@@ -1,0 +1,20 @@
+You are mapping a peer-project bug class to a target-side analogue file
+in target "{{ target_slug }}".
+
+Peer-fix distillation:
+  {{ bug_class_summary }}
+
+Target file listing (subset; pick from these only):
+"""
+{{ listing_excerpt }}
+"""
+
+Identify the ONE target-side file most likely to contain the analogous code
+pattern (same spec / format / algorithm / subsystem). If no file in the
+listing is a credible analogue, return an empty string.
+
+Output a single JSON object (no prose, no fences):
+{
+  "file":   "<relative path from the listing, or empty string>",
+  "reason": "<one-sentence rationale>"
+}

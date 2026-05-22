@@ -1,0 +1,2444 @@
+#!/usr/bin/env python3
+"""bin/export-repro — turn a CRASH-NNN-N audit dir into a 4-file
+maintainer-facing reproduction bundle.
+
+Usage:
+  bin/export-repro <CRASH-id> [--out <dir>] [--slug <slug>]
+
+Produces (replacing any previous content of <out>):
+  <out>/REPORT.md           — bug summary, root cause, candidate fix
+  <out>/reproduce.sh        — one shell command, no env vars
+  <out>/input.<ext>         — testcase bytes (renamed from internal stem)
+  <out>/harness.c/.cpp      — present iff the bug uses a C/C++ harness
+  <out>/sanitizer.txt       — original full sanitizer output
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable, Optional
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+import crash_artifacts  # noqa: E402  (runtime sys.path adjustment)
+import stack_frames  # noqa: E402  (runtime sys.path adjustment)
+import target_config  # noqa: E402  (runtime sys.path adjustment)
+
+
+def die(msg: str) -> None:
+    sys.stderr.write(f"[export-repro] {msg}\n")
+    sys.exit(1)
+
+
+def usage() -> None:
+    sys.stderr.write("Usage: bin/export-repro <CRASH-id> [--out <dir>] [--slug <slug>]\n")
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────
+
+_INTERNAL_HEADER_RE = re.compile(
+    r"^\s*(?://|<!--|#)\s*(?:TARGET|HYPOTHESIS-ID|CATEGORY|CARD-ID|HARNESS):"
+)
+
+
+def strip_internal_headers(path: Path) -> str:
+    """Drop the first ≤20 lines that look like an internal `// TAG: …` header."""
+    out: list[str] = []
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for i, line in enumerate(f, start=1):
+            if i <= 20 and _INTERNAL_HEADER_RE.match(line):
+                continue
+            out.append(line)
+    return "".join(out)
+
+
+def read_testcase_bytes(path: Path) -> bytes:
+    """Read testcase bytes, stripping text-only audit headers when present."""
+    data = path.read_bytes()
+    if b"\x00" in data:
+        return data
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    lines = text.splitlines(keepends=True)
+    changed = False
+    out: list[str] = []
+    for i, line in enumerate(lines, start=1):
+        if i <= 20 and _INTERNAL_HEADER_RE.match(line):
+            changed = True
+            continue
+        out.append(line)
+    return ("".join(out) if changed else text).encode("utf-8")
+
+
+def ext_of(basename: str) -> str:
+    b = basename.lower()
+    for suf, ext in (
+        (".html", "html"),
+        (".htm", "htm"),
+        (".xhtml", "xhtml"),
+        (".svg", "svg"),
+        (".js", "js"),
+        (".mjs", "js"),
+        (".xml", "xml"),
+        (".cat", "cat"),
+        (".json", "json"),
+        (".dat", "dat"),
+    ):
+        if b.endswith(suf):
+            return ext
+    if "." in basename:
+        ext = basename.rsplit(".", 1)[1].lower()
+        if re.fullmatch(r"[a-z0-9]{1,24}", ext):
+            return ext
+    return "bin"
+
+
+def shq(value: str) -> str:
+    """Return a shell literal safe to splice into generated bash."""
+    return shlex.quote(value)
+
+
+def safe_slug(value: str) -> str:
+    """Return a conservative path component for auto-clone directories."""
+    slug = value or "target"
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,80}", slug) and slug not in {".", ".."}:
+        return slug
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", slug).strip(".-")
+    if not cleaned or cleaned in {".", ".."}:
+        cleaned = "target"
+    return cleaned[:80]
+
+
+# Per-sanitizer metadata. Runtime *_OPTIONS strings are NOT stored here —
+# they live in lib/sanitizer_options.conf (the single source of truth shared
+# with the bin/run-* shell runners) and are loaded by
+# _load_sanitizer_mode_options() below.
+SANITIZER_META = {
+    "asan": {
+        "label": "ASan",
+        "long_label": "AddressSanitizer",
+        "env": "ASAN_OPTIONS",
+        "flag": "address",
+        "build_dir": "build-asan-repro",
+        "fallback_build": "build-asan",
+        "unset_env": "UBSAN_OPTIONS MSAN_OPTIONS TSAN_OPTIONS",
+        "mach_objdir": "build-asan",
+        "mozconfig": "asan",
+        "mach_option": "--enable-address-sanitizer",
+    },
+    "ubsan": {
+        "label": "UBSan",
+        "long_label": "UndefinedBehaviorSanitizer",
+        "env": "UBSAN_OPTIONS",
+        "flag": "undefined",
+        "build_dir": "build-ubsan-repro",
+        "fallback_build": "build-ubsan",
+        "unset_env": "ASAN_OPTIONS MSAN_OPTIONS TSAN_OPTIONS",
+        "mach_objdir": "build-ubsan",
+        "mozconfig": "ubsan",
+        "mach_option": "--enable-undefined-sanitizer",
+    },
+    "msan": {
+        "label": "MSan",
+        "long_label": "MemorySanitizer",
+        "env": "MSAN_OPTIONS",
+        "flag": "memory",
+        "build_dir": "build-msan-repro",
+        "fallback_build": "build-msan",
+        "unset_env": "ASAN_OPTIONS UBSAN_OPTIONS TSAN_OPTIONS",
+        "mach_objdir": "build-msan",
+        "mozconfig": "msan",
+        "mach_option": "--enable-memory-sanitizer",
+    },
+    "tsan": {
+        "label": "TSan",
+        "long_label": "ThreadSanitizer",
+        "env": "TSAN_OPTIONS",
+        "flag": "thread",
+        "build_dir": "build-tsan-repro",
+        "fallback_build": "build-tsan",
+        "unset_env": "ASAN_OPTIONS UBSAN_OPTIONS MSAN_OPTIONS",
+        "mach_objdir": "build-tsan",
+        "mozconfig": "tsan",
+        "mach_option": "--enable-thread-sanitizer",
+    },
+    "race": {
+        "label": "Go race",
+        "long_label": "Go race detector",
+        "env": "",
+        "flag": "",
+        "build_dir": "build-race-repro",
+        "fallback_build": "build-race",
+        "unset_env": "ASAN_OPTIONS UBSAN_OPTIONS MSAN_OPTIONS TSAN_OPTIONS",
+        "mach_objdir": "obj-race",
+        "mozconfig": "race",
+        "mach_option": "",
+    },
+}
+
+
+# Reproducer runtime presets mirror bin/run-{asan,ubsan,msan,tsan}. These are
+# execution modes, not target categories:
+#   browser          Full browser/web-content run, expensive but high-signal.
+#   browser-minimal  Fast browser smoke mode with smaller sanitizer options.
+#   generic          Target CLI or probe-built HARNESS executable.
+#   js               Standalone JS shell script execution.
+#   js-diff          Differential JS shell execution; reports divergence.
+#   xpcshell         Firefox parent-process JS/XPCOM runner.
+#   fuzz             libFuzzer corpus run; halt_on_error=0 to keep collecting.
+#   fuzz-repro       Single fuzzer crash replay; halt_on_error=1 for a clean
+#                    diagnostic.
+#   fuzz-js          SpiderMonkey `fuzz-tests` libFuzzer binary, distinct from
+#                    normal `js` shell execution.
+#
+# The option strings themselves live in lib/sanitizer_options.conf (the
+# single source of truth shared with the shell runners), keyed by the
+# canonical modes full/minimal/js/xpcshell/fuzz/fuzz-repro. The map below
+# translates each export-repro mode onto its canonical row — e.g. browser
+# and generic both run the `full` options; fuzz-js reuses `fuzz`.
+_EXPORT_MODE_TO_CANONICAL = {
+    "": "full",
+    "browser": "full",
+    "browser-minimal": "minimal",
+    "generic": "full",
+    "js": "js",
+    "js-diff": "js",
+    "xpcshell": "xpcshell",
+    "fuzz": "fuzz",
+    "fuzz-js": "fuzz",
+    "fuzz-repro": "fuzz-repro",
+}
+
+
+def _load_sanitizer_mode_options() -> dict[str, dict[str, str]]:
+    """Parse lib/sanitizer_options.conf into {sanitizer: {mode: options}}.
+
+    This is the single source of truth shared with the bin/run-* shell
+    runners (lib/sanitizer.sh:sanitizer_options_for). Keys are the canonical
+    modes; export-repro modes reach them via _EXPORT_MODE_TO_CANONICAL.
+    """
+    table: dict[str, dict[str, str]] = {}
+    conf = SCRIPT_ROOT / "lib" / "sanitizer_options.conf"
+    try:
+        text = conf.read_text(encoding="utf-8")
+    except OSError:
+        return table
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 2)
+        if len(parts) != 3:
+            continue
+        san, mode, opts = parts
+        table.setdefault(san, {})[mode] = opts
+    return table
+
+
+SANITIZER_MODE_OPTIONS = _load_sanitizer_mode_options()
+
+
+def sanitizer_meta(name: str) -> dict[str, str]:
+    return SANITIZER_META.get(name.lower(), SANITIZER_META["asan"])
+
+
+def _append_colon_options(*parts: str) -> str:
+    return ":".join(p for p in parts if p)
+
+
+def sanitizer_default_options(sanitizer: str, mode: str = "") -> str:
+    """Canonical *_OPTIONS string for a sanitizer/export-repro-mode pair.
+
+    Resolves through lib/sanitizer_options.conf. An unknown mode, or a mode
+    a sanitizer does not define, falls back to that sanitizer's `full` row;
+    a sanitizer with no rows at all (e.g. the Go race detector) yields "".
+    """
+    san = sanitizer.lower()
+    canonical = _EXPORT_MODE_TO_CANONICAL.get((mode or "generic").lower(), "full")
+    per_mode = SANITIZER_MODE_OPTIONS.get(san, {})
+    return per_mode.get(canonical) or per_mode.get("full") or ""
+
+
+def _parse_header_line(line: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for token in line.strip().split():
+        if "=" not in token:
+            continue
+        k, v = token.split("=", 1)
+        fields[k] = v
+    return fields
+
+
+def sanitizer_run_header_fields(text: str) -> dict[str, str]:
+    for line in text.splitlines():
+        if line.startswith("SANITIZER_RUN_HEADER:"):
+            fields = _parse_header_line(line.split(":", 1)[1])
+            if "sanitizer" in fields:
+                return fields
+        if line.startswith("ASAN_RUN_HEADER:"):
+            fields = _parse_header_line(line.split(":", 1)[1])
+            fields.setdefault("sanitizer", "asan")
+            return fields
+    return {}
+
+
+def decode_header_b64(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return base64.b64decode(value.encode("ascii"), validate=True).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def infer_sanitizer_from_text(text: str) -> str:
+    fields = sanitizer_run_header_fields(text)
+    if fields:
+        san = fields.get("sanitizer", "").lower()
+        if san in SANITIZER_META:
+            return san
+    header = re.search(r"\bSANITIZER_RUN_HEADER:\s+[^\n]*\bsanitizer=([A-Za-z0-9_-]+)", text)
+    if header:
+        san = header.group(1).lower()
+        if san in SANITIZER_META:
+            return san
+    if "WARNING: DATA RACE" in text and "ThreadSanitizer" not in text:
+        return "race"
+    if "MemorySanitizer" in text:
+        return "msan"
+    if "ThreadSanitizer" in text:
+        return "tsan"
+    if "UndefinedBehaviorSanitizer" in text or re.search(r"\bruntime error:", text):
+        return "ubsan"
+    if "AddressSanitizer" in text or "ASAN_RUN_HEADER" in text:
+        return "asan"
+    return "asan"
+
+
+def sanitizer_runtime_env_block(
+    sanitizer: str,
+    extra_options: str = "",
+    mode: str = "",
+    recorded_env_options: str = "",
+) -> str:
+    meta = sanitizer_meta(sanitizer)
+    unset_env = meta["unset_env"]
+    env_name = meta["env"]
+    if not env_name:
+        return f"unset {unset_env}\n"
+    base = _append_colon_options(
+        sanitizer_default_options(sanitizer, mode),
+        extra_options,
+        recorded_env_options,
+    )
+    quoted = shq(base)
+    return (
+        f"unset {unset_env}\n"
+        f'{env_name}={quoted}"${{{env_name}:+:${env_name}}}" \\\n'
+    )
+
+
+def cfg_sanitizer_bin(cfg: target_config.Config, sanitizer: str) -> str:
+    if hasattr(cfg, "sanitizer_bin"):
+        return cfg.sanitizer_bin(sanitizer)
+    return getattr(cfg, f"{sanitizer}_bin", "") if sanitizer != "asan" else cfg.asan_bin
+
+
+def cfg_sanitizer_lib(cfg: target_config.Config, sanitizer: str) -> str:
+    if hasattr(cfg, "sanitizer_lib"):
+        return cfg.sanitizer_lib(sanitizer)
+    return getattr(cfg, f"{sanitizer}_lib", "") if sanitizer != "asan" else cfg.asan_lib
+
+
+def shell_join_args(args: Iterable[str]) -> str:
+    return "".join(f" {shq(a)}" for a in args if a)
+
+
+def _bash_glob_sort_key(p: Path) -> str:
+    """Sort key matching bash's default `*` glob ordering on a UTF-8 locale —
+    case-insensitive lexical. Bash on a C locale puts uppercase first, but
+    every developer setup we ship to has LANG=*.UTF-8.
+    """
+    return p.name.casefold()
+
+
+def _list_visible_entries(d: Path) -> list[Path]:
+    """Equivalent to bash `for f in "$d"/*` — skips dotfiles and sorts
+    case-insensitively.
+    """
+    return sorted(
+        (e for e in d.iterdir() if not e.name.startswith(".")),
+        key=_bash_glob_sort_key,
+    )
+
+
+def find_first_in_scan(scan_dirs: list[Path], pattern: str) -> Optional[Path]:
+    """Glob `pattern` against each scan dir in order. First match wins.
+
+    Mirrors the bash `for dir in SCAN_DIRS; for f in $dir/$pattern; do ...`.
+    """
+    for d in scan_dirs:
+        for f in sorted(d.glob(pattern), key=_bash_glob_sort_key):
+            if f.is_file():
+                return f
+    return None
+
+
+def find_harness(scan_dirs: list[Path]) -> Optional[Path]:
+    """Any C/C++ file in scan dirs whose body contains a main() definition."""
+    main_re = re.compile(r"^(?:int\s+)?main\s*\(", re.MULTILINE)
+    for d in scan_dirs:
+        candidates: list[Path] = []
+        for pattern in ("*.c", "*.cc", "*.cpp", "*.cxx"):
+            candidates.extend(d.glob(pattern))
+        for f in sorted(candidates, key=_bash_glob_sort_key):
+            if not f.is_file():
+                continue
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if main_re.search(text):
+                return f
+    return None
+
+
+def find_shell_wrapper(scan_dirs: list[Path]) -> Optional[Path]:
+    for d in scan_dirs:
+        for name in ("testcase.sh", "reproducer.sh"):
+            p = d / name
+            if p.is_file():
+                return p
+    return None
+
+
+_TESTCASE_SKIP_EXACT = {"REPORT.md", "reproduce.sh", "asan.txt", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "reachability.json"}
+_TESTCASE_SKIP_SUFFIX = (".asan.txt", ".msan.txt", ".tsan.txt", ".ubsan.txt", ".sanitizer.txt", ".md", ".log", ".sh")
+_BIN_FILE_RE = re.compile(r"executable|Mach-O|ELF")
+
+
+def _is_executable_binary(p: Path) -> bool:
+    """Mirror the bash `[ -x "$f" ] && file "$f" | grep -qE 'executable|Mach-O|ELF'`."""
+    if not os.access(p, os.X_OK):
+        return False
+    try:
+        out = subprocess.run(
+            ["file", str(p)], capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return bool(_BIN_FILE_RE.search(out.stdout))
+
+
+def find_testcase(scan_dirs: list[Path], crash_dir: Path, audit_subdir: Path) -> Optional[Path]:
+    """Find a non-script, non-binary, non-bundle file to use as the testcase.
+
+    Mirrors the bash globber:
+      - skip canonical bundle filenames (REPORT.md / reproduce.sh /
+        sanitizer.txt / harness.c / reachability.json; plus legacy
+        asan.txt left behind by older bundles)
+      - skip files whose suffix is a known artifact type
+      - skip executable Mach-O/ELF/scripts
+      - prefer .audit/ originals when both new- and old-layout files exist
+
+    Iteration order matches bash's `for f in "$dir"/*` — dotfiles skipped,
+    case-insensitive sort.
+    """
+    asan = crash_artifacts.find_primary_asan(scan_dirs)
+    return crash_artifacts.find_testcase(scan_dirs, asan_files=[asan] if asan else [])
+
+
+def demangle(text: str) -> str:
+    """Pipe `text` through c++filt if available; else return unchanged."""
+    if shutil.which("c++filt") is None:
+        return text
+    try:
+        out = subprocess.run(
+            ["c++filt"], input=text, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return text
+    if out.returncode != 0:
+        return text
+    return out.stdout
+
+
+# ─── reproduce.sh templates ─────────────────────────────────────────
+# Templates use literal `__PLACEHOLDER__` tokens for substitutions. The
+# bash heredoc text is preserved byte-for-byte except for those tokens
+# (so a diff against a pre-port bundle on the same input is empty for
+# everything not being substituted).
+
+PREAMBLE_MACH = """\
+#!/usr/bin/env bash
+# Reproduces a __SANITIZER_LABEL__ diagnostic against an upstream Firefox checkout.
+# Usage:
+#   ./reproduce.sh /path/to/firefox-src      (REQUIRED — point at hg checkout)
+#   REPRO_AUTO_CLONE=1 ./reproduce.sh        (clone mozilla-central next to script — slow)
+set -eu
+URL=__UPSTREAM_URL__
+REV=__PINNED_REV__
+
+if [ $# -ge 1 ]; then
+  src="$1"
+elif [ "${REPRO_AUTO_CLONE:-0}" = "1" ]; then
+  src="$(dirname "$0")"/__SLUG__
+  [ -d "$src/.hg" ] || hg clone "$URL" "$src"
+  hg --cwd "$src" update -r "$REV" 2>/dev/null || true
+else
+  echo "Usage: $0 /path/to/firefox-src   (or set REPRO_AUTO_CLONE=1 for fresh clone)" >&2
+  exit 2
+fi
+[ -d "$src" ] || { echo "src not found: $src" >&2; exit 2; }
+
+# build is unused for mach (mach uses sanitizer objdir inside src), but keep the var
+# so emit_build templates can reference it consistently.
+build="$src/__MACH_OBJDIR__"
+TARGET_SAN_BIN_INLINE=__SAN_BIN_REL__
+"""
+
+PREAMBLE_GENERIC = """\
+#!/usr/bin/env bash
+# Reproduces a __SANITIZER_LABEL__ diagnostic against upstream sources.
+# Usage:
+#   ./reproduce.sh                     (clones $URL@$REV next to script)
+#   ./reproduce.sh /path/to/checkout   (uses an existing checkout)
+set -eu
+URL=__UPSTREAM_URL__
+REV=__PINNED_REV__
+
+default_src="$(dirname "$0")"/__SLUG__
+src=${1:-"$default_src"}
+[ -d "$src/.git" ] || git clone "$URL" "$src"
+git -C "$src" checkout --quiet "$REV" 2>/dev/null || true
+
+build="$src/__BUILD_DIR__"
+"""
+
+CMAKE_BUILD_TOP = """\
+# Prereqs: cmake + a C compiler (Xcode CLT / build-essential).
+# Discard any stale cache from a previous (possibly failed) configure so we
+# can switch generators / flags without cmake refusing to reconfigure.
+rm -f "$build/CMakeCache.txt"
+rm -rf "$build/CMakeFiles"
+cmake -S "$src" -B "$build" \\
+    -DCMAKE_BUILD_TYPE=Debug \\
+    -DCMAKE_C_COMPILER="${CC:-clang}" \\
+    -DCMAKE_CXX_COMPILER="${CXX:-clang++}" \\
+    -DCMAKE_C_FLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1" \\
+    -DCMAKE_CXX_FLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1" \\
+    -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=__SANITIZER_FLAG__" \\
+    -DBUILD_SHARED_LIBS=OFF
+cmake --build "$build" -j__TARGET_ARG__
+"""
+
+AUTOTOOLS_BUILD = """\
+mkdir -p "$build"
+( cd "$build" && \\
+  CC=clang CFLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1" LDFLAGS="-fsanitize=__SANITIZER_FLAG__" \\
+  "$src/configure" --disable-shared --enable-static && make -j )
+"""
+
+MACH_BUILD = """\
+# Firefox / mach build. Reuses an existing sanitizer objdir if present; otherwise
+# writes a minimal mozconfig and runs `./mach build` (slow — 1+ hour).
+if { [ -z "$TARGET_SAN_BIN_INLINE" ] || [ ! -x "$src/${TARGET_SAN_BIN_INLINE}" ]; } && [ ! -x "$src/__MACH_OBJDIR__/dist/Nightly.app/Contents/MacOS/firefox" ] && [ ! -x "$src/__MACH_OBJDIR__/dist/bin/firefox" ]; then
+  mozconfig="$src/.mozconfig-__MOZCONFIG_KIND__-repro"
+  cat > "$mozconfig" <<'MZ'
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/__MACH_OBJDIR__
+ac_add_options __MACH_SANITIZER_OPTION__
+ac_add_options --disable-jemalloc
+ac_add_options --disable-debug
+ac_add_options --enable-optimize="-O1 -fno-omit-frame-pointer"
+MZ
+  ( cd "$src" && MOZCONFIG="$mozconfig" ./mach build )
+fi
+"""
+
+MESON_BUILD = """\
+CC=clang meson setup "$build" "$src" --buildtype=debug \\
+    -Db_sanitize=__SANITIZER_FLAG__ -Ddefault_library=static
+ninja -C "$build"
+"""
+
+UNKNOWN_BUILD = """\
+echo "build_system unknown — edit this block for your project" >&2
+exit 2
+"""
+
+# ── Language-ecosystem build templates ───────────────────────────────
+#
+# These templates run a representative `<tool> build` (or fetch deps and
+# emit a stub when the language doesn't compile) so reproduce.sh produces
+# a runnable build before the runtime step. None of them assume ASan is
+# enabled — sanitizer enablement is a per-language opt-in handled by the
+# operator (e.g. RUSTFLAGS for cargo, GORACE for go). reproduce.sh is
+# language-agnostic; it just gives the maintainer a fast `<lang> run`.
+
+CARGO_BUILD = """\
+# Rust / Cargo build. Add `-Z sanitizer=address` via RUSTFLAGS for ASan
+# (requires nightly + a target with sanitizer support).
+( cd "$src" && cargo build --offline 2>/dev/null || cd "$src" && cargo build )
+"""
+
+GO_BUILD = """\
+# Go build. Add `-race` for the race detector. The result lives at $build/repro.
+mkdir -p "$build"
+( cd "$src" && go build -o "$build/repro" ./... )
+"""
+
+NPM_BUILD = """\
+# Node.js / npm build. Installs deps when node_modules/ is missing. No
+# compile step in the canonical Node flow — testcases run directly.
+( cd "$src" && ( [ -d node_modules ] || npm install --no-audit --no-fund ) )
+"""
+
+PYTHON_BUILD = """\
+# Python: build a virtualenv and install the package in editable mode if
+# there's a pyproject.toml / setup.py. Skip silently otherwise — script
+# targets can run without installing anything.
+mkdir -p "$build"
+python3 -m venv "$build/venv" 2>/dev/null || true
+. "$build/venv/bin/activate" 2>/dev/null || true
+if [ -f "$src/pyproject.toml" ] || [ -f "$src/setup.py" ]; then
+  pip install --quiet -e "$src" 2>/dev/null || \\
+    echo "[repro] pip install failed — running without project install" >&2
+fi
+"""
+
+BUNDLER_BUILD = """\
+# Ruby + Bundler: install gemset. Skip silently if Bundler not on PATH.
+( cd "$src" && command -v bundle >/dev/null 2>&1 && bundle install --quiet 2>/dev/null || true )
+"""
+
+COMPOSER_BUILD = """\
+# PHP + Composer: install dependencies if vendor/ is missing.
+( cd "$src" && [ -d vendor ] || composer install --quiet --no-interaction 2>/dev/null || true )
+"""
+
+MAVEN_BUILD = """\
+( cd "$src" && mvn --quiet --batch-mode package -DskipTests )
+"""
+
+GRADLE_BUILD = """\
+( cd "$src" && ./gradlew --quiet --no-daemon build -x test 2>/dev/null || gradle --quiet build -x test )
+"""
+
+KOTLIN_BUILD = """\
+# Kotlin single-file/script targets. Gradle Kotlin projects use the gradle
+# build_system; this fallback compiles plain .kt sources when present and lets
+# .kts probes run directly through the captured runner.
+mkdir -p "$build"
+if find "$src" -maxdepth 3 -type f -name '*.kt' | grep -q .; then
+  find "$src" -maxdepth 3 -type f -name '*.kt' -print0 | \
+    xargs -0 kotlinc -include-runtime -d "$build/repro.jar"
+fi
+"""
+
+SWIFT_BUILD = """\
+( cd "$src" && swift build --quiet )
+"""
+
+RLANG_BUILD = """\
+# R packages: install dependencies declared in DESCRIPTION.
+( cd "$src" && Rscript -e 'install.packages(".", repos=NULL, type="source", quiet=TRUE)' 2>/dev/null || true )
+"""
+
+PERL_BUILD = """\
+# Perl module: install deps via cpanm if present; otherwise skip.
+( cd "$src" && command -v cpanm >/dev/null 2>&1 && cpanm --quiet --installdeps . 2>/dev/null || true )
+"""
+
+# Make and Bazel build templates: even though we no longer detect Make
+# or Bazel as standalone "languages", many C/C++ test corpora ship with
+# ad-hoc Makefiles or BUILD files for their fixtures, and an exported
+# repro often needs to rebuild one of those before the testcase runs.
+# Keep the templates available so target.toml can opt in via
+# `build_system = "make"` or `"bazel"` even when no first-class language
+# detector exists for them.
+MAKE_BUILD = """\
+( cd "$src" && make -j 2>/dev/null || make )
+"""
+
+BAZEL_BUILD = """\
+( cd "$src" && bazel build --noshow_progress //... )
+"""
+
+# Map build_system → template string. Used by emit_build.
+_LANGUAGE_BUILD_TEMPLATES = {
+    "cargo": CARGO_BUILD,
+    "go": GO_BUILD,
+    "npm": NPM_BUILD,
+    "python": PYTHON_BUILD,
+    "bundler": BUNDLER_BUILD,
+    "composer": COMPOSER_BUILD,
+    "maven": MAVEN_BUILD,
+    "gradle": GRADLE_BUILD,
+    "kotlin": KOTLIN_BUILD,
+    "swift": SWIFT_BUILD,
+    "rlang": RLANG_BUILD,
+    "perl": PERL_BUILD,
+    "make": MAKE_BUILD,
+    "bazel": BAZEL_BUILD,
+}
+
+BIN_RESOLVE = """\
+san_bin="$build"/__SAN_BIN_TAIL__
+[ -x "$san_bin" ] || san_bin="$src"/__SAN_BIN_REL__
+[ -x "$san_bin" ] || { echo "__SANITIZER_LABEL__ binary not found at $san_bin" >&2; exit 2; }
+"""
+
+LIB_RESOLVE = """\
+san_lib="$build"/__SAN_LIB_TAIL__
+[ -f "$san_lib" ] || san_lib="$src"/__SAN_LIB_REL__
+if [ ! -f "$san_lib" ]; then
+  # target.toml records the local audit build path, but maintainer CMake
+  # builds may place the same archive in a different subdirectory. Resolve by
+  # archive basename after the fresh build, but only accept an unambiguous hit.
+  san_lib_name="${san_lib##*/}"
+  if [ -n "$san_lib_name" ] && [ -d "$build" ]; then
+    matches=$(find "$build" -type f -name "$san_lib_name" -print)
+    match_count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')
+    if [ "$match_count" = "1" ]; then
+      san_lib=$(printf '%s\n' "$matches" | sed -n '1p')
+    elif [ "$match_count" != "0" ]; then
+      echo "__SANITIZER_LABEL__ static library name is ambiguous under $build: $san_lib_name" >&2
+      printf '%s\n' "$matches" >&2
+      exit 2
+    fi
+  fi
+fi
+[ -f "$san_lib" ] || { echo "__SANITIZER_LABEL__ static library not found: $san_lib" >&2; exit 2; }
+"""
+
+# The `rc=0; <cmd> || rc=$?` pattern is intentional: the script starts
+# with `set -eu`, so a normal `<cmd>; rc=$?` would never reach the rc=
+# assignment when the harness reports a sanitizer diagnostic (the script would exit
+# at <cmd> and the user would see no [repro] exit= line). Using the
+# `|| rc=$?` form in a list context disables -e for that one command.
+
+BROWSER_RUN = """\
+san_bin=""
+[ -n __SAN_BIN_REL__ ] && san_bin="$src"/__SAN_BIN_REL__
+[ -x "$san_bin" ] || san_bin="$src/__MACH_OBJDIR__/dist/Nightly.app/Contents/MacOS/firefox"
+[ -x "$san_bin" ] || san_bin="$src/__MACH_OBJDIR__/dist/bin/firefox"
+[ -x "$san_bin" ] || { echo "__SANITIZER_LABEL__ firefox not found at $san_bin" >&2; exit 2; }
+
+profile=$(mktemp -d "${TMPDIR:-/tmp}/firefox-repro-profile-XXXXXX")
+trap 'rm -rf "$profile"' EXIT
+testcase_url="file://$(cd "$(dirname "$0")" && pwd)/__INPUT_NAME__"
+echo "=== running __SANITIZER_LABEL__ repro: $testcase_url ===" >&2
+rc=0
+__SANITIZER_ENV_BLOCK__  MOZ_HEADLESS=1 MOZ_DISABLE_CONTENT_SANDBOX=1 \\
+  "$san_bin" --headless --no-remote --profile "$profile" "$testcase_url" || rc=$?
+echo "[repro] exit=$rc" >&2
+exit "$rc"
+"""
+
+JS_SHELL_RUN = """\
+san_bin="$src/__MACH_OBJDIR__/dist/bin/js"
+[ -x "$san_bin" ] || { echo "__SANITIZER_LABEL__ js shell not found at $san_bin" >&2; exit 2; }
+testcase="$(cd "$(dirname "$0")" && pwd)/__INPUT_NAME__"
+echo "=== running __SANITIZER_LABEL__ repro: $testcase ===" >&2
+rc=0
+__SANITIZER_ENV_BLOCK__  "$san_bin" "$testcase" || rc=$?
+echo "[repro] exit=$rc" >&2
+exit "$rc"
+"""
+
+C_HARNESS_RUN = """\
+
+here=$(cd "$(dirname "$0")" && pwd)
+echo "=== compiling harness: __HARNESS_NAME__ ===" >&2
+__HARNESS_COMPILER__ -fsanitize=__SANITIZER_FLAG__ -g -O1__INCLUDES_ARGS__ \\
+    "$here/__HARNESS_NAME__"__SAN_LIB_ARG____LINK_LIBS__ \\
+    -o "$build/repro"
+echo "=== running __SANITIZER_LABEL__ repro: $here/__INPUT_NAME__ ===" >&2
+rc=0
+__SANITIZER_ENV_BLOCK__  "$build/repro" "$here/__INPUT_NAME__" || rc=$?
+echo "[repro] exit=$rc" >&2
+exit "$rc"
+"""
+
+CLI_RUN = """\
+
+testcase="$(dirname "$0")/__INPUT_NAME__"
+echo "=== running __SANITIZER_LABEL__ repro: $testcase ===" >&2
+rc=0
+__SANITIZER_ENV_BLOCK__  "$san_bin" "$testcase" || rc=$?
+echo "[repro] exit=$rc" >&2
+exit "$rc"
+"""
+
+SHELL_WRAPPER_INTRO = """\
+
+# --- inlined audit-side reproducer body ---
+"""
+
+
+def _sub_template(text: str, **kw: str) -> str:
+    out = text
+    for placeholder, value in kw.items():
+        out = out.replace(placeholder, value)
+    return out
+
+
+def emit_preamble(build_system: str, upstream_url: str, pinned_rev: str,
+                  slug: str, san_bin_rel: str, sanitizer: str = "asan") -> str:
+    quoted_url = shq(upstream_url)
+    quoted_rev = shq(pinned_rev)
+    quoted_slug = shq(safe_slug(slug))
+    quoted_san_bin_rel = shq(san_bin_rel)
+    meta = sanitizer_meta(sanitizer)
+    if build_system == "mach":
+        return _sub_template(
+            PREAMBLE_MACH,
+            __UPSTREAM_URL__=quoted_url,
+            __PINNED_REV__=quoted_rev,
+            __SLUG__=quoted_slug,
+            __SAN_BIN_REL__=quoted_san_bin_rel,
+            __SANITIZER_LABEL__=meta["label"],
+            __MACH_OBJDIR__=meta["mach_objdir"],
+        )
+    return _sub_template(
+        PREAMBLE_GENERIC,
+        __UPSTREAM_URL__=quoted_url,
+        __PINNED_REV__=quoted_rev,
+        __SLUG__=quoted_slug,
+        __SANITIZER_LABEL__=meta["label"],
+        __BUILD_DIR__=meta["build_dir"],
+    )
+
+
+def _sub_sanitizer_build_template(template: str, sanitizer: str) -> str:
+    meta = sanitizer_meta(sanitizer)
+    if not meta["flag"]:
+        return (
+            f"echo \"{meta['label']} needs a project-specific build command; "
+            "edit this block for your target\" >&2\n"
+            "exit 2\n"
+        )
+    return _sub_template(
+        template,
+        __SANITIZER_FLAG__=meta["flag"],
+        __MACH_OBJDIR__=meta["mach_objdir"],
+        __MOZCONFIG_KIND__=meta["mozconfig"],
+        __MACH_SANITIZER_OPTION__=meta["mach_option"],
+    )
+
+
+def emit_cmake_build(extra_target: str = "", sanitizer: str = "asan") -> str:
+    target_arg = f" --target {shq(extra_target)}" if extra_target else ""
+    return _sub_template(
+        _sub_sanitizer_build_template(CMAKE_BUILD_TOP, sanitizer),
+        __TARGET_ARG__=target_arg,
+    )
+
+
+def emit_build(build_system: str, extra_target: str = "", sanitizer: str = "asan") -> str:
+    if build_system == "cmake":
+        return emit_cmake_build(extra_target, sanitizer)
+    if build_system == "autotools":
+        return _sub_sanitizer_build_template(AUTOTOOLS_BUILD, sanitizer)
+    if build_system == "mach":
+        return _sub_sanitizer_build_template(MACH_BUILD, sanitizer)
+    if build_system == "meson":
+        return _sub_sanitizer_build_template(MESON_BUILD, sanitizer)
+    # Language ecosystems (cargo/go/python/npm/...) get a runnable build
+    # step suitable for `<lang> run`. Sanitizer enablement remains mostly
+    # operator-owned for ecosystems with bespoke sanitizer flags; Go's race
+    # detector is the one generic flag we can add safely.
+    if sanitizer == "race" and build_system == "go":
+        return GO_BUILD.replace("go build -o \"$build/repro\" ./...", "go build -race -o \"$build/repro\" ./...")
+    tmpl = _LANGUAGE_BUILD_TEMPLATES.get(build_system)
+    if tmpl is not None:
+        return tmpl
+    return UNKNOWN_BUILD
+
+
+def _strip_sanitizer_build_prefix(path: str, sanitizer: str) -> str:
+    meta = sanitizer_meta(sanitizer)
+    # The path may carry an AUDIT_BUILD_SUFFIX-suffixed root
+    # (build-asan-<image-id>/...) when target.toml was generated inside a
+    # container. Strip the literal roots first, then fall back to a generic
+    # "build-<san>*/..." prefix match so suffixed roots also resolve.
+    for root in (meta["build_dir"], meta["fallback_build"]):
+        prefix = f"{root}/"
+        if path.startswith(prefix):
+            return path[len(prefix):]
+    san_prefix = f"build-{sanitizer}"
+    head, sep, tail = path.partition("/")
+    if sep and head.startswith(san_prefix):
+        return tail
+    if sanitizer != "asan" and sep and head.startswith("build-asan"):
+        return tail
+    return path
+
+
+def emit_bin_resolve(san_bin_rel: str, sanitizer: str = "asan") -> str:
+    if not san_bin_rel:
+        return f'echo "{sanitizer_meta(sanitizer)["label"]} binary not configured in target.toml" >&2\nexit 2\n'
+    tail = _strip_sanitizer_build_prefix(san_bin_rel, sanitizer)
+    return _sub_template(
+        BIN_RESOLVE,
+        __SAN_BIN_TAIL__=shq(tail),
+        __SAN_BIN_REL__=shq(san_bin_rel),
+        __SANITIZER_LABEL__=sanitizer_meta(sanitizer)["label"],
+    )
+
+
+def _san_lib_is_unset(san_lib_rel: str) -> bool:
+    """A target.toml sanitizer lib field is "unset" if absent, empty, or
+    still carrying the FILL_ME placeholder from seed_toml. Header-only C++ libs
+    legitimately have no archive; treat all three cases the same so the
+    generated reproduce.sh has no broken library reference.
+    """
+    return not san_lib_rel or "FILL_ME" in san_lib_rel
+
+
+def _asan_lib_is_unset(asan_lib_rel: str) -> bool:
+    return _san_lib_is_unset(asan_lib_rel)
+
+
+def emit_lib_resolve(san_lib_rel: str, sanitizer: str = "asan") -> str:
+    if _san_lib_is_unset(san_lib_rel):
+        return ""
+    tail = _strip_sanitizer_build_prefix(san_lib_rel, sanitizer)
+    return _sub_template(
+        LIB_RESOLVE,
+        __SAN_LIB_TAIL__=shq(tail),
+        __SAN_LIB_REL__=shq(san_lib_rel),
+        __SANITIZER_LABEL__=sanitizer_meta(sanitizer)["label"],
+    )
+
+
+def emit_include_args(includes: list[str]) -> str:
+    args = ""
+    for inc in includes:
+        if not inc:
+            continue
+        build_tail = ""
+        # AUDIT_BUILD_SUFFIX may have produced build-<san>-<image-id>/... in
+        # target.toml; match by prefix instead of literal "build-asan/".
+        head, sep, tail = inc.partition("/")
+        if sep and head.startswith(("build-asan", "build-ubsan",
+                                    "build-msan", "build-tsan", "build-race")):
+            build_tail = tail
+        if build_tail:
+            tail = build_tail
+            args += f' -I "$build"/{shq(tail)}'
+            # Some CMake projects, including zlib, generate public headers
+            # directly in the build root rather than build/include.
+            if tail == "include":
+                args += ' -I "$build"'
+        elif inc.startswith("/"):
+            args += f" -I {shq(inc)}"
+        else:
+            args += f' -I "$src"/{shq(inc)}'
+    return args
+
+
+# Audit-side reproducer body rewriter (the second awk in bin/export-repro).
+_REWRITE_INTERNAL_HEADER_RE = re.compile(
+    r"^\s*#\s*(?:TARGET|HYPOTHESIS-ID|CATEGORY|CARD-ID|HARNESS):"
+)
+_REWRITE_VAR_INIT_RE = re.compile(
+    r"^\s*(?:ROOT|SRC|BUILD|SCRATCH|HARNESS_C|HARNESS_BIN|CATALOG_BIN|BIN)="
+)
+_REWRITE_SET_EU_RE = re.compile(r"^\s*set\s+-eu[a-zA-Z]*\s*$")
+_REWRITE_HARNESS_BIN_GUARD_RE = re.compile(r"^\s*if\s+\[\s+!.*HARNESS_BIN")
+_REWRITE_FI_RE = re.compile(r"^\s*fi\s*$")
+_REWRITE_BIN_QUOTED = re.compile(r'"\$CATALOG_BIN"|"\$BIN"|"\$HARNESS_BIN"')
+# Any absolute, double-quoted path that ends in `/build-<sanitizer>/<binary>`
+# is an audit-side hardcoded binary path that the wrapper template
+# replaces with `$san_bin`. We do NOT anchor on `/Users/` (that broke
+# under Docker `/root/work`, CI `/workspace`, NixOS `/nix/...`, WSL
+# `/mnt/...`) — the `/build-(a|ub|m|t)san/` infix is the load-bearing
+# discriminator and is target-agnostic.
+_REWRITE_HARDCODED_PATH = re.compile(
+    r'"/[^"]+/build-(?:a|ub|m|t)san/[A-Za-z0-9_.-]+"'
+)
+
+
+def rewrite_audit_script_body(in_path: Path) -> str:
+    """Strip audit-internals and rewrite hardcoded paths to $san_bin.
+
+    Mirrors the awk pipeline in bin/export-repro:rewrite_audit_script_body.
+    """
+    out: list[str] = []
+    skip_block = False
+    with open(in_path, "r", encoding="utf-8", errors="replace") as f:
+        for i, line in enumerate(f, start=1):
+            stripped = line.rstrip("\n")
+            if i == 1 and stripped.startswith("#!"):
+                continue
+            if _REWRITE_SET_EU_RE.match(stripped):
+                continue
+            if _REWRITE_INTERNAL_HEADER_RE.match(stripped):
+                continue
+            if _REWRITE_VAR_INIT_RE.match(stripped):
+                continue
+            if _REWRITE_HARNESS_BIN_GUARD_RE.match(stripped):
+                skip_block = True
+                continue
+            if skip_block:
+                if _REWRITE_FI_RE.match(stripped):
+                    skip_block = False
+                continue
+            new = _REWRITE_BIN_QUOTED.sub('"$san_bin"', stripped)
+            new = _REWRITE_HARDCODED_PATH.sub('"$san_bin"', new)
+            out.append(new + "\n")
+    return "".join(out)
+
+
+# ─── REPORT.md helpers ──────────────────────────────────────────────
+
+# strip_audit_sections — remove the leading h1+table, audit-internal
+# `## Reproduction`, auto-appended `## Reproduce` / `## Expected ...`,
+# bare-label fields, the auto-Severity bullet, and squash blank-line runs.
+# Section-end pseudo-tokens (Data Flow, Candidate Fix, ...) end an active
+# skip block when encountered as bare-label intros.
+
+_H1_CRASH_RE = re.compile(r"^# CRASH-[A-Z0-9-]+")
+_TBL_ROW_RE = re.compile(r"^\| ")
+_TBL_SEP_RE = re.compile(r"^\|[-: ]+\|")
+_BLANK_RE = re.compile(r"^\s*$")
+# Agents commonly wrap the field table under a `## Fields` heading. The
+# auto-generated REPORT.md prepends its own Fields table, so we drop the
+# agent's heading + immediately-following table to avoid duplication.
+_FIELDS_HEADING_RE = re.compile(r"^#{1,6}\s+Fields\s*$", re.IGNORECASE)
+_SECTION_REPRO_BLOCKS_RE = re.compile(
+    r"^## *(?:Reproduce|Expected\s+sanitizer\s+output|Expected\s+Sanitizer\s+Output|ASan\s+top\s+frames)(?:\s|$)"
+)
+_SECTION_REPRODUCTION_HEADER_RE = re.compile(r"^## *Reproduction(?:\s|$)")
+_BARE_REPRODUCTION_RE = re.compile(r"^Reproduction:\s*$")
+_NEW_H2_RE = re.compile(r"^## ")
+_END_SKIP_LABEL_RE = re.compile(
+    r"^(?:Data Flow|Candidate Fix|Reachability|Supplemental|Evidence|Boundary|Classification|Summary|Root Cause|Suggested fix|Notes)[: ]"
+)
+_FULL_ORIGINAL_RE = re.compile(r"^Full original output:")
+_BARE_LABEL_RES = (
+    re.compile(r"^[Ss]urface:\s"),
+    re.compile(r"^[Cc]luster:\s"),
+    re.compile(r"^[Dd]edup\s+frames:\s"),
+    re.compile(r"^[Cc]luster[Ff]uzz\s+key\s+frames:\s"),
+    re.compile(r"^[Bb]oundary:\s"),
+    re.compile(r"^[Cc]aller\s+controls:\s"),
+    re.compile(r"^[Pp]arameter\s+control:\s"),
+    re.compile(r"^[Tt]rusted\s+caller\s+actions:\s"),
+    re.compile(r"^[Cc]aller\s+contract:\s"),
+    re.compile(r"^[Tt]rigger\s+source:\s"),
+)
+_AUTO_SEVERITY_RE = re.compile(r"^-?\s*\*\*Severity\*\*\s*:")
+
+
+def strip_audit_sections(text: str) -> str:
+    out: list[str] = []
+    skip = False
+    # 0 = haven't seen the H1 yet; 1 = inside the H1's preamble (eat
+    # blanks + a `## Fields` heading + the field table); 2 = preamble
+    # done.
+    ate_h1_table = 0
+    blank_run = False
+    for raw_line in text.splitlines(keepends=True):
+        line_no_nl = raw_line.rstrip("\n")
+        # Drop the leading h1 and the field table that follows it. The
+        # preamble may interleave blank lines and an optional `## Fields`
+        # heading before the actual table — we eat all of it until the
+        # first non-blank, non-table, non-Fields-heading line.
+        if ate_h1_table == 0 and _H1_CRASH_RE.match(line_no_nl):
+            ate_h1_table = 1
+            continue
+        if ate_h1_table == 1:
+            if _BLANK_RE.match(line_no_nl):
+                continue
+            if _FIELDS_HEADING_RE.match(line_no_nl):
+                continue
+            if _TBL_ROW_RE.match(line_no_nl):
+                continue
+            if _TBL_SEP_RE.match(line_no_nl):
+                continue
+            ate_h1_table = 2  # First real body line — preamble is over.
+        # Whole-block kills.
+        if _SECTION_REPRODUCTION_HEADER_RE.match(line_no_nl):
+            skip = True
+            continue
+        if _BARE_REPRODUCTION_RE.match(line_no_nl):
+            skip = True
+            continue
+        if _SECTION_REPRO_BLOCKS_RE.match(line_no_nl):
+            skip = True
+            continue
+        # Drop any `## Fields` section the agent wrote in the body. The
+        # auto-header at the top of the bundle already provides one, and
+        # leaving the agent's behind produces a duplicate Fields table
+        # in the rendered HTML. Only relevant when the agent put prose
+        # between the H1 and `## Fields` (so the H1 preamble didn't eat it).
+        if _FIELDS_HEADING_RE.match(line_no_nl):
+            skip = True
+            continue
+        if skip and _NEW_H2_RE.match(line_no_nl):
+            skip = False
+        if skip and _END_SKIP_LABEL_RE.match(line_no_nl):
+            skip = False
+        if skip:
+            continue
+        if _FULL_ORIGINAL_RE.match(line_no_nl):
+            continue
+        if any(p.match(line_no_nl) for p in _BARE_LABEL_RES):
+            continue
+        if _AUTO_SEVERITY_RE.match(line_no_nl):
+            continue
+        # Squash consecutive blank lines.
+        if _BLANK_RE.match(line_no_nl):
+            if blank_run:
+                continue
+            blank_run = True
+            out.append(raw_line)
+            continue
+        blank_run = False
+        out.append(raw_line)
+    return "".join(out)
+
+
+def read_field_from_fields_table(path: Optional[Path], label: str) -> str:
+    """Lookup `label` in the first `## Fields` Markdown table in `path`.
+
+    Modern agent reports often place all required fields in a GFM
+    table under a `## Fields` heading rather than as bare-label lines.
+    This helper walks that table and returns the value cell verbatim
+    (without inline markup stripping) or "" if absent.
+    """
+    if path is None or not path.is_file():
+        return ""
+    label_lower = label.strip().lower()
+    in_section = False
+    seen_sep = False
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if not in_section:
+                if _FIELDS_HEADING_RE.match(line):
+                    in_section = True
+                continue
+            # Inside the Fields section.
+            if line.startswith("#"):
+                # Next heading ends the section without a match.
+                return ""
+            if not line.strip():
+                if seen_sep:
+                    # Blank line after the table closes it.
+                    return ""
+                continue
+            # Parse a single GFM table row: `| key | value |`.
+            stripped = line.strip()
+            if not (stripped.startswith("|") and stripped.endswith("|")):
+                if seen_sep:
+                    return ""
+                continue
+            # Header separator (`|:---|:---|`) — mark and continue.
+            if _TBL_SEP_RE.match(line):
+                seen_sep = True
+                continue
+            # Strip the outer pipes and split on the first internal pipe.
+            inner = stripped[1:-1]
+            parts = inner.split("|", 1)
+            if len(parts) != 2:
+                continue
+            key = parts[0].strip()
+            val = parts[1].strip()
+            if not seen_sep:
+                # Header row (e.g., `| Field | Value |`) — skip.
+                continue
+            if key.lower() == label_lower:
+                return val
+    return ""
+
+
+def read_bare_field(path: Optional[Path], label: str) -> str:
+    """Read `^Label: value` or a short `Label:\nvalue` block, falling back
+    to a `## Fields` Markdown table when the bare-label form is absent.
+
+    Returns the trimmed value or "" if path is empty / file absent / label
+    not found.
+    """
+    if path is None or not path.is_file():
+        return ""
+    pattern = re.compile(rf"^{re.escape(label)}:[ \t]+", re.IGNORECASE)
+    block_pattern = re.compile(rf"^{re.escape(label)}:[ \t]*$", re.IGNORECASE)
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        lines = list(f)
+    for idx, line in enumerate(lines):
+        if pattern.match(line):
+            line = line.rstrip("\n")
+            # Strip "Label:" + leading spaces, plus trailing whitespace.
+            m = re.match(r"^[A-Za-z0-9 /_-]+:\s*", line)
+            if m:
+                line = line[m.end():]
+            return line.rstrip()
+        if block_pattern.match(line.rstrip("\n")):
+            vals: list[str] = []
+            for nxt in lines[idx + 1:]:
+                stripped = nxt.strip()
+                if not stripped:
+                    if vals:
+                        break
+                    continue
+                vals.append(stripped)
+            return " ".join(vals).rstrip()
+    return read_field_from_fields_table(path, label)
+
+
+_STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-8]|REF)\b", re.IGNORECASE)
+
+
+def normalize_strategy(value: str) -> str:
+    """Reduce a free-form Strategy field to its canonical token.
+
+    Accepts agent-written forms like 'S2', 'Strategy 2', 'S2-invariant-negation',
+    'S5 (lifetime & state)', or 'REF: pattern-search'. Returns the bare token
+    (S1..S8 or REF) so the Fields table and cluster columns stay terse. Falls
+    back to the input value when no recognised token is present, and returns
+    empty for empty input. The strategy index lives in
+    .agents/references/strategies/README.md."""
+    if not value:
+        return ""
+    s = value.strip()
+    if not s:
+        return ""
+    m = _STRATEGY_TOKEN_RE.search(s)
+    if not m:
+        return s
+    token = m.group(1).upper()
+    return token
+
+
+def read_severity_from(path: Optional[Path]) -> str:
+    """Return `"Level (score)"` or just `"Level"` if the auto-Severity line
+    exists in `path`; "" otherwise.
+    """
+    if path is None or not path.is_file():
+        return ""
+    sev_re = re.compile(
+        r"^-?\s*\*\*Severity\*\*\s*:\s*(Critical|High|Medium|Low)"
+    )
+    score_re = re.compile(r"score=([0-9]+)")
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            m = sev_re.match(line)
+            if m:
+                level = m.group(1)
+                sm = score_re.search(line)
+                if sm:
+                    return f"{level} ({sm.group(1)})"
+                return level
+    return ""
+
+
+def read_auto_severity_line(path: Optional[Path]) -> str:
+    """Return the existing `**Severity**: ... (auto: ...)` line minus any
+    leading `-` bullet, or "" if absent.
+    """
+    if path is None or not path.is_file():
+        return ""
+    sev_re = re.compile(r"^-?\s*\*\*Severity\*\*\s*:.*\(auto:")
+    leading_re = re.compile(r"^-?\s*")
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if sev_re.match(line):
+                return leading_re.sub("", line)
+    return ""
+
+
+def read_confidence(report_md: Optional[Path], asan_file: Path) -> str:
+    pair_re = re.compile(r"([0-9]+/[0-9]+)")
+    if report_md is not None and report_md.is_file():
+        rate_re = re.compile(
+            r"(?:Crash\s+rate|Reproduction\s+rate|Rate):\s+[0-9]+/",
+            re.IGNORECASE,
+        )
+        extract_re = re.compile(r":\s*([0-9]+/[0-9]+)")
+        with open(report_md, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if rate_re.search(line):
+                    m = extract_re.search(line)
+                    if m:
+                        return m.group(1)
+        # Fallback: GFM Fields-table cell `| Reproduction rate | 5/5 |`.
+        for label in ("Reproduction rate", "Crash rate", "Rate"):
+            cell = read_field_from_fields_table(report_md, label)
+            if cell:
+                m = pair_re.search(cell)
+                if m:
+                    return m.group(1)
+    if asan_file.is_file():
+        cr_re = re.compile(r"CRASH_RATE:\s+([0-9]+/[0-9]+)")
+        with open(asan_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = cr_re.search(line)
+                if m:
+                    return m.group(1)
+    return "?"
+
+
+def emit_field(label: str, value: str, why: str = "") -> str:
+    val = value or "—"
+    if why:
+        return f"| {label:<21} | {val} — {why} |\n"
+    return f"| {label:<21} | {val} |\n"
+
+
+# ─── Sanitizer extraction ─────────────────────────────────────────────
+
+SAN_DIAG_START_RE = re.compile(
+    r"^(?:==[0-9]+==ERROR: (?:AddressSanitizer|UndefinedBehaviorSanitizer)|"
+    r"WARNING: (?:ThreadSanitizer|MemorySanitizer):|"
+    r"WARNING: DATA RACE$|"
+    r"[^ \t].*:[0-9]+:[0-9]+: runtime error:|"
+    r".*UndefinedBehaviorSanitizer:)"
+)
+SAN_SUMMARY_RE = re.compile(
+    r"^SUMMARY: (?:AddressSanitizer|UndefinedBehaviorSanitizer|"
+    r"ThreadSanitizer|MemorySanitizer)"
+)
+
+def extract_asan_top(asan_file: Path) -> str:
+    if not asan_file.is_file():
+        return ""
+    with open(asan_file, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if SAN_DIAG_START_RE.match(line):
+                return line.rstrip("\n")
+    return ""
+
+
+def extract_asan_summary(asan_file: Path) -> str:
+    if not asan_file.is_file():
+        return ""
+    with open(asan_file, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if SAN_SUMMARY_RE.match(line):
+                line = demangle(line + "\n").rstrip("\n")
+                line = re.sub(r"\s*\([^)]*\+0x[0-9a-fA-F]+\)", "", line)
+                return line
+    return ""
+
+
+def extract_dedup_frames(asan_file: Path) -> str:
+    if not asan_file.is_file():
+        return ""
+    text = asan_file.read_text(encoding="utf-8", errors="replace")
+    frames = stack_frames.interesting_frames(text, want=3)
+    return " -> ".join(frame.display for frame in frames)
+
+
+def extract_asan_diagnostic(asan_file: Path) -> str:
+    """Return the first complete sanitizer diagnostic block.
+
+    The maintainer-facing report should show the real sanitizer view: the
+    ERROR line, access primitive (`READ/WRITE of size ...`), every stack
+    section the sanitizer prints before SUMMARY, and the SUMMARY line. Stop before the
+    shadow-byte dump so REPORT.md stays readable while `sanitizer.txt`
+    remains the canonical full log.
+    """
+    if not asan_file.is_file():
+        return ""
+    lines: list[str] = []
+    with open(asan_file, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if SAN_DIAG_START_RE.match(line):
+                lines = [line.rstrip("\n")]
+                continue
+            if not lines:
+                continue
+            lines.append(line.rstrip("\n"))
+            if SAN_SUMMARY_RE.match(line):
+                return demangle("\n".join(lines) + "\n").rstrip("\n")
+            if len(lines) >= 160:
+                break
+    if not lines:
+        return ""
+    return demangle("\n".join(lines) + "\n").rstrip("\n")
+
+
+# ─── Surface inference ──────────────────────────────────────────────
+#
+# Classify where a crash lives: a maintenance/test tool, the target's
+# shipped command-line program, or its public library API. Every signal
+# is either structural (path segments — industry-wide layout convention)
+# or target-derived (binary names from target.toml, source paths from the
+# target tree). No hardcoded per-project list: the identifying names come
+# from the target's own config, so any project classifies correctly.
+
+_HARNESS_MAINT_INCLUDE_RE = re.compile(
+    r'#include\s+["<](?:[^">]+/)?(?:maint|tools|tests?|examples?)/'
+)
+_HARNESS_MAINT_DEFINE_RE = re.compile(r"#define\s+main\s+[a-zA-Z_]+_main")
+# Any header include (quoted or angle-bracket) — a C harness that includes
+# a real header is calling into a library. The maint check above already
+# excludes tooling, so a plain header include is a sufficient signal; this
+# replaces a former pcre2|libxml|openssl|… project enumeration.
+_HARNESS_INCLUDE_RE = re.compile(
+    r'#include\s+["<](?:[A-Za-z0-9_.+-]+/)*[A-Za-z][A-Za-z0-9_.+-]*'
+    r'\.h(?:pp|xx)?[">]'
+)
+_FRAME_LINE_RE = re.compile(r"^\s*#[0-9]+")
+_FRAME_MAINT_RE = re.compile(r"/(?:maint|tests?|examples?)/")
+# Generic prose keywords for a command-line surface. Industry vocabulary,
+# not project-specific. Tool *names* are matched separately, derived from
+# target.toml — see _target_tool_names.
+_REPORT_CLI_KEYWORD_RE = re.compile(
+    r"--shell|\bcommand[- ]line\b|\bCLI\b", re.IGNORECASE
+)
+_REPORT_DEV_SURFACE_RE = re.compile(
+    r"(^|[ /])(?:maint|tests?|fuzz|fuzzer|examples?)/|\b(?:test|maint)[- ]tool\b",
+    re.IGNORECASE,
+)
+
+
+def _target_tool_names(cfg: object) -> set[str]:
+    """Basenames of the executables this target ships, from its target.toml.
+
+    The sanitizer binaries are the instrumented build of the target's own
+    program — for a CLI project that basename *is* the tool name
+    (`xmlcatalog`, `pcre2test`, …). Deriving it here replaces a hardcoded
+    per-project CLI list, so surface inference works for any target.
+
+    Browser targets are excluded: a browser is not a command-line tool and
+    its binary name would mis-trip the `cli` classifier. The [runner] bin
+    is excluded too — it is usually a generic interpreter (python3, node,
+    …), i.e. the harness, not the target's own program.
+    """
+    names: set[str] = set()
+    if cfg is None or str(getattr(cfg, "is_browser", "0")) == "1":
+        return names
+    for attr in ("asan_bin", "ubsan_bin", "msan_bin", "tsan_bin"):
+        raw = (getattr(cfg, attr, "") or "").strip().rstrip("/")
+        if not raw:
+            continue
+        base = os.path.basename(raw)
+        if base.lower().endswith(".exe"):
+            base = base[:-4]
+        if base and not base.startswith("."):
+            names.add(base)
+    return names
+
+
+def _names_in_text(names: set[str], text: str) -> bool:
+    """True when any of `names` appears as a whole word in `text`."""
+    if not names or not text:
+        return False
+    pattern = r"\b(?:" + "|".join(re.escape(n) for n in sorted(names)) + r")\b"
+    return re.search(pattern, text) is not None
+
+
+def _frames_under_target(frames: list[str], target_root: str) -> bool:
+    """True when an ASan frame's source path lies inside the target tree."""
+    root = (target_root or "").strip().rstrip("/")
+    return bool(root) and any(root in line for line in frames)
+
+
+def infer_surface(harness_src: Optional[Path], asan_file: Path,
+                  cfg: object = None) -> tuple[str, str]:
+    tool_names = _target_tool_names(cfg)
+    target_root = (getattr(cfg, "target_root", "") or "") if cfg is not None else ""
+
+    if harness_src is not None and harness_src.is_file():
+        try:
+            text = harness_src.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if _HARNESS_MAINT_INCLUDE_RE.search(text) or _HARNESS_MAINT_DEFINE_RE.search(text):
+            return "maint-tool", "harness embeds a maintenance/test program"
+        if _HARNESS_INCLUDE_RE.search(text):
+            return "library-api", "C harness calls a public library entry point"
+    # Fall back to sanitizer.txt frames.
+    if asan_file.is_file():
+        first_n: list[str] = []
+        with open(asan_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if _FRAME_LINE_RE.match(line):
+                    first_n.append(line)
+                    if len(first_n) >= 10:
+                        break
+        joined = "\n".join(first_n)
+        if _FRAME_MAINT_RE.search(joined):
+            return "maint-tool", "ASan frames point into maint/ or tests/"
+        if _names_in_text(tool_names, joined):
+            return "cli", "ASan frames are inside the target's shipped binary"
+        if _frames_under_target(first_n, target_root):
+            return "library-api", "ASan frames are in the target's library source"
+    return "unknown", ""
+
+
+def adjust_surface_from_report(surface_value: str, surface_reason: str,
+                               report_text: str, boundary_value: str,
+                               trusted_actions_value: str,
+                               cfg: object = None) -> tuple[str, str]:
+    """Use the report's real boundary to correct harness-shaped guesses.
+
+    C harnesses often drive shipped command-line tools or embedded tool mains.
+    The harness shape alone then looks like `library-api`, but the maintainer
+    surface is the CLI named by Boundary/Trusted caller actions. Only override
+    on explicit CLI/tool signals so public-library reports that merely mention
+    a harness remain library-api. CLI tool names come from target.toml via
+    _target_tool_names — no hardcoded per-project list.
+    """
+    blob = "\n".join([boundary_value or "", trusted_actions_value or "", report_text or ""])
+    if _REPORT_DEV_SURFACE_RE.search(blob):
+        return "maint-tool", "report boundary points into maintenance/test tooling"
+    if _REPORT_CLI_KEYWORD_RE.search(blob) or _names_in_text(_target_tool_names(cfg), blob):
+        return "cli", "report boundary is a shipped command-line tool"
+    return surface_value, surface_reason
+
+
+def infer_primitive_label(asan_text: str) -> str:
+    if not asan_text:
+        return "unclassified"
+    lower = asan_text.lower()
+    if "memorysanitizer" in lower:
+        return "use-of-uninitialized-value"
+    if "threadsanitizer" in lower or re.search(r"^warning: data race$", lower, re.MULTILINE):
+        return "data-race"
+    if "undefinedbehaviorsanitizer" in lower or re.search(r":[0-9]+:[0-9]+: runtime error:", asan_text):
+        if "out of bounds" in lower:
+            return "ubsan-out-of-bounds"
+        if "misaligned" in lower:
+            return "ubsan-alignment"
+        if "null pointer" in lower:
+            return "ubsan-null"
+        if "object-size" in lower:
+            return "ubsan-object-size"
+        if "vptr" in lower:
+            return "ubsan-vptr"
+        if "pointer overflow" in lower or "pointer-overflow" in lower:
+            return "ubsan-pointer-overflow"
+        return "undefined-behavior"
+    if "attempting double-free" in lower or "double-free" in lower:
+        return "double-free"
+    if "attempting free on address which was not malloc" in lower or "bad-free" in lower:
+        return "bad-free"
+    m = re.search(r"AddressSanitizer:\s+([a-zA-Z-]+)", asan_text)
+    if not m:
+        return "unclassified"
+    prim = m.group(1)
+    rw = re.search(r"\b(READ|WRITE) of size\s+([0-9]+)", asan_text, re.IGNORECASE)
+    if prim in {"BUS", "SEGV"} and re.search(r"wild-addr-(read|write)|high value address", lower):
+        if rw:
+            return f"wild-address-{rw.group(1).lower()}"
+        return "wild-address-read"
+    return prim
+
+
+def _title_func_from_dedup(dedup_frames: str) -> str:
+    if not dedup_frames:
+        return "target code"
+    first = dedup_frames.split(" -> ", 1)[0].strip()
+    if not first:
+        return "target code"
+    # `func path:line` -> func. C++ names can contain spaces in return types,
+    # so keep the full prefix before the final source location token.
+    m = re.match(r"(?P<func>.+?)\s+\S+:\d+(?::\d+)?$", first)
+    if m:
+        return m.group("func").strip()
+    return first.split()[0]
+
+
+def build_report_title(crash_id: str, primitive_label: str, dedup_frames: str,
+                       trigger_value: str) -> str:
+    primitive = primitive_label or "sanitizer diagnostic"
+    func = _title_func_from_dedup(dedup_frames)
+    trigger = trigger_value or "input"
+    return f"{crash_id}: {primitive} in {func} when {trigger}"
+
+
+# ─── Top-level driver ───────────────────────────────────────────────
+
+# Forbidden tokens whose presence in a generated bundle file indicates
+# that internal audit refs leaked through. The path-prefix half of the
+# pattern used to also hardcode /Users|/Volumes|/home — that broke for
+# every other layout (Docker /root/work, CI /workspace, NixOS /nix,
+# WSL /mnt/...) and overlapped the dynamic cfg-prefix check below.
+# We now only look for env-var/identifier tokens that are unambiguously
+# audit-internal regardless of where the audit happens to run. Path
+# leaks are caught by the cfg.* prefix loop in
+# _bundle_text_has_internal_ref AFTER _normalize_bundle_paths has had
+# its chance to rewrite known prefixes — so a hit here is a genuine
+# bug, not a portability artefact.
+_FORBIDDEN_REFS_RE = re.compile(
+    r"\b(?:RESULTS_DIR|TARGET_ROOT|TARGET_SLUG|AUDIT_AGENT_NUM|"
+    r"HYPOTHESIS_ID|TRIED_INPUTS_LOG|ASAN_OUTPUT_FILE|HITS_LOG_PATH)="
+)
+
+
+def _bundle_text_has_internal_ref(text: str, cfg: target_config.Config) -> bool:
+    """True if `text` still contains an audit-private identifier or path.
+
+    Two-stage check:
+      1. Env-var-style tokens (RESULTS_DIR=, TARGET_ROOT=, …) that
+         shell-source files or templates would carry. These are bugs
+         everywhere.
+      2. Absolute prefixes from this session's `cfg.results_dir`,
+         `cfg.target_root`, `cfg.logdir`. Computed at runtime, so they
+         work regardless of host layout. `_normalize_bundle_paths` is
+         expected to have rewritten these before the scan; anything
+         surviving is a real escape.
+    """
+    if _FORBIDDEN_REFS_RE.search(text):
+        return True
+    for raw in (cfg.results_dir, cfg.target_root, cfg.logdir):
+        if not raw:
+            continue
+        try:
+            candidates = {raw, str(Path(raw).resolve())}
+        except OSError:
+            candidates = {raw}
+        for candidate in candidates:
+            if candidate and candidate not in {"/", "."} and candidate in text:
+                return True
+    return False
+
+
+def _normalize_bundle_paths(text: str, cfg: target_config.Config) -> str:
+    """Rewrite this session's absolute audit paths to portable form.
+
+    The bundle is a maintainer-facing artefact, so absolute paths into
+    the audit workspace are noise at best and disclose host layout at
+    worst. We rewrite each configured prefix to a stable relative
+    placeholder before the leak scan runs:
+
+      * cfg.target_root → ``targets/<slug>``  (preserves source-file
+        structure so frame paths like ``contrib/minizip/zip.c:2225``
+        remain navigable from the bundle root)
+      * cfg.results_dir → ``''`` (audit-private scratch; strip the
+        prefix so e.g. ``…/results/scratch-2/H-xyz.txt`` becomes
+        ``scratch-2/H-xyz.txt`` — still a unique handle, no host leak)
+      * cfg.logdir      → ``logs``
+
+    Idempotent: text without the configured prefixes is returned
+    unchanged. Both the raw and `Path.resolve()` forms are matched
+    because symlinked workspaces (common under /var/folders on macOS,
+    /tmp on Linux) appear in two flavours inside the same report.
+    """
+    if not text:
+        return text
+    slug = (cfg.slug or "target").strip() or "target"
+
+    raw_pairs: list[tuple[str, str]] = []
+    for attr, replacement in (
+        ("target_root", f"targets/{slug}"),
+        ("results_dir", ""),
+        ("logdir", "logs"),
+    ):
+        raw = getattr(cfg, attr, "") or ""
+        if not raw:
+            continue
+        candidates = {raw}
+        try:
+            candidates.add(str(Path(raw).resolve()))
+        except OSError:
+            pass
+        for cand in candidates:
+            if cand and cand not in ("/", "."):
+                raw_pairs.append((cand, replacement))
+
+    # Longest prefix first: if target_root is nested under results_dir
+    # (unusual but legal) we must not let the shorter results_dir match
+    # eat the longer target_root form before it gets a chance.
+    raw_pairs.sort(key=lambda kv: len(kv[0]), reverse=True)
+    for cand, replacement in raw_pairs:
+        text = text.replace(cand, replacement)
+    return text
+
+
+def _normalize_bundle_file(path: Path, cfg: target_config.Config) -> None:
+    """Apply _normalize_bundle_paths to a staged file, in place.
+
+    Only rewrites files that decode cleanly as UTF-8 text — binary
+    testcases (``input.bin`` and friends) are left untouched because
+    naive string replacement on bytes-rendered-as-text would corrupt
+    them. Best-effort: I/O errors are silently skipped, since the leak
+    scan that runs next will fail loudly if anything important is
+    still leaking.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return
+    if b"\x00" in raw[:4096]:
+        # Heuristic: a NUL byte inside the first 4 KiB is a strong
+        # binary signal. Skip to preserve testcase integrity.
+        return
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    rewritten = _normalize_bundle_paths(text, cfg)
+    if rewritten == text:
+        return
+    try:
+        path.write_text(rewritten, encoding="utf-8")
+    except OSError:
+        return
+
+
+def _is_bundle_filename(name: str) -> bool:
+    # Note: asan.txt is intentionally NOT in the bundle set — the canonical
+    # filename is sanitizer.txt, and any legacy asan.txt left over from an
+    # older bundle should migrate into .audit/ on re-export so the root
+    # doesn't carry a stale duplicate alongside the fresh sanitizer.txt.
+    # Readers still accept asan.txt as a fallback for previously-shipped
+    # bundles (lib/crash_artifacts.find_primary_asan, lib/triage.sh,
+    # bin/cluster-crashes, bin/reachability).
+    if name in {"REPORT.md", "REPORT.html", "reproduce.sh", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "reachability.json"}:
+        return True
+    if name in {".llm-triage.json", ".llm-confirm.json", ".llm-legit-crash.json",
+                ".llm-find-quality.json", ".reachability_ok", ".reachability_pending",
+                ".reachability_failed"}:
+        return True
+    if name.startswith("input."):
+        return True
+    if name == ".audit":
+        return True
+    # patch.diff stays at bundle root so a) maintainers see the patch as
+    # a standalone file, and b) bin/enrich-report inlines it into the
+    # Candidate Fix section of REPORT.md / REPORT.html. The filename is
+    # fixed in .agents/references/session-rules.md.
+    if name == "patch.diff":
+        return True
+    return False
+
+
+def write_browser_template(out: Path, *, build_system: str, upstream_url: str,
+                           pinned_rev: str, slug: str, san_bin_rel: str,
+                           input_name: str, sanitizer: str = "asan",
+                           extra_options: str = "", mode: str = "browser",
+                           recorded_env_options: str = "") -> None:
+    meta = sanitizer_meta(sanitizer)
+    text = (
+        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
+        + emit_build(build_system, sanitizer=sanitizer)
+        + _sub_template(
+            BROWSER_RUN,
+            __SAN_BIN_REL__=shq(san_bin_rel),
+            __INPUT_NAME__=input_name,
+            __SANITIZER_LABEL__=meta["label"],
+            __MACH_OBJDIR__=meta["mach_objdir"],
+            __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
+                sanitizer, extra_options, mode, recorded_env_options
+            ),
+        )
+    )
+    out.write_text(text, encoding="utf-8")
+    os.chmod(out, 0o755)
+
+
+def write_js_shell_template(out: Path, *, build_system: str, upstream_url: str,
+                            pinned_rev: str, slug: str, san_bin_rel: str,
+                            input_name: str, sanitizer: str = "asan",
+                            extra_options: str = "", mode: str = "js",
+                            recorded_env_options: str = "") -> None:
+    meta = sanitizer_meta(sanitizer)
+    text = (
+        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
+        + emit_build(build_system, sanitizer=sanitizer)
+        + _sub_template(
+            JS_SHELL_RUN,
+            __INPUT_NAME__=input_name,
+            __SANITIZER_LABEL__=meta["label"],
+            __MACH_OBJDIR__=meta["mach_objdir"],
+            __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
+                sanitizer, extra_options, mode, recorded_env_options
+            ),
+        )
+    )
+    out.write_text(text, encoding="utf-8")
+    os.chmod(out, 0o755)
+
+
+def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
+                             pinned_rev: str, slug: str, san_bin_rel: str,
+                             san_lib_rel: str, includes_args: str,
+                             link_libs: str, input_name: str,
+                             harness_name: str = "harness.c",
+                             harness_compiler: str = "clang",
+                             sanitizer: str = "asan",
+                             extra_options: str = "", mode: str = "generic",
+                             recorded_env_options: str = "") -> None:
+    meta = sanitizer_meta(sanitizer)
+    if not meta["flag"]:
+        die(f"C/C++ harness export for {meta['label']} needs target-specific compiler flags")
+    if "FILL_ME" in (san_lib_rel or ""):
+        sys.stderr.write(
+            f"[export-repro] target.toml {sanitizer}_lib still contains FILL_ME "
+            f"({san_lib_rel!r}); emitting reproduce.sh without a library "
+            f"link (treat as header-only). Edit output/<slug>/target.toml "
+            f"if your harness actually needs to link a static archive.\n"
+        )
+    san_lib_arg = "" if _san_lib_is_unset(san_lib_rel) else ' "$san_lib"'
+    text = (
+        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
+        + emit_build(build_system, sanitizer=sanitizer)
+        + emit_lib_resolve(san_lib_rel, sanitizer)
+        + _sub_template(
+            C_HARNESS_RUN,
+            __INCLUDES_ARGS__=includes_args,
+            __LINK_LIBS__=link_libs,
+            __INPUT_NAME__=input_name,
+            __HARNESS_NAME__=harness_name,
+            __HARNESS_COMPILER__=harness_compiler,
+            __SAN_LIB_ARG__=san_lib_arg,
+            __SANITIZER_FLAG__=meta["flag"] or "address",
+            __SANITIZER_LABEL__=meta["label"],
+            __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
+                sanitizer, extra_options, mode, recorded_env_options
+            ),
+        )
+    )
+    out.write_text(text, encoding="utf-8")
+    os.chmod(out, 0o755)
+
+
+def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url: str,
+                                   pinned_rev: str, slug: str, san_bin_rel: str,
+                                   cmake_target: str, input_name: str,
+                                   sanitizer: str = "asan",
+                                   extra_options: str = "", mode: str = "generic",
+                                   recorded_env_options: str = "") -> None:
+    meta = sanitizer_meta(sanitizer)
+    text = (
+        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
+        + emit_build(build_system, cmake_target, sanitizer)
+        + emit_bin_resolve(san_bin_rel, sanitizer)
+        + _sub_template(
+            CLI_RUN,
+            __INPUT_NAME__=input_name,
+            __SANITIZER_LABEL__=meta["label"],
+            __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
+                sanitizer, extra_options, mode, recorded_env_options
+            ),
+        )
+    )
+    out.write_text(text, encoding="utf-8")
+    os.chmod(out, 0o755)
+
+
+def write_shell_wrapper_template(out: Path, *, build_system: str, upstream_url: str,
+                                  pinned_rev: str, slug: str, san_bin_rel: str,
+                                  cmake_target: str, wrapper: Path,
+                                  sanitizer: str = "asan") -> None:
+    text = (
+        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
+        + emit_build(build_system, cmake_target, sanitizer)
+        + emit_bin_resolve(san_bin_rel, sanitizer)
+        + SHELL_WRAPPER_INTRO
+        + rewrite_audit_script_body(wrapper)
+    )
+    out.write_text(text, encoding="utf-8")
+    os.chmod(out, 0o755)
+
+
+_FIX_DIRECTION_HEADING_RE = re.compile(
+    r"(?im)^[#\s>*\-]*\b(?:Fix\s+Direction|Suggested\s+Fix|Recommended\s+Fix|"
+    r"Mitigation|Remediation)\b[: ]*$"
+)
+
+
+def detect_advisory_status(report_md: Optional[Path], patch_path: Optional[Path]) -> str:
+    """Return ``yes``/``no`` for the Advisory field, or '' if unknown.
+
+    A crash bundle is *advisory* when no patch can be supplied but the
+    agent has explained a fix direction in prose — typical for
+    ABI-impacting issues (a destructor signature change, a removed
+    extern symbol) that can't be expressed as a surgical diff.
+
+    The triage pipeline already accepts bundles without patch.diff,
+    but downstream maintainers and the LLM confirm-agent benefit from
+    an explicit marker that distinguishes "advisory, by design" from
+    "agent forgot to capture the patch".
+
+    Decision:
+      * patch.diff present (and non-empty) → ``no``
+      * patch.diff absent + report has a Fix-Direction-class heading →
+        ``yes``
+      * patch.diff absent + no such heading → ``''`` (unknown — leaves
+        the bundle silent rather than asserting an advisory)
+    """
+    has_patch = False
+    if patch_path is not None and patch_path.is_file():
+        try:
+            has_patch = patch_path.stat().st_size > 0
+        except OSError:
+            has_patch = False
+    if has_patch:
+        return "no"
+    if report_md is None or not report_md.is_file():
+        return ""
+    try:
+        body = report_md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if _FIX_DIRECTION_HEADING_RE.search(body):
+        return "yes"
+    return ""
+
+
+def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
+                    surface_value: str, surface_reason: str,
+                    trigger_value: str, caller_contract_value: str,
+                    boundary_value: str, caller_controls_value: str,
+                    parameter_control_value: str,
+                    trusted_actions_value: str, confidence_value: str,
+                    strategy_value: str,
+                    crash_dir: Path, report_md: Optional[Path],
+                    asan_top: str, asan_summary: str,
+                    dedup_frames: str,
+                    asan_expected: str, pinned_rev: str,
+                    sanitizer: str = "asan",
+                    advisory_value: str = "") -> str:
+    meta = sanitizer_meta(sanitizer)
+    parts: list[str] = []
+    parts.append(f"# {build_report_title(crash_id, primitive_label, dedup_frames, trigger_value)}\n")
+    parts.append("\n")
+    parts.append("## Fields\n")
+    parts.append("\n")
+    parts.append("| Field                 | Value |\n")
+    parts.append("|:----------------------|:------|\n")
+    parts.append(emit_field("Primitive", primitive_label))
+    parts.append(emit_field("Severity", severity_value))
+    if advisory_value:
+        parts.append(emit_field(
+            "Advisory", advisory_value,
+            "no patch — fix requires ABI/API-impacting change, see Fix Direction"
+            if advisory_value == "yes" else ""
+        ))
+    parts.append(emit_field("Surface", surface_value, surface_reason))
+    parts.append(emit_field("Trigger source", trigger_value))
+    parts.append(emit_field("Caller contract", caller_contract_value))
+    parts.append(emit_field("Boundary", boundary_value))
+    parts.append(emit_field("Caller controls", caller_controls_value))
+    if parameter_control_value:
+        parts.append(emit_field("Parameter control", parameter_control_value))
+    parts.append(emit_field("Trusted caller actions", trusted_actions_value))
+    parts.append(emit_field("Cluster", "(set by bin/cluster-crashes)"))
+    if dedup_frames:
+        parts.append(emit_field("Dedup frames", dedup_frames))
+    parts.append(emit_field("Reproduction rate", confidence_value))
+    parts.append(emit_field("Strategy", strategy_value))
+    parts.append("\n")
+    # Bare-label block — every label downstream parsers expect.
+    parts.append(f"Surface: {surface_value}\n")
+    parts.append(f"Trigger source: {trigger_value}\n")
+    parts.append(f"Caller contract: {caller_contract_value or 'unspecified'}\n")
+    if dedup_frames:
+        parts.append(f"Dedup frames: {dedup_frames}\n")
+    if boundary_value:
+        parts.append(f"Boundary: {boundary_value}\n")
+    if caller_controls_value:
+        parts.append(f"Caller controls: {caller_controls_value}\n")
+    if parameter_control_value:
+        parts.append(f"Parameter control: {parameter_control_value}\n")
+    if trusted_actions_value:
+        parts.append(f"Trusted caller actions: {trusted_actions_value}\n")
+    if strategy_value:
+        parts.append(f"Strategy: {strategy_value}\n")
+    if advisory_value:
+        parts.append(f"Advisory: {advisory_value}\n")
+    if severity_value == "—":
+        parts.append("- **Severity**: TBD\n")
+    else:
+        auto_line = read_auto_severity_line(crash_dir / "REPORT.md")
+        if auto_line:
+            parts.append(f"- {auto_line}\n")
+        else:
+            parts.append(f"- **Severity**: {severity_value}\n")
+    parts.append("\n")
+
+    if report_md is not None and report_md.is_file():
+        body_text = report_md.read_text(encoding="utf-8", errors="replace")
+        parts.append(strip_audit_sections(body_text))
+    else:
+        parts.append("Sanitizer diagnostic discovered during automated QA.\n")
+    parts.append("\n")
+    parts.append("## Expected sanitizer output\n")
+    parts.append("\n")
+    parts.append("```\n")
+    if asan_expected:
+        parts.append(asan_expected + "\n")
+    else:
+        # Legacy fallback for malformed/truncated logs that only expose
+        # isolated sanitizer lines.
+        if asan_top:
+            parts.append(asan_top + "\n")
+        if asan_summary:
+            parts.append(asan_summary + "\n")
+    parts.append("```\n")
+    parts.append("\n")
+    if sanitizer == "asan":
+        parts.append("Full original output: `sanitizer.txt`.\n")
+    else:
+        parts.append(f"Full original {meta['label']} output: `sanitizer.txt`.\n")
+    parts.append("\n")
+    parts.append("## Reproduce\n")
+    parts.append("\n")
+    parts.append("```sh\n")
+    parts.append(
+        f"./reproduce.sh                 # clones upstream@{pinned_rev[:12]}, builds/runs with {meta['label']}\n"
+    )
+    parts.append("./reproduce.sh /path/to/src    # use an existing checkout\n")
+    parts.append("```\n")
+    return "".join(parts)
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="bin/export-repro",
+        usage="bin/export-repro <CRASH-id> [--out <dir>] [--slug <slug>] [--crash-dir <dir>]",
+        add_help=False,
+    )
+    parser.add_argument("crash_id", nargs="?")
+    parser.add_argument("--out")
+    parser.add_argument("--slug")
+    # Override the default RESULTS_DIR/crashes/<id> path. Used by maintenance
+    # passes that regenerate bundles for crashes-rejected/ and
+    # crashes-needs-review/ dirs without having to move them.
+    parser.add_argument("--crash-dir")
+    parser.add_argument("-h", "--help", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        usage()
+        return 2
+    if args.help:
+        usage()
+        return 0
+    if not args.crash_id:
+        usage()
+        return 2
+
+    # Discover the session (slug dir / target.toml). Either via --slug or by
+    # walking up from CWD.
+    cfg = target_config.Config()
+    if args.slug:
+        slug_dir = SCRIPT_ROOT / "output" / args.slug
+        # Prefer the backend-local output/<slug>/<backend>/results/
+        # .session-env over the legacy output/<slug>/.session-env copy,
+        # which concurrent backends race on.
+        session_dir = target_config.find_slug_session_dir(slug_dir)
+        if session_dir is not None:
+            env = target_config.read_session_env(session_dir)
+            cfg.results_dir = env.get("RESULTS_DIR", "")
+            cfg.target_root = env.get("TARGET_ROOT", "")
+            cfg.slug = env.get("TARGET_SLUG", "")
+            cfg.target_rev = env.get("TARGET_REV", "")
+            cfg.session_started = env.get("SESSION_STARTED", "")
+            cfg.logdir = env.get("LOGDIR", "")
+        elif os.environ.get("RESULTS_DIR") and os.environ.get("TARGET_ROOT"):
+            env_slug = os.environ.get("TARGET_SLUG", args.slug)
+            if env_slug and env_slug != args.slug:
+                die(f"no session-env for slug: {args.slug} (env TARGET_SLUG={env_slug})")
+            cfg.results_dir = os.environ.get("RESULTS_DIR", "")
+            cfg.target_root = os.environ.get("TARGET_ROOT", "")
+            cfg.slug = env_slug or args.slug
+            cfg.target_rev = os.environ.get("TARGET_REV", "")
+            cfg.session_started = os.environ.get("SESSION_STARTED", "")
+            cfg.logdir = os.environ.get("LOGDIR", "")
+            cfg.is_browser = os.environ.get("TARGET_IS_BROWSER", os.environ.get("IS_BROWSER_TARGET", "0"))
+        else:
+            die(f"no session-env for slug: {args.slug}")
+        toml_path = slug_dir / "target.toml"
+        if toml_path.is_file():
+            target_config.load_toml_into(cfg, toml_path)
+    else:
+        try:
+            cfg = target_config.load(os.getcwd())
+        except FileNotFoundError:
+            die(f"no output/<slug>/.session-env above {os.getcwd()}; use --slug")
+
+    if args.crash_dir:
+        crash_dir = Path(args.crash_dir).resolve()
+    else:
+        crash_dir = Path(cfg.results_dir) / "crashes" / args.crash_id
+    if not crash_dir.is_dir():
+        die(f"crash dir not found: {crash_dir}")
+
+    out_dir = Path(args.out) if args.out else crash_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    audit_subdir = out_dir / ".audit"
+
+    scan_dirs: list[Path] = []
+    if audit_subdir.is_dir():
+        scan_dirs.append(audit_subdir)
+    scan_dirs.append(crash_dir)
+
+    # ── Locate audit-side artifacts ──────────────────────────────────
+    asan_file = crash_artifacts.find_primary_asan(scan_dirs)
+    if asan_file is None:
+        die(f"no sanitizer output in {crash_dir} (or .audit/)")
+    try:
+        sanitizer_text = asan_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        sanitizer_text = ""
+    sanitizer = infer_sanitizer_from_text(sanitizer_text)
+    run_header = sanitizer_run_header_fields(sanitizer_text)
+    run_mode = run_header.get("mode", "")
+    recorded_env_options = decode_header_b64(run_header.get("env_options_b64", ""))
+
+    report_md = find_first_in_scan(scan_dirs, "report.md")
+    if report_md is None:
+        report_md = find_first_in_scan(scan_dirs, "REPORT.md")
+
+    harness_src = find_harness(scan_dirs)
+    shell_wrapper = find_shell_wrapper(scan_dirs)
+    testcase = find_testcase(scan_dirs, crash_dir, audit_subdir)
+
+    # ── Stage outputs in a temp dir ──────────────────────────────────
+    stage = Path(tempfile.mkdtemp(prefix="export-repro-", dir=os.environ.get("TMPDIR", "/tmp")))
+    try:
+        input_name = ""
+        if testcase is not None:
+            ext = ext_of(testcase.name)
+            input_name = f"input.{ext}"
+            (stage / input_name).write_bytes(read_testcase_bytes(testcase))
+        harness_name = "harness.c"
+        harness_compiler = "clang"
+        if harness_src is not None:
+            suffix = harness_src.suffix.lower()
+            if suffix in {".cc", ".cpp", ".cxx"}:
+                harness_name = "harness" + suffix
+                harness_compiler = "clang++"
+            (stage / harness_name).write_text(strip_internal_headers(harness_src),
+                                              encoding="utf-8")
+        shutil.copyfile(asan_file, stage / "sanitizer.txt")
+        # Candidate patch: agents save it as patch.diff next to
+        # report.md. Older bundles still have it under .audit/ because
+        # _is_bundle_filename used to demote it; scan_dirs already
+        # covers both locations. Stage it so it lands back at the
+        # bundle root and bin/enrich-report can inline it into REPORT.md.
+        patch_src = find_first_in_scan(scan_dirs, "patch.diff")
+        if patch_src is not None:
+            shutil.copyfile(patch_src, stage / "patch.diff")
+
+        upstream_url = cfg.upstream_url or "FILL_ME"
+        pinned_rev = cfg.target_rev or cfg.pinned_rev or "HEAD"
+        slug = cfg.slug or "target"
+        cmake_target = cfg.cmake_target or ""
+        build_system = cfg.build_system or "cmake"
+        san_bin_rel = cfg_sanitizer_bin(cfg, sanitizer) or ""
+        san_lib_rel = cfg_sanitizer_lib(cfg, sanitizer) or ""
+        if sanitizer == "race" and not san_bin_rel and build_system == "go":
+            san_bin_rel = f"{sanitizer_meta(sanitizer)['build_dir']}/repro"
+        sanitizer_extra_options = cfg.sanitizer_options.get(sanitizer, "")
+        is_browser = cfg.is_browser == "1"
+
+        includes_args = emit_include_args(cfg.includes)
+        link_libs = shell_join_args(cfg.link_libs)
+
+        # ── Choose reproduce.sh template ────────────────────────────
+        repro_path = stage / "reproduce.sh"
+        input_ext_lower = input_name.rsplit(".", 1)[-1].lower() if input_name else ""
+        if is_browser:
+            if input_ext_lower in ("html", "htm", "xhtml", "svg"):
+                write_browser_template(
+                    repro_path,
+                    build_system=build_system, upstream_url=upstream_url,
+                    pinned_rev=pinned_rev, slug=slug,
+                    san_bin_rel=san_bin_rel, input_name=input_name,
+                    sanitizer=sanitizer, extra_options=sanitizer_extra_options,
+                    mode=run_mode or "browser",
+                    recorded_env_options=recorded_env_options,
+                )
+            elif input_ext_lower in ("js", "mjs"):
+                write_js_shell_template(
+                    repro_path,
+                    build_system=build_system, upstream_url=upstream_url,
+                    pinned_rev=pinned_rev, slug=slug,
+                    san_bin_rel=san_bin_rel, input_name=input_name,
+                    sanitizer=sanitizer, extra_options=sanitizer_extra_options,
+                    mode=run_mode or "js",
+                    recorded_env_options=recorded_env_options,
+                )
+            else:
+                die(f"browser target {cfg.slug}: unsupported testcase ext '{input_ext_lower}'")
+        elif harness_src is not None and input_name:
+            write_c_harness_template(
+                repro_path,
+                build_system=build_system, upstream_url=upstream_url,
+                pinned_rev=pinned_rev, slug=slug,
+                san_bin_rel=san_bin_rel, san_lib_rel=san_lib_rel,
+                includes_args=includes_args, link_libs=link_libs,
+                input_name=input_name,
+                harness_name=harness_name,
+                harness_compiler=harness_compiler,
+                sanitizer=sanitizer,
+                extra_options=sanitizer_extra_options,
+                mode=run_mode or "generic",
+                recorded_env_options=recorded_env_options,
+            )
+        elif shell_wrapper is not None:
+            write_shell_wrapper_template(
+                repro_path,
+                build_system=build_system, upstream_url=upstream_url,
+                pinned_rev=pinned_rev, slug=slug,
+                san_bin_rel=san_bin_rel, cmake_target=cmake_target,
+                wrapper=shell_wrapper, sanitizer=sanitizer,
+            )
+        elif input_name:
+            write_cli_with_input_template(
+                repro_path,
+                build_system=build_system, upstream_url=upstream_url,
+                pinned_rev=pinned_rev, slug=slug,
+                san_bin_rel=san_bin_rel, cmake_target=cmake_target,
+                input_name=input_name, sanitizer=sanitizer,
+                extra_options=sanitizer_extra_options,
+                mode=run_mode or "generic",
+                recorded_env_options=recorded_env_options,
+            )
+        else:
+            die(f"could not determine template for {args.crash_id}")
+
+        # ── Build REPORT.md ──────────────────────────────────────────
+        asan_top = extract_asan_top(asan_file)
+        asan_summary = extract_asan_summary(asan_file)
+        dedup_frames = extract_dedup_frames(asan_file)
+        asan_expected = extract_asan_diagnostic(asan_file)
+
+        surface_value, surface_reason = infer_surface(harness_src, asan_file, cfg)
+        primitive_label = infer_primitive_label("\n".join([asan_top, asan_expected, asan_summary]))
+
+        trigger_value = "bytes"
+        boundary_value = ""
+        caller_controls_value = ""
+        parameter_control_value = ""
+        trusted_actions_value = ""
+        caller_contract_value = ""
+        strategy_value = ""
+        report_text = ""
+        if report_md is not None:
+            report_text = report_md.read_text(encoding="utf-8", errors="replace")
+            v = read_bare_field(report_md, "Trigger source")
+            if v:
+                trigger_value = v
+            boundary_value = read_bare_field(report_md, "Boundary")
+            caller_controls_value = read_bare_field(report_md, "Caller controls")
+            parameter_control_value = read_bare_field(report_md, "Parameter control")
+            trusted_actions_value = read_bare_field(report_md, "Trusted caller actions")
+            caller_contract_value = read_bare_field(report_md, "Caller contract")
+            strategy_value = normalize_strategy(read_bare_field(report_md, "Strategy"))
+        surface_value, surface_reason = adjust_surface_from_report(
+            surface_value, surface_reason, report_text, boundary_value,
+            trusted_actions_value, cfg
+        )
+
+        severity_value = "—"
+        for cand in (
+            crash_dir / "REPORT.md",
+            crash_dir / "report.md",
+            report_md,
+        ):
+            v = read_severity_from(cand)
+            if v:
+                severity_value = v
+                break
+
+        confidence_value = read_confidence(report_md, asan_file)
+
+        # Advisory marker: patch.diff is optional. When absent + the
+        # agent's narrative documents a Fix Direction, the bundle is
+        # an "advisory" — the issue ships for human review even
+        # though no surgical patch was possible (ABI/API-impacting
+        # fixes don't fit a one-line diff).
+        advisory_value = detect_advisory_status(
+            report_md, stage / "patch.diff"
+        )
+
+        report_text = build_report_md(
+            crash_id=args.crash_id, primitive_label=primitive_label,
+            severity_value=severity_value, surface_value=surface_value,
+            surface_reason=surface_reason, trigger_value=trigger_value,
+            caller_contract_value=caller_contract_value,
+            boundary_value=boundary_value,
+            caller_controls_value=caller_controls_value,
+            parameter_control_value=parameter_control_value,
+            trusted_actions_value=trusted_actions_value,
+            confidence_value=confidence_value,
+            strategy_value=strategy_value,
+            crash_dir=crash_dir, report_md=report_md,
+            asan_top=asan_top, asan_summary=asan_summary,
+            dedup_frames=dedup_frames,
+            asan_expected=asan_expected, pinned_rev=pinned_rev,
+            sanitizer=sanitizer,
+            advisory_value=advisory_value,
+        )
+        (stage / "REPORT.md").write_text(report_text, encoding="utf-8")
+
+        # ── Path normalization: rewrite this session's absolute audit
+        #    paths to portable relative form *before* the leak scan
+        #    runs. The agent's report.md, ASan debug-info, and harness
+        #    #include comments all carry $RESULTS_DIR/$TARGET_ROOT
+        #    paths verbatim; without rewriting, the leak scan would
+        #    reject every bundle on every container layout. After
+        #    rewriting, anything the scan still flags is a real escape
+        #    that needs an explicit code fix.
+        normalize_candidates = [stage / "REPORT.md", stage / "reproduce.sh"]
+        normalize_candidates += list(stage.glob("harness.*"))
+        normalize_candidates += list(stage.glob("input.*"))
+        # Stable dedupe — list.unique-preserve-order.
+        _seen: set[str] = set()
+        normalize_targets: list[Path] = []
+        for c in normalize_candidates:
+            key = str(c)
+            if key in _seen:
+                continue
+            _seen.add(key)
+            normalize_targets.append(c)
+        for f in normalize_targets:
+            if f.is_file():
+                _normalize_bundle_file(f, cfg)
+
+        # ── Sanity scan: forbidden internal refs ────────────────────
+        leaked: list[str] = []
+        for f in normalize_targets:
+            if not f.is_file():
+                continue
+            try:
+                txt = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if _bundle_text_has_internal_ref(txt, cfg):
+                leaked.append(str(f))
+        if leaked:
+            msg = f"internal refs leaked into: {' '.join(leaked)}"
+            if os.environ.get("EXPORT_REPRO_ALLOW_INTERNAL_REFS") == "1":
+                sys.stderr.write(f"[export-repro] WARNING: {msg}\n")
+            else:
+                die(f"{msg}; set EXPORT_REPRO_ALLOW_INTERNAL_REFS=1 only for local debugging")
+
+        # ── Migrate junk into .audit/ ────────────────────────────────
+        if out_dir == crash_dir:
+            audit_subdir.mkdir(parents=True, exist_ok=True)
+            legacy_repro = crash_dir / "repro"
+            if legacy_repro.is_dir():
+                dest = audit_subdir / "legacy-repro"
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.move(str(legacy_repro), str(dest))
+            # Bash uses `shopt -s dotglob nullglob` here so dotfiles are also
+            # migrated; mirror that by walking iterdir() (which already lists
+            # hidden files) instead of _list_visible_entries.
+            for f in sorted(crash_dir.iterdir()):
+                if not f.exists():
+                    continue
+                base = f.name
+                # Only the chosen input.<ext> is a bundle file; older
+                # bundles may have left input.out / input.bin / ...
+                # alongside the correct testcase. Migrate the stragglers
+                # so they can't be re-picked by a later find_testcase or
+                # confuse the user about which file reproduce.sh runs.
+                if base.startswith("input."):
+                    if input_name and base == input_name:
+                        continue
+                else:
+                    if _is_bundle_filename(base):
+                        continue
+                if f.is_dir():
+                    continue
+                try:
+                    shutil.move(str(f), str(audit_subdir / base))
+                except OSError:
+                    pass
+
+        # ── Install staged files atomically ──────────────────────────
+        install_candidates = [
+            stage / "REPORT.md",
+            stage / "reproduce.sh",
+            stage / "sanitizer.txt",
+        ]
+        install_candidates += list(stage.glob("harness.*"))
+        install_candidates.append(stage / "patch.diff")
+        for staged in install_candidates:
+            if staged.is_file():
+                shutil.copyfile(staged, out_dir / staged.name)
+                os.chmod(out_dir / staged.name, 0o644)
+        for staged in stage.glob("input.*"):
+            if staged.is_file():
+                shutil.copyfile(staged, out_dir / staged.name)
+                os.chmod(out_dir / staged.name, 0o644)
+        repro_dest = out_dir / "reproduce.sh"
+        if repro_dest.is_file():
+            try:
+                os.chmod(repro_dest, 0o755)
+            except OSError:
+                pass
+
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+    # ── Re-apply cached reachability ─────────────────────────────────
+    # build_report_md rebuilds REPORT.md from the agent's report.md, which
+    # never carries the `## Reachability — external callers` /
+    # `## Severity rationale` sections written by bin/reachability. If a
+    # prior run already produced reachability.json, replay it now so a
+    # rebuild does not strip the section. --severity-only re-uses the
+    # cached JSON instead of probing the network. Best-effort.
+    reachability_json = out_dir / "reachability.json"
+    reachability_bin = SCRIPT_DIR / "reachability"
+    if reachability_json.is_file() and reachability_json.stat().st_size > 0 \
+            and reachability_bin.is_file():
+        try:
+            subprocess.run(
+                [sys.executable, str(reachability_bin),
+                 "--report", str(out_dir), "--severity-only"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    # REPORT.html is rendered by maintain_indexes after reachability and
+    # cluster post-processing have made their final REPORT.md edits. Rendering
+    # here would create a stale pre-reachability/pre-cluster HTML sibling.
+
+    # ── Mark this dir as bundled for triage. ─────────────────────────
+    promotion_log = audit_subdir / "promotion.log"
+    try:
+        audit_subdir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(promotion_log, "a", encoding="utf-8") as f:
+            f.write(
+                f"{ts}  exported  CRASH_ID={args.crash_id}  rev={cfg.target_rev or 'unknown'}\n"
+            )
+    except OSError:
+        pass
+
+    sys.stdout.write(f"[export-repro] wrote {out_dir}  (internals → {audit_subdir})\n")
+    try:
+        for entry in sorted(out_dir.iterdir()):
+            if entry.name.startswith("."):
+                continue
+            sys.stdout.write(entry.name + "\n")
+    except OSError:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

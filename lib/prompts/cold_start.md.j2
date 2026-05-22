@@ -1,0 +1,21 @@
+{{ safety_framing }}
+{{ guide_section }}
+
+# COLD START (Agent {{ agent_num }}, role={{ role }})
+
+1. Run `bin/state resume --agent {{ agent_num }} --mode {{ mode }} --role {{ role }}{{ state_strategy_arg }}` and use the assigned work card if present.
+2. If no card is assigned, pick a subsystem NOT claimed by other agents.{{ suggested_sub_line }}
+   {{ audit_fixed_strategy_hint }}
+3. Workflow rules are embedded below under "SESSION RULES DIGEST" — drill into `{{ reference_dir }}/session-rules.md` only on ambiguity.
+4. Generate 3-5 structured hypotheses with `bin/state add-hyp`; add concise data-flow/guard/variant context with `bin/state add-note`. Investigate immediately.
+{{ strategy_a_block }}
+{{ role_guidance }}
+{{ work_card_directive }}
+{{ targets }}
+{{ asan_build_directive }}
+{{ harness_build_failures_directive }}
+{{ find_first_directive }}
+
+{{ mode_lock_line }}
+{{ agent_state_instructions }}
+{{ common_suffix }}

@@ -1,0 +1,32 @@
+You are helping an audit harness pick OSS peer projects for cross-project
+variant mining (Strategy S6). Given a target, identify 3-6 peer OSS projects
+that implement the same spec / format / algorithm. Peers are independent
+implementations whose prior fixes can map to unfixed analogues in the target.
+
+Target:
+  slug         = {{ slug }}
+  upstream_url = {{ upstream_url }}
+
+Target README excerpt:
+"""
+{{ readme }}
+"""
+
+S6 taxonomy (use to pick the matching row, then list 3-6 peers from it,
+excluding the target itself):
+"""
+{{ taxonomy }}
+"""
+
+Output a single JSON object (no prose, no fences):
+{
+  "domain":    "<one of the taxonomy domain names, e.g. XML / SGML>",
+  "peers":     ["peer1", "peer2", ...],   /* 3-6 entries, slug or repo name */
+  "reasoning": "<one short sentence on why these peers — spec / format / algo>"
+}
+
+Constraints:
+- peers MUST NOT include the target itself
+- peers MUST be 3-6 entries
+- prefer projects in the taxonomy table; if the target has no row, pick
+  peers that share the closest spec/format/algorithm with brief reasoning

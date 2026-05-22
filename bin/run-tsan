@@ -1,0 +1,111 @@
+#!/bin/bash
+# ThreadSanitizer execution wrapper.
+# Supports: generic, js, fuzz, fuzz-repro, fuzz-js
+#
+# Usage: bin/run-tsan <mode> <testcase> [args...]
+#
+# Mode taxonomy:
+#   generic          Target CLI or probe-built HARNESS executable. This is the
+#                    normal non-browser path used by bin/probe.
+#   js               Standalone JS shell (`dist/bin/js`) running a script.
+#                    This is normal JS-engine execution, not libFuzzer.
+#   fuzz             Standalone libFuzzer target over a corpus. Uses
+#                    halt_on_error=0 so a fuzzing session can keep collecting.
+#   fuzz-repro       One existing fuzzer crash file, rerun with halt_on_error=1
+#                    for a clean single diagnostic.
+#   fuzz-js          Standalone SpiderMonkey fuzz-tests binary for JS engine
+#                    fuzzers such as Wasm/RegExp/StructuredClone. Different
+#                    harness ABI and artifact flow from `js`.
+#
+# The per-mode dispatch is shared with bin/run-msan via lib/sanitizer_run.sh;
+# this script only declares the TSan-specific option strings and timeouts.
+#
+# TSan detects data races. In practice it has the highest false-positive
+# rate of the four sanitizers: benign atomic_relaxed accesses, double-
+# checked locking, and intentionally racy stats counters all fire. Any
+# uninstrumented dependency creates more noise. Expect to maintain a
+# project-specific suppressions file (target.toml: [sanitizer].tsan_suppressions).
+#
+# Reads target paths and per-target suppressions from output/<slug>/target.toml.
+#
+# Timeout env vars (all optional):
+#   TSAN_TIMEOUT             — overrides js/generic defaults
+#   FUZZ_TSAN_TIMEOUT        — fuzz-mode timeout (default 600)
+#   TSAN_FUZZ_REPRO_TIMEOUT  — fuzz-repro timeout (default 20)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$REPO_ROOT/lib/timeout.sh"
+# shellcheck source=../lib/target_config.sh
+source "$REPO_ROOT/lib/target_config.sh"
+# shellcheck source=../lib/sanitizer.sh
+source "$REPO_ROOT/lib/sanitizer.sh"
+# shellcheck source=../lib/sanitizer_run.sh
+source "$REPO_ROOT/lib/sanitizer_run.sh"
+
+_probe_path="${2:-$PWD}"
+target_load "$_probe_path" 2>/dev/null || true
+
+sanitizer_prepare_runtime_env tsan
+sanitizer_warn_if_disabled tsan
+
+command -v python3 &>/dev/null || { echo "[run-tsan] FATAL: python3 is required" >&2; exit 1; }
+
+TSAN_BUILD_DIR="$(sanitizer_build_dir tsan)"
+
+JS_TIMEOUT="${TSAN_TIMEOUT:-10}"
+FUZZ_TIMEOUT="${FUZZ_TSAN_TIMEOUT:-600}"
+FUZZ_REPRO_TIMEOUT="${TSAN_FUZZ_REPRO_TIMEOUT:-20}"
+GENERIC_TIMEOUT="${TSAN_TIMEOUT:-15}"
+
+# Per-mode option strings come from lib/sanitizer_options.conf via
+# sanitizer_options_for (lib/sanitizer.sh) — the single source of truth
+# shared with bin/export-repro. Do not re-hardcode option strings here.
+# (halt_on_error=1 stops on the first race for a clean runner signal;
+# second_deadlock_stack=1 surfaces both halves of a race participant.)
+TSAN_OPTS_FULL="$(sanitizer_options_for tsan full)"
+TSAN_OPTS_JS="$(sanitizer_options_for tsan js)"
+TSAN_OPTS_FUZZ="$(sanitizer_options_for tsan fuzz)"
+TSAN_OPTS_FUZZ_REPRO="$(sanitizer_options_for tsan fuzz-repro)"
+
+# Append target.toml [sanitizer].tsan_suppressions / tsan_options. TSan
+# usually needs a suppressions file to be useful in practice — see
+# docs/reference/target-toml.md for guidance.
+TSAN_OPTS_FULL="$(sanitizer_compose_options tsan "$TSAN_OPTS_FULL")"
+TSAN_OPTS_JS="$(sanitizer_compose_options tsan "$TSAN_OPTS_JS")"
+TSAN_OPTS_FUZZ="$(sanitizer_compose_options tsan "$TSAN_OPTS_FUZZ")"
+TSAN_OPTS_FUZZ_REPRO="$(sanitizer_compose_options tsan "$TSAN_OPTS_FUZZ_REPRO")"
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 {generic|js|fuzz|fuzz-repro|fuzz-js} [args...]"
+    exit 1
+fi
+
+MODE="$1"; shift
+rc=0
+
+case "$MODE" in
+    generic)
+        sanitizer_run_generic tsan "$TSAN_OPTS_FULL" "$GENERIC_TIMEOUT" "$@" || rc=$?
+        ;;
+    js)
+        sanitizer_run_js tsan "$TSAN_OPTS_JS" "$JS_TIMEOUT" "$@" || rc=$?
+        ;;
+    fuzz)
+        sanitizer_run_fuzz tsan "$TSAN_OPTS_FUZZ" "$FUZZ_TIMEOUT" "$@" || rc=$?
+        ;;
+    fuzz-repro)
+        sanitizer_run_fuzz_repro tsan "$TSAN_OPTS_FUZZ_REPRO" "$FUZZ_REPRO_TIMEOUT" "$@" || rc=$?
+        ;;
+    fuzz-js)
+        sanitizer_run_fuzz_js tsan "$TSAN_OPTS_FUZZ" "$FUZZ_TIMEOUT" "$@" || rc=$?
+        ;;
+    *)
+        echo "Usage: $0 {generic|js|fuzz|fuzz-repro|fuzz-js} [args...]"
+        exit 1
+        ;;
+esac
+
+exit "$rc"

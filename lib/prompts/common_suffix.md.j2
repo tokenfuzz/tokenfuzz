@@ -1,0 +1,68 @@
+
+## HARD RULES
+
+- **BLOCKLISTED:** {{ blocklist_text }}. Do NOT audit blocklisted subsystems.
+- **Guard-chain rule:** if 3+ hypotheses die to the same guard, find a path past it or rotate.
+- **Check rejected crashes** before filing: `{{ results_dir }}/crashes-rejected/INDEX.md`.
+- **Fuzz leads:** scan `{{ fuzz_leads_path }}` for recent non-noise libFuzzer crashes.
+- **After compression:** read your state file's Working Context, resume top PENDING. No new recon.
+- **Session rules digest** is embedded below; drill into `{{ reference_dir }}/session-rules.md` only when the digest is ambiguous.
+
+## CONTEXT ECONOMICS
+
+Every assistant turn re-reads the entire conversation as cached input (~$0.30/M tokens). At ~100K cached tokens per turn, an extra round-trip costs ~$0.03. Two reductions are pure savings:
+
+- **Batch independent tool calls in a single turn.** When two greps, three reads, or a grep + a peek have NO dependency on each other's output, emit them as parallel `tool_use` blocks in one assistant message. One turn with three tool calls costs the same cache_read as one turn with one tool call. Three sequential turns cost 3x.
+- **Do NOT `tail` or `cat` raw `state/*.jsonl`.** Each row is multi-KB JSON. Use `bin/state show-recent --hyps 10 --runs 10 --claims 10` (one call, ~3 KB) or the per-section `bin/state recent-hyps|recent-runs|recent-claims|recent-notes` helpers — each returns slim pipe-delimited rows instead of full JSON. `grep -r` across `output/<slug>/` JSONL files is the same antipattern; filter via `bin/state` flags instead.
+- **Default Grep tool calls to `context: 2` and `head_limit: 30`.** Wider contexts return tens of KB of redundant text; tighten to `context: 2` / `head_limit: 30` and widen only after a confirmed hit you need to inspect.
+- **Watch for the 100K context warning.** When the harness injects "CONTEXT NEAR COMPACTION", checkpoint findings to your state file's Working Context immediately. Auto-compaction at ~165K otherwise drops un-checkpointed evidence.
+
+## SEARCH DISCIPLINE
+
+- **No OR-chain patterns.** Split into separate calls.
+- **Scope every search** with a specific directory or `--glob`.
+- **Source search:** `bin/rg-safe <rg args>` for `targets/<slug>/` (caps at 200 lines + 128 KiB; excludes `<backend>/logs` / `.log.raw` by default). Plain `rg` and `grep` from agent shells go through capping wrappers automatically.
+- **Audit-artifact search:** `bin/scratch-search PATTERN` for `$RESULTS_DIR` — default output is a path inventory across scratch dirs, corpus, crashes, and findings. This is the first step for "have I or a peer agent already tried this?" and name-collision checks. When you need match bodies, re-run narrowly with `bin/scratch-search --lines --section <section> PATTERN`; that is the old file:line:body behavior. Do NOT mix `targets/` and `output/` roots in one `rg-safe` call; split into a source search (`rg-safe`) and an artifact search (`scratch-search`).
+- **Symbol/region lookup:** `bin/peek -A 30 -B 8 'symbol' file` (clamps wide `-A`/`-B`) for grep-with-context; `bin/peek <FILE>:<start>-<end>` (alt to `sed -n 'X,Yp'`) for line ranges. Both clamp to function-context defaults; pass `--no-cap` to widen. Re-Reading the same file in 10+ small overlapping windows is a misfire.
+- **Patch viewing:** **always** `bin/show-patch <commit> [path]` — never raw `git show <commit>`. `PATCH-*` ids are work-card ids, not revisions; use the assigned card or `bin/state resume` **Fix commits** hashes. show-patch defaults to `--unified=10` (`PATCH_CONTEXT=80` to widen), caps output at `PATCH_MAX_LINES=1500` / `PATCH_MAX_BYTES=32768` (drill in via `bin/show-patch <commit> -- <file>` when clipped), and **caches per-session** so the second call for the same commit returns a Read-able cache path + 40-line preview instead of re-emitting the diff.
+- **Use `bin/probe` for testcase runs.** It chooses coverage-gated ASan, generic ASan, or differential mode from headers; reads TARGET / HYPOTHESIS-ID / HARNESS from the testcase; discovers RESULTS_DIR / TARGET_ROOT from the backend-local `.session-env` above the testcase path. For native C/C++ probes, put `// HARNESS: harness.c`, `harness.cc`, or `harness.cpp` in the testcase header and let `bin/probe` build/cache it. No env vars to set.
+- **Coverage-gate is automatic when supported** with `bin/probe scratch-N/<testcase>`. Add `--confirm` to run 5x once a crash appears.
+- **Check prior runs before re-probing:** `bin/probe-history <testcase>` reads `state/runs.jsonl` and shows verdict history for that testcase (by path + content sha1). If a confirmed verdict (`runs=5`) is already recorded, you have the evidence — only re-probe when the binary, harness, or testcase has changed, or to refute a flaky single-run result. This tool NEVER runs anything; `bin/probe --confirm` is still the way to get a fresh verdict.
+
+## TURN BUDGET (codex sessions only)
+
+Codex sessions have a soft turn budget of ~75 completed shell commands. Past
+this threshold, cached-input replay cost grows quadratically and the harness
+will end the session for a fresh `bin/state resume` continuation. **You will
+not get to finish a partial hypothesis if the cap fires mid-turn** — so:
+
+- Checkpoint frequently: every confirmed hypothesis, decision, or data-flow
+  observation goes into `bin/state add-hyp / update-hyp / add-note` the
+  moment you have it. The next session continues from those records.
+- Around turn 60+ (you can ask the orchestrator with `bin/state recent-runs`
+  to estimate your turn count), prefer finishing the current hypothesis and
+  writing its outcome to state over starting a new investigation.
+- Cap is configurable via `TURN_SOFT_CAP` (default 75; 0 disables). Do not
+  attempt to override it from inside the session — the harness is the only
+  thing watching the count.
+
+## TOOL-CALL BUDGET (soft hint, all backends)
+
+Re-reading the same file with `peek`, `state`, and `probe` instead of
+moving to a hypothesis inflates session cost without improving precision.
+Self-pace:
+
+- **Soft target: ~{{ tool_call_soft_target }} tool calls** per session for
+  cold-start discovery, ~{{ tool_call_deep_soft_target }} for deep
+  investigation. You can exceed it when chasing a reachable hypothesis; do
+  not exceed it for general "let me re-read the same file again" exploration.
+- Never read the same file path twice in one session — the first read result
+  is still in your context. If you genuinely need to see different lines,
+  use `peek -B N -A N <symbol>` instead of re-reading the whole file.
+- A productive session emits at least one hypothesis (PENDING or
+  NEEDS_TESTCASE row) every ~30 tool calls. If 30 calls go by with no row
+  written, change strategy or rotate subsystem — don't keep peeking.
+
+## SESSION RULES DIGEST
+
+{{ session_rules_digest }}

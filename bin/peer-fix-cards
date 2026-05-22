@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""Build S6 peer-fix cards from configured s6_peers.
+
+Reads cfg.s6_peers from output/<slug>/target.toml, mines security-relevant
+fix commits from each peer via OSV and any locally available peer clones,
+distills the bug class via LLM, maps it to a target-side file analogue via
+LLM, and emits S6 work cards as JSONL matching the patch-cards.jsonl shape.
+
+Hooks into bin/audit alongside bin/patch-cards. Failure of any peer,
+source, or LLM call is non-fatal — the orchestrator emits whatever it
+could produce and exits 0 unless the target config itself is broken.
+
+Output: <RESULTS_DIR>/s6-peer-cards.jsonl
+Cache:  <RESULTS_DIR>/.s6-cache/  (OSV responses, refreshed weekly)
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT") \
+    else Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import peer_sources  # noqa: E402
+import target_config as tc  # noqa: E402
+import workqueue  # noqa: E402
+from llm_decide import llm_decide  # noqa: E402
+from prompt_render import render_template  # noqa: E402
+
+
+def gather_target_file_listing(target_root: Path, max_files: int = 400) -> list[str]:
+    """Sample of auditable source files in the target tree.
+
+    Capped so the LLM-map prompt doesn't balloon. Sourced from
+    workqueue.iter_source_files which already filters out build/ test/
+    generated/ etc. — same files the work-card ranker considers.
+    """
+    out: list[str] = []
+    try:
+        for p in workqueue.iter_source_files(target_root, max_files=max_files):
+            rel = workqueue.relpath(p, target_root)
+            if workqueue.is_auditable_source_path(rel):
+                out.append(rel)
+    except Exception:
+        return out
+    return out
+
+
+def distill_bug_class(
+    peer: str, fix_entry: dict, diff_excerpt: str, timeout: int = 20,
+) -> str:
+    """LLM-distill the bug class from a peer fix. Empty string on failure."""
+    prompt = render_template("peer_fix_distill.md.j2", {
+        "peer": peer,
+        "fix_id": str(fix_entry.get("id", "")),
+        "summary": str(fix_entry.get("summary", "")),
+        "source": str(fix_entry.get("source", "")),
+        "url": str(fix_entry.get("url", "")),
+        "diff_excerpt": diff_excerpt[:6000] if diff_excerpt else "(no diff available — use the summary)",
+    })
+    result = llm_decide("s6-peer-distill", "class,summary,shape", prompt, timeout=timeout)
+    if result is None:
+        return ""
+    cls = str(result.get("class", "")).strip()
+    summary = str(result.get("summary", "")).strip()
+    shape = str(result.get("shape", "")).strip()
+    if not cls or not summary:
+        return ""
+    return f"{cls}: {summary} ({shape})"
+
+
+def map_to_target_file(
+    bug_class_summary: str,
+    target_file_listing: list[str],
+    target_slug: str,
+    timeout: int = 20,
+) -> str:
+    """LLM-map a distilled bug class to a target-side file analogue.
+
+    Returns the relative path or empty string on failure / no good match.
+    """
+    if not target_file_listing or not bug_class_summary:
+        return ""
+    # Cap the listing in the prompt — file lists are noisy and the LLM
+    # only needs enough to anchor on. 200 files is plenty for ranking.
+    listing_excerpt = "\n".join(target_file_listing[:200])
+    prompt = render_template("peer_fix_map.md.j2", {
+        "target_slug": target_slug,
+        "bug_class_summary": bug_class_summary,
+        "listing_excerpt": listing_excerpt,
+    })
+    result = llm_decide("s6-peer-map", "file,reason", prompt, timeout=timeout)
+    if result is None:
+        return ""
+    f = str(result.get("file", "")).strip()
+    if not f:
+        return ""
+    if f not in target_file_listing:
+        # Hallucination guard: only accept files that were in the listing.
+        return ""
+    return f
+
+
+def build_s6_card(
+    target_slug: str,
+    peer: str,
+    fix_entry: dict,
+    bug_class_summary: str,
+    target_file: str,
+) -> dict:
+    raw_id = f"{target_slug}:{peer}:{fix_entry.get('fix_hash', fix_entry.get('id', ''))}"
+    card_id = "S6-PEER-" + hashlib.sha1(raw_id.encode("utf-8")).hexdigest()[:12]
+    return {
+        "id": card_id,
+        "kind": "s6-peer-fix",
+        "target_slug": target_slug,
+        "subsystem": workqueue.subsystem_for(target_file),
+        "file": target_file,
+        "function": "",
+        "mode": workqueue.mode_for_file(target_file),
+        "strategy": "S6",
+        "score": 40,  # base S6 score; rank-work may re-score downstream
+        "seed": "",
+        "patch_cards": [],
+        "reason": (
+            f"S6 peer-fix mining: {peer} fix {fix_entry.get('id', '')[:24]} "
+            f"({fix_entry.get('source', '')}); class = {bug_class_summary[:160]}"
+        ),
+        "status": "unclaimed",
+        "created_at": workqueue.now_iso(),
+        "peer_project": peer,
+        "peer_fix_hash": fix_entry.get("fix_hash", ""),
+        "peer_fix_url": fix_entry.get("url", ""),
+        "bug_class": bug_class_summary,
+    }
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
+    workqueue.add_common_args(parser)
+    parser.add_argument("--output", help="Output JSONL path; defaults to "
+                        "<RESULTS_DIR>/s6-peer-cards.jsonl")
+    parser.add_argument("--limit", type=int, default=40,
+                        help="Max cards total (default 40)")
+    parser.add_argument("--max-per-peer", type=int, default=6,
+                        help="Max cards per peer (default 6)")
+    parser.add_argument("--days", type=int, default=3650,
+                        help="Look-back window in days (default 3650 ~ 10y). "
+                        "Wide on purpose: OSV's `modified` timestamp for "
+                        "OSS-Fuzz advisories reflects bulk-import bookkeeping, "
+                        "not the fix date, so a narrow window silently drops "
+                        "genuine peer fixes. Card volume is bounded by "
+                        "--limit / --max-per-peer regardless.")
+    parser.add_argument("--cache-ttl-days", type=int, default=7,
+                        help="OSV cache TTL (default 7 days)")
+    parser.add_argument("--peer-clone-roots", default="",
+                        help="Colon-separated dirs to search for local peer "
+                        "clones (enables VCS-log fallback)")
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args(argv)
+
+    ctx = workqueue.context_from_args(args)
+    output = Path(args.output).expanduser().resolve() if args.output \
+        else ctx.results_dir / "s6-peer-cards.jsonl"
+
+    # Load target config. output/<slug>/target.toml is the only source of
+    # S6 peers; run bin/suggest-peers to populate [s6_peers].
+    target_toml = ROOT / "output" / ctx.target_slug / "target.toml"
+    if not target_toml.is_file():
+        print(f"[peer-fix-cards] target.toml not found: {target_toml}",
+              file=sys.stderr)
+        return 1
+    cfg = tc.Config()
+    cfg.slug = ctx.target_slug
+    cfg.target_root = str(ctx.target_root)
+    try:
+        tc.load_toml_into(cfg, target_toml)
+    except Exception as e:
+        print(f"[peer-fix-cards] target.toml parse: {e}", file=sys.stderr)
+        return 1
+
+    if not cfg.s6_peers:
+        if not args.quiet:
+            print(f"[peer-fix-cards] no peers configured for {ctx.target_slug}; "
+                  f"add [s6_peers] to {target_toml} or run "
+                  f"bin/suggest-peers {ctx.target_slug}", file=sys.stderr)
+        # Write empty JSONL so callers can rely on the file existing.
+        workqueue.write_cards(output, [])
+        return 0
+
+    cache_dir = ctx.results_dir / ".s6-cache"
+    clone_roots: list[Path] = []
+    if args.peer_clone_roots:
+        for raw in args.peer_clone_roots.split(":"):
+            raw = raw.strip()
+            if raw:
+                clone_roots.append(Path(raw).expanduser())
+    # Default search: targets/<peer-name>/, in case the operator clones
+    # peers alongside the bundled targets.
+    clone_roots.append(ROOT / "targets")
+
+    target_files = gather_target_file_listing(ctx.target_root)
+
+    cards: list[dict] = []
+    seen_ids: set[str] = set()
+    for peer in cfg.s6_peers:
+        if len(cards) >= args.limit:
+            break
+        try:
+            fixes = peer_sources.gather_peer_fixes(
+                peer,
+                cache_dir=cache_dir,
+                cache_ttl_seconds=args.cache_ttl_days * 24 * 3600,
+                days=args.days,
+                peer_clone_search_roots=clone_roots,
+                max_per_source=args.max_per_peer * 2,  # over-fetch; dedupe below
+            )
+        except Exception as e:
+            if not args.quiet:
+                print(f"[peer-fix-cards] {peer}: source error: {e}",
+                      file=sys.stderr)
+            continue
+
+        emitted_for_peer = 0
+        for fix in fixes:
+            if emitted_for_peer >= args.max_per_peer:
+                break
+            if len(cards) >= args.limit:
+                break
+            if not fix.get("fix_hash") and fix.get("source") == "ossfuzz":
+                # Skip the tracker hint when we have nothing else — it's
+                # useful as a pointer but not as a work card.
+                continue
+
+            # Try to fetch a diff for LLM-distillation. Only works if we
+            # have a local clone of the peer; without one we fall back to
+            # using just the summary.
+            diff_excerpt = ""
+            clone = peer_sources.find_peer_clone(peer, clone_roots)
+            if clone is not None and fix.get("fix_hash"):
+                diff_excerpt = peer_sources.fetch_fix_diff(clone, fix["fix_hash"])
+
+            bug_class = distill_bug_class(peer, fix, diff_excerpt)
+            if not bug_class:
+                # LLM unavailable / failed — fall back to the raw summary.
+                bug_class = f"unknown class: {fix.get('summary', '')[:160]}"
+
+            target_file = map_to_target_file(bug_class, target_files, ctx.target_slug)
+            if not target_file:
+                # No credible analogue — skip the card rather than emit
+                # noise. Operator can re-run if the listing changes.
+                continue
+
+            card = build_s6_card(ctx.target_slug, peer, fix, bug_class, target_file)
+            if card["id"] in seen_ids:
+                continue
+            seen_ids.add(card["id"])
+            cards.append(card)
+            emitted_for_peer += 1
+
+    workqueue.write_cards(output, cards)
+    if not args.quiet:
+        print(f"[peer-fix-cards] wrote {len(cards)} S6 card(s) to {output}",
+              file=sys.stderr)
+        for card in cards:
+            print(json.dumps(card, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

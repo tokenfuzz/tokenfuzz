@@ -1,0 +1,1047 @@
+#!/usr/bin/env python3
+"""bin/cluster-crashes — group CRASH-* dirs by shared root cause.
+
+The audit harness records every crashing program counter as its own
+CRASH-* dir. Real-world bugs frequently surface through several different
+APIs (e.g. one missing bounds check is reachable from match(), dfa_match(),
+callout_enumerate(), …). Triaging these as N separate reports is wasteful
+for both QA and upstream maintainers.
+
+This tool collects all CRASH-* dirs under a results directory, computes a
+clustering signature per crash, and writes:
+
+  * <results>/crashes/CRASH-CLUSTERS.md
+                                      — sortable markdown summary
+  * output/<target>/CRASH-CLUSTERS.md
+                                      — cross-backend aggregate summary
+  * each CRASH-*/REPORT.md           — Cluster: <ID>  field (preserved
+                                       across re-runs of export-repro)
+
+Clustering signature (deterministic, no LLM):
+  1. ASan crash type.
+  2. ClusterFuzz-style crash state: the first interesting user frames after
+     applying the ClusterFuzz stack-frame ignore rules and frame filtering.
+
+Two crashes go in the same cluster when their crash types and crash states
+are similar under ClusterFuzz's CrashComparer heuristic: exact match,
+at least two common ordered crash-state frames, or average line similarity
+above the ClusterFuzz threshold.
+
+The tool is read-mostly for the report bundles: it only edits the
+"Cluster:" line in each REPORT.md. It does NOT touch any other section,
+the asan.txt, or the harness, and it is idempotent.
+
+The rendered Root signature column is the representative crash's exact
+top-three dedup frame chain (function plus source location) when available.
+The internal ClusterFuzz crash state remains function-oriented for duplicate
+matching, but the index should show the source lines that explain why
+similar-looking crashes stayed separate.
+
+Usage:
+  bin/cluster-crashes <results-dir>            # writes crashes/CRASH-CLUSTERS.md + Cluster: lines
+  bin/cluster-crashes <results-dir> --dry-run  # print plan, write nothing
+  bin/cluster-crashes <results-dir> --json     # emit JSON to stdout
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import string
+import sys
+import tempfile
+from pathlib import Path
+
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+import stack_frames  # noqa: E402
+from cluster_common import (  # noqa: E402
+    exact_child_file,
+    remove_legacy_cluster_files,
+    render_member_report_siblings,
+    render_md_sibling,
+    run_under_aggregate_lock,
+)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text atomically: tempfile in the same dir, then os.replace.
+    Concurrent invocations from sibling backends never see a half-written
+    file, and a SIGKILL between create and rename leaves the destination
+    untouched (a stray .tmp may linger, but it's inert)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                               dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+PRIMITIVE_RE = re.compile(
+    r"AddressSanitizer:\s+("
+    r"heap-buffer-overflow|heap-use-after-free|use-after-free|"
+    r"stack-buffer-overflow|stack-use-after-(?:scope|return)|"
+    r"global-buffer-overflow|container-overflow|dynamic-stack-buffer-overflow|"
+    r"alloc-dealloc-mismatch|intra-object-overflow|double-free|"
+    r"negative-size-param|bad-free|new-delete-type-mismatch|"
+    r"BUS|SEGV"
+    r")"
+)
+RW_RE = re.compile(r"\b(READ|WRITE) of size", re.IGNORECASE)
+SUMMARY_RE = re.compile(
+    r"^SUMMARY:\s+(?:AddressSanitizer|UndefinedBehaviorSanitizer|"
+    r"MemorySanitizer|ThreadSanitizer):\s+(?P<primitive>\S+)"
+    r"(?:\s+(?P<loc>\S+:\d+(?::\d+)?|\S+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|m|mm|rs|go|java|js|ts)))?"
+    r"(?:\s+in\s+(?P<func>.+?))?\s*$",
+    re.MULTILINE,
+)
+REPORT_LOCATION_RE = re.compile(
+    r"^(?:[-*]\s*)?(?:\*\*)?"
+    r"(?:Location|Target|Crash site|Crash location)"
+    r"(?:\*\*)?\s*:\s*`?(?P<value>[^`\n]+)`?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+STACK_OBJECT_RE = re.compile(
+    r"'(?P<object>[^']+)'\s+\(line\s+(?P<line>\d+)\)\s+<==\s+Memory access",
+    re.IGNORECASE,
+)
+REPORT_OBJECT_RE = re.compile(
+    r"`(?P<object>[A-Za-z_][A-Za-z0-9_]*(?:\[[0-9]+\])?)`"
+)
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _find_asan(crash_dir: Path) -> Path | None:
+    # Canonical bundle filename is sanitizer.txt. asan.txt is a legacy
+    # alias kept here as a fallback so older bundles already shipped to
+    # maintainers remain readable.
+    for name in ("sanitizer.txt", "asan.txt"):
+        p = crash_dir / name
+        if p.is_file():
+            return p
+    # Pre-bundle layout — first sanitizer diagnostic under .audit/ or the
+    # crash root. Probe historically uses *.asan.txt for every sanitizer, but
+    # accept explicit sanitizer suffixes too.
+    candidates = []
+    audit = crash_dir / ".audit"
+    for root in (crash_dir, audit):
+        if root.is_dir():
+            for name in sorted(p.name for p in root.iterdir() if p.is_file()):
+                if (
+                    name.endswith((".asan.txt", ".msan.txt", ".tsan.txt", ".ubsan.txt"))
+                    or name in {"asan_output.txt", "msan.txt", "tsan.txt", "ubsan.txt"}
+                ):
+                    candidates.append(root / name)
+    return candidates[0] if candidates else None
+
+
+def _find_report(crash_dir: Path) -> Path | None:
+    return exact_child_file(crash_dir, ("REPORT.md", "report.md"))
+
+
+def _extract_top_frames(asan_text: str, want: int = 5) -> list[tuple[str, str]]:
+    """Return up to N (func, path) pairs starting from the first ASan report.
+
+    Frames whose function/path/raw text matches ClusterFuzz's stack-frame
+    ignore regexes are skipped. Runtime / interceptor / libc frames are
+    present in many crashes and contribute no signal to clustering.
+    """
+    return [(frame.function, frame.location) for frame in stack_frames.interesting_frames(asan_text, want=want)]
+
+
+def _frame_token(frame: tuple[str, str]) -> str:
+    func, loc = frame
+    if loc:
+        # Drop line/column numbers so minor source drift does not split a
+        # duplicate cluster. Keep filenames/modules because they disambiguate
+        # same-named helpers across subsystems.
+        loc = re.sub(r":\d+(?::\d+)?$", "", loc)
+        return f"{func}@{loc}"
+    return func
+
+
+def _frame_display(frame: tuple[str, str]) -> str:
+    func, loc = frame
+    return f"{func} {loc}" if loc else func
+
+
+def _frame_set_signature(frames: list[tuple[str, str]], want: int = 3) -> str:
+    tokens = sorted({_frame_token(frame) for frame in frames[:want] if frame[0]})
+    return "+".join(tokens)
+
+
+def _cf_filter_stack_frame(frame: stack_frames.StackFrame) -> str:
+    """Mirror ClusterFuzz stacktraces._filter_stack_frame for C/C++ frames."""
+    stack_frame = frame.function
+    for ns in (
+        "non-virtual thunk to ",
+        "(anonymous namespace)::",
+        "`anonymous namespace'::",
+    ):
+        stack_frame = stack_frame.replace(ns, "")
+    stack_frame = stack_frame.split("!")[-1]
+    m = re.match(r"(.*?)[\(\[].*", stack_frame)
+    if m and m.group(1):
+        return m.group(1).strip()
+    return stack_frame.strip().split(" ")[0]
+
+
+def _cf_normalize_state_line(line: str) -> str:
+    """Approximate ClusterFuzz filter_addresses_and_numbers for crash_state."""
+    line = "".join(ch for ch in line if ch in string.printable)
+    line = re.sub(r"0x[0-9a-fA-F]+", "0x{*}", line)
+    line = re.sub(r"\b\d+\b", "{*}", line)
+    return line[:256]
+
+
+def _cf_crash_state(asan_text: str) -> str:
+    lines = []
+    for frame in stack_frames.interesting_frames(asan_text, want=3):
+        filtered = _cf_filter_stack_frame(frame)
+        if filtered:
+            lines.append(_cf_normalize_state_line(filtered))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _normalise_report_location(value: str) -> str:
+    value = value.strip().strip("`")
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"^src/", "", value)
+    return value[:160]
+
+
+def _extract_summary_location(asan_text: str) -> str:
+    """Fallback location from the ASan SUMMARY line.
+
+    Only use source-shaped locations or non-runtime functions. macOS CLI
+    crashes often summarize as ``(binary+0x...) in main+0x...``; that is not
+    a useful root signature and is handled by report/stack-object fallbacks.
+    """
+    for m in SUMMARY_RE.finditer(asan_text):
+        loc = (m.group("loc") or "").strip()
+        func = (m.group("func") or "").strip()
+        if loc and re.search(r"\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|m|mm|rs|go|java|js|ts)(?::\d+)?$", loc):
+            return _normalise_report_location(f"{func} {loc}" if func else loc)
+        if func and not re.match(r"^(?:main|start)(?:\+|$)", func):
+            return _normalise_report_location(func)
+    return ""
+
+
+def _extract_report_location(report_text: str) -> str:
+    for m in REPORT_LOCATION_RE.finditer(report_text):
+        value = _normalise_report_location(m.group("value"))
+        if value:
+            return value
+    return ""
+
+
+def _extract_stack_object(asan_text: str) -> str:
+    m = STACK_OBJECT_RE.search(asan_text)
+    if not m:
+        return ""
+    return f"stack-object {m.group('object')} line {m.group('line')}"
+
+
+def _extract_report_object(report_text: str) -> str:
+    """Pick a stable buffer/object token from prose when ASan lacks source.
+
+    This intentionally prefers fixed-buffer/vector names that usually
+    describe the actual missing bound (`command[100]`, `arg[400]`,
+    `argv[20]`) over broad API names.
+    """
+    priority: list[str] = []
+    for m in REPORT_OBJECT_RE.finditer(report_text):
+        obj = m.group("object")
+        if re.search(r"\[[0-9]+\]$", obj):
+            priority.append(obj)
+    if priority:
+        return f"report-object {priority[0]}"
+    return ""
+
+
+def _fallback_crash_state(asan_text: str, report_text: str, crash_id: str) -> str:
+    """Build a non-empty dedup state when all ASan frames are runtime noise.
+
+    Priority is intentionally narrow and deterministic:
+      1. Report-authored concrete location (`Location:`, `Target:`, crash site).
+      2. ASan SUMMARY source/function.
+      3. Stack-object frame metadata (`'arg' (line 117) <== ...`).
+      4. Report fixed-buffer token.
+
+    If no signal exists, include the crash id so empty/pending reports never
+    share the same CL-* id across unrelated targets.
+    """
+    root = _extract_report_location(report_text) or _extract_summary_location(asan_text)
+    obj = _extract_stack_object(asan_text) or _extract_report_object(report_text)
+    if root and obj:
+        return f"fallback:{root} {obj}\n"
+    if root:
+        return f"fallback:{root}\n"
+    if obj:
+        return f"fallback:{obj}\n"
+    return f"pending:{crash_id}\n"
+
+
+def _levenshtein_distance(string_1: str, string_2: str) -> int:
+    if string_1 == string_2:
+        return 0
+    if not string_1:
+        return len(string_2)
+    if not string_2:
+        return len(string_1)
+    v0 = list(range(len(string_2) + 1))
+    v1 = [0] * (len(string_2) + 1)
+    for i, char_1 in enumerate(string_1):
+        v1[0] = i + 1
+        for j, char_2 in enumerate(string_2):
+            cost = 0 if char_1 == char_2 else 1
+            v1[j + 1] = min(v1[j] + 1, v0[j + 1] + 1, v0[j] + cost)
+        v0, v1 = v1, v0
+    return v0[len(string_2)]
+
+
+def _similarity_ratio(string_1: str, string_2: str) -> float:
+    length_sum = len(string_1) + len(string_2)
+    if length_sum == 0:
+        return 1.0
+    return (length_sum - _levenshtein_distance(string_1, string_2)) / (
+        1.0 * length_sum)
+
+
+def _longest_common_subsequence(first_frames: list[str],
+                                second_frames: list[str]) -> int:
+    first_len = len(first_frames)
+    second_len = len(second_frames)
+    solution = [[0 for _ in range(second_len + 1)]
+                for _ in range(first_len + 1)]
+    for i in range(1, first_len + 1):
+        for j in range(1, second_len + 1):
+            if first_frames[i - 1] == second_frames[j - 1]:
+                solution[i][j] = solution[i - 1][j - 1] + 1
+            else:
+                solution[i][j] = max(solution[i - 1][j], solution[i][j - 1])
+    return solution[first_len][second_len]
+
+
+def _cf_lcs_threshold() -> int:
+    """LCS threshold for clustering two cf_states. Default 2 matches
+    upstream ClusterFuzz behavior — same-root-function crashes reached
+    through different callers SHOULD cluster (that's the whole point of
+    crash_state dedup). Tunable via CLUSTER_LCS_THRESHOLD when a target
+    needs stricter or looser grouping."""
+    raw = os.environ.get("CLUSTER_LCS_THRESHOLD", "")
+    try:
+        value = int(raw) if raw else 2
+    except ValueError:
+        value = 2
+    return max(1, value)
+
+
+def _cf_fuzzy_enabled() -> bool:
+    """Per-line Levenshtein-similarity fuzzy match for cf_states.
+    Disabled by default — average ratio > 0.8 over only 3 frames is easy
+    to hit on sibling bugs that just share token shape, and silently
+    merged distinct bugs in prior runs. Opt back in with
+    CLUSTER_FUZZY_MATCH=1 if you have a corpus where it helps."""
+    return os.environ.get("CLUSTER_FUZZY_MATCH", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cf_fuzzy_threshold() -> float:
+    raw = os.environ.get("CLUSTER_FUZZY_THRESHOLD", "")
+    try:
+        value = float(raw) if raw else 0.9
+    except ValueError:
+        value = 0.9
+    return max(0.0, min(1.0, value))
+
+
+def _cf_is_similar(state_1: str, state_2: str) -> bool:
+    """ClusterFuzz CrashComparer.is_similar equivalent.
+
+    Stricter than upstream by default: LCS threshold is 3 (was 2) and the
+    fuzzy per-line similarity fallback is opt-in via CLUSTER_FUZZY_MATCH.
+    Both are tunable for users who want looser grouping.
+    """
+    if not state_1 or not state_2:
+        return False
+    if state_1 == state_2:
+        return True
+    if "FuzzerHash=" in state_1:
+        return False
+    lines_1 = state_1.splitlines()
+    lines_2 = state_2.splitlines()
+    if _longest_common_subsequence(lines_1, lines_2) >= _cf_lcs_threshold():
+        return True
+    if not _cf_fuzzy_enabled():
+        return False
+    lines_compared = 0
+    similarity_ratio_sum = 0.0
+    for i, line_1 in enumerate(lines_1):
+        if i >= len(lines_2):
+            break
+        similarity_ratio_sum += _similarity_ratio(line_1, lines_2[i])
+        lines_compared += 1
+    if not lines_compared:
+        return False
+    return similarity_ratio_sum / lines_compared > _cf_fuzzy_threshold()
+
+
+def _cf_state_display(state: str) -> str:
+    return " -> ".join(line for line in state.splitlines() if line)
+
+
+def _is_fallback_state(state: str) -> bool:
+    return state.startswith("fallback:") or state.startswith("pending:")
+
+
+def _ubsan_summary_primitive(asan_text: str) -> str:
+    """Extract the UBSan-specific primitive from the SUMMARY line.
+
+    UBSan emits e.g. `SUMMARY: UndefinedBehaviorSanitizer:
+    signed-integer-overflow file.c:123:45 in foo`. The sub-kind
+    (`signed-integer-overflow`, `shift-base`, `pointer-overflow`,
+    `object-size`, ...) is what distinguishes two unrelated UBSan bugs
+    from each other — collapsing them to `undefined-behavior` silently
+    merges distinct findings, which is what we want to avoid.
+    """
+    for m in SUMMARY_RE.finditer(asan_text):
+        prim = (m.group("primitive") or "").strip()
+        if not prim:
+            continue
+        # SUMMARY_RE matches all four sanitizers; only return when the
+        # SUMMARY header was a UBSan one. Cheap re-check by scanning
+        # the matched line.
+        line_start = asan_text.rfind("\n", 0, m.start()) + 1
+        line_end = asan_text.find("\n", m.start())
+        if line_end == -1:
+            line_end = len(asan_text)
+        header = asan_text[line_start:line_end]
+        if "UndefinedBehaviorSanitizer" not in header:
+            continue
+        # `undefined-behavior` is UBSan's catch-all SUMMARY label when no
+        # more-specific check fired (often emitted alongside a concrete
+        # `runtime error:` line). Fall through to the substring ladder
+        # in that case so we still get e.g. `ubsan-out-of-bounds` from
+        # the runtime-error text rather than collapsing everything to a
+        # generic `ubsan-undefined-behavior`.
+        if prim in {"undefined-behavior", "generic"}:
+            return ""
+        return f"ubsan-{prim}"
+    return ""
+
+
+def _extract_primitive(asan_text: str) -> str:
+    """Classify the sanitizer primitive for clustering.
+
+    Order matters. We prefer the most SPECIFIC signal available — a
+    precise ASan token (PRIMITIVE_RE) or a UBSan SUMMARY sub-kind beats
+    the broad substring ladder. The substring ladder is a final fallback
+    so we always return *some* label, but it MUST NOT short-circuit
+    above the precise matchers — doing so silently merges distinct bugs
+    (e.g. UBSan signed-overflow vs shift-out-of-bounds both becoming
+    `undefined-behavior` and clustering together).
+    """
+    # 1. Precise ASan primitive (heap-buffer-overflow + READ/WRITE size).
+    m = PRIMITIVE_RE.search(asan_text)
+    if m:
+        prim = m.group(1)
+        rw = RW_RE.search(asan_text)
+        if rw:
+            return f"{prim}-{rw.group(1).upper()}"
+        return prim
+
+    # 2. UBSan SUMMARY-line primitive carries the specific sub-kind.
+    ubsan = _ubsan_summary_primitive(asan_text)
+    if ubsan:
+        return ubsan
+
+    # 3. Broad substring fallback for sanitizers we couldn't precisely
+    #    classify above. Keep these labels stable so existing CL-* IDs
+    #    aren't churned.
+    lower = asan_text.lower()
+    if "memorysanitizer" in lower:
+        return "use-of-uninitialized-value"
+    if "threadsanitizer" in lower or re.search(r"^warning: data race$", lower, re.MULTILINE):
+        return "data-race"
+    if "undefinedbehaviorsanitizer" in lower or re.search(r":[0-9]+:[0-9]+: runtime error:", asan_text):
+        if "out of bounds" in lower:
+            return "ubsan-out-of-bounds"
+        if "misaligned" in lower:
+            return "ubsan-alignment"
+        if "null pointer" in lower:
+            return "ubsan-null"
+        if "object-size" in lower:
+            return "ubsan-object-size"
+        if "vptr" in lower:
+            return "ubsan-vptr"
+        if "pointer overflow" in lower or "pointer-overflow" in lower:
+            return "ubsan-pointer-overflow"
+        return "undefined-behavior"
+    if "attempting double-free" in lower or "double-free" in lower:
+        return "double-free"
+    if "attempting free on address which was not malloc" in lower or "bad-free" in lower:
+        return "bad-free"
+    return "unclassified"
+
+
+# The auto-Severity line bin/reachability injects looks like:
+#
+#   - **Severity**: Medium (auto: primitive=heap READ of 1 byte(s) (+18);
+#     reachability=+15 [148 external callers found]; score=33)
+#
+# Two regexes because a single one with [^)]*? would stop at the first `)`
+# inside the auto-line (e.g. the `(+18)` token), which is BEFORE the
+# `score=` field — the bug that caused score to drop out of the cluster
+# table. We match the level first, then locate score=NN anywhere on the
+# rest of the line.
+_SEVERITY_LEVEL_RE = re.compile(
+    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low)",
+    re.MULTILINE,
+)
+_SEVERITY_SCORE_RE = re.compile(r"score=(\d+)")
+
+_SEVERITY_RANK = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
+
+
+def _extract_severity(report_text: str) -> tuple[str, int, int]:
+    """Return (level_str, rank_int, score_int) for the first **Severity**: line.
+    Falls back to ('—', 0, 0) when no severity is recorded yet (e.g. before
+    bin/reachability has run on the report). Rank is the sort key — higher is
+    more severe, so Critical=4 > High=3 > Medium=2 > Low=1."""
+    m = _SEVERITY_LEVEL_RE.search(report_text)
+    if not m:
+        return "—", 0, 0
+    level = m.group("level")
+    line_end = report_text.find("\n", m.end())
+    if line_end == -1:
+        line_end = len(report_text)
+    line_tail = report_text[m.end():line_end]
+    score_m = _SEVERITY_SCORE_RE.search(line_tail)
+    score = int(score_m.group(1)) if score_m else 0
+    return level, _SEVERITY_RANK.get(level, 0), score
+
+
+_STRATEGY_BARE_RE = re.compile(
+    r"^Strategy:\s*(?P<val>.+?)\s*$", re.MULTILINE | re.IGNORECASE,
+)
+_STRATEGY_TABLE_RE = re.compile(
+    r"^\|\s*Strategy\s*\|\s*(?P<val>.+?)\s*\|\s*$", re.MULTILINE | re.IGNORECASE,
+)
+_STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-8]|REF)\b", re.IGNORECASE)
+
+
+def _extract_strategy(report_text: str) -> str:
+    """Return the canonical S1..S8 / REF token recorded in REPORT.md, or "".
+
+    Both the bare-label line (`Strategy: S2`) and the Fields-table cell
+    (`| Strategy | S2 |`) are accepted, in that order. Anything else —
+    including free-form labels — is collapsed to the first S<N>/REF token
+    found in the value so the cluster column stays terse."""
+    for rx in (_STRATEGY_BARE_RE, _STRATEGY_TABLE_RE):
+        m = rx.search(report_text)
+        if not m:
+            continue
+        val = m.group("val").strip()
+        if not val or val in {"—", "-", "TBD", "?"}:
+            continue
+        tok = _STRATEGY_TOKEN_RE.search(val)
+        return tok.group(1).upper() if tok else val
+    return ""
+
+
+def _extract_external_callers(crash_dir: Path) -> int:
+    reach_path = crash_dir / "reachability.json"
+    if not reach_path.is_file():
+        return 0
+    try:
+        data = json.loads(_read_text(reach_path))
+        return int(data.get("external_callers", 0) or 0)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return 0
+
+
+def _signature(crash_dir: Path) -> dict:
+    asan = _find_asan(crash_dir)
+    asan_text = _read_text(asan) if asan else ""
+    report = _find_report(crash_dir)
+    report_text = _read_text(report) if report else ""
+
+    frames = _extract_top_frames(asan_text)
+    top_func = frames[0][0] if frames else ""
+    top_chain = " -> ".join(_frame_display(frame) for frame in frames[:3])
+    top_frame_set = _frame_set_signature(frames, want=3)
+    cf_state = _cf_crash_state(asan_text)
+    if not cf_state:
+        cf_state = _fallback_crash_state(asan_text, report_text, crash_dir.name)
+    primitive = _extract_primitive(asan_text)
+    sev_level, sev_rank, sev_score = _extract_severity(report_text)
+    status = "OK"
+    pending = crash_dir / ".promotion_pending"
+    if pending.is_file():
+        missing = [line.strip() for line in _read_text(pending).splitlines() if line.strip()]
+        status = "PENDING"
+        if missing:
+            status = f"PENDING (missing: {','.join(missing)})"
+
+    return {
+        "id": crash_dir.name,
+        "path": str(crash_dir),
+        "report": str(report) if report else "",
+        "top_func": top_func,
+        "top_chain": top_chain,
+        "top_frame_set": top_frame_set,
+        "cf_state": cf_state,
+        "primitive": primitive,
+        "severity_level": sev_level,
+        "severity_rank": sev_rank,
+        "severity_score": sev_score,
+        "external_callers": _extract_external_callers(crash_dir),
+        "strategy": _extract_strategy(report_text),
+        "status": status,
+    }
+
+
+def _cluster_id(key: tuple[str, str, str]) -> str:
+    """Deterministic short id. Format: CL-<8 hex chars of sha1(key)>."""
+    h = hashlib.sha1("|".join(key).encode("utf-8")).hexdigest()[:8]
+    return f"CL-{h}"
+
+
+def _same_cf_cluster(a: dict, b: dict) -> bool:
+    state_a = a.get("cf_state", "")
+    state_b = b.get("cf_state", "")
+    # Fallback states are synthetic source/object keys created only when the
+    # real stack collapsed to runtime frames. ClusterFuzz's fuzzy line
+    # similarity is appropriate for function stacks, but it over-merges
+    # adjacent source lines such as usershell:138 vs usershell:155.
+    if _is_fallback_state(state_a) or _is_fallback_state(state_b):
+        return (
+            _cf_is_similar(a.get("primitive", ""), b.get("primitive", ""))
+            and state_a == state_b
+        )
+    return (
+        _cf_is_similar(a.get("primitive", ""), b.get("primitive", ""))
+        and _cf_is_similar(state_a, state_b)
+    )
+
+
+def _clusters_from_sigs(sigs: list[dict]) -> list[dict]:
+    groups: list[list[dict]] = []
+    representatives: list[dict] = []
+    for sig in sigs:
+        for idx, rep in enumerate(representatives):
+            if _same_cf_cluster(sig, rep):
+                groups[idx].append(sig)
+                break
+        else:
+            representatives.append(sig)
+            groups.append([sig])
+
+    clusters: list[dict] = []
+    for rep, members in zip(representatives, groups):
+        key = (rep["primitive"], "", rep.get("cf_state", ""))
+        cid = _cluster_id(key)
+        for m in members:
+            m["cluster"] = cid
+        max_member = max(members, key=lambda mm: (mm["severity_rank"], mm["severity_score"]))
+        max_callers = max((int(m.get("external_callers", 0) or 0) for m in members), default=0)
+        statuses = sorted({m.get("status", "OK") for m in members})
+        status = statuses[0] if len(statuses) == 1 else "; ".join(statuses)
+        strategies = sorted({m.get("strategy", "") for m in members if m.get("strategy")})
+        strategy_cell = ", ".join(strategies)
+        clusters.append({
+            "id": cid,
+            "primitive": rep["primitive"],
+            "boundary": "",
+            "signature": (
+                rep.get("top_chain")
+                or _cf_state_display(rep.get("cf_state", ""))
+                or "NULL"
+            ),
+            "members": [m.get("display_id", m["id"]) for m in members],
+            "size": len(members),
+            "severity_level": max_member["severity_level"],
+            "severity_rank": max_member["severity_rank"],
+            "severity_score": max_member["severity_score"],
+            "external_callers": max_callers,
+            "strategy": strategy_cell,
+            "status": status,
+            "_full": members,
+        })
+
+    clusters.sort(key=lambda c: (
+        -c["severity_rank"],
+        -c["severity_score"],
+        -c["size"],
+        c["id"],
+    ))
+    return clusters
+
+
+def cluster_crashes(crashes_root: Path) -> list[dict]:
+    sigs: list[dict] = []
+    if not crashes_root.is_dir():
+        return sigs
+    for d in sorted(crashes_root.iterdir()):
+        if not d.is_dir() or not d.name.startswith("CRASH-"):
+            continue
+        sig = _signature(d)
+        sigs.append(sig)
+    return _clusters_from_sigs(sigs)
+
+
+# ─── Output: CRASH-CLUSTERS.md + Cluster: line in each REPORT.md ───────────
+
+
+CLUSTER_LINE_RE = re.compile(r"^(Cluster:\s*).*$", re.MULTILINE)
+CLUSTER_TABLE_ROW_RE = re.compile(r"^(\|\s*Cluster\s*\|).*", re.MULTILINE)
+DEDUP_FRAMES_LINE_RE = re.compile(
+    r"^((?:Dedup frames|ClusterFuzz key frames):\s*).*$",
+    re.MULTILINE,
+)
+DEDUP_FRAMES_TABLE_ROW_RE = re.compile(
+    r"^(\|\s*(?:Dedup frames|ClusterFuzz key frames)\s*\|).*",
+    re.MULTILINE,
+)
+
+
+def _insert_after_first_match(text: str, pattern: re.Pattern, addition: str) -> str:
+    match = pattern.search(text)
+    if not match:
+        return text
+    return text[: match.end()] + addition + text[match.end():]
+
+
+def _set_cluster_line(report_text: str, cluster_id: str, members: list[str],
+                      own_id: str, key_frames: str = "") -> str:
+    """Idempotently write the Cluster: bare-label line and the |Cluster| table
+    cell. Other crashes in the cluster are listed (if any) so a reader can
+    follow the cross-references without leaving the report. Also exposes the
+    exact top-three interesting frame chain used by fallback deduplication.
+    """
+    siblings = [m for m in members if m != own_id]
+    if siblings:
+        if len(siblings) <= 4:
+            sib_str = ", ".join(siblings)
+        else:
+            sib_str = ", ".join(siblings[:4]) + f", +{len(siblings) - 4} more"
+        cell = f"{cluster_id} ({len(members)} reports: {sib_str})"
+    else:
+        cell = f"{cluster_id} (singleton)"
+
+    text = report_text
+    if CLUSTER_LINE_RE.search(text):
+        text = CLUSTER_LINE_RE.sub(f"\\1{cell}", text, count=1)
+    else:
+        # Insert after Surface: / Trigger source: / first paragraph break.
+        m = re.search(r"^Trigger source:.*$", text, re.MULTILINE)
+        if m:
+            text = text[: m.end()] + f"\nCluster: {cell}" + text[m.end():]
+        else:
+            text = f"Cluster: {cell}\n" + text
+
+    if CLUSTER_TABLE_ROW_RE.search(text):
+        text = CLUSTER_TABLE_ROW_RE.sub(
+            lambda mm: f"{mm.group(1)} {cell} |", text, count=1,
+        )
+
+    if key_frames:
+        key_line = f"Dedup frames: {key_frames}"
+        if DEDUP_FRAMES_LINE_RE.search(text):
+            text = DEDUP_FRAMES_LINE_RE.sub(
+                f"Dedup frames: {key_frames}", text, count=1,
+            )
+        elif CLUSTER_LINE_RE.search(text):
+            text = _insert_after_first_match(text, CLUSTER_LINE_RE, f"\n{key_line}")
+        else:
+            text = f"{key_line}\n" + text
+
+        if DEDUP_FRAMES_TABLE_ROW_RE.search(text):
+            text = DEDUP_FRAMES_TABLE_ROW_RE.sub(
+                f"| Dedup frames | {key_frames} |", text, count=1,
+            )
+        elif CLUSTER_TABLE_ROW_RE.search(text):
+            text = _insert_after_first_match(
+                text,
+                CLUSTER_TABLE_ROW_RE,
+                f"\n| Dedup frames | {key_frames} |",
+            )
+    return text
+
+
+def _resolve_report_basename(crash_dir: Path) -> str:
+    """Return the basename of the report inside crash_dir (REPORT.md or
+    report.md) so we can emit a working hyperlink. Falls back to REPORT.md
+    if neither exists yet — that's the shape new reports will take."""
+    report = _find_report(crash_dir)
+    if report is not None:
+        return report.name
+    return "REPORT.md"
+
+
+def _member_link(crashes_root: Path, member_id: str, link_prefix: str = "") -> str:
+    """`[CRASH-XXX](<prefix>CRASH-XXX/REPORT.md)` — link points from the
+    file we are about to write back to the crash dir. link_prefix is empty
+    when CRASH-CLUSTERS.md lives inside crashes/ and is
+    "<agent>/results/crashes/" when CRASH-CLUSTERS.md is at the target root."""
+    name = _resolve_report_basename(crashes_root / member_id)
+    return f"[{member_id}]({link_prefix}{member_id}/{name})"
+
+
+def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
+    lines = ["# Crash Clusters", ""]
+    lines.append(
+        f"_Auto-generated by bin/cluster-crashes from `{crashes_root.name}/`. "
+        f"Sorted by severity (max member severity), then cluster size._  "
+        f"Each row is a unique fix; the **Members** column links to every "
+        f"CRASH-* report reachable through the same root cause."
+    )
+    lines.append("")
+    n_crashes = sum(c["size"] for c in clusters)
+    n_unique = len(clusters)
+    lines.append(
+        f"**{n_crashes} CRASH dir(s) → {n_unique} unique cluster(s).**"
+    )
+    if n_crashes and n_unique:
+        lines.append(f"Dedup ratio: {n_crashes / max(n_unique, 1):.2f}x.")
+    lines.append("")
+    # Severity is the leftmost data column so the highest-priority bugs
+    # are visually first. Numeric Size right-aligned; everything else left.
+    lines.append("| Severity | Callers | Cluster | Size | Primitive | Strategy | Boundary | Root signature | Members | Status |")
+    lines.append("|:---------|--------:|:--------|-----:|:----------|:---------|:---------|:---------------|:--------|:-------|")
+    for c in clusters:
+        # CRASH-CLUSTERS.md lives inside crashes/, so member links are
+        # relative to that directory.
+        link_prefix = ""
+        members = ", ".join(_member_link(crashes_root, m, link_prefix) for m in c["members"])
+        boundary = (c["boundary"] or "—")[:60]
+        primitive = c["primitive"] or "—"
+        signature = c["signature"] or "—"
+        strategy = c.get("strategy", "") or "—"
+        sev = c.get("severity_level", "—") or "—"
+        sev_score = c.get("severity_score", 0)
+        sev_cell = f"{sev} ({sev_score})" if sev_score else sev
+        lines.append(
+            f"| {sev_cell} | {c.get('external_callers', 0)} | `{c['id']}` | {c['size']} | "
+            f"{primitive} | "
+            f"{strategy} | "
+            f"{boundary} | "
+            f"`{signature}` | "
+            f"{members} | "
+            f"{c.get('status', 'OK')} |"
+        )
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def update_reports(clusters: list[dict], dry_run: bool = False) -> int:
+    n = 0
+    for c in clusters:
+        for member in c["_full"]:
+            report_path = Path(member["report"]) if member.get("report") else None
+            if report_path is None or not report_path.is_file():
+                continue
+            text = _read_text(report_path)
+            new_text = _set_cluster_line(
+                text, c["id"], c["members"], member["id"],
+                member.get("top_chain", ""),
+            )
+            if new_text != text:
+                if not dry_run:
+                    _atomic_write_text(report_path, new_text)
+                n += 1
+    return n
+
+
+def _aggregate_target_root(target_root: Path, dry_run: bool, want_json: bool) -> int:
+    """Walk every <agent>/results/crashes/ under output/<slug>/, cluster
+    across all of them, and write output/<slug>/CRASH-CLUSTERS.md.
+
+    Each per-agent results dir still gets its own CRASH-CLUSTERS.md via the
+    in-tree path; this top-level file is the cross-agent summary the
+    user asked for at the project root. Concurrent backends serialize
+    through an advisory flock on <slug>/.cluster-lock — see
+    lib/cluster_common.run_under_aggregate_lock."""
+    return run_under_aggregate_lock(
+        target_root, ".cluster-lock", "cluster-crashes",
+        lambda: _aggregate_target_root_locked(target_root, dry_run, want_json),
+    )
+
+
+def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: bool) -> int:
+    all_sigs: list[dict] = []
+    per_agent: dict[str, Path] = {}
+    for agent_dir in sorted(target_root.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        crashes_root = agent_dir / "results" / "crashes"
+        if not crashes_root.is_dir():
+            continue
+        per_agent[agent_dir.name] = crashes_root
+        for d in sorted(crashes_root.iterdir()):
+            if not d.is_dir() or not d.name.startswith("CRASH-"):
+                continue
+            sig = _signature(d)
+            sig["agent"] = agent_dir.name
+            sig["display_id"] = f"{agent_dir.name}/{d.name}"
+            all_sigs.append(sig)
+
+    clusters = _clusters_from_sigs(all_sigs)
+
+    if want_json:
+        emitted = [{k: v for k, v in c.items() if k != "_full"} for c in clusters]
+        json.dump({"target_root": str(target_root), "clusters": emitted},
+                  sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+
+    out_md = target_root / "CRASH-CLUSTERS.md"
+    md_lines = [f"# Crash Clusters — {target_root.name}", ""]
+    md_lines.append(
+        f"_Auto-generated by bin/cluster-crashes from agent(s): "
+        f"{', '.join(per_agent.keys()) or '(none)'}. "
+        f"Sorted by severity (max member severity), then cluster size._  "
+        "Aggregated across every `<agent>/results/crashes/` directory; "
+        "**Members** links jump straight into each report."
+    )
+    md_lines.append("")
+    md_lines.append(
+        f"**{len(all_sigs)} CRASH dir(s) → {len(clusters)} unique cluster(s).**"
+    )
+    if all_sigs and clusters:
+        md_lines.append(f"Dedup ratio: {len(all_sigs) / max(len(clusters), 1):.2f}x.")
+    md_lines.append("")
+    md_lines.append("| Severity | Callers | Cluster | Size | Primitive | Strategy | Boundary | Root signature | Members | Status |")
+    md_lines.append("|:---------|--------:|:--------|-----:|:----------|:---------|:---------|:---------------|:--------|:-------|")
+    # Build a lookup from "<agent>/CRASH-XXX" → its report path, relative
+    # to target_root. The agent dir layout is <slug>/<agent>/results/crashes/
+    # so the relative link is "<agent>/results/crashes/CRASH-XXX/<report>".
+    for c in clusters:
+        link_cells: list[str] = []
+        for member in c["_full"]:
+            agent = member.get("agent", "")
+            cid = member["id"]
+            crashes_root = per_agent.get(agent)
+            if crashes_root is not None:
+                name = _resolve_report_basename(crashes_root / cid)
+                link_cells.append(f"[{agent}/{cid}]({agent}/results/crashes/{cid}/{name})")
+            else:
+                link_cells.append(f"{agent}/{cid}")
+        boundary = (c["boundary"] or "—")[:60]
+        primitive = c["primitive"] or "—"
+        signature = c["signature"] or "—"
+        strategy = c.get("strategy", "") or "—"
+        sev = c.get("severity_level", "—") or "—"
+        sev_score = c.get("severity_score", 0)
+        sev_cell = f"{sev} ({sev_score})" if sev_score else sev
+        md_lines.append(
+            f"| {sev_cell} | {c.get('external_callers', 0)} | `{c['id']}` | {c['size']} | "
+            f"{primitive} | "
+            f"{strategy} | "
+            f"{boundary} | "
+            f"`{signature}` | "
+            f"{', '.join(link_cells)} | "
+            f"{c.get('status', 'OK')} |"
+        )
+    md_lines.append("")
+    md = "\n".join(md_lines) + "\n"
+
+    if dry_run:
+        sys.stdout.write(md)
+        return 0
+
+    _atomic_write_text(out_md, md)
+    remove_legacy_cluster_files([target_root / "CLUSTERS.md"])
+    render_md_sibling(out_md)
+
+    # Per-agent CRASH-CLUSTERS.md and REPORT.md Cluster: lines are owned by the
+    # single-results-dir invocation each backend already runs from its own
+    # maintain_indexes (lib/triage.sh). Rewriting them here would race with
+    # those concurrent writers across backends; keep the target-root
+    # invocation strictly to <slug>/CRASH-CLUSTERS.md.
+
+    print(f"[cluster-crashes] {len(clusters)} cluster(s) over "
+          f"{len(all_sigs)} crash dir(s) across {len(per_agent)} agent(s)")
+    print(f"[cluster-crashes] wrote {out_md}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("results_dir", type=Path,
+                    help="Path containing crashes/CRASH-*/ subdirs (or the crashes/ dir itself)")
+    ap.add_argument("--dry-run", action="store_true", help="Don't write files; print plan")
+    ap.add_argument("--json", action="store_true", help="Emit cluster JSON to stdout")
+    args = ap.parse_args(argv)
+
+    # Three layouts we accept:
+    #   * <results>/                 -> <results>/crashes/CRASH-CLUSTERS.md
+    #   * <results>/crashes          -> <results>/crashes/CRASH-CLUSTERS.md
+    #   * output/<slug>/             -> aggregate every <agent>/results/crashes/
+    if (args.results_dir / "crashes").is_dir():
+        crashes_root = args.results_dir / "crashes"
+        out_md = crashes_root / "CRASH-CLUSTERS.md"
+    elif args.results_dir.name == "crashes":
+        crashes_root = args.results_dir
+        out_md = crashes_root / "CRASH-CLUSTERS.md"
+    elif args.results_dir.parent.name == "output":
+        # Target-root mode: walk every <slug>/<agent>/results/crashes/.
+        return _aggregate_target_root(args.results_dir, dry_run=args.dry_run, want_json=args.json)
+    else:
+        crashes_root = args.results_dir
+        out_md = args.results_dir / "CRASH-CLUSTERS.md"
+
+    clusters = cluster_crashes(crashes_root)
+
+    if args.json:
+        # Strip internal _full member objects before emitting.
+        emitted = [{k: v for k, v in c.items() if k != "_full"} for c in clusters]
+        json.dump({"crashes_root": str(crashes_root), "clusters": emitted},
+                  sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+
+    md = _format_clusters_md(clusters, crashes_root)
+    if args.dry_run:
+        sys.stdout.write(md)
+        return 0
+
+    _atomic_write_text(out_md, md)
+    legacy_paths: list[Path] = []
+    if out_md.parent.name == "crashes":
+        legacy_paths.extend([
+            out_md.parent.parent / "CLUSTERS.md",
+            out_md.parent.parent / "CRASH-CLUSTERS.md",
+        ])
+    remove_legacy_cluster_files(legacy_paths)
+    n_updated = update_reports(clusters, dry_run=False)
+
+    render_member_report_siblings(clusters)
+    render_md_sibling(out_md)
+
+    print(f"[cluster-crashes] {len(clusters)} cluster(s) over "
+          f"{sum(c['size'] for c in clusters)} crash dir(s)")
+    print(f"[cluster-crashes] wrote {out_md}")
+    print(f"[cluster-crashes] updated Cluster: line in {n_updated} report(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

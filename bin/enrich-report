@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""bin/enrich-report — augment a crash/finding report.md with snippets,
+inline patch.diff, TL;DR card, severity badge, and source links.
+
+Usage:
+  bin/enrich-report <path/to/report.md>
+  bin/enrich-report <path/to/CRASH-XXX/>
+  bin/enrich-report --slug <slug> <path/to/CRASH-XXX/>
+
+The shim resolves the target source root + upstream URL + pinned rev
+from the surrounding session-env / target.toml when possible, then
+delegates to lib.report_enrich. Safe to re-run — idempotency markers
+ensure no duplicate blocks.
+
+The harness invokes this automatically before rendering report.html,
+so manual use is only needed when iterating on a single report.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SCRIPT_ROOT = HERE.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+import target_config  # noqa: E402
+from report_enrich import EnrichContext, enrich_file  # noqa: E402
+
+
+_REPORT_CANDIDATES = ("report.md", "REPORT.md", "description.md")
+
+
+def _resolve_report_path(arg: Path) -> Path | None:
+    if arg.is_file():
+        return arg
+    if arg.is_dir():
+        for name in _REPORT_CANDIDATES:
+            cand = arg / name
+            if cand.is_file():
+                return cand
+    return None
+
+
+def _resolve_context(report_path: Path, slug: str | None,
+                     source_root: str | None,
+                     upstream_url: str | None,
+                     pinned_rev: str | None) -> EnrichContext:
+    """Best-effort: pull source_root / upstream / rev from session-env
+    and target.toml, allowing explicit CLI overrides."""
+    src_root: Path | None = Path(source_root).resolve() if source_root else None
+    up_url = upstream_url or ""
+    rev = pinned_rev or ""
+    sanitizer_text = ""
+
+    # Locate sanitizer.txt next to the report (or in .audit/) for
+    # ASan-frame mining when the report has no fenced excerpt.
+    for cand in (
+        report_path.parent / "sanitizer.txt",
+        report_path.parent / "asan.txt",
+        report_path.parent / ".audit" / "sanitizer.txt",
+        report_path.parent / ".audit" / "asan.txt",
+    ):
+        if cand.is_file():
+            try:
+                sanitizer_text = cand.read_text("utf-8", errors="replace")
+            except OSError:
+                pass
+            break
+
+    # Resolve via target.toml walk — only when caller didn't pin
+    # everything explicitly.
+    needs_target = src_root is None or not up_url or not rev
+    if needs_target:
+        try:
+            if slug:
+                slug_dir = SCRIPT_ROOT / "output" / slug
+                # Prefer the backend-local results/.session-env over the
+                # legacy output/<slug>/.session-env copy.
+                session_dir = target_config.find_slug_session_dir(slug_dir)
+                if session_dir is None:
+                    raise FileNotFoundError(
+                        f"no .session-env for slug: {slug}")
+                env = target_config.read_session_env(session_dir)
+                cfg = target_config.Config()
+                cfg.results_dir = env.get("RESULTS_DIR", "")
+                cfg.target_root = env.get("TARGET_ROOT", "")
+                cfg.slug = env.get("TARGET_SLUG", slug)
+                cfg.target_rev = env.get("TARGET_REV", "")
+                toml = slug_dir / "target.toml"
+                if toml.is_file():
+                    target_config.load_toml_into(cfg, toml)
+            else:
+                cfg = target_config.load(str(report_path))
+        except (FileNotFoundError, OSError):
+            cfg = None
+        if cfg is not None:
+            if src_root is None and cfg.target_root:
+                p = Path(cfg.target_root)
+                if p.is_dir():
+                    src_root = p
+            if not up_url and cfg.upstream_url:
+                up_url = cfg.upstream_url
+            if not rev:
+                rev = cfg.pinned_rev or cfg.target_rev or ""
+
+    return EnrichContext(
+        report_path=report_path,
+        report_dir=report_path.parent,
+        source_root=src_root,
+        upstream_url=up_url,
+        pinned_rev=rev,
+        sanitizer_text=sanitizer_text,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Inline patch.diff + source snippets + TL;DR into a report.md.",
+    )
+    ap.add_argument("path", type=Path,
+                    help="path to report.md OR the report directory")
+    ap.add_argument("--slug", default=None,
+                    help="Target slug under output/ (when CWD is unrelated)")
+    ap.add_argument("--source-root", default=None,
+                    help="Override the target source root used for snippets")
+    ap.add_argument("--upstream-url", default=None,
+                    help="Override upstream repo URL for source-link rewrites")
+    ap.add_argument("--pinned-rev", default=None,
+                    help="Override pinned revision for source-link rewrites")
+    ap.add_argument("--quiet", action="store_true",
+                    help="Suppress the 'changed/unchanged' line")
+    args = ap.parse_args(argv)
+
+    report = _resolve_report_path(args.path)
+    if report is None:
+        print(f"enrich-report: no report.md / REPORT.md / description.md "
+              f"under {args.path}", file=sys.stderr)
+        return 2
+
+    ctx = _resolve_context(
+        report_path=report,
+        slug=args.slug,
+        source_root=args.source_root,
+        upstream_url=args.upstream_url,
+        pinned_rev=args.pinned_rev,
+    )
+    changed = enrich_file(report, ctx)
+    if not args.quiet:
+        msg = "changed" if changed else "unchanged"
+        print(f"enrich-report: {report} ({msg})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

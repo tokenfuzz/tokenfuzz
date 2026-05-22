@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Output-capping wrapper used by lib/wrappers/grep and lib/wrappers/rg.
+# Caps stdout/stderr separately so a runaway match doesn't flood agent context
+# and diagnostics don't look like search results.
+# Pass-through flags exit early since their output is already bounded.
+#
+# Two caps fire independently:
+#   line cap   — CAP_LINES (default 200)     protects against many small matches
+#   byte cap   — CAP_BYTES (default 131072)  protects against few huge matches
+# A single match line in a JSON-shaped haystack (codex .log.raw transcripts)
+# can be hundreds of KB, defeating the line cap alone. The byte cap is a
+# hard ceiling regardless of line count. Default of 128 KiB is empirical:
+# the largest legitimate rg/grep output observed across ~5,500 production
+# calls was ~92 KiB; 128 KiB gives ~40% headroom while still trimming the
+# 1 MB+ self-scan pathology.
+#
+# Stub usage:
+#   exec "$_dir/_cap" "$_dir" <tool> "<flag>,<flag>,..." "$@"
+set -uo pipefail
+
+_wrapper_dir="$1"; shift
+_tool="$1"; shift
+_passthrough="$1"; shift
+
+_cap_lines="${CAP_LINES:-200}"
+_cap_bytes="${CAP_BYTES:-131072}"
+case "$_cap_lines" in
+  ''|*[!0-9]*) echo "${_tool}: CAP_LINES must be a non-negative integer" >&2; exit 2 ;;
+esac
+case "$_cap_bytes" in
+  ''|*[!0-9]*) echo "${_tool}: CAP_BYTES must be a non-negative integer" >&2; exit 2 ;;
+esac
+
+# Find the real binary, skipping our own wrapper directory in PATH so we
+# don't recurse into ourselves.
+_real=""
+IFS=: read -ra _dirs <<< "$PATH"
+for _d in "${_dirs[@]}"; do
+  [ "$_d" = "$_wrapper_dir" ] && continue
+  if [ -x "$_d/$_tool" ]; then _real="$_d/$_tool"; break; fi
+done
+[ -n "$_real" ] || { echo "${_tool}: real binary not found" >&2; exit 127; }
+
+# Pass-through for flags that produce bounded output already.
+# Tools with no such flags (e.g. sed) pass an empty list — skip the scan.
+#
+# The scan stops at the `--` end-of-options separator so a positional
+# argument that happens to equal a passthrough flag (e.g. a literal
+# pattern `-c` in `grep -- -c FILE`, or a filename `-l`) cannot falsely
+# trigger passthrough and bypass the line/byte caps.
+if [ -n "$_passthrough" ]; then
+  IFS=','
+  read -ra _flags <<< "$_passthrough"
+  unset IFS
+  for _arg in "$@"; do
+    [ "$_arg" = "--" ] && break
+    for _flag in "${_flags[@]}"; do
+      [ "$_arg" = "$_flag" ] && exec "$_real" "$@"
+    done
+  done
+fi
+
+# Clip a file in place to at most $_cap_bytes, falling back to the last
+# newline so we never emit a partial trailing line. No-op when cap=0 or
+# python3 is unavailable. Returns 0 if a clip happened, 1 otherwise.
+_clip_to_bytes() {
+  local _file="$1" _cap="$2" _bytes
+  [ "$_cap" -gt 0 ] || return 1
+  _bytes=$(wc -c < "$_file" | tr -d ' ')
+  _bytes=${_bytes:-0}
+  [ "$_bytes" -gt "$_cap" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$_file" "$_cap" <<'PY'
+import sys
+path, cap = sys.argv[1], int(sys.argv[2])
+with open(path, "rb") as f:
+    data = f.read(cap)
+i = data.rfind(b"\n")
+if i >= 0:
+    data = data[:i + 1]
+with open(path, "wb") as f:
+    f.write(data)
+PY
+  return 0
+}
+
+_emit_capped() {
+  local _file="$1"
+  local _stream="$2"
+  local _orig_lines _orig_bytes _line_capped=0 _byte_capped=0
+  _orig_lines=$(wc -l < "$_file" | tr -d ' ')
+  _orig_lines=${_orig_lines:-0}
+  _orig_bytes=$(wc -c < "$_file" | tr -d ' ')
+  _orig_bytes=${_orig_bytes:-0}
+
+  # 1) Line cap: rewrite file in place so the byte step sees the clipped form.
+  if [ "$_cap_lines" -gt 0 ] && [ "$_orig_lines" -gt "$_cap_lines" ]; then
+    local _clip_tmp; _clip_tmp=$(mktemp) || return 1
+    head -n "$_cap_lines" "$_file" > "$_clip_tmp"
+    mv "$_clip_tmp" "$_file"
+    _line_capped=1
+  fi
+
+  # 2) Byte cap on whatever survived.
+  _clip_to_bytes "$_file" "$_cap_bytes" && _byte_capped=1
+
+  if [ "$_stream" = "stderr" ]; then
+    cat "$_file" >&2
+    if [ "$_line_capped" -eq 1 ]; then
+      printf '... (%s total stderr lines — output truncated to %s. Narrow your search.)\n' \
+        "$_orig_lines" "$_cap_lines" >&2
+    fi
+    if [ "$_byte_capped" -eq 1 ]; then
+      printf '... (stderr clipped at %s bytes of %s. Narrow your search.)\n' \
+        "$_cap_bytes" "$_orig_bytes" >&2
+    fi
+  else
+    cat "$_file"
+    if [ "$_line_capped" -eq 1 ]; then
+      printf '... (%s total stdout lines — output truncated to %s. Narrow your search.)\n' \
+        "$_orig_lines" "$_cap_lines"
+    fi
+    if [ "$_byte_capped" -eq 1 ]; then
+      printf '... (stdout clipped at %s bytes of %s. Narrow your search.)\n' \
+        "$_cap_bytes" "$_orig_bytes"
+    fi
+  fi
+}
+
+# Capture stdout and stderr separately, cap each stream, and preserve the
+# stream they are emitted on. This avoids mixing diagnostics into matches.
+_out_tmp=$(mktemp) || exit 1
+_err_tmp=$(mktemp) || { rm -f "$_out_tmp"; exit 1; }
+trap 'rm -f "$_out_tmp" "$_err_tmp"' EXIT
+"$_real" "$@" > "$_out_tmp" 2> "$_err_tmp"
+_rc=$?
+_emit_capped "$_out_tmp" stdout
+_emit_capped "$_err_tmp" stderr
+exit "$_rc"

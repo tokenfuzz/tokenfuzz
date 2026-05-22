@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""probe-history — read-only digest of state/runs.jsonl for one testcase.
+
+Answers: "What has bin/probe already recorded for this testcase, in this or
+peer agent sessions?"
+
+Key point: this NEVER short-circuits a run. It surfaces evidence so an agent
+doesn't reflexively re-probe when a confirmed verdict already exists, but the
+agent always retains the choice to re-run for fresh evidence via:
+    bin/probe --confirm <testcase>
+
+Lookup keys:
+  - PATH      — match by the testcase path recorded in runs.jsonl
+                (relative paths are matched against $RESULTS_DIR-rooted paths).
+  - SHA1      — match by the content sha1 of the testcase at run time.
+                bin/probe writes this since the schema bump that added the
+                testcase_sha1 field; older records won't have it and are
+                excluded from sha1-only lookups.
+
+Usage:
+  bin/probe-history TESTCASE                   # path AND content-sha1 lookup
+  bin/probe-history --sha1 HEX                 # content sha1 only
+  bin/probe-history --hypothesis-id H-xxx      # all runs under a hypothesis
+  bin/probe-history --card-id PATCH-xxx        # all runs under a card
+  bin/probe-history --all                      # all runs in this session
+
+Filters:
+  --agent N            restrict to one agent number (string match)
+  --verdict REGEX      restrict to verdicts matching the regex
+  --limit N            cap displayed history rows (default 20; 0 = no cap)
+
+Output:
+  --format pretty      labeled, human-readable (default)
+  --format tsv         one TSV row per run (created_at, agent, mode, verdict,
+                       asan_runs, hypothesis_id, card_id, testcase)
+  --format json        one JSON object per line
+
+Exit codes:
+  0 — at least one matching run found
+  1 — no history matched the query
+  2 — usage / config error
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from workqueue import read_jsonl, state_dir  # noqa: E402
+
+PRETTY_OUTPUT_BYTE_CAP = 8 * 1024
+
+
+def _resolve_results_dir(explicit: str | None) -> Path:
+    """RESULTS_DIR comes from CLI flag, env, or fails fast."""
+    raw = explicit or os.environ.get("RESULTS_DIR", "")
+    if not raw:
+        sys.stderr.write(
+            "[probe-history] RESULTS_DIR not set (run inside an audit session, "
+            "or pass --results-dir)\n"
+        )
+        sys.exit(2)
+    p = Path(raw).expanduser().resolve()
+    if not p.is_dir():
+        sys.stderr.write(f"[probe-history] RESULTS_DIR not a directory: {p}\n")
+        sys.exit(2)
+    return p
+
+
+def _sha1_of_file(path: Path) -> str | None:
+    """SHA1 of file contents, or None on read error / missing file."""
+    try:
+        h = hashlib.sha1()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _path_matches(stored: str, target_paths: list[str]) -> bool:
+    """A run's stored testcase path matches if it equals any candidate.
+
+    runs.jsonl typically stores paths as written by bin/probe — which may be
+    absolute, RESULTS_DIR-relative, or even an `output/<slug>/...` form from
+    the host's CWD. We compare both literal equality and basename equality so
+    a probed file matches its history whether queried with `cd` or `./`.
+    """
+    stored_norm = stored.replace("\\", "/")
+    stored_base = stored_norm.rsplit("/", 1)[-1]
+    for candidate in target_paths:
+        if not candidate:
+            continue
+        cand_norm = candidate.replace("\\", "/")
+        cand_base = cand_norm.rsplit("/", 1)[-1]
+        if stored_norm == cand_norm:
+            return True
+        # Treat suffix-match conservatively: only when the stored path ends
+        # at a path component boundary with the candidate, so "foo-1.bin"
+        # doesn't match "altsvc-foo-1.bin". The basename-equality branch
+        # catches the common rename case ("./tc.bin" vs "scratch-1/tc.bin").
+        if stored_norm.endswith("/" + cand_norm) or cand_norm.endswith("/" + stored_norm):
+            return True
+        if stored_base and cand_base and stored_base == cand_base:
+            return True
+    return False
+
+
+def _matches_run(
+    run: dict,
+    *,
+    target_paths: list[str],
+    target_sha1: str | None,
+    hypothesis_id: str,
+    card_id: str,
+    agent: str,
+    verdict_re: re.Pattern | None,
+    all_runs: bool,
+) -> bool:
+    """Apply the user's filters to one run record. AND-semantics."""
+    if not all_runs and not hypothesis_id and not card_id and not (target_paths or target_sha1):
+        return False
+    if hypothesis_id and run.get("hypothesis_id", "") != hypothesis_id:
+        return False
+    if card_id and run.get("card_id", "") != card_id:
+        return False
+    if agent and str(run.get("agent", "")) != agent:
+        return False
+    if verdict_re and not verdict_re.search(run.get("verdict", "")):
+        return False
+    if target_sha1 or target_paths:
+        stored_sha = (run.get("testcase_sha1") or "").lower()
+        sha_hit = bool(target_sha1) and stored_sha == target_sha1
+        path_hit = bool(target_paths) and _path_matches(
+            run.get("testcase", ""), target_paths
+        )
+        if not (sha_hit or path_hit):
+            return False
+    return True
+
+
+def _confirm_marker(run: dict) -> str:
+    """Returns ' ← confirmed' when ASAN_RUNS >= 5 (matches bin/probe --confirm)."""
+    try:
+        runs_n = int(run.get("asan_runs") or 0)
+    except (TypeError, ValueError):
+        runs_n = 0
+    return " ← confirmed" if runs_n >= 5 else ""
+
+
+def _relativize(path: str, results_dir: Path) -> str:
+    """Strip RESULTS_DIR prefix for compact display; leave alone otherwise."""
+    if not path:
+        return ""
+    prefix = str(results_dir) + os.sep
+    if path.startswith(prefix):
+        return path[len(prefix):]
+    return path
+
+
+def _emit_pretty(
+    rows: list[dict],
+    *,
+    results_dir: Path,
+    target_path: str | None,
+    target_sha1: str | None,
+    on_disk_sha1: str | None,
+    on_disk_size: int | None,
+    limit: int,
+    filter_label: str,
+) -> None:
+    """Human-readable digest. Stays within PRETTY_OUTPUT_BYTE_CAP bytes."""
+    buf: list[str] = []
+
+    # Header — describe the lookup the agent issued.
+    if target_path:
+        rel = _relativize(target_path, results_dir)
+        buf.append(f"[testcase] {rel}")
+        sha_part = on_disk_sha1[:12] + "…" if on_disk_sha1 else "?"
+        size_part = f"{on_disk_size} B" if on_disk_size is not None else "?"
+        buf.append(f"  sha1={sha_part}  size={size_part}")
+    elif target_sha1:
+        buf.append(f"[testcase] sha1={target_sha1[:12]}…")
+    else:
+        buf.append(f"[query] {filter_label}")
+
+    if not rows:
+        buf.append("[history] no matching runs in state/runs.jsonl")
+        sys.stdout.write("\n".join(buf) + "\n")
+        return
+
+    rows_sorted = sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True)
+    agent_set = sorted({str(r.get("agent", "")) for r in rows_sorted if r.get("agent")})
+
+    last_verdict = rows_sorted[0].get("verdict", "?")
+    last_confirmed = _confirm_marker(rows_sorted[0]).strip()
+    last_tag = f"{last_verdict} ({last_confirmed.replace('← ', '')})" if last_confirmed else last_verdict
+
+    buf.append(
+        f"[history] {len(rows_sorted)} runs across {len(agent_set)} "
+        f"agent{'s' if len(agent_set) != 1 else ''} · last verdict {last_tag}"
+    )
+
+    # When the query is path-anchored, every row points at the same testcase
+    # so the path column is redundant. Otherwise (filter by hypothesis/card/
+    # all) the testcase varies per row and must be shown so the agent can
+    # see which path produced which verdict.
+    show_tc_column = not bool(target_path)
+
+    shown = rows_sorted if limit <= 0 else rows_sorted[:limit]
+    for run in shown:
+        ts = run.get("created_at", "")
+        ag = run.get("agent", "")
+        mode = run.get("mode", "")
+        verdict = run.get("verdict", "")
+        try:
+            runs_n = int(run.get("asan_runs") or 1)
+        except (TypeError, ValueError):
+            runs_n = 1
+        confirmed = _confirm_marker(run)
+        row = (
+            f"  {ts:<21} agent={ag:<3} {mode:<8} {verdict:<8} runs={runs_n}"
+            f"{confirmed}"
+        )
+        if show_tc_column:
+            tc = _relativize(run.get("testcase", ""), results_dir)
+            row = f"{row}  {tc}"
+        buf.append(row)
+    if limit > 0 and len(rows_sorted) > limit:
+        buf.append(f"  ... ({len(rows_sorted) - limit} more)")
+
+    counts: dict[str, int] = {}
+    for run in rows_sorted:
+        counts[run.get("verdict", "?")] = counts.get(run.get("verdict", "?"), 0) + 1
+    parts = [f"{n} {v}" for v, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    buf.append("[summary] " + " · ".join(parts))
+
+    # Footer — the safety-critical reminder. Always emit when there's history.
+    has_confirmed = any(_confirm_marker(r) for r in rows_sorted)
+    if has_confirmed:
+        buf.append(
+            "[note] history shows a confirmed verdict — re-run with "
+            "`bin/probe --confirm <testcase>` to refresh evidence if state has shifted."
+        )
+    else:
+        buf.append(
+            "[note] no --confirm run recorded yet — `bin/probe --confirm <testcase>` "
+            "to lock the verdict with 5 ASan runs."
+        )
+
+    output = "\n".join(buf) + "\n"
+    if len(output) > PRETTY_OUTPUT_BYTE_CAP:
+        clipped = output[:PRETTY_OUTPUT_BYTE_CAP]
+        # Preserve last full line.
+        nl = clipped.rfind("\n")
+        if nl > 0:
+            clipped = clipped[: nl + 1]
+        sys.stdout.write(clipped)
+        sys.stdout.write(
+            f"[probe-history] output clipped at {PRETTY_OUTPUT_BYTE_CAP} B — "
+            f"re-run with --limit N or --format tsv to narrow.\n"
+        )
+    else:
+        sys.stdout.write(output)
+
+
+def _emit_tsv(rows: list[dict], limit: int) -> None:
+    rows_sorted = sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True)
+    if limit > 0:
+        rows_sorted = rows_sorted[:limit]
+    sys.stdout.write(
+        "created_at\tagent\tmode\tverdict\tasan_runs\thypothesis_id\tcard_id\ttestcase\n"
+    )
+    for run in rows_sorted:
+        tc = (run.get("testcase") or "").replace("\t", " ").replace("\n", " ")
+        sys.stdout.write(
+            f"{run.get('created_at','')}\t{run.get('agent','')}\t"
+            f"{run.get('mode','')}\t{run.get('verdict','')}\t"
+            f"{run.get('asan_runs','')}\t{run.get('hypothesis_id','')}\t"
+            f"{run.get('card_id','')}\t{tc}\n"
+        )
+
+
+def _emit_json(rows: list[dict], limit: int) -> None:
+    rows_sorted = sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True)
+    if limit > 0:
+        rows_sorted = rows_sorted[:limit]
+    for run in rows_sorted:
+        sys.stdout.write(json.dumps(run, sort_keys=True) + "\n")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="probe-history",
+        description="Read-only digest of bin/probe runs for one testcase.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "testcase",
+        nargs="?",
+        help="Testcase path. History is matched by path AND, if the file "
+        "exists, by current content sha1.",
+    )
+    parser.add_argument("--sha1", default="", help="Content sha1 to look up (hex).")
+    parser.add_argument("--hypothesis-id", default="", help="Match runs under this hypothesis ID.")
+    parser.add_argument("--card-id", default="", help="Match runs under this work card ID.")
+    parser.add_argument("--all", action="store_true", help="Match all runs (no path/sha1 filter).")
+    parser.add_argument("--agent", default="", help="Restrict to one agent number.")
+    parser.add_argument("--verdict", default="", help="Regex filter on verdict.")
+    parser.add_argument("--limit", type=int, default=20, help="Cap output rows (0 = no cap).")
+    parser.add_argument(
+        "--format",
+        choices=("pretty", "tsv", "json"),
+        default="pretty",
+        help="Output shape (default: pretty).",
+    )
+    parser.add_argument(
+        "--results-dir",
+        default="",
+        help="Override $RESULTS_DIR (state/runs.jsonl is read from <dir>/state/).",
+    )
+
+    args = parser.parse_args(argv)
+
+    if not any([args.testcase, args.sha1, args.hypothesis_id, args.card_id, args.all]):
+        parser.print_usage(sys.stderr)
+        sys.stderr.write(
+            "[probe-history] supply TESTCASE, --sha1, --hypothesis-id, --card-id, or --all\n"
+        )
+        return 2
+
+    if args.sha1 and not re.fullmatch(r"[0-9a-fA-F]{6,64}", args.sha1):
+        sys.stderr.write("[probe-history] --sha1 must be a hex string (≥6 chars)\n")
+        return 2
+
+    if args.verdict:
+        try:
+            verdict_re = re.compile(args.verdict)
+        except re.error as e:
+            sys.stderr.write(f"[probe-history] invalid --verdict regex: {e}\n")
+            return 2
+    else:
+        verdict_re = None
+
+    results_dir = _resolve_results_dir(args.results_dir or None)
+
+    # Build target paths + target sha1.
+    target_paths: list[str] = []
+    target_sha1 = (args.sha1 or "").lower() or None
+    on_disk_sha1: str | None = None
+    on_disk_size: int | None = None
+    target_display: str | None = None
+    if args.testcase:
+        tc_input = Path(args.testcase)
+        target_paths.append(args.testcase)
+        if not tc_input.is_absolute():
+            target_paths.append(str((results_dir / args.testcase).resolve()))
+            target_paths.append(str((Path.cwd() / args.testcase).resolve()))
+        else:
+            target_paths.append(str(tc_input.resolve()))
+        # Strip RESULTS_DIR-relative form too so stored relative paths match.
+        resolved = Path(target_paths[-1])
+        try:
+            rel = resolved.relative_to(results_dir)
+            target_paths.append(str(rel))
+        except ValueError:
+            pass
+        # De-duplicate while preserving order.
+        seen: set[str] = set()
+        target_paths = [p for p in target_paths if not (p in seen or seen.add(p))]
+        target_display = target_paths[0] if target_paths else None
+        if resolved.is_file():
+            on_disk_sha1 = _sha1_of_file(resolved)
+            on_disk_size = _file_size(resolved)
+            if on_disk_sha1 and not target_sha1:
+                target_sha1 = on_disk_sha1
+
+    runs_path = state_dir(results_dir) / "runs.jsonl"
+    rows = read_jsonl(runs_path)
+
+    all_runs_mode = bool(args.all) and not (target_paths or target_sha1 or args.hypothesis_id or args.card_id)
+
+    matched = [
+        r for r in rows
+        if _matches_run(
+            r,
+            target_paths=target_paths,
+            target_sha1=target_sha1,
+            hypothesis_id=args.hypothesis_id,
+            card_id=args.card_id,
+            agent=args.agent,
+            verdict_re=verdict_re,
+            all_runs=all_runs_mode or bool(target_paths or target_sha1 or args.hypothesis_id or args.card_id),
+        )
+    ]
+
+    filter_label_parts = []
+    if args.hypothesis_id:
+        filter_label_parts.append(f"hypothesis_id={args.hypothesis_id}")
+    if args.card_id:
+        filter_label_parts.append(f"card_id={args.card_id}")
+    if args.agent:
+        filter_label_parts.append(f"agent={args.agent}")
+    if args.verdict:
+        filter_label_parts.append(f"verdict~/{args.verdict}/")
+    if args.all and not filter_label_parts:
+        filter_label_parts.append("all runs")
+    filter_label = ", ".join(filter_label_parts) or "all runs"
+
+    if args.format == "tsv":
+        _emit_tsv(matched, args.limit)
+    elif args.format == "json":
+        _emit_json(matched, args.limit)
+    else:
+        _emit_pretty(
+            matched,
+            results_dir=results_dir,
+            target_path=target_display,
+            target_sha1=target_sha1,
+            on_disk_sha1=on_disk_sha1,
+            on_disk_size=on_disk_size,
+            limit=args.limit,
+            filter_label=filter_label,
+        )
+
+    return 0 if matched else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

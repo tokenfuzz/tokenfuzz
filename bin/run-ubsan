@@ -1,0 +1,394 @@
+#!/bin/bash
+# UBSan wrapper script for Firefox security audit
+# Usage: ./run-ubsan.sh browser <testcase.html>
+#        ./run-ubsan.sh browser-minimal <testcase.html>
+#        ./run-ubsan.sh js <testcase.js>
+#        ./run-ubsan.sh js-diff <testcase.js>     (differential: --ion-eager vs --no-ion)
+#        ./run-ubsan.sh fuzz [fuzzer args...]       (browser-integrated targets: FUZZER=ImagePNG)
+#        ./run-ubsan.sh fuzz-repro <crash-file>     (repro a fuzz crash with halt_on_error=1)
+#        ./run-ubsan.sh fuzz-js [fuzzer args...]    (standalone JS targets: FUZZER=Wasm)
+#
+# Mode taxonomy:
+#   browser          Full Firefox/browser run for web-content testcases. Uses
+#                    the configured UBSan browser binary and a temp profile.
+#   browser-minimal  Same browser surface, reduced UBSan options for quick
+#                    smoke checks or noisy environments.
+#   js               Standalone JS shell (`dist/bin/js`) running a script.
+#                    This is normal JS-engine execution, not libFuzzer.
+#   js-diff          Differential JS execution. Runs configured flag pairs and
+#                    reports textual divergence; sanitizer output is not
+#                    required for this mode to be useful.
+#   generic          Target CLI or probe-built HARNESS executable. This is the
+#                    normal non-browser path used by bin/probe.
+#   fuzz             Browser-integrated libFuzzer target over a corpus. Uses
+#                    halt_on_error=0 so a fuzzing session can keep collecting.
+#   fuzz-repro       One existing fuzzer crash file, rerun with halt_on_error=1
+#                    for a clean single diagnostic.
+#   fuzz-js          Standalone SpiderMonkey fuzz-tests binary for JS engine
+#                    fuzzers such as Wasm/RegExp/StructuredClone. Different
+#                    harness ABI and artifact flow from `js`.
+#
+# Browser mode launches the instrumented binary directly in headless mode on
+# both macOS and Linux so sanitizer environment variables are inherited.
+#
+# Timeout: Set UBSAN_TIMEOUT env var to override browser/js/generic defaults.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$REPO_ROOT/lib/timeout.sh"
+# shellcheck source=../lib/platform.sh
+source "$REPO_ROOT/lib/platform.sh"
+# shellcheck source=../lib/target_config.sh
+source "$REPO_ROOT/lib/target_config.sh"
+# shellcheck source=../lib/sanitizer.sh
+source "$REPO_ROOT/lib/sanitizer.sh"
+# shellcheck source=../lib/sanitizer_run.sh
+source "$REPO_ROOT/lib/sanitizer_run.sh"
+
+_probe_path="${2:-$PWD}"
+target_load "$_probe_path" 2>/dev/null || true
+
+sanitizer_prepare_runtime_env ubsan
+sanitizer_warn_if_disabled ubsan
+
+TARGET_ROOT="${TARGET_ROOT:-${REPO_ROOT}/targets/firefox}"
+
+UBSAN_BUILD_DIR="$(sanitizer_build_dir ubsan)"
+
+_default_ubsan_browser() {
+    if [[ -n "${TARGET_UBSAN_BIN:-}" ]]; then
+        target_resolve_path "$TARGET_UBSAN_BIN"
+        return
+    fi
+    local darwin_bin="${UBSAN_BUILD_DIR}/dist/Nightly.app/Contents/MacOS/firefox"
+    local linux_bin="${UBSAN_BUILD_DIR}/dist/bin/firefox"
+    if audit_is_darwin; then
+        [ -x "$darwin_bin" ] && echo "$darwin_bin" || echo "$linux_bin"
+    else
+        [ -x "$linux_bin" ] && echo "$linux_bin" || echo "$darwin_bin"
+    fi
+}
+
+UBSAN_APP="${UBSAN_APP:-${UBSAN_BUILD_DIR}/dist/Nightly.app}"
+UBSAN_BROWSER="${UBSAN_BROWSER:-$(_default_ubsan_browser)}"
+UBSAN_JS="${UBSAN_JS:-${UBSAN_BUILD_DIR}/dist/bin/js}"
+
+BROWSER_TIMEOUT="${UBSAN_TIMEOUT:-15}"
+JS_TIMEOUT="${UBSAN_TIMEOUT:-10}"
+FUZZ_TIMEOUT="${UBSAN_TIMEOUT:-600}"
+FUZZ_REPRO_TIMEOUT="${UBSAN_FUZZ_REPRO_TIMEOUT:-20}"
+GENERIC_TIMEOUT="${UBSAN_TIMEOUT:-15}"
+
+# _validate_fuzzer_name + filter_browser_output live in lib/sanitizer.sh.
+
+# Per-mode option strings come from lib/sanitizer_options.conf via
+# sanitizer_options_for (lib/sanitizer.sh) — the single source of truth
+# shared with bin/export-repro. Do not re-hardcode option strings here.
+UBSAN_OPTS_FULL="$(sanitizer_options_for ubsan full)"
+UBSAN_OPTS_MINIMAL="$(sanitizer_options_for ubsan minimal)"
+UBSAN_OPTS_JS="$(sanitizer_options_for ubsan js)"
+UBSAN_OPTS_FUZZ="$(sanitizer_options_for ubsan fuzz)"
+UBSAN_OPTS_FUZZ_REPRO="$(sanitizer_options_for ubsan fuzz-repro)"
+
+# Append target.toml [sanitizer].ubsan_suppressions / ubsan_options. UBSan
+# benefits more than ASan from suppressions because the noisier checks
+# (pointer-overflow, alignment, unsigned-integer-overflow) generate FPs
+# the project may consider intentional — see docs/reference/target-toml.md.
+UBSAN_OPTS_FULL="$(sanitizer_compose_options ubsan "$UBSAN_OPTS_FULL")"
+UBSAN_OPTS_MINIMAL="$(sanitizer_compose_options ubsan "$UBSAN_OPTS_MINIMAL")"
+UBSAN_OPTS_JS="$(sanitizer_compose_options ubsan "$UBSAN_OPTS_JS")"
+UBSAN_OPTS_FUZZ="$(sanitizer_compose_options ubsan "$UBSAN_OPTS_FUZZ")"
+UBSAN_OPTS_FUZZ_REPRO="$(sanitizer_compose_options ubsan "$UBSAN_OPTS_FUZZ_REPRO")"
+
+make_temp_profile() {
+    local tmpdir
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/ubsan-profile-XXXXXXXX")"
+    mkdir -p "${tmpdir}"
+    cat > "${tmpdir}/user.js" <<'PREFS'
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("browser.aboutConfig.showWarning", false);
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("browser.warnOnQuit", false);
+user_pref("dom.ipc.processCount", 1);
+user_pref("dom.allow_scripts_to_close_windows", true);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("startup.homepage_welcome_url", "");
+user_pref("startup.homepage_welcome_url.additional", "");
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("browser.startup.page", 0);
+user_pref("devtools.console.stdout.content", true);
+PREFS
+    echo "$tmpdir"
+}
+
+cleanup() {
+    if [[ -n "${TEMP_PROFILE:-}" ]]; then
+        pkill -f "$TEMP_PROFILE" 2>/dev/null || true
+        sleep 1
+    fi
+    if [[ -n "${TEMP_PROFILE:-}" && -d "$TEMP_PROFILE" ]]; then
+        rm -rf "$TEMP_PROFILE" 2>/dev/null || true
+    fi
+}
+
+run_browser() {
+    local ubsan_opts="$1"; shift
+    local timeout_val="$1"; shift
+
+    # Resolve relative file paths to absolute file:// URLs.
+    local resolved_args=()
+    for arg in "$@"; do
+        if [[ "$arg" != -* && -f "$arg" ]]; then
+            resolved_args+=("file://$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")")
+        else
+            resolved_args+=("$arg")
+        fi
+    done
+    set -- ${resolved_args[@]+"${resolved_args[@]}"}
+
+    TEMP_PROFILE="$(make_temp_profile)"
+    trap cleanup EXIT
+
+    local output_dir
+    output_dir="$(mktemp -d "${TMPDIR:-/tmp}/ubsan-output-XXXXXXXX")"
+    local output_file="${output_dir}/browser-output.txt"
+
+    local ubsan_opts_with_log="${ubsan_opts}:log_path=${output_dir}/ubsan.log"
+
+    # Launch the browser directly in headless mode so the child inherits
+    # UBSAN_OPTIONS and the testcase file URL deterministically.
+    audit_timeout_run "$timeout_val" env \
+        UBSAN_OPTIONS="$ubsan_opts_with_log" \
+        MOZ_DISABLE_CONTENT_SANDBOX=1 \
+        MOZ_HEADLESS=1 \
+        "$UBSAN_BROWSER" --profile "$TEMP_PROFILE" --no-remote "$@" \
+        > "$output_file" 2>&1 \
+    || {
+        local rc=$?
+        if [ "$rc" -eq 124 ]; then
+            pkill -f "$TEMP_PROFILE" 2>/dev/null || true
+            sleep 1
+        fi
+    }
+
+    # Display browser output (includes console.log when devtools.console.stdout.content is true)
+    if [ -f "$output_file" ] && [ -s "$output_file" ]; then
+        filter_browser_output "$output_file"
+    fi
+
+    # Collect and display UBSan logs (written as separate log_path.PID files)
+    local found_issue=0
+    for f in "$output_dir"/ubsan.log.*; do
+        if [ -f "$f" ] && [ -s "$f" ]; then
+            echo "=== UBSan report: $(basename "$f") ==="
+            cat "$f"
+            found_issue=1
+        fi
+    done
+
+    # Check execution evidence from the captured output
+    if [ "$found_issue" -eq 1 ]; then
+        echo "[run-ubsan] UBSan issue detected" >&2
+        local persist_dir="${UBSAN_CRASH_LOG_DIR:-}"
+        if [ -n "$persist_dir" ] && [ -d "$persist_dir" ]; then
+            cp -f "$output_dir"/ubsan.log.* "$persist_dir/" 2>/dev/null || true
+            [ -f "$output_file" ] && cp -f "$output_file" "$persist_dir/browser-output.txt" 2>/dev/null || true
+            echo "[run-ubsan] Raw UBSan logs preserved in $persist_dir" >&2
+        fi
+    elif [ -f "$output_file" ] && grep -q "TESTCASE_EXECUTED" "$output_file" 2>/dev/null; then
+        echo "[run-ubsan] EXECUTION VERIFIED: testcase ran (no UBSan issue)" >&2
+    else
+        echo "[run-ubsan] WARNING: no UBSan issue and no execution evidence — testcase may not have run" >&2
+    fi
+
+    rm -rf "$output_dir"
+}
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 {browser|browser-minimal|js|js-diff|generic|fuzz|fuzz-repro|fuzz-js} [args...]"
+    exit 1
+fi
+
+MODE="$1"; shift
+
+case "$MODE" in
+    browser)
+        run_browser "$UBSAN_OPTS_FULL" "$BROWSER_TIMEOUT" "$@"
+        ;;
+    browser-minimal)
+        run_browser "$UBSAN_OPTS_MINIMAL" "$BROWSER_TIMEOUT" "$@"
+        ;;
+    js)
+        # Generic JS-shell dispatch is shared via lib/sanitizer_run.sh.
+        sanitizer_run_js ubsan "$UBSAN_OPTS_JS" "$JS_TIMEOUT" "$@" || exit $?
+        ;;
+    js-diff)
+        # Differential execution mode testing (Strategy S4).
+        # Per-engine JIT toggle flags from target.toml [s4_diff_pairs]; falls
+        # back to SpiderMonkey flags when section is absent.
+        if [[ $# -lt 1 ]]; then
+            echo "Usage: $0 js-diff <testcase.js> [extra args...]" >&2
+            exit 1
+        fi
+        testcase="$1"; shift
+
+        s4_jit_off=("${TARGET_S4_JIT_OFF[@]:-}")
+        s4_jit_eager=("${TARGET_S4_JIT_EAGER[@]:-}")
+        if [[ ${#TARGET_S4_JIT_OFF[@]} -eq 0 ]]; then
+            s4_jit_off=("--no-ion")
+        fi
+        if [[ ${#TARGET_S4_JIT_EAGER[@]} -eq 0 ]]; then
+            s4_jit_eager=("--ion-eager")
+        fi
+        eager_label="${s4_jit_eager[*]}"
+        off_label="${s4_jit_off[*]}"
+
+        eager_out="$(mktemp "${TMPDIR:-/tmp}/ubsan-jit-eager-XXXXXXXX")"
+        off_out="$(mktemp "${TMPDIR:-/tmp}/ubsan-jit-off-XXXXXXXX")"
+        _jsdiff_cleanup() { rm -f "$eager_out" "$off_out"; }
+        trap '_jsdiff_cleanup' EXIT
+
+        echo "=== Running with ${eager_label} (JIT eager) ===" >&2
+        audit_timeout_run "$JS_TIMEOUT" env \
+            UBSAN_OPTIONS="$UBSAN_OPTS_JS" \
+            "$UBSAN_JS" "${s4_jit_eager[@]}" "$testcase" "$@" > "$eager_out" 2>&1 || true
+
+        echo "=== Running with ${off_label} (JIT off) ===" >&2
+        audit_timeout_run "$JS_TIMEOUT" env \
+            UBSAN_OPTIONS="$UBSAN_OPTS_JS" \
+            "$UBSAN_JS" "${s4_jit_off[@]}" "$testcase" "$@" > "$off_out" 2>&1 || true
+
+        echo "=== ${eager_label} output ==="
+        cat "$eager_out"
+        echo ""
+        echo "=== ${off_label} output ==="
+        cat "$off_out"
+        echo ""
+
+        if diff -q "$eager_out" "$off_out" > /dev/null 2>&1; then
+            echo "[run-ubsan] DIFFERENTIAL: outputs MATCH (no divergence)" >&2
+        else
+            echo "[run-ubsan] DIFFERENTIAL: outputs DIFFER — potential JIT bug!" >&2
+            echo "=== Diff ===" >&2
+            diff -u "$off_out" "$eager_out" || true
+        fi
+
+        if grep -q "runtime error:" "$eager_out" 2>/dev/null; then
+            echo "[run-ubsan] UBSan issue in ${eager_label} mode" >&2
+        fi
+        if grep -q "runtime error:" "$off_out" 2>/dev/null; then
+            echo "[run-ubsan] UBSan issue in ${off_label} mode" >&2
+        fi
+
+        rm -f "$eager_out" "$off_out"
+        trap - EXIT
+        ;;
+    generic)
+        # Generic CLI binary mode for non-browser targets. Resolution and
+        # dispatch are shared with run-msan/run-tsan via lib/sanitizer_run.sh:
+        # UBSAN_GENERIC_BIN env var, else TARGET_UBSAN_BIN (target.toml
+        # [sanitizer].ubsan_bin), else fail.
+        rc=0
+        sanitizer_run_generic ubsan "$UBSAN_OPTS_FULL" "$GENERIC_TIMEOUT" "$@" || rc=$?
+        exit "$rc"
+        ;;
+    fuzz)
+        # Browser-integrated fuzz targets (image, media, DOM, networking, etc.)
+        # Requires FUZZER=<TargetName> env var to select the target.
+        # Runs the binary directly (not via 'open -a') so libfuzzer output is captured.
+        # The fuzzer runs during XRE_mainStartup before any UI, so no GUI is needed.
+        if [[ -z "${FUZZER:-}" ]]; then
+            echo "Error: FUZZER env var must be set. Example: FUZZER=ImagePNG $0 fuzz /tmp/corpus" >&2
+            echo "To list targets: FUZZER=list $0 fuzz" >&2
+            exit 1
+        fi
+        _validate_fuzzer_name || exit $?
+        # Strip -fork=N from args (fails on several fuzzers)
+        fuzz_args=()
+        for arg in "$@"; do
+            [[ "$arg" =~ ^-fork= ]] || fuzz_args+=("$arg")
+        done
+        audit_timeout_run "$FUZZ_TIMEOUT" env \
+            FUZZER="$FUZZER" \
+            MOZ_RUN_GTEST=1 \
+            MOZ_FUZZ=1 \
+            LIBFUZZER=1 \
+            MOZ_DISABLE_CONTENT_SANDBOX=1 \
+            UBSAN_OPTIONS="$UBSAN_OPTS_FUZZ" \
+            "$UBSAN_BROWSER" ${fuzz_args[@]+"${fuzz_args[@]}"} \
+        || {
+            rc=$?
+            if [ "$rc" -eq 124 ]; then
+                echo "[run-ubsan] Fuzz target timed out after ${FUZZ_TIMEOUT}s" >&2
+                pkill -f "build-ubsan.*firefox.*${FUZZER:-}" 2>/dev/null || true
+            fi
+        }
+        ;;
+    fuzz-repro)
+        # Reproduce a fuzz crash with halt_on_error=1 (unlike fuzz mode which continues).
+        # Usage: FUZZER=<TargetName> bin/run-ubsan fuzz-repro <crash-file>
+        # Timeout is 60s (longer than browser default) since some crashes need setup time.
+        if [[ -z "${FUZZER:-}" ]]; then
+            echo "Error: FUZZER env var must be set. Example: FUZZER=ImagePNG $0 fuzz-repro crash-file" >&2
+            exit 1
+        fi
+        _validate_fuzzer_name || exit $?
+        if [[ $# -lt 1 ]]; then
+            echo "Error: provide a crash file to reproduce. Example: $0 fuzz-repro firefox-results/fuzzers/fuzz-Foo/crash-abc123" >&2
+            exit 1
+        fi
+        audit_timeout_run "$FUZZ_REPRO_TIMEOUT" env \
+            FUZZER="$FUZZER" \
+            MOZ_RUN_GTEST=1 \
+            MOZ_FUZZ=1 \
+            LIBFUZZER=1 \
+            MOZ_DISABLE_CONTENT_SANDBOX=1 \
+            UBSAN_OPTIONS="$UBSAN_OPTS_FUZZ_REPRO" \
+            "$UBSAN_BROWSER" "$@" \
+        || {
+            rc=$?
+            if [ "$rc" -eq 124 ]; then
+                echo "[run-ubsan] Fuzz repro timed out after ${FUZZ_REPRO_TIMEOUT}s" >&2
+                pkill -f "build-ubsan.*firefox.*${FUZZER:-}" 2>/dev/null || true
+            fi
+        }
+        ;;
+    fuzz-js)
+        # Standalone SpiderMonkey fuzz targets (Wasm, RegExp, StructuredClone, etc.)
+        # Requires FUZZER=<TargetName> env var to select the target.
+        FUZZ_TESTS="${UBSAN_BUILD_DIR}/dist/bin/fuzz-tests"
+        if [[ ! -x "$FUZZ_TESTS" ]]; then
+            echo "Error: fuzz-tests binary not found at $FUZZ_TESTS. Run ff-bsan ubsan first." >&2
+            exit 1
+        fi
+        if [[ -z "${FUZZER:-}" ]]; then
+            echo "Error: FUZZER env var must be set. Example: FUZZER=Wasm $0 fuzz-js /tmp/corpus" >&2
+            echo "To list targets: FUZZER=list $0 fuzz-js" >&2
+            exit 1
+        fi
+        _validate_fuzzer_name || exit $?
+        # Strip -fork=N from args (fails on several fuzzers)
+        fuzz_args=()
+        for arg in "$@"; do
+            [[ "$arg" =~ ^-fork= ]] || fuzz_args+=("$arg")
+        done
+        audit_timeout_run "$FUZZ_TIMEOUT" env \
+            FUZZER="$FUZZER" \
+            UBSAN_OPTIONS="$UBSAN_OPTS_FUZZ" \
+            "$FUZZ_TESTS" ${fuzz_args[@]+"${fuzz_args[@]}"} \
+        || {
+            rc=$?
+            if [ "$rc" -eq 124 ]; then
+                echo "[run-ubsan] Fuzz target timed out after ${FUZZ_TIMEOUT}s" >&2
+            fi
+        }
+        ;;
+    *)
+        echo "Usage: $0 {browser|browser-minimal|js|js-diff|generic|fuzz|fuzz-repro|fuzz-js} [args...]"
+        exit 1
+        ;;
+esac

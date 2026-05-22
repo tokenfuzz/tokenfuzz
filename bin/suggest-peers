@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Suggest S6 peer projects for a target by asking the LLM.
+
+Usage:
+    bin/suggest-peers <slug>               # print TOML snippet
+    bin/suggest-peers <slug> --apply       # append to output/<slug>/target.toml
+    bin/suggest-peers <slug> --apply --force  # overwrite existing [s6_peers]
+    bin/suggest-peers <slug> --apply --force-config  # alias for --force
+
+Reads target.toml + the target's README and the S6 strategy doc taxonomy,
+then asks the LLM to pick 3-6 peer OSS projects that implement the same
+spec / format / algorithm. Prints a [s6_peers] TOML snippet that the
+operator can paste, or appends it to target.toml with --apply.
+
+`bin/audit --new-target` runs this helper automatically when an LLM backend
+is available. Existing targets can run it manually to add or refresh
+`[s6_peers]`.
+
+Failure modes:
+    - LLM unavailable / disabled → exit 2 with helpful message
+    - Target slug not found in output/ → exit 1
+    - target.toml missing → exit 1
+    - LLM response invalid → exit 3
+    - [s6_peers] already present + no --force/--force-config → exit 4
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+# SCRIPT_ROOT env wins over the file-based resolution so tests and chrooted
+# invocations can point the script at a sandbox without symlink reach-around.
+ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT") \
+    else Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+from llm_decide import llm_decide  # noqa: E402
+from prompt_render import render_template  # noqa: E402
+import target_config as tc  # noqa: E402
+
+S6_DOC = ROOT / ".agents" / "references" / "strategies" / "S6-cross-project.md"
+README_CANDIDATES = (
+    "README.md", "README.rst", "README.txt", "README", "Readme.md",
+    "README.markdown",
+)
+
+
+def read_readme_excerpt(target_root: Path, max_bytes: int = 2048) -> str:
+    """First max_bytes of the target's README, if present."""
+    for name in README_CANDIDATES:
+        p = target_root / name
+        if p.is_file():
+            try:
+                return p.read_text(encoding="utf-8", errors="replace")[:max_bytes]
+            except OSError:
+                continue
+    return ""
+
+
+def read_s6_taxonomy() -> str:
+    """The taxonomy table from the S6 strategy doc, for LLM context."""
+    if not S6_DOC.is_file():
+        return ""
+    try:
+        text = S6_DOC.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    # Extract from "## Peer-project taxonomy" up to the next "## " heading.
+    m = re.search(
+        r"##\s*Peer-project taxonomy.*?(?=\n##\s|\Z)",
+        text,
+        re.DOTALL,
+    )
+    return m.group(0) if m else text[:6000]
+
+
+def build_prompt(slug: str, upstream_url: str, readme: str, taxonomy: str) -> str:
+    return render_template("suggest_peers.md.j2", {
+        "slug": slug,
+        "upstream_url": upstream_url or "(unknown)",
+        "readme": readme.strip() or "(no README found)",
+        "taxonomy": taxonomy.strip()[:6000],
+    })
+
+
+def format_toml_snippet(domain: str, peers: list[str], reasoning: str) -> str:
+    rendered = ", ".join(tc.toml_basic_string(p) for p in peers)
+    reasoning_comment = tc.toml_comment_lines(
+        "Reasoning: " + (reasoning.strip() or "(none)")
+    )
+    return (
+        "# ── S6 cross-project peer mining (LLM-suggested) ─────────────\n"
+        f"{reasoning_comment}\n"
+        "# Review and edit before relying on these peers.\n"
+        "[s6_peers]\n"
+        f"domain = {tc.toml_basic_string(domain)}\n"
+        f"peers  = [{rendered}]\n"
+    )
+
+
+def has_live_s6_section(text: str) -> bool:
+    """True iff target.toml contains a non-commented [s6_peers] header."""
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        if stripped.startswith("[s6_peers]"):
+            return True
+    return False
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
+    parser.add_argument("slug", help="target slug (matches output/<slug>/)")
+    parser.add_argument("--apply", action="store_true",
+                        help="append the snippet to output/<slug>/target.toml")
+    parser.add_argument("--force", "--force-config", dest="force", action="store_true",
+                        help="overwrite an existing [s6_peers] section when --apply")
+    parser.add_argument("--timeout", type=int, default=30,
+                        help="LLM-call timeout seconds (default 30)")
+    args = parser.parse_args(argv)
+
+    output_dir = ROOT / "output" / args.slug
+    target_toml = output_dir / "target.toml"
+    if not target_toml.is_file():
+        print(f"[suggest-peers] target.toml not found: {target_toml}", file=sys.stderr)
+        print("[suggest-peers] run `bin/audit --new-target <slug>` first.",
+              file=sys.stderr)
+        return 1
+
+    targets_dir = ROOT / "targets" / args.slug
+    upstream_url = ""
+    try:
+        cfg = tc.Config()
+        tc.load_toml_into(cfg, target_toml)
+        upstream_url = cfg.upstream_url
+    except Exception as e:
+        print(f"[suggest-peers] warning: target.toml parse: {e}", file=sys.stderr)
+
+    readme_excerpt = read_readme_excerpt(targets_dir) if targets_dir.is_dir() else ""
+    taxonomy = read_s6_taxonomy()
+    prompt = build_prompt(args.slug, upstream_url, readme_excerpt, taxonomy)
+
+    result = llm_decide("s6-peer-suggest", "domain,peers", prompt, timeout=args.timeout)
+    if result is None:
+        print("[suggest-peers] LLM call failed or unavailable.", file=sys.stderr)
+        print("[suggest-peers] Ensure BACKEND (or ACTIVE_BACKEND) is set and "
+              "the backend binary is on PATH, or hand-edit [s6_peers] in target.toml using",
+              file=sys.stderr)
+        print(f"[suggest-peers]   {S6_DOC}", file=sys.stderr)
+        return 2
+
+    domain = str(result.get("domain", "")).strip()
+    peers = result.get("peers", [])
+    reasoning = str(result.get("reasoning", "")).strip() or "(no reasoning provided)"
+    if not isinstance(peers, list) or not peers:
+        print(f"[suggest-peers] invalid LLM response (peers): {result!r}",
+              file=sys.stderr)
+        return 3
+    peers = [p.strip() for p in peers if isinstance(p, str) and p.strip()]
+    peers = [p for p in peers if p.lower() != args.slug.lower()]  # exclude self
+    if len(peers) < 3 or len(peers) > 6:
+        print(f"[suggest-peers] warning: LLM suggested {len(peers)} peers "
+              f"(expected 3-6): {peers}", file=sys.stderr)
+        if not peers:
+            return 3
+
+    snippet = format_toml_snippet(domain, peers, reasoning)
+
+    if not args.apply:
+        sys.stdout.write(snippet)
+        return 0
+
+    current = target_toml.read_text(encoding="utf-8")
+    if has_live_s6_section(current):
+        if not args.force:
+            print(f"[suggest-peers] target.toml already has [s6_peers]; "
+                  f"pass --force (or --force-config) to overwrite",
+                  file=sys.stderr)
+            return 4
+        # Naive overwrite: strip the existing section before appending.
+        current = _strip_s6_section(current)
+
+    if not current.endswith("\n"):
+        current += "\n"
+    new_text = current + "\n" + snippet
+    # Round-trip the candidate file through the project's own TOML loader
+    # before replacing the original. A buggy / malicious LLM response that
+    # smuggled raw newlines or unbalanced quotes through the escaper would
+    # break parsing — and we would rather refuse the write than leave a
+    # corrupted target.toml on disk for the next audit run.
+    try:
+        _probe = tc.Config()
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".toml",
+            dir=str(target_toml.parent), delete=False,
+        ) as _tmp:
+            _tmp.write(new_text)
+            _tmp_path = Path(_tmp.name)
+        try:
+            tc.load_toml_into(_probe, _tmp_path)
+        finally:
+            _tmp_path.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"[suggest-peers] refusing to write: candidate target.toml "
+              f"failed re-parse ({e}); original left untouched.", file=sys.stderr)
+        return 3
+    target_toml.write_text(new_text, encoding="utf-8")
+    print(f"[suggest-peers] appended [s6_peers] to {target_toml}", file=sys.stderr)
+    return 0
+
+
+def _strip_s6_section(text: str) -> str:
+    """Remove an existing live [s6_peers] section (best-effort).
+
+    Strips from the header line up to (but not including) the next
+    `[section]` header or EOF. Preserves preceding comment lines and any
+    other content. Used only on --force path, so a small amount of leftover
+    comment text above the section is acceptable.
+    """
+    out = []
+    in_section = False
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if not in_section and stripped.startswith("[s6_peers]"):
+            in_section = True
+            continue
+        if in_section:
+            # Next [section] header ends the strip.
+            if stripped.startswith("[") and not stripped.startswith("[s6_peers]"):
+                in_section = False
+                out.append(line)
+            # Skip lines inside the section.
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

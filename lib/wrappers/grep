@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# grep wrapper: caps output via lib/wrappers/_cap and skips logs/ and .git/
+# in recursive mode for the same reason as the rg wrapper. --exclude-dir is
+# a no-op when grep isn't run with -r/-R, so always-on is safe for single-
+# file calls.
+_dir="$(cd "$(dirname "$0")" && pwd)"
+exec "$_dir/_cap" "$_dir" grep "-c,-l,-q,-L" \
+  --exclude-dir=logs --exclude-dir=.git "$@"

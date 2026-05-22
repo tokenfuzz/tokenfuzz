@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# tests/test_report_enrich.sh — exercise bin/enrich-report + lib/report_enrich
+# against synthetic crash/finding fixtures. Verifies:
+#   (a) patch.diff is inlined under "Candidate Fix"
+#   (b) Data Flow Trace bullets get source snippets injected per file:line
+#   (c) ASan-style frames in Expected sanitizer output get annotated stack snippets
+#   (d) Severity badge + Reviewer TL;DR card insert under the H1
+#   (e) Enrichment is idempotent — re-running replaces, not duplicates
+#   (f) Missing source tree degrades gracefully (no crash, no snippets)
+#   (g) Upstream URL + pinned rev produce a "View at <rev>" link
+#   (h) render-md strips standalone <!-- enrich:NAME --> comment markers
+
+set -o pipefail
+source "$(dirname "$0")/helpers.sh"
+setup_test_env
+
+ENRICH="$SCRIPT_ROOT/bin/enrich-report"
+RENDER="$SCRIPT_ROOT/bin/render-md"
+[ -x "$ENRICH" ] || { echo "missing $ENRICH"; exit 1; }
+[ -x "$RENDER" ] || { echo "missing $RENDER"; exit 1; }
+
+# ── Fixture: a target tree with one source file we'll reference ──────
+TARGET_SRC="$TEST_TMPDIR/src"
+mkdir -p "$TARGET_SRC/lib"
+cat > "$TARGET_SRC/lib/parser.c" <<'EOF'
+#include "parser.h"
+
+int parse_header(const char *buf, size_t len) {
+    if (len < 4) {
+        return -1;
+    }
+    /* BUG: read past buf when len == 0 reaches this branch */
+    size_t off = buf[len - 1];
+    return (int) off;
+}
+
+void emit(int v) {
+    printf("%d\n", v);
+}
+EOF
+
+# ── Fixture: a CRASH dir with report.md, patch.diff, sanitizer.txt ──
+CD="$RESULTS_DIR/crashes/CRASH-001-1"
+mkdir -p "$CD"
+
+cat > "$CD/report.md" <<'EOF'
+# CRASH-001-1: parse_header reads past buffer
+
+## Summary
+parse_header reads buf[len-1] without enforcing len > 0, producing a 1-byte
+heap read past the end of small inputs.
+
+## Classification
+- **Severity**: High (auto: I=24/46; R=6/31; ×CF=0.8; primitive=heap-read)
+- **Type**: Bounds Issue
+- **Location**: lib/parser.c:9
+- **Confidence**: High
+
+## Trigger Surface
+Surface: library
+Boundary: caller-supplied byte buffer to parse_header
+Caller controls: buf pointer and len
+Trusted caller actions: call parse_header(buf, len) with len matching buf size
+Caller contract: obeyed
+Trigger source: bytes
+
+## Reproduction
+- Reproducer: testcase.c
+- Command: ./reproduce.sh
+- Result: ASan reports heap-buffer-overflow on read of 1 byte
+
+## Expected sanitizer output
+
+```
+==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xdeadbeef
+READ of size 1 at 0xdeadbeef thread T0
+    #0 0x100000000 in parse_header lib/parser.c:9
+    #1 0x100000100 in emit lib/parser.c:14
+```
+
+## Data Flow Trace
+- entry: `caller` (lib/parser.c:3) — passes buf and len
+- step: `parse_header` (lib/parser.c:4) — checks len < 4 only
+- affected: `parse_header` (lib/parser.c:9) — reads buf[len-1]
+
+## Candidate Fix
+Validate len > 0 before subscripting. See sibling patch.diff for the exact change.
+EOF
+
+cat > "$CD/patch.diff" <<'EOF'
+diff --git a/lib/parser.c b/lib/parser.c
+--- a/lib/parser.c
++++ b/lib/parser.c
+@@ -1,5 +1,5 @@
+ int parse_header(const char *buf, size_t len) {
+-    if (len < 4) {
++    if (len == 0 || len < 4) {
+         return -1;
+     }
+EOF
+
+cat > "$CD/sanitizer.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: heap-buffer-overflow
+    #0 0x100000000 in parse_header lib/parser.c:9
+    #1 0x100000100 in emit lib/parser.c:14
+EOF
+
+# ── (a) patch.diff inlined under Candidate Fix ──────────────────────
+python3 "$ENRICH" --quiet --source-root "$TARGET_SRC" \
+                  --upstream-url "https://github.com/acme/widgets" \
+                  --pinned-rev "abcdef1234567890" \
+                  "$CD/report.md" \
+  || fail "enrich-report exited non-zero on baseline fixture"
+
+assert_file_contains "$CD/report.md" "enrich:candidate-fix-diff" "candidate-fix-diff marker present"
+assert_file_contains "$CD/report.md" "len == 0 \|\| len < 4" "patch.diff body inlined under Candidate Fix"
+assert_file_contains "$CD/report.md" "\*\*Candidate patch\*\*" "patch caption rendered"
+
+# ── (b) Data Flow snippets injected ─────────────────────────────────
+assert_file_contains "$CD/report.md" "enrich:data-flow-snippets" "data-flow-snippets marker present"
+assert_file_contains "$CD/report.md" 'buf\[len - 1\]' "source snippet text from lib/parser.c"
+assert_file_contains "$CD/report.md" "▶" "snippet target-line marker present"
+
+# ── (c) Annotated ASan stack frames ─────────────────────────────────
+assert_file_contains "$CD/report.md" "enrich:asan-snippets" "asan-snippets marker present"
+assert_file_contains "$CD/report.md" "parse_header" "asan frame func referenced"
+
+# ── (d) Severity badge + TL;DR card ─────────────────────────────────
+assert_file_contains "$CD/report.md" "enrich:severity-badge" "severity badge marker present"
+assert_file_contains "$CD/report.md" "Severity: High" "severity badge text rendered"
+assert_file_contains "$CD/report.md" "enrich:tldr" "TL;DR marker present"
+assert_file_contains "$CD/report.md" "Reviewer TL;DR" "TL;DR heading rendered"
+
+# ── (g) Source link with pinned rev ─────────────────────────────────
+assert_file_contains "$CD/report.md" "abcdef123456" "pinned rev appears in source link"
+assert_file_contains "$CD/report.md" "blob/abcdef1234567890/lib/parser.c" "blob URL constructed"
+
+# ── (e) Idempotency — re-run replaces, doesn't duplicate ────────────
+BEFORE_HASH=$(shasum -a 1 "$CD/report.md" | awk '{print $1}')
+python3 "$ENRICH" --quiet --source-root "$TARGET_SRC" \
+                  --upstream-url "https://github.com/acme/widgets" \
+                  --pinned-rev "abcdef1234567890" \
+                  "$CD/report.md" \
+  || fail "enrich-report exited non-zero on re-run"
+AFTER_HASH=$(shasum -a 1 "$CD/report.md" | awk '{print $1}')
+assert_eq "$BEFORE_HASH" "$AFTER_HASH" "enrichment is byte-stable across re-runs"
+
+COUNT=$(grep -c "enrich:candidate-fix-diff" "$CD/report.md")
+assert_eq "2" "$COUNT" "exactly one open + one close marker for candidate-fix-diff (= 2 matches)"
+
+# ── (h) render-md strips the <!-- enrich:NAME --> markers ──────────
+python3 "$RENDER" "$CD/report.md" --html "$CD/report.html" --title "CRASH-001-1" --no-pad \
+  || fail "render-md failed on enriched report"
+if grep -q "enrich:tldr" "$CD/report.html"; then
+  fail "render-md did not strip enrichment marker comments from HTML output"
+else
+  pass "render-md strips enrichment marker comments from HTML"
+fi
+assert_file_contains "$CD/report.html" "Reviewer TL;DR" "TL;DR text reaches HTML"
+assert_file_contains "$CD/report.html" "Severity: High" "Severity badge text reaches HTML"
+
+# ── Colon-label heading style is recognised ─────────────────────────
+# Some agents use `Data Flow:` rather than `## Data Flow`; render-md
+# treats both as H2, so enrichment must too.
+CDL="$RESULTS_DIR/crashes/CRASH-001-L"
+mkdir -p "$CDL"
+cat > "$CDL/report.md" <<EOF
+# CRASH-001-L: colon-label format
+
+Summary:
+A bug in parse_header with colon-label headings.
+
+Classification:
+- **Severity**: High
+- Type: Bounds
+
+Data Flow:
+- step: parse_header (lib/parser.c:9) — reads buf[len-1] without guard
+EOF
+python3 "$ENRICH" --quiet --source-root "$TARGET_SRC" "$CDL/report.md" \
+  || fail "enrich-report failed on colon-label format"
+assert_file_contains "$CDL/report.md" "enrich:data-flow-snippets" \
+  "data-flow-snippets injected for colon-label Data Flow"
+assert_file_contains "$CDL/report.md" 'buf\[len - 1\]' \
+  "snippet body from parser.c reached colon-label report"
+
+# ── patch.diff in .audit/ is still found by enrichment ────────────
+# Older bundles that pre-date the _is_bundle_filename allowlist update
+# carry patch.diff under .audit/. Enrichment must still inline it.
+CDA="$RESULTS_DIR/crashes/CRASH-001-A"
+mkdir -p "$CDA/.audit"
+cat > "$CDA/REPORT.md" <<'EOF'
+# CRASH-001-A: legacy bundle layout
+
+## Summary
+Crash in legacy bundle whose patch landed in .audit/.
+
+## Classification
+- **Severity**: Medium
+
+## Candidate Fix
+See sibling patch.
+EOF
+cat > "$CDA/.audit/patch.diff" <<'EOF'
+diff --git a/x.c b/x.c
+--- a/x.c
++++ b/x.c
+@@ -1 +1 @@
+-old
++new
+EOF
+python3 "$ENRICH" --quiet "$CDA/REPORT.md" \
+  || fail "enrich-report failed on legacy .audit/ layout"
+assert_file_contains "$CDA/REPORT.md" "enrich:candidate-fix-diff" \
+  "patch.diff in .audit/ inlined via fallback search"
+assert_file_contains "$CDA/REPORT.md" "\+new$" \
+  "patch body from .audit/patch.diff appears in REPORT.md"
+
+# ── (f) Missing source tree degrades gracefully ─────────────────────
+CD2="$RESULTS_DIR/crashes/CRASH-002-1"
+mkdir -p "$CD2"
+cat > "$CD2/report.md" <<'EOF'
+# CRASH-002-1: another bug
+
+## Summary
+Another bug.
+
+## Classification
+- **Severity**: Low
+
+## Data Flow Trace
+- step: `nonexistent` (no/such/file.c:42) — should not crash
+EOF
+
+python3 "$ENRICH" --quiet --source-root "$TEST_TMPDIR/does-not-exist" \
+                  "$CD2/report.md" \
+  || fail "enrich-report should tolerate missing source root"
+
+# No snippet markers when source can't be resolved.
+if grep -q "enrich:data-flow-snippets" "$CD2/report.md"; then
+  fail "data-flow-snippets block should not be inserted when source missing"
+else
+  pass "data-flow-snippets cleanly skipped when source root absent"
+fi
+# Severity badge + TL;DR still land (don't need source tree).
+assert_file_contains "$CD2/report.md" "Severity: Low" "badge still inserted without source tree"
+
+summary

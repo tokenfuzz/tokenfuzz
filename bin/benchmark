@@ -1,0 +1,1308 @@
+#!/usr/bin/env bash
+# bin/benchmark — measure the audit harness against a naive CTF baseline.
+#
+# Answers one question with evidence: for the same target, backend, and
+# wall-clock budget, does the harness find more AddressSanitizer-confirmed
+# bugs than a bare "find all vulnerabilities" prompt?
+#
+# It runs two conditions, N replicates each:
+#
+#   model-direct     — a single agent, a bare CTF prompt, no harness
+#                      scaffolding. The control / floor.
+#   harness          — bin/audit as shipped (S1 default + rotation).
+#
+# Every cell runs in isolation via `bin/audit --experiment`, so the
+# operator's real output/<target>/ tree is never touched. Crash counts
+# are AddressSanitizer-confirmed (sanitizer text on disk), never an LLM
+# claim. Cross-condition deduplication reuses bin/cluster-crashes /
+# bin/cluster-findings — no bespoke clustering.
+#
+# All benchmark state lives under one common root (default
+# output/benchmark/), one subdirectory per backend. Each backend subtree
+# holds an append-only ledger benchmark-results.md (+ .html) plus one
+# <runid>/ directory per run; benchmark-result.md (+ .html) at the root
+# folds every backend/run/target/condition result into one comparison table.
+#
+# Usage:
+#   bin/benchmark --target pcre2
+#   bin/benchmark --target pcre2 --backend <backend> --replicates 5 --budget-wall 5400
+#   bin/benchmark --target pcre2 --agents 3
+#   bin/benchmark --target pcre2 --conditions harness
+#   bin/benchmark --reset            # archive the ledger, start fresh
+#   bin/benchmark --reset --hard     # delete the ledger
+#   bin/benchmark --target pcre2 --dry-run   # exercise the pipeline, no LLM
+#
+# Options (default in brackets):
+#   --target <slug>          Target under targets/ to benchmark. REQUIRED.
+#   --backend <backend>      Agent backend, one of: claude, codex, gemini, oss.
+#                            [default: codex]
+#   --replicates <N>         Runs per condition (>=1). [3]
+#   --budget-wall <seconds>  Wall-clock budget per cell; 0 means no outer
+#                            timeout. The harness
+#                            cell spends its first 10-30 min on a cold-start
+#                            recon pass, so budget well above that. [3600]
+#   --agents <N>             Harness worker count, passed to bin/audit as
+#                            NUM_AGENTS. model-direct remains one agent.
+#                            [default: bin/audit default]
+#   --conditions <list>      Comma list from model-direct,harness.
+#                            [model-direct,harness]
+#   --ledger <path>          Ledger file.
+#                            [<bench-root>/<backend>/benchmark-results.md]
+#   --bench-root <dir>       Shared root for all backends' benchmark state.
+#                            [output/benchmark]
+#   --dry-run                Exercise the pipeline with synthetic cells, no LLM.
+#   --no-validate-findings   Skip the model-direct independent-validator
+#                            gate. Every raw FIND-<n>/ stays in findings/
+#                            so the ledger shows raw filing volume rather
+#                            than confirmed volume. BENCHMARK_VALIDATE_FINDINGS=0
+#                            has the same effect. Default: validate on.
+#   --reset [--hard]         Archive (or, with --hard, delete) the ledger; exit.
+#
+# So `bin/benchmark --target pcre2` runs the default backend, 3 replicates
+# each of the model-direct and harness conditions, 3600s budget per cell.
+#
+# Note: the harness condition is `bin/audit` as shipped, which on a cold start
+# runs a breadth-first recon pass (10-30 min on a small library) before
+# any deep investigation. That cost is inside the per-cell budget — set
+# --budget-wall high enough that real investigation time remains.
+#
+# The deterministic half (metric harvest, aggregation, ledger rendering)
+# lives in lib/benchmark.py and is unit-tested independently.
+
+set -uo pipefail
+
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$SCRIPT_ROOT" || { echo "FATAL: cannot cd to $SCRIPT_ROOT" >&2; exit 1; }
+
+for _lib in platform.sh timeout.sh llm_invoke.sh prompt_template.sh triage_validate.sh; do
+  # shellcheck disable=SC1090
+  source "$SCRIPT_ROOT/lib/$_lib" 2>/dev/null || {
+    echo "FATAL: cannot source lib/$_lib" >&2
+    exit 1
+  }
+done
+
+_ts() { date +%H:%M:%S; }
+log() { echo "[$(_ts)] [benchmark] $*"; }
+
+format_duration() {
+  local seconds="${1:-0}"
+  case "$seconds" in
+    ''|*[!0-9]*) seconds=0 ;;
+  esac
+  printf '%dm%02ds (%ss)' "$((seconds / 60))" "$((seconds % 60))" "$seconds"
+}
+
+artifact_uri() {
+  python3 - "$1" <<'PYEOF'
+import pathlib
+import sys
+
+try:
+    print(pathlib.Path(sys.argv[1]).resolve().as_uri())
+except Exception:
+    print(sys.argv[1])
+PYEOF
+}
+
+usage() {
+  sed -n '3,61p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+# ─── Long-run in-place-edit guard ────────────────────────────────────────
+# Benchmark runs can take 5+ hours (BUDGET_WALL × replicates × conditions).
+# Bash re-reads a script's bytes line-by-line at the top level; any edits
+# to bin/benchmark while the run is in-flight cause bash to start parsing
+# whatever the new file says at the current byte offset, producing
+# baffling "line N: e): command not found" / "line N: syntax error near
+# unexpected token `else'" failures (observed in the 2026-05-23 codex
+# benchmark console.log against an older revision).
+#
+# Wrap the entire main body in a compound `{ ...; exit; }` block so bash
+# parses the full block into memory before executing — once inside, the
+# in-flight bytes are immune to filesystem changes. Function definitions
+# above this line are already parsed-on-define and are similarly immune.
+# The trailing `exit $main_rc` preserves the prior contract that the
+# script's exit code reflects whether any cell failed.
+{
+
+# ── defaults ─────────────────────────────────────────────────────────────
+TARGET_SLUG=""
+BACKEND="codex"
+REPLICATES=3
+BUDGET_WALL=3600
+AGENTS=""
+CONDITIONS="model-direct,harness"
+
+# Benchmark cells must compare backends on equal footing — auto-memory in
+# Claude Code injects MEMORY.md into every spawned agent's system prompt
+# and saves "saturated → skip future sweeps" notes back during the run.
+# That gives the claude backend a hidden run-to-run advantage (or, when
+# entries are stale, a hidden penalty) that codex/gemini/agy don't share.
+# Disable it for the duration of the benchmark; regular bin/audit runs
+# keep memory on for cumulative learning.
+export CLAUDE_CODE_DISABLE_AUTO_MEMORY="${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-1}"
+# Independent-validator gate on model-direct findings — default on; opt
+# out with --no-validate-findings or BENCHMARK_VALIDATE_FINDINGS=0 to see
+# raw filing volume rather than confirmed volume.
+VALIDATE_FINDINGS="${BENCHMARK_VALIDATE_FINDINGS:-1}"
+# All benchmark state lives under one common root, BENCH_ROOT, with one
+# subdirectory per backend:
+#
+#   output/benchmark/                  BENCH_ROOT (shared)
+#     benchmark-result.md/.html        cross-backend comparison
+#     <backend>/                       BENCH_BACKEND_ROOT
+#       benchmark-results.md/.html     this backend's append-only ledger
+#       <runid>/                       one benchmark run
+#
+# so every backend sits side by side under one directory and the crosstab
+# folds across them. Override the shared root with --bench-root, or point
+# the ledger somewhere else with --ledger.
+LEDGER=""
+BENCH_ROOT="$SCRIPT_ROOT/output/benchmark"
+DO_RESET=0
+RESET_HARD=0
+DRY_RUN=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) TARGET_SLUG="${2:?--target needs a value}"; shift 2 ;;
+    --target=*) TARGET_SLUG="${1#--target=}"; shift ;;
+    --backend) BACKEND="${2:?--backend needs a value}"; shift 2 ;;
+    --backend=*) BACKEND="${1#--backend=}"; shift ;;
+    --replicates) REPLICATES="${2:?--replicates needs a value}"; shift 2 ;;
+    --replicates=*) REPLICATES="${1#--replicates=}"; shift ;;
+    --budget-wall) BUDGET_WALL="${2:?--budget-wall needs a value}"; shift 2 ;;
+    --budget-wall=*) BUDGET_WALL="${1#--budget-wall=}"; shift ;;
+    --agents) AGENTS="${2:?--agents needs a value}"; shift 2 ;;
+    --agents=*) AGENTS="${1#--agents=}"; shift ;;
+    --conditions) CONDITIONS="${2:?--conditions needs a value}"; shift 2 ;;
+    --conditions=*) CONDITIONS="${1#--conditions=}"; shift ;;
+    --ledger) LEDGER="${2:?--ledger needs a value}"; shift 2 ;;
+    --ledger=*) LEDGER="${1#--ledger=}"; shift ;;
+    --bench-root) BENCH_ROOT="${2:?--bench-root needs a value}"; shift 2 ;;
+    --bench-root=*) BENCH_ROOT="${1#--bench-root=}"; shift ;;
+    --reset) DO_RESET=1; shift ;;
+    --hard) RESET_HARD=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --no-validate-findings) VALIDATE_FINDINGS=0; shift ;;
+    --validate-findings)    VALIDATE_FINDINGS=1; shift ;;
+    -h|--help) usage 0 ;;
+    *) echo "FATAL: unknown argument: $1" >&2; usage 1 ;;
+  esac
+done
+
+# Normalise BENCH_ROOT to an absolute path. Cell directories — and the
+# agent workspace/add-dir paths derived from them — flow into backend
+# CLIs that `cd` before launch (codex --cd, agy/claude --add-dir); a
+# relative root would resolve against the wrong directory there and the
+# agent would fail to start. Resolving once here keeps every downstream
+# path absolute regardless of how --bench-root was passed.
+case "$BENCH_ROOT" in
+  /*) ;;
+  *)  BENCH_ROOT="$SCRIPT_ROOT/$BENCH_ROOT" ;;
+esac
+
+# Each backend gets its own subtree, so output/benchmark/ holds every
+# backend (codex/, gemini/, …) side by side under one directory.
+BENCH_BACKEND_ROOT="$BENCH_ROOT/$BACKEND"
+
+PY_BENCH="$SCRIPT_ROOT/lib/benchmark.py"
+[ -f "$PY_BENCH" ] || { echo "FATAL: missing lib/benchmark.py" >&2; exit 1; }
+
+# Default the ledger into this backend's subtree so every run of this
+# backend appends to one central benchmark-results.md.
+[ -n "$LEDGER" ] || LEDGER="$BENCH_BACKEND_ROOT/benchmark-results.md"
+mkdir -p "$(dirname "$LEDGER")" 2>/dev/null || true
+
+# ── --reset short-circuits everything else ───────────────────────────────
+if [ "$DO_RESET" = "1" ]; then
+  reset_args=(reset --ledger "$LEDGER")
+  [ "$RESET_HARD" = "1" ] && reset_args+=(--hard)
+  python3 "$PY_BENCH" "${reset_args[@]}"
+  exit $?
+fi
+
+# ── validate inputs ──────────────────────────────────────────────────────
+[ -n "$TARGET_SLUG" ] || { echo "FATAL: --target is required" >&2; usage 1; }
+if [ "$DRY_RUN" != "1" ] && [ ! -d "$SCRIPT_ROOT/targets/$TARGET_SLUG" ]; then
+  echo "FATAL: targets/$TARGET_SLUG does not exist" >&2
+  exit 1
+fi
+case "$REPLICATES" in
+  ''|*[!0-9]*) echo "FATAL: --replicates must be a positive integer" >&2; exit 1 ;;
+esac
+[ "$REPLICATES" -ge 1 ] || { echo "FATAL: --replicates must be >= 1" >&2; exit 1; }
+case "$BUDGET_WALL" in
+  ''|*[!0-9]*) echo "FATAL: --budget-wall must be a non-negative integer" >&2; exit 1 ;;
+esac
+[ "$BUDGET_WALL" -ge 0 ] || { echo "FATAL: --budget-wall must be >= 0" >&2; exit 1; }
+if [ -n "$AGENTS" ]; then
+  case "$AGENTS" in
+    ''|*[!0-9]*) echo "FATAL: --agents must be a positive integer" >&2; exit 1 ;;
+  esac
+  [ "$AGENTS" -ge 1 ] || { echo "FATAL: --agents must be >= 1" >&2; exit 1; }
+fi
+if [ "$DRY_RUN" != "1" ] && ! llm_known_backend "$BACKEND"; then
+  echo "FATAL: unknown backend: $BACKEND" >&2
+  exit 1
+fi
+
+IFS=',' read -r -a COND_ARR <<< "$CONDITIONS"
+for c in "${COND_ARR[@]}"; do
+  case "$c" in
+    model-direct|harness) ;;
+    *) echo "FATAL: unknown condition '$c' (expected model-direct|harness)" >&2; exit 1 ;;
+  esac
+done
+
+# ── run setup ────────────────────────────────────────────────────────────
+RUNID_BASE="${BENCHMARK_RUNID:-$(date +%Y%m%d-%H%M%S)}"
+RUNID="$RUNID_BASE"
+BENCH_DIR="$BENCH_BACKEND_ROOT/$RUNID"
+runid_suffix=2
+while [ -e "$BENCH_DIR" ]; do
+  RUNID="${RUNID_BASE}-${runid_suffix}"
+  BENCH_DIR="$BENCH_BACKEND_ROOT/$RUNID"
+  runid_suffix=$((runid_suffix + 1))
+done
+CELLS_DIR="$BENCH_DIR/cells"
+mkdir -p "$CELLS_DIR" || { echo "FATAL: cannot create $CELLS_DIR" >&2; exit 1; }
+
+CONSOLE_LOG_STARTED=0
+CONSOLE_TEE_PID=""
+CONSOLE_LOG_MODE=""
+
+finish_console_log() {
+  local rc=$?
+  if [ "${CONSOLE_LOG_STARTED:-0}" = "1" ]; then
+    # Restore the original stdout/stderr, then close our redirected writer.
+    # Without this explicit close+wait, command substitutions can return before
+    # the background tee has flushed the final summary lines.
+    exec 1>&3 2>&4
+    if [ "${CONSOLE_LOG_MODE:-}" = "fifo" ] && [ -n "${CONSOLE_TEE_PID:-}" ]; then
+      exec 3>&- 4>&-
+      wait "$CONSOLE_TEE_PID" 2>/dev/null || true
+    else
+      # Some mounted workspaces do not support FIFOs. In that fallback, replay
+      # the completed transcript once so command substitutions and callers
+      # still receive the same stdout they would have seen through tee.
+      cat "$BENCH_DIR/console.log" 2>/dev/null || true
+      exec 3>&- 4>&-
+    fi
+  fi
+  exit "$rc"
+}
+
+start_console_log() {
+  # Tee everything this run prints — stdout and stderr — into the run
+  # directory, while mirroring it live to the operator's terminal. The
+  # tee is fed through a FIFO. Avoid bash process substitution
+  # (`exec > >(tee ...)`): on some macOS/sandbox combinations it fails
+  # opening /dev/fd/N with "Operation not permitted".
+  #
+  # The FIFO is a transient pipe — it need not live in BENCH_DIR. When
+  # the run directory's filesystem rejects FIFOs (seen on some mounted
+  # workspaces), fall back to creating it under TMPDIR / /tmp so live
+  # mirroring still works. console.log always lands in BENCH_DIR.
+  local fifo_dir fifo
+  if command -v mkfifo >/dev/null 2>&1; then
+    for fifo_dir in "$BENCH_DIR" "${TMPDIR:-/tmp}" /tmp; do
+      [ -d "$fifo_dir" ] || continue
+      fifo="$fifo_dir/.bench-console.$$.fifo"
+      rm -f "$fifo" 2>/dev/null || true
+      if mkfifo "$fifo" 2>/dev/null; then
+        exec 3>&1 4>&2
+        tee "$BENCH_DIR/console.log" < "$fifo" >&3 &
+        CONSOLE_TEE_PID=$!
+        CONSOLE_LOG_STARTED=1
+        CONSOLE_LOG_MODE="fifo"
+        trap finish_console_log EXIT
+        exec > "$fifo" 2>&1
+        rm -f "$fifo" 2>/dev/null || true
+        return
+      fi
+    done
+  fi
+  # Last-resort fallback: mkfifo unavailable everywhere tried. The
+  # transcript is still captured and replayed once on exit so callers
+  # still see it; live mirroring is the only thing lost here.
+  exec 3>&1 4>&2
+  CONSOLE_LOG_STARTED=1
+  CONSOLE_LOG_MODE="file"
+  trap finish_console_log EXIT
+  exec > "$BENCH_DIR/console.log" 2>&1
+}
+start_console_log
+
+target_sha="$(git -C "$SCRIPT_ROOT/targets/$TARGET_SLUG" rev-parse --short HEAD 2>/dev/null || echo "no-vcs")"
+harness_sha="$(git -C "$SCRIPT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "no-vcs")"
+# The model name names the model-direct baseline (<model>-direct) in the
+# cross-backend table, so a reader sees which model produced each row.
+model="$(llm_default_model "$BACKEND" 2>/dev/null || true)"
+
+python3 - "$BENCH_DIR/run.json" <<PYEOF
+import json, sys
+json.dump({
+    "runid": "$RUNID",
+    "target": "$TARGET_SLUG",
+    "backend": "$BACKEND",
+    "model": "$model",
+    "replicates": $REPLICATES,
+    "budget_wall": $BUDGET_WALL,
+    "harness_agents": ${AGENTS:-None},
+    "model_direct_agents": 1,
+    "conditions": "$CONDITIONS".split(","),
+    "target_sha": "$target_sha",
+    "harness_sha": "$harness_sha",
+    "dry_run": bool($DRY_RUN),
+}, open(sys.argv[1], "w"), indent=2)
+PYEOF
+
+if [ "$BUDGET_WALL" = "0" ]; then
+  log "run $RUNID — target=$TARGET_SLUG backend=$BACKEND replicates=$REPLICATES budget=unlimited"
+else
+  log "run $RUNID — target=$TARGET_SLUG backend=$BACKEND replicates=$REPLICATES budget=${BUDGET_WALL}s"
+fi
+log "conditions: $CONDITIONS"
+log "agents: harness=${AGENTS:-bin/audit-default}, model-direct=1"
+[ "$DRY_RUN" = "1" ] && log "DRY RUN — synthetic cells, no LLM calls"
+log "bench dir: $BENCH_DIR"
+
+# ── model-direct CTF prompt ──────────────────────────────────────────────
+# A bare CTF instruction with an output contract. Body lives in
+# lib/prompts/benchmark_model_direct.md.j2. Four substitutions are
+# interpolated:
+#   target_path           — source tree the agent reads from
+#   output_dir            — cwd + write target for findings/ / crashes/
+#   crash_objective       — primary-objective paragraph; flips between
+#                           "drive a sanitizer crash" (asan build present)
+#                           and "file FINDs only" (no native build).
+#   asan_invocation_hint  — concrete CLI to drive the asan binary, or "".
+#   harness_build_recipe  — clang link recipe pulled from target.toml, or "".
+#
+# The hint/recipe pair are the load-bearing pieces that let the bare
+# model produce CRASH artifacts. They were missing in earlier revisions
+# and the metric was 0 crashes across every backend / replicate. Do not
+# remove them. See the {# … #} sentinel at the top of the .j2 template.
+model_direct_prompt() {
+  local target_path="$1" output_dir="$2"
+  # Delegated to lib/benchmark_model_direct_render.py. The helper reads
+  # target.toml (lib/target_config.parse_toml), checks whether the
+  # build-asan binary / static library exists, and renders the three
+  # conditional blocks (crash_objective, asan_invocation_hint,
+  # harness_build_recipe) into the .md.j2 in one shot. Doing the whole
+  # render in a single Python invocation keeps multi-line output
+  # NUL-safe and avoids a bash-side block-stitching pipeline that
+  # quietly truncated rendered prompts on embedded specials.
+  python3 "$SCRIPT_ROOT/lib/benchmark_model_direct_render.py" \
+    "$target_path" "$output_dir" "$SCRIPT_ROOT"
+}
+
+# Pre-create the output directories the model-direct cell writes into.
+# The agent's cwd is the cell dir, so plain `./findings/...` resolves here.
+prepare_model_direct_output_dir() {
+  local out_dir="$1"
+  [ -n "$out_dir" ] || { echo "prepare_model_direct_output_dir: empty dir" >&2; return 1; }
+  mkdir -p "$out_dir/crashes" "$out_dir/findings" "$out_dir/logs" || return 1
+}
+
+# ── cell runners ─────────────────────────────────────────────────────────
+# Each runner is given the cell dir; it must populate a results-shaped
+# tree (crashes/, optionally findings/, recon/, logs/) and echo the path
+# to it on stdout. Exit status is the cell's run status.
+
+run_dryrun_cell() {
+  # Synthetic results so the harvest → aggregate → ledger pipeline can be
+  # exercised end-to-end without a backend. One genuine sanitizer log,
+  # one decoy without — the harvester must count exactly one.
+  local cell_dir="$1" cond="$2" rep="$3"
+  local rd="$cell_dir/results"
+  mkdir -p "$rd/crashes/CRASH-001" "$rd/crashes/CRASH-002" "$rd/logs"
+  if [ "$cond" = "harness" ]; then
+    # A parseable ASan snippet so cross-condition dedup is exercised:
+    # every harness replicate carries the same signature -> one cluster.
+    {
+      printf '==1==ERROR: AddressSanitizer: heap-buffer-overflow on 0x602\n'
+      printf '    #0 0x55 in dryrun_sink /src/dry.c:42:5\n'
+      printf '    #1 0x66 in dryrun_caller /src/dry.c:99:1\n'
+      printf 'SUMMARY: AddressSanitizer: heap-buffer-overflow\n'
+    } > "$rd/crashes/CRASH-001/sanitizer.txt"
+  fi
+  printf 'this directory has no sanitizer output\n' \
+    > "$rd/crashes/CRASH-002/notes.txt"
+  printf '{"tokens":{"input":1000,"cached_input":900,"output":%d},"probe":{"asan_invocations":3}}\n' \
+    "$((rep * 100))" > "$rd/logs/index.jsonl"
+  echo "$rd"
+  return 0
+}
+
+# gemini_quota_dominates — true if the recent tail of the raw log is
+# dominated by 429-quota retries with no successful turn between them.
+#
+# This is the lone trigger condition we kill a gemini cell on, and it is
+# deliberately conservative: a healthy run (r1-style) takes 429s on the
+# way to real progress, so as long as ANY assistant message or result
+# event lands in the window we leave the cell alone. Only a window full
+# of retries with no progress trips the abort.
+#
+# Tunables (env vars, not user-visible flags — operators tune by setting
+# them in the shell that launches bin/benchmark):
+#   GEMINI_QUOTA_WINDOW_LINES   tail size to inspect             (default 400)
+#   GEMINI_QUOTA_MIN_429        429 retries needed to trigger    (default 10)
+gemini_quota_dominates() {
+  local raw_log="$1"
+  local window="${GEMINI_QUOTA_WINDOW_LINES:-400}"
+  local min_429="${GEMINI_QUOTA_MIN_429:-10}"
+  [ -f "$raw_log" ] || return 1
+  local tail_text n_429 n_progress
+  tail_text="$(tail -n "$window" "$raw_log" 2>/dev/null)"
+  n_429="$(printf '%s\n' "$tail_text" \
+    | grep -cE 'Attempt [0-9]+ failed with status 429' 2>/dev/null || true)"
+  n_progress="$(printf '%s\n' "$tail_text" \
+    | grep -cE '"role":"assistant"|"type":"result"' 2>/dev/null || true)"
+  [ "${n_429:-0}" -ge "$min_429" ] && [ "${n_progress:-0}" -eq 0 ]
+}
+
+# Recursively send *sig* to a pid and all descendants, leaf-first. The
+# gemini-cli call sits three subshells deep (bench → backgrounded
+# function → llm_run_agent_prompt's `( cd && audit_timeout_run ... )`
+# subshell → gemini-cli), so a single `kill $pid` or `pkill -P $pid`
+# leaves grandchildren behind on macOS where SIGHUP-on-exit isn't the
+# default. Walking the tree bottom-up means SIGTERM reaches gemini-cli
+# directly instead of waiting for shell-exit chaining.
+_kill_tree() {
+  local pid="$1" sig="$2" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    _kill_tree "$child" "$sig"
+  done
+  kill -"$sig" "$pid" 2>/dev/null || true
+}
+
+# agy_drip_stopped — true if the agy cli-*.log shows "Drip stopped",
+# the event agy's text_drip subsystem emits when its --print response
+# stream is fully buffered. agy usually exits within ~1s of this event
+# but occasionally enters an idle heartbeat loop instead, polling
+# fetchAvailableModels/loadCodeAssist until --print-timeout fires
+# (the harness passes BUDGET_WALL = up to 2h there). The findings/
+# crashes the cell cares about were already written to disk by tool
+# calls during generation; only the buffered --print summary text is
+# lost when we kill agy here, which is acceptable.
+#
+# Match is anchored on agy's klog format `text_drip.go:NNN] Drip stopped`
+# so a model response that legitimately contains the phrase "drip
+# stopped" in prose can never trip it.
+agy_drip_stopped() {
+  local cli_log="$1"
+  [ -f "$cli_log" ] || return 1
+  grep -qE 'text_drip\.go:[0-9]+\] Drip stopped' "$cli_log" 2>/dev/null
+}
+
+# agy_cli_log_for_pid — locate the cli-*.log file the agy process has
+# open. agy redirects its klog stream to
+# ~/.gemini/antigravity-cli/log/cli-<ts>.log at startup; that file is
+# the only place internal events like "Drip stopped" appear (agy's
+# --print stdout is buffered until exit, no use for in-flight checks).
+# Returns empty string if lsof is missing, the process is gone, or
+# no matching FD is found — caller treats empty as "skip drip check".
+agy_cli_log_for_pid() {
+  local pid="$1"
+  command -v lsof >/dev/null 2>&1 || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  lsof -p "$pid" 2>/dev/null \
+    | awk '$NF ~ /\/antigravity-cli\/log\/cli-.*\.log$/ {print $NF; exit}'
+}
+
+# Single watchdog that handles every reason we kill a gemini cell early.
+# One background process per cell, one polling loop, two trigger
+# conditions (quota exhaustion, post-Drip hang). Every trigger SIGTERMs
+# the agent process tree; the cell harvester then runs against
+# whatever the agent wrote to disk before the kill.
+#
+# Both triggers are *fail-safe*: if detection misses (log format change,
+# lsof missing, agy log path moved), the cell simply runs to the outer
+# audit_timeout_run wall-clock cap — same as no watchdog at all.
+#
+# Tunables (env vars; defaults tested live against real runs):
+#   GEMINI_WATCHDOG_POLL_SECS   poll interval, both triggers   [10]
+#   GEMINI_QUOTA_WINDOW_LINES   raw-log tail for 429 trigger   [400]
+#   GEMINI_QUOTA_MIN_429        429 retries needed to trigger  [10]
+#   AGY_DRIP_GRACE_SECS         post-Drip wait before kill     [60]
+#                                Set 0 to skip the drip check.
+#
+# USE_GEMINI_CLI=1 selects the Google Gemini CLI dialect, which uses
+# stream-json output, exits cleanly, and has no agy klog to grep — the
+# drip arm is skipped automatically when llm_use_gemini_cli returns 0.
+start_gemini_watchdog() {
+  local raw_log="$1" agent_pid="$2" cell_dir="$3"
+  local interval="${GEMINI_WATCHDOG_POLL_SECS:-10}"
+  local drip_grace="${AGY_DRIP_GRACE_SECS:-60}"
+  local check_drip=0
+  if [ "$drip_grace" -gt 0 ] 2>/dev/null; then
+    llm_use_gemini_cli || check_drip=1
+  fi
+  local cli_log=""
+
+  while sleep "$interval"; do
+    kill -0 "$agent_pid" 2>/dev/null || return 0
+
+    if gemini_quota_dominates "$raw_log"; then
+      log "cell ${cell_dir##*/} — gemini quota exhausted (sustained 429s with no assistant progress); aborting"
+      touch "$cell_dir/.quota-exhausted"
+      _kill_tree "$agent_pid" TERM
+      sleep 5
+      _kill_tree "$agent_pid" KILL
+      return 0
+    fi
+
+    if [ "$check_drip" = 1 ]; then
+      # Lazily resolve the cli-log path — agy creates it shortly after
+      # start, so first few polls may see nothing. Once located, the
+      # path is sticky for the rest of the cell.
+      [ -n "$cli_log" ] || cli_log="$(agy_cli_log_for_pid "$agent_pid")"
+      if [ -n "$cli_log" ] && agy_drip_stopped "$cli_log"; then
+        # Give agy a grace period to flush --print and exit cleanly
+        # (it does, in the healthy case). Poll for early exit so a
+        # clean run doesn't pay the full grace.
+        local elapsed=0
+        while [ "$elapsed" -lt "$drip_grace" ]; do
+          sleep 2
+          elapsed=$((elapsed + 2))
+          kill -0 "$agent_pid" 2>/dev/null || return 0
+        done
+        log "cell ${cell_dir##*/} — agy hung ${drip_grace}s after 'Drip stopped'; aborting (cli-log: $cli_log)"
+        _kill_tree "$agent_pid" TERM
+        sleep 5
+        _kill_tree "$agent_pid" KILL
+        return 0
+      fi
+    fi
+  done
+}
+
+# Snapshot every `findings/FIND-*` and `crashes/CRASH-*` path that
+# already exists in the target tree at cell start. The post-cell sweep
+# uses this snapshot to skip anything the cell did NOT create — set
+# membership is race-free, unlike a mtime comparison which collapses
+# at 1-second resolution. The snapshot file lives under $TMPDIR so it
+# never pollutes the target tree.
+mark_cell_start_for_sweep() {
+  local cell_dir="$1" target_root="$2"
+  local marker_dir="${TMPDIR:-/tmp}"
+  local safe_name
+  safe_name="$(printf '%s' "$cell_dir" | tr '/' '_')"
+  local marker="$marker_dir/.bench-cell-mark-$$-$safe_name"
+  : > "$marker"
+  if [ -d "$target_root" ]; then
+    local parent_dir entry kind parent_name entry_glob
+    for kind in 'findings:FIND-*' 'crashes:CRASH-*'; do
+      parent_name="${kind%%:*}"
+      entry_glob="${kind#*:}"
+      while IFS= read -r parent_dir; do
+        # shellcheck disable=SC2231 -- glob expansion against literal subdir
+        for entry in "$parent_dir"/$entry_glob; do
+          [ -e "$entry" ] || continue
+          printf '%s\n' "$entry" >> "$marker"
+        done
+      done < <(
+        find "$target_root" -type d -name '.git' -prune -o \
+          -type d -name "$parent_name" -print 2>/dev/null
+      )
+    done
+  fi
+  printf '%s\n' "$marker"
+}
+
+# Recover model-direct / harness output the agent misrouted into the
+# source tree. The benchmark_model_direct prompt now uses absolute paths
+# for every write (lib/prompts/benchmark_model_direct.md.j2), but this
+# sweep is defense-in-depth: any backend that resolves paths against an
+# unexpected cwd, or any future prompt regression, lands artifacts in
+# the source tree. Gemini r1 on 2026-05-24 silently lost a real FIND-001
+# this way; the regression motivated this function.
+#
+# Only entries directly under any `findings/` or `crashes/` dir in the
+# source tree are considered, and only ones whose path was NOT in the
+# cell-start snapshot. Pre-existing target-owned `findings/FIND-*` and
+# `crashes/CRASH-*` (some projects ship a fuzz corpus under those
+# names) are NEVER moved — only this run's output is rescued. .git is
+# pruned to avoid touching repo internals. Missing or unreadable
+# snapshot = sweep is a no-op (refuses to mutate the target tree
+# without ground truth on what was there at start).
+sweep_target_tree_for_misplaced_output() {
+  local target_root="$1" cell_dir="$2" marker="${3:-}"
+  [ -d "$target_root" ] || return 0
+  [ -d "$cell_dir" ] || return 0
+  [ -n "$marker" ] && [ -f "$marker" ] || return 0
+
+  mkdir -p "$cell_dir/findings" "$cell_dir/crashes"
+
+  local moved=0
+  local parent_dir entry base dest kind parent_name entry_glob
+  for kind in 'findings:FIND-*' 'crashes:CRASH-*'; do
+    parent_name="${kind%%:*}"
+    entry_glob="${kind#*:}"
+    while IFS= read -r parent_dir; do
+      # shellcheck disable=SC2231 -- glob expansion against literal subdir
+      for entry in "$parent_dir"/$entry_glob; do
+        [ -e "$entry" ] || continue
+        # Skip anything that was already on disk at cell start.
+        # `-x` makes grep require a full-line match, `-F` treats the
+        # pattern as literal text (no regex surprises with `.` /
+        # `+` in real paths). The `--` is defensive in case any
+        # ancestor of the target tree starts with a dash and the
+        # entry path inherits that prefix; without it grep would
+        # interpret the path as a flag and return rc=1.
+        if grep -qxF -- "$entry" "$marker" 2>/dev/null; then
+          continue
+        fi
+        base="$(basename "$entry")"
+        dest="$cell_dir/$parent_name/$base"
+        # Avoid clobber: an in-cell artifact with the same name wins;
+        # the rescued one gets a disambiguator suffix so the operator
+        # can still see what was misrouted.
+        if [ -e "$dest" ]; then
+          dest="${dest}.from-target-$(date +%s)-$$"
+        fi
+        if mv "$entry" "$dest" 2>/dev/null; then
+          moved=$((moved + 1))
+          log "  sweep: rescued $parent_name/$base from source tree → $dest"
+        fi
+      done
+    done < <(
+      find "$target_root" -type d -name '.git' -prune -o \
+        -type d -name "$parent_name" -print 2>/dev/null
+    )
+  done
+
+  # Best-effort: remove now-empty findings/ and crashes/ that the agent
+  # created at the top level of the source tree. Real target-owned dirs
+  # of the same name (rare but possible) survive because rmdir on a
+  # non-empty dir is a no-op.
+  rmdir "$target_root/findings" 2>/dev/null || true
+  rmdir "$target_root/crashes"  2>/dev/null || true
+
+  # Clean up the snapshot we created in mark_cell_start_for_sweep.
+  # If this fails (race, removed elsewhere) it is a tmpdir leak at
+  # worst.
+  rm -f "$marker" 2>/dev/null || true
+
+  if [ "$moved" -gt 0 ]; then
+    log "cell ${cell_dir##*/} — pollution sweep: rescued $moved artifact(s) from $target_root"
+  fi
+}
+
+run_model_direct_cell() {
+  local cell_dir="$1" exp_name="$2"
+  local target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
+  target_root="$(cd "$target_root" 2>/dev/null && pwd -P)" || {
+    log "  model-direct: target root not found at $target_root"
+    return 1
+  }
+  # cell_dir is the results dir — findings/, crashes/, logs/ live here.
+  local out_dir="$cell_dir"
+  if ! prepare_model_direct_output_dir "$out_dir"; then
+    log "  model-direct: output-dir prepare failed at $out_dir"
+    return 1
+  fi
+
+  local prompt raw_log prompt_file
+  prompt="$(model_direct_prompt "$target_root" "$out_dir")"
+  raw_log="$cell_dir/backend.raw.log"
+  # Persist the prompt for the gemini-cli token estimate path (which has
+  # no usage telemetry and counts the prompt text instead).
+  prompt_file="$cell_dir/prompt.txt"
+  printf '%s' "$prompt" > "$prompt_file"
+  # A previous interrupted run might have left a stale sentinel here; the
+  # quota watcher is the only writer, so clear it before this cell starts.
+  rm -f "$cell_dir/.quota-exhausted" 2>/dev/null || true
+
+  # Snapshot the pre-existing pollution paths under the target tree
+  # before the agent runs. The post-cell sweep moves only entries that
+  # were NOT in the snapshot — pre-existing target content (e.g. an
+  # upstream project's findings/ corpus) stays untouched.
+  local sweep_marker
+  sweep_marker="$(mark_cell_start_for_sweep "$cell_dir" "$target_root")"
+
+  export IS_SANDBOX=1
+
+  local rc=0
+  # cwd = out_dir (first add-dir), source granted via the target add-dir.
+  # Any stray relative write lands in out_dir, not in the target tree.
+  # max_turns=0 -> no turn cap; the wall-clock budget is the real
+  # ceiling for this open-ended audit task.
+  local add_dirs="$out_dir,$target_root"
+  # Run the agent in the background so a gemini quota watcher (below)
+  # can abort it the moment a 429 death-spiral is confirmed. For other
+  # backends `wait` is just a synchronous proxy with no watcher attached.
+  if [ "$BUDGET_WALL" = "0" ]; then
+    llm_run_agent_prompt_no_timeout "$BACKEND" "$prompt" "$raw_log" \
+      "$(llm_default_model "$BACKEND")" 0 "$add_dirs" "$out_dir" &
+  else
+    llm_run_agent_prompt "$BACKEND" "$prompt" "$BUDGET_WALL" "$raw_log" \
+      "$(llm_default_model "$BACKEND")" 0 "$add_dirs" "$out_dir" &
+  fi
+  local agent_pid=$! watcher_pid=""
+  if [ "$BACKEND" = "gemini" ]; then
+    start_gemini_watchdog "$raw_log" "$agent_pid" "$cell_dir" &
+    watcher_pid=$!
+  fi
+  wait "$agent_pid" || rc=$?
+  if [ -n "$watcher_pid" ]; then
+    # The watchdog is a `while sleep N; do ...` loop, so a plain
+    # `kill $watcher_pid` would be deferred by bash until sleep
+    # returns. Walk the tree so the sleep child gets SIGTERM directly.
+    _kill_tree "$watcher_pid" TERM
+    wait "$watcher_pid" 2>/dev/null || true
+  fi
+
+  # Rescue any FIND-* / CRASH-* artifacts the agent misrouted into the
+  # source tree (see sweep_target_tree_for_misplaced_output above for
+  # the regression that motivated this). Runs BEFORE token harvest so
+  # the operator-visible log line is grouped with this cell's other
+  # post-run accounting. Marker is mtime-gated so pre-existing target
+  # content stays untouched.
+  sweep_target_tree_for_misplaced_output "$target_root" "$cell_dir" \
+    "$sweep_marker"
+
+  # Extract token usage into a one-row index.jsonl so the harvester
+  # scores model-direct cost on the same field as a harness cell.
+  mkdir -p "$out_dir/logs"
+  python3 "$SCRIPT_ROOT/lib/benchmark_model_direct_usage.py" "$BACKEND" "$raw_log" \
+    "$prompt_file" > "$out_dir/logs/index.jsonl" 2>/dev/null \
+    || printf '{}\n' > "$out_dir/logs/index.jsonl"
+
+  # Always emit out_dir so the caller harvests whatever's on disk, even on
+  # a non-zero rc. rc 124 = wall-clock timeout, the expected end of a
+  # budgeted cell. A quota-watcher kill returns a SIGTERM exit code (143);
+  # we treat that as "completed under operator policy" so the post-run
+  # harvest still runs against whatever the agent managed to write.
+  echo "$out_dir"
+  if [ -f "$cell_dir/.quota-exhausted" ]; then
+    return 0
+  fi
+  { [ "$rc" = "0" ] || [ "$rc" = "124" ]; } && return 0
+  return "$rc"
+}
+
+prepare_harness_facade() {
+  local cell_dir="$1"
+  local facade="$cell_dir/repo-root"
+  rm -rf "$facade" 2>/dev/null || true
+  mkdir -p "$facade"
+
+  local name
+  for name in bin lib .agents docs schema targets; do
+    ln -snf "$SCRIPT_ROOT/$name" "$facade/$name"
+  done
+  mkdir -p "$facade/output/$TARGET_SLUG"
+  if [ -f "$SCRIPT_ROOT/output/$TARGET_SLUG/target.toml" ]; then
+    cp -p "$SCRIPT_ROOT/output/$TARGET_SLUG/target.toml" \
+      "$facade/output/$TARGET_SLUG/target.toml" 2>/dev/null || true
+  fi
+  for name in AGENTS.md CLAUDE.md GEMINI.md CHANGELOG.md LICENSE README.md \
+              SECURITY.md requirements.txt .claudeignore .codexignore \
+              .geminiignore .gitignore; do
+    [ -e "$SCRIPT_ROOT/$name" ] && ln -snf "$SCRIPT_ROOT/$name" "$facade/$name"
+  done
+
+  printf '%s\n' "$facade"
+}
+
+run_harness_cell() {
+  local cell_dir="$1" exp_name="$2"
+  local rc=0 facade
+  local -a audit_env
+  audit_env=(env "AUDIT_RECON_CACHE_DIR=$BENCH_DIR/recon-cache")
+  [ -n "$AGENTS" ] && audit_env+=("NUM_AGENTS=$AGENTS")
+  # Rotation thresholds are left at harness defaults — the harness
+  # condition measures the product as shipped, rotation behaviour included.
+  #
+  # Every harness replicate in this run shares one target SHA and backend,
+  # so its cold-start recon is identical. A per-run shared recon cache lets
+  # only the first cell pay the recon cost; later cells get a cache hit and
+  # spend their whole budget on investigation instead of re-running recon.
+  #
+  # Run through a per-cell repo facade instead of the real harness root.
+  # bin/audit intentionally cd's to its SCRIPT_ROOT; for benchmark cells,
+  # executing facade/bin/audit makes that root the facade. Agents still see
+  # bin/, lib/, .agents/, targets/, and output/, but any bare relative files
+  # they create land under cells/<cond>/repo-root/ rather than dirtying the
+  # operator's checkout.
+  facade="$(prepare_harness_facade "$cell_dir")"
+  # Snapshot pre-existing target pollution paths, same purpose as in
+  # run_model_direct_cell. Resolve target_root the same way the
+  # post-cell sweep does.
+  local harness_target_for_mark="$SCRIPT_ROOT/targets/$TARGET_SLUG"
+  harness_target_for_mark="$(cd "$harness_target_for_mark" 2>/dev/null && pwd -P || printf '')"
+  local harness_sweep_marker
+  harness_sweep_marker="$(mark_cell_start_for_sweep "$cell_dir" "$harness_target_for_mark")"
+  if [ "$BUDGET_WALL" = "0" ]; then
+    (
+      cd "$facade" || exit 1
+      "${audit_env[@]}" \
+        "$facade/bin/audit" \
+          --target "$TARGET_SLUG" \
+          --backend "$BACKEND" \
+          --experiment "$exp_name"
+    ) > "$cell_dir/audit.log" 2>&1 || rc=$?
+  else
+    (
+      cd "$facade" || exit 1
+      audit_timeout_run "$BUDGET_WALL" \
+        "${audit_env[@]}" \
+        "$facade/bin/audit" \
+          --target "$TARGET_SLUG" \
+          --backend "$BACKEND" \
+          --experiment "$exp_name"
+    ) > "$cell_dir/audit.log" 2>&1 || rc=$?
+  fi
+
+  # Defense-in-depth: a harness agent that `cd`'d into the source tree
+  # and wrote with a relative path would land artifacts there too. Sweep
+  # the same way the model-direct cell does — mtime-gated against the
+  # cell-start marker so pre-existing target content stays untouched.
+  local harness_target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
+  if harness_target_root="$(cd "$harness_target_root" 2>/dev/null && pwd -P)"; then
+    sweep_target_tree_for_misplaced_output "$harness_target_root" \
+      "$facade/output/${TARGET_SLUG}-${exp_name}/${BACKEND}/results" \
+      "$harness_sweep_marker"
+  fi
+
+  echo "$facade/output/${TARGET_SLUG}-${exp_name}/${BACKEND}/results"
+  [ "$rc" = "0" ] || [ "$rc" = "124" ]
+}
+
+# write_cell_json — single source of truth for cell.json shape.
+# Called twice per cell: at the start with status=running and the
+# predicted results_dir, and at the end with final wall + status. The
+# early write keeps the cell indexable if the run is killed mid-way.
+#
+# P6: when the cell finishes, also lift the actual num_agents (and the
+# requested count) into cell.json so the cross-backend table doesn't
+# silently average 1-agent runs with 3-agent runs. The actual count
+# comes from <results_dir>/state/run-config.json (written by
+# bin/audit:prepare_active_backend_runtime); requested comes from the
+# --agents flag the harness was invoked with.
+write_cell_json() {
+  python3 - "$@" <<'PYEOF'
+import json, os, sys
+path, cond, rep, exp, rd, wall, status = sys.argv[1:8]
+requested_agents = sys.argv[8] if len(sys.argv) > 8 else ""
+out = {
+    "condition": cond,
+    "replicate": int(rep),
+    "experiment": exp,
+    "results_dir": rd,
+    "wall_seconds": int(wall),
+    "status": status,
+}
+def _ri(s):
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        return None
+req = _ri(requested_agents)
+if req is not None:
+    out["requested_agents"] = req
+cfg_path = os.path.join(rd, "state", "run-config.json")
+actual = None
+if rd and os.path.isfile(cfg_path):
+    try:
+        with open(cfg_path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        v = cfg.get("num_agents")
+        if isinstance(v, int) and v > 0:
+            actual = v
+    except (OSError, ValueError):
+        actual = None
+if actual is not None:
+    out["actual_agents"] = actual
+    # Surface a one-bit flag so the cross-backend report can sort/filter
+    # cells whose actual count drifted from the requested one without
+    # re-reading every cell's run-config.
+    if req is not None and req != actual:
+        out["agent_count_mismatch"] = True
+json.dump(out, open(path, "w"), indent=2)
+PYEOF
+}
+
+metric_gate_summary() {
+  python3 - "$1" <<'PYEOF'
+import json
+import sys
+
+try:
+    m = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    m = {}
+print(
+    "findings: rejected={fr} confirmed={fc} unique={fu}; "
+    "crashes: rejected={cr} confirmed={cc} unique={cu}".format(
+        fr=int(m.get("findings_rejected", 0) or 0),
+        fc=int(m.get("findings", 0) or 0),
+        fu=int(m.get("finding_clusters", 0) or 0),
+        cr=int(m.get("crashes_rejected", 0) or 0),
+        cc=int(m.get("confirmed_crashes", 0) or 0),
+        cu=int(m.get("crash_clusters", 0) or 0),
+    )
+)
+PYEOF
+}
+
+## rebuild_pool_artifacts: idempotent post-processing the live crosstab
+## (and the run's ledger section) needs to render links and unique-bug /
+## severity columns. Pool every cell's confirmed crash + finding dirs into
+## one tree, then run the harness's OWN tools over that pool so both
+## conditions are measured on an identical yardstick:
+##
+##   bin/reachability   severity, one lens over every crash of both conditions
+##   bin/export-repro   a REPORT.md / REPORT.html / reproduce.sh bundle per crash
+##   bin/cluster-crashes / bin/cluster-findings   cross-condition deduplication
+##
+## Called from update_benchmark_result() as each cell finishes — without
+## this, mid-run benchmark-result.{md,html} renders bare counts because
+## _crosstab_count requires pool/<condition>/<kind>/ to exist on disk,
+## and the unique/severity columns require clusters-*.json and the
+## per-crash REPORT.md the same tools write. All sub-tools are idempotent
+## (bench_dir/pool is rebuilt on every call), so re-running per cell and
+## once more pre-ledger is safe.
+rebuild_pool_artifacts() {
+  local reason="${1:-update}"
+  python3 "$PY_BENCH" pool "$BENCH_DIR" \
+    || log "WARN: pooling failed ($reason)"
+  local POOL="$BENCH_DIR/pool"
+
+  ## Move each harness cell's audit tree (bin/audit writes it to
+  ## output/<target>-<exp>/ at the output root) under this run's
+  ## experiments/ dir, so the output root stays clean and the tree is an
+  ## artifact of the run. Pooling above already copied out the crash and
+  ## finding dirs, so this only moves forensic session state. Idempotent:
+  ## already-relocated cells are skipped.
+  python3 "$PY_BENCH" relocate-experiments "$BENCH_DIR" \
+    || log "WARN: experiment relocation failed ($reason)"
+
+  if [ "$DRY_RUN" != "1" ] && [ -d "$POOL/crashes" ]; then
+    ## Severity: bin/reachability scores every pooled crash and writes the
+    ## Severity line into its report. The un-triaged model-direct crashes
+    ## and the harness's triaged ones go through the identical scorer —
+    ## that one lens is the whole point. Best-effort: the benchmark must
+    ## still produce a ledger if the reachability probe is offline.
+    "$SCRIPT_ROOT/bin/reachability" --batch "$POOL" --target "$TARGET_SLUG" \
+      > "$BENCH_DIR/reachability.log" 2>&1 \
+      || log "WARN: reachability batch returned non-zero (see reachability.log, $reason)"
+
+    ## Reproducer bundle: give every crash the same maintainer-facing
+    ## REPORT.md / reproduce.sh bundle the harness ships. Crashes that
+    ## already carry a REPORT.md (harness cells) are left untouched.
+    local cdir bundled=0
+    for cdir in "$POOL"/crashes/CRASH-*; do
+      [ -d "$cdir" ] || continue
+      [ -f "$cdir/REPORT.md" ] && continue
+      "$SCRIPT_ROOT/bin/export-repro" --crash-dir "$cdir" --slug "$TARGET_SLUG" \
+        >/dev/null 2>&1 && bundled=$((bundled + 1))
+    done
+    if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
+      local rep
+      for rep in "$POOL"/crashes/CRASH-*/REPORT.md; do
+        [ -f "$rep" ] || continue
+        python3 "$SCRIPT_ROOT/bin/render-md" "$rep" --html-sibling \
+          >/dev/null 2>&1 || true
+      done
+    fi
+    [ "$bundled" -gt 0 ] && log "reproducer bundles created: $bundled ($reason)"
+  fi
+
+  if [ -d "$POOL/crashes" ]; then
+    ## JSON: machine-readable cluster data the aggregator folds into report.json.
+    "$SCRIPT_ROOT/bin/cluster-crashes" "$POOL" --json \
+      > "$BENCH_DIR/clusters-crashes.json" 2>/dev/null \
+      || { log "WARN: cluster-crashes failed ($reason)"; echo '{"clusters":[]}' \
+           > "$BENCH_DIR/clusters-crashes.json"; }
+    ## Human-readable CRASH-CLUSTERS.md + .html under pool/crashes/, the
+    ## same unique-bug report a regular run produces — that is what the
+    ## scoreboard "Unique bugs" count links to.
+    "$SCRIPT_ROOT/bin/cluster-crashes" "$POOL" >/dev/null 2>&1 \
+      || log "WARN: cluster-crashes (CRASH-CLUSTERS.md) failed ($reason)"
+  fi
+  if [ -d "$POOL/findings" ]; then
+    "$SCRIPT_ROOT/bin/cluster-findings" "$POOL" --json \
+      > "$BENCH_DIR/clusters-findings.json" 2>/dev/null \
+      || { log "WARN: cluster-findings failed ($reason)"; echo '{"clusters":[]}' \
+           > "$BENCH_DIR/clusters-findings.json"; }
+    "$SCRIPT_ROOT/bin/cluster-findings" "$POOL" >/dev/null 2>&1 \
+      || log "WARN: cluster-findings (FINDING-CLUSTERS.md) failed ($reason)"
+  fi
+
+  ## Per-condition cluster reports. The combined pool above feeds the
+  ## cross-condition cluster JSON (which clusters the harness found that
+  ## the baseline missed). For the scoreboard and crosstab, copy the pool
+  ## into per-condition subtrees and run the SAME cluster tools over each,
+  ## so harness evidence and model-direct evidence each get their own
+  ## CRASH-CLUSTERS / FINDING-CLUSTERS to link to.
+  if [ -d "$POOL" ]; then
+    python3 "$PY_BENCH" split-pool "$BENCH_DIR" \
+      || log "WARN: pool split failed ($reason)"
+    local cond_dir cond
+    for cond_dir in "$POOL"/*/; do
+      cond="$(basename "$cond_dir")"
+      case "$cond" in
+        crashes|crashes-rejected|findings|findings-rejected) continue ;;
+      esac
+      [ -d "$cond_dir/crashes" ] \
+        && { "$SCRIPT_ROOT/bin/cluster-crashes" "$cond_dir" >/dev/null 2>&1 \
+             || log "WARN: per-condition cluster-crashes failed ($cond, $reason)"; }
+      [ -d "$cond_dir/findings" ] \
+        && { "$SCRIPT_ROOT/bin/cluster-findings" "$cond_dir" >/dev/null 2>&1 \
+             || log "WARN: per-condition cluster-findings failed ($cond, $reason)"; }
+    done
+    if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
+      local rep rej
+      while IFS= read -r -d '' rep; do
+        python3 "$SCRIPT_ROOT/bin/render-md" "$rep" --html-sibling \
+          >/dev/null 2>&1 || true
+      done < <(
+        find "$POOL" -path '*/findings-rejected/FIND-*/*' -type f \
+          \( -name 'REPORT.md' -o -name 'report.md' -o -name 'description.md' \) \
+          -print0 2>/dev/null
+      )
+      for rej in "$POOL"/findings-rejected/REJECTED-FINDINGS.md \
+                 "$POOL"/*/findings-rejected/REJECTED-FINDINGS.md \
+                 "$POOL"/crashes-rejected/REJECTED-CRASHES.md \
+                 "$POOL"/*/crashes-rejected/REJECTED-CRASHES.md; do
+        [ -f "$rej" ] || continue
+        python3 "$SCRIPT_ROOT/bin/render-md" "$rej" --html-sibling \
+          >/dev/null 2>&1 || true
+      done
+    fi
+  fi
+}
+
+update_benchmark_result() {
+  local reason="${1:-update}"
+  local crosstab="$BENCH_ROOT/benchmark-result.md"
+  local artifact uri
+
+  ## Rebuild the pool + cluster JSON + per-condition subtrees first so
+  ## the crosstab and the aggregator can resolve their links and pull
+  ## unique-cluster / severity counts. Without this, the live crosstab
+  ## renders every count as a bare number and shows zero unique bugs
+  ## until end-of-run.
+  rebuild_pool_artifacts "$reason"
+
+  python3 "$PY_BENCH" aggregate "$BENCH_DIR" --out "$BENCH_DIR/report.json" \
+    2>/dev/null || {
+      log "WARN: benchmark-result aggregate failed ($reason)"
+      return 0
+    }
+  if python3 "$PY_BENCH" crosstab "$BENCH_ROOT" --out "$crosstab" \
+      >/dev/null 2>&1; then
+    artifact="$crosstab"
+    if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
+      python3 "$SCRIPT_ROOT/bin/render-md" "$crosstab" --html-sibling \
+        >/dev/null 2>&1 && artifact="${crosstab%.md}.html"
+    fi
+    uri="$(artifact_uri "$artifact")"
+    log "benchmark-result update ($reason): $artifact ($uri)"
+  else
+    log "WARN: benchmark-result update failed ($reason)"
+  fi
+}
+
+# Predict the results-dir a cell WILL write to before launching it.
+# `$cell_dir/workspace` for model-direct, the bin/audit-experiment tree for
+# harness, the dryrun's results/ for dry-run. Used to populate cell.json
+# up front so a partial run is still indexable.
+predict_results_dir() {
+  local cond="$1" cell_dir="$2" exp_name="$3"
+  case "$cond" in
+    model-direct) printf '%s\n' "$cell_dir" ;;
+    harness)
+      printf '%s/repo-root/output/%s-%s/%s/results\n' \
+        "$cell_dir" "$TARGET_SLUG" "$exp_name" "$BACKEND" ;;
+    *) printf '%s/results\n' "$cell_dir" ;;
+  esac
+}
+
+# ── main cell loop ───────────────────────────────────────────────────────
+cells_done=0
+cells_failed=0
+# Tripped by the gemini quota watcher; once set, every remaining cell in
+# the run is short-circuited to status=quota_exhausted instead of being
+# launched. This is what makes the whole script exit promptly when the
+# account quota is gone — without it, replicates 2..N would each burn
+# their own ~5 min to re-detect the same dead account.
+gemini_quota_dead=0
+for cond in "${COND_ARR[@]}"; do
+  rep=1
+  while [ "$rep" -le "$REPLICATES" ]; do
+    cell_name="${cond}-r${rep}"
+    cell_dir="$CELLS_DIR/$cell_name"
+    cell_json="$cell_dir/cell.json"
+
+    # Resumability: a cell already marked done is skipped on re-invocation
+    # against the same bench dir (re-run with --bench-root to resume).
+    if [ -f "$cell_json" ] && grep -q '"status": "done"' "$cell_json" 2>/dev/null; then
+      log "cell $cell_name already done — skipping"
+      cells_done=$((cells_done + 1))
+      rep=$((rep + 1))
+      continue
+    fi
+
+    if [ "$gemini_quota_dead" = "1" ]; then
+      mkdir -p "$cell_dir"
+      exp_name="bench-${RUNID}-${cond}-r${rep}"
+      log "cell $cell_name — skipping (gemini quota exhausted earlier in this run)"
+      write_cell_json "$cell_json" "$cond" "$rep" "$exp_name" \
+        "" 0 "quota_exhausted" "$AGENTS"
+      cells_failed=$((cells_failed + 1))
+      rep=$((rep + 1))
+      continue
+    fi
+
+    mkdir -p "$cell_dir"
+    exp_name="bench-${RUNID}-${cond}-r${rep}"
+    # Per-cell config surfaced in the start line so the live log is enough
+    # to spot a mis-parameterised replicate (wrong agent count, etc.) without
+    # cross-referencing run.json / cell.json.
+    if [ "$cond" = "model-direct" ]; then
+      cell_agents=1
+    else
+      cell_agents="${AGENTS:-default}"
+    fi
+    log "cell $cell_name — starting (exp=$exp_name agents=$cell_agents model=${model:-?})"
+    start_epoch="$(date +%s)"
+    status="done"
+    results_dir=""
+
+    # Early cell.json so a kill mid-cell still leaves an indexable record
+    # pointing harvest at whatever the agent wrote. P6: thread the
+    # requested --agents through so the start-of-cell record carries it
+    # too; actual_agents is filled in after the cell finishes and the
+    # harness has written its state/run-config.json.
+    predicted_rd="$(predict_results_dir "$cond" "$cell_dir" "$exp_name")"
+    write_cell_json "$cell_json" "$cond" "$rep" "$exp_name" \
+      "$predicted_rd" 0 "running" "$AGENTS"
+
+    if [ "$DRY_RUN" = "1" ]; then
+      results_dir="$(run_dryrun_cell "$cell_dir" "$cond" "$rep")" || status="failed"
+    elif [ "$cond" = "model-direct" ]; then
+      results_dir="$(run_model_direct_cell "$cell_dir" "$exp_name")" || status="failed"
+      # Quota watcher fired during this cell — propagate the status and
+      # arm the cross-cell skip flag so we don't relaunch a dead account.
+      if [ -f "$cell_dir/.quota-exhausted" ]; then
+        status="quota_exhausted"
+        gemini_quota_dead=1
+      fi
+      # Gate raw model-direct findings through the independent-validator
+      # quorum (lib/triage_validate.sh) — a FIND counts only on a Promote
+      # vote, matching count_confirmed_crashes' rule for crashes. Rejected
+      # / uncertain findings move to findings-rejected/ before harvest.
+      if [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "1" ] \
+          && [ -n "$results_dir" ] && [ -d "$results_dir/findings" ]; then
+        TRIAGE_VALIDATE_BACKEND="$BACKEND" \
+          triage_validate_confirm_findings "$results_dir/findings" \
+            "$SCRIPT_ROOT/targets/$TARGET_SLUG" "$results_dir/findings-rejected" \
+            >/dev/null 2>&1
+      fi
+    else
+      results_dir="$(run_harness_cell "$cell_dir" "$exp_name")" || status="failed"
+    fi
+
+    end_epoch="$(date +%s)"
+    wall=$((end_epoch - start_epoch))
+
+    # Harvest deterministic metrics for this cell.
+    if [ -n "$results_dir" ] && [ -d "$results_dir" ]; then
+      python3 "$PY_BENCH" harvest "$results_dir" --out "$cell_dir/metrics.json" \
+        2>/dev/null || true
+    else
+      printf '{"exists": false}\n' > "$cell_dir/metrics.json"
+      [ "$status" = "done" ] && status="failed"
+    fi
+
+    write_cell_json "$cell_json" "$cond" "$rep" "$exp_name" \
+      "$results_dir" "$wall" "$status" "$AGENTS"
+
+    if [ "$cond" = "model-direct" ] && [ -f "$cell_dir/metrics.json" ]; then
+      if [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "0" ]; then
+        log "cell $cell_name — model-direct findings gate: DISABLED (--no-validate-findings); $(metric_gate_summary "$cell_dir/metrics.json")"
+      elif [ "$DRY_RUN" != "1" ]; then
+        log "cell $cell_name — model-direct findings gate: $(metric_gate_summary "$cell_dir/metrics.json")"
+      fi
+    fi
+
+    if [ "$status" = "done" ]; then
+      cells_done=$((cells_done + 1))
+      log "cell $cell_name — done in $(format_duration "$wall")"
+    elif [ "$status" = "quota_exhausted" ]; then
+      cells_failed=$((cells_failed + 1))
+      log "cell $cell_name — quota exhausted after $(format_duration "$wall") (see $cell_dir)"
+    else
+      cells_failed=$((cells_failed + 1))
+      log "cell $cell_name — FAILED after $(format_duration "$wall") (see $cell_dir)"
+    fi
+    update_benchmark_result "after $cell_name"
+    rep=$((rep + 1))
+  done
+done
+
+log "cells complete: $cells_done done, $cells_failed failed"
+
+# ── aggregate + ledger ───────────────────────────────────────────────────
+# Rebuild pool artifacts one more time (idempotent) so the ledger section
+# rendered below sees the freshest cluster JSON + pool/ subtree. Without
+# this the appended ledger row links to nothing.
+update_benchmark_result "pre-ledger"
+
+python3 "$PY_BENCH" ledger "$BENCH_DIR" --ledger "$LEDGER" || {
+  log "WARN: ledger update failed"
+}
+
+# Render the stylish HTML sibling (best-effort).
+if [ -x "$SCRIPT_ROOT/bin/render-md" ] && [ -f "$LEDGER" ]; then
+  python3 "$SCRIPT_ROOT/bin/render-md" "$LEDGER" --html-sibling >/dev/null 2>&1 \
+    && log "ledger HTML: ${LEDGER%.md}.html"
+fi
+
+# ── cross-backend crosstab ───────────────────────────────────────────────
+# Fold every backend/target/run under BENCH_ROOT into one comparison table,
+# using the same helper that keeps benchmark-result.* live after each cell.
+update_benchmark_result "final"
+
+# ── stdout summary ───────────────────────────────────────────────────────
+echo
+log "summary for run $RUNID:"
+python3 - "$BENCH_DIR/report.json" <<'PYEOF'
+import json, sys
+try:
+    report = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    print("  (no report.json)")
+    sys.exit(0)
+for c in report.get("conditions", []):
+    crashes = c.get("crashes", [])
+    rng = f"{min(crashes)}-{max(crashes)}" if crashes else "-"
+    print("  {cond:<18} done={d}/{t}  crash median={cm:g}  range={rng}  "
+          "total={ct}".format(
+              cond=c["condition"], d=c["replicates_done"],
+              t=c["replicates_total"], cm=c["crash_median"],
+              rng=rng, ct=c["crash_total"]))
+PYEOF
+echo
+log "ledger: $LEDGER"
+log "done."
+
+[ "$cells_failed" -eq 0 ]
+main_rc=$?
+
+# Close the long-run in-place-edit guard opened just above the
+# "── defaults ──" block. The compound `{ ... }` forces bash to read
+# the whole body into memory before executing, so an editor saving
+# this file mid-run can't change what already-running bash sees.
+exit "$main_rc"
+}

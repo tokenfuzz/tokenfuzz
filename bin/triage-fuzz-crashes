@@ -1,0 +1,125 @@
+#!/bin/bash
+# Triage libFuzzer crash artifacts in $RESULTS_DIR/fuzz-crashes/<FUZZER>/
+# and produce a single $RESULTS_DIR/fuzz-leads.md file that the audit
+# agent directives can reference. One line per non-noise crash, with the
+# top ASan frames extracted from a short repro so the agent can pick up
+# the lead without having to discover the fuzz-crashes directory itself.
+#
+# This closes the loop: fuzz produces crashes → triage script extracts
+# the signature → agents see them in their next iteration prompt and
+# convert them into state-file hypotheses (or VULN dirs on repro).
+#
+# Usage:
+#   bin/triage-fuzz-crashes <results_dir> [max_leads]
+#
+# Conservative defaults: max_leads=20, skip any file under shutdown-noise/
+# (already shunted by run-asan.sh), skip empty files (libFuzzer oom-empty
+# artifacts), skip files whose sha1 filename is the well-known DeinitXPCOM
+# Glean-panic signature.
+
+set -uo pipefail
+
+RESULTS_DIR="${1:-}"
+MAX_LEADS="${2:-20}"
+SHUTDOWN_SHA1="crash-da39a3ee5e6b4b0d3255bfef95601890afd80709"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../lib/platform.sh
+source "$REPO_ROOT/lib/platform.sh"
+
+if [ -z "$RESULTS_DIR" ] || [ ! -d "$RESULTS_DIR" ]; then
+  echo "[triage] usage: $0 <results_dir> [max_leads]" >&2
+  exit 2
+fi
+
+FUZZ_ROOT="$RESULTS_DIR/fuzz-crashes"
+OUT="$RESULTS_DIR/fuzz-leads.md"
+
+if [ ! -d "$FUZZ_ROOT" ]; then
+  # No fuzz runs yet — write an empty marker so the agent prompt can
+  # reference the file unconditionally without a confusing "file not
+  # found" feedback loop.
+  {
+    echo "# Fuzz Crash Leads"
+    echo ""
+    echo "_No $FUZZ_ROOT yet — run a fuzz target first._"
+  } > "$OUT"
+  exit 0
+fi
+
+# Collect candidate files: anything under fuzz-crashes/* that starts with
+# crash- or oom- and is NOT in shutdown-noise/. Newest first so fresh
+# findings surface at the top; agents typically read only the first N
+# leads before hitting turn 20.
+#
+# macOS default bash (3.2) has no `mapfile`, so we collect via a tmpfile
+# + newline-delimited read loop.
+_candidates_tmp="$(mktemp "${TMPDIR:-/tmp}/triage-cands-XXXXXXXX")"
+trap 'rm -f "$_candidates_tmp"' EXIT
+find "$FUZZ_ROOT" -type f \
+     \( -name 'crash-*' -o -name 'oom-*' -o -name 'timeout-*' \) \
+     -not -path '*/shutdown-noise/*' \
+     2>/dev/null \
+  | while IFS= read -r p; do
+      m=$(audit_stat_mtime_epoch "$p" 2>/dev/null || echo 0)
+      printf '%s\t%s\n' "$m" "$p"
+    done \
+  | sort -rn \
+  | cut -f2- \
+  > "$_candidates_tmp"
+
+{
+  echo "# Fuzz Crash Leads"
+  echo ""
+  echo "_Generated $(date -u +%Y-%m-%dT%H:%M:%SZ) — newest first, max ${MAX_LEADS}._"
+  echo ""
+  echo "Each lead is a libFuzzer artifact that survived infrastructure-noise"
+  echo "filtering. Convert high-value leads into state-file hypotheses:"
+  echo ""
+  echo "1. Derive FUZZER name from the parent dir."
+  echo "2. Reproduce: \`FUZZER=<Name> bin/run-asan fuzz-repro <path>\`"
+  echo "3. If the ASan trace points at product code (not libFuzzer runtime,"
+  echo "   not shutdown-path Glean), add a hypothesis row + write a minimal"
+  echo "   hand-authored testcase that reaches the same sink."
+  echo ""
+  echo "---"
+  echo ""
+} > "$OUT"
+
+emitted=0
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  [ -f "$f" ] || continue
+  # Drop the known DeinitXPCOM shutdown-panic SHA1 even if it somehow
+  # escaped the shutdown-noise move (defence-in-depth for bullet 8).
+  base="$(basename "$f")"
+  if [ "$base" = "$SHUTDOWN_SHA1" ]; then
+    continue
+  fi
+  # Drop zero-byte artifacts — libFuzzer OOM minimizer emits them.
+  if [ ! -s "$f" ]; then
+    continue
+  fi
+  fuzzer="$(basename "$(dirname "$f")")"
+  size="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+  mtime="$(audit_mtime_utc "$f" '%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '?')"
+  {
+    echo "## ${fuzzer} / ${base}"
+    echo ""
+    echo "- **Path:** \`$f\`"
+    echo "- **Size:** ${size} bytes"
+    echo "- **Modified:** ${mtime}"
+    echo "- **Reproduce:** \`FUZZER=${fuzzer} bin/run-asan fuzz-repro $f\`"
+    echo ""
+  } >> "$OUT"
+  emitted=$((emitted + 1))
+  if [ "$emitted" -ge "$MAX_LEADS" ]; then
+    break
+  fi
+done < "$_candidates_tmp"
+
+if [ "$emitted" -eq 0 ]; then
+  echo "_No non-noise fuzz crashes found._" >> "$OUT"
+fi
+
+echo "[triage] wrote $OUT (${emitted} leads)"

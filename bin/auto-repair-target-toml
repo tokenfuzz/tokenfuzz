@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""bin/auto-repair-target-toml — LLM-driven target.toml repair.
+
+When the harness keeps failing the same compile/link error across many
+probes, the most useful intervention is to extend the target.toml's
+``includes`` / ``link_libs`` / ``defines`` so harnesses pick up the
+missing translation unit or header. This script:
+
+  1. Reads the most-recent harness build-log digest from stdin (a
+     trimmed transcript chosen by the caller).
+  2. Reads the current target.toml.
+  3. Asks the active LLM backend (via lib/llm_decide.sh) to propose
+     additive edits to the three whitelisted top-level array fields:
+     ``includes``, ``link_libs``, ``defines``.
+  4. Applies the edits if they parse as TOML, change at least one
+     field, and survive the safety rails (no overlap with reserved
+     fields, no shell metacharacters, no absolute-path additions to
+     ``defines``).
+  5. Backs the original up to ``target.toml.bak.<UTC>`` and writes the
+     repaired file atomically. Logs the action to
+     ``$LOGDIR/target-toml-auto-repair.log``.
+
+Disabled by ``TARGET_TOML_AUTO_REPAIR=0`` and skipped silently if
+``LLM_DECIDE_DISABLE=1`` (tests). Idempotent: re-running with the same
+(build-log-digest, current-toml-sha) is a no-op via the marker file
+at ``$LOGDIR/.target-toml-auto-repair-<sha>``.
+
+Usage:
+  bin/auto-repair-target-toml --toml output/<slug>/target.toml \\
+                              --build-log <build.log>          \\
+                              [--harness <harness.c>]          \\
+                              [--logdir <logdir>]              \\
+                              [--dry-run]
+
+Exit codes:
+  0  repair applied (or no-op because the marker already exists)
+  1  disabled, budget exhausted, or LLM declined
+  2  invalid arguments / IO error / unsafe LLM proposal rejected
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import tomllib  # py311+
+except ModuleNotFoundError:  # pragma: no cover
+    tomllib = None  # type: ignore[assignment]
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from prompt_render import render_template  # noqa: E402
+
+# ─── Safety rails ────────────────────────────────────────────────
+
+# Top-level scalar/array names the LLM is allowed to extend. These three
+# arrays are the only fields that legitimately need new entries to fix
+# a "missing TU / missing header / missing macro" link error. Everything
+# else (target, upstream_url, pinned_rev, build_system, asan_bin, …)
+# defines what's under audit and must never be auto-edited.
+_EDITABLE_FIELDS = ("includes", "link_libs", "defines")
+
+# Entries we will REFUSE to add no matter what the LLM says — these
+# either bypass the harness contract or invite arbitrary shell exec.
+_FORBIDDEN_ENTRY_RE = re.compile(
+    r"(?:`|\$\(|\$\{|;|&&|\|\||>\s*/|<\s*/|--?wrapper=)",
+)
+
+# Defines must look like compiler flags: -D, -U, or a -W*. Reject
+# anything that drags in a path (gcc/clang would accept absolute
+# include flags via -D, but those are a smell here).
+_DEFINE_TOKEN_RE = re.compile(r"^-(?:D[A-Za-z_][A-Za-z0-9_]*(?:=.+)?|U[A-Za-z_][A-Za-z0-9_]*|W[A-Za-z0-9_+-]+)$")
+
+# Maximum number of new entries we'll accept across all three fields
+# per invocation. Mass-rewrite proposals are likely hallucinations.
+_MAX_NEW_ENTRIES_PER_FIELD = 8
+_MAX_NEW_ENTRIES_TOTAL = 16
+
+# Bound the build-log digest we ship to the LLM — full logs blow the
+# budget and rarely contribute beyond the first dozen error lines.
+_BUILD_LOG_DIGEST_CHARS = 4000
+_TOML_DIGEST_CHARS = 6000
+_HARNESS_DIGEST_CHARS = 2500
+
+
+def _log(msg: str, logdir: Path) -> None:
+    line = f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} {msg}\n"
+    try:
+        logdir.mkdir(parents=True, exist_ok=True)
+        with open(logdir / "target-toml-auto-repair.log", "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
+    sys.stderr.write(line)
+
+
+def _read_text_safely(path: Path, limit: int) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if len(text) > limit:
+        # Keep head + tail — tail tends to carry the actual linker
+        # error lines while head shows the offending TU.
+        return text[: limit // 2] + "\n…[truncated]…\n" + text[-limit // 2 :]
+    return text
+
+
+def _sha1(data: bytes) -> str:
+    return hashlib.sha1(data).hexdigest()
+
+
+def _llm_propose(prompt: str, *, timeout_secs: int = 30) -> dict | None:
+    """Run the prompt through lib/llm_decide.sh and parse JSON."""
+    helper = SCRIPT_ROOT / "lib" / "llm_decide.sh"
+    if not helper.is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1" && llm_decide target-toml-repair "" "$2"',
+                "llm-decide",
+                str(helper),
+                str(timeout_secs),
+            ],
+            input=prompt, capture_output=True, text=True, check=False,
+            timeout=timeout_secs + 5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        obj = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    return obj
+
+
+def _coerce_list(val) -> list[str]:
+    if val is None:
+        return []
+    if isinstance(val, str):
+        return [val]
+    if isinstance(val, (list, tuple)):
+        return [str(x) for x in val]
+    return []
+
+
+def _validate_additions(field: str, new_items: list[str], existing: list[str]) -> tuple[list[str], list[str]]:
+    """Return (accepted, rejected_reasons). Drops dupes / unsafe entries."""
+    accepted: list[str] = []
+    rejected: list[str] = []
+    existing_set = set(existing)
+    for item in new_items:
+        item = item.strip()
+        if not item:
+            continue
+        if item in existing_set or item in accepted:
+            # Silent dedupe — not a rejection.
+            continue
+        if _FORBIDDEN_ENTRY_RE.search(item):
+            rejected.append(f"{field}:{item} (shell-metachar)")
+            continue
+        if field == "defines" and not _DEFINE_TOKEN_RE.match(item):
+            rejected.append(f"{field}:{item} (not -D/-U/-W flag)")
+            continue
+        if field == "link_libs" and item.startswith("-") and not re.match(r"^-[lLxXWw][^\s;|&`]*$", item):
+            # Allow -l/-L/-Wl,/-x flag forms but reject open-ended -*
+            # in case the LLM proposes -fsanitize=… or --wrapper=….
+            rejected.append(f"{field}:{item} (suspicious flag)")
+            continue
+        if len(accepted) >= _MAX_NEW_ENTRIES_PER_FIELD:
+            rejected.append(f"{field}:{item} (per-field cap reached)")
+            continue
+        accepted.append(item)
+    return accepted, rejected
+
+
+def _format_toml_array(name: str, values: list[str]) -> str:
+    quoted = [json.dumps(v, ensure_ascii=False) for v in values]
+    body = ", ".join(quoted)
+    return f"{name:<13} = [{body}]"
+
+
+_ARRAY_HEAD_RE_TPL = r"^{name}\s*=\s*\["
+
+
+def _replace_top_level_array(text: str, name: str, new_values: list[str]) -> str:
+    """Replace the top-level ``name = [...]`` array literal in `text`.
+
+    We only touch the *first* occurrence in the file's top-level scope
+    (we stop scanning at the first ``[section]`` header). The
+    replacement preserves indentation but rewrites the array body
+    onto a single line — acceptable for the auto-repair audit trail,
+    and the TOML round-tripped through tomllib re-parses identically.
+    """
+    head_re = re.compile(_ARRAY_HEAD_RE_TPL.format(name=re.escape(name)), re.MULTILINE)
+    section_re = re.compile(r"^\[[^\]]+\]\s*$", re.MULTILINE)
+    section_match = section_re.search(text)
+    scan_end = section_match.start() if section_match else len(text)
+    head_match = head_re.search(text, 0, scan_end)
+    if not head_match:
+        # Append a new top-level assignment just before the first
+        # section header, or at EOF if there's no section.
+        insertion = _format_toml_array(name, new_values) + "\n"
+        if section_match:
+            return text[: section_match.start()] + insertion + text[section_match.start() :]
+        suffix = "" if text.endswith("\n") else "\n"
+        return text + suffix + insertion
+    # Find the matching closing bracket of the array literal.
+    depth = 0
+    i = head_match.end() - 1  # points at '['
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                replacement = _format_toml_array(name, new_values)
+                return text[: head_match.start()] + replacement + text[end:]
+        i += 1
+    # Unbalanced bracket — bail rather than corrupt the file.
+    raise ValueError(f"{name}: unbalanced array literal in target.toml")
+
+
+def main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(description="LLM-driven target.toml auto-repair")
+    p.add_argument("--toml", required=True, help="path to target.toml")
+    p.add_argument("--build-log", required=True, help="failing harness build log to digest")
+    p.add_argument("--harness", help="failing harness source (optional context)")
+    p.add_argument("--logdir", help="directory for the auto-repair audit log")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the proposed TOML to stdout without writing")
+    args = p.parse_args(argv)
+
+    if os.environ.get("TARGET_TOML_AUTO_REPAIR") == "0":
+        sys.stderr.write("[auto-repair] disabled by TARGET_TOML_AUTO_REPAIR=0\n")
+        return 1
+    if os.environ.get("LLM_DECIDE_DISABLE") == "1" and not os.environ.get("LLM_DECIDE_MOCK_TARGET_TOML_REPAIR") and not os.environ.get("LLM_DECIDE_MOCK"):
+        # No backend, no mock — nothing to do.
+        return 1
+
+    toml_path = Path(args.toml).resolve()
+    if not toml_path.is_file():
+        sys.stderr.write(f"[auto-repair] target.toml not found: {toml_path}\n")
+        return 2
+    build_log_path = Path(args.build_log).resolve()
+    if not build_log_path.is_file():
+        sys.stderr.write(f"[auto-repair] build log not found: {build_log_path}\n")
+        return 2
+    harness_path = Path(args.harness).resolve() if args.harness else None
+    logdir = Path(args.logdir).resolve() if args.logdir else toml_path.parent
+
+    toml_text = _read_text_safely(toml_path, _TOML_DIGEST_CHARS * 4)
+    if tomllib is not None:
+        try:
+            parsed = tomllib.loads(toml_text)
+        except tomllib.TOMLDecodeError as e:
+            _log(f"REFUSE: cannot parse current target.toml ({e})", logdir)
+            return 2
+    else:
+        parsed = {}
+
+    build_digest = _read_text_safely(build_log_path, _BUILD_LOG_DIGEST_CHARS)
+    harness_digest = _read_text_safely(harness_path, _HARNESS_DIGEST_CHARS) if harness_path else ""
+
+    marker_key = _sha1((build_digest + "|" + toml_text).encode("utf-8", "replace"))
+    marker = logdir / f".target-toml-auto-repair-{marker_key}"
+    if marker.exists():
+        _log(f"NOOP: marker already present for digest {marker_key[:12]}", logdir)
+        return 0
+
+    existing = {f: _coerce_list(parsed.get(f, [])) for f in _EDITABLE_FIELDS}
+
+    prompt = _build_prompt(
+        toml_text=toml_text,
+        build_log=build_digest,
+        harness=harness_digest,
+        existing=existing,
+    )
+    proposal = _llm_propose(prompt)
+    if proposal is None:
+        _log(f"DECLINE: LLM did not produce a proposal for digest {marker_key[:12]}", logdir)
+        # Mark the digest so we don't keep retrying the same failure
+        # on every triage pass and burning the LLM budget.
+        try:
+            marker.write_text("declined\n", encoding="utf-8")
+        except OSError:
+            pass
+        return 1
+
+    accepted_per_field: dict[str, list[str]] = {}
+    rejected_total: list[str] = []
+    total_new = 0
+    for field in _EDITABLE_FIELDS:
+        items = _coerce_list(proposal.get(field, []))
+        acc, rej = _validate_additions(field, items, existing[field])
+        accepted_per_field[field] = acc
+        rejected_total.extend(rej)
+        total_new += len(acc)
+        if total_new > _MAX_NEW_ENTRIES_TOTAL:
+            _log(f"REFUSE: proposal exceeds {_MAX_NEW_ENTRIES_TOTAL} total new entries", logdir)
+            try:
+                marker.write_text("over-cap\n", encoding="utf-8")
+            except OSError:
+                pass
+            return 2
+
+    if total_new == 0:
+        _log(f"NOOP: LLM proposed only entries already present (rejected: {';'.join(rejected_total) or 'none'})", logdir)
+        try:
+            marker.write_text("no-new\n", encoding="utf-8")
+        except OSError:
+            pass
+        return 1
+
+    # Apply additions to a fresh text buffer.
+    new_text = toml_text
+    for field in _EDITABLE_FIELDS:
+        if not accepted_per_field[field]:
+            continue
+        merged = list(existing[field]) + accepted_per_field[field]
+        try:
+            new_text = _replace_top_level_array(new_text, field, merged)
+        except ValueError as e:
+            _log(f"REFUSE: {e}", logdir)
+            return 2
+
+    if tomllib is not None:
+        try:
+            tomllib.loads(new_text)
+        except tomllib.TOMLDecodeError as e:
+            _log(f"REFUSE: repaired target.toml fails to re-parse ({e})", logdir)
+            return 2
+
+    if args.dry_run:
+        sys.stdout.write(new_text)
+        _log(f"DRY-RUN: would add {total_new} entries (digest {marker_key[:12]})", logdir)
+        return 0
+
+    # Atomic write with backup. Use UTC timestamp to keep the audit
+    # trail navigable without colliding under second-resolution.
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = toml_path.with_name(toml_path.name + f".bak.{ts}")
+    try:
+        shutil.copyfile(toml_path, backup)
+    except OSError as e:
+        _log(f"REFUSE: could not write backup {backup} ({e})", logdir)
+        return 2
+    tmp = toml_path.with_name(toml_path.name + ".tmp")
+    try:
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, toml_path)
+    except OSError as e:
+        _log(f"FAIL: write {toml_path} ({e}); restoring from {backup}", logdir)
+        try:
+            shutil.copyfile(backup, toml_path)
+        except OSError:
+            pass
+        return 2
+
+    parts = [f"{field}+{len(v)}" for field, v in accepted_per_field.items() if v]
+    summary = ", ".join(parts)
+    rej_note = f"; rejected: {';'.join(rejected_total)}" if rejected_total else ""
+    _log(
+        f"APPLY: {toml_path.name} ← {summary} (digest {marker_key[:12]}, backup {backup.name}){rej_note}",
+        logdir,
+    )
+    try:
+        marker.write_text(f"applied {ts}\n", encoding="utf-8")
+    except OSError:
+        pass
+    return 0
+
+
+def _build_prompt(*, toml_text: str, build_log: str, harness: str,
+                  existing: dict[str, list[str]]) -> str:
+    """Construct the LLM prompt. Kept terse — instruction first, then
+    the three blocks the model needs."""
+    existing_block = json.dumps({k: existing[k] for k in _EDITABLE_FIELDS}, indent=2)
+    harness_block = f"\nFailing harness source (digest):\n```\n{harness}\n```\n" if harness else ""
+    return render_template("auto_repair_target_toml.md.j2", {
+        "editable_fields": str(list(_EDITABLE_FIELDS)),
+        "max_new_entries_per_field": str(_MAX_NEW_ENTRIES_PER_FIELD),
+        "max_new_entries_total": str(_MAX_NEW_ENTRIES_TOTAL),
+        "existing_block": existing_block,
+        "toml_text": toml_text,
+        "build_log": build_log,
+        "harness_block": harness_block,
+    })
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

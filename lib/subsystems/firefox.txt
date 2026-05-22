@@ -1,0 +1,56 @@
+# Firefox subsystem overlay — the single source of truth for two things:
+#
+#   1. Path → focus-area attribution: longest-prefix match so a path like
+#      dom/media/webcodecs/Foo.cpp resolves to "dom/media/webcodecs"
+#      (lib/parse_state.py).
+#   2. Cold-start subsystem candidates per agent mode: which subsystems a
+#      browser-mode vs shell-mode agent may pick (bin/audit
+#      browser_mode_subsystems / shell_mode_subsystems).
+#
+# Format: "<mode> <path>", one entry per line. mode is one of:
+#   browser — reachable from web content via the browser launch path
+#             (DOM, layout, editor, image decoders, fonts, parser/html).
+#   shell   — reachable from the js shell / xpcshell (JS engine, JIT,
+#             Wasm, irregexp, self-hosted builtins, xpcshell XPCOM).
+#   both    — a valid cold-start candidate in either mode.
+#
+# Attribution uses every path regardless of mode; the mode column only
+# gates which subsystems an agent may pick at cold start. Add a subsystem
+# by adding a line — no code change. Comments (#) and blank lines ignored.
+
+# ── browser mode ────────────────────────────────────────────────────
+browser dom/canvas
+browser dom/webgpu
+browser dom/media
+browser dom/media/webcodecs
+browser dom/indexedDB
+browser dom/navigation
+browser dom/base
+browser dom/bindings
+browser dom/fs
+browser layout/style
+browser layout/generic
+browser layout/svg
+browser image/decoders
+browser gfx/thebes
+browser gfx/harfbuzz
+browser modules/freetype2
+browser editor/libeditor
+browser accessible
+browser parser/html
+browser netwerk/http
+browser netwerk/protocol
+browser third_party/libwebrtc
+
+# ── shell mode ──────────────────────────────────────────────────────
+shell js/src/jit
+shell js/src/wasm
+shell js/src/irregexp
+shell js/src/builtin
+shell js/src/vm
+shell js/src/proxy
+shell js/src/frontend
+shell js/src/gc
+shell modules/libjar
+shell modules/libpref
+shell xpcom/io

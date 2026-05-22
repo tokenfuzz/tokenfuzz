@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# docs - create/update the local documentation venv and run MkDocs.
+#
+# Usage:
+#   bin/docs                                  # show this help
+#   bin/docs serve [mkdocs-serve-args...]     # build site/ if missing, then preview
+#   bin/docs build [mkdocs-build-args...]     # strict build, like CI
+#   bin/docs install                          # only install docs deps
+#   bin/docs mkdocs <args...>                 # pass through to mkdocs
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+DOCS_VENV="${DOCS_VENV:-$SCRIPT_ROOT/.venv}"
+DOCS_SITE_DIR="${DOCS_SITE_DIR:-$SCRIPT_ROOT/site}"
+PYTHON="${PYTHON:-python3}"
+
+usage() {
+  sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+ensure_docs_venv() {
+  if [ ! -x "$DOCS_VENV/bin/python" ]; then
+    "$PYTHON" -m venv "$DOCS_VENV"
+  fi
+
+  "$DOCS_VENV/bin/python" -m pip install -r "$SCRIPT_ROOT/requirements.txt"
+}
+
+serve_docs() {
+  if [ ! -f "$DOCS_SITE_DIR/index.html" ]; then
+    "$DOCS_VENV/bin/mkdocs" build --strict
+  fi
+
+  exec "$DOCS_VENV/bin/mkdocs" serve "$@"
+}
+
+if [ "$#" -eq 0 ]; then
+  usage
+  exit 0
+fi
+
+cmd="$1"
+
+case "$cmd" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+  install)
+    shift
+    if [ "$#" -ne 0 ]; then
+      echo "[docs] install does not accept arguments" >&2
+      usage >&2
+      exit 2
+    fi
+    ensure_docs_venv
+    ;;
+  build)
+    shift
+    ensure_docs_venv
+    exec "$DOCS_VENV/bin/mkdocs" build --strict "$@"
+    ;;
+  mkdocs)
+    shift
+    if [ "$#" -eq 0 ]; then
+      echo "[docs] mkdocs needs arguments" >&2
+      usage >&2
+      exit 2
+    fi
+    ensure_docs_venv
+    exec "$DOCS_VENV/bin/mkdocs" "$@"
+    ;;
+  serve)
+    shift
+    ensure_docs_venv
+    serve_docs "$@"
+    ;;
+  -*)
+    ensure_docs_venv
+    serve_docs "$@"
+    ;;
+  *)
+    echo "[docs] unknown command: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

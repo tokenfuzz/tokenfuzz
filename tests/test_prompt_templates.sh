@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+# Regression coverage for lib/prompts centralization.
+set -o pipefail
+source "$(dirname "$0")/helpers.sh"
+setup_test_env
+
+renderer="$SCRIPT_ROOT/lib/prompt_render.py"
+
+assert_file_exists "$SCRIPT_ROOT/lib/prompt_template.sh" "shared bash prompt renderer exists"
+assert_file_contains "$SCRIPT_ROOT/lib/prompt_render.py" "def render_template" \
+  "python prompt renderer exposes render_template API"
+
+required_templates=(
+  cold_start.md.j2
+  compact_fresh.md.j2
+  deep_investigation.md.j2
+  safety_framing.md.j2
+  common_suffix.md.j2
+  find_first_directive.md.j2
+  strategy_picker.md.j2
+  audit_recon.md.j2
+  validate_finding.md.j2
+  suggest_peers.md.j2
+  suggest_threat_model.md.j2
+  peer_fix_distill.md.j2
+  peer_fix_map.md.j2
+  work_rerank.md.j2
+  auto_repair_target_toml.md.j2
+  model_preflight.md.j2
+  triage_legit_crash.md.j2
+  triage_crash_trace.md.j2
+  triage_crash_confirm.md.j2
+  triage_reachability_fields.md.j2
+  triage_find_quality.md.j2
+  triage_cluster_expand.md.j2
+  triage_patch_review.md.j2
+)
+
+for t in "${required_templates[@]}"; do
+  assert_file_exists "$SCRIPT_ROOT/lib/prompts/$t" "template exists: $t"
+done
+
+rendered=$(python3 "$renderer" triage_crash_trace.md.j2 \
+  --var $'trace=ASAN: heap-use-after-free\n#0 f')
+assert_match "AddressSanitizer trace" "$rendered" "triage trace template renders heading"
+assert_match "heap-use-after-free" "$rendered" "triage trace template injects trace"
+
+rendered=$(python3 "$renderer" audit_recon.md.j2 \
+  --var "target_slug=demo" \
+  --var "scope_block=## Scope"$'\n'"- src/a.c" \
+  --var "slice_name=slice-1" \
+  --var "timeout_secs=1800")
+assert_match "Find all security issues" "$rendered" "audit recon template keeps recall framing"
+assert_match '"slice": "slice-1"' "$rendered" "audit recon template injects slice"
+
+rendered=$(python3 "$renderer" suggest_threat_model.md.j2 \
+  --var "slug=demo" \
+  --var "upstream_url=https://example.com/demo" \
+  --var "readme=A toy XML parser library." \
+  --var "api_surface=include/demo.h")
+assert_match "attacker_controls" "$rendered" "threat-model template names attacker_controls"
+assert_match "call-sequence" "$rendered" "threat-model template lists the token legend"
+assert_match "A toy XML parser library" "$rendered" "threat-model template injects the README"
+
+# Prompt bodies should live in lib/prompts. These patterns intentionally
+# allow canonical docs and non-prompt backend-output regexes.
+# The `prompt="<literal>` alternative catches short single-line prompt
+# strings assigned directly in shell (e.g. the model preflight echo) that
+# the triple-quote / heredoc patterns miss; `prompt="$..."` command
+# substitutions and `prompt=""` are excluded by the leading [^"$].
+prompt_body_re="prompt[[:space:]]*=[[:space:]]*f?\"\"\"|prompt=\\$\\(cat <<|cat <<PROMPT|IFS= read -r -d '' prompt|prompt=\"[^\"\$]|You are |Output a single JSON|Output ONE JSON|Final assistant message"
+remaining=$(
+  cd "$SCRIPT_ROOT" && rg -n "$prompt_body_re" \
+    bin lib .agents \
+    --glob '!lib/prompts/*.md.j2' \
+    2>/dev/null \
+  | grep -v 'bin/run-asan-multi:.*headless mode' \
+  || true
+)
+assert_eq "" "$remaining" "no inline prompt bodies remain outside lib/prompts"
+
+# Regression guard for lib/prompts/benchmark_model_direct.md.j2.
+# This baseline prompt is load-bearing: the metric "0 crashes for every
+# model-direct cell" came back when (a) the CRASH-promotion language got
+# tightened away and (b) the prompt told the model to treat the source
+# tree as read-only, which the agent over-generalised into "do not
+# write build artifacts anywhere". Assertions below pin the structure
+# that fixed the regression so a future cleanup PR can't quietly undo
+# it. If you genuinely need to remove one of these tokens, update both
+# the template and these assertions in the same commit and explain why
+# in the message.
+md_direct="$SCRIPT_ROOT/lib/prompts/benchmark_model_direct.md.j2"
+assert_file_contains "$md_direct" "Primary objective" \
+  "model-direct template carries the CRASH-first primary-objective block"
+assert_file_contains "$md_direct" "Mode switch after ~5 FINDs" \
+  "model-direct template tells the agent to pivot from FIND to CRASH"
+assert_file_contains "$md_direct" "{{ crash_objective }}" \
+  "model-direct template wires the crash_objective placeholder"
+assert_file_contains "$md_direct" "{{ asan_invocation_hint }}" \
+  "model-direct template wires the asan_invocation_hint placeholder"
+assert_file_contains "$md_direct" "{{ harness_build_recipe }}" \
+  "model-direct template wires the harness_build_recipe placeholder"
+assert_file_contains "$md_direct" "AI EDITOR WARNING" \
+  "model-direct template keeps the sentinel comment that deters drive-by rewrites"
+assert_file_contains "$md_direct" "{{ non_audit_dirs }}" \
+  "model-direct template wires the non_audit_dirs scope placeholder"
+assert_file_contains "$md_direct" "Audit scope" \
+  "model-direct template carries the Audit scope section header"
+assert_file_contains "$md_direct" "scoping rule for .findings., not for .navigation." \
+  "model-direct template separates finding-scope from navigation-scope"
+
+# End-to-end: render with the audit_scope helper's actual output and
+# assert each doc/example/test/fuzz family name shows up in the prompt.
+# This is the load-bearing check that the bare CTF agent is told to
+# skip filing findings inside test/example/etc dirs — without it,
+# codex r1 (2026-05-24) filed a real FIND inside tests/.
+audit_scope_dirs=$(python3 -c "
+import sys; sys.path.insert(0, '$SCRIPT_ROOT/lib')
+from audit_scope import non_audit_dirs_for_prompt
+print(non_audit_dirs_for_prompt())
+")
+md_scope_rendered=$(python3 "$renderer" benchmark_model_direct.md.j2 \
+  --var "target_path=/tmp/t" \
+  --var "output_dir=/tmp/o" \
+  --var "crash_objective=" \
+  --var "asan_invocation_hint=" \
+  --var "harness_build_recipe=" \
+  --var "non_audit_dirs=$audit_scope_dirs")
+for token in tests examples fuzz docs; do
+  assert_match "$token" "$md_scope_rendered" \
+    "model-direct rendered prompt enumerates audit_scope token: $token"
+done
+# The harness-internal sanitizer-build / install-staging prefix rules
+# are scanner concerns and MUST NOT leak into the model-direct prompt
+# list — the model still needs to navigate build-asan/ to drive the
+# sanitizer binary. The Audit-scope section's own example mentions
+# build-asan inside the "navigation is fine" clause, so we anchor on
+# the rendered {{ non_audit_dirs }} value instead of grepping the
+# whole prompt.
+case "$audit_scope_dirs" in
+  *build-asan*|*install*)
+    fail "non_audit_dirs_for_prompt leaked harness-scanner prefix rule: $audit_scope_dirs"
+    ;;
+  *)
+    pass "non_audit_dirs_for_prompt stays literal-only (no scanner prefix rules)"
+    ;;
+esac
+# Check the RENDERED prompt body, not the source — the sentinel comment
+# block legitimately references the old phrase when explaining why it
+# was removed.
+md_direct_body=$(python3 "$renderer" benchmark_model_direct.md.j2 \
+  --var "target_path=/tmp/t" \
+  --var "output_dir=/tmp/o" \
+  --var "crash_objective=" \
+  --var "asan_invocation_hint=" \
+  --var "harness_build_recipe=")
+if printf '%s' "$md_direct_body" | grep -q "treat the tree as read-only"; then
+  fail "model-direct rendered prompt reintroduces the read-only-tree prohibition (kills PoC construction)"
+else
+  pass "model-direct rendered prompt no longer forbids writing build artifacts"
+fi
+
+# End-to-end: render the template with the four substitutions the
+# bin/benchmark caller now supplies, and assert the sentinel does NOT
+# survive into the model-facing prompt (prompt_render.py strips Jinja
+# {# … #} blocks).
+md_rendered=$(python3 "$renderer" benchmark_model_direct.md.j2 \
+  --var "target_path=/tmp/t" \
+  --var "output_dir=/tmp/o" \
+  --var "crash_objective=OBJ-MARKER" \
+  --var "asan_invocation_hint=HINT-MARKER" \
+  --var "harness_build_recipe=RECIPE-MARKER")
+assert_match "OBJ-MARKER"    "$md_rendered" "rendered template substitutes crash_objective"
+assert_match "HINT-MARKER"   "$md_rendered" "rendered template substitutes asan_invocation_hint"
+assert_match "RECIPE-MARKER" "$md_rendered" "rendered template substitutes harness_build_recipe"
+if printf '%s' "$md_rendered" | grep -q "AI EDITOR WARNING"; then
+  fail "Jinja {# … #} sentinel leaked into the rendered model-direct prompt"
+else
+  pass "Jinja {# … #} comments are stripped before the prompt reaches the model"
+fi
+
+# Regression guard for the gemini-r1 2026-05-24 incident: the prior
+# template used `./findings/` and `./crashes/` as write paths, which
+# silently mis-routed a real FIND-001 into the source tree when the
+# agent `cd`'d before writing. Every WRITE path in the rendered prompt
+# must now be absolute under {{ output_dir }}.
+#
+# Bare `./findings/` / `./crashes/` survive ONLY inside the explicit
+# prohibition paragraph that warns against them (so the model knows
+# what NOT to do). The bug-shaped pattern is `./crashes/CRASH-N` /
+# `./findings/FIND-<n>/...` — a relative path with the agent-coined
+# entry prefix attached. That combination should be absent from
+# instructional text (it only appears as an example inside the
+# prohibition).
+md_paths_rendered=$(python3 "$renderer" benchmark_model_direct.md.j2 \
+  --var "target_path=/tmp/t" \
+  --var "output_dir=/tmp/o" \
+  --var "crash_objective=" \
+  --var "asan_invocation_hint=" \
+  --var "harness_build_recipe=")
+# Count relative-path mentions; the prohibition paragraph contains
+# exactly THREE (`./findings/` / `./crashes/` in the HARD RULE line,
+# one `./findings/FIND-1/report.md` example, and the closing reminder
+# in "Output contract"). Anything more is a regression — a new
+# instruction sneaking in a relative write path.
+rel_count=$(printf '%s' "$md_paths_rendered" \
+  | grep -cE '\./findings/|\./crashes/' || true)
+if [ "${rel_count:-0}" -le 4 ]; then
+  pass "model-direct rendered prompt keeps relative-path mentions to the prohibition paragraph (count=$rel_count, expected <=4)"
+else
+  fail "model-direct rendered prompt has $rel_count relative-path mentions; expected <=4 (only the explicit prohibition should mention them)"
+fi
+# Belt-and-suspenders: absolute write paths must actually be present.
+assert_match "/tmp/o/findings/" "$md_paths_rendered" \
+    "rendered prompt names the absolute findings path under output_dir"
+assert_match "/tmp/o/crashes/" "$md_paths_rendered" \
+    "rendered prompt names the absolute crashes path under output_dir"
+
+# The python render helper (lib/benchmark_model_direct_render.py) also
+# emits ASan-invocation and harness-build hints whose paths must be
+# absolute. Render with a fake target that has an asan build, then
+# slice OUT the hint blocks (everything from "### Driving the asan
+# binary directly" onward) — the surrounding boilerplate already
+# contains the legitimate prohibition mentions of `./crashes/`.
+render_py="$SCRIPT_ROOT/lib/benchmark_model_direct_render.py"
+if [ -f "$render_py" ]; then
+  hint_target="$(mktemp -d)"
+  trap 'rm -rf "$hint_target"' EXIT
+  mkdir -p "$hint_target/build-asan/src"
+  cat > "$hint_target/build-asan/src/fake_cli" <<'BIN'
+#!/usr/bin/env bash
+true
+BIN
+  chmod +x "$hint_target/build-asan/src/fake_cli"
+  cat > "$hint_target/target.toml" <<TOML
+asan_bin = "src/fake_cli"
+TOML
+  hint_rendered=$(python3 "$render_py" "$hint_target" /tmp/cell)
+  hint_only=$(printf '%s\n' "$hint_rendered" | awk '/### Driving the asan/{found=1} found')
+  if [ -z "$hint_only" ]; then
+    fail "hint block sentinel not found in rendered prompt — render.py asan_invocation_hint may be empty"
+  elif printf '%s' "$hint_only" | grep -E '\./crashes/' >/dev/null; then
+    fail "benchmark_model_direct_render.py emits a relative './crashes/' path in the asan invocation hint or recipe"
+  else
+    pass "benchmark_model_direct_render.py emits absolute crashes paths in hints"
+  fi
+  assert_match "/tmp/cell/crashes/CRASH-N" "$hint_rendered" \
+    "rendered asan invocation hint uses the absolute output-dir crashes path"
+fi
+
+# find_first_directive must use the absolute results_dir for its write
+# instruction — a bare `findings/FIND-NNN-...` resolves against the
+# agent's drifted cwd in harness mode the same way the model-direct
+# bug did. Render with a fake results_dir and assert it appears.
+ffd_rendered=$(python3 "$renderer" find_first_directive.md.j2 \
+  --var "results_dir=/tmp/results-fake")
+assert_match "/tmp/results-fake/findings/FIND-NNN" "$ffd_rendered" \
+  "find_first_directive renders absolute results_dir-based findings path"
+if printf '%s' "$ffd_rendered" \
+   | grep -E '`findings/FIND-NNN' >/dev/null; then
+  fail "find_first_directive still contains a bare relative 'findings/FIND-NNN' write path"
+else
+  pass "find_first_directive no longer carries a bare relative write path"
+fi
+
+# safety_framing wires results_dir through too — its CRASH-promotion
+# gate and field-template references must use the absolute path so a
+# `cd`'d agent never lands a crash report in the source tree.
+sf_rendered=$(python3 "$renderer" safety_framing.md.j2 \
+  --var "results_dir=/tmp/results-sf")
+assert_match "/tmp/results-sf/crashes/CRASH-" "$sf_rendered" \
+  "safety_framing renders absolute results_dir-based crashes path"
+assert_match "/tmp/results-sf/findings/FIND-" "$sf_rendered" \
+  "safety_framing renders absolute results_dir-based findings path"
+# Lines that still mention a bare `crashes/` or `findings/` (without
+# the absolute prefix or NOVOCAB context) would be a regression.
+# Tolerance: `output/<slug>/target.toml` legitimately stays bare
+# (it's a read-only schematic path, not a write target).
+bare_count=$(printf '%s' "$sf_rendered" \
+  | grep -cE '`(crashes|findings)/' || true)
+if [ "${bare_count:-0}" -eq 0 ]; then
+  pass "safety_framing has no remaining bare-relative crashes/findings paths"
+else
+  fail "safety_framing still has $bare_count bare-relative crashes/ or findings/ references"
+fi
+
+# triage_legit_crash must also name the absolute path for the crashes/
+# bucket it asks the validator to consider.
+tlc_rendered=$(python3 "$renderer" triage_legit_crash.md.j2 \
+  --var "results_dir=/tmp/results-tlc" \
+  --var "require_web_gate=0" \
+  --var "evidence=ASAN: heap-use-after-free")
+assert_match "/tmp/results-tlc/crashes/" "$tlc_rendered" \
+  "triage_legit_crash renders absolute results_dir-based crashes path"
+
+# Session-rules reference docs must lead with the PATH CONVENTION
+# preamble that maps every bare findings/ / crashes/ mention to
+# ${RESULTS_DIR}. Without it, an agent that reads the digest will
+# happily write to a relative path. The preamble is the
+# documentation-level fix for the gemini-r1 2026-05-24 incident.
+if grep -q "PATH CONVENTION" "$SCRIPT_ROOT/.agents/references/session-rules.digest.md"; then
+  pass "session-rules.digest.md carries the PATH CONVENTION preamble"
+else
+  fail "session-rules.digest.md missing PATH CONVENTION preamble that maps bare paths to RESULTS_DIR"
+fi
+if grep -q "PATH CONVENTION" "$SCRIPT_ROOT/.agents/references/session-rules.md"; then
+  pass "session-rules.md carries the PATH CONVENTION preamble"
+else
+  fail "session-rules.md missing PATH CONVENTION preamble that maps bare paths to RESULTS_DIR"
+fi
+# The "file FIND first" write instruction inside the digest must use
+# the absolute path — it's the most-followed instruction in the doc.
+if grep -q '`\${RESULTS_DIR}/findings/FIND-NNN' "$SCRIPT_ROOT/.agents/references/session-rules.digest.md"; then
+  pass "session-rules.digest.md FIND-first instruction names absolute path"
+else
+  fail "session-rules.digest.md FIND-first instruction still uses a bare relative 'findings/' path"
+fi
+if grep -q '`\${RESULTS_DIR}/findings/FIND-NNN' "$SCRIPT_ROOT/.agents/references/session-rules.md"; then
+  pass "session-rules.md FIND-first instruction names absolute path"
+else
+  fail "session-rules.md FIND-first instruction still uses a bare relative 'findings/' path"
+fi
+
+# Safety guard: rendering safety_framing or find_first_directive with
+# RESULTS_DIR unset would expand `{{ results_dir }}/findings/` to
+# `/findings/` (an absolute path under the filesystem root). The bash
+# builders must refuse rather than silently emit that. Source lib/prompt.sh
+# in a subshell with RESULTS_DIR unset and confirm both error out.
+guard_out=$(unset RESULTS_DIR; bash -c '
+  set +e
+  # shellcheck disable=SC1091
+  source "$1/lib/prompt.sh" 2>/dev/null
+  build_safety_framing >/dev/null 2>&1
+  echo "safety:$?"
+  build_find_first_directive >/dev/null 2>&1
+  echo "find_first:$?"
+' _ "$SCRIPT_ROOT")
+if printf '%s' "$guard_out" | grep -q '^safety:1$'; then
+  pass "build_safety_framing refuses to render with empty RESULTS_DIR"
+else
+  fail "build_safety_framing should rc=1 with empty RESULTS_DIR, got: $guard_out"
+fi
+if printf '%s' "$guard_out" | grep -q '^find_first:1$'; then
+  pass "build_find_first_directive refuses to render with empty RESULTS_DIR"
+else
+  fail "build_find_first_directive should rc=1 with empty RESULTS_DIR, got: $guard_out"
+fi
+
+teardown_test_env
+summary

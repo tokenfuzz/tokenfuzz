@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+"""Structured audit state store.
+
+Markdown state remains supported for human-readable continuity. This helper is
+the machine-readable source for work-card claims, hypotheses, and ASan runs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from workqueue import (
+    add_common_args,
+    add_hypothesis,
+    add_note,
+    add_run,
+    AmbiguousHypothesisUpdateError,
+    agent_counts,
+    AGENT_COUNT_KEYS,
+    CardStatusUpdateError,
+    claim_next_card,
+    context_from_args,
+    DuplicateHypothesisIdError,
+    explain_queue,
+    init_state,
+    list_work_cards,
+    list_crashes,
+    list_findings,
+    lookup_crash_origin,
+    recent_claims,
+    recent_hypotheses,
+    recent_notes,
+    recent_runs,
+    recent_tried,
+    record_card_reject_skip,
+    release_stale_claims,
+    show_recent,
+    state_resume,
+    show_crash,
+    show_finding,
+    show_work_card,
+    strategy_completion_status,
+    summarize_queue,
+    update_hypothesis,
+    update_card_status,
+)
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Read/write structured audit state")
+    add_common_args(parser)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("init")
+
+    p_next = sub.add_parser("next-card")
+    p_next.add_argument("--agent", required=True)
+    p_next.add_argument("--mode", default="")
+    p_next.add_argument("--role", default="")
+    p_next.add_argument("--strategy", default="", help="optional strategy filter, e.g. S2")
+    p_next.add_argument("--peek", action="store_true", help="print next eligible card without claiming it")
+
+    p_explain = sub.add_parser("explain-queue")
+    p_explain.add_argument("--mode", action="append", default=[], help="agent mode to test for compatibility; repeatable")
+    p_explain.add_argument(
+        "--top",
+        type=int,
+        default=8,
+        help="aggregate by reason and emit top N reasons (default: 8). Use 0 for all reasons.",
+    )
+    p_explain.add_argument(
+        "--all",
+        action="store_true",
+        help="emit one JSONL row per work card (verbose, for programmatic consumers)",
+    )
+
+    p_show = sub.add_parser("show-card", help="compact JSON for one work card")
+    p_show.add_argument("card_id_pos", nargs="?", default="", help="card id")
+    p_show.add_argument("--card-id", default="", help="card id")
+    p_show.add_argument("--mode", default="", help="optional mode for queue-status calculation")
+
+    p_explain_card = sub.add_parser("explain-card", help="alias for show-card")
+    p_explain_card.add_argument("card_id_pos", nargs="?", default="", help="card id")
+    p_explain_card.add_argument("--card-id", default="", help="card id")
+    p_explain_card.add_argument("--mode", default="", help="optional mode for queue-status calculation")
+
+    p_list = sub.add_parser("list-cards", help="compact JSONL listing of work cards")
+    p_list.add_argument("--mode", default="")
+    p_list.add_argument("--status", default="", help="filter by visible status or queue reason, e.g. eligible")
+    p_list.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+
+    p_show_crash = sub.add_parser("show-crash", help="compact JSON for one crash artifact")
+    p_show_crash.add_argument("crash_id_pos", nargs="?", default="", help="crash id")
+    p_show_crash.add_argument("--crash-id", default="", help="crash id")
+
+    p_list_crashes = sub.add_parser("list-crashes", help="compact JSONL listing of crash artifacts")
+    p_list_crashes.add_argument("--status", default="", help="filter by status or cluster")
+    p_list_crashes.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+    p_list_crashes.add_argument("--agent", default="", help=argparse.SUPPRESS)
+
+    p_show_finding = sub.add_parser("show-finding", help="compact JSON for one finding artifact")
+    p_show_finding.add_argument("finding_id_pos", nargs="?", default="", help="finding id")
+    p_show_finding.add_argument("--finding-id", default="", help="finding id")
+
+    p_list_findings = sub.add_parser("list-findings", help="compact JSONL listing of finding artifacts")
+    p_list_findings.add_argument("--status", default="", help="filter by status or class")
+    p_list_findings.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+    p_list_findings.add_argument("--agent", default="", help=argparse.SUPPRESS)
+
+    p_resume = sub.add_parser("resume", help="compact structured startup brief for one agent")
+    p_resume.add_argument("--agent", required=True)
+    p_resume.add_argument("--mode", default="")
+    p_resume.add_argument("--role", default="")
+    p_resume.add_argument("--strategy", default="", help="optional strategy filter for assigned cards")
+    p_resume.add_argument("--claim", action="store_true", help="compatibility no-op; resume claims assigned cards by default")
+    p_resume.add_argument("--peek", action="store_true", help="render the next eligible card without claiming it")
+
+    p_add = sub.add_parser("add-hyp")
+    p_add.add_argument("--id", default="")
+    p_add.add_argument("--agent", required=True)
+    p_add.add_argument("--card-id", default="")
+    p_add.add_argument("--hypothesis", required=True)
+    p_add.add_argument("--file", required=True)
+    p_add.add_argument("--function", default="", help=argparse.SUPPRESS)
+    p_add.add_argument("--line", default="", help=argparse.SUPPRESS)
+    p_add.add_argument("--input-shape", required=True)
+    p_add.add_argument("--guard-gap", required=True)
+    p_add.add_argument(
+        "--diagnostic",
+        "--expected-diagnostic",
+        "--category",
+        dest="diagnostic",
+        required=True,
+        choices=["bounds", "lifetime", "type", "size", "uninit", "state"],
+    )
+    p_add.add_argument("--strategy", required=True)
+    p_add.add_argument("--status", default="PENDING")
+
+    p_up = sub.add_parser("update-hyp")
+    p_up.add_argument("id_pos", nargs="?", default="", help=argparse.SUPPRESS)
+    p_up.add_argument("--id", default="")
+    p_up.add_argument("--agent", default="", help="optional agent scope for non-unique ids")
+    p_up.add_argument("--card-id", default="", help=argparse.SUPPRESS)
+    p_up.add_argument("--status", required=True)
+    p_up.add_argument("--note", "--reason", dest="note", default="")
+
+    p_card = sub.add_parser("update-card")
+    p_card.add_argument("card_id_pos", nargs="?", default="", help=argparse.SUPPRESS)
+    p_card.add_argument("--card-id", default="")
+    p_card.add_argument("--status", required=True)
+    p_card.add_argument("--agent", default="")
+    p_card.add_argument("--note", "--reason", dest="note", default="")
+
+    p_reject_skip = sub.add_parser(
+        "mark-card-reject-skip",
+        help="record do-not-revisit marker so a card is not re-offered to one agent",
+    )
+    p_reject_skip.add_argument("--card-id", default="", help="card id to skip (or pass --crash-id to derive)")
+    p_reject_skip.add_argument("--agent", default="", help="agent number (or pass --crash-id to derive)")
+    p_reject_skip.add_argument(
+        "--crash-id", default="",
+        help="crash id to derive card_id/agent from; the originating hypothesis row supplies both",
+    )
+    p_reject_skip.add_argument("--reason", default="", help="short note for the audit ledger")
+
+    p_run = sub.add_parser("add-run")
+    p_run.add_argument("--agent", required=True)
+    p_run.add_argument("--hypothesis-id", required=True)
+    p_run.add_argument("--card-id", default="")
+    p_run.add_argument("--mode", required=True)
+    p_run.add_argument("--testcase", required=True)
+    p_run.add_argument("--testcase-sha1", default="", help="sha1 of testcase contents at run time")
+    p_run.add_argument("--asan-output", required=True)
+    p_run.add_argument("--verdict", required=True)
+    p_run.add_argument("--asan-runs", default="", help="ASAN_RUNS count for this run (1 default, 5 for --confirm)")
+
+    p_note = sub.add_parser("add-note")
+    p_note.add_argument("--agent", required=True)
+    p_note.add_argument("--hypothesis-id", default="")
+    p_note.add_argument("--card-id", default="")
+    p_note.add_argument(
+        "--kind",
+        required=True,
+        choices=["data-flow", "guard", "variants", "decision", "context", "working-context", "validation"],
+    )
+    p_note.add_argument("--text", required=True)
+
+    p_recent = sub.add_parser(
+        "recent-hyps",
+        help="slim listing of hypotheses (id|status|agent|strategy|file|card_id|hypothesis)",
+    )
+    p_recent.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+    p_recent.add_argument("--agent", default="")
+    p_recent.add_argument("--card-id", default="")
+    p_recent.add_argument("--status", default="", help="regex matched against status")
+    p_recent.add_argument("--strategy", default="")
+
+    p_runs = sub.add_parser(
+        "recent-runs",
+        help="slim listing of runs.jsonl (id|verdict|mode|agent|hypothesis_id|card_id|testcase)",
+    )
+    p_runs.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+    p_runs.add_argument("--agent", default="")
+    p_runs.add_argument("--hypothesis-id", default="")
+    p_runs.add_argument("--card-id", default="")
+    p_runs.add_argument("--verdict", default="", help="regex matched against verdict")
+
+    p_notes = sub.add_parser(
+        "recent-notes",
+        help="slim listing of notes.jsonl (id|kind|agent|hypothesis_id|card_id|text)",
+    )
+    p_notes.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+    p_notes.add_argument("--agent", default="")
+    p_notes.add_argument("--hypothesis-id", default="")
+    p_notes.add_argument("--card-id", default="")
+    p_notes.add_argument("--kind", default="")
+
+    p_claims = sub.add_parser(
+        "recent-claims",
+        help="slim listing of claims.jsonl (timestamp|status|agent|card_id|hypothesis_id|note)",
+    )
+    p_claims.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+    p_claims.add_argument("--agent", default="")
+    p_claims.add_argument("--card-id", default="")
+    p_claims.add_argument("--status", default="", help="exact status match (e.g. claimed)")
+
+    p_recent_all = sub.add_parser(
+        "show-recent",
+        help="one-call bundle: recent claims + hypotheses + runs (replaces multi-tail JSONL pipelines)",
+    )
+    p_recent_all.add_argument("--agent", default="", help="filter all sections by agent")
+    p_recent_all.add_argument("--hyps", type=int, default=10, help="hypothesis rows (0 = skip)")
+    p_recent_all.add_argument("--runs", type=int, default=10, help="run rows (0 = skip)")
+    p_recent_all.add_argument("--claims", type=int, default=10, help="claim rows (0 = skip)")
+    p_recent_all.add_argument("--notes", type=int, default=0, help="note rows (0 = skip; default off, opt-in)")
+
+    p_tried = sub.add_parser(
+        "recent-tried",
+        help="slim listing of tried-inputs-N.log (timestamp|verdict|mode|hash|hypothesis|target|testcase)",
+    )
+    p_tried.add_argument("--agent", required=True, help="agent number, or 'all'")
+    p_tried.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+    p_tried.add_argument("--verdict", default="", help="regex matched against verdict")
+    p_tried.add_argument("--hypothesis", default="")
+    p_tried.add_argument("--target", default="", help="substring match against target field")
+
+    p_release = sub.add_parser(
+        "release-stale-claims",
+        help="release card claims with no active hypothesis (frees the queue between iterations)",
+    )
+    p_release.add_argument(
+        "--grace-seconds",
+        type=int,
+        default=0,
+        help="minimum age before a hypothesis-less claim can be released (0 = use WORK_CARD_CLAIM_GRACE_SECONDS env, default 300s)",
+    )
+    p_release.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress per-row JSON output; print only the release count",
+    )
+
+    p_strat = sub.add_parser(
+        "strategy-status",
+        help="report strategy-completion evidence (used by the rotation gate)",
+    )
+    p_strat.add_argument("--agent", required=True)
+    p_strat.add_argument("--strategy", required=True)
+
+    p_counts = sub.add_parser(
+        "agent-counts",
+        help="single-pass status histogram for one agent (replaces N separate jq counters)",
+    )
+    p_counts.add_argument("--agent", required=True)
+    p_counts.add_argument(
+        "--format",
+        choices=("json", "shell"),
+        default="json",
+        help="json (default) emits one JSON object; shell emits key=value lines suitable for `eval`",
+    )
+
+    args = parser.parse_args(argv)
+    ctx = context_from_args(args)
+    if args.cmd == "init":
+        init_state(ctx)
+        return 0
+    if args.cmd == "next-card":
+        card = claim_next_card(ctx, args.agent, args.mode, args.role, claim=not args.peek, strategy=args.strategy)
+        if card is None:
+            return 1
+        print(json.dumps(card, sort_keys=True))
+        return 0
+    if args.cmd == "explain-queue":
+        if args.all:
+            for row in explain_queue(ctx, args.mode):
+                print(json.dumps(row, sort_keys=True))
+        else:
+            for row in summarize_queue(ctx, args.mode, args.top):
+                print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd in ("show-card", "explain-card"):
+        card_id = args.card_id or args.card_id_pos
+        if not card_id:
+            print("[state] show-card requires CARD_ID or --card-id CARD_ID", file=sys.stderr)
+            return 2
+        row = show_work_card(ctx, card_id, mode=args.mode)
+        if row is None:
+            print(f"[state] card not found: {card_id}", file=sys.stderr)
+            return 1
+        print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "list-cards":
+        for row in list_work_cards(ctx, mode=args.mode, status_filter=args.status, limit=args.limit):
+            print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "show-crash":
+        crash_id = args.crash_id or args.crash_id_pos
+        if not crash_id:
+            print("[state] show-crash requires CRASH-ID or --crash-id CRASH-ID", file=sys.stderr)
+            return 2
+        row = show_crash(ctx, crash_id)
+        if row is None:
+            print(f"[state] crash not found: {crash_id}", file=sys.stderr)
+            return 1
+        print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "list-crashes":
+        for row in list_crashes(ctx, status_filter=args.status, limit=args.limit):
+            print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "show-finding":
+        finding_id = args.finding_id or args.finding_id_pos
+        if not finding_id:
+            print("[state] show-finding requires FIND-ID or --finding-id FIND-ID", file=sys.stderr)
+            return 2
+        row = show_finding(ctx, finding_id)
+        if row is None:
+            print(f"[state] finding not found: {finding_id}", file=sys.stderr)
+            return 1
+        print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "list-findings":
+        for row in list_findings(ctx, status_filter=args.status, limit=args.limit):
+            print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "resume":
+        print(state_resume(ctx, args.agent, args.mode, args.role, claim=not args.peek, strategy=args.strategy), end="")
+        return 0
+    if args.cmd == "add-hyp":
+        if (args.function or args.line) and args.file.count(":") < 2:
+            parts = [args.file]
+            if args.function:
+                parts.append(args.function)
+            if args.line:
+                parts.append(args.line)
+            args.file = ":".join(parts)
+        try:
+            row = add_hypothesis(ctx, args)
+        except DuplicateHypothesisIdError as exc:
+            print(f"[state] {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "update-hyp":
+        if not args.id and args.id_pos:
+            args.id = args.id_pos
+        if not args.id:
+            print("[state] update-hyp requires --id or positional id", file=sys.stderr)
+            return 2
+        try:
+            row = update_hypothesis(ctx, args.id, args.status, args.note, agent=args.agent)
+        except AmbiguousHypothesisUpdateError as exc:
+            print(f"[state] {exc}", file=sys.stderr)
+            return 2
+        if row is None:
+            print(f"[state] hypothesis not found: {args.id}", file=sys.stderr)
+            return 1
+        print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "update-card":
+        if not args.card_id and args.card_id_pos:
+            args.card_id = args.card_id_pos
+        if not args.card_id:
+            print("[state] update-card requires --card-id or positional card id", file=sys.stderr)
+            return 2
+        allowed_card_status = {"claimed", "done", "discarded", "crash", "find", "blocked"}
+        requested_status = args.status.strip()
+        normalized_status = requested_status.lower()
+        terminal_status = requested_status.upper()
+        if terminal_status.startswith("CRASH-"):
+            args.status = "crash"
+        elif terminal_status.startswith("FIND-"):
+            args.status = "find"
+        elif terminal_status in {"ENV-BLOCKED", "ENV_BLOCKED"}:
+            args.status = "blocked"
+        elif normalized_status.startswith("mode-incompatible"):
+            args.status = "blocked"
+        elif normalized_status in allowed_card_status:
+            args.status = normalized_status
+        if args.status not in allowed_card_status:
+            print(
+                "[state] update-card invalid status: "
+                f"{requested_status} (expected one of {', '.join(sorted(allowed_card_status))}, "
+                "CRASH-*, FIND-*, ENV-BLOCKED, or mode-incompatible:*)",
+                file=sys.stderr,
+            )
+            return 2
+        if args.status in {"crash", "find"} and args.status != requested_status:
+            suffix = f"artifact={requested_status}"
+            args.note = f"{args.note}; {suffix}" if args.note else suffix
+        try:
+            row = update_card_status(ctx, args.card_id, args.status, args.agent, args.note)
+        except CardStatusUpdateError as exc:
+            print(f"[state] {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "mark-card-reject-skip":
+        card_id = (args.card_id or "").strip()
+        agent = (args.agent or "").strip()
+        crash_id = (args.crash_id or "").strip()
+        if crash_id and (not card_id or not agent):
+            origin = lookup_crash_origin(ctx, crash_id)
+            if origin is None:
+                print(
+                    f"[state] mark-card-reject-skip: no hypothesis row matches crash_id={crash_id}",
+                    file=sys.stderr,
+                )
+                return 1
+            if not card_id:
+                card_id = str(origin.get("card_id", "")).strip()
+            if not agent:
+                agent = str(origin.get("agent", "")).strip()
+        if not card_id or not agent:
+            print(
+                "[state] mark-card-reject-skip: need --card-id and --agent "
+                "(or --crash-id resolving to a hypothesis that supplies both)",
+                file=sys.stderr,
+            )
+            return 2
+        row = record_card_reject_skip(ctx, card_id, agent, crash_id=crash_id, reason=args.reason or "")
+        print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "add-run":
+        print(json.dumps(add_run(ctx, args), sort_keys=True))
+        return 0
+    if args.cmd == "add-note":
+        if args.kind == "working-context":
+            args.kind = "context"
+        print(json.dumps(add_note(ctx, args), sort_keys=True))
+        return 0
+    if args.cmd == "recent-hyps":
+        print(
+            recent_hypotheses(
+                ctx,
+                limit=args.limit,
+                agent=args.agent,
+                card_id=args.card_id,
+                status_regex=args.status,
+                strategy=args.strategy,
+            ),
+            end="",
+        )
+        return 0
+    if args.cmd == "recent-runs":
+        print(
+            recent_runs(
+                ctx,
+                limit=args.limit,
+                agent=args.agent,
+                hypothesis_id=args.hypothesis_id,
+                card_id=args.card_id,
+                verdict_regex=args.verdict,
+            ),
+            end="",
+        )
+        return 0
+    if args.cmd == "recent-notes":
+        print(
+            recent_notes(
+                ctx,
+                limit=args.limit,
+                agent=args.agent,
+                hypothesis_id=args.hypothesis_id,
+                card_id=args.card_id,
+                kind=args.kind,
+            ),
+            end="",
+        )
+        return 0
+    if args.cmd == "recent-claims":
+        print(
+            recent_claims(
+                ctx,
+                limit=args.limit,
+                agent=args.agent,
+                card_id=args.card_id,
+                status=args.status,
+            ),
+            end="",
+        )
+        return 0
+    if args.cmd == "show-recent":
+        print(
+            show_recent(
+                ctx,
+                agent=args.agent,
+                hyps=args.hyps,
+                runs=args.runs,
+                claims=args.claims,
+                notes=args.notes,
+            ),
+            end="",
+        )
+        return 0
+    if args.cmd == "recent-tried":
+        print(
+            recent_tried(
+                ctx,
+                agent=args.agent,
+                limit=args.limit,
+                verdict_regex=args.verdict,
+                hypothesis=args.hypothesis,
+                target_substr=args.target,
+            ),
+            end="",
+        )
+        return 0
+    if args.cmd == "release-stale-claims":
+        from datetime import timedelta as _td  # local import; argparse already validated input
+
+        grace = _td(seconds=args.grace_seconds) if args.grace_seconds > 0 else None
+        rows = release_stale_claims(ctx, grace=grace)
+        if args.quiet:
+            print(len(rows))
+        else:
+            for row in rows:
+                print(json.dumps(row, sort_keys=True))
+            print(f"# released {len(rows)} stale claim(s)")
+        return 0
+    if args.cmd == "strategy-status":
+        status = strategy_completion_status(ctx, args.agent, args.strategy)
+        print(json.dumps(status, sort_keys=True))
+        return 0 if status["complete"] else 1
+    if args.cmd == "agent-counts":
+        counts = agent_counts(ctx, args.agent)
+        # Always emit every key — callers parse without conditionals.
+        full = {k: int(counts.get(k, 0)) for k in AGENT_COUNT_KEYS}
+        if args.format == "shell":
+            for k in AGENT_COUNT_KEYS:
+                print(f"{k}={full[k]}")
+        else:
+            print(json.dumps(full, sort_keys=True))
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

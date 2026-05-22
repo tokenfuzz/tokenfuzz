@@ -1,0 +1,1440 @@
+#!/usr/bin/env python3
+"""bin/render-md — pad markdown table cells and emit a stylish HTML sibling.
+
+Two outputs from one tool, both deterministic and idempotent:
+
+  1. The markdown file is rewritten in place with each GFM table padded
+     to the widest cell per column (alignment markers — `:--`, `--:`,
+     `:--:` — are honoured). This makes `cat INDEX.md` actually align.
+
+  2. With `--html` (or `--html-sibling`) a self-contained HTML file is
+     emitted next to the input. The template is single-file (no external
+     CSS/JS, no network), so the user can open `file:///.../INDEX.html`
+     in any browser and have a fully styled, clickable view.
+
+The HTML carries a few touches that earn the "stylish" label without
+adding dependencies:
+
+  * **Severity badges**: cells whose text matches Critical / High /
+    Medium / Low get a pill-shaped colour-coded label (red, orange,
+    yellow, green) so the eye lands on the worst rows first.
+  * **Surface chips**: library-api / cli / maint-tool render as small
+    chips so QA can scan input surface at a glance.
+  * **Cluster ids**: monospace + light background so they read like the
+    code references they are.
+  * **Sticky table headers**: long INDEX.md tables stay scannable when
+    you scroll.
+  * **Auto link rewrite**: `[…](foo.md)` is rewritten to `…/foo.html` in
+    the HTML output so cross-document links land on the styled sibling.
+
+Markdown features supported (this is not a general renderer — only what
+INDEX.md / CLUSTERS.md / REPORT.md actually use):
+
+    # / ## / ### headings, paragraphs, GFM tables (with alignment markers),
+    inline links [text](url), inline `code`, **bold**, _italic_, fenced
+    ```code blocks```.
+
+Anything outside the set above passes through inside `<p>...</p>`.
+"""
+from __future__ import annotations
+
+import argparse
+import html
+import re
+import sys
+from pathlib import Path
+
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+import stack_frames  # noqa: E402
+
+
+# ─── Markdown table parsing + padding ─────────────────────────────────────
+
+
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$")
+
+
+def _split_row(raw: str) -> list[str]:
+    s = raw.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def _alignment_from_sep(sep_row: str) -> list[str]:
+    out: list[str] = []
+    for cell in _split_row(sep_row):
+        c = cell.strip()
+        starts = c.startswith(":")
+        ends = c.endswith(":")
+        if starts and ends:
+            out.append("center")
+        elif ends:
+            out.append("right")
+        elif starts:
+            out.append("left")
+        else:
+            out.append("none")
+    return out
+
+
+def _pad_cell(text: str, width: int, align: str) -> str:
+    pad = max(0, width - len(text))
+    if align == "right":
+        return " " * pad + text
+    if align == "center":
+        left = pad // 2
+        right = pad - left
+        return " " * left + text + " " * right
+    return text + " " * pad
+
+
+def _pad_table(header: str, sep: str, body: list[str]) -> list[str]:
+    cols_h = _split_row(header)
+    cols_sep = _split_row(sep)
+    rows = [_split_row(r) for r in body]
+    if rows:
+        n = max(len(cols_h), len(cols_sep), *(len(r) for r in rows))
+    else:
+        n = max(len(cols_h), len(cols_sep))
+    cols_h += [""] * (n - len(cols_h))
+    cols_sep += [""] * (n - len(cols_sep))
+    rows = [r + [""] * (n - len(r)) for r in rows]
+
+    align = _alignment_from_sep(sep)
+    align += ["none"] * (n - len(align))
+
+    widths = [len(cols_h[i]) for i in range(n)]
+    for r in rows:
+        for i in range(n):
+            widths[i] = max(widths[i], len(r[i]))
+
+    sep_cells: list[str] = []
+    for i in range(n):
+        a = align[i]
+        bar_w = max(widths[i], 3)
+        if a == "left":
+            sep_cells.append(":" + "-" * (bar_w - 1))
+        elif a == "right":
+            sep_cells.append("-" * (bar_w - 1) + ":")
+        elif a == "center":
+            sep_cells.append(":" + "-" * (bar_w - 2) + ":")
+        else:
+            sep_cells.append("-" * bar_w)
+
+    def emit(cells: list[str]) -> str:
+        out = []
+        for i, c in enumerate(cells):
+            a = align[i]
+            out.append(_pad_cell(c, widths[i], a if a != "none" else "left"))
+        return "| " + " | ".join(out) + " |"
+
+    lines = [emit(cols_h)]
+    lines.append("| " + " | ".join(sep_cells) + " |")
+    for r in rows:
+        lines.append(emit(r))
+    return lines
+
+
+def pad_markdown_tables(text: str) -> str:
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if _TABLE_ROW_RE.match(line) and _TABLE_SEP_RE.match(nxt):
+            header = line
+            sep = nxt
+            body: list[str] = []
+            j = i + 2
+            while j < len(lines) and _TABLE_ROW_RE.match(lines[j]):
+                body.append(lines[j])
+                j += 1
+            out.extend(_pad_table(header, sep, body))
+            i = j
+            continue
+        out.append(line)
+        i += 1
+    if text.endswith("\n"):
+        return "\n".join(out) + "\n"
+    return "\n".join(out)
+
+
+# ─── Markdown → HTML (single file, no external assets) ─────────────────────
+
+
+_HTML_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  :root {{
+    --fg: #1f2328;
+    --muted: #57606a;
+    --border: #d0d7de;
+    --border-soft: #eaeef2;
+    --bg: #ffffff;
+    --bg-alt: #f6f8fa;
+    --bg-row-even: #fcfdff;
+    --bg-row-hover: #f3f6fa;
+    --link: #0969da;
+    --link-hover: #0a4ea0;
+    --code-bg: #eef1f4;
+    --header-bg: linear-gradient(180deg, #ffffff 0%, #f6f8fa 100%);
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --shadow-sm: 0 1px 2px rgba(20, 30, 60, 0.06);
+    --shadow-md: 0 2px 6px rgba(20, 30, 60, 0.08);
+
+    --sev-critical-bg: #b91c1c;
+    --sev-critical-fg: #ffffff;
+    --sev-high-bg:     #d97706;
+    --sev-high-fg:     #ffffff;
+    --sev-medium-bg:   #facc15;
+    --sev-medium-fg:   #3a2a00;
+    --sev-low-bg:      #16a34a;
+    --sev-low-fg:      #ffffff;
+    --sev-unknown-bg:  #d0d7de;
+    --sev-unknown-fg:  #57606a;
+
+    --chip-lib-bg:   #dbeafe;
+    --chip-lib-fg:   #1e40af;
+    --chip-cli-bg:   #e2e8f0;
+    --chip-cli-fg:   #334155;
+    --chip-maint-bg: #fef3c7;
+    --chip-maint-fg: #854d0e;
+    --chip-unk-bg:   #f1f5f9;
+    --chip-unk-fg:   #64748b;
+  }}
+  html, body {{ background: var(--bg); color: var(--fg); }}
+  body {{
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    max-width: 1320px;
+    margin: 2em auto;
+    padding: 0 1.5em 5em;
+  }}
+  h1 {{
+    font-size: 1.85em;
+    margin: 0 0 .5em;
+    padding-bottom: .35em;
+    border-bottom: 2px solid var(--border-soft);
+    letter-spacing: -0.01em;
+  }}
+  h2 {{
+    font-size: 1.3em;
+    margin: 1.6em 0 .6em;
+    padding-bottom: .25em;
+    border-bottom: 1px solid var(--border-soft);
+    letter-spacing: -0.005em;
+  }}
+  h3 {{
+    font-size: 1.05em;
+    margin: 1.4em 0 .5em;
+    letter-spacing: -0.005em;
+  }}
+  h2 .anchor, h3 .anchor {{
+    color: var(--muted);
+    text-decoration: none;
+    margin-left: .35em;
+    opacity: 0;
+    transition: opacity .15s ease;
+    font-weight: 500;
+  }}
+  h2:hover .anchor, h3:hover .anchor {{ opacity: 0.55; }}
+  h2 .anchor:hover, h3 .anchor:hover {{ opacity: 1; }}
+  p, ul {{ margin: .65em 0; }}
+  em, em.note {{ color: var(--muted); font-style: normal; }}
+  /* Default to a visible underlined link: the M3 grey surface makes
+     un-underlined links blend in with surrounding `<code>` and table
+     text, so every <a> declares its affordance up front. The dimmer
+     `text-decoration-color` softens the underline so it does not shout
+     at high link density (table count cells, scoreboards). */
+  a {{
+    color: var(--link);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--link) 45%, transparent);
+    text-underline-offset: 2px;
+    text-decoration-thickness: 1px;
+  }}
+  a:hover {{
+    color: var(--link-hover);
+    text-decoration-color: currentColor;
+  }}
+  /* `<code>` inside `<a>` (e.g. `<a><code>codex</code></a>` in scoreboard
+     identity cells) used to keep the code's dark-grey fill, hiding the
+     link affordance. Make it inherit so a linked code chip reads as a
+     link, not as identical text to its un-linked neighbour. */
+  a code, a:hover code {{ color: inherit; }}
+  code {{
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 5px;
+    font-family: var(--mono);
+    font-size: .92em;
+    color: #2c3e50;
+  }}
+  pre {{
+    background: var(--bg-alt);
+    padding: .9em 1.1em;
+    border-radius: 7px;
+    overflow: auto;
+    border: 1px solid var(--border-soft);
+    font-size: .9em;
+  }}
+  pre code {{ background: transparent; padding: 0; }}
+  strong {{ font-weight: 600; }}
+  blockquote {{
+    margin: 1em 0;
+    padding: .7em 1.1em;
+    border-left: 3px solid var(--border);
+    background: var(--bg-alt);
+    border-radius: 0 8px 8px 0;
+    color: var(--muted);
+  }}
+  blockquote strong {{ color: var(--fg); }}
+  blockquote :first-child {{ margin-top: 0; }}
+  blockquote :last-child {{ margin-bottom: 0; }}
+
+  table {{
+    border-collapse: separate;
+    border-spacing: 0;
+    width: 100%;
+    min-width: 100%;
+    font-size: .94em;
+    background: var(--bg);
+    border: none;
+    box-shadow: none;
+  }}
+  .table-wrap {{
+    margin: 1em 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-radius: 8px;
+    box-shadow: var(--shadow-md);
+    border: 1px solid var(--border);
+    background: var(--bg);
+  }}
+  thead th {{
+    background: var(--header-bg);
+    border-bottom: 2px solid var(--border);
+    text-align: left;
+    font-weight: 600;
+    padding: 9px 12px;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    color: var(--fg);
+    white-space: nowrap;
+  }}
+  tbody td {{
+    border-top: 1px solid var(--border-soft);
+    padding: 8px 12px;
+    vertical-align: top;
+    word-break: break-word;
+  }}
+  tbody tr:first-child td {{ border-top: none; }}
+  tbody tr:nth-child(even) td {{ background: var(--bg-row-even); }}
+  tbody tr:hover td {{ background: var(--bg-row-hover); }}
+  td.right, th.right {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+  td.center, th.center {{ text-align: center; }}
+  td.left, th.left {{ text-align: left; }}
+  /* Inline `code` inside table cells is atomic by default — run ids,
+     slugs, CVE numbers, identifiers stay on one line so they aren't
+     chopped mid-token. render-md marks structured code spans (stack
+     signatures with `->`, prose snippets with whitespace) with the
+     `.wrap` class so the bug-causing case — a Root signature like
+     `cJSON_Delete cJSON.c:258 -> cJSON_Delete cJSON.c:261` blowing
+     out the table — wraps inside its cell instead. The classifier is
+     content-based, not column-based, so it works across every report
+     type without an allowlist that drifts as new tables appear. */
+  td code, th code {{
+    white-space: nowrap;
+  }}
+  td code.wrap, th code.wrap {{
+    white-space: normal;
+    word-break: normal;
+    overflow-wrap: anywhere;
+  }}
+
+  /* Severity pill */
+  .sev {{
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: .82em;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    line-height: 1.4;
+    white-space: nowrap;
+  }}
+  .sev-Critical {{ background: var(--sev-critical-bg); color: var(--sev-critical-fg); }}
+  .sev-High     {{ background: var(--sev-high-bg);     color: var(--sev-high-fg); }}
+  .sev-Medium   {{ background: var(--sev-medium-bg);   color: var(--sev-medium-fg); }}
+  .sev-Low      {{ background: var(--sev-low-bg);      color: var(--sev-low-fg); }}
+  .sev-Unknown  {{ background: var(--sev-unknown-bg);  color: var(--sev-unknown-fg); }}
+  .sev-score {{ font-weight: 400; opacity: 0.85; margin-left: .25em; }}
+
+  /* Surface chip */
+  .chip {{
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 5px;
+    font-size: .85em;
+    font-weight: 500;
+    line-height: 1.45;
+    white-space: nowrap;
+  }}
+  .chip-library  {{ background: var(--chip-lib-bg);   color: var(--chip-lib-fg); }}
+  .chip-cli      {{ background: var(--chip-cli-bg);   color: var(--chip-cli-fg); }}
+  .chip-maint    {{ background: var(--chip-maint-bg); color: var(--chip-maint-fg); }}
+  .chip-unknown  {{ background: var(--chip-unk-bg);   color: var(--chip-unk-fg); }}
+  .chip-reason {{ color: var(--muted); margin-left: .35em; font-weight: 400; }}
+
+  /* Compact field grid for REPORT.md "Fields" table */
+  .fields-table th:first-child {{ width: 220px; }}
+  .fields-table td:first-child {{ font-weight: 500; color: var(--muted); }}
+  .rejected-findings-table {{
+    table-layout: fixed;
+  }}
+  .rejected-findings-table th:nth-child(1),
+  .rejected-findings-table td:nth-child(1) {{ width: 14rem; white-space: nowrap; }}
+  .rejected-findings-table th:nth-child(2),
+  .rejected-findings-table td:nth-child(2) {{ width: 6rem; white-space: nowrap; }}
+  .rejected-findings-table th:nth-child(3),
+  .rejected-findings-table td:nth-child(3) {{ width: 8rem; white-space: nowrap; }}
+  .rejected-findings-table th:nth-child(4),
+  .rejected-findings-table td:nth-child(4) {{ width: 5.5rem; white-space: nowrap; }}
+  .rejected-findings-table th:nth-child(5),
+  .rejected-findings-table td:nth-child(5) {{ width: 6rem; white-space: nowrap; }}
+  .rejected-findings-table th:nth-child(7),
+  .rejected-findings-table td:nth-child(7) {{ width: 9rem; white-space: nowrap; }}
+  .rejected-findings-table td:nth-child(6) {{
+    word-break: normal;
+    overflow-wrap: anywhere;
+  }}
+  /* Aggregated benchmark crosstab: 16 columns. Let multi-word headers
+     wrap onto a second line — by default `thead th` (and `.right`)
+     carry `white-space: nowrap`, which keeps "Rejected findings",
+     "Medium+ crashes", "Top severity", etc. on a single line and
+     consumes most of the table width.
+     With the headers free to wrap, identifier cells (run id, condition
+     slug) stay atomic on a single line instead of being chopped
+     character-by-character mid-token. Compact padding + a slightly
+     smaller type scale buy back the rest. */
+  .benchmark-table {{
+    min-width: 0;
+    font-size: .88em;
+  }}
+  .benchmark-table thead th,
+  .benchmark-table tbody td {{
+    padding: 7px 8px;
+    vertical-align: middle;
+  }}
+  .benchmark-table thead th,
+  .benchmark-table thead th.right,
+  .benchmark-table thead th.center {{
+    white-space: normal;
+    word-break: normal;
+    overflow-wrap: normal;
+    line-height: 1.25;
+  }}
+  dl.report-definition {{
+    display: grid;
+    grid-template-columns: minmax(160px, 240px) 1fr;
+    gap: 0;
+    margin: .8em 0 1em;
+    border: 1px solid var(--border-soft);
+    border-radius: 7px;
+    overflow: hidden;
+    background: var(--bg);
+  }}
+  dl.report-definition dt,
+  dl.report-definition dd {{
+    margin: 0;
+    padding: 8px 11px;
+    border-top: 1px solid var(--border-soft);
+  }}
+  dl.report-definition dt:nth-of-type(1),
+  dl.report-definition dd:nth-of-type(1) {{ border-top: none; }}
+  dl.report-definition dt {{
+    color: var(--muted);
+    font-weight: 600;
+    background: var(--bg-alt);
+    white-space: nowrap;
+  }}
+  dl.report-definition dd {{
+    word-break: break-word;
+  }}
+
+  /* Triage hero card — verdict at a glance, no scrolling required.
+     Pulls from the Fields table + Summary + ASan top frames +
+     Reachability so the security triager can decide in 2 seconds. */
+  .triage-card {{
+    margin: 1em 0 1.6em;
+    padding: 1.1em 1.25em 1.15em;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow-sm);
+  }}
+  .triage-card.sev-Critical {{ border-left-color: var(--sev-critical-bg); }}
+  .triage-card.sev-High     {{ border-left-color: var(--sev-high-bg); }}
+  .triage-card.sev-Medium   {{ border-left-color: var(--sev-medium-bg); }}
+  .triage-card.sev-Low      {{ border-left-color: var(--sev-low-bg); }}
+  .triage-card.sev-Unknown  {{ border-left-color: var(--sev-unknown-bg); }}
+  .triage-row {{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .55em;
+  }}
+  .triage-row + .triage-row,
+  .triage-card .triage-frames,
+  .triage-card .triage-meta,
+  .triage-card .triage-summary {{ margin-top: .55em; }}
+  .triage-frames {{
+    display: grid;
+    gap: .2em;
+  }}
+  .triage-frame {{
+    font-family: var(--mono);
+    font-size: .92em;
+    color: var(--fg);
+  }}
+  .triage-frame code {{ background: transparent; padding: 0; }}
+  .triage-frame .frame-func {{ font-weight: 600; }}
+  .triage-frame .frame-loc  {{ color: var(--muted); }}
+  .triage-meta {{
+    color: var(--muted);
+    font-size: .92em;
+    display: flex;
+    flex-wrap: wrap;
+    gap: .3em 1.2em;
+  }}
+  .triage-meta strong {{ color: var(--fg); font-weight: 600; }}
+  .triage-summary {{
+    font-size: .98em;
+    line-height: 1.55;
+    color: var(--fg);
+    border-top: 1px solid var(--border-soft);
+    padding-top: .65em;
+  }}
+  .primitive {{
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 5px;
+    font-family: var(--mono);
+    font-size: .85em;
+    font-weight: 500;
+    line-height: 1.45;
+    background: #ede9fe;
+    color: #5b21b6;
+    white-space: nowrap;
+  }}
+  .primitive.cat-bounds   {{ background: #fee2e2; color: #991b1b; }}
+  .primitive.cat-lifetime {{ background: #ffedd5; color: #9a3412; }}
+  .primitive.cat-uninit   {{ background: #fef3c7; color: #92400e; }}
+  .primitive.cat-type     {{ background: #e0e7ff; color: #3730a3; }}
+  .primitive.cat-state    {{ background: #ecfccb; color: #3f6212; }}
+
+  /* Collapsible sections — Severity rationale is reference material
+     (the math, not the headline). <details> keeps it one click away
+     without dominating the report. */
+  details.collapsible {{
+    margin: 1.6em 0 .6em;
+    padding: 0;
+    border: none;
+  }}
+  details.collapsible > summary {{
+    cursor: pointer;
+    font-size: 1.3em;
+    font-weight: 600;
+    margin: 0 0 .6em;
+    padding-bottom: .25em;
+    border-bottom: 1px solid var(--border-soft);
+    letter-spacing: -0.005em;
+    list-style: none;
+  }}
+  details.collapsible > summary::-webkit-details-marker {{ display: none; }}
+  details.collapsible > summary::before {{
+    content: "▸";
+    color: var(--muted);
+    margin-right: .4em;
+    font-size: .85em;
+    display: inline-block;
+    transition: transform .15s ease;
+  }}
+  details.collapsible[open] > summary::before {{ transform: rotate(90deg); }}
+  details.collapsible > summary:hover {{ color: var(--link); }}
+
+  @media (max-width: 700px) {{
+    body {{ margin: 1em auto; padding: 0 .8em 3em; }}
+    table {{ font-size: .88em; }}
+    thead th, tbody td {{ padding: 7px 8px; }}
+    dl.report-definition {{ grid-template-columns: 1fr; }}
+    dl.report-definition dd {{ border-top: none; padding-top: 0; }}
+  }}
+{theme_css}
+</style>
+</head>
+<body>
+"""
+
+_HTML_FOOT = "</body>\n</html>\n"
+
+
+# ─── Material 3 stylesheet ────────────────────────────────────────────────
+#
+# Every HTML page render-md emits uses Google Material 3 Expressive on a
+# neutral grey tonal palette: layered grey surfaces, the M3 shape scale
+# (large corner radii), elevation instead of hairline borders, and a
+# tonal-grey table header. A restrained, professional monochrome — no
+# accent hue, severity badges aside.
+#
+# It is kept as a block appended at the end of <style>, so it overrides
+# the base (GitHub-flavoured) stylesheet above by source order without
+# editing it. The base is fully variable-driven, so this is mostly a
+# second :root that re-points the colour/elevation tokens plus a few
+# structural rules for shape.
+_MATERIAL_CSS = """
+  /* ─── Theme: Google Material 3 Expressive (neutral grey) ──────────── */
+  :root {
+    --fg: #202124;            /* on-surface — near-black grey */
+    --muted: #5f6368;         /* on-surface-variant — medium grey */
+    --border: #dadce0;        /* outline-variant */
+    --border-soft: #e8eaed;
+    --bg: #f1f3f4;            /* surface-container — page sits on tone */
+    --bg-alt: #e8eaed;        /* surface-container-high */
+    --bg-row-even: #f8f9fa;
+    --bg-row-hover: #f1f3f4;
+    --link: #1a73e8;          /* M3 reference blue — readable on grey surfaces */
+    --link-hover: #174ea6;    /* darker on hover for contrast */
+    --code-bg: #f1f3f4;
+    --header-bg: #e8eaed;     /* tonal grey header */
+    --shadow-sm: 0 1px 2px rgba(32,33,36,.16);
+    --shadow-md: 0 1px 3px 1px rgba(32,33,36,.10),
+                 0 1px 2px rgba(32,33,36,.18);
+    --m3-primary: #3c4043;    /* primary role — a professional dark grey */
+    --m3-on-pc: #202124;      /* header / heading text */
+    --surface-lowest: #ffffff;
+    /* Severity badges deliberately keep the base colour palette (red /
+       orange / yellow / green): the grey treatment is for surfaces only,
+       and severity is the one place colour earns its keep. */
+  }
+  body {
+    font-family: "Roboto", "Roboto Flex", -apple-system, BlinkMacSystemFont,
+                 "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    line-height: 1.6;
+  }
+  /* Headings on the M3 display / headline scale, primary-toned. */
+  h1 {
+    font-size: 2.15em;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--m3-on-pc);
+    border-bottom: none;
+    margin-bottom: .1em;
+  }
+  h2 {
+    font-size: 1.45em;
+    font-weight: 600;
+    color: var(--m3-primary);
+    border-bottom: none;
+    margin-top: 2em;
+  }
+  h3 {
+    font-size: 1.12em;
+    font-weight: 600;
+  }
+  /* Every table wrapper is an elevated M3 surface card — elevation, not outline.
+     The wrapper owns horizontal scrolling so atomic audit fields can stay
+     unwrapped instead of being forced into broken hyphenated fragments. */
+  .table-wrap {
+    border: none;
+    border-radius: 20px;
+    box-shadow: var(--shadow-md);
+    background: var(--surface-lowest);
+  }
+  table {
+    background: var(--surface-lowest);
+  }
+  thead th {
+    background: var(--header-bg);
+    color: var(--m3-on-pc);
+    border-bottom: none;
+    padding: 13px 16px;
+  }
+  tbody td {
+    padding: 11px 16px;
+    border-top: 1px solid var(--border-soft);
+  }
+  /* Code, fenced blocks, and quotes adopt the M3 rounded shape scale. */
+  code { border-radius: 8px; color: #4a4458; }
+  pre {
+    border: none;
+    border-radius: 16px;
+    background: var(--surface-lowest);
+    box-shadow: var(--shadow-sm);
+  }
+  /* Blockquote → an M3 tonal "note" card with a primary accent edge. */
+  blockquote {
+    background: var(--surface-lowest);
+    border-left: 4px solid var(--m3-primary);
+    border-radius: 16px;
+    padding: 1em 1.3em;
+    box-shadow: var(--shadow-sm);
+    color: var(--muted);
+  }
+  ul { margin: .8em 0; padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  .sev { padding: 3px 12px; letter-spacing: .03em; }
+"""
+
+
+_INLINE_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+# Tells that an inline `code` span is a structured signature or prose
+# snippet (stack frame chain, "foo bar baz", "f() -> g()") rather than
+# an atomic identifier (slug, hash, CVE id, run timestamp). Structured
+# code is allowed to wrap inside table cells; atomic code stays on one
+# line so identifiers don't get chopped mid-token. Keeping the rule
+# structural (content shape, not column name) means it works across
+# every report type — benchmark, findings, clusters, crashes — without
+# a per-column allowlist that has to be maintained as new tables appear.
+_STRUCTURED_CODE_RE = re.compile(r"\s|->")
+
+
+def _format_inline_code(content: str) -> str:
+    cls = ' class="wrap"' if _STRUCTURED_CODE_RE.search(content) else ""
+    return f"<code{cls}>{html.escape(content)}</code>"
+# A URL carries an explicit scheme when it starts with `scheme:` (RFC 3986
+# scheme grammar). Relative paths and `#anchor` links have no scheme.
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+# Schemes safe to emit as a clickable href in maintainer-facing local HTML.
+# `file:` is included: a report bundle is opened from a file:// origin and
+# links to its sibling artifacts (crash dirs, REPORT.html, reproduce.sh) by
+# absolute file:// URI — that is navigation, not execution. javascript:,
+# data: and vbscript: are NOT here: they would run script in the origin.
+_SAFE_URL_SCHEME_RE = re.compile(r"^(?:https?|mailto|ftp|file):", re.IGNORECASE)
+_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)")
+_UNDERSCORE_ITALIC_RE = re.compile(r"(?<![A-Za-z0-9_])_([^_\n]+)_(?![A-Za-z0-9_])")
+_HTML_COMMENT_LINE_RE = re.compile(r"^<!--.*?-->\s*$")
+
+
+def _slug(text: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9\- ]+", "", text).strip().lower()
+    return re.sub(r"\s+", "-", s) or "section"
+
+
+def _render_inline(text: str) -> str:
+    """Apply inline markdown transformations + HTML-escape everything else.
+    Tokens: links, code, bold, italic. Order matters — code is opaque so
+    it runs first; links second so [text](url) doesn't get italic-eaten."""
+    parts: list[tuple[str, str]] = []  # (kind, content)
+
+    def _stash_codes(m: re.Match) -> str:
+        parts.append(("code", m.group(1)))
+        return f"\x00C{len(parts) - 1}\x00"
+
+    def _stash_links(m: re.Match) -> str:
+        # Cross-document links are rewritten to .html so clicks work in
+        # the browser. (The source markdown still uses .md so harness
+        # parsers and GitHub renderers see the canonical paths.)
+        url = m.group(2)
+        if url.endswith(".md"):
+            url = url[:-3] + ".html"
+        text = html.escape(m.group(1))
+        # Drop the href for any URL that carries a scheme outside the safe
+        # set — agent-authored report markdown is rendered into local HTML
+        # that maintainers open, so a javascript:/data: link would execute
+        # in the file:// origin. The link text is kept as plain escaped
+        # text; relative paths and #anchors (no scheme) pass through.
+        if _URL_SCHEME_RE.match(url) and not _SAFE_URL_SCHEME_RE.match(url):
+            parts.append(("link", text))
+            return f"\x00L{len(parts) - 1}\x00"
+        parts.append(("link",
+                      f'<a href="{html.escape(url, quote=True)}">{text}</a>'))
+        return f"\x00L{len(parts) - 1}\x00"
+
+    s = _INLINE_CODE_RE.sub(_stash_codes, text)
+    s = _INLINE_LINK_RE.sub(_stash_links, s)
+    s = html.escape(s)
+    s = _BOLD_RE.sub(r"<strong>\1</strong>", s)
+    s = _ITALIC_RE.sub(r"<em>\1</em>", s)
+    s = _UNDERSCORE_ITALIC_RE.sub(r'<em class="note">\1</em>', s)
+
+    def _restore(m: re.Match) -> str:
+        kind = m.group(1)
+        idx = int(m.group(2))
+        k, content = parts[idx]
+        if k == "code":
+            return _format_inline_code(content)
+        return content
+
+    # Restore to a fixed point: a link's stashed text can itself hold a
+    # code placeholder (`[`code`](url)`), and one re.sub pass does not
+    # re-scan its own substitutions. Code is stashed before links, so each
+    # pass strictly reduces the placeholder count — this terminates.
+    while "\x00" in s:
+        s, n = re.subn(r"\x00([CL])(\d+)\x00", _restore, s)
+        if not n:
+            break
+    return s
+
+
+# Cell decorators — applied AFTER the cell text is HTML-rendered so we
+# can wrap matching tokens in styled spans.
+_SEV_CELL_RE = re.compile(
+    r"^\s*(Critical|High|Medium|Low|Unknown|—)(?:\s*\((\d+)\))?\s*$"
+)
+
+
+def _decorate_cell(rendered_html: str, raw_cell: str) -> str:
+    """Wrap severity / surface tokens in styled spans so the HTML view
+    shows pill-shaped badges and chips. Operates on the raw cell text
+    (pre-render) so Critical/High/Medium/Low don't have to be matched
+    inside HTML markup."""
+    raw = raw_cell.strip()
+
+    # Severity pill: "Critical (68)" → span.sev-Critical
+    m = _SEV_CELL_RE.match(raw)
+    if m:
+        level = m.group(1)
+        score = m.group(2)
+        if level == "—":
+            return rendered_html
+        klass = f"sev-{level if level != 'Unknown' else 'Unknown'}"
+        if score:
+            return (f'<span class="sev {klass}">{level}'
+                    f'<span class="sev-score">{score}</span></span>')
+        return f'<span class="sev {klass}">{level}</span>'
+
+    # Cluster placeholder before bin/cluster-crashes has run — render
+    # as a muted dash instead of the literal "(set by ...)" text.
+    if _CLUSTER_PLACEHOLDER_RE.match(raw):
+        return '<span style="color: var(--muted)">—</span>'
+
+    # Surface chip: "library-api — reason" / "cli" / "maint-tool"
+    surface_m = re.match(r"^\s*(library-api|cli|maint-tool|unknown)\b(?:\s*—\s*(.+))?\s*$", raw)
+    if surface_m:
+        kind = surface_m.group(1)
+        reason = (surface_m.group(2) or "").strip()
+        klass_map = {
+            "library-api": "chip-library",
+            "cli":         "chip-cli",
+            "maint-tool":  "chip-maint",
+            "unknown":     "chip-unknown",
+        }
+        chip = f'<span class="chip {klass_map[kind]}">{kind}</span>'
+        if reason:
+            chip += f'<span class="chip-reason">— {html.escape(reason)}</span>'
+        return chip
+    return rendered_html
+
+
+def _table_extra_class(header: list[str]) -> str:
+    """Identify the small REPORT.md "Fields" key/value table so we can
+    style the leading column as a label column."""
+    if [c.lower() for c in header[:2]] == ["field", "value"]:
+        return "fields-table"
+    if [c.lower() for c in header] == [
+        "id", "vote", "reachability", "guards", "primitive", "reason", "report"
+    ]:
+        return "rejected-findings-table"
+    # The aggregated benchmark crosstab is 16 columns wide; the
+    # harness-wide `min-width: max-content` + nowrap-on-code rules
+    # otherwise force horizontal scrolling.
+    if [c.lower() for c in header[:4]] == [
+        "backend", "run", "target", "condition"
+    ]:
+        return "benchmark-table"
+    return ""
+
+
+def _align_class(align: str) -> str:
+    return f' class="{align}"' if align in ("left", "right", "center") else ""
+
+
+def _render_table_html(header: list[str], align: list[str], body: list[list[str]]) -> str:
+    extra = _table_extra_class(header)
+    cls = f' class="{extra}"' if extra else ""
+    out = ['<div class="table-wrap">', f"<table{cls}>", "<thead><tr>"]
+    for i, c in enumerate(header):
+        a = align[i] if i < len(align) else "none"
+        out.append(f"  <th{_align_class(a)}>{_render_inline(c)}</th>")
+    out.append("</tr></thead>")
+    out.append("<tbody>")
+    for row in body:
+        out.append("  <tr>")
+        for i, c in enumerate(row):
+            a = align[i] if i < len(align) else "none"
+            inner = _decorate_cell(_render_inline(c), c)
+            out.append(f"    <td{_align_class(a)}>{inner}</td>")
+        out.append("  </tr>")
+    out.append("</tbody>")
+    out.append("</table>")
+    out.append("</div>")
+    return "\n".join(out)
+
+
+# GFM lists. We only handle a single level — that's all REPORT.md /
+# CLUSTERS.md / INDEX.md ever emit.
+_UL_ITEM_RE = re.compile(r"^\s*[-*]\s+(.*)$")
+_OL_ITEM_RE = re.compile(r"^\s*\d+\.\s+(.*)$")
+
+# Structured fields the harness duplicates *below* the Fields table as
+# bare-label lines for downstream regex parsers (bin/reachability,
+# bin/cluster-crashes, lib/triage.sh). They render as a wall of broken
+# key:value text in HTML and the same data is already on screen one
+# table up, so we drop the block from HTML output only — the markdown
+# source is left untouched so parsers keep working.
+_BARE_LABEL_KEYS = (
+    "Surface", "Trigger source", "Caller contract", "Caller controls",
+    "Parameter control", "Boundary", "Trusted caller actions", "Reproduction rate",
+    "Cluster", "Primitive", "Strategy",
+)
+_BARE_LABEL_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(k) for k in _BARE_LABEL_KEYS) + r"):\s+\S"
+)
+_SEVERITY_LINE_RE = re.compile(r"^- \*\*Severity\*\*:\s+\S")
+
+
+def _is_bare_label_line(line: str) -> bool:
+    """A line that belongs to the regex-extraction duplicate block that
+    follows the Fields table in REPORT.md. Suppressed in HTML output."""
+    return bool(_BARE_LABEL_RE.match(line) or _SEVERITY_LINE_RE.match(line))
+
+
+_REPORT_LABEL_HEADING_RE = re.compile(
+    r"^(Summary|Classification|Boundary|Caller controls|Parameter control|Trusted caller actions|"
+    r"Root Cause|Data Flow|Triage decision):\s*$"
+)
+_REPORT_DEFINITION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9 /_-]{1,48}):\s+(.+)$")
+
+
+def _render_definition_list(lines: list[str]) -> str | None:
+    rows: list[tuple[str, str]] = []
+    for line in lines:
+        m = _REPORT_DEFINITION_RE.match(line)
+        if not m:
+            return None
+        rows.append((m.group(1).strip(), m.group(2).strip()))
+    if len(rows) < 2:
+        return None
+    out = ['<dl class="report-definition">']
+    for key, val in rows:
+        out.append(f"<dt>{_render_inline(key)}</dt>")
+        out.append(f"<dd>{_render_inline(val)}</dd>")
+    out.append("</dl>")
+    return "".join(out)
+
+
+# Sections that are reference material, not headline. Rendered as
+# <details> in HTML (collapsed by default) so the eye lands on Summary,
+# Root Cause, Data Flow, the sanitizer block, and Reachability first.
+# `## Expected sanitizer output` is intentionally NOT here: as of the
+# section consolidation it carries the full ASan stack and is the
+# canonical sanitizer view.
+_COLLAPSIBLE_HEADINGS = {
+    "severity rationale",
+}
+
+# Cluster placeholder the harness writes before bin/cluster-crashes
+# computes a real ID. Rendered as a muted dash in the HTML Fields
+# table — the literal text reads as broken to a triager.
+_CLUSTER_PLACEHOLDER_RE = re.compile(r"^\(set by bin/cluster-crashes\)\s*$")
+
+
+# ─── Triage hero card extraction ─────────────────────────────────────────
+
+
+_FIELDS_ROW_RE = re.compile(
+    r"^\|\s*(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*\|\s*(?P<val>.+?)\s*\|\s*$"
+)
+_SEV_FIELD_RE = re.compile(
+    r"^(?P<level>Critical|High|Medium|Low|Unknown)(?:\s*\((?P<score>\d+)\))?\s*$"
+)
+_SEV_BULLET_RE = re.compile(
+    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low|Unknown)"
+)
+_SCORE_RE = re.compile(r"score=(\d+)")
+_SURFACE_FIELD_RE = re.compile(
+    r"^(?P<kind>library-api|cli|maint-tool|unknown)\b(?:\s*—\s*(?P<reason>.+))?\s*$"
+)
+_CALLERS_RE = re.compile(
+    r"\*\*External callers[^:\n]*:\s*(?P<n>\d+)\*\*"
+)
+_SUMMARY_RE = re.compile(
+    r"##\s+Summary\s*\n+(?P<body>(?:[^\n#].*\n?)+)"
+)
+_DEDUP_FRAMES_LINE_RE = re.compile(
+    r"^(?:Dedup frames|ClusterFuzz key frames):\s*(?P<val>.+?)\s*$",
+    re.MULTILINE,
+)
+_LOC_SUFFIX_RE = re.compile(r"^(?P<func>.+?)\s+(?P<loc>\S+:\d+(?::\d+)?)$")
+_PRIMITIVE_CATEGORY = {
+    "heap-buffer-overflow": "bounds",
+    "stack-buffer-overflow": "bounds",
+    "global-buffer-overflow": "bounds",
+    "heap-use-after-free":  "lifetime",
+    "stack-use-after-return": "lifetime",
+    "use-after-free":       "lifetime",
+    "use-of-uninitialized-value": "uninit",
+    "uninitialized":        "uninit",
+    "double-free":          "lifetime",
+    "invalid-free":         "lifetime",
+    "alignment":            "type",
+    "type-confusion":       "type",
+    "null-deref":           "state",
+}
+
+
+def _frames_from_dedup_value(value: str) -> list[stack_frames.StackFrame]:
+    frames: list[stack_frames.StackFrame] = []
+    for idx, part in enumerate(value.split(" -> "), start=1):
+        part = part.strip()
+        if not part:
+            continue
+        loc = ""
+        func = part
+        loc_match = _LOC_SUFFIX_RE.match(part)
+        if loc_match:
+            func = loc_match.group("func").strip()
+            loc = loc_match.group("loc").strip()
+        frames.append(stack_frames.StackFrame(idx, func, loc, part))
+        if len(frames) >= 3:
+            break
+    return frames
+
+
+def _extract_hero(text: str) -> dict:
+    """Pull the verdict-at-a-glance signals from REPORT.md so the HTML
+    can show them in a hero card before the user has to scroll."""
+    h: dict = {}
+    cluster_seen = False
+    for raw in text.splitlines():
+        m = _FIELDS_ROW_RE.match(raw)
+        if not m:
+            continue
+        key = m.group("key").strip().lower()
+        val = m.group("val").strip()
+        if key == "field" and val.lower() == "value":
+            continue
+        if key == "severity":
+            sm = _SEV_FIELD_RE.match(val)
+            if sm and sm.group("level") != "Unknown":
+                h["severity_level"] = sm.group("level")
+                h["severity_score"] = sm.group("score")
+        elif key == "primitive":
+            h["primitive"] = val
+        elif key == "surface":
+            sm = _SURFACE_FIELD_RE.match(val)
+            if sm:
+                h["surface"] = sm.group("kind")
+        elif key == "cluster" and not cluster_seen:
+            cluster_seen = True
+            if not _CLUSTER_PLACEHOLDER_RE.match(val):
+                h["cluster"] = val
+        elif key == "reproduction rate":
+            h["repro"] = val
+
+    if not h.get("severity_level"):
+        for raw in text.splitlines():
+            sm = _SEV_BULLET_RE.match(raw.strip())
+            if sm:
+                h["severity_level"] = sm.group("level")
+                score_m = _SCORE_RE.search(raw)
+                h["severity_score"] = score_m.group(1) if score_m else None
+                break
+
+    # Find the first three interesting ASan frames anywhere in the
+    # document. Sanitizer/libc/fuzzer wrappers often occupy #0, so literal
+    # #0 is a poor triage headline, and the clusterer now keys on the same
+    # three-frame crash-state chain.
+    frames = stack_frames.interesting_frames(text, want=3)
+    if not frames:
+        dedup_value = ""
+        for raw in text.splitlines():
+            m = _FIELDS_ROW_RE.match(raw)
+            if m and m.group("key").strip().lower() in {"dedup frames", "clusterfuzz key frames"}:
+                dedup_value = m.group("val").strip()
+                break
+        if not dedup_value:
+            m = _DEDUP_FRAMES_LINE_RE.search(text)
+            if m:
+                dedup_value = m.group("val").strip()
+        if dedup_value:
+            frames = _frames_from_dedup_value(dedup_value)
+    if frames:
+        h["top_frames"] = frames
+        h["top_frame_func"] = frames[0].function
+        h["top_frame_loc"] = frames[0].location
+
+    cm = _CALLERS_RE.search(text)
+    if cm:
+        h["callers"] = cm.group("n")
+
+    sm = _SUMMARY_RE.search(text)
+    if sm:
+        body = sm.group("body").strip()
+        # Stop at the next heading-ish line if any leaked through.
+        body = body.split("\n## ")[0]
+        # Collapse to the first paragraph — that's the headline.
+        body = body.split("\n\n", 1)[0]
+        h["summary"] = " ".join(s.strip() for s in body.splitlines() if s.strip())
+    return h
+
+
+def _primitive_category(prim: str) -> str:
+    p = prim.lower()
+    for needle, cat in _PRIMITIVE_CATEGORY.items():
+        if needle in p:
+            return cat
+    return ""
+
+
+def _render_hero(h: dict) -> str:
+    """Render the triage hero card. Skipped entirely if no useful
+    signal was extracted (small docs, INDEX.md, etc.)."""
+    if not (h.get("severity_level") or h.get("primitive") or h.get("top_frame_func")):
+        return ""
+    parts: list[str] = []
+    sev_class = f"sev-{h.get('severity_level', 'Unknown')}"
+    parts.append(f'<div class="triage-card {sev_class}">')
+
+    top_row: list[str] = []
+    if h.get("severity_level"):
+        lvl = h["severity_level"]
+        score_html = (
+            f'<span class="sev-score">{html.escape(h["severity_score"])}</span>'
+            if h.get("severity_score") else ""
+        )
+        top_row.append(
+            f'<span class="sev sev-{lvl}">{html.escape(lvl)}{score_html}</span>'
+        )
+    if h.get("primitive"):
+        cat = _primitive_category(h["primitive"])
+        cat_class = f' cat-{cat}' if cat else ""
+        top_row.append(
+            f'<span class="primitive{cat_class}">{html.escape(h["primitive"])}</span>'
+        )
+    if h.get("surface"):
+        klass_map = {
+            "library-api": "chip-library",
+            "cli":         "chip-cli",
+            "maint-tool":  "chip-maint",
+            "unknown":     "chip-unknown",
+        }
+        klass = klass_map.get(h["surface"], "chip-unknown")
+        top_row.append(
+            f'<span class="chip {klass}">{html.escape(h["surface"])}</span>'
+        )
+    if top_row:
+        parts.append('<div class="triage-row">' + "".join(top_row) + "</div>")
+
+    if h.get("top_frames"):
+        parts.append('<div class="triage-frames">')
+        for idx, frame in enumerate(h["top_frames"], start=1):
+            loc = (
+                f' @ <span class="frame-loc"><code>{html.escape(frame.location)}</code></span>'
+                if frame.location else ""
+            )
+            parts.append(
+                '<div class="triage-frame">'
+                f'<span class="frame-index">#{idx}</span> '
+                f'<span class="frame-func"><code>{html.escape(frame.function)}</code></span>'
+                f'{loc}'
+                '</div>'
+            )
+        parts.append('</div>')
+
+    meta: list[str] = []
+    if h.get("repro"):
+        meta.append(f'<span><strong>Repro</strong> {html.escape(h["repro"])}</span>')
+    if h.get("callers"):
+        meta.append(
+            f'<span><strong>{html.escape(h["callers"])}</strong> external callers</span>'
+        )
+    if h.get("cluster"):
+        meta.append(f'<span><strong>Cluster</strong> {html.escape(h["cluster"])}</span>')
+    if meta:
+        parts.append('<div class="triage-meta">' + "".join(meta) + "</div>")
+
+    if h.get("summary"):
+        parts.append(
+            f'<div class="triage-summary">{_render_inline(h["summary"])}</div>'
+        )
+
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
+def markdown_to_html(text: str, title: str = "Report") -> str:
+    """Render a small subset of markdown (headings, paragraphs, tables,
+    blockquotes, inline code/bold/italic/links, fenced code blocks) to a
+    self-contained HTML document, styled with the Material 3 stylesheet."""
+    lines = text.splitlines()
+    body: list[str] = []
+    i = 0
+    paragraph: list[str] = []
+    hero = _extract_hero(text)
+    hero_emitted = False
+    in_collapsible = False
+    # Heading anchors must be unique within the document — the benchmark
+    # ledger stacks many runs, each repeating "Verdict" / "Scoreboard" —
+    # so a repeated slug gets a -2, -3, … suffix.
+    seen_slugs: set[str] = set()
+
+    def _uniq_slug(text: str) -> str:
+        base = _slug(text)
+        slug = base
+        n = 2
+        while slug in seen_slugs:
+            slug = f"{base}-{n}"
+            n += 1
+        seen_slugs.add(slug)
+        return slug
+
+    def _flush_paragraph() -> None:
+        if not paragraph:
+            return
+        # Drop the bare-label duplicate block (kept in markdown only for
+        # regex consumers — already rendered as the Fields table above).
+        #
+        # Legacy reports sometimes place prose immediately before a bare
+        # label without an intervening blank line. Filter those metadata
+        # lines out before rendering so they do not get folded into prose.
+        paragraph[:] = [l for l in paragraph if not _is_bare_label_line(l)]
+        if not paragraph:
+            paragraph.clear()
+            return
+        joined = " ".join(paragraph).strip()
+        if joined:
+            definition = _render_definition_list(paragraph)
+            if definition is not None:
+                body.append(definition)
+            else:
+                body.append(f"<p>{_render_inline(joined)}</p>")
+        paragraph.clear()
+
+    def _close_collapsible() -> None:
+        nonlocal in_collapsible
+        if in_collapsible:
+            body.append("</details>")
+            in_collapsible = False
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+
+        if not stripped:
+            _flush_paragraph()
+            i += 1
+            continue
+
+        # Stand-alone HTML comments (most often the <!-- enrich:NAME -->
+        # idempotency fences emitted by bin/enrich-report) drop out of
+        # the rendered HTML entirely — otherwise html.escape would print
+        # the raw marker text on the page.
+        if _HTML_COMMENT_LINE_RE.match(stripped):
+            _flush_paragraph()
+            i += 1
+            continue
+
+        if stripped.startswith("# "):
+            _flush_paragraph()
+            _close_collapsible()
+            ttext = stripped[2:].strip()
+            body.append(f"<h1>{_render_inline(ttext)}</h1>")
+            if not hero_emitted:
+                hero_html = _render_hero(hero)
+                if hero_html:
+                    body.append(hero_html)
+                hero_emitted = True
+            i += 1
+            continue
+        if stripped.startswith("### "):
+            _flush_paragraph()
+            ttext = stripped[4:].strip()
+            slug = _uniq_slug(ttext)
+            body.append(
+                f'<h3 id="{slug}">{_render_inline(ttext)}'
+                f'<a class="anchor" href="#{slug}" aria-label="Permalink">¶</a></h3>'
+            )
+            i += 1
+            continue
+        if stripped.startswith("## "):
+            _flush_paragraph()
+            _close_collapsible()
+            ttext = stripped[3:].strip()
+            slug = _uniq_slug(ttext)
+            if ttext.lower() in _COLLAPSIBLE_HEADINGS:
+                body.append(
+                    f'<details class="collapsible" id="{slug}">'
+                    f'<summary>{_render_inline(ttext)}'
+                    f'<a class="anchor" href="#{slug}" aria-label="Permalink">¶</a>'
+                    f'</summary>'
+                )
+                in_collapsible = True
+            else:
+                body.append(
+                    f'<h2 id="{slug}">{_render_inline(ttext)}'
+                    f'<a class="anchor" href="#{slug}" aria-label="Permalink">¶</a></h2>'
+                )
+            i += 1
+            continue
+        label_m = _REPORT_LABEL_HEADING_RE.match(stripped)
+        if label_m:
+            _flush_paragraph()
+            ttext = label_m.group(1)
+            slug = _uniq_slug(ttext)
+            body.append(
+                f'<h2 id="{slug}">{_render_inline(ttext)}'
+                f'<a class="anchor" href="#{slug}" aria-label="Permalink">¶</a></h2>'
+            )
+            i += 1
+            if i < len(lines) and not lines[i].strip():
+                i += 1
+            continue
+        if stripped.startswith("```"):
+            _flush_paragraph()
+            block: list[str] = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                block.append(lines[i])
+                i += 1
+            i += 1  # skip closing ```
+            body.append("<pre><code>" + html.escape("\n".join(block)) + "</code></pre>")
+            continue
+        if _TABLE_ROW_RE.match(line) and _TABLE_SEP_RE.match(nxt):
+            _flush_paragraph()
+            header = _split_row(line)
+            align = _alignment_from_sep(nxt)
+            body_rows: list[list[str]] = []
+            j = i + 2
+            while j < len(lines) and _TABLE_ROW_RE.match(lines[j]):
+                body_rows.append(_split_row(lines[j]))
+                j += 1
+            body.append(_render_table_html(header, align, body_rows))
+            i = j
+            continue
+
+        # Blockquote: consecutive `>`-prefixed lines fold into one
+        # <blockquote>. Without this they would reach _flush_paragraph and
+        # render with a literal leading `>` in the page text.
+        if stripped.startswith(">"):
+            _flush_paragraph()
+            quote: list[str] = []
+            while i < len(lines) and lines[i].strip().startswith(">"):
+                q = lines[i].strip()[1:]
+                quote.append(q[1:] if q.startswith(" ") else q)
+                i += 1
+            joined = " ".join(s for s in quote if s.strip()).strip()
+            if joined:
+                body.append(f"<blockquote>{_render_inline(joined)}</blockquote>")
+            continue
+
+        # Bare-label lines (regex-extraction duplicates of the Fields
+        # table) must reach _flush_paragraph for suppression — including
+        # the `- **Severity**: ...` line that would otherwise be claimed
+        # by the list handler below.
+        if _is_bare_label_line(line):
+            paragraph.append(stripped)
+            i += 1
+            continue
+
+        ul_m = _UL_ITEM_RE.match(line)
+        ol_m = _OL_ITEM_RE.match(line)
+        if ul_m or ol_m:
+            _flush_paragraph()
+            tag = "ul" if ul_m else "ol"
+            item_re = _UL_ITEM_RE if ul_m else _OL_ITEM_RE
+            items: list[str] = []
+            while i < len(lines):
+                m = item_re.match(lines[i])
+                if not m:
+                    break
+                items.append(m.group(1).strip())
+                i += 1
+            body.append(
+                f"<{tag}>"
+                + "".join(f"<li>{_render_inline(it)}</li>" for it in items)
+                + f"</{tag}>"
+            )
+            continue
+
+        if line.endswith("  "):
+            paragraph.append(stripped + "<br>")
+        else:
+            paragraph.append(stripped)
+        i += 1
+
+    _flush_paragraph()
+    _close_collapsible()
+    return (
+        _HTML_HEAD.format(title=html.escape(title), theme_css=_MATERIAL_CSS)
+        + "\n".join(body) + "\n" + _HTML_FOOT
+    )
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("input", type=Path, help="markdown file to process")
+    ap.add_argument("--no-pad", action="store_true",
+                    help="skip markdown padding (only useful with --html)")
+    ap.add_argument("--html", type=Path, default=None,
+                    help="write HTML output to this path")
+    ap.add_argument("--html-sibling", action="store_true",
+                    help="write HTML to <input>.html (e.g. INDEX.md → INDEX.html)")
+    ap.add_argument("--title", default=None, help="HTML <title> (default: filename stem)")
+    ap.add_argument("--check", action="store_true",
+                    help="exit non-zero if a rewrite would change the file; do not rewrite")
+    args = ap.parse_args(argv)
+
+    if not args.input.is_file():
+        print(f"render-md: not a file: {args.input}", file=sys.stderr)
+        return 2
+
+    text = args.input.read_text("utf-8", errors="replace")
+
+    if args.check:
+        padded = pad_markdown_tables(text)
+        return 0 if padded == text else 1
+
+    if not args.no_pad:
+        padded = pad_markdown_tables(text)
+        if padded != text:
+            args.input.write_text(padded, "utf-8")
+        text = padded
+
+    html_path: Path | None = args.html
+    if args.html_sibling and html_path is None:
+        html_path = args.input.with_suffix(".html")
+
+    if html_path is not None:
+        title = args.title or args.input.stem
+        html_doc = markdown_to_html(text, title=title)
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(html_doc, "utf-8")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

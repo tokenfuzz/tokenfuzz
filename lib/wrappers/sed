@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# sed wrapper: caps output via lib/wrappers/_cap. _cap resolves the real sed
+# binary by skipping this wrapper directory in PATH.
+#
+# Why wrap sed: agents routinely invoke `sed -n 'X,Yp' FILE` thinking they've
+# bounded the read by line range. In practice, the first 100–200 lines of a
+# generated REPORT.md or a fixture like targets/pcre2/testdata/testoutput25
+# can be 150–260 KiB. That output then re-enters every subsequent turn's
+# context. The wrapper enforces the same line/byte caps as rg/grep so a stray
+# wide range can no longer flood the conversation.
+#
+# Pass-through flags: sed has no flag that produces zero output (unlike
+# `grep -q` or `rg --files`), so the passthrough list is empty. Stream
+# pipelines (cat foo | sed ...) and in-place edits (sed -i ...) are unaffected:
+# in-place mode emits no stdout to cap, and stream output is capped in line
+# with rg/grep behavior. Use CAP_LINES=0 CAP_BYTES=0 to disable.
+_dir="$(cd "$(dirname "$0")" && pwd)"
+exec "$_dir/_cap" "$_dir" sed "" "$@"

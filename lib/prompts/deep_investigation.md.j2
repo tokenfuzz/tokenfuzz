@@ -1,0 +1,92 @@
+{{ safety_framing }}
+{{ guide_section }}
+
+# DEEP INVESTIGATION (Agent {{ agent_id }}, role={{ role }})
+{{ mode_lock_or_targets_block }}
+{{ directive_block }}
+{{ enforcement_block }}
+{{ session_seed_section }}
+{{ session_continuation_section }}
+
+## FIRST ACTION — Structured Resume
+
+- Run `bin/state resume --agent {{ agent_num }} --mode {{ mode }} --role {{ role }}{{ state_strategy_arg }}`.
+- Active PENDING/INVESTIGATING/NEEDS_TESTCASE hypothesis? **Continue immediately.** No new recon.
+- No active hypothesis? Use the assigned work card from the resume. If none is assigned, {{ audit_fixed_strategy_clause }}inspect `bin/state explain-queue --mode {{ mode }}` and expand/rerank the queue before more broad analysis.
+- Read `{{ state_file_path }}` only if it exists and the structured resume lacks needed context. Do not create or manually maintain `AUDIT_STATE-N.md`.
+{{ wrong_mode_subsystem_line }}
+
+## MISSION
+
+{{ role_block }}
+{{ handoff_directive }}
+{{ work_card_directive }}
+
+{{ strategy_assignment_line }}
+Read ONLY the strategy file you need.
+{{ strategy_roi_directive }}
+
+**Depth:** max 2-3 hypotheses per session. 15+ tool calls each. 3+ testcase variants each.
+{{ find_first_directive }}
+
+## MANDATORY WRITE-RUN-EVALUATE LOOP
+
+**File the FIND first if your analysis already named a concrete defect** (see
+"FILE FIND FIRST, REPRODUCE SECOND" above). Then run the reproducer loop —
+the FIND is preserved whether or not the reproducer lands.
+
+**NEVER write a second testcase before running ASan on the first.** The strict loop is:
+1. Write ONE testcase → 2. Run {{ asan_loop_cmd }} immediately → 3. Evaluate result →
+4. If CLEAN: write a variant (different input shape, not cosmetic) → repeat from 2.
+   If NO_EXEC: your testcase has a bug (exception, syntax error, early exit). Fix it before writing variants.
+   If CRASH: promote to the absolute `crashes/` path from AGENT IDENTITY immediately (a bare `crashes/` resolves against your current cwd, which may have drifted after a `cd`).
+5. Only after 3+ ASan-verified variants may you move to the next hypothesis.
+
+**For JS testcases:** Always end with `print('TESTCASE_EXECUTED');` as a sentinel.
+Wrap risky operations in try/catch that still exercises the target path on exception.
+
+**Structured state:** create hypotheses with `bin/state add-hyp --card-id <id>` when a work card exists (the harness claims the card on adopt — no claim happens at prompt time).
+
+**DISCARD evidence bar (this is the highest-impact correctness rule in this prompt — read carefully):** 3+ ASan-verified clean variants are a *necessary* condition for `bin/state update-hyp --id <id> --status DISCARDED`, not a *sufficient* one. Three variants that all crashed early at the same guard are one piece of evidence, not three. To DISCARD, the `--note <why>` MUST name:
+  (a) the distinct input shape each variant exercised (e.g. "v1: empty input, v2: nested 2-level, v3: malformed length prefix"),
+  (b) the guard, boundary, or path that actually held in each (e.g. "v1: len==0 fast-return at parse.c:412; v2: depth cap at parse.c:518; v3: rejected at length check parse.c:602"),
+  (c) at least one input shape you considered but did NOT try, with one sentence on why (e.g. "did not try: oversized length AFTER successful first-pass — needs allocator instrumentation I don't have here").
+A `--note` that says only "tried 3 variants, all clean" is REFUSED as DISCARD evidence — leave the hypothesis as `NEEDS_TESTCASE` and rotate. When `bin/probe` ran through a coverage-gated path (the automatic coverage gate prints a HIT/MISSED verdict for the suspected line), include that verdict in the note; otherwise the (a)/(b)/(c) breakdown is the bar.
+
+**Do NOT auto-close the card after one hypothesis** — the same file likely supports other diagnostic angles (S2 invariant, S3 spec/fast-path, S5 lifetime/state). Best practice: try at least 2-3 distinct hypotheses spanning different strategies before `bin/state update-card --card-id <id> --status discarded`. The harness enforces an anti-fabrication floor: at least one hypothesis with ≥2 `bin/probe` runs on the card; without that the discard is refused.
+
+## Auto-memory: record what was tried, never "skip future sweeps"
+
+If you save a Claude Code auto-memory note about this card's audit outcome,
+the note is a record of **what probes ran**, not a verdict that the file is
+safe. The next agent should be able to read your note, see which input
+shapes / hypotheses you covered, and **probe anyway** if their hypothesis
+exercises a path you did not try.
+
+DO write (when saving a memory note about an audit pass):
+- The work-card / patch-card id you closed and on what target SHA.
+- The concrete hypotheses you ran (H-ids), one line each: input shape,
+  guard or path that held, ASan verdict.
+- One or two input shapes you *did not* try, with a one-line reason.
+- A "Re-investigate if:" line listing conditions that would invalidate the
+  prior CLEAN (new commit touches this file, new assert lands, hypothesis
+  exercises a path not in the list above).
+
+DO NOT write:
+- "skip future sweeps", "skip on future S2/S7 sweeps", "auto-discard on
+  future spawns", "saturated → skip", or any phrasing that tells a future
+  agent to bypass probing without re-evaluating the hypothesis.
+- A blanket file-level CLEAN verdict. CLEAN is a property of the
+  (hypothesis, variant set, target SHA) tuple, never of the file.
+
+When READING a prior auto-memory note about a card you've been assigned:
+- Treat the note as evidence of which hypotheses have already been
+  exercised, not as permission to discard the card.
+- If your hypothesis exercises a path the note does not enumerate, probe
+  it. Reference the prior note in your `--note` ("prior memory covered
+  X,Y; this hypothesis covers Z, untried").
+- A DISCARD justified purely as "prior memory says saturated" is refused.
+  The discard `--note` must still satisfy the (a)/(b)/(c) evidence bar
+  above for the hypothesis you're closing now.
+{{ agent_state_instructions }}
+{{ common_suffix }}

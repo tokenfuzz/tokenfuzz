@@ -1,0 +1,146 @@
+site_name: TokenFuzz
+site_description: >-
+  Open LLM-based vulnerability research platform for recon sweeps, eight
+  investigation strategies, reachability-labelled triage, cost-aware fleet
+  coordination, and maintainer-ready sanitizer reproducers.
+site_url: https://tokenfuzz.github.io/tokenfuzz/
+
+repo_url: https://github.com/tokenfuzz/tokenfuzz
+repo_name: tokenfuzz
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+dev_addr: 127.0.0.1:4000
+
+theme:
+  name: material
+  language: en
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Match system
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.highlight
+    - search.share
+    - search.suggest
+    - content.action.edit
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.tooltips
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - tags
+
+extra_css:
+  - assets/extra.css
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/tokenfuzz/tokenfuzz
+
+copyright: >-
+  TokenFuzz · Apache License 2.0 · Use only on software you are authorised to test.
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - getting-started/index.md
+      - Prerequisites: getting-started/prerequisites.md
+      - Add a target: getting-started/add-a-target.md
+      - First audit: getting-started/first-audit.md
+  - Guides:
+      - guides/index.md
+      - Configure a target: guides/configure-target.md
+      - Backends and ensembling: guides/backends.md
+      - Non-C/C++ targets: guides/multi-language.md
+      - Browser targets: guides/browser-targets.md
+      - Recon discovery: guides/recon-discovery.md
+      - Triage results: guides/triage-results.md
+      - Benchmark the harness: guides/benchmark.md
+      - Reproduce a crash: guides/reproduce-a-crash.md
+  - Concepts:
+      - concepts/index.md
+      - Audit lifecycle: concepts/audit-lifecycle.md
+      - System architecture: concepts/system-architecture.md
+      - Strategy model: concepts/strategy-model.md
+      - Cost model: concepts/cost-model.md
+  - Reference:
+      - reference/index.md
+      - Commands: reference/commands.md
+      - Artifact layout: reference/artifacts.md
+      - Target config: reference/target-toml.md
+      - Environment variables: reference/environment.md
+      - Glossary: reference/glossary.md
+      - Troubleshooting: reference/troubleshooting.md
+  - Getting help: getting-help.md
+  - Contributing: contributing.md

@@ -1,0 +1,9 @@
+{
+  "context": {
+    "fileFiltering": {
+      "respectGitIgnore": false,
+      "respectGeminiIgnore": true,
+      "enableFileWatcher": false
+    }
+  }
+}

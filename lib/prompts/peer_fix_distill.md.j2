@@ -1,0 +1,19 @@
+You are summarizing a prior-fix commit from peer project "{{ peer }}".
+
+Commit metadata:
+  id:       {{ fix_id }}
+  summary:  {{ summary }}
+  source:   {{ source }}
+  url:      {{ url }}
+
+Diff excerpt (may be truncated):
+"""
+{{ diff_excerpt }}
+"""
+
+Output a single JSON object (no prose, no fences):
+{
+  "class":   "<one neutral phrase: bounds / lifetime / type / size / uninit / state / logic / race>",
+  "summary": "<one sentence describing the class concretely; no CVE id, no vocab like 'vulnerability'>",
+  "shape":   "<one short phrase describing what the fix added: a guard, a type narrowing, a free, etc.>"
+}

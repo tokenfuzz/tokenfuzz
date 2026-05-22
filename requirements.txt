@@ -1,0 +1,4 @@
+# Pinned to match the GitHub Pages workflow (.github/workflows/pages.yml).
+# Bump in lockstep with CI so local previews and the deployed site stay aligned.
+mkdocs-material==9.7.6
+pymdown-extensions==10.21.3

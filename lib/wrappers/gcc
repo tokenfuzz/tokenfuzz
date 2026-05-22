@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+_dir="$(cd "$(dirname "$0")" && pwd -P)"
+exec "$_dir/_compile_guard" "$_dir" gcc "$@"

@@ -1,0 +1,987 @@
+#!/usr/bin/env bash
+# bin/audit-recon — Breadth-first confirmation-pass discovery.
+#
+# Spawns N parallel agents over N non-overlapping FILE-GROUP slices of a
+# target, each performing read-only code review with explicit confirmation
+# steps (reachability + input shape + guard inventory + falsification).
+# Output: a hypothesis JSONL that the deep-investigation harness (bin/audit)
+# can pick up via the work queue, OR a standalone report at
+# RESULTS_DIR/recon-findings.md.
+#
+# Design constraints:
+#   - No AUDIT_STATE load (cold-start by definition).
+#   - No strategy guide reload (the recon prompt is self-contained).
+#   - No reproducer construction (that's bin/audit's job in the deep loop).
+#   - Each finding must come with: file:line, reach path, input shape,
+#     guards passed with bypass, primitive, falsification attempt.
+#   - Confidence labels: CONFIRMED-HIGH | CONFIRMED-MEDIUM |
+#     NEEDS-VERIFICATION. LOW speculation is dropped before output.
+#
+# This script does NOT modify bin/audit. It writes its hypothesis JSONL to
+# $RESULTS_DIR/recon-hypotheses.jsonl which the next bin/audit iteration
+# picks up via the existing work-card mechanism (one card per confirmed
+# finding, kind=recon-hypothesis).
+#
+# Usage:
+#   bin/audit-recon --target curl --backend <backend> --slices 3
+#
+# The slicer (lib/recon_slicer.py) partitions the target's source files
+# into N directory-coherent, LOC-balanced groups (one agent per group).
+# Scope is controlled by --scope: the whole tree, a --path subtree, or
+# (the default on large trees) only files changed within a bounded
+# lookback window. If there is not enough material to fill N groups,
+# fewer agents are launched.
+
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+
+set -euo pipefail
+
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$SCRIPT_ROOT" || { echo "FATAL: cannot cd to $SCRIPT_ROOT" >&2; exit 1; }
+
+for _lib in platform.sh fmt.sh timeout.sh target_config.sh llm_invoke.sh prompt_template.sh; do
+  [ -f "$SCRIPT_ROOT/lib/$_lib" ] || { echo "FATAL: missing lib/$_lib" >&2; exit 1; }
+  # shellcheck disable=SC1090
+  source "$SCRIPT_ROOT/lib/$_lib"
+done
+
+_ts() { date +%H:%M:%S; }
+log() { echo "[$(_ts)] [recon] $*"; }
+
+append_csv() {
+  local existing="$1"
+  local item="$2"
+  if [ -z "$existing" ]; then
+    printf '%s' "$item"
+  else
+    printf '%s, %s' "$existing" "$item"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/audit-recon [options]
+
+Options:
+  --target <slug>           Target slug under targets/ (required)
+  --target-path <path>      Override target path
+  --backend <backend>       LLM backend (required; one of: claude, codex,
+                            gemini, oss — the harness does not default to
+                            any vendor)
+  --model <model>           Model override
+  --experiment <name>       Isolate artifacts under output/<target>-<name>/
+  --concurrency <N>         Number of parallel recon agents / slices
+                            (default: 4). Alias: --slices.
+  --out <path>              Hypothesis JSONL output (default:
+                            $RESULTS_DIR/recon-hypotheses.jsonl)
+  --report <path>           Human-readable report (default:
+                            $RESULTS_DIR/recon-findings.md)
+  --timeout <secs>          Per-agent wall-time budget (default: 1800).
+                            Bigger codebases or denser slices benefit from
+                            2700-3600. Token cost scales roughly linearly.
+  --validate <mode>         off | confirmed | all (default: all).
+                            'all' (default) validation-ranks every emission,
+                            including NEEDS-VERIFICATION. Promoted and
+                            uncertain candidates seed the audit queue first;
+                            rejected candidates are demoted but retained.
+                            'confirmed' is a cost-saving opt-in that skips
+                            validation for NEEDS-VERIFICATION rows. 'off'
+                            skips validation entirely.
+  --scope <scope>           auto | all | since | path (default: auto).
+                            'all' audits every source file in the tree.
+                            'since' audits only files changed within the
+                            lookback window (see --recon-lookback). 'path'
+                            audits one subtree (see --path). 'auto' picks
+                            'all' for small trees (<=500 source files) and
+                            'since' for large trees — a whole-tree recall
+                            sweep of a large codebase is unbounded in cost,
+                            so the change-driven scope is the safe default.
+  --path <subdir>           Subtree to audit, relative to the target root.
+                            Implies --scope path.
+  --recon-lookback <days>   Lookback window for --scope since (default:
+                            365). Files changed in the last N days are
+                            audited. The bound exists so recon cannot run
+                            unbounded over deep history; raise it to widen
+                            coverage at proportionally higher cost.
+  --no-reroll               Disable the automatic re-roll. By default, if every
+                            slice returns AUDIT-CLEAN with no substantive
+                            finding, the recon re-shuffles the slice partition
+                            and runs once more. This halves the false-empty
+                            rate on variance-prone single-sample runs.
+  -h, --help                Show help
+
+Behaviour:
+  Each agent receives an open-ended "find vulnerabilities here" prompt
+  on its scope (the file list for one slice). Agents are calibrated for
+  recall — they emit
+  every guard gap, unchecked input, suspicious arithmetic, and
+  lifecycle inconsistency they notice as NEEDS-VERIFICATION. The
+  validation pass (--validate, default 'all') deduplicates and ranks
+  candidates before they seed the audit queue. Output:
+    - $RESULTS_DIR/recon-hypotheses.jsonl (machine-readable, harness-consumable)
+    - $RESULTS_DIR/recon-findings.md (combined human report)
+    - $RESULTS_DIR/recon/RECON-*/ (one dir per candidate: finding.json,
+      validator-vote-*.json, and a human-readable REPORT.md/REPORT.html)
+EOF
+}
+
+TARGET_SLUG=""
+TARGET_PATH=""
+BACKEND=""
+MODEL=""
+EXPERIMENT_NAME=""
+EXPERIMENT_SUFFIX=""
+CONCURRENCY=4
+OUT_PATH=""
+REPORT_PATH=""
+OUT_PATH_EXPLICIT=0
+REPORT_PATH_EXPLICIT=0
+TIMEOUT_SECS=1800
+# Default is 'all' so every emission, including NEEDS-VERIFICATION,
+# passes through the independent validator. Recon is calibrated for
+# recall; precision is enforced downstream of the agent by validator
+# votes, not by the agent's own confirmation bar. 'confirmed' and 'off'
+# stay as cost-control opt-ins; see --help.
+VALIDATE_MODE="all"
+SCOPE="auto"
+PATH_SCOPE=""
+LOOKBACK_DAYS=365
+REROLL_ON_CLEAN=1
+
+require_arg() {
+  # Guard value-bearing flags against missing values under `set -u`.
+  if [ "$#" -lt 2 ]; then
+    echo "[audit-recon] $1 requires a value" >&2
+    usage >&2
+    exit 2
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) require_arg "$@"; TARGET_SLUG="$2"; shift 2 ;;
+    --target-path) require_arg "$@"; TARGET_PATH="$2"; shift 2 ;;
+    --backend) require_arg "$@"; BACKEND="$2"; shift 2 ;;
+    --model) require_arg "$@"; MODEL="$2"; shift 2 ;;
+    --experiment) require_arg "$@"; EXPERIMENT_NAME="$2"; shift 2 ;;
+    --experiment=*) EXPERIMENT_NAME="${1#--experiment=}"; shift ;;
+    --slices|--concurrency) require_arg "$@"; CONCURRENCY="$2"; shift 2 ;;
+    --out) require_arg "$@"; OUT_PATH="$2"; OUT_PATH_EXPLICIT=1; shift 2 ;;
+    --report) require_arg "$@"; REPORT_PATH="$2"; REPORT_PATH_EXPLICIT=1; shift 2 ;;
+    --timeout) require_arg "$@"; TIMEOUT_SECS="$2"; shift 2 ;;
+    --validate) require_arg "$@"; VALIDATE_MODE="$2"; shift 2 ;;
+    --scope) require_arg "$@"; SCOPE="$2"; shift 2 ;;
+    --path) require_arg "$@"; PATH_SCOPE="$2"; SCOPE="path"; shift 2 ;;
+    --recon-lookback) require_arg "$@"; LOOKBACK_DAYS="$2"; shift 2 ;;
+    --no-reroll) REROLL_ON_CLEAN=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$VALIDATE_MODE" in
+  off|confirmed|all) ;;
+  *) echo "FATAL: --validate must be off|confirmed|all (got: $VALIDATE_MODE)" >&2; exit 2 ;;
+esac
+
+case "$SCOPE" in
+  auto|all|since|path) ;;
+  *) echo "FATAL: --scope must be auto|all|since|path (got: $SCOPE)" >&2; exit 2 ;;
+esac
+case "$CONCURRENCY" in
+  ''|*[!0-9]*) echo "FATAL: --concurrency must be a positive integer (got: $CONCURRENCY)" >&2; exit 2 ;;
+esac
+[ "$CONCURRENCY" -ge 1 ] || { echo "FATAL: --concurrency must be >= 1" >&2; exit 2; }
+case "$LOOKBACK_DAYS" in
+  ''|*[!0-9]*) echo "FATAL: --recon-lookback must be a positive integer (got: $LOOKBACK_DAYS)" >&2; exit 2 ;;
+esac
+[ "$LOOKBACK_DAYS" -ge 1 ] || { echo "FATAL: --recon-lookback must be >= 1" >&2; exit 2; }
+if [ "$SCOPE" = "path" ] && [ -z "$PATH_SCOPE" ]; then
+  echo "FATAL: --scope path requires --path <subdir>" >&2; exit 2
+fi
+
+if [ -z "$TARGET_SLUG" ]; then
+  echo "FATAL: --target is required" >&2
+  usage >&2
+  exit 2
+fi
+
+if [ -z "$BACKEND" ]; then
+  echo "FATAL: --backend is required (one of: claude, codex, gemini, oss)" >&2
+  usage >&2
+  exit 2
+fi
+case "$BACKEND" in
+  claude|codex|gemini|oss) ;;
+  *) echo "FATAL: --backend must be one of: claude, codex, gemini, oss (got: $BACKEND)" >&2; exit 2 ;;
+esac
+
+if [ -z "$TARGET_PATH" ]; then
+  TARGET_PATH="$SCRIPT_ROOT/targets/$TARGET_SLUG"
+fi
+if [ ! -d "$TARGET_PATH" ]; then
+  echo "FATAL: target path does not exist: $TARGET_PATH" >&2
+  exit 2
+fi
+
+if [ -n "$EXPERIMENT_NAME" ]; then
+  EXPERIMENT_NAME="$(target_output_sanitize_experiment "$EXPERIMENT_NAME")" || exit 2
+  EXPERIMENT_SUFFIX="-$EXPERIMENT_NAME"
+fi
+TARGET_OUTPUT_SLUG="$(target_output_slug "$TARGET_SLUG" "" "$EXPERIMENT_SUFFIX")"
+RESULTS_DIR="$(target_backend_results_dir "$BACKEND" "$SCRIPT_ROOT" "$TARGET_SLUG" "" "$EXPERIMENT_SUFFIX")"
+LOGDIR="$(target_backend_logs_dir "$BACKEND" "$SCRIPT_ROOT" "$TARGET_SLUG" "" "$EXPERIMENT_SUFFIX")"
+# Raw model-dialogue dumps (recon_*.raw) live under logs/.raw/ so the
+# top-level logs/ surface stays focused on summaries and index files.
+RAW_DIR="$LOGDIR/.raw"
+mkdir -p "$RESULTS_DIR" "$LOGDIR" "$RAW_DIR"
+ROOT_FINDINGS_JSONL="$SCRIPT_ROOT/findings.jsonl"
+ROOT_FINDINGS_JSONL_PREEXISTED=0
+[ -e "$ROOT_FINDINGS_JSONL" ] && ROOT_FINDINGS_JSONL_PREEXISTED=1
+[ -z "$OUT_PATH" ] && OUT_PATH="$RESULTS_DIR/recon-hypotheses.jsonl"
+[ -z "$REPORT_PATH" ] && REPORT_PATH="$RESULTS_DIR/recon-findings.md"
+# If caller supplied a directory for --out / --report, append a default filename
+# so we still write to a file rather than attempting to truncate the directory.
+if [ -d "$OUT_PATH" ]; then OUT_PATH="${OUT_PATH%/}/recon-hypotheses.jsonl"; fi
+if [ -d "$REPORT_PATH" ]; then REPORT_PATH="${REPORT_PATH%/}/recon-findings.md"; fi
+
+# When a caller explicitly isolates recon output, keep validation scratch,
+# RECON-* reports, checkpoints, and raw model logs in the same isolated tree.
+# bin/audit uses explicit --out/--report paths for benchmark cells without
+# passing --experiment through to this helper, so deriving these roots from
+# --out prevents cross-run writes into output/<target>/<backend>/.
+if [ "$OUT_PATH_EXPLICIT" -eq 1 ]; then
+  out_dir="$(dirname "$OUT_PATH")"
+  mkdir -p "$out_dir"
+  out_base="$(basename "$OUT_PATH")"
+  RESULTS_DIR="$(cd "$out_dir" && pwd -P)"
+  OUT_PATH="$RESULTS_DIR/$out_base"
+  if [ "$REPORT_PATH_EXPLICIT" -eq 1 ]; then
+    report_dir="$(dirname "$REPORT_PATH")"
+    mkdir -p "$report_dir"
+    report_base="$(basename "$REPORT_PATH")"
+    REPORT_PATH="$(cd "$report_dir" && pwd -P)/$report_base"
+  else
+    REPORT_PATH="$RESULTS_DIR/recon-findings.md"
+  fi
+  if [ "$(basename "$RESULTS_DIR")" = "results" ]; then
+    LOGDIR="$(dirname "$RESULTS_DIR")/logs"
+  else
+    LOGDIR="$RESULTS_DIR/logs"
+  fi
+  RAW_DIR="$LOGDIR/.raw"
+  mkdir -p "$RESULTS_DIR" "$LOGDIR" "$RAW_DIR"
+fi
+
+SCOPE_AUTO_THRESHOLD="${RECON_SCOPE_AUTO_THRESHOLD:-500}"
+# Per-target recon checkpoint: the target HEAD sha at the last successful
+# recon. A change-driven (--scope since) run audits from this checkpoint
+# forward when it is available, falling back to the lookback window when
+# it is not. Lives next to the recon-cache marker under RESULTS_DIR.
+CHECKPOINT_FILE="$RESULTS_DIR/.recon-checkpoint"
+
+# count_source_files <dir> — count in-scope source files under a tree,
+# using the languages.py registry so non-C targets are not zero-counted.
+count_source_files() {
+  local n
+  n=$(python3 - "$1" <<PY 2>/dev/null || true
+import sys
+from pathlib import Path
+sys.path.insert(0, "$SCRIPT_ROOT/lib")
+import languages
+import recon_slicer
+exts = languages.all_source_exts()
+skip = recon_slicer.SKIP_DIR_NAMES
+root = Path(sys.argv[1])
+n = 0
+for p in root.rglob("*"):
+    if not p.is_file() or p.suffix.lower() not in exts:
+        continue
+    rel = p.relative_to(root).parts
+    if any(part in skip for part in rel[:-1]):
+        continue
+    n += 1
+print(n)
+PY
+)
+  if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+    # Fallback for environments without the Python shim: C-family only.
+    n=$(find "$1" -type f \
+          \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \
+             -o -name '*.h' -o -name '*.hpp' -o -name '*.rs' -o -name '*.go' \
+             -o -name '*.py' -o -name '*.java' \) \
+          -not -path '*/build*/*' -not -path '*/third_party/*' \
+          -not -path '*/vendor/*' -not -path '*/node_modules/*' \
+          -not -path '*/.git/*' 2>/dev/null | wc -l | tr -d ' ')
+  fi
+  printf '%s' "${n:-0}"
+}
+
+# ── Scope auto-selection ────────────────────────────────────────────────
+# 'auto' audits the whole tree when it is small enough to cover in one
+# pass, and switches to the change-driven 'since' scope on large trees:
+# a whole-tree recall sweep of a large codebase is unbounded in cost
+# (potentially many hours), so a bounded lookback window is the safe
+# default there. The threshold can be tuned via RECON_SCOPE_AUTO_THRESHOLD.
+if [ "$SCOPE" = "auto" ]; then
+  src_file_count=$(count_source_files "$TARGET_PATH")
+  if [ "$src_file_count" -le "$SCOPE_AUTO_THRESHOLD" ]; then
+    SCOPE="all"
+  else
+    SCOPE="since"
+  fi
+  log "Auto-scope: $src_file_count source file(s), threshold=$SCOPE_AUTO_THRESHOLD → scope=$SCOPE"
+fi
+
+# ── Resolve the --scope since git ref ───────────────────────────────────
+# The audited change set is <CHANGED_SINCE_REF>..HEAD. The ref is the
+# OLDER bound of the lookback window unless a newer recon checkpoint is
+# available — in which case recon runs incrementally from the checkpoint,
+# but never further back than the lookback window. If the target is not a
+# git repo, 'since' degrades to 'all'.
+CHANGED_SINCE_REF=""
+if [ "$SCOPE" = "since" ]; then
+  if ! git -C "$TARGET_PATH" rev-parse HEAD >/dev/null 2>&1; then
+    log "WARN: --scope since but $TARGET_PATH is not a git repo; falling back to --scope all"
+    SCOPE="all"
+  else
+    head_full=$(git -C "$TARGET_PATH" rev-parse HEAD 2>/dev/null || true)
+    lookback_ref=$(git -C "$TARGET_PATH" rev-list -1 \
+      --before="${LOOKBACK_DAYS} days ago" HEAD 2>/dev/null || true)
+    if [ -z "$lookback_ref" ]; then
+      # No commit older than the window — use the repo's root commit.
+      lookback_ref=$(git -C "$TARGET_PATH" rev-list --max-parents=0 HEAD 2>/dev/null \
+        | tail -1)
+    fi
+    lookback_full=$(git -C "$TARGET_PATH" rev-parse "${lookback_ref}^{commit}" 2>/dev/null || true)
+    if [ -z "$lookback_ref" ] || [ -z "$lookback_full" ]; then
+      log "WARN: could not resolve a lookback ref; falling back to --scope all"
+      SCOPE="all"
+    elif [ "$lookback_full" = "$head_full" ]; then
+      # The lookback window reaches the whole history (a young or shallow
+      # repo): <ref>..HEAD would be empty even though everything is
+      # in-window. Audit the whole tree instead.
+      log "Recon scope=since: lookback window covers the entire history → scope=all"
+      SCOPE="all"
+    else
+      CHANGED_SINCE_REF="$lookback_ref"
+      if [ -f "$CHECKPOINT_FILE" ]; then
+        ckpt=$(tr -d '[:space:]' < "$CHECKPOINT_FILE" 2>/dev/null || true)
+        # Use the checkpoint only when it is a real commit, an ancestor of
+        # HEAD, and not older than the lookback window (lookback_ref is an
+        # ancestor of it). Otherwise the lookback window stands. A
+        # checkpoint equal to HEAD legitimately yields an empty change
+        # set — nothing landed since the last recon — and is kept.
+        if [ -n "$ckpt" ] \
+           && git -C "$TARGET_PATH" cat-file -e "${ckpt}^{commit}" 2>/dev/null \
+           && git -C "$TARGET_PATH" merge-base --is-ancestor "$ckpt" HEAD 2>/dev/null \
+           && git -C "$TARGET_PATH" merge-base --is-ancestor "$lookback_ref" "$ckpt" 2>/dev/null; then
+          CHANGED_SINCE_REF="$ckpt"
+        fi
+      fi
+    fi
+  fi
+fi
+
+log "Recon discovery: target=$TARGET_SLUG path=$TARGET_PATH backend=$BACKEND scope=$SCOPE"
+log "  concurrency=$CONCURRENCY"
+[ "$SCOPE" = "since" ] && log "  change set: ${CHANGED_SINCE_REF}..HEAD (lookback ${LOOKBACK_DAYS}d)"
+[ "$SCOPE" = "path" ] && log "  subtree: $PATH_SCOPE"
+log "Output: hypotheses=$OUT_PATH report=$REPORT_PATH"
+
+# write_recon_checkpoint — record the target HEAD sha so the next
+# --scope since run can audit incrementally from here.
+write_recon_checkpoint() {
+  local sha
+  sha=$(git -C "$TARGET_PATH" rev-parse HEAD 2>/dev/null || true)
+  [ -n "$sha" ] && printf '%s\n' "$sha" > "$CHECKPOINT_FILE"
+}
+
+# ── Slice the target into file groups ───────────────────────────────────
+# We invoke the slicer Python helper to produce up to $CONCURRENCY
+# non-overlapping file lists. If the helper is missing or fails, fall
+# back to picking the top-level directories under src/ as slices.
+slices_tmpdir=$(mktemp -d -t recon-slices.XXXXXX)
+# Track background agent PIDs so SIGINT / SIGTERM can clean them up. Without
+# this, Ctrl-C leaves orphaned `claude --print` processes burning tokens.
+declare -a _RECON_BG_PIDS=()
+_recon_cleanup() {
+  local sig="${1:-EXIT}"
+  if [ "${#_RECON_BG_PIDS[@]}" -gt 0 ]; then
+    for pid in "${_RECON_BG_PIDS[@]}"; do
+      kill "$pid" 2>/dev/null || true
+    done
+    # Brief grace, then force-kill anything still alive.
+    sleep 1
+    for pid in "${_RECON_BG_PIDS[@]}"; do
+      kill -9 "$pid" 2>/dev/null || true
+    done
+  fi
+  if [ "$ROOT_FINDINGS_JSONL_PREEXISTED" -eq 0 ] && [ -e "$ROOT_FINDINGS_JSONL" ]; then
+    mkdir -p "$RAW_DIR" 2>/dev/null || true
+    mv "$ROOT_FINDINGS_JSONL" "$RAW_DIR/recon_stray_findings_${ts:-$(date +%Y%m%d_%H%M%S)}.jsonl" 2>/dev/null \
+      || rm -f "$ROOT_FINDINGS_JSONL" 2>/dev/null || true
+    log "WARN: quarantined stray repo-root findings.jsonl from recon agent"
+  fi
+  rm -rf "$slices_tmpdir" 2>/dev/null || true
+  if [ "$sig" != "EXIT" ]; then
+    log "Interrupted by SIG${sig}; cleaned up ${#_RECON_BG_PIDS[@]} agent process(es)"
+    exit 130
+  fi
+}
+trap '_recon_cleanup EXIT' EXIT
+trap '_recon_cleanup INT' INT
+trap '_recon_cleanup TERM' TERM
+
+# run_slicer <seed> writes slice-*.txt files to $slices_tmpdir. seed=0
+# is the deterministic directory-coherent partition; seed>=1 produces a
+# different non-overlapping partition (used by the re-roll). The scope
+# args (--path / --changed-since) are passed through so the slicer
+# enumerates exactly the in-scope file set.
+# Returns: 0 on success, 7 when --scope since matched no files (not an
+# error — a quiet change window), 1 on slicer failure.
+run_slicer() {
+  local seed="$1"
+  local -a scope_args=()
+  case "$SCOPE" in
+    path)  scope_args=( --path "$PATH_SCOPE" ) ;;
+    since) scope_args=( --changed-since "$CHANGED_SINCE_REF" ) ;;
+  esac
+  if [ -x "$SCRIPT_ROOT/lib/recon_slicer.py" ]; then
+    local rc=0
+    python3 "$SCRIPT_ROOT/lib/recon_slicer.py" \
+      --target-path "$TARGET_PATH" \
+      --slices "$CONCURRENCY" \
+      --seed "$seed" \
+      ${scope_args[@]+"${scope_args[@]}"} \
+      --out-dir "$slices_tmpdir" 2>"$slices_tmpdir/.err" || rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    [ "$rc" -eq 7 ] && return 7
+    log "WARN: lib/recon_slicer.py failed (rc=$rc): $(head -2 "$slices_tmpdir/.err" 2>/dev/null)"
+    log "WARN: falling back to top-level directory split"
+  fi
+  return 1
+}
+
+SCOPE_EMPTY=0
+slicer_rc=0
+run_slicer 0 || slicer_rc=$?
+[ "$slicer_rc" -eq 7 ] && SCOPE_EMPTY=1
+
+if [ "$SCOPE_EMPTY" -eq 0 ] \
+    && [ -z "$(ls "$slices_tmpdir"/slice-*.txt 2>/dev/null)" ]; then
+  # Fallback: take top-level src/ subdirectories (whole-tree only — the
+  # slicer is the source of truth for --path / --scope since).
+  src_root=""
+  for candidate in "$TARGET_PATH/src/lib" "$TARGET_PATH/src" "$TARGET_PATH/lib" "$TARGET_PATH"; do
+    [ -d "$candidate" ] && { src_root="$candidate"; break; }
+  done
+  if [ -z "$src_root" ]; then
+    echo "FATAL: cannot locate source root under $TARGET_PATH" >&2
+    exit 3
+  fi
+  slice_idx=1
+  for d in "$src_root"/*/; do
+    [ -d "$d" ] || continue
+    find "$d" -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' \) \
+      > "$slices_tmpdir/slice-$slice_idx.txt"
+    [ -s "$slices_tmpdir/slice-$slice_idx.txt" ] || rm -f "$slices_tmpdir/slice-$slice_idx.txt"
+    slice_idx=$((slice_idx + 1))
+    [ "$slice_idx" -gt "$CONCURRENCY" ] && break
+  done
+fi
+
+# ── --scope since with an empty change set: clean no-op ──────────────────
+# Nothing changed within the window, so there is nothing to audit. Write
+# an empty hypothesis file + report, advance the checkpoint, and exit 0 —
+# this is a normal outcome on a quiet target, not a failure.
+if [ "$SCOPE_EMPTY" -eq 1 ]; then
+  log "Recon scope=since: no source files changed in ${CHANGED_SINCE_REF}..HEAD; nothing to audit."
+  : > "$OUT_PATH"
+  {
+    printf '# %s — recon findings (%s)\n\n' "$TARGET_SLUG" "$(date '+%Y-%m-%d %H:%M %Z')"
+    printf 'Scope: since %s  ·  no source files changed — recon is a no-op.\n' "$CHANGED_SINCE_REF"
+  } > "$REPORT_PATH" 2>/dev/null || true
+  write_recon_checkpoint
+  log "Done (empty change set)."
+  exit 0
+fi
+
+slice_files=( "$slices_tmpdir"/slice-*.txt )
+if [ "${#slice_files[@]}" -eq 0 ] || [ ! -f "${slice_files[0]}" ]; then
+  echo "FATAL: no slices produced; check $TARGET_PATH layout" >&2
+  exit 3
+fi
+
+actual_slices="${#slice_files[@]}"
+log "Sliced $TARGET_SLUG into $actual_slices file group(s)"
+for f in "${slice_files[@]}"; do
+  name=$(basename "$f" .txt)
+  count=$(wc -l < "$f" | tr -d ' ')
+  log "  $name: $count file(s)"
+done
+
+# ── Per-slice prompt builder ────────────────────────────────────────────
+# Cache the build-feature block once per process so we don't shell out
+# to python3 for every slice. Empty when no manifest exists (fail-open).
+BUILD_FEATURES_BLOCK_CACHED=""
+_build_features_block_loaded=0
+_load_build_features_block() {
+  [ "$_build_features_block_loaded" -eq 0 ] || return 0
+  _build_features_block_loaded=1
+  local features_json="${BUILD_FEATURES_JSON:-${RESULTS_DIR:-}/state/features.json}"
+  [ -f "$features_json" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  BUILD_FEATURES_BLOCK_CACHED="$(python3 "$SCRIPT_ROOT/lib/build_probe.py" summary --features "$features_json" 2>/dev/null || true)"
+}
+
+build_recon_prompt() {
+  local slice_name="$1"
+  local slice_file="$2"
+  local scope_block files_block
+  files_block=$(awk '{ printf "- %s\n", $0 }' "$slice_file")
+  scope_block=$(cat <<SCOPE
+## Scope
+
+Focus on these files. You may read one level of caller (the public API
+entry point) outside the list when it helps trace a finding, but do
+not wander the rest of the tree.
+
+${files_block}
+SCOPE
+)
+
+  _load_build_features_block
+
+  # NOTE: this template is cache-replayed on every tool call inside an
+  # agent session. Each KB removed here saves N_tool_calls KB of
+  # cache_read cost per slice. Keep the wording dense but preserve:
+  # the CTF-style "find vulnerabilities" framing (proven recall on
+  # c-ares), the recall-not-precision instruction, the JSONL output
+  # contract, and the slice_name / TIMEOUT_SECS interpolations.
+  # tests/test_recon_changes.sh enforces a byte-size ceiling plus
+  # presence of every essential marker.
+  render_prompt_template audit_recon.md.j2 \
+    --var "target_slug=${TARGET_SLUG}" \
+    --var "scope_block=${scope_block}" \
+    --var "build_features_block=${BUILD_FEATURES_BLOCK_CACHED}" \
+    --var "slice_name=${slice_name}" \
+    --var "timeout_secs=${TIMEOUT_SECS}"
+}
+
+# ── Invoke one agent per slice (per-pass state initialised in launch_pass) ─
+run_recon_agent() {
+  local slice_name="$1"
+  local slice_file="$2"
+  local agent_log="$LOGDIR/recon_${ts}_${slice_name}.log"
+  local agent_raw="$RAW_DIR/recon_${ts}_${slice_name}.raw"
+  local prompt
+  prompt=$(build_recon_prompt "$slice_name" "$slice_file")
+
+  llm_known_backend "$BACKEND" || {
+    echo "FATAL: unsupported backend: $BACKEND" >&2
+    exit 4
+  }
+
+  # max-turns 80 ≈ ~60 tool calls + ~20 text/checkpoint turns. Lower than
+  # bin/audit's deep-investigation cap because recon is a one-shot
+  # discovery pass — we want the agent to commit to written findings
+  # within the slot, not investigate indefinitely. Flag picks (sandbox
+  # bypass, stream-json, add-dirs) live in lib/llm_invoke.sh so all
+  # call sites stay in sync.
+  declare -a recon_flags=()
+  # Recon agents perform source-tree review and often sanity-check findings
+  # with target-local commands such as `go test ./binding`. Make the target
+  # repository the working directory while still allowing reads from the
+  # harness root for shared instructions and helper context.
+  local recon_add_dirs="$TARGET_PATH"
+  if [ -n "${SCRIPT_ROOT:-}" ] && [ "$SCRIPT_ROOT" != "$TARGET_PATH" ]; then
+    recon_add_dirs="$recon_add_dirs,$SCRIPT_ROOT"
+  fi
+  llm_agent_flags "$BACKEND" recon_flags "${MODEL:-}" 80 "$recon_add_dirs"
+  export IS_SANDBOX=1
+
+  # One in-place retry on empty output: transient LLM failures (rate
+  # limits, network blips, timeouts) leave an empty raw_log; a single
+  # immediate re-attempt recovers most of them without doubling the
+  # baseline cost (retry runs only when the first try produced nothing).
+  local attempt
+  for attempt in 1 2; do
+    : > "$agent_raw"
+    case "$BACKEND" in
+      claude)
+        audit_timeout_run "$TIMEOUT_SECS" "${CLAUDE_BIN:-claude}" "${recon_flags[@]}" -p "$prompt" \
+          2>&1 \
+          | tee "$agent_raw" >/dev/null || true
+        ;;
+      codex|oss)
+        audit_timeout_run "$TIMEOUT_SECS" "${CODEX_BIN:-codex}" exec "${recon_flags[@]}" "$prompt" \
+          > "$agent_raw" 2>&1 || true
+        ;;
+      gemini)
+        # Gemini backend reads the prompt from stdin when -p "".
+        declare -a gemini_recon_flags=("${recon_flags[@]}")
+        if ! llm_use_gemini_cli; then
+          # agy's --print-timeout (default 5m0s) otherwise aborts a
+          # slower recon slice before the outer budget is reached.
+          gemini_recon_flags+=(--print-timeout "${TIMEOUT_SECS}s")
+        fi
+        printf '%s' "$prompt" \
+          | audit_timeout_run "$TIMEOUT_SECS" "$(llm_backend_bin gemini)" "${gemini_recon_flags[@]}" -p "" \
+          > "$agent_raw" 2>&1 || true
+        ;;
+    esac
+
+    # Extract assistant text into the streamable per-slice log. The codex
+    # path's jq decodes backslash-escaped JSON inside .item.text so the
+    # aggregator downstream sees real lines beginning with `{"id":"REC-..."`.
+    llm_extract_text "$BACKEND" "$agent_raw" > "$agent_log" 2>/dev/null \
+      || cp "$agent_raw" "$agent_log"
+
+    # "Usable output" = at least one byte of extracted text. We don't try
+    # to validate JSONL here because the aggregator's parse-error path
+    # already counts malformed lines; this retry exists specifically for
+    # the "agent returned nothing at all" failure mode.
+    if [ -s "$agent_log" ]; then
+      break
+    fi
+    if [ "$attempt" -eq 1 ]; then
+      log "WARN: recon agent for $slice_name produced no output on attempt 1; retrying once"
+    else
+      log "WARN: recon agent for $slice_name still empty after retry; giving up on this slice"
+    fi
+  done
+}
+
+# Launch one agent per slice in parallel. Appends to ALL_SLICE_LOGS /
+# ALL_SLICE_NAMES so the aggregator can union across multiple passes.
+launch_pass() {
+  local pass_label="$1"
+  pids=()
+  slice_logs=()
+  slice_names=()
+  ts=$(date +%Y%m%d_%H%M%S)
+
+  for slice_file in "${slice_files[@]}"; do
+    name=$(basename "$slice_file" .txt)
+    if [ -n "$pass_label" ]; then
+      name="${pass_label}-${name}"
+    fi
+    slice_names+=("$name")
+    agent_log="$LOGDIR/recon_${ts}_${name}.log"
+    slice_logs+=("$agent_log")
+    log "Launching agent for $name (${BACKEND})"
+    run_recon_agent "$name" "$slice_file" &
+    pids+=( $! )
+    _RECON_BG_PIDS+=( $! )
+  done
+
+  log "Waiting on ${#pids[@]} parallel recon agent(s) (timeout=${TIMEOUT_SECS}s each)"
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+  _RECON_BG_PIDS=()
+  log "All recon agents finished${pass_label:+ ($pass_label)}"
+
+  ALL_SLICE_LOGS+=( "${slice_logs[@]}" )
+  ALL_SLICE_NAMES+=( "${slice_names[@]}" )
+}
+
+# count_substantive <log...> sets pass_confirmed / pass_needs_verify /
+# pass_clean from the given log files. Pure counter — does not write to
+# OUT_PATH. Used by the re-roll trigger.
+count_substantive() {
+  pass_confirmed=0
+  pass_needs_verify=0
+  pass_clean=0
+  local agent_log line conf
+  for agent_log in "$@"; do
+    [ -f "$agent_log" ] || continue
+    while IFS= read -r line; do
+      printf '%s\n' "$line" | jq -e . >/dev/null 2>&1 || continue
+      conf=$(printf '%s\n' "$line" | jq -r '.confidence // ""')
+      case "$conf" in
+        AUDIT-CLEAN) pass_clean=$((pass_clean + 1)) ;;
+        NEEDS-VERIFICATION) pass_needs_verify=$((pass_needs_verify + 1)) ;;
+        CONFIRMED-*) pass_confirmed=$((pass_confirmed + 1)) ;;
+      esac
+    done < <(grep -aE '^\{.*"id"[[:space:]]*:[[:space:]]*"REC(ON)?-' "$agent_log" 2>/dev/null || true)
+  done
+}
+
+declare -a ALL_SLICE_LOGS=()
+declare -a ALL_SLICE_NAMES=()
+
+launch_pass ""
+count_substantive "${slice_logs[@]}"
+log "Pass 1 results: confirmed=$pass_confirmed needs-verify=$pass_needs_verify audit-clean=$pass_clean"
+
+# ── Re-roll on all-AUDIT-CLEAN ───────────────────────────────────────────
+# Variance on a single recon sample is high: same prompt + backend can
+# produce 3 CONFIRMED-HIGH on one roll and 0 on the next. If every slice
+# returned AUDIT-CLEAN and at least one returned something, try once more
+# with a different slice partition (seed=1). Empirically this halves the
+# false-empty rate at 2x worst-case cost (paid only when triggered).
+if [ "$REROLL_ON_CLEAN" = "1" ] && [ "$pass_confirmed" -eq 0 ] \
+    && [ "$pass_needs_verify" -eq 0 ] && [ "$pass_clean" -gt 0 ]; then
+  log "All slices returned AUDIT-CLEAN. Re-rolling once with seed=1 partition…"
+  rm -rf "$slices_tmpdir"
+  slices_tmpdir=$(mktemp -d -t recon-slices.XXXXXX)
+  if run_slicer 1; then
+    slice_files=( "$slices_tmpdir"/slice-*.txt )
+    if [ "${#slice_files[@]}" -gt 0 ] && [ -f "${slice_files[0]}" ]; then
+      log "Re-roll sliced into ${#slice_files[@]} groups (seed=1)"
+      launch_pass "reroll"
+      count_substantive "${slice_logs[@]}"
+      log "Pass 2 results: confirmed=$pass_confirmed needs-verify=$pass_needs_verify audit-clean=$pass_clean"
+    else
+      log "WARN: re-roll slicer produced no slices; skipping"
+    fi
+  else
+    log "WARN: re-roll slicer failed; skipping"
+  fi
+fi
+
+# ── Aggregate JSONL across all passes ───────────────────────────────────
+: > "$OUT_PATH"
+total_findings=0
+total_clean=0
+total_needs_verify=0
+total_confirmed=0
+total_parse_dropped=0
+
+# Re-export for downstream report code which iterates these arrays.
+slice_logs=( "${ALL_SLICE_LOGS[@]}" )
+slice_names=( "${ALL_SLICE_NAMES[@]}" )
+
+for i in "${!slice_logs[@]}"; do
+  agent_log="${slice_logs[$i]}"
+  slice_name="${slice_names[$i]}"
+  [ -f "$agent_log" ] || continue
+
+  # Extract candidate JSON lines from the agent's output. The agent was
+  # asked to emit pure JSONL; in practice it often wraps lines in prose
+  # or fenced blocks, so we hunt for objects with an "id":"REC-" prefix.
+  # Count parse failures so they show up in the run log instead of
+  # silently disappearing — a recon round that produces "0 findings" is
+  # very different from one that produced 10 unparseable rows.
+  while IFS= read -r line; do
+    if printf '%s\n' "$line" | jq -e . >/dev/null 2>&1; then
+      printf '%s\n' "$line" >> "$OUT_PATH"
+      total_findings=$((total_findings + 1))
+      conf=$(printf '%s\n' "$line" | jq -r '.confidence // ""')
+      case "$conf" in
+        AUDIT-CLEAN) total_clean=$((total_clean + 1)) ;;
+        NEEDS-VERIFICATION) total_needs_verify=$((total_needs_verify + 1)) ;;
+        CONFIRMED-*) total_confirmed=$((total_confirmed + 1)) ;;
+      esac
+    else
+      total_parse_dropped=$((total_parse_dropped + 1))
+    fi
+  done < <(grep -aE '^\{.*"id"[[:space:]]*:[[:space:]]*"REC(ON)?-' "$agent_log" 2>/dev/null || true)
+done
+if [ "$total_parse_dropped" -gt 0 ]; then
+  log "WARN: dropped $total_parse_dropped candidate JSONL line(s) that failed jq parse (agent emitted malformed JSON)"
+fi
+
+# Poisoned-output guard: if every candidate JSONL line failed to parse
+# AND nothing usable made it into OUT_PATH, the agent emitted garbage
+# (LLM glitch, rate-limit-induced truncation, etc.) and we should NOT
+# let this round prime the cache marker — re-running on the next launch
+# is much cheaper than living with a permanently-empty cached recon.
+# Set a flag now and exit non-zero at the very end after writing the
+# report so the operator still has the run-artefacts for debugging.
+recon_output_poisoned=0
+if [ "$total_findings" -eq 0 ] && [ "$total_parse_dropped" -gt 0 ]; then
+  recon_output_poisoned=1
+  log "WARN: recon output considered POISONED — $total_parse_dropped malformed line(s), 0 usable findings. Caller should not cache this round."
+fi
+
+log "Recon results: confirmed=$total_confirmed needs-verify=$total_needs_verify audit-clean=$total_clean (total $total_findings line(s))"
+
+# ── Validation gate — batched triage + single deep verify ────────────────
+# Recon once spent an independent-validator *pair* on every hypothesis:
+# O(N) cold LLM sessions, each re-reading the whole target, with no way to
+# deduplicate (each validator saw one claim in isolation). For a recon pass
+# that emits ~200 hypotheses that is hundreds of sessions and hours of wall
+# time. The pipeline below replaces it with three stages:
+#   Stage 1  deterministic clustering collapses duplicate hypotheses to one
+#            representative each (lib/recon_triage.py cluster);
+#   Stage 2  ONE batched triage agent reads the target once and assigns
+#            every representative reject / needs-deep-check / likely-real
+#            plus cross-representative duplicate links;
+#   Stage 3  each surviving representative gets exactly one independent
+#            deep validator, run in a small parallel pool.
+# reject-by-batch rows and pass-through rows skip the deep validator.
+total_promoted=0
+total_rejected=0
+total_uncertain=0
+if [ "$VALIDATE_MODE" != "off" ] && [ -s "$OUT_PATH" ]; then
+  triage_dir="$RESULTS_DIR/.recon-triage"
+  mkdir -p "$triage_dir"
+  rm -f "$triage_dir"/s3-*.tsv 2>/dev/null || true
+  reps_path="$triage_dir/reps.jsonl"
+  clusters_path="$triage_dir/clusters.json"
+  passthrough_path="$triage_dir/passthrough.jsonl"
+  verdicts_path="$triage_dir/verdicts.json"
+  stage3_path="$triage_dir/stage3.tsv"
+  validated_out="${OUT_PATH%.jsonl}.validated.jsonl"
+
+  # Stage 1 — deterministic clustering.
+  python3 "$SCRIPT_ROOT/lib/recon_triage.py" cluster \
+    --in "$OUT_PATH" --reps "$reps_path" --clusters "$clusters_path" \
+    --passthrough "$passthrough_path" --validate-mode "$VALIDATE_MODE" \
+    >/dev/null 2>&1 || log "WARN: recon_triage cluster failed"
+  n_reps=$(awk 'END{print NR+0}' "$reps_path" 2>/dev/null || echo 0)
+  n_reps=${n_reps:-0}
+  log "Recon triage: $total_findings hypothesis line(s) -> $n_reps representative cluster(s) after dedup"
+
+  if [ "$n_reps" -eq 0 ]; then
+    log "Recon triage: no representatives to validate; keeping hypotheses as emitted"
+  else
+    # Stage 2 — one batched triage pass over every representative.
+    triage_raw="$RAW_DIR/recon_batch_triage_$(date +%Y%m%d_%H%M%S).raw"
+    triage_budget="$TIMEOUT_SECS"
+    [ "$triage_budget" -ge 1800 ] 2>/dev/null || triage_budget=1800
+    log "Recon triage: batched triage pass over $n_reps representative(s) (budget ${triage_budget}s, one session)"
+    triage_prompt="$(render_prompt_template recon_batch_triage.md.j2 \
+      --var "target_path=$TARGET_PATH" \
+      --var "reps_jsonl=$(cat "$reps_path")")"
+    llm_run_agent_prompt "$BACKEND" "$triage_prompt" "$triage_budget" "$triage_raw" \
+      "${MODEL:-}" 120 "$TARGET_PATH" "$TARGET_PATH" \
+      || log "WARN: batched triage agent exited non-zero; un-triaged reps fall back to deep verify"
+    triage_text="$(llm_extract_text "$BACKEND" "$triage_raw" 2>/dev/null || true)"
+    printf '%s' "$triage_text" | python3 "$SCRIPT_ROOT/lib/recon_triage.py" \
+      parse-batch --reps "$reps_path" --out "$verdicts_path" \
+      >/dev/null 2>&1 || log "WARN: recon_triage parse-batch failed"
+
+    # Stage 3 — one independent deep validator per surviving representative,
+    # run in a small parallel pool. Each job writes its own result file, so
+    # there is never a concurrent write to a shared file.
+    : > "$stage3_path"
+    if source "$SCRIPT_ROOT/lib/triage_validate.sh" 2>/dev/null; then
+      export TRIAGE_VALIDATE_BACKEND="$BACKEND"
+      export TRIAGE_VALIDATE_VOTES=1
+      # Stage 3 must finish inside the audit's recon budget so recon
+      # completes and gets cached. At ~300s per validator, 6 in parallel
+      # clears 24 survivors in ~4 batches (~20 min). Reps past the cap
+      # keep their batch verdict (finalize marks them Uncertain) and are
+      # still investigated downstream — capped, never dropped.
+      triage_parallel="${RECON_TRIAGE_PARALLEL:-6}"
+      triage_max_deep="${RECON_TRIAGE_MAX_DEEP:-24}"
+      n_survivors=0
+      running=0
+      while IFS= read -r fid <&3; do
+        [ -n "$fid" ] || continue
+        rep_line=$(grep -F "\"id\": \"$fid\"" "$reps_path" | head -1 || true)
+        [ -n "$rep_line" ] || rep_line=$(grep -F "\"$fid\"" "$reps_path" | head -1 || true)
+        [ -n "$rep_line" ] || continue
+        n_survivors=$((n_survivors + 1))
+        finding_dir="$RESULTS_DIR/recon/$fid"
+        mkdir -p "$finding_dir"
+        [ -f "$finding_dir/finding.json" ] || printf '%s\n' "$rep_line" > "$finding_dir/finding.json"
+        (
+          if vres=$(triage_validate_finding "$finding_dir/finding.json" "$TARGET_PATH" "$RESULTS_DIR" 2>/dev/null); then
+            vrc=0
+          else
+            vrc=$?
+          fi
+          case "$vrc" in
+            0) vv=Promote ;;
+            1) vv=Reject ;;
+            *) vv=Uncertain ;;
+          esac
+          printf '%s\t%s\t%s\n' "$fid" "$vv" "$vres" > "$triage_dir/s3-$fid.tsv"
+        ) &
+        running=$((running + 1))
+        if [ "$running" -ge "$triage_parallel" ]; then
+          wait || true
+          running=0
+        fi
+      done 3< <(python3 "$SCRIPT_ROOT/lib/recon_triage.py" survivors \
+        --verdicts "$verdicts_path" --limit "$triage_max_deep" 2>/dev/null)
+      wait || true
+      cat "$triage_dir"/s3-*.tsv > "$stage3_path" 2>/dev/null || true
+      log "Recon triage: $n_survivors survivor(s) deep-verified by one independent validator each"
+    else
+      log "WARN: lib/triage_validate.sh missing; survivors kept without deep verification"
+    fi
+
+    # Finalize — fold batch verdicts, deep-validator results, and duplicate
+    # inheritance into the validated hypotheses JSONL.
+    if python3 "$SCRIPT_ROOT/lib/recon_triage.py" finalize \
+        --reps "$reps_path" --passthrough "$passthrough_path" \
+        --verdicts "$verdicts_path" --stage3 "$stage3_path" --out "$validated_out" \
+        > "$triage_dir/finalize-stats.txt" 2>/dev/null && [ -s "$validated_out" ]; then
+      mv "$validated_out" "$OUT_PATH"
+      read -r total_promoted total_rejected total_uncertain \
+        < "$triage_dir/finalize-stats.txt" 2>/dev/null || true
+    else
+      log "WARN: recon_triage finalize failed; hypotheses left unvalidated"
+    fi
+    total_promoted=${total_promoted:-0}
+    total_rejected=${total_rejected:-0}
+    total_uncertain=${total_uncertain:-0}
+    log "Validator review complete: $((total_promoted + total_rejected + total_uncertain)) representative(s) reviewed - $total_promoted promoted, $total_rejected rejected, $total_uncertain uncertain."
+
+    # Materialise the human-readable recon report under recon/RECON-*/.
+    if [ -d "$RESULTS_DIR/recon" ] && [ -f "$SCRIPT_ROOT/lib/recon_report.py" ]; then
+      if python3 "$SCRIPT_ROOT/lib/recon_report.py" "$RESULTS_DIR/recon" >/dev/null 2>&1; then
+        log "  Recon REPORT.md/REPORT.html written under $RESULTS_DIR/recon/"
+      else
+        log "  WARN: lib/recon_report.py failed; recon JSON is still on disk"
+      fi
+    fi
+  fi
+elif [ "$VALIDATE_MODE" != "off" ]; then
+  log "WARN: no hypotheses to validate (mode=$VALIDATE_MODE)"
+fi
+
+# ── Human-readable report ───────────────────────────────────────────────
+{
+  printf '# %s — recon findings (%s)\n\n' "$TARGET_SLUG" "$(date '+%Y-%m-%d %H:%M %Z')"
+  printf 'Slices: %d  ·  Backend: %s  ·  Per-slice timeout: %ds\n\n' "$actual_slices" "$BACKEND" "$TIMEOUT_SECS"
+  printf 'Confirmed: %d  ·  Needs-verification: %d  ·  Audited-clean: %d\n\n' \
+    "$total_confirmed" "$total_needs_verify" "$total_clean"
+  printf '---\n\n'
+  if [ "$total_confirmed" -gt 0 ] || [ "$total_needs_verify" -gt 0 ]; then
+    printf '## Findings\n\n'
+    # Render the current (recall-mode) schema while still accepting the
+    # legacy strict-mode fields if a finding from an older run is in
+    # the JSONL — that way historical reports still parse.
+    jq -r 'select(.confidence != "AUDIT-CLEAN" and .confidence != null) |
+      "### \(.id // "RECON-???") — \(.title // "(no title)")\n\n" +
+      "- **Confidence**: \(.confidence)\n" +
+      "- **Class**: \(.class // "?")\n" +
+      "- **File:line**: `\(.file // "?"):\(.line // 0)` in `\(.function // "?")`\n" +
+      (if .notes then "- **Notes**: \(.notes)\n" else "" end) +
+      (if .reach_path then "- **Reach path**: \(.reach_path | join(" → "))\n" else "" end) +
+      (if .input_shape then "- **Input shape**: \(.input_shape)\n" else "" end) +
+      (if .guards_passed then "- **Guards passed**:\n" + (.guards_passed | map("  - " + .) | join("\n")) + "\n" else "" end) +
+      (if .primitive then "- **Primitive**: \(.primitive)\n" else "" end) +
+      (if .falsification then "- **Falsification**: \(.falsification)\n" else "" end) +
+      (if .validator_verdict then "- **Validator**: \(.validator_verdict)\n" else "" end) +
+      "\n---\n"
+    ' "$OUT_PATH" 2>/dev/null || cat "$OUT_PATH"
+  fi
+  if [ "$total_clean" -gt 0 ]; then
+    printf '## Slices audited clean\n\n'
+    jq -r 'select(.confidence == "AUDIT-CLEAN") |
+      "- **\(.slice // "?")**: \(.notes // "")"' "$OUT_PATH" 2>/dev/null || true
+  fi
+} > "$REPORT_PATH" 2>/dev/null || true
+
+log "Report written: $REPORT_PATH"
+if [ "$recon_output_poisoned" = "1" ]; then
+  # Poisoned output: do NOT advance the checkpoint — the next run should
+  # re-audit this same change set rather than skip past it.
+  log "Done (with POISONED output; exiting non-zero so bin/audit will re-run rather than cache empties)."
+  exit 5
+fi
+# Advance the per-target recon checkpoint so the next --scope since run
+# audits incrementally from this HEAD forward.
+write_recon_checkpoint
+log "Done."

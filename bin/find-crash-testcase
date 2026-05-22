@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Print the testcase path for a CRASH-* directory, if one is discoverable."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+import crash_artifacts  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="bin/find-crash-testcase")
+    ap.add_argument("crash_dir", type=Path)
+    ap.add_argument("--min-bytes", type=int, default=1)
+    args = ap.parse_args(argv)
+
+    d = args.crash_dir
+    if not d.is_dir():
+        return 2
+    scan_dirs = []
+    audit = d / ".audit"
+    if audit.is_dir():
+        scan_dirs.append(audit)
+    scan_dirs.append(d)
+    asan = crash_artifacts.find_primary_asan(scan_dirs)
+    testcase = crash_artifacts.find_testcase(
+        scan_dirs,
+        asan_files=[asan] if asan else [],
+        min_bytes=max(1, args.min_bytes),
+    )
+    if testcase is None:
+        return 1
+    print(testcase)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

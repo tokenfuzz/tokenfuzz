@@ -1,0 +1,200 @@
+#!/bin/bash
+# rg-safe — `rg` wrapper that caps stdout (lines AND bytes), excludes
+# noisy log paths by default, and emits a single footer when capping fires.
+#
+# Why two caps: the line cap is useless against haystacks where a single
+# match line is itself large — for example, output/<target>/<backend>/logs/*.log.raw, where
+# each turn is one giant JSON line. 200 such "lines" can be 1 MB. The byte
+# cap (RG_BYTES, default 128 KiB) is a hard ceiling regardless of line
+# count. The default was chosen empirically: across ~5,500 legitimate
+# rg/grep calls in production audit logs (libxml2 / pcre2 / json / curl /
+# c-ares / zlib), the largest legitimate output was ~92 KiB. 128 KiB
+# covers that with ~40% headroom while still trimming the 1 MB+ pathology.
+#
+# Why default exclusions: `logs/` is agent self-output (transcripts, prompt
+# dumps, summaries, indices) — greppy hash hunts there self-poison by
+# matching prior tool outputs. `.git/` is VCS internals and never useful
+# bug-finding context. Override the `logs/` half with `--include-logs`;
+# the `.git/` exclusion is always on. Audit data shows zero legitimate
+# agent reads inside `logs/` across 405 sessions, so wholesale exclusion
+# is strictly an improvement over the older file-by-file list.
+#
+# Usage:
+#   bin/rg-safe [--cap N | --no-cap | RG_CAP=N]                    line cap
+#               [--cap-bytes N | --no-cap-bytes | RG_BYTES=N]      byte cap
+#               [--include-logs | RG_INCLUDE_LOGS=1]               allow logs
+#               <rg args...>
+#
+# Defaults: RG_CAP=200, RG_BYTES=131072. `--no-cap` disables both caps.
+# `--include-logs` drops the default log-file exclusions. User-supplied
+# `--glob` flags still apply.
+#
+# stderr passes through unchanged. Exit code is rg's exit code (0 = match,
+# 1 = no match, 2 = error). Caps fire only on stdout.
+
+set -uo pipefail
+
+# Load the shared replacement-cap helper. Soft dependency — rg-safe falls
+# back to legacy chop-the-tail byte capping if the lib isn't present.
+_RGSAFE_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -r "$_RGSAFE_DIR/../lib/output_cap.sh" ]; then
+  # shellcheck source=../lib/output_cap.sh
+  . "$_RGSAFE_DIR/../lib/output_cap.sh"
+fi
+
+CAP="${RG_CAP:-200}"
+BYTES_CAP="${RG_BYTES:-131072}"
+INCLUDE_LOGS="${RG_INCLUDE_LOGS:-0}"
+PASS_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-cap) CAP=0; BYTES_CAP=0; shift ;;
+    --cap)
+      [ $# -ge 2 ] || { echo "[rg-safe] --cap needs a value" >&2; exit 2; }
+      CAP="$2"; shift 2 ;;
+    --cap=*) CAP="${1#--cap=}"; shift ;;
+    --no-cap-bytes) BYTES_CAP=0; shift ;;
+    --cap-bytes)
+      [ $# -ge 2 ] || { echo "[rg-safe] --cap-bytes needs a value" >&2; exit 2; }
+      BYTES_CAP="$2"; shift 2 ;;
+    --cap-bytes=*) BYTES_CAP="${1#--cap-bytes=}"; shift ;;
+    --include-logs) INCLUDE_LOGS=1; shift ;;
+    --) PASS_ARGS+=("$1"); shift; while [ $# -gt 0 ]; do PASS_ARGS+=("$1"); shift; done ;;
+    *) PASS_ARGS+=("$1"); shift ;;
+  esac
+done
+
+case "$CAP" in
+  ''|*[!0-9]*) echo "[rg-safe] non-numeric --cap: $CAP" >&2; exit 2 ;;
+esac
+case "$BYTES_CAP" in
+  ''|*[!0-9]*) echo "[rg-safe] non-numeric --cap-bytes: $BYTES_CAP" >&2; exit 2 ;;
+esac
+
+if ! command -v rg >/dev/null 2>&1; then
+  echo "[rg-safe] rg (ripgrep) not found in PATH" >&2
+  exit 2
+fi
+
+# Default-exclude logs/ and .git/. rg `--glob !pat` is additive with caller
+# globs, so prepending these never undoes a user-supplied include.
+# `--include-logs` drops only the logs/ half — .git/ is always excluded.
+RG_PREFIX_ARGS=(--glob '!**/.git/**')
+if [ "$INCLUDE_LOGS" != "1" ]; then
+  RG_PREFIX_ARGS+=(--glob '!**/logs/**')
+fi
+
+tmp=$(mktemp "${TMPDIR:-/tmp}/rg-safe-XXXXXXXX")
+tmp_out=$(mktemp "${TMPDIR:-/tmp}/rg-safe-out-XXXXXXXX")
+trap 'rm -f "$tmp" "$tmp_out"' EXIT
+
+# stdout → tmp, stderr → caller's stderr. `set -u` on bash 3.2 (macOS) trips
+# on empty-array expansion, so dispatch by whether RG_PREFIX_ARGS has entries.
+#
+# Disable any inherited cap from lib/wrappers/rg (which sits on PATH in the
+# agent shell). Without this, --no-cap / --cap N>200 silently top out at 200
+# lines because the wrapper clips before rg-safe can see the raw output.
+# rg-safe enforces its own caps below; the wrapper one would just double-cap.
+if [ "${#RG_PREFIX_ARGS[@]}" -gt 0 ]; then
+  CAP_LINES=0 CAP_BYTES=0 rg "${RG_PREFIX_ARGS[@]}" "${PASS_ARGS[@]}" > "$tmp"
+else
+  CAP_LINES=0 CAP_BYTES=0 rg "${PASS_ARGS[@]}" > "$tmp"
+fi
+rc=$?
+
+total_lines=$(wc -l < "$tmp" 2>/dev/null | tr -d ' ')
+total_lines=${total_lines:-0}
+total_bytes=$(wc -c < "$tmp" 2>/dev/null | tr -d ' ')
+total_bytes=${total_bytes:-0}
+
+line_capped=0
+byte_capped=0
+clipped_bytes="$total_bytes"
+
+# 1) Line cap.
+if [ "$CAP" -le 0 ] || [ "$total_lines" -le "$CAP" ]; then
+  cp "$tmp" "$tmp_out"
+else
+  head -n "$CAP" "$tmp" > "$tmp_out"
+  line_capped=1
+fi
+
+# 2) Byte cap on whatever survived the line cap.
+#
+# Prefer the head + tail + spill helper (lib/output_cap.sh) when available
+# AND when the operator hasn't asked for a non-default RG_BYTES limit. The
+# helper emits the matching head, an elision marker pointing at the full
+# file on disk, then the tail — strictly more informative than the legacy
+# chop-the-tail behavior, which silently dropped every match past byte
+# BYTES_CAP. Two conditions fall back to legacy:
+#
+#   1. BYTES_CAP was set non-default by the caller (RG_BYTES env or
+#      --cap-bytes flag) — they want the historical clip-and-footer shape,
+#      preserve it so debugging workflows that grep the footer still match.
+#   2. output_cap.sh wasn't sourced (defensive — should never happen in a
+#      live tree). We retain the original python3 clip for parity.
+out_bytes=$(wc -c < "$tmp_out" 2>/dev/null | tr -d ' ')
+out_bytes=${out_bytes:-0}
+clipped_bytes="$out_bytes"
+
+# Heuristic: rg-safe was invoked with the historical default (131072) and
+# the user didn't override via env or flag iff BYTES_CAP equals the script
+# default. Comparing against the literal default is enough — if a user
+# explicitly passes `--cap-bytes 131072`, falling through to the helper
+# path is still a strict improvement, so we don't bother distinguishing.
+_use_helper=0
+if [ "$BYTES_CAP" -eq 131072 ] && declare -F cap_output_file >/dev/null 2>&1; then
+  _use_helper=1
+fi
+
+if [ "$_use_helper" -eq 1 ]; then
+  # The helper handles its own threshold check (OUTCAP_MAX_BYTES). When
+  # output is small it passes through verbatim; when large it emits
+  # head+tail+spill. Either way, no separate footer needed from rg-safe.
+  cap_output_file "$tmp_out" rg-safe
+  helper_fired=0
+  [ "$out_bytes" -gt "${OUTCAP_MAX_BYTES:-51200}" ] && helper_fired=1
+
+  if [ "$line_capped" -eq 1 ]; then
+    printf '[rg-safe: capped at %d of %d lines. Pass --no-cap, RG_CAP=0, or refine your query (narrower glob, more specific pattern, --files-with-matches) to widen.]\n' \
+      "$CAP" "$total_lines"
+  fi
+  exit "$rc"
+fi
+
+# Legacy clip-and-footer path. Preserved verbatim from the pre-helper
+# version so callers that explicitly pass RG_BYTES=N keep observing the
+# old contract.
+if [ "$BYTES_CAP" -gt 0 ] && [ "$out_bytes" -gt "$BYTES_CAP" ]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "[rg-safe] python3 not found in PATH (required for --cap-bytes)" >&2
+    exit 2
+  fi
+  python3 - "$tmp_out" "$BYTES_CAP" <<'PY' || exit 2
+import sys
+path, cap = sys.argv[1], int(sys.argv[2])
+with open(path, "rb") as f:
+    data = f.read(cap)
+i = data.rfind(b"\n")
+if i >= 0:
+    data = data[:i + 1]
+with open(path, "wb") as f:
+    f.write(data)
+PY
+  byte_capped=1
+fi
+
+cat "$tmp_out"
+
+if [ "$line_capped" -eq 1 ] && [ "$byte_capped" -eq 1 ]; then
+  printf '[rg-safe: capped at %d of %d lines AND %d of %d bytes. Pass --no-cap, RG_CAP=0, RG_BYTES=0, --include-logs, or refine your query (narrower glob, more specific pattern, --files-with-matches) to widen.]\n' \
+    "$CAP" "$total_lines" "$BYTES_CAP" "$clipped_bytes"
+elif [ "$line_capped" -eq 1 ]; then
+  printf '[rg-safe: capped at %d of %d lines. Pass --no-cap, RG_CAP=0, or refine your query (narrower glob, more specific pattern, --files-with-matches) to widen.]\n' \
+    "$CAP" "$total_lines"
+elif [ "$byte_capped" -eq 1 ]; then
+  printf '[rg-safe: capped at %d of %d bytes. Pass --no-cap-bytes, RG_BYTES=0, --no-cap, --include-logs, or refine your query to widen.]\n' \
+    "$BYTES_CAP" "$clipped_bytes"
+fi
+
+exit "$rc"

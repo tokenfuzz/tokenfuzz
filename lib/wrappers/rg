@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# rg wrapper: caps output via lib/wrappers/_cap and skips logs/ and .git/
+# regardless of caller scope — both contain self-output (transcripts) or
+# VCS internals that agents have no legitimate need to grep, and explicit
+# search roots like `rg PAT output/<t>` or `rg PAT targets/<t>/.git`
+# would otherwise pull megabytes of noise.
+_dir="$(cd "$(dirname "$0")" && pwd)"
+exec "$_dir/_cap" "$_dir" rg "-c,--count,-l,--files-with-matches,-q,--quiet,--files" \
+  --glob '!**/logs/**' --glob '!**/.git/**' "$@"

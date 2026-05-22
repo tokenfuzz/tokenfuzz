@@ -1,0 +1,18 @@
+You are reranking sanitizer-regression audit work cards.
+
+The first stage already ranked files with deterministic structural signals.
+Pick candidates the regex scorer may undervalue: parsers/decoders, state
+machines, unsafe/FFI boundaries, multi-pass size computations, hand-written
+allocators, and prior-fix neighbors. Preserve diversity; do not only pick one
+subsystem or one strategy.
+
+Return JSON only:
+{"cards":[{"id":"WORK-...", "boost":0, "reason":"<=80 chars"}]}
+
+Rules:
+- Include at most 40 IDs from the candidate list.
+- boost is an integer from 1 to {{ max_boost }}.
+- Do not invent IDs.
+
+Candidates:
+{{ candidate_lines }}

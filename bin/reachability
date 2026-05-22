@@ -1,0 +1,2514 @@
+#!/usr/bin/env python3
+"""bin/reachability — external-caller probe + severity recompute for crash reports.
+
+Two public code-search backends are queried in parallel:
+
+  * Sourcegraph public stream API — https://sourcegraph.com/.api/search/stream
+                                    Unauthenticated, broad GitHub coverage.
+  * gh search code                — official GitHub Search API via the gh CLI.
+                                    Needs `gh auth login` or GH_TOKEN.
+
+Results are cached on disk for 24h, the request carries a polite User-Agent,
+and transient failures get a single retry. 403/429 responses also create a
+short backend-level cooldown so repeated symbol probes do not hammer a
+rate-limited service. Each backend is independent: any one failing produces
+"status": "unavailable" without blocking the others.
+
+Filtering: hits whose repo or path contain any substring from the target's
+reachability_ignore list are dropped. The list is read from output/<slug>/
+target.toml and is the right place to silence the project's own sources and
+known vendored copies.
+
+Severity: a CVSS-aligned hybrid score is computed from the report's
+structured fields and the reachability counts:
+
+    score = clamp(round((Impact + Reach) × ConfidenceFactor), 0, 100)
+
+Impact is additive (primitive class + modifiers, ∈ [0, 46]).
+Reach is multiplicative (surface × callers × contract × controls,
+∈ [0, ~46]) — any near-zero gate collapses the side, so a high-impact
+primitive in a non-shipping (test/maintenance) tool correctly stays Low.
+Confidence is a multiplier ∈ [0.5, 1.0] that derates flaky reports.
+
+Continuous 0..100, bucketed Critical/High/Medium/Low. Calibration aligned
+with CVSS 3.1/4.0, OWASP Risk Rating, and the Microsoft Security Bug Bar.
+See compute_severity() for the formula. Written back into the report's
+Classification block as "- **Severity**: <level> (auto: I=.. R=..
+×CF=..; ...; score=N)".
+
+Usage:
+  bin/reachability --symbol pcre2_serialize_decode [--symbol foo] [--json]
+  bin/reachability --report path/to/CRASH-XXX/      # update report.md +
+                                                     # write reachability.json
+  bin/reachability --report path/to/CRASH-XXX/ --severity-only
+                                                     # no network; use cached
+                                                     # reachability.json or zero
+
+Env:
+  REACHABILITY_MOCK_DIR   When set, backend HTTP/CLI calls are replaced by
+                          reads of <dir>/<service>-<sha1(symbol)>.json. This
+                          is what tests/test_reachability.sh uses; it also
+                          lets you record fixtures by saving real responses.
+  REACHABILITY_CACHE_DIR  Override the cache directory. Default:
+                          ~/.cache/sancov-reachability/
+  REACHABILITY_NEGATIVE_TTL_SECS
+                          Override the 403/429 backend cooldown. Default: 300.
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+USER_AGENT = "tokenfuzz-reachability/1.0"
+DEFAULT_TIMEOUT = 10.0
+BACKOFF_SECS = 30.0
+CACHE_TTL_SECS = 24 * 3600
+# Status codes worth a single retry. 403 is deliberately excluded: it is often
+# an auth or policy response, so repeated immediate retries are not useful.
+RETRY_STATUS = (429, 502, 503, 504)
+NEGATIVE_CACHE_STATUS = (403, 429)
+DEFAULT_NEGATIVE_TTL_SECS = 5 * 60
+# Per-backend minimum gap between consecutive symbol probes. gh is bound by the
+# GitHub Search API limit (30 req/min authenticated → ≥2.0s between calls);
+# Sourcegraph publishes no rate limit but we stay polite.
+SERVICE_THROTTLE_SECS = {
+    "sourcegraph": 0.5,
+    "gh": 2.0,
+}
+
+SERVICES = ("sourcegraph", "gh")
+
+
+# ─── Cache ────────────────────────────────────────────────────────────────
+
+
+def _cache_dir() -> Path:
+    p = os.environ.get("REACHABILITY_CACHE_DIR")
+    if p:
+        return Path(p)
+    return Path(os.path.expanduser("~/.cache/sancov-reachability"))
+
+
+def _cache_path(service: str, symbol: str) -> Path:
+    """Cache key: (service, symbol). Freshness is enforced by mtime, not by
+    a date suffix in the filename — putting the date in the name caused
+    near-midnight UTC misses where a freshly written file would be discarded
+    seconds later when the day rolled over."""
+    digest = hashlib.sha1(symbol.encode("utf-8")).hexdigest()[:16]
+    return _cache_dir() / f"{service}-{digest}.json"
+
+
+def _atomic_json_write(path: Path, payload: dict) -> None:
+    tmp_name = ""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            tmp_name = f.name
+            json.dump(payload, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+        tmp_name = ""
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        if tmp_name:
+            try:
+                Path(tmp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _cache_read(service: str, symbol: str) -> dict | None:
+    p = _cache_path(service, symbol)
+    if not p.is_file():
+        return None
+    try:
+        age = time.time() - p.stat().st_mtime
+    except OSError:
+        return None
+    if age > CACHE_TTL_SECS:
+        return None
+    try:
+        return json.loads(p.read_text("utf-8"))
+    except Exception:
+        return None
+
+
+def _cache_write(service: str, symbol: str, payload: dict) -> None:
+    p = _cache_path(service, symbol)
+    try:
+        _atomic_json_write(p, payload)
+    except OSError:
+        pass
+
+
+def _negative_ttl_secs() -> float:
+    raw = os.environ.get("REACHABILITY_NEGATIVE_TTL_SECS")
+    if raw is None:
+        return float(DEFAULT_NEGATIVE_TTL_SECS)
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return float(DEFAULT_NEGATIVE_TTL_SECS)
+
+
+def _negative_cache_path(service: str) -> Path:
+    return _cache_dir() / f"{service}-backoff.json"
+
+
+def _negative_cache_read(service: str) -> dict | None:
+    p = _negative_cache_path(service)
+    if not p.is_file():
+        return None
+    try:
+        age = time.time() - p.stat().st_mtime
+    except OSError:
+        return None
+    ttl = _negative_ttl_secs()
+    if ttl <= 0 or age > ttl:
+        return None
+    try:
+        payload = json.loads(p.read_text("utf-8"))
+    except Exception:
+        return None
+    status = payload.get("http_status", "?")
+    remaining = max(0, int(ttl - age))
+    return {
+        "status": "unavailable",
+        "error": f"backend cooldown after http {status} ({remaining}s remaining)",
+        "http_status": status,
+        "negative_cache": True,
+    }
+
+
+def _negative_cache_write(service: str, http_status: int) -> None:
+    if http_status not in NEGATIVE_CACHE_STATUS or _negative_ttl_secs() <= 0:
+        return
+    p = _negative_cache_path(service)
+    payload = {
+        "status": "unavailable",
+        "http_status": http_status,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        _atomic_json_write(p, payload)
+    except OSError:
+        pass
+
+
+# ─── HTTP with one polite retry ───────────────────────────────────────────
+
+
+def _http_get(url: str, timeout: float, accept: str = "application/json") -> tuple[int, Any]:
+    """Return (status_code, body). For application/json the body is parsed JSON
+    when parseable, otherwise raw text. For any other accept value (e.g.
+    text/event-stream) the body is returned as a raw decoded string.
+    Raises urllib errors on transport failure."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+        if accept == "application/json":
+            try:
+                return resp.status, json.loads(body)
+            except json.JSONDecodeError:
+                return resp.status, body
+        return resp.status, body
+
+
+def _http_with_retry(url: str, timeout: float, accept: str = "application/json") -> tuple[int, Any]:
+    """One retry on RETRY_STATUS after BACKOFF_SECS. Other codes return as-is."""
+    try:
+        status, body = _http_get(url, timeout, accept)
+    except urllib.error.HTTPError as e:
+        status = e.code
+        body = None
+        if status in RETRY_STATUS:
+            time.sleep(BACKOFF_SECS)
+            try:
+                return _http_get(url, timeout, accept)
+            except urllib.error.HTTPError as e2:
+                return e2.code, None
+        return status, body
+    if status in RETRY_STATUS:
+        time.sleep(BACKOFF_SECS)
+        try:
+            return _http_get(url, timeout, accept)
+        except urllib.error.HTTPError as e:
+            return e.code, None
+    return status, body
+
+
+# ─── Mock layer (test fixtures) ───────────────────────────────────────────
+
+
+def _mock_path(service: str, symbol: str) -> Path | None:
+    mock_dir = os.environ.get("REACHABILITY_MOCK_DIR")
+    if not mock_dir:
+        return None
+    digest = hashlib.sha1(symbol.encode("utf-8")).hexdigest()[:16]
+    return Path(mock_dir) / f"{service}-{digest}.json"
+
+
+def _read_mock(service: str, symbol: str) -> dict | None:
+    """Mock layer for tests.
+
+    When REACHABILITY_MOCK_DIR is set, the mock dir is treated as a hard wall:
+    if a mock file exists for (service, symbol), return it; if it doesn't,
+    return an "unavailable" result rather than falling through to a real
+    HTTP / gh-CLI call. This keeps the test suite hermetic even when a
+    report yields more symbols than the test fixture covers.
+    """
+    p = _mock_path(service, symbol)
+    if p is None:
+        return None  # mock layer disabled — fall through to real backend
+    if not p.is_file():
+        return {"status": "unavailable", "error": f"no mock for ({service}, {symbol})"}
+    try:
+        return json.loads(p.read_text("utf-8"))
+    except Exception:
+        return {"status": "unavailable", "error": "mock JSON unparseable"}
+
+
+# ─── Backends ─────────────────────────────────────────────────────────────
+
+
+SOURCEGRAPH_RESULT_LIMIT = 30
+
+
+def _parse_sourcegraph_sse(body: str) -> list[dict] | None:
+    """Extract all match items from a Sourcegraph stream response.
+
+    Returns None if the body has no SSE structure at all (no `event:` lines)
+    — signal of a schema drift or HTML error page returned with 200. Returns
+    an empty list when the stream is well-formed but emitted no `matches`
+    events (legitimate "0 hits" — Sourcegraph still emits `progress` and
+    `done` in that case).
+    """
+    matches: list[dict] = []
+    saw_event = False
+    cur_event: str | None = None
+    cur_data: list[str] = []
+
+    def _flush() -> None:
+        nonlocal cur_event, cur_data
+        if cur_event == "matches" and cur_data:
+            try:
+                items = json.loads("".join(cur_data))
+            except json.JSONDecodeError:
+                items = None
+            if isinstance(items, list):
+                matches.extend(items)
+        cur_event = None
+        cur_data = []
+
+    for line in body.splitlines():
+        if line == "":
+            _flush()
+            continue
+        if line.startswith("event:"):
+            saw_event = True
+            cur_event = line[6:].strip()
+        elif line.startswith("data:"):
+            v = line[5:]
+            if v.startswith(" "):
+                v = v[1:]
+            cur_data.append(v)
+    _flush()
+    if not saw_event:
+        return None
+    return matches
+
+
+def query_sourcegraph(symbol: str, timeout: float) -> dict:
+    """Sourcegraph public stream API. The stream is bounded by `count:` in the
+    query so the response is small and terminates naturally; we read it whole
+    and pull repo+path out of every `event: matches` frame.
+
+    `lang:c` is included in the query because Sourcegraph treats both .c and
+    .cpp files as that lang scope, and the C/C++ filter cuts out stray hits
+    in JS/Python that happen to share an identifier name."""
+    mock = _read_mock("sourcegraph", symbol)
+    if mock is not None:
+        return mock
+    url = "https://sourcegraph.com/.api/search/stream?" + urllib.parse.urlencode({
+        "q": f"{symbol} lang:c count:{SOURCEGRAPH_RESULT_LIMIT}",
+        "display": str(SOURCEGRAPH_RESULT_LIMIT),
+    })
+    try:
+        status, body = _http_with_retry(url, timeout, accept="text/event-stream")
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        return {"status": "unavailable", "error": f"transport: {e!r}"}
+    if status != 200 or not isinstance(body, str):
+        return {"status": "unavailable", "error": f"http {status}", "http_status": status}
+    parsed = _parse_sourcegraph_sse(body)
+    if parsed is None:
+        return {"status": "unavailable", "error": "schema mismatch (no SSE event frames)"}
+    seen: dict[tuple[str, str], dict] = {}
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        repo = str(item.get("repository", "") or "")
+        path = str(item.get("path", "") or "")
+        if not repo and not path:
+            continue
+        key = (repo, path)
+        if key not in seen:
+            seen[key] = {"repo": repo, "path": path}
+    return {"status": "ok", "hits": list(seen.values())}
+
+
+def query_gh(symbol: str, timeout: float) -> dict:
+    """Use the gh CLI if available + authenticated. Anything else → unavailable."""
+    mock = _read_mock("gh", symbol)
+    if mock is not None:
+        return mock
+    if shutil.which("gh") is None:
+        return {"status": "unavailable", "error": "gh CLI not installed"}
+    try:
+        proc = subprocess.run(
+            ["gh", "search", "code", symbol, "--language=C", "--limit=30",
+             "--json", "repository,path"],
+            capture_output=True, text=True, timeout=timeout * 2,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"status": "unavailable", "error": f"gh exec: {e!r}"}
+    if proc.returncode != 0:
+        # Most common: not authenticated, or rate-limited.
+        return {"status": "unavailable", "error": (proc.stderr or "").strip()[:200] or f"gh exit {proc.returncode}"}
+    try:
+        items = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as e:
+        return {"status": "unavailable", "error": f"gh JSON: {e!r}"}
+    seen: dict[tuple[str, str], dict] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        repo_obj = item.get("repository") or {}
+        repo = repo_obj.get("nameWithOwner") if isinstance(repo_obj, dict) else ""
+        path = item.get("path", "")
+        if not repo and not path:
+            continue
+        key = (str(repo), str(path))
+        if key not in seen:
+            seen[key] = {"repo": str(repo), "path": str(path)}
+    return {"status": "ok", "hits": list(seen.values())}
+
+
+BACKENDS = {
+    "sourcegraph": query_sourcegraph,
+    "gh": query_gh,
+}
+
+
+# ─── Driver: parallel, cached, filtered ───────────────────────────────────
+
+
+def _apply_ignore(hits: list[dict], ignore: list[str]) -> list[dict]:
+    if not ignore:
+        return hits
+    out = []
+    for h in hits:
+        repo = h.get("repo", "")
+        path = h.get("path", "")
+        if any(tok and (tok in repo or tok in path) for tok in ignore):
+            continue
+        out.append(h)
+    return out
+
+
+# Heuristic for "this hit is a vendored copy of the target's own source, not a
+# genuine external caller." Three signals:
+#   * the path contains a well-known vendored-deps subdir (vendor/, third_party/,
+#     contrib/, deps/, ext/, external/, jni/, thirdparty/, 3rd_src/, ...),
+#   * the path contains a basename that strongly identifies the upstream source
+#     (e.g. /pcre2_substring.c, /xmlschemas.c) and a vendored-style prefix,
+#   * the file is the project's own canonical source layout (e.g. .../pcre2/src/...).
+# Hits with these signals are kept in the "vendored_copies" bucket so the
+# severity formula isn't fooled by name collisions across repos that just
+# re-include the upstream code.
+_VENDORED_PREFIX_RE = re.compile(
+    r"(^|/)("
+    r"vendor|vendored|third_party|3rdparty|3rd[_-]?src|3rd[_-]?party|"
+    r"deps|contrib|jni|thirdparty|external|ext"
+    r")(/|$)",
+    re.IGNORECASE,
+)
+
+
+# A `-`/`_`-delimited numeric version suffix (`libxml2-2.9.14`, `pcre2_10`).
+# A trailing digit that is part of the name itself (`pcre2`, `libxml2`) is
+# NOT delimited and so is preserved.
+_VERSION_SUFFIX_RE = re.compile(r"[-_][0-9][0-9A-Za-z._]*$")
+
+
+def _target_name_variants(raw: str) -> set[str]:
+    """Project-name forms to match against vendored-path directory segments.
+
+    Returns the bare name plus a version-stripped form, so a vendored tree
+    named `libxml2-2.9.14` or `pcre2-10.42` still matches a `libxml2` /
+    `pcre2` audit. Names come from the live target tree and slug — there is
+    no hardcoded project list, so this works for any target.
+    """
+    raw = os.path.basename((raw or "").strip().lower().rstrip("/"))
+    if not raw:
+        return set()
+    variants = {raw}
+    stripped = _VERSION_SUFFIX_RE.sub("", raw)
+    if len(stripped) >= 2:
+        variants.add(stripped)
+    return variants
+
+
+def _segment_names_target(seg: str, target_names: set[str]) -> bool:
+    """True when path segment `seg` names the project under audit.
+
+    Matches the bare name and version/source-suffixed forms
+    (`libxml2`, `libxml2-2.9`, `pcre2_src`)."""
+    seg = seg.strip().lower()
+    if not seg:
+        return False
+    return any(
+        seg == name or seg.startswith(name + "-")
+        or seg.startswith(name + "_") or seg.startswith(name + ".")
+        for name in target_names
+    )
+
+
+def _is_vendored_copy(hit: dict, target_basenames: set[str],
+                      target_names: set[str]) -> bool:
+    path = hit.get("path", "") or ""
+    if not path:
+        return False
+    if _VENDORED_PREFIX_RE.search(path):
+        return True
+    # Path carries an upstream filename AND a directory segment naming the
+    # project under audit (e.g. somerepo/libxml2/xmlschemas.c is a vendored
+    # copy, not a real caller). The project name is derived at runtime from
+    # the target tree / slug, so this recognises any target — no hardcoded
+    # per-project enumeration.
+    if not (target_basenames and target_names):
+        return False
+    base = path.rsplit("/", 1)[-1]
+    if base not in target_basenames:
+        return False
+    return any(_segment_names_target(seg, target_names)
+               for seg in path.split("/")[:-1])
+
+
+def _split_vendored(hits: list[dict], target_basenames: set[str],
+                    target_names: set[str]) -> tuple[list[dict], list[dict]]:
+    """Return (genuine_callers, vendored_copies) by classifying each hit."""
+    genuine: list[dict] = []
+    vendored: list[dict] = []
+    for h in hits:
+        if _is_vendored_copy(h, target_basenames, target_names):
+            vendored.append(h)
+        else:
+            genuine.append(h)
+    return genuine, vendored
+
+
+def _query_one(service: str, symbol: str, timeout: float, use_cache: bool) -> dict:
+    if use_cache:
+        cached = _cache_read(service, symbol)
+        if cached is not None:
+            cached.setdefault("from_cache", True)
+            return cached
+        cooldown = _negative_cache_read(service)
+        if cooldown is not None:
+            cooldown.setdefault("from_cache", True)
+            return cooldown
+    fn = BACKENDS[service]
+    result = fn(symbol, timeout)
+    if use_cache and result.get("status") == "ok":
+        _cache_write(service, symbol, result)
+    elif use_cache:
+        try:
+            http_status = int(result.get("http_status", 0))
+        except (TypeError, ValueError):
+            http_status = 0
+        _negative_cache_write(service, http_status)
+    result.setdefault("from_cache", False)
+    return result
+
+
+def _service_throttle_secs(service: str) -> float:
+    if os.environ.get("REACHABILITY_MOCK_DIR"):
+        return 0.0
+    raw = os.environ.get(f"REACHABILITY_{service.upper()}_THROTTLE_SECS")
+    if raw is not None:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return SERVICE_THROTTLE_SECS.get(service, 0.0)
+    return SERVICE_THROTTLE_SECS.get(service, 0.0)
+
+
+def _query_service(service: str, symbols: list[str], timeout: float, use_cache: bool) -> list[tuple[str, dict]]:
+    rows: list[tuple[str, dict]] = []
+    throttle = _service_throttle_secs(service)
+    for i, sym in enumerate(symbols):
+        r = _query_one(service, sym, timeout, use_cache)
+        rows.append((sym, r))
+        if i + 1 < len(symbols) and throttle > 0 and not r.get("from_cache"):
+            time.sleep(throttle)
+    return rows
+
+
+def query_all(symbols: list[str], ignore: list[str], timeout: float, use_cache: bool,
+              target_basenames: set[str] | None = None,
+              target_names: set[str] | None = None) -> dict:
+    """Run services in parallel, but keep each backend's symbol probes sequential.
+
+    target_basenames: filenames recognised as coming from the upstream project
+    (e.g. {"pcre2_substring.c", "pcre2_match.c"}).
+    target_names: project-name aliases for the target under audit (e.g.
+    {"pcre2"}), used to spot `…/<project>/…` vendored path segments.
+    Hits whose basename matches a target file AND whose path is vendored
+    (a vendored-style prefix, or a directory segment naming the project)
+    are bucketed into `vendored_copies` rather than `external_callers` —
+    those repos *ship* the bug, they don't call into a separate library.
+    This dramatically tightens the severity score (which weighs
+    external_callers heavily) for crashes where most search hits are
+    mirror-vendored sources.
+    """
+    per_service: dict[str, dict] = {svc: {"status": "ok", "hits": [], "errors": []} for svc in SERVICES}
+    target_basenames = target_basenames or set()
+    target_names = target_names or set()
+
+    max_workers = max(1, len(SERVICES))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_query_service, svc, symbols, timeout, use_cache): svc for svc in SERVICES}
+        for fut in concurrent.futures.as_completed(futures):
+            svc = futures[fut]
+            try:
+                rows = fut.result()
+            except Exception as e:
+                rows = [(sym, {"status": "unavailable", "error": f"executor: {e!r}"}) for sym in symbols]
+            entry = per_service[svc]
+            for sym, r in rows:
+                if r.get("status") != "ok":
+                    entry["errors"].append({"symbol": sym, "error": r.get("error", "unknown")})
+                    # If any symbol succeeds for a backend, the backend is still "ok"
+                    # for the union. Only mark unavailable if ALL symbols failed.
+                    continue
+                for h in r.get("hits", []):
+                    h2 = dict(h)
+                    h2["matched_symbol"] = sym
+                    entry["hits"].append(h2)
+
+    # Flip status to unavailable when nothing came back AND every probe errored.
+    for svc, entry in per_service.items():
+        if not entry["hits"] and entry["errors"]:
+            entry["status"] = "unavailable"
+        # Apply ignore filter
+        entry["hits"] = _apply_ignore(entry["hits"], ignore)
+        # Split vendored copies out from genuine callers.
+        genuine, vendored = _split_vendored(entry["hits"], target_basenames, target_names)
+        # Dedup across symbols by (repo, path)
+        def _dedup(items: list[dict]) -> list[dict]:
+            seen: dict[tuple[str, str], dict] = {}
+            for h in items:
+                k = (h.get("repo", ""), h.get("path", ""))
+                if k not in seen:
+                    seen[k] = h
+            return list(seen.values())
+        entry["hits"] = _dedup(genuine)
+        entry["vendored"] = _dedup(vendored)
+        entry["count"] = len(entry["hits"])
+        entry["vendored_count"] = len(entry["vendored"])
+
+    # Cross-backend external-caller count: union by (repo, path).
+    union: dict[tuple[str, str], dict] = {}
+    vendored_union: dict[tuple[str, str], dict] = {}
+    for entry in per_service.values():
+        for h in entry["hits"]:
+            k = (h.get("repo", ""), h.get("path", ""))
+            if k not in union:
+                union[k] = h
+        for h in entry.get("vendored", []):
+            k = (h.get("repo", ""), h.get("path", ""))
+            if k not in vendored_union:
+                vendored_union[k] = h
+
+    services_responding = [svc for svc, e in per_service.items() if e["status"] == "ok"]
+    return {
+        "schema_version": 2,
+        "queried_at": datetime.now(timezone.utc).isoformat(),
+        "symbols": symbols,
+        "ignore": ignore,
+        "external_callers": len(union),
+        "external_caller_hits": list(union.values()),
+        "vendored_copies": len(vendored_union),
+        "vendored_copy_hits": list(vendored_union.values()),
+        "services_responding": services_responding,
+        "services": per_service,
+    }
+
+
+# ─── target.toml discovery + ignore-list extraction ───────────────────────
+
+
+def _find_target_toml(start: Path) -> Path | None:
+    """Walk up from `start` looking for an output/<slug>/target.toml ancestor."""
+    cur = start.resolve()
+    if cur.is_file():
+        cur = cur.parent
+    for p in [cur, *cur.parents]:
+        # Case 1: we're already inside output/<slug>/...
+        for anc in [p, *p.parents]:
+            if anc.parent.name == "output" and (anc / "target.toml").is_file():
+                return anc / "target.toml"
+            if anc.name == "output":
+                # Stop climbing further once we hit the output root itself.
+                break
+        if (p / "target.toml").is_file():
+            return p / "target.toml"
+    return None
+
+
+def _parse_target_toml_ignore(path: Path) -> list[str]:
+    """Tiny TOML reader for the one key we care about. Mirrors lib/target_config.sh."""
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text("utf-8", errors="replace")
+    except OSError:
+        return []
+    ignore: list[str] = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line.startswith("reachability_ignore"):
+            continue
+        if "=" not in line:
+            continue
+        val = line.split("=", 1)[1].strip()
+        if not (val.startswith("[") and val.endswith("]")):
+            continue
+        body = val[1:-1]
+        # Naive comma split — values are quoted strings.
+        for item in body.split(","):
+            item = item.strip().strip('"').strip("'")
+            if item:
+                ignore.append(item)
+        break
+    return ignore
+
+
+# ─── Severity scoring ─────────────────────────────────────────────────────
+#
+# Hybrid additive + multiplicative formula calibrated against industry
+# practice (CVSS 3.1 / 4.0, OWASP Risk Rating, Microsoft Security Bug Bar).
+# Continuous 0..100 score; same inputs always produce the same number, but
+# with enough resolution that a security team can sort *within* a level.
+#
+#   I  ∈ [0, 46]   primitive class + caller-controlled offset/size/value mods
+#                  → maps to CVSS C/I/A Impact subscore.
+#                  Additive (base + modifiers).
+#
+#   R  ∈ [0, ~46]  surface_pts × callers × contract × controls
+#                  → maps to CVSS Attack Vector × AC × PR × UI.
+#                  *Multiplicative*: any near-zero gate collapses R.
+#                  This is the key fix from v1 — a high-impact primitive
+#                  in a non-shipping (test/maintenance) tool no longer
+#                  carries through the additive formula. Industry practice
+#                  (Microsoft Bug Bar, Project Zero) is unanimous that
+#                  bugs in dev/test code are not security-relevant unless
+#                  reachable from a real input surface.
+#
+#   CF ∈ [0.5, 1.0] reproduction rate × cluster confirmation × SCARINESS
+#                  → maps to CVSS Temporal Report Confidence.
+#                  *Multiplies the whole score* — flaky 1/5 reports get
+#                  derated by half; confirmed multi-cluster get full credit.
+#
+#   score = clamp(round((I + R) × CF), 0, 100)
+#
+#   bucket:
+#     score >= 70 → Critical    (real network/library memory-safety, broad reach)
+#     score >= 55 → High        (library memory-safety, or popular file parser)
+#     score >= 30 → Medium      (library info-disclosure; production CLI memory-safety)
+#     else        → Low         (dev/test tools; flaky; low-impact + unreached)
+
+import math
+
+
+# ── Impact axis (CVSS C/I/A Impact) ──────────────────────────────────────
+
+
+# Primitive class → base impact. Keys flow through to the report breakdown
+# so operators can see why a score landed where it did. Tuned against
+# real-world CVE distributions: UAF and wild-addr WRITEs anchor at 40
+# (CVSS Critical impact), heap-WRITE at 32 (CVSS High impact), heap-READs
+# at 16-24 (CVSS Medium impact), DoS-only at 5-8 (CVSS Low impact).
+IMPACT_BASE = {
+    # ── Memory-safety primitives (ASan / UBSan / TSan) ────────────
+    "uaf_write":         40,   # use-after-free WRITE — type-state pivot
+    "double_free":       38,
+    "wild_write":        37,
+    "heap_write":        32,   # any bounded heap WRITE
+    "stack_write":       30,
+    "global_write":      28,
+    "uaf_read":          28,
+    "heap_read_big":     24,   # READ of ≥16 bytes — info-disclosure shaped
+    "global_read":       20,
+    "stack_read":        18,
+    "heap_read_small":   16,   # READ of <16 bytes — typically DoS-shaped
+    "null_deref":         8,
+    "bus":                5,   # SIGBUS / misalignment / DoS-only
+
+    # ── Web/application vulnerability classes ─────────────────────
+    # Calibrated against industry CVSS distributions for the class.
+    # Modifiers (caller-controlled bytes etc.) still apply, capped at +6.
+    "command_injection": 40,   # RCE — CVSS Critical impact analog
+    "deserialization":   38,   # insecure deserialization — frequently RCE
+    "sqli":              36,   # SQL injection — auth bypass + data exfil
+    "ssti":              36,   # server-side template injection — RCE-shaped
+    "authn_bypass":      32,   # authentication bypass
+    "ssrf":              28,   # server-side request forgery
+    "path_traversal":    28,   # directory traversal / arbitrary file read
+    "authz_bypass":      28,   # authorization / access-control bypass
+    "xxe":               26,   # XML external entity — info-disclosure + SSRF
+    "secrets_exposure":  24,   # credentials / API keys / tokens leaked
+    "idor":              22,   # insecure direct object reference
+    "prototype_pollution": 20, # JS prototype pollution — often a pivot
+    "xss":               18,   # cross-site scripting (any flavor)
+    "open_redirect":     14,   # CWE-601 — phishing + OAuth pivot
+    "crypto_weakness":   14,   # weak hash / hard-coded key / insecure RNG
+    "csrf":              12,   # cross-site request forgery
+    "regex_dos":         12,   # ReDoS — DoS-only
+
+    # ── Recon / reasoning-confirmed classes ───────────────────────
+    # Anchors for non-ASan findings that an independent validator has
+    # voted Promote on. Tuned so a Promote-quorum reasoning-confirmed
+    # finding does not silently collapse into the "unknown=8" floor.
+    "protocol_state":    20,   # protocol-state corruption (cookie poisoning,
+                                # cache poisoning, downgrade attacks)
+    "dos_amplification": 16,   # parser amplifiers, name-decompression DoS,
+                                # algorithmic complexity attacks
+    "logic_regression":  14,   # defense-in-depth feature defeated by logic
+                                # bug (e.g., cache normalization disables
+                                # a security feature like DNS0x20)
+    "info_leak":         24,   # info disclosure / uninit read / reasoning-
+                                # confirmed leak shaped like heap_read_big
+    "injection":         24,   # generic injection fallback (CRLF, LDAP, …)
+
+    # ── Fallback ──────────────────────────────────────────────────
+    "unknown":            8,
+}
+
+# Impact modifier cap — keep modifiers a tilt, not the dominant signal.
+IMPACT_MODIFIER_CAP = 6
+
+
+def detect_primitive(report_text: str) -> tuple[str, str]:
+    """Return (primitive_key, human_label).
+
+    Inspect both the narrative and any inline ASan output. ASan reports the
+    sanitizer class and the read/write direction on *different lines*, so
+    they are detected independently and combined. The size, when present in
+    a `READ of size N` / `WRITE of size N` line, distinguishes info-leak
+    shaped reads (≥16 bytes) from DoS-shaped 1-byte reads.
+    """
+    t = report_text.lower()
+
+    # ── Direction (read / write) ──────────────────────────────────
+    rw = "?"
+    rw_size: int | None = None
+    m = re.search(r"\bwrite of size\s+(\d+)", t)
+    if m:
+        rw, rw_size = "write", int(m.group(1))
+    if rw == "?":
+        m = re.search(r"\bread of size\s+(\d+)", t)
+        if m:
+            rw, rw_size = "read", int(m.group(1))
+    if rw == "?":
+        if re.search(r"\bwrite\b.{0,30}\boverflow|out-of-range write", t):
+            rw = "write"
+        elif re.search(r"\bread\b.{0,30}\boverflow|out-of-range read", t):
+            rw = "read"
+
+    # ── Sanitizer class ───────────────────────────────────────────
+    if re.search(r"heap[- ]use[- ]after[- ]free|\buse[- ]after[- ]free\b", t):
+        if rw == "write":
+            return "uaf_write", "use-after-free WRITE"
+        return "uaf_read", "use-after-free" + (" READ" if rw == "read" else "")
+
+    if re.search(r"\bdouble[- ]free\b", t):
+        return "double_free", "double-free"
+
+    # Wild-address WRITE: explicit textual cue *or* an ASan SCARINESS line
+    # tagged `wild-addr-write`.
+    if re.search(r"wild[- ]addr[- ]write|wild-?addr.*write|wild[- ]address[ -]write", t):
+        return "wild_write", "wild-addr WRITE"
+
+    if re.search(r"\bstack-buffer-overflow\b|\bstack-use-after-(?:scope|return)\b|"
+                 r"\bdynamic-stack-buffer-overflow\b", t):
+        if rw == "write":
+            return "stack_write", "stack WRITE" + (f" of {rw_size} byte(s)" if rw_size else "")
+        return "stack_read", "stack READ" + (f" of {rw_size} byte(s)" if rw_size else "")
+
+    if re.search(r"\bglobal-buffer-overflow\b", t):
+        if rw == "write":
+            return "global_write", "global WRITE" + (f" of {rw_size} byte(s)" if rw_size else "")
+        return "global_read", "global READ" + (f" of {rw_size} byte(s)" if rw_size else "")
+
+    # Heap-buffer-overflow (or unspecified buffer overflow).
+    if re.search(r"\bheap-buffer-overflow\b|\bcontainer-overflow\b|\bintra-object-overflow\b", t):
+        if rw == "write":
+            return "heap_write", f"heap WRITE of {rw_size} byte(s)" if rw_size else "heap WRITE"
+        if rw_size is not None and rw_size >= 16:
+            return "heap_read_big", f"heap READ of {rw_size} byte(s)"
+        return "heap_read_small", f"heap READ of {rw_size} byte(s)" if rw_size else "heap READ"
+
+    if re.search(r"undefinedbehaviorsanitizer|:[0-9]+:[0-9]+: runtime error:", t):
+        if re.search(r"out of bounds|object-size|pointer[- ]overflow", t):
+            return "heap_read_small", "UBSan bounds/object-size"
+        if "misaligned" in t:
+            return "bus", "UBSan alignment"
+        if "null pointer" in t:
+            return "null_deref", "UBSan null pointer"
+        if "vptr" in t:
+            return "heap_read_small", "UBSan vptr/type"
+
+    if re.search(r"threadsanitizer: data race|^warning: data race$", t, re.MULTILINE):
+        return "heap_write", "data race"
+
+    # Direction-only fallbacks (no class found, but the report has WRITE/READ).
+    if rw == "write":
+        return "heap_write", f"WRITE of {rw_size} byte(s)" if rw_size else "WRITE"
+    if rw == "read":
+        if rw_size is not None and rw_size >= 16:
+            return "heap_read_big", f"READ of {rw_size} byte(s)"
+        return "heap_read_small", f"READ of {rw_size} byte(s)" if rw_size else "READ"
+
+    # ── Web/application vulnerability classes ────────────────────
+    # Run before the DoS-shaped fallbacks so a finding with a clear
+    # web-vuln Type (open redirect, SSRF, etc.) is not misread as
+    # null/SEGV or unclassified. Memory-safety classes above already
+    # short-circuited via ASan/UBSan/TSan keywords; what reaches this
+    # point is non-sanitizer-triggered findings.
+    web = detect_web_vuln(t)
+    if web is not None:
+        return web
+
+    # Non-memory-safety crashes (DoS-shaped).
+    if "null deref" in t or re.search(r"\bsegv\b", t) or "null pointer" in t:
+        return "null_deref", "null/SEGV"
+    if re.search(r"\bbus\b", t) or "sigbus" in t:
+        return "bus", "BUS"
+    if re.search(r"\b(info[- ]disclosure|information disclosure|internal representation|leak(?:ed|s)?)\b", t):
+        return "info_leak", "information disclosure"
+    if re.search(r"\b(uninit|uninitialized|uninitialised)\b", t):
+        return "info_leak", "uninitialized read"
+    if re.search(r"\b(type confusion|type mismatch|type validation|unchecked elements?)\b", t):
+        return "heap_read_small", "type-state mismatch"
+
+    # ── Recon / reasoning-confirmed classes ───────────────────────
+    # Patterns for non-ASan findings the harness's audit-recon pass and
+    # the validator quorum have promoted. These keep promoted reasoning
+    # findings from collapsing to "unknown=8" at scoring time. Each
+    # pattern requires the named class as a distinct phrase to avoid
+    # matching incidental mentions in prose ("not a downgrade" etc.).
+    if re.search(r"\b(?:dns[- ]?)?cache poisoning\b|\bcookie poisoning\b|"
+                 r"\bsession (?:fixation|poisoning)\b|\b(?:tcp|protocol) downgrade\b|"
+                 r"\bprotocol[- ]state corruption\b", t):
+        return "protocol_state", "protocol-state corruption"
+    if re.search(r"\bdos[- ]amplification\b|\bdecompression bomb\b|"
+                 r"\balgorithmic complexity (?:attack|amplification)\b|"
+                 r"\bquadratic (?:blowup|amplification)\b|"
+                 r"\bmemory amplification\b", t):
+        return "dos_amplification", "DoS amplification"
+    if re.search(r"\bdefense[- ]in[- ]depth regression\b|"
+                 r"\bsecurity feature (?:disabled|defeated|bypassed)\b|"
+                 r"\b(?:silently )?(?:defeats|disables) (?:dns0x20|spoofing protection)\b", t):
+        return "logic_regression", "logic regression / DiD"
+
+    return "unknown", "unclassified"
+
+
+# Ordered list of (regex, primitive_key, human_label). Order matters: the
+# first match wins, so put more specific phrases first. Patterns are case-
+# insensitive and applied to the full lowercased report text.
+#
+# Anchored phrasing: each pattern requires the *named class* to appear as a
+# distinct phrase. We do not match bare words like "injection" or "bypass"
+# alone — those generate noise on prose like "no auth bypass observed".
+_WEB_VULN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
+    # RCE-shaped
+    (re.compile(r"\b(?:os|shell|command)[- ]?injection\b|\brce\b|\bremote code execution\b"),
+     "command_injection", "command injection"),
+    (re.compile(r"\b(?:insecure )?deserialization\b|\bunsafe deserialization\b|"
+                r"\bpickle deserialization\b|\bunserialize\b"),
+     "deserialization", "insecure deserialization"),
+    (re.compile(r"\bsql[- ]?injection\b|\bsqli\b"),
+     "sqli", "SQL injection"),
+    (re.compile(r"\bserver[- ]side template injection\b|\bssti\b|\btemplate injection\b"),
+     "ssti", "server-side template injection"),
+    # Auth / access control
+    (re.compile(r"\bauthentication bypass\b|\bauthn[- ]bypass\b|\blogin bypass\b|"
+                r"\bsession (?:fixation|hijack(?:ing)?)\b"),
+     "authn_bypass", "authentication bypass"),
+    (re.compile(r"\bauthorization bypass\b|\bauthz[- ]bypass\b|"
+                r"\bprivilege escalation\b|\baccess[- ]control bypass\b|"
+                r"\bbroken access control\b"),
+     "authz_bypass", "authorization bypass"),
+    (re.compile(r"\b(?:insecure direct object reference|idor)\b"),
+     "idor", "insecure direct object reference"),
+    # File / network exfil
+    (re.compile(r"\b(?:server[- ]side request forgery|ssrf)\b"),
+     "ssrf", "server-side request forgery"),
+    (re.compile(r"\b(?:path|directory) traversal\b|\barbitrary file (?:read|write|disclosure)\b|"
+                r"\.\./\.\./"),
+     "path_traversal", "path traversal"),
+    (re.compile(r"\b(?:xml external entity|xxe)\b"),
+     "xxe", "XML external entity"),
+    (re.compile(r"\b(?:credential|secret|token|api[- ]key) (?:leak|exposure|disclosure)\b|"
+                r"\bhard[- ]coded (?:credential|secret|key|password)\b"),
+     "secrets_exposure", "credentials/secrets exposure"),
+    # Client / web-app classes
+    (re.compile(r"\bprototype pollution\b"),
+     "prototype_pollution", "prototype pollution"),
+    (re.compile(r"\b(?:stored|reflected|dom|persistent) xss\b|\bcross[- ]site scripting\b|\bxss\b"),
+     "xss", "cross-site scripting"),
+    (re.compile(r"\bopen[- ]redirect\b|\bunvalidated redirect\b|\bcwe[- ]?601\b"),
+     "open_redirect", "open redirect"),
+    (re.compile(r"\b(?:csrf|cross[- ]site request forgery)\b"),
+     "csrf", "cross-site request forgery"),
+    # Misc
+    (re.compile(r"\b(?:redos|regex(?:p)? dos|catastrophic backtracking)\b"),
+     "regex_dos", "regex DoS"),
+    (re.compile(r"\bweak (?:hash|crypto|cipher|prng|rng)\b|\binsecure (?:random|cipher|hash)\b|"
+                r"\bbroken (?:cryptography|crypto|cipher|hash)\b"),
+     "crypto_weakness", "weak/broken cryptography"),
+    # Generic injection fallback (only when explicitly named — see anchor)
+    (re.compile(r"\b(?:crlf|header|http header|response splitting|xpath|ldap|nosql)[- ]?injection\b"),
+     "injection", "injection"),
+]
+
+
+def detect_web_vuln(text_lower: str) -> tuple[str, str] | None:
+    """Return (primitive_key, human_label) for a web/app-vuln narrative,
+    or None if no class matched. Operates on already-lowercased text."""
+    for pat, key, label in _WEB_VULN_PATTERNS:
+        if pat.search(text_lower):
+            return key, label
+    return None
+
+
+def detect_impact_modifiers(report_text: str) -> tuple[int, list[str]]:
+    """Caller-controlled offset / size / value uplifts. Capped at IMPACT_MODIFIER_CAP.
+
+    Looks for the *phrase* "caller-controlled <noun>" (with the legacy
+    "attacker-controlled" wording also accepted as input — real-world ASan
+    output and external CVE writeups still use it, so the parser must
+    recognise both spellings even though our own prose uses caller-controlled).
+    Up to ~30 chars of intervening text is allowed — not coincidental adjacency.
+    """
+    t = report_text.lower()
+    score = 0
+    reasons: list[str] = []
+    for noun, pts, label in [
+        ("offset", 3, "caller-controlled offset"),
+        ("size",   3, "caller-controlled size"),
+        ("value",  2, "caller-controlled value"),
+    ]:
+        pat = re.compile(r"(?:caller|attacker)[- ]controlled[^.\n]{0,30}\b" + re.escape(noun) + r"\b")
+        if pat.search(t):
+            score += pts
+            reasons.append(label)
+    m = re.search(r"scariness[: ]+\s*(\d+)", t)
+    if m and int(m.group(1)) >= 50:
+        score += 2
+        reasons.append(f"SCARINESS={m.group(1)}")
+    if score > IMPACT_MODIFIER_CAP:
+        score = IMPACT_MODIFIER_CAP
+        reasons.append(f"(impact modifiers capped at +{IMPACT_MODIFIER_CAP})")
+    return score, reasons
+
+
+# ── Reach axis (input-path multiplicative model) ─────────────────────────
+#
+# Maps to CVSS Attack Vector × AC × PR × UI. Multiplicative:
+# surface_pts × callers × contract × controls. Each factor is a gate — any
+# one near zero collapses the side. This mirrors CVSS, where the
+# Exploitability subscore = 8.22 × AV × AC × PR × UI, so a Network bug
+# needing root privileges collapses below a Local bug needing none.
+
+
+# Surface tiers, ordered by how directly caller-supplied input can reach the
+# bug. Vendored copies count at VENDORED_WEIGHT towards reach but do NOT
+# upgrade the surface tier — they ship the bug but don't add new
+# externally-callable entry points beyond what the upstream library already
+# exposed.
+SURFACE_POINTS = {
+    "network":          28,   # service accepts network input — direct AV
+    "library_popular":  22,   # library API with ≥ POPULAR_LIBRARY_THRESHOLD callers
+    "library":          16,   # library API consumed by other software (supply chain)
+    "file":             14,   # file-format parser — callers supply files
+    "cli_production":    8,   # shipped CLI tool consumed by end users
+    "dev_tool":          1,   # test/maint/fuzz tool — non-shipping; floor, not zero
+    "internal":          0,   # audit-internal harness only
+    "unknown":           6,
+}
+
+POPULAR_LIBRARY_THRESHOLD = 50  # min genuine callers to upgrade library → library_popular
+
+# Hard score caps for surfaces that do NOT ship to end users. A bug there
+# is not a security finding even if the impact is high — this matches
+# Microsoft Security Bug Bar policy ("non-shipping code is not security-
+# relevant") and Project Zero / OSS-Fuzz practice. Without this cap, a
+# stack-WRITE in maint/ucptest.c with caller-controlled bytes leaks into
+# Medium because (Impact + Reach) × Confidence is still ~33; applying the
+# cap forces it to Low (≤24) where it belongs.
+SURFACE_SCORE_CAP = {
+    "dev_tool":  24,   # forced Low — non-shipping dev/test/maint code
+    "internal":  14,   # forced very Low — audit harness only
+}
+
+# Vendored copies ship the bug but don't add new call sites — count at 0.4×.
+VENDORED_WEIGHT = 0.4
+
+# Realistic max for R, used to size buckets. Calibrated so the four factors
+# can each contribute, but no single factor dominates:
+#   28 (network) × 1.1 (callers, max) × 1.0 (obeyed) × 1.0 (bytes) ≈ 31
+# Combined with impact (max 46) and CF (max 1.0), the realistic total max
+# is ~77 — buckets below are sized as CVSS-3 proportional fractions of that
+# (Critical ≥ ~91%, High ≥ ~71%, Medium ≥ ~39%).
+REACH_TOTAL_CAP = 31
+
+
+# ── Dev/test/maintenance tool detection ──────────────────────────────────
+#
+# The single most important calibration in v2: a memory-safety bug in code
+# that never ships to end users (test drivers, fuzzers, maintenance tooling)
+# is not a security finding under any industry framework. Microsoft Bug Bar,
+# Project Zero, and OSS-Fuzz all explicitly exclude these unless the bug is
+# reachable from a real input surface.
+#
+# Detection looks at three signals — any one is sufficient:
+#   1. Surface or Boundary text mentions maint/test/fuzz/maintenance.
+#   2. The narrative cites a path under maint/, tests/, fuzz/, examples/, etc.
+#   3. The crashing binary or function name matches a known test-tool pattern
+#      (ucptest, *test, *_test, gtest, *_fuzzer, test_*).
+
+# Match a dev/test/maint keyword only when it appears as a path component
+# (preceded by start/whitespace/slash/quote/backtick/open-paren-bracket).
+# Critically, '.' is NOT in the allowed prefix set — that prevents URL
+# hostnames like `attacker.example/after-otc` from being misread as the
+# `examples/` directory, and likewise prevents `lib.tests/` style match
+# against a member-access expression. The keyword must also be followed
+# by `/` (path separator) — the original behavior — so `samples_file.c`
+# does not match.
+_DEV_TOOL_PATH_RE = re.compile(
+    r"(?:^|[\s/\"'`(\[<])("
+    r"maint|maintenance|tests?|testdata|test_data|"
+    r"fuzz|fuzzers?|fuzzing|"
+    r"benchmark|benchmarks?|"
+    r"examples?|samples?|demo|demos|"
+    r"tools/test|unittests?"
+    r")/",
+    re.IGNORECASE,
+)
+_DEV_TOOL_NAME_RE = re.compile(
+    r"\b("
+    r"ucptest|pcre2test|xmllint_test|"
+    r"[a-z][a-z0-9_]*_test|[a-z][a-z0-9_]*test|"
+    r"test_[a-z0-9_]+|"
+    r"unittest|gtest|"
+    r"fuzz_[a-z0-9_]+|[a-z][a-z0-9_]*_fuzzer"
+    r")\b",
+    re.IGNORECASE,
+)
+# Surface "type" prefix that classifies a bug as living in non-shipping
+# code. The Surface field has shape "<type> — <human description>"; the
+# type word(s) before the em-dash are what we classify on. Matching on
+# the description risks false positives — e.g. "library-api — C harness
+# calls a public library entry point" describes a library bug, the
+# harness is just how we exercise the API. Only the type prefix is
+# authoritative for "where does this bug live."
+_DEV_TOOL_TYPE_RE = re.compile(
+    r"^\s*(maint(?:enance)?(?:[- ]tool)?|test[- ]?tool|test[- ]?driver|"
+    r"developer[- ]tool|dev[- ]tool|fuzzer|fuzz[- ]?harness|fuzz[- ]?target)\b",
+    re.IGNORECASE,
+)
+_INTERNAL_TYPE_RE = re.compile(
+    r"^\s*(internal|harness|internal[- ]?harness)\b", re.IGNORECASE,
+)
+
+
+def _surface_type_prefix(surface_value: str) -> str:
+    """Extract the type word(s) before the first em-dash / hyphen description.
+
+    `library-api — C harness calls ...` → `library-api`
+    `maint-tool — harness embeds a test program` → `maint-tool`
+    `cli — pcre2grep tool` → `cli`
+    Surfaces without a separator return as-is (already type-only).
+    """
+    if not surface_value:
+        return ""
+    # Em-dash, double-dash, or " — "/" - " separator.
+    for sep in (" — ", " – ", " -- ", " - "):
+        if sep in surface_value:
+            return surface_value.split(sep, 1)[0].strip()
+    return surface_value.strip()
+
+
+_KNOWN_PRODUCTION_TYPE_RE = re.compile(
+    r"^\s*(network|library[- ]?api|library api|public api|file[- ]?format|"
+    r"file format|parser|decoder|cli|command[- ]?line)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_dev_tool(surface_value: str, boundary_value: str, report_text: str) -> tuple[bool, str]:
+    """Return (is_dev_tool, reason). Returns the first signal that matched.
+
+    Priority order matters here. The Surface field's type prefix is the
+    authoritative source for "where does this bug live":
+
+      1. If the type prefix names a dev/test/maint tool → dev_tool.
+      2. If the type prefix names a production surface (network/library/
+         file/cli) → trust it; the Boundary or narrative might mention a
+         test harness as the *input mechanism*, but that doesn't change
+         where the bug lives. (This was the v2-1 false positive: Surface
+         said "cli — shipped CLI" but Boundary said "pcre2test input"
+         and our path/name signals incorrectly demoted to dev_tool.)
+      3. Only when Surface is unspecified do we fall back to Boundary
+         and narrative-path signals.
+    """
+    s_full = surface_value or ""
+    s_type = _surface_type_prefix(s_full)
+    b = boundary_value or ""
+
+    if s_type and _DEV_TOOL_TYPE_RE.search(s_type):
+        return True, f"surface type is a dev/test/maint tool: {s_type!r}"
+
+    # Surface clearly names a production tier — trust it, do not let
+    # Boundary/narrative override.
+    if s_type and _KNOWN_PRODUCTION_TYPE_RE.search(s_type):
+        return False, ""
+
+    if _DEV_TOOL_NAME_RE.search(b):
+        return True, f"boundary cites a known test-tool name: {b.strip()[:60]!r}"
+    if _DEV_TOOL_PATH_RE.search(report_text or ""):
+        m = _DEV_TOOL_PATH_RE.search(report_text)
+        return True, f"narrative cites a dev/test path: {m.group(0).strip()!r}"
+    return False, ""
+
+
+def _is_internal_surface(surface_value: str) -> bool:
+    s_type = _surface_type_prefix(surface_value)
+    return bool(s_type and _INTERNAL_TYPE_RE.search(s_type))
+
+
+def _classify_surface(surface_value: str, boundary_value: str,
+                      report_text: str, genuine_callers: int,
+                      report_triaged: bool = True) -> tuple[str, int, str]:
+    """Map the report's structured fields to a surface tier.
+
+    Classification is anchored on the **type prefix** of the Surface field
+    (the part before the em-dash) — the description after the dash is prose
+    that often mentions a harness or test driver as the *exercise mechanism*,
+    not the location of the bug. Mis-anchoring on prose was the v1 bug that
+    let `library-api — C harness calls a public library entry point` get
+    classified as a dev_tool because of the word "harness".
+
+    Order:
+      1. Dev/test/maintenance tool — first via type prefix, then path/name fallback.
+         A bug in non-shipping code is not security-relevant.
+      2. Internal harness — audit-internal only, hard cap to very Low.
+      3. Surface tier from the type prefix (network/library/file/cli).
+      4. Library tier upgrades to library_popular at ≥ POPULAR_LIBRARY_THRESHOLD
+         callers — but the popularity rescue for an empty/unknown Surface
+         field fires only when *report_triaged* is true. An un-triaged
+         report (no structured reach fields at all) stays at the
+         conservative `unknown` tier; see the empty-surface branch below.
+    """
+    is_dev, dev_reason = _is_dev_tool(surface_value, boundary_value, report_text)
+    if is_dev:
+        return "dev_tool", SURFACE_POINTS["dev_tool"], dev_reason
+
+    if _is_internal_surface(surface_value):
+        return "internal", SURFACE_POINTS["internal"], "internal harness (audit-only)"
+
+    s_type = _surface_type_prefix(surface_value).lower()
+
+    # Empty or literally "unknown" surface field. Two cases:
+    #
+    #  * The report WAS triaged — it carries other structured reach fields
+    #    but the author just left Surface unset. Here the reachability probe
+    #    is a stronger signal than a lazy field: if it independently found
+    #    broad supply-chain reach (≥ POPULAR_LIBRARY_THRESHOLD genuine
+    #    callers), classify as library_popular rather than punish a real bug.
+    #
+    #  * The report was NOT triaged at all — no structured reach fields
+    #    whatsoever (a bare crash dir, e.g. a benchmark `model-direct`
+    #    baseline). reachability is then scoring raw sanitizer output, and a
+    #    popular *crashing symbol* is not evidence the *bug* is reachable:
+    #    every caller of cJSON_Delete is a "caller", but only one who
+    #    misuses the API hits a misuse use-after-free. The popularity rescue
+    #    is suppressed and the surface stays at the conservative `unknown`
+    #    tier so an un-triaged crash cannot reach Medium on impact alone.
+    if not s_type or s_type == "unknown":
+        if report_triaged and genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
+            reason = (f"surface={'unspecified' if not s_type else 'unknown'} but "
+                      f"reachability found {genuine_callers} external callers "
+                      f"(≥{POPULAR_LIBRARY_THRESHOLD}) → library_popular")
+            return "library_popular", SURFACE_POINTS["library_popular"], reason
+        if not report_triaged:
+            return ("unknown", SURFACE_POINTS["unknown"],
+                    "report carries no structured reach fields — un-triaged; "
+                    "surface left unassessed, not promoted on caller count alone")
+        if not s_type:
+            return "unknown", SURFACE_POINTS["unknown"], "surface field empty"
+        return "unknown", SURFACE_POINTS["unknown"], "surface type unrecognised: 'unknown'"
+
+    if any(t in s_type for t in ("network", "daemon", "rpc", "socket", "server")):
+        return "network", SURFACE_POINTS["network"], "network-facing service"
+    if any(t in s_type for t in ("library-api", "library api", "public api", "libfuzzer")):
+        if genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
+            return ("library_popular", SURFACE_POINTS["library_popular"],
+                    f"library API with {genuine_callers} known callers (≥{POPULAR_LIBRARY_THRESHOLD})")
+        return "library", SURFACE_POINTS["library"], "library API"
+    if any(t in s_type for t in ("file-format", "file format", "parser", "decoder")):
+        return "file", SURFACE_POINTS["file"], "file-format parser"
+    if any(t in s_type for t in ("cli", "command line", "command-line")):
+        return "cli_production", SURFACE_POINTS["cli_production"], "production CLI tool"
+
+    # Fall-through: unrecognised type prefix. Same popularity-rescue path
+    # as the empty case — broad reach trumps a strange Surface label, but
+    # only for a triaged report. (A non-empty Surface field already implies
+    # triage, so this gate is belt-and-suspenders for that path.)
+    if report_triaged and genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
+        return ("library_popular", SURFACE_POINTS["library_popular"],
+                f"surface type unrecognised ({s_type!r}) but reachability found "
+                f"{genuine_callers} external callers (≥{POPULAR_LIBRARY_THRESHOLD}) → library_popular")
+    return "unknown", SURFACE_POINTS["unknown"], f"surface type unrecognised: {s_type!r}"
+
+
+def _callers_factor(reach: dict) -> tuple[float, str]:
+    """Narrow multiplier on surface points.
+
+    Popularity is primarily expressed by the surface-tier upgrade
+    (library → library_popular at ≥ POPULAR_LIBRARY_THRESHOLD callers).
+    This factor is a small *secondary* tilt so two bugs in the same tier
+    can still be ordered by caller count — without re-counting popularity
+    a second time.
+
+    All-backends-unavailable returns 1.0 (neutral — we have no signal, must
+    not penalise). Otherwise:
+      n_eff = genuine + 0.4·vendored
+      factor = clamp(0.90 + 0.05·log10(1+n_eff), 0.90, 1.10)
+    Sample values:  n=0→0.90  n=10→0.95  n=100→1.00
+                    n=1000→1.05  n=10000→1.10 (clamp)
+    """
+    services = reach.get("services") or {}
+    any_responded = any(s.get("status") == "ok" for s in services.values())
+    if not any_responded:
+        return 1.0, "all backends unavailable — no callers signal (×1.0)"
+    genuine = int(reach.get("external_callers", 0) or 0)
+    vendored = int(reach.get("vendored_copies", 0) or 0)
+    n_eff = genuine + VENDORED_WEIGHT * vendored
+    raw = 0.90 + 0.05 * math.log10(1.0 + max(0.0, n_eff))
+    factor = max(0.90, min(1.10, raw))
+    parts = [f"callers={genuine}"]
+    if vendored:
+        parts.append(f"+0.4·{vendored} vendored")
+    parts.append(f"→ ×{factor:.2f}")
+    return factor, "; ".join(parts)
+
+
+def _contract_factor(value: str) -> tuple[float, str]:
+    """CVSS Attack Complexity analogue. Obeyed contract is the *baseline*
+    (×1.0) — the standard reachable case all other factors already assume.
+    Violated contract raises Attack Complexity (caller had to misuse the
+    API), so we apply a penalty. We do not *reward* the obeyed case with a
+    bonus; that would silently inflate every routine bug — CVSS AC only
+    penalises high complexity, it never rewards low complexity."""
+    v = (value or "").lower()
+    if "violat" in v or "misuse" in v:
+        return 0.7, "contract violated (×0.7)"
+    return 1.0, "contract obeyed/unstated (×1.0)"
+
+
+def _controls_factor(value: str, trigger_source: str) -> tuple[float, str]:
+    """How much of the input does the caller control? Bytes is full control
+    (CVSS UI=None), length is partial, flags-only is minimal, none is the
+    weakest input-control gate."""
+    blob = ((value or "") + " | " + (trigger_source or "")).lower()
+    if "byte" in blob or "buffer" in blob or "input" in blob or "blob" in blob:
+        return 1.0, "controls bytes (×1.0)"
+    if "length" in blob or "size" in blob or "count" in blob:
+        return 0.7, "controls length (×0.7)"
+    if "flag" in blob or "option" in blob or "enum" in blob:
+        return 0.5, "controls flags (×0.5)"
+    if blob.strip() in ("", "|"):
+        return 0.4, "controls unspecified (×0.4)"
+    return 0.4, "controls limited (×0.4)"
+
+
+# Structured reach fields the harness's triage pass writes into REPORT.md.
+# A report carrying none of them has not been triaged — reachability is
+# then scoring raw sanitizer output. See the popularity-rescue gate in
+# _classify_surface for why that distinction changes the surface tier.
+_TRIAGE_REACH_FIELDS = ("surface", "trigger_source", "caller_contract", "caller_controls")
+
+
+def _report_is_triaged(fields: dict) -> bool:
+    """True iff the report carries at least one structured reach field.
+
+    The harness fills Surface / Trigger source / Caller contract / Caller
+    controls into a structured REPORT.md during triage. A bare crash dir
+    (e.g. a benchmark `model-direct` workspace, or any un-triaged dir fed
+    straight to `bin/reachability`) carries none of them. reachability uses
+    this to decide whether the external-caller probe may rescue a missing
+    Surface field — see _classify_surface."""
+    return any(
+        str(fields.get(key, "") or "").strip() for key in _TRIAGE_REACH_FIELDS
+    )
+
+
+def reach_score(fields: dict, reach: dict) -> tuple[int, str, list[str]]:
+    """Multiplicative score: surface × callers × contract × controls.
+
+    Returns (R_total, surface_label, reasons). The surface_label is needed
+    by the caller so a hard score cap (SURFACE_SCORE_CAP) can be applied
+    for non-shipping surfaces. The reasons list captures each factor so
+    the rationale section can show how a near-zero gate (e.g. dev_tool
+    surface) collapsed the whole side.
+    """
+    genuine = int(reach.get("external_callers", 0) or 0)
+    surface_label, surface_pts, surface_reason = _classify_surface(
+        fields.get("surface", ""), fields.get("boundary", ""),
+        fields.get("_report_text", ""), genuine,
+        _report_is_triaged(fields),
+    )
+    callers_f, callers_reason = _callers_factor(reach)
+    contract_f, contract_reason = _contract_factor(fields.get("caller_contract", ""))
+    controls_f, controls_reason = _controls_factor(
+        fields.get("caller_controls", ""), fields.get("trigger_source", ""),
+    )
+    raw = surface_pts * callers_f * contract_f * controls_f
+    total = int(round(max(0.0, min(float(REACH_TOTAL_CAP), raw))))
+    reasons = [
+        f"surface={surface_label} ({surface_pts}pt — {surface_reason})",
+        f"callers: {callers_reason}",
+        contract_reason,
+        controls_reason,
+        f"= {surface_pts} × {callers_f:.2f} × {contract_f:.2f} × {controls_f:.2f} = {raw:.1f} → {total}",
+    ]
+    return total, surface_label, reasons
+
+
+# ── Confidence factor (CVSS Temporal: Report Confidence) ─────────────────
+#
+# Multiplies the whole score so flaky reports get derated and confirmed
+# multi-cluster reports get full credit. Returns a float in [0.5, 1.0]:
+#
+#   base 0.7
+#   + reproduction rate (5/5 → +0.20, ≥0.75 → +0.15, ≥0.4 → +0.05)
+#   + cluster confirmation (≥3 → +0.05, =2 → +0.03)
+#   + SCARINESS ≥ 50 → +0.05
+#   clamped to [0.5, 1.0]
+
+
+def confidence_factor(report_text: str, fields: dict, cluster_size: int) -> tuple[float, list[str]]:
+    cf = 0.7
+    reasons: list[str] = []
+    repro = fields.get("reproduction_rate", "")
+    m = re.search(r"(\d+)\s*/\s*(\d+)", repro or "")
+    if not m:
+        m = re.search(r"\b(?:confirmed(?: result)?|repro(?:duction)?(?: rate)?|runs?)\D{0,40}(\d+)\s*/\s*(\d+)", report_text, re.IGNORECASE)
+    if m:
+        n, d = int(m.group(1)), int(m.group(2))
+        ratio = n / d if d else 0
+        if ratio >= 0.99:
+            cf += 0.20; reasons.append(f"repro {n}/{d} (+0.20)")
+        elif ratio >= 0.75:
+            cf += 0.15; reasons.append(f"repro {n}/{d} (+0.15)")
+        elif ratio >= 0.40:
+            cf += 0.05; reasons.append(f"repro {n}/{d} (+0.05)")
+        else:
+            reasons.append(f"flaky repro {n}/{d} (+0)")
+    if cluster_size >= 3:
+        cf += 0.05; reasons.append(f"cluster_size={cluster_size} (+0.05)")
+    elif cluster_size == 2:
+        cf += 0.03; reasons.append(f"cluster_size={cluster_size} (+0.03)")
+    sm = re.search(r"scariness[: ]+\s*(\d+)", report_text.lower())
+    if sm and int(sm.group(1)) >= 50:
+        cf += 0.05; reasons.append(f"SCARINESS={sm.group(1)} (+0.05)")
+    if not any(reason.startswith("repro ") or reason.startswith("flaky repro ") for reason in reasons):
+        if re.search(r"\b(evidence|observed output|reproducer|harness|asan\.txt|\.asan\.txt)\b", report_text, re.IGNORECASE):
+            cf += 0.10; reasons.append("reproducer/evidence artifacts (+0.10)")
+    cf = max(0.5, min(1.0, cf))
+    if not reasons:
+        reasons.append("no confirmation signals (×0.7 baseline)")
+    return cf, reasons
+
+
+# ── Report-field extraction ──────────────────────────────────────────────
+
+
+_TABLE_FIELD_RE = re.compile(
+    r"^\|\s*(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*\|\s*(?P<val>.*?)\s*\|\s*$"
+)
+_BARE_FIELD_RE = re.compile(
+    r"^(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*:\s*(?P<val>.+?)\s*$"
+)
+_FIELD_KEYS = {
+    "surface", "trigger source", "caller contract", "caller controls",
+    "reproduction rate", "boundary", "primitive",
+}
+
+
+def extract_report_fields(report_text: str, report_dir: Path | None = None) -> dict:
+    """Pull the structured fields the harness emits into REPORT.md.
+
+    Reads two shapes the templates write:
+      * markdown table rows: ``| Surface | library-api — ... |``
+      * bare-label lines:    ``Surface: library-api``
+    First win is kept (the table is rendered first), so a stray bare line
+    later in the narrative cannot override the canonical table value.
+
+    If a sidecar ``.llm_fields.json`` exists in ``report_dir``, its values
+    are merged in as a *fallback* — they fill only the fields the report
+    left blank. The agent-authored Fields table is always authoritative.
+    This is the LLM hybrid pass: an inexpensive single-shot LLM call
+    classifies the report into the enums the scorer understands (Surface
+    tier, Primitive class, Caller controls/contract) when the agent did
+    not write them. Scoring stays deterministic from the resulting field
+    values.
+    """
+    out: dict[str, str] = {}
+    for raw in report_text.splitlines():
+        m = _TABLE_FIELD_RE.match(raw)
+        if m:
+            key = m.group("key").strip().lower()
+            if key in _FIELD_KEYS and key not in out:
+                val = m.group("val").strip()
+                if val and val not in ("Value", "—", "-"):
+                    out[key] = val
+            continue
+        m = _BARE_FIELD_RE.match(raw)
+        if m:
+            key = m.group("key").strip().lower()
+            if key in _FIELD_KEYS and key not in out:
+                val = m.group("val").strip()
+                if val and val not in ("—", "-"):
+                    out[key] = val
+
+    fields = {
+        "surface":           out.get("surface", ""),
+        "trigger_source":    out.get("trigger source", ""),
+        "caller_contract":   out.get("caller contract", ""),
+        "caller_controls":   out.get("caller controls", ""),
+        "reproduction_rate": out.get("reproduction rate", ""),
+        "boundary":          out.get("boundary", ""),
+        "primitive_field":   out.get("primitive", ""),
+    }
+    if report_dir is not None:
+        _merge_llm_fields_sidecar(report_dir, fields)
+    return fields
+
+
+# Mapping from LLM-sidecar JSON keys to internal field names. Both the
+# JSON key set and the enum values are documented in lib/triage.sh
+# alongside the prompt. The sidecar can also carry free-form text — e.g.
+# the LLM may emit `surface: "library-api — Ghost members public API"`
+# which is merged verbatim (the same prose an agent would write).
+_LLM_FIELD_SIDECAR_KEYS = (
+    ("surface",         "surface"),
+    ("primitive",       "primitive_field"),
+    ("trigger_source",  "trigger_source"),
+    ("caller_contract", "caller_contract"),
+    ("caller_controls", "caller_controls"),
+    ("boundary",        "boundary"),
+)
+
+
+def _merge_llm_fields_sidecar(report_dir: Path, fields: dict) -> None:
+    """If ``.llm_fields.json`` exists alongside the report, fill blanks
+    in ``fields`` from it. Existing (agent-authored) values are never
+    overridden — the LLM pass is a fallback only, so agents that emit
+    proper fields remain authoritative."""
+    sidecar = report_dir / ".llm_fields.json"
+    if not sidecar.is_file():
+        return
+    try:
+        data = json.loads(sidecar.read_text("utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    for sidecar_key, internal_key in _LLM_FIELD_SIDECAR_KEYS:
+        if fields.get(internal_key):
+            continue  # agent value wins
+        v = data.get(sidecar_key)
+        if isinstance(v, str) and v.strip():
+            fields[internal_key] = v.strip()
+
+
+_CLUSTER_SIZE_RE = re.compile(r"\((\d+)\s+reports?\b", re.IGNORECASE)
+
+
+def _detect_cluster_size(report_text: str) -> int:
+    """Pull cluster size from the report's Cluster row.
+
+    Two shapes the harness writes:
+      | Cluster | CL-abc123 (singleton)                |
+      | Cluster | CL-abc123 (4 reports: id1, id2, ...) |
+    Falls back to 1 (singleton) when nothing parseable is found.
+    """
+    for raw in report_text.splitlines():
+        m = _TABLE_FIELD_RE.match(raw)
+        if not m:
+            continue
+        if m.group("key").strip().lower() != "cluster":
+            continue
+        val = m.group("val")
+        n = _CLUSTER_SIZE_RE.search(val)
+        if n:
+            return max(1, int(n.group(1)))
+        return 1
+    return 1
+
+
+# ── Bucketing & top-level scorer ─────────────────────────────────────────
+
+
+def bucket(score: int) -> str:
+    """Bucket boundaries calibrated as CVSS-3 proportional fractions of the
+    realistic max (Impact 46 + Reach 31 = 77, before Confidence multiplier).
+
+    CVSS v3 buckets are Critical ≥9.0, High ≥7.0, Medium ≥4.0, Low <4.0 — i.e.
+    top 10%, top 30%, top 60%, rest of the 0–10 scale. Mapped to the realistic
+    77-point max here:
+      Critical (≥70 / ~91% of max) — CVSS 9.0+ analog: network/popular-library
+                                     memory-safety with full caller control
+      High     (≥55 / ~71% of max) — CVSS 7.0+ analog: library memory-safety;
+                                     popular file-format parser corruption
+      Medium   (≥30 / ~39% of max) — CVSS 4.0+ analog: library info-disclosure;
+                                     production CLI memory-safety
+      Low      (<30)              — dev/test/maintenance tools; flaky reports;
+                                     unreached bugs
+    """
+    if score >= 70:
+        return "Critical"
+    if score >= 55:
+        return "High"
+    if score >= 30:
+        return "Medium"
+    return "Low"
+
+
+def compute_severity(report_text: str, reachability: dict | None,
+                     cluster_size: int = 1, report_dir: Path | None = None) -> dict:
+    """Compute the three-axis severity score for a single crash report.
+
+    Formula (CVSS-shaped hybrid):
+       I  = primitive_base + caller-controlled modifiers       additive
+       R  = surface × callers × contract × controls            multiplicative
+       CF = repro × cluster confirmation × SCARINESS           multiplier ∈ [0.5, 1.0]
+       score = clamp(round((I + R) × CF), 0, 100)
+
+    The multiplicative R is the key calibration over a purely additive
+    formula: a high-impact primitive in a non-shipping (test/maint) tool
+    correctly stays Low because the dev_tool surface tier and any near-zero
+    factor (controls=0.4, contract=0.7) compound to crash R close to zero.
+    """
+    fields = extract_report_fields(report_text, report_dir=report_dir)
+    # Pass the report text through to the surface classifier so it can
+    # detect dev/test paths in the narrative even when the Surface field
+    # itself doesn't say "test".
+    fields["_report_text"] = report_text
+
+    # Primitive: prefer the structured Primitive field if it names a known
+    # IMPACT_BASE key (LLM hybrid pass writes this). Fall back to the
+    # narrative detector. We accept *only* the exact enum key here — the
+    # detector handles human prose.
+    prim_key, prim_label = detect_primitive(report_text)
+    primitive_field = (fields.get("primitive_field") or "").strip().lower()
+    if primitive_field in IMPACT_BASE and primitive_field != "unknown":
+        # Only adopt the field value when the narrative detector also fell
+        # through to "unknown" — a precise narrative signal (ASan output)
+        # is always more authoritative than an LLM-classified label.
+        if prim_key == "unknown":
+            prim_key = primitive_field
+            prim_label = primitive_field.replace("_", " ")
+    impact_base = IMPACT_BASE[prim_key]
+    impact_mods, impact_mod_reasons = detect_impact_modifiers(report_text)
+    impact = impact_base + impact_mods
+
+    reach_data = reachability or {"services": {}, "external_callers": 0, "vendored_copies": 0}
+    reach, surface_label, reach_reasons = reach_score(fields, reach_data)
+
+    cf, cf_reasons = confidence_factor(report_text, fields, cluster_size)
+
+    raw_score = (impact + reach) * cf
+    score = max(0, min(100, int(round(raw_score))))
+
+    # Apply non-shipping surface cap — see SURFACE_SCORE_CAP rationale.
+    surface_cap = SURFACE_SCORE_CAP.get(surface_label)
+    surface_cap_applied = False
+    if surface_cap is not None and score > surface_cap:
+        surface_cap_applied = True
+        score = surface_cap
+
+    return {
+        "score": score,
+        "level": bucket(score),
+        "primitive": prim_label,
+        "primitive_key": prim_key,
+        "impact": impact,
+        "impact_base": impact_base,
+        "impact_modifier_score": impact_mods,
+        "impact_modifier_reasons": impact_mod_reasons,
+        "reach": reach,
+        "reach_reasons": reach_reasons,
+        "surface_label": surface_label,
+        "surface_cap": surface_cap,
+        "surface_cap_applied": surface_cap_applied,
+        "confidence_factor": round(cf, 2),
+        "confidence_reasons": cf_reasons,
+        "cluster_size": cluster_size,
+        "raw_score": round(raw_score, 1),
+        "fields_used": {k: v for k, v in fields.items() if not k.startswith("_")},
+    }
+
+
+# ─── Report mode: rewrite Severity + Reachability section ─────────────────
+
+
+REACH_HEADING = "## Reachability — external callers"
+SEV_HEADING = "## Severity rationale"
+
+
+# Match an identifier that is *immediately* followed by `(`, with optional
+# backticks and whitespace in between. This is the call-shape that matters —
+# struct fields and bytecode opcodes (start_subject, OP_CBRA) lack the `(`
+# and so are correctly excluded. The backtick form (``ident()``) catches the
+# common markdown rendering in reports.
+_CALL_RE = re.compile(r"`?([a-zA-Z_][a-zA-Z0-9_]{3,})`?\s*\(")
+# Library-shaped identifier. Two conventions are accepted:
+#   * snake_case with at least one underscore — pcre2_match, BIO_new, EVP_DigestInit
+#   * lowerCamelCase — at least two lowercase chars, then an uppercase letter,
+#     then more chars — xmlShellReadline, xmlConvertSGMLCatalog, htmlNewDoc
+# Plain lowercase identifiers (usershell, malloc, printf) are rejected: they
+# rarely correspond to externally-callable library APIs and add probe noise.
+# Plain CamelCase starting with an uppercase letter (FooBar) is also rejected:
+# it is much more often a class/type name than a C entry point.
+_LIB_SYMBOL_RE = re.compile(
+    r"^(?:"
+    r"[a-zA-Z][a-zA-Z0-9]*_[a-zA-Z0-9_]+"
+    r"|"
+    r"[a-z][a-z0-9]+[A-Z][a-zA-Z0-9]+"
+    r")$"
+)
+_SYMBOL_STOPLIST = {
+    "entry", "location", "trigger", "impact", "error", "class", "type",
+    "result", "size", "byte", "bytes", "addresssanitizer", "heap", "stack",
+    "global", "buffer", "overflow", "value", "offset", "false", "true",
+    "none", "null", "summary", "classification", "reproduction", "candidate",
+    "reachability", "data", "flow", "trace",
+}
+
+_RUNTIME_SYMBOL_RE = re.compile(
+    r"^(?:_?asan_|__asan|__sanitizer|__interceptor|asan_interceptors)",
+    re.IGNORECASE,
+)
+_MACRO_SYMBOL_RE = re.compile(r"^[A-Z0-9_]+$")
+
+_ASAN_FRAME_RE = re.compile(r"^\s*#[0-9]+\s+0x[0-9a-fA-F]+\s+in\s+([^\s(]+)")
+_SANITIZER_DIAG_START_RE = re.compile(
+    r"ERROR: (?:AddressSanitizer|UndefinedBehaviorSanitizer)|"
+    r"WARNING: (?:ThreadSanitizer|MemorySanitizer):|"
+    r"WARNING: DATA RACE$|"
+    r":[0-9]+:[0-9]+: runtime error:|"
+    r"UndefinedBehaviorSanitizer:"
+)
+_ASAN_FRAME_SKIP_RE = re.compile(
+    r"(^_?asan_|__asan|__sanitizer|__interceptor|libsystem_|libdyld|libobjc|"
+    r"libclang_rt|asan_interceptors|start\+|^main$|harness)",
+    re.IGNORECASE,
+)
+
+
+def _extract_symbols_from_report(report_text: str) -> list[str]:
+    """Best-effort extraction of public API entry-point identifiers.
+
+    Hard rule: an identifier is only considered if it appears with ``(``
+    directly after it (with optional backticks/whitespace). That rules out
+    struct-field references like ``re->top_bracket`` and bytecode opcodes
+    like ``OP_CBRA`` that are common in crash-report prose but are not
+    callable symbols.
+
+    Two-tier scanning order so Entry/Location lines are mined first:
+      tier 1: lines beginning with Entry: or Location:
+      tier 2: data-flow arrow lines (``→``, ``->``)
+      tier 3: any other line with a call-shape identifier
+
+    Returns up to 5 symbols in discovery order. The cap protects backends
+    from a noisy report producing dozens of throwaway probes.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    tier1: list[str] = []
+    tier2: list[str] = []
+    tier3: list[str] = []
+    for raw in report_text.splitlines():
+        s = raw.strip()
+        if re.match(r"^-?\s*\*{0,2}(Entry|Location)\*{0,2}\s*:", s, re.IGNORECASE):
+            tier1.append(s)
+            continue
+        if "→" in s or "->" in s:
+            tier2.append(s)
+            continue
+        if _CALL_RE.search(s):
+            tier3.append(s)
+
+    for line in tier1 + tier2 + tier3:
+        for m in _CALL_RE.finditer(line):
+            tok = m.group(1)
+            if tok in seen:
+                continue
+            if _RUNTIME_SYMBOL_RE.search(tok):
+                continue
+            if _MACRO_SYMBOL_RE.match(tok):
+                continue
+            if tok.lower() in _SYMBOL_STOPLIST:
+                continue
+            if not _LIB_SYMBOL_RE.match(tok):
+                continue
+            seen.add(tok)
+            out.append(tok)
+            if len(out) >= 5:
+                return out
+    return out
+
+
+def _extract_symbols_from_asan(asan_text: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    in_report = False
+    saw_frame = False
+    for raw in asan_text.splitlines():
+        if not in_report:
+            if _SANITIZER_DIAG_START_RE.search(raw):
+                in_report = True
+            continue
+        if saw_frame and not raw.strip():
+            break
+        m = _ASAN_FRAME_RE.match(raw)
+        if not m:
+            continue
+        saw_frame = True
+        tok = m.group(1)
+        if tok in seen:
+            continue
+        if _ASAN_FRAME_SKIP_RE.search(tok):
+            continue
+        if tok.lower() in _SYMBOL_STOPLIST:
+            continue
+        if not _LIB_SYMBOL_RE.match(tok):
+            continue
+        seen.add(tok)
+        out.append(tok)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _no_symbols_reachability(ignore: list[str], symbols: list[str] | None = None,
+                             status: str = "no_symbols",
+                             reason: str = "no public API symbols extracted") -> dict:
+    symbols = symbols or []
+    return {
+        "schema_version": 2,
+        "queried_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "symbols": symbols,
+        "ignore": ignore,
+        "external_callers": 0,
+        "external_caller_hits": [],
+        "vendored_copies": 0,
+        "vendored_copy_hits": [],
+        "services_responding": [],
+        "services": {
+            svc: {
+                "status": "not_run",
+                "hits": [],
+                "vendored": [],
+                "count": 0,
+                "vendored_count": 0,
+                "errors": [{"symbol": symbols[0] if symbols else "", "error": reason}],
+            }
+            for svc in SERVICES
+        },
+    }
+
+
+def _asan_text_has_dev_path(asan_text: str) -> bool:
+    return bool(re.search(r"(^|[ /])(maint|test|tests|testing|fuzz|fuzzer|bench|example|examples)/", asan_text))
+
+
+def _format_reachability_section(reach: dict) -> str:
+    lines = [REACH_HEADING, ""]
+    lines.append(f"_Probed at: {reach.get('queried_at', '?')}_")
+    if reach.get("status") == "no_symbols":
+        lines.append("_Status: no public API symbols extracted; external search was not run._")
+    elif reach.get("status") == "local_symbols_only":
+        lines.append("_Status: local ASan frame symbols only; external search skipped for dev/test surface._")
+    elif reach.get("status") == "external_skipped":
+        lines.append("_Status: external caller search skipped; severity uses local report fields only._")
+    if reach.get("symbols"):
+        lines.append(f"_Symbols: {', '.join(reach['symbols'])}_")
+    if reach.get("ignore"):
+        lines.append(f"_Ignore filter: {', '.join(reach['ignore'])}_")
+    lines.append("")
+    n_external = reach.get("external_callers", 0)
+    n_vendored = reach.get("vendored_copies", 0)
+    lines.append(f"**External callers (genuine, after ignore + vendor filter): {n_external}**")
+    if n_vendored:
+        lines.append(
+            f"**Vendored copies of upstream source (ship the bug, do not call): {n_vendored}**"
+        )
+    lines.append("")
+    lines.append("| Backend | Status | Genuine hits | Vendored copies |")
+    lines.append("|---------|--------|--------------|-----------------|")
+    for svc in SERVICES:
+        e = (reach.get("services") or {}).get(svc, {})
+        status = e.get("status", "?")
+        n = e.get("count", 0)
+        v = e.get("vendored_count", 0)
+        lines.append(f"| {svc} | {status} | {n} | {v} |")
+    errors_by_service = {
+        svc: (reach.get("services") or {}).get(svc, {}).get("errors") or []
+        for svc in SERVICES
+    }
+    if any(errors_by_service.values()):
+        lines.append("")
+        lines.append("Backend errors:")
+        for svc in SERVICES:
+            errors = errors_by_service.get(svc) or []
+            if not errors:
+                continue
+            shown = []
+            for err in errors[:3]:
+                sym = err.get("symbol", "?") if isinstance(err, dict) else "?"
+                msg = err.get("error", "unknown") if isinstance(err, dict) else str(err)
+                shown.append(f"{sym}: {msg}")
+            suffix = "" if len(errors) <= 3 else f"; +{len(errors) - 3} more"
+            lines.append(f"- `{svc}`: " + "; ".join(shown) + suffix)
+    hits = reach.get("external_caller_hits") or []
+    if hits:
+        lines.append("")
+        lines.append("Top genuine callers:")
+        for h in hits[:10]:
+            repo = h.get("repo", "")
+            path = h.get("path", "")
+            sym = h.get("matched_symbol", "")
+            lines.append(f"- `{repo}` :: `{path}`" + (f" (symbol: `{sym}`)" if sym else ""))
+    vhits = reach.get("vendored_copy_hits") or []
+    if vhits:
+        lines.append("")
+        lines.append("Vendored copies (these projects re-include the upstream source):")
+        for h in vhits[:5]:
+            repo = h.get("repo", "")
+            path = h.get("path", "")
+            lines.append(f"- `{repo}` :: `{path}`")
+        if len(vhits) > 5:
+            lines.append(f"- … +{len(vhits) - 5} more vendored copies")
+    return "\n".join(lines) + "\n"
+
+
+def _format_severity_line(sev: dict) -> str:
+    """Single-line breakdown that downstream tools parse.
+
+    Shape:
+      - **Severity**: <Level> (auto: I=.. R=.. ×CF=...; primitive=...; score=N)
+
+    `score=N` and the level word are the contracts downstream tools rely on
+    (cluster-crashes, export-repro). The rest is human-readable rationale.
+    """
+    impact_blurb = f"primitive={sev['primitive']} (base+{sev['impact_base']}"
+    if sev['impact_modifier_score']:
+        impact_blurb += f", mods+{sev['impact_modifier_score']}"
+    impact_blurb += ")"
+    impact_max = IMPACT_BASE['uaf_write'] + IMPACT_MODIFIER_CAP
+
+    parts = [
+        f"I={sev['impact']}/{impact_max}",
+        f"R={sev['reach']}/{REACH_TOTAL_CAP}",
+        f"×CF={sev['confidence_factor']}",
+        impact_blurb,
+        f"reach[{'; '.join(sev['reach_reasons'])}]",
+    ]
+    if sev["confidence_reasons"]:
+        parts.append(f"confidence[{', '.join(sev['confidence_reasons'])}]")
+    if sev.get("surface_cap_applied"):
+        parts.append(
+            f"non-shipping cap: {sev['surface_label']} → score capped at {sev['surface_cap']}"
+        )
+    parts.append(f"score={sev['score']}")
+    return f"- **Severity**: {sev['level']} (auto: {'; '.join(parts)})"
+
+
+def _replace_severity_line(text: str, new_line: str) -> str:
+    """Replace the first '- **Severity**: ...' line, or insert under '## Classification'."""
+    lines = text.splitlines()
+    sev_re = re.compile(r"^-\s*\*\*Severity\*\*\s*:")
+    for i, line in enumerate(lines):
+        if sev_re.match(line):
+            lines[i] = new_line
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    # No existing line — insert after "## Classification".
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("## classification"):
+            lines.insert(i + 1, new_line)
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    # Fall back: prepend a stub Classification section.
+    stub = ["## Classification", new_line, ""]
+    return "\n".join(stub + lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _format_severity_field(sev: dict) -> str:
+    return f"{sev['level']} ({sev['score']})"
+
+
+def _replace_structured_field(text: str, field: str, value: str) -> str:
+    """Replace an existing structured report field.
+
+    Agent reports commonly carry a top `| Field | Value |` table plus the
+    generated Classification severity line. `bin/reachability` is the owner of
+    recomputed severity, so keep the table in sync when that row exists. We do
+    not create a new table row here; reports without a structured field already
+    have the generated severity line as the single source of truth.
+    """
+    lines = text.splitlines()
+    wanted = field.lower()
+    changed = False
+    for i, line in enumerate(lines):
+        if not line.startswith("|"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 4 or parts[1].strip().lower() != wanted:
+            continue
+        old_cell = parts[2]
+        new_cell = f" {value} "
+        if len(new_cell) < len(old_cell):
+            new_cell = new_cell + (" " * (len(old_cell) - len(new_cell)))
+        parts[2] = new_cell
+        lines[i] = "|".join(parts)
+        changed = True
+        break
+    if not changed:
+        bare_re = re.compile(rf"^({re.escape(field)}\s*:\s*).*$", re.IGNORECASE)
+        for i, line in enumerate(lines):
+            if bare_re.match(line):
+                lines[i] = bare_re.sub(lambda m: f"{m.group(1)}{value}", line)
+                changed = True
+                break
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _replace_reachability_section(text: str, new_section: str) -> str:
+    """Append-or-replace the auto reachability section. Idempotent."""
+    if REACH_HEADING in text:
+        # Replace existing block: from REACH_HEADING up to next "## " heading or EOF.
+        pattern = re.compile(
+            r"^" + re.escape(REACH_HEADING) + r".*?(?=^## |\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        return pattern.sub(new_section, text, count=1)
+    sep = "" if text.endswith("\n") else "\n"
+    return text + sep + "\n" + new_section
+
+
+def _format_severity_section(sev: dict) -> str:
+    """Render the per-axis explainer block.
+
+    The point of this section is transparency: a reader should be able to
+    see exactly which inputs produced the score and how the bucket was
+    chosen, without re-running the formula. Every line is computed from
+    the `sev` dict, so re-running --report regenerates it deterministically.
+    """
+    impact_why = f"primitive={sev['primitive']}; base+{sev['impact_base']}"
+    if sev['impact_modifier_score']:
+        impact_why += (f", mods+{sev['impact_modifier_score']} ["
+                       f"{', '.join(sev['impact_modifier_reasons'])}]")
+    confidence_why = "; ".join(sev['confidence_reasons']) or "(no signal)"
+    impact_max = IMPACT_BASE['uaf_write'] + IMPACT_MODIFIER_CAP
+
+    lines = [SEV_HEADING, ""]
+    lines.append(
+        "_How this score was computed. The formula is deterministic — the "
+        "same inputs always yield the same number. Update the report's "
+        "structured Fields (Surface, Caller contract, Caller controls, "
+        "Reproduction rate, Cluster) or re-run reachability to update the "
+        "score._"
+    )
+    lines.append("")
+    lines.append("**Formula**: `score = clamp(round((I + R) × CF), 0, 100)`")
+    lines.append("")
+    lines.append("| Axis | Score | Why |")
+    lines.append("|:-----|------:|:----|")
+    lines.append(f"| I — impact (additive)      | {sev['impact']:>2}/{impact_max} | {impact_why} |")
+    lines.append(f"| R — reach (×)              | {sev['reach']:>2}/{REACH_TOTAL_CAP} | "
+                 f"{'<br>'.join(sev['reach_reasons'])} |")
+    lines.append(f"| CF — confidence factor (×) | ×{sev['confidence_factor']:.2f} | {confidence_why} |")
+    total_why = (f"({sev['impact']} + {sev['reach']}) × "
+                 f"{sev['confidence_factor']:.2f} = {sev['raw_score']}")
+    if sev.get("surface_cap_applied"):
+        total_why += (f" → capped at {sev['surface_cap']} "
+                      f"(non-shipping {sev['surface_label']} surface)")
+    lines.append(f"| **Total**      | **{sev['score']}** | {total_why} |")
+    lines.append("")
+    # Bucket call-out + the full ladder so the reader sees how `level` was chosen.
+    # Thresholds are CVSS-3 proportional fractions of the realistic max
+    # (I_max 46 + R_max 31 = 77): Critical ≥ ~91%, High ≥ ~71%, Medium ≥ ~39%.
+    lines.append(f"**Bucket: {sev['level']}** — Critical ≥ 70, High ≥ 55, Medium ≥ 30, Low < 30 "
+                 f"(CVSS-3 proportional: top ~10%, ~30%, ~60%, rest of the {IMPACT_BASE['uaf_write'] + IMPACT_MODIFIER_CAP + REACH_TOTAL_CAP}-point scale).")
+    if sev.get("surface_cap_applied"):
+        lines.append("")
+        lines.append(
+            f"> **Non-shipping surface cap applied.** This bug lives in "
+            f"`{sev['surface_label']}` code (test/maintenance/internal harness) "
+            f"that does not ship to end users. Per Microsoft Security Bug Bar "
+            f"and Project Zero practice, such bugs are not security-relevant "
+            f"unless reachable from a real input surface. The raw score "
+            f"({sev['raw_score']}) was capped at {sev['surface_cap']}."
+        )
+    lines.append("")
+    lines.append("**Calibration notes** (industry alignment):")
+    lines.append(
+        "- _Impact (I)_ — primitive class + caller-controlled offset/size/value. "
+        "Maps to CVSS C/I/A Impact subscore. **Memory-safety**: UAF/wild WRITE = 40, "
+        "heap WRITE = 32, stack WRITE = 30, big READ = 24, small READ = 16, "
+        "BUS/null = 5–8. **Web/app vulns**: command-injection/RCE = 40, "
+        "deserialization = 38, SQLi/SSTI = 36, authn-bypass = 32, "
+        "SSRF/path-traversal/authz-bypass = 28, XXE = 26, IDOR = 22, "
+        "prototype-pollution = 20, XSS = 18, open-redirect/crypto-weakness = 14, "
+        "CSRF/ReDoS = 12. Modifiers cap at +6."
+    )
+    lines.append(
+        "- _Reach (R)_ — `surface × callers × contract × controls`. "
+        "Maps to CVSS Attack Vector × AC × PR × UI. **Multiplicative** — any "
+        "near-zero gate collapses the side. Surface tiers: network 28, popular "
+        "library 22, library 16, file parser 14, production CLI 8, "
+        "**dev/test/maintenance tool 1**, internal harness 0. Popularity is "
+        "expressed by the surface-tier upgrade (library → library_popular at "
+        f"≥{POPULAR_LIBRARY_THRESHOLD} genuine callers); the callers factor is a narrow "
+        "secondary tilt (×0.90–×1.10) so two bugs in the same tier can still "
+        "be ordered by reach without double-counting popularity. Contract is "
+        "the CVSS Attack Complexity analog — obeyed is the ×1.0 baseline, "
+        "violated is ×0.7 (we never *reward* the baseline case with a bonus). "
+        "A bug in `maint/`, `tests/`, `fuzz/`, or any binary matching `*test`/`*fuzz` "
+        "lands in the dev_tool tier and stays Low even if its impact is high — "
+        "this aligns with Microsoft Bug Bar and Project Zero practice that "
+        "non-shipping code is not a security-relevant input surface."
+    )
+    lines.append(
+        "- _Confidence factor (CF)_ — multiplies the whole score. "
+        "Maps to CVSS Temporal Report Confidence. Baseline 0.7; "
+        "+0.20 for 5/5 repro, +0.05 for cluster≥3, +0.05 for SCARINESS≥50. "
+        "Range [0.5, 1.0] — flaky single-run reports get derated by half."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _strip_auto_sections(text: str) -> str:
+    """Remove auto-generated content before re-scoring.
+
+    On every --report run we regenerate the Reachability section, the
+    Severity rationale section, AND the `- **Severity**: ... (auto: ...)`
+    line. If any of those remain in the input we feed to the classifier,
+    their prose (which mentions 'tests/' and 'maint/' as examples, plus
+    the last run's reach reasons) loops back as input and trips the
+    dev/test path regex on every subsequent run. Strip them first so
+    scoring only sees the agent-authored part of the report.
+    """
+    out = text
+    for heading in (REACH_HEADING, SEV_HEADING):
+        if heading in out:
+            pattern = re.compile(
+                r"^" + re.escape(heading) + r".*?(?=^## |\Z)",
+                re.MULTILINE | re.DOTALL,
+            )
+            out = pattern.sub("", out)
+    # Drop any auto-generated Severity line(s) — they carry the previous
+    # run's reach reasons in their tail prose.
+    out = re.sub(
+        r"^-\s*\*\*Severity\*\*\s*:.*\(auto:.*$",
+        "", out, flags=re.MULTILINE,
+    )
+    return out
+
+
+def _replace_severity_section(text: str, new_section: str) -> str:
+    """Append-or-replace the Severity rationale section. Idempotent."""
+    if SEV_HEADING in text:
+        pattern = re.compile(
+            r"^" + re.escape(SEV_HEADING) + r".*?(?=^## |\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        return pattern.sub(new_section, text, count=1)
+    sep = "" if text.endswith("\n") else "\n"
+    return text + sep + "\n" + new_section
+
+
+def update_report(report_path: Path, reachability: dict, severity: dict) -> None:
+    text = report_path.read_text("utf-8", errors="replace")
+    text = _replace_structured_field(text, "Severity", _format_severity_field(severity))
+    text = _replace_severity_line(text, _format_severity_line(severity))
+    text = _replace_reachability_section(text, _format_reachability_section(reachability))
+    text = _replace_severity_section(text, _format_severity_section(severity))
+    report_path.write_text(text, "utf-8")
+
+
+# ─── Human-readable summary ───────────────────────────────────────────────
+
+
+def render_human(reach: dict, severity: dict | None = None) -> str:
+    out: list[str] = []
+    out.append(f"Reachability for: {', '.join(reach['symbols'])}")
+    if reach.get("ignore"):
+        out.append(f"  Ignore filter: {', '.join(reach['ignore'])}")
+    out.append(f"  External callers (genuine):  {reach.get('external_callers', 0)}")
+    if reach.get("vendored_copies"):
+        out.append(f"  Vendored copies (excluded): {reach['vendored_copies']}")
+    for svc in SERVICES:
+        e = (reach.get("services") or {}).get(svc, {})
+        line = f"  {svc:9s} status={e.get('status', '?'):11s} hits={e.get('count', 0)}"
+        if e.get("vendored_count"):
+            line += f"  (+{e['vendored_count']} vendored)"
+        out.append(line)
+    if severity is not None:
+        out.append("")
+        out.append(f"Severity: {severity['level']} (score={severity['score']}/100)")
+        impact_max = IMPACT_BASE['uaf_write'] + IMPACT_MODIFIER_CAP
+        out.append(f"  I impact         = {severity['impact']:>2}/{impact_max}   primitive={severity['primitive']}")
+        if severity['impact_modifier_reasons']:
+            out.append(f"                        mods: {', '.join(severity['impact_modifier_reasons'])}")
+        out.append(f"  R reach          = {severity['reach']:>2}/{REACH_TOTAL_CAP}   "
+                   f"{'  '.join(severity['reach_reasons'][:3])}")
+        if len(severity['reach_reasons']) > 3:
+            out.append(f"                        {severity['reach_reasons'][-1]}")
+        out.append(f"  CF confidence    = ×{severity['confidence_factor']:.2f}   "
+                   f"{', '.join(severity['confidence_reasons']) or '(no signal)'}")
+    return "\n".join(out)
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────
+
+
+def _resolve_ignore(args: argparse.Namespace, report_dir: Path | None) -> list[str]:
+    ignore: list[str] = list(args.ignore or [])
+    seed_path: Path | None = None
+    if args.target:
+        candidate = Path.cwd() / "output" / args.target / "target.toml"
+        if candidate.is_file():
+            seed_path = candidate
+    elif report_dir is not None:
+        seed_path = _find_target_toml(report_dir)
+    if seed_path is not None:
+        for tok in _parse_target_toml_ignore(seed_path):
+            if tok not in ignore:
+                ignore.append(tok)
+    return ignore
+
+
+def _resolve_target_identity(args: argparse.Namespace,
+                             report_dir: Path | None) -> tuple[set[str], set[str]]:
+    """Discover the upstream project's source filenames and name aliases.
+
+    Walks upward to find a targets/<slug> source root, then
+    enumerates *.c / *.h basenames there. Also derives project-name aliases
+    from the resolved root directory and the --target slug, so a vendored
+    `…/<project>/…` path segment can be recognised for *any* target.
+
+    Returns (basenames, names). Either may be empty when nothing resolves —
+    the prefix regex (third_party/, vendor/, …) still catches the common
+    case, and an empty name set simply disables the segment heuristic."""
+    target_root: Path | None = None
+    target_names: set[str] = set()
+    if args.target:
+        target_names |= _target_name_variants(args.target)
+        candidate = Path.cwd() / "targets" / args.target
+        if candidate.is_dir():
+            target_root = candidate
+    if target_root is None and report_dir is not None:
+        # Walk up to find <repo_root>/targets/<slug>/.
+        cur = report_dir.resolve()
+        for p in [cur, *cur.parents]:
+            tt = p / "targets"
+            if tt.is_dir():
+                # Pick the first dir under targets/ that has a recognizable
+                # source layout (contains *.c or src/*.c). That's almost
+                # always the slug for this report.
+                for child in tt.iterdir():
+                    if not child.is_dir():
+                        continue
+                    if any((child / "src").glob("*.c")) or any(child.glob("*.c")):
+                        target_root = child
+                        break
+                if target_root is not None:
+                    break
+    if target_root is None:
+        return set(), target_names
+    target_names |= _target_name_variants(target_root.name)
+    basenames: set[str] = set()
+    try:
+        for path in target_root.rglob("*.c"):
+            # Stay inside the target's first-level src/ — building a giant
+            # set across vendored deps inside the target itself defeats the
+            # purpose of this filter.
+            if "/build" in str(path) or "/.git/" in str(path):
+                continue
+            basenames.add(path.name)
+        for path in target_root.rglob("*.h"):
+            if "/build" in str(path) or "/.git/" in str(path):
+                continue
+            basenames.add(path.name)
+    except OSError:
+        pass
+    return basenames, target_names
+
+
+def _run_batch(results_dir: Path, args: argparse.Namespace) -> int:
+    """Walk <results_dir>/crashes/CRASH-*/ and run --report on each.
+
+    Per-crash failures don't stop the loop — they're logged and the run
+    continues. A single summary table prints at the end.
+    """
+    crashes_root = results_dir / "crashes"
+    if not crashes_root.is_dir():
+        print(f"reachability: no crashes/ subdir under {results_dir}", file=sys.stderr)
+        return 2
+    dirs = sorted(p for p in crashes_root.iterdir()
+                  if p.is_dir() and p.name.startswith("CRASH-")
+                  and _find_report_md_in_dir(p) is not None)
+    if not dirs:
+        print(f"reachability: no CRASH-*/report.md under {crashes_root}", file=sys.stderr)
+        return 0
+    rows: list[tuple[str, str, str, int, str]] = []
+    for cdir in dirs:
+        sub_argv = ["--report", str(cdir), "--json"]
+        if args.no_cache:
+            sub_argv.append("--no-cache")
+        if args.severity_only:
+            sub_argv.append("--severity-only")
+        if args.target:
+            sub_argv += ["--target", args.target]
+        for tok in args.ignore or []:
+            sub_argv += ["--ignore", tok]
+        sub_argv += ["--timeout", str(args.timeout)]
+        try:
+            # Reuse main() in-process — same mocks/cache, same target.toml
+            # discovery. We capture its output by redirecting stdout.
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(sub_argv)
+            payload = json.loads(buf.getvalue() or "{}")
+            sev = payload.get("severity") or {}
+            reach = payload.get("reachability") or {}
+            rows.append((
+                cdir.name, "ok" if rc == 0 else f"rc={rc}",
+                sev.get("level", "?"), int(reach.get("external_callers", 0)),
+                sev.get("primitive", "?"),
+            ))
+        except Exception as e:
+            rows.append((cdir.name, f"err: {e!r}", "?", 0, "?"))
+    # Summary table.
+    print(f"\n=== Reachability batch summary ({len(rows)} crash dirs) ===")
+    print(f"{'ID':<24} {'Status':<10} {'Severity':<10} {'Callers':>7}  Primitive")
+    print(f"{'-'*24} {'-'*10} {'-'*10} {'-'*7}  {'-'*30}")
+    for cid, status, level, callers, prim in rows:
+        print(f"{cid:<24} {status:<10} {level:<10} {callers:>7}  {prim}")
+    return 0
+
+
+def _find_report_md_in_dir(report_dir: Path) -> Path | None:
+    for name in ("report.md", "REPORT.md"):
+        p = report_dir / name
+        if p.is_file():
+            return p
+    return None
+
+
+def _resolve_report_arg(report_arg: Path) -> tuple[Path, Path] | None:
+    if report_arg.is_file():
+        return report_arg.parent, report_arg
+    report_md = _find_report_md_in_dir(report_arg)
+    if report_md is None:
+        return None
+    return report_arg, report_md
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="bin/reachability", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--symbol", action="append", default=[], help="Symbol to probe (repeatable)")
+    ap.add_argument("--report", type=Path, default=None, help="Crash dir containing report.md")
+    ap.add_argument("--batch", type=Path, default=None,
+                    help="Results dir; runs --report on every crashes/CRASH-*/ underneath")
+    ap.add_argument("--target", default=None, help="Target slug (loads ignore from output/<slug>/target.toml)")
+    ap.add_argument("--ignore", action="append", default=[], help="Substring to drop from hits (repeatable)")
+    ap.add_argument("--json", action="store_true", help="Emit JSON instead of human summary")
+    ap.add_argument("--no-cache", action="store_true", help="Bypass the 24h cache")
+    ap.add_argument("--severity-only", action="store_true",
+                    help="With --report: only recompute Severity (uses adjacent reachability.json when present; otherwise skips external search)")
+    ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Per-request timeout (seconds)")
+    args = ap.parse_args(argv)
+
+    if args.severity_only and args.report is None and args.batch is None:
+        print("reachability: --severity-only requires --report or --batch", file=sys.stderr)
+        return 2
+
+    if args.batch is not None:
+        return _run_batch(args.batch, args)
+
+    use_cache = not args.no_cache
+
+    report_md: Path | None = None
+    report_dir: Path | None = None
+    adjacent_asan_text = ""
+    symbols_from_asan = False
+    if args.report is not None:
+        resolved = _resolve_report_arg(args.report)
+        if resolved is None:
+            print(f"reachability: report.md/REPORT.md not found under {args.report}", file=sys.stderr)
+            return 2
+        report_dir, report_md = resolved
+        report_text = report_md.read_text("utf-8", errors="replace")
+        # sanitizer.txt is canonical; asan.txt is a legacy alias kept as a
+        # fallback so older bundles shipped to maintainers stay readable.
+        asan_path: Path | None = None
+        for name in ("sanitizer.txt", "asan.txt"):
+            candidate = report_dir / name
+            if candidate.is_file():
+                asan_path = candidate
+                break
+        if asan_path is not None:
+            try:
+                adjacent_asan_text = asan_path.read_text("utf-8", errors="replace")
+            except OSError:
+                adjacent_asan_text = ""
+        # Symbols: CLI overrides extraction; otherwise auto-extract.
+        symbols = list(args.symbol) or _extract_symbols_from_report(report_text)
+        if not symbols and adjacent_asan_text:
+            symbols = _extract_symbols_from_asan(adjacent_asan_text)
+            symbols_from_asan = bool(symbols)
+    else:
+        report_text = ""
+        symbols = list(args.symbol)
+        if not symbols:
+            ap.print_help()
+            return 2
+
+    ignore = _resolve_ignore(args, report_dir)
+    target_basenames, target_names = _resolve_target_identity(args, report_dir)
+
+    reachability_json_path = report_dir / "reachability.json" if report_dir is not None else None
+
+    local_symbols_only = symbols_from_asan and _asan_text_has_dev_path(adjacent_asan_text)
+
+    if args.severity_only:
+        if reachability_json_path is not None and reachability_json_path.is_file():
+            try:
+                reach = json.loads(reachability_json_path.read_text("utf-8"))
+            except Exception as e:
+                print(f"reachability: cannot read {reachability_json_path}: {e}", file=sys.stderr)
+                return 4
+        else:
+            reach = _no_symbols_reachability(
+                ignore,
+                symbols=symbols,
+                status="external_skipped",
+                reason="external search skipped by --severity-only",
+            )
+            if reachability_json_path is not None:
+                reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
+    elif local_symbols_only:
+        reach = _no_symbols_reachability(
+            ignore,
+            symbols=symbols,
+            status="local_symbols_only",
+            reason="local ASan frame symbol from dev/test surface; external search skipped",
+        )
+        if reachability_json_path is not None:
+            reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
+    elif not symbols and report_md is not None:
+        reach = _no_symbols_reachability(ignore)
+        if reachability_json_path is not None:
+            reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
+    else:
+        reach = query_all(symbols, ignore, args.timeout, use_cache,
+                          target_basenames, target_names)
+        if reachability_json_path is not None:
+            reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
+
+    severity: dict | None = None
+    if report_md is not None:
+        cluster_size = _detect_cluster_size(report_text)
+        # Strip our own auto-generated sections before scoring — otherwise
+        # the explainer text in the rationale section (which mentions
+        # 'tests/', 'maint/' as examples) feeds back into the dev/test
+        # path detector on subsequent runs and spuriously collapses the
+        # surface tier. Scoring should only see the agent-authored part
+        # of the report.
+        scoring_text = _strip_auto_sections(report_text)
+        # Append asan.txt when adjacent — it has the canonical ASan summary
+        # (class + READ/WRITE of size N + SCARINESS line) that the report
+        # narrative may only paraphrase. Increases classifier accuracy without
+        # changing what gets persisted.
+        if report_dir is not None:
+            if adjacent_asan_text:
+                scoring_text = scoring_text + "\n" + adjacent_asan_text
+        severity = compute_severity(scoring_text, reach, cluster_size=cluster_size,
+                                    report_dir=report_dir)
+        update_report(report_md, reach, severity)
+
+    if args.json:
+        payload: dict[str, Any] = {"reachability": reach}
+        if severity is not None:
+            payload["severity"] = severity
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(render_human(reach, severity))
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,422 @@
+#!/usr/bin/env bash
+# Clone or update a target checkout under targets/<target>, then seed
+# output/<target>/target.toml for the audit harness.
+set -euo pipefail
+
+SCRIPT_ROOT="${AUDIT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/setup-target <target> [repo URL] [options]
+
+Options:
+  --repo-type <auto|git|hg>
+                           Source repo type (default: auto)
+  --ref <ref>             Branch, tag, bookmark, or revision to check out
+  --no-update             When a repo URL/ref is supplied, do not pull/fetch an existing checkout
+  --force, --force-config
+                           Regenerate output/<target>/target.toml and overwrite
+                           LLM-suggested [threat_model] / [s6_peers] sections
+  --bootstrap             Run the language-specific build phase inside the checkout
+                            (python: setup.py build_ext --inplace; rust: cargo build;
+                             go: go build ./...; swift: swift build; npm: npm install;
+                             php: composer install; ruby: bundle install). Skips
+                             silently when the detected language has no bootstrap or
+                             when its required manifest is absent.
+  --no-llm-config         Skip LLM-backed target.toml enrichment
+  -h, --help              Show this help
+
+Examples:
+  bin/setup-target pcre2 https://github.com/PCRE2Project/pcre2
+  bin/setup-target pcre2
+  bin/setup-target firefox https://hg.mozilla.org/mozilla-unified --repo-type hg
+  bin/setup-target oss-python-pyyaml --bootstrap
+EOF
+}
+
+log() {
+  printf '[setup-target] %s\n' "$*"
+}
+
+die() {
+  printf '[setup-target] FATAL: %s\n' "$*" >&2
+  exit 1
+}
+
+TARGET_NAME=""
+REPO_URL=""
+REPO_TYPE="auto"
+REF=""
+NO_UPDATE=0
+FORCE_CONFIG=0
+FORCE_CONFIG_FLAG=""
+RUN_BOOTSTRAP=0
+RUN_LLM_CONFIG=1
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo-type)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      REPO_TYPE="$2"; shift 2 ;;
+    --repo-type=*)
+      REPO_TYPE="${1#--repo-type=}"; shift ;;
+    --ref)
+      [ "$#" -ge 2 ] || die "--ref requires a value"
+      REF="$2"; shift 2 ;;
+    --ref=*)
+      REF="${1#--ref=}"; shift ;;
+    --no-update)
+      NO_UPDATE=1; shift ;;
+    --force|--force-config)
+      FORCE_CONFIG=1
+      FORCE_CONFIG_FLAG="$1"
+      shift ;;
+    --bootstrap)
+      RUN_BOOTSTRAP=1; shift ;;
+    --no-llm-config)
+      RUN_LLM_CONFIG=0; shift ;;
+    -h|--help)
+      usage; exit 0 ;;
+    --*)
+      die "unknown option: $1" ;;
+    *)
+      if [ -z "$TARGET_NAME" ]; then
+        TARGET_NAME="$1"
+      elif [ -z "$REPO_URL" ]; then
+        REPO_URL="$1"
+      else
+        die "unexpected argument: $1"
+      fi
+      shift ;;
+  esac
+done
+
+[ -n "$TARGET_NAME" ] || { usage >&2; exit 1; }
+case "$TARGET_NAME" in
+  *[!A-Za-z0-9._-]*|'') die "target must contain only letters, numbers, dot, underscore, or dash" ;;
+esac
+case "$REPO_TYPE" in auto|git|hg) ;; *) die "--repo-type must be auto, git, or hg" ;; esac
+
+TARGET_ROOT="$SCRIPT_ROOT/targets/$TARGET_NAME"
+CONFIG_DIR="$SCRIPT_ROOT/output/$TARGET_NAME"
+TARGET_TOML="$CONFIG_DIR/target.toml"
+
+detect_repo_type() {
+  local root="$1" url="${2:-}"
+  if [ -d "$root/.git" ]; then
+    printf 'git\n'; return
+  fi
+  if [ -d "$root/.hg" ]; then
+    printf 'hg\n'; return
+  fi
+  if [ -n "$url" ]; then
+    if [ -d "$url/.git" ]; then
+      printf 'git\n'; return
+    fi
+    if [ -d "$url/.hg" ]; then
+      printf 'hg\n'; return
+    fi
+    case "$url" in
+      *hg.mozilla.org*|hg:*|*.hg) printf 'hg\n'; return ;;
+    esac
+  fi
+  printf 'git\n'
+}
+
+git_dirty() {
+  [ -n "$(git -C "$1" status --porcelain 2>/dev/null)" ]
+}
+
+hg_dirty() {
+  [ -n "$(hg --cwd "$1" status 2>/dev/null)" ]
+}
+
+clone_target() {
+  local repo_type="$1"
+  [ -n "$REPO_URL" ] || die "targets/$TARGET_NAME does not exist; pass a repo URL to clone it"
+  mkdir -p "$SCRIPT_ROOT/targets"
+  case "$repo_type" in
+    git)
+      log "Cloning git source into targets/$TARGET_NAME"
+      git clone "$REPO_URL" "$TARGET_ROOT"
+      if [ -n "$REF" ]; then
+        git -C "$TARGET_ROOT" checkout "$REF"
+      fi
+      ;;
+    hg)
+      log "Cloning hg source into targets/$TARGET_NAME"
+      if [ -n "$REF" ]; then
+        hg clone -u "$REF" "$REPO_URL" "$TARGET_ROOT"
+      else
+        hg clone "$REPO_URL" "$TARGET_ROOT"
+      fi
+      ;;
+  esac
+}
+
+sync_git() {
+  if git_dirty "$TARGET_ROOT"; then
+    log "targets/$TARGET_NAME has local changes; leaving source checkout untouched"
+    return
+  fi
+  log "Fetching git updates for targets/$TARGET_NAME"
+  if [ -n "$REF" ]; then
+    git -C "$TARGET_ROOT" fetch --tags origin "$REF" || git -C "$TARGET_ROOT" fetch --tags origin
+    git -C "$TARGET_ROOT" checkout "$REF"
+  else
+    git -C "$TARGET_ROOT" fetch --tags origin
+  fi
+  if git -C "$TARGET_ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+    git -C "$TARGET_ROOT" pull --ff-only
+  else
+    log "No upstream tracking branch; fetched updates without changing HEAD"
+  fi
+}
+
+sync_hg() {
+  if hg_dirty "$TARGET_ROOT"; then
+    log "targets/$TARGET_NAME has local changes; leaving source checkout untouched"
+    return
+  fi
+  log "Pulling hg updates for targets/$TARGET_NAME"
+  hg --cwd "$TARGET_ROOT" pull
+  if [ -n "$REF" ]; then
+    hg --cwd "$TARGET_ROOT" update -r "$REF"
+  else
+    hg --cwd "$TARGET_ROOT" update
+  fi
+}
+
+if [ -d "$TARGET_ROOT" ]; then
+  [ -d "$TARGET_ROOT/.git" ] || [ -d "$TARGET_ROOT/.hg" ] || \
+    die "targets/$TARGET_NAME exists but is not a git or hg checkout"
+  DETECTED_REPO_TYPE="$(detect_repo_type "$TARGET_ROOT" "$REPO_URL")"
+  [ "$REPO_TYPE" = "auto" ] || [ "$REPO_TYPE" = "$DETECTED_REPO_TYPE" ] || \
+    die "targets/$TARGET_NAME is $DETECTED_REPO_TYPE, not $REPO_TYPE"
+  if [ "$NO_UPDATE" -eq 1 ] || { [ -z "$REPO_URL" ] && [ -z "$REF" ]; }; then
+    log "Using existing targets/$TARGET_NAME without updating"
+  elif [ "$DETECTED_REPO_TYPE" = "git" ]; then
+    sync_git
+  else
+    sync_hg
+  fi
+else
+  DETECTED_REPO_TYPE="$([ "$REPO_TYPE" = "auto" ] && detect_repo_type "$TARGET_ROOT" "$REPO_URL" || printf '%s\n' "$REPO_TYPE")"
+  clone_target "$DETECTED_REPO_TYPE"
+fi
+
+mkdir -p "$CONFIG_DIR"
+# Reviewed configs are preserved by default. The harness only re-seeds when:
+#   * the file is missing (fresh target),
+#   * the operator passed --force / --force-config,
+#   * unfilled FILL_ME placeholders remain from a prior seed, OR
+#   * the file no longer parses as TOML (e.g. an aborted hand-edit).
+# In every other case we leave the operator's edits alone — docs/reference/
+# target-toml.md promises that `bin/setup-target <slug>` may safely be run
+# against an updated checkout without rewriting reviewed config.
+CONFIG_REASON=""
+if [ ! -f "$TARGET_TOML" ]; then
+  CONFIG_REASON="missing"
+elif [ "$FORCE_CONFIG" -ne 0 ]; then
+  CONFIG_REASON="requested"
+elif grep -q 'FILL_ME' "$TARGET_TOML" 2>/dev/null; then
+  CONFIG_REASON="placeholders"
+elif ! SCRIPT_ROOT="$SCRIPT_ROOT" python3 - "$TARGET_TOML" <<'PY' >/dev/null 2>&1
+import os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(os.environ["SCRIPT_ROOT"]) / "lib"))
+from target_config import Config, load_toml_into  # noqa: E402
+load_toml_into(Config(), Path(sys.argv[1]))
+PY
+then
+  CONFIG_REASON="invalid"
+fi
+
+if [ -z "$CONFIG_REASON" ]; then
+  log "Keeping reviewed output/$TARGET_NAME/target.toml (pass --force to regenerate)"
+else
+  case "$CONFIG_REASON" in
+    missing) log "Seeding output/$TARGET_NAME/target.toml" ;;
+    placeholders) log "Refreshing output/$TARGET_NAME/target.toml because generated placeholders remain" ;;
+    invalid) log "Refreshing output/$TARGET_NAME/target.toml because it no longer parses as TOML" ;;
+    requested) log "Regenerating output/$TARGET_NAME/target.toml (${FORCE_CONFIG_FLAG:-"--force"})" ;;
+  esac
+  python3 "$SCRIPT_ROOT/lib/target_config.py" seed-toml "$TARGET_ROOT" "$TARGET_TOML" "$REPO_URL"
+fi
+
+append_unique_backend() {
+  local candidate="$1"
+  case "$candidate" in claude|codex|gemini|oss) ;; *) return 0 ;; esac
+  case " $LLM_BACKEND_CANDIDATES " in
+    *" $candidate "*) return 0 ;;
+  esac
+  LLM_BACKEND_CANDIDATES="${LLM_BACKEND_CANDIDATES:+$LLM_BACKEND_CANDIDATES }$candidate"
+}
+
+build_llm_backend_candidates() {
+  LLM_BACKEND_CANDIDATES=""
+  local requested="${ACTIVE_BACKEND:-${BACKEND:-${AUDIT_BACKEND:-}}}"
+  if [ -n "$requested" ] && [ "$requested" != "all" ]; then
+    append_unique_backend "$requested"
+  fi
+  append_unique_backend claude
+  append_unique_backend codex
+  append_unique_backend gemini
+  if [ "$requested" = "oss" ] || [ -n "${MODEL:-${AUDIT_MODEL:-${CODEX_OSS_MODEL_DEFAULT:-}}}" ]; then
+    append_unique_backend oss
+  fi
+}
+
+run_llm_config_bootstrap() {
+  [ -n "$CONFIG_REASON" ] || return 0
+  if [ "$RUN_LLM_CONFIG" -eq 0 ]; then
+    log "LLM config bootstrap skipped (--no-llm-config)"
+    return 0
+  fi
+  if [ "${AUDIT_NEW_TARGET_BOOTSTRAP:-1}" = "0" ]; then
+    log "LLM config bootstrap skipped (AUDIT_NEW_TARGET_BOOTSTRAP=0)"
+    return 0
+  fi
+  if [ "${LLM_DECIDE_DISABLE:-0}" = "1" ]; then
+    log "LLM config bootstrap skipped (LLM_DECIDE_DISABLE=1)"
+    return 0
+  fi
+
+  build_llm_backend_candidates
+  if [ -z "$LLM_BACKEND_CANDIDATES" ]; then
+    log "LLM config bootstrap skipped (no candidate backends)"
+    return 0
+  fi
+
+  local helper backend rc success helper_args
+  for helper in suggest-threat-model suggest-peers; do
+    [ -x "$SCRIPT_ROOT/bin/$helper" ] || continue
+    success=0
+    helper_args=("$TARGET_NAME" --apply)
+    if [ "$helper" = "suggest-threat-model" ]; then
+      # setup-target has just written the deterministic seed, so replacing
+      # that generated default is safe. Existing operator-curated configs can
+      # still be protected by running the helper directly without --force.
+      helper_args+=("--force")
+    elif [ "$FORCE_CONFIG" -ne 0 ]; then
+      helper_args+=("--force")
+    fi
+    for backend in $LLM_BACKEND_CANDIDATES; do
+      rc=0
+      SCRIPT_ROOT="$SCRIPT_ROOT" ACTIVE_BACKEND="$backend" BACKEND="$backend" \
+        "$SCRIPT_ROOT/bin/$helper" "${helper_args[@]}" || rc=$?
+      case "$rc" in
+        0)
+          log "config bootstrap: updated output/$TARGET_NAME/target.toml via $helper using $backend"
+          success=1
+          break
+          ;;
+        4)
+          log "config bootstrap: $helper kept existing curated section; rerun setup-target with --force to overwrite"
+          success=1
+          break
+          ;;
+        *)
+          log "config bootstrap: $helper failed with $backend (rc=$rc); trying next backend"
+          ;;
+      esac
+    done
+    if [ "$success" -eq 0 ]; then
+      log "config bootstrap: $helper skipped after trying ${LLM_BACKEND_CANDIDATES[*]}; run 'bin/$helper $TARGET_NAME --apply' once a backend is configured"
+    fi
+  done
+}
+
+run_llm_config_bootstrap
+
+python3 "$SCRIPT_ROOT/lib/target_config.py" parse-toml "$TARGET_TOML" >/dev/null || \
+  die "target config does not parse: $TARGET_TOML"
+
+REV="$(python3 "$SCRIPT_ROOT/lib/target_config.py" detect-rev "$TARGET_ROOT" || true)"
+log "Source: $TARGET_ROOT"
+log "Config: $TARGET_TOML"
+[ -n "$REV" ] && log "Revision: $REV"
+
+# Auto-bootstrap when the source tree carries ABI-mismatched Python
+# extensions. Generic — `lib/languages.py stale-python-extensions`
+# scans the checkout for `*.cpython-<tag>-*.so` files whose tag does
+# not match the active interpreter, ignoring bases that already have a
+# matching-tag sibling. This catches the pyyaml-style failure where a
+# prebuilt cp39 `.so` blocks every C-side card under cp314 without
+# anything in setup-target's path being target-specific.
+if [ "$RUN_BOOTSTRAP" -eq 0 ] && [ -d "$TARGET_ROOT" ]; then
+  STALE_PY_EXTS="$(python3 "$SCRIPT_ROOT/lib/languages.py" \
+                     stale-python-extensions "$TARGET_ROOT" 2>/dev/null || true)"
+  if [ -n "$STALE_PY_EXTS" ]; then
+    STALE_COUNT="$(printf '%s\n' "$STALE_PY_EXTS" | wc -l | tr -d ' ')"
+    log "ABI mismatch: ${STALE_COUNT} Python extension(s) built for a non-active interpreter — forcing --bootstrap"
+    log "  first stale: $(printf '%s\n' "$STALE_PY_EXTS" | head -1)"
+    RUN_BOOTSTRAP=1
+  fi
+fi
+
+# Optional language-specific bootstrap. Reads build_system out of the
+# generated target.toml, then asks the language registry what commands
+# to run inside the source checkout. For Python this builds C
+# extensions in-place so the cp-tag matches the interpreter the audit
+# runner will use — that's the fix for the pyyaml `_yaml.cpython-39 vs
+# python3.14` ENV-BLOCKED cluster. Commands are argv-style so there's
+# no shell-injection surface; missing manifests skip silently.
+if [ "$RUN_BOOTSTRAP" -eq 1 ]; then
+  # Read build_system out of target.toml using the canonical parser
+  # (honors target_config's lenient TOML quirks).
+  BUILD_SYSTEM="$(python3 - "$SCRIPT_ROOT" "$TARGET_TOML" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+import target_config as tc
+parsed = tc.parse_toml(Path(sys.argv[2]))
+bs = parsed.get("build_system", "")
+print(bs if isinstance(bs, str) else "")
+PY
+  )"
+  if [ -z "$BUILD_SYSTEM" ]; then
+    log "bootstrap: skipped (no build_system in $TARGET_TOML)"
+  else
+    LANG_NAME="$(python3 "$SCRIPT_ROOT/lib/languages.py" supports-build-system "$BUILD_SYSTEM" 2>/dev/null || true)"
+    if [ -z "$LANG_NAME" ]; then
+      log "bootstrap: skipped (build_system='$BUILD_SYSTEM' is not registered in lib/languages.py)"
+    else
+      BOOTSTRAP_JSON="$(python3 "$SCRIPT_ROOT/lib/languages.py" bootstrap-cmds \
+                          "$BUILD_SYSTEM" "$TARGET_ROOT" --format json 2>/dev/null || echo "[]")"
+      CMD_COUNT="$(printf '%s' "$BOOTSTRAP_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+      if [ "$CMD_COUNT" -eq 0 ]; then
+        log "bootstrap: skipped ($LANG_NAME has no bootstrap commands, or required manifest is absent in $TARGET_ROOT)"
+      else
+        log "bootstrap: running $CMD_COUNT $LANG_NAME command(s) in $TARGET_ROOT"
+        # Execute each argv list via python so we keep the no-shell-expansion contract.
+        if ! python3 - "$TARGET_ROOT" "$BOOTSTRAP_JSON" <<'PY'
+import json, os, subprocess, sys
+target_root, cmds_json = sys.argv[1], sys.argv[2]
+cmds = json.loads(cmds_json)
+for cmd in cmds:
+    print(f"[setup-target] bootstrap: {' '.join(cmd)}", flush=True)
+    rc = subprocess.call(cmd, cwd=target_root)
+    if rc != 0:
+        print(f"[setup-target] bootstrap: command failed (rc={rc}); aborting bootstrap", file=sys.stderr)
+        sys.exit(rc)
+PY
+        then
+          die "bootstrap failed for $TARGET_NAME (see commands above)"
+        fi
+        log "bootstrap: completed"
+      fi
+    fi
+  fi
+fi
+
+cat <<EOF
+
+Next steps:
+  1. Build an ASan target under targets/$TARGET_NAME/build-asan/ (or
+     build-asan-<id>/ inside a container, where <id> is AUDIT_BUILD_SUFFIX).
+  2. Refresh generated config with: bin/setup-target $TARGET_NAME
+  3. Review output/$TARGET_NAME/target.toml and edit only unresolved or target-specific fields.
+  4. Smoke-test with: bin/audit --target $TARGET_NAME 1
+EOF

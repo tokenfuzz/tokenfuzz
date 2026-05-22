@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TokenFuzz mark.
+
+  Token streams feed an AI search eye from both sides. The bug is the pupil:
+  the harness turns source-aware model reasoning into a concrete finding.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"
+     role="img" aria-labelledby="title desc">
+  <title id="title">TokenFuzz</title>
+  <desc id="desc">Token bars feeding an eye with a software bug at its center.</desc>
+
+  <defs>
+    <linearGradient id="brand" x1="24" y1="74" x2="232" y2="182" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Token streams -->
+  <g fill="url(#brand)" opacity="0.9">
+    <rect x="20" y="78" width="58" height="18" rx="6"/>
+    <rect x="20" y="119" width="78" height="18" rx="6"/>
+    <rect x="20" y="160" width="58" height="18" rx="6"/>
+    <rect x="178" y="78" width="58" height="18" rx="6"/>
+    <rect x="158" y="119" width="78" height="18" rx="6"/>
+    <rect x="178" y="160" width="58" height="18" rx="6"/>
+  </g>
+
+  <!-- Feed paths into the eye -->
+  <g fill="none" stroke="url(#brand)" stroke-width="7" stroke-linecap="round"
+     stroke-linejoin="round" opacity="0.75">
+    <path d="M78 87c18 0 27 11 35 27"/>
+    <path d="M98 128h18"/>
+    <path d="M78 169c18 0 27-11 35-27"/>
+    <path d="M178 87c-18 0-27 11-35 27"/>
+    <path d="M158 128h-18"/>
+    <path d="M178 169c-18 0-27-11-35-27"/>
+  </g>
+
+  <!-- Search eye -->
+  <path d="M52 128c20-34 46-52 76-52s56 18 76 52c-20 34-46 52-76 52s-56-18-76-52Z"
+        fill="none" stroke="url(#brand)" stroke-width="14" stroke-linejoin="round"/>
+  <circle cx="128" cy="128" r="41" fill="none" stroke="url(#brand)" stroke-width="8"/>
+
+  <!-- Bug pupil -->
+  <g stroke="#e11d48" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M114 126c0-13 6-22 14-22s14 9 14 22v10c0 13-6 22-14 22s-14-9-14-22z"
+          fill="#e11d48"/>
+    <path d="M118 115 109 106"/>
+    <path d="M138 115 147 106"/>
+    <path d="M114 131h-12"/>
+    <path d="M142 131h12"/>
+    <path d="M116 146h-10"/>
+    <path d="M140 146h10"/>
+  </g>
+</svg>

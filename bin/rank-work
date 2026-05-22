@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Rank concrete work cards for sanitizer audit agents."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from workqueue import add_common_args, apply_latest_claim_status, context_from_args, llm_rerank_cards, rank_target, read_jsonl, write_cards
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Rank target source files into concrete audit work cards")
+    add_common_args(parser)
+    parser.add_argument("--limit", type=int, default=80)
+    parser.add_argument("--patch-cards", help="Patch-card JSONL path; defaults to <RESULTS_DIR>/patch-cards.jsonl")
+    parser.add_argument("--s6-cards", help="S6 peer-fix card JSONL path; defaults to <RESULTS_DIR>/s6-peer-cards.jsonl")
+    parser.add_argument("--llm-top-n", type=int, default=int(os.environ.get("RANK_WORK_LLM_TOP_N", "160")))
+    parser.add_argument("--llm-timeout", type=int, default=int(os.environ.get("RANK_WORK_LLM_TIMEOUT", "20")))
+    parser.add_argument("--output", help="Output JSONL path; defaults to <RESULTS_DIR>/work-cards.jsonl")
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args(argv)
+
+    ctx = context_from_args(args)
+    patch_cards = Path(args.patch_cards).expanduser().resolve() if args.patch_cards else None
+    out = Path(args.output).expanduser().resolve() if args.output else ctx.results_dir / "work-cards.jsonl"
+    cards = rank_target(ctx, args.limit, patch_cards)
+    cards = llm_rerank_cards(ctx, cards, args.llm_top_n, args.llm_timeout)
+    # Preserve recon-hypothesis cards already in the output file.
+    # rank_target only rebuilds patch + ranked-source cards, so a plain
+    # overwrite here would silently drop the recon-seeded pool that
+    # lib/recon_to_cards.py merges in separately — stranding every recon
+    # lead before it can be probed. Mirror recon_to_cards.py's merge: it
+    # keeps non-recon cards, we keep recon cards. Dedup by id so a ranked
+    # card never collides with a preserved one.
+    ranked_ids = {c.get("id") for c in cards}
+    recon_cards = [
+        c for c in read_jsonl(out)
+        if c.get("kind") == "recon-hypothesis"
+        and c.get("id") not in ranked_ids
+    ]
+    cards = cards + recon_cards
+    # Merge S6 peer-fix cards. bin/peer-fix-cards writes these to a
+    # separate s6-peer-cards.jsonl, refreshed each iteration alongside
+    # patch-cards.jsonl — but rank_target only ever rebuilds patch +
+    # ranked-source cards, so without this merge the S6 cards are
+    # written and then orphaned: they never land in work-cards.jsonl
+    # and no agent can claim them. The s6 file is authoritative (it is
+    # regenerated, not preserved), so we read it fresh rather than
+    # preserving from `out` the way recon cards are. Dedup by id.
+    s6_path = Path(args.s6_cards).expanduser().resolve() if args.s6_cards \
+        else ctx.results_dir / "s6-peer-cards.jsonl"
+    merged_ids = {c.get("id") for c in cards}
+    s6_cards = [
+        c for c in read_jsonl(s6_path)
+        if c.get("kind") == "s6-peer-fix"
+        and c.get("id") not in merged_ids
+    ]
+    cards = cards + s6_cards
+    cards = apply_latest_claim_status(ctx, cards)
+    write_cards(out, cards)
+    if not args.quiet:
+        for card in cards:
+            print(json.dumps(card, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

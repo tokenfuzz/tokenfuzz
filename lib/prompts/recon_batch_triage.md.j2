@@ -1,0 +1,72 @@
+You are triaging a batch of recon hypotheses for the project at
+{{ target_path }}. A breadth-first recon pass produced the candidate list
+below. Your job is to do, in this one session, what would otherwise be one
+isolated review per hypothesis: deduplicate them and assign each a triage
+verdict.
+
+Work efficiently. Read each referenced source file at most once — many
+hypotheses point into the same files, so review all hypotheses for a file
+together while that file is in context. You do not need to build a
+reproducer; this is triage, not confirmation.
+
+# Candidate hypotheses (JSONL — one object per line)
+
+```
+{{ reps_jsonl }}
+```
+
+# What to do for each hypothesis
+
+1. **Read the source** at the named `file` and `line`. Confirm the named
+   `function` and the code the `notes` describe actually exist as claimed.
+2. **Reachability**: is there a plausible path from an attacker-reachable
+   entry point (public API, parsed network/file input) to that code? You
+   are triaging plausibility, not proving it — a rigorous trace happens
+   downstream for anything you do not reject.
+3. **Guards**: does an obvious in-function or caller-side check already
+   reject the input shape the hypothesis needs? If a guard the hypothesis
+   ignored clearly neutralises it, that is grounds to reject.
+4. **Deduplicate**: if two hypotheses describe the same root cause (same
+   defect, even if the file:line or wording differ), keep the strongest
+   one and point the others at it with `duplicate_of`.
+
+# Verdicts
+
+Assign exactly one `verdict` per hypothesis:
+
+- `reject` — quote the evidence in `rationale`. A reject without a
+  direct quote is `needs-deep-check` instead. The allowed reject
+  grounds, and the quote each requires, are:
+    - guard neutralises it → paste the exact guard expression (e.g.
+      `if (len > buf->size) return -1;`).
+    - caller-misuse of a documented API contract → paste the
+      doc/comment text that establishes the contract (silence in the
+      docs is NOT a contract).
+    - site is unreachable from any attacker-controlled input → name
+      the boundary the call chain dies at and why (e.g. "only invoked
+      from xs:build-time tooling main()").
+    - the described code does not exist → name what you actually saw
+      at that file:line (function name + first source line).
+    - non-security cleanup/style/doc observation → quote the
+      non-security claim from the hypothesis `notes`.
+  A rejected hypothesis is dropped and never investigated, so the
+  citation bar is intentionally strict.
+- `needs-deep-check` — plausible but you could not fully verify
+  reachability, the guard argument, or the primitive in this pass. This is
+  the default for anything you are unsure about.
+- `likely-real` — you traced reachability, the guards, and the primitive
+  far enough to believe this is a genuine, reachable defect.
+
+Bias toward `needs-deep-check` over `reject` when uncertain: a wrong
+reject silently buries a real bug, whereas a wrong `needs-deep-check` only
+costs one downstream verification pass.
+
+# Output
+
+After reviewing every hypothesis, output exactly ONE JSON object on its own
+line, no prose around it, no code fence:
+
+{"triage": [{"id": "<hypothesis id>", "verdict": "reject|needs-deep-check|likely-real", "duplicate_of": "<id or null>", "rationale": "<one sentence>"}]}
+
+Include one entry for every hypothesis id in the candidate list. Set
+`duplicate_of` to the id of the hypothesis this one duplicates, or `null`.

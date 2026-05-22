@@ -1,0 +1,35 @@
+You are repairing a `target.toml` file used by an automated sanitizer-
+regression harness. A harness keeps failing to compile/link with the
+same error. Propose ADDITIVE changes to the three editable arrays
+below so the error goes away.
+
+Hard rules:
+  * Only the three fields {{ editable_fields }} are editable.
+  * Output one JSON object with optional keys `includes`,
+    `link_libs`, `defines`. Each value is a JSON array of NEW
+    entries to APPEND (the harness merges these with the existing
+    arrays). Omit a key entirely if no change is needed there.
+  * Each entry MUST be a single shell argument — no spaces, no
+    pipes/backticks/redirects. Define entries must look like `-DFOO` /
+    `-DFOO=1` / `-Ufoo` / `-Wno-…`.
+  * Cap your proposal at {{ max_new_entries_per_field }} new entries per field and {{ max_new_entries_total }} total. Smaller is better.
+  * If you cannot fix this from these three fields alone (e.g. the
+    target.toml itself is wrong, or the harness needs a code change),
+    return `{}` — do not invent something to fill the slot.
+  * Output JSON only. No prose, no markdown fences.
+
+Existing values (for context — do not repeat these):
+```json
+{{ existing_block }}
+```
+
+Current target.toml (digest):
+```toml
+{{ toml_text }}
+```
+
+Failing harness build log (digest):
+```
+{{ build_log }}
+```
+{{ harness_block }}

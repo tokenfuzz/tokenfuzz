@@ -1,0 +1,187 @@
+#!/bin/bash
+# cleanup_logs — wipe output/<target>/<backend>/logs/ for every target × backend.
+#
+# Backends: claude, codex, gemini, oss (override with --backend NAME or --backends a,b,c).
+# Targets: every directory under output/ (override with --target NAME, repeatable).
+#
+# Preserves:
+#   - the logs/ directory itself
+#   - any .gitkeep files inside it
+#   - everything outside logs/ (results, crashes, findings, corpora, target.toml, ...)
+#
+# Usage:
+#   bin/cleanup_logs                       # clear all targets, default backends
+#   bin/cleanup_logs --dry-run             # show what would be cleared
+#   bin/cleanup_logs --target firefox      # only firefox
+#   bin/cleanup_logs --target firefox --target libxml2
+#   bin/cleanup_logs --backend <backend>
+#   bin/cleanup_logs --backends <backend-list>
+#   bin/cleanup_logs --output-root /path/to/output
+#
+# Exit codes: 0 success (incl. nothing to do), 2 usage error, 1 partial failure.
+
+set -uo pipefail
+
+usage() {
+    sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+dry_run=0
+quiet=0
+backends_csv="claude,codex,gemini,oss"
+targets=()
+output_root=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n|--dry-run) dry_run=1; shift ;;
+        -q|--quiet)   quiet=1;   shift ;;
+        -h|--help)    usage 0 ;;
+        --backends)
+            [ $# -ge 2 ] || { echo "[cleanup_logs] --backends needs a value" >&2; exit 2; }
+            backends_csv="$2"; shift 2 ;;
+        --backends=*) backends_csv="${1#--backends=}"; shift ;;
+        --backend)
+            [ $# -ge 2 ] || { echo "[cleanup_logs] --backend needs a value" >&2; exit 2; }
+            backends_csv="$2"; shift 2 ;;
+        --backend=*) backends_csv="${1#--backend=}"; shift ;;
+        --target)
+            [ $# -ge 2 ] || { echo "[cleanup_logs] --target needs a value" >&2; exit 2; }
+            targets+=("$2"); shift 2 ;;
+        --target=*) targets+=("${1#--target=}"); shift ;;
+        --output-root)
+            [ $# -ge 2 ] || { echo "[cleanup_logs] --output-root needs a value" >&2; exit 2; }
+            output_root="$2"; shift 2 ;;
+        --output-root=*) output_root="${1#--output-root=}"; shift ;;
+        --) shift; break ;;
+        -*) echo "[cleanup_logs] unknown option: $1" >&2; exit 2 ;;
+        *)  echo "[cleanup_logs] unexpected positional arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+# Resolve output root: explicit flag > $REPO_ROOT/output > script-relative.
+if [ -z "$output_root" ]; then
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    repo_root="$(cd "$script_dir/.." && pwd)"
+    output_root="$repo_root/output"
+fi
+
+if [ ! -d "$output_root" ]; then
+    echo "[cleanup_logs] output root not found: $output_root" >&2
+    exit 2
+fi
+output_root="$(cd "$output_root" && pwd -P)"
+
+valid_component() {
+    local name="$1"
+    case "$name" in
+        ""|"."|".."|.*|*/*|*..*) return 1 ;;
+    esac
+    return 0
+}
+
+path_is_under() {
+    python3 - "$1" "$2" <<'PY'
+import os
+import sys
+
+root = os.path.realpath(sys.argv[1])
+path = os.path.realpath(sys.argv[2])
+try:
+    ok = os.path.commonpath([root, path]) == root
+except ValueError:
+    ok = False
+sys.exit(0 if ok and path != root else 1)
+PY
+}
+
+# Parse backends CSV into array, trimming whitespace, dropping empties.
+IFS=',' read -r -a backends <<< "$backends_csv"
+parsed_backends=()
+for b in "${backends[@]}"; do
+    b="${b## }"; b="${b%% }"
+    [ -n "$b" ] && parsed_backends+=("$b")
+done
+if [ "${#parsed_backends[@]}" -eq 0 ]; then
+    echo "[cleanup_logs] no backends to clear" >&2
+    exit 2
+fi
+
+# If no --target given, enumerate every direct subdir of output_root.
+if [ "${#targets[@]}" -eq 0 ]; then
+    while IFS= read -r -d '' d; do
+        targets+=("$(basename "$d")")
+    done < <(find "$output_root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+fi
+
+if [ "${#targets[@]}" -eq 0 ]; then
+    [ "$quiet" -eq 1 ] || echo "[cleanup_logs] no targets under $output_root"
+    exit 0
+fi
+
+cleared=0
+skipped=0
+failed=0
+
+for target in "${targets[@]}"; do
+    if ! valid_component "$target"; then
+        echo "[cleanup_logs] invalid target component: '$target'" >&2
+        failed=$((failed + 1))
+        continue
+    fi
+    for backend in "${parsed_backends[@]}"; do
+        if ! valid_component "$backend"; then
+            echo "[cleanup_logs] invalid backend component for $target: '$backend'" >&2
+            failed=$((failed + 1))
+            continue
+        fi
+        logdir="$output_root/$target/$backend/logs"
+        if [ ! -d "$logdir" ]; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+        abs_logdir="$(cd "$logdir" && pwd -P)"
+        case "$abs_logdir" in
+            */logs) ;;
+            *) echo "[cleanup_logs] refusing to clean unexpected path: '$abs_logdir'" >&2
+               failed=$((failed + 1))
+               continue ;;
+        esac
+        if ! path_is_under "$output_root" "$abs_logdir"; then
+            echo "[cleanup_logs] refusing to clean path outside output root: '$abs_logdir'" >&2
+            failed=$((failed + 1))
+            continue
+        fi
+
+        # Count entries that would be removed (everything except .gitkeep).
+        count=$(find "$abs_logdir" -mindepth 1 -not -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ')
+        count=${count:-0}
+
+        if [ "$dry_run" -eq 1 ]; then
+            printf '[dry-run] %s: %s entries\n' "$abs_logdir" "$count"
+            continue
+        fi
+
+        if [ "$count" -eq 0 ]; then
+            [ "$quiet" -eq 1 ] || printf '%s: already empty\n' "$abs_logdir"
+            cleared=$((cleared + 1))
+            continue
+        fi
+
+        if find "$abs_logdir" -mindepth 1 -not -name '.gitkeep' -delete 2>/dev/null; then
+            [ "$quiet" -eq 1 ] || printf '%s: cleared %s entries\n' "$abs_logdir" "$count"
+            cleared=$((cleared + 1))
+        else
+            printf '[cleanup_logs] failed to clear %s\n' "$abs_logdir" >&2
+            failed=$((failed + 1))
+        fi
+    done
+done
+
+if [ "$dry_run" -eq 0 ] && [ "$quiet" -eq 0 ]; then
+    printf 'cleared=%d skipped=%d failed=%d\n' "$cleared" "$skipped" "$failed"
+fi
+
+[ "$failed" -eq 0 ] || exit 1
+exit 0

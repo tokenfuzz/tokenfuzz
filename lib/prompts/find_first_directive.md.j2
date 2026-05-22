@@ -1,0 +1,36 @@
+
+## FILE FIND FIRST, REPRODUCE SECOND
+
+If your analysis names a concrete security defect at `file:function:line`
+with a reviewer-actionable rationale (issue class + impact + caller control),
+**write `{{ results_dir }}/findings/FIND-NNN-<slug>/report.md` immediately**
+— before, or in parallel with, the reproducer loop below. Use the absolute
+path; a relative `findings/...` resolves against your current cwd, which
+may have drifted into the source tree after a `cd` and would silently
+mis-route the finding. Filing a FIND is **not** contingent on a sanitizer crash,
+a runnable testcase, or web-reachability (see
+`.agents/references/session-rules.md` "FIND Quality Bar"). If a reproducer
+later lands, link the testcase into the FIND directory or open a CRASH that
+references the FIND id.
+
+**Why this matters:** source-only strategies (S2 invariant-negation,
+S3 spec-vs-impl, S5 lifetime/state, S8 property-based) routinely identify
+concrete defects before — or without ever achieving — an ASan crash.
+Deferring the FIND until reproduction succeeds loses the finding when the
+agent rotates, the iteration ends, or the testcase hits a coverage/build wall.
+
+**Required FIND content** (anything missing → not a FIND, keep as a state note):
+1. `file:function:line` (or endpoint/config key for non-code defects)
+2. Named issue class (memory-safety / auth / injection / info-disclosure / crypto / race / boundary-violation / logic / …)
+3. Rationale — what is wrong, impact, caller control. A reviewer can act on it.
+
+**Skip filing** when the issue is pure correctness, data-integrity,
+robustness, or spec-deviation without a security implication — the harness
+gate quarantines non-security FINDs.
+
+**Exception — work card with a pre-filed FIND:** if your assigned work
+card carries a `find_id` (rendered in the card as a "PRE-FILED FIND"
+block), the FIND already exists in `{{ results_dir }}/findings/<find_id>/`.
+Augment that dir — never create a new `FIND-NNN-<slug>/` for the same
+defect. The pre-filed id is the canonical record; double-filing inflates
+the benchmark count and breaks cluster dedup.

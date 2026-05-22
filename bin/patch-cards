@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Build S1 prior-fix patch cards for the active target."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from workqueue import add_common_args, build_patch_cards, context_from_args, write_cards
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Build ranked S1 prior-fix patch cards")
+    add_common_args(parser)
+    parser.add_argument("--limit", type=int, default=80)
+    parser.add_argument("--inspect-commits", type=int, default=24,
+                        help="Best-effort VCS file lookup for the top N "
+                        "rows by pre-score (defect-keyword / severity / "
+                        "revision signal) — not the N newest commits")
+    parser.add_argument("--scan-window", type=int, default=None,
+                        help="Commits to scan before ranking down to "
+                        "--limit (default: PATCH_SCAN_WINDOW env, else "
+                        "25x --limit). A wider window surfaces fixes "
+                        "buried under sync-bot / test churn; the scan is "
+                        "a single git/hg log call so it stays cheap.")
+    parser.add_argument("--output", help="Output JSONL path; defaults to <RESULTS_DIR>/patch-cards.jsonl")
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args(argv)
+
+    ctx = context_from_args(args)
+    out = Path(args.output).expanduser().resolve() if args.output else ctx.results_dir / "patch-cards.jsonl"
+    cards = build_patch_cards(ctx, args.limit, args.inspect_commits, args.scan_window)
+    write_cards(out, cards)
+    if not args.quiet:
+        for card in cards:
+            print(json.dumps(card, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

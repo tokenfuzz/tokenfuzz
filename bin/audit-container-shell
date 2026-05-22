@@ -1,0 +1,607 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build a disposable audit shell image with hosted-agent CLIs installed, then
+# enter /root/work with this repository mounted. CLI credentials are
+# ephemeral by default: host CLI credential directories, API-key env vars,
+# and Google Cloud config / ADC files are not mounted unless explicitly
+# requested. Log in inside the container or pass --forward-credentials.
+
+SCRIPT_ROOT="${AUDIT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/audit-container-shell [options]
+
+Reuses the local audit-cli-shell Docker image (built with the latest CLIs for
+Claude Code, Codex, Antigravity CLI, and Google Gemini CLI), mounts this
+repository at /root/work, and opens an interactive shell. It does not run
+bin/audit.
+
+CLI credentials are ephemeral by default: each container starts logged out.
+Pass --forward-credentials to forward token/API-key env vars (and Google
+ADC / gcloud config) from the host, or log in inside the container per
+session. ~/.claude, ~/.codex, ~/.gemini are never mounted — see
+"Authenticating the CLIs" below for the threat-model reasoning.
+
+By default the build phase is skipped. The helper fails fast if the
+image tag is missing locally — pass --rebuild to build it (which also
+covers the very first run on a new host).
+
+Options:
+  --image <image>       Base image to build from (default: node:lts-bookworm).
+                        Short names ubuntu and fedora mean ubuntu:latest and
+                        fedora:latest. --base-image is kept as an alias.
+                        Only used when --rebuild is set.
+  --tag <name>          Image tag to build/run (default: audit-cli-shell:latest)
+  --runtime <name>      Container CLI: docker (default). Kept for env/flag
+                        compatibility.
+  --gvisor              Run the Docker container with gVisor (runsc).
+                        Equivalent to --docker-runtime runsc.
+  --docker-runtime <name>
+                        Docker OCI runtime for `docker run` (for example runsc).
+  --workdir <path>      Container work directory (default: /root/work)
+  --env-file <path>     Pass a Docker env-file through to the container
+  --forward-credentials Forward host LLM token/API-key env vars and Google
+                        ADC / gcloud config when present. Does NOT mount
+                        ~/.claude, ~/.codex, ~/.gemini — see "Authenticating
+                        the CLIs" below for why and what to do instead.
+  --rebuild             Build the image. Use this on the first run, or to
+                        refresh the image after bumping a CLI npm spec.
+  --dry-run             Print the build/run commands without executing them
+  -h, --help            Show this help
+
+Environment overrides:
+  CLAUDE_NPM_SPEC       npm package spec (default: @anthropic-ai/claude-code@latest)
+  CODEX_NPM_SPEC        npm package spec (default: @openai/codex@latest)
+  GEMINI_CLI_NPM_SPEC   npm package spec for Google Gemini CLI
+                        (default: @google/gemini-cli@latest). Set
+                        USE_GEMINI_CLI=1 at runtime to use this dialect.
+  AGY_INSTALL_URL       URL of the Antigravity CLI install script
+                        (default: https://antigravity.google/cli/install.sh).
+                        The script downloads the agy binary and stages it
+                        on PATH.
+  AUDIT_CONTAINER_AUTO_START     Set to 0 to disable best-effort Docker daemon
+                                 start (default 1; tries Docker Desktop /
+                                 Colima / systemctl as available)
+  AUDIT_CONTAINER_START_TIMEOUT  Seconds to wait for daemon after start (default 60)
+  AUDIT_DOCKER_RUNTIME           Docker OCI runtime for `docker run`; set to
+                                 runsc to use gVisor.
+  AUDIT_CONTAINER_NO_NEW_PRIVS   Set to 0 to omit Docker's
+                                 --security-opt no-new-privileges flag.
+  AUDIT_FORWARD_CREDENTIALS      Set to 1 to behave like --forward-credentials.
+  AUDIT_BUILD_SUFFIX             Suffix appended to sanitizer build dirs
+                                 (e.g. build-asan-<image-id>). Set automatically
+                                 inside the container from the image's short ID
+                                 so different container images do not share
+                                 build-asan/build-ubsan/... output trees.
+
+Why IS_SANDBOX=1 is set:
+  Claude Code refuses --dangerously-skip-permissions under root (uid 0)
+  unless IS_SANDBOX=1 is set, exiting 4 before the first turn. The
+  container is the sandbox boundary, so this helper sets it
+  automatically; no host action required.
+
+Authenticating the CLIs:
+  Each container starts logged out. Two paths:
+
+    1. --forward-credentials (recommended). Forwards these env vars when set:
+         ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY,
+         GEMINI_API_KEY, USE_GEMINI_CLI, GOOGLE_API_KEY,
+         GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_QUOTA_PROJECT
+       plus GOOGLE_APPLICATION_CREDENTIALS and ~/.config/gcloud read-only.
+       For Claude, generate a long-lived headless token on the host first:
+           claude setup-token
+           export CLAUDE_CODE_OAUTH_TOKEN=<token>
+
+    2. Log in inside the container. Each CLI prints an OAuth URL — open it
+       in a host browser, approve, the in-container CLI receives the token.
+       Lasts for that container session only (the --rm discards it on exit).
+
+  What --forward-credentials does NOT do, and why:
+    It does not mount ~/.claude, ~/.codex, or ~/.gemini from the host. The
+    container runs LLM agents with --dangerously-skip-permissions and builds
+    + executes adversary-shaped C/C++ under sanitizers; the container is the
+    sandbox boundary. Mounting those dirs would expose your OAuth refresh
+    tokens (long-lived, account-scoped, hard to revoke without logging you
+    out everywhere) and — if mounted writable — would let a compromised
+    container poison ~/.claude/settings.json hooks that your host CLI later
+    executes. Env-var forwarding keeps the blast radius to one revocable
+    token per service.
+
+  Practical consequence: with --forward-credentials only, `codex login
+  status` inside the container will say "Not logged in" unless you exported
+  OPENAI_API_KEY on the host. Either export it, or run `codex login` inside
+  the container once per session. Same pattern for `agy` (Gemini).
+
+Inside the shell, log in to the backend you plan to use (skip this if you
+passed --forward-credentials and exported a usable API key or token):
+  # codex login         opens an OAuth URL; codex login status to confirm
+  # claude              run it once and follow the login prompt
+  # agy                 run it once and follow the printed OAuth URL
+
+Then confirm auth before starting an audit. Each check prints one line and
+exits; if one hangs at a prompt, press Ctrl+C:
+  # codex login status
+  # claude -p "Reply exactly: tokenfuzz-claude-auth-ok"
+  # agy -p "Reply exactly: tokenfuzz-gemini-auth-ok"
+
+Then run a single audit invocation from /root/work, e.g.:
+  ./bin/audit --backend <backend> --target <target-name> [--model <model>]
+  # backend: one of claude, codex, gemini, oss
+EOF
+}
+
+log() {
+  printf '[audit-container-shell] %s\n' "$*" >&2
+}
+
+die() {
+  printf '[audit-container-shell] FATAL: %s\n' "$*" >&2
+  exit 1
+}
+
+quote_command() {
+  local first=1 arg
+  for arg in "$@"; do
+    [ "$first" -eq 1 ] || printf ' '
+    printf '%q' "$arg"
+    first=0
+  done
+  printf '\n'
+}
+
+normalize_base_image() {
+  case "$1" in
+    ubuntu) printf 'ubuntu:latest\n' ;;
+    fedora) printf 'fedora:latest\n' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+IMAGE_TAG="audit-cli-shell:latest"
+RUNTIME="${CONTAINER_RUNTIME:-docker}"
+DOCKER_RUNTIME="${AUDIT_DOCKER_RUNTIME:-}"
+BASE_IMAGE="node:lts-bookworm"
+CONTAINER_WORKDIR="/root/work"
+ENV_FILE=""
+FORCE_REBUILD=0
+DRY_RUN=0
+NO_NEW_PRIVS="${AUDIT_CONTAINER_NO_NEW_PRIVS:-1}"
+FORWARD_CREDENTIALS="${AUDIT_FORWARD_CREDENTIALS:-0}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --image)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      BASE_IMAGE="$2"; shift 2 ;;
+    --image=*)
+      BASE_IMAGE="${1#--image=}"; shift ;;
+    --tag)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      IMAGE_TAG="$2"; shift 2 ;;
+    --tag=*)
+      IMAGE_TAG="${1#--tag=}"; shift ;;
+    --runtime)
+      [ "$#" -ge 2 ] || die "--runtime requires a value"
+      RUNTIME="$2"; shift 2 ;;
+    --runtime=*)
+      RUNTIME="${1#--runtime=}"; shift ;;
+    --gvisor)
+      DOCKER_RUNTIME="runsc"; shift ;;
+    --docker-runtime)
+      [ "$#" -ge 2 ] || die "--docker-runtime requires a value"
+      DOCKER_RUNTIME="$2"; shift 2 ;;
+    --docker-runtime=*)
+      DOCKER_RUNTIME="${1#--docker-runtime=}"; shift ;;
+    --base-image)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      BASE_IMAGE="$2"; shift 2 ;;
+    --base-image=*)
+      BASE_IMAGE="${1#--base-image=}"; shift ;;
+    --workdir)
+      [ "$#" -ge 2 ] || die "--workdir requires a value"
+      CONTAINER_WORKDIR="$2"; shift 2 ;;
+    --workdir=*)
+      CONTAINER_WORKDIR="${1#--workdir=}"; shift ;;
+    --env-file)
+      [ "$#" -ge 2 ] || die "--env-file requires a value"
+      ENV_FILE="$2"; shift 2 ;;
+    --env-file=*)
+      ENV_FILE="${1#--env-file=}"; shift ;;
+    --forward-credentials)
+      FORWARD_CREDENTIALS=1; shift ;;
+    --rebuild)
+      FORCE_REBUILD=1; shift ;;
+    --dry-run)
+      DRY_RUN=1; shift ;;
+    -h|--help)
+      usage; exit 0 ;;
+    --*)
+      die "unknown option: $1" ;;
+    *)
+      die "unexpected argument: $1" ;;
+  esac
+done
+
+case "$RUNTIME" in
+  docker) ;;
+  *) die "--runtime must be docker" ;;
+esac
+[ -d "$SCRIPT_ROOT" ] || die "repository root does not exist: $SCRIPT_ROOT"
+[ -n "$CONTAINER_WORKDIR" ] || die "--workdir must not be empty"
+case "$FORWARD_CREDENTIALS" in
+  0|1) ;;
+  *) die "AUDIT_FORWARD_CREDENTIALS must be 0 or 1" ;;
+esac
+BASE_IMAGE="$(normalize_base_image "$BASE_IMAGE")"
+
+CLAUDE_NPM_SPEC="${CLAUDE_NPM_SPEC:-@anthropic-ai/claude-code@latest}"
+CODEX_NPM_SPEC="${CODEX_NPM_SPEC:-@openai/codex@latest}"
+GEMINI_CLI_NPM_SPEC="${GEMINI_CLI_NPM_SPEC:-@google/gemini-cli@latest}"
+AGY_INSTALL_URL="${AGY_INSTALL_URL:-https://antigravity.google/cli/install.sh}"
+
+runtime_status() {
+  # 0 = usable, 1 = not installed, 2 = installed but daemon unreachable
+  command -v "$1" >/dev/null 2>&1 || return 1
+  "$1" info >/dev/null 2>&1 || return 2
+  return 0
+}
+
+describe_runtime_status() {
+  case "$2" in
+    1) printf '%s not installed' "$1" ;;
+    2) printf '%s installed but daemon not reachable' "$1" ;;
+    *) printf '%s unusable' "$1" ;;
+  esac
+}
+
+daemon_hint() {
+  case "$(uname -s)" in
+    Darwin) printf 'start Docker Desktop or run `colima start`' ;;
+    Linux)  printf 'start the daemon (e.g. `sudo systemctl start docker`)' ;;
+    *)      printf 'ensure the Docker daemon is running' ;;
+  esac
+}
+
+# Try to start the daemon for the given runtime. Returns 0 if a start command
+# was launched (caller should then poll runtime_status), 1 if no viable
+# start strategy was found or the launcher itself failed.
+try_start_daemon() {
+  local rt="$1" os
+  os="$(uname -s)"
+  case "$rt:$os" in
+    docker:Darwin)
+      if [ -d "/Applications/Docker.app" ]; then
+        log "Attempting to start Docker Desktop: open -a Docker"
+        open -a Docker >/dev/null 2>&1 || return 1
+        return 0
+      fi
+      if command -v colima >/dev/null 2>&1; then
+        log "Attempting to start Colima: colima start"
+        colima start >/dev/null 2>&1 &
+        return 0
+      fi
+      return 1
+      ;;
+    docker:Linux)
+      if command -v systemctl >/dev/null 2>&1; then
+        log "Attempting to start docker: systemctl --user start docker"
+        systemctl --user start docker >/dev/null 2>&1 || return 1
+        return 0
+      fi
+      return 1
+      ;;
+  esac
+  return 1
+}
+
+# Poll runtime_status for up to AUDIT_CONTAINER_START_TIMEOUT seconds (default 60).
+wait_for_daemon() {
+  local rt="$1" timeout="${AUDIT_CONTAINER_START_TIMEOUT:-60}" elapsed=0
+  while [ "$elapsed" -lt "$timeout" ]; do
+    if "$rt" info >/dev/null 2>&1; then
+      log "$rt daemon is now reachable (after ${elapsed}s)"
+      return 0
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  return 1
+}
+
+probe_with_autostart() {
+  # Echoes final status code: 0/1/2 like runtime_status. Attempts a
+  # best-effort daemon start when status is 2 and AUDIT_CONTAINER_AUTO_START != 0.
+  local rt="$1" rc=0
+  runtime_status "$rt" || rc=$?
+  if [ "$rc" -eq 2 ] && [ "${AUDIT_CONTAINER_AUTO_START:-1}" != "0" ]; then
+    log "$rt daemon not reachable; attempting auto-start (set AUDIT_CONTAINER_AUTO_START=0 to disable)"
+    if try_start_daemon "$rt"; then
+      if wait_for_daemon "$rt"; then
+        printf '0\n'
+        return
+      fi
+      log "$rt daemon still not reachable after ${AUDIT_CONTAINER_START_TIMEOUT:-60}s"
+    else
+      log "no viable auto-start strategy for $rt on $(uname -s); leaving as-is"
+    fi
+    rc=2
+  fi
+  printf '%s\n' "$rc"
+}
+
+if [ "$DRY_RUN" -eq 0 ]; then
+  primary_rc=$(probe_with_autostart "$RUNTIME")
+  if [ "$primary_rc" -ne 0 ]; then
+    msg="$(describe_runtime_status "$RUNTIME" "$primary_rc")"
+    if [ "$primary_rc" -eq 2 ]; then
+      msg="$msg ($(daemon_hint))"
+    fi
+    die "$msg"
+  fi
+fi
+
+DOCKERFILE=""
+cleanup() {
+  if [ -n "$DOCKERFILE" ]; then
+    rm -f "$DOCKERFILE"
+  fi
+}
+trap cleanup EXIT
+
+# Default is no-build. The build phase only runs when --rebuild is set
+# (or in dry-run with --rebuild). Outside dry-run, when --rebuild is not
+# set, the image must already exist locally.
+image_exists_locally() {
+  "$RUNTIME" image inspect "$IMAGE_TAG" >/dev/null 2>&1
+}
+
+if [ "$DRY_RUN" -eq 0 ] && [ "$FORCE_REBUILD" -eq 0 ]; then
+  image_exists_locally || die "image $IMAGE_TAG does not exist locally; run with --rebuild to build it"
+fi
+
+if [ "$FORCE_REBUILD" -eq 1 ]; then
+  if [ "$DRY_RUN" -eq 0 ]; then
+    DOCKERFILE=$(mktemp "${TMPDIR:-/tmp}/audit-cli-shell.Dockerfile.XXXXXXXX")
+    cat > "$DOCKERFILE" <<'EOF'
+ARG BASE_IMAGE=node:lts-bookworm
+FROM ${BASE_IMAGE}
+
+ARG CLAUDE_NPM_SPEC=@anthropic-ai/claude-code@latest
+ARG CODEX_NPM_SPEC=@openai/codex@latest
+ARG GEMINI_CLI_NPM_SPEC=@google/gemini-cli@latest
+ARG AGY_INSTALL_URL=https://antigravity.google/cli/install.sh
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN set -eux; \
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then \
+    if command -v apt-get >/dev/null 2>&1; then \
+      apt-get update; \
+      apt-get install -y --no-install-recommends nodejs npm curl ca-certificates; \
+      rm -rf /var/lib/apt/lists/*; \
+    elif command -v dnf >/dev/null 2>&1; then \
+      dnf install -y nodejs npm curl ca-certificates; \
+      dnf clean all; \
+    elif command -v microdnf >/dev/null 2>&1; then \
+      microdnf install -y nodejs npm curl ca-certificates; \
+      microdnf clean all; \
+    elif command -v yum >/dev/null 2>&1; then \
+      yum install -y nodejs npm curl ca-certificates; \
+      yum clean all; \
+    else \
+      echo "No supported package manager found for Node/npm/curl; use a Debian/Ubuntu, Fedora/RHEL, or Node base image." >&2; \
+      exit 2; \
+    fi; \
+  fi
+
+RUN npm install -g "${CLAUDE_NPM_SPEC}" "${CODEX_NPM_SPEC}" "${GEMINI_CLI_NPM_SPEC}" \
+  && npm cache clean --force
+
+# Antigravity CLI (agy) — the LLM CLI for the harness's `gemini` backend.
+# Installed via the upstream one-liner per
+# https://github.com/google-antigravity/antigravity-cli#installation.
+RUN curl -fsSL "${AGY_INSTALL_URL}" | bash
+
+RUN cat >/usr/local/bin/audit-container-entry <<'ENTRY' \
+  && chmod +x /usr/local/bin/audit-container-entry
+#!/usr/bin/env bash
+set -euo pipefail
+workdir="${AUDIT_CONTAINER_WORKDIR:-/root/work}"
+cd "$workdir"
+export AUDIT_ROOT="$workdir"
+if [ "${AUDIT_CONTAINER_INSTALL_DEPS:-1}" != "0" ]; then
+  if [ ! -f "$workdir/tests/run-tests.sh" ]; then
+    echo "FATAL: missing $workdir/tests/run-tests.sh; cannot install container dependencies" >&2
+    exit 2
+  fi
+  cat <<'NOTE'
+[audit-container] Installing baseline Linux dependencies from mounted worktree.
+[audit-container] This runs on every container start so the toolchain tracks
+[audit-container] the live tests/run-tests.sh dep list (refreshed sources,
+[audit-container] new packages, or a previously-interrupted install). To skip
+[audit-container] when you know the image is already provisioned, re-run with
+[audit-container] AUDIT_CONTAINER_INSTALL_DEPS=0.
+NOTE
+  bash "$workdir/tests/run-tests.sh" --install-container-deps
+fi
+if [ -t 1 ]; then
+  cat <<'BANNER'
+
+Audit container shell
+
+This container starts logged out. Log in to the backend you plan to use
+(skip if you passed --forward-credentials and exported a usable API key or token):
+  # codex login         opens an OAuth URL; codex login status to confirm
+  # claude              run it once and follow the login prompt
+  # agy                 run it once and follow the printed OAuth URL
+
+Then confirm auth by uncommenting a check. Each prints one line and exits;
+if one hangs at a prompt, press Ctrl+C:
+  # codex login status
+  # claude -p "Reply exactly: tokenfuzz-claude-auth-ok"
+  # agy -p "Reply exactly: tokenfuzz-gemini-auth-ok"
+
+Then run a single audit invocation from /root/work, e.g.:
+  ./bin/audit --backend <backend> --target <target-name> [--model <model>]
+  # backend: one of claude, codex, gemini, oss
+
+BANNER
+fi
+exec "${SHELL:-/bin/bash}" -l
+ENTRY
+
+WORKDIR /root/work
+ENTRYPOINT ["/usr/local/bin/audit-container-entry"]
+EOF
+  else
+    DOCKERFILE="<generated Dockerfile>"
+  fi
+
+  build_args=("$RUNTIME" build --pull -t "$IMAGE_TAG")
+  build_args+=(
+    --build-arg "BASE_IMAGE=$BASE_IMAGE"
+    --build-arg "CLAUDE_NPM_SPEC=$CLAUDE_NPM_SPEC"
+    --build-arg "CODEX_NPM_SPEC=$CODEX_NPM_SPEC"
+    --build-arg "GEMINI_CLI_NPM_SPEC=$GEMINI_CLI_NPM_SPEC"
+    --build-arg "AGY_INSTALL_URL=$AGY_INSTALL_URL"
+    -f "$DOCKERFILE"
+    "$SCRIPT_ROOT"
+  )
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "build command:"
+    quote_command "${build_args[@]}"
+  else
+    log "Building $IMAGE_TAG from $BASE_IMAGE with claude=$CLAUDE_NPM_SPEC, codex=$CODEX_NPM_SPEC, gemini-cli=$GEMINI_CLI_NPM_SPEC, agy=$AGY_INSTALL_URL"
+    "${build_args[@]}"
+  fi
+fi
+
+run_args=("$RUNTIME" run --rm -it)
+if [ -n "$DOCKER_RUNTIME" ]; then
+  run_args+=(--runtime "$DOCKER_RUNTIME")
+  log "Using Docker OCI runtime: $DOCKER_RUNTIME"
+fi
+if [ "$NO_NEW_PRIVS" != "0" ]; then
+  run_args+=(--security-opt no-new-privileges)
+fi
+run_args+=(-v "$SCRIPT_ROOT:$CONTAINER_WORKDIR")
+run_args+=(-w "$CONTAINER_WORKDIR")
+run_args+=(-e "AUDIT_CONTAINER_WORKDIR=$CONTAINER_WORKDIR")
+# Antigravity CLI honors a workspace-trust opt-in for bind-mounted dirs.
+run_args+=(-e "GEMINI_CLI_TRUST_WORKSPACE=true")
+# Claude Code refuses --dangerously-skip-permissions under root unless
+# IS_SANDBOX=1 — the container is the sandbox boundary. Without this,
+# bin/audit --backend claude exits 4 immediately with no agent output.
+run_args+=(-e "IS_SANDBOX=1")
+
+# Derive a per-image suffix so each container image gets its own
+# build-asan/build-ubsan/... output tree under targets/<slug>/. Different
+# image revisions (different toolchain, libc, etc.) must not share build
+# trees — sanitizer instrumentation is ABI-sensitive to host headers. The
+# host can also export AUDIT_BUILD_SUFFIX directly to override.
+if [ -n "${AUDIT_BUILD_SUFFIX:-}" ]; then
+  run_args+=(-e "AUDIT_BUILD_SUFFIX=${AUDIT_BUILD_SUFFIX}")
+  log "Forwarding AUDIT_BUILD_SUFFIX=${AUDIT_BUILD_SUFFIX} from host"
+elif [ "$DRY_RUN" -eq 0 ]; then
+  image_id_raw=""
+  image_id_raw=$("$RUNTIME" image inspect "$IMAGE_TAG" --format '{{.Id}}' 2>/dev/null || true)
+  # Image IDs look like sha256:<64-hex>. Strip the prefix and trim to 12
+  # chars — enough for uniqueness across image revisions, short enough to
+  # keep build-asan-<id> paths readable.
+  image_id_short="${image_id_raw#sha256:}"
+  image_id_short="${image_id_short:0:12}"
+  if [ -n "$image_id_short" ]; then
+    run_args+=(-e "AUDIT_BUILD_SUFFIX=-${image_id_short}")
+    log "Setting AUDIT_BUILD_SUFFIX=-${image_id_short} (build-asan-${image_id_short}, build-ubsan-${image_id_short}, ...)"
+  fi
+fi
+
+if [ -n "$ENV_FILE" ]; then
+  [ -f "$ENV_FILE" ] || die "--env-file does not exist: $ENV_FILE"
+  run_args+=(--env-file "$ENV_FILE")
+fi
+
+credential_env_names=(
+  ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
+  GEMINI_API_KEY USE_GEMINI_CLI GOOGLE_API_KEY
+  GOOGLE_CLOUD_PROJECT GOOGLE_CLOUD_QUOTA_PROJECT
+)
+
+HOST_HOME="${HOME:-}"
+if [ "$FORWARD_CREDENTIALS" = "1" ]; then
+  forwarded_envs=()
+  for env_name in "${credential_env_names[@]}"; do
+    if [ -n "${!env_name:-}" ]; then
+      run_args+=(-e "$env_name")
+      forwarded_envs+=("$env_name")
+    fi
+  done
+
+  forwarded_adc=0
+  if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
+    run_args+=(-v "$GOOGLE_APPLICATION_CREDENTIALS:/root/.config/audit-google-application-credentials.json:ro")
+    run_args+=(-e "GOOGLE_APPLICATION_CREDENTIALS=/root/.config/audit-google-application-credentials.json")
+    forwarded_adc=1
+  fi
+
+  forwarded_gcloud=0
+  if [ -d "${HOST_HOME:+$HOST_HOME/.config/gcloud}" ]; then
+    run_args+=(-v "$HOST_HOME/.config/gcloud:/root/.config/gcloud:ro")
+    forwarded_gcloud=1
+  fi
+
+  if [ "${#forwarded_envs[@]}" -gt 0 ]; then
+    log "Forwarding host env vars: ${forwarded_envs[*]}"
+  fi
+  if [ "$forwarded_adc" -eq 1 ]; then
+    log "Mounting GOOGLE_APPLICATION_CREDENTIALS read-only: $GOOGLE_APPLICATION_CREDENTIALS -> /root/.config/audit-google-application-credentials.json"
+  fi
+  if [ "$forwarded_gcloud" -eq 1 ]; then
+    log "Mounting Google Cloud config read-only: $HOST_HOME/.config/gcloud -> /root/.config/gcloud"
+  fi
+  if [ "${#forwarded_envs[@]}" -eq 0 ] && [ "$forwarded_adc" -eq 0 ] && [ "$forwarded_gcloud" -eq 0 ]; then
+    log "--forward-credentials set but no host credential env vars or Google config found to forward; log in inside the container"
+  fi
+
+  # CLI credential directories (~/.claude, ~/.codex, ~/.gemini) are
+  # intentionally not mounted even with --forward-credentials. The CLIs
+  # must write to those dirs (state, logs, refreshed tokens) and a
+  # read-only host mount would break agy in particular.
+  log "Note: host CLI credential directories (~/.claude, ~/.codex, ~/.gemini) are not mounted; --forward-credentials only forwards env vars and Google config"
+else
+  host_credential_hint=0
+  for env_name in "${credential_env_names[@]}" GOOGLE_APPLICATION_CREDENTIALS; do
+    if [ -n "${!env_name:-}" ]; then
+      host_credential_hint=1
+    fi
+  done
+  if [ -d "${HOST_HOME:+$HOST_HOME/.config/gcloud}" ]; then
+    host_credential_hint=1
+  fi
+  if [ "$host_credential_hint" -eq 1 ]; then
+    log "Host LLM/Google credentials were not forwarded; pass --forward-credentials or set AUDIT_FORWARD_CREDENTIALS=1 to forward them"
+  else
+    log "No host LLM/Google credentials forwarded; pass --forward-credentials or set AUDIT_FORWARD_CREDENTIALS=1 if needed"
+  fi
+
+  # Credentials are intentionally not mounted from the host. The CLIs keep
+  # their own writable config under /root/{.claude,.codex,.gemini} inside the
+  # container's ephemeral layer — a read-only host mount would break agy,
+  # which must write logs, project state, and its OAuth token to ~/.gemini.
+  # Authenticate by logging in inside the container, by passing an env-file, or
+  # by using --forward-credentials.
+  log "No host CLI credential directories mounted; log in inside the container or use --forward-credentials / --env-file"
+fi
+
+run_args+=("$IMAGE_TAG")
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  log "run command:"
+  quote_command "${run_args[@]}"
+else
+  log "Opening container shell at $CONTAINER_WORKDIR"
+  "${run_args[@]}"
+fi

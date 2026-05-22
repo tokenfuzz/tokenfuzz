@@ -1,0 +1,32 @@
+You are classifying a security finding into the structured fields used by
+a deterministic severity scorer. Return ONE JSON object with these keys
+(all optional — omit a key entirely if the report does not give clear
+evidence for it):
+
+{
+  "surface":         "<network | library-api | file-format | cli | dev-tool | internal | unknown> — short description",
+  "primitive":       "<one of the primitive_keys below>",
+  "caller_contract": "<obeyed | violated>",
+  "caller_controls": "<bytes | length | flags | none>",
+  "trigger_source":  "<bytes | api | environment | configuration>",
+  "boundary":        "<short description of the attacker boundary>"
+}
+
+Allowed primitive_keys:
+  Memory-safety: uaf_write, uaf_read, double_free, wild_write, heap_write,
+                 stack_write, global_write, heap_read_big, heap_read_small,
+                 global_read, stack_read, null_deref, bus
+  Web/app:       command_injection, deserialization, sqli, ssti,
+                 authn_bypass, ssrf, path_traversal, authz_bypass, xxe,
+                 secrets_exposure, idor, prototype_pollution, xss,
+                 open_redirect, crypto_weakness, csrf, regex_dos, injection
+  Other:         unknown
+
+Rules:
+- Pick the single most specific primitive_key that fits the bug.
+- Prefer library-api when the surface is unclear but the bug lives in a library API.
+- For an open redirect: primitive=open_redirect; surface=library-api (or network for an HTTP service).
+- Output JSON only, no prose, no markdown fences.
+
+Report:
+{{ narrative }}

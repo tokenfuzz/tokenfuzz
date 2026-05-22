@@ -1,0 +1,667 @@
+#!/usr/bin/env python3
+"""bin/cluster-findings — group FIND-* dirs by shared root cause.
+
+Findings are filed without sanitizer output and span heterogeneous bug
+classes (memory-safety, auth, injection, info-disclosure, crypto, race,
+config, logic, ...). Single-key dedup doesn't fit all shapes, so the
+signature is layered (see lib/finding_signature.py):
+
+  Layer 1 — deterministic key (class, file, function) with :line:col
+            stripped. Same drift absorption bin/cluster-crashes uses.
+
+  Layer 2 — LLM-emitted dedup_key cached in .llm-find-quality.json.
+            Used when present; preferred over Layer 1 because it
+            collapses two reports of the same root cause filed from
+            different surface sites.
+
+Output (mirrors bin/cluster-crashes):
+  * <results>/findings/FINDING-CLUSTERS.md
+                                           — sortable markdown summary
+  * output/<target>/FINDING-CLUSTERS.md   — cross-backend aggregate summary
+  * each FIND-*/{report.md,REPORT.md}    — Cluster: <ID> field
+  * non-canonical members get .dup-of    — pointer to canonical FIND id
+
+Usage:
+  bin/cluster-findings <results-dir>            # writes FINDING-CLUSTERS.md
+  bin/cluster-findings <results-dir> --dry-run  # print plan only
+  bin/cluster-findings <results-dir> --json     # emit JSON to stdout
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+import finding_signature  # noqa: E402
+from cluster_common import (  # noqa: E402
+    exact_child_file,
+    remove_legacy_cluster_files,
+    render_member_report_siblings,
+    render_md_sibling,
+    run_under_aggregate_lock,
+)
+
+
+_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                               dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _find_report(find_dir: Path) -> Path | None:
+    return exact_child_file(
+        find_dir,
+        ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md"),
+    )
+
+
+def _read_llm_cache(find_dir: Path) -> dict:
+    p = find_dir / ".llm-find-quality.json"
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text("utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _severity_rank(severity: str) -> int:
+    return _SEVERITY_RANK.get((severity or "").strip().lower(), 0)
+
+
+def _severity_label(severity: str) -> str:
+    s = (severity or "").strip().lower()
+    if not s:
+        return "—"
+    return s.capitalize()
+
+
+_STRATEGY_BARE_RE = re.compile(
+    r"^Strategy:\s*(?P<val>.+?)\s*$", re.MULTILINE | re.IGNORECASE,
+)
+_STRATEGY_TABLE_RE = re.compile(
+    r"^\|\s*Strategy\s*\|\s*(?P<val>.+?)\s*\|\s*$", re.MULTILINE | re.IGNORECASE,
+)
+_STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-8]|REF)\b", re.IGNORECASE)
+
+
+def _extract_strategy(report_text: str) -> str:
+    """Return the canonical S1..S8 / REF token recorded in the FIND report, or "".
+
+    Matches bin/cluster-crashes' extractor; accepts both the bare-label and
+    Fields-table forms. Free-form labels collapse to the first S<N>/REF token
+    so FINDING-CLUSTERS.md's Strategy column stays terse."""
+    for rx in (_STRATEGY_BARE_RE, _STRATEGY_TABLE_RE):
+        m = rx.search(report_text)
+        if not m:
+            continue
+        val = m.group("val").strip()
+        if not val or val in {"—", "-", "TBD", "?"}:
+            continue
+        tok = _STRATEGY_TOKEN_RE.search(val)
+        return tok.group(1).upper() if tok else val
+    return ""
+
+
+def _signature(find_dir: Path, target_root: str) -> dict:
+    report = _find_report(find_dir)
+    text = _read_text(report) if report else ""
+    cache = _read_llm_cache(find_dir)
+    sig = finding_signature.finding_signature(
+        text,
+        llm_class=cache.get("class", "") if cache.get("accept") else "",
+        llm_dedup_key=cache.get("dedup_key", "") if cache.get("accept") else "",
+        target_root=target_root,
+    )
+    sig["id"] = find_dir.name
+    sig["path"] = str(find_dir)
+    sig["report"] = str(report) if report else ""
+    if not text:
+        sig["kind"] = "missing"
+        sig["key"] = (sig["class"], "", find_dir.name)
+    sev = (cache.get("severity") or "") if cache.get("accept") else ""
+    sig["severity"] = sev
+    sig["severity_label"] = _severity_label(sev)
+    sig["severity_rank"] = _severity_rank(sev)
+    sig["strategy"] = _extract_strategy(text)
+    status = "OK" if report and text else "NEEDS CONTENT"
+    if (find_dir / ".needs-content").is_file():
+        status = "NEEDS CONTENT"
+    elif (find_dir / ".needs-attention").is_file():
+        status = "NEEDS ATTENTION"
+    if (find_dir / ".reviewed").is_file() or (find_dir / ".keep").is_file():
+        status = "OK (override)"
+    sig["status"] = status
+    return sig
+
+
+def cluster_findings(findings_root: Path, target_root: str = "") -> list[dict]:
+    sigs: list[dict] = []
+    if not findings_root.is_dir():
+        return sigs
+    for d in sorted(findings_root.iterdir()):
+        if not d.is_dir() or not d.name.startswith("FIND-"):
+            continue
+        sigs.append(_signature(d, target_root))
+
+    by_key: dict[tuple, list[dict]] = {}
+    for s in sigs:
+        by_key.setdefault(tuple(s["key"]), []).append(s)
+
+    clusters: list[dict] = []
+    for key, members in by_key.items():
+        cid = finding_signature.cluster_id(key)
+        # Canonical = highest severity, then lowest id (lexicographic).
+        canonical = max(members, key=lambda m: (m["severity_rank"], -_lex_rank(m["id"])))
+        member_ids = [m["id"] for m in members]
+        for m in members:
+            m["cluster"] = cid
+            m["is_canonical"] = (m["id"] == canonical["id"])
+        strategies = sorted({m.get("strategy", "") for m in members if m.get("strategy")})
+        clusters.append({
+            "id": cid,
+            "class": key[0] if len(key) > 0 else "",
+            "key_kind": members[0]["kind"],
+            "key": list(key),
+            "canonical": canonical["id"],
+            "members": member_ids,
+            "size": len(members),
+            "severity_label": canonical["severity_label"],
+            "severity_rank": canonical["severity_rank"],
+            "strategy": ", ".join(strategies),
+            "status": _status_summary(members),
+            "_full": members,
+        })
+    clusters.sort(key=lambda c: (
+        -c["severity_rank"],
+        -c["size"],
+        c["id"],
+    ))
+    return clusters
+
+
+def _lex_rank(s: str) -> int:
+    """Lower lexicographic id sorts as canonical."""
+    return sum((256 ** (8 - i)) * ord(c) for i, c in enumerate(s[:8]))
+
+
+# ── Output: FINDING-CLUSTERS.md + Cluster: stamp + .dup-of markers ──
+
+
+_CLUSTER_LINE_RE = re.compile(r"^(Cluster:\s*).*$", re.MULTILINE)
+_CLUSTER_TABLE_ROW_RE = re.compile(r"^(\|\s*Cluster\s*\|).*", re.MULTILINE)
+_DEDUP_KEY_LINE_RE = re.compile(r"^(Dedup key:\s*).*$", re.MULTILINE)
+_DEDUP_KEY_TABLE_ROW_RE = re.compile(r"^(\|\s*Dedup key\s*\|).*", re.MULTILINE)
+
+
+def _move_leading_metadata_after_title(text: str) -> str:
+    lines = text.splitlines()
+    leading: list[str] = []
+    rest_start = 0
+    while rest_start < len(lines):
+        line = lines[rest_start]
+        if line.startswith("Cluster:") or line.startswith("Dedup key:") or (
+            not line.strip() and leading
+        ):
+            leading.append(line)
+            rest_start += 1
+            continue
+        break
+    if not any(line.startswith("Cluster:") or line.startswith("Dedup key:") for line in leading):
+        return text
+    rest = lines[rest_start:]
+    title_idx = next((i for i, line in enumerate(rest) if line.startswith("# ")), None)
+    if title_idx is None:
+        return text
+    metadata = [line for line in leading if line.strip()]
+    new_lines = rest[: title_idx + 1] + [""] + metadata + [""] + rest[title_idx + 1:]
+    return "\n".join(new_lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _set_cluster_line(report_text: str, cluster_id: str, members: list[str],
+                      own_id: str, canonical: str, kind: str,
+                      key_text: str) -> str:
+    siblings = [m for m in members if m != own_id]
+    role = " (canonical)" if own_id == canonical else f" (duplicate of {canonical})"
+    if siblings:
+        if len(siblings) <= 4:
+            sib_str = ", ".join(siblings)
+        else:
+            sib_str = ", ".join(siblings[:4]) + f", +{len(siblings) - 4} more"
+        cell = f"{cluster_id} ({len(members)} reports: {sib_str}){role}"
+    else:
+        cell = f"{cluster_id} (singleton)"
+
+    text = report_text
+    if _CLUSTER_LINE_RE.search(text):
+        text = _CLUSTER_LINE_RE.sub(lambda mm: f"{mm.group(1)}{cell}", text, count=1)
+    else:
+        # Keep the report title as the first visible line. Index generation
+        # and human reviewers both prefer the issue title over dedup metadata.
+        m = re.search(r"^# .*$", text, re.MULTILINE)
+        if m:
+            text = text[: m.end()] + f"\n\nCluster: {cell}" + text[m.end():]
+        else:
+            text = f"Cluster: {cell}\n" + text
+
+    if _CLUSTER_TABLE_ROW_RE.search(text):
+        text = _CLUSTER_TABLE_ROW_RE.sub(
+            lambda mm: f"{mm.group(1)} {cell} |", text, count=1,
+        )
+
+    if key_text:
+        dk_line = f"Dedup key: [{kind}] {key_text}"
+        if _DEDUP_KEY_LINE_RE.search(text):
+            text = _DEDUP_KEY_LINE_RE.sub(dk_line, text, count=1)
+        else:
+            # Insert directly after the Cluster: bare-label line.
+            m = re.search(r"^Cluster:.*$", text, re.MULTILINE)
+            if m:
+                text = text[: m.end()] + f"\n{dk_line}" + text[m.end():]
+        if _DEDUP_KEY_TABLE_ROW_RE.search(text):
+            text = _DEDUP_KEY_TABLE_ROW_RE.sub(
+                lambda mm: f"{mm.group(1)} [{kind}] {key_text} |", text, count=1,
+            )
+    return _move_leading_metadata_after_title(text)
+
+
+def _key_display(key: list, kind: str) -> str:
+    if kind == "llm":
+        return key[2] if len(key) > 2 else ""
+    if kind == "loc":
+        f = key[1] if len(key) > 1 else ""
+        fn = key[2] if len(key) > 2 else ""
+        if f and fn:
+            return f"{f}:{fn}"
+        return f or fn
+    if kind == "title":
+        return key[2] if len(key) > 2 else ""
+    if kind == "missing":
+        return key[2] if len(key) > 2 else ""
+    return ""
+
+
+def _status_summary(members: list[dict]) -> str:
+    statuses = sorted({m.get("status", "OK") for m in members})
+    return statuses[0] if len(statuses) == 1 else "; ".join(statuses)
+
+
+def _write_dup_marker(find_path: Path, canonical: str, cluster_id: str,
+                      key_kind: str, key_text: str) -> None:
+    marker_text = (
+        f"Marker: duplicate-of\n"
+        f"Canonical: {canonical}\n"
+        f"Cluster: {cluster_id}\n"
+        f"Reason: same signature as {canonical} "
+        f"([{key_kind}] {key_text})\n"
+        f"Hint: review the canonical FIND and either merge "
+        f"this report's evidence in or delete this dir.\n"
+    )
+    dup_marker = find_path / ".dup-of"
+    if not dup_marker.is_file() or _read_text(dup_marker) != marker_text:
+        _atomic_write_text(dup_marker, marker_text)
+
+
+def _clear_dup_marker(find_path: Path) -> None:
+    dup_marker = find_path / ".dup-of"
+    if dup_marker.is_file():
+        try:
+            dup_marker.unlink()
+        except OSError:
+            pass
+
+
+def update_reports(clusters: list[dict], dry_run: bool = False) -> int:
+    n = 0
+    for c in clusters:
+        key_text = _key_display(c["key"], c["key_kind"])
+        for m in c["_full"]:
+            report_path = Path(m["report"]) if m.get("report") else None
+            if report_path is None or not report_path.is_file():
+                continue
+            text = _read_text(report_path)
+            new_text = _set_cluster_line(
+                text, c["id"], c["members"], m["id"],
+                c["canonical"], c["key_kind"], key_text,
+            )
+            if new_text != text:
+                if not dry_run:
+                    _atomic_write_text(report_path, new_text)
+                n += 1
+
+            # .dup-of marker for non-canonical members. Canonical members
+            # never carry a marker; deleting any stale marker keeps the
+            # state consistent across re-runs.
+            if m["id"] != c["canonical"]:
+                if not dry_run:
+                    _write_dup_marker(
+                        Path(m["path"]), c["canonical"], c["id"],
+                        c["key_kind"], key_text,
+                    )
+            else:
+                if not dry_run:
+                    _clear_dup_marker(Path(m["path"]))
+    return n
+
+
+def update_aggregate_reports(clusters: list[dict], dry_run: bool = False) -> int:
+    """Stamp cross-agent cluster membership into each member report."""
+    n = 0
+    for c in clusters:
+        key_text = _key_display(c["key"], c["key_kind"])
+        for m in c["_full"]:
+            report_path = Path(m["report"]) if m.get("report") else None
+            if report_path is None or not report_path.is_file():
+                continue
+            own_display = m.get("display_id", m["id"])
+            text = _read_text(report_path)
+            new_text = _set_cluster_line(
+                text, c["id"], c["members"], own_display,
+                c["canonical"], c["key_kind"], key_text,
+            )
+            if new_text != text:
+                if not dry_run:
+                    _atomic_write_text(report_path, new_text)
+                n += 1
+
+            find_path = Path(m["path"])
+            if own_display != c["canonical"]:
+                if not dry_run:
+                    _write_dup_marker(
+                        find_path, c["canonical"], c["id"],
+                        c["key_kind"], key_text,
+                    )
+            else:
+                if not dry_run:
+                    _clear_dup_marker(find_path)
+    return n
+
+
+def _format_clusters_md(clusters: list[dict], findings_root: Path,
+                        link_prefix: str = "findings/") -> str:
+    lines = ["# Finding Clusters", ""]
+    lines.append(
+        f"_Auto-generated by bin/cluster-findings from `{findings_root.name}/`. "
+        f"Sorted by max-member severity, then cluster size._  "
+        f"Each row is a unique root cause; **Members** links to every "
+        f"FIND-* report sharing the same signature. Duplicates carry a "
+        f"`.dup-of` marker pointing at the canonical FIND."
+    )
+    lines.append("")
+    n_findings = sum(c["size"] for c in clusters)
+    n_unique = len(clusters)
+    lines.append(f"**{n_findings} FIND dir(s) → {n_unique} unique cluster(s).**")
+    if n_findings and n_unique:
+        lines.append(f"Dedup ratio: {n_findings / max(n_unique, 1):.2f}x.")
+    lines.append("")
+    lines.append("| Severity | Cluster | Size | Class | Strategy | Signature kind | Signature | Canonical | Members | Status |")
+    lines.append("|:---------|:--------|-----:|:------|:---------|:---------------|:----------|:----------|:--------|:-------|")
+    for c in clusters:
+        sig_text = _key_display(c["key"], c["key_kind"]) or "—"
+        members = []
+        for mid in c["members"]:
+            link = _member_link(findings_root, mid, link_prefix)
+            if mid == c["canonical"]:
+                members.append(f"**{link}**")
+            else:
+                members.append(link)
+        members_cell = ", ".join(members)
+        canonical_link = _member_link(findings_root, c["canonical"], link_prefix)
+        cls = c["class"] or "—"
+        sev = c["severity_label"] or "—"
+        strategy = c.get("strategy", "") or "—"
+        lines.append(
+            f"| {sev} | `{c['id']}` | {c['size']} | "
+            f"{cls} | {strategy} | {c['key_kind']} | `{sig_text}` | {canonical_link} | "
+            f"{members_cell} | {c.get('status', 'OK')} |"
+        )
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _resolve_report_basename(find_dir: Path) -> str:
+    report = _find_report(find_dir)
+    if report is not None:
+        return report.name
+    return "report.md"
+
+
+def _member_link(findings_root: Path, member_id: str, link_prefix: str = "") -> str:
+    name = _resolve_report_basename(findings_root / member_id)
+    return f"[{member_id}]({link_prefix}{member_id}/{name})"
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("results_dir", type=Path,
+                    help="Path containing findings/FIND-*/ subdirs, the findings/ dir itself, or an output/<slug>/ target root (aggregates every <agent>/results/findings/)")
+    ap.add_argument("--target-root", default=os.environ.get("TARGET_ROOT", ""),
+                    help="Strip this prefix from absolute paths in report text")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Don't write FINDING-CLUSTERS.md, report.md, or .dup-of markers")
+    ap.add_argument("--json", action="store_true",
+                    help="Emit cluster JSON to stdout")
+    args = ap.parse_args(argv)
+
+    rd = args.results_dir.resolve()
+
+    # Layouts:
+    #   * <results>/                       -> writes findings/FINDING-CLUSTERS.md
+    #   * <results>/findings              -> findings/FINDING-CLUSTERS.md
+    #   * output/<slug>/                   -> aggregate every agent
+    if (rd / "findings").is_dir():
+        findings_root = rd / "findings"
+        out_md = findings_root / "FINDING-CLUSTERS.md"
+        link_prefix = ""
+    elif rd.name == "findings":
+        findings_root = rd
+        out_md = findings_root / "FINDING-CLUSTERS.md"
+        link_prefix = ""
+    elif rd.parent.name == "output":
+        return _aggregate_target_root(rd, args.target_root,
+                                      dry_run=args.dry_run, want_json=args.json)
+    else:
+        findings_root = rd
+        out_md = rd / "FINDING-CLUSTERS.md"
+        link_prefix = ""
+
+    clusters = cluster_findings(findings_root, target_root=args.target_root)
+
+    if args.json:
+        emitted = [{k: v for k, v in c.items() if k != "_full"} for c in clusters]
+        json.dump({"findings_root": str(findings_root), "clusters": emitted},
+                  sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+
+    md = _format_clusters_md(clusters, findings_root, link_prefix=link_prefix)
+    if args.dry_run:
+        sys.stdout.write(md)
+        return 0
+
+    _atomic_write_text(out_md, md)
+    remove_legacy_cluster_files([out_md.parent / "FIND-CLUSTERS.md"])
+    n_updated = update_reports(clusters, dry_run=False)
+    render_member_report_siblings(clusters)
+    render_md_sibling(out_md)
+
+    print(f"[cluster-findings] {len(clusters)} cluster(s) over "
+          f"{sum(c['size'] for c in clusters)} finding(s)")
+    print(f"[cluster-findings] wrote {out_md}")
+    print(f"[cluster-findings] updated Cluster: line in {n_updated} report(s)")
+    return 0
+
+
+def _aggregate_target_root(target_root: Path, llm_target_root_prefix: str,
+                           dry_run: bool, want_json: bool) -> int:
+    """Walk every <agent>/results/findings/ under output/<slug>/, cluster
+    across all of them, and write output/<slug>/FINDING-CLUSTERS.md.
+
+    Per-agent FINDING-CLUSTERS.md files are still owned by per-results
+    invocations from lib/triage.sh; this top-level write is the
+    cross-agent rollup. Concurrent backends serialize through an
+    advisory flock on <slug>/.find-cluster-lock — see
+    lib/cluster_common.run_under_aggregate_lock.
+    """
+    return run_under_aggregate_lock(
+        target_root, ".find-cluster-lock", "cluster-findings",
+        lambda: _aggregate_target_root_locked(
+            target_root, llm_target_root_prefix, dry_run, want_json),
+    )
+
+
+def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str,
+                                  dry_run: bool, want_json: bool) -> int:
+    all_sigs: list[dict] = []
+    per_agent: dict[str, Path] = {}
+    for agent_dir in sorted(target_root.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        findings_root = agent_dir / "results" / "findings"
+        if not findings_root.is_dir():
+            continue
+        per_agent[agent_dir.name] = findings_root
+        for d in sorted(findings_root.iterdir()):
+            if not d.is_dir() or not d.name.startswith("FIND-"):
+                continue
+            sig = _signature(d, llm_target_root_prefix)
+            sig["agent"] = agent_dir.name
+            sig["display_id"] = f"{agent_dir.name}/{d.name}"
+            all_sigs.append(sig)
+
+    by_key: dict[tuple, list[dict]] = {}
+    for s in all_sigs:
+        by_key.setdefault(tuple(s["key"]), []).append(s)
+    clusters: list[dict] = []
+    for key, members in by_key.items():
+        cid = finding_signature.cluster_id(key)
+        canonical = max(members, key=lambda m: (
+            m["severity_rank"],
+            -_lex_rank(m.get("display_id", m["id"])),
+        ))
+        for m in members:
+            m["cluster"] = cid
+            m["is_canonical"] = (m["display_id"] == canonical["display_id"])
+        strategies = sorted({m.get("strategy", "") for m in members if m.get("strategy")})
+        clusters.append({
+            "id": cid,
+            "class": key[0] if len(key) > 0 else "",
+            "key_kind": members[0]["kind"],
+            "key": list(key),
+            "canonical": canonical["display_id"],
+            "members": [m["display_id"] for m in members],
+            "size": len(members),
+            "severity_label": canonical["severity_label"],
+            "severity_rank": canonical["severity_rank"],
+            "strategy": ", ".join(strategies),
+            "status": _status_summary(members),
+            "_full": members,
+        })
+    clusters.sort(key=lambda c: (
+        -c["severity_rank"],
+        -c["size"],
+        c["id"],
+    ))
+
+    if want_json:
+        emitted = [{k: v for k, v in c.items() if k != "_full"} for c in clusters]
+        json.dump({"target_root": str(target_root), "clusters": emitted},
+                  sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+
+    out_md = target_root / "FINDING-CLUSTERS.md"
+    md_lines = [f"# Finding Clusters — {target_root.name}", ""]
+    md_lines.append(
+        f"_Auto-generated by bin/cluster-findings from agent(s): "
+        f"{', '.join(per_agent.keys()) or '(none)'}. "
+        f"Sorted by max-member severity, then cluster size._  "
+        f"Aggregated across every `<agent>/results/findings/` directory; "
+        f"**Members** links jump to each report."
+    )
+    md_lines.append("")
+    md_lines.append(
+        f"**{len(all_sigs)} FIND dir(s) → {len(clusters)} unique cluster(s).**"
+    )
+    if all_sigs and clusters:
+        md_lines.append(f"Dedup ratio: {len(all_sigs) / max(len(clusters), 1):.2f}x.")
+    md_lines.append("")
+    md_lines.append("| Severity | Cluster | Size | Class | Strategy | Signature kind | Signature | Canonical | Members | Status |")
+    md_lines.append("|:---------|:--------|-----:|:------|:---------|:---------------|:----------|:----------|:--------|:-------|")
+    for c in clusters:
+        sig_text = _key_display(c["key"], c["key_kind"]) or "—"
+        link_cells: list[str] = []
+        for m in c["_full"]:
+            agent = m.get("agent", "")
+            mid = m["id"]
+            findings_root = per_agent.get(agent)
+            display = m["display_id"]
+            if findings_root is not None:
+                name = _resolve_report_basename(findings_root / mid)
+                link = f"[{display}]({agent}/results/findings/{mid}/{name})"
+            else:
+                link = display
+            if display == c["canonical"]:
+                link_cells.append(f"**{link}**")
+            else:
+                link_cells.append(link)
+        cls = c["class"] or "—"
+        sev = c["severity_label"] or "—"
+        strategy = c.get("strategy", "") or "—"
+        md_lines.append(
+            f"| {sev} | `{c['id']}` | {c['size']} | "
+            f"{cls} | {strategy} | {c['key_kind']} | `{sig_text}` | {c['canonical']} | "
+            f"{', '.join(link_cells)} | {c.get('status', 'OK')} |"
+        )
+    md_lines.append("")
+    md = "\n".join(md_lines) + "\n"
+
+    if dry_run:
+        sys.stdout.write(md)
+        return 0
+
+    _atomic_write_text(out_md, md)
+    remove_legacy_cluster_files([target_root / "FIND-CLUSTERS.md"])
+    n_updated = update_aggregate_reports(clusters, dry_run=False)
+    render_member_report_siblings(clusters)
+    render_md_sibling(out_md)
+
+    print(f"[cluster-findings] {len(clusters)} cluster(s) over "
+          f"{len(all_sigs)} finding(s) across {len(per_agent)} agent(s)")
+    print(f"[cluster-findings] wrote {out_md}")
+    print(f"[cluster-findings] updated Cluster: line in {n_updated} report(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

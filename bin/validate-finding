@@ -1,0 +1,360 @@
+#!/usr/bin/env bash
+# bin/validate-finding — Independent 2nd-opinion validator for non-ASan findings.
+#
+# Given a finding (a recon-hypothesis JSONL row, a findings/*/description.md,
+# or a JSON file with the standard schema), invoke a fresh LLM session with
+# NO PRIOR CONTEXT to vote Promote / Reject / Uncertain. The validator gets
+# the source tree but not the originating finding's confidence label or
+# author's reasoning beyond the facts the schema requires (file:line, input
+# shape, reach path, guards passed, primitive, falsification attempt).
+#
+# This is the "junk-prevention" gate the user asked for: a non-ASan finding
+# is promoted to findings/CONFIRMED-* ONLY if the validator votes Promote.
+# A single Uncertain triggers a second validator (tiebreak). Reject moves
+# the finding to findings-rejected/ with the validator rationale.
+#
+# Exit code 0: vote Promote.
+# Exit code 1: vote Reject.
+# Exit code 2: vote Uncertain.
+# Exit code 3: validator failed to produce a parseable vote.
+#
+# Usage:
+#   bin/validate-finding --finding <path-to-json-or-md> --target-path <path>
+#   bin/validate-finding --finding <path> --backend <backend> [--model <model>]
+#   bin/validate-finding --finding <path> --tiebreak  # 2nd opinion, more skeptical
+
+set -euo pipefail
+
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$SCRIPT_ROOT" || exit 1
+
+# Shared backend-flag picker and assistant-text extractor. Single
+# source of truth — no per-backend CLI flag should be spelled out
+# below.
+# shellcheck disable=SC1091
+source "$SCRIPT_ROOT/lib/llm_invoke.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_ROOT/lib/prompt_template.sh"
+# Portable timeout helper (audit_timeout_run) — GNU `timeout` is not on
+# the default PATH on macOS; the harness uses the perl-based shim instead.
+# shellcheck disable=SC1091
+source "$SCRIPT_ROOT/lib/timeout.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/validate-finding --finding <path> --target-path <path> [options]
+
+Required:
+  --finding <path>      Path to a finding (recon JSONL row, JSON file, or
+                        findings/*/description.md). One finding per call.
+  --target-path <path>  Target root the finding lives in.
+
+Options:
+  --backend <backend>       Required; one of: claude, codex, gemini, oss
+                            (no vendor default)
+  --model <model>           Default: backend's default in lib/llm_invoke.sh
+                            (claude-opus-4-7 / gpt-5.5 / CLI default)
+  --tiebreak                Use the tiebreak prompt: more skeptical, requires
+                            stronger evidence to vote Promote. Use for the
+                            third validator after an initial Uncertain.
+  --output <path>           Write validator response JSON here. Default:
+                            <finding-dir>/validator-vote-<n>.json
+  --timeout <secs>          Validator wall-time budget. Default: 300
+
+Exit codes:
+  0=Promote, 1=Reject, 2=Uncertain, 3=parse-failure
+EOF
+}
+
+FINDING=""
+TARGET_PATH=""
+BACKEND=""
+MODEL=""
+TIEBREAK=0
+OUTPUT=""
+TIMEOUT_SECS=300
+
+require_arg() {
+  # Guard value-bearing flags against missing values under `set -u`.
+  if [ "$#" -lt 2 ]; then
+    echo "[validate-finding] $1 requires a value" >&2
+    usage >&2
+    exit 4
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --finding) require_arg "$@"; FINDING="$2"; shift 2 ;;
+    --target-path) require_arg "$@"; TARGET_PATH="$2"; shift 2 ;;
+    --backend) require_arg "$@"; BACKEND="$2"; shift 2 ;;
+    --model) require_arg "$@"; MODEL="$2"; shift 2 ;;
+    --tiebreak) TIEBREAK=1; shift ;;
+    --output) require_arg "$@"; OUTPUT="$2"; shift 2 ;;
+    --timeout) require_arg "$@"; TIMEOUT_SECS="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 4 ;;
+  esac
+done
+
+[ -n "$FINDING" ] || { echo "FATAL: --finding required" >&2; exit 4; }
+[ -f "$FINDING" ] || { echo "FATAL: finding file not found: $FINDING" >&2; exit 4; }
+[ -n "$TARGET_PATH" ] || { echo "FATAL: --target-path required" >&2; exit 4; }
+[ -d "$TARGET_PATH" ] || { echo "FATAL: target path not found: $TARGET_PATH" >&2; exit 4; }
+[ -n "$BACKEND" ] || { echo "FATAL: --backend required (one of: claude, codex, gemini, oss)" >&2; exit 4; }
+case "$BACKEND" in
+  claude|codex|gemini|oss) ;;
+  *) echo "FATAL: --backend must be one of: claude, codex, gemini, oss (got: $BACKEND)" >&2; exit 4 ;;
+esac
+
+# Extract the canonical finding fields. We accept three input formats:
+#   1. JSONL row (one JSON object — easiest)
+#   2. JSON file (a single object pretty-printed)
+#   3. Markdown report (preserve the full report and extract known labels)
+extract_field() {
+  local field="$1" file="$2"
+  # JSON path first
+  jq -r --arg f "$field" '. as $r | $r[$f] // empty' "$file" 2>/dev/null | head -1
+}
+
+CANDIDATE_JSON=""
+if jq -e . "$FINDING" >/dev/null 2>&1; then
+  CANDIDATE_JSON=$(cat "$FINDING")
+else
+  # JSONL with one line of object
+  if head -1 "$FINDING" | jq -e . >/dev/null 2>&1; then
+    CANDIDATE_JSON=$(head -1 "$FINDING")
+  fi
+fi
+
+if [ -z "$CANDIDATE_JSON" ]; then
+  # Fall back for Markdown reports. Preserve the full report text so
+  # validators never receive an empty fact object just because the report
+  # used prose labels ("File and function:", "Bug class:", bare fields,
+  # etc.) instead of the older bullet-only format.
+  CANDIDATE_JSON=$(python3 - "$FINDING" <<'PYEOF'
+import json
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8", errors="replace") as fh:
+    text = fh.read()
+
+label_to_key = {
+    "summary": "summary",
+    "classification": "classification",
+    "root cause": "root_cause",
+    "file and function": "location",
+    "location": "location",
+    "bug class": "class",
+    "class": "class",
+    "input shape and reach path": "input_shape",
+    "input shape": "input_shape",
+    "reach path": "reach_path",
+    "guards passed": "guards",
+    "guards": "guards",
+    "primitive": "primitive",
+    "falsification attempt": "falsification",
+    "boundary": "boundary",
+    "caller controls": "caller_controls",
+    "trusted caller actions": "trusted_caller_actions",
+    "caller contract": "caller_contract",
+    "trigger source": "trigger_source",
+    "strategy": "strategy",
+}
+
+label_re = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:\*\*)?"
+    r"([A-Za-z][A-Za-z0-9 /_-]{0,80}?)"
+    r"(?:\*\*)?\s*:\s*(.*)$"
+)
+
+def parse_label(line):
+    match = label_re.match(line)
+    if not match:
+        return None
+    raw = re.sub(r"\s+", " ", match.group(1).strip()).lower()
+    key = label_to_key.get(raw)
+    if not key:
+        return None
+    return key, match.group(2).strip()
+
+lines = text.splitlines()
+candidate = {
+    "format": "markdown-report",
+    "report_text": text.strip(),
+}
+
+i = 0
+while i < len(lines):
+    parsed = parse_label(lines[i])
+    if not parsed:
+        i += 1
+        continue
+    key, value = parsed
+    i += 1
+    continuation = []
+    while i < len(lines):
+        if parse_label(lines[i]) or lines[i].startswith("#"):
+            break
+        if not lines[i].strip():
+            break
+        continuation.append(lines[i].strip())
+        i += 1
+    parts = [part for part in [value, " ".join(continuation).strip()] if part]
+    if parts:
+        candidate[key] = " ".join(parts)
+
+print(json.dumps(candidate, ensure_ascii=False))
+PYEOF
+  )
+fi
+
+if [ -z "$CANDIDATE_JSON" ] || ! printf '%s' "$CANDIDATE_JSON" | jq -e . >/dev/null 2>&1; then
+  echo "FATAL: could not extract a structured finding from $FINDING" >&2
+  exit 4
+fi
+
+# Where to write the vote output
+finding_dir=$(dirname "$FINDING")
+if [ -z "$OUTPUT" ]; then
+  vote_n=1
+  while [ -e "$finding_dir/validator-vote-$vote_n.json" ]; do
+    vote_n=$((vote_n + 1))
+  done
+  OUTPUT="$finding_dir/validator-vote-$vote_n.json"
+fi
+
+# Build the validator prompt. The finding is presented to the validator as
+# OPAQUE FACTS — no confidence label, no author opinion. The validator must
+# independently confirm reachability, guards, and primitive from source.
+build_prompt() {
+  local skeptic_block=""
+  if [ "$TIEBREAK" = "1" ]; then
+    skeptic_block=$'\n# Tiebreak mode\n\nA prior validator was Uncertain. Raise your bar. Default to **Reject**\nunless the evidence is unambiguous. Specifically:\n- If you cannot reproduce the reach path from a public-API entry to the\n  bug site by reading source, vote Reject.\n- If any named guard is actually sufficient on careful re-reading, vote\n  Reject.\n- If the primitive is "could potentially" or "may eventually" without a\n  concrete attacker-controlled value, vote Reject.\n'
+  fi
+  render_prompt_template validate_finding.md.j2 \
+    --var "target_path=${TARGET_PATH}" \
+    --var "candidate_json=${CANDIDATE_JSON}" \
+    --var "skeptic_block=${skeptic_block}" \
+    --var "timeout_secs=${TIMEOUT_SECS}"
+}
+
+prompt=$(build_prompt)
+raw_log=$(mktemp -t validator.XXXXXX)
+raw_err=$(mktemp -t validator.err.XXXXXX)
+validator_cwd=$(mktemp -d -t validator-cwd.XXXXXX)
+while IFS= read -r entry; do
+  ln -s "$entry" "$validator_cwd/$(basename "$entry")" 2>/dev/null || true
+done < <(find "$TARGET_PATH" -mindepth 1 -maxdepth 1 -print 2>/dev/null)
+# On ParseFailure we preserve both files next to the vote JSON so the
+# operator can see why the validator failed (auth missing, sandbox
+# error, timeout, etc.). Otherwise both are deleted on exit.
+trap 'rm -f "$raw_log" "$raw_err" 2>/dev/null || true; rm -rf "$validator_cwd" 2>/dev/null || true' EXIT
+
+llm_known_backend "$BACKEND" || {
+  echo "FATAL: unsupported backend $BACKEND" >&2
+  exit 4
+}
+
+# Validator runs in a tool-using stream-json shape (it needs to read
+# source). 120 turns matches the prior claude budget; codex and the
+# gemini backend (Antigravity CLI) self-pace within $TIMEOUT_SECS.
+declare -a validator_flags=()
+llm_agent_flags "$BACKEND" validator_flags "${MODEL:-}" 120 "$SCRIPT_ROOT,$TARGET_PATH"
+
+# Claude refuses --dangerously-skip-permissions under root unless
+# IS_SANDBOX=1. Other backends ignore it. Setting unconditionally is
+# safe (the container is the sandbox boundary).
+export IS_SANDBOX=1
+
+# stdin discipline: some backend branches pass the prompt as an argument,
+# so the spawned CLI must NOT inherit this process's stdin.
+# `codex exec` in particular drains fd 0 — and validate-finding is called
+# from inside `while read … done < file` loops (see bin/audit-recon's
+# validation gate). Without `< /dev/null`, codex eats the loop's remaining
+# input and the loop terminates after the first finding (it once collapsed
+# an 86-hypothesis recon round down to 1 validated candidate). The gemini
+# branch instead pipes the prompt on stdin, so it must keep its pipe and
+# must NOT get `< /dev/null`.
+case "$BACKEND" in
+  claude)
+    backend_rc=0
+    ( cd "$validator_cwd" && audit_timeout_run "$TIMEOUT_SECS" "${CLAUDE_BIN:-claude}" "${validator_flags[@]}" \
+      -p "$prompt" > "$raw_log" 2> "$raw_err" < /dev/null ) || backend_rc=$?
+    ;;
+  codex|oss)
+    backend_rc=0
+    ( cd "$validator_cwd" && audit_timeout_run "$TIMEOUT_SECS" "${CODEX_BIN:-codex}" exec "${validator_flags[@]}" "$prompt" \
+      > "$raw_log" 2> "$raw_err" < /dev/null ) || backend_rc=$?
+    ;;
+  gemini)
+    # Gemini backend reads the prompt from stdin when -p "".
+    backend_rc=0
+    ( cd "$validator_cwd" && printf '%s' "$prompt" \
+      | audit_timeout_run "$TIMEOUT_SECS" "$(llm_backend_bin gemini)" "${validator_flags[@]}" -p "" \
+      > "$raw_log" 2> "$raw_err" ) || backend_rc=$?
+    ;;
+esac
+
+text=$(llm_extract_text "$BACKEND" "$raw_log" | tr -d '\r')
+
+# Parse the vote — the model may emit the JSON inline, in a fenced code
+# block, on multiple lines, or with surrounding prose. We extract every
+# candidate object that contains "vote":"Promote|Reject|Uncertain" and
+# pick the first one that parses as valid JSON.
+extract_vote_json() {
+  local body="$1"
+  # 1. Strip ```json fences if present (keep the content)
+  body=$(printf '%s\n' "$body" \
+    | sed -E '/^[[:space:]]*```(json)?[[:space:]]*$/d')
+  # 2. Try a single-line match first
+  local oneline
+  oneline=$(printf '%s\n' "$body" \
+    | grep -aE '\{[^{}]*"vote"[[:space:]]*:[[:space:]]*"(Promote|Reject|Uncertain)"[^{}]*\}' \
+    | head -1 || true)
+  if [ -n "$oneline" ]; then
+    # Trim leading/trailing prose around the JSON object
+    oneline=$(printf '%s' "$oneline" | sed -E 's/^[^{]*//; s/[^}]*$//')
+    if printf '%s' "$oneline" | jq -e . >/dev/null 2>&1; then
+      printf '%s' "$oneline"
+      return 0
+    fi
+  fi
+  # 3. Multi-line: capture from first { containing "vote" to its matching }
+  printf '%s\n' "$body" | python3 "$SCRIPT_ROOT/lib/audit_helpers.py" extract-vote-json
+}
+
+vote_json=$(extract_vote_json "$text" || true)
+
+if [ -z "$vote_json" ] || ! printf '%s' "$vote_json" | jq -e . >/dev/null 2>&1; then
+  echo "VALIDATOR_PARSE_FAILURE: no vote JSON in output (backend=$BACKEND)" >&2
+  # Preserve both streams next to the vote file so the operator can
+  # diagnose without re-running. The doomed /tmp path the old code
+  # embedded was deleted before the operator could read it.
+  stdout_dest="${OUTPUT%.json}.stdout.log"
+  stderr_dest="${OUTPUT%.json}.stderr.log"
+  cp "$raw_log" "$stdout_dest" 2>/dev/null || true
+  cp "$raw_err" "$stderr_dest" 2>/dev/null || true
+  jq -n \
+    --arg backend "$BACKEND" \
+    --arg out "$stdout_dest" \
+    --arg err "$stderr_dest" \
+    --argjson backend_rc "${backend_rc:-0}" \
+    --argjson timed_out "$([ "${backend_rc:-0}" = "124" ] && printf true || printf false)" \
+    '{vote:"ParseFailure", backend:$backend, backend_rc:$backend_rc, timed_out:$timed_out, stdout_log:$out, stderr_log:$err}' \
+    > "$OUTPUT"
+  exit 3
+fi
+
+printf '%s\n' "$vote_json" > "$OUTPUT"
+vote=$(printf '%s' "$vote_json" | jq -r '.vote // "ParseFailure"')
+
+case "$vote" in
+  Promote) exit 0 ;;
+  Reject) exit 1 ;;
+  Uncertain) exit 2 ;;
+  *) exit 3 ;;
+esac

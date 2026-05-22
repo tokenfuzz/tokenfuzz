@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Suggest a target's threat model (attacker_controls) by asking the LLM.
+
+Usage:
+    bin/suggest-threat-model <slug>                # print [threat_model] snippet
+    bin/suggest-threat-model <slug> --apply        # set it in output/<slug>/target.toml
+    bin/suggest-threat-model <slug> --apply --force # overwrite a non-default model
+    bin/suggest-threat-model <slug> --apply --force-config # alias for --force
+
+Reads target.toml + the target's README and public-header API surface,
+then asks the LLM which attacker_controls tokens genuinely apply. Prints a
+[threat_model] TOML snippet the operator can review, or writes it into
+target.toml with --apply.
+
+`bin/audit --new-target` seeds a conservative default: the curated value
+from .agents/references/threat_models.toml, or byte-only (["bytes"]) for
+an uncurated target. Byte-only under-claims for stateful library APIs —
+call-sequence bugs would be demoted to robustness. This tool is the
+LLM-backed escape hatch for those targets, mirroring bin/suggest-peers.
+
+Failure modes:
+    - LLM unavailable / disabled       → exit 2
+    - target slug / target.toml absent → exit 1
+    - LLM response invalid             → exit 3
+    - target.toml already has a non-default threat model, no --force/--force-config → exit 4
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+# SCRIPT_ROOT env wins over file-based resolution so tests and chrooted
+# invocations can point the script at a sandbox without symlink reach-around.
+ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT") \
+    else Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+from llm_decide import llm_decide  # noqa: E402
+from prompt_render import render_template  # noqa: E402
+import target_config as tc  # noqa: E402
+
+README_CANDIDATES = (
+    "README.md", "README.rst", "README.txt", "README", "Readme.md",
+    "README.markdown",
+)
+# Directories whose headers are build scaffolding / vendored deps, not the
+# target's own public API surface. Structural names, not project-specific.
+_API_SKIP_DIRS = {
+    "test", "tests", "examples", "example", "build", "third_party",
+    "thirdparty", "vendor", "vendored", "deps", "contrib", "fuzz",
+    ".git",
+}
+_MARKER_BODY = "attacker_controls set by bin/suggest-threat-model"
+# Legacy callers (tests, in-place stale-comment detection) match against the
+# fully-rendered comment line. Keep that string spelled exactly once.
+_MARKER = "# " + _MARKER_BODY
+
+
+def read_readme_excerpt(target_root: Path, max_bytes: int = 2048) -> str:
+    """First max_bytes of the target's README, if present."""
+    for name in README_CANDIDATES:
+        p = target_root / name
+        if p.is_file():
+            try:
+                return p.read_text(encoding="utf-8", errors="replace")[:max_bytes]
+            except OSError:
+                continue
+    return ""
+
+
+def collect_api_surface(target_root: Path, max_headers: int = 60) -> str:
+    """Newline-joined relative paths of the target's public C/C++ headers.
+
+    Headers under test/build/vendored directories are skipped — they are
+    not the attacker-facing API. Headers under an `include/` directory
+    sort first, since that is the conventional public-API location.
+    """
+    if not target_root.is_dir():
+        return ""
+    headers: list[str] = []
+    for path in sorted(target_root.rglob("*.h")) + sorted(target_root.rglob("*.hpp")):
+        rel_parts = path.relative_to(target_root).parts
+        if any(seg.lower() in _API_SKIP_DIRS for seg in rel_parts[:-1]):
+            continue
+        headers.append("/".join(rel_parts))
+    # Public-API headers (an include/ segment) first, then the rest.
+    headers.sort(key=lambda h: (0 if "include/" in f"/{h}" else 1, h))
+    if not headers:
+        return ""
+    shown = headers[:max_headers]
+    extra = len(headers) - len(shown)
+    text = "\n".join(shown)
+    if extra > 0:
+        text += f"\n… (+{extra} more header(s))"
+    return text
+
+
+def build_prompt(slug: str, upstream_url: str, readme: str, api_surface: str) -> str:
+    return render_template("suggest_threat_model.md.j2", {
+        "slug": slug,
+        "upstream_url": upstream_url or "(unknown)",
+        "readme": readme.strip() or "(no README found)",
+        "api_surface": api_surface.strip() or "(no public headers found)",
+    })
+
+
+def normalize_controls(raw: object) -> list[str]:
+    """Validate + normalize the LLM's attacker_controls list.
+
+    Uses the same normalization the target.toml loader applies, so whatever
+    this tool writes round-trips through lib/target_config without tokens
+    being dropped. Returns a de-duplicated, order-preserving list of valid
+    tokens; an empty list means the response was unusable.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        norm = tc._normalize_attacker_control(item.strip())
+        if tc._is_valid_attacker_control(norm) and norm not in out:
+            out.append(norm)
+    return out
+
+
+def format_toml_snippet(controls: list[str], reasoning: str) -> str:
+    rendered = ", ".join(tc.toml_basic_string(c) for c in controls)
+    reasoning_comment = tc.toml_comment_lines(
+        "Reasoning: " + (reasoning.strip() or "(none)")
+    )
+    return (
+        "# ── Threat model (LLM-suggested) ─────────────────────────────\n"
+        f"{reasoning_comment}\n"
+        "# Review before relying on this — it drives the triage verdict matrix.\n"
+        "[threat_model]\n"
+        f"attacker_controls = [{rendered}]\n"
+    )
+
+
+def set_attacker_controls(text: str, controls: list[str], reasoning: str) -> str:
+    """Return target.toml `text` with [threat_model].attacker_controls set.
+
+    Replaces the existing attacker_controls line in place when a
+    [threat_model] section is present (preserving the section's comment
+    legend); appends a [threat_model] section otherwise.
+    """
+    rendered = ("attacker_controls = ["
+                + ", ".join(tc.toml_basic_string(c) for c in controls)
+                + "]")
+    # The marker line is a TOML comment. Pass the *uncommented* body to
+    # toml_comment_lines so newlines / control chars in `reasoning` are
+    # safely re-prefixed with `# ` instead of escaping the comment context
+    # on the second line and becoming live TOML.
+    marker_body = f"{_MARKER_BODY} — {reasoning.strip()}"
+    comment = tc.toml_comment_lines(marker_body)
+    out: list[str] = []
+    in_tm = False
+    replaced = False
+
+    def emit_controls() -> None:
+        # Drop a stale marker comment from a previous run, if directly above.
+        if out and out[-1].lstrip().startswith(_MARKER):
+            out.pop()
+        out.append(comment + "\n")
+        out.append(rendered + "\n")
+
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if not in_tm and stripped.startswith("[threat_model]"):
+            in_tm = True
+            out.append(line)
+            continue
+        if in_tm and not replaced:
+            # A new [section] header ends [threat_model] — insert before it.
+            if stripped.startswith("[") and not stripped.startswith("[threat_model]"):
+                emit_controls()
+                replaced = True
+                in_tm = False
+                out.append(line)
+                continue
+            # The attacker_controls assignment itself (skip commented forms).
+            if not stripped.startswith("#") and re.match(r"attacker_controls\s*=", stripped):
+                emit_controls()
+                replaced = True
+                continue
+        out.append(line)
+
+    if in_tm and not replaced:  # section ran to EOF with no assignment
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        emit_controls()
+        replaced = True
+
+    if not replaced:  # no [threat_model] section at all — append one
+        body = "".join(out)
+        if body and not body.endswith("\n"):
+            body += "\n"
+        return body + "\n[threat_model]\n" + comment + "\n" + rendered + "\n"
+    return "".join(out)
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
+    parser.add_argument("slug", help="target slug (matches output/<slug>/)")
+    parser.add_argument("--apply", action="store_true",
+                        help="write the threat model into output/<slug>/target.toml")
+    parser.add_argument("--force", "--force-config", dest="force", action="store_true",
+                        help="overwrite a non-default [threat_model] when --apply")
+    parser.add_argument("--timeout", type=int, default=30,
+                        help="LLM-call timeout seconds (default 30)")
+    args = parser.parse_args(argv)
+
+    output_dir = ROOT / "output" / args.slug
+    target_toml = output_dir / "target.toml"
+    if not target_toml.is_file():
+        print(f"[suggest-threat-model] target.toml not found: {target_toml}", file=sys.stderr)
+        print("[suggest-threat-model] run `bin/audit --new-target <slug>` first.",
+              file=sys.stderr)
+        return 1
+
+    targets_dir = ROOT / "targets" / args.slug
+    cfg = tc.Config()
+    try:
+        tc.load_toml_into(cfg, target_toml)
+    except Exception as e:
+        print(f"[suggest-threat-model] warning: target.toml parse: {e}", file=sys.stderr)
+
+    readme = read_readme_excerpt(targets_dir)
+    api_surface = collect_api_surface(targets_dir)
+    prompt = build_prompt(args.slug, cfg.upstream_url, readme, api_surface)
+
+    result = llm_decide("threat-model-suggest", "attacker_controls", prompt,
+                         timeout=args.timeout)
+    if result is None:
+        print("[suggest-threat-model] LLM call failed or unavailable.", file=sys.stderr)
+        print("[suggest-threat-model] Ensure a backend is configured and on PATH, "
+              "or hand-edit [threat_model] in target.toml.", file=sys.stderr)
+        return 2
+
+    controls = normalize_controls(result.get("attacker_controls", []))
+    reasoning = str(result.get("reasoning", "")).strip() or "(no reasoning provided)"
+    if not controls:
+        print(f"[suggest-threat-model] invalid LLM response (attacker_controls): "
+              f"{result!r}", file=sys.stderr)
+        return 3
+
+    snippet = format_toml_snippet(controls, reasoning)
+
+    if not args.apply:
+        sys.stdout.write(snippet)
+        return 0
+
+    # `["bytes"]` is the conservative seed placeholder (explicit or defaulted)
+    # — safe to overwrite. Any richer value may be operator-curated, so it is
+    # protected behind --force.
+    current = cfg.attacker_controls or ["bytes"]
+    if current != ["bytes"] and not args.force:
+        print(f"[suggest-threat-model] target.toml already has a non-default "
+              f"threat model {current}; pass --force (or --force-config) "
+              f"to overwrite.", file=sys.stderr)
+        return 4
+
+    new_text = set_attacker_controls(target_toml.read_text(encoding="utf-8"),
+                                     controls, reasoning)
+    # Round-trip the candidate file through the project's own TOML loader
+    # before replacing the original. If an LLM-supplied string survived the
+    # escaper in a way that breaks parsing, we refuse the write rather than
+    # corrupt the on-disk config.
+    try:
+        _probe = tc.Config()
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".toml",
+            dir=str(target_toml.parent), delete=False,
+        ) as _tmp:
+            _tmp.write(new_text)
+            _tmp_path = Path(_tmp.name)
+        try:
+            tc.load_toml_into(_probe, _tmp_path)
+        finally:
+            _tmp_path.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"[suggest-threat-model] refusing to write: candidate target.toml "
+              f"failed re-parse ({e}); original left untouched.", file=sys.stderr)
+        return 3
+    target_toml.write_text(new_text, encoding="utf-8")
+    print(f"[suggest-threat-model] set attacker_controls = {controls} in {target_toml}",
+          file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

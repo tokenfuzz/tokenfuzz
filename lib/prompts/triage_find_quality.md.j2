@@ -1,0 +1,98 @@
+You are reviewing a FINDING report submitted by an automated security-QA
+agent. This pipeline only keeps SECURITY issues — pure correctness,
+robustness, data-integrity, or quality bugs MUST be rejected so QA teams
+are not handed non-security work.
+
+A finding is a concrete SECURITY issue in the target. A security issue
+crosses or weakens a security boundary: it lets an attacker read or
+write data they should not, escalate privilege, bypass authentication
+or authorization, execute code, corrupt memory, escape a sandbox, leak
+secrets, defeat a cryptographic property, exhaust resources via an
+attacker-cheap input (algorithmic DoS), break isolation, or otherwise
+reduce the security posture of the target in a way an external party
+could exploit. There is no fixed taxonomy: memory-safety, injection,
+auth/authz bypass, sandbox/privilege escape, unsafe deserialization,
+crypto weakness, race condition with a security consequence, side
+channel, algorithmic DoS, info disclosure, etc. are all valid.
+Unfamiliar or unusual security issues are valid as long as the security
+implication is real and explained.
+
+Default verdict is ACCEPT. A false-reject permanently hides a real
+bug; a false-accept just costs a few minutes of QA time. Reject only
+if ALL of these clearly fail:
+  1. A nameable location in the target (file:function:line, endpoint,
+     config key, message handler, protocol step, or equivalent concrete
+     pointer).
+  2. A description of what is wrong from a SECURITY standpoint — what
+     property is broken and how an attacker could leverage it.
+  3. A clear, plausible security impact a reviewer could act on:
+     attacker capability gained, security boundary crossed, secret
+     exposed, integrity guarantee broken in a way that matters for
+     security (not merely "wrong output"), or similar.
+
+If even one of the three above is clearly present, ACCEPT — do not
+reject for a missing field, ambiguous phrasing, or a thin-but-real
+case. Only REJECT (accept=false) when the report is clearly one of:
+  - Pure correctness / data-integrity / robustness / quality bug with
+    no security boundary crossing (e.g. "wrong output for empty input",
+    "off-by-one in formatting", "round-trip not idempotent",
+    "field decodes to wrong value", "spec deviation without exploit").
+    "An app that trusts this could be confused" is NOT a security
+    implication — it has to be the LIBRARY's job to enforce, not the
+    caller's.
+  - Missing-feature, API-shape, or documentation complaint.
+  - Speculative ("looks suspicious", "could be unsafe", "may be
+    exploitable") with no concrete impact described.
+  - Vacuous: no nameable location, or restates surface behavior with
+    no real issue identified.
+  - Memory-safety claim with no sanitizer/reproducer evidence AND no
+    code-level argument (a plausible code-level walk-through of how the
+    primitive triggers is enough — full reproducer not required).
+
+Read the substance, not the hedging. Self-deprecating qualifiers in
+the writeup ("mostly robustness, but ...", "may not be exploitable",
+"the impact is limited") are NOT by themselves a reject signal —
+judge the bug, not the writeup tone. Reject only if the report's
+substantive content (not its hedging) makes it clear the issue is
+purely correctness / data-integrity / robustness with no security
+boundary crossing.
+
+If you accept, also CLASSIFY the issue. Pick the most specific freeform
+label you can in the form "<top-level>:<sub-label>" — e.g.
+"memory-safety:bounds", "memory-safety:lifetime", "auth:bypass",
+"auth:session-fixation", "injection:sql", "injection:command",
+"info-disclosure:pii", "crypto:weak-hash", "crypto:reused-iv",
+"race:toctou", "boundary:csp-bypass", "boundary:sandbox-escape",
+"deserialization:unsafe", "config:permissive-default",
+"logic:business-rule", "side-channel:timing", "dos:algorithmic", etc.
+You may invent a new label if none of the above fits — pick whatever
+best describes the actual issue. Do NOT force-fit into "memory-safety"
+or any other class just because it appears more often.
+
+Also pick a coarse severity hint: one of info, low, medium, high,
+critical. This is advisory only.
+
+Finally, emit a canonical dedup_key that names the ROOT CAUSE CONCEPT
+of this finding, NOT the surface site. Two reports about the same root
+cause (reached through different files/functions/callers) must produce
+the SAME dedup_key. Format: 2–6 lowercase tokens joined by hyphens,
+total 4–60 characters. Letters, digits, hyphens, underscores only.
+Examples: code_start-unbounded, tls13-skip-verify, path-traversal-archive-entry,
+ipv4-trailing-garbage, ecb-mode-default, toctou-permission-openfile.
+
+{{ known_keys_block }}If your finding matches the root cause of an existing
+key in the list above, REUSE that exact key. Otherwise invent a new one.
+
+Output a single JSON object (no prose, no fences) with keys:
+  accept     boolean   true if there is concrete security substance
+  reason     string    <= 140 chars, plain-English why
+  class      string    freeform "top:sub" label; empty string if accept=false
+  severity   string    one of: info, low, medium, high, critical;
+                       empty string if accept=false
+  dedup_key  string    canonical root-cause key (see above); empty if
+                       accept=false
+
+Description (first 8 KB):
+---
+{{ body }}
+---

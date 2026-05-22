@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# bin/coverage-summary — Aggregate edge-novelty data into a subsystem
+# coverage report.
+#
+# Walks the per-agent edge journals under
+#   <results_root>/coverage/edges-agent-*.journal
+# and emits a sortable summary keyed by subsystem (top-N components of
+# each edge's file path).
+#
+# This is the read-side of lib/edges.sh. The harness (bin/audit) consults
+# this output to route agents toward subsystems with the most untouched
+# code; agents themselves can read it to plan inputs that exercise
+# unreached branches.
+#
+# Usage:
+#   bin/coverage-summary [--slug SLUG] [--depth N] [--min-edges M]
+#                        [--format md|tsv|json] [--out PATH]
+#
+# Options:
+#   --slug SLUG        Target slug (default: $TARGET_SLUG env). Required
+#                      unless RESULTS_DIR is set directly.
+#   --depth N          Path-component depth used to group edges into
+#                      subsystems. Default: 2.
+#   --min-edges M      Drop subsystems with fewer than M edges. Default: 1.
+#   --format FMT       md (default) | tsv | json.
+#   --out PATH         Write to PATH instead of stdout.
+#   --results-dir DIR  Override results root (skips the slug lookup).
+#   -h, --help         Show this help.
+#
+# Exit codes:
+#   0  output produced
+#   1  no journals found / nothing to summarize
+#   2  argument / setup error
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck disable=SC1091
+source "$REPO_ROOT/lib/edges.sh"
+
+SLUG="${TARGET_SLUG:-}"
+DEPTH=2
+MIN_EDGES=1
+FORMAT="md"
+OUT_PATH=""
+RESULTS_DIR_OVERRIDE=""
+
+usage() { sed -n '2,32p' "$0"; }
+
+# Guard against a value-bearing flag arriving with no value (e.g.
+# `bin/coverage-summary --slug` at the end of the line). Under `set -u`
+# a bare `$2` reference would abort with `unbound variable` and a stack
+# trace instead of the helpful usage error a caller expects.
+require_arg() {
+  if [ "$#" -lt 2 ]; then
+    echo "[coverage-summary] $1 requires a value" >&2
+    exit 2
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --slug)         require_arg "$@"; SLUG="$2";                 shift 2 ;;
+    --slug=*)       SLUG="${1#--slug=}";       shift ;;
+    --depth)        require_arg "$@"; DEPTH="$2";                shift 2 ;;
+    --depth=*)      DEPTH="${1#--depth=}";     shift ;;
+    --min-edges)    require_arg "$@"; MIN_EDGES="$2";            shift 2 ;;
+    --min-edges=*)  MIN_EDGES="${1#--min-edges=}"; shift ;;
+    --format)       require_arg "$@"; FORMAT="$2";               shift 2 ;;
+    --format=*)     FORMAT="${1#--format=}";   shift ;;
+    --out)          require_arg "$@"; OUT_PATH="$2";             shift 2 ;;
+    --out=*)        OUT_PATH="${1#--out=}";    shift ;;
+    --results-dir)  require_arg "$@"; RESULTS_DIR_OVERRIDE="$2"; shift 2 ;;
+    --results-dir=*) RESULTS_DIR_OVERRIDE="${1#--results-dir=}"; shift ;;
+    -h|--help)      usage; exit 0 ;;
+    *) echo "[coverage-summary] unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+case "$DEPTH" in ''|*[!0-9]*) echo "[coverage-summary] --depth must be a non-negative integer" >&2; exit 2 ;; esac
+case "$MIN_EDGES" in ''|*[!0-9]*) echo "[coverage-summary] --min-edges must be a non-negative integer" >&2; exit 2 ;; esac
+case "$FORMAT" in md|tsv|json) ;; *) echo "[coverage-summary] --format must be md, tsv, or json" >&2; exit 2 ;; esac
+
+if [ -n "$RESULTS_DIR_OVERRIDE" ]; then
+  export EDGES_RESULTS_DIR="$RESULTS_DIR_OVERRIDE"
+fi
+
+# Resolve where the journals live and bail early if there are none.
+ROOT=$(edges_root "$SLUG" 2>/dev/null) || {
+  echo "[coverage-summary] could not resolve coverage root (need --slug or --results-dir)" >&2
+  exit 2
+}
+if ! find "$ROOT" -maxdepth 1 -type f -name 'edges-agent-*.journal' 2>/dev/null \
+    | awk 'BEGIN { found = 0 } { found = 1 } END { exit(found ? 0 : 1) }'; then
+  echo "[coverage-summary] no edge journals under $ROOT — run bin/hits with --slug/--agent first" >&2
+  exit 1
+fi
+
+TOTAL=$(edges_master_union "$SLUG" | wc -l | tr -d ' ')
+TOTAL="${TOTAL:-0}"
+
+emit() {
+  if [ -n "$OUT_PATH" ]; then
+    mkdir -p "$(dirname "$OUT_PATH")" 2>/dev/null || true
+    cat > "$OUT_PATH"
+  else
+    cat
+  fi
+}
+
+case "$FORMAT" in
+  tsv)
+    {
+      printf 'subsystem\tedges\tshare_pct\n'
+      edges_summary_subsystem_counts "$SLUG" "$DEPTH" \
+        | awk -F'\t' -v total="$TOTAL" -v min="$MIN_EDGES" '
+            ($2 + 0) >= min {
+              pct = (total > 0 ? ($2 * 100.0 / total) : 0)
+              printf "%s\t%d\t%.2f\n", $1, $2, pct
+            }'
+    } | emit
+    ;;
+  json)
+    {
+      printf '{"slug":"%s","depth":%d,"total_edges":%d,"subsystems":[\n' \
+        "${SLUG:-}" "$DEPTH" "$TOTAL"
+      edges_summary_subsystem_counts "$SLUG" "$DEPTH" \
+        | awk -F'\t' -v total="$TOTAL" -v min="$MIN_EDGES" '
+            BEGIN { first = 1 }
+            ($2 + 0) >= min {
+              pct = (total > 0 ? ($2 * 100.0 / total) : 0)
+              gsub(/\\/, "\\\\", $1)
+              gsub(/"/, "\\\"", $1)
+              if (!first) printf ",\n"
+              first = 0
+              printf "  {\"subsystem\":\"%s\",\"edges\":%d,\"share_pct\":%.2f}", $1, $2, pct
+            }
+            END { printf "\n" }'
+      printf ']}\n'
+    } | emit
+    ;;
+  md|*)
+    {
+      echo "# Coverage Summary"
+      echo ""
+      [ -n "$SLUG" ] && echo "- **Target:** \`$SLUG\`"
+      echo "- **Total edges seen:** $TOTAL"
+      echo "- **Group depth:** $DEPTH path component(s)"
+      echo "- **Generated:** $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo ""
+      echo "| Subsystem | Edges | Share |"
+      echo "|-----------|------:|------:|"
+      edges_summary_subsystem_counts "$SLUG" "$DEPTH" \
+        | awk -F'\t' -v total="$TOTAL" -v min="$MIN_EDGES" '
+            ($2 + 0) >= min {
+              pct = (total > 0 ? ($2 * 100.0 / total) : 0)
+              printf "| `%s` | %d | %.2f%% |\n", $1, $2, pct
+            }'
+      echo ""
+      echo "_Generated by \`bin/coverage-summary\`._"
+    } | emit
+    ;;
+esac
+
+exit 0

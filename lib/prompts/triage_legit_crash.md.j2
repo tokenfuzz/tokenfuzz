@@ -1,0 +1,64 @@
+Decide whether this sanitizer crash is legitimate enough to belong in `{{ results_dir }}/crashes/`.
+
+Legitimate means ALL are true:
+1. Real memory-safety impact or explicit security-boundary violation.
+2. A normal untrusted input boundary drives it: file bytes, packet bytes,
+   web content, regex/pattern, media stream, archive, IPC/message bytes,
+   CLI/stdin, or equivalent product input.
+3. Trusted caller code behaves like real software: it obeys ownership,
+   lifetime, callback, allocator, threading, and cleanup contracts.
+4. When the crash depends on an API parameter, offset, size, index, callback
+   value, object lifetime, or call order, that value/sequence is exposed by
+   the real product boundary and not invented by the harness after parsing.
+   Parsed bytes can control data fields, but they do not automatically
+   control library API offsets or iterator positions. If the harness reads a
+   parsed field and then performs an unchecked out-of-range access such as
+   it[index], classify it as caller-contract misuse unless a real product path
+   legitimately performs the same operation on input-shaped data.
+
+Reject as not legitimate only when the harness creates the invalid state
+through behavior the LIBRARY's public docs explicitly prohibit, or by
+reaching into target-private surface. Concrete grounds for rejection:
+mutating target-owned struct fields directly, including/calling private
+or test-only internals not part of the public API, switching allocators
+after target allocations exist, returning callback values that the docs
+explicitly declare invalid (e.g. lengths larger than the supplied
+buffer when docs say "must be <= size"), passing input-derived values
+as out-of-contract offsets/sizes/indices where the public API documents
+the parameter's valid range, or destroying an owner before a dependent
+object in an order the docs explicitly require.
+
+DO NOT reject when the harness only used PUBLIC API calls in a sequence
+that the project's docs do not explicitly forbid. In particular:
+  - Calling another public API (cleanup, setopt, etc.) from inside a
+    public callback (lockfunc, write_callback, header_callback, ...) is
+    LEGITIMATE unless the callback's documentation explicitly prohibits
+    re-entry into the library. Re-entrancy / callback-ordering crashes
+    where the library fires a public callback before establishing its
+    own invariants (refcount, lifetime, init state) are library bugs:
+    the fix is library-side (increment-then-callback, or block re-entry
+    inside the library), so promote them.
+  - Cleanup-while-callback-active is misuse only when the docs say
+    "do not call cleanup from inside the callback." Silence on
+    re-entrancy means the library accepted the call sequence; if it
+    then UAFs, the library has the bug.
+  - "Caller contract" can only be cited as a reject reason when you
+    can name the document (man page, header doc-comment, RFC, options
+    page) that states the prohibition. Inferred / conventional /
+    unspecified contracts are NOT grounds for rejection.
+
+When in doubt, lean LEGITIMATE — false-rejects permanently bury real
+library defects.
+
+Browser/web gate required: {{ require_web_gate }}
+If browser/web gate is 1, the normal input boundary must be plausible
+web/content reachability, not shell/xpcshell/privileged-only code.
+
+Output one JSON object only:
+  legitimate  boolean
+  reason      string <= 120 chars
+
+Evidence:
+---
+{{ evidence }}
+---

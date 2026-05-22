@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+# scratch-search — search across all audit artifacts under $RESULTS_DIR.
+#
+# Answers questions like:
+#   "Have I (or a peer agent in this session) already written a testcase
+#    for this symbol?"
+#   "Does the name I'm about to use already collide with a scratch file,
+#    corpus entry, or crash report?"
+#   "Which scratch dirs reference this HYPOTHESIS-ID / HARNESS source?"
+#
+# This is the missing partner to `bin/find-seed` (searches upstream tree
+# for inputs) and `bin/scratch-status` (counts what's in scratch). Without
+# it, agents stuff scratch+source into one `rg-safe` call and the output
+# blows past the cap with mixed signals. This tool keeps each section
+# labeled and capped independently. Default output is a path inventory; use
+# --lines when you need the old match-body output for a narrow section.
+#
+# Usage:
+#   bin/scratch-search [options] PATTERN
+#
+# Options:
+#   --section A,B,...   restrict to named sections (default: all)
+#   --lines             show matching file:line:body output (old behavior)
+#   --files-only        list paths only (default; rg -l semantics)
+#   --include-asan      include *.asan.txt sidecars (off by default)
+#   --include-logs      include *.log / *.log.raw (off by default)
+#   --cap N             per-section line cap (default 40)
+#   --cap-bytes N       per-section byte cap (default 8192)
+#   -i / -w / -F / -e / --glob   pass-through to rg
+#
+# Sections searched by default:
+#   scratch-*                  per-agent scratch dirs
+#   corpus                     promoted seed corpus
+#   crashes / crashes-rejected crash report dirs
+#   findings / findings-rejected  finding report dirs
+#
+# Exit code:
+#   0 — at least one section matched
+#   1 — no matches anywhere
+#   2 — usage / config error
+
+set -uo pipefail
+
+PATTERN=""
+SECTION_FILTER=""
+FILES_ONLY=1
+INCLUDE_ASAN=0
+INCLUDE_LOGS=0
+CAP_LINES=40
+CAP_BYTES=8192
+RG_EXTRA_ARGS=()
+
+usage() { sed -n '2,40p' "$0"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --section) [ $# -ge 2 ] || { echo "[scratch-search] --section needs a value" >&2; exit 2; }; SECTION_FILTER="$2"; shift 2 ;;
+    --section=*) SECTION_FILTER="${1#--section=}"; shift ;;
+    --lines) FILES_ONLY=0; shift ;;
+    --files-only|-l) FILES_ONLY=1; shift ;;
+    --include-asan) INCLUDE_ASAN=1; shift ;;
+    --include-logs) INCLUDE_LOGS=1; shift ;;
+    --cap) [ $# -ge 2 ] || { echo "[scratch-search] --cap needs a value" >&2; exit 2; }; CAP_LINES="$2"; shift 2 ;;
+    --cap=*) CAP_LINES="${1#--cap=}"; shift ;;
+    --cap-bytes) [ $# -ge 2 ] || { echo "[scratch-search] --cap-bytes needs a value" >&2; exit 2; }; CAP_BYTES="$2"; shift 2 ;;
+    --cap-bytes=*) CAP_BYTES="${1#--cap-bytes=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    # rg pass-through flags we recognise — keep their value form intact.
+    -i|--ignore-case|-w|--word-regexp|-F|--fixed-strings|--smart-case|-S)
+      RG_EXTRA_ARGS+=("$1"); shift ;;
+    -e|--regexp|--glob|-g)
+      [ $# -ge 2 ] || { echo "[scratch-search] $1 needs a value" >&2; exit 2; }
+      RG_EXTRA_ARGS+=("$1" "$2"); shift 2 ;;
+    --) shift; PATTERN="$1"; shift; while [ $# -gt 0 ]; do RG_EXTRA_ARGS+=("$1"); shift; done ;;
+    -*) echo "[scratch-search] unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *)
+      if [ -z "$PATTERN" ]; then PATTERN="$1"; else RG_EXTRA_ARGS+=("$1"); fi
+      shift ;;
+  esac
+done
+
+if [ -z "$PATTERN" ]; then
+  echo "[scratch-search] PATTERN is required" >&2
+  usage >&2
+  exit 2
+fi
+case "$CAP_LINES$CAP_BYTES" in
+  *[!0-9]*) echo "[scratch-search] --cap / --cap-bytes must be numeric" >&2; exit 2 ;;
+esac
+
+if [ -z "${RESULTS_DIR:-}" ]; then
+  echo "[scratch-search] RESULTS_DIR not set (run inside an audit session, or export it)" >&2
+  exit 2
+fi
+if [ ! -d "$RESULTS_DIR" ]; then
+  echo "[scratch-search] RESULTS_DIR not a directory: $RESULTS_DIR" >&2
+  exit 2
+fi
+if ! command -v rg >/dev/null 2>&1; then
+  echo "[scratch-search] ripgrep (rg) is required" >&2
+  exit 2
+fi
+
+# ── Resolve sections ──────────────────────────────────────────────────
+# Section = a labeled subset of $RESULTS_DIR to search. Order is fixed so
+# repeat calls produce stable output for an agent's mental cache.
+
+declare_section_paths() {
+  # Emits "<label>\t<path>" lines for every existing section dir.
+  local d
+  for d in "$RESULTS_DIR"/scratch-*; do
+    [ -d "$d" ] || continue
+    printf '%s\t%s\n' "${d##*/}" "$d"
+  done
+  for label in corpus crashes crashes-rejected findings findings-rejected; do
+    [ -d "$RESULTS_DIR/$label" ] && printf '%s\t%s\n' "$label" "$RESULTS_DIR/$label"
+  done
+}
+
+ALL_SECTIONS="$(declare_section_paths)"
+
+# Filter by --section if provided. Filter values are matched against labels.
+if [ -n "$SECTION_FILTER" ]; then
+  IFS=',' read -ra _filt <<< "$SECTION_FILTER"
+  filtered=""
+  while IFS=$'\t' read -r label path; do
+    [ -z "$label" ] && continue
+    for f in "${_filt[@]}"; do
+      if [ "$label" = "$f" ]; then
+        filtered+="${label}"$'\t'"${path}"$'\n'
+        break
+      fi
+    done
+  done <<< "$ALL_SECTIONS"
+  ALL_SECTIONS="$filtered"
+fi
+
+if [ -z "$ALL_SECTIONS" ]; then
+  echo "[scratch-search] no sections to search (RESULTS_DIR=$RESULTS_DIR, filter='${SECTION_FILTER:-none}')" >&2
+  exit 1
+fi
+
+# ── Default exclusions ────────────────────────────────────────────────
+# Sanitizer output sidecars, logs, build artifacts, harness compile cache.
+# Override individually via --include-asan / --include-logs.
+
+EXCLUDE_GLOBS=()
+[ "$INCLUDE_ASAN" = "0" ] && EXCLUDE_GLOBS+=(--glob '!**/*.asan.txt' --glob '!**/*.ubsan.txt' --glob '!**/asan_output*.txt' --glob '!**/asan-output*.txt')
+[ "$INCLUDE_LOGS" = "0" ] && EXCLUDE_GLOBS+=(--glob '!**/*.log' --glob '!**/*.log.raw')
+EXCLUDE_GLOBS+=(--glob '!**/.harness-cache/**' --glob '!**/*.o' --glob '!**/*.a' --glob '!**/*.so' --glob '!**/*.dylib' --glob '!**/*.dSYM/**')
+
+# ── Per-section search ────────────────────────────────────────────────
+
+clip_bytes() {
+  # Clip stdin to $1 bytes, preserving the last newline boundary so a
+  # partial line isn't emitted. Returns 0 if a clip happened, 1 otherwise.
+  local cap="$1" tmp
+  tmp=$(mktemp "${TMPDIR:-/tmp}/scratch-search-XXXXXX")
+  cat > "$tmp"
+  local bytes
+  bytes=$(wc -c < "$tmp" | tr -d ' ')
+  if [ "${bytes:-0}" -le "$cap" ]; then
+    cat "$tmp"; rm -f "$tmp"; return 1
+  fi
+  python3 - "$tmp" "$cap" <<'PY'
+import sys
+path, cap = sys.argv[1], int(sys.argv[2])
+with open(path, "rb") as f:
+    data = f.read(cap)
+i = data.rfind(b"\n")
+if i >= 0:
+    data = data[:i + 1]
+sys.stdout.buffer.write(data)
+PY
+  rm -f "$tmp"
+  return 0
+}
+
+emit_section() {
+  local label="$1" path="$2"
+
+  # rg modes: -l for default path inventory, otherwise grep-style file:line:body.
+  local rg_args=()
+  if [ "$FILES_ONLY" = "1" ]; then
+    rg_args=(--files-with-matches --no-heading --color never)
+  else
+    rg_args=(--no-heading --line-number --color never --max-columns 200 --max-columns-preview)
+  fi
+
+  # Capture the raw rg output to a tempfile so we can count matches and
+  # cap output without losing the actual hits.
+  local tmp
+  tmp=$(mktemp "${TMPDIR:-/tmp}/scratch-search-sec-XXXXXX")
+  CAP_LINES=0 CAP_BYTES=0 rg "${rg_args[@]}" "${EXCLUDE_GLOBS[@]}" \
+       ${RG_EXTRA_ARGS[@]+"${RG_EXTRA_ARGS[@]}"} \
+       -- "$PATTERN" "$path" > "$tmp" 2>/dev/null
+  local rg_rc=$?
+
+  local total_lines total_files
+  total_lines=$(wc -l < "$tmp" | tr -d ' ')
+  total_lines=${total_lines:-0}
+  if [ "$FILES_ONLY" = "1" ]; then
+    total_files="$total_lines"
+  else
+    total_files=$(awk -F: 'NF{print $1}' "$tmp" | sort -u | wc -l | tr -d ' ')
+    total_files=${total_files:-0}
+  fi
+
+  if [ "$rg_rc" -eq 2 ] || [ "$total_lines" -eq 0 ]; then
+    printf '[%s] no matches\n' "$label"
+    rm -f "$tmp"
+    return 1
+  fi
+
+  local files_word="files"
+  [ "$total_files" -eq 1 ] && files_word="file"
+  local matches_word="matches"
+  [ "$total_lines" -eq 1 ] && matches_word="match"
+  if [ "$FILES_ONLY" = "1" ]; then
+    printf '[%s] %d %s\n' "$label" "$total_files" "$files_word"
+  else
+    printf '[%s] %d %s in %d %s\n' "$label" "$total_lines" "$matches_word" "$total_files" "$files_word"
+  fi
+
+  # Apply line cap then byte cap.
+  local line_capped=0 byte_capped=0
+  if [ "$CAP_LINES" -gt 0 ] && [ "$total_lines" -gt "$CAP_LINES" ]; then
+    line_capped=1
+    head -n "$CAP_LINES" "$tmp" \
+      | awk -v rd="$RESULTS_DIR/" '{ sub(rd, "", $0); print "    " $0 }' \
+      | clip_bytes "$CAP_BYTES" && byte_capped=1 || true
+  else
+    awk -v rd="$RESULTS_DIR/" '{ sub(rd, "", $0); print "    " $0 }' "$tmp" \
+      | clip_bytes "$CAP_BYTES" && byte_capped=1 || true
+  fi
+
+  if [ "$line_capped" -eq 1 ] || [ "$byte_capped" -eq 1 ]; then
+    if [ "$FILES_ONLY" = "1" ]; then
+      printf '    [%d more files in this section. Re-run with narrower PATTERN or --lines --section %s for match bodies.]\n' \
+        "$((total_lines - CAP_LINES > 0 ? total_lines - CAP_LINES : 0))" "$label"
+    else
+      printf '    [%d more matches in this section. Re-run with narrower PATTERN, higher --cap, or default files-only mode to widen path inventory.]\n' \
+        "$((total_lines - CAP_LINES > 0 ? total_lines - CAP_LINES : 0))"
+    fi
+  elif [ "$FILES_ONLY" = "1" ]; then
+    printf '    [paths only. Re-run with --lines --section %s for match bodies.]\n' "$label"
+  fi
+
+  rm -f "$tmp"
+  return 0
+}
+
+# ── Drive the per-section loop ────────────────────────────────────────
+
+any_match=0
+while IFS=$'\t' read -r label path; do
+  [ -z "$label" ] && continue
+  if emit_section "$label" "$path"; then
+    any_match=1
+  fi
+done <<< "$ALL_SECTIONS"
+
+if [ "$any_match" -eq 0 ]; then
+  exit 1
+fi
+exit 0

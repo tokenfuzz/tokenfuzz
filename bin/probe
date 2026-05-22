@@ -1,0 +1,1242 @@
+#!/usr/bin/env bash
+# probe — single entry point for coverage-gated sanitizer/differential runs.
+#
+# ── Why this is bash, not Python ─────────────────────────────────────
+# probe consumes eight bash arrays exported by lib/target_config.sh
+# (TARGET_SANITIZERS_ENABLED, TARGET_INCLUDES, TARGET_DEFINES,
+# TARGET_LINK_LIBS, TARGET_RUNNER_ARGS, TARGET_RUNNER_CRASH_PATTERNS,
+# GENERIC_PREARGS, INTERPRETER_PREARGS) plus the shared crash-marker set
+# from lib/verdict.sh,
+# and dispatches to 26 distinct external subprocesses (5 language
+# toolchains × N interpreters, the run-asan/ubsan/msan/tsan wrappers, jq,
+# stat, file, base64, shasum, etc.) across 9 case-statement modes. The
+# bash arrays are a bash-language construct: porting to Python forces
+# either (a) reimplementing target_config.sh's TOML→array projection in
+# Python — duplicating logic that lives correctly in lib/target_config.py
+# already — or (b) subprocessing back to bash for every array unpack on a
+# hot per-testcase path. The expensive parts that ARE in Python
+# (lib/languages.py registry, lib/target_config.py TOML parsing) are
+# imported indirectly via the bash glue. probe stays in bash; the
+# compute lives in Python.
+#
+# Usage:
+#   bin/probe [--confirm] [--mode auto|browser|js|generic|js-diff] \
+#             [--want REGEX] testcase [-- harness-args...]
+#
+# Discovery (walks up from testcase path, then CWD):
+#   output/<slug>/<backend>/results/.session-env
+#                                  — RESULTS_DIR, TARGET_ROOT, TARGET_REV
+#   output/<slug>/.session-env     — legacy fallback for manual calls
+#   output/<slug>/target.toml      — sanitizer bins/libs, includes, link_libs
+#
+# Inferred from testcase:
+#   // TARGET:        — defect site, sets TARGET, derives WANT
+#   // HYPOTHESIS-ID: — links runs to state hypothesis row
+#   // CARD-ID:       — links runs to work card
+#   // MODE:          — overrides --mode
+#   // HARNESS:       — relative path to a harness source file. The
+#                       toolchain is selected from lib/languages.py's
+#                       registry (`python3 lib/languages.py list` to
+#                       inspect). Compiled extensions are built once
+#                       and cached (clang/clang++/rustc/go/swiftc/
+#                       kotlinc); interpreted extensions run directly
+#                       through their interpreter (python3/node/ts-node/
+#                       ruby/php/perl/Rscript/java/kotlinc-script/bash).
+#                       C/C++ harnesses use the selected sanitizer's
+#                       compile flag and library: asan_lib for ASan, or
+#                       optional [sanitizer].ubsan_lib/msan_lib/tsan_lib.
+#                       Includes, defines, and link_libs come from target.toml.
+#                       Interpreted-language harnesses are invoked as
+#                       <interpreter> <harness-source> <testcase> <trailing args>.
+#
+# Agent number is inferred from the scratch-N/ directory the testcase lives in.
+#
+# PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner overrides the default
+# sanitizer selection. Without an override, probe uses the first sanitizer
+# listed in target.toml; findings-only targets use the configured runner.
+#
+# --confirm: replaces ASAN_RUNS=5 (5 runs to prove reproducibility).
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../lib/platform.sh
+source "$SCRIPT_ROOT/lib/platform.sh"
+# shellcheck source=../lib/verdict.sh
+source "$SCRIPT_ROOT/lib/verdict.sh"
+# shellcheck source=../lib/target_config.sh
+source "$SCRIPT_ROOT/lib/target_config.sh"
+
+MODE="auto"
+WANT_ARG=""
+CONFIRM=0
+DRY_RUN=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/probe [--confirm] [--dry-run] [--mode auto|browser|js|generic|js-diff] \
+            [--want REGEX] testcase [-- harness-args...]
+
+Runs one testcase through the active audit target. Browser/JS probes use the
+coverage gate when supported, then run the selected sanitizer. Generic probes
+run the selected sanitizer or the configured [runner] for findings-only targets.
+
+Common commands:
+  bin/probe scratch-1/testcase.html
+  bin/probe --confirm scratch-1/testcase.html
+  bin/probe --dry-run scratch-1/testcase.dat
+  PROBE_SANITIZER=ubsan bin/probe scratch-1/testcase.dat
+  bin/probe scratch-1/testcase.dat -- extra harness args
+
+Required testcase headers:
+  TARGET: <file[:function[:line]]>
+  HYPOTHESIS-ID: H<n>
+  CATEGORY: bounds|lifetime|type|size|uninit|state
+
+Optional testcase headers:
+  MODE: auto|browser|js|generic|js-diff  Override mode inference.
+  HARNESS: harness.c                     Build or run a sibling API harness.
+  CARD-ID: <id>                          Link the run to a work card.
+
+Options:
+  --confirm      Run 5 times instead of 1 to confirm reproducibility.
+  --dry-run      Print the resolved mode, sanitizer, output path, and command
+                 without executing the testcase.
+  --mode MODE    Force mode; otherwise MODE header and file extension decide.
+  --want REGEX   Expected stack/function regex. Use --want auto, or omit it,
+                 to derive from TARGET.
+
+Discovery:
+  probe walks up from the testcase path to find:
+    output/<slug>/<backend>/results/.session-env
+                                    RESULTS_DIR, TARGET_ROOT, TARGET_REV
+    output/<slug>/.session-env     legacy fallback for manual calls
+    output/<slug>/target.toml      sanitizer, runner, harness build settings
+
+Sanitizer selection:
+  Default: first [sanitizer].enabled entry in target.toml, or runner when
+  enabled = [].
+  Override one run with:
+    PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner
+
+Notes:
+  The testcase normally must live under RESULTS_DIR/scratch-N/. For C/C++ API
+  probes, put the harness source next to the testcase and reference it with
+  HARNESS:; probe builds and caches the executable.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --mode)    [ $# -ge 2 ] || { echo "[probe] --mode needs a value" >&2; exit 2; }; MODE="$2"; shift 2 ;;
+    --mode=*)  MODE="${1#--mode=}"; shift ;;
+    --confirm) CONFIRM=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --want)    [ $# -ge 2 ] || { echo "[probe] --want needs a value" >&2; exit 2; }; WANT_ARG="$2"; shift 2 ;;
+    --want=*)  WANT_ARG="${1#--want=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --)        shift; break ;;
+    -*)        echo "[probe] unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *)         break ;;
+  esac
+done
+
+# Back-compat: --want auto is a no-op (default behavior derives from TARGET header).
+[ "$WANT_ARG" = "auto" ] && WANT_ARG=""
+
+TESTCASE="${1:-}"
+[ -n "$TESTCASE" ] || { usage >&2; exit 2; }
+shift || true
+
+_probe_realpath() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+_probe_path_under() {
+  python3 - "$1" "$2" <<'PY'
+import os
+import sys
+root = os.path.realpath(sys.argv[1])
+path = os.path.realpath(sys.argv[2])
+try:
+    ok = os.path.commonpath([root, path]) == root
+except ValueError:
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+}
+
+# Agents commonly type `bin/probe scratch-N/tc` from the repository root.
+# Treat that as shorthand for the active audit scratch dir when RESULTS_DIR is
+# already in the session environment, so root-level scratch-N dirs are not used.
+case "$TESTCASE" in
+  ./*) _probe_rel="${TESTCASE#./}" ;;
+  *) _probe_rel="$TESTCASE" ;;
+esac
+case "$_probe_rel" in
+  scratch-[0-9]*/*)
+    if [ -n "${RESULTS_DIR:-}" ]; then
+      TESTCASE="${RESULTS_DIR%/}/$_probe_rel"
+    fi
+    ;;
+esac
+unset _probe_rel
+
+[ -f "$TESTCASE" ] || { echo "[probe] testcase not found: $TESTCASE" >&2; exit 2; }
+
+# Discover session + target config from the testcase path first. This matches
+# the documented probe contract and avoids stale audit env causing the wrong
+# runner / sanitizer settings to be used for an on-disk testcase. Environment
+# fallback is retained for legacy/manual calls where the testcase is outside
+# output/<slug>/.
+if ! target_load "$TESTCASE" 2>/dev/null; then
+  if [ -n "${RESULTS_DIR:-}" ] && [ -n "${TARGET_ROOT:-}" ]; then
+    _target_toml="$(target_toml_from_results "$RESULTS_DIR" 2>/dev/null || true)"
+    [ -f "$_target_toml" ] && target_load_toml "$_target_toml" 2>/dev/null || true
+  else
+    echo "[probe] could not locate output/<slug>/<backend>/results/.session-env above $TESTCASE" >&2
+    echo "[probe] run \`bin/audit --target <slug>\` first, or run probe inside an audit session." >&2
+    exit 2
+  fi
+fi
+unset _target_toml
+
+# Re-export so child wrappers (run-asan, run-asan-multi) can read them.
+export RESULTS_DIR TARGET_ROOT TARGET_SLUG TARGET_REV LOGDIR
+
+TESTCASE="$(_probe_realpath "$TESTCASE")"
+RESULTS_REAL="$(_probe_realpath "$RESULTS_DIR")"
+if [ "${PROBE_ALLOW_EXTERNAL_TESTCASE:-0}" != "1" ]; then
+  if ! _probe_path_under "$RESULTS_REAL" "$TESTCASE"; then
+    echo "[probe] testcase must live under RESULTS_DIR/scratch-N: $TESTCASE" >&2
+    echo "[probe] active RESULTS_DIR: $RESULTS_REAL" >&2
+    echo "[probe] set PROBE_ALLOW_EXTERNAL_TESTCASE=1 only for trusted local experiments" >&2
+    exit 2
+  fi
+  case "$TESTCASE" in
+    "$RESULTS_REAL"/scratch-[0-9]*/*) ;;
+    *)
+      echo "[probe] testcase must live under RESULTS_DIR/scratch-N: $TESTCASE" >&2
+      echo "[probe] active RESULTS_DIR: $RESULTS_REAL" >&2
+      echo "[probe] set PROBE_ALLOW_EXTERNAL_TESTCASE=1 only for trusted local experiments" >&2
+      exit 2 ;;
+  esac
+fi
+unset RESULTS_REAL
+
+# Derive agent number from scratch-N path or fall back to 1.
+AGENT_NUM=""
+case "$TESTCASE" in
+  */scratch-*/*)
+    _frag="${TESTCASE#*/scratch-}"
+    AGENT_NUM="${_frag%%/*}"
+    ;;
+esac
+[ -n "$AGENT_NUM" ] || AGENT_NUM=1
+export AUDIT_AGENT_NUM="$AGENT_NUM"
+
+# Derived per-agent paths (replaces TRIED_INPUTS_LOG / HITS_LOG_PATH env).
+export TRIED_INPUTS_LOG="$RESULTS_DIR/tried-inputs-${AGENT_NUM}.log"
+export HITS_LOG_PATH="$RESULTS_DIR/hits-${AGENT_NUM}.log"
+
+# Read the testcase header for TARGET / HYPOTHESIS-ID / CARD-ID / MODE / HARNESS.
+HEADER="$(head -n 16 "$TESTCASE" 2>/dev/null)"
+TARGET_LINE="$(printf '%s\n' "$HEADER" | sed -nE 's/^[^A-Za-z]*TARGET:[[:space:]]*(.+)$/\1/p' | head -1 | sed -E 's/[[:space:]]*(-->|\*\/)[[:space:]]*$//')"
+HYP_LINE="$(printf '%s\n' "$HEADER" | grep -oE 'HYPOTHESIS-ID:[[:space:]]*[^[:space:]>*]+' | head -1 | awk '{print $NF}')"
+CARD_LINE="$(printf '%s\n' "$HEADER" | grep -oE 'CARD-ID:[[:space:]]*[^[:space:]>*]+' | head -1 | awk '{print $NF}')"
+HEADER_MODE="$(printf '%s\n' "$HEADER" | sed -nE 's/^[^A-Za-z]*MODE:[[:space:]]*([A-Za-z0-9_-]+).*$/\1/p' | head -1)"
+HARNESS_LINE="$(printf '%s\n' "$HEADER" | sed -nE 's/^[^A-Za-z]*HARNESS:[[:space:]]*([^[:space:]>*]+).*$/\1/p' | head -1)"
+
+case "$MODE" in
+  auto|browser|js|generic|js-diff) ;;
+  *) echo "[probe] invalid mode: $MODE" >&2; exit 2 ;;
+esac
+
+if [ "$MODE" = "auto" ] && [ -n "$HEADER_MODE" ]; then
+  MODE="$HEADER_MODE"
+fi
+
+if [ "$MODE" = "auto" ]; then
+  case "$TESTCASE" in
+    *.html|*.htm|*.xhtml|*.svg) MODE="browser" ;;
+    *.js|*.mjs)
+      if [ "${TARGET_IS_BROWSER:-0}" = "0" ]; then MODE="generic"; else MODE="js"; fi ;;
+    *) MODE="generic" ;;
+  esac
+fi
+
+base="${TESTCASE%.*}"
+ASAN_OUTPUT_FILE="${base}.asan.txt"
+export ASAN_OUTPUT_FILE
+[ -n "$HYP_LINE" ]    && export HYPOTHESIS_ID="$HYP_LINE"
+[ -n "$TARGET_LINE" ] && export TARGET="$TARGET_LINE"
+
+# Some agents still write audit metadata as bare leading lines in script-like
+# testcases:
+#   TARGET: ...
+#   HYPOTHESIS-ID: ...
+# Those lines are useful to probe but invalid Python/JS/TS syntax. Execute a
+# hidden copy with only those bare audit lines removed, while preserving the
+# original testcase for metadata, output naming, state history, and reports.
+EXEC_TESTCASE="$TESTCASE"
+_probe_prepare_exec_testcase() {
+  local src="$1" ext bare_hash exec_dir exec_path
+  ext="${src##*.}"
+  case "$ext" in
+    js|mjs|cjs|ts|tsx|jsx|py|rb|php|pl|pm|r|R|sh|bash|zsh|kts) ;;
+    *) return 0 ;;
+  esac
+  if ! head -n 16 "$src" 2>/dev/null \
+      | grep -Eq '^[[:space:]]*(TARGET|HYPOTHESIS-ID|CARD-ID|CATEGORY|MODE|HARNESS|PROPERTY):[[:space:]]*'; then
+    return 0
+  fi
+  bare_hash="$(audit_sha1 "$src" 2>/dev/null | awk '{print $1}')"
+  [ -n "$bare_hash" ] || bare_hash="$(date +%s)"
+  exec_dir="$RESULTS_DIR/scratch-${AGENT_NUM}/.probe-exec"
+  mkdir -p "$exec_dir"
+  exec_path="$exec_dir/$(basename "${src%.*}").${bare_hash}.exec.${ext}"
+  awk '
+    NR == 1 && /^#!/ { print; next }
+    /^[[:space:]]*(TARGET|HYPOTHESIS-ID|CARD-ID|CATEGORY|MODE|HARNESS|PROPERTY):[[:space:]]*/ { next }
+    { print }
+  ' "$src" > "$exec_path"
+  chmod +r "$exec_path" 2>/dev/null || true
+  [ -x "$src" ] && chmod +x "$exec_path" 2>/dev/null || true
+  EXEC_TESTCASE="$exec_path"
+}
+_probe_prepare_exec_testcase "$TESTCASE"
+if [ "$EXEC_TESTCASE" != "$TESTCASE" ]; then
+  export ASAN_RECORDED_TESTCASE="$TESTCASE"
+fi
+
+_probe_cap_asan_output_file() {
+  local f="$1"
+  [ -s "$f" ] || return 0
+  local max_bytes="${PROBE_ASAN_OUTPUT_MAX_BYTES:-8388608}"
+  local head_bytes="${PROBE_ASAN_OUTPUT_HEAD_BYTES:-262144}"
+  local tail_bytes="${PROBE_ASAN_OUTPUT_TAIL_BYTES:-262144}"
+  case "$max_bytes:$head_bytes:$tail_bytes" in
+    *[!0-9:]*|:*|*:) return 0 ;;
+  esac
+  [ "$max_bytes" -gt 0 ] || return 0
+  local size
+  size="$(audit_stat_size "$f" 2>/dev/null || true)"
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$size" -gt "$max_bytes" ] || return 0
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/probe-asan-cap-XXXXXX")" || return 0
+  {
+    printf '[probe] ASAN_OUTPUT_FILE truncated before verdict classification: original_size_bytes=%s max_bytes=%s\n' "$size" "$max_bytes"
+    printf '[probe] showing first %s byte(s) and last %s byte(s); rerun with PROBE_ASAN_OUTPUT_MAX_BYTES=0 to preserve full output.\n' "$head_bytes" "$tail_bytes"
+    head -c "$head_bytes" "$f" 2>/dev/null || true
+    printf '\n[probe] ... middle omitted from oversized ASan output ...\n'
+    tail -c "$tail_bytes" "$f" 2>/dev/null || true
+  } > "$tmp" && cat "$tmp" > "$f"
+  rm -f "$tmp"
+}
+
+derive_want_from_target() {
+  local target="$1"
+  [ -n "$target" ] || return 1
+  case "$target" in
+    *:*)
+      local without_line func
+      without_line="${target%:*}"
+      func="${without_line#*:}"
+      if [ "$func" != "$without_line" ] && [ -n "$func" ]; then
+        printf '%s' "$func"
+        return 0
+      fi
+      ;;
+  esac
+  local basefile
+  basefile="${target##*/}"
+  basefile="${basefile%%:*}"
+  [ -n "$basefile" ] || return 1
+  printf '%s' "$basefile"
+}
+
+escape_regex_literal() { sed 's/[][\\.^$*+?{}()|]/\\&/g'; }
+
+if [ -z "$WANT_ARG" ]; then
+  WANT_ARG="$(derive_want_from_target "$TARGET_LINE" 2>/dev/null | escape_regex_literal || true)"
+fi
+[ -n "$WANT_ARG" ] && export WANT="$WANT_ARG"
+
+# Card derivation from state if header didn't supply one.
+if [ -z "$CARD_LINE" ] && [ -n "$HYP_LINE" ] && command -v jq >/dev/null 2>&1 \
+   && [ -f "$RESULTS_DIR/state/hypotheses.jsonl" ]; then
+  CARD_LINE=$(jq -r --arg id "$HYP_LINE" 'select(.id == $id) | .card_id // empty' \
+    "$RESULTS_DIR/state/hypotheses.jsonl" 2>/dev/null | tail -1)
+fi
+
+# Confirmation = 5 runs (timing-dependent UAFs need this).
+[ "$CONFIRM" -eq 1 ] && export ASAN_RUNS=5 || export ASAN_RUNS="${ASAN_RUNS:-1}"
+
+_probe_first_enabled_sanitizer() {
+  if [ "${TARGET_SANITIZERS_EXPLICITLY_DISABLED:-0}" = "1" ]; then
+    printf '%s\n' "runner"
+    return 0
+  fi
+  if [ -n "${TARGET_SANITIZERS_ENABLED+set}" ] && [ "${#TARGET_SANITIZERS_ENABLED[@]}" -gt 0 ]; then
+    printf '%s\n' "${TARGET_SANITIZERS_ENABLED[0]}"
+    return 0
+  fi
+  printf '%s\n' "asan"
+}
+
+_probe_sanitizer_is_enabled() {
+  local name="$1" san
+  if [ -n "${TARGET_SANITIZERS_ENABLED+set}" ]; then
+    for san in "${TARGET_SANITIZERS_ENABLED[@]}"; do
+      [ "$san" = "$name" ] && return 0
+    done
+    return 1
+  fi
+  [ "$name" = "asan" ]
+}
+
+_probe_resolve_executable() {
+  local raw="$1"
+  [ -n "$raw" ] || return 1
+  if command -v "$raw" >/dev/null 2>&1; then
+    command -v "$raw"
+  elif [ -x "$raw" ]; then
+    printf '%s\n' "$raw"
+  else
+    target_resolve_path "$raw"
+  fi
+}
+
+PROBE_SANITIZER_SELECTED="${PROBE_SANITIZER:-}"
+if [ -n "$PROBE_SANITIZER_SELECTED" ]; then
+  PROBE_SANITIZER_SELECTED="$(printf '%s' "$PROBE_SANITIZER_SELECTED" | tr '[:upper:]' '[:lower:]')"
+else
+  PROBE_SANITIZER_SELECTED="$(_probe_first_enabled_sanitizer)"
+fi
+case "$PROBE_SANITIZER_SELECTED" in
+  asan|ubsan|msan|tsan|race|runner) ;;
+  *) echo "[probe] unsupported sanitizer: $PROBE_SANITIZER_SELECTED" >&2; exit 2 ;;
+esac
+if [ "$PROBE_SANITIZER_SELECTED" != "runner" ]; then
+  if [ "${TARGET_SANITIZERS_EXPLICITLY_DISABLED:-0}" = "1" ]; then
+    echo "[probe] target.toml has [sanitizer].enabled = []; use PROBE_SANITIZER=runner or enable a sanitizer" >&2
+    exit 2
+  fi
+  if ! _probe_sanitizer_is_enabled "$PROBE_SANITIZER_SELECTED" \
+     && [ "${PROBE_ALLOW_DISABLED_SANITIZER:-0}" != "1" ]; then
+    echo "[probe] sanitizer '$PROBE_SANITIZER_SELECTED' is not enabled for this target" >&2
+    echo "[probe] enabled sanitizers: $(target_sanitizers_enabled_csv 2>/dev/null || echo asan)" >&2
+    echo "[probe] set PROBE_ALLOW_DISABLED_SANITIZER=1 only for trusted local experiments" >&2
+    exit 2
+  fi
+fi
+
+case "$PROBE_SANITIZER_SELECTED:$MODE" in
+  asan:*|ubsan:browser|ubsan:js|ubsan:js-diff|ubsan:generic|msan:js|msan:generic|tsan:js|tsan:generic|race:generic|runner:generic) ;;
+  race:*|runner:*)
+    echo "[probe] sanitizer '$PROBE_SANITIZER_SELECTED' is only supported in generic mode" >&2
+    exit 2 ;;
+  msan:browser|msan:js-diff|tsan:browser|tsan:js-diff)
+    echo "[probe] sanitizer '$PROBE_SANITIZER_SELECTED' does not support mode '$MODE' in this harness" >&2
+    exit 2 ;;
+  *)
+    echo "[probe] sanitizer '$PROBE_SANITIZER_SELECTED' does not support mode '$MODE'" >&2
+    exit 2 ;;
+esac
+export PROBE_SANITIZER_SELECTED
+
+# // HARNESS: build or interpret on demand, then route through generic mode.
+#
+# Dispatch by extension. Compiled-language harnesses produce a cached
+# executable under <RESULTS_DIR>/scratch-<N>/.harness-cache/ keyed by a
+# content-hash of the source + flags + asan_lib. Interpreted-language
+# harnesses skip the build step entirely; probe just remembers the
+# interpreter + harness source and hands them to run-asan generic as
+# the binary + leading arg.
+GENERIC_BIN_OVERRIDE=""
+GENERIC_PREARGS=()
+
+_probe_split_shell_words_into_array() {
+  local __out_name="$1" __words="$2" __tmp __rc __arg
+  __tmp="$(mktemp "${TMPDIR:-/tmp}/probe-argv-XXXXXX")" || return 2
+  python3 - "$__words" > "$__tmp" <<'PY'
+import shlex
+import sys
+try:
+    parts = shlex.split(sys.argv[1])
+except ValueError as e:
+    print(f"[probe] cannot parse shell words: {e}", file=sys.stderr)
+    sys.exit(2)
+for part in parts:
+    print(part)
+PY
+  __rc=$?
+  if [ "$__rc" -ne 0 ]; then
+    rm -f "$__tmp"
+    return "$__rc"
+  fi
+  while IFS= read -r __arg; do
+    eval "$__out_name+=(\"\$__arg\")"
+  done < "$__tmp"
+  rm -f "$__tmp"
+}
+
+_probe_sanitizer_compile_flag() {
+  case "$1" in
+    asan)  printf '%s\n' "address" ;;
+    ubsan) printf '%s\n' "undefined" ;;
+    msan)  printf '%s\n' "memory" ;;
+    tsan)  printf '%s\n' "thread" ;;
+    *)     return 1 ;;
+  esac
+}
+
+_probe_selected_options_env_name() {
+  case "$PROBE_SANITIZER_SELECTED" in
+    asan)  printf '%s\n' ASAN_OPTIONS ;;
+    ubsan) printf '%s\n' UBSAN_OPTIONS ;;
+    msan)  printf '%s\n' MSAN_OPTIONS ;;
+    tsan)  printf '%s\n' TSAN_OPTIONS ;;
+    *)     return 1 ;;
+  esac
+}
+
+_probe_selected_options_b64() {
+  local env_name value=""
+  env_name="$(_probe_selected_options_env_name 2>/dev/null || true)"
+  [ -n "$env_name" ] || return 0
+  value="${!env_name-}"
+  [ -n "$value" ] || return 0
+  python3 - "$value" <<'PY'
+import base64
+import sys
+print(base64.b64encode(sys.argv[1].encode()).decode())
+PY
+}
+
+if [ -n "$HARNESS_LINE" ]; then
+  testcase_dir="$(cd "$(dirname "$TESTCASE")" && pwd -P)"
+  if [ "${PROBE_ALLOW_EXTERNAL_HARNESS:-0}" != "1" ]; then
+    case "$HARNESS_LINE" in
+      /*|..|../*|*/..|*/../*)
+        echo "[probe] HARNESS must stay under the testcase directory: $HARNESS_LINE" >&2
+        echo "[probe] set PROBE_ALLOW_EXTERNAL_HARNESS=1 only for trusted local experiments" >&2
+        exit 2 ;;
+    esac
+  fi
+  harness_src="$testcase_dir/$HARNESS_LINE"
+  [ -f "$harness_src" ] || { echo "[probe] HARNESS source not found: $harness_src" >&2; exit 2; }
+  harness_src="$(_probe_realpath "$harness_src")"
+  if [ "${PROBE_ALLOW_EXTERNAL_HARNESS:-0}" != "1" ] && ! _probe_path_under "$testcase_dir" "$harness_src"; then
+    echo "[probe] HARNESS resolves outside testcase directory: $HARNESS_LINE" >&2
+    echo "[probe] set PROBE_ALLOW_EXTERNAL_HARNESS=1 only for trusted local experiments" >&2
+    exit 2
+  fi
+  hb_dir="$RESULTS_DIR/scratch-${AGENT_NUM}/.harness-cache"
+  mkdir -p "$hb_dir"
+  harness_ext="${harness_src##*.}"
+
+  _probe_print_build_log_digest() {
+    local log_file="$1"
+    [ -f "$log_file" ] || return 0
+    local head_bytes="${PROBE_BUILD_LOG_HEAD_BYTES:-8192}"
+    local tail_bytes="${PROBE_BUILD_LOG_TAIL_BYTES:-8192}"
+    python3 - "$log_file" "$head_bytes" "$tail_bytes" <<'PY'
+import sys
+
+path, head_s, tail_s = sys.argv[1:4]
+try:
+    head = max(0, int(head_s))
+    tail = max(0, int(tail_s))
+except ValueError:
+    head, tail = 8192, 8192
+
+with open(path, "rb") as f:
+    data = f.read()
+
+size = len(data)
+if head == 0 and tail == 0:
+    out = b""
+elif size <= head + tail + 256:
+    out = data
+else:
+    omitted = size - head - tail
+    marker = f"\n[probe] compiler log elided {omitted} bytes; full log: {path}\n".encode()
+    out = data[:head] + marker + data[-tail:]
+
+sys.stderr.write(out.decode("utf-8", errors="replace"))
+if out and not out.endswith(b"\n"):
+    sys.stderr.write("\n")
+PY
+  }
+
+  _probe_build_native() {
+    # Build a sanitizer-instrumented binary out of a C/C++/Rust/Go/Swift
+    # source, or a cached runnable wrapper for Kotlin .kt sources. The caller
+    # has set $compiler, $flag_string, $build_kind, and the cache stem; on
+    # success this exports $hb_path = the built binary/wrapper.
+    local cc_log
+    cc_log="$(mktemp "${TMPDIR:-/tmp}/probe-harness-XXXXXX")"
+    local extra_compile_args=()
+    if [ -n "$flag_string" ]; then
+      _probe_split_shell_words_into_array extra_compile_args "$flag_string" || return 2
+    fi
+    local rc=0
+    case "$build_kind" in
+      cc)
+        # C/C++ HARNESS builds are sanitizer-specific. Never link an ASan
+        # archive into a UBSan/MSan/TSan harness: the selected sanitizer owns
+        # both the -fsanitize flag and the optional target library.
+        local sanitize_flag sanitizer_lib
+        sanitize_flag="$(_probe_sanitizer_compile_flag "$PROBE_SANITIZER_SELECTED")" || {
+          echo "[probe] compiled C/C++ HARNESS does not support sanitizer: $PROBE_SANITIZER_SELECTED" >&2
+          rm -f "$cc_log"
+          return 2
+        }
+        sanitizer_lib="$(target_sanitizer_lib_path "$PROBE_SANITIZER_SELECTED" 2>/dev/null || true)"
+        # ASan is the primary instrumentation path; without an asan_lib
+        # archive there is nothing to link, so a missing asan_lib is a
+        # hard failure. UBSan/MSan/TSan, on the other hand, are usually
+        # useful with just `-fsanitize=...` even when no instrumented
+        # archive of the target library is available — the runtime hooks
+        # the operator code paths in the harness itself, and many real
+        # bugs are catchable that way. So for those sanitizers we
+        # downgrade a missing lib to a warning and continue. Override
+        # with PROBE_REQUIRE_SANITIZER_LIB=1 to restore the strict
+        # behavior (e.g. when the operator wants to guarantee the target
+        # itself is instrumented).
+        if [ "$PROBE_SANITIZER_SELECTED" = "asan" ] && [ -z "$sanitizer_lib" ]; then
+          echo "[probe] target.toml asan_lib missing" >&2
+          rm -f "$cc_log"
+          return 2
+        fi
+        if [ -n "$sanitizer_lib" ] && [ ! -f "$sanitizer_lib" ]; then
+          if [ "$PROBE_SANITIZER_SELECTED" = "asan" ] || [ "${PROBE_REQUIRE_SANITIZER_LIB:-0}" = "1" ]; then
+            echo "[probe] target.toml ${PROBE_SANITIZER_SELECTED}_lib missing: $sanitizer_lib" >&2
+            rm -f "$cc_log"
+            return 2
+          fi
+          echo "[probe] WARN: target.toml ${PROBE_SANITIZER_SELECTED}_lib missing ($sanitizer_lib); building with -fsanitize=$sanitize_flag only" >&2
+          sanitizer_lib=""
+        fi
+        local sanitizer_lib_args=()
+        [ -n "$sanitizer_lib" ] && sanitizer_lib_args+=("$sanitizer_lib")
+        local inc_args=() inc
+        for inc in "${TARGET_INCLUDES[@]:-}"; do
+          [ -n "$inc" ] && inc_args+=("-I" "$(target_resolve_path "$inc")")
+        done
+        local define_args=() define
+        for define in "${TARGET_DEFINES[@]:-}"; do
+          [ -n "$define" ] && define_args+=("$define")
+        done
+        local extra_link_args=()
+        if [ -n "${LDFLAGS:-}" ]; then
+          _probe_split_shell_words_into_array extra_link_args "$LDFLAGS" || return 2
+        fi
+        "$compiler" "-fsanitize=$sanitize_flag" -g -O0 \
+          ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
+          ${define_args[@]+"${define_args[@]}"} \
+          ${inc_args[@]+"${inc_args[@]}"} \
+          "$harness_src" \
+          ${sanitizer_lib_args[@]+"${sanitizer_lib_args[@]}"} \
+          "${TARGET_LINK_LIBS[@]:-}" \
+          ${extra_link_args[@]+"${extra_link_args[@]}"} \
+          -o "$hb_path" 2>"$cc_log" || rc=$?
+        ;;
+      rust)
+        # Single-file rustc build. Sanitizer enablement is opt-in via
+        # RUSTFLAGS — the harness inherits whatever the operator exported.
+        rustc -g -C opt-level=0 ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
+          -o "$hb_path" "$harness_src" 2>"$cc_log" || rc=$?
+        ;;
+      go)
+        go build -o "$hb_path" ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
+          "$harness_src" 2>"$cc_log" || rc=$?
+        ;;
+      swift)
+        swiftc -g -O0 ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
+          -o "$hb_path" "$harness_src" 2>"$cc_log" || rc=$?
+        ;;
+      kotlin)
+        local jar_path="${hb_path}.jar"
+        "$compiler" ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
+          "$harness_src" -include-runtime -d "$jar_path" 2>"$cc_log" || rc=$?
+        if [ "$rc" -eq 0 ]; then
+          {
+            printf '#!/usr/bin/env bash\n'
+            printf 'exec %q -jar %q "$@"\n' "${JAVA:-java}" "$jar_path"
+          } > "$hb_path" || rc=$?
+          [ "$rc" -eq 0 ] && chmod +x "$hb_path"
+        fi
+        ;;
+      *)
+        echo "[probe] internal: unknown build_kind=$build_kind" >&2; rc=2;;
+    esac
+    if [ "$rc" -ne 0 ]; then
+      mv "$cc_log" "$hb_fail_log" 2>/dev/null || cp "$cc_log" "$hb_fail_log" 2>/dev/null || true
+      rm -f "$cc_log"
+      rm -f "$hb_path"
+      echo "[probe] harness build failed: $harness_src" >&2
+      echo "[probe] full compiler log: $hb_fail_log" >&2
+      _probe_print_build_log_digest "$hb_fail_log"
+      return 2
+    fi
+    rm -f "$cc_log"
+    rm -f "$hb_fail_log"
+    echo "[probe] built harness: $hb_path"
+    return 0
+  }
+
+  _probe_reap_stale_harness_lock() {
+    # The harness build lock is a directory; the holder records its pid in an
+    # `owner` file. If that process dies mid-build the directory would wedge
+    # every later probe for the full lock timeout. Reap it when the owner is
+    # gone — either the recorded pid no longer exists, or (for the brief
+    # mkdir-before-owner-write window) the directory is older than the grace.
+    local lock_dir="$1" owner_pid="" stale=0
+    [ -d "$lock_dir" ] || return 0
+    if [ -f "$lock_dir/owner" ]; then
+      owner_pid=$(grep '^pid=' "$lock_dir/owner" 2>/dev/null | head -1 | cut -d= -f2)
+      if [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+        stale=1
+      fi
+    else
+      local grace="${PROBE_HARNESS_LOCK_STALE_MIN:-5}"
+      if [ "$grace" -le 0 ]; then
+        stale=1
+      elif [ -n "$(find "$lock_dir" -maxdepth 0 -mmin +"$grace" 2>/dev/null)" ]; then
+        stale=1
+      fi
+    fi
+    [ "$stale" -eq 1 ] || return 0
+    # Steal the directory by renaming it: only one racing reaper can win the
+    # mv, so the lock is removed exactly once.
+    local steal_dir="${lock_dir}.stale.$$"
+    if mv "$lock_dir" "$steal_dir" 2>/dev/null; then
+      rm -rf "$steal_dir" 2>/dev/null || true
+      echo "[probe] reaped stale harness build lock: $lock_dir (owner pid ${owner_pid:-unknown})" >&2
+    fi
+  }
+
+  # Harness toolchain dispatch is driven by lib/languages.py — the
+  # single registry shared with workqueue, target_config, and
+  # crash_artifacts. The CLI emits bash variable assignments we eval
+  # in. Compiled extensions set BUILD_KIND/COMPILER_ENV/COMPILER_DEFAULT/
+  # FLAGS_ENV; interpreted extensions set BUILD_KIND=interpret plus
+  # INTERPRETER_ENV/INTERPRETER_DEFAULT/INTERPRETER_PREARGS.
+  if ! dispatch_eval="$(python3 "$SCRIPT_ROOT/lib/languages.py" probe-dispatch "$harness_ext" 2>/dev/null)"; then
+    echo "[probe] HARNESS source has unsupported extension: $harness_src" >&2
+    compiled_exts="$(python3 "$SCRIPT_ROOT/lib/languages.py" exts --kind harness-compiled 2>/dev/null | paste -sd' ' -)"
+    interp_exts="$(python3 "$SCRIPT_ROOT/lib/languages.py" exts --kind harness-interpreted 2>/dev/null | paste -sd' ' -)"
+    echo "[probe] supported (compiled):    $compiled_exts" >&2
+    echo "[probe] supported (interpreted): $interp_exts" >&2
+    exit 2
+  fi
+  # Reset every var dispatch_eval might set so a prior iteration's
+  # leftovers cannot leak into this dispatch.
+  BUILD_KIND=""; COMPILER_ENV=""; COMPILER_DEFAULT=""; FLAGS_ENV=""
+  INTERPRETER_ENV=""; INTERPRETER_DEFAULT=""; INTERPRETER_PREARGS=()
+  eval "$dispatch_eval"
+
+  case "$BUILD_KIND" in
+    interpret)
+      # ── Interpreted-language harnesses: no build step ────────────
+      # Hand the harness source to the interpreter via GENERIC_PREARGS
+      # so run-asan generic executes:
+      #   <interpreter> [<preargs>] <harness-src> <testcase> <args>
+      # Indirect expansion (`${!VAR}`) reads the env override; absent
+      # values fall back to the registry default.
+      interpreter_override="${!INTERPRETER_ENV:-}"
+      GENERIC_BIN_OVERRIDE="${interpreter_override:-$INTERPRETER_DEFAULT}"
+      GENERIC_PREARGS=("${INTERPRETER_PREARGS[@]:-}" "$harness_src")
+      # Drop the placeholder empty-string when INTERPRETER_PREARGS was empty.
+      if [ ${#INTERPRETER_PREARGS[@]} -eq 0 ]; then
+        GENERIC_PREARGS=("$harness_src")
+      fi
+      build_kind=interpret
+      ;;
+    cc|rust|go|swift|kotlin)
+      compiler_override="${!COMPILER_ENV:-}"
+      compiler="${compiler_override:-$COMPILER_DEFAULT}"
+      flag_string="${!FLAGS_ENV:-}"
+      build_kind="$BUILD_KIND"
+      ;;
+    *)
+      echo "[probe] internal: unexpected build_kind=$BUILD_KIND from lib/languages.py" >&2
+      exit 2 ;;
+  esac
+
+  if [ "$build_kind" != "interpret" ]; then
+    hb_stem="$(basename "$harness_src")"
+    sanitizer_flag_for_hash=""
+    sanitizer_lib_for_hash=""
+    if [ "$build_kind" = "cc" ]; then
+      sanitizer_flag_for_hash="$(_probe_sanitizer_compile_flag "$PROBE_SANITIZER_SELECTED" 2>/dev/null || true)"
+      sanitizer_lib_for_hash="$(target_sanitizer_lib_path "$PROBE_SANITIZER_SELECTED" 2>/dev/null || true)"
+    fi
+    sanitizer_lib_stat=$(audit_stat_key "$sanitizer_lib_for_hash" 2>/dev/null || true)
+    compiler_for_hash="$compiler"
+    if command -v "$compiler" >/dev/null 2>&1; then
+      compiler_for_hash="$(command -v "$compiler")"
+    fi
+    compiler_stat=$(audit_stat_key "$compiler_for_hash" 2>/dev/null || true)
+    config_hash="$({
+      printf 'schema=4\ncompiler=%s\ncompiler_stat=%s\nbuild_kind=%s\nflags=%s\nsanitizer=%s\nsanitize_flag=%s\nsanitizer_lib=%s\nsanitizer_lib_stat=%s\n' \
+        "$compiler_for_hash" "$compiler_stat" "$build_kind" "$flag_string" \
+        "$PROBE_SANITIZER_SELECTED" "$sanitizer_flag_for_hash" "$sanitizer_lib_for_hash" "$sanitizer_lib_stat"
+      printf 'includes=%s\ndefines=%s\nlinks=%s\nldflags=%s\n' "${TARGET_INCLUDES[*]:-}" "${TARGET_DEFINES[*]:-}" "${TARGET_LINK_LIBS[*]:-}" "${LDFLAGS:-}"
+      audit_sha1 "$harness_src" 2>/dev/null
+    } | audit_sha1 2>/dev/null | awk '{print $1}')"
+    [ -n "$config_hash" ] || config_hash="$(date +%s)"
+    hb_path="$hb_dir/${hb_stem}.${config_hash}.bin"
+    hb_fail_log="$hb_dir/${hb_stem}.${config_hash}.build.log"
+    hb_lock_dir="$hb_dir/${hb_stem}.${config_hash}.lock"
+    if [ ! -x "$hb_path" ]; then
+      hb_waited=0
+      hb_have_lock=0
+      hb_lock_timeout="${PROBE_HARNESS_BUILD_LOCK_TIMEOUT:-600}"
+      while true; do
+        if mkdir "$hb_lock_dir" 2>/dev/null; then
+          hb_have_lock=1
+          break
+        fi
+        if [ -x "$hb_path" ]; then
+          break
+        fi
+        if [ -s "$hb_fail_log" ]; then
+          echo "[probe] cached harness build failure: $harness_src" >&2
+          echo "[probe] full compiler log: $hb_fail_log" >&2
+          _probe_print_build_log_digest "$hb_fail_log"
+          exit 2
+        fi
+        _probe_reap_stale_harness_lock "$hb_lock_dir"
+        if [ "$hb_waited" -ge "$hb_lock_timeout" ]; then
+          echo "[probe] timed out waiting for harness build lock: $hb_lock_dir" >&2
+          exit 2
+        fi
+        sleep 1
+        hb_waited=$((hb_waited + 1))
+      done
+      if [ "$hb_have_lock" -eq 1 ]; then
+        # We hold the lock: every exit path below must release it so the
+        # directory never wedges a later probe.
+        if [ -x "$hb_path" ]; then
+          # A peer finished the build between our last check and mkdir.
+          rmdir "$hb_lock_dir" 2>/dev/null || true
+        else
+          {
+            printf 'pid=%s\n' "$$"
+            date '+started=%Y-%m-%dT%H:%M:%S%z'
+          } > "$hb_lock_dir/owner" 2>/dev/null || true
+          if [ -s "$hb_fail_log" ]; then
+            rm -f "$hb_lock_dir/owner" 2>/dev/null || true
+            rmdir "$hb_lock_dir" 2>/dev/null || true
+            echo "[probe] cached harness build failure: $harness_src" >&2
+            echo "[probe] full compiler log: $hb_fail_log" >&2
+            _probe_print_build_log_digest "$hb_fail_log"
+            exit 2
+          fi
+          _probe_build_native
+          hb_rc=$?
+          rm -f "$hb_lock_dir/owner" 2>/dev/null || true
+          rmdir "$hb_lock_dir" 2>/dev/null || true
+          if [ "$hb_rc" -ne 0 ]; then
+            exit "$hb_rc"
+          fi
+        fi
+      fi
+    fi
+    GENERIC_BIN_OVERRIDE="$hb_path"
+  fi
+  MODE="generic"
+fi
+
+# npm targets default to `node`, but TypeScript testcases need a transpiling
+# runner. Prefer the target-local ts-node when present; otherwise leave the
+# configured node runner untouched so plain JS behavior is unchanged.
+if [ "$MODE" = "generic" ] \
+   && [ -z "$HARNESS_LINE" ] \
+   && [ -z "$GENERIC_BIN_OVERRIDE" ] \
+   && { [ "$PROBE_SANITIZER_SELECTED" = "asan" ] \
+        || [ "$PROBE_SANITIZER_SELECTED" = "runner" ] \
+        || [ "$PROBE_SANITIZER_SELECTED" = "race" ]; }; then
+  case "$EXEC_TESTCASE" in
+    *.ts|*.tsx)
+      _runner_base="$(basename "${TARGET_RUNNER_BIN:-}")"
+      if [ "$_runner_base" = "node" ]; then
+        _ts_node=""
+        if [ -x "$TARGET_ROOT/node_modules/.bin/ts-node" ]; then
+          _ts_node="$TARGET_ROOT/node_modules/.bin/ts-node"
+        elif command -v ts-node >/dev/null 2>&1; then
+          _ts_node="$(command -v ts-node)"
+        fi
+        if [ -n "$_ts_node" ]; then
+          GENERIC_BIN_OVERRIDE="$_ts_node"
+          GENERIC_PREARGS=(
+            --transpile-only
+            --skip-project
+            --compiler-options '{"module":"CommonJS","moduleResolution":"node","target":"ES2022","ignoreDeprecations":"6.0"}'
+          )
+        fi
+      fi
+      unset _runner_base _ts_node
+      ;;
+  esac
+fi
+
+# Generic mode binary: select exactly one sanitizer/runtime for this probe
+# invocation. Default is the first configured sanitizer in target.toml; set
+# PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner to override explicitly.
+if [ "$MODE" = "generic" ]; then
+  case "$PROBE_SANITIZER_SELECTED" in
+    asan)
+      if [ -n "$GENERIC_BIN_OVERRIDE" ]; then
+        export ASAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
+      elif [ -n "${TARGET_ASAN_BIN:-}" ]; then
+        export ASAN_GENERIC_BIN="$(target_resolve_path "$TARGET_ASAN_BIN")"
+      elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
+        export ASAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
+      fi
+      ;;
+    ubsan)
+      if [ -n "$GENERIC_BIN_OVERRIDE" ]; then
+        export UBSAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
+      elif [ -n "${TARGET_UBSAN_BIN:-}" ]; then
+        export UBSAN_GENERIC_BIN="$(target_resolve_path "$TARGET_UBSAN_BIN")"
+      fi
+      ;;
+    msan)
+      if [ -n "$GENERIC_BIN_OVERRIDE" ]; then
+        export MSAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
+      elif [ -n "${TARGET_MSAN_BIN:-}" ]; then
+        export MSAN_GENERIC_BIN="$(target_resolve_path "$TARGET_MSAN_BIN")"
+      fi
+      ;;
+    tsan)
+      if [ -n "$GENERIC_BIN_OVERRIDE" ]; then
+        export TSAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
+      elif [ -n "${TARGET_TSAN_BIN:-}" ]; then
+        export TSAN_GENERIC_BIN="$(target_resolve_path "$TARGET_TSAN_BIN")"
+      fi
+      ;;
+    runner|race)
+      if [ -n "$GENERIC_BIN_OVERRIDE" ]; then
+        export ASAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
+      elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
+        export ASAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
+      fi
+      # run-asan generic is also the historical generic runner wrapper.
+      # Suppress sanitizer option env for runner/race mode so a Go -race or
+      # language runtime execution does not inherit the wrong runtime state.
+      export ASAN_GENERIC_DISABLE_OPTIONS=1
+      export TARGET_SANITIZERS_EXPLICITLY_DISABLED=1
+      ;;
+  esac
+fi
+
+# Compose generic-mode invocation. Three modes feed into the same wrapper:
+#
+#   (a) Default (no runner, no // HARNESS:):
+#       run-asan generic <testcase> <args>
+#       → bin runs `<asan_bin> <testcase> <args>`
+#
+#   (b) Interpreted // HARNESS: (harness.py / harness.rb / ...):
+#       GENERIC_PREARGS=(harness.py <testcase>).
+#       → bin runs `<interpreter> <harness.py> <testcase> <args>`
+#
+#   (c) target.toml [runner] with args containing "{TESTCASE}":
+#       Pre-args already include the testcase path after substitution.
+#       Sentinel "" passed as testcase so run-asan-multi's coverage gate +
+#       budget accounting still see the file (via TARGET= header read).
+#       ASAN_GENERIC_SKIP_TESTCASE=1 tells run-asan generic NOT to insert
+#       <testcase> again — bin runs `<runner_bin> <expanded args> <trailing>`.
+declare -a cmd
+declare -a generic_pre_args=()
+generic_skip_testcase=0
+probe_direct_capture=0
+if [ "$MODE" = "generic" ]; then
+  if [ -z "$HARNESS_LINE" ] \
+     && [ "${#GENERIC_PREARGS[@]}" -eq 0 ] \
+     && [ -n "${TARGET_RUNNER_BIN:-}" ] \
+     && [ "${#TARGET_RUNNER_ARGS[@]}" -gt 0 ] \
+     && { [ "$PROBE_SANITIZER_SELECTED" = "asan" ] \
+          || [ "$PROBE_SANITIZER_SELECTED" = "runner" ] \
+          || [ "$PROBE_SANITIZER_SELECTED" = "race" ]; }; then
+    while IFS= read -r _ra; do
+      generic_pre_args+=("$_ra")
+    done < <(target_runner_args_for_testcase "$EXEC_TESTCASE")
+    # If any expanded arg matches the testcase path, the template already
+    # placed it explicitly via {TESTCASE} — don't let run-asan generic
+    # prepend it again. Otherwise the runner template did NOT reference
+    # {TESTCASE}, so the testcase should still go in the canonical
+    # position (<bin> <pre-args> <testcase> <trailing>).
+    for _ra in "${generic_pre_args[@]}"; do
+      [ "$_ra" = "$EXEC_TESTCASE" ] && { generic_skip_testcase=1; break; }
+    done
+    if [ "$generic_skip_testcase" -eq 0 ]; then
+      generic_pre_args+=("$EXEC_TESTCASE")
+      generic_skip_testcase=1
+    fi
+  elif [ "${#GENERIC_PREARGS[@]}" -gt 0 ]; then
+    generic_pre_args=("${GENERIC_PREARGS[@]}" "$EXEC_TESTCASE")
+    generic_skip_testcase=1
+  elif [ "$EXEC_TESTCASE" != "$TESTCASE" ]; then
+    generic_pre_args=("$EXEC_TESTCASE")
+    generic_skip_testcase=1
+  fi
+fi
+export ASAN_GENERIC_SKIP_TESTCASE="$generic_skip_testcase"
+
+case "$MODE" in
+  js-diff)
+    case "$PROBE_SANITIZER_SELECTED" in
+      asan)  cmd=("$SCRIPT_DIR/run-asan" "js-diff" "$EXEC_TESTCASE" "$@") ;;
+      ubsan) cmd=("$SCRIPT_DIR/run-ubsan" "js-diff" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
+    esac ;;
+  browser|js)
+    case "$PROBE_SANITIZER_SELECTED" in
+      asan)
+        cmd=("$SCRIPT_DIR/run-asan-multi" "$MODE" "$EXEC_TESTCASE" "$@") ;;
+      ubsan)
+        cmd=("$SCRIPT_DIR/run-ubsan" "$MODE" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
+      msan)
+        cmd=("$SCRIPT_DIR/run-msan" "$MODE" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
+      tsan)
+        cmd=("$SCRIPT_DIR/run-tsan" "$MODE" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
+    esac ;;
+  generic)
+    case "$PROBE_SANITIZER_SELECTED" in
+      asan|runner|race)
+        if [ "${#generic_pre_args[@]}" -gt 0 ]; then
+          cmd=("$SCRIPT_DIR/run-asan-multi" "generic" "$EXEC_TESTCASE"
+               "${generic_pre_args[@]}" "$@")
+        else
+          cmd=("$SCRIPT_DIR/run-asan-multi" "generic" "$EXEC_TESTCASE" "$@")
+        fi
+        ;;
+      ubsan)
+        cmd=("$SCRIPT_DIR/run-ubsan" "generic" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
+      msan)
+        cmd=("$SCRIPT_DIR/run-msan" "generic" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
+      tsan)
+        cmd=("$SCRIPT_DIR/run-tsan" "generic" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
+    esac
+    ;;
+esac
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  printf '[probe] mode=%s sanitizer=%s asan_output=%s target=%s hypothesis=%s want=%s card=%s\n' \
+    "$MODE" "$PROBE_SANITIZER_SELECTED" "$ASAN_OUTPUT_FILE" "${TARGET_LINE:-}" "${HYP_LINE:-}" "${WANT:-}" "${CARD_LINE:-}"
+  if [ "$EXEC_TESTCASE" != "$TESTCASE" ]; then
+    printf '[probe] exec_testcase=%s original_testcase=%s\n' "$EXEC_TESTCASE" "$TESTCASE"
+  fi
+  printf '[probe] command:'
+  printf ' %q' "${cmd[@]}"
+  printf '\n'
+  exit 0
+fi
+
+_confirm_tag=""
+[ "$CONFIRM" -eq 1 ] && _confirm_tag=" confirm=1"
+echo "[probe] mode=$MODE testcase=$TESTCASE asan_output=$ASAN_OUTPUT_FILE${_confirm_tag}"
+rc=0
+if [ "$MODE" = "js-diff" ]; then
+  mkdir -p "$(dirname "$ASAN_OUTPUT_FILE")" 2>/dev/null || true
+  "${cmd[@]}" 2>&1 | tee "$ASAN_OUTPUT_FILE"
+  rc=${PIPESTATUS[0]}
+else
+  if [ "$probe_direct_capture" -eq 1 ]; then
+    mkdir -p "$(dirname "$ASAN_OUTPUT_FILE")" 2>/dev/null || true
+    _probe_run_direct() {
+      local i run_rc worst_rc=0
+      echo "SANITIZER_RUN_HEADER: sanitizer=${PROBE_SANITIZER_SELECTED} runs=${ASAN_RUNS} mode=${MODE} testcase=${TESTCASE} env_options_b64=$(_probe_selected_options_b64) started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      for i in $(seq 1 "$ASAN_RUNS"); do
+        echo "=== Run $i/$ASAN_RUNS (${PROBE_SANITIZER_SELECTED}) ==="
+        run_rc=0
+        "${cmd[@]}" || run_rc=$?
+        if [ "$run_rc" -eq 0 ]; then
+          echo "[probe] ${PROBE_SANITIZER_SELECTED} EXECUTION VERIFIED (post-run, rc=0)"
+        else
+          echo "[probe] ${PROBE_SANITIZER_SELECTED} EXECUTION INCONCLUSIVE (post-run, rc=${run_rc})"
+          [ "$worst_rc" -eq 0 ] && worst_rc="$run_rc"
+        fi
+      done
+      exit "$worst_rc"
+    }
+    _probe_run_direct 2>&1 | tee "$ASAN_OUTPUT_FILE"
+    rc=${PIPESTATUS[0]}
+  else
+    "${cmd[@]}" || rc=$?
+  fi
+fi
+
+# Crash / clean classification lives in lib/verdict.sh — the single
+# source shared with bin/scratch-status and lib/quality.sh. Built-in
+# runtime-fatal markers are VERDICT_CRASH_PATTERNS; per-target additions
+# from [runner].crash_patterns flow through TARGET_RUNNER_CRASH_PATTERNS,
+# which verdict_file_has_crash unions in.
+_probe_cap_asan_output_file "$ASAN_OUTPUT_FILE"
+verdict="NO_EXEC"
+if [ -s "$ASAN_OUTPUT_FILE" ]; then
+  if verdict_file_has_crash "$ASAN_OUTPUT_FILE"; then
+    verdict="CRASH"
+  elif grep -q 'DIFFERENTIAL: outputs DIFFER' "$ASAN_OUTPUT_FILE" 2>/dev/null; then
+    verdict="DIFF"
+  elif verdict_file_is_clean "$ASAN_OUTPUT_FILE"; then
+    verdict="CLEAN"
+  fi
+elif [ "$rc" -eq 0 ]; then
+  verdict="CLEAN"
+fi
+
+# ── Auto-route to alternate sanitizer builds on feature-disabled ────
+# Many C/C++ targets ship multiple ASan builds because different code
+# paths need different configure flags (pcre2 JIT lives in
+# build-asan-jit/, not build-asan/). If the canonical binary returned a
+# "not compiled in" / "JIT not available" / "not supported in this
+# build" signature, sweep $TARGET_ROOT/build-*/ for siblings with the
+# same binary name and retry against each. First candidate whose output
+# no longer carries the sentinel wins. The route is cached in
+# $RESULTS_DIR/build-routes.jsonl so future probes skip the sweep.
+#
+# Skip when:
+#   * verdict is already CRASH/DIFF — we found something interesting,
+#     stick with the canonical build.
+#   * we're not in generic ASan mode — feature-disabled phrasing is
+#     specific to ASan native probes; runner/race/ubsan/msan/tsan don't
+#     benefit.
+#   * ASAN_GENERIC_BIN isn't set or doesn't live under a build-* dir —
+#     no anchor to extrapolate from.
+#   * PROBE_AUTO_ROUTE=0 — escape hatch for tests / debugging.
+_probe_auto_route() {
+  [ "${PROBE_AUTO_ROUTE:-1}" != "0" ] || return 0
+  [ "$MODE" = "generic" ] || return 0
+  [ "$PROBE_SANITIZER_SELECTED" = "asan" ] || return 0
+  case "$verdict" in CRASH|DIFF) return 0 ;; esac
+  [ -s "$ASAN_OUTPUT_FILE" ] || return 0
+  [ -n "${ASAN_GENERIC_BIN:-}" ] || return 0
+  [ -n "${TARGET_ROOT:-}" ] || return 0
+
+  python3 "$SCRIPT_DIR/../lib/build_routes.py" sentinel "$ASAN_OUTPUT_FILE" >/dev/null 2>&1 || return 0
+
+  # Try the cached route first — no rediscovery cost if we already
+  # found the right binary on a prior probe for this surface.
+  local route_key route_keys=() cached
+  if [ -n "${CARD_LINE:-}" ]; then
+    route_keys+=("card:${CARD_LINE}")
+  fi
+  if [ -n "${TARGET_LINE:-}" ]; then
+    # TARGET_LINE is "file:function:line"; the file portion is the
+    # routing key (siblings on the same file route to the same binary).
+    local _tf="${TARGET_LINE%%:*}"
+    [ -n "$_tf" ] && route_keys+=("file:${_tf}")
+  fi
+  cached=""
+  if [ -n "${RESULTS_DIR:-}" ] && [ "${#route_keys[@]}" -gt 0 ]; then
+    cached=$(python3 "$SCRIPT_DIR/../lib/build_routes.py" lookup "$RESULTS_DIR" "${route_keys[@]}" 2>/dev/null || true)
+  fi
+
+  local cand_bin found_bin="" feature_label
+  feature_label=$(grep -oE -m1 '(not compiled in|not enabled at configure(\s+time)?|not supported in this build|JIT not (available|supported|compiled)|no just-in-time (compiler )?support|feature (is )?disabled|(built|compiled) without [A-Za-z][A-Za-z0-9_+-]* support)' \
+    "$ASAN_OUTPUT_FILE" 2>/dev/null | head -1)
+  feature_label="${feature_label:-feature-disabled}"
+
+  # Build candidate list: cached route first (if any), then live sweep.
+  local -a candidates=()
+  [ -n "$cached" ] && candidates+=("$cached")
+  while IFS= read -r cand_bin; do
+    [ -n "$cand_bin" ] || continue
+    # De-dup: skip the cached entry if the sweep surfaces it again.
+    if [ -n "$cached" ] && [ "$cand_bin" = "$cached" ]; then
+      continue
+    fi
+    candidates+=("$cand_bin")
+  done < <(python3 "$SCRIPT_DIR/../lib/build_routes.py" enumerate "$TARGET_ROOT" "$ASAN_GENERIC_BIN" 2>/dev/null)
+
+  [ "${#candidates[@]}" -gt 0 ] || return 0
+
+  local retry_out retry_rc retry_label
+  for cand_bin in "${candidates[@]}"; do
+    [ -x "$cand_bin" ] || continue
+    retry_out=$(mktemp -t probe-route-XXXX.txt 2>/dev/null) || continue
+    retry_rc=0
+    ASAN_GENERIC_BIN="$cand_bin" \
+      "${cmd[@]}" >"$retry_out" 2>&1 || retry_rc=$?
+    # Skip candidates that also feature-disable.
+    if python3 "$SCRIPT_DIR/../lib/build_routes.py" sentinel "$retry_out" >/dev/null 2>&1; then
+      rm -f "$retry_out"
+      continue
+    fi
+    # Found a candidate that exercised the feature. Adopt its output
+    # as the canonical probe result and update rc/verdict.
+    mv "$retry_out" "$ASAN_OUTPUT_FILE"
+    rc="$retry_rc"
+    verdict="NO_EXEC"
+    if [ -s "$ASAN_OUTPUT_FILE" ]; then
+      if verdict_file_has_crash "$ASAN_OUTPUT_FILE"; then
+        verdict="CRASH"
+      elif grep -q 'DIFFERENTIAL: outputs DIFFER' "$ASAN_OUTPUT_FILE" 2>/dev/null; then
+        verdict="DIFF"
+      elif verdict_file_is_clean "$ASAN_OUTPUT_FILE"; then
+        verdict="CLEAN"
+      fi
+    elif [ "$rc" -eq 0 ]; then
+      verdict="CLEAN"
+    fi
+    found_bin="$cand_bin"
+    echo "[probe] ROUTED: feature='${feature_label}' canonical='${ASAN_GENERIC_BIN}' → '${cand_bin}' verdict=${verdict}"
+    # Cache the route for this surface so future probes skip rediscovery.
+    if [ -n "${RESULTS_DIR:-}" ]; then
+      local _rk
+      for _rk in "${route_keys[@]}"; do
+        python3 "$SCRIPT_DIR/../lib/build_routes.py" record \
+          "$RESULTS_DIR" "$_rk" "$cand_bin" \
+          --feature "$feature_label" \
+          --canonical "$ASAN_GENERIC_BIN" >/dev/null 2>&1 || true
+      done
+    fi
+    break
+  done
+  if [ -z "$found_bin" ]; then
+    echo "[probe] ROUTE_MISS: feature='${feature_label}' canonical='${ASAN_GENERIC_BIN}' — no sibling build exercised this feature; the hypothesis is genuinely env-blocked for this checkout"
+  fi
+  return 0
+}
+_probe_auto_route || true
+
+# State recording (best-effort; only if state machinery is available).
+if [ -n "$HYP_LINE" ] && [ -x "$SCRIPT_DIR/state" ]; then
+  state_args=(--results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG")
+  # Capture testcase content sha1 so bin/probe-history can correlate runs
+  # across renames/moves. audit_sha1 lives in lib/platform.sh; output is
+  # "<sha1>  <path>", so awk to the hash.
+  _tc_sha1=$(audit_sha1 "$TESTCASE" 2>/dev/null | awk '{print $1}')
+  "$SCRIPT_DIR/state" "${state_args[@]}" \
+    add-run --agent "$AGENT_NUM" --hypothesis-id "$HYP_LINE" --card-id "${CARD_LINE:-}" \
+    --mode "$MODE" --testcase "$TESTCASE" --testcase-sha1 "${_tc_sha1:-}" \
+    --asan-output "$ASAN_OUTPUT_FILE" --verdict "$verdict" \
+    --asan-runs "$ASAN_RUNS" >/dev/null 2>&1 || true
+  if [ "$verdict" = "CRASH" ] && [ "$PROBE_SANITIZER_SELECTED" != "runner" ]; then
+    "$SCRIPT_DIR/state" "${state_args[@]}" \
+      update-hyp --id "$HYP_LINE" --status "CRASH" --note "bin/probe observed sanitizer diagnostic" \
+      >/dev/null 2>&1 || true
+    if [ -n "$CARD_LINE" ]; then
+      "$SCRIPT_DIR/state" "${state_args[@]}" \
+        update-card --card-id "$CARD_LINE" --status "crash" >/dev/null 2>&1 || true
+    fi
+  elif [ "$verdict" = "CRASH" ]; then
+    "$SCRIPT_DIR/state" "${state_args[@]}" \
+      add-note --agent "$AGENT_NUM" --hypothesis-id "$HYP_LINE" --card-id "${CARD_LINE:-}" \
+      --kind "decision" --text "bin/probe observed runner diagnostic in findings-only mode; keep hypothesis/card active until a FIND report or explicit discard closes it" \
+      >/dev/null 2>&1 || true
+  fi
+fi
+
+exit "$rc"

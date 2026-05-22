@@ -1,0 +1,44 @@
+# Project runtime state
+AUDIT_STATE*.md.bak
+output/
+scratch/
+scratch-*/
+targets/
+
+# bin/benchmark ledger + run artifacts (operator data, not source)
+benchmark-results.md
+benchmark-results.html
+benchmark-results.*.bak.md
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor and IDE files
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local tool settings
+.antigravitycli/
+.claude/
+.codex/
+
+# Python environments and caches
+.pytest_cache/
+.venv/
+*.py[cod]
+*.pyo
+__pycache__/
+
+# Logs
+*.log
+
+# zsh completion cache (zsh auto-writes this when ZDOTDIR points at
+# lib/wrappers/_zdotdir/ during agent sessions — see bin/audit)
+lib/wrappers/_zdotdir/.zcompdump*
+
+# Documentation builds
+/site/

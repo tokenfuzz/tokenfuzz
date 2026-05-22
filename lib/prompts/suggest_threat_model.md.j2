@@ -1,0 +1,53 @@
+You are helping an audit harness set the threat model for a target project.
+The threat model — `attacker_controls` — declares what an attacker can
+actually supply to the code under audit. The harness uses it to decide
+whether a discovered crash is a security finding or an upstream-robustness
+issue: a crash whose trigger needs something OUTSIDE attacker_controls is
+demoted from security to robustness.
+
+Target:
+  slug         = {{ slug }}
+  upstream_url = {{ upstream_url }}
+
+Target README excerpt:
+"""
+{{ readme }}
+"""
+
+Public API surface (header files found in the target tree):
+"""
+{{ api_surface }}
+"""
+
+attacker_controls tokens — choose every token that genuinely applies:
+  bytes           input file / stream / packet bytes (most parsers, codecs)
+  call-sequence   ordered public API or script calls — the attacker picks
+                  which calls run and in what order (stateful library APIs,
+                  scripting / plugin SDKs)
+  timing          timing / scheduling control (browsers, JIT)
+  race            concurrent threads or processes (servers, runtimes)
+  protocol-state  multi-message protocol state machine (TLS, HTTP, DNS
+                  clients and servers)
+  env             environment variables / process state (rare: shells)
+  fs-state        filesystem layout the attacker shapes (rare: archive
+                  and path-handling tools)
+
+Guidance:
+- Almost every parser / codec / format library has `bytes`.
+- Add `call-sequence` only if the attacker realistically drives the public
+  API call order — a fuzz harness exercising the library API, or a
+  scripting surface. Do NOT add it if the target is only ever run as a
+  fixed-argv command-line tool.
+- Add `protocol-state` for network-protocol implementations.
+- Be conservative: never list a token the attacker cannot actually reach.
+  Over-claiming turns upstream-robustness bugs into false security reports.
+
+Output a single JSON object (no prose, no fences):
+{
+  "attacker_controls": ["bytes", "..."],
+  "reasoning": "<one short sentence on why these tokens fit the target>"
+}
+
+Constraints:
+- attacker_controls MUST be a non-empty subset of the tokens listed above.
+- Order tokens from most to least obviously attacker-controlled.
