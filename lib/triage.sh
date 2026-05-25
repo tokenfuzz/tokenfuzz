@@ -1226,7 +1226,10 @@ _triage_clear_promotion_sidecars() {
   local d="$1"
   rm -f "$d/.promotion_pending" \
         "$d/.promotion_pending.sig" \
-        "$d/.promotion_pending.count" 2>/dev/null || true
+        "$d/.promotion_pending.count" \
+        "$d/.audit/.promotion_pending" \
+        "$d/.audit/.promotion_pending.sig" \
+        "$d/.audit/.promotion_pending.count" 2>/dev/null || true
 }
 
 # Track repeated promotion-pending state across triage passes.
@@ -1531,12 +1534,16 @@ triage_crash_dirs() {
     fi
 
     # ── 2. Validate required files ─────────────────────────────────
-    # Accept either lowercase audit-side report.md or capitalized bundle
-    # REPORT.md (after export-repro has run). For sanitizer output: the
-    # bundle has sanitizer.txt at root (legacy: asan.txt); pre-bundle
-    # dirs may have *_confirm.asan.txt / *.asan.txt only.
+    # Accept the pre-bundle lowercase report.md, the finished bundle
+    # REPORT.md, or the migrated audit-side .audit/report.md. The last
+    # form is important when a previous export-repro pass partially bundled
+    # the dir: it moves report.md into .audit/ before installing the final
+    # REPORT.md, so a failed install leaves only .audit/report.md and the
+    # next pass must still be able to re-run export-repro cleanly.
+    # For sanitizer output: the bundle has sanitizer.txt at root (legacy:
+    # asan.txt); pre-bundle dirs may have *_confirm.asan.txt / *.asan.txt only.
     local missing=()
-    if [ ! -s "$d/report.md" ] && [ ! -s "$d/REPORT.md" ]; then
+    if [ ! -s "$d/report.md" ] && [ ! -s "$d/REPORT.md" ] && [ ! -s "$d/.audit/report.md" ]; then
       missing+=("report.md")
     fi
     local asan_ok=0

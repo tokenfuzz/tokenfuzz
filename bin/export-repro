@@ -2374,14 +2374,36 @@ def main(argv: list[str]) -> int:
         ]
         install_candidates += list(stage.glob("harness.*"))
         install_candidates.append(stage / "patch.diff")
+        install_observed: list[str] = []
         for staged in install_candidates:
             if staged.is_file():
                 shutil.copyfile(staged, out_dir / staged.name)
                 os.chmod(out_dir / staged.name, 0o644)
+                install_observed.append(f"{staged.name}=installed")
+            else:
+                install_observed.append(f"{staged.name}=missing")
         for staged in stage.glob("input.*"):
             if staged.is_file():
                 shutil.copyfile(staged, out_dir / staged.name)
                 os.chmod(out_dir / staged.name, 0o644)
+        # Post-install assertion: REPORT.md is the only human-readable artifact
+        # in the bundle. If it was staged (it always is at line 2291) but did
+        # not land at out_dir, this is a silent data-loss bug — the bundle
+        # looks 80% complete and triage reports "incomplete bundle missing
+        # REPORT.md" with no upstream diagnostic. Surface it loudly so the
+        # caller's _triage_bundle_crash_dir warning carries the actual reason.
+        _r_stage = stage / "REPORT.md"
+        _r_out = out_dir / "REPORT.md"
+        if _r_stage.is_file() and not _r_out.is_file():
+            stage_listing = ", ".join(p.name for p in sorted(stage.iterdir()))
+            out_listing = ", ".join(p.name for p in sorted(out_dir.iterdir()))
+            die(
+                f"REPORT.md staged ({_r_stage.stat().st_size}B at {_r_stage}) "
+                f"but did not install at {_r_out}; "
+                f"install_candidates: {install_observed}; "
+                f"stage: [{stage_listing}]; "
+                f"out_dir: [{out_listing}]"
+            )
         repro_dest = out_dir / "reproduce.sh"
         if repro_dest.is_file():
             try:
