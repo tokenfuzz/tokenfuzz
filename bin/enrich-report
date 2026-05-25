@@ -23,7 +23,10 @@ import os
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+# .absolute() not .resolve(): inside a benchmark cell facade bin/ is a
+# symlink to the real tree; .resolve() would chase it and make us read
+# the wrong output/<slug>/target.toml.
+HERE = Path(__file__).absolute().parent
 SCRIPT_ROOT = HERE.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
