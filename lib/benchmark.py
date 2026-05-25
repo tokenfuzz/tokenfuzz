@@ -517,9 +517,9 @@ def parse_cluster_count(clusters_md: Path, fallback: int) -> int:
 # _INPUT_KEYS picks `input_tokens` first, so the same subtract-cached
 # normalization applies). Claude reports fresh input only and stays out
 # of this list. harvest_tokens subtracts the cached part for these so
-# `input_tokens` means the same thing — fresh input — on every backend.
-# Backend names are industry vocabulary, not target-specific, so this
-# list is harness-shared by design.
+# the per-turn delta is comparable across backends. Backend names are
+# industry vocabulary, not target-specific, so this list is
+# harness-shared by design.
 _INPUT_INCLUDES_CACHED = ("codex", "oss", "gemini")
 
 
@@ -529,14 +529,18 @@ def harvest_tokens(index_jsonl: Path) -> dict:
     Counts are normalized so a field means the same thing on every
     backend, which is what makes a cross-condition cost comparison fair:
 
-      * input_tokens — FRESH (uncached) input. Claude reports input that
-        way already; codex/oss/gemini fold the cached prefix into `input`,
-        so the cached part is subtracted (see _INPUT_INCLUDES_CACHED).
-      * cached_input_tokens — cache READS plus cache WRITES. Both are
-        input the model processed; they bill at different tiers, but the
-        ledger column is one number. Dropping the cache-write part (as an
-        earlier version did) silently undercounts Claude, whose
-        cache_creation can run into six figures per cell.
+      * input_tokens — tokens the model processed this turn at the
+        full input rate (≥100%). On Claude this is `input + cache_creation`
+        (cache writes are billed at 125% of base input and represent
+        genuinely new content the model just read). On codex/oss/gemini
+        the SDK's `input` is cumulative — cache_read is subtracted so the
+        remainder is the new content this turn. End result: one number
+        meaning "non-cache-hit input the model paid full freight on,"
+        comparable across backends.
+      * cached_input_tokens — cache READS only (billed at ~10%). Kept
+        separate so the headline Input column isn't inflated by the cheap
+        amortized part. Cache writes used to be lumped in here too; they
+        now live in input_tokens where they belong.
     """
     totals = {
         "iterations": 0,
@@ -578,11 +582,15 @@ def harvest_tokens(index_jsonl: Path) -> dict:
         cache_read = _int(tok.get("cached_input")) or _int(tok.get("cache_read"))
         cache_creation = _int(tok.get("cache_creation"))
         if backend in _INPUT_INCLUDES_CACHED:
-            fresh_input = max(0, raw_input - cache_read)
+            full_rate_input = max(0, raw_input - cache_read)
         else:
-            fresh_input = raw_input
-        totals["input_tokens"] += fresh_input
-        totals["cached_input_tokens"] += cache_read + cache_creation
+            # Claude's `input` excludes both cache hits AND cache writes;
+            # cache_creation is billed at 125% of base input rate and is
+            # genuinely fresh content the model just processed, so it
+            # belongs in the full-rate bucket alongside `input`.
+            full_rate_input = raw_input + cache_creation
+        totals["input_tokens"] += full_rate_input
+        totals["cached_input_tokens"] += cache_read
         totals["output_tokens"] += _int(tok.get("output"))
         for field in ("prompt_estimate", "prompt_estimate_build"):
             val = tok.get(field)
@@ -1407,6 +1415,40 @@ def _fmt_tokens(value: object) -> str:
     return f"{n / 1_000_000:.1f}M"
 
 
+def _fmt_input_cell(agg: dict) -> str:
+    """Input column for the cross-backend rollup, with an estimated fallback.
+
+    Backends that surface no usage telemetry (the gemini Antigravity CLI)
+    sum to 0 measured input even when work happened. The harness still
+    derives a character-count `prompt_estimate` per turn — fall back to
+    that sum so a Gemini cell isn't scored as zero-cost. A `~` prefix
+    flags the cell as estimated so it isn't mistaken for measured.
+    """
+    measured = int(agg.get("input_tokens_total") or 0)
+    if measured > 0:
+        return _fmt_tokens(measured)
+    estimate = int(agg.get("prompt_estimate_tokens_total") or 0)
+    if estimate > 0:
+        return f"~{_fmt_tokens(estimate)}"
+    return _fmt_tokens(measured)
+
+
+def _fmt_output_cell(agg: dict) -> str:
+    """Output column for the cross-backend rollup.
+
+    When the backend reports no measured output (gemini) and we only
+    have an input-side prompt estimate, render an em dash rather than
+    `0` — there is no output estimate, and printing `0` falsely implies
+    the model produced nothing.
+    """
+    measured = int(agg.get("output_tokens_total") or 0)
+    if measured > 0:
+        return _fmt_tokens(measured)
+    if int(agg.get("prompt_estimate_tokens_total") or 0) > 0:
+        return "—"
+    return _fmt_tokens(measured)
+
+
 def _fmt_hours(seconds: object) -> str:
     """Wall-clock duration as decimal hours: 5400s -> `1.50h`.
 
@@ -1690,17 +1732,38 @@ def render_section(report: dict) -> str:
             )
         lines.append("")
         lines.append(
-            "> Each row is one cell; the **bold** row per condition is its "
-            "total — the figure to compare cost on. **Input** is fresh "
-            "(uncached) input tokens, put on one scale across backends: "
-            "codex folds cached tokens into its `input` count, so that part "
-            "is subtracted here. **Cached input** combines cache reads and "
-            "cache writes. **Prompt est.** is a character-count estimate, "
-            "used only when a backend reports no usage at all (the gemini "
-            "CLI). **Source** says where a row's numbers came from — "
-            "`measured` from the backend's own telemetry, `estimated` from "
-            "character counts, `unknown` when a cell produced no usage data. "
-            "Counts use `k` for thousands and `M` for millions."
+            "> Each row is one cell. The **bold** row per condition is "
+            "its total — the figure to compare cost on. `k` = thousands, "
+            "`M` = millions."
+        )
+        lines.append(">")
+        lines.append(
+            "> - **Input** — tokens processed at the full input rate "
+            "(≥100% of base). Claude: fresh `input` + `cache_creation` "
+            "(cache writes at 125%). Codex/Gemini: SDK `input` minus "
+            "cache hits. One number meaning \"non-cache-hit input the "
+            "model paid full freight on,\" comparable across backends."
+        )
+        lines.append(
+            "> - **Cached input** — cache READS only, billed at ~10% "
+            "of base. Large numbers mean the harness is reusing a stable "
+            "prefix — that's what keeps cost down."
+        )
+        lines.append(
+            "> - **Output** — tokens the model emitted (responses + "
+            "tool-call payloads). Billed at the full output rate."
+        )
+        lines.append(
+            "> - **Prompt est.** — character-count estimate of the "
+            "prompt side. Populated only when a backend exposes no "
+            "usage data (Antigravity CLI; `USE_GEMINI_CLI=1` produces "
+            "measured numbers instead). Sanity check for cells whose "
+            "**Input** reads `~<n>`."
+        )
+        lines.append(
+            "> - **Source** — where the numbers came from: `measured` "
+            "(backend telemetry), `estimated` (character counts), "
+            "`unknown` (no usage signal), `mixed` across cells."
         )
         lines.append("")
 
@@ -1864,7 +1927,7 @@ def crosstab(bench_root: Path) -> str:
         return "\n".join(lines)
 
     lines.append(
-        "| Backend | Run | Target | Condition | Wall (h) | Replicates "
+        "| Target | Backend | Condition | Run | Wall (h) | Replicates "
         "| Rejected findings | Findings | Unique findings "
         "| Rejected crashes | Crashes | Unique crashes "
         "| Medium+ crashes | Top severity "
@@ -1877,142 +1940,240 @@ def crosstab(bench_root: Path) -> str:
         "| --: | :--: "
         "| --: | --: |"
     )
-    for row in sorted(rows, key=lambda r: (
-        str(r["run"].get("backend", "")),
-        str(r["run"].get("target", "")),
-        str(r["run"].get("runid", "")),
-    )):
+
+    # Flatten (run × condition) so each emitted row is one
+    # target/backend/condition/run tuple. Sorted by (target, backend,
+    # condition, run) — target-first so all rows for one project sit
+    # together, then split by backend, then by condition (tokenfuzz vs
+    # baseline), with reruns of the same cell adjacent. Empty
+    # `conditions` lists still surface — they become a single placeholder
+    # row carrying just the run's identity so partially-failed runs are
+    # visible in the rollup.
+    flat_rows: list[dict] = []
+    for row in rows:
         run = row["run"]
+        conds = row["conditions"] or [None]
+        for c in conds:
+            flat_rows.append({"row": row, "run": run, "cond": c})
+
+    def _condition_sort_key(entry: dict) -> str:
+        c = entry["cond"]
+        if not c:
+            return ""
+        backend = str(entry["run"].get("backend", ""))
+        model = str(entry["run"].get("model", ""))
+        return _condition_label(str(c.get("condition", "?")), backend, model)
+
+    flat_rows.sort(key=lambda e: (
+        str(e["run"].get("target", "")),
+        str(e["run"].get("backend", "")),
+        _condition_sort_key(e),
+        str(e["run"].get("runid", "")),
+    ))
+
+    for entry in flat_rows:
+        run = entry["run"]
+        c = entry["cond"]
         backend = run.get("backend", "?")
         model = run.get("model", "")
-        backend_cell = (_md_link(f"`{backend}`", row["ledger"])
-                        if row["ledger"] else f"`{backend}`")
+        backend_cell = (_md_link(f"`{backend}`", entry["row"]["ledger"])
+                        if entry["row"]["ledger"] else f"`{backend}`")
         runid = run.get("runid", "?")
         target = run.get("target", "?")
-        # Counts link to each condition's own per-condition crash/finding
-        # tree and cluster reports, so the crosstab is a jump board into
-        # the evidence — harness and model-direct resolve separately.
-        bench_dir = row["bench_dir"]
-        conds = sorted(
-            row["conditions"],
-            key=lambda c: (-c.get("top_severity_rank", 0),
-                           c.get("condition", "")),
-        )
-        if not conds:
+        bench_dir = entry["row"]["bench_dir"]
+        if c is None:
             lines.append(
-                f"| {backend_cell} | `{runid}` | `{target}` | — "
+                f"| `{target}` | {backend_cell} | — | `{runid}` "
                 f"| — | — | — | — | — | — | — | — | — | · — | — | — |"
             )
             continue
-        for c in conds:
-            cond = c.get("condition", "?")
-            crashes_dir = (_condition_pool_dir(bench_dir, cond, "crashes")
-                           if bench_dir else None)
-            findings_dir = (_condition_pool_dir(bench_dir, cond, "findings")
-                            if bench_dir else None)
-            rejected_findings_dir = (
-                _condition_pool_dir(bench_dir, cond, "findings-rejected")
-                if bench_dir else None
-            )
-            rejected_crashes_dir = (
-                _condition_pool_dir(bench_dir, cond, "crashes-rejected")
-                if bench_dir else None
-            )
-            lines.append(
-                "| {bk} | {rid} | {tgt} | `{cond}` | {wall} | {reps} "
-                "| {rfi} | {fi} | {uf} "
-                "| {rcr} | {cr} | {uc} "
-                "| {mp} | {sev} | {inp} | {out} |".format(
-                    bk=backend_cell,
-                    rid=f"`{runid}`",
-                    tgt=f"`{target}`",
-                    cond=_condition_label(cond, backend, model),
-                    wall=_fmt_hours(c.get("wall_median")),
-                    reps=(
-                        "{d}/{t}".format(
-                            d=int(c.get("replicates_done", 0) or 0),
-                            t=int(c.get("replicates_total", 0) or 0),
+        cond = c.get("condition", "?")
+        # Counts link to each condition's own per-condition crash/finding
+        # tree and cluster reports, so the crosstab is a jump board into
+        # the evidence — harness and model-direct resolve separately.
+        crashes_dir = (_condition_pool_dir(bench_dir, cond, "crashes")
+                       if bench_dir else None)
+        findings_dir = (_condition_pool_dir(bench_dir, cond, "findings")
+                        if bench_dir else None)
+        rejected_findings_dir = (
+            _condition_pool_dir(bench_dir, cond, "findings-rejected")
+            if bench_dir else None
+        )
+        rejected_crashes_dir = (
+            _condition_pool_dir(bench_dir, cond, "crashes-rejected")
+            if bench_dir else None
+        )
+        lines.append(
+            "| {tgt} | {bk} | `{cond}` | {rid} | {wall} | {reps} "
+            "| {rfi} | {fi} | {uf} "
+            "| {rcr} | {cr} | {uc} "
+            "| {mp} | {sev} | {inp} | {out} |".format(
+                bk=backend_cell,
+                rid=f"`{runid}`",
+                tgt=f"`{target}`",
+                cond=_condition_label(cond, backend, model),
+                wall=_fmt_hours(c.get("wall_median")),
+                reps=(
+                    "{d}/{t}".format(
+                        d=int(c.get("replicates_done", 0) or 0),
+                        t=int(c.get("replicates_total", 0) or 0),
+                    )
+                    + (
+                        " ({q}q)".format(
+                            q=int(c.get("replicates_quota_exhausted", 0) or 0)
                         )
-                        + (
-                            " ({q}q)".format(
-                                q=int(c.get("replicates_quota_exhausted", 0) or 0)
-                            )
-                            if int(c.get("replicates_quota_exhausted", 0) or 0) > 0
-                            else ""
-                        )
-                    ),
-                    rfi=_crosstab_count(
-                        c.get("rejected_finding_total", 0),
-                        rejected_findings_dir,
-                        "REJECTED-FINDINGS",
-                    ),
-                    fi=_crosstab_count(c.get("finding_total", 0),
-                                       findings_dir),
-                    uf=_crosstab_count(c.get("unique_finding_clusters", 0),
-                                       findings_dir, "FINDING-CLUSTERS"),
-                    rcr=_crosstab_count(
-                        c.get("rejected_crash_total", 0),
-                        rejected_crashes_dir,
-                        "REJECTED-CRASHES",
-                    ),
-                    cr=_crosstab_count(c.get("crash_total", 0), crashes_dir),
-                    uc=_crosstab_count(c.get("unique_crash_clusters", 0),
-                                       crashes_dir, "CRASH-CLUSTERS"),
-                    mp=c.get("medium_plus_bugs", 0),
-                    sev=_severity_cell(c.get("top_severity_level", "—")),
-                    inp=_fmt_tokens(c.get("input_tokens_total")),
-                    out=_fmt_tokens(c.get("output_tokens_total")),
-                )
+                        if int(c.get("replicates_quota_exhausted", 0) or 0) > 0
+                        else ""
+                    )
+                ),
+                rfi=_crosstab_count(
+                    c.get("rejected_finding_total", 0),
+                    rejected_findings_dir,
+                    "REJECTED-FINDINGS",
+                ),
+                fi=_crosstab_count(c.get("finding_total", 0),
+                                   findings_dir),
+                uf=_crosstab_count(c.get("unique_finding_clusters", 0),
+                                   findings_dir, "FINDING-CLUSTERS"),
+                rcr=_crosstab_count(
+                    c.get("rejected_crash_total", 0),
+                    rejected_crashes_dir,
+                    "REJECTED-CRASHES",
+                ),
+                cr=_crosstab_count(c.get("crash_total", 0), crashes_dir),
+                uc=_crosstab_count(c.get("unique_crash_clusters", 0),
+                                   crashes_dir, "CRASH-CLUSTERS"),
+                mp=c.get("medium_plus_bugs", 0),
+                sev=_severity_cell(c.get("top_severity_level", "—")),
+                inp=_fmt_input_cell(c),
+                out=_fmt_output_cell(c),
             )
+        )
     lines.append("")
-    lines.append("Each backend/run/target/condition row is kept distinct.")
+    lines.append(
+        "Every row is one `target × backend × condition × run`. Rows stay "
+        "distinct so reruns don't average together. Columns are bucketed "
+        "below."
+    )
+    lines.append("")
+
+    lines.append("**What ran.**")
     lines.append("")
     lines.append(
-        "- `tokenfuzz` is the audit harness; `<model>-direct` is the bare "
-        "CTF-prompt baseline."
+        "- **Target** — open-source C/C++ project under audit "
+        "(`cjson`, `curl`, …), built with `-fsanitize=address -g -O1` "
+        "and its own pool of work cards."
     )
     lines.append(
-        "- **Wall (h)** is the median hours a cell ran — for `tokenfuzz` "
-        "this is the per-cell wall budget; for `<model>-direct` it is "
-        "`min(budget, time-to-exit)` since the baseline exits early once "
-        "the model is done."
+        "- **Backend** — agent runtime that drove the cell "
+        "(`claude`, `codex`, `gemini`). Links to that backend's ledger."
     )
     lines.append(
-        "- **Input** / **Output** are total tokens for the condition "
-        "(`k` = thousands, `M` = millions)."
-    )
-    lines.append("- Count columns — each cell links to its on-disk evidence:")
-    lines.append(
-        "  - **Rejected findings** — FIND reports that failed the "
-        "independent validator gate (linked: `REJECTED-FINDINGS` index)."
+        "- **Condition** — which agent loop produced the row. "
+        "`tokenfuzz` is the full audit harness (recon → work cards → "
+        "per-agent investigation → crash triage). `<model>-direct` is "
+        "the bare baseline: hand the model the CTF prompt, no scaffolding. "
+        "The contrast is the point of the benchmark."
     )
     lines.append(
-        "  - **Findings** — issues reported in prose that survived triage "
-        "but produced no crash on disk (linked: per-condition findings tree)."
+        "- **Run** — run identifier (UTC start timestamp); one per "
+        "`bin/benchmark` invocation."
+    )
+    lines.append("")
+
+    lines.append("**Effort spent.**")
+    lines.append("")
+    lines.append(
+        "- **Wall (h)** — median per-replicate wall-clock, in decimal "
+        "hours. `tokenfuzz` runs to the operator's time budget; "
+        "`<model>-direct` is `min(budget, time-to-exit)` — the baseline "
+        "exits early once the model decides it's done."
     )
     lines.append(
-        "  - **Unique findings** — finding count after `bin/cluster-findings` "
-        "merges duplicate signatures (linked: `FINDING-CLUSTERS` report)."
+        "- **Replicates** — `done/total`. A `(Nq)` suffix means N "
+        "replicates hit the provider quota before finishing — treat as "
+        "upper-bounded effort, not failures."
+    )
+    lines.append("")
+
+    lines.append(
+        "**Findings — issues claimed in prose, no on-disk crash.** "
+        "Each count links to the evidence tree on disk."
+    )
+    lines.append("")
+    lines.append(
+        "- **Rejected findings** — FIND reports an independent validator "
+        "agent threw out (false positives, misreadings, "
+        "sanitizer-already-catches). Linked to `REJECTED-FINDINGS`."
     )
     lines.append(
-        "  - **Rejected crashes** — crash dirs the triage validator rejected "
-        "(linked: `REJECTED-CRASHES` index)."
+        "- **Findings** — FIND reports that survived the validator gate "
+        "but produced no crash artifact. Leads, not yet bugs."
     )
     lines.append(
-        "  - **Crashes** — crash dirs with real AddressSanitizer output on "
-        "disk; prose-only crash claims never count (linked: per-condition "
-        "crashes tree)."
+        "- **Unique findings** — Findings after `bin/cluster-findings` "
+        "merges duplicate signatures. Linked to `FINDING-CLUSTERS`."
+    )
+    lines.append("")
+
+    lines.append(
+        "**Crashes — real AddressSanitizer reports on disk.** Prose-only "
+        "claims never count here; only directories with an actual ASan "
+        "log."
+    )
+    lines.append("")
+    lines.append(
+        "- **Rejected crashes** — crash dirs triage discarded "
+        "(not reproducible, harness artefact, known issue). Linked to "
+        "`REJECTED-CRASHES`."
     )
     lines.append(
-        "  - **Unique crashes** — crash count after `bin/cluster-crashes` "
-        "merges duplicate signatures (linked: `CRASH-CLUSTERS` report)."
+        "- **Crashes** — crash dirs that survived triage. Reproducible "
+        "ASan findings with stack frames on disk."
     )
     lines.append(
-        "  - **Medium+ crashes** / **Top severity** — `bin/reachability` "
-        "scores every crash of both conditions on one scale."
+        "- **Unique crashes** — Crashes after `bin/cluster-crashes` "
+        "merges duplicate signatures. Linked to `CRASH-CLUSTERS`."
+    )
+    lines.append("")
+
+    lines.append(
+        "**Severity — `bin/reachability` scores every crash on one "
+        "scale**, so harness vs baseline compares on impact, not just "
+        "count."
+    )
+    lines.append("")
+    lines.append(
+        "- **Medium+ crashes** — Unique crashes scored Medium or higher. "
+        "The number to optimize for; low-severity noise inflates "
+        "**Crashes** without moving this."
     )
     lines.append(
-        "- Backend cell links to that backend's full append-only ledger."
+        "- **Top severity** — highest tier observed in the cell "
+        "(`Low`/`Medium`/`High`/`Critical`, or `—` when nothing triaged)."
+    )
+    lines.append("")
+
+    lines.append(
+        "**Token cost — `k` = thousands, `M` = millions.** Normalized "
+        "across backends so the columns compare apples-to-apples."
+    )
+    lines.append("")
+    lines.append(
+        "- **Input** — tokens processed at the full input rate "
+        "(≥100% of base). Claude: fresh `input` + `cache_creation` "
+        "(cache writes, billed at 125%). Codex/Gemini: SDK `input` "
+        "minus cache hits (their `input` is cumulative). Cache reads "
+        "(~10% rate) are excluded — they live in each backend's per-run "
+        "ledger. A `~` prefix means an estimate from prompt characters "
+        "(Antigravity CLI exposes no usage; running gemini-cli instead "
+        "via `USE_GEMINI_CLI=1` produces measured numbers)."
+    )
+    lines.append(
+        "- **Output** — tokens the model emitted (responses + tool-call "
+        "payloads), billed at the full output rate. `—` means the "
+        "backend reported no measured output and there's no "
+        "character-side estimate — shown instead of a misleading `0`."
     )
     lines.append("")
     return "\n".join(lines)

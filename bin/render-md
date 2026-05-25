@@ -856,7 +856,7 @@ def _table_extra_class(header: list[str]) -> str:
     # harness-wide `min-width: max-content` + nowrap-on-code rules
     # otherwise force horizontal scrolling.
     if [c.lower() for c in header[:4]] == [
-        "backend", "run", "target", "condition"
+        "target", "backend", "condition", "run"
     ]:
         return "benchmark-table"
     return ""

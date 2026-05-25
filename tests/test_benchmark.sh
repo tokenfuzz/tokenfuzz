@@ -86,8 +86,10 @@ assert_eq "5" "$(echo "$shv" | jq -r '.tokens.asan_invocations')" \
   "T1s3: harvest sums asan invocations from the sibling index"
 
 # ── T1n: harvest normalizes input across backends + folds cache writes ───
-# codex reports `input` inclusive of the cached prefix; claude reports
-# fresh input only and a separate cache_creation (cache-write) counter.
+# Across backends, `input_tokens` means "tokens processed at the full
+# input rate (≥100% of base)" — for claude that's fresh `input` plus
+# `cache_creation` (cache writes, billed at 125%); for codex/gemini the
+# SDK's `input` is cumulative, so cache reads are subtracted out.
 nrd="$work/tok-norm/results"
 mkdir -p "$nrd/logs"
 printf '%s\n' \
@@ -96,12 +98,12 @@ printf '%s\n' \
   '{"backend":"gemini","tokens":{"input":58000,"cached_input":55000,"cache_creation":0,"output":80}}' \
   > "$nrd/logs/index.jsonl"
 nhv=$(python3 "$PY" harvest "$nrd")
-# codex fresh = 1000-800 = 200; claude fresh = 30; gemini fresh = 58000-55000 = 3000 → 3230.
-assert_eq "3230" "$(echo "$nhv" | jq -r '.tokens.input_tokens')" \
-  "T1n: input normalized to fresh (codex+gemini cached prefix subtracted)"
-# cached = codex(800+0) + claude(4000+120) + gemini(55000+0) = 59920.
-assert_eq "59920" "$(echo "$nhv" | jq -r '.tokens.cached_input_tokens')" \
-  "T1o: cache reads + cache writes folded into cached_input_tokens"
+# codex = 1000-800 = 200; claude = 30+120 = 150; gemini = 58000-55000 = 3000 → 3350.
+assert_eq "3350" "$(echo "$nhv" | jq -r '.tokens.input_tokens')" \
+  "T1n: input normalized to full-rate tokens (claude folds cache_creation; codex/gemini subtract cache_read)"
+# cached = cache READS only: codex 800 + claude 4000 + gemini 55000 = 59800.
+assert_eq "59800" "$(echo "$nhv" | jq -r '.tokens.cached_input_tokens')" \
+  "T1o: cached_input_tokens is cache reads only (writes now live in input_tokens)"
 assert_eq "830" "$(echo "$nhv" | jq -r '.tokens.output_tokens')" \
   "T1p: output tokens summed across backends"
 
