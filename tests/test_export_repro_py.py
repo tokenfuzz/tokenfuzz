@@ -207,6 +207,52 @@ with tempfile.TemporaryDirectory() as td:
     assert_not_in("/root/work/targets/zlib", q.read_text(encoding="utf-8"),
               "normalize: text file no longer leaks raw prefix")
 
+# _install_with_exact_case: guard against case-insensitive FS leaving
+# the bundled REPORT.md visible under the agent's lowercase report.md.
+# On macOS APFS (case-insensitive but case-preserving) and Docker
+# Desktop bind mounts that ride on top of it, writing to "REPORT.md"
+# when a "report.md" entry already exists silently overwrites the bytes
+# but leaves the directory entry under the original lowercase case. The
+# exact-case bundle gate in lib/triage.sh:_triage_has_exact_file then
+# reports "missing REPORT.md" and recycles the crash, eventually
+# auto-rejecting it after CRASH_PROMOTION_PENDING_MAX passes. This test
+# locks in the install helper that unlinks any case-different sibling
+# before copying and falls back to os.rename if the FS still serves the
+# old case.
+with tempfile.TemporaryDirectory() as td:
+    out_dir = Path(td) / "out"
+    out_dir.mkdir()
+    # Pre-seed the lowercase entry that would defeat a naive copy.
+    (out_dir / "report.md").write_text("stale agent draft\n", encoding="utf-8")
+    src = Path(td) / "stage" / "REPORT.md"
+    src.parent.mkdir()
+    src.write_text("# canonical bundled report\n", encoding="utf-8")
+
+    # Detect host case-sensitivity by seeing whether the lowercase
+    # sibling above is even visible under the uppercase name. On
+    # case-sensitive filesystems the two are independent entries; on
+    # case-insensitive filesystems they resolve to one.
+    case_insensitive = (out_dir / "REPORT.md").is_file()
+
+    er._install_with_exact_case(src, out_dir / "REPORT.md")
+    entries = sorted(p.name for p in out_dir.iterdir())
+    assert_in("REPORT.md", entries,
+              "install_with_exact_case: canonical case present after install")
+    assert_not_in("report.md", entries,
+                  "install_with_exact_case: lowercase sibling cleared")
+    if case_insensitive:
+        assert_eq(["REPORT.md"], entries,
+                  "install_with_exact_case: exactly one entry on "
+                  "case-insensitive FS (the staged bundle file)")
+    assert_in("canonical bundled report",
+              (out_dir / "REPORT.md").read_text(encoding="utf-8"),
+              "install_with_exact_case: staged content installed")
+
+    # Re-running on a clean dir is a no-op (idempotent).
+    er._install_with_exact_case(src, out_dir / "REPORT.md")
+    assert_eq(["REPORT.md"], sorted(p.name for p in out_dir.iterdir()),
+              "install_with_exact_case: idempotent on clean dir")
+
 # ─── Advisory detection ─────────────────────────────────────────
 with tempfile.TemporaryDirectory() as td:
     rpt = Path(td) / "report.md"

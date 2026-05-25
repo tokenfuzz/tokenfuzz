@@ -31,6 +31,7 @@ SCRIPT_ROOT = HERE.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import target_config  # noqa: E402
+from cluster_common import exact_child_file  # noqa: E402
 from report_enrich import EnrichContext, enrich_file  # noqa: E402
 
 
@@ -41,10 +42,12 @@ def _resolve_report_path(arg: Path) -> Path | None:
     if arg.is_file():
         return arg
     if arg.is_dir():
-        for name in _REPORT_CANDIDATES:
-            cand = arg / name
-            if cand.is_file():
-                return cand
+        # exact_child_file returns the on-disk case, so the Path we hand
+        # to enrich_file matches whatever the FS stored. Writing through
+        # a wrong-case Path on case-insensitive filesystems (macOS APFS,
+        # Docker Desktop bind mounts) can silently flip the visible case
+        # and break lib/triage.sh's exact-case bundle gate.
+        return exact_child_file(arg, _REPORT_CANDIDATES)
     return None
 
 

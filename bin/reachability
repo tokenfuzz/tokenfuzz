@@ -74,6 +74,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+HERE = Path(__file__).absolute().parent
+sys.path.insert(0, str(HERE.parent / "lib"))
+
+from cluster_common import exact_child_file  # noqa: E402
+
 USER_AGENT = "tokenfuzz-reachability/1.0"
 DEFAULT_TIMEOUT = 10.0
 BACKOFF_SECS = 30.0
@@ -2359,11 +2364,15 @@ def _run_batch(results_dir: Path, args: argparse.Namespace) -> int:
 
 
 def _find_report_md_in_dir(report_dir: Path) -> Path | None:
-    for name in ("report.md", "REPORT.md"):
-        p = report_dir / name
-        if p.is_file():
-            return p
-    return None
+    # exact_child_file walks the real directory entries, so the returned
+    # Path carries the on-disk case. On case-insensitive filesystems
+    # (macOS APFS default, Docker Desktop bind mounts) both "report.md"
+    # and "REPORT.md" resolve to the same entry; a naive (report_dir /
+    # name).is_file() probe returns a Path with whatever case we asked
+    # for, and a later write_text through that Path can leave the
+    # visible entry under the wrong case — which then trips the
+    # exact-case bundle gate in lib/triage.sh:_triage_has_exact_file.
+    return exact_child_file(report_dir, ("report.md", "REPORT.md"))
 
 
 def _resolve_report_arg(report_arg: Path) -> tuple[Path, Path] | None:

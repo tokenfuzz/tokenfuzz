@@ -1767,6 +1767,46 @@ def _normalize_bundle_file(path: Path, cfg: target_config.Config) -> None:
         return
 
 
+def _install_with_exact_case(src: Path, dst: Path) -> None:
+    """Copy ``src`` to ``dst`` and guarantee the on-disk entry name is
+    exactly ``dst.name``.
+
+    On case-insensitive but case-preserving filesystems (macOS APFS
+    default, Docker Desktop bind mounts), ``shutil.copyfile`` to a
+    destination that already exists under a different case opens the
+    existing entry and overwrites its bytes, leaving the visible name
+    under the *old* case. lib/triage.sh's exact-case bundle gate then
+    reports "missing REPORT.md" for a bundle that is correctly written
+    byte-for-byte but lives under ``report.md``.
+    """
+    target_lower = dst.name.lower()
+    try:
+        for entry in os.scandir(dst.parent):
+            if entry.name == dst.name:
+                continue
+            if entry.name.lower() != target_lower:
+                continue
+            try:
+                os.unlink(entry.path)
+            except OSError:
+                pass
+    except OSError:
+        pass
+    shutil.copyfile(str(src), str(dst))
+    os.chmod(dst, 0o644)
+    # Belt-and-suspenders for bind-mount layers whose dirent cache
+    # survived the unlink: rename if the FS still served the old case.
+    try:
+        for entry in os.scandir(dst.parent):
+            if entry.name == dst.name:
+                return
+            if entry.name.lower() == target_lower:
+                os.rename(entry.path, str(dst))
+                return
+    except OSError:
+        return
+
+
 def _is_bundle_filename(name: str) -> bool:
     # Note: asan.txt is intentionally NOT in the bundle set — the canonical
     # filename is sanitizer.txt, and any legacy asan.txt left over from an
@@ -2460,12 +2500,10 @@ def main(argv: list[str]) -> int:
         install_candidates.append(stage / "patch.diff")
         for staged in install_candidates:
             if staged.is_file():
-                shutil.copyfile(staged, out_dir / staged.name)
-                os.chmod(out_dir / staged.name, 0o644)
+                _install_with_exact_case(staged, out_dir / staged.name)
         for staged in stage.glob("input.*"):
             if staged.is_file():
-                shutil.copyfile(staged, out_dir / staged.name)
-                os.chmod(out_dir / staged.name, 0o644)
+                _install_with_exact_case(staged, out_dir / staged.name)
         repro_dest = out_dir / "reproduce.sh"
         if repro_dest.is_file():
             try:
