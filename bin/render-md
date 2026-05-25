@@ -401,6 +401,9 @@ _HTML_HEAD = """<!DOCTYPE html>
   /* Compact field grid for REPORT.md "Fields" table */
   .fields-table th:first-child {{ width: 220px; }}
   .fields-table td:first-child {{ font-weight: 500; color: var(--muted); }}
+  /* Rejected findings table: ID | Vote | Class | Severity | Reason | Report.
+     Fixed widths keep ID/Vote/Class/Severity/Report on one line; Reason
+     takes the remainder and wraps. */
   .rejected-findings-table {{
     table-layout: fixed;
   }}
@@ -409,14 +412,12 @@ _HTML_HEAD = """<!DOCTYPE html>
   .rejected-findings-table th:nth-child(2),
   .rejected-findings-table td:nth-child(2) {{ width: 6rem; white-space: nowrap; }}
   .rejected-findings-table th:nth-child(3),
-  .rejected-findings-table td:nth-child(3) {{ width: 8rem; white-space: nowrap; }}
+  .rejected-findings-table td:nth-child(3) {{ width: 12rem; white-space: nowrap; }}
   .rejected-findings-table th:nth-child(4),
-  .rejected-findings-table td:nth-child(4) {{ width: 5.5rem; white-space: nowrap; }}
-  .rejected-findings-table th:nth-child(5),
-  .rejected-findings-table td:nth-child(5) {{ width: 6rem; white-space: nowrap; }}
-  .rejected-findings-table th:nth-child(7),
-  .rejected-findings-table td:nth-child(7) {{ width: 9rem; white-space: nowrap; }}
-  .rejected-findings-table td:nth-child(6) {{
+  .rejected-findings-table td:nth-child(4) {{ width: 6rem; white-space: nowrap; }}
+  .rejected-findings-table th:nth-child(6),
+  .rejected-findings-table td:nth-child(6) {{ width: 9rem; white-space: nowrap; }}
+  .rejected-findings-table td:nth-child(5) {{
     word-break: normal;
     overflow-wrap: anywhere;
   }}
@@ -849,7 +850,7 @@ def _table_extra_class(header: list[str]) -> str:
     if [c.lower() for c in header[:2]] == ["field", "value"]:
         return "fields-table"
     if [c.lower() for c in header] == [
-        "id", "vote", "reachability", "guards", "primitive", "reason", "report"
+        "id", "vote", "class", "severity", "reason", "report"
     ]:
         return "rejected-findings-table"
     # The aggregated benchmark crosstab is 16 columns wide; the

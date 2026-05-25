@@ -713,6 +713,20 @@ def _choose_vote(finding_dir: Path) -> dict:
     return votes[-1] if votes else {}
 
 
+def _choose_find_quality(finding_dir: Path) -> dict:
+    """Read the FIND-quality gate cache (lib/triage.sh) when present.
+
+    Rejections via the FIND-quality LLM gate write
+    `.llm-find-quality.json` with `accept/reason/class/severity` — not
+    a `validator-vote-*.json`. Reading both keeps the page populated
+    regardless of which gate flagged the finding.
+    """
+    cache = finding_dir / ".llm-find-quality.json"
+    if not cache.is_file():
+        return {}
+    return _read_json(cache) or {}
+
+
 def _bool_label(value: object) -> str:
     if value is True:
         return "yes"
@@ -779,16 +793,24 @@ def _rejected_finding_rows(rejected_dir: Path) -> list[dict]:
         if not finding_dir.is_dir() or not finding_dir.name.startswith("FIND-"):
             continue
         vote = _choose_vote(finding_dir)
-        verified = vote.get("verified") if isinstance(vote.get("verified"), dict) else {}
+        quality = _choose_find_quality(finding_dir)
+        # Class/severity come from the FIND-quality cache; the validator
+        # vote pipeline doesn't emit them. Reason prefers the validator's
+        # rationale (long-form) and falls back to the FIND-gate reason.
+        reason = (
+            vote.get("rationale")
+            or vote.get("reason")
+            or quality.get("reason")
+            or vote.get("caveats")
+            or ""
+        )
         rows.append({
             "id": finding_dir.name,
             "title": _finding_title(finding_dir),
             "vote": vote.get("vote") or "Rejected",
-            "reachability": _bool_label(verified.get("reachability")),
-            "guards": _bool_label(verified.get("guards")),
-            "primitive": _bool_label(verified.get("primitive")),
-            "rationale": vote.get("rationale") or vote.get("reason") or "",
-            "caveats": vote.get("caveats") or "",
+            "class": str(quality.get("class") or "").strip(),
+            "severity": str(quality.get("severity") or "").strip(),
+            "reason": reason,
             "report": _report_link_name(finding_dir),
         })
     return rows
@@ -894,33 +916,31 @@ def write_rejected_findings_index(rejected_dir: Path) -> None:
         "# Rejected findings",
         "",
         (
-            "Findings rejected by the independent validator gate. The boolean "
-            "columns are the validator's explicit checks: reachability from the "
-            "target boundary, guard-bypass validity, and the claimed primitive."
+            "Findings rejected by triage. **Class** and **Severity** come "
+            "from the FIND-quality gate (`lib/triage.sh`); **Reason** is "
+            "the validator's rationale when one exists, otherwise the "
+            "FIND-gate's rejection reason."
         ),
         "",
     ]
     if rows:
         md_lines.append(
-            "| ID | Vote | Reachability | Guards | Primitive | Reason | Report |"
+            "| ID | Vote | Class | Severity | Reason | Report |"
         )
-        md_lines.append("| --- | --- | :--: | :--: | :--: | --- | --- |")
+        md_lines.append("| --- | --- | --- | :--: | --- | --- |")
         for row in rows:
             report = (
                 f"[Link]({row['id']}/{row['report']})"
                 if row["report"] else "—"
             )
-            reason = re.sub(
-                r"\s+", " ", row["rationale"] or row["caveats"] or "—"
-            ).strip()
+            reason = re.sub(r"\s+", " ", row["reason"] or "—").strip()
             md_lines.append(
-                "| `{id}` | {vote} | {reach} | {guards} | {primitive} "
-                "| {reason} | {report} |".format(
+                "| `{id}` | {vote} | {cls} | {sev} | {reason} | {report} |"
+                .format(
                     id=_md_cell(row["id"]),
                     vote=_md_cell(row["vote"]),
-                    reach=_md_cell(row["reachability"]),
-                    guards=_md_cell(row["guards"]),
-                    primitive=_md_cell(row["primitive"]),
+                    cls=_md_cell(row["class"] or "—"),
+                    sev=_md_cell(row["severity"] or "—"),
                     reason=_md_cell(reason),
                     report=report,
                 )

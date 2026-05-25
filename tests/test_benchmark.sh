@@ -177,12 +177,20 @@ cat > "$rrd/findings-rejected/FIND-raw/validator-vote-1.json" <<'JSON'
 {"vote":"Reject","rationale":"dirty worktree mutation, not target input. This rationale intentionally keeps enough detail to exceed the old table truncation limit, because rejected finding pages are audit evidence and must preserve the full validator explanation all the way through the final sentinel: FULL-RATIONALE-END",
  "verified":{"reachability":false,"guards":true,"primitive":false}}
 JSON
+# FIND-quality cache: the rejection path most pool entries go through.
+# Surfaces class+severity+reason — what the new columns show.
+cat > "$rrd/findings-rejected/FIND-raw/.llm-find-quality.json" <<'JSON'
+{"decision_version":"v7","accept":false,
+ "reason":"FIND-gate fallback reason for rejection",
+ "class":"memory-safety:lifetime","severity":"low",
+ "decision":"find_quality"}
+JSON
 python3 "$PY" pool "$rbd" >/dev/null
 assert_file_exists "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   "T4g: rejected finding markdown index written for combined pool"
 assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
-  'no | yes | no' \
-  "T4h: rejected finding index carries reachability/guards/primitive booleans"
+  '\| memory-safety:lifetime \| low \|' \
+  "T4h: rejected finding index carries class + severity from FIND-quality gate"
 assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   'FULL-RATIONALE-END' \
   "T4h2: rejected finding index keeps the full validator rationale"
