@@ -16,6 +16,11 @@ set -euo pipefail
 # write to their normal backend-specific output directories.
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Export so child Python tools (bin/peer-fix-cards, bin/suggest-*) pick
+# up the facade path instead of falling back to Path(__file__) — which
+# inside a benchmark cell facade chases the bin/ symlink and lands in
+# the wrong tree.
+export SCRIPT_ROOT
 cd "$SCRIPT_ROOT" || { echo "FATAL: cannot cd to $SCRIPT_ROOT" >&2; exit 1; }
 
 # Source extracted modules (runtime vars like RESULTS_DIR are bound at call-time).

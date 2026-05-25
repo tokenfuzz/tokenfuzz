@@ -22,8 +22,11 @@ import os
 import sys
 from pathlib import Path
 
+# .absolute() not .resolve() for the file-based fallback: inside a
+# benchmark cell facade bin/ is a symlink to the real tree; .resolve()
+# would chase it and make us read the wrong output/<slug>/target.toml.
 ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT") \
-    else Path(__file__).resolve().parent.parent
+    else Path(__file__).absolute().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import peer_sources  # noqa: E402
