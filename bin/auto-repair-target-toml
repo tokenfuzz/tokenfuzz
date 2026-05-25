@@ -53,7 +53,10 @@ from pathlib import Path
 try:
     import tomllib  # py311+
 except ModuleNotFoundError:  # pragma: no cover
-    tomllib = None  # type: ignore[assignment]
+    try:
+        import tomli as tomllib  # py39/py310 fallback
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPT_ROOT = SCRIPT_DIR.parent

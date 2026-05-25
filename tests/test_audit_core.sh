@@ -1396,10 +1396,29 @@ unset AUDIT_MODEL_PREFLIGHT_OPTIONAL
 # the remaining retry attempts since a quota does not clear within backoff.
 agy_log_dir="$TEST_TMPDIR/agy-cli-log"
 mkdir -p "$agy_log_dir"
+for i in $(seq 1 200); do
+  f="$agy_log_dir/cli-20260521_2337$(printf '%02d' "$i").log"
+  printf 'I0521 23:37:%02d ordinary agy log\n' "$((i % 60))" > "$f"
+  touch -t "202605212337.$(printf '%02d' "$((i % 60))")" "$f" 2>/dev/null || true
+done
+no_diag="$TEST_TMPDIR/agy-no-diag.raw"
+AUDIT_GEMINI_CLI_LOG_DIR="$agy_log_dir" gemini_capture_cli_log_diag "$no_diag"
+assert_eq "0" "$?" "model preflight: gemini private-log diagnostic ignores logs without matching errors"
+if [ -s "$no_diag" ]; then
+  fail "model preflight: gemini private-log diagnostic does not write header-only output" \
+    "unexpected content: $(cat "$no_diag")"
+else
+  pass "model preflight: gemini private-log diagnostic does not write header-only output"
+fi
 cat > "$agy_log_dir/cli-20260521_233915.log" <<'EOF'
 I0521 23:39:17.366 printmode.go:130 sending message
 E0521 23:39:17.828 log.go:398 agent executor error: RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 137h39m19s.
 EOF
+touch -t 202605212339.15 "$agy_log_dir/cli-20260521_233915.log" 2>/dev/null || true
+quota_diag="$TEST_TMPDIR/agy-quota-diag.raw"
+AUDIT_GEMINI_CLI_LOG_DIR="$agy_log_dir" gemini_capture_cli_log_diag "$quota_diag"
+assert_eq "0" "$?" "model preflight: gemini private-log diagnostic survives many agy logs under pipefail"
+assert_file_contains "$quota_diag" "RESOURCE_EXHAUSTED" "model preflight: gemini private-log diagnostic captures newest quota log"
 quota_attempts_saved="$AUDIT_MODEL_PREFLIGHT_ATTEMPTS"
 quota_backoff_saved="$AUDIT_MODEL_PREFLIGHT_BACKOFF"
 AUDIT_MODEL_PREFLIGHT_ATTEMPTS=3

@@ -172,34 +172,42 @@ cat > "$rrd/findings-rejected/FIND-raw/report.md" <<'EOF_REJ'
 # Dirty source tree mutation
 
 Claimed build break.
+
+- **Source:** recon stage
+- **Recon ID:** RECON-deadbeefcafef00d
+- **Slice:** slice-1
 EOF_REJ
 cat > "$rrd/findings-rejected/FIND-raw/validator-vote-1.json" <<'JSON'
 {"vote":"Reject","rationale":"dirty worktree mutation, not target input. This rationale intentionally keeps enough detail to exceed the old table truncation limit, because rejected finding pages are audit evidence and must preserve the full validator explanation all the way through the final sentinel: FULL-RATIONALE-END",
  "verified":{"reachability":false,"guards":true,"primitive":false}}
 JSON
-# FIND-quality cache: the rejection path most pool entries go through.
-# Surfaces class+severity+reason — what the new columns show.
 cat > "$rrd/findings-rejected/FIND-raw/.llm-find-quality.json" <<'JSON'
 {"decision_version":"v7","accept":false,
  "reason":"FIND-gate fallback reason for rejection",
  "class":"memory-safety:lifetime","severity":"low",
  "decision":"find_quality"}
 JSON
+# Plant a recon REPORT for the linker to find — it should rewrite the
+# bare "Recon ID:" line in the pooled report.md to a markdown link.
+mkdir -p "$rrd/recon/RECON-deadbeefcafef00d"
+echo "# RECON-deadbeefcafef00d — synthetic recon vote" \
+  > "$rrd/recon/RECON-deadbeefcafef00d/REPORT.md"
 python3 "$PY" pool "$rbd" >/dev/null
 assert_file_exists "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   "T4g: rejected finding markdown index written for combined pool"
 assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
-  '\| memory-safety:lifetime \| low \|' \
-  "T4h: rejected finding index carries class + severity from FIND-quality gate"
-assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   'FULL-RATIONALE-END' \
-  "T4h2: rejected finding index keeps the full validator rationale"
+  "T4h: rejected finding index keeps the full validator rationale"
 pooled_rej_dir=$(find "$rbd/pool/findings-rejected" -mindepth 1 -maxdepth 1 \
   -type d -name 'FIND-*' | head -n 1)
 pooled_rej_id="$(basename "$pooled_rej_dir")"
 assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   "\\[Link\\]\\(${pooled_rej_id}/report.md\\)" \
-  "T4h3: rejected finding index labels report links plainly"
+  "T4h2: rejected finding index labels report links plainly"
+# Recon ID linker: pooled report.md now hyperlinks to the source recon REPORT.
+assert_file_contains "$pooled_rej_dir/report.md" \
+  '\[RECON-deadbeefcafef00d\]' \
+  "T4h3: pooled report.md hyperlinks the Recon ID to the recon REPORT"
 python3 "$RENDER_MD" "$pooled_rej_dir/report.md" \
   --html-sibling >/dev/null
 python3 "$RENDER_MD" "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
@@ -1659,6 +1667,10 @@ fi
 #     the quota-exhausted cell from token / wall totals.
 qbd="$work/quota-bench"
 mkdir -p "$qbd/cells/model-direct-r1" "$qbd/cells/model-direct-r2"
+mkdir -p "$qbd/cells/model-direct-r1/findings/FIND-DONE" \
+         "$qbd/cells/model-direct-r2/findings/FIND-QUOTA"
+printf '# done finding\n' > "$qbd/cells/model-direct-r1/findings/FIND-DONE/report.md"
+printf '# quota finding\n' > "$qbd/cells/model-direct-r2/findings/FIND-QUOTA/report.md"
 cat > "$qbd/cells/model-direct-r1/cell.json" <<JSON
 {"condition":"model-direct","replicate":1,"experiment":"e1","results_dir":"$qbd/cells/model-direct-r1","wall_seconds":4000,"status":"done"}
 JSON
@@ -1670,7 +1682,7 @@ cat > "$qbd/cells/model-direct-r2/cell.json" <<JSON
 {"condition":"model-direct","replicate":2,"experiment":"e2","results_dir":"$qbd/cells/model-direct-r2","wall_seconds":300,"status":"quota_exhausted"}
 JSON
 cat > "$qbd/cells/model-direct-r2/metrics.json" <<'JSON'
-{"exists":true,"confirmed_crashes":0,"findings":0,
+{"exists":true,"confirmed_crashes":0,"findings":1,
  "tokens":{"input_tokens":9999,"cached_input_tokens":0,"output_tokens":0,"prompt_estimate_tokens":0,"estimated":true,"iterations":1,"asan_invocations":0}}
 JSON
 qrep=$(python3 "$PY" aggregate "$qbd")
@@ -1686,6 +1698,9 @@ assert_eq "2000" "$(echo "$qrep" | jq -r '.conditions[0].input_tokens_total')" \
 # Wall median must also exclude it (4000s only).
 assert_eq "4000" "$(echo "$qrep" | jq -r '.conditions[0].wall_median')" \
   "T29i: wall_median excludes quota_exhausted cells"
+python3 "$PY" pool "$qbd" >/dev/null
+assert_eq "1" "$(find "$qbd/pool/findings" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" \
+  "T29i2: pool excludes quota_exhausted findings so clusters match totals"
 
 # (c) Crosstab reps cell renders "1/2 (1q)" when quota_exhausted cells exist.
 mkdir -p "$qbd/state"

@@ -147,6 +147,33 @@ llm_backend_bin() {
   esac
 }
 
+llm_newest_agy_cli_log() {
+  local dir newest="" f
+  dir="${AUDIT_GEMINI_CLI_LOG_DIR:-${GEMINI_DIR:-$HOME/.gemini}/antigravity-cli/log}"
+  [ -d "$dir" ] || return 1
+  for f in "$dir"/cli-*.log; do
+    [ -e "$f" ] || continue
+    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+      newest="$f"
+    fi
+  done
+  [ -n "$newest" ] || return 1
+  printf '%s\n' "$newest"
+}
+
+llm_capture_gemini_cli_log_diag() {
+  local dest="$1" newest matches
+  newest="$(llm_newest_agy_cli_log 2>/dev/null || true)"
+  [ -n "$newest" ] && [ -f "$newest" ] || return 0
+  matches="$(grep -E 'RESOURCE_EXHAUSTED|[Qq]uota|429|503|UNAVAILABLE|executor error|Resets in' \
+    "$newest" 2>/dev/null | tail -15 || true)"
+  [ -n "$matches" ] || return 0
+  {
+    printf '[agy CLI log tail: %s]\n' "$newest"
+    printf '%s\n' "$matches"
+  } >> "$dest" 2>/dev/null || true
+}
+
 _llm_first_add_dir() {
   local add_dirs="${1:-}" first
   first="${add_dirs%%,*}"
@@ -189,6 +216,7 @@ llm_run_agent_prompt() {
           | audit_timeout_run "$timeout_secs" "$bin" "${flags[@]}" \
               --print-timeout "${timeout_secs}s" -p "" ) \
           > "$raw_log" 2>&1 || rc=$?
+        [ -s "$raw_log" ] || llm_capture_gemini_cli_log_diag "$raw_log"
       fi
       ;;
     *)
@@ -225,6 +253,7 @@ llm_run_agent_prompt_no_timeout() {
       else
         ( cd "$cwd" && printf '%s' "$prompt" | "$bin" "${flags[@]}" -p "" ) \
           > "$raw_log" 2>&1 || rc=$?
+        [ -s "$raw_log" ] || llm_capture_gemini_cli_log_diag "$raw_log"
       fi
       ;;
     *)

@@ -776,8 +776,11 @@ assert_eq([], tc.declared_cli_names(DCN_DIR / "does-not-exist", "cmake"),
 # between an LLM-supplied string and a corrupted target.toml, so they
 # get round-trip + edge-case coverage here.
 
-# Plain ASCII values round-trip through tomllib.
-import tomllib  # noqa: E402 — local import keeps this section self-contained
+# Plain ASCII values round-trip through tomllib/tomli.
+try:
+    import tomllib  # noqa: E402 — local import keeps this section self-contained
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
 
 def _loads_basic(value: str):
     rendered = tc.toml_basic_string(value)

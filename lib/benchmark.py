@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import re
 import shutil
 import statistics
@@ -223,6 +224,87 @@ def _scrub_pooled_tree(root: Path) -> None:
             continue
         try:
             path.write_text(scrubbed, encoding="utf-8")
+        except OSError:
+            pass
+
+
+# Recon-hash mentions in pooled FIND reports the linker turns into
+# markdown links. Two narrow shapes (kept as a list so adding more
+# patterns later — recon REPORT cross-refs, audit-log cites — is a
+# one-line change). Each pattern's group 1 is the "RECON-<hash>" token
+# to be wrapped; the surrounding context outside the group is preserved
+# verbatim. Negative lookaheads/lookbehinds keep the linker idempotent
+# by skipping hashes already inside a `[…](…)` markdown link.
+_RECON_LINK_PATTERNS = (
+    # `- **Recon ID:** RECON-<hash>` — the FIND's primary recon source.
+    re.compile(
+        r"(?<!\[)(?<!\]\()"
+        r"(?<=\*\*Recon ID:\*\*\s)"
+        r"(RECON-[0-9a-f]+)"
+        r"(?!\])",
+    ),
+    # `Validator details: duplicate of RECON-<hash>` — the dedup parent
+    # that survives even when the primary Recon ID was pruned, so the
+    # linker still gives the reader a reachable recon vote.
+    re.compile(
+        r"(?<!\[)(?<!\]\()"
+        r"(?<=duplicate of\s)"
+        r"(RECON-[0-9a-f]+)"
+        r"(?!\])",
+    ),
+)
+
+
+def _link_pool_recon_ids(pool_finding_dir: Path,
+                         source_results_dir: Path) -> None:
+    """Hyperlink `RECON-<hash>` mentions in a pooled FIND's report.md.
+
+    A pooled FIND records the recon hypothesis that promoted it
+    (`- **Recon ID:** RECON-<hash>`) plus, when the recon was a
+    duplicate, the surviving parent (`Validator details: duplicate of
+    RECON-<hash>`). Both are bare text. The matching
+    `recon/RECON-<hash>/REPORT.html` carries the independent-validator
+    votes with `verified={reachability,guards,primitive}` — useful
+    audit context that was otherwise unreachable from the rendered
+    pool pages. Rewrite each hash to a relative markdown link when
+    its recon dir exists; leave it alone when it was pruned.
+
+    Runs *after* `_scrub_pooled_tree`, since the scrubber would strip
+    the workspace prefix from any path the linker introduced.
+    Idempotent: the patterns use lookbehind/lookahead to skip hashes
+    already inside `[…](…)`.
+    """
+    if not pool_finding_dir.is_dir() or not source_results_dir.is_dir():
+        return
+    recon_root = source_results_dir / "recon"
+    if not recon_root.is_dir():
+        return
+    for report in pool_finding_dir.rglob("report.md"):
+        try:
+            text = report.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        def _link(m: re.Match) -> str:
+            token = m.group(1)  # "RECON-<hash>"
+            recon_dir = recon_root / token
+            # Prefer the rendered HTML sibling, fall back to .md; do
+            # nothing if neither exists (an orphaned id from a stale or
+            # purged recon tree).
+            for name in ("REPORT.html", "REPORT.md"):
+                candidate = recon_dir / name
+                if candidate.is_file():
+                    rel = os.path.relpath(candidate, report.parent)
+                    return f"[{token}]({rel})"
+            return token
+
+        new_text = text
+        for pat in _RECON_LINK_PATTERNS:
+            new_text = pat.sub(_link, new_text)
+        if new_text == text:
+            continue
+        try:
+            report.write_text(new_text, encoding="utf-8")
         except OSError:
             pass
 
@@ -794,9 +876,9 @@ def _rejected_finding_rows(rejected_dir: Path) -> list[dict]:
             continue
         vote = _choose_vote(finding_dir)
         quality = _choose_find_quality(finding_dir)
-        # Class/severity come from the FIND-quality cache; the validator
-        # vote pipeline doesn't emit them. Reason prefers the validator's
-        # rationale (long-form) and falls back to the FIND-gate reason.
+        # Reason prefers the validator's long-form rationale (when a
+        # recon-side vote exists), then falls back to the FIND-quality
+        # gate's reason (the path most pool entries take).
         reason = (
             vote.get("rationale")
             or vote.get("reason")
@@ -807,9 +889,6 @@ def _rejected_finding_rows(rejected_dir: Path) -> list[dict]:
         rows.append({
             "id": finding_dir.name,
             "title": _finding_title(finding_dir),
-            "vote": vote.get("vote") or "Rejected",
-            "class": str(quality.get("class") or "").strip(),
-            "severity": str(quality.get("severity") or "").strip(),
             "reason": reason,
             "report": _report_link_name(finding_dir),
         })
@@ -916,18 +995,15 @@ def write_rejected_findings_index(rejected_dir: Path) -> None:
         "# Rejected findings",
         "",
         (
-            "Findings rejected by triage. **Class** and **Severity** come "
-            "from the FIND-quality gate (`lib/triage.sh`); **Reason** is "
-            "the validator's rationale when one exists, otherwise the "
-            "FIND-gate's rejection reason."
+            "Findings rejected by triage. **Reason** is the validator's "
+            "rationale when a recon vote exists, otherwise the "
+            "FIND-quality gate's rejection reason (`lib/triage.sh`)."
         ),
         "",
     ]
     if rows:
-        md_lines.append(
-            "| ID | Vote | Class | Severity | Reason | Report |"
-        )
-        md_lines.append("| --- | --- | --- | :--: | --- | --- |")
+        md_lines.append("| ID | Reason | Report |")
+        md_lines.append("| --- | --- | --- |")
         for row in rows:
             report = (
                 f"[Link]({row['id']}/{row['report']})"
@@ -935,12 +1011,8 @@ def write_rejected_findings_index(rejected_dir: Path) -> None:
             )
             reason = re.sub(r"\s+", " ", row["reason"] or "—").strip()
             md_lines.append(
-                "| `{id}` | {vote} | {cls} | {sev} | {reason} | {report} |"
-                .format(
+                "| `{id}` | {reason} | {report} |".format(
                     id=_md_cell(row["id"]),
-                    vote=_md_cell(row["vote"]),
-                    cls=_md_cell(row["class"] or "—"),
-                    sev=_md_cell(row["severity"] or "—"),
                     reason=_md_cell(reason),
                     report=report,
                 )
@@ -1294,6 +1366,12 @@ def build_pool(bench_dir: Path) -> dict:
             cell = json.loads(cj.read_text(encoding="utf-8"))
         except ValueError:
             continue
+        # Keep pooled cluster counts consistent with the headline totals:
+        # aggregate() counts only status=done cells for confirmed findings /
+        # crashes, so the cross-condition pool must not import artifacts from
+        # failed or quota-shortened cells.
+        if cell.get("status") != "done":
+            continue
         cond = cell.get("condition") or "unknown"
         rd = Path(cell.get("results_dir") or "")
         if not rd.is_dir():
@@ -1326,6 +1404,7 @@ def build_pool(bench_dir: Path) -> dict:
                 dst = pool / "findings" / dst_name
                 shutil.copytree(src, dst)
                 _scrub_pooled_tree(dst)
+                _link_pool_recon_ids(dst, rd)
                 members["findings"][dst_name] = cond
         rejected_dir = rd / "findings-rejected"
         if rejected_dir.is_dir():
@@ -1337,6 +1416,7 @@ def build_pool(bench_dir: Path) -> dict:
                 dst = pool / "findings-rejected" / dst_name
                 shutil.copytree(src, dst)
                 _scrub_pooled_tree(dst)
+                _link_pool_recon_ids(dst, rd)
                 members["findings-rejected"][dst_name] = cond
         rejected_crashes_dir = rd / "crashes-rejected"
         if rejected_crashes_dir.is_dir():

@@ -1116,16 +1116,7 @@ gemini_cli_check_bundled_ripgrep() {
 # the directory outright (used by the test suite).
 gemini_capture_cli_log_diag() {
   local dest="$1"
-  local dir newest
-  dir="${AUDIT_GEMINI_CLI_LOG_DIR:-${GEMINI_DIR:-$HOME/.gemini}/antigravity-cli/log}"
-  [ -d "$dir" ] || return 0
-  newest=$(ls -t "$dir"/cli-*.log 2>/dev/null | head -1)
-  [ -n "$newest" ] && [ -f "$newest" ] || return 0
-  {
-    printf '[agy CLI log tail: %s]\n' "$newest"
-    grep -E 'RESOURCE_EXHAUSTED|[Qq]uota|429|503|UNAVAILABLE|executor error' \
-      "$newest" 2>/dev/null | tail -15
-  } >> "$dest" 2>/dev/null || true
+  llm_capture_gemini_cli_log_diag "$dest"
 }
 
 validate_model_for_backend() {
@@ -1243,24 +1234,26 @@ validate_model_for_backend() {
     if [ "$rc" -eq 0 ] && [ "$backend" = "gemini" ]; then
       local gemini_preflight_text
       gemini_preflight_text=$(llm_extract_text gemini "$raw" 2>/dev/null || true)
-      if [ -z "$gemini_preflight_text" ]; then
-      rc=44
-      # agy exits 0 with empty stdout when the upstream request is rejected;
-      # the real cause is only in agy's private CLI log. Pull it into $raw so
-      # the failure is diagnosable instead of a silent empty file. Only agy
-      # behaves this way — the Google Gemini CLI (USE_GEMINI_CLI=1) writes
-      # its errors to stderr, which is already captured in $raw, and does
-      # not use agy's log dir, so scraping it there would mis-attribute a
-      # stale agy quota error to a different CLI.
-      if [ "${USE_GEMINI_CLI:-0}" != "1" ]; then
-        gemini_capture_cli_log_diag "$raw"
-      fi
-      if grep -qiE 'RESOURCE_EXHAUSTED|quota reached|individual quota|exceeded your .*quota' "$raw" 2>/dev/null; then
-        gemini_quota_blocked=1
-        log "WARN: gemini preflight: agy reports the account quota is exhausted — retrying will not help until it resets" | tee -a "$INDEX"
-      else
-        log "WARN: gemini preflight: CLI exited 0 but produced no output — treating as failure" | tee -a "$INDEX"
-      fi
+      if ! grep -qx 'MODEL_PREFLIGHT_OK' <<<"$gemini_preflight_text"; then
+        rc=44
+        # agy exits 0 with empty stdout when the upstream request is rejected;
+        # the real cause is only in agy's private CLI log. Pull it into $raw so
+        # the failure is diagnosable instead of a silent empty file. Only agy
+        # behaves this way — the Google Gemini CLI (USE_GEMINI_CLI=1) writes
+        # its errors to stderr, which is already captured in $raw, and does
+        # not use agy's log dir, so scraping it there would mis-attribute a
+        # stale agy quota error to a different CLI.
+        if [ "${USE_GEMINI_CLI:-0}" != "1" ]; then
+          gemini_capture_cli_log_diag "$raw"
+        fi
+        if grep -qiE 'RESOURCE_EXHAUSTED|quota reached|individual quota|exceeded your .*quota' "$raw" 2>/dev/null; then
+          gemini_quota_blocked=1
+          log "WARN: gemini preflight: agy reports the account quota is exhausted — retrying will not help until it resets" | tee -a "$INDEX"
+        elif [ -n "$gemini_preflight_text" ]; then
+          log "WARN: gemini preflight: CLI did not return MODEL_PREFLIGHT_OK — treating as failure" | tee -a "$INDEX"
+        else
+          log "WARN: gemini preflight: CLI exited 0 but produced no output — treating as failure" | tee -a "$INDEX"
+        fi
       fi
     fi
     [ "$rc" -eq 0 ] && break

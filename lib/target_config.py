@@ -39,7 +39,10 @@ import tempfile
 try:
     import tomllib
 except ModuleNotFoundError:
-    tomllib = None
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        tomllib = None
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 

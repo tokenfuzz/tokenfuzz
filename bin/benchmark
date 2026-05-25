@@ -465,6 +465,29 @@ gemini_quota_dominates() {
   [ "${n_429:-0}" -ge "$min_429" ] && [ "${n_progress:-0}" -eq 0 ]
 }
 
+cell_log_has_quota_exhaustion() {
+  local cell_dir="$1"
+  local quota_re='RESOURCE_EXHAUSTED|Individual quota reached|exceeded your current quota|exhausted your capacity|quota will reset|quota reached|status (429|503)|code 429|HTTP 429|Too Many Requests'
+  [ -d "$cell_dir" ] || return 1
+  # The repo-root/output globs trust per-cell isolation: each cell gets
+  # its own checkout, so output/<target>/<backend>/logs/ never carries
+  # bytes from a sibling cell. If two cells ever share a checkout, a
+  # stale quota line from one would mis-flag the other as quota-dead.
+  grep -I -qiE "$quota_re" \
+    "$cell_dir/audit.log" \
+    "$cell_dir/backend.raw.log" \
+    "$cell_dir"/repo-root/output/*/*/logs/index.log \
+    "$cell_dir"/repo-root/output/*/*/logs/model-preflight-*.raw \
+    2>/dev/null
+}
+
+cell_has_result_artifacts() {
+  local results_dir="$1"
+  [ -d "$results_dir" ] || return 1
+  [ "$(find "$results_dir/crashes" "$results_dir/findings" \
+    -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" -gt 0 ]
+}
+
 # Recursively send *sig* to a pid and all descendants, leaf-first. The
 # gemini-cli call sits three subshells deep (bench → backgrounded
 # function → llm_run_agent_prompt's `( cd && audit_timeout_run ... )`
@@ -773,6 +796,16 @@ run_model_direct_cell() {
     "$prompt_file" > "$out_dir/logs/index.jsonl" 2>/dev/null \
     || printf '{}\n' > "$out_dir/logs/index.jsonl"
 
+  if [ "$BACKEND" = "gemini" ] && cell_log_has_quota_exhaustion "$cell_dir"; then
+    log "cell ${cell_dir##*/} — gemini quota exhausted (quota diagnostic found)"
+    touch "$cell_dir/.quota-exhausted"
+  elif [ "$BACKEND" = "gemini" ] && [ ! -s "$raw_log" ] \
+      && ! cell_has_result_artifacts "$out_dir"; then
+    log "cell ${cell_dir##*/} — backend produced empty output and no artifacts"
+    echo "$out_dir"
+    return 44
+  fi
+
   # Always emit out_dir so the caller harvests whatever's on disk, even on
   # a non-zero rc. rc 124 = wall-clock timeout, the expected end of a
   # budgeted cell. A quota-watcher kill returns a SIGTERM exit code (143);
@@ -871,6 +904,12 @@ run_harness_cell() {
   fi
 
   echo "$facade/output/${TARGET_SLUG}-${exp_name}/${BACKEND}/results"
+  if [ "$BACKEND" = "gemini" ] && cell_log_has_quota_exhaustion "$cell_dir"; then
+    touch "$cell_dir/.quota-exhausted"
+  fi
+  if [ -f "$cell_dir/.quota-exhausted" ]; then
+    return 0
+  fi
   [ "$rc" = "0" ] || [ "$rc" = "124" ]
 }
 
@@ -1211,6 +1250,10 @@ for cond in "${COND_ARR[@]}"; do
       fi
     else
       results_dir="$(run_harness_cell "$cell_dir" "$exp_name")" || status="failed"
+      if [ -f "$cell_dir/.quota-exhausted" ]; then
+        status="quota_exhausted"
+        gemini_quota_dead=1
+      fi
     fi
 
     end_epoch="$(date +%s)"
