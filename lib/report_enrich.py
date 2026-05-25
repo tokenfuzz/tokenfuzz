@@ -448,7 +448,12 @@ def _build_cluster_siblings(ctx: EnrichContext, text: str) -> Optional[str]:
     # Plain-text link label (no backticks) — render-md's inline-code
     # placeholder leaks NULs when a code span sits inside a link's
     # anchor text, which downstream grep then sees as a binary file.
-    rows = [f"- [{s}]({s}/report.html)" for s in siblings]
+    # `../` prefix: the link lives inside the *report's own* directory
+    # (findings/FIND-0104/report.md), so the sibling at
+    # findings/FIND-0088/report.html is one level up, not one level
+    # deeper. Dropping `../` was the original bug — every sibling href
+    # resolved to .../FIND-0104/FIND-0088/report.html and 404'd.
+    rows = [f"- [{s}](../{s}/report.html)" for s in siblings]
     return (
         f"**Cluster siblings** ({cluster_id}): {len(siblings)} other report(s)\n\n"
         + "\n".join(rows)

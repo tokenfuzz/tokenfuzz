@@ -993,6 +993,39 @@ print(
 PYEOF
 }
 
+## _reenrich_and_render_pool_reports: refresh enrichment + HTML for every
+## CRASH/FIND report under a pool subtree. The cell-level enrichment runs
+## once inside the cell (when sibling dirs still carry their original
+## `FIND-RECON-<hash>-<slug>` / `CRASH-<n>` names), so the `cluster-siblings`
+## block it writes references those names. build_pool then renames dirs to
+## `FIND-NNNN` / `CRASH-NNNN`, leaving the embedded links dangling. Re-run
+## enrich-report so cluster-siblings regenerates from the *pooled* sibling
+## set; re-render report.html so the browsable view picks up the fixed
+## links. Caller passes a directory like `$POOL/findings` or `$cond_dir/crashes`.
+_reenrich_and_render_pool_reports() {
+  local root="$1"
+  [ -d "$root" ] || return 0
+  local _enrich="$SCRIPT_ROOT/bin/enrich-report"
+  local _render="$SCRIPT_ROOT/bin/render-md"
+  local d rep cand
+  for d in "$root"/CRASH-* "$root"/FIND-*; do
+    [ -d "$d" ] || continue
+    rep=""
+    for cand in report.md REPORT.md description.md; do
+      if [ -s "$d/$cand" ]; then rep="$d/$cand"; break; fi
+    done
+    [ -n "$rep" ] || continue
+    if [ "${ENRICH_REPORT_AUTO:-1}" = "1" ] && [ -x "$_enrich" ]; then
+      python3 "$_enrich" --slug "$TARGET_SLUG" --quiet "$rep" \
+        >/dev/null 2>&1 || true
+    fi
+    if [ -x "$_render" ]; then
+      python3 "$_render" "$rep" --html-sibling --title "$(basename "$d")" \
+        >/dev/null 2>&1 || true
+    fi
+  done
+}
+
 ## rebuild_pool_artifacts: idempotent post-processing the live crosstab
 ## (and the run's ledger section) needs to render links and unique-bug /
 ## severity columns. Pool every cell's confirmed crash + finding dirs into
@@ -1077,6 +1110,16 @@ rebuild_pool_artifacts() {
       || log "WARN: cluster-findings (FINDING-CLUSTERS.md) failed ($reason)"
   fi
 
+  ## Refresh enrichment + HTML for every pooled CRASH/FIND now that the
+  ## cluster-* tools have written the post-pool `Cluster:` lines. Without
+  ## this, the cluster-siblings block keeps the cell-level sibling names
+  ## (`FIND-RECON-<hash>-<slug>`) that build_pool already renamed to
+  ## `FIND-NNNN`, so every sibling link 404s in the rendered pool tree.
+  _reenrich_and_render_pool_reports "$POOL/findings"
+  _reenrich_and_render_pool_reports "$POOL/findings-rejected"
+  _reenrich_and_render_pool_reports "$POOL/crashes"
+  _reenrich_and_render_pool_reports "$POOL/crashes-rejected"
+
   ## Per-condition cluster reports. The combined pool above feeds the
   ## cross-condition cluster JSON (which clusters the harness found that
   ## the baseline missed). For the scoreboard and crosstab, copy the pool
@@ -1098,6 +1141,14 @@ rebuild_pool_artifacts() {
       [ -d "$cond_dir/findings" ] \
         && { "$SCRIPT_ROOT/bin/cluster-findings" "$cond_dir" >/dev/null 2>&1 \
              || log "WARN: per-condition cluster-findings failed ($cond, $reason)"; }
+      ## Same enrichment refresh as the combined pool — per-condition
+      ## clustering wrote its own `Cluster:` lines into the split copies,
+      ## so the cluster-siblings block must regenerate from this subtree's
+      ## sibling set (the per-condition slice, not the combined pool).
+      _reenrich_and_render_pool_reports "$cond_dir/findings"
+      _reenrich_and_render_pool_reports "$cond_dir/findings-rejected"
+      _reenrich_and_render_pool_reports "$cond_dir/crashes"
+      _reenrich_and_render_pool_reports "$cond_dir/crashes-rejected"
     done
     if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
       local rep rej
