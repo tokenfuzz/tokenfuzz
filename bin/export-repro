@@ -740,6 +740,24 @@ if [ ! -f "$san_lib" ]; then
     fi
   fi
 fi
+if [ ! -f "$san_lib" ]; then
+  # Audit-recorded name (libcurl-d.a, libcjson-asan.a) often doesn't match
+  # what a fresh upstream build produces (libcurl.a, libcjson.a / .dylib).
+  # Strip audit-side decoration from the stem and find any matching artifact.
+  stem="${san_lib##*/}"; stem="${stem%.*}"
+  while :; do
+    case "$stem" in
+      *-asan|*-ubsan|*-msan|*-tsan|*-d|*-debug) stem="${stem%-*}" ;;
+      *) break ;;
+    esac
+  done
+  if [ -n "$stem" ] && [ -d "$build" ]; then
+    san_lib=$(find "$build" -type f \\( \\
+        -name "${stem}.a" -o -name "${stem}.dylib" -o -name "${stem}.so" \\
+        -o -name "${stem}-*.a" -o -name "${stem}-*.dylib" -o -name "${stem}-*.so" \\
+      \\) -print 2>/dev/null | head -1)
+  fi
+fi
 [ -f "$san_lib" ] || { echo "__SANITIZER_LABEL__ static library not found: $san_lib" >&2; exit 2; }
 """
 
@@ -867,7 +885,38 @@ def emit_cmake_build(extra_target: str = "", sanitizer: str = "asan") -> str:
     )
 
 
-def emit_build(build_system: str, extra_target: str = "", sanitizer: str = "asan") -> str:
+def emit_audit_build_script(script_text: str) -> str:
+    """Emit a reproduce.sh fragment that materializes and runs the
+    audit-validated build recipe verbatim, in place of the hardcoded
+    cmake/autotools/meson template.
+
+    The reproducer's build then matches the audit's build by
+    construction — no flag-set drift, no library-name drift, no
+    "we forgot CURL_USE_LIBPSL=OFF" surprises. The audit converges
+    on a working script once via bin/auto-build-script; every
+    downstream reproduce.sh splices in that exact script.
+    """
+    delim = "__AUDIT_BUILD_SCRIPT_EOF__"
+    counter = 1
+    while delim in script_text:
+        delim = f"__AUDIT_BUILD_SCRIPT_EOF_{counter}__"
+        counter += 1
+    body = script_text if script_text.endswith("\n") else script_text + "\n"
+    return (
+        "# Build recipe inlined from the audit's .audit/build.sh — the EXACT\n"
+        "# script bin/auto-build-script converged on at audit time. Inlined\n"
+        "# verbatim so the reproducer build matches the audit build.\n"
+        f"cat > \"$src/.audit-build.sh\" <<'{delim}'\n"
+        f"{body}{delim}\n"
+        'chmod +x "$src/.audit-build.sh"\n'
+        '"$src/.audit-build.sh" "$src" "$build"\n'
+    )
+
+
+def emit_build(build_system: str, extra_target: str = "", sanitizer: str = "asan",
+               audit_build_script: str = "") -> str:
+    if audit_build_script:
+        return emit_audit_build_script(audit_build_script)
     if build_system == "cmake":
         return emit_cmake_build(extra_target, sanitizer)
     if build_system == "autotools":
@@ -1800,7 +1849,8 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
                              harness_compiler: str = "clang",
                              sanitizer: str = "asan",
                              extra_options: str = "", mode: str = "generic",
-                             recorded_env_options: str = "") -> None:
+                             recorded_env_options: str = "",
+                             audit_build_script: str = "") -> None:
     meta = sanitizer_meta(sanitizer)
     if not meta["flag"]:
         die(f"C/C++ harness export for {meta['label']} needs target-specific compiler flags")
@@ -1814,7 +1864,8 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
     san_lib_arg = "" if _san_lib_is_unset(san_lib_rel) else ' "$san_lib"'
     text = (
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
-        + emit_build(build_system, sanitizer=sanitizer)
+        + emit_build(build_system, sanitizer=sanitizer,
+                     audit_build_script=audit_build_script)
         + emit_lib_resolve(san_lib_rel, sanitizer)
         + _sub_template(
             C_HARNESS_RUN,
@@ -2170,6 +2221,20 @@ def main(argv: list[str]) -> int:
         includes_args = emit_include_args(cfg.includes)
         link_libs = shell_join_args(cfg.link_libs)
 
+        # If the audit converged on a build recipe via bin/auto-build-script,
+        # splice it into reproduce.sh in place of the hardcoded cmake/autotools
+        # template. This is the only way the reproducer build is guaranteed to
+        # match the audit's build — same script, same flags, same library
+        # naming. Absent the file we fall back to the legacy template.
+        audit_build_script = ""
+        if cfg.target_root:
+            _abs = Path(cfg.target_root) / ".audit" / "build.sh"
+            if _abs.is_file():
+                try:
+                    audit_build_script = _abs.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    audit_build_script = ""
+
         # ── Choose reproduce.sh template ────────────────────────────
         repro_path = stage / "reproduce.sh"
         input_ext_lower = input_name.rsplit(".", 1)[-1].lower() if input_name else ""
@@ -2210,6 +2275,7 @@ def main(argv: list[str]) -> int:
                 extra_options=sanitizer_extra_options,
                 mode=run_mode or "generic",
                 recorded_env_options=recorded_env_options,
+                audit_build_script=audit_build_script,
             )
         elif shell_wrapper is not None:
             write_shell_wrapper_template(

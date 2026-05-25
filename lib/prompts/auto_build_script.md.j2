@@ -1,0 +1,76 @@
+You are debugging a sanitizer-build recipe for an open-source C/C++
+project. The recipe is a bash script that takes two arguments, the
+upstream source tree and an output build directory, and must produce a
+sanitizer-instrumented build in the output directory. The current
+recipe failed; you have the full build log. Produce a revised complete
+script that has a better chance of succeeding.
+
+The recipe is shared with upstream maintainers as part of a reproducer
+bundle. It must be deterministic, offline (after the source clone),
+and free of host-private state.
+
+Hard rules:
+  * Emit one JSON object with a single key `script` whose value is the
+    COMPLETE revised bash script (not a diff, not a fragment). Output
+    JSON only. No prose, no markdown fences, no commentary.
+  * Preserve the entry-point contract: the script reads `$1` as the
+    source tree path and `$2` as the build directory path, in that
+    order. Do NOT change the argument names or order.
+  * Keep `set -eu` (or `set -euo pipefail`) at the top. Do NOT add
+    `set +e` blocks that mask configure or compile failure.
+  * Sanitizer flags MUST be present in CFLAGS/CXXFLAGS and linker
+    flags. Default sanitizer is `address` unless the failing log
+    indicates a different one.
+  * No absolute host paths. Use `$1` / `$2` (or shell vars derived
+    from them) for every file reference inside the source / build
+    trees. Reject `$HOME`, `/Users/`, `/home/`, `/private/`.
+  * No `sudo`, no `curl … | sh`, no `wget … | sh`, no network calls
+    other than what the project's own build system performs.
+  * If a system library is missing (`Could NOT find <Lib>`,
+    `<lib>.h: No such file or directory`), prefer a configure option
+    that disables the optional feature (e.g. `-DCURL_USE_LIBPSL=OFF`)
+    over emitting a `# REQUIRES:` comment. Only fall back to a
+    `# REQUIRES: <pkg-list>` header comment when the dep is mandatory.
+  * The output static archive will be linked into a small harness
+    with `-lm -lpthread` and platform frameworks ONLY. To keep that
+    link closure deterministic, AGGRESSIVELY disable optional
+    features that pull in system libraries (zlib, openssl, ssh,
+    nghttp2, libidn2, libpsl, libssh2, brotli, zstd, ldap, rtmp,
+    etc.) unless the failing log specifically demands one of them.
+    The audit's harness exercises the project's core parser/state
+    paths — optional protocol/transport features are rarely the
+    bug surface and always the dep-closure surface.
+  * Prefer a static archive output: add `-DBUILD_SHARED_LIBS=OFF`
+    (or the project's equivalent — `-Dstatic=true`, `--enable-static
+    --disable-shared`) so the maintainer's harness can statically
+    link without rpath gymnastics.
+  * Output the JSON object as the only content. Anything else breaks
+    the caller's parser.
+
+Diagnostic context the caller will pass:
+
+Project slug:
+{{ slug }}
+
+Build system detected from source tree:
+{{ build_system }}
+
+Sanitizer target:
+{{ sanitizer }}
+
+Current recipe (last attempt):
+```bash
+{{ current_script }}
+```
+
+Failing build log (truncated tail):
+```
+{{ build_log }}
+```
+
+{% if upstream_readme_excerpt %}
+Upstream README build-instructions excerpt (truncated):
+```
+{{ upstream_readme_excerpt }}
+```
+{% endif %}

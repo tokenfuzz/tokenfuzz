@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+"""bin/auto-build-script — converge on a sanitizer build recipe via LLM.
+
+POC for the "ship one validated recipe per audit" model. Given an
+upstream source tree and a sanitizer label, this tool:
+
+  1. Detects the build system from on-disk manifests (CMakeLists.txt
+     → cmake; configure.ac → autotools; meson.build → meson) and
+     emits an initial vanilla recipe targeting that system.
+  2. Runs the recipe against a scratch build dir.
+  3. On non-zero exit (or missing expected artifact), feeds the tail
+     of the build log + the current script to the LLM and asks for a
+     revised COMPLETE script. Re-runs.
+  4. Iterates up to --max-iters times. Writes the first working
+     script to --out, prints its path on stdout.
+
+The output script's contract is fixed: it takes argv `<src-dir>
+<build-dir>` and on success produces a sanitizer-instrumented build
+under <build-dir>. The contract is what bin/export-repro embeds into
+reproduce.sh.
+
+Why the LLM is invoked at AUDIT TIME, not at reproduce time:
+  * Operator pays for the tokens, not maintainers.
+  * The converged script is deterministic — every maintainer running
+    reproduce.sh gets bit-identical behaviour.
+  * No LLM-emitted shell ever runs on an upstream maintainer's box.
+
+Safety rails before any LLM-emitted script runs:
+  * No absolute paths to host-private locations ($HOME, /Users/,
+    /home/, /private/).
+  * No `sudo`, `curl|sh`, `wget|sh`, `eval`.
+  * Argv-1 / argv-2 contract preserved.
+  * Script kept under a small length cap.
+
+Usage:
+  bin/auto-build-script --src targets/<slug> --sanitizer asan \\
+                        --out targets/<slug>/.audit/build.sh   \\
+                        [--max-iters 5] [--scratch /tmp/...]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).absolute().parent
+SCRIPT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from llm_decide import llm_decide  # noqa: E402
+from prompt_render import render_template  # noqa: E402
+
+
+_BUILD_LOG_TAIL_BYTES = 4_000
+_README_EXCERPT_BYTES = 2_000
+_MAX_SCRIPT_LEN = 8_000
+
+# Anything matching these substrings in an LLM-proposed script is a
+# rejection. The intent is to block obviously-host-private state and
+# trust-violating constructs from being executed by the audit loop.
+_FORBIDDEN_SUBSTRINGS = (
+    "sudo ",
+    "sudo\t",
+    "curl ", "wget ",
+    "$HOME", "${HOME}",
+    "/Users/", "/home/", "/private/",
+    "rm -rf /",
+    "> /etc/", ">/etc/",
+    "/dev/tcp/",
+    " eval ", "\teval ",
+    "`curl", "$(curl",
+    "`wget", "$(wget",
+)
+
+_REQUIRED_SUBSTRINGS = (
+    "-fsanitize=",
+    "$1",
+    "$2",
+)
+
+
+def die(msg: str, rc: int = 2) -> None:
+    sys.stderr.write(f"[auto-build-script] {msg}\n")
+    sys.exit(rc)
+
+
+def info(msg: str) -> None:
+    sys.stderr.write(f"[auto-build-script] {msg}\n")
+    sys.stderr.flush()
+
+
+def detect_build_system(src: Path) -> str:
+    if (src / "CMakeLists.txt").is_file():
+        return "cmake"
+    if (src / "meson.build").is_file():
+        return "meson"
+    if (src / "configure.ac").is_file() or (src / "configure").is_file():
+        return "autotools"
+    if (src / "Makefile").is_file() or (src / "GNUmakefile").is_file():
+        return "make"
+    return ""
+
+
+_INITIAL_CMAKE = """\
+#!/usr/bin/env bash
+set -eu
+src="$1"; build="$2"
+mkdir -p "$build"
+rm -f "$build/CMakeCache.txt"
+rm -rf "$build/CMakeFiles"
+cmake -S "$src" -B "$build" \\
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \\
+    -DCMAKE_C_COMPILER="${CC:-clang}" \\
+    -DCMAKE_CXX_COMPILER="${CXX:-clang++}" \\
+    -DCMAKE_C_FLAGS="-fsanitize=__SAN__ -g -O1 -fno-omit-frame-pointer" \\
+    -DCMAKE_CXX_FLAGS="-fsanitize=__SAN__ -g -O1 -fno-omit-frame-pointer" \\
+    -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=__SAN__" \\
+    -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=__SAN__"
+cmake --build "$build" -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
+"""
+
+_INITIAL_AUTOTOOLS = """\
+#!/usr/bin/env bash
+set -eu
+src="$1"; build="$2"
+mkdir -p "$build"
+( cd "$src" && [ -x ./configure ] || { [ -x ./autogen.sh ] && ./autogen.sh; } )
+( cd "$build" && \\
+    CC="${CC:-clang}" \\
+    CXX="${CXX:-clang++}" \\
+    CFLAGS="-fsanitize=__SAN__ -g -O1 -fno-omit-frame-pointer" \\
+    CXXFLAGS="-fsanitize=__SAN__ -g -O1 -fno-omit-frame-pointer" \\
+    LDFLAGS="-fsanitize=__SAN__" \\
+    "$src/configure" )
+( cd "$build" && make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)" )
+"""
+
+_INITIAL_MESON = """\
+#!/usr/bin/env bash
+set -eu
+src="$1"; build="$2"
+mkdir -p "$build"
+meson setup --reconfigure "$build" "$src" \\
+    -Db_sanitize=__SAN_MESON__ -Doptimization=1 -Ddebug=true \\
+    -Dc_args="-fno-omit-frame-pointer" \\
+    -Dcpp_args="-fno-omit-frame-pointer"
+meson compile -C "$build"
+"""
+
+
+_SAN_TO_CC_FLAG = {
+    "asan": "address",
+    "ubsan": "undefined",
+    "msan": "memory",
+    "tsan": "thread",
+}
+
+
+def initial_script(build_system: str, sanitizer: str) -> str:
+    cc_flag = _SAN_TO_CC_FLAG.get(sanitizer, sanitizer)
+    if build_system == "cmake":
+        return _INITIAL_CMAKE.replace("__SAN__", cc_flag)
+    if build_system == "autotools":
+        return _INITIAL_AUTOTOOLS.replace("__SAN__", cc_flag)
+    if build_system == "meson":
+        return _INITIAL_MESON.replace("__SAN__", cc_flag).replace(
+            "__SAN_MESON__", cc_flag
+        )
+    die(f"no initial recipe for build system: {build_system!r}")
+    return ""  # unreachable
+
+
+def run_script(script_path: Path, src: Path, build: Path,
+               timeout_secs: int) -> tuple[int, str]:
+    """Return (exit_code, captured_stdout_stderr_text)."""
+    proc = subprocess.run(
+        ["bash", str(script_path), str(src), str(build)],
+        capture_output=True, text=True, timeout=timeout_secs,
+    )
+    return proc.returncode, (proc.stdout + proc.stderr)
+
+
+def build_produced_artifacts(build: Path) -> bool:
+    """Heuristic: a build is 'real' if it dropped at least one
+    static archive, shared library, or executable under build/. We do
+    NOT check for a specific filename — the point of this loop is to
+    discover what the project actually emits."""
+    for p in build.rglob("*"):
+        if not p.is_file():
+            continue
+        name = p.name
+        if name.endswith((".a", ".so", ".dylib")):
+            return True
+        # Heuristic for unsuffixed executables under bin/, src/, build root.
+        if (os.access(p, os.X_OK)
+                and not name.endswith((".cmake", ".sh", ".py", ".txt"))
+                and p.stat().st_size > 4_096):
+            return True
+    return False
+
+
+def validate_proposed_script(script: str) -> tuple[bool, str]:
+    if not isinstance(script, str):
+        return False, "not a string"
+    if len(script) > _MAX_SCRIPT_LEN:
+        return False, f"script too long: {len(script)} > {_MAX_SCRIPT_LEN}"
+    lo = script.lower()
+    if not lo.startswith(("#!/usr/bin/env bash", "#!/bin/bash", "#!/usr/bin/bash")):
+        return False, "missing bash shebang"
+    for needle in _REQUIRED_SUBSTRINGS:
+        if needle not in script:
+            return False, f"missing required token: {needle!r}"
+    for bad in _FORBIDDEN_SUBSTRINGS:
+        if bad in script:
+            return False, f"contains forbidden token: {bad!r}"
+    return True, ""
+
+
+def read_readme_excerpt(src: Path) -> str:
+    for name in ("README.md", "README.rst", "README", "README.txt"):
+        p = src / name
+        if p.is_file():
+            try:
+                txt = p.read_text("utf-8", errors="replace")
+            except OSError:
+                continue
+            return txt[:_README_EXCERPT_BYTES]
+    return ""
+
+
+def ask_llm_for_revision(*, slug: str, build_system: str, sanitizer: str,
+                         current_script: str, build_log: str,
+                         readme_excerpt: str,
+                         timeout_secs: int) -> str | None:
+    prompt = render_template("auto_build_script.md.j2", {
+        "slug": slug,
+        "build_system": build_system,
+        "sanitizer": sanitizer,
+        "current_script": current_script,
+        "build_log": build_log[-_BUILD_LOG_TAIL_BYTES:],
+        "upstream_readme_excerpt": readme_excerpt,
+    })
+    obj = llm_decide("build-script-converge", "script", prompt,
+                    timeout=timeout_secs)
+    if not isinstance(obj, dict):
+        return None
+    script = obj.get("script")
+    if not isinstance(script, str):
+        return None
+    return script.strip() + "\n"
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--src", required=True, help="upstream source tree")
+    ap.add_argument("--sanitizer", default="asan",
+                    help="asan|ubsan|msan|tsan (default asan)")
+    ap.add_argument("--out", required=True,
+                    help="path to write the validated build script")
+    ap.add_argument("--scratch", default="",
+                    help="scratch build dir (default: a tempdir)")
+    ap.add_argument("--max-iters", type=int, default=5)
+    ap.add_argument("--build-timeout-secs", type=int, default=900)
+    ap.add_argument("--llm-timeout-secs", type=int, default=60)
+    ap.add_argument("--keep-scratch", action="store_true")
+    args = ap.parse_args(argv)
+
+    src = Path(args.src).expanduser().absolute()
+    if not src.is_dir():
+        die(f"source tree not found: {src}")
+
+    out = Path(args.out).expanduser().absolute()
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    scratch = Path(args.scratch).expanduser().absolute() if args.scratch \
+        else Path(tempfile.mkdtemp(prefix="auto-build-script-",
+                                   dir=os.environ.get("TMPDIR", "/tmp")))
+    scratch.mkdir(parents=True, exist_ok=True)
+
+    build_system = detect_build_system(src)
+    if not build_system:
+        die(f"no recognized build system in: {src}")
+    info(f"src={src} sanitizer={args.sanitizer} build_system={build_system}")
+    info(f"scratch={scratch}")
+
+    slug = src.name
+    script = initial_script(build_system, args.sanitizer)
+    readme_excerpt = read_readme_excerpt(src)
+
+    # Write the candidate script next to scratch each iteration so the
+    # build can be inspected on failure.
+    cand_path = scratch / "build.candidate.sh"
+
+    last_log = ""
+    success = False
+    for i in range(1, args.max_iters + 1):
+        cand_path.write_text(script, encoding="utf-8")
+        os.chmod(cand_path, 0o755)
+        # Fresh build dir per iteration so a failed configure doesn't
+        # carry stale CMakeCache state forward.
+        attempt_build = scratch / f"build-{i}"
+        if attempt_build.exists():
+            shutil.rmtree(attempt_build)
+        attempt_build.mkdir(parents=True)
+
+        info(f"iter {i}/{args.max_iters}: running candidate script")
+        t0 = time.time()
+        try:
+            rc, log = run_script(cand_path, src, attempt_build,
+                                 args.build_timeout_secs)
+        except subprocess.TimeoutExpired:
+            rc, log = 124, "[timeout]\n"
+        elapsed = time.time() - t0
+        last_log = log
+        produced = build_produced_artifacts(attempt_build) if rc == 0 else False
+        info(f"iter {i}: rc={rc} elapsed={elapsed:.1f}s produced_artifacts={produced}")
+
+        if rc == 0 and produced:
+            success = True
+            break
+
+        # Ask the LLM for a revised complete script.
+        info(f"iter {i}: asking LLM for revision (log tail {min(len(log),_BUILD_LOG_TAIL_BYTES)} bytes)")
+        revised = ask_llm_for_revision(
+            slug=slug, build_system=build_system, sanitizer=args.sanitizer,
+            current_script=script, build_log=log,
+            readme_excerpt=readme_excerpt,
+            timeout_secs=args.llm_timeout_secs,
+        )
+        if revised is None:
+            info(f"iter {i}: LLM returned no script — giving up")
+            break
+
+        ok, reason = validate_proposed_script(revised)
+        if not ok:
+            info(f"iter {i}: rejecting LLM script ({reason})")
+            break
+        if revised.strip() == script.strip():
+            info(f"iter {i}: LLM returned unchanged script — giving up")
+            break
+        script = revised
+
+    if not success:
+        sys.stderr.write("\n[auto-build-script] LAST BUILD LOG TAIL:\n")
+        sys.stderr.write(last_log[-2_000:])
+        sys.stderr.write("\n")
+        die("did not converge", rc=3)
+
+    # Persist the working script. Add a provenance header.
+    header = (
+        "#!/usr/bin/env bash\n"
+        "# AUTO-GENERATED by bin/auto-build-script.\n"
+        f"# build_system={build_system} sanitizer={args.sanitizer} converged_after={i} iters\n"
+        "# Contract: argv = <src-dir> <build-dir>. Idempotent. Deterministic.\n"
+        "# Re-run bin/auto-build-script to regenerate after an upstream\n"
+        "# build-system change.\n"
+    )
+    # Drop the candidate's own shebang line before splicing in our header
+    # so we don't end up with two shebangs.
+    body = script
+    if body.startswith("#!"):
+        body = body.split("\n", 1)[1] if "\n" in body else ""
+    out.write_text(header + body, encoding="utf-8")
+    os.chmod(out, 0o755)
+    info(f"converged: wrote {out}")
+    print(str(out))
+    if not args.keep_scratch:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
