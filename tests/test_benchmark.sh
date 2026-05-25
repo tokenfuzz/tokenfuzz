@@ -434,6 +434,19 @@ out_est2=$(echo "$gu2" | jq -r '.tokens.output')
 assert_eq "3" "$out_est2" \
   "T12c2: assistant content summed for the output estimate"
 
+# agy --print emits plain markdown with no JSON event stream — the whole
+# raw log IS the assistant reply (parity with extract_text's agy branch).
+# The JSON-event scanner would return 0 here, pinning output to 0 for
+# every successful agy cell; the plain-text fallback counts raw length.
+gem_log3="$work/gemini-agy-plain.log"
+printf 'I have completed the audit and identified two issues in cJSON.\nDetails follow below.\n' \
+  > "$gem_log3"
+gu3=$(python3 "$USAGE_PY" gemini "$gem_log3" "$gem_prompt")
+out_est3=$(echo "$gu3" | jq -r '.tokens.output')
+# 85 chars → ceil(85/4) = 22 tokens
+assert_eq "22" "$out_est3" \
+  "T12c3: agy plain-text raw log counted as assistant output"
+
 # A real usage object must NOT be flagged estimated.
 assert_eq "false" "$(python3 "$USAGE_PY" codex "$codex_log" | jq -r '.estimated')" \
   "T12d: measured codex usage not flagged estimated"

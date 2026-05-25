@@ -101,18 +101,31 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _sum_assistant_content_chars(raw: str) -> int:
-    """Sum the length of `content` from JSON events with role == assistant.
+    """Estimate assistant-content char count from a gemini raw log.
 
-    The estimated path only fires when a backend (agy) produced no usage
-    telemetry — usually because it errored before emitting one. Estimating
-    output as len(raw_log)/4 in that case folds node.js stack traces, tool
-    invocation parameter bodies, and other non-output noise into the bill;
-    one observed gemini cell reported 308k "output" tokens while its
-    actual assistant content was empty. Restrict the estimate to the
-    assistant message stream so an estimate-only cell tracks generated
-    text, not error chatter.
+    Two shapes show up here:
+
+      stream-json  — gemini-cli emits a JSON event stream. When the
+                     stream dies before reporting usage (commonly a 429),
+                     restricting the estimate to role=="assistant"
+                     content avoids billing node.js stack traces and
+                     tool-call parameter bodies as output — one observed
+                     cell reported 308k "output" tokens against zero
+                     assistant messages.
+
+      plain text   — agy --print emits the assistant's reply as a flat
+                     stdout transcript with no JSON events at all. In
+                     that shape the whole raw log IS the assistant
+                     content (mirrors lib/llm_invoke.py::extract_text's
+                     agy branch); returning 0 here pins output to 0 for
+                     every successful agy cell.
+
+    Discriminator: if any line parses as JSON it is a stream-json
+    transcript and the scanner stays restrictive; if no line parses, it
+    is an agy plain-text transcript and we fall back to the raw length.
     """
     total = 0
+    saw_json_event = False
     for line in raw.splitlines():
         line = line.strip()
         if not line or not line.startswith("{"):
@@ -123,6 +136,7 @@ def _sum_assistant_content_chars(raw: str) -> int:
             continue
         if not isinstance(obj, dict):
             continue
+        saw_json_event = True
         if obj.get("role") != "assistant":
             continue
         content = obj.get("content")
@@ -136,6 +150,8 @@ def _sum_assistant_content_chars(raw: str) -> int:
                         total += len(text)
                 elif isinstance(part, str):
                     total += len(part)
+    if not saw_json_event:
+        return len(raw)
     return total
 
 
