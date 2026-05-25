@@ -166,6 +166,119 @@ eval "$_orig_bundle"
 unset _orig_bundle
 
 # ═══════════════════════════════════════════════════════════════
+# P4b. _triage_bundle_crash_dir passes concrete --crash-dir
+# ═══════════════════════════════════════════════════════════════
+# Regression for host/container path confusion: triage already has the
+# crash dir path it is inspecting, so export-repro must receive that exact
+# path instead of rediscovering a possibly stale RESULTS_DIR from --slug.
+mkdir -p "$RESULTS_DIR/crashes/CRASH-BUNDLE-PATH/.audit" "$TEST_TMPDIR/stub-bin"
+cat > "$TEST_TMPDIR/stub-bin/export-repro" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$@" > "$STUB_ARGS_FILE"
+crash_dir=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --crash-dir)
+      shift
+      crash_dir="${1:-}"
+      ;;
+  esac
+  shift || break
+done
+[ -n "$crash_dir" ] || exit 2
+printf '# report\n' > "$crash_dir/REPORT.md"
+printf '#!/usr/bin/env bash\n' > "$crash_dir/reproduce.sh"
+printf '==1==ERROR: AddressSanitizer: heap-buffer-overflow\n' > "$crash_dir/sanitizer.txt"
+printf 'x\n' > "$crash_dir/input.txt"
+EOF
+chmod +x "$TEST_TMPDIR/stub-bin/export-repro"
+export STUB_ARGS_FILE="$TEST_TMPDIR/export-repro.args"
+
+_triage_bundle_crash_dir \
+  "$RESULTS_DIR/crashes/CRASH-BUNDLE-PATH" \
+  "CRASH-BUNDLE-PATH" \
+  "$TEST_TMPDIR/stub-bin"
+
+assert_file_contains "$STUB_ARGS_FILE" "^--crash-dir$" \
+  "bundle helper passes --crash-dir"
+assert_file_contains "$STUB_ARGS_FILE" "$RESULTS_DIR/crashes/CRASH-BUNDLE-PATH" \
+  "bundle helper passes the inspected crash dir"
+assert_file_exists "$RESULTS_DIR/crashes/CRASH-BUNDLE-PATH/REPORT.md" \
+  "stub exporter bundled the inspected crash dir"
+unset STUB_ARGS_FILE
+
+# ═══════════════════════════════════════════════════════════════
+# P4c. Real export-repro survives stale session RESULTS_DIR
+# ═══════════════════════════════════════════════════════════════
+# The production failure shape used container-authored .session-env paths
+# (/root/work/...) while the host shell inspected a different path. Triage
+# must bundle the concrete crash dir it is currently walking even when the
+# slug session says RESULTS_DIR is somewhere else.
+_saved_target_slug="$TARGET_SLUG"
+_path_slug="testproject-pathconfuse-$$"
+_path_slug_root="$SCRIPT_ROOT/output/$_path_slug"
+rm -rf "$_path_slug_root"
+mkdir -p "$_path_slug_root/codex/results" \
+         "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH"
+cat > "$_path_slug_root/codex/results/.session-env" <<EOF
+RESULTS_DIR=/root/work/output/$_path_slug/codex/results
+TARGET_ROOT=/root/work/targets/$_path_slug
+TARGET_SLUG=$_path_slug
+TARGET_REV=testrev
+LOGDIR=/root/work/output/$_path_slug/codex/logs
+SESSION_STARTED=2026-05-25T00:00:00Z
+EOF
+cat > "$_path_slug_root/target.toml" <<EOF
+target = "$_path_slug"
+build_system = "cmake"
+pinned_rev = "testrev"
+is_browser = "0"
+includes = []
+link_libs = []
+
+[threat_model]
+attacker_controls = ["bytes"]
+
+[sanitizer]
+enabled = ["asan"]
+asan_lib = "build-asan/libsample.a"
+EOF
+cat > "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/report.md" <<'EOF'
+# Report
+Boundary: bytes
+Caller controls: input bytes
+Trusted caller actions: none
+Caller contract: honored
+Trigger source: bytes
+Strategy: S1
+EOF
+cat > "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/asan.txt" <<'EOF'
+==42==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1234
+READ of size 1 at 0x1234 thread T0
+#0 0x1 in sample sample.c:10
+SUMMARY: AddressSanitizer: heap-buffer-overflow sample.c:10 in sample
+EOF
+printf 'x\n' > "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/testcase.txt"
+cat > "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/harness.c" <<'EOF'
+int main(void) { return 0; }
+EOF
+export TARGET_SLUG="$_path_slug"
+_triage_bundle_crash_dir \
+  "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH" \
+  "CRASH-BUNDLE-REALPATH" \
+  "$SCRIPT_ROOT/bin"
+export TARGET_SLUG="$_saved_target_slug"
+rm -rf "$_path_slug_root"
+assert_file_exists "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/REPORT.md" \
+  "real exporter bundles inspected crash dir despite stale session RESULTS_DIR"
+assert_file_exists "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/reproduce.sh" \
+  "real exporter writes reproduce.sh beside inspected crash dir"
+assert_file_exists "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/input.txt" \
+  "real exporter writes input beside inspected crash dir"
+unset _saved_target_slug _path_slug _path_slug_root
+
+# ═══════════════════════════════════════════════════════════════
 # P5. _triage_record_card_reject_skip — reject writes do-not-revisit
 # ═══════════════════════════════════════════════════════════════
 # When _triage_move_to_rejected runs, it should call bin/state

@@ -947,7 +947,7 @@ _triage_bundle_crash_dir() {
   mkdir -p "$audit_dir" 2>/dev/null || true
   local out_log="$audit_dir/export-repro.out"
   local err_log="$audit_dir/export-repro.err"
-  if "$bin_dir/export-repro" "$id" --slug "${TARGET_SLUG:-}" >"$out_log" 2>"$err_log"; then
+  if "$bin_dir/export-repro" "$id" --slug "${TARGET_SLUG:-}" --crash-dir "$d" >"$out_log" 2>"$err_log"; then
     return 0
   fi
   local reason
