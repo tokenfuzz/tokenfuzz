@@ -310,6 +310,17 @@ is_autodiscard_crash_output() {
     return 0
   fi
 
+  # Debug-only assert aborts: plain assert(...) routed through libc
+  # __assert_rtn / __assert_fail, or any [A-Z_]*(?:ASSERT|CHECK) macro
+  # (bare ASSERT / CHECK or a prefixed family like DEBUGASSERT / DCHECK)
+  # the project compiles out in release. ASan reports these as an ABRT,
+  # not a memory-safety class, so they pass the SIGABRT-without-ASan
+  # gate below but still aren't security bugs in the shipped binary.
+  if grep -qE '^Assertion failed:|__assert_rtn|__assert_fail|^[[:space:]]*#[0-9]+ .* in [A-Z][A-Z0-9_]*(ASSERT|CHECK)\b' "$f" 2>/dev/null && \
+     grep -qE 'AddressSanitizer: ABRT|SIGABRT' "$f" 2>/dev/null; then
+    return 0
+  fi
+
   # Rust panic (anchored)
   if grep -qE "^thread '[^']*' panicked at " "$f" 2>/dev/null; then
     return 0

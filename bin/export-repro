@@ -533,10 +533,16 @@ CMAKE_BUILD_TOP = """\
 # Prereqs: cmake + a C compiler (Xcode CLT / build-essential).
 # Discard any stale cache from a previous (possibly failed) configure so we
 # can switch generators / flags without cmake refusing to reconfigure.
+# Build type is RelWithDebInfo (not Debug) so the sanitizer runs against
+# the same code paths the release binary ships. Debug builds enable
+# project-defined debug macros (DEBUGBUILD, MOZ_DEBUG, DCHECK_IS_ON, ...)
+# that turn DEBUGASSERT / MOZ_ASSERT / DCHECK / assert() into real aborts
+# — those vanish in the shipped binary, so a debug-only abort is a
+# robustness signal, not a security bug.
 rm -f "$build/CMakeCache.txt"
 rm -rf "$build/CMakeFiles"
 cmake -S "$src" -B "$build" \\
-    -DCMAKE_BUILD_TYPE=Debug \\
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \\
     -DCMAKE_C_COMPILER="${CC:-clang}" \\
     -DCMAKE_CXX_COMPILER="${CXX:-clang++}" \\
     -DCMAKE_C_FLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1" \\
@@ -547,6 +553,10 @@ cmake --build "$build" -j__TARGET_ARG__
 """
 
 AUTOTOOLS_BUILD = """\
+# Default optimization level (no --enable-debug). Debug toggles compile
+# in project-defined DEBUGBUILD / DEBUGASSERT / assert() macros that are
+# no-ops in the shipped release binary; aborts on those are robustness
+# signals, not security bugs.
 mkdir -p "$build"
 ( cd "$build" && \\
   CC=clang CFLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1" LDFLAGS="-fsanitize=__SANITIZER_FLAG__" \\
@@ -570,7 +580,12 @@ fi
 """
 
 MESON_BUILD = """\
-CC=clang meson setup "$build" "$src" --buildtype=debug \\
+# debugoptimized (not debug) so the sanitizer mirrors the shipped release
+# binary. `--buildtype=debug` would enable project-defined debug-only
+# checks (DEBUGASSERT / MOZ_ASSERT / DCHECK / assert()) that are
+# compiled out in production; aborts on those are robustness signals,
+# not security bugs.
+CC=clang meson setup "$build" "$src" --buildtype=debugoptimized \\
     -Db_sanitize=__SANITIZER_FLAG__ -Ddefault_library=static
 ninja -C "$build"
 """

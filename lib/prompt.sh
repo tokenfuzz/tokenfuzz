@@ -1141,6 +1141,7 @@ CC=clang CXX=clang++ CFLAGS="-fsanitize=address -g -O1 -fno-omit-frame-pointer" 
   CXXFLAGS="\$CFLAGS" LDFLAGS="-fsanitize=address" \\
   ./configure --prefix=${ASAN_BUILD_DIR} && make -j"\$jobs" && make install
 \`\`\`
+**Sanitizer builds must mirror the release binary.** Do NOT pass \`--enable-debug\` (autotools), \`-DCMAKE_BUILD_TYPE=Debug\` / \`-DENABLE_DEBUG=ON\` (cmake), \`--buildtype=debug\` (meson), or \`ac_add_options --enable-debug\` (mozconfig). Debug toggles compile in \`DEBUGASSERT\` / \`MOZ_ASSERT\` / \`DCHECK\` / \`assert(...)\` aborts that are no-ops in shipped binaries — sanitizer hits on those are robustness signals, not security bugs. Prefer cmake \`-DCMAKE_BUILD_TYPE=RelWithDebInfo\` and meson \`--buildtype=debugoptimized\` so symbols stay in.
 Adapt the above to the target's actual build system (cmake, meson, cargo, go, etc.) and update \`target.toml\`.
 SANDIR
         ;;

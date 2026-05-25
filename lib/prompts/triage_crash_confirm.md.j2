@@ -37,6 +37,13 @@ REJECT when:
   - The diagnostic is logic-only (assertion text, MOZ_CRASH, panic, plain
     null-deref) and was kept by override despite missing memory-safety
     impact.
+  - The trigger is a **debug-only assertion** compiled out in release:
+    `assert(...)` (`__assert_rtn` / `__assert_fail` in the trace), any
+    `[A-Z_]*(?:ASSERT|CHECK)` macro the project defines as no-op
+    outside debug, or Rust `debug_assert!`. Release binaries don't
+    abort here. Promote ONLY if the report shows the violated
+    invariant leaves release in a memory-unsafe / boundary-crossing
+    state. Otherwise REJECT with concerns=["wrong-class"].
   - The trigger requires the caller to violate a contract that is
     EXPLICITLY DOCUMENTED in the project's public surface (man pages,
     header doc-comments, public option docs, RFC the project claims to

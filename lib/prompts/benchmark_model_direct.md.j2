@@ -104,6 +104,26 @@ still read, build, and execute anything in the tree — in particular,
 you must still drive sanitizer binaries under `build-asan/`,
 `build-ubsan/`, etc. to produce CRASHes.
 
+## Sanitizer builds must be RELEASE builds
+
+Sanitizers (ASan, MSan, UBSan, TSan) instrument the release code paths
+shipped to users. When you (re)configure a sanitizer build:
+
+  - autotools: drop `--enable-debug` (pass `--disable-debug` if
+    offered).
+  - cmake: `-DCMAKE_BUILD_TYPE=RelWithDebInfo`; never `Debug` or any
+    project-specific `*_DEBUG=ON` toggle.
+  - meson: `--buildtype=debugoptimized`, not `debug`.
+  - never add `-DDEBUG`, `-DDEBUGBUILD`, or `-UNDEBUG` by hand.
+
+Debug toggles compile in `assert(...)` and any
+`[A-Z_]*(?:ASSERT|CHECK)` macros the project gates on debug. Those
+are no-ops in the shipped binary, so an abort on one of them is a
+**robustness signal, not a security bug**. Do not file it as a CRASH
+or FIND unless you can name the unchecked OOB / UAF / type-confusion
+or boundary cross that follows in release when the assert is
+compiled out.
+
 ## Primary objective
 
 {{ crash_objective }}

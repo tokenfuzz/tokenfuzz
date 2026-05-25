@@ -79,7 +79,13 @@ def _build_invocation(asan_present: bool, asan_bin_path: Path | None,
         f"      {asan_bin_path} <args>  2> {crash_dir}/sanitizer.txt\n\n"
         "Try malformed inputs (URL escapes, oversized fields, protocol\n"
         "edge cases, integer extremes, embedded NULs) and inputs that\n"
-        "exercise the surface area the source review flagged.\n"
+        "exercise the surface area the source review flagged.\n\n"
+        "If you rebuild the sanitizer tree yourself: release config\n"
+        "only (cmake `-DCMAKE_BUILD_TYPE=RelWithDebInfo`, meson\n"
+        "`--buildtype=debugoptimized`, autotools without\n"
+        "`--enable-debug`). Debug builds compile in `assert(...)` and\n"
+        "`[A-Z_]*(?:ASSERT|CHECK)` macros that don't ship — aborts on\n"
+        "those are not security bugs by themselves.\n"
     )
 
 
@@ -108,7 +114,10 @@ def _build_recipe(lib_present: bool, asan_lib_path: Path | None,
         "    ASAN_OPTIONS=detect_leaks=0:abort_on_error=0:halt_on_error=1 \\\n"
         f"      {crash_dir}/harness 2> {crash_dir}/sanitizer.txt\n\n"
         "Keep one driver per CRASH directory so each is reproducible on\n"
-        "its own.\n"
+        "its own. Don't add `-DDEBUG`, `-DDEBUGBUILD`, `-UNDEBUG`, or\n"
+        "any project-specific debug toggle — debug-only `assert(...)`\n"
+        "and `[A-Z_]*(?:ASSERT|CHECK)` aborts don't ship and aren't\n"
+        "security bugs by themselves.\n"
     )
 
 

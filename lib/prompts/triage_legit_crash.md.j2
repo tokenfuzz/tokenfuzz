@@ -47,8 +47,15 @@ that the project's docs do not explicitly forbid. In particular:
     page) that states the prohibition. Inferred / conventional /
     unspecified contracts are NOT grounds for rejection.
 
-When in doubt, lean LEGITIMATE — false-rejects permanently bury real
-library defects.
+**Debug-only assertions are not legitimate by themselves.** An abort
+fired by `assert(...)` (`__assert_rtn` / `__assert_fail`), any
+`[A-Z_]*(?:ASSERT|CHECK)` macro the project compiles out in release,
+or Rust `debug_assert!` is set legitimate=false UNLESS the report
+shows the violated invariant leaves release in a memory-unsafe /
+boundary-crossing state. The shipping binary doesn't reach the abort.
+
+When in doubt outside the debug-assert case, lean LEGITIMATE —
+false-rejects permanently bury real library defects.
 
 Browser/web gate required: {{ require_web_gate }}
 If browser/web gate is 1, the normal input boundary must be plausible

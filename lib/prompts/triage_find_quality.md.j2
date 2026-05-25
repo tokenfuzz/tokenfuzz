@@ -48,6 +48,13 @@ case. Only REJECT (accept=false) when the report is clearly one of:
   - Memory-safety claim with no sanitizer/reproducer evidence AND no
     code-level argument (a plausible code-level walk-through of how the
     primitive triggers is enough — full reproducer not required).
+  - **Debug-only assertion fires under sanitizer/debug build** —
+    `assert(...)` (`__assert_rtn` / `__assert_fail`), any
+    `[A-Z_]*(?:ASSERT|CHECK)` macro the project compiles out in
+    release, or Rust `debug_assert!`. The shipped binary doesn't
+    reach the abort. Accept only if the report names the unchecked
+    OOB / UAF / type-confusion / boundary cross that follows in
+    release when the assert is compiled out.
 
 Read the substance, not the hedging. Self-deprecating qualifiers in
 the writeup ("mostly robustness, but ...", "may not be exploitable",
