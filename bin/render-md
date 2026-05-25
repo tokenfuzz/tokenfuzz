@@ -414,11 +414,11 @@ _HTML_HEAD = """<!DOCTYPE html>
     word-break: normal;
     overflow-wrap: anywhere;
   }}
-  /* Aggregated benchmark crosstab: 16 columns. Let multi-word headers
-     wrap onto a second line — by default `thead th` (and `.right`)
-     carry `white-space: nowrap`, which keeps "Rejected findings",
-     "Medium+ crashes", "Top severity", etc. on a single line and
-     consumes most of the table width.
+  /* Aggregated benchmark crosstab — wide table, many columns. Let
+     multi-word headers wrap onto a second line — by default `thead th`
+     (and `.right`) carry `white-space: nowrap`, which keeps "Rejected
+     findings", "Medium+ crashes", "Top severity", etc. on a single
+     line and consumes most of the table width.
      With the headers free to wrap, identifier cells (run id, condition
      slug) stay atomic on a single line instead of being chopped
      character-by-character mid-token. Compact padding + a slightly
@@ -844,7 +844,7 @@ def _table_extra_class(header: list[str]) -> str:
         return "fields-table"
     if [c.lower() for c in header] == ["id", "reason", "report"]:
         return "rejected-findings-table"
-    # The aggregated benchmark crosstab is 16 columns wide; the
+    # The aggregated benchmark crosstab is a wide table; the
     # harness-wide `min-width: max-content` + nowrap-on-code rules
     # otherwise force horizontal scrolling.
     if [c.lower() for c in header[:4]] == [

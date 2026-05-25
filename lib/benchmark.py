@@ -1990,6 +1990,28 @@ def _crosstab_count(value: object, pool_dir: Path | None,
     return _cluster_report_link(value, pool_dir, basename)
 
 
+def _short_commit(value: object) -> str:
+    """Short audited-target commit label for the aggregate table.
+    Returns an empty string when no revision was recorded, so callers
+    can omit the token entirely from a stacked Run cell rather than
+    burning a column on a dash."""
+    text = str(value or "").strip()
+    if not text or text == "no-vcs":
+        return ""
+    return f"`{text[:7]}`"
+
+
+def _run_cell(runid: object, target_sha: object) -> str:
+    """Render the Run identity cell: runid plus the audited target's
+    short commit. Two atomic `<code>` tokens with a literal space
+    between them — each token stays nowrap, but the browser is free to
+    break at the whitespace if the row gets tight, so the cell scales
+    with body width instead of forcing a horizontal scroll."""
+    rid = f"`{runid}`"
+    sha = _short_commit(target_sha)
+    return f"{rid} {sha}".rstrip() if sha else rid
+
+
 def crosstab(bench_root: Path) -> str:
     """Render benchmark results for each backend/run/target/condition key."""
     bench_root = Path(bench_root)
@@ -2081,9 +2103,10 @@ def crosstab(bench_root: Path) -> str:
         runid = run.get("runid", "?")
         target = run.get("target", "?")
         bench_dir = entry["row"]["bench_dir"]
+        run_cell = _run_cell(runid, run.get("target_sha"))
         if c is None:
             lines.append(
-                f"| `{target}` | {backend_cell} | — | `{runid}` "
+                f"| `{target}` | {backend_cell} | — | {run_cell} "
                 f"| — | — | — | — | — | — | — | — | — | · — | — | — |"
             )
             continue
@@ -2109,7 +2132,7 @@ def crosstab(bench_root: Path) -> str:
             "| {rcr} | {cr} | {uc} "
             "| {mp} | {sev} | {inp} | {out} |".format(
                 bk=backend_cell,
-                rid=f"`{runid}`",
+                rid=run_cell,
                 tgt=f"`{target}`",
                 cond=_condition_label(cond, backend, model),
                 wall=_fmt_hours(c.get("wall_median")),
@@ -2177,7 +2200,9 @@ def crosstab(bench_root: Path) -> str:
     )
     lines.append(
         "- **Run** — run identifier (UTC start timestamp); one per "
-        "`bin/benchmark` invocation."
+        "`bin/benchmark` invocation. The audited target's short commit "
+        "(seven characters) is shown alongside the timestamp when the "
+        "run recorded a VCS revision."
     )
     lines.append("")
 

@@ -992,6 +992,7 @@ mkbackend() {  # mkbackend <backend> <runid> <crash_total> <unique> [target]
   mkdir -p "$bdir"
   cat > "$bdir/report.json" <<JSON
 {"run":{"runid":"$2","target":"$target","backend":"$1","model":"$1-m","replicates":3,
+ "target_sha":"abcdef123456",
  "budget_wall":3600,"conditions":["model-direct","harness"]},
  "conditions":[
   {"condition":"harness","crash_total":$3,"unique_crash_clusters":$4,
@@ -1028,6 +1029,15 @@ assert_match '20260103-000000' "$xt" \
   "T19g2: aggregate keeps a second target for the same backend"
 assert_match '`curl`' "$xt" \
   "T19g3: aggregate names the second target"
+assert_match '`20260101-000000` `abcdef1`' "$xt" \
+  "T19g3a: aggregate stacks the audited target's short commit next to the runid in the Run cell"
+# A stand-alone Commit column would push the table to a width that
+# horizontally scrolls in the rendered HTML. Keep identity metadata in
+# the Run cell so adding more identifiers does not grow column count.
+commit_header_cells=$(printf '%s\n' "$xt" \
+  | grep -c '^| Target | Backend | Condition | Run | Wall' || true)
+assert_eq "$commit_header_cells" "1" \
+  "T19g3b: aggregate has no dedicated Commit column"
 codex_cares_rows=$(printf '%s\n' "$xt" \
   | grep -F '`codex`' \
   | grep -F '`20260101-000000`' \
@@ -1045,7 +1055,7 @@ assert_eq "$codex_cares_old_rows" "2" \
 xout="$work/benchmark-crosstab.md"
 python3 "$PY" crosstab "$xroot" --out "$xout" >/dev/null
 assert_file_exists "$xout" "T19h: crosstab --out writes a markdown file"
-# The 16-column crosstab gets a dedicated `.benchmark-table` CSS class so
+# The wide crosstab gets a dedicated `.benchmark-table` CSS class so
 # the harness-wide `min-width: max-content` rule doesn't force horizontal
 # scrolling on the rendered HTML sibling.
 python3 "$RENDER_MD" "$xout" --html-sibling >/dev/null
