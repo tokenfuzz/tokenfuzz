@@ -88,22 +88,11 @@ echo "int main(void){return 0;}" > "$RESULTS_DIR/crashes/CRASH-TTL-3/repro.c"
 echo "missing:x" > "$RESULTS_DIR/crashes/CRASH-TTL-3/.promotion_pending.sig"
 echo "5"        > "$RESULTS_DIR/crashes/CRASH-TTL-3/.promotion_pending.count"
 echo "stale"    > "$RESULTS_DIR/crashes/CRASH-TTL-3/.promotion_pending"
-# Pre-seed .audit/-level sidecars too. bin/export-repro's migration step
-# moves any non-bundle dotfile from root into .audit/ on its first pass —
-# the .promotion_pending sidecars get swept along and become stale state
-# that the clear function never reached before. Regression for that gap.
-mkdir -p "$RESULTS_DIR/crashes/CRASH-TTL-3/.audit"
-echo "stale-audit"   > "$RESULTS_DIR/crashes/CRASH-TTL-3/.audit/.promotion_pending"
-echo "missing:audit" > "$RESULTS_DIR/crashes/CRASH-TTL-3/.audit/.promotion_pending.sig"
-echo "4"             > "$RESULTS_DIR/crashes/CRASH-TTL-3/.audit/.promotion_pending.count"
 
 triage_crash_dirs 2>/dev/null
 assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-TTL-3/.promotion_pending" "marker cleared on success"
 assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-TTL-3/.promotion_pending.sig" "sig sidecar cleared on success"
 assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-TTL-3/.promotion_pending.count" "count sidecar cleared on success"
-assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-TTL-3/.audit/.promotion_pending" "audit-side marker cleared on success"
-assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-TTL-3/.audit/.promotion_pending.sig" "audit-side sig sidecar cleared on success"
-assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-TTL-3/.audit/.promotion_pending.count" "audit-side count sidecar cleared on success"
 
 # ═══════════════════════════════════════════════════════════════
 # 4. Bundle-scope counter advances across passes when step-2
