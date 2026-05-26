@@ -767,6 +767,12 @@ if [ ! -e "$san_lib" ]; then
   fi
 fi
 [ -e "$san_lib" ] || { echo "__SANITIZER_LABEL__ static library not found: $san_lib" >&2; exit 2; }
+# Loader hint for shared libs. ${san_lib%/*} is the directory side of the
+# resolved artifact; embedding it as an rpath at link time and exporting it
+# via LD_LIBRARY_PATH/DYLD_LIBRARY_PATH at run time means the harness loads
+# the instrumented .so/.dylib regardless of where the build placed it. For
+# static archives the variable is set but unused.
+san_lib_dir="${san_lib%/*}"
 """
 
 # The `rc=0; <cmd> || rc=$?` pattern is intentional: the script starts
@@ -813,7 +819,7 @@ __HARNESS_COMPILER__ -fsanitize=__SANITIZER_FLAG__ -g -O1__INCLUDES_ARGS__ \\
     -o "$build/repro"
 echo "=== running __SANITIZER_LABEL__ repro: $here/__INPUT_NAME__ ===" >&2
 rc=0
-__SANITIZER_ENV_BLOCK__  "$build/repro" "$here/__INPUT_NAME__" || rc=$?
+__SAN_LIB_RUN_ENV____SANITIZER_ENV_BLOCK__  "$build/repro" "$here/__INPUT_NAME__" || rc=$?
 echo "[repro] exit=$rc" >&2
 exit "$rc"
 """
@@ -1925,7 +1931,20 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
             f"link (treat as header-only). Edit output/<slug>/target.toml "
             f"if your harness actually needs to link a static archive.\n"
         )
-    san_lib_arg = "" if _san_lib_is_unset(san_lib_rel) else ' "$san_lib"'
+    # When a sanitizer library is resolved, embed its directory as both an
+    # rpath (Linux DT_RUNPATH / macOS LC_RPATH so the binary self-locates
+    # the shared lib) and as LD_LIBRARY_PATH/DYLD_LIBRARY_PATH (fallback
+    # for macOS dylib install-names that don't honor rpath, and for older
+    # loaders). The rpath flag is harmless for static archives.
+    if _san_lib_is_unset(san_lib_rel):
+        san_lib_arg = ""
+        san_lib_run_env = ""
+    else:
+        san_lib_arg = ' "$san_lib" -Wl,-rpath,"$san_lib_dir"'
+        san_lib_run_env = (
+            'LD_LIBRARY_PATH="$san_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" '
+            'DYLD_LIBRARY_PATH="$san_lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" '
+        )
     text = (
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
         + emit_build(build_system, sanitizer=sanitizer,
@@ -1939,6 +1958,7 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
             __HARNESS_NAME__=harness_name,
             __HARNESS_COMPILER__=harness_compiler,
             __SAN_LIB_ARG__=san_lib_arg,
+            __SAN_LIB_RUN_ENV__=san_lib_run_env,
             __SANITIZER_FLAG__=meta["flag"] or "address",
             __SANITIZER_LABEL__=meta["label"],
             __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(

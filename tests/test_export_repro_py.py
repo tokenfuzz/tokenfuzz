@@ -769,8 +769,14 @@ er.write_c_harness_template(
 text_a = repro_a.read_text(encoding="utf-8")
 assert_in('san_lib="$build"/libfoo.a', text_a,
           "c-harness asan_lib SET: emits asan_lib resolve block")
-assert_in('"$here/harness.c" "$san_lib" -lm -lpthread', text_a,
-          'c-harness asan_lib SET: link line includes "$san_lib"')
+assert_in('"$here/harness.c" "$san_lib" -Wl,-rpath,"$san_lib_dir" -lm -lpthread', text_a,
+          'c-harness asan_lib SET: link line includes "$san_lib" + rpath')
+assert_in('san_lib_dir="${san_lib%/*}"', text_a,
+          "c-harness asan_lib SET: derives lib dir for loader hints")
+assert_in('LD_LIBRARY_PATH="$san_lib_dir', text_a,
+          "c-harness asan_lib SET: run line sets LD_LIBRARY_PATH")
+assert_in('DYLD_LIBRARY_PATH="$san_lib_dir', text_a,
+          "c-harness asan_lib SET: run line sets DYLD_LIBRARY_PATH for macOS")
 assert_in("quarantine_size_mb=256:redzone=64", text_a,
           "c-harness ASan defaults: reproducer keeps run-asan redzone/quarantine")
 
@@ -790,6 +796,10 @@ assert_not_in("san_lib=", text_b,
               "c-harness asan_lib EMPTY: no asan_lib resolve block")
 assert_not_in('"$san_lib"', text_b,
               'c-harness asan_lib EMPTY: link line drops "$san_lib"')
+assert_not_in('-Wl,-rpath', text_b,
+              'c-harness asan_lib EMPTY: no rpath flag without a lib')
+assert_not_in('LD_LIBRARY_PATH=', text_b,
+              'c-harness asan_lib EMPTY: no LD_LIBRARY_PATH without a lib')
 assert_in('"$here/harness.cpp" -lm -lpthread -lc++', text_b,
           "c-harness asan_lib EMPTY: link line is well-formed without lib")
 
