@@ -484,8 +484,13 @@ def find_harness(scan_dirs: list[Path]) -> Optional[Path]:
 
 
 def find_shell_wrapper(scan_dirs: list[Path]) -> Optional[Path]:
+    # `harness.sh` / `harness.bash` is the documented convention in
+    # lib/languages.py: a `// HARNESS:` directive may name a shell driver
+    # that compiles+runs upstream sources directly (no pre-built asan_bin).
+    # `testcase.sh` / `reproducer.sh` are legacy hand-coded wrappers that
+    # launch an already-built CLI binary.
     for d in scan_dirs:
-        for name in ("testcase.sh", "reproducer.sh"):
+        for name in ("harness.sh", "harness.bash", "testcase.sh", "reproducer.sh"):
             p = d / name
             if p.is_file():
                 return p
@@ -1124,11 +1129,46 @@ _REWRITE_HARDCODED_PATH = re.compile(
 )
 
 
-def rewrite_audit_script_body(in_path: Path) -> str:
-    """Strip audit-internals and rewrite hardcoded paths to $san_bin.
+def rewrite_audit_script_body(in_path: Path, slug: str = "",
+                              target_root: str = "") -> str:
+    """Strip audit-internals and rewrite hardcoded paths to $san_bin / $src.
 
     Mirrors the awk pipeline in bin/export-repro:rewrite_audit_script_body.
+    Self-compiling shell harnesses (e.g. `harness.sh` that calls clang on
+    `<audit_root>/targets/<slug>/foo.c`) need those audit-machine paths
+    rerouted to the maintainer's cloned upstream tree (`$src`). We rewrite
+    both forms — the original absolute `target_root/foo` (this rewriter
+    runs before `_normalize_bundle_paths`) and the slug-relative
+    `targets/<slug>/foo` (defensive, in case the wrapper was pre-normalized).
     """
+    # Each rewrite replaces a directory-prefix reference to the audit-side
+    # source tree with `"$repro_src"` (the maintainer's cloned checkout).
+    # We deliberately use `$repro_src` and not `$src` because self-compiling
+    # wrappers commonly reassign `src` to their own scratch file (e.g.
+    # `src="$work/repro.c"`), which would shadow our outer variable. The
+    # caller is responsible for emitting `repro_src="$src"` before the
+    # wrapper body.
+    #
+    # We don't require a trailing `/` — `-I/.../targets/cjson` (used as an
+    # include dir) must rewrite as cleanly as `/.../targets/cjson/foo.c`.
+    # The trailing word-boundary blocks accidental matches into siblings
+    # like `targets/cjson_old`.
+    _TRAILING = r"(?![A-Za-z0-9_-])"
+    path_rewrites: list[tuple[re.Pattern[str], str]] = []
+    if target_root:
+        path_rewrites.append((
+            re.compile(re.escape(target_root.rstrip("/")) + _TRAILING),
+            '"$repro_src"',
+        ))
+    if slug:
+        # Negative lookbehind on `/`: if the prior char is `/`, this is the
+        # tail of a longer absolute path the absolute-prefix rule above is
+        # expected to own. Otherwise (whitespace, `-I`, `"`, …) it's a
+        # standalone slug-relative reference we should rewrite ourselves.
+        path_rewrites.append((
+            re.compile(r"(?<!/)targets/" + re.escape(slug) + _TRAILING),
+            '"$repro_src"',
+        ))
     out: list[str] = []
     skip_block = False
     with open(in_path, "r", encoding="utf-8", errors="replace") as f:
@@ -1151,6 +1191,8 @@ def rewrite_audit_script_body(in_path: Path) -> str:
                 continue
             new = _REWRITE_BIN_QUOTED.sub('"$san_bin"', stripped)
             new = _REWRITE_HARDCODED_PATH.sub('"$san_bin"', new)
+            for pat, repl in path_rewrites:
+                new = pat.sub(repl, new)
             out.append(new + "\n")
     return "".join(out)
 
@@ -2058,15 +2100,30 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
 def write_shell_wrapper_template(out: Path, *, build_system: str, upstream_url: str,
                                   pinned_rev: str, slug: str, san_bin_rel: str,
                                   cmake_target: str, wrapper: Path,
+                                  input_name: str = "",
+                                  target_root: str = "",
                                   sanitizer: str = "asan") -> None:
-    text = (
-        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
-        + emit_build(build_system, cmake_target, sanitizer)
-        + emit_bin_resolve(san_bin_rel, sanitizer)
-        + SHELL_WRAPPER_INTRO
-        + rewrite_audit_script_body(wrapper)
-    )
-    out.write_text(text, encoding="utf-8")
+    parts = [
+        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer),
+        emit_build(build_system, cmake_target, sanitizer),
+    ]
+    if san_bin_rel:
+        # Legacy CLI-binary wrapper: the inlined body launches `$san_bin`.
+        parts.append(emit_bin_resolve(san_bin_rel, sanitizer))
+    elif input_name:
+        # Self-compiling wrapper (`harness.sh` that compiles upstream sources
+        # inline). The preamble already consumed `$1` as the upstream src
+        # path, so we override argv to the testcase the wrapper expects.
+        # `repro_src` is the rewrite target for audit-side source references
+        # — held in a wrapper-safe name because wrappers often reassign `src`.
+        parts.append(
+            'repro_src="$src"\n'
+            'testcase="$(cd "$(dirname "$0")" && pwd)/' + input_name + '"\n'
+            'set -- "$testcase"\n'
+        )
+    parts.append(SHELL_WRAPPER_INTRO)
+    parts.append(rewrite_audit_script_body(wrapper, slug=slug, target_root=target_root))
+    out.write_text("".join(parts), encoding="utf-8")
     os.chmod(out, 0o755)
 
 
@@ -2452,7 +2509,9 @@ def main(argv: list[str]) -> int:
                 build_system=build_system, upstream_url=upstream_url,
                 pinned_rev=pinned_rev, slug=slug,
                 san_bin_rel=san_bin_rel, cmake_target=cmake_target,
-                wrapper=shell_wrapper, sanitizer=sanitizer,
+                wrapper=shell_wrapper, input_name=input_name,
+                target_root=cfg.target_root or "",
+                sanitizer=sanitizer,
             )
         elif input_name:
             write_cli_with_input_template(

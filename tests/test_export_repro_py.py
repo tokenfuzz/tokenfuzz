@@ -365,6 +365,58 @@ for host_prefix in ("/Users/alice/work", "/root/work", "/workspace",
     assert_in('"$san_bin"', out,
               f"rewrite: build-asan/<bin> under {host_prefix} rewritten to $san_bin")
 
+# Self-compiling shell harnesses reference upstream sources via the audit-side
+# target_root (and may have been pre-normalized to slug-relative form by
+# _normalize_bundle_paths). Both forms must end up as $repro_src so the
+# reproducer's cloned upstream tree is used at runtime.
+self_compile_sh = TMP / "self-compile.sh"
+self_compile_sh.write_text(
+    '#!/usr/bin/env bash\n'
+    'clang -fsanitize=address \\\n'
+    '  -I/Users/alice/work/targets/cjson \\\n'
+    '  /Users/alice/work/targets/cjson/cJSON.c \\\n'
+    '  targets/cjson/cJSON_Utils.c \\\n'
+    '  -o /tmp/repro\n',
+    encoding="utf-8")
+slug_out = er.rewrite_audit_script_body(
+    self_compile_sh, slug="cjson", target_root="/Users/alice/work/targets/cjson"
+)
+assert_in('-I"$repro_src"', slug_out,
+          "rewrite: absolute target_root prefix (with -I attached) rewritten to $repro_src")
+assert_in('"$repro_src"/cJSON.c', slug_out,
+          "rewrite: absolute target_root + source file rewritten to $repro_src/...")
+assert_in('"$repro_src"/cJSON_Utils.c', slug_out,
+          "rewrite: slug-relative targets/<slug>/file rewritten to $repro_src/...")
+assert_not_in('/Users/alice/work/targets/cjson', slug_out,
+              "rewrite: absolute target_root prefix fully stripped")
+assert_not_in('targets/cjson/', slug_out,
+              "rewrite: slug-relative form fully stripped")
+
+# Word boundary on the prefix — don't trip a longer sibling slug.
+sibling_sh = TMP / "sibling.sh"
+sibling_sh.write_text(
+    '#!/usr/bin/env bash\n'
+    'echo /Users/alice/work/targets/cjson_old/file.c\n'
+    'echo targets/cjson_old/file.c\n',
+    encoding="utf-8")
+sibling_out = er.rewrite_audit_script_body(
+    sibling_sh, slug="cjson", target_root="/Users/alice/work/targets/cjson"
+)
+assert_in('targets/cjson_old/file.c', sibling_out,
+          "rewrite: sibling slug 'cjson_old' is NOT rewritten")
+assert_not_in('"$repro_src"_old', sibling_out,
+              "rewrite: sibling slug must not glue onto $repro_src")
+
+# find_shell_wrapper: harness.sh and harness.bash are first-class
+# (lib/languages.py convention), alongside the legacy testcase.sh /
+# reproducer.sh names. Each name is recognized when present.
+for wrapper_name in ("harness.sh", "harness.bash", "testcase.sh", "reproducer.sh"):
+    d = Path(tempfile.mkdtemp(prefix="er-shfind-"))
+    (d / wrapper_name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    found = er.find_shell_wrapper([d])
+    assert_eq(d / wrapper_name, found,
+              f"find_shell_wrapper picks up {wrapper_name}")
+
 
 # 3. ext_of
 assert_eq("html", er.ext_of("foo.html"), "ext_of: .html")
