@@ -2293,7 +2293,16 @@ def main(argv: list[str]) -> int:
         audit_build_script = ""
         if cfg.target_root:
             _abs = Path(cfg.target_root) / ".audit" / "build.sh"
-            if _abs.is_file():
+            # is_file() raises PermissionError when target_root sits under
+            # a directory the current user can't stat (e.g. container-
+            # authored session-env pointing into /root/... while CI runs
+            # as an unprivileged user). Treat any stat error like absence
+            # so the generic-template fallback path below kicks in.
+            try:
+                _exists = _abs.is_file()
+            except OSError:
+                _exists = False
+            if _exists:
                 try:
                     audit_build_script = _abs.read_text(encoding="utf-8", errors="replace")
                 except OSError:
