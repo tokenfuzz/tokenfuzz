@@ -298,10 +298,24 @@ run_llm_config_bootstrap() {
     return 0
   fi
 
+  # Translate a helper name into the section + invocation it owns, so
+  # the rotation summary can point operators at the right hand-edit. Two
+  # callers today; the case statement is the single source of truth.
+  helper_section() {
+    case "$1" in
+      suggest-threat-model) printf '%s\n' "[threat_model]" ;;
+      suggest-peers)        printf '%s\n' "[s6_peers]" ;;
+      *)                    printf '%s\n' "<section>" ;;
+    esac
+  }
+
   local helper backend rc success helper_args
+  local -a attempts
+  local next_backend section
   for helper in suggest-threat-model suggest-peers; do
     [ -x "$SCRIPT_ROOT/bin/$helper" ] || continue
     success=0
+    attempts=()
     helper_args=("$TARGET_NAME" --apply)
     if [ "$helper" = "suggest-threat-model" ]; then
       # setup-target has just written the deterministic seed, so replacing
@@ -311,28 +325,44 @@ run_llm_config_bootstrap() {
     elif [ "$FORCE_CONFIG" -ne 0 ]; then
       helper_args+=("--force")
     fi
-    for backend in $LLM_BACKEND_CANDIDATES; do
+    # Convert space-separated candidate string into a positional list so
+    # we can name the next backend in the per-attempt rotation log.
+    # shellcheck disable=SC2206  # word-splitting is intentional
+    local -a candidates=($LLM_BACKEND_CANDIDATES)
+    local i
+    for (( i=0; i<${#candidates[@]}; i++ )); do
+      backend="${candidates[$i]}"
+      next_backend="${candidates[$((i+1))]:-}"
       rc=0
+      # LLM_BOOTSTRAP_QUIET=1 silences the helper's own per-attempt
+      # warning; this rotation log is the authoritative narrator.
       SCRIPT_ROOT="$SCRIPT_ROOT" ACTIVE_BACKEND="$backend" BACKEND="$backend" \
+        LLM_BOOTSTRAP_QUIET=1 \
         "$SCRIPT_ROOT/bin/$helper" "${helper_args[@]}" || rc=$?
       case "$rc" in
         0)
-          log "config bootstrap: updated output/$TARGET_NAME/target.toml via $helper using $backend"
+          log "config bootstrap: $helper succeeded on backend=$backend — updated output/$TARGET_NAME/target.toml"
           success=1
           break
           ;;
         4)
-          log "config bootstrap: $helper kept existing curated section; rerun setup-target with --force to overwrite"
+          log "config bootstrap: $helper kept the existing curated section on backend=$backend — rerun setup-target with --force to overwrite"
           success=1
           break
           ;;
         *)
-          log "config bootstrap: $helper failed with $backend (rc=$rc); trying next backend"
+          attempts+=("$backend(rc=$rc)")
+          if [ -n "$next_backend" ]; then
+            log "config bootstrap: $helper returned rc=$rc on backend=$backend — retrying with backend=$next_backend"
+          else
+            log "config bootstrap: $helper returned rc=$rc on backend=$backend — no remaining backends"
+          fi
           ;;
       esac
     done
     if [ "$success" -eq 0 ]; then
-      log "config bootstrap: $helper skipped after trying ${LLM_BACKEND_CANDIDATES[*]}; run 'bin/$helper $TARGET_NAME --apply' once a backend is configured"
+      section="$(helper_section "$helper")"
+      log "config bootstrap: $helper could not generate $section after trying [${attempts[*]}] — hand-edit output/$TARGET_NAME/target.toml or fix backend credentials and rerun 'bin/$helper $TARGET_NAME --apply' (see lib/llm_decide.log for call telemetry)"
     fi
   done
 }
@@ -456,7 +486,13 @@ if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
     else
       log "bootstrap: converging ASan build recipe via bin/auto-build-script (this may take a few minutes and one or more LLM revisions)"
       success=0
-      for backend in $LLM_BACKEND_CANDIDATES; do
+      # shellcheck disable=SC2206  # word-splitting is intentional
+      _abs_candidates=($LLM_BACKEND_CANDIDATES)
+      _abs_attempts=()
+      _abs_i=0
+      for backend in "${_abs_candidates[@]}"; do
+        next_backend="${_abs_candidates[$((_abs_i+1))]:-}"
+        _abs_i=$((_abs_i+1))
         rc=0
         SCRIPT_ROOT="$SCRIPT_ROOT" ACTIVE_BACKEND="$backend" BACKEND="$backend" \
           "$SCRIPT_ROOT/bin/auto-build-script" \
@@ -464,14 +500,19 @@ if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
             --out "$AUDIT_BUILD_SH" \
             --sanitizer asan || rc=$?
         if [ "$rc" -eq 0 ]; then
-          log "bootstrap: wrote $AUDIT_BUILD_SH (via $backend)"
+          log "bootstrap: auto-build-script succeeded on backend=$backend — wrote $AUDIT_BUILD_SH"
           success=1
           break
         fi
-        log "bootstrap: auto-build-script failed with $backend (rc=$rc); trying next backend"
+        _abs_attempts+=("$backend(rc=$rc)")
+        if [ -n "$next_backend" ]; then
+          log "bootstrap: auto-build-script returned rc=$rc on backend=$backend — retrying with backend=$next_backend"
+        else
+          log "bootstrap: auto-build-script returned rc=$rc on backend=$backend — no remaining backends"
+        fi
       done
       if [ "$success" -eq 0 ]; then
-        log "bootstrap: auto-build-script did not converge after trying ${LLM_BACKEND_CANDIDATES[*]}; rerun with --bootstrap once the upstream build error visible above is resolvable, or write $AUDIT_BUILD_SH by hand"
+        log "bootstrap: auto-build-script did not converge after trying [${_abs_attempts[*]}] — rerun with --bootstrap once the upstream build error visible above is resolvable, or write $AUDIT_BUILD_SH by hand"
       fi
     fi
   fi

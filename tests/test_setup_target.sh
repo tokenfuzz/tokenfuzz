@@ -126,8 +126,10 @@ rc=$?
 if [ "$rc" -eq 0 ] &&
    grep -q '\[s6_peers\]' "$ROOT/output/demo/target.toml" &&
    grep -q 'rapidjson' "$ROOT/output/demo/target.toml" &&
-   grep -q 'config bootstrap: suggest-peers failed with claude' <<<"$out" &&
-   grep -q 'config bootstrap: updated output/demo/target.toml via suggest-peers using codex' <<<"$out"; then
+   grep -qE 'config bootstrap: suggest-peers returned rc=[0-9]+ on backend=claude' <<<"$out" &&
+   grep -q 'config bootstrap: suggest-peers succeeded on backend=codex' <<<"$out" &&
+   ! grep -q 'LLM call failed or unavailable' <<<"$out" &&
+   ! grep -q 'backend=claude returned no usable response' <<<"$out"; then
   pass "$_CURRENT_TEST"
 else
   fail "$_CURRENT_TEST" "$out"
@@ -155,7 +157,7 @@ rc=$?
 if [ "$rc" -eq 0 ] &&
    grep -q 'rapidjson' "$ROOT/output/demo/target.toml" &&
    ! grep -q 'oldjson' "$ROOT/output/demo/target.toml" &&
-   grep -q 'config bootstrap: updated output/demo/target.toml via suggest-peers using codex' <<<"$out"; then
+   grep -q 'config bootstrap: suggest-peers succeeded on backend=codex' <<<"$out"; then
   pass "$_CURRENT_TEST"
 else
   fail "$_CURRENT_TEST" "$out"

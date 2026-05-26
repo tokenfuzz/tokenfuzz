@@ -236,9 +236,21 @@ def main(argv: list[str]) -> int:
     result = llm_decide("threat-model-suggest", "attacker_controls", prompt,
                          timeout=args.timeout)
     if result is None:
-        print("[suggest-threat-model] LLM call failed or unavailable.", file=sys.stderr)
-        print("[suggest-threat-model] Ensure a backend is configured and on PATH, "
-              "or hand-edit [threat_model] in target.toml.", file=sys.stderr)
+        # Single-line, backend-named failure message — aligned with
+        # bin/suggest-peers. Suppressed when the helper runs inside
+        # bin/setup-target's backend rotation (LLM_BOOTSTRAP_QUIET=1):
+        # the rotation log is the canonical narrator there and a per-
+        # helper warning on every attempt would scare operators into
+        # thinking the rotation itself failed.
+        backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or "<unset>"
+        if os.environ.get("LLM_BOOTSTRAP_QUIET", "0") != "1":
+            print(
+                f"[suggest-threat-model] backend={backend} returned no usable "
+                f"response — hand-edit [threat_model] in {target_toml}, or set "
+                f"BACKEND=claude|codex|gemini|oss and rerun. See lib/llm_decide.log "
+                f"for call telemetry.",
+                file=sys.stderr,
+            )
         return 2
 
     controls = normalize_controls(result.get("attacker_controls", []))

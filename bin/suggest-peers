@@ -146,11 +146,21 @@ def main(argv: list[str]) -> int:
 
     result = llm_decide("s6-peer-suggest", "domain,peers", prompt, timeout=args.timeout)
     if result is None:
-        print("[suggest-peers] LLM call failed or unavailable.", file=sys.stderr)
-        print("[suggest-peers] Ensure BACKEND (or ACTIVE_BACKEND) is set and "
-              "the backend binary is on PATH, or hand-edit [s6_peers] in target.toml using",
-              file=sys.stderr)
-        print(f"[suggest-peers]   {S6_DOC}", file=sys.stderr)
+        # Single-line, backend-named failure message — aligned with
+        # bin/suggest-threat-model. Suppressed when the helper runs inside
+        # bin/setup-target's backend rotation (LLM_BOOTSTRAP_QUIET=1): the
+        # rotation log is the canonical narrator there and a per-helper
+        # warning on every attempt would scare operators into thinking the
+        # rotation itself failed.
+        backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or "<unset>"
+        if os.environ.get("LLM_BOOTSTRAP_QUIET", "0") != "1":
+            print(
+                f"[suggest-peers] backend={backend} returned no usable response — "
+                f"hand-edit [s6_peers] in {target_toml} (see {S6_DOC}), or set "
+                f"BACKEND=claude|codex|gemini|oss and rerun. See lib/llm_decide.log "
+                f"for call telemetry.",
+                file=sys.stderr,
+            )
         return 2
 
     domain = str(result.get("domain", "")).strip()
