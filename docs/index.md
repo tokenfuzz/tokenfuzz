@@ -135,10 +135,9 @@ export BACKEND="<backend>"          # one of: claude, codex, gemini, oss
 export RESULTS="output/$TARGET/$BACKEND/results"
 
 bin/setup-target "$TARGET" <repo-url>
-# For C/C++ targets, build targets/<target>/build-asan/ with sanitizer flags
-# (or build-asan-<suffix>/ inside bin/audit-container-shell).
-# A complete CMake recipe is in getting-started/add-a-target.md.
-bin/setup-target "$TARGET"
+# For C/C++ targets, --bootstrap builds targets/<target>/build-asan/
+# with sanitizer flags automatically.
+bin/setup-target "$TARGET" --bootstrap
 
 bin/audit --target "$TARGET" --backend "$BACKEND" 1
 
