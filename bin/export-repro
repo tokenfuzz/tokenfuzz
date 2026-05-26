@@ -724,14 +724,14 @@ san_bin="$build"/__SAN_BIN_TAIL__
 
 LIB_RESOLVE = """\
 san_lib="$build"/__SAN_LIB_TAIL__
-[ -f "$san_lib" ] || san_lib="$src"/__SAN_LIB_REL__
-if [ ! -f "$san_lib" ]; then
+[ -e "$san_lib" ] || san_lib="$src"/__SAN_LIB_REL__
+if [ ! -e "$san_lib" ]; then
   # target.toml records the local audit build path, but maintainer CMake
   # builds may place the same archive in a different subdirectory. Resolve by
   # archive basename after the fresh build, but only accept an unambiguous hit.
   san_lib_name="${san_lib##*/}"
   if [ -n "$san_lib_name" ] && [ -d "$build" ]; then
-    matches=$(find "$build" -type f -name "$san_lib_name" -print)
+    matches=$(find "$build" \( -type f -o -type l \) -name "$san_lib_name" -print)
     match_count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')
     if [ "$match_count" = "1" ]; then
       san_lib=$(printf '%s\n' "$matches" | sed -n '1p')
@@ -742,10 +742,15 @@ if [ ! -f "$san_lib" ]; then
     fi
   fi
 fi
-if [ ! -f "$san_lib" ]; then
+if [ ! -e "$san_lib" ]; then
   # Audit-recorded name (libcurl-d.a, libcjson-asan.a) often doesn't match
   # what a fresh upstream build produces (libcurl.a, libcjson.a / .dylib).
   # Strip audit-side decoration from the stem and find any matching artifact.
+  # Accept symlinks (-type l): shared libs ship as libfoo.dylib -> libfoo.N.dylib
+  # -> libfoo.X.Y.Z.dylib (macOS) or libfoo.so -> libfoo.so.N (Linux), and the
+  # linker accepts a symlink. Dot-versioned name patterns catch the real-file
+  # end (libfoo.X.Y.Z.dylib, libfoo.so.X.Y.Z) when no unversioned symlink is
+  # installed in the build tree.
   stem="${san_lib##*/}"; stem="${stem%.*}"
   while :; do
     case "$stem" in
@@ -754,13 +759,14 @@ if [ ! -f "$san_lib" ]; then
     esac
   done
   if [ -n "$stem" ] && [ -d "$build" ]; then
-    san_lib=$(find "$build" -type f \\( \\
+    san_lib=$(find "$build" \\( -type f -o -type l \\) \\( \\
         -name "${stem}.a" -o -name "${stem}.dylib" -o -name "${stem}.so" \\
         -o -name "${stem}-*.a" -o -name "${stem}-*.dylib" -o -name "${stem}-*.so" \\
+        -o -name "${stem}.*.dylib" -o -name "${stem}.so.*" \\
       \\) -print 2>/dev/null | head -1)
   fi
 fi
-[ -f "$san_lib" ] || { echo "__SANITIZER_LABEL__ static library not found: $san_lib" >&2; exit 2; }
+[ -e "$san_lib" ] || { echo "__SANITIZER_LABEL__ static library not found: $san_lib" >&2; exit 2; }
 """
 
 # The `rc=0; <cmd> || rc=$?` pattern is intentional: the script starts
@@ -997,6 +1003,7 @@ def emit_lib_resolve(san_lib_rel: str, sanitizer: str = "asan") -> str:
 
 def emit_include_args(includes: list[str]) -> str:
     args = ""
+    saw_src_root = False
     for inc in includes:
         if not inc:
             continue
@@ -1018,6 +1025,13 @@ def emit_include_args(includes: list[str]) -> str:
             args += f" -I {shq(inc)}"
         else:
             args += f' -I "$src"/{shq(inc)}'
+            if inc == ".":
+                saw_src_root = True
+    # Many small C projects (cJSON, sqlite, lua) keep public headers at the
+    # source root rather than under include/. Add -I "$src" as a safety net
+    # so a target.toml that only lists include/ still resolves root headers.
+    if not saw_src_root:
+        args += ' -I "$src"'
     return args
 
 

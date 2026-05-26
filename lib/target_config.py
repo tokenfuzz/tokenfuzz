@@ -891,6 +891,49 @@ def _find_under(asan_dir: Path, *, name: str | None = None,
     return out
 
 
+_HEADER_SUFFIXES = (".h", ".hpp", ".hh", ".hxx", ".H")
+
+
+def _detect_include_dirs(target_root: Path, asan_dir_name: str) -> list[str]:
+    """Return public-header search paths relative to target_root.
+
+    Heuristic, not exhaustive — covers the layouts the seeder has observed:
+      - `include/` populated with headers (curl, libxml2, openssl, ...)
+      - headers at source root (cJSON, sqlite, lua, libpng, ...)
+      - `src/` carrying public headers (some autotools projects)
+    The `build-asan/include` entry is always emitted because CMake/Meson
+    routinely generate config headers there; if the dir doesn't exist at
+    repro time the -I just does nothing.
+    """
+    out: list[str] = []
+
+    def _has_headers(d: Path, recursive: bool = False) -> bool:
+        if not d.is_dir():
+            return False
+        try:
+            it = d.rglob("*") if recursive else d.iterdir()
+            for e in it:
+                if e.is_file() and e.suffix in _HEADER_SUFFIXES:
+                    return True
+        except OSError:
+            pass
+        return False
+
+    if _has_headers(target_root / "include", recursive=True):
+        out.append("include")
+    if _has_headers(target_root, recursive=False):
+        out.append(".")
+    # `src/` is a public-header location for some autotools projects but a
+    # private-only one for many others; only include it when it actually
+    # has headers AND no `include/` was found, to avoid pulling private
+    # internals onto the search path for projects that already publish via
+    # `include/`.
+    if "include" not in out and _has_headers(target_root / "src", recursive=False):
+        out.append("src")
+    out.append(f"{asan_dir_name}/include")
+    return out
+
+
 def _detect_build_system(target_root: Path) -> str:
     """Return a slug naming the dominant build/package system at target_root.
 
@@ -1170,7 +1213,9 @@ def seed_toml(
         "",
         "# C-API harness build inputs (testcases with // HARNESS: link against this):",
         asan_lib_line,
-        f'includes      = ["include", "{_asan_dir_name}/include"]',
+        'includes      = [' + ", ".join(
+            toml_basic_string(inc) for inc in _detect_include_dirs(root, _asan_dir_name)
+        ) + "]",
         'link_libs     = ["-lm", "-lpthread"]',
         "",
         "# Optional: cmake target name used by maintainer reproduce.sh:",

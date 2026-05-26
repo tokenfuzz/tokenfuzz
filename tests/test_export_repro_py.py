@@ -854,8 +854,8 @@ assert_in('san_lib="$build"/lib/libz.a', zlib_resolve,
           "emit_lib_resolve: preserves configured lib/ path first")
 assert_in('san_lib_name="${san_lib##*/}"', zlib_resolve,
           "emit_lib_resolve: computes archive basename")
-assert_in('find "$build" -type f -name "$san_lib_name"', zlib_resolve,
-          "emit_lib_resolve: searches fresh build tree by archive basename")
+assert_in('find "$build" \\( -type f -o -type l \\) -name "$san_lib_name"', zlib_resolve,
+          "emit_lib_resolve: searches fresh build tree by archive basename (accepts symlinks)")
 assert_in('match_count=', zlib_resolve,
           "emit_lib_resolve: counts basename matches")
 assert_in('ASan static library name is ambiguous', zlib_resolve,
