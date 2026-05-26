@@ -63,125 +63,62 @@ Notes:
   [Commands](../reference/commands.md). The normal setup flow does not
   need them.
 
-## 2. Build a sanitizer artifact (required for C/C++)
+## 2. Bootstrap the build
 
-If your target is C or C++, this step is mandatory for sanitizer
-crash evidence. Native targets default to ASan; without a configured
-sanitizer binary or runner, probes will fail setup rather than
-silently becoming findings-only. Non-C/C++ projects (Python, Ruby,
-Go, Node, Java, PHP, …) can genuinely skip it — jump to the
-[next section](#non-cc-targets-skip-the-sanitizer-build).
-
-ASan is the preferred default — it gives the clearest crash evidence
-for prioritisation. UBSan, MSan, and TSan are optional add-ons you can
-enable later through `target.toml`'s `[sanitizer]` block.
-
-Build the target with its native build system. Keep the artifacts in a
-stable location — usually:
-
-```text
-targets/<target>/build-asan/
-```
-
-When you work inside `bin/audit-container-shell`, the helper sets
-`AUDIT_BUILD_SUFFIX` so sanitizer build directories are isolated per
-container image, for example `build-asan-<image-id>/`. Harness path
-resolution applies that suffix to relative `build-asan/`,
-`build-ubsan/`, `build-msan/`, and `build-tsan/` paths; outside the
-container the suffix is empty.
-
-The exact build command belongs to the target project, not the
-harness. A minimal sanitizer flag set for any C/C++ build:
-
-```bash
-export CFLAGS="-fsanitize=address -g -O1 -fno-omit-frame-pointer"
-export LDFLAGS="-fsanitize=address"
-```
-
-For a CMake-based project, that looks like:
-
-```bash
-build_dir="targets/<target>/build-asan${AUDIT_BUILD_SUFFIX:-}"
-cmake -S "targets/<target>" -B "$build_dir" \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_C_COMPILER=clang \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DCMAKE_C_FLAGS="$CFLAGS" \
-  -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS"
-jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
-cmake --build "$build_dir" -j"$jobs"
-```
-
-For Meson, autotools, mach, or other systems, follow the upstream docs
-and inject the sanitizer flags through whatever variable that build
-system exposes. For browser-specific layouts, see
-[Browser targets](../guides/browser-targets.md).
-
-After the build finishes, the config generator looks under
-`build-asan${AUDIT_BUILD_SUFFIX:-}/` for the usual artifacts:
-
-- an executable for `asan_bin`;
-- a static library for `asan_lib` (when C harnesses are useful);
-- source and generated include directories;
-- compiler define flags needed by small harness programs;
-- linker flags required by small harness programs.
-
-### Non-C/C++ targets — skip the sanitizer build
-
-For Python, Ruby, Go, Node, Java, PHP, and similar projects,
-`bin/setup-target` automatically writes:
-
-- `[sanitizer] enabled = []`;
-- a starter `[runner]` block keyed on the detected build system.
-
-The harness runs testcases through the language's interpreter or
-driver. Diagnostics land under `findings/` instead of `crashes/`.
-
-You do **not** need a `build-asan/` directory for those targets. See
-[Auditing non-C/C++ targets](../guides/multi-language.md) for the full
-per-language matrix and `target.toml` examples.
-
-#### Building native extensions or vendored deps with `--bootstrap`
-
-Pure-Python (or pure-Ruby / pure-JS) targets need no build step. But
-some projects ship native extensions or vendored dependencies that
-must be built or installed before any code runs — PyYAML's `_yaml.so`,
-Node modules under `node_modules/`, PHP packages under `vendor/`,
-native gems. For those, run the optional language bootstrap:
+Run once per target:
 
 ```bash
 bin/setup-target <target> --bootstrap
 ```
 
-**Rule of thumb:** if your runner is going to `import` (or `require`,
-`use`, …) something the source tree builds or downloads, you need
-`--bootstrap`. If it just executes a script directly with no native or
-vendored deps, you do not.
+`--bootstrap` does whatever the detected `build_system` needs:
 
-The action is chosen from the manifest in the checkout:
+- **C/C++ (`cmake` / `autotools` / `meson`)** — `bin/auto-build-script`
+  iterates on a vanilla ASan recipe until it produces a working build,
+  then writes the validated script to `targets/<target>/.audit/build.sh`.
+  `bin/export-repro` inlines that script verbatim into every
+  `reproduce.sh`, so maintainers get the same build the audit used.
+- **Python / Node / PHP / Ruby / Rust / Go / Swift** — runs the
+  language's native install step (`setup.py build_ext --inplace`,
+  `npm install`, `composer install`, `bundle install`, `cargo build`,
+  `go build ./...`, `swift build`). Required when the runner will
+  `import` (or `require`, …) something the source tree builds or
+  downloads.
+- **Anything else (Java, Kotlin, Perl, R, Shell, …)** — no-op.
 
-| `build_system` | Manifest gate | When you need it |
-| --- | --- | --- |
-| `python`   | `setup.py`      | **Required** when the project ships a C extension. |
-| `npm`      | `package.json`  | **Required** when the project imports from `node_modules/`. |
-| `composer` | `composer.json` | **Required** when the project autoloads from `vendor/`. |
-| `bundler`  | `Gemfile`       | **Required** when the project depends on bundled gems. |
-| `cargo` / `go` / `swift` | `Cargo.toml` / `go.mod` / `Package.swift` | Optional — primes the build cache and surfaces compile errors early. |
+Skips silently when its inputs aren't present (no LLM backend, no
+manifest, no recognised build system, recipe already exists). Safe to
+pass on any target.
 
-Bootstrap is opt-in and safe to pass on any target: if the gating
-manifest is absent, or the language has no registered step (C/C++,
-Java, Kotlin, Perl, R, Shell), it skips silently. C/C++ targets build
-`build-asan${AUDIT_BUILD_SUFFIX:-}/` separately with the [sanitizer step
-above](#2-build-a-sanitizer-artifact-required-for-cc).
-One exception is automatic repair for stale Python extension builds:
-if `bin/setup-target` sees `*.cpython-<tag>-*.so` files for a
-different Python ABI, it forces the Python bootstrap so later probes
-do not all fail on an ABI mismatch.
+UBSan, MSan, and TSan are optional add-ons enabled later through
+`target.toml`'s `[sanitizer]` block.
 
-You can still wire in a sanitizer build later (Go's `-race`, Rust's
-nightly `-Z sanitizer=address`, Swift's `-sanitize=address`, …) by
-editing `[sanitizer].enabled` and pointing the matching `<name>_bin`
-at the instrumented build.
+### When you do not need `--bootstrap`
+
+Pure-Python / pure-Ruby / pure-JS scripts with no native extensions or
+vendored dependencies, and non-C/C++ targets where you are happy to
+run testcases through the language's own interpreter without a
+sanitizer build. `bin/setup-target` writes a runner-only config
+(`[sanitizer] enabled = []`) for those — diagnostics land under
+`findings/` instead of `crashes/`. See
+[Auditing non-C/C++ targets](../guides/multi-language.md) for the
+per-language matrix.
+
+### Inside `bin/audit-container-shell`
+
+The container helper sets `AUDIT_BUILD_SUFFIX` so build directories
+are isolated per image (`build-asan-<image-id>/`). Harness path
+resolution applies it to relative `build-asan/`, `build-ubsan/`,
+`build-msan/`, and `build-tsan/` paths automatically; outside the
+container the suffix is empty.
+
+### Writing the build recipe by hand
+
+`auto-build-script` is the supported path. If you need to override —
+no LLM backend available, exotic build system, in-tree patches — drop
+a shell script with the contract `argv = <src> <build>` at
+`targets/<target>/.audit/build.sh` and `bin/export-repro` will inline
+it the same way.
 
 ## 3. Refresh and review the generated config
 

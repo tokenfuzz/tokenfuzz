@@ -2274,6 +2274,20 @@ def main(argv: list[str]) -> int:
                     audit_build_script = _abs.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     audit_build_script = ""
+        # Silent fallback to the generic cmake/autotools/meson template is
+        # the failure mode that ate commit 47f0c45 on machines where
+        # auto-build-script had not run. Emit a single visible WARN so the
+        # operator sees "ah, I need to rerun bin/setup-target --bootstrap"
+        # rather than discovering it weeks later via a maintainer's broken
+        # reproduce.sh.
+        if not audit_build_script and (build_system or "") in {"cmake", "autotools", "meson"}:
+            sys.stderr.write(
+                f"[export-repro] WARN: {cfg.target_root or '<target_root unset>'}/.audit/build.sh "
+                f"is missing for {build_system} target {cfg.slug!r}; reproduce.sh will use a "
+                f"generic {build_system} template that may not include the target-specific "
+                f"flags the audit build used. Run 'bin/setup-target {cfg.slug} --bootstrap' "
+                f"to converge a working recipe via bin/auto-build-script and rerun the bundle.\n"
+            )
 
         # ── Choose reproduce.sh template ────────────────────────────
         repro_path = stage / "reproduce.sh"

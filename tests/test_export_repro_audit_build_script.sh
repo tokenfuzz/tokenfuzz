@@ -123,4 +123,48 @@ assert_file_contains "$SCRIPT_ROOT/bin/export-repro" 'Strip audit-side decoratio
 assert_file_contains "$SCRIPT_ROOT/bin/export-repro" '\*-asan|\*-ubsan|\*-msan|\*-tsan|\*-d|\*-debug' \
   "lib-resolver: stem-suffix strip list present in LIB_RESOLVE template"
 
+# ─── Fallback WARN when .audit/build.sh is missing ───────────────────
+# This is the bug that silently shipped pre-fix: the splice path didn't
+# trigger, export-repro fell back to the generic cmake template, the
+# operator had no idea, and the bundle landed in maintainers' inboxes
+# with a build that didn't reflect the audit. WARN makes the fallback
+# loud so the operator sees the missing build.sh.
+rm -f "$SRC/.audit/build.sh"
+CRASH2="$RESULTS/crashes/CRASH-ABS-2"
+mkdir -p "$CRASH2"
+cat > "$CRASH2/harness.c" <<'EOF'
+#include <stdio.h>
+int main(int argc, char **argv) { (void)argc; (void)argv; return 0; }
+EOF
+printf 'AAAA' > "$CRASH2/input.bin"
+cat > "$CRASH2/asan.txt" <<'EOF'
+ASAN_RUN_HEADER: runs=1 mode=generic testcase=output/x/scratch/x.bin started=x
+=== Run 1/1 ===
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xdead at pc 0xface
+READ of size 1 at 0xdead thread T0
+    #0 0xdead in main /src/harness.c:2
+SUMMARY: AddressSanitizer: heap-buffer-overflow /src/harness.c:2 in main
+CRASH_RATE: 1/1
+EOF
+cat > "$CRASH2/report.md" <<'EOF'
+# CRASH-ABS-2
+## Summary
+Fixture.
+Trigger source: bytes
+Caller contract: obeyed
+Boundary: input file
+Caller controls: bytes
+EOF
+( cd "$OUT" && "$SCRIPT_ROOT/bin/export-repro" CRASH-ABS-2 ) > "$TEST_TMPDIR/out2" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "export-repro fallback path exits 0"
+else
+  fail "export-repro fallback path exits 0" "rc=$rc out=$(tail -c 600 "$TEST_TMPDIR/out2")"
+fi
+assert_file_contains "$TEST_TMPDIR/out2" 'WARN.*\.audit/build\.sh.*missing' \
+  "fallback: WARN names the missing build.sh file"
+assert_file_contains "$TEST_TMPDIR/out2" 'setup-target.*--bootstrap' \
+  "fallback: WARN points operator at setup-target --bootstrap"
+
 summary

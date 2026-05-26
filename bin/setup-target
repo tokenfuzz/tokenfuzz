@@ -18,12 +18,21 @@ Options:
   --force, --force-config
                            Regenerate output/<target>/target.toml and overwrite
                            LLM-suggested [threat_model] / [s6_peers] sections
-  --bootstrap             Run the language-specific build phase inside the checkout
-                            (python: setup.py build_ext --inplace; rust: cargo build;
-                             go: go build ./...; swift: swift build; npm: npm install;
-                             php: composer install; ruby: bundle install). Skips
-                             silently when the detected language has no bootstrap or
-                             when its required manifest is absent.
+  --bootstrap             Prepare the checkout for auditing. Runs whichever of these
+                            apply to the detected build system:
+                              * Language build (python: setup.py build_ext --inplace;
+                                rust: cargo build; go: go build ./...; swift: swift
+                                build; npm: npm install; php: composer install;
+                                ruby: bundle install).
+                              * Sanitizer build recipe convergence for C/C++ targets
+                                (cmake / autotools / meson) — calls bin/auto-build-script
+                                to discover a working ASan build and writes the validated
+                                script to targets/<target>/.audit/build.sh. bin/export-repro
+                                later inlines this script verbatim into each reproduce.sh
+                                so maintainers get the same build the audit used.
+                            Skips each step silently when its inputs are absent
+                            (no manifest, no LLM backend, no recognised C/C++
+                            build system, recipe already exists).
   --no-llm-config         Skip LLM-backed target.toml enrichment
   -h, --help              Show this help
 
@@ -356,17 +365,11 @@ if [ "$RUN_BOOTSTRAP" -eq 0 ] && [ -d "$TARGET_ROOT" ]; then
   fi
 fi
 
-# Optional language-specific bootstrap. Reads build_system out of the
-# generated target.toml, then asks the language registry what commands
-# to run inside the source checkout. For Python this builds C
-# extensions in-place so the cp-tag matches the interpreter the audit
-# runner will use — that's the fix for the pyyaml `_yaml.cpython-39 vs
-# python3.14` ENV-BLOCKED cluster. Commands are argv-style so there's
-# no shell-injection surface; missing manifests skip silently.
-if [ "$RUN_BOOTSTRAP" -eq 1 ]; then
-  # Read build_system out of target.toml using the canonical parser
-  # (honors target_config's lenient TOML quirks).
-  BUILD_SYSTEM="$(python3 - "$SCRIPT_ROOT" "$TARGET_TOML" <<'PY'
+# Read build_system out of the freshly-written target.toml. Used by
+# both the language-bootstrap step below and the sanitizer build-recipe
+# convergence step further down — keep this read at top scope so both
+# can see it.
+BUILD_SYSTEM="$(python3 - "$SCRIPT_ROOT" "$TARGET_TOML" <<'PY'
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
@@ -375,7 +378,16 @@ parsed = tc.parse_toml(Path(sys.argv[2]))
 bs = parsed.get("build_system", "")
 print(bs if isinstance(bs, str) else "")
 PY
-  )"
+)"
+
+# Optional language-specific bootstrap. Asks the language registry what
+# commands to run inside the source checkout for the detected
+# build_system. For Python this builds C extensions in-place so the
+# cp-tag matches the interpreter the audit runner will use — that's the
+# fix for the pyyaml `_yaml.cpython-39 vs python3.14` ENV-BLOCKED
+# cluster. Commands are argv-style so there's no shell-injection
+# surface; missing manifests skip silently.
+if [ "$RUN_BOOTSTRAP" -eq 1 ]; then
   if [ -z "$BUILD_SYSTEM" ]; then
     log "bootstrap: skipped (no build_system in $TARGET_TOML)"
   else
@@ -411,12 +423,65 @@ PY
   fi
 fi
 
+# Sanitizer build-recipe convergence. C/C++ targets need a working ASan
+# build script at targets/<slug>/.audit/build.sh so:
+#   * bin/export-repro can inline it into each reproduce.sh (the recipe
+#     bug fixed in commit 47f0c45 — without this file, reproduce.sh
+#     silently falls back to a generic cmake template missing the
+#     target-specific flags an audit actually needed),
+#   * the maintainer running reproduce.sh and the operator running the
+#     audit get a bit-identical build by construction.
+#
+# bin/auto-build-script discovers the recipe via an LLM-driven
+# convergence loop. It needs the same LLM backend run_llm_config_bootstrap
+# uses, so we reuse that gating. The call is part of --bootstrap; if the
+# operator did not pass --bootstrap and the recipe is missing, we log a
+# one-line hint so the next setup-target run includes it.
+NATIVE_BUILD_SYSTEM=0
+case "${BUILD_SYSTEM:-}" in
+  cmake|autotools|meson) NATIVE_BUILD_SYSTEM=1 ;;
+esac
+
+AUDIT_BUILD_SH="$TARGET_ROOT/.audit/build.sh"
+
+if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
+  if [ -f "$AUDIT_BUILD_SH" ] && [ "$FORCE_CONFIG" -eq 0 ]; then
+    log "bootstrap: keeping existing $AUDIT_BUILD_SH (pass --force to regenerate)"
+  elif [ ! -x "$SCRIPT_ROOT/bin/auto-build-script" ]; then
+    log "bootstrap: bin/auto-build-script not executable; skipping sanitizer build convergence"
+  else
+    build_llm_backend_candidates
+    if [ -z "$LLM_BACKEND_CANDIDATES" ]; then
+      log "bootstrap: no LLM backend configured; skipping sanitizer build convergence (set up a backend and rerun with --bootstrap)"
+    else
+      log "bootstrap: converging ASan build recipe via bin/auto-build-script (this may take a few minutes and one or more LLM revisions)"
+      success=0
+      for backend in $LLM_BACKEND_CANDIDATES; do
+        rc=0
+        SCRIPT_ROOT="$SCRIPT_ROOT" ACTIVE_BACKEND="$backend" BACKEND="$backend" \
+          "$SCRIPT_ROOT/bin/auto-build-script" \
+            --src "$TARGET_ROOT" \
+            --out "$AUDIT_BUILD_SH" \
+            --sanitizer asan || rc=$?
+        if [ "$rc" -eq 0 ]; then
+          log "bootstrap: wrote $AUDIT_BUILD_SH (via $backend)"
+          success=1
+          break
+        fi
+        log "bootstrap: auto-build-script failed with $backend (rc=$rc); trying next backend"
+      done
+      if [ "$success" -eq 0 ]; then
+        log "bootstrap: auto-build-script did not converge after trying ${LLM_BACKEND_CANDIDATES[*]}; rerun with --bootstrap once the upstream build error visible above is resolvable, or write $AUDIT_BUILD_SH by hand"
+      fi
+    fi
+  fi
+elif [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ ! -f "$AUDIT_BUILD_SH" ]; then
+  log "hint: $TARGET_NAME is a $BUILD_SYSTEM target with no $AUDIT_BUILD_SH; rerun with --bootstrap to converge an ASan build recipe (without it, reproduce.sh falls back to a generic cmake template that may miss target-specific flags)"
+fi
+
 cat <<EOF
 
 Next steps:
-  1. Build an ASan target under targets/$TARGET_NAME/build-asan/ (or
-     build-asan-<id>/ inside a container, where <id> is AUDIT_BUILD_SUFFIX).
-  2. Refresh generated config with: bin/setup-target $TARGET_NAME
-  3. Review output/$TARGET_NAME/target.toml and edit only unresolved or target-specific fields.
-  4. Smoke-test with: bin/audit --target $TARGET_NAME 1
+  1. Review output/$TARGET_NAME/target.toml and edit only unresolved or target-specific fields.
+  2. Smoke-test with: bin/audit --target $TARGET_NAME --backend <claude|codex|gemini|oss> 1
 EOF
