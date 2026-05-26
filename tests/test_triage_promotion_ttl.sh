@@ -259,6 +259,21 @@ _triage_bundle_crash_dir \
   "$SCRIPT_ROOT/bin"
 export TARGET_SLUG="$_saved_target_slug"
 rm -rf "$_path_slug_root"
+# When the bundle install fails (CI has surfaced an intermittent Python
+# traceback that audit_log truncates to one line) dump the full stderr
+# and listing of the crash dir so the next failure is self-diagnosing.
+_bundle_err="$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/.audit/export-repro.err"
+if [ ! -f "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/REPORT.md" ] \
+   || [ ! -f "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/reproduce.sh" ] \
+   || [ ! -f "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/input.txt" ]; then
+  echo "── export-repro stderr (full) ──"
+  [ -f "$_bundle_err" ] && cat "$_bundle_err" || echo "(missing $_bundle_err)"
+  echo "── crash dir listing ──"
+  ls -la "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/" 2>&1 || true
+  ls -la "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/.audit/" 2>&1 || true
+  echo "── end diagnostics ──"
+fi
+unset _bundle_err
 assert_file_exists "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/REPORT.md" \
   "real exporter bundles inspected crash dir despite stale session RESULTS_DIR"
 assert_file_exists "$RESULTS_DIR/crashes/CRASH-BUNDLE-REALPATH/reproduce.sh" \
