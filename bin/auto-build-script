@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -205,6 +206,36 @@ def build_produced_artifacts(build: Path) -> bool:
     return False
 
 
+# Matches bash's "command not found" diagnostics. Examples this catches:
+#   /tmp/.../build.candidate.sh: line 7: cmake: command not found
+#   cmake: command not found
+#   sh: 1: cmake: not found
+# The captured group is the binary name. Path-shaped matches (anything
+# containing '/') are filtered downstream so we don't mistake a missing
+# file path inside a configure log for a missing tool.
+_COMMAND_NOT_FOUND_RE = re.compile(
+    r"(?:^|: )([A-Za-z0-9_.+-]+): (?:command )?not found",
+    re.MULTILINE,
+)
+
+
+def detect_missing_commands(log: str) -> list[str]:
+    """Return the distinct binary names bash reported as 'not found' in
+    ``log``. The caller uses a non-empty return value to short-circuit
+    the LLM revision loop: the recipe shipped in reproduce.sh cannot
+    install packages (the safety rails block sudo / apt / curl|sh), so a
+    missing toolchain is unrecoverable through LLM iteration and the
+    user needs an actionable diagnostic instead of N wasted LLM calls.
+    """
+    seen: list[str] = []
+    for m in _COMMAND_NOT_FOUND_RE.finditer(log):
+        cmd = m.group(1).strip()
+        if not cmd or "/" in cmd or cmd in seen:
+            continue
+        seen.append(cmd)
+    return seen
+
+
 def validate_proposed_script(script: str) -> tuple[bool, str]:
     if not isinstance(script, str):
         return False, "not a string"
@@ -324,6 +355,31 @@ def main(argv: list[str]) -> int:
         if rc == 0 and produced:
             success = True
             break
+
+        # Short-circuit on toolchain-missing failures. A "command not found"
+        # in the build log means the host is missing the binary the recipe
+        # depends on (cmake, ninja, meson, cargo, go, ...). The LLM cannot
+        # fix this: validate_proposed_script blocks sudo/curl|sh, and a
+        # recipe that installed packages would be unshippable to upstream
+        # maintainers anyway (reproduce.sh must not modify their host). So
+        # exit with an actionable diagnostic instead of burning the LLM
+        # revision budget on a class of failure it has no path through.
+        missing = detect_missing_commands(log)
+        if missing:
+            sys.stderr.write("\n[auto-build-script] LAST BUILD LOG TAIL:\n")
+            sys.stderr.write(log[-2_000:])
+            sys.stderr.write("\n")
+            info(
+                f"toolchain missing: {' '.join(missing)} — install in the "
+                f"audit environment and rerun. The LLM revision loop is "
+                f"skipped because the recipe baked into reproduce.sh must "
+                f"not invoke sudo / apt-get / curl|sh on a maintainer's "
+                f"box (see the safety rails in validate_proposed_script). "
+                f"Inside bin/audit-container-shell, install with `apt-get "
+                f"install -y {' '.join(missing)}` or extend the install "
+                f"list in tests/run-tests.sh --install-container-deps."
+            )
+            return 3
 
         # Ask the LLM for a revised complete script.
         info(f"iter {i}: asking LLM for revision (log tail {min(len(log),_BUILD_LOG_TAIL_BYTES)} bytes)")
