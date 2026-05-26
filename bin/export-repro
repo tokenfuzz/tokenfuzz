@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -1771,40 +1773,48 @@ def _install_with_exact_case(src: Path, dst: Path) -> None:
     """Copy ``src`` to ``dst`` and guarantee the on-disk entry name is
     exactly ``dst.name``.
 
-    On case-insensitive but case-preserving filesystems (macOS APFS
-    default, Docker Desktop bind mounts), ``shutil.copyfile`` to a
-    destination that already exists under a different case opens the
-    existing entry and overwrites its bytes, leaving the visible name
-    under the *old* case. lib/triage.sh's exact-case bundle gate then
-    reports "missing REPORT.md" for a bundle that is correctly written
-    byte-for-byte but lives under ``report.md``.
+    Atomic-write via a same-dir temp file, then ``os.replace`` to the
+    final name. The temp file uses a name that does not case-collide
+    with ``dst`` or any bundle filename. This sidesteps two Docker
+    Desktop / case-insensitive bind-mount quirks observed in practice:
+      * ``shutil.copyfile(src, dst)`` when a case-different sibling
+        (e.g. lowercase ``report.md``) exists at ``dst.parent`` writes
+        through the sibling's dirent (inode-aliased into ``.audit/``
+        once the migration step has moved that sibling), leaving the
+        bundle root without ``REPORT.md`` at all.
+      * ``unlink(sibling)`` followed by ``open(dst, 'wb')`` can fail
+        ``ENOENT`` because the bind-mount dirent cache has not made
+        the freed name re-creatable yet.
+    Writing the new content to a case-unique temp first and finishing
+    with ``os.replace`` keeps the create + sibling-removal step atomic
+    from the FS's point of view and never relies on the FS letting us
+    open a name we just unlinked.
     """
     target_lower = dst.name.lower()
+    tmp = dst.parent / f"{dst.name}.installing-{os.getpid()}-{secrets.token_hex(4)}"
     try:
-        for entry in os.scandir(dst.parent):
-            if entry.name == dst.name:
-                continue
-            if entry.name.lower() != target_lower:
-                continue
-            try:
-                os.unlink(entry.path)
-            except OSError:
-                pass
-    except OSError:
-        pass
-    shutil.copyfile(str(src), str(dst))
-    os.chmod(dst, 0o644)
-    # Belt-and-suspenders for bind-mount layers whose dirent cache
-    # survived the unlink: rename if the FS still served the old case.
-    try:
-        for entry in os.scandir(dst.parent):
-            if entry.name == dst.name:
-                return
-            if entry.name.lower() == target_lower:
-                os.rename(entry.path, str(dst))
-                return
-    except OSError:
-        return
+        shutil.copyfile(str(src), str(tmp))
+        os.chmod(tmp, 0o644)
+        # Remove any case-different sibling so ``os.replace`` produces
+        # an entry under the requested case rather than reusing the
+        # sibling's name on a case-preserving FS.
+        try:
+            for entry in os.scandir(dst.parent):
+                if entry.name in (tmp.name, dst.name):
+                    continue
+                if entry.name.lower() != target_lower:
+                    continue
+                try:
+                    os.unlink(entry.path)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        os.replace(str(tmp), str(dst))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def _is_bundle_filename(name: str) -> bool:
