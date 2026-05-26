@@ -187,6 +187,24 @@ assert_eq "/fake/root/build-ubsan/libfoo.a" "$(target_sanitizer_lib_path ubsan)"
 assert_eq "/fake/root/build-msan/libfoo.a" "$(target_sanitizer_lib_path msan)" "msan lib resolves via helper"
 assert_eq "/fake/root/build-tsan/libfoo.a" "$(target_sanitizer_lib_path tsan)" "tsan lib resolves via helper"
 
+# ── target_sanitizer_rpath_args ──────────────────────────────────────
+# Convention shared with bin/export-repro's reproduce.sh template: the
+# rpath dir is the dirname side of the resolved sanitizer_lib path. The
+# helper is what bin/probe uses at audit time; the template uses the
+# equivalent ${san_lib%/*} shell expression at repro time.
+assert_eq "-Wl,-rpath,/abs/build-asan/lib" \
+  "$(target_sanitizer_rpath_args /abs/build-asan/lib/libcjson.so.1)" \
+  "target_sanitizer_rpath_args: emits -Wl,-rpath,<dirname>"
+assert_eq "-Wl,-rpath,/abs/build-asan" \
+  "$(target_sanitizer_rpath_args /abs/build-asan/libfoo.a)" \
+  "target_sanitizer_rpath_args: works with static archive"
+assert_eq "" \
+  "$(target_sanitizer_rpath_args "")" \
+  "target_sanitizer_rpath_args: empty input → empty output"
+assert_eq "" \
+  "$(target_sanitizer_rpath_args libfoo.a)" \
+  "target_sanitizer_rpath_args: no directory component → empty output"
+
 # ───────────────────────────────────────────────────────────────────
 # 9. sanitizer_compose_options: appends suppressions when file exists
 # ───────────────────────────────────────────────────────────────────

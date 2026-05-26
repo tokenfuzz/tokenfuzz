@@ -627,7 +627,19 @@ PY
           sanitizer_lib=""
         fi
         local sanitizer_lib_args=()
-        [ -n "$sanitizer_lib" ] && sanitizer_lib_args+=("$sanitizer_lib")
+        if [ -n "$sanitizer_lib" ]; then
+          sanitizer_lib_args+=("$sanitizer_lib")
+          # Bake an rpath pointing at the lib's directory so the harness binary
+          # self-locates a shared sanitizer_lib at exec time. Without this,
+          # run-asan would invoke the binary on a Linux host and the loader
+          # would fail with "cannot open shared object file" because the build
+          # tree isn't in ld.so's search path. Harmless for static archives.
+          # Shared with bin/export-repro's reproduce.sh template via the
+          # ${lib%/*} convention in target_sanitizer_rpath_args.
+          local _rpath_arg
+          _rpath_arg="$(target_sanitizer_rpath_args "$sanitizer_lib")"
+          [ -n "$_rpath_arg" ] && sanitizer_lib_args+=("$_rpath_arg")
+        fi
         local inc_args=() inc
         for inc in "${TARGET_INCLUDES[@]:-}"; do
           [ -n "$inc" ] && inc_args+=("-I" "$(target_resolve_path "$inc")")

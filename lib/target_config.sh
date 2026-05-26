@@ -401,6 +401,23 @@ target_sanitizer_lib_path() {
   target_resolve_path "$raw"
 }
 
+# Emit clang argv that embeds DT_RUNPATH (ELF) / LC_RPATH (Mach-O) for the
+# directory holding the resolved sanitizer library, so a linked harness
+# self-locates its companion shared lib at exec time. Static archives get
+# the entry too — the loader never consults it without a shared dep, so
+# it's a no-op. Empty output when no library is configured.
+#
+# Shared with bin/export-repro's reproduce.sh template (san_lib_dir): both
+# converge on `${lib%/*}` as the rpath directory. Keep these in sync.
+target_sanitizer_rpath_args() {
+  local lib="$1"
+  [ -n "$lib" ] || return 0
+  case "$lib" in
+    */*) printf '%s\n' "-Wl,-rpath,${lib%/*}" ;;
+    *)   return 0 ;;
+  esac
+}
+
 # Print TARGET_SANITIZERS_ENABLED as a CSV string, in declared order, with
 # duplicates removed. Empty array prints "asan" UNLESS the operator
 # explicitly set `[sanitizer].enabled = []` (TARGET_SANITIZERS_EXPLICITLY_DISABLED=1),
