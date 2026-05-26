@@ -40,7 +40,7 @@
 #   --budget-wall <seconds>  Wall-clock budget per cell; 0 means no outer
 #                            timeout. The harness
 #                            cell spends its first 10-30 min on a cold-start
-#                            recon pass, so budget well above that. [3600]
+#                            recon pass, so budget well above that. [7200]
 #   --agents <N>             Harness worker count, passed to bin/audit as
 #                            NUM_AGENTS. model-direct remains one agent.
 #                            [default: bin/audit default]
@@ -59,7 +59,7 @@
 #   --reset [--hard]         Archive (or, with --hard, delete) the ledger; exit.
 #
 # So `bin/benchmark --target pcre2` runs the default backend, 3 replicates
-# each of the model-direct and harness conditions, 3600s budget per cell.
+# each of the model-direct and harness conditions, 7200s budget per cell.
 #
 # Note: the harness condition is `bin/audit` as shipped, which on a cold start
 # runs a breadth-first recon pass (10-30 min on a small library) before
@@ -131,7 +131,7 @@ usage() {
 TARGET_SLUG=""
 BACKEND="codex"
 REPLICATES=3
-BUDGET_WALL=3600
+BUDGET_WALL=7200
 AGENTS=""
 CONDITIONS="model-direct,harness"
 
