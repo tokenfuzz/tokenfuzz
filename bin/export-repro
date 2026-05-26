@@ -69,6 +69,67 @@ def strip_internal_headers(path: Path) -> str:
     return "".join(out)
 
 
+# `_INCLUDE_DIRECTIVE_RE` matches a single C/C++ #include directive, in
+# either quoted (`#include "..."`) or angle-bracket (`#include <...>`) form.
+# We keep the surrounding punctuation in `open`/`close` so the rewriter can
+# substitute just the path without disturbing the syntax around it.
+_INCLUDE_DIRECTIVE_RE = re.compile(
+    r"""
+    ^                                # anchor at line start (MULTILINE below)
+    (?P<open>   \s* \# \s* include \s* [<"] )
+    (?P<path>   [^>"\n]+ )
+    (?P<close>  [>"] )
+    """,
+    re.MULTILINE | re.VERBOSE,
+)
+
+# `_AUDIT_REPO_PATH_RE` matches an #include path that embeds the audit
+# machine's project-root layout — anything ending in
+# `.../{targets|output}/<slug>/<rest>`. The `inner` group captures `<rest>`
+# so the rewriter can re-emit just that bundle-local part. Slug-agnostic
+# by design: any audit's target slug fits, at any nested depth above.
+_AUDIT_REPO_PATH_RE = re.compile(
+    r"""
+    ^
+    (?:.*/)?                         # optional leading path the agent baked in
+    (?:targets|output) /             # the giveaway segment
+    [^/]+ /                          # the per-target slug
+    (?P<inner> .+ )                  # what should remain in the bundle
+    $
+    """,
+    re.VERBOSE,
+)
+
+
+def rewrite_harness_repo_paths(text: str) -> str:
+    """Strip audit-machine repo prefixes from `#include` paths in `text`.
+
+    Agents occasionally bake `#include "targets/<slug>/foo.h"` (or the
+    equivalent `output/<slug>/...`) into harnesses because the path
+    resolved from the audit machine's project root via clang's
+    cwd-fallback. The exported reproducer runs against a fresh upstream
+    clone at `$src` — same file, different path — so the literal include
+    misses. This rewriter strips the `targets|output/<slug>/` prefix; the
+    bundle's `-I "$src"` baseline (see `emit_include_args`) then resolves
+    the remaining in-source path.
+
+    Best-effort: untouched if no prefix matches. A stripped path that
+    still doesn't exist in the fresh clone fails with a clearer
+    `file not found: foo.h` than the repo-rooted form gave before.
+    """
+    def replace(match: re.Match[str]) -> str:
+        open_punct = match.group("open")
+        path = match.group("path")
+        close_punct = match.group("close")
+        prefix_match = _AUDIT_REPO_PATH_RE.match(path)
+        if prefix_match is None:
+            return match.group(0)  # path has no repo prefix — leave it alone
+        bundle_path = prefix_match.group("inner")
+        return f"{open_punct}{bundle_path}{close_punct}"
+
+    return _INCLUDE_DIRECTIVE_RE.sub(replace, text)
+
+
 def read_testcase_bytes(path: Path) -> bytes:
     """Read testcase bytes, stripping text-only audit headers when present."""
     data = path.read_bytes()
@@ -2278,8 +2339,9 @@ def main(argv: list[str]) -> int:
             if suffix in {".cc", ".cpp", ".cxx"}:
                 harness_name = "harness" + suffix
                 harness_compiler = "clang++"
-            (stage / harness_name).write_text(strip_internal_headers(harness_src),
-                                              encoding="utf-8")
+            harness_text = strip_internal_headers(harness_src)
+            harness_text = rewrite_harness_repo_paths(harness_text)
+            (stage / harness_name).write_text(harness_text, encoding="utf-8")
         shutil.copyfile(asan_file, stage / "sanitizer.txt")
         # Candidate patch: agents save it as patch.diff next to
         # report.md. Older bundles still have it under .audit/ because

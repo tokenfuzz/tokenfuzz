@@ -875,6 +875,47 @@ assert_eq(' -I "$src"/. -I "$src"/contrib/minizip -I "$build"/include -I "$build
           er.emit_include_args([".", "contrib/minizip", "build-asan/include"]),
           "emit_include_args: build-asan/include maps to fresh build dir")
 
+# rewrite_harness_repo_paths — strip audit-machine repo prefixes from
+# `#include` directives so the bundled harness resolves against $src.
+# Each case below documents one shape of mistake the agent can make.
+assert_eq('#include "cJSON_Utils.c"',
+          er.rewrite_harness_repo_paths('#include "targets/cjson/cJSON_Utils.c"'),
+          "rewrite_harness_repo_paths: targets/<slug>/ prefix stripped")
+assert_eq('#include "include/curl/curl.h"',
+          er.rewrite_harness_repo_paths('#include "targets/curl/include/curl/curl.h"'),
+          "rewrite_harness_repo_paths: preserves nested in-source path under target")
+assert_eq('#include <bar.h>',
+          er.rewrite_harness_repo_paths('#include <targets/foo/bar.h>'),
+          "rewrite_harness_repo_paths: handles angle-bracket include form")
+assert_eq('#include "cJSON.h"',
+          er.rewrite_harness_repo_paths('#include "/abs/audit/host/targets/cjson/cJSON.h"'),
+          "rewrite_harness_repo_paths: absolute path with embedded targets/ prefix stripped")
+assert_eq('#include "scratch/x.h"',
+          er.rewrite_harness_repo_paths('#include "output/cjson/scratch/x.h"'),
+          "rewrite_harness_repo_paths: output/<slug>/ prefix stripped too")
+assert_eq('#include "cJSON.h"',
+          er.rewrite_harness_repo_paths('#include "cJSON.h"'),
+          "rewrite_harness_repo_paths: bundle-local include passes through")
+assert_eq('#include <stdio.h>',
+          er.rewrite_harness_repo_paths('#include <stdio.h>'),
+          "rewrite_harness_repo_paths: system header passes through")
+assert_eq('#include "libcurl/foo.h"',
+          er.rewrite_harness_repo_paths('#include "libcurl/foo.h"'),
+          "rewrite_harness_repo_paths: non-prefixed path passes through")
+# Multi-line: only the targeted lines get rewritten; everything else is verbatim.
+_multi_in = (
+    '#include <stdio.h>\n'
+    '#include "targets/cjson/cJSON.h"\n'
+    'int main(void) { return 0; }\n'
+)
+_multi_out = (
+    '#include <stdio.h>\n'
+    '#include "cJSON.h"\n'
+    'int main(void) { return 0; }\n'
+)
+assert_eq(_multi_out, er.rewrite_harness_repo_paths(_multi_in),
+          "rewrite_harness_repo_paths: multi-line preserves non-include content verbatim")
+
 
 # 6. Shared testcase discovery used by export-repro.
 tc_crash = TMP / "tc-crash"
