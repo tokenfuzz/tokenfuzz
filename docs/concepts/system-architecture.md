@@ -105,20 +105,13 @@ available for inspection. It is how cards whose source was stubbed
 out of the current build are marked `blocked` — a statement about
 this build configuration, not about the source.
 
-A card is skipped for any of these reasons:
-
-- already done or already claimed by another agent's hypothesis;
-- on the same active surface another agent owns;
-- incompatible with the agent's mode;
-- blocked because the current build did not compile its source;
-- in a subsystem the run is temporarily steering away from
-  (guard-saturation backoff);
-- in a subsystem already owned by another generic-mode agent —
-  *unless* the current agent has already produced a crash or finding
-  there, in which case neighbours are unlocked.
-
-Claims expire on a timer, so a wedged or killed agent does not
-poison the queue.
+An agent skips cards that are already claimed, on a surface another
+agent owns, mode-incompatible, build-blocked, in a guard-saturated
+subsystem, or in a subsystem another generic-mode agent already owns
+(unless the current agent has produced a crash or finding there).
+Claims expire on a timer so a wedged agent does not poison the queue.
+[Strategy model](strategy-model.md#how-a-card-gets-to-an-agent)
+carries the full ruleset and the rationale for each rule.
 
 ## Agents
 

@@ -112,8 +112,7 @@ against.
 
 `target.toml` is parsed as strict TOML. Invalid section headers
 or malformed arrays fail fast instead of silently falling back to
-top-level keys. Use `TARGET_TOML_LENIENT=1` only to migrate an
-existing local config.
+top-level keys.
 
 ## Sanitizers
 
@@ -176,11 +175,11 @@ asan_suppressions  = "build-asan/asan-suppressions.txt"
 msan_suppressions  = "build-msan/msan-suppressions.txt"
 msan_bin           = "build-msan/xmllint"
 msan_lib           = "build-msan/libxml2.a"
-# ubsan_suppressions = "build-ubsan/ubsan-suppressions.txt"
-# ubsan_lib          = "build-ubsan/libxml2.a"
-# tsan_suppressions  = "build-tsan/tsan-suppressions.txt"
-# tsan_lib           = "build-tsan/libxml2.a"
 ```
+
+UBSan and TSan follow the same shape — add the slug to `enabled` and
+set the matching `<name>_bin` / `<name>_lib` / `<name>_suppressions`
+keys.
 
 Notes:
 
@@ -405,8 +404,9 @@ bin/suggest-threat-model <slug> --apply --force-config   # re-derive attacker_co
 bin/suggest-peers <slug> --apply --force-config          # re-derive [s6_peers]
 ```
 
-See [Environment variables](environment.md#new-target-bootstrap) for
-the bootstrap knob.
+`bin/setup-target` accepts `--no-llm-config` to keep the deterministic
+seed and skip LLM enrichment — not recommended unless you have a
+specific reason to stay offline.
 
 ## Generated versus live revision
 

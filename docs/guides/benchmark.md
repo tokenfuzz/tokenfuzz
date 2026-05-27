@@ -67,9 +67,11 @@ option and the exact default backend.
     with synthetic data and no LLM calls. Use it to see the output shape
     before spending a real budget.
 
-## See a live demo
+## What a run looks like
 
-Reproduce the demo run below on each supported backend:
+The screenshot below is one illustrative run on `cjson` with three
+backends, two replicates each, at the default 120-minute budget — the
+same commands you can reproduce locally:
 
 ```bash
 bin/benchmark --target cjson --backend claude --replicates 2 --budget-wall 7200
@@ -79,16 +81,12 @@ bin/benchmark --target cjson --backend gemini --replicates 2 --budget-wall 7200
 
 [![TokenFuzz vs Model-Direct](../assets/benchmark_demo.png)](../assets/benchmark_demo.png){target=_blank title="TokenFuzz vs Model-Direct — click to open full-size"}
 
-Browse the rendered demo here:
-<https://tokenfuzz.github.io/tokenfuzz/benchmark-demo/> — open
-`FINDING-CLUSTERS.html` to see the per-cluster table, then click any
-`FIND-####` link to see the full report and reproducer.
-
-[^1]: These numbers are from an active evaluation; we are still scaling
-    up longer runs across more targets and backends. If you can spare
-    cycles to contribute a target or replicate a run, please open a PR
-    or issue against [tokenfuzz/tokenfuzz](https://github.com/tokenfuzz/tokenfuzz)
-    — every additional data point sharpens the comparison.
+It is a demo of the output shape, not a statistical comparison. LLM
+runs are stochastic and a two-replicate, two-hour cell can swing either
+way across reruns; the first harness cell also pays the recon cost.
+For a defensible head-to-head, push `--replicates` to 5+ and
+`--budget-wall` well past the first harness cell's recon cost, across
+more than one target.
 
 ## Reading the results
 

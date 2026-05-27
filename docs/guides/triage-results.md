@@ -25,18 +25,46 @@ violation, and so on. A sanitizer reproducer is *not* required.
 
 `crashes-rejected/` is still part of the workflow — it stops the
 harness from refiling the same low-value crash. Findings have a
-separate substance gate:
+separate substance gate that drops one of two markers in the FIND
+directory while the report waits for content or a second review:
 
-- vacuous candidates get a `.needs-attention` marker;
-- no-content directories get `.needs-content`.
-- one LLM reject leaves the FIND in place with `.pending-drop`;
-- once the reject quorum is reached, the FIND is quarantined under
-  `findings-rejected/` instead of being deleted.
+- `.needs-content` — the FIND directory has no `report.md` or
+  `description.md` yet.
+- `.pending-drop` — the LLM substance gate has rejected the report
+  once. Cleared on the next accept; on a second reject the FIND is
+  moved to `findings-rejected/` rather than deleted.
 
-The in-place markers are visible as a `Status` column in
-`findings/FINDING-CLUSTERS.html`. Address the marker, or touch
-`.reviewed` to override. Quarantined FIND directories move out to
-`findings-rejected/`.
+Both markers surface as the `Status` column in
+`findings/FINDING-CLUSTERS.html`. Either address the underlying issue
+(add the report, sharpen the rationale) and rerun triage, or `touch
+.reviewed` (or `.keep`) in the FIND directory to pin the current
+state as-is.
+
+## Common rejection reasons
+
+Most operators arrive on this page because something landed in
+`crashes-rejected/`. Start here.
+
+| Reason | Why it is rejected |
+| --- | --- |
+| Null dereference only | Usually no memory-safety impact unless a boundary violation is also shown. |
+| OOM | Resource exhaustion alone is not the evidence this harness promotes. |
+| Assertion-only abort | Debug assertion failures need a security boundary or sanitizer diagnostic. |
+| Timeout-only behaviour | A hang needs a stronger impact story and reproduction discipline. |
+| Harness-only misuse | The testcase violates a contract no real caller can violate. |
+| Out-of-scope trigger | `Trigger source` is not listed in `attacker_controls`. |
+| Missing files | No testcase, no sanitizer output, or an incomplete report. |
+
+Before filing a similar crash, check:
+
+```text
+<RESULTS_DIR>/crashes-rejected/INDEX.html
+```
+
+For findings, scan `<RESULTS_DIR>/findings/FINDING-CLUSTERS.html` and
+look at the `Status` column. `NEEDS CONTENT` means no `report.md`
+yet; `PENDING DROP` means the LLM substance gate rejected the report
+once and a second reject will move it to `findings-rejected/`.
 
 ## What a strong crash looks like
 
@@ -65,29 +93,6 @@ Sanitizer classes that typically belong in `crashes/`:
 - alloc-dealloc-mismatch;
 - similar memory-safety diagnostics.
 
-## Common rejection reasons
-
-| Reason | Why it is rejected |
-| --- | --- |
-| Null dereference only | Usually no memory-safety impact unless a boundary violation is also shown. |
-| OOM | Resource exhaustion alone is not the evidence this harness promotes. |
-| Assertion-only abort | Debug assertion failures need a security boundary or sanitizer diagnostic. |
-| Timeout-only behaviour | A hang needs a stronger impact story and reproduction discipline. |
-| Harness-only misuse | The testcase violates a contract no real caller can violate. |
-| Out-of-scope trigger | `Trigger source` is not listed in `attacker_controls`. |
-| Missing files | No testcase, no sanitizer output, or an incomplete report. |
-
-Before filing a similar crash, check:
-
-```text
-<RESULTS_DIR>/crashes-rejected/INDEX.html
-```
-
-For findings, scan `<RESULTS_DIR>/findings/FINDING-CLUSTERS.html` and
-look for `NEEDS ATTENTION`. Those are FIND directories the LLM
-substance review flagged as vacuous. Their `.needs-attention` files
-explain why.
-
 ## Crash report fields
 
 Every crash report is written in two formats side by side:
@@ -104,7 +109,7 @@ The rows are also emitted as bare-label lines. Triage reads the
 bare-label form, and `REPORT.html` renders the table. The fields:
 
 ```text
-Surface: network|library-api|library_popular|file|cli|tests|maint|internal|unknown
+Surface: network|library-api|library|file|cli|tests|maint|internal
 Trigger source: bytes|call-sequence|timing|race|protocol-state|env|fs-state
 Caller contract: obeyed|violated|unspecified
 Boundary:
@@ -115,58 +120,88 @@ Parameter control: direct|mapped|harness-only|none
 
 Notes:
 
-- `Surface` describes where the crash is reachable from. You can
-  write a short prefix (`library-api`, `cli`, `maint`, `tests`,
-  `internal`, `network`, `file`) and `bin/reachability` will normalise
-  it before computing the advisory severity. Canonical tiers are
-  `network`, `library_popular`, `library`, `file`, `cli_production`,
-  `dev_tool`, `internal`, and `unknown`. The short prefixes above are
-  what you actually write in the field. An unset
-  `Surface` defaults the calibration toward `unknown` and under-scores
-  real findings, so make sure it is set.
+- `Surface` describes where the crash is reachable from. Write one of
+  the tokens above; `bin/reachability` normalises it (and may promote
+  `library` → `library_popular` or `cli` → `cli_production` based on
+  external caller counts) before computing the advisory severity. An
+  unset `Surface` defaults to `unknown` and under-scores real
+  findings, so always set it.
 - `Trigger source` must be one of the tokens listed in
   `attacker_controls` for the crash to stay in `crashes/`.
 - `Parameter control` is especially important for C harnesses. It
   tells triage whether a value is externally controlled or only
   invented by the harness.
 
-A typical exported `REPORT.md` looks like:
+A typical exported `REPORT.md` looks like this. `bin/export-repro`
+emits the `## Fields` table first, then the bare-label lines triage
+parses, then the auto-Severity bullet, then the agent's narrative,
+then `## Expected sanitizer output`, then the reproduce pointer.
 
 ````markdown
-# CRASH-001-1
+# CRASH-001-1: heap-buffer-overflow READ in xmlNextChar
 
 ## Fields
 
-| Field                  | Value                                       |
-|:-----------------------|:--------------------------------------------|
-| Primitive              | heap-buffer-overflow READ of size 4         |
-| Severity               | High                                        |
-| Surface                | library-api (C harness calls xmlParseDoc)   |
-| Trigger source         | bytes                                       |
-| Caller contract        | obeyed                                      |
-| Boundary               | Untrusted XML bytes parsed by libxml2.      |
-| Caller controls        | XML document contents.                      |
-| Parameter control      | direct                                      |
-| Trusted caller actions | none                                        |
-| Cluster                | C1                                          |
-| Reproduction rate      | 5/5                                         |
+| Field                 | Value |
+|:----------------------|:------|
+| Primitive             | heap-buffer-overflow READ of size 4 |
+| Severity              | High |
+| Surface               | library-api (C harness calls xmlReadMemory) |
+| Trigger source        | bytes |
+| Caller contract       | obeyed |
+| Boundary              | Untrusted XML bytes parsed by libxml2. |
+| Caller controls       | XML document contents and length. |
+| Parameter control     | direct |
+| Trusted caller actions| none |
+| Cluster               | C1 |
+| Dedup frames          | xmlNextChar → xmlParseCharRef → xmlParseReference |
+| Reproduction rate     | 5/5 |
+| Strategy              | S7 |
 
 Surface: library-api
 Trigger source: bytes
 Caller contract: obeyed
-…
+Dedup frames: xmlNextChar → xmlParseCharRef → xmlParseReference
+Boundary: Untrusted XML bytes parsed by libxml2.
+Caller controls: XML document contents and length.
+Parameter control: direct
+Strategy: S7
+- **Severity**: High (auto: I=34 R=27 C=0.95)
+
+Out-of-bounds 4-byte read in `xmlNextChar` reached from
+`xmlParseCharRef` while consuming a malformed numeric character
+reference. The length check on the entity buffer occurs after the
+read, not before. Reachable from any caller passing attacker-supplied
+XML through `xmlReadMemory` / `xmlReadFile`.
 
 ## Expected sanitizer output
 
+```
 ==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address …
     #0 0x… in xmlNextChar parser.c:225
     #1 0x… in xmlParseCharRef parser.c:2403
+    #2 0x… in xmlParseReference parser.c:7611
 …
+```
+
+Full original output: `sanitizer.txt`.
 
 ## Reproduce
 
 Run `./reproduce.sh /path/to/clean/libxml2`.
 ````
+
+Notes on the fields:
+
+- `Cluster` is filled in by `bin/cluster-crashes` after triage; agents
+  leave it blank or `(set by bin/cluster-crashes)`.
+- `Advisory: yes` is added (above `Surface`) when the fix requires an
+  ABI/API-impacting change — see the `Fix Direction` section in the
+  agent's narrative.
+- `Dedup frames` is the top-3 ClusterFuzz-style frame chain used for
+  duplicate detection.
+- The auto-Severity bullet (`- **Severity**: …`) is rewritten by
+  `bin/reachability` on every triage pass; hand-edits there are lost.
 
 ## Finding requirements
 

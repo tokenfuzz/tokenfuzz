@@ -93,8 +93,9 @@ the full per-language matrix.
    ```
 
    Note: `setup-target` refreshes generated fields from the current
-   checkout and build outputs. Pass `--no-llm-config` when you want to
-   skip the best-effort threat-model and S6 lookalike project suggestions.
+   checkout and build outputs. `--no-llm-config` skips the best-effort
+   threat-model and S6 lookalike project suggestions; not recommended
+   unless you have a specific reason to stay offline.
 
 3. Confirm `asan_bin` points to the ASan executable you want generic
    or browser runs to start.
@@ -178,8 +179,7 @@ harness testcases yet.
 After repeated C/C++ harness build failures, the audit may make a
 conservative additive repair to `includes`, `defines`, or `link_libs`.
 It writes a `target.toml.bak.<timestamp>` backup and logs the action
-under the run's `logs/` directory. Set `TARGET_TOML_AUTO_REPAIR=0`
-to disable that behavior.
+under the run's `logs/` directory.
 
 Harnesses are not limited to C. Sibling
 `.cc/.cpp/.cxx/.C/.rs/.go/.swift/.kt` harnesses compile, and

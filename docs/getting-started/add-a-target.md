@@ -57,8 +57,9 @@ Notes:
   source. It can still force the Python bootstrap when it detects stale
   ABI-tagged extension modules.
 - Re-running `setup-target` refreshes generated config fields from the
-  current checkout and build outputs. Use `--no-llm-config` when you
-  want to skip the best-effort threat-model and S6 lookalike project suggestions.
+  current checkout and build outputs. `--no-llm-config` skips the
+  best-effort threat-model and S6 lookalike project suggestions; not
+  recommended unless you have a specific reason to stay offline.
 - The full list of advanced flags is in
   [Commands](../reference/commands.md). The normal setup flow does not
   need them.

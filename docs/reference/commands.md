@@ -12,6 +12,16 @@ order you reach for things:
 
 Examples assume you are at the repository root.
 
+The commands you reach for most:
+
+```bash
+bin/audit --target <slug> --backend <backend> 1          # one bounded iteration
+bin/state --results-dir "$RESULTS" show-recent --agent 1 # mid-run check
+open "$RESULTS"/crashes/CRASH-CLUSTERS.html              # review results
+```
+
+Everything below expands on those three.
+
 To keep the examples consistent, set the target slug and backend
 once:
 
@@ -49,8 +59,10 @@ Run twice for a normal ASan-first setup:
 
 With no repo URL or ref, `bin/setup-target <target>` re-inspects
 `build-asan/` and refreshes generated fields in `target.toml`.
-Pass `--no-llm-config` to keep the deterministic seed and skip
-LLM-backed `[threat_model]` / `[s6_peers]` enrichment.
+`--no-llm-config` keeps the deterministic seed and skips the
+LLM-backed `[threat_model]` / `[s6_peers]` enrichment — not
+recommended for normal use, since the LLM-suggested values are
+usually a better starting point than the conservative defaults.
 
 Advanced flags:
 
@@ -70,7 +82,9 @@ What each flag does:
   targets (Python C extensions, `npm install`, `composer install`,
   …). See [Add a target](../getting-started/add-a-target.md).
 - `--no-llm-config` — skip the best-effort threat-model and S6 lookalike project
-  suggestions.
+  suggestions. Not recommended unless you have a specific reason to
+  stay offline; the LLM-suggested values are usually a better starting
+  point than the conservative defaults.
 
 LLM-backed config helpers can be run explicitly after setup:
 
@@ -273,7 +287,7 @@ What each one shows:
 - `show-recent` — agent's recent claims + hypotheses + probe runs.
 - `recent-runs` — one pipe-delimited row per recent testcase verdict.
 - `recent-claims` / `recent-notes` — narrower listings of those streams.
-- `resume` — the compact context the next agent iteration will pick up.
+- `resume` — the compact next-iteration brief for one agent.
 - `list-cards` / `list-crashes` / `list-findings` — slim JSONL listings.
 - `explain-queue` — why the top-N cards in the queue scored where they did.
 - `show-card` / `show-crash` / `show-finding` — full compact JSON for one item.

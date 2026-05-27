@@ -205,40 +205,18 @@ plus a shared pattern-search reference — see
 [Strategy model](concepts/strategy-model.md) for how they are assigned
 and rotated.
 
-## Documentation map
-
-Pick whichever entry matches what you are about to do:
+## Where to go next
 
 | If you want to… | Read |
 | --- | --- |
-| Get oriented | [Getting started](getting-started/index.md), [Guides](guides/index.md), [Concepts](concepts/index.md), [Reference](reference/index.md) |
-| Prepare a fresh machine | [Prerequisites](getting-started/prerequisites.md) |
-| Add or refresh a target | [Add a target](getting-started/add-a-target.md) |
-| Run your first bounded audit | [First audit](getting-started/first-audit.md) |
-| Review the generated target config | [Configure a target](guides/configure-target.md) |
-| Audit a Python / Go / Ruby / Java / Node / … target | [Non-C/C++ targets](guides/multi-language.md) |
-| Run multiple backends side by side | [Backends and ensembling](guides/backends.md) |
-| Audit a browser target | [Browser targets](guides/browser-targets.md) |
-| Understand cold-start recon and recon-hypothesis cards | [Recon discovery](guides/recon-discovery.md) |
-| Review crashes and findings | [Triage results](guides/triage-results.md) |
-| Compare harness runs against the direct baseline | [Benchmark the harness](guides/benchmark.md) |
-| Hand a crash off to an upstream maintainer | [Reproduce a crash](guides/reproduce-a-crash.md) |
+| Set up the host and run your first audit | [Getting started](getting-started/index.md) |
+| Review `target.toml`, recon, triage, or reproduce a crash | [Guides](guides/index.md) |
+| Understand the audit lifecycle, strategies, or cost model | [Concepts](concepts/index.md) |
+| Look up a command, a field, an env var, or a path | [Reference](reference/index.md) |
 | Debug a failing setup | [Troubleshooting](reference/troubleshooting.md) |
 | Ask for help or file a bug | [Getting help](getting-help.md) |
-| Contribute a change | [Contributing](contributing.md) |
 
-Reference and concept pages:
-
-- [Commands](reference/commands.md)
-- [Artifact layout](reference/artifacts.md)
-- [Target config reference](reference/target-toml.md)
-- [Environment variables](reference/environment.md)
-- [Glossary](reference/glossary.md)
-- [Troubleshooting](reference/troubleshooting.md)
-- [Audit lifecycle](concepts/audit-lifecycle.md)
-- [System architecture](concepts/system-architecture.md)
-- [Strategy model](concepts/strategy-model.md)
-- [Cost model](concepts/cost-model.md)
+The sidebar carries the full page list.
 
 ## Contributing
 

@@ -42,8 +42,7 @@ Common fixes:
   exists.
 - Remove placeholder values for fields needed by this run.
 - Quote string values. Keep arrays valid TOML.
-- Remove invalid section headers (for one-off migration of existing
-  configs, run with `TARGET_TOML_LENIENT=1`).
+- Remove invalid section headers — the loader fails fast on them.
 - Confirm `target` matches the directory slug.
 
 ## Sanitizer binary does not run
@@ -111,7 +110,7 @@ caller-contract or trigger-source reasons, keep a substantive
 report in `findings/` instead of trying to force the crash
 through `crashes/`.
 
-## FIND is marked needs-attention
+## FIND is marked needs-content or pending-drop
 
 Open the finding cluster table in a browser:
 
@@ -119,14 +118,17 @@ Open the finding cluster table in a browser:
 output/<target>/<backend>/results/findings/FINDING-CLUSTERS.html
 ```
 
-Then open the FIND directory's `.needs-attention` or
-`.needs-content` marker. The directory is not rejected or
-deleted.
+Then open the FIND directory and read the marker file:
+
+- `.needs-content` — the FIND directory has no `report.md` or
+  `description.md`. Write one.
+- `.pending-drop` — the LLM substance gate has rejected the report
+  once. A second reject moves the directory to `findings-rejected/`.
 
 Add the missing concrete location, security impact, and
 reviewer-actionable rationale, then rerun triage. If a human has
-reviewed the terse report and wants to keep it as-is, add
-`.reviewed` or `.keep`.
+reviewed the terse report and wants to keep it as-is, `touch
+.reviewed` or `.keep` inside the FIND directory.
 
 ## Backend CLI fails
 

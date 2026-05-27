@@ -108,10 +108,11 @@ harness internals. The recon outputs are explained in
 [Recon discovery](../guides/recon-discovery.md).
 
 FIND directories without a report get a `.needs-content` marker and
-surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. Vacuous
-reports can get `.needs-attention` or `.pending-drop` while they wait
-for review or a second verdict. FINDs the LLM substance gate rejects
-at quorum are moved to `findings-rejected/` (not deleted).
+surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. After one LLM
+substance reject the directory carries a `.pending-drop` marker; a
+second reject moves it to `findings-rejected/` rather than deleting
+it. `touch .reviewed` (or `.keep`) inside a FIND directory pins it
+past either gate.
 
 A short run may leave `crashes/` and `findings/` empty — that is
 not a failed run by itself. Check the rejected indexes first to
@@ -205,12 +206,10 @@ needs:
 - a rationale a reviewer can act on.
 
 Vacuous candidates are not moved out of `findings/` after a single
-reject. The harness drops a `.needs-attention` or `.pending-drop`
-marker visible in the `Status` column of
-`findings/FINDING-CLUSTERS.html`. Edit the report to address the
-marker, or `touch .reviewed` / `.keep` to override. If the reject
-quorum is reached, the directory is quarantined under
-`findings-rejected/`.
+reject. The harness drops a `.pending-drop` marker visible in the
+`Status` column of `findings/FINDING-CLUSTERS.html`. Edit the report
+to address the marker, or `touch .reviewed` / `.keep` to override. On
+a second reject, the directory is moved to `findings-rejected/`.
 
 Reachability can also write `reachability.json` and update
 severity text for a FIND. That is useful context, not a

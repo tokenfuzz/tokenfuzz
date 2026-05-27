@@ -11,14 +11,10 @@ It assumes you have already worked through:
 If you have not done those yet, do them first — this page picks up
 where they end.
 
-## A note on where to run this
-
-You can run TokenFuzz directly on the host, but **we strongly recommend
-running it inside a container** — auditing executes untrusted
-third-party code and agents have shell access. The reasoning and setup
-are in [Where to run the audit](#where-to-run-the-audit) at the bottom
-of this page. If you run on the host anyway, use a machine without
-long-lived credentials or sensitive source.
+Run this **inside a container** if you can — target builds and
+agent shells are untrusted code. Setup is in
+[Where to run the audit](#where-to-run-the-audit) at the bottom of
+this page. On the host, use a machine without long-lived credentials.
 
 ## What you will finish with
 
