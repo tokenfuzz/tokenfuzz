@@ -477,5 +477,79 @@ assert_file_contains "$bq_html" 'Material 3 Expressive' \
 assert_file_contains "$bq_html" '\-\-m3-primary' \
   "Material 3 stylesheet defines the M3 primary colour token"
 
+# ── Fenced ```diff blocks: language hint preserved + lines colored ──
+# Plain `<pre><code>` was stripping the language hint, so patch.diff
+# rendered as undifferentiated monospace text. The fenced-block parser
+# now (a) carries the language onto the <code> element and (b) for
+# `diff` specifically wraps each line in a leading-char span so CSS
+# can color +/-/@@ without a syntax-highlighter dependency.
+diff_fix="$TEST_TMPDIR/diff.md"
+cat > "$diff_fix" <<'EOF'
+# Patch
+
+```diff
+--- a/main.c
++++ b/main.c
+@@ -1,3 +1,3 @@
+ ctx
+-old
++new
+```
+EOF
+python3 "$RENDER" "$diff_fix" --html-sibling >/dev/null 2>&1
+diff_html="$TEST_TMPDIR/diff.html"
+assert_file_contains "$diff_html" '<code class="language-diff">' \
+  "diff fence carries language-diff class"
+assert_file_contains "$diff_html" '<span class="da">\+new</span>' \
+  "added line tagged for green coloring"
+assert_file_contains "$diff_html" '<span class="dr">-old</span>' \
+  "removed line tagged for red coloring"
+assert_file_contains "$diff_html" '<span class="dx">@@ -1,3 \+1,3 @@</span>' \
+  "hunk header tagged for hunk styling"
+assert_file_contains "$diff_html" '<span class="dh">--- a/main.c</span>' \
+  "file header tagged for header styling"
+assert_file_contains "$diff_html" 'code.language-diff .da' \
+  "stylesheet defines the added-line color rule"
+
+# ── Thematic breaks (`---`, `***`, `___`) render as <hr> ──────────
+# lib/report_enrich.py joins enrichment snippet blocks with
+# `\n\n---\n\n`; without thematic-break handling render-md emitted a
+# literal `<p>---</p>`. Verify the rule fires and that diff
+# `--- a/file` lines inside a fenced block are NOT misinterpreted.
+hr_fix="$TEST_TMPDIR/hr.md"
+cat > "$hr_fix" <<'EOF'
+First paragraph
+
+---
+
+Second paragraph
+EOF
+python3 "$RENDER" "$hr_fix" --html-sibling >/dev/null 2>&1
+hr_html="$TEST_TMPDIR/hr.html"
+assert_file_contains "$hr_html" '<hr>' \
+  "stand-alone --- renders as <hr>"
+if grep -qF '<p>---</p>' "$hr_html"; then
+  fail "thematic break not left as literal paragraph" "found <p>---</p>"
+else
+  pass "thematic break not left as literal paragraph"
+fi
+diff_hr_fix="$TEST_TMPDIR/diff_hr.md"
+cat > "$diff_hr_fix" <<'EOF'
+```diff
+--- a/main.c
++++ b/main.c
+@@ -1 +1 @@
+-x
++y
+```
+EOF
+python3 "$RENDER" "$diff_hr_fix" --html-sibling >/dev/null 2>&1
+diff_hr_html="$TEST_TMPDIR/diff_hr.html"
+if grep -qE '<hr>' "$diff_hr_html"; then
+  fail "diff file-header lines must not become <hr>" "found stray <hr> in diff render"
+else
+  pass "diff file-header lines stay inside the code block"
+fi
+
 teardown_test_env
 summary

@@ -68,8 +68,7 @@ expected_topics=(
   "Parameter control"                  # CRASH Promotion Gate
   "FIND"                               # FIND Quality Bar
   "patch.diff"                         # FIND patch optional
-  "three validation attempts"           # FIND patch validation loop
-  "Patch: builds"                       # validated patch status
+  "single writer"                      # enrich-report owns ## Patch section
   "differential"                       # Differential Testing (case-insensitive ok)
 )
 for topic in "${expected_topics[@]}"; do
@@ -88,12 +87,12 @@ assert_file_contains "$DIGEST" "session-rules.md" \
   "digest points at the full file for drill-down"
 assert_file_contains "$DIGEST" "Drill-down" \
   "digest has an explicit drill-down section"
-assert_file_contains "$FULL_RULES" "up to three attempts" \
-  "full rules document patch validation retry budget"
-assert_file_contains "$FULL_RULES" "apply check and build pass within the three attempts" \
-  "full rules document requires apply/build before recommending patch.diff"
-assert_file_contains "$FULL_RULES" "revise the diff" \
-  "full rules tell the agent to revise the patch between failed attempts"
+assert_file_contains "$FULL_RULES" "git apply --check" \
+  "full rules name git apply --check as the patch.diff save floor"
+assert_file_contains "$FULL_RULES" "single writer" \
+  "full rules tell the agent that enrich-report is the sole ## Patch writer"
+assert_file_contains "$FULL_RULES" "Fix Direction" \
+  "full rules name ## Fix Direction as the advisory case"
 
 # ── Prompt builder integration ────────────────────────────────────
 # Source the prompt builder in a contained shell so its globals don't

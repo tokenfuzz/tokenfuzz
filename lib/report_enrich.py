@@ -7,7 +7,10 @@ target source tree:
 * Reviewer TL;DR card at the top (bug / trigger / fix).
 * Severity badge under the title.
 * Sibling-cluster line under the Cluster: field.
-* Inlined `patch.diff` content under "Candidate Fix".
+* Inlined `patch.diff` content under "Patch" (this module is the
+  sole writer of that section; the sibling file is the canonical
+  source, and any patch-aliased section the agent may have inlined
+  is stripped and replaced).
 * Source snippets under each `file:line` bullet in "Data Flow Trace"
   / "Affected" / "Affected files" sections.
 * Annotated source snippets under frames in "Expected sanitizer output"
@@ -48,7 +51,7 @@ _KNOWN_MARKS = (
     "tldr",
     "severity-badge",
     "cluster-siblings",
-    "candidate-fix-diff",
+    "patch-diff",
     "data-flow-snippets",
     "affected-snippets",
     "asan-snippets",
@@ -67,7 +70,7 @@ _H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _LABEL_H2_RE = re.compile(
     r"^(Summary|Classification|Root Cause|Reproduction|Data Flow|"
     r"Data Flow Trace|Affected|Affected files|Trigger Surface|"
-    r"Expected sanitizer output|Sanitizer output|Candidate Fix|"
+    r"Expected sanitizer output|Sanitizer output|"
     r"Reachability Notes|Triage decision):\s*$",
     re.MULTILINE,
 )
@@ -282,6 +285,44 @@ def _section_body(text: str, heading_name: str) -> str:
     return text[body_start:body_end]
 
 
+def _insert_patch_section(text: str, patch_section: str) -> str:
+    """Insert the `## Patch` block right before the first operational
+    "tail" section so reviewers see the fix next to the bug explanation,
+    not buried at end-of-report past the reproduction details. Falls
+    back to end-of-report only when no tail section exists.
+
+    Matching is by lowercase prefix on the H2 name (Reproduce /
+    Reachability — external callers / Severity rationale and any
+    near-variants the backends use). Per CLAUDE.md, prefix is
+    preferred over an exhaustive enumeration of exact strings."""
+    tail_prefixes = ("reproduce", "reproduction", "reachability", "severity rationale")
+    earliest: Optional[int] = None
+    for m in _H2_RE.finditer(text):
+        name_lower = m.group(1).strip().lower()
+        if any(name_lower.startswith(p) for p in tail_prefixes):
+            if earliest is None or m.start() < earliest:
+                earliest = m.start()
+    if earliest is not None:
+        head = text[:earliest].rstrip() + "\n\n"
+        tail = text[earliest:]
+        return head + patch_section.rstrip() + "\n\n" + tail
+    return text.rstrip() + "\n\n" + patch_section.rstrip() + "\n"
+
+
+def _strip_patch_sections(text: str) -> str:
+    """Remove every `## Patch` section (heading + body). Sole-writer
+    rule: this module owns the patch section, so any one already
+    present — from a prior enrich pass or because the agent inlined
+    one — is removed before the canonical `## Patch` is appended.
+    Iterates until no patch heading remains so duplicates also go."""
+    while True:
+        bounds = _find_section_bounds(text, "Patch")
+        if bounds is None:
+            return text
+        heading_start, _, body_end = bounds
+        text = text[:heading_start] + text[body_end:]
+
+
 def _insert_after_section(text: str, heading_name: str, block: str) -> str:
     """Append `block` at the END of the named section (just before the
     next H2 or EOF)."""
@@ -333,16 +374,20 @@ def _build_severity_badge(text: str) -> Optional[str]:
 
 def _build_tldr(text: str) -> Optional[str]:
     """Three-line callout: bug / trigger / fix, mined from existing
-    sections."""
+    sections. The Fix line is sourced from `## Fix Direction` only —
+    the advisory-case narrative section. The `## Patch` section is
+    enricher-owned and holds the diff, not prose; mining it would
+    capture the diff body (or whatever the agent inlined before being
+    stripped) and would break TL;DR idempotency across re-runs."""
     summary = _section_body(text, "Summary").strip()
-    candidate = _section_body(text, "Candidate Fix").strip()
+    fix_direction = _section_body(text, "Fix Direction").strip()
     # Trigger source / Boundary may be bare-label lines or in a Fields
     # table — try both.
     trigger = _extract_bare_field(text, "Trigger source")
     boundary = _extract_bare_field(text, "Boundary")
     caller_controls = _extract_bare_field(text, "Caller controls")
 
-    if not summary and not candidate and not boundary:
+    if not summary and not fix_direction and not boundary:
         return None
 
     def _first_sentence(s: str, limit: int = 240) -> str:
@@ -358,7 +403,7 @@ def _build_tldr(text: str) -> Optional[str]:
         return (line[: limit - 1] + "…") if len(line) > limit else line
 
     bug = _first_sentence(summary)
-    fix = _first_sentence(candidate)
+    fix = _first_sentence(fix_direction)
     trigger_line = ""
     if boundary or trigger or caller_controls:
         bits = []
@@ -460,8 +505,12 @@ def _build_cluster_siblings(ctx: EnrichContext, text: str) -> Optional[str]:
     )
 
 
-def _build_candidate_fix_diff(ctx: EnrichContext, text: str) -> Optional[str]:
-    """Inline the sibling patch.diff under the Candidate Fix heading.
+def _build_patch_diff_block(ctx: EnrichContext) -> Optional[str]:
+    """Render the sibling `patch.diff` as the body of the `## Patch`
+    section. Returns the block body (caption + fenced diff) without
+    the heading itself — the caller composes the heading + enrichment
+    fence markers.
+
     Searches the report directory first, then its `.audit/` subdir
     (where older export-repro runs demoted the patch), and finally the
     audit dir's siblings if we *are* the .audit/report.md being
@@ -489,7 +538,7 @@ def _build_candidate_fix_diff(ctx: EnrichContext, text: str) -> Optional[str]:
         return None
     fence = "diff" if diff_text.lstrip().startswith(("diff ", "---", "@@")) else "text"
     return (
-        f"**Candidate patch** — {patch_path.name} "
+        f"**Captured patch** — {patch_path.name} "
         f"({len(diff_text.splitlines())} lines)\n\n"
         f"```{fence}\n{diff_text}\n```"
     )
@@ -635,16 +684,24 @@ def enrich_text(text: str, ctx: EnrichContext) -> str:
                                              _wrap_block("asan-snippets", asan))
                 break
 
-    # 6. Candidate Fix diff — inline at the end of Candidate Fix.
-    diff_block = _build_candidate_fix_diff(ctx, text)
+    # 6. Patch — single-writer rule. The sibling `patch.diff` file is
+    # the canonical source; this enricher is the sole writer of the
+    # `## Patch` section. Any existing `## Patch` (from a prior enrich
+    # run or because the agent inlined one) is stripped first, then a
+    # fresh section is inserted right before the first operational
+    # tail section (Reproduce / Reachability / Severity rationale) so
+    # reviewers see the fix next to the bug explanation. End-of-report
+    # placement is the fallback when no tail section exists.
+    text = _strip_patch_sections(text)
+    diff_block = _build_patch_diff_block(ctx)
     if diff_block:
-        if _find_section_bounds(text, "Candidate Fix") is None:
-            # Append a Candidate Fix heading if the agent didn't write one
-            # but we found a patch file — surface it rather than dropping.
-            text = text.rstrip() + "\n\n## Candidate Fix\n\n"
-        text = _insert_after_section(text, "Candidate Fix",
-                                     _wrap_block("candidate-fix-diff", diff_block))
+        patch_section = "## Patch\n\n" + _wrap_block("patch-diff", diff_block)
+        text = _insert_patch_section(text, patch_section)
 
+    # The strip-and-splice in step 6 can leave a `\n\n\n` seam where
+    # two `\n\n`-padded chunks meet. Collapse runs so the file stays
+    # byte-stable across re-runs (idempotency requirement).
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text
 
 

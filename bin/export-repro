@@ -1315,7 +1315,7 @@ def rewrite_audit_script_body(in_path: Path, slug: str = "",
 # strip_audit_sections — remove the leading h1+table, audit-internal
 # `## Reproduction`, auto-appended `## Reproduce` / `## Expected ...`,
 # bare-label fields, the auto-Severity bullet, and squash blank-line runs.
-# Section-end pseudo-tokens (Data Flow, Candidate Fix, ...) end an active
+# Section-end pseudo-tokens (Data Flow, Patch, ...) end an active
 # skip block when encountered as bare-label intros.
 
 _H1_CRASH_RE = re.compile(r"^# CRASH-[A-Z0-9-]+")
@@ -1333,7 +1333,7 @@ _SECTION_REPRODUCTION_HEADER_RE = re.compile(r"^## *Reproduction(?:\s|$)")
 _BARE_REPRODUCTION_RE = re.compile(r"^Reproduction:\s*$")
 _NEW_H2_RE = re.compile(r"^## ")
 _END_SKIP_LABEL_RE = re.compile(
-    r"^(?:Data Flow|Candidate Fix|Reachability|Supplemental|Evidence|Boundary|Classification|Summary|Root Cause|Suggested fix|Notes)[: ]"
+    r"^(?:Data Flow|Patch|Reachability|Supplemental|Evidence|Boundary|Classification|Summary|Root Cause|Suggested fix|Notes)[: ]"
 )
 _FULL_ORIGINAL_RE = re.compile(r"^Full original output:")
 _BARE_LABEL_RES = (
@@ -2073,7 +2073,7 @@ def _is_bundle_filename(name: str) -> bool:
         return True
     # patch.diff stays at bundle root so a) maintainers see the patch as
     # a standalone file, and b) bin/enrich-report inlines it into the
-    # Candidate Fix section of REPORT.md / REPORT.html. The filename is
+    # `## Patch` section of REPORT.md / REPORT.html. The filename is
     # fixed in .agents/references/session-rules.md.
     if name == "patch.diff":
         return True

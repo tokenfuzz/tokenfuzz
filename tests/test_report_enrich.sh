@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # tests/test_report_enrich.sh — exercise bin/enrich-report + lib/report_enrich
 # against synthetic crash/finding fixtures. Verifies:
-#   (a) patch.diff is inlined under "Candidate Fix"
+#   (a) patch.diff is inlined under the canonical "## Patch" section,
+#       and any agent-inlined patch body is replaced by the sibling
+#       (single-writer rule — only ONE ## Patch section may exist)
 #   (b) Data Flow Trace bullets get source snippets injected per file:line
 #   (c) ASan-style frames in Expected sanitizer output get annotated stack snippets
 #   (d) Severity badge + Reviewer TL;DR card insert under the H1
@@ -83,8 +85,10 @@ READ of size 1 at 0xdeadbeef thread T0
 - step: `parse_header` (lib/parser.c:4) — checks len < 4 only
 - affected: `parse_header` (lib/parser.c:9) — reads buf[len-1]
 
-## Candidate Fix
-Validate len > 0 before subscripting. See sibling patch.diff for the exact change.
+## Patch
+Agent-inlined narrative that the single-writer rule must strip and
+replace with the sibling diff. If this text survives enrichment, the
+strip-and-replace is broken.
 EOF
 
 cat > "$CD/patch.diff" <<'EOF'
@@ -105,16 +109,25 @@ cat > "$CD/sanitizer.txt" <<'EOF'
     #1 0x100000100 in emit lib/parser.c:14
 EOF
 
-# ── (a) patch.diff inlined under Candidate Fix ──────────────────────
+# ── (a) patch.diff inlined under the canonical ## Patch section ─────
 python3 "$ENRICH" --quiet --source-root "$TARGET_SRC" \
                   --upstream-url "https://github.com/acme/widgets" \
                   --pinned-rev "abcdef1234567890" \
                   "$CD/report.md" \
   || fail "enrich-report exited non-zero on baseline fixture"
 
-assert_file_contains "$CD/report.md" "enrich:candidate-fix-diff" "candidate-fix-diff marker present"
-assert_file_contains "$CD/report.md" "len == 0 \|\| len < 4" "patch.diff body inlined under Candidate Fix"
-assert_file_contains "$CD/report.md" "\*\*Candidate patch\*\*" "patch caption rendered"
+assert_file_contains "$CD/report.md" "enrich:patch-diff" "patch-diff marker present"
+assert_file_contains "$CD/report.md" "len == 0 \|\| len < 4" "patch.diff body inlined under ## Patch"
+assert_file_contains "$CD/report.md" "\*\*Captured patch\*\*" "patch caption rendered"
+# Single-writer rule: the agent-inlined narrative under ## Patch must
+# be stripped; the sibling diff is the only content under ## Patch.
+if grep -q "Agent-inlined narrative" "$CD/report.md"; then
+  fail "agent-inlined patch body was not stripped by single-writer rule"
+else
+  pass "agent-inlined patch body stripped before sibling diff inserted"
+fi
+PATCH_HEADINGS=$(grep -c "^## Patch\b" "$CD/report.md")
+assert_eq "1" "$PATCH_HEADINGS" "exactly one ## Patch heading exists after enrichment"
 
 # ── (b) Data Flow snippets injected ─────────────────────────────────
 assert_file_contains "$CD/report.md" "enrich:data-flow-snippets" "data-flow-snippets marker present"
@@ -145,8 +158,8 @@ python3 "$ENRICH" --quiet --source-root "$TARGET_SRC" \
 AFTER_HASH=$(shasum -a 1 "$CD/report.md" | awk '{print $1}')
 assert_eq "$BEFORE_HASH" "$AFTER_HASH" "enrichment is byte-stable across re-runs"
 
-COUNT=$(grep -c "enrich:candidate-fix-diff" "$CD/report.md")
-assert_eq "2" "$COUNT" "exactly one open + one close marker for candidate-fix-diff (= 2 matches)"
+COUNT=$(grep -c "enrich:patch-diff" "$CD/report.md")
+assert_eq "2" "$COUNT" "exactly one open + one close marker for patch-diff (= 2 matches)"
 
 # ── (h) render-md strips the <!-- enrich:NAME --> markers ──────────
 python3 "$RENDER" "$CD/report.md" --html "$CD/report.html" --title "CRASH-001-1" --no-pad \
@@ -198,8 +211,6 @@ Crash in legacy bundle whose patch landed in .audit/.
 ## Classification
 - **Severity**: Medium
 
-## Candidate Fix
-See sibling patch.
 EOF
 cat > "$CDA/.audit/patch.diff" <<'EOF'
 diff --git a/x.c b/x.c
@@ -211,10 +222,88 @@ diff --git a/x.c b/x.c
 EOF
 python3 "$ENRICH" --quiet "$CDA/REPORT.md" \
   || fail "enrich-report failed on legacy .audit/ layout"
-assert_file_contains "$CDA/REPORT.md" "enrich:candidate-fix-diff" \
+assert_file_contains "$CDA/REPORT.md" "enrich:patch-diff" \
   "patch.diff in .audit/ inlined via fallback search"
 assert_file_contains "$CDA/REPORT.md" "\+new$" \
   "patch body from .audit/patch.diff appears in REPORT.md"
+assert_file_contains "$CDA/REPORT.md" "^## Patch" \
+  ".audit/ fallback also creates the canonical ## Patch heading"
+
+# ── Patch placement: lands BEFORE the first operational tail section ──
+# Reviewers want the fix next to the bug explanation, not buried at
+# end-of-report past Reproduce / Reachability / Severity rationale.
+# Verified against real reports in output/benchmark/ — section names
+# Reproduce / Reachability — external callers / Severity rationale are
+# the conventional tail.
+CDP="$RESULTS_DIR/crashes/CRASH-001-P"
+mkdir -p "$CDP"
+cat > "$CDP/report.md" <<'EOF'
+# CRASH-001-P: placement check
+
+## Summary
+A bug.
+
+## Root Cause
+The cause is X.
+
+## Fix Direction
+Validate the input before the call.
+
+## Reproduce
+- Run: ./repro.sh
+
+## Reachability — external callers
+None observed.
+
+## Severity rationale
+Worst case is an info-leak.
+EOF
+cat > "$CDP/patch.diff" <<'EOF'
+diff --git a/x.c b/x.c
+--- a/x.c
++++ b/x.c
+@@ -1 +1 @@
+-old
++new
+EOF
+python3 "$ENRICH" --quiet "$CDP/report.md" \
+  || fail "enrich-report failed on placement fixture"
+# Patch must land BEFORE the first tail section (## Reproduce here).
+fd_line=$(grep -n "^## Fix Direction$" "$CDP/report.md" | cut -d: -f1)
+patch_line=$(grep -n "^## Patch$" "$CDP/report.md" | cut -d: -f1)
+repro_line=$(grep -n "^## Reproduce$" "$CDP/report.md" | cut -d: -f1)
+[ -n "$fd_line" ] && [ -n "$patch_line" ] && [ -n "$repro_line" ] \
+  && [ "$patch_line" -gt "$fd_line" ] && [ "$patch_line" -lt "$repro_line" ]
+assert_eq 0 $? \
+  "## Patch lands between Fix Direction (line $fd_line) and Reproduce (line $repro_line); got $patch_line"
+
+# Sparse report: only Classification + Reachability + Severity rationale
+# (a real shape observed in live benchmark output). Patch must still
+# land BEFORE Reachability — not at end-of-report.
+CDP2="$RESULTS_DIR/crashes/CRASH-001-Q"
+mkdir -p "$CDP2"
+cat > "$CDP2/report.md" <<'EOF'
+# CRASH-001-Q: sparse report shape
+
+## Classification
+- **Severity**: Medium
+
+## Reachability — external callers
+None observed.
+
+## Severity rationale
+Local crash only.
+EOF
+cp "$CDP/patch.diff" "$CDP2/patch.diff"
+python3 "$ENRICH" --quiet "$CDP2/report.md" \
+  || fail "enrich-report failed on sparse-report fixture"
+cls_line=$(grep -n "^## Classification$" "$CDP2/report.md" | cut -d: -f1)
+patch_line=$(grep -n "^## Patch$" "$CDP2/report.md" | cut -d: -f1)
+reach_line=$(grep -n "^## Reachability" "$CDP2/report.md" | cut -d: -f1)
+[ -n "$cls_line" ] && [ -n "$patch_line" ] && [ -n "$reach_line" ] \
+  && [ "$patch_line" -gt "$cls_line" ] && [ "$patch_line" -lt "$reach_line" ]
+assert_eq 0 $? \
+  "## Patch lands between Classification ($cls_line) and Reachability ($reach_line); got $patch_line"
 
 # ── (f) Missing source tree degrades gracefully ─────────────────────
 CD2="$RESULTS_DIR/crashes/CRASH-002-1"

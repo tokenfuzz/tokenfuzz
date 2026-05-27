@@ -75,7 +75,7 @@ than the buffer triggers the overwrite.
 ## Data Flow Trace
 file_bytes → Run() (main.cpp:9) → Parse() (parser.cpp:42) → memcpy past dst
 
-## Candidate Fix
+## Patch
 Bounds-check the length prefix against sizeof(dst) before memcpy.
 EOF
   # Validation requires testcase > 16 bytes; pad past that floor.

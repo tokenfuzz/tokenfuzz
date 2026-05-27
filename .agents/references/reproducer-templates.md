@@ -10,7 +10,7 @@ After a CRASH dir passes triage, `bin/export-repro` runs automatically and conve
 
 ```
 crashes/CRASH-NNN-N/
-├── REPORT.md           # bug summary + root cause + candidate fix
+├── REPORT.md           # bug summary + root cause + patch
 ├── reproduce.sh        # one command, no env vars, clones upstream + builds + runs
 ├── input.<ext>         # testcase bytes (renamed, headers stripped)
 ├── harness.c           # for // HARNESS: bugs only

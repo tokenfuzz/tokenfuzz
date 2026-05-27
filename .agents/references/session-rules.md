@@ -373,7 +373,7 @@ does land, the FIND already exists and the CRASH becomes the evidence
 attachment — no rewrite needed.
 
 Optional but encouraged:
-- **`patch.diff`** — a candidate fix saved as a file named exactly
+- **`patch.diff`** — a surgical patch saved as a file named exactly
   `patch.diff` in the FIND directory (alongside `report.md`), or in
   the CRASH directory for CRASH reports. The format must match the
   target's VCS so maintainers can apply it directly. See
@@ -388,27 +388,21 @@ Optional but encouraged:
   ```
 
   Keep the patch surgical — only the missing check or corrected line,
-  no surrounding refactoring or whitespace churn. Before recommending
-  it, run a bounded patch-validation loop of up to three attempts; on
-  each failed attempt, revise the diff (correct hunk offsets, fix the
-  compile error) before retrying. Each attempt:
-  (1) verify the diff applies cleanly to the target VCS checkout
-  (`git apply --check` for git, or `hg import --no-commit` with the
-  target's equivalent dry-run for hg); (2) temporarily apply it;
-  (3) run the target's build command — prefer an existing sanitizer
+  no surrounding refactoring or whitespace churn. Save `patch.diff`
+  whenever it applies cleanly (`git apply --check`, or `hg import
+  --no-commit` dry-run). Build/repro confirmation is optional and
+  improves quality but is not required: prefer an existing sanitizer
   build dir (`build-asan${AUDIT_BUILD_SUFFIX:-}/`, see `AGENTS.md`),
-  fall back to any other `build-*/` dir, otherwise use the regular
-  project build derived from the build manifest; (4) revert only the
-  files the patch touched — `git -C "$TARGET_ROOT" checkout --
-  path/to/file.cpp` for git, or `hg -R "$TARGET_ROOT" revert
-  path/to/file.cpp` for hg — never a whole-tree reset, so subsequent
-  probes run against unmodified source. Only keep `patch.diff` when the
-  apply check and build pass within the three attempts. Add `Patch:
-  confirms-fix` to `report.md` when the patched build also stops the
-  diagnostic from reproducing; otherwise add `Patch: builds` for a
-  patch that applies cleanly and builds but has not been
-  repro-confirmed. If all three validation attempts fail, omit
-  `patch.diff` and use `## Fix Direction` prose instead.
+  fall back to any other `build-*/` dir, then the regular project
+  build; revert only the files you touched (`git -C "$TARGET_ROOT"
+  checkout -- path/to/file.cpp` or `hg -R "$TARGET_ROOT" revert
+  path/to/file.cpp` — never a whole-tree reset) so later probes run
+  against unmodified source. **Do not write a `## Patch` section in
+  `report.md`** — `bin/enrich-report` is the single writer of that
+  section and inserts the diff from the sibling file on render.
+  Whatever validation you ran (applies, builds, confirms the
+  diagnostic stops) can be noted in your narrative prose; there is no
+  required label vocabulary.
 
   **Advisory bundles (no patch).** Some classes of fix can't be
   captured as a surgical diff — ABI-impacting renames, signature

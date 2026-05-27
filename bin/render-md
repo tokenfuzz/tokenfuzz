@@ -680,6 +680,17 @@ _MATERIAL_CSS = """
     background: var(--surface-lowest);
     box-shadow: var(--shadow-sm);
   }
+  /* Unified-diff coloring inside ```diff fenced blocks. Every line is
+     wrapped in a block span; the class keys the tint (added/removed/
+     hunk/file-header/context). Block layout from the shared selector,
+     not the per-class rules — keeping `display: block` on each class
+     plus `\n` text nodes between spans inside `<pre>` doubles the
+     line spacing. */
+  code.language-diff > span { display: block; min-height: 1.2em; }
+  code.language-diff .da { color: #166534; background: #dcfce7; }
+  code.language-diff .dr { color: #991b1b; background: #fee2e2; }
+  code.language-diff .dh { color: #4a4458; font-weight: 600; }
+  code.language-diff .dx { color: #1e3a8a; background: #dbeafe; }
   /* Blockquote → an M3 tonal "note" card with a primary accent edge. */
   blockquote {
     background: var(--surface-lowest);
@@ -724,6 +735,12 @@ _BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 _ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)")
 _UNDERSCORE_ITALIC_RE = re.compile(r"(?<![A-Za-z0-9_])_([^_\n]+)_(?![A-Za-z0-9_])")
 _HTML_COMMENT_LINE_RE = re.compile(r"^<!--.*?-->\s*$")
+# CommonMark thematic break: a run of 3+ matching `-`, `*`, or `_` on a
+# line by itself. lib/report_enrich.py joins enrichment snippet blocks
+# with `\n\n---\n\n`; without this rule a stand-alone `---` rendered as
+# `<p>---</p>`. Diff `--- a/file` / `+++ b/file` header lines stay
+# inside the fenced-code parser and are not seen here.
+_THEMATIC_BREAK_RE = re.compile(r"-{3,}|\*{3,}|_{3,}")
 
 
 def _slug(text: str) -> str:
@@ -1245,6 +1262,12 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
             i += 1
             continue
 
+        if _THEMATIC_BREAK_RE.fullmatch(stripped):
+            _flush_paragraph()
+            body.append("<hr>")
+            i += 1
+            continue
+
         if stripped.startswith("# "):
             _flush_paragraph()
             _close_collapsible()
@@ -1302,13 +1325,46 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
             continue
         if stripped.startswith("```"):
             _flush_paragraph()
+            lang = stripped[3:].strip().split()[0].lower() if len(stripped) > 3 else ""
             block: list[str] = []
             i += 1
             while i < len(lines) and not lines[i].strip().startswith("```"):
                 block.append(lines[i])
                 i += 1
             i += 1  # skip closing ```
-            body.append("<pre><code>" + html.escape("\n".join(block)) + "</code></pre>")
+            if lang == "diff":
+                # Wrap every line in a block span; class keys the tint.
+                # Context lines get `dc` (no color, still a block) so
+                # joining with "" — instead of "\n" — gives each line
+                # its own row without doubled spacing from `\n` text
+                # nodes between block-displayed spans inside <pre>.
+                spans: list[str] = []
+                for raw in block:
+                    esc = html.escape(raw)
+                    if raw.startswith(("+++", "---")):
+                        cls = "dh"
+                    elif raw.startswith("+"):
+                        cls = "da"
+                    elif raw.startswith("-"):
+                        cls = "dr"
+                    elif raw.startswith("@@"):
+                        cls = "dx"
+                    else:
+                        cls = "dc"
+                    spans.append(f'<span class="{cls}">{esc}</span>')
+                body.append(
+                    '<pre><code class="language-diff">'
+                    + "".join(spans)
+                    + "</code></pre>"
+                )
+            elif lang:
+                body.append(
+                    f'<pre><code class="language-{html.escape(lang)}">'
+                    + html.escape("\n".join(block))
+                    + "</code></pre>"
+                )
+            else:
+                body.append("<pre><code>" + html.escape("\n".join(block)) + "</code></pre>")
             continue
         if _TABLE_ROW_RE.match(line) and _TABLE_SEP_RE.match(nxt):
             _flush_paragraph()

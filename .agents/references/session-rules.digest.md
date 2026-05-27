@@ -153,15 +153,14 @@ up to 3 FINDs/iteration in source-only mode. Distinct `file:function:line`
 with independent rationales.
 
 Optional but encouraged: `patch.diff` in the FIND/CRASH dir, captured
-via `git diff` / `hg diff` of the surgical fix. Recommend it only after
-a bounded loop of up to three validation attempts — revising the diff
-between failures — shows it applies cleanly and builds with the best
-available target build command (sanitizer `build-*` dir if available,
-otherwise the regular build), reverting only the patched files (`git
-checkout -- <file>` / `hg revert <file>`, never a whole-tree reset)
-before further probes. Mark `Patch: builds` or `Patch: confirms-fix` in
-report.md. If validation fails, omit `patch.diff` and write
-`## Fix Direction` prose.
+via `git diff` / `hg diff` of the surgical fix. Save it whenever
+`git apply --check` (or `hg import --no-commit` dry-run) succeeds;
+build/repro confirmation is an optional quality upgrade, not a gate.
+**Do not write a `## Patch` section in `report.md`** — `bin/enrich-report`
+is the single writer of that section and inlines the diff from the
+sibling file on render. Reserve `## Fix Direction` prose (omit
+`patch.diff`) for fixes that require ABI/API-impacting changes where
+a surgical diff isn't possible.
 
 ## Pre-file checks
 

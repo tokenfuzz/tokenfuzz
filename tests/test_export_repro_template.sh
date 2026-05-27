@@ -76,7 +76,7 @@ strip_run() {
     /^Reproduction:[[:space:]]*$/                                                                              { skip=1; next }
     /^## *(Reproduce|Expected[[:space:]]+sanitizer[[:space:]]+output|Expected[[:space:]]+Sanitizer[[:space:]]+Output|ASan[[:space:]]+top[[:space:]]+frames)([[:space:]]|$)/ { skip=1; next }
     skip && /^## /                                                                                             { skip=0 }
-    skip && /^(Data Flow|Candidate Fix|Reachability|Supplemental|Evidence|Boundary|Classification|Summary|Root Cause|Suggested fix|Notes)[: ]/ { skip=0 }
+    skip && /^(Data Flow|Patch|Reachability|Supplemental|Evidence|Boundary|Classification|Summary|Root Cause|Suggested fix|Notes)[: ]/ { skip=0 }
     skip { next }
     /^Full original output:/ { next }
     { print }
