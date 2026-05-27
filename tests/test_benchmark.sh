@@ -1958,4 +1958,92 @@ fi
 
 rm -f "$drip_fn"
 
+# ── T32: agy_in_idle_heartbeat_loop predicate ──────────────────────────
+# Validates the new arm of the gemini watchdog. The function returns
+# true when the klog shows the documented post-generation idle-loop
+# signature: zero streamGenerateContent / :generateContent calls in
+# the recent window, plus >=1 fetchAvailableModels / loadCodeAssist.
+# Same fail-safe model as agy_drip_stopped — missing klog, awk
+# errors, format drift all return false.
+idle_fn=$(mktemp)
+awk '
+  /^agy_in_idle_heartbeat_loop\(\) \{/,/^\}/
+' "$BENCH" > "$idle_fn"
+# shellcheck disable=SC1090
+. "$idle_fn"
+
+# Fixtures use real "now" timestamps so the date-arithmetic in the
+# function resolves correctly. Two HH:MM offsets are computed:
+#   now_hhmm   — current minute (always inside any window)
+#   old_hhmm   — 10 minutes ago (outside the 120s window used below)
+now_hhmm=$(date +%H:%M)
+old_hhmm=$(date -v-10M +%H:%M 2>/dev/null \
+        || date -d '10 minutes ago' +%H:%M 2>/dev/null)
+mmdd=$(date +%m%d)
+
+# Positive: broken-klog signature — old stream call (out of window),
+# recent heartbeat (in window).
+idle_log_yes="$work/idle-yes.log"
+{
+  printf 'I%s %s:42.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0xabc\n' "$mmdd" "$old_hhmm"
+  printf 'I%s %s:00.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels Trace: 0xdef\n' "$mmdd" "$now_hhmm"
+  printf 'I%s %s:00.234567 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist Trace: 0x123\n' "$mmdd" "$now_hhmm"
+} > "$idle_log_yes"
+if agy_in_idle_heartbeat_loop "$idle_log_yes" 120; then
+  pass "T32a: agy_in_idle_heartbeat_loop fires on broken-klog signature"
+else
+  fail "T32a: agy_in_idle_heartbeat_loop fires on broken-klog signature" "did not trigger on the documented idle-loop shape"
+fi
+
+# Negative: healthy klog — recent stream calls + recent heartbeat.
+# The presence of any stream call in the window must veto the trigger.
+idle_log_active="$work/idle-active.log"
+{
+  printf 'I%s %s:10.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0xabc\n' "$mmdd" "$now_hhmm"
+  printf 'I%s %s:30.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels Trace: 0xdef\n' "$mmdd" "$now_hhmm"
+} > "$idle_log_active"
+if agy_in_idle_heartbeat_loop "$idle_log_active" 120; then
+  fail "T32b: agy_in_idle_heartbeat_loop must NOT trigger when stream calls are recent" "false positive during active conversation"
+else
+  pass "T32b: agy_in_idle_heartbeat_loop must NOT trigger when stream calls are recent"
+fi
+
+# Negative: no recent heartbeat either — the function requires at
+# least one heartbeat to confirm agy is still writing to the klog
+# at all. A genuinely-dead agy (no writes of any kind) should fall
+# back to the outer wall, not be picked up here.
+idle_log_silent="$work/idle-silent.log"
+{
+  printf 'I%s %s:42.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0xabc\n' "$mmdd" "$old_hhmm"
+} > "$idle_log_silent"
+if agy_in_idle_heartbeat_loop "$idle_log_silent" 120; then
+  fail "T32c: agy_in_idle_heartbeat_loop must NOT trigger without recent heartbeats" "false positive on silent klog"
+else
+  pass "T32c: agy_in_idle_heartbeat_loop must NOT trigger without recent heartbeats"
+fi
+
+# Negative: :generateContent (non-stream variant, lowercase g) also
+# counts as activity — agy sometimes uses both URLs interchangeably.
+# Without this match, a model that issues only :generateContent
+# would be mis-classified as idle.
+idle_log_nonstream="$work/idle-nonstream.log"
+{
+  printf 'I%s %s:10.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent Trace: 0xabc\n' "$mmdd" "$now_hhmm"
+  printf 'I%s %s:30.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels Trace: 0xdef\n' "$mmdd" "$now_hhmm"
+} > "$idle_log_nonstream"
+if agy_in_idle_heartbeat_loop "$idle_log_nonstream" 120; then
+  fail "T32d: agy_in_idle_heartbeat_loop must count :generateContent as activity" "treated non-stream variant as idle"
+else
+  pass "T32d: agy_in_idle_heartbeat_loop must count :generateContent as activity"
+fi
+
+# Fail-safe: missing log file returns false (caller skips the poll).
+if agy_in_idle_heartbeat_loop "$work/no-such-idle.log" 120; then
+  fail "T32e: agy_in_idle_heartbeat_loop must NOT trigger on missing log" "triggered"
+else
+  pass "T32e: agy_in_idle_heartbeat_loop must NOT trigger on missing log"
+fi
+
+rm -f "$idle_fn"
+
 summary
