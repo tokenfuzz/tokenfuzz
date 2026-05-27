@@ -80,7 +80,7 @@ assert_eq "1" "$rc" "LLM_DECIDE_DISABLE=1 + no mock → rc=1"
 base_toml
 write_build_log
 rm -f "$fixture_dir"/target.toml.bak.* 2>/dev/null
-export LLM_DECIDE_MOCK_TARGET_TOML_REPAIR='{"link_libs":["/path/to/zutil.c","/path/to/infback9.c"],"defines":["-DZ_INTERNAL"]}'
+export LLM_DECIDE_MOCK_TARGET_TOML_REPAIR='{"link_libs":["zutil.c","infback9.c"],"defines":["-DZ_INTERNAL"]}'
 "$HELPER" --toml "$fixture_dir/target.toml" \
           --build-log "$fixture_dir/H-stub-harness.c.deadbeefdeadbeefdeadbeef.build.log" \
           --logdir "$TEST_TMPDIR/logs" >/dev/null 2>&1
@@ -187,7 +187,7 @@ mock_arr() {
   done
   echo "${out%,}"
 }
-export LLM_DECIDE_MOCK_TARGET_TOML_REPAIR="{\"includes\":[$(mock_arr inc_ 9)],\"link_libs\":[$(mock_arr /lib/ 9)],\"defines\":[$(mock_arr -Dflag 9)]}"
+export LLM_DECIDE_MOCK_TARGET_TOML_REPAIR="{\"includes\":[$(mock_arr inc_ 9)],\"link_libs\":[$(mock_arr extra_ 9)],\"defines\":[$(mock_arr -Dflag 9)]}"
 "$HELPER" --toml "$fixture_dir/target.toml" \
           --build-log "$fixture_dir/H-stub-harness.c.deadbeefdeadbeefdeadbeef.build.log" \
           --logdir "$TEST_TMPDIR/logs" >/dev/null 2>&1
@@ -195,5 +195,40 @@ rc=$?
 assert_eq "2" "$rc" "over-cap proposal → rc=2 (refused)"
 toml_sha_after=$(shasum "$fixture_dir/target.toml" | awk '{print $1}')
 assert_eq "$toml_sha_before" "$toml_sha_after" "over-cap proposal: target.toml unchanged"
+
+# ═══════════════════════════════════════════════════════════════
+# 8. Absolute paths under TARGET_ROOT are stripped to relative form
+# ═══════════════════════════════════════════════════════════════
+# auto-repair-target-toml has TARGET_ROOT visible (set by bin/audit) and
+# should never let an absolute audit-host path leak into target.toml —
+# the path would break maintainer reproducers. Under-target_root entries
+# are silently rewritten to relative; outside-target_root entries are
+# refused outright.
+
+base_toml
+write_build_log
+rm -f "$fixture_dir"/target.toml.bak.* "$TEST_TMPDIR/logs/.target-toml-auto-repair-"* 2>/dev/null
+fake_target_root="$TEST_TMPDIR/fake-target-root"
+mkdir -p "$fake_target_root/build-asan/lib"
+absolute_under_root="$fake_target_root/build-asan/lib/libfoo.a"
+export LLM_DECIDE_MOCK_TARGET_TOML_REPAIR="{\"link_libs\":[\"$absolute_under_root\",\"/etc/passwd\"]}"
+TARGET_ROOT="$fake_target_root" "$HELPER" \
+            --toml "$fixture_dir/target.toml" \
+            --build-log "$fixture_dir/H-stub-harness.c.deadbeefdeadbeefdeadbeef.build.log" \
+            --logdir "$TEST_TMPDIR/logs" >/dev/null 2>&1
+rc=$?
+assert_eq "0" "$rc" "under-root path stripped, outside-root path refused → rc=0"
+assert_file_contains "$fixture_dir/target.toml" "build-asan/lib/libfoo.a" \
+  "under-target_root absolute path stored as relative"
+if grep -qF "$fake_target_root" "$fixture_dir/target.toml"; then
+  fail "absolute host path stripped" "absolute path leaked into target.toml: $(grep "$fake_target_root" "$fixture_dir/target.toml")"
+else
+  pass "absolute host path stripped"
+fi
+if grep -qF '/etc/passwd' "$fixture_dir/target.toml"; then
+  fail "outside-target_root absolute path refused" "/etc/passwd leaked into target.toml"
+else
+  pass "outside-target_root absolute path refused"
+fi
 
 summary

@@ -1761,6 +1761,42 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     if not cfg.sanitizers_enabled and not cfg.sanitizers_explicitly_disabled:
         cfg.sanitizers_enabled.append("asan")
 
+    # Normalize any path field that was stored as an audit-machine absolute
+    # path (e.g. `auto-repair-target-toml` proposed
+    # `/Users/.../targets/<slug>/build-asan/lib/libfoo.a`). Downstream
+    # consumers (bin/export-repro _strip_sanitizer_build_prefix, the
+    # seeder's `removeprefix`) assume target_root-relative form. Leaving
+    # an absolute path in cfg causes reproduce.sh to emit
+    # `$build/targets/<slug>/build-asan/...` instead of
+    # `$build/build-asan/...`, breaking the maintainer build.
+    _strip_target_root_paths(cfg)
+
+
+def _strip_target_root_paths(cfg: Config) -> None:
+    """Rewrite absolute target_root-prefixed values to target_root-relative."""
+    root = (cfg.target_root or "").rstrip("/")
+    if not root:
+        return
+    prefix = root + "/"
+
+    def _rel(value: str) -> str:
+        return value[len(prefix):] if value.startswith(prefix) else value
+
+    cfg.asan_bin = _rel(cfg.asan_bin)
+    cfg.asan_lib = _rel(cfg.asan_lib)
+    cfg.ubsan_bin = _rel(cfg.ubsan_bin)
+    cfg.ubsan_lib = _rel(cfg.ubsan_lib)
+    cfg.msan_bin = _rel(cfg.msan_bin)
+    cfg.msan_lib = _rel(cfg.msan_lib)
+    cfg.tsan_bin = _rel(cfg.tsan_bin)
+    cfg.tsan_lib = _rel(cfg.tsan_lib)
+    # link_libs may carry bare archives that auto-repair-target-toml dragged
+    # in. Don't touch `-l…` / `-L…` / `-Wl,…` flag entries.
+    cfg.link_libs = [
+        _rel(item) if not item.startswith("-") else item
+        for item in cfg.link_libs
+    ]
+
 
 def load(start: str | os.PathLike) -> Config:
     """One-shot: discover slug dir, read .session-env, parse target.toml."""

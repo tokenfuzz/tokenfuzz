@@ -858,6 +858,45 @@ assert_eq('https://ex.com/q?a="b"&c=\\d', parsed["upstream_url"],
           "seed_target_toml: upstream_url with quote+backslash round-trips")
 
 
+# ─── load_toml_into strips target_root prefix from path fields ───────
+# auto-repair-target-toml occasionally accepts (or older runs stored)
+# absolute audit-machine paths in asan_lib / asan_bin / link_libs.
+# Downstream consumers (bin/export-repro's _strip_sanitizer_build_prefix,
+# the build/lib resolution shell snippet) only handle target_root-relative
+# form. The loader normalizes silently so legacy target.toml files keep
+# working without manual repair.
+strip_dir = TEST_TMPDIR / "strip_root"
+strip_dir.mkdir(parents=True, exist_ok=True)
+strip_root = strip_dir / "targets" / "sampleproj"
+strip_root.mkdir(parents=True, exist_ok=True)
+strip_toml = strip_dir / "absolute-paths.toml"
+strip_toml.write_text(
+    f'target = "sampleproj"\n'
+    f'asan_bin = "{strip_root}/build-asan/bin/apptool"\n'
+    f'asan_lib = "{strip_root}/build-asan/lib/libsample-helper.a"\n'
+    f'link_libs = ["{strip_root}/build-asan/lib/libsample.a", "-lm", "/elsewhere/lib.a"]\n',
+    encoding="utf-8")
+cfg_strip = tc.Config()
+cfg_strip.target_root = str(strip_root)
+tc.load_toml_into(cfg_strip, strip_toml)
+assert_eq("build-asan/bin/apptool", cfg_strip.asan_bin,
+          "load_toml_into: absolute asan_bin under target_root → relative")
+assert_eq("build-asan/lib/libsample-helper.a", cfg_strip.asan_lib,
+          "load_toml_into: absolute asan_lib under target_root → relative")
+assert_eq(
+    ["build-asan/lib/libsample.a", "-lm", "/elsewhere/lib.a"],
+    cfg_strip.link_libs,
+    "load_toml_into: link_libs strips under-root, keeps flags + foreign abs paths"
+)
+
+# Same input but without a target_root in cfg — nothing to strip against,
+# so values pass through unchanged.
+cfg_no_root = tc.Config()
+tc.load_toml_into(cfg_no_root, strip_toml)
+assert_eq(f"{strip_root}/build-asan/lib/libsample-helper.a", cfg_no_root.asan_lib,
+          "load_toml_into: no target_root → asan_lib pass-through")
+
+
 # ─── Cleanup + summary ──────────────────────────────────────────────
 
 shutil.rmtree(TEST_TMPDIR, ignore_errors=True)

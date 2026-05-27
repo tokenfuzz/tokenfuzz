@@ -164,7 +164,22 @@ def _coerce_list(val) -> list[str]:
     return []
 
 
-def _validate_additions(field: str, new_items: list[str], existing: list[str]) -> tuple[list[str], list[str]]:
+def _strip_target_root(item: str, target_root: str) -> str:
+    """If `item` is an absolute path under target_root, return it relative.
+
+    target.toml fields are documented as target_root-relative; an absolute
+    path under target_root would otherwise leak the auditor's host layout
+    into bundle artifacts (reproduce.sh, REPORT.md) and break the existing
+    `build-<san>/...` prefix conventions every downstream consumer assumes.
+    """
+    if not target_root:
+        return item
+    prefix = target_root.rstrip("/") + "/"
+    return item[len(prefix):] if item.startswith(prefix) else item
+
+
+def _validate_additions(field: str, new_items: list[str], existing: list[str],
+                        target_root: str = "") -> tuple[list[str], list[str]]:
     """Return (accepted, rejected_reasons). Drops dupes / unsafe entries."""
     accepted: list[str] = []
     rejected: list[str] = []
@@ -173,6 +188,9 @@ def _validate_additions(field: str, new_items: list[str], existing: list[str]) -
         item = item.strip()
         if not item:
             continue
+        # Strip target_root prefix BEFORE dedupe so the LLM's absolute form
+        # collides with any pre-existing relative form already in the file.
+        item = _strip_target_root(item, target_root)
         if item in existing_set or item in accepted:
             # Silent dedupe — not a rejection.
             continue
@@ -186,6 +204,11 @@ def _validate_additions(field: str, new_items: list[str], existing: list[str]) -
             # Allow -l/-L/-Wl,/-x flag forms but reject open-ended -*
             # in case the LLM proposes -fsanitize=… or --wrapper=….
             rejected.append(f"{field}:{item} (suspicious flag)")
+            continue
+        if not item.startswith("-") and item.startswith("/"):
+            # Bare absolute path that doesn't sit under target_root —
+            # refuse rather than bake a host-specific path into target.toml.
+            rejected.append(f"{field}:{item} (absolute path outside target_root)")
             continue
         if len(accepted) >= _MAX_NEW_ENTRIES_PER_FIELD:
             rejected.append(f"{field}:{item} (per-field cap reached)")
@@ -310,12 +333,16 @@ def main(argv: list[str]) -> int:
             pass
         return 1
 
+    # TARGET_ROOT is set by bin/audit (and by setup-target) for every
+    # subprocess; in standalone invocations it's empty and we fall back to
+    # rejecting absolute paths outright (the safer default).
+    target_root = os.environ.get("TARGET_ROOT", "")
     accepted_per_field: dict[str, list[str]] = {}
     rejected_total: list[str] = []
     total_new = 0
     for field in _EDITABLE_FIELDS:
         items = _coerce_list(proposal.get(field, []))
-        acc, rej = _validate_additions(field, items, existing[field])
+        acc, rej = _validate_additions(field, items, existing[field], target_root)
         accepted_per_field[field] = acc
         rejected_total.extend(rej)
         total_new += len(acc)

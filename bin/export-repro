@@ -431,7 +431,60 @@ def cfg_sanitizer_lib(cfg: target_config.Config, sanitizer: str) -> str:
 
 
 def shell_join_args(args: Iterable[str]) -> str:
-    return "".join(f" {shq(a)}" for a in args if a)
+    # Items already containing a `$` are shell expressions
+    # (`"$link_lib_0"` from emit_link_libs_with_resolves); shell-quoting
+    # them would freeze the variable name as a literal. Pass those through
+    # verbatim — they were produced by us and don't need further escaping.
+    return "".join(
+        (f" {a}" if "$" in a else f" {shq(a)}") for a in args if a
+    )
+
+
+_LINK_LIB_RESOLVE_BLOCK = """\
+__VAR__="$build"/__REL__
+if [ ! -e "$__VAR__" ]; then
+  __VAR__=$(find "$build" \\( -type f -o -type l \\) -name '__NAME__' -print 2>/dev/null | head -1)
+fi
+[ -n "$__VAR__" ] && [ -e "$__VAR__" ] || { echo "link archive not found under $build: __NAME__ (target.toml link_libs hint: __REL__)" >&2; exit 2; }
+"""
+
+
+def emit_link_libs_with_resolves(link_libs: list[str], sanitizer: str) -> tuple[str, str]:
+    """Build a pre-link resolver block + the link args for the clang line.
+
+    The link_libs field can name archives at audit-side paths that don't
+    exist after a fresh maintainer build (e.g. archive installed to
+    `lib/libfoo.a` locally but the .audit/build.sh leaves it at
+    `libfoo.a`). For each path-shaped entry we emit a small resolver
+    that tries `$build/<rel>` first and falls back to a basename find —
+    matching the LIB_RESOLVE semantics used for the primary san_lib.
+
+    Flag entries (`-lm`, `-L…`, `-Wl,…`) pass through verbatim.
+    """
+    resolves: list[str] = []
+    link_args: list[str] = []
+    archive_idx = 0
+    for raw in link_libs:
+        if not raw:
+            continue
+        item = raw if (raw.startswith("-") or "$" in raw) else _strip_sanitizer_build_prefix(raw, sanitizer)
+        if raw.startswith("-") or "$" in raw:
+            link_args.append(shq(item))
+            continue
+        # Bare path: emit a resolver and reference the variable.
+        var = f"link_lib_{archive_idx}"
+        archive_idx += 1
+        name = item.rsplit("/", 1)[-1]
+        resolves.append(
+            _LINK_LIB_RESOLVE_BLOCK
+            .replace("__VAR__", var)
+            .replace("__REL__", item)
+            .replace("__NAME__", name)
+        )
+        link_args.append(f'"${var}"')
+    resolver_block = "".join(resolves)
+    link_args_string = "".join(f" {a}" for a in link_args)
+    return resolver_block, link_args_string
 
 
 def _bash_glob_sort_key(p: Path) -> str:
@@ -809,8 +862,8 @@ if [ ! -e "$san_lib" ]; then
   fi
 fi
 if [ ! -e "$san_lib" ]; then
-  # Audit-recorded name (libcurl-d.a, libcjson-asan.a) often doesn't match
-  # what a fresh upstream build produces (libcurl.a, libcjson.a / .dylib).
+  # Audit-recorded name (libfoo-d.a, libfoo-asan.a) often doesn't match
+  # what a fresh upstream build produces (libfoo.a / .dylib).
   # Strip audit-side decoration from the stem and find any matching artifact.
   # Accept symlinks (-type l): shared libs ship as libfoo.dylib -> libfoo.N.dylib
   # -> libfoo.X.Y.Z.dylib (macOS) or libfoo.so -> libfoo.so.N (Linux), and the
@@ -832,13 +885,72 @@ if [ ! -e "$san_lib" ]; then
       \\) -print 2>/dev/null | head -1)
   fi
 fi
-[ -e "$san_lib" ] || { echo "__SANITIZER_LABEL__ static library not found: $san_lib" >&2; exit 2; }
+if [ ! -e "$san_lib" ]; then
+  # TODO(post-launch): this is a repro-time band-aid. The proper fix lives
+  # in bin/auto-build-script — verify that the configured asan_lib exists
+  # under build/ after convergence, and if not, re-converge with an
+  # explicit "must produce <asan_lib>" hint so .audit/build.sh learns to
+  # build the subproject. Once that lands upstream, delete this block.
+  #
+  # The configured asan_lib often hints at a cmake subproject the agent
+  # built ad-hoc during recon, but the converged .audit/build.sh only
+  # covers the top-level cmake. When the path looks like `<subdir>/<lib>`,
+  # see if upstream carries a matching `<src>/<subdir>` or
+  # `<src>/contrib/<subdir>` cmake project and build it inline. Mirrors
+  # the audit build's flags so the ASan ABI matches.
+  san_lib_rel=__SAN_LIB_REL__
+  subdir_hint="${san_lib_rel#build-*/}"
+  subdir_hint="${subdir_hint%%/*}"
+  case "$subdir_hint" in
+    ""|"$san_lib_rel"|lib|build|src) subdir_hint="" ;;
+  esac
+  if [ -n "$subdir_hint" ]; then
+    # Install the top-level build first so the subproject's
+    # find_package() / find_dependency() calls can locate it via
+    # <Project>Config.cmake under $build/install/lib/cmake/<project>/.
+    if [ ! -d "$build/install/lib/cmake" ]; then
+      cmake --install "$build" --prefix "$build/install" >&2 || true
+    fi
+    for cand_subdir in "$src/$subdir_hint" "$src/contrib/$subdir_hint"; do
+      if [ -f "$cand_subdir/CMakeLists.txt" ]; then
+        echo "=== __SANITIZER_LABEL__: building cmake subproject for $subdir_hint at $cand_subdir ===" >&2
+        cmake -S "$cand_subdir" -B "$build/$subdir_hint" \\
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \\
+            -DCMAKE_PREFIX_PATH="$build/install" \\
+            -DCMAKE_C_FLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1 -fno-omit-frame-pointer" \\
+            -DCMAKE_CXX_FLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1 -fno-omit-frame-pointer" \\
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=__SANITIZER_FLAG__" >&2 \\
+          && cmake --build "$build/$subdir_hint" -j >&2 \\
+          || true
+        break
+      fi
+    done
+    san_lib=$(find "$build" \\( -type f -o -type l \\) -name "$san_lib_name" -print 2>/dev/null | head -1)
+  fi
+fi
+if [ ! -e "$san_lib" ]; then
+  # Header-only libraries can get placeholder anchor archives at audit
+  # time (one .o with no extern symbols) so target.toml's asan_lib field
+  # validates. The fresh maintainer build doesn't reproduce those
+  # placeholders, but the harness link doesn't actually need them.
+  # Degrade to a warning + blank san_lib so the link line's
+  # ${san_lib:+"$san_lib"} expansion skips the archive cleanly. If the
+  # harness *does* need the archive, the linker errors out next with an
+  # undefined-symbol that points the maintainer at the real fix.
+  echo "WARNING: __SANITIZER_LABEL__ library '__SAN_LIB_REL__' not found under '$build' after fallbacks." >&2
+  echo "         Proceeding without it — fine for header-only libraries; if the harness needs it," >&2
+  echo "         the linker will report undefined symbols below." >&2
+  san_lib=""
+fi
 # Loader hint for shared libs. ${san_lib%/*} is the directory side of the
 # resolved artifact; embedding it as an rpath at link time and exporting it
 # via LD_LIBRARY_PATH/DYLD_LIBRARY_PATH at run time means the harness loads
 # the instrumented .so/.dylib regardless of where the build placed it. For
-# static archives the variable is set but unused.
+# static archives the variable is set but unused. Empty san_lib_dir is
+# fine: the harness link line uses ${san_lib_dir:+...} to skip the
+# variable entirely when it's not set.
 san_lib_dir="${san_lib%/*}"
+[ -n "$san_lib" ] || san_lib_dir=""
 """
 
 # The `rc=0; <cmd> || rc=$?` pattern is intentional: the script starts
@@ -1070,6 +1182,7 @@ def emit_lib_resolve(san_lib_rel: str, sanitizer: str = "asan") -> str:
         __SAN_LIB_TAIL__=shq(tail),
         __SAN_LIB_REL__=shq(san_lib_rel),
         __SANITIZER_LABEL__=sanitizer_meta(sanitizer)["label"],
+        __SANITIZER_FLAG__=sanitizer_meta(sanitizer)["flag"] or "address",
     )
 
 
@@ -1149,10 +1262,10 @@ def rewrite_audit_script_body(in_path: Path, slug: str = "",
     # caller is responsible for emitting `repro_src="$src"` before the
     # wrapper body.
     #
-    # We don't require a trailing `/` — `-I/.../targets/cjson` (used as an
-    # include dir) must rewrite as cleanly as `/.../targets/cjson/foo.c`.
+    # We don't require a trailing `/` — `-I/.../targets/<slug>` (used as
+    # an include dir) must rewrite as cleanly as `/.../targets/<slug>/foo.c`.
     # The trailing word-boundary blocks accidental matches into siblings
-    # like `targets/cjson_old`.
+    # like `targets/<slug>_old`.
     _TRAILING = r"(?![A-Za-z0-9_-])"
     path_rewrites: list[tuple[re.Pattern[str], str]] = []
     if target_root:
@@ -2018,6 +2131,7 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
                              pinned_rev: str, slug: str, san_bin_rel: str,
                              san_lib_rel: str, includes_args: str,
                              link_libs: str, input_name: str,
+                             link_lib_resolves: str = "",
                              harness_name: str = "harness.c",
                              harness_compiler: str = "clang",
                              sanitizer: str = "asan",
@@ -2043,16 +2157,34 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
         san_lib_arg = ""
         san_lib_run_env = ""
     else:
-        san_lib_arg = ' "$san_lib" -Wl,-rpath,"$san_lib_dir"'
+        # ${san_lib:+...} expands the substitution only when san_lib is set.
+        # LIB_RESOLVE may blank san_lib when the archive can't be found
+        # (header-only library placeholder case); the link line must then
+        # skip the archive and the rpath flag entirely. The shell prunes
+        # the empty positional argument, so clang sees a clean command line
+        # — no stray "" arg that would be interpreted as "no such file".
+        #
+        # The env block uses an explicit `if [ -n ... ]; then export …; fi`
+        # rather than ${var:+VAR=val} because bash only recognizes a
+        # `VAR=val` token as an env-var prefix when it is syntactically
+        # apparent before parameter expansion. A `${var:+VAR=val}` that
+        # expands to `VAR=val` is treated as a regular word — i.e. bash
+        # tries to *run* it as a command and reports "VAR=val: command
+        # not found". The explicit `export` block sidesteps that POSIX
+        # corner entirely.
+        san_lib_arg = ' ${san_lib:+"$san_lib"} ${san_lib_dir:+-Wl,-rpath,"$san_lib_dir"}'
         san_lib_run_env = (
-            'LD_LIBRARY_PATH="$san_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" '
-            'DYLD_LIBRARY_PATH="$san_lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" '
+            'if [ -n "$san_lib_dir" ]; then\n'
+            '  export LD_LIBRARY_PATH="$san_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+            '  export DYLD_LIBRARY_PATH="$san_lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"\n'
+            'fi\n'
         )
     text = (
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
         + emit_build(build_system, sanitizer=sanitizer,
                      audit_build_script=audit_build_script)
         + emit_lib_resolve(san_lib_rel, sanitizer)
+        + link_lib_resolves
         + _sub_template(
             C_HARNESS_RUN,
             __INCLUDES_ARGS__=includes_args,
@@ -2422,7 +2554,7 @@ def main(argv: list[str]) -> int:
         is_browser = cfg.is_browser == "1"
 
         includes_args = emit_include_args(cfg.includes)
-        link_libs = shell_join_args(cfg.link_libs)
+        link_lib_resolves, link_libs = emit_link_libs_with_resolves(cfg.link_libs, sanitizer)
 
         # If the audit converged on a build recipe via bin/auto-build-script,
         # splice it into reproduce.sh in place of the hardcoded cmake/autotools
@@ -2494,6 +2626,7 @@ def main(argv: list[str]) -> int:
                 pinned_rev=pinned_rev, slug=slug,
                 san_bin_rel=san_bin_rel, san_lib_rel=san_lib_rel,
                 includes_args=includes_args, link_libs=link_libs,
+                link_lib_resolves=link_lib_resolves,
                 input_name=input_name,
                 harness_name=harness_name,
                 harness_compiler=harness_compiler,

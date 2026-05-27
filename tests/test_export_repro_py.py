@@ -373,39 +373,65 @@ self_compile_sh = TMP / "self-compile.sh"
 self_compile_sh.write_text(
     '#!/usr/bin/env bash\n'
     'clang -fsanitize=address \\\n'
-    '  -I/Users/alice/work/targets/cjson \\\n'
-    '  /Users/alice/work/targets/cjson/cJSON.c \\\n'
-    '  targets/cjson/cJSON_Utils.c \\\n'
+    '  -I/Users/alice/work/targets/sampleproj \\\n'
+    '  /Users/alice/work/targets/sampleproj/core.c \\\n'
+    '  targets/sampleproj/helper.c \\\n'
     '  -o /tmp/repro\n',
     encoding="utf-8")
 slug_out = er.rewrite_audit_script_body(
-    self_compile_sh, slug="cjson", target_root="/Users/alice/work/targets/cjson"
+    self_compile_sh, slug="sampleproj",
+    target_root="/Users/alice/work/targets/sampleproj"
 )
 assert_in('-I"$repro_src"', slug_out,
           "rewrite: absolute target_root prefix (with -I attached) rewritten to $repro_src")
-assert_in('"$repro_src"/cJSON.c', slug_out,
+assert_in('"$repro_src"/core.c', slug_out,
           "rewrite: absolute target_root + source file rewritten to $repro_src/...")
-assert_in('"$repro_src"/cJSON_Utils.c', slug_out,
+assert_in('"$repro_src"/helper.c', slug_out,
           "rewrite: slug-relative targets/<slug>/file rewritten to $repro_src/...")
-assert_not_in('/Users/alice/work/targets/cjson', slug_out,
+assert_not_in('/Users/alice/work/targets/sampleproj', slug_out,
               "rewrite: absolute target_root prefix fully stripped")
-assert_not_in('targets/cjson/', slug_out,
+assert_not_in('targets/sampleproj/', slug_out,
               "rewrite: slug-relative form fully stripped")
 
 # Word boundary on the prefix — don't trip a longer sibling slug.
 sibling_sh = TMP / "sibling.sh"
 sibling_sh.write_text(
     '#!/usr/bin/env bash\n'
-    'echo /Users/alice/work/targets/cjson_old/file.c\n'
-    'echo targets/cjson_old/file.c\n',
+    'echo /Users/alice/work/targets/sampleproj_old/file.c\n'
+    'echo targets/sampleproj_old/file.c\n',
     encoding="utf-8")
 sibling_out = er.rewrite_audit_script_body(
-    sibling_sh, slug="cjson", target_root="/Users/alice/work/targets/cjson"
+    sibling_sh, slug="sampleproj",
+    target_root="/Users/alice/work/targets/sampleproj"
 )
-assert_in('targets/cjson_old/file.c', sibling_out,
-          "rewrite: sibling slug 'cjson_old' is NOT rewritten")
+assert_in('targets/sampleproj_old/file.c', sibling_out,
+          "rewrite: sibling slug 'sampleproj_old' is NOT rewritten")
 assert_not_in('"$repro_src"_old', sibling_out,
               "rewrite: sibling slug must not glue onto $repro_src")
+
+# emit_link_libs_with_resolves: each path-shaped entry produces a
+# basename-fallback resolver block and a $-quoted variable reference in
+# the link line; flag entries pass through verbatim.
+resolves, args = er.emit_link_libs_with_resolves(
+    ["build-asan/lib/libsample.a", "-lm", "-lpthread"], "asan"
+)
+assert_in('link_lib_0="$build"/lib/libsample.a', resolves,
+          "link_libs: first resolver block uses $build + stripped tail")
+assert_in("-name 'libsample.a'", resolves,
+          "link_libs: basename fallback emitted")
+assert_in('"$link_lib_0"', args,
+          "link_libs: link args reference resolver variable")
+assert_in('-lm', args, "link_libs: -lm flag passes through")
+assert_in('-lpthread', args, "link_libs: -lpthread flag passes through")
+# Numbering increments for multiple archives.
+resolves2, args2 = er.emit_link_libs_with_resolves(
+    ["build-asan/lib/libfoo.a", "build-asan/lib/libbar.a"], "asan"
+)
+assert_in("link_lib_0=", resolves2, "link_libs: numbering starts at 0")
+assert_in("link_lib_1=", resolves2, "link_libs: second archive numbered 1")
+assert_in('"$link_lib_0" "$link_lib_1"', args2,
+          "link_libs: both vars referenced in link line")
+
 
 # find_shell_wrapper: harness.sh and harness.bash are first-class
 # (lib/languages.py convention), alongside the legacy testcase.sh /
@@ -799,8 +825,8 @@ assert_eq("harness.cpp", found_cpp.name if found_cpp else "",
 # 5f. C-harness reproduce.sh handles missing / placeholder asan_lib.
 #
 # Regression: when output/<slug>/target.toml carries the FILL_ME
-# placeholder (or asan_lib is unset entirely — e.g. header-only C++ libs
-# like nlohmann/json), reproduce.sh used to be emitted with a broken
+# placeholder (or asan_lib is unset entirely — e.g. header-only C++
+# libs), reproduce.sh used to be emitted with a broken
 # `asan_lib="$build/FILL_ME.a"` resolve block and `"$asan_lib"` literally
 # spliced into the link line. Running it failed with "ASan static
 # library not found". The fix: skip the resolve block AND drop the
@@ -821,16 +847,30 @@ er.write_c_harness_template(
 text_a = repro_a.read_text(encoding="utf-8")
 assert_in('san_lib="$build"/libfoo.a', text_a,
           "c-harness asan_lib SET: emits asan_lib resolve block")
-assert_in('"$here/harness.c" "$san_lib" -Wl,-rpath,"$san_lib_dir" -lm -lpthread', text_a,
-          'c-harness asan_lib SET: link line includes "$san_lib" + rpath')
+assert_in('"$here/harness.c" ${san_lib:+"$san_lib"} ${san_lib_dir:+-Wl,-rpath,"$san_lib_dir"} -lm -lpthread', text_a,
+          'c-harness asan_lib SET: link line gates "$san_lib" + rpath on non-empty san_lib')
 assert_in('san_lib_dir="${san_lib%/*}"', text_a,
           "c-harness asan_lib SET: derives lib dir for loader hints")
-assert_in('LD_LIBRARY_PATH="$san_lib_dir', text_a,
-          "c-harness asan_lib SET: run line sets LD_LIBRARY_PATH")
-assert_in('DYLD_LIBRARY_PATH="$san_lib_dir', text_a,
-          "c-harness asan_lib SET: run line sets DYLD_LIBRARY_PATH for macOS")
+assert_in('export LD_LIBRARY_PATH="$san_lib_dir', text_a,
+          "c-harness asan_lib SET: env block exports LD_LIBRARY_PATH")
+assert_in('export DYLD_LIBRARY_PATH="$san_lib_dir', text_a,
+          "c-harness asan_lib SET: env block exports DYLD_LIBRARY_PATH for macOS")
+assert_in('if [ -n "$san_lib_dir" ]; then', text_a,
+          "c-harness asan_lib SET: env block guarded by san_lib_dir non-empty test")
 assert_in("quarantine_size_mb=256:redzone=64", text_a,
           "c-harness ASan defaults: reproducer keeps run-asan redzone/quarantine")
+# Header-only placeholder degrade: LIB_RESOLVE no longer hard-exits when
+# every fallback misses. The block blanks `san_lib` + `san_lib_dir` so
+# the `${san_lib:+...}` link-line expansion drops the archive (and the
+# rpath flag) cleanly. Real header-only libraries whose audit-time anchor
+# archive doesn't reproduce on a fresh maintainer build need exactly
+# this graceful path.
+assert_in('WARNING:', text_a,
+          "c-harness LIB_RESOLVE: degrades to warning when archive missing")
+assert_in('san_lib=""', text_a,
+          "c-harness LIB_RESOLVE: blanks san_lib so link-line expansion drops it")
+assert_not_in('static library not found:" >&2; exit 2', text_a,
+              "c-harness LIB_RESOLVE: no longer exits 2 on missing archive")
 
 # Case B: asan_lib empty → no resolve block, no "$asan_lib" arg.
 harness_dir_b = TMP / "harness-lib-empty"
