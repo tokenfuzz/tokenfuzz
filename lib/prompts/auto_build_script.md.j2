@@ -21,6 +21,16 @@ Hard rules:
   * Sanitizer flags MUST be present in CFLAGS/CXXFLAGS and linker
     flags. Default sanitizer is `address` unless the failing log
     indicates a different one.
+  * Build must be RELEASE mode, not debug. Debug asserts produce
+    false-positive noise (invariant checks, defensive guards) that
+    is not security signal. Keep `-O2`, `-DNDEBUG`, and (for cmake)
+    `-DCMAKE_BUILD_TYPE=Release`, (for meson) `-Db_ndebug=true
+    --buildtype=release`. Do NOT switch to `-O0`, `-Og`, `Debug`,
+    `RelWithDebInfo`, or `Dbuildtype=debug` when revising the
+    recipe, even if a configure error tempts you to lower
+    optimisation — fix the configure error, do not drop release.
+    Retain `-g` for symbolised stack traces; that's orthogonal to
+    optimisation level.
   * No absolute host paths. Use `$1` / `$2` (or shell vars derived
     from them) for every file reference inside the source / build
     trees. Reject `$HOME`, `/Users/`, `/home/`, `/private/`.

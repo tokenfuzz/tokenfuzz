@@ -1,5 +1,12 @@
 # Project Instructions
 
+## Context
+
+TokenFuzz is an open platform for LLM-based security analysis. Spawns AI
+agents to write and run sanitizer testcases against local release builds
+of source trees under audit. All findings are filed privately with
+upstream maintainers.
+
 - Use neutral vocabulary: bounds / lifetime / type / size / uninit / state.
 - Follow `AGENTS.md` for testcase format and audit workflow; same guide covers browser and generic targets.
 

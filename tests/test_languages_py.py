@@ -291,32 +291,69 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq([], languages.bootstrap_for_target(tmp_root, "cargo"),
               "bootstrap: empty rust target -> no commands")
 
-    # setup.py present -> python bootstrap fires.
+    # setup.py present -> python bootstrap fires (three-step recipe:
+    # create .audit/venv, upgrade pip, then `pip install -e .` which
+    # uses PEP 517 build isolation to provision setuptools/Cython
+    # from [build-system].requires and writes C extensions in-place).
+    # The venv path sidesteps PEP 668 on Homebrew/Debian
+    # externally-managed pythons.
     (tmp_root / "setup.py").write_text("# placeholder\n")
     cmds = languages.bootstrap_for_target(tmp_root, "python")
-    assert_eq(1, len(cmds), "bootstrap: python with setup.py -> 1 command")
-    assert_eq(["python3", "setup.py", "build_ext", "--inplace"], cmds[0],
-              "bootstrap: python command shape")
+    assert_eq(3, len(cmds), "bootstrap: python with setup.py -> 3 commands")
+    assert_in("venv", cmds[0],
+              "bootstrap: python step 1 creates a venv (PEP 668 safe)")
+    assert_in(".audit/venv", cmds[0],
+              "bootstrap: python venv lives under .audit/")
+    assert_in(".audit/venv/bin/python", cmds[1],
+              "bootstrap: python step 2 uses the venv's interpreter to upgrade pip")
+    assert_in("-e", cmds[2],
+              "bootstrap: python step 3 uses editable install (writes .so in-place)")
+    assert_in(".audit/venv/bin/python", cmds[2],
+              "bootstrap: python step 3 builds via venv python "
+              "(same ABI tag as system python3 — runner can still use python3)")
     (tmp_root / "setup.py").unlink()
 
-    # Cargo.toml present -> rust bootstrap fires.
+    # Cargo.toml present -> rust bootstrap fires (release mode with
+    # --locked primary, and a fallback that drops --locked for
+    # lockfile-drift recovery).
     (tmp_root / "Cargo.toml").write_text("[package]\n")
     cmds = languages.bootstrap_for_target(tmp_root, "cargo")
     assert_eq(1, len(cmds), "bootstrap: rust with Cargo.toml -> 1 command")
     assert_in("cargo", cmds[0], "bootstrap: rust command starts with cargo")
+    assert_in("--release", cmds[0],
+              "bootstrap: rust uses release mode (no debug-assertions noise)")
+    assert_in("--locked", cmds[0],
+              "bootstrap: rust primary uses --locked for reproducibility")
+    rust_plan = languages.bootstrap_plan_for_target(tmp_root, "cargo")
+    assert_eq(1, len(rust_plan["alternatives"]),
+              "bootstrap: rust has 1 fallback (drops --locked)")
+    assert_true("--locked" not in rust_plan["alternatives"][0],
+                "bootstrap: rust fallback drops --locked (drift recovery)")
     (tmp_root / "Cargo.toml").unlink()
 
-    # go.mod -> go bootstrap.
+    # go.mod -> go bootstrap with -race (Go's maintained sanitizer).
     (tmp_root / "go.mod").write_text("module x\n")
     cmds = languages.bootstrap_for_target(tmp_root, "go")
     assert_eq(1, len(cmds), "bootstrap: go with go.mod -> 1 command")
+    assert_in("-race", cmds[0],
+              "bootstrap: go enables -race data-race detector")
     (tmp_root / "go.mod").unlink()
 
-    # package.json -> npm bootstrap.
+    # package.json -> npm bootstrap, primary is `npm ci`.
     (tmp_root / "package.json").write_text("{}\n")
     cmds = languages.bootstrap_for_target(tmp_root, "npm")
     assert_eq(1, len(cmds), "bootstrap: javascript with package.json -> 1 command")
     assert_in("npm", cmds[0], "bootstrap: javascript command is npm")
+    assert_in("ci", cmds[0],
+              "bootstrap: javascript primary is `npm ci` (deterministic from lockfile)")
+    # The new plan API also exposes alternatives and sanitizer env.
+    plan = languages.bootstrap_plan_for_target(tmp_root, "npm")
+    assert_true(len(plan["alternatives"]) >= 3,
+                "bootstrap-plan: npm has install + --legacy-peer-deps + pnpm alternatives")
+    assert_true(any("--legacy-peer-deps" in alt for alt in plan["alternatives"]),
+                "bootstrap-plan: npm alternatives include --legacy-peer-deps fallback")
+    assert_true(any("pnpm" in alt for alt in plan["alternatives"]),
+                "bootstrap-plan: npm alternatives include pnpm (workspace: protocol)")
 
 # Unknown build_system silently returns no commands.
 assert_eq([], languages.bootstrap_for_target(Path("/tmp"), "nosuch"),
@@ -377,12 +414,51 @@ assert_eq("python3", block["bin"], "CLI runner-block python -> bin=python3")
 assert_in("PYTHONDEVMODE=1", block["env"][0],
           "CLI runner-block python -> env carries PYTHONDEVMODE")
 
-# bootstrap-cmds emits shell-quoted lines.
+# bootstrap-cmds emits shell-quoted lines (now multi-step for python).
 with tempfile.TemporaryDirectory() as td:
     (Path(td) / "setup.py").write_text("# x\n")
     out, _, _ = run(CLI + ["bootstrap-cmds", "python", td])
-    assert_in("python3 setup.py build_ext --inplace", out.strip(),
-              "CLI bootstrap-cmds python returns build_ext line")
+    assert_in(".audit/venv/bin/python -m pip install -e .", out.strip(),
+              "CLI bootstrap-cmds python emits venv-python editable install line")
+    assert_in("python3 -m venv .audit/venv", out.strip(),
+              "CLI bootstrap-cmds python emits venv creation line")
+
+# bootstrap-plan JSON includes env (release flags), alternatives, and
+# fuzz_backends in a single payload.
+with tempfile.TemporaryDirectory() as td:
+    (Path(td) / "package.json").write_text("{}\n")
+    out, _, _ = run(CLI + ["bootstrap-plan", "npm", td])
+    plan = json.loads(out)
+    assert_eq("javascript", plan["language"],
+              "bootstrap-plan npm: language=javascript")
+    assert_in("jsfuzz", plan["fuzz_backends"],
+              "bootstrap-plan npm: lists jsfuzz as fuzz backend")
+    assert_true(len(plan["alternatives"]) >= 1,
+                "bootstrap-plan npm: at least one alternative present")
+
+with tempfile.TemporaryDirectory() as td:
+    (Path(td) / "setup.py").write_text("# x\n")
+    out, _, _ = run(CLI + ["bootstrap-plan", "python", td])
+    plan = json.loads(out)
+    env_keys = [pair[0] for pair in plan["env"]]
+    assert_in("CFLAGS", env_keys,
+              "bootstrap-plan python: env includes CFLAGS")
+    cflags = dict(plan["env"]).get("CFLAGS", "")
+    assert_in("DNDEBUG", cflags,
+              "bootstrap-plan python: CFLAGS carries -DNDEBUG (release mode)")
+    assert_in("O2", cflags,
+              "bootstrap-plan python: CFLAGS carries -O2 (release optimisation)")
+
+# fuzz-backends CLI returns the maintained toolchains per build_system.
+out, _, _ = run(CLI + ["fuzz-backends", "python"])
+assert_in("atheris", out, "fuzz-backends python -> atheris")
+out, _, _ = run(CLI + ["fuzz-backends", "cmake"])
+assert_in("asan", out, "fuzz-backends cmake -> asan")
+out, _, _ = run(CLI + ["fuzz-backends", "maven"])
+assert_in("jazzer", out, "fuzz-backends maven -> jazzer")
+out, _, _ = run(CLI + ["fuzz-backends", "composer"])
+assert_eq("\n", out,
+          "fuzz-backends composer -> empty (no maintained toolchain)")
 
 # list command runs and prints all required languages.
 out, _, _ = run(CLI + ["list"])

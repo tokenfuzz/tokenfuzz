@@ -125,13 +125,38 @@ class Language:
     # argv-style (no shell expansion). When provided, bin/setup-target
     # --bootstrap runs them sequentially inside TARGET_ROOT. Use this
     # to compile C extensions, run cargo build, etc. before the audit
-    # loop starts.
+    # loop starts. Recipes are RELEASE mode (NDEBUG, -O2-class) so the
+    # build does not pull in debug-only asserts that fire as noise
+    # rather than security signal — see sanitizer_env below.
     bootstrap_cmds: tuple[tuple[str, ...], ...] = ()
 
     # When True, bootstrap is gated on the presence of a manifest file
     # in TARGET_ROOT (setup.py, pyproject.toml, Cargo.toml, ...).
     # Empty means "always run when --bootstrap is requested".
     bootstrap_manifests: tuple[str, ...] = ()
+
+    # Fallback alternatives tried when the LAST bootstrap_cmd fails.
+    # Used by `bin/setup-target` to express the npm "ci → install →
+    # install --legacy-peer-deps" chain without target-specific
+    # branching. Each entry is a full argv that replaces the failing
+    # last command; the first one to exit zero wins. Empty (default)
+    # means "the primary command must succeed or bootstrap aborts".
+    bootstrap_alternatives: tuple[tuple[str, ...], ...] = ()
+
+    # Environment variables to export before running bootstrap_cmds
+    # AND captured into .audit/bootstrap.sh so reruns are
+    # bit-identical. Use this to inject release-mode sanitizer flags
+    # (CFLAGS, LDFLAGS, RUSTFLAGS, ...) that the language's build
+    # tool consumes. KEY/value pairs; never expanded by a shell.
+    sanitizer_env: tuple[tuple[str, str], ...] = ()
+
+    # Maintained sanitizer / coverage-guided fuzzer toolchains that
+    # exist for this language as of 2025. Informational; setup-target
+    # prints it as one line so the operator sees what's auditable for
+    # the target. Empty tuple = "no first-class toolchain in tree;
+    # don't pretend otherwise." Drives nothing else — keep the field
+    # honest rather than aspirational.
+    fuzz_backends: tuple[str, ...] = ()
 
 
 # ─── The registry ──────────────────────────────────────────────────
@@ -167,6 +192,12 @@ LANGUAGES: tuple[Language, ...] = (
         compiler_env="CC",
         compiler_default="clang",
         compiler_flags_env="CFLAGS",
+        # No `bootstrap_cmds` here — C/C++ targets converge their
+        # sanitizer build recipe through `bin/auto-build-script`,
+        # which writes targets/<slug>/.audit/build.sh. Release-mode
+        # ASan/UBSAN/MSAN/TSAN flags are produced there; this field
+        # advertises which backends apply to a C target.
+        fuzz_backends=("asan", "ubsan", "msan", "tsan", "libfuzzer"),
     ),
 
     # ── C++ ────────────────────────────────────────────────────────
@@ -184,6 +215,7 @@ LANGUAGES: tuple[Language, ...] = (
         compiler_env="CXX",
         compiler_default="clang++",
         compiler_flags_env="CXXFLAGS",
+        fuzz_backends=("asan", "ubsan", "msan", "tsan", "libfuzzer"),
     ),
 
     # ── Rust ───────────────────────────────────────────────────────
@@ -206,8 +238,27 @@ LANGUAGES: tuple[Language, ...] = (
             _TSAN_BANNER,
             _MSAN_BANNER,
         ),
-        bootstrap_cmds=(("cargo", "build", "--quiet"),),
+        # Release build so `debug-assertions` (Rust's panic-on-invariant
+        # equivalent of C `assert()`) and `overflow-checks` are off —
+        # they produce panics on conditions that are not security
+        # findings. `--locked` makes the bootstrap reproducible.
+        bootstrap_cmds=(("cargo", "build", "--release", "--locked"),),
+        # Fallback drops --locked: handles lockfile drift (older
+        # Cargo.lock schema vs. current cargo, transitive yanks,
+        # minimum-rust-version bumps). Cargo may regenerate the lock,
+        # which is fine for an audit — the recipe persisted to
+        # .audit/bootstrap.sh still names the exact command that ran.
+        bootstrap_alternatives=(
+            ("cargo", "build", "--release"),
+        ),
         bootstrap_manifests=("Cargo.toml",),
+        # ASan via `-Zsanitizer=address` requires the nightly toolchain
+        # plus `rust-src` to rebuild std. That's a real setup step the
+        # operator must take separately; we don't try to inject it here
+        # because a wrong RUSTFLAGS hides the failure from cargo. The
+        # release build alone is still useful — runs under the project's
+        # own test suite with overflow/debug-asserts off.
+        fuzz_backends=("cargo-fuzz", "afl.rs", "asan-nightly"),
     ),
 
     # ── Go ─────────────────────────────────────────────────────────
@@ -232,8 +283,15 @@ LANGUAGES: tuple[Language, ...] = (
             r"runtime: out of memory",
             r"^goroutine \d+ \[",
         ),
-        bootstrap_cmds=(("go", "build", "./..."),),
+        # `-race` is Go's maintained sanitizer (TSan-class data-race
+        # detection) and works on stock toolchains. `-trimpath` keeps
+        # paths reproducible across hosts. `-asan`/`-msan` apply only
+        # to cgo and degrade silently on pure-Go trees, so we leave
+        # them out of the default and rely on -race + the release
+        # build (assertions are not a Go concept).
+        bootstrap_cmds=(("go", "build", "-race", "-trimpath", "./..."),),
         bootstrap_manifests=("go.mod",),
+        fuzz_backends=("native-fuzz", "race"),
     ),
 
     # ── Swift ──────────────────────────────────────────────────────
@@ -254,8 +312,16 @@ LANGUAGES: tuple[Language, ...] = (
             _ASAN_BANNER,
             _TSAN_BANNER,
         ),
-        bootstrap_cmds=(("swift", "build"),),
+        # Release config (`-c release` strips Swift debug asserts and
+        # turns on optimizer) plus ASan via -Xswiftc. Works on stock
+        # Apple and Swift.org Linux toolchains.
+        bootstrap_cmds=(
+            ("swift", "build", "-c", "release",
+             "-Xswiftc", "-sanitize=address",
+             "-Xswiftc", "-O"),
+        ),
         bootstrap_manifests=("Package.swift",),
+        fuzz_backends=("asan", "tsan", "ubsan", "libfuzzer"),
     ),
 
     # ── Java ───────────────────────────────────────────────────────
@@ -281,6 +347,12 @@ LANGUAGES: tuple[Language, ...] = (
             r"java\.lang\.StackOverflowError",
             r"^\s+at \S+\(\S+:\d+\)",
         ),
+        # The JVM is the memory-safety boundary; there is no
+        # `-fsanitize=address`-style instrumentation for `javac`
+        # output. The only first-class coverage-guided tool is
+        # Code Intelligence's jazzer, which needs a written
+        # FuzzXxx.java harness (a separate generator step).
+        fuzz_backends=("jazzer",),
     ),
 
     # ── Kotlin ─────────────────────────────────────────────────────
@@ -313,6 +385,7 @@ LANGUAGES: tuple[Language, ...] = (
             r"kotlin\.\w+(Exception|Error):",
             r"java\.lang\.\w+(Exception|Error):",
         ),
+        fuzz_backends=("jazzer",),
     ),
 
     # ── Python ─────────────────────────────────────────────────────
@@ -346,11 +419,50 @@ LANGUAGES: tuple[Language, ...] = (
         # currently-running interpreter. Without this, prebuilt sdist
         # extensions (e.g. pyyaml shipping cp39 .so under a cp314
         # interpreter) ENV-BLOCK every C-side work card. The manifest
-        # gate is `setup.py` specifically: a pure-Python project (or
-        # pyproject-only project without a setup.py shim) does not need
-        # this build step at all.
-        bootstrap_cmds=(("python3", "setup.py", "build_ext", "--inplace"),),
+        # gate is `setup.py`: pure-Python or pyproject-only projects
+        # without a shim do not need this step at all.
+        #
+        # Three-step recipe hardened against PEP 668 (Homebrew /
+        # Debian externally-managed pythons), missing setuptools,
+        # and projects that need Cython/numpy provisioned per
+        # `[build-system].requires`:
+        #   1. Create a venv at .audit/venv. The venv's interpreter
+        #      is a thin wrapper around system python3, so .so files
+        #      built under it carry the same cpython-XYZ ABI tag as
+        #      the runner's python3 — the runner can still use
+        #      system python3 to import them.
+        #   2. Upgrade pip inside the venv (older pip lacks PEP 660
+        #      editable-install hooks for C-extension projects).
+        #   3. `pip install -e .` — editable install with build
+        #      isolation. pip auto-provisions setuptools/Cython/numpy
+        #      from pyproject.toml `[build-system].requires` into an
+        #      ephemeral build env, so this works on guest accounts
+        #      without setuptools and on projects that need Cython
+        #      to regenerate .c sources. setuptools' editable_mode
+        #      defaults to "compat" for C-ext projects, which writes
+        #      the .so files in-place next to the source — exactly
+        #      what the runner's PYTHONPATH expects. CFLAGS/LDFLAGS
+        #      from sanitizer_env propagate through build isolation.
+        bootstrap_cmds=(
+            ("python3", "-m", "venv", ".audit/venv"),
+            (".audit/venv/bin/python", "-m", "pip", "install",
+             "--upgrade", "pip"),
+            (".audit/venv/bin/python", "-m", "pip", "install", "-e", "."),
+        ),
         bootstrap_manifests=("setup.py",),
+        # Release-mode build flags. NDEBUG strips C-level asserts that
+        # produce noise (defensive checks, internal invariants) and
+        # are not security findings. -O2 matches what distros ship.
+        # No `-fsanitize=address` here: importing an ASan-instrumented
+        # .so under a non-ASan Python aborts with link-order errors;
+        # the runner does not LD_PRELOAD libasan. Use the atheris
+        # backend (see fuzz_backends) when ASan instrumentation is
+        # actually needed.
+        sanitizer_env=(
+            ("CFLAGS", "-O2 -g -DNDEBUG -fno-omit-frame-pointer"),
+            ("CXXFLAGS", "-O2 -g -DNDEBUG -fno-omit-frame-pointer"),
+        ),
+        fuzz_backends=("atheris",),
     ),
 
     # ── JavaScript (Node) ──────────────────────────────────────────
@@ -373,9 +485,32 @@ LANGUAGES: tuple[Language, ...] = (
         ),
         work_mode="js",
         # `npm install` is gated on package.json so monorepos without
-        # one (e.g. plain script bundles) skip the step.
-        bootstrap_cmds=(("npm", "install", "--silent", "--no-audit", "--no-fund"),),
+        # one (e.g. plain script bundles) skip the step. We removed
+        # `--silent` so failures are diagnosable in .audit/bootstrap.log
+        # — the old quiet form ate ERESOLVE messages and made
+        # bootstrap "fail without explanation."
+        #
+        # Primary attempt is `npm ci` (deterministic from lockfile);
+        # fallbacks handle the common drift cases:
+        #   * `npm install` when lockfile is absent or stale.
+        #   * `npm install --legacy-peer-deps` when npm-7+ strict
+        #     peer-dep resolution fails on monorepo-style trees.
+        #   * `npx --yes pnpm install` when the project uses the
+        #     `workspace:` dependency protocol (npm has no support;
+        #     Angular and most modern monorepos hit this). npx
+        #     fetches pnpm on demand so no global install is needed.
+        bootstrap_cmds=(("npm", "ci", "--no-audit", "--no-fund"),),
+        bootstrap_alternatives=(
+            ("npm", "install", "--no-audit", "--no-fund"),
+            ("npm", "install", "--no-audit", "--no-fund", "--legacy-peer-deps"),
+            ("npx", "--yes", "pnpm", "install"),
+        ),
         bootstrap_manifests=("package.json",),
+        # JS itself has no memory unsafety to instrument; native
+        # addons (N-API) could be ASan-instrumented but require
+        # rebuilding Node under ASan, out of scope here. jsfuzz is
+        # the maintained coverage-guided option; mark and move on.
+        fuzz_backends=("jsfuzz",),
     ),
 
     # ── TypeScript ─────────────────────────────────────────────────
@@ -394,6 +529,7 @@ LANGUAGES: tuple[Language, ...] = (
         interpreter_default="ts-node",
         # No runner_bin: a TS-only target is rare; npm is the build_system
         # and javascript supplies the runner block.
+        fuzz_backends=("jsfuzz",),
     ),
 
     # ── PHP ────────────────────────────────────────────────────────
@@ -413,8 +549,15 @@ LANGUAGES: tuple[Language, ...] = (
             r"Stack trace:",
             r"Uncaught \w+Error:",
         ),
-        bootstrap_cmds=(("composer", "install", "--quiet", "--no-interaction"),),
+        # Dropped --quiet so install failures (network, plugin
+        # signatures, php-extension version pins) surface in
+        # .audit/bootstrap.log instead of vanishing into a silent rc=1.
+        bootstrap_cmds=(("composer", "install", "--no-interaction"),),
         bootstrap_manifests=("composer.json",),
+        # No maintained sanitizer/coverage-guided fuzzer for PHP as
+        # of 2025. Keep the field empty rather than name something
+        # that is not actively maintained.
+        fuzz_backends=(),
     ),
 
     # ── Ruby ───────────────────────────────────────────────────────
@@ -434,8 +577,19 @@ LANGUAGES: tuple[Language, ...] = (
             r"\(NoMemoryError\)",
             r"\(fatal\)",
         ),
-        bootstrap_cmds=(("bundle", "install", "--quiet"),),
+        # Dropped --quiet for the same reason as composer/npm above.
+        bootstrap_cmds=(("bundle", "install"),),
         bootstrap_manifests=("Gemfile",),
+        # Install gems into the project (`vendor/bundle/`) instead of
+        # the system Ruby gem dir. The default path on Homebrew /
+        # rbenv-managed Rubies is not writable without sudo, and even
+        # when it is, polluting the system gemset across targets is
+        # the wrong default for an audit harness. BUNDLE_PATH is the
+        # canonical bundler env var for this; honoured since bundler
+        # 1.x. Operators must `bundle exec` to pick up the vendored
+        # gems at run time (separate runner change).
+        sanitizer_env=(("BUNDLE_PATH", "vendor/bundle"),),
+        fuzz_backends=(),
     ),
 
     # ── Perl ───────────────────────────────────────────────────────
@@ -692,6 +846,51 @@ def bootstrap_for_target(target_root: Path, build_system: str) -> list[list[str]
     return [list(cmd) for cmd in lang.bootstrap_cmds]
 
 
+def bootstrap_plan_for_target(target_root: Path, build_system: str) -> dict:
+    """Return the full bootstrap plan: cmds, alternatives, env, backends.
+
+    Shape (always all keys present, possibly empty):
+        {
+          "language": <name>,
+          "cmds": [["python3", "-m", "pip", ...], ...],
+          "alternatives": [["npm", "install", ...], ...],
+          "env": [["CFLAGS", "-O2 ..."], ...],
+          "fuzz_backends": ["atheris", ...],
+        }
+
+    `alternatives` apply to the LAST command in `cmds`: setup-target
+    tries the primary, then each alternative in order. Empty list = no
+    fallback. `env` is a list of [key, value] pairs to export before
+    running cmds (also persisted into .audit/bootstrap.sh).
+    """
+    lang = for_build_system(build_system)
+    out = {
+        "language": lang.name if lang else "",
+        "cmds": [],
+        "alternatives": [],
+        "env": [],
+        "fuzz_backends": [],
+    }
+    if not lang:
+        return out
+    out["fuzz_backends"] = list(lang.fuzz_backends)
+    out["env"] = [list(p) for p in lang.sanitizer_env]
+    if not lang.bootstrap_cmds:
+        return out
+    if lang.bootstrap_manifests:
+        if not any((target_root / m).exists() for m in lang.bootstrap_manifests):
+            return out
+    out["cmds"] = [list(c) for c in lang.bootstrap_cmds]
+    out["alternatives"] = [list(c) for c in lang.bootstrap_alternatives]
+    return out
+
+
+def fuzz_backends_for_build_system(build_system: str) -> list[str]:
+    """Return the maintained fuzz/sanitizer backends for `build_system`."""
+    lang = for_build_system(build_system)
+    return list(lang.fuzz_backends) if lang else []
+
+
 # `<modname>.cpython-NN[-platform...]` or `<modname>.pypyNN-NN[-platform...]`.
 # We match the cpython/pypy + version prefix and stop — anything after
 # (e.g. `-darwin`, `-x86_64-linux-gnu`) is the platform tag and varies.
@@ -851,6 +1050,19 @@ def _cmd_bootstrap_cmds(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bootstrap_plan(args: argparse.Namespace) -> int:
+    target_root = Path(args.target_root).expanduser().resolve()
+    plan = bootstrap_plan_for_target(target_root, args.build_system)
+    print(json.dumps(plan))
+    return 0
+
+
+def _cmd_fuzz_backends(args: argparse.Namespace) -> int:
+    backends = fuzz_backends_for_build_system(args.build_system)
+    print(" ".join(backends))
+    return 0
+
+
 def _cmd_list(args: argparse.Namespace) -> int:
     rows: list[tuple[str, str, str, str]] = []
     for lang in LANGUAGES:
@@ -907,6 +1119,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("target_root")
     p.add_argument("--format", choices=("shell", "json"), default="shell")
     p.set_defaults(func=_cmd_bootstrap_cmds)
+
+    p = sub.add_parser("bootstrap-plan",
+                       help="emit full bootstrap plan (cmds + alternatives + env + fuzz_backends) as JSON")
+    p.add_argument("build_system")
+    p.add_argument("target_root")
+    p.set_defaults(func=_cmd_bootstrap_plan)
+
+    p = sub.add_parser("fuzz-backends",
+                       help="emit maintained fuzz/sanitizer backends for a build_system, space-separated")
+    p.add_argument("build_system")
+    p.set_defaults(func=_cmd_fuzz_backends)
 
     p = sub.add_parser("supports-build-system",
                        help="exit 0 and print language name if build_system is known, else exit 1")
