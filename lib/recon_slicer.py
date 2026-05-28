@@ -66,6 +66,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import languages  # noqa: E402
+import target_config  # noqa: E402
 
 # Single source of truth: the language registry. Covers C/C++/Rust/Go/
 # Python/Java plus TS/JS/Kotlin/Swift/PHP/Ruby/Perl so recon for non-C
@@ -139,6 +140,8 @@ def changed_source_files(target_path: Path, root: Path, ref: str) -> list[Path]:
     """Source files changed in ref..HEAD, intersected with the in-scope
     source tree under root. Deleted files are dropped (they no longer
     exist to audit). Returns [] if git is unavailable or ref is unknown."""
+    if target_config.detect_repo_type(target_path) != "git":
+        return []
     try:
         repo_root = subprocess.run(
             ["git", "-C", str(target_path), "rev-parse", "--show-toplevel"],

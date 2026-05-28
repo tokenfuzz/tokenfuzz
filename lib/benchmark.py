@@ -1996,7 +1996,7 @@ def _short_commit(value: object) -> str:
     can omit the token entirely from a stacked Run cell rather than
     burning a column on a dash."""
     text = str(value or "").strip()
-    if not text or text == "no-vcs":
+    if not text or text in {"no-vcs", "norev"}:
         return ""
     return f"`{text[:7]}`"
 

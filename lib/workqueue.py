@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Iterable
 
 import languages
+import target_config
 from audit_scope import EXCLUDED_PATH_SEGMENTS, is_excluded_path_part
 from prompt_render import render_template
 # Audit-rankable source extensions. The registry in lib/languages.py is
@@ -488,18 +489,7 @@ def sanitize_slug(raw: str) -> str:
 
 
 def detect_repo_type(root: Path) -> str:
-    if (root / ".hg").is_dir():
-        return "hg"
-    try:
-        subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--git-dir"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        )
-        return "git"
-    except Exception:
-        return "none"
+    return target_config.detect_repo_type(root)
 
 
 def default_script_root() -> Path:
@@ -1649,6 +1639,8 @@ def _git_is_shallow(target_root: Path) -> bool:
     git_dir = target_root / ".git"
     if git_dir.is_dir():
         return (git_dir / "shallow").is_file()
+    if not git_dir.exists():
+        return False
     try:
         out = subprocess.check_output(
             ["git", "-C", str(target_root), "rev-parse",

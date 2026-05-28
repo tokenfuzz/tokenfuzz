@@ -188,5 +188,37 @@ else
   fail "$_CURRENT_TEST" "$out"
 fi
 
+_CURRENT_TEST="setup-target accepts an existing plain source tree inside a harness repo"
+git -C "$ROOT" init >/dev/null
+plain_root="$ROOT/targets/plain-cpp"
+mkdir -p "$plain_root"
+cat > "$plain_root/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.16)
+project(plain_cpp CXX)
+add_executable(plain main.cpp)
+EOF
+printf 'int main() { return 0; }\n' > "$plain_root/main.cpp"
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 "$SCRIPT_ROOT/bin/setup-target" plain-cpp --bootstrap 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] &&
+   [ -f "$ROOT/output/plain-cpp/target.toml" ] &&
+   grep -q 'pinned_rev    = "norev"' "$ROOT/output/plain-cpp/target.toml" &&
+   grep -q 'Using existing targets/plain-cpp as a plain source tree' <<<"$out"; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "$out"
+fi
+
+_CURRENT_TEST="setup-target ignores update inputs for a plain source tree"
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 "$SCRIPT_ROOT/bin/setup-target" plain-cpp "$REMOTE" --ref main 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] &&
+   [ ! -d "$plain_root/.git" ] &&
+   grep -q 'repo URL/ref ignored' <<<"$out"; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "$out"
+fi
+
 teardown_test_env
 summary

@@ -4,6 +4,7 @@
 set -euo pipefail
 
 SCRIPT_ROOT="${AUDIT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "$SCRIPT_ROOT/lib/target_config.sh"
 
 usage() {
   cat <<'EOF'
@@ -113,18 +114,17 @@ TARGET_TOML="$CONFIG_DIR/target.toml"
 
 detect_repo_type() {
   local root="$1" url="${2:-}"
-  if [ -d "$root/.git" ]; then
-    printf 'git\n'; return
-  fi
-  if [ -d "$root/.hg" ]; then
-    printf 'hg\n'; return
+  if [ -d "$root" ]; then
+    target_detect_repo_type "$root"
+    return
   fi
   if [ -n "$url" ]; then
-    if [ -d "$url/.git" ]; then
-      printf 'git\n'; return
-    fi
-    if [ -d "$url/.hg" ]; then
-      printf 'hg\n'; return
+    if [ -d "$url" ]; then
+      local url_type
+      url_type="$(target_detect_repo_type "$url")"
+      if [ "$url_type" != "none" ]; then
+        printf '%s\n' "$url_type"; return
+      fi
     fi
     case "$url" in
       *hg.mozilla.org*|hg:*|*.hg) printf 'hg\n'; return ;;
@@ -198,12 +198,16 @@ sync_hg() {
 }
 
 if [ -d "$TARGET_ROOT" ]; then
-  [ -d "$TARGET_ROOT/.git" ] || [ -d "$TARGET_ROOT/.hg" ] || \
-    die "targets/$TARGET_NAME exists but is not a git or hg checkout"
   DETECTED_REPO_TYPE="$(detect_repo_type "$TARGET_ROOT" "$REPO_URL")"
   [ "$REPO_TYPE" = "auto" ] || [ "$REPO_TYPE" = "$DETECTED_REPO_TYPE" ] || \
     die "targets/$TARGET_NAME is $DETECTED_REPO_TYPE, not $REPO_TYPE"
-  if [ "$NO_UPDATE" -eq 1 ] || { [ -z "$REPO_URL" ] && [ -z "$REF" ]; }; then
+  if [ "$DETECTED_REPO_TYPE" = "none" ]; then
+    if [ -n "$REPO_URL" ] || [ -n "$REF" ]; then
+      log "Using existing targets/$TARGET_NAME as a plain source tree (no VCS metadata; repo URL/ref ignored)"
+    else
+      log "Using existing targets/$TARGET_NAME as a plain source tree"
+    fi
+  elif [ "$NO_UPDATE" -eq 1 ] || { [ -z "$REPO_URL" ] && [ -z "$REF" ]; }; then
     log "Using existing targets/$TARGET_NAME without updating"
   elif [ "$DETECTED_REPO_TYPE" = "git" ]; then
     sync_git
@@ -251,7 +255,7 @@ else
     invalid) log "Refreshing output/$TARGET_NAME/target.toml because it no longer parses as TOML" ;;
     requested) log "Regenerating output/$TARGET_NAME/target.toml (${FORCE_CONFIG_FLAG:-"--force"})" ;;
   esac
-  python3 "$SCRIPT_ROOT/lib/target_config.py" seed-toml "$TARGET_ROOT" "$TARGET_TOML" "$REPO_URL"
+  target_seed_toml "$TARGET_ROOT" "$TARGET_TOML" "$REPO_URL"
 fi
 
 append_unique_backend() {
@@ -372,7 +376,7 @@ run_llm_config_bootstrap
 python3 "$SCRIPT_ROOT/lib/target_config.py" parse-toml "$TARGET_TOML" >/dev/null || \
   die "target config does not parse: $TARGET_TOML"
 
-REV="$(python3 "$SCRIPT_ROOT/lib/target_config.py" detect-rev "$TARGET_ROOT" || true)"
+REV="$(target_detect_rev "$TARGET_ROOT" || true)"
 log "Source: $TARGET_ROOT"
 log "Config: $TARGET_TOML"
 [ -n "$REV" ] && log "Revision: $REV"

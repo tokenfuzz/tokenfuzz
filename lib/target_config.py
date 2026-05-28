@@ -20,6 +20,7 @@ Two interfaces:
 2. Subcommand CLI (for the bash shim in lib/target_config.sh):
        python3 lib/target_config.py parse-toml <file>
        python3 lib/target_config.py seed-toml <root> <out> [url]
+       python3 lib/target_config.py detect-repo-type <root>
        python3 lib/target_config.py detect-rev <root>
        python3 lib/target_config.py find-session-dir [<start>]
        python3 lib/target_config.py read-session-env <slug_dir>
@@ -52,6 +53,8 @@ from datetime import datetime, timezone
 import languages
 from pathlib import Path
 from typing import Iterable, Optional
+
+NO_REV = "norev"
 
 # TOML basic-string escaping. Used everywhere we write a Python string
 # into a generated target.toml so an unsanitised value (a tainted slug,
@@ -587,11 +590,36 @@ def write_session_env(
                 pass
 
 
-# ─── git/hg revision detection ──────────────────────────────────────
+# ─── git/hg/plain source detection ──────────────────────────────────
+
+def detect_repo_type(target_root: str | os.PathLike) -> str:
+    """Return git, hg, or none for a target checkout.
+
+    A target nested under the harness repo is still a plain target unless it
+    has direct VCS metadata. That avoids treating targets/foo as a git
+    checkout only because /work/.git exists above it.
+    """
+    root = Path(target_root)
+    if (root / ".hg").is_dir():
+        return "hg"
+    if not (root / ".git").exists():
+        return "none"
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode == 0:
+            return "git"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "none"
+
 
 def detect_rev(target_root: str | os.PathLike) -> str:
     root = Path(target_root)
-    if (root / ".git").is_dir():
+    repo_type = detect_repo_type(root)
+    if repo_type == "git":
         try:
             out = subprocess.run(
                 ["git", "-C", str(root), "rev-parse", "HEAD"],
@@ -601,7 +629,9 @@ def detect_rev(target_root: str | os.PathLike) -> str:
                 return out.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             pass
-    if (root / ".hg").is_dir():
+        return ""
+
+    if repo_type == "hg":
         try:
             out = subprocess.run(
                 ["hg", "--cwd", str(root), "id", "-i"],
@@ -611,6 +641,13 @@ def detect_rev(target_root: str | os.PathLike) -> str:
                 return out.stdout.strip().rstrip("+")
         except (OSError, subprocess.TimeoutExpired):
             pass
+        return ""
+
+    if (root / ".git").exists():
+        return ""
+
+    if root.is_dir():
+        return NO_REV
     return ""
 
 
@@ -1846,6 +1883,11 @@ def _cmd_detect_rev(args) -> int:
     return 0
 
 
+def _cmd_detect_repo_type(args) -> int:
+    print(detect_repo_type(args.target_root))
+    return 0
+
+
 def _cmd_find_session_dir(args) -> int:
     start = args.start or os.getcwd()
     d = find_session_dir(start)
@@ -1898,6 +1940,10 @@ def main(argv: list[str]) -> int:
     sp = sub.add_parser("detect-rev")
     sp.add_argument("target_root")
     sp.set_defaults(func=_cmd_detect_rev)
+
+    sp = sub.add_parser("detect-repo-type")
+    sp.add_argument("target_root")
+    sp.set_defaults(func=_cmd_detect_repo_type)
 
     sp = sub.add_parser("find-session-dir")
     sp.add_argument("start", nargs="?")

@@ -74,7 +74,7 @@ set -uo pipefail
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_ROOT" || { echo "FATAL: cannot cd to $SCRIPT_ROOT" >&2; exit 1; }
 
-for _lib in platform.sh timeout.sh llm_invoke.sh prompt_template.sh triage_validate.sh; do
+for _lib in platform.sh timeout.sh target_config.sh llm_invoke.sh prompt_template.sh triage_validate.sh; do
   # shellcheck disable=SC1090
   source "$SCRIPT_ROOT/lib/$_lib" 2>/dev/null || {
     echo "FATAL: cannot source lib/$_lib" >&2
@@ -336,7 +336,8 @@ start_console_log() {
 }
 start_console_log
 
-target_sha="$(git -C "$SCRIPT_ROOT/targets/$TARGET_SLUG" rev-parse --short HEAD 2>/dev/null || echo "no-vcs")"
+target_sha="$(target_detect_rev "$SCRIPT_ROOT/targets/$TARGET_SLUG" 2>/dev/null || true)"
+target_sha="${target_sha:-norev}"
 harness_sha="$(git -C "$SCRIPT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "no-vcs")"
 # The model name names the model-direct baseline (<model>-direct) in the
 # cross-backend table, so a reader sees which model produced each row.

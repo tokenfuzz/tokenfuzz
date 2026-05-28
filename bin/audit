@@ -594,14 +594,7 @@ resolve_target_root() {
 }
 
 detect_repo_type() {
-  local root="$1"
-  if [ -d "$root/.hg" ]; then
-    echo "hg"
-  elif git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "git"
-  else
-    echo "none"
-  fi
+  target_detect_repo_type "$1"
 }
 
 _audit_append_line() {
@@ -4568,7 +4561,17 @@ maybe_seed_recon_cards() {
   #   lib/triage_validate.sh       — validator quorum rules
   #   bin/validate-finding         — per-validator prompt + parsing
   local current_target_sha current_logic_sha
-  current_target_sha=$(git -C "$TARGET_ROOT" rev-parse HEAD 2>/dev/null || echo "no-vcs")
+  case "${TARGET_REPO_TYPE:-none}" in
+    git)
+      current_target_sha=$(git -C "$TARGET_ROOT" rev-parse HEAD 2>/dev/null || echo "norev")
+      ;;
+    hg)
+      current_target_sha=$(hg -R "$TARGET_ROOT" id -i 2>/dev/null | sed 's/+//g' || echo "norev")
+      ;;
+    *)
+      current_target_sha="norev"
+      ;;
+  esac
   current_logic_sha=$(cat \
       "$SCRIPT_ROOT/bin/audit-recon" \
       "$SCRIPT_ROOT/lib/recon_slicer.py" \

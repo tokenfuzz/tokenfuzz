@@ -583,7 +583,13 @@ target_write_session_env() {
     "$slug_dir" "$results" "$target_root" "$slug" "${rev:-unknown}" "$logdir"
 }
 
-# Probe a TARGET_ROOT for the current git/hg HEAD revision. Empty on failure.
+# Detect whether TARGET_ROOT is its own git/hg checkout or a plain source tree.
+target_detect_repo_type() {
+  python3 "$_TARGET_CONFIG_PY" detect-repo-type "$1"
+}
+
+# Probe a TARGET_ROOT for the current git/hg HEAD revision. Plain source trees
+# use the sentinel "norev"; missing paths stay empty.
 target_detect_rev() {
   python3 "$_TARGET_CONFIG_PY" detect-rev "$1"
 }

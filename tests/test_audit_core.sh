@@ -107,7 +107,7 @@ sanitize_target_slug() {
 detect_repo_type() {
   local root="$1"
   if [ -d "$root/.hg" ]; then echo "hg"
-  elif git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then echo "git"
+  elif [ -e "$root/.git" ] && git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then echo "git"
   else echo "none"; fi
 }
 
@@ -379,6 +379,12 @@ assert_eq "git" "$(detect_repo_type "$git_dir")" "detect: git repo"
 plain_dir="$TEST_TMPDIR/plain"
 mkdir -p "$plain_dir"
 assert_eq "none" "$(detect_repo_type "$plain_dir")" "detect: no repo"
+
+parent_repo="$TEST_TMPDIR/parent_repo"
+nested_plain="$parent_repo/targets/plain"
+mkdir -p "$nested_plain"
+(cd "$parent_repo" && git init --quiet 2>/dev/null)
+assert_eq "none" "$(detect_repo_type "$nested_plain")" "detect: parent repo does not make nested target a repo"
 
 # ═══════════════════════════════════════════════════════════════
 # 3. resolve_guide_path — browser vs generic target

@@ -109,11 +109,11 @@ fi
 PATCH_REPO_ROOT=""
 if [ -n "${SHOW_PATCH_REPO_ROOT:-}" ]; then
   PATCH_REPO_ROOT="$SHOW_PATCH_REPO_ROOT"
-  if ! git -C "$PATCH_REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  if [ ! -e "$PATCH_REPO_ROOT/.git" ] || ! git -C "$PATCH_REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     printf '[show-patch] not a git repository: %s\n' "$PATCH_REPO_ROOT" >&2
     exit 2
   fi
-elif [ -n "${TARGET_ROOT:-}" ] && git -C "$TARGET_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+elif [ -n "${TARGET_ROOT:-}" ] && [ -e "$TARGET_ROOT/.git" ] && git -C "$TARGET_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   PATCH_REPO_ROOT="$TARGET_ROOT"
 fi
 

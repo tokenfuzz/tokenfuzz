@@ -344,7 +344,7 @@ fi
 # git repo, 'since' degrades to 'all'.
 CHANGED_SINCE_REF=""
 if [ "$SCOPE" = "since" ]; then
-  if ! git -C "$TARGET_PATH" rev-parse HEAD >/dev/null 2>&1; then
+  if [ "$(target_detect_repo_type "$TARGET_PATH")" != "git" ] || ! git -C "$TARGET_PATH" rev-parse HEAD >/dev/null 2>&1; then
     log "WARN: --scope since but $TARGET_PATH is not a git repo; falling back to --scope all"
     SCOPE="all"
   else
@@ -396,6 +396,7 @@ log "Output: hypotheses=$OUT_PATH report=$REPORT_PATH"
 # --scope since run can audit incrementally from here.
 write_recon_checkpoint() {
   local sha
+  [ "$(target_detect_repo_type "$TARGET_PATH")" = "git" ] || return 0
   sha=$(git -C "$TARGET_PATH" rev-parse HEAD 2>/dev/null || true)
   [ -n "$sha" ] && printf '%s\n' "$sha" > "$CHECKPOINT_FILE"
 }

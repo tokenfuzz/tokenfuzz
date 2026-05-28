@@ -258,7 +258,33 @@ assert_eq("myslug", re_env["TARGET_SLUG"], "write_session_env: TARGET_SLUG round
 assert_eq("abcd1234", re_env["TARGET_REV"], "write_session_env: TARGET_REV round-trips")
 
 
-# ─── 9. seed_toml emits a parseable file with [threat_model] ────────
+# ─── 9. detect_rev returns revisions and the plain-tree sentinel ─────
+
+plain_rev_root = TEST_TMPDIR / "plain-rev-target"
+plain_rev_root.mkdir()
+assert_eq("none", tc.detect_repo_type(plain_rev_root),
+          "detect_repo_type: plain source tree is none")
+assert_eq("norev", tc.detect_rev(plain_rev_root),
+          "detect_rev: plain source tree uses norev sentinel")
+broken_git_root = TEST_TMPDIR / "broken-git-rev-target"
+broken_git_root.mkdir()
+(broken_git_root / ".git").write_text("gitdir: /no/such/repo\n", encoding="utf-8")
+assert_eq("none", tc.detect_repo_type(broken_git_root),
+          "detect_repo_type: broken git metadata is none")
+assert_eq("", tc.detect_rev(broken_git_root),
+          "detect_rev: broken git metadata does not use norev sentinel")
+if shutil.which("git"):
+    parent_repo = TEST_TMPDIR / "parent-repo"
+    nested_plain = parent_repo / "targets" / "nested-plain"
+    nested_plain.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(parent_repo), "init", "-q"], check=True)
+    assert_eq("norev", tc.detect_rev(nested_plain),
+              "detect_rev: parent git repo does not make nested target a checkout")
+assert_eq("", tc.detect_rev(TEST_TMPDIR / "missing-rev-target"),
+          "detect_rev: missing source tree stays empty")
+
+
+# ─── 10. seed_toml emits a parseable file with [threat_model] ───────
 
 seed_root = TEST_TMPDIR / "seed-target"
 seed_root.mkdir()
@@ -267,6 +293,8 @@ tc.seed_toml(seed_root, out, "https://example.com/repo")
 text = out.read_text(encoding="utf-8")
 assert_in('target        = "seed-target"', text,
           "seeded toml has target field")
+assert_in('pinned_rev    = "norev"', text,
+          "seeded toml uses norev for plain source tree")
 assert_in("[threat_model]", text, "seeded toml has [threat_model] header")
 assert_in('attacker_controls = ["bytes"]', text,
           "seeded toml has bytes-only default for non-browser target")
