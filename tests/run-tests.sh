@@ -218,7 +218,8 @@ test_weight() {
   local name="$1"
   name="${name##*/}"
   case "$name" in
-    test_benchmark.sh) echo 50 ;;
+    test_benchmark.sh) echo 30 ;;
+    test_benchmark_cells.sh) echo 25 ;;
     test_audit_core.sh) echo 41 ;;
     test_decision_find_quality.sh) echo 35 ;;
     test_multilang_support.sh) echo 26 ;;

@@ -941,11 +941,11 @@ print("v2 reachability shape OK")
 # ───────────────────────────────────────────────────────────────────
 # 17. reachability.json conforms to the published JSON schema (when jsonschema is installed)
 # ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="reachability.json matches schema/reachability.schema.json"
+_CURRENT_TEST="reachability.json matches tests/schema/reachability.schema.json"
 if python3 -c 'import jsonschema' 2>/dev/null; then
   python3 - <<PY
 import json, sys, jsonschema
-schema = json.load(open("$SCRIPT_ROOT/schema/reachability.schema.json"))
+schema = json.load(open("$SCRIPT_ROOT/tests/schema/reachability.schema.json"))
 doc = json.load(open("$BATCH_RESULTS/crashes/CRASH-A/reachability.json"))
 jsonschema.validate(doc, schema)
 print("schema OK")

@@ -1,6 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/anthropic-experimental/sanitizer-qa/schema/reachability.schema.json",
   "title": "reachability.json",
   "description": "Output of bin/reachability for one crash. Written next to report.md so --severity-only can reuse it without hitting the network. Versioned via the schema_version field; downstream consumers should reject documents whose schema_version they do not understand.",
   "type": "object",
