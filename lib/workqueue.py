@@ -2089,6 +2089,15 @@ SOFT_TERMINAL_CARD_STATUSES = {"blocked"}
 # re-flag an already-blocked sibling).
 TERMINAL_CARD_STATUSES = PERMANENT_TERMINAL_CARD_STATUSES | SOFT_TERMINAL_CARD_STATUSES
 
+# After this many consecutive dry iterations at a previously-productive
+# subsystem, the bug-cluster relaxation in _claim_next_card_locked
+# stops protecting that subsystem from the diversity gate. The agent
+# then rotates to fresh territory instead of re-investigating an
+# already-closed bug. The subsystem is re-admitted automatically on the
+# next productive iteration (the streak file is reset by
+# bin/audit:reset_subsystem_dry_streak).
+_PRODUCTIVE_DECAY_AFTER_ITERS = 2
+
 
 def active_hypothesis_card_ids(ctx: Context) -> set[str]:
     active: set[str] = set()
@@ -2369,6 +2378,33 @@ def claimed_card_subsystems(ctx: Context, ttl: timedelta, now: datetime) -> set[
     return subsystems
 
 
+def subsystem_dry_streak(ctx: Context, subsystem: str) -> int:
+    """Read the global per-subsystem dry-iter counter written by bin/audit.
+
+    `bin/audit` maintains `.subsystem_dry_<slug>` flat files under
+    ``RESULTS_DIR`` via ``bump_subsystem_dry_streak`` /
+    ``reset_subsystem_dry_streak``. The file holds an integer count of
+    consecutive iterations during which the subsystem produced no new
+    productive artifact (CRASH/FIND across any agent). When a new
+    artifact appears the file is removed.
+
+    Returns 0 when the file is absent or unreadable (productive
+    subsystem on the current iteration, or never tracked).
+    """
+    if not subsystem or subsystem == "unknown":
+        return 0
+    slug = subsystem.replace("/", "_")
+    path = ctx.results_dir / f".subsystem_dry_{slug}"
+    try:
+        raw = path.read_text(encoding="utf-8", errors="ignore").strip()
+    except (FileNotFoundError, OSError):
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
 def agent_productive_subsystems(ctx: Context, agent: str) -> set[str]:
     """Subsystems where the given agent has a confirmed CRASH/FIND row.
 
@@ -2607,6 +2643,20 @@ def _claim_next_card_locked(
     # that subsystem. This implements the AGENTS.md "bugs cluster"
     # guidance the rest of the harness already encourages in prose.
     productive_subsystems = agent_productive_subsystems(ctx, agent)
+    # Time-decay the productive-subsystem relaxation: after the global
+    # dry-iter counter for a subsystem reaches PRODUCTIVE_DECAY_AFTER,
+    # treat the area as mined out and drop it from the relaxation so
+    # the agent rotates to fresh subsystems instead of re-investigating
+    # an already-closed bug. Threshold lives in code (not env) — it's a
+    # semantic boundary, not an operator tuning knob. If the subsystem
+    # becomes productive again, the streak resets and the subsystem
+    # is re-admitted on the next claim.
+    if productive_subsystems:
+        productive_subsystems = {
+            s
+            for s in productive_subsystems
+            if subsystem_dry_streak(ctx, s) < _PRODUCTIVE_DECAY_AFTER_ITERS
+        }
     diversity_floor = _int_env("WORK_CARD_SUBSYSTEM_DIVERSITY_MIN_ELIGIBLE", 8)
 
     # P5: cards whose previous filing by *this agent* was rejected at

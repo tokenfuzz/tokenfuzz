@@ -70,6 +70,47 @@ EOF
 crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/ioo_crash"
 assert_eq 0 $? "intra-object-overflow → memory safety signal"
 
+# strcpy-param-overlap → memory safety signal (libc copy-overlap family)
+mkdir -p "$TEST_TMPDIR/strcpy_overlap"
+cat > "$TEST_TMPDIR/strcpy_overlap/asan.txt" <<'EOF'
+==85864==ERROR: AddressSanitizer: strcpy-param-overlap: memory ranges overlap
+EOF
+crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/strcpy_overlap"
+assert_eq 0 $? "strcpy-param-overlap → memory safety signal"
+
+# memcpy-param-overlap → memory safety signal
+mkdir -p "$TEST_TMPDIR/memcpy_overlap"
+cat > "$TEST_TMPDIR/memcpy_overlap/asan.txt" <<'EOF'
+==123==ERROR: AddressSanitizer: memcpy-param-overlap: memory ranges overlap
+EOF
+crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/memcpy_overlap"
+assert_eq 0 $? "memcpy-param-overlap → memory safety signal"
+
+# memmove-param-overlap → memory safety signal
+mkdir -p "$TEST_TMPDIR/memmove_overlap"
+cat > "$TEST_TMPDIR/memmove_overlap/asan.txt" <<'EOF'
+==123==ERROR: AddressSanitizer: memmove-param-overlap: memory ranges overlap
+EOF
+crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/memmove_overlap"
+assert_eq 0 $? "memmove-param-overlap → memory safety signal"
+
+# strncat-param-overlap → memory safety signal
+mkdir -p "$TEST_TMPDIR/strncat_overlap"
+cat > "$TEST_TMPDIR/strncat_overlap/asan.txt" <<'EOF'
+==123==ERROR: AddressSanitizer: strncat-param-overlap: memory ranges overlap
+EOF
+crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/strncat_overlap"
+assert_eq 0 $? "strncat-param-overlap → memory safety signal"
+
+# Symmetry: the same overlap family must also gate is_autodiscard's
+# KEEP path so the autodiscard layer does not drop overlap crashes.
+mkdir -p "$TEST_TMPDIR/strcpy_overlap_autodiscard"
+cat > "$TEST_TMPDIR/strcpy_overlap_autodiscard/asan.txt" <<'EOF'
+==85864==ERROR: AddressSanitizer: strcpy-param-overlap: memory ranges overlap
+EOF
+is_autodiscard_crash_output "$TEST_TMPDIR/strcpy_overlap_autodiscard/asan.txt"
+assert_eq 1 $? "strcpy-param-overlap → not autodiscarded"
+
 # No ASan file → no signal
 mkdir -p "$TEST_TMPDIR/no_asan"
 crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/no_asan"

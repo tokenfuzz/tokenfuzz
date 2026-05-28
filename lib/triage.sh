@@ -295,8 +295,15 @@ is_autodiscard_crash_output() {
   local f="$1"
   [ -f "$f" ] && [ -s "$f" ] || return 1
 
-  # Short-circuit KEEP for interesting sanitizer-visible categories
-  if grep -qE 'AddressSanitizer: (heap-buffer-overflow|use-after-free|heap-use-after-free|container-overflow|dynamic-stack-buffer-overflow|stack-buffer-overflow|stack-use-after-return|stack-use-after-scope|global-buffer-overflow|alloc-dealloc-mismatch|intra-object-overflow|double-free|negative-size-param|bad-free|calloc-overflow|new-delete-type-mismatch|invalid-pointer-pair)' "$f" 2>/dev/null; then
+  # Short-circuit KEEP for interesting sanitizer-visible categories.
+  # The trailing `[a-z]+-param-overlap` clause catches the libc str/mem
+  # copy-and-overlap family (strcpy-, strncpy-, strncat-, memcpy-,
+  # memmove-param-overlap). ASan reports these when source and
+  # destination overlap, which still represents a real out-of-bounds
+  # write driven by attacker bytes — a previous narrow whitelist dropped
+  # a confirmed bug because the agent's reproducer happened to trip the
+  # overlap detector instead of the OOB-write detector.
+  if grep -qE 'AddressSanitizer: (heap-buffer-overflow|use-after-free|heap-use-after-free|container-overflow|dynamic-stack-buffer-overflow|stack-buffer-overflow|stack-use-after-return|stack-use-after-scope|global-buffer-overflow|alloc-dealloc-mismatch|intra-object-overflow|double-free|negative-size-param|bad-free|calloc-overflow|new-delete-type-mismatch|invalid-pointer-pair|[a-z]+-param-overlap)' "$f" 2>/dev/null; then
     return 1
   fi
 
@@ -589,7 +596,10 @@ crash_dir_has_memory_safety_asan_signal() {
   local asan_path
   asan_path=$(find_primary_asan_in_crash_dir "$d" 2>/dev/null || true)
   [ -n "$asan_path" ] || return 1
-  grep -qiE 'AddressSanitizer: (heap-buffer-overflow|use-after-free|heap-use-after-free|container-overflow|dynamic-stack-buffer-overflow|stack-buffer-overflow|stack-use-after-return|stack-use-after-scope|global-buffer-overflow|alloc-dealloc-mismatch|intra-object-overflow|double-free|negative-size-param|bad-free|calloc-overflow|new-delete-type-mismatch|invalid-pointer-pair)' "$asan_path" 2>/dev/null && return 0
+  # `[a-z]+-param-overlap` catches the libc str/mem copy-overlap family
+  # (strcpy-, strncpy-, strncat-, memcpy-, memmove-). Overlap reports
+  # still represent attacker-driven out-of-bounds writes.
+  grep -qiE 'AddressSanitizer: (heap-buffer-overflow|use-after-free|heap-use-after-free|container-overflow|dynamic-stack-buffer-overflow|stack-buffer-overflow|stack-use-after-return|stack-use-after-scope|global-buffer-overflow|alloc-dealloc-mismatch|intra-object-overflow|double-free|negative-size-param|bad-free|calloc-overflow|new-delete-type-mismatch|invalid-pointer-pair|[a-z]+-param-overlap)' "$asan_path" 2>/dev/null && return 0
   grep -qE 'SEGV on unknown address 0x[0-9a-fA-F]*[1-9a-fA-F]' "$asan_path" 2>/dev/null \
     && grep -qE 'SCARINESS: [0-9]+ \(wild-addr' "$asan_path" 2>/dev/null && return 0
   # ThreadSanitizer (data race / used after free in heap object).

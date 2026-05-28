@@ -34,7 +34,9 @@ eval "$(audit_extract_function discover_ensemble_backends)"
 eval "$(audit_extract_function init_backend_selection)"
 eval "$(audit_extract_function resolve_model)"
 eval "$(audit_extract_function model_preflight_stamp_path)"
+eval "$(audit_extract_function audit_one_time_backend_bootstrap)"
 eval "$(audit_extract_function gemini_prune_stale_sessions)"
+eval "$(audit_extract_function gemini_cli_check_bundled_ripgrep)"
 eval "$(audit_extract_function gemini_capture_cli_log_diag)"
 eval "$(audit_extract_function validate_model_for_backend)"
 eval "$(audit_extract_function validate_active_model)"
@@ -1334,6 +1336,72 @@ ACTIVE_BACKEND=codex
 MODEL="active-good"
 validate_active_model
 assert_file_exists "$(model_preflight_stamp_path codex "active-good")" "model preflight: active backend helper validates resolved model"
+
+# Per-process preflight short-circuit: once a backend/model pair has
+# passed preflight inside this audit process, subsequent calls must not
+# re-invoke the backend CLI. Verify by counting "Model preflight passed"
+# lines for the same pair across two back-to-back calls. The earlier
+# preflight assertions in this file already set the guard for
+# claude/claude-good, so use a fresh model name for a clean baseline
+# (the stub claude-preflight binary accepts any model whose name does
+# not start with "bad").
+cat > "$model_preflight_bin/claude-preflight" <<'EOF'
+#!/usr/bin/env bash
+# Stub claude CLI: succeed for any model except those whose name starts
+# with "bad". Used by the short-circuit test below — earlier in this
+# file we wrote a different stub but it accepted only "claude-good";
+# replace it so models like claude-good-sc/claude-good-sc2 succeed too.
+model=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model) model="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$model" in
+  bad-*) echo "unknown model: $model" >&2; exit 1 ;;
+  *) printf '{"type":"completion","result":"MODEL_PREFLIGHT_OK"}\n' ;;
+esac
+EOF
+chmod +x "$model_preflight_bin/claude-preflight"
+
+: > "$INDEX"
+validate_model_for_backend claude "claude-good-sc"
+short_circuit_passes_first=$(grep -c "Model preflight passed: claude backend can reach model='claude-good-sc'" "$INDEX" || true)
+validate_model_for_backend claude "claude-good-sc"
+short_circuit_passes_second=$(grep -c "Model preflight passed: claude backend can reach model='claude-good-sc'" "$INDEX" || true)
+assert_eq 1 "$short_circuit_passes_first" "preflight short-circuit: first call logs pass"
+assert_eq 1 "$short_circuit_passes_second" "preflight short-circuit: second call for same backend+model is silent"
+
+# Different model for the same backend must still preflight — guards
+# are keyed by backend+model, not backend alone.
+validate_model_for_backend claude "claude-good-sc2" 2>/dev/null || true
+short_circuit_other_model_passes=$(grep -c "Model preflight passed: claude backend can reach model='claude-good-sc2'" "$INDEX" || true)
+assert_eq 1 "$short_circuit_other_model_passes" \
+  "preflight short-circuit: different model on same backend still preflights"
+
+# audit_one_time_backend_bootstrap is idempotent — the per-process guard
+# means repeat calls are free no-ops. Verified by checking the guard env
+# variable lifecycle.
+unset AUDIT_BACKEND_BOOTSTRAP_DONE_GEMINI 2>/dev/null || true
+audit_one_time_backend_bootstrap gemini
+assert_eq 1 "${AUDIT_BACKEND_BOOTSTRAP_DONE_GEMINI:-0}" \
+  "audit_one_time_backend_bootstrap: gemini guard set after first call"
+# A second call must not re-run the helpers (idempotent). Idempotency is
+# verified by the guard staying set — the helpers themselves are no-ops
+# (gemini_prune_stale_sessions) or filesystem-checks (ripgrep) without
+# easily-observable side effects in this stubbed test environment.
+audit_one_time_backend_bootstrap gemini
+assert_eq 1 "${AUDIT_BACKEND_BOOTSTRAP_DONE_GEMINI:-0}" \
+  "audit_one_time_backend_bootstrap: gemini guard remains set on second call"
+
+# Non-gemini backends are bootstrap no-ops today but the guard must
+# still flip so future side-effect additions inherit the same
+# idempotent path.
+unset AUDIT_BACKEND_BOOTSTRAP_DONE_CODEX 2>/dev/null || true
+audit_one_time_backend_bootstrap codex
+assert_eq 1 "${AUDIT_BACKEND_BOOTSTRAP_DONE_CODEX:-0}" \
+  "audit_one_time_backend_bootstrap: codex guard set even when no side effects ship today"
 
 : > "$INDEX"
 exit_trap_output=$( ( false; audit_exit_trap 424 "$?" ) 2>&1 )

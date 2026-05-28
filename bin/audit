@@ -1055,6 +1055,36 @@ model_preflight_stamp_path() {
   printf '%s/.model_preflight_%s_%s.ok' "$LOGDIR" "$backend" "$safe_model"
 }
 
+# One-time backend bootstrap for the audit process. Side-effect helpers
+# that were previously called inside model_preflight (which fires every
+# iteration) actually answer machine-state, not per-iteration state
+# questions — running them once per audit is sufficient. Idempotent by
+# the AUDIT_BACKEND_BOOTSTRAP_DONE_<backend> guard so accidental second
+# calls are free.
+audit_one_time_backend_bootstrap() {
+  local backend="$1"
+  [ -n "$backend" ] || return 0
+  local guard
+  guard="AUDIT_BACKEND_BOOTSTRAP_DONE_$(printf '%s' "$backend" | tr '[:lower:]' '[:upper:]')"
+  [ -n "${!guard:-}" ] && return 0
+  case "$backend" in
+    gemini)
+      # gemini-cli ships without a bundled ripgrep binary on most installs;
+      # the diagnostic prints a one-time WARN with the symlink command an
+      # operator can run once per machine to restore native rg. The
+      # underlying state is the filesystem layout of the npm bundle —
+      # constant for the audit process lifetime.
+      gemini_cli_check_bundled_ripgrep
+      # Currently a no-op stub kept for forward compatibility with the
+      # Antigravity (agy) CLI. Calling it once at startup means any future
+      # session pruning logic also runs once, not per iteration.
+      gemini_prune_stale_sessions
+      ;;
+  esac
+  printf -v "$guard" 1
+  export "$guard"
+}
+
 gemini_prune_stale_sessions() {
   # Hook kept for callers that still reference it. The Antigravity CLI
   # (agy) does not require per-startup pruning. Set AUDIT_GEMINI_PRUNE=0
@@ -1152,9 +1182,16 @@ validate_model_for_backend() {
 
   mkdir -p "$LOGDIR"
   stamp=$(model_preflight_stamp_path "$backend" "$model")
-  # No early-return on existing stamp: re-running preflight on every audit
-  # invocation is cheap (one short API call) and keeps gemini_prune_stale_sessions
-  # firing on each cold start, which is the actual reason we don't want to skip.
+  # Per-process short-circuit: once a backend/model pair has passed
+  # preflight inside this audit process, subsequent iter-boundary calls
+  # don't need to re-prove reachability. Keyed by backend+model+PID so a
+  # different model (or a fresh `bin/audit` run) still preflights once.
+  local process_guard
+  process_guard="AUDIT_MODEL_PREFLIGHT_OK_${backend}_${model}_$$"
+  process_guard=$(printf '%s' "$process_guard" | tr -cs '[:alnum:]_' '_')
+  if [ -n "${!process_guard:-}" ]; then
+    return 0
+  fi
 
   if ! raw=$(mktemp "$LOGDIR/model-preflight-${backend}.XXXXXX"); then
     log "FATAL: could not create model preflight log under $LOGDIR" >&2
@@ -1179,10 +1216,10 @@ validate_model_for_backend() {
     backoff=15
   fi
 
-  if [ "$backend" = "gemini" ]; then
-    gemini_prune_stale_sessions
-    gemini_cli_check_bundled_ripgrep
-  fi
+  # Per-audit backend bootstrap (machine-state side effects). Idempotent
+  # via internal guard — extra calls are cheap. Moved out of the
+  # preflight hot path so it runs once per audit, not once per iter.
+  audit_one_time_backend_bootstrap "$backend"
 
   log "Model preflight: checking that ${backend} backend can reach model='${model}' (timeout per attempt=$(fmt_secs "$timeout_secs"), up to ${max_attempts} attempt(s) with exponential backoff)" | tee -a "$INDEX"
   local attempt
@@ -1305,6 +1342,11 @@ validate_model_for_backend() {
   # Failure path above returns/exits before reaching here, so .raw is
   # preserved as the only on-disk evidence of the failure mode.
   rm -f "$raw" "$msg" 2>/dev/null || true
+  # Record success in the per-process guard so subsequent iter-boundary
+  # calls inside this audit short-circuit. Uses the same key as the
+  # early-return path above.
+  printf -v "$process_guard" 1
+  export "$process_guard"
   log "Model preflight passed: ${backend} backend can reach model='${model}' — proceeding with agent launches" | tee -a "$INDEX"
 }
 
@@ -5727,7 +5769,77 @@ enforce_context_reuse_cap() {
 # inlined the same ~35 lines with subtle divergences. Scaling to N
 # agents motivated the factoring.
 
-# Launch N agents in parallel, wait for all, log exit codes.
+# Launch one agent process into a slot. Used by both the default
+# wait-for-all path and the opt-in refill loop. Sets globals:
+#   _slot_pid (PID of the spawned agent)
+#   _slot_role (role_name composed for this launch)
+#   _slot_before_subsystem (subsystem the slot held before this launch)
+# Inputs: slot index, role_prefix, prompt_builder fn name, ts, optional
+# refill_index (>=1 means "this is a refill of slot N's R-th refill").
+_launch_agent_into_slot() {
+  local slot="$1" role_prefix="$2" prompt_builder="$3" ts="$4"
+  local refill_index="${5:-0}"
+  local prompt turns role_name mode prompt_tokens prompt_file
+  _slot_before_subsystem=$(get_agent_subsystem "$slot" 2>/dev/null || echo "unknown")
+  prompt=$("$prompt_builder" "$slot" | neutralize_qa_vocab_string | strip_novocab_markers)
+  prompt_tokens=$(estimate_tokens "$prompt")
+  turns="$MAX_TURNS_ANALYSIS"
+  mode=$(agent_mode "$slot")
+  if [ "$refill_index" -gt 0 ]; then
+    role_name="${role_prefix}-${slot}-${mode}-r${refill_index}"
+  else
+    role_name="${role_prefix}-${slot}-${mode}"
+  fi
+  log "Prompt built for agent A${slot} (${role_name}): ~$(fmt_count "$prompt_tokens") tokens / ${#prompt} chars"
+  prompt_file=$(write_prompt_artifacts "$ts" "$role_name" "$slot" "$role_prefix" "$prompt" "$prompt_tokens")
+  log_agent_plan "$slot" "$role_prefix" "$role_name" "$prompt_tokens" "$prompt_file" ""
+  run_agent "$role_name" "$slot" "$MODEL" "$turns" "$prompt" "$ts" &
+  _slot_pid=$!
+  _slot_role="$role_name"
+}
+
+# Finalize one agent's run: wait for the recorded PID, normalize exit
+# code, log waste line / subsystem claim. Used by both paths.
+# Sets _slot_rc to the final exit code.
+_finalize_agent_slot() {
+  local slot="$1" role_prefix="$2" role_name="$3" pid="$4" before_subsystem="$5" ts="$6"
+  local rc wait_raw normalized_rc
+  wait "$pid" 2>/dev/null && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    wait_raw="$RAW_DIR/session_${ts}_${role_name}.log.raw"
+    normalized_rc=$(normalize_agent_exit_code "$ACTIVE_BACKEND" "$rc" "$wait_raw")
+    if [ "$normalized_rc" != "$rc" ]; then
+      log "Agent A${slot} (${role_name}) process exit=${rc} but raw log has a completed ${ACTIVE_BACKEND} turn with no session-level error; treating wait status as exit=${normalized_rc}" | tee -a "$INDEX"
+      rc="$normalized_rc"
+    fi
+  fi
+  record_subsystem_claim "$slot" "$role_prefix" "$role_name" "$before_subsystem" "$(get_agent_subsystem "$slot" 2>/dev/null || echo "unknown")"
+  if [ "$rc" -ne 0 ]; then
+    log "WARNING: Agent A${slot} (${role_name}) exited with non-zero code ${rc}" | tee -a "$INDEX"
+  fi
+  _slot_rc="$rc"
+}
+
+# Refill predicate: returns 0 if slot $1 should attempt another launch
+# this iteration. A slot can refill at most once per iter, and only
+# while at least one OTHER agent is still running — refills never
+# extend iter wall-time beyond the slowest initially-launched agent.
+# Beyond a single refill per slot the iter has become a degenerate
+# worker queue and the next iter's housekeeping/diversify pass adds
+# more value than further in-iter refills.
+_should_refill_slot() {
+  local slot="$1"
+  local used="$2"
+  local any_running="$3"
+  [ "$any_running" = "1" ] || return 1
+  [ "$used" -lt 1 ] || return 1
+  return 0
+}
+
+# Launch N agents in parallel, finalize each on exit. Any slot whose
+# agent exits early — while at least one other agent is still running —
+# gets a single replacement launch in that slot. Wall-time stays
+# bounded by the slowest initially-launched agent.
 # Args:
 #   $1 = role prefix ("cold-start" | "deep_investigation")
 #   $2 = prompt-builder function name (takes agent_num, echoes prompt)
@@ -5745,32 +5857,14 @@ launch_agents_and_wait() {
     return 0
   fi
 
+  # Per-slot launch. Telemetry composition (PLAN line, prompt artifact
+  # paths, role name) lives in _launch_agent_into_slot so refills share
+  # the same path.
   for i in $launch_agents; do
-    local prompt turns role_name mode prompt_tokens artifact_paths prompt_file meta_file
-    before_subsystems[$i]=$(get_agent_subsystem "$i" 2>/dev/null || echo "unknown")
-    # Final-pipeline scrub: neutralize vocab in dynamic content, then
-    # strip NOVOCAB sentinel markers from the model-visible output.
-    # The two-step split (vs the prior single-pass that also stripped
-    # markers) is what lets safety_framing's "use X (not Y)" examples
-    # survive intact through both this scrub and the upstream
-    # SAFETY_FRAMING_CACHED scrub at bin/audit:~2290.
-    prompt=$("$prompt_builder" "$i" | neutralize_qa_vocab_string | strip_novocab_markers)
-    prompt_tokens=$(estimate_tokens "$prompt")
-    turns="$MAX_TURNS_ANALYSIS"
-    # Role name in logs pairs agent num + mode + role for quick eyeballing
-    # ("deep_investigation-3-shell"). Mode lets a `grep "shell"` over
-    # index.log reconstruct which pool produced which session.
-    mode=$(agent_mode "$i")
-    role_name="${role_prefix}-${i}-${mode}"
-    log "Prompt built for agent A${i} (${role_name}): ~$(fmt_count "$prompt_tokens") tokens / ${#prompt} chars"
-    prompt_file=$(write_prompt_artifacts "$ts" "$role_name" "$i" "$role_prefix" "$prompt" "$prompt_tokens")
-    # meta_file argument retained for log_agent_plan compatibility but is
-    # always empty now — the json sidecar was redundant with index.jsonl
-    # (see lib/audit_debug.sh::write_prompt_artifacts comment).
-    log_agent_plan "$i" "$role_prefix" "$role_name" "$prompt_tokens" "$prompt_file" ""
-    run_agent "$role_name" "$i" "$MODEL" "$turns" "$prompt" "$ts" &
-    pids[$i]=$!
-    roles[$i]="$role_name"
+    _launch_agent_into_slot "$i" "$role_prefix" "$prompt_builder" "$ts" 0
+    pids[$i]="$_slot_pid"
+    roles[$i]="$_slot_role"
+    before_subsystems[$i]="$_slot_before_subsystem"
   done
 
   local pid_summary=""
@@ -5779,26 +5873,69 @@ launch_agents_and_wait() {
   done
   log "Agents now running in parallel (agent_number=process_id pairs): ${pid_summary}— waiting for all to finish before scoring the iteration"
 
-  # Wait for all agents and collect exit codes. We avoid `wait -n` so this
-  # stays portable to older bash.
   local rc_summary=""
+
+  # Poll all slots; as each agent exits, finalize it, then try to
+  # launch a replacement if at least one other agent is still running
+  # and the per-slot refill cap (1) is not reached. Refills inherit
+  # the same role_prefix and prompt_builder; each refill picks a new
+  # card via the prompt builder's normal claim-next-card path.
+  local refill_poll_secs=1
+  # Indexed (not associative) — slot indices are always integers and
+  # macOS bash 3.2 lacks associative-array support.
+  local -a refill_used=() slot_active=()
   for i in $launch_agents; do
-    local rc
-    wait "${pids[$i]}" 2>/dev/null && rc=0 || rc=$?
-    if [ "$rc" -ne 0 ]; then
-      local wait_raw normalized_rc
-      wait_raw="$RAW_DIR/session_${ts}_${roles[$i]}.log.raw"
-      normalized_rc=$(normalize_agent_exit_code "$ACTIVE_BACKEND" "$rc" "$wait_raw")
-      if [ "$normalized_rc" != "$rc" ]; then
-        log "Agent A${i} (${roles[$i]}) process exit=${rc} but raw log has a completed ${ACTIVE_BACKEND} turn with no session-level error; treating wait status as exit=${normalized_rc}" | tee -a "$INDEX"
-        rc="$normalized_rc"
+    slot_active[$i]=1
+    refill_used[$i]=0
+  done
+  while :; do
+    local any_active=0 slot_exited_this_pass=0
+    for i in $launch_agents; do
+      [ "${slot_active[$i]:-0}" = "1" ] || continue
+      if kill -0 "${pids[$i]}" 2>/dev/null; then
+        any_active=1
+        continue
       fi
+      # Slot's PID is no longer running — finalize it.
+      _finalize_agent_slot "$i" "$role_prefix" "${roles[$i]}" "${pids[$i]}" \
+        "${before_subsystems[$i]:-unknown}" "$ts"
+      rc_summary+="${i}=${_slot_rc}(r${refill_used[$i]}) "
+      slot_active[$i]=0
+      slot_exited_this_pass=1
+    done
+    # Recompute any_active (we may have just retired slots). `if/fi`
+    # rather than `&&` so the loop's last-iteration exit code is always
+    # zero — otherwise set -e could trip when the final slot is inactive.
+    any_active=0
+    for i in $launch_agents; do
+      if [ "${slot_active[$i]:-0}" = "1" ]; then
+        any_active=1
+      fi
+    done
+    if [ "$slot_exited_this_pass" = "1" ]; then
+      # For each just-retired slot, decide whether to refill. Refill is
+      # only allowed when at least one OTHER slot is still active, so we
+      # never extend iter wall-time beyond the slowest initial agent.
+      for i in $launch_agents; do
+        [ "${slot_active[$i]:-0}" = "0" ] || continue
+        local used="${refill_used[$i]}"
+        if _should_refill_slot "$i" "$used" "$any_active"; then
+          local next=$((used + 1))
+          log "Worker-pool refill: slot ${i} finished early, launching refill r${next} (prior agents still running)" | tee -a "$INDEX"
+          _launch_agent_into_slot "$i" "$role_prefix" "$prompt_builder" "$ts" "$next"
+          pids[$i]="$_slot_pid"
+          roles[$i]="$_slot_role"
+          before_subsystems[$i]="$_slot_before_subsystem"
+          refill_used[$i]="$next"
+          slot_active[$i]=1
+          any_active=1
+        fi
+      done
     fi
-    rc_summary+="${i}=${rc} "
-    record_subsystem_claim "$i" "$role_prefix" "${roles[$i]}" "${before_subsystems[$i]:-unknown}" "$(get_agent_subsystem "$i" 2>/dev/null || echo "unknown")"
-    if [ "$rc" -ne 0 ]; then
-      log "WARNING: Agent A${i} (${roles[$i]}) exited with non-zero code ${rc}" | tee -a "$INDEX"
+    if [ "$any_active" = "0" ]; then
+      break
     fi
+    sleep "$refill_poll_secs"
   done
   log "Agent exit codes: ${rc_summary}" | tee -a "$INDEX"
   return 0
@@ -5907,11 +6044,36 @@ build_strategy_roi_directive() {
 # All post-iteration housekeeping that was previously duplicated across
 # the cold-start and deep-investigation branches. Each helper is fenced
 # so a single failure cannot abort the audit loop under `set -e`.
-run_post_iteration_housekeeping() {
-  # Bash 3.2 (macOS default) has a known bug where set -e leaks through
-  # || guards inside functions when command substitutions fail internally.
-  # Disable set -e for this function body so sub-function failures are
-  # caught by the || guards as intended, then re-enable before returning.
+## Post-iteration housekeeping is split into two phases:
+##
+##   - CRITICAL phase: fast file IO and outputs that the next iter's
+##     prompt build reads (strategy ROI, handoff file, merged state).
+##     Must complete before iter N+1 can start.
+##
+##   - BACKGROUND phase: LLM-heavy gates (crash-triage, find-gate,
+##     patch-review) plus clustering/index passes. Their outputs are
+##     informational for the next iter's prompt — at worst the agent
+##     briefly investigates a soon-to-be-rejected crash before the
+##     sweeper catches up. Running them in the background reclaims the
+##     2–14 min gap they cost on the critical path when crashes/finds
+##     exist this iteration.
+##
+## A previous sweeper is barrier-waited before spawning the next one so
+## the gate ordering inside the background phase is preserved (cluster
+## expand must run before maintain_indexes reads the new card set).
+## audit_exit_trap also joins any in-flight sweeper so partial writes
+## don't survive a shutdown.
+AUDIT_HOUSEKEEPING_BG_PID="${AUDIT_HOUSEKEEPING_BG_PID:-}"
+
+wait_for_background_housekeeping() {
+  local pid="${AUDIT_HOUSEKEEPING_BG_PID:-}"
+  [ -n "$pid" ] || return 0
+  # `wait` only works on direct children; ignore any "not a child" rc.
+  wait "$pid" 2>/dev/null || true
+  AUDIT_HOUSEKEEPING_BG_PID=""
+}
+
+run_post_iteration_housekeeping_critical() {
   set +e
   record_iteration_guard_chain || log "WARN: record_iteration_guard_chain failed (rc=$?)" >> "$INDEX"
   # Snapshot BEFORE merge archives DISCARDED rows, else the discard-rate
@@ -5922,6 +6084,21 @@ run_post_iteration_housekeeping() {
   enforce_asan_for_orphans    || log "WARN: enforce_asan_for_orphans failed (rc=$?)"    >> "$INDEX"
   promote_corpus_testcases    || log "WARN: promote_corpus_testcases failed (rc=$?)"    >> "$INDEX"
 
+  local roi_inputs=("$RESULTS_DIR/state/hypotheses.jsonl")
+  local _agent_i
+  for _agent_i in $(seq 1 "$NUM_AGENTS"); do
+    roi_inputs+=("$(state_file_path "$_agent_i")")
+  done
+  housekeeping_run_if_dirty strategy-roi update_strategy_roi "${roi_inputs[@]}" \
+    || log "WARN: update_strategy_roi failed (rc=$?)" >> "$INDEX"
+  refresh_handoff_file        || log "WARN: refresh_handoff_file failed (rc=$?)"        >> "$INDEX"
+  merge_audit_state           || log "WARN: merge_audit_state failed (rc=$?)"           >> "$INDEX"
+  set -e
+  return 0
+}
+
+run_post_iteration_housekeeping_background() {
+  set +e
   local target_toml
   target_toml="${TARGET_TOML:-$(target_output_root "$SCRIPT_ROOT" "${TARGET_SLUG:-}" "" "")/target.toml}"
   housekeeping_run_if_dirty crash-triage triage_crash_dirs \
@@ -5942,16 +6119,22 @@ run_post_iteration_housekeeping() {
     "$RESULTS_DIR/crashes" "$RESULTS_DIR/crashes-rejected" \
     "$RESULTS_DIR/findings" \
     || log "WARN: maintain_indexes failed (rc=$?)" >> "$INDEX"
+  set -e
+  return 0
+}
 
-  local roi_inputs=("$RESULTS_DIR/state/hypotheses.jsonl")
-  local _agent_i
-  for _agent_i in $(seq 1 "$NUM_AGENTS"); do
-    roi_inputs+=("$(state_file_path "$_agent_i")")
-  done
-  housekeeping_run_if_dirty strategy-roi update_strategy_roi "${roi_inputs[@]}" \
-    || log "WARN: update_strategy_roi failed (rc=$?)" >> "$INDEX"
-  refresh_handoff_file        || log "WARN: refresh_handoff_file failed (rc=$?)"        >> "$INDEX"
-  merge_audit_state           || log "WARN: merge_audit_state failed (rc=$?)"           >> "$INDEX"
+run_post_iteration_housekeeping() {
+  # Bash 3.2 (macOS default) has a known bug where set -e leaks through
+  # || guards inside functions when command substitutions fail internally.
+  # Disable set -e here too in case any reachable callback path resets it.
+  set +e
+  run_post_iteration_housekeeping_critical
+  # Wait for any prior sweeper before spawning a new one — keeps the
+  # background phase's internal stage ordering intact (cluster-expand
+  # must run before maintain_indexes consumes the new cards).
+  wait_for_background_housekeeping
+  run_post_iteration_housekeeping_background &
+  AUDIT_HOUSEKEEPING_BG_PID=$!
   set -e
   return 0
 }
@@ -6108,6 +6291,10 @@ update_subsystem_dry_streaks() {
 audit_exit_trap() {
   local line="$1"
   local rc="$2"
+  # Join any in-flight background housekeeping so partially-written
+  # cluster/index files don't survive the exit. The wait itself is
+  # bounded by the gate functions' own timeouts.
+  wait_for_background_housekeeping 2>/dev/null || true
   log "SCRIPT EXITING (line=${line} rc=${rc})" >> "$INDEX" 2>/dev/null || true
   log "SCRIPT EXITING (line=${line} rc=${rc})" >&2 || true
 }
