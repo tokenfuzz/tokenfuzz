@@ -1087,7 +1087,7 @@ def _extract_hero(text: str) -> dict:
             frames = _frames_from_dedup_value(dedup_value)
     if frames:
         h["top_frames"] = frames
-        h["top_frame_func"] = frames[0].function
+        h["top_frame_func"] = frames[0].state_function
         h["top_frame_loc"] = frames[0].location
 
     cm = _CALLERS_RE.search(text)
@@ -1162,7 +1162,7 @@ def _render_hero(h: dict) -> str:
             parts.append(
                 '<div class="triage-frame">'
                 f'<span class="frame-index">#{idx}</span> '
-                f'<span class="frame-func"><code>{html.escape(frame.function)}</code></span>'
+                f'<span class="frame-func"><code>{html.escape(frame.state_function)}</code></span>'
                 f'{loc}'
                 '</div>'
             )

@@ -49,7 +49,6 @@ import hashlib
 import json
 import os
 import re
-import string
 import sys
 import tempfile
 from pathlib import Path
@@ -58,6 +57,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import stack_frames  # noqa: E402
+import clusterfuzz_stacktrace as cf_stack  # noqa: E402
 from cluster_common import (  # noqa: E402
     exact_child_file,
     remove_legacy_cluster_files,
@@ -160,9 +160,12 @@ def _extract_top_frames(asan_text: str, want: int = 5) -> list[tuple[str, str]]:
 
     Frames whose function/path/raw text matches ClusterFuzz's stack-frame
     ignore regexes are skipped. Runtime / interceptor / libc frames are
-    present in many crashes and contribute no signal to clustering.
+    present in many crashes and contribute no signal to clustering. The
+    function name is the crash-state-normalized form (parameter list and
+    demangler suffixes stripped) so the displayed dedup chain matches the
+    clustering signature.
     """
-    return [(frame.function, frame.location) for frame in stack_frames.interesting_frames(asan_text, want=want)]
+    return [(frame.state_function, frame.location) for frame in stack_frames.interesting_frames(asan_text, want=want)]
 
 
 def _frame_token(frame: tuple[str, str]) -> str:
@@ -186,36 +189,15 @@ def _frame_set_signature(frames: list[tuple[str, str]], want: int = 3) -> str:
     return "+".join(tokens)
 
 
-def _cf_filter_stack_frame(frame: stack_frames.StackFrame) -> str:
-    """Mirror ClusterFuzz stacktraces._filter_stack_frame for C/C++ frames."""
-    stack_frame = frame.function
-    for ns in (
-        "non-virtual thunk to ",
-        "(anonymous namespace)::",
-        "`anonymous namespace'::",
-    ):
-        stack_frame = stack_frame.replace(ns, "")
-    stack_frame = stack_frame.split("!")[-1]
-    m = re.match(r"(.*?)[\(\[].*", stack_frame)
-    if m and m.group(1):
-        return m.group(1).strip()
-    return stack_frame.strip().split(" ")[0]
-
-
-def _cf_normalize_state_line(line: str) -> str:
-    """Approximate ClusterFuzz filter_addresses_and_numbers for crash_state."""
-    line = "".join(ch for ch in line if ch in string.printable)
-    line = re.sub(r"0x[0-9a-fA-F]+", "0x{*}", line)
-    line = re.sub(r"\b\d+\b", "{*}", line)
-    return line[:256]
-
-
 def _cf_crash_state(asan_text: str) -> str:
+    # ClusterFuzz crash state: top interesting frames, each name normalized
+    # (filter_function_name) then address/number-scrubbed. Both helpers live
+    # in lib/clusterfuzz_stacktrace.py with upstream attribution.
     lines = []
     for frame in stack_frames.interesting_frames(asan_text, want=3):
-        filtered = _cf_filter_stack_frame(frame)
+        filtered = cf_stack.filter_function_name(frame.function)
         if filtered:
-            lines.append(_cf_normalize_state_line(filtered))
+            lines.append(cf_stack.filter_addresses_and_numbers(filtered))
     return "\n".join(lines) + ("\n" if lines else "")
 
 

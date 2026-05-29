@@ -200,6 +200,58 @@ SUMMARY: AddressSanitizer: stack-buffer-overflow (testbin:arm64+0x100002f94) in 
 ok(stack_frames.first_interesting_frame(macos_start_only) is None,
    "skips macOS dyld start+ tail frames instead of using them as dedup keys")
 
+# ClusterFuzz _filter_stack_frame port: the function name that enters the
+# crash state has its parameter list, [abi:...] / [clone] suffixes, and
+# anonymous-namespace markers stripped. Template args in <...> are kept.
+assert_eq(
+    "sampledb::Engine::Store::set_blob",
+    stack_frames.filter_function_name(
+        "sampledb::Engine::Store::set_blob(unsigned int, "
+        "std::__1::vector<unsigned char, std::__1::allocator<unsigned char>>)"
+    ),
+    "filter_function_name drops the C++ parameter list",
+)
+assert_eq("foo", stack_frames.filter_function_name("foo[abi:cxx11]()"),
+          "filter_function_name drops [abi:...] demangler suffix")
+assert_eq("app::compare<int>",
+          stack_frames.filter_function_name("app::compare<int>(int)"),
+          "filter_function_name keeps template args, drops params")
+assert_eq("mod::func", stack_frames.filter_function_name("module!mod::func(int)"),
+          "filter_function_name takes the segment after the last '!'")
+assert_eq("ns::g", stack_frames.filter_function_name("(anonymous namespace)::ns::g()"),
+          "filter_function_name strips the anonymous-namespace marker")
+
+# End-to-end: a frame whose own params mention std::__1 types must keep the
+# real (param-stripped) name in the crash state, not be ignored as stdlib and
+# not carry the parameter list into the signature.
+param_heavy = """\
+==43458==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1 at pc 0x2
+WRITE of size 1 at 0x1 thread T0
+    #0 0x10 in sampledb::Engine::Store::set_blob(unsigned int, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>>) sampledb.cpp:213
+    #1 0x11 in sampledb::Engine::apply_line(std::__1::basic_string<char> const&) sampledb.cpp:367
+    #2 0x12 in main main.cpp:13
+SUMMARY: AddressSanitizer: heap-buffer-overflow sampledb.cpp:213 in sampledb::Engine::Store::set_blob(unsigned int, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>>)
+"""
+frame = stack_frames.first_interesting_frame(param_heavy)
+ok(frame is not None and frame.state_function == "sampledb::Engine::Store::set_blob",
+   "crash-state function name has no parameter list",
+   detail=f"state_function={frame.state_function if frame else None!r}")
+ok(frame is not None and "(" not in frame.display,
+   "frame.display carries no '(' parameter list into the signature",
+   detail=f"display={frame.display if frame else None!r}")
+sig = stack_frames.crash_signature(param_heavy)
+ok(sig and sig[0] == "sampledb::Engine::Store::set_blob sampledb.cpp:213",
+   "crash_signature top line is normalized func + location",
+   detail=f"sig={sig!r}")
+ok(all("std::__1::" not in line for line in sig),
+   "no std::__1 parameter types leak into the crash signature",
+   detail=f"sig={sig!r}")
+# The raw function is preserved for the ignore step.
+ok(frame is not None and frame.function.startswith(
+        "sampledb::Engine::Store::set_blob("),
+   "frame.function keeps the raw name (with params) for ignore matching",
+   detail=f"function={frame.function if frame else None!r}")
+
 if FAILED:
     print(f"\033[0;31m{FAILED} failed, {PASSED} passed\033[0m")
     sys.exit(1)
