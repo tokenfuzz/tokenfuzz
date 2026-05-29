@@ -236,10 +236,20 @@ def _scrub_pooled_tree(root: Path) -> None:
 # verbatim. Negative lookaheads/lookbehinds keep the linker idempotent
 # by skipping hashes already inside a `[…](…)` markdown link.
 _RECON_LINK_PATTERNS = (
-    # `- **Recon ID:** RECON-<hash>` — the FIND's primary recon source.
+    # `- **Recon ID:** RECON-<hash>` (legacy bolded form).
     re.compile(
         r"(?<!\[)(?<!\]\()"
         r"(?<=\*\*Recon ID:\*\*\s)"
+        r"(RECON-[0-9a-f]+)"
+        r"(?!\])",
+    ),
+    # Bare-label form `Recon ID: RECON-<hash>` — recon_to_cards now
+    # emits this shape so render-md's bare-label suppression hides
+    # the audit-only line from HTML while the markdown copy keeps
+    # the linkified anchor.
+    re.compile(
+        r"(?<!\[)(?<!\]\()"
+        r"(?<=(?<![\w*])Recon ID:\s)"
         r"(RECON-[0-9a-f]+)"
         r"(?!\])",
     ),

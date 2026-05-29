@@ -169,8 +169,19 @@ if grep -q "enrich:tldr" "$CD/report.html"; then
 else
   pass "render-md strips enrichment marker comments from HTML"
 fi
-assert_file_contains "$CD/report.html" "Reviewer TL;DR" "TL;DR text reaches HTML"
-assert_file_contains "$CD/report.html" "Severity: High" "Severity badge text reaches HTML"
+# Hero-duplicated enrichment blocks (tldr / severity-badge / cluster-siblings)
+# are suppressed in HTML when the triage hero card emits — markdown source
+# keeps them, but the card carries the same info richer. Verify (a) the
+# duplicate text is gone, (b) the hero card carries the signal instead.
+if grep -q "Reviewer TL;DR" "$CD/report.html"; then
+  fail "TL;DR enrichment block suppressed in HTML" "Reviewer TL;DR still rendered"
+else
+  pass "TL;DR enrichment block suppressed in HTML (hero card replaces it)"
+fi
+assert_file_contains "$CD/report.html" 'class="triage-card sev-High"' \
+  "hero card carries severity signal in HTML"
+assert_file_contains "$CD/report.html" 'class="sev sev-High">High' \
+  "hero card emits severity pill instead of duplicate badge prose"
 
 # ── Colon-label heading style is recognised ─────────────────────────
 # Some agents use `Data Flow:` rather than `## Data Flow`; render-md

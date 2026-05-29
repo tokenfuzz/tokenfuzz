@@ -147,6 +147,10 @@ def normalize_class(raw: str) -> str:
 _CLASS_PATTERNS = [
     re.compile(r"^\s*-\s*\*\*Class(?:ification)?\*\*\s*:\s*`?([A-Za-z][\w:.\-]*)`?", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^\s*Class(?:ification)?\s*:\s*`?([A-Za-z][\w:.\-]*)`?", re.MULTILINE | re.IGNORECASE),
+    # `| Class | <value> |` — the Fields-table row. recon FIND reports
+    # carry the canonical Class there (no `- **Class**` bullet) since
+    # the section duplicating it was dropped from the template.
+    re.compile(r"^\s*\|\s*Class(?:ification)?\s*\|\s*`?([A-Za-z][\w:.\-]*)`?\s*\|", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^\s*-?\s*Category\s*:\s*`?([A-Za-z][\w:.\-]*)`?", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^\s*-?\s*Memory[- ]safety\s+class\s*:\s*`?([A-Za-z][\w:.\-]*)`?", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^\s*-?\s*Issue\s+class\s*:\s*`?([A-Za-z][\w:.\-/ ]*?)`?\s*$", re.MULTILINE | re.IGNORECASE),

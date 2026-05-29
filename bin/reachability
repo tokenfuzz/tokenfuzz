@@ -2083,14 +2083,24 @@ def _format_severity_line(sev: dict) -> str:
     return f"- **Severity**: {sev['level']} (auto: {'; '.join(parts)})"
 
 
-def _replace_severity_line(text: str, new_line: str) -> str:
-    """Replace the first '- **Severity**: ...' line, or insert under '## Classification'."""
+def _replace_severity_line(text: str, new_line: str, *, synthesize: bool = True) -> str:
+    """Replace the first '- **Severity**: ...' line, or insert under '## Classification'.
+
+    When `synthesize=False`, the function ONLY replaces an existing bullet
+    and does not insert / create a stub Classification section if none is
+    found. Callers pass `synthesize=False` when the Fields-table Severity
+    cell is the authoritative source — synthesizing a duplicate bullet
+    (or worse, a stub heading) would undo the slim-shape cleanup that
+    recon FIND reports rely on.
+    """
     lines = text.splitlines()
     sev_re = re.compile(r"^-\s*\*\*Severity\*\*\s*:")
     for i, line in enumerate(lines):
         if sev_re.match(line):
             lines[i] = new_line
             return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    if not synthesize:
+        return text
     # No existing line — insert after "## Classification".
     for i, line in enumerate(lines):
         if line.strip().lower().startswith("## classification"):
@@ -2105,14 +2115,20 @@ def _format_severity_field(sev: dict) -> str:
     return f"{sev['level']} ({sev['score']})"
 
 
-def _replace_structured_field(text: str, field: str, value: str) -> str:
-    """Replace an existing structured report field.
+def _replace_structured_field(text: str, field: str, value: str) -> tuple[str, bool]:
+    """Replace an existing structured report field. Returns (new_text, changed).
 
     Agent reports commonly carry a top `| Field | Value |` table plus the
     generated Classification severity line. `bin/reachability` is the owner of
     recomputed severity, so keep the table in sync when that row exists. We do
     not create a new table row here; reports without a structured field already
     have the generated severity line as the single source of truth.
+
+    The bool return lets `update_report` skip the verbose
+    `- **Severity**: <level> (auto: …)` bullet when the Fields table already
+    carries the canonical row — recon-materialized FINDs use the Fields table
+    as the only writer for Severity and would otherwise have a stub
+    `## Classification` section synthesized under them on every run.
     """
     lines = text.splitlines()
     wanted = field.lower()
@@ -2138,7 +2154,8 @@ def _replace_structured_field(text: str, field: str, value: str) -> str:
                 lines[i] = bare_re.sub(lambda m: f"{m.group(1)}{value}", line)
                 changed = True
                 break
-    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    new_text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    return new_text, changed
 
 
 def _replace_reachability_section(text: str, new_section: str) -> str:
@@ -2210,39 +2227,25 @@ def _format_severity_section(sev: dict) -> str:
         )
     lines.append("")
     lines.append("**Calibration notes** (industry alignment):")
-    lines.append(
-        "- _Impact (I)_ — primitive class + caller-controlled offset/size/value. "
-        "Maps to CVSS C/I/A Impact subscore. **Memory-safety**: UAF/wild WRITE = 40, "
-        "heap WRITE = 32, stack WRITE = 30, big READ = 24, small READ = 16, "
-        "BUS/null = 5–8. **Web/app vulns**: command-injection/RCE = 40, "
-        "deserialization = 38, SQLi/SSTI = 36, authn-bypass = 32, "
-        "SSRF/path-traversal/authz-bypass = 28, XXE = 26, IDOR = 22, "
-        "prototype-pollution = 20, XSS = 18, open-redirect/crypto-weakness = 14, "
-        "CSRF/ReDoS = 12. Modifiers cap at +6."
-    )
-    lines.append(
-        "- _Reach (R)_ — `surface × callers × contract × controls`. "
-        "Maps to CVSS Attack Vector × AC × PR × UI. **Multiplicative** — any "
-        "near-zero gate collapses the side. Surface tiers: network 28, popular "
-        "library 22, library 16, file parser 14, production CLI 8, "
-        "**dev/test/maintenance tool 1**, internal harness 0. Popularity is "
-        "expressed by the surface-tier upgrade (library → library_popular at "
-        f"≥{POPULAR_LIBRARY_THRESHOLD} genuine callers); the callers factor is a narrow "
-        "secondary tilt (×0.90–×1.10) so two bugs in the same tier can still "
-        "be ordered by reach without double-counting popularity. Contract is "
-        "the CVSS Attack Complexity analog — obeyed is the ×1.0 baseline, "
-        "violated is ×0.7 (we never *reward* the baseline case with a bonus). "
-        "A bug in `maint/`, `tests/`, `fuzz/`, or any binary matching `*test`/`*fuzz` "
-        "lands in the dev_tool tier and stays Low even if its impact is high — "
-        "this aligns with Microsoft Bug Bar and Project Zero practice that "
-        "non-shipping code is not a security-relevant input surface."
-    )
-    lines.append(
-        "- _Confidence factor (CF)_ — multiplies the whole score. "
-        "Maps to CVSS Temporal Report Confidence. Baseline 0.7; "
-        "+0.20 for 5/5 repro, +0.05 for cluster≥3, +0.05 for SCARINESS≥50. "
-        "Range [0.5, 1.0] — flaky single-run reports get derated by half."
-    )
+    lines.append("")
+    # Restructured as nested lists so each axis sits as a top-level item
+    # with its calibration numbers under sub-bullets. Reads much better
+    # than a single paragraph stuffed with semicolon-separated tiers,
+    # and the nested form survives markdown→HTML rendering as
+    # `<ul><li>…<ul><li>…</li></ul></li></ul>`.
+    lines.append("- _Impact (I)_ — primitive class + caller-controlled offset/size/value. Maps to CVSS C/I/A Impact subscore.")
+    lines.append("    - **Memory-safety**: UAF/wild WRITE = 40 · heap WRITE = 32 · stack WRITE = 30 · big READ = 24 · small READ = 16 · BUS/null = 5–8")
+    lines.append("    - **Web/app vulns**: command-injection/RCE = 40 · deserialization = 38 · SQLi/SSTI = 36 · authn-bypass = 32 · SSRF/path-traversal/authz-bypass = 28 · XXE = 26 · IDOR = 22 · prototype-pollution = 20 · XSS = 18 · open-redirect/crypto-weakness = 14 · CSRF/ReDoS = 12")
+    lines.append("    - Modifiers cap at +6")
+    lines.append("- _Reach (R)_ — `surface × callers × contract × controls`. Maps to CVSS Attack Vector × AC × PR × UI. **Multiplicative** — any near-zero gate collapses the side.")
+    lines.append("    - **Surface tiers**: network 28 · popular library 22 · library 16 · file parser 14 · production CLI 8 · **dev/test/maintenance tool 1** · internal harness 0")
+    lines.append(f"    - **Popularity**: expressed by the surface-tier upgrade (library → library_popular at ≥{POPULAR_LIBRARY_THRESHOLD} genuine callers); the callers factor is a narrow secondary tilt (×0.90–×1.10) so two bugs in the same tier can still be ordered by reach without double-counting popularity")
+    lines.append("    - **Contract** (CVSS Attack Complexity analog): obeyed = ×1.0 baseline · violated = ×0.7 (we never *reward* the baseline case with a bonus)")
+    lines.append("    - **Non-shipping surfaces**: bugs in `maint/`, `tests/`, `fuzz/`, or any binary matching `*test`/`*fuzz` land in the dev_tool tier and stay Low even if their impact is high — aligns with Microsoft Bug Bar and Project Zero practice that non-shipping code is not a security-relevant input surface")
+    lines.append("- _Confidence factor (CF)_ — multiplies the whole score. Maps to CVSS Temporal Report Confidence.")
+    lines.append("    - **Baseline**: 0.7")
+    lines.append("    - **Bonuses**: +0.20 for 5/5 repro · +0.05 for cluster≥3 · +0.05 for SCARINESS≥50")
+    lines.append("    - **Range** [0.5, 1.0] — flaky single-run reports get derated by half")
     return "\n".join(lines) + "\n"
 
 
@@ -2288,8 +2291,16 @@ def _replace_severity_section(text: str, new_section: str) -> str:
 
 def update_report(report_path: Path, reachability: dict, severity: dict) -> None:
     text = report_path.read_text("utf-8", errors="replace")
-    text = _replace_structured_field(text, "Severity", _format_severity_field(severity))
-    text = _replace_severity_line(text, _format_severity_line(severity))
+    text, fields_sev_updated = _replace_structured_field(
+        text, "Severity", _format_severity_field(severity),
+    )
+    # Always update an existing `- **Severity**: …` bullet (legacy crash
+    # reports rely on the auto-formula being kept in sync), but never
+    # synthesize one — that would inject a stub `## Classification`
+    # heading into the slim recon-finding template on every run.
+    text = _replace_severity_line(
+        text, _format_severity_line(severity), synthesize=not fields_sev_updated,
+    )
     text = _replace_reachability_section(text, _format_reachability_section(reachability))
     text = _replace_severity_section(text, _format_severity_section(severity))
     report_path.write_text(text, "utf-8")

@@ -214,11 +214,17 @@ _HTML_HEAD = """<!DOCTYPE html>
     --chip-unk-fg:   #64748b;
   }}
   html, body {{ background: var(--bg); color: var(--fg); }}
+  /* Hard backstop against page-level horizontal scroll: no individual
+     element should ever push the document wider than the viewport.
+     Long unbreakable content (C++ symbols, identifiers, diff lines)
+     scrolls inside its own container (`.table-wrap`, `<pre>`) instead. */
+  html {{ overflow-x: hidden; }}
   body {{
     font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
     max-width: 1320px;
     margin: 2em auto;
     padding: 0 1.5em 5em;
+    overflow-x: hidden;
   }}
   h1 {{
     font-size: 1.85em;
@@ -279,6 +285,14 @@ _HTML_HEAD = """<!DOCTYPE html>
     font-family: var(--mono);
     font-size: .92em;
     color: #2c3e50;
+    /* Long unbreakable identifiers (C++ qualified names, file paths
+       with no separators) would otherwise push their parent past the
+       viewport. Allow a break at any character when content would
+       overflow — only kicks in when normal word-boundary breaking
+       isn't enough. Table cells override this via `td code` below to
+       keep slugs / CVE ids / run timestamps atomic, with the wrap
+       falling back to the `.table-wrap`'s horizontal scroll. */
+    overflow-wrap: anywhere;
   }}
   pre {{
     background: var(--bg-alt);
@@ -521,6 +535,13 @@ _HTML_HEAD = """<!DOCTYPE html>
     color: var(--fg);
     border-top: 1px solid var(--border-soft);
     padding-top: .65em;
+    /* Long C++ symbols (`sampledb::Engine::Store::set_blob`) inside
+       the summary were the original culprit for page-level horizontal
+       overflow on narrow viewports — make the box itself a contained
+       line context so its inline `<code>` chips wrap before the page
+       does. */
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }}
   .primitive {{
     display: inline-block;
@@ -703,6 +724,46 @@ _MATERIAL_CSS = """
   ul { margin: .8em 0; padding-left: 1.4em; }
   li { margin: .35em 0; }
   .sev { padding: 3px 12px; letter-spacing: .03em; }
+
+  /* Enrichment cards: snippet stacks (Data Flow / ASan / Affected) and
+     the captured patch get a Material 3 surface so the long chain of
+     paragraph, code, and rule siblings reads as one contained group.
+     The card sits inside the section heading flow and adopts the M3
+     elevation + large corner radius. Inner code blocks drop their own
+     shadow — the card already provides elevation. */
+  .enrich-card {
+    background: var(--surface-lowest);
+    border-radius: 20px;
+    box-shadow: var(--shadow-md);
+    padding: 1.1em 1.4em;
+    margin: 1em 0 1.4em;
+  }
+  .enrich-card > :first-child { margin-top: 0; }
+  .enrich-card > :last-child { margin-bottom: 0; }
+  .enrich-card pre {
+    background: var(--bg);
+    box-shadow: none;
+    border-radius: 12px;
+    margin: .5em 0 .75em;
+  }
+  /* The "↳ Referenced in:" caption + "From file (lines):" line + the
+     fenced source window form a logical sub-block within a snippet card.
+     Tighten the spacing between them and let the divider between blocks
+     do the visual separation. */
+  .enrich-snippets > p { margin: .4em 0; }
+  .enrich-snippets > hr {
+    border: none;
+    border-top: 1px solid var(--border-soft);
+    margin: 1.1em -.4em;
+  }
+  .enrich-snippets em.note { display: inline-block; margin-top: .15em; }
+  .enrich-patch pre { margin: 0; }
+
+  /* Severity rationale axis table — now that `<br>` survives inline
+     rendering, each reach reason lands on its own line. Bump the
+     vertical rhythm so the "Why" column doesn't crush its rows. */
+  details.collapsible td { vertical-align: top; line-height: 1.55; }
+  details.collapsible td br + * { margin-top: .2em; }
 """
 
 
@@ -733,14 +794,47 @@ _URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _SAFE_URL_SCHEME_RE = re.compile(r"^(?:https?|mailto|ftp|file):", re.IGNORECASE)
 _BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 _ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)")
-_UNDERSCORE_ITALIC_RE = re.compile(r"(?<![A-Za-z0-9_])_([^_\n]+)_(?![A-Za-z0-9_])")
+# Italic with underscores: `_..._` where the boundary underscores sit at
+# word edges. Allow underscores *inside* the body when wedged between
+# word characters — otherwise an identifier like `cli_production` inside
+# the italic breaks the match and the literal `_` text leaks through to
+# the page (`_Symbols: cli_production, frame_capacity_`).
+_UNDERSCORE_ITALIC_RE = re.compile(
+    r"(?<![A-Za-z0-9_])_"
+    r"([^\n_]+(?:_[A-Za-z0-9][^\n_]*)*)"
+    r"_(?![A-Za-z0-9_])"
+)
 _HTML_COMMENT_LINE_RE = re.compile(r"^<!--.*?-->\s*$")
+# Enrichment blocks (`<!-- enrich:NAME -->...<!-- /enrich:NAME -->`) that
+# the triage hero card already covers in richer form. Skipped in HTML
+# output when the hero card was emitted — the markdown source still
+# carries them for plain-text readers, harness parsers, and GitHub.
+_HERO_DUPLICATED_ENRICH = ("tldr", "severity-badge", "cluster-siblings")
+# Enrichment blocks whose body benefits from being grouped inside a
+# Material 3 surface card — the snippet stacks (Data Flow, Affected,
+# ASan frames) and the captured patch otherwise render as a long
+# disjointed sequence of `<p>` / `<pre>` / `<hr>` siblings with no
+# visual containment.
+_ENRICH_CARD_CLASSES = {
+    "data-flow-snippets": "enrich-card enrich-snippets",
+    "affected-snippets":  "enrich-card enrich-snippets",
+    "asan-snippets":      "enrich-card enrich-snippets",
+    "patch-diff":         "enrich-card enrich-patch",
+}
+_ENRICH_OPEN_RE = re.compile(r"^<!--\s*enrich:([A-Za-z0-9_-]+)\s*-->\s*$")
+_ENRICH_CLOSE_RE = re.compile(r"^<!--\s*/enrich:([A-Za-z0-9_-]+)\s*-->\s*$")
 # CommonMark thematic break: a run of 3+ matching `-`, `*`, or `_` on a
 # line by itself. lib/report_enrich.py joins enrichment snippet blocks
 # with `\n\n---\n\n`; without this rule a stand-alone `---` rendered as
 # `<p>---</p>`. Diff `--- a/file` / `+++ b/file` header lines stay
 # inside the fenced-code parser and are not seen here.
 _THEMATIC_BREAK_RE = re.compile(r"-{3,}|\*{3,}|_{3,}")
+# Literal `<br>` / `<br/>` / `<br />` in source markdown — the standard
+# GFM escape hatch for multi-line table cells (cells cannot span source
+# lines). Without preservation, `html.escape` would print the literal
+# tag text in the rendered page (most visibly in the Severity rationale
+# axis table, whose "Why" column joins reasons with `<br>`).
+_LITERAL_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 
 
 def _slug(text: str) -> str:
@@ -780,13 +874,18 @@ def _render_inline(text: str) -> str:
 
     s = _INLINE_CODE_RE.sub(_stash_codes, text)
     s = _INLINE_LINK_RE.sub(_stash_links, s)
+    # Preserve literal `<br>` from the source (GFM multi-line cells) past
+    # html.escape — stash as a placeholder, restore as a real <br> below.
+    def _stash_br(_m: re.Match) -> str:
+        parts.append(("br", "<br>"))
+        return f"\x00B{len(parts) - 1}\x00"
+    s = _LITERAL_BR_RE.sub(_stash_br, s)
     s = html.escape(s)
     s = _BOLD_RE.sub(r"<strong>\1</strong>", s)
     s = _ITALIC_RE.sub(r"<em>\1</em>", s)
     s = _UNDERSCORE_ITALIC_RE.sub(r'<em class="note">\1</em>', s)
 
     def _restore(m: re.Match) -> str:
-        kind = m.group(1)
         idx = int(m.group(2))
         k, content = parts[idx]
         if k == "code":
@@ -798,7 +897,7 @@ def _render_inline(text: str) -> str:
     # re-scan its own substitutions. Code is stashed before links, so each
     # pass strictly reduces the placeholder count — this terminates.
     while "\x00" in s:
-        s, n = re.subn(r"\x00([CL])(\d+)\x00", _restore, s)
+        s, n = re.subn(r"\x00([CLB])(\d+)\x00", _restore, s)
         if not n:
             break
     return s
@@ -810,13 +909,73 @@ _SEV_CELL_RE = re.compile(
     r"^\s*(Critical|High|Medium|Low|Unknown|—)(?:\s*\((\d+)\))?\s*$"
 )
 
+# Strategy short-codes used in REPORT.md `Strategy:` field. The full
+# names live in `.agents/references/strategies/README.md`; mirroring the
+# title here lets the HTML field show `S1 — Prior-fix + regression
+# variant` instead of an opaque code. `REF` is a pattern reference, not
+# a strategy proper, but the field accepts it.
+_STRATEGY_NAMES = {
+    "S1":  "Prior-fix + regression variant",
+    "S2":  "Invariant negation",
+    "S3":  "Spec-vs-impl + fast-paths",
+    "S4":  "Advanced differential",
+    "S5":  "Lifetime & state violation",
+    "S6":  "Cross-project variant mining",
+    "S7":  "Adversarial input & fuzz engineering",
+    "S8":  "Property-based oracles",
+    "REF": "Pattern reference",
+}
+_STRATEGY_CELL_RE = re.compile(r"^\s*(S[1-8]|REF)\s*$")
 
-def _decorate_cell(rendered_html: str, raw_cell: str) -> str:
+# Advisory field is a yes/no flag — `yes` means the bundle ships a
+# `## Fix Direction` narrative *without* a surgical patch.diff, by
+# design (ABI-breaking, capacity-aware-API replacement, etc.). The
+# inline explanation tells a triager which of the two the report is.
+_ADVISORY_HINTS = {
+    "no":  "patch.diff included",
+    "yes": "advisory only — no patch",
+}
+
+# CRASH-* / FIND-* sibling IDs that appear inside cluster cells. Each
+# resolves to `../<ID>/REPORT.html` (the bundle layout is uniform).
+_CLUSTER_SIBLING_RE = re.compile(r"\b((?:CRASH|FIND)-\d+(?:-\d+)?)\b")
+
+
+def _linkify_cluster_siblings(rendered_html: str) -> str:
+    """Wrap each CRASH-NNN-N / FIND-NNN-N token in a relative link to
+    its sibling REPORT.html. Operates on already-rendered HTML so we
+    don't accidentally rewrite a sibling that the author already
+    linkified — only bare textual tokens get wrapped."""
+
+    def _wrap(m: re.Match) -> str:
+        sid = m.group(1)
+        return f'<a href="../{sid}/REPORT.html">{sid}</a>'
+
+    # Avoid re-linkifying tokens that already sit inside an <a>…</a>.
+    # Simple split on existing anchors keeps the rule cheap and robust
+    # without parsing the HTML — wrappers we emit ourselves end at the
+    # closing `</a>` so subsequent passes see the wrapped form.
+    out: list[str] = []
+    pos = 0
+    for anchor in re.finditer(r"<a\b[^>]*>.*?</a>", rendered_html, re.DOTALL):
+        out.append(_CLUSTER_SIBLING_RE.sub(_wrap, rendered_html[pos:anchor.start()]))
+        out.append(anchor.group(0))
+        pos = anchor.end()
+    out.append(_CLUSTER_SIBLING_RE.sub(_wrap, rendered_html[pos:]))
+    return "".join(out)
+
+
+def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "") -> str:
     """Wrap severity / surface tokens in styled spans so the HTML view
     shows pill-shaped badges and chips. Operates on the raw cell text
     (pre-render) so Critical/High/Medium/Low don't have to be matched
-    inside HTML markup."""
+    inside HTML markup. `row_key` carries the row's key column when the
+    cell is the value side of a Fields-style key/value row — used to
+    add inline hints for Advisory / Strategy / Cluster cells whose raw
+    value (`yes`, `S1`, a CL-id) is too generic to detect by content
+    shape alone."""
     raw = raw_cell.strip()
+    key = row_key.strip().lower()
 
     # Severity pill: "Critical (68)" → span.sev-Critical
     m = _SEV_CELL_RE.match(raw)
@@ -851,6 +1010,36 @@ def _decorate_cell(rendered_html: str, raw_cell: str) -> str:
         if reason:
             chip += f'<span class="chip-reason">— {html.escape(reason)}</span>'
         return chip
+
+    # Strategy code → code + full name. The short code stays the
+    # primary signal (matches the parser-visible bare-label form);
+    # the title appended in muted text explains what S1 actually is.
+    if key == "strategy":
+        strat_m = _STRATEGY_CELL_RE.match(raw)
+        if strat_m:
+            code = strat_m.group(1)
+            return (
+                f'<code>{code}</code>'
+                f'<span class="chip-reason">— {html.escape(_STRATEGY_NAMES[code])}</span>'
+            )
+
+    # Advisory yes/no → keep the verdict, append the meaning so a
+    # triager doesn't have to remember which side ships a patch.
+    if key == "advisory" and raw.lower() in _ADVISORY_HINTS:
+        verdict = raw.lower()
+        return (
+            f'{html.escape(verdict)}'
+            f'<span class="chip-reason">— {_ADVISORY_HINTS[verdict]}</span>'
+        )
+
+    # Cluster cell carries the cluster id plus a parenthesized list of
+    # sibling CRASH-* / FIND-* IDs — turn each one into a click-through
+    # to the sibling REPORT.html. Linkification is applied to the
+    # already-rendered HTML so existing markdown links (if any) are
+    # preserved untouched.
+    if key == "cluster":
+        return _linkify_cluster_siblings(rendered_html)
+
     return rendered_html
 
 
@@ -884,11 +1073,17 @@ def _render_table_html(header: list[str], align: list[str], body: list[list[str]
         out.append(f"  <th{_align_class(a)}>{_render_inline(c)}</th>")
     out.append("</tr></thead>")
     out.append("<tbody>")
+    # For Fields-style key/value tables the value cell can be decorated
+    # with hints derived from the key column (Advisory yes/no, Strategy
+    # code, Cluster CRASH-* siblings). Threading the row's column-0 text
+    # to `_decorate_cell` keeps the decorator stateless across rows.
+    is_kv_table = extra == "fields-table"
     for row in body:
         out.append("  <tr>")
         for i, c in enumerate(row):
             a = align[i] if i < len(align) else "none"
-            inner = _decorate_cell(_render_inline(c), c)
+            row_key = row[0] if (is_kv_table and i > 0 and row) else ""
+            inner = _decorate_cell(_render_inline(c), c, row_key)
             out.append(f"    <td{_align_class(a)}>{inner}</td>")
         out.append("  </tr>")
     out.append("</tbody>")
@@ -897,10 +1092,13 @@ def _render_table_html(header: list[str], align: list[str], body: list[list[str]
     return "\n".join(out)
 
 
-# GFM lists. We only handle a single level — that's all REPORT.md /
-# CLUSTERS.md / INDEX.md ever emit.
-_UL_ITEM_RE = re.compile(r"^\s*[-*]\s+(.*)$")
-_OL_ITEM_RE = re.compile(r"^\s*\d+\.\s+(.*)$")
+# GFM lists. Indentation-aware: leading-whitespace count is preserved so
+# the renderer can nest sub-items as `<ul><li>…<ul><li>…</li></ul></li>…`.
+# Reachability calibration notes and other long bullet lists use this to
+# group sub-points (Memory-safety tiers, Surface tiers, etc.) under a
+# single top-level item.
+_UL_ITEM_RE = re.compile(r"^(?P<indent>\s*)[-*]\s+(?P<body>.*)$")
+_OL_ITEM_RE = re.compile(r"^(?P<indent>\s*)\d+\.\s+(?P<body>.*)$")
 
 # Structured fields the harness duplicates *below* the Fields table as
 # bare-label lines for downstream regex parsers (bin/reachability,
@@ -911,7 +1109,15 @@ _OL_ITEM_RE = re.compile(r"^\s*\d+\.\s+(.*)$")
 _BARE_LABEL_KEYS = (
     "Surface", "Trigger source", "Caller contract", "Caller controls",
     "Parameter control", "Boundary", "Trusted caller actions", "Reproduction rate",
-    "Cluster", "Primitive", "Strategy",
+    "Cluster", "Primitive", "Strategy", "Dedup frames", "Advisory",
+    "ClusterFuzz key frames",
+    # Finding-side regex-extraction keys: recon FIND-* reports carry
+    # bare `Cluster:` / `Dedup key:` / `Recon ID:` / `Validator details:`
+    # lines that downstream parsers (cluster-findings, finding_signature,
+    # lib/benchmark _RECON_LINK_PATTERNS) consume. Hide them from HTML
+    # output — the hero card already shows the cluster, and the audit-only
+    # metadata would just clutter an upstream-facing view.
+    "Dedup key", "Recon ID", "Validator details",
 )
 _BARE_LABEL_RE = re.compile(
     r"^(?:" + "|".join(re.escape(k) for k in _BARE_LABEL_KEYS) + r"):\s+\S"
@@ -957,7 +1163,25 @@ def _render_definition_list(lines: list[str]) -> str | None:
 # canonical sanitizer view.
 _COLLAPSIBLE_HEADINGS = {
     "severity rationale",
+    # Provenance on a recon-materialized FIND is harness-only book-keeping
+    # (Recon ID, Slice). Upstream maintainers don't need it; the audit
+    # operator does, so we collapse-not-hide.
+    "provenance",
 }
+
+# Bullet labels under `## Classification` that are harness-only triage
+# state — drop them from HTML so an upstream maintainer doesn't see
+# Recon-stage validator votes / internal confidence tags. Match the
+# `**Label**:` / `**Label:**` prefix, case-insensitive. Markdown source
+# keeps them for the audit operator and any harness tooling.
+_HARNESS_ONLY_CLASS_LABELS = (
+    "recon confidence",
+    "validator verdict",
+    "validator details",
+)
+_CLASS_BULLET_LABEL_RE = re.compile(
+    r"^\s*\*\*(?P<label>[^*]+?)\*\*\s*[:：]",
+)
 
 # Cluster placeholder the harness writes before bin/cluster-crashes
 # computes a real ID. Rendered as a muted dash in the HTML Fields
@@ -1006,7 +1230,39 @@ _PRIMITIVE_CATEGORY = {
     "alignment":            "type",
     "type-confusion":       "type",
     "null-deref":           "state",
+    # Finding-side bug-class vocabulary (recon stage). Maps `- **Class**:
+    # <class>` values from the Classification section to the hero card's
+    # category colour scheme so findings inherit the same visual tier as
+    # the equivalent crash primitive.
+    "integer-overflow":     "type",
+    "integer-truncation":   "type",
+    "bounds":               "bounds",
+    "lifetime":             "lifetime",
+    "uninit":               "uninit",
+    "type":                 "type",
+    "state":                "state",
+    "size":                 "type",
 }
+
+# Finding-shape fallbacks. Findings ship structured fields as
+# Classification bullets / a `Cluster:` bare label / a Location section
+# instead of a Fields table — extract those when the Fields-table path
+# turns up empty so findings get the same hero-card signal as crashes.
+_CLASS_BULLET_RE = re.compile(
+    r"^[-*]\s*\*\*Class\*\*\s*:\s*(?P<val>[A-Za-z][\w\-]+)",
+    re.MULTILINE,
+)
+_CLUSTER_BARE_RE = re.compile(
+    r"^Cluster:\s*(?P<val>[A-Za-z0-9_\-]+(?:[^\n]*))",
+    re.MULTILINE,
+)
+_LOCATION_SECTION_RE = re.compile(
+    r"^##\s+Location\s*\n+(?P<body>(?:[^\n#].*\n?)+)",
+    re.MULTILINE,
+)
+_LOCATION_TRIPLE_RE = re.compile(
+    r"`?(?P<path>[\w./+\-]+):(?P<func>[\w:~<>*&\-]+):(?P<line>\d+)`?"
+)
 
 
 def _frames_from_dedup_value(value: str) -> list[stack_frames.StackFrame]:
@@ -1067,6 +1323,21 @@ def _extract_hero(text: str) -> dict:
                 h["severity_score"] = score_m.group(1) if score_m else None
                 break
 
+    # Finding-shape fallbacks: when the Fields table is absent (recon
+    # findings use Classification bullets + a bare `Cluster:` line +
+    # a Location section), pull the same signals from those alternate
+    # forms so the hero card lights up for findings too.
+    if not h.get("primitive"):
+        cm = _CLASS_BULLET_RE.search(text)
+        if cm:
+            h["primitive"] = cm.group("val").strip()
+    if not h.get("cluster"):
+        cm = _CLUSTER_BARE_RE.search(text)
+        if cm:
+            val = cm.group("val").strip()
+            if not _CLUSTER_PLACEHOLDER_RE.match(val):
+                h["cluster"] = val
+
     # Find the first three interesting ASan frames anywhere in the
     # document. Sanitizer/libc/fuzzer wrappers often occupy #0, so literal
     # #0 is a poor triage headline, and the clusterer now keys on the same
@@ -1085,6 +1356,18 @@ def _extract_hero(text: str) -> dict:
                 dedup_value = m.group("val").strip()
         if dedup_value:
             frames = _frames_from_dedup_value(dedup_value)
+    # Finding fallback: Location section carries `path:func:line` as
+    # the primary site (no stack, since recon never ran the bug). Turn
+    # that into a synthetic single-frame so the hero card shows where
+    # the defect lives instead of being frame-less.
+    if not frames:
+        lm = _LOCATION_SECTION_RE.search(text)
+        if lm:
+            loc_m = _LOCATION_TRIPLE_RE.search(lm.group("body"))
+            if loc_m:
+                func = loc_m.group("func")
+                loc = f"{loc_m.group('path').split('/')[-1]}:{loc_m.group('line')}"
+                frames = [stack_frames.StackFrame(1, func, loc, func)]
     if frames:
         h["top_frames"] = frames
         h["top_frame_func"] = frames[0].state_function
@@ -1176,7 +1459,11 @@ def _render_hero(h: dict) -> str:
             f'<span><strong>{html.escape(h["callers"])}</strong> external callers</span>'
         )
     if h.get("cluster"):
-        meta.append(f'<span><strong>Cluster</strong> {html.escape(h["cluster"])}</span>')
+        # Linkify CRASH-* / FIND-* sibling references in the cluster
+        # string so the reviewer can hop between siblings from the
+        # hero card. Escape first, then linkify the safe tokens.
+        cluster_html = _linkify_cluster_siblings(html.escape(h["cluster"]))
+        meta.append(f'<span><strong>Cluster</strong> {cluster_html}</span>')
     if meta:
         parts.append('<div class="triage-meta">' + "".join(meta) + "</div>")
 
@@ -1256,9 +1543,41 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
         # Stand-alone HTML comments (most often the <!-- enrich:NAME -->
         # idempotency fences emitted by bin/enrich-report) drop out of
         # the rendered HTML entirely — otherwise html.escape would print
-        # the raw marker text on the page.
+        # the raw marker text on the page. For enrichment blocks whose
+        # signal is already covered by the triage hero card (TL;DR /
+        # severity badge / cluster siblings), skip past the *entire*
+        # block so the prose between open and close fences is also
+        # suppressed in HTML — the markdown source keeps it for
+        # plain-text readers and parsers. For snippet stacks and the
+        # captured patch, wrap the body in a Material 3 surface card so
+        # the long sequence of `<p>`/`<pre>` siblings reads as one
+        # contained group instead of free-floating elements.
         if _HTML_COMMENT_LINE_RE.match(stripped):
             _flush_paragraph()
+            open_m = _ENRICH_OPEN_RE.match(stripped)
+            if open_m:
+                name = open_m.group(1)
+                if name in _HERO_DUPLICATED_ENRICH and (hero_emitted or hero):
+                    close_re = re.compile(
+                        r"^<!--\s*/enrich:" + re.escape(name) + r"\s*-->\s*$"
+                    )
+                    j = i + 1
+                    while j < len(lines) and not close_re.match(lines[j].strip()):
+                        j += 1
+                    i = j + 1
+                    continue
+                if name in _ENRICH_CARD_CLASSES:
+                    body.append(
+                        f'<section class="{_ENRICH_CARD_CLASSES[name]}">'
+                    )
+                    i += 1
+                    continue
+            close_m = _ENRICH_CLOSE_RE.match(stripped)
+            if close_m and close_m.group(1) in _ENRICH_CARD_CLASSES:
+                _flush_paragraph()
+                body.append("</section>")
+                i += 1
+                continue
             i += 1
             continue
 
@@ -1407,20 +1726,80 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
         ol_m = _OL_ITEM_RE.match(line)
         if ul_m or ol_m:
             _flush_paragraph()
-            tag = "ul" if ul_m else "ol"
-            item_re = _UL_ITEM_RE if ul_m else _OL_ITEM_RE
-            items: list[str] = []
+            # Indentation-driven nesting: each item carries its leading
+            # whitespace count; deeper indentation opens a child list,
+            # shallower closes back. The stack tracks open `<ul>` / `<ol>`
+            # tags by indent level so emitted HTML stays well-formed even
+            # when a list mixes single and multi-level rows. Only handles
+            # the shape REPORT.md / Calibration notes actually use —
+            # not full CommonMark loose-list / lazy-continuation rules.
+            list_stack: list[tuple[int, str]] = []  # (indent, tag)
+            html_chunks: list[str] = []
+
+            def _open(indent: int, tag: str) -> None:
+                list_stack.append((indent, tag))
+                html_chunks.append(f"<{tag}>")
+
+            def _is_harness_only_bullet(body_text: str) -> bool:
+                """Skip Classification bullets that carry harness-only
+                triage state (`**Recon confidence**: …`, `**Validator
+                verdict**: …`, `**Validator details:** …`). These leak
+                from recon-materialized FIND reports and clutter the
+                upstream-facing HTML view. Markdown source keeps them
+                untouched for harness tooling."""
+                lab_m = _CLASS_BULLET_LABEL_RE.match(body_text)
+                if not lab_m:
+                    return False
+                return lab_m.group("label").strip().lower() in _HARNESS_ONLY_CLASS_LABELS
+
+            first_indent = len((ul_m or ol_m).group("indent").expandtabs(4))
+            first_tag = "ul" if ul_m else "ol"
+            first_body = (ul_m or ol_m).group("body").strip()
+            _open(first_indent, first_tag)
+            first_skip = _is_harness_only_bullet(first_body)
+            if first_skip:
+                # Keep the list open but emit no <li> for this item — the
+                # next sibling (if any) won't try to close a non-existent
+                # <li>. Track skip so we know not to emit a `</li>` when
+                # closing.
+                pass
+            else:
+                html_chunks.append(f"<li>{_render_inline(first_body)}")
+            last_li_open = not first_skip
+            i += 1
             while i < len(lines):
-                m = item_re.match(lines[i])
+                m = _UL_ITEM_RE.match(lines[i]) or _OL_ITEM_RE.match(lines[i])
                 if not m:
                     break
-                items.append(m.group(1).strip())
+                indent = len(m.group("indent").expandtabs(4))
+                tag = "ul" if _UL_ITEM_RE.match(lines[i]) else "ol"
+                item_body = m.group("body").strip()
+                if indent > list_stack[-1][0]:
+                    _open(indent, tag)
+                    last_li_open = False  # fresh nested list, no <li> yet
+                else:
+                    while len(list_stack) > 1 and indent < list_stack[-1][0]:
+                        if last_li_open:
+                            html_chunks.append("</li>")
+                        _, t = list_stack.pop()
+                        html_chunks.append(f"</{t}>")
+                        last_li_open = True  # parent li was open
+                    if last_li_open:
+                        html_chunks.append("</li>")
+                if _is_harness_only_bullet(item_body):
+                    last_li_open = False
+                else:
+                    html_chunks.append(f"<li>{_render_inline(item_body)}")
+                    last_li_open = True
                 i += 1
-            body.append(
-                f"<{tag}>"
-                + "".join(f"<li>{_render_inline(it)}</li>" for it in items)
-                + f"</{tag}>"
-            )
+            # Close any items / lists still open.
+            while list_stack:
+                if last_li_open:
+                    html_chunks.append("</li>")
+                _, t = list_stack.pop()
+                html_chunks.append(f"</{t}>")
+                last_li_open = True
+            body.append("".join(html_chunks))
             continue
 
         if line.endswith("  "):

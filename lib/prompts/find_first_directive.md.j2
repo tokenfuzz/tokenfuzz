@@ -34,3 +34,19 @@ block), the FIND already exists in `{{ results_dir }}/findings/<find_id>/`.
 Augment that dir — never create a new `FIND-NNN-<slug>/` for the same
 defect. The pre-filed id is the canonical record; double-filing inflates
 the benchmark count and breaks cluster dedup.
+
+**Optional but encouraged — `patch.diff`.** When your fix is a surgical
+diff (a missing check, a corrected size, an inverted predicate),
+save it as a file named exactly `patch.diff` in the FIND directory
+alongside `report.md`. `bin/enrich-report` is the sole writer of the
+`## Patch` section and will inline the sibling diff on render — so
+**do not write a `## Patch` section in `report.md` yourself**. Same
+filename and rule apply for CRASH directories. Capture with the
+target's VCS (`git -C "$TARGET_ROOT" diff -- path/to/file > "$DIR/patch.diff"`
+or `hg -R "$TARGET_ROOT" diff path/to/file > "$DIR/patch.diff"`); save
+whenever `git apply --check` / `hg import --no-commit` dry-run succeeds.
+Build/repro confirmation is a quality upgrade, not a gate. When the
+fix is non-surgical (ABI rename, signature change, API replacement),
+omit `patch.diff` entirely and add a `## Fix Direction` prose section
+instead — the exporter marks the bundle `Advisory: yes` so reviewers
+know the omission is intentional.

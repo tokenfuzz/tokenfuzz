@@ -324,16 +324,33 @@ def _render_find_report(
     notes = (finding.get("notes") or "").strip()
     rec_id = finding.get("id", "")
     slice_name = (finding.get("slice") or "").strip()
-    confidence = (finding.get("confidence") or "").strip() or "NEEDS-VERIFICATION"
     verdict = (finding.get("validator_verdict") or "").strip() or "unset"
     vdetails = (finding.get("validator_details") or "").strip()
+    # Keep only the dedup anchor `duplicate of RECON-<hash>` (the bit
+    # lib/benchmark._link_pool_recon_ids actually reads from the
+    # rendered markdown); the rest of vdetails is internal noise —
+    # verdict tallies, absolute /Users/.../output paths, deep-validator
+    # debug lines — that an upstream maintainer doesn't need and that
+    # we'd otherwise have to scrub at pool-render time.
+    vdetails_keep = ""
+    dup_m = re.search(r"duplicate of (RECON-[0-9a-f]+)", vdetails)
+    if dup_m:
+        vdetails_keep = f"duplicate of {dup_m.group(1)}"
 
     tldr_bug = f"`{file_path}:{function}:{line}` — {title}"
-    # The Location line uses the canonical `file:func:line` form that
-    # lib/finding_signature.extract_location parses. This is what
-    # cluster-findings and dedupe_recon_findings rely on for signature
-    # extraction — keep it as the single, machine-readable Location
-    # statement and put human-readable detail in the section below.
+    # Section order: Title → TL;DR → Summary → Fields → Reproducer →
+    # Sanitizer evidence → Reachability → Severity rationale. Summary
+    # precedes Fields so the human-facing description anchors the
+    # structured data. Location, Classification, and Provenance sections
+    # are gone — their data lives in Fields (File / Function / Line /
+    # Class / Severity) and in the canonical `file:func:line` token in
+    # the TL;DR (which `finding_signature.extract_location` matches via
+    # `_INLINE_FILE_FUNC_LINE_RE`). `_CLASS_PATTERNS` in finding_signature
+    # has a Fields-table entry, so Class extraction still works after
+    # the `- **Class**` bullet is dropped. `bin/reachability` skips the
+    # `- **Severity**:` bullet entirely when the Fields-table Severity
+    # row gets updated, so there's no risk of a stub Classification
+    # heading being synthesized under us.
     lines = [
         f"# {title}",
         "",
@@ -350,37 +367,40 @@ def _render_find_report(
         "",
         notes,
         "",
-        "## Location",
+        # Fields table mirrors the crash-report shape so a reviewer
+        # sees the structured signal in one block. `Severity` is the
+        # row bin/reachability rewrites on scoring; it starts as `TBD`
+        # and becomes e.g. `Medium (32)` after the first reachability
+        # pass.
+        "## Fields",
         "",
-        f"`{file_path}:{function}:{line}`",
+        "| Field    | Value           |",
+        "| :------- | :-------------- |",
+        f"| Class    | {klass}         |",
+        f"| Severity | TBD             |",
+        f"| File     | `{file_path}`   |",
+        f"| Function | `{function}`    |",
+        f"| Line     | {line}          |",
+        f"| Target   | `{target_slug}` |",
         "",
-        f"- **File:** `{file_path}`",
-        f"- **Function:** `{function}`",
-        f"- **Line:** {line}",
-        f"- **Target:** `{target_slug}`",
-        "",
-        "## Classification",
-        "",
-        # `- **Class**: <value>` (colon AFTER the closing asterisks) is
-        # the form finding_signature.extract_class picks up via its
-        # first _CLASS_PATTERNS entry. Variant punctuation ("**Class:**"
-        # with colon inside the bold, em-dash, etc.) silently loses the
-        # dedup-signature class component and degrades the augment-
-        # don't-refile guarantee. tests/test_recon_find_materialization
-        # asserts the materialized report yields a parseable class.
-        f"- **Class**: {klass}",
-        f"- **Recon confidence**: {confidence}",
-        f"- **Validator verdict**: {verdict}",
     ]
-    if vdetails:
-        lines.append(f"- **Validator details:** {vdetails}")
+    # Optional dedup-anchor — the `duplicate of RECON-<hash>` substring
+    # is read by `lib/benchmark._link_pool_recon_ids` to linkify the
+    # surviving parent vote in pooled reports. Render as a bare paragraph
+    # so render-md's bare-label suppression keeps it out of the HTML view.
+    if vdetails_keep:
+        lines.append(f"Validator details: {vdetails_keep}")
+        lines.append("")
     lines += [
-        "",
-        "## Provenance",
-        "",
-        f"- **Source:** recon stage",
-        f"- **Recon ID:** {rec_id}",
-        f"- **Slice:** {slice_name or 'unknown'}",
+        # Lone audit-only metadata row: `Recon ID` is parsed by
+        # `lib/benchmark._link_pool_recon_ids` to linkify the recon
+        # vote that promoted the FIND. `Source` and `Slice` were never
+        # parsed and are dropped. The line stays on its own bare-label
+        # paragraph so render-md's bare-label suppression hides it from
+        # the rendered HTML — the audit operator still sees it in the
+        # markdown view, but it doesn't clutter the upstream-facing
+        # report.html.
+        f"Recon ID: {rec_id}",
         "",
         "## Sanitizer evidence",
         "",

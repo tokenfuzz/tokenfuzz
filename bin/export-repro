@@ -2402,6 +2402,8 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
     parts.append("\n")
     parts.append("## Reproduce\n")
     parts.append("\n")
+    parts.append("Run the sibling [reproduce.sh](reproduce.sh):\n")
+    parts.append("\n")
     parts.append("```sh\n")
     parts.append(
         f"./reproduce.sh                 # clones upstream@{pinned_rev[:12]}, builds/runs with {meta['label']}\n"

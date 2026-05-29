@@ -55,6 +55,7 @@ _KNOWN_MARKS = (
     "data-flow-snippets",
     "affected-snippets",
     "asan-snippets",
+    "reproduce-link",
 )
 
 
@@ -336,6 +337,17 @@ def _insert_after_section(text: str, heading_name: str, block: str) -> str:
     return head + block.rstrip() + "\n\n" + tail
 
 
+def _insert_at_section_start(text: str, heading_name: str, block: str) -> str:
+    """Insert `block` right after the heading line of the named section,
+    before any existing body content. Used for callouts that should sit
+    at the top of the section."""
+    bounds = _find_section_bounds(text, heading_name)
+    if bounds is None:
+        return text
+    _, body_start, _ = bounds
+    return text[:body_start] + block.rstrip() + "\n\n" + text[body_start:]
+
+
 def _insert_after_h1(text: str, block: str) -> str:
     """Insert `block` after the H1 title (or at the very top when no
     H1 is present)."""
@@ -505,6 +517,22 @@ def _build_cluster_siblings(ctx: EnrichContext, text: str) -> Optional[str]:
     )
 
 
+def _build_reproduce_link(ctx: EnrichContext) -> Optional[str]:
+    """Inject a sibling-file pointer at the top of the Reproduce section.
+    Lets the reviewer click straight through to `reproduce.sh` from the
+    rendered HTML report. Patch lives under its own section (linked
+    there), and sanitizer.txt is referenced under Expected sanitizer
+    output — duplicating them here just clutters the section.
+
+    The line is placed *inside* the Reproduce section (via the caller),
+    so re-running enrichment strips and replaces it cleanly using the
+    standard `<!-- enrich:reproduce-link -->` fence."""
+    repro = ctx.report_dir / "reproduce.sh"
+    if not (repro.is_file() and repro.stat().st_size > 0):
+        return None
+    return "**Script** — [reproduce.sh](reproduce.sh)"
+
+
 def _build_patch_diff_block(ctx: EnrichContext) -> Optional[str]:
     """Render the sibling `patch.diff` as the body of the `## Patch`
     section. Returns the block body (caption + fenced diff) without
@@ -537,8 +565,11 @@ def _build_patch_diff_block(ctx: EnrichContext) -> Optional[str]:
     if not diff_text:
         return None
     fence = "diff" if diff_text.lstrip().startswith(("diff ", "---", "@@")) else "text"
+    # Linkify the filename: in HTML the reviewer gets a click-through to
+    # the sibling file (open standalone, save, pipe to `git apply`); in
+    # plain markdown the link text reads as the bare filename.
     return (
-        f"**Captured patch** — {patch_path.name} "
+        f"**Captured patch** — [{patch_path.name}]({patch_path.name}) "
         f"({len(diff_text.splitlines())} lines)\n\n"
         f"```{fence}\n{diff_text}\n```"
     )
@@ -682,6 +713,20 @@ def enrich_text(text: str, ctx: EnrichContext) -> str:
             if _find_section_bounds(text, heading):
                 text = _insert_after_section(text, heading,
                                              _wrap_block("asan-snippets", asan))
+                break
+
+    # 5b. Bundle-artifacts callout at the top of Reproduce — gives the
+    # reviewer one-click access to reproduce.sh / patch.diff /
+    # sanitizer.txt / input.txt without leaving the report. Tries
+    # `Reproduce` first (current template), `Reproduction` second
+    # (older agent-authored reports).
+    repro_link = _build_reproduce_link(ctx)
+    if repro_link:
+        for heading in ("Reproduce", "Reproduction"):
+            if _find_section_bounds(text, heading):
+                text = _insert_at_section_start(
+                    text, heading, _wrap_block("reproduce-link", repro_link)
+                )
                 break
 
     # 6. Patch — single-writer rule. The sibling `patch.diff` file is
