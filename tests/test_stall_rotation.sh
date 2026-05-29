@@ -47,6 +47,8 @@ eval "$(audit_extract_function count_unclaimed_cards_for)"
 eval "$(audit_extract_function pick_strategy_by_load)"
 eval "$(audit_extract_function recover_exhausted_agent)"
 eval "$(audit_extract_function agent_probe_activity_score)"
+eval "$(audit_extract_function _normalize_subsystem_key)"
+eval "$(audit_extract_function _subsystem_keys_collide)"
 eval "$(audit_extract_function diversify_subsystem_collisions)"
 
 # Stubs the rotation functions expect from bin/audit.
@@ -513,7 +515,7 @@ if [[ "$got_calls" == *"1:subsystem-collision"* && "$got_calls" == *"3:subsystem
 else
   fail "diversify_subsystem_collisions: expected agents 1 and 3 to be archived, got calls='${got_calls}'"
 fi
-assert_match "SUBSYSTEM_DIVERSIFY: agents " "$(cat "$INDEX")" \
+assert_match "SUBSYSTEM_DIVERSIFY: agent " "$(cat "$INDEX")" \
   "diversify_subsystem_collisions: logs SUBSYSTEM_DIVERSIFY"
 
 # No collisions when each agent on a distinct subsystem.

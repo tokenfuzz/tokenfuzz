@@ -37,6 +37,15 @@ CASES_EXCLUDED = [
     # Test-shaped file names (separate is_excluded_work_path stem rule).
     ("src/parser_test.cpp",    "_test suffix"),
     ("src/test_parser.cpp",    "test_ prefix"),
+    # CMake's per-build cache dir. The on-disk name is capitalized
+    # (CMakeFiles) but callers lowercase the path before this check, so
+    # the segment rule must match case-insensitively. Regression for the
+    # cmakefiles livelock: compiler_depend.ts (a .ts file, hence in
+    # SOURCE_EXTS) was minting a ranked-source work card scored above
+    # real source, and no agent could form a hypothesis against a 2-line
+    # CMake timestamp file.
+    ("build/CMakeFiles/proj.dir/compiler_depend.ts", "CMakeFiles cache dir (real-cased)"),
+    ("build/cmakefiles/proj.dir/x.cpp",              "cmakefiles cache dir (lowercased by caller)"),
 ]
 
 CASES_ALLOWED = [
@@ -76,6 +85,8 @@ assert is_excluded_path_part("build-asan")
 assert is_excluded_path_part("build-asan-debug")
 assert is_excluded_path_part("foo-install")
 assert is_excluded_path_part("tests")
+assert is_excluded_path_part("CMakeFiles"), "real-cased CMakeFiles excluded"
+assert is_excluded_path_part("cmakefiles"), "lowercased cmakefiles excluded (callers lowercase)"
 assert not is_excluded_path_part("parser")
 assert not is_excluded_path_part("src")
 

@@ -49,6 +49,52 @@ audit_flock_append() {
   ' "$1" "$2" 2>/dev/null || true
 }
 
+# Instance lock — prevents two bin/audit invocations from writing to the
+# same output directory at the same time. Lock-dir style: mkdir is
+# atomic, no fd preservation needed, works identically on macOS + Linux.
+# Stale-PID reclamation: if the holder is dead the lock is reclaimable.
+# --allow-concurrent overrides (concurrent instances WILL corrupt shared
+# state — only set when you genuinely know they target disjoint slots).
+audit_acquire_instance_lock() {
+  [ -n "${LOGDIR:-}" ] || return 0
+  [ "${ALLOW_CONCURRENT_AUDIT:-0}" -eq 1 ] && return 0
+  local lockdir="$LOGDIR/.instance.lock.d"
+  mkdir -p "$LOGDIR" 2>/dev/null || true
+  if mkdir "$lockdir" 2>/dev/null; then
+    printf '%s\n' "$$" > "$lockdir/pid" 2>/dev/null || true
+    INSTANCE_LOCK_DIR="$lockdir"
+    INSTANCE_LOCK_ACQUIRED=1
+    return 0
+  fi
+  # Lock held — check if the holder is still alive.
+  local prev_pid=""
+  [ -f "$lockdir/pid" ] && prev_pid=$(head -1 "$lockdir/pid" 2>/dev/null)
+  if [ -n "$prev_pid" ] && ! kill -0 "$prev_pid" 2>/dev/null; then
+    rm -rf "$lockdir" 2>/dev/null || true
+    if mkdir "$lockdir" 2>/dev/null; then
+      printf '%s\n' "$$" > "$lockdir/pid" 2>/dev/null || true
+      INSTANCE_LOCK_DIR="$lockdir"
+      INSTANCE_LOCK_ACQUIRED=1
+      log "Instance lock: reclaimed stale lock from dead PID ${prev_pid}" >&2
+      return 0
+    fi
+  fi
+  log "FATAL: another bin/audit instance is writing to ${LOGDIR} (holder PID=${prev_pid:-unknown}). Wait for it to finish, kill it, or pass --allow-concurrent to override (concurrent instances WILL corrupt shared state)." >&2
+  exit 1
+}
+
+audit_release_instance_lock() {
+  [ "${INSTANCE_LOCK_ACQUIRED:-0}" -eq 1 ] || return 0
+  [ -n "${INSTANCE_LOCK_DIR:-}" ] || return 0
+  # Only remove if we own it — guards against racing reclamation.
+  local owner=""
+  [ -f "$INSTANCE_LOCK_DIR/pid" ] && owner=$(head -1 "$INSTANCE_LOCK_DIR/pid" 2>/dev/null)
+  if [ -z "$owner" ] || [ "$owner" = "$$" ]; then
+    rm -rf "$INSTANCE_LOCK_DIR" 2>/dev/null || true
+  fi
+  INSTANCE_LOCK_ACQUIRED=0
+}
+
 # Emit one timestamped line to stdout AND the shared index.log timeline.
 # run_agent runs backgrounded — one process per agent (see the `&` at its
 # launch site) — so its index.log appends race. Serialize them with the
@@ -88,6 +134,13 @@ Options:
                                     targets/<slug>/ introspection and backend
                                     bootstrap suggestions, then exit.
                                     Review unresolved fields before a long audit.
+  --allow-concurrent                Skip the output-dir instance lock and allow
+                                    a second bin/audit to run in parallel on
+                                    the same target+backend. Default is to
+                                    refuse, because concurrent instances write
+                                    to the same index.log, work-cards.jsonl,
+                                    and recon-hypotheses.jsonl with no
+                                    coordination and produce corrupted state.
   -h, --help                        Show this help
 
 Arguments:
@@ -302,6 +355,13 @@ CODEX_OSS=0                 # set when --backend=oss resolves; passes --oss to c
 AGENT_GUIDE_PATH=""
 REFERENCE_DIR=".agents/references"
 
+# Instance-lock state. ALLOW_CONCURRENT_AUDIT is set by --allow-concurrent
+# and bypasses the lock entirely. INSTANCE_LOCK_DIR / INSTANCE_LOCK_ACQUIRED
+# are managed by audit_acquire_instance_lock / audit_release_instance_lock.
+ALLOW_CONCURRENT_AUDIT=0
+INSTANCE_LOCK_DIR=""
+INSTANCE_LOCK_ACQUIRED=0
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --target=*)
@@ -399,6 +459,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { log "FATAL: --new-target requires a value" >&2; usage; exit 1; }
       NEW_TARGET_SLUG="$2"
       shift 2
+      ;;
+    --allow-concurrent)
+      ALLOW_CONCURRENT_AUDIT=1
+      shift
       ;;
     -h|--help)
       usage
@@ -2471,6 +2535,13 @@ fi
 # every audit start.
 configure_active_backend "$ACTIVE_BACKEND"
 
+# Acquire the output-dir instance lock now that LOGDIR is set but before
+# any iteration / agent writes to it. Two bin/audit instances writing to
+# the same output/<target>/<backend>/ produce corrupted shared state
+# (recon-hypotheses.jsonl, work-cards.jsonl, index.log). --allow-concurrent
+# overrides this for operators who genuinely understand the trade-off.
+audit_acquire_instance_lock
+
 # One consolidated agent-pool decision line. Logged after target
 # classification so the message describes the *actual* pool shape the
 # audit will run with, not the early defaults.
@@ -3312,6 +3383,45 @@ eligible_work_card_exists() {
   return 1
 }
 
+# Per-agent pre-launch skip decision. Returns 0 (skip) when ALL three
+# sources of work are dry for THIS agent:
+#   - No eligible work card claimable by agent N (--peek check)
+#   - No active hypothesis in agent N's state file
+#   - No fuzz leads (pool-wide; conservative — only skip when empty)
+# Slot 1 always launches so cold-start discovery survives the case where
+# the orchestrator-side counters report empty incorrectly. The model side
+# of these "zero-work" launches produces 4-5k tokens explaining there's
+# nothing to do; skipping the LLM round-trip is the wall-time win.
+audit_should_skip_launch() {
+  local agent_num="$1"
+  [ -n "$agent_num" ] || return 1
+  # Always allow at least one slot to launch each iteration — preserves
+  # the discovery path on a freshly-refreshed queue.
+  [ "$agent_num" -eq 1 ] && return 1
+  # An active hypothesis in the state file is work regardless of the queue.
+  local active
+  active=$(count_active_hypotheses_for_agent "$agent_num" 2>/dev/null || echo 0)
+  case "$active" in ''|*[!0-9]*) active=0 ;; esac
+  [ "$active" -gt 0 ] && return 1
+  # Eligible card for THIS agent? --peek does not claim, only tests.
+  if [ -x "bin/state" ] && [ -s "${RESULTS_DIR:-}/work-cards.jsonl" ]; then
+    local mode role
+    mode=$(agent_mode "$agent_num" 2>/dev/null || echo "")
+    role=$(agent_role "$agent_num" 2>/dev/null || echo "")
+    if bin/state --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+        next-card --agent "$agent_num" --mode "$mode" --role "$role" --peek >/dev/null 2>&1; then
+      return 1
+    fi
+  fi
+  # Fuzz leads count as work even without a card. fuzz_leads_empty returns 0
+  # (true) when empty, 1 (false) when there are leads. Skip only when empty.
+  if declare -F fuzz_leads_empty >/dev/null 2>&1; then
+    fuzz_leads_empty || return 1
+  fi
+  # All three sources are dry for this agent — skip the LLM launch.
+  return 0
+}
+
 # Release card claims with no active hypothesis. The audit loop calls this
 # every iteration so the queue does not starve on leases left behind by
 # completed/wedged agents. The Python helper is idempotent and writes
@@ -3508,6 +3618,29 @@ should_disable_resume_for_cache() {
   cached=$(extract_usage_field "$rawfile" cached_input_tokens 2>/dev/null || true)
   [[ "${cached:-}" =~ ^[0-9]+$ ]] || return 1
   [ "$cached" -gt "$cap" ]
+}
+
+# Detect whether the prior session's raw stream-json transcript contains
+# extended-thinking content blocks. The Claude CLI's --resume path
+# reconstructs the conversation from its local transcript, but extended
+# thinking blocks carry signatures the CLI does not preserve byte-exact,
+# so the API rejects with "thinking or redacted_thinking blocks in the
+# latest assistant message cannot be modified" (status 400). Returns 0
+# (resume must be disabled) when any thinking block is present.
+# Repro context: observed 9 sessions across iters 2-17 in the
+# sample-cplusplus run on 2026-05-28; all four affected sessions were on
+# claude-opus-4-8 which uses extended thinking by default.
+should_disable_resume_for_thinking_blocks() {
+  local backend="$1" rawfile="$2"
+  [ "$backend" = "claude" ] || return 1
+  [ -s "$rawfile" ] || return 1
+  # Stream-json content_block events for either thinking-block flavor.
+  # grep -E pattern matches: "type":"thinking" or "type":"redacted_thinking"
+  # with optional whitespace around the colon. -c (full consumer) so we
+  # don't SIGPIPE the producer under set -euo pipefail.
+  local n
+  n=$(grep -cE '"type"[[:space:]]*:[[:space:]]*"(thinking|redacted_thinking)"' "$rawfile" 2>/dev/null || true)
+  [ "${n:-0}" -gt 0 ]
 }
 
 clear_agent_resume_state() {
@@ -4045,51 +4178,166 @@ pick_exhaustion_recovery_strategy() {
 # Returns 0 if at least one collision was found and resolved, 1 otherwise.
 # Pure: no target-specific names; reads get_agent_subsystem +
 # pick_exhaustion_recovery_strategy.
+# Canonical (file, function) key for an agent-reported subsystem string.
+# Different agents observe different lines for the same bug; the work-
+# card scorer also produces qualified C++ names ("Store::render") while
+# agents may strip the class qualifier. Without a normalized key the
+# subsystem-collision detector and the queue-side overlap gate miss the
+# duplicate and we end up with N agents on the same (file, function).
+#
+# Transformations (applied in order):
+#   1. Strip trailing line numbers — one or more ":NNN" segments.
+#   2. Strip C++ class qualifiers — any "Identifier::" sequence.
+#
+# Examples (verified by tests/test_audit_normalize_subsystem.sh):
+#   src/sampledb.cpp:Store::write_selected:247 -> src/sampledb.cpp:write_selected
+#   src/sampledb.cpp:write_selected:241        -> src/sampledb.cpp:write_selected
+#   Store::render:266                          -> render
+#   src/main.cpp                               -> src/main.cpp
+#   ""                                         -> unknown
+#   unknown                                    -> unknown
+# Canonical subsystem identity = (file_part, last_qualifier_or_empty, function_name),
+# emitted as "file|last_q|func" (pipe-delimited) for downstream comparison
+# via _subsystem_keys_collide. Two keys "collide" — i.e. refer to the same
+# function — when their file and function fields match AND their last
+# qualifier fields match, treating an empty qualifier as a wildcard so an
+# agent that reported the function bare matches any class-qualified
+# variant of the same function in the same file.
+#
+# Why keep the innermost qualifier instead of stripping every "::":
+# strip-all would conflate Foo::bar and Foo::Baz::bar in the same file as
+# one subsystem — distinct nested-class methods with potentially distinct
+# bugs would be treated as a single agent-collision and one of them would
+# get displaced. Keeping the innermost qualifier preserves that
+# distinction while still letting Store::write_selected (qualified) and
+# write_selected (bare) recognize each other as the same function.
+_normalize_subsystem_key() {
+  local raw="$1"
+  [ -z "$raw" ] && { printf 'unknown'; return; }
+  [ "$raw" = "unknown" ] && { printf '%s' "$raw"; return; }
+  awk -v s="$raw" 'BEGIN {
+    # Strip one-or-more trailing ":NNN" line-number segments.
+    sub(/(:[0-9]+)+$/, "", s)
+    # Split on "::". After this:
+    #   parts[N]   = leaf function name
+    #   parts[N-1] = innermost class qualifier (if N >= 2)
+    #   parts[1]   = "<file>:<firstQual>" or just "<firstQual>" (if no file prefix)
+    # Variable names avoid "func" because BSD awk on macOS treats it as
+    # a reserved word.
+    n = split(s, parts, "::")
+    fn = parts[n]
+    lq = ""
+    fp = ""
+    if (n == 1) {
+      # No "::" — parts[1] is either "<file>:<fn>" or just "<fn>".
+      if (match(parts[1], /:[A-Za-z_][A-Za-z_0-9]*$/)) {
+        fp = substr(parts[1], 1, RSTART - 1)
+        fn = substr(parts[1], RSTART + 1)
+      } else {
+        fn = parts[1]
+      }
+    } else if (n == 2) {
+      # "<file>:<qual>::<fn>" or "<qual>::<fn>".
+      if (match(parts[1], /:[A-Za-z_][A-Za-z_0-9]*$/)) {
+        fp = substr(parts[1], 1, RSTART - 1)
+        lq = substr(parts[1], RSTART + 1)
+      } else {
+        lq = parts[1]
+      }
+    } else {
+      # n >= 3 — innermost qualifier is parts[n-1] (no file glue possible
+      # here). File part, if any, is glued to the outermost qualifier in
+      # parts[1].
+      lq = parts[n-1]
+      if (match(parts[1], /:[A-Za-z_][A-Za-z_0-9]*$/)) {
+        fp = substr(parts[1], 1, RSTART - 1)
+      }
+    }
+    print fp "|" lq "|" fn
+  }'
+}
+
+# Two canonical keys refer to the same function under the wildcard rule:
+# (file, func) must match exactly; last qualifiers match if equal or if
+# either is empty. Empty / "unknown" / malformed (non-3-tuple) keys never
+# collide.
+_subsystem_keys_collide() {
+  local k1="$1" k2="$2"
+  [ -z "$k1" ] || [ -z "$k2" ] && return 1
+  [ "$k1" = "unknown" ] || [ "$k2" = "unknown" ] && return 1
+  case "$k1" in *\|*\|*) ;; *) return 1 ;; esac
+  case "$k2" in *\|*\|*) ;; *) return 1 ;; esac
+  local f1 r1 q1 fn1 f2 r2 q2 fn2
+  f1="${k1%%|*}"; r1="${k1#*|}"
+  q1="${r1%%|*}"; fn1="${r1#*|}"
+  f2="${k2%%|*}"; r2="${k2#*|}"
+  q2="${r2%%|*}"; fn2="${r2#*|}"
+  [ "$f1" = "$f2" ] || return 1
+  [ "$fn1" = "$fn2" ] || return 1
+  [ "$q1" = "$q2" ] || [ -z "$q1" ] || [ -z "$q2" ]
+}
+
 diversify_subsystem_collisions() {
-  local i s
-  # Build "agent\tsubsystem" rows, skip unknowns and empties.
-  local rows=""
+  # Pairwise collision detection across active agents. Two agents collide
+  # when _subsystem_keys_collide returns 0 (their canonical (file, func)
+  # match, with last-qualifier wildcard semantics). The wildcard rule means
+  # straight group-by-key in awk would miss the qualified-vs-bare case
+  # (`Store::write_selected` and bare `write_selected`), so we iterate
+  # pairs and probe via the helper. NUM_AGENTS is small (typically 2–3),
+  # so O(N²) is fine.
+  local i a b s skey
+  local -a key_by_agent=() disp_by_agent=()
   for i in $(seq 1 "$NUM_AGENTS"); do
+    key_by_agent[$i]=""
+    disp_by_agent[$i]=""
     s=$(get_agent_subsystem "$i" 2>/dev/null || echo "")
     [ -z "$s" ] && continue
     [ "$s" = "unknown" ] && continue
-    rows="${rows}${i}	${s}
-"
+    skey=$(_normalize_subsystem_key "$s")
+    [ -z "$skey" ] || [ "$skey" = "unknown" ] && continue
+    key_by_agent[$i]="$skey"
+    disp_by_agent[$i]="$s"
   done
-  [ -n "$rows" ] || return 1
-  # Subsystems with more than one agent on them.
-  local dup_subs
-  dup_subs=$(printf '%s' "$rows" | awk -F'\t' 'NF==2 {c[$2]++; rows[NR]=$0} END {for (s in c) if (c[s] > 1) print s}')
-  [ -n "$dup_subs" ] || return 1
-  local resolved=0 sub keeper agent agent_rows
-  while IFS= read -r sub; do
-    [ -z "$sub" ] && continue
-    # Agents on this subsystem, smallest agent_num first.
-    agent_rows=$(printf '%s' "$rows" | awk -F'\t' -v s="$sub" '$2==s {print $1}' | sort -n)
-    # Keeper = agent with most probe activity. Fall back to lowest agent
-    # number on ties (sorted-asc output above).
-    local best_agent="" best_score=-1 cand_score
-    while IFS= read -r agent; do
-      [ -z "$agent" ] && continue
+
+  local resolved=0
+  local resolved_agents=" "  # space-padded list of already-handled agents
+  for a in $(seq 1 "$NUM_AGENTS"); do
+    [ -z "${key_by_agent[$a]:-}" ] && continue
+    case "$resolved_agents" in *" $a "*) continue ;; esac
+    # Build the collision group anchored at a.
+    local group="$a"
+    for b in $(seq $((a + 1)) "$NUM_AGENTS"); do
+      [ -z "${key_by_agent[$b]:-}" ] && continue
+      case "$resolved_agents" in *" $b "*) continue ;; esac
+      if _subsystem_keys_collide "${key_by_agent[$a]}" "${key_by_agent[$b]}"; then
+        group="$group $b"
+      fi
+    done
+    # Singleton — no collision involving a.
+    case "$group" in *" "*) ;; *) continue ;; esac
+    # Keeper = highest probe activity, ties broken by smallest agent_num.
+    local best_agent="" best_score=-1 cand_score agent keeper
+    for agent in $group; do
       cand_score=$(agent_probe_activity_score "$agent" 2>/dev/null || echo 0)
       if [ "${cand_score:-0}" -gt "$best_score" ]; then
         best_score="$cand_score"
         best_agent="$agent"
       fi
-    done <<<"$agent_rows"
-    keeper="${best_agent:-${agent_rows%%$'\n'*}}"
-    # Re-pin the rest.
-    while IFS= read -r agent; do
-      [ -z "$agent" ] && continue
+    done
+    keeper="${best_agent:-${group%% *}}"
+    local recovery_pair prev_strat next_strat keeper_disp agent_disp
+    keeper_disp="${disp_by_agent[$keeper]}"
+    for agent in $group; do
+      resolved_agents="${resolved_agents}${agent} "
       [ "$agent" = "$keeper" ] && continue
-      local recovery_pair prev_strat next_strat
+      agent_disp="${disp_by_agent[$agent]}"
       recovery_pair=$(recover_exhausted_agent "$agent" "subsystem-collision")
       prev_strat="${recovery_pair%% *}"
       next_strat="${recovery_pair##* }"
-      log "SUBSYSTEM_DIVERSIFY: agents ${agent} and ${keeper} both ended up on subsystem='${sub}' — keeping agent ${keeper} (more probe activity); resetting agent ${agent} and rotating its strategy $(strategy_tag "$prev_strat")→$(strategy_tag "$next_strat") so it picks fresh work next iteration" | tee -a "$INDEX"
+      log "SUBSYSTEM_DIVERSIFY: agent ${agent} (subsystem='${agent_disp}') collides with keeper ${keeper} (subsystem='${keeper_disp}') — same canonical (file, function); keeping agent ${keeper} (more probe activity); resetting agent ${agent} and rotating its strategy $(strategy_tag "$prev_strat")→$(strategy_tag "$next_strat") so it picks fresh work next iteration" | tee -a "$INDEX"
       resolved=1
-    done <<<"$agent_rows"
-  done <<<"$dup_subs"
+    done
+  done
   [ "$resolved" -eq 1 ] || return 1
   return 0
 }
@@ -5046,6 +5294,14 @@ run_agent() {
     if [ -n "$latest_resume_log" ] && should_disable_resume_for_cache "$resume_backend" "$latest_resume_log"; then
       use_resume=0
       resume_disabled_reason="previous session exceeded CLAUDE_RESUME_CACHE_CAP=${CLAUDE_RESUME_CACHE_CAP}"
+    elif [ -n "$latest_resume_log" ] && should_disable_resume_for_thinking_blocks "$resume_backend" "$latest_resume_log"; then
+      # Claude CLI's --resume rebuilds the conversation from its local
+      # transcript, but extended-thinking block signatures don't survive
+      # the round-trip and the API rejects with HTTP 400. Fall back to a
+      # fresh prompt (the prior context is already restated by the
+      # session-continuation tail and the active-hypothesis state file).
+      use_resume=0
+      resume_disabled_reason="previous session contains extended-thinking blocks (API 400 on --resume)"
     fi
   fi
 
@@ -5843,17 +6099,79 @@ launch_agents_and_wait() {
 
   # Per-slot launch. Telemetry composition (PLAN line, prompt artifact
   # paths, role name) lives in _launch_agent_into_slot so refills share
-  # the same path.
+  # the same path. Slots whose pre-launch eligibility check fires are
+  # skipped entirely — saving the LLM round-trip the model would have
+  # spent producing 4-5k tokens of "I have nothing to do".
+  #
+  # PLAN-time subsystem-claim ledger (#4): we track the canonical
+  # (file, function) keys claimed by earlier slots in THIS iteration and,
+  # if the next agent's resume-pinned subsystem collides, clear its
+  # resume state so its prompt builder re-picks from the queue. Without
+  # this, sticky resume hints from a prior iteration funnel two or three
+  # agents onto the same dead-end subsystem (observed: iter 4 had 4-5
+  # PLAN entries on Store::alias_user:227 in a row). The existing
+  # diversify_subsystem_collisions mechanism fires only AFTER agents
+  # have already run; this prevents the collision proactively.
+  local -a slot_skipped=()
+  local _iter_subsystem_keys=""
+  local _resume_pinned_sub _resume_pinned_key
   for i in $launch_agents; do
+    slot_skipped[$i]=0
+    if audit_should_skip_launch "$i"; then
+      log "SKIP_LAUNCH: agent=${i} role=${role_prefix} — no eligible work cards, no active hypothesis, no fuzz leads for this agent; skipping the LLM round-trip this iteration" | tee -a "$INDEX"
+      slot_skipped[$i]=1
+      pids[$i]=""
+      roles[$i]=""
+      before_subsystems[$i]="$(get_agent_subsystem "$i" 2>/dev/null || echo "unknown")"
+      continue
+    fi
+    # PLAN-time collision check. If this slot is resume-pinned to a
+    # subsystem already grabbed by a prior slot this iteration, clear
+    # its resume hint so the prompt builder picks fresh work from the
+    # queue. Slot 1 is always launched first and never sees a collision.
+    _resume_pinned_sub=$(get_agent_subsystem "$i" 2>/dev/null || echo "")
+    _resume_pinned_key=$(_normalize_subsystem_key "$_resume_pinned_sub")
+    if [ -n "$_resume_pinned_key" ] && [ "$_resume_pinned_key" != "unknown" ] && [ -n "$_iter_subsystem_keys" ]; then
+      # Probe each prior slot's canonical key under the wildcard rule so
+      # a bare 'write_selected' pin still matches a prior slot that
+      # claimed 'Store::write_selected' in the same file. Straight string
+      # equality would miss that case post-(b).
+      local _prior_key _collides=0
+      while IFS= read -r _prior_key; do
+        [ -z "$_prior_key" ] && continue
+        if _subsystem_keys_collide "$_resume_pinned_key" "$_prior_key"; then
+          _collides=1
+          break
+        fi
+      done <<<"$_iter_subsystem_keys"
+      if [ "$_collides" -eq 1 ]; then
+        log "PLAN_DEDUP: agent=${i} resume-pinned to '${_resume_pinned_sub}' (canonical='${_resume_pinned_key}') already held by another slot this iteration; clearing resume state so the queue picks fresh work" | tee -a "$INDEX"
+        clear_agent_resume_state "$i" 2>/dev/null || true
+      fi
+    fi
     _launch_agent_into_slot "$i" "$role_prefix" "$prompt_builder" "$ts" 0
     pids[$i]="$_slot_pid"
     roles[$i]="$_slot_role"
     before_subsystems[$i]="$_slot_before_subsystem"
+    # Re-read post-launch — the prompt builder may have rotated the
+    # agent to a different card. Track the canonical key so subsequent
+    # slots in this iteration know what's already claimed.
+    local _post_sub _post_key
+    _post_sub=$(get_agent_subsystem "$i" 2>/dev/null || echo "")
+    _post_key=$(_normalize_subsystem_key "$_post_sub")
+    if [ -n "$_post_key" ] && [ "$_post_key" != "unknown" ]; then
+      _iter_subsystem_keys="${_iter_subsystem_keys}${_post_key}
+"
+    fi
   done
 
   local pid_summary=""
   for i in $launch_agents; do
-    pid_summary+="${i}=${pids[$i]} "
+    if [ "${slot_skipped[$i]:-0}" = "1" ]; then
+      pid_summary+="${i}=skipped "
+    else
+      pid_summary+="${i}=${pids[$i]} "
+    fi
   done
   log "Agents now running in parallel (agent_number=process_id pairs): ${pid_summary}— waiting for all to finish before scoring the iteration"
 
@@ -5869,8 +6187,15 @@ launch_agents_and_wait() {
   # macOS bash 3.2 lacks associative-array support.
   local -a refill_used=() slot_active=()
   for i in $launch_agents; do
-    slot_active[$i]=1
-    refill_used[$i]=0
+    if [ "${slot_skipped[$i]:-0}" = "1" ]; then
+      # Skipped slot: never polled, never refilled, never finalized.
+      slot_active[$i]=0
+      refill_used[$i]=99
+      rc_summary+="${i}=skipped "
+    else
+      slot_active[$i]=1
+      refill_used[$i]=0
+    fi
   done
   while :; do
     local any_active=0 slot_exited_this_pass=0
@@ -6279,6 +6604,9 @@ audit_exit_trap() {
   # cluster/index files don't survive the exit. The wait itself is
   # bounded by the gate functions' own timeouts.
   wait_for_background_housekeeping 2>/dev/null || true
+  # Release the output-dir instance lock so a follow-up audit on the
+  # same target+backend can start cleanly.
+  audit_release_instance_lock 2>/dev/null || true
   log "SCRIPT EXITING (line=${line} rc=${rc})" >> "$INDEX" 2>/dev/null || true
   log "SCRIPT EXITING (line=${line} rc=${rc})" >&2 || true
 }

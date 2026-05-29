@@ -3402,6 +3402,48 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
     return row
 
 
+def mark_cards_blocked_by_find_id(ctx: "Context", find_id: str, reason: str = "") -> list[str]:
+    """Mark every WORK-recon-* card pointing at find_id as soft-blocked.
+
+    Called when the judge panel quarantines a FIND-RECON-* directory to
+    findings-rejected/. Without this hook, the originating work-card keeps
+    its previous status (typically `unclaimed`/`released`) and the queue
+    ranker continues to surface it — wasting agent sessions on a
+    hypothesis the judges have already rejected. Observed in
+    sample-cplusplus on 2026-05-28: the parse_id REC card received 37
+    PLAN entries across both audits after its FIND-RECON dir was rejected
+    at 18:16:57.
+
+    The cards are written as `blocked` (a SOFT_TERMINAL_CARD_STATUS): the
+    queue ranker skips them, but a future audit pass can re-promote them
+    via `bin/state update-card --status unclaimed` if the rejection turns
+    out wrong. The original work-cards.jsonl row is left untouched — the
+    authoritative status comes from the most recent claims.jsonl entry.
+
+    Returns the list of card ids that were marked blocked.
+    """
+    if not find_id:
+        return []
+    init_state(ctx)
+    cards = read_jsonl(work_cards_path(ctx))
+    matching: list[str] = []
+    for card in cards:
+        if str(card.get("find_id", "")) == str(find_id):
+            cid = str(card.get("id", "")).strip()
+            if cid:
+                matching.append(cid)
+    note = f"judge-rejected: {reason}" if reason else "judge-rejected"
+    for cid in matching:
+        try:
+            update_card_status(ctx, cid, "blocked", agent="", note=note)
+        except CardStatusUpdateError as exc:
+            sys.stderr.write(
+                f"[workqueue] WARN: could not mark card {cid} blocked "
+                f"for find_id={find_id}: {exc}\n"
+            )
+    return matching
+
+
 def _int_env(name: str, default: int) -> int:
     raw = os.environ.get(name, "")
     try:

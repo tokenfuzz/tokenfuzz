@@ -2188,6 +2188,22 @@ validate_find_gate() {
             [ "$rel_target" != "$target" ] || rel_target="$(basename "$qroot")/$(basename "$target")"
             audit_log "DROP: findings/${id} → ${rel_target} — non-security (${reject_count}/${quorum} reject): ${reason}" \
               | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
+            # Propagate the rejection to every WORK-recon-* card linked
+            # to this FIND directory. Without this, the queue ranker
+            # keeps surfacing the card for hours after the judges have
+            # already said it's not a security bug (observed: 37 PLAN
+            # entries on parse_id after the FIND was rejected). The
+            # cards are marked SOFT-blocked, recoverable via
+            # `bin/state update-card --status unclaimed` if the
+            # rejection turns out wrong.
+            if [ -x "${bin_dir:-bin}/state" ]; then
+              "${bin_dir:-bin}/state" \
+                --results-dir "$RESULTS_DIR" \
+                --target-path "${TARGET_ROOT:-}" \
+                --target-slug "${TARGET_SLUG:-}" \
+                mark-finding-rejected --find-id "$id" --reason "$reason" \
+                >/dev/null 2>&1 || true
+            fi
           else
             audit_log "WARN: could not quarantine findings/${id}; leaving in place" \
               | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true

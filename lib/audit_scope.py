@@ -39,15 +39,38 @@ def is_excluded_path_part(part: str) -> bool:
     """True for a path component that should not enter the work-card pool.
 
     Combines :data:`EXCLUDED_PATH_SEGMENTS` with pattern rules that cannot
-    be expressed as literals: ``build-{asan,ubsan,msan,tsan}*`` (any
-    sibling sanitizer build tree, including the suffixed variants the
-    container produces when ``AUDIT_BUILD_SUFFIX`` is set) and
-    ``*-install`` (CMake install staging). Both pattern rules are
-    harness-internal and do not appear in :func:`non_audit_dirs_for_prompt`.
+    be expressed as literals:
+
+    - ``build-{asan,ubsan,msan,tsan}*`` — any sibling sanitizer build
+      tree, including the suffixed variants the container produces when
+      ``AUDIT_BUILD_SUFFIX`` is set.
+    - ``*-install`` — CMake install staging.
+    - ``cmakefiles`` — CMake's per-build internal cache directory
+      (``CMakeFiles`` on disk). Always contains auto-generated artifacts
+      (``CMakeCXXCompilerId.cpp``, ``compiler_depend.ts``, object files,
+      depfiles, ``CMakeCache.txt``); never the user's target source.
+      Inclusion criterion: a directory name reserved by an industry-wide
+      build tool that mints its own generated files there.
+    - ``cmake-build*`` — JetBrains CLion's IDE-managed build directory
+      tree. Same property as ``CMakeFiles`` but at the tree root rather
+      than nested.
+
+    Matching is case-insensitive: both production callers in
+    ``lib/workqueue.py`` (``is_excluded_work_path`` and the
+    ``iter_source_files`` walk-prune) lowercase the path component before
+    calling, so a case-sensitive ``CMakeFiles`` literal would never fire
+    on a real path — it would silently let ``CMakeFiles/compiler_depend.ts``
+    mint a ranked-source work card. Normalize here so the rule holds
+    regardless of how the caller cased the segment.
+
+    All pattern rules are harness-internal and do not appear in
+    :func:`non_audit_dirs_for_prompt`.
     """
+    part = part.lower()
     return (
         part in EXCLUDED_PATH_SEGMENTS
-        or part.startswith(("build-asan", "build-ubsan", "build-msan", "build-tsan"))
+        or part == "cmakefiles"
+        or part.startswith(("build-asan", "build-ubsan", "build-msan", "build-tsan", "cmake-build"))
         or part.endswith("-install")
     )
 

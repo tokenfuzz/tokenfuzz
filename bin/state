@@ -31,6 +31,7 @@ from workqueue import (
     list_crashes,
     list_findings,
     lookup_crash_origin,
+    mark_cards_blocked_by_find_id,
     recent_claims,
     recent_hypotheses,
     recent_notes,
@@ -166,6 +167,19 @@ def main(argv: list[str]) -> int:
         help="crash id to derive card_id/agent from; the originating hypothesis row supplies both",
     )
     p_reject_skip.add_argument("--reason", default="", help="short note for the audit ledger")
+
+    p_find_reject = sub.add_parser(
+        "mark-finding-rejected",
+        help="soft-block every WORK-recon-* card linked to a FIND-RECON dir that the judge panel rejected",
+    )
+    p_find_reject.add_argument(
+        "--find-id", required=True,
+        help="FIND directory name (e.g. FIND-RECON-9201382210-parse-id-silently-truncates-strtoul-unsi)",
+    )
+    p_find_reject.add_argument(
+        "--reason", default="",
+        help="short note carried into the claims.jsonl entry for audit forensics",
+    )
 
     p_run = sub.add_parser("add-run")
     p_run.add_argument("--agent", required=True)
@@ -444,6 +458,14 @@ def main(argv: list[str]) -> int:
             return 2
         row = record_card_reject_skip(ctx, card_id, agent, crash_id=crash_id, reason=args.reason or "")
         print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "mark-finding-rejected":
+        find_id = (args.find_id or "").strip()
+        if not find_id:
+            print("[state] mark-finding-rejected: --find-id required", file=sys.stderr)
+            return 2
+        updated = mark_cards_blocked_by_find_id(ctx, find_id, args.reason or "")
+        print(json.dumps({"find_id": find_id, "blocked_cards": updated, "count": len(updated)}, sort_keys=True))
         return 0
     if args.cmd == "add-run":
         print(json.dumps(add_run(ctx, args), sort_keys=True))
