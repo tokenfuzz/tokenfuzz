@@ -181,8 +181,8 @@ keeps the survey and follow-up audit artifacts together.
   your local results directory until you review it.
 - It does **not** wander across the slice boundary by design. Each
   agent stays in its file group (it may read one level of caller to
-  trace a finding); a bug that needs cross-slice reasoning is the
-  audit's deep loop's job, not recon's.
+  trace a finding); a bug that needs cross-slice reasoning is a job for
+  the audit's deep loop, not recon.
 
 ## See also
 

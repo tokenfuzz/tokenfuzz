@@ -188,6 +188,9 @@ no-op or a virtual-env / dependency install.
 
 ## See also
 
-- `docs/reference/target-toml.md` — full `target.toml` schema.
-- `docs/guides/configure-target.md` — operator workflow.
-- `AGENTS.md` — agent-facing audit workflow (browser + generic).
+- [Target config reference](../reference/target-toml.md) — the full
+  `target.toml` schema.
+- [Configure a target](configure-target.md) — the operator review
+  workflow.
+- `AGENTS.md` (repository root) — the agent-facing audit workflow,
+  covering both browser and generic targets.

@@ -111,8 +111,6 @@ Notes:
 - The optional final argument limits iterations. Omit it, or pass
   `0`, to run continuously.
 - `<backend>` is one of `claude`, `codex`, `gemini`, or `oss`.
-  `--model` is required for `oss`, optional for `claude` and `codex`,
-  and supported for `gemini` only when `USE_GEMINI_CLI=1`.
 - Start with `1` to verify target config, backend CLI, results
   directory, and state writer before committing to a long run.
 - Use `--model` with the `claude` or `codex` backend. The harness

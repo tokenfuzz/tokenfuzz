@@ -61,7 +61,7 @@ selected backend:
 
 | Backend | Default without `--model` |
 |---------|---------------------------|
-| `claude` | `claude-opus-4-7` |
+| `claude` | `claude-opus-4-8` |
 | `codex` | `gpt-5.5` |
 | `gemini` with Antigravity CLI (`agy`) | `--model` is not supported; `agy` keeps model selection in its interactive `/model` setting. |
 | `gemini` with Google Gemini CLI (`USE_GEMINI_CLI=1`) | `gemini-3.1-pro-preview` |
@@ -115,12 +115,8 @@ bin/state --results-dir "$RESULTS" list-crashes             # accepted crashes
 bin/state --results-dir "$RESULTS" list-findings            # filed findings
 ```
 
-Then look at the result tree:
-
-Open the generated HTML pages in a browser. They are the fastest way to
-read the result tree.
-
-Where to look for what:
+Then look at the result tree. The generated HTML pages, opened in a
+browser, are the fastest way to read it:
 
 | Path | What's there |
 | --- | --- |

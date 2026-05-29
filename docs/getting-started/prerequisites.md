@@ -127,7 +127,7 @@ tools above:
 
 | Backend | Install and authenticate | Audit command |
 | --- | --- | --- |
-| Claude Code | Install from the [Claude Code docs](https://docs.claude.com/en/docs/claude-code), then authenticate the `claude` CLI (`claude` will prompt on first use). Default model: `claude-opus-4-7`; pass `--model <id>` to override. | `bin/audit --backend claude` |
+| Claude Code | Install from the [Claude Code docs](https://docs.claude.com/en/docs/claude-code), then authenticate the `claude` CLI (`claude` will prompt on first use). Default model: `claude-opus-4-8`; pass `--model <id>` to override. | `bin/audit --backend claude` |
 | Codex | `npm install -g @openai/codex`, then authenticate the `codex` CLI. Default model: `gpt-5.5`; pass `--model <id>` to override. | `bin/audit --backend codex` |
 | Gemini | Default: install [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) with `curl -fsSL https://antigravity.google/cli/install.sh \| bash`, then run `agy` once to authenticate. `agy` has no `--model` selector; use its interactive `/model` command. Alternative: install Google Gemini CLI, set `USE_GEMINI_CLI=1`, and pass `--model <id>` when needed. | `bin/audit --backend gemini --target <name>` |
 | Local model (`oss`) | The `oss` backend reuses the Codex CLI with its `--oss` switch, so install Codex first. Then install [Ollama](https://ollama.com), `ollama pull <model>`, and confirm it appears in `ollama list`. `--model` is **required** for `oss`. | `bin/audit --backend oss --model <ollama-model>` |
@@ -259,23 +259,6 @@ count to run continuously:
 bin/audit --target <target> --backend <backend>
 ```
 
-## Optional tools
-
-Only two extras are actually consulted by the harness:
-
-| Tool | What it unlocks |
-| --- | --- |
-| `gh` | `bin/reachability` queries GitHub Code Search to estimate external caller exposure when scoring crash severity. |
-| `hg` | Mercurial-hosted targets such as Firefox. |
-
-Install both on whichever distribution you use:
-
-```bash
-brew install gh mercurial                              # macOS
-sudo apt-get install -y gh mercurial                   # Debian / Ubuntu
-sudo dnf install -y gh mercurial                       # Fedora / RHEL
-```
-
 ## Container runtime (recommended)
 
 We recommend running audits inside a container — see [Where to run the
@@ -311,6 +294,23 @@ bin/audit-container-shell --gvisor --rebuild
 That is shorthand for `--docker-runtime runsc`. You can also set
 `AUDIT_DOCKER_RUNTIME=runsc`. The image build still uses normal Docker;
 only the interactive audit container runs under gVisor.
+
+## Optional tools
+
+Only two extras are actually consulted by the harness:
+
+| Tool | What it unlocks |
+| --- | --- |
+| `gh` | `bin/reachability` queries GitHub Code Search to estimate external caller exposure when scoring crash severity. |
+| `hg` | Mercurial-hosted targets such as Firefox. |
+
+Install both on whichever distribution you use:
+
+```bash
+brew install gh mercurial                              # macOS
+sudo apt-get install -y gh mercurial                   # Debian / Ubuntu
+sudo dnf install -y gh mercurial                       # Fedora / RHEL
+```
 
 ## macOS notes
 

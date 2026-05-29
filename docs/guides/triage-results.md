@@ -399,7 +399,7 @@ output/<target>/CRASH-CLUSTERS.html
 output/<target>/FINDING-CLUSTERS.html
 ```
 
-## Maintenance Commands
+## Maintenance commands
 
 These are maintenance commands for regenerating or enriching artifacts
 after manual edits. They are not needed for normal review; read the

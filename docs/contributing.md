@@ -67,44 +67,6 @@ catch lint issues before review.
   (e.g. `[A-Z]+_(?:ASSERT|CHECK)`) over exhaustive enumerations
   that rot as new projects appear.
 
-## Operating principles
-
-Properties the project tries to preserve regardless of what gets
-built next. Each has a docs implication (D) and an
-implementation implication (I).
-
-- **Evidence over commentary.**
-  *D:* explain how to run and verify, not only how to reason.
-  *I:* promote only artifacts that have a testcase and saved
-  output.
-- **Local-first operation.**
-  *D:* document paths and files clearly.
-  *I:* keep durable artifacts in the local results tree and call out
-  any hosted-backend or reachability-check data flow explicitly.
-- **Backend independence.**
-  *D:* describe model backends as interchangeable runners.
-  *I:* keep strategy, probing, state, and triage outside
-  provider-specific code.
-- **Sanitizer breadth.**
-  *D:* document the evidence contract, not a single sanitizer.
-  *I:* support per-target sanitizer configurations behind the
-  same probe and triage path.
-- **Small, deep investigations.**
-  *D:* teach users to finish one hypothesis before pivoting.
-  *I:* preserve compact state and rotate strategies only after
-  useful effort.
-- **Context economy.**
-  *D:* explain how to inspect state without dumping logs.
-  *I:* cap search output, seed resumed sessions, keep prompts
-  focused (see [Cost model](concepts/cost-model.md)).
-- **Stable target boundaries.**
-  *D:* keep `targets/` and `output/` responsibilities obvious.
-  *I:* do not write audit state into upstream source.
-- **Maintainer-quality handoff.**
-  *D:* show report fields, bundle layout, reproduction commands.
-  *I:* export clean bundles with `REPORT.md`, `reproduce.sh`,
-  input, and output.
-
 ## Product invariants
 
 These should continue to hold:

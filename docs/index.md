@@ -68,24 +68,19 @@ Anything you can drive with a testcase:
 
 Native **C and C++** are the headline case — AddressSanitizer gives the
 clearest, lowest-noise crash evidence — and the same holds for
-**browsers**, **JS/Wasm runtimes**, and **mixed-language targets** whose
+**browsers**, **JS/Wasm runtimes**, and **mixed-language** targets whose
 build system can produce a sanitizer build.
 
-Sanitizers are not C/C++-only. **Rust** (`-Z sanitizer`), **Go** (the
-`race` detector), **Swift** (`-sanitize`), and the native extensions of
-**Python** and **Node** can all run instrumented, and a sanitizer crash
-from any of them lands under `crashes/`. Languages with no sanitizer —
-**Java**, **Kotlin**, **Ruby**, **PHP**, **Perl**, **R**, and plain
+Sanitizers aren't C/C++-only: **Rust**, **Go**, **Swift**, and the
+native extensions of **Python** and **Node** can all run instrumented,
+and a sanitizer crash from any of them lands under `crashes/`.
+Languages with no sanitizer — **Java**, **Ruby**, **PHP**, and plain
 interpreted Python/Node — run in **findings-only mode**, where runtime
 diagnostics (tracebacks, panics, exceptions) are captured under
-`findings/` instead. See
+`findings/` instead. ASan is the default wherever one exists; UBSan,
+MSan, TSan, and the Go `race` detector are opt-in per target. See
 [Auditing non-C/C++ targets](guides/multi-language.md) for the
 per-language picture.
-
-ASan is the default for C/C++ targets; UBSan, MSan, TSan, and the Go
-`race` detector are supported but opt-in. For non-native ecosystems the
-seeded default is findings-only — opt into a sanitizer by editing
-`target.toml`.
 
 ## Result layout at a glance
 
@@ -121,6 +116,22 @@ checkout.
 - The repository's security policy is in
   [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md).
 
+## Requirements
+
+A Unix-like host (macOS or Linux), a small set of standard tools, an
+LLVM toolchain, and at least one agent backend.
+
+- **Host tools:** `bash`, `jq`, `python3`, `perl`, `git`, `rg`, `file`.
+- **LLVM tools:** `clang`, `llvm-symbolizer`, `sancov` — only needed
+  for building or running sanitizer artifacts.
+- **Backend:** one of Claude Code (`claude`), Codex (`codex`), the
+  Antigravity CLI (`gemini`, run via the `agy` binary), or a local
+  model via `--backend oss --model <name>` (uses Codex with `--oss`
+  plus an [Ollama](https://ollama.com) model served locally).
+
+See [Prerequisites](getting-started/prerequisites.md) for per-distro
+package commands.
+
 ## Quick start
 
 ```bash
@@ -150,22 +161,6 @@ startup logs, state, and either queued work or attempted testcases
 under `results/`.
 
 For the full walkthrough, see [First audit](getting-started/first-audit.md).
-
-## Requirements
-
-A Unix-like host (macOS or Linux), a small set of standard tools, an
-LLVM toolchain, and at least one agent backend.
-
-- **Host tools:** `bash`, `jq`, `python3`, `perl`, `git`, `rg`, `file`.
-- **LLVM tools:** `clang`, `llvm-symbolizer`, `sancov` — only needed
-  for building or running sanitizer artifacts.
-- **Backend:** one of Claude Code (`claude`), Codex (`codex`), the
-  Antigravity CLI (`gemini`, run via the `agy` binary), or a local
-  model via `--backend oss --model <name>` (uses Codex with `--oss`
-  plus an [Ollama](https://ollama.com) model served locally).
-
-See [Prerequisites](getting-started/prerequisites.md) for per-distro
-package commands.
 
 ## How a session is organised
 

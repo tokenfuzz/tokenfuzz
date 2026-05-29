@@ -172,9 +172,7 @@ compilation pulls its inputs from `target.toml`:
 - `link_libs`;
 - the target source root.
 
-If C harness compilation fails, those are the fields to check. You
-can leave the harness fields unresolved if you do not plan to use C
-harness testcases yet.
+If C harness compilation fails, those are the fields to check.
 
 After repeated C/C++ harness build failures, the audit may make a
 conservative additive repair to `includes`, `defines`, or `link_libs`.

@@ -41,12 +41,29 @@ parallel workers. For browser targets, prefer `BROWSER_AGENTS` and
 | `ASAN_TIMEOUT` | browser/generic/xpcshell `15`; JS `10` | ASan timeout for normal runs. |
 | `FUZZ_ASAN_TIMEOUT` | `600` | ASan timeout for fuzz-mode runs. |
 
-UBSan, MSan, and TSan follow the same pattern under their own
-prefixes — `UBSAN_TIMEOUT`/`FUZZ_UBSAN_TIMEOUT`, and so on.
-
 Do not use shell `timeout` directly in audit workflows. The
 harness timeout helpers keep behaviour consistent across macOS
 and Linux.
+
+## Per-sanitizer timeouts
+
+UBSan, MSan, and TSan have their own equivalents of `ASAN_TIMEOUT` /
+`FUZZ_ASAN_TIMEOUT` plus a third knob for fuzz-repro runs. Reach for
+these when one sanitizer is dramatically slower or faster than ASan
+on your target.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ASAN_FUZZ_REPRO_TIMEOUT` | `20` | ASan timeout for fuzz-repro runs. |
+| `UBSAN_TIMEOUT` | browser/generic `15`; JS `10` | UBSan timeout for normal runs. |
+| `FUZZ_UBSAN_TIMEOUT` | `600` | UBSan timeout for fuzz-mode runs. |
+| `UBSAN_FUZZ_REPRO_TIMEOUT` | `20` | UBSan timeout for fuzz-repro runs. |
+| `MSAN_TIMEOUT` | generic `15`; JS `10` | MSan timeout for normal runs. |
+| `FUZZ_MSAN_TIMEOUT` | `600` | MSan timeout for fuzz-mode runs. |
+| `MSAN_FUZZ_REPRO_TIMEOUT` | `20` | MSan timeout for fuzz-repro runs. |
+| `TSAN_TIMEOUT` | generic `15`; JS `10` | TSan timeout for normal runs. |
+| `FUZZ_TSAN_TIMEOUT` | `600` | TSan timeout for fuzz-mode runs. |
+| `TSAN_FUZZ_REPRO_TIMEOUT` | `20` | TSan timeout for fuzz-repro runs. |
 
 ## LLVM
 
@@ -80,7 +97,7 @@ follow-up rather than the default probe budget.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CLAUDE_MODEL_DEFAULT` | `claude-opus-4-7` | Default model name passed to the `claude` CLI when `--model` is omitted. |
+| `CLAUDE_MODEL_DEFAULT` | `claude-opus-4-8` | Default model name passed to the `claude` CLI when `--model` is omitted. |
 | `CODEX_MODEL_DEFAULT` | `gpt-5.5` | Default model name passed to the `codex` CLI when `--model` is omitted. |
 | `GEMINI_MODEL_DEFAULT` | `gemini-3.1-pro-preview` | Default model for the `gemini` backend. Only consulted with `USE_GEMINI_CLI=1`; the default Antigravity CLI (`agy`) has no launch-time model flag. |
 | `CODEX_OSS_MODEL_DEFAULT` | (empty) | Default for lower-level `oss` backend helpers. Normal `bin/audit --backend oss` runs should pass `--model <ollama-model>` explicitly. |
@@ -109,26 +126,6 @@ bin/audit --target <target> --backend <backend>
 
 Record non-default values in reports or run notes when they
 affect reproduction.
-
-## Per-sanitizer timeouts
-
-UBSan, MSan, and TSan have their own equivalents of `ASAN_TIMEOUT` /
-`FUZZ_ASAN_TIMEOUT` plus a third knob for fuzz-repro runs. Reach for
-these when one sanitizer is dramatically slower or faster than ASan
-on your target.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `ASAN_FUZZ_REPRO_TIMEOUT` | `20` | ASan timeout for fuzz-repro runs. |
-| `UBSAN_TIMEOUT` | browser/generic `15`; JS `10` | UBSan timeout for normal runs. |
-| `FUZZ_UBSAN_TIMEOUT` | `600` | UBSan timeout for fuzz-mode runs. |
-| `UBSAN_FUZZ_REPRO_TIMEOUT` | `20` | UBSan timeout for fuzz-repro runs. |
-| `MSAN_TIMEOUT` | generic `15`; JS `10` | MSan timeout for normal runs. |
-| `FUZZ_MSAN_TIMEOUT` | `600` | MSan timeout for fuzz-mode runs. |
-| `MSAN_FUZZ_REPRO_TIMEOUT` | `20` | MSan timeout for fuzz-repro runs. |
-| `TSAN_TIMEOUT` | generic `15`; JS `10` | TSan timeout for normal runs. |
-| `FUZZ_TSAN_TIMEOUT` | `600` | TSan timeout for fuzz-mode runs. |
-| `TSAN_FUZZ_REPRO_TIMEOUT` | `20` | TSan timeout for fuzz-repro runs. |
 
 ## Probe selection
 

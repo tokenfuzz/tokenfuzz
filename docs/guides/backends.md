@@ -36,7 +36,7 @@ How to choose:
   command. Set `USE_GEMINI_CLI=1` to use Google Gemini CLI (`gemini`)
   instead; in that mode `--model` is forwarded at launch time and the
   default is `gemini-3.1-pro-preview`. The other harness defaults are
-  `claude-opus-4-7` and `gpt-5.5`.
+  `claude-opus-4-8` and `gpt-5.5`.
 - For `--backend oss`, `--model` is required. The harness checks
   `ollama list` at startup and fails fast if the model is not already
   pulled.
@@ -150,7 +150,7 @@ what the ensemble found, without writing anything custom.
 - **Source-sensitivity policies.** Use `--backend oss` to keep target
   source on the local machine.
 
-## Inspecting Backend Results
+## Inspecting backend results
 
 When you inspect backend-specific output:
 
