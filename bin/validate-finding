@@ -54,7 +54,7 @@ Options:
   --backend <backend>       Required; one of: claude, codex, gemini, oss
                             (no vendor default)
   --model <model>           Default: backend's default in lib/llm_invoke.sh
-                            (claude-opus-4-7 / gpt-5.5 / CLI default)
+                            (claude-opus-4-8 / gpt-5.5 / CLI default)
   --tiebreak                Use the tiebreak prompt: more skeptical, requires
                             stronger evidence to vote Promote. Use for the
                             third validator after an initial Uncertain.

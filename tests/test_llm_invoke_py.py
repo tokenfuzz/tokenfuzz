@@ -78,7 +78,7 @@ assert_eq(1, run(["known-backend", ""]).returncode, "empty → rc=1")
 # ── default-model ───────────────────────────────────────────────────
 print("\ndefault-model")
 proc = run(["default-model", "claude"], check=True)
-assert_eq("claude-opus-4-7", proc.stdout.strip(), "claude default")
+assert_eq("claude-opus-4-8", proc.stdout.strip(), "claude default")
 proc = run(["default-model", "codex"], check=True)
 assert_eq("gpt-5.5", proc.stdout.strip(), "codex default")
 proc = run(["default-model", "gemini"], check=True)
@@ -111,7 +111,7 @@ ok("stream-json" in f, "claude has stream-json")
 ok("--dangerously-skip-permissions" in f, "claude has skip-permissions")
 ok("--max-turns" in f, "claude has --max-turns")
 ok("80" in f, "claude default max-turns 80")
-ok("claude-opus-4-7" in f, "claude default model wired")
+ok("claude-opus-4-8" in f, "claude default model wired")
 
 proc = run(["agent-flags", "codex"], check=True)
 f = proc.stdout
@@ -308,7 +308,7 @@ import llm_invoke as inv  # noqa: E402
 
 ok(inv.known_backend("claude") is True, "known_backend('claude') True")
 ok(inv.known_backend("openai") is False, "known_backend('openai') False")
-assert_eq("claude-opus-4-7", inv.default_model("claude"), "default_model claude")
+assert_eq("claude-opus-4-8", inv.default_model("claude"), "default_model claude")
 assert_eq("gpt-5.5", inv.default_model("codex"), "default_model codex")
 assert_eq("gemini-3.1-pro-preview", inv.default_model("gemini"), "default_model gemini")
 os.environ["USE_GEMINI_CLI"] = "1"
@@ -333,6 +333,32 @@ ok(agent_codex[agent_codex.index("--add-dir") + 1] == "/y",
 agent_claude = inv.agent_flags("claude", max_turns=120)
 ok(agent_claude[agent_claude.index("--max-turns") + 1] == "120",
    "max_turns kwarg threaded through claude flag list")
+
+
+# ── config/models.toml ──────────────────────────────────────────────
+print("\nconfig/models.toml")
+import tempfile  # noqa: E402
+
+cfg_path = ROOT / "config" / "models.toml"
+ok(cfg_path.is_file(), "config/models.toml exists")
+
+# default_model reads straight from config/models.toml; the per-backend
+# env var still wins when set.
+_saved_cfg_path = inv._CONFIG_PATH
+with tempfile.TemporaryDirectory() as _td:
+    alt = Path(_td) / "models.toml"
+    alt.write_text('[models]\nclaude = "claude-from-config"\n')
+    try:
+        inv._CONFIG_PATH = alt
+        os.environ.pop("CLAUDE_MODEL_DEFAULT", None)
+        assert_eq("claude-from-config", inv.default_model("claude"),
+                  "default_model reads value from config/models.toml")
+        os.environ["CLAUDE_MODEL_DEFAULT"] = "claude-from-env"
+        assert_eq("claude-from-env", inv.default_model("claude"),
+                  "env override beats config file")
+        os.environ.pop("CLAUDE_MODEL_DEFAULT", None)
+    finally:
+        inv._CONFIG_PATH = _saved_cfg_path
 
 
 print(f"\n  \033[1m{PASSED}/{PASSED + FAILED} passed\033[0m")

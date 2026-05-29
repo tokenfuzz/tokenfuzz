@@ -43,7 +43,7 @@ else
 fi
 
 # ── 2. llm_default_model ────────────────────────────────────────
-assert_eq "claude-opus-4-7" "$(llm_default_model claude)" "claude default model"
+assert_eq "claude-opus-4-8" "$(llm_default_model claude)" "claude default model"
 assert_eq "gpt-5.5"          "$(llm_default_model codex)"  "codex default model"
 assert_eq "gemini-3.1-pro-preview" "$(llm_default_model gemini)" "gemini default model"
 assert_eq "agy"              "$(llm_gemini_default_bin)"    "gemini backend defaults to agy binary"
@@ -78,7 +78,7 @@ assert_match "--print"                       "$flags_str" "agent claude has --pr
 assert_match "--output-format stream-json"   "$flags_str" "agent claude has stream-json output"
 assert_match "--dangerously-skip-permissions" "$flags_str" "agent claude has skip-permissions"
 assert_match "--max-turns 80"                "$flags_str" "agent claude has max-turns"
-assert_match "--model claude-opus-4-7"       "$flags_str" "agent claude defaults model"
+assert_match "--model claude-opus-4-8"       "$flags_str" "agent claude defaults model"
 
 # codex — JSON + sandbox bypass (required inside docker)
 declare -a flags_codex=()

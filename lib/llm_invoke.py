@@ -24,9 +24,10 @@ CLI subcommands (used by the bash shim — `python3 lib/llm_invoke.py …`):
       Exit 0 if backend ∈ {claude, codex, oss, gemini}; else 1.
 
   default-model <backend>
-      Print the project's default model name for <backend> (honouring
-      CLAUDE_MODEL_DEFAULT / CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT /
-      CODEX_OSS_MODEL_DEFAULT). Exit 1 on unknown backend.
+      Print the project's default model name for <backend>, read from
+      config/models.toml. A per-backend env override (CLAUDE_MODEL_DEFAULT /
+      CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT / CODEX_OSS_MODEL_DEFAULT)
+      wins when set. Exit 1 on unknown backend.
 
   agent-flags <backend> [--model …] [--max-turns N] [--add-dirs CSV]
       Print the agent-mode flag list, one flag per line. Used for
@@ -52,8 +53,32 @@ import os
 import sys
 from pathlib import Path
 
+try:
+    import tomllib  # py3.11+
+except ModuleNotFoundError:
+    import tomli as tomllib  # py3.9/3.10 fallback (already vendored, as target.toml uses)
+
 
 _KNOWN_BACKENDS = ("claude", "codex", "oss", "gemini")
+
+# Per-backend env var that overrides the configured default (CI / throttled
+# runs). When unset, the default comes from config/models.toml.
+_MODEL_ENV_OVERRIDE = {
+    "claude": "CLAUDE_MODEL_DEFAULT",
+    "codex": "CODEX_MODEL_DEFAULT",
+    "gemini": "GEMINI_MODEL_DEFAULT",
+    "oss": "CODEX_OSS_MODEL_DEFAULT",
+}
+
+# config/models.toml (repo root) is the single source of truth for the
+# default model names. Resolved from this file so cwd doesn't matter.
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.toml"
+
+
+def _config_models() -> dict:
+    """Return the [models] table from config/models.toml as {backend: model}."""
+    with open(_CONFIG_PATH, "rb") as fh:
+        return tomllib.load(fh).get("models", {})
 
 
 def known_backend(backend: str) -> bool:
@@ -70,20 +95,13 @@ def gemini_default_bin() -> str:
 
 
 def default_model(backend: str) -> str:
-    """Echo the project-wide default model for <backend>.
+    """Default model for <backend>: per-backend env override, else config/models.toml.
 
-    Env overrides win when set (matches the bash shim's per-invocation
-    export). Raises ValueError on unknown backend.
+    Raises ValueError on an unknown backend.
     """
-    if backend == "claude":
-        return os.environ.get("CLAUDE_MODEL_DEFAULT") or "claude-opus-4-7"
-    if backend == "codex":
-        return os.environ.get("CODEX_MODEL_DEFAULT") or "gpt-5.5"
-    if backend == "gemini":
-        return os.environ.get("GEMINI_MODEL_DEFAULT") or "gemini-3.1-pro-preview"
-    if backend == "oss":
-        return os.environ.get("CODEX_OSS_MODEL_DEFAULT") or ""
-    raise ValueError(f"unknown backend: {backend}")
+    if backend not in _KNOWN_BACKENDS:
+        raise ValueError(f"unknown backend: {backend}")
+    return os.environ.get(_MODEL_ENV_OVERRIDE[backend]) or _config_models().get(backend, "")
 
 
 def agent_flags(

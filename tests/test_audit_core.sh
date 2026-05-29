@@ -517,7 +517,7 @@ PATH="$OLD_PATH"
 
 AUDIT_MODEL=""
 ACTIVE_BACKEND=claude
-assert_eq "claude-opus-4-7" "$(resolve_model)" "model: claude default"
+assert_eq "claude-opus-4-8" "$(resolve_model)" "model: claude default"
 CLAUDE_MODEL_DEFAULT="claude-opus-9-9"
 assert_eq "claude-opus-9-9" "$(resolve_model)" "model: claude canonical default override"
 unset CLAUDE_MODEL_DEFAULT

@@ -1221,46 +1221,30 @@ validate_model_for_backend() {
   # preflight hot path so it runs once per audit, not once per iter.
   audit_one_time_backend_bootstrap "$backend"
 
+  # Preflight now launches via the shared helper (below), so it inherits the
+  # real agent flags — including claude's --dangerously-skip-permissions,
+  # which the CLI rejects under euid 0 unless IS_SANDBOX=1. The container is
+  # the sandbox boundary here (same reasoning as run_agent and the
+  # bin/validate-finding / bin/audit-recon validator paths). Other backends
+  # ignore the variable.
+  export IS_SANDBOX=1
+
   log "Model preflight: checking that ${backend} backend can reach model='${model}' (timeout per attempt=$(fmt_secs "$timeout_secs"), up to ${max_attempts} attempt(s) with exponential backoff)" | tee -a "$INDEX"
   local attempt
   for ((attempt=1; attempt<=max_attempts; attempt++)); do
     rc=0
     : > "$raw"
-    case "$backend" in
-      claude)
-        audit_timeout_run "$timeout_secs" "$CLAUDE_BIN" \
-          --print \
-          --verbose \
-          --model "$model" \
-          --max-turns 1 \
-          --output-format stream-json \
-          -p "$prompt" \
-          >"$raw" 2>&1 || rc=$?
-        ;;
-      gemini)
-        # Use the same non-interactive dialect as real gemini agent
-        # launches, including stdin prompt delivery for the Google
-        # Gemini CLI. Direct `-p "$prompt"` preflight calls can stall
-        # even when the real unattended agent/validator path works.
-        llm_run_agent_prompt gemini "$prompt" "$timeout_secs" "$raw" \
-          "$model" 1 "$SCRIPT_ROOT" "$SCRIPT_ROOT" || rc=$?
-        ;;
-      codex|oss)
-        local -a codex_preflight_flags=(
-          --json
-          --ephemeral
-          --model "$model"
-          --cd "$SCRIPT_ROOT"
-          --sandbox danger-full-access
-          --dangerously-bypass-approvals-and-sandbox
-          --output-last-message "$msg"
-        )
-        [ "$backend" = "oss" ] && codex_preflight_flags=(--oss --local-provider ollama "${codex_preflight_flags[@]}")
-        printf '%s' "$prompt" \
-          | audit_timeout_run "$timeout_secs" "$CODEX_BIN" exec "${codex_preflight_flags[@]}" - \
-              >"$raw" 2>&1 || rc=$?
-        ;;
-    esac
+    # Every backend launches through the shared flag picker (lib/llm_invoke.sh)
+    # so preflight exercises the exact same wiring as the real agent loop,
+    # bin/audit-recon, and bin/validate-finding — stream-json/json output
+    # shape, sandbox bypass, model selection, and --add-dir / --cd. No
+    # hand-rolled flag lists to drift out of sync. max_turns=1 keeps this a
+    # one-token litmus; the prompt asks the model to echo MODEL_PREFLIGHT_OK.
+    # Claude/codex success is the CLI exit code; the gemini branch below
+    # additionally requires the assistant to have echoed MODEL_PREFLIGHT_OK
+    # (agy can exit 0 with no output on upstream quota rejection).
+    llm_run_agent_prompt "$backend" "$prompt" "$timeout_secs" "$raw" \
+      "$model" 1 "$SCRIPT_ROOT" "$SCRIPT_ROOT" || rc=$?
     # Some gemini CLI failures can exit 0 while emitting no assistant text
     # (for agy this has happened on upstream RESOURCE_EXHAUSTED / 429 /
     # quota failures written only to private logs). A genuine preflight

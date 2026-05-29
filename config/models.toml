@@ -1,0 +1,9 @@
+# Default model per backend, used when bin/audit runs without --model.
+# Override per-run with --model / $MODEL, or per-backend with the
+# *_MODEL_DEFAULT env vars. "oss" has no default — pass --model.
+
+[models]
+claude = "claude-opus-4-8"
+codex  = "gpt-5.5"
+gemini = "gemini-3.1-pro-preview"
+oss    = ""
