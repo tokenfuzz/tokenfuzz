@@ -16,7 +16,6 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -141,8 +140,7 @@ def make_tree() -> tempfile.TemporaryDirectory:
     jit_bin = root / "build-asan-jit" / "bin" / "pcre2test"
     jit_bin.write_text("#!/bin/sh\necho jit\n")
     jit_bin.chmod(0o755)
-    # Sibling with the binary present but newer mtime.
-    time.sleep(0.05)
+    # Sibling with the binary present.
     cmake_bin = root / "build-asan-cmake" / "bin" / "pcre2test"
     cmake_bin.write_text("#!/bin/sh\necho cmake\n")
     cmake_bin.chmod(0o755)
@@ -150,6 +148,16 @@ def make_tree() -> tempfile.TemporaryDirectory:
     # build-asan-wide/bin/ exists but lacks pcre2test.
     # Also create a non-build-* sibling to verify the prefix filter.
     (root / "src").mkdir()
+    # enumerate_sibling_builds sorts on the build-* directory mtime. Pin
+    # those mtimes explicitly so ordering is deterministic regardless of
+    # filesystem timestamp granularity: the tight mkdir loop above can
+    # tie on a coarse-resolution filesystem or a fast CI runner, and a
+    # stable sort then falls back to arbitrary iterdir() order. cmake is
+    # newest, so it must sort first.
+    for offset, sub in enumerate(("build-asan", "build-asan-jit",
+                                  "build-asan-wide", "build-asan-cmake")):
+        stamp = 1_000_000_000 + offset
+        os.utime(root / sub, (stamp, stamp))
     return td
 
 
