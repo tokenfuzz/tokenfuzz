@@ -4,23 +4,24 @@ Findings are heterogeneous: most are memory-safety bugs with a concrete
 `file:function:line` site, but the harness also files auth, injection,
 info-disclosure, crypto, race, config, and logic findings whose
 "location" is an endpoint, config key, or design concept. One key shape
-won't fit all, so the signature is layered:
+won't fit all, so the signature draws on, in precedence order:
 
-  Layer 1 — deterministic key: (class, file, func) with :line:col
-            stripped (drift absorption — same trick bin/cluster-crashes
-            uses on top-3 frames).
+  dedup_key — a short canonical token naming the ROOT CAUSE concept,
+              independent of which surface site each FIND cites. Assigned
+              by lib/finding_keyer.py from the report alone and cached in
+              .finding-key.json (passed in here as `llm_dedup_key`). The
+              primary signal: two reports of the same root cause from
+              different sites collapse under it, the same way for every
+              finding source (harness, recon, model-direct).
 
-  Layer 2 — LLM-emitted dedup_key: a short canonical token naming the
-            root cause concept, independent of which surface site each
-            FIND happens to cite. Cached in .llm-find-quality.json
-            alongside class/severity. Used when present; preferred over
-            Layer 1 because two reports of the same root cause from
-            different surface sites collapse under it.
+  (class, file, func) — the deterministic fallback site, with :line:col
+              stripped (drift absorption — the trick bin/cluster-crashes
+              uses on top frames). Used when no dedup_key was produced.
 
 Cluster key:
-  - If a well-formed dedup_key is present → (class, dedup_key)
+  - If a well-formed dedup_key is present → (class, "", dedup_key)
   - Else if (file, func) extracted from report → (class, file, func)
-  - Else → (class, title_slug) — last-resort tail
+  - Else → (class, "", title_slug) — last-resort tail
 """
 
 from __future__ import annotations
@@ -73,6 +74,10 @@ _NEUTRAL_TO_TOP = {
     "heap-use-after-free": "memory-safety",
     "heap-buffer-overflow": "memory-safety",
     "double-free": "memory-safety",
+    "buffer-overflow": "memory-safety",
+    "stack-buffer-overflow": "memory-safety",
+    "out-of-bounds": "memory-safety",
+    "oob": "memory-safety",
     "memory_safety": "memory-safety",
     "memory-safety-class": "memory-safety",
     "authz": "auth",
@@ -154,6 +159,13 @@ _CLASS_PATTERNS = [
     re.compile(r"^\s*-?\s*Category\s*:\s*`?([A-Za-z][\w:.\-]*)`?", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^\s*-?\s*Memory[- ]safety\s+class\s*:\s*`?([A-Za-z][\w:.\-]*)`?", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^\s*-?\s*Issue\s+class\s*:\s*`?([A-Za-z][\w:.\-/ ]*?)`?\s*$", re.MULTILINE | re.IGNORECASE),
+    # "Bug class:", "Bug type:", "Vulnerability class:", "Weakness category:" —
+    # bare-prompt / model-direct reports label the class this way instead of the
+    # harness's `Class:` field. Structural family (<noun> class|type|category),
+    # not an enumeration, so new noun phrasings don't rot it. The value capture
+    # stops at the first whitespace so `stack-buffer-overflow / command …`
+    # yields the leading canonical token, which normalize_class folds.
+    re.compile(r"^\s*-?\s*(?:Bug|Vulnerability|Vuln|Defect|Weakness)\s+(?:class|type|category)\s*:\s*`?([A-Za-z][\w:.\-]*)`?", re.MULTILINE | re.IGNORECASE),
     # "- **Type**: Lifetime issue — heap-use-after-free, READ of size 1+"
     # We pull the first meaningful word (Lifetime / Bounds / heap-use-after-free).
     re.compile(r"^\s*-\s*\*\*Type\*\*\s*:\s*`?([A-Za-z][\w\-]*)", re.MULTILINE | re.IGNORECASE),
@@ -171,17 +183,19 @@ def extract_class(report_text: str) -> str:
 
 # ── Path normalization ─────────────────────────────────────────────
 # Reports cite paths in three shapes that the deterministic key must
-# collapse:
+# collapse to ONE canonical target-relative form:
 #   * relative: src/lib/foo.c
-#   * absolute: <TARGET_ROOT>/targets/c-ares/src/lib/foo.c
-#   * deeply nested: third_party/c-ares/src/lib/foo.c
+#   * absolute / repo-prefixed: <TARGET_ROOT>/targets/c-ares/src/lib/foo.c
+#   * basename-only (from ASan stack frames): foo.c
 #
-# We strip an optional TARGET_ROOT prefix when supplied and keep the
-# last 4 path segments. That's enough to disambiguate "FooImpl.cc" in
-# two namespaces while still collapsing two reports that disagree on
-# whether to prefix the path with the repo root.
-
-_MAX_PATH_SEGMENTS = 4
+# We strip the target_root prefix when supplied (auto-derived by
+# bin/cluster-findings from the output/<slug> layout) and keep the FULL
+# remaining path. We deliberately do NOT truncate to a basename or a
+# fixed segment tail: two distinct files that share a leaf name
+# (`parse.c` in two dirs) must stay distinct, so over-merging by
+# truncation is worse than the drift it would absorb. Drift is instead
+# removed at the source — extract_location prefers the canonical
+# `| File |` Fields-table row, which every report writes identically.
 
 
 def normalize_path(path: str, target_root: str = "") -> str:
@@ -191,14 +205,31 @@ def normalize_path(path: str, target_root: str = "") -> str:
     # Strip a `(some text)` trailing annotation the LLM sometimes attaches.
     p = re.sub(r"\s+\([^)]*\)\s*$", "", p)
     if target_root:
-        tr = target_root.rstrip("/") + "/"
-        if p.startswith(tr):
+        tr = target_root.strip().rstrip("/")
+        if tr and (p == tr or p.startswith(tr + "/")):
+            # Same form (both absolute or both relative): plain prefix strip.
             p = p[len(tr):]
-    # Collapse repeated slashes.
+        elif tr:
+            # Mixed forms — the audit passes an ABSOLUTE target_root
+            # (/…/targets/<slug>) but reports cite repo-relative paths
+            # (targets/<slug>/src/…), or vice versa. Strip up to and
+            # including the target's own tail marker so either form lands on
+            # the same target-relative path. Prefer the "targets/<slug>/"
+            # tail; fall back to the bare basename dir.
+            m = re.search(r"(?:^|/)(targets/[^/]+)$", tr)
+            marker = (m.group(1) if m else tr.rsplit("/", 1)[-1]) + "/"
+            idx = p.find(marker)
+            if idx != -1:
+                p = p[idx + len(marker):]
+    # Collapse repeated slashes; keep the full target-relative path.
     p = re.sub(r"/+", "/", p).lstrip("/")
+    # Structural fallback: reports universally cite the bug site as
+    # `targets/<slug>/<path>`. Strip a leading `targets/<seg>/` so the key is
+    # target-relative even when target_root was unset or mis-derived — e.g. the
+    # benchmark output layout, whose cluster path does not carry the target slug
+    # (output/benchmark/<backend>/…), so derivation can't supply it.
+    p = re.sub(r"^targets/[^/]+/", "", p)
     parts = [seg for seg in p.split("/") if seg]
-    if len(parts) > _MAX_PATH_SEGMENTS:
-        parts = parts[-_MAX_PATH_SEGMENTS:]
     return "/".join(parts)
 
 
@@ -238,46 +269,114 @@ _INLINE_FILE_LINE_RE = re.compile(
 _INLINE_FILE_ONLY_RE = re.compile(rf"`(?P<file>{_PATH_FRAG})`")
 
 
-def extract_location(report_text: str, target_root: str = "") -> tuple[str, str]:
-    """Return (file, func) — normalized, line/col stripped.
+# ── Canonical-source extractors (Fields table + ASan frame #0) ─────
+# A FIND report carries the bug site in up to three places of differing
+# authority. We pick file and func INDEPENDENTLY from the most
+# authoritative source that has each, because the best source differs
+# per field:
+#
+#   * file — the `| File |` Fields-table row is the canonical, full,
+#     target-relative path the report author intended. Stack frames and
+#     prose cite the basename only, so the table wins for `file`.
+#   * func — the ASan stack frame #0 carries the fully-qualified,
+#     demangled compiler symbol (`ns::Class::method`), identical across
+#     reports of the same crash. The `| Function |` row is a free-text
+#     label that drifts (`assign` / `frame_capacity`), so frame #0 wins
+#     for `func` when a crash exists.
+#
+# Findings with no crash (pure source analysis) have no frame #0; they
+# fall through to the table row and then the legacy patterns.
 
-    file is empty when no recognizable path is present; func is empty
-    when the report cites a file but no function (config files, header
-    locations). Caller distinguishes both-empty from func-only by
-    checking `file`.
+_FIELDS_FILE_RE = re.compile(
+    r"^\s*\|\s*File\s*\|\s*`?(?P<file>[^|`\n]+?)`?\s*\|", re.MULTILINE | re.IGNORECASE,
+)
+_FIELDS_FUNC_RE = re.compile(
+    r"^\s*\|\s*Function\s*\|\s*`?(?P<func>[^|`\n]+?)`?\s*\|", re.MULTILINE | re.IGNORECASE,
+)
+# An ASan/symbolized stack frame: `#0 [0xADDR in ]<symbol>[(args)] <file>:<line>[:col]`.
+# The frame body lives inside ```fences``` in many reports, so this runs
+# on the UNmasked text (unlike the inline prose patterns below).
+_FRAME0_LINE_RE = re.compile(r"^\s*#0\s+(?P<body>.+?)\s*$", re.MULTILINE)
+_FRAME0_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]+\s+in\s+")
+_FRAME0_TAIL_RE = re.compile(rf"(?P<file>{_PATH_FRAG})(?::\d+){{0,2}}\s*$")
+
+
+def _fields_row(text: str, rx: re.Pattern) -> str:
+    m = rx.search(text or "")
+    return m.group(1).strip() if m else ""
+
+
+def _extract_frame0(text: str) -> tuple[str, str]:
+    """Return (file, func) from the innermost ASan stack frame, or ("","").
+
+    func is the demangled symbol with any `(args)` stripped; file is the
+    basename ASan prints (caller prefers the Fields-table path for file).
     """
-    text = report_text or ""
+    for m in _FRAME0_LINE_RE.finditer(text or ""):
+        body = _FRAME0_ADDR_RE.sub("", m.group("body").strip())
+        tail = _FRAME0_TAIL_RE.search(body)
+        if not tail:
+            continue
+        file = tail.group("file")
+        head = body[:tail.start()].rstrip()
+        func = head.split("(", 1)[0].strip()  # drop argument list
+        return file, func
+    return "", ""
 
-    # Pattern 1 — explicit Location:.
+
+def _clean_func(func: str) -> str:
+    """Strip backticks, an argument list, and a trailing :line from a func."""
+    f = (func or "").strip().strip("`").strip()
+    f = f.split("(", 1)[0].strip()
+    f = re.sub(r":\d+\s*$", "", f)
+    return f
+
+
+def _legacy_location(text: str) -> tuple[str, str]:
+    """File/func from the Location: header or inline prose (raw, un-normalized)."""
     m = _LOCATION_HEADER_RE.search(text)
     if m:
-        file = normalize_path(m.group("file") or "", target_root)
-        func = (m.group("func") or "").strip()
-        return file, func
-
-    # Pattern 2 — file:func[:line] inline.
-    # Skip matches inside fenced ```code``` blocks since those tend to be
-    # reproducer snippets, not the bug site.
+        return (m.group("file") or "", (m.group("func") or "").strip())
+    # Inline patterns skip fenced ```code``` blocks (reproducer snippets).
     masked = _strip_code_fences(text)
     m = _INLINE_FILE_FUNC_LINE_RE.search(masked)
     if m:
-        file = normalize_path(m.group("file") or "", target_root)
-        func = (m.group("func") or "").strip()
-        return file, func
-
-    # Pattern 3 — file:line only.
+        return (m.group("file") or "", (m.group("func") or "").strip())
     m = _INLINE_FILE_LINE_RE.search(masked)
     if m:
-        return normalize_path(m.group("file") or "", target_root), ""
-
-    # Pattern 4 — file path alone in backticks. Last resort because plenty
-    # of reports cite paths in prose; we only want this hit when there's
-    # absolutely no file:func / file:line elsewhere.
+        return (m.group("file") or "", "")
     m = _INLINE_FILE_ONLY_RE.search(masked)
     if m:
-        return normalize_path(m.group("file") or "", target_root), ""
-
+        return (m.group("file") or "", "")
     return "", ""
+
+
+def _first(*vals: str) -> str:
+    for v in vals:
+        if v:
+            return v
+    return ""
+
+
+def extract_location(report_text: str, target_root: str = "") -> tuple[str, str]:
+    """Return (file, func) — normalized, line/col stripped.
+
+    file and func are chosen independently from the most authoritative
+    source that supplies each (see the Fields/frame#0 note above):
+      file: `| File |` row → Location/inline → frame #0 basename
+      func: frame #0 symbol → `| Function |` row → Location/inline
+    file is empty when no recognizable path is present; func is empty
+    when the report cites a file but no function.
+    """
+    text = report_text or ""
+    f0_file, f0_func = _extract_frame0(text)
+    ft_file = _fields_row(text, _FIELDS_FILE_RE)
+    ft_func = _fields_row(text, _FIELDS_FUNC_RE)
+    lg_file, lg_func = _legacy_location(text)
+
+    file = _first(ft_file, lg_file, f0_file)
+    func = _first(f0_func, ft_func, lg_func)
+    return normalize_path(file, target_root), _clean_func(func)
 
 
 _CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
@@ -426,10 +525,13 @@ def main(argv: list[str]) -> int:
 
     _, text = _read_report(args.find_dir)
     cache = read_llm_cache(args.find_dir)
+    # dedup_key is owned by the keyer (.finding-key.json), not the quality
+    # cache. Local import keeps finding_keyer's import of this module acyclic.
+    import finding_keyer  # noqa: E402
     sig = finding_signature(
         text,
         llm_class=cache.get("class", ""),
-        llm_dedup_key=cache.get("dedup_key", ""),
+        llm_dedup_key=finding_keyer.cached_key(args.find_dir),
         target_root=args.target_root,
     )
     sig["id"] = args.find_dir.name

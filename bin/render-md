@@ -769,19 +769,32 @@ _MATERIAL_CSS = """
 
 _INLINE_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 _INLINE_CODE_RE = re.compile(r"`([^`]+)`")
-# Tells that an inline `code` span is a structured signature or prose
-# snippet (stack frame chain, "foo bar baz", "f() -> g()") rather than
-# an atomic identifier (slug, hash, CVE id, run timestamp). Structured
-# code is allowed to wrap inside table cells; atomic code stays on one
-# line so identifiers don't get chopped mid-token. Keeping the rule
-# structural (content shape, not column name) means it works across
-# every report type — benchmark, findings, clusters, crashes — without
-# a per-column allowlist that has to be maintained as new tables appear.
+# Decide whether an inline `code` span may wrap inside a table cell. By
+# default code stays atomic (one line) so identifiers — run ids, hashes,
+# CVE numbers, short slugs — aren't chopped mid-token; the `.wrap` class
+# lets a span break instead of forcing its column (and the whole table)
+# wide. A span wraps when it is either:
+#   (a) structured — contains whitespace or a `->` stack arrow
+#       (e.g. a Root signature `f a.c:1 -> g a.c:2`, prose snippets); or
+#   (b) a LONG token (> _ATOMIC_CODE_MAX chars) that carries a natural
+#       break point (`-_/:.`), e.g. a dedup slug
+#       `frame-length-truncation-overflow` or a `file:func` signature —
+#       these break at their separators so a long Signature cell no longer
+#       hogs width from the Canonical/Members columns.
+# Short ids stay atomic; a long token with no separator (a bare hash)
+# also stays atomic rather than being chopped mid-character. The rule is
+# structural (shape + length), NOT per-column/per-table, so it holds
+# across every report type without an allowlist that rots as tables appear.
 _STRUCTURED_CODE_RE = re.compile(r"\s|->")
+_BREAKABLE_TOKEN_RE = re.compile(r"[-_/:.]")
+_ATOMIC_CODE_MAX = 24
 
 
 def _format_inline_code(content: str) -> str:
-    cls = ' class="wrap"' if _STRUCTURED_CODE_RE.search(content) else ""
+    wrap = bool(_STRUCTURED_CODE_RE.search(content)) or (
+        len(content) > _ATOMIC_CODE_MAX and bool(_BREAKABLE_TOKEN_RE.search(content))
+    )
+    cls = ' class="wrap"' if wrap else ""
     return f"<code{cls}>{html.escape(content)}</code>"
 # A URL carries an explicit scheme when it starts with `scheme:` (RFC 3986
 # scheme grammar). Relative paths and `#anchor` links have no scheme.

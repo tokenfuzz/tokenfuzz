@@ -79,25 +79,12 @@ or any other class just because it appears more often.
 Also pick a coarse severity hint: one of info, low, medium, high,
 critical. This is advisory only.
 
-Finally, emit a canonical dedup_key that names the ROOT CAUSE CONCEPT
-of this finding, NOT the surface site. Two reports about the same root
-cause (reached through different files/functions/callers) must produce
-the SAME dedup_key. Format: 2–6 lowercase tokens joined by hyphens,
-total 4–60 characters. Letters, digits, hyphens, underscores only.
-Examples: code_start-unbounded, tls13-skip-verify, path-traversal-archive-entry,
-ipv4-trailing-garbage, ecb-mode-default, toctou-permission-openfile.
-
-{{ known_keys_block }}If your finding matches the root cause of an existing
-key in the list above, REUSE that exact key. Otherwise invent a new one.
-
 Output a single JSON object (no prose, no fences) with keys:
   accept     boolean   true if there is concrete security substance
   reason     string    <= 140 chars, plain-English why
   class      string    freeform "top:sub" label; empty string if accept=false
   severity   string    one of: info, low, medium, high, critical;
                        empty string if accept=false
-  dedup_key  string    canonical root-cause key (see above); empty if
-                       accept=false
 
 Description (first 8 KB):
 ---

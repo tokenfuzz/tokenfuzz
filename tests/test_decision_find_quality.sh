@@ -181,8 +181,8 @@ cat > "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" <<EOF
 EOF
 export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"current reviewer accepts","class":"auth:bypass","severity":"high"}'
 validate_find_gate >/dev/null 2>&1
-assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" '"decision_version": *"v7"' \
-  "stale v2 cache: re-evaluated under v7"
+assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" '"decision_version": *"v10"' \
+  "stale v2 cache: re-evaluated under v10"
 assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" "auth:bypass" \
   "stale v2 cache: new class label written"
 assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" '"accept": *true' \
@@ -195,7 +195,7 @@ reset_findings
 #    the contract that lets the LLM invent labels for unfamiliar issue
 #    classes (e.g. "side-channel:cache-timing", "config:permissive-cors").
 mk_find FIND-CLASS "$SUBSTANTIVE" >/dev/null
-export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"clear ReDoS","class":"side-channel:cache-timing","severity":"low","dedup_key":"redos-regex-timing"}'
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"clear ReDoS","class":"side-channel:cache-timing","severity":"low"}'
 validate_find_gate >/dev/null 2>&1
 assert_file_contains "$RESULTS_DIR/findings/FIND-CLASS/.llm-find-quality.json" \
   "side-channel:cache-timing" \
@@ -203,29 +203,12 @@ assert_file_contains "$RESULTS_DIR/findings/FIND-CLASS/.llm-find-quality.json" \
 assert_file_contains "$RESULTS_DIR/findings/FIND-CLASS/.llm-find-quality.json" \
   '"severity": *"low"' \
   "severity field captured verbatim"
-assert_file_contains "$RESULTS_DIR/findings/FIND-CLASS/.llm-find-quality.json" \
-  '"dedup_key": *"redos-regex-timing"' \
-  "valid dedup_key persisted in cache"
-unset LLM_DECIDE_MOCK_FIND_QUALITY
-reset_findings
-
-# 6b. dedup_key validation — too-short / single-token / invalid chars are
-#     dropped and the cache stores an empty dedup_key (Layer 1 fallback).
-mk_find FIND-BADKEY "$SUBSTANTIVE" >/dev/null
-export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"ok","class":"auth:bypass","severity":"low","dedup_key":"oops"}'
-validate_find_gate >/dev/null 2>&1
-assert_file_contains "$RESULTS_DIR/findings/FIND-BADKEY/.llm-find-quality.json" \
-  '"dedup_key": *""' \
-  "single-token dedup_key rejected (must contain hyphen/underscore)"
-unset LLM_DECIDE_MOCK_FIND_QUALITY
-reset_findings
-
-mk_find FIND-BADKEY2 "$SUBSTANTIVE" >/dev/null
-export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"ok","class":"auth:bypass","severity":"low","dedup_key":"Has Spaces And UPPER"}'
-validate_find_gate >/dev/null 2>&1
-assert_file_contains "$RESULTS_DIR/findings/FIND-BADKEY2/.llm-find-quality.json" \
-  '"dedup_key": *"has-spaces-and-upper"' \
-  "dedup_key spaces lowercased and hyphenated"
+# Identity (dedup_key) is NOT produced by the quality gate any more — it is
+# assigned at cluster time by lib/finding_keyer.py (see test_finding_keyer.sh),
+# so the gate cache must NOT carry a dedup_key field.
+assert_file_not_contains "$RESULTS_DIR/findings/FIND-CLASS/.llm-find-quality.json" \
+  'dedup_key' \
+  "quality gate cache carries no dedup_key (identity moved to the keyer)"
 unset LLM_DECIDE_MOCK_FIND_QUALITY
 reset_findings
 
@@ -238,13 +221,117 @@ substantive_hash=$(_triage_file_sha1 "$RESULTS_DIR/findings/FIND-STALEV4/descrip
 cat > "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" <<EOF
 {"decision":"find_quality","decision_version":"v4","content_sha1":"$substantive_hash","accept":true,"reason":"v4 acceptance under looser rubric","class":"auth:bypass","severity":"high","dedup_key":"old-key","cached_at":"2026-04-24T00:00:00Z"}
 EOF
-export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"v7 reviewer confirms","class":"auth:bypass","severity":"high","dedup_key":"missing-server-side-check"}'
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"v7 reviewer confirms","class":"auth:bypass","severity":"high"}'
 validate_find_gate >/dev/null 2>&1
-assert_file_contains "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" '"decision_version": *"v7"' \
-  "stale v4 cache: re-evaluated under v7"
+assert_file_contains "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" '"decision_version": *"v10"' \
+  "stale v4 cache: re-evaluated under v10"
 assert_file_contains "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" \
-  '"dedup_key": *"missing-server-side-check"' \
-  "stale v4 cache: dedup_key updated on re-evaluation"
+  '"reason": *"v7 reviewer confirms"' \
+  "stale v4 cache: verdict updated on re-evaluation"
+unset LLM_DECIDE_MOCK_FIND_QUALITY
+reset_findings
+
+# 6d. Stamp-invariance: after an accept verdict is cached, cluster-findings
+#     stamps `Cluster:`/`Dedup key:` lines and report_enrich injects
+#     `<!-- enrich:* -->` blocks into report.md. Those mutations must NOT bust
+#     the verdict cache — otherwise the gate re-asks the LLM on every
+#     housekeeping pass forever. The short-circuit keys on the cached verdict
+#     (decision_version + accept), never on report content, so an accepted
+#     finding stays short-circuited no matter how report.md is rewritten.
+mk_find FIND-STAMP "$SUBSTANTIVE" >/dev/null
+# Gate selects report.md ahead of description.md — write the narrative there
+# so the stamping below lands on the file the gate actually hashes.
+cp "$RESULTS_DIR/findings/FIND-STAMP/description.md" "$RESULTS_DIR/findings/FIND-STAMP/report.md"
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"first reviewer accepts","class":"auth:bypass","severity":"high","dedup_key":"missing-server-side-check"}'
+validate_find_gate >/dev/null 2>&1
+assert_file_contains "$RESULTS_DIR/findings/FIND-STAMP/.llm-find-quality.json" "auth:bypass" \
+  "stamp-invariance: initial accept cached"
+sha_before=$(jq -r '.content_sha1' "$RESULTS_DIR/findings/FIND-STAMP/.llm-find-quality.json" 2>/dev/null)
+# Simulate cluster-findings + report_enrich stamping the report AFTER the
+# verdict was cached: a leading Cluster:/Dedup key: pair and an enrich block.
+report="$RESULTS_DIR/findings/FIND-STAMP/report.md"
+{ printf 'Cluster: FCL-deadbeef (3 reports: x, y) (canonical)\n'; printf 'Dedup key: [llm] missing-server-side-check\n\n'; cat "$report"; \
+  printf '\n<!-- enrich:tldr -->\n**Reviewer TL;DR** derived junk\n<!-- /enrich:tldr -->\n'; } > "$report.stamped"
+mv "$report.stamped" "$report"
+# Re-run with a mock that would change the class IF the LLM were re-asked.
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"SECOND reviewer — different verdict","class":"WRONG-CLASS-SHOULD-NOT-APPEAR","severity":"low","dedup_key":"some-other-key"}'
+validate_find_gate >/dev/null 2>&1
+assert_file_contains "$RESULTS_DIR/findings/FIND-STAMP/.llm-find-quality.json" "auth:bypass" \
+  "stamp-invariance: accept short-circuited across stamps (LLM not re-asked)"
+if grep -q "WRONG-CLASS-SHOULD-NOT-APPEAR" "$RESULTS_DIR/findings/FIND-STAMP/.llm-find-quality.json" 2>/dev/null; then
+  fail "stamp-invariance: cache must not be re-evaluated after stamping" "re-asked LLM and overwrote verdict"
+else
+  pass "stamp-invariance: stamps did not trigger an LLM re-ask"
+fi
+sha_after=$(jq -r '.content_sha1' "$RESULTS_DIR/findings/FIND-STAMP/.llm-find-quality.json" 2>/dev/null)
+[ -n "$sha_before" ] && [ "$sha_before" = "$sha_after" ] \
+  && pass "stamp-invariance: verdict cache not rewritten on short-circuit" \
+  || fail "stamp-invariance: verdict cache not rewritten on short-circuit" "before=$sha_before after=$sha_after"
+unset LLM_DECIDE_MOCK_FIND_QUALITY
+reset_findings
+
+# 6e. Structural guard against the report.md re-judge loop EVER returning:
+#     run the REAL stampers (bin/cluster-findings + bin/enrich-report) over a
+#     keyed finding, then re-gate and assert ZERO further find_quality LLM
+#     calls. 6d simulates a stamp; this exercises the actual tools — including
+#     report_enrich's in-place Fields-table reformatting, which is exactly the
+#     mutation a content-keyed cache could not survive. The verdict-keyed
+#     short-circuit makes it immune to any report.md rewrite.
+BIN_DIR="$SCRIPT_ROOT/bin"
+llm_log="$RESULTS_DIR/llm-trace.log"
+: > "$llm_log"
+mkdir -p "$RESULTS_DIR/findings/FIND-REAL"
+# A report WITH an unpadded Fields table — report_enrich reformats this table
+# in place (column padding), the exact in-place narrative rewrite that a
+# content-keyed cache could not survive.
+cat > "$RESULTS_DIR/findings/FIND-REAL/report.md" <<'EOF'
+# Authorization bypass in admin handler
+
+## Location
+server/handlers/admin.go:HandleListUsers:42
+
+## Fields
+| Field | Value |
+| :-- | :-- |
+| Class | auth:bypass |
+| Severity | High |
+
+## Rationale
+Reads the requester role from a caller-controlled cookie without checking the
+server-side session store, so any logged-in user can read other users' PII.
+EOF
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"first reviewer","class":"auth:bypass","severity":"high","dedup_key":"missing-server-side-check"}'
+LLM_DECIDE_LOG="$llm_log" validate_find_gate >/dev/null 2>&1
+calls1=$(grep -c "find_quality MOCK" "$llm_log" 2>/dev/null || true)
+[ "${calls1:-0}" -ge 1 ] \
+  && pass "real-stamp: find_quality ran on the first gate pass (${calls1} call(s))" \
+  || fail "real-stamp: find_quality ran on the first gate pass" "calls1=${calls1:-0}"
+# Run the REAL stampers that mutate report.md AFTER the verdict is cached.
+python3 "$BIN_DIR/cluster-findings" "$RESULTS_DIR" >/dev/null 2>&1 || true
+python3 "$BIN_DIR/enrich-report" --quiet "$RESULTS_DIR/findings/FIND-REAL/report.md" >/dev/null 2>&1 || true
+# Non-vacuousness: the stampers actually mutated report.md — both a Cluster:
+# stamp (cluster-findings) and the in-place table reformat (report_enrich pads
+# the cells), which together are the mutations that defeat a content hash.
+real_report="$RESULTS_DIR/findings/FIND-REAL/report.md"
+grep -q '^Cluster:' "$real_report" \
+  && pass "real-stamp: cluster-findings stamped report.md (Cluster: line present)" \
+  || fail "real-stamp: cluster-findings stamped report.md" "no Cluster: line written"
+grep -q '| Class    | auth:bypass |' "$real_report" \
+  && pass "real-stamp: report_enrich reformatted the Fields table (in-place rewrite)" \
+  || fail "real-stamp: report_enrich reformatted the Fields table" "table not padded"
+: > "$llm_log"
+# Re-gate with a DIFFERENT mock — a re-judge would both log a call AND flip
+# the cached class. Neither must happen.
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"SECOND reviewer","class":"WRONG-CLASS","severity":"low","dedup_key":"other-key"}'
+LLM_DECIDE_LOG="$llm_log" validate_find_gate >/dev/null 2>&1
+calls2=$(grep -c "find_quality MOCK" "$llm_log" 2>/dev/null || true)
+assert_eq "0" "${calls2:-0}" \
+  "real-stamp: re-gate after real cluster+enrich stamping makes ZERO find_quality calls"
+if grep -q "WRONG-CLASS" "$RESULTS_DIR/findings/FIND-REAL/.llm-find-quality.json" 2>/dev/null; then
+  fail "real-stamp: cached verdict must not be recomputed after real stamping" "class flipped to WRONG-CLASS"
+else
+  pass "real-stamp: cached verdict survived real cluster+enrich stamping"
+fi
 unset LLM_DECIDE_MOCK_FIND_QUALITY
 reset_findings
 

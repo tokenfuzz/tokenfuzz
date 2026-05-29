@@ -416,6 +416,18 @@ def _is_string(value) -> bool:
     return isinstance(value, str)
 
 
+def _is_optional_string(value) -> bool:
+    """True for a string OR JSON null.
+
+    Models routinely emit `"field": null` (rather than "") for an absent
+    optional value. An absent key already validates via `.get(k, "")`, but
+    an explicit null does not — and rejecting it would discard the WHOLE
+    decision (e.g. a find_quality verdict's class/severity/dedup_key) over
+    one empty descriptor field, then re-incur the call next pass. Treat
+    null as "" for optional fields; required fields keep using _is_string."""
+    return value is None or isinstance(value, str)
+
+
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -429,9 +441,9 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     """
     known_decisions = {
         "strategy_pick", "crash_triage", "crash_confirm", "legit_crash",
-        "find_quality", "cluster_expand", "patch_review", "work_rerank",
-        "s6-peer-suggest", "threat-model-suggest", "s6-peer-distill",
-        "s6-peer-map",
+        "find_quality", "finding_key", "cluster_expand", "patch_review",
+        "work_rerank", "s6-peer-suggest", "threat-model-suggest",
+        "s6-peer-distill", "s6-peer-map",
     }
     if decision not in known_decisions:
         return True
@@ -452,13 +464,21 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     if decision == "legit_crash":
         return _is_bool(parsed.get("legitimate")) and _is_string(parsed.get("reason"))
     if decision == "find_quality":
+        # find_quality is the QUALITY gate (accept/class/severity). Identity
+        # (dedup_key) is no longer its job — it's assigned uniformly at cluster
+        # time by the finding_key keyer (lib/finding_keyer.py), so it works the
+        # same for harness, recon, and model-direct findings alike.
         return (
             _is_bool(parsed.get("accept"))
             and _is_string(parsed.get("reason"))
             and _is_string(parsed.get("class"))
             and _is_string(parsed.get("severity"))
-            and _is_string(parsed.get("dedup_key", ""))
         )
+    if decision == "finding_key":
+        # IDENTITY-only: the canonical root-cause key. Tolerates JSON null
+        # (the model's common spelling of "absent"); an empty/invalid key just
+        # degrades that finding to the deterministic (class, file, func) label.
+        return _is_optional_string(parsed.get("dedup_key"))
     if decision == "cluster_expand":
         rows = parsed.get("rows")
         if not isinstance(rows, list):

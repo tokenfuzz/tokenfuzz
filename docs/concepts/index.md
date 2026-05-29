@@ -10,3 +10,4 @@ extend it.
 | [System architecture](system-architecture.md) | The components — audit run, recon, work queue, agents, probe runner, triage, backends. |
 | [Strategy model](strategy-model.md) | The eight investigation methods, how cards get a strategy, and how rotation is effort-gated. |
 | [Cost model](cost-model.md) | What scales with cost on long runs, and the levers the harness gives you. |
+| [Deduplication](deduplication.md) | How crashes (stack-state bucketing) and findings (evidence clustering) collapse re-discoveries into one cluster per root cause. |

@@ -418,5 +418,24 @@ assert_eq "$K" "$ok_count" "concurrent budget: exactly K=${K} callers consumed b
 assert_eq "$K" "$counter_final" "concurrent budget: counter file matches K"
 unset LLM_DECIDE_COUNTER_FILE LLM_DECIDE_MAX_CALLS
 
+# 16. find_quality: the optional dedup_key tolerates JSON null. Models
+#     routinely spell an absent optional value as `null` rather than "".
+#     Rejecting that would discard the WHOLE verdict (class/severity) over one
+#     empty field — and, with no cache written, re-incur the call every
+#     maintain_indexes pass. null on the OPTIONAL dedup_key must validate;
+#     null on a REQUIRED field must still fail.
+unset rc
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"ok","class":"memory-safety","severity":"high","dedup_key":null}'
+out=$(echo "x" | llm_decide find_quality "accept,reason,class,severity" 2 2>/dev/null) || rc=$?
+assert_eq "0" "${rc:-0}" "find_quality: null optional dedup_key → rc=0 (verdict kept)"
+echo "$out" | jq -e '.accept == true and .class == "memory-safety"' >/dev/null 2>&1 \
+  && pass "find_quality: verdict survives a null dedup_key" \
+  || fail "find_quality: verdict dropped on null dedup_key: out=$out"
+unset LLM_DECIDE_MOCK_FIND_QUALITY rc
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"ok","class":null,"severity":"high"}'
+out=$(echo "x" | llm_decide find_quality "accept,reason,class,severity" 2 2>/dev/null) || rc=$?
+assert_eq "1" "${rc:-0}" "find_quality: null on REQUIRED class still rejected"
+unset LLM_DECIDE_MOCK_FIND_QUALITY rc
+
 teardown_test_env
 summary

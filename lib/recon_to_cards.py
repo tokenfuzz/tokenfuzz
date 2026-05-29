@@ -480,162 +480,6 @@ def materialize_find(
     return find_id
 
 
-# ── Mechanical augment-don't-refile guard ───────────────────────────────
-#
-# The agent prompt instructs that any work card with a find_id must
-# augment the linked FIND-RECON-* dir rather than file a fresh
-# FIND-NNN-*. Prompt compliance is soft — an agent could ignore the
-# instruction and create a duplicate. This function is the mechanical
-# enforcement: at validate-gate / benchmark time, any agent-filed FIND
-# whose (file, function) signature collides with an existing
-# FIND-RECON-* gets moved into findings-rejected/ with a sentinel
-# annotation. The recon-materialized FIND remains canonical; the
-# headline `count_subdirs(findings, FIND-*)` stays bounded by recon-
-# unique-defects + agent-unique-defects (no double-count for the same
-# defect filed both ways).
-#
-# Idempotent: re-running after a sweep is a no-op because the moved
-# dirs no longer live under findings_dir. False-positive risk is
-# bounded by requiring BOTH file and function to match — distinct
-# defects in the same function are rare in practice and would be
-# caught by cluster-findings' richer signature.
-
-
-def _read_report_text(find_dir: Path) -> str:
-    """Best-effort read of the primary report file in a FIND dir."""
-    for name in ("REPORT.md", "report.md", "description.md",
-                 "analysis.md", "README.md"):
-        path = find_dir / name
-        if path.is_file():
-            try:
-                return path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                return ""
-    return ""
-
-
-def _extract_find_signature(
-    find_dir: Path,
-    target_root: str,
-) -> tuple[str, str, str]:
-    """(file, function, class) signature for a FIND dir, using the same
-    extraction the cluster-findings pipeline uses.
-
-    Class is included so two DISTINCT defects in the same function
-    (e.g. a UAF on line 100 and an integer-overflow on line 150) do not
-    collapse to the same signature and get incorrectly deduped. This is
-    the load-bearing fix against the capability-regression risk where
-    the augment-don't-refile sweep would otherwise hide an agent-found
-    bug whose class differs from the recon-named one.
-
-    Class is normalized via finding_signature.normalize_class so
-    surface variations ("memory-safety:bounds" vs "OOB-read" vs "bounds")
-    don't defeat the match. Class "" (extractor found no class label)
-    is preserved as "" rather than coerced to "other" — an unknown
-    class deduping against another unknown class would be wrong, so we
-    leave the dedup gate to require BOTH non-empty for a match.
-    """
-    text = _read_report_text(find_dir)
-    if not text:
-        return ("", "", "")
-    try:
-        from finding_signature import (
-            extract_class,
-            extract_location,
-            normalize_class,
-        )
-        f, fn = extract_location(text, target_root)
-        raw_class = extract_class(text)
-        # normalize_class returns "other" for empty input; we want "" to
-        # signal "no extractable class" so the dedup gate can reject the
-        # match. Only normalize when extract_class found something.
-        klass = normalize_class(raw_class) if raw_class else ""
-        return (f, fn, klass)
-    except Exception:
-        return ("", "", "")
-
-
-def dedupe_recon_findings(
-    findings_dir: Path,
-    rejected_dir: Path,
-    target_root: str = "",
-) -> list[tuple[str, str]]:
-    """Move agent-filed FIND-* dirs that duplicate a FIND-RECON-* by
-    (file, function) into rejected_dir. Returns the list of
-    (moved_id, canonical_recon_id) pairs.
-
-    The mechanical complement to the augment-don't-refile prompt
-    contract. Safe to call repeatedly: nothing happens once duplicates
-    have been moved.
-    """
-    import shutil
-    findings_dir = Path(findings_dir)
-    rejected_dir = Path(rejected_dir)
-    if not findings_dir.is_dir():
-        return []
-    # Index 1: signatures held by recon-materialized FINDs.
-    # Signature is (file, function, class). All three must be non-empty
-    # for the match to fire — see _extract_find_signature for the
-    # rationale on why class is included (distinct defects in the same
-    # function would otherwise be wrongly collapsed).
-    recon_sigs: dict[tuple[str, str, str], str] = {}
-    for d in sorted(findings_dir.glob("FIND-RECON-*")):
-        if not d.is_dir():
-            continue
-        sig = _extract_find_signature(d, target_root)
-        if sig[0] and sig[1] and sig[2] and sig not in recon_sigs:
-            recon_sigs[sig] = d.name
-    if not recon_sigs:
-        return []
-    moved: list[tuple[str, str]] = []
-    for d in sorted(findings_dir.glob("FIND-*")):
-        if not d.is_dir():
-            continue
-        if d.name.startswith("FIND-RECON-"):
-            continue
-        # Operator pin: .keep / .reviewed marks a FIND as human-approved;
-        # never auto-move those (mirrors validate_find_gate behavior).
-        if (d / ".keep").is_file() or (d / ".reviewed").is_file():
-            continue
-        sig = _extract_find_signature(d, target_root)
-        # All three signature components must be non-empty AND match.
-        # Missing class on either side → no dedup (safer to keep a
-        # potential duplicate than to wrongly hide a distinct bug).
-        if not (sig[0] and sig[1] and sig[2]):
-            continue
-        canonical = recon_sigs.get(sig)
-        if not canonical:
-            continue
-        rejected_dir.mkdir(parents=True, exist_ok=True)
-        target = rejected_dir / d.name
-        if target.exists():
-            target = rejected_dir / f"{d.name}.dup-{int(time.time())}"
-        # Audit-trail sentinel: the moved dir carries a note saying why,
-        # so a QA reviewer who opens findings-rejected/ later understands
-        # this was a programmatic dedup, not an LLM-quality reject.
-        try:
-            note = d / ".duplicate-of-recon"
-            note.write_text(
-                f"duplicates: {canonical}\n"
-                f"signature: file={sig[0]} function={sig[1]} "
-                f"class={sig[2]}\n"
-                f"moved_at: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
-                "reason: agent-filed FIND collides with a recon-materialized "
-                "FIND for the same (file, function, class); moved here to keep "
-                "the headline finding count bounded. Recon-materialized FIND "
-                "remains the canonical record.\n",
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
-        try:
-            shutil.move(str(d), str(target))
-        except OSError:
-            continue
-        moved.append((d.name, canonical))
-    return moved
-
-
 def finding_to_cards(
     finding: dict,
     target_slug: str,
@@ -808,19 +652,11 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         description="Convert recon-hypotheses.jsonl into work-cards.jsonl entries."
     )
-    ap.add_argument(
-        "--dedupe-only", action="store_true",
-        help="Run the augment-don't-refile dedup sweep against an existing "
-        "findings/ tree (no recon → cards conversion). Requires --results-dir. "
-        "Moves any agent-filed FIND-* whose (file,function) signature collides "
-        "with an existing FIND-RECON-* into findings-rejected/. Intended to be "
-        "called periodically by validate_find_gate.",
-    )
     ap.add_argument("--target-slug", default="")
     ap.add_argument("--target-path", default="",
                     help="Absolute target source root, for relativising the .file field")
     ap.add_argument("--recon-jsonl", default="",
-                    help="Path to recon-hypotheses.jsonl (required unless --dedupe-only)")
+                    help="Path to recon-hypotheses.jsonl")
     ap.add_argument("--work-cards", default="",
                     help="Path to work-cards.jsonl (will be MERGED with: existing "
                     "cards kept, recon-hypothesis cards rewritten)")
@@ -849,32 +685,6 @@ def main(argv: list[str]) -> int:
     results_dir: Path | None = None
     if args.results_dir:
         results_dir = Path(args.results_dir).expanduser().resolve()
-
-    # Dedupe-only mode: skip the recon→cards conversion entirely, just
-    # run the augment-don't-refile sweep against an existing tree.
-    if args.dedupe_only:
-        if results_dir is None:
-            print("recon_to_cards: --dedupe-only requires --results-dir",
-                  file=sys.stderr)
-            return 2
-        target_root = ""
-        if args.target_path:
-            target_root = str(Path(args.target_path).expanduser().resolve())
-        moved = dedupe_recon_findings(
-            results_dir / "findings",
-            results_dir / "findings-rejected",
-            target_root=target_root,
-        )
-        if not args.quiet:
-            print(
-                f"recon_to_cards: dedupe moved {len(moved)} agent-filed FIND(s) "
-                f"that duplicated a recon-materialized FIND",
-                file=sys.stderr,
-            )
-            for moved_id, canonical in moved:
-                print(f"  - {moved_id} → findings-rejected/ (canonical: {canonical})",
-                      file=sys.stderr)
-        return 0
 
     # Conversion mode: require the conversion-specific args that were
     # previously declared as `required=True`. We validate here so both

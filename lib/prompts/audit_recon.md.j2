@@ -38,7 +38,7 @@ something off, emit it.
     "title": "one-line title of the bug or suspicion",
     "file": "<path>",
     "line": <integer or 0>,
-    "function": "<name or empty string>",
+    "function": "<fully-qualified demangled symbol (ns::Class::method) from stack frame #0 if a crash exists, else the defining function; no args/line/path; empty if none>",
     "class": "OOB-read|OOB-write|UAF|double-free|integer-overflow|logic|DoS-amplification|info-leak|protocol-state|other",
     "notes": "1-3 sentences: why it looks like a bug. Include input shape or call sequence if you have one.",
     "confidence": "NEEDS-VERIFICATION"

@@ -134,6 +134,7 @@ nav:
       - System architecture: concepts/system-architecture.md
       - Strategy model: concepts/strategy-model.md
       - Cost model: concepts/cost-model.md
+      - Deduplication: concepts/deduplication.md
   - Reference:
       - reference/index.md
       - Commands: reference/commands.md

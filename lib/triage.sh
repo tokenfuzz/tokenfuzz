@@ -31,6 +31,15 @@ if ! declare -f render_prompt_template >/dev/null 2>&1; then
   unset _triage_prompt_dir
 fi
 
+# Single ceiling for every single-shot LLM decision (crash_triage,
+# crash_confirm, legit_crash, find_quality, cluster_expand, patch_review).
+# `timeout` is a max, not a fixed wait — fast backends finish early, so one
+# generous value costs them nothing while giving a slow model (e.g.
+# claude-opus) room to answer instead of being killed (rc=124). Operators on
+# an unusually slow/throttled backend can raise it in one place. The `:=`
+# form is idempotent, so re-sourcing in tests is safe.
+: "${LLM_DECISION_TIMEOUT:=45}"
+
 if ! declare -f audit_timeout_run >/dev/null 2>&1; then
   _triage_timeout_dir="${SCRIPT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
   [ -f "$_triage_timeout_dir/lib/timeout.sh" ] && source "$_triage_timeout_dir/lib/timeout.sh"
@@ -395,7 +404,7 @@ llm_triage_crash_decision() {
     --var "trace=${trace}") || return 1
 
   local json
-  json=$(printf '%s' "$prompt" | llm_decide crash_triage "keep,reason" 12) || return 1
+  json=$(printf '%s' "$prompt" | llm_decide crash_triage "keep,reason" "$LLM_DECISION_TIMEOUT") || return 1
   local keep
   keep=$(printf '%s' "$json" | jq -r '.keep' 2>/dev/null)
   if [ "$keep" = "false" ]; then
@@ -463,7 +472,7 @@ llm_confirm_crash_report() {
     --var "body=${body}") || return 1
 
   local json
-  json=$(printf '%s' "$prompt" | llm_decide crash_confirm "accept,reason" 15) || return 1
+  json=$(printf '%s' "$prompt" | llm_decide crash_confirm "accept,reason" "$LLM_DECISION_TIMEOUT") || return 1
   local accept reason
   accept=$(printf '%s' "$json" | jq -r '.accept' 2>/dev/null)
   reason=$(printf '%s' "$json" | jq -r '.reason' 2>/dev/null)
@@ -830,7 +839,7 @@ llm_crash_legitimacy_decision() {
     --var "evidence=${evidence}") || return 1
 
   local json legitimate reason
-  json=$(printf '%s' "$prompt" | llm_decide legit_crash "legitimate,reason" 30) || {
+  json=$(printf '%s' "$prompt" | llm_decide legit_crash "legitimate,reason" "$LLM_DECISION_TIMEOUT") || {
     return 1
   }
   legitimate=$(printf '%s' "$json" | jq -r '.legitimate' 2>/dev/null)
@@ -1922,44 +1931,39 @@ llm_find_quality_decision() {
   [ -n "$find_dir" ] || find_dir=$(dirname "$desc_path")
 
   # Bump when the prompt/criteria change so stale cached verdicts from
-  # older rubrics don't apply to the current gate.
-  # v4 added dedup_key for cluster-findings.
-  # v5 tightens the rubric to reject non-security correctness bugs
-  # (data-integrity, robustness, missing-feature, semantic mismatch)
-  # so QA only sees actual security issues.
-  # v6 inverts the in-doubt default to ACCEPT (a false-reject
-  # permanently hides a real bug; a false-accept just costs QA time)
-  # and tracks reject_count so the gate requires TWO independent
-  # reject verdicts before dropping (handled by validate_find_gate).
-  # v7 flips the rubric to "Reject only if ALL of these clearly fail"
-  # (rather than "Accept ONLY if ALL hold") and removes the
-  # auto-reject on self-deprecating hedging in Impact/Reachability
-  # notes; reviewers now judge the substance, not the writeup tone.
-  local decision_version="v7"
+  # older rubrics don't apply to the current gate. This gate is the QUALITY
+  # decision only — {accept, reason, class, severity}. Finding IDENTITY
+  # (dedup_key) is no longer produced here: it's assigned uniformly at cluster
+  # time by lib/finding_keyer.py from each report alone, so it works the same
+  # for harness, recon, and model-direct findings. v10 drops dedup_key (and the
+  # sibling-key coordination that fed it) from the verdict shape; bumping
+  # re-decides caches that still carry the old dedup_key field.
+  local decision_version="v10"
 
+  # content_sha1 is recorded for forensics (what the report looked like when
+  # judged) but is NOT used to gate re-evaluation — see the short-circuit
+  # below for why.
   local hash cache
   hash=$(_triage_file_sha1 "$desc_path" 2>/dev/null || true)
   cache="$find_dir/.llm-find-quality.json"
-  # reject_count is stored in a SEPARATE marker file rather than in the
-  # cache because cluster-findings stamps `Cluster:` lines into report.md
-  # at the end of each triage pass, which changes the content hash and
-  # would otherwise reset the counter every time. The marker tracks
-  # "how many independent reject verdicts has THIS find directory
-  # received", which is what we actually want for quorum.
   local reject_marker="$find_dir/.find_reject_count"
   local prev_reject_count=0
   if [ -s "$reject_marker" ]; then
     prev_reject_count=$(head -c 16 "$reject_marker" 2>/dev/null | tr -cd '0-9')
     [ -n "$prev_reject_count" ] || prev_reject_count=0
   fi
-  # Cache short-circuits the LLM only when the cached verdict is accept
-  # OR reject_count has already reached the quorum threshold (default
-  # 2). Otherwise we re-ask to get a second independent opinion. The
-  # content hash + version check still applies for accepts: if the
-  # report content changed, re-evaluate.
-  # Cache hit also requires decision_version to match — bumping the
-  # rubric (decision_version) intentionally invalidates older verdicts.
-  if _triage_cache_sha1_matches "$cache" "content_sha1" "$hash"; then
+  # Short-circuit on the cached VERDICT alone — decision_version + accept —
+  # never on the report's content hash. cluster-findings, report_enrich, and
+  # render-md all rewrite report.md AFTER the verdict is cached: they stamp
+  # `Cluster:`/`Dedup key:` lines, inject `<!-- enrich:* -->` blocks, and
+  # reformat the Fields table (column padding). Those are cosmetic — the
+  # security verdict does not depend on them — but a content-keyed cache busts
+  # on every one of them and re-asks the LLM on each housekeeping pass. So:
+  #   * an ACCEPTED finding is judged exactly once per rubric version, and
+  #   * a REJECTED finding is re-asked only until it reaches quorum.
+  # The explicit way to force re-evaluation is a decision_version bump (a
+  # rubric change), which is the only thing that should invalidate a verdict.
+  if [ -s "$cache" ]; then
     local cached_version cached_accept
     cached_version=$(jq -r '.decision_version // ""' "$cache" 2>/dev/null)
     cached_accept=$(jq -r '.accept' "$cache" 2>/dev/null)
@@ -1976,44 +1980,17 @@ llm_find_quality_decision() {
   local body
   body=$(head -c 8000 "$desc_path" 2>/dev/null) || return 1
 
-  # Collect existing dedup_keys from sibling FINDs so the LLM can REUSE a
-  # canonical key when the new finding matches a known root cause. Without
-  # this, two FINDs about the same root cause filed in separate sessions
-  # get two different dedup_keys and Layer 2 fails to collapse them.
-  # Wrapped in `|| true` so any one segment failing (grep on empty input,
-  # jq on missing files) doesn't abort the function under pipefail.
-  local known_keys=""
-  if command -v jq >/dev/null 2>&1 && [ -d "${RESULTS_DIR:-}/findings" ]; then
-    known_keys=$( { jq -r 'select(.accept == true) | .dedup_key // empty' \
-                       "$RESULTS_DIR"/findings/FIND-*/.llm-find-quality.json \
-                       2>/dev/null \
-                    | sort -u \
-                    | grep -v '^$' \
-                    | head -40 \
-                    | paste -sd, - 2>/dev/null; } || true )
-  fi
-  local known_keys_block=""
-  if [ -n "$known_keys" ]; then
-    known_keys_block=$(printf 'Existing canonical dedup_keys in this audit (reuse one if your finding matches that root cause):\n%s\n\n' "$known_keys")
-  fi
-
   local prompt
   prompt=$(render_prompt_template triage_find_quality.md.j2 \
-    --var "known_keys_block=${known_keys_block}" \
     --var "body=${body}") || return 1
 
   local json
-  # dedup_key is OPTIONAL — older mock/backend outputs may omit it. We
-  # keep it out of the required CSV so the validator doesn't reject a
-  # response that's otherwise valid; the jq read below tolerates a
-  # missing field via `// ""`.
-  json=$(printf '%s' "$prompt" | llm_decide find_quality "accept,reason,class,severity" 14) || return 1
-  local accept reason class severity dedup_key
+  json=$(printf '%s' "$prompt" | llm_decide find_quality "accept,reason,class,severity" "$LLM_DECISION_TIMEOUT") || return 1
+  local accept reason class severity
   accept=$(printf '%s' "$json" | jq -r '.accept' 2>/dev/null)
   reason=$(printf '%s' "$json" | jq -r '.reason' 2>/dev/null)
   class=$(printf '%s' "$json" | jq -r '.class // ""' 2>/dev/null)
   severity=$(printf '%s' "$json" | jq -r '.severity // ""' 2>/dev/null)
-  dedup_key=$(printf '%s' "$json" | jq -r '.dedup_key // ""' 2>/dev/null)
 
   case "$accept" in
     true|false) ;;
@@ -2023,28 +2000,6 @@ llm_find_quality_decision() {
   [ "$reason" = "null" ] && reason=""
   [ "$class" = "null" ] && class=""
   [ "$severity" = "null" ] && severity=""
-  [ "$dedup_key" = "null" ] && dedup_key=""
-
-  # Lower-case + tighten the dedup_key. Invalid keys are dropped — the
-  # downstream signature falls back to (class, file, func).
-  if [ -n "$dedup_key" ]; then
-    dedup_key=$(printf '%s' "$dedup_key" \
-                | tr '[:upper:]' '[:lower:]' \
-                | tr ' ' '-' \
-                | tr -cd 'a-z0-9_-' \
-                | head -c 60)
-    case "$dedup_key" in
-      *[!a-z0-9_-]*|"") dedup_key="" ;;
-    esac
-    # Require at least one hyphen or underscore (multi-token).
-    case "$dedup_key" in
-      *[-_]*) ;;
-      *)      dedup_key="" ;;
-    esac
-    if [ ${#dedup_key} -lt 4 ]; then
-      dedup_key=""
-    fi
-  fi
 
   if [ "$accept" = "true" ]; then
     [ -n "$reason" ] || reason="LLM accepted finding"
@@ -2053,9 +2008,9 @@ llm_find_quality_decision() {
     # produced an accept should not still carry old reject signal.
     rm -f "$reject_marker" 2>/dev/null || true
     { jq -n --arg reason "$reason" --arg class "$class" \
-         --arg severity "$severity" --arg dedup_key "$dedup_key" \
+         --arg severity "$severity" \
          --arg version "$decision_version" \
-         '{decision_version: $version, accept: true, reason: $reason, class: $class, severity: $severity, dedup_key: $dedup_key}' \
+         '{decision_version: $version, accept: true, reason: $reason, class: $class, severity: $severity}' \
         | _triage_cache_write_envelope "$cache" "find_quality" "content_sha1" "$hash"; } || true
     return 0
   fi
@@ -2070,7 +2025,7 @@ llm_find_quality_decision() {
   printf '%s\n' "$new_reject_count" > "$reject_marker" 2>/dev/null || true
   { jq -n --arg reason "$reason" --arg version "$decision_version" \
        --argjson reject_count "$new_reject_count" \
-       '{decision_version: $version, accept: false, reason: $reason, class: "", severity: "", dedup_key: "", reject_count: $reject_count}' \
+       '{decision_version: $version, accept: false, reason: $reason, class: "", severity: "", reject_count: $reject_count}' \
       | _triage_cache_write_envelope "$cache" "find_quality" "content_sha1" "$hash"; } || true
   return 0
 }
@@ -2094,24 +2049,10 @@ validate_find_gate() {
   local bin_dir
   bin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
 
-  # Augment-don't-refile dedup: any agent-filed FIND-* whose
-  # (file,function) signature matches an existing FIND-RECON-* gets
-  # moved to findings-rejected/ before the rest of the gate runs. The
-  # prompt instructs agents to augment recon-materialized FINDs, but
-  # prompt compliance is soft — this sweep is the mechanical guarantee
-  # that an ignored prompt cannot inflate the headline finding count.
-  # Safe to call every gate pass: dedupe_recon_findings is idempotent
-  # (returns 0 moves once the duplicates are gone).
-  local script_root
-  script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)
-  if [ -x "$script_root/lib/recon_to_cards.py" ] \
-      && [ -d "$RESULTS_DIR/findings" ]; then
-    python3 "$script_root/lib/recon_to_cards.py" --dedupe-only \
-      --results-dir "$RESULTS_DIR" \
-      ${TARGET_ROOT:+--target-path "$TARGET_ROOT"} 2>&1 \
-      | sed 's/^/[find-dedup] /' >> "$INDEX" 2>/dev/null || true
-  fi
-
+  # No location-based pre-filing dedup: a recon finding and an agent's
+  # re-discovery of the same bug are collapsed at cluster time like any other
+  # duplicate (bin/cluster-findings → lib/finding_dedup.py), so identity is
+  # computed in ONE place from each report, the same for every finding source.
   local d
   for d in "$RESULTS_DIR"/findings/FIND-*/; do
     [ -d "$d" ] || continue
@@ -2326,7 +2267,7 @@ expand_cluster_for_crash() {
     --var "source_block=${source_block}") || return 0
 
   local json
-  json=$(printf '%s' "$prompt" | llm_decide cluster_expand "rows" 15) || return 0
+  json=$(printf '%s' "$prompt" | llm_decide cluster_expand "rows" "$LLM_DECISION_TIMEOUT") || return 0
 
   # Validate and append rows.
   local count
@@ -2469,7 +2410,7 @@ patch_aware_rerun_review() {
       --var "id_list_block=${id_list_block}" \
       --var "diff=${diff}") || continue
     local json
-    json=$(printf '%s' "$prompt" | llm_decide patch_review "fixed" 20) || continue
+    json=$(printf '%s' "$prompt" | llm_decide patch_review "fixed" "$LLM_DECISION_TIMEOUT") || continue
     local flagged
     flagged=$(printf '%s' "$json" | jq -r '.fixed[]?' 2>/dev/null) || continue
     [ -n "$flagged" ] || continue
@@ -2560,6 +2501,35 @@ _triage_finding_subject() {
   ' "$desc" 2>/dev/null
 }
 
+# Coverage belt for the find-quality decision. validate_find_gate runs the
+# gate on every FIND-* in its own pass, but maintain_indexes ALSO clusters,
+# and a finding materialized after the last gate pass (e.g. recon-materialized
+# FIND-RECON-*) can reach clustering with no .llm-find-quality.json — and
+# therefore no accept/class/severity verdict. The gate decides quality only;
+# the dedup_key is assigned separately by the keyer at cluster time, so this
+# belt guarantees the quality verdict (notably the class, a hard merge gate)
+# exists for every finding before clustering. Fill exactly that gap: only
+# findings MISSING a cache are processed. Fresh verdicts short-circuit inside
+# llm_find_quality_decision, and stale-version re-evaluation stays the gate's
+# job, so this adds no LLM calls for already-decided findings. Best-effort
+# under set -euo pipefail.
+_ensure_find_quality_coverage() {
+  [ -d "$RESULTS_DIR/findings" ] || return 0
+  declare -f llm_find_quality_decision >/dev/null 2>&1 || return 0
+  local d desc c
+  for d in "$RESULTS_DIR"/findings/FIND-*/; do
+    [ -d "$d" ] || continue
+    [ -f "$d/.llm-find-quality.json" ] && continue
+    { [ -f "$d/.reviewed" ] || [ -f "$d/.keep" ]; } && continue
+    desc=""
+    for c in "$d/report.md" "$d/description.md" "$d/analysis.md" "$d/README.md"; do
+      [ -s "$c" ] && { desc="$c"; break; }
+    done
+    [ -n "$desc" ] || continue
+    llm_find_quality_decision "$desc" "$d" >/dev/null 2>&1 || true
+  done
+}
+
 maintain_indexes() {
   mkdir -p "$RESULTS_DIR/crashes" "$RESULTS_DIR/crashes-rejected" "$RESULTS_DIR/findings" 2>/dev/null || true
 
@@ -2588,6 +2558,8 @@ maintain_indexes() {
       fi
     fi
     if [ -x "$_finding_cluster_bin" ] && command -v python3 >/dev/null 2>&1; then
+      # Ensure every finding carries its semantic signals before clustering.
+      _ensure_find_quality_coverage
       TARGET_ROOT="${TARGET_ROOT:-}" python3 "$_finding_cluster_bin" "$RESULTS_DIR" >/dev/null 2>&1 \
         || audit_log "WARN: cluster-findings refresh failed (FINDING-CLUSTERS.md may be stale)" \
              | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true

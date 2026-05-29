@@ -147,6 +147,33 @@ assert_file_contains "$cluster_html" '<code class="wrap">node_free node.c:100 -&
 # Table-wide CSS: atomic code is nowrap by default, wrap-class opts out.
 assert_file_contains "$cluster_html" 'td code, th code' \
   "table code has a shared structural rule"
+
+# 10c. Long single-token signatures (no whitespace, no `->`) also opt into
+#      wrapping when they carry a natural break point, so a Signature slug
+#      like `frame-length-truncation-overflow` or a `file:func` doesn't hog
+#      column width. Short ids and separator-less hashes stay atomic. This
+#      is the content-based rule (shape + length), not a per-table hack.
+longsig="$TEST_TMPDIR/longsig.md"
+cat > "$longsig" <<'EOF'
+# Finding Clusters
+
+| Severity | Cluster | Signature | Canonical | Members | Status |
+|:---------|:--------|:----------|:----------|:--------|:-------|
+| Medium | `FCL-9a914177` | `frame-length-truncation-overflow` | proj/FIND-1 | proj/FIND-1 | OK |
+| Medium | `FCL-1111aaaa` | `src/sampledb.cpp:proj::Store::set_blob` | proj/FIND-2 | proj/FIND-2 | OK |
+| Low | `FCL-2222bbbb` | `abcdef1234567890abcdef1234567890` | proj/FIND-3 | proj/FIND-3 | OK |
+EOF
+python3 "$RENDER" "$longsig" --html-sibling >/dev/null 2>&1
+longsig_html="$TEST_TMPDIR/longsig.html"
+assert_file_contains "$longsig_html" '<code class="wrap">frame-length-truncation-overflow</code>' \
+  "long dedup slug opts into wrapping (no per-table hack)"
+assert_file_contains "$longsig_html" '<code class="wrap">src/sampledb.cpp:proj::Store::set_blob</code>' \
+  "long file:func signature opts into wrapping"
+assert_file_contains "$longsig_html" '<code>FCL-9a914177</code>' \
+  "short cluster id stays atomic"
+# Long token WITHOUT a break point (a bare hash) stays atomic — not chopped.
+assert_file_contains "$longsig_html" '<code>abcdef1234567890abcdef1234567890</code>' \
+  "long separator-less token stays atomic"
 assert_file_contains "$cluster_html" 'td code.wrap, th code.wrap' \
   "wrap class opts into anywhere-breaking"
 assert_file_contains "$cluster_html" 'overflow-wrap: anywhere;' \

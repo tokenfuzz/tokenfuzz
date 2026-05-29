@@ -574,11 +574,12 @@ bash -c '
 ' _ "$prompt_tmpdir/bp.sh" "$file_list_input" > "$prompt_tmpdir/prompt-fl.txt" 2>&1
 
 # --- Size ceiling ---
-# Ceiling is chosen at ~2700 bytes — leaves modest headroom over the
-# current ~2200 byte rendering, blocks regression back toward the pre-
-# trim 4800-byte template, and forces deliberation if anyone wants to
-# add a section to the prompt later.
-prompt_ceiling=2700
+# Ceiling blocks regression back toward the pre-trim 4800-byte template
+# and forces deliberation before anyone grows the prompt. Raised 2700 →
+# 2760 (deliberate) for the canonical-symbol `function` schema hint: the
+# recon agent must emit the fully-qualified frame-#0 symbol so findings
+# dedup on a stable function rather than a drifting free-text label.
+prompt_ceiling=2760
 
 fl_size=$(wc -c < "$prompt_tmpdir/prompt-fl.txt" | tr -d ' ')
 

@@ -23,14 +23,18 @@ mk_find() {
   local d="$RESULTS_DIR/findings/$id"
   mkdir -p "$d"
   printf '%s\n' "$body" > "$d/report.md"
-  # Synthesize the LLM cache directly — we're not testing the LLM path
-  # here, only the clustering logic that reads it.
+  # Synthesize the caches directly — we're not testing the LLM path here, only
+  # the clustering logic that reads them. The quality gate supplies class (and
+  # severity); identity (dedup_key) is owned by the keyer's .finding-key.json.
   if [ -n "$llm_class" ]; then
     local sha1
     sha1=$(shasum -a 1 "$d/report.md" | awk '{print $1}')
     cat > "$d/.llm-find-quality.json" <<EOF
-{"decision":"find_quality","decision_version":"v4","content_sha1":"$sha1","accept":true,"reason":"test","class":"$llm_class","severity":"low","dedup_key":"$llm_dedup_key","cached_at":"2026-05-12T00:00:00Z"}
+{"decision":"find_quality","decision_version":"v10","content_sha1":"$sha1","accept":true,"reason":"test","class":"$llm_class","severity":"low","cached_at":"2026-05-12T00:00:00Z"}
 EOF
+  fi
+  if [ -n "$llm_dedup_key" ]; then
+    printf '{"key_version":"v1","dedup_key":"%s"}\n' "$llm_dedup_key" > "$d/.finding-key.json"
   fi
 }
 
@@ -42,7 +46,7 @@ mk_find FIND-A1 \
 
 ## Classification
 - **Class**: auth:bypass" \
-  "auth:bypass" ""
+  "auth:bypass" "admin-listusers-authz-bypass"
 
 mk_find FIND-A2 \
 "# Same handler, different angle
@@ -51,7 +55,7 @@ mk_find FIND-A2 \
 
 ## Classification
 - **Class**: auth:bypass" \
-  "auth:bypass" ""
+  "auth:bypass" "admin-listusers-authz-bypass"
 
 # ── Layer 2: two reports at different file:func, same dedup_key ─────
 mk_find FIND-B1 \
@@ -117,6 +121,28 @@ Dedup key: [title] stale
 The token reset path accepts stale parser state after a failed parse." \
   "state:parser-reset" ""
 
+# ── Bias-to-separate: same (class,file,func) but NO dedup_key must NOT
+#    auto-merge. Only the high-precision signals (shared dedup_key, identical
+#    crash state) merge; a shared location alone is not a merge signal, so two
+#    distinct bugs in one function stay apart.
+mk_find FIND-G1 \
+"# Bug one at a shared site
+## Location
+\`src/shared/util.c:helper:10\`
+
+## Classification
+- **Class**: memory-safety:bounds" \
+  "memory-safety:bounds" ""
+
+mk_find FIND-G2 \
+"# Bug two at the same shared site
+## Location
+\`src/shared/util.c:helper:20\`
+
+## Classification
+- **Class**: memory-safety:bounds" \
+  "memory-safety:bounds" ""
+
 # ── Run cluster-findings ────────────────────────────────────────
 out=$(python3 "$CLUSTER" "$RESULTS_DIR" 2>&1) \
   || fail "cluster-findings runs cleanly" "exit nonzero: $out"
@@ -141,9 +167,17 @@ a1=$(cl_id FIND-A1); a2=$(cl_id FIND-A2)
 b1=$(cl_id FIND-B1); b2=$(cl_id FIND-B2)
 c1=$(cl_id FIND-C1); c2=$(cl_id FIND-C2); c3=$(cl_id FIND-C3)
 d1=$(cl_id FIND-D1)
+g1=$(cl_id FIND-G1); g2=$(cl_id FIND-G2)
 
-# Layer 1 collapse.
-assert_eq "$a1" "$a2" "Layer 1: same (class,file,func) → same cluster"
+# Auto-merge on a shared dedup_key (A1/A2 share admin-listusers-authz-bypass).
+assert_eq "$a1" "$a2" "auto-merge: shared dedup_key → same cluster"
+
+# Bias-to-separate: same (class,file,func) but NO dedup_key does NOT
+# auto-merge — a shared location alone is not a merge signal.
+[ "$g1" != "$g2" ] \
+  && pass "bias-to-separate: same site, no dedup_key → separate clusters" \
+  || fail "bias-to-separate: same site, no dedup_key → separate clusters" \
+       "g1=$g1 g2=$g2"
 
 # Layer 2 collapse.
 assert_eq "$b1" "$b2" "Layer 2: same dedup_key, different file → same cluster"
@@ -211,14 +245,6 @@ assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'FIND-A1' \
   "FINDING-CLUSTERS.md links the auth FINDs"
 assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'FIND-B1' \
   "FINDING-CLUSTERS.md links the memory-safety FINDs"
-# render-md pads table cells with spaces, so match the cell content
-# rather than asserting exact `| llm |` boundaries.
-assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" '\| +llm +\|' \
-  "FINDING-CLUSTERS.md flags llm signature kind"
-assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" '\| +loc +\|' \
-  "FINDING-CLUSTERS.md flags loc signature kind"
-assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" '\| +title +\|' \
-  "FINDING-CLUSTERS.md flags title signature kind"
 
 # ── Idempotency ─────────────────────────────────────────────────
 cp "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" "$TEST_TMPDIR/CLUSTERS.before"
@@ -248,7 +274,7 @@ assert_eq "$mtime_before" "$mtime_after" "--dry-run does not touch report.md"
 python3 "$CLUSTER" "$RESULTS_DIR" >/dev/null 2>&1
 sha1=$(shasum -a 1 "$RESULTS_DIR/findings/FIND-A2/report.md" | awk '{print $1}')
 cat > "$RESULTS_DIR/findings/FIND-A2/.llm-find-quality.json" <<EOF
-{"decision":"find_quality","decision_version":"v4","content_sha1":"$sha1","accept":true,"reason":"upgraded","class":"auth:bypass","severity":"high","dedup_key":"","cached_at":"2026-05-12T00:00:00Z"}
+{"decision":"find_quality","decision_version":"v10","content_sha1":"$sha1","accept":true,"reason":"upgraded","class":"auth:bypass","severity":"high","cached_at":"2026-05-12T00:00:00Z"}
 EOF
 python3 "$CLUSTER" "$RESULTS_DIR" >/dev/null 2>&1
 assert_file_exists "$RESULTS_DIR/findings/FIND-A1/.dup-of" \
@@ -275,12 +301,16 @@ Class: auth:bypass
 EOF
 sha1=$(shasum -a 1 "$agg_root/claude/results/findings/FIND-AGG-1/report.md" | awk '{print $1}')
 cat > "$agg_root/claude/results/findings/FIND-AGG-1/.llm-find-quality.json" <<EOF
-{"decision":"find_quality","decision_version":"v4","content_sha1":"$sha1","accept":true,"reason":"test","class":"auth:bypass","severity":"low","dedup_key":"","cached_at":"2026-05-12T00:00:00Z"}
+{"decision":"find_quality","decision_version":"v10","content_sha1":"$sha1","accept":true,"reason":"test","class":"auth:bypass","severity":"low","cached_at":"2026-05-12T00:00:00Z"}
 EOF
+printf '{"key_version":"v1","dedup_key":"session-validate-authz-bypass"}\n' \
+  > "$agg_root/claude/results/findings/FIND-AGG-1/.finding-key.json"
 sha1=$(shasum -a 1 "$agg_root/codex/results/findings/FIND-AGG-2/report.md" | awk '{print $1}')
 cat > "$agg_root/codex/results/findings/FIND-AGG-2/.llm-find-quality.json" <<EOF
-{"decision":"find_quality","decision_version":"v4","content_sha1":"$sha1","accept":true,"reason":"test","class":"auth:bypass","severity":"high","dedup_key":"","cached_at":"2026-05-12T00:00:00Z"}
+{"decision":"find_quality","decision_version":"v10","content_sha1":"$sha1","accept":true,"reason":"test","class":"auth:bypass","severity":"high","cached_at":"2026-05-12T00:00:00Z"}
 EOF
+printf '{"key_version":"v1","dedup_key":"session-validate-authz-bypass"}\n' \
+  > "$agg_root/codex/results/findings/FIND-AGG-2/.finding-key.json"
 
 echo "# legacy" > "$agg_root/FIND-CLUSTERS.md"
 python3 "$CLUSTER" "$agg_root" >/dev/null 2>&1 \

@@ -96,6 +96,18 @@ assert_eq("Authorization bypass",
 assert_eq("auth",
           fs.normalize_class(fs.extract_class("Issue class: Authorization bypass\n")),
           "Issue class: form → normalize → auth")
+# Bare-prompt / model-direct reports label the class as "Bug class:" etc.
+assert_eq("stack-buffer-overflow",
+          fs.extract_class("Bug class: stack-buffer-overflow / command construction overflow\n"),
+          "Bug class: form (leading token captured)")
+assert_eq("memory-safety",
+          fs.normalize_class(fs.extract_class(
+              "Bug class: stack-buffer-overflow / command construction overflow\n")),
+          "Bug class: stack-buffer-overflow → normalize → memory-safety")
+assert_eq("memory-safety",
+          fs.normalize_class(fs.extract_class("Vulnerability type: heap-buffer-overflow\n")),
+          "Vulnerability type: form → normalize → memory-safety")
+assert_eq("memory-safety", fs.normalize_class("out-of-bounds"), "out-of-bounds → memory-safety")
 
 
 # ── path normalization ─────────────────────────────────────────────
@@ -104,11 +116,38 @@ assert_eq("src/foo.c", fs.normalize_path("src/foo.c"), "relative as-is")
 assert_eq("src/foo.c", fs.normalize_path("`src/foo.c`"), "backticks stripped")
 assert_eq("src/foo.c", fs.normalize_path("/Users/x/work/src/foo.c", target_root="/Users/x/work"),
           "TARGET_ROOT prefix stripped")
-assert_eq("a/b/c/d", fs.normalize_path("very/deep/path/with/many/a/b/c/d"),
-          "last 4 segments kept")
+assert_eq("src/sampledb.cpp",
+          fs.normalize_path("targets/sample-cplusplus/src/sampledb.cpp",
+                            target_root="targets/sample-cplusplus"),
+          "relative target_root strips relative citation → target-relative path")
+# The audit passes an ABSOLUTE target_root but reports cite repo-relative
+# paths — must still collapse to the target-relative path (regression).
+assert_eq("src/sampledb.cpp",
+          fs.normalize_path("targets/sample-cplusplus/src/sampledb.cpp",
+                            target_root="/Users/x/work/targets/sample-cplusplus"),
+          "absolute target_root strips repo-relative citation (mixed forms)")
+assert_eq("src/sampledb.cpp",
+          fs.normalize_path("/Users/x/work/targets/sample-cplusplus/src/sampledb.cpp",
+                            target_root="targets/sample-cplusplus"),
+          "relative target_root strips absolute citation (mixed forms)")
+assert_eq("src/foo.c",
+          fs.normalize_path("src/foo.c", target_root="/Users/x/work/targets/sample-cplusplus"),
+          "already target-relative path is unchanged under absolute target_root")
+assert_eq("very/deep/path/with/many/a/b/c/d",
+          fs.normalize_path("very/deep/path/with/many/a/b/c/d"),
+          "full path kept — no segment truncation (distinct leaf-name files stay distinct)")
 assert_eq("src/foo.c", fs.normalize_path("src/foo.c  (line 42)"),
           "trailing annotation removed")
 assert_eq("", fs.normalize_path(""), "empty → empty")
+# Structural fallback: a leading `targets/<slug>/` is stripped even with NO
+# target_root — the benchmark output layout can't supply the slug, so derivation
+# mis-fires and the prefix must be removed structurally.
+assert_eq("src/pcre2grep.c",
+          fs.normalize_path("targets/pcre2/src/pcre2grep.c"),
+          "leading targets/<slug>/ stripped with no target_root (benchmark layout)")
+assert_eq("src/pcre2grep.c",
+          fs.normalize_path("targets/pcre2/src/pcre2grep.c", target_root="targets/benchmark"),
+          "mis-derived target_root: structural strip still normalizes the path")
 
 
 # ── extract_location ───────────────────────────────────────────────
@@ -181,6 +220,60 @@ assert_eq("", func, "file:line fallback (no func)")
 
 # Empty body returns empty.
 assert_eq(("", ""), fs.extract_location(""), "empty body → empty pair")
+
+
+# ── Canonical-source extraction: Fields table + ASan frame #0 ──────
+print("\nextract_location — canonical sources")
+
+# The | File | row (full target path) beats the basename in prose/frames;
+# frame #0 (demangled symbol) beats the fuzzy | Function | label.
+report_fields = """# Integer truncation in blob frame length
+
+| Field    | Value |
+|----------|-------|
+| File     | `targets/sampleproj/src/store.cpp` |
+| Function | `assign` |
+
+The subsequent memcpy (store.cpp:183) overflows.
+
+```
+    #0 proj::Engine::Store::set_blob(unsigned int) store.cpp:213
+    #1 proj::Engine::apply_line(...) store.cpp:367
+```
+SUMMARY: AddressSanitizer: heap-buffer-overflow store.cpp:213
+"""
+file, func = fs.extract_location(report_fields, target_root="targets/sampleproj")
+assert_eq("src/store.cpp", file, "| File | row wins, target_root stripped → relative path")
+assert_eq("proj::Engine::Store::set_blob", func,
+          "ASan frame #0 demangled symbol wins over fuzzy | Function | label")
+
+# Same crash site, a DIFFERENT report whose | Function | label drifts —
+# frame #0 makes both resolve to the same canonical func.
+report_fields2 = """# Frame capacity truncates size
+
+| File     | `targets/sampleproj/src/store.cpp` |
+| Function | `frame_capacity/Blob::assign` |
+
+```
+    #0 proj::Engine::Store::set_blob(unsigned int) store.cpp:213
+```
+"""
+file2, func2 = fs.extract_location(report_fields2, target_root="targets/sampleproj")
+assert_eq((file, func), (file2, func2),
+          "drifting | Function | labels collapse via frame #0 → identical loc")
+
+# No crash / no frame #0 → fall back to the | Function | label.
+report_no_stack = """# Logic flaw
+
+| File     | `targets/sampleproj/src/store.cpp` |
+| Function | `Store::upsert_user` |
+
+upsert_user never clears the secret on re-insert.
+"""
+file3, func3 = fs.extract_location(report_no_stack, target_root="targets/sampleproj")
+assert_eq("src/store.cpp", file3, "source-only finding: | File | row used")
+assert_eq("Store::upsert_user", func3,
+          "source-only finding: | Function | label used (no frame #0 to prefer)")
 
 
 # ── is_valid_dedup_key ─────────────────────────────────────────────
