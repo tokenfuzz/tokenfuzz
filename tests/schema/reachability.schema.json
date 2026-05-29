@@ -34,6 +34,10 @@
       "items": {"type": "string"},
       "description": "Substrings used to drop hits whose repo path or package name contains any of them. Sourced from --ignore CLI args plus reachability_ignore = [...] in target.toml."
     },
+    "match_mode": {
+      "enum": ["any-frame", "all-frames"],
+      "description": "Schema v2+. all-frames = a genuine caller had to match every probed symbol in one file (used when the symbols are a crash-state call chain, e.g. set_blob -> apply_line). any-frame = union/any-match (manual --symbol or narrative-mined entry points)."
+    },
     "external_callers": {
       "type": "integer",
       "minimum": 0,
@@ -49,7 +53,8 @@
         "properties": {
           "repo": {"type": "string"},
           "path": {"type": "string"},
-          "matched_symbol": {"type": "string"}
+          "matched_symbol": {"type": "string"},
+          "matched_symbols": {"type": "array", "items": {"type": "string"}, "description": "Schema v2+. Every probed symbol this file matched (cross-backend). Length >1 only under all-frames match mode."}
         }
       }
     },
@@ -68,7 +73,8 @@
         "properties": {
           "repo": {"type": "string"},
           "path": {"type": "string"},
-          "matched_symbol": {"type": "string"}
+          "matched_symbol": {"type": "string"},
+          "matched_symbols": {"type": "array", "items": {"type": "string"}, "description": "Schema v2+. Every probed symbol this file matched (cross-backend)."}
         }
       }
     },

@@ -101,9 +101,20 @@ def parse_asan_frame(line: str) -> StackFrame | None:
 
 
 def is_ignored_frame(frame: StackFrame) -> bool:
-    # Match against the raw fields (function with params, location, raw line)
-    # — ClusterFuzz runs the ignore check before name normalization.
-    return _cf.matches_ignore_regexes(frame.function, frame.location, frame.raw)
+    # Match against the function name (with params) and the full raw line —
+    # ClusterFuzz runs the ignore check before name normalization.
+    #
+    # We deliberately do NOT pass `frame.location` as a separate haystack. The
+    # location is a bare file path (e.g. `maint/utf8.c:361`), and several
+    # ignore rules are `^`-anchored bare-identifier *function* rules (`^main`,
+    # `^new`, `^free`, …). Matching those against a path produces false
+    # positives — `^main` matches the path `maint/...`, silently dropping a
+    # legitimate frame whose source happens to live under `maint/` (pcre2 and
+    # friends have a top-level `maint/`). The raw line already contains the
+    # location substring, so the genuine path-based rules (`.*/libc\+\+/`,
+    # `.*/googletest/`, …) still fire through `raw`; and `raw` always starts
+    # with `#<n> 0x…`, so the function-name `^` rules can never false-match it.
+    return _cf.matches_ignore_regexes(frame.function, frame.raw)
 
 
 def iter_asan_frames(text: str) -> list[StackFrame]:

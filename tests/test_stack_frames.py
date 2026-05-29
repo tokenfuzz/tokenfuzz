@@ -190,6 +190,24 @@ ok(frame is not None and frame.function.startswith("app::serialize"),
    "does NOT filter application functions that take std::__1 types as args",
    detail=f"function={frame.function if frame else None!r}")
 
+# A frame whose source lives under a `maint/` directory must NOT be dropped.
+# The ignore list has a bare-identifier `^main` function rule; the file path
+# `maint/utf8.c` starts with "main", so matching the rule against the location
+# path used to silently swallow the frame. The ignore check now runs against
+# the function name + raw line only (raw starts with `#<n> 0x…`, so `^main`
+# cannot false-match it), keeping path-based rules working via `raw`.
+maint_path_frame = """\
+==18355==ERROR: AddressSanitizer: stack-buffer-overflow
+WRITE of size 1 at 0x1 thread T0
+    #0 0x10 in utf8_tool_main maint/utf8.c:361
+    #1 0x11 in main utf8_cli_harness.c:27
+SUMMARY: AddressSanitizer: stack-buffer-overflow
+"""
+frame = stack_frames.first_interesting_frame(maint_path_frame)
+ok(frame is not None and frame.function == "utf8_tool_main",
+   "does NOT drop a frame whose source lives under maint/ (^main vs maint/ path)",
+   detail=f"function={frame.function if frame else None!r}")
+
 macos_start_only = """\
 ==18355==ERROR: AddressSanitizer: stack-buffer-overflow
 WRITE of size 1 at 0x1 thread T0

@@ -542,6 +542,104 @@ print("asan frame extraction OK; got:", syms)
 ' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "asan runtime frame leaked into symbols"
 
 # ───────────────────────────────────────────────────────────────────
+# 11b-cpp. Crash-state-first: when a sanitizer stack is present it is the
+#      PRIMARY symbol source, not the report narrative. For a C++ crash the
+#      probe keeps one qualifier level (Store::set_blob), so common method
+#      names do not collide across unrelated projects. Internal helpers named
+#      only in Data-Flow prose (parse_id, decode_hex, frame_capacity) and our
+#      own auto-generated scoring labels (surface=cli_production) must NOT be
+#      probed — they are not the crashing API.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="crash-state-first: C++ frames, no prose helpers, no scoring labels"
+CPPSTATE_DIR="$TEST_TMPDIR/cpp-crash-state"
+mkdir -p "$CPPSTATE_DIR"
+cat > "$CPPSTATE_DIR/report.md" <<'EOF'
+# CRASH-CPP-STATE: heap overflow in sampledb
+## Classification
+- **Severity**: Medium (auto: I=32/46; R=8/31; reach[surface=cli_production callers=154])
+## Data Flow
+- step2: apply_line dispatches blob, calls `decode_hex(fields[2])` and `parse_id(fields[1])`
+- step4: assign computes `frame_capacity(bytes.size())` truncated to uint16_t
+EOF
+cat > "$CPPSTATE_DIR/sanitizer.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow
+WRITE of size 1
+    #0 0x100 in sampledb::Engine::Store::set_blob(unsigned int, std::__1::vector<unsigned char>) sampledb.cpp:213
+    #1 0x200 in sampledb::Engine::apply_line(std::__1::basic_string<char> const&) sampledb.cpp:367
+    #2 0x300 in sampledb::Engine::run(std::__1::basic_istream<char>&) sampledb.cpp:342
+    #3 0x400 in main main.cpp:13
+EOF
+out=$(python3 "$REACH" --report "$CPPSTATE_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "cpp crash-state report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+syms = json.load(sys.stdin)["reachability"]["symbols"]
+# Crash state, qualified to one level, capped at the crash site + immediate caller.
+assert syms == ["Store::set_blob", "Engine::apply_line"], syms
+# Self-poisoned scoring label and Data-Flow helper names never get probed.
+forbidden = {"cli_production", "decode_hex", "parse_id", "frame_capacity", "set_blob"}
+bad = [s for s in syms if s in forbidden]
+assert not bad, ("non-crash-state symbol probed:", bad, "from", syms)
+print("cpp crash-state extraction OK; got:", syms)
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "cpp crash-state symbols wrong"
+
+# ───────────────────────────────────────────────────────────────────
+# 11b-and. All-frames gate: when symbols come from the crash state (a call
+#      chain), a genuine external caller must match EVERY frame in the same
+#      file. A repo that matches only one frame (a name collision) is dropped.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="all-frames gate: caller must match both crash-state frames"
+ANDGATE_DIR="$TEST_TMPDIR/and-gate"
+mkdir -p "$ANDGATE_DIR"
+cat > "$ANDGATE_DIR/report.md" <<'EOF'
+# CRASH-AND-GATE
+## Summary
+heap overflow in sampledb
+EOF
+cat > "$ANDGATE_DIR/sanitizer.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow
+WRITE of size 1
+    #0 0x100 in sampledb::Engine::Store::set_blob(unsigned int) sampledb.cpp:213
+    #1 0x200 in sampledb::Engine::apply_line(char const*) sampledb.cpp:367
+    #2 0x300 in main main.cpp:13
+EOF
+# Frame #0 → probe "Store::set_blob"; frame #1 → probe "Engine::apply_line".
+SB_HASH=$(sha1_short "Store::set_blob")
+AL_HASH=$(sha1_short "Engine::apply_line")
+# both-repo/src/x.cpp matches BOTH frames; only-set and only-apply each match one.
+cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${SB_HASH}.json" <<'EOF'
+{"status":"ok","hits":[
+  {"repo":"both-repo","path":"src/x.cpp"},
+  {"repo":"only-set","path":"src/y.cpp"}
+]}
+EOF
+cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${AL_HASH}.json" <<'EOF'
+{"status":"ok","hits":[
+  {"repo":"both-repo","path":"src/x.cpp"},
+  {"repo":"only-apply","path":"src/z.cpp"}
+]}
+EOF
+cat > "$REACHABILITY_MOCK_DIR/gh-${SB_HASH}.json" <<'EOF'
+{"status":"unavailable","error":"n/a"}
+EOF
+cat > "$REACHABILITY_MOCK_DIR/gh-${AL_HASH}.json" <<'EOF'
+{"status":"unavailable","error":"n/a"}
+EOF
+out=$(python3 "$REACH" --report "$ANDGATE_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "and-gate report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["reachability"]
+assert r["match_mode"] == "all-frames", r["match_mode"]
+# Only the file matching BOTH frames survives; one-frame collisions are dropped.
+assert r["external_callers"] == 1, ("expected 1, got", r["external_callers"], r["external_caller_hits"])
+hit = r["external_caller_hits"][0]
+assert hit["repo"] == "both-repo" and hit["path"] == "src/x.cpp", hit
+assert hit["matched_symbols"] == ["Engine::apply_line", "Store::set_blob"], hit["matched_symbols"]
+print("all-frames gate OK")
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "all-frames gate miscounted"
+
+# ───────────────────────────────────────────────────────────────────
 # 11c. Symbol extraction also accepts lowerCamelCase (libxml2 / htmllib /
 #      Win32-style entry points). xmlShellReadline-shaped names have no
 #      underscore but ARE library APIs with external callers. Plain
