@@ -360,6 +360,59 @@ assert_eq([], languages.bootstrap_for_target(Path("/tmp"), "nosuch"),
           "bootstrap: unknown build_system -> no commands")
 
 
+# ─── 9b. JS package-manager detection ──────────────────────────────
+# The npm-first chain is only the default. A checkout that signals
+# pnpm/yarn (lockfile, Corepack packageManager field, or the
+# `workspace:` protocol npm cannot resolve) must run that manager
+# first so a monorepo does not burn doomed npm invocations.
+
+def js_primary(root: Path) -> list:
+    return languages.bootstrap_plan_for_target(root, "npm")["cmds"][0]
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / "package.json").write_text("{}\n")
+
+    # No signal at all -> npm default (`npm ci`).
+    assert_in("npm", js_primary(root), "js-pm: bare package.json -> npm")
+    assert_in("ci", js_primary(root), "js-pm: bare package.json primary is npm ci")
+
+    # pnpm-lock.yaml -> pnpm runs first.
+    (root / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n")
+    assert_in("pnpm", js_primary(root), "js-pm: pnpm-lock.yaml -> pnpm primary")
+    assert_true("npm" not in js_primary(root) or "pnpm" in js_primary(root),
+                "js-pm: pnpm lockfile does not select bare npm")
+    # npm/yarn remain available as fallbacks for resilience.
+    pnpm_plan = languages.bootstrap_plan_for_target(root, "npm")
+    assert_true(any("npm" in alt and "ci" in alt for alt in pnpm_plan["alternatives"]),
+                "js-pm: pnpm primary still keeps npm fallbacks")
+    (root / "pnpm-lock.yaml").unlink()
+
+    # yarn.lock -> yarn runs first.
+    (root / "yarn.lock").write_text("# yarn lockfile v1\n")
+    assert_in("yarn", js_primary(root), "js-pm: yarn.lock -> yarn primary")
+    (root / "yarn.lock").unlink()
+
+    # Corepack packageManager field, no lockfile.
+    (root / "package.json").write_text('{"packageManager":"pnpm@9.1.0"}\n')
+    assert_in("pnpm", js_primary(root), "js-pm: packageManager=pnpm -> pnpm primary")
+    (root / "package.json").write_text('{"packageManager":"yarn@4.2.2"}\n')
+    assert_in("yarn", js_primary(root), "js-pm: packageManager=yarn -> yarn primary")
+
+    # `workspace:` dependency protocol -> pnpm (npm cannot resolve it).
+    (root / "package.json").write_text(
+        '{"dependencies":{"@scope/pkg":"workspace:*"}}\n')
+    assert_in("pnpm", js_primary(root),
+              "js-pm: workspace: protocol -> pnpm primary (npm has no resolver)")
+
+    # Lockfile beats a conflicting packageManager field (lockfile is the
+    # ground truth of what was actually installed).
+    (root / "package.json").write_text('{"packageManager":"yarn@4.2.2"}\n')
+    (root / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n")
+    assert_in("pnpm", js_primary(root),
+              "js-pm: lockfile outranks packageManager field")
+
+
 # ─── 10. CLI subcommands ───────────────────────────────────────────
 
 CLI = [sys.executable, str(ROOT / "lib" / "languages.py")]

@@ -175,6 +175,30 @@ _TSAN_BANNER = r"WARNING: ThreadSanitizer:"
 _MSAN_BANNER = r"WARNING: MemorySanitizer:"
 
 
+# Node package-manager install chains, keyed by manager. Each chain is
+# "primary first, then manager-specific fallbacks." `_js_bootstrap_chain`
+# detects the manager a checkout expects (lockfile / Corepack
+# `packageManager` field / `workspace:` protocol) and runs that chain
+# first, with the other managers appended as last-ditch fallbacks. This
+# is what keeps a pnpm/yarn monorepo from burning three doomed npm
+# commands before it reaches the right tool. `npx --yes` fetches pnpm or
+# yarn on demand, so a tree that needs them requires no global install.
+_JS_INSTALL_CHAINS: dict[str, tuple[tuple[str, ...], ...]] = {
+    # npm primary is `npm ci` (deterministic from package-lock.json);
+    # fall back to `npm install` for lockfile drift, then
+    # `--legacy-peer-deps` for npm-7+ strict peer-dep resolution.
+    "npm": (
+        ("npm", "ci", "--no-audit", "--no-fund"),
+        ("npm", "install", "--no-audit", "--no-fund"),
+        ("npm", "install", "--no-audit", "--no-fund", "--legacy-peer-deps"),
+    ),
+    # pnpm/yarn understand the `workspace:` protocol that npm rejects;
+    # they are the install path for modern monorepos.
+    "pnpm": (("npx", "--yes", "pnpm", "install"),),
+    "yarn": (("npx", "--yes", "yarn", "install"),),
+}
+
+
 LANGUAGES: tuple[Language, ...] = (
     # ── C ──────────────────────────────────────────────────────────
     # Headers (.h) are auditable under C: many C public APIs live in
@@ -484,26 +508,26 @@ LANGUAGES: tuple[Language, ...] = (
             r"node:internal/.*",
         ),
         work_mode="js",
-        # `npm install` is gated on package.json so monorepos without
-        # one (e.g. plain script bundles) skip the step. We removed
-        # `--silent` so failures are diagnosable in .audit/bootstrap.log
-        # — the old quiet form ate ERESOLVE messages and made
-        # bootstrap "fail without explanation."
+        # Bootstrap is gated on package.json so monorepos without one
+        # (e.g. plain script bundles) skip the step. We dropped `--silent`
+        # so failures are diagnosable in .audit/bootstrap.log — the old
+        # quiet form ate ERESOLVE messages and made bootstrap "fail
+        # without explanation."
         #
-        # Primary attempt is `npm ci` (deterministic from lockfile);
-        # fallbacks handle the common drift cases:
-        #   * `npm install` when lockfile is absent or stale.
-        #   * `npm install --legacy-peer-deps` when npm-7+ strict
-        #     peer-dep resolution fails on monorepo-style trees.
-        #   * `npx --yes pnpm install` when the project uses the
-        #     `workspace:` dependency protocol (npm has no support;
-        #     Angular and most modern monorepos hit this). npx
-        #     fetches pnpm on demand so no global install is needed.
-        bootstrap_cmds=(("npm", "ci", "--no-audit", "--no-fund"),),
+        # These static fields are the npm-default chain: the primary and
+        # alternatives setup-target uses when it has no target to inspect
+        # (e.g. `bootstrap-cmds npm` with no root). At run time
+        # `_js_bootstrap_chain` re-derives the order from the actual
+        # checkout, so a pnpm/yarn workspace (Angular and most modern
+        # monorepos use `workspace:`) runs the right manager first
+        # instead of falling through three failing npm invocations. Both
+        # the default and the derived chains come from _JS_INSTALL_CHAINS
+        # so there is one source of truth.
+        bootstrap_cmds=(_JS_INSTALL_CHAINS["npm"][0],),
         bootstrap_alternatives=(
-            ("npm", "install", "--no-audit", "--no-fund"),
-            ("npm", "install", "--no-audit", "--no-fund", "--legacy-peer-deps"),
-            ("npx", "--yes", "pnpm", "install"),
+            _JS_INSTALL_CHAINS["npm"][1:]
+            + _JS_INSTALL_CHAINS["pnpm"]
+            + _JS_INSTALL_CHAINS["yarn"]
         ),
         bootstrap_manifests=("package.json",),
         # JS itself has no memory unsafety to instrument; native
@@ -829,6 +853,58 @@ def probe_dispatch(ext: str) -> Optional[dict]:
     }
 
 
+def _js_package_manager(target_root: Path) -> str:
+    """Detect the Node package manager a JS/TS checkout expects.
+
+    Pure tree inspection — no target-specific knowledge. The signals are
+    industry-wide conventions, strongest first:
+      1. a manager's lockfile (pnpm-lock.yaml / yarn.lock / package-lock.json);
+      2. package.json's "packageManager" field (the Corepack standard);
+      3. the "workspace:" dependency protocol, which npm cannot resolve —
+         such a tree needs pnpm or yarn, and pnpm is the more common
+         monorepo choice (and the one npx already fetches for us).
+    Returns "pnpm", "yarn", or "npm" (the default when nothing matches).
+    """
+    if (target_root / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (target_root / "yarn.lock").exists():
+        return "yarn"
+    if (target_root / "package-lock.json").exists():
+        return "npm"
+    pkg = target_root / "package.json"
+    if pkg.is_file():
+        try:
+            data = json.loads(pkg.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            data = {}
+        pm = str(data.get("packageManager", "")).strip()
+        for name in ("pnpm", "yarn", "npm"):
+            if pm.startswith(name):
+                return name
+        for section in ("dependencies", "devDependencies",
+                        "optionalDependencies", "peerDependencies"):
+            deps = data.get(section)
+            if isinstance(deps, dict) and any(
+                isinstance(v, str) and v.startswith("workspace:")
+                for v in deps.values()
+            ):
+                return "pnpm"
+    return "npm"
+
+
+def _js_bootstrap_chain(target_root: Path) -> list[tuple[str, ...]]:
+    """Ordered install chain for a JS/TS target: the detected manager's
+    commands first, then the other managers' install commands as
+    last-ditch fallbacks. setup-target runs the head as the primary and
+    the tail as alternatives."""
+    pm = _js_package_manager(target_root)
+    order = [pm] + [m for m in ("npm", "pnpm", "yarn") if m != pm]
+    chain: list[tuple[str, ...]] = []
+    for manager in order:
+        chain.extend(_JS_INSTALL_CHAINS[manager])
+    return chain
+
+
 def bootstrap_for_target(target_root: Path, build_system: str) -> list[list[str]]:
     """Return the bootstrap commands setup-target should run.
 
@@ -843,6 +919,8 @@ def bootstrap_for_target(target_root: Path, build_system: str) -> list[list[str]
     if lang.bootstrap_manifests:
         if not any((target_root / m).exists() for m in lang.bootstrap_manifests):
             return []
+    if lang.name == "javascript":
+        return [list(_js_bootstrap_chain(target_root)[0])]
     return [list(cmd) for cmd in lang.bootstrap_cmds]
 
 
@@ -880,8 +958,13 @@ def bootstrap_plan_for_target(target_root: Path, build_system: str) -> dict:
     if lang.bootstrap_manifests:
         if not any((target_root / m).exists() for m in lang.bootstrap_manifests):
             return out
-    out["cmds"] = [list(c) for c in lang.bootstrap_cmds]
-    out["alternatives"] = [list(c) for c in lang.bootstrap_alternatives]
+    if lang.name == "javascript":
+        chain = _js_bootstrap_chain(target_root)
+        out["cmds"] = [list(chain[0])]
+        out["alternatives"] = [list(c) for c in chain[1:]]
+    else:
+        out["cmds"] = [list(c) for c in lang.bootstrap_cmds]
+        out["alternatives"] = [list(c) for c in lang.bootstrap_alternatives]
     return out
 
 
