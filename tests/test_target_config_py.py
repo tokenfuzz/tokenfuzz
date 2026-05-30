@@ -760,12 +760,12 @@ assert_eq("build-asan/libproject.a",
           "_detect_sanitizer_lib: skips a _deps dependency archive")
 
 
-# ─── 10e. refresh_detected_lib_fields fills <san>_lib in place ──────
+# ─── 10e. refresh_detected_build_fields corrects <san>_bin/<san>_lib ──
 #
 # seed_toml runs before any build exists, so on a fresh target asan_lib
 # stays a commented FILL_ME. setup-target --bootstrap materializes the
-# canonical build and calls refresh_detected_lib_fields to patch the
-# detected library in — without disturbing curated sections.
+# canonical build and calls refresh_detected_build_fields to patch the
+# detected fields in — without disturbing curated sections.
 refresh_root = TEST_TMPDIR / "refresh-target"
 (refresh_root / "build-asan" / "lib").mkdir(parents=True)
 (refresh_root / "build-asan" / "lib" / "libwidget.a").write_bytes(b"!<arch>\n")
@@ -781,31 +781,71 @@ refresh_toml.write_text(
     'attacker_controls = ["bytes", "protocol-state"]\n',
     encoding="utf-8",
 )
-changed = tc.refresh_detected_lib_fields(refresh_root, refresh_toml)
-assert_eq(True, changed, "refresh_detected_lib_fields: reports a change")
+changed = tc.refresh_detected_build_fields(refresh_root, refresh_toml)
+assert_eq(True, changed, "refresh_detected_build_fields: reports a change")
 refreshed = refresh_toml.read_text(encoding="utf-8")
 assert_in('asan_lib      = "build-asan/lib/libwidget.a"', refreshed,
-          "refresh_detected_lib_fields: fills asan_lib from the built archive")
+          "refresh_detected_build_fields: fills asan_lib from the built archive")
 assert_not_in("FILL_ME", refreshed,
-              "refresh_detected_lib_fields: replaces the commented placeholder")
+              "refresh_detected_build_fields: replaces the commented placeholder")
 assert_in('attacker_controls = ["bytes", "protocol-state"]', refreshed,
-          "refresh_detected_lib_fields: leaves the curated [threat_model] intact")
+          "refresh_detected_build_fields: leaves the curated [threat_model] intact")
 # Round-trips through the loader as a real field.
 cfg_refresh = tc.Config()
 tc.load_toml_into(cfg_refresh, refresh_toml)
 assert_eq("build-asan/lib/libwidget.a", cfg_refresh.asan_lib,
-          "refresh_detected_lib_fields: asan_lib round-trips through load_toml_into")
+          "refresh_detected_build_fields: asan_lib round-trips through load_toml_into")
 # Idempotent: a second pass finds the field already correct.
-assert_eq(False, tc.refresh_detected_lib_fields(refresh_root, refresh_toml),
-          "refresh_detected_lib_fields: idempotent once filled")
+assert_eq(False, tc.refresh_detected_build_fields(refresh_root, refresh_toml),
+          "refresh_detected_build_fields: idempotent once filled")
 # No build tree → nothing to fill, no change.
 norefresh_root = TEST_TMPDIR / "refresh-nobuild"
 norefresh_root.mkdir()
 norefresh_toml = norefresh_root / "target.toml"
 norefresh_toml.write_text(
     '# asan_lib    = "build-asan/FILL_ME.a"\n', encoding="utf-8")
-assert_eq(False, tc.refresh_detected_lib_fields(norefresh_root, norefresh_toml),
-          "refresh_detected_lib_fields: no change when no build tree exists")
+assert_eq(False, tc.refresh_detected_build_fields(norefresh_root, norefresh_toml),
+          "refresh_detected_build_fields: no change when no build tree exists")
+
+# asan_bin pointing into CMakeFiles/ (a CMake compiler probe the old scan
+# mis-picked) is scrubbed back to a commented FILL_ME placeholder; a
+# plausible asan_bin that detection can't confirm is left alone.
+scrub_root = TEST_TMPDIR / "refresh-scrub-bin"
+(scrub_root / "build-asan" / "CMakeFiles" / "4.3").mkdir(parents=True)
+(scrub_root / "build-asan" / "CMakeFiles" / "4.3" / "probe.bin").write_bytes(b"\x7fELF")
+(scrub_root / "build-asan" / "realtool").write_bytes(b"\x7fELF")
+scrub_toml = scrub_root / "target.toml"
+scrub_toml.write_text(
+    'target        = "widget"\n'
+    'build_system  = "cmake"\n'
+    'asan_bin      = "build-asan/CMakeFiles/4.3/probe.bin"\n',
+    encoding="utf-8",
+)
+assert_eq(True, tc.refresh_detected_build_fields(scrub_root, scrub_toml),
+          "refresh_detected_build_fields: scrubs a CMakeFiles probe asan_bin")
+scrubbed = scrub_toml.read_text(encoding="utf-8")
+assert_not_in("CMakeFiles/4.3/probe.bin", scrubbed,
+              "refresh_detected_build_fields: removes the bogus probe path")
+assert_in('# asan_bin = "build-asan/FILL_ME"', scrubbed,
+          "refresh_detected_build_fields: leaves a commented FILL_ME placeholder")
+cfg_scrub = tc.Config()
+tc.load_toml_into(cfg_scrub, scrub_toml)
+assert_eq("", cfg_scrub.asan_bin,
+          "refresh_detected_build_fields: scrubbed asan_bin reads back as unset")
+
+# A plausible asan_bin (real, non-aux path) detection can't confirm is kept.
+keep_root = TEST_TMPDIR / "refresh-keep-bin"
+(keep_root / "build-asan").mkdir(parents=True)
+(keep_root / "build-asan" / "mytool").write_bytes(b"\x7fELF")
+keep_toml = keep_root / "target.toml"
+keep_toml.write_text(
+    'build_system  = "cmake"\n'
+    'asan_bin      = "build-asan/mytool"\n',
+    encoding="utf-8",
+)
+tc.refresh_detected_build_fields(keep_root, keep_toml)
+assert_in('asan_bin      = "build-asan/mytool"', keep_toml.read_text(encoding="utf-8"),
+          "refresh_detected_build_fields: keeps a plausible operator-set asan_bin")
 
 
 # ─── 11. Fallback parser works without tomllib ─────────────────────

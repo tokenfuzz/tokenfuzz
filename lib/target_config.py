@@ -891,7 +891,16 @@ def attacker_controls_for_seed(slug: str, is_browser: bool,
     return curated if curated else ["bytes"]
 
 
-def _binary_uses_asan(path: Path) -> bool:
+# Runtime symbol each sanitizer's instrumentation links into an executable.
+# `nm` reveals them; their presence confirms the binary is actually
+# instrumented (not a stray host tool that landed in the build tree).
+_SANITIZER_RUNTIME_MARKER = {
+    "asan": "__asan_", "ubsan": "__ubsan_", "msan": "__msan_", "tsan": "__tsan_",
+}
+
+
+def _binary_uses_sanitizer(path: Path, sanitizer: str = "asan") -> bool:
+    marker = _SANITIZER_RUNTIME_MARKER.get(sanitizer, "__asan_")
     try:
         out = subprocess.run(
             ["nm", str(path)], capture_output=True, text=True, timeout=20,
@@ -900,7 +909,7 @@ def _binary_uses_asan(path: Path) -> bool:
         return False
     if out.returncode != 0:
         return False
-    return "__asan_" in out.stdout
+    return marker in out.stdout
 
 
 def _find_under(asan_dir: Path, *, name: str | None = None,
@@ -934,21 +943,31 @@ def _is_shared_lib(name: str) -> bool:
     return name.endswith((".so", ".dylib")) or ".so." in name
 
 
-# Build subdirectories that hold helper/dependency archives, never the
-# project's own library: unit-test frameworks vendored under test(s)/
-# (Unity, gtest, …) and CMake FetchContent dependency builds under _deps/.
-# Inclusion criterion: a directory a build system populates with libraries
-# that are NOT the audited project's primary artifact. Structural (no
-# project names), so it stays target-agnostic as new projects appear.
-_AUX_LIB_DIRS = {"test", "tests", "_deps"}
+# Build subdirectories that hold artifacts which are never the audited
+# project's own library or CLI: CMake's CMakeFiles/ (compiler-probe
+# binaries like CMakeDetermineCompilerABI_C.bin, object trees), unit-test
+# frameworks vendored under test(s)/ (Unity, gtest, …), and FetchContent
+# dependency builds under _deps/. Inclusion criterion: a directory a build
+# system populates with helper/probe/dependency artifacts, not the target's
+# primary output. Structural (no project names), target-agnostic as new
+# projects appear.
+_AUX_BUILD_DIRS = {"cmakefiles", "test", "tests", "_deps"}
 
 
-def _is_aux_lib(p: Path, san_dir: Path) -> bool:
+def _is_aux_build_path(p: Path, base_dir: Path) -> bool:
     try:
-        rel = p.relative_to(san_dir)
+        rel = p.relative_to(base_dir)
     except ValueError:
         return False
-    return any(part.lower() in _AUX_LIB_DIRS for part in rel.parts[:-1])
+    return any(part.lower() in _AUX_BUILD_DIRS for part in rel.parts[:-1])
+
+
+def _path_has_aux_component(rel_path: str) -> bool:
+    """True if a target.toml-relative path string traverses a build-internal
+    aux directory — used to recognise a stale/bogus <san>_bin/<san>_lib value
+    (e.g. a CMakeFiles compiler probe) that detection should scrub."""
+    return any(part.lower() in _AUX_BUILD_DIRS
+               for part in rel_path.replace("\\", "/").split("/"))
 
 
 def _pick_shared_lib(san_dir: Path, root: Path) -> str:
@@ -963,7 +982,7 @@ def _pick_shared_lib(san_dir: Path, root: Path) -> str:
     match, which the operator can override in target.toml."""
     shared = [s for s in _find_under(san_dir, name=None)
               if _is_shared_lib(s.name) and "posix" not in s.name
-              and not _is_aux_lib(s, san_dir)]
+              and not _is_aux_build_path(s, san_dir)]
     if not shared:
         return ""
     shared.sort(key=lambda s: (not s.name.endswith((".so", ".dylib")),
@@ -981,7 +1000,7 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     if not san_dir.is_dir():
         return ""
     archives = [a for a in _find_under(san_dir, name=None)
-                if a.suffix == ".a" and not _is_aux_lib(a, san_dir)]
+                if a.suffix == ".a" and not _is_aux_build_path(a, san_dir)]
     for a in archives[:3]:
         if "posix" in a.name:
             continue
@@ -991,42 +1010,110 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     return _pick_shared_lib(san_dir, root)
 
 
-def refresh_detected_lib_fields(target_root: Path, toml_path: Path) -> bool:
-    """Fill <san>_lib in an existing target.toml from the build trees now on
-    disk, editing only those lines and leaving every other field — including
-    curated [threat_model]/[s6_peers] — untouched. Returns True if anything
-    changed.
+def _detect_cli_bin(san_dir: Path, root: Path, build_system: str,
+                    sanitizer: str = "asan") -> str:
+    """Best instrumented CLI executable under `san_dir` (a build-<san>/
+    tree): a declared CLI name from the build manifests first, else the
+    first instrumented executable that is not a shared library, object file,
+    or build-system-internal artifact (CMakeFiles/ compiler probes, test
+    helpers). Empty when the build ships no CLI — a library-only or
+    header-only target. The aux-dir prune is what stops a CMake compiler
+    probe (CMakeDetermineCompilerABI_C.bin) being mistaken for the tool."""
+    if not san_dir.is_dir():
+        return ""
+    for cand_name in declared_cli_names(root, build_system):
+        for m in _find_under(san_dir, name=cand_name):
+            if (os.access(m, os.X_OK) and not _is_aux_build_path(m, san_dir)
+                    and _binary_uses_sanitizer(m, sanitizer)):
+                return str(m).removeprefix(str(root) + "/")
+    # Filter to plausible CLI executables BEFORE capping the nm probes:
+    # CMakeFiles/ alone can hold dozens of files, so capping first would
+    # exhaust the budget on pruned entries and never reach the real tool
+    # (e.g. curl's build puts src/curl after a large CMakeFiles/ tree).
+    def _is_cli_candidate(f: Path) -> bool:
+        if _is_aux_build_path(f, san_dir) or not os.access(f, os.X_OK):
+            return False
+        return not (f.name.endswith((".exe", ".so", ".dylib", ".o"))
+                    or "sanity" in f.name)
+    candidates = [f for f in _find_under(san_dir) if _is_cli_candidate(f)]
+    for f in candidates[:60]:
+        if _binary_uses_sanitizer(f, sanitizer):
+            return str(f).removeprefix(str(root) + "/")
+    return ""
 
-    seed_toml runs before any build exists (it has to: the build step reads
-    build_system from the config it writes), so on a fresh target it can't
-    detect the instrumented library and leaves <san>_lib a commented
-    FILL_ME. setup-target --bootstrap calls this after materializing the
-    canonical build to repair that ordering. A full re-seed would clobber
-    the LLM-curated sections, hence the surgical line patch."""
+
+def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
+    """Re-detect <san>_bin and <san>_lib for every sanitizer from the build
+    trees now on disk and correct them in target.toml in place. For each
+    field: fill it when unset, replace a value that points at a
+    build-internal artifact (a CMake compiler probe, a test-framework
+    archive) or a now-missing path, and leave every plausible value and
+    curated section untouched. Returns True if anything changed.
+
+    seed_toml must run before any build exists (it supplies build_system to
+    the build step), so on a fresh target it cannot detect these fields and
+    leaves them commented FILL_ME; on a target rebuilt under different cmake
+    options a previously-detected path can also go stale. setup-target
+    --bootstrap calls this after materializing the canonical build to repair
+    that ordering — a surgical line edit, not a re-seed, so the LLM-curated
+    [threat_model]/[s6_peers] survive."""
+    if target_root.name in _BROWSER_SLUGS:
+        return False  # browsers use fixed bin candidates; no harness lib link
     suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    build_system = _detect_build_system(target_root)
     try:
         lines = Path(toml_path).read_text(encoding="utf-8").splitlines()
     except OSError:
         return False
     changed = False
-    for san in ("asan", "ubsan", "msan", "tsan"):
-        detected = _detect_sanitizer_lib(target_root / f"build-{san}{suffix}",
-                                         target_root)
-        if not detected:
-            continue
-        if san == "asan":
-            new_line = f"asan_lib      = {toml_basic_string(detected)}"
-        else:
-            field = f"{san}_lib"
-            pad = " " * (len("ubsan_lib") - len(field))
-            new_line = f"{field}{pad} = {toml_basic_string(detected)}"
-        field_re = re.compile(rf"^\s*#?\s*{san}_lib\b\s*=")
+
+    def _value_of(line: str) -> str:
+        if line.lstrip().startswith("#"):
+            return ""
+        m = re.search(r'=\s*"((?:[^"\\]|\\.)*)"', line)
+        return m.group(1) if m else ""
+
+    def _active(field: str, value: str) -> str:
+        # asan_* keep seed's wide alignment; the rest use the [sanitizer]
+        # block's short form. Cosmetic — the TOML parser ignores spacing.
+        if field in ("asan_bin", "asan_lib"):
+            return f"{field}{' ' * (14 - len(field))}= {toml_basic_string(value)}"
+        pad = " " * (len("ubsan_lib") - len(field))
+        return f"{field}{pad} = {toml_basic_string(value)}"
+
+    def _commented(field: str, san: str) -> str:
+        # Retain FILL_ME so bin/setup-target's grep-for-FILL_ME re-seed
+        # trigger keeps firing for the now-unset field.
+        stem = "FILL_ME.a" if field.endswith("_lib") else "FILL_ME"
+        return f'# {field} = "build-{san}{suffix}/{stem}"'
+
+    def _refresh(field: str, san: str, detected: str) -> None:
+        nonlocal changed
+        field_re = re.compile(rf"^\s*#?\s*{field}\b\s*=")
         for i, ln in enumerate(lines):
-            if field_re.match(ln):
-                if ln != new_line:
-                    lines[i] = new_line
-                    changed = True
-                break
+            if not field_re.match(ln):
+                continue
+            cur = _value_of(ln)
+            cur_bogus = bool(cur) and (
+                _path_has_aux_component(cur)
+                or not (target_root / cur).exists()
+            )
+            if detected:
+                new_line = _active(field, detected)      # fill or correct
+            elif cur_bogus:
+                new_line = _commented(field, san)        # scrub stale/bogus
+            else:
+                return                                   # leave good or unset
+            if new_line != ln:
+                lines[i] = new_line
+                changed = True
+            return
+
+    for san in ("asan", "ubsan", "msan", "tsan"):
+        san_dir = target_root / f"build-{san}{suffix}"
+        _refresh(f"{san}_lib", san, _detect_sanitizer_lib(san_dir, target_root))
+        _refresh(f"{san}_bin", san,
+                 _detect_cli_bin(san_dir, target_root, build_system, san))
     if changed:
         Path(toml_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return changed
@@ -1280,24 +1367,7 @@ def seed_toml(
         # Candidate CLI names come from the target's own build manifests
         # (declared_cli_names), not a hardcoded per-project table. An
         # empty list just means we fall through to the free scan below.
-        for cand_name in declared_cli_names(root, build_system):
-            matches = _find_under(asan_dir, name=cand_name)
-            if matches:
-                m = matches[0]
-                if os.access(m, os.X_OK) and _binary_uses_asan(m):
-                    rel = str(m).removeprefix(str(root) + "/")
-                    asan_bin = rel
-                    break
-        if not asan_bin:
-            for f in _find_under(asan_dir)[:60]:
-                if not os.access(f, os.X_OK):
-                    continue
-                base = f.name
-                if base.endswith((".exe", ".so", ".dylib", ".o")) or "sanity" in base:
-                    continue
-                if _binary_uses_asan(f):
-                    asan_bin = str(f).removeprefix(str(root) + "/")
-                    break
+        asan_bin = _detect_cli_bin(asan_dir, root, build_system, "asan")
         asan_lib = _detect_sanitizer_lib(asan_dir, root)
 
     if not upstream_url:
@@ -2040,8 +2110,8 @@ def _cmd_write_session_env(args) -> int:
     return 0
 
 
-def _cmd_refresh_libs(args) -> int:
-    changed = refresh_detected_lib_fields(Path(args.target_root), Path(args.out))
+def _cmd_refresh_build_fields(args) -> int:
+    changed = refresh_detected_build_fields(Path(args.target_root), Path(args.out))
     print("changed" if changed else "unchanged")
     return 0
 
@@ -2061,10 +2131,10 @@ def main(argv: list[str]) -> int:
     sp.add_argument("upstream_url", nargs="?", default="")
     sp.set_defaults(func=_cmd_seed_toml)
 
-    sp = sub.add_parser("refresh-libs")
+    sp = sub.add_parser("refresh-build-fields")
     sp.add_argument("target_root")
     sp.add_argument("out")
-    sp.set_defaults(func=_cmd_refresh_libs)
+    sp.set_defaults(func=_cmd_refresh_build_fields)
 
     sp = sub.add_parser("detect-rev")
     sp.add_argument("target_root")
