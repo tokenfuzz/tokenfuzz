@@ -6,20 +6,26 @@ you have a question the docs do not answer.
 If any of the terms below (target, backend, sanitizer build,
 `target.toml`, work card) are unfamiliar, the
 [Glossary](reference/glossary.md) has one-line definitions —
-read those first; most "I don't know what to file" questions are
-really vocabulary gaps.
+read those first.
 
-## Before filing anything
+## Where to file what
 
-Run through this list first — it catches most issues in under a
-minute.
+| You want to… | Use |
+| --- | --- |
+| Report a bug in TokenFuzz itself | [GitHub Issues](https://github.com/tokenfuzz/tokenfuzz/issues) on this repository. |
+| Ask a usage question | GitHub Issues, labelled `question`. |
+| Suggest a feature or investigation strategy | GitHub Issues, labelled `enhancement`. See [Contributing](contributing.md) before opening a PR. |
+| Report a security issue **in TokenFuzz** | [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md). Do **not** open a public issue. |
+| Report a security issue **TokenFuzz found in another project** | The upstream project's normal security-disclosure process, not this repository. |
+| Share accepted impact from a TokenFuzz run | Open an issue with the public details, or use the private path in `SECURITY.md` if disclosure timing is sensitive. |
+
+## Before filing a support issue
+
+Run through this list first. It catches most setup and run problems
+quickly.
 
 1. **Did the test suite pass?** Run `bash tests/run-tests.sh`
-   from the repository root. Test failures are almost always one
-   of: a missing dependency (`clang`, `llvm`, `jq`, `ripgrep`,
-   `python3`, `perl`), a stale checkout, or — rarely — a
-   regression in the harness. The output names the failing test
-   so you can tell which.
+   from the repository root. The output names the failing test.
 2. **Did `bin/audit … 1` complete startup?** A one-iteration
    smoke test is the cheapest way to confirm that prerequisites,
    `target.toml`, and the backend CLI are wired up.
@@ -28,26 +34,21 @@ minute.
    failure modes — missing tools, sanitizer build mismatches,
    backend authentication, stalled agents — are covered there.
 4. **Have you read your logs?** `output/<target>/<backend>/logs/`
-   contains the backend's stderr. Agent stalls and CLI
-   authentication failures show up in `index.log` (per-iteration
-   timeline) and `session_<TS>_*.log` (per-agent transcript)
-   before they show up in any summary.
-
-## Where to file what
-
-| You want to… | Use |
-| --- | --- |
-| Report a bug in TokenFuzz itself | [GitHub Issues](https://github.com/tokenfuzz/tokenfuzz/issues) on this repository. |
-| Suggest a feature or new investigation strategy | GitHub Issues, labelled `enhancement`. See [Contributing](contributing.md) before opening a PR. |
-| Report a security vulnerability **in TokenFuzz** | [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md) — do **not** open a public issue. |
-| Report a vulnerability **a TokenFuzz run found in another project** | The upstream project's normal security-disclosure process, not this repository. |
-| Ask a usage question | GitHub Issues, labelled `question`. |
-| Discuss research direction or share a finding | Open a discussion on the repository, or contact the maintainers privately if disclosure timing is sensitive. |
+   contains the run timeline and per-agent logs. Start with
+   `README.md`, then `index.log`.
 
 ## What to include in a bug report
 
-A good bug report turns into a fix the same day. Include all of
-these:
+A good bug report gives a maintainer enough context to reproduce the
+failure without guessing.
+
+Set this once while collecting evidence:
+
+```bash
+export LOGS="output/<target>/<backend>/logs"
+```
+
+Include:
 
 1. **TokenFuzz revision** — `git rev-parse HEAD` (run from inside
    the repository).
@@ -58,12 +59,12 @@ these:
    `bin/audit --target <target> --backend <backend> 1 2>&1 | head -80`.
 5. **Your `target.toml`** — redact upstream URLs if private.
 6. **What you expected** vs. **what you got**.
-7. **Relevant log file** — `output/<target>/<backend>/logs/index.log`
-   for the per-iteration timeline, plus the matching
-   `session_<TS>_<role>-<n>-<mode>.log` for one agent's trimmed
-   transcript. If the trimmed log is not enough, use the matching
-   `.raw/session_<TS>_<role>-<n>-<mode>.log.raw` file and trim it to
-   the failing section; do not paste 50 MB.
+7. **Relevant logs** — paste the useful part of `$LOGS/index.log`.
+   If it points at one agent session, include the matching
+   `$LOGS/session_<TS>_<role>.log.summary.md` or
+   `$LOGS/session_<TS>_<role>.log`. Use
+   `$LOGS/.raw/session_<TS>_<role>.log.raw` only as a last resort,
+   and trim it to the failing section.
 
 A minimal template:
 
@@ -81,8 +82,8 @@ Expected: run completes, results/ contains state/ and work-cards.jsonl.
 Got:      `FATAL: …`
 
 Relevant log:
-  <paste from output/<target>/<backend>/logs/index.log,
-   plus the session_<TS>_*.log it points at>
+  <paste from $LOGS/index.log,
+   plus the session summary or session log it points at>
 
 target.toml:
   <paste, redact private URLs if needed>
@@ -90,9 +91,9 @@ target.toml:
 
 ## What not to include
 
-- **Full backend transcripts.** They are huge, expensive to read,
-  and almost never the cause of the bug. Start with the log
-  instead.
+- **Full raw backend transcripts.** They are huge, expensive to read,
+  and almost never the first thing needed. Start with `index.log` and
+  a session summary.
 - **Target source code.** We do not need it; pointing at the
   upstream revision is enough.
 - **API keys, tokens, or anything from `~/.config/<backend>/`.**
@@ -115,6 +116,5 @@ If TokenFuzz gave you a confirmed sanitizer crash or a security
 finding that an upstream maintainer accepted, that is the
 highest-leverage thing you can do for the project: **tell us.**
 
-A line in an issue ("found CVE-YYYY-NNNNN in <project> using
-strategy S<n>") is enough. See [Contributing](contributing.md)
-for the rest.
+Saying "Found using TokenFuzz" in the upstream advisory, issue, or
+acknowledgement is enough.

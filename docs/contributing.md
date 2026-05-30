@@ -1,9 +1,9 @@
 # Contributing
 
-This page captures the rules contributors should preserve when
-they change the harness or its documentation. It is short on
-purpose — the project overview lives in
-[the handbook home page](index.md).
+This page captures the rules contributors should preserve when they
+change TokenFuzz. It is short on purpose: the project overview lives
+on [the handbook home page](index.md), and exact command syntax lives
+in the [reference](reference/index.md).
 
 PRs land at
 [github.com/tokenfuzz/tokenfuzz/pulls](https://github.com/tokenfuzz/tokenfuzz/pulls).
@@ -14,58 +14,17 @@ Issues — including new-feature pitches — land at
 
 1. **Run the full test suite:** `bash tests/run-tests.sh`.
 2. **Update tests when behaviour changes** in `bin/`, `lib/`, or
-   `.agents/`. New functions, renamed symbols, changed output —
-   update test assertions. Do not leave stale tests passing by
-   accident.
+   `.agents/`. New functions, renamed symbols, changed output, new
+   prompt fields, and new artifact shapes need matching assertions.
 3. **Fix broken tests only with reason.** Determine whether the
    test or the code is wrong before changing assertions to make
    them green.
+4. **Build the handbook when docs change:** `bin/docs build`.
 
 Tests live in `tests/`. Shared fixtures and assertions live in
-`tests/helpers.sh`; it sets up the temp `RESULTS_DIR`/`LOGDIR`
-layout that `bin/audit` and `lib/prompt.sh` consume, so renaming
-or restructuring those env vars means updating `helpers.sh` in
-the same change.
-
-If you edit docs, note that the repository ships
-`.markdownlint-cli2.jsonc`. There is no CI workflow that runs it
-today, but the config is the canonical style for this codebase —
-run `npx markdownlint-cli2 'docs/**/*.md'` locally if you want to
-catch lint issues before review.
-
-## Coding discipline
-
-- **Prefer a focused LLM call over brittle regex extraction**
-  when the LLM call is simpler, more complete, and robust enough
-  without meaningful cost. The harness itself makes LLM calls
-  during triage and ranking (see `lib/llm_decide.sh` and
-  `lib/llm_decide.py`); reach for one of those before adding a brittle
-  regex. Prefer structured parsers, schemas, and project APIs where
-  they fit.
-- **Avoid hardcoded constants** — especially caps and thresholds
-  that limit bug exploration. Make exploration depth configurable,
-  visible, and easy to run.
-- **Keep the harness target-agnostic.** Target-specific means
-  *belongs to one codebase under audit* — its types, headers,
-  file paths, subsystem boundaries, internal macros. Those must
-  not appear in `bin/` or `lib/`. Derive them at runtime from
-  the live target tree, the work-card pool, or structured state.
-  If a per-target value is truly unavoidable, isolate it in a
-  target overlay (`targets/<name>/` or an opt-in config file),
-  never in the shared harness.
-
-  Industry-wide vocabulary is fair game:
-
-  - build-manifest filenames (`Cargo.toml`, `Package.swift`,
-    `CMakeLists.txt`);
-  - standard or widely-adopted assert macros (`assert`,
-    `static_assert`, `DCHECK`);
-  - sanitizer names (`asan`, `ubsan`);
-  - spec keywords (`RFC`, `WHATWG`).
-
-  Prefer prefix or structural rules that catch the family
-  (e.g. `[A-Z]+_(?:ASSERT|CHECK)`) over exhaustive enumerations
-  that rot as new projects appear.
+`tests/helpers.sh`. Keep fixtures neutral: do not copy private stack
+frames, sanitizer reports, signatures, or unreleased target details
+into tests or docs.
 
 ## Product invariants
 
@@ -73,10 +32,14 @@ These should continue to hold:
 
 - A target can be added without changing harness source.
 - A run can be resumed from state without reading raw logs.
-- Every testcase goes through `bin/probe` before promotion.
-- Accepted crashes and findings reproduce from files on disk.
+- Harness-authored testcases go through `bin/probe`, which chooses the
+  runner or sanitizer, records structured run state, and writes output
+  beside the testcase.
+- Accepted crashes have a testcase or input, saved diagnostic output,
+  and a maintainer-facing bundle on disk.
 - `findings/` records every concrete security issue, even when
-  no sanitizer reproducer exists.
+  no sanitizer reproducer or runnable testcase exists. A substantive
+  report is the requirement.
 - `crashes/` stays focused on reproducible crashes that can be
   confirmed, clustered, exported, and prioritised.
 - Rejected results are indexed with reasons.
@@ -92,6 +55,36 @@ These should continue to hold:
   maintainer judgment.
 - A place where unverified model claims become findings.
 - A tool for testing software you have no authorisation to test.
+
+## Coding discipline
+
+- **Use structured sources first.** Prefer parsers, schemas, project
+  APIs, or focused LLM decisions over brittle text scraping. Avoid
+  regexes for data that already has a reliable structure.
+- **Keep shared code target-agnostic.** Target-specific means
+  *belongs to one codebase under audit* — types, headers, paths,
+  subsystem boundaries, or internal macros. Those do not belong in
+  shared `bin/`, `lib/`, or `.agents/` code. Derive them from the
+  target tree, `target.toml`, work cards, or structured state. If a
+  per-target value is unavoidable, put it in a target overlay or
+  opt-in config.
+- **Use broad, stable rules.** Industry-wide names are fine:
+  `Cargo.toml`, `Package.swift`, `CMakeLists.txt`, `assert`,
+  `static_assert`, `DCHECK`, sanitizer names, and common spec terms.
+  Prefer structural patterns such as `[A-Z]+_(?:ASSERT|CHECK)` over
+  exhaustive lists that rot as new projects appear.
+- **Keep prompts and agent guidance centralized.** Prompt bodies live
+  in `lib/prompts/*.md.j2` and are rendered through the shared prompt
+  helpers. Do not inline prompts in `bin/`, `lib/`, or `.agents/`.
+  When editing agent guidance, keep the `AGENTS.md` / `CLAUDE.md`
+  mirror and the related tests in sync.
+- **Avoid hidden knobs.** Do not add hardcoded exploration caps or
+  defensive environment-variable toggles. Make real operator choices
+  visible, documented, and test-covered.
+- **Use shared helpers.** Shell code should use the existing platform
+  and timeout helpers. Shared JSONL state should use
+  `lib/workqueue.py`; parallel logs should be per-agent or uniquely
+  named.
 
 ## Documentation discipline
 
