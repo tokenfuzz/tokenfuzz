@@ -40,82 +40,6 @@ as a pipeline:
 The platform does the discovery, the analysis, the triage, and the
 handoff; the final security judgment stays with you.
 
-## What a run produces
-
-- **A written finding** (`findings/FIND-*`) for every concrete security
-  issue. This is the primary output. Each one names a location
-  (`file:function:line`, endpoint, or config key), the issue class, and
-  a rationale a reviewer can act on.
-- **A runnable crash** (`crashes/CRASH-*`) when the harness can also
-  reproduce the issue under a sanitizer. Ships with the sanitizer
-  trace, the input, and a one-command `reproduce.sh`.
-- **A rejected index** (`crashes-rejected/INDEX.html`) so the next session
-  does not re-file low-value candidates (null derefs, OOM, etc.) — but
-  the original artifacts are kept so you can review the reasoning.
-
-Crash candidates are verified by a probe before they are written.
-Findings may be reviewer-only — a runnable reproducer is not required.
-
-## What kinds of targets work
-
-Anything you can drive with a testcase:
-
-- a sanitizer-instrumented program;
-- a parser, decoder, codec, or protocol implementation;
-- a browser, script engine, or browser-like runtime;
-- a command-line tool;
-- a library entry point.
-
-Native **C and C++** are the headline case — AddressSanitizer gives the
-clearest, lowest-noise crash evidence — and the same holds for
-**browsers**, **JS/Wasm runtimes**, and **mixed-language** targets whose
-build system can produce a sanitizer build.
-
-Sanitizers aren't C/C++-only: **Rust**, **Go**, **Swift**, and the
-native extensions of **Python** and **Node** can all run instrumented,
-and a sanitizer crash from any of them lands under `crashes/`.
-Languages with no sanitizer — **Java**, **Ruby**, **PHP**, and plain
-interpreted Python/Node — run in **findings-only mode**, where runtime
-diagnostics (tracebacks, panics, exceptions) are captured under
-`findings/` instead. ASan is the default wherever one exists; UBSan,
-MSan, TSan, and the Go `race` detector are opt-in per target. See
-[Auditing non-C/C++ targets](guides/multi-language.md) for the
-per-language picture.
-
-## Result layout at a glance
-
-| Artifact | What it is |
-| --- | --- |
-| `findings/FIND-*` | A written security finding. Primary output. Manually verified before disclosure. |
-| `findings/FINDING-CLUSTERS.html` | Per-backend cluster summary for findings. |
-| `crashes/CRASH-*` | A finding the harness also reproduced under a sanitizer. Ships with `reproduce.sh`, the input, and the trace. |
-| `crashes/CRASH-CLUSTERS.html` | Per-backend cluster summary for crashes. |
-| `crashes-rejected/INDEX.html` | Crash candidates that failed triage, with reasons. |
-
-When you run multiple backends against the same target, the per-backend
-tables are rolled up at the target root:
-
-- `output/<target>/CRASH-CLUSTERS.html`
-- `output/<target>/FINDING-CLUSTERS.html`
-
-Triage automatically converts every accepted crash into a maintainer
-bundle: `REPORT.md`, `reproduce.sh`, `sanitizer.txt`, `input.<ext>`,
-and (for API-level testcases) `harness.*`. A maintainer can run
-`./reproduce.sh /path/to/source` to rebuild against a clean upstream
-checkout.
-
-## Responsible use
-
-- Only run TokenFuzz on software you are authorised to test.
-- All output is written to your local results directory; the harness
-  does not publish anything itself. Hosted backends receive the prompts,
-  source excerpts, state, and reports needed for the run, and optional
-  reachability checks may query public code search.
-- When reporting upstream, use the project's normal security-disclosure
-  process.
-- The repository's security policy is in
-  [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md).
-
 ## Requirements
 
 A Unix-like host (macOS or Linux), a small set of standard tools, an
@@ -150,6 +74,7 @@ bin/setup-target "$TARGET" <repo-url>
 # with sanitizer flags automatically.
 bin/setup-target "$TARGET" --bootstrap
 
+# Pass 1 for a single-iteration smoke test; omit it for a continuous run.
 bin/audit --target "$TARGET" --backend "$BACKEND" 1
 
 ls "$RESULTS"/crashes "$RESULTS"/findings
@@ -161,6 +86,59 @@ startup logs, state, and either queued work or attempted testcases
 under `results/`.
 
 For the full walkthrough, see [First audit](getting-started/first-audit.md).
+
+## What kinds of targets work
+
+Anything you can drive with a testcase:
+
+- a sanitizer-instrumented program;
+- a parser, decoder, codec, or protocol implementation;
+- a browser, script engine, or browser-like runtime;
+- a command-line tool;
+- a library entry point.
+
+Native **C and C++** are the headline case — AddressSanitizer gives the
+clearest, lowest-noise crash evidence — and the same holds for
+**browsers**, **JS/Wasm runtimes**, and **mixed-language** targets whose
+build system can produce a sanitizer build.
+
+Sanitizers aren't C/C++-only: **Rust**, **Go**, **Swift**, and the
+native extensions of **Python** and **Node** can all run instrumented,
+and a sanitizer crash from any of them lands under `crashes/`.
+Languages with no sanitizer — **Java**, **Ruby**, **PHP**, and plain
+interpreted Python/Node — run in **findings-only mode**, where runtime
+diagnostics (tracebacks, panics, exceptions) are captured under
+`findings/` instead. ASan is the default wherever one exists; UBSan,
+MSan, TSan, and the Go `race` detector are opt-in per target. See
+[Auditing non-C/C++ targets](guides/multi-language.md) for the
+per-language picture.
+
+## What a run produces
+
+Crash candidates are verified by `bin/probe` before they are promoted.
+Findings may be reviewer-only: a runnable reproducer is useful, but not
+required. A run usually creates some combination of these artifacts under
+`output/<target>/<backend>/results/`:
+
+| Artifact | What it is |
+| --- | --- |
+| `findings/FIND-*` | A written security finding. This is the primary output: a concrete location, issue class, impact, and reviewer rationale. |
+| `findings/FINDING-CLUSTERS.html` | Per-backend cluster summary for findings. |
+| `findings-rejected/FIND-*` | FIND reports the quality gate rejected after repeated review. Typical examples are vague "suspicious code" notes or correctness-only issues with no security impact. They are moved here, not deleted, so you can audit false rejects. |
+| `crashes/CRASH-*` | A finding the harness also reproduced under a sanitizer. Triage exports a maintainer-ready bundle with `REPORT.md`, `reproduce.sh`, `sanitizer.txt`, `input.<ext>`, and `harness.*` when an API harness is needed. |
+| `crashes/CRASH-CLUSTERS.html` | Per-backend cluster summary for crashes. |
+| `crashes-rejected/INDEX.html` | Crash candidates that failed triage, with reasons. Examples include null derefs, OOMs, and other low-value crash classes; the original artifacts are retained for review. |
+
+When you run multiple backends against the same target, the per-backend
+tables are rolled up at the target root:
+
+- `output/<target>/CRASH-CLUSTERS.html`
+- `output/<target>/FINDING-CLUSTERS.html`
+
+Rejected artifacts are still useful audit records. `crashes-rejected/`
+prevents later sessions from re-filing known low-value crash candidates.
+`findings-rejected/` serves the same purpose for reports that do not meet
+the security-finding bar after repeated review.
 
 ## How a session is organised
 
@@ -179,6 +157,7 @@ output/<target>/<backend>/
         │   ├── state/                 claims, hypotheses, notes, and probe runs
         │   ├── recon-hypotheses.jsonl cold-start recon candidates, when recon runs
         │   ├── findings/              accepted non-crashing security findings
+        │   ├── findings-rejected/     FIND reports rejected as non-security
         │   ├── crashes/               accepted sanitizer-backed reproductions
         │   └── crashes-rejected/      triaged low-value crash candidates
         └── logs/                      per-agent logs; raw dialogue under logs/.raw/
@@ -199,6 +178,18 @@ page. Agents investigate using a catalog of eight strategies (S1–S8)
 plus a shared pattern-search reference — see
 [Strategy model](concepts/strategy-model.md) for how they are assigned
 and rotated.
+
+## Responsible use
+
+- Only run TokenFuzz on software you are authorised to test.
+- All output is written to your local results directory; the harness
+  does not publish anything itself. Hosted backends receive the prompts,
+  source excerpts, state, and reports needed for the run, and optional
+  reachability checks may query public code search.
+- When reporting upstream, use the project's normal security-disclosure
+  process.
+- The repository's security policy is in
+  [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md).
 
 ## Where to go next
 
