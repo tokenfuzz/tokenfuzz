@@ -850,7 +850,7 @@ if [ ! -e "$san_lib" ]; then
   # archive basename after the fresh build, but only accept an unambiguous hit.
   san_lib_name="${san_lib##*/}"
   if [ -n "$san_lib_name" ] && [ -d "$build" ]; then
-    matches=$(find "$build" \( -type f -o -type l \) -name "$san_lib_name" -print)
+    matches=$(find "$build" \\( -type f -o -type l \\) -name "$san_lib_name" -print)
     match_count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')
     if [ "$match_count" = "1" ]; then
       san_lib=$(printf '%s\n' "$matches" | sed -n '1p')
