@@ -31,7 +31,6 @@ they survive a re-sync. Keep them when re-pulling from upstream.
 from __future__ import annotations
 
 import re
-import string
 
 
 # Verbatim from ClusterFuzz ``stacktraces/constants.py`` ``STACK_FRAME_IGNORE_REGEXES``
@@ -303,6 +302,14 @@ _ANON_NAMESPACE_PREFIXES = (
 # arguments in '<...>' intact (ClusterFuzz splits only on '(' and '[', so
 # overloaded templates stay distinguishable in the crash state).
 _FRAME_FILTER_RE = re.compile(r"(.*?)[\(\[].*")
+# Port of the `(.*)\+([xX0-9a-fA-F]+)` fun+off split inside
+# ClusterFuzz `SAN_STACK_FRAME_REGEX` (stacktraces/constants.py): a frame
+# like `check_opcode_types+0xc4` is captured as `function_name` + a
+# separate `function_offset` upstream, so the normalized name never carries
+# the offset. We don't run the full SAN regex (the existing parser already
+# handles frame splitting), so apply the same trim here at the end of
+# `filter_function_name`.
+_FUNC_OFFSET_RE = re.compile(r"\+[xX0-9a-fA-F]+$")
 
 
 def filter_function_name(function: str) -> str:
@@ -324,22 +331,38 @@ def filter_function_name(function: str) -> str:
     function = function.split("!")[-1]
     match = _FRAME_FILTER_RE.match(function)
     if match and match.group(1):
-        return match.group(1).strip()
-    return function.strip().split(" ")[0]
+        result = match.group(1).strip()
+    else:
+        result = function.strip().split(" ")[0]
+    return _FUNC_OFFSET_RE.sub("", result)
 
 
-_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
-_INT_RE = re.compile(r"\b\d+\b")
+def filter_addresses_and_numbers(stack_frame):
+    """Return a normalized string without unique addresses and numbers.
 
+    Verbatim port of ClusterFuzz ``stacktraces.filter_addresses_and_numbers``
+    (see module header for the upstream URL and license). The regexes and
+    comments below are copied as-is so the address/number scrubbing — and the
+    deliberate exclusions (``source.cc:1234`` line numbers, ``libfoo-1.0.so``
+    version suffixes, small-integer comparisons) — stay aligned with upstream
+    on re-sync."""
+    # Remove offset part from end of every line.
+    result = re.sub(r'\+0x[0-9a-fA-F]+\n', '\n', stack_frame, re.DOTALL)
 
-def filter_addresses_and_numbers(line: str) -> str:
-    """Approximate ClusterFuzz ``stacktraces.filter_addresses_and_numbers``.
+    # Replace sections that appear to be addresses with the string "ADDRESS".
+    address_expression = r'0x[a-fA-F0-9]{4,}[U]*'
+    address_replacement = r'ADDRESS'
+    result = re.sub(address_expression, address_replacement, result)
 
-    Replaces hex addresses and bare integers in a crash-state line with the
-    ``0x{*}`` / ``{*}`` placeholders so runs that differ only by ASLR or
-    allocation tags collapse to the same signature. Non-printable bytes are
-    dropped and the line is capped, matching upstream's bounded state."""
-    line = "".join(ch for ch in line if ch in string.printable)
-    line = _HEX_RE.sub("0x{*}", line)
-    line = _INT_RE.sub("{*}", line)
-    return line[:256]
+    # Replace sections that appear to be numbers with the string "NUMBER".
+    # Cases that we are avoiding:
+    # - source.cc:1234
+    # - libsomething-1.0.so (to avoid things like NUMBERso in replacements)
+    # - very small integer comparisons, e.g. "x >= NUMBER" for "x >= 1"
+    number_expression = r'''(?<![:0-9.])          # not preceeded by any of these
+                            (?:[0-9.]{4,}         # either >= 4 digits
+                               |(?<=\ )[0-9]{2,}  # or >= 2 digits after space
+                               |(?<=[@#])[0-9]+)  # or preceeded by @ or #
+                            (?![A-Za-z0-9.])      # not followed by any of these
+                            '''
+    return re.sub(number_expression, 'NUMBER', result, flags=re.X)

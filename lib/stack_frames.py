@@ -24,6 +24,7 @@ from pathlib import Path
 import clusterfuzz_stacktrace as _cf
 from clusterfuzz_stacktrace import (
     MAX_CRASH_STATE_FRAMES,
+    filter_addresses_and_numbers,
     filter_function_name,
 )
 
@@ -60,10 +61,15 @@ class StackFrame:
 
     @property
     def display(self) -> str:
+        """Crash-state line for this frame: normalized function name + location,
+        then ASLR addresses and line numbers scrubbed via ClusterFuzz's
+        `filter_addresses_and_numbers`. This is what flows into dedup keys
+        (`crash_signature`, `extract_dedup_frames`); the raw `function` and
+        `location` fields stay untouched for forensic display (render-md uses
+        them directly for the triage card)."""
         func = self.state_function
-        if self.location:
-            return f"{func} {self.location}"
-        return func
+        line = f"{func} {self.location}" if self.location else func
+        return filter_addresses_and_numbers(line)
 
 
 def _parse_frame_body(body: str) -> tuple[str, str]:

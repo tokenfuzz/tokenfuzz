@@ -238,6 +238,96 @@ assert_eq("mod::func", stack_frames.filter_function_name("module!mod::func(int)"
           "filter_function_name takes the segment after the last '!'")
 assert_eq("ns::g", stack_frames.filter_function_name("(anonymous namespace)::ns::g()"),
           "filter_function_name strips the anonymous-namespace marker")
+assert_eq("check_opcode_types",
+          stack_frames.filter_function_name("check_opcode_types+0xc4"),
+          "filter_function_name strips trailing +0x{hex} symbol offset (no parens)")
+assert_eq("check_opcode_types",
+          stack_frames.filter_function_name("check_opcode_types+0xC4"),
+          "filter_function_name strips trailing +0x{HEX} (uppercase hex digits)")
+assert_eq("foo",
+          stack_frames.filter_function_name("foo+0x1aac(int)"),
+          "filter_function_name strips +0x{hex} when followed by a parameter list")
+# Operator-overload symbols end in `+`, `++`, `+=` — the `+0x{hex}` stripper
+# must not eat them. `+` is not in the `[xX0-9a-fA-F]` class and the `+{hex}`
+# pattern requires at least one hex char, so a bare trailing `+` survives.
+assert_eq("Foo::operator+",
+          stack_frames.filter_function_name("Foo::operator+(int)"),
+          "filter_function_name preserves operator+ (single +) after stripping params")
+assert_eq("Foo::operator++",
+          stack_frames.filter_function_name("Foo::operator++()"),
+          "filter_function_name preserves operator++ (no false offset strip)")
+assert_eq("Foo::operator+=",
+          stack_frames.filter_function_name("Foo::operator+=(int)"),
+          "filter_function_name preserves operator+= (no false offset strip)")
+assert_eq("std::operator+<char>",
+          stack_frames.filter_function_name("std::operator+<char>(...)"),
+          "filter_function_name preserves operator+<T> template-overload form")
+
+# End-to-end: an un-symbolicated module-form frame from ASan must NOT carry
+# `+0x{hex}` into the crash state. Mirrors what CRASH-0006 was filing into
+# REPORT.html before the fix (`check_opcode_types+0xc4 (...)`).
+module_form_with_offset = """\
+==40839==ERROR: AddressSanitizer: heap-use-after-free on address 0x1 at pc 0x2
+READ of size 1 at 0x1 thread T0
+    #0 0x0001043637e0 in check_opcode_types+0xc4 (apptool.bin:arm64+0x1000677e0)
+    #1 0x00010435b2c4 in tool_resolve_entry+0x213c (apptool.bin:arm64+0x10005f2c4)
+SUMMARY: AddressSanitizer: heap-use-after-free
+"""
+sig = stack_frames.crash_signature(module_form_with_offset)
+# After both fixes (function-name offset strip + ClusterFuzz address scrub),
+# the signature for an un-symbolicated frame is ASLR-stable: hex addresses
+# ≥ 4 hex digits collapse to `ADDRESS`, and the function name has no
+# `+0x{hex}` offset. Source line numbers (`file.cc:1234`) are deliberately
+# preserved by upstream's `(?<![:0-9.])` lookbehind.
+ok(sig and "+0x" not in sig[0].split(" (", 1)[0],
+   "crash signature function-name half carries no +0x{hex} offset",
+   detail=f"sig={sig!r}")
+ok(sig and sig[0] == "check_opcode_types (apptool.bin:arm64+ADDRESS)",
+   "module-form frame normalizes to bare function + module location with ASLR-scrubbed offset",
+   detail=f"top={sig[0] if sig else None!r}")
+
+# ASLR-stability: two runs of the same crash with different PCs / module
+# offsets must produce identical crash_signature lists. The hex addresses
+# collapse to `ADDRESS` so cluster keys match.
+module_form_run_a = """\
+==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60f0000001c8 at pc 0x0001043637e4
+READ of size 1 at 0x60f0000001c8 thread T0
+    #0 0x0001043637e0 in check_opcode_types+0xc4 (apptool.bin:arm64+0x1000677e0)
+    #1 0x00010435b2c4 in tool_resolve_entry+0x213c (apptool.bin:arm64+0x10005f2c4)
+SUMMARY: AddressSanitizer: heap-use-after-free
+"""
+module_form_run_b = """\
+==2==ERROR: AddressSanitizer: heap-use-after-free on address 0x71a0000003d8 at pc 0x000201abcd00
+READ of size 1 at 0x71a0000003d8 thread T0
+    #0 0x000201abccfc in check_opcode_types+0xd0 (apptool.bin:arm64+0x2000abcd0)
+    #1 0x000201ab1208 in tool_resolve_entry+0x2200 (apptool.bin:arm64+0x2000a1200)
+SUMMARY: AddressSanitizer: heap-use-after-free
+"""
+sig_a = stack_frames.crash_signature(module_form_run_a)
+sig_b = stack_frames.crash_signature(module_form_run_b)
+ok(sig_a == sig_b and sig_a,
+   "two ASLR-different runs of the same crash collapse to the same signature",
+   detail=f"a={sig_a!r} b={sig_b!r}")
+
+# Architectural invariant: `frame.display` is the dedup/signature line and
+# gets address/number-scrubbed; `frame.function` / `frame.location` stay
+# RAW so render-md's triage card (which reads them directly, not via
+# display) keeps the real addresses for forensic display.
+frame = stack_frames.first_interesting_frame(module_form_run_a)
+ok(frame is not None and frame.function == "check_opcode_types+0xc4",
+   "frame.function preserves the raw symbol with +0x{hex} offset for forensic use",
+   detail=f"function={frame.function if frame else None!r}")
+ok(frame is not None and frame.location == "(apptool.bin:arm64+0x1000677e0)",
+   "frame.location preserves the raw module+address for forensic use",
+   detail=f"location={frame.location if frame else None!r}")
+ok(frame is not None and "0x1000677e0" not in frame.display,
+   "frame.display is the scrubbed dedup form (no raw ASLR address)",
+   detail=f"display={frame.display if frame else None!r}")
+# `libfoo-1.0.so` version-suffix preservation — upstream deliberately avoids
+# turning these into `libfooNUMBERso`. Our verbatim port inherits the fix.
+assert_eq("crash in libssl-1.0.2k.so",
+          stack_frames.filter_addresses_and_numbers("crash in libssl-1.0.2k.so"),
+          "filter_addresses_and_numbers preserves libfoo-X.Y.Z.so version strings")
 
 # End-to-end: a frame whose own params mention std::__1 types must keep the
 # real (param-stripped) name in the crash state, not be ignored as stdlib and
@@ -259,7 +349,7 @@ ok(frame is not None and "(" not in frame.display,
    detail=f"display={frame.display if frame else None!r}")
 sig = stack_frames.crash_signature(param_heavy)
 ok(sig and sig[0] == "sampledb::Engine::Store::set_blob sampledb.cpp:213",
-   "crash_signature top line is normalized func + location",
+   "crash_signature top line is normalized func + location (source line numbers preserved by upstream's `(?<![:0-9.])` lookbehind)",
    detail=f"sig={sig!r}")
 ok(all("std::__1::" not in line for line in sig),
    "no std::__1 parameter types leak into the crash signature",
