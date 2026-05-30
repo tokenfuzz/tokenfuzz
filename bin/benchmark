@@ -216,6 +216,50 @@ PY_BENCH="$SCRIPT_ROOT/lib/benchmark.py"
 [ -n "$LEDGER" ] || LEDGER="$BENCH_BACKEND_ROOT/benchmark-results.md"
 mkdir -p "$(dirname "$LEDGER")" 2>/dev/null || true
 
+BENCH_LOCK=""
+
+# Hold a lock keyed by (target, backend) for the whole run. Every cell
+# rewrites the shared per-backend ledger and the root crosstab and drives
+# bin/audit against the shared targets/<slug>/ tree, so two runs of the same
+# target+backend racing on those corrupt the rollup and silently double the
+# run — the failure mode that produced duplicate ledger rows. A second
+# *concurrent* launch is refused; sequential reruns are unaffected (the lock
+# frees on exit). Different targets or backends lock on different paths, so a
+# parallel sweep — codex+claude on one target, or one backend across targets —
+# still runs side by side. The lock is a single file written under noclobber,
+# so claiming it and recording the owner pid are one atomic step (no
+# create-then-describe window); regular files are more portable than flock(1),
+# absent on macOS, or FIFOs, which some mounts reject.
+acquire_benchmark_lock() {
+  BENCH_LOCK="$BENCH_BACKEND_ROOT/.run-$TARGET_SLUG.lock"
+  mkdir -p "$BENCH_BACKEND_ROOT" \
+    || { echo "FATAL: cannot create $BENCH_BACKEND_ROOT" >&2; exit 1; }
+  local tries=0 holder
+  until ( set -o noclobber; printf '%s\n' "$$" > "$BENCH_LOCK" ) 2>/dev/null; do
+    holder="$(cat "$BENCH_LOCK" 2>/dev/null || true)"
+    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+      echo "FATAL: a benchmark for target=$TARGET_SLUG backend=$BACKEND is already running (pid $holder)." >&2
+      echo "       Refusing to start a duplicate concurrent run. Wait for it to finish," >&2
+      echo "       or pass --bench-root to run an isolated copy." >&2
+      exit 1
+    fi
+    # Holder gone (crashed run) or never recorded — drop the stale lock and
+    # retry. noclobber is the atomic arbiter, so a real winner is never erased
+    # here; the cap stops a spin if the lock path is genuinely unwritable.
+    tries=$((tries + 1))
+    [ "$tries" -le 5 ] \
+      || { echo "FATAL: cannot acquire benchmark lock $BENCH_LOCK" >&2; exit 1; }
+    rm -f "$BENCH_LOCK" 2>/dev/null || true
+  done
+}
+
+cleanup_benchmark_lock() {
+  [ -n "${BENCH_LOCK:-}" ] && [ -f "$BENCH_LOCK" ] || return 0
+  # Only remove a lock this process still owns — never one a reclaimer took.
+  [ "$(cat "$BENCH_LOCK" 2>/dev/null || true)" = "$$" ] || return 0
+  rm -f "$BENCH_LOCK" 2>/dev/null || true
+}
+
 # ── --reset short-circuits everything else ───────────────────────────────
 if [ "$DO_RESET" = "1" ]; then
   reset_args=(reset --ledger "$LEDGER")
@@ -249,6 +293,9 @@ if [ "$DRY_RUN" != "1" ] && ! llm_known_backend "$BACKEND"; then
   exit 1
 fi
 
+acquire_benchmark_lock
+trap cleanup_benchmark_lock EXIT
+
 IFS=',' read -r -a COND_ARR <<< "$CONDITIONS"
 for c in "${COND_ARR[@]}"; do
   case "$c" in
@@ -262,7 +309,10 @@ RUNID_BASE="${BENCHMARK_RUNID:-$(date +%Y%m%d-%H%M%S)}"
 RUNID="$RUNID_BASE"
 BENCH_DIR="$BENCH_BACKEND_ROOT/$RUNID"
 runid_suffix=2
-while [ -e "$BENCH_DIR" ]; do
+# Claim the run directory atomically so two runs starting in the same second
+# (a parallel sweep of one backend across targets) can't land in one dir.
+while ! mkdir "$BENCH_DIR" 2>/dev/null; do
+  [ -e "$BENCH_DIR" ] || { echo "FATAL: cannot create $BENCH_DIR" >&2; exit 1; }
   RUNID="${RUNID_BASE}-${runid_suffix}"
   BENCH_DIR="$BENCH_BACKEND_ROOT/$RUNID"
   runid_suffix=$((runid_suffix + 1))
@@ -292,6 +342,7 @@ finish_console_log() {
       exec 3>&- 4>&-
     fi
   fi
+  cleanup_benchmark_lock
   exit "$rc"
 }
 

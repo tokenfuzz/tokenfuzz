@@ -652,6 +652,40 @@ collision_xt=$(python3 "$PY" crosstab "$collision_root")
 assert_match '20260104-000000-2' "$collision_xt" \
   "T15o: crosstab includes the collision-suffixed run"
 
+# ── T15p–T15t: concurrency guard — one run per (target, backend) ──────────
+# Two live runs of the same target+backend racing on the shared ledger and
+# root crosstab silently double the run — the failure mode that produced
+# duplicate ledger rows when two commands were started close together. The
+# lock is a single file holding the owner pid; a live owner blocks the second
+# launch, and a stale lock left by a killed run is reclaimed.
+lock_root="$work/run-guard"
+guard_lock="$lock_root/codex/.run-dummytarget.lock"
+mkdir -p "$lock_root/codex"
+printf '%s\n' "$$" > "$guard_lock"          # a live holder (this test process)
+set +e
+lock_out=$(BENCHMARK_RUNID=20260104-010001 bash "$BENCH" --target dummytarget \
+  --dry-run --replicates 1 --conditions model-direct \
+  --bench-root "$lock_root" 2>&1)
+lock_rc=$?
+set -e
+assert_eq "1" "$lock_rc" \
+  "T15p: a concurrent run for the same target+backend is refused"
+assert_match 'for target=dummytarget backend=codex is already running' "$lock_out" \
+  "T15q: the refusal names the in-progress target+backend"
+assert_dir_not_exists "$lock_root/codex/20260104-010001" \
+  "T15r: a refused run creates no run directory"
+
+# An empty lock file (owner never recorded / process gone) is treated as
+# stale, reclaimed, and the run proceeds — then releases the lock on exit.
+: > "$guard_lock"
+BENCHMARK_RUNID=20260104-010002 bash "$BENCH" --target dummytarget \
+  --dry-run --replicates 1 --conditions model-direct \
+  --bench-root "$lock_root" >/dev/null 2>&1
+assert_dir_exists "$lock_root/codex/20260104-010002" \
+  "T15s: a stale lock is reclaimed and the run proceeds"
+assert_file_not_exists "$guard_lock" \
+  "T15t: the run releases its target+backend lock on exit"
+
 # ── T17: the ledger renders a severity-sorted bug table ──────────────────
 # Reuses the T14 bench dir, whose synthetic clusters carry severity:
 # CL-1 Medium(48) and CL-2 Low(20) must render Medium-first.
