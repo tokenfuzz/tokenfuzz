@@ -37,6 +37,12 @@ cat > "$SRC/CMakeLists.txt" <<'EOF'
 cmake_minimum_required(VERSION 3.10)
 project(tgt C)
 add_library(tgt tgt.c)
+# Decoy: a test-framework-style static archive under tests/ whose name sorts
+# BEFORE libtgt. Without the test-dir prune, discovery's `*.a | sort | head`
+# would link this instead of the real library and the harness would fail
+# with an undefined boom() — so the assertions below also guard the prune.
+add_library(aaux STATIC aaux.c)
+set_target_properties(aaux PROPERTIES ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
 # Generate the public header into a NON-standard build subdir (mirrors
 # pcre2 emitting pcre2.h under build/interface/) and a config header into a
 # second subdir (mirrors config.h). target.toml's includes name neither, so
@@ -57,6 +63,9 @@ cat > "$SRC/api.h.in" <<'EOF'
 #error "build config not applied: needs -DHAVE_CONFIG_H + config.h on path"
 #endif
 int boom(void);
+EOF
+cat > "$SRC/aaux.c" <<'EOF'
+int aaux_unused(void) { return 0; }
 EOF
 cat > "$SRC/tgt.h" <<'EOF'
 int boom(void);
@@ -158,7 +167,9 @@ assert_file_exists "$CRASH_DIR/reproduce.sh" "bundle: reproduce.sh emitted"
 # ─── Shape: the discovery block + guarded link are present ───────────
 assert_file_contains "$CRASH_DIR/reproduce.sh" 'linking auto-discovered library' \
   "reproduce.sh: emits the library-discovery banner when asan_lib is unset"
-assert_file_contains "$CRASH_DIR/reproduce.sh" 'find "\$build" -type f -name .\*\.a' \
+assert_file_contains "$CRASH_DIR/reproduce.sh" "path '\*/tests/\*' .*-prune" \
+  "reproduce.sh: discovery prunes test/_deps dirs when scanning \$build"
+assert_file_contains "$CRASH_DIR/reproduce.sh" "\-type f -name '\*\.a'" \
   "reproduce.sh: discovery scans \$build for a static archive"
 assert_file_contains "$CRASH_DIR/reproduce.sh" 'san_lib:\+"\$san_lib"' \
   "reproduce.sh: harness link line is guarded by the discovered san_lib"

@@ -627,6 +627,34 @@ elif [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ ! -f "$AUDIT_BUILD_SH" ]; then
   log "hint: $TARGET_NAME is a $BUILD_SYSTEM target with no $AUDIT_BUILD_SH; rerun with --bootstrap to converge an ASan build recipe (without it, reproduce.sh falls back to a generic cmake template that may miss target-specific flags)"
 fi
 
+# Materialize the canonical sanitizer build and record the library it
+# produces, so --bootstrap is self-sufficient (recipe + build + filled
+# config). auto-build-script validates the recipe in a throwaway scratch
+# dir, so on a fresh target targets/<slug>/build-asan never exists, and the
+# early config seed — which must run before any build, to supply
+# build_system — could not detect <san>_lib and left it a commented
+# FILL_ME. Build once into the canonical dir with the converged recipe,
+# then patch the detected library fields into target.toml in place, leaving
+# the LLM-curated sections untouched. (reproduce.sh self-discovers the
+# library at run time regardless; this just makes the config accurate for
+# the model-direct prompt recipe and bin/probe.)
+if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ] && [ -f "$AUDIT_BUILD_SH" ]; then
+  ASAN_BUILD_DIR="$TARGET_ROOT/build-asan${AUDIT_BUILD_SUFFIX:-}"
+  if [ ! -d "$ASAN_BUILD_DIR" ]; then
+    log "bootstrap: materializing canonical ASan build ($ASAN_BUILD_DIR) for library detection"
+    mkdir -p "$TARGET_ROOT/.audit"
+    if "$AUDIT_BUILD_SH" "$TARGET_ROOT" "$ASAN_BUILD_DIR" \
+         >> "$TARGET_ROOT/.audit/build-materialize.log" 2>&1; then
+      log "bootstrap: canonical ASan build complete"
+    else
+      log "bootstrap: canonical ASan build failed (see $TARGET_ROOT/.audit/build-materialize.log); reproduce.sh still self-discovers the library at run time"
+    fi
+  fi
+  if [ "$(python3 "$SCRIPT_ROOT/lib/target_config.py" refresh-libs "$TARGET_ROOT" "$TARGET_TOML" 2>/dev/null)" = "changed" ]; then
+    log "bootstrap: filled <san>_lib in $TARGET_TOML from the canonical build"
+  fi
+fi
+
 cat <<EOF
 
 Next steps:

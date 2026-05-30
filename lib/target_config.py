@@ -934,6 +934,23 @@ def _is_shared_lib(name: str) -> bool:
     return name.endswith((".so", ".dylib")) or ".so." in name
 
 
+# Build subdirectories that hold helper/dependency archives, never the
+# project's own library: unit-test frameworks vendored under test(s)/
+# (Unity, gtest, …) and CMake FetchContent dependency builds under _deps/.
+# Inclusion criterion: a directory a build system populates with libraries
+# that are NOT the audited project's primary artifact. Structural (no
+# project names), so it stays target-agnostic as new projects appear.
+_AUX_LIB_DIRS = {"test", "tests", "_deps"}
+
+
+def _is_aux_lib(p: Path, san_dir: Path) -> bool:
+    try:
+        rel = p.relative_to(san_dir)
+    except ValueError:
+        return False
+    return any(part.lower() in _AUX_LIB_DIRS for part in rel.parts[:-1])
+
+
 def _pick_shared_lib(san_dir: Path, root: Path) -> str:
     """Best shared library to link a C harness against, when the build
     emits no static archive (the cmake/meson default for c-ares, pcre2,
@@ -945,7 +962,8 @@ def _pick_shared_lib(san_dir: Path, root: Path) -> str:
     above: ambiguous multi-library builds resolve to the first canonical
     match, which the operator can override in target.toml."""
     shared = [s for s in _find_under(san_dir, name=None)
-              if _is_shared_lib(s.name) and "posix" not in s.name]
+              if _is_shared_lib(s.name) and "posix" not in s.name
+              and not _is_aux_lib(s, san_dir)]
     if not shared:
         return ""
     shared.sort(key=lambda s: (not s.name.endswith((".so", ".dylib")),
@@ -962,7 +980,8 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     the same archive-then-shared rule holds for asan/ubsan/msan/tsan."""
     if not san_dir.is_dir():
         return ""
-    archives = [a for a in _find_under(san_dir, name=None) if a.suffix == ".a"]
+    archives = [a for a in _find_under(san_dir, name=None)
+                if a.suffix == ".a" and not _is_aux_lib(a, san_dir)]
     for a in archives[:3]:
         if "posix" in a.name:
             continue
@@ -970,6 +989,47 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     if archives:
         return str(archives[0]).removeprefix(str(root) + "/")
     return _pick_shared_lib(san_dir, root)
+
+
+def refresh_detected_lib_fields(target_root: Path, toml_path: Path) -> bool:
+    """Fill <san>_lib in an existing target.toml from the build trees now on
+    disk, editing only those lines and leaving every other field — including
+    curated [threat_model]/[s6_peers] — untouched. Returns True if anything
+    changed.
+
+    seed_toml runs before any build exists (it has to: the build step reads
+    build_system from the config it writes), so on a fresh target it can't
+    detect the instrumented library and leaves <san>_lib a commented
+    FILL_ME. setup-target --bootstrap calls this after materializing the
+    canonical build to repair that ordering. A full re-seed would clobber
+    the LLM-curated sections, hence the surgical line patch."""
+    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    try:
+        lines = Path(toml_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    changed = False
+    for san in ("asan", "ubsan", "msan", "tsan"):
+        detected = _detect_sanitizer_lib(target_root / f"build-{san}{suffix}",
+                                         target_root)
+        if not detected:
+            continue
+        if san == "asan":
+            new_line = f"asan_lib      = {toml_basic_string(detected)}"
+        else:
+            field = f"{san}_lib"
+            pad = " " * (len("ubsan_lib") - len(field))
+            new_line = f"{field}{pad} = {toml_basic_string(detected)}"
+        field_re = re.compile(rf"^\s*#?\s*{san}_lib\b\s*=")
+        for i, ln in enumerate(lines):
+            if field_re.match(ln):
+                if ln != new_line:
+                    lines[i] = new_line
+                    changed = True
+                break
+    if changed:
+        Path(toml_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return changed
 
 
 _HEADER_SUFFIXES = (".h", ".hpp", ".hh", ".hxx", ".H")
@@ -1980,6 +2040,12 @@ def _cmd_write_session_env(args) -> int:
     return 0
 
 
+def _cmd_refresh_libs(args) -> int:
+    changed = refresh_detected_lib_fields(Path(args.target_root), Path(args.out))
+    print("changed" if changed else "unchanged")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="lib/target_config.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1994,6 +2060,11 @@ def main(argv: list[str]) -> int:
     sp.add_argument("out")
     sp.add_argument("upstream_url", nargs="?", default="")
     sp.set_defaults(func=_cmd_seed_toml)
+
+    sp = sub.add_parser("refresh-libs")
+    sp.add_argument("target_root")
+    sp.add_argument("out")
+    sp.set_defaults(func=_cmd_refresh_libs)
 
     sp = sub.add_parser("detect-rev")
     sp.add_argument("target_root")

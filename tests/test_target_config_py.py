@@ -739,6 +739,74 @@ assert_eq("build-asan/lib/libtgt.a", cfg_mix.asan_lib,
 assert_eq("", tc._detect_sanitizer_lib(seed_root_he / "build-asan", seed_root_he),
           "_detect_sanitizer_lib: empty when no archive or shared object")
 
+# A test-framework static archive under tests/ (Unity, gtest) must NOT be
+# chosen over the project's own shared library at the build root — the
+# cjson case: libcjson.dylib at root + tests/libunity.a. Picking the test
+# archive made the harness link the wrong library.
+seed_root_aux = TEST_TMPDIR / "seed-aux-test-lib"
+(seed_root_aux / "build-asan" / "tests").mkdir(parents=True)
+(seed_root_aux / "build-asan" / "tests" / "libunity.a").write_bytes(b"!<arch>\n")
+(seed_root_aux / "build-asan" / "libproject.dylib").write_bytes(b"\x7fELF")
+assert_eq("build-asan/libproject.dylib",
+          tc._detect_sanitizer_lib(seed_root_aux / "build-asan", seed_root_aux),
+          "_detect_sanitizer_lib: skips a test-dir archive for the project's lib")
+# And a _deps/ FetchContent dependency archive is likewise skipped.
+seed_root_deps = TEST_TMPDIR / "seed-deps-lib"
+(seed_root_deps / "build-asan" / "_deps" / "fmt-build").mkdir(parents=True)
+(seed_root_deps / "build-asan" / "_deps" / "fmt-build" / "libfmt.a").write_bytes(b"!<arch>\n")
+(seed_root_deps / "build-asan" / "libproject.a").write_bytes(b"!<arch>\n")
+assert_eq("build-asan/libproject.a",
+          tc._detect_sanitizer_lib(seed_root_deps / "build-asan", seed_root_deps),
+          "_detect_sanitizer_lib: skips a _deps dependency archive")
+
+
+# ─── 10e. refresh_detected_lib_fields fills <san>_lib in place ──────
+#
+# seed_toml runs before any build exists, so on a fresh target asan_lib
+# stays a commented FILL_ME. setup-target --bootstrap materializes the
+# canonical build and calls refresh_detected_lib_fields to patch the
+# detected library in — without disturbing curated sections.
+refresh_root = TEST_TMPDIR / "refresh-target"
+(refresh_root / "build-asan" / "lib").mkdir(parents=True)
+(refresh_root / "build-asan" / "lib" / "libwidget.a").write_bytes(b"!<arch>\n")
+refresh_toml = refresh_root / "target.toml"
+refresh_toml.write_text(
+    'target        = "widget"\n'
+    'build_system  = "cmake"\n'
+    '# asan_lib    = "build-asan/FILL_ME.a"    # uncomment + fill if a // HARNESS\n'
+    'includes      = ["include", "build-asan/include"]\n'
+    'link_libs     = ["-lm", "-lpthread"]\n'
+    '\n'
+    '[threat_model]\n'
+    'attacker_controls = ["bytes", "protocol-state"]\n',
+    encoding="utf-8",
+)
+changed = tc.refresh_detected_lib_fields(refresh_root, refresh_toml)
+assert_eq(True, changed, "refresh_detected_lib_fields: reports a change")
+refreshed = refresh_toml.read_text(encoding="utf-8")
+assert_in('asan_lib      = "build-asan/lib/libwidget.a"', refreshed,
+          "refresh_detected_lib_fields: fills asan_lib from the built archive")
+assert_not_in("FILL_ME", refreshed,
+              "refresh_detected_lib_fields: replaces the commented placeholder")
+assert_in('attacker_controls = ["bytes", "protocol-state"]', refreshed,
+          "refresh_detected_lib_fields: leaves the curated [threat_model] intact")
+# Round-trips through the loader as a real field.
+cfg_refresh = tc.Config()
+tc.load_toml_into(cfg_refresh, refresh_toml)
+assert_eq("build-asan/lib/libwidget.a", cfg_refresh.asan_lib,
+          "refresh_detected_lib_fields: asan_lib round-trips through load_toml_into")
+# Idempotent: a second pass finds the field already correct.
+assert_eq(False, tc.refresh_detected_lib_fields(refresh_root, refresh_toml),
+          "refresh_detected_lib_fields: idempotent once filled")
+# No build tree → nothing to fill, no change.
+norefresh_root = TEST_TMPDIR / "refresh-nobuild"
+norefresh_root.mkdir()
+norefresh_toml = norefresh_root / "target.toml"
+norefresh_toml.write_text(
+    '# asan_lib    = "build-asan/FILL_ME.a"\n', encoding="utf-8")
+assert_eq(False, tc.refresh_detected_lib_fields(norefresh_root, norefresh_toml),
+          "refresh_detected_lib_fields: no change when no build tree exists")
+
 
 # ─── 11. Fallback parser works without tomllib ─────────────────────
 
