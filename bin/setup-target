@@ -641,7 +641,7 @@ fi
 if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ] && [ -f "$AUDIT_BUILD_SH" ]; then
   ASAN_BUILD_DIR="$TARGET_ROOT/build-asan${AUDIT_BUILD_SUFFIX:-}"
   if [ ! -d "$ASAN_BUILD_DIR" ]; then
-    log "bootstrap: materializing canonical ASan build ($ASAN_BUILD_DIR) for library detection"
+    log "bootstrap: materializing canonical ASan build into $ASAN_BUILD_DIR (compiling the project so <san>_bin/<san>_lib can be detected; a few minutes)"
     mkdir -p "$TARGET_ROOT/.audit"
     if "$AUDIT_BUILD_SH" "$TARGET_ROOT" "$ASAN_BUILD_DIR" \
          >> "$TARGET_ROOT/.audit/build-materialize.log" 2>&1; then

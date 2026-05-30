@@ -848,6 +848,37 @@ assert_in('asan_bin      = "build-asan/mytool"', keep_toml.read_text(encoding="u
           "refresh_detected_build_fields: keeps a plausible operator-set asan_bin")
 
 
+# ─── 10f. _detect_cli_bin prunes aux dirs and filters before the cap ──
+#
+# Regression: the nm-probe cap was applied before the aux filter, so a
+# build with a large CMakeFiles/ tree (curl: src/curl sits after dozens of
+# probe binaries) exhausted the budget on pruned entries and never reached
+# the real tool. Filtering to candidates first fixes it. Lay down 70
+# executable CMakeFiles probes (> the cap), a test-dir helper, and the real
+# tool at the root; with every executable treated as instrumented, only the
+# real tool may be returned.
+cli_root = TEST_TMPDIR / "cli-detect"
+(cli_root / "build-asan" / "CMakeFiles" / "3.30").mkdir(parents=True)
+for _i in range(70):
+    _p = cli_root / "build-asan" / "CMakeFiles" / "3.30" / f"probe{_i:02d}.bin"
+    _p.write_bytes(b"\x7fELF")
+    os.chmod(_p, 0o755)
+(cli_root / "build-asan" / "tests").mkdir(parents=True)
+_th = cli_root / "build-asan" / "tests" / "aaa_test_runner"
+_th.write_bytes(b"\x7fELF"); os.chmod(_th, 0o755)
+_tool = cli_root / "build-asan" / "mytool"
+_tool.write_bytes(b"\x7fELF"); os.chmod(_tool, 0o755)
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = lambda p, s="asan": True  # treat every exe as instrumented
+try:
+    _got = tc._detect_cli_bin(cli_root / "build-asan", cli_root, "cmake", "asan")
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
+assert_eq("build-asan/mytool", _got,
+          "_detect_cli_bin: skips CMakeFiles probes + tests/ helpers and finds "
+          "the real tool past the probe cap")
+
+
 # ─── 11. Fallback parser works without tomllib ─────────────────────
 
 saved_tomllib = tc.tomllib

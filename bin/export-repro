@@ -969,19 +969,19 @@ san_lib_dir="${san_lib%/*}"
 # a library.
 LIB_DISCOVER = """\
 # target.toml names no __SANITIZER_LABEL__ library, so link the one the
-# build just produced. Prefer a static archive; else the canonical shared
-# object (unversioned over its SONAME-versioned siblings).
-# Helper archives (Unity, gtest) and FetchContent dependency builds land
-# under test(s)/ and _deps/; the project's own library never does. Prune
-# those so discovery links the real library, not e.g. tests/libunity.a
-# (cjson builds libcjson.dylib at the root plus a test libunity.a).
+# build just produced: prefer a static archive, else the canonical shared
+# object (unversioned over its SONAME-versioned siblings). The pruned dirs
+# are build-system-internal — CMakeFiles/ scaffolding, test-framework
+# archives under test(s)/ (Unity, gtest), and FetchContent _deps/ builds —
+# never the project's own library (cjson builds libcjson.dylib at the root
+# plus a stray tests/libunity.a).
 san_lib=""
 if [ -d "$build" ]; then
-  san_lib=$(find "$build" \\( -path '*/test/*' -o -path '*/tests/*' -o -path '*/_deps/*' \\) -prune \\
+  san_lib=$(find "$build" -type d \\( -iname CMakeFiles -o -iname test -o -iname tests -o -iname _deps \\) -prune \\
       -o -type f -name '*.a' ! -name '*posix*' -print 2>/dev/null \\
     | LC_ALL=C sort | head -1)
   if [ -z "$san_lib" ]; then
-    san_lib=$(find "$build" \\( -path '*/test/*' -o -path '*/tests/*' -o -path '*/_deps/*' \\) -prune \\
+    san_lib=$(find "$build" -type d \\( -iname CMakeFiles -o -iname test -o -iname tests -o -iname _deps \\) -prune \\
       -o \\( -type f -o -type l \\) \\( \\
         -name 'lib*.so' -o -name 'lib*.dylib' \\
         -o -name 'lib*.so.*' -o -name 'lib*.*.dylib' \\
@@ -1053,8 +1053,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 # is pruned (private build scaffolding, no public API).
 gen_inc=""
 if [ -d "$build" ]; then
-  for d in $(find "$build" -name CMakeFiles -prune -o -type f \\
-               \\( -name '*.h' -o -name '*.hpp' -o -name '*.hh' \\) -print 2>/dev/null \\
+  for d in $(find "$build" -type d \\( -iname CMakeFiles -o -iname test -o -iname tests -o -iname _deps \\) -prune \\
+               -o -type f \\( -name '*.h' -o -name '*.hpp' -o -name '*.hh' \\) -print 2>/dev/null \\
              | sed 's|/[^/]*$||' | LC_ALL=C sort -u); do
     gen_inc="$gen_inc -I$d"
   done
@@ -1070,8 +1070,8 @@ fi
 # no config-gated header.
 have_config=""
 if [ -d "$build" ]; then
-  cfg_h=$(find "$build" -name CMakeFiles -prune -o -type f \\
-            \\( -name 'config.h' -o -name '*_config.h' \\) -print 2>/dev/null | head -1)
+  cfg_h=$(find "$build" -type d \\( -iname CMakeFiles -o -iname test -o -iname tests -o -iname _deps \\) -prune \\
+            -o -type f \\( -name 'config.h' -o -name '*_config.h' \\) -print 2>/dev/null | head -1)
   [ -n "$cfg_h" ] && have_config=" -DHAVE_CONFIG_H"
 fi
 echo "=== compiling harness: __HARNESS_NAME__ ===" >&2

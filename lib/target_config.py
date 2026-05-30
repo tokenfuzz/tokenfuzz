@@ -1044,11 +1044,12 @@ def _detect_cli_bin(san_dir: Path, root: Path, build_system: str,
 
 def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
     """Re-detect <san>_bin and <san>_lib for every sanitizer from the build
-    trees now on disk and correct them in target.toml in place. For each
-    field: fill it when unset, replace a value that points at a
-    build-internal artifact (a CMake compiler probe, a test-framework
-    archive) or a now-missing path, and leave every plausible value and
-    curated section untouched. Returns True if anything changed.
+    trees now on disk and correct them in target.toml in place. Policy per
+    field: when the build yields a value, adopt it (filling an unset field
+    or replacing a stale one); when it does not, scrub a value that points
+    at a build-internal artifact (a CMake compiler probe, a test-framework
+    archive) or a now-missing path, and otherwise leave the field — and
+    every curated section — untouched. Returns True if anything changed.
 
     seed_toml must run before any build exists (it supplies build_system to
     the build step), so on a fresh target it cannot detect these fields and

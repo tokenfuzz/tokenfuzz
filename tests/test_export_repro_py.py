@@ -892,8 +892,8 @@ assert_in("linking auto-discovered library", text_b,
           "c-harness asan_lib EMPTY: emits library-discovery block")
 assert_in("-type f -name '*.a'", text_b,
           "c-harness asan_lib EMPTY: discovery scans $build for the library")
-assert_in("-path '*/tests/*'", text_b,
-          "c-harness asan_lib EMPTY: discovery prunes test/_deps helper archives")
+assert_in("-iname tests", text_b,
+          "c-harness asan_lib EMPTY: discovery prunes CMakeFiles/test/_deps helper archives")
 assert_in('${san_lib:+"$san_lib"}', text_b,
           'c-harness asan_lib EMPTY: link line links the discovered lib when present')
 assert_in('${san_lib_dir:+-Wl,-rpath,"$san_lib_dir"}', text_b,

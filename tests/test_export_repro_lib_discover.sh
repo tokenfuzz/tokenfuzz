@@ -167,8 +167,8 @@ assert_file_exists "$CRASH_DIR/reproduce.sh" "bundle: reproduce.sh emitted"
 # ─── Shape: the discovery block + guarded link are present ───────────
 assert_file_contains "$CRASH_DIR/reproduce.sh" 'linking auto-discovered library' \
   "reproduce.sh: emits the library-discovery banner when asan_lib is unset"
-assert_file_contains "$CRASH_DIR/reproduce.sh" "path '\*/tests/\*' .*-prune" \
-  "reproduce.sh: discovery prunes test/_deps dirs when scanning \$build"
+assert_file_contains "$CRASH_DIR/reproduce.sh" "\-iname tests .*-prune" \
+  "reproduce.sh: discovery prunes CMakeFiles/test/_deps dirs when scanning \$build"
 assert_file_contains "$CRASH_DIR/reproduce.sh" "\-type f -name '\*\.a'" \
   "reproduce.sh: discovery scans \$build for a static archive"
 assert_file_contains "$CRASH_DIR/reproduce.sh" 'san_lib:\+"\$san_lib"' \
