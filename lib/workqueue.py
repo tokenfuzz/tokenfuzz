@@ -1431,9 +1431,13 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160, timeout:
     backend = os.environ.get("ACTIVE_BACKEND", "")
     if not mock_present and not backend:
         return cards
-    if not mock_present and backend == "claude" and not path_has_executable(os.environ.get("CLAUDE_BIN", "claude")):
+    # `or default`, not `, default`: an exported empty CLAUDE_BIN/CODEX_BIN
+    # (the bash shim's force-export pattern) must fall through to the
+    # vendor default the same way an unset var does, or path_has_executable("")
+    # silently bails the preflight. Matches the gemini-branch idiom.
+    if not mock_present and backend == "claude" and not path_has_executable(os.environ.get("CLAUDE_BIN") or "claude"):
         return cards
-    if not mock_present and backend in {"codex", "oss"} and not path_has_executable(os.environ.get("CODEX_BIN", "codex")):
+    if not mock_present and backend in {"codex", "oss"} and not path_has_executable(os.environ.get("CODEX_BIN") or "codex"):
         return cards
 
     top = cards[: min(top_n, len(cards))]

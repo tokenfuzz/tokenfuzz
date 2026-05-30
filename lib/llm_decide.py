@@ -282,12 +282,17 @@ def _invoke_backend(
     """Run the backend CLI and return its stdout text, or None on failure."""
     model = os.environ.get("MODEL", "") or _default_model(backend)
 
+    # `or default` (not `, default`): the bash shim force-exports these
+    # env vars as empty strings to bridge inherited-but-unexported caller
+    # state, so `os.environ.get("CLAUDE_BIN", "claude")` would return "" —
+    # subprocess.run([""], ...) PermissionErrors, swallowed as raw="",
+    # surfaced as `FAIL extract-json`. Match the gemini branch below.
     if backend == "claude":
-        bin_name = os.environ.get("CLAUDE_BIN", "claude")
+        bin_name = os.environ.get("CLAUDE_BIN") or "claude"
         flags = _backend_flags("claude", model)
         cmd = [bin_name, *flags]
     elif backend in ("codex", "oss"):
-        bin_name = os.environ.get("CODEX_BIN", "codex")
+        bin_name = os.environ.get("CODEX_BIN") or "codex"
         flags = _backend_flags(backend, model)
         # codex takes `exec` subcommand + flags + `-` for stdin prompt.
         cmd = [bin_name, "exec", *flags, "-"]
