@@ -293,6 +293,12 @@ _FIELDS_FILE_RE = re.compile(
 _FIELDS_FUNC_RE = re.compile(
     r"^\s*\|\s*Function\s*\|\s*`?(?P<func>[^|`\n]+?)`?\s*\|", re.MULTILINE | re.IGNORECASE,
 )
+# The `| Line |` Fields-table row — the canonical source line every harness
+# report writes, identical across re-discoveries of one bug. The cell may carry
+# a prefix/suffix ("L2491", "183 (the memcpy)"); capture the first integer run.
+_FIELDS_LINE_RE = re.compile(
+    r"^\s*\|\s*Line\s*\|\s*[^|\d]*(?P<line>\d+)", re.MULTILINE | re.IGNORECASE,
+)
 # An ASan/symbolized stack frame: `#0 [0xADDR in ]<symbol>[(args)] <file>:<line>[:col]`.
 # The frame body lives inside ```fences``` in many reports, so this runs
 # on the UNmasked text (unlike the inline prose patterns below).
@@ -386,6 +392,32 @@ def _strip_code_fences(text: str) -> str:
     return _CODE_FENCE_RE.sub("", text)
 
 
+def extract_line(report_text: str) -> str:
+    """Return the bug-site line number as a string, or "".
+
+    Prefers the canonical `| Line |` Fields-table row (present and identical
+    across every harness re-discovery of one bug); falls back to a line
+    captured alongside an inline file:func:line / file:line site. Feeds the
+    (class, file, line) merge edge in lib/finding_dedup.py — the line is the
+    discriminator that makes a location edge safe where (file, func) alone
+    would fuse distinct bugs sharing one large function. Reproducer line
+    numbers inside ```fences``` are masked out for the inline fallback.
+    """
+    text = report_text or ""
+    m = _FIELDS_LINE_RE.search(text)
+    if m:
+        return m.group("line")
+    m = _LOCATION_HEADER_RE.search(text)
+    if m and m.group("line"):
+        return m.group("line")
+    masked = _strip_code_fences(text)
+    for rx in (_INLINE_FILE_FUNC_LINE_RE, _INLINE_FILE_LINE_RE):
+        m = rx.search(masked)
+        if m and m.group("line"):
+            return m.group("line")
+    return ""
+
+
 # ── Title slug (fallback when no file/func and no dedup_key) ────────
 
 _TITLE_SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -443,6 +475,7 @@ def finding_signature(
     cls_raw = llm_class or extract_class(report_text)
     cls = normalize_class(cls_raw)
     file, func = extract_location(report_text, target_root=target_root)
+    line = extract_line(report_text)
     dedup_key = llm_dedup_key.strip().lower() if llm_dedup_key else ""
     if not is_valid_dedup_key(dedup_key):
         dedup_key = ""
@@ -460,6 +493,7 @@ def finding_signature(
         "class_raw": cls_raw,
         "file": file,
         "func": func,
+        "line": line,
         "dedup_key": dedup_key,
         "kind": kind,
         "key": key,

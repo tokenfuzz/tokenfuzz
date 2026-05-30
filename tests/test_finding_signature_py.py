@@ -5,9 +5,10 @@ Exercises:
   * normalize_class — neutral vocab, "top:sub" labels, unknown LLM tops
   * extract_class   — every layout we've seen in real reports
   * extract_location — explicit Location:, inline file:func:line, no func
+  * extract_line — | Line | Fields row, inline fallback, none → ""
   * path canonicalization — abs vs rel, target_root prefix, trailing parens
   * is_valid_dedup_key — char set, length, multi-token requirement
-  * finding_signature — Layer 1 vs Layer 2 selection, kind switching
+  * finding_signature — Layer 1 vs Layer 2 selection, kind switching, line field
   * cluster_id — stable across permutations of the same key
 """
 
@@ -274,6 +275,30 @@ file3, func3 = fs.extract_location(report_no_stack, target_root="targets/samplep
 assert_eq("src/store.cpp", file3, "source-only finding: | File | row used")
 assert_eq("Store::upsert_user", func3,
           "source-only finding: | Function | label used (no frame #0 to prefer)")
+
+
+# ── extract_line ───────────────────────────────────────────────────
+# Feeds the (class, file, line) merge edge in lib/finding_dedup.py.
+print("\nextract_line")
+assert_eq("213", fs.extract_line("| Line | 213 |\n"), "| Line | Fields row")
+assert_eq("213", fs.extract_line("| Line | `213` |\n"), "| Line | row, backticked")
+assert_eq("2491", fs.extract_line("| Line | L2491 (cmdbuf) |\n"),
+          "| Line | row, first integer run past a prefix")
+assert_eq("42", fs.extract_line("## Location\n`src/lib/foo.c:HandleListUsers:42`\n"),
+          "inline file:func:line fallback")
+assert_eq("142", fs.extract_line("The issue is at src/handler.c:142 in init.\n"),
+          "inline file:line fallback")
+# A reproducer line inside a fence must NOT win over a real site line.
+assert_eq("", fs.extract_line("# Issue\n```\ncrash at fake/path.c:999\n```\n"),
+          "fenced reproducer line is masked out")
+assert_eq("", fs.extract_line("no line anywhere in this body\n"), "no line → empty")
+# The line rides on the signature for the merge edge WITHOUT changing the
+# displayed (class, file, func) key.
+sig_line = fs.finding_signature(
+    "## Location\n`src/lib/foo.c:HandleListUsers:42`\n\nClass: memory-safety\n")
+assert_eq("42", sig_line["line"], "finding_signature exposes line field")
+assert_eq(("memory-safety", "src/lib/foo.c", "HandleListUsers"), sig_line["key"],
+          "display key still (class, file, func) — unchanged by the line field")
 
 
 # ── is_valid_dedup_key ─────────────────────────────────────────────

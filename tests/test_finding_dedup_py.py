@@ -4,10 +4,12 @@
 Exercises:
   * crash_state — sanitizer stack-state extraction (reused from stack_frames)
   * auto-merge — identical dedup_key (across different sites), identical crash
-    state (across drifting recorded func names)
+    state (across drifting recorded func names), identical (file, line) site
+  * site edge — same (file, line) merges (incl. keyless findings); same file
+    with a different line, or no line at all, stays apart (precision guard)
   * bias-to-separate — co-located findings with no shared key/state stay apart
     (no over-merge of distinct bugs in one function)
-  * class gate — different classes never merge, even on an identical key
+  * class gate — different classes never merge, even on an identical key or site
   * order-independence — shuffling records yields identical components
   * merge provenance — exact-match vs singleton (no probabilistic tier)
   * scale — no cap, no O(N^2): 300 findings / 60 root causes → 60 clusters
@@ -39,8 +41,8 @@ def ok(cond: bool, name: str, detail: str = "") -> None:
             print(f"    {detail}")
 
 
-def rec(id, cls="memory-safety", dedup_key=""):
-    return dict(id=id, **{"class": cls}, dedup_key=dedup_key)
+def rec(id, cls="memory-safety", dedup_key="", file="", line=""):
+    return dict(id=id, **{"class": cls}, dedup_key=dedup_key, file=file, line=line)
 
 
 def comps_of(records, **kw):
@@ -90,6 +92,55 @@ ok(comps_of(recs2, report_texts=texts) == {frozenset({"FIND-x", "FIND-y"})},
    "identical crash state → merge even with no dedup_key")
 
 
+# ── auto-merge: same (file, line) source site ──────────────────────
+print("\nauto-merge — same (file, line) site")
+# Two reports pinning the SAME class+file+line with DIFFERENT slugs (the
+# synonym drift the per-report keyer produces) collapse — the line is the
+# discriminator that makes a location edge safe.
+site = [
+    rec("FIND-s1", file="src/catalog.c", line="42", dedup_key="alloc-size-overflow"),
+    rec("FIND-s2", file="src/catalog.c", line="42", dedup_key="size-alloc-wraparound"),
+]
+ok(comps_of(site) == {frozenset({"FIND-s1", "FIND-s2"})},
+   "same class+file+line, different slugs → one cluster")
+
+# A keyless finding (no backend reached it — the keyer-unavailable case) at
+# the same site as a keyed one still merges: the site edge needs no LLM.
+mixed = [
+    rec("FIND-s3", file="src/catalog.c", line="42", dedup_key="alloc-size-overflow"),
+    rec("FIND-s4", file="src/catalog.c", line="42", dedup_key=""),
+]
+ok(comps_of(mixed) == {frozenset({"FIND-s3", "FIND-s4"})},
+   "keyless finding merges on site alone (no dedup_key needed)")
+
+# Precision guard: same file, DIFFERENT line stays apart — distinct bugs in
+# one function at different lines are NOT fused (this is why (file,func) is
+# unsafe but (file,line) is safe).
+diff_line = [
+    rec("FIND-d1", file="src/catalog.c", line="42"),
+    rec("FIND-d2", file="src/catalog.c", line="91"),
+]
+ok(comps_of(diff_line) == {frozenset({"FIND-d1"}), frozenset({"FIND-d2"})},
+   "same file, different line → stay separate (no func-level over-merge)")
+
+# Same line, DIFFERENT file stays apart (same-named line in two files).
+diff_file = [
+    rec("FIND-f1", file="src/catalog.c", line="42"),
+    rec("FIND-f2", file="src/tool.c", line="42"),
+]
+ok(comps_of(diff_file) == {frozenset({"FIND-f1"}), frozenset({"FIND-f2"})},
+   "same line, different file → stay separate")
+
+# A file with NO line gets no site edge — file alone never merges (that
+# would be the unsafe (class, file) collapse).
+no_line = [
+    rec("FIND-n1", file="src/catalog.c", line=""),
+    rec("FIND-n2", file="src/catalog.c", line=""),
+]
+ok(comps_of(no_line) == {frozenset({"FIND-n1"}), frozenset({"FIND-n2"})},
+   "file present but no line → no site edge (file alone never merges)")
+
+
 # ── bias-to-separate: co-located, no shared signal → apart ─────────
 print("\nbias-to-separate")
 # Two distinct integer bugs in ONE function, no shared dedup_key. They must
@@ -116,6 +167,12 @@ cross = [
 ]
 ok(comps_of(cross) == {frozenset({"FIND-m"}), frozenset({"FIND-n"})},
    "identical dedup_key across different classes → never merge")
+cross_site = [
+    rec("FIND-cs1", cls="memory-safety", file="src/catalog.c", line="42"),
+    rec("FIND-cs2", cls="info-disclosure", file="src/catalog.c", line="42"),
+]
+ok(comps_of(cross_site) == {frozenset({"FIND-cs1"}), frozenset({"FIND-cs2"})},
+   "identical (file, line) across different classes → never merge")
 
 
 # ── order-independence ─────────────────────────────────────────────

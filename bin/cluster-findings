@@ -14,12 +14,15 @@ report alone — identical for harness, recon, and model-direct findings:
                 across the models a benchmark compares.
   crash state — ClusterFuzz-normalized top frames, when the report embeds a
                 sanitizer stack (reused from lib/stack_frames.py).
-  (class, file, func) — the deterministic fallback label, used when no
+  (class, file, func) — the deterministic fallback label shown when no
                 dedup_key was produced (no backend, or the model declined).
 
-Findings merge on identical dedup_key or identical crash state within a
-class (lib/finding_dedup.py); location is the fallback label, never a merge
-edge. See lib/finding_signature.py for the per-field extraction.
+Findings merge on identical dedup_key, identical crash state, or an identical
+(file, line) source site within a class (lib/finding_dedup.py). The
+(class, file, func) tuple above is the displayed signature, not a merge edge —
+co-located findings merge only when they pin the same line, so the line is the
+discriminator that keeps distinct bugs in one large function apart. See
+lib/finding_signature.py for the per-field extraction.
 
 Output (mirrors bin/cluster-crashes):
   * <results>/findings/FINDING-CLUSTERS.md
