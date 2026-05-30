@@ -10,6 +10,8 @@ Exercises:
   * validation — an invalid key from the model is dropped (returns "")
   * source-independence — the same report yields the same key regardless of
     which "source" produced it (one keyer, one identity space)
+  * decision timeout — honors the harness-wide LLM_DECISION_TIMEOUT (default
+    45), so the keyer is no more timeout-fragile than any other llm_decide call
 """
 
 from __future__ import annotations
@@ -144,6 +146,21 @@ k1 = fk.ensure_key(harness)
 k2 = fk.ensure_key(direct)
 ok(k1 == k2 == "vms-callout-cmdbuf-overflow",
    "recon-harness and model-direct findings get the SAME key from one keyer")
+restore()
+
+# ── timeout honors the harness-wide LLM_DECISION_TIMEOUT ────────────
+# The keyer hardcoded 30s while every other decision uses LLM_DECISION_TIMEOUT
+# (45). That made it the first decision to time out against a slow/throttled
+# agentic backend — which is what left the gemini pool with 0 keys.
+print("\ndecision timeout (no more fragile than any other llm_decide call)")
+restore = with_env(LLM_DECISION_TIMEOUT="90")
+ok(fk._decision_timeout() == 90, "LLM_DECISION_TIMEOUT respected")
+restore()
+restore = with_env(LLM_DECISION_TIMEOUT=None)
+ok(fk._decision_timeout() == 45, "unset → default 45 (matches lib/triage.sh)")
+restore()
+restore = with_env(LLM_DECISION_TIMEOUT="not-an-int")
+ok(fk._decision_timeout() == 45, "non-integer → falls back to 45")
 restore()
 
 print()

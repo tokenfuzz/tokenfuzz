@@ -22,6 +22,7 @@ exactly what you get offline and in tests.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -43,8 +44,22 @@ CACHE_NAME = ".finding-key.json"
 # key produced under an older rubric is recomputed rather than trusted.
 KEY_VERSION = "v1"
 _PROMPT = "finding_key.md.j2"
-_TIMEOUT = 30
+# The keyer is just another llm_decide call, so it honors the same harness-wide
+# per-decision budget every other decision uses (LLM_DECISION_TIMEOUT, which
+# lib/triage.sh defaults to 45) — it must not be the first decision to time out.
+# A slow agentic backend (agy/gemini) routinely needs well over the old
+# hardcoded 30s under load, which is what left gemini findings unkeyed.
+_TIMEOUT_DEFAULT = 45
 _BODY_BYTES = 8000
+
+
+def _decision_timeout() -> int:
+    """Per-decision timeout from LLM_DECISION_TIMEOUT (default 45, matches triage.sh)."""
+    raw = os.environ.get("LLM_DECISION_TIMEOUT", "")
+    try:
+        return int(raw) if raw else _TIMEOUT_DEFAULT
+    except ValueError:
+        return _TIMEOUT_DEFAULT
 
 
 def cached_key(find_dir) -> str:
@@ -62,7 +77,8 @@ def cached_key(find_dir) -> str:
     return key if _fs.is_valid_dedup_key(key) else ""
 
 
-def ensure_key(find_dir, report_text: Optional[str] = None, timeout: int = _TIMEOUT) -> str:
+def ensure_key(find_dir, report_text: Optional[str] = None,
+               timeout: Optional[int] = None) -> str:
     """Compute and cache the dedup_key for one FIND dir; return it (or "").
 
     Idempotent: returns the cached key when present and current. On a fresh
@@ -70,6 +86,10 @@ def ensure_key(find_dir, report_text: Optional[str] = None, timeout: int = _TIME
     "" — writing no cache — when no backend is available or the model declines
     a valid key, so the finding keeps its deterministic location label and can
     be keyed on a later pass.
+
+    The ``timeout`` arg defaults to the harness-wide LLM_DECISION_TIMEOUT (45s)
+    so the keyer is no more fragile than any other llm_decide call; pass an
+    explicit value to override.
     """
     find_dir = Path(find_dir)
     existing = cached_key(find_dir)
@@ -77,6 +97,7 @@ def ensure_key(find_dir, report_text: Optional[str] = None, timeout: int = _TIME
         return existing
     if _llm is None or _pr is None:
         return ""
+    call_timeout = _decision_timeout() if timeout is None else timeout
     if report_text is None:
         _, report_text = _fs._read_report(find_dir)
     if not report_text:
@@ -86,7 +107,7 @@ def ensure_key(find_dir, report_text: Optional[str] = None, timeout: int = _TIME
     except Exception:
         return ""
     try:
-        result = _llm.llm_decide("finding_key", "dedup_key", prompt, timeout)
+        result = _llm.llm_decide("finding_key", "dedup_key", prompt, call_timeout)
     except Exception:
         result = None
     if not isinstance(result, dict):
