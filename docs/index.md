@@ -70,8 +70,12 @@ export BACKEND="<backend>"          # one of: claude, codex, gemini, oss
 export RESULTS="output/$TARGET/$BACKEND/results"
 
 bin/setup-target "$TARGET" <repo-url>
-# For C/C++ targets, --bootstrap builds targets/<target>/build-asan/
-# with sanitizer flags automatically.
+# --bootstrap prepares the target's build so the audit can run. For C/C++
+# it produces a sanitizer build under build-asan/; other languages prepare
+# through their own toolchain (cargo, go, swift, npm, ...), which picks up
+# sanitizer flags where it supports them (e.g. Go's -race, Swift's
+# -sanitize=address). Enabled sanitizers are set per target in
+# target.toml's [sanitizer] block.
 bin/setup-target "$TARGET" --bootstrap
 
 # Pass 1 for a single-iteration smoke test; omit it for a continuous run.
