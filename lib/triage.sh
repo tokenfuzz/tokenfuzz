@@ -1940,6 +1940,19 @@ llm_find_quality_decision() {
   # re-decides caches that still carry the old dedup_key field.
   local decision_version="v10"
 
+  # Quorum required for an accept=false verdict to stick. Each call resolves
+  # the quorum IN-LINE — independent LLM votes are taken back-to-back until
+  # one accepts (verdict flips to accept) or `quorum` rejects accumulate
+  # (verdict settles to accept=false). This replaces the older cross-pass
+  # accumulator that depended on the audit loop running validate_find_gate
+  # a second time before the cell budget ran out — a finding produced near
+  # the end of a run never got the second vote and stayed half-judged.
+  # Matches the in-call quorum that triage_validate_finding already uses
+  # for the independent validator.
+  local quorum="${FIND_GATE_QUORUM:-2}"
+  case "$quorum" in ''|*[!0-9]*) quorum=2 ;; esac
+  [ "$quorum" -ge 1 ] || quorum=1
+
   # content_sha1 is recorded for forensics (what the report looked like when
   # judged) but is NOT used to gate re-evaluation — see the short-circuit
   # below for why.
@@ -1947,31 +1960,27 @@ llm_find_quality_decision() {
   hash=$(_triage_file_sha1 "$desc_path" 2>/dev/null || true)
   cache="$find_dir/.llm-find-quality.json"
   local reject_marker="$find_dir/.find_reject_count"
-  local prev_reject_count=0
-  if [ -s "$reject_marker" ]; then
-    prev_reject_count=$(head -c 16 "$reject_marker" 2>/dev/null | tr -cd '0-9')
-    [ -n "$prev_reject_count" ] || prev_reject_count=0
-  fi
+
   # Short-circuit on the cached VERDICT alone — decision_version + accept —
   # never on the report's content hash. cluster-findings, report_enrich, and
   # render-md all rewrite report.md AFTER the verdict is cached: they stamp
   # `Cluster:`/`Dedup key:` lines, inject `<!-- enrich:* -->` blocks, and
   # reformat the Fields table (column padding). Those are cosmetic — the
   # security verdict does not depend on them — but a content-keyed cache busts
-  # on every one of them and re-asks the LLM on each housekeeping pass. So:
-  #   * an ACCEPTED finding is judged exactly once per rubric version, and
-  #   * a REJECTED finding is re-asked only until it reaches quorum.
-  # The explicit way to force re-evaluation is a decision_version bump (a
-  # rubric change), which is the only thing that should invalidate a verdict.
+  # on every one of them and re-asks the LLM on each housekeeping pass.
+  # Every accept=true OR accept=false-with-quorum verdict is final; the
+  # explicit way to force re-evaluation is a decision_version bump.
   if [ -s "$cache" ]; then
-    local cached_version cached_accept
+    local cached_version cached_accept cached_reject_count
     cached_version=$(jq -r '.decision_version // ""' "$cache" 2>/dev/null)
     cached_accept=$(jq -r '.accept' "$cache" 2>/dev/null)
+    cached_reject_count=$(jq -r '.reject_count // 0' "$cache" 2>/dev/null)
+    case "$cached_reject_count" in ''|*[!0-9]*) cached_reject_count=0 ;; esac
     if [ "$cached_version" = "$decision_version" ]; then
       if [ "$cached_accept" = "true" ]; then
         return 0
       fi
-      if [ "$cached_accept" = "false" ] && [ "$prev_reject_count" -ge 2 ]; then
+      if [ "$cached_accept" = "false" ] && [ "$cached_reject_count" -ge "$quorum" ]; then
         return 0
       fi
     fi
@@ -1984,47 +1993,69 @@ llm_find_quality_decision() {
   prompt=$(render_prompt_template triage_find_quality.md.j2 \
     --var "body=${body}") || return 1
 
-  local json
-  json=$(printf '%s' "$prompt" | llm_decide find_quality "accept,reason,class,severity" "$LLM_DECISION_TIMEOUT") || return 1
-  local accept reason class severity
-  accept=$(printf '%s' "$json" | jq -r '.accept' 2>/dev/null)
-  reason=$(printf '%s' "$json" | jq -r '.reason' 2>/dev/null)
-  class=$(printf '%s' "$json" | jq -r '.class // ""' 2>/dev/null)
-  severity=$(printf '%s' "$json" | jq -r '.severity // ""' 2>/dev/null)
+  # Run independent LLM votes back-to-back until one accepts or `quorum`
+  # rejects accumulate. A single accept short-circuits — any vote in favor
+  # of the finding is enough to keep it (per the docstring: rejection needs
+  # quorum agreement; acceptance is unanimous-by-veto).
+  local rejects=0 vote_json
+  local last_reject_reason=""
+  while :; do
+    vote_json=$(printf '%s' "$prompt" | llm_decide find_quality "accept,reason,class,severity" "$LLM_DECISION_TIMEOUT")
+    if [ -z "$vote_json" ]; then
+      # llm_decide failed to produce a verdict (LLM disabled, backend
+      # budget exhausted, …). If at least one reject already landed,
+      # persist that partial tally so a later pass can carry it forward;
+      # otherwise nothing to cache — propagate the failure.
+      [ "$rejects" -ge 1 ] || return 1
+      break
+    fi
+    local accept reason class severity
+    accept=$(printf '%s' "$vote_json" | jq -r '.accept' 2>/dev/null)
+    reason=$(printf '%s' "$vote_json" | jq -r '.reason' 2>/dev/null)
+    class=$(printf '%s' "$vote_json" | jq -r '.class // ""' 2>/dev/null)
+    severity=$(printf '%s' "$vote_json" | jq -r '.severity // ""' 2>/dev/null)
+    case "$accept" in
+      true|false) ;;
+      *)
+        # Unparseable verdict. Treat like a missing vote: persist any prior
+        # rejects, bail if none.
+        [ "$rejects" -ge 1 ] || return 1
+        break
+        ;;
+    esac
+    [ "$reason" = "null" ] && reason=""
+    [ "$class" = "null" ] && class=""
+    [ "$severity" = "null" ] && severity=""
 
-  case "$accept" in
-    true|false) ;;
-    *) return 1 ;;
-  esac
+    if [ "$accept" = "true" ]; then
+      [ -n "$reason" ] || reason="LLM accepted finding"
+      rm -f "$find_dir/.needs-attention" 2>/dev/null || true
+      # Accept resets the reject counter — a later content edit that
+      # produced an accept should not still carry old reject signal.
+      rm -f "$reject_marker" 2>/dev/null || true
+      { jq -n --arg reason "$reason" --arg class "$class" \
+           --arg severity "$severity" \
+           --arg version "$decision_version" \
+           '{decision_version: $version, accept: true, reason: $reason, class: $class, severity: $severity}' \
+          | _triage_cache_write_envelope "$cache" "find_quality" "content_sha1" "$hash"; } || true
+      return 0
+    fi
 
-  [ "$reason" = "null" ] && reason=""
-  [ "$class" = "null" ] && class=""
-  [ "$severity" = "null" ] && severity=""
+    # accept=false vote: tally and continue.
+    rejects=$((rejects + 1))
+    [ -n "$reason" ] && last_reject_reason="$reason"
+    [ "$rejects" -ge "$quorum" ] && break
+  done
 
-  if [ "$accept" = "true" ]; then
-    [ -n "$reason" ] || reason="LLM accepted finding"
-    rm -f "$find_dir/.needs-attention" 2>/dev/null || true
-    # Accept resets the reject counter — a later content edit that
-    # produced an accept should not still carry old reject signal.
-    rm -f "$reject_marker" 2>/dev/null || true
-    { jq -n --arg reason "$reason" --arg class "$class" \
-         --arg severity "$severity" \
-         --arg version "$decision_version" \
-         '{decision_version: $version, accept: true, reason: $reason, class: $class, severity: $severity}' \
-        | _triage_cache_write_envelope "$cache" "find_quality" "content_sha1" "$hash"; } || true
-    return 0
-  fi
-
-  # accept=false: increment reject_count in the marker file and record
-  # the verdict in the cache. The caller (validate_find_gate) only
-  # quarantines once reject_count reaches the quorum (default 2) — two
-  # independent verdicts guard against single-call LLM noise that would
-  # permanently hide a real bug.
-  [ -n "$reason" ] || reason="LLM marked finding as non-security"
-  local new_reject_count=$((prev_reject_count + 1))
-  printf '%s\n' "$new_reject_count" > "$reject_marker" 2>/dev/null || true
-  { jq -n --arg reason "$reason" --arg version "$decision_version" \
-       --argjson reject_count "$new_reject_count" \
+  # All votes rejected (or we ran out of usable verdicts before quorum).
+  # Cache the verdict with the actual reject count. The caller
+  # (validate_find_gate) quarantines once reject_count reaches `quorum`;
+  # a partial tally is left in place so a later run can carry it forward.
+  [ "$rejects" -ge 1 ] || return 1
+  [ -n "$last_reject_reason" ] || last_reject_reason="LLM marked finding as non-security"
+  printf '%s\n' "$rejects" > "$reject_marker" 2>/dev/null || true
+  { jq -n --arg reason "$last_reject_reason" --arg version "$decision_version" \
+       --argjson reject_count "$rejects" \
        '{decision_version: $version, accept: false, reason: $reason, class: "", severity: "", reject_count: $reject_count}' \
       | _triage_cache_write_envelope "$cache" "find_quality" "content_sha1" "$hash"; } || true
   return 0

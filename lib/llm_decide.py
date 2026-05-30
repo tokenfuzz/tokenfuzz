@@ -31,6 +31,14 @@ Environment knobs (mirrors the prior bash contract exactly):
   LLM_DECIDE_DISABLE=1                   block real backend calls
   LLM_DECIDE_MOCK=<json|@path>           global mock for every decision
   LLM_DECIDE_MOCK_<UPPER>=<json|@path>   per-decision mock (wins over global)
+  LLM_DECIDE_MOCK_<UPPER>_QUEUE=<path>   sequence-of-verdicts mock — file
+                                         holds JSON objects separated by
+                                         `\n---\n`; each call pops the next
+                                         and a sibling `<path>.idx` file
+                                         tracks the cursor. After the queue
+                                         is exhausted the last value sticks.
+                                         Wins over LLM_DECIDE_MOCK_<UPPER>.
+                                         Use for testing multi-vote gates.
   LLM_DECIDE_COUNTER_FILE=<path>         budget counter file location
   LLM_DECIDE_MAX_CALLS=<n>               budget cap (default 120 when
                                          LOGDIR/counter file is set,
@@ -110,8 +118,48 @@ def _decision_upper(decision: str) -> str:
     return "".join(out)
 
 
+def _pop_queue_mock(queue_path: str) -> str:
+    """Pop the next JSON object from a queue file shared across subprocess calls.
+
+    Verdicts are separated by lines containing exactly `---`. A sibling
+    `.idx` file holds the next-call cursor (created on first use). When the
+    queue is exhausted the last entry sticks — that way a finite sequence
+    can drive an unknown number of votes by ending with the steady-state
+    response. Returns "" on any failure so the caller falls back through
+    the normal resolution chain.
+    """
+    try:
+        with open(queue_path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except OSError:
+        return ""
+    items = [chunk.strip() for chunk in re.split(r"(?m)^---\s*$", raw) if chunk.strip()]
+    if not items:
+        return ""
+    idx_path = f"{queue_path}.idx"
+    try:
+        cur = int(Path(idx_path).read_text("utf-8").strip())
+    except (OSError, ValueError):
+        cur = 0
+    if cur < 0:
+        cur = 0
+    if cur >= len(items):
+        # Past the end — return the last entry without advancing.
+        return items[-1]
+    try:
+        Path(idx_path).write_text(str(cur + 1), encoding="utf-8")
+    except OSError:
+        pass
+    return items[cur]
+
+
 def _resolve_mock_value(decision: str) -> str:
     upper = _decision_upper(decision)
+    queue = os.environ.get(f"LLM_DECIDE_MOCK_{upper}_QUEUE")
+    if queue:
+        popped = _pop_queue_mock(queue)
+        if popped:
+            return popped
     per = os.environ.get(f"LLM_DECIDE_MOCK_{upper}")
     if per is not None and per != "":
         return per

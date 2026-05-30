@@ -106,9 +106,21 @@ def _severity_rank(severity: str) -> int:
 
 
 def _severity_label(severity: str) -> str:
+    """Display label for a finding's severity in the cluster table.
+
+    A blank severity means the find-quality gate has not yet rendered a
+    final verdict on this finding — typical when the LLM has been disabled
+    for a run, or when a finding is pinned by `.keep`/`.reviewed` and so
+    bypassed the gate. Render `Pending` (over a bare `—`) so the reader can
+    tell missing-because-unscored from missing-because-no-data, and so it
+    is visually distinct from the score column when both are blank.
+    Genuinely rejected findings are moved to findings-rejected/ by the
+    gate (the in-call quorum settles every reject before the gate exits),
+    so they never reach this table.
+    """
     s = (severity or "").strip().lower()
     if not s:
-        return "—"
+        return "Pending"
     return s.capitalize()
 
 
@@ -489,7 +501,11 @@ def _format_clusters_md(clusters: list[dict], findings_root: Path,
         f"Sorted by max-member severity, then cluster size._  "
         f"Each row is a unique root cause; **Members** links to every "
         f"FIND-* report sharing the same signature. Duplicates carry a "
-        f"`.dup-of` marker pointing at the canonical FIND."
+        f"`.dup-of` marker pointing at the canonical FIND. "
+        f"A `Pending` severity means the find-quality gate has not "
+        f"rendered a final verdict yet (typically because the LLM was "
+        f"disabled for this run, or the finding is pinned by "
+        f"`.keep`/`.reviewed` and bypassed the gate)."
     )
     lines.append("")
     n_findings = sum(c["size"] for c in clusters)
@@ -512,7 +528,7 @@ def _format_clusters_md(clusters: list[dict], findings_root: Path,
         members_cell = ", ".join(members)
         canonical_link = _member_link(findings_root, c["canonical"], link_prefix)
         cls = c["class"] or "—"
-        sev = c["severity_label"] or "—"
+        sev = c["severity_label"] or "Pending"
         strategy = c.get("strategy", "") or "—"
         lines.append(
             f"| {sev} | `{c['id']}` | {c['size']} | "
@@ -690,7 +706,10 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
         f"{', '.join(per_agent.keys()) or '(none)'}. "
         f"Sorted by max-member severity, then cluster size._  "
         f"Aggregated across every `<agent>/results/findings/` directory; "
-        f"**Members** links jump to each report."
+        f"**Members** links jump to each report. "
+        f"A `Pending` severity means the find-quality gate has not "
+        f"rendered a final verdict yet (LLM disabled, or pinned by "
+        f"`.keep`/`.reviewed`)."
     )
     md_lines.append("")
     md_lines.append(
@@ -719,7 +738,7 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
             else:
                 link_cells.append(link)
         cls = c["class"] or "—"
-        sev = c["severity_label"] or "—"
+        sev = c["severity_label"] or "Pending"
         strategy = c.get("strategy", "") or "—"
         md_lines.append(
             f"| {sev} | `{c['id']}` | {c['size']} | "

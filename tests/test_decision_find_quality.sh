@@ -84,29 +84,28 @@ LLM_DECIDE_DISABLE=1 validate_find_gate >/dev/null 2>&1
 assert_dir_exists "$RESULTS_DIR/findings/FIND-V1" "LLM disabled: cached FIND accept stays"
 reset_findings
 
-# 2. LLM rejects ONCE → FIND stays (pending-drop marker). A single LLM
-#    verdict is not enough to drop a FIND — a false-reject would
-#    permanently hide a real bug. After a SECOND independent reject on
-#    the same content, the FIND is QUARANTINED (moved to
-#    findings-rejected/) rather than deleted, so QA can audit
-#    false-rejects.
+# 2. LLM rejects → quorum settles IN-CALL. The gate takes independent
+#    LLM votes back-to-back inside a single validate_find_gate pass; one
+#    reject is never enough (a single false-reject would permanently hide
+#    a real bug), but with quorum=2 (the default) two consecutive rejects
+#    quarantine the FIND on the same pass. This replaces the older
+#    cross-pass accumulator that depended on a second housekeeping run
+#    landing before the cell budget elapsed — findings produced near the
+#    end of a run never got the second vote and stayed half-judged.
 mk_find FIND-V2 "$VACUOUS" >/dev/null
 export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":false,"reason":"correctness bug, no security impact","class":"","severity":""}'
 validate_find_gate >/dev/null 2>&1
-assert_dir_exists "$RESULTS_DIR/findings/FIND-V2" "LLM reject (1/2): FIND stays pending second verdict"
-assert_file_exists "$RESULTS_DIR/findings/FIND-V2/.pending-drop" "LLM reject (1/2): pending-drop marker written"
-assert_file_contains "$RESULTS_DIR/findings/FIND-V2/.llm-find-quality.json" '"reject_count": *1' \
-  "LLM reject (1/2): reject_count incremented to 1"
-# Second pass with the same mock → reject_count reaches 2 → quarantine.
-validate_find_gate >/dev/null 2>&1
-assert_dir_not_exists "$RESULTS_DIR/findings/FIND-V2" "LLM reject (2/2): FIND moved out of findings/"
-assert_dir_exists "$RESULTS_DIR/findings-rejected/FIND-V2" "LLM reject (2/2): FIND quarantined to findings-rejected/"
+assert_dir_not_exists "$RESULTS_DIR/findings/FIND-V2" \
+  "LLM reject ×2 same call: FIND quarantined without waiting on a later pass"
+assert_dir_exists "$RESULTS_DIR/findings-rejected/FIND-V2" \
+  "LLM reject ×2 same call: FIND moved to findings-rejected/"
+assert_file_contains "$RESULTS_DIR/findings-rejected/FIND-V2/.llm-find-quality.json" '"reject_count": *2' \
+  "LLM reject ×2 same call: cache records the full reject_count"
 unset LLM_DECIDE_MOCK_FIND_QUALITY
 reset_findings
 
 # 2a. Quorum override via FIND_GATE_QUORUM=1 (e.g. for legacy callers that
-#     want the old single-verdict behavior). One reject → straight to
-#     quarantine.
+#     want a single-vote gate). One reject → straight to quarantine.
 mk_find FIND-V2-Q1 "$VACUOUS" >/dev/null
 export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":false,"reason":"non-security","class":"","severity":""}'
 FIND_GATE_QUORUM=1 validate_find_gate >/dev/null 2>&1
@@ -115,17 +114,26 @@ assert_dir_exists "$RESULTS_DIR/findings-rejected/FIND-V2-Q1" "FIND_GATE_QUORUM=
 unset LLM_DECIDE_MOCK_FIND_QUALITY
 reset_findings
 
-# 2b. Verdict flip mid-quorum: first call rejects, second call accepts
-#     → FIND stays, pending-drop marker cleared.
+# 2b. Verdict flip mid-quorum: the first vote rejects but the second vote
+#     accepts → FIND stays, cache reflects the accept. Exercised via a
+#     queue-mock that pops a different verdict for each LLM call.
 mk_find FIND-V2-FLIP "$VACUOUS" >/dev/null
-export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":false,"reason":"reviewer 1 unsure","class":"","severity":""}'
+flip_queue="$RESULTS_DIR/findings/FIND-V2-FLIP/.flip-queue.jsonl"
+cat > "$flip_queue" <<'JSON'
+{"accept":false,"reason":"reviewer 1 unsure","class":"","severity":""}
+---
+{"accept":true,"reason":"reviewer 2 confirms security impact","class":"auth:bypass","severity":"high"}
+JSON
+rm -f "${flip_queue}.idx"
+export LLM_DECIDE_MOCK_FIND_QUALITY_QUEUE="$flip_queue"
 validate_find_gate >/dev/null 2>&1
-assert_file_exists "$RESULTS_DIR/findings/FIND-V2-FLIP/.pending-drop" "flip: pending-drop after first reject"
-export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"reviewer 2 confirms security impact","class":"auth:bypass","severity":"high"}'
-validate_find_gate >/dev/null 2>&1
-assert_dir_exists "$RESULTS_DIR/findings/FIND-V2-FLIP" "flip: FIND stays after accept"
-assert_file_not_exists "$RESULTS_DIR/findings/FIND-V2-FLIP/.pending-drop" "flip: pending-drop cleared on accept"
-unset LLM_DECIDE_MOCK_FIND_QUALITY
+assert_dir_exists "$RESULTS_DIR/findings/FIND-V2-FLIP" "flip: FIND stays after second vote accepts"
+assert_dir_not_exists "$RESULTS_DIR/findings-rejected/FIND-V2-FLIP" "flip: not moved to findings-rejected/"
+assert_file_contains "$RESULTS_DIR/findings/FIND-V2-FLIP/.llm-find-quality.json" '"accept": *true' \
+  "flip: cache settles to accept=true"
+assert_file_contains "$RESULTS_DIR/findings/FIND-V2-FLIP/.llm-find-quality.json" "auth:bypass" \
+  "flip: cache carries the accepting vote's class"
+unset LLM_DECIDE_MOCK_FIND_QUALITY_QUEUE
 reset_findings
 
 # 2b. .keep override prevents deletion even when the LLM rejects.

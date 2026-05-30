@@ -394,6 +394,10 @@ _HTML_HEAD = """<!DOCTYPE html>
   .sev-Medium   {{ background: var(--sev-medium-bg);   color: var(--sev-medium-fg); }}
   .sev-Low      {{ background: var(--sev-low-bg);      color: var(--sev-low-fg); }}
   .sev-Unknown  {{ background: var(--sev-unknown-bg);  color: var(--sev-unknown-fg); }}
+  /* `Pending` = quality gate has no verdict yet. Muted neutral chip — same
+     shape as a real severity pill so the column lines up, but visually
+     subordinate so the eye skips it for scored rows. */
+  .sev-Pending  {{ background: var(--sev-unknown-bg);  color: var(--muted); font-weight: 500; opacity: 0.85; }}
   .sev-score {{ font-weight: 400; opacity: 0.85; margin-left: .25em; }}
 
   /* Surface chip */
@@ -919,7 +923,7 @@ def _render_inline(text: str) -> str:
 # Cell decorators — applied AFTER the cell text is HTML-rendered so we
 # can wrap matching tokens in styled spans.
 _SEV_CELL_RE = re.compile(
-    r"^\s*(Critical|High|Medium|Low|Unknown|—)(?:\s*\((\d+)\))?\s*$"
+    r"^\s*(Critical|High|Medium|Low|Unknown|Pending|—)(?:\s*\((\d+)\))?\s*$"
 )
 
 # Strategy short-codes used in REPORT.md `Strategy:` field. The full
