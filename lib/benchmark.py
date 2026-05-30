@@ -1329,7 +1329,7 @@ def aggregate(bench_dir: Path) -> dict:
 # ── pooling for cross-condition clustering ───────────────────────────────
 
 
-def build_pool(bench_dir: Path) -> dict:
+def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
     """Copy every cell's confirmed crash + finding dirs into one pool.
 
     bin/benchmark then runs the SAME post-processing the harness uses —
@@ -1344,12 +1344,15 @@ def build_pool(bench_dir: Path) -> dict:
     Each crash/finding is copied exactly once; the member map is what
     records its condition, so there is no second tree to keep in sync.
 
-    Returns the member map. Idempotent: an existing pool/ is rebuilt.
+    Returns the member map. Idempotent: an existing pool dir is rebuilt.
+    pool_name lets the caller build into a staging dir (e.g. ".pool.staging")
+    so bin/benchmark can swap a fully-built tree into pool/ atomically instead
+    of tearing pool/ down in place.
     """
     import shutil
 
     bench_dir = Path(bench_dir)
-    pool = bench_dir / "pool"
+    pool = bench_dir / pool_name
     if pool.exists():
         shutil.rmtree(pool)
     (pool / "crashes").mkdir(parents=True)
@@ -2379,7 +2382,7 @@ def relocate_experiments(bench_dir: Path) -> list[tuple[str, str]]:
     return moved
 
 
-def split_pool(bench_dir: Path) -> dict[str, int]:
+def split_pool(bench_dir: Path, pool_name: str = "pool") -> dict[str, int]:
     """Copy the combined pool into one subtree per condition.
 
     build_pool() pools every cell's crashes/findings into a single tree so
@@ -2396,7 +2399,7 @@ def split_pool(bench_dir: Path) -> dict[str, int]:
     / FINDING-CLUSTERS report. Idempotent. Returns a {condition: count}.
     """
     bench_dir = Path(bench_dir)
-    pool = bench_dir / "pool"
+    pool = bench_dir / pool_name
     members_path = bench_dir / "pool-members.json"
     if not pool.is_dir() or not members_path.is_file():
         return {}
@@ -2525,6 +2528,9 @@ def main(argv: list[str]) -> int:
         "pool", help="copy every cell's crash/finding dirs into pool/ for clustering"
     )
     p_p.add_argument("bench_dir", type=Path)
+    p_p.add_argument("--pool-name", default="pool",
+                     help="pool dir name under bench-dir (default: pool; a "
+                          "staging name lets the caller swap atomically)")
 
     p_a = sub.add_parser("aggregate", help="fold a benchmark run's cells")
     p_a.add_argument("bench_dir", type=Path)
@@ -2558,6 +2564,8 @@ def main(argv: list[str]) -> int:
         help="copy the pool into per-condition crash/finding subtrees",
     )
     p_s.add_argument("bench_dir", type=Path)
+    p_s.add_argument("--pool-name", default="pool",
+                     help="pool dir name under bench-dir (default: pool)")
 
     args = ap.parse_args(argv)
 
@@ -2576,7 +2584,7 @@ def main(argv: list[str]) -> int:
         if not args.bench_dir.is_dir():
             print(f"benchmark: bench dir not found: {args.bench_dir}", file=sys.stderr)
             return 1
-        members = build_pool(args.bench_dir)
+        members = build_pool(args.bench_dir, args.pool_name)
         print(
             f"benchmark: pooled {len(members['crashes'])} crash + "
             f"{len(members['findings'])} finding + "
@@ -2598,7 +2606,7 @@ def main(argv: list[str]) -> int:
             print(f"benchmark: bench dir not found: {args.bench_dir}",
                   file=sys.stderr)
             return 1
-        tally = split_pool(args.bench_dir)
+        tally = split_pool(args.bench_dir, args.pool_name)
         print(
             "benchmark: split pool into "
             + (", ".join(f"{c}={n}" for c, n in sorted(tally.items()))

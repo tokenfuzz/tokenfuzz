@@ -1152,9 +1152,18 @@ _reenrich_and_render_pool_reports() {
 ## once more pre-ledger is safe.
 rebuild_pool_artifacts() {
   local reason="${1:-update}"
-  python3 "$PY_BENCH" pool "$BENCH_DIR" \
+  ## Build the whole pool — flat tree, enrichment, cluster reports, and the
+  ## per-condition subtrees — in a staging dir, then swap it into place with
+  ## one rename at the end (see the swap below). build_pool tears its target
+  ## down in place and split-pool only recreates the per-condition subtrees
+  ## last, so building in pool/ directly leaves the live tree half-rebuilt for
+  ## the whole (now LLM-keyer-paced) rebuild span — a reader of
+  ## benchmark-result.* hits dead links into pool/<condition>/. Staging keeps
+  ## the previous, complete pool/ visible until the new one is fully built.
+  local POOL_STAGE_NAME=".pool.staging"
+  local POOL="$BENCH_DIR/$POOL_STAGE_NAME"
+  python3 "$PY_BENCH" pool "$BENCH_DIR" --pool-name "$POOL_STAGE_NAME" \
     || log "WARN: pooling failed ($reason)"
-  local POOL="$BENCH_DIR/pool"
 
   ## Move each harness cell's audit tree (bin/audit writes it to
   ## output/<target>-<exp>/ at the output root) under this run's
@@ -1240,7 +1249,7 @@ rebuild_pool_artifacts() {
   ## so harness evidence and model-direct evidence each get their own
   ## CRASH-CLUSTERS / FINDING-CLUSTERS to link to.
   if [ -d "$POOL" ]; then
-    python3 "$PY_BENCH" split-pool "$BENCH_DIR" \
+    python3 "$PY_BENCH" split-pool "$BENCH_DIR" --pool-name "$POOL_STAGE_NAME" \
       || log "WARN: pool split failed ($reason)"
     local cond_dir cond
     for cond_dir in "$POOL"/*/; do
@@ -1282,6 +1291,21 @@ rebuild_pool_artifacts() {
           >/dev/null 2>&1 || true
       done
     fi
+  fi
+
+  ## Atomic swap: the staging tree is fully built (flat + enrichment +
+  ## clusters + per-condition subtrees). Replace pool/ with it via two fast
+  ## renames so a reader never sees a partial tree — the only gap is the
+  ## sub-millisecond window between the renames, versus the multi-minute hole
+  ## an in-place rebuild leaves. A killed run just leaves a stale
+  ## .pool.staging, which the next build_pool wipes and rebuilds.
+  if [ -d "$POOL" ]; then
+    local pool_live="$BENCH_DIR/pool"
+    local pool_old="$BENCH_DIR/.pool.old"
+    rm -rf "$pool_old" 2>/dev/null || true
+    [ -d "$pool_live" ] && mv "$pool_live" "$pool_old"
+    mv "$POOL" "$pool_live"
+    rm -rf "$pool_old" 2>/dev/null || true
   fi
 }
 

@@ -352,6 +352,18 @@ assert_eq "1" "$(jq -r '.model_direct_agents' "$drun_json")" \
 assert_file_contains "$dledger" 'Harness agents.*2' \
   "T9j: ledger exposes the harness worker count"
 
+# Atomic pool swap: rebuild_pool_artifacts builds the whole tree in
+# .pool.staging and swaps it into pool/ with one rename, so a reader never
+# sees a half-rebuilt pool. After a clean run the live pool/ exists and no
+# staging/backup dotdirs linger.
+dbench="$(dirname "$drun_json")"
+assert_dir_exists "$dbench/pool" \
+  "T9k: end-to-end run lands a complete pool/ (atomic swap completed)"
+assert_file_not_exists "$dbench/.pool.staging" \
+  "T9l: staging dir does not linger after the swap"
+assert_file_not_exists "$dbench/.pool.old" \
+  "T9m: backup dir is cleaned up after the swap"
+
 # ── T10: argument validation ─────────────────────────────────────────────
 # Every invocation gets a throw-away --bench-root so a successful-but-not-
 # rejected case (e.g. --budget-wall 0, which is the documented "unlimited"
@@ -942,6 +954,30 @@ assert_dir_not_exists "$sbd/pool/harness/crashes/CRASH-0002" \
   "T21c: a condition's subtree holds only its own crashes"
 assert_dir_exists "$sbd/pool/harness/findings/FIND-0001" \
   "T21d: findings are split by condition too"
+
+# ── T21e: --pool-name builds/splits into a staging dir (atomic-swap support) ──
+# bin/benchmark builds the whole pool in .pool.staging and renames it onto
+# pool/ at the end, so build_pool/split_pool must honour a non-default pool
+# dir name and never touch the live pool/ while staging.
+pnb="$work/poolname-bench"
+pnrd="$pnb/results"
+mkdir -p "$pnb/cells/harness-r1" "$pnrd/crashes/CRASH-x"
+: > "$pnrd/crashes/CRASH-x/asan.txt"
+cat > "$pnb/cells/harness-r1/cell.json" <<JSON
+{"condition":"harness","replicate":1,"status":"done","wall_seconds":1,
+ "results_dir":"$pnrd"}
+JSON
+cat > "$pnb/cells/harness-r1/metrics.json" <<'JSON'
+{"confirmed_crashes":1,"crash_dirs":["CRASH-x"],"findings":0,"findings_rejected":0}
+JSON
+python3 "$PY" pool "$pnb" --pool-name .pool.staging >/dev/null
+assert_dir_exists "$pnb/.pool.staging/crashes" \
+  "T21e: pool --pool-name builds into the named staging dir"
+assert_dir_not_exists "$pnb/pool" \
+  "T21f: pool --pool-name leaves the live pool/ untouched"
+python3 "$PY" split-pool "$pnb" --pool-name .pool.staging >/dev/null
+assert_dir_exists "$pnb/.pool.staging/harness/crashes" \
+  "T21g: split-pool --pool-name splits within the staging dir"
 
 # ── T19k: crosstab links each condition to its own per-condition tree ────
 spd="$xlink/benchmark-splitty/20260401-000000"
