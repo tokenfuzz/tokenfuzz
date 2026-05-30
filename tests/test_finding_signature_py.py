@@ -300,6 +300,21 @@ assert_eq("42", sig_line["line"], "finding_signature exposes line field")
 assert_eq(("memory-safety", "src/lib/foo.c", "HandleListUsers"), sig_line["key"],
           "display key still (class, file, func) — unchanged by the line field")
 
+# bin/cluster-findings stamps `Cluster:` / `Dedup key:` lines into a report
+# after it clusters. A `Dedup key: [loc] file:func` stamp injects a file:func
+# token that the inline scanners must ignore — otherwise re-clustering a stamped
+# report shifts (file, line) and silently changes the dedup site edge (the
+# stamped `[loc] file:func` shadowed the real inline `file:func:line`).
+_inline_site = "Crafted pattern in pkg/regex/match.go:Compile:120 backtracks.\n"
+_stamped_site = ("# Algorithmic DoS\n\nCluster: FCL-deadbeef (singleton)\n"
+                 "Dedup key: [loc] pkg/regex/match.go:Compile\n" + _inline_site)
+assert_eq(fs.extract_line(_inline_site), fs.extract_line(_stamped_site),
+          "extract_line ignores harness Cluster:/Dedup key: stamps")
+assert_eq("120", fs.extract_line(_stamped_site),
+          "stamped inline finding keeps its real line")
+assert_eq(fs.extract_location(_inline_site), fs.extract_location(_stamped_site),
+          "extract_location ignores harness stamps")
+
 
 # ── is_valid_dedup_key ─────────────────────────────────────────────
 print("\nis_valid_dedup_key")

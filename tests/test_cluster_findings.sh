@@ -241,6 +241,14 @@ assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'auth' \
   "FINDING-CLUSTERS.md lists auth class"
 assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'code_start-unbounded' \
   "FINDING-CLUSTERS.md surfaces the LLM dedup_key signature"
+# Signature renders the FULL merge algorithm — dedup_key OR (class, file, line)
+# OR crash state — not just the one key that drove the merge. B1's canonical row
+# carries both a dedup_key and a (file, line) source site, so both appear,
+# joined by " or ".
+assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'src/pcre2_match\.c, 1234' \
+  "FINDING-CLUSTERS.md Signature shows the (class, file, line) source site"
+assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'code_start-unbounded.* or .*src/pcre2_match\.c, 1234' \
+  "FINDING-CLUSTERS.md Signature joins dedup_key and source site with ' or '"
 assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'FIND-A1' \
   "FINDING-CLUSTERS.md links the auth FINDs"
 assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'FIND-B1' \

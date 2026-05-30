@@ -267,6 +267,15 @@ def _make_clusters(sigs: list[dict], display_key: str = "id") -> list[dict]:
             # Dedup key: stamp; merged_via is how the CLUSTER was formed.
             "key_kind": canonical["kind"],
             "key": list(canonical["key"]),
+            # The three merge signals carried by the canonical member, so the
+            # Signature column can render the actual algorithm (dedup_key OR
+            # (class, file, line) OR crash state) rather than just the one key
+            # that drove the merge.
+            "dedup_key": canonical.get("dedup_key", ""),
+            "file": canonical.get("file", ""),
+            "line": canonical.get("line", ""),
+            "crash_state": list(finding_dedup.crash_state(
+                canonical.get("report_text", ""))),
             "merged_via": comp["merged_via"],
             "canonical": can_disp,
             "members": [disp(m) for m in ordered],
@@ -400,6 +409,35 @@ def _key_display(key: list, kind: str) -> str:
     return ""
 
 
+def _signature_display(c: dict) -> str:
+    """Render every merge signal the canonical finding carries, ` or `-joined.
+
+    finding_dedup merges two findings (within a class) on any one of: a valid
+    dedup_key, an identical (class, file, line) source site, or an identical
+    crash state. The Signature column shows all signals present on the canonical
+    member so it reflects the actual algorithm, not just the one key that drove
+    the merge. The site needs both file and line (its merge edge does), and the
+    crash-state term is dropped when the report embeds no stack — the common
+    case for findings. Falls back to the canonical display key when no merge
+    signal is present, so the cell is never blank."""
+    parts: list[str] = []
+    dedup_key = c.get("dedup_key", "")
+    if dedup_key:
+        parts.append(f"`{dedup_key}`")
+    file = c.get("file", "")
+    line = str(c.get("line", "") or "")
+    if file and line:
+        cls = c.get("class", "") or "other"
+        parts.append(f"`({cls}, {file}, {line})`")
+    state = c.get("crash_state") or ()
+    if state:
+        parts.append("`" + " → ".join(state) + "`")
+    if parts:
+        return " or ".join(parts)
+    fallback = _key_display(c.get("key", []), c.get("key_kind", ""))
+    return f"`{fallback}`" if fallback else "—"
+
+
 def _status_summary(members: list[dict]) -> str:
     statuses = sorted({m.get("status", "OK") for m in members})
     return statuses[0] if len(statuses) == 1 else "; ".join(statuses)
@@ -520,7 +558,7 @@ def _format_clusters_md(clusters: list[dict], findings_root: Path,
     lines.append("| Severity | Cluster | Size | Class | Strategy | Signature | Canonical | Members | Status |")
     lines.append("|:---------|:--------|-----:|:------|:---------|:----------|:----------|:--------|:-------|")
     for c in clusters:
-        sig_text = _key_display(c["key"], c["key_kind"]) or "—"
+        sig_text = _signature_display(c)
         members = []
         for mid in c["members"]:
             link = _member_link(findings_root, mid, link_prefix)
@@ -535,7 +573,7 @@ def _format_clusters_md(clusters: list[dict], findings_root: Path,
         strategy = c.get("strategy", "") or "—"
         lines.append(
             f"| {sev} | `{c['id']}` | {c['size']} | "
-            f"{cls} | {strategy} | `{sig_text}` | {canonical_link} | "
+            f"{cls} | {strategy} | {sig_text} | {canonical_link} | "
             f"{members_cell} | {c.get('status', 'OK')} |"
         )
     lines.append("")
@@ -724,7 +762,7 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
     md_lines.append("| Severity | Cluster | Size | Class | Strategy | Signature | Canonical | Members | Status |")
     md_lines.append("|:---------|:--------|-----:|:------|:---------|:----------|:----------|:--------|:-------|")
     for c in clusters:
-        sig_text = _key_display(c["key"], c["key_kind"]) or "—"
+        sig_text = _signature_display(c)
         link_cells: list[str] = []
         for m in c["_full"]:
             agent = m.get("agent", "")
@@ -745,7 +783,7 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
         strategy = c.get("strategy", "") or "—"
         md_lines.append(
             f"| {sev} | `{c['id']}` | {c['size']} | "
-            f"{cls} | {strategy} | `{sig_text}` | {c['canonical']} | "
+            f"{cls} | {strategy} | {sig_text} | {c['canonical']} | "
             f"{', '.join(link_cells)} | {c.get('status', 'OK')} |"
         )
     md_lines.append("")

@@ -344,7 +344,7 @@ def _legacy_location(text: str) -> tuple[str, str]:
     if m:
         return (m.group("file") or "", (m.group("func") or "").strip())
     # Inline patterns skip fenced ```code``` blocks (reproducer snippets).
-    masked = _strip_code_fences(text)
+    masked = _prose_text(text)
     m = _INLINE_FILE_FUNC_LINE_RE.search(masked)
     if m:
         return (m.group("file") or "", (m.group("func") or "").strip())
@@ -392,6 +392,22 @@ def _strip_code_fences(text: str) -> str:
     return _CODE_FENCE_RE.sub("", text)
 
 
+# bin/cluster-findings stamps `Cluster:` and `Dedup key:` lines into a report
+# after it clusters. Those are harness metadata, not authored content — and a
+# `Dedup key: [loc] file:func` stamp injects a file:func token the inline
+# scanners below would misread as the bug site on a re-run, shifting (file,
+# line) and breaking clustering idempotency. Drop them before inline scanning so
+# identity stays a pure function of the authored report.
+_HARNESS_STAMP_RE = re.compile(
+    r"^(?:Cluster|Dedup key):.*$", re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _prose_text(text: str) -> str:
+    """Report text for inline-site scanning: code fences and harness stamps removed."""
+    return _strip_code_fences(_HARNESS_STAMP_RE.sub("", text or ""))
+
+
 def extract_line(report_text: str) -> str:
     """Return the bug-site line number as a string, or "".
 
@@ -410,7 +426,7 @@ def extract_line(report_text: str) -> str:
     m = _LOCATION_HEADER_RE.search(text)
     if m and m.group("line"):
         return m.group("line")
-    masked = _strip_code_fences(text)
+    masked = _prose_text(text)
     for rx in (_INLINE_FILE_FUNC_LINE_RE, _INLINE_FILE_LINE_RE):
         m = rx.search(masked)
         if m and m.group("line"):
