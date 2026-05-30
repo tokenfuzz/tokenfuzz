@@ -119,8 +119,8 @@ def main(argv: list[str]) -> int:
                         help="append the snippet to output/<slug>/target.toml")
     parser.add_argument("--force", "--force-config", dest="force", action="store_true",
                         help="overwrite an existing [s6_peers] section when --apply")
-    parser.add_argument("--timeout", type=int, default=30,
-                        help="LLM-call timeout seconds (default 30)")
+    parser.add_argument("--timeout", type=int, default=120,
+                        help="LLM-call timeout seconds (default 120)")
     args = parser.parse_args(argv)
 
     output_dir = ROOT / "output" / args.slug
