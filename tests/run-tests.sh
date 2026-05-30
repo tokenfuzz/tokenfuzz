@@ -231,7 +231,7 @@ test_weight() {
     test_grep_wrapper.sh|test_edges.sh|test_agent_counts_regression.sh|test_asan_multi.sh) echo 8 ;;
     test_triage_reachability.sh) echo 6 ;;
     test_decision_triage.sh|test_s6_consumers.sh|test_integration_triage.sh|test_rg_wrapper.sh|test_decision_strategy_pick.sh) echo 5 ;;
-    test_find_seed.sh|test_llm_decide.sh|test_export_repro_run.sh|test_doc_neutrality.sh|test_timeout.sh|test_run_asan.sh) echo 4 ;;
+    test_find_seed.sh|test_llm_decide.sh|test_export_repro_run.sh|test_export_repro_lib_discover.sh|test_doc_neutrality.sh|test_timeout.sh|test_run_asan.sh) echo 4 ;;
     test_*.py) echo 1 ;;
     *)
       case "$(test_category "$name")" in

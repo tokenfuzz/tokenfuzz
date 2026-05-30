@@ -701,6 +701,45 @@ assert_eq("", cfg_he.asan_bin,
           "seed_toml round-trip: empty asan_bin when none detected")
 
 
+# ─── 10d. seed_toml detects a shared library when no static archive ──
+#
+# Regression: cmake/meson projects (c-ares, pcre2, …) build only a shared
+# library, not a .a. seed_toml used to scan for archives only, leaving
+# asan_lib unset → export-repro emitted a reproduce.sh that linked nothing
+# and the harness failed with undefined symbols. seed_toml must record the
+# canonical instrumented .so/.dylib so the harness links it.
+for _sh_ext, _versioned in ((".so", "libtgt.so.2.1"), (".dylib", "libtgt.2.1.dylib")):
+    seed_root_sh = TEST_TMPDIR / f"seed-shared{_sh_ext}"
+    (seed_root_sh / "build-asan" / "lib").mkdir(parents=True)
+    libdir = seed_root_sh / "build-asan" / "lib"
+    # Canonical unversioned linker name + a versioned SONAME sibling.
+    (libdir / f"libtgt{_sh_ext}").write_bytes(b"\x7fELF")
+    (libdir / f"{_versioned}").write_bytes(b"\x7fELF")
+    out_sh = TEST_TMPDIR / f"seeded-shared{_sh_ext}.toml"
+    tc.seed_toml(seed_root_sh, out_sh, "")
+    cfg_sh = tc.Config()
+    tc.load_toml_into(cfg_sh, out_sh)
+    assert_eq(f"build-asan/lib/libtgt{_sh_ext}", cfg_sh.asan_lib,
+              f"seed_toml: picks canonical libtgt{_sh_ext} over versioned sibling")
+
+# A static archive still wins over a shared object when both are present.
+seed_root_mix = TEST_TMPDIR / "seed-archive-wins"
+(seed_root_mix / "build-asan" / "lib").mkdir(parents=True)
+(seed_root_mix / "build-asan" / "lib" / "libtgt.a").write_bytes(b"!<arch>\n")
+(seed_root_mix / "build-asan" / "lib" / "libtgt.dylib").write_bytes(b"\x7fELF")
+out_mix = TEST_TMPDIR / "seeded-archive-wins.toml"
+tc.seed_toml(seed_root_mix, out_mix, "")
+cfg_mix = tc.Config()
+tc.load_toml_into(cfg_mix, out_mix)
+assert_eq("build-asan/lib/libtgt.a", cfg_mix.asan_lib,
+          "seed_toml: static archive preferred over shared object")
+
+# _detect_sanitizer_lib returns empty for a build dir with no library
+# (header-only / CLI-only target) so the field stays a commented placeholder.
+assert_eq("", tc._detect_sanitizer_lib(seed_root_he / "build-asan", seed_root_he),
+          "_detect_sanitizer_lib: empty when no archive or shared object")
+
+
 # ─── 11. Fallback parser works without tomllib ─────────────────────
 
 saved_tomllib = tc.tomllib

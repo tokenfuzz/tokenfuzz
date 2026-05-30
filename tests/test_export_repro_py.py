@@ -872,7 +872,11 @@ assert_in('san_lib=""', text_a,
 assert_not_in('static library not found:" >&2; exit 2', text_a,
               "c-harness LIB_RESOLVE: no longer exits 2 on missing archive")
 
-# Case B: asan_lib empty → no resolve block, no "$asan_lib" arg.
+# Case B: asan_lib empty → the reproducer discovers the instrumented
+# library the build just produced and links it through the same guarded
+# ${san_lib:+...} expansion. A genuinely header-only target finds nothing,
+# and the guard then drops the archive cleanly — so the link line stays
+# well-formed either way.
 harness_dir_b = TMP / "harness-lib-empty"
 harness_dir_b.mkdir()
 repro_b = harness_dir_b / "reproduce.sh"
@@ -884,19 +888,22 @@ er.write_c_harness_template(
     input_name="input.bin", harness_name="harness.cpp", harness_compiler="clang++",
 )
 text_b = repro_b.read_text(encoding="utf-8")
-assert_not_in("san_lib=", text_b,
-              "c-harness asan_lib EMPTY: no asan_lib resolve block")
-assert_not_in('"$san_lib"', text_b,
-              'c-harness asan_lib EMPTY: link line drops "$san_lib"')
-assert_not_in('-Wl,-rpath', text_b,
-              'c-harness asan_lib EMPTY: no rpath flag without a lib')
-assert_not_in('LD_LIBRARY_PATH=', text_b,
-              'c-harness asan_lib EMPTY: no LD_LIBRARY_PATH without a lib')
-assert_in('"$here/harness.cpp" -lm -lpthread -lc++', text_b,
-          "c-harness asan_lib EMPTY: link line is well-formed without lib")
+assert_in("linking auto-discovered library", text_b,
+          "c-harness asan_lib EMPTY: emits library-discovery block")
+assert_in('find "$build" -type f -name \'*.a\'', text_b,
+          "c-harness asan_lib EMPTY: discovery scans $build for the library")
+assert_in('${san_lib:+"$san_lib"}', text_b,
+          'c-harness asan_lib EMPTY: link line links the discovered lib when present')
+assert_in('${san_lib_dir:+-Wl,-rpath,"$san_lib_dir"}', text_b,
+          'c-harness asan_lib EMPTY: rpath flag guarded by discovered san_lib_dir')
+assert_in('export LD_LIBRARY_PATH="$san_lib_dir', text_b,
+          'c-harness asan_lib EMPTY: loader path exported when a lib is discovered')
+assert_in('${san_lib_dir:+-Wl,-rpath,"$san_lib_dir"} -lm -lpthread -lc++', text_b,
+          "c-harness asan_lib EMPTY: configured link_libs still follow the lib")
 
-# Case C: asan_lib still carries FILL_ME placeholder → same emission as
-# empty, plus a stderr warning so the user notices the stale config.
+# Case C: asan_lib still carries FILL_ME placeholder → same discovery
+# emission as empty, plus a stderr warning so the user knows the field was
+# never filled and discovery is being relied on.
 harness_dir_c = TMP / "harness-lib-fillme"
 harness_dir_c.mkdir()
 repro_c = harness_dir_c / "reproduce.sh"
@@ -912,8 +919,8 @@ with contextlib.redirect_stderr(err_buf):
 text_c = repro_c.read_text(encoding="utf-8")
 assert_not_in("FILL_ME", text_c,
               "c-harness asan_lib FILL_ME: placeholder never reaches output")
-assert_not_in("san_lib=", text_c,
-              "c-harness asan_lib FILL_ME: no asan_lib resolve block")
+assert_in("linking auto-discovered library", text_c,
+          "c-harness asan_lib FILL_ME: emits library-discovery block")
 assert_in("FILL_ME", err_buf.getvalue(),
           "c-harness asan_lib FILL_ME: stderr warns about stale placeholder")
 

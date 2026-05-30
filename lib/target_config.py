@@ -928,6 +928,50 @@ def _find_under(asan_dir: Path, *, name: str | None = None,
     return out
 
 
+def _is_shared_lib(name: str) -> bool:
+    """A linkable shared object: lib<name>.so / .dylib, or a versioned
+    SONAME (lib<name>.so.2, lib<name>.2.dylib)."""
+    return name.endswith((".so", ".dylib")) or ".so." in name
+
+
+def _pick_shared_lib(san_dir: Path, root: Path) -> str:
+    """Best shared library to link a C harness against, when the build
+    emits no static archive (the cmake/meson default for c-ares, pcre2,
+    …). Prefer the canonical unversioned linker name (libfoo.so,
+    libfoo.dylib) over its versioned SONAME siblings (libfoo.so.2,
+    libfoo.2.19.4.dylib); among equals, shortest basename then path.
+
+    Single-library convention, mirroring the static-archive heuristic
+    above: ambiguous multi-library builds resolve to the first canonical
+    match, which the operator can override in target.toml."""
+    shared = [s for s in _find_under(san_dir, name=None)
+              if _is_shared_lib(s.name) and "posix" not in s.name]
+    if not shared:
+        return ""
+    shared.sort(key=lambda s: (not s.name.endswith((".so", ".dylib")),
+                               len(s.name), str(s)))
+    return str(shared[0]).removeprefix(str(root) + "/")
+
+
+def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
+    """Library a C harness must link against for the sanitizer built under
+    `san_dir` (a build-<san>/ tree). Static archive preferred (the harness
+    links it directly); otherwise the canonical instrumented shared object.
+    Empty when the build tree is absent or ships no linkable library —
+    i.e. a header-only library or a CLI-only target. Sanitizer-agnostic:
+    the same archive-then-shared rule holds for asan/ubsan/msan/tsan."""
+    if not san_dir.is_dir():
+        return ""
+    archives = [a for a in _find_under(san_dir, name=None) if a.suffix == ".a"]
+    for a in archives[:3]:
+        if "posix" in a.name:
+            continue
+        return str(a).removeprefix(str(root) + "/")
+    if archives:
+        return str(archives[0]).removeprefix(str(root) + "/")
+    return _pick_shared_lib(san_dir, root)
+
+
 _HEADER_SUFFIXES = (".h", ".hpp", ".hh", ".hxx", ".H")
 
 
@@ -1194,15 +1238,7 @@ def seed_toml(
                 if _binary_uses_asan(f):
                     asan_bin = str(f).removeprefix(str(root) + "/")
                     break
-        archives = _find_under(asan_dir, name=None)
-        archives = [a for a in archives if a.suffix == ".a"]
-        for a in archives[:3]:
-            if "posix" in a.name:
-                continue
-            asan_lib = str(a).removeprefix(str(root) + "/")
-            break
-        if not asan_lib and archives:
-            asan_lib = str(archives[0]).removeprefix(str(root) + "/")
+        asan_lib = _detect_sanitizer_lib(asan_dir, root)
 
     if not upstream_url:
         upstream_url = _detect_upstream_url(root)
@@ -1289,6 +1325,28 @@ def seed_toml(
     controls_rendered = ", ".join(f'"{v}"' for v in attacker_controls)
     lines.append(f"attacker_controls = [{controls_rendered}]")
 
+    # Per-sanitizer harness-link library. ubsan/msan/tsan are detected the
+    # same way as asan: scan build-<san>/ for a static archive, else the
+    # canonical instrumented shared object. An operator who enables a
+    # second sanitizer in `enabled` and builds build-<san>/ gets a working
+    # <san>_lib without a hand-edit — and export-repro then links it just
+    # like asan. When the build tree is absent (the steady state — only
+    # asan is built by default) or the target is a browser (links no
+    # library; harnesses drive the binary), detection returns "" and the
+    # field stays a commented FILL_ME placeholder.
+    def _san_lib_toml_line(san: str) -> str:
+        field = f"{san}_lib"
+        pad = " " * (len("ubsan_lib") - len(field))
+        detected = "" if is_browser else _detect_sanitizer_lib(
+            root / _build_dir_name(san), root)
+        if detected:
+            return f"{field}{pad} = {toml_basic_string(detected)}"
+        return f'# {field}{pad} = "{_build_dir_name(san)}/FILL_ME.a"'
+
+    ubsan_lib_line = _san_lib_toml_line("ubsan")
+    msan_lib_line = _san_lib_toml_line("msan")
+    tsan_lib_line = _san_lib_toml_line("tsan")
+
     # Detect whether this target should default to findings-only mode.
     # Heuristic: a non-native ecosystem (cargo/go/python/...) where we
     # did NOT find an ASan binary in build-asan/. Cargo + go targets
@@ -1326,9 +1384,9 @@ def seed_toml(
             f'# ubsan_bin = "{_build_dir_name("ubsan")}/{slug}"',
             f'# msan_bin  = "{_build_dir_name("msan")}/{slug}"',
             f'# tsan_bin  = "{_build_dir_name("tsan")}/{slug}"',
-            f'# ubsan_lib = "{_build_dir_name("ubsan")}/FILL_ME.a"',
-            f'# msan_lib  = "{_build_dir_name("msan")}/FILL_ME.a"',
-            f'# tsan_lib  = "{_build_dir_name("tsan")}/FILL_ME.a"',
+            ubsan_lib_line,
+            msan_lib_line,
+            tsan_lib_line,
             '# race      — enable for Go targets; built via `go build -race`',
         ]
     else:
@@ -1365,9 +1423,9 @@ def seed_toml(
             f'# ubsan_bin = "{_build_dir_name("ubsan")}/' + (slug if not is_browser else "firefox") + '"',
             f'# msan_bin  = "{_build_dir_name("msan")}/' + (slug if not is_browser else "firefox") + '"',
             f'# tsan_bin  = "{_build_dir_name("tsan")}/' + (slug if not is_browser else "firefox") + '"',
-            f'# ubsan_lib = "{_build_dir_name("ubsan")}/FILL_ME.a"',
-            f'# msan_lib  = "{_build_dir_name("msan")}/FILL_ME.a"',
-            f'# tsan_lib  = "{_build_dir_name("tsan")}/FILL_ME.a"',
+            ubsan_lib_line,
+            msan_lib_line,
+            tsan_lib_line,
         ]
 
     # ── [runner] block (language-agnostic invocation) ───────────────

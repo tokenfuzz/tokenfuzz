@@ -953,6 +953,52 @@ san_lib_dir="${san_lib%/*}"
 [ -n "$san_lib" ] || san_lib_dir=""
 """
 
+
+# Emitted instead of LIB_RESOLVE when target.toml names no <san>_lib but a
+# C/C++ harness is present. The build above already produced the project's
+# instrumented library; the harness must link it. Discover it in the fresh
+# $build tree rather than trusting a config field that was never filled —
+# robust to the seed-before-build ordering and to header-only false
+# negatives. Covers both platforms' conventions: static archives (.a),
+# macOS shared objects (lib*.dylib, versioned lib*.N.dylib) and Linux
+# shared objects (lib*.so, versioned lib*.so.N). Prefer a static archive,
+# else the canonical unversioned shared object — shortest basename wins, so
+# libfoo.dylib beats libfoo.2.dylib and libfoo.so beats libfoo.so.6. An
+# empty result means header-only: ${san_lib:+...} then skips the link
+# cleanly, and the linker reports undefined symbols if the harness did need
+# a library.
+LIB_DISCOVER = """\
+# target.toml names no __SANITIZER_LABEL__ library, so link the one the
+# build just produced. Prefer a static archive; else the canonical shared
+# object (unversioned over its SONAME-versioned siblings).
+san_lib=""
+if [ -d "$build" ]; then
+  san_lib=$(find "$build" -type f -name '*.a' ! -name '*posix*' 2>/dev/null \\
+    | LC_ALL=C sort | head -1)
+  if [ -z "$san_lib" ]; then
+    san_lib=$(find "$build" \\( -type f -o -type l \\) \\( \\
+        -name 'lib*.so' -o -name 'lib*.dylib' \\
+        -o -name 'lib*.so.*' -o -name 'lib*.*.dylib' \\
+      \\) ! -name '*posix*' 2>/dev/null \\
+      | awk -F/ '{ print length($NF), $0 }' | LC_ALL=C sort -n -k1,1 \\
+      | sed 's/^[0-9]*  *//' | head -1)
+  fi
+fi
+if [ -n "$san_lib" ]; then
+  echo "=== __SANITIZER_LABEL__: linking auto-discovered library: $san_lib ===" >&2
+fi
+san_lib_dir="${san_lib%/*}"
+[ -n "$san_lib" ] || san_lib_dir=""
+"""
+
+
+def emit_lib_discover(sanitizer: str = "asan") -> str:
+    return _sub_template(
+        LIB_DISCOVER,
+        __SANITIZER_LABEL__=sanitizer_meta(sanitizer)["label"],
+    )
+
+
 # The `rc=0; <cmd> || rc=$?` pattern is intentional: the script starts
 # with `set -eu`, so a normal `<cmd>; rc=$?` would never reach the rc=
 # assignment when the harness reports a sanitizer diagnostic (the script would exit
@@ -991,8 +1037,39 @@ exit "$rc"
 C_HARNESS_RUN = """\
 
 here=$(cd "$(dirname "$0")" && pwd)
+# CMake/Meson frequently emit generated public headers (a config header, a
+# version header, or the project's API header configured from a .in
+# template) into a build subdirectory that target.toml's `includes` doesn't
+# name — e.g. pcre2 writes the generated pcre2.h under $build/interface/.
+# Add every build directory that directly contains a header to the search
+# path so the harness #include resolves wherever this build placed it.
+# Configured includes still come first (they win on collision); CMakeFiles/
+# is pruned (private build scaffolding, no public API).
+gen_inc=""
+if [ -d "$build" ]; then
+  for d in $(find "$build" -name CMakeFiles -prune -o -type f \\
+               \\( -name '*.h' -o -name '*.hpp' -o -name '*.hh' \\) -print 2>/dev/null \\
+             | sed 's|/[^/]*$||' | LC_ALL=C sort -u); do
+    gen_inc="$gen_inc -I$d"
+  done
+fi
+# A harness that includes a library's *private* headers (pcre2_internal.h,
+# ares_setup.h, …) needs the per-TU config the build applies to its own
+# sources. Those headers gate `#include "<proj>config.h"` on -DHAVE_CONFIG_H
+# — the autotools/cmake convention — and that config header supplies macros
+# (symbol visibility, feature flags) the library's headers assume but a
+# generic harness compile lacks. Define HAVE_CONFIG_H when the build emitted
+# such a header (config.h or <proj>_config.h); its directory is already on
+# the include path via the discovery above. No-op for harnesses that include
+# no config-gated header.
+have_config=""
+if [ -d "$build" ]; then
+  cfg_h=$(find "$build" -name CMakeFiles -prune -o -type f \\
+            \\( -name 'config.h' -o -name '*_config.h' \\) -print 2>/dev/null | head -1)
+  [ -n "$cfg_h" ] && have_config=" -DHAVE_CONFIG_H"
+fi
 echo "=== compiling harness: __HARNESS_NAME__ ===" >&2
-__HARNESS_COMPILER__ -fsanitize=__SANITIZER_FLAG__ -g -O1__INCLUDES_ARGS__ \\
+__HARNESS_COMPILER__ -fsanitize=__SANITIZER_FLAG__ -g -O1__INCLUDES_ARGS__$gen_inc$have_config \\
     "$here/__HARNESS_NAME__"__SAN_LIB_ARG____LINK_LIBS__ \\
     -o "$build/repro"
 echo "=== running __SANITIZER_LABEL__ repro: __INPUT_DESC__ ===" >&2
@@ -2192,46 +2269,51 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
     if "FILL_ME" in (san_lib_rel or ""):
         sys.stderr.write(
             f"[export-repro] target.toml {sanitizer}_lib still contains FILL_ME "
-            f"({san_lib_rel!r}); emitting reproduce.sh without a library "
-            f"link (treat as header-only). Edit output/<slug>/target.toml "
-            f"if your harness actually needs to link a static archive.\n"
+            f"({san_lib_rel!r}); reproduce.sh will auto-discover the instrumented "
+            f"library the build produces under build-{sanitizer}/. Set "
+            f"{sanitizer}_lib in output/<slug>/target.toml to pin a specific "
+            f"archive/shared object if discovery picks the wrong one.\n"
         )
     # When a sanitizer library is resolved, embed its directory as both an
     # rpath (Linux DT_RUNPATH / macOS LC_RPATH so the binary self-locates
     # the shared lib) and as LD_LIBRARY_PATH/DYLD_LIBRARY_PATH (fallback
     # for macOS dylib install-names that don't honor rpath, and for older
     # loaders). The rpath flag is harmless for static archives.
+    # Resolve $san_lib either from the configured <san>_lib (LIB_RESOLVE) or,
+    # when target.toml named none, by discovering the library the build just
+    # produced (LIB_DISCOVER). Both leave $san_lib empty for a genuinely
+    # header-only target, and the link args below tolerate that.
     if _san_lib_is_unset(san_lib_rel):
-        san_lib_arg = ""
-        san_lib_run_env = ""
+        lib_resolve_block = emit_lib_discover(sanitizer)
     else:
-        # ${san_lib:+...} expands the substitution only when san_lib is set.
-        # LIB_RESOLVE may blank san_lib when the archive can't be found
-        # (header-only library placeholder case); the link line must then
-        # skip the archive and the rpath flag entirely. The shell prunes
-        # the empty positional argument, so clang sees a clean command line
-        # — no stray "" arg that would be interpreted as "no such file".
-        #
-        # The env block uses an explicit `if [ -n ... ]; then export …; fi`
-        # rather than ${var:+VAR=val} because bash only recognizes a
-        # `VAR=val` token as an env-var prefix when it is syntactically
-        # apparent before parameter expansion. A `${var:+VAR=val}` that
-        # expands to `VAR=val` is treated as a regular word — i.e. bash
-        # tries to *run* it as a command and reports "VAR=val: command
-        # not found". The explicit `export` block sidesteps that POSIX
-        # corner entirely.
-        san_lib_arg = ' ${san_lib:+"$san_lib"} ${san_lib_dir:+-Wl,-rpath,"$san_lib_dir"}'
-        san_lib_run_env = (
-            'if [ -n "$san_lib_dir" ]; then\n'
-            '  export LD_LIBRARY_PATH="$san_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
-            '  export DYLD_LIBRARY_PATH="$san_lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"\n'
-            'fi\n'
-        )
+        lib_resolve_block = emit_lib_resolve(san_lib_rel, sanitizer)
+    # ${san_lib:+...} expands the substitution only when san_lib is set.
+    # Both resolve blocks blank san_lib when no archive/shared object is
+    # found (header-only case); the link line must then skip the archive and
+    # the rpath flag entirely. The shell prunes the empty positional
+    # argument, so clang sees a clean command line — no stray "" arg that
+    # would be interpreted as "no such file".
+    #
+    # The env block uses an explicit `if [ -n ... ]; then export …; fi`
+    # rather than ${var:+VAR=val} because bash only recognizes a
+    # `VAR=val` token as an env-var prefix when it is syntactically
+    # apparent before parameter expansion. A `${var:+VAR=val}` that
+    # expands to `VAR=val` is treated as a regular word — i.e. bash
+    # tries to *run* it as a command and reports "VAR=val: command
+    # not found". The explicit `export` block sidesteps that POSIX
+    # corner entirely.
+    san_lib_arg = ' ${san_lib:+"$san_lib"} ${san_lib_dir:+-Wl,-rpath,"$san_lib_dir"}'
+    san_lib_run_env = (
+        'if [ -n "$san_lib_dir" ]; then\n'
+        '  export LD_LIBRARY_PATH="$san_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+        '  export DYLD_LIBRARY_PATH="$san_lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"\n'
+        'fi\n'
+    )
     text = (
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
         + emit_build(build_system, sanitizer=sanitizer,
                      audit_build_script=audit_build_script)
-        + emit_lib_resolve(san_lib_rel, sanitizer)
+        + lib_resolve_block
         + link_lib_resolves
         + _sub_template(
             C_HARNESS_RUN,
