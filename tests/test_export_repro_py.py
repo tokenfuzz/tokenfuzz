@@ -1565,6 +1565,44 @@ if result_r.returncode == 0:
                   "reachability replay: rationale not duplicated on second bundle")
 
 
+# ─── write_stub_reproduce: fail-open bundle (no runnable template) ───
+# Regression for the model-direct unification: export-repro used to
+# die("could not determine template") for a self-contained harness
+# (harness.c with main() but no separate testcase input), dropping the
+# whole bundle — REPORT.md included. Now it writes a stub reproduce.sh
+# and continues. The stub must be a valid shell script that exits
+# non-zero (never mistaken for a working reproducer) and names the
+# harness so a human knows how to reproduce by hand.
+stub_dir = TMP / "stub-repro"
+stub_dir.mkdir()
+stub_path = stub_dir / "reproduce.sh"
+er.write_stub_reproduce(
+    stub_path, crash_id="CRASH-STUB-1", sanitizer="asan",
+    harness_name="harness.c", input_name="",
+    reason="self-contained harness, no separate testcase",
+)
+stub_text = stub_path.read_text(encoding="utf-8")
+assert_in("#!/usr/bin/env bash", stub_text,
+          "write_stub_reproduce: emits a bash shebang")
+assert_in("exit 2", stub_text,
+          "write_stub_reproduce: stub exits non-zero (not a real reproducer)")
+assert_in("harness.c", stub_text,
+          "write_stub_reproduce: names the harness for manual reproduction")
+assert_eq(True, os.access(stub_path, os.X_OK),
+          "write_stub_reproduce: stub is executable")
+# No-harness variant: still valid, still exits 2, points at REPORT.md.
+stub2 = stub_dir / "reproduce2.sh"
+er.write_stub_reproduce(
+    stub2, crash_id="CRASH-STUB-2", sanitizer="asan",
+    harness_name="", input_name="", reason="no harness/testcase/wrapper captured",
+)
+stub2_text = stub2.read_text(encoding="utf-8")
+assert_in("exit 2", stub2_text,
+          "write_stub_reproduce: no-harness stub also exits non-zero")
+assert_in("REPORT.md", stub2_text,
+          "write_stub_reproduce: no-harness stub points at REPORT.md")
+
+
 # ─── Cleanup ────────────────────────────────────────────────────────
 
 shutil.rmtree(TMP, ignore_errors=True)

@@ -5,7 +5,7 @@ An audit run produces two kinds of duplicate-prone artifacts:
 - **Crashes** — sanitizer aborts captured by the probe runner, under
   `output/<target>/<backend>/results/crashes/CRASH-*/`.
 - **Findings** — security issues filed by agents and recon, under
-  `.../results/findings/FIND-*/`.
+  `output/<target>/<backend>/results/findings/FIND-*/`.
 
 The same bug is usually discovered many times — reached through different
 inputs, callers, or by different agents. Deduplication collapses those

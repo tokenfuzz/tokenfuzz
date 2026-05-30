@@ -189,13 +189,26 @@ when you have not built a live reproducer.
 For every FINDING:
 
   1. Create `{{ output_dir }}/findings/FIND-<n>/`  (n = 1, 2, 3, ...).
-  2. Write `{{ output_dir }}/findings/FIND-<n>/report.md` describing,
-     as concretely as the code allows:
-       - file path and line (or function) where the bug lives;
-       - bug class (e.g. heap-buffer-overflow, command-injection, XSS, ...);
-       - input shape and the reach path that delivers attacker control there;
-       - what the attacker gains (write where, read what, RCE, auth bypass,
-         crash, etc.).
+  2. Write `{{ output_dir }}/findings/FIND-<n>/report.md`. Begin it with a
+     `## Fields` table — a Markdown table whose first column is the field
+     name and second is the value — carrying these rows verbatim so the
+     downstream tooling can render and score every report on one yardstick:
+
+         ## Fields
+
+         | Field    | Value |
+         |:---------|:------|
+         | Class    | <one bug-class token, e.g. heap-buffer-overflow / use-after-free / command-injection / xss / integer-overflow / logic> |
+         | Severity | <your best estimate: Critical / High / Medium / Low — it is recomputed automatically, so an estimate is fine> |
+         | File     | `<path/to/file.c>` |
+         | Function | `<function_name>` |
+         | Line     | <line number> |
+
+     Then, below the table, describe the bug in prose as concretely as the
+     code allows: the input shape and reach path that delivers attacker
+     control to that file:function:line, and what the attacker gains (write
+     where, read what, RCE, auth bypass, crash, etc.). Keep the prose — the
+     `## Fields` table is in addition to it, not a replacement.
 
 A **CRASH** is a security issue you have demonstrated with a real input or
 driver and saved sanitizer output on disk. CRASHes are the highest-value

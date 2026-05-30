@@ -995,9 +995,9 @@ echo "=== compiling harness: __HARNESS_NAME__ ===" >&2
 __HARNESS_COMPILER__ -fsanitize=__SANITIZER_FLAG__ -g -O1__INCLUDES_ARGS__ \\
     "$here/__HARNESS_NAME__"__SAN_LIB_ARG____LINK_LIBS__ \\
     -o "$build/repro"
-echo "=== running __SANITIZER_LABEL__ repro: $here/__INPUT_NAME__ ===" >&2
+echo "=== running __SANITIZER_LABEL__ repro: __INPUT_DESC__ ===" >&2
 rc=0
-__SAN_LIB_RUN_ENV____SANITIZER_ENV_BLOCK__  "$build/repro" "$here/__INPUT_NAME__" || rc=$?
+__SAN_LIB_RUN_ENV____SANITIZER_ENV_BLOCK__  "$build/repro"__INPUT_ARG__ || rc=$?
 echo "[repro] exit=$rc" >&2
 exit "$rc"
 """
@@ -1326,8 +1326,17 @@ _BLANK_RE = re.compile(r"^\s*$")
 # auto-generated REPORT.md prepends its own Fields table, so we drop the
 # agent's heading + immediately-following table to avoid duplication.
 _FIELDS_HEADING_RE = re.compile(r"^#{1,6}\s+Fields\s*$", re.IGNORECASE)
+# Whole-section kills. `Expected sanitizer output` / `ASan top frames` are
+# auto-appended sections from a prior bundle (idempotent re-strip). A bare
+# `Sanitizer output` / `ASan output` is the model's freeform pointer (often
+# just "See sanitizer.txt") — redundant once export-repro re-inlines the
+# full diagnostic under the canonical `## Expected sanitizer output`, so we
+# drop it to avoid two sanitizer sections in the rendered report. Matching
+# is case-insensitive on the leaf word so `Sanitizer`/`sanitizer` both go.
 _SECTION_REPRO_BLOCKS_RE = re.compile(
-    r"^## *(?:Reproduce|Expected\s+sanitizer\s+output|Expected\s+Sanitizer\s+Output|ASan\s+top\s+frames)(?:\s|$)"
+    r"^## *(?:Reproduce"
+    r"|(?:Expected\s+)?[Ss]anitizer\s+[Oo]utput"
+    r"|ASan\s+(?:top\s+frames|[Oo]utput))(?:\s|$)"
 )
 _SECTION_REPRODUCTION_HEADER_RE = re.compile(r"^## *Reproduction(?:\s|$)")
 _BARE_REPRODUCTION_RE = re.compile(r"^Reproduction:\s*$")
@@ -2189,7 +2198,13 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
             C_HARNESS_RUN,
             __INCLUDES_ARGS__=includes_args,
             __LINK_LIBS__=link_libs,
-            __INPUT_NAME__=input_name,
+            # A self-contained harness (constructs its own triggering input)
+            # takes no argv; pass the testcase only when one exists. The
+            # leading space keeps the run line `… "$build/repro" "$here/x"`
+            # spaced correctly while an empty arg collapses cleanly.
+            __INPUT_ARG__=(f' "$here/{input_name}"' if input_name else ""),
+            __INPUT_DESC__=(f"$here/{input_name}" if input_name
+                            else "self-contained harness (no input file)"),
             __HARNESS_NAME__=harness_name,
             __HARNESS_COMPILER__=harness_compiler,
             __SAN_LIB_ARG__=san_lib_arg,
@@ -2226,6 +2241,61 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
         )
     )
     out.write_text(text, encoding="utf-8")
+    os.chmod(out, 0o755)
+
+
+def write_stub_reproduce(out: Path, *, crash_id: str, sanitizer: str,
+                         harness_name: str = "", input_name: str = "",
+                         reason: str = "") -> None:
+    """Last-resort reproduce.sh when no runnable template can be built.
+
+    A bundle is still worth shipping without an automated reproducer: the
+    REPORT.md (Fields, inlined sanitizer stack, root-cause prose, captured
+    patch) is the maintainer-facing artifact, and the reproducer is a
+    convenience. This used to `die()` — dropping the whole bundle — which
+    is how model-direct crashes (a self-contained harness with no separate
+    testcase, or a pooled crash with no converged build recipe) ended up
+    with no REPORT.md at all.
+
+    The stub is a valid shell script that documents what IS known (the
+    sibling artifacts, the build hint when a harness is present) and exits
+    non-zero so it is never mistaken for a working reproducer. The
+    sanitizer label keeps the manual hint accurate per build."""
+    meta = sanitizer_meta(sanitizer)
+    label = meta["label"]
+    lines = [
+        "#!/usr/bin/env bash",
+        "# Auto-generated stub reproducer — NO runnable template could be",
+        f"# determined for {crash_id}" + (f" ({reason})." if reason else "."),
+        "# The maintainer-facing artifact is REPORT.md in this directory;",
+        f"# sanitizer.txt holds the full {label} diagnostic. Reproduce by hand:",
+        "set -euo pipefail",
+        "here=\"$(cd \"$(dirname \"$0\")\" && pwd)\"",
+        'echo "Artifacts in this bundle:" >&2',
+        'ls -1 "$here" >&2',
+    ]
+    if harness_name:
+        lines += [
+            'cat >&2 <<EOF',
+            f"To reproduce: build {harness_name} against an {label}-instrumented",
+            "build of the target library and run it. The harness is self-contained",
+            "(it constructs its own triggering input); no separate input file is",
+            "needed. See REPORT.md \"Reproduce\"/\"Root cause\" for specifics.",
+            "EOF",
+        ]
+    else:
+        lines += [
+            'cat >&2 <<EOF',
+            "No harness or testcase was captured with this crash. See REPORT.md",
+            f"for the root cause and sanitizer.txt for the full {label} stack.",
+            "EOF",
+        ]
+    lines += [
+        'echo "stub reproducer: manual reproduction required (see above)" >&2',
+        "exit 2",
+        "",
+    ]
+    out.write_text("\n".join(lines), encoding="utf-8")
     os.chmod(out, 0o755)
 
 
@@ -2621,7 +2691,14 @@ def main(argv: list[str]) -> int:
                 )
             else:
                 die(f"browser target {cfg.slug}: unsupported testcase ext '{input_ext_lower}'")
-        elif harness_src is not None and input_name:
+        elif harness_src is not None:
+            # A harness drives the build whether or not a separate testcase
+            # was captured: a self-contained harness (common for model-direct
+            # crashes — it constructs its own triggering input) has
+            # input_name == "" and runs with no argv. Previously this branch
+            # required `and input_name`, so a self-contained harness fell
+            # through to the stub even though a real, runnable reproducer was
+            # one compile away.
             write_c_harness_template(
                 repro_path,
                 build_system=build_system, upstream_url=upstream_url,
@@ -2660,7 +2737,24 @@ def main(argv: list[str]) -> int:
                 recorded_env_options=recorded_env_options,
             )
         else:
-            die(f"could not determine template for {args.crash_id}")
+            # No runnable template (self-contained harness with no separate
+            # testcase, browser/CLI input absent, no shell wrapper). Ship a
+            # stub reproducer and STILL build REPORT.md — the bundle's value
+            # is the report, not the convenience script. Previously this
+            # die()'d and dropped the whole bundle, which is why model-direct
+            # crashes never got the canonical REPORT.md.
+            _stub_reason = "self-contained harness, no separate testcase" \
+                if harness_src is not None else "no harness/testcase/wrapper captured"
+            write_stub_reproduce(
+                repro_path, crash_id=args.crash_id, sanitizer=sanitizer,
+                harness_name=harness_name if harness_src is not None else "",
+                input_name=input_name, reason=_stub_reason,
+            )
+            sys.stderr.write(
+                f"[export-repro] no runnable reproduce.sh template for "
+                f"{args.crash_id} ({_stub_reason}); wrote a stub and continued "
+                f"with the REPORT.md bundle.\n"
+            )
 
         # ── Build REPORT.md ──────────────────────────────────────────
         asan_top = extract_asan_top(asan_file)

@@ -287,16 +287,17 @@ def _section_body(text: str, heading_name: str) -> str:
 
 
 def _insert_patch_section(text: str, patch_section: str) -> str:
-    """Insert the `## Patch` block right before the first operational
-    "tail" section so reviewers see the fix next to the bug explanation,
-    not buried at end-of-report past the reproduction details. Falls
-    back to end-of-report only when no tail section exists.
+    """Insert the fix/patch block right before the reference-material
+    tail (Reachability / Severity rationale) — i.e. AFTER the Reproduce
+    section, so the reading order is Reproduce → Fix → Patch. Falls back
+    to end-of-report only when no tail section exists.
 
-    Matching is by lowercase prefix on the H2 name (Reproduce /
-    Reachability — external callers / Severity rationale and any
-    near-variants the backends use). Per CLAUDE.md, prefix is
-    preferred over an exhaustive enumeration of exact strings."""
-    tail_prefixes = ("reproduce", "reproduction", "reachability", "severity rationale")
+    Matching is by lowercase prefix on the H2 name. Reproduce /
+    Reproduction are deliberately NOT anchors: the patch (and the moved
+    Fix narrative that precedes it) belong *after* the reproducer, next
+    to the scoring sections. Per CLAUDE.md, prefix is preferred over an
+    exhaustive enumeration of exact strings."""
+    tail_prefixes = ("reachability", "severity rationale")
     earliest: Optional[int] = None
     for m in _H2_RE.finditer(text):
         name_lower = m.group(1).strip().lower()
@@ -308,6 +309,32 @@ def _insert_patch_section(text: str, patch_section: str) -> str:
         tail = text[earliest:]
         return head + patch_section.rstrip() + "\n\n" + tail
     return text.rstrip() + "\n\n" + patch_section.rstrip() + "\n"
+
+
+# Prose fix-narrative sections the model writes (distinct from the
+# enricher-owned `## Patch` diff and from `## Fix Direction`, which is
+# the advisory-no-patch mechanism and must stay put). These get moved
+# to sit directly above `## Patch` so the narrative flows into the diff.
+_FIX_SECTION_NAMES = ("Fix", "Suggested fix", "Recommended fix", "Proposed fix")
+
+
+def _extract_fix_section(text: str) -> tuple[str, str]:
+    """Pull a prose `## Fix` (or near-variant) section out of `text`.
+
+    Returns (text_without_fix, fix_section_markdown). The fix section is
+    removed from its original position so the caller can re-place it
+    immediately above `## Patch`. `## Fix Direction` is intentionally not
+    matched — it is load-bearing for advisory detection and TL;DR mining.
+    Idempotent: a second pass simply re-extracts and re-places it."""
+    for name in _FIX_SECTION_NAMES:
+        bounds = _find_section_bounds(text, name)
+        if bounds is None:
+            continue
+        heading_start, _, body_end = bounds
+        section = text[heading_start:body_end].rstrip() + "\n"
+        without = text[:heading_start] + text[body_end:]
+        return without, section
+    return text, ""
 
 
 def _strip_patch_sections(text: str) -> str:
@@ -729,19 +756,28 @@ def enrich_text(text: str, ctx: EnrichContext) -> str:
                 )
                 break
 
-    # 6. Patch — single-writer rule. The sibling `patch.diff` file is
-    # the canonical source; this enricher is the sole writer of the
-    # `## Patch` section. Any existing `## Patch` (from a prior enrich
-    # run or because the agent inlined one) is stripped first, then a
-    # fresh section is inserted right before the first operational
-    # tail section (Reproduce / Reachability / Severity rationale) so
-    # reviewers see the fix next to the bug explanation. End-of-report
+    # 6. Fix narrative + Patch — single-writer rule for the diff. The
+    # sibling `patch.diff` file is the canonical source; this enricher is
+    # the sole writer of the `## Patch` section. Any existing `## Patch`
+    # is stripped first. The reading order is Reproduce → Fix → Patch:
+    # the model's prose `## Fix` section (when present) is lifted out of
+    # its original position and re-placed directly above the `## Patch`
+    # diff, and the combined block is inserted after the Reproduce
+    # section (before Reachability / Severity rationale). End-of-report
     # placement is the fallback when no tail section exists.
     text = _strip_patch_sections(text)
     diff_block = _build_patch_diff_block(ctx)
     if diff_block:
-        patch_section = "## Patch\n\n" + _wrap_block("patch-diff", diff_block)
-        text = _insert_patch_section(text, patch_section)
+        # Reorder only when there's a patch to anchor the Fix above. The
+        # model's prose `## Fix` section (if any) is lifted to sit directly
+        # above `## Patch`; a report with no patch keeps its Fix section
+        # exactly where the author placed it (no surprise relocation).
+        text, fix_section = _extract_fix_section(text)
+        tail_parts: list[str] = []
+        if fix_section:
+            tail_parts.append(fix_section.rstrip())
+        tail_parts.append("## Patch\n\n" + _wrap_block("patch-diff", diff_block).rstrip())
+        text = _insert_patch_section(text, "\n\n".join(tail_parts))
 
     # The strip-and-splice in step 6 can leave a `\n\n\n` seam where
     # two `\n\n`-padded chunks meet. Collapse runs so the file stays

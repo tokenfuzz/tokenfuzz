@@ -1185,13 +1185,40 @@ rebuild_pool_artifacts() {
       || log "WARN: reachability batch returned non-zero (see reachability.log, $reason)"
 
     ## Reproducer bundle: give every crash the same maintainer-facing
-    ## REPORT.md / reproduce.sh bundle the harness ships. Crashes that
-    ## already carry a REPORT.md (harness cells) are left untouched.
+    ## REPORT.md / reproduce.sh bundle the harness ships. This is the one
+    ## convergence point where model-direct crashes (written freeform by
+    ## the model) get the SAME canonical structure — Fields table, inlined
+    ## sanitizer stack, Patch, Reproduce — that harness crashes get from
+    ## export-repro at audit time.
+    ##
+    ## export-repro requires a positional CRASH-id AND a resolvable session.
+    ## The pooled tree has neither by default: the dir is named CRASH-NNNN
+    ## (pass basename) and output/<slug>/ carries only target.toml, no
+    ## .session-env (so we feed RESULTS_DIR/TARGET_ROOT via env, which
+    ## export-repro's fallback path consumes). The skip guard is
+    ## content-based, not filename-based: an export-repro bundle carries a
+    ## `## Expected sanitizer output` section (its unique signature), a
+    ## model-direct freeform report does not. A filename check
+    ## (`-f REPORT.md`) is wrong on case-insensitive macOS, where the
+    ## model's lowercase report.md matches REPORT.md and every model-direct
+    ## crash was silently skipped.
     local cdir bundled=0
+    local _md_target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
     for cdir in "$POOL"/crashes/CRASH-*; do
       [ -d "$cdir" ] || continue
-      [ -f "$cdir/REPORT.md" ] && continue
-      "$SCRIPT_ROOT/bin/export-repro" --crash-dir "$cdir" --slug "$TARGET_SLUG" \
+      ## Already a canonical export-repro bundle? (harness cells, or a
+      ## prior pool pass). Guard on export-repro's exact signature
+      ## heading rather than a filename (report.md / REPORT.md collapse on
+      ## case-insensitive FS) or `## Fields` (a model may emit a Fields
+      ## table in its freeform report without the inlined sanitizer stack
+      ## + reproduce.sh that only export-repro adds — that crash still
+      ## needs bundling).
+      if grep -q '^## Expected sanitizer output' "$cdir"/[Rr][Ee][Pp][Oo][Rr][Tt].md 2>/dev/null; then
+        continue
+      fi
+      RESULTS_DIR="$POOL" TARGET_ROOT="$_md_target_root" TARGET_SLUG="$TARGET_SLUG" \
+        "$SCRIPT_ROOT/bin/export-repro" "$(basename "$cdir")" \
+          --crash-dir "$cdir" --slug "$TARGET_SLUG" \
         >/dev/null 2>&1 && bundled=$((bundled + 1))
     done
     if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then

@@ -1320,6 +1320,12 @@ def _extract_hero(text: str) -> dict:
                 h["severity_score"] = sm.group("score")
         elif key == "primitive":
             h["primitive"] = val
+        elif key == "class" and not h.get("primitive"):
+            # Findings carry their bug-class in a `| Class |` Fields row
+            # (no `| Primitive |`). Treat it as the primitive so the hero
+            # card shows the category chip. Crashes have `| Primitive |`
+            # and no `| Class |`, so this never shadows a crash primitive.
+            h["primitive"] = val
         elif key == "surface":
             sm = _SURFACE_FIELD_RE.match(val)
             if sm:
