@@ -1333,10 +1333,18 @@ _FIELDS_HEADING_RE = re.compile(r"^#{1,6}\s+Fields\s*$", re.IGNORECASE)
 # full diagnostic under the canonical `## Expected sanitizer output`, so we
 # drop it to avoid two sanitizer sections in the rendered report. Matching
 # is case-insensitive on the leaf word so `Sanitizer`/`sanitizer` both go.
+# `Reachability — external callers` and `Severity rationale` are
+# bin/reachability's auto-appended sections — strip here so they get
+# re-appended at the END of the rebuilt report (after Reproduce) by the
+# `--severity-only` pass the caller runs immediately after; without
+# stripping, they'd sit in the body ahead of the sanitizer stack because
+# reachability ran against the previous-rebuild's report.
 _SECTION_REPRO_BLOCKS_RE = re.compile(
     r"^## *(?:Reproduce"
     r"|(?:Expected\s+)?[Ss]anitizer\s+[Oo]utput"
-    r"|ASan\s+(?:top\s+frames|[Oo]utput))(?:\s|$)"
+    r"|ASan\s+(?:top\s+frames|[Oo]utput)"
+    r"|Reachability"
+    r"|Severity\s+rationale)(?:\s|$)"
 )
 _SECTION_REPRODUCTION_HEADER_RE = re.compile(r"^## *Reproduction(?:\s|$)")
 _BARE_REPRODUCTION_RE = re.compile(r"^Reproduction:\s*$")
@@ -1358,6 +1366,37 @@ _BARE_LABEL_RES = (
     re.compile(r"^[Tt]rigger\s+source:\s"),
 )
 _AUTO_SEVERITY_RE = re.compile(r"^-?\s*\*\*Severity\*\*\s*:")
+
+
+# Prose `## Fix` (or near-variant) sections agents write between Summary
+# and the reproducer. Lifted out of the body in build_report_md so they
+# can sit at the END of the rebuilt report — after the sanitizer stack
+# and Reproduce — alongside Reachability / Severity rationale. The
+# variants mirror lib/report_enrich.py's `_FIX_SECTION_NAMES`.
+# `## Fix Direction` is intentionally excluded — that's the
+# advisory-no-patch narrative and load-bearing for downstream TL;DR mining.
+_FIX_HEADING_NAMES = ("Fix", "Suggested fix", "Recommended fix", "Proposed fix")
+_FIX_HEADING_PATTERN = re.compile(
+    r"^##\s+(?:Fix|Suggested\s+fix|Recommended\s+fix|Proposed\s+fix)\s*$.*?(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE,
+)
+
+
+def extract_fix_section(text: str) -> tuple[str, str]:
+    """Lift a prose `## Fix` (or near-variant) section out of `text`.
+
+    Returns (text_without_fix, fix_section). The section is removed from
+    its original position so build_report_md can re-place it at the end
+    of the rebuilt report. Idempotent: a second call on the result simply
+    returns (text, "") when no Fix heading remains. `## Fix Direction` is
+    NOT matched (the heading regex anchors `\\s*$` after the leaf word).
+    """
+    m = _FIX_HEADING_PATTERN.search(text)
+    if m is None:
+        return text, ""
+    section = m.group(0).rstrip() + "\n"
+    without = text[:m.start()] + text[m.end():]
+    return without, section
 
 
 def strip_audit_sections(text: str) -> str:
@@ -2445,9 +2484,17 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
             parts.append(f"- **Severity**: {severity_value}\n")
     parts.append("\n")
 
+    fix_section = ""
     if report_md is not None and report_md.is_file():
         body_text = report_md.read_text(encoding="utf-8", errors="replace")
-        parts.append(strip_audit_sections(body_text))
+        body_stripped = strip_audit_sections(body_text)
+        # Lift the prose `## Fix` section out of the body so it sits at
+        # the END of the rebuilt report — after Expected sanitizer output
+        # and Reproduce, alongside the auto-appended Reachability /
+        # Severity rationale. The triage card carries the verdict; the
+        # remediation belongs next to the reference material at the bottom.
+        body_stripped, fix_section = extract_fix_section(body_stripped)
+        parts.append(body_stripped)
     else:
         parts.append("Sanitizer diagnostic discovered during automated QA.\n")
     parts.append("\n")
@@ -2480,6 +2527,9 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
     )
     parts.append("./reproduce.sh /path/to/src    # use an existing checkout\n")
     parts.append("```\n")
+    if fix_section:
+        parts.append("\n")
+        parts.append(fix_section)
     return "".join(parts)
 
 
