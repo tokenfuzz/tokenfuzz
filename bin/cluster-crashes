@@ -180,8 +180,15 @@ def _frame_token(frame: tuple[str, str]) -> str:
 
 
 def _frame_display(frame: tuple[str, str]) -> str:
+    # Mirror lib/stack_frames.py::StackFrame.display: the index "Root
+    # signature" column is a dedup-display string, so it goes through
+    # ClusterFuzz's filter_addresses_and_numbers — collapses ASLR module
+    # offsets (`+0x1000677e0`) to `+ADDRESS` and matches the per-report
+    # "Dedup frames" field. Source `file.c:1234` line numbers are preserved
+    # by upstream's lookbehind, so debug-info frames are untouched.
     func, loc = frame
-    return f"{func} {loc}" if loc else func
+    line = f"{func} {loc}" if loc else func
+    return cf_stack.filter_addresses_and_numbers(line)
 
 
 def _frame_set_signature(frames: list[tuple[str, str]], want: int = 3) -> str:
