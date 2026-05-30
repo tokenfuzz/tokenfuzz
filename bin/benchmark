@@ -74,7 +74,7 @@ set -uo pipefail
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_ROOT" || { echo "FATAL: cannot cd to $SCRIPT_ROOT" >&2; exit 1; }
 
-for _lib in platform.sh timeout.sh target_config.sh llm_invoke.sh prompt_template.sh triage_validate.sh; do
+for _lib in platform.sh timeout.sh target_config.sh llm_invoke.sh prompt_template.sh triage_validate.sh triage.sh; do
   # shellcheck disable=SC1090
   source "$SCRIPT_ROOT/lib/$_lib" 2>/dev/null || {
     echo "FATAL: cannot source lib/$_lib" >&2
@@ -1462,6 +1462,15 @@ for cond in "${COND_ARR[@]}"; do
           triage_validate_confirm_findings "$results_dir/findings" \
             "$SCRIPT_ROOT/targets/$TARGET_SLUG" "$results_dir/findings-rejected" \
             >/dev/null 2>&1
+        # Score every promoted FIND through the find-quality LLM gate so
+        # cluster-findings can render a real severity/class instead of
+        # Pending. Same helper bin/audit runs from maintain_indexes — one
+        # convergence point for harness and model-direct. The gate caches
+        # per-FIND, so re-running is idempotent and adds no LLM calls for
+        # already-decided findings.
+        RESULTS_DIR="$results_dir" \
+        ACTIVE_BACKEND="$BACKEND" \
+          _ensure_find_quality_coverage >/dev/null 2>&1 || true
       fi
     else
       results_dir="$(run_harness_cell "$cell_dir" "$exp_name")" || status="failed"
