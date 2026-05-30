@@ -103,8 +103,11 @@ sudo dnf install -y \
   procps-ng python3 ripgrep
 ```
 
-No extra Python or Perl packages are needed — the harness uses only the
-standard library and Perl core modules. Minimal Fedora/RHEL container
+No extra Perl packages are needed — the harness uses Perl core modules
+only. Python needs no extra packages on 3.11+ (which ships the `tomllib`
+parser in the standard library); on Python 3.9/3.10 install `tomli`, which
+the harness imports to read `target.toml` and the model config. Minimal
+Fedora/RHEL container
 images may also need the standard userland packages that full hosts
 already have, such as `coreutils`, `diffutils`, `findutils`, `gawk`,
 `grep`, `sed`, and `which`.

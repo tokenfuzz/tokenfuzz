@@ -90,7 +90,7 @@ The paths an operator inspects after a run:
 | `recon/` | One `RECON-*` directory per breadth-first recon candidate — an **unverified** raw claim. Holds `finding.json`, `validator-vote-*.json`, and a human-readable `REPORT.md`/`REPORT.html`. A sibling of `findings/`, not part of it. |
 | `corpus/` | Promoted inputs useful for future work. |
 | `scratch-N/` | Active testcase work for agent `N`. |
-| `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_REV`, and `LOGDIR` values read by `bin/probe`. |
+| `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `LOGDIR`, and `SESSION_STARTED` values read by `bin/probe`. |
 
 The result tree also holds the queue files, structured state, and
 per-agent hit/tried-input logs the harness reads and writes itself.

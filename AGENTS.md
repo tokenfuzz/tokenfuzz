@@ -94,7 +94,7 @@ Each agent has a role set by the harness:
    ```
    `bin/probe` reads TARGET / HYPOTHESIS-ID / HARNESS from the testcase header
    and discovers TARGET_ROOT / RESULTS_DIR by walking up to
-   `output/<slug>/.session-env`. No env vars to set.
+   `output/<slug>/<backend>/results/.session-env`. No env vars to set.
    MISSED = revise input, don't discard, don't spend the sanitizer budget.
 4. **MANDATORY REPRODUCTION BUDGET.** Before DISCARDING: 10+ tool calls, 1+ HIT testcase under the sanitizer, 2+ variant inputs, documented input shapes tried.
 5. **2-3 DEEP investigations, not 10 shallow.** 15+ tool calls per hypothesis with testcase variants.
@@ -123,10 +123,10 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 
 ## SESSION START
 
-1. Run `bin/state resume` for your agent first — structured JSONL is the source of truth for the hypothesis queue and resume position. Read the legacy `<RESULTS_DIR>/AUDIT_STATE-N.md` only if it exists and the resume brief lacks needed context (Working Context, Crash Reproduction Attempts); never dump long Completed/Dead Ends history. Resume highest PENDING/NEEDS_TESTCASE.
+1. Run `bin/state resume --agent <n>` for your agent first — structured JSONL is the source of truth for the hypothesis queue and resume position. Resume highest PENDING/NEEDS_TESTCASE.
 2. Leftover testcase without sanitizer output? Run the sanitizer NOW or delete.
 3. **Cold start:** Create state from `.agents/references/state-template.md`. Recon ONE subsystem. Generate 3-5 hypotheses.
-4. **After compression:** Start from structured state (`bin/state resume`); resume top PENDING. Do not re-read the legacy `AUDIT_STATE-N.md` or prior session-seed content. No new recon.
+4. **After compression:** Start from structured state (`bin/state resume --agent <n>`); resume top PENDING. No new recon.
 5. Read `.agents/references/session-rules.md` ONCE for coverage-gate workflow, guards-db, search discipline, FIND quality bar.
 
 ---

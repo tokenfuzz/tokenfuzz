@@ -34,8 +34,10 @@ directory while the report waits for content or a second review:
   once. Cleared on the next accept; on a second reject the FIND is
   moved to `findings-rejected/` rather than deleted.
 
-Both markers surface as the `Status` column in
-`findings/FINDING-CLUSTERS.html`. Either address the underlying issue
+The `.needs-content` marker surfaces as a `NEEDS CONTENT` value in the
+`Status` column of `findings/FINDING-CLUSTERS.html`; `.pending-drop` is
+an internal triage marker and is not shown in that column. Either
+address the underlying issue
 (add the report, sharpen the rationale) and rerun triage, or `touch
 .reviewed` (or `.keep`) in the FIND directory to pin the current
 state as-is.
@@ -62,9 +64,11 @@ Before filing a similar crash, check:
 ```
 
 For findings, scan `<RESULTS_DIR>/findings/FINDING-CLUSTERS.html` and
-look at the `Status` column. `NEEDS CONTENT` means no `report.md`
-yet; `PENDING DROP` means the LLM substance gate rejected the report
-once and a second reject will move it to `findings-rejected/`.
+look at the `Status` column (`OK`, `NEEDS CONTENT`, or `NEEDS
+ATTENTION`). `NEEDS CONTENT` means no `report.md` yet. A separate
+`.pending-drop` marker (not shown in this column) means the LLM
+substance gate rejected the report once; a second reject moves it to
+`findings-rejected/`.
 
 ## What a strong crash looks like
 
@@ -369,9 +373,10 @@ How the cluster files and markers work:
   the canonical member. The `.md` siblings are generated source files.
 - Each report has a `Cluster: <ID>` line. For FINDs, a second line
   `Dedup key: [<source>] <token>` records the signature that grouped
-  it. `[layer1]` is the deterministic (class, file, function) key.
-  `[llm]` is the LLM-chosen canonical token shared across reports of
-  the same root cause filed from different surface sites.
+  it. `[loc]` is the deterministic location key, rendered as
+  `file:function`. `[llm]` is the LLM-chosen canonical token shared
+  across reports of the same root cause filed from different surface
+  sites. (`[title]` is the fallback key derived from the report title.)
 - Non-canonical members carry a `.dup-of` file naming the canonical
   member. They are **not** deleted — a duplicate may still carry a
   useful variant or a clearer reproducer. Treat the canonical member

@@ -162,15 +162,15 @@ does not cost a triage round on Tuesday and Wednesday too.
 The harness records each iteration's usage in the structured session
 index (`logs/index.jsonl`). Backends report usage differently — Claude
 and Codex emit real token counts, while the `gemini` backend (`agy`)
-surfaces no usage telemetry, so its rows carry a prompt estimate
-flagged `estimated`.
+surfaces no usage telemetry, so its rows leave the real token fields
+null and carry only the build-time `tokens.prompt_estimate`.
 
 The numbers to watch in `logs/index.jsonl`:
 
 - **`tokens.cache_read` per iteration.** Should be stable. Rising
   without growing output means the agent is dumping logs into
   context.
-- **`output_tokens` vs. testcases written.** High output with no
+- **`tokens.output` vs. testcases written.** High output with no
   testcases is a "model wrote a lot of prose" smell.
 - **Sanitizer runs vs. budget.** Chronic budget exhaustion suggests
   the agent is stuck in a guard chain (see

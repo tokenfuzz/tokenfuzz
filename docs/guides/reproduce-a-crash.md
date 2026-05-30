@@ -104,9 +104,9 @@ REPRO_AUTO_CLONE=1 ./reproduce.sh                              # fresh clone
 ASAN_OPTIONS="abort_on_error=1" ./reproduce.sh /path/to/co     # extra runtime opts
 ```
 
-`reproduce.sh` runs with `set -eu` and prints every command it
-executes. If a build step fails, the trailing few lines name exactly
-which step and why.
+`reproduce.sh` runs with `set -eu` and prints a banner for each major
+step (`=== compiling harness ... ===`, `=== running ... ===`). If a
+build step fails, the trailing few lines name the step and the error.
 
 ## Reading the sanitizer output
 

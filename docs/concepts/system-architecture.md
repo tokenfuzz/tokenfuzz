@@ -97,6 +97,7 @@ state/claims.jsonl     card leases and terminal status
 state/hypotheses.jsonl active and closed hypotheses
 state/runs.jsonl       probe verdicts
 state/notes.jsonl      compact supporting notes
+state/events.jsonl     audit event log shared across agents and orchestrator
 ```
 
 `features.json` is the output of a fail-open build probe that runs

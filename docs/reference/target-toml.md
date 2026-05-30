@@ -361,6 +361,7 @@ It contains dynamic values:
 
 - `RESULTS_DIR`;
 - `TARGET_ROOT`;
+- `TARGET_SLUG`;
 - `TARGET_REV`;
 - `LOGDIR`;
 - `SESSION_STARTED`.
@@ -381,7 +382,7 @@ meaningful defaults:
 
 ```toml
 [s4_diff_pairs]
-jit_off   = ["--no-baseline", "--no-ion"]
+jit_off   = ["--no-ion"]
 jit_eager = ["--ion-eager"]
 ```
 

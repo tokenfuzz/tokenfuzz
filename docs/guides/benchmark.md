@@ -149,7 +149,7 @@ with a `Found by` column and a link to its reproducer bundle.
 
 Every pooled crash — both conditions — is bundled into a `REPORT.md`
 + `REPORT.html` + `reproduce.sh` under
-`output/benchmark/<runid>/pool/crashes/`, so you can open any bug and
+`output/benchmark/<backend>/<runid>/pool/crashes/`, so you can open any bug and
 see exactly why it scored the way it did.
 
 ## Common variations

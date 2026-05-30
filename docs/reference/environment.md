@@ -56,7 +56,7 @@ on your target.
 | --- | --- | --- |
 | `ASAN_FUZZ_REPRO_TIMEOUT` | `20` | ASan timeout for fuzz-repro runs. |
 | `UBSAN_TIMEOUT` | browser/generic `15`; JS `10` | UBSan timeout for normal runs. |
-| `FUZZ_UBSAN_TIMEOUT` | `600` | UBSan timeout for fuzz-mode runs. |
+| `UBSAN_TIMEOUT` (fuzz mode) | `600` | UBSan fuzz-mode timeout. Unlike ASan/MSan/TSan there is no `FUZZ_UBSAN_TIMEOUT`; fuzz-mode reuses `UBSAN_TIMEOUT` (default `600` here). |
 | `UBSAN_FUZZ_REPRO_TIMEOUT` | `20` | UBSan timeout for fuzz-repro runs. |
 | `MSAN_TIMEOUT` | generic `15`; JS `10` | MSan timeout for normal runs. |
 | `FUZZ_MSAN_TIMEOUT` | `600` | MSan timeout for fuzz-mode runs. |
@@ -185,4 +185,4 @@ disable the size filter entirely.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REACHABILITY_AUTO` | `1` | `0` skips automatic reachability / severity post-processing. `external` opts triage in to public Sourcegraph / GitHub caller search (off by default, so target symbols are not sent to public services). |
+| `REACHABILITY_AUTO` | `1` | Controls post-crash reachability/severity processing. The default (`1`, alias `external`) runs **full** reachability, which queries public Sourcegraph / GitHub for callers — target symbol names leave the host. Set `local` or `severity-only` to recompute severity from cached `reachability.json` only, with no external network calls. `0` disables reachability/severity post-processing entirely. |

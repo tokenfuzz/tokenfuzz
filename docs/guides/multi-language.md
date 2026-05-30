@@ -74,7 +74,14 @@ env            = [
   "PYTHONDEVMODE=1",
   "PYTHONPATH={TARGET_ROOT}:{TARGET_ROOT}/src:{TARGET_ROOT}/lib",
 ]
-crash_patterns = []    # built-ins already cover tracebacks
+crash_patterns = [     # seeded from the language registry
+  "Traceback \\(most recent call last\\):",
+  "MemoryError",
+  "RecursionError",
+  "SystemError",
+  "Fatal Python error:",
+  "==\\d+==ERROR: AddressSanitizer",
+]
 ```
 
 The other ecosystems differ only in the `[runner]` fields:
@@ -143,8 +150,10 @@ Use `// HARNESS:` (or `# HARNESS:` for languages whose comment
 delimiter is `#`; the parser is permissive about the prefix). The
 extension picks the build/interpret path.
 
-The supported set is the registry in `lib/languages.py`. Run
-`python3 lib/languages.py list` to see it. The buckets are:
+The supported set is the registry in `lib/languages.py`; run
+`python3 lib/languages.py list` for the authoritative table (one row per
+language, with its harness extensions and build systems). The harness
+extensions split into two buckets:
 
 ```text
 # Compiled (cached binary):    .c .cc .cpp .cxx .C .go .kt .rs .swift
