@@ -23,6 +23,13 @@ RENDER_MD="$SCRIPT_ROOT/bin/render-md"
 work=$(mktemp -d)
 trap 'rm -rf "$work" 2>/dev/null || true; teardown_test_env 2>/dev/null || true' EXIT
 
+assert_file_contains "$BENCH" 'LLM_DECIDE_LOG="\$BENCH_DIR/llm-decisions\.log"' \
+  "T0a: benchmark cluster-findings keeps keyer telemetry under the run dir"
+assert_file_contains "$BENCH" 'ACTIVE_BACKEND="\$BACKEND" BACKEND="\$BACKEND" MODEL="\$model"' \
+  "T0b: benchmark cluster-findings exports backend/model context"
+assert_file_not_contains "$BENCH" 'cluster-findings".*2>/dev/null' \
+  "T0c: benchmark cluster-findings stderr is not hidden"
+
 ASAN_LINE='==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602'
 
 # ── Fixture: a results/ tree with one real crash and one decoy ───────────

@@ -1090,11 +1090,15 @@ rebuild_pool_artifacts() {
     # .finding-key.json, so the second pass and the per-condition passes below
     # reuse the keys without re-calling. Scoped to these calls so BACKEND isn't
     # leaked into unrelated subprocesses.
-    ACTIVE_BACKEND="$BACKEND" "$SCRIPT_ROOT/bin/cluster-findings" "$POOL" --json \
-      > "$BENCH_DIR/clusters-findings.json" 2>/dev/null \
+    ACTIVE_BACKEND="$BACKEND" BACKEND="$BACKEND" MODEL="$model" \
+      LLM_DECIDE_LOG="$BENCH_DIR/llm-decisions.log" \
+      "$SCRIPT_ROOT/bin/cluster-findings" "$POOL" --json \
+      > "$BENCH_DIR/clusters-findings.json" \
       || { log "WARN: cluster-findings failed ($reason)"; echo '{"clusters":[]}' \
            > "$BENCH_DIR/clusters-findings.json"; }
-    ACTIVE_BACKEND="$BACKEND" "$SCRIPT_ROOT/bin/cluster-findings" "$POOL" >/dev/null 2>&1 \
+    ACTIVE_BACKEND="$BACKEND" BACKEND="$BACKEND" MODEL="$model" \
+      LLM_DECIDE_LOG="$BENCH_DIR/llm-decisions.log" \
+      "$SCRIPT_ROOT/bin/cluster-findings" "$POOL" >/dev/null \
       || log "WARN: cluster-findings (FINDING-CLUSTERS.md) failed ($reason)"
   fi
 
@@ -1127,7 +1131,9 @@ rebuild_pool_artifacts() {
         && { "$SCRIPT_ROOT/bin/cluster-crashes" "$cond_dir" >/dev/null 2>&1 \
              || log "WARN: per-condition cluster-crashes failed ($cond, $reason)"; }
       [ -d "$cond_dir/findings" ] \
-        && { ACTIVE_BACKEND="$BACKEND" "$SCRIPT_ROOT/bin/cluster-findings" "$cond_dir" >/dev/null 2>&1 \
+        && { ACTIVE_BACKEND="$BACKEND" BACKEND="$BACKEND" MODEL="$model" \
+             LLM_DECIDE_LOG="$BENCH_DIR/llm-decisions.log" \
+             "$SCRIPT_ROOT/bin/cluster-findings" "$cond_dir" >/dev/null \
              || log "WARN: per-condition cluster-findings failed ($cond, $reason)"; }
       ## Same enrichment refresh as the combined pool — per-condition
       ## clustering wrote its own `Cluster:` lines into the split copies,
