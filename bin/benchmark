@@ -498,6 +498,43 @@ run_dryrun_cell() {
 # agy_cli_log_for_pid, agy_drip_stopped, agy_in_idle_heartbeat_loop,
 # start_gemini_watchdog) moved to lib/gemini_watchdog.sh so bin/audit
 # can share the same kill arms. Sourced near the top of this file.
+#
+# The two helpers below stay here: they read benchmark's per-cell
+# directory layout (audit.log, backend.raw.log, repo-root/output/...),
+# which bin/audit has no notion of, so they are not shared watchdog logic.
+
+# cell_log_has_quota_exhaustion — true if any of the cell's logs carry a
+# gemini quota / 429 diagnostic. This is the post-run confirmation that
+# pairs with the live watchdog: even when the watchdog never fired (e.g.
+# the cell finished on its own with a quota error in the tail), a quota
+# line on disk marks the cell quota-dead so the run short-circuits the
+# remaining replicates instead of re-burning a dead account's budget.
+cell_log_has_quota_exhaustion() {
+  local cell_dir="$1"
+  local quota_re='RESOURCE_EXHAUSTED|Individual quota reached|exceeded your current quota|exhausted your capacity|quota will reset|quota reached|status (429|503)|code 429|HTTP 429|Too Many Requests'
+  [ -d "$cell_dir" ] || return 1
+  # The repo-root/output globs trust per-cell isolation: each cell gets
+  # its own checkout, so output/<target>/<backend>/logs/ never carries
+  # bytes from a sibling cell. If two cells ever share a checkout, a
+  # stale quota line from one would mis-flag the other as quota-dead.
+  grep -I -qiE "$quota_re" \
+    "$cell_dir/audit.log" \
+    "$cell_dir/backend.raw.log" \
+    "$cell_dir"/repo-root/output/*/*/logs/index.log \
+    "$cell_dir"/repo-root/output/*/*/logs/model-preflight-*.raw \
+    2>/dev/null
+}
+
+# cell_has_result_artifacts — true if the cell wrote at least one
+# crash or finding directory. Used to distinguish a backend that
+# produced genuinely empty output from one that wrote artifacts but
+# left an empty raw log.
+cell_has_result_artifacts() {
+  local results_dir="$1"
+  [ -d "$results_dir" ] || return 1
+  [ "$(find "$results_dir/crashes" "$results_dir/findings" \
+    -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" -gt 0 ]
+}
 
 # Snapshot every `findings/FIND-*` and `crashes/CRASH-*` path that
 # already exists in the target tree at cell start. The post-cell sweep
