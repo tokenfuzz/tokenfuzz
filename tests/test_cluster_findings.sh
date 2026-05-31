@@ -157,6 +157,27 @@ assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.html" \
   'href="FIND-A1/report.html"' \
   "FINDING-CLUSTERS.html links to rendered member HTML"
 
+# If a backend is configured but keying still leaves reports without
+# .finding-key.json (bad model output, backend failure, quota, etc.), surface
+# that degradation instead of silently rendering only deterministic signatures.
+warn_root="$TEST_TMPDIR/warn-results"
+mkdir -p "$warn_root/findings/FIND-WARN"
+cat > "$warn_root/findings/FIND-WARN/report.md" <<'EOF'
+# Warning fixture
+
+Location: `src/warn.c:warn:12`
+Class: memory-safety
+EOF
+warn_err="$TEST_TMPDIR/cluster-findings-warn.err"
+ACTIVE_BACKEND=claude \
+  LLM_DECIDE_DISABLE=0 \
+  LLM_DECIDE_MOCK_FINDING_KEY='{"dedup_key":"oops"}' \
+  python3 "$CLUSTER" "$warn_root" >/dev/null 2>"$warn_err" \
+  || fail "cluster-findings warning fixture runs cleanly" "exit nonzero: $(cat "$warn_err")"
+warn_out=$(cat "$warn_err")
+assert_match 'WARN: 1/1 finding\(s\).*still have no dedup_key' "$warn_out" \
+  "cluster-findings warns when configured keying leaves reports unkeyed"
+
 # Helper: pull cluster id from a stamped Cluster: line.
 cl_id() {
   grep -m1 -E '^Cluster: FCL-' "$RESULTS_DIR/findings/$1/report.md" \

@@ -44,9 +44,10 @@ CACHE_NAME = ".finding-key.json"
 # key produced under an older rubric is recomputed rather than trusted.
 KEY_VERSION = "v1"
 _PROMPT = "finding_key.md.j2"
-# The keyer is just another llm_decide call, so it honors the same harness-wide
-# per-decision budget every other decision uses (LLM_DECISION_TIMEOUT, which
-# lib/triage.sh defaults to 45) — it must not be the first decision to time out.
+# The keyer uses the same per-decision timeout as other llm_decide calls
+# (LLM_DECISION_TIMEOUT, which lib/triage.sh defaults to 45). It is not subject
+# to the live-agent call-count budget: keying is a finite cached pass over
+# FIND-* directories.
 # A slow agentic backend (agy/gemini) routinely needs well over the old
 # hardcoded 30s under load, which is what left gemini findings unkeyed.
 _TIMEOUT_DEFAULT = 45

@@ -40,9 +40,11 @@ Environment knobs (mirrors the prior bash contract exactly):
                                          Wins over LLM_DECIDE_MOCK_<UPPER>.
                                          Use for testing multi-vote gates.
   LLM_DECIDE_COUNTER_FILE=<path>         budget counter file location
-  LLM_DECIDE_MAX_CALLS=<n>               budget cap (default 120 when
+  LLM_DECIDE_MAX_CALLS=<n>               budget cap (default 1000 when
                                          LOGDIR/counter file is set,
-                                         0 = unlimited)
+                                         0 = unlimited). The finding_key
+                                         decision is exempt: it is bounded by
+                                         FIND-* dirs and cached per finding.
   LLM_DECIDE_LOG=<path>                  audit-trail log file
   ACTIVE_BACKEND=<backend>                 concrete backend to dispatch to
                                            (one of: claude, codex, gemini, oss)
@@ -184,11 +186,11 @@ def _counter_file() -> Optional[Path]:
 
 
 def _budget_cap() -> int:
-    raw = os.environ.get("LLM_DECIDE_MAX_CALLS", "120")
+    raw = os.environ.get("LLM_DECIDE_MAX_CALLS", "1000")
     try:
         return int(raw)
     except (TypeError, ValueError):
-        return 120
+        return 1000
 
 
 def budget_available() -> bool:
@@ -633,7 +635,11 @@ def llm_decide(
         _llm_log(f"{decision} FAIL empty-prompt")
         return None
 
-    if not budget_available():
+    # finding_key is explicit batch post-processing. It is bounded by the
+    # number of FIND-* directories and cached in each .finding-key.json, so the
+    # live-agent safety budget is the wrong limit here: a 240-finding pool
+    # legitimately needs up to 240 first-pass calls.
+    if decision != "finding_key" and not budget_available():
         _llm_log(f"{decision} SKIP budget-exhausted max={_budget_cap()}")
         return None
 

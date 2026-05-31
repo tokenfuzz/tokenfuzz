@@ -613,7 +613,7 @@ assert_file_contains "$SCRIPT_ROOT/bin/audit" 'LLM_DECIDE_COUNTER_FILE="\$LOGDIR
   "llm budget: harness counter is scoped to backend logdir"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'LLM_DECIDE_COUNTER_FILE="\$LOGDIR/\.llm_decisions_\$\{agent_num\}"' \
   "llm budget: agent counters are scoped per agent logdir"
-assert_file_contains "$SCRIPT_ROOT/bin/audit" 'LLM_DECIDE_MAX_CALLS="\$\{LLM_DECIDE_MAX_CALLS:-120\}"' \
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'LLM_DECIDE_MAX_CALLS="\$\{LLM_DECIDE_MAX_CALLS:-1000\}"' \
   "llm budget: default cap allows deeper decisions"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'printf '\''0'\'' > "\$LLM_DECIDE_COUNTER_FILE"' \
   "llm budget: harness counter resets each iteration"

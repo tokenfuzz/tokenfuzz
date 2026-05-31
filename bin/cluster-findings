@@ -87,6 +87,23 @@ def _read_text(path: Path) -> str:
         return ""
 
 
+def _keyer_backend_configured() -> bool:
+    if os.environ.get("LLM_DECIDE_DISABLE", "0") == "1":
+        return False
+    return bool((os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or "").strip())
+
+
+def _warn_unkeyed(scope: Path, total: int, unkeyed: int) -> None:
+    if total <= 0 or unkeyed <= 0 or not _keyer_backend_configured():
+        return
+    print(
+        f"[cluster-findings] WARN: {unkeyed}/{total} finding(s) in {scope} "
+        "still have no dedup_key after keying; clustering fell back to "
+        "deterministic signatures for those reports",
+        file=sys.stderr,
+    )
+
+
 def _find_report(find_dir: Path) -> Path | None:
     return exact_child_file(
         find_dir,
@@ -299,12 +316,20 @@ def cluster_findings(findings_root: Path, target_root: str = "",
     sigs: list[dict] = []
     if not findings_root.is_dir():
         return sigs
+    total = 0
+    unkeyed = 0
     for d in sorted(findings_root.iterdir()):
         if not d.is_dir() or not d.name.startswith("FIND-"):
             continue
+        total += 1
         if do_key:
             finding_keyer.ensure_key(d)
-        sigs.append(_signature(d, target_root))
+        sig = _signature(d, target_root)
+        if do_key and sig.get("report_text") and not sig.get("dedup_key"):
+            unkeyed += 1
+        sigs.append(sig)
+    if do_key:
+        _warn_unkeyed(findings_root, total, unkeyed)
     return _make_clusters(sigs, display_key="id")
 
 
@@ -714,6 +739,8 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
                                   do_key: bool = True) -> int:
     all_sigs: list[dict] = []
     per_agent: dict[str, Path] = {}
+    total = 0
+    unkeyed = 0
     for agent_dir in sorted(target_root.iterdir()):
         if not agent_dir.is_dir():
             continue
@@ -724,12 +751,17 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
         for d in sorted(findings_root.iterdir()):
             if not d.is_dir() or not d.name.startswith("FIND-"):
                 continue
+            total += 1
             if do_key:
                 finding_keyer.ensure_key(d)
             sig = _signature(d, llm_target_root_prefix)
+            if do_key and sig.get("report_text") and not sig.get("dedup_key"):
+                unkeyed += 1
             sig["agent"] = agent_dir.name
             sig["display_id"] = f"{agent_dir.name}/{d.name}"
             all_sigs.append(sig)
+    if do_key:
+        _warn_unkeyed(target_root, total, unkeyed)
 
     clusters = _make_clusters(all_sigs, display_key="display_id")
 
