@@ -13,6 +13,8 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 source "$TESTS_DIR/helpers.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_ROOT/lib/timeout.sh"
 
 setup_test_env
 
@@ -175,9 +177,18 @@ fake_gemini="$work/fake-gemini"
 cat > "$fake_gemini" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-cat >/dev/null || true
-if [ -n "${BENCHMARK_FAKE_BARE_JUNK:-}" ]; then
-  printf 'junk from %s\n' "$(pwd)" > "$BENCHMARK_FAKE_BARE_JUNK"
+prompt="$(cat 2>/dev/null || true)"
+case "$prompt" in
+  *MODEL_PREFLIGHT_OK*)
+    if [ -n "${FAKE_BACKEND_RELATIVE_WRITE:-}" ]; then
+      printf 'junk from preflight %s\n' "$(pwd)" > "$FAKE_BACKEND_RELATIVE_WRITE"
+    fi
+    printf 'MODEL_PREFLIGHT_OK\n'
+    exit 0
+    ;;
+esac
+if [ -n "${FAKE_BACKEND_RELATIVE_WRITE:-}" ]; then
+  printf 'junk from %s\n' "$(pwd)" > "$FAKE_BACKEND_RELATIVE_WRITE"
 fi
 printf '{"id":"REC-empty","slice":"fake","confidence":"AUDIT-CLEAN","notes":"fake clean"}\n'
 SH
@@ -185,7 +196,7 @@ chmod +x "$fake_gemini"
 model_direct_junk_name="benchmark-model-direct-junk-$$.txt"
 rm -f "$SCRIPT_ROOT/$model_direct_junk_name" 2>/dev/null || true
 gemini_direct_root="$work/gemini-direct-bench"
-gemini_direct_out=$(GEMINI_BIN="$fake_gemini" BENCHMARK_FAKE_BARE_JUNK="$model_direct_junk_name" \
+gemini_direct_out=$(GEMINI_BIN="$fake_gemini" FAKE_BACKEND_RELATIVE_WRITE="$model_direct_junk_name" \
   bash "$BENCH" --target "$bench_target" --backend gemini \
     --replicates 1 --conditions model-direct --budget-wall 5 \
     --bench-root "$gemini_direct_root" 2>&1)
@@ -212,6 +223,21 @@ assert_eq "0" "$gemini_unlimited_rc" \
 assert_match "budget=unlimited" "$gemini_unlimited_out" \
   "T16k3: unlimited wall-time mode is visible in benchmark logs"
 
+# Regression: when benchmark output is captured by a shell command
+# substitution, the console-log FIFO path can deadlock in the EXIT trap
+# waiting for tee. Gemini CLI + unlimited wall time used to expose this:
+# the cell finished and console.log said "done", but bash never returned.
+gemini_cli_unlimited_root="$work/gemini-cli-unlimited-bench"
+gemini_cli_unlimited_out=$(USE_GEMINI_CLI=1 GEMINI_BIN="$fake_gemini" \
+  audit_timeout_run 8 bash "$BENCH" --target "$bench_target" --backend gemini \
+    --replicates 1 --conditions model-direct --budget-wall 0 \
+    --bench-root "$gemini_cli_unlimited_root" 2>&1)
+gemini_cli_unlimited_rc=$?
+assert_eq "0" "$gemini_cli_unlimited_rc" \
+  "T16k4: captured Gemini CLI unlimited benchmark exits without tee deadlock"
+assert_match "cells complete: 1 done, 0 failed" "$gemini_cli_unlimited_out" \
+  "T16k5: captured Gemini CLI unlimited benchmark cell marked done"
+
 # ── T16l-o: benchmark harness cells do not dirty the real repo root ──────
 # bin/audit cd's to its SCRIPT_ROOT before launching backend agents. In a
 # benchmark harness cell, SCRIPT_ROOT must be the cell's repo facade, not the
@@ -220,9 +246,12 @@ assert_match "budget=unlimited" "$gemini_unlimited_out" \
 root_junk_name="benchmark-root-junk-$$.txt"
 rm -f "$SCRIPT_ROOT/$root_junk_name" 2>/dev/null || true
 gemini_harness_root="$work/gemini-harness-bench"
-gemini_harness_out=$(GEMINI_BIN="$fake_gemini" BENCHMARK_FAKE_BARE_JUNK="$root_junk_name" \
+# This path starts the real bin/audit facade before the fake backend runs.
+# The fake handles model preflight and writes immediately; the timeout is only
+# the harness cell's normal stop condition, not the behavior under test here.
+gemini_harness_out=$(GEMINI_BIN="$fake_gemini" FAKE_BACKEND_RELATIVE_WRITE="$root_junk_name" \
   bash "$BENCH" --target "$bench_target" --backend gemini \
-    --replicates 1 --conditions harness --agents 1 --budget-wall 5 \
+    --replicates 1 --conditions harness --agents 1 --budget-wall 8 \
     --bench-root "$gemini_harness_root" 2>&1)
 gemini_harness_rc=$?
 assert_eq "0" "$gemini_harness_rc" \

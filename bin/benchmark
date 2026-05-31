@@ -361,7 +361,21 @@ start_console_log() {
   # the run directory's filesystem rejects FIFOs (seen on some mounted
   # workspaces), fall back to creating it under TMPDIR / /tmp so live
   # mirroring still works. console.log always lands in BENCH_DIR.
+  #
+  # When stdout is not a terminal (tests, command substitutions, CI log
+  # capture), skip the FIFO entirely. The exit trap replays console.log
+  # once to the captured stream. That avoids a teardown deadlock where
+  # the shell waits for tee while tee still holds the command-substitution
+  # pipe open.
   local fifo_dir fifo
+  if [ ! -t 1 ]; then
+    exec 3>&1 4>&2
+    CONSOLE_LOG_STARTED=1
+    CONSOLE_LOG_MODE="file"
+    trap finish_console_log EXIT
+    exec > "$BENCH_DIR/console.log" 2>&1
+    return
+  fi
   if command -v mkfifo >/dev/null 2>&1; then
     for fifo_dir in "$BENCH_DIR" "${TMPDIR:-/tmp}" /tmp; do
       [ -d "$fifo_dir" ] || continue
