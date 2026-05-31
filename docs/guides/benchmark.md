@@ -41,13 +41,14 @@ With all defaults, that command runs:
 | --- | --- | --- |
 | `--backend` | _(see below)_ | Agent backend, one of: `claude`, `codex`, `gemini`, `oss`. |
 | `--replicates` | `3` | How many times each condition is run. |
-| `--budget-wall` | `7200` | Seconds each run is allowed (120 minutes). |
+| `--budget-wall` | `10800` | Seconds each run is allowed (180 minutes / 3 hours). |
 | `--conditions` | `model-direct,harness` | Both conditions. |
 | `--bench-root` | `output/benchmark` | Where all results are stored. |
+| `--run-id` | _(UTC timestamp)_ | Name of the run directory. Re-use a prior id to resume an interrupted run. |
 
 So `bin/benchmark --target pcre2` is: **the default backend, 3 runs
-each of model-direct and harness, 120 minutes per run** — six runs,
-about twelve hours of wall-clock. Run `bin/benchmark --help` to see every
+each of model-direct and harness, 180 minutes per run** — six runs,
+about eighteen hours of wall-clock. Run `bin/benchmark --help` to see every
 option and the exact default backend.
 
 !!! note "Budget for the harness's recon pass"
@@ -59,8 +60,8 @@ option and the exact default backend.
     investigation begins; later harness cells normally get a cache hit
     and spend their budget on investigation. A short first harness cell
     can be eaten almost entirely by recon — which is why the default is
-    120 minutes. For a meaningful comparison, give each cell well over
-    one hour.
+    180 minutes (3 hours). For a meaningful comparison, give each cell
+    well over one hour.
 
 !!! tip "Try it first with no API cost"
     `bin/benchmark --target pcre2 --dry-run` runs the whole pipeline
@@ -69,20 +70,20 @@ option and the exact default backend.
 
 ## What a run looks like
 
-The screenshot below is one illustrative run on `cjson` with three
-backends, two replicates each, at the default 120-minute budget — the
+The example below is one illustrative run on `cjson` with three
+backends, two replicates each, at the default 3-hour budget — the
 same commands you can reproduce locally:
 
 ```bash
-bin/benchmark --target cjson --backend claude --replicates 2 --budget-wall 7200
-bin/benchmark --target cjson --backend codex  --replicates 2 --budget-wall 7200
-bin/benchmark --target cjson --backend gemini --replicates 2 --budget-wall 7200
+bin/benchmark --target cjson --backend claude --replicates 2 --budget-wall 10800
+bin/benchmark --target cjson --backend codex  --replicates 2 --budget-wall 10800
+bin/benchmark --target cjson --backend gemini --replicates 2 --budget-wall 10800
 ```
 
-[![TokenFuzz vs Model-Direct](../assets/benchmark_demo.png)](../assets/benchmark_demo.png){target=_blank title="TokenFuzz vs Model-Direct — click to open full-size"}
+_Benchmark comparison screenshot — pending._
 
 It is a demo of the output shape, not a statistical comparison. LLM
-runs are stochastic and a two-replicate, two-hour cell can swing either
+runs are stochastic and a two-replicate, three-hour cell can swing either
 way across reruns; the first harness cell also pays the recon cost.
 For a defensible head-to-head, push `--replicates` to 5+ and
 `--budget-wall` well past the first harness cell's recon cost, across
@@ -158,7 +159,7 @@ see exactly why it scored the way it did.
 # More replicates = a more trustworthy result (5+ recommended for claims).
 bin/benchmark --target pcre2 --replicates 5
 
-# Give each run 90 minutes instead of the default 120.
+# Give each run 90 minutes instead of the default 180.
 bin/benchmark --target pcre2 --budget-wall 5400
 
 # Only run the harness condition (skip the model-direct baseline).
@@ -170,6 +171,26 @@ bin/benchmark --target libxml2 --backend <backend>
 # Start a fresh ledger (the previous one is archived, not deleted).
 bin/benchmark --reset
 ```
+
+## Resuming an interrupted run
+
+A run can stop partway — most often when the provider's quota or rate limit
+is hit mid-sweep, leaving some replicates `failed`, `quota_exhausted`, or
+unfinished. To finish it, wait for quota to return and re-run **the same
+command with the run's `--run-id`** — the run directory name under
+`output/benchmark/<backend>/`, a UTC timestamp like `20260530-142558`:
+
+```bash
+bin/benchmark --target cjson --backend claude --replicates 2 \
+  --run-id 20260530-142558
+```
+
+Resume is per replicate and covers both conditions: cells already marked
+`done` are kept and skipped, and every incomplete cell — in model-direct
+*and* harness — is wiped clean and re-run, so a half-finished replicate's
+artifacts are never folded into the result. `--replicates` is the target
+total, so you can raise it on resume to add more replicates; pass the same
+`--conditions` you started with.
 
 ## Things to know
 

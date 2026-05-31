@@ -40,7 +40,7 @@
 #   --budget-wall <seconds>  Wall-clock budget per cell; 0 means no outer
 #                            timeout. The harness
 #                            cell spends its first 10-30 min on a cold-start
-#                            recon pass, so budget well above that. [7200]
+#                            recon pass, so budget well above that. [10800]
 #   --agents <N>             Harness worker count, passed to bin/audit as
 #                            NUM_AGENTS. model-direct remains one agent.
 #                            [default: bin/audit default]
@@ -50,6 +50,11 @@
 #                            [<bench-root>/<backend>/benchmark-results.md]
 #   --bench-root <dir>       Shared root for all backends' benchmark state.
 #                            [output/benchmark]
+#   --run-id <id>            Run directory name under <bench-root>/<backend>/.
+#                            Reuse a prior id to resume: cells already marked
+#                            done are skipped, incomplete cells re-run clean.
+#                            [default: a fresh UTC timestamp; BENCHMARK_RUNID
+#                            also sets it]
 #   --dry-run                Exercise the pipeline with synthetic cells, no LLM.
 #   --no-validate-findings   Skip the model-direct independent-validator
 #                            gate. Every raw FIND-<n>/ stays in findings/
@@ -59,7 +64,7 @@
 #   --reset [--hard]         Archive (or, with --hard, delete) the ledger; exit.
 #
 # So `bin/benchmark --target pcre2` runs the default backend, 3 replicates
-# each of the model-direct and harness conditions, 7200s budget per cell.
+# each of the model-direct and harness conditions, 10800s budget per cell.
 #
 # Note: the harness condition is `bin/audit` as shipped, which on a cold start
 # runs a breadth-first recon pass (10-30 min on a small library) before
@@ -131,9 +136,10 @@ usage() {
 TARGET_SLUG=""
 BACKEND="codex"
 REPLICATES=3
-BUDGET_WALL=7200
+BUDGET_WALL=10800
 AGENTS=""
 CONDITIONS="model-direct,harness"
+RUN_ID=""
 
 # Benchmark cells must compare backends on equal footing — auto-memory in
 # Claude Code injects MEMORY.md into every spawned agent's system prompt
@@ -183,6 +189,8 @@ while [ $# -gt 0 ]; do
     --ledger=*) LEDGER="${1#--ledger=}"; shift ;;
     --bench-root) BENCH_ROOT="${2:?--bench-root needs a value}"; shift 2 ;;
     --bench-root=*) BENCH_ROOT="${1#--bench-root=}"; shift ;;
+    --run-id) RUN_ID="${2:?--run-id needs a value}"; shift 2 ;;
+    --run-id=*) RUN_ID="${1#--run-id=}"; shift ;;
     --reset) DO_RESET=1; shift ;;
     --hard) RESET_HARD=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -305,18 +313,14 @@ for c in "${COND_ARR[@]}"; do
 done
 
 # ── run setup ────────────────────────────────────────────────────────────
-RUNID_BASE="${BENCHMARK_RUNID:-$(date +%Y%m%d-%H%M%S)}"
-RUNID="$RUNID_BASE"
+# --run-id wins, then BENCHMARK_RUNID, then a fresh UTC timestamp. A given
+# id always maps to one directory: re-running with the same id resumes into
+# it (the cell loop skips cells already marked done and re-runs the rest),
+# so finishing a quota-interrupted run is just the same command again with
+# its run-id. The per-(target,backend) lock already blocks concurrent runs.
+RUNID="${RUN_ID:-${BENCHMARK_RUNID:-$(date +%Y%m%d-%H%M%S)}}"
 BENCH_DIR="$BENCH_BACKEND_ROOT/$RUNID"
-runid_suffix=2
-# Claim the run directory atomically so two runs starting in the same second
-# (a parallel sweep of one backend across targets) can't land in one dir.
-while ! mkdir "$BENCH_DIR" 2>/dev/null; do
-  [ -e "$BENCH_DIR" ] || { echo "FATAL: cannot create $BENCH_DIR" >&2; exit 1; }
-  RUNID="${RUNID_BASE}-${runid_suffix}"
-  BENCH_DIR="$BENCH_BACKEND_ROOT/$RUNID"
-  runid_suffix=$((runid_suffix + 1))
-done
+mkdir -p "$BENCH_DIR" || { echo "FATAL: cannot create $BENCH_DIR" >&2; exit 1; }
 CELLS_DIR="$BENCH_DIR/cells"
 mkdir -p "$CELLS_DIR" || { echo "FATAL: cannot create $CELLS_DIR" >&2; exit 1; }
 
@@ -1512,6 +1516,12 @@ for cond in "${COND_ARR[@]}"; do
       continue
     fi
 
+    # Reaching here means this cell will run. On a resume the dir may hold a
+    # half-finished replicate (failed / quota_exhausted / killed mid-cell):
+    # wipe it so the re-run starts clean and a partial run's crashes/findings
+    # can never be folded into this replicate's harvest. Cells already done
+    # were skipped above, so this only ever discards incomplete work.
+    rm -rf "$cell_dir"
     mkdir -p "$cell_dir"
     exp_name="bench-${RUNID}-${cond}-r${rep}"
     # Per-cell config surfaced in the start line so the live log is enough

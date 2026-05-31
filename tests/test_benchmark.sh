@@ -245,7 +245,14 @@ python3 "$PY" ledger "$bd" --ledger "$ledger" >/dev/null
 hdr_count2=$(grep -c '^# Benchmark results' "$ledger")
 assert_eq "$hdr_count" "$hdr_count2" "T6d: header not duplicated on second append"
 sec_count=$(grep -c 'Benchmark run' "$ledger")
-assert_eq "2" "$sec_count" "T6e: second append adds a second section"
+assert_eq "1" "$sec_count" "T6e: re-rendering the same runid replaces its section (no duplicate)"
+# A different runid still accumulates as a new section.
+bd_b="$work/ledger-bd-b"
+cp -r "$bd" "$bd_b"
+jtmp="$(mktemp)"; jq '.runid="run2"' "$bd_b/run.json" > "$jtmp" && mv "$jtmp" "$bd_b/run.json"
+python3 "$PY" ledger "$bd_b" --ledger "$ledger" >/dev/null
+sec_count2=$(grep -c 'Benchmark run' "$ledger")
+assert_eq "2" "$sec_count2" "T6f: a different runid accumulates as a new section"
 
 # ── T7: reset archives the ledger; --hard deletes it ─────────────────────
 out=$(python3 "$PY" reset --ledger "$ledger")
@@ -641,30 +648,60 @@ assert_file_contains "$dledger2" '\[`CL-[^]]*`\]([^)]*pool/crashes/[^)]*)' \
 # file:// URI — both render as a working <a href="..."> in a browser.
 assert_file_contains "$dhtml2" '<a href="[^"]*pool/[^/"]*/crashes[^"]*"' \
   "T15l: artifact links render as clickable hrefs in the HTML"
-# A second run appends another section; the repeated "Verdict" / "Scoreboard"
-# headings must get unique anchor ids so in-page links never collide.
-python3 "$PY" ledger "$ddir" --ledger "$dledger2" >/dev/null
+# A second run with a DIFFERENT runid appends another section; the repeated
+# "Verdict" / "Scoreboard" headings must get unique anchor ids so in-page
+# links never collide. (Re-rendering the SAME runid replaces in place — see
+# T15i2 — so two distinct runids are what produce two sections.)
+ddir_b="$work/dedup-fixture-b"
+cp -r "$ddir" "$ddir_b"
+jtmp="$(mktemp)"; jq '.runid="dedup-fixture-b"' "$ddir_b/run.json" > "$jtmp" \
+  && mv "$jtmp" "$ddir_b/run.json"
+python3 "$PY" ledger "$ddir_b" --ledger "$dledger2" >/dev/null
 python3 "$RENDER_MD" "$dledger2" --html-sibling >/dev/null
 assert_file_contains "$dhtml2" 'id="verdict-2"' \
-  "T15i: a repeated heading gets a deduplicated anchor id"
+  "T15i: a repeated heading across runs gets a deduplicated anchor id"
 
-# A repeated runid must not reuse an existing run directory. This can happen
-# naturally when two benchmarks start in the same second; BENCHMARK_RUNID makes
-# the collision deterministic for the test.
-collision_root="$work/runid-collision"
-BENCHMARK_RUNID=20260104-000000 bash "$BENCH" --target dummytarget \
+# Re-rendering the same runid replaces its section instead of stacking a
+# duplicate — a resumed run yields one row, not the interrupted partial plus
+# the completed result.
+dup_ledger="$work/dup-ledger.md"
+python3 "$PY" ledger "$ddir" --ledger "$dup_ledger" >/dev/null
+python3 "$PY" ledger "$ddir" --ledger "$dup_ledger" >/dev/null
+heading_count="$(grep -c '^## Benchmark run `dedup-fixture`' "$dup_ledger" || true)"
+assert_eq "1" "$heading_count" \
+  "T15i2: re-rendering the same runid replaces its ledger section (no duplicate)"
+
+# --run-id resume: same id reuses the same dir (no -2 fork), cells already
+# done are preserved/skipped, and an incomplete cell is wiped and re-run so a
+# half-finished replicate's artifacts never survive into the resumed result.
+resume_root="$work/resume"
+bash "$BENCH" --target dummytarget --run-id rerun01 \
   --dry-run --replicates 1 --conditions model-direct \
-  --bench-root "$collision_root" >/dev/null 2>&1
-BENCHMARK_RUNID=20260104-000000 bash "$BENCH" --target dummytarget \
-  --dry-run --replicates 1 --conditions model-direct \
-  --bench-root "$collision_root" >/dev/null 2>&1
-assert_dir_exists "$collision_root/codex/20260104-000000" \
-  "T15m: first colliding runid keeps the base directory"
-assert_dir_exists "$collision_root/codex/20260104-000000-2" \
-  "T15n: second colliding runid gets a unique directory"
-collision_xt=$(python3 "$PY" crosstab "$collision_root")
-assert_match '20260104-000000-2' "$collision_xt" \
-  "T15o: crosstab includes the collision-suffixed run"
+  --bench-root "$resume_root" >/dev/null 2>&1
+assert_dir_exists "$resume_root/codex/rerun01" \
+  "T15m: --run-id names the run directory"
+assert_dir_not_exists "$resume_root/codex/rerun01-2" \
+  "T15n: a repeated run-id reuses its dir instead of forking a -2 suffix"
+
+# Plant a half-finished SECOND replicate (failed, with a stale finding) as an
+# interrupted run would leave behind.
+bad_cell="$resume_root/codex/rerun01/cells/model-direct-r2"
+mkdir -p "$bad_cell/findings/FIND-STALE"
+cat > "$bad_cell/cell.json" <<'JSON'
+{"condition":"model-direct","replicate":2,"status":"failed"}
+JSON
+
+# Resume with replicates bumped to 2: r1 (done) is skipped, r2 (failed) is
+# wiped clean and re-run.
+resume_out="$(bash "$BENCH" --target dummytarget --run-id rerun01 \
+  --dry-run --replicates 2 --conditions model-direct \
+  --bench-root "$resume_root" 2>&1)"
+assert_match 'already done — skipping' "$resume_out" \
+  "T15o: resume skips a replicate already marked done"
+assert_dir_not_exists "$bad_cell/findings/FIND-STALE" \
+  "T15o2: resume wipes a half-finished replicate before re-running it"
+assert_eq "done" "$(jq -r '.status' "$bad_cell/cell.json")" \
+  "T15o3: the re-run replicate completes and is marked done"
 
 # ── T15p–T15t: concurrency guard — one run per (target, backend) ──────────
 # Two live runs of the same target+backend racing on the shared ledger and

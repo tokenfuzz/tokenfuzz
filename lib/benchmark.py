@@ -2473,11 +2473,46 @@ bottom. Use `bin/benchmark --reset` to archive this file and start fresh.
 """
 
 
+_RUN_HEADING_PREFIX = "## Benchmark run `"
+
+
+def _section_runid(section: str) -> str | None:
+    """The run-id from a rendered section's `## Benchmark run \\`id\\`` heading."""
+    for line in section.splitlines():
+        s = line.strip()
+        if s.startswith(_RUN_HEADING_PREFIX) and s.endswith("`"):
+            return s[len(_RUN_HEADING_PREFIX):-1]
+    return None
+
+
+def _drop_run_section(text: str, runid: str) -> str:
+    """Remove the section for *runid* (heading to next run heading / EOF)."""
+    target = f"{_RUN_HEADING_PREFIX}{runid}`"
+    out, skipping = [], False
+    for line in text.splitlines(keepends=True):
+        if line.strip().startswith(_RUN_HEADING_PREFIX):
+            skipping = line.strip() == target
+        if not skipping:
+            out.append(line)
+    return "".join(out)
+
+
 def append_to_ledger(ledger_path: Path, section: str) -> None:
-    """Append *section* to the ledger, creating it with a header if new."""
+    """Append *section*, replacing any existing section for the same run-id.
+
+    A resumed run re-renders the same run-id; replacing its section in place
+    keeps the ledger one-section-per-run instead of stacking the interrupted
+    partial above the completed result.
+    """
     ledger_path = Path(ledger_path)
     if not ledger_path.exists() or ledger_path.stat().st_size == 0:
         ledger_path.write_text(_LEDGER_HEADER, encoding="utf-8")
+    runid = _section_runid(section)
+    if runid is not None:
+        existing = ledger_path.read_text(encoding="utf-8")
+        pruned = _drop_run_section(existing, runid)
+        if pruned != existing:
+            ledger_path.write_text(pruned.rstrip("\n") + "\n", encoding="utf-8")
     with ledger_path.open("a", encoding="utf-8") as fh:
         if not section.startswith("\n"):
             fh.write("\n")
