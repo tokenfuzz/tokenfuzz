@@ -16,7 +16,7 @@ source "$TESTS_DIR/helpers.sh"
 setup_test_env
 
 PY="$SCRIPT_ROOT/lib/benchmark.py"
-USAGE_PY="$SCRIPT_ROOT/lib/benchmark_model_direct_usage.py"
+USAGE_PY="$SCRIPT_ROOT/lib/llm_usage.py"
 BENCH="$SCRIPT_ROOT/bin/benchmark"
 RENDER_MD="$SCRIPT_ROOT/bin/render-md"
 
@@ -1543,12 +1543,13 @@ assert_eq "null" "$(jq -r '.requested_agents // "null"' "$p6_cell_a")" \
 # detector function directly and (b) the aggregator's treatment of the
 # quota_exhausted status it writes.
 
-# (a) Detector: source bin/benchmark just enough to get the function.
-#     Avoid running the script body by extracting the function definition.
-gqd="$work/gemini-quota-detector.sh"
-awk '/^gemini_quota_dominates\(\)/,/^}/' "$BENCH" > "$gqd"
-# shellcheck disable=SC1090
-. "$gqd"
+# (a) Detector: source the shared watchdog lib. The detector used to be
+#     a private function in bin/benchmark, extracted via awk from the
+#     script body; it now lives in lib/gemini_watchdog.sh and is shared
+#     with bin/audit. Source it directly — the lib has no side effects
+#     beyond defining functions.
+# shellcheck disable=SC1091
+. "$SCRIPT_ROOT/lib/gemini_watchdog.sh"
 
 # r2-style log: 12 quota retries, no assistant or result events → trigger.
 r2_like="$work/r2-like.log"
@@ -1777,13 +1778,11 @@ rm -f "$swp_fn_src"
 # don't exercise the watcher loop itself (process management is the
 # same shape as T29's quota watcher and would re-test bash plumbing,
 # not behaviour). The predicate is the load-bearing piece.
-drip_fn=$(mktemp)
-awk '
-  /^agy_drip_stopped\(\) \{/,/^\}/
-  /^agy_cli_log_for_pid\(\) \{/,/^\}/
-' "$BENCH" > "$drip_fn"
-# shellcheck disable=SC1090
-. "$drip_fn"
+# Functions now live in lib/gemini_watchdog.sh (sourced once above for T29).
+# Re-sourcing is idempotent; keep an explicit call here so T31 stays
+# runnable in isolation if a future refactor reorders test blocks.
+# shellcheck disable=SC1091
+. "$SCRIPT_ROOT/lib/gemini_watchdog.sh"
 
 # Positive: a log carrying the exact agy klog format trips.
 drip_log_yes="$work/drip-yes.log"
@@ -1874,7 +1873,8 @@ else
   fail "T31g: agy_cli_log_for_pid returns empty for a dead pid" "got: $dead_resolved"
 fi
 
-rm -f "$drip_fn"
+# (drip_fn cleanup retired: functions now live in lib/gemini_watchdog.sh,
+# no temp file is materialized for T31.)
 
 # ── T32: agy_in_idle_heartbeat_loop predicate ──────────────────────────
 # Validates the new arm of the gemini watchdog. The function returns
@@ -1883,12 +1883,9 @@ rm -f "$drip_fn"
 # the recent window, plus >=1 fetchAvailableModels / loadCodeAssist.
 # Same fail-safe model as agy_drip_stopped — missing klog, awk
 # errors, format drift all return false.
-idle_fn=$(mktemp)
-awk '
-  /^agy_in_idle_heartbeat_loop\(\) \{/,/^\}/
-' "$BENCH" > "$idle_fn"
-# shellcheck disable=SC1090
-. "$idle_fn"
+# Function now lives in lib/gemini_watchdog.sh (sourced above for T29/T31).
+# shellcheck disable=SC1091
+. "$SCRIPT_ROOT/lib/gemini_watchdog.sh"
 
 # Fixtures use real "now" timestamps so the date-arithmetic in the
 # function resolves correctly. Two HH:MM offsets are computed:
@@ -1962,6 +1959,7 @@ else
   pass "T32e: agy_in_idle_heartbeat_loop must NOT trigger on missing log"
 fi
 
-rm -f "$idle_fn"
+# (idle_fn cleanup retired: functions now live in lib/gemini_watchdog.sh,
+# no temp file is materialized for T32.)
 
 summary

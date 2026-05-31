@@ -24,7 +24,7 @@ export SCRIPT_ROOT
 cd "$SCRIPT_ROOT" || { echo "FATAL: cannot cd to $SCRIPT_ROOT" >&2; exit 1; }
 
 # Source extracted modules (runtime vars like RESULTS_DIR are bound at call-time).
-for _lib in platform.sh fmt.sh timeout.sh target_config.sh llm_invoke.sh llm_decide.sh structured_state.sh vocab.sh triage.sh quality.sh housekeeping.sh audit_debug.sh prompt.sh; do
+for _lib in platform.sh fmt.sh timeout.sh target_config.sh llm_invoke.sh llm_decide.sh structured_state.sh vocab.sh triage.sh quality.sh housekeeping.sh audit_debug.sh prompt.sh gemini_watchdog.sh; do
   [ -f "$SCRIPT_ROOT/lib/$_lib" ] || { echo "FATAL: missing lib/$_lib" >&2; exit 1; }
   source "$SCRIPT_ROOT/lib/$_lib"
 done
@@ -1658,39 +1658,37 @@ select_ensemble_backend_for_iteration() {
 }
 
 extract_usage_field() {
-  # Extract a usage accounting field from a raw JSON stream, aggregated across
-  # all emitted usage blocks. Handles Claude's stream-json schema (usage fields
-  # appear on most messages and grow cumulatively — take the MAX) and Codex's
-  # item.completed schema (single summary event — take the last). The gemini
-  # backend (Antigravity CLI) emits plain text with no usage telemetry —
-  # this function returns empty for agy logs.
+  # Extract a usage accounting field from a raw transcript. Delegates to
+  # lib/llm_usage.py — the same module bin/benchmark uses — so the agy
+  # plain-text estimator (which fixes the silent tokens=0 regression in
+  # the previous in-line jq implementation) is shared, not duplicated.
   #
-  # Also aliases common fields so callers can ask for e.g. "cached_input_tokens"
-  # and get Claude's "cache_read_input_tokens".
+  # The python helper handles:
+  #   - Claude stream-json (running usage on each message; take MAX)
+  #   - Codex item.completed (single summary event)
+  #   - gemini-cli stream-json (result.stats final cumulative)
+  #   - agy plain text (estimate from assistant transcript length;
+  #     row flagged estimated:true so downstream reporting stays
+  #     honest)
+  #
+  # The third optional argument is a path to the rendered prompt; when
+  # supplied for agy, input_tokens is also estimated from prompt bytes.
+  # Callers that don't pass it get 0 for input (agy's prompt isn't
+  # otherwise recoverable from the raw log).
   local file="$1"
   local field="$2"
+  local prompt_path="${3:-}"
   [ -f "$file" ] || { echo ""; return; }
-  jq -Rr --arg field "$field" '
-    fromjson? |
-    .. |
-    objects |
-    .usage? |
-    select(type == "object") |
-    (
-      .[$field]? //
-      (if $field == "cached_input_tokens"
-         then (.cache_read_input_tokens? // .cache_creation_input_tokens?)
-       elif $field == "input_tokens"
-         then .prompt_tokens?
-       elif $field == "output_tokens"
-         then .completion_tokens?
-       elif $field == "total_tokens"
-         then ((.input_tokens? // 0) + (.output_tokens? // 0))
-       else empty end)
-    ) // empty |
-    select(type == "number")
-  ' "$file" 2>/dev/null \
-    | awk 'BEGIN{m=-1} {if ($1+0 > m) m=$1+0} END{ if (m>=0) print m }'
+  local backend="${ACTIVE_BACKEND:-${AUDIT_BACKEND:-claude}}"
+  if [ -n "$prompt_path" ] && [ -f "$prompt_path" ]; then
+    python3 "$SCRIPT_ROOT/lib/llm_usage.py" extract-field \
+      "$field" "$backend" "$file" --prompt "$prompt_path" 2>/dev/null \
+      || echo ""
+  else
+    python3 "$SCRIPT_ROOT/lib/llm_usage.py" extract-field \
+      "$field" "$backend" "$file" 2>/dev/null \
+      || echo ""
+  fi
 }
 
 # Count tool invocations / shell commands executed by the agent.
@@ -5505,14 +5503,39 @@ run_agent() {
         fi
         exit "$_gemini_rc"
       else
-        # agy raw stdout IS the assistant transcript. Tee straight into
-        # $logfile and the .raw path for parity with other backends.
+        # agy raw stdout IS the assistant transcript. We background agy
+        # so the gemini watchdog (lib/gemini_watchdog.sh) can poll for
+        # the three known agy hang modes (quota dominates, post-Drip
+        # spin, idle-heartbeat loop) and SIGTERM the process tree.
+        # Without it the outer wall-clock watchdog (AGENT_TIMEOUT=7200)
+        # is the only kill arm and the operator pays up to 2h per
+        # stuck agent.
+        local _agy_raw _agy_pid _agy_watcher_pid _agy_rc=0
+        _agy_raw="$(audit_raw_path "$logfile")"
         printf '%s' "$prompt_with_budget" \
           | "$gemini_bin" "${gemini_flags[@]}" -p "" \
-          2>&1 \
-          | tee "$(audit_raw_path "$logfile")" \
-          | tee "$logfile" \
-          | sed -u "s|^|${_log_prefix} |"
+          > "$_agy_raw" 2>&1 &
+        _agy_pid=$!
+        start_gemini_watchdog "$_agy_raw" "$_agy_pid" \
+          "$(scratch_dir_path "$agent_num")" "$_role_display" &
+        _agy_watcher_pid=$!
+        wait "$_agy_pid" || _agy_rc=$?
+        # Watchdog runs `while sleep N; do ...`; a plain `kill` would be
+        # deferred until sleep returns. Walk the tree so the sleep child
+        # gets SIGTERM directly, then reap.
+        _kill_tree "$_agy_watcher_pid" TERM 2>/dev/null || true
+        wait "$_agy_watcher_pid" 2>/dev/null || true
+        # Mirror the prior tee chain: raw === text for agy, then prefix
+        # the lines for console display.
+        cp "$_agy_raw" "$logfile" 2>/dev/null || true
+        [ -s "$logfile" ] && sed -u "s|^|${_log_prefix} |" "$logfile"
+        # If the watchdog touched .quota-exhausted in the agent scratch
+        # dir, surface it the same way the preflight quota path does so
+        # the outer iteration loop can see the failure mode.
+        if [ -f "$(scratch_dir_path "$agent_num")/.quota-exhausted" ]; then
+          index_log "GEMINI_QUOTA: Agent $_role_display aborted by watchdog (sustained 429s)" >/dev/null 2>&1 || true
+        fi
+        exit "$_agy_rc"
       fi
     else
       # Shared flag picker; audit-only addition is --output-last-message.
@@ -5909,7 +5932,14 @@ run_agent() {
   if log_has_rate_limit_rejection "$(audit_raw_path "$logfile")"; then
     reset_dead_streak "$agent_num"
     index_log "Agent $_role_display hit model rate limit (tools=${tool_uses:-0}) — state preserved; global rate-limit backoff will handle retry timing"
-  elif [ "${tool_uses:-0}" -eq 0 ] && [ "${command_count:-0}" -eq 0 ] && [ "${verified_asan_runs:-0}" -eq 0 ]; then
+  # output_tokens > 0 keeps agy source-only sessions from false-tripping
+  # the gate. agy plain-text transcripts emit no tool_use /
+  # command_execution events the JSON-event scanner can count, so for an
+  # S2/S3/S5/S8 investigation that produces a FIND without an ASan run,
+  # the other three counters all sit at zero. The estimator in
+  # lib/llm_usage.py recovers output_tokens from raw assistant prose;
+  # any nonzero estimate is decisive evidence the agent did work.
+  elif [ "${tool_uses:-0}" -eq 0 ] && [ "${command_count:-0}" -eq 0 ] && [ "${verified_asan_runs:-0}" -eq 0 ] && [ "${output_tokens:-0}" -eq 0 ]; then
     bump_dead_streak "$agent_num"
     local streak
     streak=$(get_dead_streak "$agent_num")

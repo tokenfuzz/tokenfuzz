@@ -579,8 +579,8 @@ assert_match 'llm_agent_flags gemini gemini_flags "\$model" 80 "\$SCRIPT_ROOT,\$
   "$run_agent_src" "model: gemini launch passes script/target/results to llm_agent_flags"
 assert_match 'verified_asan_runs=\$\(count_verified_asan_runs "\$\(scratch_dir_path "\$agent_num"\)"' \
   "$run_agent_src" "agent quality: verified ASan runs are counted once for telemetry"
-assert_match '\[ "\$\{tool_uses:-0\}" -eq 0 \] && \[ "\$\{command_count:-0\}" -eq 0 \] && \[ "\$\{verified_asan_runs:-0\}" -eq 0 \]' \
-  "$run_agent_src" "agent quality: ASan activity prevents false dead-session rotation"
+assert_match '\[ "\$\{tool_uses:-0\}" -eq 0 \] && \[ "\$\{command_count:-0\}" -eq 0 \] && \[ "\$\{verified_asan_runs:-0\}" -eq 0 \] && \[ "\$\{output_tokens:-0\}" -eq 0 \]' \
+  "$run_agent_src" "agent quality: ASan + output_tokens gate prevents false dead-session rotation (output_tokens guard keeps agy source-only sessions alive)"
 # agy's --print-timeout defaults to 5m0s and silently aborts a long
 # agent session with "Error: timed out waiting for response" (0 tool
 # calls). The launch must pin it to the harness agent budget so the
@@ -1018,16 +1018,29 @@ EOF
     "agent exit: parent wait loop normalizes Codex aggregate status before warning"
 
   # ═════════════════════════════════════════════════════════════
-  # 7b. extract_usage_field — agy (gemini) emits no usage telemetry
+  # 7b. extract_usage_field — agy (gemini) plain-text estimator
   # ═════════════════════════════════════════════════════════════
-  # extract_usage_field is JSON-only. An agy transcript is plain text, so
-  # it parses to no usage object — the gemini cost path is the estimator
-  # in lib/benchmark_model_direct_usage.py, not this function.
+  # extract_usage_field now delegates to lib/llm_usage.py — the same
+  # estimator the benchmark uses. For an agy plain-text transcript with
+  # no usage telemetry, output_tokens is estimated from assistant prose
+  # length (chars/4). This output-side signal is load-bearing: it keeps
+  # the dead-streak gate (bin/audit ~L5935) from false-flagging
+  # productive S2/S3/S5/S8 source-only sessions that wrote a FIND but
+  # ran no ASan probe.
+  #
+  # input_tokens stays 0 unless the caller passes a prompt path (audit
+  # does for live sessions; this minimal test does not).
 
-  printf 'Here is the agy reply in plain prose, with no JSON usage block.\n' \
+  printf 'Here is the agy reply in plain prose, with no JSON usage block.\nIt is several lines long so the byte-count estimator returns a nonzero output.\n' \
     > "$TEST_TMPDIR/gemini_plain.log"
-  result=$(extract_usage_field "$TEST_TMPDIR/gemini_plain.log" "input_tokens")
-  assert_eq "" "$result" "usage: agy plain-text transcript yields no usage"
+  ACTIVE_BACKEND=gemini result=$(extract_usage_field "$TEST_TMPDIR/gemini_plain.log" "input_tokens")
+  assert_eq "0" "$result" "usage: agy plain-text input_tokens stays 0 without a prompt path"
+  ACTIVE_BACKEND=gemini result=$(extract_usage_field "$TEST_TMPDIR/gemini_plain.log" "output_tokens")
+  if [ -z "$result" ] || [ "$result" -le 0 ] 2>/dev/null; then
+    fail "usage: agy plain-text output_tokens must estimate > 0 (regression: tokens=0 silent pin)" "got '$result'"
+  else
+    pass "usage: agy plain-text output_tokens estimates > 0 (regression: tokens=0 silent pin)"
+  fi
 
   # ═════════════════════════════════════════════════════════════
   # 7c. extract_completed_item_count — Gemini tool_use events

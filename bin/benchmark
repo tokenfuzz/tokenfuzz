@@ -79,7 +79,7 @@ set -uo pipefail
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_ROOT" || { echo "FATAL: cannot cd to $SCRIPT_ROOT" >&2; exit 1; }
 
-for _lib in platform.sh timeout.sh target_config.sh llm_invoke.sh prompt_template.sh triage_validate.sh triage.sh; do
+for _lib in platform.sh timeout.sh target_config.sh llm_invoke.sh prompt_template.sh triage_validate.sh triage.sh gemini_watchdog.sh; do
   # shellcheck disable=SC1090
   source "$SCRIPT_ROOT/lib/$_lib" 2>/dev/null || {
     echo "FATAL: cannot source lib/$_lib" >&2
@@ -494,277 +494,10 @@ run_dryrun_cell() {
   return 0
 }
 
-# gemini_quota_dominates — true if the recent tail of the raw log is
-# dominated by 429-quota retries with no successful turn between them.
-#
-# This is the lone trigger condition we kill a gemini cell on, and it is
-# deliberately conservative: a healthy run (r1-style) takes 429s on the
-# way to real progress, so as long as ANY assistant message or result
-# event lands in the window we leave the cell alone. Only a window full
-# of retries with no progress trips the abort.
-#
-# Tunables (env vars, not user-visible flags — operators tune by setting
-# them in the shell that launches bin/benchmark):
-#   GEMINI_QUOTA_WINDOW_LINES   tail size to inspect             (default 400)
-#   GEMINI_QUOTA_MIN_429        429 retries needed to trigger    (default 10)
-gemini_quota_dominates() {
-  local raw_log="$1"
-  local window="${GEMINI_QUOTA_WINDOW_LINES:-400}"
-  local min_429="${GEMINI_QUOTA_MIN_429:-10}"
-  [ -f "$raw_log" ] || return 1
-  local tail_text n_429 n_progress
-  tail_text="$(tail -n "$window" "$raw_log" 2>/dev/null)"
-  n_429="$(printf '%s\n' "$tail_text" \
-    | grep -cE 'Attempt [0-9]+ failed with status 429' 2>/dev/null || true)"
-  n_progress="$(printf '%s\n' "$tail_text" \
-    | grep -cE '"role":"assistant"|"type":"result"' 2>/dev/null || true)"
-  [ "${n_429:-0}" -ge "$min_429" ] && [ "${n_progress:-0}" -eq 0 ]
-}
-
-cell_log_has_quota_exhaustion() {
-  local cell_dir="$1"
-  local quota_re='RESOURCE_EXHAUSTED|Individual quota reached|exceeded your current quota|exhausted your capacity|quota will reset|quota reached|status (429|503)|code 429|HTTP 429|Too Many Requests'
-  [ -d "$cell_dir" ] || return 1
-  # The repo-root/output globs trust per-cell isolation: each cell gets
-  # its own checkout, so output/<target>/<backend>/logs/ never carries
-  # bytes from a sibling cell. If two cells ever share a checkout, a
-  # stale quota line from one would mis-flag the other as quota-dead.
-  grep -I -qiE "$quota_re" \
-    "$cell_dir/audit.log" \
-    "$cell_dir/backend.raw.log" \
-    "$cell_dir"/repo-root/output/*/*/logs/index.log \
-    "$cell_dir"/repo-root/output/*/*/logs/model-preflight-*.raw \
-    2>/dev/null
-}
-
-cell_has_result_artifacts() {
-  local results_dir="$1"
-  [ -d "$results_dir" ] || return 1
-  [ "$(find "$results_dir/crashes" "$results_dir/findings" \
-    -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" -gt 0 ]
-}
-
-# Recursively send *sig* to a pid and all descendants, leaf-first. The
-# gemini-cli call sits three subshells deep (bench → backgrounded
-# function → llm_run_agent_prompt's `( cd && audit_timeout_run ... )`
-# subshell → gemini-cli), so a single `kill $pid` or `pkill -P $pid`
-# leaves grandchildren behind on macOS where SIGHUP-on-exit isn't the
-# default. Walking the tree bottom-up means SIGTERM reaches gemini-cli
-# directly instead of waiting for shell-exit chaining.
-_kill_tree() {
-  local pid="$1" sig="$2" child
-  for child in $(pgrep -P "$pid" 2>/dev/null); do
-    _kill_tree "$child" "$sig"
-  done
-  kill -"$sig" "$pid" 2>/dev/null || true
-}
-
-# agy_drip_stopped — true if the agy cli-*.log shows "Drip stopped",
-# the event agy's text_drip subsystem emits when its --print response
-# stream is fully buffered. agy usually exits within ~1s of this event
-# but occasionally enters an idle heartbeat loop instead, polling
-# fetchAvailableModels/loadCodeAssist until --print-timeout fires
-# (the harness passes BUDGET_WALL = up to 2h there). The findings/
-# crashes the cell cares about were already written to disk by tool
-# calls during generation; only the buffered --print summary text is
-# lost when we kill agy here, which is acceptable.
-#
-# Match is anchored on agy's klog format `text_drip.go:NNN] Drip stopped`
-# so a model response that legitimately contains the phrase "drip
-# stopped" in prose can never trip it.
-agy_drip_stopped() {
-  local cli_log="$1"
-  [ -f "$cli_log" ] || return 1
-  grep -qE 'text_drip\.go:[0-9]+\] Drip stopped' "$cli_log" 2>/dev/null
-}
-
-# agy_in_idle_heartbeat_loop — true if the klog shows the documented
-# post-generation idle-loop signature: no streamGenerateContent /
-# generateContent calls in the recent window, but at least one
-# fetchAvailableModels / loadCodeAssist call (agy's keepalive).
-#
-# This is the failure mode agy_drip_stopped was *designed* to catch
-# but cannot, because Drip stopped only fires when the response
-# stream completes cleanly — if agy can't reach "fully idle" state,
-# the text_drip event is suppressed and the existing trigger sits
-# unarmed for the full --print-timeout. Validated against the curl
-# 20260525-130457 hang: the broken klog has zero streamGenerateContent
-# calls in the 68 minutes between conversation-end (13:56:58) and
-# --print-timeout fire (15:04:58), only fetchAvailableModels +
-# loadCodeAssist pairs every ~6 min. The healthy cjson 20260525-201115
-# klog has streamGenerateContent every <30s throughout, and Drip
-# stopped + clean exit at the end — the detector returns false at
-# every point during the healthy run.
-#
-# Largest observed legitimate stream-call gap during active work
-# (curl active phase, before the freeze): 73s. Default window of
-# 600s gives ~8x headroom over that maximum; reduce via
-# AGY_IDLE_WINDOW_SECS only if needed.
-#
-# Fail-safe: missing klog, missing date binary, awk errors, or
-# future format changes all return rc!=0 — caller skips this poll,
-# same fail-safe model as agy_drip_stopped. Discriminator is the
-# *absence* of stream calls, not presence of heartbeat calls (the
-# healthy run also has heartbeat calls during active conversation,
-# so they alone don't disambiguate).
-agy_in_idle_heartbeat_loop() {
-  local cli_log="$1"
-  local window_secs="${2:-${AGY_IDLE_WINDOW_SECS:-600}}"
-  [ -f "$cli_log" ] || return 1
-
-  # BSD date (macOS) vs GNU date (Linux) — both forms tried so the
-  # detector works on operator workstations and CI runners alike.
-  local cutoff_hhmm
-  cutoff_hhmm="$(date -v-"${window_secs}"S +%H:%M 2>/dev/null \
-              || date -d "${window_secs} seconds ago" +%H:%M 2>/dev/null)"
-  [ -n "$cutoff_hhmm" ] || return 1
-
-  # Klog timestamp format: `IMMDD HH:MM:SS.us`. $2 holds HH:MM:SS;
-  # substr(,1,5) isolates HH:MM. Comparison is lexicographic over
-  # HH:MM strings, correct within a single UTC day. Across the
-  # midnight boundary the cutoff may end up "in the future"
-  # textually; the awk filter then returns 0 stream calls (under-
-  # counts), biasing toward NOT killing — the safe direction.
-  local stream_calls heartbeat_calls
-  stream_calls="$(awk -v cut="$cutoff_hhmm" '
-    { t=substr($2,1,5) }
-    t < cut { next }
-    /streamGenerateContent|:generateContent[^A-Za-z]/ { c++ }
-    END { print c+0 }
-  ' "$cli_log" 2>/dev/null)"
-
-  heartbeat_calls="$(awk -v cut="$cutoff_hhmm" '
-    { t=substr($2,1,5) }
-    t < cut { next }
-    /fetchAvailableModels|loadCodeAssist/ { c++ }
-    END { print c+0 }
-  ' "$cli_log" 2>/dev/null)"
-
-  [ "${stream_calls:-0}" = "0" ] && [ "${heartbeat_calls:-0}" -ge 1 ]
-}
-
-# agy_cli_log_for_pid — locate the cli-*.log file the agy process has
-# open. agy redirects its klog stream to
-# ~/.gemini/antigravity-cli/log/cli-<ts>.log at startup; that file is
-# the only place internal events like "Drip stopped" appear (agy's
-# --print stdout is buffered until exit, no use for in-flight checks).
-# Returns empty string if lsof is missing, the process is gone, or
-# no matching FD is found — caller treats empty as "skip drip check".
-agy_cli_log_for_pid() {
-  local pid="$1"
-  command -v lsof >/dev/null 2>&1 || return 0
-  kill -0 "$pid" 2>/dev/null || return 0
-  lsof -p "$pid" 2>/dev/null \
-    | awk '$NF ~ /\/antigravity-cli\/log\/cli-.*\.log$/ {print $NF; exit}'
-}
-
-# Single watchdog that handles every reason we kill a gemini cell early.
-# One background process per cell, one polling loop, two trigger
-# conditions (quota exhaustion, post-Drip hang). Every trigger SIGTERMs
-# the agent process tree; the cell harvester then runs against
-# whatever the agent wrote to disk before the kill.
-#
-# Both triggers are *fail-safe*: if detection misses (log format change,
-# lsof missing, agy log path moved), the cell simply runs to the outer
-# audit_timeout_run wall-clock cap — same as no watchdog at all.
-#
-# Tunables (env vars; defaults tested live against real runs):
-#   GEMINI_WATCHDOG_POLL_SECS   poll interval, all triggers    [10]
-#   GEMINI_QUOTA_WINDOW_LINES   raw-log tail for 429 trigger   [400]
-#   GEMINI_QUOTA_MIN_429        429 retries needed to trigger  [10]
-#   AGY_DRIP_GRACE_SECS         post-Drip wait before kill     [60]
-#                                Set 0 to skip the drip check.
-#   AGY_IDLE_WINDOW_SECS        idle-loop detection window     [600]
-#                                Seconds without streamGenerateContent
-#                                before the idle-loop arm starts firing.
-#                                Largest observed legitimate gap is 73s
-#                                so this gives ~8x headroom.
-#   AGY_IDLE_CONFIRM_POLLS      consecutive positive polls to  [2]
-#                                kill (prevents a single transient
-#                                pause between API calls from tripping
-#                                the arm). Effective kill delay is
-#                                AGY_IDLE_WINDOW_SECS + (N-1)*POLL_SECS.
-#                                Set 0 to skip the idle-loop arm.
-#
-# USE_GEMINI_CLI=1 selects the Google Gemini CLI dialect, which uses
-# stream-json output, exits cleanly, and has no agy klog to grep — the
-# drip + idle-loop arms are skipped automatically when
-# llm_use_gemini_cli returns 0.
-start_gemini_watchdog() {
-  local raw_log="$1" agent_pid="$2" cell_dir="$3"
-  local interval="${GEMINI_WATCHDOG_POLL_SECS:-10}"
-  local drip_grace="${AGY_DRIP_GRACE_SECS:-60}"
-  local idle_confirm="${AGY_IDLE_CONFIRM_POLLS:-2}"
-  local check_drip=0
-  local check_idle=0
-  if [ "$drip_grace" -gt 0 ] 2>/dev/null; then
-    llm_use_gemini_cli || check_drip=1
-  fi
-  if [ "$idle_confirm" -gt 0 ] 2>/dev/null; then
-    llm_use_gemini_cli || check_idle=1
-  fi
-  local cli_log=""
-  local idle_strikes=0
-
-  while sleep "$interval"; do
-    kill -0 "$agent_pid" 2>/dev/null || return 0
-
-    if gemini_quota_dominates "$raw_log"; then
-      log "cell ${cell_dir##*/} — gemini quota exhausted (sustained 429s with no assistant progress); aborting"
-      touch "$cell_dir/.quota-exhausted"
-      _kill_tree "$agent_pid" TERM
-      sleep 5
-      _kill_tree "$agent_pid" KILL
-      return 0
-    fi
-
-    # Lazily resolve the cli-log path once for both klog-based arms.
-    # agy creates it shortly after start, so first few polls may see
-    # nothing. Once located, the path is sticky for the rest of the
-    # cell.
-    if [ "$check_drip" = 1 ] || [ "$check_idle" = 1 ]; then
-      [ -n "$cli_log" ] || cli_log="$(agy_cli_log_for_pid "$agent_pid")"
-    fi
-
-    if [ "$check_drip" = 1 ] && [ -n "$cli_log" ] && agy_drip_stopped "$cli_log"; then
-      # Give agy a grace period to flush --print and exit cleanly
-      # (it does, in the healthy case). Poll for early exit so a
-      # clean run doesn't pay the full grace.
-      local elapsed=0
-      while [ "$elapsed" -lt "$drip_grace" ]; do
-        sleep 2
-        elapsed=$((elapsed + 2))
-        kill -0 "$agent_pid" 2>/dev/null || return 0
-      done
-      log "cell ${cell_dir##*/} — agy hung ${drip_grace}s after 'Drip stopped'; aborting (cli-log: $cli_log)"
-      _kill_tree "$agent_pid" TERM
-      sleep 5
-      _kill_tree "$agent_pid" KILL
-      return 0
-    fi
-
-    # Idle-heartbeat arm. Catches the shape where Drip stopped never
-    # fires (conversation can't reach fully-idle, so text_drip is
-    # suppressed) and agy polls fetchAvailableModels/loadCodeAssist
-    # until --print-timeout. Multi-strike confirmation avoids tripping
-    # on a transient mid-conversation pause: the signal must persist
-    # across AGY_IDLE_CONFIRM_POLLS consecutive polls before kill.
-    if [ "$check_idle" = 1 ] && [ -n "$cli_log" ]; then
-      if agy_in_idle_heartbeat_loop "$cli_log"; then
-        idle_strikes=$((idle_strikes + 1))
-        if [ "$idle_strikes" -ge "$idle_confirm" ]; then
-          log "cell ${cell_dir##*/} — agy idle-heartbeat loop (no streamGenerateContent in ${AGY_IDLE_WINDOW_SECS:-600}s, confirmed ${idle_strikes}x); aborting (cli-log: $cli_log)"
-          _kill_tree "$agent_pid" TERM
-          sleep 5
-          _kill_tree "$agent_pid" KILL
-          return 0
-        fi
-      else
-        idle_strikes=0
-      fi
-    fi
-  done
-}
+# Gemini watchdog functions (gemini_quota_dominates, _kill_tree,
+# agy_cli_log_for_pid, agy_drip_stopped, agy_in_idle_heartbeat_loop,
+# start_gemini_watchdog) moved to lib/gemini_watchdog.sh so bin/audit
+# can share the same kill arms. Sourced near the top of this file.
 
 # Snapshot every `findings/FIND-*` and `crashes/CRASH-*` path that
 # already exists in the target tree at cell start. The post-cell sweep
@@ -930,7 +663,7 @@ run_model_direct_cell() {
   fi
   local agent_pid=$! watcher_pid=""
   if [ "$BACKEND" = "gemini" ]; then
-    start_gemini_watchdog "$raw_log" "$agent_pid" "$cell_dir" &
+    start_gemini_watchdog "$raw_log" "$agent_pid" "$cell_dir" "cell ${cell_dir##*/}" &
     watcher_pid=$!
   fi
   wait "$agent_pid" || rc=$?
@@ -954,7 +687,7 @@ run_model_direct_cell() {
   # Extract token usage into a one-row index.jsonl so the harvester
   # scores model-direct cost on the same field as a harness cell.
   mkdir -p "$out_dir/logs"
-  python3 "$SCRIPT_ROOT/lib/benchmark_model_direct_usage.py" "$BACKEND" "$raw_log" \
+  python3 "$SCRIPT_ROOT/lib/llm_usage.py" "$BACKEND" "$raw_log" \
     "$prompt_file" > "$out_dir/logs/index.jsonl" 2>/dev/null \
     || printf '{}\n' > "$out_dir/logs/index.jsonl"
 

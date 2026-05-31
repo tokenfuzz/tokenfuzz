@@ -1,21 +1,37 @@
 #!/usr/bin/env python3
-"""benchmark_model_direct_usage.py — normalise a model-direct-cell backend
-log to one index.jsonl row.
+"""llm_usage.py — shared backend-log → usage object normaliser.
 
-The model-direct benchmark condition invokes a backend CLI directly (no
-harness), so its token usage is buried in the backend's own JSON event
-stream rather than in a harness logs/index.jsonl. This helper scans that
-raw log and emits a single index.jsonl-shaped line so
-lib/benchmark.py::harvest_tokens scores model-direct cost on the exact
-same field as a harness cell.
+Two clients:
 
-  usage: benchmark_model_direct_usage.py <backend> <raw-log-path> [prompt-file]
+  - bin/benchmark calls this once per cell, asking for a complete
+    {tokens, probe, estimated, backend} record that lib/benchmark.py::
+    harvest_tokens drops into the cell's index.jsonl.
+  - bin/audit calls this once per usage field at session end. Audit
+    used to inline a jq pipeline that returned EMPTY for any agy
+    plain-text transcript — silently pinning agy sessions to
+    tokens=0 and tripping the dead-streak false-positive on every
+    productive source-only investigation. The plain-text fallback
+    in `_sum_assistant_content_chars` is the fix.
 
-It prints one JSON object to stdout — `{tokens, probe, estimated,
-backend}`. `backend` is echoed back so lib/benchmark.py::harvest_tokens
-can normalize the row (codex reports `input` as cached+fresh; claude
-reports fresh only). On any failure it prints `{}` and exits 0 — a
-missing cost number must never fail a benchmark cell.
+CLI shapes:
+
+  llm_usage.py extract-usage <backend> <raw-log-path> [prompt-file]
+      Print one JSON object on stdout: {tokens:{input, cached_input,
+      cache_creation, output}, probe:{}, estimated:bool, backend}.
+      The legacy benchmark form (no `extract-usage` subcommand, the
+      first arg is a known backend name) is still accepted so
+      pre-rename callers keep working.
+
+  llm_usage.py extract-field <field> <backend> <raw-log-path>
+                            [--prompt prompt-file]
+      Print one integer (or empty string for unknown) on stdout.
+      <field> is one of: input_tokens, output_tokens,
+      cached_input_tokens, cache_creation_input_tokens, total_tokens,
+      duration_ms. Used by bin/audit's extract_usage_field shim.
+
+On any internal failure both shapes print empty and exit 0 — a
+missing cost number must never fail a benchmark cell or an audit
+session.
 
 Two extraction paths:
 
@@ -47,6 +63,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 
 _INPUT_KEYS = ("input_tokens", "prompt_tokens", "input")
@@ -223,17 +240,176 @@ def extract_usage(
     return {"tokens": tokens, "probe": {}, "estimated": True, "backend": backend}
 
 
+# ── Known backends; used to detect the legacy `backend raw [prompt]` form
+# (no subcommand). Kept in sync with lib/llm_invoke.py::_KNOWN_BACKENDS.
+_KNOWN_BACKENDS = ("claude", "codex", "gemini", "oss")
+
+# ── Field-name aliases for extract-field so callers can ask for the
+# field shape they're used to ("output_tokens", "duration_ms") without
+# knowing this module's compact internal keys ("output").
+_AUDIT_FIELD_ALIASES = {
+    "input_tokens": ("input",),
+    "output_tokens": ("output",),
+    "cached_input_tokens": ("cached_input",),
+    "cache_read_input_tokens": ("cached_input",),
+    "cache_creation_input_tokens": ("cache_creation",),
+    "total_tokens": ("input", "output"),   # sum of both
+}
+
+
+def extract_field(
+    raw_log_path: str,
+    field: str,
+    backend: str = "",
+    prompt_path: str | None = None,
+) -> str:
+    """Return one usage field as a string ('' for unknown), suitable for
+    a bash `$(... )` substitution. Aggregation matches the legacy jq
+    pipeline: scan the whole stream, return the MAX of any candidate
+    value (Claude's running totals grow per turn; the LAST/MAX is the
+    cumulative final).
+
+    For `total_tokens` (no native field on any backend), sum the input
+    and output components from the picked usage record.
+    duration_ms is read from the legacy field name directly.
+
+    Missing files return '' on every backend — including the gemini
+    plain-text path which would otherwise estimate 0. That matches the
+    legacy jq-based extract_usage_field's `[ -f "$file" ] || echo ""`
+    guard and keeps "I never wrote a raw log" distinguishable from "the
+    agent produced no output."
+    """
+    if not os.path.isfile(raw_log_path):
+        return ""
+
+    if field == "duration_ms":
+        # Scan the raw log for any duration_ms field on a top-level event
+        # object (Claude's stream-json result event); MAX wins.
+        best = -1
+        try:
+            with open(raw_log_path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or not line.startswith(("{", "[")):
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        continue
+
+                    def visit(node):
+                        nonlocal best
+                        if isinstance(node, dict):
+                            v = node.get("duration_ms")
+                            if isinstance(v, (int, float)) and v > best:
+                                best = int(v)
+                            for child in node.values():
+                                visit(child)
+                        elif isinstance(node, list):
+                            for child in node:
+                                visit(child)
+
+                    visit(obj)
+        except OSError:
+            return ""
+        return str(best) if best >= 0 else ""
+
+    aliases = _AUDIT_FIELD_ALIASES.get(field)
+    if aliases is None:
+        return ""
+
+    row = extract_usage(raw_log_path, prompt_path, backend=backend)
+    tokens = row.get("tokens", {}) if isinstance(row, dict) else {}
+    estimated = bool(row.get("estimated", False)) if isinstance(row, dict) else False
+
+    # Distinguish "no telemetry found" from "telemetry says 0". For the
+    # measured path (estimated=False) the helper returns an all-zero
+    # tokens dict whether a usage block was found AND read as zero
+    # (vanishingly rare on Claude/Codex) or no usage block existed at
+    # all. The latter is the common case for empty / corrupt / wrong-
+    # format raw logs, and the right bash semantic there is the empty
+    # string (audit's `$(extract_usage_field …)` consumers all use
+    # `${var:-0}` to floor). Distinguish by summing measured fields:
+    # all-zero AND not estimated = nothing to report.
+    measured_sum = 0
+    for k in ("input", "output", "cached_input", "cache_creation"):
+        v = tokens.get(k)
+        if isinstance(v, (int, float)):
+            measured_sum += int(v)
+    if not estimated and measured_sum == 0:
+        return ""
+
+    total = 0
+    any_present = False
+    for key in aliases:
+        v = tokens.get(key)
+        if isinstance(v, (int, float)):
+            total += int(v)
+            any_present = True
+    return str(total) if any_present else ""
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) < 2:
+    if not argv:
         print("{}")
         return 0
-    backend = argv[0]
-    raw_log = argv[1]
-    prompt_path = argv[2] if len(argv) >= 3 else None
-    try:
-        print(json.dumps(extract_usage(raw_log, prompt_path, backend=backend)))
-    except Exception:  # noqa: BLE001 — cost extraction must never fail a cell
-        print("{}")
+
+    head = argv[0]
+
+    # Legacy form: <backend> <raw-log> [prompt-file]
+    if head in _KNOWN_BACKENDS:
+        if len(argv) < 2:
+            print("{}")
+            return 0
+        backend = head
+        raw_log = argv[1]
+        prompt_path = argv[2] if len(argv) >= 3 else None
+        try:
+            print(json.dumps(extract_usage(raw_log, prompt_path, backend=backend)))
+        except Exception:  # noqa: BLE001 — cost extraction must never fail a cell
+            print("{}")
+        return 0
+
+    # Subcommand form: extract-usage / extract-field
+    if head == "extract-usage":
+        if len(argv) < 3:
+            print("{}")
+            return 0
+        backend = argv[1]
+        raw_log = argv[2]
+        prompt_path = argv[3] if len(argv) >= 4 else None
+        try:
+            print(json.dumps(extract_usage(raw_log, prompt_path, backend=backend)))
+        except Exception:  # noqa: BLE001
+            print("{}")
+        return 0
+
+    if head == "extract-field":
+        # Form: extract-field <field> <backend> <raw-log> [--prompt path]
+        if len(argv) < 4:
+            print("")
+            return 0
+        field = argv[1]
+        backend = argv[2]
+        raw_log = argv[3]
+        prompt_path = None
+        # tiny hand-rolled --prompt scan; argparse would import a 20KB
+        # module for one optional flag.
+        i = 4
+        while i < len(argv):
+            if argv[i] == "--prompt" and i + 1 < len(argv):
+                prompt_path = argv[i + 1]
+                i += 2
+            else:
+                i += 1
+        try:
+            print(extract_field(raw_log, field, backend=backend, prompt_path=prompt_path))
+        except Exception:  # noqa: BLE001
+            print("")
+        return 0
+
+    # Unrecognised subcommand: emit empty result, do not error.
+    print("{}")
     return 0
 
 
