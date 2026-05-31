@@ -144,7 +144,7 @@ hyp_out=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --t
     --file "src/parser.c:public_api_parse:7" \
     --input-shape "data length > 16" \
     --guard-gap "no length check before memcpy" \
-    --diagnostic bounds --strategy S1)
+    --diagnostic bounds --strategy S1 --json)
 hyp_id=$(printf '%s' "$hyp_out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
 claim_lines_after=$(wc -l < "$RESULTS_DIR/state/claims.jsonl" 2>/dev/null | tr -d ' ')
@@ -210,7 +210,7 @@ assert_match "distinct_hypotheses=1" "$deny_dup" "fix#1.5: duplicate hypothesis 
     --hypothesis "Check unterminated token cleanup" --file "src/parser.c" --input-shape "unterminated token" \
     --guard-gap "error path skips reset" --diagnostic lifetime --strategy S5 >/dev/null
 ok=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-    update-card --agent 1 --card-id "$card_id" --status discarded --note "three clean variants across two hypothesis shapes" 2>&1)
+    update-card --agent 1 --card-id "$card_id" --status discarded --note "three clean variants across two hypothesis shapes" --json 2>&1)
 assert_match '"status": "discarded"' "$ok" "fix#1.5: floor met → discard accepted"
 
 # Override env still works for tooling.
@@ -220,7 +220,7 @@ hyp_b=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --tar
     --diagnostic bounds --strategy S1)
 override=$(WORK_CARD_ALLOW_NORUNS_DISCARD=1 \
     "$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-    update-card --agent 2 --card-id "PATCH-fixone" --status discarded 2>&1)
+    update-card --agent 2 --card-id "PATCH-fixone" --status discarded --json 2>&1)
 assert_match '"status": "discarded"' "$override" "fix#1.5: override env forces discard"
 
 # ════════════════════════════════════════════════════════════════

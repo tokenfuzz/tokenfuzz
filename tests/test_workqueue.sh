@@ -695,7 +695,7 @@ reclaimed_id=$(printf '%s' "$reclaimed" | python3 -c 'import json,sys; print(jso
 assert_eq "$card_id" "$reclaimed_id" "state: stale card claim lease does not hide work permanently"
 
 blocked_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status blocked --note "feature unavailable in this configured build")
+  update-card --agent 1 --card-id "$card_id" --status blocked --note "feature unavailable in this configured build" --json)
 assert_match '"status": "blocked"' "$blocked_card" "state: records blocked card status"
 after_block_next=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --peek)
@@ -709,7 +709,7 @@ fi
 hyp=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   add-hyp --agent 1 --card-id "$card_id" --hypothesis "issue in ThingProcessorRead" \
   --file "alpha/core/ThingProcessor.cpp:ThingProcessorRead:3" --input-shape "generic byte input" \
-  --guard-gap "length check" --diagnostic bounds --strategy S7)
+  --guard-gap "length check" --diagnostic bounds --strategy S7 --json)
 assert_match '"status": "PENDING"' "$hyp" "state: adds hypothesis row"
 hyp_id=$(printf '%s' "$hyp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
@@ -750,12 +750,12 @@ fi
 run=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   add-run --agent 1 --hypothesis-id "$hyp_id" --card-id "$card_id" --mode generic \
   --testcase "$RESULTS_DIR/scratch-1/tc.input" --asan-output "$RESULTS_DIR/scratch-1/tc.asan.txt" \
-  --verdict CLEAN)
+  --verdict CLEAN --json)
 assert_match '"verdict": "CLEAN"' "$run" "state: records run row"
 
 note=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   add-note --agent 1 --hypothesis-id "$hyp_id" --card-id "$card_id" --kind data-flow \
-  --text "ThingProcessorRead copies input-shaped length into a fixed buffer")
+  --text "ThingProcessorRead copies input-shaped length into a fixed buffer" --json)
 assert_match '"kind": "data-flow"' "$note" "state: records structured note"
 assert_match "$hyp_id" "$note" "state: note links to hypothesis"
 
@@ -763,22 +763,22 @@ compat_hyp=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" 
   add-hyp --agent 1 --card-id "$card_id" --hypothesis "legacy flag shape" \
   --file "alpha/core/Legacy.cpp" --function "LegacyRead" --line 9 \
   --input-shape "legacy byte input" --guard-gap "legacy guard" \
-  --expected-diagnostic bounds --strategy S1)
+  --expected-diagnostic bounds --strategy S1 --json)
 assert_match '"diagnostic": "bounds"' "$compat_hyp" "state: add-hyp accepts --expected-diagnostic alias"
 assert_match 'alpha/core/Legacy.cpp:LegacyRead:9' "$compat_hyp" "state: add-hyp folds legacy function/line flags into file"
 
 compat_note=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   add-note --agent 1 --card-id "$card_id" --kind working-context \
-  --text "legacy context note without hypothesis id")
+  --text "legacy context note without hypothesis id" --json)
 assert_match '"kind": "context"' "$compat_note" "state: add-note maps working-context to context"
 
 compat_validation_note=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   add-note --agent 1 --hypothesis-id "$hyp_id" --card-id "$card_id" --kind validation \
-  --text "legacy validation note kind")
+  --text "legacy validation note kind" --json)
 assert_match '"kind": "validation"' "$compat_validation_note" "state: add-note accepts validation note kind"
 
 compat_update=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-hyp "$hyp_id" --agent 1 --status INVESTIGATING --reason "legacy reason alias")
+  update-hyp "$hyp_id" --agent 1 --status INVESTIGATING --reason "legacy reason alias" --json)
 assert_match '"status": "INVESTIGATING"' "$compat_update" "state: update-hyp accepts positional id"
 assert_match 'legacy reason alias' "$compat_update" "state: update-hyp maps --reason to note"
 
@@ -799,7 +799,7 @@ assert_not_match "\"status\": \"discarded\"" "$(tail -1 "$RESULTS_DIR/state/clai
 second_hyp=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   add-hyp --agent 1 --card-id "$card_id" --hypothesis "ThingProcessorClose frees during callback" \
   --file "alpha/core/ThingProcessor.cpp:close:88" --input-shape "callback closes owner" \
-  --guard-gap "state flag checked after callback" --diagnostic lifetime --strategy S5)
+  --guard-gap "state flag checked after callback" --diagnostic lifetime --strategy S5 --json)
 second_hyp_id=$(printf '%s' "$second_hyp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 "$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   add-note --agent 1 --hypothesis-id "$second_hyp_id" --card-id "$card_id" --kind data-flow \
@@ -809,29 +809,102 @@ second_hyp_id=$(printf '%s' "$second_hyp" | python3 -c 'import json,sys; print(j
   --testcase "$RESULTS_DIR/scratch-1/tc2.input" --asan-output "$RESULTS_DIR/scratch-1/tc2.asan.txt" \
   --verdict CLEAN >/dev/null
 card_update=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status discarded --note "variants clean")
+  update-card --agent 1 --card-id "$card_id" --status discarded --note "variants clean" --json)
 assert_match '"status": "discarded"' "$card_update" "state: updates card status"
 assert_match "$card_id" "$(tail -1 "$RESULTS_DIR/state/claims.jsonl")" "state: card status appended to claims"
 compat_discard_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status DISCARDED --note "legacy uppercase discard")
+  update-card --agent 1 --card-id "$card_id" --status DISCARDED --note "legacy uppercase discard" --json)
 assert_match '"status": "discarded"' "$compat_discard_card" "state: update-card normalizes uppercase terminal statuses"
 compat_find_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status FIND-123 --note "promoted finding")
+  update-card --agent 1 --card-id "$card_id" --status FIND-123 --note "promoted finding" --json)
 assert_match '"status": "find"' "$compat_find_card" "state: update-card maps FIND-* status to find"
 assert_match 'artifact=FIND-123' "$compat_find_card" "state: update-card preserves mapped FIND-* artifact id in note"
 compat_env_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status ENV-BLOCKED --note "legacy env block")
+  update-card --agent 1 --card-id "$card_id" --status ENV-BLOCKED --note "legacy env block" --json)
 assert_match '"status": "blocked"' "$compat_env_card" "state: update-card maps ENV-BLOCKED to blocked"
 compat_mode_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status mode-incompatible:asan --note "legacy mode wall")
+  update-card --agent 1 --card-id "$card_id" --status mode-incompatible:asan --note "legacy mode wall" --json)
 assert_match '"status": "blocked"' "$compat_mode_card" "state: update-card maps mode-incompatible:* to blocked"
 compat_reason_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status blocked --reason "legacy card reason alias")
+  update-card --agent 1 --card-id "$card_id" --status blocked --reason "legacy card reason alias" --json)
 assert_match '"status": "blocked"' "$compat_reason_card" "state: update-card accepts --reason alias"
 assert_match 'legacy card reason alias' "$compat_reason_card" "state: update-card maps --reason to note"
 compat_pos_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card "$card_id" --agent 1 --status done --note "legacy positional card id")
+  update-card "$card_id" --agent 1 --status done --note "legacy positional card id" --json)
 assert_match '"status": "done"' "$compat_pos_card" "state: update-card accepts positional card id"
+
+# ─────────────────────────────────────────────────────────────────────
+# Terse OK-line default for state mutators.
+#
+# The agent's own arguments are already in its conversation context, so
+# re-echoing the full JSON row on every add-hyp/update-hyp/update-card/
+# add-note/add-run wastes tokens. The default output is now a single
+# line carrying the fields the agent CANNOT derive client-side:
+# server-assigned ids and the server-normalized status (which differs
+# from the agent's argument for CRASH-*/FIND-*/ENV-BLOCKED inputs and
+# would otherwise be silently lost). Pass `--json` to opt back into the
+# full row when a parser needs it; the JSON form is unchanged.
+#
+# Uses a dedicated results dir so the extra rows do not contaminate
+# count-based assertions later in this file (recent-hyps / recent-runs).
+# ─────────────────────────────────────────────────────────────────────
+ok_results="$TEST_TMPDIR/ok-line-defaults"
+mkdir -p "$ok_results/scratch-1"
+: > "$ok_results/scratch-1/tc.input"
+: > "$ok_results/scratch-1/tc.asan.txt"
+"$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" init
+ok_card_id="PATCH-okline"
+ok_hyp=$("$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  add-hyp --agent 1 --card-id "$ok_card_id" --hypothesis "ok-default check" \
+  --file "alpha/core/ThingProcessor.cpp:ok:1" --input-shape "x" --guard-gap "y" \
+  --diagnostic bounds --strategy S1)
+assert_match '^OK: add-hyp id=H-[0-9a-f]{10} card='"$ok_card_id"' strategy=S1 status=PENDING file=' "$ok_hyp" \
+  "state: add-hyp default emits terse OK line with id+card+strategy+status+file"
+assert_not_match '"hypothesis":' "$ok_hyp" \
+  "state: add-hyp default does NOT re-echo the full JSON row"
+ok_hyp_id=$(printf '%s\n' "$ok_hyp" | sed -nE 's/.*id=(H-[0-9a-f]+).*/\1/p')
+assert_match '^H-[0-9a-f]{10}$' "$ok_hyp_id" "state: OK line id is parseable"
+
+ok_update=$("$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  update-hyp "$ok_hyp_id" --agent 1 --status DISCARDED --note "ok-default check")
+assert_match '^OK: update-hyp id='"$ok_hyp_id"' status=DISCARDED' "$ok_update" \
+  "state: update-hyp default emits terse OK line with id+status"
+
+ok_note=$("$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  add-note --agent 1 --hypothesis-id "$ok_hyp_id" --card-id "$ok_card_id" --kind guard \
+  --text "ok-default")
+assert_match '^OK: add-note id=NOTE-[0-9a-f]{10} kind=guard hyp='"$ok_hyp_id" "$ok_note" \
+  "state: add-note default emits terse OK line"
+
+ok_run=$("$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  add-run --agent 1 --hypothesis-id "$ok_hyp_id" --card-id "$ok_card_id" --mode generic \
+  --testcase "$ok_results/scratch-1/tc.input" --asan-output "$ok_results/scratch-1/tc.asan.txt" \
+  --verdict CLEAN)
+assert_match '^OK: add-run id=RUN-[0-9a-f]{10} verdict=CLEAN hyp='"$ok_hyp_id" "$ok_run" \
+  "state: add-run default emits terse OK line"
+
+# update-card MUST surface the server-normalized status in the OK line
+# (CRASH-* / FIND-* / ENV-BLOCKED / mode-incompatible:* inputs get rewritten);
+# without this the agent loses the only signal that normalization happened.
+ok_card=$("$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  update-card --agent 1 --card-id "$ok_card_id" --status FIND-OK --note "ok-default")
+assert_match '^OK: update-card card='"$ok_card_id"' status=find ' "$ok_card" \
+  "state: update-card OK line carries server-normalized status (FIND-* → find)"
+assert_match 'artifact=FIND-OK' "$ok_card" \
+  "state: update-card OK line carries pre-normalization artifact in note"
+
+ok_card_env=$("$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  update-card --agent 1 --card-id "$ok_card_id" --status ENV-BLOCKED --note "ok-default env")
+assert_match 'status=blocked' "$ok_card_env" \
+  "state: update-card OK line normalizes ENV-BLOCKED to blocked"
+
+# --json opt-in restores the full JSON row for callers that parse it.
+ok_card_json=$("$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  update-card --agent 1 --card-id "$ok_card_id" --status FIND-OK2 --note "json-opt-in" --json)
+assert_match '"status": "find"' "$ok_card_json" \
+  "state: --json opt-in restores full JSON row"
+assert_not_match '^OK:' "$ok_card_json" \
+  "state: --json opt-in suppresses the OK line"
 
 # `bin/state summary` was removed (zero callers in production logs); the
 # cheat sheet now lives in .agents/references/session-rules.md as the
@@ -872,7 +945,7 @@ mkdir -p "$limit_results"
 limit_hyp=$("$STATE" --results-dir "$limit_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   add-hyp --agent 2 --hypothesis "limit-probe" \
   --file alpha.c:foo:1 --input-shape bytes --guard-gap none \
-  --diagnostic state --strategy S1)
+  --diagnostic state --strategy S1 --json)
 limit_hyp_id=$(printf '%s' "$limit_hyp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
 i=1
 while [ "$i" -le 9 ]; do
@@ -975,7 +1048,7 @@ PY
 assert_eq "1:PENDING|2:PENDING" "$dup_statuses" \
   "state: ambiguous update-hyp leaves duplicate rows untouched"
 scoped_update=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-hyp --id "H-DUP" --agent 2 --status DISCARDED --note "scoped" 2>&1)
+  update-hyp --id "H-DUP" --agent 2 --status DISCARDED --note "scoped" --json 2>&1)
 assert_match '"agent": "2"' "$scoped_update" "state: update-hyp --agent updates selected duplicate row"
 dup_statuses=$(python3 - "$RESULTS_DIR/state/hypotheses.jsonl" <<'PY'
 import json, sys
@@ -986,7 +1059,7 @@ PY
 assert_eq "1:PENDING|2:DISCARDED" "$dup_statuses" \
   "state: scoped update-hyp changes only matching agent row"
 compat_hyp_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-hyp --id "H-DUP" --agent 2 --card-id "$card_id" --status CRASH-001 --note "legacy extra card-id")
+  update-hyp --id "H-DUP" --agent 2 --card-id "$card_id" --status CRASH-001 --note "legacy extra card-id" --json)
 assert_match '"status": "CRASH-001"' "$compat_hyp_card" "state: update-hyp accepts legacy --card-id"
 assert_match "legacy extra card-id" "$compat_hyp_card" "state: update-hyp keeps note with legacy --card-id"
 

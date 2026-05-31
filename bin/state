@@ -51,6 +51,63 @@ from workqueue import (
 )
 
 
+def _format_mutator_ok(cmd: str, row: dict) -> str:
+    """Compact OK line for state mutators (add-hyp/update-hyp/update-card/add-note/add-run).
+
+    The agent's own input is already in scope from the preceding function_call
+    arguments, so re-echoing the full row wastes tokens. The line below keeps
+    only the fields the agent cannot derive client-side: server-assigned ids,
+    server-normalized statuses, and the recorded note (which may carry the
+    pre-normalization status as an artifact= suffix). Pass --json on the
+    subcommand to get the full row back when a parser needs it.
+    """
+    parts = [f"OK: {cmd}"]
+    def kv(key: str, val: object) -> None:
+        if val in (None, ""):
+            return
+        s = str(val)
+        if any(c in s for c in (" ", "\t", "\n", "\"")):
+            s = s.replace("\\", "\\\\").replace("\"", "\\\"")
+            parts.append(f'{key}="{s}"')
+        else:
+            parts.append(f"{key}={s}")
+    if cmd == "add-hyp":
+        kv("id", row.get("id"))
+        kv("card", row.get("card_id"))
+        kv("strategy", row.get("strategy"))
+        kv("status", row.get("status"))
+        kv("file", row.get("file"))
+    elif cmd == "update-hyp":
+        kv("id", row.get("id"))
+        kv("status", row.get("status"))
+        kv("note", row.get("note"))
+    elif cmd == "update-card":
+        kv("card", row.get("card_id"))
+        kv("status", row.get("status"))
+        kv("note", row.get("note"))
+    elif cmd == "add-note":
+        kv("id", row.get("id"))
+        kv("kind", row.get("kind"))
+        kv("hyp", row.get("hypothesis_id"))
+        kv("card", row.get("card_id"))
+    elif cmd == "add-run":
+        kv("id", row.get("id"))
+        kv("verdict", row.get("verdict"))
+        kv("hyp", row.get("hypothesis_id"))
+        kv("card", row.get("card_id"))
+    else:
+        # Defensive: should not happen; callers pass one of the five known cmds.
+        kv("row", json.dumps(row, sort_keys=True))
+    return " ".join(parts)
+
+
+def _emit_mutator(cmd: str, row: dict, want_json: bool) -> None:
+    if want_json:
+        print(json.dumps(row, sort_keys=True))
+    else:
+        print(_format_mutator_ok(cmd, row))
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Read/write structured audit state")
     add_common_args(parser)
@@ -140,6 +197,7 @@ def main(argv: list[str]) -> int:
     )
     p_add.add_argument("--strategy", required=True)
     p_add.add_argument("--status", default="PENDING")
+    p_add.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
     p_up = sub.add_parser("update-hyp")
     p_up.add_argument("id_pos", nargs="?", default="", help=argparse.SUPPRESS)
@@ -148,6 +206,7 @@ def main(argv: list[str]) -> int:
     p_up.add_argument("--card-id", default="", help=argparse.SUPPRESS)
     p_up.add_argument("--status", required=True)
     p_up.add_argument("--note", "--reason", dest="note", default="")
+    p_up.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
     p_card = sub.add_parser("update-card")
     p_card.add_argument("card_id_pos", nargs="?", default="", help=argparse.SUPPRESS)
@@ -155,6 +214,7 @@ def main(argv: list[str]) -> int:
     p_card.add_argument("--status", required=True)
     p_card.add_argument("--agent", default="")
     p_card.add_argument("--note", "--reason", dest="note", default="")
+    p_card.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
     p_reject_skip = sub.add_parser(
         "mark-card-reject-skip",
@@ -191,6 +251,7 @@ def main(argv: list[str]) -> int:
     p_run.add_argument("--asan-output", required=True)
     p_run.add_argument("--verdict", required=True)
     p_run.add_argument("--asan-runs", default="", help="ASAN_RUNS count for this run (1 default, 5 for --confirm)")
+    p_run.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
     p_note = sub.add_parser("add-note")
     p_note.add_argument("--agent", required=True)
@@ -202,6 +263,7 @@ def main(argv: list[str]) -> int:
         choices=["data-flow", "guard", "variants", "decision", "context", "working-context", "validation"],
     )
     p_note.add_argument("--text", required=True)
+    p_note.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
     p_recent = sub.add_parser(
         "recent-hyps",
@@ -377,7 +439,7 @@ def main(argv: list[str]) -> int:
         except DuplicateHypothesisIdError as exc:
             print(f"[state] {exc}", file=sys.stderr)
             return 2
-        print(json.dumps(row, sort_keys=True))
+        _emit_mutator("add-hyp", row, args.json)
         return 0
     if args.cmd == "update-hyp":
         if not args.id and args.id_pos:
@@ -393,7 +455,7 @@ def main(argv: list[str]) -> int:
         if row is None:
             print(f"[state] hypothesis not found: {args.id}", file=sys.stderr)
             return 1
-        print(json.dumps(row, sort_keys=True))
+        _emit_mutator("update-hyp", row, args.json)
         return 0
     if args.cmd == "update-card":
         if not args.card_id and args.card_id_pos:
@@ -431,7 +493,7 @@ def main(argv: list[str]) -> int:
         except CardStatusUpdateError as exc:
             print(f"[state] {exc}", file=sys.stderr)
             return 2
-        print(json.dumps(row, sort_keys=True))
+        _emit_mutator("update-card", row, args.json)
         return 0
     if args.cmd == "mark-card-reject-skip":
         card_id = (args.card_id or "").strip()
@@ -468,12 +530,12 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"find_id": find_id, "blocked_cards": updated, "count": len(updated)}, sort_keys=True))
         return 0
     if args.cmd == "add-run":
-        print(json.dumps(add_run(ctx, args), sort_keys=True))
+        _emit_mutator("add-run", add_run(ctx, args), args.json)
         return 0
     if args.cmd == "add-note":
         if args.kind == "working-context":
             args.kind = "context"
-        print(json.dumps(add_note(ctx, args), sort_keys=True))
+        _emit_mutator("add-note", add_note(ctx, args), args.json)
         return 0
     if args.cmd == "recent-hyps":
         print(
