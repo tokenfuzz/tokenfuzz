@@ -10,9 +10,9 @@
 
 ## CONTEXT ECONOMICS
 
-Every assistant turn re-reads the entire conversation as cached input (~$0.30/M tokens). At ~100K cached tokens per turn, an extra round-trip costs ~$0.03. Two reductions are pure savings:
+Every turn re-reads the whole conversation, so fewer turns and less added text are pure savings:
 
-- **Batch independent tool calls in a single turn.** When two greps, three reads, or a grep + a peek have NO dependency on each other's output, emit them as parallel `tool_use` blocks in one assistant message. One turn with three tool calls costs the same cache_read as one turn with one tool call. Three sequential turns cost 3x.
+- **Batch independent tool calls in a single turn.** When two greps, three reads, or a grep + a peek have NO dependency on each other's output, emit them as parallel `tool_use` blocks in one assistant message. One turn with three tool calls costs the same cache_read as one with a single call.
 - **Do NOT `tail` or `cat` raw `state/*.jsonl`.** Each row is multi-KB JSON. Use `bin/state show-recent --hyps 10 --runs 10 --claims 10` (one call, ~3 KB) or the per-section `bin/state recent-hyps|recent-runs|recent-claims|recent-notes` helpers — each returns slim pipe-delimited rows instead of full JSON. `grep -r` across `output/<slug>/` JSONL files is the same antipattern; filter via `bin/state` flags instead.
 - **Default Grep tool calls to `context: 2` and `head_limit: 30`.** Wider contexts return tens of KB of redundant text; tighten to `context: 2` / `head_limit: 30` and widen only after a confirmed hit you need to inspect.
 - **Watch for the 100K context warning.** When the harness injects "CONTEXT NEAR COMPACTION", checkpoint findings to your state file's Working Context immediately. Auto-compaction at ~165K otherwise drops un-checkpointed evidence.
