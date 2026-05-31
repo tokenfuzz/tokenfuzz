@@ -150,7 +150,7 @@ Use `// HARNESS:` (or `# HARNESS:` for languages whose comment
 delimiter is `#`; the parser is permissive about the prefix). The
 extension picks the build/interpret path.
 
-The supported set is the registry in `lib/languages.py`; run
+The supported set is the registry in [`lib/languages.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/languages.py); run
 `python3 lib/languages.py list` for the authoritative table (one row per
 language, with its harness extensions and build systems). The harness
 extensions split into two buckets:
@@ -179,7 +179,7 @@ crash_patterns = [
 
 These patterns layer on top of the built-in language-agnostic
 markers (`Traceback`, `panic:`, `Exception in thread`, …) that
-`lib/triage.sh` already recognises.
+[`lib/triage.sh`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/triage.sh) already recognises.
 
 ## `reproduce.sh` templates
 
@@ -201,5 +201,5 @@ no-op or a virtual-env / dependency install.
   `target.toml` schema.
 - [Configure a target](configure-target.md) — the operator review
   workflow.
-- `AGENTS.md` (repository root) — the agent-facing audit workflow,
+- [`AGENTS.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/AGENTS.md) (repository root) — the agent-facing audit workflow,
   covering both browser and generic targets.

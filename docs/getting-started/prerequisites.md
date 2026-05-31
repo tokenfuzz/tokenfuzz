@@ -224,7 +224,7 @@ bash tests/run-tests.sh --image fedora:latest
 ```
 
 The suite does **not** call out to any real LLM backend — it stubs the
-agent invocations in `tests/helpers.sh` so it can run before you
+agent invocations in [`tests/helpers.sh`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/helpers.sh) so it can run before you
 configure any backend CLI. It exercises the local shell, Python, Perl,
 jq, target config parsing, triage logic, state handling, search
 wrappers, and testcase classification.

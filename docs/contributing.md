@@ -13,16 +13,16 @@ Issues — including new-feature pitches — land at
 ## Before opening a change
 
 1. **Run the full test suite:** `bash tests/run-tests.sh`.
-2. **Update tests when behaviour changes** in `bin/`, `lib/`, or
-   `.agents/`. New functions, renamed symbols, changed output, new
+2. **Update tests when behaviour changes** in `bin/`, [`lib/`](https://github.com/tokenfuzz/tokenfuzz/tree/main/lib), or
+   [`.agents/`](https://github.com/tokenfuzz/tokenfuzz/tree/main/.agents). New functions, renamed symbols, changed output, new
    prompt fields, and new artifact shapes need matching assertions.
 3. **Fix broken tests only with reason.** Determine whether the
    test or the code is wrong before changing assertions to make
    them green.
 4. **Build the handbook when docs change:** `bin/docs build`.
 
-Tests live in `tests/`. Shared fixtures and assertions live in
-`tests/helpers.sh`. Keep fixtures neutral: do not copy private stack
+Tests live in [`tests/`](https://github.com/tokenfuzz/tokenfuzz/tree/main/tests). Shared fixtures and assertions live in
+[`tests/helpers.sh`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/helpers.sh). Keep fixtures neutral: do not copy private stack
 frames, sanitizer reports, signatures, or unreleased target details
 into tests or docs.
 
@@ -64,7 +64,7 @@ These should continue to hold:
 - **Keep shared code target-agnostic.** Target-specific means
   *belongs to one codebase under audit* — types, headers, paths,
   subsystem boundaries, or internal macros. Those do not belong in
-  shared `bin/`, `lib/`, or `.agents/` code. Derive them from the
+  shared `bin/`, [`lib/`](https://github.com/tokenfuzz/tokenfuzz/tree/main/lib), or [`.agents/`](https://github.com/tokenfuzz/tokenfuzz/tree/main/.agents) code. Derive them from the
   target tree, `target.toml`, work cards, or structured state. If a
   per-target value is unavoidable, put it in a target overlay or
   opt-in config.
@@ -75,15 +75,15 @@ These should continue to hold:
   exhaustive lists that rot as new projects appear.
 - **Keep prompts and agent guidance centralized.** Prompt bodies live
   in `lib/prompts/*.md.j2` and are rendered through the shared prompt
-  helpers. Do not inline prompts in `bin/`, `lib/`, or `.agents/`.
-  When editing agent guidance, keep the `AGENTS.md` / `CLAUDE.md`
+  helpers. Do not inline prompts in `bin/`, [`lib/`](https://github.com/tokenfuzz/tokenfuzz/tree/main/lib), or [`.agents/`](https://github.com/tokenfuzz/tokenfuzz/tree/main/.agents).
+  When editing agent guidance, keep the [`AGENTS.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/AGENTS.md) / [`CLAUDE.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/CLAUDE.md)
   mirror and the related tests in sync.
 - **Avoid hidden knobs.** Do not add hardcoded exploration caps or
   defensive environment-variable toggles. Make real operator choices
   visible, documented, and test-covered.
 - **Use shared helpers.** Shell code should use the existing platform
   and timeout helpers. Shared JSONL state should use
-  `lib/workqueue.py`; parallel logs should be per-agent or uniquely
+  [`lib/workqueue.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/workqueue.py); parallel logs should be per-agent or uniquely
   named.
 
 ## Documentation discipline
@@ -117,7 +117,7 @@ maintainer.
 
 The site is built with
 [MkDocs Material](https://squidfunk.github.io/mkdocs-material/).
-`mkdocs.yml` lives at the repository root and `docs/` is the
+[`mkdocs.yml`](https://github.com/tokenfuzz/tokenfuzz/blob/main/mkdocs.yml) lives at the repository root and [`docs/`](https://github.com/tokenfuzz/tokenfuzz/tree/main/docs) is the
 source tree.
 
 ```bash

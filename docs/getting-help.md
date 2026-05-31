@@ -17,7 +17,7 @@ read those first.
 | Suggest a feature or investigation strategy | GitHub Issues, labelled `enhancement`. See [Contributing](contributing.md) before opening a PR. |
 | Report a security issue **in TokenFuzz** | [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md). Do **not** open a public issue. |
 | Report a security issue **TokenFuzz found in another project** | The upstream project's normal security-disclosure process, not this repository. |
-| Share accepted impact from a TokenFuzz run | Open an issue with the public details, or use the private path in `SECURITY.md` if disclosure timing is sensitive. |
+| Share accepted impact from a TokenFuzz run | Open an issue with the public details, or use the private path in [`SECURITY.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md) if disclosure timing is sensitive. |
 
 ## Before filing a support issue
 
@@ -35,7 +35,7 @@ quickly.
    backend authentication, stalled agents — are covered there.
 4. **Have you read your logs?** `output/<target>/<backend>/logs/`
    contains the run timeline and per-agent logs. Start with
-   `README.md`, then `index.log`.
+   [`README.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/README.md), then `index.log`.
 
 ## What to include in a bug report
 

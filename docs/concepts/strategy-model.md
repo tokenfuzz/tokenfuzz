@@ -45,7 +45,7 @@ the assigned card.
 ## How a strategy gets assigned to a card
 
 Strategy is not free-form. It is baked into the work card the agent
-receives. When the harness ranks a source file (in `lib/workqueue.py`),
+receives. When the harness ranks a source file (in [`lib/workqueue.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/workqueue.py)),
 it matches **families of code features** — not project-specific types
 or filenames — and picks the strategy that fits:
 

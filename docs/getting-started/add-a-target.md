@@ -140,7 +140,7 @@ Then open the file and edit only:
 - `attacker_controls`, when the default input boundary is too narrow
   or too broad. Valid tokens are `bytes`, `call-sequence`, `timing`,
   `race`, `env`, `protocol-state`, and `fs-state` (see
-  `lib/target_config.sh` / `lib/target_config.py`).
+  [`lib/target_config.sh`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/target_config.sh) / [`lib/target_config.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/target_config.py)).
 
 For the review checklist, see
 [Configure a target](../guides/configure-target.md). For complete
@@ -150,7 +150,7 @@ field definitions, see
 ### Where the agent guide lives
 
 When `bin/audit` launches an agent, it injects the long-form guide
-`AGENTS.md` into the prompt. The same guide covers browser and generic
+[`AGENTS.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/AGENTS.md) into the prompt. The same guide covers browser and generic
 targets — it describes the testcase format, strategy priority, and
 crash quality bar that the agent is expected to follow. If you want to
 tune agent behaviour for your target, that file is the right place to

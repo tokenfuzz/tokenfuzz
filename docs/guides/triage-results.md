@@ -198,7 +198,7 @@ Run `./reproduce.sh /path/to/clean/libxml2`.
 Notes on the fields:
 
 - `Cluster` is filled in by `bin/cluster-crashes` after triage; agents
-  leave it blank or `(set by bin/cluster-crashes)`.
+  leave it blank or use the generated marker.
 - `Advisory: yes` is added (above `Surface`) when the fix requires an
   ABI/API-impacting change — see the `Fix Direction` section in the
   agent's narrative.

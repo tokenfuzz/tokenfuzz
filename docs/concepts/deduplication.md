@@ -20,7 +20,7 @@ carry different evidence:
 |---|---|---|
 | Evidence | a sanitizer **stack trace** | a written **report** (often no stack) |
 | Strategy | ClusterFuzz **stack-state bucketing** | **deterministic clustering** (dedup_key · source site · crash state) |
-| Owner | `bin/cluster-crashes` | `bin/cluster-findings` + `lib/finding_dedup.py` + `lib/finding_keyer.py` |
+| Owner | `bin/cluster-crashes` | `bin/cluster-findings` + [`lib/finding_dedup.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_dedup.py) + [`lib/finding_keyer.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_keyer.py) |
 
 They are independent: nothing in the findings path can change crash
 bucketing, and vice versa.
@@ -33,8 +33,8 @@ A crash always comes with a sanitizer stack trace, so crashes dedup the
 way ClusterFuzz does: by the **crash state** — the top few *interesting*
 stack frames, normalized.
 
-Owned by `bin/cluster-crashes`, reusing `lib/stack_frames.py` and the
-upstream-derived `lib/clusterfuzz_stacktrace.py`.
+Owned by `bin/cluster-crashes`, reusing [`lib/stack_frames.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/stack_frames.py) and the
+upstream-derived [`lib/clusterfuzz_stacktrace.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/clusterfuzz_stacktrace.py).
 
 ### How it works
 
@@ -45,7 +45,7 @@ upstream-derived `lib/clusterfuzz_stacktrace.py`.
 3. **Normalize each function name** (`filter_function_name`): strip the
    argument list, anonymous-namespace markers, and `[abi:...]` tags, so
    `Store::set_blob(unsigned int)` and `Store::set_blob` are one symbol.
-4. **Take the top N** interesting frames (`MAX_CRASH_STATE_FRAMES`) — the
+4. **Take the top N** interesting frames (`MAX_CRASH_STATE_FRAMES: 3`) — the
    *crash state*. Two crashes with the same crash state are the same bug.
 5. **Bucket** crashes by crash state. Near-identical stacks that differ
    only in deep tail frames still group via a longest-common-subsequence
@@ -62,20 +62,23 @@ the memory happened to be freed.
 Crash 1 stack (raw):                         Crash 2 stack (raw):
   #0 __asan_memcpy            (ignored)        #0 __asan_memcpy           (ignored)
   #1 proj::Store::set_blob(unsigned)           #1 proj::Store::set_blob(unsigned int)
-  #2 proj::Engine::apply_line(char const*)     #2 proj::Engine::run(int)
-  #3 main                                      #3 main
+  #2 proj::Engine::apply_line(char const*)     #2 proj::Engine::apply_line(char const*)
+  #3 proj::Script::run_file(char const*)       #3 proj::Script::run_file(std::string const&)
+  #4 __libc_start_main        (ignored)        #4 start_thread            (ignored)
 
-  crash state (top 2 interesting):             crash state (top 2 interesting):
-    [set_blob, apply_line]                       [set_blob, run]
+  crash state (top 3 interesting):             crash state (top 3 interesting):
+    [set_blob, apply_line, run_file]             [set_blob, apply_line, run_file]
 
-→ Same #0-equivalent crash site (set_blob), overlapping top frames
-  → SAME bucket. The argument-list difference is normalized away; the
-    ignored __asan_memcpy frame never counts.
+→ SAME bucket. The argument-list difference is normalized away; only the
+  three interesting frames count, and ignored runtime frames do not consume
+  the MAX_CRASH_STATE_FRAMES: 3 budget.
 ```
 
 ```text
-Crash A: state [parse_id, run]      Crash B: state [decode_body, run]
-→ Different crash sites → DIFFERENT buckets, even though both end in run().
+Crash A: state [parse_id, read_record, run]
+Crash B: state [decode_body, read_record, run]
+→ Different crash sites → DIFFERENT buckets, even though the deeper frames
+  overlap.
 ```
 
 ---
@@ -84,7 +87,7 @@ Crash A: state [parse_id, run]      Crash B: state [decode_body, run]
 
 A finding is a *written report*, usually with **no stack trace** (especially
 recon / source-analysis findings), so the crash strategy doesn't apply.
-`bin/cluster-findings` (engine in `lib/finding_dedup.py`) reduces every finding
+`bin/cluster-findings` (engine in [`lib/finding_dedup.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_dedup.py)) reduces every finding
 to a few **signals computed from its report alone**, then clusters by exact
 equality on any of them — no pairwise comparison, no similarity threshold.
 
@@ -100,7 +103,7 @@ the same bug collapse here, at cluster time, like any other duplicate.
 
 ### Signals
 
-`lib/finding_signature.py` + `lib/finding_keyer.py` reduce each finding to a
+[`lib/finding_signature.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_signature.py) + [`lib/finding_keyer.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_keyer.py) reduce each finding to a
 handful of fields, all parsed from the report itself. Three of them can
 **merge** two findings; one is for display only.
 
@@ -108,7 +111,7 @@ handful of fields, all parsed from the report itself. Three of them can
   find-quality class is a hint when present). A hard **gate**: findings in
   different classes never merge, whatever else they share.
 - **dedup_key** — a short canonical root-cause slug (e.g.
-  `uint16-frame-capacity-truncation`), assigned by `lib/finding_keyer.py`: one
+  `uint16-frame-capacity-truncation`), assigned by [`lib/finding_keyer.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_keyer.py): one
   cached LLM call per fresh finding, **on by default** (`--no-key` disables it).
   This is the signal that links re-discoveries reached from **different files or
   functions** — name the same root cause from two sites and you get the same
@@ -121,7 +124,7 @@ handful of fields, all parsed from the report itself. Three of them can
   **same line** even when their slugs differ — and it is the only merge signal
   that keeps working when the keyer is offline or rate-limited.
 - **crash state** — ClusterFuzz-normalized top frames (reused from
-  `lib/stack_frames.py`), present only on the minority of findings that embed a
+  [`lib/stack_frames.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/stack_frames.py)), present only on the minority of findings that embed a
   sanitizer stack. Intrinsic to the report and model-independent.
 
 A fifth field, **`(class, file, func)`**, is computed for *display* — it fills
@@ -208,8 +211,8 @@ own singleton.
   apart.
 ```
 
-These cases are pinned in `tests/test_finding_dedup_py.py` and
-`tests/test_cluster_findings.sh`.
+These cases are pinned in [`tests/test_finding_dedup_py.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/test_finding_dedup_py.py) and
+[`tests/test_cluster_findings.sh`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/test_cluster_findings.sh).
 
 ### Output
 
