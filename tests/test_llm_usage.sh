@@ -185,4 +185,26 @@ unk_rc=$?
 assert_eq "0" "$unk_rc" "T9: unknown subcommand exits 0"
 assert_eq "{}" "$unk_out" "T9: unknown subcommand prints '{}'"
 
+# ── T10: multiple terminal events (re-invoked / resumed agent) are
+#         SUMMED, not last-wins. Regression for a real ~100x undercount
+#         where a cell with two `result` events counted only the final
+#         short invocation. Per-turn assistant deltas must NOT be added on
+#         top of the cumulative `result` totals. ──────────────────────
+multi_raw="$work/multi.raw"
+cat > "$multi_raw" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"a"}]},"usage":{"input_tokens":5,"output_tokens":10}}
+{"type":"result","usage":{"input_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50,"output_tokens":900}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"b"}]},"usage":{"input_tokens":2,"output_tokens":3}}
+{"type":"result","usage":{"input_tokens":10,"cache_read_input_tokens":200,"cache_creation_input_tokens":5,"output_tokens":30}}
+EOF
+
+assert_eq "930"  "$(xf output_tokens claude "$multi_raw")" \
+  "T10a: two result events → output summed (900+30), not last-wins (30)"
+assert_eq "110"  "$(xf input_tokens claude "$multi_raw")" \
+  "T10b: two result events → input summed (100+10)"
+assert_eq "1200" "$(xf cached_input_tokens claude "$multi_raw")" \
+  "T10c: two result events → cache_read summed (1000+200)"
+assert_eq "55"   "$(xf cache_creation_input_tokens claude "$multi_raw")" \
+  "T10d: two result events → cache_creation summed (50+5)"
+
 summary

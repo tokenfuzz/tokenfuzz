@@ -74,6 +74,17 @@ _CACHED_KEYS = ("cached_input_tokens", "cache_read_input_tokens", "cached_input"
 _CACHE_CREATION_KEYS = ("cache_creation_input_tokens", "cache_creation")
 _OUTPUT_KEYS = ("output_tokens", "completion_tokens", "output")
 
+# Terminal/summary events carry the cumulative usage for ONE agent
+# invocation: Claude Code CLI emits `result`, codex emits `turn.completed`,
+# gemini-cli emits `result` (with a `stats` block). A single cell's raw log
+# can hold several when the CLI was re-invoked / resumed and appended to the
+# same file — the token usage object RESETS per invocation (only the
+# stream's total_cost_usd keeps climbing). Their usage must be SUMMED;
+# taking only the last terminal event silently drops every earlier
+# invocation (observed as a ~100x undercount on a real multi-invocation
+# cell). These are CLI event-type names, not target-specific vocabulary.
+_TERMINAL_TYPES = ("result", "turn.completed")
+
 # Rough chars-per-token ratio for the estimated path. ~4 is the common
 # heuristic for English + code; it is only ever used when a backend (agy)
 # refuses to report real usage, and the row is flagged `estimated`.
@@ -196,10 +207,44 @@ def extract_usage(
     """Return a {tokens:{...}, probe:{}, estimated:bool} row."""
     raw = _read(raw_log_path)
 
-    # Measured path: scan the whole JSON event stream; the LAST usage
-    # object with any non-zero field wins (backends emit a running or
-    # final cumulative total). A usage object that is all-zero is not
-    # real telemetry, so it does not displace an earlier real one.
+    # Primary path: SUM the usage of every terminal/summary event. Each
+    # such event holds one invocation's cumulative total, and a cell may
+    # contain several (re-invoked / resumed agent). Summing is the only
+    # correct reduction; see _TERMINAL_TYPES for why last-wins undercounts.
+    summed = {"input": 0, "cached_input": 0, "cache_creation": 0, "output": 0}
+    saw_terminal = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") not in _TERMINAL_TYPES:
+            continue
+        usage = _find_usage(obj)
+        if usage is None:
+            continue
+        candidate = {
+            "input": _first_int(usage, _INPUT_KEYS),
+            "cached_input": _first_int(usage, _CACHED_KEYS),
+            "cache_creation": _first_int(usage, _CACHE_CREATION_KEYS),
+            "output": _first_int(usage, _OUTPUT_KEYS),
+        }
+        if any(candidate.values()):
+            saw_terminal = True
+            for k in summed:
+                summed[k] += candidate[k]
+    if saw_terminal:
+        return {"tokens": summed, "probe": {}, "estimated": False,
+                "backend": backend}
+
+    # Fallback path: no terminal event carried usage (agent killed before
+    # emitting one, or a backend that only streams per-turn usage). The
+    # LAST non-zero usage object wins — a floor, not a proven total. A
+    # usage object that is all-zero is not real telemetry, so it does not
+    # displace an earlier real one.
     measured: dict | None = None
     for line in raw.splitlines():
         line = line.strip()
