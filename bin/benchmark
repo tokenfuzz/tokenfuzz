@@ -1566,15 +1566,16 @@ for cond in "${COND_ARR[@]}"; do
           triage_validate_confirm_findings "$results_dir/findings" \
             "$SCRIPT_ROOT/targets/$TARGET_SLUG" "$results_dir/findings-rejected" \
             >/dev/null 2>&1
-        # Score every promoted FIND through the find-quality LLM gate so
-        # cluster-findings can render a real severity/class instead of
-        # Pending. Same helper bin/audit runs from maintain_indexes — one
-        # convergence point for harness and model-direct. The gate caches
+        # Run the full find-quality gate — score AND quarantine — the same
+        # gate bin/audit runs from housekeeping. A find-quality reject at
+        # quorum is MOVED to findings-rejected/ here too, matching the harness
+        # path; scoring alone would leave it in findings/ where cluster-findings
+        # renders it as a permanent "Pending" severity. The gate caches
         # per-FIND, so re-running is idempotent and adds no LLM calls for
         # already-decided findings.
         RESULTS_DIR="$results_dir" \
         ACTIVE_BACKEND="$BACKEND" \
-          _ensure_find_quality_coverage >/dev/null 2>&1 || true
+          validate_find_gate >/dev/null 2>&1 || true
       fi
     else
       results_dir="$(run_harness_cell "$cell_dir" "$exp_name")" || status="failed"

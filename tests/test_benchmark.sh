@@ -1286,6 +1286,15 @@ assert_match 'model-direct findings gate: DISABLED' "$early_out" \
 assert_match 'findings: rejected=0 confirmed=0 unique=0; crashes: rejected=0 confirmed=0 unique=0' "$early_out" \
   "T25g2: model-direct gate logs findings and crashes counts"
 
+# Regression: with validation enabled, the model-direct findings gate must be
+# the find-quality MOVER (validate_find_gate), which quarantines a find-quality
+# reject at quorum into findings-rejected/ — not the scoring-only coverage belt
+# that leaves the reject in findings/ rendering forever as a "Pending" severity
+# in the cluster. The harness reaches the same mover via bin/audit housekeeping;
+# this keeps model-direct on par so rejected finds move (and counts settle).
+assert_file_contains "$BENCH" 'validate_find_gate >/dev/null 2>&1' \
+  "T25h: model-direct findings gate runs validate_find_gate (quarantines find-quality rejects)"
+
 # ── T26: rendered prompt embeds both absolute paths ─────────────────────
 prompt_file="$cell_dir/prompt.txt"
 assert_file_exists "$prompt_file" "T26a: persisted prompt.txt exists"
