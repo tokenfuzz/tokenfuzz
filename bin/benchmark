@@ -1387,10 +1387,50 @@ rebuild_pool_artifacts() {
   fi
 }
 
+# Last cell-input signature successfully rendered by update_benchmark_result.
+# Drives the change-guard below; persists across calls within one run.
+_BENCH_LAST_RENDER_SIG=""
+
+# Signature of the inputs the pool/crosstab render is a pure function of:
+# every cell's status record (cell.json) and harvested metrics (metrics.json).
+# Pool OUTPUTS (pool/, report.json, benchmark-result.*) are deliberately
+# excluded so the signature is STABLE across a no-op re-render — it changes
+# only when a cell completes, changes status, or is added, which is exactly
+# when a rebuild is warranted.
+_bench_render_signature() {
+  [ -d "$CELLS_DIR" ] || { printf 'no-cells'; return 0; }
+  local f line=""
+  while IFS= read -r f; do
+    line="$line$f:$(audit_stat_key "$f" 2>/dev/null || printf '?')"$'\n'
+  done < <(find "$CELLS_DIR" -maxdepth 2 \
+             \( -name cell.json -o -name metrics.json \) -type f 2>/dev/null \
+           | LC_ALL=C sort)
+  printf '%s' "$line" | cksum | awk '{print $1}'
+}
+
 update_benchmark_result() {
   local reason="${1:-update}"
   local crosstab="$BENCH_ROOT/benchmark-result.md"
-  local artifact uri
+  local artifact uri sig
+
+  ## Change-guard — DO NOT REMOVE, and DO NOT add unconditional work above it.
+  ## update_benchmark_result is called once PER CELL plus pre-ledger plus final
+  ## (N+2 times per run), but everything it builds is a pure function of the
+  ## cell inputs. Before this guard, every call re-ran the full
+  ## rebuild_pool_artifacts + aggregate + crosstab + render-md, so the
+  ## pre-ledger/final passes (nothing changes after the last cell finishes)
+  ## redid all the work, and every stage ever ADDED to rebuild_pool_artifacts
+  ## got multiplied across all N+2 calls. That multiplier — not any one stage —
+  ## is the benchmark's recurring slowness; pinning replicate/condition counts
+  ## in tests only masked it. New heavy work belongs INSIDE
+  ## rebuild_pool_artifacts (behind this guard), never in an extra unguarded
+  ## render call. tests/test_benchmark.sh T9f5 pins the skip count so removing
+  ## the guard fails the suite.
+  sig="$(_bench_render_signature)"
+  if [ -n "$sig" ] && [ "$sig" = "$_BENCH_LAST_RENDER_SIG" ]; then
+    log "benchmark-result update ($reason): inputs unchanged, skipped rebuild"
+    return 0
+  fi
 
   ## Rebuild the pool + cluster JSON + per-condition subtrees first so
   ## the crosstab and the aggregator can resolve their links and pull
@@ -1412,6 +1452,9 @@ update_benchmark_result() {
         >/dev/null 2>&1 && artifact="${crosstab%.md}.html"
     fi
     uri="$(artifact_uri "$artifact")"
+    ## Memoize only a fully-successful render, so a transient aggregate/crosstab
+    ## failure is retried on the next call instead of being skipped as "done".
+    _BENCH_LAST_RENDER_SIG="$sig"
     log "benchmark-result update ($reason): $artifact ($uri)"
   else
     log "WARN: benchmark-result update failed ($reason)"

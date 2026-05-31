@@ -343,6 +343,20 @@ else
   fail "T9f4: benchmark-result is refreshed after each dry-run cell" \
     "saw $dry_updates update lines in: $dry_out"
 fi
+# Pins the update_benchmark_result change-guard: the pre-ledger + final passes
+# follow no new cell, so their inputs are unchanged and the full rebuild must be
+# skipped. Without the guard every one of the N+2 calls re-rendered the pool —
+# the benchmark's recurring slowness. If this drops below 2, someone removed the
+# guard or added unconditional work that re-dirties the inputs; the suite must
+# go red BEFORE the slowness ships, not after the next person notices 90s tests.
+dry_skips=$(printf '%s\n' "$dry_out" \
+  | grep -c 'benchmark-result update (.*): inputs unchanged, skipped rebuild' || true)
+if [ "$dry_skips" -ge 2 ]; then
+  pass "T9f5: redundant pre-ledger/final re-renders are skipped (no N+2 rebuild bloat)"
+else
+  fail "T9f5: redundant pre-ledger/final re-renders must be skipped" \
+    "expected >=2 'inputs unchanged' skips, saw $dry_skips in: $dry_out"
+fi
 drun_json=$(find "$droot/codex" -mindepth 2 -maxdepth 2 -name run.json | head -1)
 assert_file_exists "$drun_json" "T9g: dry-run writes run metadata"
 assert_eq "2" "$(jq -r '.harness_agents' "$drun_json")" \
