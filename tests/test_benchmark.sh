@@ -392,6 +392,32 @@ assert_file_not_exists "$dbench/.pool.staging" \
 assert_file_not_exists "$dbench/.pool.old" \
   "T9m: backup dir is cleaned up after the swap"
 
+# Incomplete resume cells are fully cleared before rerun. A prior benchmark can
+# leave cells/<name>/repo-root/output half-populated while an old child is
+# still winding down. Deleting that tree in place can fail with "Directory not
+# empty"; the rerun must verify the path is clean instead of mixing stale output
+# into the new replicate.
+resume_root="$work/dry-resume-bench"
+resume_run="resume-$$"
+resume_cell="$resume_root/codex/$resume_run/cells/harness-r1"
+mkdir -p "$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results"
+cat > "$resume_cell/cell.json" <<JSON
+{"condition":"harness","replicate":1,"experiment":"bench-$resume_run-harness-r1","results_dir":"$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results","wall_seconds":0,"status":"running"}
+JSON
+printf 'stale result that must not survive in live cell\n' \
+  > "$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results/stale-sentinel.txt"
+resume_out=$(bash "$BENCH" --target dummytarget --dry-run --backend codex \
+  --replicates 1 --conditions harness --bench-root "$resume_root" \
+  --run-id "$resume_run" 2>&1)
+resume_rc=$?
+assert_eq "0" "$resume_rc" \
+  "T9n: dry-run resume reruns incomplete cell cleanly"
+assert_file_not_exists \
+  "$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results/stale-sentinel.txt" \
+  "T9o: stale output is not left under the live rerun cell"
+assert_file_exists "$resume_cell/results/crashes/CRASH-001/sanitizer.txt" \
+  "T9p: rerun wrote fresh dry-run results after cleanup"
+
 # ── T10: argument validation ─────────────────────────────────────────────
 # Every invocation gets a throw-away --bench-root so a successful-but-not-
 # rejected case (e.g. --budget-wall 0, which is the documented "unlimited"
@@ -1778,6 +1804,23 @@ if ls "$swp_work/cell/findings/FIND-001-real-bug.from-target-"* >/dev/null 2>&1;
 else
   fail "T30l: collided rescue lands under a .from-target-<ts> suffix"
 fi
+
+# The sweep helper runs inside cell runners whose stdout is command-substituted
+# as the returned results_dir. Its diagnostics must stay off stdout or a
+# successful cell harvests against a multi-line non-path string.
+mkdir -p "$swp_work/target3"
+swp_capture_out=$(bash -c '
+  set -euo pipefail
+  log() { echo "LOG:$*"; }
+  # shellcheck disable=SC1091
+  source "$1"
+  marker=$(mark_cell_start_for_sweep "$2" "$3")
+  mkdir -p "$3/findings/FIND-stdout-clean"
+  echo "rescued" > "$3/findings/FIND-stdout-clean/report.md"
+  sweep_target_tree_for_misplaced_output "$3" "$2" "$marker"
+' _ "$swp_fn_src" "$swp_work/cell" "$swp_work/target3" 2>/dev/null)
+assert_eq "" "$swp_capture_out" \
+  "T30m: sweep diagnostics do not pollute stdout return values"
 rm -f "$swp_fn_src"
 
 # ── T31: agy_drip_stopped + agy_cli_log_for_pid predicates ─────────────

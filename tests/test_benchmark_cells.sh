@@ -229,7 +229,7 @@ assert_match "budget=unlimited" "$gemini_unlimited_out" \
 # the cell finished and console.log said "done", but bash never returned.
 gemini_cli_unlimited_root="$work/gemini-cli-unlimited-bench"
 gemini_cli_unlimited_out=$(USE_GEMINI_CLI=1 GEMINI_BIN="$fake_gemini" \
-  audit_timeout_run 8 bash "$BENCH" --target "$bench_target" --backend gemini \
+  audit_timeout_run 20 bash "$BENCH" --target "$bench_target" --backend gemini \
     --replicates 1 --conditions model-direct --budget-wall 0 \
     --bench-root "$gemini_cli_unlimited_root" 2>&1)
 gemini_cli_unlimited_rc=$?

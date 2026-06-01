@@ -636,7 +636,7 @@ sweep_target_tree_for_misplaced_output() {
         fi
         if mv "$entry" "$dest" 2>/dev/null; then
           moved=$((moved + 1))
-          log "  sweep: rescued $parent_name/$base from source tree → $dest"
+          log "  sweep: rescued $parent_name/$base from source tree → $dest" >&2
         fi
       done
     done < <(
@@ -658,7 +658,7 @@ sweep_target_tree_for_misplaced_output() {
   rm -f "$marker" 2>/dev/null || true
 
   if [ "$moved" -gt 0 ]; then
-    log "cell ${cell_dir##*/} — pollution sweep: rescued $moved artifact(s) from $target_root"
+    log "cell ${cell_dir##*/} — pollution sweep: rescued $moved artifact(s) from $target_root" >&2
   fi
 }
 
@@ -672,7 +672,7 @@ run_model_direct_cell() {
   # cell_dir is the results dir — findings/, crashes/, logs/ live here.
   local out_dir="$cell_dir"
   if ! prepare_model_direct_output_dir "$out_dir"; then
-    log "  model-direct: output-dir prepare failed at $out_dir"
+    log "  model-direct: output-dir prepare failed at $out_dir" >&2
     return 1
   fi
 
@@ -743,11 +743,11 @@ run_model_direct_cell() {
     || printf '{}\n' > "$out_dir/logs/index.jsonl"
 
   if [ "$BACKEND" = "gemini" ] && cell_log_has_quota_exhaustion "$cell_dir"; then
-    log "cell ${cell_dir##*/} — gemini quota exhausted (quota diagnostic found)"
+    log "cell ${cell_dir##*/} — gemini quota exhausted (quota diagnostic found)" >&2
     touch "$cell_dir/.quota-exhausted"
   elif [ "$BACKEND" = "gemini" ] && [ ! -s "$raw_log" ] \
       && ! cell_has_result_artifacts "$out_dir"; then
-    log "cell ${cell_dir##*/} — backend produced empty output and no artifacts"
+    log "cell ${cell_dir##*/} — backend produced empty output and no artifacts" >&2
     echo "$out_dir"
     return 44
   fi
@@ -787,6 +787,32 @@ prepare_harness_facade() {
   done
 
   printf '%s\n' "$facade"
+}
+
+prepare_cell_dir_for_rerun() {
+  local cell_dir="$1" cell_name="$2"
+  local tries
+  [ -n "$cell_dir" ] || { echo "prepare_cell_dir_for_rerun: empty cell dir" >&2; return 1; }
+  [ -n "$cell_name" ] || cell_name="$(basename "$cell_dir")"
+
+  if [ -e "$cell_dir" ]; then
+    # Resumed benchmark cells can contain a half-written repo facade from a
+    # killed audit process. rm -rf can still fail with "Directory not empty"
+    # if a surviving child creates entries while rm(1) is walking the tree.
+    # Retry briefly, then refuse to reuse a dirty path.
+    tries=0
+    while [ -e "$cell_dir" ] && [ "$tries" -lt 3 ]; do
+      tries=$((tries + 1))
+      rm -rf "$cell_dir" 2>/dev/null || true
+      [ ! -e "$cell_dir" ] && break
+      sleep 1
+    done
+    if [ -e "$cell_dir" ]; then
+      log "cell $cell_name — cannot clear incomplete prior attempt at $cell_dir"
+      return 1
+    fi
+  fi
+  mkdir -p "$cell_dir"
 }
 
 run_harness_cell() {
@@ -1307,12 +1333,17 @@ for cond in "${COND_ARR[@]}"; do
     fi
 
     # Reaching here means this cell will run. On a resume the dir may hold a
-    # half-finished replicate (failed / quota_exhausted / killed mid-cell):
-    # wipe it so the re-run starts clean and a partial run's crashes/findings
-    # can never be folded into this replicate's harvest. Cells already done
-    # were skipped above, so this only ever discards incomplete work.
-    rm -rf "$cell_dir"
-    mkdir -p "$cell_dir"
+    # half-finished replicate (failed / quota_exhausted / killed mid-cell).
+    # Clear and verify the path before recreating it, so partial
+    # crashes/findings can never be folded into this replicate's harvest.
+    # Cells already done were skipped above, so this only ever discards
+    # incomplete work.
+    if ! prepare_cell_dir_for_rerun "$cell_dir" "$cell_name"; then
+      log "cell $cell_name — FAILED before launch (could not prepare clean cell dir)"
+      cells_failed=$((cells_failed + 1))
+      rep=$((rep + 1))
+      continue
+    fi
     exp_name="bench-${RUNID}-${cond}-r${rep}"
     # Per-cell config surfaced in the start line so the live log is enough
     # to spot a mis-parameterised replicate (wrong agent count, etc.) without
