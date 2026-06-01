@@ -82,7 +82,7 @@ _BARE_LABEL_RE = re.compile(r"^([A-Z][A-Za-z][A-Za-z0-9 _-]{0,40}):\s*(.*)$")
 
 # file:line references — accept common source-file extensions used
 # across the targets we audit. Kept as a prefix-friendly family rather
-# than an exhaustive enum (per project CLAUDE.md guidance).
+# than an exhaustive enum (per project docs/development.md guidance).
 _SRC_EXTS = (
     r"c|cc|cpp|cxx|h|hpp|hxx|m|mm|"
     r"py|rb|js|jsx|ts|tsx|"
@@ -295,7 +295,7 @@ def _insert_patch_section(text: str, patch_section: str) -> str:
     Matching is by lowercase prefix on the H2 name. Reproduce /
     Reproduction are deliberately NOT anchors: the patch (and the moved
     Fix narrative that precedes it) belong *after* the reproducer, next
-    to the scoring sections. Per CLAUDE.md, prefix is preferred over an
+    to the scoring sections. Per docs/development.md, prefix is preferred over an
     exhaustive enumeration of exact strings."""
     tail_prefixes = ("reachability", "severity rationale")
     earliest: Optional[int] = None

@@ -359,7 +359,7 @@ with tempfile.TemporaryDirectory() as td:
 
 # Concurrent appenders must produce one well-formed JSON object per line.
 # events.jsonl is shared across parallel agents + orchestrator
-# (CLAUDE.md "Logging Discipline" §2). This is a property test: each
+# (see docs/development.md logging discipline). This is a property test: each
 # subprocess opens, writes one buffered line, and closes — the kernel
 # does a single write() per process, which O_APPEND serializes for
 # regular files. So the test passes regardless of whether the in-process

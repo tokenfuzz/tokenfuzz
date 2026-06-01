@@ -780,7 +780,7 @@ prepare_harness_facade() {
     cp -p "$SCRIPT_ROOT/output/$TARGET_SLUG/target.toml" \
       "$facade/output/$TARGET_SLUG/target.toml" 2>/dev/null || true
   fi
-  for name in AGENTS.md CLAUDE.md GEMINI.md CHANGELOG.md LICENSE README.md \
+  for name in AGENTS.md CHANGELOG.md LICENSE README.md \
               SECURITY.md requirements.txt .claudeignore .codexignore \
               .geminiignore .gitignore; do
     [ -e "$SCRIPT_ROOT/$name" ] && ln -snf "$SCRIPT_ROOT/$name" "$facade/$name"

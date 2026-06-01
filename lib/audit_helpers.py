@@ -545,8 +545,9 @@ def _cmd_emit_event(args: argparse.Namespace) -> int:
     payload["created_at"] = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     payload["event"] = args.event_name
 
-    # events.jsonl is SHARED across parallel agents + orchestrator (CLAUDE.md
-    # "Logging Discipline" §2). Short rows are already PIPE_BUF-atomic via
+    # events.jsonl is SHARED across parallel agents + orchestrator (see
+    # docs/development.md logging discipline). Short rows are already
+    # PIPE_BUF-atomic via
     # POSIX O_APPEND, but long payloads can exceed PIPE_BUF and a Python
     # buffered write can be split into multiple os.write() syscalls. Take
     # an exclusive flock and flush INSIDE the locked region so the actual

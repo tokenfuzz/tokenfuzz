@@ -1062,7 +1062,7 @@ fi
 # A use-after-free narrative whose crashing symbol is a hugely popular
 # public library symbol — the external probe finds many callers. Names
 # below are placeholders, not from a real upstream finding (see the
-# Testing Discipline rule in CLAUDE.md).
+# testing discipline rule in docs/development.md).
 GATE_UNTRIAGED=$'# CRASH-1\n==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60\nREAD of size 8 at 0x60 thread T0\n    #0 node_free node.c:100\nSUMMARY: AddressSanitizer: heap-use-after-free node.c:100 in node_free\nFile: node.c\nFunction: node_free\nBug class: lifetime / heap-use-after-free\n'
 
 run_gate_py() { # _CURRENT_TEST set by caller; stdin = python body

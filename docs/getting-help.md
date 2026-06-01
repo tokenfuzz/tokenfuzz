@@ -14,7 +14,7 @@ read those first.
 | --- | --- |
 | Report a bug in TokenFuzz itself | [GitHub Issues](https://github.com/tokenfuzz/tokenfuzz/issues) on this repository. |
 | Ask a usage question | GitHub Issues, labelled `question`. |
-| Suggest a feature or investigation strategy | GitHub Issues, labelled `enhancement`. See [Contributing](contributing.md) before opening a PR. |
+| Suggest a feature or investigation strategy | GitHub Issues, labelled `enhancement`. See [Development](development.md) before opening a PR. |
 | Report a security issue **in TokenFuzz** | [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md). Do **not** open a public issue. |
 | Report a security issue **TokenFuzz found in another project** | The upstream project's normal security-disclosure process, not this repository. |
 | Share accepted impact from a TokenFuzz run | Open an issue with the public details, or use the private path in [`SECURITY.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md) if disclosure timing is sensitive. |

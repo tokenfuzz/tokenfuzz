@@ -208,10 +208,10 @@ and rotated.
 
 The sidebar carries the full page list.
 
-## Contributing
+## Development
 
-See [Contributing](contributing.md) for the test discipline, coding
-rules, and documentation conventions.
+See [Development](development.md) for the test discipline, coding rules,
+documentation conventions, and development-agent startup prompt.
 
 ## License
 

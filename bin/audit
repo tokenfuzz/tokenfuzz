@@ -2575,17 +2575,11 @@ detect_sanitizer_builds
 # regenerated + piped through perl neutralization on every prompt build.
 SAFETY_FRAMING_CACHED="$(build_safety_framing | neutralize_qa_vocab_string)"
 
-# Cache the guide content once at startup. AGENT_GUIDE_PATH resolves to
-# AGENTS.md — the unified guide that covers both browser and generic
-# targets. The prompt builders inject this so agents reliably receive
-# the guide instructions regardless of backend (Claude auto-reads
-# AGENTS.md via --add-dir, but explicit injection is still more
-# reliable than relying on auto-discovery).
-# AGENTS.md begins with a <!-- harness-dev-only:begin -->…<!-- :end -->
-# block mirroring CLAUDE.md so Codex/Gemini dev sessions auto-discover the
-# same dev guidance. Strip that block before injecting the runtime guide so
-# harness-spawned agents don't pay tokens for harness-developer instructions.
-AGENT_GUIDE_CACHED="$(sed '/<!-- harness-dev-only:begin/,/<!-- harness-dev-only:end/d' "$AGENT_GUIDE_PATH" 2>/dev/null | neutralize_qa_vocab_string)"
+# Cache the runtime guide content once at startup. AGENT_GUIDE_PATH resolves
+# to AGENTS.md — the unified audit-agent guide that covers both browser and
+# generic targets. Harness development guidance lives in docs/development.md
+# and is intentionally not part of this runtime prompt surface.
+AGENT_GUIDE_CACHED="$(cat "$AGENT_GUIDE_PATH" 2>/dev/null | neutralize_qa_vocab_string)"
 
 state_file_path() {
   local agent_num="$1"

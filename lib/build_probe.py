@@ -24,7 +24,7 @@ defined by `FEATURES_SCHEMA_VERSION`. Consumers (workqueue, prompt
 templates) call `load_features()` and `is_tu_stub()`; both fail open —
 a missing or malformed manifest never blocks bug-finding work.
 
-Industry-wide vocabulary only (per CLAUDE.md): no curl/ffmpeg/openssl
+Industry-wide vocabulary only (per docs/development.md): no curl/ffmpeg/openssl
 identifiers appear in this file. The probe reads what the build
 produced and reports it; classification logic is purely structural
 (zero non-runtime symbols → stub).

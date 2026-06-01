@@ -70,7 +70,7 @@ _outcap_check_int() {
 # Selection order:
 #   1. An explicit OUTCAP_SPILL_DIR — honored verbatim (callers/tests pin it).
 #   2. ${RESULTS_DIR}/logs/.raw/outcap — the audit's own forensic-dump area
-#      (CLAUDE.md logging discipline). Lives in the results tree, not /tmp.
+#      (docs/development.md logging discipline). Lives in the results tree, not /tmp.
 #   3. A private per-process directory created with `mktemp -d` under $TMPDIR.
 #
 # Cases 1 and 2 reuse a stable, predictable directory; case 3 is the only one

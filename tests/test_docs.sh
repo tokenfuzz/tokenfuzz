@@ -62,8 +62,8 @@ bad_out=$(DOCS_VENV="$fake_venv" bash "$DOCS_BIN" nope 2>&1) || bad_rc=$?
 assert_eq "2" "$bad_rc" "docs: unknown command exits 2"
 assert_match "unknown command: nope" "$bad_out" "docs: unknown command explains error"
 
-assert_file_contains "$SCRIPT_ROOT/docs/contributing.md" "bin/docs" \
-  "contributing docs: local preview uses bin/docs"
+assert_file_contains "$SCRIPT_ROOT/docs/development.md" "bin/docs" \
+  "development docs: local preview uses bin/docs"
 
 teardown_test_env
 summary

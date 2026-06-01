@@ -305,7 +305,7 @@ _INPUT_CONSUMPTION_RE = re.compile(
 # `reason`; `strategy_for` / `complementary_strategies` map the reason
 # set to an audit strategy S1..S8.
 #
-# Discipline (CLAUDE.md): these run against EVERY target's source, so
+# Discipline (docs/development.md): these run against EVERY target's source, so
 # every row must be target-agnostic — it matches a *family* (verb stems,
 # macro shapes, libc/POSIX symbols, language keywords), never one
 # project's types/headers/internal macros. A loose pattern costs
@@ -1421,8 +1421,8 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160, timeout:
     # lib/llm_decide.sh so a test mock keeps working with the global default.
     if not mock_present and os.environ.get("LLM_DECIDE_DISABLE") == "1":
         return cards
-    helper = ctx.script_root / "lib" / "llm_decide.sh"
-    if not helper.is_file():
+    engine = ctx.script_root / "lib" / "llm_decide.py"
+    if not engine.is_file():
         return cards
     # No vendor default — ACTIVE_BACKEND must be set explicitly (unset or
     # empty both bail). If only a mock is present (tests), the backend name
@@ -1464,10 +1464,9 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160, timeout:
         "candidate_lines": "\n".join(candidate_lines),
     })
 
-    cmd = f"source {shlex.quote(str(helper))}; llm_decide work_rerank cards {int(timeout)}"
     try:
         raw = subprocess.check_output(
-            ["bash", "-lc", cmd],
+            [sys.executable, str(engine), "decide", "work_rerank", "cards", str(int(timeout))],
             input=prompt,
             text=True,
             stderr=subprocess.DEVNULL,
