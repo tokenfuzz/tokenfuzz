@@ -367,6 +367,7 @@ run_test_file() {
   TOTAL_PASSED=$((TOTAL_PASSED + p))
   TOTAL_FAILED=$((TOTAL_FAILED + f))
   if [ "$rc" -ne 0 ]; then
+    printf "${RED}  Suite exit code: %s%s\n" "$rc" "$NC"
     ERRORS+=("$name")
   fi
   TIMINGS+=("$elapsed $name")
@@ -424,6 +425,7 @@ run_tests_parallel() {
     TOTAL_PASSED=$((TOTAL_PASSED + p))
     TOTAL_FAILED=$((TOTAL_FAILED + f))
     if [ "$rc" -ne 0 ]; then
+      printf "${RED}  Suite exit code: %s%s\n" "$rc" "$NC"
       ERRORS+=("$name")
     fi
     TIMINGS+=("$elapsed $name")

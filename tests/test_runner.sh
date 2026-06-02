@@ -20,6 +20,7 @@ rc=0
 output=$(bash "$RUNNER" --jobs 1 "$(basename "$tmp_script")" 2>&1) || rc=$?
 assert_eq "1" "$rc" "runner: nonzero suite without assertion marks fails run"
 assert_match "Failed suites: test_runner_tmp_" "$output" "runner: nonzero suite is named"
+assert_match "Suite exit code: 7" "$output" "runner: nonzero suite exit code is printed"
 assert_match "RESULTS: .*0 passed.*, .*0 failed" "$output" "runner: assertion count stays separate from suite errors"
 assert_match "Total time:.*[0-9]+[hms0-9]* \\([0-9]+s\\)" "$output" \
   "runner: summary prints total wall time"

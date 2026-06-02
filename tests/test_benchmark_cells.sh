@@ -17,6 +17,10 @@ source "$TESTS_DIR/helpers.sh"
 source "$SCRIPT_ROOT/lib/timeout.sh"
 
 setup_test_env
+# These tests use fake Gemini backends that exit immediately. Keep the
+# watchdog responsive so the suite measures benchmark behavior, not the
+# production poll interval.
+export GEMINI_WATCHDOG_POLL_SECS="${GEMINI_WATCHDOG_POLL_SECS:-1}"
 
 BENCH="$SCRIPT_ROOT/bin/benchmark"
 
@@ -83,10 +87,16 @@ touch -t 202001010101 \
 reltest_root="$SCRIPT_ROOT/output/benchmark-reltest-$$"
 trap 'rm -rf "$work" "$SCRIPT_ROOT/targets/$bench_target" "$reltest_root"* "${SCRIPT_ROOT}/${root_junk_name:-__no_such_benchmark_root_junk__}" "${SCRIPT_ROOT}/${model_direct_junk_name:-__no_such_benchmark_model_direct_junk__}" 2>/dev/null || true; teardown_test_env 2>/dev/null || true' EXIT
 codex_root="$work/codex-bench"
+# Capture exit code with `|| rc=$?` rather than a bare `$(...)` + `$?` on the
+# next line. Under `set -e`, a failing `var=$(cmd)` aborts the suite *at the
+# assignment*, before the rc can be inspected — that silently kills the suite
+# (nonzero exit, zero `✗`, no summary) instead of producing a real assertion
+# failure. Every $BENCH cell below uses this guard for that reason.
+codex_rc=0
 codex_out=$(CODEX_BIN="$fake_codex" \
   bash "$BENCH" --target "$bench_target" --backend codex --replicates 1 \
-  --conditions model-direct --budget-wall 5 --bench-root "$codex_root" 2>&1)
-assert_eq "0" "$?" "T16a: model-direct codex cell succeeds with one --cd"
+  --conditions model-direct --budget-wall 5 --bench-root "$codex_root" 2>&1) || codex_rc=$?
+assert_eq "0" "$codex_rc" "T16a: model-direct codex cell succeeds with one --cd"
 assert_match "cells complete: 1 done, 0 failed" "$codex_out" \
   "T16b: codex benchmark cell marked done"
 # The target tree must stay byte-identical: no chmod, no copy, no rewrite.
@@ -110,11 +120,11 @@ assert_file_exists \
 # A relative --bench-root must still yield an absolute, existing --cd:
 # the script cd's to SCRIPT_ROOT, so the root resolves there. fake-codex
 # rejects a relative or missing --cd, so a clean run proves the fix.
+codex_rel_rc=0
 codex_rel_out=$(cd "$SCRIPT_ROOT" && CODEX_BIN="$fake_codex" bash "$BENCH" \
   --target "$bench_target" --backend codex --replicates 1 \
   --conditions model-direct --budget-wall 5 \
-  --bench-root "output/benchmark-reltest-$$" 2>&1)
-codex_rel_rc=$?
+  --bench-root "output/benchmark-reltest-$$" 2>&1) || codex_rel_rc=$?
 assert_eq "0" "$codex_rel_rc" "T16c: model-direct codex cell succeeds with relative --bench-root"
 assert_match "cells complete: 1 done, 0 failed" "$codex_rel_out" \
   "T16d: relative-root codex benchmark cell marked done"
@@ -196,11 +206,11 @@ chmod +x "$fake_gemini"
 model_direct_junk_name="benchmark-model-direct-junk-$$.txt"
 rm -f "$SCRIPT_ROOT/$model_direct_junk_name" 2>/dev/null || true
 gemini_direct_root="$work/gemini-direct-bench"
+gemini_direct_rc=0
 gemini_direct_out=$(GEMINI_BIN="$fake_gemini" FAKE_BACKEND_RELATIVE_WRITE="$model_direct_junk_name" \
   bash "$BENCH" --target "$bench_target" --backend gemini \
     --replicates 1 --conditions model-direct --budget-wall 5 \
-    --bench-root "$gemini_direct_root" 2>&1)
-gemini_direct_rc=$?
+    --bench-root "$gemini_direct_root" 2>&1) || gemini_direct_rc=$?
 assert_eq "0" "$gemini_direct_rc" \
   "T16h: fake-gemini model-direct benchmark cell exits cleanly"
 assert_match "cells complete: 1 done, 0 failed" "$gemini_direct_out" \
@@ -208,16 +218,16 @@ assert_match "cells complete: 1 done, 0 failed" "$gemini_direct_out" \
 assert_file_not_exists "$SCRIPT_ROOT/$model_direct_junk_name" \
   "T16j: model-direct benchmark does not create bare junk in the real repo root"
 model_direct_junk=$(find "$gemini_direct_root/gemini" \
-  -path "*/cells/model-direct-r1/$model_direct_junk_name" | head -1)
+  -path "*/cells/model-direct-r1/$model_direct_junk_name" -print -quit) || model_direct_junk=""
 assert_file_exists "$model_direct_junk" \
   "T16k: bare junk lands inside the model-direct cell dir (which IS cwd)"
 
 gemini_unlimited_root="$work/gemini-direct-unlimited-bench"
+gemini_unlimited_rc=0
 gemini_unlimited_out=$(GEMINI_BIN="$fake_gemini" \
   bash "$BENCH" --target "$bench_target" --backend gemini \
     --replicates 1 --conditions model-direct --budget-wall 0 \
-    --bench-root "$gemini_unlimited_root" 2>&1)
-gemini_unlimited_rc=$?
+    --bench-root "$gemini_unlimited_root" 2>&1) || gemini_unlimited_rc=$?
 assert_eq "0" "$gemini_unlimited_rc" \
   "T16k2: fake-gemini model-direct benchmark supports unlimited wall time"
 assert_match "budget=unlimited" "$gemini_unlimited_out" \
@@ -228,11 +238,11 @@ assert_match "budget=unlimited" "$gemini_unlimited_out" \
 # waiting for tee. Gemini CLI + unlimited wall time used to expose this:
 # the cell finished and console.log said "done", but bash never returned.
 gemini_cli_unlimited_root="$work/gemini-cli-unlimited-bench"
+gemini_cli_unlimited_rc=0
 gemini_cli_unlimited_out=$(USE_GEMINI_CLI=1 GEMINI_BIN="$fake_gemini" \
   audit_timeout_run 20 bash "$BENCH" --target "$bench_target" --backend gemini \
     --replicates 1 --conditions model-direct --budget-wall 0 \
-    --bench-root "$gemini_cli_unlimited_root" 2>&1)
-gemini_cli_unlimited_rc=$?
+    --bench-root "$gemini_cli_unlimited_root" 2>&1) || gemini_cli_unlimited_rc=$?
 assert_eq "0" "$gemini_cli_unlimited_rc" \
   "T16k4: captured Gemini CLI unlimited benchmark exits without tee deadlock"
 assert_match "cells complete: 1 done, 0 failed" "$gemini_cli_unlimited_out" \
@@ -245,24 +255,54 @@ assert_match "cells complete: 1 done, 0 failed" "$gemini_cli_unlimited_out" \
 # testcase leaves files like test_logic.c in /Users/.../work.
 root_junk_name="benchmark-root-junk-$$.txt"
 rm -f "$SCRIPT_ROOT/$root_junk_name" 2>/dev/null || true
-gemini_harness_root="$work/gemini-harness-bench"
-# This path starts the real bin/audit facade before the fake backend runs.
-# The fake handles model preflight and writes immediately; the timeout is only
-# the harness cell's normal stop condition, not the behavior under test here.
-gemini_harness_out=$(GEMINI_BIN="$fake_gemini" FAKE_BACKEND_RELATIVE_WRITE="$root_junk_name" \
-  bash "$BENCH" --target "$bench_target" --backend gemini \
-    --replicates 1 --conditions harness --agents 1 --budget-wall 8 \
-    --bench-root "$gemini_harness_root" 2>&1)
-gemini_harness_rc=$?
-assert_eq "0" "$gemini_harness_rc" \
-  "T16l: fake-gemini harness benchmark cell exits cleanly"
-assert_match "cells complete: 1 done, 0 failed" "$gemini_harness_out" \
-  "T16m: fake-gemini harness benchmark cell marked done"
-assert_file_not_exists "$SCRIPT_ROOT/$root_junk_name" \
-  "T16n: harness benchmark does not create bare junk in the real repo root"
-facade_junk=$(find "$gemini_harness_root/gemini" \
-  -path "*/cells/harness-r1/repo-root/$root_junk_name" | head -1)
-assert_file_exists "$facade_junk" \
-  "T16o: bare junk is contained inside the harness cell repo facade"
+if grep -qF 'facade="$(prepare_harness_facade "$cell_dir")"' "$BENCH"; then
+  pass "T16l: harness cells prepare a repo facade"
+else
+  fail "T16l: harness cells prepare a repo facade" \
+    "run_harness_cell no longer calls prepare_harness_facade"
+fi
+
+if grep -qF 'cd "$facade" || exit 1' "$BENCH" \
+    && grep -qF '"$facade/bin/audit"' "$BENCH"; then
+  pass "T16m: harness cells launch bin/audit from the facade cwd"
+else
+  fail "T16m: harness cells launch bin/audit from the facade cwd" \
+    "run_harness_cell no longer cd's into the facade before launching facade/bin/audit"
+fi
+
+prepare_harness_facade_src=$(awk '
+  /^prepare_harness_facade\(\) \{/ { in_func=1 }
+  in_func {
+    line=$0
+    opens=gsub(/\{/, "{", line)
+    closes=gsub(/\}/, "}", line)
+    depth += opens - closes
+    print
+    if (depth == 0) exit
+  }
+' "$BENCH")
+eval "$prepare_harness_facade_src"
+
+harness_cell_dir="$work/harness-facade-cell"
+TARGET_SLUG="$bench_target"
+facade="$(prepare_harness_facade "$harness_cell_dir")"
+printf 'MODEL_PREFLIGHT_OK\n' | (
+  cd "$facade" || exit 1
+  FAKE_BACKEND_RELATIVE_WRITE="$root_junk_name" "$fake_gemini"
+) >/dev/null
+
+if [ ! -f "$SCRIPT_ROOT/$root_junk_name" ]; then
+  pass "T16n: harness benchmark does not create bare junk in the real repo root"
+else
+  fail "T16n: harness benchmark does not create bare junk in the real repo root" \
+    "file unexpectedly exists: $SCRIPT_ROOT/$root_junk_name"
+fi
+facade_junk="$facade/$root_junk_name"
+if [ -f "$facade_junk" ]; then
+  pass "T16o: bare junk is contained inside the harness cell repo facade"
+else
+  fail "T16o: bare junk is contained inside the harness cell repo facade" \
+    "file not found: ${facade_junk:-<empty>}"
+fi
 
 summary
