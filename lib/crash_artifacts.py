@@ -299,6 +299,17 @@ def find_testcase(scan_dirs: Iterable[Path], *, asan_files: Iterable[Path] = (),
                   min_bytes: int = 1) -> Optional[Path]:
     dirs = [Path(d) for d in scan_dirs if Path(d).is_dir()]
 
+    # Prefer audit-preserved originals before following ASAN_RUN_HEADER.
+    # The header records the scratch path that crashed, but scratch dirs are
+    # reused across investigations. A later testcase at the same path can
+    # make export-repro stage the wrong input even though .audit/testcase.*
+    # still holds the immutable reproducer captured with the crash.
+    audit_dirs = [d for d in dirs if d.name == ".audit"]
+    for d in audit_dirs:
+        for p in _visible_files(d):
+            if is_testcase_candidate(p, min_bytes=min_bytes):
+                return p
+
     header_hit = testcase_from_asan_header(
         asan_files,
         [*dirs, *(d.parent for d in dirs)],

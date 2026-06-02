@@ -1042,6 +1042,27 @@ pick = er.find_testcase([tc_header], tc_header, tc_header / ".audit")
 assert_eq("from-header.txt", pick.name if pick else None,
           "find_testcase: ASAN_RUN_HEADER testcase fallback is accepted")
 
+# 6a0. Regression for CRASH-0010.20260531: ASAN_RUN_HEADER points at the
+# scratch path that crashed, but scratch dirs can be reused before the bundle
+# is exported. If .audit/testcase.* was preserved with the crash, it is the
+# immutable source of truth and must beat an existing-but-stale scratch path.
+tc_header_stale = TMP / "tc-header-stale"
+tc_header_stale.mkdir()
+audit_header_stale = tc_header_stale / ".audit"
+audit_header_stale.mkdir()
+scratch_stale = TMP / "scratch-stale"
+scratch_stale.mkdir()
+(scratch_stale / "testcase.xml").write_text("<stale />\n", encoding="utf-8")
+(audit_header_stale / "testcase.xml").write_text("<crashing />\n", encoding="utf-8")
+(tc_header_stale / "sanitizer.txt").write_text(
+    f"ASAN_RUN_HEADER: runs=5 mode=generic testcase={scratch_stale / 'testcase.xml'} started=x\n"
+    "ERROR: AddressSanitizer: heap-use-after-free\n",
+    encoding="utf-8",
+)
+pick = er.find_testcase([audit_header_stale, tc_header_stale], tc_header_stale, audit_header_stale)
+assert_eq(str(audit_header_stale / "testcase.xml"), str(pick) if pick else None,
+          "find_testcase: .audit testcase beats stale ASAN_RUN_HEADER scratch path")
+
 # 6a. Regression for CRASH-002-1.20260509: when .audit/ holds the
 # reachability prose summary that lib/triage.sh writes
 # (.audit/reachability.out) AND the crash dir has the real testcase, the
