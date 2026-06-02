@@ -44,9 +44,14 @@ alongside `report.md`. `bin/enrich-report` is the sole writer of the
 filename and rule apply for CRASH directories. Capture with the
 target's VCS (`git -C "$TARGET_ROOT" diff -- path/to/file > "$DIR/patch.diff"`
 or `hg -R "$TARGET_ROOT" diff path/to/file > "$DIR/patch.diff"`); save
-whenever `git apply --check` / `hg import --no-commit` dry-run succeeds.
-Build/repro confirmation is a quality upgrade, not a gate. When the
-fix is non-surgical (ABI rename, signature change, API replacement),
+whenever `git -C "$TARGET_ROOT" apply --check` succeeds — a
+non-mutating check that never touches the source. (`hg
+import --no-commit` is not a dry run; for hg targets save the `hg diff`
+and skip apply-validation rather than modify the source.) Build/repro
+confirmation is a quality upgrade, not a gate; if you apply a fix to
+test it, revert the touched files immediately so probes run against
+unmodified source. When the fix is non-surgical (ABI rename,
+signature change, API replacement),
 omit `patch.diff` entirely and add a `## Fix Direction` prose section
 instead — the exporter marks the bundle `Advisory: yes` so reviewers
 know the omission is intentional.

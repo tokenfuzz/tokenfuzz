@@ -154,8 +154,12 @@ with independent rationales.
 
 Optional but encouraged: `patch.diff` in the FIND/CRASH dir, captured
 via `git diff` / `hg diff` of the surgical fix. Save it whenever
-`git apply --check` (or `hg import --no-commit` dry-run) succeeds;
-build/repro confirmation is an optional quality upgrade, not a gate.
+`git -C "$TARGET_ROOT" apply --check` succeeds — a non-mutating check;
+`hg import --no-commit` is not a dry run, so for hg targets save the
+`hg diff` and skip apply-validation rather than modify the source. Build/repro
+confirmation is an optional quality upgrade, not a gate; if you apply a
+fix to test it, revert the touched files immediately so probes run
+against unmodified source.
 **Do not write a `## Patch` section in `report.md`** — `bin/enrich-report`
 is the single writer of that section and inlines the diff from the
 sibling file on render. Reserve `## Fix Direction` prose (omit

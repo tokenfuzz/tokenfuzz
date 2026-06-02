@@ -87,8 +87,16 @@ assert_file_contains "$DIGEST" "session-rules.md" \
   "digest points at the full file for drill-down"
 assert_file_contains "$DIGEST" "Drill-down" \
   "digest has an explicit drill-down section"
-assert_file_contains "$FULL_RULES" "git apply --check" \
+assert_file_contains "$FULL_RULES" "apply --check" \
   "full rules name git apply --check as the patch.diff save floor"
+assert_file_contains "$FULL_RULES" "non-mutating" \
+  "full rules describe apply --check as non-mutating"
+assert_file_contains "$FULL_RULES" "not a dry run" \
+  "full rules correct the hg import --no-commit dry-run myth"
+assert_file_contains "$DIGEST" "apply --check" \
+  "digest names git apply --check as the patch.diff save floor"
+assert_file_contains "$DIGEST" "not a dry run" \
+  "digest corrects the hg import --no-commit dry-run myth"
 assert_file_contains "$FULL_RULES" "single writer" \
   "full rules tell the agent that enrich-report is the sole ## Patch writer"
 assert_file_contains "$FULL_RULES" "Fix Direction" \

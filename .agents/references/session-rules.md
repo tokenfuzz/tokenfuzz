@@ -389,17 +389,23 @@ Optional but encouraged:
 
   Keep the patch surgical — only the missing check or corrected line,
   no surrounding refactoring or whitespace churn. Save `patch.diff`
-  whenever it applies cleanly (`git apply --check`, or `hg import
-  --no-commit` dry-run). Build/repro confirmation is optional and
-  improves quality but is not required: prefer an existing sanitizer
-  build dir (`build-asan${AUDIT_BUILD_SUFFIX:-}/`, see `AGENTS.md`),
-  fall back to any other `build-*/` dir, then the regular project
-  build; revert only the files you touched (`git -C "$TARGET_ROOT"
-  checkout -- path/to/file.cpp` or `hg -R "$TARGET_ROOT" revert
-  path/to/file.cpp` — never a whole-tree reset) so later probes run
-  against unmodified source. **Do not write a `## Patch` section in
-  `report.md`** — `bin/enrich-report` is the single writer of that
-  section and inserts the diff from the sibling file on render.
+  whenever it applies cleanly under
+  `git -C "$TARGET_ROOT" apply --check` — a non-mutating check that
+  never touches the source. (`hg import --no-commit` is not a dry run;
+  it applies to the working tree, so for Mercurial targets just save
+  the `hg diff` and skip apply-validation rather than modify the
+  source.) Build/repro confirmation is optional and improves quality
+  but is not required:
+  prefer an existing sanitizer build dir
+  (`build-asan${AUDIT_BUILD_SUFFIX:-}/`, see `AGENTS.md`), fall back to
+  any other `build-*/` dir, then the regular project build. If you
+  apply the fix to build-test it, revert only the files you touched
+  (`git -C "$TARGET_ROOT" checkout -- path/to/file.cpp` or `hg -R
+  "$TARGET_ROOT" revert path/to/file.cpp` — never a whole-tree reset)
+  immediately so later probes run against unmodified source. **Do not
+  write a `## Patch` section in `report.md`** — `bin/enrich-report` is
+  the single writer of that section and inserts the diff from the
+  sibling file on render.
   Whatever validation you ran (applies, builds, confirms the
   diagnostic stops) can be noted in your narrative prose; there is no
   required label vocabulary.
