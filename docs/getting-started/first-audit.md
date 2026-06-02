@@ -76,7 +76,7 @@ it tells you how many workers actually launched after target detection,
 backend defaults, and any RAM / sibling-audit autotuning.
 
 ```text
-[HH:MM:SS] Agent pool: flat pool of 3 shell-mode worker(s) (generic non-browser target). Set NUM_AGENTS in the environment to override.
+[HH:MM:SS] Agent pool: flat pool of 3 generic worker(s) (non-browser target). Set NUM_AGENTS in the environment to override.
 [HH:MM:SS] LLM backend: provider=<backend> model=<model> (hosted API)
 [HH:MM:SS] Target under audit: slug=<slug> path=<root> repo_type=<git|hg|none> agent_guide=<path>
 [HH:MM:SS] Artifact output roots: results (crashes/findings/state) → <results>/    logs (sessions/index) → <logs>/

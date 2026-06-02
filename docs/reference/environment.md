@@ -20,7 +20,7 @@ source.
 
 `auto` means three workers in the normal case:
 
-- generic targets: `NUM_AGENTS=3`, a flat pool of three shell-mode
+- generic targets: `NUM_AGENTS=3`, a flat pool of three generic
   workers;
 - browser targets: `BROWSER_AGENTS=1` and `SHELL_AGENTS=2`, for three
   workers total.
