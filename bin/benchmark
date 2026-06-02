@@ -781,8 +781,7 @@ prepare_harness_facade() {
       "$facade/output/$TARGET_SLUG/target.toml" 2>/dev/null || true
   fi
   for name in AGENTS.md CHANGELOG.md LICENSE README.md \
-              SECURITY.md requirements.txt .claudeignore .codexignore \
-              .geminiignore .gitignore; do
+              SECURITY.md requirements.txt .gitignore; do
     [ -e "$SCRIPT_ROOT/$name" ] && ln -snf "$SCRIPT_ROOT/$name" "$facade/$name"
   done
 
