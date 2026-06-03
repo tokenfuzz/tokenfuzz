@@ -178,7 +178,9 @@ def main(argv: list[str]) -> int:
     p_resume.add_argument("--peek", action="store_true", help="render the next eligible card without claiming it")
 
     p_add = sub.add_parser("add-hyp")
-    p_add.add_argument("--id", default="")
+    # Hypothesis id accepts --id / --hypothesis-id / --hyp-id interchangeably so the
+    # same spelling works across add-hyp, update-hyp, add-run, and add-note.
+    p_add.add_argument("--id", "--hypothesis-id", "--hyp-id", dest="id", default="")
     p_add.add_argument("--agent", required=True)
     p_add.add_argument("--card-id", default="")
     p_add.add_argument("--hypothesis", required=True)
@@ -201,7 +203,7 @@ def main(argv: list[str]) -> int:
 
     p_up = sub.add_parser("update-hyp")
     p_up.add_argument("id_pos", nargs="?", default="", help=argparse.SUPPRESS)
-    p_up.add_argument("--id", default="")
+    p_up.add_argument("--id", "--hypothesis-id", "--hyp-id", dest="id", default="")
     p_up.add_argument("--agent", default="", help="optional agent scope for non-unique ids")
     p_up.add_argument("--card-id", default="", help=argparse.SUPPRESS)
     p_up.add_argument("--status", required=True)
@@ -210,7 +212,9 @@ def main(argv: list[str]) -> int:
 
     p_card = sub.add_parser("update-card")
     p_card.add_argument("card_id_pos", nargs="?", default="", help=argparse.SUPPRESS)
-    p_card.add_argument("--card-id", default="")
+    # --id is accepted as an alias for --card-id: update-card has no hypothesis, so
+    # there is no ambiguity, and it matches the --id spelling used by sibling mutators.
+    p_card.add_argument("--card-id", "--id", dest="card_id", default="")
     p_card.add_argument("--status", required=True)
     p_card.add_argument("--agent", default="")
     p_card.add_argument("--note", "--reason", dest="note", default="")
@@ -243,7 +247,7 @@ def main(argv: list[str]) -> int:
 
     p_run = sub.add_parser("add-run")
     p_run.add_argument("--agent", required=True)
-    p_run.add_argument("--hypothesis-id", required=True)
+    p_run.add_argument("--hypothesis-id", "--id", "--hyp-id", dest="hypothesis_id", required=True)
     p_run.add_argument("--card-id", default="")
     p_run.add_argument("--mode", required=True)
     p_run.add_argument("--testcase", required=True)
@@ -255,7 +259,7 @@ def main(argv: list[str]) -> int:
 
     p_note = sub.add_parser("add-note")
     p_note.add_argument("--agent", required=True)
-    p_note.add_argument("--hypothesis-id", default="")
+    p_note.add_argument("--hypothesis-id", "--id", "--hyp-id", dest="hypothesis_id", default="")
     p_note.add_argument("--card-id", default="")
     p_note.add_argument(
         "--kind",
@@ -339,6 +343,9 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="suppress per-row JSON output; print only the release count",
     )
+    # release-stale-claims is global (it scans every claim); accept and ignore --agent
+    # so the reflexive `--agent N` that agents append to per-agent commands does not error.
+    p_release.add_argument("--agent", default="", help=argparse.SUPPRESS)
 
     p_strat = sub.add_parser(
         "strategy-status",

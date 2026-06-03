@@ -9,6 +9,7 @@ No active PENDING/INVESTIGATING/NEEDS_TESTCASE hypothesis exists for this agent.
 ## FIRST ACTION — Structured Resume
 
 - Run `bin/state resume --agent {{ agent_num }} --mode {{ mode }} --role {{ role }}{{ state_strategy_arg }}`.
+- Call `bin/` tools (`state`, `probe`, …) from the repo root — they locate `$RESULTS_DIR` themselves; `cd`-ing into an `output/` dir first leaves `bin/` unresolvable.
 - Use only the compact resume fields: assigned card, recent runs (last 3), last terminal reason, and guard notes.
 - If a card is assigned, create one hypothesis with `bin/state add-hyp --card-id <id>`, write one testcase, and run `bin/probe scratch-{{ agent_num }}/<testcase>`.
 - If no card is assigned, {{ audit_fixed_strategy_compact_clause }}run `bin/state explain-queue --mode {{ mode }}` and stop after recording why no launchable work exists.

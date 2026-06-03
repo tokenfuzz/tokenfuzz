@@ -246,7 +246,10 @@ export TRIED_INPUTS_LOG="$RESULTS_DIR/tried-inputs-${AGENT_NUM}.log"
 export HITS_LOG_PATH="$RESULTS_DIR/hits-${AGENT_NUM}.log"
 
 # Read the testcase header for TARGET / HYPOTHESIS-ID / CARD-ID / MODE / HARNESS.
-HEADER="$(head -n 16 "$TESTCASE" 2>/dev/null)"
+# Binary testcases have no text header; strip non-printable bytes in the C locale so
+# the sed/grep below never abort with "RE error: illegal byte sequence" on macOS. The
+# header keywords are ASCII, so text headers parse identically after sanitizing.
+HEADER="$(head -n 16 "$TESTCASE" 2>/dev/null | LC_ALL=C tr -cd '[:print:]\n\t')"
 TARGET_LINE="$(printf '%s\n' "$HEADER" | sed -nE 's/^[^A-Za-z]*TARGET:[[:space:]]*(.+)$/\1/p' | head -1 | sed -E 's/[[:space:]]*(-->|\*\/)[[:space:]]*$//')"
 HYP_LINE="$(printf '%s\n' "$HEADER" | grep -oE 'HYPOTHESIS-ID:[[:space:]]*[^[:space:]>*]+' | head -1 | awk '{print $NF}')"
 CARD_LINE="$(printf '%s\n' "$HEADER" | grep -oE 'CARD-ID:[[:space:]]*[^[:space:]>*]+' | head -1 | awk '{print $NF}')"
