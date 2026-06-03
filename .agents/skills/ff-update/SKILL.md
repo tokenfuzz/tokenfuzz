@@ -17,7 +17,7 @@ hg -R targets/firefox pull -u
 ### 2. Handle expected local patch conflicts
 If `hg pull -u` aborts with conflicting changes, inspect the modified files:
 ```bash
-hg -R targets/firefox status
+hg -R targets/firefox status -mard
 ```
 
 The expected local compatibility patches are:
@@ -31,8 +31,8 @@ hg -R targets/firefox update
 hg -R targets/firefox unshelve --name local-patches
 ```
 
-If `hg status` shows other modified tracked files, or if unshelving reports merge
-conflicts, stop and report the conflict. Do not force-resolve.
+If `hg status -mard` shows other tracked file changes, or if unshelving
+reports merge conflicts, stop and report the conflict. Do not force-resolve.
 
 ### 3. Verify the revision
 ```bash
