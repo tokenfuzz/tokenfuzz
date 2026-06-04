@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # tests/test_cluster_findings.sh — exercise bin/cluster-findings against
 # synthetic FIND-* fixtures. Verifies:
-#   (a) Layer 1 collapses two reports at the same (class, file, func)
-#   (b) Layer 2 collapses two reports sharing dedup_key but different sites
-#   (c) Distinct (class, file, func) tuples stay separate
-#   (d) FINDING-CLUSTERS.md is written next to findings/
-#   (e) Each report.md/REPORT.md gets a `Cluster:` line stamped
+#   (a) Two reports at the same (class, file, line) collapse
+#   (b) An *overflow* mechanism label and its memory-safety consequence
+#       collapse at one site (class normalization)
+#   (c) Same file, different line stays separate (the line discriminator)
+#   (d) Distinct sites stay separate; a siteless report becomes a title singleton
+#   (e) FINDING-CLUSTERS.md is written, each report gets a Cluster: line stamped
 #   (f) Non-canonical members get a .dup-of marker; canonical members don't
-#   (g) Idempotent across re-runs
-#   (h) Cluster metadata is kept after the report title, not before it
+#   (g) The Signature column renders (class, file, line) and ` or <crash state>`
+#   (h) Idempotent across re-runs; --dry-run writes nothing
+#   (i) Cross-agent aggregate stamps reports + .dup-of
 
 set -o pipefail
 source "$(dirname "$0")/helpers.sh"
@@ -19,13 +21,13 @@ CLUSTER="$SCRIPT_ROOT/bin/cluster-findings"
 [ -x "$CLUSTER" ] || { echo "missing $CLUSTER"; exit 1; }
 
 mk_find() {
-  local id="$1" body="$2" llm_class="$3" llm_dedup_key="${4:-}"
+  local id="$1" body="$2" llm_class="$3"
   local d="$RESULTS_DIR/findings/$id"
   mkdir -p "$d"
   printf '%s\n' "$body" > "$d/report.md"
-  # Synthesize the caches directly — we're not testing the LLM path here, only
-  # the clustering logic that reads them. The quality gate supplies class (and
-  # severity); identity (dedup_key) is owned by the keyer's .finding-key.json.
+  # Synthesize the quality cache directly — we test the clustering logic that
+  # reads it, not the LLM path. The gate supplies class (and severity);
+  # identity is the deterministic (class, file, line) site.
   if [ -n "$llm_class" ]; then
     local sha1
     sha1=$(shasum -a 1 "$d/report.md" | awk '{print $1}')
@@ -33,12 +35,9 @@ mk_find() {
 {"decision":"find_quality","decision_version":"v10","content_sha1":"$sha1","accept":true,"reason":"test","class":"$llm_class","severity":"low","cached_at":"2026-05-12T00:00:00Z"}
 EOF
   fi
-  if [ -n "$llm_dedup_key" ]; then
-    printf '{"key_version":"v1","dedup_key":"%s"}\n' "$llm_dedup_key" > "$d/.finding-key.json"
-  fi
 }
 
-# ── Layer 1: two reports at same (class, file, func) ────────────────
+# ── Same (class, file, line): two angles on one site collapse ───────
 mk_find FIND-A1 \
 "# Auth bypass
 ## Location
@@ -46,37 +45,38 @@ mk_find FIND-A1 \
 
 ## Classification
 - **Class**: auth:bypass" \
-  "auth:bypass" "admin-listusers-authz-bypass"
+  "auth:bypass"
 
 mk_find FIND-A2 \
 "# Same handler, different angle
 ## Location
-\`server/handlers/admin.go:HandleListUsers:55\`
+\`server/handlers/admin.go:HandleListUsers:42\`
 
 ## Classification
 - **Class**: auth:bypass" \
-  "auth:bypass" "admin-listusers-authz-bypass"
+  "auth:bypass"
 
-# ── Layer 2: two reports at different file:func, same dedup_key ─────
+# ── Class normalization: *overflow* mechanism folds into memory-safety,
+#    so the mechanism label and the consequence label at ONE site merge.
 mk_find FIND-B1 \
-"# UAF reached via match path
+"# Allocation size can wrap
 ## Location
-\`src/pcre2_match.c:match_internal:1234\`
+\`src/calc.c:compute:88\`
 
 ## Classification
-- **Class**: memory-safety:lifetime" \
-  "memory-safety:lifetime" "code_start-unbounded"
+- **Class**: integer-overflow" \
+  "integer-overflow"
 
 mk_find FIND-B2 \
-"# UAF reached via DFA matcher
+"# Same wrap, described as the consequence
 ## Location
-\`src/pcre2_dfa_match.c:dfa_match_internal:5678\`
+\`src/calc.c:compute:88\`
 
 ## Classification
-- **Class**: memory-safety:lifetime" \
-  "memory-safety:lifetime" "code_start-unbounded"
+- **Class**: memory-safety" \
+  "memory-safety"
 
-# ── Mass-scanner safety: 3 strcpy sites must NOT collapse ──────────
+# ── Mass-scanner safety: 3 distinct sites must NOT collapse ─────────
 mk_find FIND-C1 \
 "# strcpy site one
 ## Location
@@ -84,25 +84,25 @@ mk_find FIND-C1 \
 
 ## Classification
 - **Class**: memory-safety:bounds" \
-  "memory-safety:bounds" ""
+  "memory-safety:bounds"
 
 mk_find FIND-C2 \
 "# strcpy site two
 ## Location
-\`b/y.c:f2:1\`
+\`b/y.c:f2:2\`
 
 ## Classification
 - **Class**: memory-safety:bounds" \
-  "memory-safety:bounds" ""
+  "memory-safety:bounds"
 
 mk_find FIND-C3 \
 "# strcpy site three
 ## Location
-\`c/z.c:f3:1\`
+\`c/z.c:f3:3\`
 
 ## Classification
 - **Class**: memory-safety:bounds" \
-  "memory-safety:bounds" ""
+  "memory-safety:bounds"
 
 # ── No-location finding: falls back to title slug ───────────────────
 mk_find FIND-D1 \
@@ -110,7 +110,7 @@ mk_find FIND-D1 \
 
 The default Content-Security-Policy emitted by the framework permits
 'unsafe-inline' in script-src, which negates the XSS mitigation." \
-  "config:permissive-default" ""
+  "config:permissive-default"
 
 # ── Existing cluster metadata before H1 must be normalized after H1 ─
 mk_find FIND-E1 \
@@ -119,12 +119,10 @@ Dedup key: [title] stale
 # Metadata should not lead the report
 
 The token reset path accepts stale parser state after a failed parse." \
-  "state:parser-reset" ""
+  "state:parser-reset"
 
-# ── Bias-to-separate: same (class,file,func) but NO dedup_key must NOT
-#    auto-merge. Only the high-precision signals (shared dedup_key, identical
-#    crash state) merge; a shared location alone is not a merge signal, so two
-#    distinct bugs in one function stay apart.
+# ── The line is the discriminator: two distinct bugs in ONE function at
+#    DIFFERENT lines must NOT merge, even at the same class and file.
 mk_find FIND-G1 \
 "# Bug one at a shared site
 ## Location
@@ -132,16 +130,33 @@ mk_find FIND-G1 \
 
 ## Classification
 - **Class**: memory-safety:bounds" \
-  "memory-safety:bounds" ""
+  "memory-safety:bounds"
 
 mk_find FIND-G2 \
-"# Bug two at the same shared site
+"# Bug two at the same function, another line
 ## Location
 \`src/shared/util.c:helper:20\`
 
 ## Classification
 - **Class**: memory-safety:bounds" \
-  "memory-safety:bounds" ""
+  "memory-safety:bounds"
+
+# ── Crash-state signal: a report embedding a sanitizer stack renders
+#    both (class, file, line) AND the crash state, joined by ` or `.
+mk_find FIND-H1 \
+"# Heap overflow with a stack
+## Location
+\`src/render.c:render_draw:77\`
+
+## Classification
+- **Class**: memory-safety
+
+\`\`\`
+SUMMARY: AddressSanitizer: heap-buffer-overflow
+    #0 0x1 in render_draw src/render.c:77
+    #1 0x2 in main_loop src/main.c:10
+\`\`\`" \
+  "memory-safety"
 
 # ── Run cluster-findings ────────────────────────────────────────
 out=$(python3 "$CLUSTER" "$RESULTS_DIR" 2>&1) \
@@ -157,27 +172,6 @@ assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.html" \
   'href="FIND-A1/report.html"' \
   "FINDING-CLUSTERS.html links to rendered member HTML"
 
-# If a backend is configured but keying still leaves reports without
-# .finding-key.json (bad model output, backend failure, quota, etc.), surface
-# that degradation instead of silently rendering only deterministic signatures.
-warn_root="$TEST_TMPDIR/warn-results"
-mkdir -p "$warn_root/findings/FIND-WARN"
-cat > "$warn_root/findings/FIND-WARN/report.md" <<'EOF'
-# Warning fixture
-
-Location: `src/warn.c:warn:12`
-Class: memory-safety
-EOF
-warn_err="$TEST_TMPDIR/cluster-findings-warn.err"
-ACTIVE_BACKEND=claude \
-  LLM_DECIDE_DISABLE=0 \
-  LLM_DECIDE_MOCK_FINDING_KEY='{"dedup_key":"oops"}' \
-  python3 "$CLUSTER" "$warn_root" >/dev/null 2>"$warn_err" \
-  || fail "cluster-findings warning fixture runs cleanly" "exit nonzero: $(cat "$warn_err")"
-warn_out=$(cat "$warn_err")
-assert_match 'WARN: 1/1 finding\(s\).*still have no dedup_key' "$warn_out" \
-  "cluster-findings warns when configured keying leaves reports unkeyed"
-
 # Helper: pull cluster id from a stamped Cluster: line.
 cl_id() {
   grep -m1 -E '^Cluster: FCL-' "$RESULTS_DIR/findings/$1/report.md" \
@@ -190,23 +184,25 @@ c1=$(cl_id FIND-C1); c2=$(cl_id FIND-C2); c3=$(cl_id FIND-C3)
 d1=$(cl_id FIND-D1)
 g1=$(cl_id FIND-G1); g2=$(cl_id FIND-G2)
 
-# Auto-merge on a shared dedup_key (A1/A2 share admin-listusers-authz-bypass).
-assert_eq "$a1" "$a2" "auto-merge: shared dedup_key → same cluster"
+# Auto-merge on a shared (class, file, line) site.
+assert_eq "$a1" "$a2" "auto-merge: same (class, file, line) → same cluster"
 
-# Bias-to-separate: same (class,file,func) but NO dedup_key does NOT
-# auto-merge — a shared location alone is not a merge signal.
+# Class normalization: integer-overflow folds to memory-safety, so B1/B2 at one
+# site share the class and merge.
+assert_eq "$b1" "$b2" "overflow fold: integer-overflow + memory-safety at one site → same cluster"
+assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" \
+  'memory-safety, src/calc.c, 88' \
+  "folded cluster keys on memory-safety (integer-overflow normalized away)"
+
+# The line discriminates: same class+file, different line → separate clusters.
 [ "$g1" != "$g2" ] \
-  && pass "bias-to-separate: same site, no dedup_key → separate clusters" \
-  || fail "bias-to-separate: same site, no dedup_key → separate clusters" \
-       "g1=$g1 g2=$g2"
-
-# Layer 2 collapse.
-assert_eq "$b1" "$b2" "Layer 2: same dedup_key, different file → same cluster"
+  && pass "different line at one function → separate clusters" \
+  || fail "different line at one function → separate clusters" "g1=$g1 g2=$g2"
 
 # Mass-scanner safety.
 [ "$c1" != "$c2" ] && [ "$c2" != "$c3" ] && [ "$c1" != "$c3" ] \
-  && pass "three different strcpy sites get three different clusters" \
-  || fail "three different strcpy sites get three different clusters" \
+  && pass "three different sites get three different clusters" \
+  || fail "three different sites get three different clusters" \
        "c1=$c1 c2=$c2 c3=$c3"
 
 # A and B clusters are distinct.
@@ -260,16 +256,15 @@ fi
 # FINDING-CLUSTERS.md content.
 assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'auth' \
   "FINDING-CLUSTERS.md lists auth class"
-assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'code_start-unbounded' \
-  "FINDING-CLUSTERS.md surfaces the LLM dedup_key signature"
-# Signature renders the FULL merge algorithm — dedup_key OR (class, file, line)
-# OR crash state — not just the one key that drove the merge. B1's canonical row
-# carries both a dedup_key and a (file, line) source site, so both appear,
-# joined by " or ".
-assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'src/pcre2_match\.c, 1234' \
-  "FINDING-CLUSTERS.md Signature shows the (class, file, line) source site"
-assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'code_start-unbounded.* or .*src/pcre2_match\.c, 1234' \
-  "FINDING-CLUSTERS.md Signature joins dedup_key and source site with ' or '"
+# Signature renders the deterministic (class, file, line) site.
+assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" \
+  '(auth, server/handlers/admin.go, 42)' \
+  "FINDING-CLUSTERS.md Signature shows the (class, file, line) site"
+# When a report also embeds a sanitizer stack, the Signature shows the site AND
+# the crash state, joined by ' or ' (the H1 fixture).
+assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" \
+  'render\.c, 77.* or .*render_draw' \
+  "FINDING-CLUSTERS.md Signature joins (class, file, line) and crash state with ' or '"
 assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'FIND-A1' \
   "FINDING-CLUSTERS.md links the auth FINDs"
 assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'FIND-B1' \
@@ -325,21 +320,17 @@ EOF
 cat > "$agg_root/codex/results/findings/FIND-AGG-2/report.md" <<'EOF'
 # Aggregate duplicate B
 
-Location: `src/auth/session.go:ValidateSession:99`
+Location: `src/auth/session.go:ValidateSession:40`
 Class: auth:bypass
 EOF
 sha1=$(shasum -a 1 "$agg_root/claude/results/findings/FIND-AGG-1/report.md" | awk '{print $1}')
 cat > "$agg_root/claude/results/findings/FIND-AGG-1/.llm-find-quality.json" <<EOF
 {"decision":"find_quality","decision_version":"v10","content_sha1":"$sha1","accept":true,"reason":"test","class":"auth:bypass","severity":"low","cached_at":"2026-05-12T00:00:00Z"}
 EOF
-printf '{"key_version":"v1","dedup_key":"session-validate-authz-bypass"}\n' \
-  > "$agg_root/claude/results/findings/FIND-AGG-1/.finding-key.json"
 sha1=$(shasum -a 1 "$agg_root/codex/results/findings/FIND-AGG-2/report.md" | awk '{print $1}')
 cat > "$agg_root/codex/results/findings/FIND-AGG-2/.llm-find-quality.json" <<EOF
 {"decision":"find_quality","decision_version":"v10","content_sha1":"$sha1","accept":true,"reason":"test","class":"auth:bypass","severity":"high","cached_at":"2026-05-12T00:00:00Z"}
 EOF
-printf '{"key_version":"v1","dedup_key":"session-validate-authz-bypass"}\n' \
-  > "$agg_root/codex/results/findings/FIND-AGG-2/.finding-key.json"
 
 echo "# legacy" > "$agg_root/FIND-CLUSTERS.md"
 python3 "$CLUSTER" "$agg_root" >/dev/null 2>&1 \

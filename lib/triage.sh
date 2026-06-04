@@ -1932,12 +1932,11 @@ llm_find_quality_decision() {
 
   # Bump when the prompt/criteria change so stale cached verdicts from
   # older rubrics don't apply to the current gate. This gate is the QUALITY
-  # decision only — {accept, reason, class, severity}. Finding IDENTITY
-  # (dedup_key) is no longer produced here: it's assigned uniformly at cluster
-  # time by lib/finding_keyer.py from each report alone, so it works the same
-  # for harness, recon, and model-direct findings. v10 drops dedup_key (and the
-  # sibling-key coordination that fed it) from the verdict shape; bumping
-  # re-decides caches that still carry the old dedup_key field.
+  # decision only — {accept, reason, class, severity}. Finding IDENTITY is the
+  # deterministic (class, file, line) site computed at cluster time
+  # (lib/finding_signature.py), not anything this gate produces, so the gate
+  # works the same for harness, recon, and model-direct findings. v10 dropped
+  # the old dedup_key field from the verdict shape.
   local decision_version="v10"
 
   # Quorum required for an accept=false verdict to stick. Each call resolves
@@ -2537,9 +2536,10 @@ _triage_finding_subject() {
 # and a finding materialized after the last gate pass (e.g. recon-materialized
 # FIND-RECON-*) can reach clustering with no .llm-find-quality.json — and
 # therefore no accept/class/severity verdict. The gate decides quality only;
-# the dedup_key is assigned separately by the keyer at cluster time, so this
-# belt guarantees the quality verdict (notably the class, a hard merge gate)
-# exists for every finding before clustering. Fill exactly that gap: only
+# identity is the deterministic (class, file, line) site computed at cluster
+# time. This belt guarantees the quality verdict (notably the class, which is
+# part of that merge key) exists for every finding before clustering. Fill
+# exactly that gap: only
 # findings MISSING a cache are processed. Fresh verdicts short-circuit inside
 # llm_find_quality_decision, and stale-version re-evaluation stays the gate's
 # job, so this adds no LLM calls for already-decided findings. Best-effort

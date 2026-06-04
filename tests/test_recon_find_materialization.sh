@@ -290,9 +290,9 @@ fi
 rm -rf "$tmp"
 
 # ── 12. Materialized report carries an extractable Issue class ────────
-# Clustering keys on (class, file, func) when a finding has no dedup_key, so
-# materialize_find must keep emitting a parseable class line; if it stops, the
-# class silently degrades to "other" and same-class findings stop bucketing.
+# Clustering keys on (class, file, line), so materialize_find must keep emitting
+# a parseable class line; if it stops, the class silently degrades to "other"
+# and findings at one site stop bucketing together.
 issue_class_check=$(python3 -c "
 import sys
 sys.path.insert(0, 'lib')

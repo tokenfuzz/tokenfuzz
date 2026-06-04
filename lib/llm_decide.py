@@ -42,9 +42,7 @@ Environment knobs (mirrors the prior bash contract exactly):
   LLM_DECIDE_COUNTER_FILE=<path>         budget counter file location
   LLM_DECIDE_MAX_CALLS=<n>               budget cap (default 1000 when
                                          LOGDIR/counter file is set,
-                                         0 = unlimited). The finding_key
-                                         decision is exempt: it is bounded by
-                                         FIND-* dirs and cached per finding.
+                                         0 = unlimited).
   LLM_DECIDE_LOG=<path>                  audit-trail log file
   ACTIVE_BACKEND=<backend>                 concrete backend to dispatch to
                                            (one of: claude, codex, gemini, oss)
@@ -471,18 +469,6 @@ def _is_string(value) -> bool:
     return isinstance(value, str)
 
 
-def _is_optional_string(value) -> bool:
-    """True for a string OR JSON null.
-
-    Models routinely emit `"field": null` (rather than "") for an absent
-    optional value. An absent key already validates via `.get(k, "")`, but
-    an explicit null does not — and rejecting it would discard the WHOLE
-    decision (e.g. a find_quality verdict's class/severity/dedup_key) over
-    one empty descriptor field, then re-incur the call next pass. Treat
-    null as "" for optional fields; required fields keep using _is_string."""
-    return value is None or isinstance(value, str)
-
-
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -496,7 +482,7 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     """
     known_decisions = {
         "strategy_pick", "crash_triage", "crash_confirm", "legit_crash",
-        "find_quality", "finding_key", "cluster_expand", "patch_review",
+        "find_quality", "cluster_expand", "patch_review",
         "work_rerank", "s6-peer-suggest", "threat-model-suggest",
         "s6-peer-distill", "s6-peer-map",
     }
@@ -519,21 +505,15 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     if decision == "legit_crash":
         return _is_bool(parsed.get("legitimate")) and _is_string(parsed.get("reason"))
     if decision == "find_quality":
-        # find_quality is the QUALITY gate (accept/class/severity). Identity
-        # (dedup_key) is no longer its job — it's assigned uniformly at cluster
-        # time by the finding_key keyer (lib/finding_keyer.py), so it works the
-        # same for harness, recon, and model-direct findings alike.
+        # find_quality is the QUALITY gate (accept/class/severity). Identity is
+        # the deterministic (class, file, line) site computed at cluster time
+        # (lib/finding_signature.py), not anything this gate produces.
         return (
             _is_bool(parsed.get("accept"))
             and _is_string(parsed.get("reason"))
             and _is_string(parsed.get("class"))
             and _is_string(parsed.get("severity"))
         )
-    if decision == "finding_key":
-        # IDENTITY-only: the canonical root-cause key. Tolerates JSON null
-        # (the model's common spelling of "absent"); an empty/invalid key just
-        # degrades that finding to the deterministic (class, file, func) label.
-        return _is_optional_string(parsed.get("dedup_key"))
     if decision == "cluster_expand":
         rows = parsed.get("rows")
         if not isinstance(rows, list):
@@ -635,11 +615,7 @@ def llm_decide(
         _llm_log(f"{decision} FAIL empty-prompt")
         return None
 
-    # finding_key is explicit batch post-processing. It is bounded by the
-    # number of FIND-* directories and cached in each .finding-key.json, so the
-    # live-agent safety budget is the wrong limit here: a 240-finding pool
-    # legitimately needs up to 240 first-pass calls.
-    if decision != "finding_key" and not budget_available():
+    if not budget_available():
         _llm_log(f"{decision} SKIP budget-exhausted max={_budget_cap()}")
         return None
 

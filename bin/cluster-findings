@@ -6,23 +6,17 @@ classes (memory-safety, auth, injection, info-disclosure, crypto, race,
 config, logic, ...). Every finding gets ONE identity computed from its
 report alone — identical for harness, recon, and model-direct findings:
 
-  dedup_key   — a canonical root-cause key assigned by lib/finding_keyer.py
-                (one cached LLM call per fresh finding; on by default, pass
-                --no-key to skip). Primary signal: it collapses two reports
-                of the same root cause filed from different surface sites,
-                and — keyed by one model over a pooled set — it is stable
-                across the models a benchmark compares.
+  (class, file, line) — the normalized issue class at the source site the
+                report pins. Class is normalized first (mechanism labels like
+                integer-overflow fold into memory-safety), and the line is the
+                discriminator that keeps distinct bugs in one large function
+                apart where (file, func) alone would fuse them.
   crash state — ClusterFuzz-normalized top frames, when the report embeds a
                 sanitizer stack (reused from lib/stack_frames.py).
-  (class, file, func) — the deterministic fallback label shown when no
-                dedup_key was produced (no backend, or the model declined).
 
-Findings merge on identical dedup_key, identical crash state, or an identical
-(file, line) source site within a class (lib/finding_dedup.py). The
-(class, file, func) tuple above is the displayed signature, not a merge edge —
-co-located findings merge only when they pin the same line, so the line is the
-discriminator that keeps distinct bugs in one large function apart. See
-lib/finding_signature.py for the per-field extraction.
+Findings merge on an identical (class, file, line) site, or an identical crash
+state (lib/finding_dedup.py). Both signals are deterministic and LLM-free.
+See lib/finding_signature.py for the per-field extraction.
 
 Output (mirrors bin/cluster-crashes):
   * <results>/findings/FINDING-CLUSTERS.md
@@ -51,7 +45,6 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import finding_signature  # noqa: E402
 import finding_dedup  # noqa: E402
-import finding_keyer  # noqa: E402
 from cluster_common import (  # noqa: E402
     exact_child_file,
     remove_legacy_cluster_files,
@@ -85,23 +78,6 @@ def _read_text(path: Path) -> str:
         return path.read_text("utf-8", errors="replace")
     except OSError:
         return ""
-
-
-def _keyer_backend_configured() -> bool:
-    if os.environ.get("LLM_DECIDE_DISABLE", "0") == "1":
-        return False
-    return bool((os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or "").strip())
-
-
-def _warn_unkeyed(scope: Path, total: int, unkeyed: int) -> None:
-    if total <= 0 or unkeyed <= 0 or not _keyer_backend_configured():
-        return
-    print(
-        f"[cluster-findings] WARN: {unkeyed}/{total} finding(s) in {scope} "
-        "still have no dedup_key after keying; clustering fell back to "
-        "deterministic signatures for those reports",
-        file=sys.stderr,
-    )
 
 
 def _find_report(find_dir: Path) -> Path | None:
@@ -175,18 +151,14 @@ def _signature(find_dir: Path, target_root: str) -> dict:
     report = _find_report(find_dir)
     text = _read_text(report) if report else ""
     cache = _read_llm_cache(find_dir)
-    # Identity is a pure function of the report: class/file/func/crash-state are
-    # parsed from report.md (the find-quality cache only supplies the accepted
-    # class as a hint), and dedup_key — when present — comes solely from the
-    # finding_keyer cache (.finding-key.json), written by the keyer pre-pass
-    # (on by default; --no-key to skip). This single source is identical for
-    # harness, recon, and model-direct findings; nothing here depends on which
-    # produced the report, so every source starts from the dedup_key and falls
-    # back to (class, file, func) the same way.
+    # Identity is a pure function of the report: class, file, line, and
+    # crash-state are parsed from report.md (the find-quality cache only
+    # supplies the accepted class as a hint). This single source is identical
+    # for harness, recon, and model-direct findings; nothing here depends on
+    # which produced the report.
     sig = finding_signature.finding_signature(
         text,
         llm_class=cache.get("class", "") if cache.get("accept") else "",
-        llm_dedup_key=finding_keyer.cached_key(find_dir),
         target_root=target_root,
     )
     sig["id"] = find_dir.name
@@ -238,10 +210,11 @@ def _make_clusters(sigs: list[dict], display_key: str = "id") -> list[dict]:
     """Group signatures into clusters via deterministic finding_dedup.
 
     Components come from union-find over high-precision auto-merges only
-    (identical dedup_key or crash state, within a class — see
+    (a shared (class, file, line) site or crash state — see
     lib/finding_dedup.py). The canonical member's signature supplies the
-    display key/kind, so rendering, report stamping, and .dup-of markers are
-    unchanged.
+    display key/kind and class, so rendering, report stamping, and .dup-of
+    markers are unchanged. Every member of a site-merged cluster already
+    carries the canonical class (it is part of the merge edge).
 
     display_key selects the member identifier ("id" per-results, or
     "display_id" = "<agent>/<id>" cross-agent, which is unique when two
@@ -279,16 +252,14 @@ def _make_clusters(sigs: list[dict], display_key: str = "id") -> list[dict]:
         strategies = sorted({m.get("strategy", "") for m in members if m.get("strategy")})
         clusters.append({
             "id": cid,
-            "class": canonical["class"],
+            "class": canonical.get("class", "") or "other",
             # key_kind/key drive the canonical's "Signature" display + the
-            # Dedup key: stamp; merged_via is how the CLUSTER was formed.
+            # cluster stamp; merged_via is how the CLUSTER was formed.
             "key_kind": canonical["kind"],
             "key": list(canonical["key"]),
-            # The three merge signals carried by the canonical member, so the
-            # Signature column can render the actual algorithm (dedup_key OR
-            # (class, file, line) OR crash state) rather than just the one key
-            # that drove the merge.
-            "dedup_key": canonical.get("dedup_key", ""),
+            # The merge signals carried by the canonical member, so the
+            # Signature column can render the actual algorithm — (class, file,
+            # line) and/or crash state — not just the one that drove the merge.
             "file": canonical.get("file", ""),
             "line": canonical.get("line", ""),
             "crash_state": list(finding_dedup.crash_state(
@@ -311,25 +282,14 @@ def _make_clusters(sigs: list[dict], display_key: str = "id") -> list[dict]:
     return clusters
 
 
-def cluster_findings(findings_root: Path, target_root: str = "",
-                     do_key: bool = True) -> list[dict]:
+def cluster_findings(findings_root: Path, target_root: str = "") -> list[dict]:
     sigs: list[dict] = []
     if not findings_root.is_dir():
         return sigs
-    total = 0
-    unkeyed = 0
     for d in sorted(findings_root.iterdir()):
         if not d.is_dir() or not d.name.startswith("FIND-"):
             continue
-        total += 1
-        if do_key:
-            finding_keyer.ensure_key(d)
-        sig = _signature(d, target_root)
-        if do_key and sig.get("report_text") and not sig.get("dedup_key"):
-            unkeyed += 1
-        sigs.append(sig)
-    if do_key:
-        _warn_unkeyed(findings_root, total, unkeyed)
+        sigs.append(_signature(d, target_root))
     return _make_clusters(sigs, display_key="id")
 
 
@@ -419,36 +379,30 @@ def _set_cluster_line(report_text: str, cluster_id: str, members: list[str],
 
 
 def _key_display(key: list, kind: str) -> str:
-    if kind == "llm":
-        return key[2] if len(key) > 2 else ""
     if kind == "loc":
+        # key is (class, file, line) — or (class, file, func) when no line.
         f = key[1] if len(key) > 1 else ""
-        fn = key[2] if len(key) > 2 else ""
-        if f and fn:
-            return f"{f}:{fn}"
-        return f or fn
-    if kind == "title":
-        return key[2] if len(key) > 2 else ""
-    if kind == "missing":
+        tail = key[2] if len(key) > 2 else ""
+        if f and tail:
+            return f"{f}:{tail}"
+        return f or tail
+    if kind in ("title", "missing"):
         return key[2] if len(key) > 2 else ""
     return ""
 
 
 def _signature_display(c: dict) -> str:
-    """Render every merge signal the canonical finding carries, ` or `-joined.
+    """Render the merge signals the canonical finding carries, ` or `-joined.
 
-    finding_dedup merges two findings (within a class) on any one of: a valid
-    dedup_key, an identical (class, file, line) source site, or an identical
-    crash state. The Signature column shows all signals present on the canonical
-    member so it reflects the actual algorithm, not just the one key that drove
-    the merge. The site needs both file and line (its merge edge does), and the
-    crash-state term is dropped when the report embeds no stack — the common
-    case for findings. Falls back to the canonical display key when no merge
-    signal is present, so the cell is never blank."""
+    finding_dedup merges two findings on either an identical (class, file,
+    line) site or an identical crash state. The Signature column shows the
+    signals present on the canonical member so it reflects the actual
+    algorithm: `(class, file, line)`, and ` or <crash state>` appended when
+    the report embeds a sanitizer stack (the rare case for findings). The site
+    term needs both file and line, as its merge edge does. Falls back to the
+    canonical display key when no merge signal is present, so the cell is
+    never blank."""
     parts: list[str] = []
-    dedup_key = c.get("dedup_key", "")
-    if dedup_key:
-        parts.append(f"`{dedup_key}`")
     file = c.get("file", "")
     line = str(c.get("line", "") or "")
     if file and line:
@@ -647,17 +601,6 @@ def main(argv: list[str] | None = None) -> int:
                     help="Don't write FINDING-CLUSTERS.md, report.md, or .dup-of markers")
     ap.add_argument("--json", action="store_true",
                     help="Emit cluster JSON to stdout")
-    ap.add_argument("--no-key", dest="do_key", action="store_false",
-                    help="Disable the dedup_key keyer. By DEFAULT every finding "
-                         "is assigned a canonical dedup_key (one cached LLM call "
-                         "per fresh finding via lib/finding_keyer.py) so identity "
-                         "starts from the root-cause key and falls back to the "
-                         "deterministic (class, file, func) + crash-state label "
-                         "only when no key is available. --no-key forces that "
-                         "deterministic-only path. The keyer also no-ops "
-                         "automatically when no LLM backend is reachable, so this "
-                         "is safe offline and in tests.")
-    ap.set_defaults(do_key=True)
     args = ap.parse_args(argv)
 
     rd = args.results_dir.resolve()
@@ -681,14 +624,13 @@ def main(argv: list[str] | None = None) -> int:
         link_prefix = ""
     elif rd.parent.name == "output":
         return _aggregate_target_root(rd, target_root, dry_run=args.dry_run,
-                                      want_json=args.json, do_key=args.do_key)
+                                      want_json=args.json)
     else:
         findings_root = rd
         out_md = rd / "FINDING-CLUSTERS.md"
         link_prefix = ""
 
-    clusters = cluster_findings(findings_root, target_root=target_root,
-                                do_key=args.do_key)
+    clusters = cluster_findings(findings_root, target_root=target_root)
 
     if args.json:
         emitted = [{k: v for k, v in c.items() if k != "_full"} for c in clusters]
@@ -716,8 +658,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _aggregate_target_root(target_root: Path, llm_target_root_prefix: str,
-                           dry_run: bool, want_json: bool,
-                           do_key: bool = True) -> int:
+                           dry_run: bool, want_json: bool) -> int:
     """Walk every <agent>/results/findings/ under output/<slug>/, cluster
     across all of them, and write output/<slug>/FINDING-CLUSTERS.md.
 
@@ -730,17 +671,14 @@ def _aggregate_target_root(target_root: Path, llm_target_root_prefix: str,
     return run_under_aggregate_lock(
         target_root, ".find-cluster-lock", "cluster-findings",
         lambda: _aggregate_target_root_locked(
-            target_root, llm_target_root_prefix, dry_run, want_json, do_key),
+            target_root, llm_target_root_prefix, dry_run, want_json),
     )
 
 
 def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str,
-                                  dry_run: bool, want_json: bool,
-                                  do_key: bool = True) -> int:
+                                  dry_run: bool, want_json: bool) -> int:
     all_sigs: list[dict] = []
     per_agent: dict[str, Path] = {}
-    total = 0
-    unkeyed = 0
     for agent_dir in sorted(target_root.iterdir()):
         if not agent_dir.is_dir():
             continue
@@ -751,17 +689,10 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
         for d in sorted(findings_root.iterdir()):
             if not d.is_dir() or not d.name.startswith("FIND-"):
                 continue
-            total += 1
-            if do_key:
-                finding_keyer.ensure_key(d)
             sig = _signature(d, llm_target_root_prefix)
-            if do_key and sig.get("report_text") and not sig.get("dedup_key"):
-                unkeyed += 1
             sig["agent"] = agent_dir.name
             sig["display_id"] = f"{agent_dir.name}/{d.name}"
             all_sigs.append(sig)
-    if do_key:
-        _warn_unkeyed(target_root, total, unkeyed)
 
     clusters = _make_clusters(all_sigs, display_key="display_id")
 

@@ -2,13 +2,12 @@
 """Regression tests for lib/finding_signature.py.
 
 Exercises:
-  * normalize_class — neutral vocab, "top:sub" labels, unknown LLM tops
+  * normalize_class — neutral vocab, "top:sub" labels, *overflow* → memory-safety
   * extract_class   — every layout we've seen in real reports
   * extract_location — explicit Location:, inline file:func:line, no func
   * extract_line — | Line | Fields row, inline fallback, none → ""
   * path canonicalization — abs vs rel, target_root prefix, trailing parens
-  * is_valid_dedup_key — char set, length, multi-token requirement
-  * finding_signature — Layer 1 vs Layer 2 selection, kind switching, line field
+  * finding_signature — (class, file, line) key, kind switching, line field
   * cluster_id — stable across permutations of the same key
 """
 
@@ -62,6 +61,13 @@ assert_eq("config", fs.normalize_class("config:permissive-default"), "config")
 assert_eq("logic", fs.normalize_class("logic:business-rule"), "logic")
 assert_eq("side-channel", fs.normalize_class("side-channel:cache-timing"), "side-channel")
 assert_eq("dos", fs.normalize_class("dos:algorithmic"), "dos:algorithmic")
+# Any *overflow* label is a memory-safety mechanism — collapse the whole family
+# so a finding's mechanism and its consequence cluster together.
+assert_eq("memory-safety", fs.normalize_class("integer-overflow"), "integer-overflow → memory-safety")
+assert_eq("memory-safety", fs.normalize_class("buffer-overflow"), "buffer-overflow → memory-safety")
+assert_eq("memory-safety", fs.normalize_class("stack-overflow"), "stack-overflow → memory-safety")
+assert_eq("memory-safety", fs.normalize_class("integer-overflow:arithmetic"),
+          "integer-overflow:sub → memory-safety")
 assert_eq("network", fs.normalize_class("network:dns-response-validation"),
           "unknown top retained (network)")
 assert_eq("input-validation", fs.normalize_class("input-validation:hostname"),
@@ -292,13 +298,13 @@ assert_eq("142", fs.extract_line("The issue is at src/handler.c:142 in init.\n")
 assert_eq("", fs.extract_line("# Issue\n```\ncrash at fake/path.c:999\n```\n"),
           "fenced reproducer line is masked out")
 assert_eq("", fs.extract_line("no line anywhere in this body\n"), "no line → empty")
-# The line rides on the signature for the merge edge WITHOUT changing the
-# displayed (class, file, func) key.
+# When a line is present, it IS the third element of the merge key:
+# (class, file, line).
 sig_line = fs.finding_signature(
     "## Location\n`src/lib/foo.c:HandleListUsers:42`\n\nClass: memory-safety\n")
 assert_eq("42", sig_line["line"], "finding_signature exposes line field")
-assert_eq(("memory-safety", "src/lib/foo.c", "HandleListUsers"), sig_line["key"],
-          "display key still (class, file, func) — unchanged by the line field")
+assert_eq(("memory-safety", "src/lib/foo.c", "42"), sig_line["key"],
+          "merge key is (class, file, line) when a line is present")
 
 # bin/cluster-findings stamps `Cluster:` / `Dedup key:` lines into a report
 # after it clusters. A `Dedup key: [loc] file:func` stamp injects a file:func
@@ -316,22 +322,8 @@ assert_eq(fs.extract_location(_inline_site), fs.extract_location(_stamped_site),
           "extract_location ignores harness stamps")
 
 
-# ── is_valid_dedup_key ─────────────────────────────────────────────
-print("\nis_valid_dedup_key")
-ok(fs.is_valid_dedup_key("code_start-unbounded"), "underscore + hyphen multi-token")
-ok(fs.is_valid_dedup_key("tls13-skip-verify"), "hyphen-joined tokens")
-ok(fs.is_valid_dedup_key("ipv4-trailing-garbage"), "three tokens")
-ok(not fs.is_valid_dedup_key(""), "empty rejected")
-ok(not fs.is_valid_dedup_key("oops"), "single token rejected")
-ok(not fs.is_valid_dedup_key("a"), "too short rejected")
-ok(not fs.is_valid_dedup_key("Has Spaces"), "spaces rejected")
-ok(not fs.is_valid_dedup_key("UPPER-CASE"), "uppercase rejected")
-ok(not fs.is_valid_dedup_key("with.dot"), "dot rejected")
-ok(not fs.is_valid_dedup_key("a-" * 40), "too long rejected")
-
-
-# ── finding_signature: Layer selection ─────────────────────────────
-print("\nfinding_signature — layer selection")
+# ── finding_signature: key selection ───────────────────────────────
+print("\nfinding_signature — key selection")
 
 text_loc = """# Boundary issue
 ## Location
@@ -341,29 +333,32 @@ text_loc = """# Boundary issue
 - **Class**: auth:bypass
 """
 sig = fs.finding_signature(text_loc)
-assert_eq("loc", sig["kind"], "no LLM key → loc kind")
+assert_eq("loc", sig["kind"], "file+line → loc kind")
+assert_eq(("auth", "src/handlers/admin.go", "42"),
+          sig["key"], "merge key is (class, file, line)")
+
+# A site with a file but NO line degrades to (class, file, func) — display
+# only, never a merge edge.
+text_no_line = """# Boundary issue
+## Location
+`src/handlers/admin.go:HandleListUsers`
+
+## Classification
+- **Class**: auth:bypass
+"""
+sig_no_line = fs.finding_signature(text_no_line)
+assert_eq("loc", sig_no_line["kind"], "file, no line → loc kind")
 assert_eq(("auth", "src/handlers/admin.go", "HandleListUsers"),
-          sig["key"], "loc key tuple")
+          sig_no_line["key"], "no line → display key (class, file, func)")
 
-sig_with_llm = fs.finding_signature(text_loc, llm_class="auth:bypass",
-                                    llm_dedup_key="role-cookie-trusted")
-assert_eq("llm", sig_with_llm["kind"], "valid LLM key → llm kind")
-assert_eq(("auth", "", "role-cookie-trusted"), sig_with_llm["key"], "llm key tuple")
-
-# LLM emits an invalid key → fall back to loc.
-sig_bad_llm = fs.finding_signature(text_loc, llm_class="auth:bypass",
-                                   llm_dedup_key="oops")
-assert_eq("loc", sig_bad_llm["kind"], "invalid LLM key → loc fallback")
-assert_eq(sig_bad_llm["key"], sig["key"], "fallback key matches no-LLM key")
-
-# No file:func and no LLM key → title slug.
+# No file:func at all → title slug.
 text_no_loc = """# CSP allows unsafe-inline in default config
 
 The default Content-Security-Policy emitted by the framework permits
 'unsafe-inline' in `script-src`, which negates the XSS mitigation.
 """
 sig_title = fs.finding_signature(text_no_loc)
-assert_eq("title", sig_title["kind"], "no loc + no LLM key → title slug")
+assert_eq("title", sig_title["kind"], "no loc → title slug")
 ok(sig_title["key"][2].startswith("csp-allows"),
    "title slug derived from H1", f"slug={sig_title['key'][2]!r}")
 
@@ -372,52 +367,58 @@ sig_class_override = fs.finding_signature(text_loc, llm_class="logic:override")
 assert_eq("logic", sig_class_override["class"], "LLM class overrides report class")
 
 
-# ── Same root cause, different surface sites — Layer 2 collapses ───
-print("\ncross-caller Layer 2 collapse")
+# ── Same site → same key; different site → different key ───────────
+print("\nsite-keyed identity")
 
-text_match = """# UAF in match path
+text_a = """# UAF in match path
 ## Location
 `src/pcre2_match.c:match_internal:1234`
 
 ## Classification
 - **Class**: memory-safety:lifetime
 """
-text_dfa = """# UAF reached from DFA matcher
+text_a2 = """# Same UAF, re-discovered
+## Location
+`src/pcre2_match.c:match_internal:1234`
+
+## Classification
+- **Class**: integer-overflow
+"""
+# Same file+line, and integer-overflow normalizes to memory-safety, so the two
+# re-discoveries land on the SAME key — mechanism vs consequence collapse.
+sig_a = fs.finding_signature(text_a)
+sig_a2 = fs.finding_signature(text_a2)
+assert_eq(sig_a["key"], sig_a2["key"],
+          "same file+line, *overflow* folded to memory-safety → same key")
+assert_eq(fs.cluster_id(sig_a["key"]), fs.cluster_id(sig_a2["key"]),
+          "same site → same cluster id")
+
+# Different surface sites do NOT collapse — distinct sites are distinct bugs
+# (no cross-site LLM key invents a merge).
+text_b = """# UAF reached from DFA matcher
 ## Location
 `src/pcre2_dfa_match.c:dfa_match_internal:5678`
 
 ## Classification
 - **Class**: memory-safety:lifetime
 """
-sig_match = fs.finding_signature(text_match, llm_class="memory-safety:lifetime",
-                                 llm_dedup_key="code_start-unbounded")
-sig_dfa = fs.finding_signature(text_dfa, llm_class="memory-safety:lifetime",
-                               llm_dedup_key="code_start-unbounded")
-assert_eq(sig_match["key"], sig_dfa["key"],
-          "two callers, same dedup_key → same cluster key")
-assert_eq(fs.cluster_id(sig_match["key"]), fs.cluster_id(sig_dfa["key"]),
-          "two callers, same dedup_key → same cluster id")
-
-# Layer 1 alone would split them (different file:func) — the test that
-# Layer 2 is the value-add.
-sig_match_no_llm = fs.finding_signature(text_match, llm_class="memory-safety:lifetime")
-sig_dfa_no_llm = fs.finding_signature(text_dfa, llm_class="memory-safety:lifetime")
-ok(sig_match_no_llm["key"] != sig_dfa_no_llm["key"],
-   "Layer 1 alone splits different callers — Layer 2 is needed to collapse")
+sig_b = fs.finding_signature(text_b)
+ok(sig_a["key"] != sig_b["key"],
+   "two different sites → different keys (no cross-site over-merge)")
 
 
 # ── Mass-scanner-style: don't over-collapse 50 strcpy sites ─────────
 print("\nmass-scanner safety")
 
-# Three distinct strcpy sites at the same class, different file/func,
-# no LLM key. They MUST stay separate.
+# Three distinct strcpy sites at the same class, different file and line.
+# They MUST stay separate.
 sites = [
     fs.finding_signature("Location: `a/x.c:f1:1`\nClass: memory-safety:bounds\n"),
-    fs.finding_signature("Location: `b/y.c:f2:1`\nClass: memory-safety:bounds\n"),
-    fs.finding_signature("Location: `c/z.c:f3:1`\nClass: memory-safety:bounds\n"),
+    fs.finding_signature("Location: `b/y.c:f2:2`\nClass: memory-safety:bounds\n"),
+    fs.finding_signature("Location: `c/z.c:f3:3`\nClass: memory-safety:bounds\n"),
 ]
 keys = {s["key"] for s in sites}
-assert_eq(3, len(keys), "three distinct file:func sites stay distinct")
+assert_eq(3, len(keys), "three distinct sites stay distinct")
 
 
 # ── cluster_id stability ───────────────────────────────────────────

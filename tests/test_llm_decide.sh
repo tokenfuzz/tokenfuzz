@@ -339,25 +339,6 @@ assert_match '"reason":"standalone"|\"reason\": \"standalone\"' "$out" \
   "budget: standalone calls without LOGDIR do not use stale global counter"
 unset LLM_DECIDE_MOCK
 
-# 13c. finding_key is bounded by FIND-* inputs and cached per finding, so it
-#      must not inherit the live-agent decision cap. A pooled benchmark with
-#      >120 findings legitimately needs >120 keying calls on the first pass.
-unset rc
-export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-finding-key"
-export LLM_DECIDE_MAX_CALLS=1
-export LLM_DECIDE_MOCK_FINDING_KEY='{"dedup_key":"root-cause-key"}'
-out=$(echo "x" | llm_decide finding_key "dedup_key" 2)
-assert_match '"dedup_key":"root-cause-key"|\"dedup_key\": \"root-cause-key\"' "$out" \
-  "finding_key budget: first call succeeds"
-out=$(echo "x" | llm_decide finding_key "dedup_key" 2)
-assert_match '"dedup_key":"root-cause-key"|\"dedup_key\": \"root-cause-key\"' "$out" \
-  "finding_key budget: second call also succeeds despite max=1"
-counter_after_keying=$(cat "$LLM_DECIDE_COUNTER_FILE" 2>/dev/null || echo 0)
-counter_after_keying=${counter_after_keying:-0}
-assert_eq "0" "$counter_after_keying" \
-  "finding_key budget: keying does not consume the live-agent counter"
-unset LLM_DECIDE_COUNTER_FILE LLM_DECIDE_MAX_CALLS LLM_DECIDE_MOCK_FINDING_KEY
-
 # 14. Telemetry: prompt-byte + elapsed-seconds appended to log lines.
 # We exercise the MOCK path (deterministic, no real backend) and verify
 # both the OK success line and a controlled FAIL line carry the new
@@ -437,12 +418,11 @@ assert_eq "$K" "$ok_count" "concurrent budget: exactly K=${K} callers consumed b
 assert_eq "$K" "$counter_final" "concurrent budget: counter file matches K"
 unset LLM_DECIDE_COUNTER_FILE LLM_DECIDE_MAX_CALLS
 
-# 16. find_quality: the optional dedup_key tolerates JSON null. Models
-#     routinely spell an absent optional value as `null` rather than "".
-#     Rejecting that would discard the WHOLE verdict (class/severity) over one
-#     empty field — and, with no cache written, re-incur the call every
-#     maintain_indexes pass. null on the OPTIONAL dedup_key must validate;
-#     null on a REQUIRED field must still fail.
+# 16. find_quality: shape validation checks only the required fields
+#     (accept/reason/class/severity) and ignores any extra key a model emits —
+#     including a stray `dedup_key:null` left over from an older prompt. Such an
+#     unknown field must NOT discard the verdict (that would re-incur the call
+#     every maintain_indexes pass); a null on a REQUIRED field must still fail.
 unset rc
 export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"ok","class":"memory-safety","severity":"high","dedup_key":null}'
 out=$(echo "x" | llm_decide find_quality "accept,reason,class,severity" 2 2>/dev/null) || rc=$?

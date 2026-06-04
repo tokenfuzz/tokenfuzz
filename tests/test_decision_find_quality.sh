@@ -211,12 +211,12 @@ assert_file_contains "$RESULTS_DIR/findings/FIND-CLASS/.llm-find-quality.json" \
 assert_file_contains "$RESULTS_DIR/findings/FIND-CLASS/.llm-find-quality.json" \
   '"severity": *"low"' \
   "severity field captured verbatim"
-# Identity (dedup_key) is NOT produced by the quality gate any more — it is
-# assigned at cluster time by lib/finding_keyer.py (see test_finding_keyer.sh),
-# so the gate cache must NOT carry a dedup_key field.
+# Identity is the deterministic (class, file, line) site computed at cluster
+# time (lib/finding_signature.py), not anything the quality gate produces, so
+# the gate cache must NOT carry a dedup_key field even if a model emits one.
 assert_file_not_contains "$RESULTS_DIR/findings/FIND-CLASS/.llm-find-quality.json" \
   'dedup_key' \
-  "quality gate cache carries no dedup_key (identity moved to the keyer)"
+  "quality gate cache carries no dedup_key (identity is the deterministic site)"
 unset LLM_DECIDE_MOCK_FIND_QUALITY
 reset_findings
 
