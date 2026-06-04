@@ -685,18 +685,64 @@ assert_eq "0" "$(echo "$anv" | jq -r '.novel_crash_clusters')" \
   "T14d: model-direct has no novel cluster"
 assert_eq "2" "$(echo "$aagg" | jq -r '.crash_clusters | length')" \
   "T14e: report carries the cross-condition cluster list"
-# Severity carried straight through from the cluster tool, never recomputed.
+# Without per-member severity (older cluster JSON) the cluster-level severity
+# is carried straight through to every condition that reached the cluster.
 assert_eq "Medium" "$(echo "$ahd" | jq -r '.top_severity_level')" \
   "T14f: harness top severity is Medium (CL-1)"
 assert_eq "1" "$(echo "$ahd" | jq -r '.medium_plus_bugs')" \
   "T14g: harness has one Medium+ bug"
 assert_eq "Medium" "$(echo "$anv" | jq -r '.top_severity_level')" \
-  "T14h: model-direct top severity is Medium (shared CL-1)"
+  "T14h: model-direct top severity falls back to cluster-level Medium (no member_severity)"
 assert_eq "1" "$(echo "$anv" | jq -r '.medium_plus_bugs')" \
-  "T14h2: model-direct medium_plus counts the shared Medium cluster it reached"
+  "T14h2: model-direct medium_plus falls back to the shared Medium cluster"
 assert_eq "48" \
   "$(echo "$aagg" | jq -r '.crash_clusters[] | select(.id=="CL-1") | .severity_score')" \
   "T14i: cluster list carries severity_score from the cluster tool"
+
+# T14j: cross-condition severity must be scored per condition's OWN members.
+# A crash cluster shared by a harness Medium crash and a model-direct Low crash
+# (same crash state) must NOT credit model-direct with the harness Medium — the
+# real-world bug where the crosstab showed model-direct "Medium" while its only
+# crash report was Low. With member_severity present, each condition is scored
+# by its own member.
+abd2="$work/agg-bench-permember"
+mkdir -p "$abd2/cells"
+acell2() {
+  mkdir -p "$abd2/cells/$1"
+  cat > "$abd2/cells/$1/cell.json" <<JSON
+{"condition":"$2","replicate":1,"status":"done","wall_seconds":60,"experiment":"e-$1"}
+JSON
+  cat > "$abd2/cells/$1/metrics.json" <<JSON
+{"confirmed_crashes":1,"crash_dirs":[],"tokens":{"input_tokens":1,"output_tokens":1}}
+JSON
+}
+acell2 model-direct-r1 model-direct
+acell2 harness-r1 harness
+cat > "$abd2/run.json" <<'JSON'
+{"runid":"agg-permember","target":"dummytarget","backend":"codex","replicates":1,
+ "conditions":["model-direct","harness"],"target_sha":"a","harness_sha":"b"}
+JSON
+cat > "$abd2/clusters-crashes.json" <<'JSON'
+{"clusters":[
+  {"id":"CL-SHARED","members":["CRASH-0005","CRASH-0006"],"size":2,"primitive":"heap-use-after-free",
+   "severity_level":"Medium","severity_rank":2,"severity_score":44,
+   "member_severity":{"CRASH-0005":{"level":"Medium","rank":2,"score":44},
+                      "CRASH-0006":{"level":"Low","rank":1,"score":20}}}]}
+JSON
+cat > "$abd2/pool-members.json" <<'JSON'
+{"crashes":{"CRASH-0005":"harness","CRASH-0006":"model-direct"},"findings":{}}
+JSON
+aagg2=$(python3 "$PY" aggregate "$abd2")
+ahd2=$(echo "$aagg2" | jq -c '.conditions[] | select(.condition=="harness")')
+anv2=$(echo "$aagg2" | jq -c '.conditions[] | select(.condition=="model-direct")')
+assert_eq "Medium" "$(echo "$ahd2" | jq -r '.top_severity_level')" \
+  "T14j: harness top severity is its own Medium crash"
+assert_eq "Low" "$(echo "$anv2" | jq -r '.top_severity_level')" \
+  "T14k: model-direct top severity is its OWN Low crash, not the harness Medium"
+assert_eq "0" "$(echo "$anv2" | jq -r '.medium_plus_bugs')" \
+  "T14l: model-direct has no Medium+ bug (its only crash is Low)"
+assert_eq "1" "$(echo "$ahd2" | jq -r '.medium_plus_bugs')" \
+  "T14m: harness counts its own Medium+ bug"
 
 # ── T15: fixture-driven ledger render for dedup/report links ─────────────
 # The full bin/benchmark dry-run path is covered by T9. This fixture starts at

@@ -1326,24 +1326,59 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
                 "severity_level": cl.get("severity_level") or "—",
                 "severity_rank": int(cl.get("severity_rank", 0) or 0),
                 "severity_score": int(cl.get("severity_score", 0) or 0),
+                # {member: {level, rank, score}} from the cluster tool; lets a
+                # cross-condition cluster be scored per condition below.
+                "member_severity": cl.get("member_severity") or {},
             }
         )
         for cond in conds:
             cond_clusters.setdefault(cond, set()).add(cid)
 
+    def _cond_cluster_severity(c: dict, cond: str) -> tuple[int, int, str]:
+        """Severity of *cond*'s own members in cluster *c*.
+
+        A cluster can span conditions: e.g. a harness crash (Medium) and a
+        model-direct crash (Low) sharing one crash state cluster together,
+        and the cluster's canonical/overall severity is the harness Medium.
+        Crediting model-direct with that Medium overstates the baseline — its
+        Top severity must reflect the Low crash it actually produced. So score
+        each condition by the max severity among ITS members. Falls back to the
+        cluster's overall severity when per-member data is absent (older
+        cluster JSON without member_severity)."""
+        msev = c.get("member_severity") or {}
+        best: tuple[int, int, str] | None = None
+        for m in c["members"]:
+            if member_conditions.get(m) != cond:
+                continue
+            s = msev.get(m)
+            if not s:
+                continue
+            cand = (
+                int(s.get("rank", 0) or 0),
+                int(s.get("score", 0) or 0),
+                s.get("level", "—") or "—",
+            )
+            if best is None or cand > best:
+                best = cand
+        if best is not None:
+            return best
+        return (c["severity_rank"], c["severity_score"], c["severity_level"])
+
     by_condition: dict[str, dict] = {}
     for cond, ids in cond_clusters.items():
         cond_cls = [c for c in out_clusters if c["id"] in ids]
         novel = [c["id"] for c in cond_cls if c["conditions"] == [cond]]
-        # Highest-severity cluster this condition reached — Medium+ is rank
-        # >= 2 (Critical=4, High=3, Medium=2, Low=1, unscored=0).
-        top = max(cond_cls, key=lambda c: c["severity_rank"], default=None)
+        # Score every cluster by THIS condition's own members, then take the
+        # highest. Medium+ counts this condition's clusters at rank >= 2
+        # (Critical=4, High=3, Medium=2, Low=1, unscored=0).
+        cond_sevs = [_cond_cluster_severity(c, cond) for c in cond_cls]
+        top = max(cond_sevs, default=(0, 0, "—"))
         by_condition[cond] = {
             "unique_clusters": len(ids),
             "novel_clusters": len(novel),
-            "top_severity_level": top["severity_level"] if top else "—",
-            "top_severity_rank": top["severity_rank"] if top else 0,
-            "medium_plus": sum(1 for c in cond_cls if c["severity_rank"] >= 2),
+            "top_severity_level": top[2],
+            "top_severity_rank": top[0],
+            "medium_plus": sum(1 for s in cond_sevs if s[0] >= 2),
         }
     return {"clusters": out_clusters, "by_condition": by_condition}
 

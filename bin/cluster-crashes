@@ -678,6 +678,17 @@ def _clusters_from_sigs(sigs: list[dict]) -> list[dict]:
             ),
             "canonical": canonical_disp,
             "members": [m.get("display_id", m["id"]) for m in ordered],
+            # Per-member severity so a downstream consumer (e.g. the benchmark
+            # crosstab) can score a cross-condition cluster by the severity of
+            # ONE condition's own members, not the cluster-wide canonical.
+            "member_severity": {
+                m.get("display_id", m["id"]): {
+                    "level": m["severity_level"],
+                    "rank": m["severity_rank"],
+                    "score": m["severity_score"],
+                }
+                for m in ordered
+            },
             "size": len(members),
             "severity_level": canonical["severity_level"],
             "severity_rank": canonical["severity_rank"],

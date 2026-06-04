@@ -267,6 +267,17 @@ def _make_clusters(sigs: list[dict], display_key: str = "id") -> list[dict]:
             "merged_via": comp["merged_via"],
             "canonical": can_disp,
             "members": [disp(m) for m in ordered],
+            # Per-member severity so a cross-condition cluster can be scored by
+            # one condition's own members (mirrors bin/cluster-crashes). Findings
+            # carry no numeric score, so score is 0.
+            "member_severity": {
+                disp(m): {
+                    "level": m["severity_label"],
+                    "rank": m["severity_rank"],
+                    "score": 0,
+                }
+                for m in ordered
+            },
             "size": len(members),
             "severity_label": canonical["severity_label"],
             "severity_rank": canonical["severity_rank"],
