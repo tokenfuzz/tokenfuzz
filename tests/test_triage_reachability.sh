@@ -346,5 +346,82 @@ LLM_DECIDE_MOCK_REACHABILITY_FIELDS='["not","an","object"]' \
 assert_file_not_exists "$RESULTS_DIR/findings/FIND-LLMFILL-4/.llm_fields.json" \
   "sidecar NOT written for array LLM response (object required)"
 
+# A *partial* sidecar (missing caller_controls — the field whose absence
+# collapses severity to Low) must be RE-filled and merged, not cached as
+# final. This is the regression behind high→low flips on un-triaged findings.
+_CURRENT_TEST="llm-fill: partial sidecar is re-filled and merged"
+mkdir -p "$RESULTS_DIR/findings/FIND-LLMFILL-5"
+cat > "$RESULTS_DIR/findings/FIND-LLMFILL-5/report.md" <<'EOF'
+# FIND-LLMFILL-5
+## Summary
+Use-after-free in delete walks freed sibling pointers.
+EOF
+printf '%s' '{"surface":"library-api — delete","primitive":"double_free"}' \
+  > "$RESULTS_DIR/findings/FIND-LLMFILL-5/.llm_fields.json"
+LLM_DECIDE_MOCK_REACHABILITY_FIELDS='{"caller_controls":"bytes","caller_contract":"obeyed"}' \
+  _triage_llm_fill_fields "$RESULTS_DIR/findings/FIND-LLMFILL-5" "FIND-LLMFILL-5"
+assert_file_contains "$RESULTS_DIR/findings/FIND-LLMFILL-5/.llm_fields.json" \
+  '"caller_controls"' "partial sidecar retried: caller_controls now present"
+assert_file_contains "$RESULTS_DIR/findings/FIND-LLMFILL-5/.llm_fields.json" \
+  '"double_free"' "merge preserves the previously-captured primitive"
+assert_file_contains "$RESULTS_DIR/findings/FIND-LLMFILL-5/.llm_fields.json" \
+  '"_fill_attempts"' "retry records an attempt counter"
+
+# A COMPLETE sidecar (surface + primitive + caller_controls) must be left
+# untouched — no LLM budget spent, no risk of clobbering good fields.
+_CURRENT_TEST="llm-fill: complete sidecar left untouched"
+mkdir -p "$RESULTS_DIR/findings/FIND-LLMFILL-6"
+cat > "$RESULTS_DIR/findings/FIND-LLMFILL-6/report.md" <<'EOF'
+# FIND-LLMFILL-6
+## Summary
+SSRF via user-controlled fetch URL.
+EOF
+printf '%s' '{"surface":"network","primitive":"ssrf","caller_controls":"bytes"}' \
+  > "$RESULTS_DIR/findings/FIND-LLMFILL-6/.llm_fields.json"
+_fill6_before=$(cat "$RESULTS_DIR/findings/FIND-LLMFILL-6/.llm_fields.json")
+LLM_DECIDE_MOCK_REACHABILITY_FIELDS='{"surface":"OVERWRITTEN","primitive":"x","caller_controls":"x"}' \
+  _triage_llm_fill_fields "$RESULTS_DIR/findings/FIND-LLMFILL-6" "FIND-LLMFILL-6"
+_fill6_after=$(cat "$RESULTS_DIR/findings/FIND-LLMFILL-6/.llm_fields.json")
+assert_eq "$_fill6_before" "$_fill6_after" "complete sidecar unchanged (LLM not consulted)"
+
+# Once the attempt cap is reached, an unfillable sidecar stops re-filling so
+# a field the narrative simply does not carry can't re-burn budget forever.
+_CURRENT_TEST="llm-fill: attempt cap stops re-filling"
+mkdir -p "$RESULTS_DIR/findings/FIND-LLMFILL-7"
+cat > "$RESULTS_DIR/findings/FIND-LLMFILL-7/report.md" <<'EOF'
+# FIND-LLMFILL-7
+## Summary
+Heap overflow with no caller-control detail in the narrative.
+EOF
+printf '%s' '{"surface":"library-api","primitive":"heap_write","_fill_attempts":2}' \
+  > "$RESULTS_DIR/findings/FIND-LLMFILL-7/.llm_fields.json"
+_fill7_before=$(cat "$RESULTS_DIR/findings/FIND-LLMFILL-7/.llm_fields.json")
+LLM_FIELD_FILL_MAX_ATTEMPTS=2 \
+LLM_DECIDE_MOCK_REACHABILITY_FIELDS='{"caller_controls":"bytes"}' \
+  _triage_llm_fill_fields "$RESULTS_DIR/findings/FIND-LLMFILL-7" "FIND-LLMFILL-7"
+_fill7_after=$(cat "$RESULTS_DIR/findings/FIND-LLMFILL-7/.llm_fields.json")
+assert_eq "$_fill7_before" "$_fill7_after" "sidecar at attempt cap is left untouched"
+
+# ───────────────────────────────────────────────────────────────────
+# 12. Pool pass: triage_fill_reach_fields_tree fills model-direct-style
+# findings that never ran a per-cell triage. REACHABILITY_AUTO=0 keeps the
+# scoring side a no-op so the test exercises only the field-fill.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="pool pass: fills reach fields for findings under a pooled tree"
+POOL_TREE="$TEST_TMPDIR/pool-tree"
+mkdir -p "$POOL_TREE/findings/FIND-0001"
+cat > "$POOL_TREE/findings/FIND-0001/report.md" <<'EOF'
+# FIND-0001
+## Summary
+Integer overflow underallocates a buffer in the parser.
+EOF
+REACHABILITY_AUTO=0 \
+LLM_DECIDE_MOCK_REACHABILITY_FIELDS='{"surface":"library-api","primitive":"heap_write","caller_controls":"length"}' \
+  triage_fill_reach_fields_tree "$POOL_TREE" "$SCRIPT_ROOT/bin"
+assert_file_exists "$POOL_TREE/findings/FIND-0001/.llm_fields.json" \
+  "pool pass wrote a reach-field sidecar for the pooled finding"
+assert_file_contains "$POOL_TREE/findings/FIND-0001/.llm_fields.json" \
+  '"caller_controls"' "pool pass captured caller_controls"
+
 teardown_test_env
 summary

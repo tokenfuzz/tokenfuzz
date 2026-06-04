@@ -546,7 +546,7 @@ PYEOF
 fi
 
 if [ "$DO_REGENERATE" = "1" ]; then
-  log "regenerate $RUNID — re-deriving results for target=$TARGET_SLUG backend=$BACKEND (no cells launched, no LLM)"
+  log "regenerate $RUNID — re-deriving results for target=$TARGET_SLUG backend=$BACKEND (no cells launched; reach-field fill + scoring may call the LLM/probe)"
 else
   if [ "$BUDGET_WALL" = "0" ]; then
     log "run $RUNID — target=$TARGET_SLUG backend=$BACKEND replicates=$REPLICATES budget=unlimited"
@@ -1156,6 +1156,22 @@ rebuild_pool_artifacts() {
   ## already-relocated cells are skipped.
   python3 "$PY_BENCH" relocate-experiments "$BENCH_DIR" \
     || log "WARN: experiment relocation failed ($reason)"
+
+  ## Reach-field + severity convergence — BEFORE scoring. model-direct
+  ## findings/crashes never run the harness's per-cell triage, so without
+  ## this they reach the scorer carrying no structured reach fields (so
+  ## caller_controls is absent → ×0.4 and severity collapses to Low) or, for
+  ## findings, only the model's freeform self-assessed severity. Fill the
+  ## fields from each report's on-disk narrative — the SAME pass the harness
+  ## runs per cell — and score findings here (bin/reachability --batch below
+  ## only walks crashes/). Reads on-disk reports only (no live session), so
+  ## it runs correctly under --regenerate too; idempotent (complete sidecars
+  ## skip, re-score is cached) and best-effort. LLM_FIELD_FILL_DISABLE /
+  ## REACHABILITY_AUTO still gate the LLM / probe for a deterministic run.
+  if [ "$DRY_RUN" != "1" ] && declare -f triage_fill_reach_fields_tree >/dev/null 2>&1; then
+    triage_fill_reach_fields_tree "$POOL" "$SCRIPT_ROOT/bin" \
+      || log "WARN: pool reach-field fill returned non-zero ($reason)"
+  fi
 
   if [ "$DRY_RUN" != "1" ] && [ -d "$POOL/crashes" ]; then
     ## Severity: bin/reachability scores every pooled crash and writes the

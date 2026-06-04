@@ -975,6 +975,21 @@ _triage_bundle_crash_dir() {
   audit_log "WARN: bin/export-repro failed for crash ${id} (${reason}) — the audit-side bundle is left in place so triage can continue; the upstream-shareable repro tar.gz was not produced this iteration" | tee -a "$INDEX"
 }
 
+# True iff a .llm_fields.json sidecar already carries every scoring-relevant
+# reach field with a non-empty value. caller_controls is load-bearing: when
+# it is absent, bin/reachability falls back to its weakest controls gate
+# (×0.4) and Reach collapses to Low, so a sidecar missing it is INCOMPLETE
+# and must be re-filled rather than accepted as final. caller_contract is
+# deliberately not required here — its absence scores as ×1.0 (obeyed), so
+# it never collapses the side and needn't force a retry.
+_llm_fields_complete() {
+  jq -e '
+    (.surface // "")         != "" and
+    (.primitive // "")       != "" and
+    (.caller_controls // "") != ""
+  ' "$1" >/dev/null 2>&1
+}
+
 # Run a single-shot LLM classification pass on the report's narrative to
 # fill structured fields the agent did not emit (Surface / Primitive
 # class / Caller controls / Caller contract). The result is written to
@@ -982,16 +997,29 @@ _triage_bundle_crash_dir() {
 # — agent-authored fields always win. Best-effort: failure leaves the
 # report dir untouched.
 #
-# Knob: LLM_FIELD_FILL_DISABLE=1 skips the call (also blocked by global
-# LLM_DECIDE_DISABLE=1 from lib/llm_decide.sh).
+# Knobs: LLM_FIELD_FILL_DISABLE=1 skips the call (also blocked by global
+# LLM_DECIDE_DISABLE=1 from lib/llm_decide.sh). LLM_FIELD_FILL_MAX_ATTEMPTS
+# (default 2) caps re-fills of a stubbornly incomplete sidecar.
 _triage_llm_fill_fields() {
   local d="$1" id="$2"
   [ "${LLM_FIELD_FILL_DISABLE:-0}" = "1" ] && return 0
   command -v jq >/dev/null 2>&1 || return 0
   declare -f llm_decide >/dev/null 2>&1 || return 0
-  # Skip if the sidecar already exists for this triage pass — re-running
-  # the LLM on every iteration burns budget and rarely changes the answer.
-  [ -s "$d/.llm_fields.json" ] && return 0
+  # Skip only when a prior fill already captured every scoring-relevant
+  # field. A PARTIAL sidecar (e.g. surface present but caller_controls
+  # missing) is retried instead of cached as final — caching a partial
+  # result silently pins the deterministic scorer to its missing-field
+  # default (controls → ×0.4) and collapses severity to Low. The attempt
+  # counter caps re-fills so a genuinely unfillable field (nothing in the
+  # narrative to extract) stops re-spending budget every triage pass.
+  local _sidecar="$d/.llm_fields.json"
+  if [ -s "$_sidecar" ]; then
+    _llm_fields_complete "$_sidecar" && return 0
+    local _attempts
+    _attempts=$(jq -r '._fill_attempts // 0' "$_sidecar" 2>/dev/null || echo 0)
+    case "$_attempts" in ''|*[!0-9]*) _attempts=0 ;; esac
+    [ "$_attempts" -ge "${LLM_FIELD_FILL_MAX_ATTEMPTS:-2}" ] && return 0
+  fi
 
   local report=""
   if   [ -s "$d/report.md" ]; then report="$d/report.md"
@@ -1030,7 +1058,19 @@ _triage_llm_fill_fields() {
   [ -n "$out" ] || return 0
   # Validate it's a JSON object before writing.
   if printf '%s' "$out" | jq -e 'type=="object"' >/dev/null 2>&1; then
-    printf '%s' "$out" > "$d/.llm_fields.json" 2>/dev/null || true
+    # Merge the new non-empty fields over any prior partial sidecar (new
+    # wins; previously-captured keys the new response omitted are kept) and
+    # bump the attempt counter so an unfillable field eventually stops
+    # retrying. On any jq failure, fall back to writing the fresh response.
+    local _prev='{}'
+    [ -s "$_sidecar" ] && _prev=$(cat "$_sidecar" 2>/dev/null)
+    printf '%s' "$_prev" | jq -e 'type=="object"' >/dev/null 2>&1 || _prev='{}'
+    printf '%s' "$out" | jq --argjson prev "$_prev" '
+        ($prev * (with_entries(select(.value != null and .value != ""))))
+        | ._fill_attempts = (($prev._fill_attempts // 0) + 1)
+      ' > "$_sidecar.tmp" 2>/dev/null \
+      && mv "$_sidecar.tmp" "$_sidecar" \
+      || printf '%s' "$out" > "$_sidecar"
   fi
   return 0
 }
@@ -1121,6 +1161,45 @@ _triage_run_reachability() {
   fi
   printf '%s\n' "$reason" > "$d/.reachability_failed" 2>/dev/null || true
   audit_log "WARN: skipped reachability analysis (severity / caller-chain enrichment) for crash ${id}: ${reason} — the crash dir is preserved without enrichment and other gates still apply" | tee -a "$INDEX"
+}
+
+# Fill missing reach fields + score every FIND/CRASH report under a pooled
+# tree, so findings produced WITHOUT the harness's per-cell triage (notably
+# the benchmark's model-direct condition) reach the deterministic scorer on
+# equal footing with harness findings. For each dir this runs the same
+# _triage_llm_fill_fields the per-cell pass runs; findings are additionally
+# scored here via _triage_run_reachability because bin/reachability --batch
+# only walks crashes/ (crashes are left for the caller's --batch step, so we
+# don't double-score them). Reads only on-disk reports — no live audit
+# session — so it is safe to run during a --regenerate re-derivation as well
+# as a live run. Idempotent (complete sidecars skip; re-scoring is cached)
+# and best-effort. Honors LLM_FIELD_FILL_DISABLE / REACHABILITY_AUTO.
+#
+# Usage: triage_fill_reach_fields_tree <pool_dir> [bin_dir]
+triage_fill_reach_fields_tree() {
+  local _root="$1" _bin_dir="${2:-${SCRIPT_ROOT:-.}/bin}"
+  [ -d "$_root" ] || return 0
+  # _triage_run_reachability logs its failure tail to $INDEX (bare). In the
+  # benchmark/pool context there is no audit INDEX, so default it here — under
+  # `set -u` an unset $INDEX on the reachability-failure path would abort the
+  # whole run. Dynamic scope makes this local visible to the callee.
+  local INDEX="${INDEX:-/dev/null}"
+  local _d _id
+  if [ -d "$_root/findings" ]; then
+    for _d in "$_root"/findings/FIND-*; do
+      [ -d "$_d" ] || continue
+      _id=$(basename "$_d")
+      _triage_llm_fill_fields "$_d" "$_id"
+      _triage_run_reachability "$_d" "$_id" "$_bin_dir"
+    done
+  fi
+  if [ -d "$_root/crashes" ]; then
+    for _d in "$_root"/crashes/CRASH-*; do
+      [ -d "$_d" ] || continue
+      _triage_llm_fill_fields "$_d" "$(basename "$_d")"
+    done
+  fi
+  return 0
 }
 
 # Move a triaged dir into crashes-rejected/ with an .autodiscard marker.
