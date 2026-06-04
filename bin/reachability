@@ -2289,11 +2289,94 @@ def _replace_severity_section(text: str, new_section: str) -> str:
     return text + sep + "\n" + new_section
 
 
+# Reach fields the scorer resolves (from the report, or the LLM sidecar as a
+# fallback) and surfaces into the Fields table when a report omits them. This
+# makes a model-direct report — whose freeform model author wrote none of these
+# and which never ran the harness's per-cell triage — read in the same style as
+# a harness crash, where the audit agent authors these rows directly. Display
+# labels and order mirror the harness report template. Keyed by the internal
+# field name used in severity["fields_used"].
+_SURFACED_REACH_FIELDS = (
+    ("primitive_field", "Primitive"),
+    ("surface",         "Surface"),
+    ("trigger_source",  "Trigger source"),
+    ("caller_contract", "Caller contract"),
+    ("caller_controls", "Caller controls"),
+    ("boundary",        "Boundary"),
+)
+
+# A field counts as already present (and is left untouched — agent-authored
+# values always win) if it appears as a `| Field | … |` table row OR a bare
+# `Field:` line.
+_KNOWN_FIELD_LABELS = frozenset({
+    "class", "severity", "file", "function", "line", "target",
+    "primitive", "surface", "trigger source", "caller contract",
+    "caller controls", "boundary",
+})
+
+
+def _field_present(text: str, field: str) -> bool:
+    wanted = field.lower()
+    bare_re = re.compile(rf"^{re.escape(field)}\s*:", re.IGNORECASE)
+    for line in text.splitlines():
+        if line.startswith("|"):
+            parts = line.split("|")
+            if len(parts) >= 4 and parts[1].strip().lower() == wanted:
+                return True
+        elif bare_re.match(line):
+            return True
+    return False
+
+
+def _insert_fields_rows(text: str, rows: list[tuple[str, str]]) -> str:
+    """Append `| Field | Value |` rows to the report's Fields table (the first
+    contiguous run of table rows that carries a known structured field). No-op
+    if the report has no such table. Values are flattened to a single cell."""
+    if not rows:
+        return text
+    lines = text.splitlines()
+    end = -1
+    i, n = 0, len(lines)
+    while i < n:
+        if lines[i].lstrip().startswith("|"):
+            j = i
+            has_known = False
+            while j < n and lines[j].lstrip().startswith("|"):
+                parts = lines[j].split("|")
+                if len(parts) >= 3 and parts[1].strip().lower() in _KNOWN_FIELD_LABELS:
+                    has_known = True
+                j += 1
+            if has_known:
+                end = j - 1
+                break
+            i = j
+        else:
+            i += 1
+    if end < 0:
+        return text
+    indent = lines[end][:len(lines[end]) - len(lines[end].lstrip())]
+    def _cell(v: str) -> str:
+        return " ".join(v.split()).replace("|", r"\|")
+    new = [f"{indent}| {f} | {_cell(v)} |" for f, v in rows]
+    lines[end + 1:end + 1] = new
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
 def update_report(report_path: Path, reachability: dict, severity: dict) -> None:
     text = report_path.read_text("utf-8", errors="replace")
     text, fields_sev_updated = _replace_structured_field(
         text, "Severity", _format_severity_field(severity),
     )
+    # Surface the reach fields the scorer used into the Fields table when the
+    # report omits them (insert-if-absent; never overwrite an authored row).
+    used = severity.get("fields_used") or {}
+    to_add = [
+        (label, used[key].strip())
+        for key, label in _SURFACED_REACH_FIELDS
+        if (used.get(key) or "").strip() and not _field_present(text, label)
+    ]
+    if to_add:
+        text = _insert_fields_rows(text, to_add)
     # Always update an existing `- **Severity**: …` bullet (legacy crash
     # reports rely on the auto-formula being kept in sync), but never
     # synthesize one — that would inject a stub `## Classification`

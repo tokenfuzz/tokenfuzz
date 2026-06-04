@@ -1134,5 +1134,70 @@ assert sev["level"] in ("Medium", "High", "Critical"), \
 PY
 then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "triaged genuine bug under-scored"; fi
 
+# ───────────────────────────────────────────────────────────────────
+# 19. Reach fields are surfaced into the Fields table for a report that
+# omits them (model-direct style), sourced from the .llm_fields.json
+# sidecar — so model-direct reports read like harness crashes.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="--report surfaces missing reach fields from the sidecar"
+MD_DIR="$TEST_TMPDIR/crashes/CRASH-MODELDIRECT"
+mkdir -p "$MD_DIR"
+cat > "$MD_DIR/report.md" <<'EOF'
+# CRASH-MODELDIRECT: heap overflow
+
+| Field    | Value          |
+| :------- | :------------- |
+| Class    | use-after-free |
+| Severity | Low (10)       |
+| File     | cJSON.c        |
+
+## Summary
+Crafted JSON triggers a heap-use-after-free READ.
+EOF
+cat > "$MD_DIR/.llm_fields.json" <<'EOF'
+{"surface":"library-api — cJSON public parse API","primitive":"uaf_read",
+ "caller_contract":"obeyed","caller_controls":"bytes","trigger_source":"api",
+ "boundary":"untrusted JSON buffer handed to cJSON_Parse"}
+EOF
+python3 "$REACH" --report "$MD_DIR" --severity-only --no-cache --json >/dev/null 2>&1 \
+  || fail "$_CURRENT_TEST" "report mode failed"
+assert_file_contains "$MD_DIR/report.md" '^\| Surface \| library-api' \
+  "Surface row inserted from sidecar"
+assert_file_contains "$MD_DIR/report.md" '^\| Caller controls \| bytes' \
+  "Caller controls row inserted from sidecar"
+assert_file_contains "$MD_DIR/report.md" '^\| Boundary \| untrusted JSON' \
+  "Boundary row inserted from sidecar"
+
+# Idempotent: a second run must not duplicate the inserted rows.
+_CURRENT_TEST="--report reach-field surfacing is idempotent"
+python3 "$REACH" --report "$MD_DIR" --severity-only --no-cache --json >/dev/null 2>&1 \
+  || fail "$_CURRENT_TEST" "second report run failed"
+n_surface=$(grep -c '^| Surface |' "$MD_DIR/report.md")
+assert_eq "1" "$n_surface" "Surface row not duplicated on re-run"
+
+# Agent-authored rows win: an existing Surface value is never overwritten.
+_CURRENT_TEST="--report never overwrites an agent-authored reach field"
+AUTH_DIR="$TEST_TMPDIR/crashes/CRASH-AUTHORED"
+mkdir -p "$AUTH_DIR"
+cat > "$AUTH_DIR/report.md" <<'EOF'
+# CRASH-AUTHORED
+
+| Field    | Value          |
+| :------- | :------------- |
+| Severity | Low (10)       |
+| Surface  | AGENT-AUTHORED SURFACE |
+| File     | cJSON.c        |
+
+## Summary
+Heap-use-after-free READ.
+EOF
+cp "$MD_DIR/.llm_fields.json" "$AUTH_DIR/.llm_fields.json"
+python3 "$REACH" --report "$AUTH_DIR" --severity-only --no-cache --json >/dev/null 2>&1 \
+  || fail "$_CURRENT_TEST" "report mode failed"
+assert_file_contains "$AUTH_DIR/report.md" '^\| Surface  \| AGENT-AUTHORED SURFACE' \
+  "agent-authored Surface preserved"
+n_surface2=$(grep -c '^| Surface' "$AUTH_DIR/report.md")
+assert_eq "1" "$n_surface2" "sidecar Surface not added alongside the authored one"
+
 teardown_test_env
 summary
