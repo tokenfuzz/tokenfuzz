@@ -58,6 +58,7 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import stack_frames  # noqa: E402
 import clusterfuzz_stacktrace as cf_stack  # noqa: E402
+import finding_signature  # noqa: E402
 from cluster_common import (  # noqa: E402
     exact_child_file,
     remove_legacy_cluster_files,
@@ -489,60 +490,11 @@ def _extract_primitive(asan_text: str) -> str:
     return "unclassified"
 
 
-# The auto-Severity line bin/reachability injects looks like:
-#
-#   - **Severity**: Medium (auto: primitive=heap READ of 1 byte(s) (+18);
-#     reachability=+15 [148 external callers found]; score=33)
-#
-# Two regexes because a single one with [^)]*? would stop at the first `)`
-# inside the auto-line (e.g. the `(+18)` token), which is BEFORE the
-# `score=` field — the bug that caused score to drop out of the cluster
-# table. We match the level first, then locate score=NN anywhere on the
-# rest of the line.
-_SEVERITY_LEVEL_RE = re.compile(
-    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low)",
-    re.MULTILINE,
-)
-# Fields-table form: `| Severity | Low (24) |`. bin/reachability writes the
-# bare `- **Severity**:` line above when one already exists, but a report that
-# only carries the Fields table (e.g. a model-direct crash whose export-repro
-# bundle was not rebuilt during --regenerate) keeps its severity ONLY here.
-# Parsing both forms — like _extract_strategy does — is what keeps such a
-# crash from clustering as unscored ('—'). The score is the parenthesized
-# number; level is one of the four buckets.
-_SEVERITY_TABLE_RE = re.compile(
-    r"^\|\s*Severity\s*\|\s*(?P<level>Critical|High|Medium|Low)\b"
-    r"\s*(?:\((?P<score>\d+)\))?",
-    re.MULTILINE | re.IGNORECASE,
-)
-_SEVERITY_SCORE_RE = re.compile(r"score=(\d+)")
-
-_SEVERITY_RANK = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
-
-
-def _extract_severity(report_text: str) -> tuple[str, int, int]:
-    """Return (level_str, rank_int, score_int) for the report's severity.
-    Prefers the bare `- **Severity**: <level> (auto: … score=N)` line; falls
-    back to the `| Severity | <level> (N) |` Fields-table row; then to
-    ('—', 0, 0) when no severity is recorded yet (e.g. before bin/reachability
-    has run). Rank is the sort key — higher is more severe, so
-    Critical=4 > High=3 > Medium=2 > Low=1."""
-    m = _SEVERITY_LEVEL_RE.search(report_text)
-    if m:
-        level = m.group("level")
-        line_end = report_text.find("\n", m.end())
-        if line_end == -1:
-            line_end = len(report_text)
-        line_tail = report_text[m.end():line_end]
-        score_m = _SEVERITY_SCORE_RE.search(line_tail)
-        score = int(score_m.group(1)) if score_m else 0
-        return level, _SEVERITY_RANK.get(level, 0), score
-    m = _SEVERITY_TABLE_RE.search(report_text)
-    if m:
-        level = m.group("level").capitalize()
-        score = int(m.group("score")) if m.group("score") else 0
-        return level, _SEVERITY_RANK.get(level, 0), score
-    return "—", 0, 0
+# Severity is parsed from the report (bare `- **Severity**:` line or the
+# `| Severity | Low (24) |` Fields row). The parser is shared with
+# bin/cluster-findings via lib/finding_signature so both cluster tables read
+# the same scored severity the report carries — see extract_severity there.
+_extract_severity = finding_signature.extract_severity
 
 
 _STRATEGY_BARE_RE = re.compile(

@@ -187,6 +187,52 @@ def extract_class(report_text: str) -> str:
     return ""
 
 
+# ── Severity extraction ────────────────────────────────────────────
+# bin/reachability writes the scored severity into the report in two forms:
+#   * bare line:  - **Severity**: Medium (auto: …; score=33)
+#   * Fields row: | Severity | Low (24) |
+# The report is the single source of truth for a finding's *scored* severity
+# (the deterministic (I+R)×CF result), refreshed on every --regenerate. The
+# bare line and the Fields row are parsed separately because a single regex
+# with `[^)]*?` would stop at the first `)` inside the auto-line (e.g. the
+# `(+18)` token) before reaching `score=`.
+_SEVERITY_LEVEL_RE = re.compile(
+    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low)",
+    re.MULTILINE,
+)
+_SEVERITY_TABLE_RE = re.compile(
+    r"^\|\s*Severity\s*\|\s*(?P<level>Critical|High|Medium|Low)\b"
+    r"\s*(?:\((?P<score>\d+)\))?",
+    re.MULTILINE | re.IGNORECASE,
+)
+_SEVERITY_SCORE_RE = re.compile(r"score=(\d+)")
+_SEVERITY_RANK = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
+
+
+def extract_severity(report_text: str) -> tuple[str, int, int]:
+    """Return (level_str, rank_int, score_int) for the report's severity.
+
+    Prefers the bare ``- **Severity**: <level> (auto: … score=N)`` line; falls
+    back to the ``| Severity | <level> (N) |`` Fields-table row; then to
+    ``('—', 0, 0)`` when no severity is recorded yet (e.g. before
+    bin/reachability has scored the report). Rank is the sort key — higher is
+    more severe (Critical=4 > High=3 > Medium=2 > Low=1)."""
+    m = _SEVERITY_LEVEL_RE.search(report_text or "")
+    if m:
+        level = m.group("level")
+        line_end = report_text.find("\n", m.end())
+        if line_end == -1:
+            line_end = len(report_text)
+        score_m = _SEVERITY_SCORE_RE.search(report_text[m.end():line_end])
+        return level, _SEVERITY_RANK.get(level, 0), int(score_m.group(1)) if score_m else 0
+    m = _SEVERITY_TABLE_RE.search(report_text or "")
+    if m:
+        level = m.group("level").capitalize()
+        score = int(m.group("score")) if m.group("score") else 0
+        return level, _SEVERITY_RANK.get(level, 0), score
+    return "—", 0, 0
+
+
 # ── Path normalization ─────────────────────────────────────────────
 # Reports cite paths in three shapes that the deterministic key must
 # collapse to ONE canonical target-relative form:

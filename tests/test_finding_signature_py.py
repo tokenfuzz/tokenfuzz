@@ -432,6 +432,24 @@ ok(fs.cluster_id(("auth", "src/foo.go", "Bar"))
    "different class → different cluster id")
 
 
+# ── extract_severity ───────────────────────────────────────────────
+# The report is the source of truth for scored severity; both cluster
+# tables read it through this parser so their rows match the linked report.
+print("\nextract_severity")
+assert_eq(("Low", 1, 27), fs.extract_severity("| Severity | Low (27)       |"),
+          "Fields-table row with score")
+assert_eq(("High", 3, 58),
+          fs.extract_severity("- **Severity**: High (auto: I=40 (+6) R=18; score=58)"),
+          "bare auto-line: score read past a parenthesised token")
+assert_eq(("Medium", 2, 0), fs.extract_severity("| Severity | Medium |"),
+          "Fields-table row without a score")
+assert_eq(("—", 0, 0), fs.extract_severity("no severity recorded yet"),
+          "unscored report → em-dash sentinel")
+both = "| Severity | Low (27) |\n- **Severity**: Critical (auto: score=82)"
+ok(fs.extract_severity(both)[0] == "Critical",
+   "bare auto-line preferred over Fields row")
+
+
 print()
 if FAILED:
     print(f"\033[0;31m{FAILED} failed, {PASSED} passed\033[0m")
