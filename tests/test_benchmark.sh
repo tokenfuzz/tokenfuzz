@@ -433,6 +433,39 @@ set -e
 assert_neq "0" "$regen_norun_rc" \
   "T9r-i: --regenerate with no run on disk is rejected"
 
+# ── T9s: --regenerate with NO --target re-derives every run in the tree ──
+# Build two runs under one bench root — different backend + target each — then
+# `bin/benchmark --regenerate` (no target) must walk both, re-derive each from
+# its run.json, launch no cells, and rebuild the cross-backend page.
+allroot="$work/regen-all"
+bash "$BENCH" --target dummytarget --dry-run --replicates 1 --conditions harness \
+  --backend codex --bench-root "$allroot" --run-id ra-codex >/dev/null 2>&1
+bash "$BENCH" --target othertarget --dry-run --replicates 1 --conditions harness \
+  --backend gemini --bench-root "$allroot" --run-id ra-gemini >/dev/null 2>&1
+codex_cells_before=$(find "$allroot/codex/ra-codex/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+all_out=$(bash "$BENCH" --regenerate --bench-root "$allroot" 2>&1)
+all_rc=$?
+assert_eq "0" "$all_rc" "T9s-a: --regenerate (no target) exits 0"
+assert_match 'regenerate-all: target=dummytarget backend=codex run=ra-codex' "$all_out" \
+  "T9s-b: re-derives the codex run"
+assert_match 'regenerate-all: target=othertarget backend=gemini run=ra-gemini' "$all_out" \
+  "T9s-c: re-derives the gemini run"
+assert_match 'regenerate-all: rebuilt .*benchmark-result\.md \(2 run\(s\), 0 failed\)' "$all_out" \
+  "T9s-d: rebuilds the full cross-backend page over both runs"
+assert_file_exists "$allroot/benchmark-result.html" \
+  "T9s-e: cross-backend benchmark-result.html is rendered"
+codex_cells_after=$(find "$allroot/codex/ra-codex/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+assert_eq "$codex_cells_before" "$codex_cells_after" \
+  "T9s-f: --regenerate (no target) launches no new cells"
+
+# --regenerate (no target) on an empty tree is a clear error.
+set +e
+bash "$BENCH" --regenerate --bench-root "$work/regen-all-empty" >/dev/null 2>&1
+all_empty_rc=$?
+set -e
+assert_neq "0" "$all_empty_rc" \
+  "T9s-g: --regenerate with no runs anywhere is rejected"
+
 # Incomplete resume cells are fully cleared before rerun. A prior benchmark can
 # leave cells/<name>/repo-root/output half-populated while an old child is
 # still winding down. Deleting that tree in place can fail with "Directory not

@@ -8,7 +8,7 @@ Two public code-search backends are queried in parallel:
   * gh search code                — official GitHub Search API via the gh CLI.
                                     Needs `gh auth login` or GH_TOKEN.
 
-Results are cached on disk for 24h, the request carries a polite User-Agent,
+Results are cached on disk for 7 days, the request carries a polite User-Agent,
 and transient failures get a single retry. 403/429 responses also create a
 short backend-level cooldown so repeated symbol probes do not hammer a
 rate-limited service. Each backend is independent: any one failing produces
@@ -83,7 +83,7 @@ from cluster_common import exact_child_file  # noqa: E402
 USER_AGENT = "tokenfuzz-reachability/1.0"
 DEFAULT_TIMEOUT = 10.0
 BACKOFF_SECS = 30.0
-CACHE_TTL_SECS = 24 * 3600
+CACHE_TTL_SECS = 7 * 24 * 3600
 # Status codes worth a single retry. 403 is deliberately excluded: it is often
 # an auth or policy response, so repeated immediate retries are not useful.
 RETRY_STATUS = (429, 502, 503, 504)
@@ -2500,7 +2500,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--target", default=None, help="Target slug (loads ignore from output/<slug>/target.toml)")
     ap.add_argument("--ignore", action="append", default=[], help="Substring to drop from hits (repeatable)")
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of human summary")
-    ap.add_argument("--no-cache", action="store_true", help="Bypass the 24h cache")
+    ap.add_argument("--no-cache", action="store_true", help="Bypass the 7-day cache")
     ap.add_argument("--severity-only", action="store_true",
                     help="With --report: only recompute Severity (uses adjacent reachability.json when present; otherwise skips external search)")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Per-request timeout (seconds)")

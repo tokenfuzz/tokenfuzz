@@ -206,7 +206,16 @@ bin/benchmark --target pcre2 --backend codex --regenerate
 # Or target a specific run by id.
 bin/benchmark --target pcre2 --backend codex --regenerate \
   --run-id 20260530-142558
+
+# Re-derive EVERY run under the bench root — all targets and backends —
+# and rebuild the full cross-backend page in one go.
+bin/benchmark --regenerate
 ```
+
+With no `--target`, `--regenerate` walks every `<backend>/<runid>/` under the
+bench root, reads each run's target and backend from its `run.json`, re-derives
+it, then rebuilds the cross-backend `benchmark-result.{md,html}` so the whole
+page reflects every config you have run there.
 
 `--regenerate` launches no agents and makes no API calls. It re-pools the
 run's crash and finding directories, then re-runs `bin/reachability`

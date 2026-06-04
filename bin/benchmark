@@ -34,6 +34,8 @@
 #   bin/benchmark --target pcre2 --regenerate            # re-derive an
 #                                    # existing run's results (latest run id)
 #   bin/benchmark --target pcre2 --regenerate --run-id <id>   # a specific run
+#   bin/benchmark --regenerate       # re-derive EVERY run under the bench root
+#                                    # (all targets + backends) + the full page
 #
 # Options (default in brackets):
 #   --target <slug>          Target under targets/ to benchmark. REQUIRED.
@@ -64,20 +66,24 @@
 #                            so the ledger shows raw filing volume rather
 #                            than confirmed volume. BENCHMARK_VALIDATE_FINDINGS=0
 #                            has the same effect. Default: validate on.
-#   --regenerate             Re-derive an EXISTING run's results from the
-#                            artifacts already on disk — no cells are launched
-#                            and no LLM is called. Re-runs the deterministic
+#   --regenerate             Re-derive EXISTING results from the artifacts
+#                            already on disk — no cells are launched and no LLM
+#                            is called. Re-runs the deterministic
 #                            post-processing: severity scoring, crash + finding
 #                            clustering (dedup), the per-condition cluster
 #                            reports, then rebuilds report.json, the ledger row,
-#                            and benchmark-result.{md,html}. Targets the run
-#                            named by --run-id / BENCHMARK_RUNID, or the most
-#                            recent run under the backend when neither is set.
+#                            and benchmark-result.{md,html}.
+#                            With --target: re-derives one run (named by
+#                            --run-id / BENCHMARK_RUNID, else the most recent
+#                            run under the backend). Without --target: walks the
+#                            whole bench root and re-derives EVERY run across all
+#                            targets and backends, then rebuilds the full
+#                            cross-backend page.
 #                            Deliberately does NOT rebuild each crash's
 #                            export-repro REPORT bundle (that needs live session
-#                            state and can clobber hand-edited reports); use it
-#                            after changing a clustering/severity algorithm to
-#                            refresh the rollups without re-auditing.
+#                            state and can clobber hand-edited reports). Use it
+#                            after changing a clustering or severity algorithm
+#                            to refresh the rollups without re-auditing.
 #   --reset [--hard]         Archive (or, with --hard, delete) the ledger; exit.
 #
 # So `bin/benchmark --target pcre2` runs the default backend, 3 replicates
@@ -128,7 +134,7 @@ PYEOF
 }
 
 usage() {
-  sed -n '3,81p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,87p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -292,6 +298,57 @@ if [ "$DO_RESET" = "1" ]; then
   reset_args=(reset --ledger "$LEDGER")
   [ "$RESET_HARD" = "1" ] && reset_args+=(--hard)
   python3 "$PY_BENCH" "${reset_args[@]}"
+  exit $?
+fi
+
+# ── --regenerate with no --target: re-derive EVERY run in the tree ───────
+# `bin/benchmark --regenerate` (no target) walks every <backend>/<runid>/cells
+# under the bench root, reads each run's target+backend from its run.json, and
+# re-derives that run in a child invocation — then rebuilds the cross-backend
+# benchmark-result.{md,html} so the whole page reflects every config that was
+# ever run here. Each child takes the per-(target,backend) lock itself; the
+# driver runs them sequentially so locks never contend. No agents, no LLM.
+if [ "$DO_REGENERATE" = "1" ] && [ -z "$TARGET_SLUG" ]; then
+  self="$SCRIPT_ROOT/bin/benchmark"
+  found=0 regen_failed=0
+  while IFS= read -r cells_dir; do
+    run_dir="$(dirname "$cells_dir")"
+    rj="$run_dir/run.json"
+    runid="$(basename "$run_dir")"
+    backend_from_path="$(basename "$(dirname "$run_dir")")"
+    rt="" rb=""
+    if [ -f "$rj" ]; then
+      rt="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("target",""))' "$rj" 2>/dev/null || true)"
+      rb="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("backend",""))' "$rj" 2>/dev/null || true)"
+    fi
+    [ -n "$rb" ] || rb="$backend_from_path"
+    if [ -z "$rt" ]; then
+      log "regenerate-all: skipping $backend_from_path/$runid (no target in run.json)"
+      continue
+    fi
+    found=$((found + 1))
+    log "regenerate-all: target=$rt backend=$rb run=$runid"
+    if ! "$self" --regenerate --target "$rt" --backend "$rb" \
+        --run-id "$runid" --bench-root "$BENCH_ROOT"; then
+      regen_failed=$((regen_failed + 1))
+      log "regenerate-all: WARN re-derivation failed for $rt/$rb/$runid"
+    fi
+  done < <(find "$BENCH_ROOT" -mindepth 3 -maxdepth 3 -type d -name cells 2>/dev/null \
+            | LC_ALL=C sort)
+
+  # Final cross-backend page: every child already folds the crosstab, but
+  # render it once more here so the full page is guaranteed fresh even if the
+  # last child short-circuited on no-op inputs.
+  crosstab="$BENCH_ROOT/benchmark-result.md"
+  if python3 "$PY_BENCH" crosstab "$BENCH_ROOT" --out "$crosstab" >/dev/null 2>&1; then
+    [ -x "$SCRIPT_ROOT/bin/render-md" ] \
+      && python3 "$SCRIPT_ROOT/bin/render-md" "$crosstab" --html-sibling >/dev/null 2>&1
+    log "regenerate-all: rebuilt $crosstab ($found run(s), $regen_failed failed)"
+  else
+    log "regenerate-all: WARN crosstab render failed ($found run(s), $regen_failed failed)"
+  fi
+  [ "$found" -gt 0 ] || { echo "FATAL: --regenerate: no runs found under $BENCH_ROOT" >&2; exit 1; }
+  [ "$regen_failed" -eq 0 ]
   exit $?
 fi
 
@@ -1106,6 +1163,9 @@ rebuild_pool_artifacts() {
     ## and the harness's triaged ones go through the identical scorer —
     ## that one lens is the whole point. Best-effort: the benchmark must
     ## still produce a ledger if the reachability probe is offline.
+    ## reachability caches every (service, symbol) lookup on disk for 7 days
+    ## (~/.cache/sancov-reachability), so a re-derivation re-uses those hits
+    ## and stays fast without any special-casing here.
     "$SCRIPT_ROOT/bin/reachability" --batch "$POOL" --target "$TARGET_SLUG" \
       > "$BENCH_DIR/reachability.log" 2>&1 \
       || log "WARN: reachability batch returned non-zero (see reachability.log, $reason)"

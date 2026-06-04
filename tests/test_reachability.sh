@@ -929,7 +929,7 @@ assert_file_exists "$BATCH_RESULTS/crashes/CRASH-B/reachability.json" "batch wro
 
 # ───────────────────────────────────────────────────────────────────
 # 16. Cache freshness is mtime-based, not date-suffix-based:
-#     a stale cache file (mtime > 24h ago) is ignored even on the same day.
+#     a stale cache file (mtime older than the 7-day TTL) is ignored.
 # ───────────────────────────────────────────────────────────────────
 _CURRENT_TEST="cache TTL is mtime-based"
 SYM_TTL="ttl_demo"
@@ -945,8 +945,8 @@ cache_stale="$REACHABILITY_CACHE_DIR/sourcegraph-${H_TTL}.json"
 cat > "$cache_stale" <<'EOF'
 {"status":"ok","hits":[{"repo":"STALE-CACHE","path":"src/old.c"}]}
 EOF
-# Touch it 2 days into the past.
-touch -t "$(date -v-2d +%Y%m%d%H%M 2>/dev/null || date -d '2 days ago' +%Y%m%d%H%M)" "$cache_stale"
+# Touch it 8 days into the past (past the 7-day TTL).
+touch -t "$(date -v-8d +%Y%m%d%H%M 2>/dev/null || date -d '8 days ago' +%Y%m%d%H%M)" "$cache_stale"
 out=$(python3 "$REACH" --symbol "$SYM_TTL" --json 2>&1)
 echo "$out" | python3 -c '
 import json, sys
