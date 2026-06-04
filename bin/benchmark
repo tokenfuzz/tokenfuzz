@@ -1543,6 +1543,7 @@ for cond in "${COND_ARR[@]}"; do
     # Harvest deterministic metrics for this cell.
     if [ -n "$results_dir" ] && [ -d "$results_dir" ]; then
       python3 "$PY_BENCH" harvest "$results_dir" --out "$cell_dir/metrics.json" \
+        --backend "$BACKEND" --model "$model" \
         2>/dev/null || true
     else
       printf '{"exists": false}\n' > "$cell_dir/metrics.json"
@@ -1578,6 +1579,9 @@ fi  # end: cell loop skipped under --regenerate
 
 if [ "$DO_REGENERATE" = "1" ]; then
   log "regenerate: re-deriving results from $(find "$CELLS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') cell(s) on disk"
+  python3 "$PY_BENCH" reharvest-cells "$BENCH_DIR" \
+    --backend "$BACKEND" --model "$model" \
+    >/dev/null 2>&1 || log "WARN: regenerate metrics reharvest failed"
 else
   log "cells complete: $cells_done done, $cells_failed failed"
 fi

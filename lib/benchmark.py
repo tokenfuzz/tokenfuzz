@@ -40,6 +40,7 @@ import shutil
 import statistics
 import sys
 import urllib.parse
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -614,8 +615,190 @@ def parse_cluster_count(clusters_md: Path, fallback: int) -> int:
 # harness-shared by design.
 _INPUT_INCLUDES_CACHED = ("codex", "oss", "gemini")
 
+_MILLION = Decimal("1000000")
 
-def harvest_tokens(index_jsonl: Path) -> dict:
+
+def _money(value: str) -> Decimal:
+    return Decimal(value)
+
+
+def _pricing_rates(backend: str, model: str = "") -> dict | None:
+    """Public USD-equivalent token rates per 1M tokens.
+
+    Codex product billing uses credits, but the underlying model has public
+    API-equivalent token rates. Those rates are the reproducible denominator
+    for cross-backend benchmark dollars.
+    """
+    b = (backend or "").strip().lower()
+    m = (model or "").strip().lower()
+
+    if b == "claude":
+        # Claude API pricing, standard global routing, 5-minute prompt cache.
+        if any(x in m for x in ("opus-4-8", "opus-4.8", "opus 4.8")):
+            return {
+                "input": _money("5"),
+                "cache_write": _money("6.25"),
+                "cache_read": _money("0.50"),
+                "output": _money("25"),
+                "source": "claude-api-opus-4.8",
+            }
+        if any(x in m for x in (
+            "opus-4-7", "opus-4.7", "opus-4-6", "opus-4.6",
+            "opus-4-5", "opus-4.5",
+        )):
+            return {
+                "input": _money("5"),
+                "cache_write": _money("6.25"),
+                "cache_read": _money("0.50"),
+                "output": _money("25"),
+                "source": "claude-api-opus-4.5+",
+            }
+        if "opus" in m:
+            return {
+                "input": _money("15"),
+                "cache_write": _money("18.75"),
+                "cache_read": _money("1.50"),
+                "output": _money("75"),
+                "source": "claude-api-opus-4.1/4",
+            }
+        if "sonnet" in m:
+            return {
+                "input": _money("3"),
+                "cache_write": _money("3.75"),
+                "cache_read": _money("0.30"),
+                "output": _money("15"),
+                "source": "claude-api-sonnet-4.x",
+            }
+        if "haiku" in m:
+            return {
+                "input": _money("1"),
+                "cache_write": _money("1.25"),
+                "cache_read": _money("0.10"),
+                "output": _money("5"),
+                "source": "claude-api-haiku-4.5",
+            }
+
+    if b in {"codex", "oss"}:
+        if "gpt-5.5" in m:
+            return {
+                "input": _money("5"),
+                "cache_read": _money("0.50"),
+                "output": _money("30"),
+                "source": "openai-api-gpt-5.5",
+            }
+        if "gpt-5.4-mini" in m:
+            return {
+                "input": _money("0.75"),
+                "cache_read": _money("0.075"),
+                "output": _money("4.50"),
+                "source": "openai-api-gpt-5.4-mini",
+            }
+        if "gpt-5.4" in m:
+            return {
+                "input": _money("2.50"),
+                "cache_read": _money("0.25"),
+                "output": _money("15"),
+                "source": "openai-api-gpt-5.4",
+            }
+
+    if b == "gemini":
+        if "gemini-3.1-pro-preview" in m or "gemini-3-pro" in m:
+            return {
+                "tiered": True,
+                "threshold": 200_000,
+                "input_low": _money("2"),
+                "input_high": _money("4"),
+                "cache_read_low": _money("0.20"),
+                "cache_read_high": _money("0.40"),
+                "output_low": _money("12"),
+                "output_high": _money("18"),
+                "source": "gemini-api-3.1-pro-preview-standard",
+            }
+        if "gemini-3.1-flash-lite" in m:
+            return {
+                "input": _money("0.25"),
+                "cache_read": _money("0.025"),
+                "output": _money("1.50"),
+                "source": "gemini-api-3.1-flash-lite-standard",
+            }
+        if "gemini-3-flash" in m:
+            return {
+                "input": _money("0.50"),
+                "cache_read": _money("0.05"),
+                "output": _money("3"),
+                "source": "gemini-api-3-flash-standard",
+            }
+
+    return None
+
+
+def _cost_decimal(
+    backend: str,
+    model: str,
+    *,
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int = 0,
+    prompt_tokens_for_tier: int | None = None,
+) -> tuple[Decimal | None, str]:
+    rates = _pricing_rates(backend, model)
+    if not rates:
+        return None, "unknown"
+
+    inp = Decimal(max(0, int(input_tokens)))
+    cached = Decimal(max(0, int(cached_input_tokens)))
+    out = Decimal(max(0, int(output_tokens)))
+    cache_create = Decimal(max(0, int(cache_creation_tokens)))
+
+    if rates.get("tiered"):
+        prompt = int(prompt_tokens_for_tier or input_tokens or 0)
+        high = prompt > int(rates["threshold"])
+        input_rate = rates["input_high" if high else "input_low"]
+        cache_rate = rates["cache_read_high" if high else "cache_read_low"]
+        output_rate = rates["output_high" if high else "output_low"]
+        cost = (inp * input_rate + cached * cache_rate + out * output_rate) / _MILLION
+        return cost, str(rates["source"])
+
+    input_rate = rates["input"]
+    cache_rate = rates.get("cache_read", Decimal("0"))
+    output_rate = rates["output"]
+    write_rate = rates.get("cache_write", input_rate)
+
+    # `input_tokens` is the normalized full-rate bucket. For Claude it
+    # includes cache writes for comparability; pricing needs the split
+    # because cache writes are 1.25x base input.
+    fresh_input = max(Decimal("0"), inp - cache_create)
+    cost = (
+        fresh_input * input_rate
+        + cache_create * write_rate
+        + cached * cache_rate
+        + out * output_rate
+    ) / _MILLION
+    return cost, str(rates["source"])
+
+
+def _decimal_text(value: Decimal | None) -> str:
+    if value is None:
+        return ""
+    return format(value.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP), "f")
+
+
+def _fmt_usd(value: object, estimated: bool = False) -> str:
+    try:
+        dec = Decimal(str(value))
+    except Exception:
+        return "—"
+    prefix = "~" if estimated else ""
+    amount = dec.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    return f"{prefix}${amount:,.4f}"
+
+
+def harvest_tokens(
+    index_jsonl: Path,
+    default_backend: str = "",
+    default_model: str = "",
+) -> dict:
     """Sum token usage + sanitizer invocations from a logs/index.jsonl.
 
     Counts are normalized so a field means the same thing on every
@@ -638,6 +821,7 @@ def harvest_tokens(index_jsonl: Path) -> dict:
         "iterations": 0,
         "input_tokens": 0,
         "cached_input_tokens": 0,
+        "cache_creation_tokens": 0,
         "output_tokens": 0,
         "asan_invocations": 0,
         # prompt_estimate is the only token signal the gemini backend
@@ -646,6 +830,8 @@ def harvest_tokens(index_jsonl: Path) -> dict:
         # is not silently scored as zero-cost.
         "prompt_estimate_tokens": 0,
         "estimated": False,
+        "cost_usd": "",
+        "cost_source": "",
     }
     if not index_jsonl.is_file():
         return totals
@@ -666,7 +852,8 @@ def harvest_tokens(index_jsonl: Path) -> dict:
         except ValueError:
             continue
         totals["iterations"] += 1
-        backend = str(row.get("backend") or "").strip().lower()
+        backend = str(row.get("backend") or default_backend or "").strip().lower()
+        model = str(row.get("model") or default_model or "").strip()
         tok = row.get("tokens") or {}
         raw_input = _int(tok.get("input"))
         # cache_read is written as `cached_input` by both the harness and
@@ -681,13 +868,44 @@ def harvest_tokens(index_jsonl: Path) -> dict:
             # genuinely fresh content the model just processed, so it
             # belongs in the full-rate bucket alongside `input`.
             full_rate_input = raw_input + cache_creation
+        output = _int(tok.get("output"))
         totals["input_tokens"] += full_rate_input
         totals["cached_input_tokens"] += cache_read
-        totals["output_tokens"] += _int(tok.get("output"))
+        totals["cache_creation_tokens"] += cache_creation
+        totals["output_tokens"] += output
+        event_cost, source = _cost_decimal(
+            backend,
+            model,
+            input_tokens=full_rate_input,
+            cached_input_tokens=cache_read,
+            output_tokens=output,
+            cache_creation_tokens=cache_creation,
+            prompt_tokens_for_tier=raw_input,
+        )
+        if event_cost is not None:
+            totals["cost_usd"] = _decimal_text(
+                Decimal(totals["cost_usd"] or "0") + event_cost
+            )
+            totals["cost_source"] = source
         for field in ("prompt_estimate", "prompt_estimate_build"):
             val = tok.get(field)
             if isinstance(val, (int, float)):
                 totals["prompt_estimate_tokens"] += int(val)
+                if raw_input == 0 and backend == "gemini":
+                    estimate_cost, source = _cost_decimal(
+                        backend,
+                        model,
+                        input_tokens=int(val),
+                        cached_input_tokens=0,
+                        output_tokens=output,
+                        prompt_tokens_for_tier=int(val),
+                    )
+                    if estimate_cost is not None:
+                        totals["cost_usd"] = _decimal_text(
+                            Decimal(totals["cost_usd"] or "0") + estimate_cost
+                        )
+                        totals["cost_source"] = source
+                        totals["estimated"] = True
                 break
         probe = row.get("probe") or {}
         totals["asan_invocations"] += _int(probe.get("asan_invocations"))
@@ -740,7 +958,11 @@ def count_recon_candidates(results_dir: Path) -> int:
     return count
 
 
-def harvest(results_dir: Path) -> dict:
+def harvest(
+    results_dir: Path,
+    default_backend: str = "",
+    default_model: str = "",
+) -> dict:
     """Compute the deterministic metric set for one results/ tree.
 
     Works identically for a harness results dir and a model-direct-condition
@@ -777,7 +999,11 @@ def harvest(results_dir: Path) -> dict:
         "recon_candidates": count_recon_candidates(results_dir),
         "exists": results_dir.is_dir(),
     }
-    metrics["tokens"] = harvest_tokens(_find_index_jsonl(results_dir))
+    metrics["tokens"] = harvest_tokens(
+        _find_index_jsonl(results_dir),
+        default_backend=default_backend,
+        default_model=default_model,
+    )
     return metrics
 
 
@@ -1140,6 +1366,7 @@ def _tokens_for_cell(cell: dict) -> dict:
     tokens = metrics.get("tokens") or {}
     input_tokens = int(tokens.get("input_tokens", 0) or 0)
     cached_input = int(tokens.get("cached_input_tokens", 0) or 0)
+    cache_creation = int(tokens.get("cache_creation_tokens", 0) or 0)
     output_tokens = int(tokens.get("output_tokens", 0) or 0)
     prompt_estimate = int(tokens.get("prompt_estimate_tokens", 0) or 0)
     # `estimated` is explicit for model-direct rows. Harness-side gemini
@@ -1161,8 +1388,11 @@ def _tokens_for_cell(cell: dict) -> dict:
         "wall_seconds": int(cell.get("wall_seconds") or 0),
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input,
+        "cache_creation_tokens": cache_creation,
         "output_tokens": output_tokens,
         "prompt_estimate_tokens": prompt_estimate,
+        "cost_usd": str(tokens.get("cost_usd") or ""),
+        "cost_source": str(tokens.get("cost_source") or ""),
         "iterations": int(tokens.get("iterations", 0) or 0),
         "estimated": estimated,
     }
@@ -1192,6 +1422,31 @@ def _token_source(rows: list[dict]) -> str:
     kinds = {_row_token_source(r) for r in rows}
     if len(kinds) == 1:
         return next(iter(kinds))
+    return "mixed"
+
+
+def _sum_cost_usd(rows: list[dict]) -> str:
+    total = Decimal("0")
+    saw = False
+    for row in rows:
+        value = row.get("cost_usd")
+        if value in (None, ""):
+            continue
+        try:
+            total += Decimal(str(value))
+            saw = True
+        except Exception:
+            continue
+    return _decimal_text(total) if saw else ""
+
+
+def _cost_source(rows: list[dict]) -> str:
+    sources = {str(r.get("cost_source") or "").strip()
+               for r in rows if str(r.get("cost_source") or "").strip()}
+    if not sources:
+        return "unknown"
+    if len(sources) == 1:
+        return next(iter(sources))
     return "mixed"
 
 
@@ -1318,10 +1573,15 @@ def aggregate(bench_dir: Path) -> dict:
                 "cached_input_tokens_total": sum(
                     r["cached_input_tokens"] for r in token_rows
                 ),
+                "cache_creation_tokens_total": sum(
+                    r["cache_creation_tokens"] for r in token_rows
+                ),
                 "output_tokens_total": sum(r["output_tokens"] for r in token_rows),
                 "prompt_estimate_tokens_total": sum(
                     r["prompt_estimate_tokens"] for r in token_rows
                 ),
+                "cost_usd_total": _sum_cost_usd(token_rows),
+                "cost_source": _cost_source(token_rows),
                 "token_source": _token_source(token_rows),
                 "cells": cells,
             }
@@ -1574,6 +1834,23 @@ def _fmt_output_cell(agg: dict) -> str:
     return _fmt_tokens(measured)
 
 
+def _fmt_cost_cell(agg: dict) -> str:
+    return _fmt_usd(
+        agg.get("cost_usd_total"),
+        estimated=str(agg.get("token_source") or "") == "estimated",
+    )
+
+
+def _fmt_cost_compact_cell(agg: dict) -> str:
+    try:
+        dec = Decimal(str(agg.get("cost_usd_total")))
+    except Exception:
+        return "—"
+    prefix = "~" if str(agg.get("token_source") or "") == "estimated" else ""
+    amount = dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return f"{prefix}${amount:,}"
+
+
 def _fmt_hours(seconds: object) -> str:
     """Wall-clock duration as decimal hours: 5400s -> `1.50h`.
 
@@ -1805,10 +2082,10 @@ def render_section(report: dict) -> str:
         lines.append("")
         lines.append(
             "| Condition | Rep | Experiment | Wall (h) | Source "
-            "| Input | Cached input | Output | Prompt est. |"
+            "| Input | Cache write | Cached input | Output | Prompt est. | Cost |"
         )
         lines.append(
-            "| --- | --: | --- | --: | --- | --: | --: | --: | --: |"
+            "| --- | --: | --- | --: | --- | --: | --: | --: | --: | --: | --: |"
         )
         by_cond: dict[str, list[dict]] = {}
         for row in token_rows:
@@ -1824,16 +2101,21 @@ def render_section(report: dict) -> str:
                             if cell else f"`{exp}`")
                 lines.append(
                     "| `{cond}` | {rep} | {exp} | {wall} | {source} "
-                    "| {inp} | {cached} | {out} | {prompt} |".format(
+                    "| {inp} | {create} | {cached} | {out} | {prompt} | {cost} |".format(
                         cond=label,
                         rep=row.get("replicate") or "—",
                         exp=exp_cell,
                         wall=_fmt_hours(row.get("wall_seconds")),
                         source=_row_token_source(row),
                         inp=_fmt_tokens(row.get("input_tokens")),
+                        create=_fmt_tokens(row.get("cache_creation_tokens")),
                         cached=_fmt_tokens(row.get("cached_input_tokens")),
                         out=_fmt_tokens(row.get("output_tokens")),
                         prompt=_fmt_tokens(row.get("prompt_estimate_tokens")),
+                        cost=_fmt_usd(
+                            row.get("cost_usd"),
+                            estimated=bool(row.get("estimated")),
+                        ),
                     )
                 )
             # Per-condition totals — the line an operator compares cost on.
@@ -1841,7 +2123,8 @@ def render_section(report: dict) -> str:
             n = len(rows)
             lines.append(
                 "| **`{cond}`** | — | **{n} cell{s}** | **{wall}** | {source} "
-                "| **{inp}** | **{cached}** | **{out}** | **{prompt}** |".format(
+                "| **{inp}** | **{create}** | **{cached}** | **{out}** "
+                "| **{prompt}** | **{cost}** |".format(
                     cond=label,
                     n=n,
                     s="" if n == 1 else "s",
@@ -1850,9 +2133,11 @@ def render_section(report: dict) -> str:
                     ),
                     source=agg.get("token_source") or _token_source(rows),
                     inp=_fmt_tokens(agg.get("input_tokens_total")),
+                    create=_fmt_tokens(agg.get("cache_creation_tokens_total")),
                     cached=_fmt_tokens(agg.get("cached_input_tokens_total")),
                     out=_fmt_tokens(agg.get("output_tokens_total")),
                     prompt=_fmt_tokens(agg.get("prompt_estimate_tokens_total")),
+                    cost=_fmt_cost_cell(agg),
                 )
             )
         lines.append("")
@@ -1873,6 +2158,12 @@ def render_section(report: dict) -> str:
             "> - **Cached input** — cache READS only, billed at ~10% "
             "of base. Large numbers mean the harness is reusing a stable "
             "prefix — that's what keeps cost down."
+        )
+        lines.append(
+            "> - **Cost** — USD-equivalent token cost at public provider "
+            "rates: fresh input + cache writes + cache reads + output. "
+            "Codex rows use OpenAI API-equivalent dollars; the Codex product "
+            "also reports credits."
         )
         lines.append(
             "> - **Output** — tokens the model emitted (responses + "
@@ -2078,14 +2369,14 @@ def crosstab(bench_root: Path) -> str:
         "| Rejected findings | Findings | Unique findings "
         "| Rejected crashes | Crashes | Unique crashes "
         "| Medium+ crashes | Top severity "
-        "| Input | Output |"
+        "| Input | Output | Cost |"
     )
     lines.append(
         "| --- | --- | --- | --- | --: | --: "
         "| --: | --: | --: "
         "| --: | --: | --: "
         "| --: | :--: "
-        "| --: | --: |"
+        "| --: | --: | --: |"
     )
 
     # Flatten (run × condition) so each emitted row is one
@@ -2132,7 +2423,7 @@ def crosstab(bench_root: Path) -> str:
         if c is None:
             lines.append(
                 f"| `{target}` | {backend_cell} | — | {run_cell} "
-                f"| — | — | — | — | — | — | — | — | — | · — | — | — |"
+                f"| — | — | — | — | — | — | — | — | — | · — | — | — | — |"
             )
             continue
         cond = c.get("condition", "?")
@@ -2155,7 +2446,7 @@ def crosstab(bench_root: Path) -> str:
             "| {tgt} | {bk} | `{cond}` | {rid} | {wall} | {reps} "
             "| {rfi} | {fi} | {uf} "
             "| {rcr} | {cr} | {uc} "
-            "| {mp} | {sev} | {inp} | {out} |".format(
+            "| {mp} | {sev} | {inp} | {out} | {cost} |".format(
                 bk=backend_cell,
                 rid=run_cell,
                 tgt=f"`{target}`",
@@ -2195,135 +2486,150 @@ def crosstab(bench_root: Path) -> str:
                 sev=_severity_cell(c.get("top_severity_level", "—")),
                 inp=_fmt_input_cell(c),
                 out=_fmt_output_cell(c),
+                cost=_fmt_cost_compact_cell(c),
             )
         )
     lines.append("")
     lines.append(
-        "Every row is one `target × backend × condition × run`. Rows stay "
-        "distinct so reruns don't average together. Columns are bucketed "
-        "below."
+        "Read each row as one completed experiment slice: one target, one "
+        "backend, one condition, and one benchmark run. Reruns remain separate "
+        "so a later experiment does not hide an earlier result."
     )
     lines.append("")
 
-    lines.append("**What ran.**")
+    lines.append("**Experiment identity.**")
     lines.append("")
     lines.append(
-        "- **Target** — open-source C/C++ project under audit "
-        "(`cjson`, `curl`, …), built with `-fsanitize=address -g -O1` "
-        "and its own pool of work cards."
+        "- **Target** — the audited open-source project, built with the target's "
+        "sanitizer configuration and scored against its own work queue."
     )
     lines.append(
-        "- **Backend** — agent runtime that drove the cell "
-        "(`claude`, `codex`, `gemini`). Links to that backend's ledger."
+        "- **Backend** — the agent runtime that performed the work. The link "
+        "opens that backend's run ledger, where individual cells and token "
+        "details are listed."
     )
     lines.append(
-        "- **Condition** — which agent loop produced the row. "
-        "`tokenfuzz` is the full audit harness (recon → work cards → "
-        "per-agent investigation → crash triage). `<model>-direct` is "
-        "the bare baseline: hand the model the CTF prompt, no scaffolding. "
-        "The contrast is the point of the benchmark."
+        "- **Condition** — `tokenfuzz` is the full harness: recon, ranked work "
+        "cards, multiple agents, sanitizer probing, triage, clustering, and "
+        "reproducer export. `<model>-direct` is the control condition: the "
+        "same model gets the bare vulnerability-finding prompt without the "
+        "harness."
     )
     lines.append(
-        "- **Run** — run identifier (UTC start timestamp); one per "
-        "`bin/benchmark` invocation. The audited target's short commit "
-        "(seven characters) is shown alongside the timestamp when the "
-        "run recorded a VCS revision."
-    )
-    lines.append("")
-
-    lines.append("**Effort spent.**")
-    lines.append("")
-    lines.append(
-        "- **Wall (h)** — median per-replicate wall-clock, in decimal "
-        "hours. `tokenfuzz` runs to the operator's time budget; "
-        "`<model>-direct` is `min(budget, time-to-exit)` — the baseline "
-        "exits early once the model decides it's done."
-    )
-    lines.append(
-        "- **Replicates** — `done/total`. A `(Nq)` suffix means N "
-        "replicates hit the provider quota before finishing — treat as "
-        "upper-bounded effort, not failures."
+        "- **Run** — UTC run id, plus the audited target's short commit when "
+        "the run recorded one. The table is append-style evidence, not a "
+        "latest-only dashboard."
     )
     lines.append("")
 
-    lines.append(
-        "**Findings — issues claimed in prose, no on-disk crash.** "
-        "Each count links to the evidence tree on disk."
-    )
+    lines.append("**Effort.**")
     lines.append("")
     lines.append(
-        "- **Rejected findings** — FIND reports an independent validator "
-        "agent threw out (false positives, misreadings, "
-        "sanitizer-already-catches). Linked to `REJECTED-FINDINGS`."
+        "- **Wall (h)** — median wall-clock hours for completed replicates. "
+        "Harness cells normally consume the configured time budget; direct "
+        "cells may end early when the model stops."
     )
     lines.append(
-        "- **Findings** — FIND reports that survived the validator gate "
-        "but produced no crash artifact. Leads, not yet bugs."
-    )
-    lines.append(
-        "- **Unique findings** — Findings after `bin/cluster-findings` "
-        "merges duplicate signatures. Linked to `FINDING-CLUSTERS`."
+        "- **Replicates** — `done/total`. A `(Nq)` suffix means N replicates "
+        "ended at provider quota, so the row reflects less available model "
+        "time than planned."
     )
     lines.append("")
 
+    lines.append("**Findings.**")
+    lines.append("")
     lines.append(
-        "**Crashes — real AddressSanitizer reports on disk.** Prose-only "
-        "claims never count here; only directories with an actual ASan "
-        "log."
+        "A finding is a security report without an accepted sanitizer crash. "
+        "It can still matter, but it is prose evidence and should be reviewed "
+        "as a lead unless the linked report proves a concrete boundary issue."
     )
     lines.append("")
     lines.append(
-        "- **Rejected crashes** — crash dirs triage discarded "
-        "(not reproducible, harness artefact, known issue). Linked to "
-        "`REJECTED-CRASHES`."
+        "- **Rejected findings** — reports rejected by the independent quality "
+        "gate or validator. The linked index records the reason."
     )
     lines.append(
-        "- **Crashes** — crash dirs that survived triage. Reproducible "
-        "ASan findings with stack frames on disk."
+        "- **Findings** — reports that survived validation but do not have an "
+        "accepted crash artifact."
     )
     lines.append(
-        "- **Unique crashes** — Crashes after `bin/cluster-crashes` "
-        "merges duplicate signatures. Linked to `CRASH-CLUSTERS`."
-    )
-    lines.append("")
-
-    lines.append(
-        "**Severity — `bin/reachability` scores every crash on one "
-        "scale**, so harness vs baseline compares on impact, not just "
-        "count."
-    )
-    lines.append("")
-    lines.append(
-        "- **Medium+ crashes** — Unique crashes scored Medium or higher. "
-        "The number to optimize for; low-severity noise inflates "
-        "**Crashes** without moving this."
-    )
-    lines.append(
-        "- **Top severity** — highest tier observed in the cell "
-        "(`Low`/`Medium`/`High`/`Critical`, or `—` when nothing triaged)."
+        "- **Unique findings** — validated findings after signature clustering "
+        "merges duplicate reports for the same issue."
     )
     lines.append("")
 
+    lines.append("**Crashes.**")
+    lines.append("")
     lines.append(
-        "**Token cost — `k` = thousands, `M` = millions.** Normalized "
-        "across backends so the columns compare apples-to-apples."
+        "Crash counts are deliberately stricter than model claims: a crash "
+        "must have sanitizer output on disk and pass triage before it counts "
+        "as accepted evidence."
     )
     lines.append("")
     lines.append(
-        "- **Input** — tokens processed at the full input rate "
-        "(≥100% of base). Claude: fresh `input` + `cache_creation` "
-        "(cache writes, billed at 125%). Codex/Gemini: SDK `input` "
-        "minus cache hits (their `input` is cumulative). Cache reads "
-        "(~10% rate) are excluded — they live in each backend's per-run "
-        "ledger. A `~` prefix means an estimate from prompt characters "
-        "(Antigravity CLI exposes no usage; running gemini-cli instead "
-        "via `USE_GEMINI_CLI=1` produces measured numbers)."
+        "- **Rejected crashes** — crash candidates triage discarded, for "
+        "example because they were not reproducible, were already known, or "
+        "did not demonstrate a sanitizer-class issue."
     )
     lines.append(
-        "- **Output** — tokens the model emitted (responses + tool-call "
-        "payloads), billed at the full output rate. `—` means the "
-        "backend reported no measured output and there's no "
-        "character-side estimate — shown instead of a misleading `0`."
+        "- **Crashes** — accepted sanitizer crash directories with diagnostic "
+        "output and reproducer material on disk."
+    )
+    lines.append(
+        "- **Unique crashes** — accepted crashes after stack/signature "
+        "clustering. This is the better volume metric when one issue produces "
+        "many similar reports."
+    )
+    lines.append("")
+
+    lines.append("**Severity.**")
+    lines.append("")
+    lines.append(
+        "Severity is crash-only and comes from the shared reachability scorer. "
+        "It lets a security team compare impact, not just raw report count."
+    )
+    lines.append("")
+    lines.append(
+        "- **Medium+ crashes** — unique accepted crashes scored Medium or "
+        "higher. This is the headline security-yield column."
+    )
+    lines.append(
+        "- **Top severity** — highest crash severity observed in the row, or "
+        "`—` when no accepted crash was scored."
+    )
+    lines.append("")
+
+    lines.append("**Tokens and dollars.**")
+    lines.append("")
+    lines.append(
+        "`k` means thousands and `M` means millions. Token columns are "
+        "normalized for comparison; the dollar column prices the original "
+        "billing buckets."
+    )
+    lines.append("")
+    lines.append(
+        "- **Input** — full-rate input tokens only. Claude fresh input and "
+        "cache writes are counted here for comparability; Codex and Gemini "
+        "report cumulative input, so cache reads are subtracted."
+    )
+    lines.append(
+        "- **Output** — generated tokens, including tool-call payloads when "
+        "the backend reports them. `—` means output usage was not measurable."
+    )
+    lines.append(
+        "- **Cost** — public USD-equivalent token cost: fresh input at input "
+        "rate, cache writes at cache-write rate, cache reads at cache-read or "
+        "context-cache rate, and output at output rate. Codex rows use "
+        "OpenAI API-equivalent dollars; Codex product billing may also appear "
+        "as credits in the workspace. This aggregate table rounds to whole "
+        "dollars to stay readable; each backend ledger keeps the decimal "
+        "amounts. Gemini Pro rows are priced per request so the 200k-token "
+        "tier boundary is handled before aggregation."
+    )
+    lines.append(
+        "- **Estimated values** — a `~` prefix means the row used a "
+        "character-count estimate because the CLI did not expose reliable "
+        "usage telemetry. Measured rows have no prefix."
     )
     lines.append("")
     return "\n".join(lines)
@@ -2570,6 +2876,16 @@ def main(argv: list[str]) -> int:
     p_h = sub.add_parser("harvest", help="metric counts for one results dir")
     p_h.add_argument("results_dir", type=Path)
     p_h.add_argument("--out", type=Path, default=None)
+    p_h.add_argument("--backend", default="")
+    p_h.add_argument("--model", default="")
+
+    p_rh = sub.add_parser(
+        "reharvest-cells",
+        help="refresh metrics.json for every cell in a benchmark run",
+    )
+    p_rh.add_argument("bench_dir", type=Path)
+    p_rh.add_argument("--backend", default="")
+    p_rh.add_argument("--model", default="")
 
     p_p = sub.add_parser(
         "pool", help="copy every cell's crash/finding dirs into pool/ for clustering"
@@ -2624,7 +2940,35 @@ def main(argv: list[str]) -> int:
             )
             # Still emit a zeroed metrics object so a missing cell does
             # not abort the whole aggregation.
-        _write_json(args.out, harvest(args.results_dir))
+        _write_json(
+            args.out,
+            harvest(args.results_dir, args.backend, args.model),
+        )
+        return 0
+
+    if args.cmd == "reharvest-cells":
+        if not args.bench_dir.is_dir():
+            print(f"benchmark: bench dir not found: {args.bench_dir}", file=sys.stderr)
+            return 1
+        refreshed = 0
+        cells = args.bench_dir / "cells"
+        for cell_dir in sorted(cells.iterdir() if cells.is_dir() else []):
+            cell_json = cell_dir / "cell.json"
+            if not cell_json.is_file():
+                continue
+            try:
+                cell = json.loads(cell_json.read_text("utf-8"))
+            except (OSError, ValueError):
+                continue
+            results_dir = Path(str(cell.get("results_dir") or ""))
+            if not results_dir.is_dir():
+                continue
+            _write_json(
+                cell_dir / "metrics.json",
+                harvest(results_dir, args.backend, args.model),
+            )
+            refreshed += 1
+        print(f"benchmark: reharvested {refreshed} cell(s)")
         return 0
 
     if args.cmd == "pool":

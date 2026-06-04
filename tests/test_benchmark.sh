@@ -111,8 +111,19 @@ assert_eq "3350" "$(echo "$nhv" | jq -r '.tokens.input_tokens')" \
 # cached = cache READS only: codex 800 + claude 4000 + gemini 55000 = 59800.
 assert_eq "59800" "$(echo "$nhv" | jq -r '.tokens.cached_input_tokens')" \
   "T1o: cached_input_tokens is cache reads only (writes now live in input_tokens)"
+assert_eq "120" "$(echo "$nhv" | jq -r '.tokens.cache_creation_tokens')" \
+  "T1o2: harvest preserves cache-write tokens for pricing"
 assert_eq "830" "$(echo "$nhv" | jq -r '.tokens.output_tokens')" \
   "T1p: output tokens summed across backends"
+
+crd="$work/tok-cost/results"
+mkdir -p "$crd/logs"
+printf '%s\n' \
+  '{"backend":"claude","model":"claude-opus-4-8","tokens":{"input":1000,"cached_input":2000,"cache_creation":400,"output":3000}}' \
+  > "$crd/logs/index.jsonl"
+chv=$(python3 "$PY" harvest "$crd" --backend claude --model claude-opus-4-8)
+assert_eq "0.083500" "$(echo "$chv" | jq -r '.tokens.cost_usd')" \
+  "T1q: harvest prices fresh input + cache writes + cache reads + output"
 
 # ── T2: UBSan / TSan signatures also count as confirmed ──────────────────
 ubd="$work/ub/results/crashes/CRASH-1"
@@ -886,7 +897,8 @@ cat > "$tbd/cells/harness-r1/cell.json" <<'JSON'
 JSON
 cat > "$tbd/cells/harness-r1/metrics.json" <<'JSON'
 {"confirmed_crashes":0,"tokens":{"input_tokens":10,"cached_input_tokens":20,
- "output_tokens":30,"prompt_estimate_tokens":0,"iterations":2}}
+ "cache_creation_tokens":4,"output_tokens":30,"prompt_estimate_tokens":0,
+ "cost_usd":"1.234500","iterations":2}}
 JSON
 cat > "$tbd/cells/model-direct-r1/cell.json" <<'JSON'
 {"condition":"model-direct","replicate":1,"status":"done","wall_seconds":5400,
@@ -903,6 +915,10 @@ assert_eq "10" "$(echo "$th" | jq -r '.input_tokens_total')" \
   "T18a: harness input token total aggregated"
 assert_eq "20" "$(echo "$th" | jq -r '.cached_input_tokens_total')" \
   "T18b: harness cached token total aggregated"
+assert_eq "4" "$(echo "$th" | jq -r '.cache_creation_tokens_total')" \
+  "T18b2: harness cache-write token total aggregated"
+assert_eq "1.234500" "$(echo "$th" | jq -r '.cost_usd_total')" \
+  "T18b3: harness cost total aggregated"
 assert_eq "measured" "$(echo "$th" | jq -r '.token_source')" \
   "T18c: measured source reported for measured row"
 assert_eq "estimated" "$(echo "$tm" | jq -r '.token_source')" \
@@ -917,6 +933,8 @@ assert_file_contains "$tled" 'bench-tok-model-direct-r1' \
   "T18g: ledger lists per-experiment token usage"
 assert_file_contains "$tled" 'estimated.*1,234' \
   "T18h: ledger marks estimated token rows and formats counts"
+assert_file_contains "$tled" '\$1\.2345' \
+  "T18h2: ledger renders token cost"
 
 # T18i-l: wall time is aggregated and rendered (it used to be computed and
 # then silently dropped — never reaching the page).
@@ -990,11 +1008,13 @@ mkbackend() {  # mkbackend <backend> <runid> <crash_total> <unique> [target]
   {"condition":"harness","crash_total":$3,"unique_crash_clusters":$4,
    "finding_total":0,"unique_finding_clusters":0,"wall_median":1800,
    "input_tokens_total":2500000,"output_tokens_total":800000,
+   "cost_usd_total":"123.560000",
    "top_severity_level":"Medium","top_severity_rank":2,
    "medium_plus_bugs":1},
   {"condition":"model-direct","crash_total":1,"unique_crash_clusters":1,
    "finding_total":0,"unique_finding_clusters":0,"wall_median":900,
    "input_tokens_total":40000,"output_tokens_total":9000,
+   "cost_usd_total":"6.400000",
    "top_severity_level":"Low","top_severity_rank":1,
    "medium_plus_bugs":0}],
  "crash_clusters":[],"finding_clusters":[],"token_usage":[]}
@@ -1008,6 +1028,10 @@ mkbackend codex 20260103-000000 5 3 curl
 mkbackend gemini 20260102-000000 2 2
 xt=$(python3 "$PY" crosstab "$xroot")
 assert_match 'Aggregated benchmark results' "$xt" "T19a: crosstab has a title"
+assert_match 'Input \| Output \| Cost' "$xt" "T19a2: crosstab has a cost column"
+assert_match '\$124' "$xt" "T19a3: crosstab rounds cost to whole dollars"
+assert_not_match '\$123\.5600' "$xt" \
+  "T19a4: crosstab omits decimal cost to keep the table narrow"
 assert_match 'tokenfuzz' "$xt" "T19b: crosstab labels the harness condition"
 assert_match 'codex-m-direct' "$xt" "T19c: crosstab labels the baseline by model name"
 assert_match '20260101-000000' "$xt" "T19d: crosstab includes the newer codex run"
