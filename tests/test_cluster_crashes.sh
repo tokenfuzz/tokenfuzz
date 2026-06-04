@@ -479,5 +479,43 @@ fuzz_b=$(grep -m1 -E '^Cluster: CL-' "$fuzzy_root/crashes/CRASH-FUZZ-B/REPORT.md
   && pass "fuzzy per-line match disabled by default: token-shape-similar crashes stay distinct" \
   || fail "fuzzy per-line match disabled by default" "a=$fuzz_a b=$fuzz_b"
 
+# ── Severity from the Fields-table form (no bare `- **Severity**:` line) ──
+# A report can carry its severity ONLY as a `| Severity | Low (24) |` Fields
+# row (e.g. a model-direct crash whose export-repro bundle wasn't rebuilt
+# during --regenerate). cluster-crashes must read that, not score it as
+# unscored ('—'), so the crosstab severity matches the report.
+sevtbl_root="$TEST_TMPDIR/severity-table-form"
+mkdir -p "$sevtbl_root/crashes/CRASH-TBLONLY"
+cat > "$sevtbl_root/crashes/CRASH-TBLONLY/asan.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-use-after-free
+READ of size 4 at 0x60200000abcd
+    #0 0x1 in tbl_only_fn src/t.c:10
+    #1 0x2 in tbl_caller src/t.c:20
+EOF
+# REPORT.md with severity ONLY in the Fields table — no bare `- **Severity**:`.
+cat > "$sevtbl_root/crashes/CRASH-TBLONLY/REPORT.md" <<'EOF'
+# CRASH-TBLONLY
+
+| Field    | Value    |
+| :------- | :------- |
+| Severity | Low (24) |
+| Surface  | maint-tool |
+
+Trigger source: bytes
+
+## Summary
+A model-direct-style freeform report carrying severity only in the table.
+EOF
+python3 "$CLUSTER" "$sevtbl_root" >/dev/null 2>&1 \
+  || fail "severity-table: cluster-crashes runs cleanly" "exit nonzero"
+assert_file_contains "$sevtbl_root/crashes/CRASH-CLUSTERS.md" '\| Low \(24\) ' \
+  "Fields-table severity 'Low (24)' is parsed (not rendered as unscored)"
+# The leftmost (Severity) cell of the CRASH-TBLONLY row must be Low (24),
+# never an unscored '—'. Grab the row and check its first data cell.
+tbl_row=$(grep -E 'CRASH-TBLONLY' "$sevtbl_root/crashes/CRASH-CLUSTERS.md" | head -1)
+echo "$tbl_row" | grep -qE '^\|\s*Low \(24\) ' \
+  && pass "Fields-table-only severity scores the row Low (not unscored —)" \
+  || fail "Fields-table-only severity scores the row Low" "row: $tbl_row"
+
 teardown_test_env
 summary
