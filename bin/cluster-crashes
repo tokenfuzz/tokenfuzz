@@ -671,7 +671,6 @@ def _clusters_from_sigs(sigs: list[dict]) -> list[dict]:
         clusters.append({
             "id": cid,
             "primitive": rep["primitive"],
-            "boundary": "",
             "signature": (
                 canonical.get("top_chain")
                 or _cf_state_display(canonical.get("cf_state", ""))
@@ -829,8 +828,8 @@ def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
     lines.append("")
     # Severity is the leftmost data column so the highest-priority bugs
     # are visually first. Numeric Size right-aligned; everything else left.
-    lines.append("| Severity | Callers | Cluster | Size | Primitive | Strategy | Boundary | Root signature | Canonical | Members | Status |")
-    lines.append("|:---------|--------:|:--------|-----:|:----------|:---------|:---------|:---------------|:----------|:--------|:-------|")
+    lines.append("| Severity | Callers | Cluster | Size | Primitive | Strategy | Root signature | Canonical | Members | Status |")
+    lines.append("|:---------|--------:|:--------|-----:|:----------|:---------|:---------------|:----------|:--------|:-------|")
     for c in clusters:
         # CRASH-CLUSTERS.md lives inside crashes/, so member links are
         # relative to that directory.
@@ -841,7 +840,6 @@ def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
             member_cells.append(f"**{link}**" if m == c.get("canonical") else link)
         members = ", ".join(member_cells)
         canonical_link = _member_link(crashes_root, c.get("canonical", ""), link_prefix)
-        boundary = (c["boundary"] or "—")[:60]
         primitive = c["primitive"] or "—"
         signature = c["signature"] or "—"
         strategy = c.get("strategy", "") or "—"
@@ -852,7 +850,6 @@ def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
             f"| {sev_cell} | {c.get('external_callers', 0)} | `{c['id']}` | {c['size']} | "
             f"{primitive} | "
             f"{strategy} | "
-            f"{boundary} | "
             f"`{signature}` | "
             f"{canonical_link} | "
             f"{members} | "
@@ -941,8 +938,8 @@ def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: b
     if all_sigs and clusters:
         md_lines.append(f"Dedup ratio: {len(all_sigs) / max(len(clusters), 1):.2f}x.")
     md_lines.append("")
-    md_lines.append("| Severity | Callers | Cluster | Size | Primitive | Strategy | Boundary | Root signature | Canonical | Members | Status |")
-    md_lines.append("|:---------|--------:|:--------|-----:|:----------|:---------|:---------|:---------------|:----------|:--------|:-------|")
+    md_lines.append("| Severity | Callers | Cluster | Size | Primitive | Strategy | Root signature | Canonical | Members | Status |")
+    md_lines.append("|:---------|--------:|:--------|-----:|:----------|:---------|:---------------|:----------|:--------|:-------|")
     # Build a lookup from "<agent>/CRASH-XXX" → its report path, relative
     # to target_root. The agent dir layout is <slug>/<agent>/results/crashes/
     # so the relative link is "<agent>/results/crashes/CRASH-XXX/<report>".
@@ -959,7 +956,6 @@ def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: b
             else:
                 link = f"{agent}/{cid}"
             link_cells.append(f"**{link}**" if display == c.get("canonical") else link)
-        boundary = (c["boundary"] or "—")[:60]
         primitive = c["primitive"] or "—"
         signature = c["signature"] or "—"
         strategy = c.get("strategy", "") or "—"
@@ -970,7 +966,6 @@ def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: b
             f"| {sev_cell} | {c.get('external_callers', 0)} | `{c['id']}` | {c['size']} | "
             f"{primitive} | "
             f"{strategy} | "
-            f"{boundary} | "
             f"`{signature}` | "
             f"{c.get('canonical', '')} | "
             f"{', '.join(link_cells)} | "

@@ -1478,6 +1478,33 @@ assert_match '## Discarded hypotheses' "$rejected_md" \
 assert_match 'DISCARDED-harness-d-r1.md' "$rejected_md" \
   "T28h: REJECTED-CRASHES.md links to the per-cell roster"
 
+# A rejected crash directory must link to its rendered report, not the bare
+# directory. The source markdown points at the .md (canonical path); the
+# rendered HTML sibling rewrites it to .html so a click lands on the styled
+# report rather than a directory listing.
+rej_idx="$work/rejected-link"
+mkdir -p "$rej_idx/CRASH-REJECTED-0001"
+cat > "$rej_idx/CRASH-REJECTED-0001/REPORT.md" <<'EOF'
+# Rejected crash one
+Trigger source: bytes
+EOF
+python3 - <<PY
+import sys
+from pathlib import Path
+sys.path.insert(0, "$SCRIPT_ROOT/lib")
+import benchmark
+benchmark.write_rejected_crashes_index(Path("$rej_idx"))
+PY
+rej_idx_md=$(cat "$rej_idx/REJECTED-CRASHES.md")
+assert_match '\[REPORT\.md\]\(CRASH-REJECTED-0001/REPORT\.md\)' "$rej_idx_md" \
+  "T28i: REJECTED-CRASHES.md links a rejected crash to its REPORT.md, not the dir"
+assert_not_match '\[CRASH-REJECTED-0001/\]\(CRASH-REJECTED-0001/\)' "$rej_idx_md" \
+  "T28j: REJECTED-CRASHES.md no longer links to the bare directory"
+python3 "$RENDER_MD" "$rej_idx/REJECTED-CRASHES.md" --html-sibling >/dev/null 2>&1
+rej_idx_html=$(cat "$rej_idx/REJECTED-CRASHES.html")
+assert_match 'href="CRASH-REJECTED-0001/REPORT\.html"' "$rej_idx_html" \
+  "T28k: rendered REJECTED-CRASHES.html href points to the report's HTML sibling"
+
 # ═══════════════════════════════════════════════════════════════
 # P6: cell.json records actual_agents vs requested_agents
 # ═══════════════════════════════════════════════════════════════

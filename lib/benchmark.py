@@ -942,12 +942,24 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
     md.append("## Rejected crash directories")
     md.append("")
     if subdirs:
-        md.append("| ID | Path |")
+        md.append("| ID | Report |")
         md.append("| --- | --- |")
         for p in subdirs:
-            md.append(
-                f"| `{p.name}` | [{p.name}/]({urllib.parse.quote(p.name)}/) |"
-            )
+            # Link to the crash's report, not the directory. The source
+            # markdown points at the .md so harness parsers and GitHub see
+            # the canonical path; bin/render-md rewrites it to the .html
+            # sibling in the rendered page, so a click lands on the styled
+            # report instead of a bare directory listing. Falls back to the
+            # directory only when no report file was pooled.
+            report = _report_link_name(p)
+            if report:
+                target = (
+                    f"{urllib.parse.quote(p.name)}/{urllib.parse.quote(report)}"
+                )
+                link = f"[{report}]({target})"
+            else:
+                link = f"[{p.name}/]({urllib.parse.quote(p.name)}/)"
+            md.append(f"| `{p.name}` | {link} |")
     else:
         md.append("_No rejected crash directories pooled._")
     md.append("")
