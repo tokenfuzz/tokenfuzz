@@ -231,6 +231,57 @@ low_line=$(grep -nE '\| Low \(15\) ' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | 
   || fail "CRASH-CLUSTERS.md sorted High → Medium → Low" \
         "high=$high_line med=$med_line low=$low_line"
 
+# ── Canonical column + severity-descending members ──────────────
+# The A1+A2 cluster's canonical is the highest-severity member (A1, High 61).
+# The Canonical column names it, the Members list bolds it and orders by
+# severity descending (A1 before A2), mirroring bin/cluster-findings.
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| Canonical ' \
+  "Canonical column present in CRASH-CLUSTERS.md"
+a_row=$(grep -E '\| High \(61\) ' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | head -1)
+# Canonical column cell links to A1, and the Members cell bolds A1 then lists A2.
+echo "$a_row" | grep -qE '\| \[CRASH-A1-1\]\(CRASH-A1-1/REPORT\.md\) \| \*\*\[CRASH-A1-1\]\(CRASH-A1-1/REPORT\.md\)\*\*, \[CRASH-A2-1\]' \
+  && pass "Canonical=A1; Members bold A1 first, then A2 (severity descending)" \
+  || fail "Canonical=A1; Members bold A1 first, then A2 (severity descending)" \
+        "row: $a_row"
+
+# ── Canonical is highest-severity, NOT lowest-id ────────────────
+# Two crashes that cluster (shared 2-of-3 frames) where the lexicographically
+# FIRST id is Low and the later id is High. Canonical must be the High one —
+# proving severity, not id order, picks the canonical.
+sev_root="$TEST_TMPDIR/canonical-by-severity"
+mk_sev_crash() {
+  local id="$1" top="$2" level="$3" score="$4"
+  local d="$sev_root/crashes/$id"
+  mkdir -p "$d"
+  cat > "$d/asan.txt" <<EOF
+==1==ERROR: AddressSanitizer: heap-buffer-overflow
+READ of size 4 at 0x60200000abcd
+    #0 0x1 in ${top} src/x.c:10
+    #1 0x2 in shared_mid src/shared.c:99
+    #2 0x3 in shared_tail src/shared.c:123
+EOF
+  cat > "$d/REPORT.md" <<EOF
+# ${id}
+Trigger source: bytes
+
+## Classification
+- **Severity**: ${level} (auto: score=${score})
+EOF
+}
+# CRASH-AAA sorts before CRASH-ZZZ but is the LOWER severity.
+mk_sev_crash CRASH-AAA-1 unique_low  Low  12
+mk_sev_crash CRASH-ZZZ-1 unique_high High 70
+python3 "$CLUSTER" "$sev_root" >/dev/null 2>&1 \
+  || fail "canonical-by-severity: cluster-crashes runs cleanly" "exit nonzero"
+aaa_cluster=$(grep -m1 -E '^Cluster: CL-' "$sev_root/crashes/CRASH-AAA-1/REPORT.md" | sed -E 's/^Cluster: (CL-[0-9a-f]+).*/\1/')
+zzz_cluster=$(grep -m1 -E '^Cluster: CL-' "$sev_root/crashes/CRASH-ZZZ-1/REPORT.md" | sed -E 's/^Cluster: (CL-[0-9a-f]+).*/\1/')
+assert_eq "$aaa_cluster" "$zzz_cluster" "canonical-by-severity: AAA and ZZZ share a cluster"
+sev_row=$(grep -E '\| High \(70\) ' "$sev_root/crashes/CRASH-CLUSTERS.md" | head -1)
+echo "$sev_row" | grep -qE '\| \[CRASH-ZZZ-1\]\(CRASH-ZZZ-1/REPORT\.md\) \| \*\*\[CRASH-ZZZ-1\]' \
+  && pass "canonical-by-severity: High ZZZ is canonical despite higher id, listed first" \
+  || fail "canonical-by-severity: High ZZZ is canonical despite higher id" \
+        "row: $sev_row"
+
 # ── Idempotency: re-running produces byte-identical CRASH-CLUSTERS.md and reports ──
 cp "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" "$TEST_TMPDIR/CRASH-CLUSTERS.md.before"
 cp "$RESULTS_DIR/crashes/CRASH-A1-1/REPORT.md" "$TEST_TMPDIR/A1.before"

@@ -390,3 +390,16 @@ bin/benchmark --target "$TARGET" --backend "$BACKEND"
 It compares the shipped harness against a direct-prompt baseline under
 isolated `--experiment` output directories. Use it for harness
 evaluation, not routine target auditing.
+
+After changing a severity or clustering algorithm, re-derive an existing
+run's results — severity, crash/finding dedup, and the rollup tables —
+without re-auditing or any API calls:
+
+```bash
+bin/benchmark --target "$TARGET" --backend "$BACKEND" --regenerate
+```
+
+`--regenerate` reuses `--run-id` / `BENCHMARK_RUNID` (or the most recent run
+when neither is set) and refreshes `benchmark-result.{md,html}` and the
+cluster reports. It does not rebuild each crash's `export-repro` report
+bundle. See [the benchmark guide](../guides/benchmark.md#regenerating-results-after-a-code-change).

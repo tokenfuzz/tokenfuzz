@@ -392,6 +392,47 @@ assert_file_not_exists "$dbench/.pool.staging" \
 assert_file_not_exists "$dbench/.pool.old" \
   "T9m: backup dir is cleaned up after the swap"
 
+# ── T9r: --regenerate re-derives an existing run without launching cells ──
+# After the T9 run, re-derive its results from the artifacts on disk. No
+# cells must be launched, the export-repro REPORT bundle rebuild must be
+# skipped, run.json must keep its original metadata, and benchmark-result.*
+# must be refreshed. This is the "code changed, refresh the rollups" path.
+regen_runid="$(basename "$dbench")"
+cells_before=$(find "$dbench/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+runjson_before=$(jq -rS . "$dbench/run.json")
+regen_out=$(bash "$BENCH" --target dummytarget --regenerate \
+  --bench-root "$droot" --run-id "$regen_runid" 2>&1)
+regen_rc=$?
+assert_eq "0" "$regen_rc" "T9r-a: --regenerate exits 0"
+assert_match 'no cells launched' "$regen_out" \
+  "T9r-b: --regenerate does not launch cells"
+assert_match 'skipping export-repro REPORT bundle rebuild' "$regen_out" \
+  "T9r-c: --regenerate skips the per-crash export-repro bundle rebuild"
+assert_not_match 'cell .* — starting' "$regen_out" \
+  "T9r-d: --regenerate prints no cell-start lines"
+cells_after=$(find "$dbench/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+assert_eq "$cells_before" "$cells_after" \
+  "T9r-e: --regenerate adds no new cell directories"
+runjson_after=$(jq -rS . "$dbench/run.json")
+assert_eq "$runjson_before" "$runjson_after" \
+  "T9r-f: --regenerate leaves run.json metadata untouched"
+assert_file_exists "$droot/benchmark-result.md" \
+  "T9r-g: --regenerate rebuilds the cross-backend benchmark-result.md"
+assert_match 'benchmark-result update \(.*\): .*benchmark-result\.html' "$regen_out" \
+  "T9r-h: --regenerate re-renders benchmark-result.html"
+
+# --regenerate with no existing run under the backend is a clear error.
+# Wrap in set +e: the command is expected to fail, and a bare failing
+# command under `set -euo pipefail` aborts the whole suite before $? is read.
+regen_empty="$work/regen-empty"
+set +e
+bash "$BENCH" --target dummytarget --regenerate --bench-root "$regen_empty" \
+  >/dev/null 2>&1
+regen_norun_rc=$?
+set -e
+assert_neq "0" "$regen_norun_rc" \
+  "T9r-i: --regenerate with no run on disk is rejected"
+
 # Incomplete resume cells are fully cleared before rerun. A prior benchmark can
 # leave cells/<name>/repo-root/output half-populated while an old child is
 # still winding down. Deleting that tree in place can fail with "Directory not

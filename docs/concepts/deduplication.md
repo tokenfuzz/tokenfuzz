@@ -81,6 +81,18 @@ Crash B: state [decode_body, read_record, run]
   overlap.
 ```
 
+### Output
+
+`bin/cluster-crashes` writes `CRASH-CLUSTERS.md` (one row per cluster, sorted
+by max-member severity then size) and stamps a `Cluster:` line into each
+member `REPORT.md`. Each row names a **Canonical** member — the
+highest-severity crash in the cluster, ties broken by lowest id — and the
+**Members** column lists every crash sharing the root cause, ordered by
+severity descending with the canonical in **bold**. This mirrors
+`bin/cluster-findings`, so both pages pick and present the canonical the same
+way. The `CL-<hash>` cluster id stays anchored on the bucket's crash state, so
+it is stable regardless of which member is most severe.
+
 ---
 
 ## Findings deduplication

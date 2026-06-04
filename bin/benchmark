@@ -31,6 +31,9 @@
 #   bin/benchmark --reset            # archive the ledger, start fresh
 #   bin/benchmark --reset --hard     # delete the ledger
 #   bin/benchmark --target pcre2 --dry-run   # exercise the pipeline, no LLM
+#   bin/benchmark --target pcre2 --regenerate            # re-derive an
+#                                    # existing run's results (latest run id)
+#   bin/benchmark --target pcre2 --regenerate --run-id <id>   # a specific run
 #
 # Options (default in brackets):
 #   --target <slug>          Target under targets/ to benchmark. REQUIRED.
@@ -61,6 +64,20 @@
 #                            so the ledger shows raw filing volume rather
 #                            than confirmed volume. BENCHMARK_VALIDATE_FINDINGS=0
 #                            has the same effect. Default: validate on.
+#   --regenerate             Re-derive an EXISTING run's results from the
+#                            artifacts already on disk — no cells are launched
+#                            and no LLM is called. Re-runs the deterministic
+#                            post-processing: severity scoring, crash + finding
+#                            clustering (dedup), the per-condition cluster
+#                            reports, then rebuilds report.json, the ledger row,
+#                            and benchmark-result.{md,html}. Targets the run
+#                            named by --run-id / BENCHMARK_RUNID, or the most
+#                            recent run under the backend when neither is set.
+#                            Deliberately does NOT rebuild each crash's
+#                            export-repro REPORT bundle (that needs live session
+#                            state and can clobber hand-edited reports); use it
+#                            after changing a clustering/severity algorithm to
+#                            refresh the rollups without re-auditing.
 #   --reset [--hard]         Archive (or, with --hard, delete) the ledger; exit.
 #
 # So `bin/benchmark --target pcre2` runs the default backend, 3 replicates
@@ -111,7 +128,7 @@ PYEOF
 }
 
 usage() {
-  sed -n '3,61p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,81p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -170,6 +187,7 @@ BENCH_ROOT="$SCRIPT_ROOT/output/benchmark"
 DO_RESET=0
 RESET_HARD=0
 DRY_RUN=0
+DO_REGENERATE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -193,6 +211,7 @@ while [ $# -gt 0 ]; do
     --run-id=*) RUN_ID="${1#--run-id=}"; shift ;;
     --reset) DO_RESET=1; shift ;;
     --hard) RESET_HARD=1; shift ;;
+    --regenerate) DO_REGENERATE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --no-validate-findings) VALIDATE_FINDINGS=0; shift ;;
     --validate-findings)    VALIDATE_FINDINGS=1; shift ;;
@@ -278,7 +297,11 @@ fi
 
 # ── validate inputs ──────────────────────────────────────────────────────
 [ -n "$TARGET_SLUG" ] || { echo "FATAL: --target is required" >&2; usage 1; }
-if [ "$DRY_RUN" != "1" ] && [ ! -d "$SCRIPT_ROOT/targets/$TARGET_SLUG" ]; then
+# --regenerate re-derives results from artifacts already on disk, so it does
+# not need the live target tree to exist (severity re-scoring against it is
+# best-effort and warns if absent). Only a real audit run requires the target.
+if [ "$DRY_RUN" != "1" ] && [ "$DO_REGENERATE" != "1" ] \
+    && [ ! -d "$SCRIPT_ROOT/targets/$TARGET_SLUG" ]; then
   echo "FATAL: targets/$TARGET_SLUG does not exist" >&2
   exit 1
 fi
@@ -318,11 +341,39 @@ done
 # it (the cell loop skips cells already marked done and re-runs the rest),
 # so finishing a quota-interrupted run is just the same command again with
 # its run-id. The per-(target,backend) lock already blocks concurrent runs.
-RUNID="${RUN_ID:-${BENCHMARK_RUNID:-$(date +%Y%m%d-%H%M%S)}}"
-BENCH_DIR="$BENCH_BACKEND_ROOT/$RUNID"
-mkdir -p "$BENCH_DIR" || { echo "FATAL: cannot create $BENCH_DIR" >&2; exit 1; }
-CELLS_DIR="$BENCH_DIR/cells"
-mkdir -p "$CELLS_DIR" || { echo "FATAL: cannot create $CELLS_DIR" >&2; exit 1; }
+if [ "$DO_REGENERATE" = "1" ]; then
+  # --regenerate operates on an EXISTING run: never create a fresh dir. Use
+  # the explicit --run-id / BENCHMARK_RUNID, else fall back to the most
+  # recent run under this backend (run dirs are timestamp-named, so a plain
+  # lexicographic sort yields newest-last). The run must already hold cells/.
+  RUNID="${RUN_ID:-${BENCHMARK_RUNID:-}}"
+  if [ -z "$RUNID" ]; then
+    RUNID="$(find "$BENCH_BACKEND_ROOT" -mindepth 2 -maxdepth 2 -type d -name cells 2>/dev/null \
+              | sed 's#/cells$##' | while IFS= read -r d; do basename "$d"; done \
+              | LC_ALL=C sort | tail -1)"
+  fi
+  [ -n "$RUNID" ] || {
+    echo "FATAL: --regenerate: no run found under $BENCH_BACKEND_ROOT (target=$TARGET_SLUG backend=$BACKEND); pass --run-id" >&2
+    exit 1
+  }
+  BENCH_DIR="$BENCH_BACKEND_ROOT/$RUNID"
+  CELLS_DIR="$BENCH_DIR/cells"
+  [ -d "$CELLS_DIR" ] || {
+    echo "FATAL: --regenerate: no cells/ to re-derive at $BENCH_DIR (run-id=$RUNID)" >&2
+    exit 1
+  }
+  # Re-derive results from artifacts on disk, but never rebuild each crash's
+  # export-repro REPORT bundle — that needs live session state the regenerate
+  # pass does not have, and would clobber hand-edited reports. See the guard
+  # in rebuild_pool_artifacts.
+  export BENCH_REGEN_SKIP_REPORTS=1
+else
+  RUNID="${RUN_ID:-${BENCHMARK_RUNID:-$(date +%Y%m%d-%H%M%S)}}"
+  BENCH_DIR="$BENCH_BACKEND_ROOT/$RUNID"
+  mkdir -p "$BENCH_DIR" || { echo "FATAL: cannot create $BENCH_DIR" >&2; exit 1; }
+  CELLS_DIR="$BENCH_DIR/cells"
+  mkdir -p "$CELLS_DIR" || { echo "FATAL: cannot create $CELLS_DIR" >&2; exit 1; }
+fi
 
 CONSOLE_LOG_STARTED=0
 CONSOLE_TEE_PID=""
@@ -412,6 +463,12 @@ harness_sha="$(git -C "$SCRIPT_ROOT" rev-parse --short HEAD 2>/dev/null || echo 
 # cross-backend table, so a reader sees which model produced each row.
 model="$(llm_default_model "$BACKEND" 2>/dev/null || true)"
 
+# In --regenerate mode, run.json already exists and carries the original
+# run's metadata (replicates, budget, conditions, target/harness SHAs at
+# audit time). Overwriting it from the regenerate invocation's flags would
+# corrupt that history, so leave it untouched and re-derive only the result
+# artifacts below.
+if [ "$DO_REGENERATE" != "1" ]; then
 python3 - "$BENCH_DIR/run.json" <<PYEOF
 import json, sys
 json.dump({
@@ -429,15 +486,20 @@ json.dump({
     "dry_run": bool($DRY_RUN),
 }, open(sys.argv[1], "w"), indent=2)
 PYEOF
-
-if [ "$BUDGET_WALL" = "0" ]; then
-  log "run $RUNID — target=$TARGET_SLUG backend=$BACKEND replicates=$REPLICATES budget=unlimited"
-else
-  log "run $RUNID — target=$TARGET_SLUG backend=$BACKEND replicates=$REPLICATES budget=${BUDGET_WALL}s"
 fi
-log "conditions: $CONDITIONS"
-log "agents: harness=${AGENTS:-bin/audit-default}, model-direct=1"
-[ "$DRY_RUN" = "1" ] && log "DRY RUN — synthetic cells, no LLM calls"
+
+if [ "$DO_REGENERATE" = "1" ]; then
+  log "regenerate $RUNID — re-deriving results for target=$TARGET_SLUG backend=$BACKEND (no cells launched, no LLM)"
+else
+  if [ "$BUDGET_WALL" = "0" ]; then
+    log "run $RUNID — target=$TARGET_SLUG backend=$BACKEND replicates=$REPLICATES budget=unlimited"
+  else
+    log "run $RUNID — target=$TARGET_SLUG backend=$BACKEND replicates=$REPLICATES budget=${BUDGET_WALL}s"
+  fi
+  log "conditions: $CONDITIONS"
+  log "agents: harness=${AGENTS:-bin/audit-default}, model-direct=1"
+  [ "$DRY_RUN" = "1" ] && log "DRY RUN — synthetic cells, no LLM calls"
+fi
 log "bench dir: $BENCH_DIR"
 
 # ── model-direct CTF prompt ──────────────────────────────────────────────
@@ -1066,34 +1128,45 @@ rebuild_pool_artifacts() {
     ## (`-f REPORT.md`) is wrong on case-insensitive macOS, where the
     ## model's lowercase report.md matches REPORT.md and every model-direct
     ## crash was silently skipped.
-    local cdir bundled=0
-    local _md_target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
-    for cdir in "$POOL"/crashes/CRASH-*; do
-      [ -d "$cdir" ] || continue
-      ## Already a canonical export-repro bundle? (harness cells, or a
-      ## prior pool pass). Guard on export-repro's exact signature
-      ## heading rather than a filename (report.md / REPORT.md collapse on
-      ## case-insensitive FS) or `## Fields` (a model may emit a Fields
-      ## table in its freeform report without the inlined sanitizer stack
-      ## + reproduce.sh that only export-repro adds — that crash still
-      ## needs bundling).
-      if grep -q '^## Expected sanitizer output' "$cdir"/[Rr][Ee][Pp][Oo][Rr][Tt].md 2>/dev/null; then
-        continue
-      fi
-      RESULTS_DIR="$POOL" TARGET_ROOT="$_md_target_root" TARGET_SLUG="$TARGET_SLUG" \
-        "$SCRIPT_ROOT/bin/export-repro" "$(basename "$cdir")" \
-          --crash-dir "$cdir" --slug "$TARGET_SLUG" \
-        >/dev/null 2>&1 && bundled=$((bundled + 1))
-    done
-    if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
-      local rep
-      for rep in "$POOL"/crashes/CRASH-*/REPORT.md; do
-        [ -f "$rep" ] || continue
-        python3 "$SCRIPT_ROOT/bin/render-md" "$rep" --html-sibling \
-          >/dev/null 2>&1 || true
+    ##
+    ## --regenerate (BENCH_REGEN_SKIP_REPORTS=1) skips this whole block: it
+    ## re-derives severity + clustering + rollups from artifacts on disk, but
+    ## rebuilding each crash's REPORT bundle needs the live audit session that
+    ## a re-derivation does not have, and would overwrite hand-edited reports.
+    ## Severity scoring above (bin/reachability) still runs — it only appends a
+    ## Severity line and is exactly what the operator wants refreshed.
+    if [ "${BENCH_REGEN_SKIP_REPORTS:-0}" != "1" ]; then
+      local cdir bundled=0
+      local _md_target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
+      for cdir in "$POOL"/crashes/CRASH-*; do
+        [ -d "$cdir" ] || continue
+        ## Already a canonical export-repro bundle? (harness cells, or a
+        ## prior pool pass). Guard on export-repro's exact signature
+        ## heading rather than a filename (report.md / REPORT.md collapse on
+        ## case-insensitive FS) or `## Fields` (a model may emit a Fields
+        ## table in its freeform report without the inlined sanitizer stack
+        ## + reproduce.sh that only export-repro adds — that crash still
+        ## needs bundling).
+        if grep -q '^## Expected sanitizer output' "$cdir"/[Rr][Ee][Pp][Oo][Rr][Tt].md 2>/dev/null; then
+          continue
+        fi
+        RESULTS_DIR="$POOL" TARGET_ROOT="$_md_target_root" TARGET_SLUG="$TARGET_SLUG" \
+          "$SCRIPT_ROOT/bin/export-repro" "$(basename "$cdir")" \
+            --crash-dir "$cdir" --slug "$TARGET_SLUG" \
+          >/dev/null 2>&1 && bundled=$((bundled + 1))
       done
+      if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
+        local rep
+        for rep in "$POOL"/crashes/CRASH-*/REPORT.md; do
+          [ -f "$rep" ] || continue
+          python3 "$SCRIPT_ROOT/bin/render-md" "$rep" --html-sibling \
+            >/dev/null 2>&1 || true
+        done
+      fi
+      [ "$bundled" -gt 0 ] && log "reproducer bundles created: $bundled ($reason)"
+    else
+      log "regenerate: skipping export-repro REPORT bundle rebuild ($reason)"
     fi
-    [ "$bundled" -gt 0 ] && log "reproducer bundles created: $bundled ($reason)"
   fi
 
   if [ -d "$POOL/crashes" ]; then
@@ -1298,6 +1371,11 @@ cells_failed=0
 # account quota is gone — without it, replicates 2..N would each burn
 # their own ~5 min to re-detect the same dead account.
 gemini_quota_dead=0
+# --regenerate re-derives results from the cells already on disk, so it skips
+# the launch loop entirely and drops straight into the aggregate/ledger pass
+# below. cells_done/cells_failed stay 0; the run's exit status reflects only
+# whether the re-derivation rendered cleanly.
+if [ "$DO_REGENERATE" != "1" ]; then
 for cond in "${COND_ARR[@]}"; do
   rep=1
   while [ "$rep" -le "$REPLICATES" ]; do
@@ -1436,8 +1514,13 @@ for cond in "${COND_ARR[@]}"; do
     rep=$((rep + 1))
   done
 done
+fi  # end: cell loop skipped under --regenerate
 
-log "cells complete: $cells_done done, $cells_failed failed"
+if [ "$DO_REGENERATE" = "1" ]; then
+  log "regenerate: re-deriving results from $(find "$CELLS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') cell(s) on disk"
+else
+  log "cells complete: $cells_done done, $cells_failed failed"
+fi
 
 # ── aggregate + ledger ───────────────────────────────────────────────────
 # Rebuild pool artifacts one more time (idempotent) so the ledger section

@@ -192,6 +192,36 @@ artifacts are never folded into the result. `--replicates` is the target
 total, so you can raise it on resume to add more replicates; pass the same
 `--conditions` you started with.
 
+## Regenerating results after a code change
+
+When you change a *post-processing* algorithm — how severity is scored, how
+crashes or findings are clustered, how the rollup tables render — the cells
+already on disk are still valid; only the derived results are stale. Re-run
+just the deterministic post-processing with `--regenerate`:
+
+```bash
+# Re-derive the most recent run for this target + backend.
+bin/benchmark --target pcre2 --backend codex --regenerate
+
+# Or target a specific run by id.
+bin/benchmark --target pcre2 --backend codex --regenerate \
+  --run-id 20260530-142558
+```
+
+`--regenerate` launches no agents and makes no API calls. It re-pools the
+run's crash and finding directories, then re-runs `bin/reachability`
+(severity), `bin/cluster-crashes`, and `bin/cluster-findings` over the pool,
+and rebuilds `report.json`, the ledger row, and
+`benchmark-result.{md,html}` — the unique-bug counts, severity, and dedup
+columns all refresh.
+
+It deliberately **does not** rebuild each crash's `export-repro` `REPORT.md`
+bundle. That rebuild needs the live audit session a re-derivation no longer
+has, and would overwrite any hand-edits to a report — so regeneration leaves
+the individual reports alone and only refreshes the cluster tables and
+rollups. The original `run.json` metadata (replicates, budget, the target and
+harness SHAs at audit time) is preserved untouched.
+
 ## Things to know
 
 - **Pick a target the harness can crack.** If both conditions score
