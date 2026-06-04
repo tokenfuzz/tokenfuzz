@@ -133,5 +133,26 @@ data_lines=$(printf '%s\n' "$output" | grep -cF -- '--count' || true)
 assert_eq "200" "$data_lines" "passthrough boundary: literal '--count' pattern after -- still capped"
 assert_match "total stdout lines" "$output" "passthrough boundary: cap footer fires"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-tool bypass — AGENT_WRAPPERS_BYPASS runs the named tool uncapped while
+# leaving the others capped, so an operator can A/B the cap's effect on
+# bug-finding. large.txt has 500 matching lines; capped output keeps 200.
+# ─────────────────────────────────────────────────────────────────────────────
+GREP_WRAPPER="$SCRIPT_ROOT/lib/wrappers/grep"
+
+# matches <bypass-value> <wrapper> -> count of "match" lines surfaced.
+matches() { AGENT_WRAPPERS_BYPASS="$1" "$2" match "$TEST_TMPDIR/large.txt" 2>/dev/null | grep -c match; }
+
+assert_eq "500" "$(matches rg      "$RG_WRAPPER")"   "bypass=rg: rg runs uncapped (all 500 lines)"
+assert_eq "200" "$(matches rg      "$GREP_WRAPPER")" "bypass=rg: grep stays capped (bypass is per-tool)"
+assert_eq "500" "$(matches grep,rg "$GREP_WRAPPER")" "bypass list: comma-separated entry uncaps grep"
+assert_eq "500" "$(matches all     "$RG_WRAPPER")"   "bypass=all: rg uncapped"
+assert_eq "200" "$(matches ''      "$RG_WRAPPER")"   "bypass unset: default 200-line cap unchanged"
+
+# Uncapped output also drops the truncation footer.
+assert_not_match "total stdout lines" \
+  "$(AGENT_WRAPPERS_BYPASS=rg "$RG_WRAPPER" match "$TEST_TMPDIR/large.txt" 2>/dev/null)" \
+  "bypass=rg: no truncation footer when uncapped"
+
 teardown_test_env
 summary

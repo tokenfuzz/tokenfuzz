@@ -7,6 +7,9 @@
 # Two caps fire independently:
 #   line cap   — CAP_LINES (default 200)     protects against many small matches
 #   byte cap   — CAP_BYTES (default 131072)  protects against few huge matches
+# Per-tool bypass: AGENT_WRAPPERS_BYPASS (space/comma list, or "all") runs the
+#   named tools uncapped — e.g. AGENT_WRAPPERS_BYPASS=rg leaves grep/sed capped.
+#   Intended for A/B experiments on the cap's effect on bug-finding.
 # A single match line in a JSON-shaped haystack (codex .log.raw transcripts)
 # can be hundreds of KB, defeating the line cap alone. The byte cap is a
 # hard ceiling regardless of line count. Default of 128 KiB is empirical:
@@ -40,6 +43,16 @@ for _d in "${_dirs[@]}"; do
   if [ -x "$_d/$_tool" ]; then _real="$_d/$_tool"; break; fi
 done
 [ -n "$_real" ] || { echo "${_tool}: real binary not found" >&2; exit 127; }
+
+# AGENT_WRAPPERS_BYPASS runs named tools UNCAPPED — a space/comma list, or
+# "all". It exists to A/B the cap's effect on bug-finding per tool (e.g.
+# AGENT_WRAPPERS_BYPASS=rg leaves grep/sed capped). Glob exclusions the
+# rg/grep wrapper already put in "$@" (logs/, .git/) are kept, so a bypassed
+# rg still skips self-output noise.
+_bypass=" ${AGENT_WRAPPERS_BYPASS:-} "   # pad so the glob matches whole words
+case "${_bypass//,/ }" in                # commas optional
+  *" all "*|*" ${_tool} "*) exec "$_real" "$@" ;;
+esac
 
 # Pass-through for flags that produce bounded output already.
 # Tools with no such flags (e.g. sed) pass an empty list — skip the scan.
