@@ -372,14 +372,14 @@ print("\nsite-keyed identity")
 
 text_a = """# UAF in match path
 ## Location
-`src/pcre2_match.c:match_internal:1234`
+`src/resolve_entry.c:resolve_helper:1234`
 
 ## Classification
 - **Class**: memory-safety:lifetime
 """
 text_a2 = """# Same UAF, re-discovered
 ## Location
-`src/pcre2_match.c:match_internal:1234`
+`src/resolve_entry.c:resolve_helper:1234`
 
 ## Classification
 - **Class**: integer-overflow
@@ -397,7 +397,7 @@ assert_eq(fs.cluster_id(sig_a["key"]), fs.cluster_id(sig_a2["key"]),
 # (no cross-site LLM key invents a merge).
 text_b = """# UAF reached from DFA matcher
 ## Location
-`src/pcre2_dfa_match.c:dfa_match_internal:5678`
+`src/scan_records.c:scan_helper:5678`
 
 ## Classification
 - **Class**: memory-safety:lifetime

@@ -23,7 +23,7 @@ recon_dir="$work/results/recon/RECON-deadbeefcafe0001"
 mkdir -p "$recon_dir"
 
 cat > "$recon_dir/finding.json" <<'JSON'
-{"id":"RECON-deadbeefcafe0001","slice":"slice-1-parsers","title":"URL decoder allocates length+1 without guarding SIZE_MAX","file":"/home/x/work/targets/curl/lib/escape.c","line":116,"function":"Curl_urldecode","class":"integer-overflow","notes":"alloc is used as malloc(alloc + 1) without a wrap check.","confidence":"NEEDS-VERIFICATION","validator_verdict":"Reject","validator_details":"verdict=Reject"}
+{"id":"RECON-deadbeefcafe0001","slice":"slice-1-parsers","title":"URL decoder allocates length+1 without guarding SIZE_MAX","file":"/home/x/work/targets/curl/lib/decode.c","line":116,"function":"decode_input","class":"integer-overflow","notes":"alloc is used as malloc(alloc + 1) without a wrap check.","confidence":"NEEDS-VERIFICATION","validator_verdict":"Reject","validator_details":"verdict=Reject"}
 JSON
 
 cat > "$recon_dir/validator-vote-1.json" <<'JSON'
@@ -31,7 +31,7 @@ cat > "$recon_dir/validator-vote-1.json" <<'JSON'
 JSON
 
 cat > "$recon_dir/validator-vote-2.json" <<'JSON'
-{"vote":"Reject","rationale":"Curl_urldecode is internal; confirmed not exported.","verified":{"reachability":false}}
+{"vote":"Reject","rationale":"decode_input is internal; confirmed not exported.","verified":{"reachability":false}}
 JSON
 
 # ── T1: single-dir mode renders REPORT.md ────────────────────────────────
@@ -48,7 +48,7 @@ assert_file_contains "$recon_dir/REPORT.md" \
 assert_file_not_contains "$recon_dir/REPORT.md" \
   '/home/x/work/targets' "T2d: absolute path prefix stripped"
 assert_file_contains "$recon_dir/REPORT.md" \
-  'lib/escape.c:116' "T2e: relative file:line rendered"
+  'lib/decode.c:116' "T2e: relative file:line rendered"
 assert_file_contains "$recon_dir/REPORT.md" \
   'Vote 1 — Reject' "T2f: validator vote 1 rendered"
 assert_file_contains "$recon_dir/REPORT.md" \

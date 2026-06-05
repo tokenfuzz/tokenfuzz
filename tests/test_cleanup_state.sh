@@ -343,9 +343,9 @@ assert_match 'already clean' "$second_run" "rerun: reports already clean"
 # rm -rf -- <path> handles them correctly.
 sec13="$TEST_TMPDIR/out13"
 mk_mock_results "$sec13" libxml2 codex
-weird="$sec13/libxml2/codex/results/.subsystem_dry_xmlstring.c:xmlStrsub:382"
+weird="$sec13/libxml2/codex/results/.subsystem_dry_app_string.c:str_helper:382"
 echo "0" > "$weird"
-guard_weird="$sec13/libxml2/codex/results/.guard_chain_catalog.c:xmlCatalogConvertEntry:782"
+guard_weird="$sec13/libxml2/codex/results/.guard_chain_catalog.c:convert_entry:782"
 echo "g" > "$guard_weird"
 "$CLEANUP" --output-root "$sec13" --quiet
 assert_file_not_exists "$weird"       "weird-named dotfile #1 removed"

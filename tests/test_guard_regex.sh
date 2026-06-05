@@ -208,7 +208,7 @@ assert_eq "" "$out" "summary line '0 errors, 0 warnings' yields no guard"
 f="$TEST_TMPDIR/clean_asan_frames.txt"
 cat > "$f" <<'EOF'
 === Run 1/1 ===
-    #0 0x55edc8 in xmlParseDoc /src/parser.c:9999
+    #0 0x55edc8 in app_parse_doc /src/parser.c:9999
     #1 0x55ee1c in main /src/main.c:42
 EOF
 out=$(extract_guard "$f")

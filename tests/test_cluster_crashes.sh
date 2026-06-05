@@ -50,11 +50,11 @@ make_crash() {
   make_crash_with_chain "$1" "$2" "$3" "$4" "caller" "tail"
 }
 
-make_crash_with_chain CRASH-A1-1 heap-buffer-overflow match_internal \
+make_crash_with_chain CRASH-A1-1 heap-buffer-overflow resolve_helper \
   "Decoded \`code_start\` is not bounded inside \`blocksize\`. The match path reads past the end of the decoded allocation." \
   "shared_dispatch" "shared_tail"
-make_crash_with_chain CRASH-A2-1 heap-buffer-overflow dfa_match_internal \
-  "\`pcre2_serialize_decode\` allows \`code_start\` to point outside the decoded allocation; \`pcre2_dfa_match\` then dereferences it." \
+make_crash_with_chain CRASH-A2-1 heap-buffer-overflow scan_helper \
+  "\`decode_blob\` allows \`code_start\` to point outside the decoded allocation; \`scan_records\` then dereferences it." \
   "shared_dispatch" "shared_tail"
 make_crash_with_chain CRASH-B1-1 heap-buffer-overflow nametable_scan \
   "Decoded name_count and name_entry_size are not constrained — the name table extends past the end of the decoded allocation." \

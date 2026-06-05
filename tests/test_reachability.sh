@@ -432,20 +432,20 @@ Corrupted top_bracket field combined with OP_CBRA causes wild write.
 
 ## Classification
 - **Severity**: TBD
-- **Location**: pcre2_match.c:42
+- **Location**: resolve_entry.c:42
 
 ## Trigger Surface
-- Entry: `pcre2_serialize_decode()` → `pcre2_match()`
+- Entry: `decode_blob()` → `resolve_entry()`
 - Trigger: capture group corruption referencing OP_CBRA, OP_KET
 - The Fovector array is sized by re->top_bracket and start_subject.
 
 ## Data Flow Trace
-pcre2_serialize_decode (pcre2_serialize.c:204) →
+decode_blob (decode_blob.c:204) →
   match() reaches OP_CBRA with corrupted top_bracket = 0x7FFF →
   Fovector[65532] = ...
 EOF
 # Seed mocks for the symbols we EXPECT to be extracted (the call-shape ones).
-for sym in pcre2_serialize_decode pcre2_match; do
+for sym in decode_blob resolve_entry; do
   h=$(sha1_short "$sym")
   cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${h}.json" <<EOF
 {"status":"ok","hits":[{"repo":"demo-consumer","path":"src/use_${sym}.c"}]}
@@ -464,7 +464,7 @@ syms = data["reachability"]["symbols"]
 forbidden = {"OP_CBRA", "OP_KET", "top_bracket", "start_subject", "Fovector"}
 bad = [s for s in syms if s in forbidden]
 assert not bad, ("forbidden non-call symbols extracted:", bad, "from", syms)
-assert "pcre2_serialize_decode" in syms or "pcre2_match" in syms, syms
+assert "decode_blob" in syms or "resolve_entry" in syms, syms
 print("symbol extraction OK; got:", syms)
 ' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "symbol extraction picked non-call identifiers"
 
@@ -641,7 +641,7 @@ print("all-frames gate OK")
 
 # ───────────────────────────────────────────────────────────────────
 # 11c. Symbol extraction also accepts lowerCamelCase (libxml2 / htmllib /
-#      Win32-style entry points). xmlShellReadline-shaped names have no
+#      Win32-style entry points). read_line-shaped names have no
 #      underscore but ARE library APIs with external callers. Plain
 #      lowercase identifiers (usershell, malloc) and StartsWithUpper
 #      tokens (SomeClass) must still be rejected to keep probe noise
@@ -656,14 +656,14 @@ cat > "$CAMEL_DIR/report.md" <<'EOF'
 - **Severity**: TBD
 - **Location**: xmlcatalog.c:usershell
 ## Trigger Surface
-- Entry: `xmlShellReadline()` → `usershell()` → `xmlCatalogConvertEntry()`
-- Trigger: oversized stdin line; `xmlHashScan()` walks past end.
+- Entry: `read_line()` → `usershell()` → `convert_entry()`
+- Trigger: oversized stdin line; `scan_table()` walks past end.
 - Reference to SomeClass and FOO_MACRO in narrative; ignore both.
 ## Data Flow
-xmlConvertSGMLCatalog() invokes the parser then hands off to malloc().
+convert_catalog() invokes the parser then hands off to malloc().
 EOF
 # Seed mocks for the lowerCamelCase symbols we EXPECT to be extracted.
-for sym in xmlShellReadline xmlCatalogConvertEntry xmlHashScan xmlConvertSGMLCatalog; do
+for sym in read_line convert_entry scan_table convert_catalog; do
   h=$(sha1_short "$sym")
   cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${h}.json" <<EOF
 {"status":"ok","hits":[{"repo":"demo-libxml-consumer","path":"src/use_${sym}.c"}]}
@@ -678,8 +678,8 @@ import json, sys
 data = json.load(sys.stdin)
 syms = data["reachability"]["symbols"]
 # At least one of the libxml2-style symbols must come through.
-expected_any = {"xmlShellReadline", "xmlCatalogConvertEntry",
-                "xmlHashScan", "xmlConvertSGMLCatalog"}
+expected_any = {"read_line", "convert_entry",
+                "scan_table", "convert_catalog"}
 got = expected_any & set(syms)
 assert got, ("no lowerCamelCase symbols extracted:", syms)
 # Plain lowercase (usershell, malloc) and StartsWithUpper (SomeClass,
@@ -1157,7 +1157,7 @@ EOF
 cat > "$MD_DIR/.llm_fields.json" <<'EOF'
 {"surface":"library-api — cJSON public parse API","primitive":"uaf_read",
  "caller_contract":"obeyed","caller_controls":"bytes","trigger_source":"api",
- "boundary":"untrusted JSON buffer handed to cJSON_Parse"}
+ "boundary":"untrusted JSON buffer handed to app_parse"}
 EOF
 python3 "$REACH" --report "$MD_DIR" --severity-only --no-cache --json >/dev/null 2>&1 \
   || fail "$_CURRENT_TEST" "report mode failed"
@@ -1212,12 +1212,12 @@ cat > "$BARE_DIR/report.md" <<'EOF'
 
 Boundary: curl public API
 Caller controls: parameter string length and content
-Trusted caller actions: calls curl_easy_setopt
+Trusted caller actions: calls app_set_option
 Caller contract: obeyed
 Trigger source: call-sequence
 
 # Summary
-A heap-use-after-free READ occurs in curl_easy_getinfo after the option is freed.
+A heap-use-after-free READ occurs in app_get_info after the option is freed.
 EOF
 cat > "$BARE_DIR/.llm_fields.json" <<'EOF'
 {"surface":"library-api — curl public API","primitive":"uaf_read",

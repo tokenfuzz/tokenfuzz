@@ -28,10 +28,21 @@ Read docs/development.md first, then help me with: <task>
    new artifact shapes need matching assertions.
 3. **Fix broken tests only with reason.** Determine whether the test or the
    code is wrong before changing assertions to make them green.
-4. **Keep fixtures neutral.** Do not copy private stack frames, sanitizer
-   reports, signatures, or unreleased target details into tests or docs. Use
-   placeholders such as `child_free child.c:91`,
-   `tool_resolve_entry catalog.c:42`, `apptool`, and `sampleproj`.
+4. **Keep fixtures neutral — never disclose a target bug.** A test fixture
+   must not pin a real defect to a real symbol. Concretely:
+   - **Allowed:** a target's *name* or slug (`curl`, `cjson`, `pcre2`,
+     `libxml2`) and its directory path (`targets/<slug>/`). Naming which
+     project is under audit is fine.
+   - **Not allowed:** target **function/symbol names**
+     (`some_lib_decode`, `lib_parse_doc`), **stack frames** and crash
+     `file:func:line` signatures, sanitizer reports, real source filenames
+     tied to a finding, or any unreleased bug detail (the
+     primitive/location/trigger of an actual crash). These disclose work the
+     audit has not published.
+   Use neutral placeholders instead — `child_free child.c:91`,
+   `tool_resolve_entry catalog.c:42`, `app_parse`, `apptool`, `sampleproj` —
+   and keep them consistent within a file so the fixture and its assertions
+   still match. The same rule applies to docs.
 
 Tests live in
 [`tests/`](https://github.com/tokenfuzz/tokenfuzz/tree/main/tests). Shared

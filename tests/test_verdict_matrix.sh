@@ -264,7 +264,7 @@ assert_match "harness-only parameter" "$reason" "contract-flag reason names harn
 
 # ───────────────────────────────────────────────────────────────────
 # 11. Regression: undocumented-contract / library re-entrancy crash
-# This is the curl share_easy_link UAF scenario. CURLSHOPT_LOCKFUNC is
+# This is the curl share_link UAF scenario. APP_SHOPT_LOCKFUNC is
 # silent on re-entrancy; the report fills Caller contract: unspecified.
 # call-sequence is in curl's threat model. The deterministic verdict
 # must PROMOTE (not reject) — the LLM legitimacy gate is then
@@ -275,16 +275,16 @@ assert_match "harness-only parameter" "$reason" "contract-flag reason names harn
 
 TARGET_ATTACKER_CONTROLS_CSV="bytes,call-sequence,protocol-state"
 
-verdict=$(run_verdict 'Boundary: public libcurl API (curl_easy_setopt, CURLSHOPT_LOCKFUNC callback, curl_share_cleanup)
+verdict=$(run_verdict 'Boundary: public libcurl API (app_set_option, APP_SHOPT_LOCKFUNC callback, app_share_cleanup)
 Caller controls: ordering of share/easy API calls; body of the LOCKFUNC callback
 Trusted caller actions: only documented public API
 Caller contract: unspecified
 Trigger source: call-sequence' 'bytes,call-sequence,protocol-state')
 assert_eq "promote" "$verdict" "regression: undocumented contract + call-sequence + curl threat model → promote (library re-entrancy bug)"
 
-make_crash_dir "$TEST_TMPDIR/lib_reentrancy_uaf" "Boundary: public libcurl API (curl_easy_setopt, CURLSHOPT_LOCKFUNC callback, curl_share_cleanup)
+make_crash_dir "$TEST_TMPDIR/lib_reentrancy_uaf" "Boundary: public libcurl API (app_set_option, APP_SHOPT_LOCKFUNC callback, app_share_cleanup)
 Caller controls: ordering of share/easy API calls; body of the LOCKFUNC callback
-Trusted caller actions: only documented public API: curl_easy_init, curl_share_init, curl_share_setopt, curl_easy_setopt, curl_share_cleanup, curl_easy_cleanup
+Trusted caller actions: only documented public API: app_init, app_share_init, app_share_set_option, app_set_option, app_share_cleanup, app_cleanup
 Caller contract: unspecified
 Trigger source: call-sequence"
 reason=$(crash_dir_static_legitimacy_rejection_reason "$TEST_TMPDIR/lib_reentrancy_uaf" 2>/dev/null || true)
