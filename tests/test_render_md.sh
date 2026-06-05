@@ -616,6 +616,50 @@ PY
 [ $? -eq 0 ] && pass "no-H1 hero leads before the first section" \
   || fail "no-H1 hero leads before the first section" "card not above first heading"
 
+# ── Empty heading suppression: on a new report bin/reachability synthesizes a
+#    `## Fields` table immediately below the harness `## Classification` block,
+#    leaving that heading empty. render-md must drop the empty heading so it
+#    does not render bare and does not duplicate the model's own
+#    `# Classification` prose section. ──
+empty_h="$TEST_TMPDIR/empty_heading.md"
+cat > "$empty_h" <<'EOF'
+## Classification
+
+## Fields
+
+| Field     | Value       |
+|:----------|:------------|
+| Severity  | Medium (34) |
+| Primitive | heap_write  |
+
+- **Severity**: Medium (auto: primitive=use-after-free READ; score=34)
+Boundary: apptool public API
+
+# Summary
+A use-after-free in app_parse.
+
+# Classification
+Memory Safety (Use-After-Free)
+EOF
+python3 "$RENDER" "$empty_h" --html-sibling >/dev/null 2>&1
+empty_html="$TEST_TMPDIR/empty_heading.html"
+if grep -qE 'id="classification"' "$empty_html"; then
+  fail "empty harness Classification heading dropped" "stale H2 still rendered"
+else
+  pass "empty harness Classification heading dropped"
+fi
+# The synthesized Fields table heading is kept (it has content).
+assert_file_contains "$empty_html" 'id="fields"' \
+  "synthesized Fields heading is preserved"
+# Exactly one "Classification" heading survives — the model's prose H1.
+class_headings=$(grep -cE '<h[123][^>]*>Classification' "$empty_html")
+[ "$class_headings" = "1" ] \
+  && pass "single Classification heading after suppression" \
+  || fail "single Classification heading after suppression" "found $class_headings"
+# A heading with real content is untouched.
+assert_file_contains "$empty_html" '<h1>Summary</h1>' \
+  "headings with visible content are preserved"
+
 # A doc with NO triage signal (e.g. an index) must stay heroless.
 plain_fix="$TEST_TMPDIR/plain_noh1.md"
 cat > "$plain_fix" <<'EOF'

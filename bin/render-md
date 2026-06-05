@@ -1214,6 +1214,41 @@ _CLASS_BULLET_LABEL_RE = re.compile(
 _CLUSTER_PLACEHOLDER_RE = re.compile(r"^\(set by bin/cluster-crashes\)\s*$")
 
 
+# Headings render-md understands (`#`, `##`, `###`). Used to find the end of a
+# section when deciding whether a heading's body renders empty.
+_RENDER_HEADING_RE = re.compile(r"^#{1,3} ")
+
+
+def _render_heading_level(stripped: str) -> int:
+    """1/2/3 for a render-md heading line, else 0."""
+    if not _RENDER_HEADING_RE.match(stripped):
+        return 0
+    return len(stripped) - len(stripped.lstrip("#"))
+
+
+def _heading_renders_empty(lines: list[str], idx: int) -> bool:
+    """True when the heading at ``lines[idx]`` has no content before the next
+    heading of the same or a higher level.
+
+    This de-duplicates the two "Classification" headers on model-direct
+    reports: ``bin/reachability`` synthesizes a ``## Fields`` table immediately
+    below the harness ``## Classification`` block, leaving that heading with an
+    empty body, while the model writes its own ``# Classification`` prose
+    section. Dropping the empty harness heading leaves exactly one.
+
+    A heading followed by a deeper (child) heading is kept as a structural
+    parent."""
+    cur = _render_heading_level(lines[idx].strip())
+    for j in range(idx + 1, len(lines)):
+        s = lines[j].strip()
+        if not s:
+            continue
+        lvl = _render_heading_level(s)
+        # Empty only when the next content is itself a sibling/parent heading.
+        return bool(lvl and lvl <= cur)
+    return True  # trailing heading with nothing after it
+
+
 # ─── Triage hero card extraction ─────────────────────────────────────────
 
 
@@ -1615,6 +1650,17 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
         if _THEMATIC_BREAK_RE.fullmatch(stripped):
             _flush_paragraph()
             body.append("<hr>")
+            i += 1
+            continue
+
+        # A heading whose entire section body is suppressed in HTML (only the
+        # bare-label fields block / auto Severity bullet / harness-only
+        # bullets) would render as an empty heading — and, for the harness
+        # `## Classification` block, duplicate the model's own `# Classification`
+        # section. Drop the heading along with its hidden body.
+        if _RENDER_HEADING_RE.match(stripped) and _heading_renders_empty(lines, i):
+            _flush_paragraph()
+            _close_collapsible()
             i += 1
             continue
 
