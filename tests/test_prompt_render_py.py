@@ -137,5 +137,26 @@ ok("Agent 42" in proc.stdout and "role=analysis" in proc.stdout,
    "cold_start.md.j2 rendered with the provided vars", proc.stdout[:200])
 
 
+# ── Undecodable bytes in a --var value round-trip, don't crash ──────
+print("\nsurrogate-escaped bytes round-trip")
+# A --var value carrying a byte that is not valid UTF-8 (here a lone 0xC2,
+# the kind of latin-1 / mojibake artifact that leaks in from target strings)
+# reaches Python's argv as the surrogate \udcc2. The renderer must emit the
+# original byte rather than crash strict-UTF-8 stdout with "surrogates not
+# allowed". subprocess argv is bytes, so we drive it directly and read raw
+# stdout bytes to verify the round-trip.
+with tempfile.NamedTemporaryFile("w", suffix=".md.j2", delete=False) as f:
+    f.write("X {{ blob }} Y")
+    _tpath = f.name
+proc = subprocess.run(
+    [sys.executable.encode(), str(RENDER).encode(), _tpath.encode(),
+     b"--var", b"blob=lead\xc2tail"],
+    capture_output=True,
+)
+Path(_tpath).unlink()
+assert_eq(0, proc.returncode, "undecodable byte rc=0 (no crash)")
+assert_eq(b"X lead\xc2tail Y", proc.stdout, "raw 0xC2 byte round-trips to output")
+
+
 print(f"\n  \033[1m{PASSED}/{PASSED + FAILED} passed\033[0m")
 sys.exit(0 if FAILED == 0 else 1)

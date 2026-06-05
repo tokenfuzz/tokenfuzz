@@ -94,10 +94,21 @@ def main(argv=None) -> int:
             context[key] = value
 
     try:
-        sys.stdout.write(render_template(args.template, context))
+        rendered = render_template(args.template, context)
     except OSError as exc:
         print(f"prompt_render: cannot read {args.template}: {exc}", file=sys.stderr)
         return 2
+
+    # Byte-transparent output, matching the bash heredocs this replaced.
+    # Python decodes the OS's byte-oriented argv with errors="surrogateescape",
+    # so a --var value carrying an undecodable byte (e.g. a stray 0xC2 from a
+    # latin-1 / mojibake target string) arrives as a lone surrogate like
+    # \udcc2. Re-encode with the same handler and write the raw bytes so that
+    # byte round-trips back to its original form, instead of crashing strict
+    # UTF-8 stdout with "surrogates not allowed".
+    data = rendered.encode("utf-8", "surrogateescape")
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
     return 0
 
 
