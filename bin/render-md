@@ -1841,6 +1841,18 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
 
     _flush_paragraph()
     _close_collapsible()
+    # Hero fallback for reports with no `# ` H1. The in-loop emission is tied to
+    # the first H1 heading, but model-direct reports often open straight at
+    # `## Classification` with no title — so the triage header never rendered,
+    # even though the duplicate TL;DR / severity-badge enrich cards were already
+    # suppressed (the `hero` dict carried signal). Emit it once at the top here
+    # so every report with triage signal shows the header card regardless of
+    # whether the author wrote an H1. `_render_hero` returns "" when there is no
+    # useful signal, so non-report docs (INDEX.md, crosstabs) stay heroless.
+    if not hero_emitted:
+        hero_html = _render_hero(hero)
+        if hero_html:
+            body.insert(0, hero_html)
     return (
         _HTML_HEAD.format(title=html.escape(title), theme_css=_MATERIAL_CSS)
         + "\n".join(body) + "\n" + _HTML_FOOT

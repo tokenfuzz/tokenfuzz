@@ -578,5 +578,57 @@ else
   pass "diff file-header lines stay inside the code block"
 fi
 
+# ── Hero fallback: model-direct reports with NO `# ` H1 still get the
+#    triage header card. The in-loop emission keys off the first H1; these
+#    reports open at `## Classification`, so without the post-loop fallback
+#    the header (severity/primitive/summary) never renders. ──
+noh1_fix="$TEST_TMPDIR/noh1.md"
+cat > "$noh1_fix" <<'EOF'
+## Classification
+- **Severity**: Medium (auto: primitive=use-after-free READ; score=34)
+
+## Fields
+
+| Field     | Value               |
+|:----------|:--------------------|
+| Severity  | Medium (34)         |
+| Primitive | heap_write          |
+| Surface   | library-api — apptool |
+
+## Summary
+A heap-use-after-free occurs in tool_resolve_entry after the entry is freed.
+EOF
+python3 "$RENDER" "$noh1_fix" --html-sibling >/dev/null 2>&1
+noh1_html="$TEST_TMPDIR/noh1.html"
+assert_file_contains "$noh1_html" 'class="triage-card sev-Medium"' \
+  "hero card renders for a report with no leading H1"
+assert_file_contains "$noh1_html" 'class="primitive' \
+  "no-H1 hero shows the primitive chip"
+# It must lead the body — the card appears before the first section heading.
+python3 - "$noh1_html" <<'PY'
+import re,sys
+t=open(sys.argv[1]).read()
+b=t.find('<body')
+card=t.find('triage-card', b)
+h2=t.find('id="classification"', b)
+sys.exit(0 if 0 <= card < h2 else 1)
+PY
+[ $? -eq 0 ] && pass "no-H1 hero leads before the first section" \
+  || fail "no-H1 hero leads before the first section" "card not above first heading"
+
+# A doc with NO triage signal (e.g. an index) must stay heroless.
+plain_fix="$TEST_TMPDIR/plain_noh1.md"
+cat > "$plain_fix" <<'EOF'
+## Index
+Some links and prose, no severity or primitive.
+EOF
+python3 "$RENDER" "$plain_fix" --html-sibling >/dev/null 2>&1
+plain_html="$TEST_TMPDIR/plain_noh1.html"
+if grep -q '<div class="triage-card' "$plain_html"; then
+  fail "no spurious hero for signalless doc" "triage-card emitted without signal"
+else
+  pass "no spurious hero for signalless doc"
+fi
+
 teardown_test_env
 summary
