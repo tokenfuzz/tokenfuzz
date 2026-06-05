@@ -1,6 +1,8 @@
-# Default model per backend, used when bin/audit runs without --model.
-# Override per-run with --model / $MODEL, or per-backend with the
-# *_MODEL_DEFAULT env vars. "oss" has no default — pass --model.
+# Default model per backend — the single source of truth; change a value here
+# to switch a backend's model. Override per-run with --model / $MODEL or
+# per-backend via *_MODEL_DEFAULT env vars. "oss" has no default — pass --model.
+# Keep API slugs (they key the benchmark pricing table). For gemini on agy the
+# slug is mapped to an `agy models` label in lib/llm_invoke.py:agy_model_label.
 
 [models]
 claude = "claude-opus-4-8"

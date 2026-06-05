@@ -99,17 +99,26 @@ assert_match "--oss"                  "$flags_str" "agent oss has --oss"
 assert_match "--local-provider ollama" "$flags_str" "agent oss has --local-provider ollama"
 assert_match "--sandbox danger-full-access" "$flags_str" "agent oss inherits danger-full-access"
 
-# gemini — Antigravity CLI (agy): plain --print, skip-permissions
+# gemini — agy: plain --print, skip-permissions, and the model pinned via the
+# slug→label map (agy 1.0.5+ --model resolves labels, not API slugs; parens
+# escaped for the ERE match).
 declare -a flags_gemini=()
 llm_agent_flags gemini flags_gemini "" 80 ""
 flags_str="${flags_gemini[*]}"
 assert_match "--dangerously-skip-permissions" "$flags_str" "agent gemini has --dangerously-skip-permissions"
-# agy emits plain text; model selection is persistent config, not a launch flag.
-if grep -qE -- "--output-format|--yolo|--skip-trust|--model" <<< "$flags_str"; then
-  fail "agent gemini must not carry legacy gemini-cli flags" "got: $flags_str"
+assert_match "--model Gemini 3.1 Pro \(High\)" "$flags_str" "agent gemini wires the mapped agy model label"
+# No gemini-cli flags; --log-file appears only when AGY_LOG_FILE is set.
+if grep -qE -- "--output-format|--yolo|--skip-trust|--log-file" <<< "$flags_str"; then
+  fail "agent gemini must not carry legacy gemini-cli flags or --log-file" "got: $flags_str"
 else
-  pass "agent gemini omits legacy gemini-cli flags"
+  pass "agent gemini omits legacy gemini-cli flags and --log-file"
 fi
+
+# AGY_LOG_FILE pins agy's log to a per-probe path (the preflight reads it back
+# for the unresolved-flag signature).
+declare -a flags_logf=()
+AGY_LOG_FILE="/tmp/agy-probe.log" llm_agent_flags gemini flags_logf "" 80 ""
+assert_match "--log-file /tmp/agy-probe.log" "${flags_logf[*]}" "agent gemini wires --log-file when AGY_LOG_FILE is set"
 
 USE_GEMINI_CLI=1 bash -c '
   unset GEMINI_MODEL_DEFAULT
@@ -186,7 +195,8 @@ declare -a d_gemini=()
 llm_decide_flags gemini d_gemini ""
 flags_str="${d_gemini[*]}"
 assert_match "--dangerously-skip-permissions" "$flags_str" "decide gemini has --dangerously-skip-permissions"
-if grep -qE -- "--output-format|--approval-mode|--model" <<< "$flags_str"; then
+assert_match "--model Gemini 3.1 Pro \(High\)" "$flags_str" "decide gemini wires the mapped agy model label"
+if grep -qE -- "--output-format|--approval-mode" <<< "$flags_str"; then
   fail "decide gemini must not carry legacy gemini-cli flags" "got: $flags_str"
 else
   pass "decide gemini omits legacy gemini-cli flags"

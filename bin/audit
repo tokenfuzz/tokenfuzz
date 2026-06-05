@@ -122,7 +122,7 @@ Options:
   --target <dir-name>                 Target directory name under targets/ (default: firefox)
   --target-path <path>                Override target path directly
   --backend <backend>               Select one backend. One of: all, claude, codex, gemini, oss. If omitted, cycle configured hosted backends like --backend all. 'oss' runs codex with --oss for local models via ollama and requires --model.
-  --model <model>                   Override the model for supported backends. Required for --backend oss. For --backend gemini this is supported only when USE_GEMINI_CLI=1; agy keeps model selection in /model.
+  --model <model>                   Override the model for supported backends. Required for --backend oss. For --backend gemini with agy, pass either the config slug (e.g. gemini-3.1-pro-preview) or an exact 'agy models' label (e.g. "Gemini 3.1 Pro (High)"); the harness maps the slug to a label and the preflight rejects an unresolved one.
   --experiment <name>               Isolate artifacts under output/<target>-<name>/
   --strategy <S1|S2|S3|S4|S5|S6|S7|S8> Pin the first investigation strategy for
                                     focused smoke validation. Omit for normal
@@ -1093,10 +1093,6 @@ EOF
 
 resolve_model() {
   if [ -n "${AUDIT_MODEL:-}" ]; then
-    if [ "${ACTIVE_BACKEND:-}" = "gemini" ] && ! llm_use_gemini_cli; then
-      log "FATAL: --model is not supported for --backend gemini with agy because agy has no launch-time model flag; run agy interactively and use /model, or set USE_GEMINI_CLI=1 to use Google Gemini CLI model flags." >&2
-      exit 1
-    fi
     echo "$AUDIT_MODEL"
     return
   fi
@@ -1295,11 +1291,26 @@ validate_model_for_backend() {
   # ignore the variable.
   export IS_SANDBOX=1
 
+  # agy 1.0.5 takes --model but silently falls back to its persistent /model
+  # on a value it can't resolve to an `agy models` label (see
+  # lib/llm_invoke.py:agy_model_label) — exit 0, and the fallback model still
+  # echoes MODEL_PREFLIGHT_OK, so the echo check below can't catch it. Pin
+  # agy's log to a per-probe file via AGY_LOG_FILE so the rc==0 branch can
+  # read back the unresolved-flag signature deterministically; the shared CLI
+  # log dir is unsafe under concurrent benchmark cells. Only agy honors
+  # AGY_LOG_FILE (the Google Gemini CLI and other backends ignore it).
+  local _agy_preflight_log=""
+  if [ "$backend" = "gemini" ] && [ "${USE_GEMINI_CLI:-0}" != "1" ]; then
+    _agy_preflight_log="${raw%.raw}.agylog"
+    export AGY_LOG_FILE="$_agy_preflight_log"
+  fi
+
   log "Model preflight: checking that ${backend} backend can reach model='${model}' (timeout per attempt=$(fmt_secs "$timeout_secs"), up to ${max_attempts} attempt(s) with exponential backoff)" | tee -a "$INDEX"
   local attempt
   for ((attempt=1; attempt<=max_attempts; attempt++)); do
     rc=0
     : > "$raw"
+    [ -n "$_agy_preflight_log" ] && : > "$_agy_preflight_log"
     # Every backend launches through the shared flag picker (lib/llm_invoke.sh)
     # so preflight exercises the exact same wiring as the real agent loop,
     # bin/audit-recon, and bin/validate-finding — stream-json/json output
@@ -1341,6 +1352,19 @@ validate_model_for_backend() {
         fi
       fi
     fi
+    # agy can exit 0 AND echo MODEL_PREFLIGHT_OK while running a different
+    # model than requested: handed a name it can't resolve to a label, it
+    # silently falls back to its persistent /model, leaving the only trace in
+    # its own log. That's a config error, not a transient blip — fail hard
+    # immediately (so retries and AUDIT_MODEL_PREFLIGHT_OPTIONAL can't mask it)
+    # before a benchmark cell runs and prices the wrong model. _agy_preflight_log
+    # is set only for gemini-on-agy, so its presence is the backend gate.
+    if [ "$rc" -eq 0 ] && [ -n "$_agy_preflight_log" ] \
+       && grep -q 'Failed to resolve model flag' "$_agy_preflight_log" 2>/dev/null; then
+      log "FATAL: model preflight: agy could not resolve model '${model}' to a known 'agy models' label and silently fell back to its persistent /model. Pass an exact label (e.g. \"Gemini 3.1 Pro (High)\") or map the slug in lib/llm_invoke.py (_AGY_SLUG_TO_LABEL)." >&2
+      grep -E 'Failed to resolve model flag|Propagating selected model override' "$_agy_preflight_log" 2>/dev/null | tail -4 | sed 's/^/[model-preflight] /' >&2 || true
+      exit 1
+    fi
     [ "$rc" -eq 0 ] && break
     # A quota exhaustion does not clear within the retry window — stop now
     # and surface the real reason instead of burning the backoff budget.
@@ -1356,6 +1380,10 @@ validate_model_for_backend() {
       backoff=$(( backoff * 4 ))
     fi
   done
+
+  # Done probing — stop redirecting agy's log so real agent launches in this
+  # same process write to their normal CLI log dir.
+  [ -n "$_agy_preflight_log" ] && unset AGY_LOG_FILE
 
   if [ "$rc" -ne 0 ]; then
     # Fail fast by default: a backend that cannot complete this one-token

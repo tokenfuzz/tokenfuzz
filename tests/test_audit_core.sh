@@ -546,11 +546,10 @@ assert_eq "custom-backend-model" "$(resolve_model)" "model: override applies to 
 ACTIVE_BACKEND=codex
 assert_eq "custom-backend-model" "$(resolve_model)" "model: override applies to codex"
 ACTIVE_BACKEND=gemini
-gemini_model_output=$(resolve_model 2>&1)
-gemini_model_rc=$?
-assert_eq "1" "$gemini_model_rc" "model: gemini rejects launch-time override"
-assert_match "agy has no launch-time model flag" "$gemini_model_output" \
-  "model: gemini override explains /model requirement"
+# agy 1.0.5+ accepts --model (mapped to an `agy models` label downstream in
+# llm_invoke.py), so resolve_model now passes the override through like the
+# other backends instead of rejecting it.
+assert_eq "custom-backend-model" "$(resolve_model)" "model: override applies to gemini"
 ACTIVE_BACKEND=oss
 assert_eq "custom-backend-model" "$(resolve_model)" "model: override applies to oss"
 
@@ -1271,12 +1270,16 @@ if [ "${1:-}" = "changelog" ]; then
   printf '1.0.0:\n· stub\n'
   exit 0
 fi
-if [ "${USE_GEMINI_CLI:-0}" != "1" ]; then
+# agy 1.0.5+ accepts --model and --log-file. With AGY_MODEL_UNRESOLVED=1,
+# emulate agy failing to resolve the model: write the unresolved-flag signature
+# to the --log-file, but still echo the token and exit 0 below (silent fallback
+# to the persistent /model — the case the audit preflight must catch from the
+# log, since the echoed token alone looks like success).
+if [ "${USE_GEMINI_CLI:-0}" != "1" ] && [ "${AGY_MODEL_UNRESOLVED:-0}" = "1" ]; then
+  prev=""
   for arg in "$@"; do
-    if [ "$arg" = "--model" ]; then
-      echo "flags provided but not defined: -model" >&2
-      exit 45
-    fi
+    [ "$prev" = "--log-file" ] && printf 'Failed to resolve model flag\n' >> "$arg"
+    prev="$arg"
   done
 fi
 if [ "${AGY_FAIL:-0}" = "1" ]; then
@@ -1324,6 +1327,21 @@ assert_file_contains "$INDEX" "Model preflight passed: codex backend can reach m
 validate_model_for_backend gemini "gemini-good"
 assert_file_exists "$(model_preflight_stamp_path gemini "gemini-good")" "model preflight: gemini accepted model writes stamp"
 assert_file_contains "$INDEX" "Model preflight passed: gemini backend can reach model='gemini-good'" "model preflight: gemini pass logged"
+
+# Regression: agy can exit 0 AND echo MODEL_PREFLIGHT_OK while silently
+# running a different model (handed a name it cannot resolve to a label). The
+# preflight must read agy's log, see the unresolved-flag signature, and fail
+# hard — even with AUDIT_MODEL_PREFLIGHT_OPTIONAL=1, since a wrong model
+# corrupts a benchmark cell's cost/identity rather than being a transient blip.
+gemini_unresolved_rc=0
+( AGY_MODEL_UNRESOLVED=1 AUDIT_MODEL_PREFLIGHT_OPTIONAL=1 AUDIT_MODEL_PREFLIGHT_ATTEMPTS=1 \
+    validate_model_for_backend gemini "gemini-unresolved" ) >/dev/null 2>&1 || gemini_unresolved_rc=$?
+assert_eq "1" "$gemini_unresolved_rc" "model preflight: gemini agy silent fallback fails hard despite OPTIONAL"
+if [ -e "$(model_preflight_stamp_path gemini "gemini-unresolved")" ]; then
+  fail "model preflight: gemini silent fallback must not write a pass stamp"
+else
+  pass "model preflight: gemini silent fallback writes no pass stamp"
+fi
 
 gemini_cli_preflight_args="$TEST_TMPDIR/gemini-cli-preflight.args"
 USE_GEMINI_CLI=1 PREFLIGHT_ARGS_FILE="$gemini_cli_preflight_args" \

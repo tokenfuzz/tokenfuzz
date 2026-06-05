@@ -104,6 +104,30 @@ def default_model(backend: str) -> str:
     return os.environ.get(_MODEL_ENV_OVERRIDE[backend]) or _config_models().get(backend, "")
 
 
+# agy (Antigravity CLI) gained --model in 1.0.5, but it selects models by the
+# display label shown in `agy models` — NOT the API slug — and SILENTLY falls
+# back to its persistent /model setting when handed a value it can't resolve
+# (exit 0, no stderr; the fallback model even echoes the preflight token). So
+# config/models.toml stays the source of truth in API-slug form and we map the
+# slug to the exact label here; bin/audit's model preflight parses agy's log
+# for the unresolved-flag signature as the hard backstop.
+_AGY_SLUG_TO_LABEL = {
+    "gemini-3.1-pro-preview": "Gemini 3.1 Pro (High)",
+}
+
+
+def agy_model_label(model: str) -> str:
+    """Map a harness model identifier to an ``agy --model`` display label.
+
+    A known slug maps to its label; anything else (an empty string, or a value
+    that is already an exact agy label) is returned unchanged. An unmapped,
+    non-label value would make agy silently fall back, so bin/audit's preflight
+    is responsible for catching that.
+    """
+    m = (model or "").strip()
+    return _AGY_SLUG_TO_LABEL.get(m, m)
+
+
 def agent_flags(
     backend: str,
     model: str = "",
@@ -176,9 +200,19 @@ def agent_flags(
 
         # Antigravity CLI (agy): plain stdout in --print mode.
         # --dangerously-skip-permissions keeps the run non-interactive.
-        # Model selection is currently managed by agy's persistent /model
-        # setting, not a launch-time flag.
+        # agy 1.0.5+ takes --model, but only as the `agy models` display
+        # label (mapped from the config slug) — and silently falls back on an
+        # unrecognized value, so the audit preflight verifies it was honored.
+        # AGY_LOG_FILE, when set (by that preflight), pins agy's log to a
+        # per-probe path so the unresolved-flag signature can be read back
+        # deterministically.
         flags = ["--dangerously-skip-permissions"]
+        label = agy_model_label(resolved_model)
+        if label:
+            flags += ["--model", label]
+        agy_log = os.environ.get("AGY_LOG_FILE", "").strip()
+        if agy_log:
+            flags += ["--log-file", agy_log]
         for d in (add_dirs or "").split(","):
             d = d.strip()
             if d:
@@ -221,9 +255,12 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
 
         # Antigravity CLI (agy) decide mode: --print emits plain text.
         # --dangerously-skip-permissions keeps decide calls non-interactive.
-        # Model selection is currently managed by agy's persistent /model
-        # setting, not a launch-time flag.
-        return ["--dangerously-skip-permissions"]
+        # See agent_flags for the --model label-mapping rationale.
+        flags = ["--dangerously-skip-permissions"]
+        label = agy_model_label(resolved_model)
+        if label:
+            flags += ["--model", label]
+        return flags
 
     raise ValueError(f"unknown backend: {backend}")
 

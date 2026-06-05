@@ -126,9 +126,13 @@ ok("--local-provider" in f and "ollama" in f, "oss has --local-provider ollama")
 ok("danger-full-access" in f, "oss inherits codex sandbox")
 
 proc = run(["agent-flags", "gemini"], check=True)
-f = proc.stdout
+f = flags(proc)
 ok("--dangerously-skip-permissions" in f, "gemini has --dangerously-skip-permissions")
-for legacy in ("--output-format", "--yolo", "--skip-trust", "--model"):
+# agy 1.0.5+ pins the model via its `agy models` display label, mapped from
+# the config slug — it resolves labels, not API slugs.
+model_idx = f.index("--model")
+assert_eq("Gemini 3.1 Pro (High)", f[model_idx + 1], "gemini agy wires the mapped model label")
+for legacy in ("--output-format", "--yolo", "--skip-trust"):
     ok(legacy not in f, f"gemini omits legacy gemini-cli flag {legacy}")
 
 env = os.environ.copy()
@@ -195,9 +199,11 @@ ok("read-only" in f, "decide codex read-only sandbox")
 ok("danger-full-access" not in f, "decide codex NOT danger-full-access")
 
 proc = run(["decide-flags", "gemini"], check=True)
-f = proc.stdout
+f = flags(proc)
 ok("--dangerously-skip-permissions" in f, "decide gemini has --dangerously-skip-permissions")
-for legacy in ("--output-format", "--approval-mode", "--model"):
+model_idx = f.index("--model")
+assert_eq("Gemini 3.1 Pro (High)", f[model_idx + 1], "decide gemini agy wires the mapped model label")
+for legacy in ("--output-format", "--approval-mode"):
     ok(legacy not in f, f"decide gemini omits legacy gemini-cli flag {legacy}")
 
 env = os.environ.copy()

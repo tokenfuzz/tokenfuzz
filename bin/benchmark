@@ -40,6 +40,10 @@
 # Options (default in brackets):
 #   --target <slug>          Target under targets/ to benchmark. REQUIRED.
 #   --backend <backend>      Agent backend, one of: claude, codex, gemini, oss.
+#   --model <model>          Override the model for both conditions. Defaults to
+#                            the per-backend config/models.toml value. For
+#                            gemini on agy, pass the config slug or an exact
+#                            'agy models' label (mapped by lib/llm_invoke.py).
 #                            [default: codex]
 #   --replicates <N>         Runs per condition (>=1). [3]
 #   --budget-wall <seconds>  Wall-clock budget per cell; 0 means no outer
@@ -158,6 +162,7 @@ usage() {
 # ── defaults ─────────────────────────────────────────────────────────────
 TARGET_SLUG=""
 BACKEND="codex"
+MODEL_OVERRIDE=""
 REPLICATES=3
 BUDGET_WALL=10800
 AGENTS=""
@@ -201,6 +206,8 @@ while [ $# -gt 0 ]; do
     --target=*) TARGET_SLUG="${1#--target=}"; shift ;;
     --backend) BACKEND="${2:?--backend needs a value}"; shift 2 ;;
     --backend=*) BACKEND="${1#--backend=}"; shift ;;
+    --model) MODEL_OVERRIDE="${2:?--model needs a value}"; shift 2 ;;
+    --model=*) MODEL_OVERRIDE="${1#--model=}"; shift ;;
     --replicates) REPLICATES="${2:?--replicates needs a value}"; shift 2 ;;
     --replicates=*) REPLICATES="${1#--replicates=}"; shift ;;
     --budget-wall) BUDGET_WALL="${2:?--budget-wall needs a value}"; shift 2 ;;
@@ -516,9 +523,12 @@ start_console_log
 target_sha="$(target_detect_rev "$SCRIPT_ROOT/targets/$TARGET_SLUG" 2>/dev/null || true)"
 target_sha="${target_sha:-norev}"
 harness_sha="$(git -C "$SCRIPT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "no-vcs")"
-# The model name names the model-direct baseline (<model>-direct) in the
-# cross-backend table, so a reader sees which model produced each row.
-model="$(llm_default_model "$BACKEND" 2>/dev/null || true)"
+# Resolve the model once — --model override, else the per-backend config
+# default (same helper bin/audit's resolve_model uses). Both conditions run
+# this exact model: model-direct passes it to llm_run_agent_prompt, harness
+# passes it to bin/audit via --model. The name also labels the model-direct
+# baseline (<model>-direct) in the cross-backend table.
+model="${MODEL_OVERRIDE:-$(llm_default_model "$BACKEND" 2>/dev/null || true)}"
 
 # In --regenerate mode, run.json already exists and carries the original
 # run's metadata (replicates, budget, conditions, target/harness SHAs at
@@ -826,10 +836,10 @@ run_model_direct_cell() {
   # backends `wait` is just a synchronous proxy with no watcher attached.
   if [ "$BUDGET_WALL" = "0" ]; then
     llm_run_agent_prompt_no_timeout "$BACKEND" "$prompt" "$raw_log" \
-      "$(llm_default_model "$BACKEND")" 0 "$add_dirs" "$out_dir" &
+      "$model" 0 "$add_dirs" "$out_dir" &
   else
     llm_run_agent_prompt "$BACKEND" "$prompt" "$BUDGET_WALL" "$raw_log" \
-      "$(llm_default_model "$BACKEND")" 0 "$add_dirs" "$out_dir" &
+      "$model" 0 "$add_dirs" "$out_dir" &
   fi
   local agent_pid=$! watcher_pid=""
   if [ "$BACKEND" = "gemini" ]; then
@@ -961,6 +971,12 @@ run_harness_cell() {
   harness_target_for_mark="$(cd "$harness_target_for_mark" 2>/dev/null && pwd -P || printf '')"
   local harness_sweep_marker
   harness_sweep_marker="$(mark_cell_start_for_sweep "$cell_dir" "$harness_target_for_mark")"
+  # Propagate the benchmark-resolved model so the harness cell audits the same
+  # model as its model-direct sibling. bin/audit's resolve_model + preflight
+  # (incl. the agy label/guard) validate it — no duplicate logic here. Omit
+  # the flag when empty so bin/audit falls back to its own default.
+  local audit_model_args=()
+  [ -n "$model" ] && audit_model_args=(--model "$model")
   if [ "$BUDGET_WALL" = "0" ]; then
     (
       cd "$facade" || exit 1
@@ -968,6 +984,7 @@ run_harness_cell() {
         "$facade/bin/audit" \
           --target "$TARGET_SLUG" \
           --backend "$BACKEND" \
+          ${audit_model_args[@]+"${audit_model_args[@]}"} \
           --experiment "$exp_name"
     ) > "$cell_dir/audit.log" 2>&1 || rc=$?
   else
@@ -978,6 +995,7 @@ run_harness_cell() {
         "$facade/bin/audit" \
           --target "$TARGET_SLUG" \
           --backend "$BACKEND" \
+          ${audit_model_args[@]+"${audit_model_args[@]}"} \
           --experiment "$exp_name"
     ) > "$cell_dir/audit.log" 2>&1 || rc=$?
   fi

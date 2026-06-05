@@ -250,8 +250,10 @@ assert_match '"reason":"agy"|\"reason\": \"agy\"' "$out" "gemini backend: parses
 gemini_args=$(cat "$FAKE_GEMINI_ARGS")
 assert_match '.*--dangerously-skip-permissions' "$gemini_args" "gemini backend: passes --dangerously-skip-permissions"
 assert_match '.* -p' "$gemini_args" "gemini backend: uses prompt flag"
-# agy has no --model / --output-format / --approval-mode equivalents.
-if grep -qE -- '--output-format|--approval-mode|--model' <<<"$gemini_args"; then
+# agy 1.0.5+ pins the model by its display label (mapped from the config slug),
+# but still has no --output-format / --approval-mode equivalents.
+assert_match '--model Gemini 3.1 Pro \(High\)' "$gemini_args" "gemini backend: wires the mapped agy model label"
+if grep -qE -- '--output-format|--approval-mode' <<<"$gemini_args"; then
   fail "gemini backend: must not pass legacy gemini-cli flags" "got: $gemini_args"
 else
   pass "gemini backend: omits legacy gemini-cli flags"
