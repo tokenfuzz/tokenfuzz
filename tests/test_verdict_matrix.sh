@@ -120,7 +120,7 @@ assert_eq "promote" "$verdict" "matrix: libxml2 + bytes/bytes → promote"
 # crashes/ with a low-severity flag rather than moved to crashes-rejected/.
 verdict=$(run_verdict 'Caller contract: unspecified
 Trigger source: call-sequence' 'bytes')
-assert_eq "contract-flag" "$verdict" "matrix: libxml2 + call-sequence → contract-flag (kept in crashes/, low severity)"
+assert_eq "contract-flag" "$verdict" "matrix: libxml2 + call-sequence → contract-flag (kept in crashes/, lower severity)"
 
 # Row 3: firefox / bytes,call-sequence,timing / call-sequence → security
 verdict=$(run_verdict 'Caller contract: obeyed
@@ -140,13 +140,13 @@ assert_eq "promote" "$verdict" "matrix: openssl + bytes → promote"
 # Row 6: openssl-parser / bytes / race → contract-flag (was 'robustness')
 verdict=$(run_verdict 'Caller contract: obeyed
 Trigger source: race' 'bytes')
-assert_eq "contract-flag" "$verdict" "matrix: openssl + race → contract-flag (kept in crashes/, low severity)"
+assert_eq "contract-flag" "$verdict" "matrix: openssl + race → contract-flag (kept in crashes/, lower severity)"
 
 # contract=violated now emits contract-flag (kept in crashes/, scored low)
 # rather than the old 'violated' verdict (which moved to crashes-rejected/).
 verdict=$(run_verdict 'Caller contract: violated
 Trigger source: bytes' 'bytes')
-assert_eq "contract-flag" "$verdict" "matrix: contract=violated → contract-flag (kept in crashes/, low severity)"
+assert_eq "contract-flag" "$verdict" "matrix: contract=violated → contract-flag (kept in crashes/, lower severity)"
 
 # ───────────────────────────────────────────────────────────────────
 # 4. evaluate_crash_verdict — "both" expansion
@@ -187,7 +187,7 @@ verdict=$(run_verdict 'Caller contract: obeyed' 'bytes')
 assert_eq "promote" "$verdict" "contract-only report → promote (default trigger=bytes)"
 
 verdict=$(run_verdict 'Caller contract: violated' 'bytes')
-assert_eq "contract-flag" "$verdict" "contract=violated → contract-flag (kept in crashes/, low severity)"
+assert_eq "contract-flag" "$verdict" "contract=violated → contract-flag (kept in crashes/, lower severity)"
 
 # ───────────────────────────────────────────────────────────────────
 # 7. evaluate_crash_verdict — incomplete report
@@ -249,7 +249,7 @@ Trusted caller actions: parse
 Caller contract: violated
 Trigger source: bytes"
 reason=$(crash_dir_static_legitimacy_rejection_reason "$TEST_TMPDIR/violated_2field" 2>/dev/null || true)
-assert_match "contract-flag" "$reason" "contract=violated → contract-flag (kept in crashes/, low severity)"
+assert_match "contract-flag" "$reason" "contract=violated → contract-flag (kept in crashes/, lower severity)"
 assert_match "violated" "$reason" "contract-flag reason still names the violation"
 
 make_crash_dir "$TEST_TMPDIR/harness_only_parameter" "Boundary: JSON text input file

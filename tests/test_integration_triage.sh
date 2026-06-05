@@ -266,9 +266,9 @@ assert_file_contains "$RESULTS_DIR/findings/FIND-008-FIND/report.md" "^## Triage
 # 9. triage_crash_dirs — callback-releases-active is a CONTRACT-FLAG.
 # The dir STAYS in crashes/ with a .contract-flagged sidecar +
 # "## Contract concern" report block. The reachability scorer applies
-# a ×0.7 multiplier on caller_contract=violated downstream, so
-# Severity is automatically rated low. crashes-rejected/ is reserved
-# for non-security classes (OOM/panic/null-deref/no-signal/TTL).
+# a ×0.7 multiplier from that report block downstream, so Severity is
+# automatically rated lower. crashes-rejected/ is reserved for
+# non-security classes (OOM/panic/null-deref/no-signal/TTL).
 # ═══════════════════════════════════════════════════════════════
 
 mkdir -p "$RESULTS_DIR/crashes/CRASH-009-1"

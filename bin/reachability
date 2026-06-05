@@ -1398,16 +1398,36 @@ def _callers_factor(reach: dict) -> tuple[float, str]:
     return factor, "; ".join(parts)
 
 
-def _contract_factor(value: str) -> tuple[float, str]:
+def _has_contract_concern(report_text: str) -> bool:
+    """True when triage annotated the report with a contract concern.
+
+    Triage keeps these crashes in ``crashes/`` but prepends a report-visible
+    ``## Contract concern`` section. Treat that section as the scorer input so
+    scoring remains reproducible from REPORT.md alone; do not depend on the
+    sidecar marker.
+    """
+    return bool(re.search(r"^## Contract concern\s*$", report_text or "", re.MULTILINE))
+
+
+def _contract_factor(value: str, report_text: str = "") -> tuple[float, str]:
     """CVSS Attack Complexity analogue. Obeyed contract is the *baseline*
     (×1.0) — the standard reachable case all other factors already assume.
     Violated contract raises Attack Complexity (caller had to misuse the
     API), so we apply a penalty. We do not *reward* the obeyed case with a
     bonus; that would silently inflate every routine bug — CVSS AC only
-    penalises high complexity, it never rewards low complexity."""
+    penalises high complexity, it never rewards low complexity.
+
+    A triage contract concern is broader than the literal ``Caller contract``
+    enum: the verdict matrix also uses it when the trigger shape sits outside
+    the target's declared caller-controlled boundary. That is still a reach
+    concern, so apply the same penalty when the report carries the triage
+    annotation instead of rewriting the authored enum to ``violated``.
+    """
     v = (value or "").lower()
     if "violat" in v or "misuse" in v:
         return 0.7, "contract violated (×0.7)"
+    if _has_contract_concern(report_text):
+        return 0.7, "contract concern flagged (×0.7)"
     return 1.0, "contract obeyed/unstated (×1.0)"
 
 
@@ -1464,7 +1484,9 @@ def reach_score(fields: dict, reach: dict) -> tuple[int, str, list[str]]:
         _report_is_triaged(fields),
     )
     callers_f, callers_reason = _callers_factor(reach)
-    contract_f, contract_reason = _contract_factor(fields.get("caller_contract", ""))
+    contract_f, contract_reason = _contract_factor(
+        fields.get("caller_contract", ""), fields.get("_report_text", ""),
+    )
     controls_f, controls_reason = _controls_factor(
         fields.get("caller_controls", ""), fields.get("trigger_source", ""),
     )
@@ -2240,7 +2262,7 @@ def _format_severity_section(sev: dict) -> str:
     lines.append("- _Reach (R)_ — `surface × callers × contract × controls`. Maps to CVSS Attack Vector × AC × PR × UI. **Multiplicative** — any near-zero gate collapses the side.")
     lines.append("    - **Surface tiers**: network 28 · popular library 22 · library 16 · file parser 14 · production CLI 8 · **dev/test/maintenance tool 1** · internal harness 0")
     lines.append(f"    - **Popularity**: expressed by the surface-tier upgrade (library → library_popular at ≥{POPULAR_LIBRARY_THRESHOLD} genuine callers); the callers factor is a narrow secondary tilt (×0.90–×1.10) so two bugs in the same tier can still be ordered by reach without double-counting popularity")
-    lines.append("    - **Contract** (CVSS Attack Complexity analog): obeyed = ×1.0 baseline · violated = ×0.7 (we never *reward* the baseline case with a bonus)")
+    lines.append("    - **Contract** (CVSS Attack Complexity analog): obeyed = ×1.0 baseline · violated or triage Contract concern = ×0.7 (we never *reward* the baseline case with a bonus)")
     lines.append("    - **Non-shipping surfaces**: bugs in `maint/`, `tests/`, `fuzz/`, or any binary matching `*test`/`*fuzz` land in the dev_tool tier and stay Low even if their impact is high — aligns with Microsoft Bug Bar and Project Zero practice that non-shipping code is not a security-relevant input surface")
     lines.append("- _Confidence factor (CF)_ — multiplies the whole score. Maps to CVSS Temporal Report Confidence.")
     lines.append("    - **Baseline**: 0.7")

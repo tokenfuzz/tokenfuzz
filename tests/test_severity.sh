@@ -338,6 +338,27 @@ read level score key i r cf <<< "$(get_severity "$dir")"
 # 22 (popular) × 1.00 × 0.7 × 1.0 = 15.4 → 15
 assert_eq "15" "$r" "R=15 with violated contract"
 
+# Contract-flagged crashes can keep the authored Caller contract value
+# (for example, "unspecified") while triage records the broader reach concern
+# in a report-visible section. The scorer must apply the same reach penalty
+# from that section without requiring the field to be rewritten to "violated".
+seed_hits "demo_e_contract_concern" 100
+dir=$(make_crash "demo_e_contract_concern" CRASH-E-CONTRACT-CONCERN \
+  "heap-buffer-overflow READ" "library-api" "unspecified" "bytes" "5/5" "CL-x (singleton)")
+cat >> "$dir/report.md" <<'EOF'
+
+## Contract concern
+
+Triage kept this crash in `crashes/` and flagged a contract concern: trigger shape outside the declared input boundary.
+EOF
+_CURRENT_TEST="reach: Contract concern section factor (×0.7)"
+read level score key i r cf <<< "$(get_severity "$dir")"
+# 22 (popular) × 1.00 × 0.7 × 1.0 = 15.4 → 15
+assert_eq "15" "$r" "R=15 from Contract concern section with Caller contract unspecified"
+python3 "$REACH" --report "$dir" --no-cache >/dev/null 2>&1
+assert_file_contains "$dir/report.md" "contract concern flagged \(×0\\.7\)" \
+  "rationale names Contract concern section penalty"
+
 # NEW: unknown surface + popular caller count gets promoted to library_popular.
 # Reachability is a stronger signal than a missing Surface field — punishing
 # the bug because the report author left Surface blank/"unknown" is the bug
