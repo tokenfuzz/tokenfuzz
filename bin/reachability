@@ -2314,6 +2314,16 @@ _KNOWN_FIELD_LABELS = frozenset({
     "caller controls", "boundary",
 })
 
+# A `|` table is the report's Fields table only when a row carries one of these
+# identity labels: the `Field` header cell, the always-present Severity/Class
+# rows, or a reach label. File/Function/Line/Target are deliberately excluded —
+# they double as evidence/stack-table column headers (`| File | Note |`), so
+# matching them would mistake an evidence table for the Fields table, either
+# suppressing synthesis or appending reach rows into the wrong table.
+_FIELDS_TABLE_IDENTITY = frozenset(
+    {"field"} | (_KNOWN_FIELD_LABELS - {"file", "function", "line", "target"})
+)
+
 
 def _field_present(text: str, field: str) -> bool:
     wanted = field.lower()
@@ -2328,14 +2338,10 @@ def _field_present(text: str, field: str) -> bool:
     return False
 
 
-def _insert_fields_rows(text: str, rows: list[tuple[str, str]]) -> str:
-    """Append `| Field | Value |` rows to the report's Fields table (the first
-    contiguous run of table rows that carries a known structured field). No-op
-    if the report has no such table. Values are flattened to a single cell."""
-    if not rows:
-        return text
-    lines = text.splitlines()
-    end = -1
+def _find_fields_table_end(lines: list[str]) -> int:
+    """Index of the last row of the report's Fields table — the first
+    contiguous run of `|` rows carrying a known structured field label
+    (Class/Severity/File/…). Returns -1 when the report has no such table."""
     i, n = 0, len(lines)
     while i < n:
         if lines[i].lstrip().startswith("|"):
@@ -2343,33 +2349,85 @@ def _insert_fields_rows(text: str, rows: list[tuple[str, str]]) -> str:
             has_known = False
             while j < n and lines[j].lstrip().startswith("|"):
                 parts = lines[j].split("|")
-                if len(parts) >= 3 and parts[1].strip().lower() in _KNOWN_FIELD_LABELS:
+                if len(parts) >= 3 and parts[1].strip().lower() in _FIELDS_TABLE_IDENTITY:
                     has_known = True
                 j += 1
             if has_known:
-                end = j - 1
-                break
+                return j - 1
             i = j
         else:
             i += 1
+    return -1
+
+
+def _cell(v: str) -> str:
+    """Flatten a value to a single Markdown table cell."""
+    return " ".join(v.split()).replace("|", r"\|")
+
+
+def _insert_fields_rows(text: str, rows: list[tuple[str, str]]) -> str:
+    """Append `| Field | Value |` rows to the report's Fields table. No-op if
+    the report has no such table (callers synthesize one first)."""
+    if not rows:
+        return text
+    lines = text.splitlines()
+    end = _find_fields_table_end(lines)
     if end < 0:
         return text
     indent = lines[end][:len(lines[end]) - len(lines[end].lstrip())]
-    def _cell(v: str) -> str:
-        return " ".join(v.split()).replace("|", r"\|")
     new = [f"{indent}| {f} | {_cell(v)} |" for f, v in rows]
     lines[end + 1:end + 1] = new
     return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
 
 
+def _synthesize_fields_table(text: str, severity: dict, used: dict) -> str:
+    """Build a `## Fields` table for a report that has none — some model authors
+    write bare `Field: value` lines, or omit the fields entirely — so every
+    report renders the same tabular style as a harness crash. Rows are the
+    scored Severity plus whichever reach fields resolved.
+
+    The table is emitted under a canonical `## Fields` heading (the shape
+    `bin/export-repro` and the harness report template both use), and any bare
+    `Field: value` lines are left in place: the harness deliberately keeps the
+    Fields table duplicated as bare labels below it so downstream regex parsers
+    (`bin/export-repro`, `bin/cluster-crashes`, `lib/triage.sh`) keep working,
+    and `bin/render-md` hides that duplicate block from HTML. Removing the bare
+    labels here would make those fields invisible to export. No-op if there is
+    nothing beyond Severity to table (keeps the slim recon template unchanged)."""
+    rows: list[tuple[str, str]] = [("Severity", _format_severity_field(severity))]
+    for key, label in _SURFACED_REACH_FIELDS:
+        v = (used.get(key) or "").strip()
+        if v:
+            rows.append((label, _cell(v)))
+    if len(rows) <= 1:
+        return text
+    lines = text.splitlines()
+    table = ["## Fields", "", "| Field | Value |", "| :---- | :---- |"]
+    table += [f"| {f} | {v} |" for f, v in rows]
+    # Lead with the Fields section: place it after the first heading, or at the
+    # top when the report has no heading.
+    idx = 0
+    for i, line in enumerate(lines):
+        if line.startswith("#"):
+            idx = i + 1
+            break
+    lines[idx:idx] = ["", *table, ""]
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
 def update_report(report_path: Path, reachability: dict, severity: dict) -> None:
     text = report_path.read_text("utf-8", errors="replace")
+    used = severity.get("fields_used") or {}
+    # A report with no Fields table (model-direct / bare-label authors) gets one
+    # synthesized so it reads like a harness crash; one that already has a table
+    # keeps it and only gains the rows it is missing (below).
+    if _find_fields_table_end(text.splitlines()) < 0:
+        text = _synthesize_fields_table(text, severity, used)
     text, fields_sev_updated = _replace_structured_field(
         text, "Severity", _format_severity_field(severity),
     )
     # Surface the reach fields the scorer used into the Fields table when the
     # report omits them (insert-if-absent; never overwrite an authored row).
-    used = severity.get("fields_used") or {}
     to_add = [
         (label, used[key].strip())
         for key, label in _SURFACED_REACH_FIELDS

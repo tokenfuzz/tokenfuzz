@@ -1199,5 +1199,100 @@ assert_file_contains "$AUTH_DIR/report.md" '^\| Surface  \| AGENT-AUTHORED SURFA
 n_surface2=$(grep -c '^| Surface' "$AUTH_DIR/report.md")
 assert_eq "1" "$n_surface2" "sidecar Surface not added alongside the authored one"
 
+# ───────────────────────────────────────────────────────────────────
+# 20. A report with NO Fields table (bare-label / model-direct style)
+# gets one synthesized, so it reads like a harness crash.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="--report synthesizes a Fields table when the report has none"
+BARE_DIR="$TEST_TMPDIR/crashes/CRASH-BARE"
+mkdir -p "$BARE_DIR"
+cat > "$BARE_DIR/report.md" <<'EOF'
+## Classification
+- **Severity**: Medium (auto: score=31)
+
+Boundary: curl public API
+Caller controls: parameter string length and content
+Trusted caller actions: calls curl_easy_setopt
+Caller contract: obeyed
+Trigger source: call-sequence
+
+# Summary
+A heap-use-after-free READ occurs in curl_easy_getinfo after the option is freed.
+EOF
+cat > "$BARE_DIR/.llm_fields.json" <<'EOF'
+{"surface":"library-api — curl public API","primitive":"uaf_read",
+ "caller_contract":"obeyed","caller_controls":"bytes","trigger_source":"call-sequence",
+ "boundary":"curl public API"}
+EOF
+python3 "$REACH" --report "$BARE_DIR" --severity-only --no-cache --json >/dev/null 2>&1 \
+  || fail "$_CURRENT_TEST" "report mode failed"
+assert_file_contains "$BARE_DIR/report.md" '^## Fields$' \
+  "table is emitted under a canonical ## Fields heading"
+assert_file_contains "$BARE_DIR/report.md" '^\| Field \| Value \|' \
+  "a Fields table was synthesized"
+assert_file_contains "$BARE_DIR/report.md" '^\| Surface \| library-api' \
+  "synthesized table carries Surface"
+assert_file_contains "$BARE_DIR/report.md" '^\| Caller controls \|' \
+  "synthesized table carries Caller controls"
+# Bare labels are KEPT below the table: the harness duplicates the Fields table
+# as bare labels so downstream regex parsers (export-repro, cluster-crashes,
+# triage.sh) keep working; render-md hides them from HTML. Removing them would
+# make these fields invisible to export.
+assert_file_contains "$BARE_DIR/report.md" '^Caller controls:' \
+  "bare Caller controls: line preserved for downstream parsers"
+assert_file_contains "$BARE_DIR/report.md" '^Boundary:' \
+  "bare Boundary: line preserved for downstream parsers"
+# A non-tabled bare field (not one of the surfaced six) is left untouched.
+assert_file_contains "$BARE_DIR/report.md" '^Trusted caller actions:' \
+  "unrelated bare field preserved"
+
+_CURRENT_TEST="--report table synthesis is idempotent"
+n_before=$(grep -c '^| Field | Value |' "$BARE_DIR/report.md")
+python3 "$REACH" --report "$BARE_DIR" --severity-only --no-cache --json >/dev/null 2>&1 \
+  || fail "$_CURRENT_TEST" "second run failed"
+n_after=$(grep -c '^| Field | Value |' "$BARE_DIR/report.md")
+assert_eq "$n_before" "$n_after" "no second table synthesized on re-run"
+
+# ───────────────────────────────────────────────────────────────────
+# 21. A report whose only table is an evidence table (first column `File`)
+# must NOT be mistaken for the Fields table: synthesis still happens, and the
+# evidence table is not polluted with reach rows.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="--report does not mistake an evidence table for the Fields table"
+EV_DIR="$TEST_TMPDIR/crashes/CRASH-EV"
+mkdir -p "$EV_DIR"
+cat > "$EV_DIR/report.md" <<'EOF'
+## Classification
+- **Severity**: Medium (auto: score=31)
+
+Boundary: curl public API
+Caller controls: parameter string length and content
+
+# Evidence
+| File | Note |
+| :--- | :--- |
+| catalog.c:42 | tool_resolve_entry frees here |
+| catalog.c:91 | child_free reuse |
+
+# Summary
+A heap-use-after-free READ occurs after free.
+EOF
+cat > "$EV_DIR/.llm_fields.json" <<'EOF'
+{"surface":"library-api — curl public API","primitive":"uaf_read",
+ "caller_contract":"obeyed","caller_controls":"bytes","trigger_source":"call-sequence",
+ "boundary":"curl public API"}
+EOF
+python3 "$REACH" --report "$EV_DIR" --severity-only --no-cache --json >/dev/null 2>&1 \
+  || fail "$_CURRENT_TEST" "report mode failed"
+assert_file_contains "$EV_DIR/report.md" '^## Fields$' \
+  "a Fields table is synthesized even when an evidence table is present"
+assert_file_contains "$EV_DIR/report.md" '^\| Surface \| library-api' \
+  "synthesized Fields table carries Surface"
+# The evidence table keeps exactly its two original data rows — no reach rows
+# were appended into it (pre-fix, the reach rows landed under the `File` table
+# and no `## Fields` table was synthesized at all).
+n_ev=$(grep -c '^| catalog.c' "$EV_DIR/report.md")
+assert_eq "2" "$n_ev" "evidence table rows unchanged"
+
 teardown_test_env
 summary
