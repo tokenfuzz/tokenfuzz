@@ -681,9 +681,14 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
     if b in {"codex", "oss"}:
         if "gpt-5.5" in m:
             return {
-                "input": _money("5"),
-                "cache_read": _money("0.50"),
-                "output": _money("30"),
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("5"),
+                "input_high": _money("10"),
+                "cache_read_low": _money("0.50"),
+                "cache_read_high": _money("1"),
+                "output_low": _money("30"),
+                "output_high": _money("45"),
                 "source": "openai-api-gpt-5.5",
             }
         if "gpt-5.4-mini" in m:
@@ -2197,8 +2202,9 @@ def render_section(report: dict) -> str:
         lines.append(
             "> - **Cost** — USD-equivalent token cost at public provider "
             "rates: fresh input + cache writes + cache reads + output. "
-            "Codex rows use OpenAI API-equivalent dollars; the Codex product "
-            "also reports credits."
+            "Codex rows use OpenAI API-equivalent dollars, including "
+            "GPT-5.5 long-context pricing when a request exceeds 272k "
+            "input tokens; the Codex product also reports credits."
         )
         lines.append(
             "> - **Output** — tokens the model emitted (responses + "
@@ -2655,11 +2661,12 @@ def crosstab(bench_root: Path) -> str:
         "- **Cost** — public USD-equivalent token cost: fresh input at input "
         "rate, cache writes at cache-write rate, cache reads at cache-read or "
         "context-cache rate, and output at output rate. Codex rows use "
-        "OpenAI API-equivalent dollars; Codex product billing may also appear "
-        "as credits in the workspace. This aggregate table rounds to whole "
-        "dollars to stay readable; each backend ledger keeps the decimal "
-        "amounts. Gemini Pro rows are priced per request so the 200k-token "
-        "tier boundary is handled before aggregation."
+        "OpenAI API-equivalent dollars; GPT-5.5 long-context requests use "
+        "the higher >272k-token rates before aggregation. Codex product "
+        "billing may also appear as credits in the workspace. This aggregate "
+        "table rounds to whole dollars to stay readable; each backend ledger "
+        "keeps the decimal amounts. Gemini Pro rows are priced per request so "
+        "the 200k-token tier boundary is handled before aggregation."
     )
     lines.append(
         "- **Estimated values** — a `~` prefix means the row used a "

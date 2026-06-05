@@ -125,6 +125,16 @@ chv=$(python3 "$PY" harvest "$crd" --backend claude --model claude-opus-4-8)
 assert_eq "0.083500" "$(echo "$chv" | jq -r '.tokens.cost_usd')" \
   "T1q: harvest prices fresh input + cache writes + cache reads + output"
 
+g5d="$work/gpt55-cost/results"
+mkdir -p "$g5d/logs"
+printf '%s\n' \
+  '{"backend":"codex","model":"gpt-5.5","tokens":{"input":270000,"cached_input":260000,"output":1000}}' \
+  '{"backend":"codex","model":"gpt-5.5","tokens":{"input":300000,"cached_input":290000,"output":1000}}' \
+  > "$g5d/logs/index.jsonl"
+g5v=$(python3 "$PY" harvest "$g5d" --backend codex --model gpt-5.5)
+assert_eq "0.645000" "$(echo "$g5v" | jq -r '.tokens.cost_usd')" \
+  "T1q2: harvest applies GPT-5.5 long-context pricing per Codex request"
+
 # ── T2: UBSan / TSan signatures also count as confirmed ──────────────────
 ubd="$work/ub/results/crashes/CRASH-1"
 mkdir -p "$ubd"
