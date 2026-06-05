@@ -38,5 +38,4 @@ are about to do.
 | [Browser targets](browser-targets.md) | Audit Firefox, Chromium, or a JS/Wasm runtime. |
 | [Recon discovery](recon-discovery.md) | Understand or refresh the breadth-first source survey that seeds the audit queue. |
 | [Triage results](triage-results.md) | Decide which crashes and findings to promote, reject, or refine. |
-| [Benchmark the harness](benchmark.md) | Measure, with evidence, whether the harness out-finds a bare CTF prompt on a target. |
 | [Reproduce a crash](reproduce-a-crash.md) | Re-run an exported TokenFuzz crash bundle against a clean upstream checkout. |

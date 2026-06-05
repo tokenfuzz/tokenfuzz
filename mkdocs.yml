@@ -126,7 +126,6 @@ nav:
       - Browser targets: guides/browser-targets.md
       - Recon discovery: guides/recon-discovery.md
       - Triage results: guides/triage-results.md
-      - Benchmark the harness: guides/benchmark.md
       - Reproduce a crash: guides/reproduce-a-crash.md
   - Concepts:
       - concepts/index.md
@@ -135,6 +134,7 @@ nav:
       - Strategy model: concepts/strategy-model.md
       - Cost model: concepts/cost-model.md
       - Deduplication: concepts/deduplication.md
+      - Benchmarking: concepts/benchmark.md
   - Reference:
       - reference/index.md
       - Commands: reference/commands.md

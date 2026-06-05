@@ -404,4 +404,4 @@ most recent run when neither is set). With no `--target` it re-derives every
 run under the bench root — all targets and backends — and rebuilds the full
 cross-backend page. Either way it refreshes `benchmark-result.{md,html}` and
 the cluster reports and does not rebuild each crash's `export-repro` report
-bundle. See [the benchmark guide](../guides/benchmark.md#regenerating-results-after-a-code-change).
+bundle. See [Benchmarking](../concepts/benchmark.md#regenerating-results-after-code-changes).
