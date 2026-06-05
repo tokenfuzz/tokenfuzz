@@ -1053,8 +1053,14 @@ _triage_llm_fill_fields() {
   prompt=$(render_prompt_template triage_reachability_fields.md.j2 \
     --var "narrative=${narrative}") || return 0
 
+  # Use the shared single-shot decision timeout (default 45s), not a tight
+  # hardcoded value: a slow reasoning backend (e.g. codex) routinely needs
+  # >20s, and a timeout here returns empty → no sidecar → the reach fields
+  # silently never get filled (severity then collapses to the missing-field
+  # default). Operators raise LLM_DECISION_TIMEOUT once for all decisions.
   local out
-  out=$(printf '%s' "$prompt" | llm_decide reachability-fields '' 20 2>/dev/null) || return 0
+  out=$(printf '%s' "$prompt" \
+    | llm_decide reachability-fields '' "${LLM_DECISION_TIMEOUT:-45}" 2>/dev/null) || return 0
   [ -n "$out" ] || return 0
   # Validate it's a JSON object before writing.
   if printf '%s' "$out" | jq -e 'type=="object"' >/dev/null 2>&1; then
