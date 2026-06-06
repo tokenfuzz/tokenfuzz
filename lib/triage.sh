@@ -2021,8 +2021,10 @@ llm_find_quality_decision() {
   # deterministic (class, file, line) site computed at cluster time
   # (lib/finding_signature.py), not anything this gate produces, so the gate
   # works the same for harness, recon, and model-direct findings. v10 dropped
-  # the old dedup_key field from the verdict shape.
-  local decision_version="v10"
+  # the old dedup_key field from the verdict shape. v11 added the
+  # non-product-surface reject category (reject by role when the primary
+  # location is clearly non-shipping; accept on any scope doubt).
+  local decision_version="v11"
 
   # Quorum required for an accept=false verdict to stick. Each call resolves
   # the quorum IN-LINE — independent LLM votes are taken back-to-back until

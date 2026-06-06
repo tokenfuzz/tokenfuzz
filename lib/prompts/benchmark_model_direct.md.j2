@@ -88,16 +88,33 @@ stays clean.
 
 ## Audit scope — what NOT to file
 
-These directory names are not part of the product's attack surface,
-anywhere in the tree:
+Only file a FINDING or CRASH whose primary source location is in code
+that **ships inside the product** (the built library or program under
+audit). Judge by ROLE, not just directory name.
 
-    {{ non_audit_dirs }}
+Out of scope even when the defect is real:
 
-Do not file FINDINGs or CRASHes whose primary source location is inside
-a path component matching one of those names (a bug in
-`src/tests/foo_test.c` is out of scope even if real). Reach paths that
-*pass through* such code into product code are fair game — what
-matters is where the underlying defect lives.
+- These directory names, anywhere in the tree: {{ non_audit_dirs }}
+  (a bug in `src/tests/foo_test.c` is out of scope).
+- Any file that builds a **separate test or tool binary** rather than the
+  product: test drivers and runners (e.g. `runtest.c`, a `pcre2test`-style
+  driver, `*test*` / `*_test.*` programs), fuzz harnesses, and benchmark
+  or perf drivers.
+- **Examples, demos, and mocks/stubs/fixtures** — sample code, not the
+  shipped library.
+- **Code/table generators and build/CI scripts** — `codegen/*`, `gen*`
+  scripts, `.github/*`, and other tooling that runs at build time on
+  trusted maintainer input and emits source rather than shipping itself.
+- **Language-binding *test drivers*** (e.g. a `drv_*`/`test_*` script
+  under `python/`, `perl/`, `ruby/`) — note the binding's *shipped*
+  interface code is still in scope.
+
+The test is "does this translation unit link into / ship as the product?",
+not "what directory is it in." Reach paths that *pass through* such code
+into product code are fair game — what matters is where the underlying
+defect lives. **If you are unsure whether a file ships, treat it as
+in-scope and file it** — the gate will sort out the rest; never drop a
+real product bug over a scope doubt.
 
 This is a scoping rule for *findings*, not for *navigation*. You may
 still read, build, and execute anything in the tree — in particular,

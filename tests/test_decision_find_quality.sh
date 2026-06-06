@@ -189,8 +189,8 @@ cat > "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" <<EOF
 EOF
 export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"current reviewer accepts","class":"auth:bypass","severity":"high"}'
 validate_find_gate >/dev/null 2>&1
-assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" '"decision_version": *"v10"' \
-  "stale v2 cache: re-evaluated under v10"
+assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" '"decision_version": *"v11"' \
+  "stale v2 cache: re-evaluated under v11"
 assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" "auth:bypass" \
   "stale v2 cache: new class label written"
 assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" '"accept": *true' \
@@ -231,8 +231,8 @@ cat > "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" <<EOF
 EOF
 export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"v7 reviewer confirms","class":"auth:bypass","severity":"high"}'
 validate_find_gate >/dev/null 2>&1
-assert_file_contains "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" '"decision_version": *"v10"' \
-  "stale v4 cache: re-evaluated under v10"
+assert_file_contains "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" '"decision_version": *"v11"' \
+  "stale v4 cache: re-evaluated under v11"
 assert_file_contains "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" \
   '"reason": *"v7 reviewer confirms"' \
   "stale v4 cache: verdict updated on re-evaluation"

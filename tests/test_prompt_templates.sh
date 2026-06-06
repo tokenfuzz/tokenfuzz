@@ -108,6 +108,28 @@ assert_file_contains "$md_direct" "Audit scope" \
   "model-direct template carries the Audit scope section header"
 assert_file_contains "$md_direct" "scoping rule for .findings., not for .navigation." \
   "model-direct template separates finding-scope from navigation-scope"
+# NEW: the Audit-scope block must scope by ROLE (test/tool binaries,
+# generators, CI scripts, binding drivers), not directory name alone, and
+# must keep the false-negative-safe "unsure → file it" instruction.
+assert_file_contains "$md_direct" "Judge by ROLE" \
+  "model-direct scope block judges by role, not directory alone"
+assert_file_contains "$md_direct" "separate test or tool binary" \
+  "model-direct scope block names test/tool-binary drivers as out of scope"
+assert_file_contains "$md_direct" "generators and build/CI scripts" \
+  "model-direct scope block names generators and CI scripts as out of scope"
+assert_file_contains "$md_direct" "unsure whether a file ships, treat it as" \
+  "model-direct scope block keeps the FN-safe unsure-is-in-scope rule"
+
+# NEW: the find-quality gate carries the non-product-surface reject
+# category with an explicit keep-on-unsure (Layer 2). Render with a dummy
+# body so the {{ body }} placeholder resolves.
+fq_rendered=$(python3 "$renderer" triage_find_quality.md.j2 --var "body=stub")
+assert_match "Non-product surface" "$fq_rendered" \
+  "find-quality gate carries the non-product-surface reject category"
+assert_match "language-binding .test driver" "$fq_rendered" \
+  "find-quality gate names binding test drivers as non-product"
+assert_match "cannot tell whether the file ships . or it might be" "$fq_rendered" \
+  "find-quality gate keeps explicit keep-on-unsure for scope doubt"
 
 # End-to-end: render with the audit_scope helper's actual output and
 # assert each doc/example/test/fuzz family name shows up in the prompt.

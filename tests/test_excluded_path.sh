@@ -64,6 +64,18 @@ CASES_ALLOWED = [
     ("tools/munge.c",              "tools/ is in scope"),
     ("scripts/helper.c",           "scripts/ is in scope"),
     ("external/foo/bar.c",         "external/ is in scope"),
+    # FN guards: a name token (codegen/gen/mock/stub/perf) is NOT proof a
+    # file is non-product — these are real shipping subsystem names. A hard
+    # filter here would hide product bugs before any agent gets a card;
+    # role calls belong to the find-quality gate, not the scanner. Keeping
+    # them as live assertions so a future re-expansion of the name rules
+    # fails this test instead of silently shrinking scope.
+    ("lib/CodeGen/SelectionDAG.cpp", "CodeGen/ is a product subsystem (LLVM), not build tooling"),
+    ("src/gen_table.c",              "a generated/perf table that ships is auditable"),
+    ("src/stub_resolver.c",          "stub resolver is a product networking module"),
+    ("src/mock_backend.c",           "a shipping mock backend is auditable"),
+    ("src/perf_counter.c",           "perf counters ship; perf_* is not a test marker"),
+    ("src/performance.c",            "a file literally named performance.c is auditable"),
 ]
 
 failures = []

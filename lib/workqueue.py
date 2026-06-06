@@ -683,9 +683,12 @@ def is_excluded_work_path(path: str | Path) -> bool:
         or any(token in stem for token in ("_test_", "test_", "_fuzz", "fuzz_", "_harness", "harness_", "_bench_", "_benchmark_", "_perf_"))
         or ".test." in name
         or ".spec." in name
-        or stem in {"perf", "performance"}
-        or stem.startswith(("perf_", "performance_"))
-        or stem.endswith(("_perf", "_performance"))
+        # `_perf_` (bounded both sides) reads as a benchmark/perf-test stem
+        # (`run_perf_loop`). Deliberately NOT matched: `perf_*` / `*_perf` /
+        # a bare `perf`/`performance` file — those are real shipping
+        # subsystem names (`perf_counter.c`, `performance.c`, Linux perf),
+        # and a name alone cannot tell a perf *tool* from a perf *feature*.
+        # Scope doubt stays in scope; the find-quality gate judges by role.
         or stem.startswith("debug")
         or stem.endswith("_debug")
     ):

@@ -55,6 +55,19 @@ case. Only REJECT (accept=false) when the report is clearly one of:
     reach the abort. Accept only if the report names the unchecked
     OOB / UAF / type-confusion / boundary cross that follows in
     release when the assert is compiled out.
+  - **Non-product surface — the primary location does not ship in the
+    product.** The bug lives in code whose ROLE is not the shipped
+    library/program: a test driver or runner (`runtest.c`, a
+    `pcre2test`-style harness, `*_test.*`), a fuzz harness, a benchmark
+    or example/demo, a mock/stub/fixture, a code/table generator
+    (`codegen/*`, `gen*` scripts), a build/CI script (`.github/*`), or a
+    language-binding *test driver*. A genuine memory bug there is a defect
+    in non-shipping code, not a finding against the product. Judge by role
+    (read the File/Surface in the report), not directory alone. The
+    binding's *shipped* interface code, and a shipped CLI tool, are still
+    in scope. **If you cannot tell whether the file ships — or it might be
+    reached from a shipped path — ACCEPT.** A wrong reject hides a real
+    bug; only reject when the non-shipping role is clear.
 
 Read the substance, not the hedging. Self-deprecating qualifiers in
 the writeup ("mostly robustness, but ...", "may not be exploitable",
