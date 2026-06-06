@@ -219,5 +219,63 @@ if command -v "${cc:-cc}" >/dev/null 2>&1; then
   fi
 fi
 
+# ── Test 7: duplicate basenames don't block a real TU ──────────────
+# Two sources share a basename: dirA/parse.c (real) and dirB/parse.c
+# (stub). The object tree mirrors the source layout. The stub verdict
+# for dirB must NOT leak onto dirA, and dirA must stay auditable.
+
+if command -v "${cc:-cc}" >/dev/null 2>&1; then
+  cc_cmd="${cc:-cc}"
+  dup_target="$TEST_TMPDIR/dup-target"
+  dup_build="$TEST_TMPDIR/dup-build"
+  mkdir -p "$dup_target/dirA" "$dup_target/dirB"
+  mkdir -p "$dup_build/CMakeFiles/lib.dir/dirA" "$dup_build/CMakeFiles/lib.dir/dirB"
+
+  # dirA/parse.c: a legitimate audit surface whose object exposes no
+  # *global* symbols (all-static module, reached via pointers). It
+  # classifies as "unknown", so the `stub_set -= real_set` guard cannot
+  # rescue it — this is exactly the case where a wrong basename mapping
+  # would let dirB's stub verdict block dirA.
+  echo 'static int parse_a(int x){return x+1;}' > "$dup_target/dirA/parse.c"
+  # dirB/parse.c: source exists but its object is a sanitizer-runtime stub.
+  echo '/* parse.c stub: feature compiled out */' > "$dup_target/dirB/parse.c"
+
+  ok=1
+  "$cc_cmd" -c "$dup_target/dirA/parse.c" \
+    -o "$dup_build/CMakeFiles/lib.dir/dirA/parse.c.o" 2>/dev/null || ok=0
+  cat > "$dup_build/_dupstub.s" <<'S'
+        .text
+        .globl  asan.module_ctor_dup
+asan.module_ctor_dup:
+        .byte 0
+S
+  "$cc_cmd" -c "$dup_build/_dupstub.s" \
+    -o "$dup_build/CMakeFiles/lib.dir/dirB/parse.c.o" 2>/dev/null || ok=0
+
+  if [ "$ok" = 1 ]; then
+    dup_features="$TEST_TMPDIR/dup-features.json"
+    python3 "$PROBE" probe \
+      --target-root "$dup_target" \
+      --build-dir "$dup_build" \
+      --sanitizer asan \
+      --output "$dup_features" >/dev/null 2>&1 || true
+
+    if [ -f "$dup_features" ]; then
+      dup_check=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$dup_features" <<'PY'
+import sys, build_probe as bp
+f = bp.load_features(sys.argv[1])
+print("dirA-stub=" + ("FAIL" if bp.is_tu_stub(f, "dirA/parse.c") else "ok"))
+print("dirB-stub=" + ("ok" if bp.is_tu_stub(f, "dirB/parse.c") else "ok-failopen"))
+PY
+)
+      # The real TU must never be flagged as a stub — this is the bug
+      # the location-based disambiguation closes.
+      assert_match 'dirA-stub=ok' "$dup_check" "duplicate basename: real TU (dirA) is not blocked"
+    fi
+  else
+    echo "SKIP: duplicate-basename build setup failed"
+  fi
+fi
+
 teardown_test_env
 summary

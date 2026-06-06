@@ -298,19 +298,58 @@ def _classify_object(path: Path) -> str:
     return "real"
 
 
-def _source_for_object(obj_path: Path, target_root: Path) -> str | None:
-    """Best-effort mapping from build-tree .o back to a source path.
+def _disambiguate_by_location(
+    obj_path: Path, candidates: list[Path], target_root: Path
+) -> Path | None:
+    """Choose the candidate source whose directory chain best matches the
+    object's own location.
 
-    Strategy: take the basename minus extension, search target_root for
-    a matching `.c`/`.cc`/`.cpp`/`.cxx`/`.m`/`.mm` whose basename
-    matches. If multiple match, return the first by sorted order.
-    Returns a target-root-relative path string, or None if no match.
+    Build systems (CMake, autotools VPATH, plain recursive Make) place an
+    object at a path that mirrors its source's directory, so the candidate
+    sharing the longest run of *trailing* directory components with the
+    object is the correct source. Returns the unique best match, or None
+    when two candidates tie (or none overlap) — the caller treats that as
+    ambiguous and refuses to guess.
+    """
+    obj_dirs = obj_path.parent.parts
+    scored: list[tuple[int, Path]] = []
+    for cand in candidates:
+        cand_dirs = cand.relative_to(target_root).parent.parts
+        overlap = 0
+        for a, b in zip(reversed(obj_dirs), reversed(cand_dirs)):
+            if a != b:
+                break
+            overlap += 1
+        scored.append((overlap, cand))
+    top = max(s for s, _ in scored)
+    winners = [c for s, c in scored if s == top]
+    if top > 0 and len(winners) == 1:
+        return winners[0]
+    return None
 
-    Target-agnostic: no project-specific path heuristics.
+
+def _source_for_object(obj_path: Path, target_root: Path) -> tuple[str | None, bool]:
+    """Best-effort mapping from a build-tree .o back to a source path.
+
+    Strategy: take the basename minus extension and search target_root for
+    a matching `.c`/`.cc`/`.cpp`/`.cxx`/`.m`/`.mm`. With a single match,
+    use it. With several (duplicate filenames in different directories),
+    disambiguate by the object's own location via
+    `_disambiguate_by_location`. If that stays ambiguous we refuse to
+    guess: a wrong mapping would let one same-named TU's stub verdict block
+    a *different*, real TU from audit (a silent false negative). Failing
+    open here only risks leaving a genuine stub ungated (wasted effort),
+    which is the safe direction.
+
+    Returns `(target-root-relative path | None, ambiguous?)`. The flag is
+    True only when matches existed but could not be resolved, so callers
+    can surface how many surfaces were left ungated.
+
+    Target-agnostic: structural path matching only, no project heuristics.
     """
     stem = obj_path.stem
     if not stem:
-        return None
+        return (None, False)
     # Many build systems suffix .o files (CMake: `<tu>.c.o`). Strip the
     # inner extension if present.
     inner = Path(stem).stem
@@ -335,22 +374,31 @@ def _source_for_object(obj_path: Path, target_root: Path) -> str | None:
         if matches:
             break
     if not matches:
-        return None
-    matches.sort()
+        return (None, False)
+    matches = sorted(set(matches))
+    if len(matches) == 1:
+        chosen: Path | None = matches[0]
+    else:
+        chosen = _disambiguate_by_location(obj_path, matches, target_root)
+        if chosen is None:
+            return (None, True)
     try:
-        return str(matches[0].relative_to(target_root))
+        return (str(chosen.relative_to(target_root)), False)
     except ValueError:
-        return None
+        return (None, False)
 
 
 def probe_objects(
     build_dir: Path,
     target_root: Path,
     max_objects: int = 5000,
-) -> tuple[list[str], list[str], int]:
-    """Walk build_dir, classify each `.o`, return (stub_tus, compiled_tus, n).
+) -> tuple[list[str], list[str], int, int]:
+    """Walk build_dir, classify each `.o`, return
+    (stub_tus, compiled_tus, n, ambiguous).
 
-    Both lists are deduplicated source-relative paths. The cap is a
+    Both lists are deduplicated source-relative paths. `ambiguous` counts
+    objects whose basename matched several sources that could not be
+    resolved to one — they are left ungated (fail-open). The cap is a
     sanity bound — projects with >5000 TUs are rare and the cap can be
     raised via the CLI.
     """
@@ -358,6 +406,7 @@ def probe_objects(
         return ([], [], 0)
     stub_set: set[str] = set()
     real_set: set[str] = set()
+    ambiguous = 0
     count = 0
     for obj in sorted(build_dir.rglob("*.o")):
         if count >= max_objects:
@@ -367,8 +416,10 @@ def probe_objects(
         verdict = _classify_object(obj)
         if verdict == "unknown":
             continue
-        src = _source_for_object(obj, target_root)
-        if not src:
+        src, was_ambiguous = _source_for_object(obj, target_root)
+        if src is None:
+            # Ambiguous basename → left ungated on purpose (fail-open).
+            ambiguous += was_ambiguous
             continue
         if verdict == "stub":
             stub_set.add(src)
@@ -377,7 +428,7 @@ def probe_objects(
     # If a TU has both a stub and a real .o (e.g. duplicate builds for
     # different configs), trust the "real" classification.
     stub_set -= real_set
-    return (sorted(stub_set), sorted(real_set), count)
+    return (sorted(stub_set), sorted(real_set), count, ambiguous)
 
 
 # ─── Configure summary probe ───────────────────────────────────────
@@ -428,13 +479,19 @@ def build_manifest(
     )
     if binary_path is not None and Path(binary_path).exists():
         manifest.binary = probe_binary(Path(binary_path))
-    stubs, reals, n = probe_objects(build_dir, target_root, max_objects=max_objects)
+    stubs, reals, n, ambiguous = probe_objects(build_dir, target_root, max_objects=max_objects)
     manifest.stub_tus = stubs
     manifest.compiled_tus = reals
     manifest.probed_object_count = n
     manifest.configure_summary = probe_configure_summary(build_log)
     if n == 0:
         manifest.notes.append("no-objects-probed: build_dir contained no .o files; queue gate will fail-open")
+    if ambiguous:
+        manifest.notes.append(
+            f"ambiguous-basename: {ambiguous} object(s) matched several same-named "
+            f"sources and were left ungated (fail-open) rather than risk blocking a "
+            f"real TU"
+        )
     return manifest
 
 
