@@ -657,20 +657,20 @@ CMAKE_BUILD_TOP = """\
 # Prereqs: cmake + a C compiler (Xcode CLT / build-essential).
 # Discard any stale cache from a previous (possibly failed) configure so we
 # can switch generators / flags without cmake refusing to reconfigure.
-# Build type is RelWithDebInfo (not Debug) so the sanitizer runs against
-# the same code paths the release binary ships. Debug builds enable
-# project-defined debug macros (DEBUGBUILD, MOZ_DEBUG, DCHECK_IS_ON, ...)
-# that turn DEBUGASSERT / MOZ_ASSERT / DCHECK / assert() into real aborts
-# — those vanish in the shipped binary, so a debug-only abort is a
-# robustness signal, not a security bug.
+# Build type is Release with explicit -g/-DNDEBUG so the sanitizer runs
+# optimized shipped code paths while preserving symbolized traces. Debug
+# builds enable project-defined debug macros (DEBUGBUILD, MOZ_DEBUG,
+# DCHECK_IS_ON, ...) that turn DEBUGASSERT / MOZ_ASSERT / DCHECK /
+# assert() into real aborts; those vanish in the shipped binary, so a
+# debug-only abort is a robustness signal, not a security bug.
 rm -f "$build/CMakeCache.txt"
 rm -rf "$build/CMakeFiles"
 cmake -S "$src" -B "$build" \\
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo \\
+    -DCMAKE_BUILD_TYPE=Release \\
     -DCMAKE_C_COMPILER="${CC:-clang}" \\
     -DCMAKE_CXX_COMPILER="${CXX:-clang++}" \\
-    -DCMAKE_C_FLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1" \\
-    -DCMAKE_CXX_FLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1" \\
+    -DCMAKE_C_FLAGS="-fsanitize=__SANITIZER_FLAG__ -O2 -g -DNDEBUG -fno-omit-frame-pointer" \\
+    -DCMAKE_CXX_FLAGS="-fsanitize=__SANITIZER_FLAG__ -O2 -g -DNDEBUG -fno-omit-frame-pointer" \\
     -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=__SANITIZER_FLAG__" \\
     -DBUILD_SHARED_LIBS=OFF
 cmake --build "$build" -j__TARGET_ARG__
@@ -683,7 +683,7 @@ AUTOTOOLS_BUILD = """\
 # signals, not security bugs.
 mkdir -p "$build"
 ( cd "$build" && \\
-  CC=clang CFLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1" LDFLAGS="-fsanitize=__SANITIZER_FLAG__" \\
+  CC=clang CFLAGS="-fsanitize=__SANITIZER_FLAG__ -O2 -g -DNDEBUG -fno-omit-frame-pointer" LDFLAGS="-fsanitize=__SANITIZER_FLAG__" \\
   "$src/configure" --disable-shared --enable-static && make -j )
 """
 
@@ -704,13 +704,15 @@ fi
 """
 
 MESON_BUILD = """\
-# debugoptimized (not debug) so the sanitizer mirrors the shipped release
-# binary. `--buildtype=debug` would enable project-defined debug-only
-# checks (DEBUGASSERT / MOZ_ASSERT / DCHECK / assert()) that are
-# compiled out in production; aborts on those are robustness signals,
-# not security bugs.
-CC=clang meson setup "$build" "$src" --buildtype=debugoptimized \\
-    -Db_sanitize=__SANITIZER_FLAG__ -Ddefault_library=static
+# release + ndebug so the sanitizer mirrors shipped optimized code while
+# keeping symbols via -g. `--buildtype=debug` / `debugoptimized` would
+# enable project-defined debug-only checks (DEBUGASSERT / MOZ_ASSERT /
+# DCHECK / assert()) that are compiled out in production; aborts on those
+# are robustness signals, not security bugs.
+CC=clang meson setup "$build" "$src" --buildtype=release \\
+    -Db_sanitize=__SANITIZER_FLAG__ -Db_ndebug=true -Ddefault_library=static \\
+    -Dc_args="-g -fno-omit-frame-pointer" \\
+    -Dcpp_args="-g -fno-omit-frame-pointer"
 ninja -C "$build"
 """
 
@@ -915,10 +917,10 @@ if [ ! -e "$san_lib" ]; then
       if [ -f "$cand_subdir/CMakeLists.txt" ]; then
         echo "=== __SANITIZER_LABEL__: building cmake subproject for $subdir_hint at $cand_subdir ===" >&2
         cmake -S "$cand_subdir" -B "$build/$subdir_hint" \\
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \\
+            -DCMAKE_BUILD_TYPE=Release \\
             -DCMAKE_PREFIX_PATH="$build/install" \\
-            -DCMAKE_C_FLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1 -fno-omit-frame-pointer" \\
-            -DCMAKE_CXX_FLAGS="-fsanitize=__SANITIZER_FLAG__ -g -O1 -fno-omit-frame-pointer" \\
+            -DCMAKE_C_FLAGS="-fsanitize=__SANITIZER_FLAG__ -O2 -g -DNDEBUG -fno-omit-frame-pointer" \\
+            -DCMAKE_CXX_FLAGS="-fsanitize=__SANITIZER_FLAG__ -O2 -g -DNDEBUG -fno-omit-frame-pointer" \\
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=__SANITIZER_FLAG__" >&2 \\
           && cmake --build "$build/$subdir_hint" -j >&2 \\
           || true

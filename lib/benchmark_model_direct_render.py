@@ -80,12 +80,14 @@ def _build_invocation(asan_present: bool, asan_bin_path: Path | None,
         "Try malformed inputs (URL escapes, oversized fields, protocol\n"
         "edge cases, integer extremes, embedded NULs) and inputs that\n"
         "exercise the surface area the source review flagged.\n\n"
-        "If you rebuild the sanitizer tree yourself: release config\n"
-        "only (cmake `-DCMAKE_BUILD_TYPE=RelWithDebInfo`, meson\n"
-        "`--buildtype=debugoptimized`, autotools without\n"
-        "`--enable-debug`). Debug builds compile in `assert(...)` and\n"
-        "`[A-Z_]*(?:ASSERT|CHECK)` macros that don't ship — aborts on\n"
-        "those are not security bugs by themselves.\n"
+        "If you rebuild the sanitizer tree yourself: optimized release\n"
+        "config with symbols only (cmake `-DCMAKE_BUILD_TYPE=Release`,\n"
+        "meson `--buildtype=release -Db_ndebug=true`, autotools without\n"
+        "`--enable-debug`, and compile flags including `-O2 -g -DNDEBUG`).\n"
+        "Do not use `RelWithDebInfo` or `debugoptimized`. Debug-profile\n"
+        "builds compile in `assert(...)` and `[A-Z_]*(?:ASSERT|CHECK)`\n"
+        "macros that don't ship — aborts on those are not security bugs\n"
+        "by themselves.\n"
     )
 
 

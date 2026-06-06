@@ -134,13 +134,14 @@ can name the unchecked OOB / UAF / type-confusion / boundary cross
 that follows in release once the assert is compiled out. The same
 rule applies to FINDINGs.
 
-**Build sanitizer trees as release, not debug.** When building a
-sanitizer binary or library yourself: cmake
-`-DCMAKE_BUILD_TYPE=RelWithDebInfo`, meson
-`--buildtype=debugoptimized`, autotools without `--enable-debug`.
-Don't pass project-specific `*_DEBUG=ON` toggles or `-DDEBUG` /
-`-DDEBUGBUILD` / `-UNDEBUG` flags. Debug builds enable the very
-asserts you must not promote.
+**Build sanitizer trees as optimized release builds with symbols, not debug.**
+When building a sanitizer binary or library yourself: use `-O2 -g -DNDEBUG`
+with sanitizer flags in compile and link flags; cmake
+`-DCMAKE_BUILD_TYPE=Release`, meson `--buildtype=release -Db_ndebug=true`,
+and autotools without `--enable-debug` (pass `--disable-debug` when
+available). Don't pass `RelWithDebInfo`, `debugoptimized`, project-specific
+`*_DEBUG=ON` toggles, or `-DDEBUG` / `-DDEBUGBUILD` / `-UNDEBUG` flags.
+Debug-profile builds enable the very asserts you must not promote.
 
 Every `{{ results_dir }}/crashes/CRASH-*/report.md` must include these exact fields:
 

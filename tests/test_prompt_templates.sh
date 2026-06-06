@@ -294,6 +294,10 @@ assert_match "/tmp/results-sf/crashes/CRASH-" "$sf_rendered" \
   "safety_framing renders absolute results_dir-based crashes path"
 assert_match "/tmp/results-sf/findings/FIND-" "$sf_rendered" \
   "safety_framing renders absolute results_dir-based findings path"
+assert_match "-DCMAKE_BUILD_TYPE=Release" "$sf_rendered" \
+  "safety_framing recommends CMake Release sanitizer builds"
+assert_match "meson.*--buildtype=release -Db_ndebug=true" "$sf_rendered" \
+  "safety_framing recommends Meson release+ndebug sanitizer builds"
 # Lines that still mention a bare `crashes/` or `findings/` (without
 # the absolute prefix or NOVOCAB context) would be a regression.
 # Tolerance: `output/<slug>/target.toml` legitimately stays bare
