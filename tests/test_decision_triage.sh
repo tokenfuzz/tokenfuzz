@@ -115,7 +115,7 @@ unset LLM_DECIDE_MOCK_CRASH_TRIAGE
 
 # ── 2b. Sanitizer-keep veto: LLM discard MUST NOT drop a UAF ─────────
 # A deterministic, sanitizer-confirmed memory-safety class beats the LLM's
-# probabilistic discard (the LLM only sees the first 6 KB of trace). This
+# probabilistic discard (the LLM only sees a bounded prefix of the trace). This
 # regression-guards the FN where an LLM "discard" silently dropped a real
 # heap-use-after-free. The crash stays in crashes/ for the downstream
 # caller-contract / severity gates to judge with full context.

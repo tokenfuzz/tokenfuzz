@@ -395,8 +395,13 @@ llm_triage_crash_decision() {
     fi
   done
 
+  # Feed the LLM up to 256 KB of trace. p99 of real sanitizer traces is
+  # ~26 KB and p50 under 1 KB, so this captures the full report for all but
+  # a handful of pathological deep-recursion dumps — the verdict-relevant
+  # ERROR/SUMMARY line and crashing frames are no longer at risk of being
+  # truncated away on the ~1/3 of traces that exceed the old 6 KB window.
   local trace
-  trace=$(head -c 6000 "$asan_path" 2>/dev/null) || return 1
+  trace=$(head -c 262144 "$asan_path" 2>/dev/null) || return 1
   [ -n "$trace" ] || return 1
 
   local prompt
@@ -1677,8 +1682,8 @@ triage_crash_dirs() {
     #                    proved a memory-safety class — that veto wins.
     #   rc=2 (KEEP)    → regex bypass; do not auto-discard even if it would.
     #   rc=1 (UNDEC)   → fall through to regex.
-    # The sanitizer-keep veto is the fix for the FN where an LLM (shown only
-    # the first 6 KB of trace) discards a deterministically-confirmed bug.
+    # The sanitizer-keep veto is the fix for the FN where an LLM (shown a
+    # bounded prefix of the trace) discards a deterministically-confirmed bug.
     # crash_dir_has_memory_safety_asan_signal is the project's curated,
     # cross-sanitizer classifier — ASan, TSan, MSan, the Go race detector,
     # and the memory-safety UBSan checks all count. Deterministic sanitizer
