@@ -1223,43 +1223,57 @@ rebuild_pool_artifacts() {
     ## model's lowercase report.md matches REPORT.md and every model-direct
     ## crash was silently skipped.
     ##
-    ## --regenerate (BENCH_REGEN_SKIP_REPORTS=1) skips this whole block: it
-    ## re-derives severity + clustering + rollups from artifacts on disk, but
-    ## rebuilding each crash's REPORT bundle needs the live audit session that
-    ## a re-derivation does not have, and would overwrite hand-edited reports.
-    ## Severity scoring above (bin/reachability) still runs — it only appends a
-    ## Severity line and is exactly what the operator wants refreshed.
-    if [ "${BENCH_REGEN_SKIP_REPORTS:-0}" != "1" ]; then
-      local cdir bundled=0
-      local _md_target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
-      for cdir in "$POOL"/crashes/CRASH-*; do
-        [ -d "$cdir" ] || continue
-        ## Already a canonical export-repro bundle? (harness cells, or a
-        ## prior pool pass). Guard on export-repro's exact signature
-        ## heading rather than a filename (report.md / REPORT.md collapse on
-        ## case-insensitive FS) or `## Fields` (a model may emit a Fields
-        ## table in its freeform report without the inlined sanitizer stack
-        ## + reproduce.sh that only export-repro adds — that crash still
-        ## needs bundling).
-        if grep -q '^## Expected sanitizer output' "$cdir"/[Rr][Ee][Pp][Oo][Rr][Tt].md 2>/dev/null; then
-          continue
-        fi
-        RESULTS_DIR="$POOL" TARGET_ROOT="$_md_target_root" TARGET_SLUG="$TARGET_SLUG" \
-          "$SCRIPT_ROOT/bin/export-repro" "$(basename "$cdir")" \
-            --crash-dir "$cdir" --slug "$TARGET_SLUG" \
-          >/dev/null 2>&1 && bundled=$((bundled + 1))
-      done
-      if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
-        local rep
-        for rep in "$POOL"/crashes/CRASH-*/REPORT.md; do
-          [ -f "$rep" ] || continue
-          python3 "$SCRIPT_ROOT/bin/render-md" "$rep" --html-sibling \
-            >/dev/null 2>&1 || true
-        done
+    ## The export-repro bundle pass runs on EVERY rebuild, including
+    ## --regenerate. It is strictly additive: the per-crash guard below skips
+    ## any crash that already carries a canonical bundle, so every harness
+    ## crash (bundled by bin/audit at audit time) and any hand-edited bundle
+    ## is left byte-for-byte untouched — its REPORT.md is never re-bundled and,
+    ## under --regenerate, its REPORT.html is never re-rendered. The only
+    ## crashes this pass writes are the freeform model-direct baselines, which
+    ## are NEVER bundled at audit time (the bare CTF condition has no harness)
+    ## and otherwise ship with no reproduce.sh / REPORT.md. They need no live
+    ## audit session: export-repro resolves the build recipe from
+    ## targets/<slug>. (Severity scoring via bin/reachability above already ran
+    ## for both conditions and is unaffected.)
+    local _regen=0
+    [ "${BENCH_REGEN_SKIP_REPORTS:-0}" = "1" ] && _regen=1
+    local cdir bundled=0
+    local _md_target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
+    for cdir in "$POOL"/crashes/CRASH-*; do
+      [ -d "$cdir" ] || continue
+      ## Already a canonical export-repro bundle? (harness cells, or a prior
+      ## pool pass.) Guard on export-repro's exact signature heading rather
+      ## than a filename (report.md / REPORT.md collapse on case-insensitive
+      ## FS). A matched crash is skipped entirely — never re-bundled or
+      ## re-rendered — so existing good reports survive --regenerate unchanged.
+      if grep -q '^## Expected sanitizer output' "$cdir"/[Rr][Ee][Pp][Oo][Rr][Tt].md 2>/dev/null; then
+        continue
       fi
-      [ "$bundled" -gt 0 ] && log "reproducer bundles created: $bundled ($reason)"
-    else
-      log "regenerate: skipping export-repro REPORT bundle rebuild ($reason)"
+      RESULTS_DIR="$POOL" TARGET_ROOT="$_md_target_root" TARGET_SLUG="$TARGET_SLUG" \
+        "$SCRIPT_ROOT/bin/export-repro" "$(basename "$cdir")" \
+          --crash-dir "$cdir" --slug "$TARGET_SLUG" \
+        >/dev/null 2>&1 && bundled=$((bundled + 1))
+      ## Under --regenerate, render only the bundle we just created so the
+      ## HTML of already-bundled crashes is never rewritten. A full rebuild
+      ## re-renders every crash below instead (to track the severity line
+      ## bin/reachability appended above).
+      if [ "$_regen" = "1" ] && [ -x "$SCRIPT_ROOT/bin/render-md" ] && [ -f "$cdir/REPORT.md" ]; then
+        python3 "$SCRIPT_ROOT/bin/render-md" "$cdir/REPORT.md" --html-sibling \
+          >/dev/null 2>&1 || true
+      fi
+    done
+    if [ "$_regen" != "1" ] && [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
+      local rep
+      for rep in "$POOL"/crashes/CRASH-*/REPORT.md; do
+        [ -f "$rep" ] || continue
+        python3 "$SCRIPT_ROOT/bin/render-md" "$rep" --html-sibling \
+          >/dev/null 2>&1 || true
+      done
+    fi
+    if [ "$bundled" -gt 0 ]; then
+      log "reproducer bundles created: $bundled ($reason)"
+    elif [ "$_regen" = "1" ]; then
+      log "regenerate: no un-bundled crashes (existing bundles untouched) ($reason)"
     fi
   fi
 

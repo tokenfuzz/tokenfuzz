@@ -1405,6 +1405,35 @@ _H1_CRASH_RE = re.compile(r"^# CRASH-[A-Z0-9-]+")
 _TBL_ROW_RE = re.compile(r"^\| ")
 _TBL_SEP_RE = re.compile(r"^\|[-: ]+\|")
 _BLANK_RE = re.compile(r"^\s*$")
+# Any ATX heading. Used to end an active whole-section skip: the original
+# rule only reset on an H2 (`## `), so a narrative the agent placed under an
+# H1 (e.g. `# Mechanism`) after a killed section was swallowed whole.
+_HEADING_RE = re.compile(r"^#{1,6}\s")
+# A stray H1 in the agent body (any `# Heading` that is not the bundle's own
+# crash title). Demoted to H2 so it renders as a subsection rather than a
+# second top-level heading.
+_BODY_H1_RE = re.compile(r"^# (?=\S)")
+# A heading the agent wrote that restates a crash id/title (e.g.
+# `## CRASH-1: heap-buffer-overflow ...`). The bundle already supplies the
+# authoritative `# CRASH-NNNN: ...` title, so the agent's copy is a duplicate
+# title — drop the heading line (its body content is kept). The digit after
+# `CRASH-` keeps real crash ids (CRASH-1, CRASH-001-3) while leaving ordinary
+# hyphenated headings (`## CRASH-resistant design`) untouched.
+_BODY_CRASH_TITLE_RE = re.compile(r"^#{1,6}\s+CRASH-\d")
+# A fenced code block carrying a sanitizer dump. The bundle re-emits the
+# authoritative sanitizer output in its own `## Expected sanitizer output`
+# section, so an agent's copy — under any heading, or embedded inside a
+# narrative section — is a duplicate. Matched by the SHAPE of a real dump (a
+# `<X>Sanitizer:` report line, a `SUMMARY:` line, a numbered stack frame, or a
+# UBSan `file:line:col: runtime error:`) so a passing mention of a sanitizer
+# in source or prose does not cause a code block to be dropped.
+_SANITIZER_DUMP_RE = re.compile(
+    r"(?:Address|Leak|Thread|Memory|HWAddress|UndefinedBehavior)Sanitizer:"
+    r"|^\s*SUMMARY:\s*\w*Sanitizer"
+    r"|^\s*#\d+\s+0x[0-9a-fA-F]+"
+    r"|:\d+:\d+:\s+runtime error:",
+    re.MULTILINE,
+)
 # Agents commonly wrap the field table under a `## Fields` heading. The
 # auto-generated REPORT.md prepends its own Fields table, so we drop the
 # agent's heading + immediately-following table to avoid duplication.
@@ -1422,16 +1451,20 @@ _FIELDS_HEADING_RE = re.compile(r"^#{1,6}\s+Fields\s*$", re.IGNORECASE)
 # `--severity-only` pass the caller runs immediately after; without
 # stripping, they'd sit in the body ahead of the sanitizer stack because
 # reachability ran against the previous-rebuild's report.
+# Match the section heading at ANY level (not just `## `): agents sometimes
+# write these auto-emitted sections as an H1 (`# Reachability`, `# Sanitizer
+# output`). An H2-only match left the H1 form in the body — a duplicate of the
+# harness-appended section — and broke idempotency once demote_body_headings
+# turned the survivor into an H2 that a second pass would then kill.
 _SECTION_REPRO_BLOCKS_RE = re.compile(
-    r"^## *(?:Reproduce"
+    r"^#{1,6} *(?:Reproduce"
     r"|(?:Expected\s+)?[Ss]anitizer\s+[Oo]utput"
     r"|ASan\s+(?:top\s+frames|[Oo]utput)"
     r"|Reachability"
     r"|Severity\s+rationale)(?:\s|$)"
 )
-_SECTION_REPRODUCTION_HEADER_RE = re.compile(r"^## *Reproduction(?:\s|$)")
+_SECTION_REPRODUCTION_HEADER_RE = re.compile(r"^#{1,6} *Reproduction(?:\s|$)")
 _BARE_REPRODUCTION_RE = re.compile(r"^Reproduction:\s*$")
-_NEW_H2_RE = re.compile(r"^## ")
 _END_SKIP_LABEL_RE = re.compile(
     r"^(?:Data Flow|Patch|Reachability|Supplemental|Evidence|Boundary|Classification|Summary|Root Cause|Suggested fix|Notes)[: ]"
 )
@@ -1447,8 +1480,26 @@ _BARE_LABEL_RES = (
     re.compile(r"^[Tt]rusted\s+caller\s+actions:\s"),
     re.compile(r"^[Cc]aller\s+contract:\s"),
     re.compile(r"^[Tt]rigger\s+source:\s"),
+    # Location / bug-class fields some agents (especially freeform
+    # model-direct reports) restate as loose labels right after the Fields
+    # table. They duplicate rows the auto Fields table already emits — Dedup
+    # frames carries file:function:line, Primitive carries the bug class — so
+    # drop them from the body like the restated fields above, rather than
+    # leave them as orphaned `Label: value` lines ahead of the narrative.
+    # The value pattern is deliberately tight (a single token for
+    # file/function/line, a short class-name run for class) so a narrative
+    # sentence that merely begins with one of these words — "File: the parser
+    # reads ...", "Class: this is an instance of ..." — is NOT mistaken for a
+    # field restatement and dropped.
+    re.compile(r"^File:\s+\S+\s*$"),
+    re.compile(r"^Function:\s+\S+\s*$"),
+    re.compile(r"^Line:\s+\S+\s*$"),
+    re.compile(r"^(?:Bug\s+)?[Cc]lass:\s+[\w()\- ]{1,40}\s*$"),
 )
 _AUTO_SEVERITY_RE = re.compile(r"^-?\s*\*\*Severity\*\*\s*:")
+# Kept metadata lines (strip leaves these in the body); skipped, not treated as
+# narrative, when deciding whether the narrative already has a heading.
+_STRATEGY_LINE_RE = re.compile(r"^(?:Strategy|Advisory):\s", re.IGNORECASE)
 
 
 # Prose `## Fix` (or near-variant) sections agents write between Summary
@@ -1485,6 +1536,7 @@ def extract_fix_section(text: str) -> tuple[str, str]:
 def strip_audit_sections(text: str) -> str:
     out: list[str] = []
     skip = False
+    fields_skip = False
     # 0 = haven't seen the H1 yet; 1 = inside the H1's preamble (eat
     # blanks + a `## Fields` heading + the field table); 2 = preamble
     # done.
@@ -1509,7 +1561,25 @@ def strip_audit_sections(text: str) -> str:
             if _TBL_SEP_RE.match(line_no_nl):
                 continue
             ate_h1_table = 2  # First real body line — preamble is over.
-        # Whole-block kills.
+        # Drop the `## Fields` heading + the table that follows it: the
+        # bundle's auto-header already emits a Fields table, so the agent's
+        # copy would render as a duplicate. Unlike the whole-block kills
+        # below, this eats ONLY the heading and its table lines (blank /
+        # row / separator). The first line that is not part of the table
+        # ends the skip and is processed normally — so narrative prose the
+        # agent placed after the table (under an H1 like `# Mechanism`, or
+        # under no heading at all) is preserved rather than swallowed.
+        if _FIELDS_HEADING_RE.match(line_no_nl):
+            fields_skip = True
+            continue
+        if fields_skip:
+            if (_BLANK_RE.match(line_no_nl)
+                    or _TBL_ROW_RE.match(line_no_nl)
+                    or _TBL_SEP_RE.match(line_no_nl)):
+                continue
+            fields_skip = False  # End of the table — fall through.
+        # Whole-block kills: these sections are re-appended at the end of
+        # the rebuilt bundle, so drop everything up to the next heading.
         if _SECTION_REPRODUCTION_HEADER_RE.match(line_no_nl):
             skip = True
             continue
@@ -1519,19 +1589,18 @@ def strip_audit_sections(text: str) -> str:
         if _SECTION_REPRO_BLOCKS_RE.match(line_no_nl):
             skip = True
             continue
-        # Drop any `## Fields` section the agent wrote in the body. The
-        # auto-header at the top of the bundle already provides one, and
-        # leaving the agent's behind produces a duplicate Fields table
-        # in the rendered HTML. Only relevant when the agent put prose
-        # between the H1 and `## Fields` (so the H1 preamble didn't eat it).
-        if _FIELDS_HEADING_RE.match(line_no_nl):
-            skip = True
-            continue
-        if skip and _NEW_H2_RE.match(line_no_nl):
+        # End an active whole-section skip at the next heading of ANY level
+        # (not just H2) or a bare-label section intro.
+        if skip and _HEADING_RE.match(line_no_nl):
             skip = False
         if skip and _END_SKIP_LABEL_RE.match(line_no_nl):
             skip = False
         if skip:
+            continue
+        # Drop a heading that just restates the crash id/title — the bundle
+        # already carries the authoritative `# CRASH-NNNN: ...` title. Only
+        # the heading line goes; the section's body content stays.
+        if _BODY_CRASH_TITLE_RE.match(line_no_nl):
             continue
         if _FULL_ORIGINAL_RE.match(line_no_nl):
             continue
@@ -1549,6 +1618,193 @@ def strip_audit_sections(text: str) -> str:
         blank_run = False
         out.append(raw_line)
     return "".join(out)
+
+
+def demote_body_headings(text: str) -> str:
+    """Demote stray H1 lines (`# Foo` → `## Foo`) in an agent body.
+
+    The bundle supplies the single H1 crash title; any H1 the agent wrote
+    in the body (e.g. `# Mechanism`) would otherwise render as a second
+    top-level heading and, when its body was stripped, as an empty one.
+    Lines inside fenced code blocks are left untouched. Idempotent: an H2
+    is never matched, so a second pass is a no-op.
+    """
+    out: list[str] = []
+    in_fence = False
+    for raw_line in text.splitlines(keepends=True):
+        stripped = raw_line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(raw_line)
+            continue
+        if not in_fence and _BODY_H1_RE.match(raw_line):
+            raw_line = "#" + raw_line  # "# Foo" -> "## Foo"
+        out.append(raw_line)
+    return "".join(out)
+
+
+# Sections the bundle re-emits itself — never carry the agent's copy. Used by
+# the conservative `recover_agent_prose` fallback (section-based, independent
+# of the line-greedy strip so a bug in one cannot silently break the other).
+_AUTO_SECTION_RE = re.compile(
+    r"^#{1,6}\s+(?:Fields"
+    r"|Reproduce|Reproduction"
+    r"|(?:Expected\s+)?[Ss]anitizer\s+[Oo]utput"
+    r"|ASan\b"
+    r"|Reachability\b"
+    r"|Severity\s+rationale)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_structured_line(stripped: str) -> bool:
+    """A non-narrative body line: table row/separator, bare-label field,
+    the auto-Severity bullet, or the `Full original output:` pointer."""
+    if stripped.startswith("|"):
+        return True
+    if any(p.match(stripped) for p in _BARE_LABEL_RES):
+        return True
+    if _AUTO_SEVERITY_RE.match(stripped) or _FULL_ORIGINAL_RE.match(stripped):
+        return True
+    return False
+
+
+def _body_has_prose(text: str) -> bool:
+    """True if `text` carries narrative — a non-blank line that is not a
+    heading, table row, bare-label field, or auto-emitted boilerplate."""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _is_structured_line(stripped):
+            continue
+        return True
+    return False
+
+
+def recover_agent_prose(text: str) -> str:
+    """Conservative fallback recovery of an agent body.
+
+    Drops only the leading crash-title H1 and the known auto-emitted
+    sections (Fields, Reproduce/Reproduction, sanitizer output, Reachability,
+    Severity rationale) by heading, plus stray structured lines, keeping
+    every other line verbatim. Section-based and deliberately independent of
+    `strip_audit_sections` so it can still surface the narrative if that
+    line-greedy function ever over-strips.
+    """
+    out: list[str] = []
+    drop = False
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\n")
+        if _H1_CRASH_RE.match(line):
+            continue
+        if _HEADING_RE.match(line):
+            drop = bool(_AUTO_SECTION_RE.match(line))
+            if drop:
+                continue
+        if drop:
+            continue
+        if _is_structured_line(line):
+            continue
+        out.append(raw_line)
+    return "".join(out)
+
+
+def strip_sanitizer_blocks(text: str) -> str:
+    """Drop fenced code blocks whose content is a sanitizer dump.
+
+    The bundle re-emits the authoritative sanitizer output in its own
+    `## Expected sanitizer output` section, so an agent's copy — under any
+    heading (`## Observed`, `## ASan Evidence`, ...) or embedded inside a
+    narrative section — is a duplicate. Matched by content (a sanitizer
+    signature inside the fence), not by heading name, so it is robust to
+    whatever the agent titled it. A non-sanitizer code block (source, a
+    reproduce command) is kept verbatim. The enclosing heading and any
+    surrounding prose stay; an emptied heading is dropped by bin/render-md.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        fence = lines[i].lstrip()[:3]
+        if fence in ("```", "~~~"):
+            j = i + 1
+            while j < n and lines[j].lstrip()[:3] != fence:
+                j += 1
+            if j >= n:
+                # No closing fence — malformed. Keep this line and process the
+                # rest normally rather than swallowing the document tail.
+                out.append(lines[i])
+                i += 1
+                continue
+            if _SANITIZER_DUMP_RE.search("".join(lines[i + 1:j])):
+                i = j + 1                  # drop open fence + content + close fence
+                continue
+            out.extend(lines[i:j + 1])     # keep the block verbatim
+            i = j + 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return "".join(out)
+
+
+def _squash_blank_runs(text: str) -> str:
+    """Collapse runs of blank lines to a single blank — block removal can
+    leave a double blank where a fenced dump used to sit. Applied once at the
+    end so the result is stable on a second render_agent_body pass."""
+    out: list[str] = []
+    blank = False
+    for line in text.splitlines(keepends=True):
+        if line.strip() == "":
+            if blank:
+                continue
+            blank = True
+        else:
+            blank = False
+        out.append(line)
+    return "".join(out)
+
+
+def _ensure_leading_heading(text: str) -> str:
+    """Guarantee the agent narrative sits under a section heading.
+
+    Once the auto-emitted sections, field restatements, duplicate sanitizer
+    dumps and restated crash titles are stripped, a body can lead with bare
+    narrative prose — either because the agent wrote no heading, or because the
+    only heading it wrote restated the crash title (dropped above). The bundle
+    would then render that prose with no section title. Prepend a canonical
+    `## Summary` in that case. No-op when the body already leads with a heading
+    (of any level) or carries no narrative. The kept `Strategy:` metadata line
+    is skipped, not treated as narrative.
+    """
+    lines = text.splitlines(keepends=True)
+    for idx, raw in enumerate(lines):
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            return text                      # already under a heading
+        if _is_structured_line(s) or _STRATEGY_LINE_RE.match(s):
+            continue                          # skip kept metadata (Strategy:, ...)
+        # First narrative line, with no heading above it — head it.
+        sep = "" if idx == 0 or lines[idx - 1].strip() == "" else "\n"
+        lines.insert(idx, sep + "## Summary\n\n")
+        return "".join(lines)
+    return text                              # no narrative to head
+
+
+def render_agent_body(body_text: str) -> str:
+    """Turn a raw agent report body into the narrative spliced into the
+    bundle: strip the auto-emitted sections, drop duplicate sanitizer dumps,
+    demote stray H1s, and ensure the narrative sits under a heading. If
+    stripping leaves no prose but the original had some, fall back to the
+    conservative section-based recovery (independent of the line-greedy strip)
+    so the bundle never ships an empty narrative.
+    """
+    rendered = strip_sanitizer_blocks(strip_audit_sections(body_text))
+    if not _body_has_prose(rendered) and _body_has_prose(body_text):
+        rendered = strip_sanitizer_blocks(recover_agent_prose(body_text))
+    return _ensure_leading_heading(_squash_blank_runs(demote_body_headings(rendered)))
 
 
 def read_field_from_fields_table(path: Optional[Path], label: str) -> str:
@@ -2575,7 +2831,7 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
     fix_section = ""
     if report_md is not None and report_md.is_file():
         body_text = report_md.read_text(encoding="utf-8", errors="replace")
-        body_stripped = strip_audit_sections(body_text)
+        body_stripped = render_agent_body(body_text)
         # Lift the prose `## Fix` section out of the body so it sits at
         # the END of the rebuilt report — after Expected sanitizer output
         # and Reproduce, alongside the auto-appended Reachability /

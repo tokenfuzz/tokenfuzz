@@ -427,8 +427,17 @@ regen_rc=$?
 assert_eq "0" "$regen_rc" "T9r-a: --regenerate exits 0"
 assert_match 'no cells launched' "$regen_out" \
   "T9r-b: --regenerate does not launch cells"
-assert_match 'skipping export-repro REPORT bundle rebuild' "$regen_out" \
-  "T9r-c: --regenerate skips the per-crash export-repro bundle rebuild"
+# --regenerate now runs the bundle pass too, but it is strictly additive: the
+# per-crash signature guard skips every already-bundled crash, so it never
+# re-bundles or re-renders an existing good report. It DOES bundle a crash that
+# has no canonical bundle yet — the freeform model-direct baseline in a real
+# run — giving it the reproduce.sh / REPORT.md it otherwise never gets.
+assert_not_match 'skipping export-repro REPORT bundle rebuild' "$regen_out" \
+  "T9r-c: --regenerate no longer wholesale-skips the bundle pass"
+assert_match 'reproducer bundles created' "$regen_out" \
+  "T9r-c2: --regenerate bundles a crash that had no canonical bundle yet"
+assert_file_exists "$dbench/pool/crashes/CRASH-0001/reproduce.sh" \
+  "T9r-c3: the newly bundled crash gains a reproduce.sh under --regenerate"
 assert_not_match 'cell .* — starting' "$regen_out" \
   "T9r-d: --regenerate prints no cell-start lines"
 cells_after=$(find "$dbench/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
