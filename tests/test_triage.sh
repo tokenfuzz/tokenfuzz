@@ -561,6 +561,82 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════
+# 8b. Deterministic sanitizer KEEP veto over an LLM discard
+# A sanitizer-confirmed memory-safety class (ASan/TSan/MSan/UBSan) must not
+# be auto-rejected just because llm_triage_crash_decision returned DISCARD —
+# the LLM only sees the first 6 KB of trace and can be wrong.
+# ═══════════════════════════════════════════════════════════════
+
+IS_BROWSER_TARGET=0
+
+# Simulate an LLM that wrongly discards (rc=0 + reason on stdout).
+_orig_llm_triage_crash_decision=$(declare -f llm_triage_crash_decision)
+llm_triage_crash_decision() { echo "looks like a benign null-deref to me"; return 0; }
+
+# Strong keep class: LLM discard must be vetoed → NOT moved to crashes-rejected.
+mkdir -p "$RESULTS_DIR/crashes/CRASH-KEEPVETO"
+cat > "$RESULTS_DIR/crashes/CRASH-KEEPVETO/asan.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60200000abcd
+WRITE of size 8 at 0x60200000abcd
+#0 0x7fff12345678 in app_parse parser.c:42
+EOF
+echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-KEEPVETO/input.bin"
+triage_crash_dirs >/dev/null 2>&1
+if [ -d "$RESULTS_DIR/crashes/CRASH-KEEPVETO" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-KEEPVETO/.autodiscard" ]; then
+  pass "triage: strong sanitizer class vetoes LLM discard"
+else
+  fail "triage: strong sanitizer class vetoes LLM discard" "dir was auto-discarded despite heap-buffer-overflow"
+fi
+
+# TSan data race: a non-ASan sanitizer class must also veto the LLM discard.
+mkdir -p "$RESULTS_DIR/crashes/CRASH-TSAN-VETO"
+cat > "$RESULTS_DIR/crashes/CRASH-TSAN-VETO/asan.txt" <<'EOF'
+==12345==WARNING: ThreadSanitizer: data race (pid=123)
+  Write of size 4 at 0x7b04 by thread T1:
+    #0 app_parse parser.c:42
+EOF
+echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-TSAN-VETO/input.bin"
+triage_crash_dirs >/dev/null 2>&1
+if [ -d "$RESULTS_DIR/crashes/CRASH-TSAN-VETO" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-TSAN-VETO/.autodiscard" ]; then
+  pass "triage: TSan data race vetoes LLM discard"
+else
+  fail "triage: TSan data race vetoes LLM discard" "dir was auto-discarded despite data race"
+fi
+
+# MSan use-of-uninitialized-value must also veto the LLM discard.
+mkdir -p "$RESULTS_DIR/crashes/CRASH-MSAN-VETO"
+cat > "$RESULTS_DIR/crashes/CRASH-MSAN-VETO/asan.txt" <<'EOF'
+==12345==WARNING: MemorySanitizer: use-of-uninitialized-value
+    #0 0x4a1b2c in app_parse parser.c:42
+EOF
+echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-MSAN-VETO/input.bin"
+triage_crash_dirs >/dev/null 2>&1
+if [ -d "$RESULTS_DIR/crashes/CRASH-MSAN-VETO" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-MSAN-VETO/.autodiscard" ]; then
+  pass "triage: MSan uninit-value vetoes LLM discard"
+else
+  fail "triage: MSan uninit-value vetoes LLM discard" "dir was auto-discarded despite uninit-value"
+fi
+
+# Control: a non-keep class (null-deref) with the same LLM discard is still
+# rejected — the veto must be class-specific, not a blanket override.
+mkdir -p "$RESULTS_DIR/crashes/CRASH-NOVETO"
+cat > "$RESULTS_DIR/crashes/CRASH-NOVETO/asan.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x7fff12345678 bp 0x7fff12345680)
+Hint: address points to the zero page
+SCARINESS: 10 (null-deref)
+EOF
+echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-NOVETO/input.bin"
+triage_crash_dirs >/dev/null 2>&1
+if [ -f "$RESULTS_DIR/crashes-rejected/CRASH-NOVETO/.autodiscard" ] || [ ! -d "$RESULTS_DIR/crashes/CRASH-NOVETO" ]; then
+  pass "triage: non-keep class still honors LLM discard"
+else
+  fail "triage: non-keep class still honors LLM discard" "null-deref was not rejected"
+fi
+
+# Restore the real function for any later tests.
+eval "$_orig_llm_triage_crash_decision"
+
+# ═══════════════════════════════════════════════════════════════
 # 9. validate_find_gate — accepts any FIND with a report, regardless of
 # target type. No sanitizer / web-reachability gate. The LLM substance
 # path is covered separately in test_decision_find_quality.sh.

@@ -1673,19 +1673,30 @@ triage_crash_dirs() {
 
     # ── 1. LLM/regex DISCARD ─────────────────────────────────────────
     # Three-valued LLM semantics:
-    #   rc=0 (DISCARD) → LLM-named reason wins, skip regex.
+    #   rc=0 (DISCARD) → LLM-named reason wins, UNLESS the sanitizer already
+    #                    proved a memory-safety class — that veto wins.
     #   rc=2 (KEEP)    → regex bypass; do not auto-discard even if it would.
     #   rc=1 (UNDEC)   → fall through to regex.
-    local llm_status=1 llm_discard_reason="" regex_says_discard=0
+    # The sanitizer-keep veto is the fix for the FN where an LLM (shown only
+    # the first 6 KB of trace) discards a deterministically-confirmed bug.
+    # crash_dir_has_memory_safety_asan_signal is the project's curated,
+    # cross-sanitizer classifier — ASan, TSan, MSan, the Go race detector,
+    # and the memory-safety UBSan checks all count. Deterministic sanitizer
+    # proof always beats a probabilistic discard; downstream caller-contract
+    # / severity gates still decide whether it promotes.
+    local llm_status=1 llm_discard_reason="" regex_says_discard=0 sanitizer_says_keep=0
     if [ -n "$asan_path" ]; then
       llm_discard_reason=$(llm_triage_crash_decision "$asan_path" 2>/dev/null)
       llm_status=$?
       is_autodiscard_crash_output "$asan_path" && regex_says_discard=1
+      crash_dir_has_memory_safety_asan_signal "$d" && sanitizer_says_keep=1
     fi
 
     local discard=0 discard_reason=""
     case "$llm_status" in
-      0)  if [ -n "$llm_discard_reason" ]; then
+      0)  if [ -n "$llm_discard_reason" ] && [ "$sanitizer_says_keep" -eq 1 ]; then
+            audit_log "KEEP-VETO: ${id} — sanitizer-confirmed memory-safety class; ignoring LLM discard (${llm_discard_reason})" | tee -a "$INDEX" >/dev/null 2>&1 || true
+          elif [ -n "$llm_discard_reason" ]; then
             discard=1
             discard_reason="LLM: $llm_discard_reason"
           fi ;;

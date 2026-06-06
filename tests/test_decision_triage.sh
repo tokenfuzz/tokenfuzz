@@ -97,16 +97,11 @@ EOF
 LLM_DECIDE_DISABLE=1 triage_crash_dirs >/dev/null 2>&1
 assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-001" "LLM disabled: changed ASan output invalidates cache"
 
-# ── 2. LLM marks discard: regex would have kept (UAF trace) ─────────
-# A real heap-use-after-free trace would normally be kept by regex.
-# Tell the LLM mock to discard it and verify reason makes it through.
-UAF_TRACE=$(cat <<'EOF'
-==12345==ERROR: AddressSanitizer: heap-use-after-free
-READ of size 8 at 0x602000000010
-    #0 0x100 in junk() /a/b.c:5
-EOF
-)
-mk_crash_dir CRASH-002 "$UAF_TRACE" >/dev/null
+# ── 2. LLM marks discard on a non-memory-safety trace → still discards ─
+# The LLM gate still rejects classes the sanitizer did NOT confirm as a
+# memory-safety bug. A null-deref SEGV-on-zero is such a class, so the
+# LLM-named reason flows through to .autodiscard.
+mk_crash_dir CRASH-002 "$NULL_DEREF_TRACE" >/dev/null
 export LLM_DECIDE_MOCK_CRASH_TRIAGE='{"keep":false,"reason":"test-only stub harness, not product code"}'
 triage_crash_dirs >/dev/null 2>&1
 assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-002"          "LLM discard: removed from crashes/"
@@ -116,6 +111,27 @@ assert_dir_exists  "$rejected_dir"               "LLM discard: in crashes-reject
 assert_file_exists "$rejected_dir/.autodiscard"  "LLM discard: .autodiscard written"
 assert_file_contains "$rejected_dir/.autodiscard" "LLM:" "autodiscard mentions LLM"
 assert_file_contains "$rejected_dir/.autodiscard" "test-only stub harness" "autodiscard has LLM reason"
+unset LLM_DECIDE_MOCK_CRASH_TRIAGE
+
+# ── 2b. Sanitizer-keep veto: LLM discard MUST NOT drop a UAF ─────────
+# A deterministic, sanitizer-confirmed memory-safety class beats the LLM's
+# probabilistic discard (the LLM only sees the first 6 KB of trace). This
+# regression-guards the FN where an LLM "discard" silently dropped a real
+# heap-use-after-free. The crash stays in crashes/ for the downstream
+# caller-contract / severity gates to judge with full context.
+UAF_TRACE=$(cat <<'EOF'
+==12345==ERROR: AddressSanitizer: heap-use-after-free
+READ of size 8 at 0x602000000010
+    #0 0x100 in junk() /a/b.c:5
+EOF
+)
+mk_crash_dir CRASH-002B "$UAF_TRACE" >/dev/null
+export LLM_DECIDE_MOCK_CRASH_TRIAGE='{"keep":false,"reason":"looks benign to me"}'
+triage_crash_dirs >/dev/null 2>&1
+assert_dir_exists "$RESULTS_DIR/crashes/CRASH-002B" \
+  "sanitizer-keep veto: UAF survives LLM discard"
+assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-002B/.autodiscard" \
+  "sanitizer-keep veto: UAF not auto-discarded"
 unset LLM_DECIDE_MOCK_CRASH_TRIAGE
 
 # ── 3. LLM unavailable → regex fallback ─────────────────────────────
