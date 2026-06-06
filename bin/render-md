@@ -1268,8 +1268,12 @@ _SURFACE_FIELD_RE = re.compile(
 _CALLERS_RE = re.compile(
     r"\*\*External callers[^:\n]*:\s*(?P<n>\d+)\*\*"
 )
+# Capture the WHOLE `## Summary` section body — every line up to the next ATX
+# heading, blank lines included. (The older `[^\n#]` form stopped at the first
+# blank line, so when an enrichment block led the section the real prose that
+# followed it was never seen and the headline fell back to the comment marker.)
 _SUMMARY_RE = re.compile(
-    r"##\s+Summary\s*\n+(?P<body>(?:[^\n#].*\n?)+)"
+    r"##\s+Summary\s*\n+(?P<body>(?:(?!#).*(?:\n|$))*)"
 )
 _DEDUP_FRAMES_LINE_RE = re.compile(
     r"^(?:Dedup frames|ClusterFuzz key frames):\s*(?P<val>.+?)\s*$",
@@ -1445,9 +1449,28 @@ def _extract_hero(text: str) -> dict:
 
     sm = _SUMMARY_RE.search(text)
     if sm:
-        body = sm.group("body").strip()
-        # Stop at the next heading-ish line if any leaked through.
-        body = body.split("\n## ")[0]
+        # Drop enrichment blocks (`<!-- enrich:NAME -->...<!-- /enrich:NAME -->`)
+        # and stray HTML-comment lines first. The hero card already renders the
+        # tldr / cluster-siblings / severity-badge enrichments in richer form,
+        # and a leading comment marker would otherwise become the escaped
+        # headline (`<!-- enrich:tldr --> Reviewer TL;DR`). An enrichment block
+        # can lead the Summary section either because the agent wrote no heading
+        # (then one was inserted) or because enrichment injected the block right
+        # under the agent's own `## Summary` — both must surface the real prose.
+        kept: list[str] = []
+        in_enrich = False
+        for line in sm.group("body").splitlines():
+            stripped = line.strip()
+            if _ENRICH_OPEN_RE.match(stripped):
+                in_enrich = True
+                continue
+            if _ENRICH_CLOSE_RE.match(stripped):
+                in_enrich = False
+                continue
+            if in_enrich or _HTML_COMMENT_LINE_RE.match(stripped):
+                continue
+            kept.append(line)
+        body = "\n".join(kept).strip()
         # Collapse to the first paragraph — that's the headline.
         body = body.split("\n\n", 1)[0]
         h["summary"] = " ".join(s.strip() for s in body.splitlines() if s.strip())

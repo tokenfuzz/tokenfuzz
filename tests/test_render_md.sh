@@ -347,6 +347,48 @@ assert_file_contains "$hero_html" '<strong>87</strong> external callers' "hero s
 assert_file_contains "$hero_html" 'CL-deadbeef' "hero shows cluster"
 assert_file_contains "$hero_html" 'class="triage-summary">A bug in the foo subsystem' "hero shows summary"
 
+# 14a-enrich. The hero summary must skip a leading enrichment block under
+# `## Summary` (the hero renders tldr / cluster-siblings in richer form) and
+# surface the real prose, never the escaped comment marker. Two shapes:
+# enrichment injected directly under the agent's own `## Summary`, where the
+# block also runs past a blank line.
+hero_enrich_fix="$TEST_TMPDIR/hero_enrich.md"
+cat > "$hero_enrich_fix" <<'EOF'
+# CRASH-002-1
+
+## Fields
+
+| Field     | Value                |
+|:----------|:---------------------|
+| Primitive | heap-buffer-overflow |
+| Severity  | High (61)            |
+
+## Summary
+
+<!-- enrich:cluster-siblings -->
+**Cluster siblings** (CL-abc123): 2 other report(s)
+
+- [CRASH-0009](../CRASH-0009/report.html)
+<!-- /enrich:cluster-siblings -->
+
+The real headline: a WebSocket upgrade frees the parser twice.
+
+## Expected sanitizer output
+
+```
+==<pid>==ERROR: AddressSanitizer: heap-buffer-overflow
+    #1 <addr> in ws_parse ws.c:42
+SUMMARY: AddressSanitizer: heap-buffer-overflow ws.c:42 in ws_parse
+```
+EOF
+python3 "$RENDER" "$hero_enrich_fix" --html-sibling >/dev/null 2>&1
+hero_enrich_html="$TEST_TMPDIR/hero_enrich.html"
+assert_file_contains "$hero_enrich_html" 'class="triage-summary">The real headline' \
+  "hero summary skips the enrich block and shows the real prose"
+grep -q '&lt;!--.*enrich' "$hero_enrich_html" \
+  && fail "hero must not leak escaped enrich marker" "found &lt;!-- enrich in hero output" \
+  || pass "hero does not leak the escaped enrich marker"
+
 # 14b. Collapsible sections — Severity rationale renders as <details>
 #      so the math doesn't dominate the visual flow but stays one click
 #      away. Expected sanitizer output is the canonical sanitizer view

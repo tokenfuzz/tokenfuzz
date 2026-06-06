@@ -245,9 +245,13 @@ the pool, re-runs severity scoring and crash/finding clustering,
 refreshes per-condition cluster reports, rewrites `report.json`, and
 updates `benchmark-result.{md,html}` plus the backend ledger row.
 
-It deliberately does not rebuild each crash's exported reproducer
-bundle, because that step needs live audit-session state and can
-overwrite hand-edited reports.
+The exported reproducer bundle pass still runs, but stays additive: a
+crash with no canonical bundle yet (a model-direct freeform baseline,
+never bundled at audit time) gets one, while already-bundled crashes —
+every harness crash, plus any hand-edited report — are left untouched,
+never re-bundled or re-rendered. Re-bundling an existing report would
+need live audit-session state and could overwrite hand edits, so the
+pass skips anything that already carries a canonical bundle.
 
 ## How to make the result worth reading
 

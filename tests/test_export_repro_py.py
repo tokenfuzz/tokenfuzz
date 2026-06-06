@@ -279,6 +279,39 @@ with tempfile.TemporaryDirectory() as td:
         assert_eq("yes", er.detect_advisory_status(rpt, patch),
                   f"advisory: heading variant '{heading}' detected")
 
+# ─── extract_summary_section (Summary-before-Fields layout) ─────────
+# The Summary section (plus any leading enrichment blocks) is split off the
+# front of the body so build_report_md can place it ABOVE the Fields table.
+full_body = (
+    "<!-- enrich:tldr -->\n**TLDR**\n<!-- /enrich:tldr -->\n\n"
+    "## Summary\n\nThe real summary prose.\n\n"
+    "## Classification\n\nCategory: lifetime\n\n"
+    "## Root Cause\n\nDeep cause here.\n")
+head, rest = er.extract_summary_section(full_body)
+assert "<!-- enrich:tldr -->" in head and "## Summary" in head and "real summary prose" in head, \
+    "extract_summary_section: head carries leading enrich block + Summary section"
+assert "## Classification" not in head and "## Root Cause" not in head, \
+    "extract_summary_section: later sections stay out of the head"
+assert "## Classification" in rest and "## Root Cause" in rest and "## Summary" not in rest, \
+    "extract_summary_section: rest carries the post-Summary narrative only"
+assert_eq(("", rest), er.extract_summary_section(rest),
+          "extract_summary_section: idempotent on the remainder")
+# `###` subsections stay attached to Summary.
+sub = "## Summary\n\nLead.\n\n### Detail\n\nMore.\n\n## Classification\n\nx\n"
+h2, r2 = er.extract_summary_section(sub)
+assert "### Detail" in h2 and "## Classification" in r2, \
+    "extract_summary_section: H3 subsection stays with Summary, H2 ends it"
+# No Summary → no-op (Fields stays first).
+assert_eq(("", "## Root Cause\n\nx\n"), er.extract_summary_section("## Root Cause\n\nx\n"),
+          "extract_summary_section: no ## Summary → no-op")
+# Another section before Summary → no-op (don't drag it along).
+assert er.extract_summary_section("## Classification\n\nc\n\n## Summary\n\ns\n")[0] == "", \
+    "extract_summary_section: Summary not leading → no-op"
+# Summary-only body (model-direct) → rest is empty.
+h3, r3 = er.extract_summary_section("## Summary\n\nOnly summary.\n")
+assert "Only summary." in h3 and r3.strip() == "", \
+    "extract_summary_section: summary-only body leaves an empty remainder"
+
 # 1. strip_audit_sections
 sample = """\
 # CRASH-X-1
@@ -813,6 +846,321 @@ stripped_table_2 = er.strip_audit_sections(stripped_table)
 assert_eq(stripped_table, stripped_table_2,
           "strip_audit_sections (table form): idempotent")
 
+# 5f. Narrative prose AFTER the `## Fields` table must survive.
+#
+# Why this test exists: some agents (notably weaker instruction-followers)
+# write the root-cause narrative as loose prose right after their Fields
+# table, under an H1 like `# Mechanism` or no heading at all — never under a
+# canonical `## Summary` / `## Root Cause` H2. The old `## Fields` kill set a
+# skip flag that only reset at the next H2, so that prose was swallowed whole
+# (everything up to `## Reachability`), shipping a bundle with an empty body.
+# The Fields kill must now eat ONLY the heading + table and stop at the first
+# non-table line.
+fields_then_prose_input = """\
+Boundary: sqlite3
+Strategy: S7
+
+# Mechanism
+
+## Fields
+
+| Field     | Value     |
+| :-------- | :-------- |
+| Primitive | uaf_write |
+| Severity  | Low (26)  |
+
+A trusted caller frees the cached result object; the later write to it
+is a use-after-free. This is the whole point of the report.
+
+## Reachability — external callers
+
+callers: 136
+
+## Severity rationale
+
+score=26
+"""
+rendered_body = er.render_agent_body(fields_then_prose_input)
+assert_in("use-after-free. This is the whole point", rendered_body,
+          "render_agent_body: narrative after Fields table preserved")
+assert_not_in("| Primitive | uaf_write", rendered_body,
+              "render_agent_body: Fields table still stripped (no duplicate)")
+assert_not_in("| Severity  | Low (26)", rendered_body,
+              "render_agent_body: Fields severity row stripped")
+assert_not_in("callers: 136", rendered_body,
+              "render_agent_body: Reachability section stripped")
+assert_not_in("score=26", rendered_body,
+              "render_agent_body: Severity rationale section stripped")
+# The stray H1 is demoted to an H2 subsection (no second top-level heading).
+assert_in("## Mechanism", rendered_body,
+          "render_agent_body: stray body H1 demoted to H2")
+assert_not_in("\n# Mechanism", "\n" + rendered_body,
+              "render_agent_body: no bare H1 left in body")
+# Idempotent.
+assert_eq(rendered_body, er.render_agent_body(rendered_body),
+          "render_agent_body: idempotent")
+
+# 5g. demote_body_headings leaves headings inside fenced code blocks alone
+# (a `# comment` in a shell snippet is not a Markdown heading).
+fenced = "## Root Cause\n\n```sh\n# not a heading, a shell comment\necho hi\n```\n\n# Real Heading\n"
+demoted = er.demote_body_headings(fenced)
+assert_in("# not a heading, a shell comment", demoted,
+          "demote_body_headings: fenced '# comment' untouched")
+assert_not_in("## not a heading", demoted,
+              "demote_body_headings: fenced comment not demoted")
+assert_in("## Real Heading", demoted,
+          "demote_body_headings: real body H1 demoted to H2")
+
+# 5h. _body_has_prose distinguishes narrative from structured-only bodies.
+assert_eq(True, er._body_has_prose("## Summary\n\nReal narrative line.\n"),
+          "_body_has_prose: narrative detected")
+assert_eq(False, er._body_has_prose("## Fields\n\n| A | B |\n| :- | :- |\n| x | y |\n"),
+          "_body_has_prose: table-only body has no prose")
+assert_eq(False, er._body_has_prose("Boundary: x\nSurface: y\n- **Severity**: 5\n"),
+          "_body_has_prose: bare-label/severity-only body has no prose")
+
+# 5i. recover_agent_prose (the auto-repair fallback) keeps narrative verbatim
+# while dropping the auto-emitted sections, independent of strip's logic.
+recovered = er.recover_agent_prose(
+    "# CRASH-Z-1\n\n## Description\n\nThe defect is X.\n\n## Reachability\n\nc:9\n"
+)
+assert_in("The defect is X.", recovered,
+          "recover_agent_prose: narrative kept")
+assert_in("## Description", recovered,
+          "recover_agent_prose: non-auto heading kept")
+assert_not_in("CRASH-Z-1", recovered,
+              "recover_agent_prose: crash-title H1 dropped")
+assert_not_in("c:9", recovered,
+              "recover_agent_prose: Reachability auto-section dropped")
+
+# 5j. render_agent_body falls back to recovery when strip yields no prose.
+# Guard against future strip regressions: if strip_audit_sections ever
+# over-strips a body to headings-only, the original narrative is still
+# surfaced rather than shipped empty.
+_real_strip = er.strip_audit_sections
+try:
+    er.strip_audit_sections = lambda _t: "## Mechanism\n"  # simulate over-strip
+    salvaged = er.render_agent_body("## Mechanism\n\nLoad-bearing narrative.\n")
+    assert_in("Load-bearing narrative.", salvaged,
+              "render_agent_body: fallback recovers prose when strip empties body")
+finally:
+    er.strip_audit_sections = _real_strip
+
+# 5k. Location/bug-class labels an agent restates as loose lines after the
+# Fields table are redundant with the auto table (Dedup frames = file:func:line,
+# Primitive = bug class) and must be stripped from the body — never left as
+# orphaned `Label: value` lines ahead of the narrative. The narrative stays.
+restated_labels_input = """\
+## Fields
+
+| Field     | Value          |
+| :-------- | :------------- |
+| Primitive | heap-uaf       |
+
+File: ext/misc/closure.c
+Function: closureDequote
+Line: 445
+Bug Class: heap-buffer-overflow (read)
+Class: memory-safety
+
+The `closureDequote` function fails to null-terminate the output buffer.
+"""
+stripped_labels = er.render_agent_body(restated_labels_input)
+for lab in ("File:", "Function:", "Line:", "Bug Class:", "Class:"):
+    assert_not_in(lab, stripped_labels,
+                  f"render_agent_body: restated `{lab}` label dropped from body")
+assert_in("fails to null-terminate", stripped_labels,
+          "render_agent_body: narrative kept after dropping restated labels")
+assert_not_in("| Primitive", stripped_labels,
+              "render_agent_body: Fields table still stripped")
+assert_eq(False, er._body_has_prose("File: a.c\nFunction: f\nBug Class: uaf\n"),
+          "_body_has_prose: a body of only restated labels has no prose")
+
+# 5l. Duplicate sanitizer dumps. Agents copy the sanitizer output into the body
+# under arbitrary headings (`## Observed`, `## ASan Evidence`, ...) or inside a
+# narrative section; the bundle re-emits the authoritative `## Expected
+# sanitizer output`, so the agent's copy must be dropped by CONTENT (the
+# sanitizer signature in the fence), not by heading name. Surrounding prose and
+# non-sanitizer code blocks stay.
+dup_sanitizer_input = """\
+## Observed (sanitizer.txt)
+
+```
+==123==ERROR: AddressSanitizer: stack-buffer-overflow on address 0xdead
+    #0 0x1 in strcat
+SUMMARY: AddressSanitizer: stack-buffer-overflow harness.c:59 in main
+```
+
+The write of 2001 bytes overflows the 500-byte `cmdbuf`.
+
+## Patch
+
+```c
+strncat(cmdbuf, s, sizeof(cmdbuf) - strlen(cmdbuf) - 1);
+```
+"""
+sd = er.render_agent_body(dup_sanitizer_input)
+assert_not_in("AddressSanitizer", sd,
+              "render_agent_body: duplicate sanitizer dump dropped from body")
+assert_in("The write of 2001 bytes overflows", sd,
+          "render_agent_body: prose around the sanitizer dump preserved")
+assert_in("strncat(cmdbuf", sd,
+          "render_agent_body: non-sanitizer (patch) code block kept")
+assert_eq(sd, er.render_agent_body(sd),
+          "render_agent_body: sanitizer-dedup is idempotent")
+# strip_sanitizer_blocks in isolation: only the sanitizer fence goes.
+only_blocks = er.strip_sanitizer_blocks(
+    "```\nrun: ./reproduce.sh\n```\n\n```\nAddressSanitizer: heap-buffer-overflow\n```\n")
+assert_in("run: ./reproduce.sh", only_blocks,
+          "strip_sanitizer_blocks: keeps a non-sanitizer code block")
+assert_not_in("AddressSanitizer", only_blocks,
+              "strip_sanitizer_blocks: drops the sanitizer code block")
+
+# 5m. A heading that restates the crash id/title (the bundle supplies the real
+# `# CRASH-NNNN: ...` title) is dropped; its body content stays.
+dup_title_input = """\
+## Classification
+
+## CRASH-1: heap-buffer-overflow in the decimal extension
+
+### Trigger
+
+A crafted decimal literal.
+"""
+dt = er.render_agent_body(dup_title_input)
+assert_not_in("CRASH-1:", dt,
+              "render_agent_body: restated CRASH-id title heading dropped")
+assert_in("A crafted decimal literal.", dt,
+          "render_agent_body: body under the restated title preserved")
+assert_in("Trigger", dt,
+          "render_agent_body: subsection headings under the title preserved")
+
+# 5n. Headingless narrative gets a canonical `## Summary`. Agents (esp. freeform
+# model-direct) often write the whole writeup as bare prose with no heading, or
+# the only heading they wrote restated the crash title (dropped above). Either
+# way the narrative must not render without a section heading.
+noheading_input = """\
+## Fields
+
+| Field     | Value          |
+| :-------- | :------------- |
+| Primitive | heap-uaf       |
+
+ASan confirms a heap-buffer-overflow in closureDequote when a caller passes
+a malformed bracket-quoted argument.
+"""
+nh = er.render_agent_body(noheading_input)
+assert nh.lstrip().startswith("## Summary"), \
+    f"render_agent_body: headingless narrative gets a ## Summary heading (got {nh[:40]!r})"
+assert_in("ASan confirms a heap-buffer-overflow", nh,
+          "render_agent_body: the narrative itself is preserved under the heading")
+assert_eq(nh, er.render_agent_body(nh),
+          "render_agent_body: heading insertion is idempotent")
+# A body that already leads with a heading is NOT given a second one.
+headed = er.render_agent_body("## Root Cause\n\nThe parser overflows the stack buffer here.\n")
+assert_not_in("## Summary", headed,
+              "render_agent_body: no spurious ## Summary when body already has a heading")
+# A Strategy: metadata line is skipped, not treated as the narrative.
+strat = er.render_agent_body("Strategy: S5\n\nThe overflow occurs because the loop never bounds-checks.\n")
+assert strat.count("## Summary") == 1 and "Strategy: S5" in strat, \
+    "render_agent_body: Strategy line kept, Summary heads the real narrative"
+# A body with no narrative at all gets no heading (nothing to head).
+assert_not_in("## Summary", er.render_agent_body("## Fields\n\n| A | B |\n| :- | :- |\n| x | y |\n"),
+              "render_agent_body: no ## Summary when there is no narrative")
+# A leading `<!-- enrich:NAME -->...<!-- /enrich:NAME -->` block is harness-owned
+# metadata (lib/report_enrich.py prepends it; bin/render-md renders it as the
+# hero/snippet cards), not agent narrative. The inserted ## Summary must land
+# AFTER the block, before the real prose — otherwise the comment marker becomes
+# the first paragraph of Summary and bin/render-md's hero escapes it into the
+# triage panel (`<!-- enrich:tldr --> Reviewer TL;DR`).
+enrich_lead = er.render_agent_body(
+    "<!-- enrich:tldr -->\n**Reviewer TL;DR**\n\n- Trigger — caller bytes\n"
+    "<!-- /enrich:tldr -->\n\n"
+    "`decode()` copies past the end of a short serialized buffer.\n")
+assert enrich_lead.count("## Summary") == 1, \
+    f"render_agent_body: exactly one ## Summary for enrich-led body (got {enrich_lead!r})"
+assert enrich_lead.index("<!-- enrich:tldr -->") < enrich_lead.index("## Summary") \
+    < enrich_lead.index("`decode()`"), \
+    "render_agent_body: ## Summary sits after the enrich block, before the prose"
+assert_eq(enrich_lead, er.render_agent_body(enrich_lead),
+          "render_agent_body: enrich-led heading placement is idempotent")
+# Multiple stacked enrich blocks (cluster-siblings + tldr + severity-badge) are
+# all skipped; the heading still heads the first real prose line, exactly once.
+multi_enrich = er.render_agent_body(
+    "<!-- enrich:cluster-siblings -->\n**Cluster siblings**: 1 other\n<!-- /enrich:cluster-siblings -->\n\n"
+    "<!-- enrich:tldr -->\n**Reviewer TL;DR**\n<!-- /enrich:tldr -->\n\n"
+    "<!-- enrich:severity-badge -->\nSeverity: Low\n<!-- /enrich:severity-badge -->\n\n"
+    "Strategy: S7\n\n"
+    "The reference string is rendered as a NUL-terminated C string and overruns.\n")
+assert multi_enrich.count("## Summary") == 1, \
+    f"render_agent_body: one ## Summary across stacked enrich blocks (got {multi_enrich!r})"
+assert "Strategy: S7" in multi_enrich and \
+    multi_enrich.index("## Summary") < multi_enrich.index("The reference string"), \
+    "render_agent_body: heading heads the real prose after stacked enrich + Strategy metadata"
+# An orphan metadata line (`Linked FIND:`, a recon cross-reference) above the
+# agent's OWN `## Summary` must not trigger a second inserted `## Summary` —
+# the body is already headed under Summary. Without the guard, the orphan line
+# reads as the first unheaded narrative and the bundle grows a duplicate
+# heading (`## Summary` … Strategy … `## Summary`).
+orphan_before_summary = er.render_agent_body(
+    "Strategy: S7\n\n"
+    "Linked FIND: `FIND-RECON-deadbeef-some-finding`\n\n"
+    "## Summary\n\n"
+    "`add_item_to_array` accepts an item already linked into another array.\n")
+assert orphan_before_summary.count("## Summary") == 1, \
+    f"render_agent_body: no duplicate ## Summary when body already has one (got {orphan_before_summary!r})"
+assert "Linked FIND:" in orphan_before_summary and "Strategy: S7" in orphan_before_summary, \
+    "render_agent_body: orphan metadata lines are preserved, not dropped"
+assert_eq(orphan_before_summary, er.render_agent_body(orphan_before_summary),
+          "render_agent_body: existing-Summary guard is idempotent")
+
+# 5o. Robustness hardening — narrative must never be lost to over-eager rules.
+# (a) A sentence that begins with a label word is narrative, not a restated
+#     field — keep it. Real single-token restatements still go.
+labels_prose = er.render_agent_body(
+    "## Summary\n\nFile: the parser reads one element past the end of buf.\n"
+    "Class: this is an instance of a broader unchecked-length pattern.\n")
+assert_in("the parser reads one element past", labels_prose,
+          "5o-a: narrative sentence starting 'File:' is kept")
+assert_in("broader unchecked-length pattern", labels_prose,
+          "5o-a: narrative sentence starting 'Class:' is kept")
+assert_not_in("ext/misc/closure.c", er.render_agent_body("## Summary\n\nx\n\nFile: ext/misc/closure.c\n"),
+              "5o-a: single-token File: restatement still dropped")
+
+# (b) An UNCLOSED sanitizer fence must not swallow the rest of the document.
+unclosed = er.render_agent_body(
+    "## Observed\n\n```\n==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+    "## Root Cause\n\nThe real narrative that explains the bug.\n")
+assert_in("real narrative that explains", unclosed,
+          "5o-b: narrative after an unclosed sanitizer fence is preserved")
+
+# (c) A non-sanitizer code block that merely MENTIONS a sanitizer / 'runtime
+#     error:' is kept; a real dump is dropped.
+mention = er.render_agent_body(
+    "## Summary\n\n```c\n// guard against the runtime error: divide by zero\n"
+    "if (d) q = n / d;\n```\n")
+assert_in("divide by zero", mention,
+          "5o-c: code block merely mentioning 'runtime error:' is kept")
+assert_in("q = n / d;", mention, "5o-c: its code is kept")
+realdump = er.render_agent_body(
+    "## Observed\n\n```\n    #0 0x55 in foo bar.c:9\nSUMMARY: AddressSanitizer: heap-buffer-overflow\n```\n\nNote.\n")
+assert_not_in("AddressSanitizer", realdump, "5o-c: a real sanitizer dump is still dropped")
+
+# (d) `## CRASH-<word>` (a real heading) is kept; only `CRASH-<digit>` ids drop.
+assert_in("CRASH-resistant", er.render_agent_body("## CRASH-resistant design\n\nNarrative.\n"),
+          "5o-d: a 'CRASH-word' heading is not mistaken for a crash-id title")
+assert_not_in("CRASH-2", er.render_agent_body("## CRASH-2: heap overflow in foo\n\nNarrative.\n"),
+              "5o-d: a 'CRASH-<digit>' restated title is dropped")
+
+# (e) Auto-emitted sections written as an H1 (`# Reproduction`, `# Reachability`)
+#     are killed like their H2 form — no duplicate section leaks, and the
+#     result is idempotent.
+h1dup = er.render_agent_body(
+    "# Reproduction\n\n1. call foo()\n2. call bar()\n\n# Root Cause\n\nThe pointer is freed early.\n")
+assert_not_in("call foo()", h1dup, "5o-e: an H1 '# Reproduction' section is dropped")
+assert_in("The pointer is freed early", h1dup, "5o-e: the narrative section is kept")
+assert_eq(h1dup, er.render_agent_body(h1dup), "5o-e: H1-section handling is idempotent")
+
 cpp_harness_dir = TMP / "cpp-harness"
 cpp_harness_dir.mkdir()
 (cpp_harness_dir / "harness.cpp").write_text("#include <iostream>\nint main(int,char**){return 0;}\n",
@@ -1263,6 +1611,13 @@ if ok:
     report_text = (crash_dir / "REPORT.md").read_text(encoding="utf-8")
     assert_in("# CRASH-X-1", report_text, "end-to-end REPORT.md: h1 present")
     assert_in("## Fields", report_text, "end-to-end REPORT.md: ## Fields present")
+    # Layout: the `## Summary` section leads the report, placed ABOVE the
+    # Fields table (matching the finding-report layout). Field lookups read by
+    # label, not position, so the reorder is purely cosmetic.
+    if 0 <= report_text.find("## Summary") < report_text.find("## Fields"):
+        passed("end-to-end REPORT.md: Summary section precedes Fields")
+    else:
+        failed("end-to-end REPORT.md: Summary section precedes Fields")
     assert_in("| Primitive", report_text, "end-to-end REPORT.md: Primitive row present")
     assert_in("Surface: ", report_text, "end-to-end REPORT.md: bare Surface label present")
     assert_in("Trigger source: bytes", report_text, "end-to-end REPORT.md: trigger source carried over")
