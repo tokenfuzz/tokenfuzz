@@ -1402,14 +1402,18 @@ def _has_contract_concern(report_text: str) -> bool:
     """True when triage annotated the report with a contract concern.
 
     Triage keeps these crashes in ``crashes/`` but prepends a report-visible
-    ``## Contract concern`` section. Treat that section as the scorer input so
-    scoring remains reproducible from REPORT.md alone; do not depend on the
-    sidecar marker.
+    ``## Contract concern`` section. That section is authoritative when present
+    so scoring stays reproducible from REPORT.md alone. It is not the *only*
+    trigger: ``extract_report_fields`` also honours the ``.contract-flagged``
+    sidecar (see ``_contract_factor``'s ``flagged`` argument) so a flagged
+    bundle whose section was never written or was dropped on regeneration is
+    still derated.
     """
     return bool(re.search(r"^## Contract concern\s*$", report_text or "", re.MULTILINE))
 
 
-def _contract_factor(value: str, report_text: str = "") -> tuple[float, str]:
+def _contract_factor(value: str, report_text: str = "",
+                     flagged: bool = False) -> tuple[float, str]:
     """CVSS Attack Complexity analogue. Obeyed contract is the *baseline*
     (×1.0) — the standard reachable case all other factors already assume.
     Violated contract raises Attack Complexity (caller had to misuse the
@@ -1426,7 +1430,7 @@ def _contract_factor(value: str, report_text: str = "") -> tuple[float, str]:
     v = (value or "").lower()
     if "violat" in v or "misuse" in v:
         return 0.7, "contract violated (×0.7)"
-    if _has_contract_concern(report_text):
+    if flagged or _has_contract_concern(report_text):
         return 0.7, "contract concern flagged (×0.7)"
     return 1.0, "contract obeyed/unstated (×1.0)"
 
@@ -1486,6 +1490,7 @@ def reach_score(fields: dict, reach: dict) -> tuple[int, str, list[str]]:
     callers_f, callers_reason = _callers_factor(reach)
     contract_f, contract_reason = _contract_factor(
         fields.get("caller_contract", ""), fields.get("_report_text", ""),
+        bool(fields.get("_contract_flagged")),
     )
     controls_f, controls_reason = _controls_factor(
         fields.get("caller_controls", ""), fields.get("trigger_source", ""),
@@ -1610,6 +1615,14 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
     }
     if report_dir is not None:
         _merge_llm_fields_sidecar(report_dir, fields)
+        # Triage's machine-readable contract flag. The report-visible
+        # ``## Contract concern`` section is authoritative when present, but
+        # the sidecar is an independent trigger so a bundle that was flagged
+        # by an older triage (sidecar only) — or whose section was dropped by
+        # a later report regeneration — still receives the ×0.7 derate rather
+        # than silently scoring as if no concern existed.
+        if (report_dir / ".contract-flagged").is_file():
+            fields["_contract_flagged"] = "1"
     return fields
 
 

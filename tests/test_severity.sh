@@ -359,6 +359,39 @@ python3 "$REACH" --report "$dir" --no-cache >/dev/null 2>&1
 assert_file_contains "$dir/report.md" "contract concern flagged \(×0\\.7\)" \
   "rationale names Contract concern section penalty"
 
+# Sidecar-only contract flag: triage may write a `.contract-flagged` marker
+# without (or before) injecting the report-visible `## Contract concern`
+# section — older triage versions did exactly this, and a later report
+# regeneration can drop the section. The scorer must honour the sidecar so
+# such bundles are not silently scored as if no concern existed. This is the
+# CRASH-0031 regression: sidecar present, no section, Caller contract
+# "unspecified" → must still apply the ×0.7 reach penalty.
+seed_hits "demo_e_contract_sidecar" 100
+dir=$(make_crash "demo_e_contract_sidecar" CRASH-E-CONTRACT-SIDECAR \
+  "heap-buffer-overflow READ" "library-api" "unspecified" "bytes" "5/5" "CL-x (singleton)")
+# Baseline: without the sidecar, an "unspecified" contract is the ×1.0 case.
+_CURRENT_TEST="reach: no sidecar, unspecified contract scores neutral (×1.0)"
+read level score key i r cf <<< "$(get_severity "$dir")"
+# 22 (popular) × 1.00 × 1.00 × 1.0 = 22
+assert_eq "22" "$r" "R=22 with no contract flag (×1.0 baseline)"
+# Now drop the sidecar marker — the section is still absent from the report.
+printf '# Contract-flagged by triage_crash_dirs\n# Reason: trigger requires [call-sequence] outside attacker_controls=[bytes]\n' \
+  > "$dir/.contract-flagged"
+_CURRENT_TEST="reach: .contract-flagged sidecar applies ×0.7 without report section"
+read level score key i r cf <<< "$(get_severity "$dir")"
+# 22 (popular) × 1.00 × 0.7 × 1.0 = 15.4 → 15
+assert_eq "15" "$r" "R=15 from .contract-flagged sidecar (section absent)"
+assert_file_not_contains "$dir/report.md" "^## Contract concern" \
+  "sidecar derate does not require injecting the report section"
+python3 "$REACH" --report "$dir" --no-cache >/dev/null 2>&1
+assert_file_contains "$dir/report.md" "contract concern flagged \(×0\\.7\)" \
+  "rationale names the sidecar-driven contract penalty"
+# Removing the sidecar restores neutral scoring (no permanent derate baked in).
+rm -f "$dir/.contract-flagged"
+_CURRENT_TEST="reach: removing sidecar restores neutral scoring"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "22" "$r" "R back to 22 once the sidecar is removed"
+
 # NEW: unknown surface + popular caller count gets promoted to library_popular.
 # Reachability is a stronger signal than a missing Surface field — punishing
 # the bug because the report author left Surface blank/"unknown" is the bug
