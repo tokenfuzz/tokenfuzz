@@ -1321,6 +1321,44 @@ rebuild_pool_artifacts() {
   _reenrich_and_render_pool_reports "$POOL/crashes"
   _reenrich_and_render_pool_reports "$POOL/crashes-rejected"
 
+  ## Contract-flag reconcile (final pass, on definitively-final fields).
+  ## The contract flag is a function of a crash's structured Trigger source /
+  ## Caller contract fields, but those are only guaranteed materialised HERE —
+  ## after export-repro bundling and the enrich pass above fill the Fields
+  ## table for any crash (re)bundled this run. triage_fill_reach_fields_tree
+  ## reconciled what it could before the score batch, but a crash whose Trigger
+  ## source landed only at bundle/enrich time would reach the scorer unflagged
+  ## (one clustered copy flagged, its twin not). Reconcile once more on the now-
+  ## final fields; then — ONLY if something was newly flagged — re-score
+  ## (severity-only: reuse the reachability.json the batch above wrote, just
+  ## recompute the Severity number with the contract concern applied) and
+  ## re-render so REPORT.html tracks it. Additive/idempotent: already-flagged
+  ## crashes are skipped and a clean run does zero re-scoring. Runs before
+  ## split-pool so the per-condition copies inherit the corrected reports.
+  if [ "$DRY_RUN" != "1" ] && [ -d "$POOL/crashes" ] \
+     && declare -f _triage_reconcile_contract_flag >/dev/null 2>&1; then
+    local _rc_cdir _rc_new=0
+    for _rc_cdir in "$POOL"/crashes/CRASH-*; do
+      [ -d "$_rc_cdir" ] || continue
+      [ -f "$_rc_cdir/.contract-flagged" ] && continue
+      _triage_reconcile_contract_flag "$_rc_cdir" "$(basename "$_rc_cdir")"
+      [ -f "$_rc_cdir/.contract-flagged" ] && _rc_new=$((_rc_new + 1))
+    done
+    if [ "$_rc_new" -gt 0 ]; then
+      log "contract-flag reconcile: applied $_rc_new late flag(s) on final fields; re-scoring (severity-only)"
+      "$SCRIPT_ROOT/bin/reachability" --batch "$POOL" --target "$TARGET_SLUG" --severity-only \
+        >> "$BENCH_DIR/reachability.log" 2>&1 \
+        || log "WARN: post-reconcile re-score returned non-zero ($reason)"
+      if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
+        for _rc_cdir in "$POOL"/crashes/CRASH-*; do
+          [ -f "$_rc_cdir/REPORT.md" ] || continue
+          python3 "$SCRIPT_ROOT/bin/render-md" "$_rc_cdir/REPORT.md" --html-sibling \
+            --title "$(basename "$_rc_cdir")" >/dev/null 2>&1 || true
+        done
+      fi
+    fi
+  fi
+
   ## Per-condition cluster reports. The combined pool above feeds the
   ## cross-condition cluster JSON (which clusters the harness found that
   ## the baseline missed). For the scoreboard and crosstab, copy the pool
