@@ -1202,7 +1202,12 @@ triage_fill_reach_fields_tree() {
   if [ -d "$_root/crashes" ]; then
     for _d in "$_root"/crashes/CRASH-*; do
       [ -d "$_d" ] || continue
-      _triage_llm_fill_fields "$_d" "$(basename "$_d")"
+      _id=$(basename "$_d")
+      _triage_llm_fill_fields "$_d" "$_id"
+      # Fields are now final for this crash — reconcile its contract flag from
+      # them so a flag missed at per-cell audit time (computed before the
+      # fields existed) is applied before the scorer runs. Additive/idempotent.
+      _triage_reconcile_contract_flag "$_d" "$_id"
     done
   fi
   return 0
@@ -1331,6 +1336,66 @@ _triage_annotate_contract_concern() {
   if [ -x "$render" ] && command -v python3 >/dev/null 2>&1; then
     python3 "$render" "$report" --html-sibling --title "$id" >/dev/null 2>&1 || true
   fi
+  return 0
+}
+
+# Reconcile a single crash dir's contract flag against its FINAL fields.
+#
+# The flag is otherwise computed once, at per-cell audit time, often before the
+# structured Trigger source / Caller contract fields are finalized into the
+# report — so the gate sees an incomplete report, defaults the trigger to the
+# attacker-controlled boundary, and promotes. Nothing recomputes it afterward,
+# so a crash the deterministic gate *would* flag can reach the scorer unflagged
+# (two clustered copies of one bug then score differently: one flagged → ×0.7,
+# its twin un-flagged → full severity). Re-running the gate here, after fields
+# are final and before scoring, closes that gap.
+#
+# Additive only: applies a missing flag when the gate says contract-flag; it
+# never removes an existing flag — a flag is sticky until independently
+# disproven, per the `.contract-flagged` sidecar's own contract, and removal
+# would be the only path that could *raise* severity. Deterministic: uses only
+# the static legitimacy gate, never the LLM legitimacy fallback (which yields
+# reject/keep, never a contract-flag). Idempotent — a dir already carrying the
+# sidecar is left untouched.
+#
+# Why additive and not authoritative (flag := gate verdict, removing flags the
+# gate no longer supports):
+#   * The staleness bug is directional. It happens because the audit-time gate
+#     ran on an incomplete report, where parse_trigger_source returns empty and
+#     the gate DEFAULTS the trigger to the attacker boundary → promote → no
+#     flag. So the bug can only ever DROP a flag, never invent a spurious one.
+#     The correction it needs is therefore purely additive.
+#   * Empirically the removal case never fires: re-running the static gate over
+#     every already-flagged dir on disk re-flags 100% of them (DROP=0). So an
+#     authoritative pass would produce an identical result today, at the cost of
+#     removal machinery (strip the report section, delete the sidecar, and tell
+#     a genuine `promote` apart from a `reject` reason so we don't un-flag a
+#     crash that should instead be rejected).
+#   * Removal is the only direction that RAISES severity, and it would do so by
+#     trusting a mutable, agent-authored field (trigger_source) — the unsafe
+#     direction for a security tool. Additive trusts that same field only to
+#     LOWER severity.
+# Authoritative becomes the right call if the threat model evolves — e.g. a
+# target's attacker_controls is later widened to include call-sequence, which
+# SHOULD un-flag and re-raise previously-flagged crashes. Additive leaves those
+# stale (a safe-direction under-rating) until cleared. If/when that need is
+# real, upgrade this to re-run the FULL static gate (not just evaluate_crash_
+# verdict, or it would drop the regex-origin callback/private-include flags) and
+# remove a flag ONLY on an empty/promote verdict, never on a rejection reason.
+_triage_reconcile_contract_flag() {
+  local d="$1" id="$2"
+  [ -d "$d" ] || return 0
+  # Already flagged → sticky, nothing to do (also keeps this idempotent).
+  [ -f "$d/.contract-flagged" ] && return 0
+  # Need a report to read the final fields from.
+  find_primary_crash_narrative "$d" >/dev/null 2>&1 || return 0
+  local verdict
+  verdict=$(crash_dir_static_legitimacy_rejection_reason "$d" "${IS_BROWSER_TARGET:-0}" 2>/dev/null) || return 0
+  case "$verdict" in
+    contract-flag:*)
+      _triage_annotate_contract_concern "$d" "$id" "${verdict#contract-flag: }"
+      ;;
+  esac
   return 0
 }
 

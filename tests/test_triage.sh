@@ -689,5 +689,82 @@ unset LLM_DECIDE_MOCK_LEGIT_CRASH
 assert_match "contract-flag" "$reason" "legitimate crash gate: private include emits contract-flag prefix"
 assert_match "private" "$reason" "legitimate crash gate: private include reason still names the concern"
 
+# ═══════════════════════════════════════════════════════════════
+# _triage_reconcile_contract_flag — re-derive a contract flag missed
+# at audit time from the crash's FINAL fields (write-once staleness)
+# ═══════════════════════════════════════════════════════════════
+export TARGET_ATTACKER_CONTROLS_CSV="bytes"
+
+# A crash whose finalized Trigger source sits outside the attacker boundary
+# ("both" → bytes,call-sequence; call-sequence is outside [bytes]) but which
+# carries NO sidecar (the flag was missed at audit time) gets flagged.
+mkdir -p "$TEST_TMPDIR/reconcile_add/crashes/CRASH-RC-ADD"
+cat > "$TEST_TMPDIR/reconcile_add/crashes/CRASH-RC-ADD/asan.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010
+EOF
+cat > "$TEST_TMPDIR/reconcile_add/crashes/CRASH-RC-ADD/report.md" <<'EOF'
+# heap-use-after-free
+Boundary: public API callback during match
+Caller controls: pattern bytes, subject bytes, and public callback call sequence
+Caller contract: unspecified
+Trigger source: both
+EOF
+d="$TEST_TMPDIR/reconcile_add/crashes/CRASH-RC-ADD"
+_triage_reconcile_contract_flag "$d" CRASH-RC-ADD
+if [ -f "$d/.contract-flagged" ]; then
+  pass "reconcile: missed contract flag applied from final fields"
+else
+  fail "reconcile: missed contract flag applied from final fields" "no .contract-flagged sidecar"
+fi
+assert_file_contains "$d/report.md" "^## Contract concern" \
+  "reconcile: Contract concern section injected"
+
+# Idempotent / sticky: re-running does not append a second sidecar block.
+_triage_reconcile_contract_flag "$d" CRASH-RC-ADD
+blocks=$(grep -c "Contract-flagged by triage_crash_dirs" "$d/.contract-flagged")
+assert_eq 1 "$blocks" "reconcile: idempotent — sidecar not duplicated on re-run"
+
+# A benign crash whose trigger is fully within the attacker boundary is NOT
+# flagged (additive-only: never invents a flag, no false positives).
+mkdir -p "$TEST_TMPDIR/reconcile_benign/crashes/CRASH-RC-OK"
+cat > "$TEST_TMPDIR/reconcile_benign/crashes/CRASH-RC-OK/asan.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000010
+EOF
+cat > "$TEST_TMPDIR/reconcile_benign/crashes/CRASH-RC-OK/report.md" <<'EOF'
+# heap-buffer-overflow
+Boundary: file bytes
+Caller controls: input bytes
+Caller contract: obeyed
+Trigger source: bytes
+EOF
+d2="$TEST_TMPDIR/reconcile_benign/crashes/CRASH-RC-OK"
+_triage_reconcile_contract_flag "$d2" CRASH-RC-OK
+if [ -f "$d2/.contract-flagged" ]; then
+  fail "reconcile: benign in-boundary crash left unflagged" "unexpected .contract-flagged"
+else
+  pass "reconcile: benign in-boundary crash left unflagged"
+fi
+
+# Wiring: triage_fill_reach_fields_tree reconciles every pooled crash, so a
+# stale flag is restored before the scorer runs (LLM fill disabled to keep the
+# test deterministic/offline).
+mkdir -p "$TEST_TMPDIR/reconcile_tree/crashes/CRASH-RC-TREE"
+cat > "$TEST_TMPDIR/reconcile_tree/crashes/CRASH-RC-TREE/asan.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010
+EOF
+cat > "$TEST_TMPDIR/reconcile_tree/crashes/CRASH-RC-TREE/report.md" <<'EOF'
+# heap-use-after-free
+Boundary: public API callback during match
+Caller controls: pattern bytes and public callback call sequence
+Caller contract: unspecified
+Trigger source: call-sequence
+EOF
+LLM_FIELD_FILL_DISABLE=1 triage_fill_reach_fields_tree "$TEST_TMPDIR/reconcile_tree" "$SCRIPT_ROOT/bin" >/dev/null 2>&1 || true
+if [ -f "$TEST_TMPDIR/reconcile_tree/crashes/CRASH-RC-TREE/.contract-flagged" ]; then
+  pass "reconcile: triage_fill_reach_fields_tree flags a stale pooled crash"
+else
+  fail "reconcile: triage_fill_reach_fields_tree flags a stale pooled crash" "no sidecar after tree run"
+fi
+
 teardown_test_env
 summary
