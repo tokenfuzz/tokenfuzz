@@ -221,8 +221,8 @@ payload
 EOF
   out=$("$SCRIPT_ROOT/bin/probe" --dry-run "$RESULTS_DIR/scratch-1/${san}-tc.dat" 2>&1)
   assert_match "sanitizer=${san}" "$out" "probe sanitizer routing: ${san} selected from target.toml"
-  assert_match "run-${san} generic" "$out" "probe sanitizer routing: ${san} wrapper used"
-  assert_not_match "run-asan-multi generic" "$out" "probe sanitizer routing: ${san} does not use ASan generic wrapper"
+  assert_match "run-sanitizer-multi ${san} generic" "$out" "probe sanitizer routing: ${san} routed through the generic multi-run wrapper"
+  assert_not_match "run-asan-multi" "$out" "probe sanitizer routing: ${san} does not use the legacy ASan-only wrapper"
 done
 
 cat > "$TARGET_ROOT/asan-runner" <<'SH'
@@ -245,10 +245,10 @@ payload
 EOF
 out=$("$SCRIPT_ROOT/bin/probe" --dry-run "$RESULTS_DIR/scratch-1/multi-san.dat" 2>&1)
 assert_match "sanitizer=tsan" "$out" "probe sanitizer routing: first configured sanitizer wins by default"
-assert_match "run-tsan generic" "$out" "probe sanitizer routing: default sanitizer wrapper is used"
+assert_match "run-sanitizer-multi tsan generic" "$out" "probe sanitizer routing: default sanitizer routed through the generic multi-run wrapper"
 out=$(PROBE_SANITIZER=asan "$SCRIPT_ROOT/bin/probe" --dry-run "$RESULTS_DIR/scratch-1/multi-san.dat" 2>&1)
 assert_match "sanitizer=asan" "$out" "probe sanitizer routing: PROBE_SANITIZER override selects ASan"
-assert_match "run-asan-multi generic" "$out" "probe sanitizer routing: ASan override uses ASan wrapper"
+assert_match "run-sanitizer-multi asan generic" "$out" "probe sanitizer routing: ASan override routed through the generic multi-run wrapper"
 bad_rc=0
 bad_out=$(PROBE_SANITIZER=msan "$SCRIPT_ROOT/bin/probe" --dry-run "$RESULTS_DIR/scratch-1/multi-san.dat" 2>&1) || bad_rc=$?
 assert_eq "2" "$bad_rc" "probe sanitizer routing: disabled sanitizer override exits 2"
@@ -336,7 +336,7 @@ args = ["-race", "{TESTCASE}"]
 EOF
 out=$("$SCRIPT_ROOT/bin/probe" --dry-run "$RESULTS_DIR/scratch-1/multi-san.dat" 2>&1)
 assert_match "sanitizer=race" "$out" "probe sanitizer routing: race selected from target.toml"
-assert_match "run-asan-multi generic" "$out" "probe sanitizer routing: race uses generic runner wrapper"
+assert_match "run-sanitizer-multi race generic" "$out" "probe sanitizer routing: race routed through the generic multi-run wrapper"
 out=$(ASAN_OPTIONS=leak UBSAN_OPTIONS=leak MSAN_OPTIONS=leak TSAN_OPTIONS=leak "$SCRIPT_ROOT/bin/probe" "$RESULTS_DIR/scratch-1/multi-san.dat" 2>&1)
 for opt in ASAN UBSAN MSAN TSAN; do
   assert_match "${opt}_OPTIONS_UNSET" "$out" "probe sanitizer routing: race runner clears ${opt}_OPTIONS"

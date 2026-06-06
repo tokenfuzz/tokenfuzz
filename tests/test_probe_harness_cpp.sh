@@ -236,8 +236,8 @@ for san in ubsan msan tsan; do
   assert_file_contains "$args_file" "libtarget-${san}\\.a" \
     "probe: C++ HARNESS ${san} links selected sanitizer lib"
   assert_match "sanitizer=${san}" "$out" "probe: C++ HARNESS ${san} dry-run records selected sanitizer"
-  assert_match "run-${san} generic" "$out" "probe: C++ HARNESS ${san} routes through selected wrapper"
-  assert_not_match "run-asan-multi generic" "$out" "probe: C++ HARNESS ${san} does not mix ASan wrapper"
+  assert_match "run-sanitizer-multi ${san} generic" "$out" "probe: C++ HARNESS ${san} routes through the generic multi-run wrapper"
+  assert_not_match "run-asan-multi" "$out" "probe: C++ HARNESS ${san} does not use the legacy ASan-only wrapper"
 done
 
 # Missing sanitizer-lib fallback: when ubsan_lib/msan_lib/tsan_lib is

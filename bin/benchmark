@@ -1155,6 +1155,163 @@ _reenrich_and_render_pool_reports() {
 ##   bin/export-repro   a REPORT.md / REPORT.html / reproduce.sh bundle per crash
 ##   bin/cluster-crashes / bin/cluster-findings   cross-condition deduplication
 ##
+## Reverification: give footer-less pooled crashes a real measured
+## reproduction rate. The model-direct floor condition writes sanitizer.txt
+## from a single run (no CRASH_RATE footer), so those reports otherwise
+## render "?" for Reproduction rate. We re-run each such crash 5x through
+## bin/run-sanitizer-multi — the SAME normalizer the harness path uses — so
+## the rate is measured uniformly for every pooled crash regardless of how it
+## was produced (reproduction rate is a property of the bug, not the finder).
+## Crashes that already carry a measured CRASH_RATE footer (every harness
+## crash) are skipped, so the cost is 5x only per footer-less crash. A crash
+## that reproduces gets its one-shot trace replaced by the full 5x trace; one
+## that no longer reproduces honestly records CRASH_RATE: 0/N while keeping
+## its original diagnostic. A crash whose binary/input can't be resolved is
+## left untouched (rate stays "?"), never fabricated.
+_reverify_one_crash() {
+  local cdir="$1" target_root="$2"
+  local resolved san mode bin testcase
+  ## Resolve sanitizer family + testcase + binary with the SAME discovery
+  ## bin/export-repro uses (lib/crash_artifacts), so the re-run input matches
+  ## the bundle's staged input exactly.
+  resolved="$(SCRIPT_ROOT="$SCRIPT_ROOT" python3 - "$cdir" "$target_root" <<'PY' 2>/dev/null
+import os, re, sys
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.environ["SCRIPT_ROOT"], "lib"))
+import crash_artifacts as ca
+try:
+    from target_config import parse_toml
+except Exception:
+    parse_toml = None
+
+crash_dir, target_root = Path(sys.argv[1]), Path(sys.argv[2])
+scan_dirs = []
+audit = crash_dir / ".audit"
+if audit.is_dir():
+    scan_dirs.append(audit)
+scan_dirs.append(crash_dir)
+
+asan = ca.find_primary_asan(scan_dirs)
+text = ""
+if asan is not None:
+    try:
+        text = asan.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+m = re.search(r"sanitizer=([a-z]+)", text)
+san = m.group(1) if m else "asan"
+if san not in ("asan", "ubsan", "msan", "tsan", "race", "runner"):
+    san = "asan"
+
+# A compiled harness driver in the crash dir reproduces on its own (no CLI
+# input). It is ASan-compiled per the model-direct recipe.
+harness_bin = ""
+for p in sorted(crash_dir.glob("harness*")):
+    if ca.is_executable_binary(p):
+        harness_bin = str(p)
+        break
+
+testcase = ca.find_testcase(scan_dirs, asan_files=[asan] if asan else [])
+
+conf = {}
+toml = target_root / "target.toml"
+if parse_toml is not None and toml.is_file():
+    try:
+        conf = parse_toml(toml)
+    except Exception:
+        conf = {}
+
+def _bin_rel(s):
+    san_tbl = conf.get("sanitizer", {}) or {}
+    return conf.get(f"{s}_bin") or san_tbl.get(f"{s}_bin") or ""
+
+bin_rel = _bin_rel(san) or (conf.get("asan_bin") or "")
+# Mirror lib/sanitizer.sh::sanitizer_build_dir — build-<name><AUDIT_BUILD_SUFFIX>
+# — so suffixed/containerised builds resolve to the real tree (race/runner
+# reuse the asan build, as in bin/probe).
+build_name = "asan" if san in ("asan", "race", "runner") else san
+build_dir = target_root / ("build-%s%s" % (build_name, os.environ.get("AUDIT_BUILD_SUFFIX", "")))
+target_bin = str(build_dir / bin_rel) if bin_rel else ""
+
+if harness_bin:
+    print("SAN=asan\nMODE=harness\nBIN=%s\nTESTCASE=" % harness_bin)
+elif (testcase is not None and target_bin
+      and os.path.exists(target_bin) and os.access(target_bin, os.X_OK)):
+    print("SAN=%s\nMODE=cli\nBIN=%s\nTESTCASE=%s" % (san, target_bin, testcase))
+else:
+    print("MODE=none")
+PY
+)" || return 1
+
+  san="$(printf '%s\n' "$resolved" | sed -n 's/^SAN=//p')"
+  mode="$(printf '%s\n' "$resolved" | sed -n 's/^MODE=//p')"
+  bin="$(printf '%s\n' "$resolved" | sed -n 's/^BIN=//p')"
+  testcase="$(printf '%s\n' "$resolved" | sed -n 's/^TESTCASE=//p')"
+  [ -n "$mode" ] && [ "$mode" != "none" ] || return 1
+
+  local tmp="$cdir/sanitizer.txt.reverify.tmp" rc=0 upper
+  rm -f "$tmp"
+  if [ "$mode" = "harness" ]; then
+    env SANITIZER_RUNS=5 SAN_OUTPUT_FILE="$tmp" \
+      ASAN_GENERIC_BIN="$bin" ASAN_GENERIC_SKIP_TESTCASE=1 \
+      "$SCRIPT_ROOT/bin/run-sanitizer-multi" asan generic /dev/null \
+      >/dev/null 2>&1 || rc=$?
+  else
+    upper="$(printf '%s' "$san" | tr '[:lower:]' '[:upper:]')"
+    case "$san" in race|runner) upper="ASAN" ;; esac
+    env SANITIZER_RUNS=5 SAN_OUTPUT_FILE="$tmp" "${upper}_GENERIC_BIN=$bin" \
+      "$SCRIPT_ROOT/bin/run-sanitizer-multi" "$san" generic "$testcase" \
+      >/dev/null 2>&1 || rc=$?
+  fi
+
+  ## Success = the normalizer produced a CRASH_RATE footer (it completed the
+  ## runs). We only ever APPEND that measured footer to the original
+  ## sanitizer.txt — never replace it. Replacing with the reverify trace
+  ## could swap the model's captured diagnostic for a *different* crash (a
+  ## mis-resolved input/binary, or a second failure the testcase also
+  ## triggers); the original one-shot trace is the evidence and must be
+  ## preserved. read_confidence then reports the measured rate (it prefers
+  ## the sanitizer.txt CRASH_RATE footer). No footer at all → discard the
+  ## attempt, leave the crash footer-less so the rate stays an honest "?".
+  local footer num note
+  footer="$(grep -Eo '^CRASH_RATE:[[:space:]]*[0-9]+/[0-9]+' "$tmp" 2>/dev/null \
+            | head -1 | grep -Eo '[0-9]+/[0-9]+' | head -1)"
+  rm -f "$tmp"
+  [ -n "$footer" ] || return 1
+  num="${footer%%/*}"
+  if [ "$num" -gt 0 ] 2>/dev/null; then
+    note="reproduced in ${footer} reverification runs"
+  else
+    note="original one-shot trace did not reproduce in 5 reverification runs"
+  fi
+  {
+    printf '\nCRASH_RATE: %s\n' "$footer"
+    printf '[run-sanitizer-multi] REVERIFY: %s — %s\n' "$footer" "$note"
+  } >> "$cdir/sanitizer.txt"
+  return 0
+}
+
+_reverify_pool_crash_rates() {
+  local pool="$1" target_root="$2" reason="${3:-update}"
+  [ -d "$pool/crashes" ] || return 0
+  [ -x "$SCRIPT_ROOT/bin/run-sanitizer-multi" ] || return 0
+  local cdir san_txt reverified=0
+  for cdir in "$pool"/crashes/CRASH-*; do
+    [ -d "$cdir" ] || continue
+    san_txt="$cdir/sanitizer.txt"
+    [ -f "$san_txt" ] || continue
+    ## Already a measured footer (harness 5x) — never re-run.
+    grep -Eq '^CRASH_RATE:[[:space:]]*[0-9]+/[0-9]+' "$san_txt" && continue
+    if _reverify_one_crash "$cdir" "$target_root"; then
+      reverified=$((reverified + 1))
+    else
+      log "WARN: reverify could not measure $(basename "$cdir") — leaving rate unset ($reason)"
+    fi
+  done
+  [ "$reverified" -gt 0 ] && log "reverified crash repro rates: $reverified ($reason)"
+  return 0
+}
+
 ## Called from update_benchmark_result() as each cell finishes — without
 ## this, mid-run benchmark-result.{md,html} renders bare counts because
 ## _crosstab_count requires pool/<condition>/<kind>/ to exist on disk,
@@ -1250,14 +1407,24 @@ rebuild_pool_artifacts() {
     [ "${BENCH_REGEN_SKIP_REPORTS:-0}" = "1" ] && _regen=1
     local cdir bundled=0
     local _md_target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
+    ## Measure a real reproduction rate for any footer-less crash BEFORE
+    ## export-repro reads it (read_confidence greps CRASH_RATE). See
+    ## _reverify_pool_crash_rates above.
+    _reverify_pool_crash_rates "$POOL" "$_md_target_root" "$reason"
     for cdir in "$POOL"/crashes/CRASH-*; do
       [ -d "$cdir" ] || continue
       ## Already a canonical export-repro bundle? (harness cells, or a prior
       ## pool pass.) Guard on export-repro's exact signature heading rather
       ## than a filename (report.md / REPORT.md collapse on case-insensitive
-      ## FS). A matched crash is skipped entirely — never re-bundled or
-      ## re-rendered — so existing good reports survive --regenerate unchanged.
-      if grep -q '^## Expected sanitizer output' "$cdir"/[Rr][Ee][Pp][Oo][Rr][Tt].md 2>/dev/null; then
+      ## FS). A canonical bundle is left untouched ONLY when it already shows a
+      ## real measured Reproduction rate; one rendered with a stale "?"/"—"
+      ## (e.g. an old pool built before reverification) is re-bundled so the
+      ## CRASH_RATE that reverify just wrote into sanitizer.txt reaches the
+      ## report. Harness crashes always carry a measured rate, so they stay
+      ## untouched. The rate cell is `| Reproduction rate | <n>/<m> |`.
+      if grep -q '^## Expected sanitizer output' "$cdir"/[Rr][Ee][Pp][Oo][Rr][Tt].md 2>/dev/null \
+         && grep -Eiq '^\|[[:space:]]*Reproduction rate[[:space:]]*\|[^|]*[0-9]+/[0-9]+' \
+              "$cdir"/[Rr][Ee][Pp][Oo][Rr][Tt].md 2>/dev/null; then
         continue
       fi
       RESULTS_DIR="$POOL" TARGET_ROOT="$_md_target_root" TARGET_SLUG="$TARGET_SLUG" \

@@ -291,14 +291,15 @@ verdict = open(os.path.join(script_root, "lib", "verdict.sh")).read()
 if not re.search(r'verdict_file_is_clean "\$ASAN_OUTPUT_FILE".*?\n\s*verdict="CLEAN"',
                  probe, re.DOTALL):
     sys.exit("bin/probe CLEAN branch must route through verdict_file_is_clean")
-# The shared CLEAN marker must require a non-zero run-asan-multi execution
-# rate and must not trust raw testcase stdout (TESTCASE_EXECUTED).
+# The shared CLEAN marker must require a non-zero multi-run execution rate
+# (run-sanitizer-multi, with the legacy run-asan-multi label still accepted)
+# and must not trust raw testcase stdout (TESTCASE_EXECUTED).
 m = re.search(r'verdict_clean_marker_re\(\)\s*\{(.*?)\n\}', verdict, re.DOTALL)
 if not m:
     sys.exit("could not find verdict_clean_marker_re in lib/verdict.sh")
 body = m.group(1)
-if "EXECUTION_RATE: [1-9]" not in body or "run-asan-multi" not in body:
-    sys.exit(f"verdict_clean_marker_re must require EXECUTION_RATE: [1-9]; got: {body}")
+if "EXECUTION_RATE: [1-9]" not in body or "-multi\\] EXECUTION_RATE" not in body:
+    sys.exit(f"verdict_clean_marker_re must require a multi-run EXECUTION_RATE: [1-9]; got: {body}")
 if "TESTCASE_EXECUTED" in body:
     sys.exit(f"verdict_clean_marker_re must not trust raw TESTCASE_EXECUTED; got: {body}")
 PY

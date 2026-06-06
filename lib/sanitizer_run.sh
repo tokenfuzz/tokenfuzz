@@ -90,6 +90,11 @@ sanitizer_run_js() {
   audit_timeout_run "$timeout_val" env "${SAN}_OPTIONS=$opts" "$js_bin" "$@" || rc=$?
   if [ "$rc" -eq 124 ]; then
     echo "[run-$san] JS shell timed out after ${timeout_val}s" >&2
+  elif [ "$rc" -eq 0 ]; then
+    # Post-run execution evidence (mirrors sanitizer_run_generic). Without
+    # this, run-sanitizer-multi cannot count a clean js run and reports a
+    # false EXECUTION_RATE: 0/N for msan/tsan/ubsan js-mode testcases.
+    echo "[run-$san] js EXECUTION VERIFIED (post-run, rc=0)" >&2
   fi
   return "$rc"
 }

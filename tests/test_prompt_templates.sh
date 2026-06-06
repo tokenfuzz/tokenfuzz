@@ -74,7 +74,7 @@ remaining=$(
     bin lib .agents \
     --glob '!lib/prompts/*.md.j2' \
     2>/dev/null \
-  | grep -v 'bin/run-asan-multi:.*headless mode' \
+  | grep -v 'bin/run-\(asan\|sanitizer\)-multi:.*headless mode' \
   || true
 )
 assert_eq "" "$remaining" "no inline prompt bodies remain outside lib/prompts"

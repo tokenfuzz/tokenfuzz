@@ -190,6 +190,8 @@ fi
 
 bash -n "$SCRIPT_ROOT/bin/run-asan-multi" 2>/dev/null
 assert_eq 0 $? "run-asan-multi: syntax check passes"
+bash -n "$SCRIPT_ROOT/bin/run-sanitizer-multi" 2>/dev/null
+assert_eq 0 $? "run-sanitizer-multi: syntax check passes"
 
 # ═══════════════════════════════════════════════════════════════
 # 8. bin/hits syntax check (if exists)

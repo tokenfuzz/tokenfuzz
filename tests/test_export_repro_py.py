@@ -749,6 +749,48 @@ assert_eq("5/5",
           er.read_confidence(table_report, fake_asan),
           "read_confidence: table fallback for Reproduction rate")
 
+# read_confidence returns the MEASURED rate from a sanitizer.txt CRASH_RATE
+# footer (the only sanitizer-derived source). The multi-run normalizer
+# writes this footer for every sanitizer; reverification backfills it for
+# model-direct one-shots.
+measured_asan = TMP / "measured-crashrate.txt"
+measured_asan.write_text(
+    "==99==ERROR: AddressSanitizer: heap-use-after-free\n"
+    "SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free\n"
+    "CRASH_RATE: 3/5\n",
+    encoding="utf-8",
+)
+assert_eq("3/5",
+          er.read_confidence(None, measured_asan),
+          "read_confidence: measured CRASH_RATE footer wins")
+
+stale_rate_report = TMP / "stale-rate-report.md"
+stale_rate_report.write_text("""\
+# CRASH-STALE
+
+## Fields
+
+| Field             | Value |
+|:------------------|:------|
+| Reproduction rate | 5/5   |
+""", encoding="utf-8")
+assert_eq("3/5",
+          er.read_confidence(stale_rate_report, measured_asan),
+          "read_confidence: measured CRASH_RATE footer wins over stale report rate")
+
+# A footer-less raw one-shot trace is NOT guessed — read_confidence returns
+# "?" rather than fabricating a rate that was never measured. Reverification
+# (not inference) is what supplies a real rate.
+footerless_asan = TMP / "footerless-oneshot.txt"
+footerless_asan.write_text(
+    "==99==ERROR: AddressSanitizer: heap-use-after-free\n"
+    "SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free\n",
+    encoding="utf-8",
+)
+assert_eq("?",
+          er.read_confidence(None, footerless_asan),
+          "read_confidence: footer-less one-shot trace is not guessed (stays '?')")
+
 # 5c. Bare-label still wins when present (no regression for legacy form).
 mixed_report = TMP / "mixed-report.md"
 mixed_report.write_text("""\

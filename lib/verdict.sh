@@ -11,9 +11,10 @@
 # CRASH in one place and CLEAN in another.
 #
 # Out of scope on purpose:
-#   - bin/run-asan-multi's has_crash / this_crashed serve output
-#     digest-truncation and crash-rate counting, not verdict; they
-#     intentionally key off a narrower, formatting-oriented set.
+#   - bin/run-sanitizer-multi's digest has_crash regex serves output
+#     digest-truncation, not verdict; it intentionally keys off a narrower,
+#     formatting-oriented set. (Crash-rate counting there now uses
+#     verdict_file_has_crash from this file.)
 #   - lib/quality.py's verified-output regex answers a different
 #     question ("was the testcase executed at all"), not "did it crash".
 
@@ -97,11 +98,12 @@ verdict_file_has_crash() {
 
 # verdict_clean_marker_re — echo the canonical "execution verified" regex.
 # CLEAN requires wrapper-issued post-run evidence: a non-zero
-# run-asan-multi execution rate, or a run-asan/probe EXECUTION VERIFIED
-# marker emitted after rc=0 / browser-marker inspection. Raw testcase
-# stdout (e.g. a bare TESTCASE_EXECUTED print) is intentionally ignored.
+# run-sanitizer-multi execution rate (the old run-asan-multi label is kept
+# for historical artifacts), or a run-<san>/probe EXECUTION VERIFIED marker
+# emitted after rc=0 / browser-marker inspection. Raw testcase stdout (e.g. a
+# bare TESTCASE_EXECUTED print) is intentionally ignored.
 verdict_clean_marker_re() {
-  printf '%s' '^\[run-asan-multi\] EXECUTION_RATE: [1-9][0-9]*/[0-9]+$|^\[run-(asan|ubsan|msan|tsan)\] (browser|js|xpcshell|generic) EXECUTION VERIFIED \(post-run|^\[run-ubsan\] EXECUTION VERIFIED:|^\[probe\] (asan|ubsan|msan|tsan|race|runner) EXECUTION VERIFIED \(post-run'
+  printf '%s' '^\[run-(asan|sanitizer)-multi\] EXECUTION_RATE: [1-9][0-9]*/[0-9]+$|^\[run-(asan|ubsan|msan|tsan)\] (browser|js|xpcshell|generic) EXECUTION VERIFIED \(post-run|^\[run-ubsan\] EXECUTION VERIFIED:|^\[probe\] (asan|ubsan|msan|tsan|race|runner) EXECUTION VERIFIED \(post-run'
 }
 
 # verdict_file_is_clean <file> — return 0 if <file> carries wrapper-issued

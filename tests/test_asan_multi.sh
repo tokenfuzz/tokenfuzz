@@ -38,10 +38,14 @@ exit 0
 MOCK
 chmod +x "$MOCK_BIN/hits"
 
-# Copy run-asan-multi into the mock bin so $SCRIPT_DIR resolves to $MOCK_BIN,
-# which is where our mock run-asan lives.
+# Copy both the shim and the real normalizer into the mock bin so
+# $SCRIPT_DIR resolves to $MOCK_BIN, which is where our mock run-asan lives.
+# run-asan-multi is now a thin shim that exec's a sibling run-sanitizer-multi,
+# so the sibling must be present for the shim to work. Driving RUN_5X through
+# the shim exercises the real `run-asan-multi <mode> <tc>` entry point.
 cp "$SCRIPT_ROOT/bin/run-asan-multi" "$MOCK_BIN/run-asan-multi"
-chmod +x "$MOCK_BIN/run-asan-multi"
+cp "$SCRIPT_ROOT/bin/run-sanitizer-multi" "$MOCK_BIN/run-sanitizer-multi"
+chmod +x "$MOCK_BIN/run-asan-multi" "$MOCK_BIN/run-sanitizer-multi"
 RUN_5X="$MOCK_BIN/run-asan-multi"
 
 # Create a dummy testcase

@@ -501,29 +501,6 @@ _probe_sanitizer_compile_flag() {
   esac
 }
 
-_probe_selected_options_env_name() {
-  case "$PROBE_SANITIZER_SELECTED" in
-    asan)  printf '%s\n' ASAN_OPTIONS ;;
-    ubsan) printf '%s\n' UBSAN_OPTIONS ;;
-    msan)  printf '%s\n' MSAN_OPTIONS ;;
-    tsan)  printf '%s\n' TSAN_OPTIONS ;;
-    *)     return 1 ;;
-  esac
-}
-
-_probe_selected_options_b64() {
-  local env_name value=""
-  env_name="$(_probe_selected_options_env_name 2>/dev/null || true)"
-  [ -n "$env_name" ] || return 0
-  value="${!env_name-}"
-  [ -n "$value" ] || return 0
-  python3 - "$value" <<'PY'
-import base64
-import sys
-print(base64.b64encode(sys.argv[1].encode()).decode())
-PY
-}
-
 if [ -n "$HARNESS_LINE" ]; then
   testcase_dir="$(cd "$(dirname "$TESTCASE")" && pwd -P)"
   if [ "${PROBE_ALLOW_EXTERNAL_HARNESS:-0}" != "1" ]; then
@@ -956,11 +933,14 @@ if [ "$MODE" = "generic" ]; then
   esac
 fi
 
-# Compose generic-mode invocation. Three modes feed into the same wrapper:
+# Compose generic-mode invocation. The dispatch below routes every sanitizer
+# through `run-sanitizer-multi <san> generic ...`, which drives the matching
+# single-shot runner (run-asan/run-ubsan/run-msan/run-tsan; race/runner reuse
+# run-asan) N times. Three argv shapes feed that wrapper:
 #
 #   (a) Default (no runner, no // HARNESS:):
-#       run-asan generic <testcase> <args>
-#       → bin runs `<asan_bin> <testcase> <args>`
+#       run-sanitizer-multi <san> generic <testcase> <args>
+#       → bin runs `<sanitizer_bin> <testcase> <args>`
 #
 #   (b) Interpreted // HARNESS: (harness.py / harness.rb / ...):
 #       GENERIC_PREARGS=(harness.py <testcase>).
@@ -968,14 +948,13 @@ fi
 #
 #   (c) target.toml [runner] with args containing "{TESTCASE}":
 #       Pre-args already include the testcase path after substitution.
-#       Sentinel "" passed as testcase so run-asan-multi's coverage gate +
+#       Sentinel "" passed as testcase so run-sanitizer-multi's coverage gate +
 #       budget accounting still see the file (via TARGET= header read).
-#       ASAN_GENERIC_SKIP_TESTCASE=1 tells run-asan generic NOT to insert
+#       ASAN_GENERIC_SKIP_TESTCASE=1 tells the runner NOT to insert
 #       <testcase> again — bin runs `<runner_bin> <expanded args> <trailing>`.
 declare -a cmd
 declare -a generic_pre_args=()
 generic_skip_testcase=0
-probe_direct_capture=0
 if [ "$MODE" = "generic" ]; then
   if [ -z "$HARNESS_LINE" ] \
      && [ "${#GENERIC_PREARGS[@]}" -eq 0 ] \
@@ -1011,38 +990,27 @@ export ASAN_GENERIC_SKIP_TESTCASE="$generic_skip_testcase"
 
 case "$MODE" in
   js-diff)
+    # js-diff is a single-shot SpiderMonkey differential, NOT an N-run crash
+    # confirmation, so it does not go through the multi-run normalizer (which
+    # would loop the differential N times, double-write $ASAN_OUTPUT_FILE
+    # against the tee below, and mis-count EXECUTION_RATE). Both sanitizers
+    # run their single-shot runner directly; the tee below captures output.
     case "$PROBE_SANITIZER_SELECTED" in
       asan)  cmd=("$SCRIPT_DIR/run-asan" "js-diff" "$EXEC_TESTCASE" "$@") ;;
-      ubsan) cmd=("$SCRIPT_DIR/run-ubsan" "js-diff" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
+      ubsan) cmd=("$SCRIPT_DIR/run-ubsan" "js-diff" "$EXEC_TESTCASE" "$@") ;;
     esac ;;
   browser|js)
-    case "$PROBE_SANITIZER_SELECTED" in
-      asan)
-        cmd=("$SCRIPT_DIR/run-asan-multi" "$MODE" "$EXEC_TESTCASE" "$@") ;;
-      ubsan)
-        cmd=("$SCRIPT_DIR/run-ubsan" "$MODE" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
-      msan)
-        cmd=("$SCRIPT_DIR/run-msan" "$MODE" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
-      tsan)
-        cmd=("$SCRIPT_DIR/run-tsan" "$MODE" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
-    esac ;;
+    # Every sanitizer goes through the generic multi-run normalizer, which
+    # owns the run header, CRASH_RATE/EXECUTION_RATE footer, and verdict
+    # detection uniformly (see bin/run-sanitizer-multi).
+    cmd=("$SCRIPT_DIR/run-sanitizer-multi" "$PROBE_SANITIZER_SELECTED" "$MODE" "$EXEC_TESTCASE" "$@") ;;
   generic)
-    case "$PROBE_SANITIZER_SELECTED" in
-      asan|runner|race)
-        if [ "${#generic_pre_args[@]}" -gt 0 ]; then
-          cmd=("$SCRIPT_DIR/run-asan-multi" "generic" "$EXEC_TESTCASE"
-               "${generic_pre_args[@]}" "$@")
-        else
-          cmd=("$SCRIPT_DIR/run-asan-multi" "generic" "$EXEC_TESTCASE" "$@")
-        fi
-        ;;
-      ubsan)
-        cmd=("$SCRIPT_DIR/run-ubsan" "generic" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
-      msan)
-        cmd=("$SCRIPT_DIR/run-msan" "generic" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
-      tsan)
-        cmd=("$SCRIPT_DIR/run-tsan" "generic" "$EXEC_TESTCASE" "$@"); probe_direct_capture=1 ;;
-    esac
+    if [ "${#generic_pre_args[@]}" -gt 0 ]; then
+      cmd=("$SCRIPT_DIR/run-sanitizer-multi" "$PROBE_SANITIZER_SELECTED" "generic" "$EXEC_TESTCASE"
+           "${generic_pre_args[@]}" "$@")
+    else
+      cmd=("$SCRIPT_DIR/run-sanitizer-multi" "$PROBE_SANITIZER_SELECTED" "generic" "$EXEC_TESTCASE" "$@")
+    fi
     ;;
 esac
 
@@ -1067,29 +1035,10 @@ if [ "$MODE" = "js-diff" ]; then
   "${cmd[@]}" 2>&1 | tee "$ASAN_OUTPUT_FILE"
   rc=${PIPESTATUS[0]}
 else
-  if [ "$probe_direct_capture" -eq 1 ]; then
-    mkdir -p "$(dirname "$ASAN_OUTPUT_FILE")" 2>/dev/null || true
-    _probe_run_direct() {
-      local i run_rc worst_rc=0
-      echo "SANITIZER_RUN_HEADER: sanitizer=${PROBE_SANITIZER_SELECTED} runs=${ASAN_RUNS} mode=${MODE} testcase=${TESTCASE} env_options_b64=$(_probe_selected_options_b64) started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      for i in $(seq 1 "$ASAN_RUNS"); do
-        echo "=== Run $i/$ASAN_RUNS (${PROBE_SANITIZER_SELECTED}) ==="
-        run_rc=0
-        "${cmd[@]}" || run_rc=$?
-        if [ "$run_rc" -eq 0 ]; then
-          echo "[probe] ${PROBE_SANITIZER_SELECTED} EXECUTION VERIFIED (post-run, rc=0)"
-        else
-          echo "[probe] ${PROBE_SANITIZER_SELECTED} EXECUTION INCONCLUSIVE (post-run, rc=${run_rc})"
-          [ "$worst_rc" -eq 0 ] && worst_rc="$run_rc"
-        fi
-      done
-      exit "$worst_rc"
-    }
-    _probe_run_direct 2>&1 | tee "$ASAN_OUTPUT_FILE"
-    rc=${PIPESTATUS[0]}
-  else
-    "${cmd[@]}" || rc=$?
-  fi
+  # Every sanitizer runs through run-sanitizer-multi, which writes the run
+  # header + CRASH_RATE/EXECUTION_RATE footer into $ASAN_OUTPUT_FILE itself
+  # and echoes to stdout — so probe just runs it (no separate capture loop).
+  "${cmd[@]}" || rc=$?
 fi
 
 # Crash / clean classification lives in lib/verdict.sh — the single

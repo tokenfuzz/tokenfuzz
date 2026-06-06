@@ -253,6 +253,12 @@ never re-bundled or re-rendered. Re-bundling an existing report would
 need live audit-session state and could overwrite hand edits, so the
 pass skips anything that already carries a canonical bundle.
 
+Reproduction rate is measured the same way for every pooled crash, so
+the rate is comparable across conditions: any crash lacking a measured
+rate is re-run through the same multi-run wrapper the harness path uses,
+and a crash that can't be re-run keeps an unset (`?`) rate rather than a
+guessed one.
+
 ## How to make the result worth reading
 
 - Pick targets that can plausibly produce evidence inside the budget.

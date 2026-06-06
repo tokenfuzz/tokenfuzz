@@ -20,10 +20,13 @@ set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
 
-ASAN5X="$SCRIPT_ROOT/bin/run-asan-multi"
+# _digest_asan now lives in the generic normalizer; run-asan-multi is a shim.
+ASAN5X="$SCRIPT_ROOT/bin/run-sanitizer-multi"
 
 bash -n "$ASAN5X" 2>/dev/null
-assert_eq 0 $? "run-asan-multi: syntax check passes"
+assert_eq 0 $? "run-sanitizer-multi: syntax check passes"
+bash -n "$SCRIPT_ROOT/bin/run-asan-multi" 2>/dev/null
+assert_eq 0 $? "run-asan-multi shim: syntax check passes"
 
 # _digest_asan is an internal function — to test it directly we source the
 # script with a guard that skips main-body execution. The script has no

@@ -1408,7 +1408,7 @@ cat > "$RESULTS_DIR/scratch-1/browser.html" <<'EOF_TC'
 <script>console.log('TESTCASE_EXECUTED');</script>
 EOF_TC
 dry=$("$PROBE" --dry-run --want auto "$RESULTS_DIR/scratch-1/browser.html")
-assert_match 'run-asan-multi browser' "$dry" "probe: browser uses run-asan-multi coverage owner"
+assert_match 'run-sanitizer-multi asan browser' "$dry" "probe: browser uses run-sanitizer-multi coverage owner"
 assert_not_match 'hits-then-asan' "$dry" "probe: browser avoids duplicate coverage wrapper"
 
 : > "$RESULTS_DIR/state/claims.jsonl"
