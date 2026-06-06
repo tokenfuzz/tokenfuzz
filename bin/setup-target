@@ -27,10 +27,12 @@ Options:
                                 ruby: bundle install).
                               * Sanitizer build recipe convergence for C/C++ targets
                                 (cmake / autotools / meson) — calls bin/auto-build-script
-                                to discover a working ASan build and writes the validated
-                                script to targets/<target>/.audit/build.sh. bin/export-repro
-                                later inlines this script verbatim into each reproduce.sh
-                                so maintainers get the same build the audit used.
+                                for each sanitizer in [sanitizer].enabled and writes the
+                                validated script to targets/<target>/.audit/build.sh (ASan)
+                                or .audit/build-<san>.sh, then materializes each build-<san>
+                                tree. ASan is required; extra sanitizers are best-effort.
+                                bin/export-repro later inlines the ASan script verbatim into
+                                each reproduce.sh so maintainers get the same build.
                             Skips each step silently when its inputs are absent
                             (no manifest, no LLM backend, no recognised C/C++
                             build system, recipe already exists).
@@ -581,17 +583,62 @@ esac
 
 AUDIT_BUILD_SH="$TARGET_ROOT/.audit/build.sh"
 
+# Which sanitizers to converge a recipe + build for. ASan is the canonical,
+# always-required build (reproduce.sh, export-repro, and the model-direct
+# prompt all assume targets/<slug>/build-asan). Every *additional* sanitizer
+# listed in [sanitizer].enabled gets a best-effort per-sanitizer recipe and
+# build tree so a later `PROBE_SANITIZER=<san>` run has something to execute;
+# a non-ASan build that fails to converge warns but never blocks ASan or the
+# rest of setup. auto-build-script only understands the clang -fsanitize
+# families, so we limit the loop to those — `race` (Go) and bare `runner`
+# targets are not native C/C++ builds and are handled elsewhere.
+BOOTSTRAP_SANITIZERS="$(python3 - "$SCRIPT_ROOT" "$TARGET_TOML" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+import target_config as tc
+parsed = tc.parse_toml(Path(sys.argv[2]))
+san = parsed.get("sanitizer")
+enabled = san.get("enabled") if isinstance(san, dict) else None
+if not isinstance(enabled, list) or not enabled:
+    enabled = ["asan"]
+supported = ("asan", "ubsan", "msan", "tsan")
+ordered = []
+# ASan first (required), then the rest in declared order, deduped.
+for s in ["asan"] + [str(x).lower() for x in enabled]:
+    if s in supported and s not in ordered:
+        ordered.append(s)
+print(" ".join(ordered))
+PY
+)"
+[ -n "$BOOTSTRAP_SANITIZERS" ] || BOOTSTRAP_SANITIZERS="asan"
+
+# Recipe path for a sanitizer. ASan keeps the canonical .audit/build.sh
+# (reproduce.sh and export-repro inline that exact path); the others use a
+# sibling .audit/build-<san>.sh so each carries its own -fsanitize flags.
+_recipe_path_for() {
+  case "$1" in
+    asan) printf '%s\n' "$AUDIT_BUILD_SH" ;;
+    *)    printf '%s\n' "$TARGET_ROOT/.audit/build-$1.sh" ;;
+  esac
+}
+
 if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
-  if [ -f "$AUDIT_BUILD_SH" ] && [ "$FORCE_CONFIG" -eq 0 ]; then
-    log "bootstrap: keeping existing $AUDIT_BUILD_SH (pass --force to regenerate)"
-  elif [ ! -x "$SCRIPT_ROOT/bin/auto-build-script" ]; then
+  if [ ! -x "$SCRIPT_ROOT/bin/auto-build-script" ]; then
     log "bootstrap: bin/auto-build-script not executable; skipping sanitizer build convergence"
   else
     build_llm_backend_candidates
-    if [ -z "$LLM_BACKEND_CANDIDATES" ]; then
-      log "bootstrap: no LLM backend configured; skipping sanitizer build convergence (set up a backend and rerun with --bootstrap)"
-    else
-      log "bootstrap: converging ASan build recipe via bin/auto-build-script (this may take a few minutes and one or more LLM revisions)"
+    for san in $BOOTSTRAP_SANITIZERS; do
+      recipe="$(_recipe_path_for "$san")"
+      if [ -f "$recipe" ] && [ "$FORCE_CONFIG" -eq 0 ]; then
+        log "bootstrap: keeping existing $recipe (pass --force to regenerate)"
+        continue
+      fi
+      if [ -z "$LLM_BACKEND_CANDIDATES" ]; then
+        log "bootstrap: no LLM backend configured; skipping $san build convergence (set up a backend and rerun with --bootstrap)"
+        continue
+      fi
+      log "bootstrap: converging $san build recipe via bin/auto-build-script (this may take a few minutes and one or more LLM revisions)"
       success=0
       # shellcheck disable=SC2206  # word-splitting is intentional
       _abs_candidates=($LLM_BACKEND_CANDIDATES)
@@ -604,54 +651,66 @@ if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
         SCRIPT_ROOT="$SCRIPT_ROOT" ACTIVE_BACKEND="$backend" BACKEND="$backend" \
           "$SCRIPT_ROOT/bin/auto-build-script" \
             --src "$TARGET_ROOT" \
-            --out "$AUDIT_BUILD_SH" \
-            --sanitizer asan || rc=$?
+            --out "$recipe" \
+            --sanitizer "$san" || rc=$?
         if [ "$rc" -eq 0 ]; then
-          log "bootstrap: auto-build-script succeeded on backend=$backend — wrote $AUDIT_BUILD_SH"
+          log "bootstrap: auto-build-script ($san) succeeded on backend=$backend — wrote $recipe"
           success=1
           break
         fi
         _abs_attempts+=("$backend(rc=$rc)")
         if [ -n "$next_backend" ]; then
-          log "bootstrap: auto-build-script returned rc=$rc on backend=$backend — retrying with backend=$next_backend"
+          log "bootstrap: auto-build-script ($san) returned rc=$rc on backend=$backend — retrying with backend=$next_backend"
         else
-          log "bootstrap: auto-build-script returned rc=$rc on backend=$backend — no remaining backends"
+          log "bootstrap: auto-build-script ($san) returned rc=$rc on backend=$backend — no remaining backends"
         fi
       done
       if [ "$success" -eq 0 ]; then
-        log "bootstrap: auto-build-script did not converge after trying [${_abs_attempts[*]}] — rerun with --bootstrap once the upstream build error visible above is resolvable, or write $AUDIT_BUILD_SH by hand"
+        if [ "$san" = asan ]; then
+          log "bootstrap: auto-build-script did not converge after trying [${_abs_attempts[*]}] — rerun with --bootstrap once the upstream build error visible above is resolvable, or write $recipe by hand"
+        else
+          log "bootstrap: auto-build-script ($san) did not converge after trying [${_abs_attempts[*]}] — $san is best-effort, ASan is unaffected; resolve the build error above and rerun, or write $recipe by hand"
+        fi
       fi
-    fi
+    done
   fi
 elif [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ ! -f "$AUDIT_BUILD_SH" ]; then
   log "hint: $TARGET_NAME is a $BUILD_SYSTEM target with no $AUDIT_BUILD_SH; rerun with --bootstrap to converge an ASan build recipe (without it, reproduce.sh falls back to a generic cmake template that may miss target-specific flags)"
 fi
 
-# Materialize the canonical sanitizer build and record the binary/library
+# Materialize each enabled sanitizer's build and record the binary/library
 # it produces, so --bootstrap is self-sufficient (recipe + build + filled
 # config). auto-build-script validates the recipe in a throwaway scratch
-# dir, so on a fresh target targets/<slug>/build-asan never exists, and the
+# dir, so on a fresh target targets/<slug>/build-<san> never exists, and the
 # early config seed — which must run before any build, to supply
 # build_system — could not detect <san>_bin/<san>_lib and left them
-# commented FILL_ME. Build once into the canonical dir with the converged
-# recipe, then patch the detected fields into target.toml in place, leaving
-# the LLM-curated sections untouched. (reproduce.sh self-discovers the
-# library at run time regardless; this makes the config accurate for the
-# model-direct prompt recipe, bin/run-asan, and bin/probe.)
-if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ] && [ -f "$AUDIT_BUILD_SH" ]; then
-  ASAN_BUILD_DIR="$TARGET_ROOT/build-asan${AUDIT_BUILD_SUFFIX:-}"
-  if [ ! -d "$ASAN_BUILD_DIR" ]; then
-    log "bootstrap: materializing canonical ASan build into $ASAN_BUILD_DIR (compiling the project so <san>_bin/<san>_lib can be detected; a few minutes)"
-    mkdir -p "$TARGET_ROOT/.audit"
-    if "$AUDIT_BUILD_SH" "$TARGET_ROOT" "$ASAN_BUILD_DIR" \
-         >> "$TARGET_ROOT/.audit/build-materialize.log" 2>&1; then
-      log "bootstrap: canonical ASan build complete"
-    else
-      log "bootstrap: canonical ASan build failed (see $TARGET_ROOT/.audit/build-materialize.log); reproduce.sh still self-discovers the library at run time"
+# commented FILL_ME. Build once per sanitizer into its canonical dir with the
+# converged recipe, then patch every detected field into target.toml in place
+# (refresh-build-fields already loops over asan/ubsan/msan/tsan), leaving the
+# LLM-curated sections untouched. (reproduce.sh self-discovers the library at
+# run time regardless; this makes the config accurate for the model-direct
+# prompt recipe, bin/run-asan, and bin/probe.) ASan is required; a failed
+# non-ASan build warns but does not abort setup.
+if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
+  for san in $BOOTSTRAP_SANITIZERS; do
+    recipe="$(_recipe_path_for "$san")"
+    [ -f "$recipe" ] || continue
+    SAN_BUILD_DIR="$TARGET_ROOT/build-$san${AUDIT_BUILD_SUFFIX:-}"
+    if [ ! -d "$SAN_BUILD_DIR" ]; then
+      log "bootstrap: materializing $san build into $SAN_BUILD_DIR (compiling the project so <san>_bin/<san>_lib can be detected; a few minutes)"
+      mkdir -p "$TARGET_ROOT/.audit"
+      if "$recipe" "$TARGET_ROOT" "$SAN_BUILD_DIR" \
+           >> "$TARGET_ROOT/.audit/build-materialize.log" 2>&1; then
+        log "bootstrap: $san build complete"
+      elif [ "$san" = asan ]; then
+        log "bootstrap: canonical ASan build failed (see $TARGET_ROOT/.audit/build-materialize.log); reproduce.sh still self-discovers the library at run time"
+      else
+        log "bootstrap: $san build failed (see $TARGET_ROOT/.audit/build-materialize.log); $san is best-effort, ASan is unaffected"
+      fi
     fi
-  fi
+  done
   if [ "$(python3 "$SCRIPT_ROOT/lib/target_config.py" refresh-build-fields "$TARGET_ROOT" "$TARGET_TOML" 2>/dev/null)" = "changed" ]; then
-    log "bootstrap: refreshed <san>_bin/<san>_lib in $TARGET_TOML from the canonical build"
+    log "bootstrap: refreshed <san>_bin/<san>_lib in $TARGET_TOML from the materialized builds"
   fi
 fi
 

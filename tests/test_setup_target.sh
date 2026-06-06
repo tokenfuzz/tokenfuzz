@@ -220,5 +220,101 @@ else
   fail "$_CURRENT_TEST" "$out"
 fi
 
+_CURRENT_TEST="setup-target --bootstrap builds every enabled sanitizer (asan + ubsan)"
+# When [sanitizer].enabled lists more than asan, --bootstrap must converge a
+# recipe and materialize a build tree for EACH sanitizer, not just asan. We
+# pre-place trivial per-sanitizer recipes (.audit/build.sh + .audit/build-
+# ubsan.sh) so convergence is skipped ("keeping existing") and no LLM/clang is
+# needed; the materialize loop then runs both, proving the loop iterates over
+# the enabled set. Field-detection from a real instrumented binary is covered
+# by refresh-build-fields' own tests.
+# auto-build-script must be reachable under the harness root so the
+# convergence loop runs (and, with recipes already present, logs the
+# per-sanitizer "keeping existing" skip rather than bailing wholesale).
+ln -sf "$SCRIPT_ROOT/bin/auto-build-script" "$ROOT/bin/auto-build-script"
+multisan_root="$ROOT/targets/multisan"
+mkdir -p "$multisan_root/.audit"
+cat > "$multisan_root/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.16)
+project(multisan C)
+add_executable(multisan main.c)
+EOF
+printf 'int main(void){return 0;}\n' > "$multisan_root/main.c"
+# Fake recipe: contract is `recipe <src> <build>`. Just create the build dir
+# and a stub binary so the materialize step has something to do without a
+# real toolchain.
+for _r in "$multisan_root/.audit/build.sh" "$multisan_root/.audit/build-ubsan.sh"; do
+  cat > "$_r" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+mkdir -p "$2"
+: > "$2/multisan"
+chmod +x "$2/multisan"
+EOF
+  chmod +x "$_r"
+done
+# Reviewed config (parses, no uncommented FILL_ME) so setup-target preserves
+# it; enabled lists both sanitizers.
+mkdir -p "$ROOT/output/multisan"
+cat > "$ROOT/output/multisan/target.toml" <<'EOF'
+target = "multisan"
+build_system = "cmake"
+asan_bin = "build-asan/multisan"
+
+[sanitizer]
+enabled = ["asan", "ubsan"]
+EOF
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 \
+  "$SCRIPT_ROOT/bin/setup-target" multisan --bootstrap 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] &&
+   [ -d "$multisan_root/build-asan" ] &&
+   [ -d "$multisan_root/build-ubsan" ] &&
+   grep -q 'bootstrap: keeping existing .*\.audit/build\.sh' <<<"$out" &&
+   grep -q 'bootstrap: keeping existing .*\.audit/build-ubsan\.sh' <<<"$out" &&
+   grep -q 'bootstrap: materializing ubsan build' <<<"$out" &&
+   grep -q 'bootstrap: ubsan build complete' <<<"$out"; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "rc=$rc out=$out"
+fi
+
+_CURRENT_TEST="setup-target --bootstrap default config builds asan only"
+# With no [sanitizer] block (default enabled=["asan"]), the loop must not try
+# to build ubsan/msan/tsan trees.
+asanonly_root="$ROOT/targets/asanonly"
+mkdir -p "$asanonly_root/.audit"
+cat > "$asanonly_root/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.16)
+project(asanonly C)
+add_executable(asanonly main.c)
+EOF
+printf 'int main(void){return 0;}\n' > "$asanonly_root/main.c"
+cat > "$asanonly_root/.audit/build.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+mkdir -p "$2"
+: > "$2/asanonly"
+chmod +x "$2/asanonly"
+EOF
+chmod +x "$asanonly_root/.audit/build.sh"
+mkdir -p "$ROOT/output/asanonly"
+cat > "$ROOT/output/asanonly/target.toml" <<'EOF'
+target = "asanonly"
+build_system = "cmake"
+asan_bin = "build-asan/asanonly"
+EOF
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 \
+  "$SCRIPT_ROOT/bin/setup-target" asanonly --bootstrap 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] &&
+   [ -d "$asanonly_root/build-asan" ] &&
+   [ ! -d "$asanonly_root/build-ubsan" ] &&
+   ! grep -q 'materializing ubsan' <<<"$out"; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "rc=$rc out=$out"
+fi
+
 teardown_test_env
 summary

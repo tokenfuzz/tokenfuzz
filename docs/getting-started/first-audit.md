@@ -181,6 +181,63 @@ which artifacts are worth reporting, why every concrete security
 finding stays under `findings/`, and how exported crash bundles are
 laid out.
 
+## Auditing with UBSan, MSan, or TSan
+
+ASan is the default, but a target can be audited under any sanitizer it
+enables. Bugs that ASan cannot see — signed-integer overflow, an
+uninitialized read, a data race — surface only under the matching
+sanitizer, so each one needs its own instrumented build.
+
+Three steps take you from ASan-only to a second sanitizer.
+
+**1. Enable it in `target.toml`.** Add the slug to `[sanitizer].enabled`
+and point `<san>_bin` at the binary the build will produce. For a
+C-API harness, also set `<san>_lib`:
+
+```toml
+[sanitizer]
+enabled = ["ubsan", "asan"]
+ubsan_bin = "build-ubsan/<binary>"
+# ubsan_lib = "build-ubsan/<archive>.a"   # only if a // HARNESS testcase links it
+```
+
+Order matters: an audit runs the **first** sanitizer in `enabled`, so
+list the one you want to focus on first. See
+[Configure a target](../guides/configure-target.md#sanitizer-policy)
+for the full field list and per-sanitizer posture.
+
+**2. Build it.** `--bootstrap` converges a recipe and compiles a build
+tree for *every* sanitizer in `enabled`, not just ASan:
+
+```bash
+bin/setup-target <target> --bootstrap
+```
+
+This writes `targets/<target>/build-ubsan/` alongside `build-asan/` and
+fills in the `ubsan_bin` / `ubsan_lib` paths it detects. ASan is
+required; any other sanitizer is best-effort — if its build fails, the
+run warns and continues. (One caveat: `--bootstrap` re-seeds a
+`target.toml` that still holds `FILL_ME` placeholders, which would
+discard your edits. Fill or delete the placeholders you do not need so
+the file is "reviewed" before you re-run.)
+
+**3. Run it.** An audit uses the first enabled sanitizer automatically:
+
+```bash
+bin/audit --target <target> --backend "$BACKEND" 1
+```
+
+For a one-off `bin/probe` or `bin/benchmark` run against a different
+sanitizer than the default, set `PROBE_SANITIZER`:
+
+```bash
+PROBE_SANITIZER=ubsan bin/probe --confirm <testcase>
+```
+
+A confirmed non-ASan crash is recorded exactly like an ASan one: the
+multi-run wrapper measures a reproduction rate (`CRASH_RATE: 5/5`) and
+the crash is bundled under `crashes/`.
+
 ## Where to run the audit
 
 You can run TokenFuzz directly on the host, but **we recommend running
