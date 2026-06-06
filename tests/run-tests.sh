@@ -214,51 +214,80 @@ test_category() {
   esac
 }
 
-test_weight() {
-  local name="$1"
-  name="${name##*/}"
-  case "$name" in
-    test_benchmark.sh) echo 30 ;;
-    test_benchmark_cells.sh) echo 25 ;;
-    test_audit_core.sh) echo 41 ;;
-    test_decision_find_quality.sh) echo 35 ;;
-    test_multilang_support.sh) echo 26 ;;
-    test_confirm_crash.sh) echo 18 ;;
-    test_workqueue.sh) echo 16 ;;
-    test_cleanup_state.sh) echo 15 ;;
-    test_agent_counts.sh) echo 11 ;;
-    test_audit_quality_fixes.sh|test_integration_e2e.sh|test_probe_harness_cpp.sh|test_rg_safe.sh|test_triage.sh) echo 9 ;;
-    test_grep_wrapper.sh|test_edges.sh|test_agent_counts_regression.sh|test_asan_multi.sh) echo 8 ;;
-    test_triage_reachability.sh) echo 6 ;;
-    test_decision_triage.sh|test_s6_consumers.sh|test_integration_triage.sh|test_rg_wrapper.sh|test_decision_strategy_pick.sh) echo 5 ;;
-    test_find_seed.sh|test_llm_decide.sh|test_export_repro_run.sh|test_export_repro_lib_discover.sh|test_doc_neutrality.sh|test_timeout.sh|test_run_asan.sh) echo 4 ;;
-    test_*.py) echo 1 ;;
-    *)
-      case "$(test_category "$name")" in
-        integration|decision) echo 4 ;;
-        wrapper|unit) echo 2 ;;
-        static|python) echo 1 ;;
-        *) echo 1 ;;
-      esac
-      ;;
+# Self-calibrating scheduling weights. A suite's weight is its own
+# wall-clock seconds from the previous run, read out of the timing
+# artifact the runner already writes (write_timing_artifact). This is
+# what lets prioritize_parallel_tests start every job slot on the
+# heaviest suites without a hand-maintained table of per-suite numbers
+# that silently rots as suites grow, split, or are added.
+#
+# PRIOR_TIMINGS is a ":name=seconds:" string map (bash 3.2 has no
+# associative arrays). Populated once by load_prior_timings.
+PRIOR_TIMINGS=""
+load_prior_timings() {
+  local f="${TEST_TIMINGS_FILE:-$SCRIPT_ROOT/output/test-timings.tsv}"
+  [ -f "$f" ] || return 0
+  local name secs rest
+  # Columns: suite category passed failed rc seconds weight path
+  while IFS=$'\t' read -r name _ _ _ _ secs rest; do
+    case "$name" in suite|'') continue ;; esac        # skip header/blank
+    case "$secs" in ''|*[!0-9]*) continue ;; esac     # need an integer
+    PRIOR_TIMINGS="${PRIOR_TIMINGS}:${name}=${secs}"
+  done < "$f"
+  [ -n "$PRIOR_TIMINGS" ] && PRIOR_TIMINGS="${PRIOR_TIMINGS}:"
+}
+
+# Cold-start bootstrap: until a timing artifact exists, only these few
+# genuinely slow suites need to lead so the first run still packs well.
+# Inclusion criterion: observed > ~30s wall under the parallel runner.
+# Everything else falls through to a coarse category default and then
+# self-corrects from real timings on the next run.
+bootstrap_weight() {
+  case "$1" in
+    test_benchmark|test_workqueue|test_multilang_support) echo 65 ;;
+    test_benchmark_report|test_benchmark_cells) echo 45 ;;
+    test_triage|test_triage_reachability|test_audit_core|test_benchmark_aggregate) echo 33 ;;
+    *) echo "" ;;
   esac
 }
 
+test_weight() {
+  local raw="$1" name
+  name="${raw##*/}"; name="${name%.sh}"; name="${name%.py}"
+  # 1) Prior measured seconds win — never stale, no list to maintain.
+  case "$PRIOR_TIMINGS" in
+    *":$name="*)
+      local rest="${PRIOR_TIMINGS#*:$name=}"; rest="${rest%%:*}"
+      if [ -n "$rest" ]; then echo "$rest"; return; fi
+      ;;
+  esac
+  # 2) Small cold-start bootstrap for the known-heavy suites.
+  local boot; boot=$(bootstrap_weight "$name")
+  if [ -n "$boot" ]; then echo "$boot"; return; fi
+  # 3) Structural fallback by category (no per-suite numbers).
+  case "$(test_category "$raw")" in
+    integration|decision) echo 4 ;;
+    wrapper|unit) echo 2 ;;
+    static|python) echo 1 ;;
+    *) echo 1 ;;
+  esac
+}
+
+# Order the parallel batch by weight, longest-processing-time first. The
+# launcher starts suites in this order as job slots free, so every slot
+# begins on the heaviest suites and short suites backfill as the long
+# ones finish — the standard LPT heuristic, which minimises the makespan
+# tail. (An earlier heavy/filler interleave queued short suites ahead of
+# long ones, so only a couple of long suites started in the first wave
+# and the rest piled up at the end, leaving cores idle and stretching the
+# run.)
 prioritize_parallel_tests() {
   local tf index weight tab line
-  local -a heavy=()
-  local -a filler=()
   local -a ordered=()
   tab=$(printf '\t')
   index=0
   while IFS= read -r line; do
-    weight="${line%%$tab*}"
-    tf="${line#*$tab}"
-    if [ "$weight" -ge 15 ]; then
-      heavy+=("$tf")
-    else
-      filler+=("$tf")
-    fi
+    ordered+=("${line#*$tab}")
   done < <(
     for tf in "${TEST_FILES[@]}"; do
       index=$((index + 1))
@@ -266,23 +295,6 @@ prioritize_parallel_tests() {
       printf '%06d\t%06d\t%s\n' "$weight" "$index" "$tf"
     done | sort -t "$tab" -k1,1nr -k2,2n | awk -F '\t' '{ print $1 "\t" $3 }'
   )
-
-  local h=0 f=0 n fill
-  fill="${TEST_HEAVY_FILLERS:-3}"
-  case "$fill" in ''|*[!0-9]*) fill=3 ;; esac
-  [ "$fill" -lt 1 ] && fill=1
-  while [ "$h" -lt "${#heavy[@]}" ] || [ "$f" -lt "${#filler[@]}" ]; do
-    if [ "$h" -lt "${#heavy[@]}" ]; then
-      ordered+=("${heavy[$h]}")
-      h=$((h + 1))
-    fi
-    n=0
-    while [ "$n" -lt "$fill" ] && [ "$f" -lt "${#filler[@]}" ]; do
-      ordered+=("${filler[$f]}")
-      f=$((f + 1))
-      n=$((n + 1))
-    done
-  done
   TEST_FILES=("${ordered[@]}")
 }
 
@@ -473,6 +485,7 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+load_prior_timings
 JOBS=$(detect_default_jobs)
 printf "${BOLD}Running %d test file(s) with %d job(s)${NC}\n\n" "${#TEST_FILES[@]}" "$JOBS"
 
