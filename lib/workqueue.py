@@ -685,12 +685,11 @@ def is_excluded_work_path(path: str | Path) -> bool:
         or ".spec." in name
         # `_perf_` (bounded both sides) reads as a benchmark/perf-test stem
         # (`run_perf_loop`). Deliberately NOT matched: `perf_*` / `*_perf` /
-        # a bare `perf`/`performance` file — those are real shipping
-        # subsystem names (`perf_counter.c`, `performance.c`, Linux perf),
-        # and a name alone cannot tell a perf *tool* from a perf *feature*.
+        # a bare `perf`/`performance` file, nor `debug*` / `*_debug` — those
+        # are real shipping subsystem names (`perf_counter.c`,
+        # `performance.c`, libxml2 `debugXML.c`, Linux perf), and a name
+        # alone cannot tell a perf/debug *tool* from a perf/debug *feature*.
         # Scope doubt stays in scope; the find-quality gate judges by role.
-        or stem.startswith("debug")
-        or stem.endswith("_debug")
     ):
         return True
     return False

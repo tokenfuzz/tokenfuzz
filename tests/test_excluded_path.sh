@@ -76,6 +76,8 @@ CASES_ALLOWED = [
     ("src/mock_backend.c",           "a shipping mock backend is auditable"),
     ("src/perf_counter.c",           "perf counters ship; perf_* is not a test marker"),
     ("src/performance.c",            "a file literally named performance.c is auditable"),
+    ("src/debugXML.c",               "debug-dump is a shipped library feature (libxml2), not a test marker"),
+    ("src/debug.c",                  "a file literally named debug.c is auditable"),
 ]
 
 failures = []
