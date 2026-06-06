@@ -404,6 +404,8 @@ assert_eq "2" "$(jq -r '.harness_agents' "$drun_json")" \
   "T9h: --agents is recorded as the harness worker count"
 assert_eq "1" "$(jq -r '.model_direct_agents' "$drun_json")" \
   "T9i: model-direct remains a one-agent baseline"
+assert_match '^[0-9a-f]{40}$' "$(jq -r '.tokenfuzz_sha' "$drun_json")" \
+  "T9i2: dry-run records the full TokenFuzz repo hash"
 assert_file_contains "$dledger" 'Harness agents.*2' \
   "T9j: ledger exposes the harness worker count"
 

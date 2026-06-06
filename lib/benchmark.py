@@ -1821,6 +1821,45 @@ def _condition_label(condition: str, backend: str,
     return condition
 
 
+def _hash_text(value: object) -> str:
+    """Return a recorded revision string, or empty for missing sentinels."""
+    text = str(value or "").strip()
+    if not text or text in {"?", "no-vcs", "norev", "unknown"}:
+        return ""
+    return text
+
+
+def _hash_suffix(value: object, *, stacked: bool = False) -> str:
+    """Visible short-revision suffix for benchmark identity cells."""
+    text = _hash_text(value)
+    if not text:
+        return ""
+    short = text[:7]
+    return f"<br>`{short}`" if stacked else f" (`{short}`)"
+
+
+def _target_cell(target: object, target_sha: object, *,
+                 stacked: bool = False) -> str:
+    """Target table cell with the audited target revision appended."""
+    name = str(target or "?")
+    return f"`{name}`{_hash_suffix(target_sha, stacked=stacked)}"
+
+
+def _tokenfuzz_sha(run: dict) -> str:
+    """Full TokenFuzz revision when present; old reports fall back to harness_sha."""
+    return _hash_text(run.get("tokenfuzz_sha")) or _hash_text(run.get("harness_sha"))
+
+
+def _tokenfuzz_cell(tokenfuzz_sha: object, *, stacked: bool = False) -> str:
+    """Render the TokenFuzz condition label with the repo revision appended."""
+    return f"`tokenfuzz`{_hash_suffix(tokenfuzz_sha, stacked=stacked)}"
+
+
+def _condition_cell(condition: str, backend: str, model: str = "") -> str:
+    """Condition table cell label."""
+    return f"`{_condition_label(condition, backend, model)}`"
+
+
 def _fmt_tokens(value: object) -> str:
     """Compact token count for ledger tables: 1,234 / 47k / 2.1M.
 
@@ -1978,7 +2017,7 @@ def render_section(report: dict) -> str:
         str(harness_agents) if harness_agents not in (None, "") else "audit default"
     )
     target_sha = run.get("target_sha", "?")
-    harness_sha = run.get("harness_sha", "?")
+    tokenfuzz_sha = _tokenfuzz_sha(run)
     bench_dir = Path(report.get("bench_dir", ""))
     conditions = report.get("conditions", [])
     # Strongest severity first; ties broken by score, then id for stability.
@@ -1992,8 +2031,9 @@ def render_section(report: dict) -> str:
     lines.append(f"## Benchmark run `{runid}`")
     lines.append("")
     lines.append(
-        f"- **Target** `{target}` (`{target_sha}`)  ·  "
-        f"**Backend** `{backend}`  ·  **Harness** `{harness_sha}`"
+        f"- **Target** {_target_cell(target, target_sha)}  ·  "
+        f"**Backend** `{backend}`  ·  "
+        f"**TokenFuzz** {_tokenfuzz_cell(tokenfuzz_sha)}"
     )
     lines.append(
         f"- **Budget** {budget}s/cell  ·  "
@@ -2047,9 +2087,9 @@ def render_section(report: dict) -> str:
             bench_dir, c["condition"], "crashes-rejected"
         )
         lines.append(
-            "| `{cond}` | {rep} | {wall} | {rfi} | {fi} | {uf} "
+            "| {cond} | {rep} | {wall} | {rfi} | {fi} | {uf} "
             "| {rcr} | {cr} | {uc} | {mp} | {sev} |".format(
-                cond=_condition_label(c["condition"], backend),
+                cond=_condition_cell(c["condition"], backend),
                 rep=(
                     "{d}/{t}".format(d=c.get("replicates_done", 0),
                                      t=c.get("replicates_total", 0))
@@ -2131,7 +2171,7 @@ def render_section(report: dict) -> str:
         for row in token_rows:
             by_cond.setdefault(str(row.get("condition", "?")), []).append(row)
         for cond, rows in by_cond.items():
-            label = _condition_label(cond, backend)
+            label = _condition_cell(cond, backend)
             for row in rows:
                 exp = row.get("experiment") or row.get("cell") or "?"
                 cell = row.get("cell")
@@ -2140,7 +2180,7 @@ def render_section(report: dict) -> str:
                 exp_cell = (_md_link(f"`{exp}`", bench_dir / "cells" / cell)
                             if cell else f"`{exp}`")
                 lines.append(
-                    "| `{cond}` | {rep} | {exp} | {wall} | {source} "
+                    "| {cond} | {rep} | {exp} | {wall} | {source} "
                     "| {inp} | {create} | {cached} | {out} | {prompt} | {cost} |".format(
                         cond=label,
                         rep=row.get("replicate") or "—",
@@ -2162,7 +2202,7 @@ def render_section(report: dict) -> str:
             agg = cond_agg.get(cond, {})
             n = len(rows)
             lines.append(
-                "| **`{cond}`** | — | **{n} cell{s}** | **{wall}** | {source} "
+                "| **{cond}** | — | **{n} cell{s}** | **{wall}** | {source} "
                 "| **{inp}** | **{create}** | **{cached}** | **{out}** "
                 "| **{prompt}** | **{cost}** |".format(
                     cond=label,
@@ -2347,26 +2387,9 @@ def _crosstab_count(value: object, pool_dir: Path | None,
     return _cluster_report_link(value, pool_dir, basename)
 
 
-def _short_commit(value: object) -> str:
-    """Short audited-target commit label for the aggregate table.
-    Returns an empty string when no revision was recorded, so callers
-    can omit the token entirely from a stacked Run cell rather than
-    burning a column on a dash."""
-    text = str(value or "").strip()
-    if not text or text in {"no-vcs", "norev"}:
-        return ""
-    return f"`{text[:7]}`"
-
-
-def _run_cell(runid: object, target_sha: object) -> str:
-    """Render the Run identity cell: runid plus the audited target's
-    short commit. Two atomic `<code>` tokens with a literal space
-    between them — each token stays nowrap, but the browser is free to
-    break at the whitespace if the row gets tight, so the cell scales
-    with body width instead of forcing a horizontal scroll."""
-    rid = f"`{runid}`"
-    sha = _short_commit(target_sha)
-    return f"{rid} {sha}".rstrip() if sha else rid
+def _run_cell(runid: object) -> str:
+    """Render the Run identity cell."""
+    return f"`{runid}`"
 
 
 def crosstab(bench_root: Path) -> str:
@@ -2459,11 +2482,12 @@ def crosstab(bench_root: Path) -> str:
                         if entry["row"]["ledger"] else f"`{backend}`")
         runid = run.get("runid", "?")
         target = run.get("target", "?")
+        target_cell = _target_cell(target, run.get("target_sha"), stacked=True)
         bench_dir = entry["row"]["bench_dir"]
-        run_cell = _run_cell(runid, run.get("target_sha"))
+        run_cell = _run_cell(runid)
         if c is None:
             lines.append(
-                f"| `{target}` | {backend_cell} | — | {run_cell} "
+                f"| {target_cell} | {backend_cell} | — | {run_cell} "
                 f"| — | — | — | — | — | — | — | — | — | · — | — | — | — |"
             )
             continue
@@ -2484,14 +2508,14 @@ def crosstab(bench_root: Path) -> str:
             if bench_dir else None
         )
         lines.append(
-            "| {tgt} | {bk} | `{cond}` | {rid} | {wall} | {reps} "
+            "| {tgt} | {bk} | {cond} | {rid} | {wall} | {reps} "
             "| {rfi} | {fi} | {uf} "
             "| {rcr} | {cr} | {uc} "
             "| {mp} | {sev} | {inp} | {out} | {cost} |".format(
                 bk=backend_cell,
                 rid=run_cell,
-                tgt=f"`{target}`",
-                cond=_condition_label(cond, backend, model),
+                tgt=target_cell,
+                cond=_condition_cell(cond, backend, model),
                 wall=_fmt_hours(c.get("wall_median")),
                 reps=(
                     "{d}/{t}".format(
@@ -2542,7 +2566,8 @@ def crosstab(bench_root: Path) -> str:
     lines.append("")
     lines.append(
         "- **Target** — the audited open-source project, built with the target's "
-        "sanitizer configuration and scored against its own work queue."
+        "sanitizer configuration and scored against its own work queue. The "
+        "recorded target hash appears below the target name when available."
     )
     lines.append(
         "- **Backend** — the agent runtime that performed the work. The link "
@@ -2552,13 +2577,12 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "- **Condition** — `tokenfuzz` is the full harness: recon, ranked work "
         "cards, multiple agents, sanitizer probing, triage, clustering, and "
-        "reproducer export. `<model>-direct` is the control condition: the "
-        "same model gets the bare vulnerability-finding prompt without the "
-        "harness."
+        "reproducer export. The TokenFuzz repository hash is recorded in run "
+        "metadata. `<model>-direct` is the control condition: the same model "
+        "gets the bare vulnerability-finding prompt without the harness."
     )
     lines.append(
-        "- **Run** — UTC run id, plus the audited target's short commit when "
-        "the run recorded one. The table is append-style evidence, not a "
+        "- **Run** — UTC run id. The table is append-style evidence, not a "
         "latest-only dashboard."
     )
     lines.append("")

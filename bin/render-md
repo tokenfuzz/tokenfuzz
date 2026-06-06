@@ -458,6 +458,26 @@ _HTML_HEAD = """<!DOCTYPE html>
     overflow-wrap: normal;
     line-height: 1.25;
   }}
+  .benchmark-table tbody td:nth-child(1) code,
+  .benchmark-table tbody td:nth-child(3) code,
+  .benchmark-table tbody td:nth-child(4) code {{
+    padding: 0;
+    background: transparent;
+    color: inherit;
+    font-family: inherit;
+    font-size: 1em;
+    line-height: 1.15;
+  }}
+  .benchmark-table tbody td:nth-child(1),
+  .benchmark-table tbody td:nth-child(3) {{
+    line-height: 1.15;
+  }}
+  .benchmark-table tbody td:nth-child(1) br + code {{
+    display: inline-block;
+    margin-top: 1px;
+    color: var(--muted);
+    font-size: .84em;
+  }}
   dl.report-definition {{
     display: grid;
     grid-template-columns: minmax(160px, 240px) 1fr;

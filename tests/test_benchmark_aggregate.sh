@@ -580,6 +580,7 @@ mkbackend() {  # mkbackend <backend> <runid> <crash_total> <unique> [target]
   cat > "$bdir/report.json" <<JSON
 {"run":{"runid":"$2","target":"$target","backend":"$1","model":"$1-m","replicates":3,
  "target_sha":"abcdef123456",
+ "tokenfuzz_sha":"feedfacecafebeef1234567890abcdef12345678",
  "budget_wall":3600,"conditions":["model-direct","harness"]},
  "conditions":[
   {"condition":"harness","crash_total":$3,"unique_crash_clusters":$4,
@@ -622,8 +623,14 @@ assert_match '20260103-000000' "$xt" \
   "T19g2: aggregate keeps a second target for the same backend"
 assert_match '`curl`' "$xt" \
   "T19g3: aggregate names the second target"
-assert_match '`20260101-000000` `abcdef1`' "$xt" \
-  "T19g3a: aggregate stacks the audited target's short commit next to the runid in the Run cell"
+assert_match '`c-ares`<br>`abcdef1`' "$xt" \
+  "T19g3a: aggregate stacks the audited target short hash in the Target cell"
+assert_match '`tokenfuzz`' "$xt" \
+  "T19g3a2: aggregate shows tokenfuzz without its recorded repo hash"
+assert_not_match '`tokenfuzz`<br>' "$xt" \
+  "T19g3a2b: aggregate keeps the TokenFuzz repo hash out of the table"
+assert_not_match '`20260101-000000` `abcdef1`' "$xt" \
+  "T19g3a3: aggregate no longer duplicates the target hash in the Run cell"
 # A stand-alone Commit column would push the table to a width that
 # horizontally scrolls in the rendered HTML. Keep identity metadata in
 # the Run cell so adding more identifiers does not grow column count.
@@ -654,6 +661,8 @@ assert_file_exists "$xout" "T19h: crosstab --out writes a markdown file"
 python3 "$RENDER_MD" "$xout" --html-sibling >/dev/null
 assert_file_contains "${xout%.md}.html" 'class="benchmark-table"' \
   "T19h1: crosstab HTML gets the dedicated table layout"
+assert_file_contains "${xout%.md}.html" 'td:nth-child\(1\) br \+ code' \
+  "T19h1b: crosstab HTML styles stacked target hashes as secondary metadata"
 
 # T19h2-4: the crosstab carries wall time and token cost, compact-formatted.
 assert_match 'Wall \(h\)' "$xt" "T19h2: crosstab has a Wall column"
