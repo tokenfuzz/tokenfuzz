@@ -448,10 +448,32 @@ huge_out=$(PROBE_ASAN_OUTPUT_MAX_BYTES=1024 PROBE_ASAN_OUTPUT_HEAD_BYTES=256 PRO
 huge_asan="$RESULTS_DIR/scratch-1/huge-output.asan.txt"
 huge_size=$(wc -c < "$huge_asan" | tr -d ' ')
 [ "$huge_size" -lt 1200 ]
-assert_eq 0 $? "probe caps oversized ASan output artifact before verdict"
-assert_file_contains "$huge_asan" "ASAN_OUTPUT_FILE truncated before verdict classification" \
+assert_eq 0 $? "probe caps oversized ASan output artifact for storage"
+assert_file_contains "$huge_asan" "ASAN_OUTPUT_FILE truncated for storage after verdict classification" \
   "probe cap marker preserved in ASan output"
 assert_match "NO CRASHES" "$huge_out" "probe still classifies capped clean output"
+
+# Regression (FN): a crash marker buried in the omitted middle of an
+# oversized log must still classify as CRASH. The verdict reads the full
+# raw output; only the saved artifact is capped. Pre-fix the cap ran first
+# and the buried diagnostic became NO_EXEC/CLEAN.
+cat > "$RESULTS_DIR/scratch-1/huge-crash.py" <<'EOF'
+# TARGET: demo:main:1
+# HYPOTHESIS-ID: H_huge_crash
+# CATEGORY: state
+print("A" * 2048)
+print("ERROR: AddressSanitizer: heap-buffer-overflow on address 0xdeadbeef")
+print("B" * 2048)
+print("TESTCASE_EXECUTED")
+EOF
+huge_crash_out=$(PROBE_ASAN_OUTPUT_MAX_BYTES=1024 PROBE_ASAN_OUTPUT_HEAD_BYTES=256 PROBE_ASAN_OUTPUT_TAIL_BYTES=256 \
+  "$SCRIPT_ROOT/bin/probe" "$RESULTS_DIR/scratch-1/huge-crash.py" 2>&1) || true
+huge_crash_asan="$RESULTS_DIR/scratch-1/huge-crash.asan.txt"
+huge_crash_size=$(wc -c < "$huge_crash_asan" | tr -d ' ')
+[ "$huge_crash_size" -lt 1200 ]
+assert_eq 0 $? "probe still caps the stored artifact even when a buried crash is detected"
+assert_match "verdict=CRASH" "$huge_crash_out" \
+  "probe classifies crash buried in oversized output's omitted middle"
 
 # Runner args without {TESTCASE}: probe should append the testcase after
 # configured args, matching docs/reference/target-toml.md.

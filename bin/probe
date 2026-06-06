@@ -335,7 +335,7 @@ _probe_cap_asan_output_file() {
   local tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/probe-asan-cap-XXXXXX")" || return 0
   {
-    printf '[probe] ASAN_OUTPUT_FILE truncated before verdict classification: original_size_bytes=%s max_bytes=%s\n' "$size" "$max_bytes"
+    printf '[probe] ASAN_OUTPUT_FILE truncated for storage after verdict classification: original_size_bytes=%s max_bytes=%s\n' "$size" "$max_bytes"
     printf '[probe] showing first %s byte(s) and last %s byte(s); rerun with PROBE_ASAN_OUTPUT_MAX_BYTES=0 to preserve full output.\n' "$head_bytes" "$tail_bytes"
     head -c "$head_bytes" "$f" 2>/dev/null || true
     printf '\n[probe] ... middle omitted from oversized ASan output ...\n'
@@ -1046,7 +1046,12 @@ fi
 # runtime-fatal markers are VERDICT_CRASH_PATTERNS; per-target additions
 # from [runner].crash_patterns flow through TARGET_RUNNER_CRASH_PATTERNS,
 # which verdict_file_has_crash unions in.
-_probe_cap_asan_output_file "$ASAN_OUTPUT_FILE"
+#
+# Classify against the FULL raw output — never the capped digest. A real
+# diagnostic can land in the middle of an oversized log, so capping before
+# the verdict would silently turn a CRASH into NO_EXEC/CLEAN (false
+# negative). The artifact is capped for storage only after every verdict
+# decision below (including any auto-route reclassification).
 verdict="NO_EXEC"
 if [ -s "$ASAN_OUTPUT_FILE" ]; then
   if verdict_file_has_crash "$ASAN_OUTPUT_FILE"; then
@@ -1174,6 +1179,14 @@ _probe_auto_route() {
   return 0
 }
 _probe_auto_route || true
+
+# Cap the on-disk artifact for storage now that every verdict (initial +
+# any auto-route reclassification) has been decided against the full raw
+# output. This bounds disk/token cost without ever hiding a diagnostic
+# from classification.
+_probe_cap_asan_output_file "$ASAN_OUTPUT_FILE"
+
+echo "[probe] verdict=$verdict"
 
 # State recording (best-effort; only if state machinery is available).
 if [ -n "$HYP_LINE" ] && [ -x "$SCRIPT_DIR/state" ]; then
