@@ -419,16 +419,24 @@ _HTML_HEAD = """<!DOCTYPE html>
   /* Compact field grid for REPORT.md "Fields" table */
   .fields-table th:first-child {{ width: 220px; }}
   .fields-table td:first-child {{ font-weight: 500; color: var(--muted); }}
-  /* Rejected findings table: ID | Reason | Report. Fixed widths keep
-     ID and Report on one line; Reason takes the remainder and wraps. */
-  .rejected-findings-table {{
+  /* Rejected crashes / findings table: ID | Site | Reason | Report. Fixed
+     widths keep ID, Site, and Report on one line; Reason takes the
+     remainder and wraps. Shared by the audit and benchmark rejection
+     indexes so both read identically. */
+  .rejected-table {{
     table-layout: fixed;
   }}
-  .rejected-findings-table th:nth-child(1),
-  .rejected-findings-table td:nth-child(1) {{ width: 14rem; white-space: nowrap; }}
-  .rejected-findings-table th:nth-child(3),
-  .rejected-findings-table td:nth-child(3) {{ width: 9rem; white-space: nowrap; }}
-  .rejected-findings-table td:nth-child(2) {{
+  .rejected-table th:nth-child(1),
+  .rejected-table td:nth-child(1) {{ width: 14rem; white-space: nowrap; }}
+  .rejected-table th:nth-child(2),
+  .rejected-table td:nth-child(2) {{
+    width: 14rem;
+    white-space: nowrap;
+    overflow-wrap: anywhere;
+  }}
+  .rejected-table th:nth-child(4),
+  .rejected-table td:nth-child(4) {{ width: 6rem; white-space: nowrap; }}
+  .rejected-table td:nth-child(3) {{
     word-break: normal;
     overflow-wrap: anywhere;
   }}
@@ -1093,8 +1101,8 @@ def _table_extra_class(header: list[str]) -> str:
     style the leading column as a label column."""
     if [c.lower() for c in header[:2]] == ["field", "value"]:
         return "fields-table"
-    if [c.lower() for c in header] == ["id", "reason", "report"]:
-        return "rejected-findings-table"
+    if [c.lower() for c in header] == ["id", "site", "reason", "report"]:
+        return "rejected-table"
     # The aggregated benchmark crosstab is a wide table; the
     # harness-wide `min-width: max-content` + nowrap-on-code rules
     # otherwise force horizontal scrolling.

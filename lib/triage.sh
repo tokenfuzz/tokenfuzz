@@ -2729,6 +2729,97 @@ _ensure_find_quality_coverage() {
   done
 }
 
+# ─── Rejection-index cell helpers ─────────────────────────────────
+# These render the shared ID | Site | Reason | Report rejection ledger
+# (crashes-rejected/INDEX.md + findings-rejected/INDEX.md). lib/benchmark.py
+# carries python equivalents for the benchmark pool; keep the two in sync.
+
+# Flatten one cell to a single markdown-table-safe line: collapse
+# whitespace and escape pipes. Reasons are kept in full — rejected pages
+# are audit evidence — so no length cap is applied here.
+_rejected_md_cell() {
+  printf '%s' "$1" | tr '\n\t' '  ' | sed -e 's/|/\\|/g' -e 's/  */ /g' -e 's/^ //' -e 's/ $//'
+}
+
+# "[Link](<id>/<report>)" for a rejected dir, or an em dash when no report
+# file exists. The target is relative to the index (same parent dir);
+# render-md rewrites the .md target to its rendered .html sibling.
+_rejected_report_link() {
+  local d="$1" id rep
+  id=$(basename "$d")
+  rep=$(_triage_exact_file_path "$d" "REPORT.md" 2>/dev/null || true)
+  [ -z "$rep" ] && rep=$(_triage_exact_file_path "$d" "report.md" 2>/dev/null || true)
+  if [ -n "$rep" ]; then
+    printf '[Link](%s/%s)' "$id" "$(basename "$rep")"
+  else
+    printf '%s' "—"
+  fi
+}
+
+# First interesting crash frame ("func file:line") for a rejected crash dir.
+# Prefers the shared stack-frame helper; falls back to an awk scan that
+# skips sanitizer/libc/runtime frames (the helper returns nothing for UBSan
+# traces, which have no recognised crash-stack header).
+_rejected_crash_site() {
+  local d="$1" asan_path frame="" _fbin _fhelper
+  asan_path=$(find_primary_asan_in_crash_dir "$d" 2>/dev/null || true)
+  [ -n "$asan_path" ] || { printf '%s' "—"; return; }
+  _fbin=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
+  _fhelper="$_fbin/../lib/stack_frames.py"
+  if [ -s "$_fhelper" ] && command -v python3 >/dev/null 2>&1; then
+    frame=$(python3 "$_fhelper" --first-display "$asan_path" 2>/dev/null | head -c 70 || true)
+  fi
+  if [ -z "$frame" ]; then
+    frame=$(awk '
+      /^[[:space:]]*#[0-9]+/ {
+        if ($0 ~ /__asan|__sanitizer|__interceptor|libc\+\+|libsystem_|libdyld|libobjc|asan_interceptors|libsancov|libclang_rt|\bstart\+/) next
+        print; exit
+      }
+    ' "$asan_path" 2>/dev/null \
+      | sed -E 's/^[[:space:]]*#[0-9]+[[:space:]]+0x[0-9a-fA-F]+[[:space:]]+in[[:space:]]+//' \
+      | head -c 70 || true)
+  fi
+  printf '%s' "${frame:-—}"
+}
+
+# Rejection rationale recorded by triage in a crash dir's .autodiscard.
+_rejected_dir_reason() {
+  local d="$1" reason=""
+  if [ -f "$d/.autodiscard" ]; then
+    reason=$(grep -m1 '^# Reason:' "$d/.autodiscard" 2>/dev/null | sed -E 's/^# Reason:[[:space:]]*//')
+  fi
+  printf '%s' "${reason:-—}"
+}
+
+# file:func:line for a rejected finding, read from the report's Fields table.
+_rejected_finding_site() {
+  local d="$1" rep file func line site=""
+  rep=$(_triage_exact_file_path "$d" "report.md" 2>/dev/null || true)
+  [ -z "$rep" ] && rep=$(_triage_exact_file_path "$d" "REPORT.md" 2>/dev/null || true)
+  [ -n "$rep" ] || { printf '%s' "—"; return; }
+  file=$(awk -F'|' 'tolower($2) ~ /^ *file *$/ {gsub(/[`[:space:]]/,"",$3); print $3; exit}' "$rep" 2>/dev/null)
+  func=$(awk -F'|' 'tolower($2) ~ /^ *function *$/ {gsub(/[`[:space:]]/,"",$3); print $3; exit}' "$rep" 2>/dev/null)
+  line=$(awk -F'|' 'tolower($2) ~ /^ *line *$/ {gsub(/[`[:space:]]/,"",$3); print $3; exit}' "$rep" 2>/dev/null)
+  site="$file"
+  [ -n "$func" ] && site="${site:+$site:}$func"
+  [ -n "$line" ] && site="${site:+$site:}$line"
+  printf '%s' "${site:-—}"
+}
+
+# Rejection rationale for a finding: the FIND-quality gate's reason, falling
+# back to the recon triage reason.
+_rejected_finding_reason() {
+  local d="$1" reason="" f
+  if command -v jq >/dev/null 2>&1; then
+    for f in "$d/.llm-find-quality.json" "$d/.llm-triage.json"; do
+      [ -s "$f" ] || continue
+      reason=$(jq -r '.reason // empty' "$f" 2>/dev/null || true)
+      [ -n "$reason" ] && break
+    done
+  fi
+  printf '%s' "${reason:-—}"
+}
+
 maintain_indexes() {
   mkdir -p "$RESULTS_DIR/crashes" "$RESULTS_DIR/crashes-rejected" "$RESULTS_DIR/findings" 2>/dev/null || true
 
@@ -2786,43 +2877,50 @@ maintain_indexes() {
         "$RESULTS_DIR/findings/FIND-CLUSTERS.md" \
         "$RESULTS_DIR/findings/FIND-CLUSTERS.html" 2>/dev/null || true
 
-  # crashes-rejected/INDEX.md — Crash site only; the full ERROR line is in
-  # the per-dir asan output. ID is plain text since rejected dirs are not
-  # supposed to be re-opened.
+  # crashes-rejected/INDEX.md and findings-rejected/INDEX.md share one
+  # schema — ID | Site | Reason | Report — so the two pages, plus the
+  # benchmark pool equivalents in lib/benchmark.py, read identically. ID
+  # stays plain text (rejected dirs are not meant to be re-opened); Report
+  # is a Link to the rendered per-dir report (render-md rewrites the .md
+  # target to its .html sibling).
   {
     echo "# Rejected crashes — non-finding classes (DO NOT RE-FILE)"
     echo ""
-    echo "| ID | Crash site | Rejected at |"
-    echo "|:---|:-----------|:------------|"
+    echo "| ID | Site | Reason | Report |"
+    echo "| :--- | :--- | :--- | :--- |"
     local d
     for d in "$RESULTS_DIR"/crashes-rejected/CRASH-*/; do
       [ -d "$d" ] || continue
-      local id frame ts
+      local id site reason link
       id=$(basename "$d")
-      local asan_path
-      asan_path=$(find_primary_asan_in_crash_dir "$d" 2>/dev/null || true)
-      frame="(unknown)"
-      if [ -n "$asan_path" ]; then
-        if [ -s "$_frame_helper" ] && command -v python3 >/dev/null 2>&1; then
-          frame=$(python3 "$_frame_helper" --first-display "$asan_path" 2>/dev/null | head -c 70 || true)
-        fi
-        if [ -z "$frame" ]; then
-          frame=$(awk '
-            /^[[:space:]]*#[0-9]+/ {
-              if ($0 ~ /__asan|__sanitizer|__interceptor|libc\+\+|libsystem_|libdyld|libobjc|asan_interceptors|libsancov|libclang_rt|\bstart\+/) next
-              print; exit
-            }
-          ' "$asan_path" 2>/dev/null \
-            | sed -E 's/^[[:space:]]*#[0-9]+[[:space:]]+0x[0-9a-fA-F]+[[:space:]]+in[[:space:]]+//' \
-            | head -c 70 || true)
-        fi
-        [ -z "$frame" ] && frame="(unknown)"
-      fi
-      ts="?"
-      [ -f "$d/.autodiscard" ] && ts=$(audit_mtime_utc "$d/.autodiscard" '%Y-%m-%d' 2>/dev/null || echo "?")
-      printf '| %s | %s | %s |\n' "$id" "${frame:-—}" "$ts"
+      site=$(_rejected_md_cell "$(_rejected_crash_site "$d")")
+      reason=$(_rejected_md_cell "$(_rejected_dir_reason "$d")")
+      link=$(_rejected_report_link "$d")
+      printf '| `%s` | %s | %s | %s |\n' "$id" "${site:-—}" "${reason:-—}" "$link"
     done
   } > "$RESULTS_DIR/crashes-rejected/INDEX.md" 2>/dev/null || true
+
+  # findings-rejected/INDEX.md — same schema as crashes-rejected/INDEX.md.
+  # Only written when the dir exists (findings-only and crash-finding runs
+  # both reach here; a target with no rejected findings simply has no dir).
+  if [ -d "$RESULTS_DIR/findings-rejected" ]; then
+    {
+      echo "# Rejected findings — non-actionable (DO NOT RE-FILE)"
+      echo ""
+      echo "| ID | Site | Reason | Report |"
+      echo "| :--- | :--- | :--- | :--- |"
+      local d
+      for d in "$RESULTS_DIR"/findings-rejected/FIND-*/; do
+        [ -d "$d" ] || continue
+        local id site reason link
+        id=$(basename "$d")
+        site=$(_rejected_md_cell "$(_rejected_finding_site "$d")")
+        reason=$(_rejected_md_cell "$(_rejected_finding_reason "$d")")
+        link=$(_rejected_report_link "$d")
+        printf '| `%s` | %s | %s | %s |\n' "$id" "${site:-—}" "${reason:-—}" "$link"
+      done
+    } > "$RESULTS_DIR/findings-rejected/INDEX.md" 2>/dev/null || true
+  fi
 
   # Emit HTML siblings after all report/cluster mutations for this iteration.
   # Report HTML is intentionally owned here, not by export-repro,
@@ -2854,9 +2952,10 @@ maintain_indexes() {
         python3 "$_render" "$_report" --html-sibling --title "$(basename "$_d")" >/dev/null 2>&1 || true
       done
 
-      # Findings get the same report.md → report.html sibling treatment so
-      # reviewers have a browsable HTML view alongside the markdown.
-      for _d in "$RESULTS_DIR"/findings/FIND-*/; do
+      # Findings (kept and rejected) get the same report.md → report.html
+      # sibling treatment so reviewers have a browsable HTML view alongside
+      # the markdown — and so the rejection index's Report links resolve.
+      for _d in "$RESULTS_DIR"/findings/FIND-*/ "$RESULTS_DIR"/findings-rejected/FIND-*/; do
         [ -d "$_d" ] || continue
         _report=""
         for _candidate in REPORT.md report.md description.md analysis.md README.md; do
@@ -2875,7 +2974,8 @@ maintain_indexes() {
       for _f in \
         "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" \
         "$RESULTS_DIR/crashes-rejected/INDEX.md" \
-        "$RESULTS_DIR/findings/FINDING-CLUSTERS.md"; do
+        "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" \
+        "$RESULTS_DIR/findings-rejected/INDEX.md"; do
         [ -s "$_f" ] || continue
         python3 "$_render" "$_f" --html-sibling >/dev/null 2>&1 || true
       done

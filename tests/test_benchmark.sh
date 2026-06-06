@@ -238,6 +238,9 @@ pooled_rej_id="$(basename "$pooled_rej_dir")"
 assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   "\\[Link\\]\\(${pooled_rej_id}/report.md\\)" \
   "T4h2: rejected finding index labels report links plainly"
+assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
+  '[|] *ID *[|] *Site *[|] *Reason *[|] *Report *[|]' \
+  "T4h2b: rejected finding index uses the unified ID | Site | Reason | Report header"
 # Recon ID linker: pooled report.md now hyperlinks to the source recon REPORT.
 assert_file_contains "$pooled_rej_dir/report.md" \
   '\[RECON-deadbeefcafef00d\]' \
@@ -249,7 +252,7 @@ python3 "$RENDER_MD" "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
 assert_file_exists "$pooled_rej_dir/report.html" \
   "T4h4: rejected report markdown can be rendered for browser links"
 assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.html" \
-  'class="rejected-findings-table"' \
+  'class="rejected-table"' \
   "T4h5: rejected finding HTML gets the dedicated table layout"
 assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.html" \
   "href=\"${pooled_rej_id}/report.html\">Link</a>" \

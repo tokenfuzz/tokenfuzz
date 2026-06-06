@@ -354,8 +354,10 @@ import benchmark
 benchmark.write_rejected_crashes_index(Path("$rej_idx"))
 PY
 rej_idx_md=$(cat "$rej_idx/REJECTED-CRASHES.md")
-assert_match '\[REPORT\.md\]\(CRASH-REJECTED-0001/REPORT\.md\)' "$rej_idx_md" \
+assert_match '\[Link\]\(CRASH-REJECTED-0001/REPORT\.md\)' "$rej_idx_md" \
   "T28i: REJECTED-CRASHES.md links a rejected crash to its REPORT.md, not the dir"
+assert_match '\| ID \| Site \| Reason \| Report \|' "$rej_idx_md" \
+  "T28i2: REJECTED-CRASHES.md uses the unified ID | Site | Reason | Report header"
 assert_not_match '\[CRASH-REJECTED-0001/\]\(CRASH-REJECTED-0001/\)' "$rej_idx_md" \
   "T28j: REJECTED-CRASHES.md no longer links to the bare directory"
 python3 "$RENDER_MD" "$rej_idx/REJECTED-CRASHES.md" --html-sibling >/dev/null 2>&1

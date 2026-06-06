@@ -1092,6 +1092,94 @@ def _report_link_name(finding_dir: Path) -> str:
     return report.name if report is not None else ""
 
 
+# ── rejection-index cell helpers (shared schema with lib/triage.sh) ──────
+# The audit writes crashes-rejected/INDEX.md + findings-rejected/INDEX.md via
+# lib/triage.sh; these mirror its Site/Reason extraction so the benchmark
+# pool's REJECTED-CRASHES.md / REJECTED-FINDINGS.md read identically.
+
+_REJECT_FRAME_SKIP_RE = re.compile(
+    r"__asan|__sanitizer|__interceptor|libc\+\+|libsystem_|libdyld|libobjc|"
+    r"asan_interceptors|libsancov|libclang_rt|\bstart\+"
+)
+_REJECT_FRAME_PREFIX_RE = re.compile(r"^\s*#\d+\s+0[xX][0-9a-fA-F]+\s+in\s+")
+
+
+def _first_crash_frame(text: str) -> str:
+    """First interesting "func file:line" frame, skipping sanitizer/libc/
+    runtime frames — the awk-fallback twin of lib/triage.sh's site column
+    (lib/stack_frames.py returns nothing for UBSan traces)."""
+    for line in text.splitlines():
+        if not re.match(r"^\s*#\d+", line):
+            continue
+        if _REJECT_FRAME_SKIP_RE.search(line):
+            continue
+        return _REJECT_FRAME_PREFIX_RE.sub("", line).strip()[:70]
+    return ""
+
+
+def _crash_sanitizer_text(crash_dir: Path) -> str:
+    direct = _exact_child_file(
+        crash_dir,
+        ("sanitizer.txt", "asan.txt", "msan.txt", "tsan.txt", "ubsan.txt"),
+    )
+    candidates: list[Path] = [direct] if direct is not None else []
+    if not candidates:
+        for pat in ("*.asan.txt", "*.msan.txt", "*.tsan.txt", "*.ubsan.txt"):
+            candidates.extend(sorted(crash_dir.glob(pat)))
+    for c in candidates:
+        try:
+            return c.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return ""
+
+
+def _crash_site(crash_dir: Path) -> str:
+    text = _crash_sanitizer_text(crash_dir)
+    return _first_crash_frame(text) if text else ""
+
+
+def _crash_reason(crash_dir: Path) -> str:
+    """Triage's rejection rationale, recorded in the dir's .autodiscard."""
+    marker = crash_dir / ".autodiscard"
+    if not marker.is_file():
+        return ""
+    try:
+        for line in marker.read_text(
+                encoding="utf-8", errors="replace").splitlines():
+            s = line.strip()
+            if s.startswith("# Reason:"):
+                return s[len("# Reason:"):].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _finding_site(finding_dir: Path) -> str:
+    """file:func:line for a rejected finding, read from its Fields table."""
+    for name in ("REPORT.md", "report.md", "description.md", "analysis.md"):
+        path = finding_dir / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        fields: dict[str, str] = {}
+        for line in text.splitlines():
+            m = re.match(r"^\|\s*(File|Function|Line)\s*\|\s*(.+?)\s*\|", line, re.I)
+            if not m:
+                continue
+            key = m.group(1).lower()
+            val = m.group(2).strip().strip("`").strip()
+            if val and key not in fields:
+                fields[key] = val
+        parts = [fields[k] for k in ("file", "function", "line") if fields.get(k)]
+        if parts:
+            return ":".join(parts)
+    return ""
+
+
 def _finding_title(finding_dir: Path) -> str:
     for name in ("REPORT.md", "report.md", "description.md", "analysis.md"):
         path = finding_dir / name
@@ -1130,6 +1218,7 @@ def _rejected_finding_rows(rejected_dir: Path) -> list[dict]:
         rows.append({
             "id": finding_dir.name,
             "title": _finding_title(finding_dir),
+            "site": _finding_site(finding_dir),
             "reason": reason,
             "report": _report_link_name(finding_dir),
         })
@@ -1173,8 +1262,10 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
     md.append("## Rejected crash directories")
     md.append("")
     if subdirs:
-        md.append("| ID | Report |")
-        md.append("| --- | --- |")
+        # Shared schema with lib/triage.sh's crashes-rejected/INDEX.md and the
+        # findings index below: ID | Site | Reason | Report.
+        md.append("| ID | Site | Reason | Report |")
+        md.append("| :--- | :--- | :--- | :--- |")
         for p in subdirs:
             # Link to the crash's report, not the directory. The source
             # markdown points at the .md so harness parsers and GitHub see
@@ -1187,10 +1278,14 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
                 target = (
                     f"{urllib.parse.quote(p.name)}/{urllib.parse.quote(report)}"
                 )
-                link = f"[{report}]({target})"
+                link = f"[Link]({target})"
             else:
                 link = f"[{p.name}/]({urllib.parse.quote(p.name)}/)"
-            md.append(f"| `{p.name}` | {link} |")
+            site = re.sub(r"\s+", " ", _crash_site(p) or "—").strip()
+            reason = re.sub(r"\s+", " ", _crash_reason(p) or "—").strip()
+            md.append(
+                f"| `{p.name}` | {_md_cell(site)} | {_md_cell(reason)} | {link} |"
+            )
     else:
         md.append("_No rejected crash directories pooled._")
     md.append("")
@@ -1255,17 +1350,19 @@ def write_rejected_findings_index(rejected_dir: Path) -> None:
         "",
     ]
     if rows:
-        md_lines.append("| ID | Reason | Report |")
-        md_lines.append("| --- | --- | --- |")
+        md_lines.append("| ID | Site | Reason | Report |")
+        md_lines.append("| :--- | :--- | :--- | :--- |")
         for row in rows:
             report = (
                 f"[Link]({row['id']}/{row['report']})"
                 if row["report"] else "—"
             )
+            site = re.sub(r"\s+", " ", row.get("site") or "—").strip()
             reason = re.sub(r"\s+", " ", row["reason"] or "—").strip()
             md_lines.append(
-                "| `{id}` | {reason} | {report} |".format(
+                "| `{id}` | {site} | {reason} | {report} |".format(
                     id=_md_cell(row["id"]),
+                    site=_md_cell(site),
                     reason=_md_cell(reason),
                     report=report,
                 )

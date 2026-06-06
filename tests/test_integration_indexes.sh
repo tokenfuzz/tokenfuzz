@@ -104,7 +104,29 @@ cat > "$RESULTS_DIR/crashes-rejected/CRASH-010-1/asan.txt" <<'EOF'
 Hint: address points to the zero page
 #0 0x7fff12345678 in nsWidget::Init()
 EOF
-echo "# Auto-rejected" > "$RESULTS_DIR/crashes-rejected/CRASH-010-1/.autodiscard"
+cat > "$RESULTS_DIR/crashes-rejected/CRASH-010-1/.autodiscard" <<'EOF'
+# Auto-rejected by triage_crash_dirs
+# Reason: null-deref, not a security-relevant memory-safety class
+EOF
+echo "# CRASH-010-1 rejected" > "$RESULTS_DIR/crashes-rejected/CRASH-010-1/REPORT.md"
+
+# Rejected finding (validator/FIND-quality gate dropped it). The site is read
+# from the report's Fields table; the reason from the .llm-find-quality sidecar.
+mkdir -p "$RESULTS_DIR/findings-rejected/FIND-090-robustness-only"
+cat > "$RESULTS_DIR/findings-rejected/FIND-090-robustness-only/report.md" <<'EOF'
+# Unchecked return is robustness only
+
+## Fields
+
+| Field    | Value         |
+| :------- | :------------ |
+| File     | `app_parse.c` |
+| Function | `app_parse`   |
+| Line     | 42            |
+EOF
+cat > "$RESULTS_DIR/findings-rejected/FIND-090-robustness-only/.llm-find-quality.json" <<'EOF'
+{"accept":false,"reason":"robustness only; no security boundary crossed","decision":"find_quality"}
+EOF
 
 # Active finding (LLM accepted) with a freeform class + severity that
 # FINDING-CLUSTERS.md should surface.
@@ -211,6 +233,25 @@ assert_file_contains "$RESULTS_DIR/crashes/CRASH-001-1/report.html" "$cluster_id
 assert_file_exists "$RESULTS_DIR/crashes-rejected/INDEX.md" "crashes-rejected/INDEX.md created"
 assert_file_contains "$RESULTS_DIR/crashes-rejected/INDEX.md" "CRASH-010-1" "rejected index has CRASH-010"
 assert_file_contains "$RESULTS_DIR/crashes-rejected/INDEX.md" "DO NOT RE-FILE" "rejected index warns against re-filing"
+# Unified schema: ID | Site | Reason | Report, with a hyperlinked report.
+# (assert_file_contains greps with -E, so table pipes / link brackets escape.)
+assert_file_contains "$RESULTS_DIR/crashes-rejected/INDEX.md" '[|] *ID *[|] *Site *[|] *Reason *[|] *Report *[|]' \
+  "crashes-rejected index uses the unified column header"
+assert_file_contains "$RESULTS_DIR/crashes-rejected/INDEX.md" "null-deref, not a security-relevant" \
+  "crashes-rejected index surfaces the triage rejection reason"
+assert_file_contains "$RESULTS_DIR/crashes-rejected/INDEX.md" '\[Link\]\(CRASH-010-1/REPORT\.md\)' \
+  "crashes-rejected index links the report"
+
+# 2b. findings-rejected/INDEX.md mirrors the crashes-rejected schema.
+assert_file_exists "$RESULTS_DIR/findings-rejected/INDEX.md" "findings-rejected/INDEX.md created"
+assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" '[|] *ID *[|] *Site *[|] *Reason *[|] *Report *[|]' \
+  "findings-rejected index uses the same unified header"
+assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" "app_parse.c:app_parse:42" \
+  "findings-rejected index surfaces the finding site from the Fields table"
+assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" "robustness only; no security boundary" \
+  "findings-rejected index surfaces the FIND-quality rejection reason"
+assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" '\[Link\]\(FIND-090-robustness-only/report\.md\)' \
+  "findings-rejected index links the report"
 
 # ═══════════════════════════════════════════════════════════════
 # 3. findings/FINDING-CLUSTERS.md is the primary findings table
@@ -249,9 +290,12 @@ grep -E 'FIND-040-override.*OK \(override\)' "$RESULTS_DIR/findings/FINDING-CLUS
   || fail "finding clusters mark .reviewed FIND as OK (override)" \
        "row missing OK (override) status"
 
-[ ! -d "$RESULTS_DIR/findings-rejected" ] \
-  && pass "no findings-rejected/ directory created" \
-  || fail "no findings-rejected/ directory created" "findings-rejected/ exists"
+# The accepted findings must not be moved into findings-rejected/ (only the
+# deliberately-planted FIND-090 fixture lives there).
+[ ! -d "$RESULTS_DIR/findings-rejected/FIND-001-decoder-oob" ] \
+  && [ ! -d "$RESULTS_DIR/findings-rejected/FIND-050-unusual" ] \
+  && pass "accepted findings not moved to findings-rejected/" \
+  || fail "accepted findings not moved to findings-rejected/" "an accepted FIND was rejected"
 [ ! -d "$RESULTS_DIR/findings-needs-review" ] \
   && pass "no findings-needs-review/ directory created" \
   || fail "no findings-needs-review/ directory created" "findings-needs-review/ exists"
