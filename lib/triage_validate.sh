@@ -2,26 +2,19 @@
 # lib/triage_validate.sh — Independent-validator promotion gate for non-ASan
 # findings.
 #
-# Sourced by bin/audit and bin/audit-recon. Provides two functions:
+# Sourced by bin/audit and bin/audit-recon. Provides:
 #
 #   triage_validate_finding <finding-path> <target-path> [<results-dir>]
 #       Runs bin/validate-finding twice (and a tiebreak if needed). Writes
 #       all votes next to the finding. Returns 0 if the quorum is Promote,
 #       1 if Reject, 2 if Uncertain.
 #
-#   triage_validate_should_run <class>
-#       Returns 0 if the finding class needs an independent validator (i.e.
-#       it's NOT an ASan-validated crash). Returns 1 if the finding already
-#       has an objective oracle (ASan/UBSan/MSan/TSan crash) and the
-#       independent vote is redundant.
-#
 # Design:
-#   - ASan-validated CRASH-* findings keep the existing promotion path —
-#     the sanitizer is the objective oracle.
-#   - Reasoning-confirmed findings (kind=recon-hypothesis, logic bugs,
-#     protocol-state corruption, DoS-amplification, info-leak) need an
-#     independent vote because the originating agent's confidence is not
-#     an oracle.
+#   - ASan-validated CRASH-* artifacts keep the existing crash promotion path —
+#     the sanitizer is the objective oracle there.
+#   - FIND reports, including source-only memory-safety claims, need an
+#     independent vote because the originating agent's confidence and chosen
+#     class label are not oracles.
 #   - Two Promote votes required to promote. One Reject is fatal. One
 #     Uncertain triggers a tiebreak validator that defaults skeptical.
 #
@@ -31,23 +24,6 @@
 
 # Set this to 1 to short-circuit the validator (useful for unit tests).
 : "${TRIAGE_VALIDATE_NOOP:=0}"
-
-triage_validate_should_run() {
-  local class="${1:-}"
-  case "$class" in
-    # Anything an ASan-class sanitizer would catch already has an objective
-    # oracle. Skip the LLM validator — running it would just double-bill
-    # without adding signal.
-    OOB-read|OOB-write|UAF|use-after-free|double-free|heap-buffer-overflow|stack-buffer-overflow|use-after-poison|uninit-read)
-      return 1
-      ;;
-    # Everything else — logic, protocol-state, DoS, info-leak — needs the
-    # independent vote.
-    *)
-      return 0
-      ;;
-  esac
-}
 
 # Run validators and write vote files. Echo a single line:
 #   "verdict=<Promote|Reject|Uncertain> votes=<promote-count>/<total> path=<vote-dir>"

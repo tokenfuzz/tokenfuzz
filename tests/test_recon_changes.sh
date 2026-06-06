@@ -1011,28 +1011,7 @@ fi
 
 rm -rf "$recon_tmpdir"
 
-# ── triage_validate: noop path + class routing ─────────────────────────
-# UAF class skips independent validator (ASan is the oracle)
-if SCRIPT_ROOT="$SCRIPT_ROOT" bash -c '. "$1/lib/triage_validate.sh"; triage_validate_should_run "UAF"' _ "$SCRIPT_ROOT" >/dev/null 2>&1; then
-  fail "UAF should NOT need independent validator"
-else
-  pass "UAF skips independent validator"
-fi
-
-# DoS-amplification needs independent validator
-if SCRIPT_ROOT="$SCRIPT_ROOT" bash -c '. "$1/lib/triage_validate.sh"; triage_validate_should_run "DoS-amplification"' _ "$SCRIPT_ROOT" >/dev/null 2>&1; then
-  pass "DoS-amplification needs independent validator"
-else
-  fail "DoS-amplification should need independent validator"
-fi
-
-# protocol-state needs independent validator
-if SCRIPT_ROOT="$SCRIPT_ROOT" bash -c '. "$1/lib/triage_validate.sh"; triage_validate_should_run "protocol-state"' _ "$SCRIPT_ROOT" >/dev/null 2>&1; then
-  pass "protocol-state needs independent validator"
-else
-  fail "protocol-state should need independent validator"
-fi
-
+# ── triage_validate: noop path ─────────────────────────────────────────
 # noop mode returns Promote without invoking the validator
 verdict=$(TRIAGE_VALIDATE_NOOP=1 SCRIPT_ROOT="$SCRIPT_ROOT" \
   bash -c '. "$1/lib/triage_validate.sh"; triage_validate_finding /tmp/nonexistent /tmp; echo "rc=$?"' _ "$SCRIPT_ROOT")
