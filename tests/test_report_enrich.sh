@@ -386,4 +386,41 @@ fi
 # Severity badge + TL;DR still land (don't need source tree).
 assert_file_contains "$CD2/report.md" "Severity: Low" "badge still inserted without source tree"
 
+# ── (i) Fence-aware H1 insertion ────────────────────────────────────
+# A `# ...` line inside a fenced reproducer block (a shell/diff comment) is
+# NOT a Markdown H1. _insert_after_h1 must skip it, or an unclosed reproducer
+# fence swallows the TL;DR / badge / cluster-siblings block — it renders as
+# escaped code instead of the hero card. Regression: FIND-REJECTED-0106 had
+# its only `# ` line be `# -> "reader: malloc failure not reported"` inside a
+# fence, so enrichment injected the tldr block inside that fence.
+if python3 - "$SCRIPT_ROOT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/lib")
+import report_enrich as m
+
+# (1) Only `#` line is a shell comment inside a fence -> treat as no H1,
+#     insert the block at the very top (above the fence), never inside it.
+no_h1 = ("## Fields\n\n| a | b |\n\n## Reproducer\n\n```\nclang foo.c\n"
+         "# -> \"reader: malloc failure not reported\"\n```\n\n## Impact\n\nx\n")
+out = m._insert_after_h1(no_h1, m._wrap_block("tldr", "**TLDR**"))
+assert out.index("enrich:tldr") < out.index("```"), "tldr leaked inside the fence"
+assert out.lstrip().startswith("<!-- enrich:tldr -->"), "tldr not hoisted to top"
+
+# (2) A real H1 above a fence: block lands right after the real H1, and the
+#     `# not a heading` comment inside the fence is ignored.
+real = "# Real Title\n\nintro\n\n## Repro\n\n```\n# not a heading\n```\n"
+out2 = m._insert_after_h1(real, m._wrap_block("tldr", "**TLDR**"))
+li = out2.splitlines()
+assert li.index("# Real Title") < next(i for i, l in enumerate(li) if "enrich:tldr" in l) < li.index("## Repro"), \
+    "tldr not placed directly under the real H1"
+
+# (3) Fence bookkeeping: the comment line is flagged as fenced; no real H1.
+assert m._first_h1_outside_fence(no_h1) is None, "shell comment wrongly seen as H1"
+PY
+then
+  pass "fence-aware H1 insertion: enrichment never lands inside a code fence"
+else
+  fail "fence-aware H1 insertion" "block landed inside a fence or under a fenced comment"
+fi
+
 summary

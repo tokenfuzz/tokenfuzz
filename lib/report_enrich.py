@@ -63,6 +63,33 @@ _KNOWN_MARKS = (
 
 _H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+
+
+def _fenced_line_indices(text: str) -> set:
+    """Line indices (0-based) that sit inside a fenced code block, fence
+    marker lines included. A `# foo` or `## bar` line inside ``` is shell /
+    diff / source content, not a Markdown heading — heading scans must skip
+    it (an unclosed reproducer fence otherwise swallows enrichment blocks)."""
+    fenced: set = set()
+    in_fence = False
+    for i, line in enumerate(text.split("\n")):
+        if _FENCE_RE.match(line):
+            fenced.add(i)
+            in_fence = not in_fence
+        elif in_fence:
+            fenced.add(i)
+    return fenced
+
+
+def _first_h1_outside_fence(text: str):
+    """The first real H1 heading match, skipping `# ...` lines inside a
+    fenced code block. Returns the `re.Match` or None."""
+    fenced = _fenced_line_indices(text)
+    for m in _H1_RE.finditer(text):
+        if text.count("\n", 0, m.start()) not in fenced:
+            return m
+    return None
 # Colon-label heading style — `Data Flow:` on its own line behaves as
 # an H2 in render-md's _REPORT_LABEL_HEADING_RE. Mirror that here so
 # reports that use either style get enriched. Restricted to the
@@ -378,7 +405,7 @@ def _insert_at_section_start(text: str, heading_name: str, block: str) -> str:
 def _insert_after_h1(text: str, block: str) -> str:
     """Insert `block` after the H1 title (or at the very top when no
     H1 is present)."""
-    m = _H1_RE.search(text)
+    m = _first_h1_outside_fence(text)
     if m is None:
         return block.rstrip() + "\n\n" + text
     end = m.end()
