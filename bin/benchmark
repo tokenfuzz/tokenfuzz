@@ -531,6 +531,7 @@ start_console_log
 
 target_sha="$(target_detect_rev "$SCRIPT_ROOT/targets/$TARGET_SLUG" 2>/dev/null || true)"
 target_sha="${target_sha:-norev}"
+tokenfuzz_sha="$(git -C "$SCRIPT_ROOT" rev-parse HEAD 2>/dev/null || echo "no-vcs")"
 harness_sha="$(git -C "$SCRIPT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "no-vcs")"
 # Resolve the model once — --model override, else the per-backend config
 # default (same helper bin/audit's resolve_model uses). Both conditions run
@@ -558,6 +559,7 @@ json.dump({
     "model_direct_agents": 1,
     "conditions": "$CONDITIONS".split(","),
     "target_sha": "$target_sha",
+    "tokenfuzz_sha": "$tokenfuzz_sha",
     "harness_sha": "$harness_sha",
     "dry_run": bool($DRY_RUN),
 }, open(sys.argv[1], "w"), indent=2)
@@ -1321,6 +1323,15 @@ rebuild_pool_artifacts() {
   _reenrich_and_render_pool_reports "$POOL/crashes"
   _reenrich_and_render_pool_reports "$POOL/crashes-rejected"
 
+  ## ── Finalize severity after all pool mutations ─────────────────────────
+  ## bundling (export-repro) and clustering both create/finalize reports AFTER
+  ## the early score batch ran, so two things are stale by now: a re-bundled
+  ## crash's contract flag, and the severity of any finding clustering created
+  ## as a sibling. Re-scoring must straddle clustering (it picks each cluster's
+  ## canonical by severity yet also emits new unscored dirs), so the corrections
+  ## land here, on final reports, before split-pool copies the pool per
+  ## condition. Two passes because crashes and findings use different scorers.
+
   ## Contract-flag reconcile (final pass, on definitively-final fields).
   ## The contract flag is a function of a crash's structured Trigger source /
   ## Caller contract fields, but those are only guaranteed materialised HERE —
@@ -1357,6 +1368,42 @@ rebuild_pool_artifacts() {
         done
       fi
     fi
+  fi
+
+  ## Finding severity: enforce deterministic scoring on every finding.
+  ## A finding that never reached the scorer — no reachability.json, e.g. it was
+  ## materialised/renumbered after triage_fill_reach_fields_tree's finding pass,
+  ## or scoring ran offline (REACHABILITY_AUTO disables the external probe and
+  ## skips _triage_run_reachability entirely) — otherwise keeps its agent-
+  ## authored `| Severity | <level> |` cell, letting an unverified "High" ship,
+  ## against the no-unverified-model-claims invariant. Score those here with
+  ## --severity-only: it computes the deterministic severity from the report
+  ## fields offline (no probe, no REACHABILITY_AUTO dependency), so finding
+  ## scoring is mandatory, and it overwrites the agent cell with that value.
+  ## Idempotent: findings already carrying reachability.json (scored by the
+  ## audit/online pass) are skipped, preserving their established score. Runs
+  ## before split-pool so the per-condition copies and the ledger inherit it.
+  if [ "$DRY_RUN" != "1" ] && [ -d "$POOL/findings" ] \
+     && declare -f _triage_run_reachability >/dev/null 2>&1; then
+    local _fd _frep _fscored=0
+    for _fd in "$POOL"/findings/FIND-*; do
+      [ -d "$_fd" ] || continue
+      [ -f "$_fd/reachability.json" ] && continue
+      _frep="$_fd/report.md"; [ -f "$_frep" ] || _frep="$_fd/REPORT.md"
+      [ -f "$_frep" ] || continue
+      ## Reuse the SAME finding scorer the early pass runs (line ~1199), forced
+      ## to severity-only so it scores offline from the report fields with no
+      ## probe / REACHABILITY_AUTO dependency. Subshell so the forced setting and
+      ## the INDEX default do not leak into later pool steps.
+      ( export REACHABILITY_AUTO=severity-only INDEX="${INDEX:-$BENCH_DIR/reachability.log}"
+        _triage_run_reachability "$_fd" "$(basename "$_fd")" "$SCRIPT_ROOT/bin" )
+      if [ -f "$_fd/reachability.json" ]; then
+        _fscored=$((_fscored + 1))
+        [ -x "$SCRIPT_ROOT/bin/render-md" ] \
+          && python3 "$SCRIPT_ROOT/bin/render-md" "$_frep" --html-sibling >/dev/null 2>&1 || true
+      fi
+    done
+    [ "$_fscored" -gt 0 ] && log "finding scoring: scored $_fscored previously-unscored finding(s) (severity-only)"
   fi
 
   ## Per-condition cluster reports. The combined pool above feeds the
