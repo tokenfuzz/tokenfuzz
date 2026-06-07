@@ -54,8 +54,16 @@ Most operators arrive on this page because something landed in
 | Assertion-only abort | Debug assertion failures need a security boundary or sanitizer diagnostic. |
 | Timeout-only behaviour | A hang needs a stronger impact story and reproduction discipline. |
 | Harness-only misuse | The testcase violates a contract no real caller can violate. |
-| Out-of-scope trigger | `Trigger source` is not listed in `attacker_controls`. |
 | Missing files | No testcase, no sanitizer output, or an incomplete report. |
+
+**Not a rejection — kept but downgraded.** A reproducing sanitizer crash whose
+`Trigger source` falls outside the target's `attacker_controls` (for example a
+`call-sequence`, `env`, or `race` trigger on a bytes-only target) is **not**
+moved to `crashes-rejected/`. Triage keeps it in `crashes/`, adds a
+`## Contract concern` block, and the reachability scorer applies a ×0.7 severity
+multiplier so it ranks below in-scope crashes. It still counts as an accepted
+crash — it is scored as robustness rather than security. Agents file the
+reproducible crash; triage scores the threat-model fit.
 
 Before filing a similar crash, check:
 
@@ -130,8 +138,11 @@ Notes:
   external caller counts) before computing the advisory severity. An
   unset `Surface` defaults to `unknown` and under-scores real
   findings, so always set it.
-- `Trigger source` must be one of the tokens listed in
-  `attacker_controls` for the crash to stay in `crashes/`.
+- `Trigger source` is compared against `attacker_controls` to set
+  *severity*, not to decide filing: a trigger fully within
+  `attacker_controls` scores as security; one with a component outside it
+  stays in `crashes/` but is downgraded to robustness (contract concern,
+  ×0.7). It is not moved out of `crashes/` on this basis.
 - `Parameter control` is especially important for C harnesses. It
   tells triage whether a value is externally controlled or only
   invented by the harness.

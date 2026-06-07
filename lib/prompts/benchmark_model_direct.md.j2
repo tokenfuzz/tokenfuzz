@@ -233,6 +233,14 @@ A **CRASH** is a security issue you have demonstrated with a real input or
 driver and saved sanitizer output on disk. CRASHes are the highest-value
 artifact this session can produce.
 
+A reproducible sanitizer crash through a public boundary is a CRASH even when
+its trigger (`call-sequence`, `env`, `race`, ...) looks narrower than the
+primary input boundary — file it under `{{ output_dir }}/crashes/` and let
+triage score the threat-model fit. Do not pre-demote a confirmed crash to
+`{{ output_dir }}/findings/` on reachability grounds; that judgment is triage's,
+not yours. (Null-deref / OOM / debug-assert aborts and harness-only misuse are
+the exceptions — those are not crashes.)
+
 {{ asan_invocation_hint }}
 {{ harness_build_recipe }}
 

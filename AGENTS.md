@@ -109,7 +109,7 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
 ## REPRODUCTION
 
 ```
-0. bin/find-seed <file>[:<Function>]  — if matches, seed+delta; else write from scratch
+0. bin/find-seed <file>[:<Function>]  — for any file/bytes/parser/decoder/regex/media surface, SEED FIRST: take the top candidates and mutate (seed+delta). From-scratch inputs bounce off format/magic/length validation and probe CLEAN without reaching the bug — the top cause of missed reachable crashes. Write from scratch only when find-seed returns nothing, or for a pure API-lifecycle / call-sequence bug with no input corpus.
 1. WRITE testcase to scratch dir with header (TARGET / HYPOTHESIS-ID / CATEGORY,
    plus // HARNESS: harness.c / harness.cc / harness.cpp for C/C++ API bugs,
    or another supported sibling harness type when the target uses a language runner)
@@ -132,6 +132,15 @@ demonstrates memory-safety impact) or an explicit security-boundary violation.
 On browser targets, "reachable" means web/content-reachable; on CLI/library
 targets, it means reachable through the documented input boundary
 (file/bytes/API).
+
+**Trigger outside the threat model is triage's call, not yours.** A reproducing
+memory-safety crash through a public boundary still goes under `crashes/` even
+when its `Trigger source` (e.g. `call-sequence`, `env`, `race`) falls outside the
+target's `attacker_controls`. Triage keeps it in `crashes/`, adds a contract
+concern, and downgrades the severity (×0.7) — it does not reject it. Do not
+pre-demote such a crash to `findings/` or discard it: file the reproducer and let
+triage score it. (Only harness-only misuse and the auto-quarantine classes below
+are kept out of `crashes/`.)
 
 **Auto-quarantined by harness:** null deref (`0x0+` SEGV, "null-deref"), OOM,
 ABRT without sanitizer error, MOZ_CRASH/RustMozCrash/panic, timeout-only,

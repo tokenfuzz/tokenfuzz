@@ -277,8 +277,12 @@ Don't re-file already-rejected crash classes.
 3. The testcase does not directly mutate target-owned object internals, include private/test-only target code, free active callback state, switch allocators after target allocations exist, return impossible callback lengths, or free an owner before using a dependent object.
 4. If the crash depends on an API parameter, offset, length, index, callback return value, object lifetime, or call order, the testcase must prove that this value or sequence is exposed through the normal product boundary. Input bytes becoming a parsed application variable is not enough by itself. Do not equate "JSON contains index=6" with "the JSON library exposes caller control of iterator offset 6" unless a real public API path legitimately maps that field to that offset while obeying contracts.
 
-Do not file API-hardening / caller-misuse / harness-artifact crashes in `crashes/`.
-Keep iterating toward a legitimate input boundary or mark the hypothesis DISCARDED.
+Do not file caller-misuse or harness-artifact crashes in `crashes/` (item 3 above
+is the exact list of what those are). API-hardening crashes — an in-domain typed
+value the docs do not forbid, reproduced through a public boundary — DO belong in
+`crashes/`; they are the dominant bug class in mature C/C++ libraries, not a
+contract violation. For a borderline caller-misuse / harness-artifact case, keep
+iterating toward a legitimate input boundary or mark the hypothesis DISCARDED.
 
 Every crash report must include these exact fields:
 
@@ -336,6 +340,14 @@ component is outside the target's `attacker_controls` (declared in
 | openssl (parser) | bytes                           | race           | robustness   |
 
 `Caller contract: violated` always rejects regardless of trigger.
+
+The verdict above is a **severity** outcome triage applies, not a filing decision
+for you. A `robustness` verdict KEEPS the crash in `crashes/` (triage flags it and
+the reachability scorer deprioritizes it) — it is not moved to `findings/`. So when
+a testcase reproduces a sanitizer diagnostic through a public boundary and clears
+conditions 1–3, file it under `crashes/` regardless of trigger source. Do not
+pre-demote a `call-sequence`/`env`/`race` crash to `findings/` just because the
+target is bytes-only; triage does that math once.
 
 ## FIND Quality Bar
 

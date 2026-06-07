@@ -127,8 +127,13 @@ pattern-search library). Same field for findings/FIND-*.
 
 `Parameter control` (when value-dependent): direct / mapped /
 harness-only / none. The triage matrix demotes when `Trigger source`
-falls outside the target's `attacker_controls` (target.toml). Caller
-contract violations always reject.
+falls outside the target's `attacker_controls` (target.toml) — a
+**severity** demotion (security→robustness) that KEEPS the crash in
+`crashes/`, not a move to `findings/`. File any reproducing sanitizer
+crash that clears conditions 1–3 under `crashes/` regardless of trigger
+source and let triage score severity; do not pre-demote a
+`call-sequence`/`env`/`race` crash to `findings/` on a bytes-only target.
+Caller contract violations always reject.
 
 ## FIND quality bar
 
