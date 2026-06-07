@@ -3737,14 +3737,35 @@ target_exhausted_hard_stop_ready() {
   return 0
 }
 
+# Emit work-cards.jsonl rows with the same effective claim-status overlay
+# bin/state uses: terminal/claim rows in state/claims.jsonl win over a stale
+# work-cards.jsonl `.status`, so already-claimed or closed cards are not
+# reported as unclaimed. One JSON object per line; callers filter on .status
+# exactly as they did against the raw file. Falls back to the raw file when
+# python3/the helper is unavailable or errors, so callers never lose the queue.
+effective_work_card_rows() {
+  local cards_file="${RESULTS_DIR:-}/work-cards.jsonl"
+  [ -s "$cards_file" ] || return 0
+  if command -v python3 >/dev/null 2>&1 && [ -r "$SCRIPT_ROOT/lib/audit_helpers.py" ]; then
+    local rows
+    rows=$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" effective-work-cards \
+      "$SCRIPT_ROOT" "${TARGET_ROOT:-$SCRIPT_ROOT}" "${TARGET_SLUG:-}" "$RESULTS_DIR" 2>/dev/null || true)
+    if [ -n "$rows" ]; then
+      printf '%s\n' "$rows"
+      return 0
+    fi
+  fi
+  cat "$cards_file" 2>/dev/null || true
+}
+
 # Distinct strategies (e.g. "S1 S3 S7") of work cards still available for
-# claim. Reads results/work-cards.jsonl directly — small file, called only
-# at potential-stall time.
+# claim. Uses the same effective status overlay as bin/state so terminal
+# claim rows in state/claims.jsonl override stale work-cards.jsonl entries.
 unclaimed_card_strategies() {
   local cards_file="${RESULTS_DIR:-}/work-cards.jsonl"
   [ -s "$cards_file" ] || return 0
   if command -v jq >/dev/null 2>&1; then
-    jq -r 'select(.status == "unclaimed") | .strategy // empty' "$cards_file" 2>/dev/null \
+    effective_work_card_rows | jq -r 'select(.status == "unclaimed") | .strategy // empty' 2>/dev/null \
       | grep -E '^S[1-9]$' \
       | sort -u \
       | tr '\n' ' '
@@ -3762,13 +3783,13 @@ count_unclaimed_cards_for() {
     return 0
   fi
   if [ -n "$subsystem" ]; then
-    jq -r --arg s "$strategy" --arg sub "$subsystem" \
+    effective_work_card_rows | jq -r --arg s "$strategy" --arg sub "$subsystem" \
       'select(.status == "unclaimed" and .strategy == $s and (.subsystem // "") == $sub) | .id' \
-      "$cards_file" 2>/dev/null | awk 'NF' | wc -l | tr -d ' '
+      2>/dev/null | awk 'NF' | wc -l | tr -d ' '
   else
-    jq -r --arg s "$strategy" \
+    effective_work_card_rows | jq -r --arg s "$strategy" \
       'select(.status == "unclaimed" and .strategy == $s) | .id' \
-      "$cards_file" 2>/dev/null | awk 'NF' | wc -l | tr -d ' '
+      2>/dev/null | awk 'NF' | wc -l | tr -d ' '
   fi
 }
 
@@ -3782,13 +3803,13 @@ active_agent_strategies() {
 }
 
 # Distinct subsystems with unclaimed cards in the queue (space-separated).
-# Reads results/work-cards.jsonl. Empty when jq is unavailable or the file
-# is empty — matches the conservative behavior of unclaimed_card_strategies.
+# Empty when jq is unavailable or the work-card file is empty — matches the
+# conservative behavior of unclaimed_card_strategies.
 unclaimed_card_subsystems() {
   local cards_file="${RESULTS_DIR:-}/work-cards.jsonl"
   [ -s "$cards_file" ] || return 0
   if command -v jq >/dev/null 2>&1; then
-    jq -r 'select(.status == "unclaimed") | .subsystem // empty' "$cards_file" 2>/dev/null \
+    effective_work_card_rows | jq -r 'select(.status == "unclaimed") | .subsystem // empty' 2>/dev/null \
       | awk 'NF' \
       | sort -u \
       | tr '\n' ' '
@@ -3821,11 +3842,11 @@ unclaimed_strategies_in_untouched_subsystems() {
   # defensively anyway.
   sub_list=$(printf '%s\n' $active | awk 'NF' | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null || echo '[]')
   local cand
-  cand=$(jq -r --argjson held "$sub_list" '
+  cand=$(effective_work_card_rows | jq -r --argjson held "$sub_list" '
     select(.status == "unclaimed") |
     select(((.subsystem // "") | IN($held[])) | not) |
     .strategy // empty
-  ' "$cards_file" 2>/dev/null \
+  ' 2>/dev/null \
     | grep -E '^S[1-9]$' \
     | sort -u)
   [ -z "$cand" ] && return 0
@@ -4088,19 +4109,22 @@ log_queue_state() {
   local cards_file="${RESULTS_DIR:-}/work-cards.jsonl"
   [ -s "$cards_file" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
+  local rows
+  rows=$(effective_work_card_rows)
+  [ -n "$rows" ] || return 0
   local total unclaimed claimed blocked other by_strat by_sub active_strats active_subs top_score
-  total=$(wc -l < "$cards_file" 2>/dev/null | tr -d ' ' || echo 0)
-  unclaimed=$(jq -r 'select(.status == "unclaimed") | .id' "$cards_file" 2>/dev/null | awk 'NF' | wc -l | tr -d ' ')
-  claimed=$(jq -r 'select(.status == "claimed") | .id' "$cards_file" 2>/dev/null | awk 'NF' | wc -l | tr -d ' ')
-  blocked=$(jq -r 'select(.status == "blocked") | .id' "$cards_file" 2>/dev/null | awk 'NF' | wc -l | tr -d ' ')
+  total=$(printf '%s\n' "$rows" | awk 'NF' | wc -l | tr -d ' ')
+  unclaimed=$(printf '%s\n' "$rows" | jq -r 'select(.status == "unclaimed") | .id' 2>/dev/null | awk 'NF' | wc -l | tr -d ' ')
+  claimed=$(printf '%s\n' "$rows" | jq -r 'select(.status == "claimed") | .id' 2>/dev/null | awk 'NF' | wc -l | tr -d ' ')
+  blocked=$(printf '%s\n' "$rows" | jq -r 'select(.status == "blocked") | .id' 2>/dev/null | awk 'NF' | wc -l | tr -d ' ')
   other=$(( total - unclaimed - claimed - blocked ))
   [ "${unclaimed:-0}" -gt 0 ] || return 0
-  by_strat=$(jq -r 'select(.status == "unclaimed") | .strategy // "?"' "$cards_file" 2>/dev/null \
+  by_strat=$(printf '%s\n' "$rows" | jq -r 'select(.status == "unclaimed") | .strategy // "?"' 2>/dev/null \
     | sort | uniq -c | sort -rn | awk '{printf "%s:%s ", $2, $1}' | sed 's/ *$//')
   by_strat=$(fmt_strategy_histogram "$by_strat")
-  by_sub=$(jq -r 'select(.status == "unclaimed") | .subsystem // "?"' "$cards_file" 2>/dev/null \
+  by_sub=$(printf '%s\n' "$rows" | jq -r 'select(.status == "unclaimed") | .subsystem // "?"' 2>/dev/null \
     | sort | uniq -c | sort -rn | head -8 | awk '{printf "%s:%s ", $2, $1}' | sed 's/ *$//')
-  top_score=$(jq -r 'select(.status == "unclaimed") | .score // 0' "$cards_file" 2>/dev/null \
+  top_score=$(printf '%s\n' "$rows" | jq -r 'select(.status == "unclaimed") | .score // 0' 2>/dev/null \
     | sort -rn | head -1)
   active_strats=$(active_agent_strategies)
   active_strats=$(fmt_strategy_list "$active_strats")
@@ -4138,11 +4162,14 @@ pick_cold_start_strategy() {
     printf '%s' "S1"
     return 0
   fi
+  local rows
+  rows=$(effective_work_card_rows)
+  [ -n "$rows" ] || { printf '%s' "S1"; return 0; }
   local -a ranked=()
   local strat
   while IFS= read -r strat; do
     [ -n "$strat" ] && ranked+=("$strat")
-  done < <(jq -r 'select(.status == "unclaimed") | .strategy // empty' "$cards_file" 2>/dev/null \
+  done < <(printf '%s\n' "$rows" | jq -r 'select(.status == "unclaimed") | .strategy // empty' 2>/dev/null \
             | grep -E '^S[2-9]$' \
             | sort | uniq -c | sort -rn | awk '{print $2}')
   local count=${#ranked[@]}

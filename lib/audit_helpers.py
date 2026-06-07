@@ -34,6 +34,13 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
       Prints `total=N status:k ... claimed_ids=[id1,id2,...]` or exits 0
       silently if nothing matched.
 
+  effective-work-cards <script_root> <target_root> <target_slug> <results_dir>
+      Print every results/work-cards.jsonl row as one JSON object per line,
+      overlaying the effective claim status from state/claims.jsonl (the same
+      overlay bin/state uses) so already-claimed or terminal cards are not
+      reported as unclaimed. Exits 0 with no output on any error so the bash
+      caller can fall back to the raw file.
+
   extract-vote-json
       Read free-form LLM text from stdin and print the first
       brace-balanced JSON object containing a "vote" field set to one of
@@ -467,6 +474,55 @@ def _cmd_claims_activity(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── effective-work-cards ────────────────────────────────────────────
+
+def _cmd_effective_work_cards(args: argparse.Namespace) -> int:
+    # Lazy import: only this subcommand needs workqueue, and importing it
+    # eagerly would couple every audit_helpers invocation to that module.
+    try:
+        from workqueue import (
+            Context,
+            TERMINAL_CARD_STATUSES,
+            latest_claims_by_card,
+            read_jsonl,
+            visible_card_status,
+            work_card_claim_ttl,
+            work_cards_path,
+        )
+    except Exception:
+        return 0
+    ctx = Context(
+        Path(args.script_root),
+        Path(args.target_root),
+        args.target_slug,
+        Path(args.results_dir),
+        "",
+    )
+    try:
+        cards = read_jsonl(work_cards_path(ctx))
+        if not cards:
+            return 0
+        latest = latest_claims_by_card(ctx)
+        ttl = work_card_claim_ttl()
+    except Exception:
+        return 0
+    out: list[str] = []
+    for card in cards:
+        updated = dict(card)
+        claim = latest.get(card.get("id", ""))
+        if claim is not None:
+            status = visible_card_status(claim, ttl)
+            # Lease lifecycle rows such as "released" make a card claimable
+            # again. Terminal claim rows remain terminal.
+            if status != "claimed" and status not in TERMINAL_CARD_STATUSES:
+                status = "unclaimed"
+            updated["status"] = status
+        out.append(json.dumps(updated, sort_keys=True))
+    if out:
+        sys.stdout.write("\n".join(out) + "\n")
+    return 0
+
+
 # ── extract-vote-json ───────────────────────────────────────────────
 
 def _cmd_extract_vote_json(_args: argparse.Namespace) -> int:
@@ -616,6 +672,14 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("claims_file")
     s.add_argument("since_epoch")
     s.set_defaults(func=_cmd_claims_activity)
+
+    s = sub.add_parser("effective-work-cards",
+                       help="Print work-cards rows with claim-status overlay (one JSON object per line).")
+    s.add_argument("script_root")
+    s.add_argument("target_root")
+    s.add_argument("target_slug")
+    s.add_argument("results_dir")
+    s.set_defaults(func=_cmd_effective_work_cards)
 
     s = sub.add_parser("extract-vote-json", help="Extract first brace-balanced vote JSON object from stdin.")
     s.set_defaults(func=_cmd_extract_vote_json)

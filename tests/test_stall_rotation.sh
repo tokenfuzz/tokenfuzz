@@ -30,6 +30,7 @@ audit_extract_function() {
   ' "$SCRIPT_ROOT/bin/audit"
 }
 
+eval "$(audit_extract_function effective_work_card_rows)"
 eval "$(audit_extract_function unclaimed_card_strategies)"
 eval "$(audit_extract_function unclaimed_card_subsystems)"
 eval "$(audit_extract_function active_agent_strategies)"
@@ -139,6 +140,55 @@ subs=$(unclaimed_card_subsystems)
 subs="${subs% }"
 assert_eq "a/b a/c d/e x/y" "$subs" \
   "unclaimed_card_subsystems: skip non-unclaimed, preserve order, include all unclaimed subsystems"
+
+# ═══════════════════════════════════════════════════════════════
+# 1b. effective_work_card_rows overlays state/claims.jsonl so a card still
+#     marked "unclaimed" in work-cards.jsonl but actively claimed in
+#     claims.jsonl is no longer reported as unclaimed. Regression for agents
+#     reselecting already-claimed cards off a stale queue file.
+# ═══════════════════════════════════════════════════════════════
+if command -v python3 >/dev/null 2>&1; then
+  mkdir -p "$RESULTS_DIR/state"
+  NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  cat > "$RESULTS_DIR/state/claims.jsonl" <<JSONL
+{"card_id":"W2","status":"claimed","claimed_at":"$NOW_ISO"}
+JSONL
+
+  strats=$(unclaimed_card_strategies); strats="${strats% }"
+  assert_eq "S1 S7" "$strats" \
+    "overlay: S7 stays available via unclaimed W4 after W2 is claimed"
+  n_ac=$(count_unclaimed_cards_for S7 a/c)
+  assert_eq "0" "$n_ac" \
+    "overlay: claimed W2 no longer counts as unclaimed in a/c"
+  n_de=$(count_unclaimed_cards_for S7 d/e)
+  assert_eq "1" "$n_de" \
+    "overlay: unclaimed W4 in d/e still counts"
+  subs=$(unclaimed_card_subsystems); subs="${subs% }"
+  assert_eq "a/b d/e x/y" "$subs" \
+    "overlay: claimed W2 drops a/c from the unclaimed subsystem set"
+
+  cat >> "$RESULTS_DIR/state/claims.jsonl" <<JSONL
+{"card_id":"W2","status":"released","updated_at":"$NOW_ISO","released_at":"$NOW_ISO"}
+JSONL
+  n_ac=$(count_unclaimed_cards_for S7 a/c)
+  assert_eq "1" "$n_ac" \
+    "overlay: released W2 counts as unclaimed again"
+  subs=$(unclaimed_card_subsystems); subs="${subs% }"
+  assert_eq "a/b a/c d/e x/y" "$subs" \
+    "overlay: released W2 restores a/c to the unclaimed subsystem set"
+
+  cat >> "$RESULTS_DIR/state/claims.jsonl" <<JSONL
+{"card_id":"W2","status":"blocked","updated_at":"$NOW_ISO"}
+JSONL
+  n_ac=$(count_unclaimed_cards_for S7 a/c)
+  assert_eq "0" "$n_ac" \
+    "overlay: terminal W2 status does not count as unclaimed"
+  subs=$(unclaimed_card_subsystems); subs="${subs% }"
+  assert_eq "a/b d/e x/y" "$subs" \
+    "overlay: terminal W2 status drops a/c from the unclaimed subsystem set"
+
+  rm -f "$RESULTS_DIR/state/claims.jsonl"
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # 2. active_agent_strategies / active_agent_subsystems
