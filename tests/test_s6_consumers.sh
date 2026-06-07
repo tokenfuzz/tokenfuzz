@@ -81,14 +81,17 @@ output=$(
 rc=$?
 assert_eq 2 "$rc" "suggest-peers: exits 2 when LLM unavailable"
 
-# LLM returns invalid response (no peers)
+# LLM returns no peers → valid "S6 not applicable" answer (synthetic target /
+# harness fixture): exit 0 with an explicit empty section, so setup-target's
+# backend rotation stops here instead of falling through to another backend.
 output=$(
   SCRIPT_ROOT="$SANDBOX" \
-  LLM_DECIDE_MOCK_S6_PEER_SUGGEST='{"domain":"X","peers":[]}' \
+  LLM_DECIDE_MOCK_S6_PEER_SUGGEST='{"domain":"","peers":[],"reasoning":"synthetic fixture, no shared spec to mine"}' \
   python3 "$SCRIPT_ROOT/bin/suggest-peers" myxml 2>&1
 )
 rc=$?
-assert_eq 3 "$rc" "suggest-peers: exits 3 on empty peers"
+assert_eq 0 "$rc" "suggest-peers: exits 0 on empty peers (S6 not applicable)"
+assert_match 'peers  = \[\]' "$output" "suggest-peers: prints explicit empty peers"
 
 # Unknown slug
 output=$(

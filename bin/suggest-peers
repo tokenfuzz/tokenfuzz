@@ -8,7 +8,7 @@ Usage:
     bin/suggest-peers <slug> --apply --force-config  # alias for --force
 
 Reads target.toml + the target's README and the S6 strategy doc taxonomy,
-then asks the LLM to pick 3-6 peer OSS projects that implement the same
+then asks the LLM to pick 3-5 peer OSS projects that implement the same
 spec / format / algorithm. Prints a [s6_peers] TOML snippet that the
 operator can paste, or appends it to target.toml with --apply.
 
@@ -84,6 +84,27 @@ def build_prompt(slug: str, upstream_url: str, readme: str, taxonomy: str) -> st
         "readme": readme.strip() or "(no README found)",
         "taxonomy": taxonomy.strip()[:6000],
     })
+
+
+# Phrases that admit the listed peers are not a real same-spec/format/algorithm
+# set. Used only to catch the contradiction where the model lists peers but its
+# prose disowns them as placeholders — empty peers are honoured directly from
+# the structured field, so any phrasing of "not applicable" is fine without
+# this list. Short case-insensitive substrings, not a regex, so the contract
+# stays readable; the prompt steers the model toward these.
+_PLACEHOLDER_SIGNALS = (
+    "synthetic",
+    "harness fixture",
+    "placeholder",
+    "no meaningful",
+    "no real",
+    "not applicable",
+)
+
+
+def reasoning_disowns_peers(reasoning: str) -> bool:
+    text = (reasoning or "").lower()
+    return any(signal in text for signal in _PLACEHOLDER_SIGNALS)
 
 
 def format_toml_snippet(domain: str, peers: list[str], reasoning: str) -> str:
@@ -165,18 +186,32 @@ def main(argv: list[str]) -> int:
 
     domain = str(result.get("domain", "")).strip()
     peers = result.get("peers", [])
-    reasoning = str(result.get("reasoning", "")).strip() or "(no reasoning provided)"
-    if not isinstance(peers, list) or not peers:
+    reasoning = str(result.get("reasoning", "")).strip()
+    if not isinstance(peers, list):
         print(f"[suggest-peers] invalid LLM response (peers): {result!r}",
               file=sys.stderr)
         return 3
     peers = [p.strip() for p in peers if isinstance(p, str) and p.strip()]
     peers = [p for p in peers if p.lower() != args.slug.lower()]  # exclude self
-    if len(peers) < 3 or len(peers) > 6:
+
+    # The model is told to return [] when S6 does not apply (synthetic target,
+    # harness fixture, no shared spec). If it instead lists peers but its
+    # reasoning disowns them as placeholders, honour the reasoning so a
+    # synthetic target never gets junk peers copied from a nearby taxonomy row.
+    if peers and reasoning_disowns_peers(reasoning):
+        print("[suggest-peers] reasoning disowns the listed peers as "
+              "placeholders; writing explicit empty peers instead",
+              file=sys.stderr)
+        peers = []
+
+    if not peers:
+        # Empty peers is a valid terminal "S6 not applicable" answer. Writing an
+        # explicit empty section (exit 0) stops setup-target's backend rotation
+        # from falling through to another backend on a peerless target.
+        domain = ""
+    elif len(peers) < 3 or len(peers) > 5:
         print(f"[suggest-peers] warning: LLM suggested {len(peers)} peers "
-              f"(expected 3-6): {peers}", file=sys.stderr)
-        if not peers:
-            return 3
+              f"(expected 3-5): {peers}", file=sys.stderr)
 
     snippet = format_toml_snippet(domain, peers, reasoning)
 

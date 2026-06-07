@@ -1,6 +1,6 @@
 You are helping an audit harness pick OSS peer projects for cross-project
-variant mining (Strategy S6). Given a target, identify 3-6 peer OSS projects
-that implement the same spec / format / algorithm. Peers are independent
+variant mining (Strategy S6). Given a target, identify peer OSS projects that
+implement the same spec / format / algorithm. Peers are independent
 implementations whose prior fixes can map to unfixed analogues in the target.
 
 Target:
@@ -12,7 +12,7 @@ Target README excerpt:
 {{ readme }}
 """
 
-S6 taxonomy (use to pick the matching row, then list 3-6 peers from it,
+S6 taxonomy (use to pick the matching row, then list 3-5 peers from it,
 excluding the target itself):
 """
 {{ taxonomy }}
@@ -20,13 +20,16 @@ excluding the target itself):
 
 Output a single JSON object (no prose, no fences):
 {
-  "domain":    "<one of the taxonomy domain names, e.g. XML / SGML>",
-  "peers":     ["peer1", "peer2", ...],   /* 3-6 entries, slug or repo name */
+  "domain":    "<one of the taxonomy domain names, e.g. XML / SGML, or empty string if S6 is not applicable>",
+  "peers":     ["peer1", "peer2", ...],   /* 3-5 entries, slug or repo name; [] only when S6 is not applicable */
   "reasoning": "<one short sentence on why these peers — spec / format / algo>"
 }
 
 Constraints:
 - peers MUST NOT include the target itself
-- peers MUST be 3-6 entries
+- peers MUST be 3-5 entries when a same-spec / same-format / same-algorithm peer set exists
+- if the target is synthetic, a harness fixture, or has no meaningful same-spec /
+  same-format / same-algorithm peers, output "domain": "" and "peers": []; do
+  not invent placeholder peers from a nearby taxonomy row
 - prefer projects in the taxonomy table; if the target has no row, pick
-  peers that share the closest spec/format/algorithm with brief reasoning
+  peers only when they genuinely share a spec/format/algorithm with brief reasoning

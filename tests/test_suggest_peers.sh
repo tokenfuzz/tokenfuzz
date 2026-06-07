@@ -72,6 +72,75 @@ reparse >/dev/null 2>&1
 assert_eq 0 "$?" "--apply: written file round-trips through loader"
 
 # ═══════════════════════════════════════════════════════════════
+# 2b. "No meaningful peers" is a valid explicit empty section
+#     A synthetic target / harness fixture has no genuine S6 peers;
+#     the model signals that with domain="" + peers=[]. That must be a
+#     terminal success (exit 0, no warning), not an rc=3 that pushes
+#     setup-target's backend rotation on to Claude.
+# ═══════════════════════════════════════════════════════════════
+for reason in \
+  "demo is a synthetic harness fixture with a custom packet format, not a shared spec, format, or algorithm suitable for S6 peer mining." \
+  "demo is a synthetic local harness parsing a custom length-prefixed record, not a named spec/format/algorithm with independent peer implementations." \
+  "demo appears to be a synthetic harness fixture rather than an implementation of a shared spec, format, or algorithm." \
+  "demo appears to be a synthetic harness fixture without a shared spec, format, or algorithm peer set for S6 mining."; do
+  seed_toml
+  NO_PEER_MOCK=$(python3 -c 'import json,sys; print(json.dumps({"domain":"","peers":[],"reasoning":sys.argv[1]}))' "$reason")
+  no_peer_out=$(SCRIPT_ROOT="$SANDBOX" LLM_DECIDE_MOCK_S6_PEER_SUGGEST="$NO_PEER_MOCK" \
+    python3 "$SUG" demo --apply 2>&1)
+  assert_eq 0 "$?" "no-peer response: --apply exits 0"
+  assert_not_match "warning" "$no_peer_out" \
+    "no-peer response: explicit empty peers do not warn"
+  assert_file_contains "$SANDBOX/output/demo/target.toml" 'peers  = \[\]' \
+    "no-peer response: writes explicit empty peers"
+  reparse >/dev/null 2>&1
+  assert_eq 0 "$?" "no-peer response: written file round-trips through loader"
+done
+
+# ═══════════════════════════════════════════════════════════════
+# 2c. Contradictory placeholder peers are discarded deterministically
+#     The model named real-looking peers but its reasoning disowns them
+#     as placeholders / not-applicable: trust the reasoning, drop the
+#     peers, write an explicit empty section — never the junk names.
+# ═══════════════════════════════════════════════════════════════
+seed_toml
+PLACEHOLDER_MOCK='{"domain":"Compression — DEFLATE","peers":["zlib","libdeflate","miniz"],"reasoning":"no real spec row applies; these are placeholder peers and S6 is not applicable"}'
+placeholder_out=$(SCRIPT_ROOT="$SANDBOX" LLM_DECIDE_MOCK_S6_PEER_SUGGEST="$PLACEHOLDER_MOCK" \
+  python3 "$SUG" demo --apply 2>&1)
+assert_eq 0 "$?" "placeholder peers: --apply exits 0"
+assert_match "explicit empty peers" "$placeholder_out" \
+  "placeholder peers: emits deterministic downgrade message"
+assert_file_contains "$SANDBOX/output/demo/target.toml" 'peers  = \[\]' \
+  "placeholder peers: writes empty peers"
+assert_file_not_contains "$SANDBOX/output/demo/target.toml" 'zlib' \
+  "placeholder peers: does not write unrelated peer names"
+
+# ═══════════════════════════════════════════════════════════════
+# 2d. Empty peers is honoured from the structured field, so any phrasing
+#     of the "not applicable" reason is accepted (robust across backends).
+# ═══════════════════════════════════════════════════════════════
+seed_toml
+OFFVOCAB_MOCK='{"domain":"","peers":[],"reasoning":"This target stands alone; nothing else implements the same thing."}'
+offvocab_out=$(SCRIPT_ROOT="$SANDBOX" LLM_DECIDE_MOCK_S6_PEER_SUGGEST="$OFFVOCAB_MOCK" \
+  python3 "$SUG" demo --apply 2>&1)
+assert_eq 0 "$?" "empty peers, off-vocabulary reason: exits 0"
+assert_file_contains "$SANDBOX/output/demo/target.toml" 'peers  = \[\]' \
+  "empty peers, off-vocabulary reason: writes explicit empty peers"
+
+# ═══════════════════════════════════════════════════════════════
+# 2e. peers=[] is authoritative even if the model still named a domain:
+#     write an explicit empty section (exit 0), never half a row.
+# ═══════════════════════════════════════════════════════════════
+seed_toml
+DOMAIN_ONLY_MOCK='{"domain":"XML / SGML","peers":[],"reasoning":"no independent peers identified"}'
+domain_only_out=$(SCRIPT_ROOT="$SANDBOX" LLM_DECIDE_MOCK_S6_PEER_SUGGEST="$DOMAIN_ONLY_MOCK" \
+  python3 "$SUG" demo --apply 2>&1)
+assert_eq 0 "$?" "empty peers with a stray domain: exits 0"
+assert_file_contains "$SANDBOX/output/demo/target.toml" 'peers  = \[\]' \
+  "empty peers with a stray domain: writes explicit empty peers"
+assert_file_contains "$SANDBOX/output/demo/target.toml" 'domain = ""' \
+  "empty peers with a stray domain: domain blanked, not a half-written row"
+
+# ═══════════════════════════════════════════════════════════════
 # 3. Hostile reasoning + peer names cannot break TOML
 #    Multi-line reasoning with quote / backslash / fake [section] /
 #    a peer name carrying an embedded double-quote must all be
