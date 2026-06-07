@@ -116,6 +116,82 @@ mkdir -p "$TEST_TMPDIR/no_asan"
 crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/no_asan"
 assert_eq 1 $? "no asan file → no memory safety signal"
 
+# ───────────────────────────────────────────────────────────────
+# 1b. UBSan crash classification (ClusterFuzz security taxonomy)
+# ───────────────────────────────────────────────────────────────
+# The 5 ClusterFuzz security UBSan classes are memory-/type-safety crashes
+# (crash_dir_ubsan_class → "security"; memory-safety signal present). Every
+# other UBSan check is real UB but non-memory-safety (→ "nonsecurity"; no
+# memory-safety signal → triage demotes to findings/). Message substrings
+# mirror clang's UBSan output / ClusterFuzz UBSAN_*_REGEX.
+mk_ubsan_dir() {
+  local name="$1" line="$2"
+  local d="$TEST_TMPDIR/$name"
+  mkdir -p "$d"
+  {
+    printf '%s\n' "$line"
+    printf 'SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior x.c:1:1\n'
+  } > "$d/asan.txt"
+  printf '%s' "$d"
+}
+
+# -- the 5 security classes → "security" + memory-safety signal --
+for spec in \
+  "ubsan_vptr|x.cpp:5:3: runtime error: member call on address 0x60 which does not point to an object of type 'Base'" \
+  "ubsan_bounds|x.c:7:5: runtime error: index 4 out of bounds for type 'int[4]'" \
+  "ubsan_func|x.c:9:1: runtime error: call to function f through pointer to incorrect function type 'void (*)()'" \
+  "ubsan_objsize|x.c:3:2: runtime error: load of address 0x60 with insufficient space for an object of type 'int'" \
+  "ubsan_vla|x.c:2:9: runtime error: variable length array bound evaluates to non-positive value 0" ; do
+  name="${spec%%|*}"; line="${spec#*|}"
+  d=$(mk_ubsan_dir "$name" "$line")
+  assert_eq "security" "$(crash_dir_ubsan_class "$d")" "UBSan class: $name → security"
+  crash_dir_has_memory_safety_asan_signal "$d"
+  assert_eq 0 $? "UBSan $name → memory-safety signal kept"
+done
+
+# -- non-memory-safety classes → "nonsecurity" + NO memory-safety signal --
+for spec in \
+  "ubsan_sio|x.c:18:18: runtime error: signed integer overflow: 21475 * 100000 cannot be represented in type 'int'" \
+  "ubsan_uio|x.c:4:4: runtime error: unsigned integer overflow: 1 - 2 cannot be represented in type 'unsigned int'" \
+  "ubsan_divzero|x.c:6:6: runtime error: division by zero" \
+  "ubsan_shift|x.c:8:8: runtime error: shift exponent 33 is too large for 32-bit type 'int'" \
+  "ubsan_misalign|x.c:1:1: runtime error: load of misaligned address 0x7f for type 'int'" \
+  "ubsan_ptrovf|x.c:1:1: runtime error: applying non-zero offset 8 to null pointer" ; do
+  name="${spec%%|*}"; line="${spec#*|}"
+  d=$(mk_ubsan_dir "$name" "$line")
+  assert_eq "nonsecurity" "$(crash_dir_ubsan_class "$d")" "UBSan class: $name → nonsecurity"
+  crash_dir_has_memory_safety_asan_signal "$d"
+  assert_eq 1 $? "UBSan $name → no memory-safety signal (demote to findings/)"
+done
+
+# -- non-UBSan trace → not classified (ASan callers unaffected) --
+mkdir -p "$TEST_TMPDIR/asan_not_ubsan"
+echo "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60" > "$TEST_TMPDIR/asan_not_ubsan/asan.txt"
+crash_dir_ubsan_class "$TEST_TMPDIR/asan_not_ubsan"
+assert_eq 1 $? "non-UBSan ASan trace → crash_dir_ubsan_class returns no class"
+
+# -- combined ASan + UBSan-nonsecurity in one trace → ASan prioritised --
+# crash_dir_ubsan_class still reports "nonsecurity" (UBSan line present, not a
+# security class), but the ASan heap-buffer-overflow is the higher-priority
+# memory-safety signal, so the dir keeps its crash signal and is NOT demoted.
+mkdir -p "$TEST_TMPDIR/asan_plus_ubsan"
+cat > "$TEST_TMPDIR/asan_plus_ubsan/asan.txt" <<'EOF'
+x.c:18:18: runtime error: signed integer overflow: 21475 * 100000 cannot be represented in type 'int'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000010
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior x.c:18:18
+EOF
+assert_eq "nonsecurity" "$(crash_dir_ubsan_class "$TEST_TMPDIR/asan_plus_ubsan")" \
+  "combined ASan+UBSan: UBSan line classifies nonsecurity"
+crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/asan_plus_ubsan"
+assert_eq 0 $? "combined ASan+UBSan: ASan memory-safety signal wins (kept as crash)"
+
+# -- separate asan.txt + ubsan.txt files → primary resolver picks ASan --
+mkdir -p "$TEST_TMPDIR/asan_ubsan_split"
+echo "==2==ERROR: AddressSanitizer: heap-use-after-free on address 0x60" > "$TEST_TMPDIR/asan_ubsan_split/asan.txt"
+echo "y.c:3:3: runtime error: signed integer overflow" > "$TEST_TMPDIR/asan_ubsan_split/ubsan.txt"
+crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/asan_ubsan_split"
+assert_eq 0 $? "split asan.txt/ubsan.txt: ASan file prioritised → memory-safety signal kept"
+
 # ═══════════════════════════════════════════════════════════════
 # 2. crash_dir_has_web_reachability_evidence — various signals
 # ═══════════════════════════════════════════════════════════════

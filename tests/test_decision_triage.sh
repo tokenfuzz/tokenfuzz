@@ -167,5 +167,67 @@ reason=$(crash_dir_security_rejection_reason "$WEBLESS_DIR" 1 2>/dev/null || tru
 assert_eq "" "$reason" "LLM legitimate crash gate keeps sparse but valid crash"
 unset LLM_DECIDE_MOCK_LEGIT_CRASH
 
+# ── 6. Deterministic UBSan routing ──────────────────────────────────
+# Non-memory-safety UBSan (signed integer overflow) is demoted straight to
+# findings/ — NOT left in crashes/ and NOT sent to crashes-rejected/. This
+# runs before the LLM gates, so it is deterministic regardless of LLM state.
+UBSAN_SIO_TRACE=$(cat <<'EOF'
+/src/calc.c:18:18: runtime error: signed integer overflow: 21475 * 100000 cannot be represented in type 'int'
+    #0 0x100 in app_compute calc.c:18
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /src/calc.c:18:18
+EOF
+)
+mk_crash_dir CRASH-UBSAN-SIO "$UBSAN_SIO_TRACE" >/dev/null
+LLM_DECIDE_DISABLE=1 triage_crash_dirs >/dev/null 2>&1
+assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-UBSAN-SIO" \
+  "UBSan signed-overflow: removed from crashes/"
+sio_rejected=$(find "$RESULTS_DIR/crashes-rejected" -maxdepth 1 -name 'CRASH-UBSAN-SIO*' -type d 2>/dev/null | head -1)
+assert_eq "" "$sio_rejected" "UBSan signed-overflow: NOT sent to crashes-rejected/"
+assert_dir_exists "$RESULTS_DIR/findings/FIND-UBSAN-SIO" \
+  "UBSan signed-overflow: demoted to findings/ as an accepted finding"
+
+# An INCOMPLETE non-security UBSan dir (sanitizer trace only — no report.md,
+# no testcase) must NOT be demoted. It goes through the same completeness
+# gate as any crash and stays promotion-pending in crashes/ until the agent
+# finishes it (or TTL-rejects). This guards the invariant that a demoted
+# UBSan finding has a substantive report AND a reproducing testcase.
+INC_DIR="$RESULTS_DIR/crashes/CRASH-UBSAN-INCOMPLETE"
+mkdir -p "$INC_DIR"
+printf '%s\n' "$UBSAN_SIO_TRACE" > "$INC_DIR/sanitizer.txt"
+LLM_DECIDE_DISABLE=1 triage_crash_dirs >/dev/null 2>&1
+assert_dir_exists "$INC_DIR" "incomplete UBSan: stays in crashes/ (not demoted while incomplete)"
+assert_dir_not_exists "$RESULTS_DIR/findings/FIND-UBSAN-INCOMPLETE" \
+  "incomplete UBSan: NOT demoted to findings/ without report.md + testcase"
+assert_file_exists "$INC_DIR/.promotion_pending" \
+  "incomplete UBSan: marked promotion-pending in crashes/"
+
+# A non-security UBSan dir WITH a report but NO testcase must also stay
+# pending — a reproducing testcase is required for UBSan findings, so the
+# completeness gate keeps it in crashes/ until the testcase lands.
+NOTC_DIR="$RESULTS_DIR/crashes/CRASH-UBSAN-NOTESTCASE"
+mkdir -p "$NOTC_DIR"
+printf '%s\n' "$UBSAN_SIO_TRACE" > "$NOTC_DIR/sanitizer.txt"
+printf '# Signed overflow in app_compute\n\nReport body.\n' > "$NOTC_DIR/report.md"
+LLM_DECIDE_DISABLE=1 triage_crash_dirs >/dev/null 2>&1
+assert_dir_exists "$NOTC_DIR" "report-but-no-testcase UBSan: stays pending in crashes/"
+assert_dir_not_exists "$RESULTS_DIR/findings/FIND-UBSAN-NOTESTCASE" \
+  "report-but-no-testcase UBSan: NOT demoted to findings/ without a testcase"
+assert_file_exists "$NOTC_DIR/.promotion_pending" \
+  "report-but-no-testcase UBSan: marked promotion-pending in crashes/"
+
+# A security-class UBSan crash (vptr / Bad-cast) is NOT demoted at step 0 —
+# it stays in the crash pipeline (here: kept in crashes/ for the downstream
+# gates to judge), so it must never land in findings/ via demotion.
+UBSAN_VPTR_TRACE=$(cat <<'EOF'
+/src/poly.cpp:12:5: runtime error: member call on address 0x602000000010 which does not point to an object of type 'Shape'
+    #0 0x100 in app_dispatch poly.cpp:12
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /src/poly.cpp:12:5
+EOF
+)
+mk_crash_dir CRASH-UBSAN-VPTR "$UBSAN_VPTR_TRACE" >/dev/null
+LLM_DECIDE_DISABLE=1 triage_crash_dirs >/dev/null 2>&1
+assert_dir_not_exists "$RESULTS_DIR/findings/FIND-UBSAN-VPTR" \
+  "UBSan vptr/Bad-cast: NOT demoted to findings/ (security class stays a crash)"
+
 teardown_test_env
 summary

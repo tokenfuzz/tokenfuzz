@@ -622,12 +622,45 @@ crash_dir_has_memory_safety_asan_signal() {
   grep -qE 'WARNING: MemorySanitizer: use-of-uninitialized-value' "$asan_path" 2>/dev/null && return 0
   # Go race detector emits the same TSan banner via the runtime hook.
   grep -qE '^WARNING: DATA RACE$' "$asan_path" 2>/dev/null && return 0
-  # UBSan memory-safety-adjacent diagnostics. Not every UBSan check is a
-  # security crash by itself, but these preserve sanitizer-confirmed bounds,
-  # object-size, null, vptr, alignment, and pointer-overflow reports for the
-  # downstream caller-contract/security gate.
-  grep -qE 'UndefinedBehaviorSanitizer|^[^[:space:]].*:[0-9]+:[0-9]+: runtime error: (load of misaligned address|store to misaligned address|member access within misaligned|reference binding to misaligned|null pointer|out of bounds|index .* out of bounds|object-size|vptr|pointer overflow|pointer-overflow)' "$asan_path" 2>/dev/null && return 0
+  # UBSan: only the ClusterFuzz security classes (Bad-cast/vptr,
+  # Index-out-of-bounds, Incorrect-function-pointer-type, Object-size,
+  # Non-positive-vla-bound-value) are memory-/type-safety crashes and stay
+  # in crashes/. Every other UBSan check (arithmetic overflow, shift,
+  # divide-by-zero, misaligned, pointer-overflow, null, ...) is real
+  # undefined behaviour but not a memory-safety crash — triage_crash_dirs
+  # demotes those to findings/ rather than keeping them here. See
+  # crash_dir_ubsan_class for the per-class split.
+  [ "$(crash_dir_ubsan_class "$d")" = "security" ] && return 0
   return 1
+}
+
+# Classify a UBSan crash by ClusterFuzz's security taxonomy, mirroring
+# google/clusterfuzz stacktraces/constants.py UBSAN_CRASH_TYPES_{SECURITY,
+# NON_SECURITY}. Echoes one of:
+#   security    — a memory-/type-safety UBSan class: Bad-cast (vptr),
+#                 Index-out-of-bounds, Incorrect-function-pointer-type,
+#                 Object-size, Non-positive-vla-bound-value. Kept in crashes/.
+#   nonsecurity — any other UBSan runtime error (signed/unsigned overflow,
+#                 divide-by-zero, shift, float-cast, bool, enum, misaligned,
+#                 pointer-overflow, null, return, nonnull, ...). Real
+#                 undefined behaviour, but not a memory-safety crash; demoted
+#                 to findings/.
+# Returns 1 with no output when the trace is not a UBSan report (so ASan /
+# TSan / MSan callers are unaffected). The match substrings are the literal
+# text clang's UBSan prints (see ClusterFuzz UBSAN_*_REGEX), so the rule
+# stays stable across projects rather than enumerating per-target symbols.
+crash_dir_ubsan_class() {
+  local d="$1"
+  local asan_path
+  asan_path=$(find_primary_asan_in_crash_dir "$d" 2>/dev/null || true)
+  [ -n "$asan_path" ] && [ -s "$asan_path" ] || return 1
+  grep -qE 'runtime error:|UndefinedBehaviorSanitizer' "$asan_path" 2>/dev/null || return 1
+  if grep -qiE 'through pointer to incorrect function type|out of bounds for type|with insufficient space for an object of type|variable length array bound evaluates to non-positive value|does not point to an object of type' "$asan_path" 2>/dev/null; then
+    printf 'security\n'
+  else
+    printf 'nonsecurity\n'
+  fi
+  return 0
 }
 
 # Detect runtime crash diagnostics from interpreted / managed languages.
@@ -1676,7 +1709,38 @@ triage_crash_dirs() {
     local asan_path
     asan_path=$(find_primary_asan_in_crash_dir "$d" 2>/dev/null || true)
 
+    # ── 0. Deterministic UBSan classification ────────────────────────
+    # Non-memory-safety UBSan (signed/unsigned overflow, divide-by-zero,
+    # shift, float-cast, misaligned, pointer-overflow, null, ...) is real
+    # undefined behaviour but not a crash we keep in crashes/ — it belongs
+    # in findings/. The 5 ClusterFuzz security UBSan classes return
+    # "security" and stay in the crash pipeline. See crash_dir_ubsan_class.
+    #
+    # We only MARK it here (ubsan_demote=1); the actual move to findings/
+    # happens after the step-2 artifact-completeness gate, so a demoted
+    # finding still has report.md + a valid sanitizer trace + a testcase
+    # (an incomplete dir stays promotion-pending in crashes/ exactly like any
+    # other crash). Marking before step 1 keeps routing deterministic: the
+    # probabilistic LLM discard is skipped, so this bug is never sent to
+    # crashes-rejected/ (where a separate recon pass would re-file the same
+    # bug under findings/, double-listing it).
+    #
+    # ASan is prioritised over UBSan: a trace carrying BOTH a UBSan
+    # non-security line AND a real ASan/TSan/MSan memory-safety report (or a
+    # UBSan security class) keeps the higher-severity signal and is NOT
+    # marked. crash_dir_has_memory_safety_asan_signal greps the ASan family
+    # first and find_primary_asan_in_crash_dir resolves asan.txt ahead of
+    # ubsan.txt, so the memory-safety crash always wins.
+    local ubsan_demote=0
+    if [ "$(crash_dir_ubsan_class "$d")" = "nonsecurity" ] \
+       && ! crash_dir_has_memory_safety_asan_signal "$d"; then
+      ubsan_demote=1
+    fi
+
     # ── 1. LLM/regex DISCARD ─────────────────────────────────────────
+    # Skipped for ubsan_demote dirs: their disposition is already fixed
+    # (demote-to-findings after validation), so the probabilistic discard
+    # gate must not divert them to crashes-rejected/.
     # Three-valued LLM semantics:
     #   rc=0 (DISCARD) → LLM-named reason wins, UNLESS the sanitizer already
     #                    proved a memory-safety class — that veto wins.
@@ -1689,6 +1753,7 @@ triage_crash_dirs() {
     # and the memory-safety UBSan checks all count. Deterministic sanitizer
     # proof always beats a probabilistic discard; downstream caller-contract
     # / severity gates still decide whether it promotes.
+    if [ "$ubsan_demote" -eq 0 ]; then
     local llm_status=1 llm_discard_reason="" regex_says_discard=0 sanitizer_says_keep=0
     if [ -n "$asan_path" ]; then
       llm_discard_reason=$(llm_triage_crash_decision "$asan_path" 2>/dev/null)
@@ -1725,6 +1790,7 @@ triage_crash_dirs() {
       _triage_move_to_rejected "$d" "$id" "$discard_reason" && rejected=$((rejected + 1))
       continue
     fi
+    fi  # end: step 1 skipped when ubsan_demote=1
 
     # ── 2. Validate required files ─────────────────────────────────
     # Accept either lowercase audit-side report.md or capitalized bundle
@@ -1780,6 +1846,19 @@ triage_crash_dirs() {
       fi
       bad=$((bad + 1))
       audit_log_throttled "incomplete-${id}" "WARN: crashes/${id} incomplete (pass ${pending_count}/${max_pending}) — missing: ${missing[*]}" | tee -a "$INDEX"
+      continue
+    fi
+
+    # Non-memory-safety UBSan marked in step 0: demote to findings/ only now
+    # that the dir has passed the SAME completeness gate as every crash —
+    # report.md + valid sanitizer trace + a testcase. A reproducing testcase
+    # is required for UBSan findings (the dir reached crashes/ via one, and a
+    # UBSan report is only actionable upstream with a reproducer). Incomplete
+    # dirs never reach here — they stay promotion-pending in crashes/ above.
+    if [ "$ubsan_demote" -eq 1 ]; then
+      _triage_route_rejection "$d" "$id" \
+        "demote-to-findings: UBSan non-memory-safety class — real undefined behaviour, filed as a finding not a crash" \
+        && rejected=$((rejected + 1))
       continue
     fi
 
