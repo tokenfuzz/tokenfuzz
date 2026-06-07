@@ -41,9 +41,11 @@ assert_eq 0 $? "fixture: reverify functions extracted (${fn_lines} lines)"
 _make_target_root() { # <root> <crash|clean>
   local root="$1" behavior="$2"
   mkdir -p "$root/build-asan/src"
+  # asan_bin is relative to target_root and includes the build dir, matching the
+  # real convention (brotli: build-asan/brotli) and how bin/run-asan resolves it.
   cat > "$root/target.toml" <<TOML
 target = "reverify-stub"
-asan_bin = "src/stub"
+asan_bin = "build-asan/src/stub"
 [sanitizer]
 enabled = ["asan"]
 TOML
@@ -119,7 +121,7 @@ pool5="$TEST_TMPDIR/pool5"; tgt5="$TEST_TMPDIR/tgt5"
 mkdir -p "$tgt5"                              # target.toml present but no build-asan/stub
 cat > "$tgt5/target.toml" <<'TOML'
 target = "reverify-stub"
-asan_bin = "src/stub"
+asan_bin = "build-asan/src/stub"
 [sanitizer]
 enabled = ["asan"]
 TOML
@@ -159,6 +161,83 @@ assert_eq 1 "$rc_d" "T5c: canonical report with a stale '—' rate is re-bundled
 # bin/benchmark (same Reproduction-rate regex).
 grep -Eq 'Reproduction rate\[\[:space:\]\]\*\\\|\[\^\|\]\*\[0-9\]\+/\[0-9\]\+' "$BENCH"
 assert_eq 0 $? "T5d: bin/benchmark bundle guard uses the same measured-rate regex"
+
+# ── T6: split layout — target.toml in output/<slug>, build in target_root ──
+# The canonical bin/audit / bin/export-repro layout: config (toml) in
+# output/<slug>, build (build-asan/) in targets/<slug>. reverify must read the
+# toml from the CONFIG dir keyed by TARGET_SLUG, and resolve asan_bin (which
+# includes build-asan/) directly under target_root — no double build-asan.
+slug6="reverify-split-$$"
+cfgdir6="$SCRIPT_ROOT/output/$slug6"
+tgt6="$TEST_TMPDIR/tgt6"; pool6="$TEST_TMPDIR/pool6"
+mkdir -p "$cfgdir6" "$tgt6/build-asan/src"
+cat > "$cfgdir6/target.toml" <<'TOML'
+target = "reverify-split"
+asan_bin = "build-asan/src/stub"
+[sanitizer]
+enabled = ["asan"]
+TOML
+cat > "$tgt6/build-asan/src/stub" <<'SH'
+#!/usr/bin/env bash
+echo "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010"
+echo "SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free"
+exit 1
+SH
+chmod +x "$tgt6/build-asan/src/stub"
+_make_footerless_crash "$pool6/crashes/CRASH-0001"
+( TARGET_SLUG="$slug6"; _reverify_pool_crash_rates "$pool6" "$tgt6" test )
+assert_file_contains "$pool6/crashes/CRASH-0001/sanitizer.txt" '^CRASH_RATE: 5/5' \
+  "T6: split layout (toml in output/<slug>) resolves build under target_root and measures 5/5"
+rm -rf "$cfgdir6"
+
+# ── T7: split layout with AUDIT_BUILD_SUFFIX rewrites bare build-asan/ ──
+slug7="reverify-suffix-$$"
+cfgdir7="$SCRIPT_ROOT/output/$slug7"
+tgt7="$TEST_TMPDIR/tgt7"; pool7="$TEST_TMPDIR/pool7"
+mkdir -p "$cfgdir7" "$tgt7/build-asan-img42/src"
+cat > "$cfgdir7/target.toml" <<'TOML'
+target = "reverify-suffix"
+asan_bin = "build-asan/src/stub"
+[sanitizer]
+enabled = ["asan"]
+TOML
+cat > "$tgt7/build-asan-img42/src/stub" <<'SH'
+#!/usr/bin/env bash
+echo "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010"
+echo "SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free"
+exit 1
+SH
+chmod +x "$tgt7/build-asan-img42/src/stub"
+_make_footerless_crash "$pool7/crashes/CRASH-0001"
+( TARGET_SLUG="$slug7"; AUDIT_BUILD_SUFFIX="-img42"; _reverify_pool_crash_rates "$pool7" "$tgt7" test )
+assert_file_contains "$pool7/crashes/CRASH-0001/sanitizer.txt" '^CRASH_RATE: 5/5' \
+  "T7: AUDIT_BUILD_SUFFIX rewrites target.toml build-asan path for reverify"
+rm -rf "$cfgdir7"
+
+# ── T8: middle .. components are refused, matching target_resolve_path ──
+slug8="reverify-middle-dotdot-$$"
+cfgdir8="$SCRIPT_ROOT/output/$slug8"
+tgt8="$TEST_TMPDIR/tgt8"; pool8="$TEST_TMPDIR/pool8"
+mkdir -p "$cfgdir8" "$tgt8/build-asan/src"
+cat > "$cfgdir8/target.toml" <<'TOML'
+target = "reverify-middle-dotdot"
+asan_bin = "subdir/../build-asan/src/stub"
+[sanitizer]
+enabled = ["asan"]
+TOML
+cat > "$tgt8/build-asan/src/stub" <<'SH'
+#!/usr/bin/env bash
+echo "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010"
+echo "SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free"
+exit 1
+SH
+chmod +x "$tgt8/build-asan/src/stub"
+_make_footerless_crash "$pool8/crashes/CRASH-0001"
+before8="$(cat "$pool8/crashes/CRASH-0001/sanitizer.txt")"
+( TARGET_SLUG="$slug8"; _reverify_pool_crash_rates "$pool8" "$tgt8" test )
+assert_eq "$before8" "$(cat "$pool8/crashes/CRASH-0001/sanitizer.txt")" \
+  "T8: reverify refuses middle '..' components in asan_bin"
+rm -rf "$cfgdir8"
 
 teardown_test_env
 summary
