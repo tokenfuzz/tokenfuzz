@@ -97,13 +97,16 @@ verdict_file_has_crash() {
 }
 
 # verdict_clean_marker_re — echo the canonical "execution verified" regex.
-# CLEAN requires wrapper-issued post-run evidence: a non-zero
-# run-sanitizer-multi execution rate (the old run-asan-multi label is kept
-# for historical artifacts), or a run-<san>/probe EXECUTION VERIFIED marker
-# emitted after rc=0 / browser-marker inspection. Raw testcase stdout (e.g. a
-# bare TESTCASE_EXECUTED print) is intentionally ignored.
+# CLEAN requires wrapper-issued post-run success evidence: a non-zero
+# run-sanitizer-multi SUCCESS_RATE (the old run-asan-multi EXECUTION_RATE label
+# is kept for historical artifacts), or a run-<san>/probe EXECUTION VERIFIED
+# marker emitted after rc=0 / browser-marker inspection. EXECUTION_RATE counts
+# "reached the target" (clean + non-zero-exit + crash), so a bare EXECUTION_RATE
+# must NOT count as clean — otherwise an all-INCONCLUSIVE run would read CLEAN.
+# Raw testcase stdout (e.g. a bare TESTCASE_EXECUTED print) is intentionally
+# ignored.
 verdict_clean_marker_re() {
-  printf '%s' '^\[run-(asan|sanitizer)-multi\] EXECUTION_RATE: [1-9][0-9]*/[0-9]+$|^\[run-(asan|ubsan|msan|tsan)\] (browser|js|xpcshell|generic) EXECUTION VERIFIED \(post-run|^\[run-ubsan\] EXECUTION VERIFIED:|^\[probe\] (asan|ubsan|msan|tsan|race|runner) EXECUTION VERIFIED \(post-run'
+  printf '%s' '^\[run-sanitizer-multi\] SUCCESS_RATE: [1-9][0-9]*/[0-9]+$|^\[run-asan-multi\] EXECUTION_RATE: [1-9][0-9]*/[0-9]+$|^\[run-(asan|ubsan|msan|tsan)\] (browser|js|xpcshell|generic) EXECUTION VERIFIED \(post-run|^\[run-ubsan\] EXECUTION VERIFIED:|^\[probe\] (asan|ubsan|msan|tsan|race|runner) EXECUTION VERIFIED \(post-run'
 }
 
 # verdict_file_is_clean <file> — return 0 if <file> carries wrapper-issued

@@ -65,6 +65,7 @@ export ASAN_OUTPUT_FILE_OPTIONAL=1
 output=$(ASAN_RUNS=3 bash "$RUN_5X" browser "$TEST_TMPDIR/tc.html" 2>&1)
 assert_match "CRASH_RATE: 0/3" "$output" "clean: CRASH_RATE 0/3"
 assert_match "EXECUTION_RATE: 3/3" "$output" "clean: EXECUTION_RATE 3/3"
+assert_match "SUCCESS_RATE: 3/3" "$output" "clean: SUCCESS_RATE 3/3"
 assert_match "NO CRASHES" "$output" "clean: summary says no crashes"
 
 # ═══════════════════════════════════════════════════════════════
@@ -188,6 +189,27 @@ output=$(ASAN_RUNS=1 bash "$RUN_5X" generic "$TEST_TMPDIR/tc.html" 2>&1)
 assert_match "EXECUTION_RATE: 0/1" "$output" "raw sentinel: does not count as execution"
 assert_match "may not have executed" "$output" "raw sentinel: warning shown"
 
+# A wrapper-issued INCONCLUSIVE marker proves target reachability but is not a
+# clean execution. Because EXECUTION_RATE now counts "reached the target" (not
+# just clean runs), this all-INCONCLUSIVE case must report SUCCESS_RATE: 0 and
+# verdict EXEC_FAIL — keying CLEAN off SUCCESS_RATE is what keeps it out of the
+# clean bucket.
+cat > "$MOCK_BIN/run-asan" <<'MOCK'
+#!/bin/bash
+echo "TESTCASE_EXECUTED"
+echo "[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=7)"
+exit 7
+MOCK
+chmod +x "$MOCK_BIN/run-asan"
+
+export ASAN_OUTPUT_FILE="$TEST_TMPDIR/out3c.asan.txt"
+output=$(ASAN_RUNS=2 bash "$RUN_5X" generic "$TEST_TMPDIR/tc.html" 2>&1)
+rc=$?
+assert_eq "1" "$rc" "exec-fail: exits nonzero"
+assert_match "EXECUTION_RATE: 2/2" "$output" "exec-fail: target reach counted"
+assert_match "SUCCESS_RATE: 0/2" "$output" "exec-fail: clean success not counted"
+assert_match "EXECUTION FAILED" "$output" "exec-fail: summary says execution failed"
+
 cat > "$MOCK_BIN/run-asan" <<'MOCK'
 #!/bin/bash
 case "${MOCK_ASAN_BEHAVIOR:-clean}" in
@@ -217,6 +239,7 @@ ASAN_RUNS=1 bash "$RUN_5X" browser "$TEST_TMPDIR/tc.html" 2>&1 >/dev/null
 assert_file_contains "$TEST_TMPDIR/out4.asan.txt" "ASAN_RUN_HEADER" "output file has header"
 assert_file_contains "$TEST_TMPDIR/out4.asan.txt" "CRASH_RATE" "output file has crash rate"
 assert_file_contains "$TEST_TMPDIR/out4.asan.txt" "EXECUTION_RATE" "output file has exec rate"
+assert_file_contains "$TEST_TMPDIR/out4.asan.txt" "SUCCESS_RATE" "output file has success rate"
 
 # ═══════════════════════════════════════════════════════════════
 # 5. ASAN_OUTPUT_FILE auto-derives from testcase when unset

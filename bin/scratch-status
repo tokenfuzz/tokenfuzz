@@ -124,7 +124,7 @@ family_of() {
   printf '%s' "$stem"
 }
 
-# Verdict for a testcase: CRASH | CLEAN | NO_EXEC | ORPHAN.
+# Verdict for a testcase: CRASH | CLEAN | EXEC_FAIL | NO_EXEC | ORPHAN.
 # Read-only on disk; classification uses the shared lib/verdict.sh
 # helpers, so a testcase reads the same here as in bin/probe.
 verdict_for() {
@@ -139,6 +139,8 @@ verdict_for() {
     printf '%s' CRASH
   elif verdict_file_is_clean "$out"; then
     printf '%s' CLEAN
+  elif grep -qE 'EXECUTION_RATE: [1-9][0-9]*/[0-9]+' "$out" 2>/dev/null; then
+    printf '%s' EXEC_FAIL
   else
     printf '%s' NO_EXEC
   fi
@@ -199,7 +201,7 @@ emit_scratch() {
   #   <mtime>\t<path>\t<verdict>\t<family>
   # Downstream pipelines aggregate via awk so we don't need bash-4
   # associative arrays (macOS default bash is 3.2).
-  local n_crash=0 n_clean=0 n_noexec=0 n_orphan=0
+  local n_crash=0 n_clean=0 n_execfail=0 n_noexec=0 n_orphan=0
   local entries=""
   local fam_count=0
 
@@ -209,6 +211,7 @@ emit_scratch() {
     case "$verdict" in
       CRASH)   n_crash=$((n_crash + 1))   ;;
       CLEAN)   n_clean=$((n_clean + 1))   ;;
+      EXEC_FAIL) n_execfail=$((n_execfail + 1)) ;;
       NO_EXEC) n_noexec=$((n_noexec + 1)) ;;
       ORPHAN)  n_orphan=$((n_orphan + 1)) ;;
     esac
@@ -222,6 +225,7 @@ emit_scratch() {
   local hdr
   hdr=$(printf '[%s] %d testcases | %d CLEAN | %d CRASH' \
           "$label" "$tc_count" "$n_clean" "$n_crash")
+  [ "$n_execfail" -gt 0 ] && hdr="$hdr | $n_execfail EXEC_FAIL"
   [ "$n_noexec" -gt 0 ] && hdr="$hdr | $n_noexec NO_EXEC"
   [ "$n_orphan" -gt 0 ] && hdr="$hdr | ** $n_orphan ORPHAN **"
   [ "$harness_count" -gt 0 ] && hdr="$hdr | $harness_count harness sources"

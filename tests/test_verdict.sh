@@ -55,9 +55,18 @@ unset TARGET_RUNNER_CRASH_PATTERNS
 f=$(mk clean1.txt "[run-asan-multi] EXECUTION_RATE: 5/5")
 verdict_file_is_clean "$f" && pass "clean: run-asan-multi execution rate" \
   || fail "clean: run-asan-multi execution rate"
+f=$(mk success.txt "[run-sanitizer-multi] SUCCESS_RATE: 5/5")
+verdict_file_is_clean "$f" && pass "clean: run-sanitizer-multi success rate" \
+  || fail "clean: run-sanitizer-multi success rate"
+f=$(mk reached.txt "[run-sanitizer-multi] EXECUTION_RATE: 5/5")
+verdict_file_is_clean "$f" && fail "clean: run-sanitizer-multi execution rate alone is not CLEAN" \
+  || pass "clean: run-sanitizer-multi execution rate alone is not CLEAN"
 f=$(mk clean2.txt "[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)")
 verdict_file_is_clean "$f" && pass "clean: run-asan post-run marker" \
   || fail "clean: run-asan post-run marker"
+f=$(mk inconclusive.txt "[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=7)")
+verdict_file_is_clean "$f" && fail "clean: inconclusive marker must not count" \
+  || pass "clean: inconclusive marker must not count"
 f=$(mk raw.txt "TESTCASE_EXECUTED")
 verdict_file_is_clean "$f" && fail "clean: raw TESTCASE_EXECUTED must not count" \
   || pass "clean: ignores raw testcase stdout"

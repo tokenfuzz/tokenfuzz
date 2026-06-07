@@ -334,8 +334,8 @@ cat > "$scratch/tc-novel.html" <<'EOF'
 <html></html>
 EOF
 cat > "$scratch/tc-novel.asan.txt" <<'EOF'
-[run-asan] EXECUTION VERIFIED
-EXECUTION_RATE: 5/5
+[run-sanitizer-multi] SUCCESS_RATE: 5/5
+[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)
 ASAN_RUN_HEADER: ok
 EOF
 cat > "$scratch/tc-stale.html" <<'EOF'
@@ -345,8 +345,8 @@ cat > "$scratch/tc-stale.html" <<'EOF'
 <html></html>
 EOF
 cat > "$scratch/tc-stale.asan.txt" <<'EOF'
-[run-asan] EXECUTION VERIFIED
-EXECUTION_RATE: 5/5
+[run-sanitizer-multi] SUCCESS_RATE: 5/5
+[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)
 ASAN_RUN_HEADER: ok
 EOF
 cat > "$hits_log" <<EOF

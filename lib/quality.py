@@ -109,6 +109,17 @@ _ASAN_VERIFIED_RE = re.compile(
     r"\[run-asan\] (?:browser|js|js-diff|xpcshell|generic)? ?EXECUTION VERIFIED|"
     r"ERROR: AddressSanitizer)"
 )
+# Clean-success evidence for corpus promotion. Mirrors lib/verdict.sh:
+# SUCCESS_RATE means rc=0 execution; the run-asan-multi EXECUTION_RATE label is
+# kept only for historical artifacts. A bare run-sanitizer-multi EXECUTION_RATE
+# now only proves the target was reached, so it no longer counts as clean.
+_CLEAN_EVIDENCE_RE = re.compile(
+    r"(\[run-sanitizer-multi\] SUCCESS_RATE: [1-9][0-9]*/[0-9]+|"
+    r"\[run-asan-multi\] EXECUTION_RATE: [1-9][0-9]*/[0-9]+|"
+    r"\[run-(?:asan|ubsan|msan|tsan)\] (?:browser|js|xpcshell|generic) EXECUTION VERIFIED \(post-run|"
+    r"\[run-ubsan\] EXECUTION VERIFIED:|"
+    r"ERROR: AddressSanitizer)"
+)
 _COVERAGE_MISSED_RE = re.compile(r"COVERAGE_GATE: MISSED")
 _HIT_LINE_RE = re.compile(r"^HIT:")
 _HID_RE = re.compile(r"HYPOTHESIS-ID:\s*(H[0-9]+)")
@@ -415,10 +426,7 @@ def _cmd_promote_corpus(args) -> int:
                 skipped_no_asan += 1
                 continue
 
-            if not re.search(
-                r"EXECUTION_RATE: [1-9]|"
-                r"\[run-asan\] (?:browser|js|js-diff|xpcshell|generic)? ?EXECUTION VERIFIED|"
-                r"ERROR: AddressSanitizer", asan_text):
+            if not _CLEAN_EVIDENCE_RE.search(asan_text):
                 skipped_no_asan += 1
                 continue
 

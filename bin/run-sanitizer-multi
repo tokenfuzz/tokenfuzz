@@ -11,6 +11,7 @@
 #   <ASAN_RUN_HEADER|SANITIZER_RUN_HEADER>: sanitizer=<name> runs=N ...
 #   CRASH_RATE: <crashes>/<RUNS>
 #   [run-sanitizer-multi] EXECUTION_RATE: <executions>/<RUNS>
+#   [run-sanitizer-multi] SUCCESS_RATE: <clean rc=0 executions>/<RUNS>
 #
 # All output is also appended to $SAN_OUTPUT_FILE (legacy alias
 # $ASAN_OUTPUT_FILE) if set, for callers piping to their scratch dir.
@@ -223,6 +224,7 @@ fi
 
 crashes=0
 executions=0
+successes=0
 diff_divergences=0
 
 # Tee to output file if requested
@@ -407,6 +409,8 @@ for i in $(seq 1 "$RUNS"); do
   # language-runtime fatals identically). Fall back to the legacy ASan grep
   # only when verdict.sh wasn't sourceable (isolated mock-bin test).
   this_crashed=0
+  this_executed=0
+  this_success=0
   if [ "$_verdict_loaded" -eq 1 ]; then
     if verdict_file_has_crash "$run_tmp"; then
       crashes=$((crashes + 1))
@@ -417,12 +421,25 @@ for i in $(seq 1 "$RUNS"); do
     this_crashed=1
   fi
   # Check for wrapper-issued post-run execution evidence (any sanitizer's
-  # single-shot runner). Do not trust raw TESTCASE_EXECUTED from testcase
-  # stdout; it can be printed before an early non-sanitizer failure and
-  # would poison CLEAN accounting.
+  # single-shot runner). VERIFIED means the child runner completed cleanly
+  # (rc=0); INCONCLUSIVE means the target still ran but returned non-zero. Do
+  # not trust raw TESTCASE_EXECUTED from testcase stdout; it can be printed
+  # before an early non-sanitizer failure and would poison CLEAN accounting.
   if grep -Eq '^\[run-(asan|ubsan|msan|tsan)\] (browser|js|xpcshell|generic) EXECUTION VERIFIED \(post-run' "$run_tmp" \
      || grep -Eq '^\[run-ubsan\] EXECUTION VERIFIED:' "$run_tmp"; then
     executions=$((executions + 1))
+    successes=$((successes + 1))
+    this_executed=1
+    this_success=1
+  elif grep -Eq '^\[run-(asan|ubsan|msan|tsan)\] (browser|js|xpcshell|generic) EXECUTION INCONCLUSIVE \(post-run' "$run_tmp"; then
+    executions=$((executions + 1))
+    this_executed=1
+  fi
+  # A recognized runtime/sanitizer diagnostic proves the target reached the
+  # relevant runner even if it aborts before a post-run marker is printed.
+  if [ "$this_crashed" -eq 1 ] && [ "$this_executed" -eq 0 ]; then
+    executions=$((executions + 1))
+    this_executed=1
   fi
 
   # Compute address-stable crash signature so reruns can be summarized
@@ -457,6 +474,8 @@ for i in $(seq 1 "$RUNS"); do
     _run1_sig="$this_sig"
     _run1_sig_ok="$this_sig_ok"
     _run1_crashed="$this_crashed"
+    _run1_executed="$this_executed"
+    _run1_success="$this_success"
     _seen_run1=1
   elif [ "$_can_dedupe" -eq 0 ] || [ -n "${SANITIZER_NO_DIGEST:-${ASAN_NO_DIGEST:-}}" ]; then
     # Dedup unavailable or user opted out — emit unconditionally.
@@ -464,14 +483,21 @@ for i in $(seq 1 "$RUNS"); do
   elif [ "$this_sig_ok" -eq 0 ] || [ "$_run1_sig_ok" -eq 0 ]; then
     # Either run had a parsing failure — fail closed with full digest.
     _digest_asan "$run_tmp"
-  elif [ "$this_crashed" = "$_run1_crashed" ] && [ "$this_sig" = "$_run1_sig" ]; then
+  elif [ "$this_crashed" = "$_run1_crashed" ] \
+       && [ "$this_executed" = "$_run1_executed" ] \
+       && [ "$this_success" = "$_run1_success" ] \
+       && [ "$this_sig" = "$_run1_sig" ]; then
     # Matches run 1 — short summary instead of dumping the full stack again.
     if [ "$this_crashed" = "1" ]; then
       # Show the first stable frame so the agent can eyeball the match.
       _first_frame=$(printf '%s\n' "$_run1_sig" | head -n 1)
       _out "[run-sanitizer-multi] Run ${i}/${RUNS}: VERIFIED — same crash signature as run 1 (${_first_frame})"
-    else
+    elif [ "$this_success" = "1" ]; then
       _out "[run-sanitizer-multi] Run ${i}/${RUNS}: VERIFIED — clean (matches run 1)"
+    elif [ "$this_executed" = "1" ]; then
+      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: REPEATED — execution failed (matches run 1)"
+    else
+      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: REPEATED — no execution evidence (matches run 1)"
     fi
   else
     # Divergent — full digest. The divergence itself is information
@@ -480,6 +506,10 @@ for i in $(seq 1 "$RUNS"); do
       _out "[run-sanitizer-multi] Run ${i}/${RUNS}: DIVERGED — crashed where run 1 was clean"
     elif [ "$this_crashed" = "0" ] && [ "$_run1_crashed" = "1" ]; then
       _out "[run-sanitizer-multi] Run ${i}/${RUNS}: DIVERGED — clean where run 1 crashed"
+    elif [ "$this_success" != "$_run1_success" ]; then
+      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: DIVERGED — clean-exit status differs from run 1"
+    elif [ "$this_executed" != "$_run1_executed" ]; then
+      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: DIVERGED — execution evidence differs from run 1"
     else
       _out "[run-sanitizer-multi] Run ${i}/${RUNS}: DIVERGED — different crash signature than run 1"
     fi
@@ -493,6 +523,7 @@ done
 _out "=== SUMMARY ==="
 _out "CRASH_RATE: ${crashes}/${RUNS}"
 _out "[run-sanitizer-multi] EXECUTION_RATE: ${executions}/${RUNS}"
+_out "[run-sanitizer-multi] SUCCESS_RATE: ${successes}/${RUNS}"
 
 # ── Auto-differential testing (Strategy S4 baked in) ──────────────
 # For js and xpcshell modes, automatically run a differential check
@@ -541,6 +572,7 @@ if [ -n "${TRIED_INPUTS_LOG:-}" ]; then
   [ "$crashes" -gt 0 ] && verdict="CRASH"
   [ "$crashes" -eq 0 ] && [ "$diff_divergences" -gt 0 ] && verdict="DIFF"
   [ "$crashes" -eq 0 ] && [ "$executions" -eq 0 ] && verdict="NO_EXEC"
+  [ "$crashes" -eq 0 ] && [ "$diff_divergences" -eq 0 ] && [ "$executions" -gt 0 ] && [ "$successes" -eq 0 ] && verdict="EXEC_FAIL"
   # Hash the testcase bytes so the agent can tell a literal rerun apart
   # from a textual variant even if the path is the same.
   tc_hash="?"
@@ -566,6 +598,9 @@ elif [ "$diff_divergences" -gt 0 ]; then
 elif [ "$executions" -eq 0 ]; then
   _out "[run-sanitizer-multi] WARNING: testcase may not have executed in any run"
   exit 2
+elif [ "$successes" -eq 0 ]; then
+  _out "[run-sanitizer-multi] EXECUTION FAILED in ${RUNS} runs (${executions} reached target, 0 completed cleanly)"
+  exit 1
 else
-  _out "[run-sanitizer-multi] NO CRASHES in ${RUNS} runs (${executions} executed successfully)"
+  _out "[run-sanitizer-multi] NO CRASHES in ${RUNS} runs (${successes} completed cleanly, ${executions} reached target)"
 fi

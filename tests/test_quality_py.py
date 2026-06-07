@@ -146,7 +146,10 @@ with tempfile.TemporaryDirectory() as td:
         "<!-- CATEGORY: bounds -->\n"
         "<html></html>"
     )
-    (scratch / "tc-1.asan.txt").write_text("EXECUTION_RATE: 5\n[run-asan] generic EXECUTION VERIFIED\n")
+    (scratch / "tc-1.asan.txt").write_text(
+        "[run-sanitizer-multi] SUCCESS_RATE: 1/1\n"
+        "[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)\n"
+    )
 
     crashing = scratch / "tc-2.html"
     crashing.write_text(
@@ -162,7 +165,7 @@ with tempfile.TemporaryDirectory() as td:
         "<!-- TARGET: src/other.cpp -->\n"
         "<html></html>"
     )
-    (scratch / "tc-3.asan.txt").write_text("EXECUTION_RATE: 5\n")
+    (scratch / "tc-3.asan.txt").write_text("[run-sanitizer-multi] SUCCESS_RATE: 1/1\n")
 
     hits_log = scratch / "hits.log"
     hits_log.write_text(
@@ -245,7 +248,8 @@ with tempfile.TemporaryDirectory() as td:
             f"<html></html>"
         )
         (scratch / f"tc-{i:02d}.asan.txt").write_text(
-            "EXECUTION_RATE: 5\n[run-asan] generic EXECUTION VERIFIED\n"
+            "[run-sanitizer-multi] SUCCESS_RATE: 1/1\n"
+            "[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)\n"
         )
         hits_lines.append(
             f"HIT: 2026-05-19T01:02:{i:02d}Z testcase={tc} "

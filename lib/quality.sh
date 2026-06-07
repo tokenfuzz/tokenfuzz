@@ -227,8 +227,10 @@ enforce_asan_for_orphans() {
         local crash_class
         crash_class=$(grep -oE 'AddressSanitizer: [a-z-]+' "${base}.asan.txt" 2>/dev/null | head -1 | sed 's/AddressSanitizer: //')
         result_line="- **CRASH** \`${stem}\` → ${crash_class:-unknown class}"
-      elif grep -qE 'EXECUTION_RATE: [1-9]' "${base}.asan.txt" 2>/dev/null; then
+      elif verdict_file_is_clean "${base}.asan.txt"; then
         result_line="- CLEAN \`${stem}\` — executed without sanitizer diagnostic"
+      elif grep -qE 'EXECUTION_RATE: [1-9]' "${base}.asan.txt" 2>/dev/null; then
+        result_line="- EXEC_FAIL \`${stem}\` — testcase reached the runner but exited non-zero"
       else
         result_line="- NO_EXEC \`${stem}\` — testcase did not execute"
       fi
