@@ -424,6 +424,27 @@ _probe_resolve_executable() {
   fi
 }
 
+_probe_selected_sanitizer_bin_raw() {
+  case "${1:-}" in
+    asan)  printf '%s\n' "${TARGET_ASAN_BIN:-}" ;;
+    ubsan) printf '%s\n' "${TARGET_UBSAN_BIN:-}" ;;
+    msan)  printf '%s\n' "${TARGET_MSAN_BIN:-}" ;;
+    tsan)  printf '%s\n' "${TARGET_TSAN_BIN:-}" ;;
+    *)     printf '\n' ;;
+  esac
+}
+
+_probe_selected_can_use_runner() {
+  [ -n "${TARGET_RUNNER_BIN:-}" ] || return 1
+  case "${1:-}" in
+    runner|race) return 0 ;;
+    asan|ubsan|msan|tsan)
+      [ -z "$(_probe_selected_sanitizer_bin_raw "$1")" ] && return 0
+      ;;
+  esac
+  return 1
+}
+
 PROBE_SANITIZER_SELECTED="${PROBE_SANITIZER:-}"
 if [ -n "$PROBE_SANITIZER_SELECTED" ]; then
   PROBE_SANITIZER_SELECTED="$(printf '%s' "$PROBE_SANITIZER_SELECTED" | tr '[:upper:]' '[:lower:]')"
@@ -863,9 +884,7 @@ fi
 if [ "$MODE" = "generic" ] \
    && [ -z "$HARNESS_LINE" ] \
    && [ -z "$GENERIC_BIN_OVERRIDE" ] \
-   && { [ "$PROBE_SANITIZER_SELECTED" = "asan" ] \
-        || [ "$PROBE_SANITIZER_SELECTED" = "runner" ] \
-        || [ "$PROBE_SANITIZER_SELECTED" = "race" ]; }; then
+   && _probe_selected_can_use_runner "$PROBE_SANITIZER_SELECTED"; then
   case "$EXEC_TESTCASE" in
     *.ts|*.tsx)
       _runner_base="$(basename "${TARGET_RUNNER_BIN:-}")"
@@ -893,6 +912,7 @@ fi
 # Generic mode binary: select exactly one sanitizer/runtime for this probe
 # invocation. Default is the first configured sanitizer in target.toml; set
 # PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner to override explicitly.
+probe_generic_uses_runner=0
 if [ "$MODE" = "generic" ]; then
   case "$PROBE_SANITIZER_SELECTED" in
     asan)
@@ -902,6 +922,7 @@ if [ "$MODE" = "generic" ]; then
         export ASAN_GENERIC_BIN="$(target_resolve_path "$TARGET_ASAN_BIN")"
       elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
         export ASAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
+        probe_generic_uses_runner=1
       fi
       ;;
     ubsan)
@@ -909,6 +930,9 @@ if [ "$MODE" = "generic" ]; then
         export UBSAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
       elif [ -n "${TARGET_UBSAN_BIN:-}" ]; then
         export UBSAN_GENERIC_BIN="$(target_resolve_path "$TARGET_UBSAN_BIN")"
+      elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
+        export UBSAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
+        probe_generic_uses_runner=1
       fi
       ;;
     msan)
@@ -916,6 +940,9 @@ if [ "$MODE" = "generic" ]; then
         export MSAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
       elif [ -n "${TARGET_MSAN_BIN:-}" ]; then
         export MSAN_GENERIC_BIN="$(target_resolve_path "$TARGET_MSAN_BIN")"
+      elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
+        export MSAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
+        probe_generic_uses_runner=1
       fi
       ;;
     tsan)
@@ -923,6 +950,9 @@ if [ "$MODE" = "generic" ]; then
         export TSAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
       elif [ -n "${TARGET_TSAN_BIN:-}" ]; then
         export TSAN_GENERIC_BIN="$(target_resolve_path "$TARGET_TSAN_BIN")"
+      elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
+        export TSAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
+        probe_generic_uses_runner=1
       fi
       ;;
     runner|race)
@@ -930,6 +960,7 @@ if [ "$MODE" = "generic" ]; then
         export ASAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
       elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
         export ASAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
+        probe_generic_uses_runner=1
       fi
       # run-asan generic is also the historical generic runner wrapper.
       # Suppress sanitizer option env for runner/race mode so a Go -race or
@@ -957,29 +988,29 @@ fi
 #       Pre-args already include the testcase path after substitution.
 #       Sentinel "" passed as testcase so run-sanitizer-multi's coverage gate +
 #       budget accounting still see the file (via TARGET= header read).
-#       ASAN_GENERIC_SKIP_TESTCASE=1 tells the runner NOT to insert
-#       <testcase> again — bin runs `<runner_bin> <expanded args> <trailing>`.
+#       *_GENERIC_SKIP_TESTCASE=1 tells the runner NOT to insert <testcase>
+#       again — bin runs `<runner_bin> <expanded args> <trailing>`.
 declare -a cmd
 declare -a generic_pre_args=()
 generic_skip_testcase=0
 if [ "$MODE" = "generic" ]; then
+  if [ "$probe_generic_uses_runner" -eq 1 ]; then
+    target_runner_tokens_supported "$PROBE_SANITIZER_SELECTED" || exit 2
+  fi
   if [ -z "$HARNESS_LINE" ] \
      && [ "${#GENERIC_PREARGS[@]}" -eq 0 ] \
-     && [ -n "${TARGET_RUNNER_BIN:-}" ] \
-     && [ "${#TARGET_RUNNER_ARGS[@]}" -gt 0 ] \
-     && { [ "$PROBE_SANITIZER_SELECTED" = "asan" ] \
-          || [ "$PROBE_SANITIZER_SELECTED" = "runner" ] \
-          || [ "$PROBE_SANITIZER_SELECTED" = "race" ]; }; then
+     && [ "$probe_generic_uses_runner" -eq 1 ] \
+     && [ "${#TARGET_RUNNER_ARGS[@]}" -gt 0 ]; then
     while IFS= read -r _ra; do
       generic_pre_args+=("$_ra")
-    done < <(target_runner_args_for_testcase "$EXEC_TESTCASE")
-    # If any expanded arg matches the testcase path, the template already
-    # placed it explicitly via {TESTCASE} — don't let run-asan generic
-    # prepend it again. Otherwise the runner template did NOT reference
-    # {TESTCASE}, so the testcase should still go in the canonical
+    done < <(target_runner_args_for_testcase "$EXEC_TESTCASE" "$PROBE_SANITIZER_SELECTED")
+    # If any template arg references {TESTCASE}, the runner has placed the
+    # testcase explicitly (possibly embedded, e.g. --input={TESTCASE}) — don't
+    # let run-asan generic prepend it again. Otherwise the runner template did
+    # NOT reference {TESTCASE}, so the testcase should still go in the canonical
     # position (<bin> <pre-args> <testcase> <trailing>).
-    for _ra in "${generic_pre_args[@]}"; do
-      [ "$_ra" = "$EXEC_TESTCASE" ] && { generic_skip_testcase=1; break; }
+    for _ra in "${TARGET_RUNNER_ARGS[@]}"; do
+      [[ "$_ra" == *"{TESTCASE}"* ]] && { generic_skip_testcase=1; break; }
     done
     if [ "$generic_skip_testcase" -eq 0 ]; then
       generic_pre_args+=("$EXEC_TESTCASE")
@@ -994,6 +1025,7 @@ if [ "$MODE" = "generic" ]; then
   fi
 fi
 export ASAN_GENERIC_SKIP_TESTCASE="$generic_skip_testcase"
+export SANITIZER_GENERIC_SKIP_TESTCASE="$generic_skip_testcase"
 
 case "$MODE" in
   js-diff)

@@ -1,8 +1,9 @@
-"""ASan stack-frame parsing and interesting-frame selection.
+"""Sanitizer stack-frame parsing and interesting-frame selection.
 
-This module owns the harness-specific work: parsing ASan ``#N 0x.. in func
-loc`` lines into frames, walking the crash stack, and selecting the top
-interesting frames for the crash signature.
+This module owns the harness-specific work: parsing sanitizer frame formats
+(ASan ``#N 0x.. in func loc`` lines and Go race-detector ``func()`` / ``loc``
+pairs) into frames, walking the crash stack, and selecting the top interesting
+frames for the crash signature.
 
 The ClusterFuzz-derived pieces — the ignore-regex list, the
 ``filter_function_name`` normalizer, ``MAX_CRASH_STATE_FRAMES``, and the
@@ -33,6 +34,17 @@ _ASAN_FRAME_RE = re.compile(r"^\s*#(?P<index>\d+):?\s+(?:0x[0-9a-fA-F]+|[xX][0-9
 _LOC_RE = re.compile(r"(?P<loc>\S+:\d+(?::\d+)?)$")
 _PATH_RE = re.compile(r"(?P<loc>\S+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|m|mm|rs|go|java|js|ts))$")
 _MODULE_RE = re.compile(r"(?P<func>.*?)\s+(?P<loc>\([^)]*(?:\+0x[0-9a-fA-F]+)?\))$")
+# A conflicting-access header opens each of the race's two accesses, e.g.
+# "Write at 0x.. by goroutine 7:" / "Previous read at 0x.. by main goroutine:".
+# We anchor at column 0 (headers are unindented; frames are indented) and stop
+# at "by " so the goroutine/thread label can vary. The goroutine-*creation*
+# stacks ("Goroutine 7 (running) created at:") are deliberately NOT matched —
+# their ordering follows the scheduler and would destabilize the signature.
+_GO_RACE_ACCESS_RE = re.compile(
+    r"^(?:Atomic\s+)?(?:Previous\s+)?(?:Write|Read)\s+at\s+0x[0-9a-fA-F]+\s+by\s", re.IGNORECASE
+)
+_GO_RACE_FUNC_RE = re.compile(r"^\s+(?P<func>\S.*?)\(\)\s*$")
+_GO_RACE_LOC_RE = re.compile(r"^\s+(?P<loc>\S+\.go:\d+)(?:\s+\+0x[0-9a-fA-F]+)?\s*$")
 STATE_STOP_MARKERS = (
     "Direct leak of",
     "Uninitialized value was stored to memory at",
@@ -120,7 +132,59 @@ def is_ignored_frame(frame: StackFrame) -> bool:
     # location substring, so the genuine path-based rules (`.*/libc\+\+/`,
     # `.*/googletest/`, …) still fire through `raw`; and `raw` always starts
     # with `#<n> 0x…`, so the function-name `^` rules can never false-match it.
-    return _cf.matches_ignore_regexes(frame.function, frame.raw)
+    function = frame.function
+    if frame.raw.startswith("go-race ") and function.startswith("main."):
+        # In Go, `main.` is the application package prefix, not the C/C++
+        # process entrypoint that ClusterFuzz's `^main` rule targets. Strip it
+        # so a genuine `main.<func>` race frame is not dropped as boilerplate.
+        function = function.removeprefix("main.")
+    return _cf.matches_ignore_regexes(function, frame.raw)
+
+
+def iter_go_race_frames(text: str) -> list[StackFrame]:
+    """Parse Go race-detector ``WARNING: DATA RACE`` reports into frames.
+
+    Go prints each access as an indented ``pkg.func()`` line followed by an
+    indented ``file.go:line +0x..`` line, with no ``#N 0x..`` prefix, so the
+    ASan parser does not see them. We pair the two lines into a StackFrame
+    keyed the same way as sanitizer frames.
+    """
+    if "WARNING: DATA RACE" not in text:
+        return []
+
+    frames: list[StackFrame] = []
+    lines = text.splitlines()
+    want_site = False
+    for pos, line in enumerate(lines):
+        if _GO_RACE_ACCESS_RE.match(line):
+            # The first func()/loc pair after a header is the racing site; the
+            # deeper call-chain frames below it are skipped until the next
+            # access header so only the two racing sites form the signature.
+            want_site = True
+            continue
+        if not want_site or pos + 1 >= len(lines):
+            continue
+        func_match = _GO_RACE_FUNC_RE.match(line)
+        loc_match = _GO_RACE_LOC_RE.match(lines[pos + 1])
+        if not func_match or not loc_match:
+            continue
+        loc = loc_match.group("loc")
+        frames.append(
+            StackFrame(
+                index=len(frames),
+                function=func_match.group("func") + "()",
+                location=loc,
+                raw=f"go-race {line.strip()} {loc}",
+            )
+        )
+        want_site = False
+    if len(frames) >= 2:
+        # The race detector reports the conflicting access pair as read/write
+        # or write/read depending on scheduler timing. Canonicalize the top
+        # pair so confirm reruns don't look like different crashes.
+        head = sorted(frames[:2], key=lambda frame: frame.display)
+        frames = [dataclasses.replace(f, index=i) for i, f in enumerate(head + frames[2:])]
+    return frames
 
 
 def iter_asan_frames(text: str) -> list[StackFrame]:
@@ -143,7 +207,7 @@ def iter_asan_frames(text: str) -> list[StackFrame]:
             break
         if frame is not None:
             frames.append(frame)
-    return frames if frames else fallback_frames
+    return frames or fallback_frames or iter_go_race_frames(text)
 
 
 def interesting_frames(text: str, want: int = 5) -> list[StackFrame]:

@@ -61,10 +61,16 @@ assert_not_match '\{TESTCASE\}' "$expanded" "{TESTCASE} token replaced"
 _old_target_root="$TARGET_ROOT"
 _old_results_dir="$RESULTS_DIR"
 _old_target_slug="$TARGET_SLUG"
+_old_runner_args=("${TARGET_RUNNER_ARGS[@]}")
 _old_runner_env=("${TARGET_RUNNER_ENV[@]}")
 TARGET_ROOT="/tmp/target-root"
 RESULTS_DIR="/tmp/results-root"
 TARGET_SLUG="runner-target"
+TARGET_RUNNER_ARGS=("run" "--manifest-path" "{TARGET_ROOT}/Cargo.toml" "--" "{TESTCASE}" "--out={RESULTS_DIR}/{TARGET_SLUG}")
+expanded_args="$(target_runner_args_for_testcase /tmp/x.rs)"
+assert_match '/tmp/target-root/Cargo\.toml' "$expanded_args" "target_runner_args_for_testcase substitutes TARGET_ROOT"
+assert_match '/tmp/results-root/runner-target' "$expanded_args" "target_runner_args_for_testcase substitutes RESULTS_DIR and TARGET_SLUG"
+assert_match '/tmp/x\.rs' "$expanded_args" "target_runner_args_for_testcase still substitutes TESTCASE alongside path tokens"
 TARGET_RUNNER_ENV=("PYTHONPATH={TARGET_ROOT}:{TARGET_ROOT}/src:{TARGET_ROOT}/lib" "OUT={RESULTS_DIR}/{TARGET_SLUG}")
 expanded_env="$(target_runner_env_expanded)"
 assert_match 'PYTHONPATH=/tmp/target-root:/tmp/target-root/src:/tmp/target-root/lib' "$expanded_env" "target_runner_env_expanded substitutes TARGET_ROOT"
@@ -72,8 +78,9 @@ assert_match 'OUT=/tmp/results-root/runner-target' "$expanded_env" "target_runne
 TARGET_ROOT="$_old_target_root"
 RESULTS_DIR="$_old_results_dir"
 TARGET_SLUG="$_old_target_slug"
+TARGET_RUNNER_ARGS=("${_old_runner_args[@]}")
 TARGET_RUNNER_ENV=("${_old_runner_env[@]}")
-unset _old_target_root _old_results_dir _old_target_slug _old_runner_env
+unset _old_target_root _old_results_dir _old_target_slug _old_runner_args _old_runner_env
 
 # ───────────────────────────────────────────────────────────────────
 # 2. Malformed [runner].env entries are silently dropped
@@ -312,6 +319,50 @@ EOF
     "probe sanitizer routing: ${san} output records selected sanitizer"
 done
 
+cat > "$TARGET_ROOT/swift-token-runner" <<'SH'
+#!/usr/bin/env bash
+echo "ARGV=$*"
+echo "SWIFT_SAN=${SWIFT_SAN:-}"
+echo "ACTIVE_SAN=${ACTIVE_SAN:-}"
+echo "TESTCASE_EXECUTED"
+SH
+chmod +x "$TARGET_ROOT/swift-token-runner"
+for san_pair in "asan address" "ubsan undefined" "tsan thread"; do
+  san="${san_pair%% *}"
+  swift_san="${san_pair#* }"
+  cat > "$slug_dir/target.toml" <<EOF
+target = "multilang"
+build_system = "swift"
+[sanitizer]
+enabled = ["$san"]
+[runner]
+bin = "$TARGET_ROOT/swift-token-runner"
+args = ["-sanitize={SWIFT_SANITIZER}", "{SANITIZER}", "{TESTCASE}"]
+env = ["SWIFT_SAN={SWIFT_SANITIZER}", "ACTIVE_SAN={SANITIZER}"]
+EOF
+  out=$(SANITIZER_RUNS=1 "$SCRIPT_ROOT/bin/probe" "$RESULTS_DIR/scratch-1/multi-san.dat" 2>&1)
+  assert_match "ARGV=-sanitize=${swift_san} ${san} ${multi_san_real}" "$out" \
+    "probe runner tokens: ${san} expands Swift sanitizer flag"
+  assert_match "SWIFT_SAN=${swift_san}" "$out" \
+    "probe runner env tokens: ${san} expands SWIFT_SANITIZER"
+  assert_match "ACTIVE_SAN=${san}" "$out" \
+    "probe runner env tokens: ${san} expands SANITIZER"
+done
+cat > "$slug_dir/target.toml" <<EOF
+target = "multilang"
+build_system = "swift"
+[sanitizer]
+enabled = ["msan"]
+[runner]
+bin = "$TARGET_ROOT/swift-token-runner"
+args = ["-sanitize={SWIFT_SANITIZER}", "{TESTCASE}"]
+EOF
+swift_msan_rc=0
+swift_msan_out=$("$SCRIPT_ROOT/bin/probe" "$RESULTS_DIR/scratch-1/multi-san.dat" 2>&1) || swift_msan_rc=$?
+assert_eq "2" "$swift_msan_rc" "probe runner tokens: Swift msan exits 2"
+assert_match "Swift runner does not support sanitizer 'msan'" "$swift_msan_out" \
+  "probe runner tokens: Swift msan reports unsupported sanitizer"
+
 cat > "$TARGET_ROOT/race-exec-runner" <<'SH'
 #!/usr/bin/env bash
 for name in ASAN_OPTIONS UBSAN_OPTIONS MSAN_OPTIONS TSAN_OPTIONS; do
@@ -508,6 +559,23 @@ else
     "expected ARGV=--flag $no_token_tc_real in: $(head -3 <<< "$no_token_out")"
 fi
 
+cat > "$slug_dir/target.toml" <<EOF
+target = "multilang"
+build_system = "custom"
+[sanitizer]
+enabled = []
+[runner]
+bin = "$TEST_TMPDIR/argv-printer.sh"
+args = ["--input={TESTCASE}", "--flag"]
+EOF
+embedded_token_out=$("$SCRIPT_ROOT/bin/probe" "$no_token_tc" 2>&1)
+if grep -Fq "ARGV=--input=$no_token_tc_real --flag" <<< "$embedded_token_out"; then
+  pass "probe does not append duplicate testcase when {TESTCASE} is embedded in a runner arg"
+else
+  fail "probe does not append duplicate testcase when {TESTCASE} is embedded in a runner arg" \
+    "expected ARGV=--input=$no_token_tc_real --flag in: $(head -3 <<< "$embedded_token_out")"
+fi
+
 # A testcase that raises a runtime error → INCONCLUSIVE (rc != 0).
 cat > "$slug_dir/target.toml" <<'EOF'
 target = "multilang"
@@ -565,6 +633,23 @@ if "GOFLAGS=-mod=mod" in go_env and "GORACE=halt_on_error=1" in go_env:
     print("  \033[0;32m✓\033[0m language_runner_defaults('go') sets module and race runner env")
 else:
     print(f"  \033[0;31m✗\033[0m go runner env missing GOFLAGS/GORACE: {go_env!r}")
+    fail += 1
+cargo_args = tc.language_runner_defaults("cargo").get("args", [])
+if "--manifest-path" in cargo_args and "{TARGET_ROOT}/Cargo.toml" in cargo_args:
+    print("  \033[0;32m✓\033[0m language_runner_defaults('cargo') pins the target manifest path")
+else:
+    print(f"  \033[0;31m✗\033[0m cargo runner args missing manifest path: {cargo_args!r}")
+    fail += 1
+swift_args = tc.language_runner_defaults("swift").get("args", [])
+if (
+    "--package-path" in swift_args
+    and "{TARGET_ROOT}" in swift_args
+    and "{TARGET_SLUG}" in swift_args
+    and "-sanitize={SWIFT_SANITIZER}" in swift_args
+):
+    print("  \033[0;32m✓\033[0m language_runner_defaults('swift') runs the selected sanitizer package executable")
+else:
+    print(f"  \033[0;31m✗\033[0m swift runner args missing sanitizer package runner shape: {swift_args!r}")
     fail += 1
 sys.exit(1 if fail else 0)
 PY
@@ -684,14 +769,20 @@ for slug, manifest in CASES:
         print(f"  \033[0;31m✗\033[0m {slug} round-trip: explicit_disabled={cfg.sanitizers_explicitly_disabled} runner_bin={cfg.runner_bin!r}")
         fail += 1
 
-# Native build systems keep the legacy ["asan"] default.
-for slug, manifest in [("cmake", "CMakeLists.txt"), ("meson", "meson.build")]:
+# Native build systems and sanitizer-capable language runners (Swift, whose
+# default runner drives a selected sanitizer build) keep the legacy ["asan"]
+# default.
+for slug, manifest in [
+    ("cmake", "CMakeLists.txt"),
+    ("meson", "meson.build"),
+    ("swift", "Package.swift"),
+]:
     d = pathlib.Path(tempfile.mkdtemp(prefix=f"seed-native-{slug}-"))
     (d / manifest).write_text("")
     out = d / "target.toml"
     tc.seed_toml(d, out, "")
     text = out.read_text()
-    if 'enabled = ["asan"]' in text:
+    if 'enabled = ["asan"]' in text and (slug != "swift" or "[runner]" in text):
         print(f"  \033[0;32m✓\033[0m seed_toml({slug}) keeps enabled=['asan']")
     else:
         print(f"  \033[0;31m✗\033[0m seed_toml({slug}) should default to asan; got: {text[text.find('[sanitizer]'):text.find('[sanitizer]')+200]!r}")

@@ -1489,10 +1489,15 @@ def seed_toml(
         "cmake", "meson", "autotools", "mach", "",
         "unknown",
     }
+    # Non-native ecosystems whose default [runner] already drives sanitizer
+    # builds (e.g. `swift run -sanitize={SWIFT_SANITIZER}`), so they are
+    # runnable sanitizer targets rather than findings-only ones.
+    _sanitizer_runner_build_systems = {"swift"}
     _findings_only_default = (
         not is_browser
         and not asan_bin
         and build_system not in _native_build_systems
+        and build_system not in _sanitizer_runner_build_systems
     )
 
     if _findings_only_default:

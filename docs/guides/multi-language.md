@@ -44,7 +44,7 @@ Opt into `race` or another sanitizer by editing
 | C / C++ | `-fsanitize=address` / `undefined` / `memory` / `thread` | `asan`, `ubsan`, `msan`, `tsan` |
 | Rust | `RUSTFLAGS="-Z sanitizer=address"` (nightly) | `asan`; also `tsan` and `msan` on supported targets |
 | Go | `go build -race` | `race` |
-| Swift | `swift build -Xswiftc -sanitize=address` | `asan`; also `tsan`, `ubsan` |
+| Swift | `swift run -Xswiftc -sanitize={SWIFT_SANITIZER}` | `asan`, `ubsan`, `tsan` |
 | Java / JVM | JFR plus JNI ASan when auditing native bindings | none; use `crash_patterns` |
 | Python | `PYTHONMALLOC=malloc` plus CPython-ASan for C extensions | optional `asan` for native extensions |
 | Node / V8 | `--abort-on-uncaught-exception`; native modules can link ASan | optional `asan` for native add-ons |
@@ -90,15 +90,16 @@ The other ecosystems differ only in the `[runner]` fields:
 | --- | --- | --- | --- | --- |
 | Python | `python` | `python3` | `["{TESTCASE}"]` | `PYTHONDEVMODE=1` |
 | Go | `go` | `go` | `["run", "{TESTCASE}"]` | `GORACE=halt_on_error=1` |
-| Rust | `cargo` | `cargo` | `["run", "--quiet", "--", "{TESTCASE}"]` | — |
+| Rust | `cargo` | `cargo` | `["run", "--quiet", "--manifest-path", "{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]` | — |
+| Swift | `swift` | `swift` | `["run", "--quiet", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]` | — |
 | Ruby | `bundler` | `ruby` | `["{TESTCASE}"]` | — |
 | Java / JVM | `maven` or `gradle` | `java` | `["{TESTCASE}"]` | — |
 | Kotlin | `kotlin` | `kotlinc` | `["-script", "{TESTCASE}"]` | — |
 | Node | `npm` | `node` | `["{TESTCASE}"]` | — |
 | PHP | `composer` | `php` | `["{TESTCASE}"]` | — |
 
-The same shape applies to `swift`, `rlang`, and `perl`;
-`bin/setup-target` writes a starter `[runner]` block for each.
+The same shape applies to `rlang` and `perl`; `bin/setup-target`
+writes a starter `[runner]` block for each.
 
 A few ecosystem notes:
 

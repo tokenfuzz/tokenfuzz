@@ -39,7 +39,7 @@
 #                                  without an ASan build)
 #   TARGET_RUNNER_BIN (scalar; interpreter / driver to use when no
 #                       sanitizer binary is configured)
-#   TARGET_RUNNER_ARGS (array; literal args, {TESTCASE} substituted at run)
+#   TARGET_RUNNER_ARGS (array; literal args, stable path tokens substituted at run)
 #   TARGET_RUNNER_ENV (array; KEY=VAL pairs layered on the env)
 #   TARGET_RUNNER_CRASH_PATTERNS (array; extra regex strings lib/triage.sh
 #                                  uses as additional crash signals)
@@ -323,27 +323,64 @@ target_has_any_sanitizer() {
   return 1
 }
 
-# Substitute "{TESTCASE}" with the supplied path in every element of
-# TARGET_RUNNER_ARGS, printing the result one-per-line on stdout.
-target_runner_args_for_testcase() {
-  local testcase="$1" a
-  for a in "${TARGET_RUNNER_ARGS[@]:-}"; do
-    [ -n "$a" ] || continue
-    printf '%s\n' "${a//\{TESTCASE\}/$testcase}"
+# Print the Swift compiler sanitizer spelling for a harness sanitizer slug.
+target_swift_sanitizer_flag() {
+  case "${1:-}" in
+    asan)  printf '%s\n' "address" ;;
+    ubsan) printf '%s\n' "undefined" ;;
+    tsan)  printf '%s\n' "thread" ;;
+    *)
+      target_die "Swift runner does not support sanitizer '${1:-<unset>}' (supported: asan, ubsan, tsan)" || return 1
+      ;;
+  esac
+}
+
+target_runner_tokens_supported() {
+  local sanitizer="${1:-${PROBE_SANITIZER_SELECTED:-}}" v
+  for v in "${TARGET_RUNNER_ARGS[@]:-}" "${TARGET_RUNNER_ENV[@]:-}"; do
+    case "$v" in
+      *"{SWIFT_SANITIZER}"*) target_swift_sanitizer_flag "$sanitizer" >/dev/null || return 1 ;;
+    esac
   done
 }
 
-# Expand stable path tokens in TARGET_RUNNER_ENV. Values are still passed as
+# Expand stable path/runtime tokens in a single runner string, printing the
+# result on stdout. Values are still passed as literal argv/KEY=VAL entries;
+# this only substitutes audit-owned paths so generated target.toml files stay
+# relocatable. {TESTCASE} expands to the second argument (empty for env), and
+# sanitizer tokens derive from the third argument or PROBE_SANITIZER_SELECTED.
+target_expand_runner_tokens() {
+  local v="$1" testcase="${2:-}" sanitizer="${3:-${PROBE_SANITIZER_SELECTED:-}}" swift_sanitizer=""
+  if [[ "$v" == *"{SWIFT_SANITIZER}"* ]]; then
+    swift_sanitizer="$(target_swift_sanitizer_flag "$sanitizer")" || return 1
+  fi
+  v="${v//\{TESTCASE\}/$testcase}"
+  v="${v//\{SANITIZER\}/$sanitizer}"
+  v="${v//\{SWIFT_SANITIZER\}/$swift_sanitizer}"
+  v="${v//\{TARGET_ROOT\}/${TARGET_ROOT:-}}"
+  v="${v//\{RESULTS_DIR\}/${RESULTS_DIR:-}}"
+  v="${v//\{TARGET_SLUG\}/${TARGET_SLUG:-}}"
+  printf '%s\n' "$v"
+}
+
+# Substitute stable tokens ("{TESTCASE}", "{TARGET_ROOT}", "{SANITIZER}", …) in
+# every element of TARGET_RUNNER_ARGS, printing the result one-per-line on stdout.
+target_runner_args_for_testcase() {
+  local testcase="$1" sanitizer="${2:-${PROBE_SANITIZER_SELECTED:-}}" a
+  for a in "${TARGET_RUNNER_ARGS[@]:-}"; do
+    [ -n "$a" ] || continue
+    target_expand_runner_tokens "$a" "$testcase" "$sanitizer" || return 1
+  done
+}
+
+# Expand stable runner tokens in TARGET_RUNNER_ENV. Values are still passed as
 # literal KEY=VAL entries to `env`; this helper only substitutes audit-owned
 # paths so generated target.toml files can stay relocatable.
 target_runner_env_expanded() {
-  local e
+  local sanitizer="${1:-${PROBE_SANITIZER_SELECTED:-}}" e
   for e in "${TARGET_RUNNER_ENV[@]:-}"; do
     [ -n "$e" ] || continue
-    e="${e//\{TARGET_ROOT\}/${TARGET_ROOT:-}}"
-    e="${e//\{RESULTS_DIR\}/${RESULTS_DIR:-}}"
-    e="${e//\{TARGET_SLUG\}/${TARGET_SLUG:-}}"
-    printf '%s\n' "$e"
+    target_expand_runner_tokens "$e" "" "$sanitizer" || return 1
   done
 }
 

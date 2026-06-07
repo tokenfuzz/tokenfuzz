@@ -5,7 +5,7 @@
 # bin/run-msan and bin/run-tsan are thin shims over these helpers; bin/run-ubsan
 # delegates its non-browser modes (generic, js) here too. bin/run-asan keeps its
 # own richer generic/js implementations — findings-only [runner].bin resolution,
-# ASAN_GENERIC_SKIP_TESTCASE handling, shell-flag/script-arg splitting — and is
+# shell-flag/script-arg splitting, and browser-specific modes — and is
 # intentionally NOT routed through this file; its modes are not byte-equivalent.
 #
 # Each helper is parameterised by the lowercase sanitizer name (`msan`, `tsan`,
@@ -54,7 +54,7 @@ sanitizer_run_generic() {
     echo "Usage: $0 generic <testcase> [target args...]" >&2
     return 1
   fi
-  local SAN bin generic_testcase rc=0
+  local SAN bin generic_testcase skip_testcase rc=0
   SAN="$(_sanitizer_run_upper "$san")"
   bin="$(_sanitizer_run_resolve_bin "$SAN")"
   if [ -z "$bin" ] || [ ! -x "$bin" ]; then
@@ -63,9 +63,31 @@ sanitizer_run_generic() {
     return 2
   fi
   generic_testcase="$1"; shift
-  audit_timeout_run "$timeout_val" env \
-    "${SAN}_OPTIONS=$(sanitizer_runtime_options "$san" "$opts")" \
-    "$bin" "$generic_testcase" "$@" || rc=$?
+  skip_testcase="${SANITIZER_GENERIC_SKIP_TESTCASE:-${ASAN_GENERIC_SKIP_TESTCASE:-0}}"
+
+  local env_cmd runner_env_args kv
+  env_cmd=(env "${SAN}_OPTIONS=$(sanitizer_runtime_options "$san" "$opts")")
+  runner_env_args=()
+  if [[ -n "${TARGET_RUNNER_ENV+set}" && "${#TARGET_RUNNER_ENV[@]}" -gt 0 ]]; then
+    target_runner_tokens_supported "$san" || return 2
+    while IFS= read -r kv; do
+      [ -n "$kv" ] || continue
+      runner_env_args+=("$kv")
+    done < <(target_runner_env_expanded "$san")
+  fi
+  if [ "${#runner_env_args[@]}" -gt 0 ]; then
+    env_cmd+=("${runner_env_args[@]}")
+  fi
+
+  local generic_cmd=("$bin")
+  if [ "$skip_testcase" != "1" ]; then
+    generic_cmd+=("$generic_testcase")
+  fi
+  if [ "$#" -gt 0 ]; then
+    generic_cmd+=("$@")
+  fi
+
+  audit_timeout_run "$timeout_val" "${env_cmd[@]}" "${generic_cmd[@]}" || rc=$?
   if [ "$rc" -eq 124 ]; then
     echo "[run-$san] generic runner timed out after ${timeout_val}s" >&2
     return "$rc"

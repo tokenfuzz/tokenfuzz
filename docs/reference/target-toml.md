@@ -208,8 +208,8 @@ targets that want to plug in a custom driver script.
 | Key | Meaning |
 | --- | --- |
 | `bin` | Interpreter or driver program (`python3`, `node`, `cargo`, `ruby`, an absolute path to a wrapper script, …). |
-| `args` | Literal argument list. `{TESTCASE}` is substituted with the testcase path — see note below. |
-| `env` | Extra `KEY=VAL` strings layered on the runtime environment (e.g. `["GORACE=halt_on_error=1"]`, `["PYTHONDEVMODE=1"]`). `{TARGET_ROOT}`, `{RESULTS_DIR}`, and `{TARGET_SLUG}` are substituted at run time. |
+| `args` | Literal argument list. `{TESTCASE}` is substituted with the testcase path; `{TARGET_ROOT}`, `{RESULTS_DIR}`, `{TARGET_SLUG}`, `{SANITIZER}`, and `{SWIFT_SANITIZER}` are also substituted at run time. |
+| `env` | Extra `KEY=VAL` strings layered on the runtime environment (e.g. `["GORACE=halt_on_error=1"]`, `["PYTHONDEVMODE=1"]`). The same runner tokens as `args` are substituted at run time. |
 | `crash_patterns` | Additional regex strings the triager treats as crash signals beyond its built-in language-agnostic markers. Use sparingly. |
 
 `{TESTCASE}` substitution rules:
@@ -250,7 +250,17 @@ To enable the Go runtime race detector, set
 # Rust target — cargo run with stdin-fed testcase.
 [runner]
 bin            = "cargo"
-args           = ["run", "--quiet", "--", "{TESTCASE}"]
+args           = ["run", "--quiet", "--manifest-path", "{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]
+env            = []
+crash_patterns = []
+```
+
+```toml
+# Swift package — runner compiles with the selected Swift sanitizer
+# (`address`, `undefined`, or `thread`).
+[runner]
+bin            = "swift"
+args           = ["run", "--quiet", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]
 env            = []
 crash_patterns = []
 ```

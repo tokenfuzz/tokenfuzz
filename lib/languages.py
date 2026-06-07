@@ -254,7 +254,11 @@ LANGUAGES: tuple[Language, ...] = (
         compiler_default="rustc",
         compiler_flags_env="RUSTFLAGS",
         runner_bin="cargo",
-        runner_args=("run", "--quiet", "--", "{TESTCASE}"),
+        runner_args=(
+            "run", "--quiet",
+            "--manifest-path", "{TARGET_ROOT}/Cargo.toml",
+            "--", "{TESTCASE}",
+        ),
         crash_patterns=(
             r"thread '.*' panicked at",
             r"fatal runtime error:",
@@ -330,19 +334,27 @@ LANGUAGES: tuple[Language, ...] = (
         compiler_default="swiftc",
         compiler_flags_env="SWIFTFLAGS",
         runner_bin="swift",
-        runner_args=("{TESTCASE}",),
+        # Build and run the package executable under the selected Swift
+        # sanitizer. {SWIFT_SANITIZER} is expanded by target_config.sh from the
+        # active sanitizer slug (asan -> address, ubsan -> undefined, tsan ->
+        # thread).
+        runner_args=(
+            "run", "--quiet", "-c", "release",
+            "-Xswiftc", "-sanitize={SWIFT_SANITIZER}",
+            "-Xswiftc", "-O",
+            "--package-path", "{TARGET_ROOT}",
+            "{TARGET_SLUG}", "{TESTCASE}",
+        ),
         crash_patterns=(
             r"Fatal error:",
             _ASAN_BANNER,
             _TSAN_BANNER,
         ),
-        # Release config (`-c release` strips Swift debug asserts and
-        # turns on optimizer) plus ASan via -Xswiftc. Works on stock
-        # Apple and Swift.org Linux toolchains.
+        # Release config (`-c release` strips Swift debug asserts and turns on
+        # optimizer). Sanitizer-specific compilation happens through the runner
+        # so probes can select asan, ubsan, or tsan without rewriting target.toml.
         bootstrap_cmds=(
-            ("swift", "build", "-c", "release",
-             "-Xswiftc", "-sanitize=address",
-             "-Xswiftc", "-O"),
+            ("swift", "build", "-c", "release", "-Xswiftc", "-O"),
         ),
         bootstrap_manifests=("Package.swift",),
         fuzz_backends=("asan", "tsan", "ubsan", "libfuzzer"),

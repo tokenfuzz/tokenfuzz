@@ -74,7 +74,7 @@ bin/setup-target "$TARGET" <repo-url>
 # it produces a sanitizer build under build-asan/; other languages prepare
 # through their own toolchain (cargo, go, swift, npm, ...), which picks up
 # sanitizer flags where it supports them (e.g. Go's -race, Swift's
-# -sanitize=address). Enabled sanitizers are set per target in
+# -sanitize={SWIFT_SANITIZER}). Enabled sanitizers are set per target in
 # target.toml's [sanitizer] block.
 bin/setup-target "$TARGET" --bootstrap
 

@@ -360,6 +360,65 @@ ok(frame is not None and frame.function.startswith(
    "frame.function keeps the raw name (with params) for ignore matching",
    detail=f"function={frame.function if frame else None!r}")
 
+# Go race-detector reports carry no `#N 0x..` frames, so they fall through to
+# the dedicated parser. `main.<func>` frames must survive the ignore step (the
+# `main.` package prefix is not the C `main` entrypoint), and the conflicting
+# access pair is canonicalized so read/write vs write/read ordering — which the
+# scheduler picks nondeterministically — does not look like two crashes.
+go_race = """\
+==================
+WARNING: DATA RACE
+Write at 0x00c000010 by goroutine 7:
+  main.writer()
+      /app/auth.go:53 +0x44
+  main.run.func1()
+      /app/auth.go:43 +0x88
+
+Previous read at 0x00c000010 by goroutine 6:
+  main.reader()
+      /app/auth.go:62 +0x30
+
+Goroutine 7 (running) created at:
+  main.run()
+      /app/auth.go:40 +0x120
+Goroutine 6 (finished) created at:
+  main.main()
+      /app/auth.go:31 +0x90
+==================
+"""
+go_race_swapped = """\
+==================
+WARNING: DATA RACE
+Read at 0x00c000010 by goroutine 6:
+  main.reader()
+      /app/auth.go:62 +0x30
+
+Previous write at 0x00c000010 by goroutine 7:
+  main.writer()
+      /app/auth.go:53 +0x44
+  main.run.func1()
+      /app/auth.go:43 +0x88
+
+Goroutine 6 (running) created at:
+  main.main()
+      /app/auth.go:31 +0x90
+Goroutine 7 (finished) created at:
+  main.run()
+      /app/auth.go:40 +0x120
+==================
+"""
+go_frames = stack_frames.iter_go_race_frames(go_race)
+ok(len(go_frames) == 2 and go_frames[0].function == "main.reader()",
+   "iter_go_race_frames keeps only the two racing sites (not call-chain or creation frames)",
+   detail=f"frames={[f.display for f in go_frames]!r}")
+go_sig = stack_frames.crash_signature(go_race)
+ok(go_sig and go_sig[0] == "main.reader /app/auth.go:62",
+   "crash_signature falls back to Go race frames with the main. prefix kept",
+   detail=f"sig={go_sig!r}")
+ok(stack_frames.crash_signature(go_race) == stack_frames.crash_signature(go_race_swapped),
+   "Go race signature is stable across read/write vs write/read ordering",
+   detail=f"a={stack_frames.crash_signature(go_race)!r} b={stack_frames.crash_signature(go_race_swapped)!r}")
+
 if FAILED:
     print(f"\033[0;31m{FAILED} failed, {PASSED} passed\033[0m")
     sys.exit(1)
