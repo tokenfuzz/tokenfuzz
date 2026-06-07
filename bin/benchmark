@@ -25,6 +25,7 @@
 #
 # Usage:
 #   bin/benchmark --target pcre2
+#   bin/benchmark --target pcre2,libxml2,cjson   # one run per target, in turn
 #   bin/benchmark --target pcre2 --backend <backend> --replicates 5 --budget-wall 5400
 #   bin/benchmark --target pcre2 --agents 3
 #   bin/benchmark --target pcre2 --conditions harness
@@ -38,7 +39,11 @@
 #                                    # (all targets + backends) + the full page
 #
 # Options (default in brackets):
-#   --target <slug>          Target under targets/ to benchmark. REQUIRED.
+#   --target <slug>[,<slug>...]
+#                            Target(s) under targets/ to benchmark. REQUIRED.
+#                            A comma list (spaces allowed) benchmarks each
+#                            target one after another, every other flag held
+#                            constant; the run fails if any target fails.
 #   --backend <backend>      Agent backend, one of: claude, codex, gemini, oss.
 #   --model <model>          Override the model for both conditions. Defaults to
 #                            the per-backend config/models.toml value. For
@@ -143,7 +148,7 @@ PYEOF
 }
 
 usage() {
-  sed -n '3,96p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,101p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -237,6 +242,67 @@ while [ $# -gt 0 ]; do
     *) echo "FATAL: unknown argument: $1" >&2; usage 1 ;;
   esac
 done
+
+# ── multiple --target slugs: benchmark each one sequentially ──────────────
+# `--target a,b,c` (a comma list, optionally with surrounding spaces) runs
+# the benchmark for every slug in turn. Each target is handled by re-invoking
+# this script once with a single --target, so every downstream assumption
+# that exactly one TARGET_SLUG is in play — the per-(target,backend) lock
+# path, run.json, the console log, the pool tree — stays intact rather than
+# being threaded through a per-target loop in the body. Children run
+# sequentially so the per-(target,backend) locks never contend; each folds
+# into the shared per-backend ledger and the cross-backend crosstab exactly
+# as a standalone single-target run would. This mirrors the child-dispatch
+# the `--regenerate` (no --target) path already uses below.
+case "$TARGET_SLUG" in
+  *,*)
+    self="$SCRIPT_ROOT/bin/benchmark"
+    # Forward every operator-set flag unchanged except --target, which is
+    # replaced with the single slug for each child.
+    multi_base_args=(--backend "$BACKEND" --replicates "$REPLICATES"
+                     --budget-wall "$BUDGET_WALL" --conditions "$CONDITIONS"
+                     --bench-root "$BENCH_ROOT")
+    [ -n "$MODEL_OVERRIDE" ] && multi_base_args+=(--model "$MODEL_OVERRIDE")
+    [ -n "$AGENTS" ] && multi_base_args+=(--agents "$AGENTS")
+    [ -n "$LEDGER" ] && multi_base_args+=(--ledger "$LEDGER")
+    [ "$DRY_RUN" = "1" ] && multi_base_args+=(--dry-run)
+    [ "$DO_REGENERATE" = "1" ] && multi_base_args+=(--regenerate)
+    [ "$DO_RESET" = "1" ] && multi_base_args+=(--reset)
+    [ "$RESET_HARD" = "1" ] && multi_base_args+=(--hard)
+    if [ "$VALIDATE_FINDINGS" = "1" ]; then
+      multi_base_args+=(--validate-findings)
+    else
+      multi_base_args+=(--no-validate-findings)
+    fi
+
+    multi_total=0 multi_failed=0
+    IFS=',' read -r -a _multi_targets <<< "$TARGET_SLUG"
+    for _mt in "${_multi_targets[@]}"; do
+      # Trim surrounding whitespace so `--target a, b , c` is accepted.
+      _mt="${_mt#"${_mt%%[![:space:]]*}"}"
+      _mt="${_mt%"${_mt##*[![:space:]]}"}"
+      [ -n "$_mt" ] || continue
+      multi_total=$((multi_total + 1))
+      multi_child_args=("${multi_base_args[@]}" --target "$_mt")
+      # A shared explicit --run-id would collide across targets (run dirs are
+      # keyed by id under <bench-root>/<backend>/, not by slug); make it
+      # per-target so each keeps a distinct, resumable directory.
+      [ -n "$RUN_ID" ] && multi_child_args+=(--run-id "${RUN_ID}-${_mt}")
+      log "multi-target ($multi_total): target=$_mt — starting"
+      if "$self" "${multi_child_args[@]}"; then
+        log "multi-target: target=$_mt — completed"
+      else
+        multi_failed=$((multi_failed + 1))
+        log "multi-target: WARN target=$_mt exited non-zero"
+      fi
+    done
+    [ "$multi_total" -gt 0 ] \
+      || { echo "FATAL: --target contained no non-empty slugs" >&2; exit 1; }
+    log "multi-target: complete — $((multi_total - multi_failed))/$multi_total target(s) succeeded"
+    [ "$multi_failed" -eq 0 ]
+    exit $?
+    ;;
+esac
 
 # Normalise BENCH_ROOT to an absolute path. Cell directories — and the
 # agent workspace/add-dir paths derived from them — flow into backend

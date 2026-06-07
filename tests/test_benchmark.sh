@@ -507,6 +507,46 @@ set -e
 assert_neq "0" "$all_empty_rc" \
   "T9s-g: --regenerate with no runs anywhere is rejected"
 
+# ── T9t: a comma list of --target slugs benchmarks each one in turn ──────
+# `--target a,b` (spaces allowed around the comma) runs the benchmark once
+# per slug, holding every other flag constant, and folds both into the same
+# per-backend ledger + cross-backend page. Each child keeps its own run dir
+# (keyed by run-id, suffixed per target when one is given) so they never
+# collide. The driver exits 0 only when every target succeeds.
+multiroot="$work/multi-target"
+multi_out=$(bash "$BENCH" --target " dummytarget , othertarget " --dry-run \
+  --replicates 1 --conditions harness --backend codex \
+  --bench-root "$multiroot" --run-id mt 2>&1)
+multi_rc=$?
+assert_eq "0" "$multi_rc" "T9t-a: multi-target dry-run exits 0"
+assert_match 'multi-target \(1\): target=dummytarget' "$multi_out" \
+  "T9t-b: first slug runs (surrounding whitespace trimmed)"
+assert_match 'multi-target \(2\): target=othertarget' "$multi_out" \
+  "T9t-c: second slug runs after the first"
+assert_match 'multi-target: complete — 2/2 target\(s\) succeeded' "$multi_out" \
+  "T9t-d: driver reports an all-success summary"
+# Each target lands its own resumable run dir, suffixed from the shared id.
+assert_file_exists "$multiroot/codex/mt-dummytarget/run.json" \
+  "T9t-e: first target gets a per-target run dir"
+assert_file_exists "$multiroot/codex/mt-othertarget/run.json" \
+  "T9t-f: second target gets a distinct per-target run dir"
+assert_eq "dummytarget" "$(jq -r .target "$multiroot/codex/mt-dummytarget/run.json")" \
+  "T9t-g: first run.json records the right target"
+assert_eq "othertarget" "$(jq -r .target "$multiroot/codex/mt-othertarget/run.json")" \
+  "T9t-h: second run.json records the right target"
+# Both targets fold into one cross-backend page.
+assert_file_exists "$multiroot/benchmark-result.md" \
+  "T9t-i: multi-target run rebuilds the shared cross-backend page"
+
+# An empty/whitespace-only comma list is rejected, not silently a no-op.
+set +e
+bash "$BENCH" --target " , " --dry-run --replicates 1 --conditions harness \
+  --bench-root "$work/multi-empty" >/dev/null 2>&1
+multi_empty_rc=$?
+set -e
+assert_neq "0" "$multi_empty_rc" \
+  "T9t-j: a comma list with no real slugs is rejected"
+
 # Incomplete resume cells are fully cleared before rerun. A prior benchmark can
 # leave cells/<name>/repo-root/output half-populated while an old child is
 # still winding down. Deleting that tree in place can fail with "Directory not
