@@ -388,22 +388,37 @@ def _source_for_object(obj_path: Path, target_root: Path) -> tuple[str | None, b
         return (None, False)
 
 
+@dataclass
+class ObjectScan:
+    """Result of classifying a build tree's object files.
+
+    Named fields rather than a positional tuple: callers read
+    `scan.stub_tus`, so the result is self-describing and a short or extra
+    value can never be silently mis-bound at an unpack site — the bug this
+    type replaced, where the missing-build-dir branch returned a 3-value
+    tuple that the 4-value caller could not unpack.
+    """
+    stub_tus: list[str] = field(default_factory=list)
+    compiled_tus: list[str] = field(default_factory=list)
+    probed_object_count: int = 0
+    ambiguous: int = 0
+
+
 def probe_objects(
     build_dir: Path,
     target_root: Path,
     max_objects: int = 5000,
-) -> tuple[list[str], list[str], int, int]:
-    """Walk build_dir, classify each `.o`, return
-    (stub_tus, compiled_tus, n, ambiguous).
+) -> ObjectScan:
+    """Walk build_dir, classify each `.o`, and return an ObjectScan.
 
-    Both lists are deduplicated source-relative paths. `ambiguous` counts
-    objects whose basename matched several sources that could not be
-    resolved to one — they are left ungated (fail-open). The cap is a
+    Both TU lists are deduplicated source-relative paths. `ambiguous`
+    counts objects whose basename matched several sources that could not
+    be resolved to one — they are left ungated (fail-open). The cap is a
     sanity bound — projects with >5000 TUs are rare and the cap can be
     raised via the CLI.
     """
     if not build_dir.is_dir():
-        return ([], [], 0)
+        return ObjectScan()
     stub_set: set[str] = set()
     real_set: set[str] = set()
     ambiguous = 0
@@ -428,7 +443,12 @@ def probe_objects(
     # If a TU has both a stub and a real .o (e.g. duplicate builds for
     # different configs), trust the "real" classification.
     stub_set -= real_set
-    return (sorted(stub_set), sorted(real_set), count, ambiguous)
+    return ObjectScan(
+        stub_tus=sorted(stub_set),
+        compiled_tus=sorted(real_set),
+        probed_object_count=count,
+        ambiguous=ambiguous,
+    )
 
 
 # ─── Configure summary probe ───────────────────────────────────────
@@ -479,16 +499,16 @@ def build_manifest(
     )
     if binary_path is not None and Path(binary_path).exists():
         manifest.binary = probe_binary(Path(binary_path))
-    stubs, reals, n, ambiguous = probe_objects(build_dir, target_root, max_objects=max_objects)
-    manifest.stub_tus = stubs
-    manifest.compiled_tus = reals
-    manifest.probed_object_count = n
+    scan = probe_objects(build_dir, target_root, max_objects=max_objects)
+    manifest.stub_tus = scan.stub_tus
+    manifest.compiled_tus = scan.compiled_tus
+    manifest.probed_object_count = scan.probed_object_count
     manifest.configure_summary = probe_configure_summary(build_log)
-    if n == 0:
+    if scan.probed_object_count == 0:
         manifest.notes.append("no-objects-probed: build_dir contained no .o files; queue gate will fail-open")
-    if ambiguous:
+    if scan.ambiguous:
         manifest.notes.append(
-            f"ambiguous-basename: {ambiguous} object(s) matched several same-named "
+            f"ambiguous-basename: {scan.ambiguous} object(s) matched several same-named "
             f"sources and were left ungated (fail-open) rather than risk blocking a "
             f"real TU"
         )

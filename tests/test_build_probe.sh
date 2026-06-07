@@ -277,5 +277,31 @@ PY
   fi
 fi
 
+# ── Test 8: missing build dir returns a well-formed ObjectScan ─────
+# probe_objects returns an ObjectScan dataclass with named fields, so
+# every branch yields the same shape. The missing-build-dir branch used
+# to return a 3-value tuple where the normal path returned 4, raising
+# ValueError at the caller's unpack site and aborting the probe on
+# incomplete setups. Named fields make that mismatch impossible.
+
+missing_build_result=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - <<'PY'
+from pathlib import Path
+import build_probe as bp
+try:
+    scan = bp.probe_objects(Path("/nonexistent/build/dir"), Path("/nonexistent/target"))
+    # Read named fields — raises AttributeError if the shape is wrong.
+    print(f"crash=no count={scan.probed_object_count} stubs={len(scan.stub_tus)} "
+          f"reals={len(scan.compiled_tus)} ambiguous={scan.ambiguous}")
+except Exception as e:  # noqa: BLE001 — any exception is a failure here
+    print(f"crash={type(e).__name__}")
+
+# build_manifest reads the same ObjectScan; must not raise either.
+m = bp.build_manifest(Path("/nonexistent/target"), Path("/nonexistent/build/dir"), "asan")
+print(f"manifest_count={m.probed_object_count} manifest_stubs={len(m.stub_tus)}")
+PY
+)
+assert_match 'crash=no count=0 stubs=0 reals=0 ambiguous=0' "$missing_build_result" "probe_objects: missing build dir returns empty ObjectScan"
+assert_match 'manifest_count=0 manifest_stubs=0' "$missing_build_result" "build_manifest: missing build dir → empty, fail-open"
+
 teardown_test_env
 summary
