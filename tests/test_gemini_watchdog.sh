@@ -40,6 +40,32 @@ source "$SCRIPT_ROOT/lib/llm_invoke.sh"
 work=$(mktemp -d)
 trap 'rm -rf "$work" 2>/dev/null || true; teardown_test_env 2>/dev/null || true' EXIT
 
+poll_pause() {
+  perl -e 'select undef, undef, undef, 0.1'
+}
+
+wait_for_file() {
+  local path="$1" seconds="$2" start
+  start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$seconds" ]; do
+    [ -e "$path" ] && return 0
+    poll_pause
+  done
+  [ -e "$path" ]
+}
+
+wait_for_dead_pid() {
+  local pid="$1" seconds="$2" start stat
+  start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$seconds" ]; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    stat="$(ps -p "$pid" -o stat= 2>/dev/null | awk 'NR==1 {print $1}')"
+    case "$stat" in Z*) return 0 ;; esac
+    poll_pause
+  done
+  ! kill -0 "$pid" 2>/dev/null
+}
+
 # ── T1: sourcing the lib in a fresh shell has no side effects ───────
 
 isolation_script="$work/iso.sh"
@@ -48,7 +74,9 @@ cat > "$isolation_script" <<EOF
 set -uo pipefail
 source "$SCRIPT_ROOT/lib/llm_invoke.sh"
 source "$SCRIPT_ROOT/lib/gemini_watchdog.sh"
-declare -F _kill_tree gemini_quota_dominates agy_cli_log_for_pid \\
+declare -F _kill_tree _gemini_watchdog_pid_alive \\
+           _gemini_watchdog_terminate_tree \\
+           gemini_quota_dominates agy_cli_log_for_pid \\
            agy_drip_stopped agy_in_idle_heartbeat_loop \\
            start_gemini_watchdog _gemini_watchdog_log
 EOF
@@ -60,7 +88,9 @@ if [ "$iso_rc" -ne 0 ]; then
 else
   pass "T1: sourcing lib/gemini_watchdog.sh in a fresh shell exits 0"
 fi
-for fn in _kill_tree gemini_quota_dominates agy_cli_log_for_pid \
+for fn in _kill_tree _gemini_watchdog_pid_alive \
+          _gemini_watchdog_terminate_tree \
+          gemini_quota_dominates agy_cli_log_for_pid \
           agy_drip_stopped agy_in_idle_heartbeat_loop \
           start_gemini_watchdog _gemini_watchdog_log; do
   # `declare -F name [...]` (multiple positional names) prints one bare
@@ -92,12 +122,12 @@ AGY_IDLE_CONFIRM_POLLS=0 \
     "$work/nonexistent.raw" "$short_pid" "$work" "test-label-T2" &
 watcher_pid=$!
 wait "$short_pid" 2>/dev/null
-sleep 2
-if kill -0 "$watcher_pid" 2>/dev/null; then
+if wait_for_dead_pid "$watcher_pid" 2; then
+  wait "$watcher_pid" 2>/dev/null || true
+  pass "T2: watchdog exits when agent dies"
+else
   fail "T2: watchdog exits when agent dies" "still alive after agent finished"
   _kill_tree "$watcher_pid" KILL
-else
-  pass "T2: watchdog exits when agent dies"
 fi
 
 # ── T3: _gemini_watchdog_log fallback to stderr without `log` ────────
@@ -158,7 +188,7 @@ quota_raw="$work/quota.raw"
 (sleep 30) &
 victim_pid=$!
 
-GEMINI_WATCHDOG_POLL_SECS=1 \
+GEMINI_WATCHDOG_POLL_SECS=0 \
 GEMINI_QUOTA_WINDOW_LINES=400 \
 GEMINI_QUOTA_MIN_429=10 \
 AGY_DRIP_GRACE_SECS=0 \
@@ -166,18 +196,16 @@ AGY_IDLE_CONFIRM_POLLS=0 \
   start_gemini_watchdog "$quota_raw" "$victim_pid" "$work/marker" "test-quota-T4" &
 quota_watcher=$!
 
-# Give the watchdog a few polls.
-sleep 4
-if [ -f "$work/marker/.quota-exhausted" ]; then
+if wait_for_file "$work/marker/.quota-exhausted" 3; then
   pass "T4: quota arm writes .quota-exhausted under marker_dir"
 else
   fail "T4: quota arm writes .quota-exhausted under marker_dir" "marker file not present"
 fi
-if kill -0 "$victim_pid" 2>/dev/null; then
+if wait_for_dead_pid "$victim_pid" 3; then
+  pass "T4: quota arm kills the agent process"
+else
   fail "T4: quota arm kills the agent process" "victim still alive"
   _kill_tree "$victim_pid" KILL
-else
-  pass "T4: quota arm kills the agent process"
 fi
 # Reap the watcher.
 wait "$quota_watcher" 2>/dev/null || true
@@ -189,19 +217,18 @@ wait "$quota_watcher" 2>/dev/null || true
 mkdir -p "$work/missing-parent"
 (sleep 30) &
 victim2=$!
-GEMINI_WATCHDOG_POLL_SECS=1 \
+GEMINI_WATCHDOG_POLL_SECS=0 \
 GEMINI_QUOTA_WINDOW_LINES=400 \
 GEMINI_QUOTA_MIN_429=10 \
 AGY_DRIP_GRACE_SECS=0 \
 AGY_IDLE_CONFIRM_POLLS=0 \
   start_gemini_watchdog "$quota_raw" "$victim2" "" "test-empty-marker-T5" &
 empty_marker_watcher=$!
-sleep 4
-if kill -0 "$victim2" 2>/dev/null; then
+if wait_for_dead_pid "$victim2" 3; then
+  pass "T5: empty marker_dir does not block the kill arm"
+else
   fail "T5: empty marker_dir does not block the kill arm" "victim still alive"
   _kill_tree "$victim2" KILL
-else
-  pass "T5: empty marker_dir does not block the kill arm"
 fi
 wait "$empty_marker_watcher" 2>/dev/null || true
 

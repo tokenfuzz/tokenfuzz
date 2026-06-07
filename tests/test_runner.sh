@@ -73,12 +73,26 @@ eval "$(awk '/^prioritize_parallel_tests\(\) \{/,/^}/' "$RUNNER")"
 # --- cold start (no timing artifact): bootstrap leads, rest is coarse ---
 PRIOR_TIMINGS=""
 heavy_w=$(test_weight test_benchmark.sh)
+timeout_w=$(test_weight test_timeout.sh)
+watchdog_w=$(test_weight test_gemini_watchdog.sh)
 light_w=$(test_weight test_argparse_need_arg.sh)
 if [ "$heavy_w" -gt "$light_w" ] && [ "$heavy_w" -ge 15 ]; then
   pass "runner: cold-start bootstrap ranks a known-slow suite above a trivial one"
 else
   fail "runner: cold-start bootstrap ranks a known-slow suite above a trivial one" \
     "benchmark=$heavy_w argparse=$light_w"
+fi
+if [ "$timeout_w" -gt "$light_w" ] && [ "$timeout_w" -ge 15 ]; then
+  pass "runner: cold-start bootstrap ranks timeout coverage above trivial suites"
+else
+  fail "runner: cold-start bootstrap ranks timeout coverage above trivial suites" \
+    "timeout=$timeout_w argparse=$light_w"
+fi
+if [ "$watchdog_w" -gt "$light_w" ] && [ "$watchdog_w" -ge 15 ]; then
+  pass "runner: cold-start bootstrap ranks watchdog coverage above trivial suites"
+else
+  fail "runner: cold-start bootstrap ranks watchdog coverage above trivial suites" \
+    "watchdog=$watchdog_w argparse=$light_w"
 fi
 assert_eq "1" "$(test_weight test_audit_helpers_py.py)" \
   "runner: python suites weigh 1 by category fallback"

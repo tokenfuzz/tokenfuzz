@@ -9,6 +9,16 @@ source "$SCRIPT_ROOT/lib/timeout.sh"
 
 setup_test_env
 
+marker_stays_absent_for() {
+  local marker="$1" seconds="$2" start
+  start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$seconds" ]; do
+    [ ! -f "$marker" ] || return 1
+    perl -e 'select undef, undef, undef, 0.1'
+  done
+  [ ! -f "$marker" ]
+}
+
 audit_timeout_run 2 bash -c 'exit 7'
 assert_eq 7 $? "audit_timeout_run preserves command exit code"
 
@@ -17,10 +27,9 @@ assert_eq 124 $? "audit_timeout_run returns 124 on timeout"
 
 escaped_marker="$TEST_TMPDIR/escaped-marker"
 rm -f "$escaped_marker"
-audit_timeout_run 1 bash -c 'perl -e "setpgrp(0,0); sleep 30; open my \$fh, q(>), shift; print \$fh q(leaked)" "'"$escaped_marker"'"'
+audit_timeout_run 1 bash -c 'perl -e "setpgrp(0,0); sleep 2; open my \$fh, q(>), shift; print \$fh q(leaked)" "'"$escaped_marker"'"'
 assert_eq 124 $? "audit_timeout_run times out escaped child process group"
-sleep 3
-[ ! -f "$escaped_marker" ] \
+marker_stays_absent_for "$escaped_marker" 2 \
   && pass "audit_timeout_run reaps descendant process groups on timeout" \
   || fail "audit_timeout_run reaps descendant process groups on timeout" \
           "descendant survived after changing process group"
@@ -49,9 +58,8 @@ assert_eq 0 $? "audit_timeout_run does not stop a child that reads stdin"
 # processes without a name-pattern pkill that could hit a sibling agent.
 reap_marker="$TEST_TMPDIR/reap-marker"
 rm -f "$reap_marker"
-audit_timeout_kill 5 bash -c '( sleep 30; echo leaked > "'"$reap_marker"'" ) & exit 0'
-sleep 3
-[ ! -f "$reap_marker" ] \
+audit_timeout_kill 5 bash -c '( sleep 1; echo leaked > "'"$reap_marker"'" ) & exit 0'
+marker_stays_absent_for "$reap_marker" 2 \
   && pass "audit_timeout_kill reaps backgrounded grandchildren on normal exit" \
   || fail "audit_timeout_kill reaps backgrounded grandchildren on normal exit" \
           "grandchild survived the process-group sweep"

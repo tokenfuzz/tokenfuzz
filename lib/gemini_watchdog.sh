@@ -89,6 +89,27 @@ _kill_tree() {
   kill -"$sig" "$pid" 2>/dev/null || true
 }
 
+_gemini_watchdog_pid_alive() {
+  local pid="$1" stat
+  kill -0 "$pid" 2>/dev/null || return 1
+  stat="$(ps -p "$pid" -o stat= 2>/dev/null | awk 'NR==1 {print $1}')"
+  case "$stat" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+
+_gemini_watchdog_terminate_tree() {
+  local pid="$1" grace="${2:-5}" elapsed=0
+  _kill_tree "$pid" TERM
+  while [ "$elapsed" -lt "$grace" ]; do
+    sleep 1
+    _gemini_watchdog_pid_alive "$pid" || return 0
+    elapsed=$((elapsed + 1))
+  done
+  _kill_tree "$pid" KILL
+}
+
 # ── Quota-dominated detector ─────────────────────────────────────────
 
 gemini_quota_dominates() {
@@ -182,9 +203,7 @@ start_gemini_watchdog() {
       _gemini_watchdog_log "${label} — gemini quota exhausted (sustained 429s with no assistant progress); aborting"
       [ -n "$marker_dir" ] && [ -d "$marker_dir" ] \
         && touch "$marker_dir/.quota-exhausted" 2>/dev/null || true
-      _kill_tree "$agent_pid" TERM
-      sleep 5
-      _kill_tree "$agent_pid" KILL
+      _gemini_watchdog_terminate_tree "$agent_pid" 5
       return 0
     fi
 
@@ -207,9 +226,7 @@ start_gemini_watchdog() {
         kill -0 "$agent_pid" 2>/dev/null || return 0
       done
       _gemini_watchdog_log "${label} — agy hung ${drip_grace}s after 'Drip stopped'; aborting (cli-log: $cli_log)"
-      _kill_tree "$agent_pid" TERM
-      sleep 5
-      _kill_tree "$agent_pid" KILL
+      _gemini_watchdog_terminate_tree "$agent_pid" 5
       return 0
     fi
 
@@ -218,9 +235,7 @@ start_gemini_watchdog() {
         idle_strikes=$((idle_strikes + 1))
         if [ "$idle_strikes" -ge "$idle_confirm" ]; then
           _gemini_watchdog_log "${label} — agy idle-heartbeat loop (no streamGenerateContent in ${AGY_IDLE_WINDOW_SECS:-600}s, confirmed ${idle_strikes}x); aborting (cli-log: $cli_log)"
-          _kill_tree "$agent_pid" TERM
-          sleep 5
-          _kill_tree "$agent_pid" KILL
+          _gemini_watchdog_terminate_tree "$agent_pid" 5
           return 0
         fi
       else

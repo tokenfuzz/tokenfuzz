@@ -246,7 +246,8 @@ bootstrap_weight() {
   case "$1" in
     test_benchmark|test_workqueue|test_multilang_support) echo 65 ;;
     test_benchmark_report|test_benchmark_cells) echo 45 ;;
-    test_triage|test_triage_reachability|test_audit_core|test_benchmark_aggregate) echo 33 ;;
+    test_timeout|test_triage|test_triage_reachability|test_audit_core|test_benchmark_aggregate) echo 33 ;;
+    test_gemini_watchdog) echo 16 ;;
     *) echo "" ;;
   esac
 }
