@@ -723,16 +723,46 @@ run_dryrun_cell() {
 # directory layout (audit.log, backend.raw.log, repo-root/output/...),
 # which bin/audit has no notion of, so they are not shared watchdog logic.
 
+# cell_backend_succeeded — true if the model-direct backend session in this
+# cell ended with a terminal success result. gemini-cli writes exactly one
+# {"type":"result",...,"status":"success"} record, and only after the stream
+# completes — so its presence means the session ran to the end rather than
+# dying mid-flight. Transient 429/503s that gemini-cli retried with backoff
+# are recovered hiccups under such a run, NOT quota deaths. Only the
+# model-direct backend.raw.log carries this machine-readable verdict; a
+# harness cell has no such line, so this returns false there and the caller
+# falls back to the quota-line scan (preserving prior harness behavior).
+cell_backend_succeeded() {
+  local cell_dir="$1"
+  local raw="$cell_dir/backend.raw.log"
+  [ -s "$raw" ] || return 1
+  # type precedes status within the single-line result record, so a greedy
+  # match between them is anchored to that record and cannot be satisfied by
+  # a stray "status":"success" inside unrelated tool output.
+  grep -I -qE '"type":[[:space:]]*"result".*"status":[[:space:]]*"success"' "$raw"
+}
+
 # cell_log_has_quota_exhaustion — true if any of the cell's logs carry a
-# gemini quota / 429 diagnostic. This is the post-run confirmation that
-# pairs with the live watchdog: even when the watchdog never fired (e.g.
-# the cell finished on its own with a quota error in the tail), a quota
-# line on disk marks the cell quota-dead so the run short-circuits the
-# remaining replicates instead of re-burning a dead account's budget.
+# gemini quota / 429 diagnostic AND the cell did not finish successfully.
+# This is the post-run confirmation that pairs with the live watchdog: even
+# when the watchdog never fired (e.g. the cell finished on its own with a
+# quota error in the tail), a quota line on disk marks the cell quota-dead so
+# the run short-circuits the remaining replicates instead of re-burning a
+# dead account's budget.
+#
+# Two guards keep this from false-flagging a healthy run:
+#   1. A terminal success result wins — a recovered 429/503 in the body of an
+#      otherwise-successful session is not exhaustion (see cell_backend_succeeded).
+#   2. The regex matches only genuine quota signals. A 503 UNAVAILABLE is a
+#      transient "service overloaded" error that gemini-cli retries with
+#      backoff; it is NOT a quota verdict, so it is deliberately excluded.
+#      The real exhaustion signal is 429 / RESOURCE_EXHAUSTED.
 cell_log_has_quota_exhaustion() {
   local cell_dir="$1"
-  local quota_re='RESOURCE_EXHAUSTED|Individual quota reached|exceeded your current quota|exhausted your capacity|quota will reset|quota reached|status (429|503)|code 429|HTTP 429|Too Many Requests'
+  local quota_re='RESOURCE_EXHAUSTED|Individual quota reached|exceeded your current quota|exhausted your capacity|quota will reset|quota reached|status 429|code 429|HTTP 429|Too Many Requests'
   [ -d "$cell_dir" ] || return 1
+  # A session that reached a terminal success result was not killed by quota.
+  cell_backend_succeeded "$cell_dir" && return 1
   # The repo-root/output globs trust per-cell isolation: each cell gets
   # its own checkout, so output/<target>/<backend>/logs/ never carries
   # bytes from a sibling cell. If two cells ever share a checkout, a
