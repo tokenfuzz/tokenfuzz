@@ -3109,8 +3109,8 @@ log "Artifact output roots: results (crashes/findings/state) → ${RESULTS_DIR}/
 if [ "${AUDIT_LOG_LEGEND:-1}" = "1" ]; then
   log "Legend — investigation strategies (one is active per agent at a time; the K=V token 'strategy=Sn' uses the short code, prose/prefix use the full 'StrategyN(name)' form): Strategy1(Prior-fix-review), Strategy2(Invariant-negation), Strategy3(Spec-vs-impl), Strategy4(Differential-build), Strategy5(Lifetime-and-state), Strategy6(Cross-project-mining), Strategy7(Adversarial-input), Strategy8(Property-oracle)" | tee -a "$INDEX"
   log "Legend — hypothesis lifecycle states (appear in agent state files and log summaries): PENDING=hypothesis written, waiting on a testcase | INVESTIGATING=agent is actively probing it | NEEDS_TESTCASE=evidence is in, awaiting a reproducer | ACTIVE=shorthand for any of the previous three | DISCARDED=rejected as non-security or not reproducible" | tee -a "$INDEX"
-  log "Legend — per-agent log line prefix: [AgentN·(cold|deep)·StrategyX(short-name)·ASAN budget=remaining/total] — cold = first iteration with no prior agent state, deep = resuming an in-progress investigation, ASAN budget = sanitizer test runs left in this iteration before the wrapper refuses further calls" | tee -a "$INDEX"
-  log "Legend — recurring metric names: asan_runs=sanitizer test executions completed | hits=testcases that triggered a sanitizer crash | cards=work items waiting in the queue | dry=iterations in a row without finding anything new | cmds=shell commands the agent ran via Bash | tools=LLM tool calls (Read/Grep/Glob/etc.) | tokens=LLM input/output token count" | tee -a "$INDEX"
+  log "Legend — per-agent log line prefix: [AgentN·(cold|deep)·StrategyX(short-name)·probe budget=remaining/total] — cold = first iteration with no prior agent state, deep = resuming an in-progress investigation, probe budget = sanitizer/runner test runs left in this iteration before the wrapper asks the agent to stop opening new hypotheses" | tee -a "$INDEX"
+  log "Legend — recurring metric names: asan_runs=probe executions recorded in scratch output | hits=testcases that triggered a sanitizer or runner diagnostic | cards=work items waiting in the queue | dry=iterations in a row without finding anything new | cmds=shell commands the agent ran via Bash | tools=LLM tool calls (Read/Grep/Glob/etc.) | tokens=LLM input/output token count" | tee -a "$INDEX"
 fi
 
 # Pre-flight: Firefox-specific build check (other browser targets must handle their own builds).
@@ -5220,7 +5220,7 @@ run_agent() {
     # Multiplier in halves: dry=3 → 1.5×, dry=4 → 2×, dry=5 → 2.5×, dry≥6 → 3×.
     local _scaled=$(( agent_asan_budget * (2 + _dry_excess) / 2 ))
     if [ "$_scaled" -gt "$agent_asan_budget" ]; then
-      index_log "Dry-streak ${dry_streak}/${MAX_DRY_SESSIONS}: scaling Agent${agent_num} ASan budget ${agent_asan_budget}→${_scaled} so input-shape exploration isn't budget-pinched (set AUDIT_DRY_STREAK_BUDGET_SCALE=0 to disable)"
+      index_log "Dry-streak ${dry_streak}/${MAX_DRY_SESSIONS}: scaling Agent${agent_num} probe budget ${agent_asan_budget}→${_scaled} so input-shape exploration isn't budget-pinched (set AUDIT_DRY_STREAK_BUDGET_SCALE=0 to disable)"
       agent_asan_budget="$_scaled"
     fi
   fi
@@ -5228,7 +5228,7 @@ run_agent() {
   # Build a self-describing per-line prefix for the agent's interleaved
   # streaming output. The original "[Agent-3-deep_investigation-3-generic]"
   # buried the fields a human reader actually cares about. New form:
-  # "[Agent3·deep·Strategy2(Invariant-negation)·ASAN budget=4/60]" — agent
+  # "[Agent3·deep·Strategy2(Invariant-negation)·probe budget=4/60]" — agent
   # number, launch kind (cold-start vs resuming-deep-investigation),
   # current investigation strategy with its short description, and how
   # many sanitizer runs remain in this iteration's budget. Mode
@@ -5246,7 +5246,7 @@ run_agent() {
   case "$_asan_consumed" in ''|*[!0-9]*) _asan_consumed=0 ;; esac
   _asan_remaining=$(( agent_asan_budget - _asan_consumed ))
   [ "$_asan_remaining" -lt 0 ] && _asan_remaining=0
-  _log_prefix="[Agent${agent_num}·${_launch_short}·${_strat_tag}·ASAN budget=${_asan_remaining}/${agent_asan_budget}]"
+  _log_prefix="[Agent${agent_num}·${_launch_short}·${_strat_tag}·probe budget=${_asan_remaining}/${agent_asan_budget}]"
   # Friendly display name used in the harness's own log lines ("Agent3
   # deep Strategy1(Prior-fix-review) finished ..."). $role itself is
   # kept as-is because it's load-bearing in filenames
@@ -5259,13 +5259,13 @@ run_agent() {
 ## SESSION BUDGET
 
 - Stay within roughly ${max_turns} turns or equivalent effort for this run.
-- Prefer writing state, testcases, and ASan output over broad exploratory chatter.
+- Prefer writing state, testcases, and probe output over broad exploratory chatter.
 
-## ASAN RUN BUDGET (mode=${agent_mode_kind}) — scarce resource, budget it
+## PROBE RUN BUDGET (mode=${agent_mode_kind}) — scarce resource, budget it
 
-- You have **${agent_asan_budget} underlying ASan invocations** this iteration (shared across hypotheses). \`bin/probe\` calls the correct wrapper; the wrapper prints \`BUDGET: N/${agent_asan_budget}\` after each call so you can track it.
+- You have **${agent_asan_budget} underlying probe invocations** this iteration (shared across hypotheses). \`bin/probe\` calls the correct sanitizer or runner wrapper; the wrapper prints \`BUDGET: N/${agent_asan_budget}\` after each call so you can track it.
 - **EXPLORATION vs CONFIRMATION.** Default \`bin/probe <tc>\` (1 run) when first probing an input shape. Only switch to \`bin/probe --confirm <tc>\` (5 runs) AFTER you've seen one crash on an input and need to prove it reproduces. A 0/5 variant wastes 4 runs. For **mode=shell** the runs are ~1 s each so confirmation is cheap — just don't replay identical inputs (check tried-inputs).
-- **RUN VIA PROBE.** Use \`bin/probe scratch-N/<testcase>\` for browser/js/generic/differential probes. It reads TARGET / HYPOTHESIS-ID / HARNESS from the testcase header, discovers RESULTS_DIR / TARGET_ROOT from \`output/<slug>/.session-env\`, coverage-gates browser/js when possible, saves ASan output beside the testcase, and records structured run state.
+- **RUN VIA PROBE.** Use \`bin/probe scratch-N/<testcase>\` for browser/js/generic/differential probes. It reads TARGET / HYPOTHESIS-ID / HARNESS from the testcase header, discovers RESULTS_DIR / TARGET_ROOT from \`output/<slug>/.session-env\`, coverage-gates browser/js when possible, saves run output beside the testcase, and records structured run state.
 - **SEED CORPUS HELPER.** Before hand-writing a testcase, run \`bin/find-seed <file.cpp>[:<Function>]\` and read the top 2-3 candidates. Seed-plus-delta beats from-scratch for reaching upstream guards.
 - If \`BUDGET: EXCEEDED\` appears, wrap up the active hypothesis (record state, save any artifact) and exit. Do NOT start a new investigation past the budget."
 
@@ -5350,7 +5350,7 @@ run_agent() {
 
   local total_prompt_tokens
   total_prompt_tokens=$(estimate_tokens "$prompt_with_budget")
-  log "Starting agent $_role_display mode=${agent_mode_kind} asan_budget=${agent_asan_budget} prompt=$(fmt_count "$total_prompt_tokens")tok turns=$max_turns timeout=$(fmt_secs "$AGENT_TIMEOUT") resume=${use_resume} model=$model"
+  log "Starting agent $_role_display mode=${agent_mode_kind} probe_budget=${agent_asan_budget} prompt=$(fmt_count "$total_prompt_tokens")tok turns=$max_turns timeout=$(fmt_secs "$AGENT_TIMEOUT") resume=${use_resume} model=$model"
 
   # Run the entire pipeline in a subshell. The watchdog uses pkill -P to
   # recursively kill all descendants when the timeout fires.
@@ -6778,9 +6778,9 @@ while true; do
 
   iteration_start_epoch=$(date +%s)
   if [ "$IS_BROWSER_TARGET" -eq 1 ]; then
-    log "═══ Iteration ${iteration} starting (run #${total_iterations} this session, backend=${ACTIVE_BACKEND}); agent pool: ${BROWSER_AGENTS} browser + ${SHELL_AGENTS} shell, ASAN budget per agent: ${BROWSER_ASAN_RUN_BUDGET} (browser) / ${SHELL_ASAN_RUN_BUDGET} (shell); progress so far: ${confirmed_findings_before} confirmed finding(s), ${security_crashes_before} crash candidate(s), ${dry_streak}/${MAX_DRY_SESSIONS} dry iterations (stops at ${MAX_DRY_SESSIONS}) ═══" | tee -a "$INDEX"
+    log "═══ Iteration ${iteration} starting (run #${total_iterations} this session, backend=${ACTIVE_BACKEND}); agent pool: ${BROWSER_AGENTS} browser + ${SHELL_AGENTS} shell, probe budget per agent: ${BROWSER_ASAN_RUN_BUDGET} (browser) / ${SHELL_ASAN_RUN_BUDGET} (shell); progress so far: ${confirmed_findings_before} confirmed finding(s), ${security_crashes_before} crash candidate(s), ${dry_streak}/${MAX_DRY_SESSIONS} dry iterations (stops at ${MAX_DRY_SESSIONS}) ═══" | tee -a "$INDEX"
   else
-    log "═══ Iteration ${iteration} starting (run #${total_iterations} this session, backend=${ACTIVE_BACKEND}); agent pool: ${NUM_AGENTS} worker(s), ASAN budget per agent: ${SHELL_ASAN_RUN_BUDGET}; progress so far: ${confirmed_findings_before} confirmed finding(s), ${security_crashes_before} crash candidate(s), ${dry_streak}/${MAX_DRY_SESSIONS} dry iterations (stops at ${MAX_DRY_SESSIONS}) ═══" | tee -a "$INDEX"
+    log "═══ Iteration ${iteration} starting (run #${total_iterations} this session, backend=${ACTIVE_BACKEND}); agent pool: ${NUM_AGENTS} worker(s), probe budget per agent: ${SHELL_ASAN_RUN_BUDGET}; progress so far: ${confirmed_findings_before} confirmed finding(s), ${security_crashes_before} crash candidate(s), ${dry_streak}/${MAX_DRY_SESSIONS} dry iterations (stops at ${MAX_DRY_SESSIONS}) ═══" | tee -a "$INDEX"
   fi
 
   # Preflight: warn if free RAM is tight. Rough envelope: browsers ~3 GB
