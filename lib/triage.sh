@@ -40,6 +40,21 @@ fi
 # form is idempotent, so re-sourcing in tests is safe.
 : "${LLM_DECISION_TIMEOUT:=45}"
 
+# Byte ceiling for report/description text fed to a single-shot LLM gate
+# (find_quality, crash_confirm). This is a BACKSTOP against pathological or
+# adversarial report sizes, NOT a routine truncator. Measured over real
+# reports: p50 ~7 KB, p99 ~19 KB, largest observed ~115 KB. At 256 KB the cap
+# effectively never binds for a genuine report — so a real finding is judged on
+# its WHOLE text, never a headless prefix (the old 8 KB/12 KB caps truncated
+# ~26% of reports and silently dropped their Impact / Data Flow, a false-negative
+# source). 256 KB is ~64K tokens, comfortably inside every backend's context
+# window, so an oversize report never hard-fails the call into a silent
+# `undecided`. On the rare report that still exceeds this, the gate sends a
+# head+tail slice and logs a POSSIBLE-FALSE-NEGATIVE line (never a silent drop).
+# Operators on a small-context local backend can lower it. `:=` is idempotent so
+# re-sourcing in tests is safe.
+: "${REPORT_GATE_MAX_BYTES:=262144}"
+
 if ! declare -f audit_timeout_run >/dev/null 2>&1; then
   _triage_timeout_dir="${SCRIPT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
   [ -f "$_triage_timeout_dir/lib/timeout.sh" ] && source "$_triage_timeout_dir/lib/timeout.sh"
@@ -59,6 +74,49 @@ _triage_file_sha1() {
 
 _triage_text_sha1() {
   audit_sha1 2>/dev/null | awk '{print $1}'
+}
+
+# Read a report/description for an LLM gate, bounded by REPORT_GATE_MAX_BYTES.
+# For the overwhelming majority of reports (size <= cap) this returns the file
+# WHOLE — the gate sees every section, so a real finding is never judged on a
+# truncated prefix. On the rare overflow it returns a head+tail slice: head-
+# biased because the verdict-critical structure (Fields, Summary, Data Flow,
+# Impact) sits at the top and middle while only the auto-derived severity-
+# rationale boilerplate trails at the very end, and a tail slice keeps the
+# closing Impact / Reproduction sections in view. The two halves are joined by
+# a visible elision marker, and one POSSIBLE-FALSE-NEGATIVE line is logged to
+# STDERR — stderr, not stdout, because callers capture this function's stdout as
+# the verdict body and a log line there would corrupt it. Bytes are never
+# dropped silently.
+#
+# Prints the bounded body on stdout; rc=1 if the file is missing/empty.
+_triage_read_report_bounded() {
+  local path="$1" cap="${REPORT_GATE_MAX_BYTES:-262144}"
+  [ -s "$path" ] || return 1
+  case "$cap" in ''|*[!0-9]*) cap=262144 ;; esac
+  [ "$cap" -ge 1 ] || cap=262144
+
+  local size
+  size=$(wc -c < "$path" 2>/dev/null | tr -d ' ')
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+
+  if [ "$size" -le "$cap" ]; then
+    cat "$path" 2>/dev/null || return 1
+    return 0
+  fi
+
+  # Overflow backstop. Reserve a quarter of the budget for the tail so the
+  # closing sections survive alongside the head.
+  local tail_bytes=$((cap / 4))
+  local head_bytes=$((cap - tail_bytes))
+  local dropped=$((size - head_bytes - tail_bytes))
+  audit_log "POSSIBLE-FALSE-NEGATIVE: report '${path}' is ${size} bytes (> REPORT_GATE_MAX_BYTES=${cap}); the LLM gate saw head ${head_bytes}B + tail ${tail_bytes}B and ${dropped}B from the middle were elided. If real reports are legitimately this large, raise REPORT_GATE_MAX_BYTES so the gate sees the whole report." >&2
+  {
+    head -c "$head_bytes" "$path" 2>/dev/null
+    printf '\n\n[... %d bytes elided by REPORT_GATE_MAX_BYTES (oversize report) ...]\n\n' "$dropped"
+    tail -c "$tail_bytes" "$path" 2>/dev/null
+  } || return 1
+  return 0
 }
 
 # ─── LLM gate cache helpers ───────────────────────────────────────
@@ -469,7 +527,7 @@ llm_confirm_crash_report() {
   fi
 
   local body
-  body=$(head -c 12000 "$report_path" 2>/dev/null) || return 1
+  body=$(_triage_read_report_bounded "$report_path") || return 1
   [ -n "$body" ] || return 1
 
   local prompt
@@ -2233,7 +2291,7 @@ llm_find_quality_decision() {
   fi
 
   local body
-  body=$(head -c 8000 "$desc_path" 2>/dev/null) || return 1
+  body=$(_triage_read_report_bounded "$desc_path") || return 1
 
   local prompt
   prompt=$(render_prompt_template triage_find_quality.md.j2 \

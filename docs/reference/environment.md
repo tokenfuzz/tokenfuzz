@@ -186,3 +186,15 @@ disable the size filter entirely.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `REACHABILITY_AUTO` | `1` | Controls post-crash reachability/severity processing. The default (`1`, alias `external`) runs **full** reachability, which queries public Sourcegraph / GitHub for callers — target symbol names leave the host. Set `local` or `severity-only` to recompute severity from cached `reachability.json` only, with no external network calls. `0` disables reachability/severity post-processing entirely. |
+| `REPORT_GATE_MAX_BYTES` | `262144` | Byte ceiling for the report/description text fed to a single-shot LLM triage gate (`find_quality`, `crash_confirm`). A backstop against pathological/adversarial report sizes, **not** a routine truncator. |
+
+The `REPORT_GATE_MAX_BYTES` default (256 KB) is deliberately generous: a
+genuine report is judged on its **whole** text, never a headless prefix.
+Measured over real reports, p50 is ~7 KB and p99 ~19 KB, so at 256 KB the cap
+effectively never binds — and 256 KB (~64K tokens) stays well inside every
+backend's context window, so an oversize report never hard-fails the call into
+a silent `undecided`. A report that still exceeds the cap is sent as a
+head+tail slice (the closing Impact / Reproduction sections survive) with a
+`POSSIBLE-FALSE-NEGATIVE` line logged to stderr — bytes are never dropped
+silently. Lower it only on a small-context local backend; raise it if real
+reports are legitimately larger and you want them sent whole.
