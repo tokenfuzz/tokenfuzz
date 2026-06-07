@@ -249,7 +249,14 @@ export HITS_LOG_PATH="$RESULTS_DIR/hits-${AGENT_NUM}.log"
 # Binary testcases have no text header; strip non-printable bytes in the C locale so
 # the sed/grep below never abort with "RE error: illegal byte sequence" on macOS. The
 # header keywords are ASCII, so text headers parse identically after sanitizing.
-HEADER="$(head -n 16 "$TESTCASE" 2>/dev/null | LC_ALL=C tr -cd '[:print:]\n\t')"
+# The `head -c 16384` byte cap is load-bearing and must not be removed: this is NOT
+# an LLM/token optimisation (no model sees this text — it only feeds local routing and
+# state linkage). `head -n 16` is *line*-bounded, so on a binary testcase with no/sparse
+# newlines it reads to EOF — a multi-MB repro gets slurped whole into a shell variable,
+# then scanned byte-by-byte by tr. Capping at 16 KB bounds that worst case; the line cap
+# keeps the "metadata lives at the top" semantic and avoids deep false TARGET: matches.
+# 16 KB holds far more than 16 lines of ASCII header, so nothing is lost in practice.
+HEADER="$(head -c 16384 "$TESTCASE" 2>/dev/null | head -n 16 | LC_ALL=C tr -cd '[:print:]\n\t')"
 TARGET_LINE="$(printf '%s\n' "$HEADER" | sed -nE 's/^[^A-Za-z]*TARGET:[[:space:]]*(.+)$/\1/p' | head -1 | sed -E 's/[[:space:]]*(-->|\*\/)[[:space:]]*$//')"
 HYP_LINE="$(printf '%s\n' "$HEADER" | grep -oE 'HYPOTHESIS-ID:[[:space:]]*[^[:space:]>*]+' | head -1 | awk '{print $NF}')"
 CARD_LINE="$(printf '%s\n' "$HEADER" | grep -oE 'CARD-ID:[[:space:]]*[^[:space:]>*]+' | head -1 | awk '{print $NF}')"
