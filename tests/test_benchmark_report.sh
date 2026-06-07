@@ -113,8 +113,11 @@ mkdir -p "$md_asan_target/build-asan/src" "$md_asan_target/build-asan/lib" \
   "$md_asan_target/include" "$md_asan_target/lib"
 cat > "$md_asan_target/target.toml" <<'TOML'
 target = "md-tpl-asan-target"
-asan_bin = "src/fake-cli"
-asan_lib = "lib/libfake.a"
+# asan_bin / asan_lib are TARGET_ROOT-relative and carry the build-asan/
+# prefix in their value — the same convention as a real target.toml and as
+# target_resolve_path (NOT relative to build-asan/, which doubled the prefix).
+asan_bin = "build-asan/src/fake-cli"
+asan_lib = "build-asan/lib/libfake.a"
 includes = ["include", "lib"]
 link_libs = ["-lm", "-lpthread"]
 [sanitizer]

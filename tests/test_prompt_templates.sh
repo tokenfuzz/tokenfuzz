@@ -246,28 +246,122 @@ assert_match "/tmp/o/crashes/" "$md_paths_rendered" \
 # contains the legitimate prohibition mentions of `./crashes/`.
 render_py="$SCRIPT_ROOT/lib/benchmark_model_direct_render.py"
 if [ -f "$render_py" ]; then
-  hint_target="$(mktemp -d)"
-  trap 'rm -rf "$hint_target"' EXIT
+  # target.toml lives at output/<slug>/target.toml (the canonical location
+  # every other consumer resolves via target_output_root), NOT in the
+  # source tree. asan_bin/asan_lib are TARGET_ROOT-relative and carry the
+  # build-asan/ prefix in their value — same convention as a real
+  # target.toml and as target_resolve_path. (Regression: the helper used
+  # to look in-tree and re-join under build-asan/, doubling the prefix, so
+  # the hint blocks rendered empty for every real target.)
+  hint_root="$(mktemp -d)"
+  trap 'rm -rf "$hint_root"' EXIT
+  hint_slug="fakeproj"
+  hint_target="$hint_root/targets/$hint_slug"
   mkdir -p "$hint_target/build-asan/src"
   cat > "$hint_target/build-asan/src/fake_cli" <<'BIN'
 #!/usr/bin/env bash
 true
 BIN
   chmod +x "$hint_target/build-asan/src/fake_cli"
-  cat > "$hint_target/target.toml" <<TOML
-asan_bin = "src/fake_cli"
+  mkdir -p "$hint_root/output/$hint_slug"
+  cat > "$hint_root/output/$hint_slug/target.toml" <<TOML
+asan_bin = "build-asan/src/fake_cli"
 TOML
-  hint_rendered=$(python3 "$render_py" "$hint_target" /tmp/cell)
+  hint_rendered=$(python3 "$render_py" "$hint_target" /tmp/cell "$hint_root")
   hint_only=$(printf '%s\n' "$hint_rendered" | awk '/### Driving the asan/{found=1} found')
   if [ -z "$hint_only" ]; then
-    fail "hint block sentinel not found in rendered prompt — render.py asan_invocation_hint may be empty"
+    fail "hint block sentinel not found in rendered prompt — render.py read target.toml from output/<slug>/ and resolved asan_bin?"
   elif printf '%s' "$hint_only" | grep -E '\./crashes/' >/dev/null; then
     fail "benchmark_model_direct_render.py emits a relative './crashes/' path in the asan invocation hint or recipe"
   else
-    pass "benchmark_model_direct_render.py emits absolute crashes paths in hints"
+    pass "benchmark_model_direct_render.py reads canonical output/<slug>/target.toml and emits absolute hints"
   fi
   assert_match "/tmp/cell/crashes/CRASH-N" "$hint_rendered" \
     "rendered asan invocation hint uses the absolute output-dir crashes path"
+  assert_match "$hint_target/build-asan/src/fake_cli" "$hint_rendered" \
+    "asan_bin resolves to TARGET_ROOT/build-asan/... without doubling the prefix"
+
+  # AUDIT_BUILD_SUFFIX (set per container image) must rewrite build-asan/
+  # → build-asan<suffix>/ in the rendered paths, matching resolve_path.
+  mkdir -p "$hint_target/build-asan-img9/src"
+  cp "$hint_target/build-asan/src/fake_cli" "$hint_target/build-asan-img9/src/fake_cli"
+  chmod +x "$hint_target/build-asan-img9/src/fake_cli"
+  sfx_rendered=$(AUDIT_BUILD_SUFFIX="-img9" \
+    python3 "$render_py" "$hint_target" /tmp/cell "$hint_root")
+  assert_match "$hint_target/build-asan-img9/src/fake_cli" "$sfx_rendered" \
+    "AUDIT_BUILD_SUFFIX rewrites build-asan/ to build-asan<suffix>/ in rendered hints"
+
+  # The hints are NOT asan-only: the primary sanitizer is chosen from
+  # [sanitizer].enabled, so a ubsan-only target (ubsan_bin lives UNDER
+  # [sanitizer], not top-level) renders -fsanitize=undefined + UBSAN_OPTIONS,
+  # not the asan flag or the find-only framing.
+  ub_slug="fakeproj-ub"
+  ub_target="$hint_root/targets/$ub_slug"
+  mkdir -p "$ub_target/build-ubsan/src" "$hint_root/output/$ub_slug" \
+    "$hint_root/lib"
+  printf '#!/bin/sh\nexit 0\n' > "$ub_target/build-ubsan/src/cli"
+  chmod +x "$ub_target/build-ubsan/src/cli"
+  # _san_options() reads <script_root>/lib/sanitizer_options.conf (the single
+  # source of truth); provide it so the canonical UBSAN_OPTIONS string is
+  # exercised end-to-end, as it is when the benchmark passes the real root.
+  cp "$SCRIPT_ROOT/lib/sanitizer_options.conf" "$hint_root/lib/"
+  cat > "$hint_root/output/$ub_slug/target.toml" <<TOML
+target = "$ub_slug"
+[sanitizer]
+enabled = ["ubsan"]
+ubsan_bin = "build-ubsan/src/cli"
+TOML
+  ub_rendered=$(python3 "$render_py" "$ub_target" /tmp/cell "$hint_root")
+  assert_match '### Driving the ubsan binary directly' "$ub_rendered" \
+    "render selects ubsan from [sanitizer].enabled (not asan-only)"
+  assert_match 'UBSAN_OPTIONS=' "$ub_rendered" \
+    "ubsan render uses the UBSAN_OPTIONS env var from sanitizer_options.conf"
+  if printf '%s\n' "$ub_rendered" | grep -qE 'fsanitize=address|Driving the asan'; then
+    fail "ubsan-only target wrongly rendered asan hints"
+  else
+    pass "ubsan-only target does not leak asan-specific hints"
+  fi
+
+  # Go's race detector is a sanitizer-class signal, but it is driven through
+  # [runner] rather than a clang build-<san>/ binary. It must not render as a
+  # missing-native-build findings-only prompt when enabled.
+  race_slug="fakeproj-race"
+  race_target="$hint_root/targets/$race_slug"
+  mkdir -p "$race_target" "$hint_root/output/$race_slug"
+  cat > "$hint_root/output/$race_slug/target.toml" <<TOML
+target = "$race_slug"
+[sanitizer]
+enabled = ["race"]
+[runner]
+bin = "go"
+args = ["run", "-race", "{TESTCASE}"]
+env = ["GORACE=halt_on_error=1"]
+TOML
+  race_rendered=$(python3 "$render_py" "$race_target" /tmp/cell "$hint_root")
+  assert_match '### Driving the race runner directly' "$race_rendered" \
+    "race target renders the runner-driven sanitizer hint"
+  assert_match 'WARNING: DATA RACE' "$race_rendered" \
+    "race target asks for Go race detector output"
+  assert_match 'go run -race /tmp/cell/crashes/CRASH-N/testcase.go' "$race_rendered" \
+    "race runner args expand {TESTCASE} into the crash directory"
+  if printf '%s\n' "$race_rendered" | grep -qE 'No native sanitizer-instrumented build is present|Driving the asan'; then
+    fail "race target wrongly rendered findings-only or asan-specific hints"
+  else
+    pass "race target does not render findings-only or asan hints"
+  fi
+
+  # In-tree target.toml is honored as a fallback (committed fixtures), but
+  # only when the canonical output/<slug>/ copy is absent.
+  rm -rf "$hint_root/output/$hint_slug"
+  cat > "$hint_target/target.toml" <<TOML
+asan_bin = "build-asan/src/fake_cli"
+TOML
+  fallback_rendered=$(python3 "$render_py" "$hint_target" /tmp/cell "$hint_root")
+  if printf '%s\n' "$fallback_rendered" | grep -qE '### Driving the asan'; then
+    pass "benchmark_model_direct_render.py falls back to in-tree target.toml"
+  else
+    fail "benchmark_model_direct_render.py did not honor in-tree target.toml fallback"
+  fi
 fi
 
 # find_first_directive must use the absolute results_dir for its write
