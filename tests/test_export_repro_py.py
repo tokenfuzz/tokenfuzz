@@ -476,6 +476,59 @@ for wrapper_name in ("harness.sh", "harness.bash", "testcase.sh", "reproducer.sh
     assert_eq(d / wrapper_name, found,
               f"find_shell_wrapper picks up {wrapper_name}")
 
+runner_input_dir = Path(tempfile.mkdtemp(prefix="er-shfind-runner-input-"))
+(runner_input_dir / "testcase.sh").write_text(
+    "TARGET: targets/sample-go-asan/auth.go:exerciseAuthorizationRace:53\n"
+    "HYPOTHESIS-ID: H1\n"
+    "CATEGORY: state\n"
+    "race:2\n",
+    encoding="utf-8",
+)
+assert_eq(None, er.find_shell_wrapper([runner_input_dir]),
+          "find_shell_wrapper ignores .sh runner testcase with bare audit headers")
+runner_input = runner_input_dir / "testcase.sh"
+runner_bytes = er.read_testcase_bytes(runner_input).decode("utf-8")
+assert_not_in("TARGET:", runner_bytes,
+              "read_testcase_bytes strips bare TARGET header from runner testcase")
+assert_not_in("HYPOTHESIS-ID:", runner_bytes,
+              "read_testcase_bytes strips bare HYPOTHESIS-ID header from runner testcase")
+assert_in("race:2", runner_bytes,
+          "read_testcase_bytes preserves runner testcase payload")
+
+text_payload = runner_input_dir / "input.txt"
+text_payload.write_text(
+    "// TARGET: targets/sample-swift-asan/Sources/sample-swift-asan/main.swift:18\n"
+    + ("A" * 64) + "\n",
+    encoding="utf-8",
+)
+text_payload_bytes = er.read_testcase_bytes(text_payload).decode("utf-8")
+assert_in("// TARGET:", text_payload_bytes,
+          "read_testcase_bytes preserves comment-style bytes in data testcase")
+assert_in("AAAAAAAA", text_payload_bytes,
+          "read_testcase_bytes preserves text data testcase payload")
+
+swift_repro = runner_input_dir / "swift-reproduce.sh"
+er.write_cli_with_input_template(
+    swift_repro,
+    build_system="swift",
+    upstream_url="FILL_ME",
+    pinned_rev="HEAD",
+    slug="sample-swift-asan",
+    san_bin_rel="",
+    cmake_target="",
+    input_name="input.txt",
+    sanitizer="asan",
+)
+swift_repro_text = swift_repro.read_text(encoding="utf-8")
+assert_in("swift run --quiet -c release", swift_repro_text,
+          "Swift export uses swift run when no asan_bin is configured")
+assert_in("-sanitize=address", swift_repro_text,
+          "Swift export enables ASan through -Xswiftc")
+assert_in('sample-swift-asan "$testcase"', swift_repro_text,
+          "Swift export runs the package executable with the staged input")
+assert_not_in("ASan binary not configured", swift_repro_text,
+              "Swift export does not emit missing-binary stub")
+
 
 # 3. ext_of
 assert_eq("html", er.ext_of("foo.html"), "ext_of: .html")

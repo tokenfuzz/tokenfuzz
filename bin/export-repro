@@ -53,9 +53,29 @@ def usage() -> None:
 
 # ─── Helpers ─────────────────────────────────────────────────────────
 
+# Audit-internal header keys probe writes as the leading lines of a script
+# testcase or harness. Defined once so the comment-prefixed (harness) and
+# bare (testcase) forms below can never drift apart.
+_AUDIT_HEADER_KEYS = "TARGET|HYPOTHESIS-ID|CATEGORY|CARD-ID|MODE|HARNESS|PROPERTY"
+
+# Comment-prefixed form, for stripping headers from harness *source*
+# (`// TARGET: …`, `# TARGET: …`, `<!-- TARGET: … -->`). Prefix is optional
+# so bare headers are caught too.
 _INTERNAL_HEADER_RE = re.compile(
-    r"^\s*(?://|<!--|#)\s*(?:TARGET|HYPOTHESIS-ID|CATEGORY|CARD-ID|HARNESS):"
+    rf"^\s*(?:(?://|<!--|#)\s*)?(?:{_AUDIT_HEADER_KEYS}):"
 )
+
+# Bare form, for script *testcases*: probe strips only un-prefixed header
+# lines (after an optional shebang), so the export mirrors that exactly.
+_TESTCASE_HEADER_RE = re.compile(rf"^[ \t]*(?:{_AUDIT_HEADER_KEYS}):[ \t]*")
+
+# Extensions probe treats as scripts whose leading header lines are stripped
+# before execution (bin/probe _probe_prepare_exec_testcase). Kept in sync with
+# that list so the exported bytes match the bytes probe actually ran.
+_SCRIPT_HEADER_EXTS = frozenset({
+    "js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "rb", "php",
+    "pl", "pm", "r", "R", "sh", "bash", "zsh", "kts",
+})
 
 
 def strip_internal_headers(path: Path) -> str:
@@ -131,7 +151,7 @@ def rewrite_harness_repo_paths(text: str) -> str:
 
 
 def read_testcase_bytes(path: Path) -> bytes:
-    """Read testcase bytes, stripping text-only audit headers when present."""
+    """Read testcase bytes, mirroring probe's script-header execution view."""
     data = path.read_bytes()
     if b"\x00" in data:
         return data
@@ -139,15 +159,20 @@ def read_testcase_bytes(path: Path) -> bytes:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return data
+    if path.suffix.lstrip(".") not in _SCRIPT_HEADER_EXTS:
+        return data
     lines = text.splitlines(keepends=True)
-    changed = False
+    if not any(_TESTCASE_HEADER_RE.match(line) for line in lines[:16]):
+        return data
     out: list[str] = []
     for i, line in enumerate(lines, start=1):
-        if i <= 20 and _INTERNAL_HEADER_RE.match(line):
-            changed = True
+        if i == 1 and line.startswith("#!"):
+            out.append(line)
+            continue
+        if _TESTCASE_HEADER_RE.match(line):
             continue
         out.append(line)
-    return ("".join(out) if changed else text).encode("utf-8")
+    return "".join(out).encode("utf-8")
 
 
 def ext_of(basename: str) -> str:
@@ -536,16 +561,48 @@ def find_harness(scan_dirs: list[Path]) -> Optional[Path]:
     return None
 
 
+_SHELL_SHEBANG_RE = re.compile(r"^\s*#!.*\b(?:sh|bash|zsh|ksh)\b")
+_SHELL_WRAPPER_HINT_RE = re.compile(
+    r'(?m)(?:'
+    r'^\s*set\s+-|'
+    r'^\s*(?:ROOT|SRC|BUILD|SCRATCH|HARNESS_C|HARNESS_BIN|CATALOG_BIN|BIN)=|'
+    r'^\s*(?:if|for|while)\s+|'
+    r'^\s*exec\s+|'
+    r'"\$(?:CATALOG_BIN|BIN|HARNESS_BIN|san_bin)"|'
+    r'\$(?:CATALOG_BIN|BIN|HARNESS_BIN|san_bin|repro_src)\b|'
+    r'/build-(?:a|ub|m|t)san/'
+    r')'
+)
+
+
+def looks_like_shell_wrapper(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    first_line = text.splitlines()[0] if text.splitlines() else ""
+    if _SHELL_SHEBANG_RE.search(first_line):
+        return True
+    return bool(_SHELL_WRAPPER_HINT_RE.search(text))
+
+
 def find_shell_wrapper(scan_dirs: list[Path]) -> Optional[Path]:
     # `harness.sh` / `harness.bash` is the documented convention in
     # lib/languages.py: a `// HARNESS:` directive may name a shell driver
     # that compiles+runs upstream sources directly (no pre-built asan_bin).
     # `testcase.sh` / `reproducer.sh` are legacy hand-coded wrappers that
-    # launch an already-built CLI binary.
+    # launch an already-built CLI binary. Do not treat every .sh with one of
+    # those names as shell code: language runners can preserve a `.sh`
+    # testcase that contains only probe metadata plus input bytes. Those must
+    # be staged as `input.sh` and passed to the runner, not inlined as shell.
     for d in scan_dirs:
-        for name in ("harness.sh", "harness.bash", "testcase.sh", "reproducer.sh"):
+        for name in ("harness.sh", "harness.bash"):
             p = d / name
             if p.is_file():
+                return p
+        for name in ("testcase.sh", "reproducer.sh"):
+            p = d / name
+            if p.is_file() and looks_like_shell_wrapper(p):
                 return p
     return None
 
@@ -1093,6 +1150,16 @@ testcase="$(dirname "$0")/__INPUT_NAME__"
 echo "=== running __SANITIZER_LABEL__ repro: $testcase ===" >&2
 rc=0
 __SANITIZER_ENV_BLOCK__  "$san_bin" "$testcase" || rc=$?
+echo "[repro] exit=$rc" >&2
+exit "$rc"
+"""
+
+SWIFT_RUN = """\
+
+testcase="$(dirname "$0")/__INPUT_NAME__"
+echo "=== running __SANITIZER_LABEL__ repro: $testcase ===" >&2
+rc=0
+__SANITIZER_ENV_BLOCK__  swift run --quiet -c release -Xswiftc -sanitize=__SWIFT_SANITIZER__ -Xswiftc -O --package-path "$src" __SWIFT_EXECUTABLE__ "$testcase" || rc=$?
 echo "[repro] exit=$rc" >&2
 exit "$rc"
 """
@@ -2671,19 +2738,36 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
                                    extra_options: str = "", mode: str = "generic",
                                    recorded_env_options: str = "") -> None:
     meta = sanitizer_meta(sanitizer)
-    text = (
-        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
-        + emit_build(build_system, cmake_target, sanitizer)
-        + emit_bin_resolve(san_bin_rel, sanitizer)
-        + _sub_template(
-            CLI_RUN,
-            __INPUT_NAME__=input_name,
-            __SANITIZER_LABEL__=meta["label"],
-            __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
-                sanitizer, extra_options, mode, recorded_env_options
-            ),
+    if build_system == "swift" and not san_bin_rel:
+        if not meta["flag"]:
+            die(f"Swift runner does not support sanitizer '{sanitizer}'")
+        text = (
+            emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
+            + _sub_template(
+                SWIFT_RUN,
+                __INPUT_NAME__=input_name,
+                __SANITIZER_LABEL__=meta["label"],
+                __SWIFT_SANITIZER__=meta["flag"],
+                __SWIFT_EXECUTABLE__=shq(slug),
+                __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
+                    sanitizer, extra_options, mode, recorded_env_options
+                ),
+            )
         )
-    )
+    else:
+        text = (
+            emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
+            + emit_build(build_system, cmake_target, sanitizer)
+            + emit_bin_resolve(san_bin_rel, sanitizer)
+            + _sub_template(
+                CLI_RUN,
+                __INPUT_NAME__=input_name,
+                __SANITIZER_LABEL__=meta["label"],
+                __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
+                    sanitizer, extra_options, mode, recorded_env_options
+                ),
+            )
+        )
     out.write_text(text, encoding="utf-8")
     os.chmod(out, 0o755)
 
