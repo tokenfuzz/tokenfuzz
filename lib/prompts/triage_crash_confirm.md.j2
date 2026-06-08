@@ -6,11 +6,15 @@ report is filed with upstream maintainers.
 
 CONFIRM only if all five hold:
 
-  1. The ASan/UBSan diagnostic in the report is a real memory-safety
-     class (heap-buffer-overflow, heap-use-after-free, container-overflow,
-     stack-use-after-{return,scope}, alloc-dealloc-mismatch, double-free,
-     intra-object-overflow, type-confusion, or a non-null SEGV with
-     wild-addr / heap-near-freed evidence).
+  1. The sanitizer diagnostic in the report is a real, security-relevant
+     sanitizer-class signal: an ASan memory-safety class (heap-buffer-overflow,
+     heap-use-after-free, container-overflow, stack-use-after-{return,scope},
+     alloc-dealloc-mismatch, double-free, intra-object-overflow, type-confusion,
+     or a non-null SEGV with wild-addr / heap-near-freed evidence), a
+     MemorySanitizer use-of-uninitialized-value, a ThreadSanitizer data race
+     (including Go's `WARNING: DATA RACE`), or a security-class UBSan check
+     (bad-cast/vptr, index-out-of-bounds, incorrect-function-pointer-type,
+     object-size, or non-positive-vla-bound).
   2. The trigger surface is a legitimate input or call-sequence boundary
      (file bytes, packet bytes, web content, regex pattern, media stream,
      archive, IPC bytes, public C API, CLI argv, etc). NOT target-internal

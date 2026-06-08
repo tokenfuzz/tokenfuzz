@@ -45,6 +45,19 @@ rendered=$(python3 "$renderer" triage_crash_trace.md.j2 \
 assert_match "AddressSanitizer trace" "$rendered" "triage trace template renders heading"
 assert_match "heap-use-after-free" "$rendered" "triage trace template injects trace"
 
+# triage_crash_confirm criterion 1 must accept the full sanitizer-class
+# taxonomy, not just ASan — otherwise the final gate rejects real TSan /
+# MSan / Go-race / security-UBSan crashes as out-of-scope (false negatives).
+rendered=$(python3 "$renderer" triage_crash_confirm.md.j2)
+assert_match "MemorySanitizer use-of-uninitialized-value" "$rendered" \
+  "confirm gate accepts MemorySanitizer use-of-uninitialized-value"
+assert_match "ThreadSanitizer data race" "$rendered" \
+  "confirm gate accepts ThreadSanitizer data races"
+assert_match "WARNING: DATA RACE" "$rendered" \
+  "confirm gate accepts Go race-detector reports"
+assert_match "index-out-of-bounds" "$rendered" \
+  "confirm gate accepts security-class UBSan checks"
+
 rendered=$(python3 "$renderer" audit_recon.md.j2 \
   --var "target_slug=demo" \
   --var "scope_block=## Scope"$'\n'"- src/a.c" \

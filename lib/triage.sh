@@ -495,7 +495,7 @@ llm_triage_crash_decision() {
 #   - optional reachability/severity annotation
 #   - caller-contract / Trigger source verdict matrix
 # and looks at the finished report.md (or REPORT.md after bundling) to ask:
-# is this a real, security-relevant memory-safety crash that an upstream
+# is this a real, security-relevant sanitizer-class crash that an upstream
 # maintainer can act on? Cached by report SHA-1 alongside .llm-triage.json
 # so re-running triage on an unchanged report is free.
 #
