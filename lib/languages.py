@@ -260,7 +260,7 @@ LANGUAGES: tuple[Language, ...] = (
             "--", "{TESTCASE}",
         ),
         crash_patterns=(
-            r"thread '.*' panicked at",
+            r"thread '.*'( \([^)]*\))? panicked at",
             r"fatal runtime error:",
             _ASAN_BANNER,
             _TSAN_BANNER,

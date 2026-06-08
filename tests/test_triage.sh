@@ -120,6 +120,13 @@ EOF
 is_autodiscard_crash_output "$TEST_TMPDIR/rust_panic.txt"
 assert_eq 0 $? "Rust panic → autodiscard"
 
+cat > "$TEST_TMPDIR/rust_panic_thread_id.txt" <<'EOF'
+thread 'main' (4734029) panicked at src/record.rs:16:35:
+unsafe precondition(s) violated
+EOF
+is_autodiscard_crash_output "$TEST_TMPDIR/rust_panic_thread_id.txt"
+assert_eq 0 $? "Rust panic with thread id → autodiscard"
+
 # RustMozCrash → discard
 cat > "$TEST_TMPDIR/rust_moz.txt" <<'EOF'
 some trace with RustMozCrash in it

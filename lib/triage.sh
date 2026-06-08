@@ -396,7 +396,7 @@ is_autodiscard_crash_output() {
   fi
 
   # Rust panic (anchored)
-  if grep -qE "^thread '[^']*' panicked at " "$f" 2>/dev/null; then
+  if grep -qE "^thread '[^']*'( \([^)]*\))? panicked at " "$f" 2>/dev/null; then
     return 0
   fi
   if grep -qE '\bRustMozCrash\b' "$f" 2>/dev/null; then
@@ -734,7 +734,7 @@ crash_dir_has_runtime_diagnostic_signal() {
   # Go.
   grep -qE 'panic: runtime error:|fatal error: (stack overflow|out of memory|concurrent map)|^goroutine [0-9]+ \[' "$asan_path" 2>/dev/null && return 0
   # Rust.
-  grep -qE "^thread '.*' panicked at|fatal runtime error:" "$asan_path" 2>/dev/null && return 0
+  grep -qE "^thread '.*'( \([^)]*\))? panicked at|fatal runtime error:" "$asan_path" 2>/dev/null && return 0
   # JVM (Java/Kotlin).
   grep -qE '^Exception in thread|java\.lang\.(OutOfMemoryError|StackOverflowError|NullPointerException|IndexOutOfBoundsException|VerifyError|ClassCastException)' "$asan_path" 2>/dev/null && return 0
   # Python.

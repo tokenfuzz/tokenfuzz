@@ -27,6 +27,8 @@ f=$(mk go.txt "panic: runtime error: index out of range [3]")
 verdict_file_has_crash "$f" && pass "crash: Go runtime panic" || fail "crash: Go runtime panic"
 f=$(mk rust.txt "thread 'main' panicked at src/lib.rs:9:5")
 verdict_file_has_crash "$f" && pass "crash: Rust panic" || fail "crash: Rust panic"
+f=$(mk rust-modern.txt "thread 'main' (4734029) panicked at src/lib.rs:9:5")
+verdict_file_has_crash "$f" && pass "crash: Rust panic with thread id" || fail "crash: Rust panic with thread id"
 f=$(mk tsan.txt "WARNING: ThreadSanitizer: data race")
 verdict_file_has_crash "$f" && pass "crash: ThreadSanitizer" || fail "crash: ThreadSanitizer"
 f=$(mk segv.txt "==42==SEGV on unknown address 0x000000000000")

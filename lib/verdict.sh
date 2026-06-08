@@ -46,7 +46,7 @@ VERDICT_CRASH_PATTERNS=(
   'fatal error: out of memory'
   'fatal error: concurrent map'
   # ── Rust runtime ──
-  "thread '.*' panicked at"
+  "thread '.*'( \([^)]*\))? panicked at"
   'fatal runtime error:'
   # ── Java / JVM ──
   '^Exception in thread'

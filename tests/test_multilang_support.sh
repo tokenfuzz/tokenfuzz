@@ -825,6 +825,8 @@ main.main()" yes
   test_runtime_signal "go-race" "WARNING: DATA RACE
 Read at 0x00c000010040 by goroutine 7:" no  # data race lives in memory-safety classifier
   test_runtime_signal "rust-panic" "thread 'main' panicked at 'oops', src/lib.rs:42:5" yes
+  test_runtime_signal "rust-panic-thread-id" "thread 'main' (4734029) panicked at src/record.rs:16:35:
+unsafe precondition(s) violated" yes
   test_runtime_signal "java" "Exception in thread \"main\" java.lang.NullPointerException
         at App.main(App.java:5)" yes
   test_runtime_signal "node" "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory" yes
