@@ -156,6 +156,62 @@ _triage_cache_write_envelope() {
      > "$cache" 2>/dev/null || true
 }
 
+# Independent multi-vote wrapper shared by the crash-promotion gates
+# (trace triage, confirm, legitimacy). Takes votes from llm_decide
+# back-to-back: any single POSITIVE vote (<bool-field>=true) short-circuits
+# — one vote in favour keeps the crash, preserving the fail-open default —
+# while a NEGATIVE verdict must be echoed by `quorum` independent votes
+# before it sticks. This mirrors the in-call quorum that
+# llm_find_quality_decision and triage_validate_finding already use, so a
+# single hallucinated reject can no longer sink a real crash. Cost is
+# unchanged on the happy path (a keep verdict returns after one call);
+# only rejections pay for the extra scrutiny.
+#
+# Args:  <decision> <required-keys> <bool-field> <prompt>
+# Tunable: CRASH_GATE_QUORUM (default 2).
+# Sets globals (read by the caller after a 0/2 return):
+#   _TRIAGE_GATE_VOTE   = the deciding vote's JSON object
+#   _TRIAGE_GATE_VOTES  = negative votes tallied (== quorum on a reject)
+# Returns: 2 positive · 0 negative-quorum-reached · 1 undecided
+#          (LLM unavailable / unparseable before quorum → caller falls back)
+_triage_gate_quorum_vote() {
+  local decision="$1" keys="$2" field="$3" prompt="$4"
+  local quorum
+  quorum=$(_triage_gate_quorum)
+  _TRIAGE_GATE_VOTE=""
+  _TRIAGE_GATE_VOTES=0
+  local rejects=0 vote_json verdict
+  while :; do
+    vote_json=$(printf '%s' "$prompt" | llm_decide "$decision" "$keys" "$LLM_DECISION_TIMEOUT")
+    [ -n "$vote_json" ] || return 1
+    verdict=$(printf '%s' "$vote_json" | jq -r --arg f "$field" '.[$f]' 2>/dev/null)
+    case "$verdict" in
+      true)
+        _TRIAGE_GATE_VOTE="$vote_json"
+        return 2
+        ;;
+      false)
+        rejects=$((rejects + 1))
+        _TRIAGE_GATE_VOTE="$vote_json"
+        _TRIAGE_GATE_VOTES="$rejects"
+        [ "$rejects" -ge "$quorum" ] && return 0
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
+}
+
+# Resolve the crash-gate quorum (negative votes needed to reject). Defaults
+# to 2, matching FIND_GATE_QUORUM; never below 1.
+_triage_gate_quorum() {
+  local quorum="${CRASH_GATE_QUORUM:-2}"
+  case "$quorum" in ''|*[!0-9]*) quorum=2 ;; esac
+  [ "$quorum" -ge 1 ] || quorum=1
+  printf '%s' "$quorum"
+}
+
 # ─── Crash report parsing (Caller contract + Trigger source) ──────
 # These extract the two normalized fields from a crash report:
 #
@@ -443,12 +499,20 @@ llm_triage_crash_decision() {
       [ "$cache_candidate" = "$cache" ] || cp "$cache_candidate" "$cache" 2>/dev/null || true
       local cached_keep
       cached_keep=$(jq -r '.keep' "$cache_candidate" 2>/dev/null)
-      if [ "$cached_keep" = "false" ]; then
-        jq -r '.reason // "cached LLM discard"' "$cache_candidate" 2>/dev/null
-        return 0
-      fi
       if [ "$cached_keep" = "true" ]; then
         return 2
+      fi
+      # Honor a cached discard only if it was reached by the full quorum.
+      # A legacy single-vote cache (no `votes`, or below quorum) is
+      # re-litigated so the multi-vote gate actually applies.
+      if [ "$cached_keep" = "false" ]; then
+        local cached_votes
+        cached_votes=$(jq -r '.votes // 0' "$cache_candidate" 2>/dev/null)
+        case "$cached_votes" in ''|*[!0-9]*) cached_votes=0 ;; esac
+        if [ "$cached_votes" -ge "$(_triage_gate_quorum)" ]; then
+          jq -r '.reason // "cached LLM discard"' "$cache_candidate" 2>/dev/null
+          return 0
+        fi
       fi
     fi
   done
@@ -466,21 +530,18 @@ llm_triage_crash_decision() {
   prompt=$(render_prompt_template triage_crash_trace.md.j2 \
     --var "trace=${trace}") || return 1
 
-  local json
-  json=$(printf '%s' "$prompt" | llm_decide crash_triage "keep,reason" "$LLM_DECISION_TIMEOUT") || return 1
-  local keep
-  keep=$(printf '%s' "$json" | jq -r '.keep' 2>/dev/null)
-  if [ "$keep" = "false" ]; then
-    local reason
-    reason=$(printf '%s' "$json" | jq -r '.reason' 2>/dev/null)
-    { jq -n --arg reason "$reason" '{keep: false, reason: $reason}' \
+  local vrc reason
+  _triage_gate_quorum_vote crash_triage "keep,reason" keep "$prompt"; vrc=$?
+  reason=$(printf '%s' "$_TRIAGE_GATE_VOTE" | jq -r '.reason // ""' 2>/dev/null)
+  [ "$reason" = "null" ] && reason=""
+  if [ "$vrc" -eq 0 ]; then
+    { jq -n --arg reason "$reason" --argjson votes "$_TRIAGE_GATE_VOTES" \
+        '{keep: false, reason: $reason, votes: $votes}' \
         | _triage_cache_write_envelope "$cache" "crash_triage" "content_sha1" "$hash"; } || true
     printf '%s' "$reason"
     return 0
   fi
-  if [ "$keep" = "true" ]; then
-    local reason
-    reason=$(printf '%s' "$json" | jq -r '.reason' 2>/dev/null)
+  if [ "$vrc" -eq 2 ]; then
     { jq -n --arg reason "$reason" '{keep: true, reason: $reason}' \
         | _triage_cache_write_envelope "$cache" "crash_triage" "content_sha1" "$hash"; } || true
     return 2
@@ -520,9 +581,16 @@ llm_confirm_crash_report() {
     if [ "$cached_accept" = "true" ]; then
       return 2
     fi
+    # Honor a cached reject only if the full quorum agreed; a legacy
+    # single-vote cache is re-litigated through the multi-vote gate.
     if [ "$cached_accept" = "false" ]; then
-      printf '%s' "${cached_reason:-cached LLM rejection}"
-      return 0
+      local cached_votes
+      cached_votes=$(jq -r '.votes // 0' "$cache" 2>/dev/null)
+      case "$cached_votes" in ''|*[!0-9]*) cached_votes=0 ;; esac
+      if [ "$cached_votes" -ge "$(_triage_gate_quorum)" ]; then
+        printf '%s' "${cached_reason:-cached LLM rejection}"
+        return 0
+      fi
     fi
   fi
 
@@ -534,20 +602,20 @@ llm_confirm_crash_report() {
   prompt=$(render_prompt_template triage_crash_confirm.md.j2 \
     --var "body=${body}") || return 1
 
-  local json
-  json=$(printf '%s' "$prompt" | llm_decide crash_confirm "accept,reason" "$LLM_DECISION_TIMEOUT") || return 1
-  local accept reason
-  accept=$(printf '%s' "$json" | jq -r '.accept' 2>/dev/null)
-  reason=$(printf '%s' "$json" | jq -r '.reason' 2>/dev/null)
-  if [ "$accept" = "true" ]; then
-    [ -n "$reason" ] && [ "$reason" != "null" ] || reason="LLM confirmed report"
+  local vrc accept reason
+  _triage_gate_quorum_vote crash_confirm "accept,reason" accept "$prompt"; vrc=$?
+  reason=$(printf '%s' "$_TRIAGE_GATE_VOTE" | jq -r '.reason // ""' 2>/dev/null)
+  [ "$reason" = "null" ] && reason=""
+  if [ "$vrc" -eq 2 ]; then
+    [ -n "$reason" ] || reason="LLM confirmed report"
     { jq -n --arg reason "$reason" '{accept: true, reason: $reason}' \
         | _triage_cache_write_envelope "$cache" "crash_confirm" "content_sha1" "$hash"; } || true
     return 2
   fi
-  if [ "$accept" = "false" ]; then
-    [ -n "$reason" ] && [ "$reason" != "null" ] || reason="LLM rejected report at confirm gate"
-    { jq -n --arg reason "$reason" '{accept: false, reason: $reason}' \
+  if [ "$vrc" -eq 0 ]; then
+    [ -n "$reason" ] || reason="LLM rejected report at confirm gate"
+    { jq -n --arg reason "$reason" --argjson votes "$_TRIAGE_GATE_VOTES" \
+        '{accept: false, reason: $reason, votes: $votes}' \
         | _triage_cache_write_envelope "$cache" "crash_confirm" "content_sha1" "$hash"; } || true
     printf '%s' "$reason"
     return 0
@@ -916,8 +984,15 @@ llm_crash_legitimacy_decision() {
         return 2
       fi
       if [ "$cached_legit" = "false" ] && _triage_cache_sha1_matches "$cache" "evidence_sha1" "$hash"; then
-        jq -r '.reason // "cached crash promotion rejection"' "$cache" 2>/dev/null
-        return 0
+        # Honor a cached rejection only if the full quorum agreed; a legacy
+        # single-vote cache is re-litigated through the multi-vote gate.
+        local cached_votes
+        cached_votes=$(jq -r '.votes // 0' "$cache" 2>/dev/null)
+        case "$cached_votes" in ''|*[!0-9]*) cached_votes=0 ;; esac
+        if [ "$cached_votes" -ge "$(_triage_gate_quorum)" ]; then
+          jq -r '.reason // "cached crash promotion rejection"' "$cache" 2>/dev/null
+          return 0
+        fi
       fi
     fi
   fi
@@ -934,23 +1009,25 @@ llm_crash_legitimacy_decision() {
     --var "results_dir=${RESULTS_DIR}" \
     --var "evidence=${evidence}") || return 1
 
-  local json legitimate reason
-  json=$(printf '%s' "$prompt" | llm_decide legit_crash "legitimate,reason" "$LLM_DECISION_TIMEOUT") || {
-    return 1
-  }
-  legitimate=$(printf '%s' "$json" | jq -r '.legitimate' 2>/dev/null)
-  reason=$(printf '%s' "$json" | jq -r '.reason // ""' 2>/dev/null)
+  local vrc reason
+  _triage_gate_quorum_vote legit_crash "legitimate,reason" legitimate "$prompt"; vrc=$?
+  [ "$vrc" -eq 1 ] && return 1
+  reason=$(printf '%s' "$_TRIAGE_GATE_VOTE" | jq -r '.reason // ""' 2>/dev/null)
   [ -n "$reason" ] && [ "$reason" != "null" ] || reason="crash promotion gate rejected"
 
-  { jq -n --arg require_web "$require_web_gate" \
-       --argjson legitimate "$([ "$legitimate" = "true" ] && echo true || echo false)" \
-       --arg reason "$reason" \
-       '{require_web: $require_web, legitimate: $legitimate, reason: $reason}' \
-      | _triage_cache_write_envelope "$cache" "legit_crash" "evidence_sha1" "$hash"; } || true
-
-  if [ "$legitimate" = "true" ]; then
+  if [ "$vrc" -eq 2 ]; then
+    { jq -n --arg require_web "$require_web_gate" --argjson legitimate true \
+         --arg reason "$reason" \
+         '{require_web: $require_web, legitimate: $legitimate, reason: $reason}' \
+        | _triage_cache_write_envelope "$cache" "legit_crash" "evidence_sha1" "$hash"; } || true
     return 2
   fi
+
+  # vrc == 0: quorum of independent votes agreed the crash is illegitimate.
+  { jq -n --arg require_web "$require_web_gate" --argjson legitimate false \
+       --arg reason "$reason" --argjson votes "$_TRIAGE_GATE_VOTES" \
+       '{require_web: $require_web, legitimate: $legitimate, reason: $reason, votes: $votes}' \
+      | _triage_cache_write_envelope "$cache" "legit_crash" "evidence_sha1" "$hash"; } || true
   printf '%s\n' "$reason"
   return 0
 }
@@ -2252,7 +2329,11 @@ llm_find_quality_decision() {
   # a second time before the cell budget ran out — a finding produced near
   # the end of a run never got the second vote and stayed half-judged.
   # Matches the in-call quorum that triage_validate_finding already uses
-  # for the independent validator.
+  # for the independent validator. The crash-promotion gates share the
+  # leaner _triage_gate_quorum_vote helper; this gate keeps its own loop
+  # because it also threads class/severity out of the accepting vote and
+  # persists a partial reject tally (reject_count + .find_reject_count) for
+  # carry-forward across audit passes.
   local quorum="${FIND_GATE_QUORUM:-2}"
   case "$quorum" in ''|*[!0-9]*) quorum=2 ;; esac
   [ "$quorum" -ge 1 ] || quorum=1

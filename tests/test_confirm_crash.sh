@@ -262,5 +262,53 @@ assert_file_contains "$RESULTS_DIR/crashes/CRASH-CONF-007/.llm-confirm.json" \
   '"accept":[[:space:]]*false' "cache stored despite extra concerns key"
 unset LLM_DECIDE_MOCK_CRASH_CONFIRM
 
+# ── 11. split vote is fail-open: one reject then accept KEEPS the crash ──
+# A single skeptical vote must not sink a real crash. The gate keeps polling
+# until a vote accepts (short-circuit) or `quorum` rejects stack up. Drive it
+# with a queue mock: reject first, accept second.
+mk_promotable_crash CRASH-CONF-Q1 >/dev/null
+qfile="$RESULTS_DIR/.q-confirm-split"
+cat > "$qfile" <<'EOF'
+{"accept":false,"reason":"first reviewer is unsure"}
+---
+{"accept":true,"reason":"second reviewer confirms the OOB write"}
+EOF
+rm -f "$qfile.idx"
+export LLM_DECIDE_MOCK_CRASH_CONFIRM_QUEUE="$qfile"
+report="$RESULTS_DIR/crashes/CRASH-CONF-Q1/REPORT.md"
+out=$(llm_confirm_crash_report "$report" 2>/dev/null); rc=$?
+assert_eq 2 "$rc" "split vote (reject then accept) confirms — one reject can't sink a crash"
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CONF-Q1/.llm-confirm.json" \
+  '"accept":[[:space:]]*true' "split vote: accept cached"
+unset LLM_DECIDE_MOCK_CRASH_CONFIRM_QUEUE
+
+# ── 12. a quorum of rejects sticks, and the cache records the vote count ──
+mk_promotable_crash CRASH-CONF-Q2 >/dev/null
+qfile="$RESULTS_DIR/.q-confirm-reject"
+# Single entry → it "sticks" past the end, so every independent vote rejects.
+cat > "$qfile" <<'EOF'
+{"accept":false,"reason":"trigger needs an undocumented caller action"}
+EOF
+rm -f "$qfile.idx"
+export LLM_DECIDE_MOCK_CRASH_CONFIRM_QUEUE="$qfile"
+report="$RESULTS_DIR/crashes/CRASH-CONF-Q2/REPORT.md"
+out=$(llm_confirm_crash_report "$report" 2>/dev/null); rc=$?
+assert_eq 0 "$rc" "quorum of rejects rejects the crash"
+votes=$(jq -r '.votes' "$RESULTS_DIR/crashes/CRASH-CONF-Q2/.llm-confirm.json" 2>/dev/null)
+assert_eq 2 "$votes" "reject cache records the quorum vote count"
+unset LLM_DECIDE_MOCK_CRASH_CONFIRM_QUEUE
+
+# ── 13. a legacy sub-quorum reject cache is re-litigated, not honored ──
+# CRASH-CONF-Q2 now carries a quorum-backed reject cache (votes=2). With the
+# LLM disabled it is honored (rc=0). Rewriting it to votes=1 — the shape an
+# older single-vote gate wrote — must force a fresh decision instead.
+report="$RESULTS_DIR/crashes/CRASH-CONF-Q2/REPORT.md"
+out=$(LLM_DECIDE_DISABLE=1 llm_confirm_crash_report "$report" 2>/dev/null); rc=$?
+assert_eq 0 "$rc" "votes>=quorum reject cache honored with LLM disabled"
+cache="$RESULTS_DIR/crashes/CRASH-CONF-Q2/.llm-confirm.json"
+tmp=$(jq '.votes = 1' "$cache"); printf '%s\n' "$tmp" > "$cache"
+out=$(LLM_DECIDE_DISABLE=1 llm_confirm_crash_report "$report" 2>/dev/null); rc=$?
+assert_eq 1 "$rc" "sub-quorum (votes=1) reject cache is re-litigated, not honored"
+
 teardown_test_env
 summary
