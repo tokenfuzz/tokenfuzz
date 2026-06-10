@@ -69,6 +69,18 @@ TESTCASE_PREFIXES = (
 )
 
 TEXT_EXTS_REQUIRING_PREFIX = {".txt"}
+
+# Relaxed-mode exclusions: `.txt` stems that denote human-readable prose or
+# metadata about a crash rather than a reproducing input. The relaxed
+# last-resort pass in find_testcase accepts any other non-canonical `.txt`
+# (e.g. `payload.txt`) so a real text reproducer is not lost, but a dir whose
+# only `.txt` is one of these must still read as "no testcase". Inclusion
+# criterion: a word naming notes/output/documentation, never a program input.
+NONINPUT_TEXT_STEMS = {
+    "notes", "note", "readme", "description", "desc", "summary",
+    "comment", "comments", "changelog", "todo", "output", "out",
+    "log", "logs", "analysis", "writeup", "write-up", "explanation",
+}
 _BIN_FILE_RE = re.compile(r"executable|Mach-O|ELF|shared object|dSYM", re.IGNORECASE)
 _ASAN_TESTCASE_RE = re.compile(r"\btestcase=([^ \t\r\n]+)")
 
@@ -183,7 +195,7 @@ def _looks_like_harness_source(path: Path) -> bool:
 
 
 def is_testcase_candidate(path: Path, *, from_asan_header: bool = False,
-                          min_bytes: int = 1) -> bool:
+                          min_bytes: int = 1, relaxed: bool = False) -> bool:
     """Return true when `path` is likely the reproducing testcase.
 
     The rule is deliberately exclusion-based for binary/parser inputs, but
@@ -191,6 +203,11 @@ def is_testcase_candidate(path: Path, *, from_asan_header: bool = False,
     `testcase*.txt`, `reproducer*.txt`) or when ASan recorded the path in its
     `ASAN_RUN_HEADER`. This preserves pcre2-style text inputs without letting
     `notes.txt` satisfy promotion.
+
+    `relaxed=True` drops only the `.txt`-needs-a-canonical-name gate (every
+    artifact/binary/harness exclusion still applies). find_testcase uses it for
+    a last-resort pass so a genuine text reproducer under a non-canonical name
+    (e.g. `payload.txt`) is found rather than failing promotion entirely.
     """
     if not path.is_file():
         return False
@@ -225,6 +242,8 @@ def is_testcase_candidate(path: Path, *, from_asan_header: bool = False,
     if not (prefixed or from_asan_header) and _looks_like_harness_source(path):
         return False
     if path.suffix.lower() in TEXT_EXTS_REQUIRING_PREFIX:
+        if relaxed and path.stem.lower() not in NONINPUT_TEXT_STEMS:
+            return True
         return from_asan_header or prefixed
     return True
 
@@ -321,5 +340,14 @@ def find_testcase(scan_dirs: Iterable[Path], *, asan_files: Iterable[Path] = (),
     for d in dirs:
         for p in _visible_files(d):
             if is_testcase_candidate(p, min_bytes=min_bytes):
+                return p
+
+    # Last resort before the caller reports "no testcase" (which TTL-rejects an
+    # otherwise-complete crash): accept any non-artifact, non-binary,
+    # non-harness file even under a non-canonical `.txt` name. A real reproducer
+    # named `payload.txt` is better than losing the crash.
+    for d in (*audit_dirs, *dirs):
+        for p in _visible_files(d):
+            if is_testcase_candidate(p, min_bytes=min_bytes, relaxed=True):
                 return p
     return None

@@ -236,6 +236,35 @@ EOF
 crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/wild_crash"
 assert_eq 0 $? "wild-addr SEGV → has memory safety signal"
 
+# Wild address SEGV with NO SCARINESS line (print_scariness=0, the default for
+# agent-captured traces and msan/tsan/asan-minimal rows) must still be detected
+# from the faulting address itself.
+mkdir -p "$TEST_TMPDIR/wild_no_scariness"
+cat > "$TEST_TMPDIR/wild_no_scariness/asan.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: SEGV on unknown address 0x4141414141414141 (pc 0x55 bp 0x7f sp 0x7f T0)
+EOF
+crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/wild_no_scariness"
+assert_eq 0 $? "wild-addr SEGV without SCARINESS → has memory safety signal"
+
+# Near-null SEGV with NO SCARINESS line must NOT be a memory-safety signal —
+# a null pointer plus a small struct offset is the low-value null-deref family.
+mkdir -p "$TEST_TMPDIR/nearnull_no_scariness"
+cat > "$TEST_TMPDIR/nearnull_no_scariness/asan.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000008 (pc 0x55 bp 0x7f sp 0x7f T0)
+EOF
+crash_dir_has_memory_safety_asan_signal "$TEST_TMPDIR/nearnull_no_scariness"
+assert_eq 1 $? "near-null SEGV without SCARINESS → no memory safety signal"
+
+# HWAddressSanitizer is a valid sanitizer diagnostic (verdict.sh counts it as a
+# crash); the completeness gate must agree or an HWASan-only crash is
+# TTL-rejected for a "missing valid sanitizer trace".
+hwasan_trace="$TEST_TMPDIR/hwasan.txt"
+cat > "$hwasan_trace" <<'EOF'
+==12345==ERROR: HWAddressSanitizer: tag-mismatch on address 0x0042 at pc 0x55
+EOF
+_triage_has_sanitizer_diagnostic "$hwasan_trace"
+assert_eq 0 $? "HWAddressSanitizer trace → valid sanitizer diagnostic"
+
 # ═══════════════════════════════════════════════════════════════
 # 4. crash_dir_has_web_reachability_evidence
 # ═══════════════════════════════════════════════════════════════
@@ -543,6 +572,31 @@ if grep -qE 'testcase|input\.\*' "$RESULTS_DIR/crashes/CRASH-TC-TXT/.promotion_p
   fail "triage: input.txt recognized as testcase" "testcase/input still marked missing: $(cat "$RESULTS_DIR/crashes/CRASH-TC-TXT/.promotion_pending")"
 else
   pass "triage: input.txt recognized as testcase"
+fi
+
+# A genuine text reproducer under a non-canonical name (payload.txt) must be
+# found via the relaxed last-resort pass — losing it would TTL-reject an
+# otherwise-complete crash. Prose stems (notes.txt) stay excluded; see the
+# CRASH-TC-META case above.
+mkdir -p "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD"
+cat > "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD/asan.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60200000abcd
+EOF
+cat > "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD/report.md" <<'EOF'
+Boundary: file bytes
+Caller controls: testcase payload bytes
+Trusted caller actions: public parser entry point
+Caller contract: obeyed
+Trigger source: bytes
+EOF
+printf 'non-canonical text reproducer %080d\n' 1 > "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD/payload.txt"
+export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":true,"reason":"valid input boundary"}'
+triage_crash_dirs
+unset LLM_DECIDE_MOCK_LEGIT_CRASH
+if grep -qE 'testcase|input\.\*' "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD/.promotion_pending" 2>/dev/null; then
+  fail "triage: payload.txt recognized as testcase" "testcase still marked missing: $(cat "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD/.promotion_pending")"
+else
+  pass "triage: payload.txt recognized as testcase"
 fi
 
 mkdir -p "$RESULTS_DIR/crashes/CRASH-TC-BINONLY"

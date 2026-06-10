@@ -1471,6 +1471,24 @@ pick = er.find_testcase([tc_crash], tc_crash, tc_crash / ".audit")
 assert_eq("input.txt", pick.name if pick else None,
           "find_testcase: canonical input.txt is accepted")
 
+# Relaxed last-resort: a real text reproducer under a non-canonical name is
+# found rather than lost; a prose-named .txt alone is still not a testcase.
+tc_payload = TMP / "tc-payload"
+tc_payload.mkdir()
+(tc_payload / "payload.txt").write_text("non-canonical reproducer " + ("A" * 64),
+                                        encoding="utf-8")
+pick = er.find_testcase([tc_payload], tc_payload, tc_payload / ".audit")
+assert_eq("payload.txt", pick.name if pick else None,
+          "find_testcase: non-canonical payload.txt found via relaxed pass")
+
+tc_prose = TMP / "tc-prose"
+tc_prose.mkdir()
+(tc_prose / "notes.txt").write_text("just some prose about the crash\n" * 4,
+                                    encoding="utf-8")
+pick = er.find_testcase([tc_prose], tc_prose, tc_prose / ".audit")
+assert_eq(None, pick.name if pick else None,
+          "find_testcase: prose-named notes.txt alone is not a testcase")
+
 tc_header = TMP / "tc-header"
 tc_header.mkdir()
 scratch = TMP / "scratch-1"

@@ -411,7 +411,11 @@ evaluate_crash_verdict() {
 _triage_has_sanitizer_diagnostic() {
   local f="$1"
   [ -s "$f" ] || return 1
-  grep -qE 'ERROR: (AddressSanitizer|UndefinedBehaviorSanitizer)|SUMMARY: (AddressSanitizer|UndefinedBehaviorSanitizer)|WARNING: (ThreadSanitizer|MemorySanitizer):|SUMMARY: (ThreadSanitizer|MemorySanitizer):|^WARNING: DATA RACE$|UndefinedBehaviorSanitizer:|^[^[:space:]].*:[0-9]+:[0-9]+: runtime error:' "$f" 2>/dev/null
+  # HWAddressSanitizer is a first-class LLVM sanitizer like ASan/UBSan and
+  # verdict.sh (the canonical crash classifier) already counts it; keep this
+  # diagnostic gate in step with it so an HWASan-only crash dir is not read as
+  # "no valid sanitizer trace" and auto-rejected by the completeness TTL.
+  grep -qE 'ERROR: (AddressSanitizer|HWAddressSanitizer|UndefinedBehaviorSanitizer)|SUMMARY: (AddressSanitizer|HWAddressSanitizer|UndefinedBehaviorSanitizer)|WARNING: (ThreadSanitizer|MemorySanitizer):|SUMMARY: (ThreadSanitizer|MemorySanitizer):|^WARNING: DATA RACE$|UndefinedBehaviorSanitizer:|^[^[:space:]].*:[0-9]+:[0-9]+: runtime error:' "$f" 2>/dev/null
 }
 
 is_autodiscard_crash_output() {
@@ -684,13 +688,17 @@ find_primary_testcase_in_crash_dir() {
     [ -n "$found" ] && [ -s "$found" ] && { printf '%s\n' "$found"; return 0; }
   fi
 
-  local f stem lower sz prefixed
+  # Mirror lib/crash_artifacts.is_testcase_candidate: prefer a canonically
+  # named reproducer, but keep a relaxed fallback (any surviving non-artifact
+  # file, including a bare `.txt`) so a real reproducer under a non-canonical
+  # name like `payload.txt` is found rather than failing promotion entirely.
+  local f stem lower sz prefixed relaxed=""
   while IFS= read -r -d '' f; do
     [ -s "$f" ] || continue
     stem="${f##*/}"
     lower=$(printf '%s' "$stem" | tr '[:upper:]' '[:lower:]')
     case "$stem" in
-      .*|REPORT.md|REPORT.html|report.md|description.md|README.md|reproduce.sh|testcase.sh|reproducer.sh|asan.txt|asan-output.txt|asan_output.txt|msan.txt|tsan.txt|ubsan.txt|harness.c|harness.cc|harness.cpp|harness.cxx|reachability.json|promotion.log|*.asan.txt|*.msan.txt|*.tsan.txt|*.ubsan.txt|*.log|*.md) continue ;;
+      .*|REPORT.md|REPORT.html|report.md|description.md|README.md|reproduce.sh|testcase.sh|reproducer.sh|sanitizer.txt|asan.txt|asan-output.txt|asan_output.txt|msan.txt|tsan.txt|ubsan.txt|harness.c|harness.cc|harness.cpp|harness.cxx|reachability.json|promotion.log|*.sanitizer.txt|*.asan.txt|*.msan.txt|*.tsan.txt|*.ubsan.txt|*.log|*.md) continue ;;
     esac
     case "$lower" in
       asan*|msan*|tsan*|ubsan*|*.asan.*|*.msan.*|*.tsan.*|*.ubsan.*) continue ;;
@@ -706,11 +714,27 @@ find_primary_testcase_in_crash_dir() {
       input.*|input_*|input-*|testcase*|test-case*|tc.*|tc_*|tc-*|repro.*|repro_*|repro-*|reproducer*) prefixed=1 ;;
     esac
     case "$lower" in
-      *.txt) [ "$prefixed" -eq 1 ] || continue ;;
+      *.txt)
+        if [ "$prefixed" -ne 1 ]; then
+          # Hold non-canonical .txt as a relaxed fallback, but skip prose /
+          # metadata stems (notes, readme, output, log, …) — those document a
+          # crash, they don't reproduce it. Mirrors NONINPUT_TEXT_STEMS in
+          # lib/crash_artifacts.py.
+          case "${lower%.txt}" in
+            notes|note|readme|description|desc|summary|comment|comments|changelog|todo|output|out|log|logs|analysis|writeup|write-up|explanation) ;;
+            *) [ -n "$relaxed" ] || relaxed="$f" ;;
+          esac
+          continue
+        fi
+        ;;
     esac
     printf '%s\n' "$f"
     return 0
   done < <(find "$d" -maxdepth 1 -type f ! -name '.*' -print0 2>/dev/null | sort -z)
+  if [ -n "$relaxed" ]; then
+    printf '%s\n' "$relaxed"
+    return 0
+  fi
   return 1
 }
 
@@ -740,8 +764,17 @@ crash_dir_has_memory_safety_asan_signal() {
   # (strcpy-, strncpy-, strncat-, memcpy-, memmove-). Overlap reports
   # still represent attacker-driven out-of-bounds writes.
   grep -qiE 'AddressSanitizer: (heap-buffer-overflow|use-after-free|heap-use-after-free|container-overflow|dynamic-stack-buffer-overflow|stack-buffer-overflow|stack-use-after-return|stack-use-after-scope|global-buffer-overflow|alloc-dealloc-mismatch|intra-object-overflow|double-free|negative-size-param|bad-free|calloc-overflow|new-delete-type-mismatch|invalid-pointer-pair|[a-z]+-param-overlap)' "$asan_path" 2>/dev/null && return 0
-  grep -qE 'SEGV on unknown address 0x[0-9a-fA-F]*[1-9a-fA-F]' "$asan_path" 2>/dev/null \
-    && grep -qE 'SCARINESS: [0-9]+ \(wild-addr' "$asan_path" 2>/dev/null && return 0
+  # Wild-address SEGV. The faulting address itself is the always-present
+  # signal: a dereference of a non-near-null pointer (>= 0x1000, i.e. one page)
+  # is a wild-pointer access, whereas a near-null address (< 0x1000 — a null
+  # pointer plus a small struct offset) is the low-value null-deref family.
+  # `SCARINESS: (wild-addr` is only emitted when print_scariness=1 (ASan full
+  # mode); agent-captured traces and msan/tsan/asan-minimal rows omit it, so we
+  # classify from the address and treat the SCARINESS tag as a secondary
+  # confirmation when present. The regex eats leading zeros after `0x`, then
+  # requires >= 4 significant hex digits, which is exactly >= 0x1000.
+  grep -qE 'SEGV on unknown address 0x0*[1-9a-fA-F][0-9a-fA-F]{3,}' "$asan_path" 2>/dev/null && return 0
+  grep -qE 'SCARINESS: [0-9]+ \(wild-addr' "$asan_path" 2>/dev/null && return 0
   # ThreadSanitizer (data race / used after free in heap object).
   grep -qE 'WARNING: ThreadSanitizer: (data race|heap-use-after-free|thread-leak|deadlock)' "$asan_path" 2>/dev/null && return 0
   # MemorySanitizer (read of uninit memory).
