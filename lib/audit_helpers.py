@@ -525,6 +525,26 @@ def _cmd_effective_work_cards(args: argparse.Namespace) -> int:
 
 # ── extract-vote-json ───────────────────────────────────────────────
 
+# Doubles any backslash that does not begin a valid JSON escape (\", \\,
+# \/, \b, \f, \n, \r, \t, or \uXXXX). Validators write prose about escape
+# sequences ("ESC \\ terminates OSC 8") inside the rationale string, which
+# produces bare backslashes that json.loads rejects. The vote field and
+# every validly-escaped char are left untouched.
+_INVALID_ESCAPE_RE = re.compile(r'\\(?![\\/"bfnrt]|u[0-9a-fA-F]{4})')
+
+
+def _parse_vote_candidate(candidate: str) -> str | None:
+    """Return valid vote JSON (escape-repaired if needed) or None."""
+    for attempt in (candidate, _INVALID_ESCAPE_RE.sub(r"\\\\", candidate)):
+        try:
+            obj = json.loads(attempt)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and obj.get("vote") in ("Promote", "Reject", "Uncertain"):
+            return attempt
+    return None
+
+
 def _cmd_extract_vote_json(_args: argparse.Namespace) -> int:
     text = sys.stdin.read()
     i = 0
@@ -554,14 +574,10 @@ def _cmd_extract_vote_json(_args: argparse.Namespace) -> int:
                 elif c == "}":
                     depth -= 1
                     if depth == 0:
-                        candidate = text[i:j + 1]
-                        try:
-                            obj = json.loads(candidate)
-                            if isinstance(obj, dict) and obj.get("vote") in ("Promote", "Reject", "Uncertain"):
-                                print(candidate)
-                                return 0
-                        except Exception:
-                            pass
+                        parsed = _parse_vote_candidate(text[i:j + 1])
+                        if parsed is not None:
+                            print(parsed)
+                            return 0
                         break
             j += 1
         i = j + 1 if j < n else i + 1
@@ -681,7 +697,9 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("results_dir")
     s.set_defaults(func=_cmd_effective_work_cards)
 
-    s = sub.add_parser("extract-vote-json", help="Extract first brace-balanced vote JSON object from stdin.")
+    s = sub.add_parser("extract-vote-json",
+                       help="Extract first brace-balanced vote JSON object from stdin "
+                            "(repairing invalid string escapes if needed).")
     s.set_defaults(func=_cmd_extract_vote_json)
 
     s = sub.add_parser("emit-event", help="Append a JSONL observability event.")

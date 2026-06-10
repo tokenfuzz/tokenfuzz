@@ -297,6 +297,32 @@ proc = run(
 assert_eq(0, proc.returncode, "string-with-brace rc=0")
 ok('"vote":"Promote"' in proc.stdout, "balanced parse survives '}' inside strings")
 
+# Invalid escape repair: validators writing prose about escape sequences
+# emit bare backslashes ("ESC \ terminates the sequence") that strict JSON
+# rejects. The vote must survive with the backslash doubled, and the
+# repaired output must itself be valid JSON (downstream jq re-parses it).
+proc = run(
+    ["extract-vote-json"],
+    stdin='{"vote":"Promote","rationale":"a pty run emitted ESC ] 8 then ESC \\ in the label","verified":{"reachability":true}}',
+)
+assert_eq(0, proc.returncode, "invalid-escape repair rc=0")
+repaired = json.loads(proc.stdout)
+assert_eq("Promote", repaired.get("vote"), "invalid-escape repair keeps vote")
+ok("ESC \\ in the label" in repaired.get("rationale", ""), "repair preserves rationale text")
+
+proc = run(
+    ["extract-vote-json"],
+    stdin='{"vote":"Reject","rationale":"tab \\t and unicode \\u00e9 stay; bad \\x and \\uZZZZ get doubled"}',
+)
+assert_eq(0, proc.returncode, "mixed valid/invalid escapes rc=0")
+repaired = json.loads(proc.stdout)
+assert_eq("Reject", repaired.get("vote"), "mixed-escape repair keeps vote")
+ok("tab \t and unicode é" in repaired.get("rationale", ""), "valid escapes decode unchanged")
+ok("bad \\x and \\uZZZZ" in repaired.get("rationale", ""), "invalid escapes survive as literal text")
+
+proc = run(["extract-vote-json"], stdin='{"vote":"Promote", broken beyond repair')
+assert_eq(1, proc.returncode, "unbalanced garbage still rc=1")
+
 
 # ── emit-event ──────────────────────────────────────────────────────
 print("\nemit-event")
