@@ -168,9 +168,19 @@ Triage decides whether an artifact is useful and in scope.
 - there is a runnable testcase;
 - sanitizer or differential output is saved;
 - the report fields are complete;
-- the trigger source fits the target's declared attacker surface;
 - the result is not a low-value class such as OOM, assertion-only
   abort, or a plain null dereference without memory-safety impact.
+
+A trigger source outside the target's declared attacker surface is
+*not* a rejection: the crash stays in `crashes/` with a contract
+concern noted and its severity downgraded (×0.7), because the
+threat-model fit is a scoring question, not a filing question.
+
+The LLM-backed crash gates (trace validity, report completeness,
+legitimacy) are **multi-vote**: a single keep vote keeps the crash,
+while a rejection only sticks once independent negative votes reach
+quorum (two by default). The gates fail open — an undecided crash is
+kept rather than dropped.
 
 **For findings, the gates are about substance:**
 
@@ -178,6 +188,11 @@ Triage decides whether an artifact is useful and in scope.
 - the report is substantive — a concrete location, an explicit issue
   class, and a rationale a reviewer can act on. A sanitizer
   reproducer is *not* required.
+
+Because no sanitizer vouches for a finding, an independent validator
+votes each one Promote / Reject / Uncertain. Two Promote votes
+promote it; a single Reject is fatal; an Uncertain vote triggers a
+skeptical tiebreak.
 
 What happens to each artifact:
 

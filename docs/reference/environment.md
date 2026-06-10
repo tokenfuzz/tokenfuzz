@@ -104,7 +104,10 @@ follow-up rather than the default probe budget.
 | `AUDIT_BACKEND` | (none) | Alternative to `--backend`. Same accepted values: `all`, `claude`, `codex`, `gemini`, `oss`. |
 | `USE_GEMINI_CLI` | `0` | Set to `1` to drive the `gemini` backend through Google Gemini CLI (`gemini`) instead of the default Antigravity CLI (`agy`). |
 
-`--model` on the command line wins over hosted/backend-local model
+The model default chain is: `--model` on the command line, then the
+`*_MODEL_DEFAULT` environment variable, then `config/models.toml`.
+The table above shows the shipped `config/models.toml` values.
+`--model` wins over hosted/backend-local model
 defaults for backends that accept a launch-time model. For `gemini`, it
 is supported only with `USE_GEMINI_CLI=1`; the default Antigravity CLI
 (`agy`) keeps model selection in its interactive `/model` setting.

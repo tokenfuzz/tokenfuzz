@@ -103,7 +103,8 @@ You rarely need to open these directly; the two worth knowing are:
 
 Everything else (`work-cards.jsonl`, `patch-cards.jsonl`, the recon
 survey files, the other `state/*.jsonl` streams, per-agent
-`hits-N.log` / `tried-inputs-N.log`, `.static-prompt-rules.md`) is
+`hits-N.log` / `tried-inputs-N.log`, `.static-prompt-rules.md`, and
+the `.*.jsonl.lock` files that serialise concurrent writers) is
 harness internals. The recon outputs are explained in
 [Recon discovery](../guides/recon-discovery.md).
 

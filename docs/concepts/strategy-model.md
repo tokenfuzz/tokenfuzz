@@ -112,6 +112,12 @@ A card is skipped if it is:
 - in a subsystem already owned by another generic-mode agent —
   *unless* the current agent has confirmed a crash or finding there.
 
+That last exception implements "bugs cluster": once an agent proves
+a subsystem productive, the diversity rule stops blocking it from
+neighbouring cards in the same area. The relaxation decays after the
+agent goes dry for a while, so a mined-out subsystem is eventually
+released back to the normal rotation.
+
 Claims live as append-only rows in `state/claims.jsonl`. They expire
 on a timer *and* are released when the associated hypothesis closes,
 so a wedged or killed agent does not poison the queue.

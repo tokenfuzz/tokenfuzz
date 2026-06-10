@@ -240,6 +240,8 @@ the crash is bundled under `crashes/`.
 
 ## Where to run the audit
 
+### Why we recommend a container
+
 You can run TokenFuzz directly on the host, but **we recommend running
 it inside a container.** Two reasons:
 
@@ -261,6 +263,8 @@ sandbox: it puts a user-space kernel between target code and the host
 kernel for most system calls. See [Container runtime
 (recommended)](prerequisites.md#container-runtime-recommended) in the
 prerequisites for the basic Docker and gVisor configuration.
+
+### Using the container helper
 
 The harness ships a helper that:
 
@@ -314,3 +318,18 @@ the boundary the container is meant to provide.
 The helper does **not** auto-run `bin/audit`. You run it yourself from
 the container shell, exactly as on the host. The mounted repo persists
 between shells, so sanitizer builds are not thrown away every session.
+
+## What's next
+
+That is the end of getting started. From here, pick a guide for what
+you want to do next:
+
+- [Triage results](../guides/triage-results.md) — read what the run
+  produced and decide what is worth a maintainer's time.
+- [Backends and ensembling](../guides/backends.md) — run the same
+  target with more than one model backend.
+- [Recon discovery](../guides/recon-discovery.md) — understand the
+  candidate list the audit started from.
+- [Audit lifecycle](../concepts/audit-lifecycle.md) — the end-to-end
+  design, if you prefer to understand the machine before running it
+  longer.

@@ -42,6 +42,22 @@ address the underlying issue
 .reviewed` (or `.keep`) in the FIND directory to pin the current
 state as-is.
 
+## How the gates decide
+
+The LLM-backed crash gates (trace validity, report completeness,
+legitimacy) are multi-vote and fail open. A single keep vote keeps
+the crash; a rejection sticks only once independent negative votes
+reach quorum (two by default, `CRASH_GATE_QUORUM`). A crash that
+collects one negative vote without reaching quorum is parked in
+`crashes-needs-review/` and requeued for another pass instead of
+being rejected outright.
+
+Findings face a parallel mechanism: the substance gate needs two
+rejects before a FIND moves to `findings-rejected/` (the
+`.pending-drop` marker records the first), and findings promoted
+without sanitizer evidence need two independent Promote votes from
+the validator.
+
 ## Common rejection reasons
 
 Most operators arrive on this page because something landed in
@@ -455,3 +471,8 @@ What each command does:
   code or behaviour to inspect.
 - Everything else belongs in state, scratch, or rejected indexes
   until it becomes real evidence.
+
+Ready to hand a crash to the upstream project? See
+[Reproduce a crash](reproduce-a-crash.md) — it is written for the
+maintainer receiving the bundle, and it is the page to send along
+with one.

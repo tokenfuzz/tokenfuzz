@@ -95,12 +95,16 @@ output/<target>/<backend>/results/crashes-rejected/INDEX.html
 
 Common reasons:
 
-- The trigger source is outside `attacker_controls`.
 - Report fields are missing.
 - The crash is OOM, assertion-only abort, timeout-only behaviour,
   or a plain null dereference.
 - The testcase violates a caller contract that real product input
   cannot violate.
+
+A trigger source outside `attacker_controls` is **not** a rejection
+reason — such crashes stay in `crashes/` with a contract concern and
+a lower severity. See
+[Triage results](../guides/triage-results.md#common-rejection-reasons).
 
 Fix the evidence if the result is genuinely in scope. Otherwise
 leave it rejected so future sessions do not repeat it.
@@ -129,6 +133,21 @@ Add the missing concrete location, security impact, and
 reviewer-actionable rationale, then rerun triage. If a human has
 reviewed the terse report and wants to keep it as-is, `touch
 .reviewed` or `.keep` inside the FIND directory.
+
+## An agent looks stuck
+
+Check the timestamp on the agent's most recent log line:
+
+```bash
+ls -lt output/<target>/<backend>/logs/session_*.log | head -3
+tail -5 output/<target>/<backend>/logs/index.log
+```
+
+A long-running sanitizer build or a slow backend turn can look like
+a hang for several minutes; that is normal. If an agent genuinely
+wedges or is killed, the run self-heals: work-card claims expire on
+a timer, so the next iteration reclaims its card and resumes from
+structured state. You do not need to clean anything up by hand.
 
 ## Backend CLI fails
 

@@ -73,9 +73,10 @@ Promote / Reject / Uncertain.
 The votes shape the queue:
 
 - **Promoted** candidates get claim-time precedence over ordinary
-  cards. When a target enables more than one sanitizer, a promoted
-  card is consolidated per sanitizer and can be claimed under either
-  allowed recon strategy.
+  cards. When a target enables more than one sanitizer, one promoted
+  candidate becomes one card per enabled sanitizer, and each card
+  carries a list of allowed strategies so an agent can claim it
+  whichever strategy it is currently running.
 - **Rejected** candidates are demoted, not deleted — testcase
   evidence can still overturn the validator.
 
@@ -161,12 +162,21 @@ Triage is the boundary between "an agent produced an artifact" and
 "this is worth human review." Two contracts, deliberately different:
 
 - **Crashes** need a runnable testcase, saved sanitizer or
-  differential output, complete report fields, declared
-  attacker-surface fit, and they must not be a low-value class (OOM,
-  assertion-only abort, stack overflow, plain null deref).
+  differential output, complete report fields, and they must not be
+  a low-value class (OOM, assertion-only abort, stack overflow,
+  plain null deref). A trigger source outside the declared attacker
+  surface does not reject a crash — it stays in `crashes/` with a
+  contract concern and a severity downgrade.
 - **Findings** need substance — a concrete location, an explicit
   issue class, and a rationale a reviewer can act on. A sanitizer
   reproducer is *not* required.
+
+Both contracts are enforced by multi-vote LLM gates that fail open:
+a single keep vote keeps a crash, and a rejection sticks only at
+quorum (two independent negative votes by default). Findings without
+sanitizer evidence additionally face an independent validator — two
+Promote votes to promote, one Reject is fatal, Uncertain triggers a
+skeptical tiebreak.
 
 Empty FIND directories stay in place marked `.needs-content`.
 Findings rejected twice by the substance gate are quarantined to

@@ -2,7 +2,10 @@
 
 Task-oriented pages for the operator running an audit and for the
 maintainer receiving its output. Pick the one that matches what you
-are about to do.
+are about to do. If you have not set up a target and run a first
+iteration yet, start with
+[Getting started](../getting-started/index.md) — these pages assume
+that baseline.
 
 ## Read these in order for a first run
 

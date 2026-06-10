@@ -226,6 +226,23 @@ bin/coverage-summary --results-dir "$RESULTS"
   subsystem coverage summary. It is only useful after coverage data
   exists for the run.
 
+### Capped source-reading wrappers
+
+Agents read source through wrappers that cap output size so a single
+search cannot flood a prompt. They are plain CLI tools, and they are
+just as useful to an operator poking at a large target tree:
+
+```bash
+bin/rg-safe <pattern> targets/$TARGET/src     # rg with line + byte caps
+bin/peek targets/$TARGET/src/parser.c 200 260 # clamped line-range view
+bin/peek <pattern> targets/$TARGET/src/file.c # clamped grep-with-context
+bin/show-patch <commit> [paths...]            # git show with narrow context + caps
+```
+
+Each prints a footer when a cap fires, so truncation is visible
+rather than silent. The caps are tunable — see
+[Environment](environment.md#context-and-ranking-budgets).
+
 ### `bin/audit-recon` — breadth-first survey of the source tree
 
 `bin/audit` runs this automatically on the first audit of a given
@@ -337,6 +354,9 @@ bin/find-crash-testcase "$RESULTS/crashes/CRASH-001-1"
   report metadata into a crash/finding report.
 - `bin/find-crash-testcase` — prints the testcase path selected from a
   crash directory, useful when an old artifact layout is ambiguous.
+- `bin/show-exclusions "$RESULTS"` — one read-only view of what was
+  kept vs. excluded and why: active crashes, confirmed findings,
+  rejected candidates with reasons, and fuzz-crash noise.
 
 An empty `crashes/` directory is normal after a short smoke run. A
 rejected index with clear reasons is useful output too — it tells
@@ -362,7 +382,12 @@ bin/cleanup_logs  --target "$TARGET" --backend "$BACKEND"
 ```
 
 Both cleanup helpers accept `--backend NAME` for one backend or
-`--backends a,b,c` for a comma-separated set.
+`--backends a,b,c` for a comma-separated set, and `--dry-run` to
+print what would be removed without touching anything. With no
+`--target` they sweep every target under `output/`, so prefer an
+explicit target. `cleanup_state` preserves every crash, finding,
+rejected artifact, corpus seed, and cross-session memory file by
+default — it removes the transient queue and scratch state only.
 
 Run the test suite before merging changes to the harness or to
 docs that describe its behaviour. Use image mode for Linux

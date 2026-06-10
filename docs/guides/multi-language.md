@@ -148,8 +148,12 @@ directory does **not** have a sanitizer signal, it goes to
 ## Writing harnesses in non-C/C++ languages
 
 Use `// HARNESS:` (or `# HARNESS:` for languages whose comment
-delimiter is `#`; the parser is permissive about the prefix). The
-extension picks the build/interpret path.
+delimiter is `#`). "Permissive" here means `bin/probe` ignores
+everything before the `HARNESS:` label as long as it contains no
+letters — so any comment syntax works: `//`, `#`, `;`, `--`,
+`<!-- … -->`, or `/* … */`. The same rule applies to the other
+header fields (`TARGET:`, `HYPOTHESIS-ID:`, `CATEGORY:`, `MODE:`).
+The file extension picks the build/interpret path.
 
 The supported set is the registry in [`lib/languages.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/languages.py); run
 `python3 lib/languages.py list` for the authoritative table (one row per

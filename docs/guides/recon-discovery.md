@@ -64,9 +64,13 @@ The standalone command writes the same two files the auto-run does:
    suspicious arithmetic, unchecked input, lifetime patterns,
    protocol-state quirks. The agent is asked for **recall, not
    precision**; it is told *not* to pre-filter.
-4. **Recon deduplicates and validation-ranks candidates.** Promoted and
-   uncertain candidates move earlier in the audit queue, while rejected
-   candidates are demoted but retained.
+4. **A validator votes each candidate once.** After the sweep, an
+   independent model reviews every emission and votes it Promote,
+   Reject, or Uncertain. Promoted candidates move to the front of
+   the audit queue; rejected and uncertain ones are demoted but
+   retained, so later sanitizer evidence can still overturn the
+   vote. The verdict is recorded on the work card — the validator
+   does not keep re-ranking the queue during the audit.
 5. **Candidates become work cards for `bin/audit`.** When the audit
    starts, the deep agents pick up recon-derived cards before falling
    back to their own ranked queue. If the target enables multiple
@@ -142,9 +146,9 @@ Two safety nets:
 
 The first stage emits broadly — every guard gap the agent notices,
 including patterns that turn out to have an upstream guard or a
-downstream bound. That is expected. The validator then ranks the
-queue so the strongest candidates are investigated first and weaker
-ones drain only after better work. On a recent curl run (1022 source
+downstream bound. That is expected. The validator's votes then order the queue so the
+strongest candidates are investigated first and weaker ones drain
+only after better work. On a recent curl run (1022 source
 files), recon emitted ~30 findings, the validator rejected most with
 concrete rationale, and a small number were promoted to the front of
 the queue — so the audit starts on the best candidates without anyone
