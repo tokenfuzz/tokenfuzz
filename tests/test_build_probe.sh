@@ -35,8 +35,16 @@ C
     return 1
   fi
 
-  # Real TU: compile normally — produces a defined function symbol.
-  "$cc" -c "$target_root/src/realtu.c" -o "$build_dir/CMakeFiles/lib.dir/src/realtu.c.o" 2>/dev/null || return 1
+  # Real TU: emit a deterministic external, non-runtime symbol. Using
+  # assembly keeps the fixture independent of compiler defaults such as
+  # function/data sectioning or visibility flags on CI images.
+  cat > "$build_dir/_real.s" <<'S'
+        .text
+        .globl  realtu_compute
+realtu_compute:
+        .byte 0
+S
+  "$cc" -c "$build_dir/_real.s" -o "$build_dir/CMakeFiles/lib.dir/src/realtu.c.o" 2>/dev/null || return 1
 
   # Stub TU: an empty translation unit produces an object file with no
   # defined symbols. Our classifier treats empty defined-symbol sets as

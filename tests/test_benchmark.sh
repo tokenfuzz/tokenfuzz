@@ -364,7 +364,22 @@ assert_eq "0" "$(echo "$u5" | jq -r '.tokens.output')" \
 # ── T9: bin/benchmark --dry-run end-to-end ───────────────────────────────
 dledger="$work/dry-ledger.md"
 droot="$work/dry-bench"
-dry_out=$(bash "$BENCH" --target dummytarget --dry-run --replicates 2 \
+fake_git_bin="$work/fake-git-bin"
+mkdir -p "$fake_git_bin"
+real_git="$(command -v git)"
+fake_git_log="$work/fake-git.log"
+cat > "$fake_git_bin/git" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
+case "$*" in
+  *"-c safe.directory="*) ;;
+  *) exit 128 ;;
+esac
+exec "$REAL_GIT" "$@"
+SH
+chmod +x "$fake_git_bin/git"
+dry_out=$(REAL_GIT="$real_git" FAKE_GIT_LOG="$fake_git_log" \
+  PATH="$fake_git_bin:$PATH" bash "$BENCH" --target dummytarget --dry-run --replicates 2 \
   --agents 2 --conditions model-direct,harness --ledger "$dledger" \
   --bench-root "$droot" 2>&1)
 rc=$?
@@ -409,6 +424,8 @@ assert_eq "1" "$(jq -r '.model_direct_agents' "$drun_json")" \
   "T9i: model-direct remains a one-agent baseline"
 assert_match '^[0-9a-f]{40}$' "$(jq -r '.tokenfuzz_sha' "$drun_json")" \
   "T9i2: dry-run records the full TokenFuzz repo hash"
+assert_file_contains "$fake_git_log" 'safe[.]directory=' \
+  "T9i3: benchmark asks git to trust the mounted TokenFuzz checkout"
 assert_file_contains "$dledger" 'Harness agents.*2' \
   "T9j: ledger exposes the harness worker count"
 
