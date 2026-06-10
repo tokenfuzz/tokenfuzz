@@ -1,9 +1,20 @@
 # Project runtime state
 AUDIT_STATE*.md.bak
-output/
+output/*
+# Commit only the canary target's config; everything else under output/ is
+# runtime data. (See targets/canary — the committed ground-truth target.)
+!output/canary/
+output/canary/*
+!output/canary/target.toml
+!output/canary/ground-truth.json
 scratch/
 scratch-*/
-targets/
+targets/*
+# Commit the synthetic canary ground-truth target; all other target trees are
+# operator-provisioned working copies. Skip every sanitizer build dir
+# (build-asan, build-ubsan, …); *.log under it is already ignored below.
+!targets/canary/
+targets/canary/build-*/
 
 # bin/benchmark ledger + run artifacts (operator data, not source)
 benchmark-results.md

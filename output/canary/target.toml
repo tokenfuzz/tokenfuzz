@@ -1,0 +1,26 @@
+# target.toml — canary ground-truth target (hand-authored, committed).
+# The answer key lib/benchmark.py scores a run against lives beside this
+# file at output/canary/ground-truth.json — deliberately outside the target
+# tree (targets/canary/) so the audited agents are not handed it. Paths
+# below are relative to target_root.
+
+target        = "canary"
+upstream_url  = "synthetic — TokenFuzz benchmark calibration fixture"
+build_system  = "cmake"
+pinned_rev    = "norev"
+
+# Direct CLI binary — what `bin/run-asan generic` runs by default.
+asan_bin      = "build-asan/canary"
+
+includes      = ["src"]
+link_libs     = ["-lm"]
+
+is_browser    = "0"
+
+[threat_model]
+# The canary reads attacker-supplied input bytes through a single
+# stateless dispatch entry point; nothing else is attacker-controlled.
+attacker_controls = ["bytes"]
+
+[sanitizer]
+enabled = ["asan"]

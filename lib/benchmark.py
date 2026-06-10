@@ -44,6 +44,16 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:  # ClusterFuzz-normalized stack frames — reused, never reinvented.
+    import stack_frames as _sf
+except Exception:  # pragma: no cover - stack_frames should always import
+    _sf = None
+
+try:  # Shared sanitizer-artifact discovery — same policy as export/triage.
+    import crash_artifacts as _ca
+except Exception:  # pragma: no cover - crash_artifacts should always import
+    _ca = None
+
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 
 # ── sanitizer crash oracle ───────────────────────────────────────────────
@@ -963,6 +973,358 @@ def count_recon_candidates(results_dir: Path) -> int:
     return count
 
 
+# ── ground-truth scoring (precision / recall) ────────────────────────────
+#
+# count_confirmed_crashes makes the crash *count* trustworthy, but on an
+# ordinary target there is no oracle for *which* planted bug a crash is, so
+# a run's precision and recall are unknowable — and none of the triage gate
+# thresholds can be calibrated against a labelled answer. The canary target
+# ships a ground-truth manifest (targets/<slug>/ground-truth.json) that pins
+# every planted bug to a stable (primitive, symbol) signature and every
+# deliberate false-positive trap to its refutation. Scoring a results tree
+# against that manifest converts the raw crash count into measured precision
+# and recall: the numbers every gate threshold should be tuned against.
+
+
+def load_ground_truth(path: Path) -> dict | None:
+    """Parse a ground-truth manifest; return None if absent or malformed."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def manifest_errors(manifest: dict) -> list[str]:
+    """Validate a ground-truth manifest before scoring.
+
+    The scorer's identity is (primitive, symbol) for a real bug and
+    (outcome, symbol) for a trap; a manifest typo that drops a field, mis-types
+    the kind, or collides a match-key would silently weaken matching. So
+    validate, up front and loudly, everything the matcher and the score_subset
+    partition depend on:
+
+    * unique non-empty ids;
+    * the exact `kind` the scorer keys on — a planted bug whose kind is typoed
+      away from "real" is dropped from the recall denominator (inflating
+      recall), and a trap whose kind is not "fp" is never matched (a fired
+      trap then counts as an unexpected crash, deflating precision);
+    * the required match fields (signature_symbol, primitive for bugs,
+      expected_outcome for traps);
+    * a unique match-key per list, so a second entry sharing one entry's
+      (primitive, symbol) / (outcome, symbol) is not left permanently
+      unreachable (always 'missed' or 'unexpected').
+    """
+    errors: list[str] = []
+    seen: set[str] = set()
+
+    def check(entries, label: str, *, need_primitive: bool,
+              need_outcome: bool, want_kind: str):
+        if not isinstance(entries, list):
+            errors.append(f"{label} must be a list")
+            return
+        keys: set[tuple[str, str]] = set()
+        for i, e in enumerate(entries):
+            where = f"{label}[{i}]"
+            if not isinstance(e, dict):
+                errors.append(f"{where} must be an object")
+                continue
+            eid = str(e.get("id", "")).strip()
+            if not eid:
+                errors.append(f"{where} is missing a non-empty id")
+            elif eid in seen:
+                errors.append(f"duplicate id {eid!r}")
+            else:
+                seen.add(eid)
+            # kind defaults to the scorer's expectation; an explicit typo is
+            # the silent-drop the scorer cannot otherwise see.
+            kind = str(e.get("kind", want_kind)).strip()
+            if kind != want_kind:
+                errors.append(
+                    f"{where} ({eid or '?'}) has kind {kind!r}, "
+                    f"expected {want_kind!r}")
+            sym = str(e.get("signature_symbol", "")).strip()
+            if not sym:
+                errors.append(f"{where} ({eid or '?'}) needs a signature_symbol")
+            prim = str(e.get("primitive", "")).strip()
+            if need_primitive and not prim:
+                errors.append(f"{where} ({eid or '?'}) needs a primitive")
+            # A trap must declare what a benign occurrence looks like, so the
+            # scorer can tell a fired trap from a real crash in the same frame.
+            outcome = str(e.get("expected_outcome", "")).strip()
+            if need_outcome and not outcome:
+                errors.append(f"{where} ({eid or '?'}) needs an expected_outcome")
+            key = (prim, sym) if need_primitive else (outcome, sym)
+            if sym and key in keys:
+                errors.append(
+                    f"{where} ({eid or '?'}) duplicates match key {key!r}")
+            elif sym:
+                keys.add(key)
+
+    check(manifest.get("planted_bugs", []), "planted_bugs",
+          need_primitive=True, need_outcome=False, want_kind="real")
+    check(manifest.get("false_positive_traps", []), "false_positive_traps",
+          need_primitive=False, need_outcome=True, want_kind="fp")
+    return errors
+
+
+def ground_truth_path_for(target: str, repo_root: Path | None = None) -> Path:
+    """Manifest (answer key) location for a target slug.
+
+    Deliberately under output/<slug>/ — NOT targets/<slug>/ — so it is not in
+    the target tree handed to the audited agents (model-direct is granted the
+    target root; see bin/benchmark), keeping the score blind on that side.
+    output/* is gitignored, so a real-target answer key stays private by
+    default; the synthetic canary's is the one committed exception. Only a
+    target shipping this file is scored; everything else is unaffected.
+    """
+    root = Path(repo_root) if repo_root else Path(__file__).resolve().parent.parent
+    return root / "output" / str(target) / "ground-truth.json"
+
+
+# Evidence is read ONLY from the sanitizer runtime's own output, never from
+# an agent's report.md, so a narrative that merely names a planted bug cannot
+# spoof a ground-truth match.
+#
+# The token a sanitizer prints right after its name, e.g.
+# "AddressSanitizer: heap-buffer-overflow" or "AddressSanitizer: ABRT".
+# Upper-case classes (ABRT, SEGV) are captured too so a trap can be matched
+# by its expected observed outcome, not by frame symbol alone.
+_PRIMITIVE_RE = re.compile(
+    r"(?:AddressSanitizer|UndefinedBehaviorSanitizer|MemorySanitizer|"
+    r"ThreadSanitizer):\s+([A-Za-z][A-Za-z0-9-]+)"
+)
+
+# A symbolized sanitizer stack frame: "    #3 0x... in <func> <loc>".
+_FRAME_FUNC_RE = re.compile(r"^\s*#\d+\s+\S+\s+in\s+(\S+)", re.MULTILINE)
+
+# Markers that end the crash-state stack and begin an allocation/free/context
+# stack. Used only by the fallback frame parser (when lib/stack_frames is
+# unimportable); the shared parser applies the same boundary itself.
+_STACK_STATE_STOP_RE = re.compile(
+    r"^\s*(?:allocated|freed|previously allocated) by", re.MULTILINE
+)
+
+# Sanitizer interceptor/runtime frames (e.g. __asan_memcpy, __tsan_read4).
+# Used only by the fallback crash-site parser to skip past the interceptor to
+# the real faulting function; the shared parser's ignore list does this
+# itself. Structural prefix match, so a new interceptor needs no list edit.
+_SAN_INTERCEPTOR_RE = re.compile(
+    r"^(?:__asan|__hwasan|__msan|__tsan|__ubsan|__sanitizer|__interceptor)"
+)
+
+
+def _find_sanitizer_file(crash_dir: Path) -> Path | None:
+    """Canonical sanitizer-output file in a crash dir, or None.
+
+    Delegates to the shared crash-artifact policy so the benchmark accepts
+    exactly the sanitizer filenames export/triage/cluster do (sanitizer.txt,
+    asan.txt, asan_output.txt, asan-raw*, root msan/tsan/ubsan.txt, suffix
+    files) and skips empty files in favour of a non-empty sibling — otherwise
+    a dir the confirmed-crash oracle counts could yield no evidence and be
+    mis-scored. The small fallback covers the (never-expected) case where the
+    shared module is unimportable."""
+    if _ca is not None:
+        return _ca.find_primary_asan([crash_dir, crash_dir / ".audit"])
+    for name in ("sanitizer.txt", "asan.txt", "asan-output.txt",
+                 "asan_output.txt", "msan.txt", "tsan.txt", "ubsan.txt"):
+        p = crash_dir / name
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    return None
+
+
+def _crash_site_functions(text: str) -> set[str]:
+    """Function name(s) at the crash SITE — the first interesting frame, the
+    same frame bin/cluster-crashes keys its signature on.
+
+    Matching a planted symbol against the crash site (not against every frame
+    in the stack) is what stops a crash whose real fault is elsewhere from
+    being credited to a planted symbol that merely appears deeper as a caller,
+    an allocator, or a freer. The shared ClusterFuzz parser skips sanitizer
+    interceptor frames (e.g. __asan_memcpy) so the site is the true faulting
+    function; the raw and normalized names are both returned so a manifest
+    symbol written either way matches.
+
+    Fallback (shared parser unimportable): the first frame line before any
+    allocation/free marker that is not itself a sanitizer interceptor."""
+    if _sf is not None:
+        fr = _sf.first_interesting_frame(text)
+        if fr is None:
+            return set()
+        return {f for f in (fr.function, fr.state_function) if f}
+    head = _STACK_STATE_STOP_RE.split(text, maxsplit=1)[0]
+    for fn in _FRAME_FUNC_RE.findall(head):
+        if not _SAN_INTERCEPTOR_RE.match(fn):
+            return {fn}
+    return set()
+
+
+def _attribution_evidence(crash_dir: Path) -> tuple[str, set[str]] | None:
+    """Trusted runtime evidence for attribution, or None.
+
+    `(primitive, crash-site function names)` parsed from a CANONICAL sanitizer
+    artifact — the sanitizer runtime's own output file (find_primary_asan:
+    sanitizer.txt, asan.txt, asan_output.txt, the .audit captures, …),
+    content-verified to carry a real diagnostic.
+
+    Attribution is NEVER read from an agent-authored report.md. Prose that
+    pastes an ASan-shaped stack is a *claim*, not runtime proof, and must not
+    manufacture a true positive — the benchmark measures detection backed by
+    proof, not assertion. A confirmed crash with no canonical artifact returns
+    None and is scored as *unattributed*: still counted as a confirmed crash,
+    but never credited to a planted bug, so prose can lower precision and never
+    inflate recall."""
+    san = _find_sanitizer_file(crash_dir)
+    if san is None or not _file_has_sanitizer_output(san):
+        return None
+    try:
+        text = san.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = _PRIMITIVE_RE.search(text)
+    return (m.group(1) if m else ""), _crash_site_functions(text)
+
+
+# A trap's expected_outcome names what a *benign* occurrence looks like.
+# "clean" means it should never be a confirmed crash at all; "abort" maps to
+# the ASan ABRT class; any other value is taken as a literal sanitizer
+# primitive. Anything else observed in the trap's frame is a real unexpected
+# crash, not the trap firing.
+_OUTCOME_PRIMITIVE = {"abort": "ABRT"}
+
+
+def _match_real(primitive: str, crash_site: set[str],
+                bugs: list[dict]) -> dict | None:
+    """First planted bug whose (primitive, crash-site symbol) the evidence
+    satisfies — both facts bin/cluster-crashes keys a crash on. *crash_site*
+    is the faulting frame only, so a planted symbol that merely appears as a
+    caller, allocator, or freer does not match."""
+    for b in bugs:
+        prim = str(b.get("primitive", ""))
+        sym = str(b.get("signature_symbol", ""))
+        if prim and prim != primitive:
+            continue
+        if sym and sym not in crash_site:
+            continue
+        if prim or sym:
+            return b
+    return None
+
+
+def _match_trap(primitive: str, crash_site: set[str],
+                traps: list[dict]) -> dict | None:
+    """First trap whose crash-site symbol AND expected observed outcome match.
+    A trap fires only when the observed sanitizer class is the benign one it
+    predicts; a real memory-safety primitive at a trap's frame falls through
+    to 'unexpected' instead of being excused as the trap."""
+    for t in traps:
+        sym = str(t.get("signature_symbol", ""))
+        outcome = str(t.get("expected_outcome", ""))
+        if outcome in ("", "clean"):
+            continue  # clean trap: any confirmed crash here is unexpected
+        if _OUTCOME_PRIMITIVE.get(outcome, outcome) != primitive:
+            continue
+        if sym and sym not in crash_site:
+            continue
+        return t
+    return None
+
+
+def score_ground_truth(
+    crashes_dir: Path,
+    manifest: dict,
+    members: dict | None = None,
+    conditions: list | None = None,
+) -> dict:
+    """Score confirmed crashes in a tree against a ground-truth manifest.
+
+    *crashes_dir* may be a `crashes/` directory or a results/pool dir that
+    contains one. *members* optionally maps each crash dir name to the
+    condition that produced it (pool-members.json) so the score can be
+    broken out per condition. *conditions* names every condition that should
+    appear in the per-condition breakdown — pass the run's full list so a
+    condition that found zero crashes still gets a 0%-recall row (the exact
+    comparison the canary exists to surface); when omitted, the conditions
+    are inferred from *members*. Recall is over the distinct real bugs found,
+    each credited only from a canonical runtime sanitizer artifact at the
+    crash site; precision is crash-level — every confirmed crash that is not a
+    real planted bug (a fired trap, a novel/unexpected crash, or a confirmed
+    crash with no canonical runtime artifact to attribute) is a false positive.
+    """
+    crashes_dir = Path(crashes_dir)
+    if (crashes_dir / "crashes").is_dir():
+        crashes_dir = crashes_dir / "crashes"
+    members = members or {}
+    real = [
+        b for b in manifest.get("planted_bugs", [])
+        if b.get("kind", "real") == "real"
+    ]
+    traps = manifest.get("false_positive_traps", [])
+
+    confirmed: list[tuple[str, tuple[str, set] | None]] = []
+    if crashes_dir.is_dir():
+        for child in sorted(crashes_dir.iterdir()):
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            # Membership in the scored set is the oracle's own gate (the same
+            # one that produces the headline crash count). Attribution is then
+            # read from a canonical runtime artifact; evidence is None when the
+            # dir is confirmed but carries only prose (e.g. report.md) — scored
+            # as unattributed, never a true positive.
+            if not dir_has_sanitizer_output(child):
+                continue
+            confirmed.append((child.name, _attribution_evidence(child)))
+
+    def score_subset(items: list) -> dict:
+        detected: dict[str, list[str]] = {}
+        traps_fired: dict[str, list[str]] = {}
+        unexpected: list[str] = []
+        unattributed: list[str] = []
+        for name, evidence in items:
+            if evidence is None:
+                unattributed.append(name)
+                continue
+            primitive, crash_site = evidence
+            hit = _match_real(primitive, crash_site, real)
+            if hit:
+                detected.setdefault(hit["id"], []).append(name)
+                continue
+            trap = _match_trap(primitive, crash_site, traps)
+            if trap:
+                traps_fired.setdefault(trap["id"], []).append(name)
+            else:
+                unexpected.append(name)
+        tp_bugs = len(detected)
+        tp_crashes = sum(len(v) for v in detected.values())
+        fp_crashes = (sum(len(v) for v in traps_fired.values())
+                      + len(unexpected) + len(unattributed))
+        total = tp_crashes + fp_crashes
+        return {
+            "real_total": len(real),
+            "detected": sorted(detected),
+            "missed": sorted(b["id"] for b in real if b["id"] not in detected),
+            "recall": round(tp_bugs / len(real), 4) if real else None,
+            "confirmed_crashes": total,
+            "true_positive_crashes": tp_crashes,
+            "false_positive_crashes": fp_crashes,
+            "false_positive_traps_fired": sorted(traps_fired),
+            "unexpected_crashes": sorted(unexpected),
+            "unattributed_crashes": sorted(unattributed),
+            "precision": round(tp_crashes / total, 4) if total else None,
+        }
+
+    result = {"overall": score_subset(confirmed)}
+    conds = list(conditions) if conditions is not None else sorted(set(members.values()))
+    if conds:
+        result["by_condition"] = {
+            cond: score_subset([(n, e) for (n, e) in confirmed
+                                if members.get(n) == cond])
+            for cond in conds
+        }
+    return result
+
+
 def harvest(
     results_dir: Path,
     default_backend: str = "",
@@ -1724,7 +2086,7 @@ def aggregate(bench_dir: Path) -> dict:
             }
         )
 
-    return {
+    report = {
         "bench_dir": str(bench_dir),
         "run": run_meta,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1733,6 +2095,36 @@ def aggregate(bench_dir: Path) -> dict:
         "finding_clusters": finding_attr["clusters"],
         "token_usage": token_usage,
     }
+
+    # When the target ships a ground-truth manifest (the canary, or any
+    # future labelled target), score the pooled crashes against it so the
+    # report carries measured precision/recall, not just counts. Reuse the
+    # member map aggregate already loaded (bench_dir/pool-members.json) and
+    # pass every condition so a zero-crash condition still gets a 0% row.
+    #
+    # A manifest file that exists but is broken surfaces as an explicit
+    # ground_truth_error — for a calibration target a silent "no block" would
+    # hide a broken oracle. A valid manifest is scored only once the pool has
+    # been built (bin/benchmark builds it before the ledger step); on a
+    # partial/manual aggregate the block is simply absent ("not scored")
+    # rather than a misleading 0% recall.
+    pool_crashes = bench_dir / "pool" / "crashes"
+    gt_path = ground_truth_path_for(run_meta.get("target", ""))
+    if gt_path.is_file():
+        manifest = load_ground_truth(gt_path)
+        errs = (["manifest is not a JSON object"] if manifest is None
+                else manifest_errors(manifest))
+        if errs:
+            report["ground_truth_error"] = errs
+        elif pool_crashes.is_dir():
+            report["ground_truth_scoring"] = score_ground_truth(
+                pool_crashes,
+                manifest,
+                members.get("crashes", {}),
+                conditions=[c["condition"] for c in conditions],
+            )
+
+    return report
 
 
 # ── pooling for cross-condition clustering ───────────────────────────────
@@ -2096,6 +2488,71 @@ def _verdict_line(clusters: list[dict], backend: str) -> str:
             f"by **{by}**.")
 
 
+def _fmt_ratio(value) -> str:
+    """Render a precision/recall ratio as a percent, or — when undefined."""
+    if value is None:
+        return "—"
+    return f"{round(float(value) * 100):d}%"
+
+
+def _render_ground_truth(scoring: dict | None,
+                         error: list | None = None) -> list[str]:
+    """Render the precision/recall block for a ground-truth target.
+
+    Empty when the run has no manifest, so non-canary runs are unchanged.
+    A malformed manifest renders an explicit error block instead of a
+    misleading score.
+    """
+    if error:
+        lines = ["### Ground truth", "",
+                 "> ⚠️ **Ground-truth manifest is invalid — not scored.** "
+                 "Fix the answer key, then re-run the ledger step:", ""]
+        lines += [f"> - {e}" for e in error]
+        lines.append("")
+        return lines
+    if not scoring:
+        return []
+    overall = scoring.get("overall", {})
+    by_cond = scoring.get("by_condition", {})
+    lines = ["### Ground truth (precision / recall)", ""]
+    lines.append(
+        "| Condition | Recall | Detected | Missed | Precision "
+        "| Confirmed | False positives | Traps fired |"
+    )
+    lines.append("| --- | --: | --: | --- | --: | --: | --: | --- |")
+
+    def row(label: str, s: dict) -> str:
+        missed = ", ".join(s.get("missed", [])) or "—"
+        traps = ", ".join(s.get("false_positive_traps_fired", [])) or "—"
+        return (
+            f"| {label} "
+            f"| {_fmt_ratio(s.get('recall'))} "
+            f"| {len(s.get('detected', []))}/{s.get('real_total', 0)} "
+            f"| {missed} "
+            f"| {_fmt_ratio(s.get('precision'))} "
+            f"| {s.get('confirmed_crashes', 0)} "
+            f"| {s.get('false_positive_crashes', 0)} "
+            f"| {traps} |"
+        )
+
+    for cond in sorted(by_cond):
+        lines.append(row(f"`{cond}`", by_cond[cond]))
+    lines.append(row("**overall**", overall))
+    lines.append("")
+    lines.append(
+        "> **How to read this.** Scored against the target's "
+        "`ground-truth.json` answer key. **Recall** is the share of planted "
+        "real bugs confirmed at the crash site by a runtime sanitizer "
+        "artifact; **Precision** is the share of confirmed crashes that are "
+        "real planted bugs — a fired false-positive trap, an unexpected crash, "
+        "or a confirmed crash with no runtime artifact to attribute "
+        "(unattributed prose) all count against it. These are the labelled "
+        "numbers the triage gate thresholds are tuned to."
+    )
+    lines.append("")
+    return lines
+
+
 def render_section(report: dict) -> str:
     """One append-only markdown section for a single benchmark run.
 
@@ -2241,6 +2698,10 @@ def render_section(report: dict) -> str:
         "and the severity columns are what that extra work buys."
     )
     lines.append("")
+
+    # ── Ground truth (precision / recall) ────────────────────────────────
+    lines.extend(_render_ground_truth(report.get("ground_truth_scoring"),
+                                      report.get("ground_truth_error")))
 
     # ── Token usage ──────────────────────────────────────────────────────
     token_rows = sorted(
@@ -3093,6 +3554,21 @@ def main(argv: list[str]) -> int:
     p_s.add_argument("--pool-name", default="pool",
                      help="pool dir name under bench-dir (default: pool)")
 
+    p_sc = sub.add_parser(
+        "score",
+        help="score confirmed crashes against a ground-truth manifest",
+    )
+    p_sc.add_argument("crashes_dir", type=Path,
+                      help="a crashes/ dir, or a results/pool dir holding one")
+    p_sc.add_argument("--ground-truth", type=Path, required=True,
+                      help="path to the target's ground-truth.json")
+    p_sc.add_argument("--members", type=Path, default=None,
+                      help="optional pool-members.json for per-condition scores")
+    p_sc.add_argument("--conditions", default="",
+                      help="comma-separated condition list; every one gets a "
+                           "row even if it found zero crashes")
+    p_sc.add_argument("--out", type=Path, default=None)
+
     args = ap.parse_args(argv)
 
     if args.cmd == "harvest":
@@ -3173,6 +3649,36 @@ def main(argv: list[str]) -> int:
             print(f"benchmark: bench dir not found: {args.bench_dir}", file=sys.stderr)
             return 1
         _write_json(args.out, aggregate(args.bench_dir))
+        return 0
+
+    if args.cmd == "score":
+        manifest = load_ground_truth(args.ground_truth)
+        if manifest is None:
+            print(
+                f"benchmark: ground-truth manifest not found or malformed: "
+                f"{args.ground_truth}",
+                file=sys.stderr,
+            )
+            return 1
+        errs = manifest_errors(manifest)
+        if errs:
+            print(
+                f"benchmark: invalid ground-truth manifest {args.ground_truth}:",
+                file=sys.stderr,
+            )
+            for e in errs:
+                print(f"  - {e}", file=sys.stderr)
+            return 1
+        members = {}
+        if args.members and args.members.is_file():
+            try:
+                pm_data = json.loads(args.members.read_text(encoding="utf-8"))
+                members = pm_data.get("crashes", pm_data) if isinstance(pm_data, dict) else {}
+            except (OSError, ValueError):
+                members = {}
+        conds = [c.strip() for c in args.conditions.split(",") if c.strip()] or None
+        scoring = score_ground_truth(args.crashes_dir, manifest, members, conds)
+        _write_json(args.out, scoring)
         return 0
 
     if args.cmd == "ledger":

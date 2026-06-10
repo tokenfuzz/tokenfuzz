@@ -186,6 +186,90 @@ can provide measured numbers.
 The bug id links to the crash directory, and the reproducer link opens
 the rendered report bundle.
 
+**Ground truth** appears only for a target that ships an answer key
+(see below). It reports measured precision and recall per condition, so
+you can see not just how many crashes a run produced but how many were
+the *right* ones.
+
+## Ground truth: precision and recall
+
+The scoreboard counts crashes by sanitizer evidence, which keeps the
+count honest but cannot say *which* bug a crash is. On a real target
+there is no oracle for that, so a run's precision and recall — and the
+triage gate thresholds tuned to them — go unmeasured.
+
+The **canary** target closes that gap. It is a small synthetic
+record-processing program at `targets/canary/` — the one target tree
+committed to the repo (the rest of `targets/` is a gitignored working
+area). It carries a handful of distinct planted memory-safety bugs and a
+couple of deliberate false-positive traps (inputs that look dangerous to a
+reviewer but are not a memory-safety fault), enough to exercise detection,
+triage, clustering, and severity scoring end to end.
+
+The answer key is deliberately **not** in the target tree. It lives at
+`output/canary/ground-truth.json`, outside the directory handed to the
+audited agents, so the score stays blind — an agent auditing the canary is
+not also handed a list of which inputs are real bugs and which are traps.
+The deterministic scorer reads it after the run. Each planted bug pins its
+sanitizer primitive and the stack frame it crashes in; each trap declares
+the benign outcome it expects. The canary is 100% synthetic, so the answer
+key discloses no real project's bug.
+
+`targets/canary/run-benchmark.sh` builds the ASan binary and runs a short
+benchmark (the canary is tiny, so one replicate and a small budget suffice):
+
+```bash
+targets/canary/run-benchmark.sh
+# equivalently, by hand:
+#   bin/setup-target canary --bootstrap --no-llm-config
+#   bin/benchmark --target canary --replicates 1 --budget-wall 900
+```
+
+`lib/benchmark.py` scores the pooled crashes against the answer key and
+adds the **Ground truth** block to the ledger:
+
+- **Recall** — the share of planted bugs confirmed at their crash site by a
+  runtime sanitizer artifact. Attribution is read only from the sanitizer's
+  own output file, never from an agent's `report.md`, so prose that merely
+  names a planted bug cannot earn recall.
+- **Precision** — the share of confirmed crashes that are real planted
+  bugs. A fired trap, an unexpected crash, or a confirmed crash with no
+  runtime artifact to attribute (unattributed prose) all count against it.
+
+A healthy run shows `tokenfuzz` at high recall *and* high precision: it
+confirms the planted bugs and the traps do not slip through as confirmed
+crashes. The direct baseline typically trails on both.
+
+Score an existing results or pool tree directly:
+
+```bash
+python3 lib/benchmark.py score output/canary/<backend>/results \
+  --ground-truth output/canary/ground-truth.json
+```
+
+This is the labelled signal to tune gate thresholds against. Tune
+precision first: a change that raises recall but lets a trap through is
+a regression the canary catches before it reaches a real audit.
+
+### Measuring recall on real bugs
+
+The same `ground-truth.json` shape works for any target. To measure
+recall against real CVEs, add a manifest at
+`output/<slug>/ground-truth.json` whose `planted_bugs` reference the real
+crashing symbols and primitives, pin the target to a vulnerable revision,
+and run the benchmark as usual. The scorer needs no code change — it keys
+on the `(primitive, signature_symbol)` pair the clustering pipeline already
+produces.
+
+!!! warning "Keep real-bug manifests local — never commit them"
+    A real-CVE manifest names actual crashing symbols and primitives, which
+    discloses unreleased bug detail — exactly what the
+    [neutral-fixture rule](https://github.com/tokenfuzz/tokenfuzz/blob/main/docs/development.md)
+    forbids. `output/` is gitignored precisely so these stay private, so a
+    real-bug `output/<slug>/ground-truth.json` is uncommitted by default —
+    leave it that way. The synthetic `canary` answer key is the one committed
+    exception because it implements no real project.
+
 ## Common variations
 
 ```bash
