@@ -67,6 +67,10 @@ selected backend:
 | `gemini` with Google Gemini CLI (`USE_GEMINI_CLI=1`) | `gemini-3.1-pro-preview` |
 | `oss` | No default; `--model <ollama-model>` is required. |
 
+The defaults come from `config/models.toml`; override them per run
+with `--model` or per shell with the `*_MODEL_DEFAULT` variables in
+[Model selection](../reference/environment.md#model-selection).
+
 For a focused smoke test (one strategy only, easier to compare across
 runs), add `--strategy S1` (or `S2`, …, `S8`). Strategy rotation is
 suspended until you remove the flag.
@@ -84,10 +88,7 @@ backend defaults, and any RAM / sibling-audit autotuning.
 
 Browser targets show a split pool instead, for example
 `1 browser-mode + 2 shell-mode`. If ensemble mode is active, the block
-also says which hosted backends will be cycled. Unless
-`AUDIT_LOG_LEGEND=0`, one-time legend lines follow the startup block.
-Every audit log line is prefixed with `[HH:MM:SS]` — there is no
-`[audit]` prefix.
+also says which hosted backends will be cycled.
 
 To stop a running audit, press **Ctrl-C** in the terminal where it's
 running. The orchestrator catches `SIGINT`, lets in-flight agents

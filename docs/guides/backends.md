@@ -34,9 +34,9 @@ How to choose:
   The `gemini` backend uses Antigravity CLI (`agy`) by default; `agy`
   has no launch-time model selector, so use its interactive `/model`
   command. Set `USE_GEMINI_CLI=1` to use Google Gemini CLI (`gemini`)
-  instead; in that mode `--model` is forwarded at launch time and the
-  default is `gemini-3.1-pro-preview`. The other harness defaults are
-  `claude-opus-4-8` and `gpt-5.5`.
+  instead; in that mode `--model` is forwarded at launch time. The
+  per-backend defaults live in
+  [Model selection](../reference/environment.md#model-selection).
 - For `--backend oss`, `--model` is required. The harness checks
   `ollama list` at startup and fails fast if the model is not already
   pulled.

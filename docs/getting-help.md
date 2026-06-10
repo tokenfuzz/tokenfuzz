@@ -34,8 +34,8 @@ quickly.
    failure modes — missing tools, sanitizer build mismatches,
    backend authentication, stalled agents — are covered there.
 4. **Have you read your logs?** `output/<target>/<backend>/logs/`
-   contains the run timeline and per-agent logs. Start with
-   [`README.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/README.md), then `index.log`.
+   contains the run timeline and per-agent logs. Start with the
+   `README.md` inside that directory, then `index.log`.
 
 ## What to include in a bug report
 
@@ -61,10 +61,10 @@ Include:
 6. **What you expected** vs. **what you got**.
 7. **Relevant logs** — paste the useful part of `$LOGS/index.log`.
    If it points at one agent session, include the matching
-   `$LOGS/session_<TS>_<role>.log.summary.md` or
-   `$LOGS/session_<TS>_<role>.log`. Use
-   `$LOGS/.raw/session_<TS>_<role>.log.raw` only as a last resort,
-   and trim it to the failing section.
+   `$LOGS/session_<TS>_<role>-<n>-<mode>.log.summary.md` or
+   `$LOGS/session_<TS>_<role>-<n>-<mode>.log`. Use the raw transcript
+   under `$LOGS/.raw/` only as a last resort, and trim it to the
+   failing section.
 
 A minimal template:
 

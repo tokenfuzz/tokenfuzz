@@ -49,7 +49,10 @@ upstream-derived [`lib/clusterfuzz_stacktrace.py`](https://github.com/tokenfuzz/
    *crash state*. Two crashes with the same crash state are the same bug.
 5. **Bucket** crashes by crash state. Near-identical stacks that differ
    only in deep tail frames still group via a longest-common-subsequence
-   comparison of the top frames.
+   comparison of the top frames (implemented in `bin/cluster-crashes`).
+   An additional per-line fuzzy-similarity fallback exists but is
+   opt-in via `CLUSTER_FUZZY_MATCH=1` — by default only exact and
+   LCS matches merge.
 
 Crucially, the crash state **stops at allocation stacks** — the "freed
 by" / "previously allocated by" sections of a use-after-free report are

@@ -137,7 +137,7 @@ The rows are also emitted as bare-label lines. Triage reads the
 bare-label form, and `REPORT.html` renders the table. The fields:
 
 ```text
-Surface: network|library-api|library|file|cli|tests|maint|internal
+Surface: network|library-api|cli|maint-tool|unknown
 Trigger source: bytes|call-sequence|timing|race|protocol-state|env|fs-state
 Caller contract: obeyed|violated|unspecified
 Boundary:
@@ -148,8 +148,10 @@ Parameter control: direct|mapped|harness-only|none
 
 Notes:
 
-- `Surface` describes where the crash is reachable from. Write one of
-  the tokens above; `bin/reachability` normalises it (and may promote
+- `Surface` describes where the crash is reachable from. Agents write
+  a short label, optionally followed by prose (`library-api — C
+  harness calls app_read_memory`); export normalises it to one of the
+  tokens above, and `bin/reachability` classifies it (it may promote
   `library` → `library_popular` or `cli` → `cli_production` based on
   external caller counts) before computing the advisory severity. An
   unset `Surface` defaults to `unknown` and under-scores real
@@ -167,9 +169,11 @@ A typical exported `REPORT.md` looks like this. `bin/export-repro`
 emits the `## Fields` table first, then the bare-label lines triage
 parses, then the auto-Severity bullet, then the agent's narrative,
 then `## Expected sanitizer output`, then the reproduce pointer.
+(The project, symbols, and line numbers below are invented for
+illustration.)
 
 ````markdown
-# CRASH-001-1: heap-buffer-overflow READ in xmlNextChar
+# CRASH-001-1: heap-buffer-overflow READ in app_next_char
 
 ## Fields
 
@@ -177,41 +181,41 @@ then `## Expected sanitizer output`, then the reproduce pointer.
 |:----------------------|:------|
 | Primitive             | heap-buffer-overflow READ of size 4 |
 | Severity              | High |
-| Surface               | library-api (C harness calls xmlReadMemory) |
+| Surface               | library-api (C harness calls app_read_memory) |
 | Trigger source        | bytes |
 | Caller contract       | obeyed |
-| Boundary              | Untrusted XML bytes parsed by libxml2. |
-| Caller controls       | XML document contents and length. |
+| Boundary              | Untrusted document bytes parsed by the library. |
+| Caller controls       | Document contents and length. |
 | Parameter control     | direct |
 | Trusted caller actions| none |
 | Cluster               | C1 |
-| Dedup frames          | xmlNextChar → xmlParseCharRef → xmlParseReference |
+| Dedup frames          | app_next_char → app_parse_char_ref → app_parse_reference |
 | Reproduction rate     | 5/5 |
 | Strategy              | S7 |
 
 Surface: library-api
 Trigger source: bytes
 Caller contract: obeyed
-Dedup frames: xmlNextChar → xmlParseCharRef → xmlParseReference
-Boundary: Untrusted XML bytes parsed by libxml2.
-Caller controls: XML document contents and length.
+Dedup frames: app_next_char → app_parse_char_ref → app_parse_reference
+Boundary: Untrusted document bytes parsed by the library.
+Caller controls: Document contents and length.
 Parameter control: direct
 Strategy: S7
 - **Severity**: High (auto: I=34 R=27 C=0.95)
 
-Out-of-bounds 4-byte read in `xmlNextChar` reached from
-`xmlParseCharRef` while consuming a malformed numeric character
+Out-of-bounds 4-byte read in `app_next_char` reached from
+`app_parse_char_ref` while consuming a malformed numeric character
 reference. The length check on the entity buffer occurs after the
 read, not before. Reachable from any caller passing attacker-supplied
-XML through `xmlReadMemory` / `xmlReadFile`.
+documents through `app_read_memory` / `app_read_file`.
 
 ## Expected sanitizer output
 
 ```
 ==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address …
-    #0 0x… in xmlNextChar parser.c:225
-    #1 0x… in xmlParseCharRef parser.c:2403
-    #2 0x… in xmlParseReference parser.c:7611
+    #0 0x… in app_next_char parser.c:225
+    #1 0x… in app_parse_char_ref parser.c:2403
+    #2 0x… in app_parse_reference parser.c:7611
 …
 ```
 
@@ -219,7 +223,7 @@ Full original output: `sanitizer.txt`.
 
 ## Reproduce
 
-Run `./reproduce.sh /path/to/clean/libxml2`.
+Run `./reproduce.sh /path/to/clean/sampleproj`.
 ````
 
 Notes on the fields:
@@ -331,6 +335,8 @@ CRASH-001-1/
   input.<ext>
   harness.{c,cc,cpp,cxx} # when applicable
   sanitizer.txt
+  patch.diff             # optional: candidate fix that passes `git apply --check`
+  reachability.json      # optional: caller search + advisory severity
   .audit/
 ```
 

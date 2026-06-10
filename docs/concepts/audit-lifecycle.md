@@ -190,9 +190,9 @@ kept rather than dropped.
   reproducer is *not* required.
 
 Because no sanitizer vouches for a finding, an independent validator
-votes each one Promote / Reject / Uncertain. Two Promote votes
-promote it; a single Reject is fatal; an Uncertain vote triggers a
-skeptical tiebreak.
+(`bin/validate-finding`, run with no shared context) votes each one
+Promote / Reject / Uncertain. Two Promote votes promote it; a single
+Reject is fatal; an Uncertain vote triggers a skeptical tiebreak.
 
 What happens to each artifact:
 
@@ -225,6 +225,8 @@ reproduce.sh       single command, no env vars
 input.<ext>        the testcase bytes
 harness.{c,cc,cpp,cxx} present iff the bug uses a C/C++ harness
 sanitizer.txt      full sanitizer output
+patch.diff         optional candidate fix
+reachability.json  optional: caller search + advisory severity
 .audit/            original agent-authored files, kept for provenance
 ```
 

@@ -90,10 +90,9 @@ Notes:
   base images.
 - `file` is called out explicitly because the harness uses it to
   distinguish compiled reproducers from scripts.
-- `nodejs` (and `npm`) are needed by `bin/audit` itself — its
-  `gemini_cli_check_bundled_ripgrep` diagnostic uses `node` for portable
-  realpath and platform/arch detection — and by the npm-based backends
-  (`codex`, `@google/gemini-cli`). The same packages cover both.
+- `nodejs` and `npm` are needed by the npm-based backend CLIs
+  (`codex`, `@google/gemini-cli`) and by a few harness diagnostics
+  that call `node`.
 
 ### Fedora / RHEL
 
@@ -130,8 +129,8 @@ tools above:
 
 | Backend | Install and authenticate | Audit command |
 | --- | --- | --- |
-| Claude Code | Install from the [Claude Code docs](https://docs.claude.com/en/docs/claude-code), then authenticate the `claude` CLI (`claude` will prompt on first use). Default model: `claude-opus-4-8`; pass `--model <id>` to override. | `bin/audit --backend claude` |
-| Codex | `npm install -g @openai/codex`, then authenticate the `codex` CLI. Default model: `gpt-5.5`; pass `--model <id>` to override. | `bin/audit --backend codex` |
+| Claude Code | Install from the [Claude Code docs](https://docs.claude.com/en/docs/claude-code), then authenticate the `claude` CLI (`claude` will prompt on first use). Pass `--model <id>` to override the default model. | `bin/audit --backend claude` |
+| Codex | `npm install -g @openai/codex`, then authenticate the `codex` CLI. Pass `--model <id>` to override the default model. | `bin/audit --backend codex` |
 | Gemini | Default: install [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) with `curl -fsSL https://antigravity.google/cli/install.sh \| bash`, then run `agy` once to authenticate. `agy` has no `--model` selector; use its interactive `/model` command. Alternative: install Google Gemini CLI, set `USE_GEMINI_CLI=1`, and pass `--model <id>` when needed. | `bin/audit --backend gemini --target <name>` |
 | Local model (`oss`) | The `oss` backend reuses the Codex CLI with its `--oss` switch, so install Codex first. Then install [Ollama](https://ollama.com), `ollama pull <model>`, and confirm it appears in `ollama list`. `--model` is **required** for `oss`. | `bin/audit --backend oss --model <ollama-model>` |
 

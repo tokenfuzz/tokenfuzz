@@ -125,24 +125,37 @@ Before export, a crash directory commonly includes:
 
 ```text
 CRASH-001-1/
-  testcase.html
-  asan.txt              # sanitizer output sidecar; non-ASan logs may also appear
-  report.md
-  reproducer.sh
+  testcase.<ext>        # .html, .js, .py, .dat, … depending on the target
+  asan.txt              # sanitizer output sidecar; msan.txt / tsan.txt /
+                        # ubsan.txt appear for the matching sanitizer
+  report.md             # agent-authored narrative + fields
+  reproducer.sh         # agent-authored rerun script
+  patch.diff            # optional agent-suggested fix
 ```
+
+A crash that triage has accepted but not finished promoting carries a
+`.promotion_pending` marker; it clears when the bundle below is
+written.
 
 After export, the maintainer-facing bundle has:
 
 ```text
 CRASH-001-1/
-  REPORT.md             # field table + ASan summary; hand-edit this
+  REPORT.md             # field table + sanitizer summary; hand-edit this
   REPORT.html           # auto-generated sibling of REPORT.md
   reproduce.sh          # ./reproduce.sh /path/to/source
-  input.html
+  input.<ext>           # the testcase bytes
+  harness.{c,cc,cpp,cxx} # present iff the bug uses a C/C++ harness
   sanitizer.txt         # original sanitizer output
+  patch.diff            # optional: candidate fix
+  reachability.json     # optional: caller search + advisory severity
   .audit/
   .dup-of               # only on non-canonical cluster members
 ```
+
+Crash directories may also carry dot-files the triage gates leave
+behind (`.llm-*.json` vote caches, `.reachability_ok`, and similar
+markers). They are harness internals — safe to ignore when reviewing.
 
 `REPORT.md` carries a `Cluster: <ID>` line. Non-canonical cluster
 members also have a `.dup-of` file naming the canonical CRASH. The
@@ -225,7 +238,7 @@ output/<target>/<backend>/logs/
   index.jsonl
   llm-decisions.log
   session_<TS>_<role>-<n>-<mode>.log
-  session_<TS>_<role>-<n>-<mode>.summary.md
+  session_<TS>_<role>-<n>-<mode>.log.summary.md
   .raw/
 ```
 

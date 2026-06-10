@@ -16,7 +16,8 @@ as a pipeline:
 - **Eight investigation strategies.** Deep agents work that queue with
   prior-fix mining, invariant negation, spec-vs-implementation,
   differential testing, lifetime and state, cross-project peer-fix
-  mining, parser-input engineering, and property oracles — across Claude,
+  mining, adversarial input and fuzz engineering, and property
+  oracles — across Claude,
   Codex, Gemini, or a local Ollama model behind one probe-and-triage
   contract. See [Strategy model](concepts/strategy-model.md) and
   [Backends and ensembling](guides/backends.md).
@@ -70,12 +71,8 @@ export BACKEND="<backend>"          # one of: claude, codex, gemini, oss
 export RESULTS="output/$TARGET/$BACKEND/results"
 
 bin/setup-target "$TARGET" <repo-url>
-# --bootstrap prepares the target's build so the audit can run. For C/C++
-# it produces a sanitizer build under build-asan/; other languages prepare
-# through their own toolchain (cargo, go, swift, npm, ...), which picks up
-# sanitizer flags where it supports them (e.g. Go's -race, Swift's
-# -sanitize={SWIFT_SANITIZER}). Enabled sanitizers are set per target in
-# target.toml's [sanitizer] block.
+# Prepare the build: a sanitizer build under build-asan/ for C/C++;
+# other languages run their own toolchain step (cargo, go, npm, …).
 bin/setup-target "$TARGET" --bootstrap
 
 # Pass 1 for a single-iteration smoke test; omit it for a continuous run.

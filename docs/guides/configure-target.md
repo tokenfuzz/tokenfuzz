@@ -92,10 +92,9 @@ the full per-language matrix.
    bin/setup-target <target>
    ```
 
-   Note: `setup-target` refreshes generated fields from the current
-   checkout and build outputs. `--no-llm-config` skips the best-effort
-   threat-model and S6 lookalike project suggestions; not recommended
-   unless you have a specific reason to stay offline.
+   `setup-target` refreshes generated fields from the current
+   checkout and build outputs without touching values you have
+   already reviewed.
 
 3. Confirm `asan_bin` points to the ASan executable you want generic
    or browser runs to start.
@@ -263,7 +262,7 @@ Even when another sanitizer is enabled, ASan remains the usual first
 pass for crash prioritisation. It produces the clearest reproduction
 bundles, and the triage rules are tuned around that workflow.
 
-## Reproduction bundle fields
+## Reachability scoring fields
 
 Add this when it helps:
 
@@ -271,9 +270,10 @@ Add this when it helps:
 reachability_ignore = ["GNOME/libxml2"]
 ```
 
-It filters external-caller reachability results to drop the project's
-own sources and known vendored copies. It is not a substitute for
-correct sanitizer binary paths.
+`bin/reachability` searches public code for external callers of a
+crashing function when scoring severity. This list drops matches from
+the project's own sources and known vendored copies so they do not
+inflate the caller count.
 
 ## When the generated values need review
 

@@ -41,29 +41,16 @@ parallel workers. For browser targets, prefer `BROWSER_AGENTS` and
 | `ASAN_TIMEOUT` | browser/generic/xpcshell `15`; JS `10` | ASan timeout for normal runs. |
 | `FUZZ_ASAN_TIMEOUT` | `600` | ASan timeout for fuzz-mode runs. |
 
+UBSan, MSan, and TSan follow the same pattern when one sanitizer is
+dramatically slower or faster than ASan on your target:
+`UBSAN_TIMEOUT`, `MSAN_TIMEOUT`, and `TSAN_TIMEOUT` mirror
+`ASAN_TIMEOUT`, and `FUZZ_MSAN_TIMEOUT` / `FUZZ_TSAN_TIMEOUT` mirror
+`FUZZ_ASAN_TIMEOUT` (UBSan reuses `UBSAN_TIMEOUT` for fuzz mode).
+Most runs never need any of them.
+
 Do not use shell `timeout` directly in audit workflows. The
 harness timeout helpers keep behaviour consistent across macOS
 and Linux.
-
-## Per-sanitizer timeouts
-
-UBSan, MSan, and TSan have their own equivalents of `ASAN_TIMEOUT` /
-`FUZZ_ASAN_TIMEOUT` plus a third knob for fuzz-repro runs. Reach for
-these when one sanitizer is dramatically slower or faster than ASan
-on your target.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `ASAN_FUZZ_REPRO_TIMEOUT` | `20` | ASan timeout for fuzz-repro runs. |
-| `UBSAN_TIMEOUT` | browser/generic `15`; JS `10` | UBSan timeout for normal runs. |
-| `UBSAN_TIMEOUT` (fuzz mode) | `600` | UBSan fuzz-mode timeout. Unlike ASan/MSan/TSan there is no `FUZZ_UBSAN_TIMEOUT`; fuzz-mode reuses `UBSAN_TIMEOUT` (default `600` here). |
-| `UBSAN_FUZZ_REPRO_TIMEOUT` | `20` | UBSan timeout for fuzz-repro runs. |
-| `MSAN_TIMEOUT` | generic `15`; JS `10` | MSan timeout for normal runs. |
-| `FUZZ_MSAN_TIMEOUT` | `600` | MSan timeout for fuzz-mode runs. |
-| `MSAN_FUZZ_REPRO_TIMEOUT` | `20` | MSan timeout for fuzz-repro runs. |
-| `TSAN_TIMEOUT` | generic `15`; JS `10` | TSan timeout for normal runs. |
-| `FUZZ_TSAN_TIMEOUT` | `600` | TSan timeout for fuzz-mode runs. |
-| `TSAN_FUZZ_REPRO_TIMEOUT` | `20` | TSan timeout for fuzz-repro runs. |
 
 ## LLVM
 
@@ -100,7 +87,6 @@ follow-up rather than the default probe budget.
 | `CLAUDE_MODEL_DEFAULT` | `claude-opus-4-8` | Default model name passed to the `claude` CLI when `--model` is omitted. |
 | `CODEX_MODEL_DEFAULT` | `gpt-5.5` | Default model name passed to the `codex` CLI when `--model` is omitted. |
 | `GEMINI_MODEL_DEFAULT` | `gemini-3.1-pro-preview` | Default model for the `gemini` backend. Only consulted with `USE_GEMINI_CLI=1`; the default Antigravity CLI (`agy`) has no launch-time model flag. |
-| `CODEX_OSS_MODEL_DEFAULT` | (empty) | Default for lower-level `oss` backend helpers. Normal `bin/audit --backend oss` runs should pass `--model <ollama-model>` explicitly. |
 | `AUDIT_BACKEND` | (none) | Alternative to `--backend`. Same accepted values: `all`, `claude`, `codex`, `gemini`, `oss`. |
 | `USE_GEMINI_CLI` | `0` | Set to `1` to drive the `gemini` backend through Google Gemini CLI (`gemini`) instead of the default Antigravity CLI (`agy`). |
 
@@ -151,7 +137,6 @@ bounded by default.
 | `PEEK_GREP_AFTER` | `30` | Clamp for `bin/peek -A`. |
 | `PEEK_GREP_BEFORE` | `8` | Clamp for `bin/peek -B`. |
 | `RANK_WORK_LIMIT` | `120` | Number of work cards produced by the ranker. |
-| `STATE_RESUME_RECENT_LIMIT` | `5` | Recent rows included in compact resume output. |
 
 ## Container build directories
 
@@ -176,28 +161,13 @@ refactors/features.
 | `PEER_VCS_MAX_LINES` | `400` | Maximum insertions + deletions for a fix candidate. |
 
 The defaults are deliberately generous — a real fix usually also
-carries a regression test, header change, and changelog entry, and
-`git --shortstat` counts all of it. Too tight a bound silently drops
-genuine fixes. Candidate volume is capped separately, so widening
-these does not multiply LLM-call count. Raise them when a target's
-upstream fixes land in larger commits (e.g. `PEER_VCS_MAX_LINES=1000`
-for projects with bulky test-data files); set them very high to
-disable the size filter entirely.
+carries a regression test and changelog entry. Raise them when a
+target's upstream fixes land in larger commits; widening them does
+not multiply LLM-call count, since candidate volume is capped
+separately.
 
 ## Triage
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `REACHABILITY_AUTO` | `1` | Controls post-crash reachability/severity processing. The default (`1`, alias `external`) runs **full** reachability, which queries public Sourcegraph / GitHub for callers — target symbol names leave the host. Set `local` or `severity-only` to recompute severity from cached `reachability.json` only, with no external network calls. `0` disables reachability/severity post-processing entirely. |
-| `REPORT_GATE_MAX_BYTES` | `262144` | Byte ceiling for the report/description text fed to a single-shot LLM triage gate (`find_quality`, `crash_confirm`). A backstop against pathological/adversarial report sizes, **not** a routine truncator. |
-
-The `REPORT_GATE_MAX_BYTES` default (256 KB) is deliberately generous: a
-genuine report is judged on its **whole** text, never a headless prefix.
-Measured over real reports, p50 is ~7 KB and p99 ~19 KB, so at 256 KB the cap
-effectively never binds — and 256 KB (~64K tokens) stays well inside every
-backend's context window, so an oversize report never hard-fails the call into
-a silent `undecided`. A report that still exceeds the cap is sent as a
-head+tail slice (the closing Impact / Reproduction sections survive) with a
-`POSSIBLE-FALSE-NEGATIVE` line logged to stderr — bytes are never dropped
-silently. Lower it only on a small-context local backend; raise it if real
-reports are legitimately larger and you want them sent whole.

@@ -50,7 +50,6 @@ pinned_rev   = "HEAD"
 asan_bin     = "build-asan/xmllint"
 asan_lib     = "build-asan/libxml2.a"
 includes     = ["include", "build-asan/include"]
-defines      = []
 link_libs    = ["-lz", "-llzma", "-lm"]
 
 is_browser   = "0"
@@ -72,9 +71,14 @@ attacker_controls = ["bytes"]
 | `asan_bin` | ASan executable used by generic or browser runs. Relative paths resolve under `targets/<target>/`. |
 | `asan_lib` | ASan library used when compiling C harness testcases. |
 | `includes` | Include directories for C harness builds. Relative paths resolve under `targets/<target>/`. |
-| `defines` | Compiler define flags for C/C++ harness builds, such as `-DFOO=1`. |
 | `link_libs` | Extra linker flags for C harness builds. |
 | `is_browser` | `"1"` for browser mode, `"0"` for generic mode. |
+
+One related field is *not* seeded: `defines`, compiler define flags
+for C/C++ harness builds (such as `-DFOO=1`). Add it by hand when a
+harness build needs it — or let the audit's automatic repair propose
+it after repeated harness build failures (see
+[Configure a target](../guides/configure-target.md#c-harness-readiness)).
 
 Which fields you need depends on what the run will do:
 
@@ -297,7 +301,8 @@ legitimately control. Triage compares crash report
 | `fs-state` | Filesystem paths, presence, permissions, or layout. |
 
 Unknown tokens are logged on stderr and ignored; if the resulting list
-is empty, the loader defaults to `["bytes"]`.
+is empty, the loader defaults to `["bytes"]`. The legacy spelling
+`call-order` is accepted and normalised to `call-sequence`.
 
 Examples:
 

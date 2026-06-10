@@ -59,10 +59,6 @@ Run twice for a normal ASan-first setup:
 
 With no repo URL or ref, `bin/setup-target <target>` re-inspects
 `build-asan/` and refreshes generated fields in `target.toml`.
-`--no-llm-config` keeps the deterministic seed and skips the
-LLM-backed `[threat_model]` / `[s6_peers]` enrichment — not
-recommended for normal use, since the LLM-suggested values are
-usually a better starting point than the conservative defaults.
 
 Advanced flags:
 
@@ -341,6 +337,8 @@ bin/reachability --report "$RESULTS/crashes/CRASH-001-1/" --severity-only
 bin/validate-finding --finding "$RESULTS/findings/FIND-001" --target-path "targets/$TARGET" --backend "$BACKEND"
 bin/enrich-report "$RESULTS/crashes/CRASH-001-1/report.md" --slug "$TARGET"
 bin/find-crash-testcase "$RESULTS/crashes/CRASH-001-1"
+bin/cluster-crashes "$RESULTS"
+bin/cluster-findings "$RESULTS"
 ```
 
 - `bin/export-repro` creates the maintainer bundle for an accepted
@@ -351,9 +349,19 @@ bin/find-crash-testcase "$RESULTS/crashes/CRASH-001-1"
 - `bin/validate-finding` — re-runs the finding substance gate on a
   candidate report or recon row.
 - `bin/enrich-report` — inlines source snippets, patch excerpts, and
-  report metadata into a crash/finding report.
+  report metadata into a crash/finding report. `--source-root`,
+  `--upstream-url`, and `--pinned-rev` override the snippet source and
+  source-link rewrites; `--quiet` suppresses the changed/unchanged
+  line.
 - `bin/find-crash-testcase` — prints the testcase path selected from a
   crash directory, useful when an old artifact layout is ambiguous.
+- `bin/cluster-crashes` / `bin/cluster-findings` — group reports that
+  share a root cause, write the `CRASH-CLUSTERS` /
+  `FINDING-CLUSTERS` summaries, and stamp `Cluster:` lines into each
+  member report. Both run automatically during triage; rerun them
+  after manually editing reports or moving artifacts. Pass a backend
+  results dir for one run, or `output/<target>` for the cross-backend
+  rollup.
 - `bin/show-exclusions "$RESULTS"` — one read-only view of what was
   kept vs. excluded and why: active crashes, confirmed findings,
   rejected candidates with reasons, and fuzz-crash noise.
@@ -388,20 +396,17 @@ print what would be removed without touching anything. With no
 explicit target. `cleanup_state` preserves every crash, finding,
 rejected artifact, corpus seed, and cross-session memory file by
 default — it removes the transient queue and scratch state only.
+To adjust what survives, `--keep <name>` (repeatable) protects an
+extra directory or file, `--keep-only <csv>` replaces the default
+preserve list outright, and `--output-root <path>` points both
+helpers at a non-default output root.
 
 Run the test suite before merging changes to the harness or to
 docs that describe its behaviour. Use image mode for Linux
-portability checks. It:
-
-- mounts the repository at `/work`;
-- installs dependencies for apt, dnf, or microdnf/yum images;
-- runs the same suite with Docker.
-
-For Debian / Ubuntu images, the apt dependency set includes the
-normal shell, Python, Perl, Git, jq, ripgrep, Mercurial, procps,
-`file`, LLVM, and compiler tools, plus `libclang-rt-dev`. On
-images with a non-default LLVM major version, install the matching
-`libclang-rt-<N>-dev` package before using `--no-install-deps`.
+portability checks: it mounts the repository in a clean container,
+installs the baseline dependencies for apt, dnf, or microdnf/yum
+images, and runs the same suite under Docker (see
+[Prerequisites](../getting-started/prerequisites.md#4-verify-the-harness)).
 
 Use `bin/docs build` for the same strict MkDocs build CI expects, and
 `bin/docs serve` for a local preview.
@@ -430,3 +435,21 @@ run under the bench root — all targets and backends — and rebuilds the full
 cross-backend page. Either way it refreshes `benchmark-result.{md,html}` and
 the cluster reports and does not rebuild each crash's `export-repro` report
 bundle. See [Benchmarking](../concepts/benchmark.md#regenerating-results-after-code-changes).
+
+## Helpers the harness runs for you
+
+The remaining commands in `bin/` are invoked by the harness itself.
+You rarely run them by hand, but knowing what each one is keeps a
+directory listing from being mysterious:
+
+| Command | Invoked by | What it does |
+| --- | --- | --- |
+| `bin/auto-build-script` | `setup-target --bootstrap` | Converges on a working sanitizer build recipe via an LLM and writes it to `targets/<target>/.audit/build.sh`. |
+| `bin/auto-repair-target-toml` | triage, after repeated C/C++ harness build failures | Proposes a conservative additive repair to `includes` / `defines` / `link_libs`, with a `target.toml.bak.<timestamp>` backup. Disable with `TARGET_TOML_AUTO_REPAIR=0`. |
+| `bin/rank-work` | `bin/audit` | Builds and ranks the concrete work cards agents claim. |
+| `bin/patch-cards` | `bin/audit` | Builds S1 prior-fix cards from the target's recent fix commits. |
+| `bin/peer-fix-cards` | `bin/audit` | Builds S6 cards from the `[s6_peers]` projects in `target.toml`. |
+| `bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`, `bin/run-tsan` | `bin/probe` | Per-sanitizer single-shot execution wrappers (browser, JS, generic, and fuzz modes). |
+| `bin/run-sanitizer-multi` | `bin/probe --confirm`, `export-repro` | Multi-run normalizer (default 5 runs, `SANITIZER_RUNS` overrides) that measures the reproduction rate. `bin/run-asan-multi` is a compatibility shim forwarding to it. |
+| `bin/triage-fuzz-crashes` | triage | Triages libFuzzer artifacts under `fuzz-crashes/` into a single `fuzz-leads.md` agents can pick leads from. |
+| `bin/render-md` | triage, clustering, benchmark | Renders a markdown report or index to its styled `.html` sibling. |

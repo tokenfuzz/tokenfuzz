@@ -38,7 +38,9 @@ CRASH-001-1/
 ├── input.<ext>        # the testcase bytes
 ├── harness.{c,cc,cpp,cxx} # present iff the bug uses a C/C++ harness
 ├── sanitizer.txt      # full sanitizer output captured during discovery
-└── reachability.json  # optional: caller search + advisory severity
+├── patch.diff         # optional: candidate fix, verified to apply cleanly
+├── reachability.json  # optional: caller search + advisory severity
+└── .audit/            # audit-side originals, kept for provenance
 ```
 
 `REPORT.md` is what to read first. For an even easier read, open

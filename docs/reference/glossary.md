@@ -111,7 +111,7 @@ agent `N`. Anything here is provisional until probe confirms it.
 **Crash (`crashes/CRASH-*`).** A sanitizer-confirmed reproducer
 with a saved trace, an input, and a report. Promotion requires
 a memory-safety or explicit boundary violation reachable through
-declared `attacker_controls`.
+the target's documented input boundary.
 
 **Finding (`findings/FIND-*`).** A concrete security issue with
 a written report naming `file:function:line`, an issue class,
@@ -142,8 +142,10 @@ sanitizer binaries, build system, threat model. Lives at
 **Attacker controls.** `[threat_model].attacker_controls` — the
 tokens describing what an external caller can legitimately
 control. Valid tokens are `bytes`, `call-sequence`, `timing`,
-`race`, `env`, `protocol-state`, and `fs-state`. Triage rejects
-crashes whose trigger source is not in this set.
+`race`, `env`, `protocol-state`, and `fs-state`. A crash whose
+trigger source falls outside this set stays in `crashes/` but is
+downgraded to robustness severity (×0.7) with a contract concern
+noted — threat-model fit is a scoring question, not a filing one.
 
 **Findings-only mode.** `[sanitizer].enabled = []`. Typical for
 interpreted / managed-runtime targets (Python, Ruby, Node, Java,
