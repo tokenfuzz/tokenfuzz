@@ -109,6 +109,30 @@ audit_stat_key() {
   printf '%s:%s\n' "$m" "$s"
 }
 
+audit_realpath() {
+  local path="$1"
+  python3 - "$path" <<'PY' 2>/dev/null && return 0
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+
+  # Fallback for very early bootstrap shells where python3 is absent.
+  # Unlike GNU readlink, pwd -P is available on both macOS and Linux.
+  if [ -d "$path" ]; then
+    (cd "$path" 2>/dev/null && pwd -P) && return 0
+  else
+    local dir base
+    dir=$(dirname "$path" 2>/dev/null) || dir=.
+    base=$(basename "$path" 2>/dev/null) || base="$path"
+    if [ -d "$dir" ]; then
+      (cd "$dir" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$base") && return 0
+    fi
+  fi
+  printf '%s\n' "$path"
+}
+
 audit_mtime_utc() {
   local path="$1" fmt="${2:-%Y-%m-%dT%H:%M:%SZ}"
   python3 - "$path" "$fmt" <<'PY'

@@ -141,8 +141,10 @@ assert_match "Non-product surface" "$fq_rendered" \
   "find-quality gate carries the non-product-surface reject category"
 assert_match "language-binding .test driver" "$fq_rendered" \
   "find-quality gate names binding test drivers as non-product"
-assert_match "cannot tell whether the file ships . or it might be" "$fq_rendered" \
-  "find-quality gate keeps explicit keep-on-unsure for scope doubt"
+assert_match "cannot tell whether the file ships" "$fq_rendered" \
+  "find-quality gate keeps explicit keep-on-unsure for uncertain shipping"
+assert_match "reached from a shipped path" "$fq_rendered" \
+  "find-quality gate keeps explicit keep-on-unsure for shipped reachability"
 
 # End-to-end: render with the audit_scope helper's actual output and
 # assert each doc/example/test/fuzz family name shows up in the prompt.

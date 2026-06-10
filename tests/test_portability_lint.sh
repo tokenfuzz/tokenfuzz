@@ -23,6 +23,7 @@ cd "$SCRIPT_ROOT" || exit 1
 # shim, since none of those are the GNU `timeout` binary.
 timeout_re='(^|\|)[[:space:]]*g?timeout[[:space:]]'
 realpath_re='realpath[[:space:]]+--relative-to'
+readlink_f_re='readlink[[:space:]]+-f([[:space:]]|$)'
 find_printf_re='find[^\n]*[[:space:]]-printf[[:space:]]'
 stat_fallback_re="stat[[:space:]]+-f[[:space:]]+%[mz][^|;]*[|][|][[:space:]]*stat[[:space:]]+-c[[:space:]]+%[Ys]"
 
@@ -34,6 +35,10 @@ assert_eq "" "$timeout_hits" \
 realpath_hits=$(rg -n "$realpath_re" bin lib 2>/dev/null || true)
 assert_eq "" "$realpath_hits" \
   "no GNU 'realpath --relative-to' in bin/ or lib/"
+
+readlink_f_hits=$(rg -n "$readlink_f_re" bin lib 2>/dev/null || true)
+assert_eq "" "$readlink_f_hits" \
+  "no GNU 'readlink -f' in bin/ or lib/; use audit_realpath"
 
 find_printf_hits=$(rg -n "$find_printf_re" bin lib 2>/dev/null || true)
 assert_eq "" "$find_printf_hits" \
@@ -53,6 +58,7 @@ printf '%s\n' \
   '        audit_timeout_run 30 claude -p x' \
   '  printf x | gtimeout 5 agy' \
   '    rel=$(realpath --relative-to="$A" "$B")' \
+  '    abs=$(readlink -f "$d")' \
   '    find "$d" -maxdepth 1 -type f -printf "%f\n"' \
   '    stat -f %m "$f" 2>/dev/null || stat -c %Y "$f"' \
   > "$probe"
@@ -66,6 +72,10 @@ assert_not_match "audit_timeout_run" "$probe_timeout" \
 probe_realpath=$(rg -n "$realpath_re" "$probe" 2>/dev/null || true)
 assert_match "realpath --relative-to" "$probe_realpath" \
   "lint detects realpath --relative-to"
+
+probe_readlink_f=$(rg -n "$readlink_f_re" "$probe" 2>/dev/null || true)
+assert_match "readlink -f" "$probe_readlink_f" \
+  "lint detects readlink -f"
 
 probe_find_printf=$(rg -n "$find_printf_re" "$probe" 2>/dev/null || true)
 assert_match "find.*-printf" "$probe_find_printf" \

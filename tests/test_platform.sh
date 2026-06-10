@@ -44,6 +44,11 @@ else
   fail "$_CURRENT_TEST" "unexpected count: $cpu_count"
 fi
 
+_CURRENT_TEST="platform: realpath helper resolves an existing file"
+real_sample="$(audit_realpath "$sample")"
+expected_real_sample="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$sample")"
+assert_eq "$expected_real_sample" "$real_sample" "$_CURRENT_TEST"
+
 _CURRENT_TEST="platform: epoch formatter ignores same-named files"
 epoch=1700000000
 touch "$TEST_TMPDIR/$epoch"

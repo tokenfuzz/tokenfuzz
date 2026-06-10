@@ -815,8 +815,8 @@ fi
 
 # agy_cli_log_for_pid: spawn a child holding open a fake cli-log under
 # the canonical antigravity-cli/log/cli-*.log path layout, then resolve
-# its pid and confirm we get the path back. Skip if lsof is missing
-# (the function itself returns empty in that case — also tested below).
+# its pid and confirm we get the path back. Linux containers use /proc;
+# macOS and other POSIX hosts can fall back to lsof.
 fake_log_dir="$work/antigravity-cli/log"
 mkdir -p "$fake_log_dir"
 fake_log="$fake_log_dir/cli-20260524_191234.log"
@@ -827,20 +827,18 @@ fake_log="$fake_log_dir/cli-20260524_191234.log"
 holder_pid=$!
 # Give the OS a moment to register the FD.
 sleep 1
-if command -v lsof >/dev/null 2>&1; then
-  resolved=$(agy_cli_log_for_pid "$holder_pid")
-  # macOS lsof reports the canonicalized path (/var/folders ->
-  # /private/var/folders). Compare via realpath so the test is
-  # platform-agnostic.
-  resolved_real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$resolved" 2>/dev/null || printf '%s' "$resolved")
-  fake_real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$fake_log" 2>/dev/null || printf '%s' "$fake_log")
-  if [ "$resolved_real" = "$fake_real" ]; then
-    pass "T31f: agy_cli_log_for_pid resolves the held cli-*.log via lsof"
-  else
-    fail "T31f: agy_cli_log_for_pid resolves the held cli-*.log via lsof" "got: '$resolved_real' expected: '$fake_real'"
-  fi
+resolved=$(agy_cli_log_for_pid "$holder_pid")
+# macOS lsof reports the canonicalized path (/var/folders ->
+# /private/var/folders). Compare via realpath so the test is
+# platform-agnostic.
+resolved_real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$resolved" 2>/dev/null || printf '%s' "$resolved")
+fake_real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$fake_log" 2>/dev/null || printf '%s' "$fake_log")
+if [ "$resolved_real" = "$fake_real" ]; then
+  pass "T31f: agy_cli_log_for_pid resolves the held cli-*.log via proc-or-lsof"
+elif [ -d "/proc/$holder_pid/fd" ] || command -v lsof >/dev/null 2>&1; then
+  fail "T31f: agy_cli_log_for_pid resolves the held cli-*.log via proc-or-lsof" "got: '$resolved_real' expected: '$fake_real'"
 else
-  pass "T31f: agy_cli_log_for_pid lsof-missing path covered (lsof absent on this host)"
+  pass "T31f: agy_cli_log_for_pid no proc/lsof path available on this host"
 fi
 # Cleanup the holder.
 kill "$holder_pid" 2>/dev/null

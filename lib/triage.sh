@@ -1625,9 +1625,9 @@ _triage_bump_promotion_pending() {
 _triage_log_ttl_false_negative() {
   local d="$1" id="$2" scope="$3" pending_count="$4" max_pending="$5" missing_csv="$6"
   local full_path="$d"
-  if command -v readlink >/dev/null 2>&1; then
+  if declare -f audit_realpath >/dev/null 2>&1; then
     local _resolved
-    _resolved=$(readlink -f "$d" 2>/dev/null || true)
+    _resolved=$(audit_realpath "$d" 2>/dev/null || true)
     [ -n "$_resolved" ] && full_path="$_resolved"
   fi
   local note

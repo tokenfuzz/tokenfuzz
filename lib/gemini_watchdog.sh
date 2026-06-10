@@ -6,7 +6,7 @@
 # three known failure modes (sustained 429 quota exhaustion, post-Drip
 # hang, and post-generation idle heartbeat loop) and SIGTERMs the
 # process tree when any of them is confirmed. All triggers are
-# fail-safe: missing klog, missing lsof, awk/date errors, and future
+# fail-safe: missing klog, missing /proc and lsof, awk/date errors, and future
 # log-format drift all return false so the caller falls through to the
 # outer wall-clock budget — never a worse outcome than running with no
 # watchdog at all.
@@ -29,8 +29,9 @@
 #
 #   agy_cli_log_for_pid <pid>
 #       Echo the path to the agy klog file (cli-*.log) the process
-#       has open under ~/.gemini/antigravity-cli/log/. Empty if lsof
-#       is missing or the file isn't open yet — caller skips.
+#       has open under ~/.gemini/antigravity-cli/log/. Uses Linux
+#       /proc/<pid>/fd first, then lsof for macOS and other POSIX hosts.
+#       Empty if neither source is available or the file isn't open yet.
 #
 #   agy_drip_stopped <cli_log>
 #       True if the agy klog shows "text_drip.go:NNN] Drip stopped"
@@ -128,10 +129,31 @@ gemini_quota_dominates() {
 
 # ── agy klog locator + predicates ────────────────────────────────────
 
+agy_cli_log_for_pid_proc() {
+  local pid="$1" fd target
+  [ -d "/proc/$pid/fd" ] || return 0
+  for fd in "/proc/$pid/fd/"*; do
+    [ -e "$fd" ] || continue
+    target=$(readlink "$fd" 2>/dev/null || true)
+    case "$target" in
+      */antigravity-cli/log/cli-*.log)
+        printf '%s\n' "$target"
+        return 0
+        ;;
+    esac
+  done
+}
+
 agy_cli_log_for_pid() {
   local pid="$1"
-  command -v lsof >/dev/null 2>&1 || return 0
   kill -0 "$pid" 2>/dev/null || return 0
+  local proc_log
+  proc_log="$(agy_cli_log_for_pid_proc "$pid" 2>/dev/null || true)"
+  if [ -n "$proc_log" ]; then
+    printf '%s\n' "$proc_log"
+    return 0
+  fi
+  command -v lsof >/dev/null 2>&1 || return 0
   lsof -p "$pid" 2>/dev/null \
     | awk '$NF ~ /\/antigravity-cli\/log\/cli-.*\.log$/ {print $NF; exit}'
 }
