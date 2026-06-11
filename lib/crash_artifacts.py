@@ -97,7 +97,9 @@ def _sort_key(path: Path) -> tuple[int, str]:
 
 def _visible_files(directory: Path) -> list[Path]:
     try:
-        entries = directory.iterdir()
+        # list() inside the try: on Python <= 3.12 iterdir() is lazy, so a
+        # missing directory only raises once the iterator is consumed.
+        entries = list(directory.iterdir())
     except OSError:
         return []
     return sorted(

@@ -15,9 +15,15 @@ concurrency:
 
 jobs:
   ubuntu-host:
-    name: tests (ubuntu)
+    name: tests (ubuntu, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is the floor (ubuntu:24.04 system python); the newest stable
+        # leg catches stdlib behaviour divergences in both directions.
+        python-version: ["3.12", "3.14"]
     env:
       LLM_DECIDE_DISABLE: "1"
       TEST_JOBS_MAX: "4"
@@ -30,7 +36,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install runtime dependencies
         run: |
