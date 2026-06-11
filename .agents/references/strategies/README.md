@@ -58,10 +58,10 @@ reachability → lower priority unless you can name a concrete input path past i
 | R11 | Spec says "MUST reject" but code continues | S3 |
 | R15 | Assert-only bounds check → bounds issue in release | S2 |
 | R16 | Callback destroys held raw ptr during operation | S5 |
-| R17 | `decode(encode(x)) != x` — silent round-trip data loss | S8 (inverse) |
-| R18 | `f(f(x)) != f(x)` — non-idempotent normalization / canonicalization | S8 (idempotence) |
-| R19 | Distinct inputs hash to same key (within documented domain) | S8 (injectivity) |
-| R20 | Numerical result outside declared domain (negative for unsigned, NaN, Inf, out-of-range sample) | S8 (numerical domain) |
+| R17 | `decode(encode(x)) != x` round-trip asymmetry a trust/parse check relies on (smuggle past check) | S8 (inverse) |
+| R18 | `f(f(x)) != f(x)` non-idempotent sanitiser/canonicaliser feeding a filter/ACL/SOP check (single-pass residual bypass) | S8 (idempotence) |
+| R19 | Distinct inputs collide on a hash/cache-key feeding a lookup or identity (hash-flood DoS, cache poisoning) | S8 (injectivity) |
+| R20 | Numerical result outside declared domain feeding a size/index/limit (negative→huge-unsigned, NaN, Inf) | S8 (numerical domain) |
 | R21 | Ignored return + downstream read of OUT parameter (uninit / partial-init consumption) | REF (pattern ref) |
 | R22 | Entropy combiner using `\|=` / `+=` / `*=` / `&=` instead of XOR or a real mixer (seed bias, collision-flood) | REF (pattern ref) |
 | R23 | Fixed-size C-string buffer filled by truncation-unsafe API (`strncpy` / `readlink` / `gethostname` / `recv`) then walked by `strchr` / `strlen` (bounds read) | REF (pattern ref) |

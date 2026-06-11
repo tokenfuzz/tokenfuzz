@@ -16,6 +16,38 @@ sanitizer report.
 violations and no NEEDS_TESTCASE lead, rotate strategy. Do not stop while a
 property generator is still narrowing toward a counter-example.
 
+## Pick the target by its security consumer (do this FIRST)
+
+The property is the oracle; the **consumer** is the filter that decides whether a
+counter-example is a finding or quality noise. Most encode/decode/normalize
+functions, when a property breaks, produce a *correctness* bug — and the
+findings gate (`AGENTS.md` FINDINGS) rejects "roundtrip drops whitespace",
+"format differs from spec", and pure data-integrity bugs. Running a property on
+every such function generates work the gate throws away. Don't.
+
+Instead, choose what to test by walking *forward* from the function: does its
+output reach a security decision — a sanitiser, an ACL / SOP / CSP / auth
+check, a cache or signature lookup, an allocation size or resource limit? If
+yes, the property is in scope. If the output only reaches display, logging, or
+another pure-data path, a counter-example is an upstream correctness bug — note
+it in your state file and move on; do **not** file it.
+Use local source, call sites, comments, and docs for this filter; do not run
+external reachability or popularity probes just to choose an S8 target.
+
+| Category | In scope when the consumer is… | Security primitive it becomes |
+|----------|--------------------------------|-------------------------------|
+| Inverse (round-trip) | a trust/parse check enforced on one form but made on the other | smuggle a value past the check (parser/filter desync) |
+| Idempotence | a sanitiser / canonicaliser feeding a filter, ACL, or SOP/CSP check | single-pass residual bypasses the check |
+| Injectivity | a hash / cache-key feeding a lookup, or an identifier feeding identity/ACL | hash-flooding DoS, cache poisoning, identity confusion |
+| Numerical domain | an allocation size, index, length, or resource limit | negative→huge-unsigned / `INT_MIN` → OOB or DoS |
+| Format compliance | an escaper/emitter whose output crosses into another parser/context | injection across the context boundary |
+
+Run a category procedure below only on functions with such a consumer. A clean
+encode/decode pair that nothing security-sensitive consumes is not worth a
+hypothesis. The closing **Delivery** section is the full filing rubric; this
+table is the up-front filter so you *generate* security-relevant work instead of
+*discarding* it at the end.
+
 ## Why this is LLM-native
 
 - **Hypothesis libraries** (Python, Haskell QuickCheck, Rust proptest) expect the
@@ -42,7 +74,9 @@ opening the next; mixing categories within a single hypothesis dilutes evidence.
 at different times, against different drafts of the spec. Whenever the round trip
 loses information (NUL byte in length-delimited container, percent-encoded
 slash, surrogate-pair UTF-16 mis-pair, normalised vs raw URL), the asymmetry is
-a finding regardless of whether anything crashed.
+a counter-example regardless of whether anything crashed — and a *finding* when
+a security consumer relies on the round trip (see *Pick the target by its
+security consumer*).
 
 **Highest yield:** JSON / CBOR / protobuf / msgpack / borsh serialisers, URL and
 IDN normalisation, UTF-8↔UTF-16 conversion, HTML / XML round-trips, regex
@@ -67,8 +101,10 @@ rg -nE 'round[\s_-]?trip|roundtrip|encode.*decode|decode.*encode|inverse' --type
    (`0x00`, `0x7F`, `0x80`, `0xFF`, `0xFFFD`), surrogate halves, BOM, deeply
    nested structures, max-int counts.
 5. For each: compute `decode(encode(x))` and compare. **Any inequality is a
-   finding** — bytes differ, length differs, normalisation differs, NUL handling
-   differs, escape handling differs.
+   counter-example** — bytes differ, length differs, normalisation differs, NUL
+   handling differs, escape handling differs. File it only when a security
+   consumer relies on the round trip (see *Pick the target by its security
+   consumer*); otherwise log it as a correctness note.
 6. Repeat with `encode(decode(y))` for every `y` the decoder accepts.
 
 **Oracle:** byte-exact equality. If the spec permits ambiguity (multiple valid
@@ -157,7 +193,8 @@ rg -nE '\b(intern|symbol_id|gen_id|next_id|allocate_id|key_for)\w*\s*\(' --type 
 
 **Don't file:** trivial collisions in cryptographic hashes (those are research
 results, not bugs). Do file: any collision in a function whose docstring
-implies uniqueness on a domain you stayed inside.
+implies uniqueness on a domain you stayed inside, and whose output reaches a
+security consumer from *Pick the target by its security consumer*.
 
 ### Category 4 — Numerical-domain invariants
 
@@ -199,7 +236,10 @@ rg -nE 'positive|non[\s_-]?negative|always >= 0|in \[[0-9]|in \(0,|normalized|fi
    - `f([1e18, -1e18])` returns 0 not the small residual
    - `f(NaN)` returns a value that *looks* finite but propagates NaN downstream
    - `f(subnormal)` flushes to zero on one platform and not another
-4. Any violation is a finding. Float-comparison tolerance is `f != f` (NaN
+4. Any violation is a counter-example; file it when the out-of-domain value
+   feeds an allocation size, index, length, or resource limit (see *Pick the
+   target by its security consumer*) — that is where it becomes an OOB or DoS
+   primitive. Float-comparison tolerance is `f != f` (NaN
    self-inequality) and ULP-distance, never `==` on floats.
 
 ### Category 5 — Format-compliance regex
@@ -239,7 +279,10 @@ rg -nE 'matches \^|regex.*= |format.*=' --type c --type cpp --type rust --type p
    semantics).
 4. Generate emitter inputs covering: empty, single byte, every byte 0x00–0xFF,
    non-BMP codepoints, very long strings, structurally nested values.
-5. For each: emit, parse-or-regex-match. Failure = finding.
+5. For each: emit, parse-or-regex-match. Failure = counter-example; file it
+   when the emitter's output crosses into another parser/context where the
+   non-compliant byte becomes an injection (see *Pick the target by its
+   security consumer*).
 
 ## The generator step (Hypothesis-style)
 
@@ -319,7 +362,8 @@ shapes:
 ```
 
 When the property is violated and ASan is clean, **first decide whether the
-violation has a security implication**. Only security-relevant property
+violation has a security implication** — the same consumer test from *Pick the
+target by its security consumer* (above). Only security-relevant property
 violations belong under `findings/FIND-*`. Pure correctness / data-integrity
 / robustness / spec-deviation violations stay in your state file as a note
 and are NOT filed — `findings/` is for issues a security QA team needs to
