@@ -55,7 +55,7 @@ or filenames — and picks the strategy that fits:
 | Lifetime / ownership operations, unsafe escape hatches, concurrency primitives | **S5** Lifetime and state | The interesting input is a sequence, teardown path, callback order, or interleaving. |
 | Assert / check / panic / precondition families | **S2** Invariant negation | The code already states the condition to challenge. |
 | Exported APIs, cast-heavy paths, size arithmetic | **S3** Spec vs. implementation | Contract, type, and size-boundary surfaces. |
-| Encode/decode, compress/inflate, marshal/unmarshal, encrypt/decrypt, normalise/canonicalise pairs | **S8** Property-based oracles | The code carries its own inverse or idempotence oracle. |
+| Encode/decode, compress/inflate, marshal/unmarshal, encrypt/decrypt, normalise/canonicalise/sanitise/dedupe pairs, hashers / fingerprinters / id-key generators, and declared numerical-domain functions (non-negative / finite / probability / clamp) | **S8** Property-based oracles | The code carries its own inverse, idempotence, injectivity, or numerical-domain oracle. |
 | Prior-fix patch card | **S1** Prior-fix review | The fix tells you the old wrong assumption and the likely sibling sites. |
 | Peer-project fix card | **S6** Cross-project mining | Another implementation already disclosed the shape worth checking. |
 | Nothing distinctive matches | **S1** Prior-fix review | The diversity floor still samples quiet source files instead of letting regexes define scope. |

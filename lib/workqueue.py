@@ -393,12 +393,41 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
     # S2 — asserted invariant: a ready-made negation target.
     (_ASSERT_RE, 8, "asserted invariant"),
     # S8 — round-trip / property surface: code with an inverse operation
-    # (encode/decode, compress/inflate) carries its own oracle.
+    # (encode/decode, compress/inflate) or an idempotent normaliser
+    # (normalise/canonicalise/sanitise/dedupe) carries its own oracle.
     (re.compile(
         r"\b\w*(?:[Ee]ncode|[Dd]ecode|[Ss]erializ|[Cc]ompress|[Dd]eflate"
         r"|[Ii]nflate|[Mm]arshal|[Ee]ncrypt|[Dd]ecrypt|[Nn]ormaliz"
-        r"|[Cc]anonicaliz|[Ee]scape)\w*\b"
+        r"|[Cc]anonicaliz|[Ss]anitiz|[Dd]edup|[Ee]scape)\w*\b"
     ), 8, "round-trip property surface"),
+    # S8 — injectivity surface: non-cryptographic hashers, fingerprinters,
+    # and id/key generators carry a uniqueness oracle (collision → hash-
+    # flooding DoS, cache poisoning, identity confusion). Distinctive hasher
+    # families match liberally; the generic `hash(`/`digest(` stems require a
+    # call-paren so container plumbing (`hashmap_insert`, `rehash_table`,
+    # `hash_table_lookup`) does not match.
+    (re.compile(
+        r"\b\w*(?:fingerprint|checksum|murmur|xxhash|cityhash|siphash"
+        r"|fnv1?a?|adler32?|crc(?:16|32|64)|md5|sha1|sha256|blake[23])\w*\s*\("
+        r"|\b\w*(?:hash|digest)\s*\("
+        r"|\b(?:intern|gen_id|next_id|allocate_id|new_id|key_for|cache_key"
+        r"|symbol_id)\w*\s*\(",
+        re.IGNORECASE,
+    ), 6, "hash/injectivity surface"),
+    # S8 — numerical-domain surface: a declared output domain (non-negative,
+    # finite, probability, [0,1]) or a range-enforcement call (clamp/saturate)
+    # carries a domain oracle — an out-of-domain value feeding an allocation
+    # size, index, length, or resource limit becomes an OOB or DoS primitive.
+    # Keyed on declared-domain language and enforcement-fn names ONLY, never on
+    # bare numeric return types or loose `>= 0` comparisons: an *asserted*
+    # domain is S2's negation target, and a bare comparison is high-FP.
+    (re.compile(
+        r"\bnon[-_ ]?negative\b|\bnonnegative\b|\bsubnormal\b|\bprobabilit\w*"
+        r"|\bfinite(?:ness)?\b|\bin \[0\s*,\s*1\]"
+        r"|\bmust be (?:positive|non[-_ ]?negative|finite)\b"
+        r"|\b(?:clamp|saturat)\w*\s*\(",
+        re.IGNORECASE,
+    ), 6, "numerical-domain surface"),
     # S5 — concurrency primitive: data-race / TOCTOU candidate.
     (re.compile(
         r"\bpthread_\w+|\bstd::(?:mutex|atomic|thread|lock_guard|shared_mutex"
@@ -434,7 +463,9 @@ _STRATEGY_BUCKETS: tuple[tuple[str, frozenset[str]], ...] = (
     ("S2", frozenset({"asserted invariant"})),
     ("S3", frozenset({
         "cast-heavy path", "size math", "exported API surface"})),
-    ("S8", frozenset({"round-trip property surface"})),
+    ("S8", frozenset({
+        "round-trip property surface", "hash/injectivity surface",
+        "numerical-domain surface"})),
 )
 
 

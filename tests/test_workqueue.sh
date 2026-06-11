@@ -2186,5 +2186,47 @@ PY
 assert_eq "ok" "$itf_out" \
   "iter_source_files: default/0 scans whole repo, positive max_files bounds it"
 
+# S8 source-feature coverage: injectivity, idempotence (sanitize/dedupe), and
+# numerical-domain surfaces must seed an S8 angle, while container plumbing and
+# bare numeric code must NOT. Guards against both the missing-coverage gap and
+# the over-broadening Codex flagged. strategy_for returns the primary; the S8
+# reason may surface as a companion when a higher-signal feature co-occurs, so
+# the oracle is "an S8 reason is present", not "primary == S8".
+s8_coverage=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - <<'PY'
+import workqueue as W
+S8 = {"round-trip property surface", "hash/injectivity surface",
+      "numerical-domain surface"}
+positives = {
+    "murmur_hash":   "uint32_t murmur_hash(const char* p){return murmur_hash(p);}",
+    "compute_digest":"void compute_digest(const char* p){compute_digest(p);}",
+    "cache_key":     "char* cache_key(req* r){return cache_key(r);}",
+    "sanitize_html": "char* sanitize_html(char* s){return sanitize_html(s);}",
+    "dedupe_path":   "char* dedupe_path(char* p){return dedupe_path(p);}",
+    "clamp_sample":  "double clamp_sample(double x){return clamp_sample(x);}",
+    "nonneg_prose":  "// returns a non-negative count\nint count_items(set* s);",
+    "prob_prose":    "/* result is a probability in [0,1] */\ndouble score(model* m);",
+}
+negatives = {
+    "hashmap_insert":   "void hashmap_insert(map* m, int k){ insert(m,k); }",
+    "rehash_table":     "void rehash_table(map* m){ rehash_table(m); }",
+    "hash_table_lookup":"void* hash_table_lookup(map* m, int k){ return 0; }",
+    "to_string":        "char* to_string(int x){ return fmt(x); }",
+    "plain_compute":    "int compute(int x){ return x + 1; }",
+}
+bad = []
+for name, body in positives.items():
+    _, reasons = W.code_feature_reasons(body)
+    if not (S8 & set(reasons)):
+        bad.append(f"positive {name} missing S8 reason: {reasons}")
+for name, body in negatives.items():
+    _, reasons = W.code_feature_reasons(body)
+    if S8 & set(reasons):
+        bad.append(f"negative {name} wrongly got S8 reason: {reasons}")
+print("ok" if not bad else "FAIL: " + "; ".join(bad))
+PY
+)
+assert_eq "ok" "$s8_coverage" \
+  "code_feature_reasons: S8 covers injectivity/idempotence/numerical-domain, skips container plumbing"
+
 teardown_test_env
 summary
