@@ -723,6 +723,141 @@ print("non-ASan sanitizer entrypoint OK")
 ' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "non-ASan sanitizer entrypoint wrong"
 
 # ───────────────────────────────────────────────────────────────────
+# 11b-msan. MSan value-origin stacks ("Uninitialized value was created
+#      by …") are secondary context, like ASan freed-by stacks. The entry
+#      must come from the fault stack, not the allocation origin.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="entrypoint: MSan origin stack is not the caller entry"
+MSANENTRY_DIR="$TEST_TMPDIR/msan-entrypoint"
+mkdir -p "$MSANENTRY_DIR"
+cat > "$MSANENTRY_DIR/report.md" <<'EOF'
+# CRASH-MSAN-ENTRY
+## Summary
+Use of uninitialized value during matching.
+EOF
+cat > "$MSANENTRY_DIR/sanitizer.txt" <<'EOF'
+==1==WARNING: MemorySanitizer: use-of-uninitialized-value
+    #0 0x100 in samplelib_compare samplelib.c:42
+    #1 0x200 in samplelib_public_match samplelib.c:88
+    #2 0x300 in main harness.c:10
+
+  Uninitialized value was created by a heap allocation
+    #0 0x400 in malloc msan_interceptors.cpp:30
+    #1 0x500 in samplelib_alloc_buf samplelib.c:12
+    #2 0x600 in main harness.c:8
+EOF
+MATCH_HASH=$(sha1_short "samplelib_public_match")
+cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${MATCH_HASH}.json" <<'EOF'
+{"status":"ok","hits":[{"repo":"msan-caller","path":"src/match.c"}]}
+EOF
+echo '{"status":"unavailable","error":"n/a"}' > "$REACHABILITY_MOCK_DIR/gh-${MATCH_HASH}.json"
+out=$(python3 "$REACH" --report "$MSANENTRY_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "msan entrypoint report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["reachability"]
+assert r["entry_symbol"] == "samplelib_public_match", r["entry_symbol"]
+assert r["symbols"] == ["samplelib_public_match"], r["symbols"]
+print("msan origin-stack exclusion OK")
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "msan origin stack leaked into entry"
+
+# ───────────────────────────────────────────────────────────────────
+# 11b-tsan2. Real TSan races report TWO access stacks. The entry must come
+#      from the faulting (first) access stack; the "Previous …" stack is
+#      secondary context.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="entrypoint: TSan second access stack is not the caller entry"
+TSAN2_DIR="$TEST_TMPDIR/tsan-two-stacks"
+mkdir -p "$TSAN2_DIR"
+cat > "$TSAN2_DIR/report.md" <<'EOF'
+# CRASH-TSAN-TWO
+## Summary
+Data race between reader and writer paths.
+EOF
+cat > "$TSAN2_DIR/sanitizer.txt" <<'EOF'
+WARNING: ThreadSanitizer: data race (pid=1)
+  Read of size 4 at 0x1234 by thread T1:
+    #0 0x100 in samplelib_load samplelib.c:87
+    #1 0x200 in samplelib_public_read samplelib.c:205
+
+  Previous atomic write of size 4 at 0x1234 by main thread:
+    #0 0x300 in samplelib_store samplelib.c:99
+    #1 0x400 in samplelib_public_write samplelib.c:300
+
+  Thread T1 (tid=2, running) created by main thread at:
+    #0 0x500 in pthread_create tsan_interceptors.cpp:100
+    #1 0x600 in samplelib_spawn samplelib.c:55
+EOF
+READ_HASH=$(sha1_short "samplelib_public_read")
+cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${READ_HASH}.json" <<'EOF'
+{"status":"ok","hits":[{"repo":"tsan-reader","path":"src/reader.c"}]}
+EOF
+echo '{"status":"unavailable","error":"n/a"}' > "$REACHABILITY_MOCK_DIR/gh-${READ_HASH}.json"
+out=$(python3 "$REACH" --report "$TSAN2_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "tsan two-stack report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["reachability"]
+assert r["entry_symbol"] == "samplelib_public_read", r["entry_symbol"]
+assert r["symbols"] == ["samplelib_public_read"], r["symbols"]
+print("tsan first-access-stack entry OK")
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "tsan second stack leaked into entry"
+
+# ───────────────────────────────────────────────────────────────────
+# 11b-fallback. When no usable entry symbol exists in the primary stack,
+#      crash-state symbols are still a call chain: the all-frames collision
+#      gate applies — a genuine caller must match EVERY probed symbol in one
+#      file; single-symbol name collisions are dropped.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="fallback: crash-state chain keeps the all-frames gate"
+FALLBACK_DIR="$TEST_TMPDIR/allframes-fallback"
+mkdir -p "$FALLBACK_DIR"
+cat > "$FALLBACK_DIR/report.md" <<'EOF'
+# CRASH-FALLBACK
+## Summary
+UAF whose fault frame has no library-shaped name.
+EOF
+# Fault stack's only frame ("run") fails the probe-shape filter, so no entry
+# symbol exists; the crash-state stream supplies the freed-by chain.
+cat > "$FALLBACK_DIR/sanitizer.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-use-after-free
+WRITE of size 8
+    #0 0x100 in run sampledb.cpp:10
+
+freed by thread T0 here:
+    #0 0x300 in free san.cpp:52
+    #1 0x400 in samplelib_release samplelib.c:273
+    #2 0x500 in samplelib_teardown samplelib.c:300
+EOF
+REL_HASH=$(sha1_short "samplelib_release")
+TD_HASH=$(sha1_short "samplelib_teardown")
+# both-repo matches BOTH probed symbols; only-release matches one (collision).
+cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${REL_HASH}.json" <<'EOF'
+{"status":"ok","hits":[
+  {"repo":"both-repo","path":"src/x.c"},
+  {"repo":"only-release","path":"src/y.c"}
+]}
+EOF
+cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${TD_HASH}.json" <<'EOF'
+{"status":"ok","hits":[{"repo":"both-repo","path":"src/x.c"}]}
+EOF
+echo '{"status":"unavailable","error":"n/a"}' > "$REACHABILITY_MOCK_DIR/gh-${REL_HASH}.json"
+echo '{"status":"unavailable","error":"n/a"}' > "$REACHABILITY_MOCK_DIR/gh-${TD_HASH}.json"
+out=$(python3 "$REACH" --report "$FALLBACK_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "all-frames fallback report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["reachability"]
+assert r["match_mode"] == "all-frames", r["match_mode"]
+assert r["entry_symbol"] is None, r["entry_symbol"]
+assert r["external_callers"] == 1, ("expected 1, got", r["external_callers"], r["external_caller_hits"])
+hit = r["external_caller_hits"][0]
+assert hit["repo"] == "both-repo", hit
+assert hit["matched_symbols"] == ["samplelib_release", "samplelib_teardown"], hit["matched_symbols"]
+print("all-frames fallback gate OK")
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "all-frames fallback gate miscounted"
+
+# ───────────────────────────────────────────────────────────────────
 # 11c. Symbol extraction also accepts lowerCamelCase (libxml2 / htmllib /
 #      Win32-style entry points). read_line-shaped names have no
 #      underscore but ARE library APIs with external callers. Plain

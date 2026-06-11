@@ -306,6 +306,12 @@ under `findings/FIND-*` carry the same field.
 the public docs are silent about the call ordering you depend on — defaulting
 to `obeyed` inflates verdicts.
 
+`Entry` is optional but recommended: the public API function an external
+caller invokes to reach the bug, written call-shaped on its own line, e.g.
+``Entry: pcre2_match()``. Reachability scoring measures external-caller
+popularity at this entry point; without it the scorer falls back to inferring
+the entry from the deepest product frame in the sanitizer stack.
+
 `Parameter control` is optional but required when the finding depends on a
 specific offset, size, index, count, callback return, lifetime transition, or
 call order. State one of:

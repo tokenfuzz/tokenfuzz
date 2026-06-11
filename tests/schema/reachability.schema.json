@@ -36,7 +36,7 @@
     },
     "match_mode": {
       "enum": ["any-frame", "all-frames", "entrypoint"],
-      "description": "Schema v2+. entrypoint = a genuine caller matched the selected public/caller entry symbol any-frame, since a real dependant reaches the entry point, not the target's internal crash-state chain. all-frames is accepted for older cached documents. any-frame = union/any-match for manual --symbol or narrative-mined stackless reports."
+      "description": "Schema v2+. entrypoint = a genuine caller matched the selected public/caller entry symbol any-frame, since a real dependant reaches the entry point, not the target's internal crash-state chain. all-frames = no entry point was identified but the symbols are a crash-state call chain, so a genuine caller had to match every probed symbol in one file (collision-resistant). any-frame = union/any-match for manual --symbol or narrative-mined stackless reports."
     },
     "entry_symbol": {
       "type": ["string", "null"],

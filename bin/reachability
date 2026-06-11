@@ -600,6 +600,7 @@ def query_all(symbols: list[str], ignore: list[str], timeout: float, use_cache: 
               target_basenames: set[str] | None = None,
               target_names: set[str] | None = None,
               entry_symbol: str | None = None,
+              require_all_symbols: bool = False,
               language: str = "c") -> dict:
     """Run services in parallel, but keep each backend's symbol probes sequential.
 
@@ -618,9 +619,17 @@ def query_all(symbols: list[str], ignore: list[str], timeout: float, use_cache: 
     entry_symbol: the public/caller entry point the bug is reached through.
     When given, external-caller popularity counts genuine repos that match the
     entry symbol any-frame — a real dependant reaches the entry point, not the
-    target's internal frames above it. None (manual --symbol, narrative-mined
-    entry points) keeps plain union/any-match. Either way every unique symbol
-    is queried at most once.
+    target's internal frames above it.
+
+    require_all_symbols: collision-resistance fallback when no entry symbol
+    was identified but the symbols are still a crash-state call chain. With
+    ≥2 probed symbols, a genuine external caller must match *every* probed
+    symbol in the same file (cross-backend) — a random project that merely
+    owns its own ``set_blob`` is a name collision and is dropped.
+
+    Neither flag set (manual --symbol, narrative-mined entry points) keeps
+    plain union/any-match. In every mode each unique symbol is queried at
+    most once.
     """
     per_service: dict[str, dict] = {svc: {"status": "ok", "hits": [], "errors": []} for svc in SERVICES}
     target_basenames = target_basenames or set()
@@ -707,6 +716,7 @@ def query_all(symbols: list[str], ignore: list[str], timeout: float, use_cache: 
 
     if entry_symbol not in set(symbols):
         entry_symbol = None
+    probed = set(symbols)
     genuine_agg = _aggregate(all_genuine)
     vendored_agg = _aggregate(all_vendored)  # vendored copies are not frame-gated
 
@@ -718,6 +728,12 @@ def query_all(symbols: list[str], ignore: list[str], timeout: float, use_cache: 
         caller_agg = {k: v for k, v in genuine_agg.items()
                       if entry_symbol in v["_symbols"]}
         match_mode = "entrypoint"
+    elif require_all_symbols and len(probed) >= 2:
+        # Crash-state chain with no identified entry point: keep only files
+        # that matched every probed symbol (collision-resistant).
+        caller_agg = {k: v for k, v in genuine_agg.items()
+                      if probed <= v["_symbols"]}
+        match_mode = "all-frames"
     else:
         caller_agg = genuine_agg
         match_mode = "any-frame"
@@ -2190,6 +2206,18 @@ _MACRO_SYMBOL_RE = re.compile(r"^[A-Z0-9_]+$")
 # into it rather than re-deriving its own ASan regexes here.
 
 
+def _symbol_token_ok(tok: str, language: str = "c") -> bool:
+    """Shared probe-symbol filter: drops runtime/macro/stop-listed tokens and
+    anything that fails the library-symbol shape for `language`."""
+    if _RUNTIME_SYMBOL_RE.search(tok):
+        return False
+    if _MACRO_SYMBOL_RE.match(tok):
+        return False
+    if tok.lower() in _SYMBOL_STOPLIST:
+        return False
+    return _symbol_shape_ok(tok, language)
+
+
 def _extract_symbols_from_report(report_text: str, language: str = "c") -> list[str]:
     """Best-effort extraction of public API entry-point identifiers.
 
@@ -2232,13 +2260,7 @@ def _extract_symbols_from_report(report_text: str, language: str = "c") -> list[
             tok = m.group(1)
             if tok in seen:
                 continue
-            if _RUNTIME_SYMBOL_RE.search(tok):
-                continue
-            if _MACRO_SYMBOL_RE.match(tok):
-                continue
-            if tok.lower() in _SYMBOL_STOPLIST:
-                continue
-            if not _symbol_shape_ok(tok, language):
+            if not _symbol_token_ok(tok, language):
                 continue
             seen.add(tok)
             out.append(tok)
@@ -2247,37 +2269,23 @@ def _extract_symbols_from_report(report_text: str, language: str = "c") -> list[
     return out
 
 
-def _extract_entry_symbols_from_report(report_text: str, language: str = "c") -> list[str]:
-    """Public entry-point symbols from explicit ``Entry:`` report lines.
+def _entry_symbol_from_report(report_text: str, language: str = "c") -> str | None:
+    """First public entry-point symbol from an explicit ``Entry:`` report line.
 
     These lines are the report author's structured claim about how a normal
     caller reaches the issue, so they are a better caller-popularity signal
     than an internal fault frame when present. Only call-shaped identifiers are
     accepted, using the same shape/stop-list as general report extraction.
     """
-    out: list[str] = []
-    seen: set[str] = set()
     for raw in (report_text or "").splitlines():
         s = raw.strip()
         if not re.match(r"^-?\s*\*{0,2}Entry\*{0,2}\s*:", s, re.IGNORECASE):
             continue
         for m in _CALL_RE.finditer(s):
             tok = m.group(1)
-            if tok in seen:
-                continue
-            if _RUNTIME_SYMBOL_RE.search(tok):
-                continue
-            if _MACRO_SYMBOL_RE.match(tok):
-                continue
-            if tok.lower() in _SYMBOL_STOPLIST:
-                continue
-            if not _symbol_shape_ok(tok, language):
-                continue
-            seen.add(tok)
-            out.append(tok)
-            if len(out) >= 3:
-                return out
-    return out
+            if _symbol_token_ok(tok, language):
+                return tok
+    return None
 
 
 # Crash-state symbols are a fallback when no caller-entry symbol can be
@@ -2298,15 +2306,7 @@ def _frame_probe_symbol(frame: stack_frames.StackFrame, language: str = "c") -> 
     leaf = parts[-1].strip()
     # Shape filters apply to the bare callee name (the qualifier is just a
     # disambiguator).
-    if not leaf:
-        return None
-    if _RUNTIME_SYMBOL_RE.search(leaf):
-        return None
-    if _MACRO_SYMBOL_RE.match(leaf):
-        return None
-    if leaf.lower() in _SYMBOL_STOPLIST:
-        return None
-    if not _symbol_shape_ok(leaf, language):
+    if not leaf or not _symbol_token_ok(leaf, language):
         return None
     # Probe form: method + immediate enclosing class when present.
     return "::".join(p.strip() for p in parts[-2:]) if len(parts) >= 2 else leaf
@@ -2381,6 +2381,15 @@ def _primary_sanitizer_frames(sanitizer_text: str) -> list[stack_frames.StackFra
             return True
         if any(marker.lower() in s for marker in stack_frames.STATE_STOP_MARKERS):
             return True
+        # MSan origin stacks: every origin description starts with this
+        # prefix ("… created by a heap allocation/deallocation/argument …").
+        if s.startswith("uninitialized value was created"):
+            return True
+        # TSan second access stack: "[Previous ][atomic ]read/write of size N
+        # at 0x… by thread T1:". The *first* access header precedes any frame,
+        # so this only ever cuts the secondary access stack.
+        if re.match(r"(?:previous )?(?:atomic )?(?:read|write) of size \d+", s):
+            return True
         return (
             "freed by thread" in s
             or "previously allocated by" in s
@@ -2413,13 +2422,15 @@ def _crash_entrypoint_symbol(asan_text: str, language: str = "c",
                              report_text: str = "") -> str | None:
     """Caller entry point used for external-caller popularity.
 
-    Prefer explicit report ``Entry:`` lines. Otherwise use the deepest
+    Prefer an explicit report ``Entry:`` line. Otherwise use the deepest
     interesting frame in the primary sanitizer fault stack, walking the full
     primary stack rather than the capped ClusterFuzz crash state. Secondary
-    allocation/free context is ignored so UAF cleanup APIs do not become the
-    caller-popularity symbol.
+    context stacks (allocation/free, MSan value origin, TSan second access,
+    thread creation) are ignored so cleanup or bookkeeping APIs do not become
+    the caller-popularity symbol.
     """
-    for sym in _extract_entry_symbols_from_report(report_text, language):
+    sym = _entry_symbol_from_report(report_text, language)
+    if sym:
         return sym
     for frame in reversed(_primary_sanitizer_frames(asan_text)):
         probe = _frame_probe_symbol(frame, language)
@@ -3409,13 +3420,15 @@ def main(argv: list[str] | None = None) -> int:
         if reachability_json_path is not None:
             reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
     else:
-        # Sanitizer-backed reports carry a caller-entry symbol:
+        # Sanitizer-backed reports normally carry a caller-entry symbol:
         # popularity counts callers of that entry, any-frame (see query_all).
-        # Manual --symbol lists and narrative-mined entry points have no entry
-        # symbol and stay union/any-match.
+        # When no entry point was identified, crash-state symbols are still a
+        # call chain, so the all-frames collision gate applies. Manual
+        # --symbol lists and narrative-mined entry points stay union/any-match.
         reach = query_all(symbols, ignore, args.timeout, use_cache,
                           target_basenames, target_names,
                           entry_symbol=entry_symbol,
+                          require_all_symbols=symbols_from_asan,
                           language=language)
         if reachability_json_path is not None:
             reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")

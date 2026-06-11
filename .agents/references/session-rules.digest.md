@@ -125,6 +125,11 @@ Strategy: S1|S2|S3|S4|S5|S6|S7|S8|REF
 testcase was filed (S1..S8 from the strategy index, or REF for the
 pattern-search library). Same field for findings/FIND-*.
 
+`Entry` (optional, recommended): the public API function an external caller
+invokes to reach the bug, call-shaped, e.g. ``Entry: pcre2_match()``.
+Reachability scores caller popularity at this entry point; otherwise it
+infers the entry from the deepest product frame in the sanitizer stack.
+
 `Parameter control` (when value-dependent): direct / mapped /
 harness-only / none. The triage matrix demotes when `Trigger source`
 falls outside the target's `attacker_controls` (target.toml) — a
