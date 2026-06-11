@@ -27,7 +27,7 @@
     "symbols": {
       "type": "array",
       "items": {"type": "string"},
-      "description": "Symbols probed for this report. Auto-extracted from report.md unless --symbol was passed explicitly."
+      "description": "Symbols queried for this report. ASan-backed reports normally query the selected caller-entry symbol only; manual --symbol and stackless reports may query multiple symbols."
     },
     "ignore": {
       "type": "array",
@@ -35,8 +35,12 @@
       "description": "Substrings used to drop hits whose repo path or package name contains any of them. Sourced from --ignore CLI args plus reachability_ignore = [...] in target.toml."
     },
     "match_mode": {
-      "enum": ["any-frame", "all-frames"],
-      "description": "Schema v2+. all-frames = a genuine caller had to match every probed symbol in one file (used when the symbols are a crash-state call chain, e.g. set_blob -> apply_line). any-frame = union/any-match (manual --symbol or narrative-mined entry points)."
+      "enum": ["any-frame", "all-frames", "entrypoint"],
+      "description": "Schema v2+. entrypoint = a genuine caller matched the selected public/caller entry symbol any-frame, since a real dependant reaches the entry point, not the target's internal crash-state chain. all-frames is accepted for older cached documents. any-frame = union/any-match for manual --symbol or narrative-mined stackless reports."
+    },
+    "entry_symbol": {
+      "type": ["string", "null"],
+      "description": "Schema v2+. The public/caller entry-point symbol whose any-frame match defined external-caller popularity under match_mode=entrypoint. Prefer an explicit Entry report field; otherwise use the deepest product frame in the primary sanitizer fault stack. One of symbols; null when no entry point was identified."
     },
     "language": {
       "type": "string",
@@ -67,7 +71,7 @@
           "repo": {"type": "string"},
           "path": {"type": "string"},
           "matched_symbol": {"type": "string"},
-          "matched_symbols": {"type": "array", "items": {"type": "string"}, "description": "Schema v2+. Every probed symbol this file matched (cross-backend). Length >1 only under all-frames match mode."}
+          "matched_symbols": {"type": "array", "items": {"type": "string"}, "description": "Schema v2+. Every probed symbol this file matched (cross-backend). Length may exceed 1 when multiple manual or stackless-report symbols were queried."}
         }
       }
     },

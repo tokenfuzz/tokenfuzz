@@ -503,7 +503,8 @@ print("macro token extraction OK; got:", syms)
 # ───────────────────────────────────────────────────────────────────
 # 11b. Sanitizer runtime frames in report snippets must not become
 #      reachability symbols. If the narrative has no call-shaped public API
-#      token, fall back to the adjacent ASan file and keep only product frames.
+#      token, fall back to the adjacent ASan file and query the deepest
+#      primary-stack product frame.
 # ───────────────────────────────────────────────────────────────────
 _CURRENT_TEST="symbol extraction ignores asan runtime frames"
 ASANFRAME_DIR="$TEST_TMPDIR/asan-frame-test"
@@ -540,20 +541,18 @@ data = json.load(sys.stdin)
 syms = data["reachability"]["symbols"]
 assert "asan_thread_start" not in syms, syms
 assert "ares_thread_create" not in syms, syms
-assert syms[:2] == ["ares_evsys_select_wait", "ares_event_thread"], syms
+assert syms == ["ares_event_thread"], syms
 print("asan frame extraction OK; got:", syms)
 ' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "asan runtime frame leaked into symbols"
 
 # ───────────────────────────────────────────────────────────────────
-# 11b-cpp. Crash-state-first: when a sanitizer stack is present it is the
-#      PRIMARY symbol source, not the report narrative. For a C++ crash the
-#      probe keeps one qualifier level (Store::set_blob), so common method
-#      names do not collide across unrelated projects. Internal helpers named
-#      only in Data-Flow prose (parse_id, decode_hex, frame_capacity) and our
-#      own auto-generated scoring labels (surface=cli_production) must NOT be
-#      probed — they are not the crashing API.
+# 11b-cpp. Entrypoint-first: when a sanitizer stack is present, caller
+#      popularity is probed at one caller-entry symbol from the primary fault
+#      stack, not at narrative helpers or scoring labels. For a C++ crash the
+#      probe keeps one qualifier level (Engine::apply_line), so common method
+#      names do not collide across unrelated projects.
 # ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="crash-state-first: C++ frames, no prose helpers, no scoring labels"
+_CURRENT_TEST="entrypoint-first: C++ frame, no prose helpers, no scoring labels"
 CPPSTATE_DIR="$TEST_TMPDIR/cpp-crash-state"
 mkdir -p "$CPPSTATE_DIR"
 cat > "$CPPSTATE_DIR/report.md" <<'EOF'
@@ -573,74 +572,155 @@ WRITE of size 1
     #3 0x400 in main main.cpp:13
 EOF
 out=$(python3 "$REACH" --report "$CPPSTATE_DIR" --json --no-cache 2>&1) || \
-  fail "$_CURRENT_TEST" "cpp crash-state report mode failed: $out"
+  fail "$_CURRENT_TEST" "cpp entrypoint report mode failed: $out"
 echo "$out" | python3 -c '
 import json, sys
 syms = json.load(sys.stdin)["reachability"]["symbols"]
-# Crash state, qualified to one level, capped at the crash site + immediate caller.
-assert syms == ["Store::set_blob", "Engine::apply_line"], syms
+# Caller popularity probes the deepest usable primary-stack entry symbol.
+assert syms == ["Engine::apply_line"], syms
 # Self-poisoned scoring label and Data-Flow helper names never get probed.
-forbidden = {"cli_production", "decode_hex", "parse_id", "frame_capacity", "set_blob"}
+forbidden = {"cli_production", "decode_hex", "parse_id", "frame_capacity",
+             "set_blob", "Store::set_blob"}
 bad = [s for s in syms if s in forbidden]
-assert not bad, ("non-crash-state symbol probed:", bad, "from", syms)
-print("cpp crash-state extraction OK; got:", syms)
-' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "cpp crash-state symbols wrong"
+assert not bad, ("non-entrypoint symbol probed:", bad, "from", syms)
+print("cpp entrypoint extraction OK; got:", syms)
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "cpp entrypoint symbols wrong"
 
 # ───────────────────────────────────────────────────────────────────
-# 11b-and. All-frames gate: when symbols come from the crash state (a call
-#      chain), a genuine external caller must match EVERY frame in the same
-#      file. A repo that matches only one frame (a name collision) is dropped.
+# 11b-entry. Entrypoint popularity: external callers are counted at the
+#      PUBLIC entry point (the deepest primary-stack product frame), any-frame. A real
+#      dependant calls the entry point only — it never contains the target's
+#      internal frames above it. The entry may be deeper than the top-three
+#      crash-state window used for deduplication.
 # ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="all-frames gate: caller must match both crash-state frames"
-ANDGATE_DIR="$TEST_TMPDIR/and-gate"
-mkdir -p "$ANDGATE_DIR"
-cat > "$ANDGATE_DIR/report.md" <<'EOF'
-# CRASH-AND-GATE
+_CURRENT_TEST="entrypoint: callers of the public entry count"
+ENTRY_DIR="$TEST_TMPDIR/entrypoint"
+mkdir -p "$ENTRY_DIR"
+cat > "$ENTRY_DIR/report.md" <<'EOF'
+# CRASH-ENTRY
 ## Summary
 heap overflow in sampledb
 EOF
-cat > "$ANDGATE_DIR/sanitizer.txt" <<'EOF'
+# #0-#2 are internal frames, #3 is the public API the harness called into,
+# #4 is the harness (filtered). The entry point is deeper than the capped
+# ClusterFuzz crash-state window.
+cat > "$ENTRY_DIR/sanitizer.txt" <<'EOF'
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow
 WRITE of size 1
-    #0 0x100 in sampledb::Engine::Store::set_blob(unsigned int) sampledb.cpp:213
-    #1 0x200 in sampledb::Engine::apply_line(char const*) sampledb.cpp:367
-    #2 0x300 in main main.cpp:13
+    #0 0x100 in sampledb::Engine::set_blob(unsigned int) sampledb.cpp:213
+    #1 0x150 in sampledb::Engine::apply_line(char const*) sampledb.cpp:300
+    #2 0x180 in sampledb::Engine::decode_inner(char const*) internal.cpp:318
+    #3 0x200 in sampledb::Engine::public_decode(char const*) api.cpp:42
+    #4 0x300 in LLVMFuzzerTestOneInput harness.cpp:13
 EOF
-# Frame #0 → probe "Store::set_blob"; frame #1 → probe "Engine::apply_line".
-SB_HASH=$(sha1_short "Store::set_blob")
-AL_HASH=$(sha1_short "Engine::apply_line")
-# both-repo/src/x.cpp matches BOTH frames; only-set and only-apply each match one.
-cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${SB_HASH}.json" <<'EOF'
-{"status":"ok","hits":[
-  {"repo":"both-repo","path":"src/x.cpp"},
-  {"repo":"only-set","path":"src/y.cpp"}
-]}
+# downstream-app calls ONLY public_decode. Internal frames are not queried.
+PD_HASH=$(sha1_short "Engine::public_decode")
+cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${PD_HASH}.json" <<'EOF'
+{"status":"ok","hits":[{"repo":"downstream-app","path":"src/main.cpp"}]}
 EOF
-cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${AL_HASH}.json" <<'EOF'
-{"status":"ok","hits":[
-  {"repo":"both-repo","path":"src/x.cpp"},
-  {"repo":"only-apply","path":"src/z.cpp"}
-]}
-EOF
-cat > "$REACHABILITY_MOCK_DIR/gh-${SB_HASH}.json" <<'EOF'
-{"status":"unavailable","error":"n/a"}
-EOF
-cat > "$REACHABILITY_MOCK_DIR/gh-${AL_HASH}.json" <<'EOF'
-{"status":"unavailable","error":"n/a"}
-EOF
-out=$(python3 "$REACH" --report "$ANDGATE_DIR" --json --no-cache 2>&1) || \
-  fail "$_CURRENT_TEST" "and-gate report mode failed: $out"
+echo '{"status":"unavailable","error":"n/a"}' > "$REACHABILITY_MOCK_DIR/gh-${PD_HASH}.json"
+out=$(python3 "$REACH" --report "$ENTRY_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "entrypoint report mode failed: $out"
 echo "$out" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)["reachability"]
-assert r["match_mode"] == "all-frames", r["match_mode"]
-# Only the file matching BOTH frames survives; one-frame collisions are dropped.
-assert r["external_callers"] == 1, ("expected 1, got", r["external_callers"], r["external_caller_hits"])
-hit = r["external_caller_hits"][0]
-assert hit["repo"] == "both-repo" and hit["path"] == "src/x.cpp", hit
-assert hit["matched_symbols"] == ["Engine::apply_line", "Store::set_blob"], hit["matched_symbols"]
-print("all-frames gate OK")
-' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "all-frames gate miscounted"
+assert r["match_mode"] == "entrypoint", r["match_mode"]
+assert r["entry_symbol"] == "Engine::public_decode", r["entry_symbol"]
+# The public-API caller counts even though it lacks the internal chain.
+repos = sorted({h["repo"] for h in r["external_caller_hits"]})
+assert repos == ["downstream-app"], ("expected [downstream-app], got", repos)
+assert r["external_callers"] == 1, ("expected 1, got", r["external_callers"])
+print("entrypoint popularity OK")
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "entrypoint popularity miscounted"
+
+# ───────────────────────────────────────────────────────────────────
+# 11b-uaf. UAF reports contain secondary context stacks ("freed by",
+#      "previously allocated by"). Caller popularity must use the primary
+#      fault stack, not the cleanup/allocation context.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="entrypoint: UAF freed-by context is not the caller entry"
+UAFENTRY_DIR="$TEST_TMPDIR/uaf-entrypoint"
+mkdir -p "$UAFENTRY_DIR"
+cat > "$UAFENTRY_DIR/report.md" <<'EOF'
+# CRASH-UAF-ENTRY
+## Summary
+UAF write after a stale object link.
+EOF
+cat > "$UAFENTRY_DIR/sanitizer.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-use-after-free
+WRITE of size 8
+    #0 0x100 in samplelib_add_number samplelib.c:2201
+    #1 0x200 in main harness.c:93
+
+freed by thread T0 here:
+    #0 0x300 in free sanitizer_malloc.cpp:52
+    #1 0x400 in samplelib_delete samplelib.c:273
+    #2 0x500 in main harness.c:92
+
+previously allocated by thread T0 here:
+    #0 0x600 in malloc sanitizer_malloc.cpp:30
+    #1 0x700 in samplelib_parse samplelib.c:1172
+    #2 0x800 in main harness.c:84
+
+SUMMARY: AddressSanitizer: heap-use-after-free samplelib.c:2201 in samplelib_add_number
+EOF
+ADD_HASH=$(sha1_short "samplelib_add_number")
+cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${ADD_HASH}.json" <<'EOF'
+{"status":"ok","hits":[{"repo":"primary-caller","path":"src/use_samplelib.c"}]}
+EOF
+echo '{"status":"unavailable","error":"n/a"}' > "$REACHABILITY_MOCK_DIR/gh-${ADD_HASH}.json"
+out=$(python3 "$REACH" --report "$UAFENTRY_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "uaf entrypoint report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["reachability"]
+assert r["match_mode"] == "entrypoint", r["match_mode"]
+assert r["entry_symbol"] == "samplelib_add_number", r["entry_symbol"]
+assert r["symbols"] == ["samplelib_add_number"], r["symbols"]
+repos = sorted({h["repo"] for h in r["external_caller_hits"]})
+assert repos == ["primary-caller"], ("expected primary-caller, got", repos)
+print("uaf primary-stack entrypoint OK")
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "uaf entrypoint miscounted"
+
+# ───────────────────────────────────────────────────────────────────
+# 11b-sanitizer. The entry parser is sanitizer-family agnostic as long as
+#      the report carries symbolized #N frames (TSan/MSan/UBSan-style stacks).
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="entrypoint: non-ASan sanitizer stack uses primary frames"
+SANENTRY_DIR="$TEST_TMPDIR/sanitizer-entrypoint"
+mkdir -p "$SANENTRY_DIR"
+cat > "$SANENTRY_DIR/report.md" <<'EOF'
+# CRASH-SAN-ENTRY
+## Summary
+Thread sanitizer report with a public processing entry.
+EOF
+cat > "$SANENTRY_DIR/sanitizer.txt" <<'EOF'
+WARNING: ThreadSanitizer: data race
+  Write of size 4 at 0x1234 by thread T1:
+    #0 0x100 in samplelib_store samplelib.c:87
+    #1 0x200 in samplelib_public_process samplelib.c:205
+    #2 0x300 in main harness.c:41
+
+  Thread T1 created by main thread at:
+    #0 0x400 in pthread_create tsan_interceptors.cpp:100
+    #1 0x500 in samplelib_spawn samplelib.c:55
+EOF
+PROC_HASH=$(sha1_short "samplelib_public_process")
+cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${PROC_HASH}.json" <<'EOF'
+{"status":"ok","hits":[{"repo":"tsan-caller","path":"src/process.c"}]}
+EOF
+echo '{"status":"unavailable","error":"n/a"}' > "$REACHABILITY_MOCK_DIR/gh-${PROC_HASH}.json"
+out=$(python3 "$REACH" --report "$SANENTRY_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "sanitizer entrypoint report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["reachability"]
+assert r["entry_symbol"] == "samplelib_public_process", r["entry_symbol"]
+assert r["symbols"] == ["samplelib_public_process"], r["symbols"]
+repos = sorted({h["repo"] for h in r["external_caller_hits"]})
+assert repos == ["tsan-caller"], ("expected tsan-caller, got", repos)
+print("non-ASan sanitizer entrypoint OK")
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "non-ASan sanitizer entrypoint wrong"
 
 # ───────────────────────────────────────────────────────────────────
 # 11c. Symbol extraction also accepts lowerCamelCase (libxml2 / htmllib /
