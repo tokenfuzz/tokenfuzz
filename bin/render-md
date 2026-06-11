@@ -964,7 +964,7 @@ def _render_inline(text: str) -> str:
 # can wrap matching tokens in styled spans.
 _SEV_CELL_RE = re.compile(
     r"^\s*(Critical|High|Medium|Low|None|Unknown|Pending|—)"
-    r"(?:\s*\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*(\d+(?:\.\d+)?)\s*\))?\s*$"
+    r"(?:\s*\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(\d+(?:\.\d+)?)\s*\))?\s*$"
 )
 
 # Strategy short-codes used in REPORT.md `Strategy:` field. The full
@@ -1035,7 +1035,7 @@ def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "") -> str:
     raw = raw_cell.strip()
     key = row_key.strip().lower()
 
-    # Severity pill: "Critical (CVSS-BTE 4.0 9.3)" → span.sev-Critical
+    # Severity pill: "Critical (CVSS-BTE 4.0: 9.3)" → span.sev-Critical
     m = _SEV_CELL_RE.match(raw)
     if m:
         level = m.group(1)
@@ -1290,7 +1290,7 @@ _FIELDS_ROW_RE = re.compile(
 )
 _SEV_FIELD_RE = re.compile(
     r"^(?P<level>Critical|High|Medium|Low|None|Unknown)"
-    r"(?:\s*\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*(?P<score>\d+(?:\.\d+)?)\s*\))?\s*$"
+    r"(?:\s*\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(?P<score>\d+(?:\.\d+)?)\s*\))?\s*$"
 )
 _SEV_BULLET_RE = re.compile(
     r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low|None|Unknown)"

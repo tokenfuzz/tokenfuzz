@@ -200,7 +200,7 @@ _SEVERITY_LEVEL_RE = re.compile(
 )
 _SEVERITY_TABLE_RE = re.compile(
     r"^\|\s*Severity\s*\|\s*(?P<level>Critical|High|Medium|Low|None|Unknown)\b"
-    r"\s*(?:\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*(?P<score>\d+(?:\.\d+)?)\s*\))?",
+    r"\s*(?:\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(?P<score>\d+(?:\.\d+)?)\s*\))?",
     re.MULTILINE | re.IGNORECASE,
 )
 # The trailing lookahead keeps the "4.0" of a bare vector string
@@ -215,7 +215,7 @@ def extract_severity(report_text: str) -> tuple[str, int, float]:
     """Return (level_str, rank_int, cvss_score_float) for the report's severity.
 
     Prefers the bare ``- **Severity**: <Level> (CVSS-BTE 4.0: <score> …)`` line;
-    falls back to the ``| Severity | <Level> (CVSS-BTE 4.0 <score>) |`` Fields-table
+    falls back to the ``| Severity | <Level> (CVSS-BTE 4.0: <score>) |`` Fields-table
     row; then to ``('—', 0, 0.0)`` when no severity is recorded yet (e.g.
     before bin/reachability has scored the report). Rank is the sort key —
     higher is more severe (Critical=4 > High=3 > Medium=2 > Low=1;

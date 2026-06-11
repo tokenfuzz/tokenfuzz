@@ -2048,8 +2048,9 @@ def normalize_strategy(value: str) -> str:
 
 
 def read_severity_from(path: Optional[Path]) -> str:
-    """Return `"Level (CVSS[-*] 4.0 score)"` or just `"Level"` if the Severity line
-    exists in `path`; "" otherwise.
+    """Return `"Level (CVSS[-*] 4.0: score)"` or just `"Level"` if the Severity line
+    exists in `path`; "" otherwise. The colon after the version keeps the score
+    from reading as a second version number (`4.0 6.0`).
     """
     if path is None or not path.is_file():
         return ""
@@ -2069,8 +2070,8 @@ def read_severity_from(path: Optional[Path]) -> str:
                 if sm:
                     name, version, score = sm.groups()
                     if version:
-                        return f"{level} ({name} {version} {score})"
-                    return f"{level} ({name} {score})"
+                        return f"{level} ({name} {version}: {score})"
+                    return f"{level} ({name}: {score})"
                 return level
     return ""
 

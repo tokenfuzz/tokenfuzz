@@ -180,7 +180,7 @@ illustration.)
 | Field                 | Value |
 |:----------------------|:------|
 | Primitive             | heap-buffer-overflow READ of size 4 |
-| Severity              | Medium (CVSS-BTE 4.0 5.5) |
+| Severity              | Medium (CVSS-BTE 4.0: 5.5) |
 | Surface               | library-api (C harness calls app_read_memory) |
 | Trigger source        | bytes |
 | Caller contract       | obeyed |
@@ -240,7 +240,7 @@ Notes on the fields:
 - Severity is the **CVSS v4.0 score** — one industry-standard
   metric, computed by the vendored FIRST reference scorer. The bullet
   and the Fields-table `Severity` row carry the level plus the score
-  (`Medium (CVSS-BTE 4.0 5.5)`); the generated `## Severity rationale` section
+  (`Medium (CVSS-BTE 4.0: 5.5)`); the generated `## Severity rationale` section
   shows the full vector and how each metric was derived from the
   report's classification and Fields.
 - The CVSS vector is derived mechanically: **AV/UI** from the surface
@@ -283,7 +283,7 @@ A typical non-crashing FIND `report.md` looks like:
 | Field          | Value                                                  |
 |:---------------|:-------------------------------------------------------|
 | Class          | logic / authorization bypass                           |
-| Severity       | Medium (CVSS-BTE 4.0 4.5)                               |
+| Severity       | Medium (CVSS-BTE 4.0: 4.5)                              |
 | Surface        | library-api                                            |
 | Location       | src/policy.c:check_acl:142                             |
 | Caller control | request bytes                                          |

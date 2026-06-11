@@ -255,7 +255,7 @@ assert_file_exists "$CRASH_DIR/reachability.json" "reachability.json written"
 # Severity line should be rewritten to High or Critical (write + attacker-ctrl).
 assert_file_contains "$CRASH_DIR/report.md" "^- \*\*Severity\*\*: (Critical|High|Medium|Low|None) \(CVSS(-[A-Z]+)? 4\\.0:" "Severity line rewritten with CVSS v4.0"
 assert_file_not_contains "$CRASH_DIR/report.md" '^\| Severity \| Low \(12\)' "structured Severity field is no longer stale"
-assert_file_contains "$CRASH_DIR/report.md" '^\| Severity \| (Critical|High|Medium|Low|None) \(CVSS(-[A-Z]+)? 4\.0 [0-9.]+\)' "structured Severity field rewritten"
+assert_file_contains "$CRASH_DIR/report.md" '^\| Severity \| (Critical|High|Medium|Low|None) \(CVSS(-[A-Z]+)? 4\.0: [0-9.]+\)' "structured Severity field rewritten"
 # Reachability section should be present.
 assert_file_contains "$CRASH_DIR/report.md" "^## Reachability — external callers" "auto Reachability section added"
 # Original narrative section is preserved (idempotent placement under it).

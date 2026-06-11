@@ -2626,12 +2626,13 @@ def _replace_severity_line(text: str, new_line: str, *, synthesize: bool = True)
 
 
 def _format_severity_field(sev: dict) -> str:
-    """Fields-table cell: ``<Level> (CVSS-BTE 4.0 <score>)`` or ``Unknown`` when the
-    primitive is unclassified."""
+    """Fields-table cell: ``<Level> (CVSS-BTE 4.0: <score>)`` or ``Unknown`` when the
+    primitive is unclassified. The colon after the version keeps the score from
+    reading as a second version number (``4.0 6.0``)."""
     if sev.get("score") is None:
         return "Unknown"
     name = (sev.get("cvss") or {}).get("nomenclature", "CVSS-B")
-    return f"{sev['level']} ({name} 4.0 {sev['score']})"
+    return f"{sev['level']} ({name} 4.0: {sev['score']})"
 
 
 def _replace_structured_field(text: str, field: str, value: str) -> tuple[str, bool]:
@@ -2990,7 +2991,7 @@ def render_human(reach: dict, severity: dict | None = None) -> str:
                        f"primitive={severity['primitive']})")
         else:
             out.append(f"Severity: {severity['level']} "
-                       f"({cv.get('nomenclature', 'CVSS-B')} 4.0 {cv['score']} {cv['rating']})")
+                       f"({cv.get('nomenclature', 'CVSS-B')} 4.0: {cv['score']} {cv['rating']})")
             out.append(f"  vector     {cv['vector']}")
             out.append(f"  base       {cv['base_score']} {cv['base_rating']}  {cv['base_vector']}")
             out.append(f"  primitive  {severity['primitive']} ({severity['primitive_key']})")

@@ -868,7 +868,7 @@ with tempfile.TemporaryDirectory() as td:
         "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N; primitive=x)\n",
         encoding="utf-8",
     )
-    assert_eq("High (CVSS-BTE 4.0 8.7)",
+    assert_eq("High (CVSS-BTE 4.0: 8.7)",
               er.read_severity_from(sev_report),
               "read_severity_from: preserves CVSS-BTE 4.0 score token")
 
@@ -890,7 +890,7 @@ with tempfile.TemporaryDirectory() as td:
         "/E:P/CR:L/IR:L/AR:L/MVC:N/MVI:N/MVA:N; primitive=x)\n",
         encoding="utf-8",
     )
-    assert_eq("None (CVSS-BTE 4.0 0.0)",
+    assert_eq("None (CVSS-BTE 4.0: 0.0)",
               er.read_severity_from(none_report),
               "read_severity_from: scored-0.0 band None parsed")
 

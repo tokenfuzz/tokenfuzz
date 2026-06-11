@@ -89,11 +89,11 @@ cat > "$sev_fix" <<'EOF'
 
 | Severity           | Cluster        | Surface     | Note |
 |:-------------------|:---------------|:------------|:-----|
-| Critical (CVSS-BTE 4.0 9.3)| `CL-abc12345`  | library-api — pcre2_match | [link](other.md) |
+| Critical (CVSS-BTE 4.0: 9.3)| `CL-abc12345`  | library-api — pcre2_match | [link](other.md) |
 | High               | `CL-def67890`  | cli         | x |
-| Medium (CVSS-BTE 4.0 6.5)  | `CL-feedface`  | maint-tool  | y |
+| Medium (CVSS-BTE 4.0: 6.5)  | `CL-feedface`  | maint-tool  | y |
 | Low                | `CL-cafebabe`  | unknown     | z |
-| None (CVSS-BTE 4.0 0.0)    | `CL-0a1b2c3d`  | maint-tool  | w |
+| None (CVSS-BTE 4.0: 0.0)    | `CL-0a1b2c3d`  | maint-tool  | w |
 EOF
 python3 "$RENDER" "$sev_fix" --html-sibling >/dev/null 2>&1
 sev_html="$TEST_TMPDIR/sev.html"
@@ -136,7 +136,7 @@ cat > "$cluster_fix" <<'EOF'
 
 | Severity    | Callers | Cluster       | Size | Primitive                 | Strategy | Boundary | Root signature | Members | Status |
 |:------------|--------:|:--------------|-----:|:--------------------------|:---------|:---------|:---------------|:--------|:-------|
-| Medium (CVSS-BTE 4.0 6.4) |      63 | `CL-f2422e11` |    1 | heap-use-after-free-WRITE | S5       | —        | `node_free node.c:100 -> node_free node.c:120 -> node_free node.c:140` | CRASH-1 | OK |
+| Medium (CVSS-BTE 4.0: 6.4) |      63 | `CL-f2422e11` |    1 | heap-use-after-free-WRITE | S5       | —        | `node_free node.c:100 -> node_free node.c:120 -> node_free node.c:140` | CRASH-1 | OK |
 EOF
 python3 "$RENDER" "$cluster_fix" --html-sibling >/dev/null 2>&1
 cluster_html="$TEST_TMPDIR/cluster.html"
@@ -234,7 +234,7 @@ cat > "$bare_fix" <<'EOF'
 | Field    | Value                |
 |:---------|:---------------------|
 | Surface  | library-api          |
-| Severity | Medium (CVSS-BTE 4.0 6.5) |
+| Severity | Medium (CVSS-BTE 4.0: 6.5) |
 
 Surface: library-api
 Trigger source: bytes
@@ -304,7 +304,7 @@ cat > "$hero_fix" <<'EOF'
 | Field             | Value                       |
 |:------------------|:----------------------------|
 | Primitive         | heap-buffer-overflow        |
-| Severity          | High (CVSS-BTE 4.0 8.1)     |
+| Severity          | High (CVSS-BTE 4.0: 8.1)     |
 | Surface           | library-api — public entry  |
 | Cluster           | CL-deadbeef (3 reports)     |
 | Reproduction rate | 5/5                         |
@@ -363,7 +363,7 @@ cat > "$hero_enrich_fix" <<'EOF'
 | Field     | Value                |
 |:----------|:---------------------|
 | Primitive | heap-buffer-overflow |
-| Severity  | High (CVSS-BTE 4.0 8.1) |
+| Severity  | High (CVSS-BTE 4.0: 8.1) |
 
 ## Summary
 
@@ -413,7 +413,7 @@ cat > "$legacy_fix" <<'EOF'
 | Field     | Value                |
 |:----------|:---------------------|
 | Primitive | heap-buffer-overflow |
-| Severity  | High (CVSS-BTE 4.0 8.1) |
+| Severity  | High (CVSS-BTE 4.0: 8.1) |
 
 ## ASan top frames
 
@@ -635,7 +635,7 @@ cat > "$noh1_fix" <<'EOF'
 
 | Field     | Value               |
 |:----------|:--------------------|
-| Severity  | Medium (CVSS-BTE 4.0 6.5) |
+| Severity  | Medium (CVSS-BTE 4.0: 6.5) |
 | Primitive | heap_write          |
 | Surface   | library-api — apptool |
 
@@ -673,7 +673,7 @@ cat > "$empty_h" <<'EOF'
 
 | Field     | Value       |
 |:----------|:------------|
-| Severity  | Medium (CVSS-BTE 4.0 6.5) |
+| Severity  | Medium (CVSS-BTE 4.0: 6.5) |
 | Primitive | heap_write  |
 
 - **Severity**: Medium (CVSS-BTE 4.0: 6.5 Medium; primitive=use-after-free READ)

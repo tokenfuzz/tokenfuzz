@@ -499,7 +499,7 @@ cat > "$sevtbl_root/crashes/CRASH-TBLONLY/REPORT.md" <<'EOF'
 
 | Field    | Value          |
 | :------- | :------------- |
-| Severity | Low (CVSS-BTE 4.0 3.3) |
+| Severity | Low (CVSS-BTE 4.0: 3.3) |
 | Surface  | maint-tool     |
 
 Trigger source: bytes
@@ -510,7 +510,7 @@ EOF
 python3 "$CLUSTER" "$sevtbl_root" >/dev/null 2>&1 \
   || fail "severity-table: cluster-crashes runs cleanly" "exit nonzero"
 assert_file_contains "$sevtbl_root/crashes/CRASH-CLUSTERS.md" '\| Low \(CVSS 3.3\) ' \
-  "Fields-table severity 'Low (CVSS-BTE 4.0 3.3)' is parsed (not rendered as unscored)"
+  "Fields-table severity 'Low (CVSS-BTE 4.0: 3.3)' is parsed (not rendered as unscored)"
 # The leftmost (Severity) cell of the CRASH-TBLONLY row must be Low (CVSS 3.3),
 # never an unscored '—'. Grab the row and check its first data cell.
 tbl_row=$(grep -E 'CRASH-TBLONLY' "$sevtbl_root/crashes/CRASH-CLUSTERS.md" | head -1)

@@ -436,8 +436,12 @@ ok(fs.cluster_id(("auth", "src/foo.go", "Bar"))
 # The report is the source of truth for scored severity; both cluster
 # tables read it through this parser so their rows match the linked report.
 print("\nextract_severity")
-assert_eq(("Low", 1, 3.1), fs.extract_severity("| Severity | Low (CVSS-BTE 4.0 3.1) |"),
+assert_eq(("Low", 1, 3.1), fs.extract_severity("| Severity | Low (CVSS-BTE 4.0: 3.1) |"),
           "Fields-table row with CVSS-BTE 4.0 score")
+# Backward compatibility: the pre-colon Fields form still parses, so already
+# persisted reports keep their scores after the format change.
+assert_eq(("Low", 1, 3.1), fs.extract_severity("| Severity | Low (CVSS-BTE 4.0 3.1) |"),
+          "legacy no-colon Fields-table row still parses")
 assert_eq(("High", 3, 8.7),
           fs.extract_severity("- **Severity**: High (CVSS-BTE 4.0: 8.7 High; "
                               "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N; primitive=x)"),
@@ -453,7 +457,7 @@ assert_eq(("Unknown", 0, 0.0),
           "unclassified crash → Unknown, no score")
 assert_eq(("—", 0, 0.0), fs.extract_severity("no severity recorded yet"),
           "unscored report → em-dash sentinel")
-both = ("| Severity | Low (CVSS-BTE 4.0 3.1) |\n"
+both = ("| Severity | Low (CVSS-BTE 4.0: 3.1) |\n"
         "- **Severity**: Critical (CVSS-BTE 4.0: 9.3 Critical; primitive=x)")
 ok(fs.extract_severity(both)[0] == "Critical",
    "bare line preferred over Fields row")
@@ -463,7 +467,7 @@ assert_eq(("None", 0, 0.0),
           fs.extract_severity("- **Severity**: None (CVSS-BTE 4.0: 0.0 None; "
                               "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P/CR:L/IR:L/AR:L/MVC:N/MVI:N/MVA:N; primitive=x)"),
           "scored-0.0 band: bare None line parsed")
-assert_eq(("None", 0, 0.0), fs.extract_severity("| Severity | None (CVSS-BTE 4.0 0.0) |"),
+assert_eq(("None", 0, 0.0), fs.extract_severity("| Severity | None (CVSS-BTE 4.0: 0.0) |"),
           "scored-0.0 band: Fields-table None row parsed")
 # A hand-written line carrying only the vector must not misread the
 # vector's own "4.0" as a score.
