@@ -87,10 +87,13 @@ rm -rf "$REACHABILITY_CACHE_DIR"
 mkdir -p "$REACHABILITY_CACHE_DIR"
 python3 "$REACH" --symbol demo_decode --json >/dev/null 2>&1
 # The cache file should now exist for ok-status backends only. Filename
-# is mtime-keyed (no date suffix) — see _cache_path() in bin/reachability.
-cache_file="$REACHABILITY_CACHE_DIR/sourcegraph-${SYM_HASH}.json"
+# is mtime-keyed (no date suffix) and the digest covers (language, symbol)
+# — see _cache_path() in bin/reachability. With no resolvable target tree
+# the language defaults to "c".
+CACHE_HASH=$(sha1_short "c|demo_decode")
+cache_file="$REACHABILITY_CACHE_DIR/sourcegraph-${CACHE_HASH}.json"
 assert_file_exists "$cache_file" "sourcegraph cache file written"
-unavail_cache="$REACHABILITY_CACHE_DIR/gh-${SYM_HASH}.json"
+unavail_cache="$REACHABILITY_CACHE_DIR/gh-${CACHE_HASH}.json"
 [ ! -f "$unavail_cache" ] && pass "$_CURRENT_TEST: gh (unavailable) NOT cached" || \
   fail "$_CURRENT_TEST" "unavailable response was cached, should not be"
 # Move mocks aside; cache must satisfy.
@@ -896,6 +899,122 @@ out=$(python3 "$TEST_TMPDIR/sg_cooldown_test.py" 2>&1)
 [ $? -eq 0 ] && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "$out"
 
 # ───────────────────────────────────────────────────────────────────
+# 13d. Language-aware search: the lang filter is derived from the target
+#      tree's majority source extension (lib/languages.py registry), the
+#      backends honour it, and an empty language disables the filter.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="language filter derived from target tree + applied to query"
+# Quoted heredoc: the body is literal (REACH/TEST_TMPDIR arrive via env), so
+# backticks in comments are not run as shell command substitutions.
+cat > "$TEST_TMPDIR/lang_filter_test.py" <<'PY'
+import importlib.util, os, urllib.parse
+from pathlib import Path
+from importlib.machinery import SourceFileLoader
+TMP = Path(os.environ["TEST_TMPDIR"])
+loader = SourceFileLoader("reach", os.environ["REACH"])
+spec = importlib.util.spec_from_loader("reach", loader)
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+
+# Majority-extension detection: a JS tree maps to javascript, a C tree to c,
+# a C++ tree to the linguist token c++, and an empty/missing root falls back
+# to c (the historical default).
+root = TMP / "langdet"
+for rel in ("a/index.js", "a/util.js", "a/x.test.js", "README.md"):
+    p = root / "js" / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("x\n")
+for rel in ("src/core.cc", "src/core.hh", "include/api.hpp"):
+    p = root / "cxx" / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("x\n")
+assert m._detect_target_language(root / "js") == "javascript"
+assert m._detect_target_language(root / "cxx") == "c++"
+assert m._detect_target_language(root / "missing") == "c"
+assert m._detect_target_language(None) == "c"
+
+# Header-neutral C-vs-C++ vote: a C++ lib that is mostly headers and a few .cc
+# files must still detect as c++ (headers do not decide the language).
+hh = TMP / "hdrlib"
+(hh / "include").mkdir(parents=True, exist_ok=True)
+for i in range(20):
+    (hh / "include" / f"h{i}.h").write_text("//\n")
+for i in range(3):
+    (hh / f"impl{i}.cc").write_text("//\n")
+assert m._detect_target_language(hh) == "c++", "header-heavy C++ tree must stay c++"
+
+# Vendored/dependency subtrees are skipped: a Go service with a large
+# third_party/native/*.c blob must not be detected as C.
+gv = TMP / "go-vendored"
+(gv / "third_party" / "native").mkdir(parents=True, exist_ok=True)
+for i in range(3):
+    (gv / f"m{i}.go").write_text("package main\n")
+for i in range(20):
+    (gv / "third_party" / "native" / f"c{i}.c").write_text("int x;\n")
+assert m._detect_target_language(gv) == "go", "vendored C must not flip a Go target to c"
+
+# Structured build_system token outranks file counting for non-native
+# languages, and a native 'c' declaration still defers to the C/C++ vote.
+assert m._detect_target_language(gv, "rust") == "rust", "declared rust wins"
+assert m._detect_target_language(hh, "c") == "c++", "native 'c' declaration still votes c++"
+
+# Regression: a target tree under a `build`-named ancestor (or a tmpdir whose
+# name merely contains "build") must NOT collapse to "c". The earlier
+# absolute-substring skip ("/build" in str(path)) discarded every file and
+# fell back to c, which also disabled PascalCase Go-symbol probing.
+buildy = TMP / "build_run01" / "go-svc"
+buildy.mkdir(parents=True, exist_ok=True)
+for fn in ("main.go", "parse.go", "handler.go"):
+    (buildy / fn).write_text("package main\n")
+assert m._detect_target_language(buildy) == "go", \
+    "language collapsed to c under a build-named ancestor"
+# A genuine generated subdir IS still skipped (relative parts), so a Go tree
+# with a big vendored C blob under build/ stays go.
+(buildy / "build").mkdir(exist_ok=True)
+for i in range(5):
+    (buildy / "build" / f"gen{i}.c").write_text("int x;\n")
+assert m._detect_target_language(buildy) == "go", \
+    "generated build/ subdir should be skipped, not counted"
+
+# The Sourcegraph query carries the derived lang filter; empty disables it.
+os.environ.pop("REACHABILITY_MOCK_DIR", None)
+os.environ["REACHABILITY_CACHE_DIR"] = str(TMP / "lang-cache")
+seen = []
+def fake_http(url, timeout, accept="application/json"):
+    seen.append(url)
+    return 500, None  # availability is irrelevant; we only check the URL
+m._http_get = fake_http
+m.BACKOFF_SECS = 0.0
+m.query_sourcegraph("demo_lang_sym", 1.0, "go")
+q = urllib.parse.parse_qs(urllib.parse.urlparse(seen[-1]).query)["q"][0]
+assert "lang:go" in q, q
+m.query_sourcegraph("demo_lang_sym", 1.0, "")
+q = urllib.parse.parse_qs(urllib.parse.urlparse(seen[-1]).query)["q"][0]
+assert "lang:" not in q, q
+
+# Cache keys are language-scoped: same symbol, different language, different file.
+assert m._cache_path("sourcegraph", "demo_lang_sym", "c") != \
+       m._cache_path("sourcegraph", "demo_lang_sym", "go")
+
+# Symbol shapes are language-aware. PascalCase is a public-function convention
+# for Go/Java/Kotlin/Swift/JS/TS, so those accept it; C/C++ reject it (type
+# names), and Rust/Python reject it too (there PascalCase is a type/class, not
+# a callable). snake_case / lowerCamel stay valid everywhere. ALL_CAPS macros
+# stay rejected.
+line = "- Entry: `ParseDocument()` calls `decodeChunk()` then `FREE_LIST()`"
+assert m._extract_symbols_from_report(line, "go") == ["ParseDocument", "decodeChunk"]
+assert m._extract_symbols_from_report(line, "c") == ["decodeChunk"]
+for lang in ("go", "java", "kotlin", "swift", "javascript", "typescript"):
+    assert m._symbol_shape_ok("NewDecoder", lang), lang
+for lang in ("c", "c++", "rust", "python", "php", "ruby"):
+    assert not m._symbol_shape_ok("NewDecoder", lang), lang
+assert m._symbol_shape_ok("pcre2_match", "c")
+assert m._symbol_shape_ok("parse_doc", "rust")  # snake_case still ok for rust
+print("language filter OK")
+PY
+out=$(REACH="$REACH" TEST_TMPDIR="$TEST_TMPDIR" python3 "$TEST_TMPDIR/lang_filter_test.py" 2>&1)
+[ $? -eq 0 ] && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "$out"
+
+# ───────────────────────────────────────────────────────────────────
 # 15. --batch mode walks crashes/CRASH-*/ and produces a summary table
 # ───────────────────────────────────────────────────────────────────
 _CURRENT_TEST="--batch mode summarises every crash dir under <results>/crashes/"
@@ -1039,6 +1158,28 @@ print("v2 reachability shape OK")
 # ───────────────────────────────────────────────────────────────────
 # 17. reachability.json conforms to the published JSON schema (when jsonschema is installed)
 # ───────────────────────────────────────────────────────────────────
+# Always-on, dependency-free guard: every key the tool writes must be a
+# declared property of the schema (additionalProperties is false). This is
+# what catches "code added a field, schema not updated" even where the
+# jsonschema package is absent — the gap that previously let `language` /
+# `external_caller_repos` drift in undetected.
+_CURRENT_TEST="reachability.json keys are all declared in the schema (no drift)"
+python3 - <<PY
+import json, sys
+schema = json.load(open("$SCRIPT_ROOT/tests/schema/reachability.schema.json"))
+declared = set(schema["properties"])
+errors = []
+for rel in ("crashes/CRASH-A/reachability.json",):
+    doc = json.load(open("$BATCH_RESULTS/" + rel))
+    undeclared = set(doc) - declared
+    if undeclared:
+        errors.append((rel, sorted(undeclared)))
+if errors:
+    print("UNDECLARED KEYS:", errors); sys.exit(1)
+print("no schema drift")
+PY
+if [ $? -eq 0 ]; then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "doc carries keys absent from schema"; fi
+
 _CURRENT_TEST="reachability.json matches tests/schema/reachability.schema.json"
 if python3 -c 'import jsonschema' 2>/dev/null; then
   python3 - <<PY

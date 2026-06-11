@@ -13,9 +13,11 @@ evidence for it):
 }
 
 Allowed primitive_keys:
-  Memory-safety: uaf_write, uaf_read, double_free, wild_write, heap_write,
-                 stack_write, global_write, heap_read_big, heap_read_small,
-                 global_read, stack_read, null_deref, bus
+  Memory-safety: uaf_write, uaf_read, double_free, wild_write, wild_read,
+                 heap_write, stack_write, global_write, heap_read_big,
+                 heap_read_small, global_read, stack_read, data_race,
+                 integer_overflow, null_deref, stack_exhaustion, bus,
+                 memory_leak, oom
   Web/app:       command_injection, deserialization, sqli, ssti,
                  authn_bypass, ssrf, path_traversal, authz_bypass, xxe,
                  secrets_exposure, idor, prototype_pollution, xss,

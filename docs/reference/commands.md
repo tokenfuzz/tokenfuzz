@@ -345,7 +345,9 @@ bin/cluster-findings "$RESULTS"
   crash.
 - `bin/reachability --severity-only` recomputes severity without
   external queries. Omit `--severity-only` only when public caller
-  search is intended.
+  search is intended. The caller search filters by the target's
+  language (derived from the target tree; override with `--language`,
+  or `--language none` to disable the filter).
 - `bin/validate-finding` — re-runs the finding substance gate on a
   candidate report or recon row.
 - `bin/enrich-report` — inlines source snippets, patch excerpts, and

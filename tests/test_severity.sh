@@ -151,6 +151,184 @@ read level score key i r cf <<< "$(get_severity "$dir")"
 assert_eq "bus" "$key" "bus detected"
 assert_eq "5" "$i" "I=5"
 
+# ── ClusterFuzz-aligned sanitizer classes ──────────────────────────
+
+# ASan's hyphenated `stack-overflow` is recursion exhaustion (DoS), not a
+# stack-buffer-overflow — must not inherit the stack_write/read tier.
+seed_hits "demo_imp_stackexh" 0
+dir=$(make_crash "demo_imp_stackexh" CRASH-IMP-STACKEXH \
+  "AddressSanitizer: stack-overflow on address 0x7ffd4232fff8" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: ASan stack-overflow → stack_exhaustion base 8"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "stack_exhaustion" "$key" "stack_exhaustion detected"
+assert_eq "8" "$i" "I=8 for recursion exhaustion"
+
+# LeakSanitizer memory leaks are resource DoS — must NOT be scored as the
+# info_leak (data disclosure) class via the generic 'leaks' fallback.
+seed_hits "demo_imp_lsan" 0
+dir=$(make_crash "demo_imp_lsan" CRASH-IMP-LSAN \
+  "LeakSanitizer: detected memory leaks — Direct leak of 128 byte(s)" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: LeakSanitizer → memory_leak base 5 (not info_leak 24)"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "memory_leak" "$key" "memory_leak detected"
+assert_eq "5" "$i" "I=5 for memory leak"
+
+# SEGV discrimination by faulting address (ClusterFuzz practice): near-null
+# (< 0x1000) is a null deref; a wild address with a WRITE access is
+# wild_write-tier; with a READ access it is the wild_read info/DoS tier.
+seed_hits "demo_imp_segv_null" 0
+dir=$(make_crash "demo_imp_segv_null" CRASH-IMP-SEGV-NULL \
+  "SEGV on unknown address 0x000000000018" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: SEGV at near-null address → null_deref base 8"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "null_deref" "$key" "near-null SEGV is null_deref"
+assert_eq "8" "$i" "I=8"
+
+seed_hits "demo_imp_segv_wildr" 0
+dir=$(make_crash "demo_imp_segv_wildr" CRASH-IMP-SEGV-WILDR \
+  "SEGV on unknown address 0x612000000040 — The signal is caused by a READ memory access" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: SEGV READ at wild address → wild_read base 20"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "wild_read" "$key" "wild_read detected"
+assert_eq "20" "$i" "I=20"
+
+seed_hits "demo_imp_segv_wildw" 0
+dir=$(make_crash "demo_imp_segv_wildw" CRASH-IMP-SEGV-WILDW \
+  "SEGV on unknown address 0x612000000040 — The signal is caused by a WRITE memory access" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: SEGV WRITE at wild address → wild_write base 37"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "wild_write" "$key" "wild_write detected"
+assert_eq "37" "$i" "I=37"
+
+seed_hits "demo_imp_race" 0
+dir=$(make_crash "demo_imp_race" CRASH-IMP-RACE \
+  "WARNING: ThreadSanitizer: data race (pid=123)" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: TSan data race → data_race base 22 (not heap_write 32)"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "data_race" "$key" "data_race detected"
+assert_eq "22" "$i" "I=22"
+
+seed_hits "demo_imp_intovf" 0
+dir=$(make_crash "demo_imp_intovf" CRASH-IMP-INTOVF \
+  "x.c:12:5: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: UBSan signed integer overflow → integer_overflow base 12"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "integer_overflow" "$key" "integer_overflow detected"
+assert_eq "12" "$i" "I=12"
+
+seed_hits "demo_imp_invfree" 0
+dir=$(make_crash "demo_imp_invfree" CRASH-IMP-INVFREE \
+  "attempting free on address which was not malloc()-ed" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: invalid free → double_free family base 38"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "double_free" "$key" "invalid free maps to double_free"
+assert_eq "38" "$i" "I=38"
+
+# A crash report quoting raw input bytes containing ../../ must NOT be
+# misread as a path-traversal web vuln — the named phrase is required.
+seed_hits "demo_imp_dotdot" 0
+dir=$(make_crash "demo_imp_dotdot" CRASH-IMP-DOTDOT \
+  "SEGV with testcase bytes ../../etc/passwd quoted from the corpus" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: quoted ../../ input does not classify as path_traversal"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "null_deref" "$key" "SEGV wins; ../../ alone is not traversal"
+
+# ── Negation guard ─────────────────────────────────────────────────
+# Narrative-driven classes must not fire on sentences that rule the class
+# OUT. A negated mention falls through to "unknown" — where the structured
+# Primitive field (if any) takes over, so a guard false-positive degrades
+# gracefully instead of inventing a finding class.
+seed_hits "demo_imp_negated" 0
+dir=$(make_crash "demo_imp_negated" CRASH-IMP-NEGATED \
+  "Reviewed the session layer; no SQL injection or authentication bypass was observed, and this rules out cache poisoning" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: negated web-vuln mentions do not classify"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "unknown" "$key" "negated mentions fall through to unknown"
+
+# Positive control: the negation lives in a *previous* comma-clause, so the
+# class itself is still asserted and must classify.
+seed_hits "demo_imp_negpos" 0
+dir=$(make_crash "demo_imp_negpos" CRASH-IMP-NEGPOS \
+  "input is not sanitized, leading to SQL injection in the id parameter" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: comma-clause negation does not suppress a real finding"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "sqli" "$key" "sqli still detected past unrelated 'not' clause"
+
+# Graceful degradation: when the guard suppresses the narrative, an
+# agent-authored Primitive field is adopted (detector returned unknown).
+seed_hits "demo_imp_negfield" 0
+dir=$(make_crash "demo_imp_negfield" CRASH-IMP-NEGFIELD \
+  "no SQL injection was directly observed in the harness run" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+echo "Primitive: sqli" >> "$dir/report.md"
+_CURRENT_TEST="impact: structured Primitive field wins when narrative is negated"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "sqli" "$key" "Primitive field adopted after negation fallthrough"
+assert_eq "36" "$i" "I=36 from the structured field"
+
+# Negation AFTER the class name must also suppress — the negation token sits
+# on the right of the phrase ("X is not possible", "X was ruled out").
+seed_hits "demo_imp_negpost" 0
+dir=$(make_crash "demo_imp_negpost" CRASH-IMP-NEGPOST \
+  "We checked carefully: SQL injection is not possible and cache poisoning was ruled out" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: post-phrase negation ('is not possible'/'ruled out') suppresses"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "unknown" "$key" "trailing negation suppresses the class"
+
+# But a trailing MECHANISM word ('without escaping', 'without validation') is
+# not a class negation — it describes how the bug works, so the class stands.
+# (Also exercises the colon: the class name is followed by ': <mechanism>'.)
+seed_hits "demo_imp_mech" 0
+dir=$(make_crash "demo_imp_mech" CRASH-IMP-MECH \
+  "command injection: user input reaches shell exec without escaping" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: trailing 'without escaping' does not suppress command_injection"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "command_injection" "$key" "mechanism 'without' keeps the class"
+
+# Colon-introduced denial: a colon directly after the class name introduces a
+# qualifier, not a new statement, so 'SQL injection: not possible' / 'SSRF:
+# ruled out' must be read as negated (the post-fix walked over the colon).
+seed_hits "demo_imp_colon" 0
+dir=$(make_crash "demo_imp_colon" CRASH-IMP-COLON \
+  "Assessment — SQL injection: not possible. SSRF: ruled out after review" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="impact: colon-introduced denial ('X: not possible') suppresses"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "unknown" "$key" "colon-introduced negation suppresses the class"
+
+# Structured Primitive field outranks a prose-regex (web/recon) narrative
+# match, but NOT a sanitizer-class match.
+seed_hits "demo_imp_fieldwin" 0
+dir=$(make_crash "demo_imp_fieldwin" CRASH-IMP-FIELDWIN \
+  "open redirect via startsWith on the referrer parameter" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+echo "Primitive: sqli" >> "$dir/report.md"
+_CURRENT_TEST="impact: structured field outranks prose-regex narrative class"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "sqli" "$key" "structured sqli beats narrative open_redirect"
+
+seed_hits "demo_imp_fieldnosan" 0
+dir=$(make_crash "demo_imp_fieldnosan" CRASH-IMP-FIELDNOSAN \
+  "heap-use-after-free WRITE of size 8" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+echo "Primitive: open_redirect" >> "$dir/report.md"
+_CURRENT_TEST="impact: sanitizer-class match is NOT overridden by structured field"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "uaf_write" "$key" "sanitizer uaf_write beats structured open_redirect"
+
 seed_hits "demo_imp_cap" 0
 dir=$(make_crash "demo_imp_cap" CRASH-IMP-CAP \
   "heap-buffer-overflow WRITE of size 8" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)" \
@@ -254,6 +432,30 @@ read level score key i r cf <<< "$(get_severity "$dir")"
 # 22 × ~1.00 × 1.00 × 1.00 ≈ 22 — popularity expressed only by tier upgrade now
 assert_eq "22" "$r" "R=22 (popular library tier, single popularity signal)"
 
+# Popularity counts distinct REPOS, not files: one repo carrying 100 matching
+# files is a single dependent project and must NOT trigger the
+# library_popular tier upgrade.
+seed_hits_single_repo() {
+  local sym="$1" hits="$2"
+  local h; h=$(sha1_short "$sym")
+  {
+    printf '{"status":"ok","hits":['
+    local sep="" i
+    for ((i=0; i<hits; i++)); do
+      printf '%s{"repo":"sg-mono","path":"sg-p%d"}' "$sep" "$i"; sep=","
+    done
+    printf ']}'
+  } > "$REACHABILITY_MOCK_DIR/sourcegraph-${h}.json"
+  printf '{"status":"unavailable","error":"n/a"}' > "$REACHABILITY_MOCK_DIR/gh-${h}.json"
+}
+seed_hits_single_repo "demo_e_monorepo" 100
+dir=$(make_crash "demo_e_monorepo" CRASH-E-MONOREPO \
+  "heap-buffer-overflow READ" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="reach: 100 files in ONE repo stays plain library tier"
+read level score key i r cf <<< "$(get_severity "$dir")"
+# 16 (library) × ~1.00 (file-count tilt) × 1.00 × 1.00 = 16 — no tier upgrade
+assert_eq "16" "$r" "R=16 (single-repo hits do not impersonate popularity)"
+
 # network + 1000 callers + obeyed + bytes: 28 × 1.05 × 1.00 × 1.00 = 29.4 → 29
 seed_hits "demo_e_net" 1000
 dir=$(make_crash "demo_e_net" CRASH-E-NET \
@@ -319,6 +521,53 @@ _CURRENT_TEST="reach: URL hostname '.example/' does NOT trigger dev_tool"
 read level score key i r cf <<< "$(get_severity "$dir")"
 # 22 (library_popular at 100 callers) × 1.00 × 1.00 × 1.00 = 22
 assert_eq "22" "$r" "R=22 (URL hostname did not collapse surface to dev_tool)"
+
+# False-positive guard: ordinary English words ending in "test" ("latest",
+# "fastest", "greatest", "contest", "attestation") in the Boundary field must
+# NOT trip the test-binary name detector and collapse the surface to dev_tool.
+seed_hits "demo_e_latest_word" 10
+dir=$(make_crash "demo_e_latest_word" CRASH-E-LATEST-WORD \
+  "heap-buffer-overflow READ" "unspecified" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+echo "Boundary: the latest attestation grammar via the fastest contest path" >> "$dir/report.md"
+_CURRENT_TEST="reach: English -test words in Boundary do NOT demote to dev_tool"
+read level score key i r cf <<< "$(get_severity "$dir")"
+# unknown surface (6pt) × ~0.95 (10 callers) × 1.00 × 1.00 ≈ 6 — not 1
+assert_eq "6" "$r" "R=6 (English -test words did not collapse surface)"
+
+# True-negative restored: real bare driver names (libxml2's runtest/testapi,
+# pcre2's ucptest) must STILL demote to dev_tool when cited in Boundary, even
+# though they carry no digit/underscore. They are in the documented inclusion
+# list precisely because the digit/delimiter shapes cannot catch them.
+seed_hits "demo_e_runtest" 75
+dir=$(make_crash "demo_e_runtest" CRASH-E-RUNTEST \
+  "heap-buffer-overflow WRITE" "unspecified" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+echo "Boundary: crash reached only through the runtest driver harness" >> "$dir/report.md"
+_CURRENT_TEST="reach: bare driver name 'runtest' in Boundary demotes to dev_tool"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "1" "$r" "R=1 (runtest recognised as a dev/test driver)"
+
+# Explicit dev/test/fuzz PHRASE in Boundary prose (no binary name, no path)
+# must demote — a Surface-less report whose Boundary says "fuzz harness bytes
+# only" is non-shipping even when the crashing symbol is popular.
+seed_hits "demo_e_fuzzphrase" 75
+dir=$(make_crash "demo_e_fuzzphrase" CRASH-E-FUZZPHRASE \
+  "heap-buffer-overflow WRITE" "unspecified" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+echo "Boundary: fuzz harness bytes only — not reachable from any shipped entry point" >> "$dir/report.md"
+_CURRENT_TEST="reach: explicit 'fuzz harness' Boundary phrase demotes to dev_tool"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "1" "$r" "R=1 (fuzz-harness Boundary phrase recognised)"
+
+# False-positive guard preserved: a library-api Surface whose description
+# mentions a 'harness' (the exercise mechanism, not the bug location) must NOT
+# be demoted by the new Boundary-phrase rule — the production Surface wins first.
+seed_hits "demo_e_libharness2" 100
+dir=$(make_crash "demo_e_libharness2" CRASH-E-LIBHARNESS2 \
+  "heap-buffer-overflow READ" "library-api — C harness calls a public library entry point" \
+  "obeyed" "bytes" "5/5" "CL-x (singleton)")
+echo "Boundary: a C harness calls the public API" >> "$dir/report.md"
+_CURRENT_TEST="reach: 'harness' in a library-api report is not demoted by phrase rule"
+read level score key i r cf <<< "$(get_severity "$dir")"
+assert_eq "22" "$r" "R=22 (library_popular preserved; bare 'harness' not a dev phrase)"
 
 # All backends down → reach factor ×1.0 (neutral, no penalty)
 seed_unavailable "demo_e_outage"
@@ -437,13 +686,14 @@ _CURRENT_TEST="confidence: 5/5 + 4-cluster + SCARINESS = 1.0"
 read level score key i r cf <<< "$(get_severity "$dir")"
 assert_eq "1.0" "$cf" "CF=1.00 (max)"
 
-# Flaky 1/5 + singleton: 0.7 baseline
+# Flaky 1/5 + singleton: 0.7 − 0.20 = 0.50 — a report that fails most
+# reruns is the documented "derated by half" floor case (CVSS RC:Unknown).
 seed_hits "demo_cf_flaky" 0
 dir=$(make_crash "demo_cf_flaky" CRASH-CF-FLAKY \
   "heap-buffer-overflow READ" "library-api" "obeyed" "bytes" "1/5" "CL-x (singleton)")
-_CURRENT_TEST="confidence: flaky 1/5 + singleton = 0.70"
+_CURRENT_TEST="confidence: flaky 1/5 + singleton = 0.50"
 read level score key i r cf <<< "$(get_severity "$dir")"
-assert_eq "0.7" "$cf" "CF=0.70 (baseline only)"
+assert_eq "0.5" "$cf" "CF=0.50 (flaky penalty −0.20)"
 
 # ───────────────────────────────────────────────────────────────────
 # LEVEL BUCKETING — verify the user's key cases land in the right band

@@ -38,10 +38,23 @@
       "enum": ["any-frame", "all-frames"],
       "description": "Schema v2+. all-frames = a genuine caller had to match every probed symbol in one file (used when the symbols are a crash-state call chain, e.g. set_blob -> apply_line). any-frame = union/any-match (manual --symbol or narrative-mined entry points)."
     },
+    "language": {
+      "type": "string",
+      "description": "Schema v2+. Code-search language filter applied to both backends, derived from the target tree (lib/languages.py registry) or the --language override. Empty string means the filter was disabled."
+    },
+    "status": {
+      "type": "string",
+      "description": "Schema v2+. Present only on the symbol-less / search-skipped documents (no_symbols, local_symbols_only, external_skipped) emitted when no external search ran."
+    },
     "external_callers": {
       "type": "integer",
       "minimum": 0,
       "description": "Cross-backend deduplicated count of (repo, path) caller hits, after the ignore filter."
+    },
+    "external_caller_repos": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Schema v2+. Distinct caller repos among external_caller_hits — the popularity signal for the library_popular surface tier. Counted over repos, not (repo, path) files, so one repo with many matching files is one dependent project."
     },
     "external_caller_hits": {
       "type": "array",
@@ -101,8 +114,8 @@
       "additionalProperties": false,
       "properties": {
         "status": {
-          "enum": ["ok", "unavailable"],
-          "description": "ok = backend responded with parseable data (count may legitimately be 0). unavailable = transport error, schema mismatch, or non-2xx HTTP — treat as 'no signal' rather than '0 callers'."
+          "enum": ["ok", "unavailable", "not_run"],
+          "description": "ok = backend responded with parseable data (count may legitimately be 0). unavailable = transport error, schema mismatch, or non-2xx HTTP — treat as 'no signal' rather than '0 callers'. not_run = the document was emitted without querying this backend (no_symbols / local_symbols_only / external_skipped paths)."
         },
         "hits": {
           "type": "array",

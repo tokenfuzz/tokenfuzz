@@ -77,6 +77,7 @@ from typing import Any
 HERE = Path(__file__).absolute().parent
 sys.path.insert(0, str(HERE.parent / "lib"))
 
+import languages  # noqa: E402
 import stack_frames  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
 
@@ -110,12 +111,14 @@ def _cache_dir() -> Path:
     return Path(os.path.expanduser("~/.cache/sancov-reachability"))
 
 
-def _cache_path(service: str, symbol: str) -> Path:
-    """Cache key: (service, symbol). Freshness is enforced by mtime, not by
+def _cache_path(service: str, symbol: str, language: str = "c") -> Path:
+    """Cache key: (service, symbol, language) — the language filter changes
+    what a probe returns, so a C-target probe must not satisfy a JS-target
+    probe for the same identifier. Freshness is enforced by mtime, not by
     a date suffix in the filename — putting the date in the name caused
     near-midnight UTC misses where a freshly written file would be discarded
     seconds later when the day rolled over."""
-    digest = hashlib.sha1(symbol.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha1(f"{language}|{symbol}".encode("utf-8")).hexdigest()[:16]
     return _cache_dir() / f"{service}-{digest}.json"
 
 
@@ -153,8 +156,8 @@ def _atomic_json_write(path: Path, payload: dict) -> None:
                 pass
 
 
-def _cache_read(service: str, symbol: str) -> dict | None:
-    p = _cache_path(service, symbol)
+def _cache_read(service: str, symbol: str, language: str = "c") -> dict | None:
+    p = _cache_path(service, symbol, language)
     if not p.is_file():
         return None
     try:
@@ -169,8 +172,8 @@ def _cache_read(service: str, symbol: str) -> dict | None:
         return None
 
 
-def _cache_write(service: str, symbol: str, payload: dict) -> None:
-    p = _cache_path(service, symbol)
+def _cache_write(service: str, symbol: str, payload: dict, language: str = "c") -> None:
+    p = _cache_path(service, symbol, language)
     try:
         _atomic_json_write(p, payload)
     except OSError:
@@ -307,7 +310,12 @@ def _read_mock(service: str, symbol: str) -> dict | None:
 # ─── Backends ─────────────────────────────────────────────────────────────
 
 
-SOURCEGRAPH_RESULT_LIMIT = 30
+# Result caps per (backend, symbol) probe. 100, not 30: the library_popular
+# surface upgrade triggers at POPULAR_LIBRARY_THRESHOLD distinct caller
+# repos, and a cap below the threshold makes the tier unreachable no matter
+# how popular the symbol really is.
+SOURCEGRAPH_RESULT_LIMIT = 100
+GH_RESULT_LIMIT = 100
 
 
 def _parse_sourcegraph_sse(body: str) -> list[dict] | None:
@@ -354,19 +362,21 @@ def _parse_sourcegraph_sse(body: str) -> list[dict] | None:
     return matches
 
 
-def query_sourcegraph(symbol: str, timeout: float) -> dict:
+def query_sourcegraph(symbol: str, timeout: float, language: str = "c") -> dict:
     """Sourcegraph public stream API. The stream is bounded by `count:` in the
     query so the response is small and terminates naturally; we read it whole
     and pull repo+path out of every `event: matches` frame.
 
-    `lang:c` is included in the query because Sourcegraph treats both .c and
-    .cpp files as that lang scope, and the C/C++ filter cuts out stray hits
-    in JS/Python that happen to share an identifier name."""
+    The `lang:` filter cuts out stray hits in other languages that happen to
+    share an identifier name. It is derived from the target tree (see
+    _detect_target_language) — hardcoding C made every probe for a JS/Go/Java
+    target return only C-file noise. Empty `language` disables the filter."""
     mock = _read_mock("sourcegraph", symbol)
     if mock is not None:
         return mock
+    lang_filter = f" lang:{language}" if language else ""
     url = "https://sourcegraph.com/.api/search/stream?" + urllib.parse.urlencode({
-        "q": f"{symbol} lang:c count:{SOURCEGRAPH_RESULT_LIMIT}",
+        "q": f"{symbol}{lang_filter} count:{SOURCEGRAPH_RESULT_LIMIT}",
         "display": str(SOURCEGRAPH_RESULT_LIMIT),
     })
     try:
@@ -392,17 +402,20 @@ def query_sourcegraph(symbol: str, timeout: float) -> dict:
     return {"status": "ok", "hits": list(seen.values())}
 
 
-def query_gh(symbol: str, timeout: float) -> dict:
+def query_gh(symbol: str, timeout: float, language: str = "c") -> dict:
     """Use the gh CLI if available + authenticated. Anything else → unavailable."""
     mock = _read_mock("gh", symbol)
     if mock is not None:
         return mock
     if shutil.which("gh") is None:
         return {"status": "unavailable", "error": "gh CLI not installed"}
+    cmd = ["gh", "search", "code", symbol, f"--limit={GH_RESULT_LIMIT}",
+           "--json", "repository,path"]
+    if language:
+        cmd.insert(4, f"--language={language}")
     try:
         proc = subprocess.run(
-            ["gh", "search", "code", symbol, "--language=C", "--limit=30",
-             "--json", "repository,path"],
+            cmd,
             capture_output=True, text=True, timeout=timeout * 2,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
@@ -543,9 +556,10 @@ def _split_vendored(hits: list[dict], target_basenames: set[str],
     return genuine, vendored
 
 
-def _query_one(service: str, symbol: str, timeout: float, use_cache: bool) -> dict:
+def _query_one(service: str, symbol: str, timeout: float, use_cache: bool,
+               language: str = "c") -> dict:
     if use_cache:
-        cached = _cache_read(service, symbol)
+        cached = _cache_read(service, symbol, language)
         if cached is not None:
             cached.setdefault("from_cache", True)
             return cached
@@ -554,9 +568,9 @@ def _query_one(service: str, symbol: str, timeout: float, use_cache: bool) -> di
             cooldown.setdefault("from_cache", True)
             return cooldown
     fn = BACKENDS[service]
-    result = fn(symbol, timeout)
+    result = fn(symbol, timeout, language)
     if use_cache and result.get("status") == "ok":
-        _cache_write(service, symbol, result)
+        _cache_write(service, symbol, result, language)
     elif use_cache:
         try:
             http_status = int(result.get("http_status", 0))
@@ -579,11 +593,12 @@ def _service_throttle_secs(service: str) -> float:
     return SERVICE_THROTTLE_SECS.get(service, 0.0)
 
 
-def _query_service(service: str, symbols: list[str], timeout: float, use_cache: bool) -> list[tuple[str, dict]]:
+def _query_service(service: str, symbols: list[str], timeout: float, use_cache: bool,
+                   language: str = "c") -> list[tuple[str, dict]]:
     rows: list[tuple[str, dict]] = []
     throttle = _service_throttle_secs(service)
     for i, sym in enumerate(symbols):
-        r = _query_one(service, sym, timeout, use_cache)
+        r = _query_one(service, sym, timeout, use_cache, language)
         rows.append((sym, r))
         if i + 1 < len(symbols) and throttle > 0 and not r.get("from_cache"):
             time.sleep(throttle)
@@ -593,7 +608,8 @@ def _query_service(service: str, symbols: list[str], timeout: float, use_cache: 
 def query_all(symbols: list[str], ignore: list[str], timeout: float, use_cache: bool,
               target_basenames: set[str] | None = None,
               target_names: set[str] | None = None,
-              require_all_symbols: bool = False) -> dict:
+              require_all_symbols: bool = False,
+              language: str = "c") -> dict:
     """Run services in parallel, but keep each backend's symbol probes sequential.
 
     target_basenames: filenames recognised as coming from the upstream project
@@ -623,7 +639,8 @@ def query_all(symbols: list[str], ignore: list[str], timeout: float, use_cache: 
 
     max_workers = max(1, len(SERVICES))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_query_service, svc, symbols, timeout, use_cache): svc for svc in SERVICES}
+        futures = {pool.submit(_query_service, svc, symbols, timeout, use_cache,
+                               language): svc for svc in SERVICES}
         for fut in concurrent.futures.as_completed(futures):
             svc = futures[fut]
             try:
@@ -716,8 +733,13 @@ def query_all(symbols: list[str], ignore: list[str], timeout: float, use_cache: 
         "queried_at": datetime.now(timezone.utc).isoformat(),
         "symbols": symbols,
         "ignore": ignore,
+        "language": language,
         "match_mode": "all-frames" if require_all else "any-frame",
         "external_callers": len(external_caller_hits),
+        # Distinct repos, not files — the popularity signal for the
+        # library_popular surface tier. One repo vendoring 40 matching
+        # files is one dependent project, not 40.
+        "external_caller_repos": len({h["repo"] for h in external_caller_hits}),
         "external_caller_hits": external_caller_hits,
         "vendored_copies": len(vendored_copy_hits),
         "vendored_copy_hits": vendored_copy_hits,
@@ -796,7 +818,7 @@ def _parse_target_toml_ignore(path: Path) -> list[str]:
 #                  bugs in dev/test code are not security-relevant unless
 #                  reachable from a real input surface.
 #
-#   CF ∈ [0.5, 1.0] reproduction rate × cluster confirmation × SCARINESS
+#   CF ∈ [0.5, 1.0] reproduction rate × cluster confirmation × evidence
 #                  → maps to CVSS Temporal Report Confidence.
 #                  *Multiplies the whole score* — flaky 1/5 reports get
 #                  derated by half; confirmed multi-cluster get full credit.
@@ -833,8 +855,19 @@ IMPACT_BASE = {
     "global_read":       20,
     "stack_read":        18,
     "heap_read_small":   16,   # READ of <16 bytes — typically DoS-shaped
+    "data_race":         22,   # TSan data race — real but exploitation-
+                                # conditional (ClusterFuzz treats races as
+                                # Medium security unless a UAF is shown)
+    "wild_read":         20,   # SEGV READ at a non-near-null address —
+                                # wild-pointer deref; DoS + possible
+                                # info-leak pivot (ClusterFuzz "UNKNOWN READ")
+    "integer_overflow":  12,   # UBSan arithmetic overflow with no
+                                # demonstrated memory effect — precursor class
     "null_deref":         8,
+    "stack_exhaustion":   8,   # ASan stack-overflow (deep recursion) — DoS
     "bus":                5,   # SIGBUS / misalignment / DoS-only
+    "memory_leak":        5,   # LeakSanitizer — resource DoS, not info-leak
+    "oom":                4,   # allocation-size-too-big / OOM — resource DoS
 
     # ── Web/application vulnerability classes ─────────────────────
     # Calibrated against industry CVSS distributions for the class.
@@ -908,13 +941,20 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
             rw = "read"
 
     # ── Sanitizer class ───────────────────────────────────────────
-    if re.search(r"heap[- ]use[- ]after[- ]free|\buse[- ]after[- ]free\b", t):
+    # use-after-poison is ASan's "freed by the container, not by free()"
+    # shape — same type-state pivot as a UAF, scored identically.
+    if re.search(r"heap[- ]use[- ]after[- ]free|\buse[- ]after[- ]free\b|"
+                 r"\buse[- ]after[- ]poison\b", t):
         if rw == "write":
             return "uaf_write", "use-after-free WRITE"
         return "uaf_read", "use-after-free" + (" READ" if rw == "read" else "")
 
-    if re.search(r"\bdouble[- ]free\b", t):
-        return "double_free", "double-free"
+    # Invalid frees (free of a non-malloc'd pointer, alloc/dealloc mismatch)
+    # are the same allocator-state corruption family as double-free.
+    if re.search(r"\bdouble[- ]free\b|"
+                 r"attempting free on address which was not malloc|"
+                 r"\balloc[- ]dealloc[- ]mismatch\b|\binvalid[- ]free\b", t):
+        return "double_free", "double-free / invalid free"
 
     # Wild-address WRITE: explicit textual cue *or* an ASan SCARINESS line
     # tagged `wild-addr-write`.
@@ -926,6 +966,12 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
         if rw == "write":
             return "stack_write", "stack WRITE" + (f" of {rw_size} byte(s)" if rw_size else "")
         return "stack_read", "stack READ" + (f" of {rw_size} byte(s)" if rw_size else "")
+
+    # ASan's hyphenated `stack-overflow` token is recursion/stack exhaustion
+    # (DoS), not a buffer overflow — must be checked after the
+    # stack-buffer-overflow branch above.
+    if re.search(r"\bstack-overflow\b|\bstack exhaustion\b", t):
+        return "stack_exhaustion", "stack exhaustion (deep recursion)"
 
     if re.search(r"\bglobal-buffer-overflow\b", t):
         if rw == "write":
@@ -940,6 +986,29 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
             return "heap_read_big", f"heap READ of {rw_size} byte(s)"
         return "heap_read_small", f"heap READ of {rw_size} byte(s)" if rw_size else "heap READ"
 
+    # negative-size-param is a memcpy/memset with a negative (huge unsigned)
+    # size — write-shaped corruption (ClusterFuzz scores it as such).
+    if re.search(r"\bnegative-size-param\b", t):
+        return "heap_write", "negative-size param"
+
+    # LeakSanitizer memory leaks are a resource-DoS class. Must be matched
+    # before the generic "leak(ed|s)" info-disclosure fallback below, which
+    # is about *data* leaking, not allocations. The strong LSan tokens are
+    # literal sanitizer output and stay authoritative; the bare "memory
+    # leak(s)" phrase is prose-matchable ("memory leak was ruled out") so it
+    # goes through the negation guard.
+    if re.search(r"\bleaksanitizer\b|\bdetected memory leaks\b|"
+                 r"\b(?:direct|indirect) leak of\b", t):
+        return "memory_leak", "memory leak"
+    if _unnegated_search(r"\bmemory leaks?\b", t):
+        return "memory_leak", "memory leak"
+
+    # Allocator / resource exhaustion (OSS-Fuzz treats these as non-security
+    # unless the size is attacker-amplified — that case is dos_amplification).
+    if re.search(r"\ballocation-size-too-big\b|\bout-of-memory\b|"
+                 r"\brss limit exceeded\b|\bexceeds maximum supported size\b", t):
+        return "oom", "allocation/OOM resource exhaustion"
+
     if re.search(r"undefinedbehaviorsanitizer|:[0-9]+:[0-9]+: runtime error:", t):
         if re.search(r"out of bounds|object-size|pointer[- ]overflow", t):
             return "heap_read_small", "UBSan bounds/object-size"
@@ -949,9 +1018,13 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
             return "null_deref", "UBSan null pointer"
         if "vptr" in t:
             return "heap_read_small", "UBSan vptr/type"
+        if re.search(r"(?:signed|unsigned) integer overflow|"
+                     r"shift exponent .{0,40} is too large|"
+                     r"negation of .{0,40} cannot be represented", t):
+            return "integer_overflow", "UBSan integer overflow"
 
     if re.search(r"threadsanitizer: data race|^warning: data race$", t, re.MULTILINE):
-        return "heap_write", "data race"
+        return "data_race", "data race"
 
     # Direction-only fallbacks (no class found, but the report has WRITE/READ).
     if rw == "write":
@@ -971,36 +1044,51 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
     if web is not None:
         return web
 
+    # SEGV: discriminate by faulting address, the way ClusterFuzz does.
+    # A near-null address (< 0x1000, one unmapped page) is a classic null
+    # deref (DoS); anything else is a wild-pointer access whose direction
+    # ("caused by a READ/WRITE memory access") decides read vs write tier.
+    # Without the address line, fall through to the plain null/SEGV bucket.
+    m = re.search(r"segv on unknown address 0x0*([0-9a-f]+)", t)
+    if m:
+        addr = int(m.group(1), 16)
+        if addr >= 0x1000:
+            if re.search(r"caused by a write memory access", t):
+                return "wild_write", f"SEGV WRITE at wild address 0x{addr:x}"
+            return "wild_read", f"SEGV READ at wild address 0x{addr:x}"
+        return "null_deref", "null/SEGV (near-null address)"
+
     # Non-memory-safety crashes (DoS-shaped).
     if "null deref" in t or re.search(r"\bsegv\b", t) or "null pointer" in t:
         return "null_deref", "null/SEGV"
     if re.search(r"\bbus\b", t) or "sigbus" in t:
         return "bus", "BUS"
-    if re.search(r"\b(info[- ]disclosure|information disclosure|internal representation|leak(?:ed|s)?)\b", t):
+    if _unnegated_search(r"\b(info[- ]disclosure|information disclosure|internal representation|leak(?:ed|s)?)\b", t):
         return "info_leak", "information disclosure"
-    if re.search(r"\b(uninit|uninitialized|uninitialised)\b", t):
+    if _unnegated_search(r"\b(uninit|uninitialized|uninitialised)\b", t):
         return "info_leak", "uninitialized read"
-    if re.search(r"\b(type confusion|type mismatch|type validation|unchecked elements?)\b", t):
+    if _unnegated_search(r"\b(type confusion|type mismatch|type validation|unchecked elements?)\b", t):
         return "heap_read_small", "type-state mismatch"
 
     # ── Recon / reasoning-confirmed classes ───────────────────────
     # Patterns for non-ASan findings the harness's audit-recon pass and
     # the validator quorum have promoted. These keep promoted reasoning
     # findings from collapsing to "unknown=8" at scoring time. Each
-    # pattern requires the named class as a distinct phrase to avoid
-    # matching incidental mentions in prose ("not a downgrade" etc.).
-    if re.search(r"\b(?:dns[- ]?)?cache poisoning\b|\bcookie poisoning\b|"
-                 r"\bsession (?:fixation|poisoning)\b|\b(?:tcp|protocol) downgrade\b|"
-                 r"\bprotocol[- ]state corruption\b", t):
+    # pattern requires the named class as a distinct phrase, and
+    # _unnegated_search drops mentions whose clause rules the class out
+    # ("no cache poisoning", "not a downgrade").
+    if _unnegated_search(r"\b(?:dns[- ]?)?cache poisoning\b|\bcookie poisoning\b|"
+                         r"\bsession (?:fixation|poisoning)\b|\b(?:tcp|protocol) downgrade\b|"
+                         r"\bprotocol[- ]state corruption\b", t):
         return "protocol_state", "protocol-state corruption"
-    if re.search(r"\bdos[- ]amplification\b|\bdecompression bomb\b|"
-                 r"\balgorithmic complexity (?:attack|amplification)\b|"
-                 r"\bquadratic (?:blowup|amplification)\b|"
-                 r"\bmemory amplification\b", t):
+    if _unnegated_search(r"\bdos[- ]amplification\b|\bdecompression bomb\b|"
+                         r"\balgorithmic complexity (?:attack|amplification)\b|"
+                         r"\bquadratic (?:blowup|amplification)\b|"
+                         r"\bmemory amplification\b", t):
         return "dos_amplification", "DoS amplification"
-    if re.search(r"\bdefense[- ]in[- ]depth regression\b|"
-                 r"\bsecurity feature (?:disabled|defeated|bypassed)\b|"
-                 r"\b(?:silently )?(?:defeats|disables) (?:dns0x20|spoofing protection)\b", t):
+    if _unnegated_search(r"\bdefense[- ]in[- ]depth regression\b|"
+                         r"\bsecurity feature (?:disabled|defeated|bypassed)\b|"
+                         r"\b(?:silently )?(?:defeats|disables) (?:dns0x20|spoofing protection)\b", t):
         return "logic_regression", "logic regression / DiD"
 
     return "unknown", "unclassified"
@@ -1037,8 +1125,11 @@ _WEB_VULN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # File / network exfil
     (re.compile(r"\b(?:server[- ]side request forgery|ssrf)\b"),
      "ssrf", "server-side request forgery"),
-    (re.compile(r"\b(?:path|directory) traversal\b|\barbitrary file (?:read|write|disclosure)\b|"
-                r"\.\./\.\./"),
+    # Note: no bare `../../` alternative here — crash reports routinely quote
+    # raw input bytes (testcase paths, corpus content) containing `../..`,
+    # which would misclassify a memory-safety or DoS report as traversal.
+    # The named phrases are the anchored signal.
+    (re.compile(r"\b(?:path|directory) traversal\b|\barbitrary file (?:read|write|disclosure)\b"),
      "path_traversal", "path traversal"),
     (re.compile(r"\b(?:xml external entity|xxe)\b"),
      "xxe", "XML external entity"),
@@ -1066,13 +1157,110 @@ _WEB_VULN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
 ]
 
 
+# Negation guard for narrative-driven classification. Reports routinely
+# *rule classes out* in prose, and the negation can sit on EITHER side of
+# the class name:
+#   before — "no SQL injection is possible", "we did not find an XXE"
+#   after  — "SQL injection is not possible", "cache poisoning was ruled out"
+# A bare keyword match on such a sentence would invent a finding class, so a
+# match counts only when neither side of its clause carries a negation token.
+# The clause is cut at sentence/segment boundaries INCLUDING commas, so
+# "input is not sanitized, leading to SQL injection" stays positive (the
+# "not" is in the previous comma-clause). A trailing concessive ("…but not
+# exploitable", "…though not reachable") is NOT treated as a class negation —
+# the bug is still real, just qualified — so those connectors cap the
+# forward scan.
+# Negation when it sits BEFORE the class name ("no SQL injection", "did not
+# find an XXE", "absence of any traversal"). The full set, including the
+# mechanism-flavoured ones, is safe here because they all read as ruling the
+# class out when they precede it.
+_NEGATION_BEFORE_RE = re.compile(
+    r"\b(?:no|not|never|without|neither|nor|"
+    r"cannot|can't|couldn't|doesn't|don't|didn't|isn't|wasn't|aren't|won't|"
+    r"rules? out|ruled out|absence of|free (?:of|from)|"
+    r"unable to|impossible)\b"
+)
+# Negation when it sits AFTER the class name ("SQL injection is not possible",
+# "cache poisoning was ruled out"). This set is deliberately NARROWER: a
+# trailing "without …", "absence of …", or "free of …" almost always
+# describes the *mechanism* of the bug ("command injection … without
+# escaping", "overflow because the code is free of bounds checks"), not a
+# denial of the class — counting those would suppress real findings.
+_NEGATION_AFTER_RE = re.compile(
+    r"\b(?:not|never|cannot|can't|couldn't|isn't|wasn't|aren't|won't|"
+    r"rules? out|ruled out|impossible)\b"
+)
+_CLAUSE_BOUNDARY = (".", ";", ",", ":", "\n")
+# Concessive connectors that start a new logical clause for negation purposes:
+# "SQLi but not exploitable" still asserts the SQLi.
+_CONCESSIVE_RE = re.compile(r"\b(?:but|however|though|although|yet|still)\b")
+
+
+def _next_clause(text: str, pos: int) -> tuple[str, str]:
+    """Clause text from `pos` to the next boundary, plus the boundary char
+    that ended it ('' at end of text)."""
+    cands = [text.find(ch, pos) for ch in _CLAUSE_BOUNDARY]
+    cands = [c for c in cands if c != -1]
+    end = min(cands) if cands else len(text)
+    return text[pos:end], (text[end] if end < len(text) else "")
+
+
+def _match_is_negated(text: str, start: int, end: int) -> bool:
+    """True when the clause around [start, end) carries a negation of the
+    matched class — looking both before (full negation set) and after
+    (narrower, mechanism-aware set) the match."""
+    clause_start = max((text.rfind(ch, 0, start) for ch in _CLAUSE_BOUNDARY),
+                       default=-1) + 1
+    before = text[clause_start:start]
+    after, boundary = _next_clause(text, end)
+    # A colon directly after the class name introduces a qualifier, not a new
+    # statement ("SQL injection: not possible", "SSRF: ruled out"). Step over
+    # it and fold the qualifier clause into the after-scan so the trailing
+    # negation is seen. A non-colon boundary (period/semicolon/comma) is a
+    # genuine clause end and stops the scan.
+    if boundary == ":":
+        nxt, _ = _next_clause(text, text.find(":", end) + 1)
+        after = after + " " + nxt
+    concessive = _CONCESSIVE_RE.search(after)
+    if concessive:
+        after = after[:concessive.start()]
+    return bool(_NEGATION_BEFORE_RE.search(before)
+                or _NEGATION_AFTER_RE.search(after))
+
+
+def _unnegated_search(pattern: str | re.Pattern[str], text: str,
+                      flags: int = 0) -> bool:
+    """re.search that ignores matches whose clause negates them (either side)."""
+    pat = re.compile(pattern, flags) if isinstance(pattern, str) else pattern
+    return any(not _match_is_negated(text, m.start(), m.end())
+               for m in pat.finditer(text))
+
+
 def detect_web_vuln(text_lower: str) -> tuple[str, str] | None:
     """Return (primitive_key, human_label) for a web/app-vuln narrative,
-    or None if no class matched. Operates on already-lowercased text."""
+    or None if no class matched. Operates on already-lowercased text.
+    Negated mentions ("no SQL injection observed") do not classify."""
     for pat, key, label in _WEB_VULN_PATTERNS:
-        if pat.search(text_lower):
+        if _unnegated_search(pat, text_lower):
             return key, label
     return None
+
+
+# Primitive keys that are derived from prose REGEX (web/app classes +
+# recon/reasoning classes), not from a precise sanitizer signal. When a
+# report also carries a structured Primitive field, that deliberate
+# classification outranks a prose-regex guess — but a sanitizer-class match
+# (heap-buffer-overflow, UAF, data race, …) is precise and always wins. This
+# is the precedence rule applied in compute_severity. info_leak is *excluded*
+# here: it doubles as a sanitizer-ish "uninitialized read" detection, so it
+# stays authoritative.
+_NARRATIVE_ONLY_PRIMITIVES = frozenset({
+    "command_injection", "deserialization", "sqli", "ssti", "authn_bypass",
+    "authz_bypass", "idor", "ssrf", "path_traversal", "xxe",
+    "secrets_exposure", "prototype_pollution", "xss", "open_redirect",
+    "csrf", "regex_dos", "crypto_weakness", "injection",
+    "protocol_state", "dos_amplification", "logic_regression",
+})
 
 
 def detect_impact_modifiers(report_text: str) -> tuple[int, list[str]]:
@@ -1131,7 +1319,11 @@ SURFACE_POINTS = {
     "unknown":           6,
 }
 
-POPULAR_LIBRARY_THRESHOLD = 50  # min genuine callers to upgrade library → library_popular
+# Min distinct *repos* with a genuine caller hit to upgrade
+# library → library_popular. Counted over repos, not files (see
+# _genuine_repo_count), and only reachable because the backend result caps
+# (SOURCEGRAPH_RESULT_LIMIT / GH_RESULT_LIMIT) sit above it.
+POPULAR_LIBRARY_THRESHOLD = 50
 
 # Hard score caps for surfaces that do NOT ship to end users. A bug there
 # is not a security finding even if the impact is high — this matches
@@ -1189,13 +1381,29 @@ _DEV_TOOL_PATH_RE = re.compile(
     r")/",
     re.IGNORECASE,
 )
+# Test-binary name shapes. A bare `[a-z]+test` substring is deliberately NOT
+# matched: it fires on ordinary English ("latest", "contest", "attestation",
+# every superlative of a t-ending adjective — "greatest", "fastest") and would
+# collapse a real bug to the dev_tool tier. Three precise shapes are matched
+# instead:
+#   1. a digit/underscore in the stem (`pcre2test`, `tool2test`),
+#   2. a delimited test/fuzz marker (`api_test`, `run-test`, `test_main`,
+#      `fuzz-foo`) — the `_`/`-` is what makes it a driver name, not a word,
+#   3. an explicit list of bare all-alpha driver basenames.
+# Inclusion criterion for the list: recurring upstream test/bench driver
+# basenames that carry no digit/delimiter AND collide with no common English
+# word (so shapes 1–2 cannot catch them). `runtest`/`testapi` are libxml2's
+# drivers, `ucptest`/`pcre2test` are pcre2's; none are English words, unlike
+# the `*test` superlatives above. Add a name here only when it meets both
+# halves of the criterion.
 _DEV_TOOL_NAME_RE = re.compile(
     r"\b("
-    r"ucptest|pcre2test|xmllint_test|"
-    r"[a-z][a-z0-9_]*_test|[a-z][a-z0-9_]*test|"
-    r"test_[a-z0-9_]+|"
-    r"unittest|gtest|"
-    r"fuzz_[a-z0-9_]+|[a-z][a-z0-9_]*_fuzzer"
+    r"ucptest|selftest|unittests?|gtest|doctest|"
+    r"runtest|runsuite|apitest|testapi|parsetest|regtest|"
+    r"fuzztest|smoketest|conformancetest|"
+    r"[a-z][a-z0-9_]*[0-9_][a-z0-9_]*test|"
+    r"[a-z0-9]+[_-](?:test|fuzz)|(?:test|fuzz)[_-][a-z0-9_]+|"
+    r"[a-z][a-z0-9_]*_fuzzer"
     r")\b",
     re.IGNORECASE,
 )
@@ -1213,6 +1421,25 @@ _DEV_TOOL_TYPE_RE = re.compile(
 )
 _INTERNAL_TYPE_RE = re.compile(
     r"^\s*(internal|harness|internal[- ]?harness)\b", re.IGNORECASE,
+)
+# Explicit dev/test/fuzz phrases in free-text Boundary prose ("fuzz harness
+# bytes only", "maintenance tool input"). Distinct from _DEV_TOOL_NAME_RE,
+# which matches *binary names*: a Boundary that describes the input surface in
+# words is just as authoritative when it names a non-shipping driver. Each
+# alternative pairs a non-shipping qualifier with a tool/driver noun — bare
+# "harness" is deliberately NOT matched, so "C harness calls a public library
+# entry point" (the harness is the exercise mechanism, not the bug location)
+# is preserved. Applied only after the production-Surface override in
+# _is_dev_tool, so a real library-api/network/cli surface still wins.
+_DEV_TOOL_BOUNDARY_RE = re.compile(
+    r"\b("
+    r"test[- ](?:harness|driver|tool|program|binary|runner)|"
+    r"fuzz(?:ing)?[- ](?:harness|target|driver|tool)|"
+    r"maintenance[- ](?:tool|program|utility|script)|"
+    r"(?:developer|dev)[- ]tool|"
+    r"non[- ]shipping"
+    r")\b",
+    re.IGNORECASE,
 )
 
 
@@ -1270,6 +1497,9 @@ def _is_dev_tool(surface_value: str, boundary_value: str, report_text: str) -> t
 
     if _DEV_TOOL_NAME_RE.search(b):
         return True, f"boundary cites a known test-tool name: {b.strip()[:60]!r}"
+    bm = _DEV_TOOL_BOUNDARY_RE.search(b)
+    if bm:
+        return True, f"boundary describes a dev/test/fuzz surface: {bm.group(0)!r}"
     if _DEV_TOOL_PATH_RE.search(report_text or ""):
         m = _DEV_TOOL_PATH_RE.search(report_text)
         return True, f"narrative cites a dev/test path: {m.group(0).strip()!r}"
@@ -1332,7 +1562,7 @@ def _classify_surface(surface_value: str, boundary_value: str,
     if not s_type or s_type == "unknown":
         if report_triaged and genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
             reason = (f"surface={'unspecified' if not s_type else 'unknown'} but "
-                      f"reachability found {genuine_callers} external callers "
+                      f"reachability found {genuine_callers} caller repos "
                       f"(≥{POPULAR_LIBRARY_THRESHOLD}) → library_popular")
             return "library_popular", SURFACE_POINTS["library_popular"], reason
         if not report_triaged:
@@ -1348,7 +1578,7 @@ def _classify_surface(surface_value: str, boundary_value: str,
     if any(t in s_type for t in ("library-api", "library api", "public api", "libfuzzer")):
         if genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
             return ("library_popular", SURFACE_POINTS["library_popular"],
-                    f"library API with {genuine_callers} known callers (≥{POPULAR_LIBRARY_THRESHOLD})")
+                    f"library API with {genuine_callers} caller repos (≥{POPULAR_LIBRARY_THRESHOLD})")
         return "library", SURFACE_POINTS["library"], "library API"
     if any(t in s_type for t in ("file-format", "file format", "parser", "decoder")):
         return "file", SURFACE_POINTS["file"], "file-format parser"
@@ -1362,7 +1592,7 @@ def _classify_surface(surface_value: str, boundary_value: str,
     if report_triaged and genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
         return ("library_popular", SURFACE_POINTS["library_popular"],
                 f"surface type unrecognised ({s_type!r}) but reachability found "
-                f"{genuine_callers} external callers (≥{POPULAR_LIBRARY_THRESHOLD}) → library_popular")
+                f"{genuine_callers} caller repos (≥{POPULAR_LIBRARY_THRESHOLD}) → library_popular")
     return "unknown", SURFACE_POINTS["unknown"], f"surface type unrecognised: {s_type!r}"
 
 
@@ -1472,6 +1702,24 @@ def _report_is_triaged(fields: dict) -> bool:
     )
 
 
+def _genuine_repo_count(reach: dict) -> int:
+    """Distinct repos among the genuine external-caller hits.
+
+    The popularity tier asks "how many *projects* depend on this API", so
+    counting (repo, path) files would let one repo with many matching files
+    impersonate broad supply-chain reach. Falls back to the file-level
+    ``external_callers`` count for older reachability.json payloads that
+    carry no hit list."""
+    hits = reach.get("external_caller_hits")
+    if hits is None:
+        try:
+            return int(reach.get("external_caller_repos",
+                                 reach.get("external_callers", 0)) or 0)
+        except (TypeError, ValueError):
+            return 0
+    return len({h.get("repo", "") for h in hits})
+
+
 def reach_score(fields: dict, reach: dict) -> tuple[int, str, list[str]]:
     """Multiplicative score: surface × callers × contract × controls.
 
@@ -1481,7 +1729,7 @@ def reach_score(fields: dict, reach: dict) -> tuple[int, str, list[str]]:
     the rationale section can show how a near-zero gate (e.g. dev_tool
     surface) collapsed the whole side.
     """
-    genuine = int(reach.get("external_callers", 0) or 0)
+    genuine = _genuine_repo_count(reach)
     surface_label, surface_pts, surface_reason = _classify_surface(
         fields.get("surface", ""), fields.get("boundary", ""),
         fields.get("_report_text", ""), genuine,
@@ -1513,13 +1761,33 @@ def reach_score(fields: dict, reach: dict) -> tuple[int, str, list[str]]:
 # multi-cluster reports get full credit. Returns a float in [0.5, 1.0]:
 #
 #   base 0.7
-#   + reproduction rate (5/5 → +0.20, ≥0.75 → +0.15, ≥0.4 → +0.05)
-#   + cluster confirmation (≥3 → +0.05, =2 → +0.03)
-#   + SCARINESS ≥ 50 → +0.05
+#   + reproduction rate (5/5 → +0.20, ≥0.75 → +0.15, ≥0.4 → +0.05,
+#                        <0.4 → −0.20: a report that fails most reruns is
+#                        the CVSS RC:Unknown case and lands at the 0.5 floor)
+#   + cluster confirmation (≥3 → +0.10, =2 → +0.05) — independent testcases
+#     hitting the same signature are independent confirmations
+#   + repro/evidence artifacts on disk (+0.10, only when no repro rate)
 #   clamped to [0.5, 1.0]
+#
+# SCARINESS is deliberately NOT a confidence signal: it is ASan's impact
+# heuristic and already feeds the Impact modifiers. Report Confidence is
+# about whether the bug is real and reproducible, which scariness says
+# nothing about — counting it here double-dipped the same line.
 
 
-def confidence_factor(report_text: str, fields: dict, cluster_size: int) -> tuple[float, list[str]]:
+def _has_repro_artifacts(report_dir: Path | None) -> bool:
+    """On-disk evidence beats prose claims: a saved sanitizer log or a
+    testcase/PoC file in the bundle is direct confirmation an input
+    actually produced the crash."""
+    if report_dir is None:
+        return False
+    if any((report_dir / n).is_file() for n in ("sanitizer.txt", "asan.txt")):
+        return True
+    return any(report_dir.glob("testcase*")) or any(report_dir.glob("poc*"))
+
+
+def confidence_factor(report_text: str, fields: dict, cluster_size: int,
+                      report_dir: Path | None = None) -> tuple[float, list[str]]:
     cf = 0.7
     reasons: list[str] = []
     repro = fields.get("reproduction_rate", "")
@@ -1536,17 +1804,16 @@ def confidence_factor(report_text: str, fields: dict, cluster_size: int) -> tupl
         elif ratio >= 0.40:
             cf += 0.05; reasons.append(f"repro {n}/{d} (+0.05)")
         else:
-            reasons.append(f"flaky repro {n}/{d} (+0)")
+            cf -= 0.20; reasons.append(f"flaky repro {n}/{d} (−0.20)")
     if cluster_size >= 3:
-        cf += 0.05; reasons.append(f"cluster_size={cluster_size} (+0.05)")
+        cf += 0.10; reasons.append(f"cluster_size={cluster_size} (+0.10)")
     elif cluster_size == 2:
-        cf += 0.03; reasons.append(f"cluster_size={cluster_size} (+0.03)")
-    sm = re.search(r"scariness[: ]+\s*(\d+)", report_text.lower())
-    if sm and int(sm.group(1)) >= 50:
-        cf += 0.05; reasons.append(f"SCARINESS={sm.group(1)} (+0.05)")
+        cf += 0.05; reasons.append(f"cluster_size={cluster_size} (+0.05)")
     if not any(reason.startswith("repro ") or reason.startswith("flaky repro ") for reason in reasons):
-        if re.search(r"\b(evidence|observed output|reproducer|harness|asan\.txt|\.asan\.txt)\b", report_text, re.IGNORECASE):
-            cf += 0.10; reasons.append("reproducer/evidence artifacts (+0.10)")
+        if _has_repro_artifacts(report_dir):
+            cf += 0.10; reasons.append("repro/evidence artifacts on disk (+0.10)")
+        elif re.search(r"\b(evidence|observed output|reproducer|asan\.txt|sanitizer\.txt)\b", report_text, re.IGNORECASE):
+            cf += 0.10; reasons.append("reproducer/evidence cited (+0.10)")
     cf = max(0.5, min(1.0, cf))
     if not reasons:
         reasons.append("no confirmation signals (×0.7 baseline)")
@@ -1723,7 +1990,7 @@ def compute_severity(report_text: str, reachability: dict | None,
     Formula (CVSS-shaped hybrid):
        I  = primitive_base + caller-controlled modifiers       additive
        R  = surface × callers × contract × controls            multiplicative
-       CF = repro × cluster confirmation × SCARINESS           multiplier ∈ [0.5, 1.0]
+       CF = repro × cluster confirmation × evidence            multiplier ∈ [0.5, 1.0]
        score = clamp(round((I + R) × CF), 0, 100)
 
     The multiplicative R is the key calibration over a purely additive
@@ -1744,10 +2011,13 @@ def compute_severity(report_text: str, reachability: dict | None,
     prim_key, prim_label = detect_primitive(report_text)
     primitive_field = (fields.get("primitive_field") or "").strip().lower()
     if primitive_field in IMPACT_BASE and primitive_field != "unknown":
-        # Only adopt the field value when the narrative detector also fell
-        # through to "unknown" — a precise narrative signal (ASan output)
-        # is always more authoritative than an LLM-classified label.
-        if prim_key == "unknown":
+        # Adopt the structured field when the narrative detector fell through
+        # to "unknown", OR when its match is a prose-regex web/recon class
+        # (_NARRATIVE_ONLY_PRIMITIVES) — a deliberate structured classification
+        # outranks a keyword guess. A precise sanitizer-class match (ASan /
+        # UBSan / TSan output) is never overridden: it is the strongest signal
+        # we have about what actually happened.
+        if prim_key == "unknown" or prim_key in _NARRATIVE_ONLY_PRIMITIVES:
             prim_key = primitive_field
             prim_label = primitive_field.replace("_", " ")
     impact_base = IMPACT_BASE[prim_key]
@@ -1757,7 +2027,8 @@ def compute_severity(report_text: str, reachability: dict | None,
     reach_data = reachability or {"services": {}, "external_callers": 0, "vendored_copies": 0}
     reach, surface_label, reach_reasons = reach_score(fields, reach_data)
 
-    cf, cf_reasons = confidence_factor(report_text, fields, cluster_size)
+    cf, cf_reasons = confidence_factor(report_text, fields, cluster_size,
+                                       report_dir=report_dir)
 
     raw_score = (impact + reach) * cf
     score = max(0, min(100, int(round(raw_score))))
@@ -1804,14 +2075,16 @@ SEV_HEADING = "## Severity rationale"
 # and so are correctly excluded. The backtick form (``ident()``) catches the
 # common markdown rendering in reports.
 _CALL_RE = re.compile(r"`?([a-zA-Z_][a-zA-Z0-9_]{3,})`?\s*\(")
-# Library-shaped identifier. Two conventions are accepted:
+# Library-shaped identifier. Two conventions are accepted everywhere:
 #   * snake_case with at least one underscore — pcre2_match, BIO_new, EVP_DigestInit
 #   * lowerCamelCase — at least two lowercase chars, then an uppercase letter,
 #     then more chars — xmlShellReadline, xmlConvertSGMLCatalog, htmlNewDoc
 # Plain lowercase identifiers (usershell, malloc, printf) are rejected: they
 # rarely correspond to externally-callable library APIs and add probe noise.
-# Plain CamelCase starting with an uppercase letter (FooBar) is also rejected:
-# it is much more often a class/type name than a C entry point.
+# Plain PascalCase starting with an uppercase letter (FooBar) is accepted
+# only for the languages whose *externally-callable functions* are
+# conventionally PascalCase (see _PASCAL_OK_LANGUAGES). ALL_CAPS macros stay
+# rejected via _MACRO_SYMBOL_RE.
 _LIB_SYMBOL_RE = re.compile(
     r"^(?:"
     r"[a-zA-Z][a-zA-Z0-9]*_[a-zA-Z0-9_]+"
@@ -1819,6 +2092,29 @@ _LIB_SYMBOL_RE = re.compile(
     r"[a-z][a-z0-9]+[A-Z][a-zA-Z0-9]+"
     r")$"
 )
+# PascalCase with at least one lowercase letter (NewDecoder, ParseDocument).
+_PASCAL_SYMBOL_RE = re.compile(r"^[A-Z][a-zA-Z0-9]*[a-z][a-zA-Z0-9]*$")
+# Languages whose public, externally-callable API names are conventionally
+# PascalCase. Go exports are PascalCase by definition; Java/Kotlin/Swift/JS/TS
+# public methods commonly are too. Rust (snake_case fns; PascalCase = types),
+# Python (snake_case fns; PascalCase = classes), and PHP/Ruby are deliberately
+# EXCLUDED: there a PascalCase token is a type/class name, so probing it would
+# search type *definitions*, not callers, inflating the count. Those languages
+# still match snake_case / lowerCamelCase via _LIB_SYMBOL_RE. Tokens are
+# code-search language names (see _SEARCH_LANGUAGE / _detect_target_language).
+_PASCAL_OK_LANGUAGES = frozenset({
+    "go", "java", "kotlin", "swift", "javascript", "typescript",
+})
+
+
+def _symbol_shape_ok(tok: str, language: str = "c") -> bool:
+    """True when `tok` looks like an externally-callable API name for the
+    target's language."""
+    if _LIB_SYMBOL_RE.match(tok):
+        return True
+    if language.lower() in _PASCAL_OK_LANGUAGES:
+        return bool(_PASCAL_SYMBOL_RE.match(tok))
+    return False
 _SYMBOL_STOPLIST = {
     "entry", "location", "trigger", "impact", "error", "class", "type",
     "result", "size", "byte", "bytes", "addresssanitizer", "heap", "stack",
@@ -1838,7 +2134,7 @@ _MACRO_SYMBOL_RE = re.compile(r"^[A-Z0-9_]+$")
 # into it rather than re-deriving its own ASan regexes here.
 
 
-def _extract_symbols_from_report(report_text: str) -> list[str]:
+def _extract_symbols_from_report(report_text: str, language: str = "c") -> list[str]:
     """Best-effort extraction of public API entry-point identifiers.
 
     Hard rule: an identifier is only considered if it appears with ``(``
@@ -1846,6 +2142,9 @@ def _extract_symbols_from_report(report_text: str) -> list[str]:
     struct-field references like ``re->top_bracket`` and bytecode opcodes
     like ``OP_CBRA`` that are common in crash-report prose but are not
     callable symbols.
+
+    `language` widens the accepted identifier shape for non-C targets
+    (PascalCase Go exports etc.) — see _symbol_shape_ok.
 
     Two-tier scanning order so Entry/Location lines are mined first:
       tier 1: lines beginning with Entry: or Location:
@@ -1883,7 +2182,7 @@ def _extract_symbols_from_report(report_text: str) -> list[str]:
                 continue
             if tok.lower() in _SYMBOL_STOPLIST:
                 continue
-            if not _LIB_SYMBOL_RE.match(tok):
+            if not _symbol_shape_ok(tok, language):
                 continue
             seen.add(tok)
             out.append(tok)
@@ -1909,7 +2208,7 @@ def _extract_symbols_from_report(report_text: str) -> list[str]:
 CRASH_STATE_PROBE_FRAMES = 2
 
 
-def _extract_symbols_from_asan(asan_text: str) -> list[str]:
+def _extract_symbols_from_asan(asan_text: str, language: str = "c") -> list[str]:
     """Reachability symbols taken from the crash state's top frames.
 
     Frame parsing, the runtime/libc/sanitizer/std-lib/main ignore filter, and
@@ -1953,7 +2252,7 @@ def _extract_symbols_from_asan(asan_text: str) -> list[str]:
             continue
         if leaf.lower() in _SYMBOL_STOPLIST:
             continue
-        if not _LIB_SYMBOL_RE.match(leaf):
+        if not _symbol_shape_ok(leaf, language):
             continue
         # Probe form: method + immediate enclosing class when present.
         probe = "::".join(p.strip() for p in parts[-2:]) if len(parts) >= 2 else leaf
@@ -1977,6 +2276,7 @@ def _no_symbols_reachability(ignore: list[str], symbols: list[str] | None = None
         "symbols": symbols,
         "ignore": ignore,
         "external_callers": 0,
+        "external_caller_repos": 0,
         "external_caller_hits": [],
         "vendored_copies": 0,
         "vendored_copy_hits": [],
@@ -2015,6 +2315,8 @@ def _format_reachability_section(reach: dict) -> str:
         notes.append("_Status: external caller search skipped; severity uses local report fields only._")
     if reach.get("symbols"):
         notes.append(f"_Symbols: {', '.join(reach['symbols'])}_")
+    if reach.get("language"):
+        notes.append(f"_Language filter: {reach['language']}_")
     if reach.get("match_mode") == "all-frames":
         notes.append(
             "_Match mode: all-frames — a caller must match every crash-state "
@@ -2269,18 +2571,18 @@ def _format_severity_section(sev: dict) -> str:
     # and the nested form survives markdown→HTML rendering as
     # `<ul><li>…<ul><li>…</li></ul></li></ul>`.
     lines.append("- _Impact (I)_ — primitive class + caller-controlled offset/size/value. Maps to CVSS C/I/A Impact subscore.")
-    lines.append("    - **Memory-safety**: UAF/wild WRITE = 40 · heap WRITE = 32 · stack WRITE = 30 · big READ = 24 · small READ = 16 · BUS/null = 5–8")
+    lines.append("    - **Memory-safety**: UAF/wild WRITE = 40 · heap WRITE = 32 · stack WRITE = 30 · big READ = 24 · data race = 22 · wild READ = 20 · small READ = 16 · integer overflow = 12 · null/stack-exhaustion = 8 · BUS = 5 · leak/OOM = 4–5")
     lines.append("    - **Web/app vulns**: command-injection/RCE = 40 · deserialization = 38 · SQLi/SSTI = 36 · authn-bypass = 32 · SSRF/path-traversal/authz-bypass = 28 · XXE = 26 · IDOR = 22 · prototype-pollution = 20 · XSS = 18 · open-redirect/crypto-weakness = 14 · CSRF/ReDoS = 12")
     lines.append("    - Modifiers cap at +6")
     lines.append("- _Reach (R)_ — `surface × callers × contract × controls`. Maps to CVSS Attack Vector × AC × PR × UI. **Multiplicative** — any near-zero gate collapses the side.")
     lines.append("    - **Surface tiers**: network 28 · popular library 22 · library 16 · file parser 14 · production CLI 8 · **dev/test/maintenance tool 1** · internal harness 0")
-    lines.append(f"    - **Popularity**: expressed by the surface-tier upgrade (library → library_popular at ≥{POPULAR_LIBRARY_THRESHOLD} genuine callers); the callers factor is a narrow secondary tilt (×0.90–×1.10) so two bugs in the same tier can still be ordered by reach without double-counting popularity")
+    lines.append(f"    - **Popularity**: expressed by the surface-tier upgrade (library → library_popular at ≥{POPULAR_LIBRARY_THRESHOLD} distinct caller repos); the callers factor is a narrow secondary tilt (×0.90–×1.10) so two bugs in the same tier can still be ordered by reach without double-counting popularity")
     lines.append("    - **Contract** (CVSS Attack Complexity analog): obeyed = ×1.0 baseline · violated or triage Contract concern = ×0.7 (we never *reward* the baseline case with a bonus)")
     lines.append("    - **Non-shipping surfaces**: bugs in `maint/`, `tests/`, `fuzz/`, or any binary matching `*test`/`*fuzz` land in the dev_tool tier and stay Low even if their impact is high — aligns with Microsoft Bug Bar and Project Zero practice that non-shipping code is not a security-relevant input surface")
     lines.append("- _Confidence factor (CF)_ — multiplies the whole score. Maps to CVSS Temporal Report Confidence.")
     lines.append("    - **Baseline**: 0.7")
-    lines.append("    - **Bonuses**: +0.20 for 5/5 repro · +0.05 for cluster≥3 · +0.05 for SCARINESS≥50")
-    lines.append("    - **Range** [0.5, 1.0] — flaky single-run reports get derated by half")
+    lines.append("    - **Bonuses/penalties**: +0.20 for 5/5 repro · −0.20 for flaky (<2/5) repro · +0.10 for cluster≥3 · +0.10 for repro artifacts when no rate is recorded")
+    lines.append("    - **Range** [0.5, 1.0] — flaky reports get derated to the 0.5 floor")
     return "\n".join(lines) + "\n"
 
 
@@ -2518,15 +2820,22 @@ def render_human(reach: dict, severity: dict | None = None) -> str:
 # ─── CLI ──────────────────────────────────────────────────────────────────
 
 
-def _resolve_ignore(args: argparse.Namespace, report_dir: Path | None) -> list[str]:
-    ignore: list[str] = list(args.ignore or [])
-    seed_path: Path | None = None
+def _resolve_target_toml(args: argparse.Namespace,
+                         report_dir: Path | None) -> Path | None:
+    """Locate the target's output/<slug>/target.toml: from --target if given,
+    otherwise by walking up from the report dir. Shared by the ignore-list and
+    build-system readers."""
     if args.target:
         candidate = Path.cwd() / "output" / args.target / "target.toml"
-        if candidate.is_file():
-            seed_path = candidate
-    elif report_dir is not None:
-        seed_path = _find_target_toml(report_dir)
+        return candidate if candidate.is_file() else None
+    if report_dir is not None:
+        return _find_target_toml(report_dir)
+    return None
+
+
+def _resolve_ignore(args: argparse.Namespace, report_dir: Path | None) -> list[str]:
+    ignore: list[str] = list(args.ignore or [])
+    seed_path = _resolve_target_toml(args, report_dir)
     if seed_path is not None:
         for tok in _parse_target_toml_ignore(seed_path):
             if tok not in ignore:
@@ -2534,61 +2843,196 @@ def _resolve_ignore(args: argparse.Namespace, report_dir: Path | None) -> list[s
     return ignore
 
 
+# Registry language name → code-search language token. Both Sourcegraph's
+# `lang:` filter and `gh search code --language` accept linguist-style names
+# (case-insensitively), so one token serves both backends. Only `cpp` needs
+# renaming; every other lib/languages.py name is already the linguist name.
+_SEARCH_LANGUAGE = {"cpp": "c++"}
+
+# Directory names whose subtrees are NOT the target's own source: build
+# output, VCS metadata, and checked-in dependency / vendored trees. Tested
+# against the path's parts *relative to the target root*, never as an
+# absolute-substring match — a checkout under `/build/...`, or even a tmpdir
+# named `build_xxxx`, would otherwise make every path contain "/build" and
+# skip the whole tree (observed: language detection collapsing to "c" for a
+# Go target under such a path, which then disabled PascalCase probing). The
+# vendored names mirror _VENDORED_PREFIX_RE: a Go target with a big
+# `third_party/native/*.c` blob must not be language-detected as C.
+_SKIP_DIR_PARTS = frozenset({
+    "build", ".git", "node_modules",
+    "vendor", "vendored", "third_party", "thirdparty", "3rdparty",
+    "deps", "contrib", "external",
+})
+
+# Header extensions are shared/ambiguous (a .h sits in a C *or* C++ project,
+# and the registry assigns .h to C), so they are NEUTRAL for the C-vs-C++
+# language vote — only implementation files decide it. Without this, a C++
+# library that is mostly headers and a few .cc files would be detected as
+# plain C and searched with `lang:c`, missing the real C++ callers.
+_HEADER_EXTS = frozenset({".h", ".hh", ".hpp", ".hxx", ".h++"})
+
+# Build systems whose language is native C/C++ — for these the declared
+# build_system does not disambiguate C from C++, so we still vote on
+# implementation extensions. Every other build_system (cargo→rust, go→go,
+# maven/gradle→java, npm→javascript, …) names a language unambiguously and is
+# trusted directly.
+_NATIVE_SEARCH_LANGS = frozenset({"c", "c++"})
+
+
+def _is_skipped_path(path: Path, root: Path) -> bool:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        rel = path
+    return any(part in _SKIP_DIR_PARTS for part in rel.parts)
+
+
+def _detect_target_language(target_root: Path | None,
+                            declared: str = "") -> str:
+    """Code-search language token for the target tree.
+
+    `declared` is the linguist token derived from the target's build_system
+    (a structured source — lib/languages.py). When it names a non-native
+    language it is authoritative and returned directly. Otherwise (native
+    C/C++, or no build_system) the language is decided by majority
+    *implementation* extension across the target's own tree, with headers
+    treated as neutral and vendored/generated subtrees skipped. Defaults to
+    "c" when nothing resolves, preserving the historical filter."""
+    if declared and declared not in _NATIVE_SEARCH_LANGS:
+        return declared
+    if target_root is None:
+        return declared or "c"
+    tally: dict[str, int] = {}
+    try:
+        for path in target_root.rglob("*"):
+            if _is_skipped_path(path, target_root):
+                continue
+            ext = path.suffix.lower()
+            if ext in _HEADER_EXTS:
+                continue
+            lang = languages.for_source_ext(ext)
+            if lang is not None:
+                tally[lang.name] = tally.get(lang.name, 0) + 1
+    except OSError:
+        pass
+    if not tally:
+        return declared or "c"
+    name = max(tally.items(), key=lambda kv: kv[1])[0]
+    return _SEARCH_LANGUAGE.get(name, name)
+
+
+def _parse_target_toml_build_system(path: Path) -> str:
+    """Read the `build_system = "<slug>"` value from target.toml. Mirrors
+    _parse_target_toml_ignore — a tiny reader for the one key we need."""
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text("utf-8", errors="replace")
+    except OSError:
+        return ""
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line.startswith("build_system"):
+            continue
+        if "=" not in line:
+            continue
+        return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def _declared_search_language(args: argparse.Namespace,
+                              report_dir: Path | None) -> str:
+    """Linguist code-search token derived from the target's build_system, or
+    "" when none resolves. build_system is a structured source, so it outranks
+    file-extension counting for the languages it identifies unambiguously."""
+    seed_path = _resolve_target_toml(args, report_dir)
+    if seed_path is None:
+        return ""
+    bs = _parse_target_toml_build_system(seed_path)
+    if not bs:
+        return ""
+    lang = languages.for_build_system(bs)
+    if lang is None:
+        return ""
+    return _SEARCH_LANGUAGE.get(lang.name, lang.name)
+
+
 def _resolve_target_identity(args: argparse.Namespace,
-                             report_dir: Path | None) -> tuple[set[str], set[str]]:
-    """Discover the upstream project's source filenames and name aliases.
+                             report_dir: Path | None) -> tuple[set[str], set[str], str]:
+    """Discover the upstream project's source filenames, name aliases, and
+    code-search language.
 
-    Walks upward to find a targets/<slug> source root, then
-    enumerates *.c / *.h basenames there. Also derives project-name aliases
-    from the resolved root directory and the --target slug, so a vendored
-    `…/<project>/…` path segment can be recognised for *any* target.
+    Walks upward to find a targets/<slug> source root, then enumerates
+    source-file basenames there (any registry language, not just C — a JS or
+    Go target's vendored copies must be recognisable too). Also derives
+    project-name aliases from the resolved root directory and the --target
+    slug, so a vendored `…/<project>/…` path segment can be recognised for
+    *any* target.
 
-    Returns (basenames, names). Either may be empty when nothing resolves —
-    the prefix regex (third_party/, vendor/, …) still catches the common
-    case, and an empty name set simply disables the segment heuristic."""
+    Returns (basenames, names, language). basenames/names may be empty when
+    nothing resolves — the prefix regex (third_party/, vendor/, …) still
+    catches the common case, and an empty name set simply disables the
+    segment heuristic. language falls back to "c"."""
     target_root: Path | None = None
     target_names: set[str] = set()
+    source_exts = languages.all_source_exts()
     if args.target:
         target_names |= _target_name_variants(args.target)
         candidate = Path.cwd() / "targets" / args.target
         if candidate.is_dir():
             target_root = candidate
     if target_root is None and report_dir is not None:
-        # Walk up to find <repo_root>/targets/<slug>/.
+        # Recover the slug deterministically from the canonical
+        # output/<slug>/... layout the report lives under, so the right
+        # target is bound even when several exist under targets/. Falling
+        # back to "first child with source" could bind the wrong project
+        # (and therefore the wrong language/vendored-name set).
+        slug_hint = ""
         cur = report_dir.resolve()
+        for anc in [cur, *cur.parents]:
+            if anc.parent is not None and anc.parent.name == "output":
+                slug_hint = anc.name
+                break
+        # Walk up to find <repo_root>/targets/<slug>/.
         for p in [cur, *cur.parents]:
             tt = p / "targets"
             if tt.is_dir():
-                # Pick the first dir under targets/ that has a recognizable
-                # source layout (contains *.c or src/*.c). That's almost
-                # always the slug for this report.
-                for child in tt.iterdir():
-                    if not child.is_dir():
-                        continue
-                    if any((child / "src").glob("*.c")) or any(child.glob("*.c")):
+                # Prefer the slug-matched dir; then deterministic (sorted)
+                # order so the bound target does not depend on filesystem
+                # iteration order. Pick the first with a recognizable source
+                # layout (top-level or src/ source files in any registry
+                # language).
+                candidates: list[Path] = []
+                if slug_hint and (tt / slug_hint).is_dir():
+                    candidates.append(tt / slug_hint)
+                candidates += sorted(c for c in tt.iterdir() if c.is_dir())
+                for child in candidates:
+                    children = list(child.glob("*")) + list((child / "src").glob("*"))
+                    if any(c.suffix.lower() in source_exts for c in children):
                         target_root = child
                         break
                 if target_root is not None:
                     break
+    declared = _declared_search_language(args, report_dir)
     if target_root is None:
-        return set(), target_names
+        return set(), target_names, _detect_target_language(None, declared)
     target_names |= _target_name_variants(target_root.name)
     basenames: set[str] = set()
     try:
-        for path in target_root.rglob("*.c"):
-            # Stay inside the target's first-level src/ — building a giant
-            # set across vendored deps inside the target itself defeats the
-            # purpose of this filter.
-            if "/build" in str(path) or "/.git/" in str(path):
+        for path in target_root.rglob("*"):
+            # Stay inside the target's own tree but skip build output and
+            # checked-in dependency / vendored dirs — building a giant set
+            # across vendored deps inside the target itself defeats the
+            # purpose of this filter. Relative-parts check (not absolute
+            # substring) so a checkout under a `build`-named ancestor isn't
+            # skipped whole.
+            if _is_skipped_path(path, target_root):
                 continue
-            basenames.add(path.name)
-        for path in target_root.rglob("*.h"):
-            if "/build" in str(path) or "/.git/" in str(path):
-                continue
-            basenames.add(path.name)
+            if path.suffix.lower() in source_exts:
+                basenames.add(path.name)
     except OSError:
         pass
-    return basenames, target_names
+    return basenames, target_names, _detect_target_language(target_root, declared)
 
 
 def _run_batch(results_dir: Path, args: argparse.Namespace) -> int:
@@ -2616,6 +3060,8 @@ def _run_batch(results_dir: Path, args: argparse.Namespace) -> int:
             sub_argv.append("--severity-only")
         if args.target:
             sub_argv += ["--target", args.target]
+        if args.language is not None:
+            sub_argv += ["--language", args.language]
         for tok in args.ignore or []:
             sub_argv += ["--ignore", tok]
         sub_argv += ["--timeout", str(args.timeout)]
@@ -2675,6 +3121,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="Results dir; runs --report on every crashes/CRASH-*/ underneath")
     ap.add_argument("--target", default=None, help="Target slug (loads ignore from output/<slug>/target.toml)")
     ap.add_argument("--ignore", action="append", default=[], help="Substring to drop from hits (repeatable)")
+    ap.add_argument("--language", default=None,
+                    help="Code-search language filter for both backends "
+                         "(linguist name, e.g. c, c++, go, javascript). "
+                         "Default: derived from the target tree; 'none' disables the filter")
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of human summary")
     ap.add_argument("--no-cache", action="store_true", help="Bypass the 7-day cache")
     ap.add_argument("--severity-only", action="store_true",
@@ -2715,29 +3165,36 @@ def main(argv: list[str] | None = None) -> int:
                 adjacent_asan_text = asan_path.read_text("utf-8", errors="replace")
             except OSError:
                 adjacent_asan_text = ""
-        # Symbols: an explicit --symbol overrides everything. Otherwise the
-        # crash STATE (top interesting ASan frames) is the primary source —
-        # it is the authoritative "where did this crash" signal, free of the
-        # internal helpers and auto-generated scoring labels that pepper the
-        # report narrative. Report-prose mining is the fallback for findings
-        # with no sanitizer stack (e.g. reasoning-confirmed recon findings),
-        # and runs on auto-section-stripped text so a prior run's Severity
-        # line cannot feed its own labels (surface=cli_production, …) back in.
-        symbols = list(args.symbol)
-        if not symbols and adjacent_asan_text:
-            symbols = _extract_symbols_from_asan(adjacent_asan_text)
-            symbols_from_asan = bool(symbols)
-        if not symbols:
-            symbols = _extract_symbols_from_report(_strip_auto_sections(report_text))
     else:
         report_text = ""
-        symbols = list(args.symbol)
-        if not symbols:
+        if not args.symbol:
             ap.print_help()
             return 2
 
     ignore = _resolve_ignore(args, report_dir)
-    target_basenames, target_names = _resolve_target_identity(args, report_dir)
+    # Resolve the target's language BEFORE symbol extraction: the accepted
+    # identifier shape depends on it (Go exports are PascalCase; a C-only
+    # shape would never probe them).
+    target_basenames, target_names, language = _resolve_target_identity(args, report_dir)
+    if args.language is not None:
+        language = "" if args.language.strip().lower() == "none" else args.language.strip()
+
+    # Symbols: an explicit --symbol overrides everything. Otherwise the
+    # crash STATE (top interesting ASan frames) is the primary source —
+    # it is the authoritative "where did this crash" signal, free of the
+    # internal helpers and auto-generated scoring labels that pepper the
+    # report narrative. Report-prose mining is the fallback for findings
+    # with no sanitizer stack (e.g. reasoning-confirmed recon findings),
+    # and runs on auto-section-stripped text so a prior run's Severity
+    # line cannot feed its own labels (surface=cli_production, …) back in.
+    symbols = list(args.symbol)
+    if report_md is not None:
+        if not symbols and adjacent_asan_text:
+            symbols = _extract_symbols_from_asan(adjacent_asan_text, language)
+            symbols_from_asan = bool(symbols)
+        if not symbols:
+            symbols = _extract_symbols_from_report(
+                _strip_auto_sections(report_text), language)
 
     reachability_json_path = report_dir / "reachability.json" if report_dir is not None else None
 
@@ -2778,7 +3235,8 @@ def main(argv: list[str] | None = None) -> int:
         # narrative-mined entry points stay union/any-match.
         reach = query_all(symbols, ignore, args.timeout, use_cache,
                           target_basenames, target_names,
-                          require_all_symbols=symbols_from_asan)
+                          require_all_symbols=symbols_from_asan,
+                          language=language)
         if reachability_json_path is not None:
             reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
 
