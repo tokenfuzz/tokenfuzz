@@ -195,9 +195,9 @@ acell harness-r1 harness
 cat > "$abd/clusters-crashes.json" <<'JSON'
 {"clusters":[
   {"id":"CL-1","members":["CRASH-0001","CRASH-0002"],"size":2,"primitive":"heap-buffer-overflow",
-   "severity_level":"Medium","severity_rank":2,"severity_score":48},
+   "severity_level":"Medium","severity_rank":2,"severity_score":6.5},
   {"id":"CL-2","members":["CRASH-0003"],"size":1,"primitive":"heap-use-after-free",
-   "severity_level":"Low","severity_rank":1,"severity_score":20}]}
+   "severity_level":"Low","severity_rank":1,"severity_score":3.3}]}
 JSON
 cat > "$abd/pool-members.json" <<'JSON'
 {"crashes":{"CRASH-0001":"model-direct","CRASH-0002":"harness","CRASH-0003":"harness"},
@@ -226,7 +226,7 @@ assert_eq "Medium" "$(echo "$anv" | jq -r '.top_severity_level')" \
   "T14h: model-direct top severity falls back to cluster-level Medium (no member_severity)"
 assert_eq "1" "$(echo "$anv" | jq -r '.medium_plus_bugs')" \
   "T14h2: model-direct medium_plus falls back to the shared Medium cluster"
-assert_eq "48" \
+assert_eq "6.5" \
   "$(echo "$aagg" | jq -r '.crash_clusters[] | select(.id=="CL-1") | .severity_score')" \
   "T14i: cluster list carries severity_score from the cluster tool"
 
@@ -256,7 +256,7 @@ JSON
 cat > "$abd2/clusters-crashes.json" <<'JSON'
 {"clusters":[
   {"id":"CL-SHARED","members":["CRASH-0005","CRASH-0006"],"size":2,"primitive":"heap-use-after-free",
-   "severity_level":"Medium","severity_rank":2,"severity_score":44,
+   "severity_level":"Medium","severity_rank":2,"severity_score":6.4,
    "member_severity":{"CRASH-0005":{"level":"Medium","rank":2,"score":44},
                       "CRASH-0006":{"level":"Low","rank":1,"score":20}}}]}
 JSON
@@ -303,7 +303,7 @@ JSON
 cat > "$ddir/clusters-crashes.json" <<'JSON'
 {"clusters":[{"id":"CL-DRY","members":["CRASH-0001","CRASH-0002","CRASH-0003"],
  "size":3,"primitive":"heap-buffer-overflow","severity_level":"Medium",
- "severity_rank":2,"severity_score":42}]}
+ "severity_rank":2,"severity_score":6.4}]}
 JSON
 touch "$ddir/pool/harness/crashes/CRASH-CLUSTERS.html"
 dledger2="$ddir/benchmark-results.md"

@@ -19,22 +19,12 @@ reachability_ignore list are dropped. The list is read from output/<slug>/
 target.toml and is the right place to silence the project's own sources and
 known vendored copies.
 
-Severity: a CVSS-aligned hybrid score is computed from the report's
-structured fields and the reachability counts:
-
-    score = clamp(round((Impact + Reach) × ConfidenceFactor), 0, 100)
-
-Impact is additive (primitive class + modifiers, ∈ [0, 46]).
-Reach is multiplicative (surface × callers × contract × controls,
-∈ [0, ~46]) — any near-zero gate collapses the side, so a high-impact
-primitive in a non-shipping (test/maintenance) tool correctly stays Low.
-Confidence is a multiplier ∈ [0.5, 1.0] that derates flaky reports.
-
-Continuous 0..100, bucketed Critical/High/Medium/Low. Calibration aligned
-with CVSS 3.1/4.0, OWASP Risk Rating, and the Microsoft Security Bug Bar.
-See compute_severity() for the formula. Written back into the report's
-Classification block as "- **Severity**: <level> (auto: I=.. R=..
-×CF=..; ...; score=N)".
+Severity is the CVSS v4.0 score. The report's primitive/surface facts derive
+Base metrics; proof-of-concept evidence derives the Threat metric; local
+reachability, caller-control, and shipping-context facts derive Environmental
+metrics. The resulting score is labeled with the v4.0 nomenclature
+(CVSS-B/CVSS-BT/CVSS-BE/CVSS-BTE) and written back into the report's
+Classification block.
 
 Usage:
   bin/reachability --symbol pcre2_serialize_decode [--symbol foo] [--json]
@@ -77,6 +67,7 @@ from typing import Any
 HERE = Path(__file__).absolute().parent
 sys.path.insert(0, str(HERE.parent / "lib"))
 
+import cvss4  # noqa: E402
 import languages  # noqa: E402
 import stack_frames  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
@@ -799,118 +790,309 @@ def _parse_target_toml_ignore(path: Path) -> list[str]:
 
 # ─── Severity scoring ─────────────────────────────────────────────────────
 #
-# Hybrid additive + multiplicative formula calibrated against industry
-# practice (CVSS 3.1 / 4.0, OWASP Risk Rating, Microsoft Security Bug Bar).
-# Continuous 0..100 score; same inputs always produce the same number, but
-# with enough resolution that a security team can sort *within* a level.
+# Severity is a CVSS v4.0 score — one industry-standard metric, and the only
+# number. The pipeline is pure mappings then the standard:
 #
-#   I  ∈ [0, 46]   primitive class + caller-controlled offset/size/value mods
-#                  → maps to CVSS C/I/A Impact subscore.
-#                  Additive (base + modifiers).
+#   crash report ──detect_primitive──▶ primitive class
+#   report fields ──classify_surface─▶ surface tier
+#   reach/evidence ──────────────────▶ local threat/environment facts
+#                  ──_cvss4_metrics──▶ CVSS metrics ──cvss4.score──▶ 0–10
 #
-#   R  ∈ [0, ~46]  surface_pts × callers × contract × controls
-#                  → maps to CVSS Attack Vector × AC × PR × UI.
-#                  *Multiplicative*: any near-zero gate collapses R.
-#                  This is the key fix from v1 — a high-impact primitive
-#                  in a non-shipping (test/maintenance) tool no longer
-#                  carries through the additive formula. Industry practice
-#                  (Microsoft Bug Bar, Project Zero) is unanimous that
-#                  bugs in dev/test code are not security-relevant unless
-#                  reachable from a real input surface.
+# Rating bands are the CVSS standard's own: Critical ≥ 9.0, High ≥ 7.0,
+# Medium ≥ 4.0, Low ≥ 0.1, None = 0.0.
 #
-#   CF ∈ [0.5, 1.0] reproduction rate × cluster confirmation × evidence
-#                  → maps to CVSS Temporal Report Confidence.
-#                  *Multiplies the whole score* — flaky 1/5 reports get
-#                  derated by half; confirmed multi-cluster get full credit.
+# Reachability, attacker control, reproducer evidence, and shipping context
+# are not bolted on with TokenFuzz arithmetic. They are represented with the
+# CVSS v4.0 Threat/Environmental groups:
+#   • E     proof-of-concept / active-exploitation evidence,
+#   • CR/IR/AR local importance of the vulnerable use,
+#   • MAT   caller-control / contract preconditions,
+#   • M*    modified impact when the code is non-shipping.
+# Supplemental CVSS metrics are deliberately not used for the score because
+# the v4.0 specification says they do not affect CVSS-BTE.
 #
-#   score = clamp(round((I + R) × CF), 0, 100)
-#
-#   bucket:
-#     score >= 70 → Critical    (real network/library memory-safety, broad reach)
-#     score >= 55 → High        (library memory-safety, or popular file parser)
-#     score >= 30 → Medium      (library info-disclosure; production CLI memory-safety)
-#     else        → Low         (dev/test tools; flaky; low-impact + unreached)
+# Derivation tables:
+#   CVSS4_CLASS   primitive class → (VC, VI, VA, SC, SI, SA, AT-override)
+#   _SURFACE_AVUI surface tier    → (AV, UI)
+#   evidence      report/reproducer → E
+#   environment   reach/shipping/control → CR/IR/AR/MAT/M*
+#   PR/AC         fixed worst-case defaults (see _cvss4_metrics)
 
-import math
-
-
-# ── Impact axis (CVSS C/I/A Impact) ──────────────────────────────────────
-
-
-# Primitive class → base impact. Keys flow through to the report breakdown
-# so operators can see why a score landed where it did. Tuned against
-# real-world CVE distributions: UAF and wild-addr WRITEs anchor at 40
-# (CVSS Critical impact), heap-WRITE at 32 (CVSS High impact), heap-READs
-# at 16-24 (CVSS Medium impact), DoS-only at 5-8 (CVSS Low impact).
-IMPACT_BASE = {
-    # ── Memory-safety primitives (ASan / UBSan / TSan) ────────────
-    "uaf_write":         40,   # use-after-free WRITE — type-state pivot
-    "double_free":       38,
-    "wild_write":        37,
-    "heap_write":        32,   # any bounded heap WRITE
-    "stack_write":       30,
-    "global_write":      28,
-    "uaf_read":          28,
-    "heap_read_big":     24,   # READ of ≥16 bytes — info-disclosure shaped
-    "global_read":       20,
-    "stack_read":        18,
-    "heap_read_small":   16,   # READ of <16 bytes — typically DoS-shaped
-    "data_race":         22,   # TSan data race — real but exploitation-
-                                # conditional (ClusterFuzz treats races as
-                                # Medium security unless a UAF is shown)
-    "wild_read":         20,   # SEGV READ at a non-near-null address —
-                                # wild-pointer deref; DoS + possible
-                                # info-leak pivot (ClusterFuzz "UNKNOWN READ")
-    "integer_overflow":  12,   # UBSan arithmetic overflow with no
-                                # demonstrated memory effect — precursor class
-    "null_deref":         8,
-    "stack_exhaustion":   8,   # ASan stack-overflow (deep recursion) — DoS
-    "bus":                5,   # SIGBUS / misalignment / DoS-only
-    "memory_leak":        5,   # LeakSanitizer — resource DoS, not info-leak
-    "oom":                4,   # allocation-size-too-big / OOM — resource DoS
-
-    # ── Web/application vulnerability classes ─────────────────────
-    # Calibrated against industry CVSS distributions for the class.
-    # Modifiers (caller-controlled bytes etc.) still apply, capped at +6.
-    "command_injection": 40,   # RCE — CVSS Critical impact analog
-    "deserialization":   38,   # insecure deserialization — frequently RCE
-    "sqli":              36,   # SQL injection — auth bypass + data exfil
-    "ssti":              36,   # server-side template injection — RCE-shaped
-    "authn_bypass":      32,   # authentication bypass
-    "ssrf":              28,   # server-side request forgery
-    "path_traversal":    28,   # directory traversal / arbitrary file read
-    "authz_bypass":      28,   # authorization / access-control bypass
-    "xxe":               26,   # XML external entity — info-disclosure + SSRF
-    "secrets_exposure":  24,   # credentials / API keys / tokens leaked
-    "idor":              22,   # insecure direct object reference
-    "prototype_pollution": 20, # JS prototype pollution — often a pivot
-    "xss":               18,   # cross-site scripting (any flavor)
-    "open_redirect":     14,   # CWE-601 — phishing + OAuth pivot
-    "crypto_weakness":   14,   # weak hash / hard-coded key / insecure RNG
-    "csrf":              12,   # cross-site request forgery
-    "regex_dos":         12,   # ReDoS — DoS-only
-
-    # ── Recon / reasoning-confirmed classes ───────────────────────
-    # Anchors for non-ASan findings that an independent validator has
-    # voted Promote on. Tuned so a Promote-quorum reasoning-confirmed
-    # finding does not silently collapse into the "unknown=8" floor.
-    "protocol_state":    20,   # protocol-state corruption (cookie poisoning,
-                                # cache poisoning, downgrade attacks)
-    "dos_amplification": 16,   # parser amplifiers, name-decompression DoS,
-                                # algorithmic complexity attacks
-    "logic_regression":  14,   # defense-in-depth feature defeated by logic
-                                # bug (e.g., cache normalization disables
-                                # a security feature like DNS0x20)
-    "info_leak":         24,   # info disclosure / uninit read / reasoning-
-                                # confirmed leak shaped like heap_read_big
-    "injection":         24,   # generic injection fallback (CRLF, LDAP, …)
-
-    # ── Fallback ──────────────────────────────────────────────────
-    "unknown":            8,
+# Primitive class → the vulnerable-system Confidentiality/Integrity/
+# Availability and subsequent-system C/I/A metrics, plus an optional AT
+# (Attack Requirements) override for classes whose exploitation is inherently
+# conditional. Values are the standard CVSS-B readings the class warrants:
+#   • code-execution-capable corruption → VC/VI/VA = H/H/H,
+#   • out-of-bounds reads → VC reflecting disclosure, VA:L for the crash,
+#   • DoS-only → availability impact only.
+# SC/SI/SA (subsequent system) are N unless the class characteristically
+# crosses a security boundary (SSRF, XSS, open redirect). Each entry is a
+# reviewable claim; adjust the row, never bolt on a multiplier.
+#   key: (VC, VI, VA, SC, SI, SA, AT_override|None)
+CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
+    # ── Memory corruption — code-execution-capable (full vuln-system CIA) ──
+    "uaf_write":         ("H", "H", "H", "N", "N", "N", None),
+    "double_free":       ("H", "H", "H", "N", "N", "N", None),
+    "wild_write":        ("H", "H", "H", "N", "N", "N", None),
+    "type_confusion":    ("H", "H", "H", "N", "N", "N", None),
+    "heap_write":        ("H", "H", "H", "N", "N", "N", None),
+    "stack_write":       ("H", "H", "H", "N", "N", "N", None),
+    "global_write":      ("H", "H", "H", "N", "N", "N", None),
+    # TSan race is write-shaped but winning the window is a precondition → AT:P.
+    "data_race":         ("H", "H", "H", "N", "N", "N", "P"),
+    # ── Memory reads — disclosure (+ crash availability) ──────────────────
+    "uaf_read":          ("H", "N", "L", "N", "N", "N", None),
+    "heap_read_big":     ("H", "N", "L", "N", "N", "N", None),
+    "info_leak":         ("H", "N", "L", "N", "N", "N", None),
+    "global_read":       ("L", "N", "L", "N", "N", "N", None),
+    "stack_read":        ("L", "N", "L", "N", "N", "N", None),
+    "heap_read_small":   ("L", "N", "L", "N", "N", "N", None),
+    "wild_read":         ("L", "N", "H", "N", "N", "N", None),
+    # ── DoS-only (availability) ───────────────────────────────────────────
+    "null_deref":        ("N", "N", "H", "N", "N", "N", None),
+    "stack_exhaustion":  ("N", "N", "H", "N", "N", "N", None),
+    "bus":               ("N", "N", "H", "N", "N", "N", None),
+    "oom":               ("N", "N", "H", "N", "N", "N", None),
+    "memory_leak":       ("N", "N", "H", "N", "N", "N", None),
+    "regex_dos":         ("N", "N", "H", "N", "N", "N", None),
+    "dos_amplification": ("N", "N", "H", "N", "N", "N", None),
+    "integer_overflow":  ("N", "N", "L", "N", "N", "N", None),  # precursor
+    # ── Web / application classes ─────────────────────────────────────────
+    "command_injection": ("H", "H", "H", "N", "N", "N", None),
+    "deserialization":   ("H", "H", "H", "N", "N", "N", None),
+    "ssti":              ("H", "H", "H", "N", "N", "N", None),
+    "sqli":              ("H", "H", "L", "N", "N", "N", None),
+    "authn_bypass":      ("H", "H", "N", "N", "N", "N", None),
+    "authz_bypass":      ("H", "L", "N", "N", "N", "N", None),
+    "idor":              ("L", "L", "N", "N", "N", "N", None),
+    "path_traversal":    ("H", "N", "N", "N", "N", "N", None),
+    "xxe":               ("H", "N", "L", "N", "N", "N", None),
+    "secrets_exposure":  ("H", "N", "N", "N", "N", "N", None),
+    "ssrf":              ("L", "L", "N", "L", "N", "N", None),   # reaches subsequent system
+    "prototype_pollution": ("L", "L", "L", "N", "N", "N", None),
+    "xss":               ("N", "N", "N", "L", "L", "N", None),   # impact on victim (subsequent)
+    "open_redirect":     ("N", "N", "N", "L", "N", "N", None),
+    "csrf":              ("N", "L", "N", "N", "N", "N", None),
+    "crypto_weakness":   ("H", "N", "N", "N", "N", "N", "P"),    # exploitation conditional
+    "injection":         ("L", "L", "N", "N", "N", "N", None),
+    # ── Recon / reasoning-confirmed ───────────────────────────────────────
+    "protocol_state":    ("N", "H", "N", "N", "N", "N", None),
+    "logic_regression":  ("L", "L", "N", "N", "N", "N", None),
+    # "unknown" is intentionally absent: an unclassified crash gets no CVSS
+    # vector (emitting one would be a number dressed as a standard).
 }
 
-# Impact modifier cap — keep modifiers a tilt, not the dominant signal.
-IMPACT_MODIFIER_CAP = 6
+# Surface tier → (Attack Vector, User Interaction). Libraries and file-format
+# parsers are scored for the reasonable worst-case embedding, per the CVSS
+# v4.0 user guide's library guidance: an automated consumer (network service,
+# upload pipeline) feeds them attacker bytes with no human in the loop, so
+# AV:N/UI:N — the same reading NVD/CNAs apply to parser-library CVEs. The
+# library's *local* deployment reality belongs in Environmental metrics, not
+# in a discounted Base. UI:P ("Passive", involuntary participation of a
+# targeted user) is the v4.0 analog of 3.1's UI:R and is right where a victim
+# genuinely must act: running a CLI tool on attacker-supplied input.
+# Non-shipping tiers still get a vector; their deployment context is
+# represented through Environmental metrics.
+_SURFACE_AVUI: dict[str, tuple[str, str]] = {
+    "network":          ("N", "N"),
+    "library_popular":  ("N", "N"),
+    "library":          ("N", "N"),
+    "file":             ("N", "N"),
+    "cli_production":   ("L", "P"),
+    "dev_tool":         ("L", "P"),
+    "internal":         ("L", "P"),
+    "unknown":          ("N", "P"),  # untriaged: worst-case AV, but UI:P keeps
+                                     # it below triaged library findings
+}
+
+# Surfaces that do not ship to end users. Their reduced local impact is encoded
+# through Environmental modified impact metrics (M*) rather than a harness
+# multiplier or a post-score cap.
+NON_SHIPPING_SURFACES = frozenset({"dev_tool", "internal"})
+
+_SEVERITY_RANK = {"None": 0, "Unknown": 0, "Low": 1, "Medium": 2,
+                  "High": 3, "Critical": 4}
+
+
+def _parse_repro_rate(report_text: str, fields: dict) -> tuple[int, int] | None:
+    repro = fields.get("reproduction_rate", "")
+    m = re.search(r"(\d+)\s*/\s*(\d+)", repro or "")
+    if not m:
+        m = re.search(r"\b(?:confirmed(?: result)?|repro(?:duction)?(?: rate)?|runs?)"
+                      r"\D{0,40}(\d+)\s*/\s*(\d+)", report_text, re.IGNORECASE)
+    if not m:
+        return None
+    d = int(m.group(2))
+    if d <= 0:
+        return None
+    return int(m.group(1)), d
+
+
+def _has_repro_artifacts(report_dir: Path | None) -> bool:
+    if report_dir is None:
+        return False
+    if any((report_dir / n).is_file() for n in ("reproduce.sh", "input.txt", "input.bin")):
+        return True
+    for pattern in ("testcase*", "poc*", "reproducer*", "input.*"):
+        if any(report_dir.glob(pattern)):
+            return True
+    return False
+
+
+def _threat_metric(report_text: str, fields: dict,
+                   report_dir: Path | None) -> tuple[str, str]:
+    """Derive CVSS v4.0 Exploit Maturity (E).
+
+    The harness does not claim active real-world exploitation unless the
+    report says so. A saved reproducer or successful rerun is scored as
+    proof-of-concept availability (E:P). Otherwise a triaged report with no
+    such evidence uses E:U; completely untriaged input leaves E Not Defined.
+    """
+    t = (report_text or "").lower()
+    # Negation-aware: "no evidence this was exploited in the wild" is the
+    # OPPOSITE claim, and every trigger phrase must name exploitation itself
+    # (a bare "in the wild" is routine prose, not evidence).
+    if _unnegated_search(r"\b(?:active(?:ly)? exploited|exploited in[- ]the[- ]wild|"
+                         r"weaponized|exploit toolkit|mass exploitation)\b", t):
+        return "A", "active exploitation evidence → E:A"
+    rate = _parse_repro_rate(report_text, fields)
+    if rate is not None and rate[0] > 0:
+        n, d = rate
+        return "P", f"reproduction rate {n}/{d} → E:P"
+    if _has_repro_artifacts(report_dir):
+        return "P", "reproducer/testcase artifact on disk → E:P"
+    if _unnegated_search(r"\b(?:reproducer|testcase|proof[- ]of[- ]concept|poc)\b", t):
+        return "P", "report cites proof-of-concept/reproducer → E:P"
+    if _report_is_triaged(fields):
+        return "U", "no exploit or reproducer evidence recorded → E:U"
+    return "X", "threat evidence not defined → E:X"
+
+
+def _limited_caller_control(fields: dict) -> tuple[bool, str]:
+    """Whether local caller control adds an Environmental attack requirement."""
+    controls = (fields.get("caller_controls", "") or "").lower()
+    trigger = (fields.get("trigger_source", "") or "").lower()
+    parameter = (fields.get("parameter_control", "") or "").lower()
+    trusted = (fields.get("trusted_caller_actions", "") or "").lower()
+
+    limited_re = re.compile(r"\b(length|size|count|number|offset|index|flag|option|enum|"
+                            r"timing|race|env|fs-state|protocol-state|"
+                            r"call-sequence|call order)\b")
+    byte_re = re.compile(r"\b(byte|bytes|buffer|blob|input|payload|content|"
+                         r"document|request|packet|file)\b")
+    none_re = re.compile(r"\b(none|not controlled|no caller control)\b")
+
+    if parameter and re.search(r"\b(indirect|computed|configuration|config|harness-only|"
+                               r"trusted|application-supplied)\b", parameter):
+        return True, "parameter control is indirect/trusted → MAT:P"
+    if trusted and re.search(r"\b(private|internal|struct|mutation|harness-only|"
+                             r"callback|ordering|sequence)\b", trusted):
+        if not re.search(r"\b(?:normal(?:ly)?|public|documented|no private)\b", trusted):
+            return True, "trusted caller action required → MAT:P"
+
+    if controls.strip():
+        if none_re.search(controls):
+            return True, "caller control absent → MAT:P"
+        # Full byte control dominates: "document contents and length" is a
+        # caller who shapes the whole input, not one limited to its length.
+        # The limited-shape reading applies only when no byte/content word
+        # appears alongside it.
+        if byte_re.search(controls):
+            return False, "caller controls input bytes → MAT:X"
+        if limited_re.search(controls):
+            return True, "caller controls limited trigger shape → MAT:P"
+        return False, ""
+
+    if not trigger.strip():
+        return False, ""
+    if limited_re.search(trigger):
+        return True, "trigger source requires local state/control → MAT:P"
+    return False, ""
+
+
+def _environmental_requirement(surface_label: str, reach: dict) -> tuple[str, str]:
+    """Local CR/IR/AR importance from shipping context and observed reach."""
+    if surface_label in NON_SHIPPING_SURFACES:
+        return "L", f"non-shipping {surface_label} use → CR/IR/AR:L"
+    genuine = _genuine_repo_count(reach)
+    if surface_label in {"network", "library_popular"} or genuine >= POPULAR_LIBRARY_THRESHOLD:
+        return "H", "network/popular deployed use → CR/IR/AR:H"
+    if surface_label in {"library", "file", "cli_production"} or genuine > 0:
+        return "M", "ordinary deployed use → CR/IR/AR:M"
+    services = reach.get("services") or {}
+    any_responded = any(s.get("status") == "ok" for s in services.values())
+    if any_responded:
+        return "L", "no deployed caller evidence from responding backends → CR/IR/AR:L"
+    return "X", "environmental importance not defined → CR/IR/AR:X"
+
+
+def _non_shipping_modified_impacts(surface_label: str,
+                                   metrics: dict[str, str]) -> tuple[dict[str, str], str]:
+    """Reduce local impact for non-shipping code with Environmental M* metrics."""
+    if surface_label not in NON_SHIPPING_SURFACES:
+        return {}, ""
+    if surface_label == "internal":
+        value = "N"
+        note = "internal harness is not deployed → modified impacts:N"
+    else:
+        value = "L"
+        note = "non-shipping tool impact is local/dev-only → modified impacts:L"
+    mapping = {
+        "VC": "MVC", "VI": "MVI", "VA": "MVA",
+        "SC": "MSC", "SI": "MSI", "SA": "MSA",
+    }
+    mods = {mod: value for base, mod in mapping.items() if metrics.get(base) != "N"}
+    return mods, note
+
+
+def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
+                   reach: dict, contract_concern: bool,
+                   report_dir: Path | None = None) -> tuple[dict[str, str] | None, list[str]]:
+    """Derive CVSS v4.0 metrics for a classified crash.
+
+    Returns (metrics, derivation-notes), or (None, notes) when the primitive
+    is unclassified (no vector). Base metrics describe the vulnerability
+    class/surface; Threat and Environmental metrics describe the local audit
+    context without introducing TokenFuzz-specific arithmetic.
+    """
+    cls = CVSS4_CLASS.get(prim_key)
+    if cls is None:
+        return None, [f"primitive={prim_key} is unclassified — no CVSS vector"]
+    vc, vi, va, sc, si, sa, at_override = cls
+    av, ui = _SURFACE_AVUI.get(surface_label, _SURFACE_AVUI["unknown"])
+    # Base AT captures intrinsic class-level preconditions. Local caller
+    # contract/control concerns are Environmental MAT below.
+    at = at_override or "N"
+    metrics = {
+        "AV": av, "AC": "L", "AT": at, "PR": "N", "UI": ui,
+        "VC": vc, "VI": vi, "VA": va, "SC": sc, "SI": si, "SA": sa,
+    }
+    e, e_note = _threat_metric(fields.get("_report_text", ""), fields, report_dir)
+    if e != "X":
+        metrics["E"] = e
+    req, req_note = _environmental_requirement(surface_label, reach)
+    if req != "X":
+        metrics.update({"CR": req, "IR": req, "AR": req})
+    limited, limited_note = _limited_caller_control(fields)
+    if contract_concern or limited:
+        metrics["MAT"] = "P"
+    mods, mods_note = _non_shipping_modified_impacts(surface_label, metrics)
+    metrics.update(mods)
+    notes = [
+        f"surface={surface_label} → AV:{av}/UI:{ui}",
+        f"class={prim_key} → VC:{vc}/VI:{vi}/VA:{va}/SC:{sc}/SI:{si}/SA:{sa}",
+        f"class preconditions → AT:{at}",
+        "PR:N (worst case — no auth signal), AC:L",
+        e_note,
+        req_note,
+    ]
+    if contract_concern:
+        notes.append("caller contract concern → MAT:P")
+    if limited_note:
+        notes.append(limited_note)
+    if mods_note:
+        notes.append(mods_note)
+    return metrics, notes
 
 
 def detect_primitive(report_text: str) -> tuple[str, str]:
@@ -955,6 +1137,14 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
                  r"attempting free on address which was not malloc|"
                  r"\balloc[- ]dealloc[- ]mismatch\b|\binvalid[- ]free\b", t):
         return "double_free", "double-free / invalid free"
+
+    # C++ type confusion: ClusterFuzz's "Bad-cast to X from Y" crash type and
+    # Clang CFI's cast-check failure are both precise sanitizer-grade signals.
+    # (UBSan's vptr check lands here too, via the UBSan branch below.)
+    if re.search(r"\bbad-cast\b|"
+                 r"control flow integrity check\b.{0,120}\bduring cast\b|"
+                 r"\bcfi\b.{0,40}\bbad[- ]cast\b", t):
+        return "type_confusion", "type confusion (bad-cast)"
 
     # Wild-address WRITE: explicit textual cue *or* an ASan SCARINESS line
     # tagged `wild-addr-write`.
@@ -1009,6 +1199,18 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
                  r"\brss limit exceeded\b|\bexceeds maximum supported size\b", t):
         return "oom", "allocation/OOM resource exhaustion"
 
+    # MSan / KMSAN use of uninitialized memory — a literal *diagnostic*
+    # token, so it must classify here (authoritative), not via the prose
+    # "uninit" fallback below, which runs AFTER the web-vuln regexes and
+    # could lose to an incidental narrative mention of some web class.
+    # The bare tool names are deliberately NOT matched: "no MemorySanitizer
+    # diagnostic was produced" / "MSan build unavailable" is routine triage
+    # prose, not a finding. Only the diagnostic line shapes count.
+    if re.search(r"warning: memorysanitizer:|"
+                 r"\buse-of-uninit(?:ialized)?-value\b|"
+                 r"\bkmsan:\s*uninit-value\b|\bbug:\s*kmsan\b", t):
+        return "info_leak", "uninitialized value (MSan)"
+
     if re.search(r"undefinedbehaviorsanitizer|:[0-9]+:[0-9]+: runtime error:", t):
         if re.search(r"out of bounds|object-size|pointer[- ]overflow", t):
             return "heap_read_small", "UBSan bounds/object-size"
@@ -1017,7 +1219,10 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
         if "null pointer" in t:
             return "null_deref", "UBSan null pointer"
         if "vptr" in t:
-            return "heap_read_small", "UBSan vptr/type"
+            # An object accessed through a vptr of the wrong dynamic type IS
+            # type confusion — same class ClusterFuzz calls Bad-cast — not a
+            # small-read DoS.
+            return "type_confusion", "UBSan vptr type confusion"
         if re.search(r"(?:signed|unsigned) integer overflow|"
                      r"shift exponent .{0,40} is too large|"
                      r"negation of .{0,40} cannot be represented", t):
@@ -1067,6 +1272,12 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
         return "info_leak", "information disclosure"
     if _unnegated_search(r"\b(uninit|uninitialized|uninitialised)\b", t):
         return "info_leak", "uninitialized read"
+    # Prose-only "type confusion" stays in the conservative small-read tier:
+    # the 34-point type_confusion class is reserved for sanitizer-grade
+    # signals (Bad-cast / CFI / vptr, matched above) or a deliberate
+    # structured `Primitive: type_confusion` field. Mitigation/background
+    # prose ("hardening against type confusion") must not mint a
+    # high-impact primitive from a keyword.
     if _unnegated_search(r"\b(type confusion|type mismatch|type validation|unchecked elements?)\b", t):
         return "heap_read_small", "type-state mismatch"
 
@@ -1178,7 +1389,15 @@ _NEGATION_BEFORE_RE = re.compile(
     r"\b(?:no|not|never|without|neither|nor|"
     r"cannot|can't|couldn't|doesn't|don't|didn't|isn't|wasn't|aren't|won't|"
     r"rules? out|ruled out|absence of|free (?:of|from)|"
-    r"unable to|impossible)\b"
+    r"unable to|impossible|"
+    # Prevention/mitigation verbs before the class name assert the DEFENSE,
+    # not the bug ("prevents type confusion", "mitigates SQL injection",
+    # "hardening against XXE"). Before-position only: in after-position
+    # ("XSS mitigations were insufficient") the same stems often assert the
+    # bug, so they stay out of _NEGATION_AFTER_RE.
+    r"prevent(?:s|ed|ing)?|mitigat(?:e[sd]?|ing|ions?)|avoid(?:s|ed|ing)?|"
+    r"protect(?:s|ed|ing)? (?:against|from)|guard(?:s|ed|ing)? against|"
+    r"harden(?:s|ed|ing)? against|defend(?:s|ed|ing)? against)\b"
 )
 # Negation when it sits AFTER the class name ("SQL injection is not possible",
 # "cache poisoning was ruled out"). This set is deliberately NARROWER: a
@@ -1263,90 +1482,29 @@ _NARRATIVE_ONLY_PRIMITIVES = frozenset({
 })
 
 
-def detect_impact_modifiers(report_text: str) -> tuple[int, list[str]]:
-    """Caller-controlled offset / size / value uplifts. Capped at IMPACT_MODIFIER_CAP.
-
-    Looks for the *phrase* "caller-controlled <noun>" (with the legacy
-    "attacker-controlled" wording also accepted as input — real-world ASan
-    output and external CVE writeups still use it, so the parser must
-    recognise both spellings even though our own prose uses caller-controlled).
-    Up to ~30 chars of intervening text is allowed — not coincidental adjacency.
-    """
-    t = report_text.lower()
-    score = 0
-    reasons: list[str] = []
-    for noun, pts, label in [
-        ("offset", 3, "caller-controlled offset"),
-        ("size",   3, "caller-controlled size"),
-        ("value",  2, "caller-controlled value"),
-    ]:
-        pat = re.compile(r"(?:caller|attacker)[- ]controlled[^.\n]{0,30}\b" + re.escape(noun) + r"\b")
-        if pat.search(t):
-            score += pts
-            reasons.append(label)
-    m = re.search(r"scariness[: ]+\s*(\d+)", t)
-    if m and int(m.group(1)) >= 50:
-        score += 2
-        reasons.append(f"SCARINESS={m.group(1)}")
-    if score > IMPACT_MODIFIER_CAP:
-        score = IMPACT_MODIFIER_CAP
-        reasons.append(f"(impact modifiers capped at +{IMPACT_MODIFIER_CAP})")
-    return score, reasons
-
-
-# ── Reach axis (input-path multiplicative model) ─────────────────────────
+# ── Surface classification (drives AV/UI and Environmental use) ──────────
 #
-# Maps to CVSS Attack Vector × AC × PR × UI. Multiplicative:
-# surface_pts × callers × contract × controls. Each factor is a gate — any
-# one near zero collapses the side. This mirrors CVSS, where the
-# Exploitability subscore = 8.22 × AV × AC × PR × UI, so a Network bug
-# needing root privileges collapses below a Local bug needing none.
+# The surface tier feeds CVSS AV/UI and helps derive Environmental requirement
+# and non-shipping modified-impact metrics. External-caller counts / popularity
+# are used only where CVSS has a matching Environmental concept (CR/IR/AR);
+# vendored copies stay as reachability facts.
 
 
-# Surface tiers, ordered by how directly caller-supplied input can reach the
-# bug. Vendored copies count at VENDORED_WEIGHT towards reach but do NOT
-# upgrade the surface tier — they ship the bug but don't add new
-# externally-callable entry points beyond what the upstream library already
-# exposed.
-SURFACE_POINTS = {
-    "network":          28,   # service accepts network input — direct AV
-    "library_popular":  22,   # library API with ≥ POPULAR_LIBRARY_THRESHOLD callers
-    "library":          16,   # library API consumed by other software (supply chain)
-    "file":             14,   # file-format parser — callers supply files
-    "cli_production":    8,   # shipped CLI tool consumed by end users
-    "dev_tool":          1,   # test/maint/fuzz tool — non-shipping; floor, not zero
-    "internal":          0,   # audit-internal harness only
-    "unknown":           6,
-}
+# The set of surface tier labels the classifier can emit. Severity maps each
+# to CVSS AV/UI via _SURFACE_AVUI; the Reachability section displays the
+# label. There are no per-tier point values any more — the tier is a label,
+# not a score.
+SURFACE_TIERS = frozenset({
+    "network", "library_popular", "library", "file",
+    "cli_production", "dev_tool", "internal", "unknown",
+})
 
 # Min distinct *repos* with a genuine caller hit to upgrade
 # library → library_popular. Counted over repos, not files (see
 # _genuine_repo_count), and only reachable because the backend result caps
-# (SOURCEGRAPH_RESULT_LIMIT / GH_RESULT_LIMIT) sit above it.
+# (SOURCEGRAPH_RESULT_LIMIT / GH_RESULT_LIMIT) sit above it. Both tiers map to
+# the same CVSS metrics; the distinction is for the Reachability display only.
 POPULAR_LIBRARY_THRESHOLD = 50
-
-# Hard score caps for surfaces that do NOT ship to end users. A bug there
-# is not a security finding even if the impact is high — this matches
-# Microsoft Security Bug Bar policy ("non-shipping code is not security-
-# relevant") and Project Zero / OSS-Fuzz practice. Without this cap, a
-# stack-WRITE in maint/ucptest.c with caller-controlled bytes leaks into
-# Medium because (Impact + Reach) × Confidence is still ~33; applying the
-# cap forces it to Low (≤24) where it belongs.
-SURFACE_SCORE_CAP = {
-    "dev_tool":  24,   # forced Low — non-shipping dev/test/maint code
-    "internal":  14,   # forced very Low — audit harness only
-}
-
-# Vendored copies ship the bug but don't add new call sites — count at 0.4×.
-VENDORED_WEIGHT = 0.4
-
-# Realistic max for R, used to size buckets. Calibrated so the four factors
-# can each contribute, but no single factor dominates:
-#   28 (network) × 1.1 (callers, max) × 1.0 (obeyed) × 1.0 (bytes) ≈ 31
-# Combined with impact (max 46) and CF (max 1.0), the realistic total max
-# is ~77 — buckets below are sized as CVSS-3 proportional fractions of that
-# (Critical ≥ ~91%, High ≥ ~71%, Medium ≥ ~39%).
-REACH_TOTAL_CAP = 31
 
 
 # ── Dev/test/maintenance tool detection ──────────────────────────────────
@@ -1513,33 +1671,33 @@ def _is_internal_surface(surface_value: str) -> bool:
 
 def _classify_surface(surface_value: str, boundary_value: str,
                       report_text: str, genuine_callers: int,
-                      report_triaged: bool = True) -> tuple[str, int, str]:
-    """Map the report's structured fields to a surface tier.
+                      report_triaged: bool = True) -> tuple[str, str]:
+    """Map the report's structured fields to a surface tier label.
 
-    Classification is anchored on the **type prefix** of the Surface field
-    (the part before the em-dash) — the description after the dash is prose
-    that often mentions a harness or test driver as the *exercise mechanism*,
-    not the location of the bug. Mis-anchoring on prose was the v1 bug that
-    let `library-api — C harness calls a public library entry point` get
-    classified as a dev_tool because of the word "harness".
+    Returns (tier_label, reason). Classification is anchored on the **type
+    prefix** of the Surface field (the part before the em-dash) — the
+    description after the dash is prose that often mentions a harness or test
+    driver as the *exercise mechanism*, not the location of the bug.
+    Mis-anchoring on prose was the v1 bug that let `library-api — C harness
+    calls a public library entry point` get classified as a dev_tool because
+    of the word "harness".
 
     Order:
-      1. Dev/test/maintenance tool — first via type prefix, then path/name fallback.
-         A bug in non-shipping code is not security-relevant.
-      2. Internal harness — audit-internal only, hard cap to very Low.
+      1. Dev/test/maintenance tool — first via type prefix, then path/name
+         fallback. A bug in non-shipping code gets modified Environmental
+         impacts rather than a post-score cap.
+      2. Internal harness — audit-internal only.
       3. Surface tier from the type prefix (network/library/file/cli).
-      4. Library tier upgrades to library_popular at ≥ POPULAR_LIBRARY_THRESHOLD
-         callers — but the popularity rescue for an empty/unknown Surface
-         field fires only when *report_triaged* is true. An un-triaged
-         report (no structured reach fields at all) stays at the
-         conservative `unknown` tier; see the empty-surface branch below.
+      4. Library upgrades to library_popular at ≥ POPULAR_LIBRARY_THRESHOLD
+         callers (display distinction only). The popularity rescue for an
+         empty/unknown Surface field fires only when *report_triaged* is true.
     """
     is_dev, dev_reason = _is_dev_tool(surface_value, boundary_value, report_text)
     if is_dev:
-        return "dev_tool", SURFACE_POINTS["dev_tool"], dev_reason
+        return "dev_tool", dev_reason
 
     if _is_internal_surface(surface_value):
-        return "internal", SURFACE_POINTS["internal"], "internal harness (audit-only)"
+        return "internal", "internal harness (audit-only)"
 
     s_type = _surface_type_prefix(surface_value).lower()
 
@@ -1558,74 +1716,41 @@ def _classify_surface(surface_value: str, boundary_value: str,
     #    every caller of cJSON_Delete is a "caller", but only one who
     #    misuses the API hits a misuse use-after-free. The popularity rescue
     #    is suppressed and the surface stays at the conservative `unknown`
-    #    tier so an un-triaged crash cannot reach Medium on impact alone.
+    #    tier.
     if not s_type or s_type == "unknown":
         if report_triaged and genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
             reason = (f"surface={'unspecified' if not s_type else 'unknown'} but "
                       f"reachability found {genuine_callers} caller repos "
                       f"(≥{POPULAR_LIBRARY_THRESHOLD}) → library_popular")
-            return "library_popular", SURFACE_POINTS["library_popular"], reason
+            return "library_popular", reason
         if not report_triaged:
-            return ("unknown", SURFACE_POINTS["unknown"],
+            return ("unknown",
                     "report carries no structured reach fields — un-triaged; "
                     "surface left unassessed, not promoted on caller count alone")
         if not s_type:
-            return "unknown", SURFACE_POINTS["unknown"], "surface field empty"
-        return "unknown", SURFACE_POINTS["unknown"], "surface type unrecognised: 'unknown'"
+            return "unknown", "surface field empty"
+        return "unknown", "surface type unrecognised: 'unknown'"
 
     if any(t in s_type for t in ("network", "daemon", "rpc", "socket", "server")):
-        return "network", SURFACE_POINTS["network"], "network-facing service"
+        return "network", "network-facing service"
     if any(t in s_type for t in ("library-api", "library api", "public api", "libfuzzer")):
         if genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
-            return ("library_popular", SURFACE_POINTS["library_popular"],
+            return ("library_popular",
                     f"library API with {genuine_callers} caller repos (≥{POPULAR_LIBRARY_THRESHOLD})")
-        return "library", SURFACE_POINTS["library"], "library API"
+        return "library", "library API"
     if any(t in s_type for t in ("file-format", "file format", "parser", "decoder")):
-        return "file", SURFACE_POINTS["file"], "file-format parser"
+        return "file", "file-format parser"
     if any(t in s_type for t in ("cli", "command line", "command-line")):
-        return "cli_production", SURFACE_POINTS["cli_production"], "production CLI tool"
+        return "cli_production", "production CLI tool"
 
     # Fall-through: unrecognised type prefix. Same popularity-rescue path
     # as the empty case — broad reach trumps a strange Surface label, but
-    # only for a triaged report. (A non-empty Surface field already implies
-    # triage, so this gate is belt-and-suspenders for that path.)
+    # only for a triaged report.
     if report_triaged and genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
-        return ("library_popular", SURFACE_POINTS["library_popular"],
+        return ("library_popular",
                 f"surface type unrecognised ({s_type!r}) but reachability found "
                 f"{genuine_callers} caller repos (≥{POPULAR_LIBRARY_THRESHOLD}) → library_popular")
-    return "unknown", SURFACE_POINTS["unknown"], f"surface type unrecognised: {s_type!r}"
-
-
-def _callers_factor(reach: dict) -> tuple[float, str]:
-    """Narrow multiplier on surface points.
-
-    Popularity is primarily expressed by the surface-tier upgrade
-    (library → library_popular at ≥ POPULAR_LIBRARY_THRESHOLD callers).
-    This factor is a small *secondary* tilt so two bugs in the same tier
-    can still be ordered by caller count — without re-counting popularity
-    a second time.
-
-    All-backends-unavailable returns 1.0 (neutral — we have no signal, must
-    not penalise). Otherwise:
-      n_eff = genuine + 0.4·vendored
-      factor = clamp(0.90 + 0.05·log10(1+n_eff), 0.90, 1.10)
-    Sample values:  n=0→0.90  n=10→0.95  n=100→1.00
-                    n=1000→1.05  n=10000→1.10 (clamp)
-    """
-    services = reach.get("services") or {}
-    any_responded = any(s.get("status") == "ok" for s in services.values())
-    if not any_responded:
-        return 1.0, "all backends unavailable — no callers signal (×1.0)"
-    genuine = int(reach.get("external_callers", 0) or 0)
-    vendored = int(reach.get("vendored_copies", 0) or 0)
-    n_eff = genuine + VENDORED_WEIGHT * vendored
-    raw = 0.90 + 0.05 * math.log10(1.0 + max(0.0, n_eff))
-    factor = max(0.90, min(1.10, raw))
-    parts = [f"callers={genuine}"]
-    if vendored:
-        parts.append(f"+0.4·{vendored} vendored")
-    parts.append(f"→ ×{factor:.2f}")
-    return factor, "; ".join(parts)
+    return "unknown", f"surface type unrecognised: {s_type!r}"
 
 
 def _has_contract_concern(report_text: str) -> bool:
@@ -1635,50 +1760,26 @@ def _has_contract_concern(report_text: str) -> bool:
     ``## Contract concern`` section. That section is authoritative when present
     so scoring stays reproducible from REPORT.md alone. It is not the *only*
     trigger: ``extract_report_fields`` also honours the ``.contract-flagged``
-    sidecar (see ``_contract_factor``'s ``flagged`` argument) so a flagged
-    bundle whose section was never written or was dropped on regeneration is
-    still derated.
+    sidecar so a flagged bundle whose section was never written (or was
+    dropped on regeneration) still derives MAT:P.
     """
     return bool(re.search(r"^## Contract concern\s*$", report_text or "", re.MULTILINE))
 
 
-def _contract_factor(value: str, report_text: str = "",
-                     flagged: bool = False) -> tuple[float, str]:
-    """CVSS Attack Complexity analogue. Obeyed contract is the *baseline*
-    (×1.0) — the standard reachable case all other factors already assume.
-    Violated contract raises Attack Complexity (caller had to misuse the
-    API), so we apply a penalty. We do not *reward* the obeyed case with a
-    bonus; that would silently inflate every routine bug — CVSS AC only
-    penalises high complexity, it never rewards low complexity.
+def _contract_concern(fields: dict) -> tuple[bool, str]:
+    """Whether the caller contract is in question — drives CVSS MAT:P.
 
-    A triage contract concern is broader than the literal ``Caller contract``
-    enum: the verdict matrix also uses it when the trigger shape sits outside
-    the target's declared caller-controlled boundary. That is still a reach
-    concern, so apply the same penalty when the report carries the triage
-    annotation instead of rewriting the authored enum to ``violated``.
+    A violated/misused contract or a triage contract concern means the local
+    attack path carries a requirement in this target's environment
+    (CVSS v4.0 Modified Attack Requirements: P). An obeyed/unstated contract
+    is the standard reachable case.
     """
-    v = (value or "").lower()
+    v = (fields.get("caller_contract", "") or "").lower()
     if "violat" in v or "misuse" in v:
-        return 0.7, "contract violated (×0.7)"
-    if flagged or _has_contract_concern(report_text):
-        return 0.7, "contract concern flagged (×0.7)"
-    return 1.0, "contract obeyed/unstated (×1.0)"
-
-
-def _controls_factor(value: str, trigger_source: str) -> tuple[float, str]:
-    """How much of the input does the caller control? Bytes is full control
-    (CVSS UI=None), length is partial, flags-only is minimal, none is the
-    weakest input-control gate."""
-    blob = ((value or "") + " | " + (trigger_source or "")).lower()
-    if "byte" in blob or "buffer" in blob or "input" in blob or "blob" in blob:
-        return 1.0, "controls bytes (×1.0)"
-    if "length" in blob or "size" in blob or "count" in blob:
-        return 0.7, "controls length (×0.7)"
-    if "flag" in blob or "option" in blob or "enum" in blob:
-        return 0.5, "controls flags (×0.5)"
-    if blob.strip() in ("", "|"):
-        return 0.4, "controls unspecified (×0.4)"
-    return 0.4, "controls limited (×0.4)"
+        return True, "caller contract violated → MAT:P"
+    if fields.get("_contract_flagged") or _has_contract_concern(fields.get("_report_text", "")):
+        return True, "triage contract concern → MAT:P"
+    return False, ""
 
 
 # Structured reach fields the harness's triage pass writes into REPORT.md.
@@ -1720,104 +1821,47 @@ def _genuine_repo_count(reach: dict) -> int:
     return len({h.get("repo", "") for h in hits})
 
 
-def reach_score(fields: dict, reach: dict) -> tuple[int, str, list[str]]:
-    """Multiplicative score: surface × callers × contract × controls.
-
-    Returns (R_total, surface_label, reasons). The surface_label is needed
-    by the caller so a hard score cap (SURFACE_SCORE_CAP) can be applied
-    for non-shipping surfaces. The reasons list captures each factor so
-    the rationale section can show how a near-zero gate (e.g. dev_tool
-    surface) collapsed the whole side.
-    """
+def classify_surface(fields: dict, reach: dict) -> tuple[str, str]:
+    """Resolve the surface tier label + reason from report fields and the
+    external-caller probe. The tier feeds severity through CVSS AV/UI and
+    Environmental metrics."""
     genuine = _genuine_repo_count(reach)
-    surface_label, surface_pts, surface_reason = _classify_surface(
+    return _classify_surface(
         fields.get("surface", ""), fields.get("boundary", ""),
         fields.get("_report_text", ""), genuine,
         _report_is_triaged(fields),
     )
-    callers_f, callers_reason = _callers_factor(reach)
-    contract_f, contract_reason = _contract_factor(
-        fields.get("caller_contract", ""), fields.get("_report_text", ""),
-        bool(fields.get("_contract_flagged")),
-    )
-    controls_f, controls_reason = _controls_factor(
-        fields.get("caller_controls", ""), fields.get("trigger_source", ""),
-    )
-    raw = surface_pts * callers_f * contract_f * controls_f
-    total = int(round(max(0.0, min(float(REACH_TOTAL_CAP), raw))))
-    reasons = [
-        f"surface={surface_label} ({surface_pts}pt — {surface_reason})",
-        f"callers: {callers_reason}",
-        contract_reason,
-        controls_reason,
-        f"= {surface_pts} × {callers_f:.2f} × {contract_f:.2f} × {controls_f:.2f} = {raw:.1f} → {total}",
-    ]
-    return total, surface_label, reasons
 
 
-# ── Confidence factor (CVSS Temporal: Report Confidence) ─────────────────
+# ── Reproduction facts ───────────────────────────────────────────────────
 #
-# Multiplies the whole score so flaky reports get derated and confirmed
-# multi-cluster reports get full credit. Returns a float in [0.5, 1.0]:
-#
-#   base 0.7
-#   + reproduction rate (5/5 → +0.20, ≥0.75 → +0.15, ≥0.4 → +0.05,
-#                        <0.4 → −0.20: a report that fails most reruns is
-#                        the CVSS RC:Unknown case and lands at the 0.5 floor)
-#   + cluster confirmation (≥3 → +0.10, =2 → +0.05) — independent testcases
-#     hitting the same signature are independent confirmations
-#   + repro/evidence artifacts on disk (+0.10, only when no repro rate)
-#   clamped to [0.5, 1.0]
-#
-# SCARINESS is deliberately NOT a confidence signal: it is ASan's impact
-# heuristic and already feeds the Impact modifiers. Report Confidence is
-# about whether the bug is real and reproducible, which scariness says
-# nothing about — counting it here double-dipped the same line.
+# Reproducer evidence feeds the standard Threat metric E. Cluster size remains
+# a verification/priority fact because CVSS v4.0 has no cluster-confirmation
+# metric.
 
 
-def _has_repro_artifacts(report_dir: Path | None) -> bool:
-    """On-disk evidence beats prose claims: a saved sanitizer log or a
-    testcase/PoC file in the bundle is direct confirmation an input
-    actually produced the crash."""
-    if report_dir is None:
-        return False
-    if any((report_dir / n).is_file() for n in ("sanitizer.txt", "asan.txt")):
-        return True
-    return any(report_dir.glob("testcase*")) or any(report_dir.glob("poc*"))
-
-
-def confidence_factor(report_text: str, fields: dict, cluster_size: int,
-                      report_dir: Path | None = None) -> tuple[float, list[str]]:
-    cf = 0.7
-    reasons: list[str] = []
-    repro = fields.get("reproduction_rate", "")
-    m = re.search(r"(\d+)\s*/\s*(\d+)", repro or "")
-    if not m:
-        m = re.search(r"\b(?:confirmed(?: result)?|repro(?:duction)?(?: rate)?|runs?)\D{0,40}(\d+)\s*/\s*(\d+)", report_text, re.IGNORECASE)
-    if m:
-        n, d = int(m.group(1)), int(m.group(2))
-        ratio = n / d if d else 0
-        if ratio >= 0.99:
-            cf += 0.20; reasons.append(f"repro {n}/{d} (+0.20)")
-        elif ratio >= 0.75:
-            cf += 0.15; reasons.append(f"repro {n}/{d} (+0.15)")
-        elif ratio >= 0.40:
-            cf += 0.05; reasons.append(f"repro {n}/{d} (+0.05)")
-        else:
-            cf -= 0.20; reasons.append(f"flaky repro {n}/{d} (−0.20)")
-    if cluster_size >= 3:
-        cf += 0.10; reasons.append(f"cluster_size={cluster_size} (+0.10)")
-    elif cluster_size == 2:
-        cf += 0.05; reasons.append(f"cluster_size={cluster_size} (+0.05)")
-    if not any(reason.startswith("repro ") or reason.startswith("flaky repro ") for reason in reasons):
-        if _has_repro_artifacts(report_dir):
-            cf += 0.10; reasons.append("repro/evidence artifacts on disk (+0.10)")
-        elif re.search(r"\b(evidence|observed output|reproducer|asan\.txt|sanitizer\.txt)\b", report_text, re.IGNORECASE):
-            cf += 0.10; reasons.append("reproducer/evidence cited (+0.10)")
-    cf = max(0.5, min(1.0, cf))
-    if not reasons:
-        reasons.append("no confirmation signals (×0.7 baseline)")
-    return cf, reasons
+def _repro_facts(report_text: str, fields: dict, cluster_size: int,
+                 report_dir: Path | None = None) -> list[str]:
+    """Human-readable reproduction/verification facts for the rationale
+    section. Descriptive only — never feeds the CVSS score."""
+    facts: list[str] = []
+    rate = _parse_repro_rate(report_text, fields)
+    if rate is not None:
+        n, d = rate
+        facts.append(f"reproduction rate {n}/{d}")
+    if cluster_size >= 2:
+        facts.append(f"cluster of {cluster_size} reports")
+    if report_dir is not None:
+        have_san = (any((report_dir / n).is_file() for n in ("sanitizer.txt", "asan.txt"))
+                    or any(report_dir.glob("*.asan.txt")))
+        have_tc = any(report_dir.glob("testcase*")) or any(report_dir.glob("poc*"))
+        if have_san and have_tc:
+            facts.append("testcase + sanitizer log on disk")
+        elif have_san:
+            facts.append("sanitizer log on disk")
+        elif have_tc:
+            facts.append("testcase on disk")
+    return facts
 
 
 # ── Report-field extraction ──────────────────────────────────────────────
@@ -1831,7 +1875,8 @@ _BARE_FIELD_RE = re.compile(
 )
 _FIELD_KEYS = {
     "surface", "trigger source", "caller contract", "caller controls",
-    "reproduction rate", "boundary", "primitive",
+    "trusted caller actions", "parameter control", "reproduction rate",
+    "boundary", "primitive", "class", "advisory",
 }
 
 
@@ -1876,9 +1921,13 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
         "trigger_source":    out.get("trigger source", ""),
         "caller_contract":   out.get("caller contract", ""),
         "caller_controls":   out.get("caller controls", ""),
+        "trusted_caller_actions": out.get("trusted caller actions", ""),
+        "parameter_control":  out.get("parameter control", ""),
         "reproduction_rate": out.get("reproduction rate", ""),
         "boundary":          out.get("boundary", ""),
         "primitive_field":   out.get("primitive", ""),
+        "class_field":       out.get("class", ""),
+        "advisory":          out.get("advisory", ""),
     }
     if report_dir is not None:
         _merge_llm_fields_sidecar(report_dir, fields)
@@ -1886,8 +1935,8 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
         # ``## Contract concern`` section is authoritative when present, but
         # the sidecar is an independent trigger so a bundle that was flagged
         # by an older triage (sidecar only) — or whose section was dropped by
-        # a later report regeneration — still receives the ×0.7 derate rather
-        # than silently scoring as if no concern existed.
+        # a later report regeneration — still derives Environmental MAT:P
+        # rather than silently scoring as if no concern existed.
         if (report_dir / ".contract-flagged").is_file():
             fields["_contract_flagged"] = "1"
     return fields
@@ -1904,7 +1953,11 @@ _LLM_FIELD_SIDECAR_KEYS = (
     ("trigger_source",  "trigger_source"),
     ("caller_contract", "caller_contract"),
     ("caller_controls", "caller_controls"),
+    ("trusted_caller_actions", "trusted_caller_actions"),
+    ("parameter_control", "parameter_control"),
     ("boundary",        "boundary"),
+    ("class",           "class_field"),
+    ("advisory",        "advisory"),
 )
 
 
@@ -1955,109 +2008,104 @@ def _detect_cluster_size(report_text: str) -> int:
     return 1
 
 
-# ── Bucketing & top-level scorer ─────────────────────────────────────────
-
-
-def bucket(score: int) -> str:
-    """Bucket boundaries calibrated as CVSS-3 proportional fractions of the
-    realistic max (Impact 46 + Reach 31 = 77, before Confidence multiplier).
-
-    CVSS v3 buckets are Critical ≥9.0, High ≥7.0, Medium ≥4.0, Low <4.0 — i.e.
-    top 10%, top 30%, top 60%, rest of the 0–10 scale. Mapped to the realistic
-    77-point max here:
-      Critical (≥70 / ~91% of max) — CVSS 9.0+ analog: network/popular-library
-                                     memory-safety with full caller control
-      High     (≥55 / ~71% of max) — CVSS 7.0+ analog: library memory-safety;
-                                     popular file-format parser corruption
-      Medium   (≥30 / ~39% of max) — CVSS 4.0+ analog: library info-disclosure;
-                                     production CLI memory-safety
-      Low      (<30)              — dev/test/maintenance tools; flaky reports;
-                                     unreached bugs
-    """
-    if score >= 70:
-        return "Critical"
-    if score >= 55:
-        return "High"
-    if score >= 30:
-        return "Medium"
-    return "Low"
+# ── Top-level scorer ─────────────────────────────────────────────────────
 
 
 def compute_severity(report_text: str, reachability: dict | None,
                      cluster_size: int = 1, report_dir: Path | None = None) -> dict:
-    """Compute the three-axis severity score for a single crash report.
+    """Score one report's severity as a CVSS v4.0 score.
 
-    Formula (CVSS-shaped hybrid):
-       I  = primitive_base + caller-controlled modifiers       additive
-       R  = surface × callers × contract × controls            multiplicative
-       CF = repro × cluster confirmation × evidence            multiplier ∈ [0.5, 1.0]
-       score = clamp(round((I + R) × CF), 0, 100)
+    Steps, each a pure mapping:
+      1. classify the crash into a primitive class (detect_primitive),
+      2. classify the surface tier (classify_surface),
+      3. derive CVSS Base/Threat/Environmental metrics (_cvss4_metrics),
+      4. score with the vendored reference scorer (lib/cvss4),
+      5. return the score with the CVSS nomenclature (B/BT/BE/BTE).
 
-    The multiplicative R is the key calibration over a purely additive
-    formula: a high-impact primitive in a non-shipping (test/maint) tool
-    correctly stays Low because the dev_tool surface tier and any near-zero
-    factor (controls=0.4, contract=0.7) compound to crash R close to zero.
+    Cluster size is returned as a descriptive verification fact and drives
+    triage priority elsewhere; CVSS v4.0 has no cluster-confirmation metric.
+
+    Returns a dict whose contract for downstream tools is: ``level`` (the
+    CVSS qualitative band) and ``score`` (the CVSS v4.0 score, a float, or
+    None when the primitive is unclassified).
     """
     fields = extract_report_fields(report_text, report_dir=report_dir)
-    # Pass the report text through to the surface classifier so it can
-    # detect dev/test paths in the narrative even when the Surface field
-    # itself doesn't say "test".
+    # Pass the report text through so the surface classifier can detect
+    # dev/test paths in the narrative even when the Surface field is unset.
     fields["_report_text"] = report_text
 
-    # Primitive: prefer the structured Primitive field if it names a known
-    # IMPACT_BASE key (LLM hybrid pass writes this). Fall back to the
-    # narrative detector. We accept *only* the exact enum key here — the
-    # detector handles human prose.
+    # Primitive: prefer a structured Primitive field that names a known class
+    # (the LLM hybrid pass writes this) when the narrative detector fell
+    # through to "unknown" or matched only a prose-regex web/recon class. A
+    # precise sanitizer-class match (ASan / UBSan / TSan) is never overridden.
     prim_key, prim_label = detect_primitive(report_text)
     primitive_field = (fields.get("primitive_field") or "").strip().lower()
-    if primitive_field in IMPACT_BASE and primitive_field != "unknown":
-        # Adopt the structured field when the narrative detector fell through
-        # to "unknown", OR when its match is a prose-regex web/recon class
-        # (_NARRATIVE_ONLY_PRIMITIVES) — a deliberate structured classification
-        # outranks a keyword guess. A precise sanitizer-class match (ASan /
-        # UBSan / TSan output) is never overridden: it is the strongest signal
-        # we have about what actually happened.
+    if primitive_field in CVSS4_CLASS and primitive_field != "unknown":
         if prim_key == "unknown" or prim_key in _NARRATIVE_ONLY_PRIMITIVES:
             prim_key = primitive_field
             prim_label = primitive_field.replace("_", " ")
-    impact_base = IMPACT_BASE[prim_key]
-    impact_mods, impact_mod_reasons = detect_impact_modifiers(report_text)
-    impact = impact_base + impact_mods
+    elif fields.get("class_field"):
+        class_key, class_label = detect_primitive(fields["class_field"])
+        if class_key in CVSS4_CLASS and (prim_key == "unknown" or prim_key in _NARRATIVE_ONLY_PRIMITIVES):
+            prim_key = class_key
+            prim_label = class_label
 
     reach_data = reachability or {"services": {}, "external_callers": 0, "vendored_copies": 0}
-    reach, surface_label, reach_reasons = reach_score(fields, reach_data)
+    surface_label, surface_reason = classify_surface(fields, reach_data)
+    concern, concern_note = _contract_concern(fields)
 
-    cf, cf_reasons = confidence_factor(report_text, fields, cluster_size,
-                                       report_dir=report_dir)
+    metrics, derivation = _cvss4_metrics(prim_key, surface_label, fields, reach_data,
+                                         concern, report_dir)
+    repro_facts = _repro_facts(report_text, fields, cluster_size, report_dir)
+    non_shipping = surface_label in NON_SHIPPING_SURFACES
 
-    raw_score = (impact + reach) * cf
-    score = max(0, min(100, int(round(raw_score))))
+    if metrics is None:
+        # Unclassified crash — no CVSS vector. Honest placeholder; downstream
+        # rank is 0 (sorts below any scored finding).
+        return {
+            "level": "Unknown",
+            "score": None,
+            "cvss": None,
+            "primitive": prim_label,
+            "primitive_key": prim_key,
+            "surface_label": surface_label,
+            "surface_reason": surface_reason,
+            "derivation": derivation,
+            "non_shipping": non_shipping,
+            "repro_facts": repro_facts,
+            "cluster_size": cluster_size,
+            "fields_used": {k: v for k, v in fields.items() if not k.startswith("_")},
+        }
 
-    # Apply non-shipping surface cap — see SURFACE_SCORE_CAP rationale.
-    surface_cap = SURFACE_SCORE_CAP.get(surface_label)
-    surface_cap_applied = False
-    if surface_cap is not None and score > surface_cap:
-        surface_cap_applied = True
-        score = surface_cap
+    base_metrics = cvss4.base_metrics(metrics)
+    base_score = cvss4.score(base_metrics)
+    base_vector = cvss4.vector(base_metrics)
+    cvss_score = cvss4.score(metrics)
+    cvss_vector = cvss4.vector(metrics)
+    cvss_rating = cvss4.rating(cvss_score)
+    cvss_name = cvss4.nomenclature(metrics)
 
     return {
-        "score": score,
-        "level": bucket(score),
+        "level": cvss_rating,
+        "score": cvss_score,
+        "cvss": {
+            "vector": cvss_vector,
+            "score": cvss_score,
+            "rating": cvss_rating,
+            "nomenclature": cvss_name,
+            "base_vector": base_vector,
+            "base_score": base_score,
+            "base_rating": cvss4.rating(base_score),
+        },
         "primitive": prim_label,
         "primitive_key": prim_key,
-        "impact": impact,
-        "impact_base": impact_base,
-        "impact_modifier_score": impact_mods,
-        "impact_modifier_reasons": impact_mod_reasons,
-        "reach": reach,
-        "reach_reasons": reach_reasons,
+        "metrics": metrics,
+        "derivation": derivation + ([concern_note] if concern_note else []),
         "surface_label": surface_label,
-        "surface_cap": surface_cap,
-        "surface_cap_applied": surface_cap_applied,
-        "confidence_factor": round(cf, 2),
-        "confidence_reasons": cf_reasons,
+        "surface_reason": surface_reason,
+        "non_shipping": non_shipping,
+        "repro_facts": repro_facts,
         "cluster_size": cluster_size,
-        "raw_score": round(raw_score, 1),
         "fields_used": {k: v for k, v in fields.items() if not k.startswith("_")},
     }
 
@@ -2389,35 +2437,29 @@ def _format_reachability_section(reach: dict) -> str:
 
 
 def _format_severity_line(sev: dict) -> str:
-    """Single-line breakdown that downstream tools parse.
+    """Single-line severity that downstream tools parse.
 
-    Shape:
-      - **Severity**: <Level> (auto: I=.. R=.. ×CF=...; primitive=...; score=N)
+    Shape (classified):
+      - **Severity**: <Level> (CVSS-BTE 4.0: <score> <rating>; <vector>; \
+primitive=<class>; surface=<tier>)
+    Shape (unclassified):
+      - **Severity**: Unknown (unclassified — no CVSS vector)
 
-    `score=N` and the level word are the contracts downstream tools rely on
-    (cluster-crashes, export-repro). The rest is human-readable rationale.
+    The leading ``<Level>`` word and the ``CVSS-* 4.0: <score>`` token are the
+    contract downstream tools rely on (cluster-crashes, export-repro,
+    render-md). The rest is human-readable rationale.
     """
-    impact_blurb = f"primitive={sev['primitive']} (base+{sev['impact_base']}"
-    if sev['impact_modifier_score']:
-        impact_blurb += f", mods+{sev['impact_modifier_score']}"
-    impact_blurb += ")"
-    impact_max = IMPACT_BASE['uaf_write'] + IMPACT_MODIFIER_CAP
-
+    cv = sev.get("cvss")
+    if cv is None:
+        return ("- **Severity**: Unknown (unclassified — no CVSS vector; "
+                f"primitive={sev['primitive']})")
     parts = [
-        f"I={sev['impact']}/{impact_max}",
-        f"R={sev['reach']}/{REACH_TOTAL_CAP}",
-        f"×CF={sev['confidence_factor']}",
-        impact_blurb,
-        f"reach[{'; '.join(sev['reach_reasons'])}]",
+        f"{cv.get('nomenclature', 'CVSS-B')} 4.0: {cv['score']} {cv['rating']}",
+        cv["vector"],
+        f"primitive={sev['primitive']}",
+        f"surface={sev['surface_label']}",
     ]
-    if sev["confidence_reasons"]:
-        parts.append(f"confidence[{', '.join(sev['confidence_reasons'])}]")
-    if sev.get("surface_cap_applied"):
-        parts.append(
-            f"non-shipping cap: {sev['surface_label']} → score capped at {sev['surface_cap']}"
-        )
-    parts.append(f"score={sev['score']}")
-    return f"- **Severity**: {sev['level']} (auto: {'; '.join(parts)})"
+    return f"- **Severity**: {sev['level']} ({'; '.join(parts)})"
 
 
 def _replace_severity_line(text: str, new_line: str, *, synthesize: bool = True) -> str:
@@ -2449,7 +2491,12 @@ def _replace_severity_line(text: str, new_line: str, *, synthesize: bool = True)
 
 
 def _format_severity_field(sev: dict) -> str:
-    return f"{sev['level']} ({sev['score']})"
+    """Fields-table cell: ``<Level> (CVSS-BTE 4.0 <score>)`` or ``Unknown`` when the
+    primitive is unclassified."""
+    if sev.get("score") is None:
+        return "Unknown"
+    name = (sev.get("cvss") or {}).get("nomenclature", "CVSS-B")
+    return f"{sev['level']} ({name} 4.0 {sev['score']})"
 
 
 def _replace_structured_field(text: str, field: str, value: str) -> tuple[str, bool]:
@@ -2509,80 +2556,74 @@ def _replace_reachability_section(text: str, new_section: str) -> str:
 
 
 def _format_severity_section(sev: dict) -> str:
-    """Render the per-axis explainer block.
+    """Render the severity explainer block.
 
-    The point of this section is transparency: a reader should be able to
-    see exactly which inputs produced the score and how the bucket was
-    chosen, without re-running the formula. Every line is computed from
-    the `sev` dict, so re-running --report regenerates it deterministically.
+    Transparency is the point: a reader sees the CVSS 4.0 vector, the score,
+    and exactly how each metric was derived from the report's fields — without
+    re-running anything. Every line is computed from `sev`, so re-running
+    --report regenerates it deterministically.
     """
-    impact_why = f"primitive={sev['primitive']}; base+{sev['impact_base']}"
-    if sev['impact_modifier_score']:
-        impact_why += (f", mods+{sev['impact_modifier_score']} ["
-                       f"{', '.join(sev['impact_modifier_reasons'])}]")
-    confidence_why = "; ".join(sev['confidence_reasons']) or "(no signal)"
-    impact_max = IMPACT_BASE['uaf_write'] + IMPACT_MODIFIER_CAP
-
     lines = [SEV_HEADING, ""]
+    cv = sev.get("cvss")
+    if cv is None:
+        lines.append(
+            f"_Severity is the **CVSS v4.0 score**. This crash is "
+            f"**unclassified** (primitive={sev['primitive']}), so no CVSS "
+            f"vector is derivable and no score is assigned. Classify the "
+            f"primitive (set a `Primitive:` field) to score it._"
+        )
+        lines.append("")
+        return "\n".join(lines) + "\n"
+
     lines.append(
-        "_How this score was computed. The formula is deterministic — the "
-        "same inputs always yield the same number. Update the report's "
-        "structured Fields (Surface, Caller contract, Caller controls, "
-        "Reproduction rate, Cluster) or re-run reachability to update the "
-        "score._"
+        "_Severity is the **CVSS v4.0 score** — one industry-standard metric, "
+        "computed by the vendored FIRST reference scorer. Base metrics come "
+        "from the primitive and surface. Threat/Environmental metrics come "
+        "from reproducibility, caller control, reachability, and local "
+        "shipping context. Cluster size remains a priority/verification fact "
+        "because CVSS v4.0 has no cluster metric._"
     )
     lines.append("")
-    lines.append("**Formula**: `score = clamp(round((I + R) × CF), 0, 100)`")
+    lines.append(f"**{cv.get('nomenclature', 'CVSS-B')} v4.0**: `{cv['vector']}` → **{cv['score']} ({cv['rating']})**")
+    lines.append(f"**CVSS-B baseline**: `{cv['base_vector']}` → **{cv['base_score']} ({cv['base_rating']})**")
     lines.append("")
-    lines.append("| Axis | Score | Why |")
-    lines.append("|:-----|------:|:----|")
-    lines.append(f"| I — impact (additive)      | {sev['impact']:>2}/{impact_max} | {impact_why} |")
-    lines.append(f"| R — reach (×)              | {sev['reach']:>2}/{REACH_TOTAL_CAP} | "
-                 f"{'<br>'.join(sev['reach_reasons'])} |")
-    lines.append(f"| CF — confidence factor (×) | ×{sev['confidence_factor']:.2f} | {confidence_why} |")
-    total_why = (f"({sev['impact']} + {sev['reach']}) × "
-                 f"{sev['confidence_factor']:.2f} = {sev['raw_score']}")
-    if sev.get("surface_cap_applied"):
-        total_why += (f" → capped at {sev['surface_cap']} "
-                      f"(non-shipping {sev['surface_label']} surface)")
-    lines.append(f"| **Total**      | **{sev['score']}** | {total_why} |")
+    lines.append("| Metric | Value | Derived from |")
+    lines.append("|:-------|:-----:|:-------------|")
+    m = sev["metrics"]
+    lines.append(f"| Attack Vector (AV)        | {m['AV']} | surface tier = `{sev['surface_label']}` |")
+    lines.append(f"| Attack Complexity (AC)    | {m['AC']} | fixed — not separately modelled |")
+    lines.append(f"| Attack Requirements (AT)  | {m['AT']} | intrinsic attack preconditions |")
+    lines.append(f"| Privileges Required (PR)  | {m['PR']} | worst case — no auth signal |")
+    lines.append(f"| User Interaction (UI)     | {m['UI']} | surface tier |")
+    lines.append(f"| Vuln Conf/Integ/Avail     | {m['VC']}/{m['VI']}/{m['VA']} | primitive class = `{sev['primitive_key']}` |")
+    lines.append(f"| Subseq Conf/Integ/Avail   | {m['SC']}/{m['SI']}/{m['SA']} | primitive class |")
+    if any(k in m for k in ("E", "CR", "IR", "AR", "MAT", "MAV", "MUI", "MVC", "MVI", "MVA", "MSC", "MSI", "MSA")):
+        lines.append(f"| Threat Exploit Maturity (E) | {m.get('E', 'X')} | reproducer / exploit evidence |")
+        lines.append(f"| Env Requirements (CR/IR/AR) | {m.get('CR', 'X')}/{m.get('IR', 'X')}/{m.get('AR', 'X')} | reachability + local use |")
+        env_attack = "/".join(m.get(k, "X") for k in ("MAV", "MAC", "MAT", "MPR", "MUI"))
+        lines.append(f"| Env Modified AV/AC/AT/PR/UI | {env_attack} | caller control / local deployment |")
+        env_impact = "/".join(m.get(k, "X") for k in ("MVC", "MVI", "MVA", "MSC", "MSI", "MSA"))
+        lines.append(f"| Env Modified C/I/A impacts | {env_impact} | local shipping context |")
     lines.append("")
-    # Bucket call-out + the full ladder so the reader sees how `level` was chosen.
-    # Thresholds are CVSS-3 proportional fractions of the realistic max
-    # (I_max 46 + R_max 31 = 77): Critical ≥ ~91%, High ≥ ~71%, Medium ≥ ~39%.
-    lines.append(f"**Bucket: {sev['level']}** — Critical ≥ 70, High ≥ 55, Medium ≥ 30, Low < 30 "
-                 f"(CVSS-3 proportional: top ~10%, ~30%, ~60%, rest of the {IMPACT_BASE['uaf_write'] + IMPACT_MODIFIER_CAP + REACH_TOTAL_CAP}-point scale).")
-    if sev.get("surface_cap_applied"):
+    lines.append(f"**Severity level: {sev['level']}** — CVSS bands: Critical ≥ 9.0, "
+                 "High ≥ 7.0, Medium ≥ 4.0, Low ≥ 0.1, None = 0.0.")
+    if sev.get("non_shipping"):
         lines.append("")
         lines.append(
-            f"> **Non-shipping surface cap applied.** This bug lives in "
-            f"`{sev['surface_label']}` code (test/maintenance/internal harness) "
-            f"that does not ship to end users. Per Microsoft Security Bug Bar "
-            f"and Project Zero practice, such bugs are not security-relevant "
-            f"unless reachable from a real input surface. The raw score "
-            f"({sev['raw_score']}) was capped at {sev['surface_cap']}."
+            f"> **Non-shipping surface represented through Environmental metrics.** This bug lives "
+            f"in `{sev['surface_label']}` code (test/maintenance/internal "
+            f"harness) that does not ship to end users, so local modified "
+            f"impact metrics reduce the CVSS-BTE score without a custom cap."
         )
+    facts = sev.get("repro_facts") or []
+    if facts:
+        lines.append("")
+        lines.append("**Verification facts** (not part of severity — triage priority): "
+                     + "; ".join(facts) + ".")
     lines.append("")
-    lines.append("**Calibration notes** (industry alignment):")
-    lines.append("")
-    # Restructured as nested lists so each axis sits as a top-level item
-    # with its calibration numbers under sub-bullets. Reads much better
-    # than a single paragraph stuffed with semicolon-separated tiers,
-    # and the nested form survives markdown→HTML rendering as
-    # `<ul><li>…<ul><li>…</li></ul></li></ul>`.
-    lines.append("- _Impact (I)_ — primitive class + caller-controlled offset/size/value. Maps to CVSS C/I/A Impact subscore.")
-    lines.append("    - **Memory-safety**: UAF/wild WRITE = 40 · heap WRITE = 32 · stack WRITE = 30 · big READ = 24 · data race = 22 · wild READ = 20 · small READ = 16 · integer overflow = 12 · null/stack-exhaustion = 8 · BUS = 5 · leak/OOM = 4–5")
-    lines.append("    - **Web/app vulns**: command-injection/RCE = 40 · deserialization = 38 · SQLi/SSTI = 36 · authn-bypass = 32 · SSRF/path-traversal/authz-bypass = 28 · XXE = 26 · IDOR = 22 · prototype-pollution = 20 · XSS = 18 · open-redirect/crypto-weakness = 14 · CSRF/ReDoS = 12")
-    lines.append("    - Modifiers cap at +6")
-    lines.append("- _Reach (R)_ — `surface × callers × contract × controls`. Maps to CVSS Attack Vector × AC × PR × UI. **Multiplicative** — any near-zero gate collapses the side.")
-    lines.append("    - **Surface tiers**: network 28 · popular library 22 · library 16 · file parser 14 · production CLI 8 · **dev/test/maintenance tool 1** · internal harness 0")
-    lines.append(f"    - **Popularity**: expressed by the surface-tier upgrade (library → library_popular at ≥{POPULAR_LIBRARY_THRESHOLD} distinct caller repos); the callers factor is a narrow secondary tilt (×0.90–×1.10) so two bugs in the same tier can still be ordered by reach without double-counting popularity")
-    lines.append("    - **Contract** (CVSS Attack Complexity analog): obeyed = ×1.0 baseline · violated or triage Contract concern = ×0.7 (we never *reward* the baseline case with a bonus)")
-    lines.append("    - **Non-shipping surfaces**: bugs in `maint/`, `tests/`, `fuzz/`, or any binary matching `*test`/`*fuzz` land in the dev_tool tier and stay Low even if their impact is high — aligns with Microsoft Bug Bar and Project Zero practice that non-shipping code is not a security-relevant input surface")
-    lines.append("- _Confidence factor (CF)_ — multiplies the whole score. Maps to CVSS Temporal Report Confidence.")
-    lines.append("    - **Baseline**: 0.7")
-    lines.append("    - **Bonuses/penalties**: +0.20 for 5/5 repro · −0.20 for flaky (<2/5) repro · +0.10 for cluster≥3 · +0.10 for repro artifacts when no rate is recorded")
-    lines.append("    - **Range** [0.5, 1.0] — flaky reports get derated to the 0.5 floor")
+    lines.append("_Field derivation (each line is a reviewable claim):_")
+    for note in sev.get("derivation", []):
+        lines.append(f"- {note}")
     return "\n".join(lines) + "\n"
 
 
@@ -2606,9 +2647,9 @@ def _strip_auto_sections(text: str) -> str:
             )
             out = pattern.sub("", out)
     # Drop any auto-generated Severity line(s) — they carry the previous
-    # run's reach reasons in their tail prose.
+    # run's reach reasons/vector in their tail prose.
     out = re.sub(
-        r"^-\s*\*\*Severity\*\*\s*:.*\(auto:.*$",
+        r"^-\s*\*\*Severity\*\*\s*:.*\((?:auto:|CVSS(?:-[A-Z]+)?\s+4\.0:).*$",
         "", out, flags=re.MULTILINE,
     )
     return out
@@ -2634,12 +2675,16 @@ def _replace_severity_section(text: str, new_section: str) -> str:
 # labels and order mirror the harness report template. Keyed by the internal
 # field name used in severity["fields_used"].
 _SURFACED_REACH_FIELDS = (
+    ("class_field",     "Class"),
     ("primitive_field", "Primitive"),
     ("surface",         "Surface"),
     ("trigger_source",  "Trigger source"),
     ("caller_contract", "Caller contract"),
     ("caller_controls", "Caller controls"),
+    ("trusted_caller_actions", "Trusted caller actions"),
+    ("parameter_control", "Parameter control"),
     ("boundary",        "Boundary"),
+    ("advisory",        "Advisory"),
 )
 
 # A field counts as already present (and is left untouched — agent-authored
@@ -2648,7 +2693,8 @@ _SURFACED_REACH_FIELDS = (
 _KNOWN_FIELD_LABELS = frozenset({
     "class", "severity", "file", "function", "line", "target",
     "primitive", "surface", "trigger source", "caller contract",
-    "caller controls", "boundary",
+    "caller controls", "trusted caller actions", "parameter control",
+    "boundary", "advisory",
 })
 
 # A `|` table is the report's Fields table only when a row carries one of these
@@ -2803,17 +2849,20 @@ def render_human(reach: dict, severity: dict | None = None) -> str:
         out.append(line)
     if severity is not None:
         out.append("")
-        out.append(f"Severity: {severity['level']} (score={severity['score']}/100)")
-        impact_max = IMPACT_BASE['uaf_write'] + IMPACT_MODIFIER_CAP
-        out.append(f"  I impact         = {severity['impact']:>2}/{impact_max}   primitive={severity['primitive']}")
-        if severity['impact_modifier_reasons']:
-            out.append(f"                        mods: {', '.join(severity['impact_modifier_reasons'])}")
-        out.append(f"  R reach          = {severity['reach']:>2}/{REACH_TOTAL_CAP}   "
-                   f"{'  '.join(severity['reach_reasons'][:3])}")
-        if len(severity['reach_reasons']) > 3:
-            out.append(f"                        {severity['reach_reasons'][-1]}")
-        out.append(f"  CF confidence    = ×{severity['confidence_factor']:.2f}   "
-                   f"{', '.join(severity['confidence_reasons']) or '(no signal)'}")
+        cv = severity.get("cvss")
+        if cv is None:
+            out.append(f"Severity: Unknown (unclassified — no CVSS vector; "
+                       f"primitive={severity['primitive']})")
+        else:
+            out.append(f"Severity: {severity['level']} "
+                       f"({cv.get('nomenclature', 'CVSS-B')} 4.0 {cv['score']} {cv['rating']})")
+            out.append(f"  vector     {cv['vector']}")
+            out.append(f"  base       {cv['base_score']} {cv['base_rating']}  {cv['base_vector']}")
+            out.append(f"  primitive  {severity['primitive']} ({severity['primitive_key']})")
+            out.append(f"  surface    {severity['surface_label']}")
+            facts = severity.get("repro_facts") or []
+            if facts:
+                out.append(f"  verification (priority, not severity): {'; '.join(facts)}")
     return "\n".join(out)
 
 

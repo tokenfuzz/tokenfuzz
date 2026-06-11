@@ -1789,7 +1789,7 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
                 "primitive": cl.get("primitive", "") or cl.get("signature", ""),
                 "severity_level": cl.get("severity_level") or "—",
                 "severity_rank": int(cl.get("severity_rank", 0) or 0),
-                "severity_score": int(cl.get("severity_score", 0) or 0),
+                "severity_score": float(cl.get("severity_score", 0) or 0),  # CVSS 4.0 score (0–10)
                 # {member: {level, rank, score}} from the cluster tool; lets a
                 # cross-condition cluster be scored per condition below.
                 "member_severity": cl.get("member_severity") or {},

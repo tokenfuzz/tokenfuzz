@@ -436,18 +436,41 @@ ok(fs.cluster_id(("auth", "src/foo.go", "Bar"))
 # The report is the source of truth for scored severity; both cluster
 # tables read it through this parser so their rows match the linked report.
 print("\nextract_severity")
-assert_eq(("Low", 1, 27), fs.extract_severity("| Severity | Low (27)       |"),
-          "Fields-table row with score")
-assert_eq(("High", 3, 58),
-          fs.extract_severity("- **Severity**: High (auto: I=40 (+6) R=18; score=58)"),
-          "bare auto-line: score read past a parenthesised token")
-assert_eq(("Medium", 2, 0), fs.extract_severity("| Severity | Medium |"),
+assert_eq(("Low", 1, 3.1), fs.extract_severity("| Severity | Low (CVSS-BTE 4.0 3.1) |"),
+          "Fields-table row with CVSS-BTE 4.0 score")
+assert_eq(("High", 3, 8.7),
+          fs.extract_severity("- **Severity**: High (CVSS-BTE 4.0: 8.7 High; "
+                              "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N; primitive=x)"),
+          "bare line: CVSS score read past the vector's own tokens")
+assert_eq(("Low", 1, 1.9),
+          fs.extract_severity("- **Severity**: Low (CVSS-BTE 4.0: 1.9 Low; "
+                              "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P/CR:L/IR:L/AR:L/MVC:L/MVI:L/MVA:L; primitive=x)"),
+          "CVSS-BTE line parsed with Environmental score")
+assert_eq(("Medium", 2, 0.0), fs.extract_severity("| Severity | Medium |"),
           "Fields-table row without a score")
-assert_eq(("—", 0, 0), fs.extract_severity("no severity recorded yet"),
+assert_eq(("Unknown", 0, 0.0),
+          fs.extract_severity("- **Severity**: Unknown (unclassified — no CVSS vector)"),
+          "unclassified crash → Unknown, no score")
+assert_eq(("—", 0, 0.0), fs.extract_severity("no severity recorded yet"),
           "unscored report → em-dash sentinel")
-both = "| Severity | Low (27) |\n- **Severity**: Critical (auto: score=82)"
+both = ("| Severity | Low (CVSS-BTE 4.0 3.1) |\n"
+        "- **Severity**: Critical (CVSS-BTE 4.0: 9.3 Critical; primitive=x)")
 ok(fs.extract_severity(both)[0] == "Critical",
-   "bare auto-line preferred over Fields row")
+   "bare line preferred over Fields row")
+# Level "None" is the CVSS band for a scored 0.0 (e.g. internal-surface
+# code whose modified impacts are all N) — parsed, rank 0.
+assert_eq(("None", 0, 0.0),
+          fs.extract_severity("- **Severity**: None (CVSS-BTE 4.0: 0.0 None; "
+                              "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P/CR:L/IR:L/AR:L/MVC:N/MVI:N/MVA:N; primitive=x)"),
+          "scored-0.0 band: bare None line parsed")
+assert_eq(("None", 0, 0.0), fs.extract_severity("| Severity | None (CVSS-BTE 4.0 0.0) |"),
+          "scored-0.0 band: Fields-table None row parsed")
+# A hand-written line carrying only the vector must not misread the
+# vector's own "4.0" as a score.
+assert_eq(("High", 3, 0.0),
+          fs.extract_severity("- **Severity**: High (CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/"
+                              "VC:H/VI:H/VA:H/SC:N/SI:N/SA:N)"),
+          "vector-only line: no score scraped from the vector version")
 
 
 print()

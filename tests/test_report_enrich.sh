@@ -53,7 +53,7 @@ parse_header reads buf[len-1] without enforcing len > 0, producing a 1-byte
 heap read past the end of small inputs.
 
 ## Classification
-- **Severity**: High (auto: I=24/46; R=6/31; ×CF=0.8; primitive=heap-read)
+- **Severity**: High (CVSS-BTE 4.0: 8.1 High; CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:H/VI:N/VA:L/SC:N/SI:N/SA:N/E:P/CR:M/IR:M/AR:M; primitive=heap READ; surface=library)
 - **Type**: Bounds Issue
 - **Location**: lib/parser.c:9
 - **Confidence**: High
@@ -421,6 +421,23 @@ then
   pass "fence-aware H1 insertion: enrichment never lands inside a code fence"
 else
   fail "fence-aware H1 insertion" "block landed inside a fence or under a fenced comment"
+fi
+
+# The CVSS band "None" (scored 0.0, e.g. internal-surface code) gets a badge
+# like every other generated level — it is a real level, not a missing one.
+if python3 - "$SCRIPT_ROOT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/lib")
+import report_enrich as m
+
+badge = m._build_severity_badge(
+    "- **Severity**: None (CVSS-BTE 4.0: 0.0 None; primitive=x)")
+assert badge == "⚪ **Severity: None**", f"unexpected badge: {badge!r}"
+PY
+then
+  pass "severity badge: scored-0.0 band None gets a neutral badge"
+else
+  fail "severity badge: scored-0.0 band None" "no badge built for level None"
 fi
 
 summary

@@ -97,7 +97,7 @@ Boundary: xmlcatalog --shell stdin
 Trigger source: bytes
 
 ## Classification
-- **Severity**: Low (auto: score=10)
+- **Severity**: Low (CVSS-BTE 4.0: 3.3 Low; primitive=x)
 
 Target: xmlcatalog.c:usershell:${target_line}
 
@@ -131,17 +131,18 @@ EOF
 # whose max severity is High (61); B1's cluster is Medium (33); C1's
 # cluster is Low (15). After sorting, the High cluster must come first.
 inject_severity() {
-  local id="$1" level="$2" score="$3"
+  local id="$1" level="$2" score="$3"  # score = current CVSS v4.0 score (0–10)
   local f="$RESULTS_DIR/crashes/$id/REPORT.md"
-  printf '\n## Classification\n- **Severity**: %s (auto: score=%s)\n' "$level" "$score" >> "$f"
+  printf '\n## Classification\n- **Severity**: %s (CVSS-BTE 4.0: %s %s; primitive=x)\n' \
+    "$level" "$score" "$level" >> "$f"
 }
-inject_severity CRASH-A1-1 High     61
-inject_severity CRASH-A2-1 Medium   33
-inject_severity CRASH-B1-1 Medium   33
-inject_severity CRASH-C1-1 Low      15
-inject_severity CRASH-D1-1 Low      11
-inject_severity CRASH-E1-1 Low      10
-inject_severity CRASH-F1-1 Low      10
+inject_severity CRASH-A1-1 High     8.7
+inject_severity CRASH-A2-1 Medium   6.5
+inject_severity CRASH-B1-1 Medium   6.5
+inject_severity CRASH-C1-1 Low      3.3
+inject_severity CRASH-D1-1 Low      1.1
+inject_severity CRASH-E1-1 Low      1.0
+inject_severity CRASH-F1-1 Low      1.0
 
 # ── Run cluster-crashes ────────────────────────────────────────
 out=$(python3 "$CLUSTER" "$RESULTS_DIR" 2>&1) || \
@@ -214,17 +215,17 @@ assert_file_contains "$RESULTS_DIR/crashes/CRASH-E1-1/REPORT.md" '\| Dedup frame
 # CRASH-CLUSTERS.md must list rows by severity descending. The High cluster
 # (CRASH-A1-1 + CRASH-A2-1) appears before the Medium cluster (CRASH-B1-1)
 # which appears before the Low cluster (CRASH-C1-1). Each non-zero
-# score is rendered alongside the level, e.g. "High (61)".
+# score is rendered alongside the level, e.g. "High (CVSS 8.7)".
 assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| Severity ' "Severity column present"
-assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| High \(61\) ' \
-  "High cell shows score (61)"
-assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| Medium \(33\) ' \
-  "Medium cell shows score (33)"
-assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| Low \(15\) ' \
-  "Low cell shows score (15)"
-high_line=$(grep -nE '\| High \(61\) ' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | head -1 | cut -d: -f1)
-med_line=$(grep -nE '\| Medium \(33\) .*CRASH-B1-1' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | head -1 | cut -d: -f1)
-low_line=$(grep -nE '\| Low \(15\) ' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | head -1 | cut -d: -f1)
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| High \(CVSS 8.7\) ' \
+  "High cell shows CVSS score (8.7)"
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| Medium \(CVSS 6.5\) ' \
+  "Medium cell shows CVSS score (6.5)"
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| Low \(CVSS 3.3\) ' \
+  "Low cell shows CVSS score (3.3)"
+high_line=$(grep -nE '\| High \(CVSS 8.7\) ' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | head -1 | cut -d: -f1)
+med_line=$(grep -nE '\| Medium \(CVSS 6.5\) .*CRASH-B1-1' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | head -1 | cut -d: -f1)
+low_line=$(grep -nE '\| Low \(CVSS 3.3\) ' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | head -1 | cut -d: -f1)
 [ -n "$high_line" ] && [ -n "$med_line" ] && [ -n "$low_line" ] \
   && [ "$high_line" -lt "$med_line" ] && [ "$med_line" -lt "$low_line" ] \
   && pass "CRASH-CLUSTERS.md sorted High → Medium → Low" \
@@ -237,7 +238,7 @@ low_line=$(grep -nE '\| Low \(15\) ' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | 
 # severity descending (A1 before A2), mirroring bin/cluster-findings.
 assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| Canonical ' \
   "Canonical column present in CRASH-CLUSTERS.md"
-a_row=$(grep -E '\| High \(61\) ' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | head -1)
+a_row=$(grep -E '\| High \(CVSS 8.7\) ' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" | head -1)
 # Canonical column cell links to A1, and the Members cell bolds A1 then lists A2.
 echo "$a_row" | grep -qE '\| \[CRASH-A1-1\]\(CRASH-A1-1/REPORT\.md\) \| \*\*\[CRASH-A1-1\]\(CRASH-A1-1/REPORT\.md\)\*\*, \[CRASH-A2-1\]' \
   && pass "Canonical=A1; Members bold A1 first, then A2 (severity descending)" \
@@ -265,18 +266,18 @@ EOF
 Trigger source: bytes
 
 ## Classification
-- **Severity**: ${level} (auto: score=${score})
+- **Severity**: ${level} (CVSS-BTE 4.0: ${score} ${level}; primitive=x)
 EOF
 }
 # CRASH-AAA sorts before CRASH-ZZZ but is the LOWER severity.
-mk_sev_crash CRASH-AAA-1 unique_low  Low  12
-mk_sev_crash CRASH-ZZZ-1 unique_high High 70
+mk_sev_crash CRASH-AAA-1 unique_low  Low  1.2
+mk_sev_crash CRASH-ZZZ-1 unique_high High 8.7
 python3 "$CLUSTER" "$sev_root" >/dev/null 2>&1 \
   || fail "canonical-by-severity: cluster-crashes runs cleanly" "exit nonzero"
 aaa_cluster=$(grep -m1 -E '^Cluster: CL-' "$sev_root/crashes/CRASH-AAA-1/REPORT.md" | sed -E 's/^Cluster: (CL-[0-9a-f]+).*/\1/')
 zzz_cluster=$(grep -m1 -E '^Cluster: CL-' "$sev_root/crashes/CRASH-ZZZ-1/REPORT.md" | sed -E 's/^Cluster: (CL-[0-9a-f]+).*/\1/')
 assert_eq "$aaa_cluster" "$zzz_cluster" "canonical-by-severity: AAA and ZZZ share a cluster"
-sev_row=$(grep -E '\| High \(70\) ' "$sev_root/crashes/CRASH-CLUSTERS.md" | head -1)
+sev_row=$(grep -E '\| High \(CVSS 8.7\) ' "$sev_root/crashes/CRASH-CLUSTERS.md" | head -1)
 echo "$sev_row" | grep -qE '\| \[CRASH-ZZZ-1\]\(CRASH-ZZZ-1/REPORT\.md\) \| \*\*\[CRASH-ZZZ-1\]' \
   && pass "canonical-by-severity: High ZZZ is canonical despite higher id, listed first" \
   || fail "canonical-by-severity: High ZZZ is canonical despite higher id" \
@@ -496,10 +497,10 @@ EOF
 cat > "$sevtbl_root/crashes/CRASH-TBLONLY/REPORT.md" <<'EOF'
 # CRASH-TBLONLY
 
-| Field    | Value    |
-| :------- | :------- |
-| Severity | Low (24) |
-| Surface  | maint-tool |
+| Field    | Value          |
+| :------- | :------------- |
+| Severity | Low (CVSS-BTE 4.0 3.3) |
+| Surface  | maint-tool     |
 
 Trigger source: bytes
 
@@ -508,12 +509,12 @@ A model-direct-style freeform report carrying severity only in the table.
 EOF
 python3 "$CLUSTER" "$sevtbl_root" >/dev/null 2>&1 \
   || fail "severity-table: cluster-crashes runs cleanly" "exit nonzero"
-assert_file_contains "$sevtbl_root/crashes/CRASH-CLUSTERS.md" '\| Low \(24\) ' \
-  "Fields-table severity 'Low (24)' is parsed (not rendered as unscored)"
-# The leftmost (Severity) cell of the CRASH-TBLONLY row must be Low (24),
+assert_file_contains "$sevtbl_root/crashes/CRASH-CLUSTERS.md" '\| Low \(CVSS 3.3\) ' \
+  "Fields-table severity 'Low (CVSS-BTE 4.0 3.3)' is parsed (not rendered as unscored)"
+# The leftmost (Severity) cell of the CRASH-TBLONLY row must be Low (CVSS 3.3),
 # never an unscored '—'. Grab the row and check its first data cell.
 tbl_row=$(grep -E 'CRASH-TBLONLY' "$sevtbl_root/crashes/CRASH-CLUSTERS.md" | head -1)
-echo "$tbl_row" | grep -qE '^\|\s*Low \(24\) ' \
+echo "$tbl_row" | grep -qE '^\|\s*Low \(CVSS 3.3\) ' \
   && pass "Fields-table-only severity scores the row Low (not unscored —)" \
   || fail "Fields-table-only severity scores the row Low" "row: $tbl_row"
 

@@ -169,7 +169,7 @@ def _signature(find_dir: Path, target_root: str) -> dict:
     if not text:
         sig["kind"] = "missing"
         sig["key"] = (sig["class"], "", find_dir.name)
-    # Severity comes from the REPORT — the deterministic (I+R)×CF score that
+    # Severity comes from the REPORT — the CVSS v4.0 score that
     # bin/reachability writes and --regenerate refreshes — so the cluster
     # table always agrees with the report it links to. The find-quality
     # cache's coarse severity is only a fallback for a report that has not

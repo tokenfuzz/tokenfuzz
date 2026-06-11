@@ -253,9 +253,9 @@ out=$(python3 "$REACH" --report "$CRASH_DIR" --json 2>&1) || \
 # reachability.json should be written.
 assert_file_exists "$CRASH_DIR/reachability.json" "reachability.json written"
 # Severity line should be rewritten to High or Critical (write + attacker-ctrl).
-assert_file_contains "$CRASH_DIR/report.md" "^- \*\*Severity\*\*: (Critical|High|Medium|Low) \(auto:" "Severity line rewritten with auto:"
+assert_file_contains "$CRASH_DIR/report.md" "^- \*\*Severity\*\*: (Critical|High|Medium|Low|None) \(CVSS(-[A-Z]+)? 4\\.0:" "Severity line rewritten with CVSS v4.0"
 assert_file_not_contains "$CRASH_DIR/report.md" '^\| Severity \| Low \(12\)' "structured Severity field is no longer stale"
-assert_file_contains "$CRASH_DIR/report.md" '^\| Severity \| (Critical|High|Medium|Low) \([0-9]+\)' "structured Severity field rewritten"
+assert_file_contains "$CRASH_DIR/report.md" '^\| Severity \| (Critical|High|Medium|Low|None) \(CVSS(-[A-Z]+)? 4\.0 [0-9.]+\)' "structured Severity field rewritten"
 # Reachability section should be present.
 assert_file_contains "$CRASH_DIR/report.md" "^## Reachability — external callers" "auto Reachability section added"
 # Original narrative section is preserved (idempotent placement under it).
@@ -271,7 +271,7 @@ cp "$CRASH_DIR/report.md" "$UPPER_CRASH_DIR/REPORT.md"
 out=$(python3 "$REACH" --report "$UPPER_CRASH_DIR" --json --no-cache 2>&1) || \
   fail "$_CURRENT_TEST" "REPORT.md mode failed: $out"
 assert_file_exists "$UPPER_CRASH_DIR/reachability.json" "reachability.json written for REPORT.md"
-assert_file_contains "$UPPER_CRASH_DIR/REPORT.md" "^- \*\*Severity\*\*: (Critical|High|Medium|Low) \(auto:" \
+assert_file_contains "$UPPER_CRASH_DIR/REPORT.md" "^- \*\*Severity\*\*: (Critical|High|Medium|Low|None) \(CVSS(-[A-Z]+)? 4\\.0:" \
   "REPORT.md Severity line rewritten"
 
 # ───────────────────────────────────────────────────────────────────
@@ -559,7 +559,7 @@ mkdir -p "$CPPSTATE_DIR"
 cat > "$CPPSTATE_DIR/report.md" <<'EOF'
 # CRASH-CPP-STATE: heap overflow in sampledb
 ## Classification
-- **Severity**: Medium (auto: I=32/46; R=8/31; reach[surface=cli_production callers=154])
+- **Severity**: Medium (CVSS-BTE 4.0: 5.3 Medium; primitive=heap WRITE; surface=cli_production)
 ## Data Flow
 - step2: apply_line dispatches blob, calls `decode_hex(fields[2])` and `parse_id(fields[1])`
 - step4: assign computes `frame_capacity(bytes.size())` truncated to uint16_t
@@ -1217,10 +1217,9 @@ from importlib.machinery import SourceFileLoader
 _loader = SourceFileLoader("reachability", sys.argv[1])
 mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("reachability", _loader))
 _loader.exec_module(mod)
-lbl, pts, _ = mod._classify_surface("", "", "narrative text", 500, report_triaged=False)
+lbl, _ = mod._classify_surface("", "", "narrative text", 500, report_triaged=False)
 assert lbl == "unknown", f"un-triaged should stay unknown, got {lbl!r}"
-assert pts == mod.SURFACE_POINTS["unknown"], pts
-lbl2, _, _ = mod._classify_surface("", "", "narrative text", 500, report_triaged=True)
+lbl2, _ = mod._classify_surface("", "", "narrative text", 500, report_triaged=True)
 assert lbl2 == "library_popular", f"triaged + many callers should rescue, got {lbl2!r}"
 PY
 then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "classification gate wrong"; fi
@@ -1242,7 +1241,13 @@ assert mod._report_is_triaged({}) is False
 PY
 then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "triage detection wrong"; fi
 
-_CURRENT_TEST="popularity-rescue gate: un-triaged UAF report scores Low (not Medium)"
+# Under CVSS-as-severity, an un-triaged UAF is still scored by its CVSS class
+# (a use-after-free is a severe class) — the popularity rescue is suppressed so
+# the surface stays `unknown` (it is NOT promoted to library_popular on caller
+# count alone), but the un-triaged-ness no longer *suppresses* the severity.
+# Reachability/popularity uncertainty is a priority concern reported separately,
+# not a severity reducer. The caller count must not flip the surface tier.
+_CURRENT_TEST="popularity-rescue gate: un-triaged report's surface stays unknown (not promoted)"
 if run_gate_py <<'PY' 2>/dev/null
 import importlib.util, sys
 from importlib.machinery import SourceFileLoader
@@ -1252,10 +1257,12 @@ _loader.exec_module(mod)
 reach = {"services": {"sourcegraph": {"status": "ok"}},
          "external_callers": 500, "vendored_copies": 0}
 sev = mod.compute_severity(sys.argv[2], reach, cluster_size=17)
+# Caller count does NOT promote an un-triaged report's surface.
 assert sev["surface_label"] == "unknown", sev["surface_label"]
-assert sev["level"] == "Low", f"un-triaged UAF must be Low, got {sev['level']} ({sev['score']})"
+# Severity is the CVSS class score — a UAF is High/Critical, not artificially Low.
+assert sev["level"] in ("High", "Critical"), f"UAF should score by class, got {sev['level']} ({sev['score']})"
 PY
-then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "un-triaged crash over-scored"; fi
+then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "un-triaged surface promotion or scoring wrong"; fi
 
 _CURRENT_TEST="popularity-rescue gate: triaged library-api UAF report still scores Medium+"
 if run_gate_py <<'PY' 2>/dev/null

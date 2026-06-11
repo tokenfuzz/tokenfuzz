@@ -76,9 +76,9 @@ Most operators arrive on this page because something landed in
 `Trigger source` falls outside the target's `attacker_controls` (for example a
 `call-sequence`, `env`, or `race` trigger on a bytes-only target) is **not**
 moved to `crashes-rejected/`. Triage keeps it in `crashes/`, adds a
-`## Contract concern` block, and the reachability scorer applies a ×0.7 severity
-multiplier so it ranks below in-scope crashes. It still counts as an accepted
-crash — it is scored as robustness rather than security. Agents file the
+`## Contract concern` block, and the scorer sets CVSS **MAT:P** (Modified
+Attack Requirements: present) so it ranks below in-scope crashes in the
+CVSS-BTE score. It still counts as an accepted crash. Agents file the
 reproducible crash; triage scores the threat-model fit.
 
 Before filing a similar crash, check:
@@ -159,8 +159,8 @@ Notes:
 - `Trigger source` is compared against `attacker_controls` to set
   *severity*, not to decide filing: a trigger fully within
   `attacker_controls` scores as security; one with a component outside it
-  stays in `crashes/` but is downgraded to robustness (contract concern,
-  ×0.7). It is not moved out of `crashes/` on this basis.
+  stays in `crashes/` but is flagged with a contract concern (CVSS
+  MAT:P), lowering the CVSS-BTE score. It is not moved out of `crashes/` on this basis.
 - `Parameter control` is especially important for C harnesses. It
   tells triage whether a value is externally controlled or only
   invented by the harness.
@@ -180,7 +180,7 @@ illustration.)
 | Field                 | Value |
 |:----------------------|:------|
 | Primitive             | heap-buffer-overflow READ of size 4 |
-| Severity              | High |
+| Severity              | Medium (CVSS-BTE 4.0 5.5) |
 | Surface               | library-api (C harness calls app_read_memory) |
 | Trigger source        | bytes |
 | Caller contract       | obeyed |
@@ -201,7 +201,7 @@ Boundary: Untrusted document bytes parsed by the library.
 Caller controls: Document contents and length.
 Parameter control: direct
 Strategy: S7
-- **Severity**: High (auto: I=34 R=27 C=0.95)
+- **Severity**: Medium (CVSS-BTE 4.0: 5.5 Medium; CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:L/SC:N/SI:N/SA:N/E:P/CR:M/IR:M/AR:M; primitive=heap READ of 4 byte(s); surface=library)
 
 Out-of-bounds 4-byte read in `app_next_char` reached from
 `app_parse_char_ref` while consuming a malformed numeric character
@@ -237,6 +237,23 @@ Notes on the fields:
   duplicate detection.
 - The auto-Severity bullet (`- **Severity**: …`) is rewritten by
   `bin/reachability` on every triage pass; hand-edits there are lost.
+- Severity is the **CVSS v4.0 score** — one industry-standard
+  metric, computed by the vendored FIRST reference scorer. The bullet
+  and the Fields-table `Severity` row carry the level plus the score
+  (`Medium (CVSS-BTE 4.0 5.5)`); the generated `## Severity rationale` section
+  shows the full vector and how each metric was derived from the
+  report's classification and Fields.
+- The CVSS vector is derived mechanically: **AV/UI** from the surface
+  tier; **VC/VI/VA/SC/SI/SA** from the primitive class; **E** from
+  reproducer/exploit evidence; **CR/IR/AR** from local reach and usage;
+  **MAT** from caller-control or contract concerns. **PR:N** is the
+  worst-case default because the harness has no auth signal. Review
+  those assumptions against the real deployment before filing an
+  advisory — each derivation line is a reviewable claim.
+- **Non-shipping code** (test/maintenance/internal harness) is represented
+  with Environmental modified impact metrics rather than a custom cap.
+- Cluster size has no CVSS v4.0 metric. It is reported as a verification
+  fact and used for triage priority separately.
 
 ## Finding requirements
 
@@ -266,7 +283,7 @@ A typical non-crashing FIND `report.md` looks like:
 | Field          | Value                                                  |
 |:---------------|:-------------------------------------------------------|
 | Class          | logic / authorization bypass                           |
-| Severity       | Medium                                                 |
+| Severity       | Medium (CVSS-BTE 4.0 4.5)                               |
 | Surface        | library-api                                            |
 | Location       | src/policy.c:check_acl:142                             |
 | Caller control | request bytes                                          |

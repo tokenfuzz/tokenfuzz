@@ -2,7 +2,7 @@
 # Tests for recon-related additions:
 #   - NOVOCAB markers (lib/vocab.sh)
 #   - patch-card boost / version-only filter (lib/workqueue.py)
-#   - new IMPACT_BASE primitives (bin/reachability)
+#   - recon primitive classes are CVSS-classified (bin/reachability)
 #   - recon_slicer.py basic invocation
 #   - triage_validate.sh class routing
 set -euo pipefail
@@ -203,19 +203,27 @@ k3, _ = mod.detect_primitive("DNS0x20 security feature defeated by cache normali
 print("P1", k1)
 print("P2", k2)
 print("P3", k3)
-print("B1", mod.IMPACT_BASE.get("protocol_state", 0))
-print("B2", mod.IMPACT_BASE.get("dos_amplification", 0))
-print("B3", mod.IMPACT_BASE.get("logic_regression", 0))
-print("B4", mod.IMPACT_BASE.get("info_leak", 0))
+# Each recon class must be CVSS-classified (not collapse to the unscored
+# "unknown" band): _cvss4_metrics returns a metrics dict, and the class scores
+# a non-zero CVSS v4.0 value at a library surface.
+def cvss(key):
+    m, _ = mod._cvss4_metrics(key, "library", {}, {}, False)
+    return int(mod.cvss4.score(m)) if m else 0   # floored for integer compare
+print("B1", cvss("protocol_state"))
+print("B2", cvss("dos_amplification"))
+print("B3", cvss("logic_regression"))
+print("B4", cvss("info_leak"))
 PY
 )
 verify P1 protocol_state
 verify P2 dos_amplification
 verify P3 logic_regression
-verify_ge B1 15
-verify_ge B2 12
-verify_ge B3 10
-verify_ge B4 18
+# CVSS v4.0 scores at a library surface — each well above zero (classified,
+# not the unscored "unknown" band).
+verify_ge B1 5
+verify_ge B2 4
+verify_ge B3 2
+verify_ge B4 5
 
 # ── T1-5: slicer produces non-overlapping coverage ─────────────────────
 fake_target=$(mktemp -d)

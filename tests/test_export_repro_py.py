@@ -861,6 +861,39 @@ assert_eq("obeyed",
           er.read_bare_field(mixed_report, "Caller contract"),
           "read_bare_field: bare label wins over table when both present")
 
+with tempfile.TemporaryDirectory() as td:
+    sev_report = Path(td) / "REPORT.md"
+    sev_report.write_text(
+        "- **Severity**: High (CVSS-BTE 4.0: 8.7 High; "
+        "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N; primitive=x)\n",
+        encoding="utf-8",
+    )
+    assert_eq("High (CVSS-BTE 4.0 8.7)",
+              er.read_severity_from(sev_report),
+              "read_severity_from: preserves CVSS-BTE 4.0 score token")
+
+    vector_only = Path(td) / "VECTOR_ONLY.md"
+    vector_only.write_text(
+        "- **Severity**: High (CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N)\n",
+        encoding="utf-8",
+    )
+    assert_eq("High",
+              er.read_severity_from(vector_only),
+              "read_severity_from: does not treat vector version as score")
+
+    # "None" is the CVSS band for a scored 0.0 (internal-surface code whose
+    # modified impacts are all N) — a real level, not a missing one.
+    none_report = Path(td) / "NONE_LEVEL.md"
+    none_report.write_text(
+        "- **Severity**: None (CVSS-BTE 4.0: 0.0 None; "
+        "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+        "/E:P/CR:L/IR:L/AR:L/MVC:N/MVI:N/MVA:N; primitive=x)\n",
+        encoding="utf-8",
+    )
+    assert_eq("None (CVSS-BTE 4.0 0.0)",
+              er.read_severity_from(none_report),
+              "read_severity_from: scored-0.0 band None parsed")
+
 # 5d. strip_audit_sections drops the agent's `## Fields` heading + table.
 table_strip_input = """\
 # CRASH-T-1

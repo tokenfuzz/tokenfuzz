@@ -341,10 +341,10 @@ _expand_trigger_components() {
 #                  component outside attacker_controls. The crash dir
 #                  STAYS in crashes/ with a `.contract-flagged`
 #                  sidecar and a "## Contract concern" report block.
-#                  The downstream reachability scorer applies a ×0.7
-#                  multiplier when it sees the report-visible
+#                  The downstream reachability scorer derives CVSS-BTE
+#                  Environmental MAT:P when it sees the report-visible
 #                  "## Contract concern" section, so contract-flagged
-#                  crashes are automatically deprioritized in Severity
+#                  crashes are automatically represented in Severity
 #                  without being lost from the crashes/ count.
 #                  crashes-rejected/ is reserved for non-security
 #                  classes (OOM, panic, null-deref, MOZ_CRASH,
@@ -917,8 +917,8 @@ crash_dir_static_legitimacy_rejection_reason() {
   # are returned with a `contract-flag:` prefix. triage_crash_dirs
   # then annotates the dir in place (.contract-flagged sidecar +
   # report block) and KEEPS it in crashes/. The downstream reachability
-  # scorer applies a ×0.7 multiplier when the report carries the
-  # "## Contract concern" section, so these are automatically rated
+  # scorer derives CVSS-BTE Environmental MAT:P when the report carries
+  # the "## Contract concern" section, so these are automatically rated
   # lower in Severity. crashes-rejected/ stays reserved for non-security
   # classes (OOM, panic, null-deref, stack-overflow, no sanitizer
   # signal, threat-boundary failures, incomplete-bundle TTL).
@@ -1477,9 +1477,9 @@ _triage_annotate_rejection_report() {
 
 # Annotate a crash dir IN PLACE for contract concerns. The dir stays
 # in crashes/; the existing reachability scorer rates it lower when it
-# sees the report-visible "## Contract concern" section (×0.7 severity
-# multiplier in bin/reachability — see test_severity.sh), so the
-# downstream score reflects the contract concern without losing the
+# sees the report-visible "## Contract concern" section by deriving
+# CVSS-BTE Environmental MAT:P, so the downstream score reflects the
+# contract concern without losing the
 # crash from the count. Used by triage_crash_dirs step 4 when the static
 # gate or verdict matrix returns a `contract-flag:` reason.
 #
@@ -1500,7 +1500,7 @@ _triage_annotate_contract_concern() {
     echo "# Contract-flagged by triage_crash_dirs"
     echo "# Reason: $reason"
     echo "# When: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "# Action: dir stays in crashes/. Reachability scorer applies a ×0.7 multiplier when REPORT.md carries the Contract concern section, so Severity is automatically deprioritized without losing the crash from the count. Promote back to full severity only if the cited concern is independently disproven."
+    echo "# Action: dir stays in crashes/. Reachability scorer derives CVSS-BTE Environmental MAT:P when REPORT.md carries the Contract concern section, so Severity is automatically adjusted without losing the crash from the count. Promote back to full severity only if the cited concern is independently disproven."
   } >> "$d/.contract-flagged" 2>/dev/null || true
 
   [ -n "$report" ] || return 0
@@ -1513,7 +1513,7 @@ _triage_annotate_contract_concern() {
       print ""
       print "Triage kept this crash in `crashes/` and flagged a contract concern: " reason "."
       print ""
-      print "The sanitizer diagnostic is real. The downstream reachability scorer rates contract-flagged crashes lower automatically (×0.7 multiplier from this Contract concern section). Promote to a higher Severity only if the concern is independently disproven — e.g. the cited contract is undocumented or inferred, or the reach path does not actually require the prohibited caller action."
+      print "The sanitizer diagnostic is real. The downstream reachability scorer rates contract-flagged crashes with CVSS-BTE Environmental MAT:P from this Contract concern section. Promote to a higher Severity only if the concern is independently disproven — e.g. the cited contract is undocumented or inferred, or the reach path does not actually require the prohibited caller action."
       print ""
     }
     BEGIN { inserted=0; skip=0 }
@@ -1552,8 +1552,8 @@ _triage_annotate_contract_concern() {
 # report — so the gate sees an incomplete report, defaults the trigger to the
 # attacker-controlled boundary, and promotes. Nothing recomputes it afterward,
 # so a crash the deterministic gate *would* flag can reach the scorer unflagged
-# (two clustered copies of one bug then score differently: one flagged → ×0.7,
-# its twin un-flagged → full severity). Re-running the gate here, after fields
+# (two clustered copies of one bug then score differently: one flagged → MAT:P,
+# its twin un-flagged → MAT:X). Re-running the gate here, after fields
 # are final and before scoring, closes that gap.
 #
 # Additive only: applies a missing flag when the gate says contract-flag; it
@@ -2093,9 +2093,9 @@ triage_crash_dirs() {
     #     callback-releases-active regex, private/internal include
     #     regex): annotate IN PLACE with a .contract-flagged sidecar
     #     + "## Contract concern" report block and KEEP in crashes/.
-    #     The downstream reachability scorer applies a ×0.7 multiplier
-    #     when it sees the report-visible Contract concern section (see
-    #     test_severity.sh), so these are automatically deprioritized in
+    #     The downstream reachability scorer derives CVSS-BTE Environmental
+    #     MAT:P when it sees the report-visible Contract concern section
+    #     (see test_severity.sh), so these are automatically represented in
     #     Severity without being lost from the crashes/ count or the
     #     reachability/scoring pipeline.
     #   - demote-to-findings: existing path, routed through
@@ -2108,7 +2108,7 @@ triage_crash_dirs() {
         contract-flag:*)
           local flag_reason="${security_reject_reason#contract-flag: }"
           _triage_annotate_contract_concern "$d" "$id" "$flag_reason"
-          audit_log "CONTRACT-FLAG: crashes/${id} kept in crashes/ with contract-concern annotation — ${flag_reason}. Reachability scorer will rate this lower (×0.7 multiplier from the Contract concern section)." | tee -a "$INDEX"
+          audit_log "CONTRACT-FLAG: crashes/${id} kept in crashes/ with contract-concern annotation — ${flag_reason}. Reachability scorer will rate this with CVSS-BTE Environmental MAT:P from the Contract concern section." | tee -a "$INDEX"
           ;;
         *)
           if [ ! -f "$d/.autodiscard" ]; then

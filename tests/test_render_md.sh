@@ -87,12 +87,13 @@ sev_fix="$TEST_TMPDIR/sev.md"
 cat > "$sev_fix" <<'EOF'
 # Sample
 
-| Severity      | Cluster        | Surface     | Note |
-|:--------------|:---------------|:------------|:-----|
-| Critical (68) | `CL-abc12345`  | library-api — pcre2_match | [link](other.md) |
-| High          | `CL-def67890`  | cli         | x |
-| Medium (33)   | `CL-feedface`  | maint-tool  | y |
-| Low           | `CL-cafebabe`  | unknown     | z |
+| Severity           | Cluster        | Surface     | Note |
+|:-------------------|:---------------|:------------|:-----|
+| Critical (CVSS-BTE 4.0 9.3)| `CL-abc12345`  | library-api — pcre2_match | [link](other.md) |
+| High               | `CL-def67890`  | cli         | x |
+| Medium (CVSS-BTE 4.0 6.5)  | `CL-feedface`  | maint-tool  | y |
+| Low                | `CL-cafebabe`  | unknown     | z |
+| None (CVSS-BTE 4.0 0.0)    | `CL-0a1b2c3d`  | maint-tool  | w |
 EOF
 python3 "$RENDER" "$sev_fix" --html-sibling >/dev/null 2>&1
 sev_html="$TEST_TMPDIR/sev.html"
@@ -103,10 +104,11 @@ assert_file_contains "$sev_html" 'class="table-wrap"' "HTML tables are wrapped i
 
 # 7. Severity pills are emitted with the right class.
 assert_file_contains "$sev_html" 'class="sev sev-Critical">Critical' "Critical pill present"
-assert_file_contains "$sev_html" 'class="sev-score">68' "Critical score shown"
+assert_file_contains "$sev_html" 'class="sev-score">9.3' "Critical CVSS score shown"
 assert_file_contains "$sev_html" 'class="sev sev-High">High' "High pill present"
 assert_file_contains "$sev_html" 'class="sev sev-Medium">Medium' "Medium pill present"
 assert_file_contains "$sev_html" 'class="sev sev-Low">Low' "Low pill present"
+assert_file_contains "$sev_html" 'class="sev sev-None">None' "None pill present (scored 0.0 band)"
 
 # 8. Surface chips are emitted with the right class.
 assert_file_contains "$sev_html" 'class="chip chip-library">library-api' "library-api chip present"
@@ -134,7 +136,7 @@ cat > "$cluster_fix" <<'EOF'
 
 | Severity    | Callers | Cluster       | Size | Primitive                 | Strategy | Boundary | Root signature | Members | Status |
 |:------------|--------:|:--------------|-----:|:--------------------------|:---------|:---------|:---------------|:--------|:-------|
-| Medium (39) |      63 | `CL-f2422e11` |    1 | heap-use-after-free-WRITE | S5       | —        | `node_free node.c:100 -> node_free node.c:120 -> node_free node.c:140` | CRASH-1 | OK |
+| Medium (CVSS-BTE 4.0 6.4) |      63 | `CL-f2422e11` |    1 | heap-use-after-free-WRITE | S5       | —        | `node_free node.c:100 -> node_free node.c:120 -> node_free node.c:140` | CRASH-1 | OK |
 EOF
 python3 "$RENDER" "$cluster_fix" --html-sibling >/dev/null 2>&1
 cluster_html="$TEST_TMPDIR/cluster.html"
@@ -232,7 +234,7 @@ cat > "$bare_fix" <<'EOF'
 | Field    | Value                |
 |:---------|:---------------------|
 | Surface  | library-api          |
-| Severity | Medium (33)          |
+| Severity | Medium (CVSS-BTE 4.0 6.5) |
 
 Surface: library-api
 Trigger source: bytes
@@ -240,7 +242,7 @@ Caller contract: obeyed
 Boundary: serialized PCRE2 code bytes
 Caller controls: bytes
 Parameter control: direct
-- **Severity**: Medium (auto: primitive=heap READ; score=33)
+- **Severity**: Medium (CVSS-BTE 4.0: 6.5 Medium; primitive=heap READ)
 
 ## Summary
 
@@ -263,7 +265,7 @@ grep -q 'Trigger source: bytes' "$bare_html" \
 grep -q 'Parameter control: direct' "$bare_html" \
   && fail "Parameter control bare-label suppressed in HTML" "still rendered" \
   || pass "Parameter control bare-label suppressed in HTML"
-grep -q 'auto: primitive=heap READ' "$bare_html" \
+grep -q 'CVSS-BTE 4.0: 6.5 Medium' "$bare_html" \
   && fail "Severity rationale paragraph suppressed in HTML" "still rendered" \
   || pass "Severity rationale paragraph suppressed in HTML"
 # Real prose still renders.
@@ -302,7 +304,7 @@ cat > "$hero_fix" <<'EOF'
 | Field             | Value                       |
 |:------------------|:----------------------------|
 | Primitive         | heap-buffer-overflow        |
-| Severity          | High (62)                   |
+| Severity          | High (CVSS-BTE 4.0 8.1)     |
 | Surface           | library-api — public entry  |
 | Cluster           | CL-deadbeef (3 reports)     |
 | Reproduction rate | 5/5                         |
@@ -361,7 +363,7 @@ cat > "$hero_enrich_fix" <<'EOF'
 | Field     | Value                |
 |:----------|:---------------------|
 | Primitive | heap-buffer-overflow |
-| Severity  | High (61)            |
+| Severity  | High (CVSS-BTE 4.0 8.1) |
 
 ## Summary
 
@@ -411,7 +413,7 @@ cat > "$legacy_fix" <<'EOF'
 | Field     | Value                |
 |:----------|:---------------------|
 | Primitive | heap-buffer-overflow |
-| Severity  | High (62)            |
+| Severity  | High (CVSS-BTE 4.0 8.1) |
 
 ## ASan top frames
 
@@ -438,7 +440,7 @@ cat > "$labels_fix" <<'EOF'
 | Primitive | heap-use-after-free   |
 | Severity  | —                     |
 
-- **Severity**: Medium (auto: primitive=use-after-free READ; score=34)
+- **Severity**: Medium (CVSS-BTE 4.0: 6.5 Medium; primitive=use-after-free READ)
 
 Summary:
 Duplicating a channel reaches a lifetime diagnostic.
@@ -627,13 +629,13 @@ fi
 noh1_fix="$TEST_TMPDIR/noh1.md"
 cat > "$noh1_fix" <<'EOF'
 ## Classification
-- **Severity**: Medium (auto: primitive=use-after-free READ; score=34)
+- **Severity**: Medium (CVSS-BTE 4.0: 6.5 Medium; primitive=use-after-free READ)
 
 ## Fields
 
 | Field     | Value               |
 |:----------|:--------------------|
-| Severity  | Medium (34)         |
+| Severity  | Medium (CVSS-BTE 4.0 6.5) |
 | Primitive | heap_write          |
 | Surface   | library-api — apptool |
 
@@ -671,10 +673,10 @@ cat > "$empty_h" <<'EOF'
 
 | Field     | Value       |
 |:----------|:------------|
-| Severity  | Medium (34) |
+| Severity  | Medium (CVSS-BTE 4.0 6.5) |
 | Primitive | heap_write  |
 
-- **Severity**: Medium (auto: primitive=use-after-free READ; score=34)
+- **Severity**: Medium (CVSS-BTE 4.0: 6.5 Medium; primitive=use-after-free READ)
 Boundary: apptool public API
 
 # Summary

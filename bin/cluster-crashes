@@ -629,7 +629,7 @@ def _clusters_from_sigs(sigs: list[dict]) -> list[dict]:
         # so both pages pick the canonical the same way.
         ordered = sorted(members, key=lambda mm: (
             -int(mm.get("severity_rank", 0) or 0),
-            -int(mm.get("severity_score", 0) or 0),
+            -float(mm.get("severity_score", 0) or 0),  # CVSS v4.0 score (0–10)
             mm.get("display_id", mm["id"]),
         ))
         canonical = ordered[0]
@@ -827,7 +827,7 @@ def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
         strategy = c.get("strategy", "") or "—"
         sev = c.get("severity_level", "—") or "—"
         sev_score = c.get("severity_score", 0)
-        sev_cell = f"{sev} ({sev_score})" if sev_score else sev
+        sev_cell = f"{sev} (CVSS {sev_score})" if sev_score else sev
         lines.append(
             f"| {sev_cell} | {c.get('external_callers', 0)} | `{c['id']}` | {c['size']} | "
             f"{primitive} | "
@@ -943,7 +943,7 @@ def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: b
         strategy = c.get("strategy", "") or "—"
         sev = c.get("severity_level", "—") or "—"
         sev_score = c.get("severity_score", 0)
-        sev_cell = f"{sev} ({sev_score})" if sev_score else sev
+        sev_cell = f"{sev} (CVSS {sev_score})" if sev_score else sev
         md_lines.append(
             f"| {sev_cell} | {c.get('external_callers', 0)} | `{c['id']}` | {c['size']} | "
             f"{primitive} | "

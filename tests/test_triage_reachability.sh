@@ -77,7 +77,7 @@ triage_crash_dirs >/dev/null 2>&1
 assert_file_exists "$RESULTS_DIR/crashes/CRASH-INTEG-1/reachability.json" \
   "reachability.json written during triage"
 assert_file_contains "$RESULTS_DIR/crashes/CRASH-INTEG-1/REPORT.md" \
-  "Severity\*\*: (Critical|High|Medium|Low) \(auto:" \
+  "Severity\*\*: (Critical|High|Medium|Low|None) \(CVSS(-[A-Z]+)? 4\\.0:" \
   "report Severity line was rewritten during triage"
 assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-INTEG-1/REPORT.html" \
   "report HTML is not rendered before final maintain_indexes pass"
@@ -106,7 +106,7 @@ assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| Severity +\| C
 # rather than `| CRASH-INTEG-1 |`.
 row=$(grep -E '\[CRASH-INTEG-1\]' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" || true)
 [ -n "$row" ] && pass "$_CURRENT_TEST: row present" || fail "$_CURRENT_TEST" "no cluster row for CRASH-INTEG-1"
-grep -qE '\| (Critical|High|Medium|Low) \([0-9]+\) \|' <<<"$row" \
+grep -qE '\| (Critical|High|Medium|Low) \(CVSS [0-9.]+\) \|' <<<"$row" \
   && pass "$_CURRENT_TEST: severity column populated" \
   || fail "$_CURRENT_TEST" "severity column missing/malformed: $row"
 # Caller count is a cluster-level maximum. CRASH-INTEG-EXT shares the same
@@ -240,7 +240,7 @@ assert_file_exists "$RESULTS_DIR/findings/FIND-REACH-1/reachability.json" \
 assert_file_exists "$RESULTS_DIR/findings/FIND-REACH-1/.reachability_ok" \
   "FIND triage marks reachability_ok"
 assert_file_contains "$RESULTS_DIR/findings/FIND-REACH-1/report.md" \
-  "Severity\*\*: (Critical|High|Medium|Low) \(auto:" \
+  "Severity\*\*: (Critical|High|Medium|Low|None) \(CVSS(-[A-Z]+)? 4\\.0:" \
   "FIND report Severity line rewritten by reachability"
 
 # ───────────────────────────────────────────────────────────────────

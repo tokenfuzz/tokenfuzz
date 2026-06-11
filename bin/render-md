@@ -394,6 +394,9 @@ _HTML_HEAD = """<!DOCTYPE html>
   .sev-Medium   {{ background: var(--sev-medium-bg);   color: var(--sev-medium-fg); }}
   .sev-Low      {{ background: var(--sev-low-bg);      color: var(--sev-low-fg); }}
   .sev-Unknown  {{ background: var(--sev-unknown-bg);  color: var(--sev-unknown-fg); }}
+  /* `None` = scored 0.0 (CVSS band), e.g. internal-surface code whose
+     modified impacts are all N. Same neutral palette as Unknown. */
+  .sev-None     {{ background: var(--sev-unknown-bg);  color: var(--sev-unknown-fg); }}
   /* `Pending` = quality gate has no verdict yet. Muted neutral chip — same
      shape as a real severity pill so the column lines up, but visually
      subordinate so the eye skips it for scored rows. */
@@ -531,6 +534,7 @@ _HTML_HEAD = """<!DOCTYPE html>
   .triage-card.sev-Medium   {{ border-left-color: var(--sev-medium-bg); }}
   .triage-card.sev-Low      {{ border-left-color: var(--sev-low-bg); }}
   .triage-card.sev-Unknown  {{ border-left-color: var(--sev-unknown-bg); }}
+  .triage-card.sev-None     {{ border-left-color: var(--sev-unknown-bg); }}
   .triage-row {{
     display: flex;
     flex-wrap: wrap;
@@ -959,7 +963,8 @@ def _render_inline(text: str) -> str:
 # Cell decorators — applied AFTER the cell text is HTML-rendered so we
 # can wrap matching tokens in styled spans.
 _SEV_CELL_RE = re.compile(
-    r"^\s*(Critical|High|Medium|Low|Unknown|Pending|—)(?:\s*\((\d+)\))?\s*$"
+    r"^\s*(Critical|High|Medium|Low|None|Unknown|Pending|—)"
+    r"(?:\s*\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*(\d+(?:\.\d+)?)\s*\))?\s*$"
 )
 
 # Strategy short-codes used in REPORT.md `Strategy:` field. The full
@@ -1030,7 +1035,7 @@ def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "") -> str:
     raw = raw_cell.strip()
     key = row_key.strip().lower()
 
-    # Severity pill: "Critical (68)" → span.sev-Critical
+    # Severity pill: "Critical (CVSS-BTE 4.0 9.3)" → span.sev-Critical
     m = _SEV_CELL_RE.match(raw)
     if m:
         level = m.group(1)
@@ -1284,12 +1289,15 @@ _FIELDS_ROW_RE = re.compile(
     r"^\|\s*(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*\|\s*(?P<val>.+?)\s*\|\s*$"
 )
 _SEV_FIELD_RE = re.compile(
-    r"^(?P<level>Critical|High|Medium|Low|Unknown)(?:\s*\((?P<score>\d+)\))?\s*$"
+    r"^(?P<level>Critical|High|Medium|Low|None|Unknown)"
+    r"(?:\s*\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*(?P<score>\d+(?:\.\d+)?)\s*\))?\s*$"
 )
 _SEV_BULLET_RE = re.compile(
-    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low|Unknown)"
+    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low|None|Unknown)"
 )
-_SCORE_RE = re.compile(r"score=(\d+)")
+# The trailing lookahead keeps the "4.0" of a bare vector string
+# (``CVSS:4.0/AV:N/…``) from being misread as the score.
+_SCORE_RE = re.compile(r"CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(\d+(?:\.\d+)?)(?![0-9./])")
 _SURFACE_FIELD_RE = re.compile(
     r"^(?P<kind>library-api|cli|maint-tool|unknown)\b(?:\s*—\s*(?P<reason>.+))?\s*$"
 )

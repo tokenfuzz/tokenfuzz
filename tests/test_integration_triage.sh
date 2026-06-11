@@ -266,8 +266,8 @@ assert_file_contains "$RESULTS_DIR/findings/FIND-008-FIND/report.md" "^## Triage
 # 9. triage_crash_dirs — callback-releases-active is a CONTRACT-FLAG.
 # The dir STAYS in crashes/ with a .contract-flagged sidecar +
 # "## Contract concern" report block. The reachability scorer applies
-# a ×0.7 multiplier from that report block downstream, so Severity is
-# automatically rated lower. crashes-rejected/ is reserved for
+# CVSS-BTE Environmental MAT:P from that report block downstream, so
+# Severity is automatically rated lower. crashes-rejected/ is reserved for
 # non-security classes (OOM/panic/null-deref/no-signal/TTL).
 # ═══════════════════════════════════════════════════════════════
 

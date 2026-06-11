@@ -144,8 +144,9 @@ tokens describing what an external caller can legitimately
 control. Valid tokens are `bytes`, `call-sequence`, `timing`,
 `race`, `env`, `protocol-state`, and `fs-state`. A crash whose
 trigger source falls outside this set stays in `crashes/` but is
-downgraded to robustness severity (×0.7) with a contract concern
-noted — threat-model fit is a scoring question, not a filing one.
+flagged with a contract concern, which sets CVSS **MAT:P** (Modified
+Attack Requirements: present) in the CVSS-BTE score — threat-model fit
+is a scoring question, not a filing one.
 
 **Findings-only mode.** `[sanitizer].enabled = []`. Typical for
 interpreted / managed-runtime targets (Python, Ruby, Node, Java,

@@ -188,49 +188,52 @@ def extract_class(report_text: str) -> str:
 
 
 # ── Severity extraction ────────────────────────────────────────────
-# bin/reachability writes the scored severity into the report in two forms:
-#   * bare line:  - **Severity**: Medium (auto: …; score=33)
-#   * Fields row: | Severity | Low (24) |
-# The report is the single source of truth for a finding's *scored* severity
-# (the deterministic (I+R)×CF result), refreshed on every --regenerate. The
-# bare line and the Fields row are parsed separately because a single regex
-# with `[^)]*?` would stop at the first `)` inside the auto-line (e.g. the
-# `(+18)` token) before reaching `score=`.
+# Severity is a CVSS v4.0 score written by bin/reachability in two
+# shapes: the bare bullet ``- **Severity**: <Level> (CVSS-BTE 4.0: <score> …)``
+# and the Fields-table row ``| Severity | <Level> (CVSS-BTE 4.0 <score>) |``.
+# The CVSS score is a float in [0.0, 10.0]; an unclassified crash is
+# ``Unknown`` with no score; a scored 0.0 is the CVSS band ``None``
+# (e.g. internal-surface code whose modified impacts are all N).
 _SEVERITY_LEVEL_RE = re.compile(
-    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low)",
+    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low|None|Unknown)",
     re.MULTILINE,
 )
 _SEVERITY_TABLE_RE = re.compile(
-    r"^\|\s*Severity\s*\|\s*(?P<level>Critical|High|Medium|Low)\b"
-    r"\s*(?:\((?P<score>\d+)\))?",
+    r"^\|\s*Severity\s*\|\s*(?P<level>Critical|High|Medium|Low|None|Unknown)\b"
+    r"\s*(?:\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*(?P<score>\d+(?:\.\d+)?)\s*\))?",
     re.MULTILINE | re.IGNORECASE,
 )
-_SEVERITY_SCORE_RE = re.compile(r"score=(\d+)")
-_SEVERITY_RANK = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
+# The trailing lookahead keeps the "4.0" of a bare vector string
+# (``CVSS:4.0/AV:N/…``) from being misread as the score.
+_SEVERITY_SCORE_RE = re.compile(
+    r"CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(\d+(?:\.\d+)?)(?![0-9./])")
+_SEVERITY_RANK = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1,
+                  "None": 0, "Unknown": 0}
 
 
-def extract_severity(report_text: str) -> tuple[str, int, int]:
-    """Return (level_str, rank_int, score_int) for the report's severity.
+def extract_severity(report_text: str) -> tuple[str, int, float]:
+    """Return (level_str, rank_int, cvss_score_float) for the report's severity.
 
-    Prefers the bare ``- **Severity**: <level> (auto: … score=N)`` line; falls
-    back to the ``| Severity | <level> (N) |`` Fields-table row; then to
-    ``('—', 0, 0)`` when no severity is recorded yet (e.g. before
-    bin/reachability has scored the report). Rank is the sort key — higher is
-    more severe (Critical=4 > High=3 > Medium=2 > Low=1)."""
+    Prefers the bare ``- **Severity**: <Level> (CVSS-BTE 4.0: <score> …)`` line;
+    falls back to the ``| Severity | <Level> (CVSS-BTE 4.0 <score>) |`` Fields-table
+    row; then to ``('—', 0, 0.0)`` when no severity is recorded yet (e.g.
+    before bin/reachability has scored the report). Rank is the sort key —
+    higher is more severe (Critical=4 > High=3 > Medium=2 > Low=1;
+    None=Unknown=0)."""
     m = _SEVERITY_LEVEL_RE.search(report_text or "")
     if m:
-        level = m.group("level")
+        level = m.group("level").capitalize()
         line_end = report_text.find("\n", m.end())
         if line_end == -1:
             line_end = len(report_text)
         score_m = _SEVERITY_SCORE_RE.search(report_text[m.end():line_end])
-        return level, _SEVERITY_RANK.get(level, 0), int(score_m.group(1)) if score_m else 0
+        return level, _SEVERITY_RANK.get(level, 0), float(score_m.group(1)) if score_m else 0.0
     m = _SEVERITY_TABLE_RE.search(report_text or "")
     if m:
         level = m.group("level").capitalize()
-        score = int(m.group("score")) if m.group("score") else 0
+        score = float(m.group("score")) if m.group("score") else 0.0
         return level, _SEVERITY_RANK.get(level, 0), score
-    return "—", 0, 0
+    return "—", 0, 0.0
 
 
 # ── Path normalization ─────────────────────────────────────────────

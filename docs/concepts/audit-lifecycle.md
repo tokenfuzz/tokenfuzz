@@ -173,8 +173,9 @@ Triage decides whether an artifact is useful and in scope.
 
 A trigger source outside the target's declared attacker surface is
 *not* a rejection: the crash stays in `crashes/` with a contract
-concern noted and its severity downgraded (×0.7), because the
-threat-model fit is a scoring question, not a filing question.
+concern noted. The scorer represents that local precondition with
+CVSS-BTE Environmental **MAT:P**, because the threat-model fit is a
+scoring question, not a filing question.
 
 The LLM-backed crash gates (trace validity, report completeness,
 legitimacy) are **multi-vote**: a single keep vote keeps the crash,

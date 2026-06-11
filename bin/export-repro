@@ -2048,15 +2048,17 @@ def normalize_strategy(value: str) -> str:
 
 
 def read_severity_from(path: Optional[Path]) -> str:
-    """Return `"Level (score)"` or just `"Level"` if the auto-Severity line
+    """Return `"Level (CVSS[-*] 4.0 score)"` or just `"Level"` if the Severity line
     exists in `path`; "" otherwise.
     """
     if path is None or not path.is_file():
         return ""
     sev_re = re.compile(
-        r"^-?\s*\*\*Severity\*\*\s*:\s*(Critical|High|Medium|Low)"
+        r"^-?\s*\*\*Severity\*\*\s*:\s*(Critical|High|Medium|Low|None|Unknown)"
     )
-    score_re = re.compile(r"score=([0-9]+)")
+    score_re = re.compile(
+        r"\b(CVSS(?:-[A-Z]+)?)(?:\s+(4\.0))?\s*:?\s*([0-9]+(?:\.[0-9]+)?)(?![0-9./])"
+    )
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.rstrip("\n")
@@ -2065,18 +2067,21 @@ def read_severity_from(path: Optional[Path]) -> str:
                 level = m.group(1)
                 sm = score_re.search(line)
                 if sm:
-                    return f"{level} ({sm.group(1)})"
+                    name, version, score = sm.groups()
+                    if version:
+                        return f"{level} ({name} {version} {score})"
+                    return f"{level} ({name} {score})"
                 return level
     return ""
 
 
 def read_auto_severity_line(path: Optional[Path]) -> str:
-    """Return the existing `**Severity**: ... (auto: ...)` line minus any
+    """Return the existing generated `**Severity**: ...` line minus any
     leading `-` bullet, or "" if absent.
     """
     if path is None or not path.is_file():
         return ""
-    sev_re = re.compile(r"^-?\s*\*\*Severity\*\*\s*:.*\(auto:")
+    sev_re = re.compile(r"^-?\s*\*\*Severity\*\*\s*:.*\((?:auto:|CVSS(?:-[A-Z]+)?\s+4\.0:)")
     leading_re = re.compile(r"^-?\s*")
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
