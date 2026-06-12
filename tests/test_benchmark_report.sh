@@ -171,9 +171,26 @@ args = []
 TOML
 # A fake codex that just runs to completion so the cell finishes. We then
 # poke at the early cell.json that the bench wrote before the run started.
+# It ALSO traces its --cd/--add-dir argv to stderr (consumed by T27): the
+# bench invocation here and the one T27 used to make were byte-identical
+# apart from --bench-root, so a single run now serves T24–T27.
 fake_codex_early="$work/fake-codex-early"
 cat > "$fake_codex_early" <<'SH'
 #!/usr/bin/env bash
+set -euo pipefail
+cd_val=""
+adds=""
+want_cd=0
+want_add=0
+for arg in "$@"; do
+  if [ "$want_cd" = 1 ]; then cd_val="$arg"; want_cd=0
+  elif [ "$want_add" = 1 ]; then adds="$adds|$arg"; want_add=0
+  elif [ "$arg" = "--cd" ]; then want_cd=1
+  elif [ "$arg" = "--add-dir" ]; then want_add=1
+  fi
+done
+printf 'FAKE_CD=%s\n' "$cd_val" >&2
+printf 'FAKE_ADDS=%s\n' "$adds" >&2
 printf '{"type":"item.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}\n'
 SH
 chmod +x "$fake_codex_early"
@@ -244,40 +261,15 @@ assert_not_match '\{\{\s*(target_path|output_dir)\s*\}\}' "$prompt_body" \
   "T26d: no un-substituted placeholders survive in the rendered prompt"
 
 # ── T27: launch wiring — cwd is the cell dir, target is an --add-dir ────
-fake_codex_args="$work/fake-codex-args"
-cat > "$fake_codex_args" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-cd_val=""
-adds=""
-want_cd=0
-want_add=0
-for arg in "$@"; do
-  if [ "$want_cd" = 1 ]; then cd_val="$arg"; want_cd=0
-  elif [ "$want_add" = 1 ]; then adds="$adds|$arg"; want_add=0
-  elif [ "$arg" = "--cd" ]; then want_cd=1
-  elif [ "$arg" = "--add-dir" ]; then want_add=1
-  fi
-done
-printf 'FAKE_CD=%s\n' "$cd_val" >&2
-printf 'FAKE_ADDS=%s\n' "$adds" >&2
-printf '{"type":"item.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
-SH
-chmod +x "$fake_codex_args"
-args_root="$work/args-bench"
-CODEX_BIN="$fake_codex_args" bash "$BENCH" \
-  --target "$(basename "$target_dir")" --backend codex --replicates 1 \
-  --conditions model-direct --budget-wall 5 \
-  --bench-root "$args_root" --no-validate-findings >/dev/null 2>&1
+# Asserted against the T24 run: same bench flags, and the fake codex
+# (see fake_codex_early above) traces the argv it received.
 # Agent stdout+stderr go to backend.raw.log; the FAKE_* trace lines land
 # there, not in the bench's own stdout.
-raw_log=$(find "$args_root/codex" \
+raw_log=$(find "$early_root/codex" \
   -path '*/cells/model-direct-r1/backend.raw.log' | head -1)
 fake_cd=$(sed -n 's/^FAKE_CD=//p' "$raw_log" | head -1)
 fake_adds=$(sed -n 's/^FAKE_ADDS=//p' "$raw_log" | head -1)
-args_cell=$(find "$args_root/codex" -path '*/cells/model-direct-r1' \
-  -type d | head -1)
-assert_eq "$args_cell" "$fake_cd" \
+assert_eq "$cell_dir" "$fake_cd" \
   "T27a: --cd is the cell dir"
 if [[ "$fake_adds" == *"$target_abs"* ]]; then
   pass "T27b: target tree is granted via --add-dir at its real absolute path"
@@ -822,12 +814,21 @@ mkdir -p "$fake_log_dir"
 fake_log="$fake_log_dir/cli-20260524_191234.log"
 : > "$fake_log"
 # Hold the file open in a backgrounded shell. exec 9>file binds an FD
-# that lsof will see for that PID.
-( exec 9>"$fake_log"; sleep 30 ) &
+# that lsof will see for that PID. `exec sleep` keeps holder_pid == the
+# fd-holding process so the kill below reaps it (a plain `sleep` child
+# would survive the kill of its parent subshell and, by inheriting this
+# suite's stdout, hold the runner's pipe open for the full 30s). The
+# /dev/null redirect makes even a leaked holder harmless to the pipe.
+( exec 9>"$fake_log"; exec sleep 30 ) >/dev/null 2>&1 &
 holder_pid=$!
-# Give the OS a moment to register the FD.
-sleep 1
-resolved=$(agy_cli_log_for_pid "$holder_pid")
+# Poll until the OS has registered the FD for the pid (proc/lsof can lag
+# behind the fork by a few ms; was a fixed `sleep 1`).
+resolved=""
+for _ in $(seq 1 40); do
+  resolved=$(agy_cli_log_for_pid "$holder_pid")
+  if [ -n "$resolved" ]; then break; fi
+  sleep 0.05
+done
 # macOS lsof reports the canonicalized path (/var/folders ->
 # /private/var/folders). Compare via realpath so the test is
 # platform-agnostic.

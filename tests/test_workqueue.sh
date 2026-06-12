@@ -9,6 +9,25 @@ PATCH_CARDS="$SCRIPT_ROOT/bin/patch-cards"
 STATE="$SCRIPT_ROOT/bin/state"
 PROBE="$SCRIPT_ROOT/bin/probe"
 
+# Extract the "id" value from a JSON document without spawning python3
+# (interpreter startup dominates this suite's wall time). jq keeps this
+# structured: malformed JSON, a missing id, or trailing/multi-document
+# stdout all surface as an empty or mismatching value instead of a regex
+# guess, matching the old `python3 -c 'json.load(...)["id"]'` strictness.
+json_id() {
+  jq -r '.id // empty' <<<"$1"
+}
+
+# Replicate `bin/state init` (state dir + five empty jsonl stores) for
+# fixture dirs where init itself is NOT the behavior under test — init is
+# asserted once against $RESULTS_DIR below. Saves a bin/state startup per
+# fixture dir.
+mk_state_dir() {
+  mkdir -p "$1/state"
+  touch "$1/state/hypotheses.jsonl" "$1/state/runs.jsonl" \
+        "$1/state/claims.jsonl" "$1/state/events.jsonl" "$1/state/notes.jsonl"
+}
+
 probe_help="$("$PROBE" --help)"
 assert_match 'bin/probe .*--confirm.*--dry-run' "$probe_help" "probe help: lists confirm and dry-run"
 assert_match 'TARGET: <file' "$probe_help" "probe help: documents TARGET header"
@@ -157,23 +176,6 @@ if command -v git >/dev/null 2>&1; then
   TARGET_ROOT="$git_target" TARGET_SLUG="git-target" TARGET_REPO_TYPE=git RESULTS_DIR="$git_results" \
     "$PATCH_CARDS" --limit 50 --inspect-commits 50 \
     --output "$git_cards" --quiet
-  vcs_patch_cards=$(python3 - "$git_cards" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-cards = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() if line.strip()]
-assert cards, "no patch cards produced from VCS log"
-card = next((c for c in cards if "alpha" in (c.get("description") or "").lower()), None)
-assert card, cards
-assert card["source"] == "vcs-log", card
-assert card["touched_files"] == ["src/alpha.c"], card
-assert card["fix_hashes"], card
-print("ok")
-PY
-)
-  assert_eq "ok" "$vcs_patch_cards" "patch-cards: builds S1 cards from VCS log"
-
   # ── scan window reaches fixes older than --limit ──
   # --limit 3 emits 3 cards; the 3 highest-scored commits are the 3
   # OLDEST (defect-keyword) commits. A window capped at --limit (the old
@@ -182,19 +184,69 @@ PY
   TARGET_ROOT="$git_target" TARGET_SLUG="git-target" TARGET_REPO_TYPE=git RESULTS_DIR="$git_results" \
     "$PATCH_CARDS" --limit 3 --inspect-commits 50 \
     --output "$window_cards" --quiet
-  window_ok=$(python3 - "$window_cards" <<'PY'
+
+  # ── inspect budget targets highest-signal commit, not newest ──
+  # Budget of 1 → exactly one commit_files lookup. It must land on a
+  # defect-keyword commit (the three oldest), never on the newer churn.
+  budget_cards="$TEST_TMPDIR/git-budget-cards.jsonl"
+  TARGET_ROOT="$git_target" TARGET_SLUG="git-target" TARGET_REPO_TYPE=git RESULTS_DIR="$git_results" \
+    "$PATCH_CARDS" --limit 50 --inspect-commits 1 \
+    --output "$budget_cards" --quiet
+
+  # The three read-only verifications run in ONE python invocation
+  # (interpreter startup dominates); each check prints its own labeled
+  # ok/failure line so the assertions below stay independent.
+  git_checks=$(python3 - "$git_cards" "$window_cards" "$budget_cards" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-cards = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() if line.strip()]
-files = {f for c in cards for f in c.get("touched_files", [])}
-assert "src/alpha.c" in files, files   # oldest commit, position 6 of 6
-assert "src/gamma.c" in files, files
-print("ok")
+def load(p):
+    return [json.loads(line) for line in Path(p).read_text().splitlines() if line.strip()]
+
+def check(label, fn):
+    try:
+        fn()
+        print(f"{label}:ok")
+    except AssertionError as exc:
+        print(f"{label}:FAIL {exc}")
+
+def vcs():
+    cards = load(sys.argv[1])
+    assert cards, "no patch cards produced from VCS log"
+    card = next((c for c in cards if "alpha" in (c.get("description") or "").lower()), None)
+    assert card, cards
+    assert card["source"] == "vcs-log", card
+    assert card["touched_files"] == ["src/alpha.c"], card
+    assert card["fix_hashes"], card
+
+def window():
+    cards = load(sys.argv[2])
+    files = {f for c in cards for f in c.get("touched_files", [])}
+    assert "src/alpha.c" in files, files   # oldest commit, position 6 of 6
+    assert "src/gamma.c" in files, files
+
+def budget():
+    cards = load(sys.argv[3])
+    inspected = [c for c in cards if c.get("touched_files")]
+    assert len(inspected) == 1, [c.get("touched_files") for c in cards]
+    keyword = {"src/alpha.c", "src/beta.c", "src/gamma.c"}
+    assert set(inspected[0]["touched_files"]) & keyword, inspected[0]
+    churn = {"src/delta.c", "src/epsilon.c", "src/zeta.c"}
+    for c in cards:
+        assert not (set(c.get("touched_files", [])) & churn), c
+
+check("vcs", vcs)
+check("window", window)
+check("budget", budget)
 PY
 )
+  case "$git_checks" in *"vcs:ok"*) vcs_patch_cards=ok ;; *) vcs_patch_cards="$git_checks" ;; esac
+  case "$git_checks" in *"window:ok"*) window_ok=ok ;; *) window_ok="$git_checks" ;; esac
+  case "$git_checks" in *"budget:ok"*) budget_ok=ok ;; *) budget_ok="$git_checks" ;; esac
+  assert_eq "ok" "$vcs_patch_cards" "patch-cards: builds S1 cards from VCS log"
   assert_eq "ok" "$window_ok" "patch-cards: scan window reaches fixes older than --limit"
+  assert_eq "ok" "$budget_ok" "patch-cards: inspect budget targets highest-signal commit, not newest"
 
   # ── PATCH_SCAN_WINDOW / --scan-window cap the scan ──
   capped_cards="$TEST_TMPDIR/git-capped-cards.jsonl"
@@ -209,31 +261,6 @@ PY
     --output "$cli_cards" --quiet
   assert_eq 2 "$(grep -c . "$cli_cards" 2>/dev/null || echo 0)" \
     "patch-cards: --scan-window flag caps commits scanned"
-
-  # ── inspect budget targets highest-signal commit, not newest ──
-  # Budget of 1 → exactly one commit_files lookup. It must land on a
-  # defect-keyword commit (the three oldest), never on the newer churn.
-  budget_cards="$TEST_TMPDIR/git-budget-cards.jsonl"
-  TARGET_ROOT="$git_target" TARGET_SLUG="git-target" TARGET_REPO_TYPE=git RESULTS_DIR="$git_results" \
-    "$PATCH_CARDS" --limit 50 --inspect-commits 1 \
-    --output "$budget_cards" --quiet
-  budget_ok=$(python3 - "$budget_cards" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-cards = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() if line.strip()]
-inspected = [c for c in cards if c.get("touched_files")]
-assert len(inspected) == 1, [c.get("touched_files") for c in cards]
-keyword = {"src/alpha.c", "src/beta.c", "src/gamma.c"}
-assert set(inspected[0]["touched_files"]) & keyword, inspected[0]
-churn = {"src/delta.c", "src/epsilon.c", "src/zeta.c"}
-for c in cards:
-    assert not (set(c.get("touched_files", [])) & churn), c
-print("ok")
-PY
-)
-  assert_eq "ok" "$budget_ok" "patch-cards: inspect budget targets highest-signal commit, not newest"
 
   # ── shallow-clone warning ──
   shallow_src="$TEST_TMPDIR/shallow-src"
@@ -252,25 +279,75 @@ else
   pass "patch-cards: VCS patch-cards skipped (git unavailable)"
 fi
 
-# _patch_scan_window: a positive env knob is honoured verbatim (so the
-# scan can be deliberately narrowed); junk values fall back to default.
-scan_window_check=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - <<'PY'
+# Two stateless workqueue unit checks share ONE python invocation (the
+# workqueue import is the expensive part); each prints a labeled ok line
+# so the two assertions below remain independent.
+# 1) _patch_scan_window: a positive env knob is honoured verbatim (so the
+#    scan can be deliberately narrowed); junk values fall back to default.
+# 2) is_auditable_source_path: centralized bad-path exclusions (asserted
+#    further below, next to the rank-work output checks it mirrors).
+wq_unit_checks=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - <<'PY'
 import os
 import workqueue as wq
 
-assert wq._patch_scan_window(80) == 80 * 25, wq._patch_scan_window(80)
-os.environ["PATCH_SCAN_WINDOW"] = "500"
-assert wq._patch_scan_window(80) == 500, wq._patch_scan_window(80)
-os.environ["PATCH_SCAN_WINDOW"] = "10"        # honoured verbatim, even < limit
-assert wq._patch_scan_window(80) == 10, wq._patch_scan_window(80)
-os.environ["PATCH_SCAN_WINDOW"] = "bogus"     # non-numeric → default
-assert wq._patch_scan_window(80) == 80 * 25, wq._patch_scan_window(80)
-os.environ["PATCH_SCAN_WINDOW"] = "0"         # non-positive → default
-assert wq._patch_scan_window(80) == 80 * 25, wq._patch_scan_window(80)
-del os.environ["PATCH_SCAN_WINDOW"]
-print("ok")
+def check(label, fn):
+    try:
+        fn()
+        print(f"{label}:ok")
+    except (AssertionError, SystemExit) as exc:
+        print(f"{label}:FAIL {exc}")
+
+def scan_window():
+    assert wq._patch_scan_window(80) == 80 * 25, wq._patch_scan_window(80)
+    os.environ["PATCH_SCAN_WINDOW"] = "500"
+    assert wq._patch_scan_window(80) == 500, wq._patch_scan_window(80)
+    os.environ["PATCH_SCAN_WINDOW"] = "10"        # honoured verbatim, even < limit
+    assert wq._patch_scan_window(80) == 10, wq._patch_scan_window(80)
+    os.environ["PATCH_SCAN_WINDOW"] = "bogus"     # non-numeric → default
+    assert wq._patch_scan_window(80) == 80 * 25, wq._patch_scan_window(80)
+    os.environ["PATCH_SCAN_WINDOW"] = "0"         # non-positive → default
+    assert wq._patch_scan_window(80) == 80 * 25, wq._patch_scan_window(80)
+    del os.environ["PATCH_SCAN_WINDOW"]
+
+def policy():
+    # Audit-scope set (lib/audit_scope.EXCLUDED_PATH_SEGMENTS) is narrow:
+    # only doc/example/test/fuzz families exclude by directory name.
+    # Test-shaped *file names* still exclude regardless of location.
+    bad = [
+        "fuzz/regexp.c",
+        "testdict.c",
+        "harness11.c",
+        "src/pcre2test.c",
+        "src/pcre2test_inc.h",
+        "src/pcre2_fuzzsupport.c",
+        "config.h",
+    ]
+    good = [
+        "alpha/core/ThingProcessor.cpp",
+        "beta/io/plain.c",
+        "src/pcre2_compile.c",
+        "parser.c",
+        "third_party/vendor/lib/mirror.c",
+        # Deliberately auditable now: vendored deps, tools, scripts,
+        # build outputs, generated code, maintenance scripts.
+        "maint/tool.c",
+        "generated/table.c",
+        "tools/devtool.c",
+        "build/foo.c",
+        "scripts/munge.c",
+        "external/lib/bar.c",
+    ]
+    if any(wq.is_auditable_source_path(p) for p in bad):
+        raise SystemExit("bad path accepted")
+    if any(not wq.is_auditable_source_path(p) for p in good):
+        raise SystemExit("good path rejected")
+
+check("scan_window", scan_window)
+check("policy", policy)
 PY
 )
+case "$wq_unit_checks" in *"scan_window:ok"*) scan_window_check=ok ;; *) scan_window_check="$wq_unit_checks" ;; esac
+case "$wq_unit_checks" in *"policy:ok"*) policy_check=ok ;; *) policy_check="$wq_unit_checks" ;; esac
 assert_eq "ok" "$scan_window_check" "patch-cards: _patch_scan_window resolves the env knob"
 
 # --limit must exceed the fixture's own size: 7 auditable files, each
@@ -305,22 +382,14 @@ assert_match 'PyParser\.py' "$output" "rank-work: includes Python sources (regis
 # lib/recon_to_cards.py seeds those separately into work-cards.jsonl; a
 # plain overwrite on the next work-card refresh would strand every recon
 # lead before it can be probed (the benchmark bug that drove findings to 0).
-python3 - "$RESULTS_DIR/work-cards.jsonl" <<'PY'
-import json, sys
-p = sys.argv[1]
-rows = [json.loads(l) for l in open(p) if l.strip()]
-rows.append({
-    "id": "RECON-deadbeef-asan-S5", "kind": "recon-hypothesis",
-    "strategy": "S5", "status": "unclaimed", "score": 55,
-    "recon": {"id": "RECON-deadbeef", "confidence": "NEEDS-VERIFICATION"},
-})
-with open(p, "w") as f:
-    f.write("".join(json.dumps(r) + "\n" for r in rows))
-PY
+cat >> "$RESULTS_DIR/work-cards.jsonl" <<'JSONL'
+{"id": "RECON-deadbeef-asan-S5", "kind": "recon-hypothesis", "strategy": "S5", "status": "unclaimed", "score": 55, "recon": {"id": "RECON-deadbeef", "confidence": "NEEDS-VERIFICATION"}}
+JSONL
 TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --quiet >/dev/null 2>&1
-assert_match '"id": "RECON-deadbeef-asan-S5"' "$(cat "$RESULTS_DIR/work-cards.jsonl")" \
+refreshed_cards=$(cat "$RESULTS_DIR/work-cards.jsonl")
+assert_match '"id": "RECON-deadbeef-asan-S5"' "$refreshed_cards" \
   "rank-work: preserves recon-hypothesis cards across a refresh"
-assert_match '"kind": "recon-hypothesis"' "$(cat "$RESULTS_DIR/work-cards.jsonl")" \
+assert_match '"kind": "recon-hypothesis"' "$refreshed_cards" \
   "rank-work: recon-hypothesis kind survives re-rank"
 
 # P7 (F): the new allowed_strategies field on a consolidated Promote
@@ -340,47 +409,29 @@ mkdir -p "$f_results/state"
 # Start from an empty work-cards file and inject only the Promote card;
 # rank-work re-runs over the (empty) target tree and merges our seeded
 # recon card from the existing file.
-: > "$f_results/work-cards.jsonl"
-python3 - "$f_results/work-cards.jsonl" <<'PY'
-import json, sys
-row = {
-    "id": "RECON-cafebabe-asan",
-    "kind": "recon-hypothesis",
-    "strategy": "S7",
-    "allowed_strategies": ["S5", "S7"],
-    "status": "unclaimed",
-    "score": 1000,
-    "recon": {"id": "RECON-cafebabe", "confidence": "CONFIRMED-HIGH",
-              "validator_verdict": "Promote"},
-}
-with open(sys.argv[1], "w") as f:
-    f.write(json.dumps(row) + "\n")
-PY
+cat > "$f_results/work-cards.jsonl" <<'JSONL'
+{"id": "RECON-cafebabe-asan", "kind": "recon-hypothesis", "strategy": "S7", "allowed_strategies": ["S5", "S7"], "status": "unclaimed", "score": 1000, "recon": {"id": "RECON-cafebabe", "confidence": "CONFIRMED-HIGH", "validator_verdict": "Promote"}}
+JSONL
 TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$f_results" "$RANK_WORK" --limit 40 --quiet >/dev/null 2>&1
-preserved_allowed=$(python3 -c "
+# One python reads back both preserved fields ("allowed|verdict").
+preserved_pair=$(python3 -c "
 import json
 for line in open('$f_results/work-cards.jsonl'):
     line=line.strip()
     if not line: continue
     c = json.loads(line)
     if c.get('id') == 'RECON-cafebabe-asan':
-        print(','.join(c.get('allowed_strategies') or []))
+        allowed = ','.join(c.get('allowed_strategies') or [])
+        verdict = (c.get('recon') or {}).get('validator_verdict','')
+        print(allowed + '|' + verdict)
         break
 ")
+preserved_allowed=${preserved_pair%%|*}
+preserved_verdict=${preserved_pair##*|}
 assert_eq "S5,S7" "$preserved_allowed" \
   "F: rank-work refresh preserves allowed_strategies on Promote recon cards"
 # Sanity belt: Promote-verdict survives too (the field that distinguishes
 # precedence-eligible cards from ordinary recon cards).
-preserved_verdict=$(python3 -c "
-import json
-for line in open('$f_results/work-cards.jsonl'):
-    line=line.strip()
-    if not line: continue
-    c = json.loads(line)
-    if c.get('id') == 'RECON-cafebabe-asan':
-        print((c.get('recon') or {}).get('validator_verdict',''))
-        break
-")
 assert_eq "Promote" "$preserved_verdict" \
   "F: rank-work refresh preserves recon.validator_verdict on Promote cards"
 
@@ -393,11 +444,12 @@ cat > "$RESULTS_DIR/s6-peer-cards.jsonl" <<'EOF'
 {"id": "S6-PEER-skipme000000", "kind": "not-an-s6-card", "strategy": "S6", "status": "unclaimed"}
 EOF
 TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --quiet >/dev/null 2>&1
-assert_match '"id": "S6-PEER-abc123def456"' "$(cat "$RESULTS_DIR/work-cards.jsonl")" \
+s6_merged_cards=$(cat "$RESULTS_DIR/work-cards.jsonl")
+assert_match '"id": "S6-PEER-abc123def456"' "$s6_merged_cards" \
   "rank-work: merges S6 peer-fix cards into the work queue"
-assert_match '"kind": "s6-peer-fix"' "$(cat "$RESULTS_DIR/work-cards.jsonl")" \
+assert_match '"kind": "s6-peer-fix"' "$s6_merged_cards" \
   "rank-work: s6-peer-fix kind survives the merge"
-assert_not_match 'S6-PEER-skipme000000' "$(cat "$RESULTS_DIR/work-cards.jsonl")" \
+assert_not_match 'S6-PEER-skipme000000' "$s6_merged_cards" \
   "rank-work: non-s6-peer-fix kinds in the s6 file are ignored"
 # Idempotent: a second refresh must not duplicate the merged S6 card.
 TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --quiet >/dev/null 2>&1
@@ -411,43 +463,7 @@ EOF
 output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 20 --llm-top-n 0 2>&1)
 assert_match 'coverage gap subsystem' "$output" "rank-work: expands toward coverage-gap subsystems"
 
-policy_check=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - <<'PY'
-from workqueue import is_auditable_source_path
-
-# Audit-scope set (lib/audit_scope.EXCLUDED_PATH_SEGMENTS) is narrow:
-# only doc/example/test/fuzz families exclude by directory name.
-# Test-shaped *file names* still exclude regardless of location.
-bad = [
-    "fuzz/regexp.c",
-    "testdict.c",
-    "harness11.c",
-    "src/pcre2test.c",
-    "src/pcre2test_inc.h",
-    "src/pcre2_fuzzsupport.c",
-    "config.h",
-]
-good = [
-    "alpha/core/ThingProcessor.cpp",
-    "beta/io/plain.c",
-    "src/pcre2_compile.c",
-    "parser.c",
-    "third_party/vendor/lib/mirror.c",
-    # Deliberately auditable now: vendored deps, tools, scripts,
-    # build outputs, generated code, maintenance scripts.
-    "maint/tool.c",
-    "generated/table.c",
-    "tools/devtool.c",
-    "build/foo.c",
-    "scripts/munge.c",
-    "external/lib/bar.c",
-]
-if any(is_auditable_source_path(p) for p in bad):
-    raise SystemExit("bad path accepted")
-if any(not is_auditable_source_path(p) for p in good):
-    raise SystemExit("good path rejected")
-print("ok")
-PY
-)
+# (computed in the merged wq_unit_checks python invocation above)
 assert_eq "ok" "$policy_check" "workqueue policy: centralized bad path exclusions"
 
 jsonl_concurrency=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$RESULTS_DIR/state/concurrent.jsonl" <<'PY'
@@ -518,8 +534,11 @@ mkdir -p "$batch_results"
 TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$batch_results" "$RANK_WORK" \
   --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" --results-dir "$batch_results" \
   --limit 1 --llm-top-n 0 --quiet >/dev/null
-"$STATE" --results-dir "$batch_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" init
-first_batch_id=$(sed -n '1p' "$batch_results/work-cards.jsonl" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+# Setup-only state init (init itself is asserted on $RESULTS_DIR below):
+# replicate init_state = state dir + five empty jsonl stores.
+mk_state_dir "$batch_results"
+IFS= read -r first_batch_line < "$batch_results/work-cards.jsonl"
+first_batch_id=$(json_id "$first_batch_line")
 WORK_CARD_ALLOW_NORUNS_DISCARD=1 \
 "$STATE" --results-dir "$batch_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   update-card --card-id "$first_batch_id" --status discarded >/dev/null
@@ -561,7 +580,7 @@ assert_file_exists "$RESULTS_DIR/state/notes.jsonl" "state: init creates notes s
 card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --role reproduce)
 assert_match '"id": "(PATCH-|WORK-)' "$card" "state: claims next generic-compatible card"
-card_id=$(printf '%s' "$card" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+card_id=$(json_id "$card")
 assert_match '"expires_at":' "$(tail -1 "$RESULTS_DIR/state/claims.jsonl")" "state: card claim has a lease expiry"
 
 shown_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
@@ -681,7 +700,7 @@ assert_match '"id": "FIND-900-demo"' "$listed_findings_agent" "state: list-findi
 
 fresh_claim_next=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --peek)
-fresh_claim_next_id=$(printf '%s' "$fresh_claim_next" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+fresh_claim_next_id=$(json_id "$fresh_claim_next")
 if [ "$fresh_claim_next_id" = "$card_id" ]; then
   fail "state: fresh claim lease blocks duplicate card assignment" "next-card returned freshly claimed card $card_id"
 else
@@ -691,7 +710,7 @@ fi
 printf '{"agent":"1","card_id":"%s","claimed_at":"2000-01-01T00:00:00Z","expires_at":"2000-01-01T01:00:00Z","mode":"generic","role":"reproduce","status":"claimed"}\n' "$card_id" >> "$RESULTS_DIR/state/claims.jsonl"
 reclaimed=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce)
-reclaimed_id=$(printf '%s' "$reclaimed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+reclaimed_id=$(json_id "$reclaimed")
 assert_eq "$card_id" "$reclaimed_id" "state: stale card claim lease does not hide work permanently"
 
 blocked_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
@@ -699,7 +718,7 @@ blocked_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT
 assert_match '"status": "blocked"' "$blocked_card" "state: records blocked card status"
 after_block_next=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --peek)
-after_block_next_id=$(printf '%s' "$after_block_next" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+after_block_next_id=$(json_id "$after_block_next")
 if [ "$after_block_next_id" = "$card_id" ]; then
   fail "state: blocked work card is not re-offered in same result set" "next-card returned blocked card $card_id"
 else
@@ -711,12 +730,12 @@ hyp=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --targe
   --file "alpha/core/ThingProcessor.cpp:ThingProcessorRead:3" --input-shape "generic byte input" \
   --guard-gap "length check" --diagnostic bounds --strategy S7 --json)
 assert_match '"status": "PENDING"' "$hyp" "state: adds hypothesis row"
-hyp_id=$(printf '%s' "$hyp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+hyp_id=$(json_id "$hyp")
 
 printf '{"agent":"1","card_id":"%s","claimed_at":"2000-01-01T00:00:00Z","expires_at":"2000-01-01T01:00:00Z","mode":"generic","role":"reproduce","status":"claimed"}\n' "$card_id" >> "$RESULTS_DIR/state/claims.jsonl"
 while_hyp_active=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --peek)
-while_hyp_active_id=$(printf '%s' "$while_hyp_active" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+while_hyp_active_id=$(json_id "$while_hyp_active")
 if [ "$while_hyp_active_id" = "$card_id" ]; then
   fail "state: active hypothesis reserves work card" "next-card returned active hypothesis card $card_id"
 else
@@ -740,7 +759,7 @@ path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in [dup, *rows]) +
 PY
 surface_claim_next=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --peek)
-surface_claim_next_id=$(printf '%s' "$surface_claim_next" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+surface_claim_next_id=$(json_id "$surface_claim_next")
 if [ "$surface_claim_next_id" = "WORK-DUPLICATE-SURFACE" ]; then
   fail "state: active hypothesis reserves duplicate file surface" "next-card returned duplicate surface"
 else
@@ -791,23 +810,21 @@ assert_match 'refuses discard' "$refuse_out" "state: discard refused with insuff
 assert_not_match "\"status\": \"discarded\"" "$(tail -1 "$RESULTS_DIR/state/claims.jsonl")" "state: refused discard does not enter claims"
 
 # Add more evidence so the stricter production discard floor is met, then
-# discard succeeds.
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-run --agent 1 --hypothesis-id "$hyp_id" --card-id "$card_id" --mode generic \
-  --testcase "$RESULTS_DIR/scratch-1/tc.input" --asan-output "$RESULTS_DIR/scratch-1/tc.asan.txt" \
-  --verdict CLEAN >/dev/null
-second_hyp=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-hyp --agent 1 --card-id "$card_id" --hypothesis "ThingProcessorClose frees during callback" \
-  --file "alpha/core/ThingProcessor.cpp:close:88" --input-shape "callback closes owner" \
-  --guard-gap "state flag checked after callback" --diagnostic lifetime --strategy S5 --json)
-second_hyp_id=$(printf '%s' "$second_hyp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-note --agent 1 --hypothesis-id "$second_hyp_id" --card-id "$card_id" --kind data-flow \
-  --text "ThingProcessorRead copies into callback-owned state before close" >/dev/null
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-run --agent 1 --hypothesis-id "$second_hyp_id" --card-id "$card_id" --mode generic \
-  --testcase "$RESULTS_DIR/scratch-1/tc2.input" --asan-output "$RESULTS_DIR/scratch-1/tc2.asan.txt" \
-  --verdict CLEAN >/dev/null
+# discard succeeds. The mutators themselves (add-run/add-hyp/add-note) are
+# exercised above; this is pure setup, so append rows directly in the exact
+# shape lib/workqueue's add_run/add_hypothesis/add_note write — zero forks
+# instead of four bin/state startups.
+second_hyp_id="H-2nd0000001"
+printf '{"id": "%s", "agent": "1", "card_id": "%s", "hypothesis": "ThingProcessorClose frees during callback", "file": "alpha/core/ThingProcessor.cpp:close:88", "input_shape": "callback closes owner", "guard_gap": "state flag checked after callback", "diagnostic": "lifetime", "strategy": "S5", "status": "PENDING", "created_at": "2026-06-01T00:00:01Z", "updated_at": "2026-06-01T00:00:01Z"}\n' \
+  "$second_hyp_id" "$card_id" >> "$RESULTS_DIR/state/hypotheses.jsonl"
+printf '{"id": "NOTE-2nd000001", "agent": "1", "hypothesis_id": "%s", "card_id": "%s", "kind": "data-flow", "text": "ThingProcessorRead copies into callback-owned state before close", "created_at": "2026-06-01T00:00:01Z"}\n' \
+  "$second_hyp_id" "$card_id" >> "$RESULTS_DIR/state/notes.jsonl"
+{
+  printf '{"id": "RUN-floor00001", "agent": "1", "hypothesis_id": "%s", "card_id": "%s", "mode": "generic", "testcase": "%s/scratch-1/tc.input", "testcase_sha1": "", "asan_output": "%s/scratch-1/tc.asan.txt", "verdict": "CLEAN", "asan_runs": 1, "created_at": "2026-06-01T00:00:01Z"}\n' \
+    "$hyp_id" "$card_id" "$RESULTS_DIR" "$RESULTS_DIR"
+  printf '{"id": "RUN-floor00002", "agent": "1", "hypothesis_id": "%s", "card_id": "%s", "mode": "generic", "testcase": "%s/scratch-1/tc2.input", "testcase_sha1": "", "asan_output": "%s/scratch-1/tc2.asan.txt", "verdict": "CLEAN", "asan_runs": 1, "created_at": "2026-06-01T00:00:02Z"}\n' \
+    "$second_hyp_id" "$card_id" "$RESULTS_DIR" "$RESULTS_DIR"
+} >> "$RESULTS_DIR/state/runs.jsonl"
 card_update=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   update-card --agent 1 --card-id "$card_id" --status discarded --note "variants clean" --json)
 assert_match '"status": "discarded"' "$card_update" "state: updates card status"
@@ -852,7 +869,7 @@ ok_results="$TEST_TMPDIR/ok-line-defaults"
 mkdir -p "$ok_results/scratch-1"
 : > "$ok_results/scratch-1/tc.input"
 : > "$ok_results/scratch-1/tc.asan.txt"
-"$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" init
+mk_state_dir "$ok_results"
 ok_card_id="PATCH-okline"
 ok_hyp=$("$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   add-hyp --agent 1 --card-id "$ok_card_id" --hypothesis "ok-default check" \
@@ -939,19 +956,18 @@ assert_not_match 'Quick reference' "$resume_with_tried" "state: cheat sheet stay
 #    output. ──
 limit_results="$TEST_TMPDIR/limit-results"
 mkdir -p "$limit_results"
-"$STATE" --results-dir "$limit_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" init
+mk_state_dir "$limit_results"
 # Seed one PENDING hypothesis so resume has an active hypothesis to anchor
-# the notes section to.
-limit_hyp=$("$STATE" --results-dir "$limit_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-hyp --agent 2 --hypothesis "limit-probe" \
-  --file alpha.c:foo:1 --input-shape bytes --guard-gap none \
-  --diagnostic state --strategy S1 --json)
-limit_hyp_id=$(printf '%s' "$limit_hyp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+# the notes section to, plus 9 notes for it. add-hyp/add-note are exercised
+# above; this is pure setup, so append rows directly in the shape
+# lib/workqueue writes — zero bin/state startups for 10 rows.
+limit_hyp_id="H-limit00001"
+printf '{"id": "%s", "agent": "2", "card_id": "", "hypothesis": "limit-probe", "file": "alpha.c:foo:1", "input_shape": "bytes", "guard_gap": "none", "diagnostic": "state", "strategy": "S1", "status": "PENDING", "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z"}\n' \
+  "$limit_hyp_id" >> "$limit_results/state/hypotheses.jsonl"
 i=1
 while [ "$i" -le 9 ]; do
-  "$STATE" --results-dir "$limit_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-    add-note --agent 2 --hypothesis-id "$limit_hyp_id" --kind data-flow \
-    --text "note number $i for limit testing" >/dev/null
+  printf '{"id": "NOTE-limit%04d", "agent": "2", "hypothesis_id": "%s", "card_id": "", "kind": "data-flow", "text": "note number %d for limit testing", "created_at": "2026-06-01T00:01:%02dZ"}\n' \
+    "$i" "$limit_hyp_id" "$i" "$i" >> "$limit_results/state/notes.jsonl"
   i=$((i + 1))
 done
 
@@ -980,12 +996,16 @@ standalone_count=$(printf '%s\n' "$standalone_notes" | grep -c '^NOTE-' || true)
   || fail "state: standalone recent-notes should return all 9 rows, got ${standalone_count}"
 
 health_results="$TEST_TMPDIR/health-results"
-mkdir -p "$health_results/state"
-"$STATE" --results-dir "$health_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" init
+mk_state_dir "$health_results"
 # Active claims must lie in the future relative to wall-clock now;
 # `claim_blocks_card` collapses expired claims back to "eligible".
-claimed_at=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')
-expires_at=$(python3 -c 'from datetime import datetime, timezone, timedelta; print((datetime.now(timezone.utc)+timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+# One python prints both timestamps ("now|now+1h").
+claim_window=$(python3 -c 'from datetime import datetime, timezone, timedelta
+now = datetime.now(timezone.utc)
+fmt = "%Y-%m-%dT%H:%M:%SZ"
+print(now.strftime(fmt) + "|" + (now + timedelta(hours=1)).strftime(fmt))')
+claimed_at=${claim_window%%|*}
+expires_at=${claim_window##*|}
 expires_year=${expires_at%%-*}
 for n in 1 2 3 4 5 6 7 8 9 10; do
   printf '{"id":"WORK-health-%s","kind":"ranked-source","target_slug":"%s","file":"beta/io/plain.c","subsystem":"beta/io","mode":"generic","strategy":"S1","score":1,"reason":"test","status":"unclaimed"}\n' \
@@ -1013,16 +1033,13 @@ recent_lines=$(printf '%s\n' "$recent" | grep -c '^H' || true)
 assert_eq "3" "$recent_lines" "recent-hyps: three data rows for three hypothesis shapes"
 
 # Add a few extra rows so filters and --limit have something to cut.
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-hyp --id "H-ALPHA" --agent 2 --card-id "$card_id" --hypothesis "alpha lifetime in foo" \
-  --file "alpha/core/ThingProcessor.cpp:foo:42" --input-shape "any" --guard-gap "any" \
-  --diagnostic lifetime --strategy S2 >/dev/null
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-hyp --id "H-BETA"  --agent 1 --card-id "$card_id" --hypothesis "beta uninit at bar" \
-  --file "beta/io/plain.c:bar:7" --input-shape "any" --guard-gap "any" \
-  --diagnostic uninit --strategy S1 >/dev/null
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-hyp --id "H-ALPHA" --status DISCARDED --note "ruled out" >/dev/null
+# Pure setup (add-hyp/update-hyp are exercised above and below): append the
+# post-update rows directly — H-ALPHA already DISCARDED — like the H-DUP
+# literal rows below, instead of three bin/state round-trips.
+{
+  printf '{"id":"H-ALPHA","agent":"2","card_id":"%s","hypothesis":"alpha lifetime in foo","file":"alpha/core/ThingProcessor.cpp:foo:42","input_shape":"any","guard_gap":"any","diagnostic":"lifetime","strategy":"S2","status":"DISCARDED","created_at":"2026-06-01T00:00:03Z","updated_at":"2026-06-01T00:00:05Z"}\n' "$card_id"
+  printf '{"id":"H-BETA","agent":"1","card_id":"%s","hypothesis":"beta uninit at bar","file":"beta/io/plain.c:bar:7","input_shape":"any","guard_gap":"any","diagnostic":"uninit","strategy":"S1","status":"PENDING","created_at":"2026-06-01T00:00:04Z","updated_at":"2026-06-01T00:00:04Z"}\n' "$card_id"
+} >> "$RESULTS_DIR/state/hypotheses.jsonl"
 
 dup_add=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   add-hyp --id "H-BETA" --agent 2 --card-id "$card_id" --hypothesis "duplicate beta" \
@@ -1090,11 +1107,11 @@ recent_lim=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" 
 lim_lines=$(printf '%s\n' "$recent_lim" | grep -c '^H' || true)
 assert_eq "1" "$lim_lines" "recent-hyps --limit 1: returns exactly one data row"
 
-# Hypothesis text containing pipe characters is sanitized for the column delimiter.
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-hyp --id "H-PIPE" --agent 1 --card-id "$card_id" --hypothesis "issue|with|pipes" \
-  --file "alpha/core/ThingProcessor.cpp:f:1" --input-shape "any" --guard-gap "any" \
-  --diagnostic state --strategy S1 >/dev/null
+# Hypothesis text containing pipe characters is sanitized for the column
+# delimiter. add-hyp stores the text verbatim (sanitization is in the
+# recent-hyps renderer), so seed the raw row directly.
+printf '{"id":"H-PIPE","agent":"1","card_id":"%s","hypothesis":"issue|with|pipes","file":"alpha/core/ThingProcessor.cpp:f:1","input_shape":"any","guard_gap":"any","diagnostic":"state","strategy":"S1","status":"PENDING","created_at":"2026-06-01T00:00:06Z","updated_at":"2026-06-01T00:00:06Z"}\n' \
+  "$card_id" >> "$RESULTS_DIR/state/hypotheses.jsonl"
 recent_pipe=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   recent-hyps --status '^PENDING$' --limit 50)
 assert_match 'H-PIPE' "$recent_pipe" "recent-hyps: includes pipe-bearing row"
@@ -1109,15 +1126,14 @@ assert_match 'invalid --status regex' "$bad_status" "recent-hyps: bad regex repo
 
 # ── recent-runs: slim listing of runs.jsonl ──
 # We've already added one CLEAN run via add-run above. Add a CRASH run too
-# so verdict filtering has something to discriminate on.
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-run --agent 1 --hypothesis-id "H-BETA" --card-id "$card_id" --mode generic \
-  --testcase "$RESULTS_DIR/scratch-1/tc-crash.input" --asan-output "$RESULTS_DIR/scratch-1/tc-crash.asan.txt" \
-  --verdict CRASH >/dev/null
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-run --agent 2 --hypothesis-id "H-ALPHA" --card-id "$card_id" --mode browser \
-  --testcase "$RESULTS_DIR/scratch-2/tc.html" --asan-output "$RESULTS_DIR/scratch-2/tc.asan.txt" \
-  --verdict CLEAN >/dev/null
+# so verdict filtering has something to discriminate on. add-run itself is
+# exercised above; seed these reader fixtures directly.
+{
+  printf '{"id": "RUN-recent0001", "agent": "1", "hypothesis_id": "H-BETA", "card_id": "%s", "mode": "generic", "testcase": "%s/scratch-1/tc-crash.input", "testcase_sha1": "", "asan_output": "%s/scratch-1/tc-crash.asan.txt", "verdict": "CRASH", "asan_runs": 1, "created_at": "2026-06-01T00:00:07Z"}\n' \
+    "$card_id" "$RESULTS_DIR" "$RESULTS_DIR"
+  printf '{"id": "RUN-recent0002", "agent": "2", "hypothesis_id": "H-ALPHA", "card_id": "%s", "mode": "browser", "testcase": "%s/scratch-2/tc.html", "testcase_sha1": "", "asan_output": "%s/scratch-2/tc.asan.txt", "verdict": "CLEAN", "asan_runs": 1, "created_at": "2026-06-01T00:00:08Z"}\n' \
+    "$card_id" "$RESULTS_DIR" "$RESULTS_DIR"
+} >> "$RESULTS_DIR/state/runs.jsonl"
 
 recent_runs=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" recent-runs)
 assert_match '^id\|verdict\|mode\|agent\|hypothesis_id\|card_id\|testcase$' "$recent_runs" "recent-runs: header row"
@@ -1158,12 +1174,12 @@ bad_v=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --tar
 assert_match 'invalid --verdict regex' "$bad_v" "recent-runs: bad regex reported, not raised"
 
 # ── recent-notes: structured working context without markdown state ──
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-note --agent 1 --hypothesis-id "H-BETA" --card-id "$card_id" --kind guard \
-  --text "guard|text with delimiter is sanitized" >/dev/null
-"$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-note --agent 2 --hypothesis-id "H-ALPHA" --card-id "$card_id" --kind variants \
-  --text "variant note for agent two" >/dev/null
+# add-note stores text verbatim (pipe sanitization is in the recent-notes
+# renderer) and is exercised above; seed these reader fixtures directly.
+{
+  printf '{"id": "NOTE-recent001", "agent": "1", "hypothesis_id": "H-BETA", "card_id": "%s", "kind": "guard", "text": "guard|text with delimiter is sanitized", "created_at": "2026-06-01T00:00:09Z"}\n' "$card_id"
+  printf '{"id": "NOTE-recent002", "agent": "2", "hypothesis_id": "H-ALPHA", "card_id": "%s", "kind": "variants", "text": "variant note for agent two", "created_at": "2026-06-01T00:00:10Z"}\n' "$card_id"
+} >> "$RESULTS_DIR/state/notes.jsonl"
 recent_notes=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" recent-notes)
 assert_match '^id\|kind\|agent\|hypothesis_id\|card_id\|text$' "$recent_notes" "recent-notes: header row"
 assert_match 'data-flow' "$recent_notes" "recent-notes: includes data-flow note"
@@ -1297,13 +1313,16 @@ mkdir -p "$runner_results/scratch-1" "$runner_results/state"
 cat > "$runner_results/work-cards.jsonl" <<'JSONL'
 {"id":"WORK-runner","kind":"ranked-source","target_slug":"testproject","file":"alpha/core/ThingProcessor.cpp","subsystem":"alpha/core","status":"unclaimed","strategy":"S3"}
 JSONL
-"$STATE" --results-dir "$runner_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-hyp --agent 1 --card-id WORK-runner --id H-runner \
-  --hypothesis "runner diagnostic stays active" \
-  --file "alpha/core/ThingProcessor.cpp:ThingProcessorRead:3" \
-  --input-shape "shell runner emits a runtime diagnostic" \
-  --guard-gap "findings-only runner has no sanitizer crash bundle yet" \
-  --diagnostic state --strategy S3 >/dev/null
+# add-hyp is exercised above; seed the hypothesis row probe will act on
+# directly (the row shape lib/workqueue's add_hypothesis writes).
+mk_state_dir "$runner_results"
+printf '{"id": "H-runner", "agent": "1", "card_id": "WORK-runner", "hypothesis": "runner diagnostic stays active", "file": "alpha/core/ThingProcessor.cpp:ThingProcessorRead:3", "input_shape": "shell runner emits a runtime diagnostic", "guard_gap": "findings-only runner has no sanitizer crash bundle yet", "diagnostic": "state", "strategy": "S3", "status": "PENDING", "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z"}\n' \
+  >> "$runner_results/state/hypotheses.jsonl"
+# Seed the claim-on-adopt row add-hyp would have written, so the
+# "does not terminal-close card" negative grep below runs against a
+# populated claims file rather than passing vacuously on an empty one.
+printf '{"card_id": "WORK-runner", "agent": "1", "mode": "", "role": "", "status": "claimed", "claimed_at": "2026-06-01T00:00:00Z", "expires_at": "2026-06-01T01:00:00Z", "source": "add-hyp", "hypothesis_id": "H-runner"}\n' \
+  >> "$runner_results/state/claims.jsonl"
 cat > "$runner_results/scratch-1/runner-diagnostic.sh" <<'EOF_TC'
 #!/usr/bin/env bash
 # TARGET: alpha/core/ThingProcessor.cpp:ThingProcessorRead:3
@@ -1317,28 +1336,26 @@ chmod +x "$runner_results/scratch-1/runner-diagnostic.sh"
 RESULTS_DIR="$runner_results" PROBE_SANITIZER=runner \
   TARGET_SANITIZERS_EXPLICITLY_DISABLED=1 ASAN_GENERIC_BIN=bash \
   "$PROBE" "$runner_results/scratch-1/runner-diagnostic.sh" >/dev/null 2>&1 || true
-runner_run_verdict=$(python3 - "$runner_results/state/runs.jsonl" <<'PY'
+# One python reads back both outcomes ("<run verdict>|<hyp status>").
+runner_pair=$(python3 - "$runner_results/state/runs.jsonl" "$runner_results/state/hypotheses.jsonl" <<'PY'
 import json, sys
 verdict = ""
 for line in open(sys.argv[1], encoding="utf-8"):
     row = json.loads(line)
     if row.get("hypothesis_id") == "H-runner":
         verdict = row.get("verdict", "")
-print(verdict)
-PY
-)
-assert_eq "CRASH" "$runner_run_verdict" \
-  "probe: runner diagnostic is still recorded as a crash-like run"
-runner_hyp_status=$(python3 - "$runner_results/state/hypotheses.jsonl" <<'PY'
-import json, sys
 status = ""
-for line in open(sys.argv[1], encoding="utf-8"):
+for line in open(sys.argv[2], encoding="utf-8"):
     row = json.loads(line)
     if row.get("id") == "H-runner":
         status = row.get("status", "")
-print(status)
+print(verdict + "|" + status)
 PY
 )
+runner_run_verdict=${runner_pair%%|*}
+runner_hyp_status=${runner_pair##*|}
+assert_eq "CRASH" "$runner_run_verdict" \
+  "probe: runner diagnostic is still recorded as a crash-like run"
 assert_eq "PENDING" "$runner_hyp_status" \
   "probe: findings-only runner diagnostic does not terminal-close hypothesis"
 if grep -q '"card_id": "WORK-runner".*"status": "crash"' "$runner_results/state/claims.jsonl" 2>/dev/null; then
@@ -1435,7 +1452,7 @@ assert_match 'PATCH-\* is only the work-card id, not a VCS revision' "$directive
 
 prompt_claim_results="$TEST_TMPDIR/prompt-claim-results"
 mkdir -p "$prompt_claim_results/state"
-"$STATE" --results-dir "$prompt_claim_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" init
+mk_state_dir "$prompt_claim_results"
 cat > "$prompt_claim_results/work-cards.jsonl" <<'JSONL'
 {"id":"WORK-PROMPT-A","kind":"ranked-source","target_slug":"testproject","subsystem":"alpha","file":"alpha/a.c","mode":"generic","strategy":"S1","score":100,"status":"unclaimed"}
 {"id":"WORK-PROMPT-B","kind":"ranked-source","target_slug":"testproject","subsystem":"beta","file":"beta/b.c","mode":"generic","strategy":"S1","score":90,"status":"unclaimed"}
@@ -1486,39 +1503,27 @@ assert_match 'ASSIGNED WORK CARD' "$directive_abs" \
 # ── explain-queue: aggregated default + --all + --top sizing ──
 explain_results="$TEST_TMPDIR/explain-queue-results"
 mkdir -p "$explain_results"
-"$STATE" --results-dir "$explain_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" init
-python3 - "$explain_results/work-cards.jsonl" <<'PY'
-import json, sys
-rows = []
+mk_state_dir "$explain_results"
 # Five reasons, varying counts: not-auditable=4, terminal:DISCARDED=2, claimed-until=2, eligible=1, mode-incompatible=1
-for i in range(4):
-    rows.append({"id": f"WORK-NA-{i}", "kind": "ranked-source", "file": f"third_party/skip{i}.c", "subsystem": "skip", "mode": "generic", "score": 1, "reason": "rank"})
-for i in range(2):
-    rows.append({"id": f"WORK-TD-{i}", "kind": "ranked-source", "file": f"alpha/term{i}.c", "subsystem": "alpha", "mode": "generic", "score": 1, "reason": "rank", "status": "discarded"})
-for i in range(2):
-    rows.append({"id": f"WORK-CU-{i}", "kind": "ranked-source", "file": f"alpha/claim{i}.c", "subsystem": "alpha", "mode": "generic", "score": 1, "reason": "rank"})
-rows.append({"id": "WORK-OK-0", "kind": "ranked-source", "file": "alpha/ok.c", "subsystem": "alpha", "mode": "generic", "score": 1, "reason": "rank"})
-rows.append({"id": "WORK-MI-0", "kind": "ranked-source", "file": "alpha/mode.c", "subsystem": "alpha", "mode": "browser", "score": 1, "reason": "rank"})
-with open(sys.argv[1], "w") as f:
-    for r in rows:
-        f.write(json.dumps(r) + "\n")
-PY
-# Synthesize claims.jsonl entries that are still within TTL for the CU rows.
-python3 - "$explain_results/state/claims.jsonl" <<'PY'
-import json, sys
-from datetime import datetime, timedelta, timezone
-expires = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-claimed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-rows = [
-    {"agent": "9", "card_id": "WORK-CU-0", "claimed_at": claimed, "expires_at": expires, "mode": "generic", "role": "reproduce", "status": "claimed"},
-    {"agent": "9", "card_id": "WORK-CU-1", "claimed_at": claimed, "expires_at": expires, "mode": "generic", "role": "reproduce", "status": "claimed"},
-    {"agent": "9", "card_id": "WORK-TD-0", "claimed_at": claimed, "expires_at": expires, "mode": "generic", "role": "reproduce", "status": "discarded"},
-    {"agent": "9", "card_id": "WORK-TD-1", "claimed_at": claimed, "expires_at": expires, "mode": "generic", "role": "reproduce", "status": "discarded"},
-]
-with open(sys.argv[1], "w") as f:
-    for r in rows:
-        f.write(json.dumps(r) + "\n")
-PY
+# (static expansion of a former python generator loop)
+cat > "$explain_results/work-cards.jsonl" <<'JSONL'
+{"id": "WORK-NA-0", "kind": "ranked-source", "file": "third_party/skip0.c", "subsystem": "skip", "mode": "generic", "score": 1, "reason": "rank"}
+{"id": "WORK-NA-1", "kind": "ranked-source", "file": "third_party/skip1.c", "subsystem": "skip", "mode": "generic", "score": 1, "reason": "rank"}
+{"id": "WORK-NA-2", "kind": "ranked-source", "file": "third_party/skip2.c", "subsystem": "skip", "mode": "generic", "score": 1, "reason": "rank"}
+{"id": "WORK-NA-3", "kind": "ranked-source", "file": "third_party/skip3.c", "subsystem": "skip", "mode": "generic", "score": 1, "reason": "rank"}
+{"id": "WORK-TD-0", "kind": "ranked-source", "file": "alpha/term0.c", "subsystem": "alpha", "mode": "generic", "score": 1, "reason": "rank", "status": "discarded"}
+{"id": "WORK-TD-1", "kind": "ranked-source", "file": "alpha/term1.c", "subsystem": "alpha", "mode": "generic", "score": 1, "reason": "rank", "status": "discarded"}
+{"id": "WORK-CU-0", "kind": "ranked-source", "file": "alpha/claim0.c", "subsystem": "alpha", "mode": "generic", "score": 1, "reason": "rank"}
+{"id": "WORK-CU-1", "kind": "ranked-source", "file": "alpha/claim1.c", "subsystem": "alpha", "mode": "generic", "score": 1, "reason": "rank"}
+{"id": "WORK-OK-0", "kind": "ranked-source", "file": "alpha/ok.c", "subsystem": "alpha", "mode": "generic", "score": 1, "reason": "rank"}
+{"id": "WORK-MI-0", "kind": "ranked-source", "file": "alpha/mode.c", "subsystem": "alpha", "mode": "browser", "score": 1, "reason": "rank"}
+JSONL
+# Synthesize claims.jsonl entries that are still within TTL for the CU rows
+# (reusing the future-dated claim window computed for health_results above).
+for explain_claim in 'WORK-CU-0|claimed' 'WORK-CU-1|claimed' 'WORK-TD-0|discarded' 'WORK-TD-1|discarded'; do
+  printf '{"agent": "9", "card_id": "%s", "claimed_at": "%s", "expires_at": "%s", "mode": "generic", "role": "reproduce", "status": "%s"}\n' \
+    "${explain_claim%%|*}" "$claimed_at" "$expires_at" "${explain_claim##*|}"
+done > "$explain_results/state/claims.jsonl"
 
 # Default: aggregated digest, mode=generic. Expect bounded JSONL with count/reason/sample_id.
 default_out=$("$STATE" --results-dir "$explain_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
@@ -1560,39 +1565,20 @@ fi
 
 diversity_results="$TEST_TMPDIR/diversity-results"
 mkdir -p "$diversity_results/state"
-"$STATE" --results-dir "$diversity_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" init >/dev/null
-python3 - "$diversity_results/work-cards.jsonl" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-cards = []
-for i in range(1, 6):
-    cards.append({
-        "id": f"WORK-ALPHA-{i}",
-        "kind": "ranked-source",
-        "target_slug": "testproject",
-        "subsystem": "include/nlohmann",
-        "file": f"include/nlohmann/json{i}.hpp",
-        "mode": "generic",
-        "strategy": f"S{i}",
-        "score": 100 - i,
-        "status": "unclaimed",
-    })
-for i in range(1, 5):
-    cards.append({
-        "id": f"WORK-BETA-{i}",
-        "kind": "ranked-source",
-        "target_slug": "testproject",
-        "subsystem": "src/parser",
-        "file": f"src/parser/p{i}.cpp",
-        "mode": "generic",
-        "strategy": f"S{i}",
-        "score": 20 - i,
-        "status": "unclaimed",
-    })
-Path(sys.argv[1]).write_text("\n".join(json.dumps(c, sort_keys=True) for c in cards) + "\n")
-PY
+mk_state_dir "$diversity_results"
+# Deterministic card set (was a python generator loop; the expansion is
+# static, so write the rows directly): five include/nlohmann cards scored
+# 99..95 and four src/parser cards scored 19..16, strategies S1..S5/S1..S4.
+{
+  for i in 1 2 3 4 5; do
+    printf '{"id": "WORK-ALPHA-%d", "kind": "ranked-source", "target_slug": "testproject", "subsystem": "include/nlohmann", "file": "include/nlohmann/json%d.hpp", "mode": "generic", "strategy": "S%d", "score": %d, "status": "unclaimed"}\n' \
+      "$i" "$i" "$i" "$((100 - i))"
+  done
+  for i in 1 2 3 4; do
+    printf '{"id": "WORK-BETA-%d", "kind": "ranked-source", "target_slug": "testproject", "subsystem": "src/parser", "file": "src/parser/p%d.cpp", "mode": "generic", "strategy": "S%d", "score": %d, "status": "unclaimed"}\n' \
+      "$i" "$i" "$i" "$((20 - i))"
+  done
+} > "$diversity_results/work-cards.jsonl"
 cat > "$diversity_results/state/hypotheses.jsonl" <<'JSONL'
 {"id":"H-alpha","agent":"1","card_id":"WORK-ALPHA-1","status":"PENDING","file":"include/nlohmann/json1.hpp","subsystem":"include/nlohmann"}
 JSONL
@@ -1704,7 +1690,7 @@ JSONL
 # P3 behaviour.
 promo_claim_a=$("$STATE" --results-dir "$promoted_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --role reproduce --strategy S2)
-promo_claim_a_id=$(printf '%s' "$promo_claim_a" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+promo_claim_a_id=$(json_id "$promo_claim_a")
 case "$promo_claim_a_id" in
   WORK-PROMO-S7|WORK-PROMO-S5)
     pass "state: P3 precedence steers S2-pinned agent onto Promote-recon card"
@@ -1720,7 +1706,7 @@ esac
 # applies as normal. The S2-pinned agent should now receive WORK-PATCH-S2.
 promo_claim_b=$("$STATE" --results-dir "$promoted_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --strategy S2)
-promo_claim_b_id=$(printf '%s' "$promo_claim_b" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+promo_claim_b_id=$(json_id "$promo_claim_b")
 assert_eq "WORK-PATCH-S2" "$promo_claim_b_id" \
   "state: P3 precedence releases once one Promote card is actively held"
 
@@ -1737,7 +1723,7 @@ mkdir -p "$unpromo_results/state"
 grep -v PROMO "$promoted_results/work-cards.jsonl" > "$unpromo_results/work-cards.jsonl"
 unpromo_claim=$("$STATE" --results-dir "$unpromo_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --role reproduce --strategy S2)
-unpromo_claim_id=$(printf '%s' "$unpromo_claim" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+unpromo_claim_id=$(json_id "$unpromo_claim")
 assert_eq "WORK-PATCH-S2" "$unpromo_claim_id" \
   "state: NEEDS-VERIFICATION recon does NOT trigger Promote precedence"
 
@@ -1754,7 +1740,7 @@ mkdir -p "$optout_results/state"
 cp "$promoted_results/work-cards.jsonl" "$optout_results/work-cards.jsonl"
 optout_claim=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$optout_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --role reproduce --strategy S2)
-optout_claim_id=$(printf '%s' "$optout_claim" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+optout_claim_id=$(json_id "$optout_claim")
 assert_eq "WORK-PATCH-S2" "$optout_claim_id" \
   "state: WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 disables the gate"
 
@@ -1792,7 +1778,7 @@ JSONL
 # WORK-G-PATCH rather than returning nothing.
 g_claim=$("$STATE" --results-dir "$g_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --role reproduce --strategy S2 --peek)
-g_claim_id=$(printf '%s' "$g_claim" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)
+g_claim_id=$(json_id "$g_claim" || true)
 assert_eq "WORK-G-PATCH" "$g_claim_id" \
   "G: P3 override falls through to normal queue when every Promote shares an owned surface"
 
@@ -1808,7 +1794,7 @@ JSONL
 mkdir -p "$g_results/crashes/CRASH-001-1"
 g_owner_claim=$("$STATE" --results-dir "$g_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --peek)
-g_owner_claim_id=$(printf '%s' "$g_owner_claim" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)
+g_owner_claim_id=$(json_id "$g_owner_claim" || true)
 # Any of the three Promote cards is acceptable — once the productive
 # CRASH cleared the active-hypothesis lock, the queue is free to hand
 # back A or any of its siblings. The point is that the agent isn't
@@ -1868,7 +1854,7 @@ JSONL
 # on the matching strategy).
 pre_reject=$("$STATE" --results-dir "$p5_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --role reproduce --strategy S2 --peek)
-pre_reject_id=$(printf '%s' "$pre_reject" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+pre_reject_id=$(json_id "$pre_reject")
 assert_eq "WORK-P5-A" "$pre_reject_id" "P5: pre-rejection, agent receives the top-scored card"
 
 # Apply the do-not-revisit marker via the CLI.
@@ -1881,11 +1867,11 @@ assert_match '"agent": "1"' "$mark_out" "P5: mark-card-reject-skip resolves agen
 # WORK-P5-A (the skip is per-agent, not global).
 post_reject_a1=$("$STATE" --results-dir "$p5_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --role reproduce --strategy S2 --peek)
-post_reject_a1_id=$(printf '%s' "$post_reject_a1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+post_reject_a1_id=$(json_id "$post_reject_a1")
 assert_eq "WORK-P5-B" "$post_reject_a1_id" "P5: post-rejection, agent 1 skips the rejected card"
 post_reject_a2=$("$STATE" --results-dir "$p5_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --strategy S2 --peek)
-post_reject_a2_id=$(printf '%s' "$post_reject_a2" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+post_reject_a2_id=$(json_id "$post_reject_a2")
 assert_eq "WORK-P5-A" "$post_reject_a2_id" "P5: post-rejection, other agents still see the card"
 
 # mark-card-reject-skip --card-id/--agent path (no crash_id needed) still works.
@@ -1915,20 +1901,20 @@ JSONL
 # matches the multi-strategy card.
 p7_s5=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --role reproduce --strategy S5 --peek)
-p7_s5_id=$(printf '%s' "$p7_s5" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+p7_s5_id=$(json_id "$p7_s5")
 assert_eq "WORK-P7-PROMO" "$p7_s5_id" "P7: --strategy S5 matches via allowed_strategies"
 
 # (b) S7-filtered agent matches via primary strategy (unchanged semantics).
 p7_s7=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --strategy S7 --peek)
-p7_s7_id=$(printf '%s' "$p7_s7" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+p7_s7_id=$(json_id "$p7_s7")
 assert_eq "WORK-P7-PROMO" "$p7_s7_id" "P7: --strategy S7 matches via primary strategy"
 
 # (c) Non-recon S2 card is still gated by exact strategy match (legacy
 # single-strategy behaviour preserved).
 p7_s2=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 3 --mode generic --role reproduce --strategy S2 --peek)
-p7_s2_id=$(printf '%s' "$p7_s2" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+p7_s2_id=$(json_id "$p7_s2")
 assert_eq "WORK-P7-S2" "$p7_s2_id" "P7: non-recon S2 cards still use exact-match comparison"
 
 # (d) An unrelated strategy (S3) finds neither card — allowed_strategies
@@ -1958,7 +1944,7 @@ cat > "$p7_mode_results/work-cards.jsonl" <<'JSONL'
 JSONL
 p7_asan=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$p7_mode_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 5 --mode generic --role reproduce --strategy S7 --peek)
-p7_asan_id=$(printf '%s' "$p7_asan" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+p7_asan_id=$(json_id "$p7_asan")
 assert_eq "WORK-P7-ASAN-PROMO" "$p7_asan_id" "P7: generic agents can claim sanitizer-mode Promote cards"
 
 # A bogus crash_id with no resolving hypothesis surfaces an error.
@@ -1981,7 +1967,7 @@ mkdir -p "$nostrat_results/state"
 cp "$promoted_results/work-cards.jsonl" "$nostrat_results/work-cards.jsonl"
 nostrat_claim=$("$STATE" --results-dir "$nostrat_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --role reproduce)
-nostrat_claim_id=$(printf '%s' "$nostrat_claim" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+nostrat_claim_id=$(json_id "$nostrat_claim")
 case "$nostrat_claim_id" in
   WORK-PROMO-S7|WORK-PROMO-S5)
     pass "state: P3 precedence applies to filter-less claims as well"
@@ -2106,85 +2092,87 @@ assert_eq "0" "$resume_peek_lines" "state resume: --peek does not append a lease
 # snake_case parser detection (the old CamelCase-only regex missed it),
 # a structural assert family that needs no MOZ_/DCHECK enumeration, and
 # direct S5/S8 seeding (previously never produced by any code feature).
-cfr_out=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - <<'PY'
+# This and the two stateless checks below (iter_source_files, S8 feature
+# coverage) share ONE python invocation — the workqueue import is the
+# expensive part. Each prints a labeled ok/failure line so the three
+# assertions stay independent.
+wq_feature_checks=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$TEST_TMPDIR" <<'PY'
+import sys, tempfile, pathlib
 import workqueue as W
+
+results = []
 
 def reasons(t):
     return W.code_feature_reasons(t)[1]
 
-# (label, snippet, expected reason tag, expected primary strategy)
-checks = [
-    ("snake_case parser is detected (CamelCase-only regression)",
-     "int parse_uri(const char *s){return 0;}",
-     "input-consumption entrypoint", "S7"),
-    ("leading-position verb is detected",
-     "void ReadBuffer(char *p){}",
-     "input-consumption entrypoint", "S7"),
-    ("assert family is target-agnostic (no MOZ_ token needed)",
-     "static_assert(sizeof(int)==4); CHECK_EQ(a,b);",
-     "asserted invariant", "S2"),
-    ("lifetime ops seed S5 directly",
-     "void g(T *p){ free(p); }",
-     "lifetime/ownership operation", "S5"),
-    ("unsafe islands seed S5",
-     "unsafe { *p = 1; }",
-     "unmanaged escape hatch", "S5"),
-    ("round-trip code seeds S8",
-     "char *base64_encode(const char *s);",
-     "round-trip property surface", "S8"),
-    ("deserialization sink seeds S7",
-     "ois.readObject();",
-     "deserialization sink", "S7"),
-    # multi-language coverage: not just C/C++
-    ("Go panic is an asserted invariant",
-     "func f(){ panic(\"unreachable\") }",
-     "asserted invariant", "S2"),
-    ("Go exec.Command is a command/injection surface",
-     "c := exec.Command(\"sh\", \"-c\", arg)",
-     "command/injection surface", "S7"),
-    ("Rust unsafe block seeds S5",
-     "unsafe fn raw(p: *mut u8) { *p = 0; }",
-     "unmanaged escape hatch", "S5"),
-]
-bad = []
-for label, snip, want_reason, want_strat in checks:
-    r = reasons(snip)
-    s = W.strategy_for(r)
-    if want_reason not in r or s != want_strat:
-        bad.append(f"{label}: reasons={r} strategy={s}")
+def run(label, fn):
+    bad = fn()
+    results.append(f"{label}:ok" if not bad else f"{label}:FAIL: " + " | ".join(bad))
 
-# concurrency keywords must not be misread as input-consumption
-for fp in ("pthread_create(&t);", "int thread_local_x;"):
-    if "input-consumption entrypoint" in reasons(fp):
-        bad.append(f"false-positive: {fp!r} flagged input-consumption")
+def cfr():
+    # (label, snippet, expected reason tag, expected primary strategy)
+    checks = [
+        ("snake_case parser is detected (CamelCase-only regression)",
+         "int parse_uri(const char *s){return 0;}",
+         "input-consumption entrypoint", "S7"),
+        ("leading-position verb is detected",
+         "void ReadBuffer(char *p){}",
+         "input-consumption entrypoint", "S7"),
+        ("assert family is target-agnostic (no MOZ_ token needed)",
+         "static_assert(sizeof(int)==4); CHECK_EQ(a,b);",
+         "asserted invariant", "S2"),
+        ("lifetime ops seed S5 directly",
+         "void g(T *p){ free(p); }",
+         "lifetime/ownership operation", "S5"),
+        ("unsafe islands seed S5",
+         "unsafe { *p = 1; }",
+         "unmanaged escape hatch", "S5"),
+        ("round-trip code seeds S8",
+         "char *base64_encode(const char *s);",
+         "round-trip property surface", "S8"),
+        ("deserialization sink seeds S7",
+         "ois.readObject();",
+         "deserialization sink", "S7"),
+        # multi-language coverage: not just C/C++
+        ("Go panic is an asserted invariant",
+         "func f(){ panic(\"unreachable\") }",
+         "asserted invariant", "S2"),
+        ("Go exec.Command is a command/injection surface",
+         "c := exec.Command(\"sh\", \"-c\", arg)",
+         "command/injection surface", "S7"),
+        ("Rust unsafe block seeds S5",
+         "unsafe fn raw(p: *mut u8) { *p = 0; }",
+         "unmanaged escape hatch", "S5"),
+    ]
+    bad = []
+    for label, snip, want_reason, want_strat in checks:
+        r = reasons(snip)
+        s = W.strategy_for(r)
+        if want_reason not in r or s != want_strat:
+            bad.append(f"{label}: reasons={r} strategy={s}")
 
-print("ok" if not bad else "FAIL: " + " | ".join(bad))
-PY
-)
-assert_eq "ok" "$cfr_out" "code_feature_reasons: target-agnostic patterns map to right strategies"
+    # concurrency keywords must not be misread as input-consumption
+    for fp in ("pthread_create(&t);", "int thread_local_x;"):
+        if "input-consumption entrypoint" in reasons(fp):
+            bad.append(f"false-positive: {fp!r} flagged input-consumption")
+    return bad
 
 # ─── iter_source_files: no cap scans the whole repo ─────────────────
 # RANK_WORK_MAX_FILES is gone — the ranker must never go blind past a
 # fixed walk position. The default (and an explicit 0) means unbounded;
 # a positive max_files still bounds the sample-only callers (peer-fix-cards).
-itf_out=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$TEST_TMPDIR" <<'PY'
-import sys, tempfile, pathlib
-import workqueue as W
-root = pathlib.Path(tempfile.mkdtemp(dir=sys.argv[1]))
-src = root / "lib"
-src.mkdir()
-for i in range(12):
-    (src / f"src{i:02d}.c").write_text("int f(void){return 0;}\n")
-all_default = list(W.iter_source_files(root))
-all_zero = list(W.iter_source_files(root, max_files=0))
-bounded = list(W.iter_source_files(root, max_files=4))
-ok = len(all_default) == 12 and len(all_zero) == 12 and len(bounded) == 4
-print("ok" if ok else
-      f"FAIL default={len(all_default)} zero={len(all_zero)} bounded={len(bounded)}")
-PY
-)
-assert_eq "ok" "$itf_out" \
-  "iter_source_files: default/0 scans whole repo, positive max_files bounds it"
+def itf():
+    root = pathlib.Path(tempfile.mkdtemp(dir=sys.argv[1]))
+    src = root / "lib"
+    src.mkdir()
+    for i in range(12):
+        (src / f"src{i:02d}.c").write_text("int f(void){return 0;}\n")
+    all_default = list(W.iter_source_files(root))
+    all_zero = list(W.iter_source_files(root, max_files=0))
+    bounded = list(W.iter_source_files(root, max_files=4))
+    if len(all_default) == 12 and len(all_zero) == 12 and len(bounded) == 4:
+        return []
+    return [f"default={len(all_default)} zero={len(all_zero)} bounded={len(bounded)}"]
 
 # S8 source-feature coverage: injectivity, idempotence (sanitize/dedupe), and
 # numerical-domain surfaces must seed an S8 angle, while container plumbing and
@@ -2192,67 +2180,77 @@ assert_eq "ok" "$itf_out" \
 # the over-broadening Codex flagged. strategy_for returns the primary; the S8
 # reason may surface as a companion when a higher-signal feature co-occurs, so
 # the oracle is "an S8 reason is present", not "primary == S8".
-s8_coverage=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - <<'PY'
-import workqueue as W
-S8 = {"round-trip property surface", "hash/injectivity surface",
-      "numerical-domain surface"}
-positives = {
-    # injectivity — distinctive families and the generic hash/digest token
-    "murmur_hash":   "uint32_t murmur_hash(const char* p){return murmur_hash(p);}",
-    "compute_digest":"void compute_digest(const char* p){compute_digest(p);}",
-    "hash_bytes":    "uint64_t hash_bytes(const void* p, size_t n);",
-    "hash_string":   "uint32_t hash_string(const char* s);",
-    "hashString":    "int hashString(const char* s);",
-    "digest_update": "void digest_update(ctx* c, const void* p);",
-    "sha512_init":   "void sha512_init(ctx* c);",
-    "cache_key":     "char* cache_key(req* r){return cache_key(r);}",
-    "make_id":       "long make_id(void){ return make_id(); }",
-    "generate_id":   "long generate_id(void);",
-    "id_for":        "long id_for(obj* o);",
-    # idempotence
-    "sanitize_html": "char* sanitize_html(char* s){return sanitize_html(s);}",
-    "dedupe_path":   "char* dedupe_path(char* p){return dedupe_path(p);}",
-    # numerical-domain — declared language + enforcement calls
-    "clamp_sample":  "double clamp_sample(double x){return clamp_sample(x);}",
-    "nonneg_prose":  "// returns a non-negative count\nint count_items(set* s);",
-    "prob_prose":    "/* result is a probability in [0,1] */\ndouble score(model* m);",
-    "isfinite_use":  "double f(double v){ if (isfinite(v)) return v; return 0; }",
-}
-negatives = {
-    # injectivity — container plumbing must NOT match
-    "hashmap_insert":   "void hashmap_insert(map* m, int k){ insert(m,k); }",
-    "hashtable_get":    "void* hashtable_get(map* m, int k){ return 0; }",
-    "rehash_table":     "void rehash_table(map* m){ rehash_table(m); }",
-    "hash_table_lookup":"void* hash_table_lookup(map* m, int k){ return 0; }",
-    # numerical — non-numeric prose must NOT match (Codex FP cases)
-    "finite_state":     "// drive the finite state machine forward\nvoid step(sm* m);",
-    "finite_element":   "/* finite element mesh refinement */\nvoid refine(mesh* m);",
-    # generic
-    "to_string":        "char* to_string(int x){ return fmt(x); }",
-    "plain_compute":    "int compute(int x){ return x + 1; }",
-}
-bad = []
-for name, body in positives.items():
-    _, reasons = W.code_feature_reasons(body)
-    if not (S8 & set(reasons)):
-        bad.append(f"positive {name} missing S8 reason: {reasons}")
-for name, body in negatives.items():
-    _, reasons = W.code_feature_reasons(body)
-    if S8 & set(reasons):
-        bad.append(f"negative {name} wrongly got S8 reason: {reasons}")
+def s8():
+    S8 = {"round-trip property surface", "hash/injectivity surface",
+          "numerical-domain surface"}
+    positives = {
+        # injectivity — distinctive families and the generic hash/digest token
+        "murmur_hash":   "uint32_t murmur_hash(const char* p){return murmur_hash(p);}",
+        "compute_digest":"void compute_digest(const char* p){compute_digest(p);}",
+        "hash_bytes":    "uint64_t hash_bytes(const void* p, size_t n);",
+        "hash_string":   "uint32_t hash_string(const char* s);",
+        "hashString":    "int hashString(const char* s);",
+        "digest_update": "void digest_update(ctx* c, const void* p);",
+        "sha512_init":   "void sha512_init(ctx* c);",
+        "cache_key":     "char* cache_key(req* r){return cache_key(r);}",
+        "make_id":       "long make_id(void){ return make_id(); }",
+        "generate_id":   "long generate_id(void);",
+        "id_for":        "long id_for(obj* o);",
+        # idempotence
+        "sanitize_html": "char* sanitize_html(char* s){return sanitize_html(s);}",
+        "dedupe_path":   "char* dedupe_path(char* p){return dedupe_path(p);}",
+        # numerical-domain — declared language + enforcement calls
+        "clamp_sample":  "double clamp_sample(double x){return clamp_sample(x);}",
+        "nonneg_prose":  "// returns a non-negative count\nint count_items(set* s);",
+        "prob_prose":    "/* result is a probability in [0,1] */\ndouble score(model* m);",
+        "isfinite_use":  "double f(double v){ if (isfinite(v)) return v; return 0; }",
+    }
+    negatives = {
+        # injectivity — container plumbing must NOT match
+        "hashmap_insert":   "void hashmap_insert(map* m, int k){ insert(m,k); }",
+        "hashtable_get":    "void* hashtable_get(map* m, int k){ return 0; }",
+        "rehash_table":     "void rehash_table(map* m){ rehash_table(m); }",
+        "hash_table_lookup":"void* hash_table_lookup(map* m, int k){ return 0; }",
+        # numerical — non-numeric prose must NOT match (Codex FP cases)
+        "finite_state":     "// drive the finite state machine forward\nvoid step(sm* m);",
+        "finite_element":   "/* finite element mesh refinement */\nvoid refine(mesh* m);",
+        # generic
+        "to_string":        "char* to_string(int x){ return fmt(x); }",
+        "plain_compute":    "int compute(int x){ return x + 1; }",
+    }
+    bad = []
+    for name, body in positives.items():
+        _, rs = W.code_feature_reasons(body)
+        if not (S8 & set(rs)):
+            bad.append(f"positive {name} missing S8 reason: {rs}")
+    for name, body in negatives.items():
+        _, rs = W.code_feature_reasons(body)
+        if S8 & set(rs):
+            bad.append(f"negative {name} wrongly got S8 reason: {rs}")
 
-# Ranking regression: a repetition-dense S8 file must NOT outrank a single
-# high-signal S7 input-consumption entrypoint. Presence-only scoring (the
-# S8 rows score once, not per-match) is what holds this invariant.
-s7_score, _ = W.code_feature_reasons("int parse_doc(const char* p);")
-s8_dense, _ = W.code_feature_reasons(
-    "double a(double x){clamp(x);} double b(){clamp(0);} "
-    "double c(){clamp(1);} double d(){clamp(2);}")
-if s8_dense >= s7_score:
-    bad.append(f"clamp-dense S8 ({s8_dense}) outranks single S7 ({s7_score})")
-print("ok" if not bad else "FAIL: " + "; ".join(bad))
+    # Ranking regression: a repetition-dense S8 file must NOT outrank a single
+    # high-signal S7 input-consumption entrypoint. Presence-only scoring (the
+    # S8 rows score once, not per-match) is what holds this invariant.
+    s7_score, _ = W.code_feature_reasons("int parse_doc(const char* p);")
+    s8_dense, _ = W.code_feature_reasons(
+        "double a(double x){clamp(x);} double b(){clamp(0);} "
+        "double c(){clamp(1);} double d(){clamp(2);}")
+    if s8_dense >= s7_score:
+        bad.append(f"clamp-dense S8 ({s8_dense}) outranks single S7 ({s7_score})")
+    return bad
+
+run("cfr", cfr)
+run("itf", itf)
+run("s8", s8)
+print("\n".join(results))
 PY
 )
+case "$wq_feature_checks" in *"cfr:ok"*) cfr_out=ok ;; *) cfr_out="$wq_feature_checks" ;; esac
+case "$wq_feature_checks" in *"itf:ok"*) itf_out=ok ;; *) itf_out="$wq_feature_checks" ;; esac
+case "$wq_feature_checks" in *"s8:ok"*) s8_coverage=ok ;; *) s8_coverage="$wq_feature_checks" ;; esac
+assert_eq "ok" "$cfr_out" "code_feature_reasons: target-agnostic patterns map to right strategies"
+assert_eq "ok" "$itf_out" \
+  "iter_source_files: default/0 scans whole repo, positive max_files bounds it"
 assert_eq "ok" "$s8_coverage" \
   "code_feature_reasons: S8 covers injectivity/idempotence/numerical-domain, skips plumbing, never outranks S7"
 

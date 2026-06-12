@@ -44,6 +44,10 @@ poll_pause() {
   perl -e 'select undef, undef, undef, 0.1'
 }
 
+# Deadlines passed to these helpers are failure bounds, not expected
+# durations — both poll and return as soon as the condition holds, so a
+# generous bound costs nothing on success but absorbs scheduler stalls
+# when the full suite runs 8-way parallel.
 wait_for_file() {
   local path="$1" seconds="$2" start
   start=$SECONDS
@@ -122,7 +126,7 @@ AGY_IDLE_CONFIRM_POLLS=0 \
     "$work/nonexistent.raw" "$short_pid" "$work" "test-label-T2" &
 watcher_pid=$!
 wait "$short_pid" 2>/dev/null
-if wait_for_dead_pid "$watcher_pid" 2; then
+if wait_for_dead_pid "$watcher_pid" 10; then
   wait "$watcher_pid" 2>/dev/null || true
   pass "T2: watchdog exits when agent dies"
 else
@@ -196,12 +200,12 @@ AGY_IDLE_CONFIRM_POLLS=0 \
   start_gemini_watchdog "$quota_raw" "$victim_pid" "$work/marker" "test-quota-T4" &
 quota_watcher=$!
 
-if wait_for_file "$work/marker/.quota-exhausted" 3; then
+if wait_for_file "$work/marker/.quota-exhausted" 10; then
   pass "T4: quota arm writes .quota-exhausted under marker_dir"
 else
   fail "T4: quota arm writes .quota-exhausted under marker_dir" "marker file not present"
 fi
-if wait_for_dead_pid "$victim_pid" 3; then
+if wait_for_dead_pid "$victim_pid" 10; then
   pass "T4: quota arm kills the agent process"
 else
   fail "T4: quota arm kills the agent process" "victim still alive"
@@ -224,7 +228,7 @@ AGY_DRIP_GRACE_SECS=0 \
 AGY_IDLE_CONFIRM_POLLS=0 \
   start_gemini_watchdog "$quota_raw" "$victim2" "" "test-empty-marker-T5" &
 empty_marker_watcher=$!
-if wait_for_dead_pid "$victim2" 3; then
+if wait_for_dead_pid "$victim2" 10; then
   pass "T5: empty marker_dir does not block the kill arm"
 else
   fail "T5: empty marker_dir does not block the kill arm" "victim still alive"

@@ -41,6 +41,12 @@ touch "$INDEX"
 CRITICAL_LOG="$TEST_TMPDIR/critical.log"
 BACKGROUND_LOG="$TEST_TMPDIR/background.log"
 BACKGROUND_SENTINEL="$TEST_TMPDIR/background.sentinel"
+# Gate file the fake slow triage blocks on. Deterministic stand-in for
+# "slow LLM work": wall-clock sleeps flake under parallel-suite load
+# (a loaded box can stall the critical phase past any fixed sleep, or
+# finish the sleep before the orchestrator returns). With a gate, the
+# background phase provably cannot finish until the test releases it.
+BACKGROUND_RELEASE="$TEST_TMPDIR/background.release"
 
 record_iteration_guard_chain() { echo guard >> "$CRITICAL_LOG"; }
 snapshot_quality_feedback() { echo snapshot >> "$CRITICAL_LOG"; }
@@ -51,11 +57,19 @@ refresh_handoff_file() { echo handoff >> "$CRITICAL_LOG"; }
 merge_audit_state() { echo merge >> "$CRITICAL_LOG"; }
 
 triage_crash_dirs() {
-  echo triage_start >> "$BACKGROUND_LOG"
-  # Simulate slow LLM work — the test asserts the critical phase
-  # returns immediately while this sleep is still running.
-  sleep 0.6
-  echo triage_done >> "$BACKGROUND_LOG"
+  # Markers carry the sweeper's identity (SWEEP_TAG, inherited at fork
+  # time) so an assertion about sweeper N's completion cannot be
+  # satisfied by sweeper N+1 writing the same marker.
+  echo "triage_start${SWEEP_TAG:+:$SWEEP_TAG}" >> "$BACKGROUND_LOG"
+  # Block until the test releases the gate. The cap (30s) only matters
+  # if the orchestrator regresses to running this synchronously while
+  # the gate is closed; passing runs release before (or instead of)
+  # waiting, so this costs nothing.
+  local _i=0
+  while [ ! -e "$BACKGROUND_RELEASE" ] && [ "$_i" -lt 600 ]; do
+    sleep 0.05; _i=$((_i + 1))
+  done
+  echo "triage_done${SWEEP_TAG:+:$SWEEP_TAG}" >> "$BACKGROUND_LOG"
   touch "$BACKGROUND_SENTINEL"
 }
 warn_persistent_harness_build_failures() { echo persistent >> "$BACKGROUND_LOG"; }
@@ -115,24 +129,27 @@ assert_file_not_contains "$CRITICAL_LOG" "find_gate" \
 # ─────────────────────────────────────────────────────────────────────
 : > "$CRITICAL_LOG"
 : > "$BACKGROUND_LOG"
-rm -f "$BACKGROUND_SENTINEL"
+rm -f "$BACKGROUND_SENTINEL" "$BACKGROUND_RELEASE"
 AUDIT_HOUSEKEEPING_BG_PID=""
-start=$(date +%s)
 run_post_iteration_housekeeping >/dev/null
-elapsed=$(( $(date +%s) - start ))
-# The critical phase + a fork is well under a second; the background
-# triage takes 0.6s but we should NOT have waited for it.
-[ $elapsed -lt 1 ] && pass "background default: critical+fork returns in <1s (got ${elapsed}s)" || fail "background default: critical+fork returns in <1s (got ${elapsed}s)"
+# The gate is closed, so a non-blocking orchestrator returns while the
+# background sweeper is provably still alive — no wall-clock threshold,
+# so parallel-suite load cannot flip this either way.
+kill -0 "$AUDIT_HOUSEKEEPING_BG_PID" 2>/dev/null \
+  && pass "background default: returns while gated background sweeper still running" \
+  || fail "background default: returns while gated background sweeper still running"
 [ -n "$AUDIT_HOUSEKEEPING_BG_PID" ] \
   && pass "background default: pid recorded after spawn" \
   || fail "background default: pid recorded after spawn"
-# At this point the sentinel file from the slow triage MUST NOT exist —
-# the background process is still mid-sleep.
+# At this point the sentinel file from the gated triage MUST NOT exist —
+# the background process is still blocked on the gate.
 [ ! -f "$BACKGROUND_SENTINEL" ] \
   && pass "background default: triage sentinel absent immediately after return" \
   || fail "background default: triage sentinel absent immediately after return"
 
-# After joining, the background phase has produced all its markers.
+# Release the gate, then join: the background phase has produced all
+# its markers.
+touch "$BACKGROUND_RELEASE"
 wait_for_background_housekeeping
 assert_file_contains "$BACKGROUND_LOG" "triage_done"  "background: triage finished after join"
 assert_file_contains "$BACKGROUND_LOG" "find_gate"    "background: find_gate ran"
@@ -153,17 +170,26 @@ assert_eq "" "$AUDIT_HOUSEKEEPING_BG_PID" \
 # ─────────────────────────────────────────────────────────────────────
 : > "$CRITICAL_LOG"
 : > "$BACKGROUND_LOG"
-rm -f "$BACKGROUND_SENTINEL"
+rm -f "$BACKGROUND_SENTINEL" "$BACKGROUND_RELEASE"
 AUDIT_HOUSEKEEPING_BG_PID=""
 
+SWEEP_TAG="iter1"
 run_post_iteration_housekeeping >/dev/null
 first_pid="$AUDIT_HOUSEKEEPING_BG_PID"
 [ -n "$first_pid" ] \
   && pass "iter1: first sweeper pid recorded" \
   || fail "iter1: first sweeper pid recorded"
 
-# Second iteration's call must barrier-wait the first sweeper, then
-# spawn a new one with a different pid.
+# Call again with the gate still CLOSED; a detached releaser opens it
+# 2s from now. A correct barrier blocks the second call on the first
+# sweeper (itself blocked on the gate), and `wait` only returns after
+# that child exits — so by the time the call returns, iter1's tagged
+# completion marker is guaranteed with no timing assumption. A
+# regressed barrier returns within milliseconds while iter1 is still
+# gated for ~2 more seconds, so the marker check fails deterministically
+# instead of racing iter1's poll wakeup.
+( sleep 2; touch "$BACKGROUND_RELEASE" ) >/dev/null 2>&1 &
+SWEEP_TAG="iter2"
 run_post_iteration_housekeeping >/dev/null
 second_pid="$AUDIT_HOUSEKEEPING_BG_PID"
 [ -n "$second_pid" ] \
@@ -173,10 +199,11 @@ second_pid="$AUDIT_HOUSEKEEPING_BG_PID"
   && pass "iter2: second sweeper has a distinct pid" \
   || fail "iter2: second sweeper has a distinct pid"
 # By the time the second sweeper was spawned, the first MUST have run
-# to completion — the sentinel file from triage_done is present.
-[ -f "$BACKGROUND_SENTINEL" ] \
-  && pass "iter2: first sweeper's sentinel exists before second spawn (barrier worked)" \
-  || fail "iter2: first sweeper's sentinel exists before second spawn (barrier worked)"
+# to completion — its tagged triage_done marker is present (the second
+# sweeper cannot fake this; its markers carry :iter2).
+grep -q '^triage_done:iter1$' "$BACKGROUND_LOG" \
+  && pass "iter2: first sweeper completed before second spawn (barrier worked)" \
+  || fail "iter2: first sweeper completed before second spawn (barrier worked)"
 
 wait_for_background_housekeeping
 teardown_test_env

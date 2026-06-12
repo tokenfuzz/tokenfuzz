@@ -26,68 +26,89 @@ audit_extract_function() {
   ' "$SCRIPT_ROOT/bin/audit"
 }
 
-eval "$(audit_extract_function _detect_free_ram_mb)"
-eval "$(audit_extract_function backend_bin)"
-eval "$(audit_extract_function backend_configured)"
-eval "$(audit_extract_function oss_model_available)"
-eval "$(audit_extract_function discover_ensemble_backends)"
-eval "$(audit_extract_function init_backend_selection)"
-eval "$(audit_extract_function resolve_model)"
-eval "$(audit_extract_function model_preflight_stamp_path)"
-eval "$(audit_extract_function audit_one_time_backend_bootstrap)"
-eval "$(audit_extract_function gemini_prune_stale_sessions)"
-eval "$(audit_extract_function gemini_cli_check_bundled_ripgrep)"
-eval "$(audit_extract_function gemini_capture_cli_log_diag)"
-eval "$(audit_extract_function validate_model_for_backend)"
-eval "$(audit_extract_function validate_active_model)"
-eval "$(audit_extract_function extract_waste_telemetry)"
-eval "$(audit_extract_function write_session_log_summary)"
-eval "$(audit_extract_function count_structural_refusal_signals)"
-eval "$(audit_extract_function log_has_codex_usage_limit)"
-eval "$(audit_extract_function codex_usage_limit_reset_at)"
-eval "$(audit_extract_function log_is_gemini_cli)"
-eval "$(audit_extract_function log_has_gemini_backend_rejection)"
-eval "$(audit_extract_function log_has_rate_limit_rejection)"
-eval "$(audit_extract_function codex_raw_has_completed_turn)"
-eval "$(audit_extract_function codex_raw_has_failed_turn)"
-eval "$(audit_extract_function gemini_raw_has_success_result)"
-eval "$(audit_extract_function normalize_agent_exit_code)"
-eval "$(audit_extract_function fuzz_leads_signature_file)"
-eval "$(audit_extract_function fuzz_leads_signature_exists)"
-eval "$(audit_extract_function current_fuzz_leads_signature)"
-eval "$(audit_extract_function fuzz_leads_changed_since_last_iteration)"
-eval "$(audit_extract_function refresh_fuzz_leads_signature)"
-eval "$(audit_extract_function target_source_signature_file)"
-eval "$(audit_extract_function target_source_signature_exists)"
-eval "$(audit_extract_function current_target_source_signature)"
-eval "$(audit_extract_function target_source_unchanged_since_last_iteration)"
-eval "$(audit_extract_function refresh_target_source_signature)"
-eval "$(audit_extract_function launch_evidence_is_new)"
-eval "$(audit_extract_function refresh_launch_evidence_signatures)"
-eval "$(audit_extract_function resume_state_path)"
-eval "$(audit_extract_function resume_state_read)"
-eval "$(audit_extract_function resume_state_write)"
-eval "$(audit_extract_function resume_bool_enabled)"
-eval "$(audit_extract_function backend_resume_enabled)"
-eval "$(audit_extract_function agent_active_card_id)"
-eval "$(audit_extract_function latest_agent_resume_raw_log)"
-eval "$(audit_extract_function should_disable_resume_for_cache)"
-eval "$(audit_extract_function clear_agent_resume_state)"
-eval "$(audit_extract_function target_exhausted_hard_stop_ready)"
-eval "$(audit_extract_function audit_exit_trap)"
-eval "$(audit_extract_function _audit_append_line)"
-eval "$(audit_extract_function _audit_resolve_target_path)"
-eval "$(audit_extract_function _audit_record_sanitizer_found)"
-eval "$(audit_extract_function _audit_record_sanitizer_missing)"
-eval "$(audit_extract_function _audit_nm_has_symbol)"
-eval "$(audit_extract_function _audit_scan_sanitizer_build_dir)"
-eval "$(audit_extract_function _audit_detect_configured_binary)"
-eval "$(audit_extract_function _audit_detect_configured_file)"
-eval "$(audit_extract_function _audit_detect_asan_build)"
-eval "$(audit_extract_function _audit_detect_binary_sanitizer_build)"
-eval "$(audit_extract_function _audit_runner_bin_available)"
-eval "$(audit_extract_function _audit_detect_race_runner)"
-eval "$(audit_extract_function detect_sanitizer_builds)"
+# Multi-function variant of audit_extract_function: one awk pass over
+# bin/audit (~320KB) instead of one subprocess per function. The output is
+# every requested function body (first definition wins, same as the
+# single-function extractor), in bin/audit file order — eval'ing pure
+# definitions is order-independent. This exists purely for speed: the
+# original one-eval-per-function block spawned ~80 awk subshells and
+# dominated this suite's startup time.
+audit_extract_functions() {
+  awk -v names="$*" '
+    BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 }
+    /^[A-Za-z0-9_]+\(\) \{/ {
+      fname = $0
+      sub(/\(\) \{.*/, "", fname)
+      if (fname in want && !(fname in seen)) { in_func = 1; seen[fname] = 1 }
+    }
+    in_func { print }
+    in_func && $0 == "}" { in_func = 0 }
+  ' "$SCRIPT_ROOT/bin/audit"
+}
+
+eval "$(audit_extract_functions \
+  _detect_free_ram_mb \
+  backend_bin \
+  backend_configured \
+  oss_model_available \
+  discover_ensemble_backends \
+  init_backend_selection \
+  resolve_model \
+  model_preflight_stamp_path \
+  audit_one_time_backend_bootstrap \
+  gemini_prune_stale_sessions \
+  gemini_cli_check_bundled_ripgrep \
+  gemini_capture_cli_log_diag \
+  validate_model_for_backend \
+  validate_active_model \
+  extract_waste_telemetry \
+  write_session_log_summary \
+  count_structural_refusal_signals \
+  log_has_codex_usage_limit \
+  codex_usage_limit_reset_at \
+  log_is_gemini_cli \
+  log_has_gemini_backend_rejection \
+  log_has_rate_limit_rejection \
+  codex_raw_has_completed_turn \
+  codex_raw_has_failed_turn \
+  gemini_raw_has_success_result \
+  normalize_agent_exit_code \
+  fuzz_leads_signature_file \
+  fuzz_leads_signature_exists \
+  current_fuzz_leads_signature \
+  fuzz_leads_changed_since_last_iteration \
+  refresh_fuzz_leads_signature \
+  target_source_signature_file \
+  target_source_signature_exists \
+  current_target_source_signature \
+  target_source_unchanged_since_last_iteration \
+  refresh_target_source_signature \
+  launch_evidence_is_new \
+  refresh_launch_evidence_signatures \
+  resume_state_path \
+  resume_state_read \
+  resume_state_write \
+  resume_bool_enabled \
+  backend_resume_enabled \
+  agent_active_card_id \
+  latest_agent_resume_raw_log \
+  should_disable_resume_for_cache \
+  clear_agent_resume_state \
+  target_exhausted_hard_stop_ready \
+  audit_exit_trap \
+  _audit_append_line \
+  _audit_resolve_target_path \
+  _audit_record_sanitizer_found \
+  _audit_record_sanitizer_missing \
+  _audit_nm_has_symbol \
+  _audit_scan_sanitizer_build_dir \
+  _audit_detect_configured_binary \
+  _audit_detect_configured_file \
+  _audit_detect_asan_build \
+  _audit_detect_binary_sanitizer_build \
+  _audit_runner_bin_available \
+  _audit_detect_race_runner \
+  detect_sanitizer_builds)"
 run_agent_src="$(audit_extract_function run_agent)"
 
 command_exists() {
@@ -135,9 +156,7 @@ reset_asan_run_counter() {
 # so the test exercises the real usage parser. An inlined copy drifted in
 # the past (it grew a gemini `.stats` / `.cached` branch the real function
 # never had — agy emits plain text, so bin/audit reads no usage from it).
-eval "$(audit_extract_function extract_usage_field)"
-eval "$(audit_extract_function extract_completed_item_count)"
-eval "$(audit_extract_function extract_total_tool_uses)"
+eval "$(audit_extract_functions extract_usage_field extract_completed_item_count extract_total_tool_uses)"
 
 set_agent_strategy() {
   printf '%s' "$2" > "$(agent_strategy_path "$1")"
@@ -1501,11 +1520,20 @@ unset AUDIT_MODEL_PREFLIGHT_OPTIONAL
 # the remaining retry attempts since a quota does not clear within backoff.
 agy_log_dir="$TEST_TMPDIR/agy-cli-log"
 mkdir -p "$agy_log_dir"
-for i in $(seq 1 200); do
-  f="$agy_log_dir/cli-20260521_2337$(printf '%02d' "$i").log"
-  printf 'I0521 23:37:%02d ordinary agy log\n' "$((i % 60))" > "$f"
-  touch -t "202605212337.$(printf '%02d' "$((i % 60))")" "$f" 2>/dev/null || true
-done
+# One python3 invocation instead of a 200-iteration shell loop (which
+# forked ~600 subprocesses for printf/touch). Same files, same contents,
+# same mtimes (2026-05-21 23:37:SS local time, SS = i % 60).
+python3 - "$agy_log_dir" <<'PY'
+import os, sys, time
+d = sys.argv[1]
+base = time.mktime(time.strptime("202605212337", "%Y%m%d%H%M"))
+for i in range(1, 201):
+    p = os.path.join(d, "cli-20260521_2337%02d.log" % i)
+    with open(p, "w") as f:
+        f.write("I0521 23:37:%02d ordinary agy log\n" % (i % 60))
+    mtime = base + (i % 60)
+    os.utime(p, (mtime, mtime))
+PY
 no_diag="$TEST_TMPDIR/agy-no-diag.raw"
 AUDIT_GEMINI_CLI_LOG_DIR="$agy_log_dir" gemini_capture_cli_log_diag "$no_diag"
 assert_eq "0" "$?" "model preflight: gemini private-log diagnostic ignores logs without matching errors"
@@ -1581,7 +1609,12 @@ SAVED_CLAUDE_BIN="$CLAUDE_BIN"
 CLAUDE_BIN="$model_preflight_bin/claude-retry"
 AUDIT_MODEL_PREFLIGHT_ATTEMPTS=3
 AUDIT_MODEL_PREFLIGHT_BACKOFF=1
-retry_output=$(validate_model_for_backend claude "retry-good" 2>&1)
+# The retry assertions check attempt counts and log lines, not wall-clock
+# backoff, and validate_model_for_backend clamps BACKOFF to >=1s — so stub
+# `sleep` inside the capture subshell to keep each retrying call instant.
+# (The stub is scoped to the $(...) subshell; the preflight stub CLIs are
+# separate processes and never see a shell function.)
+retry_output=$(sleep() { :; }; validate_model_for_backend claude "retry-good" 2>&1)
 retry_rc=$?
 assert_eq "0" "$retry_rc" "model preflight retry: succeeds after one transient failure"
 assert_match 'attempt 1/3 .* failed' "$retry_output" "model preflight retry: attempt 1 failure logged"
@@ -1603,7 +1636,7 @@ chmod +x "$model_preflight_bin/claude-always-fail"
 CLAUDE_BIN="$model_preflight_bin/claude-always-fail"
 AUDIT_MODEL_PREFLIGHT_ATTEMPTS=2
 AUDIT_MODEL_PREFLIGHT_BACKOFF=1
-persistent_output=$(validate_model_for_backend claude "never-good" 2>&1)
+persistent_output=$(sleep() { :; }; validate_model_for_backend claude "never-good" 2>&1)
 persistent_rc=$?
 assert_eq "1" "$persistent_rc" "model preflight retry: persistent failure exits 1 by default"
 assert_match 'after 2 attempt' "$persistent_output" \
@@ -1620,7 +1653,7 @@ AUDIT_MODEL_PREFLIGHT_BACKOFF=1
 AUDIT_MODEL_PREFLIGHT_OPTIONAL=1
 optional_stamp=$(model_preflight_stamp_path claude "optional-never-good")
 rm -f "$optional_stamp"
-optional_output=$(validate_model_for_backend claude "optional-never-good" 2>&1)
+optional_output=$(sleep() { :; }; validate_model_for_backend claude "optional-never-good" 2>&1)
 optional_rc=$?
 assert_eq "0" "$optional_rc" \
   "model preflight optional: persistent failure returns 0 when AUDIT_MODEL_PREFLIGHT_OPTIONAL=1"
@@ -1641,7 +1674,7 @@ unset AUDIT_MODEL_PREFLIGHT_OPTIONAL AUDIT_MODEL_PREFLIGHT_ATTEMPTS AUDIT_MODEL_
 CLAUDE_BIN="$model_preflight_bin/claude-always-fail"
 AUDIT_MODEL_PREFLIGHT_ATTEMPTS=2
 AUDIT_MODEL_PREFLIGHT_BACKOFF=1
-default_fail_output=$(validate_model_for_backend claude "default-never-good" 2>&1)
+default_fail_output=$(sleep() { :; }; validate_model_for_backend claude "default-never-good" 2>&1)
 default_fail_rc=$?
 assert_eq "1" "$default_fail_rc" \
   "model preflight default: persistent failure exits before agent launch"
@@ -1990,9 +2023,7 @@ assert_eq "$size_before" "$size_after" "logs README: idempotent (no rewrite if p
 # Subsystem mode lists: read from the lib/subsystems/<slug>.txt overlay,
 # not hardcoded heredocs. Extract the real functions and exercise them.
 # ═══════════════════════════════════════════════════════════════
-eval "$(audit_extract_function _mode_subsystems)"
-eval "$(audit_extract_function browser_mode_subsystems)"
-eval "$(audit_extract_function shell_mode_subsystems)"
+eval "$(audit_extract_functions _mode_subsystems browser_mode_subsystems shell_mode_subsystems)"
 
 _saved_slug="${TARGET_SLUG:-}"
 TARGET_SLUG=firefox
@@ -2028,10 +2059,7 @@ assert_file_contains "$SCRIPT_ROOT/bin/audit" 'lib/subsystems/\$\{TARGET_SLUG' \
 # the initial commit because helpers.sh stubs `get_agent_strategy`
 # in every other test, so the real fallback path was never exercised.
 # ═══════════════════════════════════════════════════════════════
-eval "$(audit_extract_function agent_strategy_path)"
-eval "$(audit_extract_function agent_strategy_streak_path)"
-eval "$(audit_extract_function get_agent_strategy)"
-eval "$(audit_extract_function pick_cold_start_strategy)"
+eval "$(audit_extract_functions agent_strategy_path agent_strategy_streak_path get_agent_strategy pick_cold_start_strategy)"
 
 # Minimal stubs for the deps get_agent_strategy normally calls.
 # All return values that force the fallback to pick_cold_start_strategy

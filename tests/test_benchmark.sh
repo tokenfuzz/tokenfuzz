@@ -27,7 +27,85 @@ BENCH="$SCRIPT_ROOT/bin/benchmark"
 RENDER_MD="$SCRIPT_ROOT/bin/render-md"
 
 work=$(mktemp -d)
-trap 'rm -rf "$work" 2>/dev/null || true; teardown_test_env 2>/dev/null || true' EXIT
+trap 'wait 2>/dev/null || true; rm -rf "$work" 2>/dev/null || true; teardown_test_env 2>/dev/null || true' EXIT
+
+# ── Speed: launch every independent bin/benchmark invocation up front ────
+# Each `bash bin/benchmark ... --dry-run` spawns ~30 python subprocesses
+# (2.5–9s each), so running them serially pinned this suite near 30s. The
+# four T9* end-to-end runs are independent — separate bench roots, no shared
+# state — so they are launched here as background jobs and their captured
+# stdout/exit codes are consumed at the original T9/T9s/T9t/T9n assertion
+# sites below. Assertions, ordering, and invocations are unchanged; only
+# the wall-clock is overlapped (with the cheap T0–T8 checks too).
+
+# T9 fixture: fake git shim proving benchmark passes safe.directory.
+dledger="$work/dry-ledger.md"
+droot="$work/dry-bench"
+fake_git_bin="$work/fake-git-bin"
+mkdir -p "$fake_git_bin"
+real_git="$(command -v git)"
+fake_git_log="$work/fake-git.log"
+cat > "$fake_git_bin/git" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
+case "$*" in
+  *"-c safe.directory="*) ;;
+  *) exit 128 ;;
+esac
+exec "$REAL_GIT" "$@"
+SH
+chmod +x "$fake_git_bin/git"
+(
+  set +e
+  REAL_GIT="$real_git" FAKE_GIT_LOG="$fake_git_log" \
+    PATH="$fake_git_bin:$PATH" bash "$BENCH" --target dummytarget --dry-run --replicates 2 \
+    --agents 2 --conditions model-direct,harness --ledger "$dledger" \
+    --bench-root "$droot" > "$work/t9-dry.out" 2>&1
+  echo $? > "$work/t9-dry.rc"
+) &
+t9_job=$!
+
+# T9s fixture: two seed runs (different backend + target) under one root.
+# Sequential WITHIN the job: both rebuild the same cross-backend page.
+allroot="$work/regen-all"
+(
+  set +e
+  bash "$BENCH" --target dummytarget --dry-run --replicates 1 --conditions harness \
+    --backend codex --bench-root "$allroot" --run-id ra-codex >/dev/null 2>&1
+  bash "$BENCH" --target othertarget --dry-run --replicates 1 --conditions harness \
+    --backend gemini --bench-root "$allroot" --run-id ra-gemini >/dev/null 2>&1
+) &
+t9s_seed_job=$!
+
+# T9t: the multi-target driver run.
+multiroot="$work/multi-target"
+(
+  set +e
+  bash "$BENCH" --target " dummytarget , othertarget " --dry-run \
+    --replicates 1 --conditions harness --backend codex \
+    --bench-root "$multiroot" --run-id mt > "$work/t9t-multi.out" 2>&1
+  echo $? > "$work/t9t-multi.rc"
+) &
+t9t_job=$!
+
+# T9n fixture: a pre-seeded incomplete resume cell, then its rerun.
+resume_root="$work/dry-resume-bench"
+resume_run="resume-$$"
+resume_cell="$resume_root/codex/$resume_run/cells/harness-r1"
+mkdir -p "$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results"
+cat > "$resume_cell/cell.json" <<JSON
+{"condition":"harness","replicate":1,"experiment":"bench-$resume_run-harness-r1","results_dir":"$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results","wall_seconds":0,"status":"running"}
+JSON
+printf 'stale result that must not survive in live cell\n' \
+  > "$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results/stale-sentinel.txt"
+(
+  set +e
+  bash "$BENCH" --target dummytarget --dry-run --backend codex \
+    --replicates 1 --conditions harness --bench-root "$resume_root" \
+    --run-id "$resume_run" > "$work/t9n-resume.out" 2>&1
+  echo $? > "$work/t9n-resume.rc"
+) &
+t9n_job=$!
 
 assert_file_contains "$BENCH" 'LLM_DECIDE_LOG="\$BENCH_DIR/llm-decisions\.log"' \
   "T0a: benchmark cluster-findings keeps keyer telemetry under the run dir"
@@ -362,27 +440,11 @@ assert_eq "0" "$(echo "$u5" | jq -r '.tokens.output')" \
   "T8i: codex no-usage log stays zero-cost instead of estimated"
 
 # ── T9: bin/benchmark --dry-run end-to-end ───────────────────────────────
-dledger="$work/dry-ledger.md"
-droot="$work/dry-bench"
-fake_git_bin="$work/fake-git-bin"
-mkdir -p "$fake_git_bin"
-real_git="$(command -v git)"
-fake_git_log="$work/fake-git.log"
-cat > "$fake_git_bin/git" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
-case "$*" in
-  *"-c safe.directory="*) ;;
-  *) exit 128 ;;
-esac
-exec "$REAL_GIT" "$@"
-SH
-chmod +x "$fake_git_bin/git"
-dry_out=$(REAL_GIT="$real_git" FAKE_GIT_LOG="$fake_git_log" \
-  PATH="$fake_git_bin:$PATH" bash "$BENCH" --target dummytarget --dry-run --replicates 2 \
-  --agents 2 --conditions model-direct,harness --ledger "$dledger" \
-  --bench-root "$droot" 2>&1)
-rc=$?
+# (Invocation + fake-git fixture launched in the background at the top of
+# this file; collected here. Same flags, same assertions.)
+wait "$t9_job" 2>/dev/null || true
+dry_out=$(cat "$work/t9-dry.out")
+rc=$(cat "$work/t9-dry.rc")
 assert_eq "0" "$rc" "T9a: dry-run exits 0"
 assert_file_exists "$dledger" "T9b: dry-run writes the ledger"
 assert_match "crash median=1" "$dry_out" "T9c: harness scores 1 crash/cell in dry-run"
@@ -449,6 +511,17 @@ assert_file_not_exists "$dbench/.pool.old" \
 regen_runid="$(basename "$dbench")"
 cells_before=$(find "$dbench/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
 runjson_before=$(jq -rS . "$dbench/run.json")
+# Overlap: T9s's regenerate-all (independent bench root, seeded at the top
+# of the file) runs in the background while T9r's regenerate runs here.
+# Its cells-before snapshot must precede its launch, so take it now.
+wait "$t9s_seed_job" 2>/dev/null || true
+codex_cells_before=$(find "$allroot/codex/ra-codex/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+(
+  set +e
+  bash "$BENCH" --regenerate --bench-root "$allroot" > "$work/t9s-all.out" 2>&1
+  echo $? > "$work/t9s-all.rc"
+) &
+t9s_all_job=$!
 regen_out=$(bash "$BENCH" --target dummytarget --regenerate \
   --bench-root "$droot" --run-id "$regen_runid" 2>&1)
 regen_rc=$?
@@ -492,17 +565,14 @@ assert_neq "0" "$regen_norun_rc" \
   "T9r-i: --regenerate with no run on disk is rejected"
 
 # ── T9s: --regenerate with NO --target re-derives every run in the tree ──
-# Build two runs under one bench root — different backend + target each — then
-# `bin/benchmark --regenerate` (no target) must walk both, re-derive each from
-# its run.json, launch no cells, and rebuild the cross-backend page.
-allroot="$work/regen-all"
-bash "$BENCH" --target dummytarget --dry-run --replicates 1 --conditions harness \
-  --backend codex --bench-root "$allroot" --run-id ra-codex >/dev/null 2>&1
-bash "$BENCH" --target othertarget --dry-run --replicates 1 --conditions harness \
-  --backend gemini --bench-root "$allroot" --run-id ra-gemini >/dev/null 2>&1
-codex_cells_before=$(find "$allroot/codex/ra-codex/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
-all_out=$(bash "$BENCH" --regenerate --bench-root "$allroot" 2>&1)
-all_rc=$?
+# Two runs were built under one bench root — different backend + target each
+# (seeded in the background at the top of this file) — then
+# `bin/benchmark --regenerate` (no target, launched above alongside T9r's
+# regenerate) must walk both, re-derive each from its run.json, launch no
+# cells, and rebuild the cross-backend page.
+wait "$t9s_all_job" 2>/dev/null || true
+all_out=$(cat "$work/t9s-all.out")
+all_rc=$(cat "$work/t9s-all.rc")
 assert_eq "0" "$all_rc" "T9s-a: --regenerate (no target) exits 0"
 assert_match 'regenerate-all: target=dummytarget backend=codex run=ra-codex' "$all_out" \
   "T9s-b: re-derives the codex run"
@@ -530,11 +600,10 @@ assert_neq "0" "$all_empty_rc" \
 # per-backend ledger + cross-backend page. Each child keeps its own run dir
 # (keyed by run-id, suffixed per target when one is given) so they never
 # collide. The driver exits 0 only when every target succeeds.
-multiroot="$work/multi-target"
-multi_out=$(bash "$BENCH" --target " dummytarget , othertarget " --dry-run \
-  --replicates 1 --conditions harness --backend codex \
-  --bench-root "$multiroot" --run-id mt 2>&1)
-multi_rc=$?
+# (Invocation launched in the background at the top of this file.)
+wait "$t9t_job" 2>/dev/null || true
+multi_out=$(cat "$work/t9t-multi.out")
+multi_rc=$(cat "$work/t9t-multi.rc")
 assert_eq "0" "$multi_rc" "T9t-a: multi-target dry-run exits 0"
 assert_match 'multi-target \(1\): target=dummytarget' "$multi_out" \
   "T9t-b: first slug runs (surrounding whitespace trimmed)"
@@ -569,19 +638,11 @@ assert_neq "0" "$multi_empty_rc" \
 # still winding down. Deleting that tree in place can fail with "Directory not
 # empty"; the rerun must verify the path is clean instead of mixing stale output
 # into the new replicate.
-resume_root="$work/dry-resume-bench"
-resume_run="resume-$$"
-resume_cell="$resume_root/codex/$resume_run/cells/harness-r1"
-mkdir -p "$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results"
-cat > "$resume_cell/cell.json" <<JSON
-{"condition":"harness","replicate":1,"experiment":"bench-$resume_run-harness-r1","results_dir":"$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results","wall_seconds":0,"status":"running"}
-JSON
-printf 'stale result that must not survive in live cell\n' \
-  > "$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results/stale-sentinel.txt"
-resume_out=$(bash "$BENCH" --target dummytarget --dry-run --backend codex \
-  --replicates 1 --conditions harness --bench-root "$resume_root" \
-  --run-id "$resume_run" 2>&1)
-resume_rc=$?
+# (Stale-cell fixture + rerun launched in the background at the top of
+# this file; collected here.)
+wait "$t9n_job" 2>/dev/null || true
+resume_out=$(cat "$work/t9n-resume.out")
+resume_rc=$(cat "$work/t9n-resume.rc")
 assert_eq "0" "$resume_rc" \
   "T9n: dry-run resume reruns incomplete cell cleanly"
 assert_file_not_exists \

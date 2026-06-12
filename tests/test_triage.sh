@@ -464,6 +464,13 @@ assert_eq "none" "$result" "empty dir → no narrative"
 
 IS_BROWSER_TARGET=0
 
+# Speed: the six fixture dirs below are created up front and triaged in ONE
+# triage_crash_dirs pass (the per-dir loop is independent, so each dir's
+# .promotion_pending outcome is identical to a per-dir run). Reachability
+# enrichment is best-effort (never blocks promotion, no assertion below
+# reads its sidecars), so it is skipped via the supported knob.
+REACHABILITY_AUTO=0
+
 # .c reproducer should be recognized as a valid testcase
 mkdir -p "$RESULTS_DIR/crashes/CRASH-TC-C"
 cat > "$RESULTS_DIR/crashes/CRASH-TC-C/asan_output.txt" <<'EOF'
@@ -489,17 +496,6 @@ int main() {
     return 0;
 }
 EOF
-export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":true,"reason":"valid input boundary"}'
-triage_crash_dirs
-unset LLM_DECIDE_MOCK_LEGIT_CRASH
-# The pre-bundle testcase gate should accept the C reproducer; the exact
-# maintainer-bundle gate still keeps this dir pending until REPORT.md,
-# reproduce.sh, exact asan.txt, and input.* exist.
-if grep -q 'testcase' "$RESULTS_DIR/crashes/CRASH-TC-C/.promotion_pending" 2>/dev/null; then
-  fail "triage: .c reproducer recognized as testcase" "testcase still marked missing: $(cat "$RESULTS_DIR/crashes/CRASH-TC-C/.promotion_pending")"
-else
-  pass "triage: .c reproducer recognized as testcase"
-fi
 
 # .py reproducer should also work
 mkdir -p "$RESULTS_DIR/crashes/CRASH-TC-PY"
@@ -519,14 +515,6 @@ import ctypes
 lib = ctypes.CDLL("libfoo.so")
 lib.vulnerable_function(b"A" * 256)
 EOF
-export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":true,"reason":"valid input boundary"}'
-triage_crash_dirs
-unset LLM_DECIDE_MOCK_LEGIT_CRASH
-if grep -q 'testcase' "$RESULTS_DIR/crashes/CRASH-TC-PY/.promotion_pending" 2>/dev/null; then
-  fail "triage: .py reproducer recognized as testcase" "testcase still marked missing"
-else
-  pass "triage: .py reproducer recognized as testcase"
-fi
 
 # Metadata-only dir should still be flagged as incomplete
 mkdir -p "$RESULTS_DIR/crashes/CRASH-TC-META"
@@ -541,14 +529,6 @@ Caller contract: obeyed
 Trigger source: bytes
 EOF
 echo "short" > "$RESULTS_DIR/crashes/CRASH-TC-META/notes.txt"
-export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":true,"reason":"valid input boundary"}'
-triage_crash_dirs
-unset LLM_DECIDE_MOCK_LEGIT_CRASH
-if [ -f "$RESULTS_DIR/crashes/CRASH-TC-META/.promotion_pending" ]; then
-  pass "triage: metadata-only dir flagged incomplete (no testcase)"
-else
-  fail "triage: metadata-only dir flagged incomplete (no testcase)" "missing .promotion_pending"
-fi
 
 # Canonical text inputs should be accepted, but helper binaries must not
 # satisfy testcase promotion by themselves.
@@ -565,14 +545,6 @@ Caller contract: obeyed
 Trigger source: bytes
 EOF
 printf 'input-shaped text payload %080d\n' 1 > "$RESULTS_DIR/crashes/CRASH-TC-TXT/input.txt"
-export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":true,"reason":"valid input boundary"}'
-triage_crash_dirs
-unset LLM_DECIDE_MOCK_LEGIT_CRASH
-if grep -qE 'testcase|input\.\*' "$RESULTS_DIR/crashes/CRASH-TC-TXT/.promotion_pending" 2>/dev/null; then
-  fail "triage: input.txt recognized as testcase" "testcase/input still marked missing: $(cat "$RESULTS_DIR/crashes/CRASH-TC-TXT/.promotion_pending")"
-else
-  pass "triage: input.txt recognized as testcase"
-fi
 
 # A genuine text reproducer under a non-canonical name (payload.txt) must be
 # found via the relaxed last-resort pass — losing it would TTL-reject an
@@ -590,14 +562,6 @@ Caller contract: obeyed
 Trigger source: bytes
 EOF
 printf 'non-canonical text reproducer %080d\n' 1 > "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD/payload.txt"
-export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":true,"reason":"valid input boundary"}'
-triage_crash_dirs
-unset LLM_DECIDE_MOCK_LEGIT_CRASH
-if grep -qE 'testcase|input\.\*' "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD/.promotion_pending" 2>/dev/null; then
-  fail "triage: payload.txt recognized as testcase" "testcase still marked missing: $(cat "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD/.promotion_pending")"
-else
-  pass "triage: payload.txt recognized as testcase"
-fi
 
 mkdir -p "$RESULTS_DIR/crashes/CRASH-TC-BINONLY"
 cat > "$RESULTS_DIR/crashes/CRASH-TC-BINONLY/asan.txt" <<'EOF'
@@ -612,14 +576,54 @@ Trigger source: bytes
 EOF
 cp /bin/echo "$RESULTS_DIR/crashes/CRASH-TC-BINONLY/helper_binary" 2>/dev/null || printf '#!/bin/sh\necho helper\n' > "$RESULTS_DIR/crashes/CRASH-TC-BINONLY/helper_binary"
 chmod +x "$RESULTS_DIR/crashes/CRASH-TC-BINONLY/helper_binary"
+
+# Single triage pass over all six fixture dirs.
 export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":true,"reason":"valid input boundary"}'
 triage_crash_dirs
 unset LLM_DECIDE_MOCK_LEGIT_CRASH
+
+# The pre-bundle testcase gate should accept the C reproducer; the exact
+# maintainer-bundle gate still keeps this dir pending until REPORT.md,
+# reproduce.sh, exact asan.txt, and input.* exist.
+if grep -q 'testcase' "$RESULTS_DIR/crashes/CRASH-TC-C/.promotion_pending" 2>/dev/null; then
+  fail "triage: .c reproducer recognized as testcase" "testcase still marked missing: $(cat "$RESULTS_DIR/crashes/CRASH-TC-C/.promotion_pending")"
+else
+  pass "triage: .c reproducer recognized as testcase"
+fi
+
+if grep -q 'testcase' "$RESULTS_DIR/crashes/CRASH-TC-PY/.promotion_pending" 2>/dev/null; then
+  fail "triage: .py reproducer recognized as testcase" "testcase still marked missing"
+else
+  pass "triage: .py reproducer recognized as testcase"
+fi
+
+if [ -f "$RESULTS_DIR/crashes/CRASH-TC-META/.promotion_pending" ]; then
+  pass "triage: metadata-only dir flagged incomplete (no testcase)"
+else
+  fail "triage: metadata-only dir flagged incomplete (no testcase)" "missing .promotion_pending"
+fi
+
+if grep -qE 'testcase|input\.\*' "$RESULTS_DIR/crashes/CRASH-TC-TXT/.promotion_pending" 2>/dev/null; then
+  fail "triage: input.txt recognized as testcase" "testcase/input still marked missing: $(cat "$RESULTS_DIR/crashes/CRASH-TC-TXT/.promotion_pending")"
+else
+  pass "triage: input.txt recognized as testcase"
+fi
+
+if grep -qE 'testcase|input\.\*' "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD/.promotion_pending" 2>/dev/null; then
+  fail "triage: payload.txt recognized as testcase" "testcase still marked missing: $(cat "$RESULTS_DIR/crashes/CRASH-TC-PAYLOAD/.promotion_pending")"
+else
+  pass "triage: payload.txt recognized as testcase"
+fi
+
 if [ -f "$RESULTS_DIR/crashes/CRASH-TC-BINONLY/.promotion_pending" ]; then
   pass "triage: helper binary alone does not satisfy testcase"
 else
   fail "triage: helper binary alone does not satisfy testcase" "missing .promotion_pending"
 fi
+
+# These fixtures are never referenced again; drop them so the section 8b
+# triage pass below does not re-bundle them.
+rm -rf "$RESULTS_DIR"/crashes/CRASH-TC-* "$RESULTS_DIR"/crashes-rejected/CRASH-TC-*
 
 # ═══════════════════════════════════════════════════════════════
 # 8b. Deterministic sanitizer KEEP veto over an LLM discard
@@ -642,12 +646,6 @@ WRITE of size 8 at 0x60200000abcd
 #0 0x7fff12345678 in app_parse parser.c:42
 EOF
 echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-KEEPVETO/input.bin"
-triage_crash_dirs >/dev/null 2>&1
-if [ -d "$RESULTS_DIR/crashes/CRASH-KEEPVETO" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-KEEPVETO/.autodiscard" ]; then
-  pass "triage: strong sanitizer class vetoes LLM discard"
-else
-  fail "triage: strong sanitizer class vetoes LLM discard" "dir was auto-discarded despite heap-buffer-overflow"
-fi
 
 # TSan data race: a non-ASan sanitizer class must also veto the LLM discard.
 mkdir -p "$RESULTS_DIR/crashes/CRASH-TSAN-VETO"
@@ -657,12 +655,6 @@ cat > "$RESULTS_DIR/crashes/CRASH-TSAN-VETO/asan.txt" <<'EOF'
     #0 app_parse parser.c:42
 EOF
 echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-TSAN-VETO/input.bin"
-triage_crash_dirs >/dev/null 2>&1
-if [ -d "$RESULTS_DIR/crashes/CRASH-TSAN-VETO" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-TSAN-VETO/.autodiscard" ]; then
-  pass "triage: TSan data race vetoes LLM discard"
-else
-  fail "triage: TSan data race vetoes LLM discard" "dir was auto-discarded despite data race"
-fi
 
 # MSan use-of-uninitialized-value must also veto the LLM discard.
 mkdir -p "$RESULTS_DIR/crashes/CRASH-MSAN-VETO"
@@ -671,12 +663,6 @@ cat > "$RESULTS_DIR/crashes/CRASH-MSAN-VETO/asan.txt" <<'EOF'
     #0 0x4a1b2c in app_parse parser.c:42
 EOF
 echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-MSAN-VETO/input.bin"
-triage_crash_dirs >/dev/null 2>&1
-if [ -d "$RESULTS_DIR/crashes/CRASH-MSAN-VETO" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-MSAN-VETO/.autodiscard" ]; then
-  pass "triage: MSan uninit-value vetoes LLM discard"
-else
-  fail "triage: MSan uninit-value vetoes LLM discard" "dir was auto-discarded despite uninit-value"
-fi
 
 # Control: a non-keep class (null-deref) with the same LLM discard is still
 # rejected — the veto must be class-specific, not a blanket override.
@@ -687,7 +673,29 @@ Hint: address points to the zero page
 SCARINESS: 10 (null-deref)
 EOF
 echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-NOVETO/input.bin"
+
+# Single triage pass over all four veto fixtures (the per-dir loop is
+# independent, so each verdict is identical to a per-dir run).
 triage_crash_dirs >/dev/null 2>&1
+
+if [ -d "$RESULTS_DIR/crashes/CRASH-KEEPVETO" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-KEEPVETO/.autodiscard" ]; then
+  pass "triage: strong sanitizer class vetoes LLM discard"
+else
+  fail "triage: strong sanitizer class vetoes LLM discard" "dir was auto-discarded despite heap-buffer-overflow"
+fi
+
+if [ -d "$RESULTS_DIR/crashes/CRASH-TSAN-VETO" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-TSAN-VETO/.autodiscard" ]; then
+  pass "triage: TSan data race vetoes LLM discard"
+else
+  fail "triage: TSan data race vetoes LLM discard" "dir was auto-discarded despite data race"
+fi
+
+if [ -d "$RESULTS_DIR/crashes/CRASH-MSAN-VETO" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-MSAN-VETO/.autodiscard" ]; then
+  pass "triage: MSan uninit-value vetoes LLM discard"
+else
+  fail "triage: MSan uninit-value vetoes LLM discard" "dir was auto-discarded despite uninit-value"
+fi
+
 if [ -f "$RESULTS_DIR/crashes-rejected/CRASH-NOVETO/.autodiscard" ] || [ ! -d "$RESULTS_DIR/crashes/CRASH-NOVETO" ]; then
   pass "triage: non-keep class still honors LLM discard"
 else
@@ -696,6 +704,7 @@ fi
 
 # Restore the real function for any later tests.
 eval "$_orig_llm_triage_crash_decision"
+unset REACHABILITY_AUTO
 
 # ═══════════════════════════════════════════════════════════════
 # 9. validate_find_gate — accepts any FIND with a report, regardless of

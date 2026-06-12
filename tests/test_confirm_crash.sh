@@ -153,6 +153,15 @@ unset LLM_DECIDE_MOCK_CRASH_CONFIRM
 # autodiscard text. CRASH_CONFIRM_AUTO defaults on. Disable the
 # needs-review purgatory so the legacy fast-path is exercised here;
 # section 7b below asserts the default purgatory behavior.
+#
+# Fixture cleanup (wall-time): CRASH-CONF-001..003 are fully asserted by
+# sections 1–6 (which drive llm_confirm_crash_report directly) and nothing
+# below references them. Remove 001/002 so the integration triage passes
+# below don't re-gate every leftover dir; 003 (no confirm cache) stays for
+# the first pass so it still walks more than one dir with heterogeneous
+# cache states — a loop abort mid-pass fails CONF-004's assertions.
+rm -rf "$RESULTS_DIR/crashes/CRASH-CONF-001" \
+       "$RESULTS_DIR/crashes/CRASH-CONF-002"
 mk_promotable_crash CRASH-CONF-004 >/dev/null
 export CRASH_REJECT_NEEDS_REVIEW=0
 export LLM_DECIDE_MOCK_CRASH_CONFIRM='{"accept":false,"reason":"trigger source declared bytes but testcase needs chrome-only API","concerns":["self-contradictory"]}'
@@ -213,6 +222,9 @@ unset LLM_DECIDE_MOCK_CRASH_CONFIRM
 unset LLM_DECIDE_MOCK_CRASH_TRIAGE
 unset LLM_DECIDE_MOCK_LEGIT_CRASH
 
+# Fixture cleanup (wall-time): the requeued CRASH-CONF-004B is fully
+# asserted; remove it so the next triage calls don't re-gate it.
+rm -rf "$requeued_dir"
 mkdir -p "$RESULTS_DIR/crashes-needs-review/CRASH-CONF-SECOND"
 touch "$RESULTS_DIR/crashes-needs-review/CRASH-CONF-SECOND/.review-requeued"
 triage_crash_dirs >/dev/null 2>&1 || true
@@ -235,6 +247,8 @@ unset LLM_DECIDE_MOCK_CRASH_TRIAGE
 unset LLM_DECIDE_MOCK_LEGIT_CRASH
 
 # ── 9. CRASH_CONFIRM_AUTO=0 disables the gate entirely ─────────────
+# Fixture cleanup (wall-time): CRASH-CONF-005 is fully asserted above.
+rm -rf "$RESULTS_DIR/crashes/CRASH-CONF-005"
 mk_promotable_crash CRASH-CONF-006 >/dev/null
 # Mock would reject if the gate ran.
 export LLM_DECIDE_MOCK_CRASH_CONFIRM='{"accept":false,"reason":"would reject if gate ran"}'

@@ -73,6 +73,11 @@ EOF
 # ───────────────────────────────────────────────────────────────────
 _CURRENT_TEST="triage promotion auto-invokes local reachability"
 make_promotable_crash CRASH-INTEG-1
+# CRASH-INTEG-3 (section 5's "reachability failure does not block triage"
+# fixture) is created up front so this single triage_crash_dirs pass covers
+# both sections — env and mocks are identical, and a second full pass over
+# the same crashes/ tree costs ~1s of redundant subprocess work.
+make_promotable_crash CRASH-INTEG-3
 triage_crash_dirs >/dev/null 2>&1
 assert_file_exists "$RESULTS_DIR/crashes/CRASH-INTEG-1/reachability.json" \
   "reachability.json written during triage"
@@ -123,6 +128,13 @@ assert_file_contains "$RESULTS_DIR/crashes/CRASH-INTEG-1/REPORT.html" \
 # 4. REACHABILITY_AUTO=0 disables the hook
 # ───────────────────────────────────────────────────────────────────
 _CURRENT_TEST="REACHABILITY_AUTO=0 disables auto-invocation"
+# Fixture cleanup (wall-time): every assertion on the promoted dirs above
+# has run, and section 3's CRASH-CLUSTERS.md / REPORT.html snapshots are
+# already asserted. Remove them so this and later triage_crash_dirs calls
+# only walk their own fixture instead of re-gating the whole tree.
+# (CRASH-INTEG-3 stays until section 5 has checked its promotion marker.)
+rm -rf "$RESULTS_DIR/crashes/CRASH-INTEG-1" \
+       "$RESULTS_DIR/crashes/CRASH-INTEG-EXT"
 make_promotable_crash CRASH-INTEG-2
 REACHABILITY_AUTO=0 triage_crash_dirs >/dev/null 2>&1
 assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-INTEG-2/reachability.json" \
@@ -132,14 +144,16 @@ assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-INTEG-2/reachability.json" \
 # 5. A failing reachability run does not block triage
 # ───────────────────────────────────────────────────────────────────
 _CURRENT_TEST="reachability failure does not block triage"
-make_promotable_crash CRASH-INTEG-3
-# Wipe mocks so the script still runs but its sub-process can't load any data.
-# In practice the script will still succeed (returning all-unavailable) — the
-# stronger test is to point REACHABILITY_AUTO at a non-existent script via
-# PATH manipulation. Here we just verify the crash is still considered
-# promoted (no .promotion_pending file) regardless of reachability outcome.
-triage_crash_dirs >/dev/null 2>&1
-[ ! -f "$RESULTS_DIR/crashes/CRASH-INTEG-3/.promotion_pending" ] \
+# CRASH-INTEG-3 was created in section 1 and promoted by the same
+# triage_crash_dirs pass (identical env + mocks — see the note there).
+# In practice the reachability script still succeeds (returning
+# all-unavailable) — the stronger test is to point REACHABILITY_AUTO at a
+# non-existent script via PATH manipulation (section "failure records
+# non-blocking marker" below). Here we just verify the crash is still
+# considered promoted (no .promotion_pending file) regardless of
+# reachability outcome.
+[ -d "$RESULTS_DIR/crashes/CRASH-INTEG-3" ] \
+  && [ ! -f "$RESULTS_DIR/crashes/CRASH-INTEG-3/.promotion_pending" ] \
   && pass "$_CURRENT_TEST" \
   || fail "$_CURRENT_TEST" ".promotion_pending lingered after triage"
 
@@ -176,6 +190,13 @@ crash_dir_security_rejection_reason() {
   return 0
 }
 export -f crash_dir_security_rejection_reason
+# Fixture cleanup (wall-time): all remaining promoted dirs have been fully
+# asserted above; remove them so the reject-everything mock only evaluates
+# this section's fixture (and can't churn through — or reject — leftovers).
+rm -rf "$RESULTS_DIR/crashes/CRASH-INTEG-2" \
+       "$RESULTS_DIR/crashes/CRASH-INTEG-3" \
+       "$RESULTS_DIR/crashes/CRASH-INTEG-4" \
+       "$RESULTS_DIR/crashes/CRASH-INTEG-5"
 make_promotable_crash CRASH-INTEG-REJ
 triage_crash_dirs >/dev/null 2>&1
 assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-INTEG-REJ" \
@@ -247,6 +268,9 @@ assert_file_contains "$RESULTS_DIR/findings/FIND-REACH-1/report.md" \
 # 9. REACHABILITY_AUTO=0 disables the FIND-side hook too
 # ───────────────────────────────────────────────────────────────────
 _CURRENT_TEST="REACHABILITY_AUTO=0 disables reachability for findings"
+# Fixture cleanup (wall-time): FIND-REACH-1 is fully asserted; remove it so
+# this second validate_find_gate pass only walks its own fixture.
+rm -rf "$RESULTS_DIR/findings/FIND-REACH-1"
 mkdir -p "$RESULTS_DIR/findings/FIND-REACH-2"
 cat > "$RESULTS_DIR/findings/FIND-REACH-2/report.md" <<'EOF'
 # FIND-REACH-2

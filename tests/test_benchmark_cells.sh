@@ -87,15 +87,133 @@ touch -t 202001010101 \
 reltest_root="$SCRIPT_ROOT/output/benchmark-reltest-$$"
 trap 'rm -rf "$work" "$SCRIPT_ROOT/targets/$bench_target" "$reltest_root"* "${SCRIPT_ROOT}/${root_junk_name:-__no_such_benchmark_root_junk__}" "${SCRIPT_ROOT}/${model_direct_junk_name:-__no_such_benchmark_model_direct_junk__}" 2>/dev/null || true; teardown_test_env 2>/dev/null || true' EXIT
 codex_root="$work/codex-bench"
-# Capture exit code with `|| rc=$?` rather than a bare `$(...)` + `$?` on the
-# next line. Under `set -e`, a failing `var=$(cmd)` aborts the suite *at the
-# assignment*, before the rc can be inspected — that silently kills the suite
-# (nonzero exit, zero `✗`, no summary) instead of producing a real assertion
-# failure. Every $BENCH cell below uses this guard for that reason.
-codex_rc=0
-codex_out=$(CODEX_BIN="$fake_codex" \
-  bash "$BENCH" --target "$bench_target" --backend codex --replicates 1 \
-  --conditions model-direct --budget-wall 5 --bench-root "$codex_root" 2>&1) || codex_rc=$?
+gemini_direct_root="$work/gemini-direct-bench"
+gemini_unlimited_root="$work/gemini-direct-unlimited-bench"
+gemini_cli_unlimited_root="$work/gemini-cli-unlimited-bench"
+
+# fake-claude-fail and fake-gemini are created up front (rather than next to
+# their assertion sections below) so every $BENCH dry-run can launch together
+# in the parallel block that follows.
+fake_claude_fail="$work/fake-claude-fail"
+cat > "$fake_claude_fail" <<'SH'
+#!/usr/bin/env bash
+printf '{"type":"result","subtype":"error_during_execution","is_error":true}\n'
+exit 1
+SH
+chmod +x "$fake_claude_fail"
+
+fake_gemini="$work/fake-gemini"
+cat > "$fake_gemini" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+prompt="$(cat 2>/dev/null || true)"
+case "$prompt" in
+  *MODEL_PREFLIGHT_OK*)
+    if [ -n "${FAKE_BACKEND_RELATIVE_WRITE:-}" ]; then
+      printf 'junk from preflight %s\n' "$(pwd)" > "$FAKE_BACKEND_RELATIVE_WRITE"
+    fi
+    printf 'MODEL_PREFLIGHT_OK\n'
+    exit 0
+    ;;
+esac
+if [ -n "${FAKE_BACKEND_RELATIVE_WRITE:-}" ]; then
+  printf 'junk from %s\n' "$(pwd)" > "$FAKE_BACKEND_RELATIVE_WRITE"
+fi
+printf '{"id":"REC-empty","slice":"fake","confidence":"AUDIT-CLEAN","notes":"fake clean"}\n'
+SH
+chmod +x "$fake_gemini"
+model_direct_junk_name="benchmark-model-direct-junk-$$.txt"
+rm -f "$SCRIPT_ROOT/$model_direct_junk_name" 2>/dev/null || true
+
+# ── Launch every $BENCH dry-run in parallel ─────────────────────────────────
+# Each `bash bin/benchmark` dry-run spawns ~30 python subprocesses and takes
+# 1-2s; run serially the six cells dominated this suite's wall time. They are
+# independent — distinct --bench-root dirs, and the shared target fixture is
+# read-only to the benchmark (asserted by T16b2/T16b3) — so launch them as
+# background jobs and assert on the captured outputs afterwards, in the
+# original order.
+#
+# Each job writes its exit code to a file instead of using a bare
+# `var=$(cmd)` + `$?`. Under `set -e`, a failing `var=$(cmd)` aborts the
+# suite *at the assignment*, before the rc can be inspected — that silently
+# kills the suite (nonzero exit, zero `✗`, no summary) instead of producing
+# a real assertion failure. The `|| rc=$?` guard inside each subshell keeps
+# the job's own `set -e` from doing the same.
+( rc=0
+  CODEX_BIN="$fake_codex" \
+    bash "$BENCH" --target "$bench_target" --backend codex --replicates 1 \
+    --conditions model-direct --budget-wall 5 --bench-root "$codex_root" \
+    > "$work/codex.out" 2>&1 || rc=$?
+  printf '%s' "$rc" > "$work/codex.rc"
+) &
+codex_pid=$!
+
+# A relative --bench-root must still yield an absolute, existing --cd:
+# the script cd's to SCRIPT_ROOT, so the root resolves there. fake-codex
+# rejects a relative or missing --cd, so a clean run proves the fix.
+( rc=0
+  cd "$SCRIPT_ROOT" && CODEX_BIN="$fake_codex" \
+    bash "$BENCH" --target "$bench_target" --backend codex --replicates 1 \
+    --conditions model-direct --budget-wall 5 \
+    --bench-root "output/benchmark-reltest-$$" \
+    > "$work/codex_rel.out" 2>&1 || rc=$?
+  printf '%s' "$rc" > "$work/codex_rel.rc"
+) &
+codex_rel_pid=$!
+
+( rc=0
+  cd "$SCRIPT_ROOT" && CLAUDE_BIN="$fake_claude_fail" \
+    bash "$BENCH" --target "$bench_target" --backend claude --replicates 1 \
+    --conditions model-direct --budget-wall 5 \
+    --bench-root "$reltest_root-claudefail" \
+    > "$work/claude_fail.out" 2>&1 || rc=$?
+  printf '%s' "$rc" > "$work/claude_fail.rc"
+) &
+claude_fail_pid=$!
+
+( rc=0
+  GEMINI_BIN="$fake_gemini" FAKE_BACKEND_RELATIVE_WRITE="$model_direct_junk_name" \
+    bash "$BENCH" --target "$bench_target" --backend gemini \
+    --replicates 1 --conditions model-direct --budget-wall 5 \
+    --bench-root "$gemini_direct_root" \
+    > "$work/gemini_direct.out" 2>&1 || rc=$?
+  printf '%s' "$rc" > "$work/gemini_direct.rc"
+) &
+gemini_direct_pid=$!
+
+( rc=0
+  GEMINI_BIN="$fake_gemini" \
+    bash "$BENCH" --target "$bench_target" --backend gemini \
+    --replicates 1 --conditions model-direct --budget-wall 0 \
+    --bench-root "$gemini_unlimited_root" \
+    > "$work/gemini_unlimited.out" 2>&1 || rc=$?
+  printf '%s' "$rc" > "$work/gemini_unlimited.rc"
+) &
+gemini_unlimited_pid=$!
+
+# Regression: when benchmark output is captured by a shell command
+# substitution, the console-log FIFO path can deadlock in the EXIT trap
+# waiting for tee. Gemini CLI + unlimited wall time used to expose this:
+# the cell finished and console.log said "done", but bash never returned.
+# NOTE: unlike the other jobs, this one must keep capturing via `$(...)` —
+# the command-substitution pipe held open by a stray tee child IS the
+# deadlock vector under test; a plain `> file` redirection would mask a
+# regression.
+( rc=0
+  out=$(USE_GEMINI_CLI=1 GEMINI_BIN="$fake_gemini" \
+    audit_timeout_run 20 bash "$BENCH" --target "$bench_target" --backend gemini \
+    --replicates 1 --conditions model-direct --budget-wall 0 \
+    --bench-root "$gemini_cli_unlimited_root" 2>&1) || rc=$?
+  printf '%s\n' "$out" > "$work/gemini_cli_unlimited.out"
+  printf '%s' "$rc" > "$work/gemini_cli_unlimited.rc"
+) &
+gemini_cli_unlimited_pid=$!
+
+wait "$codex_pid" "$codex_rel_pid" "$claude_fail_pid" \
+     "$gemini_direct_pid" "$gemini_unlimited_pid" "$gemini_cli_unlimited_pid"
+
+codex_rc=$(<"$work/codex.rc")
+codex_out=$(<"$work/codex.out")
 assert_eq "0" "$codex_rc" "T16a: model-direct codex cell succeeds with one --cd"
 assert_match "cells complete: 1 done, 0 failed" "$codex_out" \
   "T16b: codex benchmark cell marked done"
@@ -117,14 +235,9 @@ assert_file_exists \
   "$SCRIPT_ROOT/targets/$bench_target/findings/FIND-stale/report.md" \
   "T16b3: pre-existing files in the target tree are left undisturbed"
 
-# A relative --bench-root must still yield an absolute, existing --cd:
-# the script cd's to SCRIPT_ROOT, so the root resolves there. fake-codex
-# rejects a relative or missing --cd, so a clean run proves the fix.
-codex_rel_rc=0
-codex_rel_out=$(cd "$SCRIPT_ROOT" && CODEX_BIN="$fake_codex" bash "$BENCH" \
-  --target "$bench_target" --backend codex --replicates 1 \
-  --conditions model-direct --budget-wall 5 \
-  --bench-root "output/benchmark-reltest-$$" 2>&1) || codex_rel_rc=$?
+# Relative --bench-root cell (see launch block above for rationale).
+codex_rel_rc=$(<"$work/codex_rel.rc")
+codex_rel_out=$(<"$work/codex_rel.out")
 assert_eq "0" "$codex_rel_rc" "T16c: model-direct codex cell succeeds with relative --bench-root"
 assert_match "cells complete: 1 done, 0 failed" "$codex_rel_out" \
   "T16d: relative-root codex benchmark cell marked done"
@@ -167,50 +280,17 @@ fi
 # A non-zero exit is a real failure and must not be laundered into a done cell.
 # (Previously error_max_turns was treated as success; with the model-direct
 # turn cap removed, that special case is gone and any non-zero exit fails.)
-fake_claude_fail="$work/fake-claude-fail"
-cat > "$fake_claude_fail" <<'SH'
-#!/usr/bin/env bash
-printf '{"type":"result","subtype":"error_during_execution","is_error":true}\n'
-exit 1
-SH
-chmod +x "$fake_claude_fail"
-claude_fail_out=$(cd "$SCRIPT_ROOT" && CLAUDE_BIN="$fake_claude_fail" bash "$BENCH" \
-  --target "$bench_target" --backend claude --replicates 1 \
-  --conditions model-direct --budget-wall 5 \
-  --bench-root "$reltest_root-claudefail" 2>&1) || true
+# The fake-claude-fail cell ran in the parallel launch block above; its
+# nonzero benchmark exit code is expected, so only the output is asserted.
+claude_fail_out=$(<"$work/claude_fail.out")
 rm -rf "$reltest_root-claudefail" 2>/dev/null || true
 assert_match "cells complete: 0 done, 1 failed" "$claude_fail_out" \
   "T16g: a genuinely failed claude cell stays failed"
 
 # ── T16h-k: model-direct cells do not dirty the real repo root ───────────
-fake_gemini="$work/fake-gemini"
-cat > "$fake_gemini" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-prompt="$(cat 2>/dev/null || true)"
-case "$prompt" in
-  *MODEL_PREFLIGHT_OK*)
-    if [ -n "${FAKE_BACKEND_RELATIVE_WRITE:-}" ]; then
-      printf 'junk from preflight %s\n' "$(pwd)" > "$FAKE_BACKEND_RELATIVE_WRITE"
-    fi
-    printf 'MODEL_PREFLIGHT_OK\n'
-    exit 0
-    ;;
-esac
-if [ -n "${FAKE_BACKEND_RELATIVE_WRITE:-}" ]; then
-  printf 'junk from %s\n' "$(pwd)" > "$FAKE_BACKEND_RELATIVE_WRITE"
-fi
-printf '{"id":"REC-empty","slice":"fake","confidence":"AUDIT-CLEAN","notes":"fake clean"}\n'
-SH
-chmod +x "$fake_gemini"
-model_direct_junk_name="benchmark-model-direct-junk-$$.txt"
-rm -f "$SCRIPT_ROOT/$model_direct_junk_name" 2>/dev/null || true
-gemini_direct_root="$work/gemini-direct-bench"
-gemini_direct_rc=0
-gemini_direct_out=$(GEMINI_BIN="$fake_gemini" FAKE_BACKEND_RELATIVE_WRITE="$model_direct_junk_name" \
-  bash "$BENCH" --target "$bench_target" --backend gemini \
-    --replicates 1 --conditions model-direct --budget-wall 5 \
-    --bench-root "$gemini_direct_root" 2>&1) || gemini_direct_rc=$?
+# (fake-gemini and the gemini cells ran in the parallel launch block above.)
+gemini_direct_rc=$(<"$work/gemini_direct.rc")
+gemini_direct_out=$(<"$work/gemini_direct.out")
 assert_eq "0" "$gemini_direct_rc" \
   "T16h: fake-gemini model-direct benchmark cell exits cleanly"
 assert_match "cells complete: 1 done, 0 failed" "$gemini_direct_out" \
@@ -222,27 +302,15 @@ model_direct_junk=$(find "$gemini_direct_root/gemini" \
 assert_file_exists "$model_direct_junk" \
   "T16k: bare junk lands inside the model-direct cell dir (which IS cwd)"
 
-gemini_unlimited_root="$work/gemini-direct-unlimited-bench"
-gemini_unlimited_rc=0
-gemini_unlimited_out=$(GEMINI_BIN="$fake_gemini" \
-  bash "$BENCH" --target "$bench_target" --backend gemini \
-    --replicates 1 --conditions model-direct --budget-wall 0 \
-    --bench-root "$gemini_unlimited_root" 2>&1) || gemini_unlimited_rc=$?
+gemini_unlimited_rc=$(<"$work/gemini_unlimited.rc")
+gemini_unlimited_out=$(<"$work/gemini_unlimited.out")
 assert_eq "0" "$gemini_unlimited_rc" \
   "T16k2: fake-gemini model-direct benchmark supports unlimited wall time"
 assert_match "budget=unlimited" "$gemini_unlimited_out" \
   "T16k3: unlimited wall-time mode is visible in benchmark logs"
 
-# Regression: when benchmark output is captured by a shell command
-# substitution, the console-log FIFO path can deadlock in the EXIT trap
-# waiting for tee. Gemini CLI + unlimited wall time used to expose this:
-# the cell finished and console.log said "done", but bash never returned.
-gemini_cli_unlimited_root="$work/gemini-cli-unlimited-bench"
-gemini_cli_unlimited_rc=0
-gemini_cli_unlimited_out=$(USE_GEMINI_CLI=1 GEMINI_BIN="$fake_gemini" \
-  audit_timeout_run 20 bash "$BENCH" --target "$bench_target" --backend gemini \
-    --replicates 1 --conditions model-direct --budget-wall 0 \
-    --bench-root "$gemini_cli_unlimited_root" 2>&1) || gemini_cli_unlimited_rc=$?
+gemini_cli_unlimited_rc=$(<"$work/gemini_cli_unlimited.rc")
+gemini_cli_unlimited_out=$(<"$work/gemini_cli_unlimited.out")
 assert_eq "0" "$gemini_cli_unlimited_rc" \
   "T16k4: captured Gemini CLI unlimited benchmark exits without tee deadlock"
 assert_match "cells complete: 1 done, 0 failed" "$gemini_cli_unlimited_out" \

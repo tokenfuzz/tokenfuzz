@@ -239,15 +239,14 @@ load_prior_timings() {
 
 # Cold-start bootstrap: until a timing artifact exists, only these few
 # genuinely slow suites need to lead so the first run still packs well.
-# Inclusion criterion: observed > ~30s wall under the parallel runner.
+# Inclusion criterion: observed > ~10s wall under the parallel runner.
 # Everything else falls through to a coarse category default and then
 # self-corrects from real timings on the next run.
 bootstrap_weight() {
   case "$1" in
-    test_benchmark|test_workqueue|test_multilang_support) echo 65 ;;
-    test_benchmark_report|test_benchmark_cells) echo 45 ;;
-    test_timeout|test_triage|test_triage_reachability|test_audit_core|test_benchmark_aggregate) echo 33 ;;
-    test_gemini_watchdog) echo 16 ;;
+    test_workqueue|test_benchmark) echo 25 ;;
+    test_audit_core|test_triage|test_decision_triage|test_probe_harness_cpp|test_severity|test_setup_target|test_stall_rotation) echo 15 ;;
+    test_timeout|test_integration_e2e|test_multilang_support|test_benchmark_cells) echo 10 ;;
     *) echo "" ;;
   esac
 }
