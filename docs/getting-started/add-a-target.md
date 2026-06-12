@@ -48,10 +48,18 @@ Three useful variants:
 bin/setup-target <target>                                   # re-inspect existing checkout
 bin/setup-target <target> <repo-url> --ref <branch-or-rev>  # clone + pin to a revision
 bin/setup-target <target> --ref <branch-or-rev>             # switch the existing checkout
+bin/setup-target <target> /path/to/local/source            # use a local source directory
 ```
 
 Notes:
 
+- The source argument can be a local directory instead of a URL. A local
+  git/hg checkout is cloned as usual. A plain directory with no VCS
+  metadata is symlinked into `targets/<target>/` (never copied, pulled, or
+  fetched) and audited in place as a local-only "no VCS" target — its
+  `target.toml` records `upstream_url = "FILL_ME"` and `pinned_rev =
+  "norev"`, and the generated `reproduce.sh` asks for a checkout path
+  instead of trying to clone.
 - If a checkout already exists under `targets/<target>/`, the no-URL
   form normally seeds or refreshes the generated config without touching
   source. It can still force the Python bootstrap when it detects stale
@@ -196,7 +204,8 @@ generated placeholders remain.
 
 A target is ready when:
 
-- `targets/<target>/` is a Git or Mercurial checkout;
+- `targets/<target>/` is a Git or Mercurial checkout, or a symlink to a
+  local source tree;
 - the default ASan artifacts exist and start cleanly outside the
   harness;
 - `output/<target>/target.toml` exists. `bin/audit --target <target>`

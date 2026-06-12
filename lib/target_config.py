@@ -81,6 +81,42 @@ def is_placeholder_url(url: str) -> bool:
     """True when `url` is empty or the un-seeded target.toml `FILL_ME` stub."""
     return (url or "").strip().lower() in _PLACEHOLDER_URLS
 
+
+def config_has_live_placeholder(toml_path: "str | os.PathLike") -> bool:
+    """True when target.toml has an UNRESOLVED placeholder a re-seed can fix —
+    an active (parsed, non-comment) field whose value still contains FILL_ME.
+
+    bin/setup-target uses this to decide whether to refresh a generated config.
+    Two things are deliberately NOT treated as placeholders, so a reviewed
+    config keeps the operator's edits across reruns instead of being rewritten:
+
+      * commented example lines such as `# ubsan_lib = "build-<san>/FILL_ME.a"`,
+        which the seed always emits and the TOML parser never sees; and
+      * `upstream_url = "FILL_ME"` on a local-only target (unpinned pinned_rev),
+        which is the intended steady state — re-seeding cannot resolve it.
+
+    A grep for FILL_ME cannot make these distinctions (it matches comments and
+    the local-only upstream), which is why this parses the TOML instead.
+    """
+    try:
+        parsed = parse_toml(Path(toml_path))
+    except Exception:
+        return False  # unparsable config is handled by the caller's own check
+    upstream_unresolvable = is_unpinned_rev(str(parsed.get("pinned_rev", "") or ""))
+
+    def _walk(obj, key=None) -> bool:
+        if isinstance(obj, str):
+            if "FILL_ME" not in obj:
+                return False
+            return not (key == "upstream_url" and upstream_unresolvable)
+        if isinstance(obj, dict):
+            return any(_walk(v, k) for k, v in obj.items())
+        if isinstance(obj, list):
+            return any(_walk(v, key) for v in obj)
+        return False
+
+    return _walk(parsed)
+
 # TOML basic-string escaping. Used everywhere we write a Python string
 # into a generated target.toml so an unsanitised value (a tainted slug,
 # an LLM-suggested peer name with an embedded quote, a Windows-style
@@ -2147,6 +2183,12 @@ def _cmd_refresh_build_fields(args) -> int:
     return 0
 
 
+def _cmd_config_needs_reseed(args) -> int:
+    # Exit 0 when an active placeholder needs a re-seed, 1 otherwise — shaped
+    # for use as a shell `if` condition in bin/setup-target.
+    return 0 if config_has_live_placeholder(Path(args.file)) else 1
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="lib/target_config.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2166,6 +2208,10 @@ def main(argv: list[str]) -> int:
     sp.add_argument("target_root")
     sp.add_argument("out")
     sp.set_defaults(func=_cmd_refresh_build_fields)
+
+    sp = sub.add_parser("config-needs-reseed")
+    sp.add_argument("file")
+    sp.set_defaults(func=_cmd_config_needs_reseed)
 
     sp = sub.add_parser("detect-rev")
     sp.add_argument("target_root")

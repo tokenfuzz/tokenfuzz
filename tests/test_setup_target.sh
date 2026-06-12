@@ -220,6 +220,83 @@ else
   fail "$_CURRENT_TEST" "$out"
 fi
 
+_CURRENT_TEST="setup-target symlinks a local non-VCS source dir as a no-VCS target"
+# A local directory with no VCS metadata, passed as the source argument, is
+# symlinked in place (not cloned/copied) and seeds a local-only target
+# (FILL_ME / norev), so the generated reproduce.sh asks for a checkout path
+# instead of cloning. The symlink is never pulled or fetched.
+link_src="$TEST_TMPDIR/external-plain"
+mkdir -p "$link_src"
+cat > "$link_src/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.16)
+project(external_plain C)
+EOF
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 "$SCRIPT_ROOT/bin/setup-target" extlink "$link_src" 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] &&
+   [ -L "$ROOT/targets/extlink" ] &&
+   [ -f "$ROOT/targets/extlink/CMakeLists.txt" ] &&
+   grep -q 'upstream_url  = "FILL_ME"' "$ROOT/output/extlink/target.toml" &&
+   grep -q 'pinned_rev    = "norev"' "$ROOT/output/extlink/target.toml" &&
+   grep -q 'Symlinking targets/extlink' <<<"$out" &&
+   grep -q 'non-VCS source' <<<"$out"; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "$out"
+fi
+
+_CURRENT_TEST="setup-target clones a local git checkout rather than symlinking it"
+# A local directory that IS its own git checkout keeps the existing clone
+# behaviour — an isolated checkout under targets/, not a symlink.
+git_co="$TEST_TMPDIR/external-git"
+git clone "$REMOTE" "$git_co" >/dev/null 2>&1
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 "$SCRIPT_ROOT/bin/setup-target" gitclone "$git_co" 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] &&
+   [ ! -L "$ROOT/targets/gitclone" ] &&
+   [ -d "$ROOT/targets/gitclone/.git" ]; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "$out"
+fi
+
+_CURRENT_TEST="setup-target symlink seeds an honest no-VCS upstream (not the ignored arg)"
+# A plain local source must record upstream_url = FILL_ME, never the local path
+# passed as the source arg — recording it would produce dishonest export-repro
+# metadata pointing reproduce.sh at the wrong source.
+grep -q 'upstream_url  = "FILL_ME"' "$ROOT/output/extlink/target.toml" &&
+  ! grep -q "$link_src" "$ROOT/output/extlink/target.toml" &&
+  pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "$(cat "$ROOT/output/extlink/target.toml")"
+
+_CURRENT_TEST="setup-target does not re-seed a local-only config on rerun (preserves edits)"
+# The seed always leaves commented FILL_ME example lines and a local-only target
+# keeps upstream_url = "FILL_ME"; the structured re-seed trigger must NOT fire on
+# those, or a rerun would wipe operator edits. Append a marker and rerun.
+printf '\n# OPERATOR_EDIT_MARKER\nlink_libs = ["-lm", "-lcustom"]\n' >> "$ROOT/output/extlink/target.toml"
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 "$SCRIPT_ROOT/bin/setup-target" extlink "$link_src" 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] &&
+   grep -q 'OPERATOR_EDIT_MARKER' "$ROOT/output/extlink/target.toml" &&
+   grep -q -- '-lcustom' "$ROOT/output/extlink/target.toml" &&
+   grep -q 'Keeping reviewed' <<<"$out"; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "$out"
+fi
+
+_CURRENT_TEST="setup-target rejects --repo-type for a plain local source"
+# An explicit --repo-type git|hg contradicts a plain (no-VCS) source dir; fail
+# clearly rather than silently symlinking it as no-VCS.
+out=$(AUDIT_ROOT="$ROOT" "$SCRIPT_ROOT/bin/setup-target" rejecttype "$link_src" --repo-type git 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] &&
+   [ ! -e "$ROOT/targets/rejecttype" ] &&
+   grep -q 'plain source tree, not a git repo' <<<"$out"; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "rc=$rc $out"
+fi
+
 _CURRENT_TEST="setup-target --bootstrap builds every enabled sanitizer (asan + ubsan)"
 # When [sanitizer].enabled lists more than asan, --bootstrap must converge a
 # recipe and materialize a build tree for EACH sanitizer, not just asan. We

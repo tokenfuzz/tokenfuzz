@@ -1395,8 +1395,13 @@ with contextlib.redirect_stderr(err_buf):
         input_name="input.bin", harness_name="harness.c", harness_compiler="clang",
     )
 text_c = repro_c.read_text(encoding="utf-8")
-assert_not_in("FILL_ME", text_c,
-              "c-harness asan_lib FILL_ME: placeholder never reaches output")
+# Guard the specific leak: the placeholder library PATH (build-asan/FILL_ME.a)
+# must never reach a resolve/link line — discovery replaces it. We can't assert
+# the bare token "FILL_ME" is absent because the generic preamble now matches it
+# as a clone-skip sentinel (URL=FILL_ME → local-only target), so the word
+# legitimately appears in the case guard / its comment.
+assert_not_in("FILL_ME.a", text_c,
+              "c-harness asan_lib FILL_ME: placeholder library path never reaches output")
 assert_in("linking auto-discovered library", text_c,
           "c-harness asan_lib FILL_ME: emits library-discovery block")
 assert_in("FILL_ME", err_buf.getvalue(),
@@ -2164,6 +2169,38 @@ assert_eq(True, er._rev_is_pinned("HEAD"),
           "_rev_is_pinned: HEAD is treated as a usable ref")
 assert_eq(True, er._rev_is_pinned("v1.2.3"),
           "_rev_is_pinned: a tag is a usable ref")
+
+
+# ─── build_report_md Reproduce hint mirrors reproduce.sh ────────────
+# The report's Reproduce block must advertise the same invocation the bundled
+# reproduce.sh actually supports: clone for a pinned upstream, the no-argument
+# in-place form for a local-only target with a recorded source, and the
+# path-only form when neither applies.
+def _repro_hint(pinned_rev: str, local_src: str) -> str:
+    return er.build_report_md(
+        crash_id="CRASH-H-1", primitive_label="stack-buffer-overflow",
+        severity_value="Medium", surface_value="cli", surface_reason="",
+        trigger_value="bytes", caller_contract_value="obeyed",
+        boundary_value="", caller_controls_value="", parameter_control_value="",
+        trusted_actions_value="", confidence_value="", strategy_value="",
+        crash_dir=TMP, report_md=None,
+        asan_top="", asan_summary="", dedup_frames="fn file.c:1",
+        asan_expected="", pinned_rev=pinned_rev, local_src=local_src,
+    )
+
+_h = _repro_hint("abc123def456", "")
+assert_in("clones upstream@abc123def456", _h,
+          "build_report_md: pinned rev advertises clone")
+_h = _repro_hint("norev", "targets/x")
+assert_in("against the in-place audit source", _h,
+          "build_report_md: local-only with source advertises no-arg repro")
+assert_not_in("clones upstream@", _h,
+              "build_report_md: local-only does not advertise a clone")
+_h = _repro_hint("norev", "")
+assert_in("/path/to/src", _h,
+          "build_report_md: no source falls back to the path form")
+assert_not_in("in-place audit source", _h,
+              "build_report_md: no recorded source omits the in-place hint")
 
 
 # ─── Cleanup ────────────────────────────────────────────────────────

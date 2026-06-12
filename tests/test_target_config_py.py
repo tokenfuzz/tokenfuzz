@@ -1123,6 +1123,43 @@ assert_eq(False, tc.is_placeholder_url("https://github.com/acme/widgets"),
           "is_placeholder_url: a real URL is not a placeholder")
 
 
+# ─── config_has_live_placeholder (structured re-seed trigger) ───────
+# Replaces bin/setup-target's bare `grep FILL_ME`, which re-seeded (and wiped
+# operator edits) on every rerun because the seed always leaves commented
+# FILL_ME example lines and local-only targets keep upstream_url = "FILL_ME".
+def _write_toml(name: str, body: str) -> Path:
+    p = TEST_TMPDIR / name
+    p.write_text(body, encoding="utf-8")
+    return p
+
+# Local-only steady state: upstream FILL_ME + unpinned rev → NOT a placeholder.
+_local_only = _write_toml("local_only.toml",
+    'target = "x"\nupstream_url = "FILL_ME"\npinned_rev = "norev"\n'
+    '# ubsan_lib = "build-ubsan/FILL_ME.a"\nlink_libs = ["-lm"]\n')
+assert_eq(False, tc.config_has_live_placeholder(_local_only),
+          "config_has_live_placeholder: local-only FILL_ME upstream is steady state")
+
+# Commented example FILL_ME only (fully-configured target) → NOT a placeholder.
+_commented = _write_toml("commented.toml",
+    'target = "x"\nupstream_url = "https://h/r"\npinned_rev = "abc123"\n'
+    'asan_bin = "build-asan/x"\n# msan_lib = "build-msan/FILL_ME.a"\n')
+assert_eq(False, tc.config_has_live_placeholder(_commented),
+          "config_has_live_placeholder: commented FILL_ME lines are not placeholders")
+
+# Active FILL_ME in a build field → IS a placeholder needing refresh.
+_active = _write_toml("active.toml",
+    'target = "x"\nupstream_url = "https://h/r"\npinned_rev = "abc123"\n'
+    'asan_lib = "build-asan/FILL_ME.a"\n')
+assert_eq(True, tc.config_has_live_placeholder(_active),
+          "config_has_live_placeholder: an active FILL_ME build field needs refresh")
+
+# Real upstream but FILL_ME URL with a pinned rev → re-detect (not local-only).
+_url_unfilled = _write_toml("url_unfilled.toml",
+    'target = "x"\nupstream_url = "FILL_ME"\npinned_rev = "abc123"\n')
+assert_eq(True, tc.config_has_live_placeholder(_url_unfilled),
+          "config_has_live_placeholder: FILL_ME upstream with a pinned rev still refreshes")
+
+
 # ─── Cleanup + summary ──────────────────────────────────────────────
 
 shutil.rmtree(TEST_TMPDIR, ignore_errors=True)

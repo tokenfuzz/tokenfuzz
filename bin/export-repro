@@ -698,14 +698,66 @@ PREAMBLE_GENERIC = """\
 # Usage:
 #   ./reproduce.sh                     (clones $URL@$REV next to script)
 #   ./reproduce.sh /path/to/checkout   (uses an existing checkout)
+# Local-only targets (no recorded upstream — a symlinked or plain local source
+# tree) carry the FILL_ME url sentinel; for those the clone is skipped and you
+# must pass a checkout path.
 set -eu
 URL=__UPSTREAM_URL__
 REV=__PINNED_REV__
+# Audit-tree-relative source path (e.g. targets/<slug>) for a local-only
+# target; empty for VCS targets. Kept relative — not a host-absolute path — so
+# the bundle stays portable and leaks no host layout. Resolve it against the
+# first ancestor of this script that contains it (the audit repo root) so
+# `./reproduce.sh` finds the in-place source on the machine that produced the
+# bundle; stays empty when the bundle was copied elsewhere.
+LOCAL_SRC=__LOCAL_SRC__
+resolved_local=""
+if [ -n "$LOCAL_SRC" ]; then
+  _d="$(cd "$(dirname "$0")" && pwd)"
+  while :; do
+    if [ -d "$_d/$LOCAL_SRC" ]; then resolved_local="$_d/$LOCAL_SRC"; break; fi
+    [ "$_d" = "/" ] && break
+    _d="$(dirname "$_d")"
+  done
+fi
 
 default_src="$(dirname "$0")"/__SLUG__
-src=${1:-"$default_src"}
-[ -d "$src/.git" ] || git clone "$URL" "$src"
-git -C "$src" checkout --quiet "$REV" 2>/dev/null || true
+# Choose the source tree: an explicit argument wins; else the resolved in-place
+# source recorded at audit time; else the clone/checkout location next to the
+# script.
+if [ $# -ge 1 ]; then
+  src="$1"
+elif [ -n "$resolved_local" ]; then
+  src="$resolved_local"
+else
+  src="$default_src"
+fi
+# Fetch the source when it is absent — but clone only with a real upstream AND
+# a usable revision. FILL_ME / norev are seed sentinels: a local-only or
+# unpinned target cannot clone (this mirrors the report, which offers a
+# path-based repro in that case), so ask for a checkout instead of attempting a
+# doomed `git clone`.
+if [ ! -d "$src" ]; then
+  can_clone=1
+  case "$URL" in FILL_ME|''|norev|no-vcs|unknown) can_clone=0 ;; esac
+  case "$REV" in ''|norev|no-vcs|unknown|'?') can_clone=0 ;; esac
+  if [ "$can_clone" -eq 1 ]; then
+    git clone "$URL" "$src"
+  else
+    echo "reproduce.sh: no source tree at '$src' and no cloneable upstream recorded for this target." >&2
+    [ -n "$LOCAL_SRC" ] && echo "Recorded source '$LOCAL_SRC' was not found near this bundle." >&2
+    echo "Pass a local checkout: $0 /path/to/src" >&2
+    exit 2
+  fi
+fi
+# Pin to the recorded revision when this is a VCS checkout; a plain tree
+# (no .git / .hg) is used as-is. Both git and hg are handled so a checkout the
+# operator passes in is pinned either way.
+if [ -d "$src/.git" ]; then
+  git -C "$src" checkout --quiet "$REV" 2>/dev/null || true
+elif [ -d "$src/.hg" ]; then
+  hg --cwd "$src" update -r "$REV" 2>/dev/null || true
+fi
 
 build="$src/__BUILD_DIR__"
 """
@@ -1178,7 +1230,8 @@ def _sub_template(text: str, **kw: str) -> str:
 
 
 def emit_preamble(build_system: str, upstream_url: str, pinned_rev: str,
-                  slug: str, san_bin_rel: str, sanitizer: str = "asan") -> str:
+                  slug: str, san_bin_rel: str, sanitizer: str = "asan",
+                  local_src: str = "") -> str:
     quoted_url = shq(upstream_url)
     quoted_rev = shq(pinned_rev)
     quoted_slug = shq(safe_slug(slug))
@@ -1198,6 +1251,10 @@ def emit_preamble(build_system: str, upstream_url: str, pinned_rev: str,
         PREAMBLE_GENERIC,
         __UPSTREAM_URL__=quoted_url,
         __PINNED_REV__=quoted_rev,
+        # Recorded local source for a local-only target (empty for VCS targets,
+        # which clone from upstream instead). shq("") -> '' so the LOCAL_SRC
+        # branch is simply skipped at run time.
+        __LOCAL_SRC__=shq(local_src),
         __SLUG__=quoted_slug,
         __SANITIZER_LABEL__=meta["label"],
         __BUILD_DIR__=meta["build_dir"],
@@ -2668,7 +2725,8 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
                              sanitizer: str = "asan",
                              extra_options: str = "", mode: str = "generic",
                              recorded_env_options: str = "",
-                             audit_build_script: str = "") -> None:
+                             audit_build_script: str = "",
+                             local_src: str = "") -> None:
     meta = sanitizer_meta(sanitizer)
     if not meta["flag"]:
         die(f"C/C++ harness export for {meta['label']} needs target-specific compiler flags")
@@ -2716,7 +2774,8 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
         'fi\n'
     )
     text = (
-        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
+        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel,
+                      sanitizer, local_src)
         + emit_build(build_system, sanitizer=sanitizer,
                      audit_build_script=audit_build_script)
         + lib_resolve_block
@@ -2752,13 +2811,15 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
                                    cmake_target: str, input_name: str,
                                    sanitizer: str = "asan",
                                    extra_options: str = "", mode: str = "generic",
-                                   recorded_env_options: str = "") -> None:
+                                   recorded_env_options: str = "",
+                                   local_src: str = "") -> None:
     meta = sanitizer_meta(sanitizer)
     if build_system == "swift" and not san_bin_rel:
         if not meta["flag"]:
             die(f"Swift runner does not support sanitizer '{sanitizer}'")
         text = (
-            emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
+            emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel,
+                          sanitizer, local_src)
             + _sub_template(
                 SWIFT_RUN,
                 __INPUT_NAME__=input_name,
@@ -2772,7 +2833,8 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
         )
     else:
         text = (
-            emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
+            emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel,
+                          sanitizer, local_src)
             + emit_build(build_system, cmake_target, sanitizer)
             + emit_bin_resolve(san_bin_rel, sanitizer)
             + _sub_template(
@@ -2848,9 +2910,11 @@ def write_shell_wrapper_template(out: Path, *, build_system: str, upstream_url: 
                                   cmake_target: str, wrapper: Path,
                                   input_name: str = "",
                                   target_root: str = "",
-                                  sanitizer: str = "asan") -> None:
+                                  sanitizer: str = "asan",
+                                  local_src: str = "") -> None:
     parts = [
-        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer),
+        emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel,
+                      sanitizer, local_src),
         emit_build(build_system, cmake_target, sanitizer),
     ]
     if san_bin_rel:
@@ -2930,7 +2994,8 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
                     dedup_frames: str,
                     asan_expected: str, pinned_rev: str,
                     sanitizer: str = "asan",
-                    advisory_value: str = "") -> str:
+                    advisory_value: str = "",
+                    local_src: str = "") -> str:
     meta = sanitizer_meta(sanitizer)
     # Compute the agent narrative up front so the `## Summary` section can lead
     # the report — placed ABOVE the Fields table, matching the finding-report
@@ -3045,11 +3110,19 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
             f"./reproduce.sh                 # clones upstream@{pinned_rev[:12]}, builds/runs with {meta['label']}\n"
         )
         parts.append("./reproduce.sh /path/to/src    # use an existing checkout\n")
+    elif local_src:
+        # Local-only target audited in place: reproduce.sh resolves the
+        # recorded in-place source (targets/<slug>) by walking up to the audit
+        # repo root, so the no-argument form works on the audit machine. Keep
+        # the path form for a copy of the bundle taken elsewhere.
+        parts.append(
+            f"./reproduce.sh                 # builds/runs with {meta['label']} against the in-place audit source\n"
+        )
+        parts.append("./reproduce.sh /path/to/src    # or an existing checkout\n")
     else:
-        # No pinned upstream revision (local-only target, or VCS not
-        # recorded). The bundled reproduce.sh cannot clone; point only at
-        # the path form so the message stays honest instead of claiming a
-        # "clone upstream@norev" that will fail.
+        # No pinned upstream revision and no in-place source recorded. The
+        # bundled reproduce.sh cannot clone; point only at the path form so the
+        # message stays honest instead of claiming a "clone upstream@norev".
         parts.append(
             f"./reproduce.sh /path/to/src    # builds/runs with {meta['label']} against your checkout\n"
         )
@@ -3202,6 +3275,19 @@ def main(argv: list[str]) -> int:
         sanitizer_extra_options = cfg.sanitizer_options.get(sanitizer, "")
         is_browser = cfg.is_browser == "1"
 
+        # A local-only / unpinned target cannot be cloned by reproduce.sh (see
+        # the clone gate in PREAMBLE_GENERIC). Point it at the in-place source
+        # using the same audit-tree-relative placeholder the bundle normalizer
+        # uses for source paths (targets/<slug>), so `./reproduce.sh` reproduces
+        # in place on the audit machine with no host-absolute path baked in. VCS
+        # targets leave this empty and clone from upstream.
+        local_src = ""
+        if cfg.target_root and (
+            target_config.is_placeholder_url(upstream_url)
+            or target_config.is_unpinned_rev(pinned_rev)
+        ):
+            local_src = f"targets/{slug}"
+
         includes_args = emit_include_args(cfg.includes)
         link_lib_resolves, link_libs = emit_link_libs_with_resolves(cfg.link_libs, sanitizer)
 
@@ -3291,6 +3377,7 @@ def main(argv: list[str]) -> int:
                 mode=run_mode or "generic",
                 recorded_env_options=recorded_env_options,
                 audit_build_script=audit_build_script,
+                local_src=local_src,
             )
         elif shell_wrapper is not None:
             write_shell_wrapper_template(
@@ -3301,6 +3388,7 @@ def main(argv: list[str]) -> int:
                 wrapper=shell_wrapper, input_name=input_name,
                 target_root=cfg.target_root or "",
                 sanitizer=sanitizer,
+                local_src=local_src,
             )
         elif input_name:
             write_cli_with_input_template(
@@ -3312,6 +3400,7 @@ def main(argv: list[str]) -> int:
                 extra_options=sanitizer_extra_options,
                 mode=run_mode or "generic",
                 recorded_env_options=recorded_env_options,
+                local_src=local_src,
             )
         else:
             # No runnable template (self-contained harness with no separate
@@ -3405,6 +3494,7 @@ def main(argv: list[str]) -> int:
             asan_expected=asan_expected, pinned_rev=pinned_rev,
             sanitizer=sanitizer,
             advisory_value=advisory_value,
+            local_src=local_src,
         )
         (stage / "REPORT.md").write_text(report_text, encoding="utf-8")
 

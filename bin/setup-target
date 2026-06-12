@@ -9,7 +9,16 @@ source "$SCRIPT_ROOT/lib/target_config.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  bin/setup-target <target> [repo URL] [options]
+  bin/setup-target <target> [repo URL | local source dir] [options]
+
+The second argument may be a remote repo URL or a path to a local source
+directory:
+  * a remote URL — or a local directory that is its own git/hg checkout — is
+    cloned into targets/<target> as an isolated checkout;
+  * a local directory with no VCS metadata is symlinked into targets/<target>
+    instead (never copied, pulled, or fetched) and seeds a local-only "no VCS"
+    target (upstream_url = FILL_ME, pinned_rev = norev), so the generated
+    reproduce.sh asks for a checkout path rather than trying to clone.
 
 Options:
   --repo-type <auto|git|hg>
@@ -43,6 +52,7 @@ Examples:
   bin/setup-target pcre2 https://github.com/PCRE2Project/pcre2
   bin/setup-target pcre2
   bin/setup-target firefox https://hg.mozilla.org/mozilla-unified --repo-type hg
+  bin/setup-target myparser ~/code/myparser
   bin/setup-target oss-python-pyyaml --bootstrap
 EOF
 }
@@ -143,6 +153,26 @@ hg_dirty() {
   [ -n "$(hg --cwd "$1" status 2>/dev/null)" ]
 }
 
+# Point targets/<target> at an existing local non-VCS directory via symlink
+# instead of cloning. Used when the source argument is a plain source tree (no
+# .git / .hg) the operator wants audited in place: it is never copied, pulled,
+# or fetched, and seeds a local-only "no VCS" target. A local directory that is
+# its own git/hg checkout goes through clone_target instead.
+link_target() {
+  local src="$1" dest
+  dest="$(cd "$src" 2>/dev/null && pwd)" || die "source directory not found: $src"
+  [ -d "$dest" ] || die "source is not a directory: $dest"
+  mkdir -p "$SCRIPT_ROOT/targets"
+  if [ -L "$TARGET_ROOT" ]; then
+    log "Re-pointing targets/$TARGET_NAME -> $dest"
+    rm -f "$TARGET_ROOT"
+  elif [ -e "$TARGET_ROOT" ]; then
+    die "targets/$TARGET_NAME already exists and is not a symlink; remove it first to symlink a different source"
+  fi
+  ln -s "$dest" "$TARGET_ROOT"
+  log "Symlinking targets/$TARGET_NAME -> $dest (local non-VCS source; not cloned, pulled, or fetched)"
+}
+
 clone_target() {
   local repo_type="$1"
   [ -n "$REPO_URL" ] || die "targets/$TARGET_NAME does not exist; pass a repo URL to clone it"
@@ -209,6 +239,11 @@ if [ -d "$TARGET_ROOT" ]; then
     else
       log "Using existing targets/$TARGET_NAME as a plain source tree"
     fi
+    # The tree has no VCS to clone from, so an ignored URL must not be recorded
+    # as the upstream — that would produce dishonest export-repro metadata and
+    # point reproduce.sh at the wrong source. Seed introspection records a
+    # local-only (FILL_ME / norev) target instead.
+    REPO_URL=""
   elif [ "$NO_UPDATE" -eq 1 ] || { [ -z "$REPO_URL" ] && [ -z "$REF" ]; }; then
     log "Using existing targets/$TARGET_NAME without updating"
   elif [ "$DETECTED_REPO_TYPE" = "git" ]; then
@@ -216,6 +251,17 @@ if [ -d "$TARGET_ROOT" ]; then
   else
     sync_hg
   fi
+elif [ -n "$REPO_URL" ] && [ -d "$REPO_URL" ] && \
+     [ "$(target_detect_repo_type "$REPO_URL")" = "none" ]; then
+  # The source argument is a local directory with no VCS metadata. An explicit
+  # --repo-type git|hg contradicts that, so fail clearly rather than silently
+  # symlinking (mirrors the type-mismatch check for existing checkouts above).
+  [ "$REPO_TYPE" = "auto" ] || \
+    die "$REPO_URL is a plain source tree, not a $REPO_TYPE repo; omit --repo-type to symlink it"
+  # Symlink it in place rather than failing on `git clone <plain dir>`; seed
+  # introspection (REPO_URL cleared) then records a local-only no-VCS target.
+  link_target "$REPO_URL"
+  REPO_URL=""
 else
   DETECTED_REPO_TYPE="$([ "$REPO_TYPE" = "auto" ] && detect_repo_type "$TARGET_ROOT" "$REPO_URL" || printf '%s\n' "$REPO_TYPE")"
   clone_target "$DETECTED_REPO_TYPE"
@@ -225,17 +271,22 @@ mkdir -p "$CONFIG_DIR"
 # Reviewed configs are preserved by default. The harness only re-seeds when:
 #   * the file is missing (fresh target),
 #   * the operator passed --force / --force-config,
-#   * unfilled FILL_ME placeholders remain from a prior seed, OR
+#   * an ACTIVE (uncommented) field still holds an unresolved FILL_ME
+#     placeholder a re-seed could fill, OR
 #   * the file no longer parses as TOML (e.g. an aborted hand-edit).
 # In every other case we leave the operator's edits alone — docs/reference/
 # target-toml.md promises that `bin/setup-target <slug>` may safely be run
-# against an updated checkout without rewriting reviewed config.
+# against an updated checkout without rewriting reviewed config. A bare grep
+# for FILL_ME cannot do this: the seed always leaves commented FILL_ME example
+# lines, and a local-only target keeps upstream_url = "FILL_ME" as its steady
+# state, so grep would re-seed (and wipe edits) on every rerun. The structured
+# check parses the TOML and ignores both — see target_config.config-needs-reseed.
 CONFIG_REASON=""
 if [ ! -f "$TARGET_TOML" ]; then
   CONFIG_REASON="missing"
 elif [ "$FORCE_CONFIG" -ne 0 ]; then
   CONFIG_REASON="requested"
-elif grep -q 'FILL_ME' "$TARGET_TOML" 2>/dev/null; then
+elif python3 "$SCRIPT_ROOT/lib/target_config.py" config-needs-reseed "$TARGET_TOML" >/dev/null 2>&1; then
   CONFIG_REASON="placeholders"
 elif ! SCRIPT_ROOT="$SCRIPT_ROOT" python3 - "$TARGET_TOML" <<'PY' >/dev/null 2>&1
 import os, sys
@@ -709,9 +760,17 @@ if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
       fi
     fi
   done
-  if [ "$(python3 "$SCRIPT_ROOT/lib/target_config.py" refresh-build-fields "$TARGET_ROOT" "$TARGET_TOML" 2>/dev/null)" = "changed" ]; then
-    log "bootstrap: refreshed <san>_bin/<san>_lib in $TARGET_TOML from the materialized builds"
-  fi
+fi
+
+# Re-detect <san>_bin/<san>_lib from whatever build trees are on disk and patch
+# them into target.toml in place. This is a surgical line edit, not a re-seed,
+# so curated sections survive — which is why it runs on every native rerun, not
+# just --bootstrap: it is how the documented "build, then rerun setup-target to
+# re-inspect" flow fills the fields the pre-build seed had to leave commented.
+# A no-op when no build exists yet.
+if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && \
+   [ "$(python3 "$SCRIPT_ROOT/lib/target_config.py" refresh-build-fields "$TARGET_ROOT" "$TARGET_TOML" 2>/dev/null)" = "changed" ]; then
+  log "Refreshed <san>_bin/<san>_lib in $TARGET_TOML from build trees on disk"
 fi
 
 cat <<EOF
