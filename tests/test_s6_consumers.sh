@@ -221,5 +221,66 @@ else
   fail "peer-fix-cards: empty jsonl exists after hallucination run" "no file"
 fi
 
+# ═══════════════════════════════════════════════════════════════
+# 5. LLM verdict cache — identical re-run skips both LLM calls
+# ═══════════════════════════════════════════════════════════════
+# Fixes mined from OSV are stable between work-card refreshes; the
+# distill + map verdicts must replay from .s6-cache instead of paying
+# two LLM round-trips per fix on every refresh. The decision log counts
+# actual engine invocations (cache hits don't log).
+
+s6llm_log="$TEST_TMPDIR/s6-decisions.log"
+rm -f "$s6llm_log" "$card_file"
+rm -rf "$SANDBOX/output/myxml/results/.s6-cache"
+for _pass in 1 2; do
+  SCRIPT_ROOT="$SANDBOX" \
+  RESULTS_DIR="$SANDBOX/output/myxml/results" \
+  TARGET_ROOT="$SANDBOX/targets/myxml" \
+  TARGET_SLUG=myxml \
+  LLM_DECIDE_LOG="$s6llm_log" \
+  LLM_DECIDE_MOCK_S6_PEER_DISTILL='{"class":"bounds","summary":"entity expansion writes past buffer","shape":"adds bounds check"}' \
+  LLM_DECIDE_MOCK_S6_PEER_MAP='{"file":"parser.c","reason":"target equivalent of entity parser"}' \
+  python3 "$SHIM" >/dev/null 2>&1
+done
+assert_file_contains "$card_file" '"file":\s*"parser.c"' \
+  "peer-fix-cards: cached re-run still emits the mapped card"
+distill_calls=$(grep -c 's6-peer-distill MOCK' "$s6llm_log" 2>/dev/null || true)
+map_calls=$(grep -c 's6-peer-map MOCK' "$s6llm_log" 2>/dev/null || true)
+assert_eq 1 "$distill_calls" "peer-fix-cards: distill verdict replayed from cache on re-run"
+assert_eq 1 "$map_calls" "peer-fix-cards: map verdict replayed from cache on re-run"
+
+# ── 5b. decider key resolves the backend default model ──────────────
+# MODEL unset must key the cache by the backend's resolved default
+# (config/models.toml), not by the empty string — otherwise a harness
+# default-model bump would silently replay stale verdicts. Run 1 leaves
+# MODEL empty; run 2 pins MODEL to the configured default (same key →
+# cache hit); run 3 pins a different model (key changes → re-ask).
+default_backend_model=$(python3 - <<PY
+import sys
+sys.path.insert(0, "$SCRIPT_ROOT/lib")
+from llm_invoke import default_model
+print(default_model("codex"))
+PY
+)
+s6llm_log2="$TEST_TMPDIR/s6-decisions-model.log"
+rm -f "$s6llm_log2" "$card_file"
+rm -rf "$SANDBOX/output/myxml/results/.s6-cache"
+for run_model in "" "$default_backend_model" "some-other-model"; do
+  SCRIPT_ROOT="$SANDBOX" \
+  RESULTS_DIR="$SANDBOX/output/myxml/results" \
+  TARGET_ROOT="$SANDBOX/targets/myxml" \
+  TARGET_SLUG=myxml \
+  ACTIVE_BACKEND=codex \
+  MODEL="$run_model" \
+  LLM_DECIDE_LOG="$s6llm_log2" \
+  LLM_DECIDE_MOCK_S6_PEER_DISTILL='{"class":"bounds","summary":"entity expansion writes past buffer","shape":"adds bounds check"}' \
+  LLM_DECIDE_MOCK_S6_PEER_MAP='{"file":"parser.c","reason":"target equivalent of entity parser"}' \
+  python3 "$SHIM" >/dev/null 2>&1
+done
+distill_calls=$(grep -c 's6-peer-distill MOCK' "$s6llm_log2" 2>/dev/null || true)
+map_calls=$(grep -c 's6-peer-map MOCK' "$s6llm_log2" 2>/dev/null || true)
+assert_eq 2 "$distill_calls" "peer-fix-cards: unset MODEL shares the resolved-default cache entry; model change re-asks"
+assert_eq 2 "$map_calls" "peer-fix-cards: map cache keys on the resolved model too"
+
 teardown_test_env
 summary

@@ -171,3 +171,4 @@ separately.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `REACHABILITY_AUTO` | `1` | Controls post-crash reachability/severity processing. The default (`1`, alias `external`) runs **full** reachability, which queries public Sourcegraph / GitHub for callers — target symbol names leave the host. Set `local` or `severity-only` to recompute severity from cached `reachability.json` only, with no external network calls. `0` disables reachability/severity post-processing entirely. |
+| `TRIAGE_DIR_PARALLEL` | `4` | How many `CRASH-*`/`FIND-*` dirs the triage sweep processes concurrently. Each dir's pipeline (LLM gates, bundling, reachability) stays serial internally; dirs are independent, so the pool only changes wall-clock, never verdicts. Set `1` to restore the fully serial sweep, or lower it if parallel triage decisions hit backend rate limits. |

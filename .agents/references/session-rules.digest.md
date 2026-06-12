@@ -62,6 +62,10 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
 - Commands returning >200 lines are a misfire — re-scope.
 - NEVER grep `output/<slug>/<backend>/logs/` or `*.log.raw`. `bin/rg-safe`
   excludes them by default.
+- Don't grep `bin/`, `lib/`, or `.agents/` to reverse-engineer the harness
+  (testcase headers, probe contract, CLI flags). That contract is fully
+  specified in this digest — the header block, the `bin/state` cheat sheet,
+  and the `bin/probe` rules above are the API. Harness source is not.
 - Append-only logs: `tail -50`, never `cat`. JSONL state files
   (`state/hypotheses.jsonl`, `runs.jsonl`, `tried-inputs-N.log`): use
   `bin/state recent-hyps|recent-runs|recent-tried|recent-notes`, never
@@ -77,8 +81,32 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
   head + elision marker + tail; the full original spills to
   `$TMPDIR/outcap-<label>-<sha>.txt`. Recover with `cat <path>`. Disable
   with `OUTCAP_MAX_BYTES=0`.
-- Don't run `bin/state … --help` repeatedly — full cheat sheet is in the
-  long session-rules.md.
+- Don't run `bin/state … --help` — the cheat sheet below is the argument
+  shape for every subcommand you need. Flags accept the aliases shown.
+
+## bin/state cheat sheet (use instead of `--help`)
+
+```
+resume        --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1..S8]
+next-card     --agent N [--mode MODE] [--peek]
+show-card     CARD_ID|--card-id ID [--mode MODE]        # compact JSON
+list-cards    [--mode MODE] [--status eligible] [--limit N]
+show-crash    CRASH-ID|--crash-id ID ;  list-crashes [--status OK|NEW] [--limit N]
+show-finding  FIND-ID|--finding-id ID ;  list-findings [--status OK|NEW] [--limit N]
+add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:func:line \
+              --input-shape 'shape' --guard-gap 'gap' \
+              --diagnostic bounds|lifetime|type|size|uninit|state --strategy S1
+update-hyp    --id H-... --status STATUS [--note NOTE]
+update-card   --card-id ID --status claimed|done|discarded|crash|find|blocked [--note NOTE]
+add-run       --agent N --hypothesis-id H-... --mode MODE --testcase TC \
+              --asan-output ASAN --verdict VERDICT       # bin/probe sets these for you
+add-note      --agent N --hypothesis-id H-... --kind data-flow|guard|variants|decision|context --text '...'
+recent-hyps   [--agent N] [--card-id ID] [--status REGEX] [--strategy S] [--limit N]
+recent-runs   [--agent N] [--hypothesis-id H-...] [--verdict REGEX] [--limit N]
+recent-notes  [--agent N] [--hypothesis-id H-...] [--kind KIND] [--limit N]
+recent-tried  --agent N|all [--verdict REGEX] [--target SUBSTR] [--limit N]
+explain-queue [--mode MODE] [--top N]
+```
 
 ## State file discipline
 

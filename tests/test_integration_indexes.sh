@@ -325,6 +325,68 @@ diff_result=$(diff "$TEST_TMPDIR/finding_clusters_before.md" "$RESULTS_DIR/findi
 assert_eq "" "$diff_result" "finding clusters are idempotent"
 
 # ═══════════════════════════════════════════════════════════════
+# 6b. Quiescent reports are not re-enriched / re-rendered
+# ═══════════════════════════════════════════════════════════════
+# Every housekeeping pass used to pay two python subprocesses per
+# CRASH/FIND dir even when nothing changed. The post-render signature
+# (.audit/.render-sig) must short-circuit both: after a re-run of
+# maintain_indexes on unchanged markdown, the HTML sibling is untouched;
+# a markdown edit re-renders.
+
+quiescent_dir=$(find "$RESULTS_DIR/crashes" -maxdepth 1 -type d -name 'CRASH-*' 2>/dev/null | sort | head -1)
+if command -v python3 >/dev/null 2>&1 && [ -n "$quiescent_dir" ]; then
+  quiescent_html=$(find "$quiescent_dir" -maxdepth 1 \( -name 'REPORT.html' -o -name 'report.html' \) 2>/dev/null | head -1)
+  assert_file_exists "$quiescent_dir/.audit/.render-sig" \
+    "render pass records the post-render signature"
+  if [ -n "$quiescent_html" ]; then
+    # Pin md older than its html sentinel: both the cluster pass's
+    # mtime guard and maintain's content signature must then leave the
+    # HTML untouched; any re-render would refresh its mtime to "now".
+    report_md=$(find "$quiescent_dir" -maxdepth 1 \( -name 'REPORT.md' -o -name 'report.md' \) 2>/dev/null | head -1)
+    touch -t 200001010000 "$report_md" 2>/dev/null || true
+    touch -t 200001010001 "$quiescent_html" 2>/dev/null || true
+    sentinel_mtime=$(audit_stat_mtime_epoch "$quiescent_html" 2>/dev/null || echo 0)
+    maintain_indexes 2>/dev/null
+    after_mtime=$(audit_stat_mtime_epoch "$quiescent_html" 2>/dev/null || echo changed)
+    assert_eq "$sentinel_mtime" "$after_mtime" \
+      "re-run skips re-render of unchanged report HTML"
+    echo "edited narrative line" >> "$report_md"
+    maintain_indexes 2>/dev/null
+    after_edit_mtime=$(audit_stat_mtime_epoch "$quiescent_html" 2>/dev/null || echo "$sentinel_mtime")
+    if [ "$after_edit_mtime" != "$sentinel_mtime" ]; then
+      pass "edited report re-renders its HTML sibling"
+    else
+      fail "edited report re-renders its HTML sibling" "html mtime still at sentinel"
+    fi
+
+    # ── 6c. patch.diff is keyed by content, not mtime:size ──────────
+    # enrich-report inlines patch.diff into the report; a rewrite that
+    # keeps the same byte count and the same epoch-second mtime must
+    # still re-enrich + re-render.
+    patch_file="$quiescent_dir/patch.diff"
+    printf 'patch-v1\n' > "$patch_file"
+    touch -t 200001010000 "$patch_file" 2>/dev/null || true
+    maintain_indexes 2>/dev/null     # converge: sig records sha(patch-v1)
+    touch -t 200001010000 "$report_md" 2>/dev/null || true
+    touch -t 200001010001 "$quiescent_html" 2>/dev/null || true
+    sentinel_mtime=$(audit_stat_mtime_epoch "$quiescent_html" 2>/dev/null || echo 0)
+    maintain_indexes 2>/dev/null
+    after_mtime=$(audit_stat_mtime_epoch "$quiescent_html" 2>/dev/null || echo changed)
+    assert_eq "$sentinel_mtime" "$after_mtime" \
+      "unchanged patch.diff still skips the re-render"
+    printf 'patch-v2\n' > "$patch_file"          # same size, new bytes
+    touch -t 200001010000 "$patch_file" 2>/dev/null || true  # same mtime:size
+    maintain_indexes 2>/dev/null
+    after_swap_mtime=$(audit_stat_mtime_epoch "$quiescent_html" 2>/dev/null || echo "$sentinel_mtime")
+    if [ "$after_swap_mtime" != "$sentinel_mtime" ]; then
+      pass "same-size same-mtime patch.diff rewrite re-renders (content sha)"
+    else
+      fail "same-size same-mtime patch.diff rewrite re-renders (content sha)" "html mtime still at sentinel"
+    fi
+  fi
+fi
+
+# ═══════════════════════════════════════════════════════════════
 # 7. Empty directories produce valid but empty cluster tables
 # ═══════════════════════════════════════════════════════════════
 

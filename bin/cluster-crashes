@@ -65,6 +65,7 @@ from cluster_common import (  # noqa: E402
     render_member_report_siblings,
     render_md_sibling,
     run_under_aggregate_lock,
+    texts_differ_beyond_padding,
 )
 
 
@@ -853,7 +854,7 @@ def update_reports(clusters: list[dict], dry_run: bool = False) -> int:
                 text, c["id"], c["members"], member["id"],
                 member.get("top_chain", ""),
             )
-            if new_text != text:
+            if texts_differ_beyond_padding(text, new_text):
                 if not dry_run:
                     _atomic_write_text(report_path, new_text)
                 n += 1

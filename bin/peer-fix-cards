@@ -54,8 +54,67 @@ def gather_target_file_listing(target_root: Path, max_files: int = 400) -> list[
     return out
 
 
+# ── LLM verdict cache ────────────────────────────────────────────────
+# The fixes mined from OSV/peer clones are stable between work-card
+# refreshes, but distill/map used to re-ask the LLM for the same fix on
+# every refresh (two ~10-20s calls per fix per iteration). Verdicts are
+# a function of the rendered prompt and the decider, so memoize them in
+# .s6-cache keyed by both. Transport failures (llm_decide → None) are
+# never cached; a genuine "no good match" verdict is.
+
+def _decider_key(decision: str) -> str:
+    upper = decision.upper().replace("-", "_")
+    mock = os.environ.get(f"LLM_DECIDE_MOCK_{upper}") or os.environ.get("LLM_DECIDE_MOCK") or ""
+    backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
+    # Resolve the backend's default when MODEL is unset (mirrors
+    # workqueue.llm_rerank_cards): an empty model would replay stale
+    # verdicts across a harness default-model change.
+    model = os.environ.get("MODEL", "")
+    if not model:
+        try:
+            from llm_invoke import default_model
+            model = default_model(backend)
+        except Exception:
+            model = ""
+    return f"{backend}\x00{model}\x00{mock}"
+
+
+def _verdict_cache_path(cache_dir: Path | None, decision: str, prompt: str) -> Path | None:
+    if cache_dir is None:
+        return None
+    key = hashlib.sha1(
+        (decision + "\x00" + _decider_key(decision) + "\x00" + prompt).encode("utf-8", "replace")
+    ).hexdigest()
+    return cache_dir / f"llm-{decision}-{key}.json"
+
+
+def _verdict_cache_load(path: Path | None) -> dict | None:
+    if path is None:
+        return None
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        return obj if isinstance(obj, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _verdict_cache_store(path: Path | None, payload: dict) -> None:
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # PID-unique temp name: two refreshes racing on the same
+        # RESULTS_DIR must not interleave writes into one temp file.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
 def distill_bug_class(
     peer: str, fix_entry: dict, diff_excerpt: str, timeout: int = 20,
+    cache_dir: Path | None = None,
 ) -> str:
     """LLM-distill the bug class from a peer fix. Empty string on failure."""
     prompt = render_template("peer_fix_distill.md.j2", {
@@ -66,6 +125,10 @@ def distill_bug_class(
         "url": str(fix_entry.get("url", "")),
         "diff_excerpt": diff_excerpt[:6000] if diff_excerpt else "(no diff available — use the summary)",
     })
+    cache_path = _verdict_cache_path(cache_dir, "s6-peer-distill", prompt)
+    cached = _verdict_cache_load(cache_path)
+    if cached is not None and "bug_class" in cached:
+        return str(cached["bug_class"])
     result = llm_decide("s6-peer-distill", "class,summary,shape", prompt, timeout=timeout)
     if result is None:
         return ""
@@ -74,7 +137,9 @@ def distill_bug_class(
     shape = str(result.get("shape", "")).strip()
     if not cls or not summary:
         return ""
-    return f"{cls}: {summary} ({shape})"
+    bug_class = f"{cls}: {summary} ({shape})"
+    _verdict_cache_store(cache_path, {"bug_class": bug_class})
+    return bug_class
 
 
 def map_to_target_file(
@@ -82,6 +147,7 @@ def map_to_target_file(
     target_file_listing: list[str],
     target_slug: str,
     timeout: int = 20,
+    cache_dir: Path | None = None,
 ) -> str:
     """LLM-map a distilled bug class to a target-side file analogue.
 
@@ -97,15 +163,21 @@ def map_to_target_file(
         "bug_class_summary": bug_class_summary,
         "listing_excerpt": listing_excerpt,
     })
+    cache_path = _verdict_cache_path(cache_dir, "s6-peer-map", prompt)
+    cached = _verdict_cache_load(cache_path)
+    if cached is not None and "file" in cached:
+        f = str(cached["file"])
+        # Defensive replay guard: the listing excerpt keys the cache, so
+        # membership still holds, but re-checking costs nothing.
+        return f if (not f or f in target_file_listing) else ""
     result = llm_decide("s6-peer-map", "file,reason", prompt, timeout=timeout)
     if result is None:
         return ""
     f = str(result.get("file", "")).strip()
-    if not f:
-        return ""
-    if f not in target_file_listing:
+    if f and f not in target_file_listing:
         # Hallucination guard: only accept files that were in the listing.
-        return ""
+        f = ""
+    _verdict_cache_store(cache_path, {"file": f})
     return f
 
 
@@ -248,12 +320,15 @@ def main(argv: list[str]) -> int:
             if clone is not None and fix.get("fix_hash"):
                 diff_excerpt = peer_sources.fetch_fix_diff(clone, fix["fix_hash"])
 
-            bug_class = distill_bug_class(peer, fix, diff_excerpt)
+            bug_class = distill_bug_class(peer, fix, diff_excerpt,
+                                          cache_dir=cache_dir)
             if not bug_class:
                 # LLM unavailable / failed — fall back to the raw summary.
                 bug_class = f"unknown class: {fix.get('summary', '')[:160]}"
 
-            target_file = map_to_target_file(bug_class, target_files, ctx.target_slug)
+            target_file = map_to_target_file(bug_class, target_files,
+                                             ctx.target_slug,
+                                             cache_dir=cache_dir)
             if not target_file:
                 # No credible analogue — skip the card rather than emit
                 # noise. Operator can re-run if the listing changes.

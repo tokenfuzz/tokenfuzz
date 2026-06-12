@@ -8,7 +8,10 @@
 #                       to crashes-rejected/ with .autodiscard.
 #   3. cached accept (matching SHA-1) → no LLM call, dir stays.
 #   4. cached reject (matching SHA-1) → no LLM call, dir gets rejected.
-#   5. cache busts when report.md changes (new SHA-1 → fresh decision).
+#   5. asymmetric accept reuse: harness-stamped enrichment (Severity
+#      rationale / Reachability / Cluster / Contract concern) keeps a
+#      cached accept while the sanitizer evidence is byte-identical; a
+#      substantive (agent-narrative) edit or changed evidence re-litigates.
 #   6. malformed JSON / LLM unavailable → undecided → dir kept (fall-through).
 #   7. CRASH_CONFIRM_AUTO=0 → gate disabled entirely.
 #   8. Concerns array round-trips when present.
@@ -124,17 +127,69 @@ rc=$?
 assert_eq 0 "$rc" "cached reject honored with LLM disabled"
 assert_match "hand-wavy" "$out" "cached reject reason replayed from disk"
 
-# ── 5. cache busts when report.md content changes ──────────────────
-# Modify report; hash changes; cached accept must NOT apply. With LLM
-# disabled and no per-decision mock present, llm_decide returns rc=1
-# (undecided) → llm_confirm_crash_report falls through to rc=1.
+# ── 5a. harness-stamped enrichment keeps a cached accept ────────────
+# bin/reachability, bin/cluster-crashes, and the contract-concern
+# annotator rewrite report.md between triage passes without changing
+# what the gate judges. A cached ACCEPT must survive those stamps while
+# the sanitizer evidence is byte-identical — re-asking the gate every
+# sweep was pure LLM waste.
 report="$RESULTS_DIR/crashes/CRASH-CONF-001/REPORT.md"
-echo "" >> "$report"  # any byte change invalidates the SHA-1
-echo "## Note" >> "$report"
-echo "extra trailing context was added after the accept cache was written" >> "$report"
+cat >> "$report" <<'EOF'
+
+Cluster: CL-20260611-1
+Dedup frames: app_parse|main
+## Severity rationale
+- **Severity**: High (auto: CVSS-BTE 4.0: 8.7)
+Derived from reach=High and primitive=oob-write.
+## Reachability — external callers
+- 12 external callers via code search
+## Patch
+<!-- enrich:patch-diff -->
+--- a/src/app.c
++++ b/src/app.c
+<!-- /enrich:patch-diff -->
+<!-- enrich:tldr -->
+TL;DR: enricher-generated summary block.
+<!-- /enrich:tldr -->
+EOF
 out=$(LLM_DECIDE_DISABLE=1 llm_confirm_crash_report "$report" 2>/dev/null)
 rc=$?
-assert_eq 1 "$rc" "stale-hash cache treated as undecided when LLM is unavailable"
+assert_eq 2 "$rc" "harness-stamped enrichment keeps cached accept (evidence + substance unchanged)"
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CONF-001/.llm-confirm.json" '"evidence_sha1"' \
+  "accept cache records the sanitizer-evidence SHA-1"
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CONF-001/.llm-confirm.json" '"semantic_sha1"' \
+  "accept cache records the agent-substance SHA-1"
+
+# ── 5b. substantive (agent-narrative) edit re-litigates ─────────────
+# An edit outside the harness-stamped sections changes the substance the
+# gate judged — the cached accept must NOT be reused. With the LLM
+# disabled and no mock, the gate falls to rc=1.
+echo "## Note" >> "$report"
+echo "impact rewritten: actually this needs an unrealistic 3-call setup" >> "$report"
+out=$(LLM_DECIDE_DISABLE=1 llm_confirm_crash_report "$report" 2>/dev/null)
+rc=$?
+assert_eq 1 "$rc" "substantive report edit re-litigates: treated as undecided when LLM is unavailable"
+
+# ── 5c. reverting the substantive edit restores the cached accept ───
+# The reuse key is content-derived, not order/time-derived: restoring the
+# judged substance (harness stamps may differ) makes the accept valid again.
+python3 - "$report" <<'PY'
+import sys
+p = sys.argv[1]
+lines = open(p).read().splitlines(True)
+open(p, "w").writelines(lines[:-2])  # drop the "## Note" block
+PY
+out=$(LLM_DECIDE_DISABLE=1 llm_confirm_crash_report "$report" 2>/dev/null)
+rc=$?
+assert_eq 2 "$rc" "reverting the substantive edit restores the cached accept"
+
+# ── 5d. changed sanitizer evidence re-litigates ─────────────────────
+# New evidence means a different crash — the cached accept must NOT be
+# reused even though the report substance is unchanged.
+echo "    #2 0x300 in Extra() src/extra.cpp:7" >> "$RESULTS_DIR/crashes/CRASH-CONF-001/asan.txt"
+out=$(LLM_DECIDE_DISABLE=1 llm_confirm_crash_report "$report" 2>/dev/null)
+rc=$?
+assert_eq 1 "$rc" "changed evidence re-litigates: stale cache treated as undecided when LLM is unavailable"
 
 # ── 6. malformed LLM output → rc=1 (undecided) ─────────────────────
 mk_promotable_crash CRASH-CONF-003 >/dev/null

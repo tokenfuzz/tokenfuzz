@@ -311,5 +311,95 @@ PY
 assert_match 'crash=no count=0 stubs=0 reals=0 ambiguous=0' "$missing_build_result" "probe_objects: missing build dir returns empty ObjectScan"
 assert_match 'manifest_count=0 manifest_stubs=0' "$missing_build_result" "build_manifest: missing build dir → empty, fail-open"
 
+# ── Content-addressed probe skip (bin/audit run_build_feature_probe) ─
+# The manifest is a pure function of the build artifacts; the harness
+# used to re-run the nm sweep at every iteration boundary. The probe
+# must run once, skip while the binary/build-log identity (mtime:size)
+# is unchanged, and re-run after a rebuild touches the anchor.
+
+audit_extract_function() {
+  awk -v name="$1" '
+    $0 ~ "^" name "\\(\\) \\{" { in_func=1 }
+    in_func { print }
+    in_func && $0 == "}" { exit }
+  ' "$SCRIPT_ROOT/bin/audit"
+}
+eval "$(audit_extract_function run_build_feature_probe)"
+source "$SCRIPT_ROOT/lib/platform.sh"
+log() { printf '%s\n' "$*"; }
+
+sig_target="$TEST_TMPDIR/sig-target"
+sig_build="$TEST_TMPDIR/sig-build"
+mkdir -p "$sig_target" "$sig_build"
+printf '#!/bin/sh\necho tool 1.0\n' > "$sig_build/tool"
+chmod +x "$sig_build/tool" 2>/dev/null || true
+
+PROBE_CALL_LOG="$TEST_TMPDIR/probe-calls.log"
+: > "$PROBE_CALL_LOG"
+# Shadow python3 to count actual build_probe.py invocations; everything
+# else (summary, queue gate) passes through untouched.
+python3() {
+  case "$*" in
+    *build_probe.py*) echo probe >> "$PROBE_CALL_LOG" ;;
+  esac
+  command python3 "$@"
+}
+
+run_probe_once() {
+  IS_BROWSER_TARGET=0 SANITIZER_BUILD_DISABLED=0 \
+  ASAN_BUILD_AVAILABLE=1 ASAN_BUILD_DIR="$sig_build" \
+  ASAN_BUILD_BINARY="$sig_build/tool" \
+  TARGET_ROOT="$sig_target" SCRIPT_ROOT="$SCRIPT_ROOT" \
+  RESULTS_DIR="$RESULTS_DIR" LOGDIR="$LOGDIR" INDEX="$INDEX" \
+  run_build_feature_probe >/dev/null 2>&1 || true
+}
+
+run_probe_once
+probe_runs=$(grep -c probe "$PROBE_CALL_LOG" 2>/dev/null || true)
+assert_eq 1 "$probe_runs" "probe-sig: first call runs the probe"
+assert_file_exists "$RESULTS_DIR/state/features.json" "probe-sig: manifest written"
+assert_file_exists "$RESULTS_DIR/state/.features.probe-sig" "probe-sig: signature stamp written"
+
+run_probe_once
+probe_runs=$(grep -c probe "$PROBE_CALL_LOG" 2>/dev/null || true)
+assert_eq 1 "$probe_runs" "probe-sig: unchanged build skips the re-probe"
+
+# A rebuild changes the binary's content → the signature misses → re-probe.
+printf '#!/bin/sh\necho tool 1.1\n' > "$sig_build/tool"
+run_probe_once
+probe_runs=$(grep -c probe "$PROBE_CALL_LOG" 2>/dev/null || true)
+assert_eq 2 "$probe_runs" "probe-sig: rebuilt binary re-runs the probe"
+
+# An object file changing WITHOUT a relink must also miss: stub_tus come
+# from sweeping every .o under the build dir, including TUs the probed
+# binary does not link. A stale skip here gates work cards on old data.
+printf 'obj-v1' > "$sig_build/extra.o"
+run_probe_once
+probe_runs=$(grep -c probe "$PROBE_CALL_LOG" 2>/dev/null || true)
+assert_eq 3 "$probe_runs" "probe-sig: new object file re-runs the probe (binary unchanged)"
+run_probe_once
+probe_runs=$(grep -c probe "$PROBE_CALL_LOG" 2>/dev/null || true)
+assert_eq 3 "$probe_runs" "probe-sig: unchanged object tree skips again"
+printf 'obj-v2-longer' > "$sig_build/extra.o"
+run_probe_once
+probe_runs=$(grep -c probe "$PROBE_CALL_LOG" 2>/dev/null || true)
+assert_eq 4 "$probe_runs" "probe-sig: changed object file re-runs the probe (binary unchanged)"
+
+# A configured-but-MISSING binary must never cache (audit_stat_key
+# prints "0:0" for missing paths — caching on that would freeze a stale
+# manifest while the object tree changes underneath it). Every call
+# re-probes.
+rm -f "$sig_build/tool" "$RESULTS_DIR/state/.features.probe-sig"
+run_probe_once
+run_probe_once
+probe_runs=$(grep -c probe "$PROBE_CALL_LOG" 2>/dev/null || true)
+assert_eq 6 "$probe_runs" "probe-sig: missing binary always re-probes (no 0:0 cache)"
+if [ -f "$RESULTS_DIR/state/.features.probe-sig" ]; then
+  fail "probe-sig: no signature stamped for a missing binary" "stamp exists"
+else
+  pass "probe-sig: no signature stamped for a missing binary"
+fi
+unset -f python3
+
 teardown_test_env
 summary

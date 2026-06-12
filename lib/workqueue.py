@@ -1525,31 +1525,77 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160, timeout:
         "candidate_lines": "\n".join(candidate_lines),
     })
 
-    try:
-        raw = subprocess.check_output(
-            [sys.executable, str(engine), "decide", "work_rerank", "cards", str(int(timeout))],
-            input=prompt,
-            text=True,
-            stderr=subprocess.DEVNULL,
-            timeout=timeout + 5,
-        )
-        data = json.loads(raw)
-    except Exception:
-        return cards
-
-    boosts: dict[str, tuple[int, str]] = {}
-    for item in data.get("cards", []) if isinstance(data, dict) else []:
-        cid = str(item.get("id", ""))
-        if not cid:
-            continue
+    # Rerank verdicts are a function of the rendered prompt (the candidate
+    # set + max_boost) AND of who answers it. The queue refresh runs every
+    # iteration but the top-N candidate set is usually unchanged between
+    # refreshes, and each miss costs a ~10-20s LLM round-trip in the
+    # iteration boundary — so memoize the parsed boosts (including the
+    # "no boosts" outcome) keyed by sha1 over the prompt plus the decider
+    # identity. Any card mutation, re-scoring, reordering, backend swap,
+    # or model swap changes the key and re-asks. The active mock value
+    # (tests) keys the cache too, so swapping a mock verdict always
+    # re-decides instead of replaying the previous mock's boosts.
+    mock_key = os.environ.get("LLM_DECIDE_MOCK_WORK_RERANK") or os.environ.get("LLM_DECIDE_MOCK") or ""
+    resolved_model = os.environ.get("MODEL", "")
+    if not resolved_model:
         try:
-            boost = int(item.get("boost", 0))
+            from llm_invoke import default_model
+            resolved_model = default_model(backend)
         except Exception:
-            continue
-        if boost <= 0:
-            continue
-        reason = str(item.get("reason", ""))[:100]
-        boosts[cid] = (min(boost, max_boost), reason)
+            resolved_model = ""
+    decider_key = f"{backend}\x00{resolved_model}\x00{mock_key}"
+    cache_path = state_dir(ctx.results_dir) / ".work-rerank-cache.json"
+    prompt_sha = hashlib.sha1((prompt + "\x00" + decider_key).encode("utf-8", "replace")).hexdigest()
+    boosts: dict[str, tuple[int, str]] | None = None
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        if cached.get("prompt_sha1") == prompt_sha and isinstance(cached.get("boosts"), dict):
+            boosts = {
+                str(cid): (int(pair[0]), str(pair[1]))
+                for cid, pair in cached["boosts"].items()
+            }
+    except Exception:
+        boosts = None
+
+    if boosts is None:
+        try:
+            raw = subprocess.check_output(
+                [sys.executable, str(engine), "decide", "work_rerank", "cards", str(int(timeout))],
+                input=prompt,
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout + 5,
+            )
+            data = json.loads(raw)
+        except Exception:
+            return cards
+
+        boosts = {}
+        for item in data.get("cards", []) if isinstance(data, dict) else []:
+            cid = str(item.get("id", ""))
+            if not cid:
+                continue
+            try:
+                boost = int(item.get("boost", 0))
+            except Exception:
+                continue
+            if boost <= 0:
+                continue
+            reason = str(item.get("reason", ""))[:100]
+            boosts[cid] = (min(boost, max_boost), reason)
+
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            # PID-unique temp name: two refreshes racing on the same
+            # RESULTS_DIR must not interleave writes into one temp file.
+            tmp = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.tmp")
+            tmp.write_text(
+                json.dumps({"prompt_sha1": prompt_sha, "boosts": {k: list(v) for k, v in boosts.items()}}),
+                encoding="utf-8",
+            )
+            tmp.replace(cache_path)
+        except Exception:
+            pass
 
     if not boosts:
         return cards

@@ -212,6 +212,63 @@ _triage_gate_quorum() {
   printf '%s' "$quorum"
 }
 
+# How many crash/finding dirs are triaged concurrently. Each per-dir
+# pipeline is independent — every artifact write lands inside its own
+# CRASH-*/FIND-* dir, bin/state serializes shared JSONL via flock, and
+# INDEX appends are single whole lines — but each pipeline contains
+# several serial LLM gate calls (5-20s apiece), so running dirs serially
+# made triage the longest stop-the-world phase between iterations.
+# Mirrors RECON_TRIAGE_PARALLEL (recon's validator pool, default 6);
+# default 4 keeps concurrent decision calls below the recon pool so the
+# two never stack past typical backend rate limits. TRIAGE_DIR_PARALLEL=1
+# restores the serial behaviour.
+_triage_dir_pool_size() {
+  local n="${TRIAGE_DIR_PARALLEL:-4}"
+  case "$n" in ''|*[!0-9]*) n=4 ;; esac
+  [ "$n" -ge 1 ] || n=1
+  printf '%s' "$n"
+}
+
+# Hash of a report's agent-authored substance. Strips exactly the content
+# the harness itself stamps into reports between triage passes, so
+# mechanical enrichment leaves the hash unchanged while ANY edit to the
+# narrative (summary, impact, root cause, data flow, reproduction) changes
+# it. Inclusion criterion for the strip list: a section/line is stripped
+# ONLY if it is written by harness code, never by the reporting agent:
+#   ## Severity rationale            — bin/reachability SEV_HEADING
+#   ## Reachability — external callers — bin/reachability REACH_HEADING
+#   ## Contract concern              — _triage_annotate_contract_concern
+#   ## Patch                         — bin/enrich-report (sole writer)
+#   <!-- enrich:name --> … fences    — bin/enrich-report idempotency blocks
+#   Cluster: <id> lines + |Cluster| table rows — bin/cluster-crashes
+#   Dedup frames: lines + |Dedup frames| rows  — bin/cluster-crashes
+#   - **Severity**: …(auto:/CVSS…)   — bin/reachability auto severity line
+_triage_report_semantic_sha() {
+  local report_path="$1"
+  [ -s "$report_path" ] || return 1
+  # Headings are matched EXACTLY (modulo trailing whitespace): a report
+  # author writing e.g. "## Reachability analysis" keeps that section in
+  # the hash — only the harness's own headings are stripped.
+  awk '
+    /^<!-- enrich:[A-Za-z0-9_-]+ -->/ { fence=1; next }
+    /^<!-- \/enrich:[A-Za-z0-9_-]+ -->/ { fence=0; next }
+    fence { next }
+    /^## Severity rationale[[:space:]]*$/ { skip=1; next }
+    /^## Reachability — external callers[[:space:]]*$/ { skip=1; next }
+    /^## Contract concern[[:space:]]*$/ { skip=1; next }
+    /^## Patch[[:space:]]*$/ { skip=1; next }
+    skip && /^## / { skip=0 }
+    skip { next }
+    /^Cluster:/ { next }
+    /^\|[[:space:]]*Cluster[[:space:]]*\|/ { next }
+    /^Dedup frames:/ { next }
+    /^\|[[:space:]]*Dedup frames[[:space:]]*\|/ { next }
+    /^- \*\*Severity\*\*:.*(\(auto:|CVSS)/ { next }
+    /^[[:space:]]*$/ { next }
+    { print }
+  ' "$report_path" 2>/dev/null | _triage_text_sha1
+}
+
 # ─── Crash report parsing (Caller contract + Trigger source) ──────
 # These extract the two normalized fields from a crash report:
 #
@@ -578,6 +635,16 @@ llm_confirm_crash_report() {
   local hash cache
   hash=$(_triage_file_sha1 "$report_path" 2>/dev/null || true)
   cache="$(dirname "$report_path")/.llm-confirm.json"
+
+  # Sanitizer-evidence sha for the asymmetric accept below. The report may
+  # live at the crash-dir root or under .audit/ — the evidence always sits
+  # at the crash-dir root.
+  local _ev_dir evidence_path evidence_sha=""
+  _ev_dir=$(dirname "$report_path")
+  [ "$(basename "$_ev_dir")" = ".audit" ] && _ev_dir=$(dirname "$_ev_dir")
+  evidence_path=$(find_primary_asan_in_crash_dir "$_ev_dir" 2>/dev/null || true)
+  [ -n "$evidence_path" ] && evidence_sha=$(_triage_file_sha1 "$evidence_path" 2>/dev/null || true)
+
   if _triage_cache_sha1_matches "$cache" "content_sha1" "$hash"; then
     local cached_accept cached_reason
     cached_accept=$(jq -r '.accept' "$cache" 2>/dev/null)
@@ -598,6 +665,27 @@ llm_confirm_crash_report() {
     fi
   fi
 
+  # Asymmetric accept reuse — same rationale as llm_crash_legitimacy_decision:
+  # harness enrichment (severity/reachability/cluster/contract stamps)
+  # rewrites report.md between triage passes without changing what the
+  # gate judges, so keying the accept on raw report content re-litigated
+  # every already-confirmed crash each sweep (observed: a full second
+  # round of confirm votes per run). A prior ACCEPT stays valid only while
+  # BOTH the sanitizer evidence AND the report's agent-authored substance
+  # (_triage_report_semantic_sha — harness-stamped sections stripped) are
+  # unchanged. A substantive report edit, new evidence, or any reject goes
+  # back to the gate.
+  local semantic_sha=""
+  semantic_sha=$(_triage_report_semantic_sha "$report_path" 2>/dev/null || true)
+  if [ -n "$evidence_sha" ] && [ -n "$semantic_sha" ] \
+     && [ -s "$cache" ] && command -v jq >/dev/null 2>&1; then
+    if [ "$(jq -r '.accept' "$cache" 2>/dev/null)" = "true" ] \
+       && [ "$(jq -r '.evidence_sha1 // ""' "$cache" 2>/dev/null)" = "$evidence_sha" ] \
+       && [ "$(jq -r '.semantic_sha1 // ""' "$cache" 2>/dev/null)" = "$semantic_sha" ]; then
+      return 2
+    fi
+  fi
+
   local body
   body=$(_triage_read_report_bounded "$report_path") || return 1
   [ -n "$body" ] || return 1
@@ -612,7 +700,10 @@ llm_confirm_crash_report() {
   [ "$reason" = "null" ] && reason=""
   if [ "$vrc" -eq 2 ]; then
     [ -n "$reason" ] || reason="LLM confirmed report"
-    { jq -n --arg reason "$reason" '{accept: true, reason: $reason}' \
+    { jq -n --arg reason "$reason" --arg ev "$evidence_sha" --arg sem "$semantic_sha" \
+        '{accept: true, reason: $reason}
+         + (if $ev != "" then {evidence_sha1: $ev} else {} end)
+         + (if $sem != "" then {semantic_sha1: $sem} else {} end)' \
         | _triage_cache_write_envelope "$cache" "crash_confirm" "content_sha1" "$hash"; } || true
     return 2
   fi
@@ -1350,6 +1441,37 @@ _triage_run_reachability() {
   local out_log="$audit_dir/reachability.out"
   local err_log="$audit_dir/reachability.err"
   local _reach_timeout="${REACHABILITY_TIMEOUT:-180}"
+
+  # Politeness lock for external mode: bin/reachability already fans out
+  # parallel Sourcegraph/GitHub queries with per-process throttling, so
+  # TRIAGE_DIR_PARALLEL pooled workers would multiply that and bypass the
+  # intended global rate limits. Serialize just this step across workers
+  # (the LLM gates stay parallel; severity-only/local mode has no
+  # external calls and skips the lock). mkdir is the portable atomic
+  # primitive; a stale lock from a killed holder is stolen once it is
+  # older than the reachability timeout + slack, and a worker that waits
+  # out the full window proceeds anyway — politeness is best-effort,
+  # crash preservation is not.
+  local _reach_lock=""
+  if [ "$_reach_setting" = "1" ] || [ "$_reach_setting" = "external" ]; then
+    _reach_lock="${RESULTS_DIR:-$d}/.reachability.lock"
+    local _stale_after=$(( _reach_timeout + 60 )) _waited=0
+    while ! mkdir "$_reach_lock" 2>/dev/null; do
+      local _lock_age
+      _lock_age=$(( $(date +%s) - $(audit_stat_mtime_epoch "$_reach_lock" 2>/dev/null || echo 0) ))
+      if [ "$_lock_age" -gt "$_stale_after" ]; then
+        rmdir "$_reach_lock" 2>/dev/null || true
+        continue
+      fi
+      if [ "$_waited" -ge $(( _stale_after * 4 )) ]; then
+        _reach_lock=""
+        break
+      fi
+      sleep 2
+      _waited=$(( _waited + 2 ))
+    done
+  fi
+
   local rc=0
   if declare -f audit_timeout_run >/dev/null 2>&1; then
     audit_timeout_run "$_reach_timeout" "$bin_dir/reachability" --report "$d" ${_reach_target[@]+"${_reach_target[@]}"} ${_reach_mode[@]+"${_reach_mode[@]}"} >"$out_log" 2>"$err_log"
@@ -1358,6 +1480,7 @@ _triage_run_reachability() {
     "$bin_dir/reachability" --report "$d" ${_reach_target[@]+"${_reach_target[@]}"} ${_reach_mode[@]+"${_reach_mode[@]}"} >"$out_log" 2>"$err_log"
     rc=$?
   fi
+  [ -n "$_reach_lock" ] && rmdir "$_reach_lock" 2>/dev/null || true
   if [ "$rc" -eq 0 ]; then
     printf 'ok\n' > "$d/.reachability_ok" 2>/dev/null || true
     return 0
@@ -1861,18 +1984,17 @@ _requeue_crash_needs_review_dirs() {
 #                                 Failure never moves a crash out of
 #                                 crashes/.
 #   6. LLM confirm-agent        — final report sanity review.
-triage_crash_dirs() {
-  mkdir -p "$RESULTS_DIR/crashes" "$RESULTS_DIR/crashes-rejected" 2>/dev/null || true
-  _requeue_crash_needs_review_dirs
-
-  local bin_dir
-  bin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
-
-  local bad=0 rejected=0 d
-  for d in "$RESULTS_DIR"/crashes/CRASH-*/; do
-    [ -d "$d" ] || continue
-    local id
-    id=$(basename "$d")
+# One crash dir through the step 0-6 pipeline documented above. Writes
+# the dir's disposition ("rejected" / "bad" / "ok") to $outcome_file so
+# triage_crash_dirs can aggregate counts across parallel workers — every
+# write below lands inside this dir (or goes through flock'd bin/state),
+# so concurrent invocations on DIFFERENT dirs never interfere.
+_triage_one_crash_dir() {
+  local d="$1" bin_dir="$2" outcome_file="$3"
+  printf 'ok\n' > "$outcome_file" 2>/dev/null || true
+  [ -d "$d" ] || return 0
+  local id
+  id=$(basename "$d")
 
     local asan_path
     asan_path=$(find_primary_asan_in_crash_dir "$d" 2>/dev/null || true)
@@ -1955,8 +2077,8 @@ triage_crash_dirs() {
             "$asan_path" 2>/dev/null | head -6 || true
         } > "$d/.autodiscard" 2>/dev/null || true
       fi
-      _triage_move_to_rejected "$d" "$id" "$discard_reason" && rejected=$((rejected + 1))
-      continue
+      _triage_move_to_rejected "$d" "$id" "$discard_reason" && printf 'rejected\n' > "$outcome_file"
+      return 0
     fi
     fi  # end: step 1 skipped when ubsan_demote=1
 
@@ -2009,12 +2131,12 @@ triage_crash_dirs() {
           } > "$d/.autodiscard" 2>/dev/null || true
         fi
         _triage_log_ttl_false_negative "$d" "$id" missing "$pending_count" "$max_pending" "$missing_csv"
-        _triage_move_to_rejected "$d" "$id" "$ttl_reason" && rejected=$((rejected + 1))
-        continue
+        _triage_move_to_rejected "$d" "$id" "$ttl_reason" && printf 'rejected\n' > "$outcome_file"
+        return 0
       fi
-      bad=$((bad + 1))
+      printf 'bad\n' > "$outcome_file" 2>/dev/null || true
       audit_log_throttled "incomplete-${id}" "WARN: crashes/${id} incomplete (pass ${pending_count}/${max_pending}) — missing: ${missing[*]}" | tee -a "$INDEX"
-      continue
+      return 0
     fi
 
     # Non-memory-safety UBSan marked in step 0: demote to findings/ only now
@@ -2026,16 +2148,16 @@ triage_crash_dirs() {
     if [ "$ubsan_demote" -eq 1 ]; then
       _triage_route_rejection "$d" "$id" \
         "demote-to-findings: UBSan non-memory-safety class — real undefined behaviour, filed as a finding not a crash" \
-        && rejected=$((rejected + 1))
-      continue
+        && printf 'rejected\n' > "$outcome_file"
+      return 0
     fi
 
     if crash_dir_is_findings_only_target \
        && crash_dir_has_runtime_diagnostic_signal "$d" \
        && ! crash_dir_has_memory_safety_asan_signal "$d"; then
       local runtime_demote_reason="demote-to-findings: runtime diagnostic without sanitizer-class memory-safety signal"
-      _triage_route_rejection "$d" "$id" "$runtime_demote_reason" && rejected=$((rejected + 1))
-      continue
+      _triage_route_rejection "$d" "$id" "$runtime_demote_reason" && printf 'rejected\n' > "$outcome_file"
+      return 0
     fi
 
     # NOTE: do NOT clear .promotion_pending sidecars here. The bump
@@ -2073,12 +2195,12 @@ triage_crash_dirs() {
           } > "$d/.autodiscard" 2>/dev/null || true
         fi
         _triage_log_ttl_false_negative "$d" "$id" bundle "$pending_count" "$max_pending" "$bundle_csv"
-        _triage_move_to_rejected "$d" "$id" "$ttl_reason" && rejected=$((rejected + 1))
-        continue
+        _triage_move_to_rejected "$d" "$id" "$ttl_reason" && printf 'rejected\n' > "$outcome_file"
+        return 0
       fi
-      bad=$((bad + 1))
+      printf 'bad\n' > "$outcome_file" 2>/dev/null || true
       audit_log_throttled "bundle-${id}" "WARN: crashes/${id} incomplete bundle (pass ${pending_count}/${max_pending}) — missing: ${bundle_csv}" | tee -a "$INDEX"
-      continue
+      return 0
     fi
     _triage_clear_promotion_sidecars "$d"
 
@@ -2123,8 +2245,8 @@ triage_crash_dirs() {
               echo "# Source: $(basename "${asan_path:-unknown}")"
             } > "$d/.autodiscard" 2>/dev/null || true
           fi
-          _triage_route_rejection "$d" "$id" "$security_reject_reason" && rejected=$((rejected + 1))
-          continue
+          _triage_route_rejection "$d" "$id" "$security_reject_reason" && printf 'rejected\n' > "$outcome_file"
+          return 0
           ;;
       esac
     fi
@@ -2159,12 +2281,65 @@ triage_crash_dirs() {
               echo "# Source: $(basename "$confirm_report")"
             } > "$d/.autodiscard" 2>/dev/null || true
           fi
-          _triage_move_to_needs_review "$d" "$id" "LLM-CONFIRM: $confirm_reason" && rejected=$((rejected + 1))
-          continue
+          _triage_move_to_needs_review "$d" "$id" "LLM-CONFIRM: $confirm_reason" && printf 'rejected\n' > "$outcome_file"
+          return 0
         fi
       fi
     fi
+  return 0
+}
+
+triage_crash_dirs() {
+  mkdir -p "$RESULTS_DIR/crashes" "$RESULTS_DIR/crashes-rejected" 2>/dev/null || true
+  _requeue_crash_needs_review_dirs
+
+  local bin_dir
+  bin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
+
+  local -a crash_dirs=()
+  local d
+  for d in "$RESULTS_DIR"/crashes/CRASH-*/; do
+    [ -d "$d" ] || continue
+    crash_dirs+=("$d")
   done
+  [ "${#crash_dirs[@]}" -gt 0 ] || return 0
+
+  # Per-dir outcome files let parallel workers report dispositions back
+  # without sharing shell state. mktemp failure degrades to a PID-keyed
+  # dir; concurrent sweeps can't collide because the housekeeping driver
+  # waits for the previous background sweep before starting a new one.
+  local pool outcome_dir
+  pool=$(_triage_dir_pool_size)
+  outcome_dir=$(mktemp -d "${TMPDIR:-/tmp}/triage-crash-outcomes.XXXXXX" 2>/dev/null || true)
+  if [ -z "$outcome_dir" ]; then
+    outcome_dir="${TMPDIR:-/tmp}/triage-crash-outcomes.$$"
+    rm -rf "$outcome_dir" 2>/dev/null || true
+    mkdir -p "$outcome_dir" 2>/dev/null || true
+  fi
+
+  local idx=0 running=0
+  for d in "${crash_dirs[@]}"; do
+    idx=$((idx + 1))
+    if [ "$pool" -le 1 ] || [ "${#crash_dirs[@]}" -le 1 ]; then
+      _triage_one_crash_dir "$d" "$bin_dir" "$outcome_dir/$idx" || true
+    else
+      ( _triage_one_crash_dir "$d" "$bin_dir" "$outcome_dir/$idx" ) &
+      running=$((running + 1))
+      if [ "$running" -ge "$pool" ]; then
+        wait || true
+        running=0
+      fi
+    fi
+  done
+  [ "$running" -gt 0 ] && { wait || true; }
+
+  local bad rejected
+  bad=$(cat "$outcome_dir"/* 2>/dev/null | grep -cx 'bad' 2>/dev/null || true)
+  rejected=$(cat "$outcome_dir"/* 2>/dev/null | grep -cx 'rejected' 2>/dev/null || true)
+  case "$bad" in ''|*[!0-9]*) bad=0 ;; esac
+  case "$rejected" in ''|*[!0-9]*) rejected=0 ;; esac
+  rm -rf "$outcome_dir" 2>/dev/null || true
+
   [ "$bad" -gt 0 ] && audit_log_throttled "promotion-pending-total" "WARN: ${bad} crash dir(s) need promotion completion (see .promotion_pending)" | tee -a "$INDEX"
   [ "$rejected" -gt 0 ] && audit_log "REJECT: ${rejected} crash dir(s) moved to crashes-rejected/ this iteration" | tee -a "$INDEX"
   return 0
@@ -2494,21 +2669,17 @@ llm_find_quality_decision() {
 #      severity annotation (same helper crashes use).
 #   5. report.md → report.html sibling render happens in maintain_indexes
 #      so the artifact set matches crashes/.
-validate_find_gate() {
-  local bin_dir
-  bin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
+# One FIND dir through the quality gate + reachability enrichment. Same
+# isolation contract as _triage_one_crash_dir: every write lands inside
+# this dir or goes through flock'd bin/state, so the pool in
+# validate_find_gate can run different dirs concurrently.
+_validate_one_find_dir() {
+  local d="$1" bin_dir="$2"
+  [ -d "$d" ] || return 0
+  local id
+  id=$(basename "$d")
 
-  # No location-based pre-filing dedup: a recon finding and an agent's
-  # re-discovery of the same bug are collapsed at cluster time like any other
-  # duplicate (bin/cluster-findings → lib/finding_dedup.py), so identity is
-  # computed in ONE place from each report, the same for every finding source.
-  local d
-  for d in "$RESULTS_DIR"/findings/FIND-*/; do
-    [ -d "$d" ] || continue
-    local id
-    id=$(basename "$d")
-
-    [ -f "$d/.reviewed" ] || [ -f "$d/.keep" ] && continue
+    [ -f "$d/.reviewed" ] || [ -f "$d/.keep" ] && return 0
 
     # Find a non-empty narrative. Any of these qualifies.
     local desc="" c
@@ -2525,7 +2696,7 @@ validate_find_gate() {
         echo "Reason: no report file (report.md / description.md / report.html) in FIND dir"
         echo "Hint: write a report describing the security issue, then re-run triage."
       } > "$d/.needs-content" 2>/dev/null || true
-      continue
+      return 0
     fi
     # Clear stale "missing content" marker now that we have a report.
     rm -f "$d/.needs-content" 2>/dev/null || true
@@ -2598,7 +2769,7 @@ validate_find_gate() {
             audit_log "WARN: could not quarantine findings/${id}; leaving in place" \
               | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
           fi
-          continue
+          return 0
         else
           # Pending second verdict — leave dir in place with a marker so
           # QA can see why it's flagged. Next triage pass re-asks the LLM.
@@ -2609,7 +2780,7 @@ validate_find_gate() {
             echo "Reason: ${reason}"
             echo "Hint: next triage pass will re-evaluate; touch .keep to pin."
           } > "$d/.pending-drop" 2>/dev/null || true
-          continue
+          return 0
         fi
       else
         # Verdict flipped to accept (or first verdict was accept) —
@@ -2624,7 +2795,42 @@ validate_find_gate() {
     # redirect, SSRF, …) instead of falling through to "unclassified".
     _triage_llm_fill_fields "$d" "$id"
     _triage_run_reachability "$d" "$id" "$bin_dir"
+  return 0
+}
+
+validate_find_gate() {
+  local bin_dir
+  bin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
+
+  # No location-based pre-filing dedup: a recon finding and an agent's
+  # re-discovery of the same bug are collapsed at cluster time like any other
+  # duplicate (bin/cluster-findings → lib/finding_dedup.py), so identity is
+  # computed in ONE place from each report, the same for every finding source.
+  local -a find_dirs=()
+  local d
+  for d in "$RESULTS_DIR"/findings/FIND-*/; do
+    [ -d "$d" ] || continue
+    find_dirs+=("$d")
   done
+
+  # Each FIND gate is 1-2 serial LLM calls; dirs are independent, so run
+  # them through the same bounded pool the crash sweep uses. Clustering
+  # below stays AFTER the wait — it reads every surviving report.
+  local pool running=0
+  pool=$(_triage_dir_pool_size)
+  for d in ${find_dirs[@]+"${find_dirs[@]}"}; do
+    if [ "$pool" -le 1 ] || [ "${#find_dirs[@]}" -le 1 ]; then
+      _validate_one_find_dir "$d" "$bin_dir" || true
+    else
+      ( _validate_one_find_dir "$d" "$bin_dir" ) &
+      running=$((running + 1))
+      if [ "$running" -ge "$pool" ]; then
+        wait || true
+        running=0
+      fi
+    fi
+  done
+  [ "$running" -gt 0 ] && { wait || true; }
 
   # Layered dedup: write FINDING-CLUSTERS.md and stamp Cluster: lines into
   # each report.md. Mirrors how maintain_indexes runs bin/cluster-crashes
@@ -2685,6 +2891,23 @@ _cluster_nearby_source() {
   return 0
 }
 
+# Pure decision step: prints the cluster-expansion JSON for one crash
+# dir on stdout (no state writes), so the driver below can run several
+# decisions concurrently and keep the state-file appends serial.
+_cluster_expand_decide() {
+  local d="$1"
+  local id frames source_block prompt
+  id=$(basename "$d")
+  frames=$(_cluster_top_frames "$d" 2>/dev/null) || return 1
+  [ -n "$frames" ] || return 1
+  source_block=$(_cluster_nearby_source "$d" 2>/dev/null || true)
+  prompt=$(render_prompt_template triage_cluster_expand.md.j2 \
+    --var "id=${id}" \
+    --var "frames=${frames}" \
+    --var "source_block=${source_block}") || return 1
+  printf '%s' "$prompt" | llm_decide cluster_expand "rows" "$LLM_DECISION_TIMEOUT"
+}
+
 # Append cluster-expansion rows to a state file.
 expand_cluster_for_crash() {
   local d="$1"
@@ -2704,19 +2927,19 @@ expand_cluster_for_crash() {
   local id; id=$(basename "$d")
   [ -f "$d/.cluster_expanded" ] && return 0
 
-  local frames source_block
-  frames=$(_cluster_top_frames "$d" 2>/dev/null) || return 0
-  [ -n "$frames" ] || return 0
-  source_block=$(_cluster_nearby_source "$d" 2>/dev/null || true)
-
-  local prompt
-  prompt=$(render_prompt_template triage_cluster_expand.md.j2 \
-    --var "id=${id}" \
-    --var "frames=${frames}" \
-    --var "source_block=${source_block}") || return 0
-
-  local json
-  json=$(printf '%s' "$prompt" | llm_decide cluster_expand "rows" "$LLM_DECISION_TIMEOUT") || return 0
+  # Consume a decision pre-computed by the parallel driver when present;
+  # an empty pre-computed file means the LLM was unavailable for that
+  # crash — leave the dir unexpanded so the next pass retries, exactly
+  # like a live llm_decide failure.
+  local json="" precomputed="$d/.cluster_rows.json.tmp"
+  if [ -f "$precomputed" ]; then
+    json=$(cat "$precomputed" 2>/dev/null)
+    rm -f "$precomputed" 2>/dev/null || true
+    [ -n "$json" ] || return 0
+  else
+    json=$(_cluster_expand_decide "$d") || return 0
+    [ -n "$json" ] || return 0
+  fi
 
   # Validate and append rows.
   local count
@@ -2741,16 +2964,40 @@ expand_cluster_for_crash() {
 }
 
 # Run cluster expansion across all CRASH-* dirs that have not yet been
-# expanded. Best-effort.
+# expanded. Best-effort. The per-crash LLM decisions (the slow part,
+# 5-20s each) are pre-computed concurrently through the shared triage
+# pool; the state-file appends stay serial in expand_cluster_for_crash
+# so table blocks never interleave in the shared markdown.
 expand_clusters_for_new_crashes() {
   declare -f llm_decide >/dev/null 2>&1 || return 0
   [ -d "${RESULTS_DIR:-/nonexistent}/crashes" ] || return 0
+  local -a dirs=()
   local d
   for d in "$RESULTS_DIR"/crashes/CRASH-*/; do
     [ -d "$d" ] || continue
     [ -f "$d/.cluster_expanded" ] && continue
     [ -f "$d/.autodiscard" ] && continue
+    dirs+=("$d")
+  done
+  [ "${#dirs[@]}" -gt 0 ] || return 0
+
+  local pool running=0
+  pool=$(_triage_dir_pool_size)
+  if [ "$pool" -gt 1 ] && [ "${#dirs[@]}" -gt 1 ]; then
+    for d in "${dirs[@]}"; do
+      ( _cluster_expand_decide "$d" > "$d/.cluster_rows.json.tmp" 2>/dev/null || true ) &
+      running=$((running + 1))
+      if [ "$running" -ge "$pool" ]; then
+        wait || true
+        running=0
+      fi
+    done
+    [ "$running" -gt 0 ] && { wait || true; }
+  fi
+
+  for d in "${dirs[@]}"; do
     expand_cluster_for_crash "$d" 2>/dev/null || true
+    rm -f "$d/.cluster_rows.json.tmp" 2>/dev/null || true
   done
   return 0
 }
@@ -3118,6 +3365,57 @@ maintain_indexes() {
   _frame_bin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
   _frame_helper="$_frame_bin_dir/../lib/stack_frames.py"
 
+  # Enrich + render one report dir, skipping both subprocesses when
+  # nothing the render depends on changed since the last pass. Without
+  # this, every housekeeping pass paid two python invocations per
+  # CRASH/FIND dir (enrich-report re-reads the source tree for snippets)
+  # even on fully quiescent result sets. The signature covers every
+  # enrichment input, not just the markdown: patch.diff siblings (enrich
+  # inlines them — a diff landing AFTER the first render must re-enrich),
+  # the render/enrich tool identities, and the ENRICH_REPORT_AUTO toggle.
+  # It records the POST-enrich markdown sha: enrich is idempotent, so a
+  # dir converges after one pass and re-renders only when reachability,
+  # clustering, a new patch, or an agent actually changes an input.
+  _maintain_render_sig() {
+    local _d="$1" _report="$2" _render="$3" _enrich="$4"
+    local _sha
+    _sha=$(_triage_file_sha1 "$_report" 2>/dev/null || true)
+    [ -n "$_sha" ] || return 1
+    # patch.diff is small and semantically load-bearing (enrich inlines
+    # it), so key it by content sha — a same-second same-size rewrite
+    # must still re-enrich. Missing file → empty sha, a stable token for
+    # "dependency absent". The tool scripts below stay on audit_stat_key
+    # ("0:0" when missing): they only change on a harness upgrade.
+    printf '%s|p=%s|ap=%s|render=%s|enrich=%s|auto=%s' \
+      "$_sha" \
+      "$(_triage_file_sha1 "$_d/patch.diff" 2>/dev/null || true)" \
+      "$(_triage_file_sha1 "$_d/.audit/patch.diff" 2>/dev/null || true)" \
+      "$(audit_stat_key "$_render" 2>/dev/null || true)" \
+      "$(audit_stat_key "$_enrich" 2>/dev/null || true)" \
+      "${ENRICH_REPORT_AUTO:-1}"
+  }
+
+  _maintain_render_report() {
+    local _d="$1" _report="$2" _render="$3" _enrich="$4"
+    local _sig_file="$_d/.audit/.render-sig" _html="${_report%.md}.html"
+    local _cur
+    _cur=$(_maintain_render_sig "$_d" "$_report" "$_render" "$_enrich" || true)
+    if [ -n "$_cur" ] && [ -s "$_html" ] && [ -s "$_sig_file" ] \
+       && [ "$(cat "$_sig_file" 2>/dev/null)" = "$_cur" ]; then
+      return 0
+    fi
+    # Enrich first (patch.diff inline, snippets, TL;DR) so render-md
+    # picks up the augmented markdown for HTML. Best-effort; missing
+    # source tree just no-ops the snippet blocks.
+    if [ "${ENRICH_REPORT_AUTO:-1}" = "1" ] && [ -x "$_enrich" ]; then
+      python3 "$_enrich" --quiet "$_report" >/dev/null 2>&1 || true
+    fi
+    python3 "$_render" "$_report" --html-sibling --title "$(basename "$_d")" >/dev/null 2>&1 || true
+    mkdir -p "$_d/.audit" 2>/dev/null || true
+    _cur=$(_maintain_render_sig "$_d" "$_report" "$_render" "$_enrich" || true)
+    [ -n "$_cur" ] && { printf '%s' "$_cur" > "$_sig_file" 2>/dev/null || true; }
+  }
+
   # CRASH/FINDING cluster files are now the primary review tables. Remove
   # stale legacy per-directory indexes so reviewers do not see two competing
   # summaries for the same artifacts.
@@ -3194,13 +3492,7 @@ maintain_indexes() {
         _report=$(_triage_exact_file_path "$_d" "REPORT.md" 2>/dev/null || true)
         [ -z "$_report" ] && _report=$(_triage_exact_file_path "$_d" "report.md" 2>/dev/null || true)
         [ -n "$_report" ] || continue
-        # Enrich first (patch.diff inline, snippets, TL;DR) so render-md
-        # picks up the augmented markdown for HTML. Best-effort; missing
-        # source tree just no-ops the snippet blocks.
-        if [ "${ENRICH_REPORT_AUTO:-1}" = "1" ] && [ -x "$_enrich" ]; then
-          python3 "$_enrich" --quiet "$_report" >/dev/null 2>&1 || true
-        fi
-        python3 "$_render" "$_report" --html-sibling --title "$(basename "$_d")" >/dev/null 2>&1 || true
+        _maintain_render_report "$_d" "$_report" "$_render" "$_enrich"
       done
 
       # Findings (kept and rejected) get the same report.md → report.html
@@ -3215,10 +3507,7 @@ maintain_indexes() {
           fi
         done
         [ -n "$_report" ] || continue
-        if [ "${ENRICH_REPORT_AUTO:-1}" = "1" ] && [ -x "$_enrich" ]; then
-          python3 "$_enrich" --quiet "$_report" >/dev/null 2>&1 || true
-        fi
-        python3 "$_render" "$_report" --html-sibling --title "$(basename "$_d")" >/dev/null 2>&1 || true
+        _maintain_render_report "$_d" "$_report" "$_render" "$_enrich"
       done
 
       local _f

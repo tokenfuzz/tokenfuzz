@@ -1243,4 +1243,38 @@ else
   fail "audit-recon does not include target path in backend workspace dirs"
 fi
 
+# ── Recon cache key for local / no-VCS targets ──────────────────────────
+# A bare "norev" key cached the first recon run forever: edits to a local
+# target silently reused stale hypotheses, and reproduce.sh-style local
+# trees never re-ran recon. The key must now carry a content signature
+# (tree-<sha1>) that is stable across identical trees and changes when a
+# source file changes.
+recon_key_dir="$TEST_TMPDIR/recon-key-target"
+mkdir -p "$recon_key_dir/src"
+printf 'int app_parse(void){return 0;}\n' > "$recon_key_dir/src/app.c"
+
+# Extract the signature helper the same way other suites pull functions
+# out of bin/audit, then exercise it directly.
+eval "$(awk '
+  $0 ~ "^recon_target_tree_sha\\(\\) \\{" { in_func=1 }
+  in_func { print }
+  in_func && $0 == "}" { exit }
+' "$SCRIPT_ROOT/bin/audit")"
+
+recon_tree_sig() { printf 'tree-%s' "$(recon_target_tree_sha "$1")"; }
+
+sig1=$(recon_tree_sig "$recon_key_dir")
+sig2=$(recon_tree_sig "$recon_key_dir")
+assert_match '^tree-[0-9a-f]{40}$' "$sig1" "no-VCS recon key carries a tree content signature, not norev"
+assert_eq "$sig1" "$sig2" "tree signature is stable for an unchanged tree"
+sleep 1
+printf 'int app_parse(void){return 1;}\n\n' > "$recon_key_dir/src/app.c"
+sig3=$(recon_tree_sig "$recon_key_dir")
+if [ "$sig3" != "$sig1" ] && [[ "$sig3" =~ ^tree- ]]; then
+  pass "tree signature changes when a source file changes"
+else
+  fail "tree signature changes when a source file changes" "before=$sig1 after=$sig3"
+fi
+rm -rf "$recon_key_dir"
+
 summary

@@ -103,5 +103,31 @@ assert_eq "$before_lines" "$after_lines" "malformed: state unchanged"
 assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-DD/.cluster_expanded" "malformed: no marker"
 unset LLM_DECIDE_MOCK_CLUSTER_EXPAND
 
+# 6. Parallel driver: decisions fan out, appends stay serial and intact.
+# Three fresh crashes through expand_clusters_for_new_crashes with a
+# pool of 3 — every dir gets its marker, every expansion block lands in
+# the state file with its full table (no interleaved/torn blocks), and
+# no pre-computed decision tmp files are left behind.
+rm -rf "$RESULTS_DIR"/crashes/CRASH-*
+mk_crash_with_frames CRASH-P1 >/dev/null
+mk_crash_with_frames CRASH-P2 >/dev/null
+mk_crash_with_frames CRASH-P3 >/dev/null
+export LLM_DECIDE_MOCK_CLUSTER_EXPAND='{"rows":[{"file":"src/foo/Foo.cpp","function":"parseAlt","line":160,"hypothesis":"pool-driver sibling row","category":"bounds"}]}'
+export AGENT_CLUSTER_STATE="$state_file"
+TRIAGE_DIR_PARALLEL=3 expand_clusters_for_new_crashes >/dev/null 2>&1
+unset AGENT_CLUSTER_STATE LLM_DECIDE_MOCK_CLUSTER_EXPAND
+for pid in P1 P2 P3; do
+  assert_file_exists "$RESULTS_DIR/crashes/CRASH-$pid/.cluster_expanded" \
+    "parallel driver expanded CRASH-$pid"
+  assert_file_contains "$state_file" "Cluster expansion from CRASH-$pid" \
+    "state file has CRASH-$pid expansion block"
+  assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-$pid/.cluster_rows.json.tmp" \
+    "no leftover decision tmp for CRASH-$pid"
+done
+block_headers=$(grep -c '^## Cluster expansion from CRASH-P' "$state_file")
+row_lines=$(grep -c 'pool-driver sibling row' "$state_file")
+assert_eq 3 "$block_headers" "exactly one block header per crash"
+assert_eq 3 "$row_lines" "exactly one appended row per crash (no torn appends)"
+
 teardown_test_env
 summary

@@ -79,6 +79,29 @@ ASAN_BUILD_AVAILABLE=0
 ASAN_BUILD_BINARY=""
 
 # ═══════════════════════════════════════════════════════════════
+# 5b. Cold start — TARGET CONFIG excerpt replaces target.toml peeks
+# ═══════════════════════════════════════════════════════════════
+# Transcripts showed agents spending one LLM round-trip per session (or
+# more) on `bin/peek output/<slug>/target.toml` to recover the threat
+# model and sanitizer matrix the orchestrator already parsed. The prompt
+# must carry both facts and steer agents away from re-reading the file.
+
+IS_BROWSER_TARGET=0
+TARGET_ATTACKER_CONTROLS_CSV="bytes,api-args"
+TARGET_SANITIZERS_ENABLED_CSV="asan,ubsan"
+result=$(build_cold_start_prompt 1)
+assert_match "TARGET CONFIG" "$result" "cold start generic: target-config excerpt present"
+assert_match "attacker_controls.*bytes,api-args" "$result" "target-config: threat model inlined"
+assert_match "enabled.*asan,ubsan" "$result" "target-config: sanitizer matrix inlined"
+assert_match "do not re-read it" "$result" "target-config: steers agents off re-peeking target.toml"
+IS_BROWSER_TARGET=1
+result=$(build_target_config_directive)
+assert_eq "" "$result" "browser target: no target-config excerpt"
+IS_BROWSER_TARGET=0
+TARGET_ATTACKER_CONTROLS_CSV=""
+TARGET_SANITIZERS_ENABLED_CSV=""
+
+# ═══════════════════════════════════════════════════════════════
 # 6. Cold start — Sanitizer build NOT shown for browser target
 # ═══════════════════════════════════════════════════════════════
 

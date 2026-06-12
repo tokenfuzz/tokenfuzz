@@ -13,11 +13,27 @@ near-identical copies.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Iterable
+
+_HSPACE_RE = re.compile(r"[ \t]+")
+
+
+def texts_differ_beyond_padding(old: str, new: str) -> bool:
+    """True when *old* and *new* differ by more than horizontal whitespace.
+
+    bin/render-md pads markdown table columns in place; the cluster
+    stampers re-substitute table cells unpadded. Without this comparison
+    the two ping-pong — every housekeeping pass rewrote each member
+    report (same content modulo padding) and re-rendered its HTML.
+    Collapsing runs of spaces/tabs before comparing treats padding-only
+    drift as "unchanged" while any real cell/narrative change still wins.
+    """
+    return _HSPACE_RE.sub(" ", old) != _HSPACE_RE.sub(" ", new)
 
 
 def exact_child_file(parent: Path, names: Iterable[str]) -> Path | None:
@@ -76,6 +92,20 @@ def render_member_report_siblings(clusters: Iterable[dict]) -> None:
             if path in seen or not path.is_file():
                 continue
             seen.add(path)
+            # Make-style staleness guard: an HTML sibling strictly newer
+            # than its markdown is already current. Clustering runs every
+            # housekeeping pass, and re-rendering every member every pass
+            # was pure subprocess churn. render-md writes the (possibly
+            # padded) markdown BEFORE the html, so a fresh render always
+            # leaves html strictly newer; any later md edit flips the
+            # comparison and re-renders. On 1s-granularity filesystems an
+            # equal mtime re-renders — the pre-guard behaviour, never stale.
+            html = path.with_suffix(".html")
+            try:
+                if html.is_file() and html.stat().st_mtime > path.stat().st_mtime:
+                    continue
+            except OSError:
+                pass
             render_md_sibling(path, title=path.parent.name)
 
 

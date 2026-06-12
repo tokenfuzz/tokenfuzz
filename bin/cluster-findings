@@ -51,6 +51,7 @@ from cluster_common import (  # noqa: E402
     render_member_report_siblings,
     render_md_sibling,
     run_under_aggregate_lock,
+    texts_differ_beyond_padding,
 )
 
 
@@ -482,7 +483,7 @@ def update_reports(clusters: list[dict], dry_run: bool = False) -> int:
                 text, c["id"], c["members"], m["id"],
                 c["canonical"], c["key_kind"], key_text,
             )
-            if new_text != text:
+            if texts_differ_beyond_padding(text, new_text):
                 if not dry_run:
                     _atomic_write_text(report_path, new_text)
                 n += 1
@@ -517,7 +518,7 @@ def update_aggregate_reports(clusters: list[dict], dry_run: bool = False) -> int
                 text, c["id"], c["members"], own_display,
                 c["canonical"], c["key_kind"], key_text,
             )
-            if new_text != text:
+            if texts_differ_beyond_padding(text, new_text):
                 if not dry_run:
                     _atomic_write_text(report_path, new_text)
                 n += 1

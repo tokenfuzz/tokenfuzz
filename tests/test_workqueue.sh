@@ -518,6 +518,24 @@ output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --li
 assert_match 'llm-rerank: parser/state boundary' "$output" "rank-work: LLM rerank annotates selected cards"
 unset LLM_DECIDE_MOCK_WORK_RERANK
 
+# Rerank memoization: an identical candidate set (same rendered prompt,
+# same mock) must replay the cached boosts instead of re-invoking the
+# decision engine — the engine call is a 10-20s LLM round-trip in real
+# runs, paid at every iteration boundary before this cache existed.
+export LLM_DECIDE_MOCK_WORK_RERANK="{\"cards\":[{\"id\":\"$work_id\",\"boost\":20,\"reason\":\"cached boundary\"}]}"
+rerank_log="$TEST_TMPDIR/rerank-decisions.log"
+rm -f "$rerank_log"
+output=$(LLM_DECIDE_LOG="$rerank_log" TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" \
+  "$RANK_WORK" --limit 40 --llm-top-n 10 2>&1)
+assert_match 'llm-rerank: cached boundary' "$output" "rank-work: rerank cache — first run annotates"
+assert_file_exists "$RESULTS_DIR/state/.work-rerank-cache.json" "rank-work: rerank cache file written"
+output=$(LLM_DECIDE_LOG="$rerank_log" TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" \
+  "$RANK_WORK" --limit 40 --llm-top-n 10 2>&1)
+assert_match 'llm-rerank: cached boundary' "$output" "rank-work: rerank cache — repeat run still annotates"
+rerank_calls=$(grep -c 'work_rerank MOCK' "$rerank_log" 2>/dev/null || true)
+assert_eq 1 "$rerank_calls" "rank-work: identical candidate set hits the boost cache (one engine call, not two)"
+unset LLM_DECIDE_MOCK_WORK_RERANK
+
 # Malformed mock → llm_decide rejects → rerank short-circuits, cards unchanged.
 export LLM_DECIDE_MOCK_WORK_RERANK='not json at all'
 output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --llm-top-n 10 2>&1)

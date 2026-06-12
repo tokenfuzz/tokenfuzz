@@ -97,6 +97,26 @@ assert_file_contains "$DIGEST" "apply --check" \
   "digest names git apply --check as the patch.diff save floor"
 assert_file_contains "$DIGEST" "not a dry run" \
   "digest corrects the hg import --no-commit dry-run myth"
+
+# ── The digest must inline the bin/state cheat sheet ────────────────
+# Agents historically burned ~5 `bin/state … --help` round-trips per
+# session because the cheat sheet lived only in the long (non-embedded)
+# file. The compact argument-shape reference must live in the digest so it
+# ships in every prompt. We sample a few subcommands that appeared as
+# --help calls in real transcripts.
+assert_file_contains "$DIGEST" "bin/state cheat sheet" \
+  "digest inlines the bin/state cheat sheet (kills --help round-trips)"
+for sub in add-hyp update-hyp add-note update-card; do
+  assert_file_contains "$DIGEST" "$sub" \
+    "digest cheat sheet documents bin/state $sub"
+done
+
+# ── The digest must warn against reverse-engineering the harness ────
+# Transcripts showed agents grepping bin/ and lib/ for the testcase-header
+# and probe contract. The digest carries that contract, so it must tell
+# agents not to dig into harness source for it.
+assert_file_contains "$DIGEST" "reverse-engineer the harness" \
+  "digest warns agents off grepping bin/lib for the contract"
 assert_file_contains "$FULL_RULES" "single writer" \
   "full rules tell the agent that enrich-report is the sole ## Patch writer"
 assert_file_contains "$FULL_RULES" "Fix Direction" \
@@ -138,6 +158,40 @@ diff=$(( double_bytes - expected ))
 [ "$diff" -le 2 ]
 assert_eq 0 $? \
   "build_session_rules_digest cache: 2 calls = 2x bytes (got $double_bytes vs $expected)"
+
+# ── Regression: an empty static cache must NOT strip the digest ─────
+# A failed/raced/truncating write left .static-prompt-rules.md at 0 bytes;
+# build_common_suffix's old `-f` test cat'd it to nothing, silently
+# dropping the entire digest from every deep-investigation prompt for a
+# whole resumed run. build_common_suffix must fall back to live
+# computation when the cache is empty, and write_static_prompt_file must
+# publish atomically (no empty/partial reads, no leftover temp files).
+suffix_probe=$(REFERENCE_DIR="$SCRIPT_ROOT/.agents/references" bash -c '
+  set -u
+  source "'"$PROMPT_SH"'"
+  cached_blocklist_description(){ echo "<none>"; }
+  fuzz_leads_path(){ echo "/tmp/fl"; }
+  neutralize_qa_vocab_string(){ cat; }
+  RESULTS_DIR=$(mktemp -d); export RESULTS_DIR
+  sf="$RESULTS_DIR/.static-prompt-rules.md"
+  : > "$sf"                                   # 0-byte cache (the bug trigger)
+  empty_out=$(build_common_suffix)
+  printf "EMPTY_DIGEST=%s\n" "$(printf "%s" "$empty_out" | grep -c "PATH CONVENTION")"
+  write_static_prompt_file                    # atomic publish
+  printf "STATIC_NONEMPTY=%s\n" "$([ -s "$sf" ] && echo 1 || echo 0)"
+  printf "TMP_LEFTOVER=%s\n" "$(ls "$sf".tmp.* 2>/dev/null | wc -l | tr -d " ")"
+  cached_out=$(build_common_suffix)
+  printf "CACHED_DIGEST=%s\n" "$(printf "%s" "$cached_out" | grep -c "PATH CONVENTION")"
+  rm -rf "$RESULTS_DIR"
+')
+assert_match 'EMPTY_DIGEST=[1-9]' "$suffix_probe" \
+  "build_common_suffix falls back to live digest when static cache is empty"
+assert_match 'STATIC_NONEMPTY=1' "$suffix_probe" \
+  "write_static_prompt_file publishes a non-empty static cache"
+assert_match 'TMP_LEFTOVER=0' "$suffix_probe" \
+  "write_static_prompt_file leaves no temp files behind"
+assert_match 'CACHED_DIGEST=[1-9]' "$suffix_probe" \
+  "build_common_suffix serves the digest from a populated cache"
 
 # ── Graceful degradation when digest file is missing ──────────────
 # Test envs and partially provisioned trees should still build prompts.

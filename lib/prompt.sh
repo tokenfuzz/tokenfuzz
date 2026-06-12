@@ -701,7 +701,12 @@ state_strategy_arg() {
 
 build_common_suffix() {
   local static_file="$RESULTS_DIR/.static-prompt-rules.md"
-  if [ -f "$static_file" ]; then
+  # -s (exists AND non-empty), not -f: an empty static file — left by a
+  # failed/raced/truncating write — would otherwise `cat` to nothing and
+  # silently strip the ENTIRE session-rules digest (cheat sheet, search
+  # discipline, CRASH/FIND gates) from every prompt that reads it. Fall
+  # back to live computation so the suffix is never dropped.
+  if [ -s "$static_file" ]; then
     cat "$static_file"
   else
     _build_common_suffix_inline
@@ -722,7 +727,18 @@ _build_common_suffix_inline() {
 
 write_static_prompt_file() {
   local static_file="$RESULTS_DIR/.static-prompt-rules.md"
-  _build_common_suffix_inline | neutralize_qa_vocab_string > "$static_file" 2>/dev/null || true
+  # Build into a per-process temp file, then atomically rename into place.
+  # Writing directly to $static_file exposes a truncate-then-fill window in
+  # which a concurrent prompt build reads an empty suffix (the bug that
+  # stripped the digest from a whole resumed run). Only publish when the new
+  # content is non-empty, so a failed neutralize pass never clobbers a good
+  # cache with an empty file.
+  local tmp="${static_file}.tmp.$$"
+  if _build_common_suffix_inline | neutralize_qa_vocab_string > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$static_file"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+  fi
 }
 
 # ─── File-FIND-first directive ───────────────────────────────────
@@ -1162,8 +1178,39 @@ SANDIR
   fi
 }
 
+# Compact excerpt of the target.toml facts agents kept re-reading.
+# Session transcripts showed repeated `bin/peek output/<slug>/target.toml`
+# calls per session — one full LLM round-trip each — to recover the
+# threat model and sanitizer matrix the orchestrator has already parsed.
+# Emit those two facts inline and point agents away from re-reading the
+# file. Values come from the exported config (no re-parse).
+build_target_config_directive() {
+  [ "${IS_BROWSER_TARGET:-0}" -eq 0 ] || return 0
+
+  local controls="${TARGET_ATTACKER_CONTROLS_CSV:-}"
+  if [ -z "$controls" ] && declare -F target_attacker_controls_csv >/dev/null 2>&1; then
+    controls="$(target_attacker_controls_csv 2>/dev/null || true)"
+  fi
+  local enabled="${TARGET_SANITIZERS_ENABLED_CSV:-}"
+  if [ -z "$enabled" ] && declare -F target_sanitizers_enabled_csv >/dev/null 2>&1; then
+    enabled="$(target_sanitizers_enabled_csv 2>/dev/null || true)"
+  fi
+  [ -n "$controls" ] || [ -n "$enabled" ] || return 0
+
+  cat <<CFGDIR
+
+## TARGET CONFIG (already parsed from target.toml — do not re-read it)
+
+- \`[threat_model] attacker_controls\` (the only valid Trigger sources): \`${controls:-bytes}\`
+- \`[sanitizer] enabled\`: \`${enabled:-asan}\`
+
+Beyond these, \`output/${TARGET_SLUG}/target.toml\` holds only build/configure plumbing — open it only when debugging a build, not to re-derive the threat model.
+CFGDIR
+}
+
 build_asan_build_directive() {
   build_sanitizer_build_directive
+  build_target_config_directive
   build_build_features_directive
 }
 
