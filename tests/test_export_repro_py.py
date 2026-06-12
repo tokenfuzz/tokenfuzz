@@ -2134,6 +2134,38 @@ assert_in("REPORT.md", stub2_text,
           "write_stub_reproduce: no-harness stub points at REPORT.md")
 
 
+# ─── build_report_title: complete sentence, no dangling clause ───────
+# The headline used to append "when <trigger>", which read as a fragment
+# whenever the trigger was a bare noun ("... when bytes"). The trigger is
+# already a Fields row, so the title must stay a clean, complete phrase.
+_title = er.build_report_title(
+    "CRASH-001-1", "stack-buffer-overflow",
+    "sample_process_record parser.c:28", "bytes",
+)
+assert_eq("CRASH-001-1: stack-buffer-overflow in sample_process_record", _title,
+          "build_report_title: no trailing 'when <trigger>' clause")
+assert_eq(False, " when " in _title,
+          "build_report_title: title has no dangling 'when' clause")
+# Falls back to a placeholder primitive but stays well-formed when inputs
+# are sparse.
+assert_in("sanitizer diagnostic", er.build_report_title("CRASH-9", "", "", ""),
+          "build_report_title: blank primitive falls back without breaking")
+
+# ─── _rev_is_pinned: real shas pin, sentinels do not ─────────────────
+# Delegates to target_config.is_unpinned_rev (single source of truth).
+for _rev in ("norev", "NoRev", "no-vcs", "unknown", "?", ""):
+    assert_eq(False, er._rev_is_pinned(_rev),
+              f"_rev_is_pinned: sentinel {_rev!r} is not pinned")
+assert_eq(True, er._rev_is_pinned("abcdef1234567890"),
+          "_rev_is_pinned: a concrete sha is pinned")
+# HEAD is a deliberate, documented exception: it clones / resolves to a
+# forge default branch, so it counts as a usable (pinned) ref.
+assert_eq(True, er._rev_is_pinned("HEAD"),
+          "_rev_is_pinned: HEAD is treated as a usable ref")
+assert_eq(True, er._rev_is_pinned("v1.2.3"),
+          "_rev_is_pinned: a tag is a usable ref")
+
+
 # ─── Cleanup ────────────────────────────────────────────────────────
 
 shutil.rmtree(TMP, ignore_errors=True)

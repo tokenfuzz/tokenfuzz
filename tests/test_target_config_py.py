@@ -1103,6 +1103,26 @@ assert_eq(f"{strip_root}/build-asan/lib/libsample-helper.a", cfg_no_root.asan_li
           "load_toml_into: no target_root → asan_lib pass-through")
 
 
+# ─── is_unpinned_rev / is_placeholder_url (shared sentinel helpers) ──
+# Single source of truth consumed by bin/export-repro + lib/report_enrich
+# for report/link text. Keep these in lockstep with those consumers.
+for _rev in ("norev", "NoRev", " norev ", "no-vcs", "unknown", "?", "", None):
+    assert_eq(True, tc.is_unpinned_rev(_rev),
+              f"is_unpinned_rev: {_rev!r} is a sentinel")
+for _rev in ("abcdef1234567890", "v1.2.3", "main"):
+    assert_eq(False, tc.is_unpinned_rev(_rev),
+              f"is_unpinned_rev: {_rev!r} is a usable ref")
+# HEAD is the documented exception: usable, not unpinned (it clones and
+# resolves to a forge default branch).
+assert_eq(False, tc.is_unpinned_rev("HEAD"),
+          "is_unpinned_rev: HEAD is usable (documented exception)")
+for _url in ("", "FILL_ME", " fill_me ", None):
+    assert_eq(True, tc.is_placeholder_url(_url),
+              f"is_placeholder_url: {_url!r} is a placeholder")
+assert_eq(False, tc.is_placeholder_url("https://github.com/acme/widgets"),
+          "is_placeholder_url: a real URL is not a placeholder")
+
+
 # ─── Cleanup + summary ──────────────────────────────────────────────
 
 shutil.rmtree(TEST_TMPDIR, ignore_errors=True)

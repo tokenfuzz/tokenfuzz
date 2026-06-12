@@ -56,6 +56,31 @@ from typing import Iterable, Optional
 
 NO_REV = "norev"
 
+# Revision / URL sentinels meaning "no usable upstream was recorded" — a
+# local-only target, or a checkout with no VCS, or an un-seeded target.toml.
+# Single source of truth for the report and link builders (bin/export-repro,
+# lib/report_enrich) so they agree on what is worth a "clones upstream@<rev>"
+# hint or a /blob/<rev>/ source link. Mirrors lib/benchmark._hash_text.
+#
+# "HEAD" is deliberately NOT unpinned: it clones and resolves to a forge's
+# default branch, so a target with a real upstream but no recorded commit
+# still gets a working hint/link. The only cost is a non-permalink line ref,
+# which is strictly more useful to a maintainer than no link at all.
+_UNPINNED_REVS = frozenset({"", NO_REV, "no-vcs", "unknown", "?"})
+_PLACEHOLDER_URLS = frozenset({"", "fill_me"})
+
+
+def is_unpinned_rev(rev: str) -> bool:
+    """True when `rev` is a sentinel meaning 'no usable upstream commit'.
+
+    `HEAD` is treated as usable (returns False) — see `_UNPINNED_REVS`."""
+    return (rev or "").strip().lower() in _UNPINNED_REVS
+
+
+def is_placeholder_url(url: str) -> bool:
+    """True when `url` is empty or the un-seeded target.toml `FILL_ME` stub."""
+    return (url or "").strip().lower() in _PLACEHOLDER_URLS
+
 # TOML basic-string escaping. Used everywhere we write a Python string
 # into a generated target.toml so an unsanitised value (a tainted slug,
 # an LLM-suggested peer name with an embedded quote, a Windows-style

@@ -208,6 +208,33 @@ assert_file_contains "$CDL/report.md" "enrich:data-flow-snippets" \
 assert_file_contains "$CDL/report.md" 'buf\[len - 1\]' \
   "snippet body from parser.c reached colon-label report"
 
+# ── (g2) Placeholder upstream URL/rev → no dead "View at" link ───────
+# An un-seeded target.toml leaves the URL as FILL_ME and a local-only
+# checkout records the rev as "norev". Building a link from either yields
+# a dead `FILL_ME/blob/norev/...`, so enrichment must emit the snippet
+# WITHOUT any link rather than a broken one.
+CDP="$RESULTS_DIR/crashes/CRASH-001-P"
+mkdir -p "$CDP"
+cat > "$CDP/report.md" <<EOF
+# CRASH-001-P: placeholder upstream
+
+Summary:
+A bug in parse_header with no pinned upstream.
+
+Data Flow:
+- step: parse_header (lib/parser.c:9) — reads buf[len-1] without guard
+EOF
+python3 "$ENRICH" --quiet --source-root "$TARGET_SRC" \
+                  --upstream-url "FILL_ME" --pinned-rev "norev" \
+                  "$CDP/report.md" \
+  || fail "enrich-report failed with placeholder upstream URL/rev"
+assert_file_contains "$CDP/report.md" 'buf\[len - 1\]' \
+  "snippet body still rendered when upstream is a placeholder"
+assert_file_not_contains "$CDP/report.md" "View at" \
+  "no 'View at' link emitted for placeholder upstream"
+assert_file_not_contains "$CDP/report.md" "blob/norev" \
+  "no dead FILL_ME/blob/norev link emitted"
+
 # ── patch.diff in .audit/ is still found by enrichment ────────────
 # Older bundles that pre-date the _is_bundle_filename allowlist update
 # carry patch.diff under .audit/. Enrichment must still inline it.
@@ -438,6 +465,48 @@ then
   pass "severity badge: scored-0.0 band None gets a neutral badge"
 else
   fail "severity badge: scored-0.0 band None" "no badge built for level None"
+fi
+
+# _source_url returns None for placeholder upstream/rev (no dead links) and a
+# real blob URL otherwise; _truncate_anchor never leaves a dangling backtick.
+if python3 - "$SCRIPT_ROOT" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1] + "/lib")
+import report_enrich as m
+
+def _ctx(url, rev):
+    return m.EnrichContext(report_path=Path("r.md"), report_dir=Path("."),
+                           upstream_url=url, pinned_rev=rev)
+
+real = _ctx("https://github.com/acme/widgets", "abcdef1234567890")
+assert m._source_url(real, "lib/parser.c", 9) == \
+    "https://github.com/acme/widgets/blob/abcdef1234567890/lib/parser.c#L9", \
+    "real url+rev must produce a blob link"
+
+# HEAD is a usable ref (documented exception), so it still produces a link.
+head = _ctx("https://github.com/acme/widgets", "HEAD")
+assert m._source_url(head, "lib/parser.c", 9) == \
+    "https://github.com/acme/widgets/blob/HEAD/lib/parser.c#L9", \
+    "HEAD is usable and must still produce a blob link"
+
+for url, rev in (("FILL_ME", "abcdef12"), ("https://x/y", "norev"),
+                 ("FILL_ME", "norev"), ("", "abcdef12"), ("https://x/y", "")):
+    assert m._source_url(_ctx(url, rev), "lib/parser.c", 9) is None, \
+        f"placeholder ({url!r},{rev!r}) must yield no link"
+
+short = "guard: f (a.c:1) — small note"
+assert m._truncate_anchor(short) == short, "short anchor unchanged"
+long_open = "guard: f (a.c:1) — rejects values larger than the file length, " \
+            "but does not compare against `sizeof" + "x" * 80
+trunc = m._truncate_anchor(long_open)
+assert trunc.endswith("…"), "truncated anchor ends with ellipsis"
+assert trunc.count("`") % 2 == 0, f"dangling backtick in: {trunc!r}"
+PY
+then
+  pass "source links: placeholders drop the link; anchors keep backticks balanced"
+else
+  fail "source links / anchor truncation" "placeholder link emitted or backtick left dangling"
 fi
 
 summary

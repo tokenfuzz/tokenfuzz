@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
+import target_config  # sibling lib/ module; callers put lib/ on sys.path
+
 
 # ── enrichment fence markers ───────────────────────────────────────
 # Re-running enrichment strips the previous block and re-inserts.
@@ -256,9 +258,14 @@ def _rel_to_root(ctx: EnrichContext, path: Path) -> str:
 
 def _source_url(ctx: EnrichContext, rel_path: str, line: int) -> Optional[str]:
     """Construct a viewable URL for path:line at the pinned rev when
-    upstream_url + pinned_rev are both known. Best-effort across the
-    common forges (GitHub, GitLab, cgit, hgweb, sourcehut)."""
-    if not ctx.upstream_url or not ctx.pinned_rev:
+    upstream_url + pinned_rev are both usable. Best-effort across the
+    common forges (GitHub, GitLab, cgit, hgweb, sourcehut). Returns None
+    when either value is missing or a not-yet-filled placeholder, so an
+    un-seeded target never emits a dead `FILL_ME/blob/norev/...` link.
+    The placeholder sets live in target_config (single source of truth)."""
+    if target_config.is_placeholder_url(ctx.upstream_url):
+        return None
+    if target_config.is_unpinned_rev(ctx.pinned_rev):
         return None
     url = ctx.upstream_url.rstrip("/")
     rev = ctx.pinned_rev
@@ -647,6 +654,26 @@ def _snippet_for_ref(ctx: EnrichContext, path_ref: str, line: int,
     return snippet
 
 
+def _truncate_anchor(text: str, limit: int = 140) -> str:
+    """Shorten a Data-Flow anchor for display without breaking Markdown.
+
+    Plain ``text[:n] + "…"`` could cut mid-word and, worse, slice through
+    an inline-code span — leaving an unbalanced backtick that renders as a
+    literal `` ` `` followed by un-styled text (e.g. ``against `s…``). We
+    cut on a word boundary when one is reasonably close, then re-close any
+    inline-code span the cut left open."""
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    space = cut.rfind(" ")
+    if space >= limit // 2:  # only honour a boundary that isn't pathologically early
+        cut = cut[:space]
+    cut = cut.rstrip()
+    if cut.count("`") % 2:  # odd backtick count → close the dangling span
+        cut += "`"
+    return cut + "…"
+
+
 def _build_section_snippets(ctx: EnrichContext, text: str,
                             heading_name: str) -> Optional[str]:
     """For each bullet under `heading_name` that names a file:line,
@@ -672,7 +699,7 @@ def _build_section_snippets(ctx: EnrichContext, text: str,
             snippet = _snippet_for_ref(ctx, path_ref, lineno)
             if snippet is None:
                 continue
-            anchor = line_stripped if len(line_stripped) <= 140 else line_stripped[:137] + "…"
+            anchor = _truncate_anchor(line_stripped)
             # Strip a leading list bullet (`- `, `* `, `1. `) so the
             # anchor reads as prose, not a fresh list item.
             anchor = re.sub(r"^(?:[-*]|\d+\.)\s+", "", anchor)

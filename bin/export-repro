@@ -2388,12 +2388,22 @@ def _title_func_from_dedup(dedup_frames: str) -> str:
     return first.split()[0]
 
 
+def _rev_is_pinned(rev: str) -> bool:
+    """True when `rev` is a usable upstream ref worth a "clones upstream@<rev>"
+    hint — a sha, tag, or branch/HEAD. Sentinels ("norev", "") are not.
+    Delegates to the shared sentinel set in target_config."""
+    return not target_config.is_unpinned_rev(rev)
+
+
 def build_report_title(crash_id: str, primitive_label: str, dedup_frames: str,
                        trigger_value: str) -> str:
+    # `trigger_value` is intentionally unused in the headline: it is already a
+    # Fields-table row ("Trigger source"), and appending "when <trigger>"
+    # produced a dangling clause ("... when bytes") whenever the value was a
+    # bare noun rather than a phrase. Keep the title a complete sentence.
     primitive = primitive_label or "sanitizer diagnostic"
     func = _title_func_from_dedup(dedup_frames)
-    trigger = trigger_value or "input"
-    return f"{crash_id}: {primitive} in {func} when {trigger}"
+    return f"{crash_id}: {primitive} in {func}"
 
 
 # ─── Top-level driver ───────────────────────────────────────────────
@@ -3030,10 +3040,19 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
     parts.append("Run the sibling [reproduce.sh](reproduce.sh):\n")
     parts.append("\n")
     parts.append("```sh\n")
-    parts.append(
-        f"./reproduce.sh                 # clones upstream@{pinned_rev[:12]}, builds/runs with {meta['label']}\n"
-    )
-    parts.append("./reproduce.sh /path/to/src    # use an existing checkout\n")
+    if _rev_is_pinned(pinned_rev):
+        parts.append(
+            f"./reproduce.sh                 # clones upstream@{pinned_rev[:12]}, builds/runs with {meta['label']}\n"
+        )
+        parts.append("./reproduce.sh /path/to/src    # use an existing checkout\n")
+    else:
+        # No pinned upstream revision (local-only target, or VCS not
+        # recorded). The bundled reproduce.sh cannot clone; point only at
+        # the path form so the message stays honest instead of claiming a
+        # "clone upstream@norev" that will fail.
+        parts.append(
+            f"./reproduce.sh /path/to/src    # builds/runs with {meta['label']} against your checkout\n"
+        )
     parts.append("```\n")
     if fix_section:
         parts.append("\n")
