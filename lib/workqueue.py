@@ -402,16 +402,21 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
     ), 8, "round-trip property surface"),
     # S8 — injectivity surface: non-cryptographic hashers, fingerprinters,
     # and id/key generators carry a uniqueness oracle (collision → hash-
-    # flooding DoS, cache poisoning, identity confusion). Distinctive hasher
-    # families match liberally; the generic `hash(`/`digest(` stems require a
-    # call-paren so container plumbing (`hashmap_insert`, `rehash_table`,
-    # `hash_table_lookup`) does not match.
+    # flooding DoS, cache poisoning, identity confusion). Three alternatives:
+    #   1. distinctive hasher/fingerprint families — safe with any affix;
+    #   2. the generic `hash`/`digest` token in a call (covers compute_hash,
+    #      hash_bytes, hashString, digest_update, …), guarded by a negative
+    #      lookahead so container plumbing (hashmap, hashtable, hash_table,
+    #      hash_map, rehash) does NOT match;
+    #   3. id/key/symbol generators (injective-by-contract).
     (re.compile(
-        r"\b\w*(?:fingerprint|checksum|murmur|xxhash|cityhash|siphash"
-        r"|fnv1?a?|adler32?|crc(?:16|32|64)|md5|sha1|sha256|blake[23])\w*\s*\("
-        r"|\b\w*(?:hash|digest)\s*\("
-        r"|\b(?:intern|gen_id|next_id|allocate_id|new_id|key_for|cache_key"
-        r"|symbol_id)\w*\s*\(",
+        r"\b\w*(?:md[45]|sha[0-9]{1,3}|blake\w*|murmur\w*|xxhash|cityhash"
+        r"|siphash|spooky\w*|fnv1?a?|adler32?|crc(?:16|32|64)|fingerprint"
+        r"|checksum|digest)\w*\s*\("
+        r"|\b(?!\w*(?:hashmap|hashtable|hash_table|hash_map|rehash))"
+        r"\w*hash\w*\s*\("
+        r"|\b(?:intern|symbol_id|cache_key|key_for|id_for"
+        r"|(?:gen(?:erate)?|make|new|next|alloc(?:ate)?|create)_id)\w*\s*\(",
         re.IGNORECASE,
     ), 6, "hash/injectivity surface"),
     # S8 — numerical-domain surface: a declared output domain (non-negative,
@@ -420,11 +425,14 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
     # size, index, length, or resource limit becomes an OOB or DoS primitive.
     # Keyed on declared-domain language and enforcement-fn names ONLY, never on
     # bare numeric return types or loose `>= 0` comparisons: an *asserted*
-    # domain is S2's negation target, and a bare comparison is high-FP.
+    # domain is S2's negation target, and a bare comparison is high-FP. `finite`
+    # must sit in numeric context (isfinite(), `finite <number-noun>`, NaN) so
+    # prose like "finite state machine" / "finite element" does not match.
     (re.compile(
-        r"\bnon[-_ ]?negative\b|\bnonnegative\b|\bsubnormal\b|\bprobabilit\w*"
-        r"|\bfinite(?:ness)?\b|\bin \[0\s*,\s*1\]"
-        r"|\bmust be (?:positive|non[-_ ]?negative|finite)\b"
+        r"\bnon[-_ ]?negative\b|\bnonnegative\b|\bprobabilit\w*"
+        r"|\bin \[0\s*,\s*1\]|\bmust be (?:positive|non[-_ ]?negative|finite)\b"
+        r"|\bis(?:finite|nan|inf)\s*\(|\bNaN\b|\bsubnormal\s+(?:value|float|number|result)s?\b"
+        r"|\bfinite\s+(?:value|float|double|number|result)s?\b"
         r"|\b(?:clamp|saturat)\w*\s*\(",
         re.IGNORECASE,
     ), 6, "numerical-domain surface"),
@@ -467,6 +475,17 @@ _STRATEGY_BUCKETS: tuple[tuple[str, frozenset[str]], ...] = (
         "round-trip property surface", "hash/injectivity surface",
         "numerical-domain surface"})),
 )
+
+# Reasons scored once per file regardless of match count (see
+# code_feature_reasons). The S8 property surfaces are presence signals: a
+# file either carries an inverse/idempotence/injectivity/domain oracle or it
+# does not, and repeating the token does not raise confidence. Keeping them
+# off the per-match ×4 multiplier is what holds the commit's intent that a
+# repetition-dense S8 file cannot outrank a single high-signal S7 entrypoint.
+_PRESENCE_ONLY_REASONS: frozenset[str] = frozenset({
+    "round-trip property surface", "hash/injectivity surface",
+    "numerical-domain surface",
+})
 
 
 @dataclass
@@ -1179,7 +1198,16 @@ def code_feature_reasons(text: str) -> tuple[int, list[str]]:
     for pattern, pts, reason in CODE_PATTERNS:
         matches = len(pattern.findall(text))
         if matches:
-            score += min(pts * matches, pts * 4)
+            # Presence-only reasons (the S8 property surfaces) score once,
+            # not per match: one `clamp()` is as indicative as four, and the
+            # per-match ×4 multiplier would otherwise let a repetition-dense
+            # but low-confidence S8 file outrank a single high-signal S7
+            # input-consumption entrypoint. Other rows keep the multiplier —
+            # many memcpy/parse calls genuinely raise a file's interest.
+            if reason in _PRESENCE_ONLY_REASONS:
+                score += pts
+            else:
+                score += min(pts * matches, pts * 4)
             reasons.append(reason)
     return score, reasons
 

@@ -2197,19 +2197,37 @@ import workqueue as W
 S8 = {"round-trip property surface", "hash/injectivity surface",
       "numerical-domain surface"}
 positives = {
+    # injectivity — distinctive families and the generic hash/digest token
     "murmur_hash":   "uint32_t murmur_hash(const char* p){return murmur_hash(p);}",
     "compute_digest":"void compute_digest(const char* p){compute_digest(p);}",
+    "hash_bytes":    "uint64_t hash_bytes(const void* p, size_t n);",
+    "hash_string":   "uint32_t hash_string(const char* s);",
+    "hashString":    "int hashString(const char* s);",
+    "digest_update": "void digest_update(ctx* c, const void* p);",
+    "sha512_init":   "void sha512_init(ctx* c);",
     "cache_key":     "char* cache_key(req* r){return cache_key(r);}",
+    "make_id":       "long make_id(void){ return make_id(); }",
+    "generate_id":   "long generate_id(void);",
+    "id_for":        "long id_for(obj* o);",
+    # idempotence
     "sanitize_html": "char* sanitize_html(char* s){return sanitize_html(s);}",
     "dedupe_path":   "char* dedupe_path(char* p){return dedupe_path(p);}",
+    # numerical-domain — declared language + enforcement calls
     "clamp_sample":  "double clamp_sample(double x){return clamp_sample(x);}",
     "nonneg_prose":  "// returns a non-negative count\nint count_items(set* s);",
     "prob_prose":    "/* result is a probability in [0,1] */\ndouble score(model* m);",
+    "isfinite_use":  "double f(double v){ if (isfinite(v)) return v; return 0; }",
 }
 negatives = {
+    # injectivity — container plumbing must NOT match
     "hashmap_insert":   "void hashmap_insert(map* m, int k){ insert(m,k); }",
+    "hashtable_get":    "void* hashtable_get(map* m, int k){ return 0; }",
     "rehash_table":     "void rehash_table(map* m){ rehash_table(m); }",
     "hash_table_lookup":"void* hash_table_lookup(map* m, int k){ return 0; }",
+    # numerical — non-numeric prose must NOT match (Codex FP cases)
+    "finite_state":     "// drive the finite state machine forward\nvoid step(sm* m);",
+    "finite_element":   "/* finite element mesh refinement */\nvoid refine(mesh* m);",
+    # generic
     "to_string":        "char* to_string(int x){ return fmt(x); }",
     "plain_compute":    "int compute(int x){ return x + 1; }",
 }
@@ -2222,11 +2240,21 @@ for name, body in negatives.items():
     _, reasons = W.code_feature_reasons(body)
     if S8 & set(reasons):
         bad.append(f"negative {name} wrongly got S8 reason: {reasons}")
+
+# Ranking regression: a repetition-dense S8 file must NOT outrank a single
+# high-signal S7 input-consumption entrypoint. Presence-only scoring (the
+# S8 rows score once, not per-match) is what holds this invariant.
+s7_score, _ = W.code_feature_reasons("int parse_doc(const char* p);")
+s8_dense, _ = W.code_feature_reasons(
+    "double a(double x){clamp(x);} double b(){clamp(0);} "
+    "double c(){clamp(1);} double d(){clamp(2);}")
+if s8_dense >= s7_score:
+    bad.append(f"clamp-dense S8 ({s8_dense}) outranks single S7 ({s7_score})")
 print("ok" if not bad else "FAIL: " + "; ".join(bad))
 PY
 )
 assert_eq "ok" "$s8_coverage" \
-  "code_feature_reasons: S8 covers injectivity/idempotence/numerical-domain, skips container plumbing"
+  "code_feature_reasons: S8 covers injectivity/idempotence/numerical-domain, skips plumbing, never outranks S7"
 
 teardown_test_env
 summary
