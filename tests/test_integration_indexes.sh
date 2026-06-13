@@ -400,5 +400,84 @@ assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" "Crash Clusters" "
 assert_file_exists "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" "empty finding clusters exist"
 assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" "Finding Clusters" "empty finding clusters have header"
 
+# ═══════════════════════════════════════════════════════════════
+# 8. Rejected-index dir-list change-skip rebuilds when the set changes
+#    (the skip keys on the sorted rejected dir basenames; adding a dir must
+#     bust it so a newly-rejected finding appears in the index).
+# ═══════════════════════════════════════════════════════════════
+mkdir -p "$RESULTS_DIR/findings-rejected/FIND-SKIP-A"
+printf '# A\n\n## Fields\n| Field | Value |\n|---|---|\n| File | src/a.c |\n| Line | 1 |\n' \
+  > "$RESULTS_DIR/findings-rejected/FIND-SKIP-A/report.md"
+printf '{"reason":"non-security a"}\n' > "$RESULTS_DIR/findings-rejected/FIND-SKIP-A/.llm-find-quality.json"
+maintain_indexes 2>/dev/null
+assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" 'FIND-SKIP-A' \
+  "rejected index lists the first rejected dir"
+
+mkdir -p "$RESULTS_DIR/findings-rejected/FIND-SKIP-B"
+printf '# B\n\n## Fields\n| Field | Value |\n|---|---|\n| File | src/b.c |\n| Line | 2 |\n' \
+  > "$RESULTS_DIR/findings-rejected/FIND-SKIP-B/report.md"
+printf '{"reason":"non-security b"}\n' > "$RESULTS_DIR/findings-rejected/FIND-SKIP-B/.llm-find-quality.json"
+maintain_indexes 2>/dev/null
+assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" 'FIND-SKIP-B' \
+  "rejected index rebuilds (skip busts) when a dir is added"
+
+# ═══════════════════════════════════════════════════════════════
+# 9. cluster-crashes change-skip rebuilds when a crash is added
+#    (the skip keys on the crash basenames + asan stat; adding a crash must
+#     bust it so the new crash appears in CRASH-CLUSTERS.md).
+# ═══════════════════════════════════════════════════════════════
+rm -rf "$RESULTS_DIR/crashes/CRASH-"*
+maintain_indexes 2>/dev/null   # settle: empty crash clusters + sig
+mkdir -p "$RESULTS_DIR/crashes/CRASH-SKIP-9-1"
+cat > "$RESULTS_DIR/crashes/CRASH-SKIP-9-1/asan.txt" <<'AEOF'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x6020
+#0 0x111 in app_parse parser.c:9
+SUMMARY: AddressSanitizer: heap-buffer-overflow parser.c:9 in app_parse
+AEOF
+printf '# CRASH-SKIP-9-1\n- **Severity**: Low (CVSS-BTE 4.0: 3.3)\nbody\n' \
+  > "$RESULTS_DIR/crashes/CRASH-SKIP-9-1/report.md"
+maintain_indexes 2>/dev/null
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" 'app_parse' \
+  "cluster-crashes rebuilds (skip busts) when a crash is added"
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" 'Low' \
+  "cluster-crashes table shows the report's initial severity"
+
+# 9b. An in-place severity edit in the report must bust the cluster-crashes
+#     skip — the table carries severity, not just asan frames, so a key on
+#     asan files alone would leave CRASH-CLUSTERS.md stale at the old rank.
+printf '# CRASH-SKIP-9-1\n- **Severity**: High (CVSS-BTE 4.0: 8.7)\nbody\n' \
+  > "$RESULTS_DIR/crashes/CRASH-SKIP-9-1/report.md"
+maintain_indexes 2>/dev/null
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" 'High' \
+  "cluster-crashes reclusters when report severity changes (Low -> High)"
+
+# 9c. Even a same-mtime, same-size in-place severity rewrite must bust it:
+#     the sig content-hashes the report (a stat key would miss this). "High"
+#     and "None" are both 4 chars, so the file size is identical.
+_ref_9c=$(mktemp)
+touch -r "$RESULTS_DIR/crashes/CRASH-SKIP-9-1/report.md" "$_ref_9c"
+printf '# CRASH-SKIP-9-1\n- **Severity**: None (CVSS-BTE 4.0: 0.0)\nbody\n' \
+  > "$RESULTS_DIR/crashes/CRASH-SKIP-9-1/report.md"
+touch -r "$_ref_9c" "$RESULTS_DIR/crashes/CRASH-SKIP-9-1/report.md"
+rm -f "$_ref_9c"
+maintain_indexes 2>/dev/null
+if grep -q 'High' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md"; then
+  fail "cluster-crashes reclusters on same-mtime same-size severity rewrite" \
+    "table still shows stale High"
+else
+  pass "cluster-crashes reclusters on same-mtime same-size severity rewrite"
+fi
+
+# ═══════════════════════════════════════════════════════════════
+# 10. Rejected-index rebuilds when a cell input is repaired in place
+#     (a late report-Fields edit must bust the skip even though the dir set
+#      is unchanged — the sig stats the per-dir cell inputs, not just names).
+# ═══════════════════════════════════════════════════════════════
+printf '# B\n\n## Fields\n| Field | Value |\n|---|---|\n| File | src/REPAIRED.c |\n| Line | 99 |\n' \
+  > "$RESULTS_DIR/findings-rejected/FIND-SKIP-B/report.md"
+maintain_indexes 2>/dev/null
+assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" 'REPAIRED' \
+  "rejected index rebuilds when a report Fields cell is repaired in place"
+
 teardown_test_env
 summary

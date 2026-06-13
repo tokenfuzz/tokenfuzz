@@ -74,6 +74,38 @@ def render_md_sibling(md_path: Path, title: str | None = None) -> None:
         pass
 
 
+def render_md_batch(md_paths: "list[Path]") -> None:
+    """Render many markdown reports in ONE render-md process.
+
+    render-md accepts multiple inputs and titles each by its parent dir under
+    ``--title-from parent`` — identical to the per-file
+    ``render_md_sibling(title=path.parent.name)`` it replaces. This turns the
+    cold-cluster hotspot (one subprocess per member; profiled at ~40 ms/finding,
+    5.5 s for 150 findings, all in subprocess wait) into a single spawn. Chunked
+    so a very large finding set can never overflow ARG_MAX. Best-effort.
+    """
+    if not md_paths:
+        return
+    here = Path(__file__).resolve().parent.parent / "bin"
+    render = here / "render-md"
+    if not render.is_file() or not os.access(render, os.X_OK):
+        return
+    if shutil.which("python3") is None:
+        return
+    html = os.environ.get("CLUSTER_HTML") != "0"
+    chunk = 400
+    for start in range(0, len(md_paths), chunk):
+        batch = md_paths[start:start + chunk]
+        args = ["python3", str(render), *[str(p) for p in batch], "--title-from", "parent"]
+        if html:
+            args.append("--html-sibling")
+        try:
+            # Scale the timeout with batch size — one process renders many files.
+            subprocess.run(args, capture_output=True, timeout=15 + len(batch), check=False)
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+
 def render_member_report_siblings(clusters: Iterable[dict]) -> None:
     """Render every markdown report referenced by *clusters*.
 
@@ -83,6 +115,7 @@ def render_member_report_siblings(clusters: Iterable[dict]) -> None:
     the cluster index. Best-effort, like ``render_md_sibling``.
     """
     seen: set[Path] = set()
+    stale: list[Path] = []
     for cluster in clusters:
         for member in cluster.get("_full", []):
             report = member.get("report") if isinstance(member, dict) else None
@@ -106,7 +139,9 @@ def render_member_report_siblings(clusters: Iterable[dict]) -> None:
                     continue
             except OSError:
                 pass
-            render_md_sibling(path, title=path.parent.name)
+            stale.append(path)
+    # One batched render-md process for all stale members (was one per member).
+    render_md_batch(stale)
 
 
 def remove_legacy_cluster_files(paths: Iterable[Path]) -> None:

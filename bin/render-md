@@ -1967,26 +1967,14 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
 # ─── CLI ──────────────────────────────────────────────────────────────────
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input", type=Path, help="markdown file to process")
-    ap.add_argument("--no-pad", action="store_true",
-                    help="skip markdown padding (only useful with --html)")
-    ap.add_argument("--html", type=Path, default=None,
-                    help="write HTML output to this path")
-    ap.add_argument("--html-sibling", action="store_true",
-                    help="write HTML to <input>.html (e.g. INDEX.md → INDEX.html)")
-    ap.add_argument("--title", default=None, help="HTML <title> (default: filename stem)")
-    ap.add_argument("--check", action="store_true",
-                    help="exit non-zero if a rewrite would change the file; do not rewrite")
-    args = ap.parse_args(argv)
-
-    if not args.input.is_file():
-        print(f"render-md: not a file: {args.input}", file=sys.stderr)
+def _process_one(input_path: Path, args) -> int:
+    """Pad + optionally render one markdown file. Returns a per-file rc:
+    0 ok / unchanged, 1 (under --check) would-change, 2 not-a-file."""
+    if not input_path.is_file():
+        print(f"render-md: not a file: {input_path}", file=sys.stderr)
         return 2
 
-    text = args.input.read_text("utf-8", errors="replace")
+    text = input_path.read_text("utf-8", errors="replace")
 
     if args.check:
         padded = pad_markdown_tables(text)
@@ -1995,20 +1983,70 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_pad:
         padded = pad_markdown_tables(text)
         if padded != text:
-            args.input.write_text(padded, "utf-8")
+            input_path.write_text(padded, "utf-8")
         text = padded
 
     html_path: Path | None = args.html
     if args.html_sibling and html_path is None:
-        html_path = args.input.with_suffix(".html")
+        html_path = input_path.with_suffix(".html")
 
     if html_path is not None:
-        title = args.title or args.input.stem
+        # Title precedence: explicit --title (single input), then --title-from
+        # parent (each file titled by its containing dir — e.g. report.md in
+        # FIND-001-1/ → "FIND-001-1", matching the per-dir caller), else stem.
+        if args.title:
+            title = args.title
+        elif args.title_from == "parent":
+            title = input_path.parent.name or input_path.stem
+        else:
+            title = input_path.stem
         html_doc = markdown_to_html(text, title=title)
         html_path.parent.mkdir(parents=True, exist_ok=True)
         html_path.write_text(html_doc, "utf-8")
 
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    # Multiple inputs are processed in one process — the caller (maintain_indexes)
+    # renders many sibling-HTML files per pass, and one python start beats N.
+    ap.add_argument("inputs", type=Path, nargs="+", metavar="input",
+                    help="markdown file(s) to process")
+    ap.add_argument("--no-pad", action="store_true",
+                    help="skip markdown padding (only useful with --html)")
+    ap.add_argument("--html", type=Path, default=None,
+                    help="write HTML output to this path (single input only)")
+    ap.add_argument("--html-sibling", action="store_true",
+                    help="write HTML to <input>.html (e.g. INDEX.md → INDEX.html)")
+    ap.add_argument("--title", default=None,
+                    help="HTML <title> (single input only; batch uses --title-from)")
+    ap.add_argument("--title-from", choices=("stem", "parent"), default="stem",
+                    help="batch title source: 'stem' (filename) or 'parent' (containing dir name)")
+    ap.add_argument("--check", action="store_true",
+                    help="exit non-zero if a rewrite would change the file; do not rewrite")
+    args = ap.parse_args(argv)
+
+    # --html and --title name one output/title, so they are single-input only;
+    # batch callers use --html-sibling and per-file stem titles.
+    if len(args.inputs) > 1:
+        if args.html is not None:
+            print("render-md: --html requires a single input", file=sys.stderr)
+            return 2
+        if args.title is not None:
+            print("render-md: --title requires a single input", file=sys.stderr)
+            return 2
+
+    rc = 0
+    for input_path in args.inputs:
+        r = _process_one(input_path, args)
+        # --check: non-zero if ANY file would change. Otherwise: propagate the
+        # worst rc but keep processing the rest (one missing file must not skip
+        # the siblings the caller asked for).
+        if r != 0:
+            rc = r if rc == 0 else rc
+    return rc
 
 
 if __name__ == "__main__":

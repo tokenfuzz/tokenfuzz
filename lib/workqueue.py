@@ -25,9 +25,15 @@ from pathlib import Path
 from typing import Iterable
 
 import languages
-import target_config
 from audit_scope import EXCLUDED_PATH_SEGMENTS, is_excluded_path_part
-from prompt_render import render_template
+# target_config (only detect_repo_type, below) and prompt_render.render_template
+# (only the work_rerank gate) are imported lazily inside their single call sites:
+# workqueue backs bin/state, which agents invoke 30+ times per session, and each
+# of these modules adds ~3-4 ms of import (target_config pulls shutil; together
+# ~5 ms) that the common state ops (resume/add-hyp/update-hyp) never use —
+# detect_repo_type runs only when TARGET_REPO_TYPE is unset, which the audit
+# always sets. Each is referenced in exactly one function, so deferring the
+# import there cannot raise NameError elsewhere.
 # Audit-rankable source extensions. The registry in lib/languages.py is
 # the single source of truth — adding a new language there (Python,
 # Ruby, Go, Java, ...) automatically widens iter_source_files and
@@ -539,6 +545,7 @@ def sanitize_slug(raw: str) -> str:
 
 
 def detect_repo_type(root: Path) -> str:
+    import target_config  # lazy: see import note at top of file
     return target_config.detect_repo_type(root)
 
 
@@ -1519,6 +1526,7 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160, timeout:
             )
         )
 
+    from prompt_render import render_template  # lazy: see import note at top
     max_boost = int(os.environ.get("RANK_WORK_LLM_MAX_BOOST", "30") or "30")
     prompt = render_template("work_rerank.md.j2", {
         "max_boost": str(max_boost),

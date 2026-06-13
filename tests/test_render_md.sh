@@ -718,5 +718,26 @@ else
   pass "no spurious hero for signalless doc"
 fi
 
+# ── Multi-file batch rendering (maintain_indexes renders many siblings in
+#    one process) — both files get HTML, and --title-from parent titles each
+#    by its containing directory.
+mkdir -p "$TEST_TMPDIR/FIND-001-1" "$TEST_TMPDIR/FIND-002-1"
+printf '# Alpha\n\ntext\n' > "$TEST_TMPDIR/FIND-001-1/report.md"
+printf '# Beta\n\ntext\n'  > "$TEST_TMPDIR/FIND-002-1/report.md"
+python3 "$RENDER" "$TEST_TMPDIR/FIND-001-1/report.md" "$TEST_TMPDIR/FIND-002-1/report.md" \
+  --html-sibling --title-from parent >/dev/null 2>&1
+assert_file_contains "$TEST_TMPDIR/FIND-001-1/report.html" '<title>FIND-001-1</title>' \
+  "batch render: first sibling titled by its parent dir"
+assert_file_contains "$TEST_TMPDIR/FIND-002-1/report.html" '<title>FIND-002-1</title>' \
+  "batch render: second sibling titled by its parent dir"
+
+# --title with multiple inputs is rejected (one title can't name many files).
+if python3 "$RENDER" "$TEST_TMPDIR/FIND-001-1/report.md" "$TEST_TMPDIR/FIND-002-1/report.md" \
+     --title X >/dev/null 2>&1; then
+  fail "--title rejected for multi-input" "render-md accepted --title with >1 input"
+else
+  pass "--title rejected for multi-input"
+fi
+
 teardown_test_env
 summary

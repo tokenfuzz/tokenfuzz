@@ -81,7 +81,7 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 2. Leftover testcase without sanitizer output? Run the sanitizer NOW or delete.
 3. **Cold start:** Create state from `.agents/references/state-template.md`. Recon ONE subsystem. Generate 3-5 hypotheses.
 4. **After compression:** Start from structured state (`bin/state resume --agent <n>`); resume top PENDING. No new recon.
-5. Read `.agents/references/session-rules.md` ONCE for coverage-gate workflow, guards-db, search discipline, FIND quality bar.
+5. The harness embeds a condensed **session-rules digest** in your prompt (coverage-gate workflow, guards-db, search discipline, FIND quality bar). Rely on it. Read the full `.agents/references/session-rules.md` only if the digest is ambiguous for your situation — it is ~22 KB and re-sends on every later turn once read.
 
 ---
 

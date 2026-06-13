@@ -509,4 +509,19 @@ else
   fail "source links / anchor truncation" "placeholder link emitted or backtick left dangling"
 fi
 
+# ── Multi-file batch (benchmark --regenerate enriches a whole pool in one
+#    process). Both reports must be enriched; each resolves its own context.
+multi_a="$TEST_TMPDIR/multi_a"; multi_b="$TEST_TMPDIR/multi_b"
+mkdir -p "$multi_a" "$multi_b"
+printf '# A\n\n## Patch\n\n`patch.diff`\n' > "$multi_a/report.md"
+printf '# B\n\n## Patch\n\n`patch.diff`\n' > "$multi_b/report.md"
+printf 'diff --git a/x b/x\n+line\n' > "$multi_a/patch.diff"
+printf 'diff --git a/y b/y\n+line\n' > "$multi_b/patch.diff"
+python3 "$ENRICH" --quiet "$multi_a/report.md" "$multi_b/report.md" >/dev/null 2>&1
+if grep -q '+line' "$multi_a/report.md" && grep -q '+line' "$multi_b/report.md"; then
+  pass "enrich-report batches multiple reports in one process"
+else
+  fail "enrich-report multi-file" "one or both reports were not enriched in the batch"
+fi
+
 summary

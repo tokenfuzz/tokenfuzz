@@ -68,8 +68,20 @@ if ! declare -f audit_mtime_utc >/dev/null 2>&1; then
 fi
 
 _triage_file_sha1() {
-  local f="$1"
-  audit_sha1 "$f" 2>/dev/null | awk '{print $1}'
+  # Hot helper: called per report/patch/evidence file, several times per
+  # render-sig, twice per dir, every maintain_indexes pass. Two cheap wins
+  # over the old `audit_sha1 | awk`:
+  #   1. Skip entirely when the file is absent — render-sig probes patch.diff
+  #      / .audit/patch.diff that usually don't exist, and audit_sha1 would
+  #      still spawn python just to fail. A missing file yields an empty sha
+  #      either way, so the signature is byte-identical.
+  #   2. Strip the trailing "  <path>" in bash instead of forking awk.
+  # audit_sha1 prints "<hex>  <path>"; ${out%% *} keeps the hex (the hash
+  # never contains a space, so this is path-independent).
+  local f="$1" out
+  [ -f "$f" ] || return 1
+  out=$(audit_sha1 "$f" 2>/dev/null) || return 1
+  printf '%s' "${out%% *}"
 }
 
 _triage_text_sha1() {
@@ -2317,21 +2329,28 @@ triage_crash_dirs() {
     mkdir -p "$outcome_dir" 2>/dev/null || true
   fi
 
-  local idx=0 running=0
+  # FIFO-windowed pool: when full, wait on the OLDEST worker (specific pid —
+  # portable to bash 3.2, no `wait -n`) and launch the next immediately,
+  # rather than an all-jobs batch barrier that idles the batch on its slowest
+  # crash (the 3-gate chain + reachability lookup makes per-dir latency vary).
+  # Each worker writes its own indexed outcome file and the tally below cats
+  # them all AFTER the final wait, so window ordering changes scheduling only.
+  local idx=0
+  local -a _cpids=()
   for d in "${crash_dirs[@]}"; do
     idx=$((idx + 1))
     if [ "$pool" -le 1 ] || [ "${#crash_dirs[@]}" -le 1 ]; then
       _triage_one_crash_dir "$d" "$bin_dir" "$outcome_dir/$idx" || true
     else
       ( _triage_one_crash_dir "$d" "$bin_dir" "$outcome_dir/$idx" ) &
-      running=$((running + 1))
-      if [ "$running" -ge "$pool" ]; then
-        wait || true
-        running=0
+      _cpids+=("$!")
+      if [ "${#_cpids[@]}" -ge "$pool" ]; then
+        wait "${_cpids[0]}" 2>/dev/null || true
+        _cpids=("${_cpids[@]:1}")
       fi
     fi
   done
-  [ "$running" -gt 0 ] && { wait || true; }
+  [ "${#_cpids[@]}" -gt 0 ] && { wait || true; }
 
   local bad rejected
   bad=$(cat "$outcome_dir"/* 2>/dev/null | grep -cx 'bad' 2>/dev/null || true)
@@ -2813,24 +2832,31 @@ validate_find_gate() {
     find_dirs+=("$d")
   done
 
-  # Each FIND gate is 1-2 serial LLM calls; dirs are independent, so run
-  # them through the same bounded pool the crash sweep uses. Clustering
-  # below stays AFTER the wait — it reads every surviving report.
-  local pool running=0
+  # Each FIND gate is 1-2 serial LLM calls plus an optional external
+  # reachability lookup (up to REACHABILITY_TIMEOUT, default 180s), so
+  # per-dir latency varies a lot. Run dirs through a bounded FIFO-windowed
+  # pool: when full, wait on the OLDEST job (a specific pid — portable to
+  # bash 3.2, which lacks `wait -n`) and launch the next immediately,
+  # instead of an all-jobs batch barrier that would idle the whole batch on
+  # its slowest member. Dirs are independent (each writes only its own
+  # sidecars), so this changes scheduling only, never a verdict. Clustering
+  # below stays AFTER the final wait — it reads every surviving report.
+  local pool
+  local -a _vpids=()
   pool=$(_triage_dir_pool_size)
   for d in ${find_dirs[@]+"${find_dirs[@]}"}; do
     if [ "$pool" -le 1 ] || [ "${#find_dirs[@]}" -le 1 ]; then
       _validate_one_find_dir "$d" "$bin_dir" || true
     else
       ( _validate_one_find_dir "$d" "$bin_dir" ) &
-      running=$((running + 1))
-      if [ "$running" -ge "$pool" ]; then
-        wait || true
-        running=0
+      _vpids+=("$!")
+      if [ "${#_vpids[@]}" -ge "$pool" ]; then
+        wait "${_vpids[0]}" 2>/dev/null || true
+        _vpids=("${_vpids[@]:1}")
       fi
     fi
   done
-  [ "$running" -gt 0 ] && { wait || true; }
+  [ "${#_vpids[@]}" -gt 0 ] && { wait || true; }
 
   # Layered dedup: write FINDING-CLUSTERS.md and stamp Cluster: lines into
   # each report.md. Mirrors how maintain_indexes runs bin/cluster-crashes
@@ -2981,18 +3007,24 @@ expand_clusters_for_new_crashes() {
   done
   [ "${#dirs[@]}" -gt 0 ] || return 0
 
-  local pool running=0
+  # FIFO-windowed precompute: each LLM decision (5-20s) writes its own
+  # per-dir temp file, so wait on the OLDEST job when full (specific pid —
+  # bash 3.2 has no `wait -n`) and refill immediately instead of barriering
+  # the whole batch on its slowest member. The serial apply below runs only
+  # after the final wait, so ordering changes scheduling only.
+  local pool
+  local -a _epids=()
   pool=$(_triage_dir_pool_size)
   if [ "$pool" -gt 1 ] && [ "${#dirs[@]}" -gt 1 ]; then
     for d in "${dirs[@]}"; do
       ( _cluster_expand_decide "$d" > "$d/.cluster_rows.json.tmp" 2>/dev/null || true ) &
-      running=$((running + 1))
-      if [ "$running" -ge "$pool" ]; then
-        wait || true
-        running=0
+      _epids+=("$!")
+      if [ "${#_epids[@]}" -ge "$pool" ]; then
+        wait "${_epids[0]}" 2>/dev/null || true
+        _epids=("${_epids[@]:1}")
       fi
     done
-    [ "$running" -gt 0 ] && { wait || true; }
+    [ "${#_epids[@]}" -gt 0 ] && { wait || true; }
   fi
 
   for d in "${dirs[@]}"; do
@@ -3213,6 +3245,12 @@ _triage_finding_subject() {
 _ensure_find_quality_coverage() {
   [ -d "$RESULTS_DIR/findings" ] || return 0
   declare -f llm_find_quality_decision >/dev/null 2>&1 || return 0
+  # Collect the dirs that still need a verdict, then run them through the same
+  # bounded pool validate_find_gate uses. Each call writes only inside its own
+  # dir (.llm-find-quality.json / .find_reject_count), so concurrency changes
+  # scheduling only — never the per-finding verdict. Clustering downstream
+  # already waits on this function to return.
+  local -a pending=()
   local d desc c
   for d in "$RESULTS_DIR"/findings/FIND-*/; do
     [ -d "$d" ] || continue
@@ -3223,8 +3261,27 @@ _ensure_find_quality_coverage() {
       [ -s "$c" ] && { desc="$c"; break; }
     done
     [ -n "$desc" ] || continue
-    llm_find_quality_decision "$desc" "$d" >/dev/null 2>&1 || true
+    pending+=("$d"$'\t'"$desc")
   done
+  [ "${#pending[@]}" -gt 0 ] || return 0
+
+  local pool entry
+  local -a _qpids=()
+  pool=$(_triage_dir_pool_size)
+  for entry in "${pending[@]}"; do
+    d="${entry%%$'\t'*}"; desc="${entry#*$'\t'}"
+    if [ "$pool" -le 1 ] || [ "${#pending[@]}" -le 1 ]; then
+      llm_find_quality_decision "$desc" "$d" >/dev/null 2>&1 || true
+    else
+      ( llm_find_quality_decision "$desc" "$d" >/dev/null 2>&1 || true ) &
+      _qpids+=("$!")
+      if [ "${#_qpids[@]}" -ge "$pool" ]; then
+        wait "${_qpids[0]}" 2>/dev/null || true
+        _qpids=("${_qpids[@]:1}")
+      fi
+    fi
+  done
+  [ "${#_qpids[@]}" -gt 0 ] && { wait || true; }
 }
 
 # ─── Rejection-index cell helpers ─────────────────────────────────
@@ -3318,6 +3375,40 @@ _rejected_finding_reason() {
   printf '%s' "${reason:-—}"
 }
 
+# Stable change-key for cluster-crashes: the active + rejected crash set
+# (basenames) plus, per crash, every input cluster-crashes::_signature() reads
+# — NOT just the sanitizer file. The crash cluster identity comes from asan
+# frames, but the table ALSO carries severity, strategy, external-caller counts
+# and promotion status, all of which are pulled from the maintainer report,
+# reachability.json and .promotion_pending. An earlier version keyed on asan
+# files alone, so an in-place severity edit (Low -> High) left CRASH-CLUSTERS.md
+# stale at the old rank. We content-hash the report (severity/strategy are
+# rewritten in place, possibly at the same mtime/size, so a stat key can miss
+# them) and the small sidecars; asan files are immutable once written but cost
+# the same to hash. The tool identity and cluster tuning knobs are folded in so
+# a harness upgrade or a changed threshold re-clusters too. Empty (and constant)
+# when there are no crashes — the common findings-only target still skips the
+# whole pass after the first iteration. Crash counts are small, so the per-crash
+# hashes are far cheaper than re-running the Python clustering pass every time.
+_maintain_crash_cluster_sig() {
+  local d f out=""
+  out="tool=${_cluster_statkey:-}"$'\n'
+  out="${out}env=${CLUSTER_LCS_THRESHOLD:-}|${CLUSTER_FUZZY_MATCH:-}|${CLUSTER_FUZZY_THRESHOLD:-}"$'\n'
+  for d in "$RESULTS_DIR"/crashes/CRASH-*/ "$RESULTS_DIR"/crashes-rejected/CRASH-*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"; out="${out}${d##*/}|"
+    for f in "$d"/sanitizer.txt "$d"/asan.txt \
+             "$d"/.audit/*.asan.txt "$d"/.audit/*.msan.txt \
+             "$d"/.audit/*.tsan.txt "$d"/.audit/*.ubsan.txt \
+             "$d"/REPORT.md "$d"/report.md \
+             "$d"/reachability.json "$d"/.promotion_pending; do
+      [ -f "$f" ] && out="${out}${f##*/}:$(_triage_file_sha1 "$f" 2>/dev/null || true),"
+    done
+    out="${out}"$'\n'
+  done
+  printf '%s' "$out"
+}
+
 maintain_indexes() {
   mkdir -p "$RESULTS_DIR/crashes" "$RESULTS_DIR/crashes-rejected" "$RESULTS_DIR/findings" 2>/dev/null || true
 
@@ -3330,19 +3421,39 @@ maintain_indexes() {
     _bin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
     _cluster_bin="$_bin_dir/cluster-crashes"
     _finding_cluster_bin="$_bin_dir/cluster-findings"
+
     if [ -x "$_cluster_bin" ] && command -v python3 >/dev/null 2>&1; then
-      python3 "$_cluster_bin" "$RESULTS_DIR" >/dev/null 2>&1 \
-        || audit_log "WARN: cluster-crashes refresh failed (CRASH-CLUSTERS.md may be stale)" \
-             | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
-      # Cross-backend aggregate at output/<slug>/CRASH-CLUSTERS.md. Concurrent
-      # backends serialize internally via fcntl.flock on .cluster-lock; the
-      # loser exits 0 immediately so this never stalls our audit loop.
-      local _target_root="$(dirname "$RESULTS_DIR")"
-      _target_root="$(dirname "$_target_root")"
-      if [ -d "$_target_root" ] && [ "$(basename "$(dirname "$_target_root")")" = "output" ]; then
-        python3 "$_cluster_bin" "$_target_root" >/dev/null 2>&1 \
-          || audit_log "WARN: cluster-crashes target-root aggregate failed" \
-               | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
+      # Skip when the crash set is unchanged since the last cluster-crashes (and
+      # the summary already exists). Empty crashes/ → empty constant sig, so a
+      # findings-only target re-creates the same CRASH-CLUSTERS.md no more than
+      # once. A crash added or rejected changes a basename → sig busts → recluster.
+      local _cc_sig_file="$RESULTS_DIR/crashes/.cluster-crashes-sig" _cc_cur _cluster_statkey _cc_ok
+      _cluster_statkey=$(audit_stat_key "$_cluster_bin" 2>/dev/null || true)
+      _cc_cur=$(_maintain_crash_cluster_sig 2>/dev/null || true)
+      if [ -s "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" ] && [ -f "$_cc_sig_file" ] \
+         && [ "$(cat "$_cc_sig_file" 2>/dev/null)" = "$_cc_cur" ]; then
+        : # crash set unchanged — CRASH-CLUSTERS.md already current
+      else
+        _cc_ok=1
+        python3 "$_cluster_bin" "$RESULTS_DIR" >/dev/null 2>&1 \
+          || { _cc_ok=0; audit_log "WARN: cluster-crashes refresh failed (CRASH-CLUSTERS.md may be stale)" \
+               | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true; }
+        # Cross-backend aggregate at output/<slug>/CRASH-CLUSTERS.md. Concurrent
+        # backends serialize internally via fcntl.flock on .cluster-lock; the
+        # loser exits 0 immediately so this never stalls our audit loop.
+        local _target_root="$(dirname "$RESULTS_DIR")"
+        _target_root="$(dirname "$_target_root")"
+        if [ -d "$_target_root" ] && [ "$(basename "$(dirname "$_target_root")")" = "output" ]; then
+          python3 "$_cluster_bin" "$_target_root" >/dev/null 2>&1 \
+            || audit_log "WARN: cluster-crashes target-root aggregate failed" \
+                 | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
+        fi
+        mkdir -p "$RESULTS_DIR/crashes" 2>/dev/null || true
+        # Persist the skip key ONLY when the per-results pass succeeded.
+        # Otherwise a transient failure would freeze the now-stale table until
+        # some watched input happened to change; leaving the sig unwritten makes
+        # the next iteration retry the cluster.
+        [ "$_cc_ok" = 1 ] && { printf '%s' "$_cc_cur" > "$_cc_sig_file" 2>/dev/null || true; }
       fi
     fi
     if [ -x "$_finding_cluster_bin" ] && command -v python3 >/dev/null 2>&1; then
@@ -3386,12 +3497,17 @@ maintain_indexes() {
     # must still re-enrich. Missing file → empty sha, a stable token for
     # "dependency absent". The tool scripts below stay on audit_stat_key
     # ("0:0" when missing): they only change on a harness upgrade.
+    # The render/enrich tool stat-keys are identical for every dir this pass,
+    # so reuse the values memoized once below ($_render_statkey/$_enrich_statkey)
+    # instead of spawning `stat` per dir — that was ~4 stat processes per sig,
+    # twice per dir, all returning the same two values. Fall back to a live
+    # compute if the memo is unset (e.g. a direct call outside the loop).
     printf '%s|p=%s|ap=%s|render=%s|enrich=%s|auto=%s' \
       "$_sha" \
       "$(_triage_file_sha1 "$_d/patch.diff" 2>/dev/null || true)" \
       "$(_triage_file_sha1 "$_d/.audit/patch.diff" 2>/dev/null || true)" \
-      "$(audit_stat_key "$_render" 2>/dev/null || true)" \
-      "$(audit_stat_key "$_enrich" 2>/dev/null || true)" \
+      "${_render_statkey:-$(audit_stat_key "$_render" 2>/dev/null || true)}" \
+      "${_enrich_statkey:-$(audit_stat_key "$_enrich" 2>/dev/null || true)}" \
       "${ENRICH_REPORT_AUTO:-1}"
   }
 
@@ -3432,43 +3548,83 @@ maintain_indexes() {
   # stays plain text (rejected dirs are not meant to be re-opened); Report
   # is a Link to the rendered per-dir report (render-md rewrites the .md
   # target to its .html sibling).
-  {
-    echo "# Rejected crashes — non-finding classes (DO NOT RE-FILE)"
-    echo ""
-    echo "| ID | Site | Reason | Report |"
-    echo "| :--- | :--- | :--- | :--- |"
-    local d
-    for d in "$RESULTS_DIR"/crashes-rejected/CRASH-*/; do
+  # Skip key: the sorted list of rejected dir basenames (bash globs expand
+  # sorted) PLUS a stat key for each per-dir file the Site/Reason/Report cells
+  # are derived from. Rejected dirs are terminal, but a cell input can still
+  # arrive or be repaired after the move — reachability filling a report's
+  # Fields table, a late .autodiscard or .llm-*.json — and the index must
+  # rebuild when it does. Stat keys (size+mtime) catch any such write while
+  # staying far cheaper than the ~6 awk/jq reads the rebuild itself costs, so
+  # an unchanged set still skips. Files absent in a given dir contribute
+  # nothing, keeping the common no-change case down to a handful of stats.
+  _maintain_rejected_dirlist() {
+    local parent="$1" prefix="$2" d f out=""
+    for d in "$parent"/"$prefix"*/; do
       [ -d "$d" ] || continue
-      local id site reason link
-      id=$(basename "$d")
-      site=$(_rejected_md_cell "$(_rejected_crash_site "$d")")
-      reason=$(_rejected_md_cell "$(_rejected_dir_reason "$d")")
-      link=$(_rejected_report_link "$d")
-      printf '| `%s` | %s | %s | %s |\n' "$id" "${site:-—}" "${reason:-—}" "$link"
+      d="${d%/}"; out="${out}${d##*/}|"
+      for f in "$d"/REPORT.md "$d"/report.md "$d"/.autodiscard \
+               "$d"/.llm-find-quality.json "$d"/.llm-triage.json \
+               "$d"/sanitizer.txt "$d"/asan.txt \
+               "$d"/.audit/*.asan.txt "$d"/.audit/*.msan.txt \
+               "$d"/.audit/*.tsan.txt "$d"/.audit/*.ubsan.txt; do
+        [ -f "$f" ] && out="${out}${f##*/}=$(audit_stat_key "$f" 2>/dev/null || true),"
+      done
+      out="${out}"$'\n'
     done
-  } > "$RESULTS_DIR/crashes-rejected/INDEX.md" 2>/dev/null || true
+    printf '%s' "$out"
+  }
 
-  # findings-rejected/INDEX.md — same schema as crashes-rejected/INDEX.md.
-  # Only written when the dir exists (findings-only and crash-finding runs
-  # both reach here; a target with no rejected findings simply has no dir).
-  if [ -d "$RESULTS_DIR/findings-rejected" ]; then
+  local _rej_idx="$RESULTS_DIR/crashes-rejected/INDEX.md"
+  local _rej_sig="$RESULTS_DIR/crashes-rejected/.index-sig"
+  local _rej_list
+  _rej_list=$(_maintain_rejected_dirlist "$RESULTS_DIR/crashes-rejected" "CRASH-")
+  if ! { [ -s "$_rej_idx" ] && [ -f "$_rej_sig" ] && [ "$(cat "$_rej_sig" 2>/dev/null)" = "$_rej_list" ]; }; then
     {
-      echo "# Rejected findings — non-actionable (DO NOT RE-FILE)"
+      echo "# Rejected crashes — non-finding classes (DO NOT RE-FILE)"
       echo ""
       echo "| ID | Site | Reason | Report |"
       echo "| :--- | :--- | :--- | :--- |"
       local d
-      for d in "$RESULTS_DIR"/findings-rejected/FIND-*/; do
+      for d in "$RESULTS_DIR"/crashes-rejected/CRASH-*/; do
         [ -d "$d" ] || continue
         local id site reason link
         id=$(basename "$d")
-        site=$(_rejected_md_cell "$(_rejected_finding_site "$d")")
-        reason=$(_rejected_md_cell "$(_rejected_finding_reason "$d")")
+        site=$(_rejected_md_cell "$(_rejected_crash_site "$d")")
+        reason=$(_rejected_md_cell "$(_rejected_dir_reason "$d")")
         link=$(_rejected_report_link "$d")
         printf '| `%s` | %s | %s | %s |\n' "$id" "${site:-—}" "${reason:-—}" "$link"
       done
-    } > "$RESULTS_DIR/findings-rejected/INDEX.md" 2>/dev/null || true
+    } > "$_rej_idx" 2>/dev/null \
+      && printf '%s' "$_rej_list" > "$_rej_sig" 2>/dev/null || true
+  fi
+
+  # findings-rejected/INDEX.md — same schema and same dir-list skip as above.
+  # Only written when the dir exists (findings-only and crash-finding runs
+  # both reach here; a target with no rejected findings simply has no dir).
+  if [ -d "$RESULTS_DIR/findings-rejected" ]; then
+    local _frej_idx="$RESULTS_DIR/findings-rejected/INDEX.md"
+    local _frej_sig="$RESULTS_DIR/findings-rejected/.index-sig"
+    local _frej_list
+    _frej_list=$(_maintain_rejected_dirlist "$RESULTS_DIR/findings-rejected" "FIND-")
+    if ! { [ -s "$_frej_idx" ] && [ -f "$_frej_sig" ] && [ "$(cat "$_frej_sig" 2>/dev/null)" = "$_frej_list" ]; }; then
+      {
+        echo "# Rejected findings — non-actionable (DO NOT RE-FILE)"
+        echo ""
+        echo "| ID | Site | Reason | Report |"
+        echo "| :--- | :--- | :--- | :--- |"
+        local d
+        for d in "$RESULTS_DIR"/findings-rejected/FIND-*/; do
+          [ -d "$d" ] || continue
+          local id site reason link
+          id=$(basename "$d")
+          site=$(_rejected_md_cell "$(_rejected_finding_site "$d")")
+          reason=$(_rejected_md_cell "$(_rejected_finding_reason "$d")")
+          link=$(_rejected_report_link "$d")
+          printf '| `%s` | %s | %s | %s |\n' "$id" "${site:-—}" "${reason:-—}" "$link"
+        done
+      } > "$_frej_idx" 2>/dev/null \
+        && printf '%s' "$_frej_list" > "$_frej_sig" 2>/dev/null || true
+    fi
   fi
 
   # Emit HTML siblings after all report/cluster mutations for this iteration.
@@ -3484,15 +3640,37 @@ maintain_indexes() {
     _bin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
     _render="$_bin_dir/render-md"
     _enrich="$_bin_dir/enrich-report"
+    # Memoize the render/enrich tool stat-keys once — they are identical for
+    # every dir's signature this pass, so _maintain_render_sig reuses these
+    # instead of re-spawning `stat` per dir (dynamic scope makes them visible
+    # to the nested function, including inside the forked render workers).
+    local _render_statkey _enrich_statkey
+    _render_statkey=$(audit_stat_key "$_render" 2>/dev/null || true)
+    _enrich_statkey=$(audit_stat_key "$_enrich" 2>/dev/null || true)
     if [ -x "$_render" ]; then
       local _d _report _candidate
+      # Render each stale dir in a bounded FIFO-windowed fork pool. Batching
+      # enrich+render into 2 processes is far faster COLD (one --regenerate-style
+      # pass of 100 dirs: 0.48s batched vs 7s parallel), but it serializes the
+      # per-dir staleness sha1 and so REGRESSES the common quiescent/incremental
+      # pass (most dirs unchanged); the parallel pool keeps that sha1 parallel.
+      # maintain_indexes runs dirty-gated and mostly quiescent, so the pool wins
+      # net. (The cold cluster path — the genuinely hot one — is batched in
+      # lib/cluster_common.py instead.)
+      local _rpool _rpids=()
+      _rpool=$(_triage_dir_pool_size)
       for _d in "$RESULTS_DIR"/crashes/CRASH-*/ "$RESULTS_DIR"/crashes-rejected/CRASH-*/; do
         [ -d "$_d" ] || continue
         _report=""
         _report=$(_triage_exact_file_path "$_d" "REPORT.md" 2>/dev/null || true)
         [ -z "$_report" ] && _report=$(_triage_exact_file_path "$_d" "report.md" 2>/dev/null || true)
         [ -n "$_report" ] || continue
-        _maintain_render_report "$_d" "$_report" "$_render" "$_enrich"
+        ( _maintain_render_report "$_d" "$_report" "$_render" "$_enrich" ) &
+        _rpids+=("$!")
+        if [ "${#_rpids[@]}" -ge "$_rpool" ]; then
+          wait "${_rpids[0]}" 2>/dev/null || true
+          _rpids=("${_rpids[@]:1}")
+        fi
       done
 
       # Findings (kept and rejected) get the same report.md → report.html
@@ -3507,18 +3685,30 @@ maintain_indexes() {
           fi
         done
         [ -n "$_report" ] || continue
-        _maintain_render_report "$_d" "$_report" "$_render" "$_enrich"
+        ( _maintain_render_report "$_d" "$_report" "$_render" "$_enrich" ) &
+        _rpids+=("$!")
+        if [ "${#_rpids[@]}" -ge "$_rpool" ]; then
+          wait "${_rpids[0]}" 2>/dev/null || true
+          _rpids=("${_rpids[@]:1}")
+        fi
       done
+      wait || true
 
+      # Render the cluster/index summary tables in ONE render-md process
+      # (it accepts multiple inputs) instead of one python start per file.
+      # These use --html-sibling with default per-file stem titles, so no
+      # per-file flags are needed.
       local _f
+      local -a _summary_md=()
       for _f in \
         "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" \
         "$RESULTS_DIR/crashes-rejected/INDEX.md" \
         "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" \
         "$RESULTS_DIR/findings-rejected/INDEX.md"; do
-        [ -s "$_f" ] || continue
-        python3 "$_render" "$_f" --html-sibling >/dev/null 2>&1 || true
+        [ -s "$_f" ] && _summary_md+=("$_f")
       done
+      [ "${#_summary_md[@]}" -gt 0 ] \
+        && python3 "$_render" "${_summary_md[@]}" --html-sibling >/dev/null 2>&1 || true
     fi
   fi
   return 0

@@ -127,8 +127,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Inline patch.diff + source snippets + TL;DR into a report.md.",
     )
-    ap.add_argument("path", type=Path,
-                    help="path to report.md OR the report directory")
+    # Multiple paths are enriched in one process — the benchmark re-enriches a
+    # whole result pool per --regenerate, and one python start beats N (~40ms of
+    # interpreter startup each). Each path resolves its own context from its
+    # location; --slug/--source-root (when given) apply to all.
+    ap.add_argument("paths", type=Path, nargs="+", metavar="path",
+                    help="path(s) to report.md OR the report directory")
     ap.add_argument("--slug", default=None,
                     help="Target slug under output/ (when CWD is unrelated)")
     ap.add_argument("--source-root", default=None,
@@ -141,24 +145,26 @@ def main(argv: list[str] | None = None) -> int:
                     help="Suppress the 'changed/unchanged' line")
     args = ap.parse_args(argv)
 
-    report = _resolve_report_path(args.path)
-    if report is None:
-        print(f"enrich-report: no report.md / REPORT.md / description.md "
-              f"under {args.path}", file=sys.stderr)
-        return 2
-
-    ctx = _resolve_context(
-        report_path=report,
-        slug=args.slug,
-        source_root=args.source_root,
-        upstream_url=args.upstream_url,
-        pinned_rev=args.pinned_rev,
-    )
-    changed = enrich_file(report, ctx)
-    if not args.quiet:
-        msg = "changed" if changed else "unchanged"
-        print(f"enrich-report: {report} ({msg})")
-    return 0
+    rc = 0
+    for path in args.paths:
+        report = _resolve_report_path(path)
+        if report is None:
+            print(f"enrich-report: no report.md / REPORT.md / description.md "
+                  f"under {path}", file=sys.stderr)
+            rc = rc or 2
+            continue
+        ctx = _resolve_context(
+            report_path=report,
+            slug=args.slug,
+            source_root=args.source_root,
+            upstream_url=args.upstream_url,
+            pinned_rev=args.pinned_rev,
+        )
+        changed = enrich_file(report, ctx)
+        if not args.quiet:
+            msg = "changed" if changed else "unchanged"
+            print(f"enrich-report: {report} ({msg})")
+    return rc
 
 
 if __name__ == "__main__":

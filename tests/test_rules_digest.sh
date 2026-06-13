@@ -223,5 +223,19 @@ old_count="${old_count:-0}"
 assert_eq 0 "$old_count" \
   "prompt.sh no longer instructs agents to re-read session-rules.md once per session"
 
+# Same regression guard for the runtime-loaded AGENTS.md: its SESSION START
+# step must not tell agents to read the long session-rules.md unconditionally
+# ("ONCE"). The digest is embedded in the prompt; the long file is a
+# drill-down only. An unconditional read re-sends ~22 KB on every later turn.
+AGENTS_MD="$SCRIPT_ROOT/AGENTS.md"
+agents_old=$(grep -c 'session-rules\.md.*ONCE' "$AGENTS_MD" 2>/dev/null | head -1)
+agents_old="${agents_old:-0}"
+assert_eq 0 "$agents_old" \
+  "AGENTS.md no longer instructs agents to read session-rules.md ONCE per session"
+# It should still name the file as a conditional drill-down so agents know
+# where to look when the embedded digest is ambiguous.
+assert_match 'session-rules\.md' "$(cat "$AGENTS_MD")" \
+  "AGENTS.md still names session-rules.md as a drill-down"
+
 teardown_test_env
 summary

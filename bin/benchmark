@@ -1223,21 +1223,32 @@ _reenrich_and_render_pool_reports() {
   local _enrich="$SCRIPT_ROOT/bin/enrich-report"
   local _render="$SCRIPT_ROOT/bin/render-md"
   local d rep cand
+  # Collect every pool report, then enrich + render them in TWO batched python
+  # processes instead of two spawns per report. This pass always re-renders the
+  # whole pool (no staleness skip), so it is the clean batch case — no per-dir
+  # sha1 to serialize. --title-from parent reproduces the old per-dir
+  # `--title $(basename d)` (title = the CRASH-*/FIND-* dir name). Both tools
+  # accept many inputs; chunk so a large pool can't overflow ARG_MAX.
+  local -a _reps=()
   for d in "$root"/CRASH-* "$root"/FIND-*; do
     [ -d "$d" ] || continue
     rep=""
     for cand in report.md REPORT.md description.md; do
       if [ -s "$d/$cand" ]; then rep="$d/$cand"; break; fi
     done
-    [ -n "$rep" ] || continue
+    [ -n "$rep" ] && _reps+=("$rep")
+  done
+  [ "${#_reps[@]}" -gt 0 ] || return 0
+  local _total="${#_reps[@]}" _start=0 _chunk=400
+  while [ "$_start" -lt "$_total" ]; do
+    local -a _batch=("${_reps[@]:_start:_chunk}")
     if [ "${ENRICH_REPORT_AUTO:-1}" = "1" ] && [ -x "$_enrich" ]; then
-      python3 "$_enrich" --slug "$TARGET_SLUG" --quiet "$rep" \
-        >/dev/null 2>&1 || true
+      python3 "$_enrich" --slug "$TARGET_SLUG" --quiet "${_batch[@]}" >/dev/null 2>&1 || true
     fi
     if [ -x "$_render" ]; then
-      python3 "$_render" "$rep" --html-sibling --title "$(basename "$d")" \
-        >/dev/null 2>&1 || true
+      python3 "$_render" "${_batch[@]}" --html-sibling --title-from parent >/dev/null 2>&1 || true
     fi
+    _start=$((_start + _chunk))
   done
 }
 
@@ -1562,11 +1573,12 @@ rebuild_pool_artifacts() {
     done
     if [ "$_regen" != "1" ] && [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
       local rep
+      local -a _creps=()
       for rep in "$POOL"/crashes/CRASH-*/REPORT.md; do
-        [ -f "$rep" ] || continue
-        python3 "$SCRIPT_ROOT/bin/render-md" "$rep" --html-sibling \
-          >/dev/null 2>&1 || true
+        [ -f "$rep" ] && _creps+=("$rep")
       done
+      [ "${#_creps[@]}" -gt 0 ] \
+        && python3 "$SCRIPT_ROOT/bin/render-md" "${_creps[@]}" --html-sibling >/dev/null 2>&1 || true
     fi
     if [ "$bundled" -gt 0 ]; then
       log "reproducer bundles created: $bundled ($reason)"
@@ -1648,11 +1660,13 @@ rebuild_pool_artifacts() {
         >> "$BENCH_DIR/reachability.log" 2>&1 \
         || log "WARN: post-reconcile re-score returned non-zero ($reason)"
       if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
+        local -a _rcreps=()
         for _rc_cdir in "$POOL"/crashes/CRASH-*; do
-          [ -f "$_rc_cdir/REPORT.md" ] || continue
-          python3 "$SCRIPT_ROOT/bin/render-md" "$_rc_cdir/REPORT.md" --html-sibling \
-            --title "$(basename "$_rc_cdir")" >/dev/null 2>&1 || true
+          [ -f "$_rc_cdir/REPORT.md" ] && _rcreps+=("$_rc_cdir/REPORT.md")
         done
+        # --title-from parent reproduces the per-dir --title $(basename cdir).
+        [ "${#_rcreps[@]}" -gt 0 ] \
+          && python3 "$SCRIPT_ROOT/bin/render-md" "${_rcreps[@]}" --html-sibling --title-from parent >/dev/null 2>&1 || true
       fi
     fi
   fi
@@ -1673,6 +1687,7 @@ rebuild_pool_artifacts() {
   if [ "$DRY_RUN" != "1" ] && [ -d "$POOL/findings" ] \
      && declare -f _triage_run_reachability >/dev/null 2>&1; then
     local _fd _frep _fscored=0
+    local -a _fscored_reps=()
     for _fd in "$POOL"/findings/FIND-*; do
       [ -d "$_fd" ] || continue
       [ -f "$_fd/reachability.json" ] && continue
@@ -1686,10 +1701,19 @@ rebuild_pool_artifacts() {
         _triage_run_reachability "$_fd" "$(basename "$_fd")" "$SCRIPT_ROOT/bin" )
       if [ -f "$_fd/reachability.json" ]; then
         _fscored=$((_fscored + 1))
-        [ -x "$SCRIPT_ROOT/bin/render-md" ] \
-          && python3 "$SCRIPT_ROOT/bin/render-md" "$_frep" --html-sibling >/dev/null 2>&1 || true
+        _fscored_reps+=("$_frep")
       fi
     done
+    # Render the freshly-scored finding reports in one batched render-md process
+    # (the per-finding scorer above must stay serial, but the html render need
+    # not be one spawn per finding).
+    if [ "${#_fscored_reps[@]}" -gt 0 ] && [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
+      local _fs _ft="${#_fscored_reps[@]}"; _fs=0
+      while [ "$_fs" -lt "$_ft" ]; do
+        python3 "$SCRIPT_ROOT/bin/render-md" "${_fscored_reps[@]:_fs:400}" --html-sibling >/dev/null 2>&1 || true
+        _fs=$((_fs + 400))
+      done
+    fi
     [ "$_fscored" -gt 0 ] && log "finding scoring: scored $_fscored previously-unscored finding(s) (severity-only)"
   fi
 
@@ -1726,23 +1750,33 @@ rebuild_pool_artifacts() {
       _reenrich_and_render_pool_reports "$cond_dir/crashes-rejected"
     done
     if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
+      local _render="$SCRIPT_ROOT/bin/render-md"
       local rep rej
-      while IFS= read -r -d '' rep; do
-        python3 "$SCRIPT_ROOT/bin/render-md" "$rep" --html-sibling \
-          >/dev/null 2>&1 || true
-      done < <(
+      # Collect the rejected member reports + the rejected index files, then
+      # render each group in batched render-md processes (it accepts many
+      # inputs) instead of one spawn per file. Default per-file stem titles
+      # (no --title), matching the prior per-file behaviour. Chunk for ARG_MAX.
+      local -a _rejreps=()
+      while IFS= read -r -d '' rep; do _rejreps+=("$rep"); done < <(
         find "$POOL" -path '*/findings-rejected/FIND-*/*' -type f \
           \( -name 'REPORT.md' -o -name 'report.md' -o -name 'description.md' \) \
           -print0 2>/dev/null
       )
+      local _t _s
+      _t=${#_rejreps[@]}; _s=0
+      while [ "$_s" -lt "$_t" ]; do
+        python3 "$_render" "${_rejreps[@]:_s:400}" --html-sibling >/dev/null 2>&1 || true
+        _s=$((_s + 400))
+      done
+      local -a _rejidx=()
       for rej in "$POOL"/findings-rejected/REJECTED-FINDINGS.md \
                  "$POOL"/*/findings-rejected/REJECTED-FINDINGS.md \
                  "$POOL"/crashes-rejected/REJECTED-CRASHES.md \
                  "$POOL"/*/crashes-rejected/REJECTED-CRASHES.md; do
-        [ -f "$rej" ] || continue
-        python3 "$SCRIPT_ROOT/bin/render-md" "$rej" --html-sibling \
-          >/dev/null 2>&1 || true
+        [ -f "$rej" ] && _rejidx+=("$rej")
       done
+      [ "${#_rejidx[@]}" -gt 0 ] \
+        && python3 "$_render" "${_rejidx[@]}" --html-sibling >/dev/null 2>&1 || true
     fi
   fi
 

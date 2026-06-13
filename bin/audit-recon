@@ -874,7 +874,15 @@ if [ "$VALIDATE_MODE" != "off" ] && [ -s "$OUT_PATH" ]; then
       triage_parallel="${RECON_TRIAGE_PARALLEL:-6}"
       triage_max_deep="${RECON_TRIAGE_MAX_DEEP:-24}"
       n_survivors=0
-      running=0
+      # FIFO sliding window instead of an all-jobs batch barrier: once the
+      # pool is full, wait for the OLDEST validator to finish (a specific
+      # pid — portable to bash 3.2, which has no `wait -n`) and immediately
+      # launch the next one. A bare `wait` here would block on the whole
+      # batch, so one slow validator (300s) idled the other five for its
+      # full duration before the next batch could start. Validators write
+      # their own per-id result file, so window ordering changes scheduling
+      # only, never the verdicts.
+      pids=()
       while IFS= read -r fid <&3; do
         [ -n "$fid" ] || continue
         rep_line=$(grep -F "\"id\": \"$fid\"" "$reps_path" | head -1 || true)
@@ -897,10 +905,10 @@ if [ "$VALIDATE_MODE" != "off" ] && [ -s "$OUT_PATH" ]; then
           esac
           printf '%s\t%s\t%s\n' "$fid" "$vv" "$vres" > "$triage_dir/s3-$fid.tsv"
         ) &
-        running=$((running + 1))
-        if [ "$running" -ge "$triage_parallel" ]; then
-          wait || true
-          running=0
+        pids+=("$!")
+        if [ "${#pids[@]}" -ge "$triage_parallel" ]; then
+          wait "${pids[0]}" 2>/dev/null || true
+          pids=("${pids[@]:1}")
         fi
       done 3< <(python3 "$SCRIPT_ROOT/lib/recon_triage.py" survivors \
         --verdicts "$verdicts_path" --limit "$triage_max_deep" 2>/dev/null)
