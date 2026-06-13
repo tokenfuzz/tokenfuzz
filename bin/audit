@@ -141,6 +141,18 @@ Options:
                                     to the same index.log, work-cards.jsonl,
                                     and recon-hypotheses.jsonl with no
                                     coordination and produce corrupted state.
+  --enable-memory                   Opt back in to the backend's cross-run
+                                    auto-memory (Claude Code MEMORY.md/memory/*,
+                                    Codex ~/.codex/memories/, Gemini CLI
+                                    save_memory). OFF by default: a single wrong
+                                    learned note poisons every later run. With
+                                    this flag, watch those memory files and
+                                    prune stale entries. (Default agy/Antigravity
+                                    keeps persistent state under
+                                    ~/.gemini/antigravity-cli and exposes no
+                                    memory-off flag, so it is NOT disabled by
+                                    default either way; use USE_GEMINI_CLI=1 for
+                                    strict Gemini memory isolation.)
   -h, --help                        Show this help
 
 Arguments:
@@ -364,6 +376,11 @@ ALLOW_CONCURRENT_AUDIT=0
 INSTANCE_LOCK_DIR=""
 INSTANCE_LOCK_ACQUIRED=0
 
+# Cross-run backend auto-memory is OFF by default (see llm_apply_memory_policy):
+# learned notes from a prior run poison every later one. --enable-memory opts
+# back in for cumulative learning.
+ENABLE_MEMORY=0
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --target=*)
@@ -466,6 +483,10 @@ while [ $# -gt 0 ]; do
       ALLOW_CONCURRENT_AUDIT=1
       shift
       ;;
+    --enable-memory)
+      ENABLE_MEMORY=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -516,6 +537,11 @@ case "${AUDIT_FIXED_STRATEGY:-}" in
     exit 1
     ;;
 esac
+
+# Disable cross-run backend auto-memory by default (poison-resistant); opt
+# back in with --enable-memory. Exported here so every backend child the run
+# spawns inherits the decision. (llm_apply_memory_policy lives in llm_invoke.sh.)
+llm_apply_memory_policy "$ENABLE_MEMORY"
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -1457,6 +1483,11 @@ configure_active_backend() {
   TARGET_CONFIG_DIR="$(target_output_root)"
   TARGET_TOML="$TARGET_CONFIG_DIR/target.toml"
   mkdir -p "$TARGET_CONFIG_DIR" "$LOGDIR" "$RAW_DIR" "$RESULTS_DIR"
+  # With cross-run memory off (default) and the Gemini CLI dialect, stage a
+  # clean empty GEMINI_CLI_HOME under $LOGDIR so the global ~/.gemini/GEMINI.md
+  # is neither read nor written. No-op for agy and for --enable-memory runs;
+  # fatal if isolation applies but cannot be guaranteed (see the function).
+  llm_stage_gemini_memory_home "$ACTIVE_BACKEND" || exit 1
   audit_write_logdir_readme "$LOGDIR"
   local target_rev
   target_rev="$(target_detect_rev "$TARGET_ROOT")"

@@ -79,6 +79,7 @@ from llm_invoke import (  # noqa: E402
     default_model as _default_model,
     gemini_default_bin as _gemini_default_bin,
     known_backend as _known_backend,
+    memory_env as _memory_env,
 )
 
 
@@ -312,6 +313,15 @@ def _invoke_backend(
         # Caller logs the specific no-<backend>-bin reason.
         raise FileNotFoundError(f"no-{backend}-bin")
 
+    # Disable each backend's cross-run auto-memory by default, the same as the
+    # agent launch path. The bash entry points export these (CLAUDE_CODE_DISABLE_AUTO_MEMORY,
+    # GEMINI_CLI_HOME) via llm_apply_memory_policy, but standalone tools that
+    # import llm_decide directly (bin/setup-target, bin/suggest-*, etc.) never
+    # call it — so set them here too, keyed on TOKENFUZZ_MEMORY_ENABLED.
+    # codex/oss carry their disable as `-c` flags already in the decide flags.
+    child_env = os.environ.copy()
+    child_env.update(_memory_env(backend))
+
     try:
         result = subprocess.run(
             cmd,
@@ -319,6 +329,7 @@ def _invoke_backend(
             capture_output=True,
             text=True,
             timeout=timeout_secs,
+            env=child_env,
         )
     except subprocess.TimeoutExpired:
         raise

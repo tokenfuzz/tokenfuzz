@@ -20,6 +20,7 @@ awk '
 # derivation and session-env placement.
 resolve_model() { echo "test-model"; }
 audit_write_logdir_readme() { :; }
+llm_stage_gemini_memory_home() { :; }  # lives in lib/llm_invoke.sh; covered by test_llm_invoke.sh
 target_detect_rev() { echo "test-rev"; }
 target_write_session_env() {
   local dir="$1" results="$2" target_root="$3" slug="$4" rev="$5" logdir="$6"

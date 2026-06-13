@@ -219,6 +219,11 @@ case "$BACKEND" in
   *) echo "FATAL: --backend must be one of: claude, codex, gemini, oss (got: $BACKEND)" >&2; exit 2 ;;
 esac
 
+# Inherit the spawning audit's cross-run memory decision (default off when run
+# standalone); the flag builders read TOKENFUZZ_MEMORY_ENABLED and claude reads
+# the exported env var. See lib/llm_invoke.sh:llm_apply_memory_policy.
+llm_apply_memory_policy
+
 if [ -z "$TARGET_PATH" ]; then
   TARGET_PATH="$SCRIPT_ROOT/targets/$TARGET_SLUG"
 fi
@@ -275,6 +280,11 @@ if [ "$OUT_PATH_EXPLICIT" -eq 1 ]; then
   RAW_DIR="$LOGDIR/.raw"
   mkdir -p "$RESULTS_DIR" "$LOGDIR" "$RAW_DIR"
 fi
+
+# $LOGDIR is now settled — stage a clean empty GEMINI_CLI_HOME under it when
+# memory is off and the gemini-cli dialect is in use (no-op otherwise; fatal if
+# isolation applies but cannot be guaranteed — see the function).
+llm_stage_gemini_memory_home "$BACKEND" || exit 1
 
 SCOPE_AUTO_THRESHOLD="${RECON_SCOPE_AUTO_THRESHOLD:-500}"
 # Per-target recon checkpoint: the target HEAD sha at the last successful

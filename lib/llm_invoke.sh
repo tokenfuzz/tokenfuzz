@@ -27,6 +27,12 @@
 #   llm_gemini_default_bin
 #       Echo gemini when USE_GEMINI_CLI=1, otherwise agy.
 #
+#   llm_apply_memory_policy [enabled]
+#       Set the process-wide cross-run auto-memory policy (default off),
+#       exporting TOKENFUZZ_MEMORY_ENABLED + the claude env var so backend
+#       children inherit it. With no argument it inherits the parent's
+#       exported switch. See the function for the per-backend mechanism.
+#
 #   llm_default_model <backend>
 #       Echo the project-wide default model name. Honours CLAUDE_MODEL_DEFAULT
 #       / CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT /
@@ -71,6 +77,125 @@ llm_gemini_default_bin() {
   fi
 }
 
+# llm_apply_memory_policy [enabled]
+#   Set the process-wide cross-run "auto-memory" policy. Exports the single
+#   switch TOKENFUZZ_MEMORY_ENABLED (read by the flag builders in
+#   lib/llm_invoke.py) plus the claude env var, so every spawned backend
+#   child inherits the decision. Call once at startup from each entry point.
+#
+#   With an explicit argument (0/1) the caller forces the decision —
+#   bin/audit passes its --enable-memory state, bin/benchmark always passes 0.
+#   With NO argument it inherits a parent's exported TOKENFUZZ_MEMORY_ENABLED
+#   (default off), so sub-tools (bin/audit-recon, bin/validate-finding) honour
+#   the audit that spawned them yet still default to off when run standalone.
+#
+# Some backend CLIs accumulate learned notes across runs and inject them into
+# every later session's context: Claude Code's MEMORY.md + memory/*, Codex's
+# ~/.codex/memories/, and Google Gemini CLI's save_memory tool (appends to the
+# global ~/.gemini/GEMINI.md). One wrong note then steers every future run — a
+# confirmed failure mode (a stale "this surface is saturated" note walked an
+# audit straight past a real bug). The harness disables it by DEFAULT so each
+# run reasons from the target code, not from a prior run's guesses.
+#
+# Scope is the auto-accumulated, cross-run channel only. Operator-authored
+# project context — AGENTS.md (every backend) and project GEMINI.md — is the
+# audit contract and is never touched.
+#
+# Per-backend mechanism (applied where it actually takes effect):
+#   claude  CLAUDE_CODE_DISABLE_AUTO_MEMORY=1, exported here (claude reads the
+#           env var directly; it has no launch flag for this).
+#   codex   `-c features.memories=false` + memories.use_memories/generate=false,
+#           injected by llm_invoke.py's flag builders keyed on
+#           TOKENFUZZ_MEMORY_ENABLED, so EVERY launch path gets them.
+#   gemini  (Google Gemini CLI) GEMINI_CLI_HOME relocated to a clean, EMPTY
+#           per-run home so the global ~/.gemini/GEMINI.md is neither read nor
+#           written (no setting or flag disables that load — verified). Auth
+#           rides on the GEMINI_API_KEY env the harness forwards, so the empty
+#           home needs no credential files. Staged by
+#           llm_stage_gemini_memory_home AFTER $LOGDIR is known (so the home
+#           lives under the run's output tree), NOT here. The save_memory deny
+#           in the flag builders is only a defence-in-depth backstop.
+#   gemini  (agy / Antigravity) — left untouched. The CLI persists state under
+#           ~/.gemini/antigravity-cli (including brain/implicit/conversations),
+#           but it exposes no documented memory-off flag or auth-preserving
+#           isolated home/profile switch in headless `agy -p`. Relocating HOME
+#           creates fresh state but breaks auth, so the harness does not do it
+#           implicitly. Use USE_GEMINI_CLI=1 when strict Gemini memory
+#           isolation is required.
+llm_apply_memory_policy() {
+  local enabled
+  if [ $# -ge 1 ]; then
+    enabled="$1"
+  else
+    enabled="${TOKENFUZZ_MEMORY_ENABLED:-0}"
+  fi
+  if [ "$enabled" = "1" ]; then
+    export TOKENFUZZ_MEMORY_ENABLED=1
+    unset CLAUDE_CODE_DISABLE_AUTO_MEMORY
+    return 0
+  fi
+  export TOKENFUZZ_MEMORY_ENABLED=0
+  export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+}
+
+# llm_stage_gemini_memory_home [backend]
+#   Stage a clean, empty per-run Gemini CLI home and export GEMINI_CLI_HOME so
+#   the global ~/.gemini/GEMINI.md is neither read nor written this run. No-op
+#   unless <backend> is gemini, cross-run memory is OFF, and the gemini-cli
+#   dialect is in use (agy is never touched). <backend> defaults from
+#   ACTIVE_BACKEND / BACKEND when available, then gemini for direct helper tests.
+#   Call from each entry point AFTER $LOGDIR is set: the home then lands at
+#   $LOGDIR/.gemini-home — wiped fresh each run, cleaned with the run's artifacts,
+#   never littering /tmp. Staging once here and exporting the result means every
+#   later launch (bash agents and the llm_decide.py subprocess) inherits and
+#   reuses the one staged home.
+#
+#   Fails LOUD (rc=1) when isolation applies but cannot be guaranteed: the whole
+#   point is that the operator's global GEMINI.md is not read/written, so a
+#   silent fall-through to it would defeat the guard. Callers treat a nonzero
+#   return as fatal. Two ways it bails:
+#     * no API key — an empty home has no credential files, so it can only
+#       authenticate via GEMINI_API_KEY / GOOGLE_API_KEY in the env. Without
+#       one, fail now rather than dying opaquely mid-run on an auth error (or,
+#       worse, silently reading the global home).
+#     * staging produced no home — python could not stage it (e.g. an
+#       unwritable $LOGDIR, or a python too old to run the module at all).
+llm_stage_gemini_memory_home() {
+  local _backend="${1:-${ACTIVE_BACKEND:-${BACKEND:-gemini}}}"
+  [ "$_backend" = "gemini" ] || return 0
+  [ "${TOKENFUZZ_MEMORY_ENABLED:-0}" = "1" ] && return 0
+  llm_use_gemini_cli || return 0
+  if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "${GOOGLE_API_KEY:-}" ]; then
+    {
+      echo "ERROR: Gemini CLI cross-run memory isolation needs an API key."
+      echo "       The harness relocates GEMINI_CLI_HOME to a clean, EMPTY home"
+      echo "       (no cross-run memory, no credential files), which can only"
+      echo "       authenticate via an env API key. Set GEMINI_API_KEY or"
+      echo "       GOOGLE_API_KEY, or run the default agy backend (unset"
+      echo "       USE_GEMINI_CLI), or pass --enable-memory to opt back in."
+    } >&2
+    return 1
+  fi
+  local _gemini_home _rc=0
+  _llm_invoke_export_env
+  export LOGDIR="${LOGDIR:-}"
+  # Capture rc without `set -e` aborting the assignment; let python's stderr
+  # flow through so the real cause (e.g. an ImportError) is visible.
+  _gemini_home="$(python3 "$_LLM_INVOKE_PY" gemini-isolated-home)" || _rc=$?
+  if [ "$_rc" -ne 0 ] || [ -z "$_gemini_home" ]; then
+    {
+      echo "ERROR: Gemini CLI memory isolation failed to stage a clean home"
+      echo "       (python3 lib/llm_invoke.py gemini-isolated-home: rc=$_rc," \
+           "home='$_gemini_home')."
+      echo "       Refusing to run: the global ~/.gemini/GEMINI.md would"
+      echo "       otherwise be read and written. Check that python3" \
+           "($(command -v python3 || echo not-found)) can run the module."
+    } >&2
+    return 1
+  fi
+  export GEMINI_CLI_HOME="$_gemini_home"
+}
+
 # Forward the env-var defaults to the python subprocess. The caller's
 # shell scope has them set (via the `: "${VAR:=…}"` defaults above or an
 # explicit assignment) but bash function callers may not have exported
@@ -78,6 +203,9 @@ llm_gemini_default_bin() {
 _llm_invoke_export_env() {
   export CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT CODEX_OSS_MODEL_DEFAULT
   export USE_GEMINI_CLI="${USE_GEMINI_CLI:-}"
+  # The flag builders gate the per-backend memory-disable flags on this; an
+  # unset value reads as "memory off" (the harness default).
+  export TOKENFUZZ_MEMORY_ENABLED="${TOKENFUZZ_MEMORY_ENABLED:-}"
 }
 
 llm_known_backend() {

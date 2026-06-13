@@ -108,6 +108,10 @@ case "$BACKEND" in
   *) echo "FATAL: --backend must be one of: claude, codex, gemini, oss (got: $BACKEND)" >&2; exit 4 ;;
 esac
 
+# Inherit the spawning audit's cross-run memory decision (default off when run
+# standalone). See lib/llm_invoke.sh:llm_apply_memory_policy.
+llm_apply_memory_policy
+
 # Extract the canonical finding fields. We accept three input formats:
 #   1. JSONL row (one JSON object — easiest)
 #   2. JSON file (a single object pretty-printed)
@@ -269,6 +273,12 @@ llm_agent_flags "$BACKEND" validator_flags "${MODEL:-}" 120 "$SCRIPT_ROOT,$TARGE
 # IS_SANDBOX=1. Other backends ignore it. Setting unconditionally is
 # safe (the container is the sandbox boundary).
 export IS_SANDBOX=1
+
+# For the gemini-cli dialect with cross-run memory off (the default), stage a
+# clean empty GEMINI_CLI_HOME under the trap-cleaned validator scratch dir so
+# the global ~/.gemini/GEMINI.md is neither read nor written. No-op for agy,
+# non-gemini backends, and --enable-memory.
+LOGDIR="$validator_cwd" llm_stage_gemini_memory_home "$BACKEND" || exit 1
 
 # stdin discipline: some backend branches pass the prompt as an argument,
 # so the spawned CLI must NOT inherit this process's stdin.

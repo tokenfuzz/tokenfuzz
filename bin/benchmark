@@ -179,14 +179,15 @@ AGENTS=""
 CONDITIONS="model-direct,harness"
 RUN_ID=""
 
-# Benchmark cells must compare backends on equal footing — auto-memory in
-# Claude Code injects MEMORY.md into every spawned agent's system prompt
-# and saves "saturated → skip future sweeps" notes back during the run.
-# That gives the claude backend a hidden run-to-run advantage (or, when
-# entries are stale, a hidden penalty) that codex/gemini/agy don't share.
-# Disable it for the duration of the benchmark; regular bin/audit runs
-# keep memory on for cumulative learning.
-export CLAUDE_CODE_DISABLE_AUTO_MEMORY="${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-1}"
+# Benchmark cells must compare backends on equal footing — cross-run
+# auto-memory (Claude Code's MEMORY.md/memory/*, Gemini CLI's save_memory)
+# injects prior-run notes into every spawned agent's context and saves new
+# ones back during the run. That gives a hidden run-to-run advantage (or,
+# when entries are stale, a hidden penalty) one backend would not share with
+# the others. The benchmark must always be correct, so it is hard-disabled
+# here for every backend with no opt-in; bin/audit defaults to the same but
+# accepts --enable-memory for cumulative learning. (See llm_apply_memory_policy.)
+llm_apply_memory_policy 0
 # Independent-validator gate on model-direct findings — default on; opt
 # out with --no-validate-findings or BENCHMARK_VALIDATE_FINDINGS=0 to see
 # raw filing volume rather than confirmed volume.
@@ -931,6 +932,14 @@ run_model_direct_cell() {
   sweep_marker="$(mark_cell_start_for_sweep "$cell_dir" "$target_root")"
 
   export IS_SANDBOX=1
+
+  # Benchmark always runs memory-off. For the gemini-cli dialect, stage a clean
+  # empty GEMINI_CLI_HOME under this cell's logs dir so the model-direct agent
+  # never reads/writes the global ~/.gemini/GEMINI.md. No-op for agy and
+  # non-gemini backends. (The harness condition goes through bin/audit, which
+  # stages its own.)
+  local LOGDIR="$out_dir/logs"
+  llm_stage_gemini_memory_home "$BACKEND" || exit 1
 
   local rc=0
   # cwd = out_dir (first add-dir), source granted via the target add-dir.

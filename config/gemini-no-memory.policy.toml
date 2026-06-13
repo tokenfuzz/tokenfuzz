@@ -1,0 +1,18 @@
+# Gemini CLI admin Policy Engine overlay — passed via `--admin-policy` when
+# TokenFuzz disables cross-run memory (the default). It denies the
+# `save_memory` tool, which otherwise writes durable user memory that later
+# sessions can auto-load — the same run-to-run poison vector the harness
+# disables for Claude Code and Codex.
+#
+# The Policy Engine is Gemini CLI's supported tool-gating mechanism; the
+# legacy `tools.exclude` / top-level `excludeTools` settings are deprecated
+# for this purpose. Admin tier (loaded via --admin-policy) outranks user and
+# workspace settings, so an operator's own settings cannot re-enable the tool.
+# Background extraction (experimental.autoMemory) is a separate setting that
+# defaults to false; see docs/reference/commands.md.
+
+[[rule]]
+toolName = "save_memory"
+decision = "deny"
+priority = 999
+denyMessage = "Cross-run memory is disabled by TokenFuzz (run bin/audit --enable-memory to allow it)."

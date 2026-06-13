@@ -117,6 +117,65 @@ Notes:
   Set `USE_GEMINI_CLI=1` to use Google Gemini CLI instead; then
   `--model` is forwarded to `gemini`.
 
+### Cross-run memory is off by default
+
+Every supported backend can build up its own *cross-run memory* — notes it
+saves from one run and silently reloads into later ones. That is dangerous for
+an audit: the memory is cumulative, so one wrong note ("this code is already
+saturated", "not reachable") quietly steers **every future run** on that
+target. Exactly that has happened — a stale "saturated" note walked an audit
+straight past a real, reproducible bug. The danger is two-sided: a backend
+*reads* its prior notes into context, and *writes* new ones — so a real off
+switch has to close both directions.
+
+So the harness turns cross-run memory **off by default**. There is one control,
+a single flag — no environment variables to set:
+
+```bash
+bin/audit --target "$TARGET" --backend "$BACKEND" --enable-memory
+```
+
+`--enable-memory` opts back in (for cumulative learning across runs). Otherwise
+the harness applies the right per-backend "off" control for you:
+
+| Backend | Cross-run memory it keeps | What the harness does by default |
+| --- | --- | --- |
+| `claude` | `MEMORY.md` + `memory/*.md`, auto-recalled into context and auto-saved mid-run | sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (Claude Code's own off switch) |
+| `codex` / `oss` | learned memories under `~/.codex/memories/`, reloaded into context and regenerated | passes `-c features.memories=false -c memories.use_memories=false -c memories.generate_memories=false` |
+| `gemini` with `USE_GEMINI_CLI=1` (Google Gemini CLI) | global `~/.gemini/GEMINI.md` plus private project memory under Gemini's user storage, loaded into later sessions and writable by memory commands or direct file edits | runs the CLI under a clean, **empty** per-run `GEMINI_CLI_HOME` (staged at `$LOGDIR/.gemini-home`, no `GEMINI.md`, no state, no credential files) so nothing is read or written; auth rides on the `GEMINI_API_KEY` the harness forwards. An `--admin-policy` denying `save_memory` stays as a backstop |
+| `gemini` default (`agy` / Antigravity CLI) | persistent Antigravity CLI state under `~/.gemini/antigravity-cli` (`brain/`, `implicit/`, conversations, logs) | nothing automatic — `agy` exposes no documented memory-off flag or auth-preserving isolated home/profile switch in headless `-p`; naive `HOME` relocation creates fresh state but breaks auth (a false "successful" empty run). Use `USE_GEMINI_CLI=1` when strict Gemini memory isolation is required |
+
+Every row was confirmed by **running the CLI**, not just reading its docs: with
+memory on, the model recalls a planted fact; with the harness's control
+applied, it does not. For Gemini CLI in particular, denying `save_memory` alone
+was *not* enough — the global memory is loaded regardless of tool policy and the
+model can write it directly, and no flag or setting disables that load. So the
+harness relocates the home to an empty per-run directory: a planted fact in the
+real `~/.gemini/GEMINI.md` is then not recalled, while the forwarded
+`GEMINI_API_KEY` keeps the empty home authenticated. Because the empty home has
+no credential files, an API key is the only way it can authenticate, so the
+harness checks for one up front: with `USE_GEMINI_CLI=1` and memory off, a run
+that has neither `GEMINI_API_KEY` nor `GOOGLE_API_KEY` set **fails immediately**
+with a clear message rather than silently falling back to the operator's global
+home. Operators who use file-based (OAuth) Gemini CLI auth must export an API
+key for memory-off runs, use the default `agy` backend, or pass
+`--enable-memory` to opt back in.
+
+This affects only the *learned, cross-run* channel. Your project instructions —
+`AGENTS.md` and a project `GEMINI.md` — are the intended audit contract and are
+never touched.
+
+If you turn memory back on, **watch the memory files and prune stale entries**:
+Claude Code stores them under `~/.claude/projects/<slugified-cwd>/memory/` (one
+fact per file, indexed by `MEMORY.md`) and Codex under `~/.codex/memories/`.
+Delete any note claiming a target is "clean", "saturated", or "not reachable"
+unless you have re-confirmed it — those are the ones that suppress future
+findings.
+
+`bin/benchmark` always keeps memory off (so backends compare from a clean
+slate) and has no opt-in. Gemini CLI memory-off runs without an env API key fail
+early as described above; otherwise the effect is only the memory default.
+
 Results are written under:
 
 ```bash

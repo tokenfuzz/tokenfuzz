@@ -43,20 +43,41 @@ CLI subcommands (used by the bash shim — `python3 lib/llm_invoke.py …`):
       to stdout. Per-backend: claude (.message.content[].text, with
       .result as fallback only), codex (item.completed/agent_message),
       gemini (agy plain stdout, or Gemini CLI stream-json assistant text).
+
+  gemini-isolated-home
+      Stage (when cross-run memory is off and USE_GEMINI_CLI=1) a throwaway
+      Gemini CLI home that excludes the global GEMINI.md, and print its path
+      for the bash entry point to export as GEMINI_CLI_HOME. Prints nothing
+      when isolation does not apply.
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
-try:
-    import tomllib  # py3.11+
-except ModuleNotFoundError:
-    import tomli as tomllib  # py3.9/3.10 fallback (already vendored, as target.toml uses)
+
+def _load_tomllib():
+    """Import tomllib lazily, so only the TOML-reading subcommands depend on it.
+
+    Kept out of module import on purpose: gemini-isolated-home / known-backend /
+    agent-flags etc. need no TOML, and a too-old python without tomllib AND
+    without the tomli fallback must NOT take the whole module — and with it the
+    memory-isolation staging — down. The few callers that read config/models.toml
+    (default-model) get a clear ImportError here instead.
+    """
+    try:
+        import tomllib  # py3.11+
+        return tomllib
+    except ModuleNotFoundError:
+        import tomli  # py3.9/3.10 fallback (already vendored, as target.toml uses)
+        return tomli
 
 
 _KNOWN_BACKENDS = ("claude", "codex", "oss", "gemini")
@@ -78,7 +99,7 @@ _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.toml"
 def _config_models() -> dict:
     """Return the [models] table from config/models.toml as {backend: model}."""
     with open(_CONFIG_PATH, "rb") as fh:
-        return tomllib.load(fh).get("models", {})
+        return _load_tomllib().load(fh).get("models", {})
 
 
 def known_backend(backend: str) -> bool:
@@ -92,6 +113,201 @@ def use_gemini_cli() -> bool:
 
 def gemini_default_bin() -> str:
     return "gemini" if use_gemini_cli() else "agy"
+
+
+def memory_enabled() -> bool:
+    """Cross-run backend auto-memory is OFF unless TOKENFUZZ_MEMORY_ENABLED=1.
+
+    Default-off (unset / empty / anything but "1") so every flag builder
+    injects the per-backend disable controls automatically — no entry point
+    can forget to. bin/audit's --enable-memory exports it as 1; bin/benchmark
+    always leaves it off. See lib/llm_invoke.sh:llm_apply_memory_policy.
+    """
+    return os.environ.get("TOKENFUZZ_MEMORY_ENABLED", "").strip() == "1"
+
+
+def gemini_memory_policy_path() -> str:
+    """Absolute path to the Gemini CLI admin policy that denies save_memory."""
+    return str(_CONFIG_PATH.parent / "gemini-no-memory.policy.toml")
+
+
+# Marker file that identifies a TokenFuzz-staged GEMINI_CLI_HOME, so a child
+# process that inherits the exported GEMINI_CLI_HOME reuses it instead of
+# wiping and re-staging it mid-run.
+_GEMINI_ISOLATION_MARKER = ".tokenfuzz-memory-isolated"
+
+# Cache the staged isolated home for the lifetime of one process so repeated
+# memory_env("gemini") calls reuse the one staged dir.
+_gemini_iso_home: "str | None" = None
+
+
+def _is_tokenfuzz_gemini_home(path: str) -> bool:
+    if not path:
+        return False
+    return (Path(path) / ".gemini" / _GEMINI_ISOLATION_MARKER).exists()
+
+
+def _same_path(a: str, b) -> bool:
+    """True when two paths resolve to the same location.
+
+    Ignores `//`, trailing slashes, and symlinks so an inherited GEMINI_CLI_HOME
+    string compares equal to this run's freshly built Path. The desired path may
+    not exist yet — realpath then just normalizes lexically, which is what we
+    want for the equality test.
+    """
+    if not a or not b:
+        return False
+    try:
+        return os.path.realpath(a) == os.path.realpath(os.fspath(b))
+    except (OSError, ValueError):
+        return False
+
+
+def _stage_clean_gemini_home(iso_root: Path) -> None:
+    """Wipe and recreate an empty staged Gemini CLI home at iso_root.
+
+    Wiping first means a stale throwaway GEMINI.md from a prior (e.g. killed)
+    run under the same $LOGDIR cannot be read back on resume.
+    """
+    if iso_root.exists():
+        shutil.rmtree(iso_root)
+    if iso_root.exists():
+        raise OSError(f"failed to remove stale Gemini CLI home: {iso_root}")
+    iso_gemini = iso_root / ".gemini"
+    iso_gemini.mkdir(parents=True, exist_ok=True)
+    (iso_gemini / _GEMINI_ISOLATION_MARKER).write_text(
+        "TokenFuzz staged this empty Gemini CLI home to disable cross-run memory.\n",
+        encoding="utf-8",
+    )
+    _verify_clean_gemini_home(iso_root)
+
+
+def _verify_clean_gemini_home(iso_root: Path) -> None:
+    """Fail unless iso_root is exactly the empty home TokenFuzz expects."""
+    iso_gemini = iso_root / ".gemini"
+    top_names = sorted(p.name for p in iso_root.iterdir())
+    if top_names != [".gemini"] or not iso_gemini.is_dir() or iso_gemini.is_symlink():
+        raise OSError(f"Gemini CLI home is not clean: {iso_root}")
+    gemini_entries = sorted(p.name for p in iso_gemini.iterdir())
+    marker = iso_gemini / _GEMINI_ISOLATION_MARKER
+    if gemini_entries != [_GEMINI_ISOLATION_MARKER] or not marker.is_file() or marker.is_symlink():
+        raise OSError(f"Gemini CLI .gemini directory is not clean: {iso_gemini}")
+
+
+def prepare_gemini_memory_isolation() -> "str | None":
+    """Relocate GEMINI_CLI_HOME to a clean, empty per-run home and return it.
+
+    Denying the save_memory tool does NOT isolate Gemini CLI's cross-run
+    memory: the global ~/.gemini/GEMINI.md is auto-loaded as context on every
+    run regardless of tool policy, and write_file/replace can append to memory
+    files without going through save_memory. Settings (context.fileName,
+    loadMemoryFromIncludeDirectories, discoveryMaxDirs) do not gate the global
+    load either — all verified by running the CLI. The only lever Gemini CLI
+    exposes is GEMINI_CLI_HOME, which overrides the dir it derives its global
+    .gemini from. We point it at a clean, EMPTY home: no GEMINI.md, no
+    project-memory dir, no history — nothing to read and nothing to write back
+    into the operator's real home.
+
+    Authentication rides on the GEMINI_API_KEY / GOOGLE_API_KEY env the harness
+    already forwards, so the empty home needs no credential files (verified: an
+    empty home authenticates and recalls no planted memory). Operators who use
+    file-based (OAuth) Gemini CLI auth must export an API key for memory-off
+    runs, or use the default agy backend; that surfaces as a loud preflight
+    auth error, never as silent memory leakage.
+
+    Location: under $LOGDIR (the run's own output tree) when set, so the home is
+    wiped fresh each run, cleaned with the run's artifacts, and never litters
+    /tmp. Standalone callers with no $LOGDIR get a throwaway removed at process
+    exit. Returns the home path, or None when isolation does not apply (memory
+    enabled, not the Gemini CLI dialect) or it cannot be staged.
+
+    Reuse is keyed to THIS run's home ($LOGDIR/.gemini-home): an inherited or
+    cached GEMINI_CLI_HOME is reused (not re-wiped) only when it resolves to the
+    same path — so parallel agents and the llm_decide subprocess in ONE run
+    share the single staged home, while a later run or a sequential benchmark
+    cell with a different $LOGDIR stages its own clean home instead of
+    inheriting the previous one's (which would leak that run's memory).
+    """
+    global _gemini_iso_home
+    if memory_enabled() or not use_gemini_cli():
+        return None
+    existing = os.environ.get("GEMINI_CLI_HOME", "").strip()
+    logdir = os.environ.get("LOGDIR", "").strip()
+    if logdir:
+        desired = Path(logdir) / ".gemini-home"
+        # Reuse ONLY when the inherited/cached home is this run's home; a
+        # mismatch belongs to a different run/cell and must not be reused.
+        if existing and _same_path(existing, desired) and _is_tokenfuzz_gemini_home(existing):
+            _gemini_iso_home = str(desired)
+            return _gemini_iso_home
+        if _gemini_iso_home is not None and _same_path(_gemini_iso_home, desired):
+            return _gemini_iso_home
+        try:
+            _stage_clean_gemini_home(desired)
+        except OSError:
+            return None
+        _gemini_iso_home = str(desired)
+        return _gemini_iso_home
+    # No $LOGDIR (standalone caller): there is no per-run path to key on, so an
+    # inherited marked home or the in-process cache is reused; otherwise a
+    # throwaway removed at process exit.
+    if existing and _is_tokenfuzz_gemini_home(existing):
+        return existing
+    if _gemini_iso_home is not None:
+        return _gemini_iso_home
+    try:
+        iso_root = Path(tempfile.mkdtemp(prefix="tokenfuzz-gemini-home-"))
+        atexit.register(shutil.rmtree, iso_root, ignore_errors=True)
+        _stage_clean_gemini_home(iso_root)
+    except OSError:
+        return None
+    _gemini_iso_home = str(iso_root)
+    return _gemini_iso_home
+
+
+def memory_env(backend: str) -> dict:
+    """Environment overrides that disable cross-run memory for <backend>.
+
+    Empty when memory is enabled, or when the backend needs no env-level
+    control — codex/oss disable memory through `-c` flags in agent_flags /
+    decide_flags, and headless agy has no auth-preserving home/profile
+    isolation wired here. Apply this on top of the child env at every launch
+    site (lib/llm_decide.py's subprocess, and lib/llm_invoke.sh's agent
+    launchers via llm_apply_memory_policy) so even standalone llm_decide tools
+    get the same isolation bin/audit gets.
+
+      claude  CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 — claude reads this env var
+              directly; there is no launch flag for it.
+      gemini  (Google Gemini CLI only) GEMINI_CLI_HOME -> an isolated home that
+              excludes the global GEMINI.md (see prepare_gemini_memory_isolation).
+    """
+    if memory_enabled():
+        return {}
+    if backend == "claude":
+        return {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+    if backend == "gemini" and use_gemini_cli():
+        home = prepare_gemini_memory_isolation()
+        if home:
+            return {"GEMINI_CLI_HOME": home}
+    return {}
+
+
+# Codex/oss memory-disable controls, added to the flag list when memory is
+# disabled. All are `-c` config overrides rather than `--disable memories`:
+# an unknown `-c` key is accepted and ignored on any Codex version, whereas
+# `--disable <feature>` hard-errors when the feature name is unknown, which
+# would break the run on a Codex build without the experimental feature.
+#   features.memories=false          turn the memories feature off entirely
+#   memories.use_memories=false      don't read ~/.codex/memories into context
+#   memories.generate_memories=false don't write new cross-run memories
+# Codex stores learned memory under ~/.codex/memories/; without these a prior
+# run's notes are injected into every later session (docs:
+# https://developers.openai.com/codex/memories).
+_CODEX_MEMORY_OFF_FLAGS = [
+    "-c", "features.memories=false",
+    "-c", "memories.use_memories=false",
+    "-c", "memories.generate_memories=false",
+]
 
 
 def default_model(backend: str) -> str:
@@ -178,6 +394,8 @@ def agent_flags(
             flags += ["--cd", dirs[0]]
             for d in dirs[1:]:
                 flags += ["--add-dir", d]
+        if not memory_enabled():
+            flags += _CODEX_MEMORY_OFF_FLAGS
         if backend == "oss":
             flags = ["--oss", "--local-provider", "ollama", *flags]
         return flags
@@ -192,6 +410,18 @@ def agent_flags(
             flags = ["--approval-mode=yolo", "--skip-trust", "--output-format", "stream-json"]
             if resolved_model:
                 flags += ["--model", resolved_model]
+            # Deny the save_memory tool at the admin policy tier as
+            # defence-in-depth. This alone is NOT sufficient isolation — the
+            # global ~/.gemini/GEMINI.md is auto-loaded regardless of tool
+            # policy, and write_file/replace can append to it without touching
+            # save_memory. The actual read+write isolation comes from
+            # GEMINI_CLI_HOME relocation (memory_env / prepare_gemini_memory_isolation),
+            # exported by the entry point's llm_apply_memory_policy and applied
+            # to the subprocess env in lib/llm_decide.py. The deny stays as a
+            # cheap explicit block on the one tool whose whole job is writing
+            # cross-run memory.
+            if not memory_enabled():
+                flags += ["--admin-policy", gemini_memory_policy_path()]
             for d in (add_dirs or "").split(","):
                 d = d.strip()
                 if d:
@@ -240,6 +470,8 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         flags = ["--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only"]
         if resolved_model:
             flags += ["--model", resolved_model]
+        if not memory_enabled():
+            flags += _CODEX_MEMORY_OFF_FLAGS
         if backend == "oss":
             flags = ["--oss", "--local-provider", "ollama", *flags]
         return flags
@@ -251,6 +483,10 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
             flags = ["--approval-mode=plan", "--skip-trust"]
             if resolved_model:
                 flags += ["--model", resolved_model]
+            # Deny save_memory even here, so the no-write contract holds
+            # regardless of plan-mode tool gating (see agent_flags).
+            if not memory_enabled():
+                flags += ["--admin-policy", gemini_memory_policy_path()]
             return flags
 
         # Antigravity CLI (agy) decide mode: --print emits plain text.
@@ -468,6 +704,16 @@ def _cmd_extract_text(args) -> int:
         return 1
 
 
+def _cmd_gemini_isolated_home(_args) -> int:
+    # Stage the isolated Gemini CLI home (when memory is off and USE_GEMINI_CLI=1)
+    # and print its path so the bash entry point can export GEMINI_CLI_HOME.
+    # Prints nothing when isolation does not apply.
+    home = prepare_gemini_memory_isolation()
+    if home:
+        sys.stdout.write(home + "\n")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="llm_invoke")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -496,6 +742,9 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("backend")
     s.add_argument("raw_log")
     s.set_defaults(func=_cmd_extract_text)
+
+    s = sub.add_parser("gemini-isolated-home")
+    s.set_defaults(func=_cmd_gemini_isolated_home)
 
     return p
 

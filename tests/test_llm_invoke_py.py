@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,9 @@ HELPER = ROOT / "lib" / "llm_invoke.py"
 # test process insulated from a developer shell that happens to export the
 # Gemini CLI switch.
 os.environ.pop("USE_GEMINI_CLI", None)
+# Cross-run memory defaults to OFF when the switch is unset; clear any
+# developer-shell value so the default-off assertions are deterministic.
+os.environ.pop("TOKENFUZZ_MEMORY_ENABLED", None)
 for key in (
     "CLAUDE_MODEL_DEFAULT",
     "CODEX_MODEL_DEFAULT",
@@ -339,6 +343,174 @@ ok(agent_codex[agent_codex.index("--add-dir") + 1] == "/y",
 agent_claude = inv.agent_flags("claude", max_turns=120)
 ok(agent_claude[agent_claude.index("--max-turns") + 1] == "120",
    "max_turns kwarg threaded through claude flag list")
+
+
+# ── cross-run memory policy (TOKENFUZZ_MEMORY_ENABLED) ──────────────
+print("\nmemory policy")
+# Default (switch unset → memory OFF): codex/oss get the memory-off config
+# overrides on both agent and decide flags; Gemini CLI gets the deny-save_memory
+# admin policy; claude carries no memory flag (it is env-driven).
+os.environ.pop("TOKENFUZZ_MEMORY_ENABLED", None)
+for be in ("codex", "oss"):
+    for builder in (inv.agent_flags, inv.decide_flags):
+        fl = builder(be)
+        ok("features.memories=false" in fl,
+           f"{be}.{builder.__name__} disables the memories feature by default", fl)
+        ok("memories.use_memories=false" in fl,
+           f"{be}.{builder.__name__} disables memory reads by default")
+        ok("memories.generate_memories=false" in fl,
+           f"{be}.{builder.__name__} disables memory writes by default")
+
+os.environ["USE_GEMINI_CLI"] = "1"
+gem_agent = inv.agent_flags("gemini")
+ok("--admin-policy" in gem_agent,
+   "Gemini CLI agent denies save_memory via --admin-policy by default", gem_agent)
+pol = gem_agent[gem_agent.index("--admin-policy") + 1]
+ok(pol.endswith("config/gemini-no-memory.policy.toml"),
+   "admin-policy points at the shipped policy file", pol)
+ok(Path(pol).is_file(), "the admin policy file exists on disk", pol)
+ok("save_memory" in Path(pol).read_text(), "the policy file names the save_memory tool")
+ok("--admin-policy" in inv.decide_flags("gemini"),
+   "Gemini CLI decide also denies save_memory by default")
+os.environ.pop("USE_GEMINI_CLI", None)
+
+ok(not any("memor" in x.lower() for x in inv.agent_flags("claude")),
+   "claude agent flags carry no memory flag (env-driven)")
+
+# --enable-memory (switch=1): every per-backend memory disable disappears.
+os.environ["TOKENFUZZ_MEMORY_ENABLED"] = "1"
+for be in ("codex", "oss"):
+    for builder in (inv.agent_flags, inv.decide_flags):
+        fl = builder(be)
+        ok(not any("memories" in x for x in fl),
+           f"{be}.{builder.__name__} omits memory flags when memory enabled", fl)
+os.environ["USE_GEMINI_CLI"] = "1"
+ok("--admin-policy" not in inv.agent_flags("gemini"),
+   "Gemini CLI agent omits admin-policy when memory enabled")
+ok("--admin-policy" not in inv.decide_flags("gemini"),
+   "Gemini CLI decide omits admin-policy when memory enabled")
+os.environ.pop("USE_GEMINI_CLI", None)
+os.environ.pop("TOKENFUZZ_MEMORY_ENABLED", None)
+
+
+# ── memory_env: env-level disable controls (claude + Gemini CLI home) ──
+print("\nmemory_env")
+# Reset the per-process isolated-home cache so each case stages fresh.
+inv._gemini_iso_home = None
+os.environ.pop("TOKENFUZZ_MEMORY_ENABLED", None)
+os.environ.pop("USE_GEMINI_CLI", None)
+os.environ.pop("GEMINI_CLI_HOME", None)
+
+# Default (memory off): claude gets the disable env var; codex/oss none (they
+# disable via -c flags); agy-dialect gemini none (no auth-preserving isolation
+# mechanism is wired for Antigravity CLI).
+ok(inv.memory_env("claude") == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
+   "claude memory_env sets CLAUDE_CODE_DISABLE_AUTO_MEMORY by default")
+ok(inv.memory_env("codex") == {} and inv.memory_env("oss") == {},
+   "codex/oss memory_env is empty (disabled via -c flags, not env)")
+ok(inv.memory_env("gemini") == {},
+   "agy-dialect gemini memory_env is empty (no auth-preserving relocation)")
+
+# Gemini CLI dialect: memory_env relocates GEMINI_CLI_HOME to a CLEAN, EMPTY
+# per-run home — a .gemini/ holding only the TokenFuzz marker, no GEMINI.md and
+# no other state. There is nothing to read (no cross-run memory) and no
+# credential files (auth rides on the GEMINI_API_KEY env the harness forwards).
+os.environ["USE_GEMINI_CLI"] = "1"
+gem_logdir = tempfile.mkdtemp()
+os.environ["LOGDIR"] = gem_logdir
+inv._gemini_iso_home = None
+gem_env = inv.memory_env("gemini")
+ok(list(gem_env) == ["GEMINI_CLI_HOME"],
+   "Gemini CLI memory_env relocates GEMINI_CLI_HOME", gem_env)
+iso_home = gem_env["GEMINI_CLI_HOME"]
+iso_gemini = Path(iso_home) / ".gemini"
+ok(iso_home == str(Path(gem_logdir) / ".gemini-home"),
+   "isolated home lives under $LOGDIR (run output tree, not /tmp)", iso_home)
+ok(iso_gemini.is_dir(), "isolated home has a .gemini directory", iso_home)
+ok(not (iso_gemini / "GEMINI.md").exists(),
+   "isolated home excludes the global GEMINI.md (no cross-run memory read)")
+ok(sorted(os.listdir(iso_gemini)) == [inv._GEMINI_ISOLATION_MARKER],
+   "isolated .gemini holds only the marker — empty, no symlinks, no creds",
+   sorted(os.listdir(iso_gemini)))
+ok(not any((iso_gemini / e).is_symlink() for e in os.listdir(iso_gemini)),
+   "isolated home contains no symlinks (no credentials placed on disk)")
+ok(inv.memory_env("gemini")["GEMINI_CLI_HOME"] == iso_home,
+   "isolated home is cached per process (no leak of a dir per call)")
+
+# Re-staging (a fresh run reusing the same $LOGDIR) wipes a stale throwaway
+# GEMINI.md so a killed run's memory can't be read back on resume.
+(iso_gemini / "GEMINI.md").write_text("STALE\n")
+inv._gemini_iso_home = None
+restaged = Path(inv.prepare_gemini_memory_isolation())
+ok(not (restaged / ".gemini" / "GEMINI.md").exists(),
+   "re-staging wipes a stale GEMINI.md from a prior run under the same $LOGDIR")
+
+# If cleanup fails to remove an old staged home, do not return a dirty home with
+# stale memory still present. Simulate a pathological rmtree that silently leaves
+# the old tree behind; verification must fail closed.
+dirty_logdir = tempfile.mkdtemp()
+dirty_home = Path(dirty_logdir) / ".gemini-home"
+dirty_gemini = dirty_home / ".gemini"
+dirty_gemini.mkdir(parents=True)
+(dirty_gemini / inv._GEMINI_ISOLATION_MARKER).write_text("old marker\n")
+(dirty_gemini / "GEMINI.md").write_text("STALE\n")
+os.environ["LOGDIR"] = dirty_logdir
+inv._gemini_iso_home = None
+real_rmtree = inv.shutil.rmtree
+try:
+    inv.shutil.rmtree = lambda *args, **kwargs: None
+    ok(inv.prepare_gemini_memory_isolation() is None,
+       "failed cleanup returns no Gemini home rather than reusing stale memory")
+finally:
+    inv.shutil.rmtree = real_rmtree
+    shutil.rmtree(dirty_logdir, ignore_errors=True)
+os.environ["LOGDIR"] = gem_logdir
+
+# An inherited TokenFuzz-staged home matching THIS run's $LOGDIR/.gemini-home is
+# reused as-is, so parallel agents / the llm_decide subprocess in one run share
+# the single staged home rather than racing to re-wipe it.
+os.environ["GEMINI_CLI_HOME"] = iso_home
+inv._gemini_iso_home = None
+ok(inv.prepare_gemini_memory_isolation() == iso_home,
+   "an inherited GEMINI_CLI_HOME matching this run's $LOGDIR is reused without re-wiping")
+
+# But an inherited home from a DIFFERENT run/cell (its $LOGDIR ≠ this one) must
+# NOT be reused — that would leak the prior cell's memory. With cell A's home
+# (carrying planted memory) still exported, switching $LOGDIR to cell B stages a
+# fresh clean home under B, not A's.
+(Path(iso_home) / ".gemini" / "GEMINI.md").write_text("STALE A MEMORY\n")
+gem_logdir_b = tempfile.mkdtemp()
+os.environ["LOGDIR"] = gem_logdir_b           # cell B
+os.environ["GEMINI_CLI_HOME"] = iso_home      # still A's, inherited in-shell
+inv._gemini_iso_home = None
+home_b = inv.prepare_gemini_memory_isolation()
+ok(home_b == str(Path(gem_logdir_b) / ".gemini-home") and home_b != iso_home,
+   "a different $LOGDIR stages its own home, not the inherited prior-cell one", home_b)
+ok(not (Path(home_b) / ".gemini" / "GEMINI.md").exists(),
+   "the new cell's home is clean (prior cell's planted memory does not leak in)")
+os.environ["LOGDIR"] = gem_logdir
+os.environ.pop("GEMINI_CLI_HOME", None)
+shutil.rmtree(gem_logdir_b, ignore_errors=True)
+shutil.rmtree(gem_logdir, ignore_errors=True)
+
+# No $LOGDIR (standalone caller): falls back to a throwaway dir, still empty.
+os.environ.pop("LOGDIR", None)
+inv._gemini_iso_home = None
+fallback = Path(inv.prepare_gemini_memory_isolation())
+ok((fallback / ".gemini").is_dir() and not (fallback / ".gemini" / "GEMINI.md").exists(),
+   "no-$LOGDIR fallback stages a clean empty home")
+shutil.rmtree(fallback, ignore_errors=True)
+
+# Memory enabled: no env overrides for any backend.
+os.environ["TOKENFUZZ_MEMORY_ENABLED"] = "1"
+inv._gemini_iso_home = None
+ok(inv.memory_env("claude") == {}, "claude memory_env empty when memory enabled")
+ok(inv.memory_env("gemini") == {}, "Gemini CLI memory_env empty when memory enabled")
+ok(inv.prepare_gemini_memory_isolation() is None,
+   "no isolated home staged when memory enabled")
+os.environ.pop("USE_GEMINI_CLI", None)
+os.environ.pop("TOKENFUZZ_MEMORY_ENABLED", None)
+inv._gemini_iso_home = None
 
 
 # ── config/models.toml ──────────────────────────────────────────────

@@ -292,6 +292,68 @@ else
 fi
 unset ACTIVE_BACKEND USE_GEMINI_CLI GEMINI_BIN FAKE_GEMINI_CLI_ARGS LLM_DECIDE_COUNTER_FILE
 
+# 11c. Cross-run memory is disabled at the ENV level for the claude subprocess
+#      llm_decide launches — covers standalone tools (bin/setup-target,
+#      bin/suggest-*) that import llm_decide without going through a bash entry
+#      point's llm_apply_memory_policy. The fake claude echoes the env var it
+#      was launched with.
+fake_claude_mem="$TEST_TMPDIR/fake-claude-mem"
+cat > "$fake_claude_mem" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-UNSET}" > "$FAKE_CLAUDE_MEM_ENV"
+cat >/dev/null
+printf '{"keep":true,"reason":"claude-mem"}\n'
+EOF
+chmod +x "$fake_claude_mem"
+unset rc LLM_DECIDE_DISABLE TOKENFUZZ_MEMORY_ENABLED CLAUDE_CODE_DISABLE_AUTO_MEMORY
+export ACTIVE_BACKEND=claude
+export CLAUDE_BIN="$fake_claude_mem"
+export FAKE_CLAUDE_MEM_ENV="$TEST_TMPDIR/fake-claude-mem.env"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-claude-mem"
+out=$(echo "x" | llm_decide demo "keep,reason" 2)
+assert_eq "0" "$?" "claude memory: llm_decide succeeds through fake claude"
+assert_eq "1" "$(cat "$FAKE_CLAUDE_MEM_ENV")" \
+  "claude memory: subprocess sees CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 by default"
+# --enable-memory (TOKENFUZZ_MEMORY_ENABLED=1): the disable env is NOT forced on.
+export TOKENFUZZ_MEMORY_ENABLED=1
+out=$(echo "x" | llm_decide demo "keep,reason" 2)
+assert_eq "UNSET" "$(cat "$FAKE_CLAUDE_MEM_ENV")" \
+  "claude memory: --enable-memory leaves CLAUDE_CODE_DISABLE_AUTO_MEMORY unset"
+unset TOKENFUZZ_MEMORY_ENABLED ACTIVE_BACKEND CLAUDE_BIN FAKE_CLAUDE_MEM_ENV LLM_DECIDE_COUNTER_FILE
+
+# 11d. The Gemini CLI subprocess is launched with GEMINI_CLI_HOME relocated to
+#      a throwaway home that excludes the global GEMINI.md — read+write
+#      isolation, since denying save_memory alone does not stop the auto-load
+#      of ~/.gemini/GEMINI.md nor write_file appends to it.
+fake_gemini_mem="$TEST_TMPDIR/fake-gemini-mem"
+cat > "$fake_gemini_mem" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${GEMINI_CLI_HOME:-UNSET}" > "$FAKE_GEMINI_MEM_ENV"
+cat >/dev/null
+printf '{"keep":true,"reason":"gemini-mem"}\n'
+EOF
+chmod +x "$fake_gemini_mem"
+unset rc LLM_DECIDE_DISABLE TOKENFUZZ_MEMORY_ENABLED GEMINI_CLI_HOME
+export ACTIVE_BACKEND=gemini USE_GEMINI_CLI=1
+export GEMINI_BIN="$fake_gemini_mem"
+export FAKE_GEMINI_MEM_ENV="$TEST_TMPDIR/fake-gemini-mem.env"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-gemini-mem"
+out=$(echo "x" | llm_decide demo "keep,reason" 2)
+assert_eq "0" "$?" "gemini memory: llm_decide succeeds through fake Gemini CLI"
+gem_home_used="$(cat "$FAKE_GEMINI_MEM_ENV")"
+if [ "$gem_home_used" != "UNSET" ] && [ -d "$gem_home_used/.gemini" ] \
+   && [ -e "$gem_home_used/.gemini/.tokenfuzz-memory-isolated" ] \
+   && [ ! -e "$gem_home_used/.gemini/GEMINI.md" ] \
+   && [ ! -e "$gem_home_used/.gemini/tmp" ]; then
+  pass "gemini memory: subprocess GEMINI_CLI_HOME relocated without memory state"
+else
+  fail "gemini memory: subprocess GEMINI_CLI_HOME relocated without memory state" \
+    "got: $gem_home_used"
+fi
+# Clean up the throwaway isolated home this test staged.
+[ "$gem_home_used" != "UNSET" ] && [ -d "$gem_home_used" ] && rm -rf "$gem_home_used"
+unset ACTIVE_BACKEND USE_GEMINI_CLI GEMINI_BIN FAKE_GEMINI_MEM_ENV LLM_DECIDE_COUNTER_FILE
+
 # 12. Empty prompt → rc=1
 unset rc
 out=$(echo -n "" | llm_decide demo "" 2 2>/dev/null) || rc=$?

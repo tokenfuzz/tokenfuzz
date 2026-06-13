@@ -17,12 +17,16 @@
 #      gemini plain stdout).
 #   7. llm_extract_text returns empty on raw_log that has no
 #      assistant content, and returns rc=1 if raw_log is missing.
+#   8. llm_apply_memory_policy exports the cross-run memory switch
+#      (TOKENFUZZ_MEMORY_ENABLED) + the claude env var: off by default,
+#      inherits a parent's switch when called with no argument, and
+#      re-enables on explicit 1. The Gemini CLI deny policy ships in config/.
 
 set -uo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$TESTS_DIR/helpers.sh"
-unset USE_GEMINI_CLI
+unset USE_GEMINI_CLI TOKENFUZZ_MEMORY_ENABLED
 unset CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT CODEX_OSS_MODEL_DEFAULT
 source "$SCRIPT_ROOT/lib/llm_invoke.sh"
 
@@ -299,6 +303,177 @@ if llm_extract_text claude "$TEST_TMPDIR/does-not-exist.log" 2>/dev/null; then
 else
   pass "extract returns non-zero on missing raw_log"
 fi
+
+# ── 8. llm_apply_memory_policy ───────────────────────────────────
+# The shipped Gemini CLI deny-policy asset.
+gem_policy="$SCRIPT_ROOT/config/gemini-no-memory.policy.toml"
+assert_file_exists "$gem_policy" "gemini no-memory admin policy ships in config/"
+assert_file_contains "$gem_policy" "save_memory" "policy denies the save_memory tool"
+assert_file_contains "$gem_policy" 'decision = "deny"' "policy decision is deny"
+
+# Disabled (explicit 0): exports the switch off + claude env var on.
+(
+  unset CLAUDE_CODE_DISABLE_AUTO_MEMORY TOKENFUZZ_MEMORY_ENABLED
+  llm_apply_memory_policy 0
+  printf '%s\n%s\n' "${TOKENFUZZ_MEMORY_ENABLED:-UNSET}" \
+    "${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-UNSET}"
+) > "$TEST_TMPDIR/mem-off" 2>/dev/null
+assert_eq "0" "$(sed -n 1p "$TEST_TMPDIR/mem-off")" \
+  "memory off exports TOKENFUZZ_MEMORY_ENABLED=0"
+assert_eq "1" "$(sed -n 2p "$TEST_TMPDIR/mem-off")" \
+  "memory off sets CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"
+
+# No argument + no inherited switch ⇒ disabled (the default).
+(
+  unset CLAUDE_CODE_DISABLE_AUTO_MEMORY TOKENFUZZ_MEMORY_ENABLED
+  llm_apply_memory_policy
+  printf '%s\n' "${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-UNSET}"
+) > "$TEST_TMPDIR/mem-default" 2>/dev/null
+assert_eq "1" "$(cat "$TEST_TMPDIR/mem-default")" \
+  "memory policy disables by default with no argument and no inherited switch"
+
+# No argument INHERITS a parent's exported switch (sub-tool behaviour).
+(
+  export TOKENFUZZ_MEMORY_ENABLED=1
+  unset CLAUDE_CODE_DISABLE_AUTO_MEMORY
+  llm_apply_memory_policy
+  printf '%s\n%s\n' "${TOKENFUZZ_MEMORY_ENABLED:-UNSET}" \
+    "${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-UNSET}"
+) > "$TEST_TMPDIR/mem-inherit" 2>/dev/null
+assert_eq "1" "$(sed -n 1p "$TEST_TMPDIR/mem-inherit")" \
+  "no-arg inherits an enabled parent switch"
+assert_eq "UNSET" "$(sed -n 2p "$TEST_TMPDIR/mem-inherit")" \
+  "inherited-enabled keeps CLAUDE_CODE_DISABLE_AUTO_MEMORY unset"
+
+# Enabled (explicit 1, --enable-memory): switch on, claude disable cleared.
+(
+  export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+  unset TOKENFUZZ_MEMORY_ENABLED
+  llm_apply_memory_policy 1
+  printf '%s\n%s\n' "${TOKENFUZZ_MEMORY_ENABLED:-UNSET}" \
+    "${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-UNSET}"
+) > "$TEST_TMPDIR/mem-on" 2>/dev/null
+assert_eq "1" "$(sed -n 1p "$TEST_TMPDIR/mem-on")" \
+  "enable-memory exports TOKENFUZZ_MEMORY_ENABLED=1"
+assert_eq "UNSET" "$(sed -n 2p "$TEST_TMPDIR/mem-on")" \
+  "enable-memory unsets CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+
+# Staging is separate from the policy: llm_apply_memory_policy runs at startup
+# before $LOGDIR is known, so it sets only the claude env + switch and does NOT
+# relocate the gemini home.
+(
+  unset GEMINI_CLI_HOME
+  export USE_GEMINI_CLI=1
+  llm_apply_memory_policy 0
+  printf '%s\n' "${GEMINI_CLI_HOME:-UNSET}"
+) > "$TEST_TMPDIR/mem-policy-no-stage" 2>/dev/null
+assert_eq "UNSET" "$(cat "$TEST_TMPDIR/mem-policy-no-stage")" \
+  "llm_apply_memory_policy does not relocate the gemini home (staging is separate)"
+
+# llm_stage_gemini_memory_home (memory off + Gemini CLI dialect) stages a clean,
+# EMPTY home under $LOGDIR: a .gemini/ holding ONLY the marker — no GEMINI.md, no
+# symlinks, no credential files (auth rides on GEMINI_API_KEY).
+gem_logdir="$TEST_TMPDIR/gem-run-logs"
+mkdir -p "$gem_logdir"
+(
+  unset GEMINI_CLI_HOME TOKENFUZZ_MEMORY_ENABLED
+  export USE_GEMINI_CLI=1 LOGDIR="$gem_logdir" GEMINI_API_KEY=test-key
+  llm_apply_memory_policy 0
+  llm_stage_gemini_memory_home
+  printf '%s\n' "${GEMINI_CLI_HOME:-UNSET}"
+) > "$TEST_TMPDIR/mem-gem-cli" 2>/dev/null
+gem_home="$(cat "$TEST_TMPDIR/mem-gem-cli")"
+# -ef compares the resolved file (device+inode), so a // vs / or symlink
+# difference between the bash literal and Python's normalized Path doesn't
+# matter — the staged dir is the one under $LOGDIR.
+if [ "$gem_home" != "UNSET" ] && [ "$(basename "$gem_home")" = ".gemini-home" ] \
+   && [ "$gem_home" -ef "$gem_logdir/.gemini-home" ] \
+   && [ -d "$gem_home/.gemini" ] \
+   && [ -e "$gem_home/.gemini/.tokenfuzz-memory-isolated" ] \
+   && [ ! -e "$gem_home/.gemini/GEMINI.md" ] \
+   && [ "$(ls -A "$gem_home/.gemini")" = ".tokenfuzz-memory-isolated" ]; then
+  pass "memory off + Gemini CLI: clean empty GEMINI_CLI_HOME staged under \$LOGDIR"
+else
+  fail "memory off + Gemini CLI: clean empty GEMINI_CLI_HOME staged under \$LOGDIR" \
+    "got: $gem_home"
+fi
+
+# Disabled + agy dialect (USE_GEMINI_CLI unset): no relocation. Antigravity CLI
+# has persistent state under ~/.gemini/antigravity-cli/, but it exposes no
+# memory-off/profile flag and naive HOME relocation breaks auth (false
+# "successful" empty runs), so the harness leaves agy untouched. Use
+# USE_GEMINI_CLI=1 for strict Gemini memory isolation.
+(
+  unset GEMINI_CLI_HOME USE_GEMINI_CLI
+  export LOGDIR="$gem_logdir"
+  llm_stage_gemini_memory_home
+  printf '%s\n' "${GEMINI_CLI_HOME:-UNSET}"
+) > "$TEST_TMPDIR/mem-gem-agy" 2>/dev/null
+assert_eq "UNSET" "$(cat "$TEST_TMPDIR/mem-gem-agy")" \
+  "memory off + agy: no Gemini CLI home relocation (agy left untouched)"
+
+# A leaked USE_GEMINI_CLI=1 in the operator environment must not make
+# non-gemini backends require Gemini auth or stage a Gemini home. Entry points
+# pass the active backend so claude/codex/oss remain independent.
+(
+  unset GEMINI_CLI_HOME TOKENFUZZ_MEMORY_ENABLED GEMINI_API_KEY GOOGLE_API_KEY
+  export USE_GEMINI_CLI=1 LOGDIR="$TEST_TMPDIR/non-gemini/logs"
+  mkdir -p "$LOGDIR"
+  llm_apply_memory_policy 0
+  if llm_stage_gemini_memory_home claude 2>/dev/null; then
+    printf '%s\n' "RET0:${GEMINI_CLI_HOME:-UNSET}"
+  else
+    printf '%s\n' "FAILED:${GEMINI_CLI_HOME:-UNSET}"
+  fi
+) > "$TEST_TMPDIR/mem-non-gemini-leaked-switch"
+assert_eq "RET0:UNSET" "$(cat "$TEST_TMPDIR/mem-non-gemini-leaked-switch")" \
+  "USE_GEMINI_CLI leaked in env does not make non-gemini backends require Gemini auth"
+
+# Sequential cells with DIFFERENT $LOGDIR in one shell (bin/benchmark's
+# model-direct cells) must each get their own clean home: cell B must NOT
+# inherit cell A's already-exported GEMINI_CLI_HOME (that would leak cell A's
+# memory into cell B). Plant memory in A, then stage B and assert B is a
+# distinct, clean home under B's logdir.
+(
+  unset GEMINI_CLI_HOME TOKENFUZZ_MEMORY_ENABLED
+  export USE_GEMINI_CLI=1 GEMINI_API_KEY=test-key
+  llm_apply_memory_policy 0
+  export LOGDIR="$TEST_TMPDIR/cell-a/logs"; mkdir -p "$LOGDIR"
+  llm_stage_gemini_memory_home gemini
+  printf '%s' "$GEMINI_CLI_HOME" > "$TEST_TMPDIR/cell-a-home"
+  printf 'STALE A MEMORY\n' > "$GEMINI_CLI_HOME/.gemini/GEMINI.md"
+  # Cell B: new logdir, same shell, A's GEMINI_CLI_HOME still exported.
+  export LOGDIR="$TEST_TMPDIR/cell-b/logs"; mkdir -p "$LOGDIR"
+  llm_stage_gemini_memory_home gemini
+  printf '%s' "$GEMINI_CLI_HOME" > "$TEST_TMPDIR/cell-b-home"
+) 2>/dev/null
+cell_a_home="$(cat "$TEST_TMPDIR/cell-a-home")"
+cell_b_home="$(cat "$TEST_TMPDIR/cell-b-home")"
+if [ -n "$cell_b_home" ] && [ "$cell_b_home" != "$cell_a_home" ] \
+   && [ "$cell_b_home" -ef "$TEST_TMPDIR/cell-b/logs/.gemini-home" ] \
+   && [ ! -e "$cell_b_home/.gemini/GEMINI.md" ]; then
+  pass "sequential cells with different \$LOGDIR each stage a distinct clean home"
+else
+  fail "sequential cells with different \$LOGDIR each stage a distinct clean home" \
+    "a=$cell_a_home b=$cell_b_home"
+fi
+
+# Fail LOUD when isolation applies but no API key is set: an empty home cannot
+# authenticate, so the function returns nonzero and exports NO home rather than
+# silently falling through to the operator's global ~/.gemini/GEMINI.md.
+(
+  unset GEMINI_CLI_HOME TOKENFUZZ_MEMORY_ENABLED GEMINI_API_KEY GOOGLE_API_KEY
+  export USE_GEMINI_CLI=1 LOGDIR="$TEST_TMPDIR/noauth/logs"
+  mkdir -p "$LOGDIR"
+  llm_apply_memory_policy 0
+  if llm_stage_gemini_memory_home gemini 2>/dev/null; then
+    printf '%s\n' "RET0:${GEMINI_CLI_HOME:-UNSET}"
+  else
+    printf '%s\n' "FAILED:${GEMINI_CLI_HOME:-UNSET}"
+  fi
+) > "$TEST_TMPDIR/mem-gem-noauth"
+assert_eq "FAILED:UNSET" "$(cat "$TEST_TMPDIR/mem-gem-noauth")" \
+  "memory off + Gemini CLI without an API key fails loud (no silent memory leak)"
 
 teardown_test_env
 summary
