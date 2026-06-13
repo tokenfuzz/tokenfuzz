@@ -423,18 +423,21 @@ _HTML_HEAD = """<!DOCTYPE html>
   .fields-table th:first-child {{ width: 220px; }}
   .fields-table td:first-child {{ font-weight: 500; color: var(--muted); }}
   /* Rejected crashes / findings table: ID | Site | Reason | Report. Fixed
-     widths keep ID, Site, and Report on one line; Reason takes the
-     remainder and wraps. Shared by the audit and benchmark rejection
-     indexes so both read identically. */
+     widths cap ID, Site, and Report; Reason takes the remainder. ID and
+     Site can hold tokens wider than their column (long finding slugs,
+     `file.c:func:line` signatures), so they wrap within the cell instead
+     of spilling over and overlapping the next column — `overflow-wrap:
+     anywhere` does the wrapping, so these cells must NOT be `nowrap`.
+     Shared by the audit and benchmark rejection indexes so both read
+     identically. */
   .rejected-table {{
     table-layout: fixed;
   }}
   .rejected-table th:nth-child(1),
-  .rejected-table td:nth-child(1) {{ width: 14rem; white-space: nowrap; }}
+  .rejected-table td:nth-child(1) {{ width: 14rem; overflow-wrap: anywhere; }}
   .rejected-table th:nth-child(2),
   .rejected-table td:nth-child(2) {{
     width: 14rem;
-    white-space: nowrap;
     overflow-wrap: anywhere;
   }}
   .rejected-table th:nth-child(4),

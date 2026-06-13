@@ -579,6 +579,20 @@ def _format_clusters_md(clusters: list[dict], findings_root: Path,
             f"{members_cell} | {c.get('status', 'OK')} |"
         )
     lines.append("")
+    # Footer: point readers at the sibling rejected index, but only when one
+    # exists — findings-rejected/INDEX.md is written alongside the clusters
+    # dir whenever something was triaged out. Skip the line entirely on runs
+    # with no rejections so we never emit a dead link.
+    rejected_index = findings_root.parent / "findings-rejected" / "INDEX.md"
+    if rejected_index.exists():
+        lines.append("---")
+        lines.append("")
+        lines.append(
+            "_Findings triaged out as non-actionable (out-of-scope, false "
+            "positive, or robustness-only) are tracked separately — see the "
+            "[rejected findings index](../findings-rejected/INDEX.md)._"
+        )
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
