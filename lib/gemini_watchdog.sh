@@ -171,28 +171,29 @@ agy_in_idle_heartbeat_loop() {
 
   # BSD date (macOS) vs GNU date (Linux) — both forms tried so the
   # detector works on operator workstations and CI runners alike.
-  local cutoff_hhmm
-  cutoff_hhmm="$(date -v-"${window_secs}"S +%H:%M 2>/dev/null \
-              || date -d "${window_secs} seconds ago" +%H:%M 2>/dev/null)"
-  [ -n "$cutoff_hhmm" ] || return 1
+  local cutoff_key now_key
+  cutoff_key="$(date -v-"${window_secs}"S +%m%d%H%M 2>/dev/null \
+             || date -d "${window_secs} seconds ago" +%m%d%H%M 2>/dev/null)"
+  now_key="$(date +%m%d%H%M 2>/dev/null)"
+  [ -n "$cutoff_key" ] && [ -n "$now_key" ] || return 1
 
-  # Klog timestamp format: `IMMDD HH:MM:SS.us`. $2 holds HH:MM:SS;
-  # substr(,1,5) isolates HH:MM. Comparison is lexicographic over
-  # HH:MM strings, correct within a single UTC day. Across the
-  # midnight boundary the cutoff may end up "in the future"
-  # textually; the awk filter then returns 0 stream calls (under-
-  # counts), biasing toward NOT killing — the safe direction.
+  # Klog timestamp format: `IMMDD HH:MM:SS.us`. Compare MMDDHHMM keys so a
+  # poll just after midnight does not treat yesterday's late stream call as
+  # newer than today's heartbeat. The wraparound branch also covers New Year's
+  # windows where the cutoff key is textually greater than "now".
   local stream_calls heartbeat_calls
-  stream_calls="$(awk -v cut="$cutoff_hhmm" '
-    { t=substr($2,1,5) }
-    t < cut { next }
+  stream_calls="$(awk -v cut="$cutoff_key" -v now="$now_key" '
+    function recent(k) { return (cut <= now) ? (k >= cut && k <= now) : (k >= cut || k <= now) }
+    { k=substr($1,2,4) substr($2,1,2) substr($2,4,2) }
+    !recent(k) { next }
     /streamGenerateContent|:generateContent[^A-Za-z]/ { c++ }
     END { print c+0 }
   ' "$cli_log" 2>/dev/null)"
 
-  heartbeat_calls="$(awk -v cut="$cutoff_hhmm" '
-    { t=substr($2,1,5) }
-    t < cut { next }
+  heartbeat_calls="$(awk -v cut="$cutoff_key" -v now="$now_key" '
+    function recent(k) { return (cut <= now) ? (k >= cut && k <= now) : (k >= cut || k <= now) }
+    { k=substr($1,2,4) substr($2,1,2) substr($2,4,2) }
+    !recent(k) { next }
     /fetchAvailableModels|loadCodeAssist/ { c++ }
     END { print c+0 }
   ' "$cli_log" 2>/dev/null)"

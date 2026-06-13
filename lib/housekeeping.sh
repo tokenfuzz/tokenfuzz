@@ -18,9 +18,15 @@ _housekeeping_slug() {
 }
 
 _housekeeping_sha1_file() {
-  local f="$1"
+  local f="$1" out
   if declare -F audit_sha1 >/dev/null 2>&1; then
-    audit_sha1 "$f" 2>/dev/null | awk '{print $1}'
+    # audit_sha1 prints "<hex>  <path>"; strip the path in bash instead of
+    # forking awk (the hash never contains a space). Runs ~7x/iteration via
+    # housekeeping_signature, so the saved fork compounds. Byte-identical:
+    # command substitution strips the trailing newline either way, and a
+    # failed audit_sha1 yields an empty string here exactly as the awk did.
+    out=$(audit_sha1 "$f" 2>/dev/null) || true
+    printf '%s' "${out%% *}"
   elif command -v shasum >/dev/null 2>&1; then
     shasum -a 1 "$f" 2>/dev/null | awk '{print $1}'
   elif command -v sha1sum >/dev/null 2>&1; then

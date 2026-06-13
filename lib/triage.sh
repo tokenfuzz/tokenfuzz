@@ -3394,6 +3394,9 @@ _maintain_crash_cluster_sig() {
   local d f out=""
   out="tool=${_cluster_statkey:-}"$'\n'
   out="${out}env=${CLUSTER_LCS_THRESHOLD:-}|${CLUSTER_FUZZY_MATCH:-}|${CLUSTER_FUZZY_THRESHOLD:-}"$'\n'
+  # The "rejected crashes index" footer is now UNCONDITIONAL in cluster-crashes,
+  # so CRASH-CLUSTERS.md no longer depends on whether crashes-rejected/INDEX.md
+  # exists — no rejected-index term is needed in this skip key.
   for d in "$RESULTS_DIR"/crashes/CRASH-*/ "$RESULTS_DIR"/crashes-rejected/CRASH-*/; do
     [ -d "$d" ] || continue
     d="${d%/}"; out="${out}${d##*/}|"
@@ -3409,8 +3412,64 @@ _maintain_crash_cluster_sig() {
   printf '%s' "$out"
 }
 
+# Build crashes-rejected/INDEX.md and findings-rejected/INDEX.md. Both share one
+# schema — ID | Site | Reason | Report — so the two pages, plus the benchmark
+# pool equivalents in lib/benchmark.py, read identically. ID stays plain text
+# (rejected dirs are not meant to be re-opened); Report is a Link to the
+# rendered per-dir report (render-md rewrites the .md target to its .html
+# sibling).
+#
+# Both pages are ALWAYS written, even when empty (just the header row). The
+# cluster tables link to them unconditionally, so an always-present page means
+# the link is never dead — and it removes every moving part the old conditional
+# footer created: no build-ordering requirement, no skip-cache, no empty-set
+# special case, no staleness window. The page is rebuilt from scratch each pass;
+# rejected sets are small and this runs only on a dirty maintain_indexes pass,
+# so the cost is bounded and the output is always current.
+_maintain_rejected_index_one() {
+  local parent="$1" prefix="$2" kind="$3" title="$4"
+  local idx="$parent/INDEX.md"
+  local d id site reason link
+  mkdir -p "$parent" 2>/dev/null || true
+  {
+    echo "# $title"
+    echo ""
+    echo "| ID | Site | Reason | Report |"
+    echo "| :--- | :--- | :--- | :--- |"
+    for d in "$parent"/"$prefix"*/; do
+      [ -d "$d" ] || continue
+      id=$(basename "$d")
+      if [ "$kind" = crash ]; then
+        site=$(_rejected_md_cell "$(_rejected_crash_site "$d")")
+        reason=$(_rejected_md_cell "$(_rejected_dir_reason "$d")")
+      else
+        site=$(_rejected_md_cell "$(_rejected_finding_site "$d")")
+        reason=$(_rejected_md_cell "$(_rejected_finding_reason "$d")")
+      fi
+      link=$(_rejected_report_link "$d")
+      printf '| `%s` | %s | %s | %s |\n' "$id" "${site:-—}" "${reason:-—}" "$link"
+    done
+  } > "$idx" 2>/dev/null || true
+  # Drop the now-unused skip-cache sidecar from older versions.
+  rm -f "$parent/.index-sig" 2>/dev/null || true
+}
+
+_maintain_rejected_indexes() {
+  _maintain_rejected_index_one "$RESULTS_DIR/crashes-rejected" "CRASH-" crash \
+    "Rejected crashes — non-finding classes (DO NOT RE-FILE)"
+  _maintain_rejected_index_one "$RESULTS_DIR/findings-rejected" "FIND-" find \
+    "Rejected findings — non-actionable (DO NOT RE-FILE)"
+}
+
 maintain_indexes() {
-  mkdir -p "$RESULTS_DIR/crashes" "$RESULTS_DIR/crashes-rejected" "$RESULTS_DIR/findings" 2>/dev/null || true
+  mkdir -p "$RESULTS_DIR/crashes" "$RESULTS_DIR/crashes-rejected" \
+           "$RESULTS_DIR/findings" "$RESULTS_DIR/findings-rejected" 2>/dev/null || true
+
+  # Always (re)write the rejected indexes — they exist on every pass so the
+  # cluster tables' unconditional footer links are never dead. Order vs the
+  # cluster step below no longer matters (the footer doesn't depend on the
+  # file), but building here keeps all index writes together.
+  _maintain_rejected_indexes
 
   # Refresh CRASH/FINDING cluster summaries + Cluster: lines first so report
   # HTML rendered below sees the cluster ids on the first run.
@@ -3541,91 +3600,6 @@ maintain_indexes() {
         "$RESULTS_DIR/CRASH-CLUSTERS.md" "$RESULTS_DIR/CRASH-CLUSTERS.html" \
         "$RESULTS_DIR/findings/FIND-CLUSTERS.md" \
         "$RESULTS_DIR/findings/FIND-CLUSTERS.html" 2>/dev/null || true
-
-  # crashes-rejected/INDEX.md and findings-rejected/INDEX.md share one
-  # schema — ID | Site | Reason | Report — so the two pages, plus the
-  # benchmark pool equivalents in lib/benchmark.py, read identically. ID
-  # stays plain text (rejected dirs are not meant to be re-opened); Report
-  # is a Link to the rendered per-dir report (render-md rewrites the .md
-  # target to its .html sibling).
-  # Skip key: the sorted list of rejected dir basenames (bash globs expand
-  # sorted) PLUS a stat key for each per-dir file the Site/Reason/Report cells
-  # are derived from. Rejected dirs are terminal, but a cell input can still
-  # arrive or be repaired after the move — reachability filling a report's
-  # Fields table, a late .autodiscard or .llm-*.json — and the index must
-  # rebuild when it does. Stat keys (size+mtime) catch any such write while
-  # staying far cheaper than the ~6 awk/jq reads the rebuild itself costs, so
-  # an unchanged set still skips. Files absent in a given dir contribute
-  # nothing, keeping the common no-change case down to a handful of stats.
-  _maintain_rejected_dirlist() {
-    local parent="$1" prefix="$2" d f out=""
-    for d in "$parent"/"$prefix"*/; do
-      [ -d "$d" ] || continue
-      d="${d%/}"; out="${out}${d##*/}|"
-      for f in "$d"/REPORT.md "$d"/report.md "$d"/.autodiscard \
-               "$d"/.llm-find-quality.json "$d"/.llm-triage.json \
-               "$d"/sanitizer.txt "$d"/asan.txt \
-               "$d"/.audit/*.asan.txt "$d"/.audit/*.msan.txt \
-               "$d"/.audit/*.tsan.txt "$d"/.audit/*.ubsan.txt; do
-        [ -f "$f" ] && out="${out}${f##*/}=$(audit_stat_key "$f" 2>/dev/null || true),"
-      done
-      out="${out}"$'\n'
-    done
-    printf '%s' "$out"
-  }
-
-  local _rej_idx="$RESULTS_DIR/crashes-rejected/INDEX.md"
-  local _rej_sig="$RESULTS_DIR/crashes-rejected/.index-sig"
-  local _rej_list
-  _rej_list=$(_maintain_rejected_dirlist "$RESULTS_DIR/crashes-rejected" "CRASH-")
-  if ! { [ -s "$_rej_idx" ] && [ -f "$_rej_sig" ] && [ "$(cat "$_rej_sig" 2>/dev/null)" = "$_rej_list" ]; }; then
-    {
-      echo "# Rejected crashes — non-finding classes (DO NOT RE-FILE)"
-      echo ""
-      echo "| ID | Site | Reason | Report |"
-      echo "| :--- | :--- | :--- | :--- |"
-      local d
-      for d in "$RESULTS_DIR"/crashes-rejected/CRASH-*/; do
-        [ -d "$d" ] || continue
-        local id site reason link
-        id=$(basename "$d")
-        site=$(_rejected_md_cell "$(_rejected_crash_site "$d")")
-        reason=$(_rejected_md_cell "$(_rejected_dir_reason "$d")")
-        link=$(_rejected_report_link "$d")
-        printf '| `%s` | %s | %s | %s |\n' "$id" "${site:-—}" "${reason:-—}" "$link"
-      done
-    } > "$_rej_idx" 2>/dev/null \
-      && printf '%s' "$_rej_list" > "$_rej_sig" 2>/dev/null || true
-  fi
-
-  # findings-rejected/INDEX.md — same schema and same dir-list skip as above.
-  # Only written when the dir exists (findings-only and crash-finding runs
-  # both reach here; a target with no rejected findings simply has no dir).
-  if [ -d "$RESULTS_DIR/findings-rejected" ]; then
-    local _frej_idx="$RESULTS_DIR/findings-rejected/INDEX.md"
-    local _frej_sig="$RESULTS_DIR/findings-rejected/.index-sig"
-    local _frej_list
-    _frej_list=$(_maintain_rejected_dirlist "$RESULTS_DIR/findings-rejected" "FIND-")
-    if ! { [ -s "$_frej_idx" ] && [ -f "$_frej_sig" ] && [ "$(cat "$_frej_sig" 2>/dev/null)" = "$_frej_list" ]; }; then
-      {
-        echo "# Rejected findings — non-actionable (DO NOT RE-FILE)"
-        echo ""
-        echo "| ID | Site | Reason | Report |"
-        echo "| :--- | :--- | :--- | :--- |"
-        local d
-        for d in "$RESULTS_DIR"/findings-rejected/FIND-*/; do
-          [ -d "$d" ] || continue
-          local id site reason link
-          id=$(basename "$d")
-          site=$(_rejected_md_cell "$(_rejected_finding_site "$d")")
-          reason=$(_rejected_md_cell "$(_rejected_finding_reason "$d")")
-          link=$(_rejected_report_link "$d")
-          printf '| `%s` | %s | %s | %s |\n' "$id" "${site:-—}" "${reason:-—}" "$link"
-        done
-      } > "$_frej_idx" 2>/dev/null \
-        && printf '%s' "$_frej_list" > "$_frej_sig" 2>/dev/null || true
-    fi
-  fi
 
   # Emit HTML siblings after all report/cluster mutations for this iteration.
   # Report HTML is intentionally owned here, not by export-repro,

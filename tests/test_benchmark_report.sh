@@ -871,16 +871,19 @@ fi
 # function resolves correctly. Two HH:MM offsets are computed:
 #   now_hhmm   — current minute (always inside any window)
 #   old_hhmm   — 10 minutes ago (outside the 120s window used below)
+#   old_mmdd   — the matching klog date for old_hhmm, which may be yesterday
 now_hhmm=$(date +%H:%M)
 old_hhmm=$(date -v-10M +%H:%M 2>/dev/null \
         || date -d '10 minutes ago' +%H:%M 2>/dev/null)
 mmdd=$(date +%m%d)
+old_mmdd=$(date -v-10M +%m%d 2>/dev/null \
+        || date -d '10 minutes ago' +%m%d 2>/dev/null)
 
 # Positive: broken-klog signature — old stream call (out of window),
 # recent heartbeat (in window).
 idle_log_yes="$work/idle-yes.log"
 {
-  printf 'I%s %s:42.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0xabc\n' "$mmdd" "$old_hhmm"
+  printf 'I%s %s:42.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0xabc\n' "$old_mmdd" "$old_hhmm"
   printf 'I%s %s:00.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels Trace: 0xdef\n' "$mmdd" "$now_hhmm"
   printf 'I%s %s:00.234567 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist Trace: 0x123\n' "$mmdd" "$now_hhmm"
 } > "$idle_log_yes"
@@ -909,7 +912,7 @@ fi
 # back to the outer wall, not be picked up here.
 idle_log_silent="$work/idle-silent.log"
 {
-  printf 'I%s %s:42.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0xabc\n' "$mmdd" "$old_hhmm"
+  printf 'I%s %s:42.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0xabc\n' "$old_mmdd" "$old_hhmm"
 } > "$idle_log_silent"
 if agy_in_idle_heartbeat_loop "$idle_log_silent" 120; then
   fail "T32c: agy_in_idle_heartbeat_loop must NOT trigger without recent heartbeats" "false positive on silent klog"

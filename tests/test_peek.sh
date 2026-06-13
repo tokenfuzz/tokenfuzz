@@ -75,6 +75,13 @@ printf 'a\nb\nc\n' > "$small"
 output=$("$PEEK" "$small")
 assert_eq $'a\nb\nc' "$output" "range bare-file: small file emits everything"
 
+# `peek -- FILE` explicitly marks FILE as an operand; it must range-read it,
+# not route to grep mode (which would treat FILE as a pattern and exit 1 empty).
+output=$("$PEEK" -- "$small")
+assert_eq $'a\nb\nc' "$output" "range -- FILE: explicit operand is range-read"
+output=$("$PEEK" -- "$FIX:10-12")
+assert_eq $'line 10\nline 11\nline 12' "$output" "range -- FILE:range: explicit operand honors the range"
+
 # ── Range error paths ──
 
 # Missing file: short error to stderr, exit 2.

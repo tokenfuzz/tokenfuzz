@@ -400,10 +400,20 @@ assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" "Crash Clusters" "
 assert_file_exists "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" "empty finding clusters exist"
 assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" "Finding Clusters" "empty finding clusters have header"
 
+# The rejected index is ALWAYS written (even empty), and the cluster table's
+# footer link to it is unconditional — so the link is never dead. With zero
+# rejected crashes the index is present as an empty table (header only).
+assert_file_exists "$RESULTS_DIR/crashes-rejected/INDEX.md" \
+  "empty rejected set: crashes-rejected/INDEX.md still exists (empty table)"
+assert_file_contains "$RESULTS_DIR/crashes-rejected/INDEX.md" "DO NOT RE-FILE" \
+  "empty rejected set: empty index keeps its header"
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" "triaged out" \
+  "empty rejected set: cluster footer link is present unconditionally"
+
 # ═══════════════════════════════════════════════════════════════
-# 8. Rejected-index dir-list change-skip rebuilds when the set changes
-#    (the skip keys on the sorted rejected dir basenames; adding a dir must
-#     bust it so a newly-rejected finding appears in the index).
+# 8. Rejected index always rebuilds (no skip cache): a newly-rejected dir
+#    appears immediately, and a dir indexed before its cell files land is
+#    updated once they arrive (no stale "— | — | —" row).
 # ═══════════════════════════════════════════════════════════════
 mkdir -p "$RESULTS_DIR/findings-rejected/FIND-SKIP-A"
 printf '# A\n\n## Fields\n| Field | Value |\n|---|---|\n| File | src/a.c |\n| Line | 1 |\n' \
@@ -419,7 +429,23 @@ printf '# B\n\n## Fields\n| Field | Value |\n|---|---|\n| File | src/b.c |\n| Li
 printf '{"reason":"non-security b"}\n' > "$RESULTS_DIR/findings-rejected/FIND-SKIP-B/.llm-find-quality.json"
 maintain_indexes 2>/dev/null
 assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" 'FIND-SKIP-B' \
-  "rejected index rebuilds (skip busts) when a dir is added"
+  "rejected index rebuilds when a dir is added"
+
+# A dir that is indexed BEFORE its cell files land (incomplete/TTL reject) must
+# update once the report + reason arrive — always-rebuild guarantees this; the
+# old name-only skip left it stuck at "— | — | —".
+mkdir -p "$RESULTS_DIR/findings-rejected/FIND-LATE"
+maintain_indexes 2>/dev/null
+assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" 'FIND-LATE' \
+  "late dir: appears with placeholder cells before its files exist"
+printf '# L\n\n## Fields\n| Field | Value |\n|---|---|\n| File | src/late.c |\n| Line | 7 |\n' \
+  > "$RESULTS_DIR/findings-rejected/FIND-LATE/report.md"
+printf '{"reason":"late non-security"}\n' \
+  > "$RESULTS_DIR/findings-rejected/FIND-LATE/.llm-find-quality.json"
+maintain_indexes 2>/dev/null
+assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" 'src/late.c:7' \
+  "late dir: row updates once cell inputs arrive (no stale placeholder)"
+rm -rf "$RESULTS_DIR/findings-rejected/FIND-LATE"
 
 # ═══════════════════════════════════════════════════════════════
 # 9. cluster-crashes change-skip rebuilds when a crash is added
@@ -469,15 +495,16 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# 10. Rejected-index rebuilds when a cell input is repaired in place
-#     (a late report-Fields edit must bust the skip even though the dir set
-#      is unchanged — the sig stats the per-dir cell inputs, not just names).
+# 10. Rejected index busts the dir-name skip when a dir is REMOVED.
+#     Rejected dirs are terminal, so the skip keys on the set of dir names;
+#     dropping one must remove its row (and keep the others).
 # ═══════════════════════════════════════════════════════════════
-printf '# B\n\n## Fields\n| Field | Value |\n|---|---|\n| File | src/REPAIRED.c |\n| Line | 99 |\n' \
-  > "$RESULTS_DIR/findings-rejected/FIND-SKIP-B/report.md"
+rm -rf "$RESULTS_DIR/findings-rejected/FIND-SKIP-A"
 maintain_indexes 2>/dev/null
-assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" 'REPAIRED' \
-  "rejected index rebuilds when a report Fields cell is repaired in place"
+assert_file_not_contains "$RESULTS_DIR/findings-rejected/INDEX.md" 'FIND-SKIP-A' \
+  "rejected index rebuilds when a dir is removed (row dropped)"
+assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" 'FIND-SKIP-B' \
+  "rejected index keeps remaining dirs after a removal"
 
 teardown_test_env
 summary

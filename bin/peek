@@ -96,24 +96,27 @@ if [ "$PEEK_MAX_LINES" -eq 0 ]; then
 fi
 
 # ── Range-mode detection ──────────────────────────────────────────────
-# Range mode triggers when the FIRST non-flag positional looks like a path
-# without a glob/regex pattern (no whitespace, exists as a file) AND has
-# no other positionals after it. Anything else (multiple positionals, a
-# pattern that doesn't look like a path) is grep mode.
-first_positional=""
-positional_count=0
-for a in "${ARGS[@]}"; do
-  case "$a" in
-    -*) continue ;;
-    *) positional_count=$((positional_count + 1))
-       [ -z "$first_positional" ] && first_positional="$a"
-       ;;
-  esac
-done
-
+# Range mode is the documented single-argument form after peek's own flags:
+#   bin/peek FILE[:START[-END]]
+# Anything with additional grep flags or operands is grep mode. This avoids
+# misrouting `bin/peek -e PATTERN` into range mode when PATTERN happens to name
+# a real file.
+first_positional="${ARGS[0]}"
 is_range=0
-if [ "$positional_count" -eq 1 ]; then
+# `peek -- FILE` (or `peek -- FILE:range`): the `--` explicitly marks the next
+# token as an operand, not a flag. Collapse it to the single-operand range form
+# so a dash-prefixed or literal filename is range-read, not routed to grep mode
+# (which would treat FILE as a pattern and block on / exit-1 from stdin).
+if [ "${#ARGS[@]}" -eq 2 ] && [ "${ARGS[0]}" = "--" ]; then
+  ARGS=("${ARGS[1]}")
+  first_positional="${ARGS[0]}"
   case "$first_positional" in
+    *:*-*|*:*) is_range=1 ;;
+    *) [ -e "$first_positional" ] && is_range=1 ;;
+  esac
+elif [ "${#ARGS[@]}" -eq 1 ]; then
+  case "$first_positional" in
+    -*) ;;
     *:*-*|*:*) is_range=1 ;;
     *)
       [ -e "$first_positional" ] && is_range=1
@@ -121,7 +124,7 @@ if [ "$positional_count" -eq 1 ]; then
   esac
 fi
 
-if [ "$positional_count" -eq 1 ] && [ "$is_range" -eq 0 ]; then
+if [ "${#ARGS[@]}" -eq 1 ] && [ "$is_range" -eq 0 ]; then
   case "$first_positional" in
     */*|*.[A-Za-z0-9][A-Za-z0-9]*)
       echo "[peek] file not found: $first_positional" >&2

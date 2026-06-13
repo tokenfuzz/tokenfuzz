@@ -101,9 +101,16 @@ _emit_capped() {
   local _file="$1"
   local _stream="$2"
   local _orig_lines _orig_bytes _line_capped=0 _byte_capped=0
-  _orig_lines=$(wc -l < "$_file" | tr -d ' ')
+  # Empty stream → nothing to emit and nothing to cap (0 lines/bytes trips
+  # neither cap), so skip the wc/cat work entirely. stderr is empty on the
+  # large majority of grep/rg/sed calls, so this drops ~3 forks per call —
+  # it compounds across the thousands of search calls an audit makes.
+  [ -s "$_file" ] || return 0
+  # One `wc -lc` instead of separate `wc -l` + `wc -c`: both BSD and GNU wc
+  # print "<lines> <bytes>" for -lc. `read` strips the leading whitespace,
+  # so no `tr` fork is needed either.
+  read -r _orig_lines _orig_bytes <<< "$(wc -lc < "$_file")"
   _orig_lines=${_orig_lines:-0}
-  _orig_bytes=$(wc -c < "$_file" | tr -d ' ')
   _orig_bytes=${_orig_bytes:-0}
 
   # 1) Line cap: rewrite file in place so the byte step sees the clipped form.

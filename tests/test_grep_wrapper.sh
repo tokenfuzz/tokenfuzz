@@ -144,5 +144,17 @@ assert_match "total stdout lines" "$output" "passthrough boundary: cap footer fi
 output=$("$GREP_WRAPPER" -c '.' "$PASSTHRU_HAYSTACK" 2>/dev/null)
 assert_eq "500" "$output" "passthrough: real -c flag still passes through unchanged"
 
+# ═══════════════════════════════════════════════════════════════
+# 11. Empty streams emit nothing and preserve grep's exit code.
+#     _cap early-returns on an empty stdout/stderr (skipping the wc/cat
+#     work); this locks that optimization to byte-identical behavior.
+# ═══════════════════════════════════════════════════════════════
+echo "needle" > "$TEST_TMPDIR/nomatch.txt"
+out=$("$GREP_WRAPPER" "ABSENT_PATTERN_XYZ" "$TEST_TMPDIR/nomatch.txt" 2>/dev/null); rc=$?
+assert_eq "" "$out" "empty stdout: no-match prints nothing"
+assert_eq "1" "$rc" "empty stdout: no-match preserves grep exit 1"
+err=$("$GREP_WRAPPER" "needle" "$TEST_TMPDIR/nomatch.txt" 2>&1 1>/dev/null)
+assert_eq "" "$err" "empty stderr: a clean match emits nothing on stderr"
+
 teardown_test_env
 summary
