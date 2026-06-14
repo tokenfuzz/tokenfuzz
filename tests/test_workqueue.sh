@@ -354,7 +354,17 @@ assert_eq "ok" "$scan_window_check" "patch-cards: _patch_scan_window resolves th
 # of which can legitimately fan out into companion cards (one per
 # strategy its code features seed). A limit below files×(1+companions)
 # silently truncates real source out of the queue.
-output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 2>&1)
+compact_output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --summary-limit 3 2>&1)
+assert_match 'rank-work: wrote [0-9]+ card\(s\)' "$compact_output" "rank-work: default stdout is a compact summary"
+assert_match 'inspect with bin/state list-cards --limit N or rerun with --jsonl' "$compact_output" "rank-work: compact summary points at bounded inspection"
+compact_lines=$(printf '%s\n' "$compact_output" | wc -l | tr -d ' ')
+if [ "$compact_lines" -le 7 ]; then
+  pass "rank-work: compact summary stays bounded (lines=$compact_lines)"
+else
+  fail "rank-work: compact summary emitted too many lines" "$compact_output"
+fi
+
+output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --jsonl 2>&1)
 assert_file_exists "$RESULTS_DIR/work-cards.jsonl" "rank-work: writes default output"
 first_card=$(sed -n '1p' "$RESULTS_DIR/work-cards.jsonl")
 assert_match '"id": "PATCH-local"' "$first_card" "rank-work: prioritizes concrete S1 patch cards"
@@ -460,7 +470,7 @@ mkdir -p "$RESULTS_DIR/coverage"
 cat > "$RESULTS_DIR/coverage/edges-agent-1.journal" <<'EOF'
 ThingProcessorRead|alpha/core/ThingProcessor.cpp:3
 EOF
-output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 20 --llm-top-n 0 2>&1)
+output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 20 --llm-top-n 0 --jsonl 2>&1)
 assert_match 'coverage gap subsystem' "$output" "rank-work: expands toward coverage-gap subsystems"
 
 # (computed in the merged wq_unit_checks python invocation above)
@@ -507,14 +517,14 @@ PY
 assert_eq "ok" "$jsonl_concurrency" "workqueue JSONL: read-modify-write uses unique locked rewrites"
 
 export LLM_DECIDE_MOCK_WORK_RERANK='{"cards":[{"id":"WORK-doesnotexist","boost":30,"reason":"ignored bad id"}]}'
-output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --llm-top-n 10 2>&1)
+output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --llm-top-n 10 --jsonl 2>&1)
 assert_file_exists "$RESULTS_DIR/work-cards.jsonl" "rank-work: LLM rerank still writes output"
 assert_not_match 'llm-rerank' "$output" "rank-work: LLM rerank ignores unknown IDs"
 unset LLM_DECIDE_MOCK_WORK_RERANK
 
 work_id=$(jq -r 'select(.kind=="ranked-source") | .id' "$RESULTS_DIR/work-cards.jsonl" | head -1)
 export LLM_DECIDE_MOCK_WORK_RERANK="{\"cards\":[{\"id\":\"$work_id\",\"boost\":20,\"reason\":\"parser/state boundary\"}]}"
-output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --llm-top-n 10 2>&1)
+output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --llm-top-n 10 --jsonl 2>&1)
 assert_match 'llm-rerank: parser/state boundary' "$output" "rank-work: LLM rerank annotates selected cards"
 unset LLM_DECIDE_MOCK_WORK_RERANK
 
@@ -526,11 +536,11 @@ export LLM_DECIDE_MOCK_WORK_RERANK="{\"cards\":[{\"id\":\"$work_id\",\"boost\":2
 rerank_log="$TEST_TMPDIR/rerank-decisions.log"
 rm -f "$rerank_log"
 output=$(LLM_DECIDE_LOG="$rerank_log" TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" \
-  "$RANK_WORK" --limit 40 --llm-top-n 10 2>&1)
+  "$RANK_WORK" --limit 40 --llm-top-n 10 --jsonl 2>&1)
 assert_match 'llm-rerank: cached boundary' "$output" "rank-work: rerank cache — first run annotates"
 assert_file_exists "$RESULTS_DIR/state/.work-rerank-cache.json" "rank-work: rerank cache file written"
 output=$(LLM_DECIDE_LOG="$rerank_log" TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" \
-  "$RANK_WORK" --limit 40 --llm-top-n 10 2>&1)
+  "$RANK_WORK" --limit 40 --llm-top-n 10 --jsonl 2>&1)
 assert_match 'llm-rerank: cached boundary' "$output" "rank-work: rerank cache — repeat run still annotates"
 rerank_calls=$(grep -c 'work_rerank MOCK' "$rerank_log" 2>/dev/null || true)
 assert_eq 1 "$rerank_calls" "rank-work: identical candidate set hits the boost cache (one engine call, not two)"
@@ -538,13 +548,13 @@ unset LLM_DECIDE_MOCK_WORK_RERANK
 
 # Malformed mock → llm_decide rejects → rerank short-circuits, cards unchanged.
 export LLM_DECIDE_MOCK_WORK_RERANK='not json at all'
-output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --llm-top-n 10 2>&1)
+output=$(TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" "$RANK_WORK" --limit 40 --llm-top-n 10 --jsonl 2>&1)
 assert_not_match 'llm-rerank' "$output" "rank-work: malformed mock → no rerank annotation"
 unset LLM_DECIDE_MOCK_WORK_RERANK
 
 # DISABLE=1 + no mock → rerank short-circuits, cards unchanged.
 output=$(LLM_DECIDE_DISABLE=1 TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$RESULTS_DIR" \
-  "$RANK_WORK" --limit 40 --llm-top-n 10 2>&1)
+  "$RANK_WORK" --limit 40 --llm-top-n 10 --jsonl 2>&1)
 assert_not_match 'llm-rerank' "$output" "rank-work: DISABLE=1 → no rerank annotation"
 
 batch_results="$TEST_TMPDIR/batch-results"
@@ -653,7 +663,16 @@ listed_cards=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT
 listed_count=$(printf '%s\n' "$listed_cards" | grep -c '^{' || true)
 assert_eq "2" "$listed_count" "state: list-cards honors --limit"
 assert_match '"id": "(PATCH-|WORK-)' "$listed_cards" "state: list-cards emits compact JSONL cards"
+assert_not_match '"why_ranked":' "$listed_cards" "state: list-cards default omits prose-heavy ranking detail"
 assert_not_match 'usage: state' "$listed_cards" "state: list-cards does not fall through to argparse help"
+
+verbose_cards=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  list-cards --mode generic --limit 2 --verbose)
+assert_match '"why_ranked":' "$verbose_cards" "state: list-cards --verbose restores ranking detail"
+
+contains_rank_reason=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  list-cards --mode generic --contains 'raw memory operation' --limit 1)
+assert_match '"id": "(PATCH-|WORK-)' "$contains_rank_reason" "state: list-cards --contains still filters hidden ranking text"
 
 eligible_cards=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   list-cards --mode generic --status eligible --limit 3)

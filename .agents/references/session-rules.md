@@ -187,8 +187,8 @@ bin/state resume        --agent N [--mode browser|js|generic] [--role reproduce|
 bin/state next-card     --agent N [--mode browser|js|generic] [--peek]
 bin/state show-card     CARD_ID|--card-id ID [--mode MODE]       # compact JSON
 bin/state explain-card  CARD_ID|--card-id ID [--mode MODE]       # alias
-bin/state list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N]
-bin/state dump-queue    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N]  # alias
+bin/state list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
+bin/state dump-queue    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]  # alias
 bin/state show-crash    CRASH-ID|--crash-id ID                  # compact JSON
 bin/state list-crashes  [--status OK|NEW|...] [--limit N]
 bin/state show-finding  FIND-ID|--finding-id ID                 # compact JSON
@@ -221,6 +221,10 @@ bin/scratch-search PATTERN       audit-artifact path inventory under $RESULTS_DI
                                  section labeled output). Default is paths only.
 bin/scratch-search --lines --section SECTION PATTERN
                                  old file:line:body behavior for a narrow section
+bin/scratch-status --agent N     compact scratch digest; use instead of
+                                 `ls -la output/<slug>/<backend>/results/scratch-N`
+bin/scratch-status --files --agent N --file-limit 20
+                                 bounded newest-file inventory for a scratch dir
 bin/probe-history TESTCASE       read-only digest of prior bin/probe runs for
                                  a testcase (by path AND content sha1); also
                                  --hypothesis-id / --card-id / --all. Does
@@ -240,6 +244,10 @@ plain `scratch-search PATTERN` as an inventory step: it tells you which files
 match without dumping bodies. When the body matters, drill into one section
 with `bin/scratch-search --lines --section <section> PATTERN` or inspect one
 file with `bin/peek`.
+Use `bin/scratch-status --agent N` for scratch directory status and
+`bin/scratch-status --files --agent N --file-limit 20` when you need recent
+filenames. Do not use raw `ls -la` on scratch dirs unless exact permissions or
+link targets matter.
 Before re-probing reflexively, check `bin/probe-history <testcase>` — if a
 confirmed verdict (asan_runs=5) exists in this session, you already have the
 evidence; only re-run when state has shifted (binary rebuilt, harness edited,

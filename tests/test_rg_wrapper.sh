@@ -23,6 +23,7 @@ output=$("$RG_WRAPPER" "match" "$TEST_TMPDIR/large.txt" 2>/dev/null)
 data_lines=$(printf '%s\n' "$output" | grep -c 'match')
 assert_eq "200" "$data_lines" "large: caps stdout at 200 data lines"
 assert_match "total stdout lines" "$output" "large: stdout truncation footer"
+assert_match "at least 201 total stdout lines" "$output" "large: broad search stops after visible budget"
 
 output=$("$RG_WRAPPER" --count "match" "$TEST_TMPDIR/large.txt" 2>/dev/null)
 assert_match "500" "$output" "--count flag: count is exact"
@@ -119,6 +120,7 @@ stream_output=$(seq 1 500 | "$RG_WRAPPER" '[0-9]+' 2>/dev/null)
 stream_lines=$(printf '%s\n' "$stream_output" | grep -cE '^[0-9]+$' || true)
 assert_eq "200" "$stream_lines" "stream: stdin pipeline still capped at 200"
 assert_match "total stdout lines" "$stream_output" "stream: stdout cap footer fires"
+assert_match "at least 201 total stdout lines" "$stream_output" "stream: broad stdin search stops after visible budget"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Passthrough boundary — a positional arg equal to a passthrough flag (e.g.
@@ -137,6 +139,7 @@ output=$("$RG_WRAPPER" -- '\-\-count' "$PASSTHRU_HAYSTACK" 2>/dev/null)
 data_lines=$(printf '%s\n' "$output" | grep -cF -- '--count' || true)
 assert_eq "200" "$data_lines" "passthrough boundary: literal '--count' pattern after -- still capped"
 assert_match "total stdout lines" "$output" "passthrough boundary: cap footer fires"
+assert_match "at least 201 total stdout lines" "$output" "passthrough boundary: capped literal search stops early"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-tool bypass — AGENT_WRAPPERS_BYPASS runs the named tool uncapped while

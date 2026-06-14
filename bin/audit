@@ -1850,6 +1850,41 @@ extract_tool_counts() {
     || printf 'command_execution=0\nall_tools=0\n'
 }
 
+extract_raw_status() {
+  local file="$1"
+  [ -f "$file" ] || {
+    printf 'rate_limit=0\ncodex_completed=0\ncodex_failed=0\ngemini_success=0\n'
+    return
+  }
+  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" raw-status "$file" 2>/dev/null \
+    || printf 'rate_limit=0\ncodex_completed=0\ncodex_failed=0\ngemini_success=0\n'
+}
+
+extract_finish_fields() {
+  local file="$1"
+  local backend="${2:-${ACTIVE_BACKEND:-${AUDIT_BACKEND:-claude}}}"
+  local prompt_path="${3:-}"
+  [ -f "$file" ] || {
+    printf 'total_tokens=\ninput_tokens=\ncached_input_tokens=\ncache_creation_input_tokens=\noutput_tokens=\nduration_ms=\n'
+    printf 'command_execution=0\nall_tools=0\n'
+    printf 'rate_limit=0\ncodex_completed=0\ncodex_failed=0\ngemini_success=0\n'
+    return
+  }
+  if [ -n "$prompt_path" ] && [ -f "$prompt_path" ]; then
+    python3 "$SCRIPT_ROOT/lib/audit_helpers.py" finish-fields "$file" "$backend" --prompt "$prompt_path" 2>/dev/null || {
+      printf 'total_tokens=\ninput_tokens=\ncached_input_tokens=\ncache_creation_input_tokens=\noutput_tokens=\nduration_ms=\n'
+      printf 'command_execution=0\nall_tools=0\n'
+      printf 'rate_limit=\ncodex_completed=\ncodex_failed=\ngemini_success=\n'
+    }
+  else
+    python3 "$SCRIPT_ROOT/lib/audit_helpers.py" finish-fields "$file" "$backend" 2>/dev/null || {
+      printf 'total_tokens=\ninput_tokens=\ncached_input_tokens=\ncache_creation_input_tokens=\noutput_tokens=\nduration_ms=\n'
+      printf 'command_execution=0\nall_tools=0\n'
+      printf 'rate_limit=\ncodex_completed=\ncodex_failed=\ngemini_success=\n'
+    }
+  fi
+}
+
 # Total tool invocations across all tools (any name). Used for richer
 # observability than command_execution alone (which only counts shells).
 extract_total_tool_uses() {
@@ -2952,6 +2987,9 @@ gemini_raw_has_success_result() {
 normalize_agent_exit_code() {
   local backend="$1" exit_code="$2" rawfile="$3"
   local rate_limit_rejected="${4:-}"
+  local codex_completed="${5:-}"
+  local codex_failed="${6:-}"
+  local gemini_success="${7:-}"
   if [ -z "$rate_limit_rejected" ]; then
     if log_has_rate_limit_rejection "$rawfile"; then
       rate_limit_rejected=1
@@ -2966,8 +3004,8 @@ normalize_agent_exit_code() {
         # completed turn fails. Audit agents intentionally run failing probes
         # during exploration, so trust the structured turn status instead of
         # the aggregate process status for this narrow case.
-        if codex_raw_has_completed_turn "$rawfile" \
-           && ! codex_raw_has_failed_turn "$rawfile" \
+        if { [ "$codex_completed" = "1" ] || { [ -z "$codex_completed" ] && codex_raw_has_completed_turn "$rawfile"; }; } \
+           && { [ "$codex_failed" = "0" ] || { [ -z "$codex_failed" ] && ! codex_raw_has_failed_turn "$rawfile"; }; } \
            && [ "$rate_limit_rejected" -eq 0 ]; then
           echo 0
           return 0
@@ -2977,7 +3015,7 @@ normalize_agent_exit_code() {
         # Gemini CLI can return a non-zero aggregate status when a tool call
         # inside an otherwise completed session fails. The stream-json result
         # event is the session-level status.
-        if gemini_raw_has_success_result "$rawfile" \
+        if { [ "$gemini_success" = "1" ] || { [ -z "$gemini_success" ] && gemini_raw_has_success_result "$rawfile"; }; } \
            && [ "$rate_limit_rejected" -eq 0 ]; then
           echo 0
           return 0
@@ -6276,32 +6314,30 @@ run_agent() {
     local _turncap_poll="$TURN_SOFT_CAP_POLL_SECS"
     local _turncap_subshell="$subshell_pid"
     local _turncap_role="$_role_display"
+    local _turncap_helper="$SCRIPT_ROOT/lib/audit_helpers.py"
     (
       # Brief startup grace — codex takes a few seconds to emit anything;
       # polling before the file exists just wastes a wakeup.
       sleep 3
+      local _offset=0 _count=0 _delta_out="" _key="" _value="" _delta=0 _next_offset=0
       while kill -0 "$_turncap_subshell" 2>/dev/null; do
-        # Count completed command_executions cheaply. We avoid the full
-        # jq-backed extract_completed_item_count helper because it touches
-        # the file twice per call; a plain grep on the marker substring is
-        # accurate enough at this granularity and uses ~10x less CPU on a
-        # growing log. The substring "\"type\":\"item.completed\"" appears
-        # exactly once per completed item; we further filter by
-        # "command_execution" so non-command items (assistant messages,
-        # reasoning blocks) don't inflate the count.
-        local _count=0
+        # Count only newly appended complete JSONL events. The old watcher
+        # rescanned the entire growing raw log with grep every poll; large
+        # Codex sessions paid repeated full-file I/O while the model was
+        # still running. The helper returns the next complete-line offset so
+        # partially written events are retried instead of lost.
         if [ -f "$_turncap_raw" ]; then
-          # grep -c exits 1 with "0" on stdout when there are zero matches;
-          # the naive "|| echo 0" form then yields "0\n0" and breaks `[ -eq ]`.
-          # Sink stderr, take the first numeric line, default empty to 0.
-          _count=$(grep -c '"type":"item.completed".*"type":"command_execution"' "$_turncap_raw" 2>/dev/null | head -1)
-          _count=${_count:-0}
-          # If the JSON ordering nests differently (item before type), fall
-          # back to a two-pattern AND that's slower but more robust.
-          if [ "$_count" -eq 0 ]; then
-            _count=$(grep -c '"command_execution".*"completed"' "$_turncap_raw" 2>/dev/null | head -1)
-            _count=${_count:-0}
-          fi
+          _delta_out=$(python3 "$_turncap_helper" codex-turn-delta "$_turncap_raw" "$_offset" 2>/dev/null || true)
+          _delta=0
+          _next_offset="$_offset"
+          while IFS='=' read -r _key _value; do
+            case "$_key" in
+              count) case "${_value:-}" in ''|*[!0-9]*) _delta=0 ;; *) _delta="$_value" ;; esac ;;
+              offset) case "${_value:-}" in ''|*[!0-9]*) ;; *) _next_offset="$_value" ;; esac ;;
+            esac
+          done <<< "$_delta_out"
+          _count=$(( _count + _delta ))
+          _offset="$_next_offset"
         fi
         if [ "$_count" -ge "$_turncap_cap" ]; then
           index_log "TURN_SOFT_CAP: Agent $_turncap_role hit ${_count} completed commands (soft cap=${_turncap_cap}) — stopping the session so it resumes on the next iteration"
@@ -6340,42 +6376,48 @@ run_agent() {
   # Extract usage and command counts from the raw JSON stream.
   # extract_* helpers are backend-aware (see function docstrings).
   local total_tokens tool_uses duration_ms input_tokens cached_input_tokens cache_creation_tokens output_tokens command_count waste_telemetry
-  local raw_logfile usage_fields usage_key usage_value tool_counts tool_key tool_value
+  local raw_logfile finish_fields finish_key finish_value
   raw_logfile="$(audit_raw_path "$logfile")"
-  usage_fields=$(extract_usage_fields "$raw_logfile")
-  while IFS='=' read -r usage_key usage_value; do
-    case "$usage_key" in
-      total_tokens) total_tokens="$usage_value" ;;
-      input_tokens) input_tokens="$usage_value" ;;
-      cached_input_tokens) cached_input_tokens="$usage_value" ;;
-      cache_creation_input_tokens) cache_creation_tokens="$usage_value" ;;
-      output_tokens) output_tokens="$usage_value" ;;
-      duration_ms) duration_ms="$usage_value" ;;
+  local rate_limit_rejected=0
+  local raw_codex_completed="" raw_codex_failed="" raw_gemini_success=""
+  command_count=0
+  tool_uses=0
+  finish_fields=$(extract_finish_fields "$raw_logfile" "$ACTIVE_BACKEND")
+  while IFS='=' read -r finish_key finish_value; do
+    case "$finish_key" in
+      total_tokens) total_tokens="$finish_value" ;;
+      input_tokens) input_tokens="$finish_value" ;;
+      cached_input_tokens) cached_input_tokens="$finish_value" ;;
+      cache_creation_input_tokens) cache_creation_tokens="$finish_value" ;;
+      output_tokens) output_tokens="$finish_value" ;;
+      duration_ms) duration_ms="$finish_value" ;;
+      command_execution) command_count="$finish_value" ;;
+      all_tools) tool_uses="$finish_value" ;;
+      rate_limit) rate_limit_rejected="${finish_value:-0}" ;;
+      codex_completed) raw_codex_completed="$finish_value" ;;
+      codex_failed) raw_codex_failed="$finish_value" ;;
+      gemini_success) raw_gemini_success="$finish_value" ;;
     esac
-  done <<< "$usage_fields"
+  done <<< "$finish_fields"
+  if [ -z "$rate_limit_rejected" ]; then
+    if log_has_rate_limit_rejection "$raw_logfile"; then
+      rate_limit_rejected=1
+    else
+      rate_limit_rejected=0
+    fi
+  fi
   case "${duration_ms:-}" in
     ''|*[!0-9]*|0)
       duration_ms=$(( ($(date +%s) - ${agent_start_epoch:-$(date +%s)}) * 1000 ))
       ;;
   esac
-  command_count=0
-  tool_uses=0
-  tool_counts=$(extract_tool_counts "$raw_logfile")
-  while IFS='=' read -r tool_key tool_value; do
-    case "$tool_key" in
-      command_execution) command_count="$tool_value" ;;
-      all_tools) tool_uses="$tool_value" ;;
-    esac
-  done <<< "$tool_counts"
 
   # Recover log file from raw JSON if --output-last-message failed (e.g., Codex SDK crash)
   recover_log_from_raw "$logfile"
 
-  local normalized_exit_code rate_limit_rejected=0
-  if log_has_rate_limit_rejection "$raw_logfile"; then
-    rate_limit_rejected=1
-  fi
-  normalized_exit_code=$(normalize_agent_exit_code "$ACTIVE_BACKEND" "$exit_code" "$raw_logfile" "$rate_limit_rejected")
+  local normalized_exit_code
+  normalized_exit_code=$(normalize_agent_exit_code "$ACTIVE_BACKEND" "$exit_code" "$raw_logfile" \
+    "$rate_limit_rejected" "$raw_codex_completed" "$raw_codex_failed" "$raw_gemini_success")
   if [ "$normalized_exit_code" != "$exit_code" ]; then
     index_log "Agent $_role_display process exit=$exit_code but raw log has a completed ${ACTIVE_BACKEND} turn with no session-level error; treating the agent session as exit=0"
     exit_code="$normalized_exit_code"

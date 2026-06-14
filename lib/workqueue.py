@@ -3822,6 +3822,19 @@ def _compact_card(ctx: Context, card: dict, status_row: dict | None = None, *, o
     return row
 
 
+def _list_card_row(compact: dict, *, verbose: bool = False) -> dict:
+    if verbose:
+        return compact
+    row = dict(compact)
+    # list-cards is an overview/browse API. Keep enough to pick a card,
+    # but leave prose-heavy ranking detail to show-card/--verbose.
+    for key in ("why_ranked", "description", "testcase_hashes", "invalid_testcase_hashes"):
+        row.pop(key, None)
+    if row.get("mode") == "auto":
+        row.pop("mode", None)
+    return row
+
+
 def show_work_card(ctx: Context, card_id: str, mode: str = "") -> dict | None:
     """Return compact JSON for one work card.
 
@@ -3851,6 +3864,7 @@ def list_work_cards(
     subsystem_filters: Iterable[str] | None = None,
     contains_filters: Iterable[str] | None = None,
     limit: int = 20,
+    verbose: bool = False,
 ) -> list[dict]:
     """Return a compact JSONL-friendly listing of work cards."""
     init_state(ctx)
@@ -3899,7 +3913,7 @@ def list_work_cards(
             haystack = json.dumps(compact, sort_keys=True).lower()
             if not any(needle in haystack for needle in contains_needles):
                 continue
-        rows.append(compact)
+        rows.append(_list_card_row(compact, verbose=verbose))
         if limit > 0 and len(rows) >= limit:
             break
     return rows

@@ -8,11 +8,10 @@
 # codex binary plus the full audit harness around it; instead, we test
 # the load-bearing pieces in isolation:
 #
-#   1. The counter heuristic — the grep that bin/audit uses to count
-#      completed command_executions in the codex .log.raw stream — gives
-#      the same answer as the canonical jq-backed
-#      extract_completed_item_count helper on representative fixtures.
-#      That's the contract that determines when the cap fires.
+#   1. The incremental counter that bin/audit uses to count completed
+#      command_executions in the codex .log.raw stream gives the same answer
+#      as the canonical transcript helper on representative fixtures. That's
+#      the contract that determines when the cap fires.
 #   2. TURN_SOFT_CAP and TURN_SOFT_CAP_POLL_SECS are declared with
 #      sensible defaults and a 0-disable contract.
 #   3. The kill cascade only runs for codex (not Claude / Gemini —
@@ -61,15 +60,16 @@ canonical=$(bash -c "
 ")
 assert_eq 8 "$canonical" "canonical helper counts 8 command_executions"
 
-# Watchdog's grep heuristic. This is the exact pattern from bin/audit's
-# turn-cap watcher — it has to match the same set of items.
-heuristic=$(grep -c '"type":"item.completed".*"type":"command_execution"' "$RAWLOG" 2>/dev/null | head -1)
-heuristic="${heuristic:-0}"
-assert_eq "$canonical" "$heuristic" \
-  "watchdog grep heuristic agrees with canonical helper ($heuristic vs $canonical)"
+delta_out=$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" codex-turn-delta "$RAWLOG" 0)
+delta_count=$(awk -F= '$1=="count"{print $2}' <<<"$delta_out")
+delta_offset=$(awk -F= '$1=="offset"{print $2}' <<<"$delta_out")
+assert_eq "$canonical" "$delta_count" \
+  "watchdog incremental counter agrees with canonical helper ($delta_count vs $canonical)"
 
 # Noise items must not inflate the count.
-assert_eq 8 "$heuristic" "watchdog heuristic does not count agent_message items"
+assert_eq 8 "$delta_count" "watchdog incremental counter does not count agent_message items"
+assert_eq "$(wc -c < "$RAWLOG" | tr -d ' ')" "$delta_offset" \
+  "watchdog incremental counter advances to end after complete log"
 
 # ── 2) Defaults and the 0-disable contract ────────────────────────
 #
@@ -165,12 +165,12 @@ assert_match 'digest below is the API for `bin/probe` and `bin/state`' "$output"
 assert_not_match 'bin/probe --help' "$output" \
   "common suffix avoids the old bin/probe --help nudge"
 
-# ── 5) The watchdog grep handles realistic codex outputs ──────────
+# ── 5) The watchdog counter handles realistic codex outputs ────────
 #
-# Defensive: real codex output may include nested JSON inside aggregated_output
-# (commands that emit JSON, or codex echoing back tool args). The watcher
-# heuristic must not over-count when those nested strings happen to include
-# the pattern fragments. We embed a fake command whose output itself
+# Defensive: real codex output may include nested JSON inside
+# aggregated_output (commands that emit JSON, or codex echoing back tool
+# args). The watcher must not over-count when those nested strings happen to
+# include the pattern fragments. We embed a fake command whose output itself
 # contains the substring "type":"command_execution" and confirm we still
 # count just the one real completion.
 RAW2="$TEST_TMPDIR/nested.log.raw"
@@ -180,30 +180,28 @@ RAW2="$TEST_TMPDIR/nested.log.raw"
   # marker. We want exactly 1 completion counted.
   printf '{"type":"item.completed","item":{"id":"item_99","type":"command_execution","aggregated_output":"{\\"type\\":\\"command_execution\\":\\"fake\\"}","status":"completed"}}\n'
 } > "$RAW2"
-nested_count=$(grep -c '"type":"item.completed".*"type":"command_execution"' "$RAW2" 2>/dev/null | head -1)
-nested_count="${nested_count:-0}"
+nested_count=$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" codex-turn-delta "$RAW2" 0 | awk -F= '$1=="count"{print $2}')
 # One real completion, regardless of nested-string false-friends.
 assert_eq 1 "$nested_count" \
-  "watchdog heuristic resists nested-JSON false positives"
+  "watchdog incremental counter resists nested-JSON false positives"
 
-# ── 6) Regression: watcher must not use `grep -c ... || echo 0` ───
+# ── 6) Regression: watcher must not rescan with `grep -c` ─────────
 #
 # grep -c exits 1 with "0" on stdout when there are zero matches; the
 # naive `|| echo 0` fallback then yields "0\n0" and the next `[ -eq ]`
-# comparison fails with `integer expression expected`. We extract just
-# the TURN_SOFT_CAP watcher block (the `if [ "$ACTIVE_BACKEND" = "codex" ]`
-# guard through its closing `fi`) and assert the bad pattern is absent.
-watcher_block=$(awk '
-  /if \[ "\$ACTIVE_BACKEND" = "codex" \] && \[ "\${TURN_SOFT_CAP:-0}" -gt 0 \]; then/ { in_blk=1 }
-  in_blk { print; depth += gsub(/\<if\>|\<while\>|\<for\>|\<case\>/, "&"); depth -= gsub(/\<fi\>|\<done\>|\<esac\>/, "&") }
-  in_blk && depth == 0 { exit }
-' "$AUDIT")
-if grep -q 'grep -c.*|| *echo' <<<"$watcher_block"; then
-  fail "watcher block free of 'grep -c ... || echo' poison-fallback" \
-       "watcher still uses the multi-line 'grep -c ... || echo N' pattern (see bin/audit comment at agent_probe_activity_score)"
+# comparison fails with `integer expression expected`. More importantly for
+# performance, full-log grep polling rescans a growing raw transcript every
+# 10s. We extract just the TURN_SOFT_CAP watcher block and assert it uses
+# the incremental helper instead.
+watcher_block=$(sed -n '/local _turncap_helper=.*audit_helpers.py/,/sleep "\$_turncap_poll"/p' "$AUDIT")
+if grep -q 'grep -c' <<<"$watcher_block"; then
+  fail "watcher block free of full-log grep polling" \
+       "watcher still scans the whole raw log with grep -c"
 else
-  pass "watcher block free of 'grep -c ... || echo' poison-fallback"
+  pass "watcher block free of full-log grep polling"
 fi
+assert_match 'codex-turn-delta' "$watcher_block" \
+  "watcher block uses the incremental codex-turn-delta helper"
 
 teardown_test_env
 summary

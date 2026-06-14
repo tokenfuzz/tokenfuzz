@@ -25,6 +25,24 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
       Count both shell-command tool calls and all tool calls in one transcript
       pass. Prints key=value lines for shell callers.
 
+  raw-status <log_file>
+      Stream a raw transcript once and print status booleans used by the
+      agent finish path: rate_limit, codex_completed, codex_failed,
+      gemini_success. This replaces several independent grep passes over
+      the same file while preserving the shell predicates' broad text checks.
+
+  finish-fields <log_file> <backend> [--prompt <prompt_file>]
+      Stream/read a raw transcript once and print every agent finish-path
+      field needed by bin/audit: usage counters, tool counts, and backend
+      status booleans. Existing focused subcommands remain for tests and
+      one-off callers.
+
+  codex-turn-delta <log_file> <offset>
+      Count completed Codex command_execution items in complete JSONL lines
+      appended at or after <offset>. Prints count=N and offset=N. The returned
+      offset stops after the last complete line so a partially-written event is
+      retried on the next poll.
+
   append-guard-card <work_file> <id> <slug> <subsystem> <guard> <now>
       Append a guard-bypass work-card JSONL row. No-op if a row with the
       same id already exists. Output: nothing.
@@ -154,6 +172,13 @@ def _command_pattern(cmd):
     squashed = re.sub(r"\s+", " ", cmd).strip()
     if not squashed:
         return "unknown"
+    m = re.search(
+        r"(?:^|[;&| ])(?:env\s+[^;&| ]+\s+)*(rg|grep|sed|cat|ls|find|python3?|jq|awk|head|tail|wc|sort|uniq)\b",
+        squashed,
+    )
+    if m:
+        tool = m.group(1)
+        return "python" if tool.startswith("python") else tool
     if re.search(r"(?:^|[;&| ])bin/state\s+(?:--help|-h)\b", squashed):
         return "state-help"
     if re.search(r"(?:^|[;&| ])bin/state\s+(?:show-card|explain-card|list-cards)\b", squashed):
@@ -167,13 +192,6 @@ def _command_pattern(cmd):
         return "hg-diff"
     if re.search(r"(?:^|[;&| ])hg(?:\s+-R\s+\S+)?\s+log\b", squashed):
         return "hg-log"
-    m = re.search(
-        r"(?:^|[;&| ])(?:env\s+[^;&| ]+\s+)*(rg|grep|sed|cat|ls|find|python3?|jq|awk|head|tail|wc|sort|uniq)\b",
-        squashed,
-    )
-    if m:
-        tool = m.group(1)
-        return "python" if tool.startswith("python") else tool
     return squashed.split()[0].split("/")[-1][:32]
 
 
@@ -376,6 +394,257 @@ def _cmd_count_tools_all(args: argparse.Namespace) -> int:
     counts = _count_tools(args.log_file)
     print(f"command_execution={counts['command_execution']}")
     print(f"all_tools={counts['all_tools']}")
+    return 0
+
+
+_RAW_STATUS_ERROR_TYPE_RE = re.compile(r'"type":"(?:error|turn\.failed)"')
+_RAW_STATUS_USAGE_TYPE_RE = re.compile(r'"type":"(?:error|turn\.failed|agent_message)"')
+_RAW_STATUS_GEMINI_REJECTION_RE = re.compile(
+    r'Attempt [0-9]+ failed with status (?:429|503)|'
+    r'"code"[ \t]*:[ \t]*(?:429|503)|'
+    r'status:[ \t]*(?:429|503)|'
+    r'RESOURCE_EXHAUSTED|UNAVAILABLE|'
+    r'exceeded your current quota|exhausted your capacity|'
+    r'quota will reset|high demand|fetch failed sending request|'
+    r'rate.?limit.*(?:exceeded|reached)',
+    re.IGNORECASE,
+)
+_RAW_STATUS_GEMINI_DIALECT_RE = re.compile(
+    r'Antigravity CLI|antigravity-cli|antigravity\.google|'
+    r'YOLO mode is enabled|Ripgrep is not available\. Falling back to GrepTool|'
+    r'@google/gemini-cli/|"model":"gemini-[a-z0-9._-]+"',
+    re.IGNORECASE,
+)
+
+
+def _raw_status_defaults() -> dict[str, int]:
+    return {
+        "rate_limit": 0,
+        "codex_completed": 0,
+        "codex_failed": 0,
+        "gemini_success": 0,
+    }
+
+
+def _raw_status_from_lines(lines) -> dict[str, int]:
+    status = {
+        "rate_limit": 0,
+        "codex_completed": 0,
+        "codex_failed": 0,
+        "gemini_success": 0,
+    }
+    usage_candidate = False
+    usage_phrase = False
+    retry_phrase = False
+    gemini_result = False
+    gemini_success = False
+    gemini_dialect = False
+    gemini_rejection = False
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        event = None
+        if line.startswith("{"):
+            try:
+                parsed = json.loads(line)
+                if isinstance(parsed, dict):
+                    event = parsed
+            except (json.JSONDecodeError, ValueError):
+                event = None
+        event_type = event.get("type") if event else ""
+        event_status = event.get("status") if event else ""
+        if '"api_error_status":429' in line:
+            status["rate_limit"] = 1
+        if event_type in ("error", "turn.failed") or _RAW_STATUS_ERROR_TYPE_RE.search(line):
+            status["codex_failed"] = 1
+            if re.search(r'status\\?":429|Server returned 429', line):
+                status["rate_limit"] = 1
+        if _RAW_STATUS_USAGE_TYPE_RE.search(line) and re.search(
+            r"usage limit|hit your .*limit|try again at", line, re.IGNORECASE
+        ):
+            usage_candidate = True
+        if re.search(r"usage limit|hit your .*limit", lower):
+            usage_phrase = True
+        if re.search(r"try again at|retry after|reset", lower):
+            retry_phrase = True
+        if _RAW_STATUS_GEMINI_DIALECT_RE.search(line):
+            gemini_dialect = True
+        if _RAW_STATUS_GEMINI_REJECTION_RE.search(line):
+            gemini_rejection = True
+        if event_type == "turn.completed" or '"type":"turn.completed"' in line:
+            status["codex_completed"] = 1
+        if event_type == "result" or '"type":"result"' in line:
+            gemini_result = True
+        if event_status == "success" or '"status":"success"' in line:
+            gemini_success = True
+
+    if usage_candidate and usage_phrase and retry_phrase:
+        status["rate_limit"] = 1
+    if gemini_dialect and gemini_rejection:
+        status["rate_limit"] = 1
+    if gemini_result and gemini_success:
+        status["gemini_success"] = 1
+
+    return status
+
+
+def _cmd_raw_status(args: argparse.Namespace) -> int:
+    try:
+        with open(args.log_file, "r", encoding="utf-8", errors="replace") as f:
+            status = _raw_status_from_lines(f)
+    except OSError:
+        status = _raw_status_defaults()
+
+    for key, value in status.items():
+        print(f"{key}={value}")
+    return 0
+
+
+def _finish_field_defaults() -> dict[str, str]:
+    fields = {
+        "total_tokens": "",
+        "input_tokens": "",
+        "cached_input_tokens": "",
+        "cache_creation_input_tokens": "",
+        "output_tokens": "",
+        "duration_ms": "",
+        "command_execution": "0",
+        "all_tools": "0",
+    }
+    fields.update({k: str(v) for k, v in _raw_status_defaults().items()})
+    return fields
+
+
+def _cmd_finish_fields(args: argparse.Namespace) -> int:
+    fields = _finish_field_defaults()
+    try:
+        with open(args.log_file, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except OSError:
+        for key, value in fields.items():
+            print(f"{key}={value}")
+        return 0
+
+    prompt_text = ""
+    if args.prompt:
+        try:
+            with open(args.prompt, "r", encoding="utf-8", errors="replace") as f:
+                prompt_text = f.read()
+        except OSError:
+            prompt_text = ""
+
+    try:
+        from llm_usage import extract_fields_from_text
+
+        fields.update(extract_fields_from_text(raw, prompt_text=prompt_text, backend=args.backend))
+    except Exception:
+        pass
+
+    counts = {"command_execution": 0, "all_tools": 0}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+
+        if event.get("type") == "item.completed":
+            item = event.get("item") or {}
+            item_type = item.get("type") if isinstance(item, dict) else ""
+            if item_type == "command_execution":
+                counts["command_execution"] += 1
+                counts["all_tools"] += 1
+            elif item_type in ("tool_use", "file_change"):
+                counts["all_tools"] += 1
+            continue
+
+        if event.get("type") == "command_execution":
+            counts["command_execution"] += 1
+            counts["all_tools"] += 1
+            continue
+
+        if event.get("type") == "tool_use":
+            name = event.get("tool_name") or event.get("name") or ""
+            if name == "run_shell_command":
+                counts["command_execution"] += 1
+            counts["all_tools"] += 1
+            continue
+
+        if event.get("type") == "assistant" or "message" in event:
+            for item in _claude_content_items(event):
+                if not isinstance(item, dict) or item.get("type") != "tool_use":
+                    continue
+                name = item.get("name") or ""
+                if name == "Bash":
+                    counts["command_execution"] += 1
+                counts["all_tools"] += 1
+
+    fields["command_execution"] = str(counts["command_execution"])
+    fields["all_tools"] = str(counts["all_tools"])
+    fields.update({k: str(v) for k, v in _raw_status_from_lines(raw.splitlines()).items()})
+
+    for key, value in fields.items():
+        print(f"{key}={value}")
+    return 0
+
+
+def _cmd_codex_turn_delta(args: argparse.Namespace) -> int:
+    try:
+        offset = int(args.offset)
+    except (TypeError, ValueError):
+        offset = 0
+    if offset < 0:
+        offset = 0
+
+    count = 0
+    next_offset = offset
+    try:
+        with open(args.log_file, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            if offset > size:
+                offset = 0
+            f.seek(offset)
+            chunk = f.read()
+    except OSError:
+        print("count=0")
+        print(f"offset={offset}")
+        return 0
+
+    if not chunk:
+        print("count=0")
+        print(f"offset={offset}")
+        return 0
+
+    last_newline = chunk.rfind(b"\n")
+    if last_newline < 0:
+        print("count=0")
+        print(f"offset={offset}")
+        return 0
+
+    complete = chunk[: last_newline + 1]
+    next_offset = offset + last_newline + 1
+    for raw in complete.splitlines():
+        if not raw:
+            continue
+        try:
+            ev = json.loads(raw.decode("utf-8", "replace"))
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            continue
+        if not isinstance(ev, dict) or ev.get("type") != "item.completed":
+            continue
+        item = ev.get("item") or {}
+        if isinstance(item, dict) and item.get("type") == "command_execution":
+            count += 1
+
+    print(f"count={count}")
+    print(f"offset={next_offset}")
     return 0
 
 
@@ -717,6 +986,24 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Count shell commands and all tools in one transcript pass.")
     s.add_argument("log_file")
     s.set_defaults(func=_cmd_count_tools_all)
+
+    s = sub.add_parser("raw-status",
+                       help="Summarize rate-limit and backend status flags in one transcript pass.")
+    s.add_argument("log_file")
+    s.set_defaults(func=_cmd_raw_status)
+
+    s = sub.add_parser("finish-fields",
+                       help="Summarize usage, tool counts, and backend status for agent finish.")
+    s.add_argument("log_file")
+    s.add_argument("backend")
+    s.add_argument("--prompt", default="")
+    s.set_defaults(func=_cmd_finish_fields)
+
+    s = sub.add_parser("codex-turn-delta",
+                       help="Count newly-appended Codex command_execution completions.")
+    s.add_argument("log_file")
+    s.add_argument("offset")
+    s.set_defaults(func=_cmd_codex_turn_delta)
 
     s = sub.add_parser("append-guard-card", help="Append a guard-bypass work-card row.")
     s.add_argument("work_file")

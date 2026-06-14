@@ -7,8 +7,20 @@
 # and raw `rg` runs at full firehose (observed: 7.2 MB of rg output across one
 # audit run, vs ~2 MB when wrappers actually fire).
 #
-# Runs after /etc/zprofile, so we win the path_helper race. Silent no-op when
-# AGENT_WRAPPERS_PATH is unset (lets developers source this dir without harm).
+# Runs after /etc/zprofile, so we win the path_helper race. When
+# AGENT_WRAPPERS_PATH is unset but ZDOTDIR is this shim directory, infer the
+# wrapper dir from ZDOTDIR itself. Codex-like launchers have been observed to
+# preserve ZDOTDIR while dropping auxiliary env vars; losing the wrapper path
+# turns rg/grep back into uncapped firehoses.
+
+if [ -z "${AGENT_WRAPPERS_PATH:-}" ] && [ -n "${ZDOTDIR:-}" ]; then
+  case "$ZDOTDIR" in
+    */_zdotdir)
+      AGENT_WRAPPERS_PATH="${ZDOTDIR%/_zdotdir}"
+      export AGENT_WRAPPERS_PATH
+      ;;
+  esac
+fi
 
 if [ -n "${AGENT_WRAPPERS_PATH:-}" ]; then
   # Strip any existing copy first so wrappers always win the PATH race —

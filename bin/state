@@ -166,6 +166,7 @@ def main(argv: list[str]) -> int:
         help="case-insensitive substring filter over compact card fields; repeat for OR",
     )
     p_list.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+    p_list.add_argument("--verbose", action="store_true", help="include prose-heavy ranking/detail fields")
 
     p_dump_queue = sub.add_parser(
         "dump-queue",
@@ -187,6 +188,7 @@ def main(argv: list[str]) -> int:
         help="case-insensitive substring filter over compact card fields; repeat for OR",
     )
     p_dump_queue.add_argument("--limit", type=int, default=50, help="max rows (0 = no cap)")
+    p_dump_queue.add_argument("--verbose", action="store_true", help="include prose-heavy ranking/detail fields")
 
     p_show_crash = sub.add_parser("show-crash", help="compact JSON for one crash artifact")
     p_show_crash.add_argument("crash_id_pos", nargs="?", default="", help="crash id")
@@ -449,6 +451,7 @@ def main(argv: list[str]) -> int:
             subsystem_filters=args.subsystem,
             contains_filters=args.contains,
             limit=args.limit,
+            verbose=args.verbose,
         ):
             print(json.dumps(row, sort_keys=True))
         return 0

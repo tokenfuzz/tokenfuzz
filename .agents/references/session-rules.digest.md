@@ -81,6 +81,10 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
   is also output-capped. `--no-cap` or `OUTCAP_MAX_BYTES=0` to widen.
 - Prior-fix patches: `bin/show-patch <commit> [<path>]` (10-line ctx,
   1500-line / 32 KiB cap). `PATCH_CONTEXT=80` widens.
+- Scratch dirs: `bin/scratch-status --agent N` instead of raw `ls -la
+  output/<slug>/<backend>/results/scratch-N`; add `--files --file-limit 20`
+  for a bounded newest-file inventory. Use raw `ls` only for exact
+  permission/link details.
 - Output cap behavior: any tool output past ~50 KB is replaced with
   head + elision marker + tail; the full original spills to
   `$TMPDIR/outcap-<label>-<sha>.txt`. Inspect it with bounded reads such
@@ -89,6 +93,8 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
   with `OUTCAP_MAX_BYTES=0`.
 - Don't run `bin/state … --help` — the cheat sheet below is the argument
   shape for every subcommand you need. Flags accept the aliases shown.
+- Scratch helpers: `bin/scratch-status --agent N` for status; add
+  `--files --file-limit 20` for a bounded recent file inventory.
 
 ## bin/state cheat sheet (use instead of `--help`)
 
@@ -96,8 +102,8 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
 resume        --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1..S8]
 next-card     --agent N [--mode MODE] [--peek]
 show-card     CARD_ID|--card-id ID [--mode MODE]        # compact JSON
-list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N]
-dump-queue    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N]  # alias
+list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
+dump-queue    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]  # alias
 show-crash    CRASH-ID|--crash-id ID ;  list-crashes [--status OK|NEW] [--limit N]
 show-finding  FIND-ID|--finding-id ID ;  list-findings [--status OK|NEW] [--limit N]
 add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:func:line \

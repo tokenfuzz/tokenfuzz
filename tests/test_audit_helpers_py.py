@@ -224,6 +224,157 @@ proc = run(["count-tools-all", "/nonexistent/path-that-cannot-exist.log"])
 assert_eq(["command_execution=0", "all_tools=0"], proc.stdout.splitlines(), "missing log → zero tool counts")
 
 
+# ── raw-status ──────────────────────────────────────────────────────
+print("\nraw-status")
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    raw_status_path = f.name
+    rows = [
+        {"type": "turn.completed"},
+        {"type": "result", "status": "success"},
+        {"type": "agent_message", "message": "You've hit your usage limit. Please try again at 9:01 AM."},
+    ]
+    for row in rows:
+        json.dump(row, f, separators=(",", ":"))
+        f.write("\n")
+try:
+    proc = run(["raw-status", raw_status_path])
+    assert_eq(
+        ["rate_limit=1", "codex_completed=1", "codex_failed=0", "gemini_success=1"],
+        proc.stdout.splitlines(),
+        "raw-status: completed codex + gemini success + usage-limit wording",
+    )
+finally:
+    os.unlink(raw_status_path)
+
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    raw_failed_path = f.name
+    f.write('{"type":"turn.failed","error":"Server returned 429"}\n')
+try:
+    proc = run(["raw-status", raw_failed_path])
+    assert_eq(
+        ["rate_limit=1", "codex_completed=0", "codex_failed=1", "gemini_success=0"],
+        proc.stdout.splitlines(),
+        "raw-status: codex failed turn with 429",
+    )
+finally:
+    os.unlink(raw_failed_path)
+
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    stray_429_path = f.name
+    f.write('{"type":"item.completed","item":{"type":"command_execution","aggregated_output":"tool said status:429"}}\n')
+try:
+    proc = run(["raw-status", stray_429_path])
+    assert_eq(
+        ["rate_limit=0", "codex_completed=0", "codex_failed=0", "gemini_success=0"],
+        proc.stdout.splitlines(),
+        "raw-status: non-gemini stray status:429 is not a backend rate limit",
+    )
+finally:
+    os.unlink(stray_429_path)
+
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    gemini_429_path = f.name
+    f.write('{"type":"init","model":"gemini-2.5-pro"}\n')
+    f.write('Attempt 1 failed with status 429\n')
+try:
+    proc = run(["raw-status", gemini_429_path])
+    assert_eq(
+        ["rate_limit=1", "codex_completed=0", "codex_failed=0", "gemini_success=0"],
+        proc.stdout.splitlines(),
+        "raw-status: gemini dialect marker scopes backend rejection text",
+    )
+finally:
+    os.unlink(gemini_429_path)
+
+proc = run(["raw-status", "/nonexistent/path-that-cannot-exist.log"])
+assert_eq(
+    ["rate_limit=0", "codex_completed=0", "codex_failed=0", "gemini_success=0"],
+    proc.stdout.splitlines(),
+    "raw-status: missing log returns zero flags",
+)
+
+
+# ── finish-fields ──────────────────────────────────────────────────
+print("\nfinish-fields")
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    finish_path = f.name
+    rows = [
+        {"type": "item.completed", "item": {"type": "command_execution", "command": "ls"}},
+        {"type": "tool_use", "tool_name": "run_shell_command", "tool_id": "g1"},
+        {"type": "tool_use", "tool_name": "read_file", "tool_id": "g2"},
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 7,
+                "cached_input_tokens": 2,
+                "cache_creation_input_tokens": 3,
+                "output_tokens": 5,
+            },
+            "duration_ms": 456,
+        },
+        {"type": "result", "status": "success"},
+    ]
+    for row in rows:
+        json.dump(row, f)
+        f.write("\n")
+try:
+    proc = run(["finish-fields", finish_path, "codex"])
+    assert_eq(0, proc.returncode, "finish-fields rc=0")
+    lines = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
+    assert_eq("7", lines.get("input_tokens"), "finish-fields input_tokens")
+    assert_eq("12", lines.get("total_tokens"), "finish-fields total_tokens")
+    assert_eq("2", lines.get("cached_input_tokens"), "finish-fields cached_input_tokens")
+    assert_eq("3", lines.get("cache_creation_input_tokens"), "finish-fields cache_creation_input_tokens")
+    assert_eq("5", lines.get("output_tokens"), "finish-fields output_tokens")
+    assert_eq("456", lines.get("duration_ms"), "finish-fields duration_ms")
+    assert_eq("2", lines.get("command_execution"), "finish-fields command_execution")
+    assert_eq("3", lines.get("all_tools"), "finish-fields all_tools")
+    assert_eq("1", lines.get("codex_completed"), "finish-fields codex_completed")
+    assert_eq("1", lines.get("gemini_success"), "finish-fields gemini_success")
+finally:
+    os.unlink(finish_path)
+
+proc = run(["finish-fields", "/nonexistent/path-that-cannot-exist.log", "codex"])
+ok(
+    "command_execution=0" in proc.stdout and "rate_limit=0" in proc.stdout,
+    "finish-fields: missing log returns zero/default fields",
+    proc.stdout,
+)
+
+
+# ── codex-turn-delta ───────────────────────────────────────────────
+print("\ncodex-turn-delta")
+with tempfile.NamedTemporaryFile("wb", suffix=".jsonl", delete=False) as f:
+    delta_path = f.name
+    f.write(b'{"type":"item.completed","item":{"type":"command_execution","command":"one"}}\n')
+    f.write(b'{"type":"item.completed","item":{"type":"agent_message","text":"skip"}}\n')
+    # Nested JSON-looking output must not inflate the structured count.
+    f.write(
+        b'{"type":"item.completed","item":{"type":"command_execution",'
+        b'"aggregated_output":"{\\"type\\":\\"command_execution\\"}"}}\n'
+    )
+    partial_offset = f.tell()
+    f.write(b'{"type":"item.completed","item":{"type":"command_execution"')
+try:
+    proc = run(["codex-turn-delta", delta_path, "0"])
+    lines = proc.stdout.splitlines()
+    assert_eq(0, proc.returncode, "codex-turn-delta exit code")
+    assert_eq("count=2", lines[0], "codex-turn-delta counts only completed command executions")
+    assert_eq(f"offset={partial_offset}", lines[1], "codex-turn-delta stops before partial line")
+
+    with open(delta_path, "ab") as f:
+        f.write(b',"command":"two"}}\n')
+    proc = run(["codex-turn-delta", delta_path, str(partial_offset)])
+    assert_eq(["count=1", f"offset={os.path.getsize(delta_path)}"], proc.stdout.splitlines(),
+              "codex-turn-delta retries and counts completed partial line")
+
+    proc = run(["codex-turn-delta", delta_path, str(os.path.getsize(delta_path) + 100)])
+    assert_eq("count=3", proc.stdout.splitlines()[0],
+              "codex-turn-delta resets if offset is past truncated file")
+finally:
+    os.unlink(delta_path)
+
+
 # ── append-guard-card ───────────────────────────────────────────────
 print("\nappend-guard-card")
 with tempfile.TemporaryDirectory() as td:

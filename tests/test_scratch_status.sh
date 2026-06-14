@@ -41,6 +41,7 @@ EOF
 
 # A README — must be ignored entirely.
 echo "notes" > "$S1/README.md"
+echo "compile note" > "$S1/build.log"
 
 # Build a synthetic scratch-2 with underscore-variant naming.
 S2="$RESULTS_DIR/scratch-2"
@@ -125,6 +126,11 @@ if grep -q 'newest 5' <<<"$output_terse"; then
 else
   pass "terse: newest section omitted"
 fi
+if grep -q 'recent files' <<<"$output_terse"; then
+  fail "terse: recent files should be omitted unless --files is set"
+else
+  pass "terse: recent files omitted by default"
+fi
 
 # ── 9. README / harness / asan.txt are not counted as testcases ──────
 # 6 testcases above: 3 altsvc-expire-size, 1 aws-sigv4-size CRASH, 2 ORPHAN.
@@ -154,6 +160,22 @@ if [ "$size" -lt 2048 ]; then
 else
   fail "output size: $size B exceeds 2 KB budget"
 fi
+
+# ── 13. --files gives a bounded substitute for raw ls -la ─────────────
+for i in $(seq 1 25); do
+  printf 'artifact %d\n' "$i" > "$S1/artifact-${i}.tmp"
+done
+output_files=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 1 --files --file-limit 5 2>&1)
+assert_match 'recent files \(newest 5 of [0-9]+\)' "$output_files" "files: section header includes bounded count"
+assert_match 'artifact-[0-9]+\.tmp' "$output_files" "files: artifacts listed"
+assert_match '\[artifact\]' "$output_files" "files: generic artifact kind shown"
+assert_match 'more files; narrow by name with bin/scratch-search PATTERN' "$output_files" "files: cap footer suggests scratch-search"
+file_rows=$(grep -c '^    .* B  ' <<<"$output_files" || true)
+assert_eq 5 "$file_rows" "files: honors --file-limit"
+
+output_files_wide=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 1 --files --file-limit 80 2>&1)
+assert_match '\[testcase\]' "$output_files_wide" "files: testcase kind shown"
+assert_match '\[sanitizer-output\]' "$output_files_wide" "files: sanitizer-output kind shown"
 
 teardown_test_env
 summary

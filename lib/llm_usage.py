@@ -385,6 +385,27 @@ def extract_fields(
     prompt_path: str | None = None,
 ) -> dict[str, str]:
     """Return every audit usage field without reparsing the raw log per field."""
+    if not os.path.isfile(raw_log_path):
+        return {
+            "total_tokens": "",
+            "input_tokens": "",
+            "cached_input_tokens": "",
+            "cache_creation_input_tokens": "",
+            "output_tokens": "",
+            "duration_ms": "",
+        }
+
+    raw = _read(raw_log_path)
+    prompt_text = _read(prompt_path) if prompt_path else ""
+    return extract_fields_from_text(raw, prompt_text=prompt_text, backend=backend)
+
+
+def extract_fields_from_text(
+    raw: str,
+    prompt_text: str = "",
+    backend: str = "",
+) -> dict[str, str]:
+    """Return every audit usage field from an already-read transcript."""
     fields = (
         "total_tokens",
         "input_tokens",
@@ -395,11 +416,6 @@ def extract_fields(
     out = {field: "" for field in fields}
     out["duration_ms"] = ""
 
-    if not os.path.isfile(raw_log_path):
-        return out
-
-    raw = _read(raw_log_path)
-    prompt_text = _read(prompt_path) if prompt_path else ""
     row = extract_usage_from_text(raw, prompt_text=prompt_text, backend=backend)
     tokens = row.get("tokens", {}) if isinstance(row, dict) else {}
     estimated = bool(row.get("estimated", False)) if isinstance(row, dict) else False

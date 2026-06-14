@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Output-capping wrapper used by lib/wrappers/grep and lib/wrappers/rg.
 # Caps stdout/stderr separately so a runaway match doesn't flood agent context
-# and diagnostics don't look like search results.
+# and diagnostics don't look like search results. For plain rg/grep searches,
+# stop reading stdout after the visible line budget is exceeded; otherwise a
+# broad match still pays to emit megabytes that the wrapper later discards.
 # Pass-through flags exit early since their output is already bounded.
 #
 # Two caps fire independently:
@@ -107,6 +109,7 @@ PY
 _emit_capped() {
   local _file="$1"
   local _stream="$2"
+  local _line_count_kind="${3:-exact}"
   local _orig_lines _orig_bytes _line_capped=0 _byte_capped=0
   # Empty stream → nothing to emit and nothing to cap (0 lines/bytes trips
   # neither cap), so skip the wc/cat work entirely. stderr is empty on the
@@ -149,8 +152,13 @@ _emit_capped() {
       cat "$_file" >&2
     fi
     if [ "$_line_capped" -eq 1 ]; then
-      printf '... (%s total stderr lines — output truncated to %s. Narrow your search.)\n' \
-        "$_orig_lines" "$_cap_lines" >&2
+      if [ "$_line_count_kind" = "at-least" ]; then
+        printf '... (at least %s total stderr lines — output truncated to %s. Narrow your search.)\n' \
+          "$_orig_lines" "$_cap_lines" >&2
+      else
+        printf '... (%s total stderr lines — output truncated to %s. Narrow your search.)\n' \
+          "$_orig_lines" "$_cap_lines" >&2
+      fi
     fi
     if [ "$_use_output_cap" -eq 0 ] && [ "$_byte_capped" -eq 1 ]; then
       printf '... (stderr clipped at %s bytes of %s. Narrow your search.)\n' \
@@ -164,8 +172,13 @@ _emit_capped() {
       cat "$_file"
     fi
     if [ "$_line_capped" -eq 1 ]; then
-      printf '... (%s total stdout lines — output truncated to %s. Narrow your search.)\n' \
-        "$_orig_lines" "$_cap_lines"
+      if [ "$_line_count_kind" = "at-least" ]; then
+        printf '... (at least %s total stdout lines — output truncated to %s. Narrow your search.)\n' \
+          "$_orig_lines" "$_cap_lines"
+      else
+        printf '... (%s total stdout lines — output truncated to %s. Narrow your search.)\n' \
+          "$_orig_lines" "$_cap_lines"
+      fi
     fi
     if [ "$_use_output_cap" -eq 0 ] && [ "$_byte_capped" -eq 1 ]; then
       printf '... (stdout clipped at %s bytes of %s. Narrow your search.)\n' \
@@ -179,8 +192,45 @@ _emit_capped() {
 _out_tmp=$(mktemp) || exit 1
 _err_tmp=$(mktemp) || { rm -f "$_out_tmp"; exit 1; }
 trap 'rm -f "$_out_tmp" "$_err_tmp"' EXIT
-"$_real" "$@" > "$_out_tmp" 2> "$_err_tmp"
-_rc=$?
-_emit_capped "$_out_tmp" stdout
+
+_stdout_line_count_kind=exact
+_fast_stdout_cap=0
+case "$_tool" in
+  rg|grep)
+    # For normal search output, we only ever display CAP_LINES lines plus a
+    # footer. Read one extra line, then let head close the pipe so broad
+    # matches stop early. Count/list/quiet modes have already passed through
+    # above, so this does not affect exact query modes.
+    if [ "$_cap_lines" -gt 0 ]; then
+      _fast_stdout_cap=1
+    fi
+    ;;
+esac
+
+if [ "$_fast_stdout_cap" -eq 1 ]; then
+  _line_limit=$((_cap_lines + 1))
+  "$_real" "$@" 2> "$_err_tmp" | head -n "$_line_limit" > "$_out_tmp"
+  _pipe_status=("${PIPESTATUS[@]}")
+  _rc="${_pipe_status[0]:-0}"
+  _head_rc="${_pipe_status[1]:-0}"
+  if [ "$_head_rc" -eq 0 ]; then
+    _captured_lines=$(wc -l < "$_out_tmp" | tr -d ' ')
+    _captured_lines=${_captured_lines:-0}
+    if [ "$_captured_lines" -gt "$_cap_lines" ]; then
+      _stdout_line_count_kind=at-least
+      # rg/grep often report SIGPIPE after head has collected enough visible
+      # output. The visible result is a successful capped search, not a tool
+      # diagnostic.
+      case "$_rc" in
+        13|141) _rc=0 ;;
+      esac
+    fi
+  fi
+else
+  "$_real" "$@" > "$_out_tmp" 2> "$_err_tmp"
+  _rc=$?
+fi
+
+_emit_capped "$_out_tmp" stdout "$_stdout_line_count_kind"
 _emit_capped "$_err_tmp" stderr
 exit "$_rc"

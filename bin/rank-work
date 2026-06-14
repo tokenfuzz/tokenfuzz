@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -23,6 +24,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--llm-timeout", type=int, default=int(os.environ.get("RANK_WORK_LLM_TIMEOUT", "20")))
     parser.add_argument("--output", help="Output JSONL path; defaults to <RESULTS_DIR>/work-cards.jsonl")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--jsonl", action="store_true", help="print full card JSONL to stdout")
+    parser.add_argument("--summary-limit", type=int, default=8, help="number of top cards to show in compact stdout")
     args = parser.parse_args(argv)
 
     ctx = context_from_args(args)
@@ -64,9 +67,59 @@ def main(argv: list[str]) -> int:
     cards = apply_latest_claim_status(ctx, cards)
     write_cards(out, cards)
     if not args.quiet:
-        for card in cards:
-            print(json.dumps(card, sort_keys=True))
+        if args.jsonl:
+            for card in cards:
+                print(json.dumps(card, sort_keys=True))
+        else:
+            print_compact_summary(cards, out, args.summary_limit)
     return 0
+
+
+def _card_file(card: dict) -> str:
+    for key in ("file", "path", "source"):
+        value = str(card.get(key) or "").strip()
+        if value:
+            return value
+    recon = card.get("recon")
+    if isinstance(recon, dict):
+        value = str(recon.get("file") or recon.get("location") or "").strip()
+        if value:
+            return value
+    return "-"
+
+
+def _clip(value: object, limit: int = 96) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) > limit:
+        return text[: max(0, limit - 3)] + "..."
+    return text
+
+
+def _counter_text(cards: list[dict], key: str) -> str:
+    counts = Counter(str(card.get(key) or "unknown") for card in cards)
+    return ",".join(f"{name}:{count}" for name, count in sorted(counts.items()))
+
+
+def print_compact_summary(cards: list[dict], out: Path, summary_limit: int) -> None:
+    limit = max(0, summary_limit)
+    print(f"rank-work: wrote {len(cards)} card(s) to {out}")
+    if cards:
+        print(f"rank-work: by_strategy={_counter_text(cards, 'strategy')} by_status={_counter_text(cards, 'status')}")
+    if limit:
+        print(f"rank-work: top {min(limit, len(cards))} card(s)")
+        for card in cards[:limit]:
+            reason = card.get("reason") or card.get("why_ranked") or ""
+            print(
+                "  "
+                f"{card.get('id', '-')}"
+                f" score={card.get('score', '-')}"
+                f" strategy={card.get('strategy', '-')}"
+                f" kind={card.get('kind', '-')}"
+                f" file={_clip(_card_file(card), 72)}"
+                f" reason={_clip(reason)}"
+            )
+    if len(cards) > limit:
+        print(f"rank-work: ... {len(cards) - limit} more card(s); inspect with bin/state list-cards --limit N or rerun with --jsonl")
 
 
 if __name__ == "__main__":

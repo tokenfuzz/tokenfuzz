@@ -22,10 +22,11 @@
 #   bin/scratch-status --agent N             # only scratch-N
 #   bin/scratch-status scratch-1             # explicit dir (relative or abs)
 #   bin/scratch-status --terse               # one summary line per scratch
+#   bin/scratch-status --files --agent N     # bounded recent file inventory
 #
-# Output ~1-3 KB typical, capped near 5 KB. If an agent really needs the raw
-# listing they can still run `ls -la <scratch>` directly — this command is
-# the digest, not a replacement gate.
+# Output ~1-3 KB typical, capped near 5 KB. Use `--files` for a bounded
+# newest-file inventory; reserve raw `ls -la <scratch>` for exact permission
+# or link-target checks.
 
 set -uo pipefail
 
@@ -40,6 +41,8 @@ source "$SCRIPT_ROOT/lib/quality.sh"
 source "$SCRIPT_ROOT/lib/verdict.sh"
 
 TERSE=0
+FILES=0
+FILE_LIMIT=20
 EXPLICIT_AGENTS=()
 EXPLICIT_DIRS=()
 
@@ -54,12 +57,22 @@ while [ $# -gt 0 ]; do
       EXPLICIT_AGENTS+=("$2"); shift 2 ;;
     --agent=*) EXPLICIT_AGENTS+=("${1#--agent=}"); shift ;;
     --terse) TERSE=1; shift ;;
+    --files) FILES=1; shift ;;
+    --files=*) FILES=1; FILE_LIMIT="${1#--files=}"; shift ;;
+    --file-limit)
+      [ $# -ge 2 ] || { echo "[scratch-status] --file-limit needs a value" >&2; exit 2; }
+      FILE_LIMIT="$2"; shift 2 ;;
+    --file-limit=*) FILE_LIMIT="${1#--file-limit=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; while [ $# -gt 0 ]; do EXPLICIT_DIRS+=("$1"); shift; done ;;
     -*) echo "[scratch-status] unknown option: $1" >&2; usage >&2; exit 2 ;;
     *) EXPLICIT_DIRS+=("$1"); shift ;;
   esac
 done
+
+case "$FILE_LIMIT" in
+  ''|*[!0-9]*) echo "[scratch-status] --files / --file-limit must be numeric" >&2; exit 2 ;;
+esac
 
 # ── Resolve target scratch dirs ───────────────────────────────────────
 SCRATCH_DIRS=()
@@ -163,9 +176,56 @@ mtime_of() {
   audit_stat_mtime_epoch "$1"
 }
 
+size_of() {
+  audit_stat_size "$1"
+}
+
+kind_of_file() {
+  local path="$1" base="${1##*/}" mode
+  case "$base" in
+    *.asan.txt|*.ubsan.txt|asan_output*.txt|asan-output*.txt) printf '%s' sanitizer-output; return ;;
+    *_harness.c|*_harness.cc|*_harness.cpp|harness*.c|harness*.cc|harness*.cpp) printf '%s' harness; return ;;
+    *.o|*.a|*.so|*.dylib) printf '%s' build-artifact; return ;;
+  esac
+  mode=$(testcase_mode_for_file "$path" 2>/dev/null || true)
+  if [ -n "$mode" ]; then
+    printf '%s' testcase
+  else
+    printf '%s' artifact
+  fi
+}
+
 # Sort entries by mtime desc. Input lines: "<mtime>\t<path>\t<verdict>"
 sort_newest() {
   sort -t $'\t' -k1,1nr
+}
+
+emit_recent_files() {
+  local dir="$1" total f mt sz rows kind shown
+  total=$(find "$dir" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+  total=${total:-0}
+  [ "$total" -gt 0 ] || return
+
+  printf '  recent files (newest %d of %d):\n' "$FILE_LIMIT" "$total"
+  rows=$(
+    while IFS= read -r -d '' f; do
+      mt=$(mtime_of "$f")
+      sz=$(size_of "$f")
+      printf '%s\t%s\t%s\n' "$mt" "$sz" "$f"
+    done < <(find "$dir" -maxdepth 1 -type f -print0 2>/dev/null)
+  )
+  shown=0
+  printf '%s\n' "$rows" \
+    | sort_newest \
+    | head -n "$FILE_LIMIT" \
+    | while IFS=$'\t' read -r mt sz f; do
+        [ -n "$f" ] || continue
+        kind=$(kind_of_file "$f")
+        printf '    %-50s %8s B  %-16s [%s]\n' "${f##*/}" "${sz:-0}" "$(ago_of "$mt")" "$kind"
+      done
+  shown="$FILE_LIMIT"
+  [ "$shown" -gt "$total" ] && shown="$total"
+  [ "$total" -gt "$shown" ] && printf '    ... (%d more files; narrow by name with bin/scratch-search PATTERN)\n' "$((total - shown))"
 }
 
 # ── Per-scratch digest ───────────────────────────────────────────────
@@ -173,6 +233,7 @@ sort_newest() {
 emit_scratch() {
   local dir="$1"
   local label="${dir##*/}"
+  local inventory_hint
 
   if [ ! -d "$dir" ]; then
     printf '[%s] (missing)\n' "$label"
@@ -286,7 +347,15 @@ emit_scratch() {
         done
   fi
 
-  printf '  (full ls: ls -la %s)\n' "$dir"
+  if [ "$FILES" -eq 1 ]; then
+    emit_recent_files "$dir"
+  fi
+
+  case "$label" in
+    scratch-*) inventory_hint="bin/scratch-status --files --agent ${label#scratch-}" ;;
+    *) inventory_hint="bin/scratch-status --files $dir" ;;
+  esac
+  printf '  (file inventory: %s)\n' "$inventory_hint"
 }
 
 for d in "${SCRATCH_DIRS[@]}"; do

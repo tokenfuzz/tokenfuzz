@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Tests for lib/wrappers/_zdotdir/.zprofile — re-prepends AGENT_WRAPPERS_PATH
-# after macOS's /etc/zprofile path_helper resets PATH inside `zsh -lc`.
+# Tests for lib/wrappers/_zdotdir/.zprofile/.zshenv — re-prepends the harness
+# wrappers after macOS's /etc/zprofile path_helper resets PATH inside
+# `zsh -lc`, and bootstraps non-login zsh shells too.
 set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
@@ -25,6 +26,10 @@ assert_eq 0 $? "zdotdir: .zprofile exists at expected location"
 bash -n "$ZDOTDIR_PATH/.zprofile" 2>/dev/null
 # (.zprofile is zsh-flavored; bash -n is a smoke check, not exact)
 
+[ -f "$ZDOTDIR_PATH/.zshenv" ]
+assert_eq 0 $? "zdotdir: .zshenv exists at expected location"
+bash -n "$ZDOTDIR_PATH/.zshenv" 2>/dev/null
+
 # ── With ZDOTDIR + AGENT_WRAPPERS_PATH, wrappers win the PATH race
 #    even after /etc/zprofile's path_helper. ──
 output=$(ZDOTDIR="$ZDOTDIR_PATH" AGENT_WRAPPERS_PATH="$WRAPPERS" \
@@ -36,10 +41,16 @@ output=$(ZDOTDIR="$ZDOTDIR_PATH" AGENT_WRAPPERS_PATH="$WRAPPERS" \
           "$ZSH_BIN" -lc 'command -v rg')
 assert_eq "$WRAPPERS/rg" "$output" "zdotdir: rg resolves to wrapper"
 
-# ── Without AGENT_WRAPPERS_PATH set, .zprofile is a no-op (does not crash,
-#    does not invent a path). ──
-output=$(ZDOTDIR="$ZDOTDIR_PATH" "$ZSH_BIN" -lc 'echo OK; command -v rg' 2>&1)
-assert_match 'OK' "$output" "zdotdir: no AGENT_WRAPPERS_PATH → silent no-op"
+# ── If a backend preserves ZDOTDIR but drops AGENT_WRAPPERS_PATH, infer the
+#    wrapper directory from the shim path. This keeps rg/grep capped in Codex
+#    command shells even when auxiliary env vars are filtered. ──
+output=$(ZDOTDIR="$ZDOTDIR_PATH" "$ZSH_BIN" -lc 'command -v rg' 2>&1)
+assert_eq "$WRAPPERS/rg" "$output" "zdotdir: ZDOTDIR-only login shell infers wrappers dir"
+
+# ── Non-login zsh reads .zshenv but not .zprofile; it should still find
+#    wrappers from ZDOTDIR alone. ──
+output=$(ZDOTDIR="$ZDOTDIR_PATH" "$ZSH_BIN" -c 'command -v rg' 2>&1)
+assert_eq "$WRAPPERS/rg" "$output" "zdotdir: ZDOTDIR-only non-login shell infers wrappers dir"
 
 # ── Idempotent: if PATH already contains the wrappers dir somewhere
 #    (path_helper relocates it mid-PATH), the shim strips and re-prepends

@@ -24,6 +24,7 @@ output=$("$GREP_WRAPPER" "." "$TEST_TMPDIR/large.txt" 2>/dev/null)
 line_count=$(echo "$output" | wc -l | tr -d ' ')
 # Should be 201 lines (200 data + 1 truncation notice)
 assert_match "truncated to 200" "$output" "large: truncation notice shown"
+assert_match "at least 201 total stdout lines" "$output" "large: broad search stops after visible budget"
 
 # ═══════════════════════════════════════════════════════════════
 # 3. -c flag passes through (bounded output)
@@ -126,6 +127,7 @@ stream_output=$(seq 1 500 | "$GREP_WRAPPER" '.' 2>/dev/null)
 stream_lines=$(printf '%s\n' "$stream_output" | grep -cE '^[0-9]+$' || true)
 assert_eq "200" "$stream_lines" "stream: stdin pipeline still capped at 200"
 assert_match "total stdout lines" "$stream_output" "stream: stdout cap footer fires"
+assert_match "at least 201 total stdout lines" "$stream_output" "stream: broad stdin search stops after visible budget"
 
 # ═══════════════════════════════════════════════════════════════
 # 10. Passthrough boundary — positional arg equal to a passthrough flag
@@ -143,6 +145,7 @@ output=$("$GREP_WRAPPER" -- '-c' "$PASSTHRU_HAYSTACK" 2>/dev/null)
 data_lines=$(printf '%s\n' "$output" | grep -cF -- '-c hit' || true)
 assert_eq "200" "$data_lines" "passthrough boundary: literal '-c' pattern after -- still capped"
 assert_match "total stdout lines" "$output" "passthrough boundary: cap footer fires"
+assert_match "at least 201 total stdout lines" "$output" "passthrough boundary: capped literal search stops early"
 
 # Real -c flag still triggers passthrough (count is bounded output).
 output=$("$GREP_WRAPPER" -c '.' "$PASSTHRU_HAYSTACK" 2>/dev/null)

@@ -62,6 +62,7 @@ eval "$(audit_extract_functions \
   validate_model_for_backend \
   validate_active_model \
   extract_waste_telemetry \
+  extract_raw_status \
   write_session_log_summary \
   count_structural_refusal_signals \
   log_has_codex_usage_limit \
@@ -158,7 +159,7 @@ reset_asan_run_counter() {
 # so the test exercises the real usage parser. An inlined copy drifted in
 # the past (it grew a gemini `.stats` / `.cached` branch the real function
 # never had — agy emits plain text, so bin/audit reads no usage from it).
-eval "$(audit_extract_functions extract_usage_field extract_usage_fields extract_completed_item_count extract_tool_counts extract_total_tool_uses)"
+eval "$(audit_extract_functions extract_usage_field extract_usage_fields extract_completed_item_count extract_tool_counts extract_raw_status extract_finish_fields extract_total_tool_uses)"
 
 set_agent_strategy() {
   printf '%s' "$2" > "$(agent_strategy_path "$1")"
@@ -1093,6 +1094,8 @@ EOF
 EOF
   result=$(normalize_agent_exit_code codex 5 "$TEST_TMPDIR/codex_completed_with_failed_tool.jsonl")
   assert_eq "0" "$result" "agent exit: codex completed turn normalizes failed tool aggregate status"
+  result=$(normalize_agent_exit_code codex 5 "$TEST_TMPDIR/codex_completed_with_failed_tool.jsonl" 0 1 0 0)
+  assert_eq "0" "$result" "agent exit: cached codex status flags normalize failed tool aggregate status"
 
   result=$(normalize_agent_exit_code oss 5 "$TEST_TMPDIR/codex_completed_with_failed_tool.jsonl")
   assert_eq "0" "$result" "agent exit: oss completed turn follows codex normalization"
@@ -1113,6 +1116,8 @@ EOF
 EOF
   result=$(normalize_agent_exit_code codex 5 "$TEST_TMPDIR/codex_turn_failed.jsonl")
   assert_eq "5" "$result" "agent exit: codex turn.failed preserves non-zero status"
+  result=$(normalize_agent_exit_code codex 5 "$TEST_TMPDIR/codex_turn_failed.jsonl" 0 0 1 0)
+  assert_eq "5" "$result" "agent exit: cached codex failed flag preserves non-zero status"
 
   cat > "$TEST_TMPDIR/codex_rate_limited.jsonl" <<'EOF'
 {"type":"thread.started","thread_id":"abc"}
@@ -1276,14 +1281,58 @@ done
 
 result=$(extract_waste_telemetry "$TEST_TMPDIR/no-such-log.jsonl")
 assert_match 'tool_bytes=0 max_output=0 over8k=0' "$result" "waste: missing log returns zero summary"
+cat > "$TEST_TMPDIR/raw_status.jsonl" <<'EOF'
+{"type":"turn.completed"}
+{"type":"result","status":"success"}
+EOF
+raw_status_out=$(extract_raw_status "$TEST_TMPDIR/raw_status.jsonl")
+assert_match 'codex_completed=1' "$raw_status_out" "raw-status shell helper: codex completion surfaced"
+assert_match 'gemini_success=1' "$raw_status_out" "raw-status shell helper: gemini success surfaced"
+raw_status_missing=$(extract_raw_status "$TEST_TMPDIR/no-such-raw-status.jsonl")
+assert_match 'rate_limit=0' "$raw_status_missing" "raw-status shell helper: missing log has zero rate-limit flag"
+
+cat > "$TEST_TMPDIR/finish_fields.jsonl" <<'EOF'
+{"type":"item.completed","item":{"type":"command_execution","command":"ls","aggregated_output":"x"}}
+{"type":"tool_use","tool_name":"run_shell_command","tool_id":"g1","parameters":{"command":"bin/probe scratch-1/t.c"}}
+{"type":"tool_use","tool_name":"read_file","tool_id":"g2","parameters":{"path":"foo"}}
+{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":3,"cache_creation_input_tokens":2,"output_tokens":5},"duration_ms":123}
+{"type":"result","status":"success"}
+EOF
+finish_fields=$(extract_finish_fields "$TEST_TMPDIR/finish_fields.jsonl" codex)
+assert_match '^input_tokens=10$' "$finish_fields" "finish-fields: input tokens surfaced"
+assert_match '^cached_input_tokens=3$' "$finish_fields" "finish-fields: cache-read tokens surfaced"
+assert_match '^cache_creation_input_tokens=2$' "$finish_fields" "finish-fields: cache-creation tokens surfaced"
+assert_match '^output_tokens=5$' "$finish_fields" "finish-fields: output tokens surfaced"
+assert_match '^total_tokens=15$' "$finish_fields" "finish-fields: total tokens matches usage helper"
+assert_match '^duration_ms=123$' "$finish_fields" "finish-fields: duration surfaced"
+assert_match '^command_execution=2$' "$finish_fields" "finish-fields: command count matches tool helper"
+assert_match '^all_tools=3$' "$finish_fields" "finish-fields: total tool count matches tool helper"
+assert_match '^codex_completed=1$' "$finish_fields" "finish-fields: codex completion surfaced"
+assert_match '^gemini_success=1$' "$finish_fields" "finish-fields: gemini success surfaced"
+
+mkdir -p "$TEST_TMPDIR/bad-helper-root/lib"
+cat > "$TEST_TMPDIR/bad-helper-root/lib/audit_helpers.py" <<'PY'
+raise SystemExit(1)
+PY
+old_script_root="$SCRIPT_ROOT"
+SCRIPT_ROOT="$TEST_TMPDIR/bad-helper-root"
+finish_fields_failed=$(extract_finish_fields "$TEST_TMPDIR/finish_fields.jsonl" codex)
+SCRIPT_ROOT="$old_script_root"
+assert_match '^command_execution=0$' "$finish_fields_failed" "finish-fields failure: command count has safe default"
+assert_match '^rate_limit=$' "$finish_fields_failed" "finish-fields failure: blank rate-limit re-enables shell fallback"
+assert_match '^codex_completed=$' "$finish_fields_failed" "finish-fields failure: blank codex completion re-enables shell fallback"
+assert_match '^gemini_success=$' "$finish_fields_failed" "finish-fields failure: blank gemini success re-enables shell fallback"
+
 assert_match 'Agent \$_role_display waste: \$\{waste_telemetry\}' "$run_agent_src" "run_agent: writes waste telemetry to index"
-assert_match 'usage_fields=\$\(extract_usage_fields "\$raw_logfile"\)' "$run_agent_src" "run_agent: extracts all usage fields in one raw-log read"
+assert_match 'finish_fields=\$\(extract_finish_fields "\$raw_logfile" "\$ACTIVE_BACKEND"\)' "$run_agent_src" "run_agent: extracts finish fields in one raw-log read"
+assert_not_match 'usage_fields=\$\(extract_usage_fields "\$raw_logfile"\)' "$run_agent_src" "run_agent: avoids separate usage raw-log scan"
 assert_not_match 'extract_usage_field "\$raw_logfile" total_tokens' "$run_agent_src" "run_agent: avoids per-field usage raw-log scans"
-assert_match 'tool_counts=\$\(extract_tool_counts "\$raw_logfile"\)' "$run_agent_src" "run_agent: extracts all tool counts in one raw-log read"
+assert_not_match 'tool_counts=\$\(extract_tool_counts "\$raw_logfile"\)' "$run_agent_src" "run_agent: avoids separate tool-count raw-log scan"
 assert_not_match 'extract_completed_item_count "\$raw_logfile" command_execution' "$run_agent_src" "run_agent: avoids per-field tool-count raw-log scans"
-assert_match 'normalize_agent_exit_code "\$ACTIVE_BACKEND" "\$exit_code" "\$raw_logfile" "\$rate_limit_rejected"' "$run_agent_src" "run_agent: passes cached rate-limit status into exit normalization"
-run_agent_rate_limit_checks=$(grep -cF 'log_has_rate_limit_rejection "$raw_logfile"' <<< "$run_agent_src" || true)
-assert_eq "1" "$run_agent_rate_limit_checks" "run_agent: checks raw-log rate limit once after recovery"
+assert_not_match 'raw_status=\$\(extract_raw_status "\$raw_logfile"\)' "$run_agent_src" "run_agent: avoids separate raw-status raw-log scan"
+assert_match 'raw_codex_completed' "$run_agent_src" "run_agent: passes cached backend status into exit normalization"
+assert_match 'normalize_agent_exit_code "\$ACTIVE_BACKEND" "\$exit_code" "\$raw_logfile"' "$run_agent_src" "run_agent: passes cached rate-limit status into exit normalization"
+assert_match 'if \[ -z "\$rate_limit_rejected" \]' "$run_agent_src" "run_agent: helper failure re-enables rate-limit fallback"
 assert_match 'waste_telemetry=\$\(write_session_log_summary "\$raw_logfile"' "$run_agent_src" "run_agent: gets waste telemetry from summary raw-log pass"
 assert_match 'write_session_log_summary "\$raw_logfile"' "$run_agent_src" "run_agent: writes compact log summaries"
 assert_match 'pkill -TERM -P "\$watchdog_pid"' "$run_agent_src" "run_agent: watchdog child sleep is killed before watchdog shell"
