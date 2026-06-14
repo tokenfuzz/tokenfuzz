@@ -601,11 +601,16 @@ def summarise_for_prompt(features: dict | None, *, max_items: int = 40) -> str:
     lines.append("")
     lines.append("These TUs are present in the source tree but produced "
                  "empty/sanitizer-runtime-only object files in the current "
-                 "sanitizer build — they are NOT compiled in. Do not propose "
-                 "or pivot to work cards against them; the queue gate will "
-                 "block such cards as `tu-not-compiled`. Fix the build "
-                 "(target.toml configure flags) if coverage of these TUs "
-                 "is required.")
+                 "sanitizer build. They are not reachable through the "
+                 "configured sanitizer binary alone, and direct queued cards "
+                 "against those TUs may be blocked as `tu-not-compiled`. Do "
+                 "not discard a lead solely for this reason when a documented "
+                 "public API, CLI mode, target runner, or `// HARNESS:` "
+                 "testcase can reach the code under the enabled sanitizer. "
+                 "Keep harnesses within the public caller contract. If no "
+                 "sanitizer-supported public entry point reaches the TU, mark "
+                 "the lead ENV-BLOCKED/`tu-not-compiled` or fix target.toml "
+                 "build coverage if that surface should be audited.")
     lines.append("")
     if feats:
         lines.append(f"- Binary features: `{' '.join(feats)}`")

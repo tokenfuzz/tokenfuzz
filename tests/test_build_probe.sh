@@ -198,6 +198,12 @@ summary_text=$(python3 "$PROBE" summary --features "$TEST_TMPDIR/consumer/featur
 assert_match 'Build feature manifest' "$summary_text" "summary: emits manifest header"
 assert_match 'lib/vtls/' "$summary_text" "summary: lists stub directory"
 assert_match 'tu-not-compiled' "$summary_text" "summary: names the queue gate reason"
+assert_match 'not reachable through the configured sanitizer binary alone' "$summary_text" \
+  "summary: scopes stub TUs to the configured binary"
+assert_match 'public API, CLI mode, target runner, or `// HARNESS:`' "$summary_text" \
+  "summary: preserves public harnessable reachability"
+assert_not_match 'Do not propose or pivot' "$summary_text" \
+  "summary: does not blanket-block public harnessable leads"
 
 empty_summary=$(python3 "$PROBE" summary --features /nonexistent/features.json)
 assert_eq "" "$empty_summary" "summary: missing manifest → empty output (fail-open)"
