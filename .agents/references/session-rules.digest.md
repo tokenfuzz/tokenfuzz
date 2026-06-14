@@ -54,6 +54,9 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
   rerun identical inputs.
 - `bin/probe-history <testcase>` before re-probing — if a confirmed
   verdict exists, reuse it; only re-run when state has shifted.
+- Do not run `bin/rank-work` just to browse cards. It rewrites the queue and
+  can dump tens of KB; use `bin/state explain-queue` or
+  `bin/state list-cards --limit N` for inspection.
 
 ## Search discipline (output cap is enforced)
 
@@ -80,7 +83,9 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
   1500-line / 32 KiB cap). `PATCH_CONTEXT=80` widens.
 - Output cap behavior: any tool output past ~50 KB is replaced with
   head + elision marker + tail; the full original spills to
-  `$TMPDIR/outcap-<label>-<sha>.txt`. Recover with `cat <path>`. Disable
+  `$TMPDIR/outcap-<label>-<sha>.txt`. Inspect it with bounded reads such
+  as `bin/peek <path>:1-200` or `tail -50 <path>`. Do not `cat` spills
+  unless you intentionally want the full output in the transcript. Disable
   with `OUTCAP_MAX_BYTES=0`.
 - Don't run `bin/state … --help` — the cheat sheet below is the argument
   shape for every subcommand you need. Flags accept the aliases shown.

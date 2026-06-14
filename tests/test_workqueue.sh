@@ -1007,6 +1007,18 @@ assert_match 'Queue Health' "$resume" "state: resume includes queue health"
 # resume payload. Recent Tried Inputs is opt-in via env var.
 assert_not_match 'Quick reference' "$resume" "state: resume does not embed cheat sheet (now in session-rules)"
 assert_not_match 'Recent Tried Inputs' "$resume" "state: resume omits recent tried inputs by default"
+
+# No-card resume must not nudge agents back into bin/rank-work. A fresh empty
+# results dir has no hypotheses and no eligible cards, so the no-card branch
+# fires. Guard against reintroducing the "expand/rerank the queue" nudge that
+# conflicts with the prompt's "explain-queue and stop" guidance.
+nocard_results="$TEST_TMPDIR/nocard-resume-results"
+mkdir -p "$nocard_results"
+nocard_resume=$("$STATE" --results-dir "$nocard_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  resume --agent 9 --mode generic --role reproduce)
+assert_match 'no eligible work card' "$nocard_resume" "state: no-card resume reports no eligible work"
+assert_match 'explain-queue' "$nocard_resume" "state: no-card resume points at explain-queue"
+assert_not_match 'expand/rerank' "$nocard_resume" "state: no-card resume drops the expand/rerank nudge"
 assert_file_contains "$SCRIPT_ROOT/lib/workqueue.py" 'recent_hypotheses\(ctx, limit=resume_limit, agent=agent, rows=hyps\)' \
   "state: resume reuses preloaded hypothesis rows"
 assert_file_contains "$SCRIPT_ROOT/lib/workqueue.py" 'recent_runs\(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, card_id=card_id, rows=runs\)' \

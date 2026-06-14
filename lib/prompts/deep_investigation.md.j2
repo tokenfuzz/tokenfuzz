@@ -12,7 +12,7 @@
 
 - Run `bin/state resume --agent {{ agent_num }} --mode {{ mode }} --role {{ role }}{{ state_strategy_arg }}`.
 - Active PENDING/INVESTIGATING/NEEDS_TESTCASE hypothesis? **Continue immediately.** No new recon.
-- No active hypothesis? Use the assigned work card from the resume. If none is assigned, {{ audit_fixed_strategy_clause }}inspect `bin/state explain-queue --mode {{ mode }}` and expand/rerank the queue before more broad analysis.
+- No active hypothesis? Use the assigned work card from the resume. If none is assigned, {{ audit_fixed_strategy_clause }}inspect `bin/state explain-queue --mode {{ mode }}` and stop after recording why no launchable work exists.
 - Read `{{ state_file_path }}` only if it exists and the structured resume lacks needed context. Do not create or manually maintain `AUDIT_STATE-N.md`.
 {{ wrong_mode_subsystem_line }}
 

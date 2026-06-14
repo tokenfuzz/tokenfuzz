@@ -66,6 +66,8 @@ output=$(_subshell_eval "OUTCAP_SPILL_DIR='$SPILL_DIR' cap_output_file '$BIG' te
 assert_match 'output_cap: test-big truncated' "$output" "replacement: marker emitted"
 assert_match 'head .* tail' "$output" "replacement: marker labels head/tail counts"
 assert_match 'Full output:' "$output" "replacement: marker points at spill path"
+assert_match 'bin/peek .*:1-200' "$output" "replacement: marker recommends bounded reread"
+assert_not_match 'Re-read with `cat' "$output" "replacement: marker does not recommend catting the spill"
 assert_match 'fixture-line-00001-' "$output" "replacement: head contains first lines"
 assert_match 'fixture-line-15000-' "$output" "replacement: tail contains last lines"
 # A middle line (somewhere around line 7500) MUST be elided. If it shows up,

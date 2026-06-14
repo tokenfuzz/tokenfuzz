@@ -105,7 +105,8 @@ _outcap_resolve_spill_dir() {
 #   - If size ≤ OUTCAP_MAX_BYTES: passthrough byte-for-byte.
 #   - Else: head H bytes (line-aligned) + marker + tail T bytes (line-aligned).
 #           The full <input-file> is preserved on disk at OUTCAP_SPILL_DIR
-#           under a stable name; marker points there.
+#           under a stable name; marker points there and recommends bounded
+#           inspection so agents do not immediately re-poison context.
 #
 # The optional [label] is shown in the truncation marker so agents can tell
 # which tool emitted it ("rg-safe", "peek", "asan-crash").
@@ -216,13 +217,23 @@ sys.stdout.buffer.write(head)
 elided = total - len(head) - len(tail)
 if elided < 0:
     elided = 0
-spill_str = spill if spill else "<spill unavailable>"
-marker = (
+prefix = (
     f"\n[output_cap: {label} truncated — {total:,} total bytes, "
     f"{len(head):,} head + {len(tail):,} tail shown, {elided:,} bytes elided. "
-    f"Full output: {spill_str}. Re-read with `cat {spill_str}` "
-    f"or narrow your query. Override: OUTCAP_MAX_BYTES=0 to disable.]\n"
 )
+disable = (
+    "use OUTCAP_MAX_BYTES=0 to disable only when you intentionally want full "
+    "output in the transcript.]\n"
+)
+if spill:
+    marker = (
+        prefix
+        + f"Full output: {spill}. Inspect bounded ranges with "
+        + f"`bin/peek {spill}:1-200` or `tail -50 {spill}`; "
+        + disable
+    )
+else:
+    marker = prefix + "(spill unavailable.) Narrow your query or " + disable
 sys.stdout.buffer.write(marker.encode("utf-8"))
 sys.stdout.buffer.write(tail)
 # Ensure trailing newline so the next agent line doesn't visually butt up
@@ -239,10 +250,10 @@ PY
   [ "$elided" -lt 0 ] && elided=0
   head -c "$OUTCAP_HEAD_BYTES" "$in_file"
   if [ -n "$spill_path" ]; then
-    printf '\n[output_cap: %s truncated — %d total bytes, head/tail shown, %d bytes elided. Full output: %s. Re-read with `cat %s` or narrow your query.]\n' \
-      "$label" "$total_bytes" "$elided" "$spill_path" "$spill_path"
+    printf '\n[output_cap: %s truncated — %d total bytes, head/tail shown, %d bytes elided. Full output: %s. Inspect bounded ranges with `bin/peek %s:1-200` or `tail -50 %s`; use OUTCAP_MAX_BYTES=0 to disable only when you intentionally want full output in the transcript.]\n' \
+      "$label" "$total_bytes" "$elided" "$spill_path" "$spill_path" "$spill_path"
   else
-    printf '\n[output_cap: %s truncated — %d total bytes, head/tail shown, %d bytes elided. (spill unavailable.) Narrow your query or disable with OUTCAP_MAX_BYTES=0.]\n' \
+    printf '\n[output_cap: %s truncated — %d total bytes, head/tail shown, %d bytes elided. (spill unavailable.) Narrow your query or use OUTCAP_MAX_BYTES=0 to disable only when you intentionally want full output in the transcript.]\n' \
       "$label" "$total_bytes" "$elided"
   fi
   tail -c "$OUTCAP_TAIL_BYTES" "$in_file"

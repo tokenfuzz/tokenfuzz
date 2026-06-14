@@ -4231,7 +4231,7 @@ def state_resume(
                 [
                     "- none",
                     "",
-                    "Next action: no eligible work card is available. Use `bin/state explain-queue` and expand/rerank the queue before launching more agent work.",
+                    "Next action: no eligible work card is available. Use `bin/state explain-queue` to record why no launchable work exists; do not run `bin/rank-work` interactively to expand or rerank the queue.",
                 ]
             )
 

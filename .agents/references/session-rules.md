@@ -122,6 +122,10 @@ bin/state recent-tried --agent N --limit 40
 ```
 Don't rerun identical inputs.
 
+Do not run `bin/rank-work` just to browse cards. It rewrites the queue and
+can dump tens of KB of JSONL into the transcript; use
+`bin/state explain-queue` or `bin/state list-cards --limit N` for inspection.
+
 ## Search Discipline
 
 - Every `rg`/`grep` call MUST be scoped with `--glob` or a narrow directory.
@@ -160,6 +164,10 @@ Don't rerun identical inputs.
   head+tail spill cap) so a stray `sed -n '1,500p' BIG_FILE` no longer
   floods context. Set `CAP_LINES=0 CAP_BYTES=0 sed …` for the rare
   full-stream case.
+- When an output cap marker names an `outcap-*` spill file, inspect it with
+  bounded reads (`bin/peek <path>:1-200`, `tail -50 <path>`, or a narrow
+  `bin/rg-safe` query). Do not `cat` the spill unless you intentionally want
+  the full output to enter the transcript.
 - For viewing prior-fix patches, use `bin/show-patch <commit> [<path>]`
   instead of `git show --unified=80`. Default context is 10 lines
   (`PATCH_CONTEXT=80` to widen). Bad/unknown hashes return a single-line

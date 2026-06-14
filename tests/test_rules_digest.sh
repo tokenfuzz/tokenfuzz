@@ -120,6 +120,8 @@ assert_file_contains "$DIGEST" "strategy S" \
   "digest cheat sheet documents explain-queue strategy flag"
 assert_file_contains "$DIGEST" "bin/state recent-tried --agent N --limit 40" \
   "digest tells compressed sessions to use recent-tried instead of raw tail"
+assert_file_contains "$DIGEST" 'Do not run `bin/rank-work` just to browse cards' \
+  "digest steers agents away from rank-work dumps"
 if grep -q 'tail -40 <RESULTS_DIR>/tried-inputs-N.log' "$DIGEST"; then
   fail "digest no longer recommends raw tail for tried-inputs" \
     "found stale tail -40 tried-inputs guidance in $DIGEST"
