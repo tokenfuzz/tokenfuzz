@@ -31,6 +31,7 @@ audit_extract_function() {
 }
 
 eval "$(audit_extract_function effective_work_card_rows)"
+eval "$(audit_extract_function unclaimed_strategy_counts)"
 eval "$(audit_extract_function unclaimed_card_strategies)"
 eval "$(audit_extract_function unclaimed_card_subsystems)"
 eval "$(audit_extract_function active_agent_strategies)"
@@ -45,8 +46,12 @@ eval "$(audit_extract_function next_strategy_in_rotation)"
 eval "$(audit_extract_function pick_exhaustion_recovery_strategy)"
 eval "$(audit_extract_function pick_cold_start_strategy)"
 eval "$(audit_extract_function count_unclaimed_cards_for)"
+eval "$(audit_extract_function count_unclaimed_cards_for_two_strategies)"
+eval "$(audit_extract_function count_unclaimed_cards_for_strategy_subsystem)"
 eval "$(audit_extract_function pick_strategy_by_load)"
 eval "$(audit_extract_function recover_exhausted_agent)"
+eval "$(audit_extract_function strategy_completion_fields)"
+eval "$(audit_extract_function update_subsystem_dry_streaks)"
 eval "$(audit_extract_function agent_probe_activity_score)"
 eval "$(audit_extract_function _normalize_subsystem_key)"
 eval "$(audit_extract_function _subsystem_keys_collide)"
@@ -135,6 +140,11 @@ strats=$(unclaimed_card_strategies)
 strats="${strats% }"
 assert_eq "S1 S7" "$strats" \
   "unclaimed_card_strategies: skip non-unclaimed and reject malformed strategy labels"
+counts=$(unclaimed_strategy_counts 1)
+assert_match $'S7\t2' "$counts" \
+  "unclaimed_strategy_counts: counts unclaimed valid strategies in one JSON pass"
+assert_match $'S1\t1' "$counts" \
+  "unclaimed_strategy_counts: includes lower-volume strategy counts"
 
 subs=$(unclaimed_card_subsystems)
 subs="${subs% }"
@@ -163,6 +173,18 @@ JSONL
   n_de=$(count_unclaimed_cards_for S7 d/e)
   assert_eq "1" "$n_de" \
     "overlay: unclaimed W4 in d/e still counts"
+  pair_counts=$(count_unclaimed_cards_for_two_strategies S1 S7)
+  IFS="$(printf '\t')" read -r pair_s1 pair_s7 <<< "$pair_counts"
+  assert_eq "1" "$pair_s1" \
+    "batched card counts: first strategy total"
+  assert_eq "1" "$pair_s7" \
+    "batched card counts: second strategy total respects claim overlay"
+  strat_counts=$(count_unclaimed_cards_for_strategy_subsystem S7 d/e)
+  IFS="$(printf '\t')" read -r strat_total strat_sub <<< "$strat_counts"
+  assert_eq "1" "$strat_total" \
+    "batched card counts: strategy total"
+  assert_eq "1" "$strat_sub" \
+    "batched card counts: strategy+subsystem total"
   subs=$(unclaimed_card_subsystems); subs="${subs% }"
   assert_eq "a/b d/e x/y" "$subs" \
     "overlay: claimed W2 drops a/c from the unclaimed subsystem set"
@@ -188,6 +210,44 @@ JSONL
     "overlay: terminal W2 status drops a/c from the unclaimed subsystem set"
 
   rm -f "$RESULTS_DIR/state/claims.jsonl"
+fi
+
+# ═══════════════════════════════════════════════════════════════
+# 1c. allowed_strategies: a card claimable from a non-primary strategy
+#     (validator-Promoted recon cards via card_strategy_matches) must be
+#     counted toward that strategy's availability, or scheduling starves a
+#     strategy that actually has claimable cards.
+# ═══════════════════════════════════════════════════════════════
+if command -v jq >/dev/null 2>&1; then
+  cat > "$WORK_CARDS" <<'JSONL'
+{"id":"P1","status":"unclaimed","strategy":"S7","subsystem":"p/q","allowed_strategies":["S5","S7"]}
+{"id":"P2","status":"unclaimed","strategy":"S2","subsystem":"p/r"}
+JSONL
+  counts=$(unclaimed_strategy_counts 1)
+  assert_match $'S7\t1' "$counts" "allowed_strategies: primary S7 counted"
+  assert_match $'S5\t1' "$counts" "allowed_strategies: allowed S5 counted toward S5"
+  assert_match $'S2\t1' "$counts" "allowed_strategies: plain card unaffected"
+  n_s5=$(count_unclaimed_cards_for S5)
+  assert_eq "1" "$n_s5" "allowed_strategies: count_unclaimed_cards_for honors allowed S5"
+  n_s7=$(count_unclaimed_cards_for S7)
+  assert_eq "1" "$n_s7" "allowed_strategies: primary S7 still counts once (no double count)"
+  pair_counts=$(count_unclaimed_cards_for_two_strategies S5 S7)
+  IFS="$(printf '\t')" read -r pair_s5 pair_s7 <<< "$pair_counts"
+  assert_eq "1" "$pair_s5" "allowed_strategies: two-strategy count honors allowed S5"
+  assert_eq "1" "$pair_s7" "allowed_strategies: two-strategy count primary S7"
+  ss_counts=$(count_unclaimed_cards_for_strategy_subsystem S5 p/q)
+  IFS="$(printf '\t')" read -r ss_total ss_sub <<< "$ss_counts"
+  assert_eq "1" "$ss_total" "allowed_strategies: strategy+subsystem total honors allowed S5"
+  assert_eq "1" "$ss_sub" "allowed_strategies: strategy+subsystem matched subsystem"
+  # Restore the section-1 fixture for any later assertions that reuse it.
+  cat > "$WORK_CARDS" <<'JSONL'
+{"id":"W1","status":"unclaimed","strategy":"S1","subsystem":"a/b"}
+{"id":"W2","status":"unclaimed","strategy":"S7","subsystem":"a/c"}
+{"id":"W3","status":"discarded","strategy":"S2","subsystem":"a/b"}
+{"id":"W4","status":"unclaimed","strategy":"S7","subsystem":"d/e"}
+{"id":"W5","status":"find","strategy":"S3","subsystem":"a/b"}
+{"id":"W6","status":"unclaimed","strategy":"BOGUS","subsystem":"x/y"}
+JSONL
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -385,6 +445,11 @@ assert_match "by_strategy=.*Strategy7\\(Adversarial-input\\):2" "$snapshot" \
   "log_queue_state: histograms strategies (S7 count)"
 assert_match "by_subsystem.top8.=.*a/c:1" "$snapshot" \
   "log_queue_state: histograms subsystems"
+log_queue_state_src="$(audit_extract_function log_queue_state)"
+assert_match 'jq -n -r' "$log_queue_state_src" \
+  "log_queue_state: queue rows summarized in one streaming jq pass"
+assert_not_match 'wc -l|uniq -c' "$log_queue_state_src" \
+  "log_queue_state: avoids repeated shell count/sort pipelines"
 
 # ═══════════════════════════════════════════════════════════════
 # 11. log_queue_state silent on empty queue
@@ -775,6 +840,21 @@ assert_eq "S2" "$got" "pick_cold_start_strategy: agent 3 takes 3rd-largest non-S
 # (c) Wrap-around: more agents than distinct non-S1 strategies → modulo.
 got=$(pick_cold_start_strategy 4)
 assert_eq "S7" "$got" "pick_cold_start_strategy: agent 4 wraps back to top (S7)"
+pick_cold_start_strategy_src="$(audit_extract_function pick_cold_start_strategy)"
+assert_match 'cold_start_strategies\.txt' "$pick_cold_start_strategy_src" \
+  "pick_cold_start_strategy: can reuse cached cold-start rank"
+
+# (c2) Iteration cache path: no live queue re-rank is needed when the
+# per-iteration cache already holds the ordered non-S1 strategy list.
+mkdir -p "$RESULTS_DIR/.iter_cache"
+printf 'S5\nS2\n' > "$RESULTS_DIR/.iter_cache/cold_start_strategies.txt"
+got=$(ITERATION_CACHE_DIR="$RESULTS_DIR/.iter_cache" pick_cold_start_strategy 1)
+assert_eq "S5" "$got" "pick_cold_start_strategy: cached rank agent 1"
+got=$(ITERATION_CACHE_DIR="$RESULTS_DIR/.iter_cache" pick_cold_start_strategy 2)
+assert_eq "S2" "$got" "pick_cold_start_strategy: cached rank agent 2"
+got=$(ITERATION_CACHE_DIR="$RESULTS_DIR/.iter_cache" pick_cold_start_strategy 3)
+assert_eq "S5" "$got" "pick_cold_start_strategy: cached rank wraps"
+rm -rf "$RESULTS_DIR/.iter_cache"
 
 # (d) Queue is S1-only — boot on S1 (don't starve the agent).
 cat > "$WORK_CARDS" <<'JSONL'
@@ -819,6 +899,30 @@ cat > "$WORK_CARDS" <<'JSONL'
 JSONL
 got=$(pick_strategy_by_load "S1 S2 S5 S7")
 assert_eq "S7" "$got" "pick_strategy_by_load: skewed dist → argmax picks S7"
+pick_strategy_by_load_src="$(audit_extract_function pick_strategy_by_load)"
+assert_match 'unclaimed_strategy_counts' "$pick_strategy_by_load_src" \
+  "pick_strategy_by_load: reuses one structured strategy histogram helper"
+assert_not_match 'sort \| uniq -c' "$pick_strategy_by_load_src" \
+  "pick_strategy_by_load: avoids text sort/uniq histogram pipeline"
+assert_not_match 'count_unclaimed_cards_for "\$strat"' "$pick_strategy_by_load_src" \
+  "pick_strategy_by_load: avoids per-strategy queue rescans"
+
+update_subsystem_dry_streaks_src="$(audit_extract_function update_subsystem_dry_streaks)"
+assert_match 'count_unclaimed_cards_for_two_strategies' "$update_subsystem_dry_streaks_src" \
+  "strategy status loop: rotation log gets from/to counts in one queue pass"
+assert_match 'count_unclaimed_cards_for_strategy_subsystem' "$update_subsystem_dry_streaks_src" \
+  "strategy status loop: keep log gets strategy/subsystem counts in one queue pass"
+assert_not_match 'count_unclaimed_cards_for "\$current_strat"' "$update_subsystem_dry_streaks_src" \
+  "strategy status loop: avoids repeated single-count queue scans"
+fields=$(strategy_completion_fields '{"complete":false,"evidence":2,"threshold":4}')
+IFS="$(printf '\t')" read -r complete_field evidence_field threshold_field <<< "$fields"
+assert_eq "false" "$complete_field" "strategy completion fields: complete parsed"
+assert_eq "2" "$evidence_field" "strategy completion fields: evidence parsed"
+assert_eq "4" "$threshold_field" "strategy completion fields: threshold parsed"
+assert_match 'strategy_completion_fields "\$strat_status"' "$update_subsystem_dry_streaks_src" \
+  "strategy status loop: parses strategy completion JSON once"
+assert_not_match "jq -r '\\.complete'|jq -r '\\.evidence'|jq -r '\\.threshold'" "$update_subsystem_dry_streaks_src" \
+  "strategy status loop: avoids per-field jq strategy-status parsing"
 
 # (b) Deny-list excludes S7 → next-largest (S5) wins.
 got=$(pick_strategy_by_load "S1 S2 S5 S7" "S7")

@@ -35,10 +35,14 @@ assert_eq "201" "$line_count" "large line-range: 200 data lines + 1 footer"
 python3 -c 'import sys; sys.stdout.write("Z" * 150000 + "\n")' > "$TEST_TMPDIR/huge.txt"
 output=$("$SED_WRAPPER" -n '1p' "$TEST_TMPDIR/huge.txt" 2>/dev/null)
 output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
-[ "$output_bytes" -le 135000 ] \
-  && pass "byte cap: huge single line clipped (got ${output_bytes})" \
-  || fail "byte cap: huge single line should clip" "got ${output_bytes} bytes"
-assert_match "stdout clipped at 131072" "$output" "byte cap: footer reports default cap"
+[ "$output_bytes" -le 56000 ] \
+  && pass "byte cap: huge single line head+tail capped (got ${output_bytes})" \
+  || fail "byte cap: huge single line should be head+tail capped" "got ${output_bytes} bytes"
+assert_match "output_cap: sed-stdout truncated" "$output" "byte cap: default path emits output_cap marker"
+
+# Explicit CAP_BYTES preserves the historical chop-and-footer behavior.
+output=$(CAP_BYTES=65536 "$SED_WRAPPER" -n '1p' "$TEST_TMPDIR/huge.txt" 2>/dev/null)
+assert_match "stdout clipped at 65536" "$output" "byte cap: explicit CAP_BYTES uses legacy footer"
 
 # CAP_BYTES env override.
 output=$(CAP_BYTES=4096 "$SED_WRAPPER" -n '1p' "$TEST_TMPDIR/huge.txt" 2>/dev/null)

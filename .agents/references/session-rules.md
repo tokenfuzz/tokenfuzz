@@ -118,7 +118,7 @@ When your testcase dies to a reproducible guard string, append a new entry.
 
 Every `bin/probe` / `bin/run-asan-multi` run appends to `TRIED_INPUTS_LOG`. After context compression:
 ```
-tail -40 <RESULTS_DIR>/tried-inputs-N.log
+bin/state recent-tried --agent N --limit 40
 ```
 Don't rerun identical inputs.
 
@@ -135,27 +135,31 @@ Don't rerun identical inputs.
   by default; the only escape hatch is `--include-logs` (audit work only).
 - For `state/hypotheses.jsonl`, `state/runs.jsonl`, `tried-inputs-N.log`:
   never `tail`/`sed`/`cat` them directly. Use the slim accessors:
+  - `bin/state show-recent [--agent N] [--hyps N] [--runs N] [--claims N]`
   - `bin/state recent-hyps  [--agent N] [--card-id ID] [--status REGEX] [--limit N]`
   - `bin/state recent-runs  [--agent N] [--hypothesis-id H-...] [--verdict REGEX]`
   - `bin/state recent-tried --agent N|all [--verdict REGEX] [--hypothesis H-...]`
-  Each is ~6–10× smaller than the equivalent `tail` and returns only the
-  columns triage actually needs. The full files stay on disk; reach for
+  `show-recent` is the one-call default when you need a compact session
+  snapshot. Each accessor is ~6–10× smaller than the equivalent `tail` and
+  returns only the columns triage actually needs. The full files stay on disk; reach for
   `--no-cap`/`--limit 0`/raw `tail` only when you genuinely need every field.
 - For `crashes/CRASH-*/REPORT.md` and `findings/FIND-*/REPORT.md`: use
   `bin/state show-crash`, `list-crashes`, `show-finding`, and
   `list-findings` first. Read the full `REPORT.md` only when editing that
   report or reproducing that specific artifact.
 - For broad source/repo searches, use `bin/rg-safe <rg args>` instead of bare
-  `rg`. It enforces TWO caps (200 lines + 128 KiB) and excludes log paths
-  by default. Override with `--no-cap` / `RG_CAP=0`, `--no-cap-bytes` /
-  `RG_BYTES=0`, or `--include-logs` only when you really need them.
+  `rg`. It enforces a 200-line cap plus a ~50 KiB head+tail spill cap and
+  excludes log paths by default. Override with `--no-cap` / `RG_CAP=0`,
+  `--no-cap-bytes` / `RG_BYTES=0`, or `--include-logs` only when you really
+  need them.
 - For viewing source ranges, prefer `bin/peek <FILE>:<start>-<end>` or
   `bin/peek -A N -B M PATTERN FILE` over `sed -n 'X,Yp'` and `grep -A 95`.
   `bin/peek` clamps `-A` to 30 and `-B` to 8 by default (the values that
   cover normal function-context viewing); pass `--no-cap` to widen.
-  Bare `sed` is also output-capped (200 lines / 128 KiB) so a stray
-  `sed -n '1,500p' BIG_FILE` no longer floods context. Set
-  `CAP_LINES=0 CAP_BYTES=0 sed …` for the rare full-stream case.
+  Bare `sed` is also output-capped (200 lines plus the same ~50 KiB
+  head+tail spill cap) so a stray `sed -n '1,500p' BIG_FILE` no longer
+  floods context. Set `CAP_LINES=0 CAP_BYTES=0 sed …` for the rare
+  full-stream case.
 - For viewing prior-fix patches, use `bin/show-patch <commit> [<path>]`
   instead of `git show --unified=80`. Default context is 10 lines
   (`PATCH_CONTEXT=80` to widen). Bad/unknown hashes return a single-line
@@ -175,7 +179,8 @@ bin/state resume        --agent N [--mode browser|js|generic] [--role reproduce|
 bin/state next-card     --agent N [--mode browser|js|generic] [--peek]
 bin/state show-card     CARD_ID|--card-id ID [--mode MODE]       # compact JSON
 bin/state explain-card  CARD_ID|--card-id ID [--mode MODE]       # alias
-bin/state list-cards    [--mode MODE] [--status eligible] [--limit N]
+bin/state list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N]
+bin/state dump-queue    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N]  # alias
 bin/state show-crash    CRASH-ID|--crash-id ID                  # compact JSON
 bin/state list-crashes  [--status OK|NEW|...] [--limit N]
 bin/state show-finding  FIND-ID|--finding-id ID                 # compact JSON
@@ -190,10 +195,13 @@ bin/state add-run       --agent N --hypothesis-id H-... --mode MODE --testcase T
                         [--testcase-sha1 HEX] [--asan-runs N]   # bin/probe sets these
 bin/state add-note      --agent N --hypothesis-id H-... \
                         --kind data-flow|guard|variants|decision|context --text '...'
+bin/state show-recent   [--agent N] [--hyps N] [--runs N] [--claims N] [--notes N]
 bin/state recent-hyps   [--agent N] [--card-id ID] [--status REGEX] [--strategy S] [--limit N]
 bin/state recent-runs   [--agent N] [--hypothesis-id H-...] [--card-id ID] [--verdict REGEX] [--limit N]
 bin/state recent-notes  [--agent N] [--hypothesis-id H-...] [--kind KIND] [--limit N]
+bin/state list-notes    [--agent N] [--hypothesis-id H-...] [--kind KIND] [--limit N]  # alias
 bin/state recent-tried  --agent N|all [--verdict REGEX] [--hypothesis H-...] [--target SUBSTR] [--limit N]
+bin/state explain-queue [--agent N] [--mode MODE] [--role ROLE] [--strategy S] [--top N] [--all]
 ```
 
 Search & diff helpers:

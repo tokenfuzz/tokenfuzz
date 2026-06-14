@@ -55,14 +55,19 @@ assert_match "total stderr lines" "$(tail -1 "$err")" "stderr cap: footer emitte
 # ─────────────────────────────────────────────────────────────────────────────
 
 # One match line of ~150 KiB. Line count is 1 so the line cap doesn't fire,
-# but the byte cap (default 128 KiB) must clip it.
+# but the default head+tail byte cap must trim it to roughly 50 KiB and
+# leave a spill marker.
 HUGE="$TEST_TMPDIR/huge_line.txt"
 python3 -c 'import sys; sys.stdout.write("Z" * 150000 + " match\n")' > "$HUGE"
 output=$("$RG_WRAPPER" "match" "$HUGE" 2>/dev/null)
 output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
-[ "$output_bytes" -le 135000 ] && pass "byte cap: huge match line clipped (got ${output_bytes} bytes)" \
-  || fail "byte cap: huge match should be clipped, got ${output_bytes} bytes"
-assert_match "stdout clipped at 131072 bytes" "$output" "byte cap: footer reports default cap"
+[ "$output_bytes" -le 56000 ] && pass "byte cap: huge match line head+tail capped (got ${output_bytes} bytes)" \
+  || fail "byte cap: huge match should be head+tail capped, got ${output_bytes} bytes"
+assert_match "output_cap: rg-stdout truncated" "$output" "byte cap: default path emits output_cap marker"
+
+# Explicit CAP_BYTES preserves the historical chop-and-footer behavior.
+output=$(CAP_BYTES=65536 "$RG_WRAPPER" "match" "$HUGE" 2>/dev/null)
+assert_match "stdout clipped at 65536 bytes" "$output" "byte cap: explicit CAP_BYTES uses legacy footer"
 
 # CAP_BYTES env override.
 output=$(CAP_BYTES=4096 "$RG_WRAPPER" "match" "$HUGE" 2>/dev/null)
@@ -80,7 +85,7 @@ assert_not_match "clipped" "$output" "byte cap: CAP_BYTES=0 suppresses clip foot
 
 # Both caps fire together. The line cap applies first (200 lines kept), so
 # we need each surviving line big enough that the cumulative bytes still
-# blow past CAP_BYTES — 800 chars × 200 lines ≈ 160 KiB > 128 KiB default.
+# blow past the default output-cap threshold — 800 chars × 200 lines ≈ 160 KiB.
 COMBO="$TEST_TMPDIR/combo.txt"
 python3 -c '
 for i in range(500):
@@ -88,7 +93,7 @@ for i in range(500):
 ' > "$COMBO"
 output=$("$RG_WRAPPER" "match" "$COMBO" 2>/dev/null)
 assert_match "total stdout lines" "$output" "combined: line-cap footer present"
-assert_match "stdout clipped at 131072" "$output" "combined: byte-cap footer present"
+assert_match "output_cap: rg-stdout truncated" "$output" "combined: default byte-cap marker present"
 
 # Byte clip aligns to last newline (no partial trailing line). Cap must be
 # big enough to fit at least one full line, otherwise no newline boundary

@@ -807,6 +807,17 @@ def work_surface(card: dict) -> str:
     return str(card.get("id", "")).lower()
 
 
+def card_strategy_matches(card: dict, strategy: str = "") -> bool:
+    """Return whether a work card is claimable under a requested strategy."""
+    requested = str(strategy or "").strip().upper()
+    if not requested:
+        return True
+    primary = str(card.get("strategy", "")).strip().upper()
+    allowed_raw = card.get("allowed_strategies") or []
+    allowed = {str(s).strip().upper() for s in allowed_raw if str(s).strip()}
+    return primary == requested or requested in allowed
+
+
 def is_auditable_work_card(card: dict) -> bool:
     file = card.get("file", "")
     if file and not is_auditable_source_path(file):
@@ -2632,64 +2643,157 @@ def apply_latest_claim_status(ctx: Context, cards: list[dict]) -> list[dict]:
     return out
 
 
-def explain_queue(ctx: Context, agent_modes: list[str]) -> list[dict]:
-    cards = read_jsonl(work_cards_path(ctx))
+def _active_hypothesis_queue_sets(
+    cards_by_id: dict[str, dict],
+    hypotheses: list[dict],
+) -> tuple[set[str], set[str], set[str]]:
+    active_cards: set[str] = set()
+    active_surfaces: set[str] = set()
+    active_subsystems: set[str] = set()
+    for row in hypotheses:
+        if not is_active_hypothesis_status(row.get("status", "")):
+            continue
+        cid = row.get("card_id", "")
+        card = cards_by_id.get(cid) if cid else None
+        if cid:
+            active_cards.add(cid)
+        if card:
+            surface = work_surface(card)
+        else:
+            surface = normalized_relpath(row.get("file", "").split(":", 1)[0]).lower()
+        if surface:
+            active_surfaces.add(surface)
+        subsystem = str(row.get("subsystem", "") or "")
+        if not subsystem and card:
+            subsystem = str(card.get("subsystem", "") or "")
+        if not subsystem:
+            file = row.get("file", "").split(":", 1)[0]
+            if file:
+                subsystem = subsystem_for(file)
+        if subsystem and subsystem != "unknown":
+            active_subsystems.add(subsystem)
+    return active_cards, active_surfaces, active_subsystems
+
+
+def _claimed_card_queue_sets(
+    cards_by_id: dict[str, dict],
+    latest_claims: dict[str, dict],
+    ttl: timedelta,
+    now: datetime,
+) -> tuple[set[str], set[str]]:
+    claimed_surfaces: set[str] = set()
+    claimed_subsystems: set[str] = set()
+    for cid, claim in latest_claims.items():
+        if not claim_blocks_card(claim, ttl, now):
+            continue
+        card = cards_by_id.get(cid)
+        if not card:
+            continue
+        surface = work_surface(card)
+        if surface:
+            claimed_surfaces.add(surface)
+        subsystem = str(card.get("subsystem", "") or "")
+        if subsystem and subsystem != "unknown":
+            claimed_subsystems.add(subsystem)
+    return claimed_surfaces, claimed_subsystems
+
+
+def _queue_status_row(
+    card: dict,
+    *,
+    latest: dict[str, dict],
+    ttl: timedelta,
+    now: datetime,
+    active_cards: set[str],
+    active_surfaces: set[str],
+    claimed_surfaces: set[str],
+    saturated_subsystems: set[str],
+    owned_subsystems: set[str],
+    features_manifest: dict,
+    agent_modes: list[str],
+    strategy: str = "",
+) -> dict:
+    cid = card.get("id", "")
+    reason = "eligible"
+    status = visible_card_status(latest.get(cid), ttl, now)
+    surface = work_surface(card)
+    if not is_auditable_work_card(card):
+        reason = "not-auditable"
+    elif is_stub_tu_card(card, features_manifest):
+        reason = "tu-not-compiled"
+    elif status in PERMANENT_TERMINAL_CARD_STATUSES:
+        reason = f"terminal:{status}"
+    elif status in SOFT_TERMINAL_CARD_STATUSES:
+        # Retryable in a fresh result set, but closed for this run.
+        reason = f"terminal:{status}"
+    elif strategy and not card_strategy_matches(card, strategy):
+        reason = f"strategy-incompatible:{card.get('strategy') or 'none'}"
+    elif cid in active_cards:
+        reason = "active-hypothesis"
+    elif surface and surface in active_surfaces:
+        reason = "active-surface"
+    elif status == "claimed":
+        claim = latest.get(cid, {})
+        expiry = claim_row_expiry(claim, ttl)
+        expires_at = claim.get("expires_at", "") or (
+            expiry.strftime("%Y-%m-%dT%H:%M:%SZ") if expiry is not None else ""
+        )
+        reason = "claimed"
+        if expires_at:
+            reason = f"claimed-until:{expires_at}"
+    elif surface and surface in claimed_surfaces:
+        reason = "claimed-surface"
+    elif card.get("subsystem", "") in saturated_subsystems:
+        reason = "guard-saturated-subsystem"
+    elif (card.get("mode") or "auto") in ("", "auto", "generic") and card.get("subsystem", "") in owned_subsystems:
+        reason = "claimed-subsystem"
+    elif agent_modes and not any(card_mode_matches(card.get("mode") or "auto", mode) for mode in agent_modes):
+        reason = f"mode-incompatible:{card.get('mode') or 'auto'}"
+    return {
+        "id": cid,
+        "kind": card.get("kind", ""),
+        "file": card.get("file", ""),
+        "subsystem": card.get("subsystem", ""),
+        "mode": card.get("mode") or "auto",
+        "status": status,
+        "reason": reason,
+    }
+
+
+def explain_queue(
+    ctx: Context,
+    agent_modes: list[str],
+    strategy: str = "",
+    cards: list[dict] | None = None,
+) -> list[dict]:
+    cards = list(cards) if cards is not None else read_jsonl(work_cards_path(ctx))
+    cards_by_id = {c.get("id", ""): c for c in cards}
     latest = latest_claims_by_card(ctx)
-    active_cards = active_hypothesis_card_ids(ctx)
+    hypotheses = read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
     ttl = work_card_claim_ttl()
     now = datetime.now(timezone.utc)
-    active_surfaces = active_hypothesis_surfaces(ctx)
-    claimed_surfaces = claimed_card_surfaces(ctx, ttl, now)
-    owned_subsystems = active_hypothesis_subsystems(ctx) | claimed_card_subsystems(ctx, ttl, now)
+    active_cards, active_surfaces, active_subsystems = _active_hypothesis_queue_sets(cards_by_id, hypotheses)
+    claimed_surfaces, claimed_subsystems = _claimed_card_queue_sets(cards_by_id, latest, ttl, now)
+    owned_subsystems = active_subsystems | claimed_subsystems
     saturated_subsystems = guard_saturated_subsystems(ctx)
     features_manifest = _load_features_for_ctx(ctx)
     rows: list[dict] = []
     for card in cards:
-        cid = card.get("id", "")
-        reason = "eligible"
-        status = visible_card_status(latest.get(cid), ttl, now)
-        surface = work_surface(card)
-        if not is_auditable_work_card(card):
-            reason = "not-auditable"
-        elif is_stub_tu_card(card, features_manifest):
-            reason = "tu-not-compiled"
-        elif status in PERMANENT_TERMINAL_CARD_STATUSES:
-            reason = f"terminal:{status}"
-        elif status in SOFT_TERMINAL_CARD_STATUSES:
-            # Retryable in a fresh result set, but closed for this run.
-            reason = f"terminal:{status}"
-        elif cid in active_cards:
-            reason = "active-hypothesis"
-        elif surface and surface in active_surfaces:
-            reason = "active-surface"
-        elif status == "claimed":
-            claim = latest.get(cid, {})
-            expires_at = claim.get("expires_at", "") or (
-                claim_row_expiry(claim, ttl).strftime("%Y-%m-%dT%H:%M:%SZ")
-                if claim_row_expiry(claim, ttl) is not None
-                else ""
-            )
-            reason = "claimed"
-            if expires_at:
-                reason = f"claimed-until:{expires_at}"
-        elif surface and surface in claimed_surfaces:
-            reason = "claimed-surface"
-        elif card.get("subsystem", "") in saturated_subsystems:
-            reason = "guard-saturated-subsystem"
-        elif (card.get("mode") or "auto") in ("", "auto", "generic") and card.get("subsystem", "") in owned_subsystems:
-            reason = "claimed-subsystem"
-        elif agent_modes and not any(card_mode_matches(card.get("mode") or "auto", mode) for mode in agent_modes):
-            reason = f"mode-incompatible:{card.get('mode') or 'auto'}"
         rows.append(
-            {
-                "id": cid,
-                "kind": card.get("kind", ""),
-                "file": card.get("file", ""),
-                "subsystem": card.get("subsystem", ""),
-                "mode": card.get("mode") or "auto",
-                "status": status,
-                "reason": reason,
-            }
+            _queue_status_row(
+                card,
+                latest=latest,
+                ttl=ttl,
+                now=now,
+                active_cards=active_cards,
+                active_surfaces=active_surfaces,
+                claimed_surfaces=claimed_surfaces,
+                saturated_subsystems=saturated_subsystems,
+                owned_subsystems=owned_subsystems,
+                features_manifest=features_manifest,
+                agent_modes=agent_modes,
+                strategy=strategy,
+            )
         )
     return rows
 
@@ -2850,16 +2954,7 @@ def _claim_next_card_locked(
             if override and not is_promoted_recon_card(card):
                 continue
             if eff_filter:
-                primary = str(card.get("strategy", "")).strip().upper()
-                # P7: a consolidated promoted-recon card may advertise
-                # additional strategies it can be claimed under. Accept
-                # if the requested strategy matches the primary OR is
-                # listed in allowed_strategies. Non-recon cards never
-                # carry allowed_strategies, so the legacy comparison
-                # path is preserved.
-                allowed_raw = card.get("allowed_strategies") or []
-                allowed = {str(s).strip().upper() for s in allowed_raw if str(s).strip()}
-                if primary != eff_filter and eff_filter not in allowed:
+                if not card_strategy_matches(card, eff_filter):
                     continue
             latest_claim = latest.get(cid)
             latest_status = latest_claim.get("status", "claimed") if latest_claim else ""
@@ -3647,7 +3742,7 @@ def queue_health_lines(ctx: Context, mode: str = "", limit: int | None = None) -
     return out
 
 
-def summarize_queue(ctx: Context, agent_modes: list[str], top: int) -> list[dict]:
+def summarize_queue(ctx: Context, agent_modes: list[str], top: int, strategy: str = "") -> list[dict]:
     """Aggregated queue digest for `bin/state explain-queue`.
 
     Groups rows from `explain_queue` by normalized reason (volatile
@@ -3656,7 +3751,7 @@ def summarize_queue(ctx: Context, agent_modes: list[str], top: int) -> list[dict
     truncated. Each kept reason row carries one `sample_id` so an agent can
     eyeball a representative card.
     """
-    rows = explain_queue(ctx, agent_modes)
+    rows = explain_queue(ctx, agent_modes, strategy=strategy)
     reason_counts: dict[str, int] = {}
     reason_samples: dict[str, str] = {}
     for row in rows:
@@ -3692,17 +3787,17 @@ def _clip_model_field(value: object, limit: int = 180) -> str:
     return text
 
 
-def _status_rows_by_card(ctx: Context, mode: str = "") -> dict[str, dict]:
+def _status_rows_by_card(ctx: Context, mode: str = "", cards: list[dict] | None = None) -> dict[str, dict]:
     return {
         str(row.get("id", "")): row
-        for row in explain_queue(ctx, [mode] if mode else [])
+        for row in explain_queue(ctx, [mode] if mode else [], cards=cards)
         if row.get("id", "")
     }
 
 
-def _compact_card(ctx: Context, card: dict, status_row: dict | None = None) -> dict:
+def _compact_card(ctx: Context, card: dict, status_row: dict | None = None, *, omit_empty: bool = False) -> dict:
     status_row = status_row or {}
-    return {
+    row = {
         "id": card.get("id", ""),
         "kind": card.get("kind", ""),
         "file": card.get("file", ""),
@@ -3722,6 +3817,9 @@ def _compact_card(ctx: Context, card: dict, status_row: dict | None = None) -> d
         "invalid_testcase_hashes": (card.get("invalid_testcase_hashes", []) or [])[:5],
         "seed": card.get("seed", ""),
     }
+    if omit_empty:
+        row = {k: v for k, v in row.items() if v not in ("", [], None)}
+    return row
 
 
 def show_work_card(ctx: Context, card_id: str, mode: str = "") -> dict | None:
@@ -3731,9 +3829,10 @@ def show_work_card(ctx: Context, card_id: str, mode: str = "") -> dict | None:
     and bounded so they don't fall back to verbose `--help` or raw JSONL.
     """
     init_state(ctx)
-    status_rows = _status_rows_by_card(ctx, mode)
-    for card in read_jsonl(work_cards_path(ctx)):
+    cards = read_jsonl(work_cards_path(ctx))
+    for card in cards:
         if card.get("id", "") == card_id:
+            status_rows = _status_rows_by_card(ctx, mode, cards=cards)
             return _compact_card(ctx, card, status_rows.get(card_id))
 
     # Fallback for older states or direct PATCH-* lookups before work-cards
@@ -3748,23 +3847,58 @@ def list_work_cards(
     ctx: Context,
     mode: str = "",
     status_filter: str = "",
+    strategy_filter: str = "",
+    subsystem_filters: Iterable[str] | None = None,
+    contains_filters: Iterable[str] | None = None,
     limit: int = 20,
 ) -> list[dict]:
     """Return a compact JSONL-friendly listing of work cards."""
     init_state(ctx)
-    status_rows = _status_rows_by_card(ctx, mode)
+    cards = read_jsonl(work_cards_path(ctx))
+    cards_by_id = {c.get("id", ""): c for c in cards}
+    latest = latest_claims_by_card(ctx)
+    hypotheses = read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
+    ttl = work_card_claim_ttl()
+    now = datetime.now(timezone.utc)
+    active_cards, active_surfaces, active_subsystems = _active_hypothesis_queue_sets(cards_by_id, hypotheses)
+    claimed_surfaces, claimed_subsystems = _claimed_card_queue_sets(cards_by_id, latest, ttl, now)
+    owned_subsystems = active_subsystems | claimed_subsystems
+    saturated_subsystems = guard_saturated_subsystems(ctx)
+    features_manifest = _load_features_for_ctx(ctx)
+    agent_modes = [mode] if mode else []
+    subsystem_needles = [str(s).strip().lower() for s in (subsystem_filters or []) if str(s).strip()]
+    contains_needles = [str(s).strip().lower() for s in (contains_filters or []) if str(s).strip()]
     rows: list[dict] = []
-    for card in read_jsonl(work_cards_path(ctx)):
-        cid = str(card.get("id", ""))
-        status_row = status_rows.get(cid)
-        if status_row is None:
+    for card in cards:
+        if strategy_filter and not card_strategy_matches(card, strategy_filter):
             continue
+        if subsystem_needles:
+            subsystem = str(card.get("subsystem", "")).lower()
+            if not any(needle in subsystem for needle in subsystem_needles):
+                continue
+        status_row = _queue_status_row(
+            card,
+            latest=latest,
+            ttl=ttl,
+            now=now,
+            active_cards=active_cards,
+            active_surfaces=active_surfaces,
+            claimed_surfaces=claimed_surfaces,
+            saturated_subsystems=saturated_subsystems,
+            owned_subsystems=owned_subsystems,
+            features_manifest=features_manifest,
+            agent_modes=agent_modes,
+        )
         visible_status = str(status_row.get("status", ""))
         reason = str(status_row.get("reason", ""))
         if status_filter and status_filter not in (visible_status, reason):
             continue
-        compact = _compact_card(ctx, card, status_row)
+        compact = _compact_card(ctx, card, status_row, omit_empty=True)
         compact["why_ranked"] = _clip_model_field(card.get("reason", ""), 120)
+        if contains_needles:
+            haystack = json.dumps(compact, sort_keys=True).lower()
+            if not any(needle in haystack for needle in contains_needles):
+                continue
         rows.append(compact)
         if limit > 0 and len(rows) >= limit:
             break
@@ -4123,14 +4257,16 @@ def state_resume(
     # so we don't bill it every resume.
     resume_limit = _int_env("STATE_RESUME_RECENT_LIMIT", 5)
     include_tried = os.environ.get("STATE_RESUME_INCLUDE_TRIED", "0") == "1"
+    runs = read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl")
+    notes = read_jsonl(state_dir(ctx.results_dir) / "notes.jsonl")
     lines.extend(
         [
             "",
             "## Recent Hypotheses",
-            recent_hypotheses(ctx, limit=resume_limit, agent=agent).strip(),
+            recent_hypotheses(ctx, limit=resume_limit, agent=agent, rows=hyps).strip(),
             "",
             "## Recent Runs",
-            recent_runs(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, card_id=card_id).strip(),
+            recent_runs(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, card_id=card_id, rows=runs).strip(),
         ]
     )
     if active:
@@ -4138,7 +4274,7 @@ def state_resume(
             [
                 "",
                 "## Recent Notes",
-                recent_notes(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id).strip(),
+                recent_notes(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, rows=notes).strip(),
             ]
         )
     else:
@@ -4146,10 +4282,10 @@ def state_resume(
             [
                 "",
                 "## Last Terminal Reason",
-                last_terminal_reason(ctx, agent).strip(),
+                last_terminal_reason(ctx, agent, rows=hyps).strip(),
                 "",
                 "## Guard Notes",
-                recent_notes(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, kind="guard").strip(),
+                recent_notes(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, kind="guard", rows=notes).strip(),
             ]
         )
     if include_tried:
@@ -4172,6 +4308,7 @@ def recent_hypotheses(
     card_id: str = "",
     status_regex: str = "",
     strategy: str = "",
+    rows: list[dict] | None = None,
 ) -> str:
     """Slim, agent-friendly digest of hypotheses.jsonl.
 
@@ -4181,7 +4318,7 @@ def recent_hypotheses(
     """
     import re
 
-    rows = read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
+    rows = list(rows) if rows is not None else read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
     if status_regex:
         try:
             sre = re.compile(status_regex)
@@ -4218,6 +4355,7 @@ def recent_runs(
     hypothesis_id: str = "",
     card_id: str = "",
     verdict_regex: str = "",
+    rows: list[dict] | None = None,
 ) -> str:
     """Slim digest of runs.jsonl.
 
@@ -4227,7 +4365,7 @@ def recent_runs(
     """
     import re
 
-    rows = read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl")
+    rows = list(rows) if rows is not None else read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl")
     if verdict_regex:
         try:
             vre = re.compile(verdict_regex)
@@ -4262,13 +4400,14 @@ def recent_notes(
     hypothesis_id: str = "",
     card_id: str = "",
     kind: str = "",
+    rows: list[dict] | None = None,
 ) -> str:
     """Slim digest of notes.jsonl.
 
     Returns id|kind|agent|hypothesis_id|card_id|text. Notes hold the concise
     data-flow, guard, and variant context that used to live in markdown state.
     """
-    rows = read_jsonl(state_dir(ctx.results_dir) / "notes.jsonl")
+    rows = list(rows) if rows is not None else read_jsonl(state_dir(ctx.results_dir) / "notes.jsonl")
     if agent:
         rows = [r for r in rows if r.get("agent", "") == agent]
     if hypothesis_id:
@@ -4365,10 +4504,10 @@ def show_recent(
     return "\n".join(parts) + "\n"
 
 
-def last_terminal_reason(ctx: Context, agent: str = "") -> str:
+def last_terminal_reason(ctx: Context, agent: str = "", rows: list[dict] | None = None) -> str:
     """One-line summary of the latest terminal hypothesis for compact resumes."""
     rows = [
-        r for r in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
+        r for r in (list(rows) if rows is not None else read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"))
         if not is_active_hypothesis_status(r.get("status", ""))
     ]
     if agent:

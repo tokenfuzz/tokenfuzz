@@ -243,8 +243,7 @@ assert_not_match 'sess\.log\.raw' "$output" "rg-safe: default log exclusion stil
 
 # The byte-cap clip works when scanning a real .log.raw via --include-logs:
 # build a single huge JSON line (the actual pathology in production —
-# observed up to ~1 MB per turn) and confirm byte cap fires at the new
-# 128 KiB default.
+# observed up to ~1 MB per turn) and confirm the default head+tail cap fires.
 HUGE_RAW="$LOGTREE/output/foo/codex/logs/huge.log.raw"
 python3 -c '
 import sys, json
@@ -253,14 +252,14 @@ sys.stdout.write(json.dumps({"type":"item.completed","item":payload}) + "\n")
 ' > "$HUGE_RAW"
 output=$("$RG_SAFE" --include-logs 'aggregated_output' "$HUGE_RAW" 2>&1)
 output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
-[ "$output_bytes" -le 135000 ] && pass "rg-safe: byte cap fires on real .log.raw shape (got ${output_bytes})" \
-  || fail "rg-safe: byte cap should clip .log.raw scan, got ${output_bytes} bytes"
+[ "$output_bytes" -le 56000 ] && pass "rg-safe: byte cap fires on real .log.raw shape (got ${output_bytes})" \
+  || fail "rg-safe: byte cap should head+tail cap .log.raw scan, got ${output_bytes} bytes"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Production-PATH interaction: lib/wrappers/rg sits on PATH in the agent shell
 # (see lib/wrappers/_zdotdir/.zprofile). Without explicit cap suppression,
 # rg-safe's invocation of `rg` resolves to the wrapper, which clips at 200
-# lines / 128 KiB BEFORE rg-safe sees the output. That silently breaks
+# lines / byte cap BEFORE rg-safe sees the output. That silently breaks
 # --no-cap, --cap N>200, and the "X of Y" line-count footer (Y stops at 201).
 # These tests exercise the production config to catch any regression.
 # ─────────────────────────────────────────────────────────────────────────────

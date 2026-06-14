@@ -241,8 +241,8 @@ assert_eq "0" "$?" "--help: exits 0"
 # Production-PATH interaction: lib/wrappers/{sed,grep} sit on PATH in the
 # agent shell. Without explicit cap suppression in peek, peek's internal
 # `sed -n '1,Np'` and `grep -A N` calls resolve to the wrappers, which clip
-# at 200 lines / 128 KiB. That silently breaks --no-cap (peek thinks it's
-# returning the full range; the wrapper has already clipped).
+# at their own line/byte caps. That silently breaks --no-cap (peek thinks
+# it's returning the full range; the wrapper has already clipped).
 # ─────────────────────────────────────────────────────────────────────────────
 
 WRAPPED_PATH="$SCRIPT_ROOT/lib/wrappers:$PATH"

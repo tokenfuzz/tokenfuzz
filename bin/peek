@@ -185,8 +185,8 @@ if [ "$is_range" -eq 1 ]; then
 
   # Disable any cap from lib/wrappers/sed (on PATH in the agent shell). peek
   # already clamps the line range itself; without this, --no-cap silently
-  # tops out at the wrapper's 200-line / 128 KiB cap. We capture into a temp
-  # so the byte-cap pass below can act on the result without re-running sed.
+  # tops out at the wrapper's own output cap. We capture into a temp so the
+  # byte-cap pass below can act on the result without re-running sed.
   _peek_tmp=$(mktemp "${TMPDIR:-/tmp}/peek-range-XXXXXXXX")
   trap 'rm -f "$_peek_tmp"' EXIT
   CAP_LINES=0 CAP_BYTES=0 sed -n "${start},${end}p" "$file" > "$_peek_tmp"
@@ -350,7 +350,7 @@ done
 
 # Disable any cap from lib/wrappers/grep (on PATH in the agent shell). peek
 # already clamps -A/-B/-C itself; without this, --no-cap silently tops out
-# at the wrapper's 200-line / 128 KiB cap when there are many matches.
+# at the wrapper's own output cap when there are many matches.
 # Capture so the byte cap below can act on the result; preserves the real
 # grep exit code via PIPESTATUS.
 _peek_grep_tmp=$(mktemp "${TMPDIR:-/tmp}/peek-grep-XXXXXXXX")

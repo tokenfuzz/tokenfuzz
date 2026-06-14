@@ -95,14 +95,18 @@ rc=0
 # ═══════════════════════════════════════════════════════════════
 
 # One match line of ~150 KiB. Line cap doesn't fire (only 1 line) but the
-# default 128 KiB byte cap must clip.
+# default head+tail byte cap must trim it and leave a spill marker.
 HUGE="$TEST_TMPDIR/huge_line.txt"
 python3 -c 'import sys; sys.stdout.write("Z" * 150000 + " match\n")' > "$HUGE"
 output=$("$GREP_WRAPPER" "match" "$HUGE" 2>/dev/null)
 output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
-[ "$output_bytes" -le 135000 ] && pass "byte cap: huge match line clipped (got ${output_bytes})" \
-  || fail "byte cap: huge match should clip, got ${output_bytes} bytes"
-assert_match "stdout clipped at 131072" "$output" "byte cap: footer reports default cap"
+[ "$output_bytes" -le 56000 ] && pass "byte cap: huge match line head+tail capped (got ${output_bytes})" \
+  || fail "byte cap: huge match should be head+tail capped, got ${output_bytes} bytes"
+assert_match "output_cap: grep-stdout truncated" "$output" "byte cap: default path emits output_cap marker"
+
+# Explicit CAP_BYTES preserves the historical chop-and-footer behavior.
+output=$(CAP_BYTES=65536 "$GREP_WRAPPER" "match" "$HUGE" 2>/dev/null)
+assert_match "stdout clipped at 65536" "$output" "byte cap: explicit CAP_BYTES uses legacy footer"
 
 # CAP_BYTES env override.
 output=$(CAP_BYTES=4096 "$GREP_WRAPPER" "match" "$HUGE" 2>/dev/null)

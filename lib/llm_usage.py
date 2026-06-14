@@ -29,6 +29,11 @@ CLI shapes:
       cached_input_tokens, cache_creation_input_tokens, total_tokens,
       duration_ms. Used by bin/audit's extract_usage_field shim.
 
+  llm_usage.py extract-fields <backend> <raw-log-path> [--prompt prompt-file]
+      Print the audit hot-path fields as key=value lines in one invocation:
+      total_tokens, input_tokens, cached_input_tokens,
+      cache_creation_input_tokens, output_tokens, duration_ms.
+
 On any internal failure both shapes print empty and exit 0 — a
 missing cost number must never fail a benchmark cell or an audit
 session.
@@ -206,6 +211,16 @@ def extract_usage(
 ) -> dict:
     """Return a {tokens:{...}, probe:{}, estimated:bool} row."""
     raw = _read(raw_log_path)
+    prompt_text = _read(prompt_path) if prompt_path else ""
+    return extract_usage_from_text(raw, prompt_text=prompt_text, backend=backend)
+
+
+def extract_usage_from_text(
+    raw: str,
+    prompt_text: str = "",
+    backend: str = "",
+) -> dict:
+    """Return a usage row from an already-read raw transcript."""
 
     # Primary path: SUM the usage of every terminal/summary event. Each
     # such event holds one invocation's cumulative total, and a cell may
@@ -274,7 +289,6 @@ def extract_usage(
     if backend != "gemini":
         return {**_zero_usage(), "backend": backend}
 
-    prompt_text = _read(prompt_path) if prompt_path else ""
     assistant_chars = _sum_assistant_content_chars(raw)
     tokens = {
         "input": _estimate_tokens(prompt_text),
@@ -328,36 +342,7 @@ def extract_field(
         return ""
 
     if field == "duration_ms":
-        # Scan the raw log for any duration_ms field on a top-level event
-        # object (Claude's stream-json result event); MAX wins.
-        best = -1
-        try:
-            with open(raw_log_path, encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or not line.startswith(("{", "[")):
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except ValueError:
-                        continue
-
-                    def visit(node):
-                        nonlocal best
-                        if isinstance(node, dict):
-                            v = node.get("duration_ms")
-                            if isinstance(v, (int, float)) and v > best:
-                                best = int(v)
-                            for child in node.values():
-                                visit(child)
-                        elif isinstance(node, list):
-                            for child in node:
-                                visit(child)
-
-                    visit(obj)
-        except OSError:
-            return ""
-        return str(best) if best >= 0 else ""
+        return extract_duration_ms(raw_log_path)
 
     aliases = _AUDIT_FIELD_ALIASES.get(field)
     if aliases is None:
@@ -392,6 +377,89 @@ def extract_field(
             total += int(v)
             any_present = True
     return str(total) if any_present else ""
+
+
+def extract_fields(
+    raw_log_path: str,
+    backend: str = "",
+    prompt_path: str | None = None,
+) -> dict[str, str]:
+    """Return every audit usage field without reparsing the raw log per field."""
+    fields = (
+        "total_tokens",
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_creation_input_tokens",
+        "output_tokens",
+    )
+    out = {field: "" for field in fields}
+    out["duration_ms"] = ""
+
+    if not os.path.isfile(raw_log_path):
+        return out
+
+    raw = _read(raw_log_path)
+    prompt_text = _read(prompt_path) if prompt_path else ""
+    row = extract_usage_from_text(raw, prompt_text=prompt_text, backend=backend)
+    tokens = row.get("tokens", {}) if isinstance(row, dict) else {}
+    estimated = bool(row.get("estimated", False)) if isinstance(row, dict) else False
+
+    measured_sum = 0
+    for k in ("input", "output", "cached_input", "cache_creation"):
+        v = tokens.get(k)
+        if isinstance(v, (int, float)):
+            measured_sum += int(v)
+
+    if estimated or measured_sum != 0:
+        for field in fields:
+            aliases = _AUDIT_FIELD_ALIASES.get(field, ())
+            total = 0
+            any_present = False
+            for key in aliases:
+                v = tokens.get(key)
+                if isinstance(v, (int, float)):
+                    total += int(v)
+                    any_present = True
+            if any_present:
+                out[field] = str(total)
+
+    out["duration_ms"] = extract_duration_ms_from_text(raw)
+    return out
+
+
+def extract_duration_ms(raw_log_path: str) -> str:
+    """Return max duration_ms, matching extract_field(..., "duration_ms")."""
+    if not os.path.isfile(raw_log_path):
+        return ""
+    return extract_duration_ms_from_text(_read(raw_log_path))
+
+
+def extract_duration_ms_from_text(raw: str) -> str:
+    """Return max duration_ms from an already-read raw transcript."""
+    best = -1
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or not line.startswith(("{", "[")):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+
+        def visit(node):
+            nonlocal best
+            if isinstance(node, dict):
+                v = node.get("duration_ms")
+                if isinstance(v, (int, float)) and v > best:
+                    best = int(v)
+                for child in node.values():
+                    visit(child)
+            elif isinstance(node, list):
+                for child in node:
+                    visit(child)
+
+        visit(obj)
+    return str(best) if best >= 0 else ""
 
 
 def main(argv: list[str]) -> int:
@@ -451,6 +519,43 @@ def main(argv: list[str]) -> int:
             print(extract_field(raw_log, field, backend=backend, prompt_path=prompt_path))
         except Exception:  # noqa: BLE001
             print("")
+        return 0
+
+    if head == "extract-fields":
+        # Form: extract-fields <backend> <raw-log> [--prompt path]
+        if len(argv) < 3:
+            return 0
+        backend = argv[1]
+        raw_log = argv[2]
+        prompt_path = None
+        i = 3
+        while i < len(argv):
+            if argv[i] == "--prompt" and i + 1 < len(argv):
+                prompt_path = argv[i + 1]
+                i += 2
+            else:
+                i += 1
+        try:
+            fields = extract_fields(raw_log, backend=backend, prompt_path=prompt_path)
+            for key in (
+                "total_tokens",
+                "input_tokens",
+                "cached_input_tokens",
+                "cache_creation_input_tokens",
+                "output_tokens",
+                "duration_ms",
+            ):
+                print(f"{key}={fields.get(key, '')}")
+        except Exception:  # noqa: BLE001
+            for key in (
+                "total_tokens",
+                "input_tokens",
+                "cached_input_tokens",
+                "cache_creation_input_tokens",
+                "output_tokens",
+                "duration_ms",
+            ):
+                print(f"{key}=")
         return 0
 
     # Unrecognised subcommand: emit empty result, do not error.

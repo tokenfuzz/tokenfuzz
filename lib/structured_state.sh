@@ -81,7 +81,7 @@ structured_state_agent_result_count() {
 }
 
 structured_state_actionable_count() {
-  structured_state_count_all_status_regex '^(CRASH|CRASH-|FIND|FIND-|NEEDS_TESTCASE)$'
+  structured_state_count_all_status_regex '^((CRASH|FIND)(-|$)|NEEDS_TESTCASE$)'
 }
 
 # One-shot status histogram for one agent. Replaces 6 separate jq counter
@@ -109,8 +109,8 @@ structured_state_actionable_count() {
 #   * result         = prefix ^(CRASH|FIND) — includes CRASH-DEDUPED, FIND-LOWPRIO
 #
 # Usage:
-#   local p=0 a=0 d=0 e=0 n=0 r=0 i=0
-#   if structured_state_agent_counts_load "$agent_num" p a d e n r i; then
+#   local p=0 a=0 d=0 e=0 n=0 r=0 i=0 t=0
+#   if structured_state_agent_counts_load "$agent_num" p a d e n r i t; then
 #     # vars now hold structured counts
 #   fi
 structured_state_agent_counts_load() {
@@ -122,15 +122,20 @@ structured_state_agent_counts_load() {
   local _v_needs_tc="${6:-_ssac_needs_tc}"
   local _v_result="${7:-_ssac_result}"
   local _v_investigating="${8:-_ssac_investigating}"
+  local _v_total="${9:-}"
 
   structured_state_available || return 1
   local f
   f=$(structured_state_hypotheses_path)
+  local __ssac_want_total=0
+  [ -n "$_v_total" ] && __ssac_want_total=1
 
   # Single jq pass: filter to this agent, classify each status, return
   # pipe-delimited counts plus a row-count sentinel for the no-rows check.
+  # The optional total bucket preserves the legacy exact-match quality-gate
+  # regex; it intentionally differs from the result prefix bucket.
   local out
-  out=$(jq -s -r --arg agent "$agent_num" '
+  out=$(jq -s -r --arg agent "$agent_num" --arg want_total "$__ssac_want_total" '
     [ .[] | select((.agent // "") == $agent) ] as $rows
     | ($rows | length) as $n
     | "\($n)|\(
@@ -145,6 +150,14 @@ structured_state_agent_counts_load() {
         [ $rows[] | select((.status // "") == "ENV-BLOCKED") ] | length
       )|\(
         [ $rows[] | select((.status // "") | test("^(CRASH|FIND)")) ] | length
+      )|\(
+        if $want_total == "1" then
+          [ $rows[]
+            | select((.status // "") | test("^(PENDING|INVESTIGATING|NEEDS_TESTCASE|DISCARDED|CRASH|CRASH-|FIND|FIND-|ENV-BLOCKED)$"))
+          ] | length
+        else
+          ""
+        end
       )"
   ' "$f" 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
@@ -152,12 +165,15 @@ structured_state_agent_counts_load() {
   # Use prefix-mangled internals — printf -v writes to the caller's named
   # variables, but if a local here had the same name (e.g. `p`) it would
   # shadow the caller and the assignment would silently land in our scope.
-  local __ssac_rc __ssac_p __ssac_inv __ssac_ntc __ssac_disc __ssac_env __ssac_res
-  IFS='|' read -r __ssac_rc __ssac_p __ssac_inv __ssac_ntc __ssac_disc __ssac_env __ssac_res <<< "$out"
+  local __ssac_rc __ssac_p __ssac_inv __ssac_ntc __ssac_disc __ssac_env __ssac_res __ssac_total
+  IFS='|' read -r __ssac_rc __ssac_p __ssac_inv __ssac_ntc __ssac_disc __ssac_env __ssac_res __ssac_total <<< "$out"
   local __ssac_v
   for __ssac_v in "$__ssac_rc" "$__ssac_p" "$__ssac_inv" "$__ssac_ntc" "$__ssac_disc" "$__ssac_env" "$__ssac_res"; do
     case "$__ssac_v" in ''|*[!0-9]*) return 1 ;; esac
   done
+  if [ -n "$_v_total" ]; then
+    case "$__ssac_total" in ''|*[!0-9]*) return 1 ;; esac
+  fi
   # No rows for this agent → return 1 so caller falls through to its
   # markdown-state grep path. Matches the old structured_state_agent_has_rows
   # gate semantics exactly.
@@ -171,6 +187,9 @@ structured_state_agent_counts_load() {
   printf -v "$_v_needs_tc"      '%s' "$__ssac_ntc"
   printf -v "$_v_result"        '%s' "$__ssac_res"
   printf -v "$_v_investigating" '%s' "$__ssac_inv"
+  if [ -n "$_v_total" ]; then
+    printf -v "$_v_total"       '%s' "$__ssac_total"
+  fi
   return 0
 }
 

@@ -4,12 +4,10 @@
 #
 # Why two caps: the line cap is useless against haystacks where a single
 # match line is itself large — for example, output/<target>/<backend>/logs/*.log.raw, where
-# each turn is one giant JSON line. 200 such "lines" can be 1 MB. The byte
-# cap (RG_BYTES, default 128 KiB) is a hard ceiling regardless of line
-# count. The default was chosen empirically: across ~5,500 legitimate
-# rg/grep calls in production audit logs (libxml2 / pcre2 / json / curl /
-# c-ares / zlib), the largest legitimate output was ~92 KiB. 128 KiB
-# covers that with ~40% headroom while still trimming the 1 MB+ pathology.
+# each turn is one giant JSON line. 200 such "lines" can be 1 MB. The default
+# byte path uses lib/output_cap.sh's ~50 KiB head+tail spill so agents see
+# both ends without replaying huge search output. Non-default RG_BYTES values
+# preserve the older hard clip for explicit debugging workflows.
 #
 # Why default exclusions: `logs/` is agent self-output (transcripts, prompt
 # dumps, summaries, indices) — greppy hash hunts there self-poison by

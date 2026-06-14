@@ -159,9 +159,17 @@ assert_eq 0 $? "json: first row is valid JSON with verdict field"
 # ── 11. --limit cap ──────────────────────────────────────────────────
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" --all --limit 2 2>&1)
 assert_match "more)" "$out" "--limit 2: shows overflow indicator"
+assert_match "6 runs across 3 agents" "$out" "--limit 2: summary still counts all matches"
+assert_match "\\[summary\\] 3 CRASH · 2 CLEAN · 1 NO_EXEC" "$out" \
+  "--limit 2: verdict summary still counts all matches"
 # Body rows (start with "  202") capped at 2.
 body=$(echo "$out" | grep -c '^  202')
 assert_eq 2 "$body" "--limit 2: only 2 history rows shown"
+ph_src=$(cat "$PH")
+assert_match '^def read_jsonl\(' "$ph_src" \
+  "probe-history: keeps a local read-only JSONL reader"
+assert_not_match 'from workqueue import' "$ph_src" \
+  "probe-history: avoids importing the full workqueue module"
 
 # ── 12. Empty runs.jsonl ─────────────────────────────────────────────
 empty_dir=$(mktemp -d)

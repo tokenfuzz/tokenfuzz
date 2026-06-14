@@ -51,12 +51,27 @@ import re
 import sys
 from pathlib import Path
 
-SCRIPT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
-
-from workqueue import read_jsonl, state_dir  # noqa: E402
-
 PRETTY_OUTPUT_BYTE_CAP = 8 * 1024
+
+
+def state_dir(results_dir: Path) -> Path:
+    return results_dir / "state"
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    out = []
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
 
 
 def _resolve_results_dir(explicit: str | None) -> Path:

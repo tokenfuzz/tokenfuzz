@@ -157,6 +157,8 @@ export -f get_agent_strategy
 result=$(build_session_directive 1)
 assert_match "SWITCH STRATEGY.*S1.*S2" "$result" "P5b: strategy rotation directive"
 assert_match "S2-assert-negation.md" "$result" "P5b: references strategy file"
+assert_match "Strategy brief \\(S2\\)" "$result" "P5b: inlines strategy brief"
+assert_not_match "Read .*S2-assert-negation\\.md" "$result" "P5b: no mandatory strategy file read"
 
 # Reset
 rm -f "$(agent_strategy_path 1)"

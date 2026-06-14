@@ -18,6 +18,21 @@ echo "HIT: dom.canvas.Foo" > "$(hits_log_path 1)"
 echo "HIT: dom.canvas.Bar" >> "$(hits_log_path 1)"
 echo "HIT: parser.html.Baz" > "$(hits_log_path 2)"
 
+all_hits=$'HIT: dom.canvas.Foo\nHIT: dom.canvas.Bar\nHIT: parser.html.Baz'
+ranked=$(coverage_hit_ranked_subsystems $'dom/canvas\nparser/html\njs/src/jit' "$all_hits" | awk -F '\t' '{print $2}' | paste -sd ' ' -)
+assert_eq "js/src/jit parser/html dom/canvas" "$ranked" "coverage ranking: one-pass hit counts sort least-covered first"
+
+coverage_cache_src="$(declare -f cache_iteration_data)"
+coverage_live_src="$(declare -f _assign_subsystem_from_coverage_live)"
+assert_match 'coverage_hit_ranked_subsystems' "$coverage_cache_src" \
+  "coverage cache: uses shared one-pass hit ranker"
+assert_match 'coverage_hit_ranked_subsystems' "$coverage_live_src" \
+  "coverage live fallback: uses shared one-pass hit ranker"
+assert_not_match 'grep -c .*sub_slug' "$coverage_cache_src" \
+  "coverage cache: avoids per-subsystem grep hit counting"
+assert_not_match 'grep -c .*sub_slug' "$coverage_live_src" \
+  "coverage live fallback: avoids per-subsystem grep hit counting"
+
 get_agent_subsystem() {
   case "$1" in 1) echo "dom/canvas";; *) echo "unknown";; esac
 }
@@ -149,6 +164,8 @@ rm -f "$(state_file_path 1)"
 result=$(build_cold_start_prompt 1 2>/dev/null)
 assert_match "ASSIGNED STRATEGY.*S4" "$result" "cold start: assigned strategy S4 shown"
 assert_match "S4-differential.md" "$result" "cold start: strategy file referenced"
+assert_match "Strategy brief \\(S4\\)" "$result" "cold start: strategy brief inlined"
+assert_not_match "Read .*S4-differential\\.md" "$result" "cold start: no mandatory strategy file read"
 
 rm -f "$(agent_strategy_path 1)"
 

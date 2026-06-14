@@ -133,8 +133,8 @@ assert_json_parity_for_agent 1 "full coverage agent 1"
 
 # Counts we deliberately spell out — guards against accidental regex drift
 # in either implementation.
-p=0 a=0 d=0 e=0 n=0 r=0 i=0
-structured_state_agent_counts_load 1 p a d e n r i
+p=0 a=0 d=0 e=0 n=0 r=0 i=0 t=0
+structured_state_agent_counts_load 1 p a d e n r i t
 assert_eq "1" "$p" "agent 1 explicit: pending=1"
 assert_eq "3" "$a" "agent 1 explicit: active=3 (PENDING+INVESTIGATING+NEEDS_TESTCASE)"
 assert_eq "1" "$d" "agent 1 explicit: discards=1"
@@ -142,6 +142,9 @@ assert_eq "1" "$e" "agent 1 explicit: env_blocked=1"
 assert_eq "1" "$n" "agent 1 explicit: needs_testcase=1"
 assert_eq "4" "$r" "agent 1 explicit: result=4 (CRASH+CRASH-DEDUPED+FIND+FIND-LOWPRIO)"
 assert_eq "1" "$i" "agent 1 explicit: investigating=1"
+assert_eq "7" "$t" "agent 1 explicit: legacy total excludes suffixed CRASH/FIND statuses"
+assert_eq "5" "$(structured_state_actionable_count)" \
+  "global actionable: NEEDS_TESTCASE plus suffixed CRASH/FIND statuses count"
 
 # ═══════════════════════════════════════════════════════════════
 # 4. Multi-agent rows — one agent's counts must not bleed into another's

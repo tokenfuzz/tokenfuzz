@@ -119,6 +119,76 @@ audit_count_hits_for_agent() {
   echo "${n:-0}"
 }
 
+audit_plan_state_counts_load() {
+  local agent_num="$1" _v_pending="$2" _v_active="$3" _v_discards="$4"
+  local __apsc_pending=0 __apsc_active=0 __apsc_discards=0
+
+  if declare -F structured_state_available >/dev/null 2>&1 \
+     && structured_state_available; then
+    local __apsc_f __apsc_out __apsc_rows
+    __apsc_f=$(structured_state_hypotheses_path)
+    __apsc_out=$(jq -n -r --arg agent "$agent_num" '
+      reduce inputs as $r ({rows:0, pending:0, active:0, discards:0};
+        if (($r.agent // "") == $agent) then
+          .rows += 1
+          | ($r.status // "") as $s
+          | if $s == "PENDING" then
+              .pending += 1 | .active += 1
+            elif ($s == "INVESTIGATING" or $s == "NEEDS_TESTCASE") then
+              .active += 1
+            elif $s == "DISCARDED" then
+              .discards += 1
+            else
+              .
+            end
+        else
+          .
+        end
+      )
+      | "\(.rows)|\(.pending)|\(.active)|\(.discards)"
+    ' "$__apsc_f" 2>/dev/null) || __apsc_out=""
+    IFS='|' read -r __apsc_rows __apsc_pending __apsc_active __apsc_discards <<< "$__apsc_out"
+    case "$__apsc_rows:$__apsc_pending:$__apsc_active:$__apsc_discards" in
+      *[!0-9:]*|'') ;;
+      *)
+        if [ "${__apsc_rows:-0}" -gt 0 ]; then
+          printf -v "$_v_pending" '%s' "${__apsc_pending:-0}"
+          printf -v "$_v_active" '%s' "${__apsc_active:-0}"
+          printf -v "$_v_discards" '%s' "${__apsc_discards:-0}"
+          return 0
+        fi
+        ;;
+    esac
+  elif declare -F structured_state_agent_counts_load >/dev/null 2>&1 \
+       && structured_state_agent_counts_load "$agent_num" \
+            __apsc_pending __apsc_active __apsc_discards 2>/dev/null; then
+    printf -v "$_v_pending" '%s' "${__apsc_pending:-0}"
+    printf -v "$_v_active" '%s' "${__apsc_active:-0}"
+    printf -v "$_v_discards" '%s' "${__apsc_discards:-0}"
+    return 0
+  fi
+
+  local sf out
+  sf=$(state_file_path "$agent_num" 2>/dev/null || true)
+  [ -f "$sf" ] || {
+    printf -v "$_v_pending" '%s' 0
+    printf -v "$_v_active" '%s' 0
+    printf -v "$_v_discards" '%s' 0
+    return 0
+  }
+
+  out=$(awk '
+    /PENDING/ { pending++ }
+    /PENDING|INVESTIGATING|NEEDS_TESTCASE/ { active++ }
+    /DISCARDED/ { discards++ }
+    END { printf "%d|%d|%d\n", pending, active, discards }
+  ' "$sf" 2>/dev/null) || out="0|0|0"
+  IFS='|' read -r __apsc_pending __apsc_active __apsc_discards <<< "$out"
+  printf -v "$_v_pending" '%s' "${__apsc_pending:-0}"
+  printf -v "$_v_active" '%s' "${__apsc_active:-0}"
+  printf -v "$_v_discards" '%s' "${__apsc_discards:-0}"
+}
+
 audit_strategy_for_agent() {
   local agent_num="$1"
   if declare -F get_agent_strategy >/dev/null 2>&1; then
@@ -194,9 +264,7 @@ log_agent_plan() {
   strategy=$(audit_strategy_for_agent "$agent_num")
   streak=$(audit_strategy_streak_for_agent "$agent_num")
   threshold=$(audit_strategy_threshold_for_strategy "$strategy")
-  active=$(audit_count_active_for_agent "$agent_num")
-  pending=$(audit_count_pending_for_agent "$agent_num")
-  discards=$(audit_count_discards_for_agent "$agent_num")
+  audit_plan_state_counts_load "$agent_num" pending active discards
   asan_runs=$(audit_count_asan_runs_for_agent "$agent_num")
   hits=$(audit_count_hits_for_agent "$agent_num")
   suggestion=$(audit_latest_subsystem_suggestion "$agent_num")

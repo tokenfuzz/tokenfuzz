@@ -5,10 +5,10 @@
 # Background: each tool output that lands in an agent's aggregated_output gets
 # replayed as cached input on every subsequent turn. A 130 KB rg-safe dump
 # emitted at turn 5 of a 130-turn session adds ~16 MB of cached tokens. The
-# existing rg-safe / sed wrappers cap at 128 KiB by chopping the *tail* and
-# appending a footer ("clipped at N bytes — narrow your search"). That keeps
-# the head intact but loses the tail entirely; it also doesn't help peek
-# (no byte cap) or ASan crash output (uncapped on crash by design).
+# older wrappers capped at 128 KiB by chopping the *tail* and appending a
+# footer ("clipped at N bytes — narrow your search"). That kept the head
+# intact but lost the tail entirely; it also didn't help peek or ASan crash
+# output before those paths adopted this helper.
 #
 # This module replaces the chop-the-tail behavior with a head + middle-elide
 # + tail layout, line-aligned, and spills the full original to disk so the

@@ -110,6 +110,22 @@ for sub in add-hyp update-hyp add-note update-card; do
   assert_file_contains "$DIGEST" "$sub" \
     "digest cheat sheet documents bin/state $sub"
 done
+for sub in show-recent dump-queue list-notes recent-claims recent-tried; do
+  assert_file_contains "$DIGEST" "$sub" \
+    "digest cheat sheet documents compact state accessor $sub"
+done
+assert_file_contains "$DIGEST" "explain-queue" \
+  "digest cheat sheet documents resume-shaped explain-queue flags"
+assert_file_contains "$DIGEST" "strategy S" \
+  "digest cheat sheet documents explain-queue strategy flag"
+assert_file_contains "$DIGEST" "bin/state recent-tried --agent N --limit 40" \
+  "digest tells compressed sessions to use recent-tried instead of raw tail"
+if grep -q 'tail -40 <RESULTS_DIR>/tried-inputs-N.log' "$DIGEST"; then
+  fail "digest no longer recommends raw tail for tried-inputs" \
+    "found stale tail -40 tried-inputs guidance in $DIGEST"
+else
+  pass "digest no longer recommends raw tail for tried-inputs"
+fi
 
 # ── The digest must warn against reverse-engineering the harness ────
 # Transcripts showed agents grepping bin/ and lib/ for the testcase-header
@@ -177,6 +193,8 @@ suffix_probe=$(REFERENCE_DIR="$SCRIPT_ROOT/.agents/references" bash -c '
   : > "$sf"                                   # 0-byte cache (the bug trigger)
   empty_out=$(build_common_suffix)
   printf "EMPTY_DIGEST=%s\n" "$(printf "%s" "$empty_out" | grep -c "PATH CONVENTION")"
+  printf "SUFFIX_DIGEST_API=%s\n" "$(printf "%s" "$empty_out" | grep -c "digest below is the API for .bin/probe. and .bin/state")"
+  printf "SUFFIX_PROBE_HELP_EXAMPLE=%s\n" "$(printf "%s" "$empty_out" | grep -c "bin/probe --help")"
   write_static_prompt_file                    # atomic publish
   printf "STATIC_NONEMPTY=%s\n" "$([ -s "$sf" ] && echo 1 || echo 0)"
   printf "TMP_LEFTOVER=%s\n" "$(ls "$sf".tmp.* 2>/dev/null | wc -l | tr -d " ")"
@@ -186,6 +204,10 @@ suffix_probe=$(REFERENCE_DIR="$SCRIPT_ROOT/.agents/references" bash -c '
 ')
 assert_match 'EMPTY_DIGEST=[1-9]' "$suffix_probe" \
   "build_common_suffix falls back to live digest when static cache is empty"
+assert_match 'SUFFIX_DIGEST_API=[1-9]' "$suffix_probe" \
+  "build_common_suffix tells agents the digest is the bin/probe/bin/state API"
+assert_match 'SUFFIX_PROBE_HELP_EXAMPLE=0' "$suffix_probe" \
+  "build_common_suffix no longer nudges agents toward bin/probe --help"
 assert_match 'STATIC_NONEMPTY=1' "$suffix_probe" \
   "write_static_prompt_file publishes a non-empty static cache"
 assert_match 'TMP_LEFTOVER=0' "$suffix_probe" \

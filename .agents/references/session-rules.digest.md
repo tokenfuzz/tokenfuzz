@@ -50,7 +50,7 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
 - `bin/find-seed <file>[:<Function>]` before writing a fresh testcase.
 - `grep -A4 "SUBSYSTEM: <subsystem>" <RESULTS_DIR>/guards-db.md` before
   building a hypothesis. Append a new entry on a reproducible guard string.
-- `tail -40 <RESULTS_DIR>/tried-inputs-N.log` after compression. Never
+- `bin/state recent-tried --agent N --limit 40` after compression. Never
   rerun identical inputs.
 - `bin/probe-history <testcase>` before re-probing — if a confirmed
   verdict exists, reuse it; only re-run when state has shifted.
@@ -66,9 +66,10 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
   (testcase headers, probe contract, CLI flags). That contract is fully
   specified in this digest — the header block, the `bin/state` cheat sheet,
   and the `bin/probe` rules above are the API. Harness source is not.
-- Append-only logs: `tail -50`, never `cat`. JSONL state files
+- Append-only non-state logs: `tail -50`, never `cat`. JSONL state files
   (`state/hypotheses.jsonl`, `runs.jsonl`, `tried-inputs-N.log`): use
-  `bin/state recent-hyps|recent-runs|recent-tried|recent-notes`, never
+  `bin/state show-recent` or
+  `recent-hyps|recent-runs|recent-claims|recent-tried|recent-notes`, never
   `tail`/`sed`/`cat` directly.
 - Crash/finding reports: `bin/state show-crash|show-finding|list-*` first;
   read full `REPORT.md` only when editing it.
@@ -90,7 +91,8 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
 resume        --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1..S8]
 next-card     --agent N [--mode MODE] [--peek]
 show-card     CARD_ID|--card-id ID [--mode MODE]        # compact JSON
-list-cards    [--mode MODE] [--status eligible] [--limit N]
+list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N]
+dump-queue    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N]  # alias
 show-crash    CRASH-ID|--crash-id ID ;  list-crashes [--status OK|NEW] [--limit N]
 show-finding  FIND-ID|--finding-id ID ;  list-findings [--status OK|NEW] [--limit N]
 add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:func:line \
@@ -101,11 +103,13 @@ update-card   --card-id ID --status claimed|done|discarded|crash|find|blocked [-
 add-run       --agent N --hypothesis-id H-... --mode MODE --testcase TC \
               --asan-output ASAN --verdict VERDICT       # bin/probe sets these for you
 add-note      --agent N --hypothesis-id H-... --kind data-flow|guard|variants|decision|context --text '...'
+show-recent   [--agent N] [--hyps N] [--runs N] [--claims N] [--notes N]
 recent-hyps   [--agent N] [--card-id ID] [--status REGEX] [--strategy S] [--limit N]
 recent-runs   [--agent N] [--hypothesis-id H-...] [--verdict REGEX] [--limit N]
 recent-notes  [--agent N] [--hypothesis-id H-...] [--kind KIND] [--limit N]
+list-notes    [--agent N] [--hypothesis-id H-...] [--kind KIND] [--limit N]  # alias
 recent-tried  --agent N|all [--verdict REGEX] [--target SUBSTR] [--limit N]
-explain-queue [--mode MODE] [--top N]
+explain-queue [--agent N] [--mode MODE] [--role ROLE] [--strategy S] [--top N] [--all]
 ```
 
 ## State file discipline

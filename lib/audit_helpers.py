@@ -21,6 +21,10 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
       Count shell-command tool calls or all tool calls in a raw transcript.
       Supports Codex, Claude, and Gemini CLI stream-json shapes.
 
+  count-tools-all <log_file>
+      Count both shell-command tool calls and all tool calls in one transcript
+      pass. Prints key=value lines for shell callers.
+
   append-guard-card <work_file> <id> <slug> <subsystem> <guard> <now>
       Append a guard-bypass work-card JSONL row. No-op if a row with the
       same id already exists. Output: nothing.
@@ -198,6 +202,7 @@ def _cmd_waste_telemetry(args: argparse.Namespace) -> int:
     largest_label = "none"
 
     claude_pending = {}
+    top_level_pending = {}
 
     def record_command(cmd):
         if cmd:
@@ -260,6 +265,18 @@ def _cmd_waste_telemetry(args: argparse.Namespace) -> int:
                 cmd = params.get("command") if isinstance(params, dict) else ""
                 if name == "run_shell_command":
                     record_command(cmd)
+                tool_id = ev.get("tool_id") or ev.get("id")
+                if tool_id:
+                    label = cmd or name
+                    top_level_pending[tool_id] = (name, label)
+                continue
+
+            if ev.get("type") == "tool_result":
+                tool_id = ev.get("tool_id") or ev.get("tool_use_id") or ev.get("id")
+                name, label = top_level_pending.pop(tool_id, ("tool_result", "tool_result"))
+                output = _text_value(ev.get("output") or ev.get("content") or ev)
+                if name not in _WASTE_OBSERVABILITY_ONLY:
+                    record_output(output, f"{_command_pattern(label) if name == 'run_shell_command' else name}: {label}")
                 continue
 
             if ev.get("type") == "assistant" or "message" in ev:
@@ -313,27 +330,29 @@ def _iter_json_events(path):
         return
 
 
-def _cmd_count_tools(args: argparse.Namespace) -> int:
-    count = 0
-    for event in _iter_json_events(args.log_file):
+def _count_tools(path: str) -> dict[str, int]:
+    counts = {"command_execution": 0, "all_tools": 0}
+    for event in _iter_json_events(path):
         if event.get("type") == "item.completed":
             item = event.get("item") or {}
             item_type = item.get("type")
-            if args.kind == "command_execution":
-                if item_type == "command_execution":
-                    count += 1
-            elif item_type in ("command_execution", "tool_use", "file_change"):
-                count += 1
+            if item_type == "command_execution":
+                counts["command_execution"] += 1
+                counts["all_tools"] += 1
+            elif item_type in ("tool_use", "file_change"):
+                counts["all_tools"] += 1
             continue
 
         if event.get("type") == "command_execution":
-            count += 1
+            counts["command_execution"] += 1
+            counts["all_tools"] += 1
             continue
 
         if event.get("type") == "tool_use":
             name = event.get("tool_name") or event.get("name") or ""
-            if args.kind == "all_tools" or name == "run_shell_command":
-                count += 1
+            if name == "run_shell_command":
+                counts["command_execution"] += 1
+            counts["all_tools"] += 1
             continue
 
         if event.get("type") == "assistant" or "message" in event:
@@ -341,10 +360,22 @@ def _cmd_count_tools(args: argparse.Namespace) -> int:
                 if not isinstance(item, dict) or item.get("type") != "tool_use":
                     continue
                 name = item.get("name") or ""
-                if args.kind == "all_tools" or name == "Bash":
-                    count += 1
+                if name == "Bash":
+                    counts["command_execution"] += 1
+                counts["all_tools"] += 1
 
-    print(count)
+    return counts
+
+
+def _cmd_count_tools(args: argparse.Namespace) -> int:
+    print(_count_tools(args.log_file)[args.kind])
+    return 0
+
+
+def _cmd_count_tools_all(args: argparse.Namespace) -> int:
+    counts = _count_tools(args.log_file)
+    print(f"command_execution={counts['command_execution']}")
+    print(f"all_tools={counts['all_tools']}")
     return 0
 
 
@@ -681,6 +712,11 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("log_file")
     s.add_argument("kind", choices=("command_execution", "all_tools"))
     s.set_defaults(func=_cmd_count_tools)
+
+    s = sub.add_parser("count-tools-all",
+                       help="Count shell commands and all tools in one transcript pass.")
+    s.add_argument("log_file")
+    s.set_defaults(func=_cmd_count_tools_all)
 
     s = sub.add_parser("append-guard-card", help="Append a guard-bypass work-card row.")
     s.add_argument("work_file")

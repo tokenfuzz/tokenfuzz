@@ -73,6 +73,7 @@ eval "$(audit_extract_functions \
   codex_raw_has_failed_turn \
   gemini_raw_has_success_result \
   normalize_agent_exit_code \
+  work_card_refresh_summary \
   fuzz_leads_signature_file \
   fuzz_leads_signature_exists \
   current_fuzz_leads_signature \
@@ -110,6 +111,7 @@ eval "$(audit_extract_functions \
   _audit_detect_race_runner \
   detect_sanitizer_builds)"
 run_agent_src="$(audit_extract_function run_agent)"
+eval "$(audit_extract_functions count_iteration_progress_snapshot load_iteration_progress_snapshot)"
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -156,7 +158,7 @@ reset_asan_run_counter() {
 # so the test exercises the real usage parser. An inlined copy drifted in
 # the past (it grew a gemini `.stats` / `.cached` branch the real function
 # never had — agy emits plain text, so bin/audit reads no usage from it).
-eval "$(audit_extract_functions extract_usage_field extract_completed_item_count extract_total_tool_uses)"
+eval "$(audit_extract_functions extract_usage_field extract_usage_fields extract_completed_item_count extract_tool_counts extract_total_tool_uses)"
 
 set_agent_strategy() {
   printf '%s' "$2" > "$(agent_strategy_path "$1")"
@@ -597,6 +599,12 @@ assert_match 'llm_agent_flags gemini gemini_flags "\$model" 80 "\$SCRIPT_ROOT,\$
   "$run_agent_src" "model: gemini launch passes script/target/results to llm_agent_flags"
 assert_match 'verified_asan_runs=\$\(count_verified_asan_runs "\$\(scratch_dir_path "\$agent_num"\)"' \
   "$run_agent_src" "agent quality: verified ASan runs are counted once for telemetry"
+run_agent_asan_count_calls=$(grep -cF 'count_verified_asan_runs "$(scratch_dir_path "$agent_num")"' <<< "$run_agent_src" || true)
+assert_eq "2" "$run_agent_asan_count_calls" "agent quality: ASan runs counted once before launch and once after launch"
+run_agent_result_count_calls=$(grep -cF 'count_active_security_results' <<< "$run_agent_src" || true)
+assert_eq "2" "$run_agent_result_count_calls" "agent quality: security results counted once before launch and once after launch"
+assert_match 'resume_results_after="\$active_security_results_after"' "$run_agent_src" "agent quality: resume dry-count reuses post-session result count"
+assert_match 'resume_asan_after="\$verified_asan_runs"' "$run_agent_src" "agent quality: resume dry-count reuses post-session ASan count"
 assert_match '\[ "\$\{tool_uses:-0\}" -eq 0 \] && \[ "\$\{command_count:-0\}" -eq 0 \] && \[ "\$\{verified_asan_runs:-0\}" -eq 0 \] && \[ "\$\{output_tokens:-0\}" -eq 0 \]' \
   "$run_agent_src" "agent quality: ASan + output_tokens gate prevents false dead-session rotation (output_tokens guard keeps agy source-only sessions alive)"
 # agy's --print-timeout defaults to 5m0s and silently aborts a long
@@ -609,6 +617,76 @@ assert_match 'STREAM_IDLE_RETRY: agent=\$\{agent_num\} role=\$\{role\}' \
   "$run_agent_src" "backend: claude stream-idle retry logs the run_agent role argument"
 assert_not_match 'STREAM_IDLE_RETRY: agent=\$\{agent_num\} role=\$\{role_name\}' \
   "$run_agent_src" "backend: claude stream-idle retry does not reference launcher-local role_name"
+
+# Work-card refresh summary used to scan the newly-written queue three times:
+# wc for total lines, jq/sort/uniq for strategy histogram, jq/sort/uniq for
+# status histogram. Keep one jq reduction over work-cards plus one cheap patch
+# line count so refresh logging stays out of the iteration critical path.
+work_cards_summary="$TEST_TMPDIR/work-cards-summary.jsonl"
+patch_cards_summary="$TEST_TMPDIR/patch-cards-summary.jsonl"
+cat > "$work_cards_summary" <<'EOF'
+{"id":"W1","strategy":"S7","status":"unclaimed"}
+{"id":"W2","strategy":"S7","status":"unclaimed"}
+{"id":"W3","strategy":"S5","status":"claimed"}
+{"id":"W4","strategy":"S2","status":"blocked"}
+EOF
+cat > "$patch_cards_summary" <<'EOF'
+{"id":"P1"}
+{"id":"P2"}
+EOF
+summary=$(work_card_refresh_summary "$work_cards_summary" "$patch_cards_summary")
+IFS="$(printf '\t')" read -r wc_lines pc_lines wc_by_strat wc_by_status <<< "$summary"
+assert_eq "4" "$wc_lines" "work-card refresh summary: counts ranked cards"
+assert_eq "2" "$pc_lines" "work-card refresh summary: counts patch cards"
+assert_match 'Strategy7\(Adversarial-input\):2' "$wc_by_strat" \
+  "work-card refresh summary: formats strategy histogram"
+assert_match 'unclaimed:2' "$wc_by_status" "work-card refresh summary: status histogram"
+refresh_src="$(audit_extract_function refresh_structured_work_cards)"
+assert_match 'work_card_refresh_summary "\$work_file" "\$patch_file"' "$refresh_src" \
+  "work-card refresh: log summary delegated to single-pass helper"
+assert_not_match 'wc -l < "\$work_file"|sort \| uniq -c' "$refresh_src" \
+  "work-card refresh: avoids repeated count/histogram scans"
+
+# Iteration progress snapshot replaces four separate before/after counters.
+# The structured path must count suffixed CRASH-* / FIND-* statuses as
+# actionable, matching the state-template contract and avoiding dry-streak
+# false negatives after a real result row lands.
+rm -rf "$RESULTS_DIR/crashes" "$RESULTS_DIR/findings" "$RESULTS_DIR/state"
+mkdir -p "$RESULTS_DIR/crashes/CRASH-001-1" \
+         "$RESULTS_DIR/crashes/CRASH-002-pending" \
+         "$RESULTS_DIR/findings/FIND-001-test"
+touch "$RESULTS_DIR/crashes/CRASH-002-pending/.promotion_pending"
+cat > "$(state_file_path 1)" <<'EOF'
+| 1 | H1 | src/a.c | shape | guard | bounds | S1 | NEEDS_TESTCASE |
+| 2 | H2 | src/b.c | shape | guard | bounds | S1 | CRASH-001 |
+EOF
+cat > "$(state_file_path 2)" <<'EOF'
+| 1 | H3 | src/c.c | shape | guard | bounds | S1 | FIND-001 |
+| 2 | H4 | src/d.c | shape | guard | bounds | S1 | ENV-BLOCKED |
+EOF
+snapshot=$(count_iteration_progress_snapshot)
+assert_match '^confirmed_findings=1$' "$snapshot" "iteration snapshot: markdown path counts confirmed findings"
+assert_match '^security_crashes=1$' "$snapshot" "iteration snapshot: markdown path excludes promotion-pending crashes"
+assert_match '^actionable=3$' "$snapshot" "iteration snapshot: markdown path counts actionable state once"
+assert_match '^env_blocked=1$' "$snapshot" "iteration snapshot: markdown path counts env-blocked state once"
+confirmed=0 crashes=0 actionable=0 blocked=0
+load_iteration_progress_snapshot confirmed crashes actionable blocked
+assert_eq "1" "$confirmed" "iteration snapshot loader: confirmed findings assigned"
+assert_eq "1" "$crashes" "iteration snapshot loader: crash candidates assigned"
+assert_eq "3" "$actionable" "iteration snapshot loader: actionable assigned"
+assert_eq "1" "$blocked" "iteration snapshot loader: env-blocked assigned"
+
+mkdir -p "$RESULTS_DIR/state"
+cat > "$RESULTS_DIR/state/hypotheses.jsonl" <<'EOF'
+{"id":"H1","agent":"1","status":"NEEDS_TESTCASE","file":"src/a.c"}
+{"id":"H2","agent":"1","status":"CRASH-001","file":"src/b.c"}
+{"id":"H3","agent":"2","status":"FIND-LOWPRIO","file":"src/c.c"}
+{"id":"H4","agent":"2","status":"ENV-BLOCKED","file":"src/d.c"}
+{"id":"H5","agent":"2","status":"DISCARDED","file":"src/e.c"}
+EOF
+snapshot=$(count_iteration_progress_snapshot)
+assert_match '^actionable=3$' "$snapshot" "iteration snapshot: structured path counts suffixed CRASH/FIND statuses"
+assert_match '^env_blocked=1$' "$snapshot" "iteration snapshot: structured path counts ENV-BLOCKED rows"
 # The gemini backend is no longer capped to a conservative 1-agent
 # default — it takes the same generic pool as every other backend and is
 # tuned with NUM_AGENTS. The old GEMINI_DEFAULT_AGENTS special-case must
@@ -945,10 +1023,18 @@ EOF
   assert_eq "120" "$result" "usage: max output_tokens"
   result=$(extract_usage_field "$TEST_TMPDIR/claude_log.jsonl" "cached_input_tokens")
   assert_eq "50" "$result" "usage: cached_input_tokens alias"
+  result=$(extract_usage_fields "$TEST_TMPDIR/claude_log.jsonl")
+  assert_match 'input_tokens=300' "$result" "usage: multi-field input_tokens"
+  assert_match 'output_tokens=120' "$result" "usage: multi-field output_tokens"
+  assert_match 'cached_input_tokens=50' "$result" "usage: multi-field cached_input_tokens"
+  assert_match 'total_tokens=420' "$result" "usage: multi-field total_tokens"
 
   # Missing file
   result=$(extract_usage_field "$TEST_TMPDIR/nonexistent.jsonl" "input_tokens")
   assert_eq "" "$result" "usage: missing file → empty"
+  result=$(extract_usage_fields "$TEST_TMPDIR/nonexistent.jsonl")
+  assert_match '^input_tokens=$' "$result" "usage: multi-field missing file has empty input"
+  assert_match '^duration_ms=$' "$result" "usage: multi-field missing file has empty duration"
 
   # Empty file
   : > "$TEST_TMPDIR/empty.jsonl"
@@ -983,10 +1069,16 @@ EOF
   assert_eq "2" "$result" "tool count: 2 Bash invocations"
   result=$(extract_completed_item_count "$TEST_TMPDIR/claude_tools.jsonl" "all_tools")
   assert_eq "3" "$result" "tool count: 3 total tool_use"
+  result=$(extract_tool_counts "$TEST_TMPDIR/claude_tools.jsonl")
+  assert_match '^command_execution=2$' "$result" "tool count: multi-field Claude Bash invocations"
+  assert_match '^all_tools=3$' "$result" "tool count: multi-field Claude total tool_use"
 
   # Missing file
   result=$(extract_completed_item_count "$TEST_TMPDIR/nonexistent.jsonl" "command_execution")
   assert_eq "0" "$result" "tool count: missing file → 0"
+  result=$(extract_tool_counts "$TEST_TMPDIR/nonexistent.jsonl")
+  assert_match '^command_execution=0$' "$result" "tool count: multi-field missing file command count"
+  assert_match '^all_tools=0$' "$result" "tool count: multi-field missing file total count"
 
   # ═════════════════════════════════════════════════════════════
   # 7a. normalize_agent_exit_code — Codex completed turns
@@ -1011,6 +1103,8 @@ EOF
 EOF
   result=$(normalize_agent_exit_code gemini 5 "$TEST_TMPDIR/gemini_success_result.jsonl")
   assert_eq "0" "$result" "agent exit: gemini success result normalizes failed tool aggregate status"
+  result=$(normalize_agent_exit_code gemini 5 "$TEST_TMPDIR/gemini_success_result.jsonl" 1)
+  assert_eq "5" "$result" "agent exit: cached rate-limit flag prevents gemini success normalization"
 
   cat > "$TEST_TMPDIR/codex_turn_failed.jsonl" <<'EOF'
 {"type":"thread.started","thread_id":"abc"}
@@ -1028,6 +1122,8 @@ EOF
 EOF
   result=$(normalize_agent_exit_code codex 5 "$TEST_TMPDIR/codex_rate_limited.jsonl")
   assert_eq "5" "$result" "agent exit: codex rate limit preserves non-zero status"
+  result=$(normalize_agent_exit_code codex 5 "$TEST_TMPDIR/codex_completed_with_failed_tool.jsonl" 1)
+  assert_eq "5" "$result" "agent exit: cached rate-limit flag prevents codex completion normalization"
 
   result=$(normalize_agent_exit_code claude 5 "$TEST_TMPDIR/codex_completed_with_failed_tool.jsonl")
   assert_eq "5" "$result" "agent exit: non-codex backend does not normalize"
@@ -1059,6 +1155,13 @@ EOF
   else
     pass "usage: agy plain-text output_tokens estimates > 0 (regression: tokens=0 silent pin)"
   fi
+  ACTIVE_BACKEND=gemini result=$(extract_usage_fields "$TEST_TMPDIR/gemini_plain.log")
+  assert_match '^input_tokens=0$' "$result" "usage: multi-field agy input_tokens stays 0 without prompt"
+  if ! printf '%s\n' "$result" | grep -Eq '^output_tokens=[1-9][0-9]*$'; then
+    fail "usage: multi-field agy output_tokens estimates > 0" "got '$result'"
+  else
+    pass "usage: multi-field agy output_tokens estimates > 0"
+  fi
 
   # ═════════════════════════════════════════════════════════════
   # 7c. extract_completed_item_count — Gemini tool_use events
@@ -1075,6 +1178,9 @@ EOF
   assert_eq "2" "$result" "tool count: 2 gemini run_shell_command invocations"
   result=$(extract_completed_item_count "$TEST_TMPDIR/gemini_tools.jsonl" "all_tools")
   assert_eq "3" "$result" "tool count: 3 gemini tool_use total"
+  result=$(extract_tool_counts "$TEST_TMPDIR/gemini_tools.jsonl")
+  assert_match '^command_execution=2$' "$result" "tool count: multi-field Gemini shell invocations"
+  assert_match '^all_tools=3$' "$result" "tool count: multi-field Gemini total tool_use"
 else
   pass "jq not available — skipping usage extraction tests"
   pass "jq not available — skipping tool count tests"
@@ -1090,6 +1196,9 @@ result=$(extract_completed_item_count "$TEST_TMPDIR/mixed_backend_tools.jsonl" "
 assert_eq "3" "$result" "tool count: command executions are parsed through audit_helpers.py"
 result=$(extract_total_tool_uses "$TEST_TMPDIR/mixed_backend_tools.jsonl")
 assert_eq "5" "$result" "tool count: total tool uses are parsed through audit_helpers.py"
+result=$(extract_tool_counts "$TEST_TMPDIR/mixed_backend_tools.jsonl")
+assert_match '^command_execution=3$' "$result" "tool count: one-pass mixed command executions"
+assert_match '^all_tools=5$' "$result" "tool count: one-pass mixed total tool uses"
 
 # ═══════════════════════════════════════════════════════════════
 # 7d. extract_waste_telemetry — backend-neutral output attribution
@@ -1128,20 +1237,55 @@ assert_match 'native_tools=Read:1,Grep:1,Glob:1' "$result" "waste: claude counts
 assert_match 'top_cmds=grep:1' "$result" "waste: claude normalizes Bash command patterns"
 assert_match 'largest="Read: Read"' "$result" "waste: claude names largest native output"
 
-# The gemini backend (Antigravity CLI) emits plain text in --print
-# mode, so its raw logs carry no JSON tool_use / tool_result events.
-# extract_waste_telemetry naturally yields zero counters for agy logs;
-# the parse never reaches a JSON branch.
+# The older Antigravity CLI emits plain text in --print mode, so those
+# logs carry no JSON tool_use / tool_result events. extract_waste_telemetry
+# naturally yields zero counters for agy logs; the parse never reaches a
+# JSON branch.
 cat > "$TEST_TMPDIR/gemini_waste.txt" <<'EOF'
 agy plain stdout — no JSON envelope to count tool bytes against.
 EOF
 result=$(extract_waste_telemetry "$TEST_TMPDIR/gemini_waste.txt")
 assert_match 'tool_bytes=0 max_output=0 over8k=0' "$result" "waste: gemini (agy) plain text → zero summary"
 
+cat > "$TEST_TMPDIR/gemini_cli_waste.jsonl" <<EOF
+{"type":"tool_use","tool_name":"run_shell_command","tool_id":"g1","parameters":{"command":"sed -n '1,20p' targets/libxml2/parser.c"}}
+{"type":"tool_result","tool_id":"g1","status":"success","output":"abc"}
+{"type":"tool_use","tool_name":"run_shell_command","tool_id":"g2","parameters":{"command":"bin/probe scratch-1/testcase.c"}}
+{"type":"tool_result","tool_id":"g2","status":"success","output":"$big_output"}
+EOF
+result=$(extract_waste_telemetry "$TEST_TMPDIR/gemini_cli_waste.jsonl")
+assert_match 'tool_bytes=9003' "$result" "waste: gemini stream-json sums tool_result output"
+assert_match 'max_output=9000' "$result" "waste: gemini stream-json records largest output"
+assert_match 'over8k=1' "$result" "waste: gemini stream-json counts oversized outputs"
+assert_match 'top_cmds=sed:1,probe:1' "$result" "waste: gemini stream-json normalizes shell commands"
+assert_match 'largest="probe: bin/probe scratch-1/testcase.c"' "$result" "waste: gemini stream-json names largest command"
+
+printf '%s\n' 'last message' > "$TEST_TMPDIR/waste-parity.log"
+for waste_fixture in codex_waste.jsonl claude_waste.jsonl gemini_cli_waste.jsonl; do
+  expected_waste=$(extract_waste_telemetry "$TEST_TMPDIR/$waste_fixture")
+  actual_waste=$(
+    SESSION_SUMMARY_PRINT_WASTE=1 \
+    python3 "$SCRIPT_ROOT/lib/audit_log_summary.py" \
+      "$TEST_TMPDIR/$waste_fixture" \
+      "$TEST_TMPDIR/waste-parity.log" \
+      "$TEST_TMPDIR/$waste_fixture.summary.md" \
+      "$TEST_TMPDIR/$waste_fixture.index.jsonl"
+  )
+  assert_eq "$expected_waste" "$actual_waste" "summary: one-pass waste parity for $waste_fixture"
+done
+
 result=$(extract_waste_telemetry "$TEST_TMPDIR/no-such-log.jsonl")
 assert_match 'tool_bytes=0 max_output=0 over8k=0' "$result" "waste: missing log returns zero summary"
 assert_match 'Agent \$_role_display waste: \$\{waste_telemetry\}' "$run_agent_src" "run_agent: writes waste telemetry to index"
-assert_match 'write_session_log_summary "\$\(audit_raw_path "\$logfile"\)"' "$run_agent_src" "run_agent: writes compact log summaries"
+assert_match 'usage_fields=\$\(extract_usage_fields "\$raw_logfile"\)' "$run_agent_src" "run_agent: extracts all usage fields in one raw-log read"
+assert_not_match 'extract_usage_field "\$raw_logfile" total_tokens' "$run_agent_src" "run_agent: avoids per-field usage raw-log scans"
+assert_match 'tool_counts=\$\(extract_tool_counts "\$raw_logfile"\)' "$run_agent_src" "run_agent: extracts all tool counts in one raw-log read"
+assert_not_match 'extract_completed_item_count "\$raw_logfile" command_execution' "$run_agent_src" "run_agent: avoids per-field tool-count raw-log scans"
+assert_match 'normalize_agent_exit_code "\$ACTIVE_BACKEND" "\$exit_code" "\$raw_logfile" "\$rate_limit_rejected"' "$run_agent_src" "run_agent: passes cached rate-limit status into exit normalization"
+run_agent_rate_limit_checks=$(grep -cF 'log_has_rate_limit_rejection "$raw_logfile"' <<< "$run_agent_src" || true)
+assert_eq "1" "$run_agent_rate_limit_checks" "run_agent: checks raw-log rate limit once after recovery"
+assert_match 'waste_telemetry=\$\(write_session_log_summary "\$raw_logfile"' "$run_agent_src" "run_agent: gets waste telemetry from summary raw-log pass"
+assert_match 'write_session_log_summary "\$raw_logfile"' "$run_agent_src" "run_agent: writes compact log summaries"
 assert_match 'pkill -TERM -P "\$watchdog_pid"' "$run_agent_src" "run_agent: watchdog child sleep is killed before watchdog shell"
 assert_match 'pkill -TERM -P "\$turncap_pid"' "$run_agent_src" "run_agent: turn-cap child sleep is killed before turn-cap shell"
 assert_match 'agent_start_epoch=\$\(date \+%s\)' "$run_agent_src" "run_agent: records agent wall-clock start"
@@ -1153,6 +1297,9 @@ cat > "$TEST_TMPDIR/session_summary.raw" <<EOF
 EOF
 printf '%s\n' 'last message' > "$TEST_TMPDIR/session_summary.log"
 summary_waste=$(extract_waste_telemetry "$TEST_TMPDIR/session_summary.raw")
+summary_writer_src="$(audit_extract_function write_session_log_summary)"
+assert_not_match "sed -n 's/\\^subsystem=//p'" "$summary_writer_src" "summary: prompt metadata stash parsed without per-field sed scans"
+assert_match "while IFS='=' read -r stash_key stash_value" "$summary_writer_src" "summary: prompt metadata stash parsed in one shell loop"
 # Drop a prompt-meta stash where the finish handler expects it, so the
 # index.jsonl row gets the folded fields (subsystem, strategy, launch,
 # suggested_subsystem, prompt_tokens_est).
@@ -1164,6 +1311,14 @@ mkdir -p "$LOGDIR"
   printf 'prompt_tokens_est=%s\n' "11500"
   printf 'launch=%s\n' "deep_investigation"
 } > "$LOGDIR/.prompt_meta_2"
+computed_summary_waste=$(write_session_log_summary \
+  "$TEST_TMPDIR/session_summary.raw" \
+  "$TEST_TMPDIR/session_summary.log" \
+  "$TEST_TMPDIR/session_summary.computed.summary.md" \
+  "$TEST_TMPDIR/computed-index.jsonl" \
+  "analysis" "2" "codex" "gpt-test" "generic" "0" \
+  "123" "1000" "900" "50" "1050" "222" "2" "2" "" "50")
+assert_eq "$summary_waste" "$computed_summary_waste" "summary: shell wrapper returns computed waste when no precomputed waste is passed"
 write_session_log_summary \
   "$TEST_TMPDIR/session_summary.raw" \
   "$TEST_TMPDIR/session_summary.log" \
@@ -1209,6 +1364,34 @@ PY
 assert_eq "0" "$?" "summary: index.jsonl row is parseable and excludes summary_json field"
 assert_file_contains "$TEST_TMPDIR/session_summary.summary.md" 'Raw log retained for explicit post-mortem use' "summary: markdown tells readers not to default to raw logs"
 
+# Gemini stream-json: a run_shell_command tool_result carrying probe/ASan
+# output must feed the probe/verdict scan, exactly like the codex
+# command_execution and claude tool_result paths. Without it, gemini runs
+# report probe/asan/verdict counts as false-low.
+cat > "$TEST_TMPDIR/gemini_probe.jsonl" <<'EOF'
+{"type":"tool_use","tool_name":"run_shell_command","tool_id":"g1","parameters":{"command":"bin/probe scratch-1/testcase.html"}}
+{"type":"tool_result","tool_id":"g1","status":"success","output":"[probe] mode=asan\n=== Run 1/5 ===\nERROR: AddressSanitizer: heap-buffer-overflow\nCRASHES FOUND\nHIT\n"}
+EOF
+printf '%s\n' 'last message' > "$TEST_TMPDIR/gemini_probe.log"
+write_session_log_summary \
+  "$TEST_TMPDIR/gemini_probe.jsonl" \
+  "$TEST_TMPDIR/gemini_probe.log" \
+  "$TEST_TMPDIR/gemini_probe.summary.md" \
+  "$TEST_TMPDIR/gemini_probe.index.jsonl" \
+  "analysis" "3" "gemini" "gemini-test" "generic" "0" \
+  "0" "0" "0" "0" "0" "0" "0" "0" ""
+python3 - "$TEST_TMPDIR/gemini_probe.index.jsonl" <<'PY'
+import json, sys
+row = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()][-1]
+assert row["backend"] == "gemini"
+assert row["probe"]["commands"] == 1, row["probe"]
+assert row["probe"]["outputs"] >= 1, row["probe"]
+assert row["probe"]["asan_invocations"] == 1, row["probe"]
+assert row["probe"]["verdicts"]["crash"] >= 1, row["probe"]
+assert row["probe"]["verdicts"]["hit"] >= 1, row["probe"]
+PY
+assert_eq "0" "$?" "summary: gemini stream-json run_shell_command output feeds probe/verdict scan"
+
 cat > "$TEST_TMPDIR/codex_immediate_failed_turn.jsonl" <<EOF
 {"type":"thread.started","thread_id":"t1"}
 {"type":"turn.started"}
@@ -1225,6 +1408,28 @@ cat > "$TEST_TMPDIR/codex_mid_session_failed_turn.jsonl" <<EOF
 {"type":"turn.failed","error":{"message":"backend rejected the turn"}}
 EOF
 assert_eq "1" "$(count_structural_refusal_signals "$TEST_TMPDIR/codex_mid_session_failed_turn.jsonl")" "refusal signals: codex failed turn after work is counted"
+
+cat > "$TEST_TMPDIR/codex_explicit_refusal.jsonl" <<'EOF'
+{"type":"refusal","message":"no"}
+{"stop_reason":"refusal","message":"no"}
+EOF
+assert_eq "2" "$(count_structural_refusal_signals "$TEST_TMPDIR/codex_explicit_refusal.jsonl")" "refusal signals: explicit refusal marker lines are counted"
+
+cat > "$TEST_TMPDIR/codex_brief_text_only.jsonl" <<'EOF'
+{"type":"item.completed","item":{"type":"agent_message","text":"brief"}}
+EOF
+assert_eq "1" "$(count_structural_refusal_signals "$TEST_TMPDIR/codex_brief_text_only.jsonl")" "refusal signals: brief text-only topology is counted"
+
+{
+  printf '{"type":"item.completed","item":{"type":"agent_message","text":"'
+  head -c 9000 < /dev/zero | tr '\0' 'x'
+  printf '"}}\n'
+} > "$TEST_TMPDIR/codex_large_text_only.jsonl"
+assert_eq "0" "$(count_structural_refusal_signals "$TEST_TMPDIR/codex_large_text_only.jsonl")" "refusal signals: large text-only topology is ignored"
+
+refusal_src="$(audit_extract_function count_structural_refusal_signals)"
+assert_match '^  awk -v log_bytes=' "$refusal_src" "refusal signals: shell wrapper uses one awk scan"
+assert_not_match 'grep -cF' "$refusal_src" "refusal signals: shell wrapper avoids repeated grep scans"
 
 # ═══════════════════════════════════════════════════════════════
 # 7e. Model preflight validates selected backend/model before launch
@@ -2059,7 +2264,7 @@ assert_file_contains "$SCRIPT_ROOT/bin/audit" 'lib/subsystems/\$\{TARGET_SLUG' \
 # the initial commit because helpers.sh stubs `get_agent_strategy`
 # in every other test, so the real fallback path was never exercised.
 # ═══════════════════════════════════════════════════════════════
-eval "$(audit_extract_functions agent_strategy_path agent_strategy_streak_path get_agent_strategy pick_cold_start_strategy)"
+eval "$(audit_extract_functions agent_strategy_path agent_strategy_streak_path get_agent_strategy effective_work_card_rows unclaimed_strategy_counts pick_cold_start_strategy)"
 
 # Minimal stubs for the deps get_agent_strategy normally calls.
 # All return values that force the fallback to pick_cold_start_strategy
@@ -2101,7 +2306,7 @@ _csps_pick=$(perl -e '
   alarm 0;
   exit ($? >> 8);
 ' 5 bash -c "
-  $(declare -f agent_strategy_path agent_strategy_streak_path get_agent_strategy pick_cold_start_strategy structured_state_latest_strategy count_active_hypotheses_for_agent state_file_path)
+  $(declare -f agent_strategy_path agent_strategy_streak_path get_agent_strategy effective_work_card_rows unclaimed_strategy_counts pick_cold_start_strategy structured_state_latest_strategy count_active_hypotheses_for_agent state_file_path)
   RESULTS_DIR='$RESULTS_DIR' NUM_AGENTS=3 pick_cold_start_strategy 1
 " 2>/dev/null) || _csps_rc=$?
 _csps_elapsed=$(( $(date +%s) - _csps_started ))

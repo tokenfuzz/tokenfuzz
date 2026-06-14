@@ -6,16 +6,16 @@
 #
 # Two caps fire independently:
 #   line cap   — CAP_LINES (default 200)     protects against many small matches
-#   byte cap   — CAP_BYTES (default 131072)  protects against few huge matches
+#   byte cap   — default head+tail cap       protects against few huge matches
+#                explicit CAP_BYTES=N keeps the legacy chop-at-N behavior
 # Per-tool bypass: AGENT_WRAPPERS_BYPASS (space/comma list, or "all") runs the
 #   named tools uncapped — e.g. AGENT_WRAPPERS_BYPASS=rg leaves grep/sed capped.
 #   Intended for A/B experiments on the cap's effect on bug-finding.
 # A single match line in a JSON-shaped haystack (codex .log.raw transcripts)
-# can be hundreds of KB, defeating the line cap alone. The byte cap is a
-# hard ceiling regardless of line count. Default of 128 KiB is empirical:
-# the largest legitimate rg/grep output observed across ~5,500 production
-# calls was ~92 KiB; 128 KiB gives ~40% headroom while still trimming the
-# 1 MB+ self-scan pathology.
+# can be hundreds of KB, defeating the line cap alone. The default byte path
+# uses lib/output_cap.sh's ~50 KiB head+tail spill so the agent sees enough
+# context without replaying a huge command result on every later turn. The
+# full stream is saved under logs/.raw/outcap when RESULTS_DIR is available.
 #
 # Stub usage:
 #   exec "$_dir/_cap" "$_dir" <tool> "<flag>,<flag>,..." "$@"
@@ -26,6 +26,8 @@ _tool="$1"; shift
 _passthrough="$1"; shift
 
 _cap_lines="${CAP_LINES:-200}"
+_cap_bytes_explicit=0
+[ "${CAP_BYTES+x}" = "x" ] && _cap_bytes_explicit=1
 _cap_bytes="${CAP_BYTES:-131072}"
 case "$_cap_lines" in
   ''|*[!0-9]*) echo "${_tool}: CAP_LINES must be a non-negative integer" >&2; exit 2 ;;
@@ -33,6 +35,11 @@ esac
 case "$_cap_bytes" in
   ''|*[!0-9]*) echo "${_tool}: CAP_BYTES must be a non-negative integer" >&2; exit 2 ;;
 esac
+
+if [ -r "$_wrapper_dir/../output_cap.sh" ]; then
+  # shellcheck source=../output_cap.sh
+  . "$_wrapper_dir/../output_cap.sh"
+fi
 
 # Find the real binary, skipping our own wrapper directory in PATH so we
 # don't recurse into ourselves.
@@ -122,25 +129,45 @@ _emit_capped() {
   fi
 
   # 2) Byte cap on whatever survived.
-  _clip_to_bytes "$_file" "$_cap_bytes" && _byte_capped=1
+  #
+  # Default path: use output_cap.sh's head+tail replacement so broad
+  # searches show both ends and spill the full original to disk. If the
+  # operator explicitly sets CAP_BYTES, preserve the historical chop-at-N
+  # contract and footer shape for compatibility/debugging.
+  local _use_output_cap=0
+  if [ "$_cap_bytes_explicit" -eq 0 ] \
+     && [ "$_cap_bytes" -gt 0 ] \
+     && declare -F cap_output_file >/dev/null 2>&1; then
+    _use_output_cap=1
+  fi
 
   if [ "$_stream" = "stderr" ]; then
-    cat "$_file" >&2
+    if [ "$_use_output_cap" -eq 1 ]; then
+      cap_output_file "$_file" "${_tool}-${_stream}" >&2
+    else
+      _clip_to_bytes "$_file" "$_cap_bytes" && _byte_capped=1
+      cat "$_file" >&2
+    fi
     if [ "$_line_capped" -eq 1 ]; then
       printf '... (%s total stderr lines — output truncated to %s. Narrow your search.)\n' \
         "$_orig_lines" "$_cap_lines" >&2
     fi
-    if [ "$_byte_capped" -eq 1 ]; then
+    if [ "$_use_output_cap" -eq 0 ] && [ "$_byte_capped" -eq 1 ]; then
       printf '... (stderr clipped at %s bytes of %s. Narrow your search.)\n' \
         "$_cap_bytes" "$_orig_bytes" >&2
     fi
   else
-    cat "$_file"
+    if [ "$_use_output_cap" -eq 1 ]; then
+      cap_output_file "$_file" "${_tool}-${_stream}"
+    else
+      _clip_to_bytes "$_file" "$_cap_bytes" && _byte_capped=1
+      cat "$_file"
+    fi
     if [ "$_line_capped" -eq 1 ]; then
       printf '... (%s total stdout lines — output truncated to %s. Narrow your search.)\n' \
         "$_orig_lines" "$_cap_lines"
     fi
-    if [ "$_byte_capped" -eq 1 ]; then
+    if [ "$_use_output_cap" -eq 0 ] && [ "$_byte_capped" -eq 1 ]; then
       printf '... (stdout clipped at %s bytes of %s. Narrow your search.)\n' \
         "$_cap_bytes" "$_orig_bytes"
     fi

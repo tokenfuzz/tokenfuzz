@@ -5,6 +5,7 @@ set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
 
+source "$SCRIPT_ROOT/lib/structured_state.sh"
 source "$SCRIPT_ROOT/lib/audit_debug.sh"
 
 ACTIVE_BACKEND="codex"
@@ -74,6 +75,17 @@ assert_file_contains "$INDEX" "strategy=S1" "plan: strategy logged"
 assert_file_contains "$INDEX" "active=1 pending=1 discards=1 asan_runs=3 hits=1" "plan: critical counts logged"
 assert_file_contains "$(audit_events_path)" '"event":"subsystem-suggest"' "events: subsystem suggest event written"
 assert_file_contains "$(audit_events_path)" '"event":"agent-plan"' "events: plan event written"
+
+mkdir -p "$RESULTS_DIR/state"
+cat > "$RESULTS_DIR/state/hypotheses.jsonl" <<'EOF'
+{"id":"H-json-1","agent":"1","status":"PENDING","file":"src/lib/A.cpp"}
+{"id":"H-json-2","agent":"1","status":"PENDING","file":"src/lib/B.cpp"}
+{"id":"H-json-3","agent":"1","status":"INVESTIGATING","file":"src/lib/C.cpp"}
+{"id":"H-json-4","agent":"1","status":"DISCARDED","file":"src/lib/D.cpp"}
+EOF
+log_agent_plan 1 "deep_investigation" "deep_investigation-1-generic" 14 "$prompt_file" "$meta_file" 2>/dev/null
+assert_file_contains "$INDEX" "PLAN: agent=1 launch=deep_investigation.*active=3 pending=2 discards=1 asan_runs=3 hits=1" \
+  "plan: structured state counts loaded in one pass"
 
 # ═══════════════════════════════════════════════════════════════
 # 3. SUBSYSTEM_CLAIM

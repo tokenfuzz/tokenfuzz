@@ -141,6 +141,36 @@ finally:
     os.unlink(claude_path)
 
 with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+    gemini_path = f.name
+    json.dump(
+        {
+            "type": "tool_use",
+            "tool_name": "run_shell_command",
+            "tool_id": "g1",
+            "parameters": {"command": "bin/probe scratch-1/testcase.c"},
+        },
+        f,
+    )
+    f.write("\n")
+    json.dump(
+        {
+            "type": "tool_result",
+            "tool_id": "g1",
+            "status": "success",
+            "output": "hello",
+        },
+        f,
+    )
+    f.write("\n")
+try:
+    proc = run(["waste-telemetry", gemini_path])
+    ok("probe:1" in proc.stdout, "gemini tool_use → probe command pattern", proc.stdout)
+    ok("tool_bytes=5" in proc.stdout, "gemini tool_result output size = 5")
+    ok("largest=\"probe: bin/probe scratch-1/testcase.c\"" in proc.stdout, "gemini largest command label")
+finally:
+    os.unlink(gemini_path)
+
+with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
     bad_path = f.name
     f.write("not json at all\n")
     f.write(
@@ -153,6 +183,45 @@ try:
     ok("jq:1" in proc.stdout, "second valid line still parsed")
 finally:
     os.unlink(bad_path)
+
+
+# ── count-tools ─────────────────────────────────────────────────────
+print("\ncount-tools")
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    tools_path = f.name
+    rows = [
+        {"type": "item.completed", "item": {"type": "command_execution", "command": "ls"}},
+        {"type": "item.completed", "item": {"type": "file_change", "path": "x"}},
+        {
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "pwd"}},
+                    {"type": "tool_use", "name": "Read", "input": {"path": "foo"}},
+                ]
+            }
+        },
+        {"type": "tool_use", "tool_name": "run_shell_command", "tool_id": "g1"},
+        {"type": "tool_use", "tool_name": "read_file", "tool_id": "g2"},
+    ]
+    for row in rows:
+        json.dump(row, f)
+        f.write("\n")
+try:
+    proc = run(["count-tools", tools_path, "command_execution"])
+    assert_eq("3", proc.stdout.strip(), "single command_execution count")
+    proc = run(["count-tools", tools_path, "all_tools"])
+    assert_eq("6", proc.stdout.strip(), "single all_tools count")
+    proc = run(["count-tools-all", tools_path])
+    assert_eq(
+        ["command_execution=3", "all_tools=6"],
+        proc.stdout.splitlines(),
+        "count-tools-all prints both counts",
+    )
+finally:
+    os.unlink(tools_path)
+
+proc = run(["count-tools-all", "/nonexistent/path-that-cannot-exist.log"])
+assert_eq(["command_execution=0", "all_tools=0"], proc.stdout.splitlines(), "missing log → zero tool counts")
 
 
 # ── append-guard-card ───────────────────────────────────────────────

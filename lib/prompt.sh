@@ -71,6 +71,66 @@ EOF
   printf '\n## AGENT GUIDE\n\n%s\n' "$AGENT_GUIDE_CACHED"
 }
 
+build_strategy_brief() {
+  local strategy="${1:-}"
+  strategy=$(printf '%s' "$strategy" | tr '[:lower:]' '[:upper:]')
+  [ -n "$strategy" ] || return 0
+
+  local ref_file
+  ref_file=$(strategy_file_for_letter "$strategy" 2>/dev/null || true)
+  [ -n "$ref_file" ] || return 0
+
+  local summary probes
+  case "$strategy" in
+    S1)
+      summary="Prior-fix regression: inspect the named fix commit(s), identify the invariant that was repaired, then test nearby code paths for unfixed variants."
+      probes="Start with \`bin/show-patch <fix-hash>\`, then \`bin/find-seed <file>[:Function]\` before mutating inputs."
+      ;;
+    S2)
+      summary="Invariant negation: find asserts/checks/preconditions, then craft inputs that violate the guarded assumption through the public boundary."
+      probes="Search for assertion/check families and turn the most reachable guard into one testcase plus variants."
+      ;;
+    S3)
+      summary="Spec-vs-implementation: compare documented format/API rules against parser fast paths, normalization, and edge-case shortcuts."
+      probes="Use seed+delta inputs that cross boundary values, duplicate fields, alternate encodings, or fast-path eligibility."
+      ;;
+    S4)
+      summary="Advanced differential: compare execution modes, tiers, builds, or feature flags and treat stable behavioral divergence as the oracle."
+      probes="For JS/Wasm, use \`MODE: js-diff\`; otherwise pick two documented configurations and keep the input identical."
+      ;;
+    S5)
+      summary="Lifetime/state: target re-entrancy, error-path rollback, races, and state-machine sequences where valid calls arrive in a harmful order."
+      probes="Build one explicit call/input sequence: setup state, trigger transition/error/callback/race, then touch the stale or inconsistent state."
+      ;;
+    S6)
+      summary="Cross-project variant mining: map peer-project security fixes onto this target's analogous parser, allocator, state, or API surface."
+      probes="Use the peer fix as a bug-class template, not as target-specific truth; confirm reachability with a local testcase."
+      ;;
+    S7)
+      summary="Adversarial input engineering: start from a real seed and mutate parser/decoder boundaries, lengths, nesting, dictionaries, and checksums."
+      probes="Run \`bin/find-seed <file>[:Function]\` first; from-scratch inputs only after seed search returns nothing."
+      ;;
+    S8)
+      summary="Property oracle: test security-relevant invariants such as inverse operations, injectivity, idempotence, canonicalization, and numeric domains."
+      probes="Write small oracle drivers that compare two equivalent paths or round trips; file FIND only for concrete security impact."
+      ;;
+    REF)
+      summary="Pattern library: use broad target-agnostic grep patterns to support the active strategy, then turn hits into concrete hypotheses."
+      probes="Keep searches capped and immediately read 2-3 matching files rather than expanding the grep surface."
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  cat <<STRAT
+
+Strategy brief (${strategy}): ${summary}
+Probe shape: ${probes}
+Full playbook: \`${REFERENCE_DIR}/strategies/${ref_file}\` — the brief is orientation only; open the file for the taxonomy, mining commands, and proven patterns it cannot hold, before you commit to hypotheses.
+STRAT
+}
+
 # Context framing shared by all agent prompts. Kept as a template because
 # it is large, mostly static, and reviewed as user-facing prompt text.
 # results_dir is interpolated so every reference to crashes/ and findings/
@@ -102,16 +162,14 @@ build_session_directive() {
 
   local my_subsystem my_pending=0 my_active=0 my_discards=0 my_asan_runs=0 my_hits_count=0 my_env_blocked=0
   local _ntc_unused=0 _result_unused=0 _invest_unused=0
-  my_subsystem=$(get_agent_subsystem "$agent_num" 2>/dev/null || echo "unknown")
+  my_subsystem=$(cached_agent_subsystem "$agent_num")
   if ! structured_state_agent_counts_load "$agent_num" \
          my_pending my_active my_discards my_env_blocked \
          _ntc_unused _result_unused _invest_unused 2>/dev/null; then
-    if [ -f "$state_file" ]; then
-      my_pending=$(grep -c "PENDING" "$state_file" 2>/dev/null) || true
-      my_active=$(grep -cE "PENDING|INVESTIGATING|NEEDS_TESTCASE" "$state_file" 2>/dev/null) || true
-      my_discards=$(grep -c "DISCARDED" "$state_file" 2>/dev/null) || true
-      my_env_blocked=$(count_env_blocked "$state_file")
-    fi
+    [ -f "$state_file" ] \
+      && prompt_markdown_state_counts_load "$state_file" \
+           my_pending my_active my_discards my_env_blocked \
+           _ntc_unused _result_unused
   fi
   my_asan_runs=$(count_verified_asan_runs "$(scratch_dir_path "$agent_num")" 2>/dev/null)
   my_hits_count=0
@@ -126,7 +184,7 @@ build_session_directive() {
   for other in $(seq 1 "$NUM_AGENTS"); do
     [ "$other" -eq "$agent_num" ] && continue
     local other_sub
-    other_sub=$(get_agent_subsystem "$other" 2>/dev/null || echo "unknown")
+    other_sub=$(cached_agent_subsystem "$other")
     [ "$other_sub" != "unknown" ] && claimed_subsystems="${claimed_subsystems:+$claimed_subsystems, }${other_sub}"
   done
 
@@ -246,7 +304,8 @@ DIRECTIVE
 ## SESSION DIRECTIVE: SWITCH STRATEGY (${current_strategy} → ${assigned_strategy})
 
 Strategy **${current_strategy}** has not produced findings on \`${my_subsystem}\` after multiple iterations.
-**This session: use Strategy ${assigned_strategy}.** Read \`${REFERENCE_DIR}/strategies/${strat_ref_file}\` for approach details.
+**This session: use Strategy ${assigned_strategy}.** Orient with the brief below, then open \`${REFERENCE_DIR}/strategies/${strat_ref_file}\` for the full playbook before forming hypotheses.
+$(build_strategy_brief "$assigned_strategy")
 Stay on \`${my_subsystem}\` but change HOW you investigate — different strategy, same subsystem.
 Generate 3-5 NEW hypotheses using the ${assigned_strategy} approach. Do NOT fall back to ${current_strategy}.
 DIRECTIVE
@@ -326,11 +385,10 @@ cache_iteration_data() {
     if ! structured_state_agent_counts_load "$i" \
            pending _act_unused _disc_unused _env_unused \
            needs_tc crashes _invest_unused 2>/dev/null; then
-      if [ -f "$sf" ]; then
-        pending=$(grep -c "PENDING" "$sf" 2>/dev/null) || true
-        crashes=$(grep -cE "CRASH-|FIND-" "$sf" 2>/dev/null) || true
-        needs_tc=$(grep -c "NEEDS_TESTCASE" "$sf" 2>/dev/null) || true
-      fi
+      [ -f "$sf" ] \
+        && prompt_markdown_state_counts_load "$sf" \
+             pending _act_unused _disc_unused _env_unused \
+             needs_tc crashes
     fi
     local line="- Agent ${i} (${mode}/${role}): subsystem=\`${sub}\`, ${pending} PENDING, ${crashes} findings"
     [ "${needs_tc:-0}" -gt 0 ] && line+=", ${needs_tc} NEEDS_TESTCASE"
@@ -338,7 +396,22 @@ cache_iteration_data() {
     printf '%s\n' "$sub" > "$ITERATION_CACHE_DIR/agent_${i}_subsystem.txt"
   done
 
-  # 3. Coverage-gap rankings per mode (sorted subsystems by ascending hit count)
+  # 3. Cold-start strategy ranking. The ranking is identical for every
+  # agent in this iteration, so compute it once instead of re-scanning the
+  # effective work-card queue from pick_cold_start_strategy for each slot.
+  rm -f "$ITERATION_CACHE_DIR/cold_start_strategies.txt" 2>/dev/null || true
+  if declare -F effective_work_card_rows >/dev/null 2>&1 \
+     && declare -F unclaimed_strategy_counts >/dev/null 2>&1 \
+     && command -v jq >/dev/null 2>&1 \
+     && [ -s "${RESULTS_DIR:-}/work-cards.jsonl" ]; then
+    local strat _count
+    while IFS="$(printf '\t')" read -r strat _count; do
+      [ -n "$strat" ] && printf '%s\n' "$strat"
+    done < <(unclaimed_strategy_counts '^S[2-9]$' 2>/dev/null || true) \
+      > "$ITERATION_CACHE_DIR/cold_start_strategies.txt" 2>/dev/null || true
+  fi
+
+  # 4. Coverage-gap rankings per mode (sorted subsystems by ascending hit count)
   rm -f "$ITERATION_CACHE_DIR/coverage_browser.txt" "$ITERATION_CACHE_DIR/coverage_shell.txt" 2>/dev/null || true
   [ "${IS_BROWSER_TARGET:-0}" -eq 1 ] || return 0
 
@@ -361,23 +434,15 @@ cache_iteration_data() {
     fi
     [ -n "$approved_list" ] || continue
 
-    # Score each subsystem by hit count, sorted ascending (least-covered first)
-    local ranked=""
+    local ranked_inputs=""
     while IFS= read -r sub; do
       [ -n "$sub" ] || continue
       subsystem_is_blocklisted "$sub" 2>/dev/null && continue
-      local sub_slug hit_count
-      sub_slug=$(printf '%s' "$sub" | sed 's|/|.|g')
-      hit_count=0
-      if [ -n "$all_hits" ]; then
-        hit_count=$(printf '%s' "$all_hits" | grep -c "$sub_slug\|$sub" 2>/dev/null || true)
-      fi
-      hit_count=${hit_count:-0}
-      ranked+="${hit_count} ${sub}"$'\n'
+      ranked_inputs+="${sub}"$'\n'
     done <<< "$approved_list"
 
-    # Sort ascending by hit count; write subsystem names only
-    printf '%s' "$ranked" | sort -n | awk '{print $2}' \
+    # Sort ascending by hit count; write subsystem names only.
+    coverage_hit_ranked_subsystems "$ranked_inputs" "$all_hits" | awk -F '\t' '{print $2}' \
       > "$ITERATION_CACHE_DIR/coverage_${mode_name}.txt" 2>/dev/null || true
   done
 }
@@ -390,6 +455,100 @@ cached_blocklist_description() {
   else
     blocklist_description
   fi
+}
+
+cached_agent_subsystem() {
+  local agent_num="$1"
+  local cache_file="${ITERATION_CACHE_DIR:-}/agent_${agent_num}_subsystem.txt"
+  if [ -n "${ITERATION_CACHE_DIR:-}" ] && [ -f "$cache_file" ]; then
+    local sub
+    IFS= read -r sub < "$cache_file" 2>/dev/null || sub=""
+    if [ -n "$sub" ]; then
+      printf '%s\n' "$sub"
+      return 0
+    fi
+  fi
+  get_agent_subsystem "$agent_num" 2>/dev/null || echo "unknown"
+}
+
+prompt_markdown_state_counts_load() {
+  local state_file="$1"
+  local _v_pending="${2:-_pmsc_pending}"
+  local _v_active="${3:-_pmsc_active}"
+  local _v_discards="${4:-_pmsc_discards}"
+  local _v_env="${5:-_pmsc_env}"
+  local _v_needs_tc="${6:-_pmsc_needs_tc}"
+  local _v_results="${7:-_pmsc_results}"
+
+  if [ ! -f "$state_file" ]; then
+    printf -v "$_v_pending" '%s' 0
+    printf -v "$_v_active" '%s' 0
+    printf -v "$_v_discards" '%s' 0
+    printf -v "$_v_env" '%s' 0
+    printf -v "$_v_needs_tc" '%s' 0
+    printf -v "$_v_results" '%s' 0
+    return 1
+  fi
+
+  local counts
+  counts=$(awk '
+    /PENDING/ { pending++ }
+    /PENDING|INVESTIGATING|NEEDS_TESTCASE/ { active++ }
+    /DISCARDED/ { discards++ }
+    /ENV-BLOCKED/ { env_blocked++ }
+    /NEEDS_TESTCASE/ { needs_tc++ }
+    /CRASH-|FIND-/ { results++ }
+    END {
+      printf "%d %d %d %d %d %d\n",
+        pending, active, discards, env_blocked, needs_tc, results
+    }
+  ' "$state_file" 2>/dev/null) || counts="0 0 0 0 0 0"
+
+  local __pmsc_pending __pmsc_active __pmsc_discards __pmsc_env __pmsc_needs_tc __pmsc_results
+  read -r __pmsc_pending __pmsc_active __pmsc_discards __pmsc_env __pmsc_needs_tc __pmsc_results <<< "$counts"
+  printf -v "$_v_pending" '%s' "${__pmsc_pending:-0}"
+  printf -v "$_v_active" '%s' "${__pmsc_active:-0}"
+  printf -v "$_v_discards" '%s' "${__pmsc_discards:-0}"
+  printf -v "$_v_env" '%s' "${__pmsc_env:-0}"
+  printf -v "$_v_needs_tc" '%s' "${__pmsc_needs_tc:-0}"
+  printf -v "$_v_results" '%s' "${__pmsc_results:-0}"
+  return 0
+}
+
+# Emit `hit_count<TAB>subsystem` rows sorted least-covered first.
+# This replaces the older per-subsystem `sed` + `grep -c` loop in coverage
+# assignment with one awk pass over the approved subsystem list.
+coverage_hit_ranked_subsystems() {
+  local approved_list="$1"
+  local all_hits="${2:-}"
+  [ -n "$approved_list" ] || return 0
+
+  {
+    printf '%s\n' "$all_hits"
+    printf '\034\n'
+    printf '%s' "$approved_list"
+  } | awk '
+    $0 == "\034" {
+      reading_subsystems = 1
+      next
+    }
+    !reading_subsystems {
+      hit_lines[++hit_n] = $0
+      next
+    }
+    $0 != "" {
+      subsystem = $0
+      slug = subsystem
+      gsub("/", ".", slug)
+      count = 0
+      for (i = 1; i <= hit_n; i++) {
+        if (hit_lines[i] ~ slug || hit_lines[i] ~ subsystem) {
+          count++
+        }
+      }
+      printf "%d\t%s\n", count, subsystem
+    }
+  ' | LC_ALL=C sort -n 2>/dev/null
 }
 
 # ─── Coverage-gap subsystem assignment (cached) ─────────────────
@@ -417,11 +576,7 @@ assign_subsystem_from_coverage() {
   for other in $(seq 1 "$NUM_AGENTS"); do
     [ "$other" -eq "$agent_num" ] && continue
     local other_sub
-    if [ -f "${ITERATION_CACHE_DIR}/agent_${other}_subsystem.txt" ]; then
-      other_sub=$(cat "${ITERATION_CACHE_DIR}/agent_${other}_subsystem.txt" 2>/dev/null || echo "unknown")
-    else
-      other_sub=$(get_agent_subsystem "$other" 2>/dev/null || echo "unknown")
-    fi
+    other_sub=$(cached_agent_subsystem "$other")
     [ "$other_sub" != "unknown" ] && claimed+=("$other_sub")
   done
 
@@ -481,7 +636,7 @@ _assign_subsystem_from_coverage_live() {
     [ "$other_sub" != "unknown" ] && claimed+=("$other_sub")
   done
 
-  local best_sub="" best_score=999999
+  local ranked_inputs=""
   while IFS= read -r sub; do
     [ -n "$sub" ] || continue
     if subsystem_is_blocklisted "$sub" 2>/dev/null; then
@@ -496,19 +651,11 @@ _assign_subsystem_from_coverage_live() {
       skipped_claimed="${skipped_claimed:+$skipped_claimed,}${sub}"
       continue
     fi
-    local sub_slug hit_count
-    sub_slug=$(printf '%s' "$sub" | sed 's|/|.|g')
-    hit_count=0
-    if [ -n "$all_hits" ]; then
-      hit_count=$(printf '%s' "$all_hits" | grep -c "$sub_slug\|$sub" 2>/dev/null || true)
-    fi
-    hit_count=${hit_count:-0}
-    if [ "$hit_count" -lt "$best_score" ]; then
-      best_score="$hit_count"
-      best_sub="$sub"
-    fi
+    ranked_inputs+="${sub}"$'\n'
   done <<< "$approved_list"
 
+  local best_sub=""
+  best_sub=$(coverage_hit_ranked_subsystems "$ranked_inputs" "$all_hits" | awk -F '\t' 'NF { print $2; exit }' 2>/dev/null)
   if declare -F record_subsystem_suggest >/dev/null 2>&1; then
     record_subsystem_suggest "$agent_num" "$my_mode" "$best_sub" "coverage-live" "$skipped_claimed" "$skipped_blocklisted"
   fi
@@ -531,7 +678,7 @@ build_cross_agent_summary() {
     else
       # Fallback: compute live
       local other_sub other_mode other_role other_pending other_crashes other_needs_tc
-      other_sub=$(get_agent_subsystem "$other" 2>/dev/null || echo "unknown")
+      other_sub=$(cached_agent_subsystem "$other")
       other_mode=$(agent_mode "$other")
       other_role=$(agent_role "$other")
       local other_sf
@@ -541,11 +688,10 @@ build_cross_agent_summary() {
       if ! structured_state_agent_counts_load "$other" \
              other_pending _act_unused _disc_unused _env_unused \
              other_needs_tc other_crashes _invest_unused 2>/dev/null; then
-        if [ -f "$other_sf" ]; then
-          other_pending=$(grep -c "PENDING" "$other_sf" 2>/dev/null) || true
-          other_crashes=$(grep -cE "CRASH-|FIND-" "$other_sf" 2>/dev/null) || true
-          other_needs_tc=$(grep -c "NEEDS_TESTCASE" "$other_sf" 2>/dev/null) || true
-        fi
+        [ -f "$other_sf" ] \
+          && prompt_markdown_state_counts_load "$other_sf" \
+               other_pending _act_unused _disc_unused _env_unused \
+               other_needs_tc other_crashes
       fi
       summary+="- Agent ${other} (${other_mode}/${other_role}): subsystem=\`${other_sub}\`, ${other_pending} PENDING, ${other_crashes} findings"
       [ "${other_needs_tc:-0}" -gt 0 ] && summary+=", ${other_needs_tc} NEEDS_TESTCASE"
@@ -607,7 +753,7 @@ build_subsystem_targets() {
 
 ## HIGH-VALUE TARGETS — BROWSER MODE
 
-Pick subsystems reachable from web content. Use the assigned strategy file for approach details.
+Pick subsystems reachable from web content. Use the assigned strategy brief for approach details.
 
 **BLOCKLISTED:** ${blocklist_text}
 **Mode-compatible candidates:** ${approved}
@@ -624,7 +770,7 @@ TARGETS
 
 ## HIGH-VALUE TARGETS — SHELL MODE
 
-Drive ASan js shell or xpcshell. Use the assigned strategy file for approach details.
+Drive ASan js shell or xpcshell. Use the assigned strategy brief for approach details.
 
 **BLOCKLISTED:** ${blocklist_text}
 **Mode-compatible candidates:** ${approved}
@@ -674,9 +820,9 @@ build_strategy_assignment_line() {
     strat_ref=$(strategy_file_for_letter "$assigned")
     if [ -n "$strat_ref" ]; then
       if [ -n "${AUDIT_FIXED_STRATEGY:-}" ]; then
-        echo "**Assigned strategy: ${assigned}** (read \`.agents/references/strategies/${strat_ref}\`). This is a pinned smoke run; do not fall back to S1 work cards."
+        printf '**Assigned strategy: %s.** This is a pinned smoke run; do not fall back to S1 work cards.\n%s\n' "$assigned" "$(build_strategy_brief "$assigned")"
       else
-        echo "**Assigned strategy: ${assigned}** (read \`.agents/references/strategies/${strat_ref}\`). Fallback priority: S1 > S2 > S3 > S4 > S5 > S6 > S7 > S8"
+        printf '**Assigned strategy: %s.** Fallback priority: S1 > S2 > S3 > S4 > S5 > S6 > S7 > S8\n%s\n' "$assigned" "$(build_strategy_brief "$assigned")"
       fi
     else
       if [ -n "${AUDIT_FIXED_STRATEGY:-}" ]; then
@@ -864,17 +1010,28 @@ build_work_card_directive() {
   fi
   [ -n "$card" ] || { _wcd_skip "next-card returned empty stdout"; return 0; }
 
-  local id kind subsystem file strategy score seed reason patch_cards fix_hashes
-  id=$(printf '%s' "$card" | jq -r '.id // ""' 2>/dev/null)
-  kind=$(printf '%s' "$card" | jq -r '.kind // ""' 2>/dev/null)
-  subsystem=$(printf '%s' "$card" | jq -r '.subsystem // ""' 2>/dev/null)
-  file=$(printf '%s' "$card" | jq -r '.file // ""' 2>/dev/null)
-  strategy=$(printf '%s' "$card" | jq -r '.strategy // ""' 2>/dev/null)
-  score=$(printf '%s' "$card" | jq -r '.score // ""' 2>/dev/null)
-  seed=$(printf '%s' "$card" | jq -r '.seed // ""' 2>/dev/null)
-  reason=$(printf '%s' "$card" | jq -r '.reason // ""' 2>/dev/null)
-  patch_cards=$(printf '%s' "$card" | jq -r '(.patch_cards // []) | join(", ")' 2>/dev/null)
-  fix_hashes=$(printf '%s' "$card" | jq -r '(.fix_hashes // []) | join(", ")' 2>/dev/null)
+  local id="" kind="" subsystem="" file="" strategy="" score="" seed="" reason="" patch_cards="" fix_hashes=""
+  local r_class="" r_line="" r_verdict="" r_id="" r_find_id=""
+  local field_assignments
+  field_assignments=$(printf '%s' "$card" | jq -r '
+    def emit($name; $value): "\($name)=\($value | @sh)";
+    emit("id"; .id // ""),
+    emit("kind"; .kind // ""),
+    emit("subsystem"; .subsystem // ""),
+    emit("file"; .file // ""),
+    emit("strategy"; .strategy // ""),
+    emit("score"; ((.score // "") | tostring)),
+    emit("seed"; .seed // ""),
+    emit("reason"; .reason // ""),
+    emit("patch_cards"; ((.patch_cards // []) | join(", "))),
+    emit("fix_hashes"; ((.fix_hashes // []) | join(", "))),
+    emit("r_class"; .recon.class // ""),
+    emit("r_line"; ((.recon.line // "") | tostring)),
+    emit("r_verdict"; .recon.validator_verdict // ""),
+    emit("r_id"; .recon.id // ""),
+    emit("r_find_id"; .find_id // "")
+  ' 2>/dev/null) || field_assignments=""
+  [ -n "$field_assignments" ] && eval "$field_assignments"
 
   # Recon-hypothesis cards carry the validator's verdict + the original
   # finding's title/notes/class/line in a sub-object. The block was
@@ -885,18 +1042,13 @@ build_work_card_directive() {
   # exact input shape recon validated. Empty for non-recon cards.
   local recon_detail=""
   if [ "$kind" = "recon-hypothesis" ]; then
-    local r_class r_line r_verdict r_id r_title r_notes r_find_id
-    r_class=$(printf '%s' "$card" | jq -r '.recon.class // ""' 2>/dev/null)
-    r_line=$(printf '%s' "$card" | jq -r '.recon.line // ""' 2>/dev/null)
-    r_verdict=$(printf '%s' "$card" | jq -r '.recon.validator_verdict // ""' 2>/dev/null)
-    r_id=$(printf '%s' "$card" | jq -r '.recon.id // ""' 2>/dev/null)
-    r_find_id=$(printf '%s' "$card" | jq -r '.find_id // ""' 2>/dev/null)
+    local r_title r_notes
     # title/notes don't live under .recon — recon_to_cards.py only
     # echoes them into .reason (truncated). Extract from .reason as a
     # best-effort split on " | " delimiters that recon_to_cards uses.
-    r_title=$(printf '%s' "$card" | jq -r '.reason // ""' 2>/dev/null \
+    r_title=$(printf '%s' "$reason" \
       | awk -F ' \\| ' '{for (i=1;i<=NF;i++) if ($i !~ /^(recon hypothesis|class=|validator=)/) {print $i; exit}}')
-    r_notes=$(printf '%s' "$card" | jq -r '.reason // ""' 2>/dev/null \
+    r_notes=$(printf '%s' "$reason" \
       | awk -F ' \\| ' 'NF{print $NF}')
     [ "$r_notes" = "$r_title" ] && r_notes=""
     # If recon already materialized a FIND for this hypothesis, render a
@@ -984,10 +1136,10 @@ EOF
 # ─── Session seed (compaction recovery) ─────────────────────────
 # Reads $RESULTS_DIR/.session_seed_<agent>.md (produced by
 # lib/build_session_seed.py at the END of the prior iteration). The
-# seed lists files+ranges the agent has already Read and testcases
-# already Written. Injecting it into the next prompt prevents the
-# agent from re-Reading the same content after auto-compaction —
-# which validation showed wastes ~33% of all Read bytes.
+# seed lists files+ranges the agent has already Read, exact source searches
+# already run, and testcases already Written. Injecting it into the next
+# prompt prevents the agent from re-Reading/re-searching the same context
+# after auto-compaction — which validation showed wastes ~33% of Read bytes.
 #
 # Silent on miss: first iteration, fresh agent, or empty prior log.
 
@@ -1002,9 +1154,10 @@ build_session_seed_section() {
 
 ## PRIOR SESSION SEED — files already on disk / already Read
 
-The harness recorded what the *prior* iteration of this agent Read and Wrote.
-Use this to avoid re-Reading the same ranges after compaction. To read a
-*different* range of the same file, pass \`offset\`/\`limit\` outside the listed span.
+The harness recorded what the *prior* iteration of this agent Read, Wrote,
+and searched. Use this to avoid re-Reading the same ranges or repeating exact
+source searches after compaction. To read a *different* range of the same file,
+pass \`offset\`/\`limit\` outside the listed span.
 
 \`\`\`
 $(cat "$seed_path")
@@ -1181,9 +1334,33 @@ SANDIR
 # Compact excerpt of the target.toml facts agents kept re-reading.
 # Session transcripts showed repeated `bin/peek output/<slug>/target.toml`
 # calls per session — one full LLM round-trip each — to recover the
-# threat model and sanitizer matrix the orchestrator has already parsed.
-# Emit those two facts inline and point agents away from re-reading the
-# file. Values come from the exported config (no re-parse).
+# threat model, sanitizer matrix, and harness/runner flags the orchestrator
+# has already parsed. Emit those facts inline and point agents away from
+# re-reading the file. Values come from the exported config (no re-parse).
+prompt_compact_list() {
+  local limit=8 total="$#" count=0 omitted=0 out="" item clean
+  for item in "$@"; do
+    count=$((count + 1))
+    if [ "$count" -gt "$limit" ]; then
+      omitted=$((total - limit))
+      break
+    fi
+    clean="${item//$'\n'/ }"
+    if [ "${#clean}" -gt 120 ]; then
+      clean="${clean:0:117}..."
+    fi
+    if [ -n "$out" ]; then
+      out="${out}, ${clean}"
+    else
+      out="$clean"
+    fi
+  done
+  if [ "$omitted" -gt 0 ]; then
+    out="${out}, ... (+${omitted} more)"
+  fi
+  printf '%s' "$out"
+}
+
 build_target_config_directive() {
   [ "${IS_BROWSER_TARGET:-0}" -eq 0 ] || return 0
 
@@ -1195,7 +1372,31 @@ build_target_config_directive() {
   if [ -z "$enabled" ] && declare -F target_sanitizers_enabled_csv >/dev/null 2>&1; then
     enabled="$(target_sanitizers_enabled_csv 2>/dev/null || true)"
   fi
-  [ -n "$controls" ] || [ -n "$enabled" ] || return 0
+  local includes="" defines="" link_libs="" runner_args="" runner_env=""
+  includes="$(prompt_compact_list "${TARGET_INCLUDES[@]:-}")"
+  defines="$(prompt_compact_list "${TARGET_DEFINES[@]:-}")"
+  link_libs="$(prompt_compact_list "${TARGET_LINK_LIBS[@]:-}")"
+  runner_args="$(prompt_compact_list "${TARGET_RUNNER_ARGS[@]:-}")"
+  runner_env="$(prompt_compact_list "${TARGET_RUNNER_ENV[@]:-}")"
+  local extra_lines=""
+  [ -n "${TARGET_ASAN_LIB:-}" ] && extra_lines="${extra_lines}- \`asan_lib\`: \`${TARGET_ASAN_LIB}\`
+"
+  [ -n "$includes" ] && extra_lines="${extra_lines}- \`includes\`: \`${includes}\`
+"
+  [ -n "$defines" ] && extra_lines="${extra_lines}- \`defines\`: \`${defines}\`
+"
+  [ -n "$link_libs" ] && extra_lines="${extra_lines}- \`link_libs\`: \`${link_libs}\`
+"
+  [ -n "${TARGET_RUNNER_BIN:-}" ] && extra_lines="${extra_lines}- \`[runner].bin\`: \`${TARGET_RUNNER_BIN}\`
+"
+  [ -n "$runner_args" ] && extra_lines="${extra_lines}- \`[runner].args\`: \`${runner_args}\`
+"
+  [ -n "$runner_env" ] && extra_lines="${extra_lines}- \`[runner].env\`: \`${runner_env}\`
+"
+  [ -n "$controls" ] || [ -n "$enabled" ] || [ -n "${TARGET_ASAN_LIB:-}" ] \
+    || [ -n "$includes" ] || [ -n "$defines" ] || [ -n "$link_libs" ] \
+    || [ -n "${TARGET_RUNNER_BIN:-}" ] || [ -n "$runner_args" ] || [ -n "$runner_env" ] \
+    || return 0
 
   cat <<CFGDIR
 
@@ -1203,8 +1404,9 @@ build_target_config_directive() {
 
 - \`[threat_model] attacker_controls\` (the only valid Trigger sources): \`${controls:-bytes}\`
 - \`[sanitizer] enabled\`: \`${enabled:-asan}\`
+${extra_lines}
 
-Beyond these, \`output/${TARGET_SLUG}/target.toml\` holds only build/configure plumbing — open it only when debugging a build, not to re-derive the threat model.
+Beyond these, \`output/${TARGET_SLUG}/target.toml\` holds only advanced build/configure plumbing — open it only when editing the config, not to re-derive harness flags, runner args, or the threat model.
 CFGDIR
 }
 
@@ -1279,13 +1481,15 @@ build_harness_build_failures_directive() {
 \`${RESULTS_DIR}/scratch-*/.harness-cache/\`. Probes keep returning
 "harness build failed" for the same root cause. Do not retry blindly.
 
-Most recent failures (read with \`cat\`):
+Most recent failures (start with \`tail -120\`, not \`cat\`):
 $(printf '%s\n' "$top" | sed 's|^|- `|; s|$|`|')
 
 Triage and act, in this order:
 
-1. **Read the latest build log** end-to-end. Identify whether the error is
-   a missing header, type/define conflict, link symbol miss, or SDK clash.
+1. **Read the latest build log tail** with \`tail -120 <log>\`. Identify
+   whether the error is a missing header, type/define conflict, link symbol
+   miss, or SDK clash. If the diagnostic is incomplete, widen the bounded
+   read with \`tail -240 <log>\` or \`bin/peek <log>:1-200\`.
 2. **If the harness source is wrong** (bad \`#include\` order, missing
    \`#define\` to avoid host-header conflict, missing forward decl), edit
    the scratch \`.c\`/\`.cc\` file and re-probe.
@@ -1354,7 +1558,8 @@ build_cold_start_prompt() {
 ## ASSIGNED STRATEGY — ${assigned_strat}
 
 The harness has assigned Strategy **${assigned_strat}** based on prior rotation.
-Read \`${REFERENCE_DIR}/strategies/${strat_ref}\` for the detailed approach.
+Orient with this inline brief, then open \`${REFERENCE_DIR}/strategies/${strat_ref}\` for the full playbook before forming hypotheses.
+$(build_strategy_brief "$assigned_strat")
 Generate 3-5 hypotheses using this strategy. Do NOT default to Strategy S1."
   fi
 
@@ -1490,7 +1695,9 @@ unvalidated targets. Aim for 3+ ASan validation runs per session."
     if [ -n "$assigned_strat_deep" ] && [ "$assigned_strat_deep" != "S1" ]; then
       local strat_ref_deep
       strat_ref_deep=$(strategy_file_for_letter "$assigned_strat_deep")
-      default_action="**ASSIGNED STRATEGY: ${assigned_strat_deep}.** Read \`${REFERENCE_DIR}/strategies/${strat_ref_deep}\` and generate hypotheses using that approach."
+      default_action="**ASSIGNED STRATEGY: ${assigned_strat_deep}.** Orient with this brief, then open \`${REFERENCE_DIR}/strategies/${strat_ref_deep}\` for the full playbook before forming hypotheses.
+$(build_strategy_brief "$assigned_strat_deep")
+Generate hypotheses using that approach."
     fi
     role_block="**ROLE: REPRODUCE** — Write testcases that trigger sanitizer diagnostics.
 ${default_action}

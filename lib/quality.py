@@ -284,6 +284,50 @@ def count_orphan_testcases(directory: str) -> int:
     return n
 
 
+def scan_scratch(directory: str) -> tuple[int, list[str], list[str]]:
+    """Return (verified ASan runs, testcases, orphan testcases) in one pass.
+
+    The standalone count helpers above intentionally stay small and obvious,
+    because they are useful CLI/API entry points. The quality feedback path
+    needs all three values at once, so this scanner classifies entries once
+    and reads each sanitizer sidecar at most once.
+    """
+    if not os.path.isdir(directory):
+        return 0, [], []
+
+    testcases: list[str] = []
+    verified_asan: set[str] = set()
+
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return 0, [], []
+
+    for entry in entries:
+        if not entry.is_file(follow_symlinks=False):
+            continue
+
+        if testcase_mode_for_file(entry.path) is not None:
+            testcases.append(entry.path)
+
+        lower = entry.name.lower()
+        if lower.endswith(".asan.txt") or lower.startswith(("asan_output", "asan-output")):
+            if _file_has_verified_asan(entry.path):
+                verified_asan.add(entry.path)
+
+    orphans: list[str] = []
+    for tc in testcases:
+        base, _, _ = tc.rpartition(".")
+        candidates = []
+        if base:
+            candidates.append(base + ".asan.txt")
+        candidates.append(tc + ".asan.txt")
+        if not any(c in verified_asan for c in candidates):
+            orphans.append(tc)
+
+    return len(verified_asan), testcases, orphans
+
+
 # ── CLI dispatch ────────────────────────────────────────────────────
 
 
@@ -321,10 +365,7 @@ def _cmd_count_orphans(args) -> int:
 
 
 def _cmd_scan_scratch(args) -> int:
-    directory = args.dir
-    testcases = list_testcases(directory)
-    asan_runs = count_verified_asan_runs(directory)
-    orphans = [tc for tc in testcases if not _testcase_has_verified_asan_output(tc)]
+    asan_runs, testcases, orphans = scan_scratch(args.dir)
     print(f"asan_runs={asan_runs} testcases={len(testcases)} orphans={len(orphans)}")
     if args.list_orphans and orphans:
         for tc in orphans:

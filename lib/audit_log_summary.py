@@ -12,6 +12,15 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from audit_helpers import (
+    _WASTE_NATIVE_NAMES,
+    _WASTE_OBSERVABILITY_ONLY,
+    _WASTE_OVER_BYTES,
+    _byte_len,
+    _command_pattern as waste_command_pattern,
+    _sanitize_label,
+)
+
 
 # Exclusive lock on a sibling .lock file so concurrent agent finish
 # handlers don't interleave bytes when their JSON rows exceed PIPE_BUF.
@@ -131,6 +140,29 @@ def scan_raw_log(rawfile):
     verdicts = Counter()
     command_patterns = Counter()
     claude_pending = {}
+    waste_tool_bytes = 0
+    waste_max_output = 0
+    waste_over8k = 0
+    waste_native = Counter()
+    waste_command_patterns = Counter()
+    waste_largest_label = "none"
+    top_level_pending = {}
+
+    def record_waste_command(cmd):
+        if cmd:
+            waste_command_patterns[waste_command_pattern(cmd)] += 1
+
+    def record_waste_output(text, label):
+        nonlocal waste_tool_bytes, waste_max_output, waste_over8k, waste_largest_label
+        size = _byte_len(text)
+        if size <= 0:
+            return
+        waste_tool_bytes += size
+        if size > _WASTE_OVER_BYTES:
+            waste_over8k += 1
+        if size > waste_max_output:
+            waste_max_output = size
+            waste_largest_label = _sanitize_label(label)
 
     with open(rawfile, "r", encoding="utf-8", errors="replace") as handle:
         for raw_line in handle:
@@ -154,27 +186,59 @@ def scan_raw_log(rawfile):
                 if item.get("type") == "command_execution":
                     cmd = item.get("command") or ""
                     commands.append(cmd)
-                    outputs.append(text_value(item.get("aggregated_output") or item.get("output") or item))
+                    output = text_value(item.get("aggregated_output") or item.get("output") or item)
+                    outputs.append(output)
+                    pattern = waste_command_pattern(cmd)
+                    record_waste_command(cmd)
+                    record_waste_output(output, f"{pattern}: {cmd}")
             elif event.get("type") == "command_execution":
                 cmd = event.get("command") or ""
                 commands.append(cmd)
-                outputs.append(text_value(event.get("aggregated_output") or event.get("output") or event))
+                output = text_value(event.get("aggregated_output") or event.get("output") or event)
+                outputs.append(output)
+                pattern = waste_command_pattern(cmd)
+                record_waste_command(cmd)
+                record_waste_output(output, f"{pattern}: {cmd}")
             elif event.get("type") == "tool_use":
                 name = event.get("tool_name") or event.get("name") or ""
+                if name in _WASTE_NATIVE_NAMES:
+                    waste_native[name] += 1
                 params = event.get("parameters") or event.get("input") or {}
                 cmd = params.get("command") if isinstance(params, dict) else ""
                 if name == "run_shell_command":
                     commands.append(cmd)
+                    record_waste_command(cmd)
+                tool_id = event.get("tool_id") or event.get("id")
+                if tool_id:
+                    top_level_pending[tool_id] = (name or "unknown", cmd or name or "unknown")
+            elif event.get("type") == "tool_result":
+                tool_id = event.get("tool_id") or event.get("tool_use_id") or event.get("id")
+                name, label = top_level_pending.pop(tool_id, ("tool_result", "tool_result"))
+                output = text_value(event.get("output") or event.get("content") or event)
+                # Shell output carries probe/ASan/verdict text. The codex
+                # (command_execution) and claude (tool_result) paths both feed it
+                # into outputs; the gemini stream-json path must too, or
+                # probe/verdict summaries read false-low for gemini runs.
+                if name == "run_shell_command":
+                    outputs.append(output)
+                if name not in _WASTE_OBSERVABILITY_ONLY:
+                    record_waste_output(
+                        output,
+                        f"{waste_command_pattern(label) if name == 'run_shell_command' else name}: {label}",
+                    )
 
             if event.get("type") == "assistant" or "message" in event:
                 for item in claude_content_items(event):
                     if not isinstance(item, dict) or item.get("type") != "tool_use":
                         continue
                     name = item.get("name") or "unknown"
+                    if name in _WASTE_NATIVE_NAMES:
+                        waste_native[name] += 1
                     inp = item.get("input") or {}
                     cmd = inp.get("command") if isinstance(inp, dict) else ""
                     if name == "Bash":
                         commands.append(cmd)
+                        record_waste_command(cmd)
                     tool_id = item.get("id")
                     if tool_id:
                         claude_pending[tool_id] = (name, cmd or name)
@@ -184,8 +248,10 @@ def scan_raw_log(rawfile):
                     if not isinstance(item, dict) or item.get("type") != "tool_result":
                         continue
                     tool_id = item.get("tool_use_id")
-                    claude_pending.pop(tool_id, ("tool_result", "tool_result"))
-                    outputs.append(text_value(item.get("content") or item))
+                    name, label = claude_pending.pop(tool_id, ("tool_result", "tool_result"))
+                    output = text_value(item.get("content") or item)
+                    outputs.append(output)
+                    record_waste_output(output, f"{waste_command_pattern(label) if name == 'Bash' else name}: {label}")
 
             for cmd in commands:
                 if not cmd:
@@ -211,6 +277,13 @@ def scan_raw_log(rawfile):
                 verdicts["no_exec"] += len(re.findall(r"\bNO_EXEC\b", output))
                 verdicts["diff"] += len(re.findall(r"DIFFERENTIAL: outputs DIFFER|outputs DIFFER", output))
 
+    top_cmds = ",".join(f"{name}:{count}" for name, count in waste_command_patterns.most_common(5)) or "none"
+    native_text = ",".join(f"{name}:{waste_native.get(name, 0)}" for name in _WASTE_NATIVE_NAMES)
+    waste_telemetry = (
+        f"tool_bytes={waste_tool_bytes} max_output={waste_max_output} over8k={waste_over8k} "
+        f"native_tools={native_text} top_cmds={top_cmds} largest=\"{waste_largest_label}\""
+    )
+
     return dict(
         probe_commands=probe_commands,
         probe_outputs=probe_outputs,
@@ -219,12 +292,13 @@ def scan_raw_log(rawfile):
         rate_limits=rate_limits,
         verdicts=dict(verdicts),
         command_patterns=dict(command_patterns.most_common(10)),
+        waste_telemetry=waste_telemetry,
     )
 
 
-def build_payload(rawfile, logfile, summary_md):
-    scan = scan_raw_log(rawfile)
-    waste = parse_waste(env("SESSION_SUMMARY_WASTE"))
+def build_payload(rawfile, logfile, summary_md, scan=None, waste_text=None):
+    scan = scan or scan_raw_log(rawfile)
+    waste = parse_waste(waste_text if waste_text is not None else (env("SESSION_SUMMARY_WASTE") or scan["waste_telemetry"]))
     raw_path = Path(rawfile)
     log_path = Path(logfile)
     return dict(
@@ -340,8 +414,11 @@ def main(argv):
     rawfile, logfile, summary_md, index_jsonl = argv[1:5]
     if not Path(rawfile).is_file():
         return 0
-    payload = build_payload(rawfile, logfile, summary_md)
+    scan = scan_raw_log(rawfile)
+    payload = build_payload(rawfile, logfile, summary_md, scan=scan)
     write_summary(payload, summary_md, index_jsonl)
+    if env("SESSION_SUMMARY_PRINT_WASTE").lower() not in ("", "0", "false", "no"):
+        print(scan["waste_telemetry"])
     return 0
 
 

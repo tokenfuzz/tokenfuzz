@@ -199,8 +199,12 @@ gemini_unlimited_pid=$!
 # the command-substitution pipe held open by a stray tee child IS the
 # deadlock vector under test; a plain `> file` redirection would mask a
 # regression.
+# A dummy GEMINI_API_KEY satisfies the gemini-cli memory-isolation preflight
+# (it stages an empty GEMINI_CLI_HOME that can only auth via an env key). The
+# fake gemini binary never reads it; without it the cell would bail at preflight
+# and never reach the agent launch this deadlock regression needs to exercise.
 ( rc=0
-  out=$(USE_GEMINI_CLI=1 GEMINI_BIN="$fake_gemini" \
+  out=$(GEMINI_API_KEY=fake-benchmark-key USE_GEMINI_CLI=1 GEMINI_BIN="$fake_gemini" \
     audit_timeout_run 20 bash "$BENCH" --target "$bench_target" --backend gemini \
     --replicates 1 --conditions model-direct --budget-wall 0 \
     --bench-root "$gemini_cli_unlimited_root" 2>&1) || rc=$?

@@ -1809,6 +1809,29 @@ extract_usage_field() {
   fi
 }
 
+extract_usage_fields() {
+  # Extract every usage accounting field needed at agent-session end in one
+  # Python process and one raw-log read. Keep extract_usage_field above for
+  # targeted callers (resume cache gate, tests), but don't pay six full scans
+  # on the run_agent hot path.
+  local file="$1"
+  local prompt_path="${2:-}"
+  [ -f "$file" ] || {
+    printf 'total_tokens=\ninput_tokens=\ncached_input_tokens=\ncache_creation_input_tokens=\noutput_tokens=\nduration_ms=\n'
+    return
+  }
+  local backend="${ACTIVE_BACKEND:-${AUDIT_BACKEND:-claude}}"
+  if [ -n "$prompt_path" ] && [ -f "$prompt_path" ]; then
+    python3 "$SCRIPT_ROOT/lib/llm_usage.py" extract-fields \
+      "$backend" "$file" --prompt "$prompt_path" 2>/dev/null \
+      || printf 'total_tokens=\ninput_tokens=\ncached_input_tokens=\ncache_creation_input_tokens=\noutput_tokens=\nduration_ms=\n'
+  else
+    python3 "$SCRIPT_ROOT/lib/llm_usage.py" extract-fields \
+      "$backend" "$file" 2>/dev/null \
+      || printf 'total_tokens=\ninput_tokens=\ncached_input_tokens=\ncache_creation_input_tokens=\noutput_tokens=\nduration_ms=\n'
+  fi
+}
+
 # Count tool invocations / shell commands executed by the agent.
 # Backend-aware parsing lives in lib/audit_helpers.py so the shell-side
 # dead-session logic and JSONL session summaries use the same transcript
@@ -1818,6 +1841,13 @@ extract_completed_item_count() {
   local item_type="$2"
   [ -f "$file" ] || { echo 0; return; }
   python3 "$SCRIPT_ROOT/lib/audit_helpers.py" count-tools "$file" "$item_type" 2>/dev/null || echo 0
+}
+
+extract_tool_counts() {
+  local file="$1"
+  [ -f "$file" ] || { printf 'command_execution=0\nall_tools=0\n'; return; }
+  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" count-tools-all "$file" 2>/dev/null \
+    || printf 'command_execution=0\nall_tools=0\n'
 }
 
 # Total tool invocations across all tools (any name). Used for richer
@@ -1875,12 +1905,20 @@ write_session_log_summary() {
   local stash_subsystem="" stash_suggested="" stash_strategy="" stash_launch=""
   local stash_prompt_tokens_build=""
   if [ -f "$stash" ]; then
-    stash_subsystem=$(sed -n 's/^subsystem=//p' "$stash" 2>/dev/null)
-    stash_suggested=$(sed -n 's/^suggested_subsystem=//p' "$stash" 2>/dev/null)
-    stash_strategy=$(sed -n 's/^strategy=//p' "$stash" 2>/dev/null)
-    stash_launch=$(sed -n 's/^launch=//p' "$stash" 2>/dev/null)
-    stash_prompt_tokens_build=$(sed -n 's/^prompt_tokens_est=//p' "$stash" 2>/dev/null)
+    local stash_key stash_value
+    while IFS='=' read -r stash_key stash_value; do
+      case "$stash_key" in
+        subsystem) stash_subsystem="$stash_value" ;;
+        suggested_subsystem) stash_suggested="$stash_value" ;;
+        strategy) stash_strategy="$stash_value" ;;
+        launch) stash_launch="$stash_value" ;;
+        prompt_tokens_est) stash_prompt_tokens_build="$stash_value" ;;
+      esac
+    done < "$stash"
   fi
+
+  local print_waste=0
+  [ -z "$waste_telemetry" ] && print_waste=1
 
   SESSION_SUMMARY_TARGET="${TARGET_SLUG:-}" \
   SESSION_SUMMARY_ROLE="$role" \
@@ -1900,6 +1938,7 @@ write_session_log_summary() {
   SESSION_SUMMARY_COMMANDS="$command_count" \
   SESSION_SUMMARY_TOOLS="$tool_uses" \
   SESSION_SUMMARY_WASTE="$waste_telemetry" \
+  SESSION_SUMMARY_PRINT_WASTE="$print_waste" \
   SESSION_SUMMARY_SUBSYSTEM="$stash_subsystem" \
   SESSION_SUMMARY_SUGGESTED_SUBSYSTEM="$stash_suggested" \
   SESSION_SUMMARY_STRATEGY="$stash_strategy" \
@@ -2175,6 +2214,20 @@ strategy_completion_for_agent() {
   [ -x "bin/state" ] || { echo '{"complete": true, "evidence": 0, "threshold": 0}'; return 0; }
   bin/state --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
     strategy-status --agent "$agent_num" --strategy "$strategy" 2>/dev/null
+}
+
+strategy_completion_fields() {
+  local status_json="$1"
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$status_json" | jq -r '
+      [
+        (if has("complete") then .complete else true end),
+        (.evidence // "?"),
+        (.threshold // "?")
+      ] | @tsv
+    ' 2>/dev/null && return 0
+  fi
+  printf 'true\t?\t?\n'
 }
 
 # Given the current strategy letter, return the next one in STRATEGY_ROTATION_ORDER.
@@ -2762,43 +2815,27 @@ reset_dead_streak() {
 count_structural_refusal_signals() {
   local raw_log="$1"
   [ -f "$raw_log" ] || { echo 0; return; }
-  local count
-  count=$(grep -cF -e '"stop_reason":"refusal"' -e '"type":"refusal"' "$raw_log" 2>/dev/null || true)
-  count=${count:-0}
-  if [ "$count" -gt 0 ]; then
-    echo "$count"
-    return
-  fi
-  local msg_count started_count work_count
-  msg_count=$(grep -cF '"type":"agent_message"' "$raw_log" 2>/dev/null || true)
-  started_count=$(grep -cF '"type":"item.started"' "$raw_log" 2>/dev/null || true)
-  work_count=$(grep -cF -e '"type":"command_execution"' -e '"type":"file_change"' -e '"type":"todo_list"' "$raw_log" 2>/dev/null || true)
-  msg_count=${msg_count:-0}
-  started_count=${started_count:-0}
-  work_count=${work_count:-0}
-  if [ "$msg_count" -eq 1 ] && [ "$started_count" -eq 0 ] && [ "$work_count" -eq 0 ]; then
-    # Guard: real refusals are brief (1-3 sentences). Legitimate text-only
-    # answers (e.g., error explanations) produce larger logs. Skip if the
-    # raw log is large enough to be a real work response.
-    local log_bytes
-    log_bytes=$(wc -c < "$raw_log" 2>/dev/null || echo 999999)
-    if [ "${log_bytes}" -lt 8000 ]; then
-      echo 1
-    else
-      echo 0
-    fi
-  else
-    local error_count failed_count
-    error_count=$(grep -cF '"type":"error"' "$raw_log" 2>/dev/null || true)
-    failed_count=$(grep -cF '"type":"turn.failed"' "$raw_log" 2>/dev/null || true)
-    error_count=${error_count:-0}
-    failed_count=${failed_count:-0}
-    if [ "$error_count" -gt 0 ] && [ "$failed_count" -gt 0 ]; then
-      echo 1
-    else
-      echo 0
-    fi
-  fi
+  local log_bytes
+  log_bytes=$(wc -c < "$raw_log" 2>/dev/null || echo 999999)
+  awk -v log_bytes="${log_bytes:-999999}" '
+    /"stop_reason":"refusal"|"type":"refusal"/ { explicit++ }
+    /"type":"agent_message"/ { msg++ }
+    /"type":"item.started"/ { started++ }
+    /"type":"command_execution"|"type":"file_change"|"type":"todo_list"/ { work++ }
+    /"type":"error"/ { error++ }
+    /"type":"turn.failed"/ { failed++ }
+    END {
+      if (explicit > 0) {
+        print explicit
+      } else if (msg == 1 && started == 0 && work == 0) {
+        print (log_bytes < 8000 ? 1 : 0)
+      } else if (error > 0 && failed > 0) {
+        print 1
+      } else {
+        print 0
+      }
+    }
+  ' "$raw_log" 2>/dev/null || echo 0
 }
 
 # Detect API rate limits from the most recent iteration's raw logs.
@@ -2914,6 +2951,14 @@ gemini_raw_has_success_result() {
 
 normalize_agent_exit_code() {
   local backend="$1" exit_code="$2" rawfile="$3"
+  local rate_limit_rejected="${4:-}"
+  if [ -z "$rate_limit_rejected" ]; then
+    if log_has_rate_limit_rejection "$rawfile"; then
+      rate_limit_rejected=1
+    else
+      rate_limit_rejected=0
+    fi
+  fi
   if [ "${exit_code:-0}" -ne 0 ]; then
     case "$backend" in
       codex|oss)
@@ -2923,7 +2968,7 @@ normalize_agent_exit_code() {
         # the aggregate process status for this narrow case.
         if codex_raw_has_completed_turn "$rawfile" \
            && ! codex_raw_has_failed_turn "$rawfile" \
-           && ! log_has_rate_limit_rejection "$rawfile"; then
+           && [ "$rate_limit_rejected" -eq 0 ]; then
           echo 0
           return 0
         fi
@@ -2933,7 +2978,7 @@ normalize_agent_exit_code() {
         # inside an otherwise completed session fails. The stream-json result
         # event is the session-level status.
         if gemini_raw_has_success_result "$rawfile" \
-           && ! log_has_rate_limit_rejection "$rawfile"; then
+           && [ "$rate_limit_rejected" -eq 0 ]; then
           echo 0
           return 0
         fi
@@ -3318,6 +3363,10 @@ count_actionable_state_entries() {
 # + eligible_work_card_exists) fires STALL_STOP when there is genuinely
 # no work left, so no per-streak cap is needed on top.
 count_total_env_blocked() {
+  if structured_state_available 2>/dev/null; then
+    structured_state_count_all_status_regex '^ENV-BLOCKED$' 2>/dev/null || echo 0
+    return
+  fi
   local total=0
   for i in $(seq 1 "$NUM_AGENTS"); do
     local f
@@ -3329,6 +3378,87 @@ count_total_env_blocked() {
     fi
   done
   echo "$total"
+}
+
+count_iteration_progress_snapshot() {
+  # One-pass progress snapshot for iteration dry-streak accounting. This
+  # replaces separate scans for crash candidates, findings, actionable state,
+  # and ENV-BLOCKED rows at the same checkpoint.
+  local confirmed_findings=0 security_crashes=0 actionable=0 env_blocked=0
+  local d
+  for d in "$RESULTS_DIR"/crashes/CRASH-*/; do
+    [ -d "$d" ] || continue
+    [ -f "$d/.promotion_pending" ] && continue
+    security_crashes=$((security_crashes + 1))
+  done
+  for d in "$RESULTS_DIR"/findings/FIND-*/; do
+    [ -d "$d" ] || continue
+    confirmed_findings=$((confirmed_findings + 1))
+  done
+
+  if structured_state_available 2>/dev/null; then
+    local f state_counts
+    f=$(structured_state_hypotheses_path)
+    state_counts=$(jq -R -s -r '
+      split("\n")
+      | map(select(length > 0) | fromjson?)
+      | reduce .[] as $r ({actionable: 0, env_blocked: 0};
+          ($r.status // "") as $s
+          | .actionable += (if (($s | test("^(CRASH|FIND)(-|$)")) or $s == "NEEDS_TESTCASE") then 1 else 0 end)
+          | .env_blocked += (if $s == "ENV-BLOCKED" then 1 else 0 end)
+        )
+      | "\(.actionable) \(.env_blocked)"
+    ' "$f" 2>/dev/null) || state_counts=""
+    if [ -n "$state_counts" ]; then
+      read -r actionable env_blocked <<< "$state_counts"
+    fi
+  else
+    local i f state_counts a e
+    for i in $(seq 1 "$NUM_AGENTS"); do
+      f=$(state_file_path "$i" 2>/dev/null || true)
+      [ -f "$f" ] || continue
+      state_counts=$(awk '
+        /CRASH-|FIND-|NEEDS_TESTCASE/ { actionable++ }
+        /ENV-BLOCKED/ { env_blocked++ }
+        END { printf "%d %d\n", actionable + 0, env_blocked + 0 }
+      ' "$f" 2>/dev/null) || state_counts=""
+      read -r a e <<< "$state_counts"
+      case "${a:-0}" in ''|*[!0-9]*) a=0 ;; esac
+      case "${e:-0}" in ''|*[!0-9]*) e=0 ;; esac
+      actionable=$((actionable + a))
+      env_blocked=$((env_blocked + e))
+    done
+  fi
+
+  case "${actionable:-0}" in ''|*[!0-9]*) actionable=0 ;; esac
+  case "${env_blocked:-0}" in ''|*[!0-9]*) env_blocked=0 ;; esac
+  printf 'confirmed_findings=%s\n' "$confirmed_findings"
+  printf 'security_crashes=%s\n' "$security_crashes"
+  printf 'actionable=%s\n' "$actionable"
+  printf 'env_blocked=%s\n' "$env_blocked"
+}
+
+load_iteration_progress_snapshot() {
+  local _v_confirmed="$1" _v_crashes="$2" _v_actionable="$3" _v_env_blocked="$4"
+  local _confirmed=0 _crashes=0 _actionable=0 _env_blocked=0
+  local _snapshot _key _value
+  _snapshot=$(count_iteration_progress_snapshot)
+  while IFS='=' read -r _key _value; do
+    case "$_key" in
+      confirmed_findings) _confirmed="$_value" ;;
+      security_crashes) _crashes="$_value" ;;
+      actionable) _actionable="$_value" ;;
+      env_blocked) _env_blocked="$_value" ;;
+    esac
+  done <<< "$_snapshot"
+  case "${_confirmed:-0}" in ''|*[!0-9]*) _confirmed=0 ;; esac
+  case "${_crashes:-0}" in ''|*[!0-9]*) _crashes=0 ;; esac
+  case "${_actionable:-0}" in ''|*[!0-9]*) _actionable=0 ;; esac
+  case "${_env_blocked:-0}" in ''|*[!0-9]*) _env_blocked=0 ;; esac
+  printf -v "$_v_confirmed" '%s' "$_confirmed"
+  printf -v "$_v_crashes" '%s' "$_crashes"
+  printf -v "$_v_actionable" '%s' "$_actionable"
+  printf -v "$_v_env_blocked" '%s' "$_env_blocked"
 }
 
 # ─── Subsystem exhaustion & overlap detection ──────────────────────
@@ -3908,15 +4038,63 @@ effective_work_card_rows() {
 # Distinct strategies (e.g. "S1 S3 S7") of work cards still available for
 # claim. Uses the same effective status overlay as bin/state so terminal
 # claim rows in state/claims.jsonl override stale work-cards.jsonl entries.
+unclaimed_strategy_counts() {
+  # $1 is the lowest strategy number to report (1 includes S1, 2 skips it).
+  local min_strategy="${1:-1}"
+  case "$min_strategy" in ''|*[!0-9]*) min_strategy=1 ;; esac
+  local cards_file="${RESULTS_DIR:-}/work-cards.jsonl"
+  [ -s "$cards_file" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 1
+  # A card is claimable under its primary strategy OR any entry in its
+  # allowed_strategies set (mirrors card_strategy_matches in lib/workqueue.py).
+  # Emit the deduped union per card so availability counts match claim
+  # semantics — otherwise a Promoted card primaried S7 but allowing S5 is
+  # invisible to S5 scheduling even though an S5 agent can claim it.
+  effective_work_card_rows | jq -r '
+    select((.status // "") == "unclaimed")
+    | ([.strategy // empty] + (.allowed_strategies // []))
+    | map(select(type == "string" and . != "") | ascii_upcase)
+    | unique[]
+  ' 2>/dev/null | awk -v min_strategy="$min_strategy" '
+    /^S[1-9]$/ {
+      n = substr($0, 2) + 0
+      if (n >= min_strategy) counts[$0]++
+    }
+    END {
+      remaining = 0
+      for (n = min_strategy; n <= 9; n++) {
+        s = "S" n
+        if (counts[s] > 0) remaining++
+      }
+      while (remaining > 0) {
+        best = ""
+        best_count = -1
+        for (n = min_strategy; n <= 9; n++) {
+          s = "S" n
+          if (counts[s] > 0 && (counts[s] > best_count || (counts[s] == best_count && (best == "" || s < best)))) {
+            best = s
+            best_count = counts[s]
+          }
+        }
+        print best "\t" best_count
+        counts[best] = -1
+        remaining--
+      }
+    }
+  '
+}
+
 unclaimed_card_strategies() {
   local cards_file="${RESULTS_DIR:-}/work-cards.jsonl"
   [ -s "$cards_file" ] || return 0
-  if command -v jq >/dev/null 2>&1; then
-    effective_work_card_rows | jq -r 'select(.status == "unclaimed") | .strategy // empty' 2>/dev/null \
-      | grep -E '^S[1-9]$' \
-      | sort -u \
-      | tr '\n' ' '
-  fi
+  command -v jq >/dev/null 2>&1 || return 0
+  local present=" " strat _count
+  while IFS="$(printf '\t')" read -r strat _count; do
+    [ -n "$strat" ] && present="${present}${strat} "
+  done < <(unclaimed_strategy_counts 1)
+  for strat in S1 S2 S3 S4 S5 S6 S7 S8 S9; do
+    case "$present" in *" $strat "*) printf '%s ' "$strat" ;; esac
+  done
 }
 
 # Count unclaimed work-cards matching the given strategy. Optional 2nd arg
@@ -3930,14 +4108,75 @@ count_unclaimed_cards_for() {
     return 0
   fi
   if [ -n "$subsystem" ]; then
-    effective_work_card_rows | jq -r --arg s "$strategy" --arg sub "$subsystem" \
-      'select(.status == "unclaimed" and .strategy == $s and (.subsystem // "") == $sub) | .id' \
-      2>/dev/null | awk 'NF' | wc -l | tr -d ' '
+    effective_work_card_rows | jq -n -r --arg s "$strategy" --arg sub "$subsystem" '
+      reduce inputs as $r (0;
+        if (($r.status // "") == "unclaimed"
+            and (($r.strategy // "") == $s or (($r.allowed_strategies // []) | map(select(type == "string") | ascii_upcase) | index($s)))
+            and ($r.subsystem // "") == $sub
+            and (($r.id // "") | length) > 0) then
+          . + 1
+        else
+          .
+        end
+      )
+    ' 2>/dev/null
   else
-    effective_work_card_rows | jq -r --arg s "$strategy" \
-      'select(.status == "unclaimed" and .strategy == $s) | .id' \
-      2>/dev/null | awk 'NF' | wc -l | tr -d ' '
+    effective_work_card_rows | jq -n -r --arg s "$strategy" '
+      reduce inputs as $r (0;
+        if (($r.status // "") == "unclaimed"
+            and (($r.strategy // "") == $s or (($r.allowed_strategies // []) | map(select(type == "string") | ascii_upcase) | index($s)))
+            and (($r.id // "") | length) > 0) then
+          . + 1
+        else
+          .
+        end
+      )
+    ' 2>/dev/null
   fi
+}
+
+count_unclaimed_cards_for_two_strategies() {
+  local first="$1" second="$2"
+  local cards_file="${RESULTS_DIR:-}/work-cards.jsonl"
+  if [ ! -s "$cards_file" ] || ! command -v jq >/dev/null 2>&1; then
+    printf '?\t?\n'
+    return 0
+  fi
+  local counts first_count=0 second_count=0 strat count
+  counts=$(unclaimed_strategy_counts 1) || { printf '?\t?\n'; return 0; }
+  while IFS="$(printf '\t')" read -r strat count; do
+    case "$strat" in
+      "$first") first_count="$count" ;;
+      "$second") second_count="$count" ;;
+    esac
+  done <<< "$counts"
+  printf '%s\t%s\n' "$first_count" "$second_count"
+}
+
+count_unclaimed_cards_for_strategy_subsystem() {
+  local strategy="$1" subsystem="$2"
+  local cards_file="${RESULTS_DIR:-}/work-cards.jsonl"
+  if [ ! -s "$cards_file" ] || ! command -v jq >/dev/null 2>&1; then
+    printf '?\t?\n'
+    return 0
+  fi
+  effective_work_card_rows | jq -n -r --arg s "$strategy" --arg sub "$subsystem" '
+    reduce inputs as $r ({total:0, subsystem:0};
+      if (($r.status // "") == "unclaimed"
+          and (($r.strategy // "") == $s or (($r.allowed_strategies // []) | map(select(type == "string") | ascii_upcase) | index($s)))
+          and (($r.id // "") | length) > 0) then
+        .total += 1
+        | if (($r.subsystem // "") == $sub) then
+            .subsystem += 1
+          else
+            .
+          end
+      else
+        .
+      end
+    )
+    | "\(.total)\t\(.subsystem)"
+  ' 2>/dev/null
 }
 
 # Distinct strategies currently assigned across all agents (e.g. "S1 S2").
@@ -4092,10 +4331,21 @@ pick_strategy_by_load() {
   [ -n "$cards_file" ] && [ -s "$cards_file" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  local strat count best_count=-1 best_strats=""
+  local counts
+  counts=$(unclaimed_strategy_counts 1) || return 1
+  [ -n "$counts" ] || return 1
+
+  local strat count c_strat c_count best_count=-1 best_strats=""
   for strat in $allowed; do
+    [ -n "$strat" ] || continue
     case " $denied " in *" $strat "*) continue ;; esac
-    count=$(count_unclaimed_cards_for "$strat" 2>/dev/null || echo 0)
+    count=0
+    while IFS="$(printf '\t')" read -r c_strat c_count; do
+      if [ "$c_strat" = "$strat" ]; then
+        count="$c_count"
+        break
+      fi
+    done <<< "$counts"
     case "$count" in ''|*[!0-9]*) count=0 ;; esac
     if [ "$count" -gt "$best_count" ]; then
       best_count="$count"
@@ -4106,7 +4356,7 @@ pick_strategy_by_load() {
   done
   [ -n "$best_strats" ] || return 1
   # When every candidate strategy reports 0 unclaimed cards (e.g.
-  # count_unclaimed_cards_for returned 0 for all of them), there is no
+  # the single queue scan returned 0 for all of them), there is no
   # signal here to drive a load-based choice. Let the caller fall back
   # to first_strategy_in_order rather than picking randomly among zero
   # buckets — that fallback at least gives deterministic behaviour for
@@ -4260,19 +4510,51 @@ log_queue_state() {
   rows=$(effective_work_card_rows)
   [ -n "$rows" ] || return 0
   local total unclaimed claimed blocked other by_strat by_sub active_strats active_subs top_score
-  total=$(printf '%s\n' "$rows" | awk 'NF' | wc -l | tr -d ' ')
-  unclaimed=$(printf '%s\n' "$rows" | jq -r 'select(.status == "unclaimed") | .id' 2>/dev/null | awk 'NF' | wc -l | tr -d ' ')
-  claimed=$(printf '%s\n' "$rows" | jq -r 'select(.status == "claimed") | .id' 2>/dev/null | awk 'NF' | wc -l | tr -d ' ')
-  blocked=$(printf '%s\n' "$rows" | jq -r 'select(.status == "blocked") | .id' 2>/dev/null | awk 'NF' | wc -l | tr -d ' ')
-  other=$(( total - unclaimed - claimed - blocked ))
+  local summary
+  summary=$(printf '%s\n' "$rows" | jq -n -r '
+    def hist($m; $limit):
+      ($m
+       | to_entries
+       | sort_by(-.value, .key)
+       | if $limit == 0 then . else .[:$limit] end
+       | map("\(.key):\(.value)")
+       | join(" "));
+    reduce inputs as $r (
+      {total:0, unclaimed:0, claimed:0, blocked:0, top_score:null, by_strategy:{}, by_subsystem:{}};
+      .total += 1
+      | ($r.status // "") as $status
+      | if $status == "unclaimed" then
+          .unclaimed += 1
+          | ($r.score // 0 | tonumber? // 0) as $score
+          | .top_score = ([.top_score // $score, $score] | max)
+          | ($r.strategy // "?") as $strategy
+          | .by_strategy[$strategy] = ((.by_strategy[$strategy] // 0) + 1)
+          | ($r.subsystem // "?") as $subsystem
+          | .by_subsystem[$subsystem] = ((.by_subsystem[$subsystem] // 0) + 1)
+        elif $status == "claimed" then
+          .claimed += 1
+        elif $status == "blocked" then
+          .blocked += 1
+        else
+          .
+        end
+    )
+    | [
+        .total,
+        .unclaimed,
+        .claimed,
+        .blocked,
+        (.total - .unclaimed - .claimed - .blocked),
+        (.top_score // "?"),
+        hist(.by_strategy; 0),
+        hist(.by_subsystem; 8)
+      ]
+    | @tsv
+  ' 2>/dev/null) || return 0
+  [ -n "$summary" ] || return 0
+  IFS="$(printf '\t')" read -r total unclaimed claimed blocked other top_score by_strat by_sub <<< "$summary"
   [ "${unclaimed:-0}" -gt 0 ] || return 0
-  by_strat=$(printf '%s\n' "$rows" | jq -r 'select(.status == "unclaimed") | .strategy // "?"' 2>/dev/null \
-    | sort | uniq -c | sort -rn | awk '{printf "%s:%s ", $2, $1}' | sed 's/ *$//')
   by_strat=$(fmt_strategy_histogram "$by_strat")
-  by_sub=$(printf '%s\n' "$rows" | jq -r 'select(.status == "unclaimed") | .subsystem // "?"' 2>/dev/null \
-    | sort | uniq -c | sort -rn | head -8 | awk '{printf "%s:%s ", $2, $1}' | sed 's/ *$//')
-  top_score=$(printf '%s\n' "$rows" | jq -r 'select(.status == "unclaimed") | .score // 0' 2>/dev/null \
-    | sort -rn | head -1)
   active_strats=$(active_agent_strategies)
   active_strats=$(fmt_strategy_list "$active_strats")
   active_subs=$(active_agent_subsystems)
@@ -4309,16 +4591,30 @@ pick_cold_start_strategy() {
     printf '%s' "S1"
     return 0
   fi
-  local rows
-  rows=$(effective_work_card_rows)
-  [ -n "$rows" ] || { printf '%s' "S1"; return 0; }
+
+  local ranked_file="${ITERATION_CACHE_DIR:-}/cold_start_strategies.txt"
+  if [ -n "${ITERATION_CACHE_DIR:-}" ] && [ -f "$ranked_file" ]; then
+    local -a cached_ranked=()
+    local cached_strat
+    while IFS= read -r cached_strat; do
+      case "$cached_strat" in
+        S[2-9]) cached_ranked+=("$cached_strat") ;;
+      esac
+    done < "$ranked_file"
+    local cached_count=${#cached_ranked[@]}
+    if [ "$cached_count" -gt 0 ]; then
+      printf '%s' "${cached_ranked[$(( (agent_num - 1) % cached_count ))]}"
+      return 0
+    fi
+    printf '%s' "S1"
+    return 0
+  fi
+
   local -a ranked=()
-  local strat
-  while IFS= read -r strat; do
+  local strat _count
+  while IFS="$(printf '\t')" read -r strat _count; do
     [ -n "$strat" ] && ranked+=("$strat")
-  done < <(printf '%s\n' "$rows" | jq -r 'select(.status == "unclaimed") | .strategy // empty' 2>/dev/null \
-            | grep -E '^S[2-9]$' \
-            | sort | uniq -c | sort -rn | awk '{print $2}')
+  done < <(unclaimed_strategy_counts 2)
   local count=${#ranked[@]}
   if [ "$count" -eq 0 ]; then
     printf '%s' "S1"
@@ -5248,6 +5544,49 @@ mark_structured_work_cards_refreshed() {
   housekeeping_mark_clean work-cards-refresh "$sig"
 }
 
+work_card_refresh_summary() {
+  local work_file="$1" patch_file="$2"
+  local pc_lines=0
+  if [ -f "$patch_file" ]; then
+    pc_lines=$(awk 'END { print NR + 0 }' "$patch_file" 2>/dev/null || echo 0)
+  fi
+
+  if [ -s "$work_file" ] && command -v jq >/dev/null 2>&1; then
+    local summary
+    summary=$(jq -n -r '
+      def hist($m):
+        ($m
+         | to_entries
+         | sort_by(-.value, .key)
+         | map("\(.key):\(.value)")
+         | join(" "));
+      reduce inputs as $r (
+        {total:0, by_strategy:{}, by_status:{}};
+        .total += 1
+        | ($r.strategy // "?") as $strategy
+        | .by_strategy[$strategy] = ((.by_strategy[$strategy] // 0) + 1)
+        | ($r.status // "?") as $status
+        | .by_status[$status] = ((.by_status[$status] // 0) + 1)
+      )
+      | [.total, hist(.by_strategy), hist(.by_status)]
+      | @tsv
+    ' "$work_file" 2>/dev/null) || summary=""
+    if [ -n "$summary" ]; then
+      local wc_lines wc_by_strat wc_by_status
+      IFS="$(printf '\t')" read -r wc_lines wc_by_strat wc_by_status <<< "$summary"
+      wc_by_strat=$(fmt_strategy_histogram "$wc_by_strat")
+      printf '%s\t%s\t%s\t%s\n' "${wc_lines:-0}" "$pc_lines" "$wc_by_strat" "$wc_by_status"
+      return 0
+    fi
+  fi
+
+  local wc_lines=0
+  if [ -f "$work_file" ]; then
+    wc_lines=$(awk 'END { print NR + 0 }' "$work_file" 2>/dev/null || echo 0)
+  fi
+  printf '%s\t%s\t\t\n' "${wc_lines:-0}" "$pc_lines"
+}
+
 refresh_structured_work_cards() {
   [ -x "bin/state" ] || return 0
   bin/state --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" init \
@@ -5299,18 +5638,9 @@ refresh_structured_work_cards() {
       && _wc_refresh_append "ranked"
   fi
   if [ "$refreshed" -eq 1 ]; then
-    local wc_lines pc_lines wc_by_strat wc_by_status
-    wc_lines=$(wc -l < "$work_file" 2>/dev/null | tr -d ' ' || echo 0)
-    pc_lines=$(wc -l < "$patch_file" 2>/dev/null | tr -d ' ' || echo 0)
-    if [ -s "$work_file" ] && command -v jq >/dev/null 2>&1; then
-      wc_by_strat=$(jq -r '.strategy // "?"' "$work_file" 2>/dev/null \
-        | sort | uniq -c | sort -rn \
-        | awk 'NF{printf "%s:%s ", $2, $1} END{print ""}' | sed 's/ *$//')
-      wc_by_strat=$(fmt_strategy_histogram "$wc_by_strat")
-      wc_by_status=$(jq -r '.status // "?"' "$work_file" 2>/dev/null \
-        | sort | uniq -c | sort -rn \
-        | awk 'NF{printf "%s:%s ", $2, $1} END{print ""}' | sed 's/ *$//')
-    fi
+    local wc_lines pc_lines wc_by_strat wc_by_status summary
+    summary=$(work_card_refresh_summary "$work_file" "$patch_file")
+    IFS="$(printf '\t')" read -r wc_lines pc_lines wc_by_strat wc_by_status <<< "$summary"
     log "work-cards refreshed [${refresh_parts}] — ${wc_lines} ranked card(s), ${pc_lines} patch card(s)${wc_by_strat:+ | by_strategy=${wc_by_strat}}${wc_by_status:+ by_status=${wc_by_status}}" | tee -a "$INDEX"
     mark_structured_work_cards_refreshed "$work_file" "$patch_file"
   fi
@@ -6010,31 +6340,48 @@ run_agent() {
   # Extract usage and command counts from the raw JSON stream.
   # extract_* helpers are backend-aware (see function docstrings).
   local total_tokens tool_uses duration_ms input_tokens cached_input_tokens cache_creation_tokens output_tokens command_count waste_telemetry
-  total_tokens=$(extract_usage_field "$(audit_raw_path "$logfile")" total_tokens)
-  input_tokens=$(extract_usage_field "$(audit_raw_path "$logfile")" input_tokens)
-  cached_input_tokens=$(extract_usage_field "$(audit_raw_path "$logfile")" cached_input_tokens)
-  cache_creation_tokens=$(extract_usage_field "$(audit_raw_path "$logfile")" cache_creation_input_tokens)
-  output_tokens=$(extract_usage_field "$(audit_raw_path "$logfile")" output_tokens)
-  duration_ms=$(extract_usage_field "$(audit_raw_path "$logfile")" duration_ms)
+  local raw_logfile usage_fields usage_key usage_value tool_counts tool_key tool_value
+  raw_logfile="$(audit_raw_path "$logfile")"
+  usage_fields=$(extract_usage_fields "$raw_logfile")
+  while IFS='=' read -r usage_key usage_value; do
+    case "$usage_key" in
+      total_tokens) total_tokens="$usage_value" ;;
+      input_tokens) input_tokens="$usage_value" ;;
+      cached_input_tokens) cached_input_tokens="$usage_value" ;;
+      cache_creation_input_tokens) cache_creation_tokens="$usage_value" ;;
+      output_tokens) output_tokens="$usage_value" ;;
+      duration_ms) duration_ms="$usage_value" ;;
+    esac
+  done <<< "$usage_fields"
   case "${duration_ms:-}" in
     ''|*[!0-9]*|0)
       duration_ms=$(( ($(date +%s) - ${agent_start_epoch:-$(date +%s)}) * 1000 ))
       ;;
   esac
-  command_count=$(extract_completed_item_count "$(audit_raw_path "$logfile")" command_execution)
-  tool_uses=$(extract_total_tool_uses "$(audit_raw_path "$logfile")")
+  command_count=0
+  tool_uses=0
+  tool_counts=$(extract_tool_counts "$raw_logfile")
+  while IFS='=' read -r tool_key tool_value; do
+    case "$tool_key" in
+      command_execution) command_count="$tool_value" ;;
+      all_tools) tool_uses="$tool_value" ;;
+    esac
+  done <<< "$tool_counts"
 
   # Recover log file from raw JSON if --output-last-message failed (e.g., Codex SDK crash)
   recover_log_from_raw "$logfile"
 
-  local normalized_exit_code
-  normalized_exit_code=$(normalize_agent_exit_code "$ACTIVE_BACKEND" "$exit_code" "$(audit_raw_path "$logfile")")
+  local normalized_exit_code rate_limit_rejected=0
+  if log_has_rate_limit_rejection "$raw_logfile"; then
+    rate_limit_rejected=1
+  fi
+  normalized_exit_code=$(normalize_agent_exit_code "$ACTIVE_BACKEND" "$exit_code" "$raw_logfile" "$rate_limit_rejected")
   if [ "$normalized_exit_code" != "$exit_code" ]; then
     index_log "Agent $_role_display process exit=$exit_code but raw log has a completed ${ACTIVE_BACKEND} turn with no session-level error; treating the agent session as exit=0"
     exit_code="$normalized_exit_code"
   fi
 
-  if log_has_rate_limit_rejection "$(audit_raw_path "$logfile")"; then
+  if [ "$rate_limit_rejected" -eq 1 ]; then
     # The Antigravity CLI can surface backend exhaustion through stderr
     # while the shell pipeline itself exits 0. Mark the agent as a
     # temporary backend failure so index.log and rc summaries do not
@@ -6076,20 +6423,24 @@ run_agent() {
   else
     index_log "Agent $_role_display finished exit=$exit_code dur=$(fmt_ms "${duration_ms:-0}") tokens=$(fmt_count "${total_tokens:-0}") cmds=${command_count:-0} tools=${tool_uses:-0}"
   fi
-  waste_telemetry=$(extract_waste_telemetry "$(audit_raw_path "$logfile")")
-  index_log "Agent $_role_display waste: ${waste_telemetry}"
-  write_session_log_summary "$(audit_raw_path "$logfile")" "$logfile" \
+  waste_telemetry=$(write_session_log_summary "$raw_logfile" "$logfile" \
     "${logfile}.summary.md" "${LOG_INDEX_JSONL:-$LOGDIR/index.jsonl}" \
     "$role" "$agent_num" "$ACTIVE_BACKEND" "$model" "$agent_mode_kind" "$exit_code" \
     "$total_prompt_tokens" "$input_tokens" "$cached_input_tokens" "$output_tokens" "$total_tokens" \
-    "$duration_ms" "$command_count" "$tool_uses" "$waste_telemetry" "$cache_creation_tokens"
+    "$duration_ms" "$command_count" "$tool_uses" "" "$cache_creation_tokens")
+  if [ -z "$waste_telemetry" ]; then
+    waste_telemetry=$(extract_waste_telemetry "$raw_logfile")
+  fi
+  index_log "Agent $_role_display waste: ${waste_telemetry}"
 
   # Stash tool-use count, ASan run count, and active-result baseline for
   # quality-feedback and reverse-turn-budget directives next iteration.
-  local verified_asan_runs
+  local verified_asan_runs active_security_results_after
   verified_asan_runs=$(count_verified_asan_runs "$(scratch_dir_path "$agent_num")" 2>/dev/null || echo 0)
+  active_security_results_after=$(count_active_security_results 2>/dev/null || echo 0)
+  case "${active_security_results_after:-0}" in ''|*[!0-9]*) active_security_results_after=0 ;; esac
   printf '%s' "${tool_uses:-0}" > "$LOGDIR/.prev_tools_${agent_num}" 2>/dev/null || true
-  printf '%s' "$(count_active_security_results)" > "$LOGDIR/.prev_results_${agent_num}" 2>/dev/null || true
+  printf '%s' "$active_security_results_after" > "$LOGDIR/.prev_results_${agent_num}" 2>/dev/null || true
   printf '%s' "${verified_asan_runs:-0}" > "$LOGDIR/.prev_asan_runs_${agent_num}" 2>/dev/null || true
 
   # Stash session ID and scheduler metadata for guarded continuation.
@@ -6102,24 +6453,24 @@ run_agent() {
     rm -f "$(resume_state_path "$agent_num" fallback)" 2>/dev/null || true
   fi
   if [ "$ACTIVE_BACKEND" = "claude" ]; then
-    new_session_id=$(head -5 "$(audit_raw_path "$logfile")" 2>/dev/null \
+    new_session_id=$(head -5 "$raw_logfile" 2>/dev/null \
       | jq -r 'select(.type == "system" and .subtype == "init") | .session_id // empty' 2>/dev/null \
       | head -1)
     # Fallback: extract from any message line
     if [ -z "$new_session_id" ]; then
-      new_session_id=$(head -20 "$(audit_raw_path "$logfile")" 2>/dev/null \
+      new_session_id=$(head -20 "$raw_logfile" 2>/dev/null \
         | jq -r '.session_id // empty' 2>/dev/null \
         | head -1)
     fi
   elif [ "$ACTIVE_BACKEND" = "codex" ]; then
-    new_session_id=$(head -3 "$(audit_raw_path "$logfile")" 2>/dev/null \
+    new_session_id=$(head -3 "$raw_logfile" 2>/dev/null \
       | jq -r 'select(.type == "thread.started") | .thread_id // empty' 2>/dev/null \
       | head -1)
     if [ -z "$new_session_id" ] && [ "$use_resume" -eq 1 ] && [ "$resume_fallback_used" -eq 0 ]; then
       new_session_id="$prev_session_id"
     fi
   elif [ "$ACTIVE_BACKEND" = "gemini" ] && llm_use_gemini_cli; then
-    new_session_id=$(head -10 "$(audit_raw_path "$logfile")" 2>/dev/null \
+    new_session_id=$(head -10 "$raw_logfile" 2>/dev/null \
       | jq -r 'select(.type == "init") | .session_id // empty' 2>/dev/null \
       | head -1)
     if [ -z "$new_session_id" ]; then
@@ -6131,7 +6482,7 @@ run_agent() {
   if [ "$exit_code" -eq 0 ] \
      && [ -n "$new_session_id" ] \
      && backend_resume_enabled "$resume_backend" \
-     && ! log_has_rate_limit_rejection "$(audit_raw_path "$logfile")"; then
+     && [ "$rate_limit_rejected" -eq 0 ]; then
     save_resume_state=1
   fi
   if [ "$save_resume_state" -eq 1 ]; then
@@ -6147,7 +6498,7 @@ run_agent() {
     resume_state_write "$agent_num" subsystem "$saved_sub"
     resume_state_write "$agent_num" strategy "$saved_strategy"
     resume_state_write "$agent_num" card "$saved_card"
-  elif [ "$exit_code" -ne 0 ] && ! log_has_rate_limit_rejection "$(audit_raw_path "$logfile")"; then
+  elif [ "$exit_code" -ne 0 ] && [ "$rate_limit_rejected" -eq 0 ]; then
     clear_agent_resume_state "$agent_num"
   fi
 
@@ -6155,8 +6506,8 @@ run_agent() {
     if [ "$use_resume" -eq 1 ] && [ "$resume_fallback_used" -eq 0 ]; then
       local resume_actionable_after resume_results_after resume_asan_after next_dry_count
       resume_actionable_after=$(count_actionable_state_entries 2>/dev/null || echo 0)
-      resume_results_after=$(count_active_security_results 2>/dev/null || echo 0)
-      resume_asan_after=$(count_verified_asan_runs "$(scratch_dir_path "$agent_num")" 2>/dev/null || echo 0)
+      resume_results_after="$active_security_results_after"
+      resume_asan_after="$verified_asan_runs"
       case "${resume_actionable_after:-0}" in ''|*[!0-9]*) resume_actionable_after=0 ;; esac
       case "${resume_results_after:-0}" in ''|*[!0-9]*) resume_results_after=0 ;; esac
       case "${resume_asan_after:-0}" in ''|*[!0-9]*) resume_asan_after=0 ;; esac
@@ -6178,9 +6529,9 @@ run_agent() {
   # iteration's prompt so the agent doesn't re-Read the same ranges after
   # compaction. See lib/build_session_seed.py.
   local seed_path="$RESULTS_DIR/.session_seed_${agent_num}.md"
-  if [ -f "$(audit_raw_path "$logfile")" ] && [ -s "$(audit_raw_path "$logfile")" ]; then
+  if [ -f "$raw_logfile" ] && [ -s "$raw_logfile" ]; then
     python3 "$SCRIPT_ROOT/lib/build_session_seed.py" \
-      "$(audit_raw_path "$logfile")" "$seed_path" 2>/dev/null || true
+      "$raw_logfile" "$seed_path" 2>/dev/null || true
   fi
 
   if [ "${command_count:-0}" -eq 0 ] && [ "${verified_asan_runs:-0}" -eq 0 ]; then
@@ -6194,14 +6545,14 @@ run_agent() {
   # detector cannot itself become a safety-classifier trigger when archived logs
   # are later read by an agent.
   local refusal_signals
-  refusal_signals=$(count_structural_refusal_signals "$(audit_raw_path "$logfile")" 2>/dev/null || echo 0)
+  refusal_signals=$(count_structural_refusal_signals "$raw_logfile" 2>/dev/null || echo 0)
   # Split the two failure modes that used to share this branch:
   #   (a) tool_uses == 0         -> genuine dead session (early exit, SDK crash, timeout)
   #   (b) refusal_signals > 0    -> classifier hit after real work
   # Only (a) contributes to the destructive cold-start threshold. A classifier
   # hit with real tool work is evidence that the agent was alive and the current
   # queue is still useful, so preserve state and retry with the existing context.
-  if log_has_rate_limit_rejection "$(audit_raw_path "$logfile")"; then
+  if [ "$rate_limit_rejected" -eq 1 ]; then
     reset_dead_streak "$agent_num"
     index_log "Agent $_role_display hit model rate limit (tools=${tool_uses:-0}) — state preserved; global rate-limit backoff will handle retry timing"
   # output_tokens > 0 keeps agy source-only sessions from false-tripping
@@ -6794,11 +7145,10 @@ update_subsystem_dry_streaks() {
       # off `current_strat` until the floor is met. This stops the
       # "1 hypothesis + 3 variants → rotate" pattern that lets agents
       # touch a strategy without doing the work it actually demands.
-      local strat_status strat_complete strat_evidence strat_min
+      local strat_status strat_complete strat_evidence strat_min strat_fields
       strat_status=$(strategy_completion_for_agent "$i" "$current_strat" 2>/dev/null || echo "")
-      strat_complete=$(printf '%s' "$strat_status" | jq -r '.complete' 2>/dev/null || echo "true")
-      strat_evidence=$(printf '%s' "$strat_status" | jq -r '.evidence' 2>/dev/null || echo "?")
-      strat_min=$(printf '%s' "$strat_status" | jq -r '.threshold' 2>/dev/null || echo "?")
+      strat_fields=$(strategy_completion_fields "$strat_status")
+      IFS="$(printf '\t')" read -r strat_complete strat_evidence strat_min <<< "$strat_fields"
       if [ "$strat_complete" = "false" ]; then
         log "STRATEGY_INCOMPLETE: agent=${i} subsystem=${subsystem} strategy=$(strategy_tag "$current_strat") dry=${strat_streak}/${strat_threshold} evidence=${strat_evidence}/${strat_min} action=keep — this strategy needs more concrete work (hypotheses/testcases) before rotating off; the agent stays on it" | tee -a "$INDEX"
         # Safety valve: the agent cannot wedge on one strategy forever.
@@ -6835,9 +7185,9 @@ update_subsystem_dry_streaks() {
         picker="rr"
         picker_reason="round-robin fallback"
       fi
-      local from_cards to_cards from_tag to_tag
-      from_cards=$(count_unclaimed_cards_for "$current_strat" 2>/dev/null)
-      to_cards=$(count_unclaimed_cards_for "$next_strat" 2>/dev/null)
+      local from_cards to_cards from_tag to_tag card_counts
+      card_counts=$(count_unclaimed_cards_for_two_strategies "$current_strat" "$next_strat" 2>/dev/null)
+      IFS="$(printf '\t')" read -r from_cards to_cards <<< "$card_counts"
       from_tag=$(strategy_tag "$current_strat")
       to_tag=$(strategy_tag "$next_strat")
       log_strategy_rotation "$i" "$subsystem" "$current_strat" "$next_strat" "$strat_streak" "$strat_threshold" "$picker" "$picker_reason" \
@@ -6851,9 +7201,9 @@ update_subsystem_dry_streaks() {
       set_agent_strategy "$i" "$current_strat"
       local strategy_action="keep"
       [ "$agent_productive" -eq 1 ] && strategy_action="reset"
-      local strat_cards strat_sub_cards strat_label
-      strat_cards=$(count_unclaimed_cards_for "$current_strat" 2>/dev/null)
-      strat_sub_cards=$(count_unclaimed_cards_for "$current_strat" "$subsystem" 2>/dev/null)
+      local strat_cards strat_sub_cards strat_label card_counts
+      card_counts=$(count_unclaimed_cards_for_strategy_subsystem "$current_strat" "$subsystem" 2>/dev/null)
+      IFS="$(printf '\t')" read -r strat_cards strat_sub_cards <<< "$card_counts"
       strat_label=$(strategy_tag "$current_strat")
       log_strategy_status "$i" "$subsystem" "$current_strat" "$strat_streak" "$strat_threshold" "$agent_productive" "$strategy_action" \
         "playing=${strat_label} cards_available=${strat_cards:-?}(in_subsystem=${strat_sub_cards:-?})"
@@ -6995,10 +7345,8 @@ while true; do
   refresh_launch_evidence_signatures
 
   timestamp=$(date +%Y%m%d_%H%M%S)
-  confirmed_findings_before=$(count_confirmed_findings 2>/dev/null || echo 0)
-  security_crashes_before=$(count_security_crash_candidates 2>/dev/null || echo 0)
-  actionable_before=$(count_actionable_state_entries 2>/dev/null || echo 0)
-  env_blocked_before=$(count_total_env_blocked 2>/dev/null || echo 0)
+  load_iteration_progress_snapshot \
+    confirmed_findings_before security_crashes_before actionable_before env_blocked_before
 
   # Reset the per-iteration ASan-run counter for every agent. The wrapper
   # increments this and prints BUDGET: N/${ASAN_RUN_BUDGET_PER_ITERATION}
@@ -7057,12 +7405,10 @@ while true; do
     fi
     run_post_iteration_housekeeping || true
 
-    confirmed_findings_after=$(count_confirmed_findings 2>/dev/null || echo 0)
-    security_crashes_after=$(count_security_crash_candidates 2>/dev/null || echo 0)
+    load_iteration_progress_snapshot \
+      confirmed_findings_after security_crashes_after actionable_after env_blocked_after
     new_confirmed_findings=$((confirmed_findings_after - confirmed_findings_before))
     new_security_crashes=$((security_crashes_after - security_crashes_before))
-    actionable_after=$(count_actionable_state_entries 2>/dev/null || echo 0)
-    env_blocked_after=$(count_total_env_blocked 2>/dev/null || echo 0)
     new_env_blocked=$((env_blocked_after - env_blocked_before))
     # PRODUCTIVE only when triage actually promoted something to a
     # confirmed finding or a crash candidate. A non-autodiscard ASan
@@ -7130,12 +7476,10 @@ while true; do
   # Track confirmed security findings and security crash candidates separately so the
   # logs never call pending crash candidates "findings". Productivity still
   # includes net-new actionable state entries (CRASH- / FIND- / NEEDS_TESTCASE).
-  confirmed_findings_after=$(count_confirmed_findings 2>/dev/null || echo 0)
-  security_crashes_after=$(count_security_crash_candidates 2>/dev/null || echo 0)
+  load_iteration_progress_snapshot \
+    confirmed_findings_after security_crashes_after actionable_after env_blocked_after
   new_confirmed_findings=$((confirmed_findings_after - confirmed_findings_before))
   new_security_crashes=$((security_crashes_after - security_crashes_before))
-  actionable_after=$(count_actionable_state_entries 2>/dev/null || echo 0)
-  env_blocked_after=$(count_total_env_blocked 2>/dev/null || echo 0)
   new_env_blocked=$((env_blocked_after - env_blocked_before))
 
   iteration_was_productive=0

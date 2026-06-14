@@ -132,7 +132,7 @@ bounded by default.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `RG_CAP` | `200` | Line cap used by `bin/rg-safe`. |
-| `RG_BYTES` | `131072` | Byte cap used by `bin/rg-safe`. |
+| `RG_BYTES` | `131072` | Compatibility byte threshold for `bin/rg-safe`; the default value routes through the ~50 KiB head+tail spill cap, while non-default values use the legacy hard clip. |
 | `PEEK_MAX_LINES` | `200` | Maximum range shown by `bin/peek` range mode. |
 | `PEEK_GREP_AFTER` | `30` | Clamp for `bin/peek -A`. |
 | `PEEK_GREP_BEFORE` | `8` | Clamp for `bin/peek -B`. |

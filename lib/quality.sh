@@ -67,6 +67,43 @@ count_orphan_testcases() {
   python3 "$_QUALITY_PY" count-orphans "$dir" 2>/dev/null || echo 0
 }
 
+scan_scratch_counts_load() {
+  local dir="$1"
+  local _v_asan="${2:-_qscan_asan}"
+  local _v_tc="${3:-_qscan_tc}"
+  local _v_orphan="${4:-_qscan_orphan}"
+
+  if [ ! -d "$dir" ]; then
+    printf -v "$_v_asan" '%s' 0
+    printf -v "$_v_tc" '%s' 0
+    printf -v "$_v_orphan" '%s' 0
+    return 0
+  fi
+
+  local out first kv asan="" tc="" orphan=""
+  out=$(python3 "$_QUALITY_PY" scan-scratch "$dir" 2>/dev/null) || {
+    printf -v "$_v_asan" '%s' 0
+    printf -v "$_v_tc" '%s' 0
+    printf -v "$_v_orphan" '%s' 0
+    return 1
+  }
+  first=${out%%$'\n'*}
+  for kv in $first; do
+    case "$kv" in
+      asan_runs=*) asan=${kv#asan_runs=} ;;
+      testcases=*) tc=${kv#testcases=} ;;
+      orphans=*) orphan=${kv#orphans=} ;;
+    esac
+  done
+  case "$asan:$tc:$orphan" in
+    *[!0-9:]*|:*|*::*) asan=0; tc=0; orphan=0 ;;
+  esac
+  printf -v "$_v_asan" '%s' "${asan:-0}"
+  printf -v "$_v_tc" '%s' "${tc:-0}"
+  printf -v "$_v_orphan" '%s' "${orphan:-0}"
+  return 0
+}
+
 # ── Quality feedback loop ─────────────────────────────────────────
 
 check_agent_quality() {
@@ -80,28 +117,30 @@ check_agent_quality() {
   local discarded=0 total=0 needs_tc=0 asan_runs=0 crash_count=0 pending=0 tc_count=0
   local _act_unused=0 _env_unused=0 investigating=0
   if structured_state_agent_counts_load "$agent_num" \
-       pending _act_unused discarded _env_unused needs_tc crash_count investigating 2>/dev/null; then
-    # `total` keeps its legacy exact-match semantics — see structured_state.sh
-    # (^(CRASH|CRASH-|FIND|FIND-)$ excludes CRASH-DEDUPED etc., unlike the
-    # prefix-match used for `result`). Preserve exact behavior so the
-    # depth-required gate stays calibrated to its historical values.
-    total=$(structured_state_count_agent_status_regex "$agent_num" '^(PENDING|INVESTIGATING|NEEDS_TESTCASE|DISCARDED|CRASH|CRASH-|FIND|FIND-|ENV-BLOCKED)$' 2>/dev/null || echo 0)
+       pending _act_unused discarded _env_unused needs_tc crash_count investigating total 2>/dev/null; then
+    :
   elif [ -f "$state_file" ]; then
-    discarded=$(grep -c "DISCARDED" "$state_file" 2>/dev/null) || true
-    needs_tc=$(grep -c "NEEDS_TESTCASE" "$state_file" 2>/dev/null) || true
-    pending=$(grep -c "PENDING" "$state_file" 2>/dev/null) || true
-    crash_count=$(grep -cE "CRASH-|FIND-" "$state_file" 2>/dev/null) || true
-    total=$(grep -cE "PENDING|INVESTIGATING|NEEDS_TESTCASE|DISCARDED|CRASH-|FIND-|ENV-BLOCKED" "$state_file" 2>/dev/null) || true
-    investigating=$(grep -c "INVESTIGATING" "$state_file" 2>/dev/null) || true
+    local state_counts
+    state_counts=$(awk '
+      /DISCARDED/ { discarded++ }
+      /NEEDS_TESTCASE/ { needs_tc++ }
+      /PENDING/ { pending++ }
+      /CRASH-|FIND-/ { crash_count++ }
+      /PENDING|INVESTIGATING|NEEDS_TESTCASE|DISCARDED|CRASH-|FIND-|ENV-BLOCKED/ { total++ }
+      /INVESTIGATING/ { investigating++ }
+      END {
+        printf "%d %d %d %d %d %d\n",
+          discarded, needs_tc, pending, crash_count, total, investigating
+      }
+    ' "$state_file" 2>/dev/null) || state_counts="0 0 0 0 0 0"
+    read -r discarded needs_tc pending crash_count total investigating <<< "$state_counts"
   fi
   discarded=${discarded:-0}; needs_tc=${needs_tc:-0}; total=${total:-0}
   pending=${pending:-0}; crash_count=${crash_count:-0}; investigating=${investigating:-0}
 
-  asan_runs=0; tc_count=0
-  if [ -d "$(scratch_dir_path "$agent_num")" ]; then
-    asan_runs=$(count_verified_asan_runs "$(scratch_dir_path "$agent_num")")
-    tc_count=$(count_scratch_input_files "$(scratch_dir_path "$agent_num")")
-  fi
+  local scratch_dir orphan_count=0
+  scratch_dir=$(scratch_dir_path "$agent_num")
+  scan_scratch_counts_load "$scratch_dir" asan_runs tc_count orphan_count >/dev/null 2>&1 || true
 
   feedback+="**Stats:** ${discarded} discarded, ${pending} pending, ${crash_count} findings, ${tc_count} testcases, ${asan_runs} ASan runs.\n"
 
@@ -117,10 +156,6 @@ check_agent_quality() {
   fi
 
   # Gate 3: Orphan testcases
-  local orphan_count=0
-  if [ -d "$(scratch_dir_path "$agent_num")" ]; then
-    orphan_count=$(count_orphan_testcases "$(scratch_dir_path "$agent_num")")
-  fi
   if [ "${orphan_count:-0}" -ge 3 ]; then
     feedback+="**ORPHAN GATE:** ${orphan_count} testcase(s) have no .asan.txt. Run ASan on every existing testcase before writing new ones.\n"
   fi
@@ -142,8 +177,11 @@ check_agent_quality() {
   tried_log=$(tried_inputs_log_path "$agent_num")
   if [ -f "$tried_log" ]; then
     local no_exec_count total_tried
-    no_exec_count=$(grep -c 'verdict=NO_EXEC' "$tried_log" 2>/dev/null) || true
-    total_tried=$(wc -l < "$tried_log" 2>/dev/null | tr -d ' ') || true
+    read -r no_exec_count total_tried <<< "$(awk '
+      /verdict=NO_EXEC/ { no_exec++ }
+      { total++ }
+      END { printf "%d %d\n", no_exec, total }
+    ' "$tried_log" 2>/dev/null || echo "0 0")"
     no_exec_count=${no_exec_count:-0}; total_tried=${total_tried:-0}
     if [ "$no_exec_count" -gt 5 ] && [ "$total_tried" -gt 0 ]; then
       local no_exec_pct=$(( no_exec_count * 100 / total_tried ))
@@ -170,9 +208,7 @@ warn_orphan_testcases() {
     d=$(scratch_dir_path "$i")
     [ -d "$d" ] || continue
     local tc_count asan_count orphan_count
-    tc_count=$(count_scratch_input_files "$d")
-    asan_count=$(count_verified_asan_runs "$d")
-    orphan_count=$(count_orphan_testcases "$d")
+    scan_scratch_counts_load "$d" asan_count tc_count orphan_count >/dev/null 2>&1 || true
     if [ "${tc_count:-0}" -gt 0 ] && [ "${orphan_count:-0}" -eq "${tc_count:-0}" ]; then
       audit_log "WARN: agent ${i} has ${tc_count} testcase(s) but 0 verified ASan outputs — all orphan!" | tee -a "$INDEX"
     elif [ "${orphan_count:-0}" -ge 3 ]; then

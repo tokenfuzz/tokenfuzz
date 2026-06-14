@@ -30,6 +30,27 @@ export LLM_DECIDE_DISABLE=1
 # Triage helpers we don't exercise here; suppress reachability/bundling.
 export REACHABILITY_AUTO=0
 
+confirm_cache="$RESULTS_DIR/confirm-cache-fields.json"
+cat > "$confirm_cache" <<'EOF'
+{"content_sha1":"abc123","accept":false,"reason":"cached reason with spaces","votes":3,"evidence_sha1":"ev456","semantic_sha1":"sem789"}
+EOF
+cache_fields=$(_triage_confirm_cache_fields "$confirm_cache")
+eval "set -- $cache_fields"
+assert_eq "abc123" "${1:-}" "confirm cache fields: content sha"
+assert_eq "false" "${2:-}" "confirm cache fields: accept false preserved"
+assert_eq "cached reason with spaces" "${3:-}" "confirm cache fields: reason preserved"
+assert_eq "3" "${4:-}" "confirm cache fields: votes"
+assert_eq "ev456" "${5:-}" "confirm cache fields: evidence sha"
+assert_eq "sem789" "${6:-}" "confirm cache fields: semantic sha"
+
+confirm_src="$(declare -f llm_confirm_crash_report)"
+assert_match '_triage_confirm_cache_fields "\$cache"' "$confirm_src" \
+  "confirm cache: parses sidecar fields in one helper call"
+assert_not_match "jq -r '\\.accept'" "$confirm_src" \
+  "confirm cache: avoids per-field jq accept reads"
+assert_not_match "jq -r '\\.evidence_sha1" "$confirm_src" \
+  "confirm cache: avoids per-field jq asymmetric accept reads"
+
 mk_promotable_crash() {
   # Builds a CRASH-* dir whose ASan trace + report would survive every
   # earlier triage stage. The confirm gate is the only thing that can

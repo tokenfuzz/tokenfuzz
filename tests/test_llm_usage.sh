@@ -29,6 +29,10 @@ xf() {
   python3 "$USAGE_PY" extract-field "$@"
 }
 
+xfs() {
+  python3 "$USAGE_PY" extract-fields "$@"
+}
+
 # ── Fixtures ────────────────────────────────────────────────────────
 
 # Claude stream-json: each assistant message carries a usage object
@@ -86,6 +90,19 @@ assert_eq "1580" "$(xf total_tokens claude "$claude_raw")" \
   "T1e: claude total_tokens sums input + output from the picked block"
 assert_eq "3400" "$(xf duration_ms claude "$claude_raw")" \
   "T1f: claude duration_ms scans top-level event objects"
+fields_out=$(xfs claude "$claude_raw")
+assert_match '^input_tokens=1500$' "$fields_out" \
+  "T1g: extract-fields emits claude input_tokens"
+assert_match '^output_tokens=80$' "$fields_out" \
+  "T1h: extract-fields emits claude output_tokens"
+assert_match '^cached_input_tokens=1000$' "$fields_out" \
+  "T1i: extract-fields emits claude cached_input_tokens"
+assert_match '^cache_creation_input_tokens=100$' "$fields_out" \
+  "T1j: extract-fields emits claude cache_creation_input_tokens"
+assert_match '^total_tokens=1580$' "$fields_out" \
+  "T1k: extract-fields emits claude total_tokens"
+assert_match '^duration_ms=3400$' "$fields_out" \
+  "T1l: extract-fields emits claude duration_ms"
 
 # ── T2: Codex item.completed measured fields ────────────────────────
 
@@ -129,6 +146,19 @@ if [ -z "$in_with_prompt" ] || [ "$in_with_prompt" -le 0 ] 2>/dev/null; then
 else
   pass "T4c: agy plain-text input_tokens estimates > 0 when --prompt supplied"
 fi
+fields_with_prompt=$(xfs gemini "$agy_raw" --prompt "$prompt_file")
+if ! printf '%s\n' "$fields_with_prompt" | grep -Eq '^input_tokens=[1-9][0-9]*$'; then
+  fail "T4d: extract-fields agy input_tokens estimates > 0 with --prompt" \
+    "got '$fields_with_prompt'"
+else
+  pass "T4d: extract-fields agy input_tokens estimates > 0 with --prompt"
+fi
+if ! printf '%s\n' "$fields_with_prompt" | grep -Eq '^output_tokens=[1-9][0-9]*$'; then
+  fail "T4e: extract-fields agy output_tokens estimates > 0" \
+    "got '$fields_with_prompt'"
+else
+  pass "T4e: extract-fields agy output_tokens estimates > 0"
+fi
 
 # ── T5: unknown-telemetry → empty string (preserves audit's
 #         `extract_usage_field` "I don't know" semantic) ──────────────
@@ -149,6 +179,11 @@ assert_eq "" "$(xf input_tokens claude "$ghost_raw")" \
   "T5d: missing raw file → '' for any backend"
 assert_eq "" "$(xf output_tokens gemini "$ghost_raw")" \
   "T5e: missing raw file → '' for any backend (gemini path too)"
+missing_fields=$(xfs gemini "$ghost_raw")
+assert_match '^input_tokens=$' "$missing_fields" \
+  "T5f: extract-fields missing raw emits empty input"
+assert_match '^duration_ms=$' "$missing_fields" \
+  "T5g: extract-fields missing raw emits empty duration"
 
 # ── T6: unknown field returns empty ─────────────────────────────────
 

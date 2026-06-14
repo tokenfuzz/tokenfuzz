@@ -99,7 +99,9 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 | **8th** | **S8: Property-based oracles** | Sanitizer-free oracles for silent corruption: idempotence, injectivity, numerical domain, format compliance, inverse operations. |
 | Ref | **REF: Pattern search library** | Grep patterns for use alongside any strategy. |
 
-Full strategy index: `.agents/references/strategies/README.md`. Read ONLY the strategy file you need.
+Full strategy index: `.agents/references/strategies/README.md`. Use the
+harness-rendered strategy brief to orient, then open the full strategy file
+for the complete playbook before committing to hypotheses on your assigned card.
 
 **Auto-rotation:** The harness may rotate strategy after sustained dry work; S1 prior-fix review gets a longer runway because patch analysis often needs several dry iterations before the first testcase.
 If the current strategy yields nothing on this subsystem, **switch strategy first, not subsystem** — keep active HIT / NEEDS_TESTCASE / NEEDS_DEEPER_PROBE rows alive while you exhaust strategies. Only pivot subsystems either (a) after you confirm a crash and the harness opens neighbor cards to you (see Critical Rule 7), or (b) the queue assigns you a card in a different subsystem because every in-subsystem card is claimed/discarded.

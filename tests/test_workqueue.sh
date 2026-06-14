@@ -591,6 +591,25 @@ else
   pass "state: strategy filter rejects mismatched cards"
 fi
 
+strategy_list=$("$STATE" --results-dir "$strategy_mode_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  list-cards --mode generic --strategy S7 --limit 0)
+assert_match '"id": "WORK-S7-JS"' "$strategy_list" "state: list-cards can filter by strategy server-side"
+assert_not_match '"id": "WORK-S1-JS"' "$strategy_list" "state: list-cards strategy filter avoids client grep"
+assert_not_match '"fix_hashes": \[\]' "$strategy_list" "state: list-cards omits empty optional arrays"
+strategy_shown=$("$STATE" --results-dir "$strategy_mode_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  show-card WORK-S7-JS)
+assert_match '"fix_hashes": \[\]' "$strategy_shown" "state: show-card keeps full single-card detail"
+
+subsystem_list=$("$STATE" --results-dir "$strategy_mode_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  list-cards --mode generic --subsystem lib2 --limit 0)
+assert_match '"id": "WORK-S7-JS"' "$subsystem_list" "state: list-cards can filter by subsystem substring"
+assert_not_match '"id": "WORK-S1-JS"' "$subsystem_list" "state: list-cards subsystem filter avoids unrelated rows"
+
+contains_list=$("$STATE" --results-dir "$strategy_mode_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  list-cards --mode generic --contains b.js --limit 0)
+assert_match '"id": "WORK-S7-JS"' "$contains_list" "state: list-cards can filter compact card text"
+assert_not_match '"id": "WORK-S1-JS"' "$contains_list" "state: list-cards contains filter avoids unrelated rows"
+
 "$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" init
 assert_dir_exists "$RESULTS_DIR/state" "state: init creates state dir"
 assert_file_exists "$RESULTS_DIR/state/notes.jsonl" "state: init creates notes store"
@@ -610,6 +629,15 @@ assert_not_match 'usage: state' "$shown_card" "state: show-card does not fall th
 shown_card_flag=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   show-card --card-id "$card_id" --mode generic)
 assert_match "\"id\": \"$card_id\"" "$shown_card_flag" "state: show-card accepts --card-id"
+show_card_src=$(awk '
+  /^def show_work_card\(/ { in_func=1 }
+  in_func { print }
+  /^def list_work_cards\(/ { exit }
+' "$SCRIPT_ROOT/lib/workqueue.py")
+assert_match '_status_rows_by_card\(ctx, mode, cards=cards\)' "$show_card_src" \
+  "state: show-card reuses preloaded work cards for status rows"
+show_card_reads=$(grep -c 'read_jsonl(work_cards_path(ctx))' <<< "$show_card_src" || true)
+assert_eq "1" "$show_card_reads" "state: show-card keeps one work-cards JSONL read"
 
 explained_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   explain-card --card-id "$card_id")
@@ -630,6 +658,24 @@ assert_not_match 'usage: state' "$listed_cards" "state: list-cards does not fall
 eligible_cards=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   list-cards --mode generic --status eligible --limit 3)
 assert_match '"reason": "eligible"' "$eligible_cards" "state: list-cards can filter by queue reason"
+
+dumped_queue=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  dump-queue --mode generic --status eligible --limit 2)
+dumped_count=$(printf '%s\n' "$dumped_queue" | grep -c '^{' || true)
+assert_eq "2" "$dumped_count" "state: dump-queue alias honors --limit"
+assert_match '"reason": "eligible"' "$dumped_queue" "state: dump-queue alias preserves list-cards filtering"
+assert_not_match 'usage: state' "$dumped_queue" "state: dump-queue alias does not fall through to argparse help"
+list_cards_src=$(awk '
+  /^def list_work_cards\(/ { in_func=1 }
+  in_func { print }
+  /^def _markdown_cells\(/ { exit }
+' "$SCRIPT_ROOT/lib/workqueue.py")
+assert_match '_queue_status_row\(' "$list_cards_src" \
+  "state: list-cards computes queue status lazily"
+assert_not_match '_status_rows_by_card' "$list_cards_src" \
+  "state: list-cards avoids eager status rows for every card"
+list_card_reads=$(grep -c 'read_jsonl(work_cards_path(ctx))' <<< "$list_cards_src" || true)
+assert_eq "1" "$list_card_reads" "state: list-cards keeps one work-cards JSONL read"
 
 mkdir -p "$RESULTS_DIR/crashes/CRASH-900-1" "$RESULTS_DIR/findings/FIND-900-demo"
 cat > "$RESULTS_DIR/crashes/CRASH-900-1/REPORT.md" <<'MD'
@@ -961,6 +1007,14 @@ assert_match 'Queue Health' "$resume" "state: resume includes queue health"
 # resume payload. Recent Tried Inputs is opt-in via env var.
 assert_not_match 'Quick reference' "$resume" "state: resume does not embed cheat sheet (now in session-rules)"
 assert_not_match 'Recent Tried Inputs' "$resume" "state: resume omits recent tried inputs by default"
+assert_file_contains "$SCRIPT_ROOT/lib/workqueue.py" 'recent_hypotheses\(ctx, limit=resume_limit, agent=agent, rows=hyps\)' \
+  "state: resume reuses preloaded hypothesis rows"
+assert_file_contains "$SCRIPT_ROOT/lib/workqueue.py" 'recent_runs\(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, card_id=card_id, rows=runs\)' \
+  "state: resume reuses preloaded run rows"
+assert_file_contains "$SCRIPT_ROOT/lib/workqueue.py" 'recent_notes\(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, rows=notes\)' \
+  "state: resume reuses preloaded note rows"
+assert_file_contains "$SCRIPT_ROOT/lib/workqueue.py" 'last_terminal_reason\(ctx, agent, rows=hyps\)' \
+  "state: resume reuses preloaded rows for terminal reason"
 
 resume_with_tried=$(STATE_RESUME_INCLUDE_TRIED=1 "$STATE" \
   --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
@@ -1191,6 +1245,23 @@ bad_v=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --tar
   recent-runs --verdict '[bad' 2>&1 || true)
 assert_match 'invalid --verdict regex' "$bad_v" "recent-runs: bad regex reported, not raised"
 
+# ── show-recent: one-call compact session snapshot ──
+show_recent=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  show-recent --hyps 1 --runs 1 --claims 1)
+assert_match '^# recent-hyps$' "$show_recent" "show-recent: includes hypothesis section"
+assert_match '^# recent-runs$' "$show_recent" "show-recent: includes run section"
+assert_match '^# recent-claims$' "$show_recent" "show-recent: includes claim section"
+show_hyp_rows=$(printf '%s\n' "$show_recent" | grep -c '^H-' || true)
+show_run_rows=$(printf '%s\n' "$show_recent" | grep -c '^RUN-' || true)
+show_claim_rows=$(printf '%s\n' "$show_recent" | grep -c -E '^[0-9]{4}-.*\|' || true)
+assert_eq "1" "$show_hyp_rows" "show-recent --hyps 1: caps hypothesis rows"
+assert_eq "1" "$show_run_rows" "show-recent --runs 1: caps run rows"
+assert_eq "1" "$show_claim_rows" "show-recent --claims 1: caps claim rows"
+show_recent_no_notes=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  show-recent --hyps 0 --runs 0 --claims 0)
+assert_not_match 'usage: state' "$show_recent_no_notes" "show-recent: prompt-advised command parses without help fallback"
+assert_not_match '# recent-notes' "$show_recent" "show-recent: notes stay opt-in by default"
+
 # ── recent-notes: structured working context without markdown state ──
 # add-note stores text verbatim (pipe sanitization is in the recent-notes
 # renderer) and is exercised above; seed these reader fixtures directly.
@@ -1212,6 +1283,9 @@ assert_match 'H-BETA' "$recent_notes_beta" "recent-notes --hypothesis-id: keeps 
 recent_notes_kind=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   recent-notes --kind variants)
 assert_match 'variants' "$recent_notes_kind" "recent-notes --kind: filters kind"
+list_notes_a2=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  list-notes --agent 2)
+assert_eq "$recent_notes_a2" "$list_notes_a2" "state: list-notes is a recent-notes alias"
 
 # ── recent-tried: parses tried-inputs-N.log key=value records ──
 TRIED_LOG="$RESULTS_DIR/tried-inputs-1.log"
@@ -1289,7 +1363,14 @@ assert_file_exists "$SESSION_RULES" "cheat-sheet: session-rules.md exists"
 sr_content=$(cat "$SESSION_RULES")
 assert_match 'bin/state recent-hyps' "$sr_content" "cheat-sheet: session-rules lists recent-hyps"
 assert_match 'bin/state recent-runs' "$sr_content" "cheat-sheet: session-rules lists recent-runs"
+assert_match 'bin/state show-recent' "$sr_content" "cheat-sheet: session-rules lists show-recent"
 assert_match 'bin/state recent-tried' "$sr_content" "cheat-sheet: session-rules lists recent-tried"
+assert_match 'bin/state dump-queue' "$sr_content" "cheat-sheet: session-rules lists dump-queue"
+assert_match 'bin/state list-notes' "$sr_content" "cheat-sheet: session-rules lists list-notes"
+assert_match 'bin/state recent-tried --agent N --limit 40' "$sr_content" "cheat-sheet: session-rules uses recent-tried for tried-inputs memory"
+assert_not_match 'tail -40 <RESULTS_DIR>/tried-inputs-N.log' "$sr_content" "cheat-sheet: session-rules does not recommend raw tried-input tails"
+assert_match 'bin/state explain-queue' "$sr_content" "cheat-sheet: session-rules lists explain-queue"
+assert_match 'explain-queue .*--strategy S' "$sr_content" "cheat-sheet: explain-queue documents strategy filter"
 assert_match 'bin/state show-crash' "$sr_content" "cheat-sheet: session-rules lists show-crash"
 assert_match 'bin/state list-findings' "$sr_content" "cheat-sheet: session-rules lists list-findings"
 assert_match 'bin/state add-hyp' "$sr_content" "cheat-sheet: session-rules lists add-hyp"
@@ -1467,6 +1548,13 @@ assert_match '\*\*File:\*\* `' "$directive" "prompt: work card directive include
 assert_match '\*\*Fix commits:\*\* ' "$directive" "prompt: work card directive includes fix-hash field"
 assert_match 'PATCH-\* is only the work-card id, not a VCS revision' "$directive" \
   "prompt: work card directive warns not to use card id as commit"
+wcd_src=$(awk '
+  /^build_work_card_directive\(\) \{/ { in_func=1 }
+  in_func { print }
+  in_func && $0 == "}" { exit }
+' "$SCRIPT_ROOT/lib/prompt.sh")
+wcd_card_jq_calls=$(grep -cF 'printf '\''%s'\'' "$card" | jq' <<< "$wcd_src" || true)
+assert_eq "1" "$wcd_card_jq_calls" "prompt: work card directive parses card JSON in one jq pass"
 
 prompt_claim_results="$TEST_TMPDIR/prompt-claim-results"
 mkdir -p "$prompt_claim_results/state"
@@ -1483,6 +1571,36 @@ assert_eq "WORK-PROMPT-A" "$prompt_claim_a_id" "prompt: first work card directiv
 assert_eq "WORK-PROMPT-B" "$prompt_claim_b_id" "prompt: second work card directive skips freshly claimed card"
 prompt_claim_rows=$(grep -c '"status": "claimed"' "$prompt_claim_results/state/claims.jsonl" 2>/dev/null || true)
 assert_eq "2" "$prompt_claim_rows" "prompt: work card directive records prompt-time leases"
+
+prompt_fields_results="$TEST_TMPDIR/prompt-fields-results"
+mkdir -p "$prompt_fields_results/state"
+mk_state_dir "$prompt_fields_results"
+cat > "$prompt_fields_results/work-cards.jsonl" <<'JSONL'
+{"id":"WORK-FIELDS","kind":"recon-hypothesis","target_slug":"testproject","subsystem":"alpha/core","file":"alpha/core/a.c","mode":"generic","strategy":"S1","score":321,"status":"unclaimed","reason":"recon hypothesis | class=bounds | validator=Promote | tricky title with spaces | notes with punctuation: a=b, c/d","seed":"seed with spaces","fix_hashes":["abc123","def456"],"patch_cards":["PATCH-one","PATCH two"],"find_id":"FIND-777","recon":{"id":"RECON-777","class":"bounds","line":77,"validator_verdict":"Promote"}}
+JSONL
+fields_list=$("$STATE" --results-dir "$prompt_fields_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  list-cards --mode generic --limit 1)
+assert_match '"fix_hashes": \["abc123", "def456"\]' "$fields_list" \
+  "state: list-cards keeps non-empty fix hashes"
+assert_match '"patch_cards": \["PATCH-one", "PATCH two"\]' "$fields_list" \
+  "state: list-cards keeps non-empty related patch cards"
+assert_match '"seed": "seed with spaces"' "$fields_list" "state: list-cards keeps non-empty seed"
+assert_not_match '"invalid_fix_hashes": \[\]' "$fields_list" "state: list-cards drops empty optional hash fields"
+prompt_fields=$(RESULTS_DIR="$prompt_fields_results" build_work_card_directive 1)
+assert_match 'Seed.*seed with spaces' "$prompt_fields" \
+  "prompt: one-pass card parser preserves seed with spaces"
+assert_match 'Fix commits.*abc123, def456' "$prompt_fields" \
+  "prompt: one-pass card parser joins fix hashes"
+assert_match 'Related patch cards.*PATCH-one, PATCH two' "$prompt_fields" \
+  "prompt: one-pass card parser joins patch cards"
+assert_match 'Recon ID:.*RECON-777' "$prompt_fields" \
+  "prompt: one-pass card parser renders recon id"
+assert_match 'Line:.*77' "$prompt_fields" \
+  "prompt: one-pass card parser renders recon line"
+assert_match 'Validator verdict:.*Promote' "$prompt_fields" \
+  "prompt: one-pass card parser renders validator verdict"
+assert_match 'findings/FIND-777/report.md' "$prompt_fields" \
+  "prompt: one-pass card parser renders pre-filed FIND path"
 
 # ── Diagnostic surface for build_work_card_directive ─────────────────
 # Each silent-return branch emits a stderr line under
@@ -1556,6 +1674,21 @@ assert_not_match '"file":' "$default_out" "explain-queue: aggregated default sup
 assert_match '"count": 2, "reason": "claimed-until"' "$default_out" \
   "explain-queue: claimed-until bucket counts both freshly-claimed cards"
 
+context_out=$("$STATE" --results-dir "$explain_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  explain-queue --agent 3 --mode generic --role reproduce --strategy S3 --top 12)
+assert_not_match 'usage: state' "$context_out" "explain-queue: accepts resume-shaped agent/role/strategy flags"
+assert_match '"reason": "strategy-incompatible:none"' "$context_out" \
+  "explain-queue --strategy: explains otherwise eligible nonmatching cards"
+explain_src=$(awk '
+  /^def explain_queue\(/ { in_func=1 }
+  in_func { print }
+  /^def is_promoted_recon_card\(/ { exit }
+' "$SCRIPT_ROOT/lib/workqueue.py")
+assert_not_match 'active_hypothesis_card_ids|active_hypothesis_surfaces|active_hypothesis_subsystems' "$explain_src" \
+  "explain-queue: derives active hypothesis sets from one preloaded state pass"
+assert_not_match 'claimed_card_surfaces|claimed_card_subsystems' "$explain_src" \
+  "explain-queue: derives claimed sets from one preloaded claims pass"
+
 # --top 2 keeps the two biggest buckets and rolls the rest into a _more tail.
 top_out=$("$STATE" --results-dir "$explain_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   explain-queue --mode generic --top 2)
@@ -1571,6 +1704,33 @@ all_lines=$(printf '%s\n' "$all_out" | grep -c '^{')
 assert_eq "10" "$all_lines" "explain-queue: --all emits one row per work card"
 assert_match '"file":' "$all_out" "explain-queue: --all includes per-card fields"
 assert_not_match '"sample_id":' "$all_out" "explain-queue: --all does not aggregate"
+
+ownership_results="$TEST_TMPDIR/explain-ownership-results"
+mkdir -p "$ownership_results"
+mk_state_dir "$ownership_results"
+cat > "$ownership_results/work-cards.jsonl" <<'JSONL'
+{"id":"WORK-ACTIVE","kind":"ranked-source","file":"owned/a.c","subsystem":"owned","mode":"generic","score":10,"reason":"rank"}
+{"id":"WORK-ACTIVE-SIBLING","kind":"ranked-source","file":"owned/a.c","subsystem":"fresh","mode":"generic","score":9,"reason":"rank"}
+{"id":"WORK-CLAIMED","kind":"ranked-source","file":"claimed/b.c","subsystem":"claimed-sub","mode":"generic","score":8,"reason":"rank"}
+{"id":"WORK-CLAIMED-SIBLING","kind":"ranked-source","file":"claimed/b.c","subsystem":"fresh","mode":"generic","score":7,"reason":"rank"}
+{"id":"WORK-CLAIMED-SUBSYSTEM","kind":"ranked-source","file":"claimed/c.c","subsystem":"claimed-sub","mode":"generic","score":6,"reason":"rank"}
+JSONL
+printf '{"id":"H-ACTIVE","agent":"1","card_id":"WORK-ACTIVE","hypothesis":"active","file":"owned/a.c:foo:1","status":"PENDING","created_at":"2026-06-01T00:00:00Z"}\n' \
+  > "$ownership_results/state/hypotheses.jsonl"
+printf '{"agent":"2","card_id":"WORK-CLAIMED","claimed_at":"%s","expires_at":"%s","status":"claimed"}\n' \
+  "$claimed_at" "$expires_at" > "$ownership_results/state/claims.jsonl"
+ownership_all=$("$STATE" --results-dir "$ownership_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  explain-queue --all --mode generic)
+assert_match '"id": "WORK-ACTIVE", .*"reason": "active-hypothesis"' "$ownership_all" \
+  "explain-queue: active card reason preserved after one-pass set derivation"
+assert_match '"id": "WORK-ACTIVE-SIBLING", .*"reason": "active-surface"' "$ownership_all" \
+  "explain-queue: active surface reason preserved after one-pass set derivation"
+assert_match '"id": "WORK-CLAIMED", .*"reason": "claimed-until:' "$ownership_all" \
+  "explain-queue: claimed card reason preserved after one-pass set derivation"
+assert_match '"id": "WORK-CLAIMED-SIBLING", .*"reason": "claimed-surface"' "$ownership_all" \
+  "explain-queue: claimed surface reason preserved after one-pass set derivation"
+assert_match '"id": "WORK-CLAIMED-SUBSYSTEM", .*"reason": "claimed-subsystem"' "$ownership_all" \
+  "explain-queue: claimed subsystem reason preserved after one-pass set derivation"
 
 # Aggregated default should be byte-thrifty: well under per-card form.
 default_bytes=$(printf '%s' "$default_out" | wc -c | tr -d ' ')

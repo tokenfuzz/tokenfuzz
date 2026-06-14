@@ -155,12 +155,15 @@ assert_match 'harness is the only' "$output" \
 # Perf guidance: agents must be told NOT to read the harness's own tool SOURCE
 # (bin/*, lib/*) to learn how a tool works — that dumps irrelevant bytes that
 # every later turn re-sends (measured ~18% of agent output bytes on a sample
-# run). The fix points them at `<tool> --help` instead. Lock both halves in so
-# the instruction can't silently regress.
+# run). The fix points them at the embedded digest API for `bin/probe` and
+# `bin/state` so they don't spend a command rediscovering already-rendered
+# contracts. Lock both halves in so the instruction can't silently regress.
 assert_match "harness's own tool source" "$output" \
   "common suffix tells agents not to read harness bin/*,lib/* tool source"
-assert_match 'bin/probe --help' "$output" \
-  "common suffix points agents to <tool> --help instead of reading source"
+assert_match 'digest below is the API for `bin/probe` and `bin/state`' "$output" \
+  "common suffix points agents to the embedded probe/state API instead of help"
+assert_not_match 'bin/probe --help' "$output" \
+  "common suffix avoids the old bin/probe --help nudge"
 
 # ── 5) The watchdog grep handles realistic codex outputs ──────────
 #

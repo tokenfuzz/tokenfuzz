@@ -123,7 +123,10 @@ def main(argv: list[str]) -> int:
     p_next.add_argument("--peek", action="store_true", help="print next eligible card without claiming it")
 
     p_explain = sub.add_parser("explain-queue")
+    p_explain.add_argument("--agent", default="", help="accepted for resume/next-card compatibility")
     p_explain.add_argument("--mode", action="append", default=[], help="agent mode to test for compatibility; repeatable")
+    p_explain.add_argument("--role", default="", help="accepted for resume/next-card compatibility")
+    p_explain.add_argument("--strategy", default="", help="optional strategy filter, e.g. S2")
     p_explain.add_argument(
         "--top",
         type=int,
@@ -149,7 +152,41 @@ def main(argv: list[str]) -> int:
     p_list = sub.add_parser("list-cards", help="compact JSONL listing of work cards")
     p_list.add_argument("--mode", default="")
     p_list.add_argument("--status", default="", help="filter by visible status or queue reason, e.g. eligible")
+    p_list.add_argument("--strategy", default="", help="filter by primary/allowed strategy, e.g. S5")
+    p_list.add_argument(
+        "--subsystem",
+        action="append",
+        default=[],
+        help="case-insensitive subsystem substring filter; repeat for OR",
+    )
+    p_list.add_argument(
+        "--contains",
+        action="append",
+        default=[],
+        help="case-insensitive substring filter over compact card fields; repeat for OR",
+    )
     p_list.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+
+    p_dump_queue = sub.add_parser(
+        "dump-queue",
+        help="compatibility alias for list-cards (compact JSONL, capped)",
+    )
+    p_dump_queue.add_argument("--mode", default="")
+    p_dump_queue.add_argument("--status", default="", help="filter by visible status or queue reason, e.g. eligible")
+    p_dump_queue.add_argument("--strategy", default="", help="filter by primary/allowed strategy, e.g. S5")
+    p_dump_queue.add_argument(
+        "--subsystem",
+        action="append",
+        default=[],
+        help="case-insensitive subsystem substring filter; repeat for OR",
+    )
+    p_dump_queue.add_argument(
+        "--contains",
+        action="append",
+        default=[],
+        help="case-insensitive substring filter over compact card fields; repeat for OR",
+    )
+    p_dump_queue.add_argument("--limit", type=int, default=50, help="max rows (0 = no cap)")
 
     p_show_crash = sub.add_parser("show-crash", help="compact JSON for one crash artifact")
     p_show_crash.add_argument("crash_id_pos", nargs="?", default="", help="crash id")
@@ -299,6 +336,13 @@ def main(argv: list[str]) -> int:
     p_notes.add_argument("--card-id", default="")
     p_notes.add_argument("--kind", default="")
 
+    p_list_notes = sub.add_parser("list-notes", help="compatibility alias for recent-notes")
+    p_list_notes.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+    p_list_notes.add_argument("--agent", default="")
+    p_list_notes.add_argument("--hypothesis-id", default="")
+    p_list_notes.add_argument("--card-id", default="")
+    p_list_notes.add_argument("--kind", default="")
+
     p_claims = sub.add_parser(
         "recent-claims",
         help="slim listing of claims.jsonl (timestamp|status|agent|card_id|hypothesis_id|note)",
@@ -379,10 +423,10 @@ def main(argv: list[str]) -> int:
         return 0
     if args.cmd == "explain-queue":
         if args.all:
-            for row in explain_queue(ctx, args.mode):
+            for row in explain_queue(ctx, args.mode, strategy=args.strategy):
                 print(json.dumps(row, sort_keys=True))
         else:
-            for row in summarize_queue(ctx, args.mode, args.top):
+            for row in summarize_queue(ctx, args.mode, args.top, strategy=args.strategy):
                 print(json.dumps(row, sort_keys=True))
         return 0
     if args.cmd in ("show-card", "explain-card"):
@@ -396,8 +440,16 @@ def main(argv: list[str]) -> int:
             return 1
         print(json.dumps(row, sort_keys=True))
         return 0
-    if args.cmd == "list-cards":
-        for row in list_work_cards(ctx, mode=args.mode, status_filter=args.status, limit=args.limit):
+    if args.cmd in ("list-cards", "dump-queue"):
+        for row in list_work_cards(
+            ctx,
+            mode=args.mode,
+            status_filter=args.status,
+            strategy_filter=args.strategy,
+            subsystem_filters=args.subsystem,
+            contains_filters=args.contains,
+            limit=args.limit,
+        ):
             print(json.dumps(row, sort_keys=True))
         return 0
     if args.cmd == "show-crash":
@@ -570,7 +622,7 @@ def main(argv: list[str]) -> int:
             end="",
         )
         return 0
-    if args.cmd == "recent-notes":
+    if args.cmd in ("recent-notes", "list-notes"):
         print(
             recent_notes(
                 ctx,

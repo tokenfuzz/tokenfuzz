@@ -21,7 +21,7 @@ Every turn re-reads the whole conversation, so fewer turns and less added text a
 
 - **No OR-chain patterns.** Split into separate calls.
 - **Scope every search** with a specific directory or `--glob`.
-- **Source search:** `bin/rg-safe <rg args>` for `targets/<slug>/` (caps at 200 lines + 128 KiB; excludes `<backend>/logs` / `.log.raw` by default). Plain `rg` and `grep` from agent shells go through capping wrappers automatically.
+- **Source search:** `bin/rg-safe <rg args>` for `targets/<slug>/` (caps at 200 lines plus a ~50 KiB head+tail spill; excludes `<backend>/logs` / `.log.raw` by default). Plain `rg` and `grep` from agent shells go through the same capping wrappers automatically.
 - **Audit-artifact search:** `bin/scratch-search PATTERN` for `$RESULTS_DIR` — default output is a path inventory across scratch dirs, corpus, crashes, and findings. This is the first step for "have I or a peer agent already tried this?" and name-collision checks. When you need match bodies, re-run narrowly with `bin/scratch-search --lines --section <section> PATTERN`; that is the old file:line:body behavior. Do NOT mix `targets/` and `output/` roots in one `rg-safe` call; split into a source search (`rg-safe`) and an artifact search (`scratch-search`).
 - **Symbol/region lookup:** `bin/peek -A 30 -B 8 'symbol' file` (clamps wide `-A`/`-B`) for grep-with-context; `bin/peek <FILE>:<start>-<end>` (alt to `sed -n 'X,Yp'`) for line ranges. Both clamp to function-context defaults; pass `--no-cap` to widen. Re-Reading the same file in 10+ small overlapping windows is a misfire.
 - **Patch viewing:** **always** `bin/show-patch <commit> [path]` — never raw `git show <commit>`. `PATCH-*` ids are work-card ids, not revisions; use the assigned card or `bin/state resume` **Fix commits** hashes. show-patch defaults to `--unified=10` (`PATCH_CONTEXT=80` to widen), caps output at `PATCH_MAX_LINES=1500` / `PATCH_MAX_BYTES=32768` (drill in via `bin/show-patch <commit> -- <file>` when clipped), and **caches per-session** so the second call for the same commit returns a Read-able cache path + 40-line preview instead of re-emitting the diff.
@@ -65,10 +65,12 @@ Self-pace:
 - **Don't read the harness's own tool source to learn how a tool works.**
   `bin/*` and `lib/*` are the auditing harness, not the code under audit;
   every `peek`/`sed`/`rg` into them dumps irrelevant bytes that each later
-  turn re-sends. Run `<tool> --help` (e.g. `bin/probe --help`) instead. The
-  only files outside the target tree worth reading are the strategy
-  playbooks under `.agents/references/`. Your audit target lives under
-  `targets/<slug>/` and `output/<slug>/`.
+  turn re-sends. The digest below is the API for `bin/probe` and `bin/state`;
+  use it instead of `--help`. For other harness tools, run `<tool> --help`
+  at most once when the digest does not answer the question. The only files
+  outside the target tree worth reading are the strategy playbooks under
+  `.agents/references/`. Your audit target lives under `targets/<slug>/` and
+  `output/<slug>/`.
 
 ## SESSION RULES DIGEST
 

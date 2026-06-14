@@ -154,6 +154,66 @@ _triage_cache_sha1_matches() {
   [ "$cached" = "$expected" ]
 }
 
+_triage_confirm_cache_fields() {
+  local cache="$1"
+  [ -s "$cache" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -r '
+    [
+      (.content_sha1 // .signature_sha1 // .sha1 // ""),
+      (if has("accept") then .accept else "" end),
+      (.reason // ""),
+      (.votes // 0),
+      (.evidence_sha1 // ""),
+      (.semantic_sha1 // "")
+    ] | @sh
+  ' "$cache" 2>/dev/null
+}
+
+_triage_crash_triage_cache_fields() {
+  local cache="$1"
+  [ -s "$cache" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -r '
+    [
+      (.content_sha1 // .signature_sha1 // .sha1 // ""),
+      (if has("keep") then .keep else "" end),
+      (.reason // ""),
+      (.votes // 0)
+    ] | @sh
+  ' "$cache" 2>/dev/null
+}
+
+_triage_legit_cache_fields() {
+  local cache="$1"
+  [ -s "$cache" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -r '
+    [
+      (.evidence_sha1 // .signature_sha1 // .sha1 // ""),
+      (.require_web // ""),
+      (if has("legitimate") then .legitimate else "" end),
+      (.reason // ""),
+      (.votes // 0)
+    ] | @sh
+  ' "$cache" 2>/dev/null
+}
+
+_triage_find_quality_cache_fields() {
+  local cache="$1"
+  [ -s "$cache" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -r '
+    [
+      (.decision_version // ""),
+      (if has("accept") then .accept else "" end),
+      (.reason // ""),
+      (.reject_count // 0),
+      (.content_sha1 // .signature_sha1 // .sha1 // "")
+    ] | @sh
+  ' "$cache" 2>/dev/null
+}
+
 # Write the canonical cache envelope. Reads a JSON object on stdin
 # (caller-supplied business fields), wraps it with
 # decision/cached_at/<sha1_field>, and atomically writes to `$cache`.
@@ -568,10 +628,16 @@ llm_triage_crash_decision() {
   # location so subsequent reads short-circuit on the first candidate.
   local cache_candidate
   for cache_candidate in "$cache" "$audit_cache"; do
-    if _triage_cache_sha1_matches "$cache_candidate" "content_sha1" "$hash"; then
+    local cache_fields="" cached_content_sha="" cached_keep="" cached_reason="" cached_votes=0
+    if cache_fields=$(_triage_crash_triage_cache_fields "$cache_candidate" 2>/dev/null); then
+      eval "set -- $cache_fields"
+      cached_content_sha="${1:-}"
+      cached_keep="${2:-}"
+      cached_reason="${3:-}"
+      cached_votes="${4:-0}"
+    fi
+    if [ -n "$hash" ] && [ "$cached_content_sha" = "$hash" ]; then
       [ "$cache_candidate" = "$cache" ] || cp "$cache_candidate" "$cache" 2>/dev/null || true
-      local cached_keep
-      cached_keep=$(jq -r '.keep' "$cache_candidate" 2>/dev/null)
       if [ "$cached_keep" = "true" ]; then
         return 2
       fi
@@ -579,11 +645,9 @@ llm_triage_crash_decision() {
       # A legacy single-vote cache (no `votes`, or below quorum) is
       # re-litigated so the multi-vote gate actually applies.
       if [ "$cached_keep" = "false" ]; then
-        local cached_votes
-        cached_votes=$(jq -r '.votes // 0' "$cache_candidate" 2>/dev/null)
         case "$cached_votes" in ''|*[!0-9]*) cached_votes=0 ;; esac
         if [ "$cached_votes" -ge "$(_triage_gate_quorum)" ]; then
-          jq -r '.reason // "cached LLM discard"' "$cache_candidate" 2>/dev/null
+          printf '%s' "${cached_reason:-cached LLM discard}"
           return 0
         fi
       fi
@@ -657,18 +721,24 @@ llm_confirm_crash_report() {
   evidence_path=$(find_primary_asan_in_crash_dir "$_ev_dir" 2>/dev/null || true)
   [ -n "$evidence_path" ] && evidence_sha=$(_triage_file_sha1 "$evidence_path" 2>/dev/null || true)
 
-  if _triage_cache_sha1_matches "$cache" "content_sha1" "$hash"; then
-    local cached_accept cached_reason
-    cached_accept=$(jq -r '.accept' "$cache" 2>/dev/null)
-    cached_reason=$(jq -r '.reason // ""' "$cache" 2>/dev/null)
+  local cache_fields="" cached_content_sha="" cached_accept="" cached_reason="" cached_votes=0 cached_evidence_sha="" cached_semantic_sha=""
+  if cache_fields=$(_triage_confirm_cache_fields "$cache" 2>/dev/null); then
+    eval "set -- $cache_fields"
+    cached_content_sha="${1:-}"
+    cached_accept="${2:-}"
+    cached_reason="${3:-}"
+    cached_votes="${4:-0}"
+    cached_evidence_sha="${5:-}"
+    cached_semantic_sha="${6:-}"
+  fi
+
+  if [ -n "$hash" ] && [ "$cached_content_sha" = "$hash" ]; then
     if [ "$cached_accept" = "true" ]; then
       return 2
     fi
     # Honor a cached reject only if the full quorum agreed; a legacy
     # single-vote cache is re-litigated through the multi-vote gate.
     if [ "$cached_accept" = "false" ]; then
-      local cached_votes
-      cached_votes=$(jq -r '.votes // 0' "$cache" 2>/dev/null)
       case "$cached_votes" in ''|*[!0-9]*) cached_votes=0 ;; esac
       if [ "$cached_votes" -ge "$(_triage_gate_quorum)" ]; then
         printf '%s' "${cached_reason:-cached LLM rejection}"
@@ -690,10 +760,10 @@ llm_confirm_crash_report() {
   local semantic_sha=""
   semantic_sha=$(_triage_report_semantic_sha "$report_path" 2>/dev/null || true)
   if [ -n "$evidence_sha" ] && [ -n "$semantic_sha" ] \
-     && [ -s "$cache" ] && command -v jq >/dev/null 2>&1; then
-    if [ "$(jq -r '.accept' "$cache" 2>/dev/null)" = "true" ] \
-       && [ "$(jq -r '.evidence_sha1 // ""' "$cache" 2>/dev/null)" = "$evidence_sha" ] \
-       && [ "$(jq -r '.semantic_sha1 // ""' "$cache" 2>/dev/null)" = "$semantic_sha" ]; then
+     && [ -n "$cache_fields" ]; then
+    if [ "$cached_accept" = "true" ] \
+       && [ "$cached_evidence_sha" = "$evidence_sha" ] \
+       && [ "$cached_semantic_sha" = "$semantic_sha" ]; then
       return 2
     fi
   fi
@@ -1101,7 +1171,7 @@ llm_crash_legitimacy_decision() {
   declare -f llm_decide >/dev/null 2>&1 || return 1
   [ -d "$d" ] || return 1
 
-  local evidence hash cache cached_require cached_legit
+  local evidence hash cache
   evidence=$(collect_crash_legitimacy_evidence "$d" 2>/dev/null) || evidence=""
   [ -n "$evidence" ] || return 1
 
@@ -1112,21 +1182,26 @@ llm_crash_legitimacy_decision() {
   # mutate report fields without changing the underlying crash), so we
   # accept it on require_web match alone. A negative decision still
   # requires the exact evidence hash so a content edit can re-litigate.
-  if [ -n "$hash" ] && [ -s "$cache" ] && command -v jq >/dev/null 2>&1; then
-    cached_require=$(jq -r '.require_web // ""' "$cache" 2>/dev/null)
+  if [ -n "$hash" ]; then
+    local cache_fields="" cached_evidence_sha="" cached_require="" cached_legit="" cached_reason="" cached_votes=0
+    if cache_fields=$(_triage_legit_cache_fields "$cache" 2>/dev/null); then
+      eval "set -- $cache_fields"
+      cached_evidence_sha="${1:-}"
+      cached_require="${2:-}"
+      cached_legit="${3:-}"
+      cached_reason="${4:-}"
+      cached_votes="${5:-0}"
+    fi
     if [ "$cached_require" = "$require_web_gate" ]; then
-      cached_legit=$(jq -r '.legitimate' "$cache" 2>/dev/null)
       if [ "$cached_legit" = "true" ]; then
         return 2
       fi
-      if [ "$cached_legit" = "false" ] && _triage_cache_sha1_matches "$cache" "evidence_sha1" "$hash"; then
+      if [ "$cached_legit" = "false" ] && [ "$cached_evidence_sha" = "$hash" ]; then
         # Honor a cached rejection only if the full quorum agreed; a legacy
         # single-vote cache is re-litigated through the multi-vote gate.
-        local cached_votes
-        cached_votes=$(jq -r '.votes // 0' "$cache" 2>/dev/null)
         case "$cached_votes" in ''|*[!0-9]*) cached_votes=0 ;; esac
         if [ "$cached_votes" -ge "$(_triage_gate_quorum)" ]; then
-          jq -r '.reason // "cached crash promotion rejection"' "$cache" 2>/dev/null
+          printf '%s' "${cached_reason:-cached crash promotion rejection}"
           return 0
         fi
       fi
@@ -2582,11 +2657,14 @@ llm_find_quality_decision() {
   # on every one of them and re-asks the LLM on each housekeeping pass.
   # Every accept=true OR accept=false-with-quorum verdict is final; the
   # explicit way to force re-evaluation is a decision_version bump.
-  if [ -s "$cache" ]; then
-    local cached_version cached_accept cached_reject_count
-    cached_version=$(jq -r '.decision_version // ""' "$cache" 2>/dev/null)
-    cached_accept=$(jq -r '.accept' "$cache" 2>/dev/null)
-    cached_reject_count=$(jq -r '.reject_count // 0' "$cache" 2>/dev/null)
+  local cache_fields="" cached_version="" cached_accept="" cached_reason="" cached_reject_count=0 cached_content_sha=""
+  if cache_fields=$(_triage_find_quality_cache_fields "$cache" 2>/dev/null); then
+    eval "set -- $cache_fields"
+    cached_version="${1:-}"
+    cached_accept="${2:-}"
+    cached_reason="${3:-}"
+    cached_reject_count="${4:-0}"
+    cached_content_sha="${5:-}"
     case "$cached_reject_count" in ''|*[!0-9]*) cached_reject_count=0 ;; esac
     if [ "$cached_version" = "$decision_version" ]; then
       if [ "$cached_accept" = "true" ]; then
@@ -2735,12 +2813,15 @@ _validate_one_find_dir() {
     # Tunables: FIND_GATE_QUORUM (default 2), FIND_GATE_QUARANTINE_DIR
     # (default $RESULTS_DIR/findings-rejected).
     local cache="$d/.llm-find-quality.json"
-    if [ -s "$cache" ] && command -v jq >/dev/null 2>&1; then
-      # NB: do not use `.accept // ""` — jq's // treats `false` as falsy
-      # and would coerce a legitimate reject verdict into the empty string.
-      local accept reason reject_count quorum reject_marker
-      accept=$(jq -r '.accept' "$cache" 2>/dev/null)
-      reason=$(jq -r '.reason // ""' "$cache" 2>/dev/null)
+    local cache_fields=""
+    if cache_fields=$(_triage_find_quality_cache_fields "$cache" 2>/dev/null); then
+      local _cached_version accept reason _cached_cache_reject_count _cached_content_sha reject_count quorum reject_marker
+      eval "set -- $cache_fields"
+      _cached_version="${1:-}"
+      accept="${2:-}"
+      reason="${3:-}"
+      _cached_cache_reject_count="${4:-0}"
+      _cached_content_sha="${5:-}"
       # reject_count is authoritative in the marker file, not the cache,
       # because cluster-findings rewrites report.md (changing the cache
       # content_sha1) and we'd otherwise lose the counter between passes.

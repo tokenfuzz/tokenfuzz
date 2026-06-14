@@ -88,6 +88,12 @@ touch "$input_dir/.DS_Store"
 result=$(count_scratch_input_files "$input_dir")
 assert_eq "4" "$result" "count_scratch_input_files: counts runnable inputs, skips source/build/debug output"
 
+scan_asan=0; scan_tc=0; scan_orphans=0
+scan_scratch_counts_load "$input_dir" scan_asan scan_tc scan_orphans
+assert_eq "4" "$scan_tc" "scan_scratch_counts_load: testcase count matches standalone helper"
+assert_eq "0" "$scan_asan" "scan_scratch_counts_load: ASan count from combined scan"
+assert_eq "4" "$scan_orphans" "scan_scratch_counts_load: orphan count from combined scan"
+
 assert_eq "browser" "$(testcase_mode_for_file "$input_dir/test.html")" "testcase mode: html → browser"
 assert_eq "js" "$(testcase_mode_for_file "$input_dir/test.js")" "testcase mode: js → js"
 assert_eq "generic" "$(testcase_mode_for_file "$input_dir/test.pcre2test")" "testcase mode: pcre2test → generic"
@@ -156,6 +162,12 @@ assert_match "ORPHAN GATE" "$result" "gate 3: 3 orphan testcases → ORPHAN GATE
 
 orphan_count=$(count_orphan_testcases "$scratch")
 assert_eq "3" "$orphan_count" "count_orphan_testcases: exact sibling matching"
+
+quality_src=$(declare -f check_agent_quality)
+assert_match "scan_scratch_counts_load" "$quality_src" "check_agent_quality: uses combined scratch scan"
+assert_not_match "count_verified_asan_runs" "$quality_src" "check_agent_quality: avoids standalone ASan scan"
+assert_not_match "count_scratch_input_files" "$quality_src" "check_agent_quality: avoids standalone testcase scan"
+assert_not_match "count_orphan_testcases" "$quality_src" "check_agent_quality: avoids standalone orphan scan"
 
 # ═══════════════════════════════════════════════════════════════
 # 6. check_agent_quality — Gate 4: Zero-ASan gate for reproduce agent

@@ -7,6 +7,7 @@ source "$(dirname "$0")/helpers.sh"
 setup_test_env
 
 # Source the library under test
+source "$SCRIPT_ROOT/lib/platform.sh"
 source "$SCRIPT_ROOT/lib/prompt.sh"
 
 # Stubs for functions from other libs
@@ -63,6 +64,8 @@ IS_BROWSER_TARGET=0
 echo "S4" > "$(agent_strategy_path 1)"
 result=$(build_cold_start_prompt 1)
 assert_match "ASSIGNED STRATEGY.*S4" "$result" "cold start: non-default strategy shown"
+assert_match "Strategy brief \\(S4\\)" "$result" "cold start: assigned strategy brief inlined"
+assert_not_match "Read .*S4-differential\\.md" "$result" "cold start: does not require full strategy read"
 assert_match "Do NOT default to Strategy S1" "$result" "cold start: warns against S1 fallback"
 rm -f "$(agent_strategy_path 1)"
 
@@ -89,10 +92,22 @@ ASAN_BUILD_BINARY=""
 IS_BROWSER_TARGET=0
 TARGET_ATTACKER_CONTROLS_CSV="bytes,api-args"
 TARGET_SANITIZERS_ENABLED_CSV="asan,ubsan"
+TARGET_ASAN_LIB="build-asan/libsample.a"
+TARGET_INCLUDES=("include" "src/include")
+TARGET_DEFINES=("FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1")
+TARGET_LINK_LIBS=("-lm" "-lpthread")
+TARGET_RUNNER_BIN="python3"
+TARGET_RUNNER_ARGS=("-X" "dev" "{TESTCASE}")
+TARGET_RUNNER_ENV=("PYTHONDEVMODE=1")
 result=$(build_cold_start_prompt 1)
 assert_match "TARGET CONFIG" "$result" "cold start generic: target-config excerpt present"
 assert_match "attacker_controls.*bytes,api-args" "$result" "target-config: threat model inlined"
 assert_match "enabled.*asan,ubsan" "$result" "target-config: sanitizer matrix inlined"
+assert_match "asan_lib.*build-asan/libsample.a" "$result" "target-config: asan library inlined"
+assert_match "includes.*include, src/include" "$result" "target-config: includes inlined"
+assert_match "link_libs.*-lm, -lpthread" "$result" "target-config: link libs inlined"
+assert_match "runner.*bin.*python3" "$result" "target-config: runner bin inlined"
+assert_match "runner.*args.*-X, dev, \\{TESTCASE\\}" "$result" "target-config: runner args inlined"
 assert_match "do not re-read it" "$result" "target-config: steers agents off re-peeking target.toml"
 IS_BROWSER_TARGET=1
 result=$(build_target_config_directive)
@@ -100,6 +115,40 @@ assert_eq "" "$result" "browser target: no target-config excerpt"
 IS_BROWSER_TARGET=0
 TARGET_ATTACKER_CONTROLS_CSV=""
 TARGET_SANITIZERS_ENABLED_CSV=""
+TARGET_ASAN_LIB=""
+TARGET_INCLUDES=()
+TARGET_DEFINES=()
+TARGET_LINK_LIBS=()
+TARGET_RUNNER_BIN=""
+TARGET_RUNNER_ARGS=()
+TARGET_RUNNER_ENV=()
+
+# ═══════════════════════════════════════════════════════════════
+# 5c. Persistent harness build failures — bounded log guidance
+# ═══════════════════════════════════════════════════════════════
+# Large cached compiler/linker logs showed up in raw sessions as unbounded
+# `cat` reads. The prompt should point agents at the useful diagnostic tail
+# first, while preserving the target.toml repair loop.
+
+mkdir -p "$RESULTS_DIR/scratch-1/.harness-cache" \
+         "$RESULTS_DIR/scratch-2/.harness-cache" \
+         "$RESULTS_DIR/scratch-3/.harness-cache"
+printf '%s\n' "older compiler error" > "$RESULTS_DIR/scratch-1/.harness-cache/a.build.log"
+printf '%s\n' "middle linker error" > "$RESULTS_DIR/scratch-2/.harness-cache/b.build.log"
+printf '%s\n' "newest missing header" > "$RESULTS_DIR/scratch-3/.harness-cache/c.build.log"
+result=$(build_harness_build_failures_directive)
+assert_match "PERSISTENT HARNESS BUILD FAILURES" "$result" "harness-build prompt: section appears"
+assert_match "tail -120" "$result" "harness-build prompt: bounded tail read first"
+assert_match "tail -240" "$result" "harness-build prompt: bounded widening path"
+assert_match "bin/peek .*:1-200" "$result" "harness-build prompt: bounded peek fallback"
+assert_match "target.toml" "$result" "harness-build prompt: target config path named"
+assert_match "includes = \\[\\.\\.\\.\\]" "$result" "harness-build prompt: includes repair kept"
+assert_match "link_libs = \\[\\.\\.\\.\\]" "$result" "harness-build prompt: link_libs repair kept"
+assert_match "defines = \\[\\.\\.\\.\\]" "$result" "harness-build prompt: defines repair kept"
+assert_not_match 'read with `cat`|end-to-end' "$result" "harness-build prompt: no unbounded read wording"
+rm -rf "$RESULTS_DIR/scratch-1/.harness-cache" \
+       "$RESULTS_DIR/scratch-2/.harness-cache" \
+       "$RESULTS_DIR/scratch-3/.harness-cache"
 
 # ═══════════════════════════════════════════════════════════════
 # 6. Cold start — Sanitizer build NOT shown for browser target
@@ -148,6 +197,21 @@ assert_match "PENDING.*Continue immediately" "$result" "deep: pending → contin
 assert_match "MISSION" "$result" "deep: has MISSION section"
 assert_match "MANDATORY WRITE-RUN-EVALUATE LOOP" "$result" "deep: has write-run-evaluate loop"
 assert_match "HARD RULES" "$result" "deep: has hard rules"
+
+TARGET_ATTACKER_CONTROLS_CSV="bytes"
+TARGET_SANITIZERS_ENABLED_CSV="asan"
+TARGET_INCLUDES=("build-asan/include" ".")
+TARGET_LINK_LIBS=("-lm")
+TARGET_ASAN_LIB="build-asan/libtarget.a"
+result=$(build_deep_investigation_prompt 1)
+assert_match "TARGET CONFIG" "$result" "deep: target-config excerpt present"
+assert_match "includes.*build-asan/include, \\." "$result" "deep: target-config includes inlined"
+assert_match "link_libs.*-lm" "$result" "deep: target-config link libs inlined"
+TARGET_ATTACKER_CONTROLS_CSV=""
+TARGET_SANITIZERS_ENABLED_CSV=""
+TARGET_INCLUDES=()
+TARGET_LINK_LIBS=()
+TARGET_ASAN_LIB=""
 
 # ═══════════════════════════════════════════════════════════════
 # 10. Deep investigation — analysis role
@@ -253,6 +317,8 @@ EOF
 result=$(build_deep_investigation_prompt 1)
 assert_match "ASSIGNED STRATEGY: S5" "$result" "deep: assigned strategy in role block"
 assert_match "S5-reentrancy.md" "$result" "deep: strategy file reference"
+assert_match "Strategy brief \\(S5\\)" "$result" "deep: assigned strategy brief inlined"
+assert_not_match "Read .*S5-reentrancy\\.md" "$result" "deep: does not require full strategy read"
 rm -f "$(agent_strategy_path 1)"
 
 # ═══════════════════════════════════════════════════════════════
@@ -314,6 +380,7 @@ result=$(build_deep_investigation_prompt 1)
 assert_match "PRIOR SESSION SEED" "$result" "deep: seed section header present"
 assert_match "lib/foo.sh: 1-200" "$result" "deep: seed body embedded"
 assert_match "offset.*limit" "$result" "deep: seed instructs use of offset/limit for new ranges"
+assert_match "searched" "$result" "deep: seed intro mentions prior searches"
 rm -f "$seed_path"
 
 # build_session_seed_section — direct unit test
@@ -367,11 +434,85 @@ cat > "$(state_file_path 2)" <<'EOF'
 | 1 | H1 | g.cpp | shape | guard | bounds | S2 | INVESTIGATING |
 EOF
 
+prompt_markdown_state_counts_load "$(state_file_path 1)" p a d e n r
+assert_eq "1" "$p" "cache: markdown count helper pending"
+assert_eq "1" "$a" "cache: markdown count helper active"
+assert_eq "0" "$d" "cache: markdown count helper discards"
+assert_eq "0" "$e" "cache: markdown count helper env-blocked"
+assert_eq "0" "$n" "cache: markdown count helper needs-testcase"
+assert_eq "0" "$r" "cache: markdown count helper results"
+
+get_agent_subsystem() {
+  case "$1" in
+    1) echo "src/lib" ;;
+    2) echo "src/net" ;;
+    *) echo "unknown" ;;
+  esac
+}
+export -f get_agent_subsystem
+cat > "$RESULTS_DIR/work-cards.jsonl" <<'EOF'
+{"id":"W1","status":"unclaimed","strategy":"S2","subsystem":"src/lib"}
+{"id":"W2","status":"unclaimed","strategy":"S5","subsystem":"src/net"}
+{"id":"W3","status":"unclaimed","strategy":"S5","subsystem":"src/net"}
+{"id":"W4","status":"unclaimed","strategy":"S7","subsystem":"src/io"}
+{"id":"W5","status":"unclaimed","strategy":"S7","subsystem":"src/io"}
+{"id":"W6","status":"unclaimed","strategy":"S7","subsystem":"src/io"}
+{"id":"W7","status":"unclaimed","strategy":"S1","subsystem":"src/old"}
+{"id":"W8","status":"claimed","strategy":"S8","subsystem":"src/held"}
+EOF
+effective_work_card_rows() {
+  cat "$RESULTS_DIR/work-cards.jsonl"
+}
+export -f effective_work_card_rows
+unclaimed_strategy_counts() {
+  local strategy_re="${1:-^S[1-9]$}"
+  local min_strategy=1
+  [ "$strategy_re" = '^S[2-9]$' ] && min_strategy=2
+  effective_work_card_rows | jq -r '
+    select((.status // "") == "unclaimed") | .strategy // empty
+  ' | awk -v min_strategy="$min_strategy" '
+    /^S[1-9]$/ {
+      n = substr($0, 2) + 0
+      if (n >= min_strategy) counts[$0]++
+    }
+    END {
+      remaining = 0
+      for (n = min_strategy; n <= 9; n++) {
+        s = "S" n
+        if (counts[s] > 0) remaining++
+      }
+      while (remaining > 0) {
+        best = ""
+        best_count = -1
+        for (n = min_strategy; n <= 9; n++) {
+          s = "S" n
+          if (counts[s] > 0 && (counts[s] > best_count || (counts[s] == best_count && (best == "" || s < best)))) {
+            best = s
+            best_count = counts[s]
+          }
+        }
+        print best "\t" best_count
+        counts[best] = -1
+        remaining--
+      }
+    }
+  '
+}
+export -f unclaimed_strategy_counts
+
 cache_iteration_data
 assert_file_exists "$ITERATION_CACHE_DIR/blocklist.txt" "cache: blocklist.txt created"
 assert_file_exists "$ITERATION_CACHE_DIR/agent_1_summary.txt" "cache: agent 1 summary created"
 assert_file_exists "$ITERATION_CACHE_DIR/agent_2_summary.txt" "cache: agent 2 summary created"
 assert_file_exists "$ITERATION_CACHE_DIR/agent_1_subsystem.txt" "cache: agent 1 subsystem created"
+assert_file_exists "$ITERATION_CACHE_DIR/cold_start_strategies.txt" "cache: cold-start strategy rank created"
+assert_eq $'S7\nS5\nS2' "$(cat "$ITERATION_CACHE_DIR/cold_start_strategies.txt")" \
+  "cache: cold-start strategy rank is load ordered and excludes S1/claimed"
+
+get_agent_subsystem() { echo "live/changed"; }
+export -f get_agent_subsystem
+assert_eq "src/lib" "$(cached_agent_subsystem 1)" "cache: cached_agent_subsystem avoids live resolver when populated"
+assert_eq "live/changed" "$(ITERATION_CACHE_DIR="" cached_agent_subsystem 1)" "cache: cached_agent_subsystem falls back without cache"
 
 # ═══════════════════════════════════════════════════════════════
 # 20. cached_blocklist_description — uses cache when available
