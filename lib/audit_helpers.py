@@ -25,7 +25,7 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
       Append a guard-bypass work-card JSONL row. No-op if a row with the
       same id already exists. Output: nothing.
 
-  codex-usage-reset-at <logfile>
+  codex-usage-reset-at <logfile> [--now-epoch N]
       Parse a codex raw transcript for the next usage-reset epoch.
       Prints the epoch on stdout and exits 0 if found, exits 1 otherwise.
 
@@ -383,6 +383,9 @@ _USAGE_TIME_PATTERNS = [
 ]
 
 
+_CODEX_CLOCK_ROLLOVER_MAX_SECS = 6 * 3600
+
+
 def _cmd_codex_usage_reset(args: argparse.Namespace) -> int:
     try:
         with open(args.logfile, "r", encoding="utf-8", errors="replace") as f:
@@ -390,7 +393,13 @@ def _cmd_codex_usage_reset(args: argparse.Namespace) -> int:
     except OSError:
         return 1
 
-    now = _dt.datetime.now()
+    if args.now_epoch is not None:
+        try:
+            now = _dt.datetime.fromtimestamp(int(args.now_epoch))
+        except (TypeError, ValueError, OSError, OverflowError):
+            return 1
+    else:
+        now = _dt.datetime.now()
     for m in re.finditer(_USAGE_TIME_PATTERNS[0], text, re.IGNORECASE):
         hour = int(m.group(1))
         minute = int(m.group(2) or "0")
@@ -404,6 +413,8 @@ def _cmd_codex_usage_reset(args: argparse.Namespace) -> int:
         candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if candidate <= now:
             candidate += _dt.timedelta(days=1)
+            if (candidate - now).total_seconds() > _CODEX_CLOCK_ROLLOVER_MAX_SECS:
+                continue
         print(int(time.mktime(candidate.timetuple())))
         return 0
 
@@ -682,6 +693,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("codex-usage-reset-at", help="Parse codex transcript for next usage-reset epoch.")
     s.add_argument("logfile")
+    s.add_argument("--now-epoch")
     s.set_defaults(func=_cmd_codex_usage_reset)
 
     s = sub.add_parser("claims-activity-since", help="Summarize claims.jsonl events since epoch.")

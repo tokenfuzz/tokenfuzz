@@ -540,6 +540,8 @@ elif ampm == "am" and hour == 12:
 candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 if candidate <= now:
     candidate += dt.timedelta(days=1)
+    if (candidate - now).total_seconds() > 6 * 3600:
+        sys.exit(1)
 print(int(time.mktime(candidate.timetuple())))
 PY
 }
@@ -850,7 +852,7 @@ rate_limit_cooldown_path() {
 }
 
 rate_limit_cooldown_expiry() {
-  local reset_at="$1" now
+  local reset_at="$1" now expires_at cap_at
   now=$(date +%s)
   if [ "$reset_at" = "unknown" ]; then
     printf '%s\n' "$((now + RATE_LIMIT_DEFAULT_BACKOFF))"
@@ -858,7 +860,12 @@ rate_limit_cooldown_expiry() {
   fi
   case "$reset_at" in ''|*[!0-9]*) return 1 ;; esac
   [ "$reset_at" -gt "$now" ] 2>/dev/null || return 1
-  printf '%s\n' "$((reset_at + 30))"
+  expires_at=$((reset_at + 30))
+  cap_at=$((now + RATE_LIMIT_MAX_BACKOFF))
+  if [ "$expires_at" -gt "$cap_at" ]; then
+    expires_at="$cap_at"
+  fi
+  printf '%s\n' "$expires_at"
 }
 
 persist_rate_limit_cooldown() {
@@ -887,7 +894,7 @@ clear_rate_limit_cooldown() {
 }
 
 active_rate_limit_cooldown_wait() {
-  local path backend expires_at now wait
+  local path backend expires_at created_at now wait max_expires_at
   path=$(rate_limit_cooldown_path)
   [ -f "$path" ] || return 1
   backend=$(read_rate_limit_cooldown_field backend 2>/dev/null || true)
@@ -896,6 +903,16 @@ active_rate_limit_cooldown_wait() {
   fi
   expires_at=$(read_rate_limit_cooldown_field expires_at 2>/dev/null || true)
   case "$expires_at" in ''|*[!0-9]*) clear_rate_limit_cooldown; return 1 ;; esac
+  created_at=$(read_rate_limit_cooldown_field created_at 2>/dev/null || true)
+  case "$created_at" in
+    ''|*[!0-9]*) ;;
+    *)
+      max_expires_at=$((created_at + RATE_LIMIT_MAX_BACKOFF))
+      if [ "$expires_at" -gt "$max_expires_at" ] 2>/dev/null; then
+        expires_at="$max_expires_at"
+      fi
+      ;;
+  esac
   now=$(date +%s)
   wait=$((expires_at - now))
   if [ "$wait" -le 0 ]; then
@@ -1003,6 +1020,24 @@ persist_rate_limit_cooldown "cooldown-unknown" "unknown"
 unknown_wait=$(active_rate_limit_cooldown_wait)
 [ "$unknown_wait" -gt 0 ] && [ "$unknown_wait" -le "$RATE_LIMIT_DEFAULT_BACKOFF" ]
 assert_eq 0 $? "rate cooldown: unknown reset uses default backoff window"
+
+far_reset=$(( $(date +%s) + 86400 ))
+persist_rate_limit_cooldown "cooldown-far" "$far_reset"
+far_expires_at=$(read_rate_limit_cooldown_field expires_at)
+far_window=$((far_expires_at - $(read_rate_limit_cooldown_field created_at)))
+[ "$far_window" -le "$RATE_LIMIT_MAX_BACKOFF" ]
+assert_eq 0 $? "rate cooldown: persisted known reset is capped to max backoff"
+
+old_created=$(( $(date +%s) - RATE_LIMIT_MAX_BACKOFF - 60 ))
+{
+  printf 'backend=codex\n'
+  printf 'reset_at=%s\n' "$far_reset"
+  printf 'expires_at=%s\n' "$((far_reset + 30))"
+  printf 'created_at=%s\n' "$old_created"
+} > "$(rate_limit_cooldown_path)"
+active_rate_limit_cooldown_wait >/dev/null 2>&1
+assert_eq 1 $? "rate cooldown: legacy uncapped entry is inactive once max backoff elapsed"
+assert_file_not_exists "$(rate_limit_cooldown_path)" "rate cooldown: legacy uncapped entry removed"
 
 printf 'backend=codex\nexpires_at=1\n' > "$(rate_limit_cooldown_path)"
 active_rate_limit_cooldown_wait >/dev/null 2>&1

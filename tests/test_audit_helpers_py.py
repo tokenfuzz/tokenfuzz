@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import datetime as dt
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -201,7 +202,8 @@ print("\ncodex-usage-reset-at")
 
 with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
     p1 = f.name
-    f.write("You've hit your usage limit. Please try again at 9:01 AM.\n")
+    future_clock = (dt.datetime.now() + dt.timedelta(minutes=15)).strftime("%I:%M %p").lstrip("0")
+    f.write(f"You've hit your usage limit. Please try again at {future_clock}.\n")
 try:
     proc = run(["codex-usage-reset-at", p1])
     assert_eq(0, proc.returncode, "absolute time form rc=0")
@@ -209,6 +211,28 @@ try:
     ok(re.fullmatch(r"\d{9,11}", out) is not None, "prints integer epoch", out)
 finally:
     os.unlink(p1)
+
+fixed_now = int(time.mktime(dt.datetime(2026, 6, 14, 23, 18, 0).timetuple()))
+with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+    p1_stale = f.name
+    f.write("You've hit your usage limit. Please try again at 10:55 PM.\n")
+try:
+    proc = run(["codex-usage-reset-at", p1_stale, "--now-epoch", str(fixed_now)])
+    assert_eq(1, proc.returncode, "stale same-day clock reset does not roll to tomorrow")
+    assert_eq("", proc.stdout, "stale same-day clock reset → empty stdout")
+finally:
+    os.unlink(p1_stale)
+
+with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+    p1_rollover = f.name
+    f.write("You've hit your usage limit. Please try again at 12:10 AM.\n")
+try:
+    proc = run(["codex-usage-reset-at", p1_rollover, "--now-epoch", str(fixed_now)])
+    expected = int(time.mktime(dt.datetime(2026, 6, 15, 0, 10, 0).timetuple()))
+    assert_eq(0, proc.returncode, "near-midnight next-day clock reset rc=0")
+    assert_eq(str(expected), proc.stdout.strip(), "near-midnight next-day clock reset rolls forward")
+finally:
+    os.unlink(p1_rollover)
 
 with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
     p2 = f.name
