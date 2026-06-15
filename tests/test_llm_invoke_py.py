@@ -531,6 +531,13 @@ with tempfile.TemporaryDirectory() as _td:
         os.environ.pop("CLAUDE_MODEL_DEFAULT", None)
         assert_eq("claude-from-config", inv.default_model("claude"),
                   "default_model reads value from config/models.toml")
+        _saved_loader = inv._load_tomllib
+        try:
+            inv._load_tomllib = lambda: (_ for _ in ()).throw(ModuleNotFoundError("tomli"))
+            assert_eq("claude-from-config", inv.default_model("claude"),
+                      "default_model falls back without tomllib/tomli")
+        finally:
+            inv._load_tomllib = _saved_loader
         os.environ["CLAUDE_MODEL_DEFAULT"] = "claude-from-env"
         assert_eq("claude-from-env", inv.default_model("claude"),
                   "env override beats config file")

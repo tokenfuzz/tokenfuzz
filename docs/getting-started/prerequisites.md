@@ -24,12 +24,15 @@ and during sanitizer builds.
 | Tool | Why it is needed |
 | --- | --- |
 | `bash` 3.2+ | Runs the orchestrator and shell wrappers. macOS system Bash is fine. |
-| `python3` | Parses target config and structured state. No extra packages. |
+| `python3` 3.9+ | Parses target config and structured state. No extra packages. |
 | `perl` | Runs vocabulary normalization and timeout fallbacks. |
 | `git` | Clones, updates, and identifies revisions for most targets. |
+| `gh` | Lets reachability checks query GitHub Code Search when scoring crash exposure. |
 | `jq` | Reads and writes JSONL state records. |
 | `rg` | Fast, bounded source search through helper commands. |
 | `file` | Distinguishes testcase inputs from scripts and compiled artifacts. |
+| `curl`, CA certificates | Fetch backend installers and remote metadata over HTTPS. |
+| `node`, `npm` | Install npm-based backend CLIs and run backend diagnostics. |
 
 `bin/audit` preflight-checks `jq`, `python3`, and `perl` at startup and
 exits with a clear "FATAL: missing required tool(s): ..." message if
@@ -44,8 +47,10 @@ For sanitizer builds, you also need LLVM:
 | Tool | Why it is needed |
 | --- | --- |
 | `clang`, `clang++` | Build target code with sanitizer instrumentation. |
+| `llvm-ar` | Build and test static-library sanitizer harnesses. |
 | `llvm-symbolizer` | Turn sanitizer PCs into readable stack traces. |
 | `sancov` | Enable coverage-gated probes on supported targets. |
+| `nm` | Detect candidate sanitizer binaries in build trees. |
 | `otool` (macOS) | Inspect the dynamic loader's view of an instrumented binary. |
 | `readelf`, `llvm-readelf`, or `objdump` (Linux) | Inspect ELF sections in coverage-instrumented binaries. |
 
@@ -58,22 +63,23 @@ newer compiler than the distro provides.
 ### macOS
 
 ```bash
-brew install jq ripgrep llvm
 xcode-select --install
+brew install gh jq node ripgrep llvm
 ```
 
 `xcode-select --install` provides Apple's command-line tools (Git, Clang
-support files, `python3`, and `otool`). macOS already includes Bash,
-Perl, and `file`. If the command-line tools are already installed,
-macOS will say so.
+support files, `python3`, `nm`, and `otool`). macOS already includes
+Bash, Perl, `curl`, CA certificates, and `file`. If the command-line
+tools are already installed, macOS will say so. Git is not guaranteed on
+a fresh macOS install until those command-line tools are installed.
 
 ### Debian / Ubuntu
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  bash ca-certificates clang curl file git jq libclang-rt-dev llvm \
-  nodejs npm perl procps python3 ripgrep
+  bash binutils ca-certificates clang curl file gh git jq libclang-rt-dev \
+  llvm nodejs npm perl procps python3 ripgrep
 ```
 
 Notes:
@@ -93,38 +99,31 @@ Notes:
 - `nodejs` and `npm` are needed by the npm-based backend CLIs
   (`codex`, `@google/gemini-cli`) and by a few harness diagnostics
   that call `node`.
-
 ### Fedora / RHEL
 
 ```bash
 sudo dnf install -y \
-  bash ca-certificates clang curl file git jq llvm nodejs npm perl \
-  procps-ng python3 ripgrep
+  bash binutils ca-certificates clang coreutils curl diffutils file findutils \
+  compiler-rt gawk gh git grep jq llvm nodejs npm perl procps-ng python3 \
+  ripgrep sed which
 ```
 
-No extra Perl packages are needed — the harness uses Perl core modules
-only. Python needs no extra packages on 3.11+ (which ships the `tomllib`
-parser in the standard library); on Python 3.9/3.10 install `tomli`, which
-the harness imports to read `target.toml` and the model config. Minimal
-Fedora/RHEL container
-images may also need the standard userland packages that full hosts
-already have, such as `coreutils`, `diffutils`, `findutils`, `gawk`,
-`grep`, `sed`, and `which`.
+No extra Perl or Python packages are needed. The command includes
+standard userland packages that full Fedora/RHEL hosts usually already
+have, because minimal container images often do not.
 
 ## 2. One agent backend
 
 Agents run through an external CLI. Install and authenticate one of the
 supported backends before pointing TokenFuzz at a real target.
 
-Backend installer prerequisites are separate from the harness runtime
-tools above:
+Backend CLIs have their own install and authentication steps. The OS
+commands above already include their common installer prerequisites:
 
-- Codex and Google Gemini CLI use npm-based installers; install
-  Node.js and npm first when using those CLIs directly (`brew install
-  node`, `sudo apt-get install -y nodejs npm`, or `sudo dnf install -y
-  nodejs npm`).
+- Codex and Google Gemini CLI use npm-based installers; the host-tool
+  commands above install Node.js and npm for that path.
 - The default Gemini path uses the Antigravity installer, which needs
-  `curl` and valid CA certificates.
+  `curl` and valid CA certificates, also installed above.
 - The local `oss` backend needs Codex plus Ollama.
 
 | Backend | Install and authenticate | Audit command |
@@ -172,45 +171,12 @@ the host tools above. A `libxml2` audit, for example, starts with the
 base harness tools and adds whatever the upstream `libxml2` build
 instructions require on your host.
 
-Browser targets and very large projects often need extra setup. Firefox
-is the canonical example:
-
-- Its source lives in Mercurial.
-- Its build system pins a Python minor version.
-- You need both `hg` and Python 3.12.
-
-### macOS
-
-```bash
-brew install mercurial python@3.12
-```
-
-### Debian / Ubuntu
-
-```bash
-sudo apt-get install -y mercurial python3.12
-```
-
-### Fedora / RHEL
-
-```bash
-sudo dnf install -y mercurial python3.12
-```
-
-Once Firefox is cloned into `targets/firefox`, run Mozilla's bootstrap
-once from inside the checkout:
-
-```bash
-(cd targets/firefox && python3.12 ./mach bootstrap)
-```
-
-Use `python3.12` here — Firefox `mach` is pinned to a Python minor
-version. For the full upstream setup flow, see the
-[Firefox source documentation](https://firefox-source-docs.mozilla.org/setup/).
-
-In general, follow each target project's own build documentation.
-TokenFuzz needs the resulting sanitizer binary, library, or harness
-configuration — it does not replace the target's build system.
+Browser targets, Mercurial-hosted projects, and very large codebases may
+need extra compilers, package managers, language runtimes, or source
+control tools. Follow the target project's own build documentation for
+those dependencies. TokenFuzz needs the resulting sanitizer binary,
+library, or harness configuration — it does not replace the target's
+build system.
 
 ## 4. Verify the harness
 
@@ -271,48 +237,35 @@ Colima, or gVisor for you.
 | Platform | Install command |
 | --- | --- |
 | macOS | [Docker Desktop](https://www.docker.com/products/docker-desktop/) (`brew install --cask docker`) or `brew install colima docker` |
-| Debian / Ubuntu | `sudo apt-get install -y docker.io` |
-| Fedora / RHEL | `sudo dnf install -y docker` |
+| Debian / Ubuntu | `sudo apt-get update && sudo apt-get install -y docker.io` |
+| Fedora | `sudo dnf install -y moby-engine` |
 
-You usually do not need to start the daemon yourself.
-`bin/audit-container-shell` detects when the daemon is down and tries
-the appropriate launcher (`open -a Docker`, `colima start`, or
-`systemctl --user start docker`), then polls reachability for up to 60
-seconds. If your Linux install requires a system service instead, start
-Docker manually, for example with `sudo systemctl start docker`. Set
-`AUDIT_CONTAINER_AUTO_START=0` to opt out or
-`AUDIT_CONTAINER_START_TIMEOUT=<seconds>` to wait longer.
+After installation, make sure `docker info` works. Start Docker Desktop,
+run `colima start`, or start the Linux service with
+`sudo systemctl start docker` if needed. On RHEL-family hosts where
+`moby-engine` is not available from your enabled repositories, install a
+Docker-compatible engine using your distro's standard package source.
 
 ### Optional gVisor runtime
 
 On a Linux Docker host, gVisor adds another sandbox layer around the
-audit container. Once `runsc` is installed and registered with Docker,
-enable it like this:
+audit container. The required-tools commands above do not install or
+register `runsc`; follow gVisor's Docker setup first. Verify that Docker
+can run with `runsc`:
 
 ```bash
-bin/audit-container-shell --gvisor --rebuild
+docker run --runtime=runsc --rm hello-world
 ```
 
-That is shorthand for `--docker-runtime runsc`. You can also set
-`AUDIT_DOCKER_RUNTIME=runsc`. The image build still uses normal Docker;
-only the interactive audit container runs under gVisor.
-
-## Optional tools
-
-Only two extras are actually consulted by the harness:
-
-| Tool | What it unlocks |
-| --- | --- |
-| `gh` | `bin/reachability` queries GitHub Code Search to estimate external caller exposure when scoring crash severity. |
-| `hg` | Mercurial-hosted targets such as Firefox. |
-
-Install both on whichever distribution you use:
+Then enable it for the audit container:
 
 ```bash
-brew install gh mercurial                              # macOS
-sudo apt-get install -y gh mercurial                   # Debian / Ubuntu
-sudo dnf install -y gh mercurial                       # Fedora / RHEL
+bin/audit-container-shell --gvisor
 ```
+
+That is shorthand for `--docker-runtime runsc`. The image build still
+uses normal Docker; only the interactive audit container runs under
+gVisor.
 
 ## macOS notes
 
@@ -321,8 +274,9 @@ A few things worth knowing on macOS:
 - You do not need GNU coreutils. Scripts work with BSD `stat`, `date`,
   `sed`, and `mktemp`, and tolerate a missing `realpath`.
 - System Bash 3.2 is sufficient — no need to install a newer Bash.
-- If Homebrew LLVM is installed but the sanitizer tools are not found,
-  make sure the Homebrew LLVM `bin` directory is on your `PATH`.
+- Homebrew LLVM is auto-detected at `/opt/homebrew/opt/llvm` and
+  `/usr/local/opt/llvm`. Set `LLVM_PREFIX` only when you want to force a
+  different LLVM install.
 
 ## If preflight fails
 

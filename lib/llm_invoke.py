@@ -69,14 +69,13 @@ def _load_tomllib():
     Kept out of module import on purpose: gemini-isolated-home / known-backend /
     agent-flags etc. need no TOML, and a too-old python without tomllib AND
     without the tomli fallback must NOT take the whole module — and with it the
-    memory-isolation staging — down. The few callers that read config/models.toml
-    (default-model) get a clear ImportError here instead.
+    memory-isolation staging — down.
     """
     try:
         import tomllib  # py3.11+
         return tomllib
     except ModuleNotFoundError:
-        import tomli  # py3.9/3.10 fallback (already vendored, as target.toml uses)
+        import tomli  # py3.9/py3.10 optional fallback
         return tomli
 
 
@@ -98,8 +97,14 @@ _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.toml"
 
 def _config_models() -> dict:
     """Return the [models] table from config/models.toml as {backend: model}."""
+    try:
+        toml = _load_tomllib()
+    except ModuleNotFoundError:
+        from target_config import parse_toml
+
+        return parse_toml(_CONFIG_PATH).get("models", {})
     with open(_CONFIG_PATH, "rb") as fh:
-        return _load_tomllib().load(fh).get("models", {})
+        return toml.load(fh).get("models", {})
 
 
 def known_backend(backend: str) -> bool:
