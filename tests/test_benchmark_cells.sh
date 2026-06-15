@@ -245,6 +245,10 @@ codex_rel_out=$(<"$work/codex_rel.out")
 assert_eq "0" "$codex_rel_rc" "T16c: model-direct codex cell succeeds with relative --bench-root"
 assert_match "cells complete: 1 done, 0 failed" "$codex_rel_out" \
   "T16d: relative-root codex benchmark cell marked done"
+assert_match "live log: $SCRIPT_ROOT/output/benchmark-reltest-$$/codex/.*/cells/model-direct-r1/backend.raw.log" "$codex_rel_out" \
+  "T16d2: relative-root benchmark prints an absolute live log path"
+assert_not_match "live log: .*file://" "$codex_rel_out" \
+  "T16d3: live log path is not printed as a file:// URI"
 
 # ── T16e: claude model-direct flags omit --max-turns ────────────────────────
 # Model-direct is an open-ended audit task; the wall-clock budget is its only
@@ -341,6 +345,14 @@ else
   fail "T16m: harness cells launch bin/audit from the facade cwd" \
     "run_harness_cell no longer cd's into the facade before launching facade/bin/audit"
 fi
+assert_file_contains "$BENCH" 'model-direct\) cell_log="\$cell_dir/backend\.raw\.log"' \
+  "T16m2: benchmark console points model-direct cells at backend.raw.log"
+assert_file_contains "$BENCH" 'harness\) cell_log="\$cell_dir/audit\.log"' \
+  "T16m3: benchmark console points harness cells at audit.log"
+assert_file_contains "$BENCH" 'cell \$cell_name .* live log: \$cell_log' \
+  "T16m4: benchmark console prints one live log path per real cell"
+assert_file_not_contains "$BENCH" 'live log:.*artifact_uri' \
+  "T16m5: live log paths are printed without file:// URI decoration"
 
 prepare_harness_facade_src=$(awk '
   /^prepare_harness_facade\(\) \{/ { in_func=1 }

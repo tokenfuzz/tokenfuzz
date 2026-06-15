@@ -147,6 +147,18 @@ except Exception:
 PYEOF
 }
 
+absolute_path() {
+  python3 - "$1" <<'PYEOF'
+import pathlib
+import sys
+
+try:
+    print(pathlib.Path(sys.argv[1]).resolve())
+except Exception:
+    print(sys.argv[1])
+PYEOF
+}
+
 usage() {
   sed -n '3,101p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
@@ -1957,6 +1969,17 @@ for cond in "${COND_ARR[@]}"; do
       cell_agents="${AGENTS:-default}"
     fi
     log "cell $cell_name — starting (exp=$exp_name agents=$cell_agents model=${model:-?})"
+    if [ "$DRY_RUN" != "1" ]; then
+      case "$cond" in
+        model-direct) cell_log="$cell_dir/backend.raw.log" ;;
+        harness) cell_log="$cell_dir/audit.log" ;;
+        *) cell_log="" ;;
+      esac
+      if [ -n "$cell_log" ]; then
+        cell_log="$(absolute_path "$cell_log")"
+        log "cell $cell_name — live log: $cell_log"
+      fi
+    fi
     start_epoch="$(date +%s)"
     status="done"
     results_dir=""
