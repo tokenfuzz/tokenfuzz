@@ -43,8 +43,8 @@ Each agent has a role set by the harness:
 2. **ONE finding at a time.** Confirm or discard before moving on.
 3. **RUN `bin/probe` FIRST; it coverage-gates when supported, then runs the sanitizer.**
    ```
-   bin/probe scratch-N/testcase.html              # 1 run, exploration
-   bin/probe --confirm scratch-N/testcase.html    # 5 runs, after first crash
+   bin/probe "${RESULTS_DIR}/scratch-N/testcase.html"              # 1 run, exploration
+   bin/probe --confirm "${RESULTS_DIR}/scratch-N/testcase.html"    # 5 runs, after first crash
    ```
    `bin/probe` reads TARGET / HYPOTHESIS-ID / HARNESS from the testcase header
    and discovers TARGET_ROOT / RESULTS_DIR by walking up to
@@ -112,11 +112,13 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
 
 ```
 0. bin/find-seed <file>[:<Function>]  — for any file/bytes/parser/decoder/regex/media surface, SEED FIRST: take the top candidates and mutate (seed+delta). From-scratch inputs bounce off format/magic/length validation and probe CLEAN without reaching the bug — the top cause of missed reachable crashes. Write from scratch only when find-seed returns nothing, or for a pure API-lifecycle / call-sequence bug with no input corpus.
-1. WRITE testcase to scratch dir with header (TARGET / HYPOTHESIS-ID / CATEGORY,
-   plus // HARNESS: harness.c / harness.cc / harness.cpp for C/C++ API bugs,
-   or another supported sibling harness type when the target uses a language runner)
+1. WRITE testcase to the absolute `${RESULTS_DIR}/scratch-N/` dir with header
+   (TARGET / HYPOTHESIS-ID / CATEGORY, plus // HARNESS: harness.c /
+   harness.cc / harness.cpp for C/C++ API bugs, or another supported sibling
+   harness type when the target uses a language runner). Do not create
+   repo-root `scratch-N/` dirs.
 2. Run `bin/probe` in the same turn:
-   bin/probe scratch-N/testcase.html
+   bin/probe "${RESULTS_DIR}/scratch-N/testcase.html"
 3. EVALUATE: crash? → file under crashes/CRASH-NNN-N/. Clean? → 2+ variants.
 4. IF CRASH: write report.md (Summary, Classification, Root Cause, Reproduction, Data Flow). Format Data Flow bullets as `step: func (path/to/file.c:NN) — desc` so the post-render pass can inline source snippets. For a 1–3 line fix, save a surgical patch as sibling `patch.diff` whenever it passes the non-mutating `git -C "$TARGET_ROOT" apply --check` (never modify the target source to validate — for hg targets just save the `hg diff`); do NOT write a `## Patch` section in `report.md` — `bin/enrich-report` is the single writer of that section. Reserve `## Fix Direction` prose (no `patch.diff`) for ABI/API-impacting changes where a surgical diff isn't possible. The report must also carry the standard bare-label fields `Boundary:` / `Caller controls:` / `Trusted caller actions:` / `Caller contract:` / `Trigger source:` / `Strategy:` (see `.agents/references/session-rules.md`). `Strategy: S<N>` records which of S1..S8 (or REF) produced this report — the cluster tables and ROI surface use it to attribute bugs to the strategy that found them.
 ```

@@ -722,6 +722,7 @@ build_agent_state_instructions() {
 - **Structured state:** use \`bin/state add-hyp\`, \`bin/state update-hyp\`, \`bin/state add-note\`, and \`bin/state update-card\`; \`bin/probe\` records runs automatically when testcase headers include \`HYPOTHESIS-ID:\`
 - **Legacy state file:** $(state_file_path "$agent_num") — optional human-readable context only if it exists; do not create or maintain it manually
 - **Scratch dir:** $(scratch_dir_path "$agent_num")/ — testcases, ASan output, harnesses
+- **Scratch writes:** always write testcase and harness files under the absolute scratch dir above; never create repo-root \`scratch-${agent_num}/...\`
 - **Crashes:** \`${RESULTS_DIR}/crashes/CRASH-NNN-${agent_num}/\` — security crash candidates only
 - **Findings:** \`${RESULTS_DIR}/findings/FIND-NNN-<slug>/\` — confirmed SECURITY findings only. Crosses or weakens a security boundary (memory-safety, auth/authz bypass, injection, sandbox escape, info disclosure, crypto weakness, algorithmic DoS, etc.). Do **NOT** file pure correctness / data-integrity / robustness / spec-deviation bugs here — those are upstream quality issues, not security findings. The harness gate deletes non-security FINDs; save the cycles and don't file them in the first place.
 $([ "$IS_BROWSER_TARGET" -eq 1 ] && echo "- **Source tree:** ${TARGET_ROOT}/ (Mercurial). Always \`cd ${TARGET_ROOT}\` before \`hg\` commands.")
@@ -1167,7 +1168,7 @@ SEED
 
 build_agent_asan_loop_command() {
   local agent_num="$1"
-  echo "\`bin/probe scratch-${agent_num}/<testcase>\`"
+  echo "\`bin/probe $(scratch_dir_path "$agent_num")/<testcase>\`"
 }
 
 # ─── Investigation continuation (open INVESTIGATING hypothesis) ───
@@ -1581,7 +1582,7 @@ Aim for at least 3 ASan validation runs per session."
 ## ROLE: REPRODUCTION AGENT
 
 Focus on turning hypotheses into crashes.
-Check \`bin/find-seed <file>[:<Function>]\` first — if it returns candidates, mutate one; otherwise write from scratch. Run every testcase with \`bin/probe\`; it saves ASan output and coverage-gates browser/js inputs when possible.
+Check \`bin/find-seed <file>[:<Function>]\` first — if it returns candidates, mutate one; otherwise write from scratch under \`$(scratch_dir_path "$agent_num")/\`. Run every testcase with \`bin/probe\`; it saves ASan output and coverage-gates browser/js inputs when possible.
 Try 3+ variant inputs per hypothesis. First testcase within 20 tool calls."
   fi
 
@@ -1629,6 +1630,7 @@ build_compact_fresh_prompt() {
     --var "safety_framing=$SAFETY_FRAMING_CACHED" \
     --var "guide_section=$(build_guide_section deep)" \
     --var "state_strategy_arg=$(state_strategy_arg "$agent_num")" \
+    --var "scratch_dir=$(scratch_dir_path "$agent_num")" \
     --var "audit_fixed_strategy_compact_clause=$audit_fixed_strategy_compact_clause" \
     --var "strategy_assignment_line=$(build_strategy_assignment_line "$agent_num")" \
     --var "work_card_directive=$(build_work_card_directive "$agent_num")" \
@@ -1701,7 +1703,7 @@ Generate hypotheses using that approach."
     fi
     role_block="**ROLE: REPRODUCE** — Write testcases that trigger sanitizer diagnostics.
 ${default_action}
-Check \`bin/find-seed <file>[:<Function>]\` first — if it returns candidates, mutate one; otherwise write from scratch. First testcase plus \`bin/probe\` output within ~20 tool calls."
+Check \`bin/find-seed <file>[:<Function>]\` first — if it returns candidates, mutate one; otherwise write from scratch under \`$(scratch_dir_path "$agent_num")/\`. First testcase plus \`bin/probe\` output within ~20 tool calls."
   fi
 
   # Pre-compute the conditional fragments the template substitutes.

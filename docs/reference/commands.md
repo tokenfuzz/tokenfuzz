@@ -209,10 +209,10 @@ are not forwarded unless you pass `--forward-credentials`.
 ### `bin/probe` — run one testcase
 
 ```bash
-bin/probe scratch-1/testcase.html
-bin/probe --confirm scratch-1/testcase.html
-bin/probe --dry-run scratch-1/testcase.dat
-PROBE_SANITIZER=ubsan bin/probe scratch-1/testcase.dat
+bin/probe "$RESULTS/scratch-1/testcase.html"
+bin/probe --confirm "$RESULTS/scratch-1/testcase.html"
+bin/probe --dry-run "$RESULTS/scratch-1/testcase.dat"
+PROBE_SANITIZER=ubsan bin/probe "$RESULTS/scratch-1/testcase.dat"
 ```
 
 `bin/probe` is the execution gate for testcases. It discovers the active
@@ -270,8 +270,8 @@ Coverage helpers are useful when you need to debug why a testcase is
 missing the intended code:
 
 ```bash
-bin/hits --testcase scratch-1/testcase.html --want <symbol-regex> --mode browser
-bin/hits --testcase scratch-1/testcase.js --want <symbol-regex> --mode js
+bin/hits --testcase "$RESULTS/scratch-1/testcase.html" --want <symbol-regex> --mode browser
+bin/hits --testcase "$RESULTS/scratch-1/testcase.js" --want <symbol-regex> --mode js
 bin/coverage-summary --results-dir "$RESULTS"
 ```
 

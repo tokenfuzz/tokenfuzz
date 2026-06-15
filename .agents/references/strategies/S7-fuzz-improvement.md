@@ -28,7 +28,7 @@ at phase boundaries exercises error-recovery code.
 ```
 1. Read the parser's main loop to identify phase transitions
 2. For each phase boundary: construct a valid-up-to-that-point input, then truncate
-3. Deliver via `bin/probe scratch-N/tc.<ext>` — TARGET / HYPOTHESIS-ID come
+3. Deliver via `bin/probe "${RESULTS_DIR}/scratch-N/tc.<ext>"` — TARGET / HYPOTHESIS-ID come
    from the testcase header. For generic C/C++ targets, bin/probe selects
    the generic ASan path automatically.
 ```
@@ -117,7 +117,7 @@ Inputs to construct:
 
 All Part A testcases go through the normal pipeline:
 ```bash
-bin/probe scratch-N/testcase.html       # TARGET / HYPOTHESIS-ID from header
+bin/probe "${RESULTS_DIR}/scratch-N/testcase.html"       # TARGET / HYPOTHESIS-ID from header
 ```
 
 No fuzzer binary needed. No XPCOM init overhead. Same budget as any other testcase.
@@ -133,7 +133,7 @@ of session time here** — seed generation is the deliverable, not fuzzer runtim
 1. Read the fuzz harness source to understand input format requirements
 2. Read the target parser code to identify unreached branches
 3. Construct minimal seeds that pass header/magic validation and exercise specific branches
-4. Write seeds to `scratch-N/fuzz-seeds/<TargetName>/` for offline use
+4. Write seeds to `${RESULTS_DIR}/scratch-N/fuzz-seeds/<TargetName>/` for offline use
 
 **Do NOT run the fuzzer yourself** for browser-integrated targets (XPCOM init = ~5s/exec,
 impractical for short sessions). For JS-only targets (`fuzz-tests` binary), short runs
@@ -141,7 +141,7 @@ impractical for short sessions). For JS-only targets (`fuzz-tests` binary), shor
 
 ### Harness gaps to document
 
-When reading a fuzz harness, note gaps in `scratch-N/fuzz-harness-notes.md`:
+When reading a fuzz harness, note gaps in `${RESULTS_DIR}/scratch-N/fuzz-harness-notes.md`:
 
 | Gap | Impact | Example |
 |-----|--------|---------|

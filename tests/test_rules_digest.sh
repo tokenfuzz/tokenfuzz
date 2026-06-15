@@ -156,6 +156,10 @@ assert_match 'Session Rules — Digest' "$output" \
   "build_session_rules_digest emits the digest header"
 assert_match 'bin/probe' "$output" \
   "build_session_rules_digest emits digest content"
+assert_match 'RESULTS_DIR.*/scratch-N' "$output" \
+  "build_session_rules_digest tells agents to use RESULTS_DIR scratch"
+assert_not_match 'bin/probe scratch-N' "$output" \
+  "build_session_rules_digest avoids bare root-scratch probe examples"
 assert_match 'Drill-down' "$output" \
   "build_session_rules_digest emits drill-down section"
 

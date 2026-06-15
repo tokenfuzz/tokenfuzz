@@ -83,13 +83,13 @@ saves a sibling `.asan.txt`.
 # Preferred wrapper — coverage-gated ASan in one call when supported.
 # bin/probe reads TARGET / HYPOTHESIS-ID / HARNESS from the testcase header
 # and discovers TARGET_ROOT/RESULTS_DIR by walking up to output/<slug>/.session-env.
-bin/probe scratch-1/tc_H3.html
+bin/probe "${RESULTS_DIR}/scratch-1/tc_H3.html"
 
-# `scratch-1/...` means `$RESULTS_DIR/scratch-1/...`; do not write repo-root
-# scratch dirs or compile root-level harness binaries by hand.
+# Write under `$RESULTS_DIR/scratch-1/...`; do not write repo-root scratch dirs
+# or compile root-level harness binaries by hand.
 
 # API harness case (// HARNESS: harness.c in the testcase header):
-bin/probe scratch-1/tc_H3.xml -- 8 100        # trailing args go to the harness
+bin/probe "${RESULTS_DIR}/scratch-1/tc_H3.xml" -- 8 100        # trailing args go to the harness
 
 # exit 0 → HIT + ASan ran cleanly, or generic run completed
 # exit 1 → MISSED — ASan SKIPPED. Revise input; don't discard; no budget spent.
@@ -101,14 +101,14 @@ crash and need reproducibility proof — timing-dependent UAFs don't crash every
 run. A 0/5 exploration variant is 4 wasted browser launches.
 
 ```
-bin/probe --confirm scratch-1/tc_H3.html      # 5 runs to confirm a crash
+bin/probe --confirm "${RESULTS_DIR}/scratch-1/tc_H3.html"      # 5 runs to confirm a crash
 ```
 
 Raw `bin/hits` is still available when you need the coverage verdict
 without ASan (e.g., checking whether ANY existing testcase reaches a target):
 
 ```
-bin/hits --testcase scratch-1/tc_H3.html \
+bin/hits --testcase ${RESULTS_DIR}/scratch-1/tc_H3.html \
                 --want 'nsTextFrame::ClearTextRun|nsTextFrame.*:.*123' \
                 --mode browser
 ```

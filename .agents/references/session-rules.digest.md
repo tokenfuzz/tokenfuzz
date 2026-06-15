@@ -23,7 +23,10 @@ harness's harvester only looks under `${RESULTS_DIR}`.
 
 - Default reproducer: `bin/probe <testcase>`. Reads TARGET / HYPOTHESIS-ID /
   HARNESS from the testcase header. No env vars to set.
-  - `bin/probe scratch-N/tc.html` → 1 run; `--confirm` → 5 runs.
+  - Write testcases and sibling harnesses under `${RESULTS_DIR}/scratch-N/`.
+  - `bin/probe "${RESULTS_DIR}/scratch-N/tc.html"` → 1 run; `--confirm` → 5 runs.
+  - Do not create repo-root `scratch-N/` dirs; a bare relative path writes to
+    the shell cwd, not the active audit scratch dir.
   - MISSED → revise input, don't discard. Don't burn ASan budget.
   - Generic C/C++ falls back to `bin/run-asan-multi generic` + `.asan.txt`.
 - Clean runs over ~200 lines auto-truncate to head+tail with a

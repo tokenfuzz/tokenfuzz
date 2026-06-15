@@ -420,7 +420,7 @@ non-security paths should not have been filed at all.
 - Read ONE function pair (or one function for idempotence/injectivity/domain/
   format) per hypothesis. Do not bulk-load 20 function pairs.
 - Reuse generators across hypotheses on the same target; cache them in
-  `scratch-N/generators/`.
+  `${RESULTS_DIR}/scratch-N/generators/`.
 - For C/C++ targets, build the property harness with `// HARNESS: harness.c`
   so `bin/probe` caches the compile.
 - For interpreted targets (Python, Ruby, Node) the Hypothesis-equivalent

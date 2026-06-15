@@ -84,11 +84,11 @@ coverage gate when supported, then run the selected sanitizer. Generic probes
 run the selected sanitizer or the configured [runner] for findings-only targets.
 
 Common commands:
-  bin/probe scratch-1/testcase.html
-  bin/probe --confirm scratch-1/testcase.html
-  bin/probe --dry-run scratch-1/testcase.dat
-  PROBE_SANITIZER=ubsan bin/probe scratch-1/testcase.dat
-  bin/probe scratch-1/testcase.dat -- extra harness args
+  bin/probe "$RESULTS_DIR/scratch-1/testcase.html"
+  bin/probe --confirm "$RESULTS_DIR/scratch-1/testcase.html"
+  bin/probe --dry-run "$RESULTS_DIR/scratch-1/testcase.dat"
+  PROBE_SANITIZER=ubsan bin/probe "$RESULTS_DIR/scratch-1/testcase.dat"
+  bin/probe "$RESULTS_DIR/scratch-1/testcase.dat" -- extra harness args
 
 Required testcase headers:
   TARGET: <file[:function[:line]]>
@@ -174,7 +174,8 @@ PY
 
 # Agents commonly type `bin/probe scratch-N/tc` from the repository root.
 # Treat that as shorthand for the active audit scratch dir when RESULTS_DIR is
-# already in the session environment, so root-level scratch-N dirs are not used.
+# already in the session environment. If a cwd scratch file with the same
+# relative path also exists, fail rather than silently probing stale results.
 case "$TESTCASE" in
   ./*) _probe_rel="${TESTCASE#./}" ;;
   *) _probe_rel="$TESTCASE" ;;
@@ -182,11 +183,21 @@ esac
 case "$_probe_rel" in
   scratch-[0-9]*/*)
     if [ -n "${RESULTS_DIR:-}" ]; then
-      TESTCASE="${RESULTS_DIR%/}/$_probe_rel"
+      _probe_results_path="${RESULTS_DIR%/}/$_probe_rel"
+      if [ -f "$_probe_rel" ] && [ -f "$_probe_results_path" ]; then
+        _probe_cwd_real="$(_probe_realpath "$_probe_rel")"
+        _probe_results_real="$(_probe_realpath "$_probe_results_path")"
+        if [ "$_probe_cwd_real" != "$_probe_results_real" ]; then
+          echo "[probe] ambiguous scratch path: cwd $_probe_rel exists, but probe would use $_probe_results_path" >&2
+          echo "[probe] use the absolute RESULTS_DIR scratch path, or remove the cwd scratch file." >&2
+          exit 2
+        fi
+      fi
+      TESTCASE="$_probe_results_path"
     fi
     ;;
 esac
-unset _probe_rel
+unset _probe_rel _probe_results_path _probe_cwd_real _probe_results_real
 
 [ -f "$TESTCASE" ] || { echo "[probe] testcase not found: $TESTCASE" >&2; exit 2; }
 

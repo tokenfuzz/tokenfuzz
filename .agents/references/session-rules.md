@@ -59,14 +59,15 @@ HARNESS, and (derived) WANT all come from the header. RESULTS_DIR / TARGET_ROOT
 are discovered by walking up to `output/<slug>/.session-env`.
 
 ```
-bin/probe scratch-N/tc.html               # 1 run (exploration)
-bin/probe --confirm scratch-N/tc.html     # 5 runs (after first crash)
-bin/probe scratch-N/tc.xml -- 8 100       # trailing args go to the harness
+bin/probe "${RESULTS_DIR}/scratch-N/tc.html"               # 1 run (exploration)
+bin/probe --confirm "${RESULTS_DIR}/scratch-N/tc.html"     # 5 runs (after first crash)
+bin/probe "${RESULTS_DIR}/scratch-N/tc.xml" -- 8 100       # trailing args go to the harness
 ```
 
-- `scratch-N/...` is resolved against the active `RESULTS_DIR`; do not create
-  top-level repo `scratch-N/` dirs. Native harness outputs belong under
-  `RESULTS_DIR/scratch-N/` and should normally be built by `bin/probe`.
+- Write testcases and sibling harnesses under `${RESULTS_DIR}/scratch-N/`;
+  do not create top-level repo `scratch-N/` dirs. Native harness outputs
+  belong under `RESULTS_DIR/scratch-N/` and should normally be built by
+  `bin/probe`.
 - MISSED → revise input, don't discard. Don't spend ASan budget.
 - Generic C/C++ targets do not support coverage gating; `bin/probe` falls back
   to `bin/run-asan-multi generic` and saves a sibling `.asan.txt`.

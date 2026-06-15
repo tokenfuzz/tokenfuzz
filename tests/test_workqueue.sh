@@ -1510,6 +1510,10 @@ HYPOTHESIS-ID: H-rel
 CATEGORY: bounds
 abc
 EOF_TC
+dry=$(cd "$TEST_TMPDIR" && "$PROBE" --dry-run scratch-1/rel-probe.dat)
+assert_match 'asan_output=.*/results/scratch-1/rel-probe.asan.txt' \
+  "$dry" "probe: relative scratch-N resolves to active RESULTS_DIR"
+
 mkdir -p "$TEST_TMPDIR/scratch-1"
 cat > "$TEST_TMPDIR/scratch-1/rel-probe.dat" <<'EOF_TC'
 TARGET: wrong/root-scratch.c:Wrong:1
@@ -1517,11 +1521,11 @@ HYPOTHESIS-ID: H-root
 CATEGORY: state
 root
 EOF_TC
-dry=$(cd "$TEST_TMPDIR" && "$PROBE" --dry-run scratch-1/rel-probe.dat)
-assert_match 'asan_output=.*/results/scratch-1/rel-probe.asan.txt' \
-  "$dry" "probe: relative scratch-N resolves to active RESULTS_DIR"
-assert_not_match "$TEST_TMPDIR/scratch-1" "$dry" \
-  "probe: relative scratch-N ignores cwd scratch dir"
+ambiguous_rc=0
+ambiguous_out=$(cd "$TEST_TMPDIR" && "$PROBE" --dry-run scratch-1/rel-probe.dat 2>&1) || ambiguous_rc=$?
+assert_eq "2" "$ambiguous_rc" "probe: ambiguous relative scratch-N exits 2"
+assert_match 'ambiguous scratch path' "$ambiguous_out" \
+  "probe: ambiguous relative scratch-N explains cwd/results conflict"
 
 cat > "$TEST_TMPDIR/outside-probe.dat" <<'EOF_TC'
 TARGET: alpha/core/ThingProcessor.cpp:ThingProcessorRead:3

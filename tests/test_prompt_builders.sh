@@ -328,6 +328,10 @@ rm -f "$(agent_strategy_path 1)"
 IS_BROWSER_TARGET=0
 result=$(build_agent_state_instructions 1)
 assert_match "AGENT IDENTITY.*Agent 1.*role=reproduce" "$result" "state instructions generic: identity"
+assert_match "Scratch writes.*absolute scratch dir" "$result" \
+  "state instructions generic: requires absolute scratch writes"
+assert_match "never create repo-root" "$result" \
+  "state instructions generic: forbids repo-root scratch dirs"
 assert_not_match "mode=" "$result" "state instructions generic: mode omitted (generic targets)"
 assert_not_match "Mercurial" "$result" "state instructions generic: no Mercurial"
 
