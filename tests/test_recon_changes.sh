@@ -376,6 +376,189 @@ else
 fi
 rm -rf "$flat_target" "$flat_out"
 
+# Dependency coherence: on a flat tree, files connected by target-local
+# quoted includes and uniquely-resolved calls/imports must land in one
+# dependency unit; unrelated files and ambiguous names must not. These are
+# context-packing hints only and never change what counts as a finding, so
+# they are exercised directly against build_dependency_units.
+dep_rc=0
+python3 - <<'PY' || dep_rc=$?
+import sys, tempfile
+from pathlib import Path
+sys.path.insert(0, "lib")
+import recon_slicer as rs
+
+def component_of(units, name):
+    for _, fs in units:
+        names = {f.name for f in fs}
+        if name in names:
+            return names
+    return set()
+
+# 1. include + call coherence on a flat tree.
+d = Path(tempfile.mkdtemp())
+(d / "app_parse.h").write_text('#ifndef H\n#define H\nint app_decode(int);\n#endif\n')
+(d / "app_parse.c").write_text('#include "app_parse.h"\nint run(int x){ return app_decode(x); }\n')
+(d / "app_codec.c").write_text('int app_decode(int x){ return x + 1; }\n')
+(d / "app_misc.c").write_text('int app_unrelated(void){ return 0; }\n')
+files = sorted(d.glob("*.[ch]"))
+units = rs.build_dependency_units(d, files)
+comp = component_of(units, "app_parse.c")
+assert {"app_parse.c", "app_parse.h", "app_codec.c"} <= comp, f"include/call clustering: {units}"
+assert "app_misc.c" not in comp, f"unrelated file pulled in: {units}"
+
+# 2. ambiguous (multiply-defined) names create no edge.
+a = Path(tempfile.mkdtemp())
+(a / "one.c").write_text('int dup(void){ return 1; }\n')
+(a / "two.c").write_text('int dup(void){ return 2; }\n')
+(a / "call.c").write_text('void go(void){ dup(); }\n')
+assert rs.build_dependency_units(a, sorted(a.glob("*.c"))) == [], "ambiguous def created an edge"
+
+# 3. PHP require coherence.
+p = Path(tempfile.mkdtemp())
+(p / "entry.php").write_text("<?php require_once 'helper.php'; run();\n")
+(p / "helper.php").write_text("<?php function run(){ return 1; }\n")
+assert {"entry.php", "helper.php"} <= component_of(
+    rs.build_dependency_units(p, sorted(p.glob("*.php"))), "entry.php"), "PHP require clustering"
+
+# 4. Python import -> CPython extension module coherence.
+y = Path(tempfile.mkdtemp())
+(y / "driver.py").write_text("import fastthing\nfastthing.go()\n")
+(y / "fastthing.c").write_text(
+    '#include <Python.h>\nPyMODINIT_FUNC PyInit_fastthing(void){ return NULL; }\n')
+assert {"driver.py", "fastthing.c"} <= component_of(
+    rs.build_dependency_units(y, sorted(y.iterdir())), "driver.py"), "py->c-extension clustering"
+
+# 5. Call edges are registry-driven, so every supported language clusters a
+# cross-file definition+call pair — not just the C/JS/Python originals.
+LANG_CASES = {
+    ".rs":   ("pub fn decode(x: i32) -> i32 { x + 1 }\n", "fn run() { let _ = decode(1); }\n"),
+    ".go":   ("func Decode(x int) int { return x + 1 }\n", "func Run() { Decode(1) }\n"),
+    ".java": ("  public int decode(int x) { return x + 1; }\n", "  void run() { decode(1); }\n"),
+    ".swift":("func decode(_ x: Int) -> Int { return x + 1 }\n", "func run() { _ = decode(1) }\n"),
+    ".kt":   ("fun decode(x: Int): Int { return x + 1 }\n", "fun run() { decode(1) }\n"),
+    ".pl":   ("sub decode { return $_[0] + 1; }\n", "sub run { decode(1); }\n"),
+    ".rb":   ("def decode(x)\n  x + 1\nend\n", "def run\n  decode(1)\nend\n"),
+    ".ts":   ("export function decode(x: number) { return x + 1 }\n", "function run() { decode(1) }\n"),
+}
+for ext, (def_src, call_src) in LANG_CASES.items():
+    g = Path(tempfile.mkdtemp())
+    (g / f"def{ext}").write_text(def_src)
+    (g / f"use{ext}").write_text(call_src)
+    comp = component_of(rs.build_dependency_units(g, sorted(g.iterdir())), f"def{ext}")
+    assert {f"def{ext}", f"use{ext}"} <= comp, f"call-edge clustering broke for {ext}: {comp}"
+
+# 6. Mixed-language guard. A coincidental same-name call across unrelated
+# runtimes must NOT merge (false-positive guard); a call within a shared
+# call-family (C/C++, JS/TS, Java/Kotlin) MUST still merge even across file
+# extensions (false-negative guard for mixed-language projects).
+def two(name_a, src_a, name_b, src_b):
+    z = Path(tempfile.mkdtemp())
+    (z / name_a).write_text(src_a)
+    (z / name_b).write_text(src_b)
+    return rs.build_dependency_units(z, sorted(z.iterdir()))
+
+# cross-runtime coincidence: a Python decode() call vs the sole C decode().
+assert two("driver.py", "def go():\n    decode(1)\n",
+           "codec.c", "int decode(int x){ return x + 1; }\n") == [], \
+    "cross-family coincidental call must not merge"
+# intra-family across extensions: a .ts caller and the sole .js definition.
+assert {"app.ts", "lib.js"} <= component_of(
+    two("lib.js", "function decode(x){ return x + 1 }\n",
+        "app.ts", "function run(){ decode(1) }\n"), "lib.js"), \
+    "intra-family JS/TS call edge must merge"
+# intra-family across extensions: a .cc caller and the sole .c definition.
+assert {"impl.c", "use.cc"} <= component_of(
+    two("impl.c", "int decode(int x){ return x + 1; }\n",
+        "use.cc", "void run(){ decode(1); }\n"), "impl.c"), \
+    "intra-family C/C++ call edge must merge"
+
+# 7. Uniqueness is per call-family, not global: an unrelated cross-runtime
+# duplicate name must NOT erase a valid same-family edge.
+z = Path(tempfile.mkdtemp())
+(z / "codec.c").write_text("int decode(int x){ return x + 1; }\n")
+(z / "use.c").write_text("void run(void){ decode(1); }\n")
+(z / "helper.py").write_text("def decode(x):\n    return x\n")  # coincidental dup
+assert {"codec.c", "use.c"} <= component_of(
+    rs.build_dependency_units(z, sorted(z.iterdir())), "codec.c"), \
+    "cross-runtime duplicate name erased a same-family edge"
+
+# 8. Modern JS/TS arrow/const definitions create call edges (not just the
+# classic `function foo()` form).
+assert {"lib.js", "app.js"} <= component_of(
+    two("lib.js", "export const decode = (x) => { return x + 1 }\n",
+        "app.js", "function run(){ return decode(1) }\n"), "lib.js"), \
+    "JS arrow/const definition must produce a call edge"
+assert {"lib.ts", "app.ts"} <= component_of(
+    two("lib.ts", "export const decode = (x: number): number => x + 1\n",
+        "app.ts", "function run(){ return decode(1) }\n"), "lib.ts"), \
+    "TS return-typed arrow definition must produce a call edge"
+
+print("ok")
+PY
+if [ "$dep_rc" = "0" ]; then
+  pass "slicer dependency units cluster include/call/import edges across all registry languages"
+else
+  fail "slicer dependency-unit clustering broken (rc=$dep_rc)"
+fi
+
+# An in-tree symlink that resolves outside the source root must not abort
+# the slicer (relative_to would raise); it should fall back gracefully and
+# still partition the real files.
+sym_rc=0
+python3 - <<'PY' || sym_rc=$?
+import os, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, "lib")
+import recon_slicer as rs
+base = Path(tempfile.mkdtemp())
+outside = Path(tempfile.mkdtemp())
+(outside / "ext.c").write_text("int decode(int x){ return x + 1; }\n")
+(base / "real.c").write_text("void run(void){ decode(1); }\n")
+os.symlink(outside / "ext.c", base / "link.c")
+files = sorted([base / "real.c", base / "link.c"])
+units = rs.build_dependency_units(base, files)  # must not raise
+got = {f.name for _, fs in units for f in fs}
+# No crash is the contract; the symlinked def is still reachable via call edge.
+assert "real.c" in got, f"slicer dropped real files on symlink: {got}"
+print("ok")
+PY
+if [ "$sym_rc" = "0" ]; then
+  pass "slicer tolerates an in-tree symlink resolving outside the source root"
+else
+  fail "slicer aborted on an out-of-root symlink (rc=$sym_rc)"
+fi
+
+# End-to-end: connected files on a flat tree share one slice, and the
+# partition still covers every file exactly once.
+depe_target=$(mktemp -d)
+mkdir -p "$depe_target/src/lib"
+printf '#ifndef H\n#define H\nint app_decode(int);\n#endif\n' \
+  > "$depe_target/src/lib/app_parse.h"
+printf '#include "app_parse.h"\nint run(int x){ return app_decode(x); }\n' \
+  > "$depe_target/src/lib/app_parse.c"
+printf 'int app_decode(int x){ return x + 1; }\n' \
+  > "$depe_target/src/lib/app_codec.c"
+for f in alpha beta gamma; do seq 1 40 > "$depe_target/src/lib/app_$f.c"; done
+depe_out=$(mktemp -d)
+python3 lib/recon_slicer.py --target-path "$depe_target" --slices 3 \
+  --out-dir "$depe_out" >/dev/null 2>&1
+depe_total=$(cat "$depe_out"/slice-*.txt 2>/dev/null | sort | wc -l | tr -d ' ')
+depe_uniq=$(cat "$depe_out"/slice-*.txt 2>/dev/null | sort -u | wc -l | tr -d ' ')
+depe_together=no
+for sf in "$depe_out"/slice-*.txt; do
+  if grep -q 'app_parse.c' "$sf" && grep -q 'app_parse.h' "$sf" \
+     && grep -q 'app_codec.c' "$sf"; then
+    depe_together=yes
+  fi
+done
+if [ "$depe_together" = "yes" ] && [ "$depe_total" = "6" ] && [ "$depe_uniq" = "6" ]; then
+  pass "slicer keeps dependency-connected flat-tree files in one slice"
+else
+  fail "dependency slice wrong: together=$depe_together total=$depe_total uniq=$depe_uniq"
+fi
+rm -rf "$depe_target" "$depe_out"
+
 # --path: restrict the partition to one subtree.
 path_target=$(mktemp -d)
 mkdir -p "$path_target/src/lib/parse" "$path_target/src/lib/net"

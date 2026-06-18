@@ -13,17 +13,23 @@ prompt receives a file list, never the label — so the regex bought a
 rot-prone enumeration for prettier log lines.
 
 The current algorithm:
-  1. Build *directory-coherent units*: descend the directory tree, emitting
-     a subtree as one unit once its total LOC drops below the per-slice
-     target. Directories are the project author's own functional
-     decomposition — a far stronger signal than filenames.
-  2. Pack/split units into exactly N slices, balanced by **lines of code**,
+  1. Build *dependency-coherent units*: connect files that directly depend
+     on each other via target-local quoted includes/imports and uniquely
+     resolved function calls, then take connected components. This recovers
+     coherence on flat trees where directories cannot help (every file in
+     one directory, yet heavily cross-including, e.g. libxml2). Edges are
+     deliberately conservative — only unambiguous, in-scope references — so
+     a noisy guess is never treated as anything but a context-packing hint.
+  2. Build *directory-coherent units* for the files left unconnected:
+     descend the directory tree, emitting a subtree as one unit once its
+     total LOC drops below the per-slice target. Directories are the project
+     author's own functional decomposition — a far stronger signal than
+     filenames.
+  3. Pack/split units into exactly N slices, balanced by **lines of code**,
      not file count. LOC balancing is what keeps one agent from drawing
      every 10k-line monster file (the libxml2 failure mode) while a peer
      draws forty stubs.
-  3. Flat trees (every file in one directory, e.g. libxml2) have no
-     directory structure to exploit. There is no cheap static signal that
-     recovers semantic boundaries from filenames, so the fallback is an
+  4. Whatever still has no structure to exploit falls back to an
      explicitly-arbitrary LOC-balanced contiguous chunking. It is balanced
      and deterministic; it does not pretend to be semantic.
 
@@ -45,18 +51,15 @@ Guarantees audit relies on:
   - Exit code 7 (not an error) means --changed-since matched no source
     files; callers treat this as "nothing to recon", not a failure.
 
-FUTURE OPTION (documented, not built): true call-graph coherence would come
-from clustering files by their #include / call edges rather than directory
-layout — connected components over the include graph. That is the only
-method that delivers coherent slices on a flat tree. It is deliberately not
-implemented: for small targets the partition axis is yield-noise (the whole
-tree is covered in one wave regardless), so it should be built only if
-recon instrumentation shows coherence-related misses justify the cost.
+Dependency units are best-effort context packing only. They do not change
+what counts as a vulnerability and they are always subordinate to the
+non-overlap and LOC-balance guarantees.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import random
 import re
 import subprocess
@@ -91,6 +94,56 @@ SKIP_DIR_PREFIXES = ("build-asan", "build-ubsan", "build-msan", "build-tsan")
 # the hard-error codes so callers can treat a quiet change window as a
 # clean no-op rather than a failure.
 EXIT_EMPTY_CHANGED_SET = 7
+
+# Dependency-edge signals. Per-language function-definition and local-include
+# detectors live in the language registry (languages.Language.def_patterns /
+# include_patterns), so coverage is a property of the supported-language set,
+# not of this file — adding a language widens recon slicing automatically.
+# Edges are conservative: an include only connects when it resolves to an
+# in-scope file, and a call only connects when its name is defined in exactly
+# one in-scope file. A wrong match merely co-locates two files in one slice;
+# it never affects what counts as a finding.
+#
+# Call sites are language-agnostic (a bare `name(`), so one universal token
+# matcher feeds every language's definitions.
+CALL_TOKEN_RE = re.compile(r"\b(?P<name>[A-Za-z_]\w*)\s*\(")
+# Keywords that look like calls/definitions but are control flow.
+NON_CALL_NAMES = {
+    "if", "for", "while", "switch", "return", "sizeof", "catch",
+    "assert", "static_assert", "new", "delete",
+}
+
+# The one deliberate cross-language edge that does not fit the per-file
+# def/include model: a Python `import <mod>` that resolves to the C/C++ file
+# defining that CPython extension module's initializer (PyInit_<mod>). Kept
+# here, isolated and documented, rather than forced into the registry.
+PY_IMPORT_RE = re.compile(
+    r"""
+    ^\s*
+    (?:
+      import\s+(?P<imports>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)
+      |
+      from\s+(?P<from>[A-Za-z_]\w*)\s+import\s+
+    )
+    """,
+    re.M | re.VERBOSE,
+)
+PY_CAPI_INIT_RE = re.compile(r"\bPyMODINIT_FUNC\s+PyInit_(?P<name>[A-Za-z_]\w*)\s*\(")
+
+
+@functools.lru_cache(maxsize=None)
+def _dependency_patterns(ext: str) -> tuple[tuple[re.Pattern[str], ...],
+                                            tuple[re.Pattern[str], ...]]:
+    """Compiled (def_patterns, include_patterns) for a source extension.
+
+    Sourced from the language registry and cached per extension. Returns
+    empty tuples for extensions with no language or no declared patterns."""
+    lang = languages.for_source_ext(ext)
+    if lang is None:
+        return ((), ())
+    defs = tuple(re.compile(p) for p in lang.def_patterns)
+    incs = tuple(re.compile(p) for p in lang.include_patterns)
+    return (defs, incs)
 
 
 def _is_skipped_dir(name: str) -> bool:
@@ -190,12 +243,219 @@ def file_loc(path: Path) -> int:
     return max(1, n)
 
 
+def _read_text(path: Path, limit: int = 1_000_000) -> str:
+    """Bounded source read for dependency hints."""
+    try:
+        data = path.read_bytes()[:limit]
+    except OSError:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
+def _local_include_target(src_root: Path, source: Path, include: str,
+                          by_rel: dict[str, Path]) -> Path | None:
+    """Resolve a quoted include/require to an in-scope file, or None.
+
+    Tries the including file's directory first, then the source root.
+    Absolute and out-of-tree paths are ignored."""
+    if not include or include.startswith("/"):
+        return None
+    resolved_root = src_root.resolve()
+    for candidate in ((source.parent / include).resolve(),
+                      (resolved_root / include).resolve()):
+        try:
+            rel = candidate.relative_to(resolved_root).as_posix()
+        except ValueError:
+            continue
+        if rel in by_rel:
+            return by_rel[rel]
+    return None
+
+
+def _defined_names(text: str,
+                   def_patterns: tuple[re.Pattern[str], ...]) -> set[str]:
+    """Function/method names defined in this file, per its language's
+    registry def_patterns."""
+    names: set[str] = set()
+    for rx in def_patterns:
+        for match in rx.finditer(text):
+            name = match.group("name")
+            if name and name not in NON_CALL_NAMES:
+                names.add(name)
+    return names
+
+
+def _included_paths(text: str,
+                    include_patterns: tuple[re.Pattern[str], ...]) -> list[str]:
+    """Local include/require targets named in this file, per its language's
+    registry include_patterns. An optional `dir` group (e.g. PHP `__DIR__`)
+    that prefixes an otherwise-absolute-looking path marks it relative."""
+    out: list[str] = []
+    for rx in include_patterns:
+        for match in rx.finditer(text):
+            path = match.group("path")
+            if not path:
+                continue
+            if match.groupdict().get("dir") and path.startswith(("/", "\\")):
+                path = path[1:]
+            out.append(path)
+    return out
+
+
+def _called_names(text: str) -> set[str]:
+    """Names invoked like a call in this file."""
+    return {
+        match.group("name")
+        for match in CALL_TOKEN_RE.finditer(text)
+        if match.group("name") not in NON_CALL_NAMES
+    }
+
+
+def _python_imported_modules(text: str) -> set[str]:
+    """Top-level module names this Python file imports."""
+    modules: set[str] = set()
+    for match in PY_IMPORT_RE.finditer(text):
+        if match.group("from"):
+            modules.add(match.group("from"))
+        for raw in (match.group("imports") or "").split(","):
+            name = raw.strip()
+            if name:
+                modules.add(name)
+    return modules
+
+
+def _python_capi_modules(text: str) -> set[str]:
+    """CPython extension module names this file defines (PyInit_<name>)."""
+    return {match.group("name") for match in PY_CAPI_INIT_RE.finditer(text)}
+
+
+def build_dependency_units(src_root: Path,
+                           files: list[Path]) -> list[tuple[str, list[Path]]]:
+    """Return conservative include/call-connected file units.
+
+    Edges (each only created when it resolves unambiguously and in-scope):
+      * local includes/requires that resolve to another in-scope file
+        (per each language's registry include_patterns: C/C++ quoted
+        `#include`, PHP require/include of target-local string paths);
+      * calls to a function/method name defined in exactly one in-scope
+        file of the same call-family (definitions come from each language's
+        registry def_patterns, so every supported language contributes call
+        edges; C/C++, JS/TS and Java/Kotlin are each one family, every other
+        language its own, so a coincidental cross-runtime name match does
+        not merge unrelated files);
+      * Python imports that resolve to exactly one in-scope CPython
+        extension module initializer (PyInit_<module>) — the one
+        cross-language edge handled outside the registry.
+
+    Angle-bracket/system includes and ambiguous (multiply-defined) names are
+    ignored on purpose. The result is only a recon context-packing hint:
+    files in the same connected component (size >= 2) become one unit.
+    """
+    if len(files) < 2:
+        return []
+    resolved_root = src_root.resolve()
+    file_set = set(files)
+    by_rel: dict[str, Path] = {}
+    for f in files:
+        try:
+            by_rel[f.resolve().relative_to(resolved_root).as_posix()] = f
+        except ValueError:
+            # A symlink (or junction) that resolves outside the tree is not
+            # an include-resolvable target. Skip it as a target here — it
+            # still participates via call edges and the final partition —
+            # rather than letting relative_to() abort the whole slicer.
+            continue
+    texts = {f: _read_text(f) for f in files}
+    # Call-edge family per file. A bare-name call only unions to a unique
+    # definition when both files share a family (C/C++, JS/TS, Java/Kotlin,
+    # or the same single language). This is the mixed-language guard:
+    # cross-runtime name collisions (a Python `decode(` vs a C `decode`)
+    # never merge, while genuine intra-family cross-language calls still do.
+    # Cross-family bindings are modeled explicitly (Python import -> PyInit).
+    file_family = {f: languages.call_family_for_ext(f.suffix.lower()) for f in files}
+
+    # A function name is an edge source only when it is defined in exactly
+    # one in-scope file *of its call-family*. Keying uniqueness by
+    # (family, name) does two things at once: it scopes uniqueness so an
+    # unrelated cross-runtime duplicate (a Python `decode` vs a C `decode`)
+    # cannot erase a valid same-family edge, and it makes the call lookup
+    # below inherently same-family (a caller only finds a definition under
+    # its own family key).
+    defs: dict[tuple[str, str], set[Path]] = defaultdict(set)
+    for f, text in texts.items():
+        family = file_family.get(f)
+        if family is None:
+            continue
+        def_patterns, _ = _dependency_patterns(f.suffix.lower())
+        for name in _defined_names(text, def_patterns):
+            defs[(family, name)].add(f)
+    unique_defs = {key: next(iter(paths))
+                   for key, paths in defs.items() if len(paths) == 1}
+
+    capi_defs: dict[str, set[Path]] = defaultdict(set)
+    for f, text in texts.items():
+        for module in _python_capi_modules(text):
+            capi_defs[module].add(f)
+    unique_capi_defs = {module: next(iter(paths))
+                        for module, paths in capi_defs.items()
+                        if len(paths) == 1}
+
+    parent: dict[Path, Path] = {f: f for f in files}
+
+    def find(x: Path) -> Path:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: Path, b: Path) -> None:
+        if a not in file_set or b not in file_set or a == b:
+            return
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for f, text in texts.items():
+        _, include_patterns = _dependency_patterns(f.suffix.lower())
+        for include_path in _included_paths(text, include_patterns):
+            target = _local_include_target(src_root, f, include_path, by_rel)
+            if target:
+                union(f, target)
+        if f.suffix == ".py":
+            for module in _python_imported_modules(text):
+                target = unique_capi_defs.get(module)
+                if target:
+                    union(f, target)
+        caller_family = file_family.get(f)
+        if caller_family is not None:
+            for name in _called_names(text):
+                target = unique_defs.get((caller_family, name))
+                if target is not None:
+                    union(f, target)
+
+    components: dict[Path, list[Path]] = defaultdict(list)
+    for f in files:
+        components[find(f)].append(f)
+    units: list[tuple[str, list[Path]]] = []
+    for fs in components.values():
+        if len(fs) < 2:
+            continue
+        fs = sorted(fs, key=str)
+        stems = sorted({f.stem for f in fs})
+        label = "dep:" + "+".join(stems[:3])
+        if len(stems) > 3:
+            label += f"+{len(stems) - 3}more"
+        units.append((label, fs))
+    units.sort(key=lambda u: (u[0], [str(f) for f in u[1]]))
+    return units
+
+
 def _label(parts: tuple[str, ...]) -> str:
     return "/".join(parts) if parts else "root"
 
 
-def build_units(src_root: Path, files: list[Path], locs: dict[Path, int],
-                target_loc: int) -> list[tuple[str, list[Path]]]:
+def build_directory_units(src_root: Path, files: list[Path], locs: dict[Path, int],
+                          target_loc: int) -> list[tuple[str, list[Path]]]:
     """Descend the directory tree, emitting each subtree as one unit once
     its total LOC drops to target_loc or below (or it has no subdirectories
     left to descend into). Files lying directly in an over-target directory
@@ -223,6 +483,19 @@ def build_units(src_root: Path, files: list[Path], locs: dict[Path, int],
         return units
 
     return rec((), files)
+
+
+def build_units(src_root: Path, files: list[Path], locs: dict[Path, int],
+                target_loc: int) -> list[tuple[str, list[Path]]]:
+    """Dependency-coherent units first, then directory units for the files
+    left unconnected. Every in-scope file lands in exactly one unit."""
+    dep_units = build_dependency_units(src_root, files)
+    dep_files = {f for _, fs in dep_units for f in fs}
+    remaining = [f for f in files if f not in dep_files]
+    units = list(dep_units)
+    if remaining:
+        units.extend(build_directory_units(src_root, remaining, locs, target_loc))
+    return units
 
 
 def _loc_split(files: list[Path], locs: dict[Path, int]) -> tuple[list[Path], list[Path]]:

@@ -116,6 +116,35 @@ class Language:
     runner_env: tuple[str, ...] = ()
     crash_patterns: tuple[str, ...] = ()
 
+    # Dependency-slice hints (lib/recon_slicer.py). These drive recon
+    # context-packing only: a wrong match co-locates two files in one audit
+    # slice and never affects what counts as a finding, so broad anchored
+    # keyword patterns are deliberately sufficient — the same lightweight,
+    # registry-owned approach used for crash_patterns above.
+    #   def_patterns      — each captures a named group `name` for a
+    #                       function/method definition in this language.
+    #   include_patterns  — each captures a named group `path` for a
+    #                       target-local file include/require, plus an
+    #                       optional `dir` group for a base-dir prefix
+    #                       (e.g. PHP `__DIR__ . '/x.php'`).
+    # Patterns carry their own inline flags (e.g. `(?m)`, `(?x)`) so the
+    # slicer can compile them uniformly. Empty = no static dependency
+    # signal for this language; recon falls back to directory slicing.
+    def_patterns: tuple[str, ...] = ()
+    include_patterns: tuple[str, ...] = ()
+
+    # Call-edge grouping for recon dependency slicing. Languages that share
+    # a compiler/runtime and routinely call each other by bare name belong
+    # to one family, so a call in one file can connect to a definition in
+    # the other: C/C++, JavaScript/TypeScript, Java/Kotlin. Empty means the
+    # language is its own family (its `name`). A cross-family reference only
+    # ever connects through an explicitly modeled binding (e.g. the Python
+    # import -> PyInit edge), never a coincidental same-name match — that is
+    # the mixed-language false-positive guard. Inclusion criterion: two
+    # languages share a family iff a bare `name()` call in one can resolve
+    # to a definition in the other without an FFI/binding declaration.
+    call_family: str = ""
+
     # Workqueue mode hint. workqueue.mode_for_file returns this string
     # when the file matches this language; the audit loop treats "js"
     # specially (browser-style probes). Empty defaults to "auto".
@@ -175,6 +204,76 @@ _TSAN_BANNER = r"WARNING: ThreadSanitizer:"
 _MSAN_BANNER = r"WARNING: MemorySanitizer:"
 
 
+# ─── Dependency-slice patterns (lib/recon_slicer.py) ───────────────────
+#
+# Function-definition and local-include detectors, one set per language.
+# These are intentionally broad keyword rules ("def", "fn", "func",
+# "sub", "function", quoted "#include") — the industry-stable vocabulary
+# the coding guidelines call out — not an attempt at a parser. They feed
+# recon slice packing only. Each pattern is anchored at line start and
+# carries its own inline flags so recon_slicer compiles them uniformly.
+#
+# `name` is the captured definition name; `path` (and optional `dir`) is
+# the captured include target. A definition only ever produces a slice
+# edge when its name resolves to exactly one in-scope file, so an
+# over-eager match degrades to "no edge", never a wrong finding.
+
+# C / C++ share a definition and a quoted-include detector. The def rule
+# matches `<ret-type> name(...) {` at line start; control-flow keywords
+# are filtered by recon_slicer (NON_CALL_NAMES), not here.
+_C_DEF = (
+    r"(?xm) ^\s* (?:[A-Za-z_][\w:<>,~*&\s]+\s+)? "
+    r"(?P<name>[A-Za-z_]\w*)\s* \([^;{}]*\)\s* (?:const\s*)? \{"
+)
+_C_INCLUDE = r'(?m)^\s*#\s*include\s+"(?P<path>[^"]+)"'
+
+_RUST_DEF = (
+    r"(?m)^\s*(?:pub\s+)?(?:default\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r'(?:const\s+)?(?:extern\s+"[^"]*"\s+)?fn\s+(?P<name>[A-Za-z_]\w*)'
+)
+_GO_DEF = r"(?m)^\s*func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\("
+_SWIFT_DEF = r"(?m)^\s*(?:[\w@]+\s+)*func\s+(?P<name>[A-Za-z_]\w*)\s*[<(]"
+# Java methods carry at least one modifier (public/static/...) so the rule
+# stays anchored; package-private methods are skipped on purpose rather
+# than risk matching variable declarations.
+_JAVA_DEF = (
+    r"(?m)^\s*(?:@\w+\s*)*"
+    r"(?:(?:public|private|protected|static|final|abstract|synchronized|native|default)\s+)+"
+    r"[\w<>\[\],.\s]+?\s+(?P<name>[A-Za-z_]\w*)\s*\([^;{}]*\)\s*"
+    r"(?:throws[\w\s,.]+)?\{"
+)
+_KOTLIN_DEF = (
+    r"(?m)^\s*(?:[\w@]+\s+)*fun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?"
+    r"(?P<name>[A-Za-z_]\w*)\s*\("
+)
+_PY_DEF = r"(?m)^\s*(?:async\s+)?def\s+(?P<name>[A-Za-z_]\w*)\s*\("
+_JS_DEF = (
+    r"(?m)^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?"
+    r"function\s*\*?\s*(?P<name>[A-Za-z_]\w*)\s*\("
+)
+# Modern JS/TS defines most functions as `const name = (args) => ...`
+# (optionally exported / async / with a TS return type). Without this the
+# slicer misses the dominant idiom and JS/TS flat trees lose call edges.
+# Anchored to a const/let/var binding immediately followed by an arrow, so
+# it does not match plain value bindings, arrays, objects, or regex literals.
+_JS_ARROW_DEF = (
+    r"(?m)^\s*(?:export\s+)?(?:default\s+)?(?:const|let|var)\s+"
+    r"(?P<name>[A-Za-z_]\w*)\s*=\s*(?:async\s+)?"
+    r"(?:\([^)]*\)|[A-Za-z_]\w*)\s*(?::\s*[\w<>\[\].,|& ]+?)?=>"
+)
+_PHP_DEF = (
+    r"(?m)^\s*(?:<\?php\s+)?(?:(?:public|private|protected|static|final|abstract)\s+)*"
+    r"function\s+(?P<name>[A-Za-z_]\w*)\s*\("
+)
+_PHP_INCLUDE = (
+    r"""(?mx)^\s*(?:<\?php\s+)?(?:require|include)(?:_once)?\s*\(?\s*"""
+    r"""(?:(?P<dir>__DIR__)\s*\.\s*)?["'](?P<path>[^"']+)["']"""
+)
+_RUBY_DEF = r"(?m)^\s*def\s+(?:self\.)?(?P<name>[A-Za-z_]\w*)"
+_PERL_DEF = r"(?m)^\s*sub\s+(?P<name>[A-Za-z_]\w*)"
+_R_DEF = r"(?m)^\s*(?P<name>[A-Za-z_][\w.]*)\s*(?:<-|=)\s*function\s*\("
+
+
 # Node package-manager install chains, keyed by manager. Each chain is
 # "primary first, then manager-specific fallbacks." `_js_bootstrap_chain`
 # detects the manager a checkout expects (lockfile / Corepack
@@ -209,6 +308,9 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="c",
         source_exts=(".c", ".h"),
+        def_patterns=(_C_DEF,),
+        include_patterns=(_C_INCLUDE,),
+        call_family="c",
         harness_exts=(".c",),
         build_systems=("cmake", "meson", "autotools", "make", "mach"),
         interpreted=False,
@@ -232,6 +334,9 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="cpp",
         source_exts=(".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"),
+        def_patterns=(_C_DEF,),
+        include_patterns=(_C_INCLUDE,),
+        call_family="c",
         harness_exts=(".cc", ".cpp", ".cxx", ".C"),
         build_systems=(),
         interpreted=False,
@@ -246,6 +351,7 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="rust",
         source_exts=(".rs",),
+        def_patterns=(_RUST_DEF,),
         harness_exts=(".rs",),
         build_systems=("cargo",),
         interpreted=False,
@@ -293,6 +399,7 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="go",
         source_exts=(".go",),
+        def_patterns=(_GO_DEF,),
         harness_exts=(".go",),
         build_systems=("go",),
         interpreted=False,
@@ -326,6 +433,7 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="swift",
         source_exts=(".swift",),
+        def_patterns=(_SWIFT_DEF,),
         harness_exts=(".swift",),
         build_systems=("swift",),
         interpreted=False,
@@ -369,6 +477,8 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="java",
         source_exts=(".java",),
+        def_patterns=(_JAVA_DEF,),
+        call_family="jvm",
         harness_exts=(".java",),
         build_systems=("maven", "gradle"),
         interpreted=True,
@@ -400,6 +510,8 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="kotlin",
         source_exts=(".kt", ".kts"),
+        def_patterns=(_KOTLIN_DEF,),
+        call_family="jvm",
         harness_exts=(".kt", ".kts"),
         build_systems=("kotlin",),
         interpreted=False,
@@ -432,6 +544,7 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="python",
         source_exts=(".py", ".pyx", ".pxd"),
+        def_patterns=(_PY_DEF,),
         harness_exts=(".py",),
         build_systems=("python",),
         interpreted=True,
@@ -505,6 +618,8 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="javascript",
         source_exts=(".js", ".mjs", ".cjs"),
+        def_patterns=(_JS_DEF, _JS_ARROW_DEF),
+        call_family="js",
         harness_exts=(".js", ".mjs"),
         build_systems=("npm",),
         interpreted=True,
@@ -558,6 +673,8 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="typescript",
         source_exts=(".ts", ".tsx"),
+        def_patterns=(_JS_DEF, _JS_ARROW_DEF),
+        call_family="js",
         harness_exts=(".ts", ".tsx"),
         build_systems=(),
         interpreted=True,
@@ -572,6 +689,8 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="php",
         source_exts=(".php",),
+        def_patterns=(_PHP_DEF,),
+        include_patterns=(_PHP_INCLUDE,),
         harness_exts=(".php",),
         build_systems=("composer",),
         interpreted=True,
@@ -600,6 +719,7 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="ruby",
         source_exts=(".rb",),
+        def_patterns=(_RUBY_DEF,),
         harness_exts=(".rb",),
         build_systems=("bundler",),
         interpreted=True,
@@ -632,6 +752,7 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="perl",
         source_exts=(".pl", ".pm"),
+        def_patterns=(_PERL_DEF,),
         harness_exts=(".pl",),
         build_systems=("perl",),
         interpreted=True,
@@ -650,6 +771,7 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         name="r",
         source_exts=(".r", ".R"),
+        def_patterns=(_R_DEF,),
         harness_exts=(".r", ".R"),
         build_systems=("rlang",),
         interpreted=True,
@@ -822,6 +944,22 @@ def mode_for_ext(ext: str) -> str:
     if lang and lang.work_mode:
         return lang.work_mode
     return "auto"
+
+
+def call_family_for_ext(ext: str) -> Optional[str]:
+    """Recon call-edge family for a source extension (lib/recon_slicer.py).
+
+    Two extensions share a family iff a bare-name call in one can resolve
+    to a definition in the other without an FFI/binding declaration — so
+    C/C++, JavaScript/TypeScript, and Java/Kotlin each collapse to one
+    family while every other language is its own. Falls back to the
+    language name when no explicit family is declared, and returns None
+    for an unknown extension (no language claims it).
+    """
+    lang = for_source_ext(ext)
+    if lang is None:
+        return None
+    return lang.call_family or lang.name
 
 
 def runner_table() -> dict[str, dict]:
