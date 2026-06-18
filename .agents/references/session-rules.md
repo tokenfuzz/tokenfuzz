@@ -144,6 +144,8 @@ can dump tens of KB of JSONL into the transcript; use
   - `bin/state recent-hyps  [--agent N] [--card-id ID] [--status REGEX] [--limit N]`
   - `bin/state recent-runs  [--agent N] [--hypothesis-id H-...] [--verdict REGEX]`
   - `bin/state recent-tried --agent N|all [--verdict REGEX] [--hypothesis H-...]`
+    shows a `closest` column for coverage near-misses; mutate around that
+    frame before restarting from a broader seed.
   `show-recent` is the one-call default when you need a compact session
   snapshot. Each accessor is ~6–10× smaller than the equivalent `tail` and
   returns only the columns triage actually needs. The full files stay on disk; reach for
@@ -212,6 +214,10 @@ bin/state list-notes    [--agent N] [--hypothesis-id H-...] [--kind KIND] [--lim
 bin/state recent-tried  --agent N|all [--verdict REGEX] [--hypothesis H-...] [--target SUBSTR] [--limit N]
 bin/state explain-queue [--agent N] [--mode MODE] [--role ROLE] [--strategy S] [--top N] [--all]
 ```
+
+`bin/state resume` includes Runtime Feedback derived from recent probe
+artifacts. Treat it as next-mutation or harness-repair guidance only, not
+filing/discard evidence.
 
 Search & diff helpers:
 

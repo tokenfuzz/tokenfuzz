@@ -607,6 +607,17 @@ with tempfile.TemporaryDirectory() as td:
               "CLI stale-python-extensions: emits absolute path")
 
 
+# all_crash_patterns unions every Language's crash_patterns (deduped) so
+# consumers stay generic across every sanitizer/runtime the registry knows.
+_crash_pats = languages.all_crash_patterns()
+assert_eq(True, len(_crash_pats) > 0, "all_crash_patterns: non-empty")
+assert_eq(len(_crash_pats), len(set(_crash_pats)), "all_crash_patterns: deduped")
+assert_eq(True, any("AddressSanitizer" in p for p in _crash_pats),
+          "all_crash_patterns: includes the ASan banner")
+assert_eq(True, any("ThreadSanitizer" in p for p in _crash_pats),
+          "all_crash_patterns: includes the TSan banner")
+
+
 # ─── Summary ───────────────────────────────────────────────────────
 
 print()

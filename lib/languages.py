@@ -734,6 +734,26 @@ def all_source_exts() -> frozenset[str]:
     return frozenset(out)
 
 
+def all_crash_patterns() -> tuple[str, ...]:
+    """All runtime crash / sanitizer banners across every Language.
+
+    The deduped union of every Language's ``crash_patterns`` — the LLVM
+    sanitizer banners (ASan/UBSan/MSan/TSan) plus per-runtime crash
+    signatures (Rust/Go panics, ``fatal runtime error:``). Adding a language
+    or a new sanitizer banner to LANGUAGES widens this everywhere it is used,
+    so consumers stay generic across every sanitizer the harness supports.
+    Registry order is preserved so a compiled alternation is deterministic.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for lang in LANGUAGES:
+        for pat in lang.crash_patterns:
+            if pat not in seen:
+                seen.add(pat)
+                out.append(pat)
+    return tuple(out)
+
+
 def all_harness_exts(*, compiled: Optional[bool] = None) -> frozenset[str]:
     """All extensions probe accepts as a // HARNESS: source.
 

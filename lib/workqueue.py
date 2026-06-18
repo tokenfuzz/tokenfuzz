@@ -261,6 +261,41 @@ def patch_audit_boost(desc: str) -> int:
         return 0
     return min(20 + (matches - 1) * 5, 35)
 
+
+# Most of what the next-action hint needs — crash, no-exec, coverage miss,
+# timeout, clean — is already in the structured `verdict`, so we route on that
+# instead of re-grepping it out of text. Only two text signals add information
+# the verdict cannot, so only these two are scanned:
+#   - crash-signal: a known crash/sanitizer banner is present although the
+#     verdict is not a crash (a possible missed crash — inspect before
+#     discarding). The banners are the shared per-language crash_patterns from
+#     lib/languages.py, so this stays in sync with every sanitizer and runtime
+#     the harness supports instead of a local, rot-prone copy.
+#   - format-reject: the input was rejected at parse/format time rather than
+#     reaching deeper code (reseed instead of mutating).
+RUNTIME_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "crash-signal",
+        re.compile(
+            "|".join(f"(?:{p})" for p in languages.all_crash_patterns()) or r"(?!)"
+        ),
+    ),
+    (
+        "format-reject",
+        re.compile(
+            r"\b(?:parse|syntax|decode|format|magic|checksum|length)\s+"
+            r"(?:error|fail|invalid|mismatch|rejected?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+# Coverage near-miss: the probe's coverage gate prints the closest reached frame
+# when a testcase ran near, but not at, the suspicious point.
+NEAR_MISS_RE = re.compile(
+    r"(?:closest reached:|closest:)\s*(?!<none>|NO_PROXIMITY)([^\n\r;)]+)",
+    re.IGNORECASE,
+)
+
 CI_PATCH_TERMS = (
     "ci",
     "workflow",
@@ -4281,6 +4316,9 @@ def state_resume(
             "",
             "## Recent Runs",
             recent_runs(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, card_id=card_id, rows=runs).strip(),
+            "",
+            "## Runtime Feedback",
+            runtime_feedback(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, card_id=card_id, rows=runs).strip(),
         ]
     )
     if active:
@@ -4405,6 +4443,168 @@ def recent_runs(
             f"{r.get('agent','')}|{r.get('hypothesis_id','')}|{r.get('card_id','')}|{tc}"
         )
     return "\n".join(out) + "\n"
+
+
+def runtime_feedback(
+    ctx: Context,
+    limit: int = 20,
+    agent: str = "",
+    hypothesis_id: str = "",
+    card_id: str = "",
+    rows: list[dict] | None = None,
+) -> str:
+    """Summarize recent probe outcomes into report-only next-action hints."""
+    rows = list(rows) if rows is not None else read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl")
+    if agent:
+        rows = [r for r in rows if r.get("agent", "") == agent]
+    if hypothesis_id:
+        rows = [r for r in rows if r.get("hypothesis_id", "") == hypothesis_id]
+        scope = f"hypothesis `{hypothesis_id}`"
+    elif card_id:
+        rows = [r for r in rows if r.get("card_id", "") == card_id]
+        scope = f"card `{card_id}`"
+    else:
+        scope = "agent recent runs"
+
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    if limit > 0:
+        rows = rows[:limit]
+
+    out = ["scope|recent_verdicts|runtime_signals|diagnosis|feedback"]
+    if not rows:
+        out.append(
+            f"{scope}|none|none|needs-first-probe|"
+            "write one testcase, run bin/probe, then update structured state"
+        )
+        return "\n".join(out) + "\n"
+
+    verdict_counts: dict[str, int] = {}
+    signal_counts: dict[str, int] = {}
+    for row in rows:
+        verdict = (row.get("verdict") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+        for signal in _runtime_row_signals(ctx, row):
+            signal_counts[signal] = signal_counts.get(signal, 0) + 1
+
+    verdict_text = ", ".join(
+        f"{verdict}={verdict_counts[verdict]}"
+        for verdict in sorted(verdict_counts)
+    )
+    signal_text = ", ".join(
+        f"{signal}={signal_counts[signal]}"
+        for signal in sorted(signal_counts)
+    ) or "none"
+    diagnosis, feedback = _runtime_feedback_decision(
+        verdict_counts, sum(verdict_counts.values()), signal_counts
+    )
+    out.append(f"{scope}|{verdict_text}|{signal_text}|{diagnosis}|{feedback}")
+    return "\n".join(out) + "\n"
+
+
+def _runtime_row_signals(ctx: Context, row: dict) -> list[str]:
+    text = _runtime_artifact_text(ctx, row)
+    if not text:
+        return []
+    signals = [
+        label
+        for label, pattern in RUNTIME_SIGNAL_PATTERNS
+        if pattern.search(text)
+    ]
+    if _runtime_has_near_miss(text):
+        signals.append("coverage-near-miss")
+    return signals
+
+
+def _runtime_artifact_text(ctx: Context, row: dict) -> str:
+    """Read the head of the saved sanitizer/runner output for one run.
+
+    runs.jsonl stores `asan_output` as a path. The signals we scan for —
+    sanitizer banners, parse/format errors, and the coverage gate's closest
+    frame — all appear at the top of the output, so we read only a bounded
+    prefix rather than the whole file. The file is not always size-capped:
+    bin/probe caps only very large outputs, and rows can also come from older
+    state, `bin/state add-run`, or external tooling that capped nothing. If the
+    value is not a readable file, treat it as inline text.
+    """
+    value = str(row.get("asan_output") or "").strip()
+    if not value:
+        return ""
+    path = Path(value)
+    if not path.is_absolute():
+        path = ctx.results_dir / path
+    try:
+        if path.is_file():
+            # 64 KiB comfortably covers the head signals above without slurping
+            # a multi-megabyte log into memory on every `state resume`.
+            with open(path, "rb") as fh:
+                return fh.read(65536).decode("utf-8", errors="replace")
+    except OSError:
+        pass
+    return value
+
+
+def _runtime_has_near_miss(text: str) -> bool:
+    for match in NEAR_MISS_RE.finditer(text):
+        closest = match.group(1).strip().strip("'\"")
+        if closest and closest.lower() not in {"<none>", "none", "no_proximity"}:
+            return True
+    return False
+
+
+def _runtime_feedback_decision(
+    verdicts: dict[str, int],
+    total: int,
+    signals: dict[str, int],
+) -> tuple[str, str]:
+    if any(v in verdicts for v in ("CRASH", "DIFF", "FIND")):
+        return (
+            "productive-artifact",
+            "productive signal exists; confirm, file, and cluster nearby before pivoting",
+        )
+    if signals.get("crash-signal", 0):
+        return (
+            "artifact-mismatch",
+            "crash or sanitizer text appears in saved output; inspect artifact before discarding",
+        )
+    if verdicts.get("NO_EXEC", 0):
+        return (
+            "harness-setup",
+            "runs are not executing; fix testcase header, harness build, runner path, or target.toml before mutating inputs",
+        )
+    if signals.get("coverage-near-miss", 0):
+        return (
+            "near-miss-targeting",
+            "coverage near-miss seen; mutate around the closest reached frame before broadening seeds",
+        )
+    # format-reject is the more specific diagnosis: a parse/format rejection is
+    # often also recorded as a NO_HIT/MISSED verdict, so check it before the
+    # generic coverage-routing fallback or its precise seed advice gets masked.
+    if signals.get("format-reject", 0) >= max(1, total // 2):
+        return (
+            "seed-format",
+            "format rejects dominate; start from bin/find-seed output and preserve magic, length, checksum, and nesting",
+        )
+    miss_count = verdicts.get("NO_HIT", 0) + verdicts.get("MISSED", 0)
+    if miss_count >= max(1, total // 2):
+        return (
+            "coverage-routing",
+            "coverage misses dominate; use bin/find-seed or a broader valid seed before spending more sanitizer budget",
+        )
+    timeout_count = verdicts.get("TIMEOUT", 0) + verdicts.get("TIMEOUT_ONLY", 0)
+    if timeout_count >= max(1, total // 2):
+        return (
+            "timeout-budget",
+            "timeout signal dominates; minimize input and isolate runner budget before filing",
+        )
+    if verdicts.get("CLEAN", 0) == total and total >= 2:
+        return (
+            "clean-no-diagnostic",
+            "CLEAN-only evidence; revise input shape or guard gap with seed, allocator, or state variants before discard",
+        )
+    return (
+        "mixed-signal",
+        "mixed runtime signal; compare testcase shapes and continue the highest-signal variant",
+    )
 
 
 def recent_notes(
@@ -4589,7 +4789,7 @@ def recent_tried(
 ) -> str:
     """Slim digest of tried-inputs-N.log (parsed key=value records).
 
-    Returns timestamp|verdict|mode|hash|hypothesis|target|testcase. Replaces
+    Returns timestamp|verdict|mode|hash|hypothesis|target|closest|testcase. Replaces
     `tail -80 tried-inputs-N.log` which returns ~22 KB per call when the agent
     only needs to confirm a hash isn't a duplicate. --agent picks the file;
     --agent all reads every per-agent log under RESULTS_DIR.
@@ -4633,13 +4833,16 @@ def recent_tried(
     if limit > 0:
         rows = rows[:limit]
 
-    out = ["timestamp|verdict|mode|hash|hypothesis|target|testcase"]
+    out = ["timestamp|verdict|mode|hash|hypothesis|target|closest|testcase"]
     for r in rows:
         tgt = (r.get("target") or "").replace("|", "/").replace("\n", " ")
+        closest = (r.get("closest") or "").replace("|", "/").replace("\n", " ")
+        if len(closest) > 120:
+            closest = closest[:117] + "..."
         tc = (r.get("testcase") or "").replace("|", "/").replace("\n", " ")
         out.append(
             f"{r.get('timestamp','')}|{r.get('verdict','')}|{r.get('mode','')}|"
-            f"{r.get('hash','')}|{r.get('hypothesis','')}|{tgt}|{tc}"
+            f"{r.get('hash','')}|{r.get('hypothesis','')}|{tgt}|{closest}|{tc}"
         )
     return "\n".join(out) + "\n"
 

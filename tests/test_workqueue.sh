@@ -1276,6 +1276,59 @@ bad_v=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --tar
   recent-runs --verdict '[bad' 2>&1 || true)
 assert_match 'invalid --verdict regex' "$bad_v" "recent-runs: bad regex reported, not raised"
 
+# Runtime feedback is report-only guidance from recent probe artifacts.
+mkdir -p "$RESULTS_DIR/scratch-3"
+cat > "$RESULTS_DIR/scratch-3/coverage-near.txt" <<'EOF'
+COVERAGE_GATE: MISSED — ASan skipped. Revise testcase (closest: Mock::near_target)
+EOF
+cat > "$RESULTS_DIR/scratch-3/format.txt" <<'EOF'
+parse error: invalid magic while decoding testcase
+EOF
+cat > "$RESULTS_DIR/scratch-3/sanitizer.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xdeadbeef
+EOF
+feedback_out=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$RESULTS_DIR" "$TARGET_ROOT" "$TARGET_SLUG" <<'PY'
+import sys
+from pathlib import Path
+from workqueue import Context, runtime_feedback
+
+results = Path(sys.argv[1])
+ctx = Context(Path("."), Path(sys.argv[2]), sys.argv[3], results, "none")
+print(runtime_feedback(ctx, rows=[
+    {"verdict": "CLEAN", "agent": "1", "asan_output": str(results / "scratch-3/clean-1.txt"), "created_at": "2026-06-01T00:00:11Z"},
+    {"verdict": "CLEAN", "agent": "1", "asan_output": str(results / "scratch-3/clean-2.txt"), "created_at": "2026-06-01T00:00:12Z"},
+]), end="")
+print(runtime_feedback(ctx, rows=[
+    {"verdict": "NO_HIT", "agent": "1", "asan_output": str(results / "scratch-3/coverage-near.txt"), "created_at": "2026-06-01T00:00:13Z"},
+]), end="")
+print(runtime_feedback(ctx, rows=[
+    {"verdict": "CLEAN", "agent": "1", "asan_output": str(results / "scratch-3/format.txt"), "created_at": "2026-06-01T00:00:14Z"},
+]), end="")
+# A parse rejection recorded as NO_HIT must still get the precise seed advice,
+# not the generic coverage-routing fallback (format-reject before coverage).
+print(runtime_feedback(ctx, rows=[
+    {"verdict": "NO_HIT", "agent": "1", "asan_output": str(results / "scratch-3/format.txt"), "created_at": "2026-06-01T00:00:15Z"},
+]), end="")
+# A sanitizer banner in saved output under a non-crash verdict must flag a
+# possible missed crash (artifact-mismatch), not be silently treated as clean.
+print(runtime_feedback(ctx, rows=[
+    {"verdict": "CLEAN", "agent": "1", "asan_output": str(results / "scratch-3/sanitizer.txt"), "created_at": "2026-06-01T00:00:16Z"},
+]), end="")
+PY
+)
+assert_match 'scope\|recent_verdicts\|runtime_signals\|diagnosis\|feedback' "$feedback_out" \
+  "runtime feedback: header includes signal and diagnosis columns"
+assert_match 'clean-no-diagnostic.*CLEAN-only evidence' "$feedback_out" \
+  "runtime feedback: repeated clean probes trigger variant guidance"
+assert_match 'coverage-near-miss=1.*near-miss-targeting.*closest reached frame' "$feedback_out" \
+  "runtime feedback: coverage near misses trigger closest-frame guidance"
+assert_match 'format-reject=1.*seed-format.*bin/find-seed' "$feedback_out" \
+  "runtime feedback: format rejects trigger seed-first guidance"
+assert_match 'NO_HIT=1.*format-reject=1.*seed-format' "$feedback_out" \
+  "runtime feedback: format reject under NO_HIT verdict keeps precise seed advice"
+assert_match 'crash-signal=1.*artifact-mismatch' "$feedback_out" \
+  "runtime feedback: sanitizer banner under non-crash verdict flags artifact-mismatch"
+
 # ── show-recent: one-call compact session snapshot ──
 show_recent=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   show-recent --hyps 1 --runs 1 --claims 1)
@@ -1325,20 +1378,23 @@ TRIED_LOG="$RESULTS_DIR/tried-inputs-1.log"
     "$RESULTS_DIR/scratch-1/v1.xml" "alpha/core/ThingProcessor.cpp:func:1"
   printf '2026-05-02T02:00:00Z verdict=CRASH mode=generic testcase=%s hash=bbb222 runs=1 crashes=1 execs=1 hypothesis=H2 target=%s closest=<none> hits_verdict=?\n' \
     "$RESULTS_DIR/scratch-1/v2.xml" "alpha/core/Other.cpp:func2:1"
-  printf '2026-05-02T03:00:00Z verdict=NO_HIT mode=browser testcase=%s hash=ccc333 runs=0 crashes=0 execs=0 hypothesis=H3 target=%s closest=<none> hits_verdict=MISSED\n' \
+  printf '2026-05-02T03:00:00Z verdict=NO_HIT mode=browser testcase=%s hash=ccc333 runs=0 crashes=0 execs=0 hypothesis=H3 target=%s closest=%q hits_verdict=MISSED\n' \
+    "$RESULTS_DIR/scratch-1/v3.html" "beta/io/plain.c:helper:1" "Mock::near_target"
+  printf '2026-05-02T03:30:00Z verdict=NO_HIT mode=browser testcase=%s hash=eee555 runs=0 crashes=0 execs=0 hypothesis=H4 target=%s closest=<none> hits_verdict=MISSED\n' \
     "$RESULTS_DIR/scratch-1/v3.html" "beta/io/plain.c:helper:1"
 } > "$TRIED_LOG"
 
 # Default: --agent N parses one log, returns most-recent first.
 recent_tried=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   recent-tried --agent 1)
-assert_match '^timestamp\|verdict\|mode\|hash\|hypothesis\|target\|testcase$' "$recent_tried" "recent-tried: header row"
+assert_match '^timestamp\|verdict\|mode\|hash\|hypothesis\|target\|closest\|testcase$' "$recent_tried" "recent-tried: header row"
 assert_match 'aaa111' "$recent_tried" "recent-tried: contains hash 1"
 assert_match 'bbb222' "$recent_tried" "recent-tried: contains hash 2"
 assert_match 'ccc333' "$recent_tried" "recent-tried: contains hash 3"
-# Sorted desc by timestamp — first data row should be ccc333 (03:00:00).
+assert_match 'Mock::near_target' "$recent_tried" "recent-tried: preserves closest reached frame"
+# Sorted desc by timestamp — first data row should be eee555 (03:30:00).
 first_data=$(printf '%s\n' "$recent_tried" | sed -n '2p')
-assert_match 'ccc333' "$first_data" "recent-tried: sorted most-recent first"
+assert_match 'eee555' "$first_data" "recent-tried: sorted most-recent first"
 
 # Verdict filter
 tried_crash=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
@@ -2239,6 +2295,8 @@ assert_match "## Last Terminal Reason" "$resume_out" "state resume: includes las
 assert_match "three clean variants; guard holds" "$resume_out" "state resume: terminal reason includes note"
 assert_match "R-6" "$resume_out" "state resume: includes newest run"
 assert_not_match "R-old" "$resume_out" "state resume: limits recent runs to last 5"
+assert_match "## Runtime Feedback" "$resume_out" "state resume: includes runtime feedback"
+assert_match "clean-no-diagnostic" "$resume_out" "state resume: runtime feedback summarizes repeated clean probes"
 assert_match "## Guard Notes" "$resume_out" "state resume: includes guard notes section"
 assert_match "guard six" "$resume_out" "state resume: includes newest guard note"
 assert_not_match "old guard note|verbose data flow" "$resume_out" "state resume: guard notes are filtered and limited"

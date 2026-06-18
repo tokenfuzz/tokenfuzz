@@ -55,6 +55,8 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
   building a hypothesis. Append a new entry on a reproducible guard string.
 - `bin/state recent-tried --agent N --limit 40` after compression. Never
   rerun identical inputs.
+- If recent-tried shows `closest`, mutate around that near-miss frame before
+  restarting from a broader seed.
 - `bin/probe-history <testcase>` before re-probing — if a confirmed
   verdict exists, reuse it; only re-run when state has shifted.
 - Do not run `bin/rank-work` just to browse cards. It rewrites the queue and
@@ -125,6 +127,9 @@ list-notes    [--agent N] [--hypothesis-id H-...] [--kind KIND] [--limit N]  # a
 recent-tried  --agent N|all [--verdict REGEX] [--target SUBSTR] [--limit N]
 explain-queue [--agent N] [--mode MODE] [--role ROLE] [--strategy S] [--top N] [--all]
 ```
+
+`resume` Runtime Feedback is next-mutation or harness-repair guidance from
+recent probe artifacts. It is not filing or discard evidence.
 
 ## State file discipline
 
