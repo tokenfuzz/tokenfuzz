@@ -266,3 +266,46 @@ audit_llvm_tool() {
   fi
   printf '%s\n' "$tool"
 }
+
+# pool_run POOL WORKER ITEM...
+#
+# Run WORKER once per ITEM through a bounded FIFO sliding-window fork pool —
+# the scheduling idiom that replaced all-jobs batch barriers for a 10-60x
+# housekeeping speedup. Keep POOL workers in flight at once; when the window is
+# full, block on the OLDEST worker (a specific pid — bash 3.2 has no `wait -n`)
+# and launch the next immediately, so the batch never idles on its slowest
+# member. Workers are independent (each writes its own sidecar/output), so
+# window ordering changes scheduling only, never results.
+#
+# WORKER is a function name; it is invoked as `WORKER ITEM INDEX` (INDEX is
+# 1-based across all items) and runs in a subshell that still sees the caller's
+# dynamically-scoped locals (e.g. bin_dir, outcome_dir). Falls back to in-line
+# serial execution when POOL<=1 or there is a single item.
+#
+# The final drain waits ONLY on this pool's own worker pids — never a bare
+# `wait`, which would also reap unrelated long-lived siblings of the calling
+# shell (e.g. the benchmark console `tee`) and deadlock the caller.
+pool_run() {
+  local _pool="$1" _worker="$2"
+  shift 2
+  local _i=0 _it
+  if [ "$_pool" -le 1 ] || [ "$#" -le 1 ]; then
+    for _it in ${1+"$@"}; do
+      _i=$((_i + 1))
+      "$_worker" "$_it" "$_i"
+    done
+    return 0
+  fi
+  local -a _pp=()
+  for _it in "$@"; do
+    _i=$((_i + 1))
+    ( "$_worker" "$_it" "$_i" ) &
+    _pp+=("$!")
+    if [ "${#_pp[@]}" -ge "$_pool" ]; then
+      wait "${_pp[0]}" 2>/dev/null || true
+      _pp=("${_pp[@]:1}")
+    fi
+  done
+  [ "${#_pp[@]}" -gt 0 ] && { wait "${_pp[@]}" 2>/dev/null || true; }
+  return 0
+}

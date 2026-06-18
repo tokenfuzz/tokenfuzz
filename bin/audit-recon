@@ -884,15 +884,28 @@ if [ "$VALIDATE_MODE" != "off" ] && [ -s "$OUT_PATH" ]; then
       triage_parallel="${RECON_TRIAGE_PARALLEL:-6}"
       triage_max_deep="${RECON_TRIAGE_MAX_DEEP:-24}"
       n_survivors=0
-      # FIFO sliding window instead of an all-jobs batch barrier: once the
-      # pool is full, wait for the OLDEST validator to finish (a specific
-      # pid — portable to bash 3.2, which has no `wait -n`) and immediately
-      # launch the next one. A bare `wait` here would block on the whole
-      # batch, so one slow validator (300s) idled the other five for its
-      # full duration before the next batch could start. Validators write
-      # their own per-id result file, so window ordering changes scheduling
-      # only, never the verdicts.
-      pids=()
+      # One independent validator per survivor. Each writes its own per-id
+      # result file ($triage_dir/s3-<id>.tsv), so window ordering changes
+      # scheduling only, never the verdicts. Reads RESULTS_DIR/TARGET_PATH/
+      # triage_dir from this stage via dynamic scope.
+      _recon_validate_pool_worker() {
+        local fid="$1" vres vrc vv
+        if vres=$(triage_validate_finding "$RESULTS_DIR/recon/$fid/finding.json" "$TARGET_PATH" "$RESULTS_DIR" 2>/dev/null); then
+          vrc=0
+        else
+          vrc=$?
+        fi
+        case "$vrc" in
+          0) vv=Promote ;;
+          1) vv=Reject ;;
+          *) vv=Uncertain ;;
+        esac
+        printf '%s\t%s\t%s\n' "$fid" "$vv" "$vres" > "$triage_dir/s3-$fid.tsv"
+      }
+
+      # Collect the survivors (already capped by --limit), materialising each
+      # finding.json, then deep-verify them through the bounded validator pool.
+      survivor_ids=()
       while IFS= read -r fid <&3; do
         [ -n "$fid" ] || continue
         rep_line=$(grep -F "\"id\": \"$fid\"" "$reps_path" | head -1 || true)
@@ -902,27 +915,10 @@ if [ "$VALIDATE_MODE" != "off" ] && [ -s "$OUT_PATH" ]; then
         finding_dir="$RESULTS_DIR/recon/$fid"
         mkdir -p "$finding_dir"
         [ -f "$finding_dir/finding.json" ] || printf '%s\n' "$rep_line" > "$finding_dir/finding.json"
-        (
-          if vres=$(triage_validate_finding "$finding_dir/finding.json" "$TARGET_PATH" "$RESULTS_DIR" 2>/dev/null); then
-            vrc=0
-          else
-            vrc=$?
-          fi
-          case "$vrc" in
-            0) vv=Promote ;;
-            1) vv=Reject ;;
-            *) vv=Uncertain ;;
-          esac
-          printf '%s\t%s\t%s\n' "$fid" "$vv" "$vres" > "$triage_dir/s3-$fid.tsv"
-        ) &
-        pids+=("$!")
-        if [ "${#pids[@]}" -ge "$triage_parallel" ]; then
-          wait "${pids[0]}" 2>/dev/null || true
-          pids=("${pids[@]:1}")
-        fi
+        survivor_ids+=("$fid")
       done 3< <(python3 "$SCRIPT_ROOT/lib/recon_triage.py" survivors \
         --verdicts "$verdicts_path" --limit "$triage_max_deep" 2>/dev/null)
-      wait || true
+      pool_run "$triage_parallel" _recon_validate_pool_worker ${survivor_ids[@]+"${survivor_ids[@]}"}
       cat "$triage_dir"/s3-*.tsv > "$stage3_path" 2>/dev/null || true
       log "Recon triage: $n_survivors survivor(s) deep-verified by one independent validator each"
     else

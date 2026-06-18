@@ -8,6 +8,13 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 export SCRIPT_ROOT
 
+# Foundational shared lib (pure function defs, no source-time side effects).
+# Production sources it before every other lib; load it here too so tests that
+# source lib/triage.sh or lib/*.sh directly still get its helpers (audit_log,
+# pool_run, …) without each test having to source it itself.
+# shellcheck disable=SC1091
+source "$SCRIPT_ROOT/lib/platform.sh"
+
 # Block real Claude/Codex calls when a test is run directly (not via
 # tests/run-tests.sh). Per-decision mocks override.
 export LLM_DECIDE_DISABLE="${LLM_DECIDE_DISABLE:-1}"

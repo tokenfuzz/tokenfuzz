@@ -2376,6 +2376,12 @@ _triage_one_crash_dir() {
   return 0
 }
 
+# Worker for the crash-sweep pool: $1=crash dir, $2=1-based index. Reads
+# bin_dir/outcome_dir from triage_crash_dirs via dynamic scope.
+_triage_crash_pool_worker() {
+  _triage_one_crash_dir "$1" "$bin_dir" "$outcome_dir/$2" || true
+}
+
 triage_crash_dirs() {
   mkdir -p "$RESULTS_DIR/crashes" "$RESULTS_DIR/crashes-rejected" 2>/dev/null || true
   _requeue_crash_needs_review_dirs
@@ -2404,28 +2410,11 @@ triage_crash_dirs() {
     mkdir -p "$outcome_dir" 2>/dev/null || true
   fi
 
-  # FIFO-windowed pool: when full, wait on the OLDEST worker (specific pid —
-  # portable to bash 3.2, no `wait -n`) and launch the next immediately,
-  # rather than an all-jobs batch barrier that idles the batch on its slowest
-  # crash (the 3-gate chain + reachability lookup makes per-dir latency vary).
-  # Each worker writes its own indexed outcome file and the tally below cats
-  # them all AFTER the final wait, so window ordering changes scheduling only.
-  local idx=0
-  local -a _cpids=()
-  for d in "${crash_dirs[@]}"; do
-    idx=$((idx + 1))
-    if [ "$pool" -le 1 ] || [ "${#crash_dirs[@]}" -le 1 ]; then
-      _triage_one_crash_dir "$d" "$bin_dir" "$outcome_dir/$idx" || true
-    else
-      ( _triage_one_crash_dir "$d" "$bin_dir" "$outcome_dir/$idx" ) &
-      _cpids+=("$!")
-      if [ "${#_cpids[@]}" -ge "$pool" ]; then
-        wait "${_cpids[0]}" 2>/dev/null || true
-        _cpids=("${_cpids[@]:1}")
-      fi
-    fi
-  done
-  [ "${#_cpids[@]}" -gt 0 ] && { wait || true; }
+  # Each worker writes its own indexed outcome file ($outcome_dir/<n>); the
+  # tally below cats them all AFTER the pool drains, so the bounded FIFO window
+  # (vs an all-jobs barrier that idles on the slowest 3-gate + reachability
+  # chain) changes scheduling only, never a disposition.
+  pool_run "$pool" _triage_crash_pool_worker "${crash_dirs[@]}"
 
   local bad rejected
   bad=$(cat "$outcome_dir"/* 2>/dev/null | grep -cx 'bad' 2>/dev/null || true)
@@ -2898,6 +2887,12 @@ _validate_one_find_dir() {
   return 0
 }
 
+# Worker for the find-gate pool: $1=finding dir. Reads bin_dir from
+# validate_find_gate via dynamic scope.
+_validate_find_pool_worker() {
+  _validate_one_find_dir "$1" "$bin_dir" || true
+}
+
 validate_find_gate() {
   local bin_dir
   bin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
@@ -2923,21 +2918,8 @@ validate_find_gate() {
   # sidecars), so this changes scheduling only, never a verdict. Clustering
   # below stays AFTER the final wait — it reads every surviving report.
   local pool
-  local -a _vpids=()
   pool=$(_triage_dir_pool_size)
-  for d in ${find_dirs[@]+"${find_dirs[@]}"}; do
-    if [ "$pool" -le 1 ] || [ "${#find_dirs[@]}" -le 1 ]; then
-      _validate_one_find_dir "$d" "$bin_dir" || true
-    else
-      ( _validate_one_find_dir "$d" "$bin_dir" ) &
-      _vpids+=("$!")
-      if [ "${#_vpids[@]}" -ge "$pool" ]; then
-        wait "${_vpids[0]}" 2>/dev/null || true
-        _vpids=("${_vpids[@]:1}")
-      fi
-    fi
-  done
-  [ "${#_vpids[@]}" -gt 0 ] && { wait || true; }
+  pool_run "$pool" _validate_find_pool_worker ${find_dirs[@]+"${find_dirs[@]}"}
 
   # Layered dedup: write FINDING-CLUSTERS.md and stamp Cluster: lines into
   # each report.md. Mirrors how maintain_indexes runs bin/cluster-crashes
@@ -3075,6 +3057,12 @@ expand_cluster_for_crash() {
 # 5-20s each) are pre-computed concurrently through the shared triage
 # pool; the state-file appends stay serial in expand_cluster_for_crash
 # so table blocks never interleave in the shared markdown.
+# Worker for the cluster-expand precompute pool: $1=crash dir. Writes its own
+# per-dir temp file that the serial apply step below consumes.
+_cluster_expand_pool_worker() {
+  _cluster_expand_decide "$1" > "$1/.cluster_rows.json.tmp" 2>/dev/null || true
+}
+
 expand_clusters_for_new_crashes() {
   declare -f llm_decide >/dev/null 2>&1 || return 0
   [ -d "${RESULTS_DIR:-/nonexistent}/crashes" ] || return 0
@@ -3088,24 +3076,14 @@ expand_clusters_for_new_crashes() {
   done
   [ "${#dirs[@]}" -gt 0 ] || return 0
 
-  # FIFO-windowed precompute: each LLM decision (5-20s) writes its own
-  # per-dir temp file, so wait on the OLDEST job when full (specific pid —
-  # bash 3.2 has no `wait -n`) and refill immediately instead of barriering
-  # the whole batch on its slowest member. The serial apply below runs only
-  # after the final wait, so ordering changes scheduling only.
+  # Precompute each cluster decision (5-20s LLM call) into its own per-dir temp
+  # file through the shared pool, then apply serially below. Only fan out when
+  # there's more than one dir; when serial, skip the temp files entirely and let
+  # the apply step compute each inline (byte-identical, just unscheduled).
   local pool
-  local -a _epids=()
   pool=$(_triage_dir_pool_size)
   if [ "$pool" -gt 1 ] && [ "${#dirs[@]}" -gt 1 ]; then
-    for d in "${dirs[@]}"; do
-      ( _cluster_expand_decide "$d" > "$d/.cluster_rows.json.tmp" 2>/dev/null || true ) &
-      _epids+=("$!")
-      if [ "${#_epids[@]}" -ge "$pool" ]; then
-        wait "${_epids[0]}" 2>/dev/null || true
-        _epids=("${_epids[@]:1}")
-      fi
-    done
-    [ "${#_epids[@]}" -gt 0 ] && { wait || true; }
+    pool_run "$pool" _cluster_expand_pool_worker "${dirs[@]}"
   fi
 
   for d in "${dirs[@]}"; do
@@ -3323,6 +3301,13 @@ _triage_finding_subject() {
 # llm_find_quality_decision, and stale-version re-evaluation stays the gate's
 # job, so this adds no LLM calls for already-decided findings. Best-effort
 # under set -euo pipefail.
+# Worker for the find-quality pool: $1 = "dir<TAB>description-file" (the pack
+# the collection loop builds, since each item carries two fields).
+_find_quality_pool_worker() {
+  local _d="${1%%$'\t'*}" _desc="${1#*$'\t'}"
+  llm_find_quality_decision "$_desc" "$_d" >/dev/null 2>&1 || true
+}
+
 _ensure_find_quality_coverage() {
   [ -d "$RESULTS_DIR/findings" ] || return 0
   declare -f llm_find_quality_decision >/dev/null 2>&1 || return 0
@@ -3346,23 +3331,9 @@ _ensure_find_quality_coverage() {
   done
   [ "${#pending[@]}" -gt 0 ] || return 0
 
-  local pool entry
-  local -a _qpids=()
+  local pool
   pool=$(_triage_dir_pool_size)
-  for entry in "${pending[@]}"; do
-    d="${entry%%$'\t'*}"; desc="${entry#*$'\t'}"
-    if [ "$pool" -le 1 ] || [ "${#pending[@]}" -le 1 ]; then
-      llm_find_quality_decision "$desc" "$d" >/dev/null 2>&1 || true
-    else
-      ( llm_find_quality_decision "$desc" "$d" >/dev/null 2>&1 || true ) &
-      _qpids+=("$!")
-      if [ "${#_qpids[@]}" -ge "$pool" ]; then
-        wait "${_qpids[0]}" 2>/dev/null || true
-        _qpids=("${_qpids[@]:1}")
-      fi
-    fi
-  done
-  [ "${#_qpids[@]}" -gt 0 ] && { wait || true; }
+  pool_run "$pool" _find_quality_pool_worker ${pending[@]+"${pending[@]}"}
 }
 
 # ─── Rejection-index cell helpers ─────────────────────────────────
@@ -3672,6 +3643,13 @@ maintain_indexes() {
     [ -n "$_cur" ] && { printf '%s' "$_cur" > "$_sig_file" 2>/dev/null || true; }
   }
 
+  # Worker for the report-render pool: $1 = "dir<TAB>report" (each item carries
+  # both fields). Reads _render/_enrich from maintain_indexes via dynamic scope.
+  _maintain_render_pool_worker() {
+    local _d="${1%%$'\t'*}" _rep="${1#*$'\t'}"
+    _maintain_render_report "$_d" "$_rep" "$_render" "$_enrich" || true
+  }
+
   # CRASH/FINDING cluster files are now the primary review tables. Remove
   # stale legacy per-directory indexes so reviewers do not see two competing
   # summaries for the same artifacts.
@@ -3712,7 +3690,12 @@ maintain_indexes() {
       # maintain_indexes runs dirty-gated and mostly quiescent, so the pool wins
       # net. (The cold cluster path — the genuinely hot one — is batched in
       # lib/cluster_common.py instead.)
-      local _rpool _rpids=()
+      # Collect (dir, report) pairs from crashes and findings into one packed
+      # list, then render them all through a single shared FIFO window. Both
+      # report-resolution rules differ per source, so they stay in the
+      # collection loops; the pool just dispatches the resolved work.
+      local _rpool
+      local -a _render_items=()
       _rpool=$(_triage_dir_pool_size)
       for _d in "$RESULTS_DIR"/crashes/CRASH-*/ "$RESULTS_DIR"/crashes-rejected/CRASH-*/; do
         [ -d "$_d" ] || continue
@@ -3720,12 +3703,7 @@ maintain_indexes() {
         _report=$(_triage_exact_file_path "$_d" "REPORT.md" 2>/dev/null || true)
         [ -z "$_report" ] && _report=$(_triage_exact_file_path "$_d" "report.md" 2>/dev/null || true)
         [ -n "$_report" ] || continue
-        ( _maintain_render_report "$_d" "$_report" "$_render" "$_enrich" ) &
-        _rpids+=("$!")
-        if [ "${#_rpids[@]}" -ge "$_rpool" ]; then
-          wait "${_rpids[0]}" 2>/dev/null || true
-          _rpids=("${_rpids[@]:1}")
-        fi
+        _render_items+=("$_d"$'\t'"$_report")
       done
 
       # Findings (kept and rejected) get the same report.md → report.html
@@ -3740,14 +3718,9 @@ maintain_indexes() {
           fi
         done
         [ -n "$_report" ] || continue
-        ( _maintain_render_report "$_d" "$_report" "$_render" "$_enrich" ) &
-        _rpids+=("$!")
-        if [ "${#_rpids[@]}" -ge "$_rpool" ]; then
-          wait "${_rpids[0]}" 2>/dev/null || true
-          _rpids=("${_rpids[@]:1}")
-        fi
+        _render_items+=("$_d"$'\t'"$_report")
       done
-      wait || true
+      pool_run "$_rpool" _maintain_render_pool_worker ${_render_items[@]+"${_render_items[@]}"}
 
       # Render the cluster/index summary tables in ONE render-md process
       # (it accepts multiple inputs) instead of one python start per file.
