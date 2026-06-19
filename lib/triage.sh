@@ -524,7 +524,7 @@ evaluate_crash_verdict() {
   done
 
   if [ -n "$missing" ]; then
-    printf 'contract-flag\ttrigger requires [%s] outside attacker_controls=[%s]; treat as robustness/low-severity within this threat model\n' \
+    printf 'contract-flag\ttrigger requires [%s] outside attacker_controls=[%s]; this out-of-boundary precondition is a robustness/hardening concern that lowers severity (CVSS AT:P/MAT:P) — the CVSS band is set by the scorer\n' \
       "$missing" "$controls_csv"
     return 0
   fi

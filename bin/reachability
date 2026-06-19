@@ -934,6 +934,19 @@ _SURFACE_AVUI: dict[str, tuple[str, str]] = {
 # multiplier or a post-score cap.
 NON_SHIPPING_SURFACES = frozenset({"dev_tool", "internal"})
 
+# Crash classes that manifest as a single fatal signal on the malicious
+# request: the process dies on that input and a supervisor respawns it, so the
+# next request is unaffected and no persistent state is damaged. CVSS v4.0
+# Recovery = Automatic (R:A) for these. Recovery is a *Supplemental* metric and
+# does NOT change the CVSS-BTE score (the spec excludes supplementals from the
+# score); it is surfaced in the rationale only so a triager reading a High
+# availability band knows the impact is transient/auto-recovering, not a
+# sustained takedown. Inclusion criterion: a per-request fatal signal with no
+# accumulating resource cost. Resource-exhaustion DoS that grows across
+# requests (oom, memory_leak) is deliberately excluded — its recovery is not
+# automatic and may need operator action (R:U).
+TRANSIENT_CRASH_PRIMITIVES = frozenset({"stack_exhaustion", "null_deref", "bus"})
+
 _SEVERITY_RANK = {"None": 0, "Unknown": 0, "Low": 1, "Medium": 2,
                   "High": 3, "Critical": 4}
 
@@ -1034,6 +1047,106 @@ def _limited_caller_control(fields: dict) -> tuple[bool, str]:
     return False, ""
 
 
+def _local_caller_only(fields: dict) -> tuple[bool, str]:
+    """Whether the primitive is reachable only by a trusted local caller.
+
+    The surface worst-case-embedding rule (``_SURFACE_AVUI``) sets AV:N for a
+    library on the premise — from the CVSS v4.0 user guide's library guidance —
+    that some external boundary feeds the vulnerable code attacker-controlled
+    *bytes*. That premise fails when the trigger instead requires a trusted
+    in-process caller to drive a privileged API/call sequence (install
+    allocator hooks, reorder public calls, mutate private state) and exposes no
+    attacker-controlled byte/content path. Then the only actor who can reach
+    the primitive is a local caller: Attack Vector is Local (AV:L) and the
+    required setup is an intrinsic Attack Requirement (AT:P) — not merely an
+    Environmental MAT:P override of this deployment.
+
+    Deliberately narrower than ``_limited_caller_control``: a remote attacker
+    who merely shapes a length/size/flag field is still AV:N, so those signals
+    do not gate the vector here. The byte/content guard takes precedence — any
+    attacker-controlled byte path keeps the surface AV — so a genuine
+    parse-the-bytes bug can never be localised by a misclassified field.
+
+    Localisation requires *positive* local-caller evidence (call-sequence /
+    call-order in controls, trusted/application-supplied parameters, or a
+    private/internal trusted action). A bare contract concern or generic
+    ``Trigger source: api`` is intentionally NOT enough: those establish the
+    trigger is not pure attacker bytes, but not that only a trusted local caller
+    can reach it. Contract concern is already represented as Environmental
+    MAT:P in ``_cvss4_metrics``.
+    """
+    controls = (fields.get("caller_controls", "") or "").lower()
+    trigger = (fields.get("trigger_source", "") or "").lower()
+    parameter = (fields.get("parameter_control", "") or "").lower()
+    trusted = (fields.get("trusted_caller_actions", "") or "").lower()
+
+    # Words denoting attacker-supplied *data/content* reaching the code (as
+    # opposed to call ordering, numeric/flag shape, or environmental state).
+    # Inclusion criterion: a term a triage report uses for the bytes/text the
+    # caller feeds the primitive. Widening this list only ever *keeps* a crash
+    # at the surface AV (the safe direction); it never downgrades one.
+    byte_re = re.compile(r"\b(byte|bytes|buffer|blob|input|payload|content|"
+                         r"document|request|response|packet|file|stream|"
+                         r"string|text|char|data|message|body|header|token|"
+                         r"json|xml|html|url|uri|utf-?8|unicode|encoding)\b")
+    # `both` is the structured triage trigger-source token that expands to
+    # `bytes,call-sequence` (lib/triage.sh _expand_trigger_components): it
+    # asserts a byte path alongside the call-sequence, so it must veto
+    # localisation exactly like a bare `bytes` would. Scope it to the
+    # trigger_source field ONLY — in free-prose caller_controls/parameter_control
+    # "both" is the ordinary English word ("both calls must be made in order")
+    # and vetoing there would wrongly keep a genuine local call-sequence bug at
+    # AV:N (over-severity). The generic byte/content words apply to every field.
+    trigger_is_byte = byte_re.search(trigger) or re.search(r"\bboth\b", trigger)
+    # Any attacker-controlled byte/content path means an external boundary can
+    # reach the primitive — keep the surface Attack Vector (AV:N for libraries).
+    if byte_re.search(controls) or trigger_is_byte or byte_re.search(parameter):
+        return False, ""
+
+    # Trigger tokens that are NOT unambiguously local. Each can be driven by a
+    # remote attacker in some real deployment, so the trigger token alone does
+    # not decide attacker proximity: a `race`/`timing` bug is reached by
+    # concurrent *remote* requests to a multithreaded server; `protocol-state`
+    # by attacker-sent messages; `env` and `fs-state` by content the attacker
+    # supplies remotely (CGI maps HTTP headers to env vars — Shellshock;
+    # upload-then-parse makes file contents attacker-controlled). Because each
+    # is remotely reachable whenever attacker content flows through it, the
+    # conservative classification is the surface AV:N — localising would
+    # under-rate real network bugs. When trigger_source names one of these,
+    # veto localisation on EVERY signal below (including a trusted parameter or
+    # caller action): the trigger itself may be attacker-reachable, so AV:N must
+    # win. Scoped to the structured trigger_source field (like the `both` token)
+    # so a free-prose mention does not over-veto; `call-sequence` is the one
+    # local-by-nature token and is intentionally absent here. The extra
+    # precondition these triggers carry is still captured as an Attack
+    # Requirement / Environmental MAT:P elsewhere.
+    remote_capable_re = re.compile(r"\b(timing|race|data[- ]?race|"
+                                   r"protocol[- ]?state|env|environment|"
+                                   r"fs[- ]?state|file[- ]?system[- ]?state)\b")
+    if remote_capable_re.search(trigger):
+        return False, ""
+
+    # A call-ordering trigger, in either the controls prose or the structured
+    # trigger_source field. Matches the literal `call-sequence` token and the
+    # common free-prose phrasings ("the sequence of public API calls", "ordering
+    # of calls"). This is the precise call-ordering signal — NOT the coarse
+    # `Trigger source: api`, which every library bug carries and is excluded.
+    # Past this point only `call-sequence` and the trusted local
+    # parameter/action signals localise; the remote-capable trigger tokens have
+    # already been vetoed above.
+    seq_re = re.compile(r"\bcall[- ]sequence\b|\bcall[- ]order(?:ing)?\b|"
+                        r"\bcallback ordering\b|\bapi call[- ]sequence\b|"
+                        r"\b(?:sequence|ordering|order) of (?:\w+\s+){0,3}calls?\b")
+    if seq_re.search(controls) or seq_re.search(trigger):
+        return True, "trigger is a local API/call-sequence, not attacker bytes → AV:L/AT:P"
+    if parameter and re.search(r"\b(trusted|application-supplied|harness-only)\b", parameter):
+        return True, "trigger needs trusted/application-supplied parameters → AV:L/AT:P"
+    if (trusted and re.search(r"\b(private|internal|mutation|callback|ordering|sequence)\b", trusted)
+            and not re.search(r"\b(?:normal(?:ly)?|public|documented|no private)\b", trusted)):
+        return True, "trigger needs a trusted private/callback caller action → AV:L/AT:P"
+    return False, ""
+
+
 def _environmental_requirement(surface_label: str, reach: dict) -> tuple[str, str]:
     """Local CR/IR/AR importance from shipping context and observed reach."""
     if surface_label in NON_SHIPPING_SURFACES:
@@ -1084,9 +1197,25 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
         return None, [f"primitive={prim_key} is unclassified — no CVSS vector"]
     vc, vi, va, sc, si, sa, at_override = cls
     av, ui = _SURFACE_AVUI.get(surface_label, _SURFACE_AVUI["unknown"])
+    surface_av = av
     # Base AT captures intrinsic class-level preconditions. Local caller
     # contract/control concerns are Environmental MAT below.
     at = at_override or "N"
+    # Attack Vector reflects how the attacker reaches the primitive, not just
+    # where the code is deployed. The surface worst-case embedding (AV:N)
+    # assumes an external boundary feeds the primitive attacker-controlled
+    # bytes. When the trigger instead requires a trusted local caller to drive
+    # a privileged API/call sequence and exposes no byte path, the attacker is
+    # local: AV:L, and the setup is an intrinsic Attack Requirement (AT:P).
+    # The setup requirement (AT:P) is intrinsic to the trigger and holds even
+    # when the surface already reads AV:L; the AV override only applies when
+    # the surface worst-case would otherwise be AV:N.
+    local_only, local_note = _local_caller_only(fields)
+    if local_only:
+        at = "P"
+    av_localised = local_only and av == "N"
+    if av_localised:
+        av = "L"
     metrics = {
         "AV": av, "AC": "L", "AT": at, "PR": "N", "UI": ui,
         "VC": vc, "VI": vi, "VA": va, "SC": sc, "SI": si, "SA": sa,
@@ -1103,9 +1232,18 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
     mods, mods_note = _non_shipping_modified_impacts(surface_label, metrics)
     metrics.update(mods)
     notes = [
-        f"surface={surface_label} → AV:{av}/UI:{ui}",
+        f"surface={surface_label} → AV:{surface_av}/UI:{ui}",
         f"class={prim_key} → VC:{vc}/VI:{vi}/VA:{va}/SC:{sc}/SI:{si}/SA:{sa}",
-        f"class preconditions → AT:{at}",
+    ]
+    if local_only:
+        notes.append(local_note)
+        if av_localised:
+            notes.append(f"local-only trigger → AV:{av} (overrides surface AV:{surface_av}), AT:{at}")
+        else:
+            notes.append(f"local-only trigger → AT:{at} (surface already AV:{surface_av})")
+    else:
+        notes.append(f"class preconditions → AT:{at}")
+    notes += [
         "PR:N (worst case — no auth signal), AC:L",
         e_note,
         req_note,
@@ -2714,8 +2852,10 @@ def _format_severity_section(sev: dict) -> str:
     lines.append(
         "_Severity is the **CVSS v4.0 score** — one industry-standard metric, "
         "computed by the vendored FIRST reference scorer. Base metrics come "
-        "from the primitive and surface. Threat/Environmental metrics come "
-        "from reproducibility, caller control, reachability, and local "
+        "from the primitive and surface, with Attack Vector/Requirements also "
+        "reflecting the trigger's caller-control facts (a trusted local "
+        "API/call-sequence reads as AV:L/AT:P). Threat/Environmental metrics "
+        "come from reproducibility, caller control, reachability, and local "
         "shipping context. Cluster size remains a priority/verification fact "
         "because CVSS v4.0 has no cluster metric._"
     )
@@ -2726,7 +2866,13 @@ def _format_severity_section(sev: dict) -> str:
     lines.append("| Metric | Value | Derived from |")
     lines.append("|:-------|:-----:|:-------------|")
     m = sev["metrics"]
-    lines.append(f"| Attack Vector (AV)        | {m['AV']} | surface tier = `{sev['surface_label']}` |")
+    surface_av = _SURFACE_AVUI.get(sev["surface_label"], _SURFACE_AVUI["unknown"])[0]
+    if m["AV"] == "L" and surface_av == "N":
+        av_from = (f"local API/call-sequence trigger "
+                   f"(surface `{sev['surface_label']}` worst-case is AV:N)")
+    else:
+        av_from = f"surface tier = `{sev['surface_label']}`"
+    lines.append(f"| Attack Vector (AV)        | {m['AV']} | {av_from} |")
     lines.append(f"| Attack Complexity (AC)    | {m['AC']} | fixed — not separately modelled |")
     lines.append(f"| Attack Requirements (AT)  | {m['AT']} | intrinsic attack preconditions |")
     lines.append(f"| Privileges Required (PR)  | {m['PR']} | worst case — no auth signal |")
@@ -2743,6 +2889,18 @@ def _format_severity_section(sev: dict) -> str:
     lines.append("")
     lines.append(f"**Severity level: {sev['level']}** — CVSS bands: Critical ≥ 9.0, "
                  "High ≥ 7.0, Medium ≥ 4.0, Low ≥ 0.1, None = 0.0.")
+    if sev.get("primitive_key") in TRANSIENT_CRASH_PRIMITIVES:
+        lines.append("")
+        lines.append(
+            "> **Recovery: Automatic (`R:A`) — supplemental, score unchanged.** "
+            "This is a single-request fatal crash: the process dies on the "
+            "malicious input and a supervisor respawns it, so the availability "
+            "loss is transient rather than a sustained takedown. CVSS v4.0 "
+            "Recovery is a Supplemental metric and does not affect the CVSS-BTE "
+            "score, so the availability band above reflects worst-case "
+            "(sustained) impact. For a service that respawns per request, read "
+            "the operational severity one band lighter than the number."
+        )
     if sev.get("non_shipping"):
         lines.append("")
         lines.append(

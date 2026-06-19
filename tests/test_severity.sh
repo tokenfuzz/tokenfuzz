@@ -501,6 +501,207 @@ _CURRENT_TEST="derive: trusted private action → MAT:P"
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "P" "$(metric "$vector" MAT)" "MAT:P for private trusted caller action"
 
+# ── Attack Vector localisation: a library bug whose trigger is a trusted
+# local API/call-sequence (no attacker byte path) is reached only by a local
+# in-process caller → AV:L, and the required setup is an intrinsic AT:P. The
+# surface worst-case AV:N embedding does not apply. This is the cJSON bad-free
+# / DetachItemViaPointer shape: install hooks, reorder public calls, delete.
+seed_hits "demo_av_callseq" 0
+dir=$(make_crash "demo_av_callseq" CRASH-AV-CALLSEQ \
+  "attempting free on address which was not malloc()-ed" \
+  "library-api" "unspecified" "call-sequence" "5/5" "CL-x (singleton)")
+cat >> "$dir/report.md" <<'EOF'
+
+## Contract concern
+
+Triage flagged a contract concern: trigger requires [call-sequence] outside attacker_controls=[bytes].
+EOF
+_CURRENT_TEST="derive: local call-sequence trigger (no byte path) → AV:L/AT:P"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "double_free" "$key" "bad-free classified as double_free"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L for local-only call-sequence trigger"
+assert_eq "P" "$(metric "$vector" AT)" "AT:P intrinsic precondition for local call sequence"
+assert_eq "Medium" "$level" "local-API double-free is Medium, not High"
+
+# Byte-guard: the SAME contract concern over a crash the caller triggers with
+# attacker-controlled BYTES keeps AV:N (an external boundary can reach it).
+# The contract concern still yields Environmental MAT:P, but not localisation.
+seed_hits "demo_av_bytesguard" 0
+dir=$(make_crash "demo_av_bytesguard" CRASH-AV-BYTESGUARD \
+  "attempting free on address which was not malloc()-ed" \
+  "library-api" "unspecified" "bytes" "5/5" "CL-x (singleton)")
+cat >> "$dir/report.md" <<'EOF'
+
+## Contract concern
+
+Triage flagged a contract concern: trigger shape outside the declared input boundary.
+EOF
+_CURRENT_TEST="derive: byte-controlled trigger keeps AV:N despite contract concern"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N preserved when attacker controls bytes"
+assert_eq "P" "$(metric "$vector" MAT)" "MAT:P still derived from contract concern"
+
+# Content-word guard: "JSON string" is an attacker-controlled content path even
+# though it lacks the literal word "bytes". A call-sequence wrapper around
+# caller-supplied content must NOT localise — the content reaches the primitive,
+# so the surface AV:N (worst-case embedding) still applies.
+seed_hits "demo_av_jsonstr" 0
+dir=$(make_crash "demo_av_jsonstr" CRASH-AV-JSONSTR \
+  "attempting free on address which was not malloc()-ed" \
+  "library-api" "unspecified" "JSON string and public call sequence" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="derive: caller-controlled JSON string + call-sequence keeps AV:N"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N — JSON string is an attacker content path"
+
+# Free-prose call-sequence phrasing must localise the same as the literal
+# token: "the sequence of public API calls" (no byte path) is a trusted local
+# call-ordering trigger → AV:L/AT:P. Regression for a real cJSON UAF whose
+# caller-controls prose avoided the exact word "call-sequence".
+seed_hits "demo_av_seqprose" 0
+dir=$(make_crash "demo_av_seqprose" CRASH-AV-SEQPROSE \
+  "heap-use-after-free WRITE of size 8" "library-api" "unspecified" \
+  "the sequence of public API calls and which (parent, item) pairing" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="derive: free-prose 'sequence of public API calls' localises to AV:L"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L for prose call-sequence phrasing"
+assert_eq "P" "$(metric "$vector" AT)" "AT:P for prose call-sequence phrasing"
+
+# The structured Trigger source field carries the call-sequence signal even when
+# caller-controls prose is vague. trigger_source=call-sequence (no byte path) →
+# AV:L. (A byte path in any field would still veto via the content guard.)
+seed_hits "demo_av_trigseq" 0
+dir=$(make_crash "demo_av_trigseq" CRASH-AV-TRIGSEQ \
+  "attempting free on address which was not malloc()-ed" "library-api" "unspecified" \
+  "which (parent, item) pairing is used" "5/5" "CL-x (singleton)")
+echo "Trigger source: call-sequence" >> "$dir/report.md"
+_CURRENT_TEST="derive: trigger_source call-sequence localises even with vague controls"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L from structured trigger_source=call-sequence"
+
+# Generic `Trigger source: api` is not local-caller proof by itself. A public API
+# can still be reached through a worst-case external embedding, and limited
+# caller control is already represented as MAT:P rather than AV localisation.
+seed_hits "demo_av_api_length" 0
+dir=$(make_crash "demo_av_api_length" CRASH-AV-API-LENGTH \
+  "heap-buffer-overflow WRITE of size 8" \
+  "library-api" "obeyed" "length" "5/5" "CL-x (singleton)")
+echo "Trigger source: api" >> "$dir/report.md"
+_CURRENT_TEST="derive: trigger_source api + limited control keeps AV:N"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N — api alone is not local-caller proof"
+assert_eq "P" "$(metric "$vector" MAT)" "MAT:P carries the limited-control precondition"
+
+# A contract concern with NO positive local/API evidence must NOT localise the
+# vector: "not pure bytes" (e.g. a timing/race shape) is true of remotely
+# reachable bugs too, so it stays AV:N and is represented only as MAT:P. A bare
+# concern is not proof that only a trusted local caller can reach the bug.
+seed_hits "demo_av_concern_only" 0
+dir=$(make_crash "demo_av_concern_only" CRASH-AV-CONCERN-ONLY \
+  "heap-buffer-overflow WRITE of size 8" "library-api" "unspecified" "timing" "5/5" "CL-x (singleton)")
+cat >> "$dir/report.md" <<'EOF'
+
+## Contract concern
+
+Triage flagged a contract concern: trigger shape outside the declared input boundary.
+EOF
+_CURRENT_TEST="derive: contract concern without local/API evidence stays AV:N"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N kept — bare concern is not local-caller proof"
+assert_eq "P" "$(metric "$vector" MAT)" "MAT:P still derived from contract concern"
+
+# AT:P follows the local trigger independently of the AV override: when the
+# surface is already AV:L (production CLI), a privileged local call-sequence
+# still imposes an intrinsic Attack Requirement (AT:P).
+seed_hits "demo_av_cli_seq" 0
+dir=$(make_crash "demo_av_cli_seq" CRASH-AV-CLI-SEQ \
+  "attempting free on address which was not malloc()-ed" \
+  "cli — shipped tool" "unspecified" "call-sequence" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="derive: surface AV:L + local call-sequence → AT:P (no AV override needed)"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "cli_production" "$surface" "cli_production classified"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L from surface (unchanged)"
+assert_eq "P" "$(metric "$vector" AT)" "AT:P from local call-sequence even when AV already L"
+
+# `both` is the triage trigger token that expands to bytes + call-sequence
+# (lib/triage.sh _expand_trigger_components). It asserts a byte path alongside
+# the call-sequence, so it must veto localisation exactly like a bare `bytes`:
+# AV:N stays. Without the `both` veto, trigger_source=both + controls=call-
+# sequence would localise to AV:L and under-rate a genuinely byte-reachable bug.
+seed_hits "demo_av_both" 0
+dir=$(make_crash "demo_av_both" CRASH-AV-BOTH \
+  "heap-use-after-free WRITE of size 8" "library-api" "unspecified" \
+  "call-sequence" "5/5" "CL-x (singleton)")
+echo "Trigger source: both" >> "$dir/report.md"
+_CURRENT_TEST="derive: trigger_source=both (bytes+call-seq) keeps AV:N, never localises"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N — 'both' carries a byte path, vetoes localisation"
+
+# The `both` veto is scoped to the structured trigger_source token. In free-prose
+# caller_controls, "both" is the ordinary English word and must NOT veto: a
+# genuine local call-sequence bug whose prose happens to say "both calls" still
+# localises to AV:L. Regression for over-localising the byte veto to prose fields.
+seed_hits "demo_av_both_prose" 0
+dir=$(make_crash "demo_av_both_prose" CRASH-AV-BOTH-PROSE \
+  "heap-use-after-free WRITE of size 8" "library-api" "unspecified" \
+  "both of the public API calls the harness issues, in order" "5/5" "CL-x (singleton)")
+echo "Trigger source: call-sequence" >> "$dir/report.md"
+_CURRENT_TEST="derive: prose 'both' in controls does not veto a call-sequence localisation"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L — prose 'both' is not the trigger token, localisation holds"
+assert_eq "P" "$(metric "$vector" AT)" "AT:P for the local call-sequence trigger"
+
+# Policy lock: non-byte trigger tokens that are NOT call-sequence (env, fs-state,
+# timing, race, protocol-state) are deliberately NOT localised — they are
+# remotely reachable whenever attacker content flows through them (CGI maps HTTP
+# headers to env vars; upload-then-parse for fs-state; concurrent remote requests
+# for race/timing). The conservative classification is AV:N; the extra
+# precondition is carried as MAT:P, not an AV downgrade. `env` stands in here.
+seed_hits "demo_av_env" 0
+dir=$(make_crash "demo_av_env" CRASH-AV-ENV \
+  "heap-buffer-overflow WRITE of size 8" "library-api" "unspecified" \
+  "environment variable state" "5/5" "CL-x (singleton)")
+echo "Trigger source: env" >> "$dir/report.md"
+_CURRENT_TEST="derive: env trigger is not localised — stays AV:N (policy lock)"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N — env is not unambiguously local, stays surface AV"
+
+# Policy lock (the strong case): a remote-capable trigger token must veto
+# localisation even when a TRUSTED parameter/action is also present. Without the
+# trigger_source veto, env/race/etc. + parameter_control=trusted localised to
+# AV:L and under-rated a remotely-driveable bug (Shellshock-style env, server
+# race). The trigger veto takes precedence over the trusted-caller signals.
+seed_hits "demo_av_env_trusted" 0
+dir=$(make_crash "demo_av_env_trusted" CRASH-AV-ENV-TRUSTED \
+  "heap-buffer-overflow WRITE of size 8" "library-api" "unspecified" \
+  "process environment state" "5/5" "CL-x (singleton)")
+{ echo "Trigger source: env"; echo "Parameter control: trusted"; } >> "$dir/report.md"
+_CURRENT_TEST="derive: env trigger + trusted parameter still stays AV:N (veto wins)"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N — remote-capable trigger vetoes the trusted-parameter localisation"
+
+seed_hits "demo_av_race_trusted" 0
+dir=$(make_crash "demo_av_race_trusted" CRASH-AV-RACE-TRUSTED \
+  "heap-use-after-free WRITE of size 8" "library-api" "unspecified" \
+  "thread scheduling window" "5/5" "CL-x (singleton)")
+{ echo "Trigger source: race"; echo "Trusted caller actions: private struct mutation"; } >> "$dir/report.md"
+_CURRENT_TEST="derive: race trigger + trusted action still stays AV:N (veto wins)"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N — remote-capable race trigger vetoes trusted-action localisation"
+
+# Guard the opposite over-veto: the legitimate trusted-parameter localisation
+# (no byte path, no remote-capable trigger token) must STILL localise to AV:L.
+# This is the genuine API-misuse shape — application-supplied parameters with no
+# attacker bytes — and the remote-capable veto must not swallow it.
+seed_hits "demo_av_trusted_local" 0
+dir=$(make_crash "demo_av_trusted_local" CRASH-AV-TRUSTED-LOCAL \
+  "attempting free on address which was not malloc()-ed" "library-api" "unspecified" \
+  "which internal handle is passed" "5/5" "CL-x (singleton)")
+echo "Parameter control: application-supplied" >> "$dir/report.md"
+_CURRENT_TEST="derive: trusted/application-supplied parameter (no byte, no remote trigger) → AV:L"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L — trusted-parameter localisation preserved when no remote trigger"
+assert_eq "P" "$(metric "$vector" AT)" "AT:P for the local trusted-parameter trigger"
+
 # XSS sets subsequent-system impact (SC:L/SI:L).
 seed_hits "demo_xss_sub" 0
 dir=$(make_crash "demo_xss_sub" CRASH-XSS-SUB \
@@ -695,6 +896,33 @@ dir=$(make_crash "demo_capnote" CRASH-CAPNOTE \
 python3 "$REACH" --report "$dir" --no-cache >/dev/null 2>&1
 assert_file_contains "$dir/report.md" "Non-shipping surface" "non-shipping note present"
 assert_file_contains "$dir/report.md" "without a custom cap" "environmental explanation present"
+
+# Transient-crash DoS (stack_exhaustion/null_deref/bus) carries a supplemental
+# Recovery=Automatic (R:A) note: score-unchanged, operational-severity context.
+_CURRENT_TEST="section: stack-overflow carries supplemental R:A recovery note"
+seed_hits "demo_recover" 60   # ≥ POPULAR_LIBRARY_THRESHOLD → CR/IR/AR:H, lands High like the real DoS
+dir=$(make_crash "demo_recover" CRASH-RECOVER \
+  "stack-overflow on address 0xfeed (deep recursion)" \
+  "library-api — C harness calls a public library entry point" \
+  "obeyed" "bytes" "5/5" "CL-x (singleton)")
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "stack_exhaustion" "$key" "stack-overflow classifies as stack_exhaustion"
+assert_eq "High" "$level" "stack_exhaustion DoS scored High (score unchanged by note)"
+python3 "$REACH" --report "$dir" --no-cache >/dev/null 2>&1
+assert_file_contains "$dir/report.md" "Recovery: Automatic" "R:A supplemental note present"
+assert_file_contains "$dir/report.md" "score unchanged" "note disclaims any score effect"
+assert_file_contains "$dir/report.md" "one band lighter" "note gives operational-severity read"
+
+# A non-transient crash class (heap WRITE) must NOT carry the R:A note — the
+# damage is persistent corruption, not an auto-recovering process restart.
+_CURRENT_TEST="section: heap-write crash does not carry R:A recovery note"
+seed_hits "demo_norecover" 0
+dir=$(make_crash "demo_norecover" CRASH-NORECOVER \
+  "heap-buffer-overflow WRITE of size 8" \
+  "library-api — C harness calls a public library entry point" \
+  "obeyed" "bytes" "5/5" "CL-x (singleton)")
+python3 "$REACH" --report "$dir" --no-cache >/dev/null 2>&1
+assert_file_not_contains "$dir/report.md" "Recovery: Automatic" "no R:A note on persistent-corruption class"
 
 # ───────────────────────────────────────────────────────────────────
 # 7. LLM hybrid field-fill: .llm_fields.json sidecar
