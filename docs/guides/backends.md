@@ -41,6 +41,39 @@ How to choose:
   `ollama list` at startup and fails fast if the model is not already
   pulled.
 
+### Google Gemini CLI ripgrep
+
+When `USE_GEMINI_CLI=1` selects Google Gemini CLI, that CLI looks for
+`ripgrep` inside its npm bundle instead of using `rg` from `PATH`. Some
+installs miss that bundled file, so Gemini prints `Ripgrep is not
+available` and falls back to a slower grep implementation. TokenFuzz
+warns at startup and prints the path it checked.
+
+Fix the Gemini CLI install that TokenFuzz will run. `GEMINI_BIN` wins
+when set; otherwise TokenFuzz uses the first `gemini` on `PATH`. Use
+`type -a gemini` or `whereis gemini` if you need to inspect multiple
+installs.
+
+```bash
+gemini_bin="${GEMINI_BIN:-$(command -v gemini)}"
+system_rg="$(command -v rg)"
+[ -n "$gemini_bin" ] || { echo "gemini not found; set GEMINI_BIN=/path/to/gemini" >&2; exit 1; }
+[ -n "$system_rg" ] || { echo "rg not found; install ripgrep first" >&2; exit 1; }
+
+bundle_dir="$(node -e 'const p=require("path"),f=require("fs");process.stdout.write(p.dirname(f.realpathSync(process.argv[1])))' "$gemini_bin")"
+plat_arch="$(node -e 'process.stdout.write(process.platform+"-"+process.arch)')"
+vendor_rg="$bundle_dir/vendor/ripgrep/rg-$plat_arch"
+
+mkdir -p "${vendor_rg%/*}"
+ln -sfn "$system_rg" "$vendor_rg"
+```
+
+On Windows the vendored file name ends in `.exe`; TokenFuzz's startup
+warning prints the exact command for that platform. If the npm bundle is
+system-owned and `mkdir` or `ln` fails with permission denied, rerun
+those two commands with `sudo`, or set `GEMINI_BIN` to a user-writable
+Gemini CLI install.
+
 ## Containerised backend shell
 
 `bin/audit-container-shell` opens a clean shell with the hosted backend
