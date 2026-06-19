@@ -666,6 +666,8 @@ _GEMINI_REFUSAL_FINISH_REASONS = {
     "SPII",
 }
 _REFUSAL_SCAN_EDGE_BYTES = 2 * 1024 * 1024
+_CLI_NO_WORK_REFUSAL_CONTEXT = ("security", "vulnerab")
+_CLI_NO_WORK_REFUSAL_PREFIXES = ("i can't help", "sorry, i cannot fulfill")
 
 
 def _norm_json_scalar(value) -> str:
@@ -703,6 +705,108 @@ def _json_has_refusal_signal(value) -> bool:
     if isinstance(value, list):
         return any(_json_has_refusal_signal(item) for item in value)
     return False
+
+
+def _normalize_refusal_text(text: str) -> str:
+    return " ".join(
+        text.lower()
+        .replace("\r", " ")
+        .replace("’", "'")
+        .replace("‘", "'")
+        .split()
+    )
+
+
+def _json_event_has_tool_activity(ev: dict) -> bool:
+    ev_type = ev.get("type")
+    if ev_type in {"tool_use", "tool_result", "function_call", "function_call_output"}:
+        return True
+    if ev.get("tool_name") or ev.get("tool_call_id"):
+        return True
+    item = ev.get("item")
+    item_type = item.get("type") if isinstance(item, dict) else ""
+    return bool(item_type and item_type != "agent_message")
+
+
+def _cli_assistant_texts(backend: str, ev: dict) -> list[str]:
+    pieces: list[str] = []
+
+    if backend in ("codex", "oss"):
+        item = ev.get("item")
+        if isinstance(item, dict) and item.get("type") == "agent_message":
+            text = item.get("text")
+            if isinstance(text, str):
+                pieces.append(text)
+        return pieces
+
+    if backend == "claude":
+        msg = ev.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict):
+                        text = item.get("text")
+                        if isinstance(text, str):
+                            pieces.append(text)
+        result = ev.get("result")
+        if isinstance(result, str):
+            pieces.append(result)
+        return pieces
+
+    if backend == "gemini":
+        ev_type = ev.get("type")
+        role = ev.get("role")
+        is_assistant = (
+            role in ("assistant", "model")
+            or ev_type == "assistant"
+            or (ev_type == "message" and role in ("assistant", "model"))
+        )
+        if not is_assistant:
+            return pieces
+
+        content = ev.get("content")
+        if isinstance(content, str):
+            pieces.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, str):
+                    pieces.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str):
+                        pieces.append(text)
+        for key in ("text", "delta", "result", "response"):
+            text = ev.get(key)
+            if isinstance(text, str):
+                pieces.append(text)
+
+    return pieces
+
+
+def raw_log_has_cli_no_work_refusal(backend: str, raw_log_path: str) -> bool:
+    """Detect short CLI prose refusals that lack structured metadata."""
+    try:
+        size = os.path.getsize(raw_log_path)
+    except OSError:
+        return False
+    if size > _REFUSAL_SCAN_EDGE_BYTES:
+        return False
+
+    assistant_pieces: list[str] = []
+    for ev in _iter_json_lines(raw_log_path):
+        if not isinstance(ev, dict):
+            continue
+        if _json_event_has_tool_activity(ev):
+            return False
+        assistant_pieces.extend(_cli_assistant_texts(backend, ev))
+
+    text = _normalize_refusal_text(" ".join(assistant_pieces))
+    return (
+        0 < len(text) <= 1200
+        and any(text.startswith(prefix) for prefix in _CLI_NO_WORK_REFUSAL_PREFIXES)
+        and any(marker in text for marker in _CLI_NO_WORK_REFUSAL_CONTEXT)
+    )
 
 
 def _iter_refusal_scan_json(raw_log_path: str):
@@ -743,6 +847,13 @@ def raw_log_has_structured_refusal(raw_log_path: str) -> bool:
     )
 
 
+def raw_log_has_model_refusal(backend: str, raw_log_path: str) -> bool:
+    return (
+        raw_log_has_structured_refusal(raw_log_path)
+        or raw_log_has_cli_no_work_refusal(backend, raw_log_path)
+    )
+
+
 def prompt_first_line(prompt: str, limit: int = 180) -> str:
     for line in prompt.replace("\r", "").splitlines():
         first = " ".join(line.split())
@@ -752,12 +863,10 @@ def prompt_first_line(prompt: str, limit: int = 180) -> str:
 
 
 def refusal_warning(backend: str, raw_log_path: str, prompt: str) -> str:
-    # Detection keys only on the providers' documented structured refusal/block
-    # fields. We deliberately do NOT scan the assistant's prose: in a bug-finding
-    # transcript "I cannot provide a reproducer", "cannot generate a testcase",
-    # etc. are ordinary working statements, not refusals, and would drown a real
-    # refusal in false positives.
-    if not raw_log_has_structured_refusal(raw_log_path):
+    # Prefer provider refusal/block fields. Some CLIs can also return a short
+    # assistant-message refusal with no structured metadata; catch only those
+    # no-tool, response-initial shapes.
+    if not raw_log_has_model_refusal(backend, raw_log_path):
         return ""
     return (
         f"WARN: MODEL_REFUSAL backend={backend} refused to answer prompt: "
