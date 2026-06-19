@@ -304,6 +304,109 @@ else
   pass "extract returns non-zero on missing raw_log"
 fi
 
+# ── 7b. Refusal warning helper ───────────────────────────────────
+# Detection keys ONLY on the providers' structured refusal/block fields; the
+# warning lands beside the transcript at "<raw_log>.refusals.log".
+refusal_prompt=$'Review this project\nSecond line should not be logged'
+
+# OpenAI/Codex structured refusal content item — also exercises the warning
+# format (backend + first prompt line only) via its sidecar.
+cat > "$TEST_TMPDIR/raw_codex_refusal.jsonl" <<'EOF'
+{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"refusal","refusal":"I cannot fulfill this request."}]}}
+EOF
+codex_raw="$TEST_TMPDIR/raw_codex_refusal.jsonl"
+if llm_log_refusal_warning codex "$refusal_prompt" "$codex_raw" \
+    > "$TEST_TMPDIR/refusal.stdout" 2>&1; then
+  pass "refusal warning helper detects OpenAI/Codex structured refusal"
+else
+  fail "refusal warning helper should detect OpenAI/Codex structured refusal"
+fi
+assert_file_contains "${codex_raw}.refusals.log" \
+  'WARN: MODEL_REFUSAL backend=codex refused to answer prompt: Review this project\.\.\.' \
+  "refusal warning includes backend and first prompt line"
+assert_file_not_contains "${codex_raw}.refusals.log" 'Second line should not be logged' \
+  "refusal warning omits later prompt lines"
+
+# OpenAI Chat Completions structured refusal field.
+cat > "$TEST_TMPDIR/raw_openai_chat_refusal.jsonl" <<'EOF'
+{"choices":[{"message":{"role":"assistant","refusal":"I cannot assist with that request."},"finish_reason":"stop"}]}
+EOF
+if llm_log_refusal_warning codex "$refusal_prompt" \
+    "$TEST_TMPDIR/raw_openai_chat_refusal.jsonl" >/dev/null 2>&1; then
+  pass "refusal warning helper detects OpenAI chat message.refusal"
+else
+  fail "refusal warning helper should detect OpenAI chat message.refusal"
+fi
+
+# Sidecar is truncated, not appended: re-running the same turn (e.g. on resume)
+# must leave exactly one MODEL_REFUSAL line so the benchmark count is idempotent.
+llm_log_refusal_warning codex "$refusal_prompt" "$codex_raw" >/dev/null 2>&1 || true
+assert_eq "1" "$(grep -c MODEL_REFUSAL "${codex_raw}.refusals.log")" \
+  "refusal sidecar stays at one line across repeated calls"
+
+cat > "$TEST_TMPDIR/raw_claude_structured_refusal.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[],"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"This request was declined because it could enable harm."}}}
+EOF
+if llm_log_refusal_warning claude "$refusal_prompt" \
+    "$TEST_TMPDIR/raw_claude_structured_refusal.jsonl" >/dev/null 2>&1; then
+  pass "refusal warning helper detects Claude structured refusal"
+else
+  fail "refusal warning helper should detect Claude structured refusal"
+fi
+
+cat > "$TEST_TMPDIR/raw_gemini_structured_refusal.jsonl" <<'EOF'
+{"promptFeedback":{"blockReason":"SAFETY","safetyRatings":[]}}
+{"candidates":[{"finishReason":"PROHIBITED_CONTENT"}]}
+EOF
+if llm_log_refusal_warning gemini "$refusal_prompt" \
+    "$TEST_TMPDIR/raw_gemini_structured_refusal.jsonl" >/dev/null 2>&1; then
+  pass "refusal warning helper detects Gemini block metadata"
+else
+  fail "refusal warning helper should detect Gemini block metadata"
+fi
+
+python3 - "$TEST_TMPDIR/raw_large_refusal_edges.jsonl" <<'PY'
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(
+    '{"promptFeedback":{"blockReason":"SAFETY"}}\n'
+    + ("x" * (3 * 1024 * 1024))
+    + '\n{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"refusal","refusal":"blocked"}]}}\n',
+    encoding="utf-8",
+)
+PY
+if llm_log_refusal_warning gemini "$refusal_prompt" \
+    "$TEST_TMPDIR/raw_large_refusal_edges.jsonl" >/dev/null 2>&1; then
+  pass "refusal warning helper scans both edges of large raw logs"
+else
+  fail "refusal warning helper should detect edge refusal metadata in large raw logs"
+fi
+
+cat > "$TEST_TMPDIR/raw_codex_tool_refusal_text.jsonl" <<'EOF'
+{"type":"item.completed","item":{"type":"command_execution","aggregated_output":"{\"type\":\"refusal\"}"}}
+EOF
+if llm_log_refusal_warning codex "$refusal_prompt" \
+    "$TEST_TMPDIR/raw_codex_tool_refusal_text.jsonl" >/dev/null 2>&1; then
+  fail "refusal warning helper should not flag tool output mentioning refusal"
+else
+  pass "refusal warning helper ignores tool output mentioning refusal"
+fi
+
+# Regression guard: refusal-shaped prose with NO structured refusal field is
+# ordinary bug-finding work, not a refusal, and must not be flagged.
+cat > "$TEST_TMPDIR/raw_claude_not_refusal.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"I cannot provide a reproducer for this overflow yet; I cannot generate a testcase that reaches it, so I will keep fuzzing."}],"stop_reason":"end_turn"}}
+EOF
+if llm_log_refusal_warning claude "$refusal_prompt" \
+    "$TEST_TMPDIR/raw_claude_not_refusal.jsonl" >/dev/null 2>&1; then
+  fail "refusal warning helper should not flag ordinary 'cannot' working prose"
+else
+  pass "refusal warning helper ignores ordinary 'cannot' working prose"
+fi
+assert_file_not_exists "$TEST_TMPDIR/raw_claude_not_refusal.jsonl.refusals.log" \
+  "no sidecar written when the turn is not a refusal"
+
 # ── 8. llm_apply_memory_policy ───────────────────────────────────
 # The shipped Gemini CLI deny-policy asset.
 gem_policy="$SCRIPT_ROOT/config/gemini-no-memory.policy.toml"

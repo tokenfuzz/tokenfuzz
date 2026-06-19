@@ -6414,6 +6414,7 @@ run_agent() {
 
   # Recover log file from raw JSON if --output-last-message failed (e.g., Codex SDK crash)
   recover_log_from_raw "$logfile"
+  llm_log_refusal_warning "$ACTIVE_BACKEND" "$prompt_with_budget" "$raw_logfile" || true
 
   local normalized_exit_code
   normalized_exit_code=$(normalize_agent_exit_code "$ACTIVE_BACKEND" "$exit_code" "$raw_logfile" \

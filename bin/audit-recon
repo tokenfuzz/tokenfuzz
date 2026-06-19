@@ -651,6 +651,7 @@ run_recon_agent() {
     # aggregator downstream sees real lines beginning with `{"id":"REC-..."`.
     llm_extract_text "$BACKEND" "$agent_raw" > "$agent_log" 2>/dev/null \
       || cp "$agent_raw" "$agent_log"
+    llm_log_refusal_warning "$BACKEND" "$prompt" "$agent_raw" || true
 
     # "Usable output" = at least one byte of extracted text. We don't try
     # to validate JSONL here because the aggregator's parse-error path

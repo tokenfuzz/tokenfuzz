@@ -509,6 +509,20 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
 # ── Assistant-text extraction ───────────────────────────────────────
 
 
+def _iter_json_values(lines):
+    """Yield JSON objects from transcript lines, tolerating non-JSON lines."""
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if not line.startswith(("{", "[")):
+            continue
+        try:
+            yield json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+
 def _iter_json_lines(raw_log_path: str):
     """Yield JSON objects from a raw transcript, tolerating non-JSON lines.
 
@@ -518,16 +532,7 @@ def _iter_json_lines(raw_log_path: str):
     """
     try:
         with open(raw_log_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                if not line.startswith(("{", "[")):
-                    continue
-                try:
-                    yield json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
+            yield from _iter_json_values(f)
     except OSError:
         return
 
@@ -652,6 +657,114 @@ def extract_text(backend: str, raw_log_path: str) -> str:
     raise ValueError(f"unknown backend: {backend}")
 
 
+_GEMINI_REFUSAL_FINISH_REASONS = {
+    "SAFETY",
+    "BLOCKLIST",
+    "PROHIBITED_CONTENT",
+    "IMAGE_SAFETY",
+    "IMAGE_PROHIBITED_CONTENT",
+    "SPII",
+}
+_REFUSAL_SCAN_EDGE_BYTES = 2 * 1024 * 1024
+
+
+def _norm_json_scalar(value) -> str:
+    return str(value).strip().upper() if isinstance(value, str) else ""
+
+
+def _has_refusal_value(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "null", "none", "false")
+    return isinstance(value, (dict, list)) and bool(value)
+
+
+def _json_has_refusal_signal(value) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            k = str(key).lower()
+            scalar = _norm_json_scalar(item)
+            if k in ("stop_reason", "stopreason") and scalar == "REFUSAL":
+                return True
+            if k == "type" and scalar == "REFUSAL":
+                return True
+            if k == "refusal" and _has_refusal_value(item):
+                return True
+            if k == "finishreason" and scalar in _GEMINI_REFUSAL_FINISH_REASONS:
+                return True
+            if (
+                k == "blockreason"
+                and scalar
+                and scalar != "BLOCK_REASON_UNSPECIFIED"
+            ):
+                return True
+            if isinstance(item, (dict, list)) and _json_has_refusal_signal(item):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_json_has_refusal_signal(item) for item in value)
+    return False
+
+
+def _iter_refusal_scan_json(raw_log_path: str):
+    """Yield JSON events from bounded refusal-relevant transcript regions."""
+    try:
+        size = os.path.getsize(raw_log_path)
+    except OSError:
+        return
+
+    if size <= _REFUSAL_SCAN_EDGE_BYTES * 2:
+        yield from _iter_json_lines(raw_log_path)
+        return
+
+    try:
+        with open(raw_log_path, "rb") as f:
+            head = f.read(_REFUSAL_SCAN_EDGE_BYTES)
+            f.seek(size - _REFUSAL_SCAN_EDGE_BYTES)
+            tail = f.read(_REFUSAL_SCAN_EDGE_BYTES)
+    except OSError:
+        return
+
+    yield from _iter_json_values(
+        head.decode("utf-8", errors="replace").splitlines()
+    )
+    tail_lines = tail.decode("utf-8", errors="replace").splitlines()
+    if tail_lines:
+        tail_lines = tail_lines[1:]
+    yield from _iter_json_values(tail_lines)
+
+
+def raw_log_has_structured_refusal(raw_log_path: str) -> bool:
+    # Refusal/block markers are normally either early (Gemini promptFeedback)
+    # or in final stream-json events (Claude/OpenAI stop/content metadata).
+    # Scan both edges so large audit transcripts do not get fully re-read.
+    return any(
+        _json_has_refusal_signal(ev)
+        for ev in _iter_refusal_scan_json(raw_log_path)
+    )
+
+
+def prompt_first_line(prompt: str, limit: int = 180) -> str:
+    for line in prompt.replace("\r", "").splitlines():
+        first = " ".join(line.split())
+        if first:
+            return first[:limit]
+    return "<empty prompt>"
+
+
+def refusal_warning(backend: str, raw_log_path: str, prompt: str) -> str:
+    # Detection keys only on the providers' documented structured refusal/block
+    # fields. We deliberately do NOT scan the assistant's prose: in a bug-finding
+    # transcript "I cannot provide a reproducer", "cannot generate a testcase",
+    # etc. are ordinary working statements, not refusals, and would drown a real
+    # refusal in false positives.
+    if not raw_log_has_structured_refusal(raw_log_path):
+        return ""
+    return (
+        f"WARN: MODEL_REFUSAL backend={backend} refused to answer prompt: "
+        f"{prompt_first_line(prompt)}..."
+    )
+
+
 # ── CLI dispatch (used by the bash shim) ────────────────────────────
 
 
@@ -709,6 +822,18 @@ def _cmd_extract_text(args) -> int:
         return 1
 
 
+def _cmd_refusal_warning(args) -> int:
+    prompt = sys.stdin.read()
+    try:
+        warning = refusal_warning(args.backend, args.raw_log, prompt)
+    except (FileNotFoundError, ValueError):
+        return 1
+    if not warning:
+        return 1
+    sys.stdout.write(warning + "\n")
+    return 0
+
+
 def _cmd_gemini_isolated_home(_args) -> int:
     # Stage the isolated Gemini CLI home (when memory is off and USE_GEMINI_CLI=1)
     # and print its path so the bash entry point can export GEMINI_CLI_HOME.
@@ -747,6 +872,11 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("backend")
     s.add_argument("raw_log")
     s.set_defaults(func=_cmd_extract_text)
+
+    s = sub.add_parser("refusal-warning")
+    s.add_argument("backend")
+    s.add_argument("raw_log")
+    s.set_defaults(func=_cmd_refusal_warning)
 
     s = sub.add_parser("gemini-isolated-home")
     s.set_defaults(func=_cmd_gemini_isolated_home)

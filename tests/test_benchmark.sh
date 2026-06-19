@@ -139,6 +139,10 @@ printf '{"tokens":{"input":1000,"cached_input":800,"output":50},"probe":{"asan_i
   > "$rd/logs/index.jsonl"
 printf '{"tokens":{"input":500,"cached_input":400,"output":30},"probe":{"asan_invocations":1}}\n' \
   >> "$rd/logs/index.jsonl"
+printf 'WARN: MODEL_REFUSAL backend=codex refused to answer prompt: Review this project...\n' \
+  > "$rd/backend.raw.log.refusals.log"
+printf 'noise\nWARN: MODEL_REFUSAL backend=codex refused to answer prompt: Validate this finding...\n' \
+  > "$rd/logs/refusals.log"
 
 # ── T1: harvest counts only sanitizer-confirmed crashes ──────────────────
 hv=$(python3 "$PY" harvest "$rd")
@@ -159,6 +163,8 @@ assert_eq "80" "$(echo "$hv" | jq -r '.tokens.output_tokens')" "T1h: output toke
 assert_eq "3" "$(echo "$hv" | jq -r '.tokens.asan_invocations')" "T1i: asan invocations summed"
 assert_eq "2" "$(echo "$hv" | jq -r '.tokens.iterations')" "T1j: iteration count"
 assert_eq "1200" "$(echo "$hv" | jq -r '.tokens.cached_input_tokens')" "T1k: cached input tokens summed"
+assert_eq "2" "$(echo "$hv" | jq -r '.model_refusals')" \
+  "T1l: model refusal warning sidecars counted"
 
 # ── T1s: harvest finds index.jsonl when logs/ is a sibling of results/ ───
 # A harness run lays out output/<target>-<exp>/<backend>/{results,logs} —
@@ -168,6 +174,8 @@ sib="$work/harness-exp/codex"
 mkdir -p "$sib/results/crashes" "$sib/logs"
 printf '{"backend":"codex","tokens":{"input":4000,"cached_input":3800,"output":120},"probe":{"asan_invocations":5}}\n' \
   > "$sib/logs/index.jsonl"
+printf 'WARN: MODEL_REFUSAL backend=codex refused to answer prompt: Harness prompt...\n' \
+  > "$sib/logs/refusals.log"
 shv=$(python3 "$PY" harvest "$sib/results")
 assert_eq "200" "$(echo "$shv" | jq -r '.tokens.input_tokens')" \
   "T1s: harvest reads token index from a sibling logs/ dir (fresh input)"
@@ -175,6 +183,8 @@ assert_eq "120" "$(echo "$shv" | jq -r '.tokens.output_tokens')" \
   "T1s2: harvest sums output tokens from the sibling index"
 assert_eq "5" "$(echo "$shv" | jq -r '.tokens.asan_invocations')" \
   "T1s3: harvest sums asan invocations from the sibling index"
+assert_eq "1" "$(echo "$shv" | jq -r '.model_refusals')" \
+  "T1s4: harvest reads model refusals from sibling logs/ dir"
 
 # ── T1n: harvest normalizes input across backends + folds cache writes ───
 # Across backends, `input_tokens` means "tokens processed at the full
@@ -243,6 +253,7 @@ JSON
 mk_cell() { # name condition replicate status crashes
   local d="$bd/cells/$1"
   local rejected="${6:-0}"
+  local refusals="${7:-0}"
   mkdir -p "$d"
   cat > "$d/cell.json" <<JSON
 {"condition":"$2","replicate":$3,"status":"$4","wall_seconds":42}
@@ -250,12 +261,13 @@ JSON
   cat > "$d/metrics.json" <<JSON
 {"confirmed_crashes":$5,"crash_clusters":$5,"findings":0,
  "findings_rejected":$rejected,
+ "model_refusals":$refusals,
  "tokens":{"output_tokens":111}}
 JSON
 }
-mk_cell model-direct-r1            model-direct           1 done 0 2
+mk_cell model-direct-r1            model-direct           1 done 0 2 1
 mk_cell model-direct-r2            model-direct           2 done 0
-mk_cell harness-r1 harness 1 done 3
+mk_cell harness-r1 harness 1 done 3 0 2
 mk_cell harness-r2 harness 2 done 1
 agg=$(python3 "$PY" aggregate "$bd")
 hd=$(echo "$agg" | jq -c '.conditions[] | select(.condition=="harness")')
@@ -268,6 +280,10 @@ nv=$(echo "$agg" | jq -c '.conditions[] | select(.condition=="model-direct")')
 assert_eq "0" "$(echo "$nv" | jq -r '.crash_median')" "T4e: model-direct median is 0"
 assert_eq "2" "$(echo "$nv" | jq -r '.rejected_finding_total')" \
   "T4f: aggregate carries rejected finding totals"
+assert_eq "2" "$(echo "$hd" | jq -r '.model_refusal_total')" \
+  "T4g: aggregate carries harness model refusal totals"
+assert_eq "1" "$(echo "$nv" | jq -r '.model_refusal_total')" \
+  "T4h: aggregate carries model-direct model refusal totals"
 
 # Rejected findings are pooled into a browsable list with validator booleans.
 rbd="$work/rejected-bench"

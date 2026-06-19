@@ -310,6 +310,7 @@ case "$BACKEND" in
 esac
 
 text=$(llm_extract_text "$BACKEND" "$raw_log" | tr -d '\r')
+llm_log_refusal_warning "$BACKEND" "$prompt" "$raw_log" || true
 
 # Parse the vote — the model may emit the JSON inline, in a fenced code
 # block, on multiple lines, or with surrounding prose. We extract every

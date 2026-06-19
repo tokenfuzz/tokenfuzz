@@ -81,6 +81,7 @@ SANITIZER_SIGNATURE_RE = re.compile(
 _MAX_SCAN_BYTES = 2 * 1024 * 1024
 
 _CLUSTER_COUNT_RE = re.compile(r"(\d+)\s+unique\s+cluster")
+_MODEL_REFUSAL_RE = re.compile(r"\bMODEL_REFUSAL\b")
 
 
 _RENDER_BASE_DIR: Path | None = None
@@ -973,6 +974,41 @@ def count_recon_candidates(results_dir: Path) -> int:
     return count
 
 
+def count_model_refusals(results_dir: Path) -> int:
+    """Count backend refusal warnings recorded for one benchmark cell.
+
+    The LLM launch shim and custom audit launch paths write one-line
+    ``*.refusals.log`` sidecars carrying ``MODEL_REFUSAL``. Model-direct cells
+    keep those beside ``backend.raw.log`` inside *results_dir*; harness cells
+    keep them under the sibling ``logs/`` tree next to ``results/``.
+    """
+    roots = [Path(results_dir)]
+    sibling_logs = Path(results_dir).parent / "logs"
+    if sibling_logs.is_dir():
+        roots.append(sibling_logs)
+
+    count = 0
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*refusals.log"):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                resolved = path
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            count += sum(1 for line in text.splitlines()
+                         if _MODEL_REFUSAL_RE.search(line))
+    return count
+
+
 # ── ground-truth scoring (precision / recall) ────────────────────────────
 #
 # count_confirmed_crashes makes the crash *count* trustworthy, but on an
@@ -1364,6 +1400,7 @@ def harvest(
             results_dir / "findings-rejected", "FIND-"
         ),
         "recon_candidates": count_recon_candidates(results_dir),
+        "model_refusals": count_model_refusals(results_dir),
         "exists": results_dir.is_dir(),
     }
     metrics["tokens"] = harvest_tokens(
@@ -2043,6 +2080,9 @@ def aggregate(bench_dir: Path) -> dict:
         discarded_hypotheses = [
             c["metrics"].get("discarded_hypotheses", 0) for c in done
         ]
+        model_refusals = [
+            c["metrics"].get("model_refusals", 0) for c in done
+        ]
         walls = [c["wall_seconds"] for c in done if c.get("wall_seconds")]
         token_rows = [_tokens_for_cell(c) for c in done]
         token_usage.extend(token_rows)
@@ -2060,6 +2100,7 @@ def aggregate(bench_dir: Path) -> dict:
                 "rejected_crash_total": sum(rejected_crashes),
                 "discarded_hypothesis_total": sum(discarded_hypotheses),
                 "rejected_finding_total": sum(rejected_findings),
+                "model_refusal_total": sum(model_refusals),
                 "finding_total": sum(findings),
                 "unique_crash_clusters": cb.get("unique_clusters", 0),
                 "novel_crash_clusters": cb.get("novel_clusters", 0),

@@ -221,6 +221,8 @@ codex_out=$(<"$work/codex.out")
 assert_eq "0" "$codex_rc" "T16a: model-direct codex cell succeeds with one --cd"
 assert_match "cells complete: 1 done, 0 failed" "$codex_out" \
   "T16b: codex benchmark cell marked done"
+assert_match "refusals=0" "$codex_out" \
+  "T16b-refusals: benchmark summary prints refusal count"
 # The target tree must stay byte-identical: no chmod, no copy, no rewrite.
 # Inspect the literal mode bits via stat rather than `[ -x file ]`. The
 # latter lies on Docker-for-Mac bind mounts (root + virtiofs returns

@@ -57,6 +57,13 @@
 #
 #   llm_extract_text <backend> <raw_log_path>
 #       Stream the assistant's natural-language text to stdout.
+#
+#   llm_log_refusal_warning <backend> <prompt> <raw_log_path>
+#       Detect a structured backend refusal/block in the raw transcript and
+#       emit a one-line MODEL_REFUSAL warning (backend + first prompt line) to
+#       stderr and to a "<raw_log_path>.refusals.log" sidecar. The sidecar is
+#       truncated, not appended: one transcript = at most one refusal, so a
+#       resumed run that re-runs the same turn stays idempotent.
 
 _llm_invoke_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _LLM_INVOKE_PY="$_llm_invoke_dir/llm_invoke.py"
@@ -302,6 +309,21 @@ llm_capture_gemini_cli_log_diag() {
   } >> "$dest" 2>/dev/null || true
 }
 
+llm_log_refusal_warning() {
+  local backend="$1" prompt="$2" raw_log="$3"
+  local warning
+  _llm_invoke_export_env
+  warning="$(printf '%s' "$prompt" \
+    | python3 "$_LLM_INVOKE_PY" refusal-warning "$backend" "$raw_log" 2>/dev/null)" \
+    || return 1
+  [ -n "$warning" ] || return 1
+  printf '%s\n' "$warning" >&2
+  # Truncate, not append: the sidecar path is unique per transcript, so one
+  # line per refusing turn keeps the benchmark count idempotent across resume.
+  printf '%s\n' "$warning" > "${raw_log}.refusals.log" 2>/dev/null || true
+  return 0
+}
+
 _llm_first_add_dir() {
   local add_dirs="${1:-}" first
   first="${add_dirs%%,*}"
@@ -351,6 +373,7 @@ llm_run_agent_prompt() {
       return 1
       ;;
   esac
+  llm_log_refusal_warning "$backend" "$prompt" "$raw_log" || true
   return "$rc"
 }
 
@@ -388,6 +411,7 @@ llm_run_agent_prompt_no_timeout() {
       return 1
       ;;
   esac
+  llm_log_refusal_warning "$backend" "$prompt" "$raw_log" || true
   return "$rc"
 }
 

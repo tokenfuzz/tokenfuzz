@@ -2116,11 +2116,27 @@ for c in report.get("conditions", []):
     crashes = c.get("crashes", [])
     rng = f"{min(crashes)}-{max(crashes)}" if crashes else "-"
     print("  {cond:<18} done={d}/{t}  crash median={cm:g}  range={rng}  "
-          "total={ct}".format(
+          "total={ct}  refusals={rf}".format(
               cond=c["condition"], d=c["replicates_done"],
               t=c["replicates_total"], cm=c["crash_median"],
-              rng=rng, ct=c["crash_total"]))
+              rng=rng, ct=c["crash_total"],
+              rf=int(c.get("model_refusal_total", 0) or 0)))
 PYEOF
+refusal_total=$(python3 - "$BENCH_DIR/report.json" <<'PYEOF'
+import json, sys
+try:
+    report = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    print(0)
+    sys.exit(0)
+print(sum(int(c.get("model_refusal_total", 0) or 0)
+          for c in report.get("conditions", [])))
+PYEOF
+)
+case "$refusal_total" in ''|*[!0-9]*) refusal_total=0 ;; esac
+if [ "$refusal_total" -gt 0 ]; then
+  log "model refusals: $refusal_total total MODEL_REFUSAL warning(s); examples are in $BENCH_DIR/console.log and each cell's live log path"
+fi
 echo
 log "ledger: $LEDGER"
 log "done."
