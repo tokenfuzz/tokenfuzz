@@ -55,6 +55,7 @@ eval "$(audit_extract_functions \
   oss_resolved_model_name \
   discover_ensemble_backends \
   init_backend_selection \
+  apply_backend_decision_timeout_defaults \
   resolve_model \
   model_preflight_stamp_path \
   oss_tool_preflight \
@@ -497,6 +498,25 @@ GEMINI_BIN="$fake_backend_dir/gemini-missing-auth"
 OPENCODE_BIN="$fake_backend_dir/opencode"
 init_backend_selection
 assert_eq "oss" "$ACTIVE_BACKEND" "backend: oss selects local OpenCode path without hosted login check"
+
+ACTIVE_BACKEND=codex
+AUDIT_LLM_DECISION_TIMEOUT_USER_SET=""
+LLM_DECISION_TIMEOUT=45
+apply_backend_decision_timeout_defaults
+assert_eq "45" "$LLM_DECISION_TIMEOUT" "decision timeout: hosted backend keeps shared default"
+
+ACTIVE_BACKEND=oss
+AUDIT_LLM_DECISION_TIMEOUT_USER_SET=""
+LLM_DECISION_TIMEOUT=45
+apply_backend_decision_timeout_defaults
+assert_eq "180" "$LLM_DECISION_TIMEOUT" "decision timeout: oss backend raises shared default"
+assert_eq "180" "$(bash -c 'printf "%s" "$LLM_DECISION_TIMEOUT"')" "decision timeout: applied value is exported to child tools"
+
+ACTIVE_BACKEND=oss
+AUDIT_LLM_DECISION_TIMEOUT_USER_SET=1
+LLM_DECISION_TIMEOUT=240
+apply_backend_decision_timeout_defaults
+assert_eq "240" "$LLM_DECISION_TIMEOUT" "decision timeout: explicit operator override wins for oss"
 
 AUDIT_BACKEND=oss
 BACKEND_FLAG_PROVIDED=1

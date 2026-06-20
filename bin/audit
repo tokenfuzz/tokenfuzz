@@ -23,6 +23,10 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export SCRIPT_ROOT
 cd "$SCRIPT_ROOT" || { echo "FATAL: cannot cd to $SCRIPT_ROOT" >&2; exit 1; }
 
+# triage.sh assigns the hosted-backend default while it is sourced below.
+# Remember whether the operator provided a value before that default is applied.
+AUDIT_LLM_DECISION_TIMEOUT_USER_SET="${LLM_DECISION_TIMEOUT:+1}"
+
 # Source extracted modules (runtime vars like RESULTS_DIR are bound at call-time).
 for _lib in platform.sh fmt.sh timeout.sh target_config.sh llm_invoke.sh llm_decide.sh structured_state.sh vocab.sh triage.sh quality.sh housekeeping.sh audit_debug.sh prompt.sh gemini_watchdog.sh; do
   [ -f "$SCRIPT_ROOT/lib/$_lib" ] || { echo "FATAL: missing lib/$_lib" >&2; exit 1; }
@@ -1133,6 +1137,17 @@ EOF
       exit 1
       ;;
   esac
+}
+
+apply_backend_decision_timeout_defaults() {
+  if [ -z "${AUDIT_LLM_DECISION_TIMEOUT_USER_SET:-}" ] && [ "${ACTIVE_BACKEND:-}" = "oss" ]; then
+    LLM_DECISION_TIMEOUT=180
+  fi
+  if ! [[ "${LLM_DECISION_TIMEOUT:-}" =~ ^[0-9]+$ ]] || [ "$LLM_DECISION_TIMEOUT" -le 0 ]; then
+    log "FATAL: LLM_DECISION_TIMEOUT must be a positive integer number of seconds (got '${LLM_DECISION_TIMEOUT:-}')" >&2
+    exit 1
+  fi
+  export LLM_DECISION_TIMEOUT
 }
 
 resolve_model() {
@@ -2682,6 +2697,7 @@ fi
 unset _missing_tools _tool
 
 init_backend_selection
+apply_backend_decision_timeout_defaults
 
 # --new-target: seed output/<slug>/target.toml then exit. Used to bootstrap
 # a brand-new target before running the first audit session.
@@ -3342,11 +3358,12 @@ corpus_dir_root() {
 }
 prepare_active_backend_runtime
 clear_startup_rate_limit_cooldowns
+backend_detail="(hosted API)"
 if [ "$ACTIVE_BACKEND" = "oss" ]; then
-  log "LLM backend: provider=${ACTIVE_BACKEND} model=${MODEL} base_url=$(oss_local_base_url)" | tee -a "$INDEX"
-else
-  log "LLM backend: provider=${ACTIVE_BACKEND} model=${MODEL} (hosted API)" | tee -a "$INDEX"
+  backend_detail="base_url=$(oss_local_base_url)"
 fi
+log "LLM backend: provider=${ACTIVE_BACKEND} model=${MODEL} ${backend_detail} decision_timeout=$(fmt_secs "$LLM_DECISION_TIMEOUT")" | tee -a "$INDEX"
+unset backend_detail
 if [ "$ENSEMBLE_MODE" -eq 1 ]; then
   log "Ensemble mode: cycling through backends ${ENSEMBLE_BACKENDS[*]} across iterations (artifacts written under output/${TARGET_OUTPUT_SLUG}/<backend>/)" | tee -a "$INDEX"
 fi
