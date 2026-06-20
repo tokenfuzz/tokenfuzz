@@ -89,13 +89,19 @@ follow-up rather than the default probe budget.
 | `GEMINI_MODEL_DEFAULT` | `gemini-3.1-pro-preview` | Default model for the `gemini` backend. Only consulted with `USE_GEMINI_CLI=1`; the default Antigravity CLI (`agy`) has no launch-time model flag. |
 | `AUDIT_BACKEND` | (none) | Alternative to `--backend`. Same accepted values: `all`, `claude`, `codex`, `gemini`, `oss`. |
 | `USE_GEMINI_CLI` | `0` | Set to `1` to drive the `gemini` backend through Google Gemini CLI (`gemini`) instead of the default Antigravity CLI (`agy`). |
+| `AUDIT_LOCAL_BASE_URL` | `http://127.0.0.1:8000/v1` | OpenAI-compatible endpoint for `--backend oss`. `/v1` is appended automatically when omitted. Set this to `http://127.0.0.1:11434/v1` for Ollama. |
+| `AUDIT_LOCAL_API_KEY` | (none) | Generic optional API key for the local OpenAI-compatible endpoint. |
+| `OPENCODE_BIN` | `opencode` | OpenCode binary used by `--backend oss` when it is not on `PATH` under the default name. |
 
-The model default chain is: `--model` on the command line, then the
-`*_MODEL_DEFAULT` environment variable, then `config/models.toml`.
-The table above shows the shipped `config/models.toml` values.
+The hosted model default chain is: `--model` on the command line, then
+the matching `*_MODEL_DEFAULT` environment variable, then
+`config/models.toml`. The table above shows the shipped
+`config/models.toml` values.
 `--model` wins over hosted/backend-local model
-defaults for backends that accept a launch-time model. For `gemini`, it
-is supported only with `USE_GEMINI_CLI=1`; the default Antigravity CLI
+defaults for backends that accept a launch-time model. For `oss`, pass
+`--model` every time so the harness can match the exact served model id
+from the local provider's `/v1/models` endpoint. For `gemini`, it is
+supported only with `USE_GEMINI_CLI=1`; the default Antigravity CLI
 (`agy`) keeps model selection in its interactive `/model` setting.
 
 ## Where to put overrides

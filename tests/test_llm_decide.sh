@@ -140,34 +140,40 @@ out=$(echo "x" | llm_decide demo "id" 2 2>/dev/null) || rc=$?
 assert_eq "1" "${rc:-0}" "array missing key on element → rc=1"
 unset LLM_DECIDE_MOCK
 
-# 10. OSS backend invokes Codex exec with Ollama provider flags
-fake_codex="$TEST_TMPDIR/fake-codex-oss"
-cat > "$fake_codex" <<'EOF'
+# 10. OSS backend invokes OpenCode with provider/model config
+fake_opencode="$TEST_TMPDIR/fake-opencode-oss"
+cat > "$fake_opencode" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$*" > "$FAKE_CODEX_ARGS"
-cat >/dev/null
-printf '{"keep":true,"reason":"oss"}\n'
+printf '%s\n' "$*" > "$FAKE_OPENCODE_ARGS"
+printf '%s\n' "${OPENCODE_CONFIG_CONTENT:-}" > "$FAKE_OPENCODE_CONFIG"
+printf '{"type":"message","role":"assistant","content":"{\\"keep\\":true,\\"reason\\":\\"oss\\"}"}\n'
 EOF
-chmod +x "$fake_codex"
+chmod +x "$fake_opencode"
 unset rc
 unset LLM_DECIDE_DISABLE
 export ACTIVE_BACKEND=oss
-export MODEL="qwen3:14b"
-export CODEX_BIN="$fake_codex"
-export FAKE_CODEX_ARGS="$TEST_TMPDIR/fake-codex-oss.args"
+export MODEL="qwen3-14b"
+export OPENCODE_BIN="$fake_opencode"
+export FAKE_OPENCODE_ARGS="$TEST_TMPDIR/fake-opencode-oss.args"
+export FAKE_OPENCODE_CONFIG="$TEST_TMPDIR/fake-opencode-oss.config"
 export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-oss"
 out=$(echo "x" | llm_decide demo "keep,reason" 2)
-assert_eq "0" "$?" "oss backend: llm_decide succeeds through fake Codex"
-assert_match '"reason":"oss"|\"reason\": \"oss\"' "$out" "oss backend: parses fake Codex JSON"
-oss_args=$(cat "$FAKE_CODEX_ARGS")
-assert_match 'exec --oss --local-provider ollama --ephemeral --skip-git-repo-check --sandbox read-only --model qwen3:14b -' "$oss_args" \
-  "oss backend: Codex args are ordered for exec"
+assert_eq "0" "$?" "oss backend: llm_decide succeeds through fake OpenCode"
+assert_match '"reason":"oss"|\"reason\": \"oss\"' "$out" "oss backend: parses fake OpenCode JSON"
+oss_args=$(cat "$FAKE_OPENCODE_ARGS")
+assert_match 'run --model local/qwen3-14b --format json x' "$oss_args" \
+  "oss backend: OpenCode args pass prompt as message"
+assert_not_match '--file' "$oss_args" \
+  "oss backend: OpenCode args do not attach prompt file"
+oss_config=$(cat "$FAKE_OPENCODE_CONFIG")
+assert_match '"provider":\{"local"' "$oss_config" "oss backend: OpenCode config defines shared local provider"
+assert_match '"qwen3-14b"' "$oss_config" "oss backend: OpenCode config includes resolved model"
 if grep -q -- '--output-schema' <<<"$oss_args"; then
-  fail "oss backend: decision calls use plain text JSON, not Codex schema" "got: $oss_args"
+  fail "oss backend: decision calls use plain text JSON, not CLI schema flags" "got: $oss_args"
 else
-  pass "oss backend: decision calls use plain text JSON, not Codex schema"
+  pass "oss backend: decision calls use plain text JSON, not CLI schema flags"
 fi
-unset ACTIVE_BACKEND MODEL CODEX_BIN FAKE_CODEX_ARGS LLM_DECIDE_COUNTER_FILE
+unset ACTIVE_BACKEND MODEL OPENCODE_BIN FAKE_OPENCODE_ARGS FAKE_OPENCODE_CONFIG LLM_DECIDE_COUNTER_FILE
 
 # 10b. Standalone helper compatibility: BACKEND is accepted when
 # ACTIVE_BACKEND is unset. bin/audit still uses ACTIVE_BACKEND internally

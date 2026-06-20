@@ -35,8 +35,7 @@
 #
 #   llm_default_model <backend>
 #       Echo the project-wide default model name. Honours CLAUDE_MODEL_DEFAULT
-#       / CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT /
-#       CODEX_OSS_MODEL_DEFAULT env vars.
+#       / CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT env vars.
 #
 #   llm_agent_flags <backend> <out-array-name> [model] [max_turns] [add_dirs_csv]
 #       Populate <out-array-name> with agent-mode flags (stream-json, sandbox
@@ -114,6 +113,8 @@ llm_gemini_default_bin() {
 #   codex   `-c features.memories=false` + memories.use_memories/generate=false,
 #           injected by llm_invoke.py's flag builders keyed on
 #           TOKENFUZZ_MEMORY_ENABLED, so EVERY launch path gets them.
+#   oss     OpenCode is launched with a per-call provider config. No
+#           cross-run memory controls are currently needed.
 #   gemini  (Google Gemini CLI) GEMINI_CLI_HOME relocated to a clean, EMPTY
 #           per-run home so the global ~/.gemini/GEMINI.md is neither read nor
 #           written (no setting or flag disables that load — verified). Auth
@@ -208,7 +209,8 @@ llm_stage_gemini_memory_home() {
 # explicit assignment) but bash function callers may not have exported
 # them. Each subprocess invocation needs them visible.
 _llm_invoke_export_env() {
-  export CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT CODEX_OSS_MODEL_DEFAULT
+  export CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT
+  export AUDIT_LOCAL_BASE_URL AUDIT_LOCAL_API_KEY OPENCODE_BIN
   export USE_GEMINI_CLI="${USE_GEMINI_CLI:-}"
   # The flag builders gate the per-backend memory-disable flags on this; an
   # unset value reads as "memory off" (the harness default).
@@ -276,10 +278,28 @@ llm_agent_flags() {
 llm_backend_bin() {
   case "$1" in
     claude) printf '%s\n' "${CLAUDE_BIN:-claude}" ;;
-    codex|oss) printf '%s\n' "${CODEX_BIN:-codex}" ;;
+    codex) printf '%s\n' "${CODEX_BIN:-codex}" ;;
+    oss) printf '%s\n' "${OPENCODE_BIN:-opencode}" ;;
     gemini) printf '%s\n' "${GEMINI_BIN:-$(llm_gemini_default_bin)}" ;;
     *) return 1 ;;
   esac
+}
+
+llm_opencode_config_content() {
+  local model="${1:-}"
+  ( _llm_invoke_export_env
+    python3 "$_LLM_INVOKE_PY" opencode-config --model "$model" )
+}
+
+llm_resolve_model_name() {
+  local backend="$1" model="${2:-}"
+  ( _llm_invoke_export_env
+    python3 "$_LLM_INVOKE_PY" resolve-model "$backend" --model "$model" )
+}
+
+llm_local_base_url() {
+  ( _llm_invoke_export_env
+    python3 "$_LLM_INVOKE_PY" local-base-url )
 }
 
 llm_newest_agy_cli_log() {
@@ -351,9 +371,20 @@ llm_run_agent_prompt() {
       ( cd "$cwd" && audit_timeout_run "$timeout_secs" "$bin" "${flags[@]}" \
         -p "$prompt" ) > "$raw_log" 2>&1 || rc=$?
       ;;
-    codex|oss)
+    codex)
       ( cd "$cwd" && printf '%s' "$prompt" \
         | audit_timeout_run "$timeout_secs" "$bin" exec "${flags[@]}" - ) \
+        > "$raw_log" 2>&1 || rc=$?
+      ;;
+    oss)
+      # OpenCode `run` takes the prompt as a positional argument; it has no
+      # stdin path (unlike codex `exec -`), so the prompt rides in argv.
+      local opencode_config
+      opencode_config="$(llm_opencode_config_content "$model")" || return $?
+      ( cd "$cwd" && OPENCODE_CONFIG_CONTENT="$opencode_config" \
+        audit_timeout_run "$timeout_secs" "$bin" "${flags[@]}" \
+          "$prompt" \
+        ) \
         > "$raw_log" 2>&1 || rc=$?
       ;;
     gemini)
@@ -393,8 +424,17 @@ llm_run_agent_prompt_no_timeout() {
     claude)
       ( cd "$cwd" && "$bin" "${flags[@]}" -p "$prompt" ) > "$raw_log" 2>&1 || rc=$?
       ;;
-    codex|oss)
+    codex)
       ( cd "$cwd" && printf '%s' "$prompt" | "$bin" exec "${flags[@]}" - ) \
+        > "$raw_log" 2>&1 || rc=$?
+      ;;
+    oss)
+      # Prompt rides in argv — OpenCode `run` has no stdin path.
+      local opencode_config
+      opencode_config="$(llm_opencode_config_content "$model")" || return $?
+      ( cd "$cwd" && OPENCODE_CONFIG_CONTENT="$opencode_config" "$bin" "${flags[@]}" \
+          "$prompt" \
+        ) \
         > "$raw_log" 2>&1 || rc=$?
       ;;
     gemini)
@@ -426,4 +466,10 @@ llm_extract_text() {
   local backend="$1" raw_log="$2"
   [ -r "$raw_log" ] || return 1
   python3 "$_LLM_INVOKE_PY" extract-text "$backend" "$raw_log"
+}
+
+llm_raw_has_tool() {
+  local raw_log="$1" tool_name="$2"
+  [ -r "$raw_log" ] || return 1
+  python3 "$_LLM_INVOKE_PY" raw-has-tool "$raw_log" "$tool_name"
 }

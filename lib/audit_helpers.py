@@ -112,6 +112,7 @@ def _cmd_relpath_list(args: argparse.Namespace) -> int:
 _WASTE_OVER_BYTES = 8192
 _WASTE_NATIVE_NAMES = ("Read", "Grep", "Glob")
 _WASTE_OBSERVABILITY_ONLY = {"update_topic"}
+_SHELL_TOOL_NAMES = {"Bash", "bash", "run_shell_command"}
 
 
 def _text_value(value):
@@ -151,6 +152,33 @@ def _sanitize_label(label):
     if len(label) > 120:
         label = label[:117] + "..."
     return label or "unknown"
+
+
+def _native_tool_name(name):
+    lower = str(name or "").lower()
+    if lower == "read":
+        return "Read"
+    if lower == "grep":
+        return "Grep"
+    if lower == "glob":
+        return "Glob"
+    return str(name or "")
+
+
+def _opencode_tool_event(ev):
+    if ev.get("type") != "tool_use":
+        return None
+    part = ev.get("part")
+    if not isinstance(part, dict) or part.get("type") != "tool":
+        return None
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    tool_input = state.get("input") if isinstance(state.get("input"), dict) else {}
+    return {
+        "name": part.get("tool") or "",
+        "input": tool_input,
+        "output": _text_value(state.get("output") or state.get("error") or ""),
+        "call_id": part.get("callID") or part.get("id") or "",
+    }
 
 
 def _unwrap_shell(cmd):
@@ -276,12 +304,31 @@ def _cmd_waste_telemetry(args: argparse.Namespace) -> int:
                 continue
 
             if ev.get("type") == "tool_use":
+                opencode_tool = _opencode_tool_event(ev)
+                if opencode_tool is not None:
+                    name = opencode_tool["name"]
+                    native_name = _native_tool_name(name)
+                    if native_name in _WASTE_NATIVE_NAMES:
+                        native[native_name] += 1
+                    cmd = opencode_tool["input"].get("command") if isinstance(opencode_tool["input"], dict) else ""
+                    if name in _SHELL_TOOL_NAMES:
+                        record_command(cmd)
+                    output = opencode_tool["output"]
+                    if output and name not in _WASTE_OBSERVABILITY_ONLY:
+                        label = cmd or name or "tool"
+                        record_output(
+                            output,
+                            f"{_command_pattern(label) if name in _SHELL_TOOL_NAMES else native_name or name}: {label}",
+                        )
+                    continue
+
                 name = ev.get("tool_name") or ev.get("name") or "unknown"
-                if name in _WASTE_NATIVE_NAMES:
-                    native[name] += 1
+                native_name = _native_tool_name(name)
+                if native_name in _WASTE_NATIVE_NAMES:
+                    native[native_name] += 1
                 params = ev.get("parameters") or ev.get("input") or {}
                 cmd = params.get("command") if isinstance(params, dict) else ""
-                if name == "run_shell_command":
+                if name in _SHELL_TOOL_NAMES:
                     record_command(cmd)
                 tool_id = ev.get("tool_id") or ev.get("id")
                 if tool_id:
@@ -367,8 +414,15 @@ def _count_tools(path: str) -> dict[str, int]:
             continue
 
         if event.get("type") == "tool_use":
+            opencode_tool = _opencode_tool_event(event)
+            if opencode_tool is not None:
+                if opencode_tool["name"] in _SHELL_TOOL_NAMES:
+                    counts["command_execution"] += 1
+                counts["all_tools"] += 1
+                continue
+
             name = event.get("tool_name") or event.get("name") or ""
-            if name == "run_shell_command":
+            if name in _SHELL_TOOL_NAMES:
                 counts["command_execution"] += 1
             counts["all_tools"] += 1
             continue
@@ -571,8 +625,15 @@ def _cmd_finish_fields(args: argparse.Namespace) -> int:
             continue
 
         if event.get("type") == "tool_use":
+            opencode_tool = _opencode_tool_event(event)
+            if opencode_tool is not None:
+                if opencode_tool["name"] in _SHELL_TOOL_NAMES:
+                    counts["command_execution"] += 1
+                counts["all_tools"] += 1
+                continue
+
             name = event.get("tool_name") or event.get("name") or ""
-            if name == "run_shell_command":
+            if name in _SHELL_TOOL_NAMES:
                 counts["command_execution"] += 1
             counts["all_tools"] += 1
             continue

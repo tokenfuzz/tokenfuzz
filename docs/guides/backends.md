@@ -30,16 +30,19 @@ How to choose:
   control.
 - `<backend>` is one of `claude`, `codex`, `gemini`, or `oss`.
 - `--model` overrides the model name for `claude` and `codex`; for
-  `oss`, it is required and must name an already-pulled Ollama model.
+  `oss`, it is required and names the local model served through OpenCode.
+  OpenCode is always configured with one local provider ref,
+  `local/<model>`. The default local endpoint is vLLM-style
+  `http://127.0.0.1:8000/v1`; set `AUDIT_LOCAL_BASE_URL` for Ollama or
+  any other OpenAI-compatible server.
   The `gemini` backend uses Antigravity CLI (`agy`) by default; `agy`
   has no launch-time model selector, so use its interactive `/model`
   command. Set `USE_GEMINI_CLI=1` to use Google Gemini CLI (`gemini`)
   instead; in that mode `--model` is forwarded at launch time. The
   per-backend defaults live in
   [Model selection](../reference/environment.md#model-selection).
-- For `--backend oss`, `--model` is required. The harness checks
-  `ollama list` at startup and fails fast if the model is not already
-  pulled.
+- For `--backend oss`, `--model` is required and must match the exact
+  model id listed by the selected provider's `/v1/models` endpoint.
 
 ### Google Gemini CLI ripgrep
 
@@ -218,23 +221,117 @@ still comes from the cluster tables in `crashes/` and `findings/`. See
 [Cost model](../concepts/cost-model.md#what-to-monitor) for which
 numbers to watch.
 
-## Local models through Ollama
+## Local models through OpenCode
 
 ```bash
 bin/audit --backend oss --model <model-name>
 ```
 
-The local backend runs Codex in OSS mode against an Ollama-hosted
-model. Check that Ollama is running and the model is available before
-starting a long session:
+The local backend runs OpenCode against a local OpenAI-compatible model
+server. Use vLLM when you care about throughput and larger open models;
+it is the default because it is built for fast batched inference on GPU
+hosts. Use Ollama when you want the simplest desktop setup, especially
+on macOS or for smaller models.
+
+Install OpenCode first. The official installer options include:
 
 ```bash
-ollama list
+curl -fsSL https://opencode.ai/install | bash
+# or: npm i -g opencode-ai
+# or on macOS: brew install anomalyco/tap/opencode
 ```
 
-The harness checks this at startup for `--backend oss` and fails fast
-if the model is not already listed. That avoids letting Codex trigger
-a long implicit download mid-run.
+### vLLM path (recommended)
+
+Install [vLLM](https://docs.vllm.ai/en/latest/getting_started/installation/)
+on the machine that has the GPU:
+
+```bash
+python3 -m venv .venv-vllm
+. .venv-vllm/bin/activate
+pip install -U vllm
+```
+
+Start a model with an explicit served name. The served name is what you
+pass to `--model`:
+
+```bash
+vllm serve <hf-model-or-local-path> --served-model-name qwen3-8b
+
+bin/audit --backend oss --model qwen3-8b --target <target-name> 1
+```
+
+For current larger open models, use the upstream model id as the vLLM
+source and choose a short served name for the harness:
+
+```bash
+# Gemma 4 26B-A4B
+vllm serve google/gemma-4-26B-A4B --served-model-name gemma4-26b-a4b
+bin/audit --backend oss --model gemma4-26b-a4b --target <target-name> 1
+
+# Qwen3.6 35B-A3B
+vllm serve Qwen/Qwen3.6-35B-A3B --served-model-name qwen3.6-35b-a3b
+bin/audit --backend oss --model qwen3.6-35b-a3b --target <target-name> 1
+
+# GLM-5.2
+vllm serve zai-org/GLM-5.2 --served-model-name glm5.2
+bin/audit --backend oss --model glm5.2 --target <target-name> 1
+```
+
+If vLLM is not on the default URL, point the harness at it:
+
+```bash
+export AUDIT_LOCAL_BASE_URL=http://127.0.0.1:8000/v1
+bin/audit --backend oss --model qwen3-8b --target <target-name>
+```
+
+### Ollama path
+
+Install Ollama from its official download page, then pull and serve the
+model:
+
+```bash
+# Linux:
+curl -fsSL https://ollama.com/install.sh | sh
+
+ollama pull qwen3:8b
+ollama serve
+
+export AUDIT_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
+bin/audit --backend oss --model qwen3:8b --target <target-name> 1
+```
+
+Common Ollama examples use Ollama's tag as the exact model name:
+
+```bash
+# Gemma 4 26B-A4B
+ollama pull gemma4:26b
+export AUDIT_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
+bin/audit --backend oss --model gemma4:26b --target <target-name> 1
+
+# Qwen3.6 35B-A3B
+ollama pull qwen3.6:35b-a3b
+export AUDIT_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
+bin/audit --backend oss --model qwen3.6:35b-a3b --target <target-name> 1
+
+# GLM-5.2. Ollama currently publishes this as a cloud tag; use vLLM
+# instead when you need fully local GLM-5.2 weights.
+ollama pull glm-5.2:cloud
+export AUDIT_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
+bin/audit --backend oss --model glm-5.2:cloud --target <target-name> 1
+```
+
+If Ollama is not on the default URL, set the shared local base URL:
+
+```bash
+export AUDIT_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
+bin/audit --backend oss --model qwen3:8b --target <target-name>
+```
+
+At startup, the harness asks the selected provider's `/v1/models`
+endpoint for the served model list. If the model is missing, it fails
+before launching agents. That avoids burning an audit session on a
+misnamed model or a server that was never started.
 
 Local models are useful for:
 

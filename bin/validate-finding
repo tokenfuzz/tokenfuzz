@@ -295,10 +295,15 @@ case "$BACKEND" in
     ( cd "$validator_cwd" && audit_timeout_run "$TIMEOUT_SECS" "${CLAUDE_BIN:-claude}" "${validator_flags[@]}" \
       -p "$prompt" > "$raw_log" 2> "$raw_err" < /dev/null ) || backend_rc=$?
     ;;
-  codex|oss)
+  codex)
     backend_rc=0
     ( cd "$validator_cwd" && audit_timeout_run "$TIMEOUT_SECS" "${CODEX_BIN:-codex}" exec "${validator_flags[@]}" "$prompt" \
       > "$raw_log" 2> "$raw_err" < /dev/null ) || backend_rc=$?
+    ;;
+  oss)
+    backend_rc=0
+    : > "$raw_err"
+    llm_run_agent_prompt oss "$prompt" "$TIMEOUT_SECS" "$raw_log" "${MODEL:-}" 1 "$TARGET_PATH,$SCRIPT_ROOT" "$validator_cwd" || backend_rc=$?
     ;;
   gemini)
     # Gemini backend reads the prompt from stdin when -p "".

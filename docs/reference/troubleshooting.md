@@ -157,12 +157,14 @@ Check:
 output/<target>/<backend>/logs/
 ```
 
-Then run the backend CLI outside the harness to confirm
-authentication and basic execution. For local models, confirm
-Ollama is running:
+Then run the backend CLI outside the harness to confirm authentication
+and basic execution. For local models, confirm the selected provider is
+running and serving the expected model:
 
 ```bash
-ollama list
+curl http://127.0.0.1:8000/v1/models
+# or, for Ollama:
+curl http://127.0.0.1:11434/v1/models
 ```
 
 Use an explicit backend while debugging:

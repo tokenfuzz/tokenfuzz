@@ -53,6 +53,11 @@ triage_validate_finding() {
   # claude wasn't authenticated in the container).
   local backend="${TRIAGE_VALIDATE_BACKEND:-${ACTIVE_BACKEND:-${BACKEND:-claude}}}"
   local -a backend_args=(--backend "$backend")
+  # Forward the model when the caller resolved one. oss has no default model,
+  # so without this the OpenCode validator config errors out; hosted backends
+  # fall back to their own default when this is empty.
+  local validate_model="${TRIAGE_VALIDATE_MODEL:-${MODEL:-}}"
+  [ -n "$validate_model" ] && backend_args+=(--model "$validate_model")
 
   # One in-place retry on rc=3 (ParseFailure): the validator returns 3
   # when the LLM produced no parseable vote JSON. In practice that's

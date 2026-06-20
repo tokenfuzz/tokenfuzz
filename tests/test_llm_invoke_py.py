@@ -31,7 +31,8 @@ for key in (
     "CLAUDE_MODEL_DEFAULT",
     "CODEX_MODEL_DEFAULT",
     "GEMINI_MODEL_DEFAULT",
-    "CODEX_OSS_MODEL_DEFAULT",
+    "AUDIT_LOCAL_BASE_URL",
+    "AUDIT_LOCAL_API_KEY",
 ):
     os.environ.pop(key, None)
 
@@ -124,10 +125,44 @@ ok("danger-full-access" in f, "codex has danger-full-access sandbox")
 ok("--dangerously-bypass-approvals-and-sandbox" in f, "codex bypasses approvals")
 
 proc = run(["agent-flags", "oss"], check=True)
-f = proc.stdout
-ok("--oss" in f, "oss has --oss")
-ok("--local-provider" in f and "ollama" in f, "oss has --local-provider ollama")
-ok("danger-full-access" in f, "oss inherits codex sandbox")
+f = flags(proc)
+assert_eq(
+    ["run", "--dangerously-skip-permissions", "--format", "json"],
+    f,
+    "oss agent flags do not invent a model when none is supplied",
+)
+
+proc = run(["agent-flags", "oss", "--model", "qwen3-8b"], check=True)
+f = flags(proc)
+assert_eq("local/qwen3-8b", f[f.index("--model") + 1], "oss model uses shared local provider ref for vLLM")
+ok("--dangerously-skip-permissions" in f, "oss agent auto-approves OpenCode permissions")
+
+proc = run(["agent-flags", "oss", "--model", "qwen3:8b"], check=True)
+f = flags(proc)
+assert_eq("local/qwen3:8b", f[f.index("--model") + 1], "oss model uses shared local provider ref for colon-tagged models")
+
+proc = run(["local-base-url"], check=True)
+assert_eq("http://127.0.0.1:8000/v1", proc.stdout.strip(), "oss vLLM default base URL includes /v1")
+
+env = os.environ.copy()
+env["AUDIT_LOCAL_BASE_URL"] = "127.0.0.1:9999"
+proc = run(["local-base-url"], env=env, check=True)
+assert_eq("http://127.0.0.1:9999/v1", proc.stdout.strip(), "oss generic local base URL overrides provider defaults")
+
+env = os.environ.copy()
+env["AUDIT_LOCAL_BASE_URL"] = "127.0.0.1:11434"
+proc = run(["local-base-url"], env=env, check=True)
+assert_eq("http://127.0.0.1:11434/v1", proc.stdout.strip(), "oss Ollama-style bare host base URL gains /v1")
+
+env = os.environ.copy()
+env["AUDIT_LOCAL_BASE_URL"] = "127.0.0.1:8000"
+proc = run(["opencode-config", "--model", "qwen3-8b"], env=env, check=True)
+cfg = json.loads(proc.stdout)
+assert_eq(
+    "http://127.0.0.1:8000/v1",
+    cfg["provider"]["local"]["options"]["baseURL"],
+    "oss OpenCode config uses normalized vLLM base URL",
+)
 
 proc = run(["agent-flags", "gemini"], check=True)
 f = flags(proc)
@@ -260,6 +295,33 @@ with tempfile.TemporaryDirectory() as td:
     ok('"vote":"Reject"' in proc.stdout, "codex agent_message decoded")
     ok("because X" in proc.stdout, "codex rationale preserved")
 
+    # oss/OpenCode assistant JSON content
+    (p / "oss.jsonl").write_text(
+        '{"type":"message","role":"assistant",'
+        '"content":"{\\"vote\\":\\"Promote\\",\\"rationale\\":\\"opencode\\"}"}\n'
+    )
+    proc = run(["extract-text", "oss", str(p / "oss.jsonl")], check=True)
+    ok('"vote":"Promote"' in proc.stdout, "oss assistant JSON content extracted")
+    ok("opencode" in proc.stdout, "oss rationale preserved")
+
+    # oss/OpenCode real `opencode run --format json` text event
+    (p / "oss_text_event.jsonl").write_text(
+        '{"type":"text","part":{"type":"text",'
+        '"text":"{\\"smoke\\":true,\\"model\\":\\"qwen3.6-35b-a3b\\"}"}}\n'
+    )
+    proc = run(["extract-text", "oss", str(p / "oss_text_event.jsonl")], check=True)
+    ok('"smoke":true' in proc.stdout, "oss text event content extracted")
+    ok("qwen3.6-35b-a3b" in proc.stdout, "oss text event model preserved")
+
+    (p / "oss_tool_spaced.jsonl").write_text(
+        '{ "type": "tool_use", "part": { "type": "tool", '
+        '"tool": "read", "state": { "status": "completed" } } }\n'
+    )
+    proc = run(["raw-has-tool", str(p / "oss_tool_spaced.jsonl"), "read"])
+    assert_eq(0, proc.returncode, "raw-has-tool detects nested OpenCode read tool with spaced JSON")
+    proc = run(["raw-has-tool", str(p / "oss_tool_spaced.jsonl"), "bash"])
+    assert_eq(1, proc.returncode, "raw-has-tool rejects absent tool names")
+
     # gemini — Antigravity CLI emits plain text on stdout; the entire
     # transcript IS the assistant reply.
     (p / "gemini.txt").write_text(
@@ -347,19 +409,21 @@ ok(agent_claude[agent_claude.index("--max-turns") + 1] == "120",
 
 # ── cross-run memory policy (TOKENFUZZ_MEMORY_ENABLED) ──────────────
 print("\nmemory policy")
-# Default (switch unset → memory OFF): codex/oss get the memory-off config
+# Default (switch unset → memory OFF): codex gets the memory-off config
 # overrides on both agent and decide flags; Gemini CLI gets the deny-save_memory
-# admin policy; claude carries no memory flag (it is env-driven).
+# admin policy; claude carries no memory flag (it is env-driven). OpenCode/oss
+# does not need a harness memory knob.
 os.environ.pop("TOKENFUZZ_MEMORY_ENABLED", None)
-for be in ("codex", "oss"):
-    for builder in (inv.agent_flags, inv.decide_flags):
-        fl = builder(be)
-        ok("features.memories=false" in fl,
-           f"{be}.{builder.__name__} disables the memories feature by default", fl)
-        ok("memories.use_memories=false" in fl,
-           f"{be}.{builder.__name__} disables memory reads by default")
-        ok("memories.generate_memories=false" in fl,
-           f"{be}.{builder.__name__} disables memory writes by default")
+for builder in (inv.agent_flags, inv.decide_flags):
+    fl = builder("codex")
+    ok("features.memories=false" in fl,
+       f"codex.{builder.__name__} disables the memories feature by default", fl)
+    ok("memories.use_memories=false" in fl,
+       f"codex.{builder.__name__} disables memory reads by default")
+    ok("memories.generate_memories=false" in fl,
+       f"codex.{builder.__name__} disables memory writes by default")
+    ok(not any("memories" in x for x in builder("oss")),
+       f"oss.{builder.__name__} carries no Codex memory flags")
 
 os.environ["USE_GEMINI_CLI"] = "1"
 gem_agent = inv.agent_flags("gemini")
@@ -379,11 +443,10 @@ ok(not any("memor" in x.lower() for x in inv.agent_flags("claude")),
 
 # --enable-memory (switch=1): every per-backend memory disable disappears.
 os.environ["TOKENFUZZ_MEMORY_ENABLED"] = "1"
-for be in ("codex", "oss"):
-    for builder in (inv.agent_flags, inv.decide_flags):
-        fl = builder(be)
-        ok(not any("memories" in x for x in fl),
-           f"{be}.{builder.__name__} omits memory flags when memory enabled", fl)
+for builder in (inv.agent_flags, inv.decide_flags):
+    fl = builder("codex")
+    ok(not any("memories" in x for x in fl),
+       f"codex.{builder.__name__} omits memory flags when memory enabled", fl)
 os.environ["USE_GEMINI_CLI"] = "1"
 ok("--admin-policy" not in inv.agent_flags("gemini"),
    "Gemini CLI agent omits admin-policy when memory enabled")
@@ -401,13 +464,13 @@ os.environ.pop("TOKENFUZZ_MEMORY_ENABLED", None)
 os.environ.pop("USE_GEMINI_CLI", None)
 os.environ.pop("GEMINI_CLI_HOME", None)
 
-# Default (memory off): claude gets the disable env var; codex/oss none (they
-# disable via -c flags); agy-dialect gemini none (no auth-preserving isolation
-# mechanism is wired for Antigravity CLI).
+# Default (memory off): claude gets the disable env var; codex has CLI flags;
+# oss has no harness memory knob; agy-dialect gemini has no auth-preserving
+# isolation mechanism wired for Antigravity CLI.
 ok(inv.memory_env("claude") == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
    "claude memory_env sets CLAUDE_CODE_DISABLE_AUTO_MEMORY by default")
 ok(inv.memory_env("codex") == {} and inv.memory_env("oss") == {},
-   "codex/oss memory_env is empty (disabled via -c flags, not env)")
+   "codex/oss memory_env is empty")
 ok(inv.memory_env("gemini") == {},
    "agy-dialect gemini memory_env is empty (no auth-preserving relocation)")
 

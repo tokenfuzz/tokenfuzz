@@ -111,7 +111,11 @@ Notes:
   directory, and state writer before committing to a long run.
 - Use `--model` with the `claude` or `codex` backend. The harness
   forwards it to that backend's native model flag. For `oss`,
-  `--model` is required and names an already-pulled Ollama model. The
+  `--model` is required and names the local model served through
+  OpenCode. The value must match the exact model id returned by the
+  local server's `/v1/models` endpoint. The default local endpoint is
+  `http://127.0.0.1:8000/v1`; set `AUDIT_LOCAL_BASE_URL` for Ollama or
+  any other OpenAI-compatible server. The
   `gemini` backend uses Antigravity CLI (`agy`) by default, which has no
   launch-time model selector; use `agy`'s interactive `/model` command.
   Set `USE_GEMINI_CLI=1` to use Google Gemini CLI instead; then
@@ -141,7 +145,8 @@ the harness applies the right per-backend "off" control for you:
 | Backend | Cross-run memory it keeps | What the harness does by default |
 | --- | --- | --- |
 | `claude` | `MEMORY.md` + `memory/*.md`, auto-recalled into context and auto-saved mid-run | sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (Claude Code's own off switch) |
-| `codex` / `oss` | learned memories under `~/.codex/memories/`, reloaded into context and regenerated | passes `-c features.memories=false -c memories.use_memories=false -c memories.generate_memories=false` |
+| `codex` | learned memories under `~/.codex/memories/`, reloaded into context and regenerated | passes `-c features.memories=false -c memories.use_memories=false -c memories.generate_memories=false` |
+| `oss` through OpenCode | no harness-managed cross-run memory channel | no memory flag is needed |
 | `gemini` with `USE_GEMINI_CLI=1` (Google Gemini CLI) | global `~/.gemini/GEMINI.md` plus private project memory under Gemini's user storage, loaded into later sessions and writable by memory commands or direct file edits | runs the CLI under a clean, **empty** per-run `GEMINI_CLI_HOME` (staged at `$LOGDIR/.gemini-home`, no `GEMINI.md`, no state, no credential files) so nothing is read or written; auth rides on the `GEMINI_API_KEY` the harness forwards. An `--admin-policy` denying `save_memory` stays as a backstop |
 | `gemini` default (`agy` / Antigravity CLI) | persistent Antigravity CLI state under `~/.gemini/antigravity-cli` (`brain/`, `implicit/`, conversations, logs) | nothing automatic — `agy` exposes no documented memory-off flag or auth-preserving isolated home/profile switch in headless `-p`; naive `HOME` relocation creates fresh state but breaks auth (a false "successful" empty run). Use `USE_GEMINI_CLI=1` when strict Gemini memory isolation is required |
 

@@ -13,11 +13,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from audit_helpers import (
+    _SHELL_TOOL_NAMES,
     _WASTE_NATIVE_NAMES,
     _WASTE_OBSERVABILITY_ONLY,
     _WASTE_OVER_BYTES,
     _byte_len,
     _command_pattern as waste_command_pattern,
+    _native_tool_name,
+    _opencode_tool_event,
     _sanitize_label,
 )
 
@@ -200,12 +203,33 @@ def scan_raw_log(rawfile):
                 record_waste_command(cmd)
                 record_waste_output(output, f"{pattern}: {cmd}")
             elif event.get("type") == "tool_use":
+                opencode_tool = _opencode_tool_event(event)
+                if opencode_tool is not None:
+                    name = opencode_tool["name"]
+                    native_name = _native_tool_name(name)
+                    if native_name in _WASTE_NATIVE_NAMES:
+                        waste_native[native_name] += 1
+                    cmd = opencode_tool["input"].get("command") if isinstance(opencode_tool["input"], dict) else ""
+                    output = opencode_tool["output"]
+                    if name in _SHELL_TOOL_NAMES:
+                        commands.append(cmd)
+                        outputs.append(output)
+                        record_waste_command(cmd)
+                    if output and name not in _WASTE_OBSERVABILITY_ONLY:
+                        label = cmd or name or "tool"
+                        record_waste_output(
+                            output,
+                            f"{waste_command_pattern(label) if name in _SHELL_TOOL_NAMES else native_name or name}: {label}",
+                        )
+                    continue
+
                 name = event.get("tool_name") or event.get("name") or ""
-                if name in _WASTE_NATIVE_NAMES:
-                    waste_native[name] += 1
+                native_name = _native_tool_name(name)
+                if native_name in _WASTE_NATIVE_NAMES:
+                    waste_native[native_name] += 1
                 params = event.get("parameters") or event.get("input") or {}
                 cmd = params.get("command") if isinstance(params, dict) else ""
-                if name == "run_shell_command":
+                if name in _SHELL_TOOL_NAMES:
                     commands.append(cmd)
                     record_waste_command(cmd)
                 tool_id = event.get("tool_id") or event.get("id")

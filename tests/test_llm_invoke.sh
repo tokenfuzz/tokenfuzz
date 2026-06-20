@@ -8,12 +8,12 @@
 #      honours env overrides.
 #   3. llm_agent_flags includes the required flag set per backend
 #      (stream-json for claude, --json + sandbox bypass for codex,
-#      --oss for the oss alias, --dangerously-skip-permissions for
+#      opencode run for oss, --dangerously-skip-permissions for
 #      the gemini backend / Antigravity CLI).
 #   4. llm_agent_flags wires --add-dir / --cd from the add_dirs CSV.
 #   5. llm_decide_flags is text-mode and read-only-sandbox per backend.
 #   6. llm_extract_text decodes assistant text for each backend's
-#      output shape (claude stream-json, codex agent_message wrap,
+#      output shape (claude stream-json, codex agent_message wrap, oss JSON,
 #      gemini plain stdout).
 #   7. llm_extract_text returns empty on raw_log that has no
 #      assistant content, and returns rc=1 if raw_log is missing.
@@ -27,7 +27,7 @@ set -uo pipefail
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$TESTS_DIR/helpers.sh"
 unset USE_GEMINI_CLI TOKENFUZZ_MEMORY_ENABLED
-unset CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT CODEX_OSS_MODEL_DEFAULT
+unset CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT AUDIT_LOCAL_BASE_URL AUDIT_LOCAL_API_KEY
 source "$SCRIPT_ROOT/lib/llm_invoke.sh"
 
 setup_test_env
@@ -95,13 +95,18 @@ assert_match "--sandbox danger-full-access"                      "$flags_str" "a
 assert_match "--dangerously-bypass-approvals-and-sandbox"        "$flags_str" "agent codex bypasses approvals"
 assert_match "--model gpt-5.5"                                   "$flags_str" "agent codex defaults model"
 
-# oss — codex flags PLUS --oss --local-provider ollama
+# oss — OpenCode run against vLLM by default
 declare -a flags_oss=()
-llm_agent_flags oss flags_oss "" 80 ""
+llm_agent_flags oss flags_oss "qwen3-8b" 80 ""
 flags_str="${flags_oss[*]}"
-assert_match "--oss"                  "$flags_str" "agent oss has --oss"
-assert_match "--local-provider ollama" "$flags_str" "agent oss has --local-provider ollama"
-assert_match "--sandbox danger-full-access" "$flags_str" "agent oss inherits danger-full-access"
+assert_match "run --dangerously-skip-permissions --model local/qwen3-8b --format json" "$flags_str" "agent oss uses shared OpenCode local model ref"
+llm_agent_flags oss flags_oss "qwen3:8b" 80 ""
+flags_str="${flags_oss[*]}"
+assert_match "run --dangerously-skip-permissions --model local/qwen3:8b --format json" "$flags_str" "agent oss keeps shared local model ref for colon-tagged models"
+
+assert_eq "http://127.0.0.1:8000/v1" "$(llm_local_base_url)" "oss vLLM default base URL includes /v1"
+assert_eq "http://127.0.0.1:9999/v1" "$(AUDIT_LOCAL_BASE_URL=127.0.0.1:9999 llm_local_base_url)" "oss generic local base URL overrides provider defaults"
+assert_eq "http://127.0.0.1:11434/v1" "$(AUDIT_LOCAL_BASE_URL=127.0.0.1:11434 llm_local_base_url)" "oss Ollama-style bare host base URL gains /v1"
 
 # gemini — agy: plain --print, skip-permissions, and the model pinned via the
 # slug→label map (agy 1.0.5+ --model resolves labels, not API slugs; parens
@@ -255,6 +260,36 @@ EOF
 out=$(llm_extract_text codex "$TEST_TMPDIR/raw_codex.jsonl")
 assert_match '"vote":"Reject"' "$out" "extract codex agent_message decodes inner JSON"
 assert_match 'because of X'     "$out" "extract codex preserves rationale"
+
+# OpenCode — JSON output with assistant content.
+cat > "$TEST_TMPDIR/raw_oss.jsonl" <<'EOF'
+{"type":"message","role":"assistant","content":"{\"vote\":\"Promote\",\"rationale\":\"opencode\"}"}
+EOF
+out=$(llm_extract_text oss "$TEST_TMPDIR/raw_oss.jsonl")
+assert_match '"vote":"Promote"' "$out" "extract oss assistant JSON content"
+assert_match 'opencode' "$out" "extract oss preserves rationale"
+
+# OpenCode — real `opencode run --format json` text event shape.
+cat > "$TEST_TMPDIR/raw_oss_text_event.jsonl" <<'EOF'
+{"type":"text","part":{"type":"text","text":"{\"smoke\":true,\"model\":\"qwen3.6-35b-a3b\"}"}}
+EOF
+out=$(llm_extract_text oss "$TEST_TMPDIR/raw_oss_text_event.jsonl")
+assert_match '"smoke":true' "$out" "extract oss text event content"
+assert_match 'qwen3.6-35b-a3b' "$out" "extract oss text event model"
+
+cat > "$TEST_TMPDIR/raw_oss_tool_spaced.jsonl" <<'EOF'
+{ "type": "tool_use", "part": { "type": "tool", "tool": "read", "state": { "status": "completed" } } }
+EOF
+if llm_raw_has_tool "$TEST_TMPDIR/raw_oss_tool_spaced.jsonl" read; then
+  pass "raw-has-tool detects nested OpenCode read tool with spaced JSON"
+else
+  fail "raw-has-tool detects nested OpenCode read tool with spaced JSON"
+fi
+if llm_raw_has_tool "$TEST_TMPDIR/raw_oss_tool_spaced.jsonl" bash; then
+  fail "raw-has-tool rejects absent tool names"
+else
+  pass "raw-has-tool rejects absent tool names"
+fi
 
 # Gemini — Antigravity CLI emits plain text in --print mode. The
 # entire stdout transcript IS the assistant reply; no JSON parsing.

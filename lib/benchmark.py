@@ -615,7 +615,8 @@ def parse_cluster_count(clusters_md: Path, fallback: int) -> int:
 
 
 # Backends whose `input` token field already includes the cached prefix
-# (cached + fresh). Codex and its --oss alias report a running total;
+# (cached + fresh). Codex reports a running total; local OpenCode/oss
+# transcripts can follow the same cumulative shape when usage is present;
 # gemini-cli's `result.stats.input_tokens` is likewise cumulative (it
 # also emits a separate fresh-only `input`, but the priority order in
 # _INPUT_KEYS picks `input_tokens` first, so the same subtract-cached

@@ -2,7 +2,8 @@
 """Shared backend-flag picker and assistant-text extractor.
 
 Single source of truth for the four LLM backends the harness drives —
-claude / codex / oss (codex --oss) / gemini. The `gemini` backend keeps
+claude / codex / oss (OpenCode against local OpenAI-compatible servers) /
+gemini. The `gemini` backend keeps
 one harness-visible name while supporting two CLI dialects underneath:
 Antigravity (`agy`, default) and Google Gemini CLI (`gemini` when
 USE_GEMINI_CLI=1). Previously this logic lived in lib/llm_invoke.sh
@@ -26,13 +27,12 @@ CLI subcommands (used by the bash shim — `python3 lib/llm_invoke.py …`):
   default-model <backend>
       Print the project's default model name for <backend>, read from
       config/models.toml. A per-backend env override (CLAUDE_MODEL_DEFAULT /
-      CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT / CODEX_OSS_MODEL_DEFAULT)
+      CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT)
       wins when set. Exit 1 on unknown backend.
 
   agent-flags <backend> [--model …] [--max-turns N] [--add-dirs CSV]
       Print the agent-mode flag list, one flag per line. Used for
-      interactive tool-using agent calls (stream-json, sandbox bypass,
-      --add-dir / --cd wiring).
+      interactive tool-using agent calls.
 
   decide-flags <backend> [--model …]
       Print the decide-mode flag list (text output, no tools, read-only
@@ -42,7 +42,8 @@ CLI subcommands (used by the bash shim — `python3 lib/llm_invoke.py …`):
       Stream the assistant's natural-language text from a raw transcript
       to stdout. Per-backend: claude (.message.content[].text, with
       .result as fallback only), codex (item.completed/agent_message),
-      gemini (agy plain stdout, or Gemini CLI stream-json assistant text).
+      oss (OpenCode JSON output), gemini (agy plain stdout, or Gemini CLI
+      stream-json assistant text).
 
   gemini-isolated-home
       Stage (when cross-run memory is off and USE_GEMINI_CLI=1) a throwaway
@@ -60,6 +61,8 @@ import os
 import shutil
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -87,7 +90,6 @@ _MODEL_ENV_OVERRIDE = {
     "claude": "CLAUDE_MODEL_DEFAULT",
     "codex": "CODEX_MODEL_DEFAULT",
     "gemini": "GEMINI_MODEL_DEFAULT",
-    "oss": "CODEX_OSS_MODEL_DEFAULT",
 }
 
 # config/models.toml (repo root) is the single source of truth for the
@@ -274,9 +276,10 @@ def memory_env(backend: str) -> dict:
     """Environment overrides that disable cross-run memory for <backend>.
 
     Empty when memory is enabled, or when the backend needs no env-level
-    control — codex/oss disable memory through `-c` flags in agent_flags /
-    decide_flags, and headless agy has no auth-preserving home/profile
-    isolation wired here. Apply this on top of the child env at every launch
+    control — codex disables memory through `-c` flags in agent_flags /
+    decide_flags, OpenCode does not need a harness memory knob for local OSS
+    runs, and headless agy has no auth-preserving home/profile isolation wired
+    here. Apply this on top of the child env at every launch
     site (lib/llm_decide.py's subprocess, and lib/llm_invoke.sh's agent
     launchers via llm_apply_memory_policy) so even standalone llm_decide tools
     get the same isolation bin/audit gets.
@@ -297,7 +300,7 @@ def memory_env(backend: str) -> dict:
     return {}
 
 
-# Codex/oss memory-disable controls, added to the flag list when memory is
+# Codex memory-disable controls, added to the flag list when memory is
 # disabled. All are `-c` config overrides rather than `--disable memories`:
 # an unknown `-c` key is accepted and ignored on any Codex version, whereas
 # `--disable <feature>` hard-errors when the feature name is unknown, which
@@ -322,7 +325,80 @@ def default_model(backend: str) -> str:
     """
     if backend not in _KNOWN_BACKENDS:
         raise ValueError(f"unknown backend: {backend}")
-    return os.environ.get(_MODEL_ENV_OVERRIDE[backend]) or _config_models().get(backend, "")
+    override_key = _MODEL_ENV_OVERRIDE.get(backend)
+    if override_key:
+        primary = os.environ.get(override_key)
+        if primary:
+            return primary
+    return _config_models().get(backend, "")
+
+
+def _ensure_http_url(value: str) -> str:
+    value = value.strip()
+    if value and "://" not in value:
+        value = "http://" + value
+    return value.rstrip("/")
+
+
+def local_provider_base_url() -> str:
+    generic = os.environ.get("AUDIT_LOCAL_BASE_URL")
+    if generic:
+        url = _ensure_http_url(generic)
+        return url if url.endswith("/v1") else url + "/v1"
+    return "http://127.0.0.1:8000/v1"
+
+
+def resolve_model_name(backend: str, model: str = "") -> str:
+    return model or default_model(backend)
+
+
+def opencode_model_ref(model: str) -> str:
+    resolved = (model or default_model("oss")).strip()
+    return f"local/{resolved}" if resolved else "local"
+
+
+def opencode_config(model: str) -> dict:
+    resolved = (model or default_model("oss")).strip()
+    if not resolved:
+        raise ValueError("oss model is required")
+    api_key = os.environ.get("AUDIT_LOCAL_API_KEY") or "EMPTY"
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "local": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Local OpenAI-compatible",
+                "options": {
+                    "baseURL": local_provider_base_url(),
+                    "apiKey": api_key,
+                },
+                "models": {
+                    resolved: {
+                        "name": resolved,
+                    },
+                },
+            },
+        },
+    }
+
+
+def local_model_available(model: str) -> bool:
+    resolved = (model or "").strip()
+    url = local_provider_base_url().rstrip("/") + "/models"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            data = json.load(resp)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError):
+        return False
+    models = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(models, list):
+        return False
+    ids = {
+        str(item.get("id", "")).strip()
+        for item in models
+        if isinstance(item, dict)
+    }
+    return bool(resolved and resolved in ids)
 
 
 # agy (Antigravity CLI) gained --model in 1.0.5, but it selects models by the
@@ -362,7 +438,7 @@ def agent_flags(
     can't create a user namespace; the outer container is the sandbox
     boundary (same reasoning as IS_SANDBOX=1 for claude).
     """
-    resolved_model = model or default_model(backend)
+    resolved_model = resolve_model_name(backend, model)
 
     if backend == "claude":
         flags = [
@@ -384,7 +460,7 @@ def agent_flags(
                 flags += ["--add-dir", d]
         return flags
 
-    if backend in ("codex", "oss"):
+    if backend == "codex":
         flags = [
             "--json",
             "--ephemeral",
@@ -401,8 +477,17 @@ def agent_flags(
                 flags += ["--add-dir", d]
         if not memory_enabled():
             flags += _CODEX_MEMORY_OFF_FLAGS
-        if backend == "oss":
-            flags = ["--oss", "--local-provider", "ollama", *flags]
+        return flags
+
+    if backend == "oss":
+        # OpenCode has no per-directory grant flag like codex/gemini --add-dir;
+        # --dangerously-skip-permissions auto-approves tool use and filesystem
+        # access is scoped by the launch cwd, so add_dirs is intentionally
+        # unused here.
+        flags = ["run", "--dangerously-skip-permissions"]
+        if resolved_model:
+            flags += ["--model", opencode_model_ref(resolved_model)]
+        flags += ["--format", "json"]
         return flags
 
     if backend == "gemini":
@@ -463,7 +548,7 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
     No tools, text output, read-only sandbox where applicable. Used by
     lib/llm_decide.py's backend dispatcher (imported, not subprocessed).
     """
-    resolved_model = model or default_model(backend)
+    resolved_model = resolve_model_name(backend, model)
 
     if backend == "claude":
         flags = ["--print", "--max-turns", "1", "--output-format", "text"]
@@ -471,14 +556,19 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
             flags += ["--model", resolved_model]
         return flags
 
-    if backend in ("codex", "oss"):
+    if backend == "codex":
         flags = ["--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only"]
         if resolved_model:
             flags += ["--model", resolved_model]
         if not memory_enabled():
             flags += _CODEX_MEMORY_OFF_FLAGS
-        if backend == "oss":
-            flags = ["--oss", "--local-provider", "ollama", *flags]
+        return flags
+
+    if backend == "oss":
+        flags = ["run"]
+        if resolved_model:
+            flags += ["--model", opencode_model_ref(resolved_model)]
+        flags += ["--format", "json"]
         return flags
 
     if backend == "gemini":
@@ -537,6 +627,73 @@ def _iter_json_lines(raw_log_path: str):
         return
 
 
+def _collect_text_values(value) -> list[str]:
+    pieces: list[str] = []
+    if isinstance(value, str):
+        pieces.append(value)
+    elif isinstance(value, list):
+        for item in value:
+            pieces.extend(_collect_text_values(item))
+    elif isinstance(value, dict):
+        for key in ("text", "content", "delta", "result", "response"):
+            item = value.get(key)
+            if isinstance(item, (str, list, dict)):
+                pieces.extend(_collect_text_values(item))
+        message = value.get("message")
+        if isinstance(message, dict):
+            pieces.extend(_collect_text_values(message))
+    return pieces
+
+
+def _opencode_assistant_texts(ev: dict) -> list[str]:
+    ev_type = str(ev.get("type", "")).lower()
+    role = str(ev.get("role", "")).lower()
+    if role and role not in {"assistant", "model"}:
+        return []
+    if ev_type and any(marker in ev_type for marker in ("tool", "permission", "diagnostic")):
+        return []
+
+    pieces: list[str] = []
+    for key in ("content", "text", "delta", "result", "response"):
+        value = ev.get(key)
+        if isinstance(value, (str, list, dict)):
+            pieces.extend(_collect_text_values(value))
+
+    message = ev.get("message")
+    if isinstance(message, dict):
+        msg_role = str(message.get("role", role)).lower()
+        if msg_role in {"assistant", "model", ""}:
+            pieces.extend(_collect_text_values(message.get("content")))
+
+    part = ev.get("part")
+    if isinstance(part, dict):
+        pieces.extend(_collect_text_values(part))
+
+    return pieces
+
+
+def _json_has_tool_name(value, tool_name: str) -> bool:
+    wanted = tool_name.lower()
+    if isinstance(value, dict):
+        for key in ("tool", "name", "tool_name"):
+            item = value.get(key)
+            if isinstance(item, str) and item.lower() == wanted:
+                return True
+        return any(_json_has_tool_name(item, tool_name) for item in value.values())
+    if isinstance(value, list):
+        return any(_json_has_tool_name(item, tool_name) for item in value)
+    return False
+
+
+def raw_has_tool(raw_log_path: str, tool_name: str) -> bool:
+    if not os.path.isfile(raw_log_path):
+        raise FileNotFoundError(raw_log_path)
+    return any(
+        isinstance(ev, dict) and _json_has_tool_name(ev, tool_name)
+        for ev in _iter_json_lines(raw_log_path)
+    )
+
+
 def extract_text(backend: str, raw_log_path: str) -> str:
     """Pull the assistant's text from a raw transcript.
 
@@ -584,7 +741,7 @@ def extract_text(backend: str, raw_log_path: str) -> str:
         # uses `jq -r` which puts each emitted value on a new line.
         return "\n".join(pieces) + ("\n" if pieces else "")
 
-    if backend in ("codex", "oss"):
+    if backend == "codex":
         # item.completed events with .item.type == "agent_message",
         # take .item.text. The CLI emits a JSON string for the model's
         # output; json.loads() on the outer line already decoded it.
@@ -599,6 +756,18 @@ def extract_text(backend: str, raw_log_path: str) -> str:
                 if isinstance(t, str):
                     pieces.append(t)
         return "\n".join(pieces) + ("\n" if pieces else "")
+
+    if backend == "oss":
+        for ev in _iter_json_lines(raw_log_path):
+            if isinstance(ev, dict):
+                pieces.extend(_opencode_assistant_texts(ev))
+        if pieces:
+            return "".join(pieces).rstrip("\n")
+        try:
+            with open(raw_log_path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read().rstrip("\n")
+        except OSError:
+            return ""
 
     if backend == "gemini":
         if use_gemini_cli():
@@ -731,13 +900,16 @@ def _json_event_has_tool_activity(ev: dict) -> bool:
 def _cli_assistant_texts(backend: str, ev: dict) -> list[str]:
     pieces: list[str] = []
 
-    if backend in ("codex", "oss"):
+    if backend == "codex":
         item = ev.get("item")
         if isinstance(item, dict) and item.get("type") == "agent_message":
             text = item.get("text")
             if isinstance(text, str):
                 pieces.append(text)
         return pieces
+
+    if backend == "oss":
+        return _opencode_assistant_texts(ev)
 
     if backend == "claude":
         msg = ev.get("message")
@@ -899,6 +1071,38 @@ def _cmd_default_model(args) -> int:
         return 1
 
 
+def _cmd_resolve_model(args) -> int:
+    try:
+        sys.stdout.write(resolve_model_name(args.backend, args.model or "") + "\n")
+        return 0
+    except ValueError:
+        return 1
+
+
+def _cmd_local_base_url(_args) -> int:
+    try:
+        sys.stdout.write(local_provider_base_url() + "\n")
+        return 0
+    except ValueError:
+        return 1
+
+
+def _cmd_opencode_config(args) -> int:
+    try:
+        json.dump(opencode_config(args.model or ""), sys.stdout, separators=(",", ":"))
+        sys.stdout.write("\n")
+        return 0
+    except ValueError:
+        return 1
+
+
+def _cmd_local_model_available(args) -> int:
+    try:
+        return 0 if local_model_available(args.model or "") else 1
+    except ValueError:
+        return 1
+
+
 def _cmd_agent_flags(args) -> int:
     try:
         return _print_flags(agent_flags(
@@ -928,6 +1132,13 @@ def _cmd_extract_text(args) -> int:
     except FileNotFoundError:
         return 1
     except ValueError:
+        return 1
+
+
+def _cmd_raw_has_tool(args) -> int:
+    try:
+        return 0 if raw_has_tool(args.raw_log, args.tool_name) else 1
+    except FileNotFoundError:
         return 1
 
 
@@ -965,6 +1176,22 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("backend")
     s.set_defaults(func=_cmd_default_model)
 
+    s = sub.add_parser("resolve-model")
+    s.add_argument("backend")
+    s.add_argument("--model", default="")
+    s.set_defaults(func=_cmd_resolve_model)
+
+    s = sub.add_parser("local-base-url")
+    s.set_defaults(func=_cmd_local_base_url)
+
+    s = sub.add_parser("opencode-config")
+    s.add_argument("--model", default="")
+    s.set_defaults(func=_cmd_opencode_config)
+
+    s = sub.add_parser("local-model-available")
+    s.add_argument("--model", default="")
+    s.set_defaults(func=_cmd_local_model_available)
+
     s = sub.add_parser("agent-flags")
     s.add_argument("backend")
     s.add_argument("--model", default="")
@@ -981,6 +1208,11 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("backend")
     s.add_argument("raw_log")
     s.set_defaults(func=_cmd_extract_text)
+
+    s = sub.add_parser("raw-has-tool")
+    s.add_argument("raw_log")
+    s.add_argument("tool_name")
+    s.set_defaults(func=_cmd_raw_has_tool)
 
     s = sub.add_parser("refusal-warning")
     s.add_argument("backend")

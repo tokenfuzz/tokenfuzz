@@ -18,7 +18,7 @@ as a pipeline:
   differential testing, lifetime and state, cross-project peer-fix
   mining, adversarial input and fuzz engineering, and property
   oracles — across Claude,
-  Codex, Gemini, or a local Ollama model behind one probe-and-triage
+  Codex, Gemini, or a local OpenCode-backed model behind one probe-and-triage
   contract. See [Strategy model](concepts/strategy-model.md) and
   [Backends and ensembling](guides/backends.md).
 - **Reachability-labelled findings.** Every finding separates
@@ -51,8 +51,9 @@ LLVM toolchain, and at least one agent backend.
   for building or running sanitizer artifacts.
 - **Backend:** one of Claude Code (`claude`), Codex (`codex`), the
   Antigravity CLI (`gemini`, run via the `agy` binary), or a local
-  model via `--backend oss --model <name>` (uses Codex with `--oss`
-  plus an [Ollama](https://ollama.com) model served locally).
+  model via `--backend oss --model <name>` (OpenCode against a local
+  OpenAI-compatible endpoint; set `AUDIT_LOCAL_BASE_URL` when it is not
+  on `http://127.0.0.1:8000/v1`).
 
 See [Prerequisites](getting-started/prerequisites.md) for per-distro
 package commands.

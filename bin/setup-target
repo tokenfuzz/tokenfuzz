@@ -329,7 +329,7 @@ build_llm_backend_candidates() {
   append_unique_backend claude
   append_unique_backend codex
   append_unique_backend gemini
-  if [ "$requested" = "oss" ] || [ -n "${MODEL:-${AUDIT_MODEL:-${CODEX_OSS_MODEL_DEFAULT:-}}}" ]; then
+  if [ "$requested" = "oss" ] || [ -n "${MODEL:-${AUDIT_MODEL:-}}" ]; then
     append_unique_backend oss
   fi
 }

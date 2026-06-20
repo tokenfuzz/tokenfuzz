@@ -5,7 +5,7 @@ set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
 unset USE_GEMINI_CLI
-unset CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT CODEX_OSS_MODEL_DEFAULT
+unset CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT AUDIT_LOCAL_BASE_URL AUDIT_LOCAL_API_KEY
 source "$SCRIPT_ROOT/lib/platform.sh"
 source "$SCRIPT_ROOT/lib/fmt.sh"
 source "$SCRIPT_ROOT/lib/llm_invoke.sh"
@@ -51,10 +51,13 @@ eval "$(audit_extract_functions \
   backend_bin \
   backend_configured \
   oss_model_available \
+  oss_local_base_url \
+  oss_resolved_model_name \
   discover_ensemble_backends \
   init_backend_selection \
   resolve_model \
   model_preflight_stamp_path \
+  oss_tool_preflight \
   audit_one_time_backend_bootstrap \
   gemini_prune_stale_sessions \
   gemini_cli_check_bundled_ripgrep \
@@ -440,20 +443,16 @@ cat > "$fake_backend_dir/gemini-missing-auth" <<'EOF'
 [ "$1" = "--list-sessions" ] && exit 41
 exit 1
 EOF
-cat > "$fake_backend_dir/ollama" <<'EOF'
+cat > "$fake_backend_dir/opencode" <<'EOF'
 #!/usr/bin/env bash
-if [ "$1" = "list" ]; then
-  cat <<'MODELS'
-NAME         ID              SIZE      MODIFIED
-qwen3:14b    bdbd181c33f2    9.3 GB    7 weeks ago
-MODELS
-  exit 0
-fi
-exit 1
+exit 0
 EOF
 chmod +x "$fake_backend_dir/"*
 OLD_PATH="$PATH"
 PATH="$fake_backend_dir:$PATH"
+oss_model_available() {
+  [ "$(oss_resolved_model_name "$1")" = "qwen3-14b" ]
+}
 
 AUDIT_BACKEND=all
 BACKEND_FLAG_PROVIDED=0
@@ -488,21 +487,23 @@ assert_eq "codex" "${ENSEMBLE_BACKENDS[*]}" "backend: explicit all skips unconfi
 AUDIT_BACKEND=oss
 BACKEND_FLAG_PROVIDED=1
 MODEL_FLAG_PROVIDED=1
-AUDIT_MODEL="qwen3:14b"
+AUDIT_MODEL="qwen3-14b"
 ENSEMBLE_MODE=0
 ENSEMBLE_BACKENDS=()
 ACTIVE_BACKEND=""
 CLAUDE_BIN="$fake_backend_dir/gemini-missing-auth"
 CODEX_BIN="$fake_backend_dir/codex-ok"
 GEMINI_BIN="$fake_backend_dir/gemini-missing-auth"
+OPENCODE_BIN="$fake_backend_dir/opencode"
 init_backend_selection
-assert_eq "oss" "$ACTIVE_BACKEND" "backend: oss selects local Codex path without hosted login check"
+assert_eq "oss" "$ACTIVE_BACKEND" "backend: oss selects local OpenCode path without hosted login check"
 
 AUDIT_BACKEND=oss
 BACKEND_FLAG_PROVIDED=1
 MODEL_FLAG_PROVIDED=0
 AUDIT_MODEL=""
 ACTIVE_BACKEND=""
+OPENCODE_BIN="$fake_backend_dir/opencode"
 oss_missing_model_output=$(init_backend_selection 2>&1)
 oss_missing_model_rc=$?
 assert_eq "1" "$oss_missing_model_rc" "backend: oss requires explicit model"
@@ -513,10 +514,11 @@ BACKEND_FLAG_PROVIDED=1
 MODEL_FLAG_PROVIDED=1
 AUDIT_MODEL="missing-local-model"
 ACTIVE_BACKEND=""
+OPENCODE_BIN="$fake_backend_dir/opencode"
 oss_unavailable_output=$(init_backend_selection 2>&1)
 oss_unavailable_rc=$?
-assert_eq "1" "$oss_unavailable_rc" "backend: oss requires installed Ollama model"
-assert_match "ollama pull missing-local-model" "$oss_unavailable_output" "backend: oss unavailable model explains pull command"
+assert_eq "1" "$oss_unavailable_rc" "backend: oss requires a served local model"
+assert_match "resolved to 'missing-local-model'.*127.0.0.1:8000/v1" "$oss_unavailable_output" "backend: oss unavailable model explains base URL"
 
 # A model override is backend-specific. Implicit hosted cycling would pass the
 # same model string to different CLIs, so require an explicit single backend.
@@ -592,7 +594,7 @@ assert_match 'export IS_SANDBOX=1' "$claude_branch_src" \
 assert_match 'llm_agent_flags claude claude_base_flags "\$model"'   "$run_agent_src" "model: claude launch delegates to llm_agent_flags with \$model"
 assert_match 'llm_agent_flags gemini gemini_flags "\$model"'        "$run_agent_src" "model: gemini launch delegates to llm_agent_flags with \$model"
 assert_match 'llm_agent_flags codex codex_flags "\$model"'          "$run_agent_src" "model: codex launch delegates to llm_agent_flags with \$model"
-assert_match 'llm_agent_flags oss codex_flags "\$model"'            "$run_agent_src" "backend: oss launch routes through llm_agent_flags oss alias"
+assert_match 'llm_agent_flags oss opencode_flags "\$model"'         "$run_agent_src" "backend: oss launch routes through llm_agent_flags oss"
 # Gemini's full add-dirs CSV (script root, target tree, results dir)
 # becomes repeated --add-dir flags inside llm_agent_flags. The harness
 # call site still joins them verbatim from the add_dirs argument.
@@ -963,14 +965,15 @@ assert_file_not_exists "$(resume_state_path 1 dry_count)" "resume state: clear r
 assert_file_not_exists "$LOGDIR/.session_id_1" "resume state: clear removes legacy session id"
 assert_file_not_exists "$LOGDIR/.prev_subsystem_1" "resume state: clear removes legacy subsystem"
 
-CODEX_OSS=0
 CLAUDE_RESUME=1 backend_resume_enabled claude
 assert_eq 0 $? "resume enabled: claude defaults on"
 CODEX_RESUME=1 backend_resume_enabled codex
 assert_eq 0 $? "resume enabled: codex defaults on"
-CODEX_OSS=1 CODEX_RESUME=1 backend_resume_enabled codex
-assert_eq 1 $? "resume enabled: codex resume disabled for oss routing"
-CODEX_OSS=0
+OSS_RESUME=0 backend_resume_enabled oss
+assert_eq 1 $? "resume enabled: oss defaults off"
+OSS_RESUME=1 backend_resume_enabled oss
+assert_eq 0 $? "resume enabled: oss knob enables resume gate"
+OSS_RESUME=0
 unset USE_GEMINI_CLI
 GEMINI_RESUME=1 backend_resume_enabled gemini
 assert_eq 1 $? "resume enabled: gemini resume disabled for agy dialect"
@@ -1098,7 +1101,7 @@ EOF
   assert_eq "0" "$result" "agent exit: cached codex status flags normalize failed tool aggregate status"
 
   result=$(normalize_agent_exit_code oss 5 "$TEST_TMPDIR/codex_completed_with_failed_tool.jsonl")
-  assert_eq "0" "$result" "agent exit: oss completed turn follows codex normalization"
+  assert_eq "5" "$result" "agent exit: oss does not use codex turn normalization"
 
   cat > "$TEST_TMPDIR/gemini_success_result.jsonl" <<'EOF'
 {"type":"message","role":"assistant","content":"done","delta":true}
@@ -1196,14 +1199,16 @@ cat > "$TEST_TMPDIR/mixed_backend_tools.jsonl" <<'EOF'
 {"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pwd"}},{"type":"tool_use","name":"Read","input":{"path":"foo"}}]}}
 {"type":"tool_use","tool_name":"run_shell_command","tool_id":"g1","parameters":{"command":"bin/probe scratch-1/t.c"}}
 {"type":"tool_use","tool_name":"read_file","tool_id":"g2","parameters":{"path":"foo"}}
+{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"o1","state":{"status":"completed","input":{"command":"bin/probe scratch-1/opencode.c"},"output":"HIT"}}}
+{"type":"tool_use","part":{"type":"tool","tool":"read","callID":"o2","state":{"status":"completed","input":{"filePath":"targets/sample/main.c"},"output":"source"}}}
 EOF
 result=$(extract_completed_item_count "$TEST_TMPDIR/mixed_backend_tools.jsonl" "command_execution")
-assert_eq "3" "$result" "tool count: command executions are parsed through audit_helpers.py"
+assert_eq "4" "$result" "tool count: command executions are parsed through audit_helpers.py"
 result=$(extract_total_tool_uses "$TEST_TMPDIR/mixed_backend_tools.jsonl")
-assert_eq "5" "$result" "tool count: total tool uses are parsed through audit_helpers.py"
+assert_eq "7" "$result" "tool count: total tool uses are parsed through audit_helpers.py"
 result=$(extract_tool_counts "$TEST_TMPDIR/mixed_backend_tools.jsonl")
-assert_match '^command_execution=3$' "$result" "tool count: one-pass mixed command executions"
-assert_match '^all_tools=5$' "$result" "tool count: one-pass mixed total tool uses"
+assert_match '^command_execution=4$' "$result" "tool count: one-pass mixed command executions"
+assert_match '^all_tools=7$' "$result" "tool count: one-pass mixed total tool uses"
 
 # ═══════════════════════════════════════════════════════════════
 # 7d. extract_waste_telemetry — backend-neutral output attribution
@@ -1265,8 +1270,19 @@ assert_match 'over8k=1' "$result" "waste: gemini stream-json counts oversized ou
 assert_match 'top_cmds=sed:1,probe:1' "$result" "waste: gemini stream-json normalizes shell commands"
 assert_match 'largest="probe: bin/probe scratch-1/testcase.c"' "$result" "waste: gemini stream-json names largest command"
 
+cat > "$TEST_TMPDIR/opencode_waste.jsonl" <<EOF
+{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"o1","state":{"status":"completed","input":{"command":"sed -n '1,20p' targets/sample/main.c"},"output":"abc"}}}
+{"type":"tool_use","part":{"type":"tool","tool":"read","callID":"o2","state":{"status":"completed","input":{"filePath":"targets/sample/main.c"},"output":"$big_output"}}}
+{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"o3","state":{"status":"completed","input":{"command":"bin/probe scratch-1/testcase.c"},"output":"HIT"}}}
+EOF
+result=$(extract_waste_telemetry "$TEST_TMPDIR/opencode_waste.jsonl")
+assert_match 'tool_bytes=9006' "$result" "waste: opencode sums inline tool output"
+assert_match 'native_tools=Read:1,Grep:0,Glob:0' "$result" "waste: opencode counts lowercase read as native Read"
+assert_match 'top_cmds=sed:1,probe:1' "$result" "waste: opencode normalizes bash commands"
+assert_match 'largest="Read: read"' "$result" "waste: opencode names largest native output"
+
 printf '%s\n' 'last message' > "$TEST_TMPDIR/waste-parity.log"
-for waste_fixture in codex_waste.jsonl claude_waste.jsonl gemini_cli_waste.jsonl; do
+for waste_fixture in codex_waste.jsonl claude_waste.jsonl gemini_cli_waste.jsonl opencode_waste.jsonl; do
   expected_waste=$(extract_waste_telemetry "$TEST_TMPDIR/$waste_fixture")
   actual_waste=$(
     SESSION_SUMMARY_PRINT_WASTE=1 \
@@ -1295,6 +1311,7 @@ cat > "$TEST_TMPDIR/finish_fields.jsonl" <<'EOF'
 {"type":"item.completed","item":{"type":"command_execution","command":"ls","aggregated_output":"x"}}
 {"type":"tool_use","tool_name":"run_shell_command","tool_id":"g1","parameters":{"command":"bin/probe scratch-1/t.c"}}
 {"type":"tool_use","tool_name":"read_file","tool_id":"g2","parameters":{"path":"foo"}}
+{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"o1","state":{"status":"completed","input":{"command":"bin/probe scratch-1/opencode.c"},"output":"HIT"}}}
 {"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":3,"cache_creation_input_tokens":2,"output_tokens":5},"duration_ms":123}
 {"type":"result","status":"success"}
 EOF
@@ -1305,8 +1322,8 @@ assert_match '^cache_creation_input_tokens=2$' "$finish_fields" "finish-fields: 
 assert_match '^output_tokens=5$' "$finish_fields" "finish-fields: output tokens surfaced"
 assert_match '^total_tokens=15$' "$finish_fields" "finish-fields: total tokens matches usage helper"
 assert_match '^duration_ms=123$' "$finish_fields" "finish-fields: duration surfaced"
-assert_match '^command_execution=2$' "$finish_fields" "finish-fields: command count matches tool helper"
-assert_match '^all_tools=3$' "$finish_fields" "finish-fields: total tool count matches tool helper"
+assert_match '^command_execution=3$' "$finish_fields" "finish-fields: command count matches tool helper"
+assert_match '^all_tools=4$' "$finish_fields" "finish-fields: total tool count matches tool helper"
 assert_match '^codex_completed=1$' "$finish_fields" "finish-fields: codex completion surfaced"
 assert_match '^gemini_success=1$' "$finish_fields" "finish-fields: gemini success surfaced"
 
@@ -1570,11 +1587,35 @@ else
   printf 'MODEL_PREFLIGHT_OK\n'
 fi
 EOF
+cat > "$model_preflight_bin/opencode-preflight" <<'EOF'
+#!/usr/bin/env bash
+model=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model) model="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$model" in
+  */oss-no-tool)
+    printf '{"type":"text","part":{"type":"text","text":"OSS_TOOL_PREFLIGHT_OK_without_tool"}}\n'
+    exit 0
+    ;;
+esac
+if [ ! -f oss-tool-sentinel.txt ]; then
+  echo "missing oss preflight sentinel" >&2
+  exit 47
+fi
+token=$(cat oss-tool-sentinel.txt)
+printf '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"completed"}}}\n'
+printf '{"type":"text","part":{"type":"text","text":"%s"}}\n' "$token"
+EOF
 chmod +x "$model_preflight_bin/"*
 
 CLAUDE_BIN="$model_preflight_bin/claude-preflight"
 CODEX_BIN="$model_preflight_bin/codex-preflight"
 GEMINI_BIN="$model_preflight_bin/gemini-preflight"
+OPENCODE_BIN="$model_preflight_bin/opencode-preflight"
 LOGDIR="$TEST_TMPDIR/model-preflight-logs"
 INDEX="$LOGDIR/index.log"
 mkdir -p "$LOGDIR"
@@ -1600,6 +1641,10 @@ assert_file_contains "$INDEX" "Model preflight passed: codex backend can reach m
 validate_model_for_backend gemini "gemini-good"
 assert_file_exists "$(model_preflight_stamp_path gemini "gemini-good")" "model preflight: gemini accepted model writes stamp"
 assert_file_contains "$INDEX" "Model preflight passed: gemini backend can reach model='gemini-good'" "model preflight: gemini pass logged"
+
+validate_model_for_backend oss "oss-good"
+assert_file_exists "$(model_preflight_stamp_path oss "oss-good")" "model preflight: oss accepted tool-capable model writes stamp"
+assert_file_contains "$INDEX" "Model preflight passed: oss backend can reach model='oss-good'" "model preflight: oss pass logged"
 
 # Regression: agy can exit 0 AND echo MODEL_PREFLIGHT_OK while silently
 # running a different model (handed a name it cannot resolve to a label). The
@@ -1742,6 +1787,13 @@ bad_rc=$?
 assert_eq "1" "$bad_rc" "model preflight: codex rejected model exits early"
 assert_match 'model preflight failed.*bad-codex-model' "$bad_output" "model preflight: codex rejected model names backend model"
 assert_match 'unsupported model: bad-codex-model' "$bad_output" "model preflight: codex rejected model includes CLI output"
+
+printf 'legacy echo-only approval\n' > "$LOGDIR/.model_preflight_oss_oss-no-tool.ok"
+bad_output=$(validate_model_for_backend oss "oss-no-tool" 2>&1)
+bad_rc=$?
+assert_eq "1" "$bad_rc" "model preflight: oss rejects model without required read tool"
+assert_match 'did not use the required read tool' "$bad_output" "model preflight: oss names missing tool-use failure"
+assert_file_not_exists "$(model_preflight_stamp_path oss "oss-no-tool")" "model preflight: oss missing tool use writes no .ok stamp"
 
 # The fake agy rejects through AGY_FAIL=1 so this exercises the harness's
 # failure path while recording the resolved harness model label.

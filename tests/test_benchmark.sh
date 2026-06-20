@@ -410,6 +410,21 @@ assert_eq "0" "$(echo "$u" | jq -r '.tokens.cache_creation')" \
 assert_eq "codex" "$(echo "$u" | jq -r '.backend')" \
   "T8c3: backend echoed for harvest-side normalization"
 
+oss_log="$work/oss.log"
+printf '%s\n' \
+  '{"type":"text","part":{"type":"text","text":"done"}}' \
+  '{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":1200,"output":34,"reasoning":0,"cache":{"read":900,"write":25}}}}' \
+  > "$oss_log"
+u_oss=$(python3 "$USAGE_PY" oss "$oss_log")
+assert_eq "1200" "$(echo "$u_oss" | jq -r '.tokens.input')" \
+  "T8c4: oss/OpenCode input tokens from step_finish"
+assert_eq "900" "$(echo "$u_oss" | jq -r '.tokens.cached_input')" \
+  "T8c5: oss/OpenCode cache.read captured"
+assert_eq "25" "$(echo "$u_oss" | jq -r '.tokens.cache_creation')" \
+  "T8c6: oss/OpenCode cache.write captured"
+assert_eq "34" "$(echo "$u_oss" | jq -r '.tokens.output')" \
+  "T8c7: oss/OpenCode output tokens from step_finish"
+
 claude_log="$work/claude.log"
 printf '%s\n' \
   '{"type":"assistant","message":{"usage":{"input_tokens":5,"output_tokens":7}}}' \

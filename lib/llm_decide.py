@@ -49,7 +49,8 @@ Environment knobs (mirrors the prior bash contract exactly):
   BACKEND=<backend>                        alias used when ACTIVE_BACKEND is
                                            unset, for standalone helper calls
   MODEL=<name>                           per-backend model override
-  CLAUDE_BIN / CODEX_BIN / GEMINI_BIN    backend binary overrides
+  CLAUDE_BIN / CODEX_BIN / GEMINI_BIN /
+  OPENCODE_BIN                           backend binary overrides
   USE_GEMINI_CLI=1                       make the gemini backend invoke
                                          Google Gemini CLI instead of agy
 """
@@ -64,6 +65,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -77,9 +79,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llm_invoke import (  # noqa: E402
     decide_flags as _decide_flags_for_backend,
     default_model as _default_model,
+    extract_text as _extract_backend_text,
     gemini_default_bin as _gemini_default_bin,
     known_backend as _known_backend,
     memory_env as _memory_env,
+    opencode_config as _opencode_config,
 )
 
 
@@ -292,11 +296,15 @@ def _invoke_backend(
         bin_name = os.environ.get("CLAUDE_BIN") or "claude"
         flags = _backend_flags("claude", model)
         cmd = [bin_name, *flags]
-    elif backend in ("codex", "oss"):
+    elif backend == "codex":
         bin_name = os.environ.get("CODEX_BIN") or "codex"
         flags = _backend_flags(backend, model)
         # codex takes `exec` subcommand + flags + `-` for stdin prompt.
         cmd = [bin_name, "exec", *flags, "-"]
+    elif backend == "oss":
+        bin_name = os.environ.get("OPENCODE_BIN") or "opencode"
+        flags = _backend_flags("oss", model)
+        cmd = [bin_name, *flags]
     elif backend == "gemini":
         # Gemini backend keeps one name while switching CLI dialects via
         # USE_GEMINI_CLI. Both dialects accept -p "" with the prompt on
@@ -318,28 +326,49 @@ def _invoke_backend(
     # GEMINI_CLI_HOME) via llm_apply_memory_policy, but standalone tools that
     # import llm_decide directly (bin/setup-target, bin/suggest-*, etc.) never
     # call it — so set them here too, keyed on TOKENFUZZ_MEMORY_ENABLED.
-    # codex/oss carry their disable as `-c` flags already in the decide flags.
+    # codex carries its disable as `-c` flags already in the decide flags.
     child_env = os.environ.copy()
     child_env.update(_memory_env(backend))
+    temp_dir = None
+    run_input = prompt
+    if backend == "oss":
+        # Build the config first: _opencode_config can raise ValueError (no
+        # model), and doing it before TemporaryDirectory() avoids leaking an
+        # uncleaned temp dir on that error path.
+        config_content = json.dumps(_opencode_config(model), separators=(",", ":"))
+        temp_dir = tempfile.TemporaryDirectory(prefix="tokenfuzz-opencode-decide-")
+        child_env["OPENCODE_CONFIG_CONTENT"] = config_content
+        cmd = [*cmd, prompt]
+        run_input = None
 
     try:
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout_secs,
-            env=child_env,
-        )
-    except subprocess.TimeoutExpired:
-        raise
-    except OSError:
-        return None
+        try:
+            result = subprocess.run(
+                cmd,
+                input=run_input,
+                capture_output=True,
+                text=True,
+                timeout=timeout_secs,
+                env=child_env,
+            )
+        except subprocess.TimeoutExpired:
+            raise
+        except OSError:
+            return None
 
-    if result.returncode != 0:
-        # Caller logs the backend-specific rc.
-        raise subprocess.CalledProcessError(result.returncode, cmd, output=result.stdout, stderr=result.stderr)
-    return result.stdout or ""
+        if result.returncode != 0:
+            # Caller logs the backend-specific rc.
+            raise subprocess.CalledProcessError(result.returncode, cmd, output=result.stdout, stderr=result.stderr)
+        if backend == "oss":
+            if temp_dir is None:
+                return result.stdout or ""
+            raw_path = Path(temp_dir.name) / "opencode.jsonl"
+            raw_path.write_text(result.stdout or "", encoding="utf-8")
+            return _extract_backend_text("oss", str(raw_path))
+        return result.stdout or ""
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
 
 
 # ── JSON extraction & key validation ────────────────────────────────

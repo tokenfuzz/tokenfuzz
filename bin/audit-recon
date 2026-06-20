@@ -628,9 +628,12 @@ run_recon_agent() {
           2>&1 \
           | tee "$agent_raw" >/dev/null || true
         ;;
-      codex|oss)
+      codex)
         audit_timeout_run "$TIMEOUT_SECS" "${CODEX_BIN:-codex}" exec "${recon_flags[@]}" "$prompt" \
           > "$agent_raw" 2>&1 || true
+        ;;
+      oss)
+        llm_run_agent_prompt oss "$prompt" "$TIMEOUT_SECS" "$agent_raw" "${MODEL:-}" 80 "$recon_add_dirs" "$TARGET_PATH" || true
         ;;
       gemini)
         # Gemini backend reads the prompt from stdin when -p "".
@@ -876,6 +879,9 @@ if [ "$VALIDATE_MODE" != "off" ] && [ -s "$OUT_PATH" ]; then
     : > "$stage3_path"
     if source "$SCRIPT_ROOT/lib/triage_validate.sh" 2>/dev/null; then
       export TRIAGE_VALIDATE_BACKEND="$BACKEND"
+      # Propagate the model so the validator runs the same one as recon.
+      # Mandatory for oss (no default model); harmless for hosted backends.
+      export TRIAGE_VALIDATE_MODEL="${MODEL:-}"
       export TRIAGE_VALIDATE_VOTES=1
       # Stage 3 must finish inside the audit's recon budget so recon
       # completes and gets cached. At ~300s per validator, 6 in parallel

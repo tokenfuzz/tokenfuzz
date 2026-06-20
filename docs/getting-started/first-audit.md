@@ -65,7 +65,7 @@ selected backend:
 | `codex` | `gpt-5.5` |
 | `gemini` with Antigravity CLI (`agy`) | `--model` is not supported; `agy` keeps model selection in its interactive `/model` setting. |
 | `gemini` with Google Gemini CLI (`USE_GEMINI_CLI=1`) | `gemini-3.1-pro-preview` |
-| `oss` | No default; `--model <ollama-model>` is required. |
+| `oss` | No default; `--model <served-model-name>` is required. |
 
 The defaults come from `config/models.toml`; override them per run
 with `--model` or per shell with the `*_MODEL_DEFAULT` variables in

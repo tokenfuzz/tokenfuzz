@@ -27,6 +27,7 @@ required_templates=(
   work_rerank.md.j2
   auto_repair_target_toml.md.j2
   model_preflight.md.j2
+  oss_tool_preflight.md.j2
   triage_legit_crash.md.j2
   triage_crash_trace.md.j2
   triage_crash_confirm.md.j2
@@ -57,6 +58,12 @@ assert_match "WARNING: DATA RACE" "$rendered" \
   "confirm gate accepts Go race-detector reports"
 assert_match "index-out-of-bounds" "$rendered" \
   "confirm gate accepts security-class UBSan checks"
+
+# oss tool preflight prompt: must drive the file read tool and demand the
+# sentinel back verbatim (the local-model tool-use litmus in bin/audit).
+rendered=$(python3 "$renderer" oss_tool_preflight.md.j2)
+assert_match "file read tool" "$rendered" "oss preflight template asks for the read tool"
+assert_match "oss-tool-sentinel.txt" "$rendered" "oss preflight template names the sentinel path"
 
 rendered=$(python3 "$renderer" audit_recon.md.j2 \
   --var "target_slug=demo" \

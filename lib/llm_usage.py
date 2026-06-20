@@ -81,14 +81,15 @@ _OUTPUT_KEYS = ("output_tokens", "completion_tokens", "output")
 
 # Terminal/summary events carry the cumulative usage for ONE agent
 # invocation: Claude Code CLI emits `result`, codex emits `turn.completed`,
-# gemini-cli emits `result` (with a `stats` block). A single cell's raw log
+# OpenCode emits `step_finish` / `step-finish`, and gemini-cli emits
+# `result` (with a `stats` block). A single cell's raw log
 # can hold several when the CLI was re-invoked / resumed and appended to the
 # same file — the token usage object RESETS per invocation (only the
 # stream's total_cost_usd keeps climbing). Their usage must be SUMMED;
 # taking only the last terminal event silently drops every earlier
 # invocation (observed as a ~100x undercount on a real multi-invocation
 # cell). These are CLI event-type names, not target-specific vocabulary.
-_TERMINAL_TYPES = ("result", "turn.completed")
+_TERMINAL_TYPES = ("result", "turn.completed", "step_finish", "step-finish")
 
 # Rough chars-per-token ratio for the estimated path. ~4 is the common
 # heuristic for English + code; it is only ever used when a backend (agy)
@@ -106,6 +107,16 @@ def _first_int(d: dict, keys: tuple[str, ...]) -> int:
 
 def _looks_like_usage(d: dict) -> bool:
     return any(k in d for k in _INPUT_KEYS + _OUTPUT_KEYS)
+
+
+def _cache_int(d: dict, key: str) -> int:
+    cache = d.get("cache")
+    if not isinstance(cache, dict):
+        return 0
+    v = cache.get(key)
+    if isinstance(v, (int, float)):
+        return int(v)
+    return 0
 
 
 def _find_usage(obj: object) -> dict | None:
@@ -243,8 +254,8 @@ def extract_usage_from_text(
             continue
         candidate = {
             "input": _first_int(usage, _INPUT_KEYS),
-            "cached_input": _first_int(usage, _CACHED_KEYS),
-            "cache_creation": _first_int(usage, _CACHE_CREATION_KEYS),
+            "cached_input": _first_int(usage, _CACHED_KEYS) or _cache_int(usage, "read"),
+            "cache_creation": _first_int(usage, _CACHE_CREATION_KEYS) or _cache_int(usage, "write"),
             "output": _first_int(usage, _OUTPUT_KEYS),
         }
         if any(candidate.values()):
@@ -273,8 +284,8 @@ def extract_usage_from_text(
         if usage is not None:
             candidate = {
                 "input": _first_int(usage, _INPUT_KEYS),
-                "cached_input": _first_int(usage, _CACHED_KEYS),
-                "cache_creation": _first_int(usage, _CACHE_CREATION_KEYS),
+                "cached_input": _first_int(usage, _CACHED_KEYS) or _cache_int(usage, "read"),
+                "cache_creation": _first_int(usage, _CACHE_CREATION_KEYS) or _cache_int(usage, "write"),
                 "output": _first_int(usage, _OUTPUT_KEYS),
             }
             if any(candidate.values()):

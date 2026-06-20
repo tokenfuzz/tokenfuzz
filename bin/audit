@@ -121,8 +121,8 @@ Usage:
 Options:
   --target <dir-name>                 Target directory name under targets/ (default: firefox)
   --target-path <path>                Override target path directly
-  --backend <backend>               Select one backend. One of: all, claude, codex, gemini, oss. If omitted, cycle configured hosted backends like --backend all. 'oss' runs codex with --oss for local models via ollama and requires --model.
-  --model <model>                   Override the model for supported backends. Required for --backend oss. For --backend gemini with agy, pass either the config slug (e.g. gemini-3.1-pro-preview) or an exact 'agy models' label (e.g. "Gemini 3.1 Pro (High)"); the harness maps the slug to a label and the preflight rejects an unresolved one.
+  --backend <backend>               Select one backend. One of: all, claude, codex, gemini, oss. If omitted, cycle configured hosted backends like --backend all. 'oss' runs OpenCode against a local OpenAI-compatible endpoint and requires --model.
+  --model <model>                   Override the model for supported backends. Required for --backend oss, where it must match the exact local served model name from /v1/models. For --backend gemini with agy, pass either the config slug (e.g. gemini-3.1-pro-preview) or an exact 'agy models' label (e.g. "Gemini 3.1 Pro (High)"); the harness maps the slug to a label and the preflight rejects an unresolved one.
   --experiment <name>               Isolate artifacts under output/<target>-<name>/
   --strategy <S1|S2|S3|S4|S5|S6|S7|S8> Pin the first investigation strategy for
                                     focused smoke validation. Omit for normal
@@ -361,11 +361,11 @@ NEW_TARGET_SLUG=""
 AUDIT_MODEL=""
 CLAUDE_BIN="claude"
 CODEX_BIN="codex"
+OPENCODE_BIN="${OPENCODE_BIN:-opencode}"
 # The "gemini" backend keeps one harness-visible name. By default it
 # invokes Antigravity (`agy`); USE_GEMINI_CLI=1 switches the underlying
 # dialect to Google Gemini CLI (`gemini`) without changing artifact paths.
 GEMINI_BIN="${GEMINI_BIN:-$(llm_gemini_default_bin)}"
-CODEX_OSS=0                 # set when --backend=oss resolves; passes --oss to codex exec (local models via ollama)
 AGENT_GUIDE_PATH=""
 REFERENCE_DIR=".agents/references"
 
@@ -596,8 +596,16 @@ backend_configured() {
 
 oss_model_available() {
   local model="$1"
-  command_exists ollama || return 1
-  ollama list 2>/dev/null | awk -v model="$model" 'NR > 1 && $1 == model { found=1 } END { exit found ? 0 : 1 }'
+  _llm_invoke_export_env
+  python3 "$SCRIPT_ROOT/lib/llm_invoke.py" local-model-available --model "$model" >/dev/null 2>&1
+}
+
+oss_local_base_url() {
+  llm_local_base_url 2>/dev/null || printf '%s\n' "http://127.0.0.1:8000/v1"
+}
+
+oss_resolved_model_name() {
+  llm_resolve_model_name oss "$1" 2>/dev/null || printf '%s\n' "$1"
 }
 
 discover_ensemble_backends() {
@@ -1104,13 +1112,18 @@ EOF
       ACTIVE_BACKEND="gemini"
       ;;
     oss)
-      command_exists "$CODEX_BIN" || { log "FATAL: '$CODEX_BIN' not found in PATH" >&2; exit 1; }
+      command_exists "$OPENCODE_BIN" || { log "FATAL: '$OPENCODE_BIN' not found in PATH. Install OpenCode, or set OPENCODE_BIN=/path/to/opencode." >&2; exit 1; }
       if [ -z "${AUDIT_MODEL:-}" ]; then
-        log "FATAL: --backend oss requires --model <name> (e.g. --model gemma4:26b)" >&2
+        log "FATAL: --backend oss requires --model <served-model-name> (the exact model id listed by the provider's /v1/models endpoint)" >&2
         exit 1
       fi
+      local base_url resolved
+      base_url="$(oss_local_base_url)"
+      resolved="$(oss_resolved_model_name "$AUDIT_MODEL")"
       if ! oss_model_available "$AUDIT_MODEL"; then
-        log "FATAL: Ollama model '$AUDIT_MODEL' is not available. Run 'ollama list' or 'ollama pull $AUDIT_MODEL' before --backend oss." >&2
+        log "FATAL: local model '$AUDIT_MODEL' resolved to '$resolved', but ${base_url} did not list it from /models." >&2
+        log "Start a local OpenAI-compatible server first, for example: vllm serve <hf-model-or-local-path> --served-model-name '$resolved'" >&2
+        log "For Ollama, use: AUDIT_LOCAL_BASE_URL=http://127.0.0.1:11434/v1 bin/audit --backend oss --model '$resolved' ..." >&2
         exit 1
       fi
       ACTIVE_BACKEND="oss"
@@ -1123,13 +1136,21 @@ EOF
 }
 
 resolve_model() {
+  local model=""
   if [ -n "${AUDIT_MODEL:-}" ]; then
-    echo "$AUDIT_MODEL"
-    return
+    model="$AUDIT_MODEL"
+  else
+    case "${ACTIVE_BACKEND}" in
+      claude|codex|gemini|oss) model="$(llm_default_model "$ACTIVE_BACKEND")" ;;
+      *)
+        log "FATAL: unsupported backend: ${ACTIVE_BACKEND}" >&2
+        exit 1
+        ;;
+    esac
   fi
-
   case "${ACTIVE_BACKEND}" in
-    claude|codex|gemini|oss) llm_default_model "$ACTIVE_BACKEND" ;;
+    oss) llm_resolve_model_name oss "$model" ;;
+    claude|codex|gemini) printf '%s\n' "$model" ;;
     *)
       log "FATAL: unsupported backend: ${ACTIVE_BACKEND}" >&2
       exit 1
@@ -1140,12 +1161,49 @@ resolve_model() {
 model_preflight_stamp_path() {
   local backend="$1"
   local model="$2"
-  local safe_model
+  local safe_model stamp_backend
   safe_model=$(printf '%s' "$model" | tr -cs '[:alnum:]._-' '_')
   safe_model="${safe_model#_}"
   safe_model="${safe_model%_}"
   [ -n "$safe_model" ] || safe_model="model"
-  printf '%s/.model_preflight_%s_%s.ok' "$LOGDIR" "$backend" "$safe_model"
+  stamp_backend="$backend"
+  # OSS used to have an echo-only connectivity preflight. Keep tool-aware
+  # approvals separate so old stamps cannot bless a weak local model.
+  [ "$backend" = "oss" ] && stamp_backend="oss_tool_v1"
+  printf '%s/.model_preflight_%s_%s.ok' "$LOGDIR" "$stamp_backend" "$safe_model"
+}
+
+oss_tool_preflight() {
+  local model="$1"
+  local timeout_secs="$2"
+  local raw="$3"
+  local preflight_dir sentinel token prompt text rc
+
+  preflight_dir="$LOGDIR/.preflight"
+  mkdir -p "$preflight_dir" || return 1
+  sentinel="$preflight_dir/oss-tool-sentinel.txt"
+  token="OSS_TOOL_PREFLIGHT_OK_$(date -u '+%Y%m%d%H%M%S')_$$"
+  printf '%s\n' "$token" > "$sentinel" || return 1
+
+  prompt="$(render_prompt_template oss_tool_preflight.md.j2)"
+
+  rc=0
+  llm_run_agent_prompt oss "$prompt" "$timeout_secs" "$raw" \
+    "$model" 6 "$preflight_dir" "$preflight_dir" || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+
+  text=$(llm_extract_text oss "$raw" 2>/dev/null || true)
+  if ! llm_raw_has_tool "$raw" read; then
+    log "WARN: oss preflight: model did not use the required read tool — treating as failure" | tee -a "$INDEX"
+    return 45
+  fi
+  if ! grep -qxF "$token" <<<"$text"; then
+    log "WARN: oss preflight: model did not return the hidden sentinel after tool use — treating as failure" | tee -a "$INDEX"
+    return 46
+  fi
+
+  rm -f "$sentinel" 2>/dev/null || true
+  return 0
 }
 
 # One-time backend bootstrap for the audit process. Side-effect helpers
@@ -1351,8 +1409,12 @@ validate_model_for_backend() {
     # Claude/codex success is the CLI exit code; the gemini branch below
     # additionally requires the assistant to have echoed MODEL_PREFLIGHT_OK
     # (agy can exit 0 with no output on upstream quota rejection).
-    llm_run_agent_prompt "$backend" "$prompt" "$timeout_secs" "$raw" \
-      "$model" 1 "$SCRIPT_ROOT" "$SCRIPT_ROOT" || rc=$?
+    if [ "$backend" = "oss" ]; then
+      oss_tool_preflight "$model" "$timeout_secs" "$raw" || rc=$?
+    else
+      llm_run_agent_prompt "$backend" "$prompt" "$timeout_secs" "$raw" \
+        "$model" 1 "$SCRIPT_ROOT" "$SCRIPT_ROOT" || rc=$?
+    fi
     # Some gemini CLI failures can exit 0 while emitting no assistant text
     # (for agy this has happened on upstream RESOURCE_EXHAUSTED / 429 /
     # quota failures written only to private logs). A genuine preflight
@@ -1466,8 +1528,6 @@ validate_active_model() {
 configure_active_backend() {
   local backend="$1"
   ACTIVE_BACKEND="$backend"
-  CODEX_OSS=0
-  [ "$ACTIVE_BACKEND" = "oss" ] && CODEX_OSS=1
   MODEL="$(resolve_model)"
 
   # Output layout: output/<target>[-<experiment>]/<backend>/{results,logs}. Raw model
@@ -3004,7 +3064,7 @@ normalize_agent_exit_code() {
   fi
   if [ "${exit_code:-0}" -ne 0 ]; then
     case "$backend" in
-      codex|oss)
+      codex)
         # `codex exec` can return non-zero when a command inside an otherwise
         # completed turn fails. Audit agents intentionally run failing probes
         # during exploration, so trust the structured turn status instead of
@@ -3282,8 +3342,8 @@ corpus_dir_root() {
 }
 prepare_active_backend_runtime
 clear_startup_rate_limit_cooldowns
-if [ "${CODEX_OSS:-0}" = "1" ]; then
-  log "LLM backend: provider=${ACTIVE_BACKEND} model=${MODEL} (running locally via Ollama)" | tee -a "$INDEX"
+if [ "$ACTIVE_BACKEND" = "oss" ]; then
+  log "LLM backend: provider=${ACTIVE_BACKEND} model=${MODEL} base_url=$(oss_local_base_url)" | tee -a "$INDEX"
 else
   log "LLM backend: provider=${ACTIVE_BACKEND} model=${MODEL} (hosted API)" | tee -a "$INDEX"
 fi
@@ -3907,7 +3967,6 @@ backend_resume_enabled() {
       resume_bool_enabled "${CLAUDE_RESUME:-1}"
       ;;
     codex)
-      [ "${CODEX_OSS:-0}" -eq 0 ] || return 1
       resume_bool_enabled "${CODEX_RESUME:-1}"
       ;;
     oss)
@@ -5507,10 +5566,14 @@ maybe_seed_recon_cards() {
   fi
 
   log "Recon seed: cache MISS (target SHA $current_target_sha); launching bin/audit-recon (this may take 10-30 minutes)" | tee -a "$INDEX"
+  # Pass the resolved model through: hosted backends fall back to a config
+  # default, but oss has no default and the OpenCode provider config errors
+  # without an explicit served-model name (recon would emit empty output).
   if "$SCRIPT_ROOT/bin/audit-recon" \
       --target "$TARGET_SLUG" \
       --target-path "$TARGET_ROOT" \
       --backend "$backend" \
+      --model "$MODEL" \
       --out "$recon_out" \
       --report "$recon_report" \
       2>&1 | sed -u 's/^/[recon-seed] /' | tee -a "$INDEX"; then
@@ -6187,16 +6250,28 @@ run_agent() {
         fi
         exit "$_agy_rc"
       fi
+    elif [ "$ACTIVE_BACKEND" = "oss" ]; then
+      declare -a opencode_flags=()
+      llm_agent_flags oss opencode_flags "$model" 80 "$SCRIPT_ROOT,$TARGET_ROOT,$RESULTS_DIR"
+      # Prompt rides in argv — OpenCode `run` has no stdin path. The canonical
+      # prompt artifact is written separately by write_prompt_artifacts.
+      local _opencode_config _opencode_rc=0
+      _opencode_config="$(llm_opencode_config_content "$model")" || exit $?
+      OPENCODE_CONFIG_CONTENT="$_opencode_config" \
+        "$OPENCODE_BIN" "${opencode_flags[@]}" \
+          "$prompt_with_budget" \
+          > "$(audit_raw_path "$logfile")" 2>&1 || _opencode_rc=$?
+      llm_extract_text oss "$(audit_raw_path "$logfile")" > "$logfile" 2>/dev/null || true
+      if [ -s "$logfile" ]; then
+        sed -u "s|^|${_log_prefix} |" "$logfile"
+      else
+        sed -u "s|^|${_log_prefix} |" "$(audit_raw_path "$logfile")"
+      fi
+      exit "$_opencode_rc"
     else
       # Shared flag picker; audit-only addition is --output-last-message.
-      # CODEX_OSS=1 (resolved upstream from --backend=oss) routes through
-      # llm_invoke.sh's `oss` alias which prepends --oss + --local-provider.
       declare -a codex_flags=()
-      if [ "$CODEX_OSS" -eq 1 ]; then
-        llm_agent_flags oss codex_flags "$model" 80 "$SCRIPT_ROOT,$TARGET_ROOT,$RESULTS_DIR"
-      else
-        llm_agent_flags codex codex_flags "$model" 80 "$SCRIPT_ROOT,$TARGET_ROOT,$RESULTS_DIR"
-      fi
+      llm_agent_flags codex codex_flags "$model" 80 "$SCRIPT_ROOT,$TARGET_ROOT,$RESULTS_DIR"
       codex_flags+=(--output-last-message "$logfile")
       _codex_drop_flag_args() {
         local out_var="$1"; shift
@@ -6238,7 +6313,7 @@ run_agent() {
       fi
       _codex_drop_flag_args codex_resume_flags "${codex_flags[@]}"
       local _codex_rc=0
-      if [ "$use_resume" -eq 1 ] && [ -n "$prev_session_id" ] && [ "$CODEX_OSS" -eq 0 ]; then
+      if [ "$use_resume" -eq 1 ] && [ -n "$prev_session_id" ]; then
         printf '%s' "$prompt_with_budget" \
           | "$CODEX_BIN" exec resume "${codex_resume_flags[@]}" "$prev_session_id" - \
               > "$(audit_raw_path "$logfile")" 2>&1 || _codex_rc=$?

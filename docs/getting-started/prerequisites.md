@@ -124,14 +124,73 @@ commands above already include their common installer prerequisites:
   commands above install Node.js and npm for that path.
 - The default Gemini path uses the Antigravity installer, which needs
   `curl` and valid CA certificates, also installed above.
-- The local `oss` backend needs Codex plus Ollama.
+- The local `oss` backend needs OpenCode plus a local model server.
+  vLLM is the recommended default for fast GPU inference; Ollama is the
+  simple desktop fallback.
 
 | Backend | Install and authenticate | Audit command |
 | --- | --- | --- |
 | Claude Code | Install from the [Claude Code docs](https://docs.claude.com/en/docs/claude-code), then authenticate the `claude` CLI (`claude` will prompt on first use). Pass `--model <id>` to override the default model. | `bin/audit --backend claude` |
 | Codex | `npm install -g @openai/codex`, then authenticate the `codex` CLI. Pass `--model <id>` to override the default model. | `bin/audit --backend codex` |
 | Gemini | Default: install [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) with `curl -fsSL https://antigravity.google/cli/install.sh \| bash`, then run `agy` once to authenticate. `agy` has no `--model` selector; use its interactive `/model` command. Alternative: install Google Gemini CLI, set `USE_GEMINI_CLI=1`, and pass `--model <id>` when needed. If Gemini CLI logs `Ripgrep is not available`, apply the [bundled ripgrep symlink](../guides/backends.md#google-gemini-cli-ripgrep). | `bin/audit --backend gemini --target <name>` |
-| Local model (`oss`) | The `oss` backend reuses the Codex CLI with its `--oss` switch, so install Codex first. Then install [Ollama](https://ollama.com), `ollama pull <model>`, and confirm it appears in `ollama list`. `--model` is **required** for `oss`. | `bin/audit --backend oss --model <ollama-model>` |
+| Local model (`oss`) | Install [OpenCode](https://opencode.ai/download). Then run a local model through [vLLM](https://docs.vllm.ai/en/latest/getting_started/installation/) (recommended for larger GPU-backed models) or [Ollama](https://ollama.com/download). `--model` is **required** for `oss` and must match the served model name. | `bin/audit --backend oss --model qwen3-8b` |
+
+Local model quick paths:
+
+```bash
+# OpenCode terminal CLI.
+curl -fsSL https://opencode.ai/install | bash
+# Alternative installers: npm i -g opencode-ai, or brew install anomalyco/tap/opencode.
+```
+
+```bash
+# vLLM, recommended for fast Linux GPU inference.
+python3 -m venv .venv-vllm
+. .venv-vllm/bin/activate
+pip install -U vllm
+vllm serve <hf-model-or-local-path> --served-model-name qwen3-8b
+
+bin/audit --backend oss --model qwen3-8b --target <name> 1
+```
+
+Examples:
+
+```bash
+vllm serve google/gemma-4-26B-A4B --served-model-name gemma4-26b-a4b
+bin/audit --backend oss --model gemma4-26b-a4b --target <name> 1
+
+vllm serve Qwen/Qwen3.6-35B-A3B --served-model-name qwen3.6-35b-a3b
+bin/audit --backend oss --model qwen3.6-35b-a3b --target <name> 1
+
+vllm serve zai-org/GLM-5.2 --served-model-name glm5.2
+bin/audit --backend oss --model glm5.2 --target <name> 1
+```
+
+```bash
+# Ollama, useful for macOS and smaller local models.
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen3:8b
+ollama serve
+
+export AUDIT_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
+bin/audit --backend oss --model qwen3:8b --target <name> 1
+```
+
+Ollama examples:
+
+```bash
+export AUDIT_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
+
+ollama pull gemma4:26b
+bin/audit --backend oss --model gemma4:26b --target <name> 1
+
+ollama pull qwen3.6:35b-a3b
+bin/audit --backend oss --model qwen3.6:35b-a3b --target <name> 1
+
+# Ollama's GLM-5.2 tag is cloud-backed today. Use vLLM for fully local GLM-5.2.
+ollama pull glm-5.2:cloud
+bin/audit --backend oss --model glm-5.2:cloud --target <name> 1
+```
 
 When you pass `--backend all` (or omit `--backend` entirely), `bin/audit`
 cycles installed hosted backends in `claude → codex → gemini` order,
@@ -160,9 +219,9 @@ for following the provider's usage policy. They give the provider
 clearer context that your work is defensive, authorised research.
 
 If you would rather keep target source on the local machine, use the
-`oss` backend through Ollama. It avoids hosted-model data flow
-entirely, runs on the same audit contract, but tends to need shorter
-sessions and more hands-on review of results.
+`oss` backend through OpenCode and a local model server. It avoids
+hosted-model data flow entirely, runs on the same audit contract, but
+tends to need shorter sessions and more hands-on review of results.
 
 ## 3. Target-specific tools
 

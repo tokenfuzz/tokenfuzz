@@ -44,6 +44,13 @@ llm_decide() {
     export CLAUDE_BIN="${CLAUDE_BIN:-}"
     export CODEX_BIN="${CODEX_BIN:-}"
     export GEMINI_BIN="${GEMINI_BIN:-}"
+    # oss/OpenCode decide path: the python child builds the local provider
+    # config from these, so forward them like the agent path's
+    # _llm_invoke_export_env does. Without the base URL the decide child would
+    # fall back to the default endpoint and miss the operator's local server.
+    export OPENCODE_BIN="${OPENCODE_BIN:-}"
+    export AUDIT_LOCAL_BASE_URL="${AUDIT_LOCAL_BASE_URL:-}"
+    export AUDIT_LOCAL_API_KEY="${AUDIT_LOCAL_API_KEY:-}"
     export USE_GEMINI_CLI="${USE_GEMINI_CLI:-}"
     export LLM_DECIDE_DISABLE="${LLM_DECIDE_DISABLE:-}"
     export LLM_DECIDE_MOCK="${LLM_DECIDE_MOCK:-}"
