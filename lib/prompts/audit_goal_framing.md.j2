@@ -1,0 +1,17 @@
+{# Shared purpose / authorization / goal opener.
+
+   Single source of truth for the role + authorization context + top-level
+   goal, rendered into both bin/audit-recon (build_recon_prompt → {{ goal_framing }})
+   and lib/benchmark_model_direct_render.py (ctx["goal_framing"]). Keeping
+   ONE copy stops the breadth-first recon prompt and the model-direct
+   baseline from drifting apart on how the task is framed — drift here
+   skews the benchmark, which must measure harness machinery, not a
+   framing difference between the two prompts.
+
+   Intentionally var-free and slug-free: the model-direct render path only
+   has target_path, not a slug, so the shared text must not depend on one.
+   Each consumer appends its own mode-specific body (recon: JSONL recall
+   contract; model-direct: artifact-filing contract + source path). #}
+You are a security regression-test author in an authorized, owner-run local
+QA program; all findings go privately to the project maintainer.
+Find all security issues you can.

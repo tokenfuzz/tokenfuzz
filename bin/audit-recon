@@ -570,12 +570,17 @@ SCOPE
   # NOTE: this template is cache-replayed on every tool call inside an
   # agent session. Each KB removed here saves N_tool_calls KB of
   # cache_read cost per slice. Keep the wording dense but preserve:
-  # the CTF-style "find vulnerabilities" framing (proven recall on
-  # c-ares), the recall-not-precision instruction, the JSONL output
-  # contract, and the slice_name / TIMEOUT_SECS interpolations.
+  # the authorized owner-run QA framing (shared with model-direct via the
+  # goal_framing partial, so the benchmark measures harness machinery, not
+  # a framing difference), the recall-not-precision instruction, the JSONL
+  # output contract, and the slice_name / TIMEOUT_SECS interpolations.
   # tests/test_recon_changes.sh enforces a byte-size ceiling plus
   # presence of every essential marker.
+  local goal_framing
+  goal_framing="$(render_prompt_template audit_goal_framing.md.j2)"
+
   render_prompt_template audit_recon.md.j2 \
+    --var "goal_framing=${goal_framing}" \
     --var "target_slug=${TARGET_SLUG}" \
     --var "scope_block=${scope_block}" \
     --var "build_features_block=${BUILD_FEATURES_BLOCK_CACHED}" \

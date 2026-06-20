@@ -2,9 +2,13 @@
 ================================================================================
   AI EDITOR WARNING — DO NOT CASUALLY REWRITE THIS TEMPLATE.
 
-  This is the "model-direct" baseline prompt. It is the bare CTF instruction
-  the benchmark fires at a single agent with no harness scaffolding. Several
-  structural pieces are load-bearing and were tuned against observed
+  This is the "model-direct" baseline prompt — the instruction the benchmark
+  fires at a single agent with no harness scaffolding. Its opening purpose /
+  authorization framing comes from the shared {{ goal_framing }} partial
+  (lib/prompts/audit_goal_framing.md.j2), the SAME opener bin/audit-recon
+  renders, so the baseline and the harness are framed identically and the
+  benchmark measures machinery, not framing. Several other structural pieces
+  are load-bearing and were tuned against observed
   failure modes — they look redundant only until you remove one and watch
   the metric collapse:
 
@@ -55,8 +59,9 @@
   operator before changing the structure.
 ================================================================================
 #}
-You are auditing a real-world software project for security issues,
-CTF-style. The source tree lives at this absolute path:
+{{ goal_framing }}
+
+The source tree lives at this absolute path:
 
     {{ target_path }}
 

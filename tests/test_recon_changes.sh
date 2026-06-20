@@ -770,7 +770,17 @@ bash -c '
 # 2760 (deliberate) for the canonical-symbol `function` schema hint: the
 # recon agent must emit the fully-qualified frame-#0 symbol so findings
 # dedup on a stable function rather than a drifting free-text label.
-prompt_ceiling=2760
+# Raised 2760 → 2900 (deliberate) to swap the bare "playing in a CTF"
+# opener for the authorized owner-run QA framing shared with model-direct
+# (goal_framing partial), so the benchmark measures harness machinery, not
+# a framing difference between recon and the model-direct baseline.
+# ~140B over ~80 turns ≈ 10KB cache_read/slice (recon pre-pass only).
+# Raised 2900 → 3120 (deliberate) for recall COMPLETENESS: the opener's
+# bug examples were a closed memory/parser/protocol list with no escape,
+# which narrows recall (Claude follows it literally). Broadened to be
+# class-diverse and added model_direct's "starting point, not a fence"
+# escape so the list reads as illustrative, not exhaustive.
+prompt_ceiling=3120
 
 fl_size=$(wc -c < "$prompt_tmpdir/prompt-fl.txt" | tr -d ' ')
 
@@ -782,7 +792,7 @@ fi
 
 # --- Semantic preservation ---
 # Recall-mode prompt invariants. Every marker below is load-bearing:
-# removing any of them either breaks the CTF recall framing,
+# removing any of them either breaks the recall framing,
 # downstream aggregation (label values), or per-slice provenance.
 assert_prompt_contains() {
   local file="$1" needle="$2" label="$3"
@@ -795,15 +805,41 @@ assert_prompt_contains() {
 
 for variant in fl; do
   f="$prompt_tmpdir/prompt-fl.txt" ; vlabel="file-list"
-  # CTF recall framing. These two phrases are what produced the
-  # 14-finding simple-prompt baseline; the harness reproduces them.
-  assert_prompt_contains "$f" 'playing in a CTF' "$vlabel-ctf-framing"
+  # Authorized owner-run QA framing (shared with model-direct via the
+  # goal_framing partial — one opener for both so the benchmark measures
+  # machinery, not framing). The explicit recall directives below ("Find
+  # all security issues" / "recall, not precision" / "not a fence") carry
+  # the breadth, so unifying the opener does not narrow recall.
+  assert_prompt_contains "$f" 'authorized, owner-run local' "$vlabel-qa-framing"
+  # Guard against the bare CTF opener creeping back in (framing drift).
+  if grep -qF -- 'playing in a CTF' "$f"; then
+    fail "$vlabel-no-ctf: recon prompt reintroduced bare 'playing in a CTF' framing"
+  else
+    pass "$vlabel-no-ctf: recon prompt uses authorized-QA framing, not bare CTF"
+  fi
   # "Find all security issues" is stronger than "Find security issues" or
   # "Find a security issue" — the "all" is an explicit recall directive
   # that combats the model's natural tendency to commit to one or two
   # high-confidence findings and stop.
   assert_prompt_contains "$f" 'Find all security issues' "$vlabel-find-all-vulns"
   assert_prompt_contains "$f" 'recall, not precision' "$vlabel-recall-instr"
+  # Recall COMPLETENESS: the opener's bug examples must stay illustrative,
+  # not a closed list. The "not a fence" escape (mirrors model_direct) and
+  # the class-diverse vocabulary stop the model — Claude especially — from
+  # reading the examples as the only thing to look for. Without these the
+  # list skews to memory/parser/protocol bugs and silently narrows recall.
+  assert_prompt_contains "$f" 'starting point, not a fence' "$vlabel-list-not-a-fence"
+  for cls in injection auth info-leak race resource-exhaustion; do
+    assert_prompt_contains "$f" "$cls" "$vlabel-broad-class-$cls"
+  done
+  # The schema stays on finding_signature's coarse top-level classes.
+  # Detailed vulnerability names belong in title/notes, where reachability
+  # already has anchored, negation-aware detectors. Keeping class coarse
+  # avoids a second incomplete taxonomy and prevents cluster fragmentation.
+  for cls in memory-safety auth injection info-disclosure crypto race \
+             boundary deserialization config logic side-channel dos other; do
+    assert_prompt_contains "$f" "$cls" "$vlabel-schema-class-$cls"
+  done
   # Recall enforcement: agents must not self-censor to AUDIT-CLEAN.
   assert_prompt_contains "$f" 'pre-filter' "$vlabel-no-prefilter"
   # The two labels recall mode emits.

@@ -1,8 +1,8 @@
-You are playing in a CTF. Find all security issues in the **{{ target_slug }}**
-project. Emit every guard gap, unchecked input, suspicious arithmetic,
-lifecycle inconsistency, or protocol-state oddity you notice — do not
-pre-filter. An independent validator gates each emission with two-vote
-majority afterwards; your job here is recall, not precision.
+{{ goal_framing }} In **{{ target_slug }}**, emit every guard gap, unchecked
+input, suspicious arithmetic, lifecycle/protocol-state oddity, memory-safety,
+injection, auth, info-leak, race, or resource-exhaustion weakness. That list is
+a starting point, not a fence: emit anything that weakens a security boundary.
+Do not pre-filter. Validator quorum runs later; optimize recall, not precision.
 
 {{ scope_block }}
 {{ build_features_block }}

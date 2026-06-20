@@ -18,6 +18,7 @@ required_templates=(
   common_suffix.md.j2
   find_first_directive.md.j2
   strategy_picker.md.j2
+  audit_goal_framing.md.j2
   audit_recon.md.j2
   validate_finding.md.j2
   suggest_peers.md.j2
@@ -65,7 +66,11 @@ rendered=$(python3 "$renderer" oss_tool_preflight.md.j2)
 assert_match "file read tool" "$rendered" "oss preflight template asks for the read tool"
 assert_match "oss-tool-sentinel.txt" "$rendered" "oss preflight template names the sentinel path"
 
+# audit_recon pulls its opener from the shared goal_framing partial, the
+# same as build_recon_prompt does — render and pass it through here too.
+recon_goal_framing=$(python3 "$renderer" audit_goal_framing.md.j2)
 rendered=$(python3 "$renderer" audit_recon.md.j2 \
+  --var "goal_framing=$recon_goal_framing" \
   --var "target_slug=demo" \
   --var "scope_block=## Scope"$'\n'"- src/a.c" \
   --var "slice_name=slice-1" \
@@ -110,6 +115,27 @@ assert_eq "" "$remaining" "no inline prompt bodies remain outside lib/prompts"
 # the template and these assertions in the same commit and explain why
 # in the message.
 md_direct="$SCRIPT_ROOT/lib/prompts/benchmark_model_direct.md.j2"
+# Shared purpose/authorization opener: single source of truth in
+# audit_goal_framing.md.j2, rendered into BOTH model-direct (ctx) and
+# bin/audit-recon (build_recon_prompt). Pinning the wiring here stops the
+# benchmark baseline and the recon prompt from drifting apart on framing —
+# drift would make the benchmark measure framing, not harness machinery.
+goal_framing_rendered=$(python3 "$renderer" audit_goal_framing.md.j2)
+assert_match "authorized, owner-run local" "$goal_framing_rendered" \
+  "shared goal-framing partial renders the authorized owner-run QA framing"
+assert_match "Find all security issues" "$goal_framing_rendered" \
+  "shared goal-framing partial renders the find-all-issues goal directive"
+assert_file_contains "$md_direct" "{{ goal_framing }}" \
+  "model-direct template wires the shared goal_framing placeholder"
+recon_tmpl="$SCRIPT_ROOT/lib/prompts/audit_recon.md.j2"
+assert_file_contains "$recon_tmpl" "{{ goal_framing }}" \
+  "recon template wires the shared goal_framing placeholder"
+# The aligned framing replaced model-direct's bare CTF opener; guard it.
+if grep -qF -- "CTF-style" "$md_direct"; then
+  fail "model-direct reintroduced the bare 'CTF-style' opener (framing drift vs recon)"
+else
+  pass "model-direct uses the shared authorized-QA opener, not bare CTF"
+fi
 assert_file_contains "$md_direct" "Primary objective" \
   "model-direct template carries the CRASH-first primary-objective block"
 assert_file_contains "$md_direct" "Mode switch after ~5 FINDs" \
@@ -302,6 +328,15 @@ TOML
     "rendered asan invocation hint uses the absolute output-dir crashes path"
   assert_match "$hint_target/build-asan/src/fake_cli" "$hint_rendered" \
     "asan_bin resolves to TARGET_ROOT/build-asan/... without doubling the prefix"
+  # End-to-end: the python helper must inject the shared goal_framing so the
+  # baseline opens with the same authorized-QA framing recon uses.
+  assert_match "authorized, owner-run local" "$hint_rendered" \
+    "benchmark_model_direct_render.py injects the shared goal_framing opener"
+  if printf '%s' "$hint_rendered" | grep -qF -- "CTF-style"; then
+    fail "rendered model-direct prompt still carries the bare 'CTF-style' opener"
+  else
+    pass "rendered model-direct prompt opens with the shared authorized-QA framing"
+  fi
 
   # AUDIT_BUILD_SUFFIX (set per container image) must rewrite build-asan/
   # → build-asan<suffix>/ in the rendered paths, matching resolve_path.

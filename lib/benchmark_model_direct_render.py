@@ -378,6 +378,12 @@ def render(target_path: str, output_dir: str, script_root: str) -> str:
     present = bin_path is not None or lib_path is not None
 
     ctx = {
+        # Shared purpose/authorization opener — single source of truth in
+        # lib/prompts/audit_goal_framing.md.j2, also rendered by
+        # bin/audit-recon. Keeps the model-direct baseline and the recon
+        # prompt framed identically so the benchmark measures harness
+        # machinery, not a framing difference.
+        "goal_framing": render_template("audit_goal_framing.md.j2", {}),
         "target_path": target_path,
         "output_dir": output_dir,
         "crash_objective": _build_crash_objective(
