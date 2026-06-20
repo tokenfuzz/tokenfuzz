@@ -195,7 +195,7 @@ SANITIZERS_VALID = ("asan", "ubsan", "msan", "tsan", "race")
 # .session-env keys we trust to import into the parent shell environment.
 SESSION_ENV_ALLOW = (
     "RESULTS_DIR", "TARGET_ROOT", "TARGET_SLUG",
-    "TARGET_REV", "SESSION_STARTED", "LOGDIR",
+    "TARGET_REV", "TARGET_REPO_TYPE", "SESSION_STARTED", "LOGDIR",
 )
 
 # Section/key names emitted as shell variables must restrict to [A-Za-z0-9_]
@@ -603,12 +603,21 @@ def write_session_env(
     d.mkdir(parents=True, exist_ok=True)
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     rev_v = rev or "unknown"
+    # Persist the VCS type so downstream tools (e.g. bin/reachability) get the
+    # authoritative decision from resumable state without re-resolving the
+    # target root from output-path heuristics. Detected from the same
+    # target_root the audit binds, so it cannot disagree with bin/audit.
+    try:
+        repo_type = detect_repo_type(target_root)
+    except Exception:
+        repo_type = "none"
     lines = [
         "# Written by bin/audit at session start. Sourced by bin/probe and friends.",
         f"RESULTS_DIR={results}",
         f"TARGET_ROOT={target_root}",
         f"TARGET_SLUG={slug}",
         f"TARGET_REV={rev_v}",
+        f"TARGET_REPO_TYPE={repo_type}",
         f"LOGDIR={logdir}",
         f"SESSION_STARTED={started}",
     ]

@@ -70,6 +70,7 @@ sys.path.insert(0, str(HERE.parent / "lib"))
 import cvss4  # noqa: E402
 import languages  # noqa: E402
 import stack_frames  # noqa: E402
+import target_config as tc  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
 
 USER_AGENT = "tokenfuzz-reachability/1.0"
@@ -784,32 +785,21 @@ def _find_target_toml(start: Path) -> Path | None:
     return None
 
 
-def _parse_target_toml_ignore(path: Path) -> list[str]:
-    """Tiny TOML reader for the one key we care about. Mirrors lib/target_config.sh."""
+def _parse_target_toml(path: Path) -> dict:
     if not path.is_file():
-        return []
+        return {}
     try:
-        text = path.read_text("utf-8", errors="replace")
-    except OSError:
+        parsed = tc.parse_toml(path)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_target_toml_ignore(path: Path) -> list[str]:
+    raw = _parse_target_toml(path).get("reachability_ignore", [])
+    if not isinstance(raw, list):
         return []
-    ignore: list[str] = []
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line.startswith("reachability_ignore"):
-            continue
-        if "=" not in line:
-            continue
-        val = line.split("=", 1)[1].strip()
-        if not (val.startswith("[") and val.endswith("]")):
-            continue
-        body = val[1:-1]
-        # Naive comma split — values are quoted strings.
-        for item in body.split(","):
-            item = item.strip().strip('"').strip("'")
-            if item:
-                ignore.append(item)
-        break
-    return ignore
+    return [str(item) for item in raw if str(item)]
 
 
 # ─── Severity scoring ─────────────────────────────────────────────────────
@@ -2624,7 +2614,16 @@ def _format_reachability_section(reach: dict) -> str:
     elif reach.get("status") == "local_symbols_only":
         notes.append("_Status: local ASan frame symbols only; external search skipped for dev/test surface._")
     elif reach.get("status") == "external_skipped":
-        notes.append("_Status: external caller search skipped; severity uses local report fields only._")
+        reason = ""
+        for block in (reach.get("services") or {}).values():
+            errors = block.get("errors") or []
+            if errors and errors[0].get("error"):
+                reason = errors[0]["error"]
+                break
+        if reason:
+            notes.append(f"_Status: external caller search skipped ({reason}); severity uses local report fields only._")
+        else:
+            notes.append("_Status: external caller search skipped; severity uses local report fields only._")
     if reach.get("symbols"):
         notes.append(f"_Symbols: {', '.join(reach['symbols'])}_")
     if reach.get("language"):
@@ -3186,6 +3185,75 @@ def _resolve_ignore(args: argparse.Namespace, report_dir: Path | None) -> list[s
     return ignore
 
 
+def _session_env_value(report_dir: Path | None, key: str) -> str:
+    """Read an allowlisted KEY from the nearest .session-env at or above the
+    report dir, parsed by the shared target_config.read_session_env.
+
+    bin/audit writes one .session-env per results tree, so the nearest one on
+    the direct path up names the exact target even when the output slug differs
+    from the target slug (e.g. output/<slug>-<experiment>/). We walk direct
+    ancestors only — deliberately NOT tc.find_session_dir, whose sideways
+    output/* scan can bind a crash under one results tree to an unrelated
+    sibling target's session."""
+    if report_dir is None:
+        return ""
+    for anc in [report_dir.resolve(), *report_dir.resolve().parents]:
+        if not (anc / ".session-env").is_file():
+            continue
+        try:
+            return tc.read_session_env(anc).get(key, "").strip()
+        except Exception:
+            return ""
+    return ""
+
+
+def _authoritative_target_root(args: argparse.Namespace,
+                               report_dir: Path | None) -> Path | None:
+    """The target source checkout, from sources that name it unambiguously:
+    an explicit --target slug, the audit-exported TARGET_ROOT, or the
+    TARGET_ROOT recorded in the report tree's .session-env. Unlike the
+    slug/path heuristic these never bind the wrong project when the output
+    slug differs from the target slug."""
+    if args.target:
+        candidate = Path.cwd() / "targets" / args.target
+        if candidate.is_dir():
+            return candidate
+    env_root = os.environ.get("TARGET_ROOT", "").strip()
+    if env_root and Path(env_root).is_dir():
+        return Path(env_root)
+    sess_root = _session_env_value(report_dir, "TARGET_ROOT")
+    if sess_root and Path(sess_root).is_dir():
+        return Path(sess_root)
+    return None
+
+
+def _resolve_repo_type(args: argparse.Namespace, report_dir: Path | None) -> str:
+    """Resolve the target's VCS type (git/hg/none) the way the rest of the
+    harness does: the authoritative ``TARGET_REPO_TYPE`` the audit exports or
+    records in .session-env, else live detection on the authoritative
+    TARGET_ROOT (env / .session-env). repo_type is NOT a target.toml field —
+    bin/setup-target never seeds it (see lib/workqueue.py and bin/audit, which
+    use the same env-or-detect order).
+
+    Deliberately does NOT fall back to the slug/path heuristic: when the
+    output slug differs from the target slug, that heuristic can bind the
+    wrong project (and its repo type), which would mis-skip or mis-run
+    external search. An unresolved target stays no-signal ('') instead."""
+    env = os.environ.get("TARGET_REPO_TYPE", "").strip().lower()
+    if env:
+        return env
+    sess = _session_env_value(report_dir, "TARGET_REPO_TYPE").strip().lower()
+    if sess:
+        return sess
+    root = _authoritative_target_root(args, report_dir)
+    if root is None:
+        return ""
+    try:
+        return tc.detect_repo_type(root).strip().lower()
+    except Exception:
+        return ""
+
+
 # Registry language name → code-search language token. Both Sourcegraph's
 # `lang:` filter and `gh search code --language` accept linguist-style names
 # (case-insensitively), so one token serves both backends. Only `cpp` needs
@@ -3265,22 +3333,9 @@ def _detect_target_language(target_root: Path | None,
 
 
 def _parse_target_toml_build_system(path: Path) -> str:
-    """Read the `build_system = "<slug>"` value from target.toml. Mirrors
-    _parse_target_toml_ignore — a tiny reader for the one key we need."""
-    if not path.is_file():
-        return ""
-    try:
-        text = path.read_text("utf-8", errors="replace")
-    except OSError:
-        return ""
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line.startswith("build_system"):
-            continue
-        if "=" not in line:
-            continue
-        return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return ""
+    """Read the `build_system = "<slug>"` value from target.toml."""
+    raw = _parse_target_toml(path).get("build_system", "")
+    return str(raw).strip()
 
 
 def _declared_search_language(args: argparse.Namespace,
@@ -3300,6 +3355,63 @@ def _declared_search_language(args: argparse.Namespace,
     return _SEARCH_LANGUAGE.get(lang.name, lang.name)
 
 
+def _resolve_target_root(args: argparse.Namespace,
+                         report_dir: Path | None) -> Path | None:
+    """Locate the target's source checkout under targets/<slug>. Prefer the
+    authoritative sources (--target / TARGET_ROOT / .session-env); only fall
+    back to a walk-up heuristic when none is available. Shared by identity
+    resolution and repo-type detection so both bind the same tree.
+
+    Note repo-type detection uses _authoritative_target_root directly and
+    skips the heuristic — a wrong bind there mis-skips/mis-runs external
+    search. The heuristic remains acceptable for identity (language /
+    vendored-name) enrichment, where a wrong bind only degrades filtering."""
+    root = _authoritative_target_root(args, report_dir)
+    if root is not None:
+        return root
+    return _heuristic_target_root(report_dir)
+
+
+def _heuristic_target_root(report_dir: Path | None) -> Path | None:
+    """Last-resort walk-up when no authoritative target root is available:
+    bind targets/<output-slug> when it exists, else the first sorted target
+    with a source layout. Can bind the wrong project when the output slug
+    differs from the target slug, so it is used only for identity enrichment,
+    never for repo-type decisions."""
+    if report_dir is None:
+        return None
+    source_exts = languages.all_source_exts()
+    # Recover the slug deterministically from the canonical
+    # output/<slug>/... layout the report lives under, so the right
+    # target is bound even when several exist under targets/. Falling
+    # back to "first child with source" could bind the wrong project
+    # (and therefore the wrong language/vendored-name set).
+    slug_hint = ""
+    cur = report_dir.resolve()
+    for anc in [cur, *cur.parents]:
+        if anc.parent is not None and anc.parent.name == "output":
+            slug_hint = anc.name
+            break
+    # Walk up to find <repo_root>/targets/<slug>/.
+    for p in [cur, *cur.parents]:
+        tt = p / "targets"
+        if not tt.is_dir():
+            continue
+        # Prefer the slug-matched dir; then deterministic (sorted) order so
+        # the bound target does not depend on filesystem iteration order.
+        # Pick the first with a recognizable source layout (top-level or
+        # src/ source files in any registry language).
+        candidates: list[Path] = []
+        if slug_hint and (tt / slug_hint).is_dir():
+            candidates.append(tt / slug_hint)
+        candidates += sorted(c for c in tt.iterdir() if c.is_dir())
+        for child in candidates:
+            children = list(child.glob("*")) + list((child / "src").glob("*"))
+            if any(c.suffix.lower() in source_exts for c in children):
+                return child
+    return None
+
+
 def _resolve_target_identity(args: argparse.Namespace,
                              report_dir: Path | None) -> tuple[set[str], set[str], str]:
     """Discover the upstream project's source filenames, name aliases, and
@@ -3316,46 +3428,11 @@ def _resolve_target_identity(args: argparse.Namespace,
     nothing resolves — the prefix regex (third_party/, vendor/, …) still
     catches the common case, and an empty name set simply disables the
     segment heuristic. language falls back to "c"."""
-    target_root: Path | None = None
-    target_names: set[str] = set()
     source_exts = languages.all_source_exts()
+    target_root = _resolve_target_root(args, report_dir)
+    target_names: set[str] = set()
     if args.target:
         target_names |= _target_name_variants(args.target)
-        candidate = Path.cwd() / "targets" / args.target
-        if candidate.is_dir():
-            target_root = candidate
-    if target_root is None and report_dir is not None:
-        # Recover the slug deterministically from the canonical
-        # output/<slug>/... layout the report lives under, so the right
-        # target is bound even when several exist under targets/. Falling
-        # back to "first child with source" could bind the wrong project
-        # (and therefore the wrong language/vendored-name set).
-        slug_hint = ""
-        cur = report_dir.resolve()
-        for anc in [cur, *cur.parents]:
-            if anc.parent is not None and anc.parent.name == "output":
-                slug_hint = anc.name
-                break
-        # Walk up to find <repo_root>/targets/<slug>/.
-        for p in [cur, *cur.parents]:
-            tt = p / "targets"
-            if tt.is_dir():
-                # Prefer the slug-matched dir; then deterministic (sorted)
-                # order so the bound target does not depend on filesystem
-                # iteration order. Pick the first with a recognizable source
-                # layout (top-level or src/ source files in any registry
-                # language).
-                candidates: list[Path] = []
-                if slug_hint and (tt / slug_hint).is_dir():
-                    candidates.append(tt / slug_hint)
-                candidates += sorted(c for c in tt.iterdir() if c.is_dir())
-                for child in candidates:
-                    children = list(child.glob("*")) + list((child / "src").glob("*"))
-                    if any(c.suffix.lower() in source_exts for c in children):
-                        target_root = child
-                        break
-                if target_root is not None:
-                    break
     declared = _declared_search_language(args, report_dir)
     if target_root is None:
         return set(), target_names, _detect_target_language(None, declared)
@@ -3515,6 +3592,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     ignore = _resolve_ignore(args, report_dir)
+    repo_type = _resolve_repo_type(args, report_dir)
     # Resolve the target's language BEFORE symbol extraction: the accepted
     # identifier shape depends on it (Go exports are PascalCase; a C-only
     # shape would never probe them).
@@ -3549,7 +3627,16 @@ def main(argv: list[str] | None = None) -> int:
 
     local_symbols_only = symbols_from_asan and _asan_text_has_dev_path(adjacent_asan_text)
 
-    if args.severity_only:
+    if repo_type == "none":
+        reach = _no_symbols_reachability(
+            ignore,
+            symbols=symbols,
+            status="external_skipped",
+            reason="target repo_type=none; external caller search skipped",
+        )
+        if reachability_json_path is not None:
+            reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
+    elif args.severity_only:
         if reachability_json_path is not None and reachability_json_path.is_file():
             try:
                 reach = json.loads(reachability_json_path.read_text("utf-8"))

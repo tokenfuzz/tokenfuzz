@@ -23,6 +23,10 @@ export -f llm_triage_crash_decision crash_dir_security_rejection_reason
 mkdir -p "$TEST_TMPDIR/reach-mock"
 export REACHABILITY_MOCK_DIR="$TEST_TMPDIR/reach-mock"
 export REACHABILITY_CACHE_DIR="$TEST_TMPDIR/reach-cache"
+# External caller search only runs for VCS-backed targets. Under a real audit
+# bin/audit exports TARGET_REPO_TYPE; this integration test models a git target
+# so the external opt-in path is exercised (repo_type=none would skip it).
+export TARGET_REPO_TYPE=git
 
 sha1_short() { printf '%s' "$1" | shasum -a 1 | awk '{print substr($1,1,16)}'; }
 

@@ -20,6 +20,11 @@ sha1_short() {
 mkdir -p "$TEST_TMPDIR/mock" "$TEST_TMPDIR/cache" "$TEST_TMPDIR/crashes/CRASH-EXAMPLE"
 export REACHABILITY_MOCK_DIR="$TEST_TMPDIR/mock"
 export REACHABILITY_CACHE_DIR="$TEST_TMPDIR/cache"
+# External caller search only runs for VCS-backed targets; bin/reachability
+# reads the audit-exported TARGET_REPO_TYPE (else detects it live). These
+# external-search tests model a git target — the 5b repo_type=none cases below
+# override this per-invocation (TARGET_REPO_TYPE=none / `env -u`).
+export TARGET_REPO_TYPE=git
 
 # ───────────────────────────────────────────────────────────────────
 # Seed fixtures: one symbol "demo_decode", two backends.
@@ -184,6 +189,237 @@ assert all(s["status"] == "unavailable" for s in r["services"].values())
 assert r["external_callers"] == 0
 print("all-down OK")
 ' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "did not handle all-backends-down"
+
+# ───────────────────────────────────────────────────────────────────
+# 5b. repo_type=none targets have no stable external repository identity.
+#     Do not enrich them with external caller hits; keep severity on the
+#     local report/sanitizer facts instead of treating the skip as a penalty.
+#
+#     repo_type is NOT a target.toml field — bin/setup-target never seeds it.
+#     The authoritative source is the TARGET_REPO_TYPE the audit exports, with
+#     live detection on the targets/<slug> tree as the standalone fallback. The
+#     target.toml here deliberately carries NO repo_type, so a green test means
+#     the skip fires through the real source, not a fixture-only key.
+# ───────────────────────────────────────────────────────────────────
+NONE_SYM="plain_parse"
+NONE_HASH=$(sha1_short "$NONE_SYM")
+cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${NONE_HASH}.json" <<'EOF'
+{"status": "ok", "hits": [
+  {"repo": "false-positive/downstream", "path": "src/plain_parse.c"}
+]}
+EOF
+cat > "$REACHABILITY_MOCK_DIR/gh-${NONE_HASH}.json" <<'EOF'
+{"status": "ok", "hits": [
+  {"repo": "also-wrong/downstream", "path": "lib/plain_parse.c"}
+]}
+EOF
+
+# Seed a library crash report + sanitizer txt under $1/crashes/CRASH-NONE.
+_seed_none_crash() {
+  local d="$1/crashes/CRASH-NONE"
+  mkdir -p "$d"
+  cat > "$d/report.md" <<'EOF'
+# CRASH-NONE: bounds issue in plain_parse
+
+## Fields
+
+| Field | Value |
+| :---- | :---- |
+| Surface | library-api |
+| Caller contract | obeyed |
+| Caller controls | bytes |
+| Boundary | input bytes |
+| Trigger source | bytes |
+
+## Trigger Surface
+Entry: `plain_parse()`
+Impact: stack-buffer-overflow WRITE of 32 bytes
+EOF
+  cat > "$d/sanitizer.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x7ffee
+WRITE of size 32 at 0x7ffee thread T0
+    #0 0x100 in plain_parse parser.c:15
+    #1 0x110 in main driver.c:9
+SUMMARY: AddressSanitizer: stack-buffer-overflow parser.c:15 in plain_parse
+EOF
+  printf '%s\n' "$d"
+}
+
+# ── 5b.i — authoritative TARGET_REPO_TYPE=none env (the audit path) ──
+_CURRENT_TEST="TARGET_REPO_TYPE=none skips external reachability without severity penalty"
+NONE_OUT="$TEST_TMPDIR/output/plain-none"
+NONE_DIR=$(_seed_none_crash "$NONE_OUT")
+mkdir -p "$NONE_OUT"
+cat > "$NONE_OUT/target.toml" <<'EOF'
+target = "plain-none"
+build_system = "make"
+EOF
+out=$(TARGET_REPO_TYPE=none python3 "$REACH" --report "$NONE_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "repo_type=none report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+r = data["reachability"]
+s = data["severity"]
+assert r["status"] == "external_skipped", r
+assert r["external_callers"] == 0, r
+assert r["external_caller_hits"] == [], r
+assert all(block["status"] == "not_run" for block in r["services"].values()), r["services"]
+assert any("repo_type=none" in err.get("error", "")
+           for block in r["services"].values()
+           for err in block.get("errors", [])), r["services"]
+assert s["surface_label"] == "library", s
+assert s["score"] is not None and s["score"] >= 4.0, s
+print("repo_type none skip OK")
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "repo_type=none did not skip cleanly"
+assert_file_not_contains "$NONE_DIR/report.md" "false-positive/downstream" \
+  "repo_type=none report did not include Sourcegraph hit"
+assert_file_contains "$NONE_DIR/report.md" "repo_type=none; external caller search skipped" \
+  "repo_type=none skip reason recorded"
+
+# Stale external reachability.json must not resurface under --severity-only:
+# the repo_type=none branch runs before the severity-only artifact reuse.
+cat > "$NONE_DIR/reachability.json" <<'EOF'
+{
+  "schema_version": 2,
+  "queried_at": "2026-01-01T00:00:00Z",
+  "symbols": ["plain_parse"],
+  "external_callers": 1,
+  "external_caller_repos": 1,
+  "external_caller_hits": [{"repo": "stale/false-positive", "path": "src/plain_parse.c"}],
+  "vendored_copies": 0,
+  "vendored_copy_hits": [],
+  "services_responding": ["sourcegraph"],
+  "services": {
+    "sourcegraph": {
+      "status": "ok",
+      "hits": [{"repo": "stale/false-positive", "path": "src/plain_parse.c"}],
+      "count": 1,
+      "vendored": [],
+      "vendored_count": 0,
+      "errors": []
+    },
+    "gh": {
+      "status": "unavailable",
+      "hits": [],
+      "count": 0,
+      "vendored": [],
+      "vendored_count": 0,
+      "errors": []
+    }
+  }
+}
+EOF
+out=$(TARGET_REPO_TYPE=none python3 "$REACH" --report "$NONE_DIR" --severity-only --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "repo_type=none severity-only failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+r = data["reachability"]
+assert r["status"] == "external_skipped", r
+assert r["external_callers"] == 0, r
+assert r["external_caller_hits"] == [], r
+assert all(block["status"] == "not_run" for block in r["services"].values()), r["services"]
+print("repo_type none severity-only skip OK")
+' >/dev/null && pass "$_CURRENT_TEST: severity-only ignores stale external hits" || \
+  fail "$_CURRENT_TEST" "severity-only reused stale external reachability"
+
+# ── 5b.ii — live detection fallback: no env, plain (no-VCS) source tree ──
+_CURRENT_TEST="repo_type=none detected from plain source tree when env is unset"
+DET_OUT="$TEST_TMPDIR/output/plain-detect"
+DET_DIR=$(_seed_none_crash "$DET_OUT")
+# A targets/<slug> checkout with source but no .git/.hg → detect_repo_type=none.
+mkdir -p "$TEST_TMPDIR/targets/plain-detect"
+cat > "$TEST_TMPDIR/targets/plain-detect/parser.c" <<'EOF'
+int plain_parse(const char *p) { return p ? 0 : 1; }
+EOF
+out=$(env -u TARGET_REPO_TYPE python3 "$REACH" --report "$DET_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "detect-fallback report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["reachability"]
+assert r["status"] == "external_skipped", r
+assert r["external_callers"] == 0, r
+assert all(block["status"] == "not_run" for block in r["services"].values()), r["services"]
+print("detect-fallback skip OK")
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "plain source tree did not detect repo_type=none"
+
+# ── 5b.iii — negative control: a git target still enriches externally ──
+_CURRENT_TEST="TARGET_REPO_TYPE=git does not skip external reachability"
+GIT_OUT="$TEST_TMPDIR/output/plain-git"
+GIT_DIR=$(_seed_none_crash "$GIT_OUT")
+out=$(TARGET_REPO_TYPE=git python3 "$REACH" --report "$GIT_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "git target report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["reachability"]
+assert r.get("status") != "external_skipped", r
+# query_all actually ran: at least one backend was queried (status ok), not not_run.
+assert any(block.get("status") == "ok" for block in r["services"].values()), r["services"]
+print("git target enriches OK")
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "git target was wrongly skipped"
+
+# ── 5b.iv — production-shaped path: output slug ≠ target slug ──
+# When the report lives under output/<slug>-<experiment>/... the slug/path
+# heuristic would bind the alphabetically-first target (here a git decoy),
+# mis-detecting repo_type and running external search. repo-type resolution
+# must instead use the authoritative TARGET_ROOT recorded in .session-env.
+_CURRENT_TEST="repo_type resolved from .session-env when output slug differs from target slug"
+# Decoy target, alphabetically first, that IS a git repo — the misbind trap.
+mkdir -p "$TEST_TMPDIR/targets/aaa-decoy"
+cat > "$TEST_TMPDIR/targets/aaa-decoy/decoy.c" <<'EOF'
+int decoy(void) { return 0; }
+EOF
+git -C "$TEST_TMPDIR/targets/aaa-decoy" init -q 2>/dev/null
+# The real target: a plain (no-VCS) source tree → repo_type none.
+mkdir -p "$TEST_TMPDIR/targets/realtarget"
+cat > "$TEST_TMPDIR/targets/realtarget/parser.c" <<'EOF'
+int plain_parse(const char *p) { return p ? 0 : 1; }
+EOF
+# Output dir slug intentionally differs from the target slug.
+EXP_RESULTS="$TEST_TMPDIR/output/realtarget-skip-recon/oss/results"
+EXP_DIR=$(_seed_none_crash "$EXP_RESULTS")
+# Production-shaped session-env without a repo_type line → forces detection on
+# the authoritative TARGET_ROOT (the exact codex-reported repro).
+cat > "$EXP_RESULTS/.session-env" <<EOF
+# Written by bin/audit at session start.
+RESULTS_DIR=$EXP_RESULTS
+TARGET_ROOT=$TEST_TMPDIR/targets/realtarget
+TARGET_SLUG=realtarget
+TARGET_REV=norev
+EOF
+# Sanity: the heuristic alone WOULD misbind to the git decoy (guards the test).
+heur=$(env -u TARGET_REPO_TYPE -u TARGET_ROOT python3 -c "
+import importlib.machinery, importlib.util, argparse, sys
+from pathlib import Path
+ld=importlib.machinery.SourceFileLoader('reach', sys.argv[1])
+sp=importlib.util.spec_from_loader('reach', ld)
+m=importlib.util.module_from_spec(sp); ld.exec_module(m)
+print((m._heuristic_target_root(Path(sys.argv[2])) or Path('none')).name)
+" "$REACH" "$EXP_DIR" 2>/dev/null)
+assert_eq "aaa-decoy" "$heur" "heuristic alone would misbind to the git decoy"
+out=$(env -u TARGET_REPO_TYPE -u TARGET_ROOT python3 "$REACH" --report "$EXP_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "session-env detect report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["reachability"]
+assert r["status"] == "external_skipped", r
+assert all(block["status"] == "not_run" for block in r["services"].values()), r["services"]
+print("session-env authoritative detect OK")
+' >/dev/null && pass "$_CURRENT_TEST" || \
+  fail "$_CURRENT_TEST" "slug-mismatched path misbound to decoy and ran external search"
+# And when the audit recorded TARGET_REPO_TYPE in .session-env, use it directly.
+_CURRENT_TEST="repo_type read directly from .session-env TARGET_REPO_TYPE"
+printf 'TARGET_REPO_TYPE=none\n' >> "$EXP_RESULTS/.session-env"
+out=$(env -u TARGET_REPO_TYPE -u TARGET_ROOT python3 "$REACH" --report "$EXP_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "session-env repo_type report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["reachability"]
+assert r["status"] == "external_skipped", r
+print("session-env recorded repo_type OK")
+' >/dev/null && pass "$_CURRENT_TEST" || \
+  fail "$_CURRENT_TEST" "recorded .session-env repo_type was not honored"
 
 # ───────────────────────────────────────────────────────────────────
 # 6. Multi-symbol union: hits from two symbols merge into one count

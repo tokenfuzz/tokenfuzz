@@ -27,6 +27,10 @@ REACH="$SCRIPT_ROOT/bin/reachability"
 mkdir -p "$TEST_TMPDIR/mock" "$TEST_TMPDIR/cache"
 export REACHABILITY_MOCK_DIR="$TEST_TMPDIR/mock"
 export REACHABILITY_CACHE_DIR="$TEST_TMPDIR/cache"
+# These severity cases exercise external caller-count rescue, which only runs
+# for VCS-backed targets; bin/audit exports TARGET_REPO_TYPE in production.
+# Model a git target so reachability does not skip (repo_type=none would).
+export TARGET_REPO_TYPE=git
 
 sha1_short() {
   printf '%s' "$1" | shasum -a 1 | awk '{print substr($1,1,16)}'

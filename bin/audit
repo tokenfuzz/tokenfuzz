@@ -2751,6 +2751,7 @@ for browser_slug in $BROWSER_TARGET_SLUGS; do
   [ "$TARGET_SLUG" = "$browser_slug" ] && { IS_BROWSER_TARGET=1; break; }
 done
 TARGET_REPO_TYPE="$(detect_repo_type "$TARGET_ROOT")"
+export TARGET_REPO_TYPE
 AGENT_GUIDE_PATH="$(resolve_guide_path)"
 [ -f "$AGENT_GUIDE_PATH" ] || { log "FATAL: guide file not found: $AGENT_GUIDE_PATH" >&2; exit 1; }
 
