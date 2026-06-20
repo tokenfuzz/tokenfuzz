@@ -45,6 +45,7 @@ from workqueue import (
     show_finding,
     show_work_card,
     strategy_completion_status,
+    strategy_yield,
     summarize_queue,
     update_hypothesis,
     update_card_status,
@@ -400,6 +401,12 @@ def main(argv: list[str]) -> int:
     p_strat.add_argument("--agent", required=True)
     p_strat.add_argument("--strategy", required=True)
 
+    sub.add_parser(
+        "strategy-yield",
+        help="read-only: per-strategy crash/diff yield, with a recon-origin subset, "
+             "joined from runs/hypotheses/cards (no write path; safe to run live)",
+    )
+
     p_counts = sub.add_parser(
         "agent-counts",
         help="single-pass status histogram for one agent (replaces N separate jq counters)",
@@ -692,6 +699,9 @@ def main(argv: list[str]) -> int:
         status = strategy_completion_status(ctx, args.agent, args.strategy)
         print(json.dumps(status, sort_keys=True))
         return 0 if status["complete"] else 1
+    if args.cmd == "strategy-yield":
+        print(json.dumps(strategy_yield(ctx), sort_keys=True))
+        return 0
     if args.cmd == "agent-counts":
         counts = agent_counts(ctx, args.agent)
         # Always emit every key — callers parse without conditionals.

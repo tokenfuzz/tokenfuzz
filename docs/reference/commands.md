@@ -361,6 +361,7 @@ bin/state --results-dir "$RESULTS" explain-queue
 bin/state --results-dir "$RESULTS" show-card     <id>
 bin/state --results-dir "$RESULTS" show-crash    <id>
 bin/state --results-dir "$RESULTS" show-finding  <id>
+bin/state --results-dir "$RESULTS" strategy-yield
 ```
 
 What each one shows:
@@ -372,6 +373,10 @@ What each one shows:
 - `list-cards` / `list-crashes` / `list-findings` — slim JSONL listings.
 - `explain-queue` — why the top-N cards in the queue scored where they did.
 - `show-card` / `show-crash` / `show-finding` — full compact JSON for one item.
+- `strategy-yield` — per-strategy crash/diff yield with a recon-origin
+  subset, joined read-only from runs/hypotheses/cards. Use it to see which
+  strategies actually convert leads (and recon leads specifically) into
+  signal; no write path, so it is safe to run during a live audit.
 
 ## Result review
 

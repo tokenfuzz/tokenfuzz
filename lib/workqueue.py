@@ -3600,6 +3600,66 @@ def strategy_completion_status(ctx: Context, agent: str, strategy: str) -> dict:
     }
 
 
+def strategy_yield(ctx: Context) -> dict:
+    """Read-only attribution of probe outcomes to the strategy that drove them.
+
+    Answers "which strategy actually converts leads — and recon leads
+    specifically — into crashes?" purely by joining state already on disk:
+    runs.jsonl (verdict + hypothesis_id + card_id) against hypotheses.jsonl
+    (strategy) with a card fallback. No write path, no extra probe, so it
+    cannot slow a live audit; run it post-hoc or between iterations.
+
+    Each run is attributed to a strategy via its hypothesis (the agent stamps
+    its working strategy on every hypothesis), falling back to the work
+    card's strategy when the run has no hypothesis. A run is counted as
+    recon-origin when its card carries a `recon` block, so the recon_* tallies
+    isolate exactly the recon fan-out this module emits. `yield` is
+    (CRASH+DIFF)/runs — the signal-producing fraction. Strategies with no
+    runs are omitted; unattributable runs bucket under "(none)".
+    """
+    hyp_strategy = {
+        str(h.get("id", "")): str(h.get("strategy", "") or "")
+        for h in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
+    }
+    cards_by_id = {
+        str(c.get("id", "")): c for c in read_jsonl(work_cards_path(ctx))
+    }
+    buckets: dict[str, dict] = {}
+    for run in read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl"):
+        card = cards_by_id.get(str(run.get("card_id", "")))
+        strategy = hyp_strategy.get(str(run.get("hypothesis_id", "")), "")
+        if not strategy and card:
+            strategy = str(card.get("strategy", "") or "")
+        strategy = strategy or "(none)"
+        is_recon = bool(card and card.get("recon"))
+        verdict = str(run.get("verdict", "") or "").upper()
+        b = buckets.setdefault(
+            strategy,
+            {"strategy": strategy, "runs": 0, "crash": 0, "diff": 0,
+             "clean": 0, "no_exec": 0, "recon_runs": 0, "recon_crash": 0},
+        )
+        b["runs"] += 1
+        if verdict == "CRASH":
+            b["crash"] += 1
+        elif verdict == "DIFF":
+            b["diff"] += 1
+        elif verdict == "NO_EXEC":
+            b["no_exec"] += 1
+        else:
+            b["clean"] += 1
+        if is_recon:
+            b["recon_runs"] += 1
+            if verdict in ("CRASH", "DIFF"):
+                b["recon_crash"] += 1
+    rows = []
+    for b in buckets.values():
+        signal = b["crash"] + b["diff"]
+        b["yield"] = round(signal / b["runs"], 3) if b["runs"] else 0.0
+        rows.append(b)
+    rows.sort(key=lambda r: (-r["yield"], -r["runs"], r["strategy"]))
+    return {"strategies": rows}
+
+
 class CardStatusUpdateError(ValueError):
     """Raised when update_card_status refuses to commit a status change."""
 
