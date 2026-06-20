@@ -3612,10 +3612,12 @@ def strategy_yield(ctx: Context) -> dict:
     Each run is attributed to a strategy via its hypothesis (the agent stamps
     its working strategy on every hypothesis), falling back to the work
     card's strategy when the run has no hypothesis. A run is counted as
-    recon-origin when its card carries a `recon` block, so the recon_* tallies
-    isolate exactly the recon fan-out this module emits. `yield` is
-    (CRASH+DIFF)/runs — the signal-producing fraction. Strategies with no
-    runs are omitted; unattributable runs bucket under "(none)".
+    recon-origin when its card carries a `recon` block, or — when that card
+    has since been dropped by a recon refresh — when its card_id keeps the
+    stable "WORK-recon-" prefix; recon_crash / recon_diff isolate exactly the
+    recon fan-out's signal. `yield` is (CRASH+DIFF)/runs — the signal-
+    producing fraction. Strategies with no runs are omitted; unattributable
+    runs bucket under "(none)".
     """
     hyp_strategy = {
         str(h.get("id", "")): str(h.get("strategy", "") or "")
@@ -3626,31 +3628,46 @@ def strategy_yield(ctx: Context) -> dict:
     }
     buckets: dict[str, dict] = {}
     for run in read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl"):
-        card = cards_by_id.get(str(run.get("card_id", "")))
+        card_id = str(run.get("card_id", ""))
+        card = cards_by_id.get(card_id)
         strategy = hyp_strategy.get(str(run.get("hypothesis_id", "")), "")
         if not strategy and card:
             strategy = str(card.get("strategy", "") or "")
         strategy = strategy or "(none)"
-        is_recon = bool(card and card.get("recon"))
+        # Recon refresh rewrites work-cards.jsonl and drops superseded
+        # recon-hypothesis rows (recon_to_cards.py), so the card backing an
+        # older run may be gone. The run's card_id is on the append-only
+        # runs.jsonl and is never rewritten, and recon card ids are
+        # deterministically prefixed "WORK-recon-" (derive_card_id), so that
+        # prefix is the stable recon-origin signal when the row is missing.
+        is_recon = bool(card and card.get("recon")) or card_id.startswith("WORK-recon-")
         verdict = str(run.get("verdict", "") or "").upper()
         b = buckets.setdefault(
             strategy,
             {"strategy": strategy, "runs": 0, "crash": 0, "diff": 0,
-             "clean": 0, "no_exec": 0, "recon_runs": 0, "recon_crash": 0},
+             "clean": 0, "no_exec": 0, "other": 0,
+             "recon_runs": 0, "recon_crash": 0, "recon_diff": 0},
         )
         b["runs"] += 1
+        # Only CLEAN is a clean execution. Unknown/auxiliary verdicts
+        # (EXEC_FAIL, REGEX, NO_HIT, MISSED, TIMEOUT, ...) bucket under
+        # `other` rather than silently inflating `clean`.
         if verdict == "CRASH":
             b["crash"] += 1
         elif verdict == "DIFF":
             b["diff"] += 1
+        elif verdict == "CLEAN":
+            b["clean"] += 1
         elif verdict == "NO_EXEC":
             b["no_exec"] += 1
         else:
-            b["clean"] += 1
+            b["other"] += 1
         if is_recon:
             b["recon_runs"] += 1
-            if verdict in ("CRASH", "DIFF"):
+            if verdict == "CRASH":
                 b["recon_crash"] += 1
+            elif verdict == "DIFF":
+                b["recon_diff"] += 1
     rows = []
     for b in buckets.values():
         signal = b["crash"] + b["diff"]

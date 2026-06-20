@@ -1278,34 +1278,45 @@ assert_match 'invalid --verdict regex' "$bad_v" "recent-runs: bad regex reported
 
 # ── strategy-yield: read-only crash/diff attribution per strategy ──
 # Dedicated fixture so the assertion does not couple to runs accumulated
-# above. Three runs: an S8 recon crash (attributed via hypothesis), an S8
-# recon diff (attributed via card fallback, empty hypothesis_id), and an S5
-# non-recon clean run.
+# above. Covers: hypothesis attribution, card-fallback strategy (empty
+# hypothesis_id), recon-origin via the stable WORK-recon- prefix when the
+# card row was dropped by a refresh, the split recon_crash/recon_diff
+# tallies, and the `other` bucket for non-CRASH/DIFF/CLEAN/NO_EXEC verdicts.
 yield_dir="$RESULTS_DIR/yield-fixture"
 mk_state_dir "$yield_dir"
+# WORK-recon-bbbb-* is intentionally ABSENT here: it models a recon card
+# that a refresh has superseded, so attribution must fall back to the id.
 cat > "$yield_dir/work-cards.jsonl" <<'JSONL'
-{"id":"RECON-z-asan-S8","strategy":"S8","recon":{"id":"REC-c1","class":"crypto"}}
+{"id":"WORK-recon-aaaa-asan-S8","strategy":"S8","recon":{"id":"REC-c1","class":"crypto"}}
 {"id":"WORK-z","strategy":"S5"}
 JSONL
 cat > "$yield_dir/state/hypotheses.jsonl" <<'JSONL'
-{"id":"HY-1","card_id":"RECON-z-asan-S8","strategy":"S8"}
+{"id":"HY-1","card_id":"WORK-recon-aaaa-asan-S8","strategy":"S8"}
 {"id":"HY-2","card_id":"WORK-z","strategy":"S5"}
+{"id":"HY-3","card_id":"WORK-recon-bbbb-asan-S8","strategy":"S8"}
 JSONL
 cat > "$yield_dir/state/runs.jsonl" <<'JSONL'
-{"id":"RUN-Y1","hypothesis_id":"HY-1","card_id":"RECON-z-asan-S8","verdict":"CRASH"}
-{"id":"RUN-Y2","hypothesis_id":"","card_id":"RECON-z-asan-S8","verdict":"DIFF"}
+{"id":"RUN-Y1","hypothesis_id":"HY-1","card_id":"WORK-recon-aaaa-asan-S8","verdict":"CRASH"}
+{"id":"RUN-Y2","hypothesis_id":"","card_id":"WORK-recon-aaaa-asan-S8","verdict":"DIFF"}
 {"id":"RUN-Y3","hypothesis_id":"HY-2","card_id":"WORK-z","verdict":"CLEAN"}
+{"id":"RUN-Y4","hypothesis_id":"HY-3","card_id":"WORK-recon-bbbb-asan-S8","verdict":"CRASH"}
+{"id":"RUN-Y5","hypothesis_id":"HY-2","card_id":"WORK-z","verdict":"EXEC_FAIL"}
 JSONL
 yield_json=$("$STATE" --results-dir "$yield_dir" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" strategy-yield)
 assert_eq "2" "$(jq -r '.strategies | length' <<<"$yield_json")" "strategy-yield: two strategies seen"
-# S8: both runs signal-producing (crash+diff) and both recon-origin.
-assert_eq "2" "$(jq -r '.strategies[] | select(.strategy=="S8") | .runs' <<<"$yield_json")" "strategy-yield: S8 counts the card-fallback run too"
-assert_eq "1" "$(jq -r '.strategies[] | select(.strategy=="S8") | .crash' <<<"$yield_json")" "strategy-yield: S8 one crash"
+# S8: 3 runs — Y1 (recon via card), Y2 (recon, strategy via card fallback),
+# Y4 (recon via WORK-recon- prefix; its card row is gone).
+assert_eq "3" "$(jq -r '.strategies[] | select(.strategy=="S8") | .runs' <<<"$yield_json")" "strategy-yield: S8 counts card-fallback and refreshed-away runs"
+assert_eq "2" "$(jq -r '.strategies[] | select(.strategy=="S8") | .crash' <<<"$yield_json")" "strategy-yield: S8 two crashes"
 assert_eq "1" "$(jq -r '.strategies[] | select(.strategy=="S8") | .diff' <<<"$yield_json")" "strategy-yield: S8 one diff"
-assert_eq "2" "$(jq -r '.strategies[] | select(.strategy=="S8") | .recon_crash' <<<"$yield_json")" "strategy-yield: S8 recon_crash isolates recon-origin signal"
+assert_eq "3" "$(jq -r '.strategies[] | select(.strategy=="S8") | .recon_runs' <<<"$yield_json")" "strategy-yield: S8 recon_runs includes the refreshed-away card via prefix"
+assert_eq "2" "$(jq -r '.strategies[] | select(.strategy=="S8") | .recon_crash' <<<"$yield_json")" "strategy-yield: S8 recon_crash counts only CRASH"
+assert_eq "1" "$(jq -r '.strategies[] | select(.strategy=="S8") | .recon_diff' <<<"$yield_json")" "strategy-yield: S8 recon_diff counts only DIFF"
 assert_eq "1.0" "$(jq -r '.strategies[] | select(.strategy=="S8") | .yield' <<<"$yield_json")" "strategy-yield: S8 yield = 1.0"
-# S5: lone clean run, zero yield, no recon attribution.
+# S5: one CLEAN run + one EXEC_FAIL (unknown verdict -> other, NOT clean).
 assert_eq "0.0" "$(jq -r '.strategies[] | select(.strategy=="S5") | .yield' <<<"$yield_json")" "strategy-yield: S5 yield = 0"
+assert_eq "1" "$(jq -r '.strategies[] | select(.strategy=="S5") | .clean' <<<"$yield_json")" "strategy-yield: S5 one clean run"
+assert_eq "1" "$(jq -r '.strategies[] | select(.strategy=="S5") | .other' <<<"$yield_json")" "strategy-yield: EXEC_FAIL buckets under other, not clean"
 assert_eq "0" "$(jq -r '.strategies[] | select(.strategy=="S5") | .recon_runs' <<<"$yield_json")" "strategy-yield: S5 has no recon-origin runs"
 # Ranked by yield descending: highest-yield strategy first.
 assert_eq "S8" "$(jq -r '.strategies[0].strategy' <<<"$yield_json")" "strategy-yield: rows sorted by yield, S8 first"
