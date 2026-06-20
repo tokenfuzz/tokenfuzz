@@ -391,4 +391,7 @@ else
     "file not found: ${facade_junk:-<empty>}"
 fi
 
+assert_file_contains "$BENCH" 'audit_args\+=\(--skip-recon\)' \
+  "T16p: --skip-recon is forwarded to bin/audit instead of shadowing bin/audit-recon"
+
 summary

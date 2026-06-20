@@ -380,6 +380,7 @@ INSTANCE_LOCK_ACQUIRED=0
 # learned notes from a prior run poison every later one. --enable-memory opts
 # back in for cumulative learning.
 ENABLE_MEMORY=0
+AUDIT_SKIP_RECON=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -481,6 +482,10 @@ while [ $# -gt 0 ]; do
       ;;
     --allow-concurrent)
       ALLOW_CONCURRENT_AUDIT=1
+      shift
+      ;;
+    --skip-recon)
+      AUDIT_SKIP_RECON=1
       shift
       ;;
     --enable-memory)
@@ -5409,6 +5414,11 @@ maybe_seed_recon_cards() {
   local marker="$RESULTS_DIR/.recon-cache-marker"
   local work_file
   work_file=$(work_cards_path)
+
+  if [ "${AUDIT_SKIP_RECON:-0}" = "1" ]; then
+    log "Recon seed: skipped by --skip-recon" | tee -a "$INDEX"
+    return 0
+  fi
 
   if [ "$MAX_ITERATIONS" -eq 1 ]; then
     log "Recon seed: skipped for smoke test mode (max_iterations=1)" | tee -a "$INDEX"

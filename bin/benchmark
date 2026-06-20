@@ -189,6 +189,7 @@ REPLICATES=3
 BUDGET_WALL=10800
 AGENTS=""
 CONDITIONS="model-direct,harness"
+SKIP_RECON=0
 RUN_ID=""
 
 # Benchmark cells must compare backends on equal footing — cross-run
@@ -239,6 +240,7 @@ while [ $# -gt 0 ]; do
     --agents=*) AGENTS="${1#--agents=}"; shift ;;
     --conditions) CONDITIONS="${2:?--conditions needs a value}"; shift 2 ;;
     --conditions=*) CONDITIONS="${1#--conditions=}"; shift ;;
+    --skip-recon) SKIP_RECON=1; shift ;;
     --ledger) LEDGER="${2:?--ledger needs a value}"; shift 2 ;;
     --ledger=*) LEDGER="${1#--ledger=}"; shift ;;
     --bench-root) BENCH_ROOT="${2:?--bench-root needs a value}"; shift 2 ;;
@@ -277,6 +279,7 @@ case "$TARGET_SLUG" in
                      --bench-root "$BENCH_ROOT")
     [ -n "$MODEL_OVERRIDE" ] && multi_base_args+=(--model "$MODEL_OVERRIDE")
     [ -n "$AGENTS" ] && multi_base_args+=(--agents "$AGENTS")
+    [ "$SKIP_RECON" = "1" ] && multi_base_args+=(--skip-recon)
     [ -n "$LEDGER" ] && multi_base_args+=(--ledger "$LEDGER")
     [ "$DRY_RUN" = "1" ] && multi_base_args+=(--dry-run)
     [ "$DO_REGENERATE" = "1" ] && multi_base_args+=(--regenerate)
@@ -637,6 +640,7 @@ json.dump({
     "harness_agents": ${AGENTS:-None},
     "model_direct_agents": 1,
     "conditions": "$CONDITIONS".split(","),
+    "skip_recon": bool($SKIP_RECON),
     "target_sha": "$target_sha",
     "tokenfuzz_sha": "$tokenfuzz_sha",
     "harness_sha": "$harness_sha",
@@ -655,6 +659,7 @@ else
   fi
   log "conditions: $CONDITIONS"
   log "agents: harness=${AGENTS:-bin/audit-default}, model-direct=1"
+  [ "$SKIP_RECON" = "1" ] && log "harness recon: skipped (--skip-recon)"
   [ "$DRY_RUN" = "1" ] && log "DRY RUN — synthetic cells, no LLM calls"
 fi
 log "bench dir: $BENCH_DIR"
@@ -1103,28 +1108,22 @@ run_harness_cell() {
   # model as its model-direct sibling. bin/audit's resolve_model + preflight
   # (incl. the agy label/guard) validate it — no duplicate logic here. Omit
   # the flag when empty so bin/audit falls back to its own default.
-  local audit_model_args=()
-  [ -n "$model" ] && audit_model_args=(--model "$model")
+  local audit_args=(--target "$TARGET_SLUG" --backend "$BACKEND")
+  [ "$SKIP_RECON" = "1" ] && audit_args+=(--skip-recon)
+  [ -n "$model" ] && audit_args+=(--model "$model")
+  audit_args+=(--experiment "$exp_name")
   if [ "$BUDGET_WALL" = "0" ]; then
     (
       cd "$facade" || exit 1
       "${audit_env[@]}" \
-        "$facade/bin/audit" \
-          --target "$TARGET_SLUG" \
-          --backend "$BACKEND" \
-          ${audit_model_args[@]+"${audit_model_args[@]}"} \
-          --experiment "$exp_name"
+        "$facade/bin/audit" "${audit_args[@]}"
     ) > "$cell_dir/audit.log" 2>&1 || rc=$?
   else
     (
       cd "$facade" || exit 1
       audit_timeout_run "$BUDGET_WALL" \
         "${audit_env[@]}" \
-        "$facade/bin/audit" \
-          --target "$TARGET_SLUG" \
-          --backend "$BACKEND" \
-          ${audit_model_args[@]+"${audit_model_args[@]}"} \
-          --experiment "$exp_name"
+        "$facade/bin/audit" "${audit_args[@]}"
     ) > "$cell_dir/audit.log" 2>&1 || rc=$?
   fi
 

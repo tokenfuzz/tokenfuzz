@@ -23,4 +23,11 @@ _CURRENT_TEST="bin/audit skips recon seeding in smoke mode"
 assert_file_contains "$AUDIT_SRC" "skipped for smoke test mode" "$_CURRENT_TEST: recon skip is logged"
 assert_file_contains "$AUDIT_SRC" "return 0" "$_CURRENT_TEST: recon helper exits cleanly"
 
+_CURRENT_TEST="bin/audit supports hidden skip-recon for benchmark experiments"
+assert_file_contains "$AUDIT_SRC" "AUDIT_SKIP_RECON=0" "$_CURRENT_TEST: flag state is initialized"
+assert_file_contains "$AUDIT_SRC" "skip-recon)" "$_CURRENT_TEST: parser accepts the hidden flag"
+assert_file_contains "$AUDIT_SRC" "skipped by --skip-recon" "$_CURRENT_TEST: recon helper skips only seeding"
+assert_file_not_contains "$AUDIT_SRC" "Skip breadth-first recon seeding" \
+  "$_CURRENT_TEST: hidden flag is not advertised in usage"
+
 summary

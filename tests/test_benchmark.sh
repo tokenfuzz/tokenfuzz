@@ -59,7 +59,7 @@ chmod +x "$fake_git_bin/git"
   set +e
   REAL_GIT="$real_git" FAKE_GIT_LOG="$fake_git_log" \
     PATH="$fake_git_bin:$PATH" bash "$BENCH" --target dummytarget --dry-run --replicates 2 \
-    --agents 2 --conditions model-direct,harness --ledger "$dledger" \
+    --agents 2 --conditions model-direct,harness --skip-recon --ledger "$dledger" \
     --bench-root "$droot" > "$work/t9-dry.out" 2>&1
   echo $? > "$work/t9-dry.rc"
 ) &
@@ -82,7 +82,7 @@ multiroot="$work/multi-target"
 (
   set +e
   bash "$BENCH" --target " dummytarget , othertarget " --dry-run \
-    --replicates 1 --conditions harness --backend codex \
+    --replicates 1 --conditions harness --backend codex --skip-recon \
     --bench-root "$multiroot" --run-id mt > "$work/t9t-multi.out" 2>&1
   echo $? > "$work/t9t-multi.rc"
 ) &
@@ -465,6 +465,8 @@ assert_eq "0" "$rc" "T9a: dry-run exits 0"
 assert_file_exists "$dledger" "T9b: dry-run writes the ledger"
 assert_match "crash median=1" "$dry_out" "T9c: harness scores 1 crash/cell in dry-run"
 assert_match "model-direct .*crash median=0" "$dry_out" "T9d: model-direct scores 0 in dry-run"
+assert_match "harness recon: skipped \\(--skip-recon\\)" "$dry_out" \
+  "T9d2: --skip-recon is accepted and logged"
 # 2 replicates x harness, each synthetic cell has one real crash.
 assert_file_contains "$dledger" 'Scoreboard' "T9e: ledger has the redesigned Scoreboard section"
 assert_not_match "Operation not permitted" "$dry_out" \
@@ -502,6 +504,8 @@ assert_eq "1" "$(jq -r '.model_direct_agents' "$drun_json")" \
   "T9i: model-direct remains a one-agent baseline"
 assert_match '^[0-9a-f]{40}$' "$(jq -r '.tokenfuzz_sha' "$drun_json")" \
   "T9i2: dry-run records the full TokenFuzz repo hash"
+assert_eq "true" "$(jq -r '.skip_recon' "$drun_json")" \
+  "T9i2b: --skip-recon is recorded in run metadata"
 assert_file_contains "$fake_git_log" 'safe[.]directory=' \
   "T9i3: benchmark asks git to trust the mounted TokenFuzz checkout"
 assert_file_contains "$dledger" 'Harness agents.*2' \
@@ -636,6 +640,8 @@ assert_eq "dummytarget" "$(jq -r .target "$multiroot/codex/mt-dummytarget/run.js
   "T9t-g: first run.json records the right target"
 assert_eq "othertarget" "$(jq -r .target "$multiroot/codex/mt-othertarget/run.json")" \
   "T9t-h: second run.json records the right target"
+assert_eq "true" "$(jq -r .skip_recon "$multiroot/codex/mt-dummytarget/run.json")" \
+  "T9t-h2: multi-target forwards --skip-recon to child runs"
 # Both targets fold into one cross-backend page.
 assert_file_exists "$multiroot/benchmark-result.md" \
   "T9t-i: multi-target run rebuilds the shared cross-backend page"
