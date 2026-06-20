@@ -18,6 +18,40 @@ Start your coding environment from the repository root, for example `claude`,
 Read docs/development.md first, then help me with: <task>
 ```
 
+## Engineering principles
+
+These are strong defaults for every change, whichever agent you drive
+(`claude`, `codex`, `gemini`). The concrete, harness-specific rules live under
+*Coding discipline*; this is the mindset that should produce them.
+
+- **Understand before you change.** Read the surrounding code and trace the real
+  control and data flow first. Confirm the bug is real and that the cause is the
+  one you think before writing a line. State your assumptions; if a requirement
+  or symptom is unclear, stop and ask rather than guess.
+- **Simplest change that fully solves it.** Minimum code, nothing speculative —
+  no feature, flag, or abstraction layer the task did not ask for. If 200 lines
+  can be 50, write the 50. Skip abstraction until a second caller needs it.
+- **No duplication.** Before adding logic, find the existing helper and use it;
+  if you write the same shape twice, factor the one. Reuse shared primitives
+  (`lib/workqueue.py`, platform/timeout helpers, prompt renderers) instead of
+  re-implementing them.
+- **Be robust about real failure modes, not imaginary ones.** This harness runs
+  many agents in parallel against flaky backends over long sessions, so handle
+  the failures that actually occur — concurrent writers, partial or corrupt
+  state, timeouts, unhealthy backends — atomically, and fall open rather than
+  crash a run. Do not add guards for states that cannot happen.
+- **Correctness over green.** A passing suite is necessary, not sufficient.
+  Reason through edge cases and concurrency, and prove the fix with a test that
+  fails before and passes after. Change a test only once you know whether the
+  test or the code is wrong.
+- **Touch only what you must.** Match the existing style. Clean up the orphans
+  *your* change created; leave unrelated code — and unrelated working-tree
+  changes — alone.
+- **Make the reasoning legible.** Record the non-obvious *why* — options taken
+  and rejected, and the failure mode a guard defends against — in the commit
+  message and a short comment, so the next agent need not re-derive it. Prefer
+  deleting a wart to documenting it.
+
 ## Testing discipline
 
 1. **Run the full test suite:** `bash tests/run-tests.sh`.
