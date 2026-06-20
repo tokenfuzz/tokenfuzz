@@ -89,10 +89,11 @@ Before filing a similar crash, check:
 
 For findings, scan `<RESULTS_DIR>/findings/FINDING-CLUSTERS.html` and
 look at the `Status` column (`OK`, `NEEDS CONTENT`, or `NEEDS
-ATTENTION`). `NEEDS CONTENT` means no `report.md` yet. A separate
-`.pending-drop` marker (not shown in this column) means the LLM
-substance gate rejected the report once; a second reject moves it to
-`findings-rejected/`.
+ATTENTION`). `NEEDS CONTENT` means no `report.md` yet; `NEEDS ATTENTION`
+is set by a `.needs-attention` marker the harness drops on a report that
+needs a closer human look. A separate `.pending-drop` marker (not shown
+in this column) means the LLM substance gate rejected the report once; a
+second reject moves it to `findings-rejected/`.
 
 ## What a strong crash looks like
 
@@ -373,9 +374,10 @@ cd path/to/CRASH-001-1
 
 `reproduce.sh` is self-contained. It compiles or launches the right
 ASan runner against the input next to it, prints the running
-command, and exits with the ASan exit code. The last line is always
-`[repro] exit=<n>`. For a crashing bundle, a non-zero exit
-accompanied by ASan output in stderr is a successful reproduction.
+command, and exits with the ASan exit code. The final line of a
+completed run is `[repro] exit=<n>` on stderr (a failed build step under
+`set -eu` exits earlier, without it). For a crashing bundle, a non-zero
+exit accompanied by ASan output in stderr is a successful reproduction.
 
 The script needs:
 

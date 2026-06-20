@@ -126,7 +126,10 @@ sanitizer's optional suppression file.
 
 Only ASan is enabled by default. The supported sanitizer slugs
 are `asan`, `ubsan`, `msan`, `tsan`, and `race`; everything except
-`asan` is opt-in per target. For when to enable each one and the
+`asan` is opt-in per target. `race` (Go's runtime race detector) is
+valid only inside `enabled` — it routes through `[runner]` and takes
+none of the per-sanitizer `<name>_bin` / `<name>_lib` /
+`<name>_suppressions` keys below. For when to enable each one and the
 false-positive trade-offs, see
 [Configure a target](../guides/configure-target.md#sanitizer-policy).
 

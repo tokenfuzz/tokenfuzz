@@ -166,6 +166,7 @@ The defaults are tuned for normal use. The knobs that matter:
 | `--scope S` | `auto` | Force `all`, `since`, or `path` instead of the size-based default. |
 | `--path <subdir>` | — | Audit one subtree; implies `--scope path`. |
 | `--recon-lookback N` | 365 days | Widen or narrow the `--scope since` change window. |
+| `--validate <mode>` | `all` | Validator pass over candidates: `off` skips it, `confirmed` is a cost-saving mode that validates only candidates the recon agent already marked confirmed, `all` validates every candidate. |
 
 You can also pick a backend explicitly:
 

@@ -19,7 +19,7 @@ Open the generated HTML pages first:
 $RESULTS/crashes/CRASH-CLUSTERS.html
 $RESULTS/findings/FINDING-CLUSTERS.html
 $RESULTS/crashes-rejected/INDEX.html
-$RESULTS/crashes/CRASH-*/REPORT.html
+$RESULTS/crashes/CRASH-*/REPORT.html   # report.html before export-repro runs
 $RESULTS/findings/FIND-*/report.html
 ```
 

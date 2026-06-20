@@ -74,6 +74,7 @@ Defaults by platform:
 | --- | --- | --- |
 | `BROWSER_ASAN_RUN_BUDGET` | `25` | Maximum ASan invocations per browser agent per iteration. |
 | `SHELL_ASAN_RUN_BUDGET` | `60` | Maximum ASan invocations per shell agent per iteration. |
+| `SANITIZER_RUNS` | `5` | Number of runs `bin/run-sanitizer-multi` uses for `bin/probe --confirm` and export, to measure the reproduction rate. (Legacy alias: `ASAN_RUNS`.) |
 
 These budgets protect long sessions from spending too much ASan
 time on a single agent iteration. UBSan, MSan, and TSan runners
@@ -86,11 +87,12 @@ follow-up rather than the default probe budget.
 | --- | --- | --- |
 | `CLAUDE_MODEL_DEFAULT` | `claude-opus-4-8` | Default model name passed to the `claude` CLI when `--model` is omitted. |
 | `CODEX_MODEL_DEFAULT` | `gpt-5.5` | Default model name passed to the `codex` CLI when `--model` is omitted. |
-| `GEMINI_MODEL_DEFAULT` | `gemini-3.1-pro-preview` | Default model for the `gemini` backend. Only consulted with `USE_GEMINI_CLI=1`; the default Antigravity CLI (`agy`) has no launch-time model flag. |
+| `GEMINI_MODEL_DEFAULT` | `gemini-3.1-pro-preview` | Default model for the `gemini` backend. Used by both the default Antigravity CLI (`agy`, mapped to its `agy models` label) and Google Gemini CLI (`USE_GEMINI_CLI=1`). |
 | `AUDIT_BACKEND` | (none) | Alternative to `--backend`. Same accepted values: `all`, `claude`, `codex`, `gemini`, `oss`. |
 | `USE_GEMINI_CLI` | `0` | Set to `1` to drive the `gemini` backend through Google Gemini CLI (`gemini`) instead of the default Antigravity CLI (`agy`). |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | (none) | Required for the `USE_GEMINI_CLI=1` path when memory is off; the harness fails fast if neither is set. Not needed for the default `agy` path, which uses its own login. |
 | `AUDIT_LOCAL_BASE_URL` | `http://127.0.0.1:8000/v1` | OpenAI-compatible endpoint for `--backend oss`. `/v1` is appended automatically when omitted. Set this to `http://127.0.0.1:11434/v1` for Ollama. |
-| `AUDIT_LOCAL_API_KEY` | (none) | Generic optional API key for the local OpenAI-compatible endpoint. |
+| `AUDIT_LOCAL_API_KEY` | `EMPTY` | API key sent to the local OpenAI-compatible endpoint. Set it only if your server requires a token. |
 | `OPENCODE_BIN` | `opencode` | OpenCode binary used by `--backend oss` when it is not on `PATH` under the default name. |
 
 The hosted model default chain is: `--model` on the command line, then
@@ -100,9 +102,11 @@ the matching `*_MODEL_DEFAULT` environment variable, then
 `--model` wins over hosted/backend-local model
 defaults for backends that accept a launch-time model. For `oss`, pass
 `--model` every time so the harness can match the exact served model id
-from the local provider's `/v1/models` endpoint. For `gemini`, it is
-supported only with `USE_GEMINI_CLI=1`; the default Antigravity CLI
-(`agy`) keeps model selection in its interactive `/model` setting.
+from the local provider's `/v1/models` endpoint. For `gemini` on the
+default Antigravity CLI (`agy`), `--model` takes a config slug or an
+exact `agy models` label, which the harness maps and a preflight
+validates; under `USE_GEMINI_CLI=1` it is forwarded to the Google Gemini
+CLI directly.
 
 ## Where to put overrides
 

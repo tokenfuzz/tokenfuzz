@@ -106,20 +106,26 @@ Notes:
 
 - The optional final argument limits iterations. Omit it, or pass
   `0`, to run continuously.
-- `<backend>` is one of `claude`, `codex`, `gemini`, or `oss`.
+- `<backend>` is one of `all`, `claude`, `codex`, `gemini`, or `oss`.
+  Omitting `--backend` is the same as `all` — it cycles every installed
+  hosted backend.
 - Start with `1` to verify target config, backend CLI, results
-  directory, and state writer before committing to a long run.
+  directory, and state writer before committing to a long run. A `1` run
+  is a smoke test: one worker, recon seeding skipped.
+- `--strategy S1`…`S8` pins one investigation strategy (rotation is
+  suspended) — handy for comparing runs. `--skip-recon` runs the audit
+  loop without the cold-start recon seed on a multi-iteration run.
 - Use `--model` with the `claude` or `codex` backend. The harness
   forwards it to that backend's native model flag. For `oss`,
   `--model` is required and names the local model served through
   OpenCode. The value must match the exact model id returned by the
   local server's `/v1/models` endpoint. The default local endpoint is
   `http://127.0.0.1:8000/v1`; set `AUDIT_LOCAL_BASE_URL` for Ollama or
-  any other OpenAI-compatible server. The
-  `gemini` backend uses Antigravity CLI (`agy`) by default, which has no
-  launch-time model selector; use `agy`'s interactive `/model` command.
-  Set `USE_GEMINI_CLI=1` to use Google Gemini CLI instead; then
-  `--model` is forwarded to `gemini`.
+  any other OpenAI-compatible server. The `gemini` backend uses the
+  Antigravity CLI (`agy`) by default; pass `--model` as a config slug or
+  an exact `agy models` label (the harness maps and preflight-validates
+  it). Set `USE_GEMINI_CLI=1` to use Google Gemini CLI instead; then
+  `--model` is forwarded to `gemini` directly.
 
 ### Cross-run memory is off by default
 
@@ -383,7 +389,7 @@ $RESULTS/crashes-rejected/INDEX.html
 Then follow the linked cluster member to the report:
 
 ```text
-$RESULTS/crashes/CRASH-*/REPORT.html
+$RESULTS/crashes/CRASH-*/REPORT.html   # report.html before export-repro runs
 $RESULTS/findings/FIND-*/report.html
 ```
 
@@ -462,10 +468,11 @@ print what would be removed without touching anything. With no
 explicit target. `cleanup_state` preserves every crash, finding,
 rejected artifact, corpus seed, and cross-session memory file by
 default — it removes the transient queue and scratch state only.
-To adjust what survives, `--keep <name>` (repeatable) protects an
-extra directory or file, `--keep-only <csv>` replaces the default
-preserve list outright, and `--output-root <path>` points both
-helpers at a non-default output root.
+To adjust what `cleanup_state` keeps, `--keep <name>` (repeatable)
+protects an extra directory or file and `--keep-only <csv>` replaces the
+default preserve list outright (these two are `cleanup_state`-only).
+`--output-root <path>` points either helper at a non-default output
+root.
 
 Run the test suite before merging changes to the harness or to
 docs that describe its behaviour. Use image mode for Linux

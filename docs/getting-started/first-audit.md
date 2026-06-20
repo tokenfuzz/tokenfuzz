@@ -43,14 +43,20 @@ export RESULTS="output/$TARGET/$BACKEND/results"
 export LOGS="output/$TARGET/$BACKEND/logs"
 ```
 
-Leaving the placeholders unset will fail with
-`AUDIT_BACKEND must be all, claude, codex, gemini, or oss`.
+Because the command below passes `--backend "$BACKEND"`, leaving
+`$BACKEND` unset sends an empty value and fails with
+`AUDIT_BACKEND must be all, claude, codex, gemini, or oss`. (Omitting
+`--backend` altogether instead cycles every installed hosted backend —
+that is the `all` default.)
 
 ## 1. Run one iteration
 
 This runs the whole audit pipeline in miniature: backend launch,
 work-card ranking, and as much testcase work as the agent can complete
-in one iteration.
+in one iteration. A trailing `1` is a **smoke test** — it launches a
+single worker and deliberately skips recon seeding, so
+`recon-hypotheses.jsonl` will not appear. Recon kicks in on
+multi-iteration and continuous runs.
 
 ```bash
 bin/audit --target "$TARGET" --backend "$BACKEND" 1
@@ -63,7 +69,7 @@ selected backend:
 |---------|---------------------------|
 | `claude` | `claude-opus-4-8` |
 | `codex` | `gpt-5.5` |
-| `gemini` with Antigravity CLI (`agy`) | `--model` is not supported; `agy` keeps model selection in its interactive `/model` setting. |
+| `gemini` with Antigravity CLI (`agy`) | `gemini-3.1-pro-preview`, mapped to its `agy models` label. Override with `--model` as a config slug or an exact `agy models` label. |
 | `gemini` with Google Gemini CLI (`USE_GEMINI_CLI=1`) | `gemini-3.1-pro-preview` |
 | `oss` | No default; `--model <served-model-name>` is required. |
 

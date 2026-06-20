@@ -28,18 +28,21 @@ How to choose:
   because it needs an explicit `--model`.
 - Use an explicit `--backend` when you want reproducible runs or cost
   control.
-- `<backend>` is one of `claude`, `codex`, `gemini`, or `oss`.
+- `<backend>` is one of `all`, `claude`, `codex`, `gemini`, or `oss`.
+  `all` is the no-`--backend` default described above.
 - `--model` overrides the model name for `claude` and `codex`; for
   `oss`, it is required and names the local model served through OpenCode.
   OpenCode is always configured with one local provider ref,
   `local/<model>`. The default local endpoint is vLLM-style
   `http://127.0.0.1:8000/v1`; set `AUDIT_LOCAL_BASE_URL` for Ollama or
   any other OpenAI-compatible server.
-  The `gemini` backend uses Antigravity CLI (`agy`) by default; `agy`
-  has no launch-time model selector, so use its interactive `/model`
-  command. Set `USE_GEMINI_CLI=1` to use Google Gemini CLI (`gemini`)
-  instead; in that mode `--model` is forwarded at launch time. The
-  per-backend defaults live in
+  The `gemini` backend uses the Antigravity CLI (`agy`) by default. Pass
+  `--model` as either the config slug (e.g. `gemini-3.1-pro-preview`) or
+  an exact `agy models` label (e.g. `"Gemini 3.1 Pro (High)"`); the
+  harness maps the slug to a label and a preflight rejects an
+  unrecognized value before launch. Set `USE_GEMINI_CLI=1` to use the
+  Google Gemini CLI (`gemini`) instead, where `--model` is forwarded
+  directly. The per-backend defaults live in
   [Model selection](../reference/environment.md#model-selection).
 - For `--backend oss`, `--model` is required and must match the exact
   model id listed by the selected provider's `/v1/models` endpoint.
@@ -262,7 +265,8 @@ bin/audit --backend oss --model qwen3-8b --target <target-name> 1
 ```
 
 For current larger open models, use the upstream model id as the vLLM
-source and choose a short served name for the harness:
+source and choose a short served name for the harness. The ids below are
+illustrative — substitute a model you actually serve:
 
 ```bash
 # Gemma 4 26B-A4B

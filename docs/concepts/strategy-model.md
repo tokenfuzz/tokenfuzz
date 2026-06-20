@@ -24,13 +24,13 @@ They exist for one reason:
 
 | ID | Recipe | What success looks like |
 | --- | --- | --- |
-| **S1** Prior-fix review | Mine recent fixes and large refactors for incomplete patches, removed checks, and unfixed sibling code paths. | A regression testcase adapted from the changed or neighbouring code. |
+| **S1** Prior-fix and regression variant | Mine recent fixes and large refactors for incomplete patches, removed checks, and unfixed sibling code paths. | A regression testcase adapted from the changed or neighbouring code. |
 | **S2** Invariant negation | Break asserts, preconditions, and algorithm assumptions one at a time. | An input that challenges one precise guard or state assumption. |
 | **S3** Spec vs. implementation | Compare what the spec or doc requires against what the code (especially optimisation fast paths) actually does. | A testcase comparing required behaviour against the implementation shortcut. |
-| **S4** Differential testing | Compare two execution modes — JIT vs. interpreter, Wasm tiers, GC zeal, cross-build variants. | A textual divergence between modes (no sanitizer crash needed). |
+| **S4** Advanced differential testing | Go beyond the automatic JIT-vs-interpreter diff: GC zeal, Wasm tiers, cross-build variants, and other hand-set comparisons. | A textual divergence between modes (no sanitizer crash needed). |
 | **S5** Lifetime and state | Probe re-entrancy, error-path cleanup, ordering, and timing transitions on the same object. | A multi-step sequence that reaches a lifetime or state transition. |
-| **S6** Cross-project mining | Take a recent fix in a peer project that implements the same spec/format/algorithm, look for the unfixed analogue here. | An adapted testcase against the local implementation. |
-| **S7** Input and fuzz engineering | Build parser/decoder boundary inputs and smarter seeds. | A targeted seed, a minimised input, or a corpus variant. |
+| **S6** Cross-project variant mining | Take a recent fix in a peer project that implements the same spec/format/algorithm, look for the unfixed analogue here. | An adapted testcase against the local implementation. |
+| **S7** Adversarial input and fuzz engineering | Build parser/decoder boundary inputs and smarter seeds. | A targeted seed, a minimised input, or a corpus variant. |
 | **S8** Property-based oracles | Check inverse, idempotence, injectivity, numerical-domain, or format properties — silent corruption that no sanitizer catches. | A generated input with a minimised property counter-example. |
 | **REF** Pattern search | Shared grep recipes used alongside any strategy. | Candidate sites and guard shapes. |
 
@@ -51,14 +51,14 @@ or filenames — and picks the strategy that fits:
 
 | What the file looks like | Primary strategy | Why |
 | --- | --- | --- |
-| Input consumers, deserializers, allocation/resize paths, command-injection or XXE surfaces, raw memory calls | **S7** Input and fuzz engineering | Byte- and shape-driven code. Seeds, minimisation, and boundary inputs pay off. |
+| Input consumers, deserializers, allocation/resize paths, command-injection or XXE surfaces, raw memory calls | **S7** Adversarial input and fuzz engineering | Byte- and shape-driven code. Seeds, minimisation, and boundary inputs pay off. |
 | Lifetime / ownership operations, unsafe escape hatches, concurrency primitives | **S5** Lifetime and state | The interesting input is a sequence, teardown path, callback order, or interleaving. |
 | Assert / check / panic / precondition families | **S2** Invariant negation | The code already states the condition to challenge. |
 | Exported APIs, cast-heavy paths, size arithmetic | **S3** Spec vs. implementation | Contract, type, and size-boundary surfaces. |
 | Encode/decode, compress/inflate, marshal/unmarshal, encrypt/decrypt, normalise/canonicalise/sanitise/dedupe pairs, hashers / fingerprinters / id-key generators, and declared numerical-domain functions (non-negative / finite / probability / clamp) | **S8** Property-based oracles | The code carries its own inverse, idempotence, injectivity, or numerical-domain oracle. |
-| Prior-fix patch card | **S1** Prior-fix review | The fix tells you the old wrong assumption and the likely sibling sites. |
-| Peer-project fix card | **S6** Cross-project mining | Another implementation already disclosed the shape worth checking. |
-| Nothing distinctive matches | **S1** Prior-fix review | The diversity floor still samples quiet source files instead of letting regexes define scope. |
+| Prior-fix patch card | **S1** Prior-fix and regression variant | The fix tells you the old wrong assumption and the likely sibling sites. |
+| Peer-project fix card | **S6** Cross-project variant mining | Another implementation already disclosed the shape worth checking. |
+| Nothing distinctive matches | **S1** Prior-fix and regression variant | The diversity floor still samples quiet source files instead of letting regexes define scope. |
 
 Most real files hit more than one row. When that happens, the file
 gets:

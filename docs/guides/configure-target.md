@@ -244,18 +244,20 @@ Recommended posture for each:
   triage.
 - **race** — Go's runtime race detector. Enable for Go targets built
   or run with `-race`. Reports containing `WARNING: DATA RACE` are
-  treated like TSan-class evidence.
+  treated like TSan-class evidence. Unlike the C/C++ sanitizers, `race`
+  is valid only inside `enabled`: it routes through `[runner]` and has no
+  `race_bin` / `race_lib` / `race_suppressions` keys.
 
 See
 [Target config reference](../reference/target-toml.md#sanitizers)
 for the full field list and per-sanitizer binary overrides.
 
-`bin/setup-target <target> --bootstrap` builds every sanitizer in
+`bin/setup-target <target> --bootstrap` builds every C/C++ sanitizer in
 `enabled`, not just ASan: it converges a per-sanitizer recipe
 (`.audit/build-<san>.sh`), compiles `build-<san>/`, and fills the
 detected `<san>_bin` / `<san>_lib` paths. ASan is required; the others
-are best-effort and a failed one only warns. The end-to-end walkthrough
-is in
+are best-effort and a failed one only warns. (`race` builds through the
+Go toolchain, not this step.) The end-to-end walkthrough is in
 [Auditing with UBSan, MSan, or TSan](../getting-started/first-audit.md#auditing-with-ubsan-msan-or-tsan).
 
 Even when another sanitizer is enabled, ASan remains the usual first

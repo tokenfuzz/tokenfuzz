@@ -86,7 +86,10 @@ bin/setup-target <target> --bootstrap
   iterates on a vanilla ASan recipe until it produces a working build,
   then writes the validated script to `targets/<target>/.audit/build.sh`.
   `bin/export-repro` inlines that script verbatim into every
-  `reproduce.sh`, so maintainers get the same build the audit used.
+  `reproduce.sh`, so maintainers get the same build the audit used. If
+  `[sanitizer].enabled` lists more than ASan, each extra sanitizer gets
+  its own `.audit/build-<san>.sh` and `build-<san>/` tree — ASan is
+  required, the others are best-effort and only warn on failure.
 - **Python / Node / PHP / Ruby / Rust / Go / Swift** — runs the
   language's native install step (`setup.py build_ext --inplace`,
   `npm install`, `composer install`, `bundle install`, `cargo build`,

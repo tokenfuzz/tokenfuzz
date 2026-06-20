@@ -168,8 +168,10 @@ Triage decides whether an artifact is useful and in scope.
 - there is a runnable testcase;
 - sanitizer or differential output is saved;
 - the report fields are complete;
-- the result is not a low-value class such as OOM, assertion-only
-  abort, or a plain null dereference without memory-safety impact.
+- the result is not an auto-quarantined low-value class — null
+  dereference (`0x0` SEGV), OOM, assertion-only abort (ABRT with no
+  sanitizer error), `MOZ_CRASH`/panic, timeout-only, or a plain
+  stack overflow.
 
 A trigger source outside the target's declared attacker surface is
 *not* a rejection: the crash stays in `crashes/` with a contract
