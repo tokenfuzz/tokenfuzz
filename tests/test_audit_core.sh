@@ -1378,7 +1378,7 @@ assert_match 'agent_start_epoch=\$\(date \+%s\)' "$run_agent_src" "run_agent: re
 assert_match 'duration_ms=.*agent_start_epoch' "$run_agent_src" "run_agent: duration falls back to measured wall clock"
 
 cat > "$TEST_TMPDIR/session_summary.raw" <<EOF
-{"type":"item.completed","item":{"type":"command_execution","command":"bin/probe scratch-1/testcase.html","aggregated_output":"[probe] mode=asan\n=== Run 1/5 ===\nNO CRASHES\nHIT\n"}}
+{"type":"item.completed","item":{"type":"command_execution","command":"bin/probe scratch-1/testcase.html","aggregated_output":"[probe] mode=asan\n=== Run 1/5 ===\nEXECUTION VERIFIED\n"}}
 {"type":"item.completed","item":{"type":"command_execution","command":"sed -n '1,20p' parser.c","aggregated_output":"small"}}
 EOF
 printf '%s\n' 'last message' > "$TEST_TMPDIR/session_summary.log"
@@ -1431,7 +1431,7 @@ assert row["tools"]["top_commands"]["probe"] == 1
 assert row["probe"]["commands"] == 1
 assert row["probe"]["asan_invocations"] == 1
 assert row["probe"]["verdicts"]["clean"] == 1
-assert row["probe"]["verdicts"]["hit"] == 1
+assert "hit" not in row["probe"]["verdicts"], "HIT is not a real verdict marker; must not be counted"
 assert "summary_json" not in row["files"], "files.summary_json field should be dropped from schema"
 assert row["files"]["summary_md"] == "session_summary.summary.md"
 # Fields folded in from the dropped *.prompt.meta.json sidecar.
@@ -1456,7 +1456,7 @@ assert_file_contains "$TEST_TMPDIR/session_summary.summary.md" 'Raw log retained
 # report probe/asan/verdict counts as false-low.
 cat > "$TEST_TMPDIR/gemini_probe.jsonl" <<'EOF'
 {"type":"tool_use","tool_name":"run_shell_command","tool_id":"g1","parameters":{"command":"bin/probe scratch-1/testcase.html"}}
-{"type":"tool_result","tool_id":"g1","status":"success","output":"[probe] mode=asan\n=== Run 1/5 ===\nERROR: AddressSanitizer: heap-buffer-overflow\nCRASHES FOUND\nHIT\n"}
+{"type":"tool_result","tool_id":"g1","status":"success","output":"[probe] mode=asan\n=== Run 1/5 ===\nERROR: ThreadSanitizer: data race\nCRASHES FOUND\n"}
 EOF
 printf '%s\n' 'last message' > "$TEST_TMPDIR/gemini_probe.log"
 write_session_log_summary \
@@ -1474,7 +1474,7 @@ assert row["probe"]["commands"] == 1, row["probe"]
 assert row["probe"]["outputs"] >= 1, row["probe"]
 assert row["probe"]["asan_invocations"] == 1, row["probe"]
 assert row["probe"]["verdicts"]["crash"] >= 1, row["probe"]
-assert row["probe"]["verdicts"]["hit"] >= 1, row["probe"]
+assert "hit" not in row["probe"]["verdicts"], row["probe"]
 PY
 assert_eq "0" "$?" "summary: gemini stream-json run_shell_command output feeds probe/verdict scan"
 
@@ -1549,6 +1549,98 @@ assert row["probe"]["asan_invocations"] == 0, row["probe"]
 assert row["probe"]["verdicts"] == {}, row["probe"]
 PY
 assert_eq "0" "$?" "summary: unrelated verdict text does not become probe telemetry"
+
+# Raw sanitizer-looking text from an arbitrary helper is not probe telemetry
+# unless it carries a probe/sanitizer artifact marker. This avoids filling
+# probe.verdicts from copied reports or ad-hoc repro scripts.
+cat > "$TEST_TMPDIR/non_probe_asan_text.jsonl" <<'EOF'
+{"type":"item.completed","item":{"type":"command_execution","command":"python3 scratch-1/manual-repro.py","aggregated_output":"ERROR: AddressSanitizer: heap-buffer-overflow\nCRASHES FOUND\n"}}
+EOF
+printf '%s\n' 'last message' > "$TEST_TMPDIR/non_probe_asan_text.log"
+write_session_log_summary \
+  "$TEST_TMPDIR/non_probe_asan_text.jsonl" \
+  "$TEST_TMPDIR/non_probe_asan_text.log" \
+  "$TEST_TMPDIR/non_probe_asan_text.summary.md" \
+  "$TEST_TMPDIR/non_probe_asan_text.index.jsonl" \
+  "analysis" "7" "codex" "gpt-test" "generic" "0" \
+  "0" "0" "0" "0" "0" "0" "0" "0" ""
+python3 - "$TEST_TMPDIR/non_probe_asan_text.index.jsonl" <<'PY'
+import json, sys
+row = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()][-1]
+assert row["probe"]["commands"] == 0, row["probe"]
+assert row["probe"]["outputs"] == 0, row["probe"]
+assert row["probe"]["asan_invocations"] == 0, row["probe"]
+assert row["probe"]["verdicts"] == {}, row["probe"]
+PY
+assert_eq "0" "$?" "summary: raw ASan text from non-probe command is not probe telemetry"
+
+# Legacy bin/probe output without a structured header is still probe telemetry
+# because the command itself supplies the context for fallback markers.
+cat > "$TEST_TMPDIR/legacy_probe_output.jsonl" <<'EOF'
+{"type":"item.completed","item":{"type":"command_execution","command":"bin/probe scratch-8/testcase.html","aggregated_output":"=== Run 1/5 ===\nNO CRASHES\n"}}
+EOF
+printf '%s\n' 'last message' > "$TEST_TMPDIR/legacy_probe_output.log"
+write_session_log_summary \
+  "$TEST_TMPDIR/legacy_probe_output.jsonl" \
+  "$TEST_TMPDIR/legacy_probe_output.log" \
+  "$TEST_TMPDIR/legacy_probe_output.summary.md" \
+  "$TEST_TMPDIR/legacy_probe_output.index.jsonl" \
+  "analysis" "8" "codex" "gpt-test" "generic" "0" \
+  "0" "0" "0" "0" "0" "0" "0" "0" ""
+python3 - "$TEST_TMPDIR/legacy_probe_output.index.jsonl" <<'PY'
+import json, sys
+row = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()][-1]
+assert row["probe"]["commands"] == 1, row["probe"]
+assert row["probe"]["outputs"] == 1, row["probe"]
+assert row["probe"]["asan_invocations"] == 1, row["probe"]
+assert row["probe"]["verdicts"] == {"clean": 1}, row["probe"]
+PY
+assert_eq "0" "$?" "summary: legacy bin/probe output keeps fallback verdict telemetry"
+
+# One differential marker is one diff verdict, not two matches for
+# DIFFERENTIAL and outputs DIFFER on the same line.
+cat > "$TEST_TMPDIR/diff_probe_output.jsonl" <<'EOF'
+{"type":"item.completed","item":{"type":"command_execution","command":"cat output/sample/oss/results/scratch-9/testcase.asan.txt","aggregated_output":"ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=js testcase=scratch-9/testcase.js\n[run-asan] DIFFERENTIAL: outputs DIFFER - potential issue\n"}}
+EOF
+printf '%s\n' 'last message' > "$TEST_TMPDIR/diff_probe_output.log"
+write_session_log_summary \
+  "$TEST_TMPDIR/diff_probe_output.jsonl" \
+  "$TEST_TMPDIR/diff_probe_output.log" \
+  "$TEST_TMPDIR/diff_probe_output.summary.md" \
+  "$TEST_TMPDIR/diff_probe_output.index.jsonl" \
+  "analysis" "9" "codex" "gpt-test" "generic" "0" \
+  "0" "0" "0" "0" "0" "0" "0" "0" ""
+python3 - "$TEST_TMPDIR/diff_probe_output.index.jsonl" <<'PY'
+import json, sys
+row = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()][-1]
+assert row["probe"]["outputs"] == 1, row["probe"]
+assert row["probe"]["asan_invocations"] == 1, row["probe"]
+assert row["probe"]["verdicts"] == {"diff": 1}, row["probe"]
+PY
+assert_eq "0" "$?" "summary: differential fallback counts one verdict per marker"
+
+# Verdict scanning is robust across backends: an explicit verdict= token is
+# honoured case-insensitively, while sanitizer/verdict words embedded in
+# ordinary prose (UNCLEAN, "cache HIT", "we MISSED it") must not be counted.
+cat > "$TEST_TMPDIR/verdict_robustness.jsonl" <<'EOF'
+{"type":"item.completed","item":{"type":"command_execution","command":"bin/probe scratch-9/testcase.c","aggregated_output":"[probe] mode=generic\n[probe] VERDICT=Clean\n"}}
+{"type":"item.completed","item":{"type":"command_execution","command":"sed -n '1,40p' notes.txt","aggregated_output":"the run left the tree UNCLEAN; cache HIT rate was high and we MISSED nothing.\n"}}
+EOF
+printf '%s\n' 'last message' > "$TEST_TMPDIR/verdict_robustness.log"
+write_session_log_summary \
+  "$TEST_TMPDIR/verdict_robustness.jsonl" \
+  "$TEST_TMPDIR/verdict_robustness.log" \
+  "$TEST_TMPDIR/verdict_robustness.summary.md" \
+  "$TEST_TMPDIR/verdict_robustness.index.jsonl" \
+  "analysis" "10" "codex" "gpt-test" "generic" "0" \
+  "0" "0" "0" "0" "0" "0" "0" "0" ""
+python3 - "$TEST_TMPDIR/verdict_robustness.index.jsonl" <<'PY'
+import json, sys
+row = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()][-1]
+# Explicit VERDICT=Clean wins (case-insensitive) and prose words are ignored.
+assert row["probe"]["verdicts"] == {"clean": 1}, row["probe"]
+PY
+assert_eq "0" "$?" "summary: verdict scan is case-insensitive and ignores prose look-alikes"
 
 cat > "$TEST_TMPDIR/codex_immediate_failed_turn.jsonl" <<EOF
 {"type":"thread.started","thread_id":"t1"}

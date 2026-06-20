@@ -128,40 +128,72 @@ def command_pattern(cmd):
     return squashed.split()[0].split("/")[-1][:32]
 
 
+# Canonical probe/sanitizer verdict vocabulary, shared by every backend's
+# log scan. Maps each raw `verdict=<TOKEN>` spelling the harness emits to a
+# stable bucket. bin/probe emits CRASH/CLEAN/DIFF/NO_EXEC; run-asan and
+# lib/quality add EXEC_FAIL and NO_HIT. Aliases (MISSED, DIFFERENTIAL) cover
+# spellings other subsystems consume (e.g. lib/workqueue reads a MISSED key).
+# Unrelated verdict namespaces — triage Promote/Reject/Uncertain, contract
+# flags — are intentionally absent and so resolve to "" (ignored).
+_VERDICT_TOKENS = {
+    "crash": "crash",
+    "clean": "clean",
+    "diff": "diff",
+    "differential": "diff",
+    "no_exec": "no_exec",
+    "exec_fail": "exec_fail",
+    "no_hit": "missed",
+    "missed": "missed",
+}
+_VERDICT_ALTERNATION = "|".join(sorted(_VERDICT_TOKENS, key=len, reverse=True))
+
+# Cheap pre-filter: does this output look like probe/sanitizer telemetry at
+# all? Recognises probe banners, run/rate headers, and any known verdict token
+# (case-insensitive) so saved .asan.txt artifacts count even when the shell
+# command itself was not bin/probe.
 _PROBE_OUTPUT_RE = re.compile(
     r"\[probe\]|bin/probe|ASAN_RUN_HEADER:|SANITIZER_RUN_HEADER:|CRASH_RATE:|EXECUTION_RATE:|"
-    r"\bverdict=(?:CRASH|CLEAN|DIFF|NO_EXEC|EXEC_FAIL|NO_HIT|MISSED)\b",
+    r"\bverdict=(?:" + _VERDICT_ALTERNATION + r")\b",
     re.IGNORECASE,
 )
 _RUN_HEADER_RE = re.compile(r"^(?:ASAN_RUN_HEADER|SANITIZER_RUN_HEADER):.*?\bruns=([0-9]+)\b", re.MULTILINE)
 _RUN_LINE_RE = re.compile(r"^=== Run [0-9]+/[0-9]+ ===", re.MULTILINE)
-_EXPLICIT_VERDICT_RE = re.compile(r"\bverdict=([A-Za-z][A-Za-z0-9_-]*)\b")
+_EXPLICIT_VERDICT_RE = re.compile(r"\bverdict=([A-Za-z][A-Za-z0-9_-]*)\b", re.IGNORECASE)
+_BIN_PROBE_COMMAND_RE = re.compile(r"(?:^|[;&| ])bin/probe\b")
+
+# Fallback verdict accounting for probe/sanitizer output that lacks an explicit
+# `verdict=` summary — e.g. a raw .asan.txt artifact the agent cat'd. Used only
+# when no authoritative verdict token is present. Patterns are anchored on word
+# boundaries to avoid matching inside ordinary prose, and the crash detector is
+# structural (`ERROR: <name>Sanitizer`) so it covers every sanitizer —
+# Address, HWAddress, Memory, Thread, Leak, UndefinedBehavior — not a list that
+# rots as new ones appear.
+_FALLBACK_VERDICT_PATTERNS = (
+    ("crash", re.compile(r"\bERROR: [A-Za-z]+Sanitizer\b|\bCRASH(?:ES)? (?:FOUND|DETECTED)\b")),
+    ("diff", re.compile(r"\bDIFFERENTIAL(?:: outputs DIFFER)?\b|\boutputs DIFFER\b")),
+    ("clean", re.compile(r"\bNO CRASHES\b|\bEXECUTION VERIFIED\b")),
+    ("no_exec", re.compile(r"\bNO_EXEC\b")),
+    ("exec_fail", re.compile(r"\bEXEC_FAIL\b")),
+    # Only the machine token NO_HIT here — a bare "MISSED" is ordinary English
+    # and would match prose. `verdict=MISSED` is still honoured via the token
+    # table above.
+    ("missed", re.compile(r"\bNO_HIT\b")),
+)
 
 
 def _verdict_key(value):
     normalized = (value or "").strip().lower().replace("-", "_")
-    if normalized in ("crash", "crashes_found"):
-        return "crash"
-    if normalized in ("clean", "no_crashes"):
-        return "clean"
-    if normalized in ("diff", "differential"):
-        return "diff"
-    if normalized == "no_exec":
-        return "no_exec"
-    if normalized in ("no_hit", "missed"):
-        return "missed"
-    if normalized == "exec_fail":
-        return "exec_fail"
-    return ""
+    return _VERDICT_TOKENS.get(normalized, "")
 
 
-def scan_probe_output(output):
+def scan_probe_output(output, *, force_probe=False):
     """Return probe metrics visible in one shell/tool output."""
     metrics = dict(probe_outputs=0, asan_invocations=0, verdicts=Counter())
     if not output:
         return metrics
 
-    if _PROBE_OUTPUT_RE.search(output):
+    probe_marker_seen = bool(_PROBE_OUTPUT_RE.search(output))
+    if force_probe or probe_marker_seen:
         metrics["probe_outputs"] = 1
 
     header_runs = [int(match) for match in _RUN_HEADER_RE.findall(output)]
@@ -176,25 +208,11 @@ def scan_probe_output(output):
         metrics["verdicts"].update(explicit_verdicts)
         return metrics
 
-    crash_count = len(
-        re.findall(
-            r"CRASHES FOUND|ERROR: AddressSanitizer|ERROR: MemorySanitizer|ERROR: UndefinedBehaviorSanitizer",
-            output,
-        )
-    )
-    clean_count = len(re.findall(r"NO CRASHES|CLEAN\b", output))
-    missed_count = len(re.findall(r"\bMISSED\b", output))
-    hit_count = len(re.findall(r"\bHIT\b", output))
-    no_exec_count = len(re.findall(r"\bNO_EXEC\b", output))
-    diff_count = len(re.findall(r"DIFFERENTIAL: outputs DIFFER|outputs DIFFER", output))
-    for key, count in (
-        ("crash", crash_count),
-        ("clean", clean_count),
-        ("missed", missed_count),
-        ("hit", hit_count),
-        ("no_exec", no_exec_count),
-        ("diff", diff_count),
-    ):
+    if not (force_probe or probe_marker_seen):
+        return metrics
+
+    for key, pattern in _FALLBACK_VERDICT_PATTERNS:
+        count = len(pattern.findall(output))
         if count:
             metrics["verdicts"][key] += count
     return metrics
@@ -244,12 +262,12 @@ def scan_raw_log(rawfile):
         if not cmd:
             return
         command_patterns[command_pattern(cmd)] += 1
-        if re.search(r"(?:^|[;&| ])bin/probe\b", cmd):
+        if _BIN_PROBE_COMMAND_RE.search(cmd):
             probe_commands += 1
 
-    def record_probe_output(output):
+    def record_probe_output(output, *, force_probe=False):
         nonlocal probe_outputs, asan_invocations
-        metrics = scan_probe_output(output)
+        metrics = scan_probe_output(output, force_probe=force_probe)
         probe_outputs += metrics["probe_outputs"]
         asan_invocations += metrics["asan_invocations"]
         verdicts.update(metrics["verdicts"])
@@ -277,7 +295,7 @@ def scan_raw_log(rawfile):
                     cmd = item.get("command") or ""
                     commands.append(cmd)
                     output = text_value(item.get("aggregated_output") or item.get("output") or item)
-                    outputs.append(output)
+                    outputs.append((output, bool(_BIN_PROBE_COMMAND_RE.search(cmd))))
                     pattern = waste_command_pattern(cmd)
                     record_waste_command(cmd)
                     record_waste_output(output, f"{pattern}: {cmd}")
@@ -285,7 +303,7 @@ def scan_raw_log(rawfile):
                 cmd = event.get("command") or ""
                 commands.append(cmd)
                 output = text_value(event.get("aggregated_output") or event.get("output") or event)
-                outputs.append(output)
+                outputs.append((output, bool(_BIN_PROBE_COMMAND_RE.search(cmd))))
                 pattern = waste_command_pattern(cmd)
                 record_waste_command(cmd)
                 record_waste_output(output, f"{pattern}: {cmd}")
@@ -300,7 +318,7 @@ def scan_raw_log(rawfile):
                     output = opencode_tool["output"]
                     if name in _SHELL_TOOL_NAMES:
                         commands.append(cmd)
-                        outputs.append(output)
+                        outputs.append((output, bool(_BIN_PROBE_COMMAND_RE.search(cmd))))
                         record_waste_command(cmd)
                     if output and name not in _WASTE_OBSERVABILITY_ONLY:
                         label = cmd or name or "tool"
@@ -330,7 +348,7 @@ def scan_raw_log(rawfile):
                 # into outputs; the gemini stream-json path must too, or
                 # probe/verdict summaries read false-low for gemini runs.
                 if name == "run_shell_command":
-                    outputs.append(output)
+                    outputs.append((output, bool(_BIN_PROBE_COMMAND_RE.search(label))))
                 if name not in _WASTE_OBSERVABILITY_ONLY:
                     record_waste_output(
                         output,
@@ -360,13 +378,13 @@ def scan_raw_log(rawfile):
                     tool_id = item.get("tool_use_id")
                     name, label = claude_pending.pop(tool_id, ("tool_result", "tool_result"))
                     output = text_value(item.get("content") or item)
-                    outputs.append(output)
+                    outputs.append((output, bool(_BIN_PROBE_COMMAND_RE.search(label))))
                     record_waste_output(output, f"{waste_command_pattern(label) if name == 'Bash' else name}: {label}")
 
             for cmd in commands:
                 record_probe_command(cmd)
-            for output in outputs:
-                record_probe_output(output)
+            for output, force_probe in outputs:
+                record_probe_output(output, force_probe=force_probe)
 
     top_cmds = ",".join(f"{name}:{count}" for name, count in waste_command_patterns.most_common(5)) or "none"
     native_text = ",".join(f"{name}:{waste_native.get(name, 0)}" for name in _WASTE_NATIVE_NAMES)
