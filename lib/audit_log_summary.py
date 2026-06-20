@@ -128,6 +128,78 @@ def command_pattern(cmd):
     return squashed.split()[0].split("/")[-1][:32]
 
 
+_PROBE_OUTPUT_RE = re.compile(
+    r"\[probe\]|bin/probe|ASAN_RUN_HEADER:|SANITIZER_RUN_HEADER:|CRASH_RATE:|EXECUTION_RATE:|"
+    r"\bverdict=(?:CRASH|CLEAN|DIFF|NO_EXEC|EXEC_FAIL|NO_HIT|MISSED)\b",
+    re.IGNORECASE,
+)
+_RUN_HEADER_RE = re.compile(r"^(?:ASAN_RUN_HEADER|SANITIZER_RUN_HEADER):.*?\bruns=([0-9]+)\b", re.MULTILINE)
+_RUN_LINE_RE = re.compile(r"^=== Run [0-9]+/[0-9]+ ===", re.MULTILINE)
+_EXPLICIT_VERDICT_RE = re.compile(r"\bverdict=([A-Za-z][A-Za-z0-9_-]*)\b")
+
+
+def _verdict_key(value):
+    normalized = (value or "").strip().lower().replace("-", "_")
+    if normalized in ("crash", "crashes_found"):
+        return "crash"
+    if normalized in ("clean", "no_crashes"):
+        return "clean"
+    if normalized in ("diff", "differential"):
+        return "diff"
+    if normalized == "no_exec":
+        return "no_exec"
+    if normalized in ("no_hit", "missed"):
+        return "missed"
+    if normalized == "exec_fail":
+        return "exec_fail"
+    return ""
+
+
+def scan_probe_output(output):
+    """Return probe metrics visible in one shell/tool output."""
+    metrics = dict(probe_outputs=0, asan_invocations=0, verdicts=Counter())
+    if not output:
+        return metrics
+
+    if _PROBE_OUTPUT_RE.search(output):
+        metrics["probe_outputs"] = 1
+
+    header_runs = [int(match) for match in _RUN_HEADER_RE.findall(output)]
+    if header_runs:
+        metrics["asan_invocations"] = sum(header_runs)
+    else:
+        metrics["asan_invocations"] = len(_RUN_LINE_RE.findall(output))
+
+    explicit_verdicts = [_verdict_key(match) for match in _EXPLICIT_VERDICT_RE.findall(output)]
+    explicit_verdicts = [value for value in explicit_verdicts if value]
+    if explicit_verdicts:
+        metrics["verdicts"].update(explicit_verdicts)
+        return metrics
+
+    crash_count = len(
+        re.findall(
+            r"CRASHES FOUND|ERROR: AddressSanitizer|ERROR: MemorySanitizer|ERROR: UndefinedBehaviorSanitizer",
+            output,
+        )
+    )
+    clean_count = len(re.findall(r"NO CRASHES|CLEAN\b", output))
+    missed_count = len(re.findall(r"\bMISSED\b", output))
+    hit_count = len(re.findall(r"\bHIT\b", output))
+    no_exec_count = len(re.findall(r"\bNO_EXEC\b", output))
+    diff_count = len(re.findall(r"DIFFERENTIAL: outputs DIFFER|outputs DIFFER", output))
+    for key, count in (
+        ("crash", crash_count),
+        ("clean", clean_count),
+        ("missed", missed_count),
+        ("hit", hit_count),
+        ("no_exec", no_exec_count),
+        ("diff", diff_count),
+    ):
+        if count:
+            metrics["verdicts"][key] += count
+    return metrics
+
+
 def claude_content_items(event):
     msg = event.get("message") or {}
     content = msg.get("content") if isinstance(msg, dict) else []
@@ -166,6 +238,21 @@ def scan_raw_log(rawfile):
         if size > waste_max_output:
             waste_max_output = size
             waste_largest_label = _sanitize_label(label)
+
+    def record_probe_command(cmd):
+        nonlocal probe_commands
+        if not cmd:
+            return
+        command_patterns[command_pattern(cmd)] += 1
+        if re.search(r"(?:^|[;&| ])bin/probe\b", cmd):
+            probe_commands += 1
+
+    def record_probe_output(output):
+        nonlocal probe_outputs, asan_invocations
+        metrics = scan_probe_output(output)
+        probe_outputs += metrics["probe_outputs"]
+        asan_invocations += metrics["asan_invocations"]
+        verdicts.update(metrics["verdicts"])
 
     with open(rawfile, "r", encoding="utf-8", errors="replace") as handle:
         for raw_line in handle:
@@ -221,20 +308,19 @@ def scan_raw_log(rawfile):
                             output,
                             f"{waste_command_pattern(label) if name in _SHELL_TOOL_NAMES else native_name or name}: {label}",
                         )
-                    continue
-
-                name = event.get("tool_name") or event.get("name") or ""
-                native_name = _native_tool_name(name)
-                if native_name in _WASTE_NATIVE_NAMES:
-                    waste_native[native_name] += 1
-                params = event.get("parameters") or event.get("input") or {}
-                cmd = params.get("command") if isinstance(params, dict) else ""
-                if name in _SHELL_TOOL_NAMES:
-                    commands.append(cmd)
-                    record_waste_command(cmd)
-                tool_id = event.get("tool_id") or event.get("id")
-                if tool_id:
-                    top_level_pending[tool_id] = (name or "unknown", cmd or name or "unknown")
+                else:
+                    name = event.get("tool_name") or event.get("name") or ""
+                    native_name = _native_tool_name(name)
+                    if native_name in _WASTE_NATIVE_NAMES:
+                        waste_native[native_name] += 1
+                    params = event.get("parameters") or event.get("input") or {}
+                    cmd = params.get("command") if isinstance(params, dict) else ""
+                    if name in _SHELL_TOOL_NAMES:
+                        commands.append(cmd)
+                        record_waste_command(cmd)
+                    tool_id = event.get("tool_id") or event.get("id")
+                    if tool_id:
+                        top_level_pending[tool_id] = (name or "unknown", cmd or name or "unknown")
             elif event.get("type") == "tool_result":
                 tool_id = event.get("tool_id") or event.get("tool_use_id") or event.get("id")
                 name, label = top_level_pending.pop(tool_id, ("tool_result", "tool_result"))
@@ -278,28 +364,9 @@ def scan_raw_log(rawfile):
                     record_waste_output(output, f"{waste_command_pattern(label) if name == 'Bash' else name}: {label}")
 
             for cmd in commands:
-                if not cmd:
-                    continue
-                command_patterns[command_pattern(cmd)] += 1
-                if re.search(r"(?:^|[;&| ])bin/probe\b", cmd):
-                    probe_commands += 1
+                record_probe_command(cmd)
             for output in outputs:
-                if not output:
-                    continue
-                if "[probe]" in output or "bin/probe" in output:
-                    probe_outputs += 1
-                asan_invocations += len(re.findall(r"^=== Run [0-9]+/[0-9]+ ===", output, flags=re.MULTILINE))
-                verdicts["crash"] += len(
-                    re.findall(
-                        r"CRASHES FOUND|ERROR: AddressSanitizer|ERROR: MemorySanitizer|ERROR: UndefinedBehaviorSanitizer",
-                        output,
-                    )
-                )
-                verdicts["clean"] += len(re.findall(r"NO CRASHES|CLEAN\b", output))
-                verdicts["missed"] += len(re.findall(r"\bMISSED\b", output))
-                verdicts["hit"] += len(re.findall(r"\bHIT\b", output))
-                verdicts["no_exec"] += len(re.findall(r"\bNO_EXEC\b", output))
-                verdicts["diff"] += len(re.findall(r"DIFFERENTIAL: outputs DIFFER|outputs DIFFER", output))
+                record_probe_output(output)
 
     top_cmds = ",".join(f"{name}:{count}" for name, count in waste_command_patterns.most_common(5)) or "none"
     native_text = ",".join(f"{name}:{waste_native.get(name, 0)}" for name in _WASTE_NATIVE_NAMES)

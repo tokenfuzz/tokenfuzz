@@ -1478,6 +1478,78 @@ assert row["probe"]["verdicts"]["hit"] >= 1, row["probe"]
 PY
 assert_eq "0" "$?" "summary: gemini stream-json run_shell_command output feeds probe/verdict scan"
 
+# OpenCode emits completed shell tool calls as inline tool_use records.
+# They must feed the same probe/verdict scan as codex, claude, and gemini
+# logs; otherwise OSS runs show false-low probe.commands/asan_invocations.
+cat > "$TEST_TMPDIR/opencode_probe.jsonl" <<'EOF'
+{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"o1","state":{"status":"completed","input":{"command":"bin/probe scratch-1/testcase.c"},"output":"[probe] mode=generic\nASAN_RUN_HEADER: sanitizer=asan runs=2 mode=generic testcase=scratch-1/testcase.c\n=== Run 1/2 ===\n=== Run 2/2 ===\n[probe] verdict=CRASH\n"}}}
+EOF
+printf '%s\n' 'last message' > "$TEST_TMPDIR/opencode_probe.log"
+write_session_log_summary \
+  "$TEST_TMPDIR/opencode_probe.jsonl" \
+  "$TEST_TMPDIR/opencode_probe.log" \
+  "$TEST_TMPDIR/opencode_probe.summary.md" \
+  "$TEST_TMPDIR/opencode_probe.index.jsonl" \
+  "analysis" "4" "oss" "opencode-test" "generic" "0" \
+  "0" "0" "0" "0" "0" "0" "0" "0" ""
+python3 - "$TEST_TMPDIR/opencode_probe.index.jsonl" <<'PY'
+import json, sys
+row = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()][-1]
+assert row["backend"] == "oss"
+assert row["probe"]["commands"] == 1, row["probe"]
+assert row["probe"]["outputs"] == 1, row["probe"]
+assert row["probe"]["asan_invocations"] == 2, row["probe"]
+assert row["probe"]["verdicts"]["crash"] == 1, row["probe"]
+assert row["tools"]["observed_command_patterns"]["probe"] == 1, row["tools"]
+PY
+assert_eq "0" "$?" "summary: OpenCode inline tool_use output feeds probe/verdict scan"
+
+# OSS agents also inspect saved sanitizer artifacts with ordinary shell
+# commands. ASAN_RUN_HEADER/verdict markers in that output are probe
+# telemetry even when the command itself is not bin/probe.
+cat > "$TEST_TMPDIR/opencode_saved_asan.jsonl" <<'EOF'
+{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"o2","state":{"status":"completed","input":{"command":"cat output/sample/oss/results/scratch-7/testcase.asan.txt"},"output":"ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic testcase=scratch-7/testcase.c\nNO CRASHES\n2026-06-20T01:02:03Z verdict=CLEAN mode=generic testcase=scratch-7/testcase.c hash=abc runs=1 crashes=0 execs=1\n"}}}
+EOF
+printf '%s\n' 'last message' > "$TEST_TMPDIR/opencode_saved_asan.log"
+write_session_log_summary \
+  "$TEST_TMPDIR/opencode_saved_asan.jsonl" \
+  "$TEST_TMPDIR/opencode_saved_asan.log" \
+  "$TEST_TMPDIR/opencode_saved_asan.summary.md" \
+  "$TEST_TMPDIR/opencode_saved_asan.index.jsonl" \
+  "analysis" "5" "oss" "opencode-test" "generic" "0" \
+  "0" "0" "0" "0" "0" "0" "0" "0" ""
+python3 - "$TEST_TMPDIR/opencode_saved_asan.index.jsonl" <<'PY'
+import json, sys
+row = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()][-1]
+assert row["probe"]["commands"] == 0, row["probe"]
+assert row["probe"]["outputs"] == 1, row["probe"]
+assert row["probe"]["asan_invocations"] == 1, row["probe"]
+assert row["probe"]["verdicts"]["clean"] == 1, row["probe"]
+assert row["tools"]["observed_command_patterns"]["cat"] == 1, row["tools"]
+PY
+assert_eq "0" "$?" "summary: OpenCode saved ASan artifact output feeds probe/verdict scan"
+
+cat > "$TEST_TMPDIR/opencode_non_probe_verdict.jsonl" <<'EOF'
+{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"o3","state":{"status":"completed","input":{"command":"cat findings/FIND-001/report.md"},"output":"triage detail: verdict=contract-flag\n"}}}
+EOF
+printf '%s\n' 'last message' > "$TEST_TMPDIR/opencode_non_probe_verdict.log"
+write_session_log_summary \
+  "$TEST_TMPDIR/opencode_non_probe_verdict.jsonl" \
+  "$TEST_TMPDIR/opencode_non_probe_verdict.log" \
+  "$TEST_TMPDIR/opencode_non_probe_verdict.summary.md" \
+  "$TEST_TMPDIR/opencode_non_probe_verdict.index.jsonl" \
+  "analysis" "6" "oss" "opencode-test" "generic" "0" \
+  "0" "0" "0" "0" "0" "0" "0" "0" ""
+python3 - "$TEST_TMPDIR/opencode_non_probe_verdict.index.jsonl" <<'PY'
+import json, sys
+row = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()][-1]
+assert row["probe"]["commands"] == 0, row["probe"]
+assert row["probe"]["outputs"] == 0, row["probe"]
+assert row["probe"]["asan_invocations"] == 0, row["probe"]
+assert row["probe"]["verdicts"] == {}, row["probe"]
+PY
+assert_eq "0" "$?" "summary: unrelated verdict text does not become probe telemetry"
+
 cat > "$TEST_TMPDIR/codex_immediate_failed_turn.jsonl" <<EOF
 {"type":"thread.started","thread_id":"t1"}
 {"type":"turn.started"}
