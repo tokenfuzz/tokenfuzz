@@ -4,7 +4,7 @@ entries that the bin/audit strategy rotator can pick up.
 
 Each substantive recon finding (CONFIRMED-* or NEEDS-VERIFICATION)
 becomes the cross-product of work-cards over (enabled sanitizers) ×
-(agent-suggested strategies). AUDIT-CLEAN entries are skipped. Work-card
+(the fixed (S5, S7) strategy set). AUDIT-CLEAN entries are skipped. Work-card
 fields follow the schema used by build_patch_cards() in lib/workqueue.py.
 
 Fan-out rationale:
@@ -16,23 +16,14 @@ Fan-out rationale:
     same OOB-read can be triggered via S5 (lifetime/state probing) or
     S7 (adversarial input). We fix the strategy set to (S5, S7) — two
     complementary shapes that cover most real bugs without making the
-    agent emit a new schema field. Class-table single-strategy mapping
-    is intentionally NOT used as a fallback (brittle to mislabels).
+    agent emit a new schema field. We never *replace* the pair from the
+    class label (that would drop an angle on a mislabel); instead we
+    *append* a class-appropriate lens for classes the memory floor does
+    not probe — crypto/dos -> S8, logic -> S2, auth/config -> S3. Additive
+    only, so the label can add a wasted probe but never cost a bug.
 
 Card IDs are RECON-<sha>-<san>-<strategy>; each combination is one
 independent probe attempt.
-
-Class-to-strategy mapping (target-agnostic; chosen so the rotator picks
-the strategy whose investigative shape best matches the finding's
-expected primitive):
-
-  UAF, double-free, OOB-read, OOB-write  -> S5 (Lifetime-and-state)
-  integer-overflow                        -> S2 (Invariant-negation)
-  DoS-amplification                       -> S8 (Property-oracle)
-  info-leak                               -> S7 (Adversarial-input)
-  protocol-state                          -> S3 (Spec-vs-impl)
-  logic                                   -> S2 (Invariant-negation)
-  other / unmatched                       -> S5 (default to lifetime)
 
 Scoring rationale: recon cards must outrank generic S1 patch cards so the
 rotator picks them first. Validator-promoted findings score higher than
@@ -50,29 +41,36 @@ import sys
 import time
 from pathlib import Path
 
-CLASS_TO_STRATEGY = {
-    "UAF": "S5",
-    "double-free": "S5",
-    "OOB-read": "S5",
-    "OOB-write": "S5",
-    "use-after-free": "S5",
-    "integer-overflow": "S2",
-    "DoS-amplification": "S8",
-    "info-leak": "S7",
-    "protocol-state": "S3",
-    "logic": "S2",
-}
-DEFAULT_STRATEGY = "S5"
-
-# Fixed strategy fan-out. Every recon finding gets one card per strategy
+# Guaranteed strategy floor. Every recon finding gets one card per strategy
 # in this list × one per enabled sanitizer. S5 (lifetime-and-state) and
-# S7 (adversarial-input) cover complementary investigative shapes — S5
-# chases reachability via API-sequence manipulation, S7 hammers the input
-# surface. Two independent probe angles per finding regardless of class
-# label accuracy. We deliberately don't ask the recon agent to suggest
-# strategies: an extra schema field for marginal benefit, since (S5, S7)
-# already cover the bulk of real bug shapes.
+# S7 (adversarial-input) are two orthogonal *reachability mechanisms* for
+# the sanitizer-reproducible memory bugs that are the harness's core
+# mission — a bug is triggered either by a single adversarial input (S7) or
+# by a harmful API call/lifetime sequence (S5). Both fire for every finding
+# regardless of class label accuracy, so a mislabel never costs an angle.
 RECON_STRATEGIES = ("S5", "S7")
+
+# Additive per-class lens. The (S5, S7) floor is memory-shaped; the coarse
+# finding taxonomy also carries classes whose natural reachability is
+# property-, invariant-, or spec-shaped, which neither floor strategy
+# probes. For those we *append* (never replace) the better-fit strategy, so
+# the finding keeps its two guaranteed memory angles AND gains the lens its
+# class actually needs. The class label is an unverified recon guess, but
+# because the mapping only ever ADDS a card it can at worst waste one probe
+# — it can never drop an angle, so it is false-negative-safe.
+#
+# Inclusion criterion: a coarse class is listed ONLY when exactly one
+# catalog strategy is a clearly better fit than the memory floor. Classes
+# already covered by input/sequence (memory-safety, boundary, injection,
+# deserialization, info-disclosure, race) and ones with no clean fit
+# (side-channel) are omitted and ride the floor.
+CLASS_EXTRA_STRATEGY = {
+    "crypto": "S8",   # property oracle: round-trip / injectivity / canonicalization
+    "dos": "S8",      # property oracle: output-vs-input bound, termination, numeric domain
+    "logic": "S2",    # invariant negation: violate the guarded assumption
+    "auth": "S3",     # spec-vs-impl: the check diverges from intended policy
+    "config": "S3",   # spec-vs-impl: impl ignores documented config semantics
+}
 
 # Scoring — calibrated so a *validated* recon hypothesis outranks every
 # generic ranked-source card. A Promote verdict means the recon agent
@@ -103,12 +101,6 @@ SCORE_NEEDS_VERIFICATION = 200
 # card is exhausted — but they remain in the pool. Test
 # coverage in test_recon_changes.sh enforces this contract.
 SCORE_VALIDATOR_REJECTED = 10
-
-
-def class_to_strategy(klass: str) -> str:
-    if not klass:
-        return DEFAULT_STRATEGY
-    return CLASS_TO_STRATEGY.get(klass, DEFAULT_STRATEGY)
 
 
 def score_for(finding: dict) -> int:
@@ -510,11 +502,16 @@ def finding_to_cards(
     score = score_for(finding)
     if score <= 0:
         return []
-    # Strategy fan-out: fixed (S5, S7) pair, no class-table single-strategy
-    # mapping. We don't ask the agent to suggest strategies — that's an
-    # extra schema field for marginal benefit. Two complementary
-    # investigative angles per finding cover most real bug shapes.
+    # Strategy fan-out: the guaranteed (S5, S7) memory floor, plus an
+    # additive per-class lens for classes the floor doesn't probe (crypto/
+    # dos -> S8, logic -> S2, auth/config -> S3). The extra is APPENDED, so a
+    # mislabel can at worst add a wasted probe — it never drops one of the
+    # two guaranteed angles. We don't ask the agent to suggest strategies;
+    # the coarse class it already emits is enough to route the extra lens.
     strategies = list(RECON_STRATEGIES)
+    extra = CLASS_EXTRA_STRATEGY.get(klass)
+    if extra and extra not in strategies:
+        strategies.append(extra)
     title = (finding.get("title") or "").strip()
     notes = (finding.get("notes") or "").strip()
     verdict = finding.get("validator_verdict") or ""

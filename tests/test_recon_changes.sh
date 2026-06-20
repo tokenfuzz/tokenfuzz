@@ -851,6 +851,9 @@ cat > "$recon_jsonl" <<JSONL
 {"id":"REC-intover","slice":"slice-2","title":"size mul wrap on alloc","file":"$synth_target/src/lib/record/rec.c","line":1249,"function":"set_bin","class":"integer-overflow","notes":"len*sizeof wraps to 0","confidence":"CONFIRMED-MEDIUM"}
 {"id":"REC-dosamp","slice":"slice-3","title":"hash seed entropy","file":"$synth_target/src/lib/dsa/ht.c","line":64,"function":"seed","class":"DoS-amplification","notes":"|= instead of ^=","confidence":"NEEDS-VERIFICATION"}
 {"id":"REC-leak","slice":"slice-4","title":"cookie cache key collision","file":"$synth_target/src/lib/cache.c","line":125,"function":"key","class":"info-leak","notes":"delimiter-based key","confidence":"CONFIRMED-MEDIUM"}
+{"id":"REC-crypto","slice":"slice-6","title":"tag compare not constant-time","file":"$synth_target/src/lib/crypto/mac.c","line":88,"function":"verify_tag","class":"crypto","notes":"early-return compare on tag","confidence":"NEEDS-VERIFICATION"}
+{"id":"REC-logic","slice":"slice-7","title":"off-by-one in window check","file":"$synth_target/src/lib/win.c","line":40,"function":"check_window","class":"logic","notes":"<= vs <","confidence":"NEEDS-VERIFICATION"}
+{"id":"REC-auth","slice":"slice-8","title":"role check skipped on cached path","file":"$synth_target/src/lib/auth.c","line":210,"function":"resolve_perm","class":"auth","notes":"cache bypass skips authz","confidence":"NEEDS-VERIFICATION"}
 {"id":"REC-empty","slice":"slice-5","confidence":"AUDIT-CLEAN","notes":"all gated"}
 JSONL
 
@@ -868,12 +871,15 @@ python3 lib/recon_to_cards.py \
 # Total card count after P7 consolidation:
 #   - 1 existing patch card (untouched)
 #   - REC-uaf01 (Promote) → 1 consolidated card with allowed_strategies=[S5,S7]
-#   - REC-intover (CONFIRMED-MEDIUM, no Promote) → 2 cards (S5+S7 fan-out)
+#   - REC-intover (CONFIRMED-MEDIUM, no Promote) → 2 cards (S5+S7 floor)
 #   - REC-dosamp (NEEDS-VERIFICATION) → 2 cards
 #   - REC-leak (CONFIRMED-MEDIUM) → 2 cards
-# Total = 1 + 1 + 2 + 2 + 2 = 8 cards. Sanitizer fan-out is asan-only.
+#   - REC-crypto (NEEDS-VERIFICATION, class crypto) → 3 cards (S5,S7 + S8)
+#   - REC-logic (NEEDS-VERIFICATION, class logic) → 3 cards (S5,S7 + S2)
+#   - REC-auth (NEEDS-VERIFICATION, class auth) → 3 cards (S5,S7 + S3)
+# Total = 1 + 1 + 2 + 2 + 2 + 3 + 3 + 3 = 17 cards. Sanitizer fan-out is asan-only.
 card_total=$(wc -l < "$work_cards" | tr -d ' ')
-assert_eq "$card_total" "8" "recon_to_cards: P7 collapses Promote (1) + non-Promote fan-out (6) + existing (1) = 8"
+assert_eq "$card_total" "17" "recon_to_cards: Promote (1) + memory-floor fan-out (6) + additive-class fan-out (9) + existing (1) = 17"
 
 # AUDIT-CLEAN dropped
 if grep -q '"REC-empty"' "$work_cards"; then
@@ -924,6 +930,11 @@ assert_eq "$(allowed_for_rec REC-uaf01)" "S5,S7" "P7: Promote card carries allow
 assert_eq "$(strategies_for_rec REC-intover)" "S5,S7" "integer-overflow defaults to S5+S7 fan-out"
 assert_eq "$(strategies_for_rec REC-dosamp)" "S5,S7" "DoS-amplification defaults to S5+S7 fan-out"
 assert_eq "$(strategies_for_rec REC-leak)" "S5,S7" "info-leak defaults to S5+S7 fan-out"
+# Additive per-class lens: the (S5, S7) memory floor is always present; a
+# class with a better-fit strategy APPENDS it (never replaces an angle).
+assert_eq "$(strategies_for_rec REC-crypto)" "S5,S7,S8" "crypto appends S8 (property oracle) to the S5+S7 floor"
+assert_eq "$(strategies_for_rec REC-logic)" "S2,S5,S7" "logic appends S2 (invariant negation) to the S5+S7 floor"
+assert_eq "$(strategies_for_rec REC-auth)" "S3,S5,S7" "auth appends S3 (spec-vs-impl) to the S5+S7 floor"
 # Non-Promote cards must NOT have allowed_strategies set (legacy field
 # default; absent = no multi-strategy override).
 assert_eq "$(allowed_for_rec REC-intover)" "" "P7: non-Promote cards leave allowed_strategies unset"
