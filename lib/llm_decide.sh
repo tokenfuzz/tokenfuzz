@@ -57,6 +57,9 @@ llm_decide() {
     export LLM_DECIDE_LOG="${LLM_DECIDE_LOG:-}"
     export LLM_DECIDE_COUNTER_FILE="${LLM_DECIDE_COUNTER_FILE:-}"
     export LLM_DECIDE_MAX_CALLS="${LLM_DECIDE_MAX_CALLS:-}"
+    export LLM_DECIDE_FAILCACHE_FILE="${LLM_DECIDE_FAILCACHE_FILE:-}"
+    export LLM_DECIDE_FAIL_THRESHOLD="${LLM_DECIDE_FAIL_THRESHOLD:-}"
+    export LLM_DECIDE_FAIL_COOLDOWN="${LLM_DECIDE_FAIL_COOLDOWN:-}"
     export LOGDIR="${LOGDIR:-}"
     # Per-decision mocks (LLM_DECIDE_MOCK_<UPPER>) have dynamic names —
     # enumerate them via compgen and forward each.

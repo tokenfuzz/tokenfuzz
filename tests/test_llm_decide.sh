@@ -506,5 +506,215 @@ out=$(echo "x" | llm_decide find_quality "accept,reason,class,severity" 2 2>/dev
 assert_eq "1" "${rc:-0}" "find_quality: null on REQUIRED class still rejected"
 unset LLM_DECIDE_MOCK_FIND_QUALITY rc
 
+# 17. Failed-decision circuit breaker. A decision whose exact (decision,
+#     prompt) keeps failing must not re-invoke the backend forever — that is
+#     the OSS cluster_expand 180s-timeout-every-pass waste. After the failure
+#     threshold the breaker opens and identical requests are skipped without a
+#     backend call; a different prompt is unaffected; a success clears the key.
+unset rc LLM_DECIDE_MOCK LLM_DECIDE_DISABLE
+fake_fail="$TEST_TMPDIR/fake-codex-cb-fail"
+cat > "$fake_fail" <<'EOF'
+#!/usr/bin/env bash
+echo call >> "$FAKE_CB_CALLS"
+cat >/dev/null
+exit 1
+EOF
+chmod +x "$fake_fail"
+fake_ok="$TEST_TMPDIR/fake-codex-cb-ok"
+cat > "$fake_ok" <<'EOF'
+#!/usr/bin/env bash
+echo call >> "$FAKE_CB_CALLS"
+cat >/dev/null
+printf '{"keep":true,"reason":"cb-ok"}\n'
+EOF
+chmod +x "$fake_ok"
+export ACTIVE_BACKEND=codex
+export CODEX_BIN="$fake_fail"
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-cb.calls"
+: > "$FAKE_CB_CALLS"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-cb"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-cb"
+export LLM_DECIDE_FAIL_THRESHOLD=1
+
+# First failing call reaches the backend and records the failure.
+out=$(echo "same-prompt" | llm_decide demo "keep" 5 2>/dev/null) || rc=$?
+assert_eq "1" "${rc:-0}" "circuit breaker: first failing call returns rc=1"
+assert_eq "1" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "circuit breaker: first call invoked the backend"
+
+# Identical repeat is skipped — the backend is NOT invoked again.
+unset rc
+out=$(echo "same-prompt" | llm_decide demo "keep" 5 2>/dev/null) || rc=$?
+assert_eq "1" "${rc:-0}" "circuit breaker: repeat identical call still rc=1"
+assert_eq "1" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "circuit breaker: repeat identical call skipped the backend"
+
+# A different prompt has its own key and still reaches the backend.
+unset rc
+out=$(echo "other-prompt" | llm_decide demo "keep" 5 2>/dev/null) || rc=$?
+assert_eq "2" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "circuit breaker: a different prompt still reaches the backend"
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD
+
+# 17b. A success clears the recorded failure so the threshold counts
+#      consecutive failures (a high threshold keeps the breaker from opening
+#      during the test so the success call is dispatched, not skipped).
+unset rc
+export ACTIVE_BACKEND=codex
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-cb2.calls"
+: > "$FAKE_CB_CALLS"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-cb2"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-cb2"
+export LLM_DECIDE_FAIL_THRESHOLD=5
+rm -f "$LLM_DECIDE_FAILCACHE_FILE"
+export CODEX_BIN="$fake_fail"
+out=$(echo "clearme" | llm_decide demo "keep" 5 2>/dev/null) || true
+grep -q '"demo:' "$LLM_DECIDE_FAILCACHE_FILE" 2>/dev/null \
+  && pass "circuit breaker: failure recorded in failcache" \
+  || fail "circuit breaker: failure recorded in failcache"
+export CODEX_BIN="$fake_ok"
+out=$(echo "clearme" | llm_decide demo "keep" 5)
+assert_eq "0" "$?" "circuit breaker: success call dispatched below threshold"
+if grep -q '"demo:' "$LLM_DECIDE_FAILCACHE_FILE" 2>/dev/null; then
+  fail "circuit breaker: success did not clear the failcache key"
+else
+  pass "circuit breaker: success cleared the failcache key"
+fi
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD
+
+# 17c. A corrupted failcache value must never raise into the decision path.
+#      The failcache is best-effort telemetry; a non-numeric value under the
+#      real key is treated as count 0, so a real-backend decision still runs.
+#      Without the guard, int("garbage") would raise out of the skip check
+#      and crash the decision (rc!=0). The key is demo:<sha1(prompt)[:16]>.
+unset rc LLM_DECIDE_MOCK
+export ACTIVE_BACKEND=codex
+export CODEX_BIN="$fake_ok"
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-cb3.calls"
+: > "$FAKE_CB_CALLS"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-cb3"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-corrupt"
+export LLM_DECIDE_FAIL_THRESHOLD=1
+corrupt_key="demo:$(printf 'x' | shasum -a 1 | cut -c1-16)"
+printf '{"%s":"garbage","other":[1,2]}' "$corrupt_key" > "$LLM_DECIDE_FAILCACHE_FILE"
+out=$(echo "x" | llm_decide demo "keep,reason" 5 2>/dev/null) || rc=$?
+assert_eq "0" "${rc:-0}" "circuit breaker: corrupted failcache value does not crash the decision"
+assert_match '"reason":"cb-ok"|\"reason\": \"cb-ok\"' "$out" \
+  "circuit breaker: decision still returns its result despite corrupt failcache"
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD
+
+# 17d. Half-open cooldown: a tripped key is skipped only until the cooldown
+#      elapses, then one retry reaches the backend — so a transiently
+#      unhealthy backend self-heals instead of being skipped all session.
+#      Timestamps are seeded directly to avoid a real sleep.
+unset rc LLM_DECIDE_MOCK
+key="demo:$(printf 'x' | shasum -a 1 | cut -c1-16)"
+export ACTIVE_BACKEND=codex
+export CODEX_BIN="$fake_ok"
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-cb4.calls"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-cb4"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-cd"
+export LLM_DECIDE_FAIL_THRESHOLD=2
+export LLM_DECIDE_FAIL_COOLDOWN=600
+
+# Recent failure (ts=now): within the 600s cooldown → still skipped.
+: > "$FAKE_CB_CALLS"
+now=$(date +%s)
+printf '{"%s":[3,%s]}' "$key" "$now" > "$LLM_DECIDE_FAILCACHE_FILE"
+out=$(echo "x" | llm_decide demo "keep,reason" 5 2>/dev/null) || rc=$?
+assert_eq "1" "${rc:-0}" "cooldown: tripped key within cooldown returns rc=1"
+assert_eq "0" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "cooldown: tripped key within cooldown skips the backend"
+
+# Stale failure (ancient ts): cooldown elapsed → one half-open retry reaches
+# the backend, which now succeeds and clears the key.
+: > "$FAKE_CB_CALLS"
+printf '{"%s":[3,1.0]}' "$key" > "$LLM_DECIDE_FAILCACHE_FILE"
+unset rc
+out=$(echo "x" | llm_decide demo "keep,reason" 5 2>/dev/null) || rc=$?
+assert_eq "0" "${rc:-0}" "cooldown: half-open retry after cooldown succeeds"
+assert_eq "1" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "cooldown: half-open retry reaches the backend"
+if grep -q "\"$key\"" "$LLM_DECIDE_FAILCACHE_FILE" 2>/dev/null; then
+  fail "cooldown: a successful half-open retry did not clear the key"
+else
+  pass "cooldown: a successful half-open retry cleared the key"
+fi
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD LLM_DECIDE_FAIL_COOLDOWN
+
+# 17e. The cooldown default is backend-tiered so a healthy cloud target
+#      recovers fast while OSS's expensive deterministic timeouts back off
+#      hard. An explicit LLM_DECIDE_FAIL_COOLDOWN still overrides both.
+unset LLM_DECIDE_FAIL_COOLDOWN
+cd_oss=$(ACTIVE_BACKEND=oss python3 -c \
+  "import sys; sys.path.insert(0,'$SCRIPT_ROOT/lib'); import llm_decide as L; print(int(L._fail_cooldown()))")
+cd_codex=$(ACTIVE_BACKEND=codex python3 -c \
+  "import sys; sys.path.insert(0,'$SCRIPT_ROOT/lib'); import llm_decide as L; print(int(L._fail_cooldown()))")
+cd_claude=$(ACTIVE_BACKEND=claude python3 -c \
+  "import sys; sys.path.insert(0,'$SCRIPT_ROOT/lib'); import llm_decide as L; print(int(L._fail_cooldown()))")
+cd_override=$(ACTIVE_BACKEND=oss LLM_DECIDE_FAIL_COOLDOWN=42 python3 -c \
+  "import sys; sys.path.insert(0,'$SCRIPT_ROOT/lib'); import llm_decide as L; print(int(L._fail_cooldown()))")
+assert_eq "1800" "$cd_oss" "cooldown default: oss gets the long (30 min) window"
+assert_eq "300" "$cd_codex" "cooldown default: cloud codex gets the short (5 min) window"
+assert_eq "300" "$cd_claude" "cooldown default: cloud claude gets the short (5 min) window"
+assert_eq "42" "$cd_override" "cooldown: explicit env override wins over the backend default"
+
+# 17f. Concurrency: the half-open retry is claimed atomically. N callers hit
+#      one stale tripped key simultaneously; exactly ONE must reach the
+#      backend (the reserved retry), the rest skip. A read-only stale check
+#      would let all N retry at once — the bug this guards against.
+unset rc LLM_DECIDE_MOCK
+NCONC=8
+cc_key="demo:$(printf 'cc' | shasum -a 1 | cut -c1-16)"
+export ACTIVE_BACKEND=codex
+export CODEX_BIN="$fake_fail"
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-cb-conc.calls"
+: > "$FAKE_CB_CALLS"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-conc"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-conc"
+export LLM_DECIDE_FAIL_THRESHOLD=2
+export LLM_DECIDE_FAIL_COOLDOWN=600
+# Tripped (count 3 >= 2) with an ancient ts → cooldown elapsed → half-open.
+printf '{"%s":[3,1.0]}' "$cc_key" > "$LLM_DECIDE_FAILCACHE_FILE"
+for i in $(seq 1 "$NCONC"); do
+  ( echo "cc" | llm_decide demo "keep" 5 >/dev/null 2>&1 ) &
+done
+wait
+conc_calls=$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')
+assert_eq "1" "$conc_calls" \
+  "cooldown: concurrent half-open callers reserve exactly one backend retry"
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD LLM_DECIDE_FAIL_COOLDOWN
+
+# 17g. Legacy failcache entries used a bare integer count with no timestamp.
+#      Treat that missing/0 timestamp as stale so old entries get one
+#      half-open retry instead of staying skipped forever.
+unset rc LLM_DECIDE_MOCK
+legacy_key="demo:$(printf 'legacy' | shasum -a 1 | cut -c1-16)"
+export ACTIVE_BACKEND=codex
+export CODEX_BIN="$fake_ok"
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-cb-legacy.calls"
+: > "$FAKE_CB_CALLS"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-legacy"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-legacy"
+export LLM_DECIDE_FAIL_THRESHOLD=2
+export LLM_DECIDE_FAIL_COOLDOWN=600
+printf '{"%s":3}' "$legacy_key" > "$LLM_DECIDE_FAILCACHE_FILE"
+out=$(echo "legacy" | llm_decide demo "keep,reason" 5 2>/dev/null) || rc=$?
+assert_eq "0" "${rc:-0}" "cooldown: legacy bare-int entry half-opens"
+assert_eq "1" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "cooldown: legacy bare-int entry reaches the backend once"
+if grep -q "\"$legacy_key\"" "$LLM_DECIDE_FAILCACHE_FILE" 2>/dev/null; then
+  fail "cooldown: successful legacy half-open retry did not clear the key"
+else
+  pass "cooldown: successful legacy half-open retry cleared the key"
+fi
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD LLM_DECIDE_FAIL_COOLDOWN
+
 teardown_test_env
 summary

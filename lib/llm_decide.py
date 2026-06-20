@@ -43,6 +43,25 @@ Environment knobs (mirrors the prior bash contract exactly):
   LLM_DECIDE_MAX_CALLS=<n>               budget cap (default 1000 when
                                          LOGDIR/counter file is set,
                                          0 = unlimited).
+  LLM_DECIDE_FAILCACHE_FILE=<path>       circuit-breaker state file location
+                                         (defaults to LOGDIR/llm-decisions.failcache).
+  LLM_DECIDE_FAIL_THRESHOLD=<n>          consecutive identical-request failures
+                                         before the breaker opens and skips
+                                         re-issuing that decision (default 2,
+                                         0 = disabled).
+  LLM_DECIDE_FAIL_COOLDOWN=<secs>        once tripped, how long a key stays
+                                         skipped before one half-open retry is
+                                         allowed (so a transiently unhealthy
+                                         backend self-heals). 0 = stay open for
+                                         the whole session (no retry). Unset,
+                                         the default is backend-tiered: 1800s
+                                         (30 min) for oss — retries are an
+                                         expensive ~180s timeout and failures
+                                         are usually deterministic — and 300s
+                                         (5 min) for cloud backends, whose
+                                         failures are usually transient and
+                                         cheap to retry, so a healthy cloud
+                                         target recovers fast.
   LLM_DECIDE_LOG=<path>                  audit-trail log file
   ACTIVE_BACKEND=<backend>                 concrete backend to dispatch to
                                            (one of: claude, codex, gemini, oss)
@@ -60,6 +79,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -252,6 +272,210 @@ def budget_available() -> bool:
             os.close(fd)
         except OSError:
             pass
+
+
+# ── Failed-decision circuit breaker ─────────────────────────────────
+# A failed decision writes no success marker, so callers re-issue the
+# identical request every pass and re-pay the full backend timeout — e.g.
+# triage's cluster_expand re-times-out on the same crash dir on every
+# triage pass because expand_cluster_for_crash only marks .cluster_expanded
+# on success. We record failures keyed by (decision, prompt hash) in a
+# session-scoped file beside the budget counter; once a key reaches the
+# threshold the breaker opens and identical requests are skipped without a
+# backend call. A later success clears the key and re-arms the breaker, so
+# the threshold counts *consecutive* failures.
+#
+# To survive a *transiently* unhealthy backend, the breaker is half-open:
+# a tripped key is skipped only until the cooldown elapses since its last
+# failure, after which one retry is allowed. If that retry succeeds the key
+# clears; if it fails the cooldown restarts. This bounds the waste of a
+# permanently-failing decision to ~one attempt per cooldown window while
+# letting a recovered backend resume on its own. Each entry is stored as
+# [failure_count, last_failure_epoch] (a bare int is also accepted for
+# tolerance); any malformed value is read as count 0.
+#
+# The cooldown default is backend-tiered (see _fail_cooldown): a healthy
+# cloud backend that hiccups recovers in minutes, while OSS's expensive,
+# usually-deterministic 180s timeouts are retried far less often. The
+# breaker only engages after threshold consecutive *identical* failures, so
+# a healthy backend never reaches this logic at all.
+
+def _failcache_file() -> Optional[Path]:
+    target = os.environ.get("LLM_DECIDE_FAILCACHE_FILE") or ""
+    if not target:
+        logdir = os.environ.get("LOGDIR") or ""
+        if not logdir:
+            # Standalone helpers (no session LOGDIR) have no persistent
+            # failcache, mirroring the budget counter's scoping.
+            return None
+        target = f"{logdir}/llm-decisions.failcache"
+    p = Path(target)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return p
+
+
+def _fail_threshold() -> int:
+    raw = os.environ.get("LLM_DECIDE_FAIL_THRESHOLD", "2")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 2
+
+
+# Backend-tiered cooldown defaults: oss retries pay an expensive (~180s)
+# usually-deterministic timeout, so they back off hard; cloud APIs fail
+# transiently and retry cheaply, so they recover fast. (The long tier is any
+# slow-local-inference backend — only oss today.)
+_COOLDOWN_OSS = 1800.0     # 30 min
+_COOLDOWN_CLOUD = 300.0    # 5 min
+
+
+def _fail_cooldown() -> float:
+    raw = os.environ.get("LLM_DECIDE_FAIL_COOLDOWN")
+    if raw:  # explicit override (the shim force-exports "" when unset)
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
+    return _COOLDOWN_OSS if backend == "oss" else _COOLDOWN_CLOUD
+
+
+def _failcache_key(decision: str, prompt: str) -> str:
+    digest = hashlib.sha1(prompt.encode("utf-8", "replace")).hexdigest()[:16]
+    return f"{decision}:{digest}"
+
+
+def _entry(value) -> tuple[int, float]:
+    """Parse a failcache entry into (failure_count, last_failure_epoch).
+
+    Accepts the [count, ts] shape or a legacy bare int, and tolerates any
+    corrupt / partially written / tampered value (→ (0, 0.0)) so the
+    best-effort failcache never raises into the decision path — the same
+    "fall open, never crash" discipline as _llm_log and budget_available.
+    """
+    count, ts = 0, 0.0
+    try:
+        if isinstance(value, list):
+            if value:
+                count = int(value[0])
+            if len(value) >= 2:
+                ts = float(value[1])
+        else:
+            count = int(value)
+    except (TypeError, ValueError):
+        return 0, 0.0
+    return count, ts
+
+
+def _failcache_update(mutate, default):
+    """Run mutate(data) under the failcache's exclusive lock.
+
+    mutate receives the parsed dict (any malformed content is normalized to
+    {}) and returns (result, dirty); the file is rewritten only when dirty.
+    The exclusive lock — the same fcntl.flock discipline as the budget
+    counter — makes the read-decide-write one atomic step, so concurrent
+    decide subprocesses cannot lose updates or both claim a half-open retry.
+    Returns `default` (without calling mutate) when the failcache is
+    unavailable, so callers fall open.
+    """
+    path = _failcache_file()
+    if path is None:
+        return default
+    try:
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        return default
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            return default
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            blob = os.read(fd, 1 << 20).decode("utf-8", "replace").strip()
+            try:
+                data = json.loads(blob) if blob else {}
+            except ValueError:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            result, dirty = mutate(data)
+            if dirty:
+                new_blob = json.dumps(data, separators=(",", ":")).encode("utf-8")
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.write(fd, new_blob)
+                os.ftruncate(fd, len(new_blob))
+            return result
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _failcache_should_skip(decision: str, prompt: str) -> bool:
+    """True iff this exact (decision, prompt) should be skipped now.
+
+    Atomically decides AND claims: a key past the threshold is skipped until
+    its cooldown elapses, after which exactly ONE caller is let through (the
+    half-open retry) by stamping the entry's timestamp to now under the lock;
+    concurrent callers then see a fresh window and skip. This is why the
+    decide and the claim must share one locked section — a read-only check
+    would let every concurrent caller retry at once.
+    """
+    threshold = _fail_threshold()
+    if threshold <= 0:
+        return False
+    key = _failcache_key(decision, prompt)
+    cooldown = _fail_cooldown()
+
+    def mutate(data):
+        count, last = _entry(data.get(key))
+        if count < threshold:
+            return False, False  # not tripped → don't skip, no write
+        if cooldown <= 0:
+            return True, False   # open for the whole session → skip
+        if not last or (time.time() - last) >= cooldown:
+            # Claim the single half-open retry: stamp now so other concurrent
+            # callers see a fresh failure window and skip. Count is unchanged;
+            # _failcache_note records the retry's actual outcome.
+            data[key] = [count, time.time()]
+            return False, True   # let THIS caller through
+        return True, False       # still cooling down → skip
+
+    return _failcache_update(mutate, default=False)
+
+
+def _failcache_note(decision: str, prompt: str, success: bool) -> None:
+    """Record one real-backend outcome: success clears the key, failure bumps it.
+
+    A success when no key exists short-circuits without a rewrite — the
+    common path pays nothing.
+    """
+    if _fail_threshold() <= 0:
+        return
+    key = _failcache_key(decision, prompt)
+
+    def mutate(data):
+        if success:
+            if key not in data:
+                return None, False
+            data.pop(key, None)
+            return None, True
+        count, _ = _entry(data.get(key))
+        data[key] = [count + 1, time.time()]
+        return None, True
+
+    _failcache_update(mutate, default=None)
 
 
 # ── Backend dispatch ────────────────────────────────────────────────
@@ -655,10 +879,42 @@ def llm_decide(
         _llm_log(f"{decision} FAIL empty-prompt")
         return None
 
+    # Circuit breaker: skip a real-backend request whose exact (decision,
+    # prompt) has already failed the threshold times this session, before
+    # consuming budget or paying another backend timeout. Mocks are
+    # deterministic test fixtures and are never circuit-broken.
+    if not mock_val and _failcache_should_skip(decision, prompt):
+        _llm_log(f"{decision} SKIP circuit-open threshold={_fail_threshold()}")
+        return None
+
     if not budget_available():
         _llm_log(f"{decision} SKIP budget-exhausted max={_budget_cap()}")
         return None
 
+    result = _run_decision(decision, required_keys, prompt, timeout, mock_val)
+
+    # Update the breaker on real-backend outcomes only: a failure arms it,
+    # a success clears the key. Mock outcomes are deterministic and must not
+    # arm or disarm the breaker.
+    if not mock_val:
+        _failcache_note(decision, prompt, success=result is not None)
+
+    return result
+
+
+def _run_decision(
+    decision: str,
+    required_keys: str,
+    prompt: str,
+    timeout: int,
+    mock_val: str,
+) -> Optional[dict | list]:
+    """Dispatch one decision (mock or real backend) and validate its JSON.
+
+    The disable / empty-prompt / circuit-breaker / budget gates have already
+    run in llm_decide(); this is the dispatch+extract+validate body. Returns
+    the parsed JSON or None on any failure.
+    """
     prompt_bytes = len(prompt.encode("utf-8", "replace"))
     t_start = time.time()
 
