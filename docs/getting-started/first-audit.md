@@ -176,7 +176,7 @@ To start fresh on the same target (wipe state, logs, and any
 in-progress artifacts), use the harness helpers:
 
 ```bash
-bin/cleanup_state   --target "$TARGET" --backend "$BACKEND"   # wipe transient results state
+bin/cleanup_state   --target "$TARGET"                       # wipe target output except target.toml
 bin/cleanup_logs    --target "$TARGET" --backend "$BACKEND"   # wipe logs/
 ```
 

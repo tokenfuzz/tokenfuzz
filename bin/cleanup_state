@@ -1,45 +1,25 @@
 #!/bin/bash
-# cleanup_state — wipe transient audit state under output/<target>/<backend>/results/
-# while preserving every crash, rejected crash, finding, and rejected finding artifact.
+# cleanup_state — reset output/<target>/ while preserving target.toml.
 #
-# Backends: every backend directory under each target (override with
-# --backend NAME or --backends a,b,c).
+# By default this removes every direct child under each output/<target>/ except
+# target.toml, including backend directories and generated cluster summaries.
+#
+# Backends: when --backend NAME or --backends a,b,c is provided, cleanup is
+# scoped to those backend directories under each selected target.
 # Targets: every directory under output/ (override with --target NAME, repeatable).
 #
-# By default, inside each results/ dir the following are PRESERVED:
-#   crashes/                  promoted security crash candidates
-#   crashes-rejected/         rejected crashes (incl. .autodiscard markers)
-#   crashes-needs-review/     borderline LLM-confirm rejections
-#   findings/                 confirmed security findings only. Non-security
-#                             FINDs (correctness / data-integrity / robustness)
-#                             are moved out at triage time, not stored here.
-#   findings-rejected/        findings rejected by the substance gate
-#   corpus/                   coverage-confirmed testcase seeds
-#   coverage/                 edge journals used by queue ranking
-#   fuzz-crashes/             raw fuzzer crash artifacts awaiting triage
-#   fuzz-leads.md             summarized fuzzer leads
-#   guards-db.md              cross-session guard/bypass memory
-#   strategy-roi.md           strategy outcome history
-#
-# Override the preserve set with --keep NAME (repeatable) or --keep-only csv.
-#
-# Everything else inside results/ is removed (state/, scratch-N/,
-# work-cards.jsonl, patch-cards.jsonl, AUDIT_STATE*.md, *.log, *.jsonl,
-# .session-env, .state_archive/, etc.). The results/ directory itself is kept;
-# .gitkeep markers inside preserved dirs are not touched.
-#
-# logs/ is intentionally NOT touched — that is bin/cleanup_logs's job.
-# target.toml and output/<target>/{CRASH,FINDING}-CLUSTERS.* are also left alone.
+# target.toml is always preserved. You can preserve additional direct children
+# with --keep NAME (repeatable) or --keep-only csv.
 #
 # Usage:
-#   bin/cleanup_state                       # clean all targets, default backends
+#   bin/cleanup_state                       # reset every output/<target>/
 #   bin/cleanup_state --dry-run             # show what would be removed
 #   bin/cleanup_state --target firefox      # only firefox
 #   bin/cleanup_state --target firefox --target libxml2
-#   bin/cleanup_state --backend <backend>
-#   bin/cleanup_state --backends <backend-list>
-#   bin/cleanup_state --keep state          # also preserve structured state/
-#   bin/cleanup_state --keep-only crashes,findings
+#   bin/cleanup_state --backend <backend>   # remove only that backend dir
+#   bin/cleanup_state --backends <list>     # remove only those backend dirs
+#   bin/cleanup_state --keep codex          # preserve an extra direct child
+#   bin/cleanup_state --keep-only codex     # preserve only target.toml + codex
 #   bin/cleanup_state --output-root /path/to/output
 #
 # Exit codes: 0 success (incl. nothing to do), 2 usage error, 1 partial failure.
@@ -60,22 +40,6 @@ output_root=""
 extra_keep=()
 keep_only_csv=""
 keep_only_set=0  # tracks whether --keep-only was explicitly passed (even with "")
-
-# Default preserve list. findings/ holds confirmed security findings only;
-# rejected FINDs are quarantined next to it for auditability.
-default_keep=(
-    "crashes"
-    "crashes-rejected"
-    "crashes-needs-review"
-    "findings"
-    "findings-rejected"
-    "corpus"
-    "coverage"
-    "fuzz-crashes"
-    "fuzz-leads.md"
-    "guards-db.md"
-    "strategy-roi.md"
-)
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -162,10 +126,8 @@ if [ "$backends_set" -eq 1 ]; then
     fi
 fi
 
-# Resolve preserve list. --keep-only replaces the defaults; --keep adds.
-# --keep-only "" is honored as an explicit empty list and rejected
-# below (we refuse to wipe results/ wholesale without an explicit
-# affirmation).
+# Resolve additional preserve list. target.toml is protected separately and
+# cannot be removed by --keep-only "".
 preserve=()
 if [ "$keep_only_set" -eq 1 ]; then
     if [ -n "$keep_only_csv" ]; then
@@ -175,22 +137,15 @@ if [ "$keep_only_set" -eq 1 ]; then
             [ -n "$k" ] && preserve+=("$k")
         done
     fi
-    # else: --keep-only was passed with empty value → preserve stays
-    #       empty → falls through to the empty-list rejection below.
 else
-    preserve+=("${default_keep[@]}")
-    for k in "${extra_keep[@]:-}"; do
+    for k in "${extra_keep[@]+"${extra_keep[@]}"}"; do
         [ -n "$k" ] && preserve+=("$k")
     done
-fi
-if [ "${#preserve[@]}" -eq 0 ]; then
-    echo "[cleanup_state] preserve list is empty — refusing to wipe results/" >&2
-    exit 2
 fi
 
 # Reject preserve entries that contain a slash, leading dot, or .. — those
 # are out of scope for this tool and almost always a typo.
-for k in "${preserve[@]}"; do
+for k in "${preserve[@]+"${preserve[@]}"}"; do
     case "$k" in
         */*|*..*|.*|"") echo "[cleanup_state] invalid --keep entry: '$k'" >&2; exit 2 ;;
     esac
@@ -217,7 +172,8 @@ preserved_total=0
 is_preserved() {
     local name="$1"
     local p
-    for p in "${preserve[@]}"; do
+    [ "$name" = "target.toml" ] && return 0
+    for p in "${preserve[@]+"${preserve[@]}"}"; do
         [ "$name" = "$p" ] && return 0
     done
     return 1
@@ -229,56 +185,43 @@ for target in "${targets[@]}"; do
         failed=$((failed + 1))
         continue
     fi
-    target_backends=()
-    if [ "$backends_set" -eq 1 ]; then
-        target_backends=("${parsed_backends[@]}")
-    else
-        while IFS= read -r -d '' d; do
-            target_backends+=("$(basename "$(dirname "$d")")")
-        done < <(find "$output_root/$target" -mindepth 2 -maxdepth 2 -type d -name results -print0 2>/dev/null)
-    fi
-    if [ "${#target_backends[@]}" -eq 0 ]; then
+
+    target_dir="$output_root/$target"
+    if [ ! -d "$target_dir" ]; then
         skipped=$((skipped + 1))
         continue
     fi
+    abs_target="$(cd "$target_dir" && pwd -P)"
+    case "$abs_target" in
+        ""|"/") echo "[cleanup_state] refusing to clean suspicious path: '$abs_target'" >&2
+                failed=$((failed + 1))
+                continue ;;
+    esac
+    if ! path_is_under "$output_root" "$abs_target"; then
+        echo "[cleanup_state] refusing to clean path outside output root: '$abs_target'" >&2
+        failed=$((failed + 1))
+        continue
+    fi
 
-    for backend in "${target_backends[@]}"; do
-        if ! valid_component "$backend"; then
-            echo "[cleanup_state] invalid backend component for $target: '$backend'" >&2
-            failed=$((failed + 1))
-            continue
-        fi
-        results_dir="$output_root/$target/$backend/results"
-        if [ ! -d "$results_dir" ]; then
-            skipped=$((skipped + 1))
-            continue
-        fi
-
-        # Resolve the absolute path so a moving working directory does not
-        # turn rm into rm -rf / by accident. We refuse to delete a path
-        # whose name is empty, "/", or does not contain "results".
-        abs_results="$(cd "$results_dir" && pwd -P)"
-        case "$abs_results" in
-            ""|"/") echo "[cleanup_state] refusing to clean suspicious path: '$abs_results'" >&2
-                    failed=$((failed + 1))
-                    continue ;;
-        esac
-        case "$abs_results" in
-            */results) ;;
-            *) echo "[cleanup_state] refusing to clean unexpected path: '$abs_results'" >&2
-               failed=$((failed + 1))
-               continue ;;
-        esac
-        if ! path_is_under "$output_root" "$abs_results"; then
-            echo "[cleanup_state] refusing to clean path outside output root: '$abs_results'" >&2
-            failed=$((failed + 1))
-            continue
-        fi
-
-        # Walk the immediate children of results/. find -mindepth 1
-        # -maxdepth 1 does not follow symlinks (we never -L here).
-        to_remove=()
-        kept_here=0
+    to_remove=()
+    kept_here=0
+    if [ "$backends_set" -eq 1 ]; then
+        for backend in "${parsed_backends[@]}"; do
+            if ! valid_component "$backend"; then
+                echo "[cleanup_state] invalid backend component for $target: '$backend'" >&2
+                failed=$((failed + 1))
+                continue
+            fi
+            entry="$abs_target/$backend"
+            if [ -e "$entry" ] || [ -L "$entry" ]; then
+                to_remove+=("$entry")
+            else
+                skipped=$((skipped + 1))
+            fi
+        done
+    else
+        # Walk only immediate children of output/<target>/. find does not
+        # follow symlinks here; rm removes a symlink itself, not its target.
         while IFS= read -r -d '' entry; do
             base="$(basename "$entry")"
             if is_preserved "$base"; then
@@ -286,42 +229,42 @@ for target in "${targets[@]}"; do
                 continue
             fi
             to_remove+=("$entry")
-        done < <(find "$abs_results" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+        done < <(find "$abs_target" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    fi
 
-        preserved_total=$((preserved_total + kept_here))
+    preserved_total=$((preserved_total + kept_here))
 
-        if [ "${#to_remove[@]}" -eq 0 ]; then
-            [ "$quiet" -eq 1 ] || printf '%s: already clean (%d preserved)\n' \
-                "$abs_results" "$kept_here"
-            cleaned=$((cleaned + 1))
-            continue
-        fi
+    if [ "${#to_remove[@]}" -eq 0 ]; then
+        [ "$quiet" -eq 1 ] || printf '%s: already clean (%d preserved)\n' \
+            "$abs_target" "$kept_here"
+        cleaned=$((cleaned + 1))
+        continue
+    fi
 
-        if [ "$dry_run" -eq 1 ]; then
-            printf '[dry-run] %s: would remove %d entries (%d preserved)\n' \
-                "$abs_results" "${#to_remove[@]}" "$kept_here"
-            for e in "${to_remove[@]}"; do
-                printf '[dry-run]   - %s\n' "$(basename "$e")"
-            done
-            continue
-        fi
-
-        local_failed=0
+    if [ "$dry_run" -eq 1 ]; then
+        printf '[dry-run] %s: would remove %d entries (%d preserved)\n' \
+            "$abs_target" "${#to_remove[@]}" "$kept_here"
         for e in "${to_remove[@]}"; do
-            if ! rm -rf -- "$e" 2>/dev/null; then
-                printf '[cleanup_state] failed to remove %s\n' "$e" >&2
-                local_failed=$((local_failed + 1))
-            fi
+            printf '[dry-run]   - %s\n' "$(basename "$e")"
         done
+        continue
+    fi
 
-        if [ "$local_failed" -eq 0 ]; then
-            [ "$quiet" -eq 1 ] || printf '%s: removed %d entries, %d preserved\n' \
-                "$abs_results" "${#to_remove[@]}" "$kept_here"
-            cleaned=$((cleaned + 1))
-        else
-            failed=$((failed + 1))
+    local_failed=0
+    for e in "${to_remove[@]}"; do
+        if ! rm -rf -- "$e" 2>/dev/null; then
+            printf '[cleanup_state] failed to remove %s\n' "$e" >&2
+            local_failed=$((local_failed + 1))
         fi
     done
+
+    if [ "$local_failed" -eq 0 ]; then
+        [ "$quiet" -eq 1 ] || printf '%s: removed %d entries, %d preserved\n' \
+            "$abs_target" "${#to_remove[@]}" "$kept_here"
+        cleaned=$((cleaned + 1))
+    else
+        failed=$((failed + 1))
+    fi
 done
 
 if [ "$dry_run" -eq 0 ] && [ "$quiet" -eq 0 ]; then

@@ -464,8 +464,8 @@ bash tests/run-tests.sh --image fedora:latest
 bin/docs build
 bin/docs serve
 
-# Wipe state, logs, or both for a clean restart on the same target.
-bin/cleanup_state --target "$TARGET" --backend "$BACKEND"
+# Wipe target output, logs, or both for a clean restart on the same target.
+bin/cleanup_state --target "$TARGET"
 bin/cleanup_logs  --target "$TARGET" --backend "$BACKEND"
 ```
 
@@ -473,14 +473,14 @@ Both cleanup helpers accept `--backend NAME` for one backend or
 `--backends a,b,c` for a comma-separated set, and `--dry-run` to
 print what would be removed without touching anything. With no
 `--target` they sweep every target under `output/`, so prefer an
-explicit target. `cleanup_state` preserves every crash, finding,
-rejected artifact, corpus seed, and cross-session memory file by
-default — it removes the transient queue and scratch state only.
-To adjust what `cleanup_state` keeps, `--keep <name>` (repeatable)
-protects an extra directory or file and `--keep-only <csv>` replaces the
-default preserve list outright (these two are `cleanup_state`-only).
-`--output-root <path>` points either helper at a non-default output
-root.
+explicit target. `cleanup_state` removes every direct child under
+`output/<target>/` except `target.toml` by default, including backend
+directories and generated cluster summaries. With `--backend`, it removes
+only the selected backend directory. To adjust what `cleanup_state`
+keeps, `--keep <name>` (repeatable) protects an extra direct child and
+`--keep-only <csv>` protects only `target.toml` plus the named direct
+children (these two are `cleanup_state`-only). `--output-root <path>`
+points either helper at a non-default output root.
 
 Run the test suite before merging changes to the harness or to
 docs that describe its behaviour. Use image mode for Linux
