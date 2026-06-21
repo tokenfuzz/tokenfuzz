@@ -1005,14 +1005,17 @@ run_model_direct_cell() {
   fi
   local agent_pid=$! watcher_pid=""
   if [ "$BACKEND" = "gemini" ]; then
-    start_gemini_watchdog "$raw_log" "$agent_pid" "$cell_dir" "cell ${cell_dir##*/}" &
+    # run_model_direct_cell is called inside results_dir=$(...), so the
+    # watchdog must not inherit stdout or it can keep the capture pipe open.
+    # Route watchdog log() output to the benchmark console instead.
+    start_gemini_watchdog "$raw_log" "$agent_pid" "$cell_dir" "cell ${cell_dir##*/}" >&2 &
     watcher_pid=$!
   fi
   wait "$agent_pid" || rc=$?
   if [ -n "$watcher_pid" ]; then
-    # The watchdog is a `while sleep N; do ...` loop, so a plain
-    # `kill $watcher_pid` would be deferred by bash until sleep
-    # returns. Walk the tree so the sleep child gets SIGTERM directly.
+    # The watchdog is a `while sleep N; do ...` loop. Kill its child first;
+    # otherwise bash may wait for sleep, delaying or deadlocking captured runs.
+    pkill -TERM -P "$watcher_pid" 2>/dev/null || true
     _kill_tree "$watcher_pid" TERM
     wait "$watcher_pid" 2>/dev/null || true
   fi

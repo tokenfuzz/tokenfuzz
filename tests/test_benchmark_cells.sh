@@ -325,6 +325,8 @@ assert_eq "0" "$gemini_cli_unlimited_rc" \
   "T16k4: captured Gemini CLI unlimited benchmark exits without tee deadlock"
 assert_match "cells complete: 1 done, 0 failed" "$gemini_cli_unlimited_out" \
   "T16k5: captured Gemini CLI unlimited benchmark cell marked done"
+assert_file_contains "$BENCH" 'start_gemini_watchdog .* >&2 &' \
+  "T16k6: model-direct watchdog cannot hold the results_dir capture pipe"
 
 # ── T16l-o: benchmark harness cells do not dirty the real repo root ──────
 # bin/audit cd's to its SCRIPT_ROOT before launching backend agents. In a
