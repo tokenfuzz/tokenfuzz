@@ -2,8 +2,8 @@
 # tests/test_cleanup_state.sh
 #
 # Coverage for bin/cleanup_state, which resets output/<target>/ while always
-# preserving target.toml. Backend filters intentionally scope deletion to the
-# selected backend directories. Symlinks must be unlinked, never followed.
+# preserving target metadata. Backend filters intentionally scope deletion to
+# the selected backend directories. Symlinks must be unlinked, never followed.
 
 set -o pipefail
 source "$(dirname "$0")/helpers.sh"
@@ -32,7 +32,7 @@ mk_mock_target() {
     echo "state" > "$root/$target/.target-state"
 }
 
-# Section 1: default cleanup removes everything below target except target.toml.
+# Section 1: default cleanup removes generated children below target.
 sec1="$TEST_TMPDIR/out1"
 mk_mock_target "$sec1" libxml2
 mk_mock_target "$sec1" cjson
@@ -49,6 +49,20 @@ for t in libxml2 cjson; do
     assert_file_not_exists "$sec1/$t/FINDING-CLUSTERS.md" "default $t: finding clusters removed"
     assert_file_not_exists "$sec1/$t/.target-state" "default $t: target dotfile removed"
 done
+
+# Section 1a: canary ground truth is preserved with target metadata.
+sec1a="$TEST_TMPDIR/out1a"
+mk_mock_target "$sec1a" canary
+echo "{}" > "$sec1a/canary/ground-truth.json"
+tracked_out=$("$CLEANUP" --output-root "$sec1a" --target canary 2>&1)
+rc=$?
+assert_eq 0 "$rc" "ground truth: clean exits 0"
+assert_match 'removed 7 entries, 2 preserved' "$tracked_out" "ground truth: reports preserved metadata"
+assert_file_exists "$sec1a/canary/target.toml" "ground truth: target.toml preserved"
+assert_file_exists "$sec1a/canary/ground-truth.json" "ground truth: ground truth preserved"
+assert_dir_not_exists "$sec1a/canary/codex" "ground truth: generated backend removed"
+assert_dir_not_exists "$sec1a/canary/claude" "ground truth: generated backend removed"
+assert_file_not_exists "$sec1a/canary/CRASH-CLUSTERS.md" "ground truth: generated cluster removed"
 
 # Section 2: --dry-run reports removals but does not delete.
 sec2="$TEST_TMPDIR/out2"

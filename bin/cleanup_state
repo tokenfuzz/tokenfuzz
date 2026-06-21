@@ -1,15 +1,16 @@
 #!/bin/bash
-# cleanup_state — reset output/<target>/ while preserving target.toml.
+# cleanup_state — reset output/<target>/ while preserving target metadata.
 #
-# By default this removes every direct child under each output/<target>/ except
-# target.toml, including backend directories and generated cluster summaries.
+# By default this removes every generated direct child under each
+# output/<target>/, including backend directories and generated cluster
+# summaries.
 #
 # Backends: when --backend NAME or --backends a,b,c is provided, cleanup is
 # scoped to those backend directories under each selected target.
 # Targets: every directory under output/ (override with --target NAME, repeatable).
 #
-# target.toml is always preserved. You can preserve additional direct children
-# with --keep NAME (repeatable) or --keep-only csv.
+# Target metadata is always preserved. You can preserve additional direct
+# children with --keep NAME (repeatable) or --keep-only csv.
 #
 # Usage:
 #   bin/cleanup_state                       # reset every output/<target>/
@@ -19,7 +20,7 @@
 #   bin/cleanup_state --backend <backend>   # remove only that backend dir
 #   bin/cleanup_state --backends <list>     # remove only those backend dirs
 #   bin/cleanup_state --keep codex          # preserve an extra direct child
-#   bin/cleanup_state --keep-only codex     # preserve only target.toml + codex
+#   bin/cleanup_state --keep-only codex     # preserve metadata + codex
 #   bin/cleanup_state --output-root /path/to/output
 #
 # Exit codes: 0 success (incl. nothing to do), 2 usage error, 1 partial failure.
@@ -126,8 +127,8 @@ if [ "$backends_set" -eq 1 ]; then
     fi
 fi
 
-# Resolve additional preserve list. target.toml is protected separately and
-# cannot be removed by --keep-only "".
+# Resolve additional preserve list. Built-in target metadata is protected
+# separately and cannot be removed by --keep-only "".
 preserve=()
 if [ "$keep_only_set" -eq 1 ]; then
     if [ -n "$keep_only_csv" ]; then
@@ -173,6 +174,7 @@ is_preserved() {
     local name="$1"
     local p
     [ "$name" = "target.toml" ] && return 0
+    [ "$name" = "ground-truth.json" ] && return 0
     for p in "${preserve[@]+"${preserve[@]}"}"; do
         [ "$name" = "$p" ] && return 0
     done
@@ -214,6 +216,10 @@ for target in "${targets[@]}"; do
             fi
             entry="$abs_target/$backend"
             if [ -e "$entry" ] || [ -L "$entry" ]; then
+                if is_preserved "$backend"; then
+                    kept_here=$((kept_here + 1))
+                    continue
+                fi
                 to_remove+=("$entry")
             else
                 skipped=$((skipped + 1))

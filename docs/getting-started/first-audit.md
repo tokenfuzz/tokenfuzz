@@ -176,11 +176,12 @@ To start fresh on the same target (wipe state, logs, and any
 in-progress artifacts), use the harness helpers:
 
 ```bash
-bin/cleanup_state   --target "$TARGET"                       # wipe target output except target.toml
+bin/cleanup_state   --target "$TARGET"                       # wipe generated target output
 bin/cleanup_logs    --target "$TARGET" --backend "$BACKEND"   # wipe logs/
 ```
 
 Both are non-destructive to upstream source under `targets/`.
+`cleanup_state` also preserves target metadata under `output/`.
 
 Before committing to a long run, skim
 [Triage results](../guides/triage-results.md). That page explains
