@@ -1347,6 +1347,18 @@ if grep -qF 'cluster \' "$SCRIPT_ROOT/bin/audit-recon" \
 else
   fail "audit-recon batched-triage stages incomplete"
 fi
+# A guard-based reject must refute a bypass the hypothesis named, not just
+# re-quote the guard. This is what stops a single triage agent from burying
+# a real, sanitizer-reproducible bug whose guard is defeated by an
+# attacker/callback-controlled value or a compiled-out assertion.
+batch_triage_prompt="$SCRIPT_ROOT/lib/prompts/recon_batch_triage.md.j2"
+if grep -qF 'must refute THAT' "$batch_triage_prompt" \
+  && grep -qiE 'compiled out under .?NDEBUG' "$batch_triage_prompt" \
+  && grep -qF 'not a valid reject' "$batch_triage_prompt"; then
+  pass "recon batch-triage rejects a guard only after refuting a named bypass"
+else
+  fail "recon batch-triage lets a guard quote reject a named-bypass hypothesis"
+fi
 
 # Benchmark cells and other isolated callers pass explicit --out/--report
 # paths. Validation scratch and raw model logs must follow that output path,

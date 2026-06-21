@@ -38,7 +38,15 @@ Assign exactly one `verdict` per hypothesis:
   direct quote is `needs-deep-check` instead. The allowed reject
   grounds, and the quote each requires, are:
     - guard neutralises it → paste the exact guard expression (e.g.
-      `if (len > buf->size) return -1;`).
+      `if (len > buf->size) return -1;`). But if the hypothesis `notes`
+      name a concrete way that guard is defeated — the guarded value is
+      attacker- or callback-controlled, or the "guard" is a debug-only
+      assertion compiled out under `NDEBUG` (`assert`, `DCHECK`, or a
+      project `ASSERT`/`CHECK` macro documented as debug-only — not a
+      `CHECK` that survives release) — your rationale must refute THAT
+      named bypass, not just re-quote the guard. A guard citation that
+      ignores a named bypass is not a valid reject; use
+      `needs-deep-check` and let the sanitizer settle it downstream.
     - caller-misuse of a documented API contract → paste the
       doc/comment text that establishes the contract (silence in the
       docs is NOT a contract).
