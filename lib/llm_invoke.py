@@ -58,6 +58,7 @@ import argparse
 import atexit
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -826,6 +827,78 @@ def extract_text(backend: str, raw_log_path: str) -> str:
     raise ValueError(f"unknown backend: {backend}")
 
 
+# ── Transient provider-failure detection ────────────────────────────────
+# Single source of truth for "did this run die on a transient backend
+# failure (overload / 429 / 5xx / rate-limit / timeout)?" It lives next to
+# the transcript parsers so callers never hand-roll the keyword regex. The
+# stream-json backends (codex, gemini-CLI) surface the failure as a JSON
+# error event OR a trailing stderr line that the text extractor drops, so
+# detection reads the RAW transcript and understands both shapes.
+_TRANSIENT_KW = re.compile(
+    r"(?:\b(?:429|5\d\d)\b|overload|temporar\w* limit|rate[\s_-]?limit"
+    r"|usage[\s_-]?limit|too many requests|timed?\s?out|time[\s_-]?out"
+    r"|service unavailable|server is temporarily)",
+    re.IGNORECASE,
+)
+_ERROR_LINE = re.compile(r"^\s*(?:api error|error:|fatal|stream error)", re.IGNORECASE)
+
+
+def _event_is_transient_error(ev) -> bool:
+    """True for a JSON transcript event that signals a transient failure."""
+    if not isinstance(ev, dict):
+        return False
+    et = str(ev.get("type", "")).lower()
+    sub = str(ev.get("subtype", "")).lower()
+    marked = (
+        ev.get("is_error") is True
+        or "error" in et
+        or et in ("overloaded_error", "server_error")
+        or "error" in sub
+        or isinstance(ev.get("error"), (dict, str))
+    )
+    if not marked:
+        return False
+    return bool(_TRANSIENT_KW.search(json.dumps(ev, ensure_ascii=False)))
+
+
+def transient_tail(raw_log_path: str, tail_lines: int = 4) -> bool:
+    """True if the tail of a raw transcript shows a fatal transient provider
+    failure that cut the run off (overload / 429 / 5xx / rate-limit / timeout).
+
+    Reads only the last few non-empty lines — the failure is the terminal
+    write before the process exits — and detects both a plain stderr error
+    line and a JSON error event, so it is correct for every backend
+    regardless of how that CLI surfaces the error. Anchoring on an error
+    context (an error-prefixed line or an error-typed event) keeps an
+    ordinary trailing result/agent_message event from tripping it.
+    """
+    if not os.path.isfile(raw_log_path):
+        return False
+    from collections import deque
+
+    tail: deque = deque(maxlen=max(1, tail_lines))
+    try:
+        with open(raw_log_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if line.strip():
+                    tail.append(line)
+    except OSError:
+        return False
+    for line in tail:
+        if _ERROR_LINE.search(line) and _TRANSIENT_KW.search(line):
+            return True
+        stripped = line.lstrip()
+        if stripped.startswith("{"):
+            try:
+                ev = json.loads(stripped)
+            except Exception:
+                continue
+            if _event_is_transient_error(ev):
+                return True
+    return False
+
+
 _GEMINI_REFUSAL_FINISH_REASONS = {
     "SAFETY",
     "BLOCKLIST",
@@ -1142,6 +1215,10 @@ def _cmd_raw_has_tool(args) -> int:
         return 1
 
 
+def _cmd_transient_tail(args) -> int:
+    return 0 if transient_tail(args.raw_log) else 1
+
+
 def _cmd_refusal_warning(args) -> int:
     prompt = sys.stdin.read()
     try:
@@ -1208,6 +1285,10 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("backend")
     s.add_argument("raw_log")
     s.set_defaults(func=_cmd_extract_text)
+
+    s = sub.add_parser("transient-tail")
+    s.add_argument("raw_log")
+    s.set_defaults(func=_cmd_transient_tail)
 
     s = sub.add_parser("raw-has-tool")
     s.add_argument("raw_log")

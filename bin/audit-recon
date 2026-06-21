@@ -588,6 +588,35 @@ SCOPE
     --var "timeout_secs=${TIMEOUT_SECS}"
 }
 
+# recon_candidate_lines <log> — emit the candidate JSONL lines from a recon
+# agent log: objects whose `id` begins `REC-`/`RECON-` (the `AUDIT-CLEAN`
+# sentinel carries a `REC-` id, so it is included). This is the single
+# source of truth for "what shape counts as a recon candidate line"; every
+# consumer (the usable-signal retry guard, count_substantive, and the
+# aggregation harvest) reads through here so the selection regex lives in
+# one place. Emitted lines may still be malformed JSON — callers run their
+# own `jq` parse and account for parse failures themselves.
+recon_candidate_lines() {
+  local log="$1"
+  [ -f "$log" ] || return 0
+  grep -aE '^\{.*"id"[[:space:]]*:[[:space:]]*"REC(ON)?-' "$log" 2>/dev/null || true
+}
+
+# recon_usable_signals <log> — echo the count of parseable recon candidate
+# lines the log contributes to the aggregate (valid-JSON candidate lines).
+# "Usable" means exactly "will survive into recon-hypotheses.jsonl", so the
+# retry guard can use this instead of a raw byte check: a slice that emitted
+# only prose or a transient provider error counts as the failure it is.
+recon_usable_signals() {
+  local log="$1" n=0 line
+  while IFS= read -r line; do
+    if printf '%s\n' "$line" | jq -e . >/dev/null 2>&1; then
+      n=$((n + 1))
+    fi
+  done < <(recon_candidate_lines "$log")
+  printf '%s\n' "$n"
+}
+
 # ── Invoke one agent per slice (per-pass state initialised in launch_pass) ─
 run_recon_agent() {
   local slice_name="$1"
@@ -620,25 +649,45 @@ run_recon_agent() {
   llm_agent_flags "$BACKEND" recon_flags "${MODEL:-}" 80 "$recon_add_dirs"
   export IS_SANDBOX=1
 
-  # One in-place retry on empty output: transient LLM failures (rate
-  # limits, network blips, timeouts) leave an empty raw_log; a single
-  # immediate re-attempt recovers most of them without doubling the
-  # baseline cost (retry runs only when the first try produced nothing).
-  local attempt
+  # One in-place retry when a slice does not deliver a complete candidate
+  # list. A transient failure (rate limit, 529 overload, network blip,
+  # timeout) shows up three ways, all recall holes:
+  #   (a) a NON-empty log with zero parseable candidates — a stray
+  #       "API Error: 529 Overloaded" or a few sentences of prose;
+  #   (b) the agent cut off AFTER emitting only part of its list — a fatal
+  #       error as the final line, with a handful of candidates above it; or
+  #   (c) a wall-clock kill (audit_timeout_run rc=124) mid-pass — candidates
+  #       emitted, then SIGTERM, with NO error line in the log.
+  # We retry on any (recon_usable_signals==0 OR llm_transient_tail OR
+  # backend_rc==124) and UNION the candidates across attempts — appended
+  # to $agent_log, never overwritten — so a partial first attempt's leads
+  # survive even if the retry also fails. Downstream Stage-1 clustering
+  # collapses any candidate the retry re-emits. The retry is hard-capped at
+  # one extra attempt, so a persistently unhealthy backend cannot loop: we
+  # fall open and keep whatever was gathered.
+  local attempt usable fatal agent_log_try backend_rc
+  : > "$agent_log"
   for attempt in 1 2; do
     : > "$agent_raw"
+    # Capture the backend exit status instead of discarding it with `|| true`.
+    # A wall-clock kill by audit_timeout_run (rc=124) leaves a raw log with no
+    # error line — just the candidates emitted before the SIGTERM — so
+    # llm_transient_tail alone cannot see it; rc=124 is the only signal that a
+    # slice was cut off at its time budget. With pipefail (set above) the
+    # piped backends propagate audit_timeout_run's rc as the pipeline status.
+    backend_rc=0
     case "$BACKEND" in
       claude)
         audit_timeout_run "$TIMEOUT_SECS" "${CLAUDE_BIN:-claude}" "${recon_flags[@]}" -p "$prompt" \
           2>&1 \
-          | tee "$agent_raw" >/dev/null || true
+          | tee "$agent_raw" >/dev/null || backend_rc=$?
         ;;
       codex)
         audit_timeout_run "$TIMEOUT_SECS" "${CODEX_BIN:-codex}" exec "${recon_flags[@]}" "$prompt" \
-          > "$agent_raw" 2>&1 || true
+          > "$agent_raw" 2>&1 || backend_rc=$?
         ;;
       oss)
-        llm_run_agent_prompt oss "$prompt" "$TIMEOUT_SECS" "$agent_raw" "${MODEL:-}" 80 "$recon_add_dirs" "$TARGET_PATH" || true
+        llm_run_agent_prompt oss "$prompt" "$TIMEOUT_SECS" "$agent_raw" "${MODEL:-}" 80 "$recon_add_dirs" "$TARGET_PATH" || backend_rc=$?
         ;;
       gemini)
         # Gemini backend reads the prompt from stdin when -p "".
@@ -650,28 +699,58 @@ run_recon_agent() {
         fi
         printf '%s' "$prompt" \
           | audit_timeout_run "$TIMEOUT_SECS" "$(llm_backend_bin gemini)" "${gemini_recon_flags[@]}" -p "" \
-          > "$agent_raw" 2>&1 || true
+          > "$agent_raw" 2>&1 || backend_rc=$?
         ;;
     esac
 
-    # Extract assistant text into the streamable per-slice log. The codex
-    # path's jq decodes backslash-escaped JSON inside .item.text so the
-    # aggregator downstream sees real lines beginning with `{"id":"REC-..."`.
-    llm_extract_text "$BACKEND" "$agent_raw" > "$agent_log" 2>/dev/null \
-      || cp "$agent_raw" "$agent_log"
+    # Extract this attempt's assistant text and APPEND it to the slice's
+    # accumulated log (union across attempts). The codex path's jq decodes
+    # backslash-escaped JSON inside .item.text so the aggregator downstream
+    # sees real lines beginning with `{"id":"REC-..."`.
+    agent_log_try="${agent_log}.try${attempt}"
+    llm_extract_text "$BACKEND" "$agent_raw" > "$agent_log_try" 2>/dev/null \
+      || cp "$agent_raw" "$agent_log_try"
     llm_log_refusal_warning "$BACKEND" "$prompt" "$agent_raw" || true
+    # Append this attempt's candidates, guaranteeing a newline boundary: some
+    # extractors (gemini/agy/oss) strip the trailing newline, which would
+    # otherwise glue attempt-1's last line onto attempt-2's first candidate
+    # and hide it from the `^{`-anchored selector. A blank separator line is
+    # ignored by every consumer (they only read `^{` candidate lines).
+    cat "$agent_log_try" >> "$agent_log"
+    printf '\n' >> "$agent_log"
+    rm -f "$agent_log_try"
 
-    # "Usable output" = at least one byte of extracted text. We don't try
-    # to validate JSONL here because the aggregator's parse-error path
-    # already counts malformed lines; this retry exists specifically for
-    # the "agent returned nothing at all" failure mode.
-    if [ -s "$agent_log" ]; then
+    # A slice is "done" only if it produced at least one harvestable
+    # candidate AND was not cut off mid-pass by a fatal provider error.
+    # "Usable output" is parseable candidate lines, NOT merely non-empty
+    # text: the old `[ -s ]` byte test mistook a slice that died on a
+    # transient "API Error: 529 Overloaded" (a short log with zero
+    # candidates) for success and silently dropped that slice's entire
+    # file-group scope. llm_transient_tail (checked on the RAW transcript, so
+    # it works for the stream-json backends whose text extractor drops the
+    # error) additionally catches the partial case — some candidates
+    # emitted, then a fatal error — so its remaining leads are recovered. A
+    # wall-clock kill (rc=124) is the same partial case with no error line in
+    # the log, so it counts as fatal too.
+    usable=$(recon_usable_signals "$agent_log")
+    fatal=0
+    if [ "$backend_rc" -eq 124 ] || llm_transient_tail "$agent_raw"; then fatal=1; fi
+    if [ "$usable" -gt 0 ] && [ "$fatal" -eq 0 ]; then
       break
     fi
     if [ "$attempt" -eq 1 ]; then
-      log "WARN: recon agent for $slice_name produced no output on attempt 1; retrying once"
+      if [ "$fatal" -eq 1 ]; then
+        log "WARN: recon agent for $slice_name was cut off by a transient provider error ($usable candidate(s) so far); backing off and retrying once to recover the rest"
+      else
+        log "WARN: recon agent for $slice_name yielded 0 usable candidate(s) on attempt 1 (transient error or non-JSONL output); backing off and retrying once"
+      fi
+      # Jittered backoff: the per-slice agents launch together, so a
+      # provider overload (529) tends to strike several at once. A short
+      # randomised pause de-synchronises the retries instead of replaying
+      # the same simultaneous burst that triggered the overload.
+      sleep "$(( 3 + RANDOM % 5 ))"
     else
-      log "WARN: recon agent for $slice_name still empty after retry; giving up on this slice"
+      log "WARN: recon agent for $slice_name still incomplete after retry ($usable usable candidate(s)); proceeding with what was gathered"
     fi
   done
 }
@@ -728,7 +807,7 @@ count_substantive() {
         NEEDS-VERIFICATION) pass_needs_verify=$((pass_needs_verify + 1)) ;;
         CONFIRMED-*) pass_confirmed=$((pass_confirmed + 1)) ;;
       esac
-    done < <(grep -aE '^\{.*"id"[[:space:]]*:[[:space:]]*"REC(ON)?-' "$agent_log" 2>/dev/null || true)
+    done < <(recon_candidate_lines "$agent_log")
   done
 }
 
@@ -801,7 +880,7 @@ for i in "${!slice_logs[@]}"; do
     else
       total_parse_dropped=$((total_parse_dropped + 1))
     fi
-  done < <(grep -aE '^\{.*"id"[[:space:]]*:[[:space:]]*"REC(ON)?-' "$agent_log" 2>/dev/null || true)
+  done < <(recon_candidate_lines "$agent_log")
 done
 if [ "$total_parse_dropped" -gt 0 ]; then
   log "WARN: dropped $total_parse_dropped candidate JSONL line(s) that failed jq parse (agent emitted malformed JSON)"

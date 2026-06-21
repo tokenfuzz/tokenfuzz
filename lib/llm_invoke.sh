@@ -473,3 +473,15 @@ llm_raw_has_tool() {
   [ -r "$raw_log" ] || return 1
   python3 "$_LLM_INVOKE_PY" raw-has-tool "$raw_log" "$tool_name"
 }
+
+# llm_transient_tail <raw_log> — exit 0 when the tail of a raw transcript
+# shows a fatal transient provider failure (overload / 429 / 5xx / rate
+# limit / timeout) that cut the run off. Single, backend-agnostic source of
+# transient-error detection: it understands both a plain stderr error line
+# and a JSON error event, so callers check the RAW transcript (the
+# stream-json text extractor drops these) without hand-rolling a regex.
+llm_transient_tail() {
+  local raw_log="$1"
+  [ -r "$raw_log" ] || return 1
+  python3 "$_LLM_INVOKE_PY" transient-tail "$raw_log"
+}

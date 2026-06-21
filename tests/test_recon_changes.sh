@@ -1429,6 +1429,120 @@ agg_count=$(printf '%s\n%s\n%s\n' \
   | grep -aEc "$agg_re" || true)
 assert_eq "$agg_count" "2" "aggregator regex matches REC- and RECON- but rejects OTHER-"
 
+# ── Recon slice retry fires on transient errors, not just empty output ──
+# A recon slice that died on a transient provider error ("API Error: 529
+# Overloaded") leaves a NON-empty log with zero parseable candidates. The
+# old guard retried only on a zero-byte log (`[ -s "$agent_log" ]`), so it
+# treated that error text as success and silently dropped the slice's
+# entire file-group scope — a pure recall hole (a transient overload can
+# take out a meaningful share of a run's recon slices). The guard must
+# instead retry when the slice yields no harvestable candidate.
+if grep -qF '[ -s "$agent_log" ]' "$SCRIPT_ROOT/bin/audit-recon"; then
+  fail "recon retry still guards on raw byte count; a 529-only log counts as success"
+else
+  pass "recon retry no longer treats non-empty error text as usable output"
+fi
+# Behaviour, not exact text: the retry must gate on the harvestable-candidate
+# count and pause with a randomised backoff before retrying. We assert the
+# gate predicate and the *presence* of jitter (a $RANDOM-derived sleep on the
+# retry path), not a specific arithmetic expression — so refactoring the
+# jitter formula or moving to a shared iterator does not break the test.
+if grep -qF 'usable=$(recon_usable_signals "$agent_log")' "$SCRIPT_ROOT/bin/audit-recon"; then
+  pass "recon retry gates on the harvestable-candidate count"
+else
+  fail "recon retry must gate on recon_usable_signals, not a raw byte check"
+fi
+if awk '/^run_recon_agent\(\) \{/{f=1} f&&/sleep[^A-Za-z]*\$\(\(.*RANDOM/{ok=1} f&&/^\}/{exit} END{exit !ok}' \
+    "$SCRIPT_ROOT/bin/audit-recon"; then
+  pass "recon retry backs off with a randomised (jittered) pause"
+else
+  fail "recon retry should pause with a $RANDOM-derived backoff before retrying"
+fi
+
+# ── #3: partial-loss recovery — retry-on-fatal-tail + union across attempts ─
+# A slice can emit a few candidates and THEN be cut off by a fatal provider
+# error as its final line (yielding far fewer leads than a comparable slice
+# that ran to completion). Fix A alone treated that as success (usable>0). The
+# retry must also fire when the slice's last line is a fatal provider error,
+# and it must UNION candidates across attempts (append, never overwrite) so a
+# partial first attempt's leads survive a failed retry.
+if grep -qF 'if [ "$backend_rc" -eq 124 ] || llm_transient_tail "$agent_raw"; then fatal=1; fi' "$SCRIPT_ROOT/bin/audit-recon" \
+  && grep -qF '[ "$usable" -gt 0 ] && [ "$fatal" -eq 0 ]' "$SCRIPT_ROOT/bin/audit-recon"; then
+  pass "recon retry fires on a fatal provider error (raw transcript) or a wall-clock kill (rc=124)"
+else
+  fail "recon retry must break only when usable AND not (transient-tail OR rc=124) (partial-loss #3)"
+fi
+# A wall-clock kill (audit_timeout_run rc=124) after some candidates leaves no
+# error line in the log, so the loop must CAPTURE the backend rc, not discard
+# it with `|| true`, and treat 124 as a retryable partial-loss.
+if grep -qF '|| backend_rc=$?' "$SCRIPT_ROOT/bin/audit-recon" \
+  && ! awk '/^run_recon_agent\(\) \{/{f=1} f&&/audit_timeout_run|llm_run_agent_prompt/&&/\|\| true/{bad=1} f&&/^\}/{exit} END{exit !bad}' "$SCRIPT_ROOT/bin/audit-recon"; then
+  pass "recon retry captures the backend exit status (no '|| true' on the agent invocation)"
+else
+  fail "recon retry must capture backend rc (|| backend_rc=\$?), not swallow it with '|| true'"
+fi
+if grep -qF 'cat "$agent_log_try" >> "$agent_log"' "$SCRIPT_ROOT/bin/audit-recon" \
+  && grep -qF "printf '\\n' >> \"\$agent_log\"" "$SCRIPT_ROOT/bin/audit-recon"; then
+  pass "recon retry unions candidates across attempts with a newline boundary (append, never overwrite)"
+else
+  fail "recon retry must accumulate per-attempt output with a newline separator, not overwrite \$agent_log"
+fi
+# Transient detection is centralized (no hand-rolled regex in bin/): the
+# loop calls the shared llm_transient_tail helper, not a local copy.
+if grep -qE '^recon_fatal_tail\(\)' "$SCRIPT_ROOT/bin/audit-recon"; then
+  fail "bin/audit-recon still defines a local recon_fatal_tail; use the shared llm_transient_tail"
+else
+  pass "transient-error detection is centralized in llm_transient_tail, not duplicated in bin/audit-recon"
+fi
+
+# Behavioural check: extract the candidate-line predicate + recon_usable_signals
+# and confirm the harvest count matches the aggregator on the real failure modes.
+rus_src="$(awk '/^recon_candidate_lines\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SCRIPT_ROOT/bin/audit-recon")
+$(awk '/^recon_usable_signals\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SCRIPT_ROOT/bin/audit-recon")"
+rus_probe() { # <log-content> -> printed signal count
+  local tmp; tmp="$(mktemp)"; printf '%b' "$1" > "$tmp"
+  bash -c "set -euo pipefail; $rus_src"$'\n'"recon_usable_signals \"\$1\"" _ "$tmp"
+  rm -f "$tmp"
+}
+# decide <raw-content> [backend_rc] -> "retry"/"done", replicating the loop's
+# break rule against the REAL shared helper (recon_usable_signals +
+# llm_transient_tail) plus the rc=124 timeout signal — not a re-derived copy,
+# so the test tracks the code it guards.
+decide() {
+  local tmp u f rc; tmp="$(mktemp)"; printf '%b' "$1" > "$tmp"; rc="${2:-0}"
+  u=$(bash -c "set -euo pipefail; $rus_src"$'\n'"recon_usable_signals \"\$1\"" _ "$tmp")
+  f=0
+  if [ "$rc" -eq 124 ]; then f=1; elif python3 "$SCRIPT_ROOT/lib/llm_invoke.py" transient-tail "$tmp"; then f=1; fi
+  rm -f "$tmp"
+  if [ "$u" -gt 0 ] && [ "$f" -eq 0 ]; then echo done; else echo retry; fi
+}
+assert_eq "$(rus_probe 'API Error: 529 Overloaded.\n')" "0" \
+  "recon_usable_signals scores a 529-only slice log as 0 usable candidates"
+assert_eq "$(rus_probe 'Let me audit directly.\nAPI Error: 529 Overloaded.\n')" "0" \
+  "recon_usable_signals scores a prose+529 slice log as 0 usable candidates"
+assert_eq "$(rus_probe '{"id":"REC-x","confidence":"NEEDS-VERIFICATION"}\n{"id":"REC-empty","confidence":"AUDIT-CLEAN"}\n')" "2" \
+  "recon_usable_signals counts a real candidate plus the AUDIT-CLEAN sentinel"
+# Retry decision matrix (the heart of #3), via the shared helper:
+assert_eq "$(decide 'API Error: 529 Overloaded. Server-side issue.')" "retry" \
+  "total-loss (0 candidates, fatal tail) -> retry"
+assert_eq "$(decide '{"type":"item.completed","item":{"type":"agent_message","text":"{\"id\":\"REC-a\"}"}}\nAPI Error: 529 Overloaded.')" "retry" \
+  "codex partial-loss (candidate then fatal tail, error dropped by extractor) -> retry (#3)"
+assert_eq "$(decide '{"id":"REC-a","confidence":"NEEDS-VERIFICATION"}\n{"id":"REC-b","confidence":"NEEDS-VERIFICATION"}')" "done" \
+  "healthy slice (candidates, clean tail) -> done, no extra cost"
+assert_eq "$(decide '{"id":"REC-a","confidence":"NEEDS-VERIFICATION"}\nError: no second bug found in parser.c, finishing up.')" "done" \
+  "prose mentioning Error: without a transient keyword -> not fatal, done"
+# Wall-clock kill (rc=124) after some candidates, NO error line in the log:
+# transient-tail is clean, but rc=124 makes it a retryable partial-loss.
+assert_eq "$(decide '{"id":"REC-a","confidence":"NEEDS-VERIFICATION"}' 124)" "retry" \
+  "timeout kill (rc=124, candidates, no error line) -> retry"
+assert_eq "$(decide '{"id":"REC-a","confidence":"NEEDS-VERIFICATION"}' 0)" "done" \
+  "same candidates with rc=0 (clean exit) -> done"
+# A slice that hit a blip mid-run and kept working pushes the error out of
+# the transcript tail, so it is not retried. (A blip still inside the tail
+# window retries — cheap and recall-safe, since union keeps the candidates.)
+assert_eq "$(decide 'API Error: 529 Overloaded.\nRetrying...\n{"id":"REC-a"}\n{"id":"REC-b"}\n{"id":"REC-c"}\n{"id":"REC-d"}')" "done" \
+  "mid-run blip that recovered (error pushed out of the tail) -> done"
+
 # ── Validator re-emit keeps OUT_PATH as one-object-per-line JSONL ───────
 # The batched gate re-emits each hypothesis with validator_verdict /
 # validator_details merged in via lib/recon_triage.py finalize, then

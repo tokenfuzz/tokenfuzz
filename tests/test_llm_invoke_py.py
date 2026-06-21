@@ -609,5 +609,64 @@ with tempfile.TemporaryDirectory() as _td:
         inv._CONFIG_PATH = _saved_cfg_path
 
 
+# ── transient_tail: backend-agnostic provider-failure detection ─────────
+# Recon's retry uses this to recover slices killed mid-pass by a transient
+# overload/429/5xx/rate-limit/timeout. It must read the RAW transcript and
+# understand BOTH a plain stderr error line AND a JSON error event, because
+# the stream-json text extractors (codex, gemini-CLI) drop the error. And it
+# must NOT fire on healthy output or on "rate limit" merely discussed in
+# agent prose — a false positive there costs a needless extra agent run.
+def _tt(content: str) -> bool:
+    with tempfile.NamedTemporaryFile("w", suffix=".raw", delete=False) as fh:
+        fh.write(content)
+        path = fh.name
+    try:
+        return inv.transient_tail(path)
+    finally:
+        os.unlink(path)
+
+
+_TT_TRANSIENT = {
+    "claude 529 stderr tail":
+        '{"type":"assistant","message":{"content":[{"text":"working"}]}}\n'
+        'API Error: 529 Overloaded. This is a server-side issue.',
+    "codex partial then stderr 529":
+        '{"type":"item.completed","item":{"type":"agent_message","text":"{c}"}}\n'
+        'API Error: 529 Overloaded.',
+    "codex JSON error event":
+        '{"type":"item.completed","item":{"type":"agent_message","text":"x"}}\n'
+        '{"type":"error","message":"server_error: 529 overloaded, retry"}',
+    "agy timeout line":
+        'plain agy output\nError: timed out waiting for response',
+    "gemini 503 unavailable event":
+        '{"role":"model","content":"hi"}\n'
+        '{"type":"error","error":{"code":503,"status":"UNAVAILABLE","message":"x"}}',
+}
+_TT_CLEAN = {
+    "healthy claude result (is_error false)":
+        '{"type":"assistant","message":{"content":[{"text":"{\\"id\\":\\"REC-a\\"}"}]}}\n'
+        '{"type":"result","is_error":false,"result":"done"}',
+    'prose "Error:" without a transient keyword':
+        '{"id":"REC-a"}\nError: no second bug found in parser.c, finishing up.',
+    "recovered mid-run (error pushed out of tail)":
+        'API Error: 529 Overloaded.\nRetrying...\n'
+        '{"id":"REC-a"}\n{"id":"REC-b"}\n{"id":"REC-c"}\n{"id":"REC-d"}',
+    '"rate limit" merely discussed in agent prose':
+        '{"type":"item.completed","item":{"type":"agent_message",'
+        '"text":"the rate limit logic in net.c looks ok"}}',
+}
+for _name, _c in _TT_TRANSIENT.items():
+    ok(_tt(_c) is True, f"transient_tail fires: {_name}")
+for _name, _c in _TT_CLEAN.items():
+    ok(_tt(_c) is False, f"transient_tail clean: {_name}")
+# Subcommand exit codes mirror the API (0 = transient, 1 = clean/missing).
+with tempfile.NamedTemporaryFile("w", suffix=".raw", delete=False) as _fh:
+    _fh.write("API Error: 529 Overloaded.\n")
+    _p = _fh.name
+ok(run(["transient-tail", _p]).returncode == 0, "transient-tail subcommand: exit 0 on a fatal tail")
+os.unlink(_p)
+ok(run(["transient-tail", "/no/such/raw.log"]).returncode == 1, "transient-tail subcommand: exit 1 when the log is missing")
+
+
 print(f"\n  \033[1m{PASSED}/{PASSED + FAILED} passed\033[0m")
 sys.exit(0 if FAILED == 0 else 1)
