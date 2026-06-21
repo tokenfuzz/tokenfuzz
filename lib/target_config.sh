@@ -636,3 +636,10 @@ target_detect_rev() {
 target_seed_toml() {
   python3 "$_TARGET_CONFIG_PY" seed-toml "$1" "$2" "${3:-}"
 }
+
+# Re-seed but carry curated [threat_model]/[s6_peers] forward — used for a
+# placeholder refresh so filling one FILL_ME never discards hand/LLM-curated
+# sections a fresh seed cannot re-derive.
+target_seed_toml_preserving() {
+  python3 "$_TARGET_CONFIG_PY" seed-toml "$1" "$2" "${3:-}" --preserve-curated
+}

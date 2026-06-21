@@ -164,7 +164,7 @@ else
 fi
 assert_file_contains "$TEST_TMPDIR/out2" 'WARN.*\.audit/build\.sh.*missing' \
   "fallback: WARN names the missing build.sh file"
-assert_file_contains "$TEST_TMPDIR/out2" 'setup-target.*--bootstrap' \
-  "fallback: WARN points operator at setup-target --bootstrap"
+assert_file_contains "$TEST_TMPDIR/out2" 'setup-target.*--build' \
+  "fallback: WARN points operator at setup-target --build"
 
 summary

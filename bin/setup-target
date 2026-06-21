@@ -28,8 +28,13 @@ Options:
   --force, --force-config
                            Regenerate output/<target>/target.toml and overwrite
                            LLM-suggested [threat_model] / [s6_peers] sections
-  --bootstrap             Prepare the checkout for auditing. Runs whichever of these
-                            apply to the detected build system:
+  --build                 Optional: build the checkout now instead of letting the
+                            first `bin/audit` build it lazily. setup-target does NOT
+                            build by default — bin/audit (and bin/benchmark, which
+                            runs through it) (re)builds a missing or stale native
+                            ASan tree automatically at audit time, fail-open. Pass
+                            --build only to pre-warm or verify the build up front.
+                            Runs whichever of these apply to the detected build system:
                               * Language build (python: setup.py build_ext --inplace;
                                 rust: cargo build; go: go build ./...; swift: swift
                                 build; npm: npm install; php: composer install;
@@ -53,7 +58,7 @@ Examples:
   bin/setup-target pcre2
   bin/setup-target firefox https://hg.mozilla.org/mozilla-unified --repo-type hg
   bin/setup-target myparser ~/code/myparser
-  bin/setup-target oss-python-pyyaml --bootstrap
+  bin/setup-target oss-python-pyyaml --build
 EOF
 }
 
@@ -73,7 +78,7 @@ REF=""
 NO_UPDATE=0
 FORCE_CONFIG=0
 FORCE_CONFIG_FLAG=""
-RUN_BOOTSTRAP=0
+RUN_BUILD=0
 RUN_LLM_CONFIG=1
 
 while [ "$#" -gt 0 ]; do
@@ -94,8 +99,8 @@ while [ "$#" -gt 0 ]; do
       FORCE_CONFIG=1
       FORCE_CONFIG_FLAG="$1"
       shift ;;
-    --bootstrap)
-      RUN_BOOTSTRAP=1; shift ;;
+    --build)
+      RUN_BUILD=1; shift ;;
     --no-llm-config)
       RUN_LLM_CONFIG=0; shift ;;
     -h|--help)
@@ -281,6 +286,11 @@ mkdir -p "$CONFIG_DIR"
 # lines, and a local-only target keeps upstream_url = "FILL_ME" as its steady
 # state, so grep would re-seed (and wipe edits) on every rerun. The structured
 # check parses the TOML and ignores both — see target_config.config-needs-reseed.
+#
+# The placeholder re-seed is non-destructive: it carries the curated
+# [threat_model]/[s6_peers] forward (target_seed_toml_preserving), so filling
+# one unrelated FILL_ME cannot discard a hand/LLM-curated threat model or peer
+# set. A full re-seed (missing/invalid/--force) regenerates everything.
 CONFIG_REASON=""
 if [ ! -f "$TARGET_TOML" ]; then
   CONFIG_REASON="missing"
@@ -299,16 +309,43 @@ then
   CONFIG_REASON="invalid"
 fi
 
+# A --build invocation is "build what's already set up" and must not rewrite a
+# config that still parses. The placeholder re-seed does a full template
+# rewrite that discards curated [threat_model]/[s6_peers] (and then the LLM
+# bootstrap regenerates them) — fine when an operator runs plain setup-target
+# to refresh config, but bin/audit and bin/benchmark shell `setup-target
+# --build` at preflight to (re)build lazily, and must never clobber a reviewed
+# target.toml as a side effect of an audit. A missing/invalid config still
+# seeds (a fresh --build target needs build_system); --force still wins.
+if [ "$RUN_BUILD" -eq 1 ] && [ "$CONFIG_REASON" = "placeholders" ]; then
+  log "Keeping output/$TARGET_NAME/target.toml as-is (--build does not re-seed; run 'bin/setup-target $TARGET_NAME' without --build to refresh placeholders)"
+  CONFIG_REASON=""
+fi
+
+# RUN_LLM_AFTER_SEED gates the threat-model/peers LLM bootstrap below. It is
+# set only when a FULL re-seed (missing/invalid/--force) wrote the deterministic
+# defaults — those are safe for the bootstrap to replace with --force. The
+# placeholder refresh deliberately leaves it 0: that path PRESERVES the curated
+# [threat_model]/[s6_peers], so running the bootstrap (which forces an
+# overwrite) would clobber exactly the sections we just protected.
+RUN_LLM_AFTER_SEED=0
 if [ -z "$CONFIG_REASON" ]; then
   log "Keeping reviewed output/$TARGET_NAME/target.toml (pass --force to regenerate)"
+elif [ "$CONFIG_REASON" = "placeholders" ]; then
+  # Surgical refresh: re-render the template (re-detecting metadata, re-emitting
+  # build-field placeholders as comments) to clear the stale FILL_ME, but carry
+  # the curated [threat_model]/[s6_peers] forward. Filling one unrelated
+  # placeholder must never discard a hand/LLM-curated threat model or peer set.
+  log "Refreshing output/$TARGET_NAME/target.toml to fill placeholders (preserving curated [threat_model] / [s6_peers])"
+  target_seed_toml_preserving "$TARGET_ROOT" "$TARGET_TOML" "$REPO_URL"
 else
   case "$CONFIG_REASON" in
     missing) log "Seeding output/$TARGET_NAME/target.toml" ;;
-    placeholders) log "Refreshing output/$TARGET_NAME/target.toml because generated placeholders remain" ;;
     invalid) log "Refreshing output/$TARGET_NAME/target.toml because it no longer parses as TOML" ;;
     requested) log "Regenerating output/$TARGET_NAME/target.toml (${FORCE_CONFIG_FLAG:-"--force"})" ;;
   esac
   target_seed_toml "$TARGET_ROOT" "$TARGET_TOML" "$REPO_URL"
+  RUN_LLM_AFTER_SEED=1
 fi
 
 append_unique_backend() {
@@ -335,7 +372,10 @@ build_llm_backend_candidates() {
 }
 
 run_llm_config_bootstrap() {
-  [ -n "$CONFIG_REASON" ] || return 0
+  # Only after a full re-seed (missing/invalid/--force). A placeholder refresh
+  # preserves curated [threat_model]/[s6_peers], so it leaves this 0 to avoid a
+  # --force overwrite of the sections it just protected.
+  [ "$RUN_LLM_AFTER_SEED" -eq 1 ] || return 0
   if [ "$RUN_LLM_CONFIG" -eq 0 ]; then
     log "LLM config bootstrap skipped (--no-llm-config)"
     return 0
@@ -441,14 +481,14 @@ log "Config: $TARGET_TOML"
 # matching-tag sibling. This catches the pyyaml-style failure where a
 # prebuilt cp39 `.so` blocks every C-side card under cp314 without
 # anything in setup-target's path being target-specific.
-if [ "$RUN_BOOTSTRAP" -eq 0 ] && [ -d "$TARGET_ROOT" ]; then
+if [ "$RUN_BUILD" -eq 0 ] && [ -d "$TARGET_ROOT" ]; then
   STALE_PY_EXTS="$(python3 "$SCRIPT_ROOT/lib/languages.py" \
                      stale-python-extensions "$TARGET_ROOT" 2>/dev/null || true)"
   if [ -n "$STALE_PY_EXTS" ]; then
     STALE_COUNT="$(printf '%s\n' "$STALE_PY_EXTS" | wc -l | tr -d ' ')"
-    log "ABI mismatch: ${STALE_COUNT} Python extension(s) built for a non-active interpreter — forcing --bootstrap"
+    log "ABI mismatch: ${STALE_COUNT} Python extension(s) built for a non-active interpreter — forcing a build"
     log "  first stale: $(printf '%s\n' "$STALE_PY_EXTS" | head -1)"
-    RUN_BOOTSTRAP=1
+    RUN_BUILD=1
   fi
 fi
 
@@ -475,7 +515,7 @@ PY
 # security signal. All output is tee'd to TARGET_ROOT/.audit/bootstrap.log
 # so failures are diagnosable; the actual recipe that worked is
 # persisted to TARGET_ROOT/.audit/bootstrap.sh for reproducible reruns.
-if [ "$RUN_BOOTSTRAP" -eq 1 ]; then
+if [ "$RUN_BUILD" -eq 1 ]; then
   if [ -z "$BUILD_SYSTEM" ]; then
     log "bootstrap: skipped (no build_system in $TARGET_TOML)"
   else
@@ -529,7 +569,7 @@ for k, v in env_pairs:
 # also has a forensic record under .audit/bootstrap.log.
 recipe_lines: list[str] = [
     "#!/usr/bin/env bash",
-    "# Auto-generated by bin/setup-target --bootstrap. Reproduces the",
+    "# Auto-generated by bin/setup-target --build. Reproduces the",
     "# release-mode sanitizer build that the audit harness ran against.",
     "set -euo pipefail",
     f'cd "$(dirname "$0")/.."',  # .audit/bootstrap.sh → target root
@@ -624,8 +664,8 @@ fi
 #
 # bin/auto-build-script discovers the recipe via an LLM-driven
 # convergence loop. It needs the same LLM backend run_llm_config_bootstrap
-# uses, so we reuse that gating. The call is part of --bootstrap; if the
-# operator did not pass --bootstrap and the recipe is missing, we log a
+# uses, so we reuse that gating. The call is part of --build; if the
+# operator did not pass --build and the recipe is missing, we log a
 # one-line hint so the next setup-target run includes it.
 NATIVE_BUILD_SYSTEM=0
 case "${BUILD_SYSTEM:-}" in
@@ -674,7 +714,7 @@ _recipe_path_for() {
   esac
 }
 
-if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
+if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BUILD" -eq 1 ]; then
   if [ ! -x "$SCRIPT_ROOT/bin/auto-build-script" ]; then
     log "bootstrap: bin/auto-build-script not executable; skipping sanitizer build convergence"
   else
@@ -686,7 +726,7 @@ if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
         continue
       fi
       if [ -z "$LLM_BACKEND_CANDIDATES" ]; then
-        log "bootstrap: no LLM backend configured; skipping $san build convergence (set up a backend and rerun with --bootstrap)"
+        log "bootstrap: no LLM backend configured; skipping $san build convergence (set up a backend and rerun with --build)"
         continue
       fi
       log "bootstrap: converging $san build recipe via bin/auto-build-script (this may take a few minutes and one or more LLM revisions)"
@@ -718,7 +758,7 @@ if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
       done
       if [ "$success" -eq 0 ]; then
         if [ "$san" = asan ]; then
-          log "bootstrap: auto-build-script did not converge after trying [${_abs_attempts[*]}] — rerun with --bootstrap once the upstream build error visible above is resolvable, or write $recipe by hand"
+          log "bootstrap: auto-build-script did not converge after trying [${_abs_attempts[*]}] — rerun with --build once the upstream build error visible above is resolvable, or write $recipe by hand"
         else
           log "bootstrap: auto-build-script ($san) did not converge after trying [${_abs_attempts[*]}] — $san is best-effort, ASan is unaffected; resolve the build error above and rerun, or write $recipe by hand"
         fi
@@ -726,11 +766,11 @@ if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
     done
   fi
 elif [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ ! -f "$AUDIT_BUILD_SH" ]; then
-  log "hint: $TARGET_NAME is a $BUILD_SYSTEM target with no $AUDIT_BUILD_SH; rerun with --bootstrap to converge an ASan build recipe (without it, reproduce.sh falls back to a generic cmake template that may miss target-specific flags)"
+  log "hint: $TARGET_NAME is a $BUILD_SYSTEM target with no $AUDIT_BUILD_SH yet; bin/audit converges an ASan build recipe and builds it automatically on first run (pass --build here to do it now instead)"
 fi
 
 # Materialize each enabled sanitizer's build and record the binary/library
-# it produces, so --bootstrap is self-sufficient (recipe + build + filled
+# it produces, so --build is self-sufficient (recipe + build + filled
 # config). auto-build-script validates the recipe in a throwaway scratch
 # dir, so on a fresh target targets/<slug>/build-<san> never exists, and the
 # early config seed — which must run before any build, to supply
@@ -742,16 +782,30 @@ fi
 # run time regardless; this makes the config accurate for the model-direct
 # prompt recipe, bin/run-asan, and bin/probe.) ASan is required; a failed
 # non-ASan build warns but does not abort setup.
-if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BOOTSTRAP" -eq 1 ]; then
+#
+# Build when the tree is missing OR stale (a source pull/edit since the last
+# build), then stamp it. The freshness probe + stamp are the same ones
+# bin/audit and bin/benchmark use to (re)build lazily, so a manual --build and
+# an audit-time build converge on identical state. A re-run of the recipe over
+# an existing build-<san> is an incremental rebuild (cmake/make pick up only
+# changed sources); we do not wipe the tree.
+if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BUILD" -eq 1 ]; then
   for san in $BOOTSTRAP_SANITIZERS; do
     recipe="$(_recipe_path_for "$san")"
     [ -f "$recipe" ] || continue
     SAN_BUILD_DIR="$TARGET_ROOT/build-$san${AUDIT_BUILD_SUFFIX:-}"
-    if [ ! -d "$SAN_BUILD_DIR" ]; then
-      log "bootstrap: materializing $san build into $SAN_BUILD_DIR (compiling the project so <san>_bin/<san>_lib can be detected; a few minutes)"
+    freshness="$(python3 "$SCRIPT_ROOT/lib/target_config.py" \
+                   build-freshness "$TARGET_ROOT" "$san" 2>/dev/null || echo missing)"
+    # Build unless the tree is confirmed fresh — missing/stale (and any
+    # unexpected value) all (re)build, erring toward a harmless incremental
+    # recipe re-run rather than skipping and leaving a stale binary.
+    if [ "$freshness" != fresh ]; then
+      log "bootstrap: materializing $san build into $SAN_BUILD_DIR (source is $freshness; compiling so <san>_bin/<san>_lib can be detected; a few minutes)"
       mkdir -p "$TARGET_ROOT/.audit"
       if "$recipe" "$TARGET_ROOT" "$SAN_BUILD_DIR" \
            >> "$TARGET_ROOT/.audit/build-materialize.log" 2>&1; then
+        python3 "$SCRIPT_ROOT/lib/target_config.py" \
+          build-write-stamp "$TARGET_ROOT" "$san" 2>/dev/null || true
         log "bootstrap: $san build complete"
       elif [ "$san" = asan ]; then
         log "bootstrap: canonical ASan build failed (see $TARGET_ROOT/.audit/build-materialize.log); reproduce.sh still self-discovers the library at run time"
@@ -765,7 +819,7 @@ fi
 # Re-detect <san>_bin/<san>_lib from whatever build trees are on disk and patch
 # them into target.toml in place. This is a surgical line edit, not a re-seed,
 # so curated sections survive — which is why it runs on every native rerun, not
-# just --bootstrap: it is how the documented "build, then rerun setup-target to
+# just --build: it is how the documented "build, then rerun setup-target to
 # re-inspect" flow fills the fields the pre-build seed had to leave commented.
 # A no-op when no build exists yet.
 if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && \

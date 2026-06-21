@@ -213,20 +213,23 @@ list the one you want to focus on first. See
 [Configure a target](../guides/configure-target.md#sanitizer-policy)
 for the full field list and per-sanitizer posture.
 
-**2. Build it.** `--bootstrap` converges a recipe and compiles a build
-tree for *every* sanitizer in `enabled`, not just ASan:
+**2. The build is automatic.** `bin/audit` converges a recipe and
+compiles a build tree for *every* sanitizer in `enabled` — not just
+ASan — on its first run, and rebuilds when the source changes. To build
+up front instead, run:
 
 ```bash
-bin/setup-target <target> --bootstrap
+bin/setup-target <target> --build
 ```
 
-This writes `targets/<target>/build-ubsan/` alongside `build-asan/` and
-fills in the `ubsan_bin` / `ubsan_lib` paths it detects. ASan is
-required; any other sanitizer is best-effort — if its build fails, the
-run warns and continues. (One caveat: `--bootstrap` re-seeds a
-`target.toml` that still holds `FILL_ME` placeholders, which would
-discard your edits. Fill or delete the placeholders you do not need so
-the file is "reviewed" before you re-run.)
+Either way this writes `targets/<target>/build-ubsan/` alongside
+`build-asan/` and fills in the `ubsan_bin` / `ubsan_lib` paths it
+detects. ASan is required; any other sanitizer is best-effort — if its
+build fails, the run warns and continues. (Note: `--build` never
+re-seeds your `target.toml`. A plain `bin/setup-target <target>` rerun
+*does* refresh a config that still holds active `FILL_ME` placeholders,
+but that refresh preserves your curated `[threat_model]` and `[s6_peers]`
+sections — filling one placeholder will not discard hand or LLM edits.)
 
 **3. Run it.** An audit uses the first enabled sanitizer automatically:
 

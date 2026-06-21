@@ -486,6 +486,35 @@ for c in "${COND_ARR[@]}"; do
   esac
 done
 
+# Ensure a fresh native ASan build before any cell runs. Harness cells get
+# this for free (each goes through bin/audit, which (re)builds a stale/missing
+# tree), but the model-direct condition renders against the build directly and
+# would otherwise silently degrade to "file-FINDs only" on a stale/absent
+# build. Building once here, up front, keeps both conditions comparing against
+# the same fresh binary. Fail-open, same contract as bin/audit: a build that
+# can't run (no recipe, language target) WARNs and the benchmark proceeds.
+if [ "$DRY_RUN" != "1" ] && [ "$DO_REGENERATE" != "1" ]; then
+  _bench_freshness="$(python3 "$SCRIPT_ROOT/lib/target_config.py" \
+                        build-freshness "$SCRIPT_ROOT/targets/$TARGET_SLUG" asan 2>/dev/null || echo skip)"
+  case "$_bench_freshness" in
+    missing|stale)
+      log "native ASan build is '$_bench_freshness' relative to source — (re)building via bin/setup-target --build (fail-open)"
+      "$SCRIPT_ROOT/bin/setup-target" "$TARGET_SLUG" --build >/dev/null 2>&1 || true
+      # Re-probe rather than trust the exit status: `setup-target --build`
+      # exits 0 even when it skips convergence (no backend) or a materialize
+      # fails, so a 0 does not prove a fresh build exists.
+      _bench_after="$(python3 "$SCRIPT_ROOT/lib/target_config.py" \
+                        build-freshness "$SCRIPT_ROOT/targets/$TARGET_SLUG" asan 2>/dev/null || echo skip)"
+      case "$_bench_after" in
+        fresh|skip) log "ASan build refreshed" ;;
+        *) log "WARN: ASan build is still '$_bench_after' after auto-build; model-direct cells may render file-FINDs only — benchmark continues" ;;
+      esac
+      unset _bench_after
+      ;;
+  esac
+  unset _bench_freshness
+fi
+
 # ── run setup ────────────────────────────────────────────────────────────
 # --run-id wins, then BENCHMARK_RUNID, then a fresh UTC timestamp. A given
 # id always maps to one directory: re-running with the same id resumes into

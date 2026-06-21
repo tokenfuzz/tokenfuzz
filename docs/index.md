@@ -72,9 +72,11 @@ export BACKEND="<backend>"          # one of: claude, codex, gemini, oss
 export RESULTS="output/$TARGET/$BACKEND/results"
 
 bin/setup-target "$TARGET" <repo-url>
-# Prepare the build: a sanitizer build under build-asan/ for C/C++;
-# other languages run their own toolchain step (cargo, go, npm, …).
-bin/setup-target "$TARGET" --bootstrap
+
+# bin/audit builds the target automatically on first run: a sanitizer build
+# under build-asan/ for C/C++ (and rebuilds it whenever the source changes);
+# other languages run their own toolchain step (cargo, go, npm, …). To build
+# up front instead of at audit time, add: bin/setup-target "$TARGET" --build
 
 # Pass 1 for a single-iteration smoke test; omit it for a continuous run.
 bin/audit --target "$TARGET" --backend "$BACKEND" 1

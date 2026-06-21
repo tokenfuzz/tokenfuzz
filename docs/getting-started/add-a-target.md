@@ -62,8 +62,8 @@ Notes:
   instead of trying to clone.
 - If a checkout already exists under `targets/<target>/`, the no-URL
   form normally seeds or refreshes the generated config without touching
-  source. It can still force the Python bootstrap when it detects stale
-  ABI-tagged extension modules.
+  source. It can still force a build when it detects stale ABI-tagged
+  extension modules.
 - Re-running `setup-target` refreshes generated config fields from the
   current checkout and build outputs. (`--no-llm-config` skips the
   LLM-backed threat-model and peer suggestions if you must stay
@@ -72,15 +72,15 @@ Notes:
   [Commands](../reference/commands.md). The normal setup flow does not
   need them.
 
-## 2. Bootstrap the build
+## 2. The build happens automatically
 
-Run once per target:
+You do not run a separate build step. `bin/audit` builds the target on
+its first run and rebuilds it whenever the source changes, so a checkout
+you just pulled is never audited against an older binary. The build is
+**fail-open**: if it cannot run or does not converge, the audit warns and
+continues rather than blocking.
 
-```bash
-bin/setup-target <target> --bootstrap
-```
-
-`--bootstrap` does whatever the detected `build_system` needs:
+What that build does depends on the detected `build_system`:
 
 - **C/C++ (`cmake` / `autotools` / `meson`)** — `bin/auto-build-script`
   iterates on a vanilla ASan recipe until it produces a working build,
@@ -98,14 +98,24 @@ bin/setup-target <target> --bootstrap
   downloads.
 - **Anything else (Java, Kotlin, Perl, R, Shell, …)** — no-op.
 
-Skips silently when its inputs aren't present (no LLM backend, no
-manifest, no recognised build system, recipe already exists). Safe to
-pass on any target.
-
 UBSan, MSan, and TSan are optional add-ons enabled later through
 `target.toml`'s `[sanitizer]` block.
 
-### When you do not need `--bootstrap`
+### Building up front (optional)
+
+If you would rather pay the build cost at setup time — for example to
+verify the target compiles before launching a long audit — run:
+
+```bash
+bin/setup-target <target> --build
+```
+
+This does the same build `bin/audit` would, now instead of at audit
+time. It skips silently when its inputs aren't present (no LLM backend,
+no manifest, no recognised build system, recipe already current). It is
+never required.
+
+### Targets with no sanitizer build
 
 Pure-Python / pure-Ruby / pure-JS scripts with no native extensions or
 vendored dependencies, and non-C/C++ targets where you are happy to

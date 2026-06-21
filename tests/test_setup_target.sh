@@ -65,10 +65,43 @@ out=$(AUDIT_ROOT="$ROOT" "$SCRIPT_ROOT/bin/setup-target" demo 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] &&
    grep -q 'target        = "demo"' "$ROOT/output/demo/target.toml" &&
-   grep -q 'Refreshing output/demo/target.toml because generated placeholders remain' <<<"$out"; then
+   grep -q 'Refreshing output/demo/target.toml to fill placeholders' <<<"$out"; then
   pass "$_CURRENT_TEST"
 else
   fail "$_CURRENT_TEST" "$out"
+fi
+
+_CURRENT_TEST="setup-target placeholder refresh preserves curated threat_model/s6_peers"
+# Regression: filling one unrelated FILL_ME (active asan_lib) must NOT discard a
+# hand/LLM-curated [threat_model] or [s6_peers]. Before the fix, the placeholder
+# re-seed full-rewrote the file, resetting attacker_controls to the default and
+# DELETING [s6_peers] (which a plain seed never emits). LLM disabled so nothing
+# can regenerate them — preservation is the only thing keeping them.
+cat > "$ROOT/output/demo/target.toml" <<'EOF'
+target        = "demo"
+build_system  = "cmake"
+asan_lib      = "build-asan/FILL_ME.a"
+
+[threat_model]
+attacker_controls = ["bytes", "call-sequence", "protocol-state"]
+
+[s6_peers]
+domain = "JSON"
+peers = ["rapidjson", "simdjson", "json-c"]
+EOF
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 "$SCRIPT_ROOT/bin/setup-target" demo 2>&1)
+rc=$?
+_demo_toml="$ROOT/output/demo/target.toml"
+if [ "$rc" -eq 0 ] &&
+   grep -q 'attacker_controls = \["bytes", "call-sequence", "protocol-state"\]' "$_demo_toml" &&
+   grep -q '\[s6_peers\]' "$_demo_toml" &&
+   grep -q 'peers = \["rapidjson", "simdjson", "json-c"\]' "$_demo_toml" &&
+   grep -q 'preserving curated' <<<"$out" &&
+   ! grep -qE '^asan_lib.*FILL_ME' "$_demo_toml" &&
+   ! python3 "$SCRIPT_ROOT/lib/target_config.py" config-needs-reseed "$_demo_toml" 2>/dev/null; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "rc=$rc out=$out cfg=$(cat "$_demo_toml")"
 fi
 
 _CURRENT_TEST="setup-target force-config regenerates target.toml"
@@ -198,7 +231,7 @@ project(plain_cpp CXX)
 add_executable(plain main.cpp)
 EOF
 printf 'int main() { return 0; }\n' > "$plain_root/main.cpp"
-out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 "$SCRIPT_ROOT/bin/setup-target" plain-cpp --bootstrap 2>&1)
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 "$SCRIPT_ROOT/bin/setup-target" plain-cpp --build 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] &&
    [ -f "$ROOT/output/plain-cpp/target.toml" ] &&
@@ -297,8 +330,8 @@ else
   fail "$_CURRENT_TEST" "rc=$rc $out"
 fi
 
-_CURRENT_TEST="setup-target --bootstrap builds every enabled sanitizer (asan + ubsan)"
-# When [sanitizer].enabled lists more than asan, --bootstrap must converge a
+_CURRENT_TEST="setup-target --build builds every enabled sanitizer (asan + ubsan)"
+# When [sanitizer].enabled lists more than asan, --build must converge a
 # recipe and materialize a build tree for EACH sanitizer, not just asan. We
 # pre-place trivial per-sanitizer recipes (.audit/build.sh + .audit/build-
 # ubsan.sh) so convergence is skipped ("keeping existing") and no LLM/clang is
@@ -342,7 +375,7 @@ asan_bin = "build-asan/multisan"
 enabled = ["asan", "ubsan"]
 EOF
 out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 \
-  "$SCRIPT_ROOT/bin/setup-target" multisan --bootstrap 2>&1)
+  "$SCRIPT_ROOT/bin/setup-target" multisan --build 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] &&
    [ -d "$multisan_root/build-asan" ] &&
@@ -356,7 +389,7 @@ else
   fail "$_CURRENT_TEST" "rc=$rc out=$out"
 fi
 
-_CURRENT_TEST="setup-target --bootstrap default config builds asan only"
+_CURRENT_TEST="setup-target --build default config builds asan only"
 # With no [sanitizer] block (default enabled=["asan"]), the loop must not try
 # to build ubsan/msan/tsan trees.
 asanonly_root="$ROOT/targets/asanonly"
@@ -382,7 +415,7 @@ build_system = "cmake"
 asan_bin = "build-asan/asanonly"
 EOF
 out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 \
-  "$SCRIPT_ROOT/bin/setup-target" asanonly --bootstrap 2>&1)
+  "$SCRIPT_ROOT/bin/setup-target" asanonly --build 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] &&
    [ -d "$asanonly_root/build-asan" ] &&
@@ -391,6 +424,51 @@ if [ "$rc" -eq 0 ] &&
   pass "$_CURRENT_TEST"
 else
   fail "$_CURRENT_TEST" "rc=$rc out=$out"
+fi
+
+_CURRENT_TEST="setup-target --build never re-seeds a config with placeholders"
+# bin/audit and bin/benchmark shell `setup-target --build` to build lazily at
+# preflight. That must NOT rewrite a reviewed target.toml as a side effect of
+# an audit: a config holding an active FILL_ME placeholder (which a plain
+# setup-target rerun WOULD re-seed) is left byte-for-byte intact under --build,
+# so hand-curated [threat_model]/attacker_controls cannot be clobbered.
+ph_root="$ROOT/targets/phtarget"
+mkdir -p "$ph_root/.audit"
+cat > "$ph_root/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.16)
+project(phtarget C)
+EOF
+printf 'int main(void){return 0;}\n' > "$ph_root/main.c"
+cat > "$ph_root/.audit/build.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+mkdir -p "$2"
+: > "$2/phtarget"
+EOF
+chmod +x "$ph_root/.audit/build.sh"
+mkdir -p "$ROOT/output/phtarget"
+# Active FILL_ME placeholder (asan_bin) + a curated [threat_model] section that
+# the placeholder re-seed would discard. (A surgical refresh-build-fields may
+# still fill asan_bin from the fresh build tree — that is the curated-preserving
+# path; what must NOT happen is a full re-seed that rewrites [threat_model].)
+cat > "$ROOT/output/phtarget/target.toml" <<'EOF'
+target = "phtarget"
+build_system = "cmake"
+asan_bin = "build-asan/FILL_ME"
+
+[threat_model]
+attacker_controls = ["hand-curated-token"]
+EOF
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 \
+  "$SCRIPT_ROOT/bin/setup-target" phtarget --build 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] &&
+   grep -q 'attacker_controls = \["hand-curated-token"\]' "$ROOT/output/phtarget/target.toml" &&
+   grep -q -- '--build does not re-seed' <<<"$out" &&
+   ! grep -q 'because generated placeholders remain' <<<"$out"; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "rc=$rc out=$out cfg=$(cat "$ROOT/output/phtarget/target.toml")"
 fi
 
 teardown_test_env

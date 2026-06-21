@@ -2603,5 +2603,32 @@ assert_match "^(S[0-9]+|REF)$" "$_csps_pick" "pick_cold_start_strategy: returns 
 
 rm -rf "$_csps_tmp"
 
+# ── build freshness preflight: lazy, audit-owned, fail-open ───────────
+# bin/audit (re)builds a missing/stale native ASan tree before agents spawn so
+# a moved checkout is never audited against an older binary. It MUST be
+# fail-open — a target with no convergeable recipe (language/read-only) warns
+# and the run continues — and MUST run before the harness canary check.
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'preflight_build_freshness()' \
+  "build-freshness: bin/audit defines the preflight"
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'build-freshness "\$TARGET_ROOT" asan' \
+  "build-freshness: preflight probes the asan tree via target_config.py"
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'setup-target" "\$TARGET_SLUG" --build' \
+  "build-freshness: a stale/missing tree is (re)built via setup-target --build"
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'PREFLIGHT WARN: ASan build is still' \
+  "build-freshness: a build that stays stale warns and the audit continues (fail-open)"
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'Re-probe rather than trust the exit status' \
+  "build-freshness: success is re-probed, not inferred from setup-target exit code"
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'fresh|skip) return 0' \
+  "build-freshness: fresh or skip short-circuits without building"
+# Must run BEFORE the harness canary (which would otherwise smoke-test a stale
+# build).
+_bf_ln=$(grep -n '^preflight_build_freshness$' "$SCRIPT_ROOT/bin/audit" | tail -1 | cut -d: -f1)
+_canary_ln=$(grep -n 'if ! preflight_harness_check;' "$SCRIPT_ROOT/bin/audit" | head -1 | cut -d: -f1)
+if [ -n "$_bf_ln" ] && [ -n "$_canary_ln" ] && [ "$_bf_ln" -lt "$_canary_ln" ]; then
+  pass "build-freshness: preflight@${_bf_ln} runs before the harness canary@${_canary_ln}"
+else
+  fail "build-freshness: preflight runs before the harness canary" "bf=$_bf_ln canary=$_canary_ln"
+fi
+
 teardown_test_env
 summary

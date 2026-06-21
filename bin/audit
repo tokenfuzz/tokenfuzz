@@ -2684,6 +2684,46 @@ JS_CANARY
   return 0
 }
 
+# ─── Preflight: ensure the native ASan build matches the source ────
+# bin/audit owns the build lazily: if the checkout moved since build-asan was
+# compiled (an upstream pull or local edit), agents would silently audit the
+# wrong binary, because the prompt tells them not to rebuild. So before agents
+# spawn we (re)build a missing or stale native ASan tree via setup-target
+# --build, reusing the same freshness probe + stamp setup-target writes.
+#
+# Fail-open by design: not every target has a convergeable ASan recipe
+# (language targets build via cargo/go/pip; some are audited read-only), so a
+# build that can't run or fails must WARN and let the audit proceed — agents
+# treat a missing/stale artifact as ENV-BLOCKED. The probe returns "skip" for
+# browsers (handled by the canary above + ff-bsan) and non-native build
+# systems, so this is a no-op there.
+preflight_build_freshness() {
+  [ "$IS_BROWSER_TARGET" -eq 1 ] && return 0
+  local state
+  state="$(python3 "$SCRIPT_ROOT/lib/target_config.py" \
+             build-freshness "$TARGET_ROOT" asan 2>/dev/null || echo skip)"
+  case "$state" in
+    fresh|skip) return 0 ;;
+  esac
+  log "PREFLIGHT: native ASan build is '${state}' relative to source — (re)building via bin/setup-target --build before agents start (fail-open: the audit proceeds even if this cannot complete)" | tee -a "$INDEX"
+  local build_log="${LOGDIR:-$RESULTS_DIR}/setup-build.log"
+  "$SCRIPT_ROOT/bin/setup-target" "$TARGET_SLUG" --build >> "$build_log" 2>&1 || true
+  # Re-probe rather than trust the exit status: `setup-target --build` exits 0
+  # even when it skips recipe convergence (no LLM backend) or a materialize
+  # fails, so a 0 does not mean a fresh build exists. Only claim success when
+  # freshness actually confirms it.
+  local after
+  after="$(python3 "$SCRIPT_ROOT/lib/target_config.py" \
+             build-freshness "$TARGET_ROOT" asan 2>/dev/null || echo skip)"
+  case "$after" in
+    fresh|skip)
+      log "PREFLIGHT: ASan build refreshed (log: $build_log)" | tee -a "$INDEX" ;;
+    *)
+      log "PREFLIGHT WARN: ASan build is still '${after}' after auto-build (see $build_log); agents will treat missing/stale artifacts as ENV-BLOCKED — audit continues" | tee -a "$INDEX" ;;
+  esac
+  return 0
+}
+
 # Validate required external tools before doing anything expensive.
 _missing_tools=()
 for _tool in jq python3 perl; do
@@ -3391,6 +3431,12 @@ if [ "$TARGET_SLUG" = "firefox" ] \
   log "BUILD MISSING — stopped at $(date)" >> "$INDEX"
   exit 1
 fi
+
+# Pre-flight: (re)build the native ASan tree if it is missing or stale vs the
+# checkout, so agents never audit a binary built from older source. Fail-open
+# — never aborts the run (see preflight_build_freshness). Generic/native
+# targets only; a no-op for browsers and language targets.
+preflight_build_freshness
 
 # Pre-flight: verify the ASan harness actually captures traces. Catches
 # silently broken wrappers / builds where agents would write 100+ testcases

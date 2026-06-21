@@ -24,8 +24,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
-echo "[canary] bootstrapping target (keeps committed .audit/build.sh; no LLM)…"
-bin/setup-target canary --bootstrap --no-llm-config
+echo "[canary] building target (keeps committed .audit/build.sh; no LLM)…"
+bin/setup-target canary --build --no-llm-config
 
 echo "[canary] running benchmark (1 replicate, 900s/cell budget)…"
 bin/benchmark --target canary --replicates 1 --budget-wall 900 "$@"

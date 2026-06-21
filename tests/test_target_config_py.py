@@ -763,9 +763,9 @@ assert_eq("build-asan/libproject.a",
 # ─── 10e. refresh_detected_build_fields corrects <san>_bin/<san>_lib ──
 #
 # seed_toml runs before any build exists, so on a fresh target asan_lib
-# stays a commented FILL_ME. setup-target --bootstrap materializes the
-# canonical build and calls refresh_detected_build_fields to patch the
-# detected fields in — without disturbing curated sections.
+# stays a commented FILL_ME. The build step materializes the canonical
+# build and calls refresh_detected_build_fields to patch the detected
+# fields in — without disturbing curated sections.
 refresh_root = TEST_TMPDIR / "refresh-target"
 (refresh_root / "build-asan" / "lib").mkdir(parents=True)
 (refresh_root / "build-asan" / "lib" / "libwidget.a").write_bytes(b"!<arch>\n")
@@ -1158,6 +1158,145 @@ _url_unfilled = _write_toml("url_unfilled.toml",
     'target = "x"\nupstream_url = "FILL_ME"\npinned_rev = "abc123"\n')
 assert_eq(True, tc.config_has_live_placeholder(_url_unfilled),
           "config_has_live_placeholder: FILL_ME upstream with a pinned rev still refreshes")
+
+
+# ─── build_freshness / build_write_stamp ────────────────────────────
+#
+# bin/audit and bin/benchmark use these to (re)build a stale or missing
+# native sanitizer tree lazily, so a checkout that moved since the last
+# build is never audited against the wrong binary. The classifier must err
+# toward "stale" (a needless rebuild) and never toward "fresh".
+import time  # noqa: E402
+
+_bf_root = TEST_TMPDIR / "freshness"
+_bf_root.mkdir()
+(_bf_root / "main.c").write_text("int main(void){return 0;}\n")
+
+# Non-native (no CMakeLists/configure/meson) → freshness is N/A.
+assert_eq("skip", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: non-native target reports skip")
+
+# Native target, no build tree yet → missing.
+(_bf_root / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.16)\n")
+assert_eq("missing", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: native target with no build-asan reports missing")
+
+# Build dir present but never stamped → stale (built before stamping existed).
+(_bf_root / "build-asan").mkdir()
+assert_eq("stale", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: build-asan without a stamp reports stale")
+
+# Stamp it → fresh.
+assert_eq(True, tc.build_write_stamp(_bf_root, "asan"),
+          "build_write_stamp: writes the stamp when build-asan exists")
+assert_eq("fresh", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: stamped build with no newer source reports fresh")
+
+# A source edit after the stamp → stale (the core staleness signal).
+time.sleep(1)
+(_bf_root / "main.c").write_text("int main(void){return 1;}\n")
+assert_eq("stale", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: a source file newer than the stamp reports stale")
+
+# A sibling sanitizer build compiled after the asan stamp must NOT read as a
+# source edit (only the canonical build-<san> trees are pruned from the walk).
+tc.build_write_stamp(_bf_root, "asan")
+time.sleep(1)
+(_bf_root / "build-ubsan").mkdir()
+(_bf_root / "build-ubsan" / "obj.o").write_bytes(b"\0")
+assert_eq("fresh", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: a newer sibling build-<san> tree does not mark asan stale")
+
+# A source-support dir whose name merely STARTS WITH "build-" (build-aux/ is
+# the canonical autotools example, also build-scripts/, build-tools/) is real
+# source: a change under it MUST register as stale. Over-pruning every
+# "build-*" dir would hide it and produce a false "fresh" — the one direction
+# this check must never take.
+tc.build_write_stamp(_bf_root, "asan")
+time.sleep(1)
+(_bf_root / "build-aux").mkdir()
+(_bf_root / "build-aux" / "config.guess").write_text("#!/bin/sh\n")
+assert_eq("stale", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: a change under build-aux/ (source-support) reports stale")
+
+# Deletion-only change: removing a source file leaves no remaining file newer
+# than the build, so a max-mtime check would falsely report "fresh". The
+# source-state signature must catch the vanished path. (Renames are the same
+# class — a path disappears and another appears.)
+(_bf_root / "doomed.c").write_text("int doomed(void){return 0;}\n")
+tc.build_write_stamp(_bf_root, "asan")
+assert_eq("fresh", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: re-stamped tree with a known file reports fresh")
+(_bf_root / "doomed.c").unlink()
+assert_eq("stale", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: deleting a source file (nothing newer) reports stale")
+
+# build_write_stamp is a no-op (False) when the build dir is absent.
+assert_eq(False, tc.build_write_stamp(_bf_root, "msan"),
+          "build_write_stamp: no-op when build-<san> does not exist")
+
+
+# ─── seed_toml(preserve_curated=...) ────────────────────────────────
+#
+# A placeholder refresh re-renders the template but must carry curated
+# [threat_model].attacker_controls and the whole [s6_peers] section (which a
+# plain seed never emits) forward — see bin/setup-target. preserve_curated=False
+# (the full-reseed default) resets them.
+_seed_root = TEST_TMPDIR / "seed-preserve"
+_seed_root.mkdir()
+(_seed_root / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.16)\n")
+_seed_out = _seed_root / "target.toml"
+_curated = (
+    'target = "seed-preserve"\n'
+    'build_system = "cmake"\n'
+    '[threat_model]\n'
+    'attacker_controls = ["bytes", "call-sequence", "protocol-state"]\n'
+    '[s6_peers]\n'
+    'domain = "JSON"\n'
+    'peers = ["rapidjson", "simdjson"]\n'
+)
+
+# preserve_curated=True keeps both curated sections.
+_seed_out.write_text(_curated, encoding="utf-8")
+tc.seed_toml(_seed_root, _seed_out, preserve_curated=True)
+_kept = tc.parse_toml(_seed_out)
+assert_eq(["bytes", "call-sequence", "protocol-state"],
+          _kept.get("threat_model", {}).get("attacker_controls"),
+          "seed_toml(preserve_curated=True): keeps curated attacker_controls")
+assert_eq(["rapidjson", "simdjson"], _kept.get("s6_peers", {}).get("peers"),
+          "seed_toml(preserve_curated=True): keeps curated [s6_peers] peers")
+assert_eq("JSON", _kept.get("s6_peers", {}).get("domain"),
+          "seed_toml(preserve_curated=True): keeps curated s6 domain")
+
+# preserve_curated=False (default) resets attacker_controls to the seed default
+# and drops [s6_peers] entirely.
+_seed_out.write_text(_curated, encoding="utf-8")
+tc.seed_toml(_seed_root, _seed_out)
+_reset = tc.parse_toml(_seed_out)
+assert_eq(None, _reset.get("s6_peers"),
+          "seed_toml(default): a full re-seed drops [s6_peers]")
+if _reset.get("threat_model", {}).get("attacker_controls") != [
+        "bytes", "call-sequence", "protocol-state"]:
+    passed("seed_toml(default): a full re-seed resets attacker_controls")
+else:
+    failed("seed_toml(default): a full re-seed resets attacker_controls",
+           "curated controls survived a non-preserving seed")
+
+# A preserved control containing a double-quote must be TOML-escaped on
+# re-render, not emitted raw (which would corrupt the whole file). The value
+# must survive the round-trip intact.
+_seed_out.write_text(
+    'target = "x"\nbuild_system = "cmake"\n'
+    '[threat_model]\nattacker_controls = ["a\\"b", "bytes"]\n',
+    encoding="utf-8")
+tc.seed_toml(_seed_root, _seed_out, preserve_curated=True)
+try:
+    _esc = tc.parse_toml(_seed_out)
+    assert_eq(['a"b', "bytes"], _esc.get("threat_model", {}).get("attacker_controls"),
+              "seed_toml(preserve): a quoted attacker_control round-trips, valid TOML")
+except Exception as _e:  # noqa: BLE001
+    failed("seed_toml(preserve): a quoted attacker_control round-trips, valid TOML",
+           f"re-render produced invalid TOML: {_e}")
 
 
 # ─── Cleanup + summary ──────────────────────────────────────────────

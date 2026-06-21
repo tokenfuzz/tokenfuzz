@@ -30,6 +30,7 @@ Two interfaces:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -1125,8 +1126,8 @@ def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
     the build step), so on a fresh target it cannot detect these fields and
     leaves them commented FILL_ME; on a target rebuilt under different cmake
     options a previously-detected path can also go stale. setup-target
-    --bootstrap calls this after materializing the canonical build to repair
-    that ordering — a surgical line edit, not a re-seed, so the LLM-curated
+    calls this after materializing the canonical build to repair that
+    ordering — a surgical line edit, not a re-seed, so the LLM-curated
     [threat_model]/[s6_peers] survive."""
     if target_root.name in _BROWSER_SLUGS:
         return False  # browsers use fixed bin candidates; no harness lib link
@@ -1366,6 +1367,120 @@ def _detect_java_runner() -> tuple[str, list[str]]:
     return "", []
 
 
+# ─── Build freshness (audit-owned lazy build) ───────────────────────
+#
+# bin/audit and bin/benchmark are the consumption points: they (re)build a
+# stale or missing native sanitizer tree on demand so a checkout that moved
+# since the last build is never audited against the wrong binary. These two
+# helpers are the cheap probe and the stamp those callers and `setup-target
+# --build` share. Native C/C++ only — language targets (cargo/go/pip) and
+# browsers build elsewhere and report "skip".
+_NATIVE_BUILD_SYSTEMS = {"cmake", "autotools", "meson"}
+# VCS metadata and generated caches — never source whose change should force a
+# rebuild. Pruned from the mtime walk so a fresh .audit log or __pycache__ entry
+# can't masquerade as a source edit. (The sanitizer build trees themselves are
+# pruned separately, by exact name — see san_build_dirs in build_freshness.)
+_FRESHNESS_PRUNE_DIRS = {".git", ".hg", ".audit", "__pycache__", "node_modules"}
+
+
+def _build_dir_for(target_root: Path, san: str) -> Path:
+    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    return Path(target_root) / f"build-{san}{suffix}"
+
+
+def _source_state_signature(root: Path) -> str:
+    """Hash the (relative path, mtime) of every source file under root.
+
+    Compared across a build, a change in this signature flags ANY source-tree
+    edit — modification or addition (an mtime/path appears), AND deletion or
+    rename (a path disappears), which a bare max-mtime check misses because no
+    remaining file is newer. Prunes VCS/cache dirs and only the canonical
+    sanitizer build trees by exact name, so a sibling build compiled later (or
+    this san's own tree) is excluded, while a source-support dir like build-aux/
+    is still hashed. Errs toward "changed": any touch flips it (a harmless
+    rebuild), but nothing real slips through as unchanged."""
+    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    san_build_dirs = {
+        f"build-{s}{sfx}"
+        for s in ("asan", "ubsan", "msan", "tsan")
+        for sfx in ("", suffix)
+    }
+    entries: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _FRESHNESS_PRUNE_DIRS and d not in san_build_dirs
+        ]
+        for fn in filenames:
+            fp = Path(dirpath) / fn
+            try:
+                mt = fp.stat().st_mtime
+            except OSError:
+                continue  # races/broken symlinks: not a staleness signal
+            entries.append(f"{os.path.relpath(fp, root)}\0{mt:.3f}")
+    entries.sort()
+    return hashlib.sha1(
+        "\n".join(entries).encode("utf-8", "surrogatepass")
+    ).hexdigest()
+
+
+def build_write_stamp(target_root: "str | os.PathLike", san: str) -> bool:
+    """Mark build-<san> as current with the source tree as of now.
+
+    Writes build-<san>/.audit-build-stamp with the detected rev (line 1, for
+    human diagnostics) and a source-state signature (line 2) that build_freshness
+    recomputes and compares. Returns False (no-op) when the build dir does not
+    exist."""
+    root = Path(target_root)
+    build_dir = _build_dir_for(root, san)
+    if not build_dir.is_dir():
+        return False
+    rev = detect_rev(root) or ""
+    sig = _source_state_signature(root)
+    (build_dir / ".audit-build-stamp").write_text(
+        f"{rev}\n{sig}\n", encoding="utf-8")
+    return True
+
+
+def build_freshness(target_root: "str | os.PathLike", san: str = "asan") -> str:
+    """Classify build-<san> against the current source tree.
+
+    Returns one of:
+      * "skip"    — browser, or not a native C/C++ build system: no
+                    build-<san> tree is expected, so freshness is N/A and
+                    the caller must not try to (re)build one.
+      * "missing" — native target with no build-<san> tree yet.
+      * "stale"   — the source-state signature differs from the recorded
+                    stamp (an upstream pull, branch switch, or local edit,
+                    add, delete, or rename since the build), or the stamp
+                    predates this mechanism.
+      * "fresh"   — build-<san> exists and the source signature still matches.
+
+    The signature (see _source_state_signature) catches every update mode
+    uniformly — VCS or not, including deletion-only changes — and errs toward
+    "stale" (a needless rebuild), never toward "fresh", which would audit the
+    wrong binary."""
+    root = Path(target_root)
+    if root.name in _BROWSER_SLUGS:
+        return "skip"
+    if _detect_build_system(root) not in _NATIVE_BUILD_SYSTEMS:
+        return "skip"
+    build_dir = _build_dir_for(root, san)
+    if not build_dir.is_dir():
+        return "missing"
+    stamp = build_dir / ".audit-build-stamp"
+    if not stamp.exists():
+        return "stale"  # built before stamping existed → rebuild to be safe
+    try:
+        stamp_lines = stamp.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return "stale"
+    stored_sig = stamp_lines[1] if len(stamp_lines) >= 2 else ""
+    if not stored_sig:
+        return "stale"  # old-format (rev-only) stamp → rebuild to upgrade it
+    return "fresh" if _source_state_signature(root) == stored_sig else "stale"
+
+
 def language_runner_defaults(build_system: str) -> dict:
     """Return the default [runner] block for a build_system, or {}."""
     defaults = {k: (list(v) if isinstance(v, list) else v)
@@ -1407,12 +1522,50 @@ def seed_toml(
     target_root: str | os.PathLike,
     out_path: str | os.PathLike,
     upstream_url: str = "",
+    preserve_curated: bool = False,
 ) -> None:
-    """Seed a starter target.toml — best-effort introspection."""
+    """Seed a starter target.toml — best-effort introspection.
+
+    When ``preserve_curated`` is set and out_path already parses, the curated
+    sections a fresh seed cannot re-derive — [threat_model].attacker_controls
+    and the whole [s6_peers] block — are carried over from the existing file
+    instead of reset to the conservative default (attacker_controls) or dropped
+    (s6_peers, which a plain seed never emits). bin/setup-target uses this for a
+    placeholder refresh, so filling one unrelated FILL_ME never discards an
+    operator's hand- or LLM-curated threat model / peer set. A full re-seed
+    (--force, missing, or unparseable file) leaves it False and regenerates."""
     root = Path(target_root)
     out = Path(out_path)
     slug = root.name
     is_browser = slug in _BROWSER_SLUGS
+
+    # Read the curated sections to carry forward BEFORE the template is built,
+    # so the render below can substitute them in place of the seed defaults.
+    preserved_controls: Optional[list[str]] = None
+    preserved_s6: Optional[tuple[str, list[str]]] = None
+    if preserve_curated and out.exists():
+        try:
+            _existing = parse_toml(out)
+        except Exception:
+            _existing = {}
+        _tm = _existing.get("threat_model")
+        if isinstance(_tm, dict):
+            _ac = _tm.get("attacker_controls")
+            if isinstance(_ac, list):
+                _ac = [str(x) for x in _ac if isinstance(x, str) and x]
+                if _ac:
+                    preserved_controls = _ac
+        _s6 = _existing.get("s6_peers")
+        if isinstance(_s6, dict):
+            _peers = _s6.get("peers")
+            if isinstance(_peers, list):
+                _peers = [str(p) for p in _peers if isinstance(p, str) and p]
+                if _peers:
+                    _dom = _s6.get("domain")
+                    preserved_s6 = (
+                        str(_dom) if isinstance(_dom, str) else "",
+                        _peers,
+                    )
     # Detected up front: declared_cli_names() needs the build system to know
     # which manifest to read when biasing the asan_bin guess below.
     build_system = _detect_build_system(root)
@@ -1522,8 +1675,15 @@ def seed_toml(
         "# for an LLM-suggested model, or edit attacker_controls by hand.",
         "[threat_model]",
     ]
-    attacker_controls = attacker_controls_for_seed(slug, is_browser)
-    controls_rendered = ", ".join(f'"{v}"' for v in attacker_controls)
+    attacker_controls = (
+        preserved_controls if preserved_controls is not None
+        else attacker_controls_for_seed(slug, is_browser)
+    )
+    # toml_basic_string escapes embedded quotes/backslashes. Default tokens are
+    # clean, but a preserved value carried over from a hand-edited config may
+    # contain a quote — a raw f'"{v}"' would emit invalid TOML and corrupt the
+    # whole file on the next placeholder refresh.
+    controls_rendered = ", ".join(toml_basic_string(v) for v in attacker_controls)
     lines.append(f"attacker_controls = [{controls_rendered}]")
 
     # Per-sanitizer harness-link library. ubsan/msan/tsan are detected the
@@ -1705,6 +1865,22 @@ def seed_toml(
             if args:
                 rendered = ", ".join(f'"{a}"' for a in args)
                 lines.append(f"{key:<10} = [{rendered}]")
+
+    # Carry a curated [s6_peers] forward. A plain seed never emits this section
+    # (it is added by bin/suggest-peers / hand edits), so without this a
+    # placeholder refresh would silently drop the operator's peer set.
+    if preserved_s6 is not None:
+        domain, peers = preserved_s6
+        lines += [
+            "",
+            "# ── S6 peers (cross-project variant mining) — preserved from prior config ──",
+            "[s6_peers]",
+        ]
+        if domain:
+            lines.append(f"domain = {toml_basic_string(domain)}")
+        lines.append(
+            "peers = [" + ", ".join(toml_basic_string(p) for p in peers) + "]"
+        )
 
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -2138,7 +2314,8 @@ def _cmd_parse_toml(args) -> int:
 
 
 def _cmd_seed_toml(args) -> int:
-    seed_toml(args.target_root, args.out, args.upstream_url or "")
+    seed_toml(args.target_root, args.out, args.upstream_url or "",
+              preserve_curated=args.preserve_curated)
     return 0
 
 
@@ -2198,6 +2375,17 @@ def _cmd_config_needs_reseed(args) -> int:
     return 0 if config_has_live_placeholder(Path(args.file)) else 1
 
 
+def _cmd_build_freshness(args) -> int:
+    # Print skip|missing|stale|fresh for the bash callers to branch on.
+    print(build_freshness(args.target_root, args.sanitizer))
+    return 0
+
+
+def _cmd_build_write_stamp(args) -> int:
+    build_write_stamp(args.target_root, args.sanitizer)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="lib/target_config.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2211,6 +2399,9 @@ def main(argv: list[str]) -> int:
     sp.add_argument("target_root")
     sp.add_argument("out")
     sp.add_argument("upstream_url", nargs="?", default="")
+    sp.add_argument("--preserve-curated", action="store_true",
+                    help="carry curated [threat_model]/[s6_peers] forward from "
+                         "an existing out file (placeholder refresh)")
     sp.set_defaults(func=_cmd_seed_toml)
 
     sp = sub.add_parser("refresh-build-fields")
@@ -2221,6 +2412,16 @@ def main(argv: list[str]) -> int:
     sp = sub.add_parser("config-needs-reseed")
     sp.add_argument("file")
     sp.set_defaults(func=_cmd_config_needs_reseed)
+
+    sp = sub.add_parser("build-freshness")
+    sp.add_argument("target_root")
+    sp.add_argument("sanitizer", nargs="?", default="asan")
+    sp.set_defaults(func=_cmd_build_freshness)
+
+    sp = sub.add_parser("build-write-stamp")
+    sp.add_argument("target_root")
+    sp.add_argument("sanitizer", nargs="?", default="asan")
+    sp.set_defaults(func=_cmd_build_write_stamp)
 
     sp = sub.add_parser("detect-rev")
     sp.add_argument("target_root")

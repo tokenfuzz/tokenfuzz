@@ -252,12 +252,13 @@ See
 [Target config reference](../reference/target-toml.md#sanitizers)
 for the full field list and per-sanitizer binary overrides.
 
-`bin/setup-target <target> --bootstrap` builds every C/C++ sanitizer in
-`enabled`, not just ASan: it converges a per-sanitizer recipe
-(`.audit/build-<san>.sh`), compiles `build-<san>/`, and fills the
-detected `<san>_bin` / `<san>_lib` paths. ASan is required; the others
-are best-effort and a failed one only warns. (`race` builds through the
-Go toolchain, not this step.) The end-to-end walkthrough is in
+`bin/audit` builds every C/C++ sanitizer in `enabled`, not just ASan, on
+its first run (or `bin/setup-target <target> --build` to do it up front):
+it converges a per-sanitizer recipe (`.audit/build-<san>.sh`), compiles
+`build-<san>/`, and fills the detected `<san>_bin` / `<san>_lib` paths.
+ASan is required; the others are best-effort and a failed one only warns.
+(`race` builds through the Go toolchain, not this step.) The end-to-end
+walkthrough is in
 [Auditing with UBSan, MSan, or TSan](../getting-started/first-audit.md#auditing-with-ubsan-msan-or-tsan).
 
 Even when another sanitizer is enabled, ASan remains the usual first

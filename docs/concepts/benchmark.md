@@ -220,8 +220,9 @@ benchmark (the canary is tiny, so one replicate and a small budget suffice):
 
 ```bash
 targets/canary/run-benchmark.sh
-# equivalently, by hand:
-#   bin/setup-target canary --bootstrap --no-llm-config
+# equivalently, by hand (bin/benchmark builds the ASan binary itself; add
+# `bin/setup-target canary --build` first only to pre-build):
+#   bin/setup-target canary --no-llm-config
 #   bin/benchmark --target canary --replicates 1 --budget-wall 900
 ```
 

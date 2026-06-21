@@ -65,7 +65,7 @@ Advanced flags:
 ```bash
 bin/setup-target <target> <repo-url> --no-update
 bin/setup-target <target> --force-config
-bin/setup-target <target> --bootstrap
+bin/setup-target <target> --build
 bin/setup-target <target> --no-llm-config
 ```
 
@@ -74,9 +74,12 @@ What each flag does:
 - `--no-update` — skip the pull when passing a repo URL or ref.
 - `--force-config` — explicitly regenerate `target.toml` and overwrite
   LLM-suggested `[threat_model]` / `[s6_peers]` sections.
-- `--bootstrap` — run an optional language build step for non-C/C++
-  targets (Python C extensions, `npm install`, `composer install`,
-  …). See [Add a target](../getting-started/add-a-target.md).
+- `--build` — optional: build the checkout now (converge the C/C++ ASan
+  recipe and compile `build-<san>/`, or run the language build step:
+  Python C extensions, `npm install`, `composer install`, …) instead of
+  letting `bin/audit` build it lazily on first run. Never required, and
+  never re-seeds an existing `target.toml`. See
+  [Add a target](../getting-started/add-a-target.md).
 - `--no-llm-config` — skip the best-effort threat-model and S6 lookalike project
   suggestions. Not recommended unless you have a specific reason to
   stay offline; the LLM-suggested values are usually a better starting
@@ -522,7 +525,7 @@ directory listing from being mysterious:
 
 | Command | Invoked by | What it does |
 | --- | --- | --- |
-| `bin/auto-build-script` | `setup-target --bootstrap` | Converges on a working sanitizer build recipe via an LLM and writes it to `targets/<target>/.audit/build.sh`. |
+| `bin/auto-build-script` | `bin/audit` (lazy, first run); `setup-target --build` | Converges on a working sanitizer build recipe via an LLM and writes it to `targets/<target>/.audit/build.sh`. |
 | `bin/auto-repair-target-toml` | triage, after repeated C/C++ harness build failures | Proposes a conservative additive repair to `includes` / `defines` / `link_libs`, with a `target.toml.bak.<timestamp>` backup. Disable with `TARGET_TOML_AUTO_REPAIR=0`. |
 | `bin/rank-work` | `bin/audit` | Builds and ranks the concrete work cards agents claim. |
 | `bin/patch-cards` | `bin/audit` | Builds S1 prior-fix cards from the target's recent fix commits. |

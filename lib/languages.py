@@ -151,17 +151,18 @@ class Language:
     work_mode: str = ""
 
     # Source-tree bootstrap. Tuple-of-tuples; each inner tuple is
-    # argv-style (no shell expansion). When provided, bin/setup-target
-    # --bootstrap runs them sequentially inside TARGET_ROOT. Use this
-    # to compile C extensions, run cargo build, etc. before the audit
-    # loop starts. Recipes are RELEASE mode (NDEBUG, -O2-class) so the
-    # build does not pull in debug-only asserts that fire as noise
-    # rather than security signal — see sanitizer_env below.
+    # argv-style (no shell expansion). When provided, the build step
+    # (bin/audit lazily, or bin/setup-target --build) runs them
+    # sequentially inside TARGET_ROOT. Use this to compile C extensions,
+    # run cargo build, etc. before the audit loop starts. Recipes are
+    # RELEASE mode (NDEBUG, -O2-class) so the build does not pull in
+    # debug-only asserts that fire as noise rather than security signal —
+    # see sanitizer_env below.
     bootstrap_cmds: tuple[tuple[str, ...], ...] = ()
 
     # When True, bootstrap is gated on the presence of a manifest file
     # in TARGET_ROOT (setup.py, pyproject.toml, Cargo.toml, ...).
-    # Empty means "always run when --bootstrap is requested".
+    # Empty means "always run when a build is requested".
     bootstrap_manifests: tuple[str, ...] = ()
 
     # Fallback alternatives tried when the LAST bootstrap_cmd fails.
