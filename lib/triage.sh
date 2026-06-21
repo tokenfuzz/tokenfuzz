@@ -2759,6 +2759,74 @@ llm_find_quality_decision() {
 # isolation contract as _triage_one_crash_dir: every write lands inside
 # this dir or goes through flock'd bin/state, so the pool in
 # validate_find_gate can run different dirs concurrently.
+
+# Move a rejected finding to findings-rejected/ and record it. Factored so the
+# quality-quorum gate and the trigger gate produce an identical on-disk shape
+# (the benchmark counts findings by directory presence, so a demote MUST be a
+# physical move). $4=DROP audit-log tail, $5=reason for bin/state. Returns 0 on
+# move, 1 if it could not move (finding left in place).
+_triage_quarantine_find_dir() {
+  local d="$1" id="$2" bin_dir="$3" drop_msg="$4" state_reason="$5"
+  local qroot="${FIND_GATE_QUARANTINE_DIR:-$RESULTS_DIR/findings-rejected}"
+  mkdir -p "$qroot" 2>/dev/null || true
+  local target="$qroot/$id"
+  [ -e "$target" ] && target="${target}.$(date -u +%Y%m%dT%H%M%SZ)"
+  if mv "$d" "$target" 2>/dev/null; then
+    local rel_target="${target#$RESULTS_DIR/}"
+    [ "$rel_target" != "$target" ] || rel_target="$(basename "$qroot")/$(basename "$target")"
+    audit_log "DROP: findings/${id} → ${rel_target} — ${drop_msg}" \
+      | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
+    # SOFT-block linked WORK-recon cards; recoverable via
+    # `bin/state update-card --status unclaimed` if the reject is wrong.
+    if [ -x "${bin_dir:-bin}/state" ]; then
+      "${bin_dir:-bin}/state" \
+        --results-dir "$RESULTS_DIR" \
+        --target-path "${TARGET_ROOT:-}" \
+        --target-slug "${TARGET_SLUG:-}" \
+        mark-finding-rejected --find-id "$id" --reason "$state_reason" \
+        >/dev/null 2>&1 || true
+    fi
+    return 0
+  fi
+  audit_log "WARN: could not quarantine findings/${id}; leaving in place" \
+    | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
+  return 1
+}
+
+# Demote-only trigger-provenance gate for an already-accepted finding. Rejects
+# (moves to findings-rejected/) ONLY when `validate-finding --gate trigger`
+# votes Reject — which, by that tool's own rule, requires an affirmative source
+# disproof (an unsupported Reject is downgraded to Uncertain there). Promote,
+# Uncertain and parse-failure all KEEP. It can never promote and never runs on
+# crashes (findings-only path). It calls validate-finding DIRECTLY, not the
+# triage_validate_finding quorum, whose "any Reject is fatal + skeptical
+# tiebreak" semantics are wrong for a recall-safe demote. The vote file doubles
+# as the done-marker so a resume neither re-runs nor oscillates. Backend is the
+# run's own. Returns 0 if it demoted the finding (caller stops), else 1 (keep).
+_triage_trigger_provenance_gate() {
+  local d="$1" id="$2" desc="$3" bin_dir="$4"
+  [ "${LLM_DECIDE_DISABLE:-0}" = "1" ] && return 1
+  local vote_file="$d/.trigger-gate.json"
+  [ -s "$vote_file" ] && return 1           # already gated → keep as decided
+  [ -s "$desc" ] && [ -d "${TARGET_ROOT:-}" ] || return 1
+  # The run's resolved single backend (a fork-inherited audit var, the same one
+  # llm_find_quality_decision uses here). Not AUDIT_BACKEND — that can be "all".
+  local vb="${ACTIVE_BACKEND:-}"
+  [ -n "$vb" ] || return 1
+  # MODEL is the run's resolved model (fork-inherited, like ACTIVE_BACKEND). It
+  # must be forwarded explicitly — validate-finding is a subprocess and would
+  # otherwise fall back to the backend default (and oss has no usable default).
+  local rc=0
+  "${bin_dir:-bin}/validate-finding" --finding "$desc" --target-path "$TARGET_ROOT" \
+    --backend "$vb" ${MODEL:+--model "$MODEL"} --gate trigger --output "$vote_file" >/dev/null 2>&1 || rc=$?
+  # Recall-safe: ONLY rc=1 (a disproof-backed Reject) demotes; everything keeps.
+  if [ "$rc" = 1 ]; then
+    local msg="trigger-provenance: triggering state not attacker-reachable"
+    _triage_quarantine_find_dir "$d" "$id" "$bin_dir" "$msg" "$msg" && return 0
+  fi
+  return 1
+}
+
 _validate_one_find_dir() {
   local d="$1" bin_dir="$2"
   [ -d "$d" ] || return 0
@@ -2825,39 +2893,8 @@ _validate_one_find_dir() {
       case "$quorum" in ''|*[!0-9]*) quorum=2 ;; esac
       if [ "$accept" = "false" ]; then
         if [ "$reject_count" -ge "$quorum" ]; then
-          local qroot="${FIND_GATE_QUARANTINE_DIR:-$RESULTS_DIR/findings-rejected}"
-          mkdir -p "$qroot" 2>/dev/null || true
-          local target="$qroot/$id"
-          # Avoid clobbering a prior quarantine of the same id by
-          # suffixing a timestamp on collision.
-          if [ -e "$target" ]; then
-            target="${target}.$(date -u +%Y%m%dT%H%M%SZ)"
-          fi
-          if mv "$d" "$target" 2>/dev/null; then
-            local rel_target="${target#$RESULTS_DIR/}"
-            [ "$rel_target" != "$target" ] || rel_target="$(basename "$qroot")/$(basename "$target")"
-            audit_log "DROP: findings/${id} → ${rel_target} — non-security (${reject_count}/${quorum} reject): ${reason}" \
-              | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
-            # Propagate the rejection to every WORK-recon-* card linked
-            # to this FIND directory. Without this, the queue ranker
-            # keeps surfacing the card for hours after the judges have
-            # already said it's not a security bug (observed: 37 PLAN
-            # entries on parse_id after the FIND was rejected). The
-            # cards are marked SOFT-blocked, recoverable via
-            # `bin/state update-card --status unclaimed` if the
-            # rejection turns out wrong.
-            if [ -x "${bin_dir:-bin}/state" ]; then
-              "${bin_dir:-bin}/state" \
-                --results-dir "$RESULTS_DIR" \
-                --target-path "${TARGET_ROOT:-}" \
-                --target-slug "${TARGET_SLUG:-}" \
-                mark-finding-rejected --find-id "$id" --reason "$reason" \
-                >/dev/null 2>&1 || true
-            fi
-          else
-            audit_log "WARN: could not quarantine findings/${id}; leaving in place" \
-              | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
-          fi
+          _triage_quarantine_find_dir "$d" "$id" "$bin_dir" \
+            "non-security (${reject_count}/${quorum} reject): ${reason}" "$reason" || true
           return 0
         else
           # Pending second verdict — leave dir in place with a marker so
@@ -2877,6 +2914,10 @@ _validate_one_find_dir() {
         rm -f "$d/.pending-drop" 2>/dev/null || true
       fi
     fi
+
+    # Demote-only trigger-provenance gate: the finding has passed the accept
+    # gate above; this can only move it to findings-rejected/, never promote.
+    _triage_trigger_provenance_gate "$d" "$id" "$desc" "$bin_dir" && return 0
 
     # Reachability annotation (same helper crashes use). Best-effort.
     # The LLM hybrid pass fills missing structured fields beforehand so

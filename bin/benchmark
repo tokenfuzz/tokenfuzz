@@ -2040,7 +2040,7 @@ for cond in "${COND_ARR[@]}"; do
       # / uncertain findings move to findings-rejected/ before harvest.
       if [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "1" ] \
           && [ -n "$results_dir" ] && [ -d "$results_dir/findings" ]; then
-        TRIAGE_VALIDATE_BACKEND="$BACKEND" \
+        TRIAGE_VALIDATE_BACKEND="$BACKEND" TRIAGE_VALIDATE_MODEL="$model" \
           triage_validate_confirm_findings "$results_dir/findings" \
             "$SCRIPT_ROOT/targets/$TARGET_SLUG" "$results_dir/findings-rejected" \
             >/dev/null 2>&1
@@ -2051,8 +2051,7 @@ for cond in "${COND_ARR[@]}"; do
         # renders it as a permanent "Pending" severity. The gate caches
         # per-FIND, so re-running is idempotent and adds no LLM calls for
         # already-decided findings.
-        RESULTS_DIR="$results_dir" \
-        ACTIVE_BACKEND="$BACKEND" \
+        RESULTS_DIR="$results_dir" ACTIVE_BACKEND="$BACKEND" MODEL="$model" \
           validate_find_gate >/dev/null 2>&1 || true
       fi
     else

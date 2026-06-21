@@ -21,6 +21,7 @@ required_templates=(
   audit_goal_framing.md.j2
   audit_recon.md.j2
   validate_finding.md.j2
+  validate_trigger_provenance.md.j2
   suggest_peers.md.j2
   suggest_threat_model.md.j2
   peer_fix_distill.md.j2
@@ -65,6 +66,17 @@ assert_match "index-out-of-bounds" "$rendered" \
 rendered=$(python3 "$renderer" oss_tool_preflight.md.j2)
 assert_match "file read tool" "$rendered" "oss preflight template asks for the read tool"
 assert_match "oss-tool-sentinel.txt" "$rendered" "oss preflight template names the sentinel path"
+
+# Trigger-provenance gate: must interpolate the finding + target and keep the
+# recall-safe framing (affirmative disproof only; self-declared fields are not
+# evidence) so a future edit can't silently turn it into an eager rejecter.
+rendered=$(python3 "$renderer" validate_trigger_provenance.md.j2 \
+  --var 'target_path=/tmp/tgt' --var 'candidate_json={"id":"X"}' \
+  --var 'skeptic_block=' --var 'timeout_secs=300')
+assert_match "/tmp/tgt" "$rendered" "trigger gate interpolates target_path"
+assert_match '"id":"X"' "$rendered" "trigger gate interpolates candidate_json"
+assert_match "affirmative disproof" "$rendered" "trigger gate keeps the affirmative-disproof rule"
+assert_match "NOT evidence" "$rendered" "trigger gate keeps the fields-are-not-evidence guard"
 
 # audit_recon pulls its opener from the shared goal_framing partial, the
 # same as build_recon_prompt does — render and pass it through here too.

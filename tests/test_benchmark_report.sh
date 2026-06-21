@@ -246,6 +246,10 @@ assert_match 'findings: rejected=0 confirmed=0 unique=0; crashes: rejected=0 con
 # this keeps model-direct on par so rejected finds move (and counts settle).
 assert_file_contains "$BENCH" 'validate_find_gate >/dev/null 2>&1' \
   "T25h: model-direct findings gate runs validate_find_gate (quarantines find-quality rejects)"
+assert_file_contains "$BENCH" 'TRIAGE_VALIDATE_BACKEND="\$BACKEND" TRIAGE_VALIDATE_MODEL="\$model"' \
+  "T25i: model-direct independent validator gets benchmark model"
+assert_file_contains "$BENCH" 'RESULTS_DIR="\$results_dir" ACTIVE_BACKEND="\$BACKEND" MODEL="\$model"' \
+  "T25j: model-direct find gate gets benchmark model for trigger gate"
 
 # ── T26: rendered prompt embeds both absolute paths ─────────────────────
 prompt_file="$cell_dir/prompt.txt"

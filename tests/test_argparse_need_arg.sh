@@ -40,6 +40,7 @@ ROWS=(
   "validate-finding  --target-path   4"
   "validate-finding  --backend       4"
   "validate-finding  --model         4"
+  "validate-finding  --gate          4"
   "validate-finding  --output        4"
   "validate-finding  --timeout       4"
 )

@@ -1,0 +1,99 @@
+You are an independent reviewer doing a second-opinion pass on a security
+finding for the project at {{ target_path }}. You have NOT seen this finding
+before. Treat the structured facts below as claims to verify, not as a
+conclusion to rubber-stamp.
+
+# Finding under review (opaque facts)
+
+```json
+{{ candidate_json }}
+```
+
+# Your job: trigger-provenance
+
+A large share of false findings share ONE structural defect: the bug only
+"exists" if the program is first driven into a state it can never actually
+reach from attacker-controlled input. The code is fine for every input a real
+attacker can supply; the report implicitly assumes a starting state the
+program's own invariants forbid.
+
+Your single question is therefore about the **provenance of the triggering
+state**, not the bug mechanics:
+
+> Can an attacker drive this program into the triggering state from a
+> public / untrusted entry point, **without** any of the following?
+>   (a) hand-forging or corrupting an internal object that real code only
+>       ever produces through a constructor/allocator that enforces an
+>       invariant the bug needs broken (e.g. a "malformed" compiled object,
+>       a corrupted handle, a struct with a field no public path can set);
+>   (b) calling an internal-only / private mutator that has no caller chain
+>       from any public, attacker-reachable entry;
+>   (c) the *caller* violating a precondition that the LIBRARY itself is not
+>       responsible for enforcing on untrusted input (a documented-contract
+>       "violation" the application, not an attacker, would have to commit);
+>   (d) the location living in code that does not ship in the product
+>       (test/fuzz/example/benchmark/demo harness, a language-binding test
+>       driver, a code generator, or a dead `#ifdef` not compiled in the
+>       shipped build).
+
+# Method
+
+1. Identify the triggering state the primitive needs (the exact object,
+   buffer, length, or call-sequence that must hold for the bug to fire).
+2. Start from a public / attacker-reachable entry per the threat model and
+   **try to CONSTRUCT a path to that state** — an input byte string, a file,
+   or a concrete sequence of public API calls. Spend at least one tool call
+   actually attempting the construction by reading source.
+3. If you reach the state, write down the path (the real bug survives).
+4. If you cannot, determine WHY: read the constructor/guard that stands in
+   the way and confirm it enforces the invariant on every path. Affirmative
+   disproof means naming the file:function that blocks every route into the
+   triggering state — not merely "I didn't find a path."
+
+# Surface scope (read before voting)
+
+This challenge is calibrated for native memory-safety / library-API findings,
+where "unreachable trigger" is the dominant false-finding mode. It is the
+WRONG axis for web / application / protocol / configuration / concurrency
+logic bugs, where the triggering path is trivially reachable and realness is
+a *semantic* property (an origin boundary crossed, an authz check weakened, a
+gadget reached). If this finding is one of those — judge by `surface` /
+`class` and the narrative — do **not** apply the construction challenge:
+vote **Uncertain** and say the trigger-provenance axis does not apply, so the
+finding is preserved for a semantic review.
+{{ skeptic_block }}
+# Vote
+
+Default to preserving the finding. A wrong Reject permanently hides a real
+bug; a wrong Promote/Uncertain only costs a downstream review. Reject ONLY on
+affirmative disproof.
+
+This is the ONE question that may reject a finding here — do not invent
+secondary reasons, and do not let several weak signals add up to a Reject.
+In particular, the report's self-declared fields (`caller_contract`,
+`parameter_control`, `trigger_source`, …) are NOT evidence: a real bug very
+often shows `caller_contract: violated` precisely because enforcing that
+contract on untrusted input is the LIBRARY's job. Reject only when you have
+READ the source and can name the specific constructor or guard that makes the
+triggering state unreachable from every attacker entry. Whenever two readings
+are defensible, keep the finding (Uncertain).
+
+Output ONE JSON object on a single line, nothing else:
+
+```json
+{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<the attacker-reachable path you constructed, or the empty string>","disproof":"<for Reject only: file:function of the invariant/constructor that blocks every route into the triggering state, plus which of (a)-(d) applies>","surface_applies":"yes|no"}
+```
+
+Definitions:
+- **Promote**: you constructed a concrete attacker-reachable path (bytes or a
+  public call sequence) into the triggering state. The trigger is real.
+- **Reject**: affirmative disproof — every route into the triggering state is
+  blocked by a named, enforced invariant (cite it), OR the trigger requires a
+  forged object / internal-only mutator with no public caller, OR the location
+  does not ship (one of (a)-(d)). Name the code; do not reject on absence of a
+  path you simply could not find.
+- **Uncertain**: you can neither construct a path nor affirmatively disprove
+  one in the budget, OR the surface is not in scope for this challenge. Name
+  what would settle it. This preserves the finding downstream.
+
+Budget: {{ timeout_secs }}s wall time, ~60 tool calls. Be calibrated.

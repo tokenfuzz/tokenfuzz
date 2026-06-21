@@ -58,6 +58,11 @@ Options:
   --tiebreak                Use the tiebreak prompt: more skeptical, requires
                             stronger evidence to vote Promote. Use for the
                             third validator after an initial Uncertain.
+  --gate <name>             Validator prompt: finding (default, full
+                            reachability/guards/primitive review) or trigger
+                            (trigger-provenance — demote-only; a Reject is
+                            honoured only with an affirmative source disproof,
+                            else downgraded to Uncertain). Same exit codes.
   --output <path>           Write validator response JSON here. Default:
                             <finding-dir>/validator-vote-<n>.json
   --timeout <secs>          Validator wall-time budget. Default: 300
@@ -74,6 +79,7 @@ MODEL=""
 TIEBREAK=0
 OUTPUT=""
 TIMEOUT_SECS=300
+GATE="finding"
 
 require_arg() {
   # Guard value-bearing flags against missing values under `set -u`.
@@ -91,6 +97,7 @@ while [ $# -gt 0 ]; do
     --backend) require_arg "$@"; BACKEND="$2"; shift 2 ;;
     --model) require_arg "$@"; MODEL="$2"; shift 2 ;;
     --tiebreak) TIEBREAK=1; shift ;;
+    --gate) require_arg "$@"; GATE="$2"; shift 2 ;;
     --output) require_arg "$@"; OUTPUT="$2"; shift 2 ;;
     --timeout) require_arg "$@"; TIMEOUT_SECS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -106,6 +113,10 @@ done
 case "$BACKEND" in
   claude|codex|gemini|oss) ;;
   *) echo "FATAL: --backend must be one of: claude, codex, gemini, oss (got: $BACKEND)" >&2; exit 4 ;;
+esac
+case "$GATE" in
+  finding|trigger) ;;
+  *) echo "FATAL: --gate must be one of: finding, trigger (got: $GATE)" >&2; exit 4 ;;
 esac
 
 # Inherit the spawning audit's cross-run memory decision (default off when run
@@ -239,7 +250,9 @@ build_prompt() {
   if [ "$TIEBREAK" = "1" ]; then
     skeptic_block=$'\n# Tiebreak mode\n\nA prior validator was Uncertain. Raise your bar. Default to **Reject**\nunless the evidence is unambiguous. Specifically:\n- If you cannot reproduce the reach path from a public-API entry to the\n  bug site by reading source, vote Reject.\n- If any named guard is actually sufficient on careful re-reading, vote\n  Reject.\n- If the primitive is "could potentially" or "may eventually" without a\n  concrete attacker-controlled value, vote Reject.\n'
   fi
-  render_prompt_template validate_finding.md.j2 \
+  local template="validate_finding.md.j2"
+  [ "$GATE" = "trigger" ] && template="validate_trigger_provenance.md.j2"
+  render_prompt_template "$template" \
     --var "target_path=${TARGET_PATH}" \
     --var "candidate_json=${CANDIDATE_JSON}" \
     --var "skeptic_block=${skeptic_block}" \
@@ -367,6 +380,20 @@ fi
 
 printf '%s\n' "$vote_json" > "$OUTPUT"
 vote=$(printf '%s' "$vote_json" | jq -r '.vote // "ParseFailure"')
+
+# Trigger gate is recall-safe: a Reject is only honoured with an affirmative
+# disproof (named source). An empty disproof means the prompt's "affirmative
+# disproof only" rule was not met, so downgrade to Uncertain — the finding is
+# preserved. Scoped to --gate trigger; the main validator has no such field.
+if [ "$GATE" = "trigger" ] && [ "$vote" = "Reject" ]; then
+  disproof=$(printf '%s' "$vote_json" | jq -r '.disproof // ""' | tr -d '[:space:]')
+  if [ -z "$disproof" ]; then
+    vote="Uncertain"
+    printf '%s' "$vote_json" \
+      | jq '.vote="Uncertain" | .downgraded_from="Reject" | .downgrade_reason="empty disproof"' \
+      > "$OUTPUT" 2>/dev/null || true
+  fi
+fi
 
 case "$vote" in
   Promote) exit 0 ;;
