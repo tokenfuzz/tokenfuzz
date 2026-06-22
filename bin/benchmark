@@ -1042,16 +1042,17 @@ run_model_direct_cell() {
   elif [ "$BACKEND" = "gemini" ] && [ ! -s "$raw_log" ] \
       && ! cell_has_result_artifacts "$out_dir"; then
     log "cell ${cell_dir##*/} — backend produced empty output and no artifacts" >&2
-    echo "$out_dir"
     return 44
   fi
 
-  # Always emit out_dir so the caller harvests whatever's on disk, even on
-  # a non-zero rc. rc 124 = wall-clock timeout, the expected end of a
-  # budgeted cell. A quota-watcher kill returns a SIGTERM exit code (143);
-  # we treat that as "completed under operator policy" so the post-run
-  # harvest still runs against whatever the agent managed to write.
-  echo "$out_dir"
+  # The caller already knows the model-direct result root is $cell_dir. Keep
+  # this long-running function status-only: using stdout as a return channel
+  # runs it inside command substitution, and any backend descendant that keeps
+  # the capture pipe open can strand the benchmark before cell finalization.
+  # rc 124 = wall-clock timeout, the expected end of a budgeted cell. A
+  # quota-watcher kill returns a SIGTERM exit code (143); we treat that as
+  # "completed under operator policy" so the post-run harvest still runs
+  # against whatever the agent managed to write.
   if [ -f "$cell_dir/.quota-exhausted" ]; then
     return 0
   fi
@@ -2027,7 +2028,11 @@ for cond in "${COND_ARR[@]}"; do
     if [ "$DRY_RUN" = "1" ]; then
       results_dir="$(run_dryrun_cell "$cell_dir" "$cond" "$rep")" || status="failed"
     elif [ "$cond" = "model-direct" ]; then
-      results_dir="$(run_model_direct_cell "$cell_dir" "$exp_name")" || status="failed"
+      # Do not capture run_model_direct_cell with $(...). The result directory
+      # is deterministic, and command substitution around a long backend run
+      # can hang if a backend child inherits the capture pipe.
+      results_dir="$cell_dir"
+      run_model_direct_cell "$cell_dir" "$exp_name" || status="failed"
       # Quota watcher fired during this cell — propagate the status and
       # arm the cross-cell skip flag so we don't relaunch a dead account.
       if [ -f "$cell_dir/.quota-exhausted" ]; then
