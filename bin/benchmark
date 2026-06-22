@@ -116,7 +116,7 @@ set -uo pipefail
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_ROOT" || { echo "FATAL: cannot cd to $SCRIPT_ROOT" >&2; exit 1; }
 
-for _lib in platform.sh timeout.sh target_config.sh llm_invoke.sh prompt_template.sh triage_validate.sh triage.sh gemini_watchdog.sh; do
+for _lib in platform.sh timeout.sh target_config.sh process_tree.sh llm_invoke.sh prompt_template.sh triage_validate.sh triage.sh gemini_watchdog.sh; do
   # shellcheck disable=SC1090
   source "$SCRIPT_ROOT/lib/$_lib" 2>/dev/null || {
     echo "FATAL: cannot source lib/$_lib" >&2
@@ -387,6 +387,14 @@ cleanup_benchmark_lock() {
   rm -f "$BENCH_LOCK" 2>/dev/null || true
 }
 
+benchmark_signal_trap() {
+  local signal="$1" rc="$2"
+  trap - HUP INT TERM
+  log "received SIG${signal}; stopping child process trees" >&2 || true
+  process_tree_kill_descendants "$$" TERM 1
+  exit "$rc"
+}
+
 # ── --reset short-circuits everything else ───────────────────────────────
 if [ "$DO_RESET" = "1" ]; then
   reset_args=(reset --ledger "$LEDGER")
@@ -477,6 +485,9 @@ fi
 
 acquire_benchmark_lock
 trap cleanup_benchmark_lock EXIT
+trap 'benchmark_signal_trap HUP 129' HUP
+trap 'benchmark_signal_trap INT 130' INT
+trap 'benchmark_signal_trap TERM 143' TERM
 
 IFS=',' read -r -a COND_ARR <<< "$CONDITIONS"
 for c in "${COND_ARR[@]}"; do

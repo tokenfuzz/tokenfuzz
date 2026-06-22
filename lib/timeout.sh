@@ -76,6 +76,17 @@ audit_timeout__perl() {
       }
     };
 
+    my %exit_for_signal = (HUP => 129, INT => 130, TERM => 143);
+    for my $sig (keys %exit_for_signal) {
+      $SIG{$sig} = sub {
+        $kill_group->("TERM");
+        sleep 1;
+        $kill_group->("KILL");
+        waitpid($pid, 0);
+        exit $exit_for_signal{$sig};
+      };
+    }
+
     $SIG{ALRM} = sub {
       if ($mode eq "KILL") {
         $kill_group->("KILL");

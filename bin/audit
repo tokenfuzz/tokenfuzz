@@ -28,7 +28,7 @@ cd "$SCRIPT_ROOT" || { echo "FATAL: cannot cd to $SCRIPT_ROOT" >&2; exit 1; }
 AUDIT_LLM_DECISION_TIMEOUT_USER_SET="${LLM_DECISION_TIMEOUT:+1}"
 
 # Source extracted modules (runtime vars like RESULTS_DIR are bound at call-time).
-for _lib in platform.sh fmt.sh timeout.sh target_config.sh llm_invoke.sh llm_decide.sh structured_state.sh vocab.sh triage.sh quality.sh housekeeping.sh audit_debug.sh prompt.sh gemini_watchdog.sh; do
+for _lib in platform.sh fmt.sh timeout.sh target_config.sh process_tree.sh llm_invoke.sh llm_decide.sh structured_state.sh vocab.sh triage.sh quality.sh housekeeping.sh audit_debug.sh prompt.sh gemini_watchdog.sh; do
   [ -f "$SCRIPT_ROOT/lib/$_lib" ] || { echo "FATAL: missing lib/$_lib" >&2; exit 1; }
   source "$SCRIPT_ROOT/lib/$_lib"
 done
@@ -6901,6 +6901,14 @@ _should_refill_slot() {
   return 0
 }
 
+audit_signal_trap() {
+  local signal="$1" rc="$2"
+  trap - HUP INT TERM
+  log "Received SIG${signal}; stopping child process trees" >&2 || true
+  process_tree_kill_descendants "$$" TERM 1
+  exit "$rc"
+}
+
 # Launch N agents in parallel, finalize each on exit. Any slot whose
 # agent exits early — while at least one other agent is still running —
 # gets a single replacement launch in that slot. Wall-time stays
@@ -7436,6 +7444,9 @@ audit_exit_trap() {
 }
 
 trap 'log "UNEXPECTED EXIT at line $LINENO (rc=$?)" >> "$INDEX" 2>/dev/null; log "UNEXPECTED EXIT at line $LINENO (rc=$?)" >&2' ERR
+trap 'audit_signal_trap HUP 129' HUP
+trap 'audit_signal_trap INT 130' INT
+trap 'audit_signal_trap TERM 143' TERM
 trap 'audit_exit_trap "$LINENO" "$?"' EXIT
 
 while true; do
