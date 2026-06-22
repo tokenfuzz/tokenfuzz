@@ -454,9 +454,10 @@ def _cmd_count_tools_all(args: argparse.Namespace) -> int:
 _RAW_STATUS_ERROR_TYPE_RE = re.compile(r'"type":"(?:error|turn\.failed)"')
 _RAW_STATUS_USAGE_TYPE_RE = re.compile(r'"type":"(?:error|turn\.failed|agent_message)"')
 _RAW_STATUS_GEMINI_REJECTION_RE = re.compile(
-    r'Attempt [0-9]+ failed with status (?:429|503)|'
-    r'"code"[ \t]*:[ \t]*(?:429|503)|'
-    r'status:[ \t]*(?:429|503)|'
+    # 5xx (500/502/503/529) are all server-side overload — match the family.
+    r'Attempt [0-9]+ failed with status (?:429|5[0-9][0-9])|'
+    r'"code"[ \t]*:[ \t]*(?:429|5[0-9][0-9])|'
+    r'status:[ \t]*(?:429|5[0-9][0-9])|'
     r'RESOURCE_EXHAUSTED|UNAVAILABLE|'
     r'exceeded your current quota|exhausted your capacity|'
     r'quota will reset|high demand|fetch failed sending request|'
@@ -510,11 +511,13 @@ def _raw_status_from_lines(lines) -> dict[str, int]:
                 event = None
         event_type = event.get("type") if event else ""
         event_status = event.get("status") if event else ""
-        if '"api_error_status":429' in line:
+        # 429 (rate limit) and 5xx (500/502/503/529 server overload) are both
+        # transient backend rejections handled by the same backoff path.
+        if re.search(r'"api_error_status":(?:429|5[0-9][0-9])', line):
             status["rate_limit"] = 1
         if event_type in ("error", "turn.failed") or _RAW_STATUS_ERROR_TYPE_RE.search(line):
             status["codex_failed"] = 1
-            if re.search(r'status\\?":429|Server returned 429', line):
+            if re.search(r'status\\?":(?:429|5[0-9][0-9])|Server returned (?:429|5[0-9][0-9])', line):
                 status["rate_limit"] = 1
         if _RAW_STATUS_USAGE_TYPE_RE.search(line) and re.search(
             r"usage limit|hit your .*limit|try again at", line, re.IGNORECASE
@@ -526,7 +529,14 @@ def _raw_status_from_lines(lines) -> dict[str, int]:
             retry_phrase = True
         if _RAW_STATUS_GEMINI_DIALECT_RE.search(line):
             gemini_dialect = True
-        if _RAW_STATUS_GEMINI_REJECTION_RE.search(line):
+        # Scope the gemini rejection to a backend-error context: a non-JSON
+        # glog line (where the CLI prints transient API failures) or an
+        # explicit error/turn.failed/result event. A tool_result / user /
+        # assistant content event must NOT count — its payload is audited
+        # program output, which may legitimately contain "status:500",
+        # "UNAVAILABLE", "high demand", etc. without any backend overload.
+        if (event is None or event_type in ("error", "turn.failed", "result")) \
+                and _RAW_STATUS_GEMINI_REJECTION_RE.search(line):
             gemini_rejection = True
         if event_type == "turn.completed" or '"type":"turn.completed"' in line:
             status["codex_completed"] = 1

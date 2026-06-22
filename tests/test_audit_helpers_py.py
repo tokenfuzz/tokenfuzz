@@ -286,6 +286,82 @@ try:
 finally:
     os.unlink(gemini_429_path)
 
+# Overload (5xx) reads the same as a rate limit so the backoff path handles it.
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    claude_529_path = f.name
+    f.write('{"type":"result","is_error":true,"api_error_status":529,"result":"API Error: 529 Overloaded"}\n')
+try:
+    proc = run(["raw-status", claude_529_path])
+    assert_eq(
+        ["rate_limit=1", "codex_completed=0", "codex_failed=0", "gemini_success=0"],
+        proc.stdout.splitlines(),
+        "raw-status: claude 529 overload is a transient rejection",
+    )
+finally:
+    os.unlink(claude_529_path)
+
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    codex_5xx_path = f.name
+    f.write('{"type":"turn.failed","error":"Server returned 503"}\n')
+try:
+    proc = run(["raw-status", codex_5xx_path])
+    assert_eq(
+        ["rate_limit=1", "codex_completed=0", "codex_failed=1", "gemini_success=0"],
+        proc.stdout.splitlines(),
+        "raw-status: codex 5xx server error is a transient rejection",
+    )
+finally:
+    os.unlink(codex_5xx_path)
+
+# Event-scoping: a gemini-dialect session whose TOOL OUTPUT contains
+# overload-shaped text must NOT be read as a backend rejection (the trigger
+# text is audited program output inside a tool_result, not a CLI error).
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    gemini_tooloutput_path = f.name
+    f.write('{"type":"init","model":"gemini-3.1-pro"}\n')
+    f.write('{"type":"user","message":{"content":[{"type":"tool_result","content":"grep hit: code 503 UNAVAILABLE status:500"}]}}\n')
+try:
+    proc = run(["raw-status", gemini_tooloutput_path])
+    assert_eq(
+        ["rate_limit=0", "codex_completed=0", "codex_failed=0", "gemini_success=0"],
+        proc.stdout.splitlines(),
+        "raw-status: gemini tool-output 5xx text is not a backend rejection",
+    )
+finally:
+    os.unlink(gemini_tooloutput_path)
+
+# ...but a real gemini backend error on a glog (non-JSON) line still counts.
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    gemini_glog_path = f.name
+    f.write('{"type":"init","model":"gemini-3.1-pro"}\n')
+    f.write('Attempt 1 failed with status 503. Retrying in 2s.\n')
+try:
+    proc = run(["raw-status", gemini_glog_path])
+    assert_eq(
+        ["rate_limit=1", "codex_completed=0", "codex_failed=0", "gemini_success=0"],
+        proc.stdout.splitlines(),
+        "raw-status: gemini glog 5xx backend error is a transient rejection",
+    )
+finally:
+    os.unlink(gemini_glog_path)
+
+# Non-transient 4xx (auth/config) must NOT be treated as a transient
+# rejection — otherwise the harness would silently retry an unrecoverable
+# error instead of surfacing it. Only 429 and 5xx are retryable.
+for code in (400, 401, 403, 404, 413):
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+        cfg_path = f.name
+        f.write('{"type":"result","is_error":true,"api_error_status":%d}\n' % code)
+    try:
+        proc = run(["raw-status", cfg_path])
+        assert_eq(
+            ["rate_limit=0", "codex_completed=0", "codex_failed=0", "gemini_success=0"],
+            proc.stdout.splitlines(),
+            f"raw-status: claude {code} (auth/config) is NOT a transient rejection",
+        )
+    finally:
+        os.unlink(cfg_path)
+
 proc = run(["raw-status", "/nonexistent/path-that-cannot-exist.log"])
 assert_eq(
     ["rate_limit=0", "codex_completed=0", "codex_failed=0", "gemini_success=0"],

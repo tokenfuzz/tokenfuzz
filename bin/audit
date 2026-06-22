@@ -3041,50 +3041,23 @@ codex_usage_limit_reset_at() {
   python3 "$SCRIPT_ROOT/lib/audit_helpers.py" codex-usage-reset-at "$logfile" 2>/dev/null
 }
 
-log_is_gemini_cli() {
-  local logfile="$1"
-  [ -f "$logfile" ] || return 1
-  # Match raw logs from either gemini-backend dialect.
-  #
-  # Antigravity (agy) — the default — emits glog stderr referencing
-  # "Antigravity CLI" / "antigravity-cli" / "antigravity.google".
-  #
-  # The official Google gemini-cli (selected by USE_GEMINI_CLI=1) emits
-  # none of those, only its own banner: "YOLO mode is enabled. All tool
-  # calls will be automatically approved.", "Ripgrep is not available.
-  # Falling back to GrepTool", and a stream-json init event of the form
-  # {"type":"init",...,"model":"gemini-<id>"}. On errors its async stack
-  # traces also contain the bundled module path "@google/gemini-cli/".
-  # Empirically those four markers are sufficient and specific — none
-  # appear in claude / codex / oss raw logs of any size we have on disk.
-  #
-  # Without the gemini-cli half of this pattern, log_has_gemini_backend
-  # _rejection (its caller) silently returned 1 for every USE_GEMINI_CLI
-  # =1 run, so the harness never noticed a 429 / RESOURCE_EXHAUSTED and
-  # burned the full wall budget on retry chatter.
-  grep -qiE \
-    'Antigravity CLI|antigravity-cli|antigravity\.google|YOLO mode is enabled|Ripgrep is not available\. Falling back to GrepTool|@google/gemini-cli/|"model":"gemini-[a-z0-9._-]+"' \
-    "$logfile" 2>/dev/null
-}
-
-log_has_gemini_backend_rejection() {
-  local logfile="$1"
-  [ -f "$logfile" ] || return 1
-  log_is_gemini_cli "$logfile" || return 1
-  grep -qiE \
-    'Attempt [0-9]+ failed with status (429|503)|"code"[[:space:]]*:[[:space:]]*(429|503)|status:[[:space:]]*(429|503)|RESOURCE_EXHAUSTED|UNAVAILABLE|exceeded your current quota|exhausted your capacity|quota will reset|high demand|fetch failed sending request|rate.?limit.*(exceeded|reached)' \
-    "$logfile" 2>/dev/null
-}
-
 log_has_rate_limit_rejection() {
   local logfile="$1"
   [ -f "$logfile" ] || return 1
-  grep -qF '"api_error_status":429' "$logfile" 2>/dev/null && return 0
-  grep -E '"type":"(error|turn\.failed)"' "$logfile" 2>/dev/null \
-    | grep -qE 'status\\?":429|Server returned 429' && return 0
-  log_has_codex_usage_limit "$logfile" && return 0
-  log_has_gemini_backend_rejection "$logfile" && return 0
-  return 1
+  # Single source of truth for "did the backend reject this iteration?" —
+  # 429 (rate limit) and 5xx (500/502/503/529 server overload), across all
+  # backends — lives in the Python raw-status parser (extract_raw_status).
+  # Delegating here means:
+  #   * it JSON-parses events, so a "status:500" / "UNAVAILABLE" string inside
+  #     a tool_result (audited program output) is NOT mistaken for a backend
+  #     overload, and gemini detection is event-scoped (no false positives);
+  #   * no `grep | grep -q` over a large raw log, which under `set -o pipefail`
+  #     can SIGPIPE the producer and turn a real match into a false negative.
+  # Capture-then-here-string keeps even this 4-line read SIGPIPE-proof, and
+  # extract_raw_status already fails open (prints rate_limit=0) on any error.
+  local rs
+  rs=$(extract_raw_status "$logfile")
+  grep -q '^rate_limit=1' <<<"$rs"
 }
 
 codex_raw_has_completed_turn() {
@@ -3157,27 +3130,13 @@ detect_rate_limit() {
       for mode in generic browser shell; do
         logfile="$RAW_DIR/session_${timestamp}_${role}-${i}-${mode}.log.raw"
         [ -f "$logfile" ] || continue
-        local hit_429=0
-        # Claude CLI: api_error_status:429 on the result event.
-        if grep -qF '"api_error_status":429' "$logfile" 2>/dev/null; then
-          hit_429=1
-        fi
-        # Codex CLI: 429 inside an error or turn.failed event. Scope by event
-        # type so a stray "429" in tool output (line numbers, regex test data,
-        # etc.) doesn't match.
-        # The JSON-stringified payload escapes inner quotes, so "status":429
-        # appears as \"status\":429 in the byte stream. The optional-backslash
-        # match ('\\?') covers both forms.
-        if [ "$hit_429" -eq 0 ] && \
-           grep -E '"type":"(error|turn\.failed)"' "$logfile" 2>/dev/null \
-           | grep -qE 'status\\?":429|Server returned 429'; then
-          hit_429=1
-        fi
-        # Codex usage-cap exhaustion can be emitted without an explicit 429.
-        # Treat it as a rate limit and use its "try again at ..." timestamp
-        # when present.
-        if [ "$hit_429" -eq 0 ] && log_has_codex_usage_limit "$logfile"; then
-          hit_429=1
+        # Same single source of truth as everywhere else (429/5xx, all
+        # backends, event-scoped). detect_rate_limit only adds the
+        # reset-time extraction on top of that boolean.
+        log_has_rate_limit_rejection "$logfile" || continue
+        saw_429=1
+        # Codex usage-cap exhaustion carries a "try again at <time>" reset.
+        if log_has_codex_usage_limit "$logfile"; then
           local codex_reset
           codex_reset=$(codex_usage_limit_reset_at "$logfile" 2>/dev/null || true)
           if [ -n "$codex_reset" ] && [ "$codex_reset" -gt 0 ] 2>/dev/null; then
@@ -3186,14 +3145,6 @@ detect_rate_limit() {
             fi
           fi
         fi
-        # Gemini backend (Antigravity CLI): stderr text can carry
-        # 429/503/quota/RESOURCE_EXHAUSTED wording when the upstream
-        # API throttles us. Treat that as a backend cooldown.
-        if [ "$hit_429" -eq 0 ] && log_has_gemini_backend_rejection "$logfile"; then
-          hit_429=1
-        fi
-        [ "$hit_429" -eq 1 ] || continue
-        saw_429=1
         # Stage 2: pick a usable resetsAt from a non-allowed* rate_limit_event.
         local candidate
         candidate=$(grep -F '"type":"rate_limit_event"' "$logfile" 2>/dev/null \
@@ -3228,6 +3179,19 @@ fi
 if ! [[ "$RATE_LIMIT_MAX_BACKOFF" =~ ^[0-9]+$ ]] || [ "$RATE_LIMIT_MAX_BACKOFF" -lt 1 ]; then
   RATE_LIMIT_MAX_BACKOFF=1800
 fi
+# After this many *consecutive* iterations whose only outcome was a
+# rate-limit / overload backoff (the whole pool was rejected, no forward
+# progress), stop with a distinct BACKEND_UNAVAILABLE reason instead of
+# sleeping out the rest of the wall budget against a backend that isn't
+# recovering. The streak resets the moment an iteration runs without a
+# rejection, so a transient blip just costs a backoff or two. 0 disables
+# the cap (back off indefinitely until the wall budget). Default 6 ≈ at
+# least ~30 min sustained at the 300s default backoff.
+MAX_RATE_LIMIT_BACKOFFS="${MAX_RATE_LIMIT_BACKOFFS:-6}"
+if ! [[ "$MAX_RATE_LIMIT_BACKOFFS" =~ ^[0-9]+$ ]]; then
+  MAX_RATE_LIMIT_BACKOFFS=6
+fi
+RATE_LIMIT_BACKOFF_STREAK=0
 
 rate_limit_cooldown_path() {
   printf '%s/.rate_limit_cooldown' "$LOGDIR"
@@ -3336,10 +3300,16 @@ sleep_for_active_rate_limit_cooldown() {
 
 # If rate-limited, sleep until the reset time plus a small buffer.
 # For 429s without a reset time (e.g. Codex), uses a default backoff.
+# Returns: 0 = backed off this iteration (caller should `continue` without
+#          counting it as exploration); 1 = no rejection (proceed normally);
+#          2 = sustained rejection past MAX_RATE_LIMIT_BACKOFFS (caller should
+#          stop the run with a BACKEND_UNAVAILABLE outcome).
 handle_rate_limit_backoff() {
   local timestamp="$1"
   local reset_at
-  reset_at=$(detect_rate_limit "$timestamp" 2>/dev/null) || return 1
+  # No rejection this iteration — the backend responded, so a prior streak
+  # is over. Reset and let the caller run its normal accounting.
+  reset_at=$(detect_rate_limit "$timestamp" 2>/dev/null) || { RATE_LIMIT_BACKOFF_STREAK=0; return 1; }
   persist_rate_limit_cooldown "$timestamp" "$reset_at" || true
 
   local now wait_secs reset_human
@@ -3351,6 +3321,8 @@ handle_rate_limit_backoff() {
   else
     wait_secs=$(( reset_at - now + 30 ))
     if [ "$wait_secs" -le 0 ]; then
+      # Reset time already passed — the limit has cleared. Treat as recovery.
+      RATE_LIMIT_BACKOFF_STREAK=0
       return 1
     fi
     reset_human=$(audit_format_epoch_local "$reset_at" '%H:%M:%S %Z' 2>/dev/null || echo "unknown")
@@ -3360,8 +3332,16 @@ handle_rate_limit_backoff() {
     log "RATE_LIMIT: the API reset is $(fmt_secs "$wait_secs") away, which exceeds the configured backoff cap RATE_LIMIT_MAX_BACKOFF=$(fmt_secs "$RATE_LIMIT_MAX_BACKOFF") — sleeping the cap instead and will retry sooner." | tee -a "$INDEX"
     wait_secs="$RATE_LIMIT_MAX_BACKOFF"
   fi
-  log "RATE_LIMIT: the ${ACTIVE_BACKEND:-LLM} API returned a 429 (rate limit) — sleeping $(fmt_secs "$wait_secs") until ${reset_human} before retrying." | tee -a "$INDEX"
+  RATE_LIMIT_BACKOFF_STREAK=$((RATE_LIMIT_BACKOFF_STREAK + 1))
+  log "RATE_LIMIT: the ${ACTIVE_BACKEND:-LLM} API returned a 429/5xx (rate limit or overload) — sleeping $(fmt_secs "$wait_secs") until ${reset_human} before retrying (consecutive backoff ${RATE_LIMIT_BACKOFF_STREAK}$( [ "$MAX_RATE_LIMIT_BACKOFFS" -gt 0 ] && printf '/%s' "$MAX_RATE_LIMIT_BACKOFFS"))." | tee -a "$INDEX"
   sleep "$wait_secs"
+  # Sustained, pool-wide rejection that is not clearing: stop loudly rather
+  # than burn the rest of the budget retrying, and so the run never reports a
+  # clean exhaustion when the real cause was an unreachable backend.
+  if [ "$MAX_RATE_LIMIT_BACKOFFS" -gt 0 ] && [ "$RATE_LIMIT_BACKOFF_STREAK" -ge "$MAX_RATE_LIMIT_BACKOFFS" ]; then
+    log "BACKEND_UNAVAILABLE: the ${ACTIVE_BACKEND:-LLM} API rejected every agent for ${RATE_LIMIT_BACKOFF_STREAK} consecutive iteration(s) (sustained rate-limit/overload) — stopping the audit. Results are partial, not a clean exhaustion; re-run when the backend is healthy, or raise MAX_RATE_LIMIT_BACKOFFS to wait longer." | tee -a "$INDEX"
+    return 2
+  fi
   return 0
 }
 
@@ -7592,7 +7572,10 @@ while true; do
       log "Cold start: no prior agent state files exist for this target/backend, so the harness is launching all ${CURRENT_LAUNCH_AGENT_COUNT} of ${NUM_AGENTS} configured agents [${_agent_display}] in parallel. Each agent will pick its own subsystem from the queue." | tee -a "$INDEX"
     fi
     launch_agents_and_wait "cold-start" build_cold_start_prompt "$timestamp"
-    if handle_rate_limit_backoff "$timestamp" 2>/dev/null; then
+    rl_rc=0; handle_rate_limit_backoff "$timestamp" 2>/dev/null || rl_rc=$?
+    if [ "$rl_rc" -eq 2 ]; then
+      break   # BACKEND_UNAVAILABLE: sustained rejection — stop loudly (logged inside)
+    elif [ "$rl_rc" -eq 0 ]; then
       continue
     fi
     run_post_iteration_housekeeping || true
@@ -7657,7 +7640,10 @@ while true; do
   fi
   launch_agents_and_wait "deep_investigation" build_deep_investigation_prompt "$timestamp"
 
-  if handle_rate_limit_backoff "$timestamp" 2>/dev/null; then
+  rl_rc=0; handle_rate_limit_backoff "$timestamp" 2>/dev/null || rl_rc=$?
+  if [ "$rl_rc" -eq 2 ]; then
+    break   # BACKEND_UNAVAILABLE: sustained rejection — stop loudly (logged inside)
+  elif [ "$rl_rc" -eq 0 ]; then
     continue
   fi
 

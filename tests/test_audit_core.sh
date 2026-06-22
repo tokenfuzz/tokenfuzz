@@ -71,9 +71,9 @@ eval "$(audit_extract_functions \
   count_structural_refusal_signals \
   log_has_codex_usage_limit \
   codex_usage_limit_reset_at \
-  log_is_gemini_cli \
-  log_has_gemini_backend_rejection \
   log_has_rate_limit_rejection \
+  extract_raw_status \
+  handle_rate_limit_backoff \
   codex_raw_has_completed_turn \
   codex_raw_has_failed_turn \
   gemini_raw_has_success_result \
@@ -1158,6 +1158,130 @@ EOF
 
   assert_file_contains "$SCRIPT_ROOT/bin/audit" 'normalize_agent_exit_code "\$ACTIVE_BACKEND" "\$rc" "\$wait_raw"' \
     "agent exit: parent wait loop normalizes Codex aggregate status before warning"
+
+  # ═════════════════════════════════════════════════════════════
+  # Transient-rejection detection covers overload (5xx), not just 429,
+  # across all backends. A 5xx/overload must read the same as a rate
+  # limit so the run rides it out with a backoff instead of mistaking an
+  # unreachable backend for "agent explored and found nothing".
+  # ═════════════════════════════════════════════════════════════
+  # Claude: 529 Overloaded on the terminal result event.
+  printf '%s\n' '{"type":"result","is_error":true,"api_error_status":529,"result":"API Error: 529 Overloaded"}' \
+    > "$TEST_TMPDIR/claude_529.jsonl"
+  if log_has_rate_limit_rejection "$TEST_TMPDIR/claude_529.jsonl"; then
+    pass "rate-limit detect: claude 529 overload recognized as transient rejection"
+  else
+    fail "rate-limit detect: claude 529 overload recognized as transient rejection" "not detected"
+  fi
+  # Claude: 429 still recognized (regression guard).
+  printf '%s\n' '{"type":"result","is_error":true,"api_error_status":429}' \
+    > "$TEST_TMPDIR/claude_429.jsonl"
+  if log_has_rate_limit_rejection "$TEST_TMPDIR/claude_429.jsonl"; then
+    pass "rate-limit detect: claude 429 still recognized"
+  else
+    fail "rate-limit detect: claude 429 still recognized" "not detected"
+  fi
+  # Codex: 5xx inside an error event.
+  printf '%s\n' '{"type":"error","message":"Server returned 503"}' \
+    > "$TEST_TMPDIR/codex_503.jsonl"
+  if log_has_rate_limit_rejection "$TEST_TMPDIR/codex_503.jsonl"; then
+    pass "rate-limit detect: codex 5xx server error recognized as transient rejection"
+  else
+    fail "rate-limit detect: codex 5xx server error recognized as transient rejection" "not detected"
+  fi
+  # Gemini: 5xx in a gemini-cli transcript (dialect marker + status).
+  printf '%s\n%s\n' \
+    '{"type":"init","model":"gemini-3.1-pro"}' \
+    'Attempt 2 failed with status 500. Retrying.' \
+    > "$TEST_TMPDIR/gemini_500.jsonl"
+  if log_has_rate_limit_rejection "$TEST_TMPDIR/gemini_500.jsonl"; then
+    pass "rate-limit detect: gemini 5xx overload recognized as transient rejection"
+  else
+    fail "rate-limit detect: gemini 5xx overload recognized as transient rejection" "not detected"
+  fi
+  # No false positive: a 5xx mentioned in prose tool output (no structured
+  # api_error_status field, not inside an error event) must NOT match.
+  printf '%s\n%s\n' \
+    '{"type":"result","is_error":false,"subtype":"success"}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","content":"curl said: HTTP 503 Service Unavailable from example.com"}]}}' \
+    > "$TEST_TMPDIR/clean_with_503_prose.jsonl"
+  if log_has_rate_limit_rejection "$TEST_TMPDIR/clean_with_503_prose.jsonl"; then
+    fail "rate-limit detect: prose '503' in tool output is not a rejection" "false positive"
+  else
+    pass "rate-limit detect: prose '503' in tool output is not a rejection"
+  fi
+  # No false positive, GEMINI path: a gemini-dialect session whose *tool
+  # output* contains overload-shaped text (status:500 / UNAVAILABLE) must NOT
+  # be classified as a backend rejection — detection is event-scoped.
+  printf '%s\n%s\n' \
+    '{"type":"init","model":"gemini-3.1-pro"}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","content":"grep hit: if (code == 503 || status:500) return UNAVAILABLE;"}]}}' \
+    > "$TEST_TMPDIR/gemini_tooloutput_503.jsonl"
+  if log_has_rate_limit_rejection "$TEST_TMPDIR/gemini_tooloutput_503.jsonl"; then
+    fail "rate-limit detect: gemini tool-output 5xx text is not a backend rejection" "false positive"
+  else
+    pass "rate-limit detect: gemini tool-output 5xx text is not a backend rejection"
+  fi
+  # SIGPIPE robustness: a 5xx in an error event near the TOP of a very large
+  # raw log must still be detected (the old grep|grep -q could SIGPIPE the
+  # producer under pipefail and miss it). Detection now streams through the
+  # Python parser, so a match early in a big file is found regardless of size.
+  {
+    printf '%s\n' '{"type":"error","message":"Server returned 503"}'
+    for _n in $(seq 1 40000); do
+      printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"benign padding line"}]}}'
+    done
+  } > "$TEST_TMPDIR/codex_big_503.jsonl"
+  if log_has_rate_limit_rejection "$TEST_TMPDIR/codex_big_503.jsonl"; then
+    pass "rate-limit detect: 5xx near top of a large log is detected (no SIGPIPE false negative)"
+  else
+    fail "rate-limit detect: 5xx near top of a large log is detected (no SIGPIPE false negative)" "missed"
+  fi
+
+  # ═════════════════════════════════════════════════════════════
+  # Sustained-overload halt (#3): after MAX_RATE_LIMIT_BACKOFFS consecutive
+  # backoffs, handle_rate_limit_backoff returns 2 so the caller stops with a
+  # BACKEND_UNAVAILABLE outcome instead of burning the budget or misreading
+  # the run as a clean exhaustion. A recovery iteration resets the streak.
+  # Isolated in a subshell so the stubs/globals don't leak.
+  (
+    INDEX=/dev/null
+    ACTIVE_BACKEND=claude
+    RATE_LIMIT_DEFAULT_BACKOFF=0   # no real sleep
+    RATE_LIMIT_MAX_BACKOFF=1800
+    MAX_RATE_LIMIT_BACKOFFS=2
+    RATE_LIMIT_BACKOFF_STREAK=0
+    persist_rate_limit_cooldown() { :; }
+    log() { :; }
+    fmt_secs() { printf '%ss' "$1"; }
+    # Overload present this iteration → "unknown" reset → default backoff.
+    detect_rate_limit() { echo unknown; }
+
+    rc=0; handle_rate_limit_backoff ts1 || rc=$?
+    [ "$rc" -eq 0 ] && [ "$RATE_LIMIT_BACKOFF_STREAK" -eq 1 ] \
+      && echo "B1_OK" || echo "B1_BAD rc=$rc streak=$RATE_LIMIT_BACKOFF_STREAK"
+    rc=0; handle_rate_limit_backoff ts2 || rc=$?
+    [ "$rc" -eq 2 ] && [ "$RATE_LIMIT_BACKOFF_STREAK" -eq 2 ] \
+      && echo "B2_HALT" || echo "B2_BAD rc=$rc streak=$RATE_LIMIT_BACKOFF_STREAK"
+
+    # Recovery: no rejection → streak resets, returns 1 (proceed normally).
+    detect_rate_limit() { return 1; }
+    rc=0; handle_rate_limit_backoff ts3 || rc=$?
+    [ "$rc" -eq 1 ] && [ "$RATE_LIMIT_BACKOFF_STREAK" -eq 0 ] \
+      && echo "RECOVER_OK" || echo "RECOVER_BAD rc=$rc streak=$RATE_LIMIT_BACKOFF_STREAK"
+  ) > "$TEST_TMPDIR/rl_streak.out" 2>/dev/null
+  assert_match 'B1_OK' "$(cat "$TEST_TMPDIR/rl_streak.out")" \
+    "sustained halt: first overload backoff returns 0 (continue) and bumps the streak"
+  assert_match 'B2_HALT' "$(cat "$TEST_TMPDIR/rl_streak.out")" \
+    "sustained halt: streak at MAX_RATE_LIMIT_BACKOFFS returns 2 (BACKEND_UNAVAILABLE)"
+  assert_match 'RECOVER_OK' "$(cat "$TEST_TMPDIR/rl_streak.out")" \
+    "sustained halt: a clean iteration resets the backoff streak"
+
+  # Call sites stop the run (break) on the sustained-halt return code.
+  assert_file_contains "$SCRIPT_ROOT/bin/audit" 'handle_rate_limit_backoff "\$timestamp" 2>/dev/null \|\| rl_rc=\$\?' \
+    "sustained halt: call sites capture the backoff return code set-e-safely"
+  assert_file_contains "$SCRIPT_ROOT/bin/audit" 'MAX_RATE_LIMIT_BACKOFFS="\$\{MAX_RATE_LIMIT_BACKOFFS:-6\}"' \
+    "sustained halt: consecutive-backoff cap is configurable"
 
   # ═════════════════════════════════════════════════════════════
   # 7b. extract_usage_field — agy (gemini) plain-text estimator
