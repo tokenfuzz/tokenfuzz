@@ -18,6 +18,8 @@
 #   - quota marker contract: when the quota arm trips it writes
 #     `<marker_dir>/.quota-exhausted` so the audit iteration loop (and
 #     benchmark cell harvester) can see why the agent died
+#   - quiet cleanup: caller-side watchdog cleanup does not leak bash
+#     "Terminated: 15 sleep ..." diagnostics into backend.raw.log
 #
 # These contracts were either implicit before the refactor (one-binary
 # scope) or new (marker_dir / label parameters); the asserts here pin
@@ -79,6 +81,7 @@ set -uo pipefail
 source "$SCRIPT_ROOT/lib/llm_invoke.sh"
 source "$SCRIPT_ROOT/lib/gemini_watchdog.sh"
 declare -F _kill_tree _gemini_watchdog_pid_alive \\
+           _gemini_watchdog_sleep \\
            _gemini_watchdog_terminate_tree \\
            gemini_quota_dominates agy_cli_log_for_pid \\
            agy_drip_stopped agy_in_idle_heartbeat_loop \\
@@ -92,7 +95,7 @@ if [ "$iso_rc" -ne 0 ]; then
 else
   pass "T1: sourcing lib/gemini_watchdog.sh in a fresh shell exits 0"
 fi
-for fn in _kill_tree _gemini_watchdog_pid_alive \
+for fn in _kill_tree _gemini_watchdog_pid_alive _gemini_watchdog_sleep \
           _gemini_watchdog_terminate_tree \
           gemini_quota_dominates agy_cli_log_for_pid \
           agy_drip_stopped agy_in_idle_heartbeat_loop \
@@ -235,5 +238,46 @@ else
   _kill_tree "$victim2" KILL
 fi
 wait "$empty_marker_watcher" 2>/dev/null || true
+
+# ── T6: watchdog cleanup does not log killed poll sleeps ─────────────
+
+quiet_cleanup_script="$work/quiet-cleanup.sh"
+cat > "$quiet_cleanup_script" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+source "$SCRIPT_ROOT/lib/llm_invoke.sh"
+source "$SCRIPT_ROOT/lib/gemini_watchdog.sh"
+
+(sleep 30) &
+victim=\$!
+GEMINI_WATCHDOG_POLL_SECS=30 \\
+AGY_DRIP_GRACE_SECS=0 \\
+AGY_IDLE_CONFIRM_POLLS=0 \\
+  start_gemini_watchdog "$work/nonexistent.raw" "\$victim" "$work" "quiet-cleanup-T6" &
+watcher=\$!
+
+sleep_child=""
+for _ in \$(seq 1 50); do
+  sleep_child="\$(pgrep -P "\$watcher" 2>/dev/null | head -1 || true)"
+  [ -n "\$sleep_child" ] && break
+  perl -e 'select undef, undef, undef, 0.1'
+done
+[ -n "\$sleep_child" ] || exit 2
+
+pkill -TERM -P "\$watcher" 2>/dev/null || true
+kill "\$watcher" 2>/dev/null || true
+wait "\$watcher" 2>/dev/null || true
+kill "\$victim" 2>/dev/null || true
+wait "\$victim" 2>/dev/null || true
+EOF
+chmod +x "$quiet_cleanup_script"
+quiet_cleanup_stderr=$("$quiet_cleanup_script" 2>&1 >/dev/null)
+quiet_cleanup_rc=$?
+if [ "$quiet_cleanup_rc" -eq 0 ] && [[ "$quiet_cleanup_stderr" != *"Terminated"* ]]; then
+  pass "T6: watchdog cleanup does not leak killed sleep diagnostics"
+else
+  fail "T6: watchdog cleanup does not leak killed sleep diagnostics" \
+    "rc=$quiet_cleanup_rc stderr='$quiet_cleanup_stderr'"
+fi
 
 summary

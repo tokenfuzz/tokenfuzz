@@ -100,11 +100,21 @@ _gemini_watchdog_pid_alive() {
   return 0
 }
 
+_gemini_watchdog_sleep() {
+  local interval="$1" sleep_pid
+  # Reap the poll sleep explicitly. If callers stop the watchdog while bash is
+  # blocked on a foreground sleep, bash prints "Terminated: 15 sleep ..." into
+  # the agent raw log.
+  sleep "$interval" &
+  sleep_pid=$!
+  wait "$sleep_pid" 2>/dev/null
+}
+
 _gemini_watchdog_terminate_tree() {
   local pid="$1" grace="${2:-5}" elapsed=0
   _kill_tree "$pid" TERM
   while [ "$elapsed" -lt "$grace" ]; do
-    sleep 1
+    _gemini_watchdog_sleep 1 || return 0
     _gemini_watchdog_pid_alive "$pid" || return 0
     elapsed=$((elapsed + 1))
   done
@@ -219,7 +229,7 @@ start_gemini_watchdog() {
   local cli_log=""
   local idle_strikes=0
 
-  while sleep "$interval"; do
+  while _gemini_watchdog_sleep "$interval"; do
     kill -0 "$agent_pid" 2>/dev/null || return 0
 
     if gemini_quota_dominates "$raw_log"; then
@@ -244,7 +254,7 @@ start_gemini_watchdog() {
       # clean run doesn't pay the full grace.
       local elapsed=0
       while [ "$elapsed" -lt "$drip_grace" ]; do
-        sleep 2
+        _gemini_watchdog_sleep 2 || return 0
         elapsed=$((elapsed + 2))
         kill -0 "$agent_pid" 2>/dev/null || return 0
       done
