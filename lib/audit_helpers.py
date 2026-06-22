@@ -854,7 +854,7 @@ def _cmd_effective_work_cards(args: argparse.Namespace) -> int:
     try:
         from workqueue import (
             Context,
-            TERMINAL_CARD_STATUSES,
+            card_closed_for_run,
             latest_claims_by_card,
             read_jsonl,
             visible_card_status,
@@ -879,14 +879,24 @@ def _cmd_effective_work_cards(args: argparse.Namespace) -> int:
     except Exception:
         return 0
     out: list[str] = []
+    # Memo so card_closed_for_run reads each subsystem's dry-streak once.
+    dry_streaks: dict[str, int] = {}
     for card in cards:
         updated = dict(card)
         claim = latest.get(card.get("id", ""))
         if claim is not None:
             status = visible_card_status(claim, ttl)
-            # Lease lifecycle rows such as "released" make a card claimable
-            # again. Terminal claim rows remain terminal.
-            if status != "claimed" and status not in TERMINAL_CARD_STATUSES:
+            # Single source of truth for "is this card still claimable?":
+            # card_closed_for_run keeps the claim path, the explain view, and
+            # this audit-facing overlay in agreement. Lease lifecycle rows
+            # ("released") and a *productive* crash/find on a still-hot
+            # subsystem collapse to "unclaimed" so strategy rotation, queue
+            # counts, and diversity recovery see the same reopened cards the
+            # claimer does; done/discarded/blocked and mined-out (dry) crash/
+            # find stay terminal.
+            if status != "claimed" and not card_closed_for_run(
+                ctx, card, status, dry_streaks=dry_streaks
+            ):
                 status = "unclaimed"
             updated["status"] = status
         out.append(json.dumps(updated, sort_keys=True))

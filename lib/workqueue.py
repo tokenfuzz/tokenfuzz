@@ -2264,6 +2264,14 @@ TERMINAL_CARD_STATUSES = PERMANENT_TERMINAL_CARD_STATUSES | SOFT_TERMINAL_CARD_S
 # bin/audit:reset_subsystem_dry_streak).
 _PRODUCTIVE_DECAY_AFTER_ITERS = 2
 
+# crash/find are *productive* terminal conclusions, not dead ends: a
+# verified bug means the surface is hot and — on targets with a few very
+# large files (where a file:strategy card is the whole file) — likely
+# holds more. These stay claimable while the subsystem is still yielding
+# (see card_closed_for_run); done/discarded/blocked are hard-closed for
+# the run. Keep this a strict subset of PERMANENT_TERMINAL_CARD_STATUSES.
+_PRODUCTIVE_TERMINAL_CARD_STATUSES = {"crash", "find"}
+
 
 def active_hypothesis_card_ids(ctx: Context) -> set[str]:
     active: set[str] = set()
@@ -2571,6 +2579,69 @@ def subsystem_dry_streak(ctx: Context, subsystem: str) -> int:
         return 0
 
 
+def card_closed_for_run(
+    ctx: Context,
+    card: dict,
+    status: str,
+    *,
+    dry_streaks: dict[str, int] | None = None,
+) -> bool:
+    """Is a card at ``status`` closed for the *current* run (not re-offerable)?
+
+    ``done``/``discarded``/``blocked`` are hard-closed. ``crash``/``find``
+    are productive conclusions, kept claimable while the card's *subsystem*
+    is still yielding and retired once that subsystem has gone dry for
+    ``_PRODUCTIVE_DECAY_AFTER_ITERS`` consecutive iterations — the same
+    signal the productive-subsystem relaxation in ``_claim_next_card_locked``
+    already uses.
+
+    Scope, stated plainly: this is **subsystem-grain keep-alive**, not
+    per-card or per-signature decay. While a subsystem is hot, *every*
+    crash/find card in it stays claimable (the "bugs cluster" bias). The
+    anti-camp guarantee is separate: ``card_conclusion_counts`` demotes an
+    already-cracked card below fresher siblings in the claim ranker, so a
+    productive surface is revisited by least-mined-first rotation, not hit
+    sequentially. Keep-alive provides breadth across the hot file; demotion
+    provides the diversification.
+
+    Why this exists: terminal-on-first-conclusion drains a finite, one-shot
+    card queue before the wall budget — recon runs once and nothing
+    replenishes. Fast backends reach conclusions quickly and hit
+    QUEUE_EXHAUSTED in a fraction of the budget (gemini exited a cjson run
+    in ~69 min of 240). Slower backends merely reach the same wall later;
+    queue sizes also differ per backend, so this is a structural-supply
+    fix, not a per-backend one. Keeping a productive surface open until it
+    is mined out lets the run find the *other* bugs a large file holds.
+
+    Fabrication-*resistant*, not fabrication-proof: ``subsystem_dry_streak``
+    is reset only by triage-promoted CRASH/FIND artifacts on disk
+    (bin/audit:agent_iteration_productive), never by an ``update-card``
+    claim — so a fabricated crash/find in an otherwise-dry subsystem cannot
+    keep itself alive. It can ride a subsystem kept hot by a *real* sibling
+    artifact, which the per-card demotion then sinks; the crash evidence
+    gate in ``update_card_status`` is the primary defence against fabricated
+    crash closures.
+
+    ``dry_streaks`` is an optional per-call memo so a candidate loop reads
+    each subsystem's streak file at most once.
+    """
+    if status not in TERMINAL_CARD_STATUSES:
+        return False
+    if status in _PRODUCTIVE_TERMINAL_CARD_STATUSES:
+        subsystem = str(card.get("subsystem", "") or "")
+        if subsystem and subsystem != "unknown":
+            if dry_streaks is None:
+                streak = subsystem_dry_streak(ctx, subsystem)
+            else:
+                streak = dry_streaks.get(subsystem)
+                if streak is None:
+                    streak = subsystem_dry_streak(ctx, subsystem)
+                    dry_streaks[subsystem] = streak
+            if streak < _PRODUCTIVE_DECAY_AFTER_ITERS:
+                return False
+    return True
+
+
 def agent_productive_subsystems(ctx: Context, agent: str) -> set[str]:
     """Subsystems where the given agent has a confirmed CRASH/FIND row.
 
@@ -2738,6 +2809,8 @@ def _claimed_card_queue_sets(
 def _queue_status_row(
     card: dict,
     *,
+    ctx: Context,
+    dry_streaks: dict[str, int],
     latest: dict[str, dict],
     ttl: timedelta,
     now: datetime,
@@ -2758,10 +2831,11 @@ def _queue_status_row(
         reason = "not-auditable"
     elif is_stub_tu_card(card, features_manifest):
         reason = "tu-not-compiled"
-    elif status in PERMANENT_TERMINAL_CARD_STATUSES:
-        reason = f"terminal:{status}"
-    elif status in SOFT_TERMINAL_CARD_STATUSES:
-        # Retryable in a fresh result set, but closed for this run.
+    elif card_closed_for_run(ctx, card, status, dry_streaks=dry_streaks):
+        # done/discarded/blocked, or a crash/find whose subsystem has gone
+        # dry. A productive crash/find on a still-hot subsystem is NOT
+        # closed here — it falls through and stays eligible so the run
+        # keeps mining the surface for the other bugs a large file holds.
         reason = f"terminal:{status}"
     elif strategy and not card_strategy_matches(card, strategy):
         reason = f"strategy-incompatible:{card.get('strategy') or 'none'}"
@@ -2814,11 +2888,14 @@ def explain_queue(
     owned_subsystems = active_subsystems | claimed_subsystems
     saturated_subsystems = guard_saturated_subsystems(ctx)
     features_manifest = _load_features_for_ctx(ctx)
+    dry_streaks: dict[str, int] = {}
     rows: list[dict] = []
     for card in cards:
         rows.append(
             _queue_status_row(
                 card,
+                ctx=ctx,
+                dry_streaks=dry_streaks,
                 latest=latest,
                 ttl=ttl,
                 now=now,
@@ -2892,6 +2969,9 @@ def _claim_next_card_locked(
     owned_surfaces = active_hypothesis_surfaces(ctx) | claimed_card_surfaces(ctx, ttl, now)
     owned_subsystems = active_hypothesis_subsystems(ctx) | claimed_card_subsystems(ctx, ttl, now)
     saturated_subsystems = guard_saturated_subsystems(ctx)
+    # Per-claim memo for card_closed_for_run so the candidate loops read
+    # each subsystem's dry-streak file at most once.
+    dry_streaks: dict[str, int] = {}
     # Agents that have already produced a confirmed CRASH/FIND are
     # "productive" — they have working data-flow context for that
     # subsystem and bugs cluster, so the subsystem-ownership skip
@@ -2953,6 +3033,12 @@ def _claim_next_card_locked(
             cid = card.get("id", "")
             latest_claim = latest.get(cid)
             latest_status = latest_claim.get("status", "claimed") if latest_claim else ""
+            # Promoted precedence must NOT re-fire on an already-concluded
+            # card. A productive crash/find promoted card stays claimable via
+            # the normal queue below (and is rank-demoted by conclusion
+            # count), but re-granting it precedence — which bypasses the
+            # strategy filter — would let it preempt breadth every iteration
+            # until the subsystem goes dry. Hard-terminal check on purpose.
             if latest_status in TERMINAL_CARD_STATUSES or cid in active_cards:
                 continue
             if claim_blocks_card(latest_claim, ttl, now):
@@ -3000,7 +3086,7 @@ def _claim_next_card_locked(
             # Blocked cards are retryable in a fresh result set, but not in
             # the same run where the target configuration has already proven
             # the surface unreachable.
-            if latest_status in TERMINAL_CARD_STATUSES or cid in active_cards or (blocks_card and not own_active_claim):
+            if card_closed_for_run(ctx, card, latest_status, dry_streaks=dry_streaks) or cid in active_cards or (blocks_card and not own_active_claim):
                 continue
             surface = work_surface(card)
             if surface and surface in owned_surfaces and not own_active_claim:
@@ -3063,6 +3149,33 @@ def _claim_next_card_locked(
         preferred = _apply_diversity(_build_candidates(override=True))
     if not preferred:
         preferred = _apply_diversity(_build_candidates(override=False))
+
+    # Diminishing-returns demotion: a card kept eligible *after* a verified
+    # crash/find (card_closed_for_run) sinks below every fresher
+    # (zero-conclusion) candidate so the agent spreads out instead of
+    # re-hitting the same card sequentially. Hot-file siblings naturally
+    # sort ahead of unrelated cold work because they carry the file's
+    # higher base rank (the stable sort preserves rank within a tier), so
+    # this still mines the hot surface before rotating; a still-hot card
+    # resurfaces once the less-mined work is exhausted, and no card is
+    # dropped. An active same-agent lease is exempt — it keeps top priority
+    # so the agent continues its own in-flight card instead of pivoting and
+    # stranding the lease until TTL. Skipped when nothing has been concluded
+    # yet (the common early-run case).
+    if len(preferred) > 1:
+        conclusion_counts = card_conclusion_counts(ctx)
+        if conclusion_counts:
+            def _demotion_key(c: dict) -> tuple[int, int]:
+                cid = c.get("id", "")
+                lc = latest.get(cid)
+                own_active_lease = bool(
+                    lc
+                    and str(lc.get("agent", "")) == str(agent)
+                    and claim_blocks_card(lc, ttl, now)
+                )
+                return (0 if own_active_lease else 1, conclusion_counts.get(cid, 0))
+
+            preferred.sort(key=_demotion_key)
 
     for card in preferred:
         cid = card.get("id", "")
@@ -3347,15 +3460,48 @@ def update_hypothesis(
     return found
 
 
-def card_run_count(ctx: Context, card_id: str) -> int:
-    """How many runs.jsonl rows reference this card."""
+def card_run_count(ctx: Context, card_id: str, verdict: str = "") -> int:
+    """How many runs.jsonl rows reference this card.
+
+    When ``verdict`` is given (e.g. "CRASH"), count only rows with that
+    verdict. The crash-close gate in update_card_status uses
+    verdict="CRASH" as the harness-written evidence that a crash was
+    actually reproduced (bin/probe records the verdict before it
+    auto-closes the card); the discard gate uses the unfiltered count.
+    """
     if not card_id:
         return 0
+    want = verdict.upper()
     n = 0
     for r in read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl"):
-        if r.get("card_id", "") == card_id:
-            n += 1
+        if r.get("card_id", "") != card_id:
+            continue
+        if want and str(r.get("verdict", "") or "").upper() != want:
+            continue
+        n += 1
     return n
+
+
+def card_conclusion_counts(ctx: Context) -> dict[str, int]:
+    """Per-card tally of productive terminal closures (crash/find) ever
+    recorded in claims.jsonl.
+
+    Used by the claim ranker to *demote* — never drop — a card that has
+    already produced a bug. A verified crash/find keeps the surface
+    claimable (card_closed_for_run), but re-offering the same high-scored
+    card first every iteration would camp it sequentially instead of
+    spreading across the file's other functions/siblings. Sorting eligible
+    candidates by this count (ascending, stable on rank) makes the agent
+    exhaust fresher surfaces first and revisit a cracked card only once the
+    less-mined work is gone — diminishing returns without losing the card.
+    """
+    counts: dict[str, int] = {}
+    for row in read_jsonl(state_dir(ctx.results_dir) / "claims.jsonl"):
+        if str(row.get("status", "")) in _PRODUCTIVE_TERMINAL_CARD_STATUSES:
+            cid = str(row.get("card_id", ""))
+            if cid:
+                counts[cid] = counts.get(cid, 0) + 1
+    return counts
 
 
 def card_distinct_hypothesis_count(ctx: Context, card_id: str) -> int:
@@ -3684,16 +3830,42 @@ class CardStatusUpdateError(ValueError):
 def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "", note: str = "") -> dict:
     """Append a card-status row to claims.jsonl with evidence gates.
 
-    Discard gates (production-grade audit trail):
-      * `discarded` requires ≥WORK_CARD_MIN_RUNS_BEFORE_DISCARD
-        (default 3) runs.jsonl rows referencing the card AND
+    Evidence-free *terminal* closures drain a finite, one-shot card queue
+    before the wall budget, so the clean-close and crash conclusions must
+    carry harness-written evidence:
+
+      * `discarded` requires ≥WORK_CARD_MIN_RUNS_BEFORE_DISCARD (default 3)
+        runs.jsonl rows referencing the card AND
         ≥WORK_CARD_MIN_HYPS_BEFORE_DISCARD (default 2) distinct hypothesis
-        shapes. Rationale: a clean variant set must have actually been run,
-        and one shallow hypothesis must not retire a file/strategy surface.
-      * Override: WORK_CARD_ALLOW_NORUNS_DISCARD=1 logs a warning to
-        stderr and proceeds — used by tests and one-shot tooling.
-      * Terminal `crash`/`find` are always allowed (the testcase that
-        caused them is itself the run evidence).
+        shapes: a clean variant set must have actually been run, and one
+        shallow hypothesis must not retire a file/strategy surface.
+        Override: WORK_CARD_ALLOW_NORUNS_DISCARD=1 warns and proceeds
+        (tests / one-shot tooling).
+      * `crash` requires ≥1 runs.jsonl row with a CRASH verdict for the
+        card — bin/probe writes that verdict before it auto-closes the
+        card. An `update-card --status crash` with no such row is bounced
+        back to needs-verify instead of terminally consuming the card; the
+        agent must run the testcase through bin/probe. Scope: this catches
+        the observed failure mode (a card closed `crash` with no probe run
+        at all — gemini filed CRASH dirs with no valid sanitizer output);
+        it is an anti-fabrication gate, not proof the diagnostic is genuine
+        (add-run is callable), so triage's artifact checks still apply.
+        Override: WORK_CARD_ALLOW_NORUNS_CRASH=1 (tests / one-shot repair).
+      * `find` is intentionally NOT gated here: a finding's evidence is a
+        substantive report dir that the separate finding/triage gate
+        already validates (and the product allows findings with no
+        sanitizer reproducer), so a second gate would only risk false
+        negatives against real findings. Residual exposure is small and
+        bounded: a fabricated find cannot reset its subsystem's dry streak
+        (only triage-promoted artifacts do), so it can keep a card eligible
+        only by riding a subsystem already hot from a *real* sibling
+        artifact — and card_conclusion_counts then demotes the cracked card
+        below fresher work. See card_closed_for_run.
+
+    Note: `crash`/`find` are no longer *permanently* terminal for the
+    queue. See card_closed_for_run: a verified crash/find keeps its
+    surface claimable until the subsystem is mined out, so one bug no
+    longer retires a whole (possibly very large) file.
     """
     init_state(ctx)
     if status == "discarded":
@@ -3717,6 +3889,20 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
                 f"runs={runs}/{min_runs} hyps={hyps}/{min_hyps} "
                 f"(WORK_CARD_ALLOW_NORUNS_DISCARD=1)\n"
             )
+    elif status == "crash" and card_run_count(ctx, card_id, verdict="CRASH") < 1:
+        allow_override = os.environ.get("WORK_CARD_ALLOW_NORUNS_CRASH") == "1"
+        if not allow_override:
+            raise CardStatusUpdateError(
+                f"update-card refuses crash for {card_id}: no runs.jsonl "
+                "CRASH verdict references this card. Run the testcase "
+                "through bin/probe to verify the crash (it records the "
+                "verdict and re-files the artifact), or set "
+                "WORK_CARD_ALLOW_NORUNS_CRASH=1 to override."
+            )
+        sys.stderr.write(
+            f"[workqueue] WARN: forced crash close of {card_id} with no "
+            "runs.jsonl CRASH verdict (WORK_CARD_ALLOW_NORUNS_CRASH=1)\n"
+        )
     row = {
         "card_id": card_id,
         "agent": agent,
@@ -3996,6 +4182,7 @@ def list_work_cards(
     agent_modes = [mode] if mode else []
     subsystem_needles = [str(s).strip().lower() for s in (subsystem_filters or []) if str(s).strip()]
     contains_needles = [str(s).strip().lower() for s in (contains_filters or []) if str(s).strip()]
+    dry_streaks: dict[str, int] = {}
     rows: list[dict] = []
     for card in cards:
         if strategy_filter and not card_strategy_matches(card, strategy_filter):
@@ -4006,6 +4193,8 @@ def list_work_cards(
                 continue
         status_row = _queue_status_row(
             card,
+            ctx=ctx,
+            dry_streaks=dry_streaks,
             latest=latest,
             ttl=ttl,
             now=now,
