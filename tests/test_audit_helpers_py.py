@@ -370,6 +370,157 @@ assert_eq(
 )
 
 
+# ── provider-issue ─────────────────────────────────────────────────
+print("\nprovider-issue")
+
+provider_cases = [
+    (
+        [{"type": "result", "is_error": True, "api_error_status": 429}],
+        "capacity_limited",
+        "provider-issue: claude api_error_status 429 is capacity-limited",
+    ),
+    (
+        [{"type": "turn.failed", "error": {"message": "Server returned 503"}}],
+        "transient",
+        "provider-issue: codex Server returned 503 is transient",
+    ),
+    (
+        [{"type": "error", "error": {"code": 429, "message": "Too Many Requests"}}],
+        "capacity_limited",
+        "provider-issue: quoted JSON code 429 is capacity-limited",
+    ),
+    (
+        [{"type": "error", "error": {"code": 503, "message": "backend unavailable"}}],
+        "transient",
+        "provider-issue: quoted JSON code 503 is transient",
+    ),
+    (
+        [
+            {"type": "init", "model": "gemini-3.1-pro-preview"},
+            "Attempt 1 failed with status 429. RESOURCE_EXHAUSTED You exceeded your current quota.",
+        ],
+        "capacity_limited",
+        "provider-issue: gemini RESOURCE_EXHAUSTED 429 is capacity-limited",
+    ),
+    (
+        [
+            "[agy CLI log tail: /tmp/agy-cli-log/cli-20260521_233915.log]",
+            "E0521 23:39:17.828 log.go:398 agent executor error: "
+            "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 137h39m19s.",
+        ],
+        "capacity_limited",
+        "provider-issue: copied agy CLI log quota tail is capacity-limited",
+    ),
+    (
+        [
+            {"type": "error", "error": {"message": "upstream UNAVAILABLE"}},
+        ],
+        "transient",
+        "provider-issue: opencode-style unavailable error is transient",
+    ),
+    (
+        [
+            {"type": "tool_result", "content": "fixture text says status:500 UNAVAILABLE"},
+            {"type": "item.completed", "item": {"aggregated_output": "Server returned 429"}},
+        ],
+        "none",
+        "provider-issue: tool output is not a provider failure",
+    ),
+    (
+        # The model reasoning about a target's rate-limit behaviour in its own
+        # prose must NOT read as a provider failure (the agent_message FP guard).
+        [{"type": "agent_message",
+          "message": "The target returns HTTP 429 Too Many Requests once its "
+                     "rate limit is exceeded; we should fuzz that path."}],
+        "none",
+        "provider-issue: assistant prose about 429 is not a provider failure",
+    ),
+    (
+        # Conjunction guard: a generic 'limit' + 'reset' in prose is not the
+        # account usage notice.
+        [{"type": "agent_message",
+          "message": "The parser will hit your configured recursion limit and "
+                     "then reset its state."}],
+        "none",
+        "provider-issue: generic limit+reset prose is not capacity-limited",
+    ),
+    (
+        # The account-limit conjunction must be local to one trusted provider
+        # line. Otherwise normal assistant reasoning about target-side usage
+        # limits plus unrelated tool output mentioning reset would discard a
+        # benchmark cell as provider-limited.
+        [
+            {"type": "agent_message",
+             "message": "We should add a usage limit regression test for the target."},
+            {"type": "item.completed",
+             "item": {"type": "command_execution", "aggregated_output": "reset complete"}},
+        ],
+        "none",
+        "provider-issue: usage-limit prose plus unrelated reset is not capacity-limited",
+    ),
+    (
+        # The real Codex/Claude account notice: account-limit phrase AND retry
+        # wording, in an agent_message → capacity.
+        [{"type": "agent_message",
+          "message": "You've hit your usage limit. Please try again at 9:01 AM."}],
+        "capacity_limited",
+        "provider-issue: codex usage-limit notice is capacity-limited",
+    ),
+    (
+        # Plain capacity wording with NO provider-CLI dialect marker must not
+        # match (the dialect-gate guard for non-JSON lines).
+        ["2026-06-22 some unrelated tool log: exceeded your current quota here"],
+        "none",
+        "provider-issue: plain capacity text without dialect is not a failure",
+    ),
+    (
+        # Claude's account notice via the session-limit phrasing → capacity.
+        [{"type": "agent_message",
+          "message": "You've hit your session limit · resets 9:40am"}],
+        "capacity_limited",
+        "provider-issue: claude session-limit notice is capacity-limited",
+    ),
+    (
+        # Anthropic 529 overload is server-side, not a quota → transient.
+        [{"type": "result", "is_error": True, "api_error_status": 529}],
+        "transient",
+        "provider-issue: claude 529 overload is transient",
+    ),
+    (
+        # Non-429 4xx (auth/config/input) is NOT a provider retry/quota signal.
+        # It must fall through so normal failure handling exposes the real cause
+        # (bad key, forbidden, not found, payload too large) — never a backoff.
+        [
+            {"type": "error", "error": {"code": 400, "message": "Bad Request"}},
+            {"type": "error", "error": {"code": 401, "message": "Unauthorized"}},
+            {"type": "error", "error": {"code": 403, "message": "Forbidden"}},
+            {"type": "turn.failed", "error": {"message": "Server returned 404"}},
+            {"type": "error", "error": {"code": 413, "message": "Payload Too Large"}},
+        ],
+        "none",
+        "provider-issue: non-429 4xx is not transient or capacity",
+    ),
+]
+
+for rows, expected, name in provider_cases:
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+        provider_path = f.name
+        for row in rows:
+            if isinstance(row, str):
+                f.write(row)
+            else:
+                json.dump(row, f, separators=(",", ":"))
+            f.write("\n")
+    try:
+        proc = run(["provider-issue", provider_path])
+        assert_eq(expected, proc.stdout.strip(), name)
+    finally:
+        os.unlink(provider_path)
+
+proc = run(["provider-issue", "/nonexistent/path-that-cannot-exist.log"])
+assert_eq("none", proc.stdout.strip(), "provider-issue: missing log returns none")
+
+
 # ── finish-fields ──────────────────────────────────────────────────
 print("\nfinish-fields")
 with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:

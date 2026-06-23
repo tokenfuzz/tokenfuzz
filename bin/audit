@@ -1450,7 +1450,7 @@ validate_model_for_backend() {
         if [ "${USE_GEMINI_CLI:-0}" != "1" ]; then
           gemini_capture_cli_log_diag "$raw"
         fi
-        if grep -qiE 'RESOURCE_EXHAUSTED|quota reached|individual quota|exceeded your .*quota' "$raw" 2>/dev/null; then
+        if [ "$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-issue "$raw" 2>/dev/null || printf '%s\n' none)" = "capacity_limited" ]; then
           gemini_quota_blocked=1
           log "WARN: gemini preflight: agy reports the account quota is exhausted — retrying will not help until it resets" | tee -a "$INDEX"
         elif [ -n "$gemini_preflight_text" ]; then
@@ -1938,6 +1938,13 @@ extract_raw_status() {
   }
   python3 "$SCRIPT_ROOT/lib/audit_helpers.py" raw-status "$file" 2>/dev/null \
     || printf 'rate_limit=0\ncodex_completed=0\ncodex_failed=0\ngemini_success=0\n'
+}
+
+log_provider_issue() {
+  local file="$1"
+  [ -f "$file" ] || { printf '%s\n' none; return; }
+  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-issue "$file" 2>/dev/null \
+    || printf '%s\n' none
 }
 
 extract_finish_fields() {
@@ -3006,39 +3013,25 @@ count_structural_refusal_signals() {
 # signal that a request was rejected. Treating those as rate-limit hits caused
 # spurious 30-minute backoffs.
 #
-# Stage 1 — confirm a 429 actually happened:
+# Stage 1 — confirm a provider rejection actually happened:
 #   Claude CLI: {"type":"result",...,"api_error_status":429,...}
 #   Codex CLI:  {"type":"error","message":"..."} or
 #               {"type":"turn.failed","error":{"message":"..."}}
 #               with payload containing either "Server returned 429" (legacy)
 #               or a JSON-encoded "status":429 (current shape).
-#   Gemini backend (Antigravity CLI): plain-text output containing quota/
-#               capacity exhaustion text (HTTP 429/503, RESOURCE_EXHAUSTED,
-#               "high demand", "quota will reset", etc.).
-# Stage 2 — only if a 429 fired, look up the most recent rate_limit_event whose
-#   status is NOT allowed/allowed_warning (i.e. an actual rejection) and use its
-#   resetsAt. Pick the largest resetsAt across agents — when both five_hour and
-#   seven_day windows reject, the later one is when we can safely retry.
-#   The Antigravity CLI does not emit a resetsAt — fall back to the default
-#   backoff for the gemini backend.
+#   Gemini/OpenCode/oss: provider stderr or JSON error events containing 429,
+#               5xx, quota/capacity, overload, or network-unavailable text.
+# Stage 2 — only after a provider rejection, look up the most recent
+#   rate_limit_event whose status is NOT allowed/allowed_warning (i.e. an
+#   actual rejection) and use its resetsAt. Pick the largest resetsAt across
+#   agents — when both five_hour and seven_day windows reject, the later one is
+#   when we can safely retry. If a provider only gives text such as "try again
+#   at ..." or "reset after ...", parse that as a reset too. Backends without
+#   any reset window fall back to the default backoff.
 
-log_has_codex_usage_limit() {
+provider_text_reset_at() {
   local logfile="$1"
-  [ -f "$logfile" ] || return 1
-  # Codex usage exhaustion is not always surfaced as status:429. Current raw
-  # logs often carry only human text such as "You've hit your usage limit ...
-  # try again at 9:01 AM" in a failed turn/message event. Require both the
-  # usage-limit phrase and retry wording to avoid matching unrelated tool text.
-  grep -E '"type":"(error|turn\.failed|agent_message)"' "$logfile" 2>/dev/null \
-    | grep -qiE 'usage limit|hit your .*limit|try again at' || return 1
-  grep -qiE 'usage limit|hit your .*limit' "$logfile" 2>/dev/null || return 1
-  grep -qiE 'try again at|retry after|reset' "$logfile" 2>/dev/null || return 1
-  return 0
-}
-
-codex_usage_limit_reset_at() {
-  local logfile="$1"
-  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" codex-usage-reset-at "$logfile" 2>/dev/null
+  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-reset-at "$logfile" 2>/dev/null
 }
 
 log_has_rate_limit_rejection() {
@@ -3123,7 +3116,7 @@ normalize_agent_exit_code() {
 
 detect_rate_limit() {
   local timestamp="$1"
-  local reset_at="" saw_429=0
+  local reset_at="" saw_provider_rejection=0
   local i role mode logfile
   for i in $(seq 1 "$NUM_AGENTS"); do
     for role in cold-start deep_investigation; do
@@ -3134,15 +3127,13 @@ detect_rate_limit() {
         # backends, event-scoped). detect_rate_limit only adds the
         # reset-time extraction on top of that boolean.
         log_has_rate_limit_rejection "$logfile" || continue
-        saw_429=1
-        # Codex usage-cap exhaustion carries a "try again at <time>" reset.
-        if log_has_codex_usage_limit "$logfile"; then
-          local codex_reset
-          codex_reset=$(codex_usage_limit_reset_at "$logfile" 2>/dev/null || true)
-          if [ -n "$codex_reset" ] && [ "$codex_reset" -gt 0 ] 2>/dev/null; then
-            if [ -z "$reset_at" ] || [ "$codex_reset" -gt "$reset_at" ] 2>/dev/null; then
-              reset_at="$codex_reset"
-            fi
+        saw_provider_rejection=1
+        # Some providers include a reset window only as human text.
+        local text_reset
+        text_reset=$(provider_text_reset_at "$logfile" 2>/dev/null || true)
+        if [ -n "$text_reset" ] && [ "$text_reset" -gt 0 ] 2>/dev/null; then
+          if [ -z "$reset_at" ] || [ "$text_reset" -gt "$reset_at" ] 2>/dev/null; then
+            reset_at="$text_reset"
           fi
         fi
         # Stage 2: pick a usable resetsAt from a non-allowed* rate_limit_event.
@@ -3164,7 +3155,7 @@ detect_rate_limit() {
     printf '%s\n' "$reset_at"
     return 0
   fi
-  if [ "$saw_429" -eq 1 ]; then
+  if [ "$saw_provider_rejection" -eq 1 ]; then
     printf '%s\n' "unknown"
     return 0
   fi
@@ -3179,6 +3170,16 @@ fi
 if ! [[ "$RATE_LIMIT_MAX_BACKOFF" =~ ^[0-9]+$ ]] || [ "$RATE_LIMIT_MAX_BACKOFF" -lt 1 ]; then
   RATE_LIMIT_MAX_BACKOFF=1800
 fi
+# When a capacity/account limit's reset is further away than the backoff cap,
+# stop the audit immediately as provider-limited instead of sleeping the cap and
+# retrying. Default off: a standalone audit has no deadline and should keep
+# waiting so a recoverable window (e.g. a 1-hour quota reset) resumes the
+# session. bin/benchmark sets this to 1 because a cell's wall budget is far
+# shorter than the sustained-streak halt (MAX_RATE_LIMIT_BACKOFFS × cap), so
+# without an early stop the cell is SIGTERM'd mid-backoff and mis-recorded as a
+# clean done instead of provider-limited.
+RATE_LIMIT_CAPACITY_HARD_STOP="${RATE_LIMIT_CAPACITY_HARD_STOP:-0}"
+[ "$RATE_LIMIT_CAPACITY_HARD_STOP" = "1" ] || RATE_LIMIT_CAPACITY_HARD_STOP=0
 # After this many *consecutive* iterations whose only outcome was a
 # rate-limit / overload backoff (the whole pool was rejected, no forward
 # progress), stop with a distinct BACKEND_UNAVAILABLE reason instead of
@@ -3192,6 +3193,57 @@ if ! [[ "$MAX_RATE_LIMIT_BACKOFFS" =~ ^[0-9]+$ ]]; then
   MAX_RATE_LIMIT_BACKOFFS=6
 fi
 RATE_LIMIT_BACKOFF_STREAK=0
+
+run_quality_path() {
+  printf '%s/.run-quality' "$LOGDIR"
+}
+
+backend_unavailable_path() {
+  printf '%s/.backend-unavailable' "$LOGDIR"
+}
+
+mark_run_quality() {
+  local quality="$1" path current
+  case "$quality" in
+    clean|provider_recovered|provider_limited) ;;
+    *) quality=clean ;;
+  esac
+  path="$(run_quality_path)"
+  current="$(cat "$path" 2>/dev/null || true)"
+  # provider_limited is terminal for this audit run; do not downgrade it when
+  # later cleanup probes inspect logs.
+  [ "$current" = "provider_limited" ] && return 0
+  printf '%s\n' "$quality" > "$path" 2>/dev/null || true
+}
+
+mark_backend_unavailable() {
+  mark_run_quality provider_limited
+  : > "$(backend_unavailable_path)" 2>/dev/null || true
+}
+
+provider_issue_for_timestamp() {
+  local timestamp="$1"
+  local issue saw_transient=0
+  local i role mode logfile
+  for i in $(seq 1 "$NUM_AGENTS"); do
+    for role in cold-start deep_investigation; do
+      for mode in generic browser shell; do
+        logfile="$RAW_DIR/session_${timestamp}_${role}-${i}-${mode}.log.raw"
+        [ -f "$logfile" ] || continue
+        issue="$(log_provider_issue "$logfile")"
+        case "$issue" in
+          capacity_limited) printf '%s\n' capacity_limited; return 0 ;;
+          transient) saw_transient=1 ;;
+        esac
+      done
+    done
+  done
+  if [ "$saw_transient" -eq 1 ]; then
+    printf '%s\n' transient
+  else
+    printf '%s\n' none
+  fi
+}
 
 rate_limit_cooldown_path() {
   printf '%s/.rate_limit_cooldown' "$LOGDIR"
@@ -3241,7 +3293,7 @@ clear_rate_limit_cooldown() {
 
 clear_startup_rate_limit_cooldowns() {
   local backend path cleared=0
-  for backend in claude codex gemini; do
+  for backend in claude codex gemini oss; do
     path="$(target_backend_logs_dir "$backend")/.rate_limit_cooldown"
     [ -f "$path" ] || continue
     rm -f "$path" 2>/dev/null || continue
@@ -3306,10 +3358,12 @@ sleep_for_active_rate_limit_cooldown() {
 #          stop the run with a BACKEND_UNAVAILABLE outcome).
 handle_rate_limit_backoff() {
   local timestamp="$1"
-  local reset_at
+  local reset_at provider_issue
   # No rejection this iteration — the backend responded, so a prior streak
   # is over. Reset and let the caller run its normal accounting.
   reset_at=$(detect_rate_limit "$timestamp" 2>/dev/null) || { RATE_LIMIT_BACKOFF_STREAK=0; return 1; }
+  provider_issue="$(provider_issue_for_timestamp "$timestamp" 2>/dev/null || echo none)"
+  [ "$provider_issue" = "none" ] && provider_issue=transient
   persist_rate_limit_cooldown "$timestamp" "$reset_at" || true
 
   local now wait_secs reset_human
@@ -3329,17 +3383,24 @@ handle_rate_limit_backoff() {
     reset_human="${reset_human} (+30s buffer)"
   fi
   if [ "$wait_secs" -gt "$RATE_LIMIT_MAX_BACKOFF" ]; then
+    if [ "$provider_issue" = "capacity_limited" ] && [ "$RATE_LIMIT_CAPACITY_HARD_STOP" = "1" ]; then
+      log "BACKEND_UNAVAILABLE: the ${ACTIVE_BACKEND:-LLM} API is capacity-limited until ${reset_human}, which is $(fmt_secs "$wait_secs") away and exceeds RATE_LIMIT_MAX_BACKOFF=$(fmt_secs "$RATE_LIMIT_MAX_BACKOFF") — stopping this audit as provider-limited instead of sleeping out the benchmark budget." | tee -a "$INDEX"
+      mark_backend_unavailable
+      return 2
+    fi
     log "RATE_LIMIT: the API reset is $(fmt_secs "$wait_secs") away, which exceeds the configured backoff cap RATE_LIMIT_MAX_BACKOFF=$(fmt_secs "$RATE_LIMIT_MAX_BACKOFF") — sleeping the cap instead and will retry sooner." | tee -a "$INDEX"
     wait_secs="$RATE_LIMIT_MAX_BACKOFF"
   fi
   RATE_LIMIT_BACKOFF_STREAK=$((RATE_LIMIT_BACKOFF_STREAK + 1))
-  log "RATE_LIMIT: the ${ACTIVE_BACKEND:-LLM} API returned a 429/5xx (rate limit or overload) — sleeping $(fmt_secs "$wait_secs") until ${reset_human} before retrying (consecutive backoff ${RATE_LIMIT_BACKOFF_STREAK}$( [ "$MAX_RATE_LIMIT_BACKOFFS" -gt 0 ] && printf '/%s' "$MAX_RATE_LIMIT_BACKOFFS"))." | tee -a "$INDEX"
+  mark_run_quality provider_recovered
+  log "RATE_LIMIT: the ${ACTIVE_BACKEND:-LLM} API returned a provider rejection (${provider_issue}) — sleeping $(fmt_secs "$wait_secs") until ${reset_human} before retrying (consecutive backoff ${RATE_LIMIT_BACKOFF_STREAK}$( [ "$MAX_RATE_LIMIT_BACKOFFS" -gt 0 ] && printf '/%s' "$MAX_RATE_LIMIT_BACKOFFS"))." | tee -a "$INDEX"
   sleep "$wait_secs"
   # Sustained, pool-wide rejection that is not clearing: stop loudly rather
   # than burn the rest of the budget retrying, and so the run never reports a
   # clean exhaustion when the real cause was an unreachable backend.
   if [ "$MAX_RATE_LIMIT_BACKOFFS" -gt 0 ] && [ "$RATE_LIMIT_BACKOFF_STREAK" -ge "$MAX_RATE_LIMIT_BACKOFFS" ]; then
-    log "BACKEND_UNAVAILABLE: the ${ACTIVE_BACKEND:-LLM} API rejected every agent for ${RATE_LIMIT_BACKOFF_STREAK} consecutive iteration(s) (sustained rate-limit/overload) — stopping the audit. Results are partial, not a clean exhaustion; re-run when the backend is healthy, or raise MAX_RATE_LIMIT_BACKOFFS to wait longer." | tee -a "$INDEX"
+    log "BACKEND_UNAVAILABLE: the ${ACTIVE_BACKEND:-LLM} API rejected every agent for ${RATE_LIMIT_BACKOFF_STREAK} consecutive iteration(s) (sustained provider rejection: ${provider_issue}) — stopping the audit. Results are partial, not a clean exhaustion; re-run when the backend is healthy, or raise MAX_RATE_LIMIT_BACKOFFS to wait longer." | tee -a "$INDEX"
+    mark_backend_unavailable
     return 2
   fi
   return 0
@@ -3379,6 +3440,7 @@ corpus_dir_root() {
 }
 prepare_active_backend_runtime
 clear_startup_rate_limit_cooldowns
+rm -f "$(run_quality_path)" "$(backend_unavailable_path)" 2>/dev/null || true
 backend_detail="(hosted API)"
 if [ "$ACTIVE_BACKEND" = "oss" ]; then
   backend_detail="base_url=$(oss_local_base_url)"

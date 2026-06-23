@@ -69,8 +69,6 @@ eval "$(audit_extract_functions \
   extract_raw_status \
   write_session_log_summary \
   count_structural_refusal_signals \
-  log_has_codex_usage_limit \
-  codex_usage_limit_reset_at \
   log_has_rate_limit_rejection \
   extract_raw_status \
   handle_rate_limit_backoff \

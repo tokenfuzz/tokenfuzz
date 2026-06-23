@@ -48,7 +48,11 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
       same id already exists. Output: nothing.
 
   codex-usage-reset-at <logfile> [--now-epoch N]
-      Parse a codex raw transcript for the next usage-reset epoch.
+      Compatibility alias for provider-reset-at.
+      Prints the epoch on stdout and exits 0 if found, exits 1 otherwise.
+
+  provider-reset-at <logfile> [--now-epoch N]
+      Parse provider text for the next reset epoch.
       Prints the epoch on stdout and exits 0 if found, exits 1 otherwise.
 
   claims-activity-since <claims_file> <since_epoch>
@@ -452,24 +456,141 @@ def _cmd_count_tools_all(args: argparse.Namespace) -> int:
 
 
 _RAW_STATUS_ERROR_TYPE_RE = re.compile(r'"type":"(?:error|turn\.failed)"')
-_RAW_STATUS_USAGE_TYPE_RE = re.compile(r'"type":"(?:error|turn\.failed|agent_message)"')
-_RAW_STATUS_GEMINI_REJECTION_RE = re.compile(
-    # 5xx (500/502/503/529) are all server-side overload — match the family.
-    r'Attempt [0-9]+ failed with status (?:429|5[0-9][0-9])|'
-    r'"code"[ \t]*:[ \t]*(?:429|5[0-9][0-9])|'
-    r'status:[ \t]*(?:429|5[0-9][0-9])|'
-    r'RESOURCE_EXHAUSTED|UNAVAILABLE|'
-    r'exceeded your current quota|exhausted your capacity|'
-    r'quota will reset|high demand|fetch failed sending request|'
-    r'rate.?limit.*(?:exceeded|reached)',
+
+# Claude's dedicated provider-status field. It only ever carries a real backend
+# HTTP status, so it is trustworthy wherever it appears (it lives in the result
+# event, which also embeds model prose we must NOT scan for loose wording).
+_PROVIDER_API_ERROR_RE = re.compile(r'"api_error_status"[ \t]*:[ \t]*([0-9]{3})')
+
+# An HTTP status / error code. Trustworthy only inside a backend error event or
+# on a provider-CLI plain line — never in assistant prose or tool output, where
+# the model and target programs legitimately mention status codes.
+_PROVIDER_STATUS_CODE_RE = re.compile(
+    r'(?:status|code)\\?"[ \t]*:[ \t]*([0-9]{3})|'
+    r'\b(?:status|code|HTTP)[ \t:]+([0-9]{3})\b|'
+    r'Server returned ([0-9]{3})',
+)
+
+# Capacity / quota wording (429-class): the account or model window is spent.
+_PROVIDER_CAPACITY_TEXT_RE = re.compile(
+    r'Too Many Requests|RESOURCE_EXHAUSTED|Individual quota reached|'
+    r'exceeded your current quota|exhausted your capacity|quota reached|'
+    r'quota will reset|rate_limit_error|rate.?limit.*(?:exceeded|reached)',
     re.IGNORECASE,
 )
-_RAW_STATUS_GEMINI_DIALECT_RE = re.compile(
-    r'Antigravity CLI|antigravity-cli|antigravity\.google|'
+
+# Transient / overload wording (5xx / transport): a blip that should clear.
+_PROVIDER_TRANSIENT_TEXT_RE = re.compile(
+    r'\bUNAVAILABLE\b|overload(?:ed)?|high demand|fetch failed|'
+    r'EADDRNOTAVAIL|ECONNRESET|ECONNABORTED|ETIMEDOUT|'
+    r'TypeError: terminated|terminated stream',
+    re.IGNORECASE,
+)
+
+# Soft account/usage-limit notice. Codex ("You've hit your usage limit") and
+# Claude ("You've hit your session limit · resets 9:40am") surface this as prose
+# in an agent_message rather than a status code, so it is the one signal allowed
+# in assistant text — but ONLY as a conjunction (an account-limit phrase AND
+# retry/reset wording). The phrases are the provider's own account terms ("usage
+# limit", "session limit"), which also match the "hit your usage/session limit"
+# wording as substrings, so unrelated prose like "hit your recursion limit" is
+# not a hit.
+_PROVIDER_USAGE_LIMIT_RE = re.compile(r'usage limit|session limit', re.IGNORECASE)
+_PROVIDER_RETRY_RE = re.compile(r'try again at|retry after|reset', re.IGNORECASE)
+
+# Provider-CLI dialect markers (gemini/agy). A bare plain-text provider error
+# (no JSON event) is trusted only when the log is one of these CLIs, so a stray
+# "UNAVAILABLE" / "quota will reset" in unrelated output is not a false hit.
+_PROVIDER_DIALECT_RE = re.compile(
+    r'Antigravity CLI|antigravity-cli|antigravity\.google|\[agy CLI log tail:|'
     r'YOLO mode is enabled|Ripgrep is not available\. Falling back to GrepTool|'
-    r'@google/gemini-cli/|"model":"gemini-[a-z0-9._-]+"',
+    r'@google/gemini-cli/|"model"[ \t]*:[ \t]*"gemini-[a-z0-9._-]+"',
     re.IGNORECASE,
 )
+
+
+def _status_class(match) -> str:
+    """Map a regex match's first populated 3-digit group to capacity/transient/''."""
+    code = next((g for g in match.groups() if g), None)
+    if code == "429":
+        return "capacity"
+    if code and code[0] == "5":
+        return "transient"
+    return ""
+
+
+def _provider_issue_from_lines(lines) -> str:
+    """Classify backend/provider failures as none, transient, or capacity_limited.
+
+    Capacity wins over transient when both appear. Detection is scoped so that
+    only genuine provider failures count: structured status codes and provider
+    wording are credited inside a backend error event or on a provider-CLI plain
+    line (gemini stderr), never in tool output or assistant prose. The account
+    usage-limit notice is the sole exception and needs a two-part match.
+    """
+
+    cap = trans = False              # credited in a backend error context
+    cap_plain = trans_plain = False  # seen on a non-JSON (provider-CLI) line
+    dialect = False
+    usage_limit_notice = False
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        event = None
+        if line.startswith("{"):
+            try:
+                parsed = json.loads(line)
+                if isinstance(parsed, dict):
+                    event = parsed
+            except (json.JSONDecodeError, ValueError):
+                event = None
+        event_type = event.get("type") if event else ""
+        is_error_event = event_type in ("error", "turn.failed")
+        is_plain = event is None
+
+        if _PROVIDER_DIALECT_RE.search(line):
+            dialect = True
+
+        # api_error_status is a dedicated field — trust it anywhere.
+        m = _PROVIDER_API_ERROR_RE.search(line)
+        if m:
+            cls = _status_class(m)
+            cap = cap or cls == "capacity"
+            trans = trans or cls == "transient"
+
+        if is_error_event:
+            m = _PROVIDER_STATUS_CODE_RE.search(line)
+            if m:
+                cls = _status_class(m)
+                cap = cap or cls == "capacity"
+                trans = trans or cls == "transient"
+            cap = cap or bool(_PROVIDER_CAPACITY_TEXT_RE.search(line))
+            trans = trans or bool(_PROVIDER_TRANSIENT_TEXT_RE.search(line))
+        elif is_plain:
+            m = _PROVIDER_STATUS_CODE_RE.search(line)
+            if m:
+                cls = _status_class(m)
+                cap_plain = cap_plain or cls == "capacity"
+                trans_plain = trans_plain or cls == "transient"
+            cap_plain = cap_plain or bool(_PROVIDER_CAPACITY_TEXT_RE.search(line))
+            trans_plain = trans_plain or bool(_PROVIDER_TRANSIENT_TEXT_RE.search(line))
+
+        # Usage-limit notice: allowed in agent_message / error / plain lines, but
+        # only when the account-limit phrase and retry/reset wording appear in
+        # the same trusted line. Accumulating the conjunction across the whole
+        # log would let unrelated assistant prose plus tool output look like a
+        # provider account limit.
+        if is_plain or event_type in ("error", "turn.failed", "agent_message"):
+            if _PROVIDER_USAGE_LIMIT_RE.search(line) and _PROVIDER_RETRY_RE.search(line):
+                usage_limit_notice = True
+
+    if cap or (dialect and cap_plain) or usage_limit_notice:
+        return "capacity_limited"
+    if trans or (dialect and trans_plain):
+        return "transient"
+    return "none"
 
 
 def _raw_status_defaults() -> dict[str, int]:
@@ -482,25 +603,23 @@ def _raw_status_defaults() -> dict[str, int]:
 
 
 def _raw_status_from_lines(lines) -> dict[str, int]:
+    raw_lines = list(lines)
     status = {
         "rate_limit": 0,
         "codex_completed": 0,
         "codex_failed": 0,
         "gemini_success": 0,
     }
-    usage_candidate = False
-    usage_phrase = False
-    retry_phrase = False
     gemini_result = False
     gemini_success = False
-    gemini_dialect = False
-    gemini_rejection = False
 
-    for raw_line in lines:
+    if _provider_issue_from_lines(raw_lines) != "none":
+        status["rate_limit"] = 1
+
+    for raw_line in raw_lines:
         line = raw_line.strip()
         if not line:
             continue
-        lower = line.lower()
         event = None
         if line.startswith("{"):
             try:
@@ -511,33 +630,8 @@ def _raw_status_from_lines(lines) -> dict[str, int]:
                 event = None
         event_type = event.get("type") if event else ""
         event_status = event.get("status") if event else ""
-        # 429 (rate limit) and 5xx (500/502/503/529 server overload) are both
-        # transient backend rejections handled by the same backoff path.
-        if re.search(r'"api_error_status":(?:429|5[0-9][0-9])', line):
-            status["rate_limit"] = 1
         if event_type in ("error", "turn.failed") or _RAW_STATUS_ERROR_TYPE_RE.search(line):
             status["codex_failed"] = 1
-            if re.search(r'status\\?":(?:429|5[0-9][0-9])|Server returned (?:429|5[0-9][0-9])', line):
-                status["rate_limit"] = 1
-        if _RAW_STATUS_USAGE_TYPE_RE.search(line) and re.search(
-            r"usage limit|hit your .*limit|try again at", line, re.IGNORECASE
-        ):
-            usage_candidate = True
-        if re.search(r"usage limit|hit your .*limit", lower):
-            usage_phrase = True
-        if re.search(r"try again at|retry after|reset", lower):
-            retry_phrase = True
-        if _RAW_STATUS_GEMINI_DIALECT_RE.search(line):
-            gemini_dialect = True
-        # Scope the gemini rejection to a backend-error context: a non-JSON
-        # glog line (where the CLI prints transient API failures) or an
-        # explicit error/turn.failed/result event. A tool_result / user /
-        # assistant content event must NOT count — its payload is audited
-        # program output, which may legitimately contain "status:500",
-        # "UNAVAILABLE", "high demand", etc. without any backend overload.
-        if (event is None or event_type in ("error", "turn.failed", "result")) \
-                and _RAW_STATUS_GEMINI_REJECTION_RE.search(line):
-            gemini_rejection = True
         if event_type == "turn.completed" or '"type":"turn.completed"' in line:
             status["codex_completed"] = 1
         if event_type == "result" or '"type":"result"' in line:
@@ -545,10 +639,6 @@ def _raw_status_from_lines(lines) -> dict[str, int]:
         if event_status == "success" or '"status":"success"' in line:
             gemini_success = True
 
-    if usage_candidate and usage_phrase and retry_phrase:
-        status["rate_limit"] = 1
-    if gemini_dialect and gemini_rejection:
-        status["rate_limit"] = 1
     if gemini_result and gemini_success:
         status["gemini_success"] = 1
 
@@ -564,6 +654,16 @@ def _cmd_raw_status(args: argparse.Namespace) -> int:
 
     for key, value in status.items():
         print(f"{key}={value}")
+    return 0
+
+
+def _cmd_provider_issue(args: argparse.Namespace) -> int:
+    try:
+        with open(args.log_file, "r", encoding="utf-8", errors="replace") as f:
+            issue = _provider_issue_from_lines(f)
+    except OSError:
+        issue = "none"
+    print(issue)
     return 0
 
 
@@ -745,7 +845,7 @@ def _cmd_append_guard_card(args: argparse.Namespace) -> int:
     return 0
 
 
-# ── codex-usage-reset-at ────────────────────────────────────────────
+# ── provider-reset-at / codex-usage-reset-at ────────────────────────
 
 _USAGE_TIME_PATTERNS = [
     r"try again at\s+([0-9]{1,2})(?::([0-9]{2}))?\s*([AaPp]\.?[Mm]\.?)?",
@@ -757,7 +857,7 @@ _USAGE_TIME_PATTERNS = [
 _CODEX_CLOCK_ROLLOVER_MAX_SECS = 6 * 3600
 
 
-def _cmd_codex_usage_reset(args: argparse.Namespace) -> int:
+def _cmd_provider_reset(args: argparse.Namespace) -> int:
     try:
         with open(args.logfile, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
@@ -1073,6 +1173,11 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("log_file")
     s.set_defaults(func=_cmd_raw_status)
 
+    s = sub.add_parser("provider-issue",
+                       help="Classify provider failures as none, transient, or capacity_limited.")
+    s.add_argument("log_file")
+    s.set_defaults(func=_cmd_provider_issue)
+
     s = sub.add_parser("finish-fields",
                        help="Summarize usage, tool counts, and backend status for agent finish.")
     s.add_argument("log_file")
@@ -1095,10 +1200,15 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("now")
     s.set_defaults(func=_cmd_append_guard_card)
 
-    s = sub.add_parser("codex-usage-reset-at", help="Parse codex transcript for next usage-reset epoch.")
+    s = sub.add_parser("codex-usage-reset-at", help="Compatibility alias for provider-reset-at.")
     s.add_argument("logfile")
     s.add_argument("--now-epoch")
-    s.set_defaults(func=_cmd_codex_usage_reset)
+    s.set_defaults(func=_cmd_provider_reset)
+
+    s = sub.add_parser("provider-reset-at", help="Parse provider text for next reset epoch.")
+    s.add_argument("logfile")
+    s.add_argument("--now-epoch")
+    s.set_defaults(func=_cmd_provider_reset)
 
     s = sub.add_parser("claims-activity-since", help="Summarize claims.jsonl events since epoch.")
     s.add_argument("claims_file")

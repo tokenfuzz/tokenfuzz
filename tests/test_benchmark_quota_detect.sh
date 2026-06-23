@@ -8,8 +8,8 @@
 # flipped an otherwise-successful model-direct cell to status=quota_exhausted,
 # armed the cross-cell short-circuit, and dropped the cell's real confirmed
 # crashes from the pool (build_pool / aggregate count only status=done cells).
-# The fix: 503 is excluded from the quota regex, and a terminal success result
-# in backend.raw.log vetoes the quota flag entirely.
+# The fix: quota classification is delegated to lib/audit_helpers.py, and a
+# terminal success result in backend.raw.log vetoes the quota flag entirely.
 set -euo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +41,9 @@ extract_fn() {
   ' "$BENCH"
 }
 eval "$(extract_fn cell_backend_succeeded)"
+eval "$(extract_fn cell_provider_issue)"
+eval "$(extract_fn cell_has_result_artifacts)"
+eval "$(extract_fn model_direct_capacity_blocked)"
 eval "$(extract_fn cell_log_has_quota_exhaustion)"
 
 # The terminal success record gemini-cli writes once the stream completes.
@@ -89,10 +92,15 @@ else
 fi
 
 # ── T4: sustained 429 with no success result IS quota exhaustion ────────────
-# The real death case must still be detected so the run short-circuits.
+# The real death case must still be detected so the run short-circuits. A real
+# gemini/agy log carries the Antigravity banner (as every gemini fixture does);
+# the classifier requires that provider-CLI dialect marker before trusting a
+# bare plain-text 429/quota line, so a stray "status 429" in arbitrary tool
+# output is not mistaken for a backend death.
 cell4="$work/cell-429-dead"
 mkdir -p "$cell4"
 {
+  printf 'I0519 17:22:48.681 12345 server.go:1295] Antigravity CLI starting\n'
   for i in $(seq 1 12); do
     printf 'Attempt %d failed with status 429. Retrying...\n' "$i"
   done
@@ -126,6 +134,57 @@ if cell_backend_succeeded "$cell6"; then
     "returned true on a cell with no log"
 else
   pass "T6: cell_backend_succeeded is false without a backend.raw.log"
+fi
+
+# ── T7: model-direct capacity verdict for a NON-Gemini (claude) cell ─────────
+# Locks the rc!=0 assumption: a claude capacity death (api_error_status:429,
+# no terminal success, no artifacts) is provider-limited when the backend exits
+# non-zero, but a recovered/clean exit (rc=0) stays done, and a cell that wrote
+# artifacts is never discarded. This is the model-direct path bin/benchmark:
+# run_model_direct_cell uses to decide .backend-unavailable.
+cell7="$work/cell-md-claude"
+mkdir -p "$cell7"
+printf '{"type":"result","is_error":true,"api_error_status":429}\n' \
+  > "$cell7/backend.raw.log"
+assert_eq "capacity_limited" "$(cell_provider_issue "$cell7")" \
+  "T7: claude api_error_status:429 model-direct log classifies as capacity"
+
+if model_direct_capacity_blocked "$(cell_provider_issue "$cell7")" 1 "$cell7"; then
+  pass "T7a: claude capacity + rc!=0 + no artifacts → provider-limited"
+else
+  fail "T7a: claude capacity + rc!=0 + no artifacts → provider-limited" "not blocked"
+fi
+
+# rc=0 (recovered or clean exit) must NOT be discarded — the assumption that a
+# real capacity death exits non-zero, made explicit so a future change is
+# deliberate.
+if model_direct_capacity_blocked "$(cell_provider_issue "$cell7")" 0 "$cell7"; then
+  fail "T7b: claude capacity + rc=0 must NOT be provider-limited (relies on non-zero exit)" \
+    "blocked on a clean exit"
+else
+  pass "T7b: claude capacity + rc=0 stays done (rc!=0 assumption locked)"
+fi
+
+# A cell that produced artifacts is useful work — never discarded.
+mkdir -p "$cell7/findings/FIND-001"
+if model_direct_capacity_blocked "$(cell_provider_issue "$cell7")" 1 "$cell7"; then
+  fail "T7c: a capacity cell WITH artifacts must NOT be provider-limited" "blocked despite artifacts"
+else
+  pass "T7c: capacity + artifacts is not provider-limited"
+fi
+
+# A transient issue never blocks, even with rc!=0 and no artifacts — it becomes
+# a plain failed cell the next replicate re-runs.
+cell8="$work/cell-md-transient"
+mkdir -p "$cell8"
+printf '{"type":"error","error":{"message":"Server returned 503"}}\n' \
+  > "$cell8/backend.raw.log"
+assert_eq "transient" "$(cell_provider_issue "$cell8")" \
+  "T7d: claude 503 model-direct log classifies as transient"
+if model_direct_capacity_blocked "$(cell_provider_issue "$cell8")" 1 "$cell8"; then
+  fail "T7e: a transient cell must NOT be provider-limited" "transient blocked"
+else
+  pass "T7e: transient + rc!=0 + no artifacts is not provider-limited (plain failed)"
 fi
 
 summary

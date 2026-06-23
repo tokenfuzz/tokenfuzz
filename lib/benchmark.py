@@ -2027,6 +2027,7 @@ def aggregate(bench_dir: Path) -> dict:
             "replicate": cell.get("replicate"),
             "experiment": cell.get("experiment", ""),
             "status": cell.get("status", "unknown"),
+            "run_quality": cell.get("run_quality", "clean"),
             "wall_seconds": cell.get("wall_seconds"),
             "metrics": metrics,
         }
@@ -2058,12 +2059,26 @@ def aggregate(bench_dir: Path) -> dict:
     token_usage = []
     for cond, cells in sorted(by_condition.items()):
         done = [c for c in cells if c["status"] == "done"]
-        # quota_exhausted is written by bin/benchmark when the gemini
-        # quota watcher abandons a cell (or when a later cell is short-
-        # circuited because the account ran out earlier in the run).
-        # Counted separately so the report can show "2/4 done, 2 quota
-        # exhausted" rather than burying the loss in a low replicates_done.
+        # incomplete is written when provider/account limits made the cell
+        # unsuitable as a clean benchmark replicate. Older runs used
+        # quota_exhausted for the Gemini-only variant; keep that status in
+        # the same excluded bucket for regenerate/backward compatibility.
+        incomplete = [
+            c for c in cells if c["status"] in ("incomplete", "quota_exhausted")
+        ]
+        provider_limited = [
+            c
+            for c in incomplete
+            if c.get("run_quality") == "provider_limited"
+            or c["status"] == "quota_exhausted"
+        ]
         quota_exhausted = [c for c in cells if c["status"] == "quota_exhausted"]
+        # done cells that recovered from a provider blip mid-run. They ARE
+        # counted in the clean totals (the run finished usefully), but surfaced
+        # so a reader knows those metrics include a disrupted session.
+        provider_recovered = [
+            c for c in done if c.get("run_quality") == "provider_recovered"
+        ]
         crashes = [c["metrics"].get("confirmed_crashes", 0) for c in done]
         findings = [c["metrics"].get("findings", 0) for c in done]
         rejected_findings = [
@@ -2094,6 +2109,9 @@ def aggregate(bench_dir: Path) -> dict:
                 "condition": cond,
                 "replicates_total": len(cells),
                 "replicates_done": len(done),
+                "replicates_incomplete": len(incomplete),
+                "replicates_provider_limited": len(provider_limited),
+                "replicates_provider_recovered": len(provider_recovered),
                 "replicates_quota_exhausted": len(quota_exhausted),
                 "crashes": crashes,
                 "crash_median": _median([float(x) for x in crashes]),
@@ -2690,6 +2708,16 @@ def render_section(report: dict) -> str:
                     "{d}/{t}".format(d=c.get("replicates_done", 0),
                                      t=c.get("replicates_total", 0))
                     + (
+                        " ({r}r)".format(r=c.get("replicates_provider_recovered", 0))
+                        if int(c.get("replicates_provider_recovered", 0) or 0) > 0
+                        else ""
+                    )
+                    + (
+                        " ({p}p)".format(p=c.get("replicates_provider_limited", 0))
+                        if int(c.get("replicates_provider_limited", 0) or 0) > 0
+                        else ""
+                    )
+                    + (
                         " ({q}q)".format(q=c.get("replicates_quota_exhausted", 0))
                         if int(c.get("replicates_quota_exhausted", 0) or 0) > 0
                         else ""
@@ -3123,6 +3151,20 @@ def crosstab(bench_root: Path) -> str:
                         t=int(c.get("replicates_total", 0) or 0),
                     )
                     + (
+                        " ({r}r)".format(
+                            r=int(c.get("replicates_provider_recovered", 0) or 0)
+                        )
+                        if int(c.get("replicates_provider_recovered", 0) or 0) > 0
+                        else ""
+                    )
+                    + (
+                        " ({p}p)".format(
+                            p=int(c.get("replicates_provider_limited", 0) or 0)
+                        )
+                        if int(c.get("replicates_provider_limited", 0) or 0) > 0
+                        else ""
+                    )
+                    + (
                         " ({q}q)".format(
                             q=int(c.get("replicates_quota_exhausted", 0) or 0)
                         )
@@ -3195,9 +3237,11 @@ def crosstab(bench_root: Path) -> str:
         "cells may end early when the model stops."
     )
     lines.append(
-        "- **Replicates** — `done/total`. A `(Nq)` suffix means N replicates "
-        "ended at provider quota, so the row reflects less available model "
-        "time than planned."
+        "- **Replicates** — `done/total`. A `(Nr)` suffix means N done replicates "
+        "recovered from a provider blip and ARE counted (their metrics include a "
+        "disrupted session); `(Np)` means N provider-limited replicates were "
+        "excluded from clean totals; legacy `(Nq)` marks the older "
+        "quota-exhausted subset."
     )
     lines.append("")
 

@@ -778,7 +778,7 @@ run_dryrun_cell() {
 # can share the same kill arms. Sourced near the top of this file.
 #
 # The two helpers below stay here: they read benchmark's per-cell
-# directory layout (audit.log, backend.raw.log, repo-root/output/...),
+# directory layout (backend.raw.log, repo-root/output/...),
 # which bin/audit has no notion of, so they are not shared watchdog logic.
 
 # cell_backend_succeeded — true if the model-direct backend session in this
@@ -800,37 +800,72 @@ cell_backend_succeeded() {
   grep -I -qE '"type":[[:space:]]*"result".*"status":[[:space:]]*"success"' "$raw"
 }
 
-# cell_log_has_quota_exhaustion — true if any of the cell's logs carry a
-# gemini quota / 429 diagnostic AND the cell did not finish successfully.
+# cell_log_has_quota_exhaustion — compatibility wrapper for older Gemini quota
+# handling. Provider classification itself lives in lib/audit_helpers.py and is
+# shared across Claude, Codex, Gemini, and OpenCode/oss.
 # This is the post-run confirmation that pairs with the live watchdog: even
 # when the watchdog never fired (e.g. the cell finished on its own with a
 # quota error in the tail), a quota line on disk marks the cell quota-dead so
 # the run short-circuits the remaining replicates instead of re-burning a
 # dead account's budget.
 #
-# Two guards keep this from false-flagging a healthy run:
-#   1. A terminal success result wins — a recovered 429/503 in the body of an
-#      otherwise-successful session is not exhaustion (see cell_backend_succeeded).
-#   2. The regex matches only genuine quota signals. A 503 UNAVAILABLE is a
-#      transient "service overloaded" error that gemini-cli retries with
-#      backoff; it is NOT a quota verdict, so it is deliberately excluded.
-#      The real exhaustion signal is 429 / RESOURCE_EXHAUSTED.
+# A terminal success result wins: a recovered 429/503 in the body of an
+# otherwise-successful model-direct session is not exhaustion.
 cell_log_has_quota_exhaustion() {
   local cell_dir="$1"
-  local quota_re='RESOURCE_EXHAUSTED|Individual quota reached|exceeded your current quota|exhausted your capacity|quota will reset|quota reached|status 429|code 429|HTTP 429|Too Many Requests'
   [ -d "$cell_dir" ] || return 1
-  # A session that reached a terminal success result was not killed by quota.
   cell_backend_succeeded "$cell_dir" && return 1
-  # The repo-root/output globs trust per-cell isolation: each cell gets
-  # its own checkout, so output/<target>/<backend>/logs/ never carries
-  # bytes from a sibling cell. If two cells ever share a checkout, a
-  # stale quota line from one would mis-flag the other as quota-dead.
-  grep -I -qiE "$quota_re" \
-    "$cell_dir/audit.log" \
+  [ "$(cell_provider_issue "$cell_dir")" = "capacity_limited" ]
+}
+
+cell_provider_issue() {
+  local cell_dir="$1" file issue saw_transient=0
+  [ -d "$cell_dir" ] || { printf '%s\n' none; return; }
+  for file in \
     "$cell_dir/backend.raw.log" \
+    "$cell_dir"/repo-root/output/*/*/results/logs/.raw/session_*.log.raw \
+    "$cell_dir"/repo-root/output/*/*/results/logs/index.log \
+    "$cell_dir"/repo-root/output/*/*/results/logs/model-preflight-*.raw \
     "$cell_dir"/repo-root/output/*/*/logs/index.log \
-    "$cell_dir"/repo-root/output/*/*/logs/model-preflight-*.raw \
-    2>/dev/null
+    "$cell_dir"/repo-root/output/*/*/logs/model-preflight-*.raw
+  do
+    [ -f "$file" ] || continue
+    issue="$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-issue "$file" 2>/dev/null || echo none)"
+    case "$issue" in
+      capacity_limited) printf '%s\n' capacity_limited; return 0 ;;
+      transient) saw_transient=1 ;;
+    esac
+  done
+  if [ "$saw_transient" -eq 1 ]; then
+    printf '%s\n' transient
+  else
+    printf '%s\n' none
+  fi
+}
+
+set_cell_run_quality() {
+  local cell_dir="$1" quality="$2"
+  case "$quality" in
+    clean|provider_recovered|provider_limited) ;;
+    *) quality=clean ;;
+  esac
+  printf '%s\n' "$quality" > "$cell_dir/.run-quality" 2>/dev/null || true
+}
+
+sync_harness_provider_markers() {
+  local cell_dir="$1" results_dir="$2" logs_dir
+  logs_dir="$results_dir/logs"
+  if [ -f "$logs_dir/.run-quality" ]; then
+    cp "$logs_dir/.run-quality" "$cell_dir/.run-quality" 2>/dev/null || true
+  fi
+  if [ -f "$logs_dir/.backend-unavailable" ]; then
+    : > "$cell_dir/.backend-unavailable" 2>/dev/null || true
+  fi
+  # Compatibility with the older Gemini-only quota marker.
+  if [ -f "$cell_dir/.quota-exhausted" ]; then
+    : > "$cell_dir/.backend-unavailable" 2>/dev/null || true
+    set_cell_run_quality "$cell_dir" provider_limited
+  fi
 }
 
 # cell_has_result_artifacts — true if the cell wrote at least one
@@ -842,6 +877,24 @@ cell_has_result_artifacts() {
   [ -d "$results_dir" ] || return 1
   [ "$(find "$results_dir/crashes" "$results_dir/findings" \
     -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" -gt 0 ]
+}
+
+# model_direct_capacity_blocked — true when a model-direct cell must be marked
+# provider-limited/incomplete: a capacity/account limit that left the cell with
+# no terminal result (non-zero exit) and no artifacts. Kept as a pure helper so
+# the load-bearing assumption is unit-testable without booting a backend:
+#   - rc != 0 is the cross-backend "did not finish cleanly" signal. A real
+#     Claude/Codex capacity death exits non-zero; a run that *recovered* from a
+#     capacity blip exits 0 and stays done (its empty result is genuine, not a
+#     provider artifact). cell_backend_succeeded cannot stand in here because it
+#     keys on gemini's `"status":"success"`, which claude/codex do not emit.
+#   - transient issues never block (only capacity does); a transient that killed
+#     the cell falls through to a plain failed cell the next replicate re-runs.
+model_direct_capacity_blocked() {
+  local provider_issue="$1" rc="$2" out_dir="$3"
+  [ "$provider_issue" = "capacity_limited" ] || return 1
+  [ "$rc" != "0" ] || return 1
+  ! cell_has_result_artifacts "$out_dir"
 }
 
 # Snapshot every `findings/FIND-*` and `crashes/CRASH-*` path that
@@ -979,7 +1032,7 @@ run_model_direct_cell() {
   printf '%s' "$prompt" > "$prompt_file"
   # A previous interrupted run might have left a stale sentinel here; the
   # quota watcher is the only writer, so clear it before this cell starts.
-  rm -f "$cell_dir/.quota-exhausted" 2>/dev/null || true
+  rm -f "$cell_dir/.quota-exhausted" "$cell_dir/.backend-unavailable" "$cell_dir/.run-quality" 2>/dev/null || true
 
   # Snapshot the pre-existing pollution paths under the target tree
   # before the agent runs. The post-cell sweep moves only entries that
@@ -1047,9 +1100,25 @@ run_model_direct_cell() {
     "$prompt_file" > "$out_dir/logs/index.jsonl" 2>/dev/null \
     || printf '{}\n' > "$out_dir/logs/index.jsonl"
 
-  if [ "$BACKEND" = "gemini" ] && cell_log_has_quota_exhaustion "$cell_dir"; then
+  local provider_issue
+  provider_issue="$(cell_provider_issue "$cell_dir")"
+  if [ "$provider_issue" != "none" ]; then
+    set_cell_run_quality "$cell_dir" provider_recovered
+  fi
+  # Only a persistent capacity/account limit that left the cell empty marks it
+  # provider-limited and (via .backend-unavailable) arms the cross-cell skip. A
+  # transient blip is not persistent: if it recovered, the cell stands as done;
+  # if it killed the cell, the rc!=0 below makes it a plain failed cell that the
+  # next replicate re-runs — it must NOT abandon the remaining replicates.
+  if model_direct_capacity_blocked "$provider_issue" "$rc" "$out_dir"; then
+    log "cell ${cell_dir##*/} — provider capacity-limited; no terminal result or artifacts" >&2
+    : > "$cell_dir/.backend-unavailable"
+    set_cell_run_quality "$cell_dir" provider_limited
+  elif [ "$BACKEND" = "gemini" ] && cell_log_has_quota_exhaustion "$cell_dir"; then
     log "cell ${cell_dir##*/} — gemini quota exhausted (quota diagnostic found)" >&2
     touch "$cell_dir/.quota-exhausted"
+    : > "$cell_dir/.backend-unavailable"
+    set_cell_run_quality "$cell_dir" provider_limited
   elif [ "$BACKEND" = "gemini" ] && [ ! -s "$raw_log" ] \
       && ! cell_has_result_artifacts "$out_dir"; then
     log "cell ${cell_dir##*/} — backend produced empty output and no artifacts" >&2
@@ -1064,7 +1133,7 @@ run_model_direct_cell() {
   # quota-watcher kill returns a SIGTERM exit code (143); we treat that as
   # "completed under operator policy" so the post-run harvest still runs
   # against whatever the agent managed to write.
-  if [ -f "$cell_dir/.quota-exhausted" ]; then
+  if [ -f "$cell_dir/.backend-unavailable" ] || [ -f "$cell_dir/.quota-exhausted" ]; then
     return 0
   fi
   { [ "$rc" = "0" ] || [ "$rc" = "124" ]; } && return 0
@@ -1126,6 +1195,11 @@ run_harness_cell() {
   local -a audit_env
   audit_env=(env "AUDIT_RECON_CACHE_DIR=$BENCH_DIR/recon-cache")
   [ -n "$AGENTS" ] && audit_env+=("NUM_AGENTS=$AGENTS")
+  # A cell has a fixed wall budget that is far shorter than the audit's
+  # sustained-streak halt, so a far-off capacity/account reset must stop the
+  # cell early (and mark it provider-limited) rather than sleep out the budget
+  # and get SIGTERM'd mid-backoff into a false "done".
+  audit_env+=("RATE_LIMIT_CAPACITY_HARD_STOP=1")
   # Rotation thresholds are left at harness defaults — the harness
   # condition measures the product as shipped, rotation behaviour included.
   #
@@ -1182,11 +1256,20 @@ run_harness_cell() {
       "$harness_sweep_marker"
   fi
 
-  echo "$facade/output/${TARGET_SLUG}-${exp_name}/${BACKEND}/results"
+  local results_dir="$facade/output/${TARGET_SLUG}-${exp_name}/${BACKEND}/results"
+  sync_harness_provider_markers "$cell_dir" "$results_dir"
+  if [ ! -f "$cell_dir/.run-quality" ]; then
+    local provider_issue
+    provider_issue="$(cell_provider_issue "$cell_dir")"
+    [ "$provider_issue" != "none" ] && set_cell_run_quality "$cell_dir" provider_recovered
+  fi
+  echo "$results_dir"
   if [ "$BACKEND" = "gemini" ] && cell_log_has_quota_exhaustion "$cell_dir"; then
     touch "$cell_dir/.quota-exhausted"
+    : > "$cell_dir/.backend-unavailable"
+    set_cell_run_quality "$cell_dir" provider_limited
   fi
-  if [ -f "$cell_dir/.quota-exhausted" ]; then
+  if [ -f "$cell_dir/.backend-unavailable" ] || [ -f "$cell_dir/.quota-exhausted" ]; then
     return 0
   fi
   [ "$rc" = "0" ] || [ "$rc" = "124" ]
@@ -1208,6 +1291,18 @@ write_cell_json() {
 import json, os, sys
 path, cond, rep, exp, rd, wall, status = sys.argv[1:8]
 requested_agents = sys.argv[8] if len(sys.argv) > 8 else ""
+cell_dir = os.path.dirname(path)
+run_quality = "clean"
+rq_path = os.path.join(cell_dir, ".run-quality")
+try:
+    with open(rq_path, encoding="utf-8") as fh:
+        value = fh.read().strip()
+    if value in {"clean", "provider_recovered", "provider_limited"}:
+        run_quality = value
+except OSError:
+    pass
+if status in {"incomplete", "quota_exhausted"} and run_quality == "clean":
+    run_quality = "provider_limited"
 out = {
     "condition": cond,
     "replicate": int(rep),
@@ -1215,6 +1310,7 @@ out = {
     "results_dir": rd,
     "wall_seconds": int(wall),
     "status": status,
+    "run_quality": run_quality,
 }
 def _ri(s):
     s = (s or "").strip()
@@ -1952,12 +2048,11 @@ predict_results_dir() {
 # ── main cell loop ───────────────────────────────────────────────────────
 cells_done=0
 cells_failed=0
-# Tripped by the gemini quota watcher; once set, every remaining cell in
-# the run is short-circuited to status=quota_exhausted instead of being
-# launched. This is what makes the whole script exit promptly when the
-# account quota is gone — without it, replicates 2..N would each burn
-# their own ~5 min to re-detect the same dead account.
-gemini_quota_dead=0
+# Tripped by provider-unavailable detection; once set, every remaining cell in
+# the run is short-circuited to status=incomplete instead of being launched.
+# This prevents replicates 2..N from re-burning wall time against the same
+# dead account/session/provider window.
+provider_unavailable=0
 # --regenerate re-derives results from the cells already on disk, so it skips
 # the launch loop entirely and drops straight into the aggregate/ledger pass
 # below. cells_done/cells_failed stay 0; the run's exit status reflects only
@@ -1979,12 +2074,14 @@ for cond in "${COND_ARR[@]}"; do
       continue
     fi
 
-    if [ "$gemini_quota_dead" = "1" ]; then
+    if [ "$provider_unavailable" = "1" ]; then
       mkdir -p "$cell_dir"
       exp_name="bench-${RUNID}-${cond}-r${rep}"
-      log "cell $cell_name — skipping (gemini quota exhausted earlier in this run)"
+      : > "$cell_dir/.backend-unavailable"
+      set_cell_run_quality "$cell_dir" provider_limited
+      log "cell $cell_name — skipping (provider unavailable earlier in this run)"
       write_cell_json "$cell_json" "$cond" "$rep" "$exp_name" \
-        "" 0 "quota_exhausted" "$AGENTS"
+        "" 0 "incomplete" "$AGENTS"
       cells_failed=$((cells_failed + 1))
       rep=$((rep + 1))
       continue
@@ -2044,11 +2141,11 @@ for cond in "${COND_ARR[@]}"; do
       # can hang if a backend child inherits the capture pipe.
       results_dir="$cell_dir"
       run_model_direct_cell "$cell_dir" "$exp_name" || status="failed"
-      # Quota watcher fired during this cell — propagate the status and
-      # arm the cross-cell skip flag so we don't relaunch a dead account.
-      if [ -f "$cell_dir/.quota-exhausted" ]; then
-        status="quota_exhausted"
-        gemini_quota_dead=1
+      # Provider unavailability fired during this cell — propagate the status
+      # and arm the cross-cell skip flag so we don't relaunch a dead backend.
+      if [ -f "$cell_dir/.backend-unavailable" ] || [ -f "$cell_dir/.quota-exhausted" ]; then
+        status="incomplete"
+        provider_unavailable=1
       fi
       # Gate raw model-direct findings through the independent-validator
       # quorum (lib/triage_validate.sh) — a FIND counts only on a Promote
@@ -2072,9 +2169,9 @@ for cond in "${COND_ARR[@]}"; do
       fi
     else
       results_dir="$(run_harness_cell "$cell_dir" "$exp_name")" || status="failed"
-      if [ -f "$cell_dir/.quota-exhausted" ]; then
-        status="quota_exhausted"
-        gemini_quota_dead=1
+      if [ -f "$cell_dir/.backend-unavailable" ] || [ -f "$cell_dir/.quota-exhausted" ]; then
+        status="incomplete"
+        provider_unavailable=1
       fi
     fi
 
@@ -2105,9 +2202,9 @@ for cond in "${COND_ARR[@]}"; do
     if [ "$status" = "done" ]; then
       cells_done=$((cells_done + 1))
       log "cell $cell_name — done in $(format_duration "$wall")"
-    elif [ "$status" = "quota_exhausted" ]; then
+    elif [ "$status" = "incomplete" ] || [ "$status" = "quota_exhausted" ]; then
       cells_failed=$((cells_failed + 1))
-      log "cell $cell_name — quota exhausted after $(format_duration "$wall") (see $cell_dir)"
+      log "cell $cell_name — incomplete after $(format_duration "$wall") (provider limited; see $cell_dir)"
     else
       cells_failed=$((cells_failed + 1))
       log "cell $cell_name — FAILED after $(format_duration "$wall") (see $cell_dir)"

@@ -509,100 +509,48 @@ rm -f "$(agent_strategy_path 1)" "$(agent_strategy_path 2)"
 # Rate limit detection
 # ═══════════════════════════════════════════════════════════════
 
-log_has_codex_usage_limit() {
-  local logfile="$1" candidate_lines
-  [ -f "$logfile" ] || return 1
-  candidate_lines=$(grep -E '"type":"(error|turn\.failed|agent_message)"' "$logfile" 2>/dev/null || true)
-  grep -qiE 'usage limit|hit your .*limit|try again at' <<<"$candidate_lines" || return 1
-  grep -qiE 'usage limit|hit your .*limit' "$logfile" 2>/dev/null || return 1
-  grep -qiE 'try again at|retry after|reset' "$logfile" 2>/dev/null || return 1
-  return 0
+provider_text_reset_at() {
+  local logfile="$1"
+  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-reset-at "$logfile" 2>/dev/null
 }
 
-codex_usage_limit_reset_at() {
+extract_raw_status() {
   local logfile="$1"
-  python3 - "$logfile" <<'PY' 2>/dev/null
-import datetime as dt
-import re
-import sys
-import time
-text = open(sys.argv[1], "r", encoding="utf-8", errors="replace").read()
-now = dt.datetime.now()
-m = re.search(r"try again at\s+([0-9]{1,2})(?::([0-9]{2}))?\s*([AaPp]\.?[Mm]\.?)?", text, re.I)
-if not m:
-    sys.exit(1)
-hour = int(m.group(1)); minute = int(m.group(2) or "0")
-ampm = (m.group(3) or "").lower().replace(".", "")
-if ampm == "pm" and hour != 12:
-    hour += 12
-elif ampm == "am" and hour == 12:
-    hour = 0
-candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-if candidate <= now:
-    candidate += dt.timedelta(days=1)
-    if (candidate - now).total_seconds() > 6 * 3600:
-        sys.exit(1)
-print(int(time.mktime(candidate.timetuple())))
-PY
+  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" raw-status "$logfile" 2>/dev/null \
+    || printf 'rate_limit=0\ncodex_completed=0\ncodex_failed=0\ngemini_success=0\n'
 }
 
-log_is_gemini_cli() {
+log_provider_issue() {
   local logfile="$1"
-  [ -f "$logfile" ] || return 1
-  grep -qiE \
-    'Antigravity CLI|antigravity-cli|antigravity\.google|YOLO mode is enabled|Ripgrep is not available\. Falling back to GrepTool|@google/gemini-cli/|"model":"gemini-[a-z0-9._-]+"' \
-    "$logfile" 2>/dev/null
+  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-issue "$logfile" 2>/dev/null \
+    || printf '%s\n' none
 }
 
-log_has_gemini_backend_rejection() {
-  local logfile="$1"
+log_has_rate_limit_rejection() {
+  local logfile="$1" rs
   [ -f "$logfile" ] || return 1
-  log_is_gemini_cli "$logfile" || return 1
-  grep -qiE \
-    'Attempt [0-9]+ failed with status (429|503)|"code"[[:space:]]*:[[:space:]]*(429|503)|status:[[:space:]]*(429|503)|RESOURCE_EXHAUSTED|UNAVAILABLE|exceeded your current quota|exhausted your capacity|quota will reset|high demand|fetch failed sending request|rate.?limit.*(exceeded|reached)' \
-    "$logfile" 2>/dev/null
+  rs=$(extract_raw_status "$logfile")
+  grep -q '^rate_limit=1' <<<"$rs"
 }
 
 detect_rate_limit() {
   local timestamp="$1"
-  local reset_at="" saw_429=0
+  local reset_at="" saw_provider_rejection=0
   local i role mode logfile
   for i in $(seq 1 "$NUM_AGENTS"); do
     for role in cold-start deep_investigation; do
       for mode in generic browser shell; do
         logfile="$LOGDIR/session_${timestamp}_${role}-${i}-${mode}.log.raw"
         [ -f "$logfile" ] || continue
-        local hit_429=0
-        if grep -qF '"api_error_status":429' "$logfile" 2>/dev/null; then
-          hit_429=1
-        fi
-        if [ "$hit_429" -eq 0 ]; then
-          local error_lines
-          error_lines=$(grep -E '"type":"(error|turn\.failed)"' "$logfile" 2>/dev/null || true)
-          if grep -qE 'status\\?":429|Server returned 429' <<<"$error_lines"; then
-            hit_429=1
+        log_has_rate_limit_rejection "$logfile" || continue
+        saw_provider_rejection=1
+        local text_reset
+        text_reset=$(provider_text_reset_at "$logfile" 2>/dev/null || true)
+        if [ -n "$text_reset" ] && [ "$text_reset" -gt 0 ] 2>/dev/null; then
+          if [ -z "$reset_at" ] || [ "$text_reset" -gt "$reset_at" ] 2>/dev/null; then
+            reset_at="$text_reset"
           fi
         fi
-        if [ "$hit_429" -eq 0 ] && log_has_codex_usage_limit "$logfile"; then
-          hit_429=1
-          local codex_reset
-          codex_reset=$(codex_usage_limit_reset_at "$logfile" 2>/dev/null || true)
-          if [ -n "$codex_reset" ] && [ "$codex_reset" -gt 0 ] 2>/dev/null; then
-            if [ -z "$reset_at" ] || [ "$codex_reset" -gt "$reset_at" ] 2>/dev/null; then
-              reset_at="$codex_reset"
-            fi
-          fi
-        fi
-        if [ "$hit_429" -eq 0 ] && \
-           grep -qE '"type":"result"[^}]*"status":"error"' "$logfile" 2>/dev/null && \
-           grep -qiE 'exhausted your capacity|quota will reset|rate.?limit.*(exceeded|reached)' "$logfile" 2>/dev/null; then
-          hit_429=1
-        fi
-        if [ "$hit_429" -eq 0 ] && log_has_gemini_backend_rejection "$logfile"; then
-          hit_429=1
-        fi
-        [ "$hit_429" -eq 1 ] || continue
-        saw_429=1
         local candidate
         candidate=$(awk '
           /"type":"rate_limit_event"/ &&
@@ -627,7 +575,7 @@ detect_rate_limit() {
     printf '%s\n' "$reset_at"
     return 0
   fi
-  if [ "$saw_429" -eq 1 ]; then
+  if [ "$saw_provider_rejection" -eq 1 ]; then
     printf '%s\n' "unknown"
     return 0
   fi
@@ -780,7 +728,8 @@ W0519 17:22:48.821 12345 client.go:81] You have exhausted your capacity on this 
 EOF
 result=$(detect_rate_limit "$ts_gemini")
 assert_eq 0 $? "Antigravity capacity wording → exit 0"
-assert_eq "unknown" "$result" "Antigravity rate limit → returns 'unknown'"
+[ "$result" -gt "$(date +%s)" ] 2>/dev/null
+assert_eq 0 $? "Antigravity rate limit → reset timestamp parsed from text"
 
 # Antigravity CLI: high-demand 503 in the diagnostic log.
 ts_gemini_503_stderr="20260510_235001"

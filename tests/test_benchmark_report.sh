@@ -382,6 +382,18 @@ p6_write_cell_json() {
 import json, os, sys
 path, cond, rep, exp, rd, wall, status = sys.argv[1:8]
 requested_agents = sys.argv[8] if len(sys.argv) > 8 else ""
+cell_dir = os.path.dirname(path)
+run_quality = "clean"
+rq_path = os.path.join(cell_dir, ".run-quality")
+try:
+    with open(rq_path, encoding="utf-8") as fh:
+        value = fh.read().strip()
+    if value in {"clean", "provider_recovered", "provider_limited"}:
+        run_quality = value
+except OSError:
+    pass
+if status in {"incomplete", "quota_exhausted"} and run_quality == "clean":
+    run_quality = "provider_limited"
 out = {
     "condition": cond,
     "replicate": int(rep),
@@ -389,6 +401,7 @@ out = {
     "results_dir": rd,
     "wall_seconds": int(wall),
     "status": status,
+    "run_quality": run_quality,
 }
 def _ri(s):
     s = (s or "").strip()
@@ -592,6 +605,10 @@ assert_eq "1" "$(echo "$qrep" | jq -r '.conditions[0].replicates_done')" \
   "T29e: only the done cell counts toward replicates_done"
 assert_eq "1" "$(echo "$qrep" | jq -r '.conditions[0].replicates_quota_exhausted')" \
   "T29f: quota_exhausted cell counted in its own column"
+assert_eq "1" "$(echo "$qrep" | jq -r '.conditions[0].replicates_incomplete')" \
+  "T29f2: quota_exhausted cell counted as incomplete"
+assert_eq "1" "$(echo "$qrep" | jq -r '.conditions[0].replicates_provider_limited')" \
+  "T29f3: quota_exhausted cell counted as provider-limited"
 assert_eq "2" "$(echo "$qrep" | jq -r '.conditions[0].replicates_total')" \
   "T29g: replicates_total covers both cells"
 # Token totals must exclude the quota-exhausted cell — its 9999 is noise.
@@ -604,7 +621,7 @@ python3 "$PY" pool "$qbd" >/dev/null
 assert_eq "1" "$(find "$qbd/pool/findings" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" \
   "T29i2: pool excludes quota_exhausted findings so clusters match totals"
 
-# (c) Crosstab reps cell renders "1/2 (1q)" when quota_exhausted cells exist.
+# (c) Crosstab reps cell renders provider-limited and legacy quota suffixes.
 mkdir -p "$qbd/state"
 printf '{"runid":"q-runid","target":"t","backend":"gemini","model":"gemini-3.1-pro-preview","replicates":2,"budget_wall":10800,"harness_agents":null,"model_direct_agents":1,"conditions":["model-direct"],"target_sha":"sha","harness_sha":"sha","dry_run":false}\n' \
   > "$qbd/run.json"
@@ -613,12 +630,63 @@ mkdir -p "$qbroot/gemini"
 ln -s "$qbd" "$qbroot/gemini/q-runid"
 python3 "$PY" aggregate "$qbd" --out "$qbd/report.json" >/dev/null 2>&1 || true
 ctab=$(python3 "$PY" crosstab "$qbroot" 2>/dev/null || true)
-if printf '%s\n' "$ctab" | grep -qE '1/2 \(1q\)'; then
-  pass "T29j: crosstab reps cell annotates quota_exhausted count as (Nq)"
+if printf '%s\n' "$ctab" | grep -qE '1/2 \(1p\) \(1q\)'; then
+  pass "T29j: crosstab reps cell annotates provider-limited and quota counts"
 else
-  fail "T29j: crosstab reps cell annotates quota_exhausted count as (Nq)" \
+  fail "T29j: crosstab reps cell annotates provider-limited and quota counts" \
     "got: $(printf '%s\n' "$ctab" | grep -E '^\| `gemini`' || echo none)"
 fi
+
+# (d) A done cell that recovered from a provider blip IS counted in clean
+#     totals but is surfaced as replicates_provider_recovered, and the crosstab
+#     reps cell carries a (Nr) suffix.
+rbd="$work/recovered-bench"
+mkdir -p "$rbd/cells/model-direct-r1" "$rbd/state"
+cat > "$rbd/cells/model-direct-r1/cell.json" <<JSON
+{"condition":"model-direct","replicate":1,"experiment":"e1","results_dir":"$rbd/cells/model-direct-r1","wall_seconds":4000,"status":"done","run_quality":"provider_recovered"}
+JSON
+cat > "$rbd/cells/model-direct-r1/metrics.json" <<'JSON'
+{"exists":true,"confirmed_crashes":0,"findings":0,
+ "tokens":{"input_tokens":2000,"cached_input_tokens":0,"output_tokens":50,"prompt_estimate_tokens":0,"estimated":false,"iterations":1,"asan_invocations":0}}
+JSON
+rrep=$(python3 "$PY" aggregate "$rbd")
+assert_eq "1" "$(echo "$rrep" | jq -r '.conditions[0].replicates_done')" \
+  "T29k: a recovered cell still counts as done"
+assert_eq "1" "$(echo "$rrep" | jq -r '.conditions[0].replicates_provider_recovered')" \
+  "T29k2: recovered cell surfaced in its own column"
+assert_eq "0" "$(echo "$rrep" | jq -r '.conditions[0].replicates_provider_limited')" \
+  "T29k3: a recovered cell is NOT provider-limited"
+printf '{"runid":"r-runid","target":"t","backend":"gemini","model":"gemini-3.1-pro-preview","replicates":1,"budget_wall":10800,"harness_agents":null,"model_direct_agents":1,"conditions":["model-direct"],"target_sha":"sha","harness_sha":"sha","dry_run":false}\n' \
+  > "$rbd/run.json"
+rbroot="$work/recovered-bench-root"
+mkdir -p "$rbroot/gemini"
+ln -s "$rbd" "$rbroot/gemini/r-runid"
+python3 "$PY" aggregate "$rbd" --out "$rbd/report.json" >/dev/null 2>&1 || true
+rctab=$(python3 "$PY" crosstab "$rbroot" 2>/dev/null || true)
+if printf '%s\n' "$rctab" | grep -qE '1/1 \(1r\)'; then
+  pass "T29l: crosstab reps cell annotates provider-recovered count as (Nr)"
+else
+  fail "T29l: crosstab reps cell annotates provider-recovered count as (Nr)" \
+    "got: $(printf '%s\n' "$rctab" | grep -E '^\| `gemini`' || echo none)"
+fi
+
+# (e) A NEW status=incomplete cell carrying run_quality=provider_limited (the
+#     non-legacy path) must be counted as provider-limited. This exercises the
+#     run_quality field surviving cell-load — without it only legacy
+#     quota_exhausted cells would be counted.
+ibd="$work/incomplete-bench"
+mkdir -p "$ibd/cells/model-direct-r1"
+cat > "$ibd/cells/model-direct-r1/cell.json" <<JSON
+{"condition":"model-direct","replicate":1,"experiment":"e1","results_dir":"$ibd/cells/model-direct-r1","wall_seconds":120,"status":"incomplete","run_quality":"provider_limited"}
+JSON
+printf '{"exists":false}\n' > "$ibd/cells/model-direct-r1/metrics.json"
+irep=$(python3 "$PY" aggregate "$ibd")
+assert_eq "0" "$(echo "$irep" | jq -r '.conditions[0].replicates_done')" \
+  "T29m: an incomplete cell does not count as done"
+assert_eq "1" "$(echo "$irep" | jq -r '.conditions[0].replicates_incomplete')" \
+  "T29m2: incomplete cell counted as incomplete"
+assert_eq "1" "$(echo "$irep" | jq -r '.conditions[0].replicates_provider_limited')" \
+  "T29m3: incomplete+provider_limited counted via run_quality (not just legacy quota)"
 
 # ── T30: sweep_target_tree_for_misplaced_output rescues misrouted output ─
 # Regression coverage for the gemini-r1 2026-05-24 incident: when a
