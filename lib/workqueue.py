@@ -590,6 +590,12 @@ def default_script_root() -> Path:
 
 def context_from_args(args: argparse.Namespace) -> Context:
     script_root = realpath(getattr(args, "script_root", None) or os.environ.get("SCRIPT_ROOT") or default_script_root())
+    target_given = bool(
+        getattr(args, "target_path", None)
+        or os.environ.get("TARGET_ROOT")
+        or getattr(args, "target", None)
+        or os.environ.get("TARGET_NAME")
+    )
     if getattr(args, "target_path", None):
         target_root = realpath(args.target_path)
     elif os.environ.get("TARGET_ROOT"):
@@ -599,12 +605,26 @@ def context_from_args(args: argparse.Namespace) -> Context:
         target_root = realpath(script_root / "targets" / target_name)
     else:
         target_root = realpath(Path.cwd())
+    slug_given = bool(getattr(args, "target_slug", None) or os.environ.get("TARGET_SLUG"))
     target_slug = getattr(args, "target_slug", None) or os.environ.get("TARGET_SLUG") or sanitize_slug(str(target_root))
-    results_dir = realpath(
-        getattr(args, "results_dir", None)
-        or os.environ.get("RESULTS_DIR")
-        or (script_root / "output" / target_slug / "results")
-    )
+    results_given = getattr(args, "results_dir", None) or os.environ.get("RESULTS_DIR")
+    # A stateful results dir must be named, not guessed. With no RESULTS_DIR /
+    # --results-dir AND no target identity (--target/--target-path/TARGET_ROOT/
+    # TARGET_NAME/--target-slug/TARGET_SLUG), the only remaining fallback is
+    # sanitize_slug(cwd) -> output/<basename(cwd)>/results: an arbitrary working
+    # directory silently becomes a phantom "target" and state writes land in a
+    # tree nothing reads back (observed: the bare model-direct baseline agent
+    # poking bin/state created an empty output/<cell-name>/results/state). A
+    # real audit always sets RESULTS_DIR (bin/audit) or names the target, so
+    # this only fires for a stray call — fail loud instead of fabricating one.
+    if not results_given and not target_given and not slug_given:
+        raise SystemExit(
+            "audit state: no results directory. Set RESULTS_DIR or pass "
+            "--results-dir, or name the target with --target / --target-path / "
+            "--target-slug (or TARGET_NAME / TARGET_SLUG). Refusing to derive "
+            "output/<cwd>/results from the current directory."
+        )
+    results_dir = realpath(results_given or (script_root / "output" / target_slug / "results"))
     repo_type = os.environ.get("TARGET_REPO_TYPE") or detect_repo_type(target_root)
     return Context(script_root, target_root, target_slug, results_dir, repo_type)
 

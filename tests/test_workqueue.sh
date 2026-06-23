@@ -2714,5 +2714,57 @@ assert_eq "ok" "$itf_out" \
 assert_eq "ok" "$s8_coverage" \
   "code_feature_reasons: S8 covers injectivity/idempotence/numerical-domain, skips plumbing, never outranks S7"
 
+# ── context_from_args results-dir guard ──────────────────────────────────
+# Regression: with no RESULTS_DIR/--results-dir AND no target identity,
+# context_from_args used to fabricate output/<basename(cwd)>/results and
+# touch the 5 state files there. A bare model-direct baseline agent poking
+# bin/state thus created phantom output/<cell-name>/results/state trees (and
+# could silently misroute real state writes into them). The guard must refuse
+# this fully-implicit case — but ONLY this case: an explicit RESULTS_DIR (how
+# every harness agent runs) or an explicit target identity must still work.
+
+# (1) Negative: bare invocation from an arbitrary cwd with all identity env
+# cleared must fail loud and create no phantom output/<cwd>/results.
+guard_cwd="$TEST_TMPDIR/model-direct-rX"
+mkdir -p "$guard_cwd"
+guard_phantom="$SCRIPT_ROOT/output/model-direct-rX"
+rm -rf "$guard_phantom"
+guard_rc=0
+( cd "$guard_cwd" && env -u RESULTS_DIR -u TARGET_ROOT -u TARGET_SLUG -u TARGET_NAME \
+    "$STATE" init ) >/dev/null 2>&1 || guard_rc=$?
+assert_neq 0 "$guard_rc" "state guard: bare call with no results/target context exits nonzero"
+if [ -e "$guard_phantom" ]; then
+  fail "state guard: bare call created phantom $guard_phantom"
+  rm -rf "$guard_phantom"
+else
+  pass "state guard: bare call creates no phantom output/<cwd>/results"
+fi
+
+# (2) Positive: a target identity (TARGET_SLUG) still resolves the canonical
+# output/<slug>/results default — the guard must not make --target mandatory.
+guard_slug_out="$SCRIPT_ROOT/output/wq-guard-postest"
+rm -rf "$guard_slug_out"
+slug_rc=0
+( cd "$guard_cwd" && env -u RESULTS_DIR -u TARGET_ROOT -u TARGET_NAME TARGET_SLUG=wq-guard-postest \
+    "$STATE" init ) >/dev/null 2>&1 || slug_rc=$?
+if [ "$slug_rc" = "0" ] && [ -d "$guard_slug_out/results/state" ]; then
+  pass "state guard: TARGET_SLUG preserves output/<slug>/results default"
+else
+  fail "state guard: TARGET_SLUG should resolve output/<slug>/results (rc=$slug_rc)"
+fi
+rm -rf "$guard_slug_out"
+
+# (3) Positive (harness-agent shape): an explicit RESULTS_DIR keeps the guard
+# silent and writes land in the real results dir, never a phantom.
+guard_hr="$TEST_TMPDIR/guard-harness-results"
+harness_rc=0
+( cd "$guard_cwd" && env -u TARGET_ROOT -u TARGET_SLUG -u TARGET_NAME RESULTS_DIR="$guard_hr" \
+    "$STATE" init ) >/dev/null 2>&1 || harness_rc=$?
+if [ "$harness_rc" = "0" ] && [ -f "$guard_hr/state/hypotheses.jsonl" ]; then
+  pass "state guard: explicit RESULTS_DIR works (harness agents unaffected)"
+else
+  fail "state guard: explicit RESULTS_DIR should work without guard (rc=$harness_rc)"
+fi
+
 teardown_test_env
 summary
