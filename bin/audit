@@ -6190,22 +6190,12 @@ run_agent() {
       # subshell + watchdog), so signal that explicitly. Without this,
       # docker-shell sessions on Linux roots produce 93-byte error logs.
       export IS_SANDBOX=1
-      # Per-agent settings.json wires the context-warn PostToolUse hook so the
-      # agent gets injected reminders before auto-compaction at ~165K cached
-      # tokens drops un-checkpointed Working Context. Soft warn at 100K, hard
-      # at 140K. Override via CONTEXT_WARN_THRESHOLD / CONTEXT_WARN_HARD_THRESHOLD.
-      # JSON is written via printf with no '}' at column 0 — the audit_extract_function
-      # awk helper used by tests treats column-0 '}' as the end of run_agent.
-      local _claude_settings="$LOGDIR/.claude-settings-${agent_num}.json"
-      printf '{ "hooks": { "PostToolUse": [ { "matcher": "*", "hooks": [ { "type": "command", "command": "%s" } ] } ] } }\n' \
-        "${SCRIPT_ROOT}/lib/hooks/context_warn.py" > "$_claude_settings"
       # Shared flag picker (lib/llm_invoke.sh) keeps stream-json shape,
       # sandbox-skip, model defaults, and --add-dir wiring in sync with
       # bin/audit-recon, bin/validate-finding, and lib/llm_decide.sh.
-      # Audit-only additions (--settings, --resume) are appended below.
+      # Audit-only additions (--resume) are appended below.
       declare -a claude_base_flags=() claude_flags=()
       llm_agent_flags claude claude_base_flags "$model" "$max_turns" "$SCRIPT_ROOT"
-      claude_base_flags+=(--settings "$_claude_settings")
       claude_flags=("${claude_base_flags[@]}")
       if [ "$use_resume" -eq 1 ] && [ -n "$prev_session_id" ]; then
         # Resume prior session — the prompt becomes a continuation message.
