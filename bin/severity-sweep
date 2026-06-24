@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Re-score the UNIQUE cluster representatives of an audit results pool and emit
+one CSV row per finding/crash — a deterministic, reproducible severity sweep.
+
+Walking the *canonical* cluster reps (from FINDING-CLUSTERS.md / CRASH-CLUSTERS.md)
+rather than every CRASH-*/FIND-* copy avoids double-counting clustered duplicates,
+so the row counts match the benchmark's "Unique findings" / "Unique crashes".
+
+Usage:
+    bin/severity-sweep <results-dir> [<results-dir> ...]      # one pool dir each
+    bin/severity-sweep --batch output/benchmark               # every pool dir under it
+
+A "results dir" is a pool directory that contains findings/ and/or crashes/
+(e.g. output/<run>/pool/harness or .../pool/model-direct). Output columns:
+
+    scope,item_type,item_id,canonical,score,band,primitive,surface,E,vector
+
+Run it on two checkouts (e.g. `git stash` the patch) and diff the CSVs to get a
+reproducible old→new comparison. Read-only: never writes into the results dirs.
+"""
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+_REPO = Path(__file__).resolve().parent.parent
+_REACH = _REPO / "bin" / "reachability"
+# Canonical column in a *-CLUSTERS.md row: "... | [CRASH-0008](CRASH-0008/REPORT.md) | ..."
+_CANON_RE = re.compile(r"\[((?:CRASH|FIND)-\d+)\]\([^)]*\)")
+
+
+def _canonical_ids(clusters_md: Path) -> list[str]:
+    """Canonical IDs from a cluster index — the first linked id on each table
+    row whose first cell is a severity/qualifier (a cluster row), de-duplicated
+    in first-seen order. Falls back to every linked id if the table shape drifts."""
+    if not clusters_md.is_file():
+        return []
+    seen: dict[str, None] = {}
+    for line in clusters_md.read_text("utf-8", errors="replace").splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        m = _CANON_RE.search(line)
+        if m:
+            seen.setdefault(m.group(1), None)
+    return list(seen)
+
+
+def _dirs(pool: Path, kind: str, pref: str) -> list[Path]:
+    base = pool / kind
+    if not base.is_dir():
+        return []
+    canon = _canonical_ids(base / f"{pref}-CLUSTERS.md")
+    if canon:
+        return [base / cid for cid in canon if (base / cid).is_dir()]
+    return sorted(p for p in base.glob(f"{pref}-*") if p.is_dir())
+
+
+def _score(item: Path) -> dict:
+    out = subprocess.run(
+        [sys.executable, str(_REACH), "--report", str(item),
+         "--severity-only", "--json", "--no-cache"],
+        capture_output=True, text=True)
+    try:
+        return json.loads(out.stdout)["severity"]
+    except Exception:
+        return {}
+
+
+def _emit(pool: Path, scope: str) -> int:
+    n = 0
+    for kind, pref, itype in (("findings", "FIND", "finding"), ("crashes", "CRASH", "crash")):
+        canon = set(_canonical_ids(pool / kind / f"{pref}-CLUSTERS.md"))
+        for item in _dirs(pool, kind, pref):
+            s = _score(item)
+            cv = s.get("cvss") or {}
+            vec = cv.get("vector") or ""
+            E = vec.split("/E:")[1].split("/")[0] if "/E:" in vec else ""
+            row = [scope, itype, item.name,
+                   "1" if (not canon or item.name in canon) else "0",
+                   str(s.get("score")), s.get("level", ""), s.get("primitive_key", ""),
+                   s.get("surface_label", ""), E, vec]
+            print(",".join(x.replace(",", ";") for x in row))
+            n += 1
+    return n
+
+
+def main(argv: list[str]) -> int:
+    print("scope,item_type,item_id,canonical,score,band,primitive,surface,E,vector")
+    pools: list[Path] = []
+    if argv and argv[0] == "--batch":
+        root = Path(argv[1])
+        pools = sorted({p.parent.parent for p in root.rglob("findings/FINDING-CLUSTERS.md")}
+                       | {p.parent.parent for p in root.rglob("crashes/CRASH-CLUSTERS.md")})
+    else:
+        pools = [Path(a) for a in argv]
+    for pool in pools:
+        scope = str(pool).replace("output/benchmark/", "").replace("/pool", "")
+        _emit(pool, scope)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

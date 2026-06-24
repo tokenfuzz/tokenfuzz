@@ -59,22 +59,18 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 # ── sanitizer crash oracle ───────────────────────────────────────────────
 #
 # A "confirmed crash" is a directory holding at least one file whose text
-# carries a sanitizer diagnostic. The signature set below is a deliberate
-# mirror of the triager's gate in lib/triage.sh (search: "ERROR:
-# (AddressSanitizer"). Inclusion criterion: a line a sanitizer runtime
-# prints on a real memory-safety / UB / race fault — never a line an
-# agent could fabricate in prose. Keep it in sync with triage.sh; this
-# is the whole reason the benchmark number is trustworthy.
-SANITIZER_SIGNATURE_RE = re.compile(
-    r"ERROR: (AddressSanitizer|UndefinedBehaviorSanitizer)"
-    r"|SUMMARY: (AddressSanitizer|UndefinedBehaviorSanitizer)"
-    r"|WARNING: (ThreadSanitizer|MemorySanitizer):"
-    r"|SUMMARY: (ThreadSanitizer|MemorySanitizer):"
-    r"|^WARNING: DATA RACE$"
-    r"|UndefinedBehaviorSanitizer:"
-    r"|: runtime error:",
-    re.MULTILINE,
-)
+# carries a sanitizer diagnostic. The signature set is the single source of
+# truth in stack_frames.SANITIZER_SIGNATURE_RE — a deliberate mirror of the
+# triager's gate in lib/triage.sh (search: "_triage_has_sanitizer_diagnostic").
+# Sourcing it here (rather than re-spelling the alternation) keeps the
+# benchmark's confirmed-crash count, the severity scorer (bin/reachability),
+# and the triage gate in lockstep; this is the whole reason the benchmark
+# number is trustworthy.
+if _sf is not None:
+    SANITIZER_SIGNATURE_RE = _sf.SANITIZER_SIGNATURE_RE
+else:  # pragma: no cover - stack_frames should always import
+    SANITIZER_SIGNATURE_RE = re.compile(r": runtime error:|ERROR: \w*Sanitizer",
+                                        re.MULTILINE)
 
 # Files large enough to be a build artifact rather than a sanitizer log
 # are skipped during the grep so harvest stays fast on big result trees.

@@ -419,6 +419,24 @@ ok(stack_frames.crash_signature(go_race) == stack_frames.crash_signature(go_race
    "Go race signature is stable across read/write vs write/read ordering",
    detail=f"a={stack_frames.crash_signature(go_race)!r} b={stack_frames.crash_signature(go_race_swapped)!r}")
 
+# ── Canonical sanitizer-diagnostic signature (shared with benchmark + reachability).
+# Every sanitizer the harness builds must be recognised, and harness/probe
+# footers (which an agent can echo in prose) must NOT be mistaken for a crash.
+for _line, _want, _why in [
+    ("ERROR: AddressSanitizer: heap-buffer-overflow on address 0x..", True, "ASan"),
+    ("ERROR: HWAddressSanitizer: tag-mismatch on address 0x..", True, "HWASan (was the benchmark drift)"),
+    ("WARNING: ThreadSanitizer: data race", True, "TSan"),
+    ("SUMMARY: MemorySanitizer: use-of-uninitialized-value foo.c:1", True, "MSan"),
+    ("foo.c:9:5: runtime error: signed integer overflow", True, "UBSan runtime error"),
+    ("SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior foo.c:9:5", True, "UBSan summary"),
+    ("CRASH_RATE: 0/1", False, "clean probe footer is not a crash"),
+    ("NO CRASHES in 1 runs (1 completed cleanly)", False, "clean run footer is not a crash"),
+    ("I built a reproducer that triggers a heap overflow", False, "prose claim is not a crash"),
+]:
+    ok(stack_frames.has_sanitizer_diagnostic(_line) is _want,
+       f"has_sanitizer_diagnostic: {_why}",
+       detail=f"line={_line!r} want={_want}")
+
 if FAILED:
     print(f"\033[0;31m{FAILED} failed, {PASSED} passed\033[0m")
     sys.exit(1)

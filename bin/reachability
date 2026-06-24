@@ -866,7 +866,14 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     "null_deref":        ("N", "N", "H", "N", "N", "N", None),
     "stack_exhaustion":  ("N", "N", "H", "N", "N", "N", None),
     "bus":               ("N", "N", "H", "N", "N", "N", None),
-    "oom":               ("N", "N", "H", "N", "N", "N", None),
+    # OOM exploitation is inherently conditional on the allocator actually
+    # being in a failing state (memory pressure / a failing hook) — a
+    # precondition outside the attacker's byte control — so AT:P, the same
+    # "inherently conditional" reading already applied to data_race and
+    # crypto_weakness below. (An unchecked-allocation null-deref classified as
+    # `null_deref` stays AT:N; splitting that into its own AT:P class needs a
+    # target-agnostic allocation-failure detector and is a separate change.)
+    "oom":               ("N", "N", "H", "N", "N", "N", "P"),
     "memory_leak":       ("N", "N", "H", "N", "N", "N", None),
     "regex_dos":         ("N", "N", "H", "N", "N", "N", None),
     "dos_amplification": ("N", "N", "H", "N", "N", "N", None),
@@ -895,6 +902,17 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     # "unknown" is intentionally absent: an unclassified crash gets no CVSS
     # vector (emitting one would be a number dressed as a standard).
 }
+
+# Primitive classes whose impact claims code-execution-capable corruption or
+# disclosure (Confidentiality OR Integrity = H) — as opposed to availability-
+# only DoS. A *sidecar-claimed* primitive in this set, unconfirmed by any
+# sanitizer class and CONTRADICTED by a clean on-disk sanitizer run, is demoted
+# to unclassified rather than credited H-impact (see compute_severity). DoS
+# classes (null_deref/oom/stack_exhaustion/…) are deliberately excluded: a
+# short clean run does not disprove a resource-exhaustion lead.
+_HIGH_IMPACT_PRIMITIVES = frozenset(
+    k for k, v in CVSS4_CLASS.items() if "H" in (v[0], v[1])
+)
 
 # Surface tier → (Attack Vector, User Interaction). Libraries and file-format
 # parsers are scored for the reasonable worst-case embedding, per the CVSS
@@ -945,8 +963,16 @@ def _parse_repro_rate(report_text: str, fields: dict) -> tuple[int, int] | None:
     repro = fields.get("reproduction_rate", "")
     m = re.search(r"(\d+)\s*/\s*(\d+)", repro or "")
     if not m:
-        m = re.search(r"\b(?:confirmed(?: result)?|repro(?:duction)?(?: rate)?|runs?)"
-                      r"\D{0,40}(\d+)\s*/\s*(\d+)", report_text, re.IGNORECASE)
+        # Probe-native crash rate — the harness's own reverification count, and
+        # authoritative over prose: "CRASH_RATE: 3/5".
+        m = re.search(r"\bcrash_rate:\s*(\d+)\s*/\s*(\d+)", report_text, re.IGNORECASE)
+    if not m:
+        # Strict prose fallback. Deliberately NOT keyed on a bare "run": log
+        # noise like `run-sanitizer-multi` and budget counters
+        # (`BUDGET: 21/60 sanitizer invocations used`) otherwise parse as a
+        # reproduction rate — a real false positive that inflated E to E:P.
+        m = re.search(r"\b(?:reproduc(?:tion|ed)|confirmed)(?:\s+rate)?\D{0,20}"
+                      r"(\d+)\s*/\s*(\d+)", report_text, re.IGNORECASE)
     if not m:
         return None
     d = int(m.group(2))
@@ -966,14 +992,89 @@ def _has_repro_artifacts(report_dir: Path | None) -> bool:
     return False
 
 
+# Probe-native CLEAN evidence embedded in a report body: the harness's
+# sanitizer probe ran the saved input and it did NOT crash. Distinct from the
+# BUDGET/invocation counters in the same logs (those are filtered out of
+# _parse_repro_rate). `CRASH_RATE: 0/N`, `NO CRASHES in N runs`, and the
+# `[probe] verdict=CLEAN` line are the harness's own reverification verdict.
+_PROBE_CLEAN_RE = re.compile(
+    r"\bverdict\s*=\s*clean\b|\bno crashes in \d+ runs?\b|"
+    r"\bcrash_rate:\s*0\s*/\s*\d+\b",
+    re.IGNORECASE,
+)
+
+
+def _probe_ran_clean_text(report_text: str) -> bool:
+    """True when the report body records a sanitizer PROBE that ran the saved
+    input and produced no crash (verdict=CLEAN / NO CRASHES / CRASH_RATE 0/N) —
+    a recorded failed reproduction, equivalent to a structured 0/N rate. Lets
+    the threat gate and the clean-run demotion react to clean evidence embedded
+    in report.md, not only to adjacent sanitizer.txt/*.asan.txt files."""
+    return bool(_PROBE_CLEAN_RE.search(report_text or ""))
+
+
+def _sanitizer_ran_clean(report_dir: Path | None) -> bool:
+    """True when a sanitizer artifact on disk recorded the sanitizer EXECUTING
+    and producing NO crash — positive evidence that a claimed memory-corruption
+    did not occur, distinct from a finding that was simply never run.
+
+    A real crash log — any sanitizer's diagnostic (``stack_frames`` owns the
+    shared signature, so ASan/HWASan/UBSan/TSan/MSan are all recognised) or a
+    non-zero ``CRASH_RATE`` footer — is the opposite of clean and returns
+    False, so accepted crashes are never affected. Only used to demote an
+    unconfirmed *sidecar* high-impact primitive (see compute_severity);
+    sanitizer-derived classes are authoritative and bypass this.
+    """
+    if report_dir is None:
+        return False
+    texts: list[str] = []
+    for name in ("sanitizer.txt", "asan.txt"):
+        p = report_dir / name
+        if p.is_file():
+            texts.append(p.read_text("utf-8", errors="replace"))
+    for p in report_dir.glob("*.asan.txt"):
+        texts.append(p.read_text("utf-8", errors="replace"))
+    if not texts:
+        return False
+    saw_clean_run = False
+    for t in texts:
+        # A genuine sanitizer crash (any sanitizer) or a non-zero crash-rate
+        # footer means a fault is recorded — not clean.
+        if stack_frames.has_sanitizer_diagnostic(t) or \
+                re.search(r"\bcrash_rate:\s*[1-9]", t, re.IGNORECASE):
+            return False
+        tl = t.lower()
+        # The run header is ASAN_RUN_HEADER for asan and SANITIZER_RUN_HEADER
+        # for every other sanitizer (see bin/run-sanitizer-multi) — accept both.
+        if ("no crashes" in tl or "completed cleanly" in tl
+                or "reached target" in tl or "success_rate" in tl
+                or "asan_run_header" in tl or "sanitizer_run_header" in tl):
+            saw_clean_run = True
+    return saw_clean_run
+
+
 def _threat_metric(report_text: str, fields: dict,
                    report_dir: Path | None) -> tuple[str, str]:
     """Derive CVSS v4.0 Exploit Maturity (E).
 
     The harness does not claim active real-world exploitation unless the
-    report says so. A saved reproducer or successful rerun is scored as
-    proof-of-concept availability (E:P). Otherwise a triaged report with no
-    such evidence uses E:U; completely untriaged input leaves E Not Defined.
+    report says so. Exploit Maturity is graded on *evidence*, not prose:
+
+      * active-exploitation text                         → E:A
+      * a recorded reproduction rate N/D with N>0        → E:P
+      * a recorded rate N/D with N==0 (reverification    → E:U
+        FAILED) — overrides any artifact on disk: a
+        saved input that no longer reproduces is not
+        proof-of-concept maturity
+      * a reproducer/testcase artifact and no failed     → E:P
+        reverification
+      * triaged but none of the above                    → E:U
+      * untriaged input                                  → E:X
+
+    A bare *prose* mention of "reproducer/PoC/testcase" is deliberately NOT
+    sufficient — a sentence saying a PoC "could be built" is a claim, not
+    evidence, and must not grant E:P (the dominant source of inflated
+    Exploit-Maturity in prose-only findings).
     """
     t = (report_text or "").lower()
     # Negation-aware: "no evidence this was exploited in the wild" is the
@@ -982,16 +1083,26 @@ def _threat_metric(report_text: str, fields: dict,
     if _unnegated_search(r"\b(?:active(?:ly)? exploited|exploited in[- ]the[- ]wild|"
                          r"weaponized|exploit toolkit|mass exploitation)\b", t):
         return "A", "active exploitation evidence → E:A"
+    # A probe that ran the saved input CLEAN (verdict=CLEAN / NO CRASHES /
+    # CRASH_RATE 0/N embedded in the report body) is a recorded failed
+    # reproduction and overrides any stale testcase artifact — the same reading
+    # as a structured 0/N rate. Checked BEFORE the rate parse so a misread
+    # budget counter can never grant E:P over real clean probe evidence.
+    if _probe_ran_clean_text(report_text):
+        return "U", "probe ran the saved input clean (verdict=CLEAN / 0-of-N) → E:U"
     rate = _parse_repro_rate(report_text, fields)
-    if rate is not None and rate[0] > 0:
+    if rate is not None:
         n, d = rate
-        return "P", f"reproduction rate {n}/{d} → E:P"
+        if n > 0:
+            return "P", f"reproduction rate {n}/{d} → E:P"
+        # n == 0: the harness recorded a reverification and it FAILED. A
+        # reproducer that no longer fires is not proof-of-concept maturity,
+        # and this verdict overrides a stale artifact still on disk.
+        return "U", f"reproduction rate {n}/{d}: reverification failed → E:U"
     if _has_repro_artifacts(report_dir):
         return "P", "reproducer/testcase artifact on disk → E:P"
-    if _unnegated_search(r"\b(?:reproducer|testcase|proof[- ]of[- ]concept|poc)\b", t):
-        return "P", "report cites proof-of-concept/reproducer → E:P"
     if _report_is_triaged(fields):
-        return "U", "no exploit or reproducer evidence recorded → E:U"
+        return "U", "no reproducer artifact or positive reproduction → E:U"
     return "X", "threat evidence not defined → E:X"
 
 
@@ -1088,9 +1199,23 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
     # and vetoing there would wrongly keep a genuine local call-sequence bug at
     # AV:N (over-severity). The generic byte/content words apply to every field.
     trigger_is_byte = byte_re.search(trigger) or re.search(r"\bboth\b", trigger)
+    # A structured `call-sequence` trigger_source is authoritative: the triage
+    # pass classified the trigger as a local call ordering, not attacker bytes,
+    # so incidental byte/content words in the free-prose caller_controls /
+    # parameter_control (e.g. "caller controls … subject bytes, match-context
+    # callback") must NOT veto localisation — the same trigger-scoped reading
+    # already applied to the `both` token just above. A genuine parse-the-bytes
+    # bug instead carries trigger_source=bytes/both (vetoed here), so this never
+    # localises a real byte-reachable crash; it only stops the prose byte-word
+    # veto from over-scoring a re-entrancy/callback/call-order crash whose
+    # subject bytes are present but are not the proximate trigger.
+    trigger_is_call_sequence = bool(re.search(r"\bcall[- ]sequence\b", trigger)) \
+        and not trigger_is_byte
     # Any attacker-controlled byte/content path means an external boundary can
     # reach the primitive — keep the surface Attack Vector (AV:N for libraries).
-    if byte_re.search(controls) or trigger_is_byte or byte_re.search(parameter):
+    if trigger_is_byte:
+        return False, ""
+    if not trigger_is_call_sequence and (byte_re.search(controls) or byte_re.search(parameter)):
         return False, ""
 
     # Trigger tokens that are NOT unambiguously local. Each can be driven by a
@@ -1275,6 +1400,17 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
             rw = "read"
 
     # ── Sanitizer class ───────────────────────────────────────────
+    # Authoritative SIGBUS: the sanitizer headline names BUS / SIGBUS. A bus
+    # error is a misalignment / unmapped-access DoS (N,N,H), NOT a wild WRITE —
+    # match it before the corruption branches and the read/write-direction
+    # fallbacks so an incidental "WRITE of size N" frame (e.g. a memmove deep
+    # in the faulting libc stack) or a SCARINESS `wild-addr-write` tag cannot
+    # mis-route a bus error to a code-execution-capable corruption class.
+    if re.search(r"addresssanitizer:\s*bus\b|"
+                 r"summary:[^\n]*sanitizer:\s*bus\b|"
+                 r"\bsigbus\b|\bbus error\b", t):
+        return "bus", "BUS / SIGBUS"
+
     # use-after-poison is ASan's "freed by the container, not by free()"
     # shape — same type-state pivot as a UAF, scored identically.
     if re.search(r"heap[- ]use[- ]after[- ]free|\buse[- ]after[- ]free\b|"
@@ -1382,6 +1518,14 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
 
     if re.search(r"threadsanitizer: data race|^warning: data race$", t, re.MULTILINE):
         return "data_race", "data race"
+
+    # A near-null faulting address is a null dereference (DoS), authoritative
+    # over a stray read/write-direction line below: ASan's `SEGV on unknown
+    # address 0x000…` in the first unmapped page is a null pointer deref
+    # (N,N,H), not a heap read — even if some frame logged a "READ of size N".
+    m_nullseg = re.search(r"segv on unknown address 0x0*([0-9a-f]+)", t)
+    if m_nullseg and int(m_nullseg.group(1), 16) < 0x1000:
+        return "null_deref", "null/SEGV (near-null address)"
 
     # Direction-only fallbacks (no class found, but the report has WRITE/READ).
     if rw == "write":
@@ -2191,6 +2335,9 @@ def compute_severity(report_text: str, reachability: dict | None,
     # through to "unknown" or matched only a prose-regex web/recon class. A
     # precise sanitizer-class match (ASan / UBSan / TSan) is never overridden.
     prim_key, prim_label = detect_primitive(report_text)
+    # A precise ASan/UBSan/TSan class match is authoritative — never overridden
+    # or demoted below.
+    sanitizer_authoritative = prim_key != "unknown" and prim_key not in _NARRATIVE_ONLY_PRIMITIVES
     primitive_field = (fields.get("primitive_field") or "").strip().lower()
     if primitive_field in CVSS4_CLASS and primitive_field != "unknown":
         if prim_key == "unknown" or prim_key in _NARRATIVE_ONLY_PRIMITIVES:
@@ -2202,8 +2349,31 @@ def compute_severity(report_text: str, reachability: dict | None,
             prim_key = class_key
             prim_label = class_label
 
+    # A sidecar/narrative HIGH-IMPACT primitive (memory-corruption or
+    # disclosure) that no sanitizer class confirmed AND that an on-disk
+    # sanitizer run actively CONTRADICTS (ran clean, no crash) must not score
+    # code-execution impact — that is an unverified model claim, which is a
+    # product non-goal. Demote to unclassified (no CVSS vector). ASan-derived
+    # classes are authoritative (bypassed), and a pure-static finding with no
+    # sanitizer run is untouched (it has no clean-run artifact), so a real
+    # code-review lead keeps its vector and is graded down through E:U instead.
+    if (not sanitizer_authoritative
+            and prim_key in _HIGH_IMPACT_PRIMITIVES
+            and (_sanitizer_ran_clean(report_dir) or _probe_ran_clean_text(report_text))):
+        prim_label = f"{prim_label} (unconfirmed: sanitizer ran clean)"
+        prim_key = "unknown"
+
     reach_data = reachability or {"services": {}, "external_callers": 0, "vendored_copies": 0}
     surface_label, surface_reason = classify_surface(fields, reach_data)
+    # A crash that faults inside the audit harness/driver with no target frame
+    # anywhere in the report is not a target vulnerability — score it as the
+    # internal audit surface (non-shipping → modified impacts:N), which floors
+    # the impact instead of crediting it as a library-popular AV:N crash. Only
+    # overrides a shipping surface; an already-internal/dev tier is unchanged.
+    if surface_label not in NON_SHIPPING_SURFACES and _crash_is_harness_rooted(report_text):
+        surface_label = "internal"
+        surface_reason = ("crash faults in the audit harness/driver with no target-library "
+                          "frame anywhere in the report — harness-rooted, not a target bug")
     concern, concern_note = _contract_concern(fields)
 
     metrics, derivation = _cvss4_metrics(prim_key, surface_label, fields, reach_data,
@@ -2544,6 +2714,77 @@ def _primary_sanitizer_frames(sanitizer_text: str) -> list[stack_frames.StackFra
 
     raw = frames or fallback_frames
     return [frame for frame in raw if not stack_frames.is_ignored_frame(frame)]
+
+
+# Driver/entry functions that mark a harness frame rather than target code.
+_HARNESS_DRIVER_FUNCS = frozenset({"main", "llvmfuzzertestoneinput"})
+# A source file whose name marks it as the audit harness/driver (agents write
+# `*_harness.c` / `harness.c`), not the target library under audit.
+_HARNESS_FILE_RE = re.compile(r"(?:^|[\\/_-])harness[\w-]*\.[ch]\w*\b", re.IGNORECASE)
+# A `file.ext:line` location (real source) vs a bare module offset such as
+# `(dyld:arm64e+0x..)`, which is a system/runtime frame, not target source.
+_SOURCE_LOC_RE = re.compile(r"[\w.+-]+\.\w+:\d+")
+
+
+def _frame_is_harness_driver(frame: stack_frames.StackFrame) -> bool:
+    """A fault frame that belongs to the audit harness/driver, not the target."""
+    if (frame.function or "").strip().lower() in _HARNESS_DRIVER_FUNCS:
+        return True
+    return bool(_HARNESS_FILE_RE.search(frame.location or ""))
+
+
+def _frame_is_target_source(frame: stack_frames.StackFrame) -> bool:
+    """A fault frame in real source that is neither the harness nor a
+    system/runtime frame — i.e. the target library (or a dependency)."""
+    if stack_frames.is_ignored_frame(frame):
+        return False
+    if _frame_is_harness_driver(frame):
+        return False
+    return bool(_SOURCE_LOC_RE.search(frame.location or ""))
+
+
+def _crash_is_harness_rooted(report_text: str) -> bool:
+    """True when the crash faults in the audit harness/driver itself and the
+    target library is absent from the ENTIRE sanitizer report.
+
+    Conservative by design — severity has to stay trustworthy for the
+    benchmark. A crash is only treated as harness-rooted when BOTH:
+
+      * the primary fault leaf (#0) is a harness/driver frame, AND
+      * no target-source frame appears anywhere in the report, including the
+        "freed by" / "allocated by" / origin context stacks.
+
+    The second clause preserves a genuine *library* lifetime bug whose final
+    dereference surfaces in the caller but whose freed/allocated memory is
+    library-owned: such a report carries a library frame in its context stack
+    and is scored normally (as a caller-contract concern), not zeroed. This is
+    the case both reviewers flagged where a bare "#0 is harness ⇒ reject" rule
+    would wrongly under-score a real bug.
+
+    Note we read the raw leaf frame directly rather than via
+    ``_primary_sanitizer_frames`` — that helper applies ClusterFuzz's ignore
+    rules, which drop ``^main`` (exactly the harness entry we need to see).
+    """
+    leaf = None
+    in_report = False
+    for line in (report_text or "").splitlines():
+        # Any sanitizer headline opens the trace (shared signature, so
+        # UBSan/TSan/MSan are recognised too, not only ASan/HWASan).
+        if not in_report and stack_frames.has_sanitizer_diagnostic(line):
+            in_report = True
+            continue
+        if in_report and leaf is None:
+            frame = stack_frames.parse_asan_frame(line)
+            if frame is not None:
+                leaf = frame
+                break
+    if leaf is None or not _frame_is_harness_driver(leaf):
+        return False
+    for line in (report_text or "").splitlines():
+        frame = stack_frames.parse_asan_frame(line)
+        if frame is not None and _frame_is_target_source(frame):
+            return False
+    return True
 
 
 def _crash_entrypoint_symbol(asan_text: str, language: str = "c",
@@ -3549,11 +3790,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-cache", action="store_true", help="Bypass the 7-day cache")
     ap.add_argument("--severity-only", action="store_true",
                     help="With --report: only recompute Severity (uses adjacent reachability.json when present; otherwise skips external search)")
+    ap.add_argument("--harness-rooted-check", action="store_true",
+                    help="With --report: read-only — print 1 and exit 0 if the crash "
+                         "faults entirely in the audit harness/driver (leaf frame is the "
+                         "driver AND no target-library frame appears anywhere); else print "
+                         "0 and exit 1. No scoring, no external search.")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Per-request timeout (seconds)")
     args = ap.parse_args(argv)
 
     if args.severity_only and args.report is None and args.batch is None:
         print("reachability: --severity-only requires --report or --batch", file=sys.stderr)
+        return 2
+    if args.harness_rooted_check and args.report is None:
+        print("reachability: --harness-rooted-check requires --report", file=sys.stderr)
         return 2
 
     if args.batch is not None:
@@ -3585,6 +3834,22 @@ def main(argv: list[str] | None = None) -> int:
                 adjacent_asan_text = asan_path.read_text("utf-8", errors="replace")
             except OSError:
                 adjacent_asan_text = ""
+        if args.harness_rooted_check:
+            # Read-only fast path: combine the report (which embeds the trace)
+            # with every adjacent sanitizer artifact so the leaf/context scan
+            # sees the full fault stack regardless of which file carries it or
+            # how it is named at triage time (sanitizer.txt, asan.txt,
+            # *_confirm.asan.txt, …) — not just one fixed filename.
+            texts = [report_text]
+            for name in ("sanitizer.txt", "asan.txt"):
+                p = report_dir / name
+                if p.is_file():
+                    texts.append(p.read_text("utf-8", errors="replace"))
+            for p in sorted(report_dir.glob("*.asan.txt")):
+                texts.append(p.read_text("utf-8", errors="replace"))
+            rooted = _crash_is_harness_rooted("\n".join(texts))
+            print("1" if rooted else "0")
+            return 0 if rooted else 1
     else:
         report_text = ""
         if not args.symbol:

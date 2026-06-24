@@ -202,6 +202,27 @@ _CURRENT_TEST="class: wild-address SEGV WRITE → wild_write"
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "wild_write" "$key" "wild_write detected"
 
+# SIGBUS authority: a bus error whose faulting frame is a libc memmove logs a
+# "WRITE of size N" line and a SCARINESS wild-addr-write tag, but the headline
+# is BUS. The sanitizer class must win → bus (N,N,H), not wild_write (H,H,H).
+seed_hits "demo_bus_summary" 0
+dir=$(make_crash "demo_bus_summary" CRASH-BUS-SUMMARY \
+  "ERROR: AddressSanitizer: BUS on unknown address; WRITE of size 8; SCARINESS: 10 (wild-addr-write)" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="class: ASan BUS headline beats stray WRITE/wild-addr → bus"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "bus" "$key" "BUS headline classifies as bus despite a stray WRITE frame"
+
+# Near-null SEGV with a stray "READ of size N" frame must stay null_deref
+# (N,N,H), not be down-routed to a heap read (L,N,L) by the direction fallback.
+seed_hits "demo_segv_null_strayread" 0
+dir=$(make_crash "demo_segv_null_strayread" CRASH-SEGV-NULL-READ \
+  "SEGV on unknown address 0x000000000000; READ of size 8 in frame" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="class: near-null SEGV + stray READ → null_deref"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "null_deref" "$key" "near-null SEGV stays null_deref despite a stray READ-of-size line"
+
 seed_hits "demo_race" 0
 dir=$(make_crash "demo_race" CRASH-RACE \
   "WARNING: ThreadSanitizer: data race (pid=123)" \
@@ -557,6 +578,35 @@ _CURRENT_TEST="derive: caller-controlled JSON string + call-sequence keeps AV:N"
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "N" "$(metric "$vector" AV)" "AV:N — JSON string is an attacker content path"
 
+# A STRUCTURED `call-sequence` trigger_source is authoritative: it localises
+# (AV:L/AT:P) even when the free-prose caller_controls incidentally lists
+# "subject bytes" — the re-entrancy/callback UAF shape (caller's own callout
+# frees the live object). The bytes are present in the data flow but the call
+# ordering is the proximate trigger. Regression for the codex pcre2 re-entrancy
+# UAFs scored AV:N High instead of AV:L Medium.
+seed_hits "demo_callseq_trigger" 0
+dir=$(make_crash "demo_callseq_trigger" CRASH-CALLSEQ-TRIGGER \
+  "heap-use-after-free WRITE of size 8" \
+  "library-api" "unspecified" "subject bytes, match-context callback, callback data pointer" \
+  "5/5" "CL-x (singleton)")
+printf '\nTrigger source: call-sequence\n' >> "$dir/report.md"
+_CURRENT_TEST="derive: structured call-sequence trigger localises despite byte prose"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L — structured call-sequence trigger overrides incidental 'subject bytes' prose"
+assert_eq "P" "$(metric "$vector" AT)" "AT:P for the localised call-sequence trigger"
+
+# Guard: a genuine parse-the-bytes crash carries trigger_source=bytes and must
+# NOT be localised even with the identical caller_controls prose → AV:N.
+seed_hits "demo_bytes_trigger" 0
+dir=$(make_crash "demo_bytes_trigger" CRASH-BYTES-TRIGGER \
+  "heap-use-after-free WRITE of size 8" \
+  "library-api" "unspecified" "subject bytes, match-context callback, callback data pointer" \
+  "5/5" "CL-x (singleton)")
+printf '\nTrigger source: bytes\n' >> "$dir/report.md"
+_CURRENT_TEST="derive: trigger_source=bytes keeps AV:N (no localisation)"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N — trigger_source=bytes is a real attacker-byte path, not localised"
+
 # Free-prose call-sequence phrasing must localise the same as the literal
 # token: "the sequence of public API calls" (no byte path) is a trusted local
 # call-ordering trigger → AV:L/AT:P. Regression for a real cJSON UAF whose
@@ -706,6 +756,65 @@ read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "L" "$(metric "$vector" AV)" "AV:L — trusted-parameter localisation preserved when no remote trigger"
 assert_eq "P" "$(metric "$vector" AT)" "AT:P for the local trusted-parameter trigger"
 
+# OOM / allocation-failure exploitation is inherently conditional on the
+# allocator being in a failing state — a precondition outside attacker byte
+# control — so the primitive carries Attack Requirements Present (AT:P).
+seed_hits "demo_oom_at" 0
+dir=$(make_crash "demo_oom_at" CRASH-OOM-AT \
+  "ERROR: AddressSanitizer: out-of-memory: allocator is out of memory" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="derive: oom primitive → AT:P"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "oom" "$key" "out-of-memory classifies as oom"
+assert_eq "P" "$(metric "$vector" AT)" "AT:P — oom allocation-failure precondition is inherent"
+
+# Harness-rooted crash: fault #0 is the audit harness/driver and NO target
+# frame appears anywhere (the harness freed its own buffer) → internal surface
+# (impacts floored), not a library_popular AV:N crash.
+seed_hits "demo_harness_rooted" 0
+dir=$(make_crash "demo_harness_rooted" CRASH-HARNESS-ROOTED \
+  "heap-use-after-free READ of size 8" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+{
+  echo '```'
+  echo '==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60d000000058'
+  echo '    #0 0x100 in main error_ptr_heap_lifetime_harness.c:84'
+  echo '    #1 0x188 in start+0x1b4c (dyld:arm64e+0x1fdfc)'
+  echo 'freed by thread T0 here:'
+  echo '    #0 0x101 in free (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x41258)'
+  echo '    #1 0x102 in main error_ptr_heap_lifetime_harness.c:76'
+  echo '```'
+} >> "$dir/report.md"
+_CURRENT_TEST="harness-rooted crash → internal surface"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "internal" "$surface" "harness-rooted crash (no target frame) is tiered internal"
+# The --harness-rooted-check flag (used by triage to REJECT these) agrees.
+_CURRENT_TEST="flag: --harness-rooted-check exits 0 for a harness-rooted crash"
+"$REACH" --report "$dir" --harness-rooted-check >/dev/null 2>&1 \
+  && pass "--harness-rooted-check exits 0 (reject) for the harness-rooted crash" \
+  || fail "--harness-rooted-check on harness-rooted dir" "expected exit 0"
+
+# Control: a genuine library bug merely *exercised* by a harness — #0 is the
+# library, the harness only appears deeper — must keep normal library scoring.
+seed_hits "demo_lib_via_harness" 0
+dir=$(make_crash "demo_lib_via_harness" CRASH-LIB-VIA-HARNESS \
+  "heap-use-after-free READ of size 8" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+{
+  echo '```'
+  echo '==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60d000000058'
+  echo '    #0 0x100 in cJSON_Delete cJSON.c:261'
+  echo '    #1 0x180 in main harness.c:70'
+  echo '```'
+} >> "$dir/report.md"
+_CURRENT_TEST="library bug via harness → NOT harness-rooted"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_neq "internal" "$surface" "a library faulting frame keeps the normal (non-internal) surface"
+_CURRENT_TEST="flag: --harness-rooted-check exits non-zero for a library crash"
+if "$REACH" --report "$dir" --harness-rooted-check >/dev/null 2>&1; then
+  fail "--harness-rooted-check on library crash" "wrongly matched a real library bug"
+else
+  pass "--harness-rooted-check exits non-zero (keep) for a library faulting frame"
+fi
+
 # XSS sets subsequent-system impact (SC:L/SI:L).
 seed_hits "demo_xss_sub" 0
 dir=$(make_crash "demo_xss_sub" CRASH-XSS-SUB \
@@ -731,6 +840,50 @@ printf 'payload\n' > "$dir/input.txt"
 _CURRENT_TEST="derive: reproducer artifact → E:P"
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "P" "$(metric "$vector" E)" "E:P from saved reproducer/testcase artifact"
+
+# A recorded 0/N reverification (reproduction failed) overrides a stale
+# artifact still on disk: a reproducer that no longer fires is not
+# proof-of-concept maturity, so E:U — not E:P.
+seed_hits "demo_e_failed_reverify" 0
+dir=$(make_crash "demo_e_failed_reverify" CRASH-E-FAILED \
+  "heap-buffer-overflow READ of size 1" "library-api" "obeyed" "bytes" "0/5" "CL-x (singleton)")
+printf 'payload\n' > "$dir/input.txt"
+_CURRENT_TEST="derive: 0/N reverify overrides artifact → E:U"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "U" "$(metric "$vector" E)" "E:U when reverification failed (0/5), even with an artifact on disk"
+
+# A bare PROSE mention of "reproducer/PoC" with no artifact and no positive
+# reproduction is a claim, not evidence — it must NOT grant E:P (this was the
+# dominant source of inflated Exploit-Maturity on prose-only findings).
+seed_hits "demo_e_prose_only" 0
+dir=$(make_crash "demo_e_prose_only" CRASH-E-PROSE \
+  "heap-buffer-overflow READ of size 1" "library-api" "obeyed" "bytes" "?" "CL-x (singleton)" \
+  "A reproducer and proof-of-concept could be constructed from this testcase.")
+_CURRENT_TEST="derive: prose-only PoC mention (no artifact) → E:U"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "U" "$(metric "$vector" E)" "prose mention of reproducer/PoC without an artifact does not grant E:P"
+
+# Probe-native CLEAN evidence embedded in the report BODY (verdict=CLEAN /
+# NO CRASHES / CRASH_RATE 0/N) is a failed reproduction → E:U, overriding a
+# stale testcase artifact — AND a BUDGET counter in the same log
+# ("BUDGET: 21/60 sanitizer invocations") must NOT be misread as a 21/60
+# reproduction rate that would grant E:P. Regression for gemini FIND-0011.
+seed_hits "demo_e_probe_clean" 0
+dir=$(make_crash "demo_e_probe_clean" CRASH-E-PROBECLEAN \
+  "heap-buffer-overflow WRITE of size 8" "library-api" "obeyed" "bytes" "?" "CL-x (singleton)")
+printf 'payload\n' > "$dir/input.txt"
+cat >> "$dir/report.md" <<'EOF'
+
+```
+[run-sanitizer-multi] BUDGET: 21/60 sanitizer invocations used this iteration
+CRASH_RATE: 0/1
+[run-sanitizer-multi] NO CRASHES in 1 runs (1 completed cleanly, 1 reached target)
+[probe] verdict=CLEAN
+```
+EOF
+_CURRENT_TEST="derive: embedded probe verdict=CLEAN → E:U (BUDGET not a repro rate)"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "U" "$(metric "$vector" E)" "embedded probe CLEAN / CRASH_RATE 0/N overrides artifact → E:U (BUDGET 21/60 ignored)"
 
 # An affirmative exploitation claim is E:A; the same phrase NEGATED
 # ("no evidence ... exploited in the wild") must NOT be — it is the
@@ -1009,6 +1162,58 @@ read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "protocol_state" "$key" "sidecar protocol_state adopted"
 [ "$score" != "None" ] && pass "protocol_state scored a CVSS vector ($score)" \
   || fail "protocol_state scored" "no score"
+
+# Fix 3b: a sidecar HIGH-IMPACT primitive (deserialization) that no sanitizer
+# class confirmed AND that an on-disk sanitizer run CONTRADICTS (ran clean, no
+# crash) is demoted to unclassified — an unverified model claim must not score
+# H/H/H. Regression for the codex "parser accepts raw control bytes" findings
+# scored 8.0 High over a clean ASan run.
+_CURRENT_TEST="llm-fill: sidecar high-impact primitive + clean sanitizer run → unclassified"
+seed_unavailable "demo_3b_clean"
+dir=$(make_finding_no_fields FIND-3B-CLEAN \
+  "Parser accepts non-conforming input in field values (spec-leniency lead).")
+cat > "$dir/.llm_fields.json" <<'JSON'
+{ "surface": "library-api", "primitive": "deserialization", "caller_controls": "bytes" }
+JSON
+printf 'ASAN_RUN_HEADER: sanitizer=asan runs=1\n[run-sanitizer-multi] NO CRASHES in 1 runs (1 completed cleanly, 1 reached target)\n' \
+  > "$dir/H-spec.asan.txt"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "Unknown" "$level" "clean sanitizer run demotes an unconfirmed deserialization claim to Unknown"
+assert_eq "None" "$score" "no CVSS score for a sanitizer-contradicted high-impact claim"
+
+# Control: the SAME class of sidecar claim with NO sanitizer artifact (a pure
+# static code-review lead) is NOT demoted — it keeps its vector and is graded
+# down through E:U instead. This preserves TokenFuzz's no-sanitizer findings.
+_CURRENT_TEST="llm-fill: sidecar high-impact primitive, no sanitizer run → kept (scored)"
+seed_unavailable "demo_3b_static"
+dir=$(make_finding_no_fields FIND-3B-STATIC \
+  "Static review lead: an unchecked length permits a crafted record to write past the allocation.")
+cat > "$dir/.llm_fields.json" <<'JSON'
+{ "surface": "library-api", "primitive": "heap_write", "caller_controls": "bytes" }
+JSON
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "heap_write" "$key" "a pure-static high-impact finding (no sanitizer run) keeps its primitive"
+
+# Fix 3b via EMBEDDED clean log: a sidecar high-impact primitive whose clean
+# evidence (verdict=CLEAN) lives in the report BODY — not an adjacent
+# *.asan.txt — is still demoted to unclassified. Regression for the real
+# benchmark layout (gemini FIND-0011: 32-bit claim, clean 64-bit run).
+_CURRENT_TEST="llm-fill: embedded clean probe log demotes sidecar high-impact primitive"
+seed_unavailable "demo_3b_embed"
+dir=$(make_finding_no_fields FIND-3B-EMBED \
+  "32-bit size_t overflow lead; the 64-bit audited build did not crash.")
+cat > "$dir/.llm_fields.json" <<'JSON'
+{ "surface": "library-api", "primitive": "heap_write", "caller_controls": "bytes" }
+JSON
+cat >> "$dir/report.md" <<'EOF'
+
+```
+CRASH_RATE: 0/1
+[probe] verdict=CLEAN
+```
+EOF
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "Unknown" "$level" "embedded clean probe log demotes an unconfirmed heap_write claim to Unknown"
 
 teardown_test_env
 summary

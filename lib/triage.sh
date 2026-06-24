@@ -2086,6 +2086,30 @@ _triage_one_crash_dir() {
     local asan_path
     asan_path=$(find_primary_asan_in_crash_dir "$d" 2>/dev/null || true)
 
+    # ── 0a. Harness-rooted reject ────────────────────────────────────
+    # A crash whose fault is entirely in the audit harness/driver (leaf frame
+    # is the driver AND no target-library frame appears anywhere — including the
+    # freed/allocated context) is not a target vulnerability. Reject it to
+    # crashes-rejected/ so it leaves the crash count, not just the severity.
+    # Conservative: a real library bug merely *exercised* by a harness keeps a
+    # library frame in its stack and is NOT matched (see _crash_is_harness_rooted
+    # in bin/reachability — the single source of truth, reused here so the rule
+    # is not duplicated in shell).
+    if [ -n "$asan_path" ] \
+       && python3 "$bin_dir/reachability" --report "$d" --harness-rooted-check >/dev/null 2>&1; then
+      if [ ! -f "$d/.autodiscard" ]; then
+        {
+          echo "# Auto-rejected by triage_crash_dirs"
+          echo "# Reason: harness-rooted (fault frame in audit driver, no target-library frame)"
+          echo "# Source: $(basename "${asan_path:-unknown}")"
+        } > "$d/.autodiscard" 2>/dev/null || true
+      fi
+      _triage_move_to_rejected "$d" "$id" \
+        "harness-rooted: fault frame in audit harness/driver, no target-library frame" \
+        && printf 'rejected\n' > "$outcome_file"
+      return 0
+    fi
+
     # ── 0. Deterministic UBSan classification ────────────────────────
     # Non-memory-safety UBSan (signed/unsigned overflow, divide-by-zero,
     # shift, float-cast, misaligned, pointer-overflow, null, ...) is real

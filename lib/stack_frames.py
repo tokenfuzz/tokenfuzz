@@ -54,6 +54,35 @@ STATE_STOP_MARKERS = (
     "previously allocated by",
 )
 
+# Canonical sanitizer-diagnostic signature: a line a sanitizer RUNTIME prints
+# on a real memory-safety / UB / race fault — never something an agent can
+# fabricate in prose. This is the single source of truth for "this text is a
+# confirmed sanitizer crash"; it is shared by the benchmark's confirmed-crash
+# count (lib/benchmark.py) and the severity scorer (bin/reachability), and the
+# bash gate `_triage_has_sanitizer_diagnostic` in lib/triage.sh mirrors it
+# cross-language. Matches EVERY sanitizer the harness builds — ASan, HWASan,
+# UBSan, TSan, MSan — so a crash from any of them is recognised identically.
+SANITIZER_SIGNATURE_RE = re.compile(
+    r"ERROR: (?:AddressSanitizer|HWAddressSanitizer|UndefinedBehaviorSanitizer)"
+    r"|SUMMARY: (?:AddressSanitizer|HWAddressSanitizer|UndefinedBehaviorSanitizer)"
+    r"|WARNING: (?:ThreadSanitizer|MemorySanitizer):"
+    r"|SUMMARY: (?:ThreadSanitizer|MemorySanitizer):"
+    r"|^WARNING: DATA RACE$"
+    r"|UndefinedBehaviorSanitizer:"
+    r"|: runtime error:",
+    re.MULTILINE,
+)
+
+
+def has_sanitizer_diagnostic(text: str) -> bool:
+    """True when *text* carries a sanitizer runtime diagnostic for a real fault
+    (any sanitizer the harness builds). The Python twin of lib/triage.sh's
+    ``_triage_has_sanitizer_diagnostic`` and the single gate behind the
+    benchmark's confirmed-crash count — use it instead of hand-rolling an
+    ASan-only ``ERROR: AddressSanitizer`` check, which silently misses
+    HWASan/UBSan/TSan/MSan faults."""
+    return bool(SANITIZER_SIGNATURE_RE.search(text or ""))
+
 
 @dataclasses.dataclass(frozen=True)
 class StackFrame:
