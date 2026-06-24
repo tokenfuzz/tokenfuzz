@@ -7799,7 +7799,6 @@ while true; do
         log "Agent ${i} state: ${pending} queued (PENDING) + ${active} in-progress (ACTIVE) on subsystem='${subsystem}' (subsystem_dry_streak=${sub_streak})" | tee -a "$INDEX"
       fi
       if [ "${active:-0}" -eq 0 ]; then
-        local recovery_pair prev_strat next_strat
         recovery_pair=$(recover_exhausted_agent "$i" "exhausted")
         prev_strat="${recovery_pair%% *}"
         next_strat="${recovery_pair##* }"
