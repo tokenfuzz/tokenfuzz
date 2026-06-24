@@ -707,6 +707,106 @@ eval "$_orig_llm_triage_crash_decision"
 unset REACHABILITY_AUTO
 
 # ═══════════════════════════════════════════════════════════════
+# 8c. Hard reject: null-deref / stack-exhaustion an LLM KEEP may not rescue
+# These two classes are recoverable, low-value process crashes (no memory
+# corruption, no controllable primitive), so an "interesting"-leaning LLM keep
+# vote (rc=2) must NOT pull them back into crashes/. A genuine memory-safety
+# class with the same keep vote is still kept, and a stack-BUFFER-overflow
+# (corruption) must never be mistaken for stack exhaustion.
+# ═══════════════════════════════════════════════════════════════
+
+IS_BROWSER_TARGET=0
+REACHABILITY_AUTO=0
+
+# Simulate an LLM that votes KEEP (rc=2, regex bypass) for every crash.
+_orig_llm_triage_crash_decision=$(declare -f llm_triage_crash_decision)
+llm_triage_crash_decision() { return 2; }
+
+# Helper unit checks for the split-out classifiers.
+cat > "$TEST_TMPDIR/hr_nulldref.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x4a1)
+Hint: address points to the zero page
+EOF
+_crash_is_null_deref "$TEST_TMPDIR/hr_nulldref.txt"
+assert_eq 0 $? "_crash_is_null_deref: zero-page SEGV matches"
+cat > "$TEST_TMPDIR/hr_stackov.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: stack-overflow on address 0x7ffd1234 (pc 0x4a1)
+EOF
+_crash_is_stack_exhaustion "$TEST_TMPDIR/hr_stackov.txt"
+assert_eq 0 $? "_crash_is_stack_exhaustion: recursion overflow matches"
+cat > "$TEST_TMPDIR/hr_stackbof.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x7ffd1234
+EOF
+_crash_is_stack_exhaustion "$TEST_TMPDIR/hr_stackbof.txt"
+assert_eq 1 $? "_crash_is_stack_exhaustion: stack-buffer-overflow does NOT match"
+
+# null-deref: rejected despite the KEEP vote.
+mkdir -p "$RESULTS_DIR/crashes/CRASH-HR-NULLDEREF"
+cat > "$RESULTS_DIR/crashes/CRASH-HR-NULLDEREF/asan.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x7fff12345678 bp 0x7fff12345680)
+Hint: address points to the zero page
+SCARINESS: 10 (null-deref)
+    #0 0x7fff12345678 in app_parse parser.c:42
+EOF
+echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-HR-NULLDEREF/input.bin"
+
+# stack-exhaustion: rejected despite the KEEP vote.
+mkdir -p "$RESULTS_DIR/crashes/CRASH-HR-STACKOV"
+cat > "$RESULTS_DIR/crashes/CRASH-HR-STACKOV/asan.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: stack-overflow on address 0x7ffd00001234 (pc 0x7fff12345678 bp 0x7fff12345680)
+SCARINESS: 10 (stack-overflow)
+    #0 0x7fff12345678 in app_parse parser.c:42
+EOF
+echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-HR-STACKOV/input.bin"
+
+# memory-safety class: the KEEP vote IS honored (hard-reject is class-specific).
+mkdir -p "$RESULTS_DIR/crashes/CRASH-HR-KEEP"
+cat > "$RESULTS_DIR/crashes/CRASH-HR-KEEP/asan.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60200000abcd
+WRITE of size 8 at 0x60200000abcd
+    #0 0x7fff12345678 in app_parse parser.c:42
+EOF
+echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-HR-KEEP/input.bin"
+
+# stack-BUFFER-overflow (corruption): kept, never mistaken for exhaustion.
+mkdir -p "$RESULTS_DIR/crashes/CRASH-HR-STACKBOF"
+cat > "$RESULTS_DIR/crashes/CRASH-HR-STACKBOF/asan.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x7ffd00001234
+WRITE of size 8 at 0x7ffd00001234
+    #0 0x7fff12345678 in app_parse parser.c:42
+EOF
+echo "AAAAAAAAAAAAAAAAAAAA" > "$RESULTS_DIR/crashes/CRASH-HR-STACKBOF/input.bin"
+
+triage_crash_dirs >/dev/null 2>&1
+
+if [ -f "$RESULTS_DIR/crashes-rejected/CRASH-HR-NULLDEREF/.autodiscard" ] || [ ! -d "$RESULTS_DIR/crashes/CRASH-HR-NULLDEREF" ]; then
+  pass "triage: null-deref hard-rejected despite LLM keep"
+else
+  fail "triage: null-deref hard-rejected despite LLM keep" "null-deref survived in crashes/"
+fi
+
+if [ -f "$RESULTS_DIR/crashes-rejected/CRASH-HR-STACKOV/.autodiscard" ] || [ ! -d "$RESULTS_DIR/crashes/CRASH-HR-STACKOV" ]; then
+  pass "triage: stack-exhaustion hard-rejected despite LLM keep"
+else
+  fail "triage: stack-exhaustion hard-rejected despite LLM keep" "stack-overflow survived in crashes/"
+fi
+
+if [ -d "$RESULTS_DIR/crashes/CRASH-HR-KEEP" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-HR-KEEP/.autodiscard" ]; then
+  pass "triage: memory-safety class keeps LLM keep (hard-reject is class-specific)"
+else
+  fail "triage: memory-safety class keeps LLM keep (hard-reject is class-specific)" "heap-buffer-overflow was rejected"
+fi
+
+if [ -d "$RESULTS_DIR/crashes/CRASH-HR-STACKBOF" ] && [ ! -f "$RESULTS_DIR/crashes/CRASH-HR-STACKBOF/.autodiscard" ]; then
+  pass "triage: stack-buffer-overflow kept (not mistaken for stack exhaustion)"
+else
+  fail "triage: stack-buffer-overflow kept (not mistaken for stack exhaustion)" "stack-buffer-overflow was rejected"
+fi
+
+eval "$_orig_llm_triage_crash_decision"
+unset REACHABILITY_AUTO
+
+# ═══════════════════════════════════════════════════════════════
 # 9. validate_find_gate — accepts any FIND with a report, regardless of
 # target type. No sanitizer / web-reachability gate. The LLM substance
 # path is covered separately in test_decision_find_quality.sh.

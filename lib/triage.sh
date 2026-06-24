@@ -547,6 +547,30 @@ _triage_has_sanitizer_diagnostic() {
   grep -qE 'ERROR: (AddressSanitizer|HWAddressSanitizer|UndefinedBehaviorSanitizer)|SUMMARY: (AddressSanitizer|HWAddressSanitizer|UndefinedBehaviorSanitizer)|WARNING: (ThreadSanitizer|MemorySanitizer):|SUMMARY: (ThreadSanitizer|MemorySanitizer):|^WARNING: DATA RACE$|UndefinedBehaviorSanitizer:|^[^[:space:]].*:[0-9]+:[0-9]+: runtime error:' "$f" 2>/dev/null
 }
 
+# Recoverable, low-value crash classes — single-process death with NO memory
+# corruption and no controllable primitive. Split out from
+# is_autodiscard_crash_output so _triage_one_crash_dir can treat them as a HARD
+# reject (an LLM keep vote may NOT rescue them): both terminate one process and
+# are robustness bugs, not security-class crashes. The caller guards with
+# crash_dir_has_memory_safety_asan_signal so a real corruption class that merely
+# also faults near null / exhausts the stack is never hard-rejected here.
+_crash_is_null_deref() {
+  local f="$1"
+  [ -s "$f" ] || return 1
+  grep -qE 'Hint: address points to the zero page|SCARINESS: [0-9]+ \(null-deref\)|SEGV on unknown address 0x0+[^0-9a-fA-F]' "$f" 2>/dev/null
+}
+
+# Plain recursion stack-overflow (stack EXHAUSTION), NOT stack-buffer-overflow.
+# ASan's bare `stack-overflow` token is resource exhaustion from deep recursion;
+# `stack-buffer-overflow` / `dynamic-stack-buffer-overflow` are memory
+# corruption and are kept by is_autodiscard_crash_output's keep-list above. The
+# trailing `( |$)` is what excludes the `-buffer-overflow` family.
+_crash_is_stack_exhaustion() {
+  local f="$1"
+  [ -s "$f" ] || return 1
+  grep -qE 'AddressSanitizer: stack-overflow( |$)' "$f" 2>/dev/null
+}
+
 is_autodiscard_crash_output() {
   local f="$1"
   [ -f "$f" ] && [ -s "$f" ] || return 1
@@ -563,8 +587,8 @@ is_autodiscard_crash_output() {
     return 1
   fi
 
-  # Null-deref
-  if grep -qE 'Hint: address points to the zero page|SCARINESS: [0-9]+ \(null-deref\)|SEGV on unknown address 0x0+[^0-9a-fA-F]' "$f" 2>/dev/null; then
+  # Null-deref (recoverable, low-value — see _crash_is_null_deref)
+  if _crash_is_null_deref "$f"; then
     return 0
   fi
 
@@ -592,8 +616,8 @@ is_autodiscard_crash_output() {
     return 0
   fi
 
-  # Plain stack-overflow (not dynamic-stack-buffer-overflow)
-  if grep -qE 'AddressSanitizer: stack-overflow( |$)' "$f" 2>/dev/null; then
+  # Plain stack-overflow / recursion exhaustion (not stack-buffer-overflow)
+  if _crash_is_stack_exhaustion "$f"; then
     return 0
   fi
 
@@ -2163,7 +2187,29 @@ _triage_one_crash_dir() {
       crash_dir_has_memory_safety_asan_signal "$d" && sanitizer_says_keep=1
     fi
 
+    # ── Hard reject: recoverable low-value classes the LLM may NOT rescue ──
+    # A null-pointer/first-page deref and a plain recursion stack-overflow both
+    # terminate a single process with no memory corruption and no controllable
+    # primitive — robustness crashes, not security-class bugs. Unlike
+    # OOM/MOZ_CRASH/panic (still LLM-rescuable in the case below), these two are
+    # rejected unconditionally so an "interesting"-leaning keep vote cannot pull
+    # them back into crashes/ and inflate yield. The memory-safety veto still
+    # wins: a real corruption class that merely also faults near null / exhausts
+    # the stack keeps sanitizer_says_keep=1 and is exempt.
+    local hard_reject_reason=""
+    if [ -n "$asan_path" ] && [ "$sanitizer_says_keep" -eq 0 ]; then
+      if _crash_is_null_deref "$asan_path"; then
+        hard_reject_reason="null-deref (recoverable low-value crash; not a security class)"
+      elif _crash_is_stack_exhaustion "$asan_path"; then
+        hard_reject_reason="stack exhaustion (recursion DoS; recoverable low-value crash, not memory corruption)"
+      fi
+    fi
+
     local discard=0 discard_reason=""
+    if [ -n "$hard_reject_reason" ]; then
+      discard=1
+      discard_reason="$hard_reject_reason"
+    else
     case "$llm_status" in
       0)  if [ -n "$llm_discard_reason" ] && [ "$sanitizer_says_keep" -eq 1 ]; then
             audit_log "KEEP-VETO: ${id} — sanitizer-confirmed memory-safety class; ignoring LLM discard (${llm_discard_reason})" | tee -a "$INDEX" >/dev/null 2>&1 || true
@@ -2177,6 +2223,7 @@ _triage_one_crash_dir() {
             discard_reason="non-finding class (null-deref/OOM/MOZ_CRASH/panic/stack-overflow)"
           fi ;;
     esac
+    fi
 
     if [ "$discard" -eq 1 ]; then
       if [ ! -f "$d/.autodiscard" ]; then

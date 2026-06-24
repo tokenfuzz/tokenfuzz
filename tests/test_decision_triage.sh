@@ -3,7 +3,9 @@
 # with a mock and verifies override semantics.
 #
 # Three pillars:
-#   1. LLM says "keep" → regex-discardable crash IS NOT discarded (override).
+#   1. LLM says "keep" → regex-discardable crash IS NOT discarded (override),
+#      EXCEPT the hard-reject classes (null-deref / stack-exhaustion), which are
+#      rejected regardless of the LLM vote (pillar 1b).
 #   2. LLM says "discard" → crash IS discarded with LLM reason in .autodiscard.
 #   3. LLM unavailable → regex fallback runs (existing behavior).
 
@@ -61,16 +63,23 @@ CODEX_BIN="$OLD_CODEX_BIN"
 [ -n "$OLD_LLM_DECIDE_DISABLE" ] && export LLM_DECIDE_DISABLE="$OLD_LLM_DECIDE_DISABLE"
 
 # ── 1. LLM override: regex would discard, LLM says keep ─────────────
-# Build a SEGV-on-zero trace that the regex would auto-discard, but
-# instruct the LLM mock to say keep.
+# Build an OOM trace that the regex would auto-discard. Unlike null-deref /
+# stack-exhaustion (hard-rejected — pillar 1b), OOM stays LLM-rescuable, so a
+# "keep" vote overrides the regex discard. This exercises the override path.
+OOM_TRACE=$(cat <<'EOF'
+==12345==ERROR: AddressSanitizer: allocation-size-too-big (0xffffffffffff)
+    #0 0x100 in foo() /a/b.c:10
+EOF
+)
+# A hard-reject class (null-deref) reused by pillar 1b below.
 NULL_DEREF_TRACE=$(cat <<'EOF'
 ==12345==ERROR: AddressSanitizer: SEGV on unknown address 0x0000000000
 SCARINESS: 10 (null-deref)
     #0 0x100 in foo() /a/b.c:10
 EOF
 )
-mk_crash_dir CRASH-001 "$NULL_DEREF_TRACE" >/dev/null
-export LLM_DECIDE_MOCK_CRASH_TRIAGE='{"keep":true,"reason":"hidden UAF"}'
+mk_crash_dir CRASH-001 "$OOM_TRACE" >/dev/null
+export LLM_DECIDE_MOCK_CRASH_TRIAGE='{"keep":true,"reason":"bounded by caller; real DoS lead"}'
 export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":true,"reason":"web content input boundary"}'
 triage_crash_dirs >/dev/null 2>&1
 assert_dir_exists     "$RESULTS_DIR/crashes/CRASH-001"           "LLM keep: crash not discarded"
@@ -90,18 +99,32 @@ asan_cache_target="$RESULTS_DIR/crashes/CRASH-001/sanitizer.txt"
 [ -s "$asan_cache_target" ] || asan_cache_target="$RESULTS_DIR/crashes/CRASH-001/asan.txt"
 [ -s "$asan_cache_target" ] || asan_cache_target="$RESULTS_DIR/crashes/CRASH-001/asan-output.txt"
 cat > "$asan_cache_target" <<'EOF'
-==67890==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000
-SCARINESS: 10 (null-deref)
+==67890==ERROR: AddressSanitizer: out-of-memory: allocator is trying to allocate 0x80000000 bytes
     #0 0x7fff0000aaaa in foo() /a/b.c:10
 EOF
 LLM_DECIDE_DISABLE=1 triage_crash_dirs >/dev/null 2>&1
 assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-001" "LLM disabled: changed ASan output invalidates cache"
 
+# ── 1b. Hard-reject exception: LLM keep does NOT rescue null-deref ───
+# null-deref / stack-exhaustion are recoverable, low-value process crashes;
+# they are rejected regardless of the LLM vote, so the pillar-1 override must
+# NOT apply. (Autodiscard-classifier coverage lives in test_triage.sh §8c; this
+# asserts the policy through the full llm_decide→triage path with a keep mock.)
+mk_crash_dir CRASH-001B "$NULL_DEREF_TRACE" >/dev/null
+export LLM_DECIDE_MOCK_CRASH_TRIAGE='{"keep":true,"reason":"insists this is interesting"}'
+export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":true,"reason":"web content input boundary"}'
+triage_crash_dirs >/dev/null 2>&1
+assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-001B" "hard-reject: LLM keep does NOT rescue null-deref"
+hr_rejected=$(find "$RESULTS_DIR/crashes-rejected" -maxdepth 1 -name 'CRASH-001B*' -type d | head -1)
+assert_dir_exists "$hr_rejected" "hard-reject: null-deref sent to crashes-rejected despite keep"
+unset LLM_DECIDE_MOCK_CRASH_TRIAGE
+unset LLM_DECIDE_MOCK_LEGIT_CRASH
+
 # ── 2. LLM marks discard on a non-memory-safety trace → still discards ─
 # The LLM gate still rejects classes the sanitizer did NOT confirm as a
-# memory-safety bug. A null-deref SEGV-on-zero is such a class, so the
-# LLM-named reason flows through to .autodiscard.
-mk_crash_dir CRASH-002 "$NULL_DEREF_TRACE" >/dev/null
+# memory-safety bug. OOM is such a class (and, unlike null-deref, is not
+# hard-rejected first), so the LLM-named reason flows through to .autodiscard.
+mk_crash_dir CRASH-002 "$OOM_TRACE" >/dev/null
 export LLM_DECIDE_MOCK_CRASH_TRIAGE='{"keep":false,"reason":"test-only stub harness, not product code"}'
 triage_crash_dirs >/dev/null 2>&1
 assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-002"          "LLM discard: removed from crashes/"
@@ -135,16 +158,16 @@ assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-002B/.autodiscard" \
 unset LLM_DECIDE_MOCK_CRASH_TRIAGE
 
 # ── 3. LLM unavailable → regex fallback ─────────────────────────────
-mk_crash_dir CRASH-003 "$NULL_DEREF_TRACE" >/dev/null
+mk_crash_dir CRASH-003 "$OOM_TRACE" >/dev/null
 LLM_DECIDE_DISABLE=1 triage_crash_dirs >/dev/null 2>&1
-assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-003"          "LLM disabled: regex still discards null-deref"
+assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-003"          "LLM disabled: regex still discards OOM"
 rejected_dir=$(find "$RESULTS_DIR/crashes-rejected" -maxdepth 1 -name 'CRASH-003*' -type d | head -1)
 assert_dir_exists "$rejected_dir" "LLM disabled: rejected via regex"
 assert_file_contains "$rejected_dir/.autodiscard" "non-finding class" \
   "autodiscard reflects regex reason"
 
 # ── 4. LLM returns malformed JSON → regex fallback ──────────────────
-mk_crash_dir CRASH-004 "$NULL_DEREF_TRACE" >/dev/null
+mk_crash_dir CRASH-004 "$OOM_TRACE" >/dev/null
 export LLM_DECIDE_MOCK_CRASH_TRIAGE='this is not json'
 triage_crash_dirs >/dev/null 2>&1
 assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-004" \
