@@ -1496,8 +1496,9 @@ Triage and act, in this order:
    the scratch \`.c\`/\`.cc\` file and re-probe.
 3. **If the target config is wrong**, edit \`${toml_path}\`:
    - \`includes = [...]\` — add the missing include directory.
-   - \`link_libs = [...]\` — add the missing \`-l<name>\`, \`-L<path>\`, or
-     \`-Wl,-rpath,<path>\` entry.
+   - \`link_libs = [...]\` — add the missing \`-l<name>\`, \`-L<path>\`,
+     \`-Wl,-rpath,<path>\`, target-relative archive, or target-relative source
+     file entry.
    - \`defines = [...]\` (optional) — add \`-D<NAME>=<val>\` flags.
    Re-source by re-running \`bin/probe\`; the cached failure under
    \`.harness-cache/\` will rebuild against the new config.

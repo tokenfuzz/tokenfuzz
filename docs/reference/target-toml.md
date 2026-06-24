@@ -71,7 +71,7 @@ attacker_controls = ["bytes"]
 | `asan_bin` | ASan executable used by generic or browser runs. Relative paths resolve under `targets/<target>/`. |
 | `asan_lib` | ASan library used when compiling C harness testcases. |
 | `includes` | Include directories for C harness builds. Relative paths resolve under `targets/<target>/`. |
-| `link_libs` | Extra linker flags for C harness builds. |
+| `link_libs` | Extra linker inputs for C harness builds: system/library flags such as `-lm`, target-relative archives, or target-relative source files that must be compiled into the harness. |
 | `is_browser` | `"1"` for browser mode, `"0"` for generic mode. |
 
 One related field is *not* seeded: `defines`, compiler define flags

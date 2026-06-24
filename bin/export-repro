@@ -203,6 +203,11 @@ def shq(value: str) -> str:
     return shlex.quote(value)
 
 
+def shdq_text(value: str) -> str:
+    """Return text safe inside a generated double-quoted shell string."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+
 def safe_slug(value: str) -> str:
     """Return a conservative path component for auto-clone directories."""
     slug = value or "target"
@@ -466,12 +471,31 @@ def shell_join_args(args: Iterable[str]) -> str:
 
 
 _LINK_LIB_RESOLVE_BLOCK = """\
-__VAR__="$build"/__REL__
+__VAR__="$build"/__REL_Q__
 if [ ! -e "$__VAR__" ]; then
-  __VAR__=$(find "$build" \\( -type f -o -type l \\) -name '__NAME__' -print 2>/dev/null | head -1)
+  __VAR__=$(find "$build" \\( -type f -o -type l \\) -name __NAME_Q__ -print 2>/dev/null | head -1)
 fi
-[ -n "$__VAR__" ] && [ -e "$__VAR__" ] || { echo "link archive not found under $build: __NAME__ (target.toml link_libs hint: __REL__)" >&2; exit 2; }
+[ -n "$__VAR__" ] && [ -e "$__VAR__" ] || { echo "link archive not found under $build: __NAME_MSG__ (target.toml link_libs hint: __REL_MSG__)" >&2; exit 2; }
 """
+
+_LINK_SOURCE_RESOLVE_BLOCK = """\
+__VAR__="$src"/__REL_Q__
+if [ ! -e "$__VAR__" ]; then
+  __VAR__=$(find "$src" -type d \\( -iname .git -o -iname build -o -iname 'build-*' -o -iname CMakeFiles -o -iname test -o -iname tests -o -iname _deps \\) -prune \\
+    -o -type f -name __NAME_Q__ -print 2>/dev/null | head -1)
+fi
+[ -n "$__VAR__" ] && [ -e "$__VAR__" ] || { echo "link source not found under $src: __NAME_MSG__ (target.toml link_libs hint: __REL_MSG__)" >&2; exit 2; }
+"""
+
+_LINK_SOURCE_EXTS = {
+    ".c", ".cc", ".cpp", ".cxx", ".c++",
+    ".m", ".mm", ".s", ".S", ".asm",
+}
+
+
+def _is_source_link_item(path: str) -> bool:
+    lower = path.rsplit("/", 1)[-1].lower()
+    return any(lower.endswith(ext.lower()) for ext in _LINK_SOURCE_EXTS)
 
 
 def emit_link_libs_with_resolves(link_libs: list[str], sanitizer: str) -> tuple[str, str]:
@@ -482,7 +506,9 @@ def emit_link_libs_with_resolves(link_libs: list[str], sanitizer: str) -> tuple[
     `lib/libfoo.a` locally but the .audit/build.sh leaves it at
     `libfoo.a`). For each path-shaped entry we emit a small resolver
     that tries `$build/<rel>` first and falls back to a basename find —
-    matching the LIB_RESOLVE semantics used for the primary san_lib.
+    matching the LIB_RESOLVE semantics used for the primary san_lib. It can
+    also name source files that should be compiled into the reproducer link
+    command; those resolve from `$src` instead of `$build`.
 
     Flag entries (`-lm`, `-L…`, `-Wl,…`) pass through verbatim.
     """
@@ -496,14 +522,21 @@ def emit_link_libs_with_resolves(link_libs: list[str], sanitizer: str) -> tuple[
         if raw.startswith("-") or "$" in raw:
             link_args.append(shq(item))
             continue
-        # Bare path: emit a resolver and reference the variable.
+        # Bare path: emit a resolver and reference the variable. Source files
+        # are compile/link inputs from the upstream checkout; archives/shared
+        # objects are build outputs.
         var = f"link_lib_{archive_idx}"
         archive_idx += 1
         name = item.rsplit("/", 1)[-1]
+        template = _LINK_SOURCE_RESOLVE_BLOCK if _is_source_link_item(item) else _LINK_LIB_RESOLVE_BLOCK
         resolves.append(
-            _LINK_LIB_RESOLVE_BLOCK
+            template
             .replace("__VAR__", var)
+            .replace("__REL_Q__", shq(item))
             .replace("__REL__", item)
+            .replace("__NAME_Q__", shq(name))
+            .replace("__REL_MSG__", shdq_text(item))
+            .replace("__NAME_MSG__", shdq_text(name))
             .replace("__NAME__", name)
         )
         link_args.append(f'"${var}"')
@@ -1090,8 +1123,7 @@ LIB_DISCOVER = """\
 # object (unversioned over its SONAME-versioned siblings). The pruned dirs
 # are build-system-internal — CMakeFiles/ scaffolding, test-framework
 # archives under test(s)/ (Unity, gtest), and FetchContent _deps/ builds —
-# never the project's own library (cjson builds libcjson.dylib at the root
-# plus a stray tests/libunity.a).
+# not normal project library output.
 san_lib=""
 if [ -d "$build" ]; then
   san_lib=$(find "$build" -type d \\( -iname CMakeFiles -o -iname test -o -iname tests -o -iname _deps \\) -prune \\

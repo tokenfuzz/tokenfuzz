@@ -2267,8 +2267,9 @@ def _strip_target_root_paths(cfg: Config) -> None:
     cfg.msan_lib = _rel(cfg.msan_lib)
     cfg.tsan_bin = _rel(cfg.tsan_bin)
     cfg.tsan_lib = _rel(cfg.tsan_lib)
-    # link_libs may carry bare archives that auto-repair-target-toml dragged
-    # in. Don't touch `-l…` / `-L…` / `-Wl,…` flag entries.
+    # link_libs may carry bare archives or source compile inputs that
+    # auto-repair-target-toml dragged in. Don't touch `-l…` / `-L…` /
+    # `-Wl,…` flag entries.
     cfg.link_libs = [
         _rel(item) if not item.startswith("-") else item
         for item in cfg.link_libs

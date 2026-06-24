@@ -303,7 +303,7 @@ fields are refined later.
 | Generic testcase runs the wrong binary | Fix `asan_bin`. Paths are relative to `targets/<target>/`. |
 | C harness compile fails on missing headers | Add source or build include directories to `includes`. |
 | C harness compile fails on missing macros | Add required compiler flags to `defines`. |
-| Link fails during harness compile | Add the ASan library and required system libraries to `asan_lib` and `link_libs`. |
+| Link fails during harness compile | Add the ASan library to `asan_lib`; add required system libraries, target-relative archives, or target-relative source files to `link_libs`. |
 | Triage rejects a report as out of scope | Recheck `attacker_controls` and report `Trigger source`. Do not widen the model unless the product actually exposes that control. |
 
 For field-by-field details, see

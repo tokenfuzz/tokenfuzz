@@ -450,7 +450,7 @@ resolves, args = er.emit_link_libs_with_resolves(
 )
 assert_in('link_lib_0="$build"/lib/libsample.a', resolves,
           "link_libs: first resolver block uses $build + stripped tail")
-assert_in("-name 'libsample.a'", resolves,
+assert_in("-name libsample.a", resolves,
           "link_libs: basename fallback emitted")
 assert_in('"$link_lib_0"', args,
           "link_libs: link args reference resolver variable")
@@ -464,6 +464,36 @@ assert_in("link_lib_0=", resolves2, "link_libs: numbering starts at 0")
 assert_in("link_lib_1=", resolves2, "link_libs: second archive numbered 1")
 assert_in('"$link_lib_0" "$link_lib_1"', args2,
           "link_libs: both vars referenced in link line")
+resolves_src, args_src = er.emit_link_libs_with_resolves(
+    ["cJSON_Utils.c", "src/extra.cc"], "asan"
+)
+assert_in('link_lib_0="$src"/cJSON_Utils.c', resolves_src,
+          "link_libs: C source inputs resolve from $src, not $build")
+assert_in('link source not found under $src', resolves_src,
+          "link_libs: source resolver emits a source-specific error")
+assert_in("-name cJSON_Utils.c", resolves_src,
+          "link_libs: source resolver has basename fallback")
+assert_not_in('link archive not found under $build: cJSON_Utils.c', resolves_src,
+              "link_libs: source inputs are not treated as build archives")
+assert_in('"$link_lib_0" "$link_lib_1"', args_src,
+          "link_libs: source vars are referenced in link line")
+resolves_spaced, args_spaced = er.emit_link_libs_with_resolves(
+    ["source dir/extra file.c", "build dir/lib sample.a"], "asan"
+)
+assert_in('link_lib_0="$src"/\'source dir/extra file.c\'', resolves_spaced,
+          "link_libs: source relative paths are shell-quoted after $src")
+assert_in('link_lib_1="$build"/\'build dir/lib sample.a\'', resolves_spaced,
+          "link_libs: archive relative paths are shell-quoted after $build")
+assert_in('"$link_lib_0" "$link_lib_1"', args_spaced,
+          "link_libs: quoted-path vars are referenced in link line")
+resolves_diag, _args_diag = er.emit_link_libs_with_resolves(
+    ['weird "`name`".c'], "asan"
+)
+assert_in('link_lib_0="$src"/\'weird "`name`".c\'', resolves_diag,
+          "link_libs: shell path uses single-quoted literal for metacharacters")
+assert_in('link source not found under $src: weird \\"\\`name\\`\\".c',
+          resolves_diag,
+          "link_libs: diagnostic text escapes double-quoted shell metacharacters")
 
 
 # find_shell_wrapper: harness.sh and harness.bash are first-class
