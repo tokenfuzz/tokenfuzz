@@ -200,6 +200,12 @@ assert_file_contains "$CRASH_DIR/reproduce.sh" 'echo "\[repro\] exit=' \
   "reproduce.sh: prints exit code after run"
 assert_file_not_contains "$CRASH_DIR/reproduce.sh" '^exec "\$build/repro"' \
   "reproduce.sh: no bare exec that hides exit status"
+# Submodule-dependent builds (e.g. a JIT engine vendored under deps/) need the
+# clone to pull submodules and the pinned-rev checkout to re-sync them.
+assert_file_contains "$CRASH_DIR/reproduce.sh" 'git clone --recurse-submodules' \
+  "reproduce.sh: clones with submodules"
+assert_file_contains "$CRASH_DIR/reproduce.sh" 'submodule update --init --recursive' \
+  "reproduce.sh: re-syncs submodules after pinning REV"
 
 # ─── Actually build + run reproduce.sh ───────────────────────────────
 # Pass the fake-src checkout explicitly so the embedded `git clone` is

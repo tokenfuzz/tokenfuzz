@@ -742,7 +742,7 @@ if [ ! -d "$src" ]; then
   case "$URL" in FILL_ME|''|norev|no-vcs|unknown) can_clone=0 ;; esac
   case "$REV" in ''|norev|no-vcs|unknown|'?') can_clone=0 ;; esac
   if [ "$can_clone" -eq 1 ]; then
-    git clone "$URL" "$src"
+    git clone --recurse-submodules "$URL" "$src"
   else
     echo "reproduce.sh: no source tree at '$src' and no cloneable upstream recorded for this target." >&2
     [ -n "$LOCAL_SRC" ] && echo "Recorded source '$LOCAL_SRC' was not found near this bundle." >&2
@@ -755,6 +755,12 @@ fi
 # operator passes in is pinned either way.
 if [ -d "$src/.git" ]; then
   git -C "$src" checkout --quiet "$REV" 2>/dev/null || true
+  # Re-sync submodules after pinning: the recorded REV can point them at
+  # different commits than the clone fetched, and an operator-supplied checkout
+  # may not have them initialized at all. Submodule-dependent builds (e.g. a JIT
+  # engine vendored under deps/) need their sources present. No-op when the repo
+  # has no submodules.
+  git -C "$src" submodule update --init --recursive 2>/dev/null || true
 elif [ -d "$src/.hg" ]; then
   hg --cwd "$src" update -r "$REV" 2>/dev/null || true
 fi
