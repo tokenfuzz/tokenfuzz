@@ -1505,9 +1505,10 @@ _triage_llm_fill_fields() {
 #                                    (Sourcegraph + GitHub) for external callers.
 #                                    This is the default because OSS targets'
 #                                    symbol names are already public — the
-#                                    reachability signal materially improves
-#                                    severity scoring (library_popular tier
-#                                    upgrade, callers tilt).
+#                                    external-caller reach enriches the
+#                                    Reachability report and triage
+#                                    prioritisation (it does not feed the CVSS
+#                                    score).
 #   local / severity-only          → skip backends; compute severity from
 #                                    the report fields only. Use this when
 #                                    auditing private code whose symbol

@@ -1646,10 +1646,10 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────
-# 18. popularity-rescue gate — an un-triaged report (no structured reach
-#     fields) must NOT be promoted to library_popular on caller count
-#     alone, so it cannot reach Medium on impact alone. A triaged report
-#     with a lazily-unset Surface field still gets the rescue.
+# 18. surface tier is a function of the surface *kind*, never of external-
+#     caller counts. Popularity is ecosystem prevalence, not a surface
+#     characteristic, so it must not move the tier (or, through it, the
+#     CVSS score). Reported separately as external-caller reach.
 # ───────────────────────────────────────────────────────────────────
 # A use-after-free narrative whose crashing symbol is a hugely popular
 # public library symbol — the external probe finds many callers. Names
@@ -1661,21 +1661,27 @@ run_gate_py() { # _CURRENT_TEST set by caller; stdin = python body
   python3 - "$REACH" "$GATE_UNTRIAGED"
 }
 
-_CURRENT_TEST="popularity-rescue gate: _classify_surface un-triaged + many callers → unknown"
+_CURRENT_TEST="surface tier: empty Surface stays unknown regardless of caller count or triage"
 if run_gate_py <<'PY' 2>/dev/null
 import importlib.util, sys
 from importlib.machinery import SourceFileLoader
 _loader = SourceFileLoader("reachability", sys.argv[1])
 mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("reachability", _loader))
 _loader.exec_module(mod)
-lbl, _ = mod._classify_surface("", "", "narrative text", 500, report_triaged=False)
+# No surface kind to anchor on → unknown, whether or not the report was triaged.
+# Caller count is never consulted to rescue the tier (popularity ≠ surface).
+lbl, _ = mod._classify_surface("", "", "narrative text", report_triaged=False)
 assert lbl == "unknown", f"un-triaged should stay unknown, got {lbl!r}"
-lbl2, _ = mod._classify_surface("", "", "narrative text", 500, report_triaged=True)
-assert lbl2 == "library_popular", f"triaged + many callers should rescue, got {lbl2!r}"
+lbl2, _ = mod._classify_surface("", "", "narrative text", report_triaged=True)
+assert lbl2 == "unknown", f"empty Surface stays unknown (no popularity rescue), got {lbl2!r}"
+# A declared library-api kind classifies as library — never library_popular.
+lbl3, _ = mod._classify_surface("library-api — public entry", "", "", report_triaged=True)
+assert lbl3 == "library", f"library-api should be library, got {lbl3!r}"
+assert "library_popular" not in mod.SURFACE_TIERS, "library_popular tier should be retired"
 PY
 then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "classification gate wrong"; fi
 
-_CURRENT_TEST="popularity-rescue gate: _report_is_triaged detects structured reach fields"
+_CURRENT_TEST="surface tier: _report_is_triaged detects structured reach fields"
 if run_gate_py <<'PY' 2>/dev/null
 import importlib.util, sys
 from importlib.machinery import SourceFileLoader
@@ -1693,12 +1699,11 @@ PY
 then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "triage detection wrong"; fi
 
 # Under CVSS-as-severity, an un-triaged UAF is still scored by its CVSS class
-# (a use-after-free is a severe class) — the popularity rescue is suppressed so
-# the surface stays `unknown` (it is NOT promoted to library_popular on caller
-# count alone), but the un-triaged-ness no longer *suppresses* the severity.
-# Reachability/popularity uncertainty is a priority concern reported separately,
-# not a severity reducer. The caller count must not flip the surface tier.
-_CURRENT_TEST="popularity-rescue gate: un-triaged report's surface stays unknown (not promoted)"
+# (a use-after-free is a severe class) — the surface stays `unknown` (it is NOT
+# promoted on caller count alone), but the un-triaged-ness no longer
+# *suppresses* the severity. Reachability/popularity uncertainty is a priority
+# concern reported separately, not a severity reducer.
+_CURRENT_TEST="surface tier: un-triaged report's surface stays unknown (caller count ignored)"
 if run_gate_py <<'PY' 2>/dev/null
 import importlib.util, sys
 from importlib.machinery import SourceFileLoader
@@ -1715,7 +1720,36 @@ assert sev["level"] in ("High", "Critical"), f"UAF should score by class, got {s
 PY
 then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "un-triaged surface promotion or scoring wrong"; fi
 
-_CURRENT_TEST="popularity-rescue gate: triaged library-api UAF report still scores Medium+"
+_CURRENT_TEST="surface tier: triaged library-api UAF classifies as library (not library_popular) and scores Medium+"
+if run_gate_py <<'PY' 2>/dev/null
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+_loader = SourceFileLoader("reachability", sys.argv[1])
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("reachability", _loader))
+_loader.exec_module(mod)
+# 500 callers used to promote this to library_popular (CR/IR/AR:H). Popularity
+# no longer touches the score: the tier is `library` (CR/IR/AR:M) on surface
+# kind alone, and the bug still scores Medium+ on its class.
+reach = {"services": {"sourcegraph": {"status": "ok"}},
+         "external_callers": 500, "external_caller_repos": 500, "vendored_copies": 0}
+structured = sys.argv[2] + ("Surface: library-api — public entry point on caller bytes\n"
+                             "Trigger source: bytes\n")
+sev = mod.compute_severity(structured, reach, cluster_size=2)
+assert sev["surface_label"] == "library", sev["surface_label"]
+assert sev["level"] in ("Medium", "High", "Critical"), \
+    f"triaged library bug must not be Low, got {sev['level']} ({sev['score']})"
+PY
+then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "triaged genuine bug under-scored"; fi
+
+# ───────────────────────────────────────────────────────────────────
+# Contract-concern set-difference localises trigger shape (AV:L/AT:P).
+# A trusted callback/re-entrancy UAF carries trigger_source=both (bytes are
+# only setup) but triage records the call-sequence as outside attacker_controls.
+# The scorer must consume that authoritative set-difference and localise to
+# AV:L/AT:P — even though `both` asserts a byte path — dropping the HHH-impact
+# crash from High to Medium. Mirrors the benchmark callout-reentrancy reports.
+# Placeholder symbols only (see docs/development.md testing discipline).
+_CURRENT_TEST="trigger-shape: call-sequence outside attacker_controls localises to AV:L/AT:P"
 if run_gate_py <<'PY' 2>/dev/null
 import importlib.util, sys
 from importlib.machinery import SourceFileLoader
@@ -1724,14 +1758,98 @@ mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("reachabil
 _loader.exec_module(mod)
 reach = {"services": {"sourcegraph": {"status": "ok"}},
          "external_callers": 500, "vendored_copies": 0}
-structured = sys.argv[2] + ("Surface: library-api — public entry point on caller bytes\n"
-                             "Trigger source: bytes\n")
-sev = mod.compute_severity(structured, reach, cluster_size=2)
-assert sev["surface_label"] == "library_popular", sev["surface_label"]
-assert sev["level"] in ("Medium", "High", "Critical"), \
-    f"triaged library bug must not be Low, got {sev['level']} ({sev['score']})"
+report = (
+    "# CRASH-1: heap-use-after-free WRITE in app_match\n"
+    "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60\n"
+    "WRITE of size 8 at 0x60 thread T0\n"
+    "    #0 app_match match.c:177\n"
+    "SUMMARY: AddressSanitizer: heap-use-after-free match.c:177 in app_match\n"
+    "## Contract concern\n"
+    "Triage kept this crash and flagged a contract concern: trigger requires "
+    "[call-sequence] outside attacker_controls=[bytes]; this out-of-boundary "
+    "precondition is a robustness/hardening concern (CVSS AT:P/MAT:P).\n"
+    "Surface: library-api — public entry point\n"
+    "Trigger source: both\n"
+    "Caller controls: pattern bytes, subject bytes, callback, public API call sequence\n"
+)
+sev = mod.compute_severity(report, reach, cluster_size=2)
+# The localisation invariant — AV:L/AT:P — is what the fix asserts; it holds
+# regardless of Exploit Maturity (E), which the report's reproducer evidence
+# sets independently. The point is de-inflation: an attacker-bytes embedding
+# would read AV:N and land High on this HHH-impact UAF; localising it must pull
+# it below High.
+assert "AV:L" in sev["cvss"]["vector"], sev["cvss"]["vector"]
+assert "AT:P" in sev["cvss"]["vector"], sev["cvss"]["vector"]
+assert sev["level"] not in ("High", "Critical"), \
+    f"localised callback/re-entrancy UAF must drop below High, got {sev['level']} ({sev['score']})"
 PY
-then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "triaged genuine bug under-scored"; fi
+then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "trigger-shape localisation did not fire"; fi
+
+# A genuine byte-parser/deserialiser has trigger ⊆ attacker_controls, so triage
+# never writes a Contract concern set-difference. The localiser must NOT fire:
+# attacker bytes reach the primitive directly → AV:N, score stays High. This is
+# the false-positive guard for the change above.
+_CURRENT_TEST="trigger-shape: byte-parser without contract concern stays AV:N/High"
+if run_gate_py <<'PY' 2>/dev/null
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+_loader = SourceFileLoader("reachability", sys.argv[1])
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("reachability", _loader))
+_loader.exec_module(mod)
+reach = {"services": {"sourcegraph": {"status": "ok"}},
+         "external_callers": 500, "vendored_copies": 0}
+report = (
+    "# CRASH-2: heap-buffer-overflow READ in app_decode\n"
+    "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60\n"
+    "READ of size 8 at 0x60 thread T0\n"
+    "    #0 app_decode decode.c:227\n"
+    "SUMMARY: AddressSanitizer: heap-buffer-overflow decode.c:227 in app_decode\n"
+    "Surface: library-api — public entry point on caller bytes\n"
+    "Trigger source: bytes\n"
+    "Caller controls: serialized byte stream contents and buffer length\n"
+)
+sev = mod.compute_severity(report, reach, cluster_size=2)
+# The guarded invariant: with no contract-concern set-difference, the localiser
+# must not fire — attacker bytes reach the primitive directly, so AV stays N.
+assert "AV:N" in sev["cvss"]["vector"], sev["cvss"]["vector"]
+assert "AV:L" not in sev["cvss"]["vector"], sev["cvss"]["vector"]
+PY
+then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "byte-parser was wrongly localised"; fi
+
+# The subset test is exact: an out-of-attacker-control set that includes bytes
+# (alongside or instead of call-sequence) means a byte path is part of the
+# gating trigger, so the bug is NOT call-sequence-only — it must stay AV:N. This
+# is the precision guard: `trigger_source: both` alone must never localise; only
+# the {call-sequence} set-difference does. Placeholder symbols per docs.
+_CURRENT_TEST="trigger-shape: bytes in the out-of-control set keeps AV:N (no over-localisation)"
+if run_gate_py <<'PY' 2>/dev/null
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+_loader = SourceFileLoader("reachability", sys.argv[1])
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("reachability", _loader))
+_loader.exec_module(mod)
+reach = {"services": {"sourcegraph": {"status": "ok"}},
+         "external_callers": 500, "vendored_copies": 0}
+base = (
+    "# CRASH-3: heap-use-after-free WRITE in app_match\n"
+    "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60\n"
+    "WRITE of size 8 at 0x60 thread T0\n"
+    "    #0 app_match match.c:177\n"
+    "SUMMARY: AddressSanitizer: heap-use-after-free match.c:177 in app_match\n"
+    "Surface: library-api — public entry point\n"
+    "Trigger source: both\n"
+)
+for oob in ("bytes,call-sequence", "bytes"):
+    report = base + (
+        "## Contract concern\n"
+        f"Triage flagged a contract concern: trigger requires [{oob}] outside "
+        "attacker_controls=[]; this out-of-boundary precondition lowers severity.\n"
+    )
+    sev = mod.compute_severity(report, reach, cluster_size=2)
+    assert "AV:N" in sev["cvss"]["vector"], (oob, sev["cvss"]["vector"])
+    assert "AV:L" not in sev["cvss"]["vector"], (oob, sev["cvss"]["vector"])
+PY
+then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "bytes-in-OOB-set was wrongly localised"; fi
 
 # ───────────────────────────────────────────────────────────────────
 # 19. Reach fields are surfaced into the Fields table for a report that

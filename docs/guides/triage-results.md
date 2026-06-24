@@ -152,9 +152,10 @@ Notes:
 - `Surface` describes where the crash is reachable from. Agents write
   a short label, optionally followed by prose (`library-api — C
   harness calls app_read_memory`); export normalises it to one of the
-  tokens above, and `bin/reachability` classifies it (it may promote
-  `library` → `library_popular` or `cli` → `cli_production` based on
-  external caller counts) before computing the advisory severity. An
+  tokens above, and `bin/reachability` classifies it into a surface tier
+  (e.g. `cli` → `cli_production`) from the surface *kind* alone before
+  computing the advisory severity. External-caller counts are not consulted
+  for the score — popularity is reported separately as reach metadata. An
   unset `Surface` defaults to `unknown` and under-scores real
   findings, so always set it.
 - `Trigger source` is compared against `attacker_controls` to set

@@ -178,8 +178,9 @@ pattern-search library). Same field for findings/FIND-*.
 
 `Entry` (optional, recommended): the public API function an external caller
 invokes to reach the bug, call-shaped, e.g. ``Entry: pcre2_match()``.
-Reachability scores caller popularity at this entry point; otherwise it
-infers the entry from the deepest product frame in the sanitizer stack.
+Reachability *reports* caller reach at this entry point (prioritisation only;
+not a CVSS input); otherwise it infers the entry from the deepest product frame
+in the sanitizer stack.
 
 `Parameter control` (when value-dependent): direct / mapped /
 harness-only / none. The triage matrix demotes when `Trigger source`

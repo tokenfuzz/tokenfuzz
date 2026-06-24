@@ -302,10 +302,11 @@ def _read_mock(service: str, symbol: str) -> dict | None:
 # ─── Backends ─────────────────────────────────────────────────────────────
 
 
-# Result caps per (backend, symbol) probe. 100, not 30: the library_popular
-# surface upgrade triggers at POPULAR_LIBRARY_THRESHOLD distinct caller
-# repos, and a cap below the threshold makes the tier unreachable no matter
-# how popular the symbol really is.
+# Result caps per (backend, symbol) probe. 100, not 30: the reported
+# external-caller reach (distinct dependent repos) saturates well below this on
+# popular APIs, and a low cap would understate that prevalence signal in the
+# Reachability section. The count is reporting metadata only — it does not feed
+# the CVSS score.
 SOURCEGRAPH_RESULT_LIMIT = 100
 GH_RESULT_LIMIT = 100
 
@@ -752,9 +753,10 @@ def query_all(symbols: list[str], ignore: list[str], timeout: float, use_cache: 
         "language": language,
         "match_mode": match_mode,
         "external_callers": len(external_caller_hits),
-        # Distinct repos, not files — the popularity signal for the
-        # library_popular surface tier. One repo vendoring 40 matching
-        # files is one dependent project, not 40.
+        # Distinct repos, not files — the reported external-caller reach
+        # (dependent-project prevalence). One repo vendoring 40 matching files
+        # is one dependent project, not 40. Reporting metadata only; it does
+        # not feed the CVSS score.
         "external_caller_repos": len({h["repo"] for h in external_caller_hits}),
         "external_caller_hits": external_caller_hits,
         "vendored_copies": len(vendored_copy_hits),
@@ -927,7 +929,6 @@ _HIGH_IMPACT_PRIMITIVES = frozenset(
 # represented through Environmental metrics.
 _SURFACE_AVUI: dict[str, tuple[str, str]] = {
     "network":          ("N", "N"),
-    "library_popular":  ("N", "N"),
     "library":          ("N", "N"),
     "file":             ("N", "N"),
     "cli_production":   ("L", "P"),
@@ -1148,6 +1149,46 @@ def _limited_caller_control(fields: dict) -> tuple[bool, str]:
     return False, ""
 
 
+# Trigger tokens that can be driven by a *remote* attacker in some real
+# deployment, so they do not localise the attack vector: a race/timing window
+# is reached by concurrent remote requests; protocol-state by attacker-sent
+# messages; env/fs-state by content the attacker supplies remotely. Module-level
+# so both the localisation gate and the trigger-token veto share one definition.
+_REMOTE_CAPABLE_RE = re.compile(r"\b(timing|race|data[- ]?race|"
+                                r"protocol[- ]?state|env|environment|"
+                                r"fs[- ]?state|file[- ]?system[- ]?state)\b")
+
+# A local API/call-ordering trigger: the structured `call-sequence` token plus
+# the common free-prose phrasings. Deliberately excludes the `both` token — in
+# free prose "both" is the ordinary English word ("both calls must run"), so it
+# is matched only when scoped to the structured trigger_source field.
+_CALL_SEQUENCE_RE = re.compile(r"\bcall[- ]sequence\b|"
+                               r"\bcall[- ]order(?:ing)?\b|\bcallback ordering\b|"
+                               r"\bapi call[- ]sequence\b|"
+                               r"\b(?:sequence|ordering|order) of (?:\w+\s+){0,3}calls?\b")
+
+# The structured set-difference lib/triage.sh records in the `## Contract
+# concern` section: `requires [<csv>] outside attacker_controls=[...]`. This is
+# the exact set of trigger components triage determined the attacker does NOT
+# control, computed once against the target's threat model (with triage's own
+# token normalisation/expansion). The scorer consumes that authoritative result
+# rather than re-deriving the set-difference — the tokens are already canonical.
+_CONTRACT_OOB_RE = re.compile(
+    r"requires\s*\[([^\]]*)\]\s*outside\s+attacker_controls=", re.IGNORECASE)
+
+
+def _contract_oob_components(fields: dict) -> set[str]:
+    """Trigger components triage recorded as outside the target's declared
+    attacker_controls. Empty set when the report carries no such annotation —
+    e.g. trigger ⊆ attacker_controls (promoted) or a contract concern raised for
+    a different reason (violated contract / harness-only parameters), neither of
+    which establishes that *only* a local call-sequence gates the primitive."""
+    m = _CONTRACT_OOB_RE.search(fields.get("_report_text", "") or "")
+    if not m:
+        return set()
+    return {t.strip().lower() for t in m.group(1).split(",") if t.strip()}
+
+
 def _local_caller_only(fields: dict) -> tuple[bool, str]:
     """Whether the primitive is reachable only by a trusted local caller.
 
@@ -1180,6 +1221,28 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
     trigger = (fields.get("trigger_source", "") or "").lower()
     parameter = (fields.get("parameter_control", "") or "").lower()
     trusted = (fields.get("trusted_caller_actions", "") or "").lower()
+
+    # Authoritative localisation from triage's structured set-difference. When
+    # the *only* trigger component outside the attacker's control is a local
+    # `call-sequence`, the primitive is reachable solely by a trusted in-process
+    # caller driving that ordering — the attacker-controlled bytes (the `both`
+    # case) are mere setup. That is AV:L/AT:P, and it holds even for
+    # trigger_source=both, where the byte veto below would otherwise keep AV:N.
+    #
+    # The subset test is exact and conservative — it localises ONLY when the
+    # out-of-control set is {call-sequence} and nothing else:
+    #   * {bytes,call-sequence} or {bytes} → bytes are out of attacker control
+    #     too, so a byte path is part of the gating trigger → stay AV:N;
+    #   * {timing}/{race}/{env}/… → remotely reachable in some deployment → AV:N;
+    #   * a contract concern from a violated contract / harness-only parameters
+    #     emits no `requires [...] outside` line → empty set → stay AV:N.
+    # A genuine byte-parser has trigger ⊆ attacker_controls (promoted, no
+    # concern) and never localises; a target that exposes the call-sequence
+    # declares it in attacker_controls, clearing it from the set → AV:N.
+    oob = _contract_oob_components(fields)
+    if oob and oob <= {"call-sequence"}:
+        return True, ("trigger's only out-of-attacker-control component is a "
+                      "local call-sequence → AV:L/AT:P")
 
     # Words denoting attacker-supplied *data/content* reaching the code (as
     # opposed to call ordering, numeric/flag shape, or environmental state).
@@ -1235,10 +1298,7 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
     # local-by-nature token and is intentionally absent here. The extra
     # precondition these triggers carry is still captured as an Attack
     # Requirement / Environmental MAT:P elsewhere.
-    remote_capable_re = re.compile(r"\b(timing|race|data[- ]?race|"
-                                   r"protocol[- ]?state|env|environment|"
-                                   r"fs[- ]?state|file[- ]?system[- ]?state)\b")
-    if remote_capable_re.search(trigger):
+    if _REMOTE_CAPABLE_RE.search(trigger):
         return False, ""
 
     # A call-ordering trigger, in either the controls prose or the structured
@@ -1249,10 +1309,7 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
     # Past this point only `call-sequence` and the trusted local
     # parameter/action signals localise; the remote-capable trigger tokens have
     # already been vetoed above.
-    seq_re = re.compile(r"\bcall[- ]sequence\b|\bcall[- ]order(?:ing)?\b|"
-                        r"\bcallback ordering\b|\bapi call[- ]sequence\b|"
-                        r"\b(?:sequence|ordering|order) of (?:\w+\s+){0,3}calls?\b")
-    if seq_re.search(controls) or seq_re.search(trigger):
+    if _CALL_SEQUENCE_RE.search(controls) or _CALL_SEQUENCE_RE.search(trigger):
         return True, "trigger is a local API/call-sequence, not attacker bytes → AV:L/AT:P"
     if parameter and re.search(r"\b(trusted|application-supplied|harness-only)\b", parameter):
         return True, "trigger needs trusted/application-supplied parameters → AV:L/AT:P"
@@ -1262,20 +1319,28 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
     return False, ""
 
 
-def _environmental_requirement(surface_label: str, reach: dict) -> tuple[str, str]:
-    """Local CR/IR/AR importance from shipping context and observed reach."""
+def _environmental_requirement(surface_label: str) -> tuple[str, str]:
+    """Local CR/IR/AR importance from the *shipping context* of the surface.
+
+    Deliberately not a function of external-caller counts. How many third-party
+    projects depend on an API measures ecosystem prevalence, not the importance
+    of the affected asset to a consuming environment — the concept CR/IR/AR is
+    defined for. Prevalence is prioritisation metadata (reported separately as
+    external-caller reach), so it must not move the CVSS score. Tiering here is
+    purely deployment surface: an internet-facing service warrants H; an
+    ordinary shipped library/file/CLI warrants M; non-shipping code L."""
     if surface_label in NON_SHIPPING_SURFACES:
         return "L", f"non-shipping {surface_label} use → CR/IR/AR:L"
-    genuine = _genuine_repo_count(reach)
-    if surface_label in {"network", "library_popular"} or genuine >= POPULAR_LIBRARY_THRESHOLD:
-        return "H", "network/popular deployed use → CR/IR/AR:H"
-    if surface_label in {"library", "file", "cli_production"} or genuine > 0:
-        return "M", "ordinary deployed use → CR/IR/AR:M"
-    services = reach.get("services") or {}
-    any_responded = any(s.get("status") == "ok" for s in services.values())
-    if any_responded:
-        return "L", "no deployed caller evidence from responding backends → CR/IR/AR:L"
-    return "X", "environmental importance not defined → CR/IR/AR:X"
+    if surface_label == "network":
+        return "H", "network-facing deployment → CR/IR/AR:H"
+    if surface_label in {"library", "file", "cli_production"}:
+        return "M", "ordinary deployed library/file/CLI use → CR/IR/AR:M"
+    # Unclassified surface (e.g. `unknown`): no deployment context to tier on.
+    # Leave the requirement Not Defined so scoring falls back to the CVSS-B
+    # worst case (CR/IR/AR default to H), rather than discounting on the absence
+    # of caller evidence — that absence is a popularity signal, not an asset-
+    # importance one, and must not lower the score.
+    return "X", "surface kind unclassified → CR/IR/AR not defined (CVSS-B baseline)"
 
 
 def _non_shipping_modified_impacts(surface_label: str,
@@ -1338,7 +1403,7 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
     e, e_note = _threat_metric(fields.get("_report_text", ""), fields, report_dir)
     if e != "X":
         metrics["E"] = e
-    req, req_note = _environmental_requirement(surface_label, reach)
+    req, req_note = _environmental_requirement(surface_label)
     if req != "X":
         metrics.update({"CR": req, "IR": req, "AR": req})
     limited, limited_note = _limited_caller_control(fields)
@@ -1780,27 +1845,20 @@ _NARRATIVE_ONLY_PRIMITIVES = frozenset({
 
 # ── Surface classification (drives AV/UI and Environmental use) ──────────
 #
-# The surface tier feeds CVSS AV/UI and helps derive Environmental requirement
-# and non-shipping modified-impact metrics. External-caller counts / popularity
-# are used only where CVSS has a matching Environmental concept (CR/IR/AR);
-# vendored copies stay as reachability facts.
+# The surface tier feeds CVSS AV/UI and helps derive the Environmental
+# requirement and non-shipping modified-impact metrics, purely from the surface
+# *kind*. External-caller counts / popularity do not enter the score — they are
+# ecosystem-prevalence prioritisation metadata, reported separately; vendored
+# copies likewise stay as reachability facts.
 
 
 # The set of surface tier labels the classifier can emit. Severity maps each
 # to CVSS AV/UI via _SURFACE_AVUI; the Reachability section displays the
-# label. There are no per-tier point values any more — the tier is a label,
-# not a score.
+# label. There are no per-tier point values — the tier is a label, not a score.
 SURFACE_TIERS = frozenset({
-    "network", "library_popular", "library", "file",
+    "network", "library", "file",
     "cli_production", "dev_tool", "internal", "unknown",
 })
-
-# Min distinct *repos* with a genuine caller hit to upgrade
-# library → library_popular. Counted over repos, not files (see
-# _genuine_repo_count), and only reachable because the backend result caps
-# (SOURCEGRAPH_RESULT_LIMIT / GH_RESULT_LIMIT) sit above it. Both tiers map to
-# the same CVSS metrics; the distinction is for the Reachability display only.
-POPULAR_LIBRARY_THRESHOLD = 50
 
 
 # ── Dev/test/maintenance tool detection ──────────────────────────────────
@@ -1966,7 +2024,7 @@ def _is_internal_surface(surface_value: str) -> bool:
 
 
 def _classify_surface(surface_value: str, boundary_value: str,
-                      report_text: str, genuine_callers: int,
+                      report_text: str,
                       report_triaged: bool = True) -> tuple[str, str]:
     """Map the report's structured fields to a surface tier label.
 
@@ -1978,15 +2036,17 @@ def _classify_surface(surface_value: str, boundary_value: str,
     calls a public library entry point` get classified as a dev_tool because
     of the word "harness".
 
+    The tier is a function of the surface *kind* only — never of external-caller
+    counts. Caller popularity is ecosystem prevalence, not a surface
+    characteristic, and is reported separately rather than folded into the
+    score (see _environmental_requirement).
+
     Order:
       1. Dev/test/maintenance tool — first via type prefix, then path/name
          fallback. A bug in non-shipping code gets modified Environmental
          impacts rather than a post-score cap.
       2. Internal harness — audit-internal only.
       3. Surface tier from the type prefix (network/library/file/cli).
-      4. Library upgrades to library_popular at ≥ POPULAR_LIBRARY_THRESHOLD
-         callers (display distinction only). The popularity rescue for an
-         empty/unknown Surface field fires only when *report_triaged* is true.
     """
     is_dev, dev_reason = _is_dev_tool(surface_value, boundary_value, report_text)
     if is_dev:
@@ -1997,32 +2057,18 @@ def _classify_surface(surface_value: str, boundary_value: str,
 
     s_type = _surface_type_prefix(surface_value).lower()
 
-    # Empty or literally "unknown" surface field. Two cases:
-    #
-    #  * The report WAS triaged — it carries other structured reach fields
-    #    but the author just left Surface unset. Here the reachability probe
-    #    is a stronger signal than a lazy field: if it independently found
-    #    broad supply-chain reach (≥ POPULAR_LIBRARY_THRESHOLD genuine
-    #    callers), classify as library_popular rather than punish a real bug.
-    #
-    #  * The report was NOT triaged at all — no structured reach fields
-    #    whatsoever (a bare crash dir, e.g. a benchmark `model-direct`
-    #    baseline). reachability is then scoring raw sanitizer output, and a
-    #    popular *crashing symbol* is not evidence the *bug* is reachable:
-    #    every caller of cJSON_Delete is a "caller", but only one who
-    #    misuses the API hits a misuse use-after-free. The popularity rescue
-    #    is suppressed and the surface stays at the conservative `unknown`
-    #    tier.
+    # Empty or literally "unknown" surface field. An un-triaged bare crash dir
+    # (e.g. a benchmark `model-direct` baseline) and a triaged report whose
+    # author just left Surface blank both land here; with no surface kind to
+    # anchor on, the conservative `unknown` tier applies. (Caller count is never
+    # consulted to rescue the tier — prevalence is not reachability evidence:
+    # every caller of an API is a "caller", but only a misusing one hits a
+    # misuse bug.)
     if not s_type or s_type == "unknown":
-        if report_triaged and genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
-            reason = (f"surface={'unspecified' if not s_type else 'unknown'} but "
-                      f"reachability found {genuine_callers} caller repos "
-                      f"(≥{POPULAR_LIBRARY_THRESHOLD}) → library_popular")
-            return "library_popular", reason
         if not report_triaged:
             return ("unknown",
                     "report carries no structured reach fields — un-triaged; "
-                    "surface left unassessed, not promoted on caller count alone")
+                    "surface left unassessed")
         if not s_type:
             return "unknown", "surface field empty"
         return "unknown", "surface type unrecognised: 'unknown'"
@@ -2030,22 +2076,12 @@ def _classify_surface(surface_value: str, boundary_value: str,
     if any(t in s_type for t in ("network", "daemon", "rpc", "socket", "server")):
         return "network", "network-facing service"
     if any(t in s_type for t in ("library-api", "library api", "public api", "libfuzzer")):
-        if genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
-            return ("library_popular",
-                    f"library API with {genuine_callers} caller repos (≥{POPULAR_LIBRARY_THRESHOLD})")
         return "library", "library API"
     if any(t in s_type for t in ("file-format", "file format", "parser", "decoder")):
         return "file", "file-format parser"
     if any(t in s_type for t in ("cli", "command line", "command-line")):
         return "cli_production", "production CLI tool"
 
-    # Fall-through: unrecognised type prefix. Same popularity-rescue path
-    # as the empty case — broad reach trumps a strange Surface label, but
-    # only for a triaged report.
-    if report_triaged and genuine_callers >= POPULAR_LIBRARY_THRESHOLD:
-        return ("library_popular",
-                f"surface type unrecognised ({s_type!r}) but reachability found "
-                f"{genuine_callers} caller repos (≥{POPULAR_LIBRARY_THRESHOLD}) → library_popular")
     return "unknown", f"surface type unrecognised: {s_type!r}"
 
 
@@ -2079,9 +2115,9 @@ def _contract_concern(fields: dict) -> tuple[bool, str]:
 
 
 # Structured reach fields the harness's triage pass writes into REPORT.md.
-# A report carrying none of them has not been triaged — reachability is
-# then scoring raw sanitizer output. See the popularity-rescue gate in
-# _classify_surface for why that distinction changes the surface tier.
+# A report carrying none of them has not been triaged — reachability is then
+# scoring raw sanitizer output, and an un-triaged report with no surface kind
+# stays at the conservative `unknown` tier (see _classify_surface).
 _TRIAGE_REACH_FIELDS = ("surface", "trigger_source", "caller_contract", "caller_controls")
 
 
@@ -2099,32 +2135,14 @@ def _report_is_triaged(fields: dict) -> bool:
     )
 
 
-def _genuine_repo_count(reach: dict) -> int:
-    """Distinct repos among the genuine external-caller hits.
-
-    The popularity tier asks "how many *projects* depend on this API", so
-    counting (repo, path) files would let one repo with many matching files
-    impersonate broad supply-chain reach. Falls back to the file-level
-    ``external_callers`` count for older reachability.json payloads that
-    carry no hit list."""
-    hits = reach.get("external_caller_hits")
-    if hits is None:
-        try:
-            return int(reach.get("external_caller_repos",
-                                 reach.get("external_callers", 0)) or 0)
-        except (TypeError, ValueError):
-            return 0
-    return len({h.get("repo", "") for h in hits})
-
-
 def classify_surface(fields: dict, reach: dict) -> tuple[str, str]:
-    """Resolve the surface tier label + reason from report fields and the
-    external-caller probe. The tier feeds severity through CVSS AV/UI and
-    Environmental metrics."""
-    genuine = _genuine_repo_count(reach)
+    """Resolve the surface tier label + reason from the report fields. The tier
+    feeds severity through CVSS AV/UI and Environmental metrics. The external-
+    caller probe (`reach`) is not consulted: prevalence is prioritisation
+    metadata, not a surface characteristic (see _environmental_requirement)."""
     return _classify_surface(
         fields.get("surface", ""), fields.get("boundary", ""),
-        fields.get("_report_text", ""), genuine,
+        fields.get("_report_text", ""),
         _report_is_triaged(fields),
     )
 

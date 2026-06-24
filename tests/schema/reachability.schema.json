@@ -58,7 +58,7 @@
     "external_caller_repos": {
       "type": "integer",
       "minimum": 0,
-      "description": "Schema v2+. Distinct caller repos among external_caller_hits — the popularity signal for the library_popular surface tier. Counted over repos, not (repo, path) files, so one repo with many matching files is one dependent project."
+      "description": "Schema v2+. Distinct caller repos among external_caller_hits — the reported external-caller reach (dependent-project prevalence). Prioritisation metadata only; it does not feed the CVSS score. Counted over repos, not (repo, path) files, so one repo with many matching files is one dependent project."
     },
     "external_caller_hits": {
       "type": "array",
