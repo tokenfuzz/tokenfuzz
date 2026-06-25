@@ -168,18 +168,28 @@ assert_not_match "jq -r '\\.require_web" "$legit_src" \
 
 find_quality_cache="$WORK/find-quality-fields.json"
 cat > "$find_quality_cache" <<'EOF'
-{"decision_version":"v11","accept":false,"reason":"cached non-security reason","reject_count":2,"content_sha1":"findsha"}
+{"decision_version":"v13","accept":false,"reason":"cached non-security reason","reject_count":2,"content_sha1":"findsha"}
 EOF
 find_quality_fields=$(_triage_find_quality_cache_fields "$find_quality_cache")
 eval "set -- $find_quality_fields"
-assert_eq "v11" "${1:-}" "find-quality fields: decision version"
+assert_eq "v13" "${1:-}" "find-quality fields: decision version"
 assert_eq "false" "${2:-}" "find-quality fields: accept false preserved"
 assert_eq "cached non-security reason" "${3:-}" "find-quality fields: reason preserved"
 assert_eq "2" "${4:-}" "find-quality fields: reject count"
 assert_eq "findsha" "${5:-}" "find-quality fields: content sha"
+assert_eq "0" "${6:-}" "find-quality fields: accept count defaults to 0 when absent"
+
+find_quality_accept="$WORK/find-quality-fields-accept.json"
+cat > "$find_quality_accept" <<'EOF'
+{"decision_version":"v13","accept":true,"reason":"cached accept reason","reject_count":0,"content_sha1":"acceptsha","accept_count":2}
+EOF
+find_quality_fields=$(_triage_find_quality_cache_fields "$find_quality_accept")
+eval "set -- $find_quality_fields"
+assert_eq "true" "${2:-}" "find-quality fields: accept true preserved"
+assert_eq "2" "${6:-}" "find-quality fields: accept count parsed"
 
 find_quality_legacy="$WORK/find-quality-fields-legacy.json"
-printf '{"decision_version":"v11","accept":true,"sha1":"legacyfind"}' > "$find_quality_legacy"
+printf '{"decision_version":"v13","accept":true,"sha1":"legacyfind"}' > "$find_quality_legacy"
 find_quality_fields=$(_triage_find_quality_cache_fields "$find_quality_legacy")
 eval "set -- $find_quality_fields"
 assert_eq "true" "${2:-}" "find-quality fields: accept true preserved"

@@ -209,7 +209,8 @@ _triage_find_quality_cache_fields() {
       (if has("accept") then .accept else "" end),
       (.reason // ""),
       (.reject_count // 0),
-      (.content_sha1 // .signature_sha1 // .sha1 // "")
+      (.content_sha1 // .signature_sha1 // .sha1 // ""),
+      (.accept_count // 0)
     ] | @sh
   ' "$cache" 2>/dev/null
 }
@@ -2681,25 +2682,49 @@ llm_find_quality_decision() {
   # works the same for harness, recon, and model-direct findings. v10 dropped
   # the old dedup_key field from the verdict shape. v11 added the
   # non-product-surface reject category (reject by role when the primary
-  # location is clearly non-shipping; accept on any scope doubt).
-  local decision_version="v11"
+  # location is clearly non-shipping; accept on any scope doubt). v12 adds
+  # explicit reject buckets for OOM-only cleanup, caller-contract misuse,
+  # intentional extension surfaces, and private/internal metadata claims.
+  # v13 flips the prompt default to REJECT-on-unproven-substance (a finding
+  # must affirmatively show a source/control/sink/boundary chain) — paired
+  # with the accept-quorum below so a single lenient vote can no longer keep
+  # a weak prose finding.
+  local decision_version="v13"
 
-  # Quorum required for an accept=false verdict to stick. Each call resolves
+  # Quorum required for a verdict to stick, on BOTH sides. Each call resolves
   # the quorum IN-LINE — independent LLM votes are taken back-to-back until
-  # one accepts (verdict flips to accept) or `quorum` rejects accumulate
-  # (verdict settles to accept=false). This replaces the older cross-pass
-  # accumulator that depended on the audit loop running validate_find_gate
-  # a second time before the cell budget ran out — a finding produced near
-  # the end of a run never got the second vote and stayed half-judged.
-  # Matches the in-call quorum that triage_validate_finding already uses
-  # for the independent validator. The crash-promotion gates share the
-  # leaner _triage_gate_quorum_vote helper; this gate keeps its own loop
-  # because it also threads class/severity out of the accepting vote and
-  # persists a partial reject tally (reject_count + .find_reject_count) for
-  # carry-forward across audit passes.
+  # `accept_quorum` accepts accumulate (verdict settles to accept) or `quorum`
+  # rejects accumulate (verdict settles to accept=false). Acceptance is no
+  # longer a single-vote veto: a lone lenient vote can no longer keep a weak
+  # finding, which was the dominant false-positive path for prose findings
+  # that carry no crash artifact (a confirmed bug still gets accept_quorum
+  # agreement; a borderline lead that one reviewer waves through is demoted to
+  # findings-rejected/, where it stays recoverable). A 1-1 split draws one
+  # tiebreak vote — max_votes = accept_quorum + quorum - 1 bounds the loop.
+  # This replaces the older cross-pass accumulator that depended on the audit
+  # loop running validate_find_gate a second time before the cell budget ran
+  # out — a finding produced near the end of a run never got the second vote
+  # and stayed half-judged. The crash-promotion gates share the leaner
+  # _triage_gate_quorum_vote helper (and keep single-positive-vote semantics —
+  # a crash has a sanitizer artifact on disk, so it does not need the symmetric
+  # quorum a prose finding does); this gate keeps its own loop because it also
+  # threads class/severity out of the accepting votes and records this pass's
+  # reject tally in reject_count + .find_reject_count. Each pass resolves the
+  # quorum FRESH (the loop starts from accepts=0/rejects=0); the marker is NOT
+  # accumulated across passes — a partial (< quorum) tally just leaves the FIND
+  # pending so the next pass re-judges it from scratch. A settled (>= quorum)
+  # marker is what persists, so the pool worker still quarantines on a later
+  # housekeeping pass even when the decision short-circuits on the cache.
   local quorum="${FIND_GATE_QUORUM:-2}"
   case "$quorum" in ''|*[!0-9]*) quorum=2 ;; esac
   [ "$quorum" -ge 1 ] || quorum=1
+
+  # Accept-quorum: independent accepts required to KEEP a finding. Default 2
+  # mirrors the reject quorum so neither verdict can be set by a single vote.
+  local accept_quorum="${FIND_GATE_ACCEPT_QUORUM:-2}"
+  case "$accept_quorum" in ''|*[!0-9]*) accept_quorum=2 ;; esac
+  [ "$accept_quorum" -ge 1 ] || accept_quorum=1
+  local max_votes=$(( accept_quorum + quorum - 1 ))
 
   # content_sha1 is recorded for forensics (what the report looked like when
   # judged) but is NOT used to gate re-evaluation — see the short-circuit
@@ -2718,7 +2743,7 @@ llm_find_quality_decision() {
   # on every one of them and re-asks the LLM on each housekeeping pass.
   # Every accept=true OR accept=false-with-quorum verdict is final; the
   # explicit way to force re-evaluation is a decision_version bump.
-  local cache_fields="" cached_version="" cached_accept="" cached_reason="" cached_reject_count=0 cached_content_sha=""
+  local cache_fields="" cached_version="" cached_accept="" cached_reason="" cached_reject_count=0 cached_content_sha="" cached_accept_count=0
   if cache_fields=$(_triage_find_quality_cache_fields "$cache" 2>/dev/null); then
     eval "set -- $cache_fields"
     cached_version="${1:-}"
@@ -2726,9 +2751,16 @@ llm_find_quality_decision() {
     cached_reason="${3:-}"
     cached_reject_count="${4:-0}"
     cached_content_sha="${5:-}"
+    cached_accept_count="${6:-0}"
     case "$cached_reject_count" in ''|*[!0-9]*) cached_reject_count=0 ;; esac
+    case "$cached_accept_count" in ''|*[!0-9]*) cached_accept_count=0 ;; esac
     if [ "$cached_version" = "$decision_version" ]; then
-      if [ "$cached_accept" = "true" ]; then
+      # Short-circuit only when the cached verdict was reached under a quorum
+      # at least as strict as the one in force now — otherwise a verdict
+      # settled under FIND_GATE_ACCEPT_QUORUM=1 (or a lower FIND_GATE_QUORUM)
+      # would be treated as final under the stricter default. Mirrors the
+      # reject side: re-evaluate rather than trust an under-quorum verdict.
+      if [ "$cached_accept" = "true" ] && [ "$cached_accept_count" -ge "$accept_quorum" ]; then
         return 0
       fi
       if [ "$cached_accept" = "false" ] && [ "$cached_reject_count" -ge "$quorum" ]; then
@@ -2744,20 +2776,19 @@ llm_find_quality_decision() {
   prompt=$(render_prompt_template triage_find_quality.md.j2 \
     --var "body=${body}") || return 1
 
-  # Run independent LLM votes back-to-back until one accepts or `quorum`
-  # rejects accumulate. A single accept short-circuits — any vote in favor
-  # of the finding is enough to keep it (per the docstring: rejection needs
-  # quorum agreement; acceptance is unanimous-by-veto).
-  local rejects=0 vote_json
-  local last_reject_reason=""
-  while :; do
+  # Run independent LLM votes back-to-back until `accept_quorum` accepts or
+  # `quorum` rejects accumulate. Acceptance is NO LONGER a single-vote veto:
+  # a finding is kept only when accept_quorum independent reviewers agree, so
+  # one stray lenient vote can no longer rescue a weak prose finding. A 1-1
+  # split is resolved by a single tiebreak vote (max_votes bounds the loop).
+  local accepts=0 rejects=0 votes_taken=0 vote_json
+  local last_reject_reason="" last_accept_reason="" accept_class="" accept_severity=""
+  while [ "$votes_taken" -lt "$max_votes" ]; do
     vote_json=$(printf '%s' "$prompt" | llm_decide find_quality "accept,reason,class,severity" "$LLM_DECISION_TIMEOUT")
     if [ -z "$vote_json" ]; then
-      # llm_decide failed to produce a verdict (LLM disabled, backend
-      # budget exhausted, …). If at least one reject already landed,
-      # persist that partial tally so a later pass can carry it forward;
-      # otherwise nothing to cache — propagate the failure.
-      [ "$rejects" -ge 1 ] || return 1
+      # llm_decide failed to produce a verdict (LLM disabled, backend budget
+      # exhausted, …). Stop voting; the post-loop block records this pass's
+      # reject tally so the next pass re-judges from it (it is not accumulated).
       break
     fi
     local accept reason class severity
@@ -2768,40 +2799,50 @@ llm_find_quality_decision() {
     case "$accept" in
       true|false) ;;
       *)
-        # Unparseable verdict. Treat like a missing vote: persist any prior
-        # rejects, bail if none.
-        [ "$rejects" -ge 1 ] || return 1
+        # Unparseable verdict. Treat like a missing vote: stop and let the
+        # post-loop block settle on whatever tally we have.
         break
         ;;
     esac
+    votes_taken=$((votes_taken + 1))
     [ "$reason" = "null" ] && reason=""
     [ "$class" = "null" ] && class=""
     [ "$severity" = "null" ] && severity=""
 
     if [ "$accept" = "true" ]; then
-      [ -n "$reason" ] || reason="LLM accepted finding"
-      rm -f "$find_dir/.needs-attention" 2>/dev/null || true
-      # Accept resets the reject counter — a later content edit that
-      # produced an accept should not still carry old reject signal.
-      rm -f "$reject_marker" 2>/dev/null || true
-      { jq -n --arg reason "$reason" --arg class "$class" \
-           --arg severity "$severity" \
-           --arg version "$decision_version" \
-           '{decision_version: $version, accept: true, reason: $reason, class: $class, severity: $severity}' \
-          | _triage_cache_write_envelope "$cache" "find_quality" "content_sha1" "$hash"; } || true
-      return 0
+      accepts=$((accepts + 1))
+      [ -n "$reason" ] && last_accept_reason="$reason"
+      [ -n "$class" ] && accept_class="$class"
+      [ -n "$severity" ] && accept_severity="$severity"
+      if [ "$accepts" -ge "$accept_quorum" ]; then
+        [ -n "$last_accept_reason" ] || last_accept_reason="LLM accepted finding"
+        rm -f "$find_dir/.needs-attention" 2>/dev/null || true
+        # Accept-quorum reached — clear any partial reject signal.
+        rm -f "$reject_marker" 2>/dev/null || true
+        { jq -n --arg reason "$last_accept_reason" --arg class "$accept_class" \
+             --arg severity "$accept_severity" \
+             --arg version "$decision_version" \
+             --argjson accept_count "$accepts" \
+             '{decision_version: $version, accept: true, accept_count: $accept_count, reason: $reason, class: $class, severity: $severity}' \
+            | _triage_cache_write_envelope "$cache" "find_quality" "content_sha1" "$hash"; } || true
+        return 0
+      fi
+      continue
     fi
 
-    # accept=false vote: tally and continue.
+    # accept=false vote: tally and continue until the reject quorum.
     rejects=$((rejects + 1))
     [ -n "$reason" ] && last_reject_reason="$reason"
     [ "$rejects" -ge "$quorum" ] && break
   done
 
-  # All votes rejected (or we ran out of usable verdicts before quorum).
-  # Cache the verdict with the actual reject count. The caller
-  # (validate_find_gate) quarantines once reject_count reaches `quorum`;
-  # a partial tally is left in place so a later run can carry it forward.
+  # Reject quorum reached, or we ran out of usable verdicts before either
+  # quorum settled. Cache the verdict with this pass's reject count; the caller
+  # (validate_find_gate) quarantines once reject_count reaches `quorum`. A
+  # partial (< quorum) tally leaves the FIND in place and the next pass
+  # re-judges from scratch — counts are not summed across passes. A pure
+  # partial-accept (some accepts but below accept_quorum, no rejects) returns
+  # undecided so the FIND stays in findings/ for the next pass to re-judge.
   [ "$rejects" -ge 1 ] || return 1
   [ -n "$last_reject_reason" ] || last_reject_reason="LLM marked finding as non-security"
   printf '%s\n' "$rejects" > "$reject_marker" 2>/dev/null || true
@@ -2939,7 +2980,9 @@ _validate_one_find_dir() {
     # away. We also require TWO independent LLM reject verdicts on the
     # same content (reject_count >= 2 in the cache) before quarantining
     # — single-call LLM noise should not permanently hide a real bug.
-    # Tunables: FIND_GATE_QUORUM (default 2), FIND_GATE_QUARANTINE_DIR
+    # Tunables: FIND_GATE_QUORUM (reject quorum, default 2),
+    # FIND_GATE_ACCEPT_QUORUM (accept quorum, default 2; set to 1 to restore
+    # the old single-accept-veto behavior), FIND_GATE_QUARANTINE_DIR
     # (default $RESULTS_DIR/findings-rejected).
     local cache="$d/.llm-find-quality.json"
     local cache_fields=""

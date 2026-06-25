@@ -114,26 +114,89 @@ assert_dir_exists "$RESULTS_DIR/findings-rejected/FIND-V2-Q1" "FIND_GATE_QUORUM=
 unset LLM_DECIDE_MOCK_FIND_QUALITY
 reset_findings
 
-# 2b. Verdict flip mid-quorum: the first vote rejects but the second vote
-#     accepts → FIND stays, cache reflects the accept. Exercised via a
-#     queue-mock that pops a different verdict for each LLM call.
+# 2b. Accept-quorum tiebreak — KEEP. A 1-1 split (reject then accept) is not
+#     decided by the lone accept; a third tiebreak vote settles it. Here the
+#     tiebreak accepts → two accepts reach the accept quorum → FIND stays.
 mk_find FIND-V2-FLIP "$VACUOUS" >/dev/null
 flip_queue="$RESULTS_DIR/findings/FIND-V2-FLIP/.flip-queue.jsonl"
 cat > "$flip_queue" <<'JSON'
 {"accept":false,"reason":"reviewer 1 unsure","class":"","severity":""}
 ---
 {"accept":true,"reason":"reviewer 2 confirms security impact","class":"auth:bypass","severity":"high"}
+---
+{"accept":true,"reason":"reviewer 3 confirms security impact","class":"auth:bypass","severity":"high"}
 JSON
 rm -f "${flip_queue}.idx"
 export LLM_DECIDE_MOCK_FIND_QUALITY_QUEUE="$flip_queue"
 validate_find_gate >/dev/null 2>&1
-assert_dir_exists "$RESULTS_DIR/findings/FIND-V2-FLIP" "flip: FIND stays after second vote accepts"
-assert_dir_not_exists "$RESULTS_DIR/findings-rejected/FIND-V2-FLIP" "flip: not moved to findings-rejected/"
+assert_dir_exists "$RESULTS_DIR/findings/FIND-V2-FLIP" "tiebreak keep: FIND stays after 2 of 3 votes accept"
+assert_dir_not_exists "$RESULTS_DIR/findings-rejected/FIND-V2-FLIP" "tiebreak keep: not moved to findings-rejected/"
 assert_file_contains "$RESULTS_DIR/findings/FIND-V2-FLIP/.llm-find-quality.json" '"accept": *true' \
-  "flip: cache settles to accept=true"
+  "tiebreak keep: cache settles to accept=true"
 assert_file_contains "$RESULTS_DIR/findings/FIND-V2-FLIP/.llm-find-quality.json" "auth:bypass" \
-  "flip: cache carries the accepting vote's class"
+  "tiebreak keep: cache carries the accepting vote's class"
 unset LLM_DECIDE_MOCK_FIND_QUALITY_QUEUE
+reset_findings
+
+# 2c. A single accept is NO LONGER a veto. Under the old gate the first accept
+#     short-circuited and kept the FIND; now an accept followed by two rejects
+#     reaches the reject quorum and quarantines it. This is the core
+#     false-positive fix: one lenient vote cannot keep a weak finding.
+mk_find FIND-V2-SOLO "$VACUOUS" >/dev/null
+solo_queue="$RESULTS_DIR/findings/FIND-V2-SOLO/.solo-queue.jsonl"
+cat > "$solo_queue" <<'JSON'
+{"accept":true,"reason":"reviewer 1 waves it through","class":"auth:bypass","severity":"high"}
+---
+{"accept":false,"reason":"reviewer 2 finds no security impact","class":"","severity":""}
+---
+{"accept":false,"reason":"reviewer 3 finds no security impact","class":"","severity":""}
+JSON
+rm -f "${solo_queue}.idx"
+export LLM_DECIDE_MOCK_FIND_QUALITY_QUEUE="$solo_queue"
+validate_find_gate >/dev/null 2>&1
+assert_dir_not_exists "$RESULTS_DIR/findings/FIND-V2-SOLO" "single accept no longer vetoes: FIND quarantined after 2 rejects"
+assert_dir_exists "$RESULTS_DIR/findings-rejected/FIND-V2-SOLO" "single accept no longer vetoes: moved to findings-rejected/"
+assert_file_contains "$RESULTS_DIR/findings-rejected/FIND-V2-SOLO/.llm-find-quality.json" '"reject_count": *2' \
+  "single accept no longer vetoes: cache records the reject quorum"
+unset LLM_DECIDE_MOCK_FIND_QUALITY_QUEUE
+reset_findings
+
+# 2d. FIND_GATE_ACCEPT_QUORUM=1 restores the old single-accept-veto behavior
+#     (escape hatch / rollback knob). One accept keeps the FIND immediately,
+#     with no second vote required.
+mk_find FIND-V2-AQ1 "$VACUOUS" >/dev/null
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"single reviewer accepts","class":"auth:bypass","severity":"high"}'
+FIND_GATE_ACCEPT_QUORUM=1 validate_find_gate >/dev/null 2>&1
+assert_dir_exists "$RESULTS_DIR/findings/FIND-V2-AQ1" "FIND_GATE_ACCEPT_QUORUM=1: single accept keeps the FIND"
+assert_file_contains "$RESULTS_DIR/findings/FIND-V2-AQ1/.llm-find-quality.json" '"accept": *true' \
+  "FIND_GATE_ACCEPT_QUORUM=1: cache settles to accept=true on one vote"
+assert_file_contains "$RESULTS_DIR/findings/FIND-V2-AQ1/.llm-find-quality.json" '"accept_count": *1' \
+  "FIND_GATE_ACCEPT_QUORUM=1: cache records the accept_count it settled under"
+unset LLM_DECIDE_MOCK_FIND_QUALITY
+reset_findings
+
+# 2e. The cached verdict encodes the accept quorum it was settled under, so a
+#     verdict reached with FIND_GATE_ACCEPT_QUORUM=1 is NOT trusted as final by
+#     a later default (quorum 2) run — the stricter run re-evaluates instead of
+#     short-circuiting on a single-accept cache. Regression for the accept_count
+#     cache semantics (without it, a one-off rollback run would silently pin
+#     accepts that the default quorum never agreed to).
+mk_find FIND-V2-AQCACHE "$VACUOUS" >/dev/null
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"lone accept under quorum=1","class":"auth:bypass","severity":"high"}'
+FIND_GATE_ACCEPT_QUORUM=1 validate_find_gate >/dev/null 2>&1
+assert_file_contains "$RESULTS_DIR/findings/FIND-V2-AQCACHE/.llm-find-quality.json" '"accept_count": *1' \
+  "accept-quorum cache: quorum=1 run records accept_count=1"
+unset LLM_DECIDE_MOCK_FIND_QUALITY
+# Re-run under the default accept quorum (2) with a reject mock: the stale
+# single-accept cache must not short-circuit; the gate re-evaluates and the two
+# rejects quarantine the FIND.
+export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":false,"reason":"no security impact on re-review","class":"","severity":""}'
+validate_find_gate >/dev/null 2>&1
+assert_dir_not_exists "$RESULTS_DIR/findings/FIND-V2-AQCACHE" \
+  "accept-quorum cache: under-quorum accept is re-evaluated, not trusted"
+assert_dir_exists "$RESULTS_DIR/findings-rejected/FIND-V2-AQCACHE" \
+  "accept-quorum cache: re-evaluation quarantines the now-rejected FIND"
+unset LLM_DECIDE_MOCK_FIND_QUALITY
 reset_findings
 
 # 2b. .keep override prevents deletion even when the LLM rejects.
@@ -189,8 +252,8 @@ cat > "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" <<EOF
 EOF
 export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"current reviewer accepts","class":"auth:bypass","severity":"high"}'
 validate_find_gate >/dev/null 2>&1
-assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" '"decision_version": *"v11"' \
-  "stale v2 cache: re-evaluated under v11"
+assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" '"decision_version": *"v13"' \
+  "stale v2 cache: re-evaluated under v13"
 assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" "auth:bypass" \
   "stale v2 cache: new class label written"
 assert_file_contains "$RESULTS_DIR/findings/FIND-STALE/.llm-find-quality.json" '"accept": *true' \
@@ -231,8 +294,8 @@ cat > "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" <<EOF
 EOF
 export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"v7 reviewer confirms","class":"auth:bypass","severity":"high"}'
 validate_find_gate >/dev/null 2>&1
-assert_file_contains "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" '"decision_version": *"v11"' \
-  "stale v4 cache: re-evaluated under v11"
+assert_file_contains "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" '"decision_version": *"v13"' \
+  "stale v4 cache: re-evaluated under v13"
 assert_file_contains "$RESULTS_DIR/findings/FIND-STALEV4/.llm-find-quality.json" \
   '"reason": *"v7 reviewer confirms"' \
   "stale v4 cache: verdict updated on re-evaluation"

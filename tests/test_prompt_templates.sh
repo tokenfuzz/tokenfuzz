@@ -77,6 +77,12 @@ assert_match "/tmp/tgt" "$rendered" "trigger gate interpolates target_path"
 assert_match '"id":"X"' "$rendered" "trigger gate interpolates candidate_json"
 assert_match "affirmative disproof" "$rendered" "trigger gate keeps the affirmative-disproof rule"
 assert_match "NOT evidence" "$rendered" "trigger gate keeps the fields-are-not-evidence guard"
+assert_match "runs caller-supplied code by design" "$rendered" \
+  "trigger gate can reject trusted extension surfaces with source evidence"
+assert_match "private static metadata or internal descriptor tables" "$rendered" \
+  "trigger gate can reject forged private metadata prerequisites"
+assert_match "semantic-looking finding" "$rendered" \
+  "trigger gate rejects semantic-looking feature behavior when source-proven"
 
 # audit_recon pulls its opener from the shared goal_framing partial, the
 # same as build_recon_prompt does — render and pass it through here too.
@@ -190,6 +196,58 @@ assert_match "cannot tell whether the file ships" "$fq_rendered" \
   "find-quality gate keeps explicit keep-on-unsure for uncertain shipping"
 assert_match "reached from a shipped path" "$fq_rendered" \
   "find-quality gate keeps explicit keep-on-unsure for shipped reachability"
+assert_match "OOM-only or allocation-failure-only" "$fq_rendered" \
+  "find-quality gate rejects OOM-only cleanup claims without a security primitive"
+assert_match "Caller-contract / trusted-caller misuse" "$fq_rendered" \
+  "find-quality gate rejects trusted caller contract misuse"
+assert_match "Intentional extension or code-execution surface" "$fq_rendered" \
+  "find-quality gate rejects trusted extension-surface claims"
+assert_match "Internal invariant / static metadata corruption" "$fq_rendered" \
+  "find-quality gate rejects forged private metadata claims"
+assert_match "source/control/sink/boundary" "$fq_rendered" \
+  "find-quality gate requires the Codex-style proof tuple before accept"
+assert_match "Dependency presence" "$fq_rendered" \
+  "find-quality gate rejects dependency/API/string-match-only claims"
+assert_match "call chain is not enough" "$fq_rendered" \
+  "find-quality gate rejects partial call chains without boundary proof"
+
+vf_rendered=$(python3 "$renderer" validate_finding.md.j2 \
+  --var 'target_path=/tmp/tgt' \
+  --var 'candidate_json={"id":"Y"}' \
+  --var 'skeptic_block=' \
+  --var 'timeout_secs=300')
+assert_match "Product surface and boundary" "$vf_rendered" \
+  "finding validator requires product surface and boundary verification"
+assert_match '"boundary":true\|false' "$vf_rendered" \
+  "finding validator emits an explicit boundary verification field"
+assert_match "writing around the gap" "$vf_rendered" \
+  "finding validator records inconclusive checks instead of writing around them"
+
+# Divergence guard (SMOKE TEST, not a semantic-equivalence proof): the FINDINGS
+# gate (triage_find_quality) and the CRASH gates (triage_crash_confirm,
+# triage_legit_crash) deliberately use DIFFERENT default postures — crash gates
+# lean accept because the sanitizer artifact already proves realness, the
+# findings gate defaults to reject because a finding is unproven prose. But the
+# security-RELEVANCE rules below are about whether a *real* issue is a security
+# issue, so they must read the same way on both paths or the same bug gets
+# accepted as a crash and rejected as a finding (or vice-versa). These rules are
+# duplicated across the three prompts (no shared partial yet). This asserts only
+# that each rule is still PRESENT on every path — it trips when an edit deletes a
+# rule from one path (the common drift), but it cannot catch a rule that is
+# reworded into a materially different meaning while keeping the trigger word.
+# Treat a green result as "nobody dropped a rule," not "the rules are equivalent."
+for _div_tpl in triage_find_quality triage_crash_confirm triage_legit_crash; do
+  case "$_div_tpl" in
+    triage_find_quality) _div_rendered="$fq_rendered" ;;
+    *) _div_rendered=$(python3 "$renderer" "$_div_tpl.md.j2") ;;
+  esac
+  assert_match 'ASSERT|CHECK' "$_div_rendered" \
+    "divergence guard: $_div_tpl carries the debug-only-assert reject rule"
+  assert_match "conventional" "$_div_rendered" \
+    "divergence guard: $_div_tpl keeps inferred/conventional contracts off the reject grounds"
+  assert_match "library defect" "$_div_rendered" \
+    "divergence guard: $_div_tpl treats public-callback re-entrancy as a library defect, not caller misuse"
+done
 
 # End-to-end: render with the audit_scope helper's actual output and
 # assert each doc/example/test/fuzz family name shows up in the prompt.

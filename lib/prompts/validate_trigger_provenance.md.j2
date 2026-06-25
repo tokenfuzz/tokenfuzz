@@ -35,6 +35,12 @@ state**, not the bug mechanics:
 >       (test/fuzz/example/benchmark/demo harness, a language-binding test
 >       driver, a code generator, or a dead `#ifdef` not compiled in the
 >       shipped build).
+>   (e) reaching a surface that runs caller-supplied code by design, or one
+>       driven by a trusted operator (plugin/module loading, callback
+>       registration, serializer knobs, local configuration), without showing
+>       an untrusted path crossing into that surface.
+>   (f) corrupting private static metadata or internal descriptor tables that
+>       are only produced by trusted code and never parsed from attacker input.
 
 # Method
 
@@ -53,14 +59,20 @@ state**, not the bug mechanics:
 # Surface scope (read before voting)
 
 This challenge is calibrated for native memory-safety / library-API findings,
-where "unreachable trigger" is the dominant false-finding mode. It is the
-WRONG axis for web / application / protocol / configuration / concurrency
+where "unreachable trigger" is the dominant false-finding mode. It is usually
+the WRONG axis for web / application / protocol / configuration / concurrency
 logic bugs, where the triggering path is trivially reachable and realness is
 a *semantic* property (an origin boundary crossed, an authz check weakened, a
-gadget reached). If this finding is one of those — judge by `surface` /
-`class` and the narrative — do **not** apply the construction challenge:
-vote **Uncertain** and say the trigger-provenance axis does not apply, so the
-finding is preserved for a semantic review.
+gadget reached). If this finding is one of those and you cannot source-prove
+one of (c)-(f), vote **Uncertain** and say the trigger-provenance axis does
+not settle the semantic issue.
+
+However, do not preserve a semantic-looking finding merely because it uses
+words like injection, boundary, or info disclosure. Reject when source evidence
+shows the claim is only documented feature behavior or trusted local/operator
+choice with no untrusted boundary, for example intentional dynamic module
+loading, local config selecting a file path, serializer API parameters chosen
+by the caller, or a build/test/codegen utility that is not shipped.
 {{ skeptic_block }}
 # Vote
 
@@ -81,7 +93,7 @@ are defensible, keep the finding (Uncertain).
 Output ONE JSON object on a single line, nothing else:
 
 ```json
-{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<the attacker-reachable path you constructed, or the empty string>","disproof":"<for Reject only: file:function of the invariant/constructor that blocks every route into the triggering state, plus which of (a)-(d) applies>","surface_applies":"yes|no"}
+{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<the attacker-reachable path you constructed, or the empty string>","disproof":"<for Reject only: file:function of the invariant/constructor that blocks every route into the triggering state, plus which of (a)-(f) applies>","surface_applies":"yes|no"}
 ```
 
 Definitions:
@@ -90,8 +102,10 @@ Definitions:
 - **Reject**: affirmative disproof — every route into the triggering state is
   blocked by a named, enforced invariant (cite it), OR the trigger requires a
   forged object / internal-only mutator with no public caller, OR the location
-  does not ship (one of (a)-(d)). Name the code; do not reject on absence of a
-  path you simply could not find.
+  does not ship, OR source/build evidence shows a trusted caller/operator
+  extension surface or private metadata prerequisite (one of (a)-(f)). Name
+  the code or build evidence; do not reject on absence of a path you simply
+  could not find.
 - **Uncertain**: you can neither construct a path nor affirmatively disprove
   one in the budget, OR the surface is not in scope for this challenge. Name
   what would settle it. This preserves the finding downstream.

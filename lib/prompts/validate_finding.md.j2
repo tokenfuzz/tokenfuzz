@@ -25,23 +25,37 @@ Read the source at {{ target_path }} and independently verify:
    actually what happens, given the data flow? Walk it from input to
    effect yourself.
 
-4. **Falsification**: Spend at least one tool call trying to break this
-   finding. What invariant, allocator behavior, or post-check might
-   prevent it from being reachable / exploitable?
+4. **Product surface and boundary**: Does the reachable path sit in code that
+   actually ships to users (library API, CLI, server route, package export,
+   parser entrypoint, etc.), and does the claimed input cross a security
+   boundary the project defends? Code that only runs in tests, fixtures,
+   examples, codegen, or local dev tooling — and inputs that are really trusted
+   config, operator-supplied values, or extension points meant to run
+   caller-provided code — argue AGAINST the finding unless the report shows an
+   untrusted path reaching them.
+
+5. **Falsification**: Spend at least one tool call trying to break this
+   finding. What invariant, allocator behavior, post-check, product-surface
+   fact, trust-boundary fact, or nearby guard might stop it from being
+   reachable / exploitable? Where your own check stays inconclusive, say so
+   plainly rather than writing around the gap.
 {{ skeptic_block }}
 # Vote
 
 Output ONE JSON object on a single line, nothing else:
 
 ```json
-{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","verified":{"reachability":true|false,"guards":true|false,"primitive":true|false},"caveats":"<any conditions you couldn't verify>"}
+{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","verified":{"reachability":true|false,"guards":true|false,"primitive":true|false,"boundary":true|false},"caveats":"<open questions or conditions you couldn't verify>"}
 ```
 
 Definitions:
-- **Promote**: All three of reachability, guards, primitive verified
-  independently from source. The finding is real and reachable.
-- **Reject**: At least one of reachability / guards / primitive is wrong
-  on independent re-read. The finding is junk or already-mitigated.
+- **Promote**: Reachability, guards, primitive, and product-boundary relevance
+  are all verified independently from source. The finding is real, reachable,
+  and security-relevant in the target's product model.
+- **Reject**: At least one of reachability / guards / primitive / boundary is
+  wrong on independent re-read, or a concrete counter-fact you found defeats
+  the claim. The finding is junk, already mitigated, non-product, trusted-only,
+  or not a security issue.
 - **Uncertain**: You cannot definitively verify or refute one component
   in the time budget. Name what would settle it.
 

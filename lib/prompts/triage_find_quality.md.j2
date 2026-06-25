@@ -17,9 +17,16 @@ channel, algorithmic DoS, info disclosure, etc. are all valid.
 Unfamiliar or unusual security issues are valid as long as the security
 implication is real and explained.
 
-Default verdict is ACCEPT. A false-reject permanently hides a real
-bug; a false-accept just costs a few minutes of QA time. Reject only
-if ALL of these clearly fail:
+Default verdict is REJECT. Keep a finding only when it AFFIRMATIVELY proves a
+security issue; a report that cannot establish one is rejected. Rejection is
+recoverable — the finding is MOVED to findings-rejected/, never deleted — and
+two independent reviewers must agree before a finding is kept, so judge the
+substance in front of you and do not accept on the hope that another reviewer
+will supply what this report does not. A concrete location plus scary wording
+is not security substance when the real content is caller misuse, non-product
+code, intentional extension behavior, or pure robustness.
+
+A kept report must carry concrete security substance:
   1. A nameable location in the target (file:function:line, endpoint,
      config key, message handler, protocol step, or equivalent concrete
      pointer).
@@ -30,9 +37,26 @@ if ALL of these clearly fail:
      exposed, integrity guarantee broken in a way that matters for
      security (not merely "wrong output"), or similar.
 
-If even one of the three above is clearly present, ACCEPT — do not
-reject for a missing field, ambiguous phrasing, or a thin-but-real
-case. Only REJECT (accept=false) when the report is clearly one of:
+Use a source/control/sink/boundary sanity check before accepting:
+  - source: what untrusted input, external trigger, or trusted operator input
+    reaches the issue?
+  - control: what guard, validator, sanitizer, authorization check, or
+    configuration gate is missing or bypassed?
+  - sink: what dangerous operation, memory primitive, broken control, or
+    security impact occurs?
+  - boundary: what shipped product surface is affected, and why is the source
+    untrusted in that product model?
+
+Dependency presence, dangerous API presence, a string match, or a partial
+call chain is not enough by itself. If the report cannot name a source,
+control/sink, and product boundary, reject unless it gives a concrete native
+memory-safety code walk-through that makes the security impact obvious.
+
+ACCEPT when the source/control/sink/boundary chain holds and none of the
+explicit reject buckets below apply. A thin-but-real security case still
+ACCEPTS — the buckets target non-security substance, not weak writing — but an
+unproven or merely suspicious report does not clear the default reject. REJECT
+(accept=false) when the report is clearly one of:
   - Pure correctness / data-integrity / robustness / quality bug with
     no security boundary crossing (e.g. "wrong output for empty input",
     "off-by-one in formatting", "round-trip not idempotent",
@@ -48,6 +72,42 @@ case. Only REJECT (accept=false) when the report is clearly one of:
   - Memory-safety claim with no sanitizer/reproducer evidence AND no
     code-level argument (a plausible code-level walk-through of how the
     primitive triggers is enough — full reproducer not required).
+  - OOM-only or allocation-failure-only cleanup issue where the described
+    effect is a NULL crash, leaked allocation, stale error flag, or partial
+    cleanup and the report does not show attacker-controlled memory
+    corruption, UAF, bounds access, secret disclosure, or durable security
+    impact after the failed allocation. An unchecked string-duplication or
+    buffer-allocation helper is not by itself security substance.
+  - Caller-contract / trusted-caller misuse. Reject when the primitive
+    depends on the caller supplying a bogus length for its own pointer,
+    freeing or mutating an object after handing it to the API, passing
+    NULL/None/bad context handles where the API expects a valid object,
+    racing cleanup while other threads use the library, or otherwise
+    violating ownership, lifetime, allocator, threading, or parameter
+    contracts that are not derived from untrusted input by the product itself.
+    Silence in docs is not automatically a contract, so keep cases where
+    normal product parsing maps bytes into the bad value. Enforcing a contract
+    against untrusted input is the LIBRARY's job: if an attacker's bytes, file,
+    or protocol message drive the parameter into the bad state through a
+    public, attacker-reachable entry, that is a real finding — not caller
+    misuse — even when the writeup labels it a caller-contract violation.
+    Reject only when a TRUSTED caller would have to commit the violation
+    itself, against a prohibition the project actually documents (man page,
+    header doc-comment, RFC, options page). If the report's `Caller contract:`
+    is unspecified, or the prohibition is merely inferred/conventional, do NOT
+    reject on contract grounds. A public callback (lockfunc, write/header
+    callback, …) fired while the library's own invariants are not yet
+    established is a library defect, not caller misuse — keep it; the fix is
+    library-side. (This matches the crash-triage gates so the two paths agree.)
+  - Intentional extension or code-execution surface controlled by the
+    trusted application/operator, such as dynamic module/plugin loading,
+    callback registration, serializer version strings, or local developer
+    configuration. Accept only if the report shows an untrusted party can
+    cross a supported boundary into that extension point.
+  - Internal invariant / static metadata corruption. Reject when the
+    finding requires corrupting static tables, range descriptors, compiled
+    automata, private structs, or other internal metadata that public
+    constructors never expose in the required malformed state.
   - **Debug-only assertion fires under sanitizer/debug build** —
     `assert(...)` (`__assert_rtn` / `__assert_fail`), any
     `[A-Z_]*(?:ASSERT|CHECK)` macro the project compiles out in
