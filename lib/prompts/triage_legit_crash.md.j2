@@ -42,6 +42,18 @@ that the project's docs do not explicitly forbid. In particular:
     "do not call cleanup from inside the callback." Silence on
     re-entrancy means the library accepted the call sequence; if it
     then UAFs, the library has the bug.
+  - A callback body that releases or mutates an active target object may
+    be a caller-contract concern, but do not hard-reject it here based on
+    inferred infrastructure-callback norms. Keep it unless the docs
+    explicitly prohibit the sequence or the harness reaches private
+    target state / switches allocator state in a way real callers cannot.
+  - Callbacks that exist to run application logic or policy — match
+    callouts, SAX/visitor handlers, recursion/resource guards, read/write
+    output callbacks — are NOT infrastructure callbacks. A real application
+    legitimately does work inside them, and input can influence when they
+    fire, so a UAF reached through one is a library re-entrancy bug, not
+    harness fabrication. Keep it unless the docs explicitly prohibit the
+    call sequence.
   - "Caller contract" can only be cited as a reject reason when you
     can name the document (man page, header doc-comment, RFC, options
     page) that states the prohibition. Inferred / conventional /

@@ -1391,11 +1391,25 @@ _triage_bundle_crash_dir() {
 # and must be re-filled rather than accepted as final. caller_contract is
 # deliberately not required here — its absence scores as ×1.0 (obeyed), so
 # it never collapses the side and needn't force a retry.
+#
+# trigger_source is required ONLY when caller_controls / trusted_caller_actions
+# names a caller call-sequence or callback ordering. There the scorer's
+# localisation hinges on whether attacker bytes also drive the trigger:
+# trigger_source=bytes keeps it AV:N, its absence makes bin/reachability
+# localise on caller_controls alone (AV:L) and under-score a byte-reachable
+# callback bug — the exact false-negative the trigger_source guardrail in
+# lib/prompts/triage_reachability_fields.md.j2 exists to prevent. Forcing a
+# re-fill makes the model commit to bytes-or-not instead of defaulting to local.
 _llm_fields_complete() {
   jq -e '
     (.surface // "")         != "" and
     (.primitive // "")       != "" and
-    (.caller_controls // "") != ""
+    (.caller_controls // "") != "" and
+    (
+      (((.caller_controls // "") + " " + (.trusted_caller_actions // ""))
+        | ascii_downcase | test("call-sequence|call-order|callback")) as $is_seq
+      | ($is_seq | not) or ((.trigger_source // "") != "")
+    )
   ' "$1" >/dev/null 2>&1
 }
 

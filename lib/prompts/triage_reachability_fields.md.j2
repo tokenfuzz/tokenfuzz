@@ -3,13 +3,24 @@ a deterministic severity scorer. Return ONE JSON object with these keys
 (all optional — omit a key entirely if the report does not give clear
 evidence for it):
 
+{# Maintainer note (stripped from the rendered prompt): the trigger_source enum
+   below is the canonical trigger vocabulary — keep it identical to
+   docs/guides/triage-results.md and lib/target_config.sh
+   TARGET_ATTACKER_CONTROLS_VALID, and in sync with the trigger tokens the
+   deterministic scorer matches: bin/reachability _CALL_SEQUENCE_RE
+   (call-sequence / call-order / callback ordering → local AV:L/AT:P) and
+   _REMOTE_CAPABLE_RE (timing / race / protocol-state / env / fs-state →
+   remote, vetoes localisation). A value the scorer reads but the enum omits is
+   silently unreachable (this is how trigger_source lost `call-sequence`: commit
+   9b6ad27 widened caller_controls but not here). When you teach the scorer a
+   new trigger token, add it here and to the canonical list above. #}
 {
   "surface":         "<network | library-api | file-format | cli | dev-tool | internal | unknown> — short description",
   "primitive":       "<one of the primitive_keys below>",
   "class":           "<short issue class, only if Primitive is unclear>",
   "caller_contract": "<obeyed | violated>",
   "caller_controls": "<bytes | length | number | flags | call-sequence | timing | none>",
-  "trigger_source":  "<bytes | api | environment | configuration>",
+  "trigger_source":  "<bytes | call-sequence | timing | race | protocol-state | env | fs-state>",
   "parameter_control": "<direct | indirect | application-supplied | trusted | harness-only>",
   "trusted_caller_actions": "<normal public call | private mutation | callback ordering | harness-only>",
   "boundary":        "<short description of the attacker boundary>",
@@ -37,6 +48,20 @@ Rules:
 - Use caller_controls for what the external caller shapes. Use parameter_control
   and trusted_caller_actions for extra local preconditions; do not repeat bytes
   there when a normal public caller supplies the trigger bytes directly.
+- If reproducing the crash requires the caller to install a callback — a memory
+  allocator/free or lock hook, a match/substitute callout, a recursion/resource
+  guard, a comparator, or an enumeration callback — that frees, destroys, or
+  mutates an object the in-flight library call still owns, the precondition is a
+  caller call-sequence: set caller_controls to "call-sequence" and
+  trusted_caller_actions to "callback ordering". Input bytes may control WHEN the
+  callback fires, but the destructive callback is caller-installed code, not
+  attacker bytes — so do not classify caller_controls as "bytes".
+- Use trigger_source "call-sequence" ONLY for a purely local call-ordering
+  trigger with no attacker byte/content path. If input bytes drive the trigger
+  at all — including merely controlling callback timing — keep trigger_source
+  "bytes" and record the local precondition in caller_controls instead;
+  mislabelling a byte-reachable bug as call-sequence would wrongly localise it
+  (AV:L) and under-score it.
 - Output JSON only, no prose, no markdown fences.
 
 Report:

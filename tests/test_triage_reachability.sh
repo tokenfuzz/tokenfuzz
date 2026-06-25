@@ -412,6 +412,43 @@ LLM_DECIDE_MOCK_REACHABILITY_FIELDS='{"surface":"OVERWRITTEN","primitive":"x","c
 _fill6_after=$(cat "$RESULTS_DIR/findings/FIND-LLMFILL-6/.llm_fields.json")
 assert_eq "$_fill6_before" "$_fill6_after" "complete sidecar unchanged (LLM not consulted)"
 
+# A call-sequence / callback-ordering precondition WITHOUT trigger_source is
+# INCOMPLETE: the scorer would localise on caller_controls alone (AV:L) and
+# under-score a byte-reachable callback bug. The fill must re-ask so the model
+# commits to bytes-or-not, not default to local.
+_CURRENT_TEST="llm-fill: call-sequence sidecar missing trigger_source is re-filled"
+mkdir -p "$RESULTS_DIR/findings/FIND-LLMFILL-6B"
+cat > "$RESULTS_DIR/findings/FIND-LLMFILL-6B/report.md" <<'EOF'
+# FIND-LLMFILL-6B
+## Summary
+UAF when a caller-installed callback frees the object the call still owns.
+EOF
+printf '%s' '{"surface":"library-api","primitive":"uaf_write","caller_controls":"call-sequence"}' \
+  > "$RESULTS_DIR/findings/FIND-LLMFILL-6B/.llm_fields.json"
+LLM_DECIDE_MOCK_REACHABILITY_FIELDS='{"trigger_source":"bytes"}' \
+  _triage_llm_fill_fields "$RESULTS_DIR/findings/FIND-LLMFILL-6B" "FIND-LLMFILL-6B"
+assert_file_contains "$RESULTS_DIR/findings/FIND-LLMFILL-6B/.llm_fields.json" \
+  '"trigger_source"' "call-sequence sidecar retried: trigger_source now present"
+assert_file_contains "$RESULTS_DIR/findings/FIND-LLMFILL-6B/.llm_fields.json" \
+  '"_fill_attempts"' "call-sequence re-fill records an attempt counter"
+
+# Same precondition WITH trigger_source already present is COMPLETE — the
+# bytes-or-not question is answered, so no re-fill and no clobbering.
+_CURRENT_TEST="llm-fill: call-sequence sidecar with trigger_source left untouched"
+mkdir -p "$RESULTS_DIR/findings/FIND-LLMFILL-6C"
+cat > "$RESULTS_DIR/findings/FIND-LLMFILL-6C/report.md" <<'EOF'
+# FIND-LLMFILL-6C
+## Summary
+UAF reached only by a trusted caller reordering public API calls.
+EOF
+printf '%s' '{"surface":"library-api","primitive":"uaf_write","caller_controls":"call-sequence","trigger_source":"call-sequence"}' \
+  > "$RESULTS_DIR/findings/FIND-LLMFILL-6C/.llm_fields.json"
+_fill6c_before=$(cat "$RESULTS_DIR/findings/FIND-LLMFILL-6C/.llm_fields.json")
+LLM_DECIDE_MOCK_REACHABILITY_FIELDS='{"trigger_source":"OVERWRITTEN"}' \
+  _triage_llm_fill_fields "$RESULTS_DIR/findings/FIND-LLMFILL-6C" "FIND-LLMFILL-6C"
+_fill6c_after=$(cat "$RESULTS_DIR/findings/FIND-LLMFILL-6C/.llm_fields.json")
+assert_eq "$_fill6c_before" "$_fill6c_after" "complete call-sequence sidecar unchanged (LLM not consulted)"
+
 # Once the attempt cap is reached, an unfillable sidecar stops re-filling so
 # a field the narrative simply does not carry can't re-burn budget forever.
 _CURRENT_TEST="llm-fill: attempt cap stops re-filling"
