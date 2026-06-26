@@ -1773,6 +1773,44 @@ rebuild_pool_artifacts() {
     fi
   fi
 
+  ## ── Trigger-provenance gate (regenerate / model-direct parity) ─────────
+  ## bin/audit applies the step-5.5 trigger-provenance gate during per-cell
+  ## triage, but model-direct crashes never run that triage and a re-derivation
+  ## never re-runs it — so without this a pooled crash whose triggering state no
+  ## attacker can reach (forged internal state, caller self-sabotage) would keep
+  ## inflating the crash set and its severity here. Run the SAME recall-safe,
+  ## quorum-gated reviewer over every pooled crash at this convergence point,
+  ## where model-direct and harness crashes already share one lens. It is
+  ## demote-only — it only sets a crash aside, never promotes one. Rejected dirs
+  ## move to $POOL/crashes-rejected/ BEFORE clustering, so clusters / HTML /
+  ## ledger reflect the filtered set; the next re-derivation re-pools from the
+  ## cells and re-applies it identically (idempotent). Needs a backend, so a
+  ## deterministic (LLM-disabled) re-derivation no-ops. Subshell scopes the env
+  ## overrides — RESULTS_DIR=$POOL routes the move into the pool — so they never
+  ## leak into later pool steps. CRASH_TRIGGER_GATE=0 opts out.
+  if [ "$DRY_RUN" != "1" ] && [ -d "$POOL/crashes" ] \
+     && [ "${LLM_DECIDE_DISABLE:-0}" != "1" ] \
+     && declare -f _triage_crash_trigger_provenance_gate >/dev/null 2>&1; then
+    mkdir -p "$POOL/crashes-rejected" 2>/dev/null || true
+    local _tg_target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
+    local _tg_cdir _tg_report _tg_rej=0
+    for _tg_cdir in "$POOL"/crashes/CRASH-*; do
+      [ -d "$_tg_cdir" ] || continue
+      _tg_report=$(_triage_crash_report_path "$_tg_cdir") || _tg_report=""
+      [ -n "$_tg_report" ] || continue
+      if ( export RESULTS_DIR="$POOL" TARGET_ROOT="$_tg_target_root" \
+                  TARGET_SLUG="$TARGET_SLUG" ACTIVE_BACKEND="$BACKEND" MODEL="$model" \
+                  INDEX="${INDEX:-$BENCH_DIR/reachability.log}" \
+                  CRASH_REJECT_SKIP_DO_NOT_REVISIT=0
+           _triage_crash_trigger_provenance_gate "$_tg_cdir" \
+             "$(basename "$_tg_cdir")" "$_tg_report" "$SCRIPT_ROOT/bin" ); then
+        _tg_rej=$((_tg_rej + 1))
+      fi
+    done
+    [ "$_tg_rej" -gt 0 ] \
+      && log "trigger-provenance gate: set aside $_tg_rej non-reachable crash(es) ($reason)"
+  fi
+
   if [ -d "$POOL/crashes" ]; then
     ## JSON: machine-readable cluster data the aggregator folds into report.json.
     "$SCRIPT_ROOT/bin/cluster-crashes" "$POOL" --json \

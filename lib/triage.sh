@@ -2110,12 +2110,28 @@ _requeue_crash_needs_review_dirs() {
 #                                 report and .reachability_* status markers.
 #                                 Failure never moves a crash out of
 #                                 crashes/.
+#   5.5 Trigger-provenance gate — independent source-reading reviewer;
+#                                 rejects a crash whose triggering state no
+#                                 attacker can reach (forged internal state,
+#                                 caller self-sabotage), uniformly across
+#                                 trigger kinds. Recall-safe, demote-only.
 #   6. LLM confirm-agent        — final report sanity review.
 # One crash dir through the step 0-6 pipeline documented above. Writes
 # the dir's disposition ("rejected" / "bad" / "ok") to $outcome_file so
 # triage_crash_dirs can aggregate counts across parallel workers — every
 # write below lands inside this dir (or goes through flock'd bin/state),
 # so concurrent invocations on DIFFERENT dirs never interfere.
+
+# Echo the first present, non-empty report file in a crash dir (REPORT.md,
+# report.md, or .audit/report.md), or nothing. Returns 1 when none exists.
+_triage_crash_report_path() {
+  local d="$1" f
+  for f in "$d/REPORT.md" "$d/report.md" "$d/.audit/report.md"; do
+    [ -s "$f" ] && { printf '%s' "$f"; return 0; }
+  done
+  return 1
+}
+
 _triage_one_crash_dir() {
   local d="$1" bin_dir="$2" outcome_file="$3"
   printf 'ok\n' > "$outcome_file" 2>/dev/null || true
@@ -2432,17 +2448,32 @@ _triage_one_crash_dir() {
     _triage_llm_fill_fields "$d" "$id"
     _triage_run_reachability "$d" "$id" "$bin_dir"
 
+    local crash_report=""
+    crash_report=$(_triage_crash_report_path "$d") || crash_report=""
+
+    # ── 5.5 Trigger-provenance gate ────────────────────────────────
+    # Independent, source-reading reachability reviewer over the scored
+    # report. Step 4's verdict matrix promotes any crash whose trigger ⊆
+    # attacker_controls, which keeps a `bytes`-triggered crash at full
+    # severity even when those bytes are internal state the program produces
+    # itself and only a trusted caller could forge. This gate applies the
+    # same reachability test to every trigger kind and routes a disproof-
+    # backed Reject to crashes-rejected/ (recoverable), so a forged-state or
+    # caller-self-sabotage crash can no longer inflate the crash set or its
+    # severity. Recall-safe and demote-only; keeps everything else untouched.
+    if [ -n "$crash_report" ] \
+       && _triage_crash_trigger_provenance_gate "$d" "$id" "$crash_report" "$bin_dir"; then
+      printf 'rejected\n' > "$outcome_file"
+      return 0
+    fi
+
     # ── 6. LLM confirm-agent (final pre-promotion gate) ────────────
     # Looks at the finished, bundled report.md and asks
     # whether it is genuinely fileable upstream. Cached by report SHA-1
     # so unchanged reports are free on rerun. Disabled targets / LLM
     # unavailable → undecided → fall through (existing behavior).
     if [ "${CRASH_CONFIRM_AUTO:-1}" = "1" ]; then
-      local confirm_report=""
-      local _f
-      for _f in "$d/REPORT.md" "$d/report.md" "$d/.audit/report.md"; do
-        [ -s "$_f" ] && { confirm_report="$_f"; break; }
-      done
+      local confirm_report="$crash_report"
       if [ -n "$confirm_report" ]; then
         local confirm_reason="" confirm_status=1
         confirm_reason=$(llm_confirm_crash_report "$confirm_report" 2>/dev/null)
@@ -2920,38 +2951,98 @@ _triage_quarantine_find_dir() {
   return 1
 }
 
-# Demote-only trigger-provenance gate for an already-accepted finding. Rejects
-# (moves to findings-rejected/) ONLY when `validate-finding --gate trigger`
-# votes Reject — which, by that tool's own rule, requires an affirmative source
-# disproof (an unsupported Reject is downgraded to Uncertain there). Promote,
-# Uncertain and parse-failure all KEEP. It can never promote and never runs on
-# crashes (findings-only path). It calls validate-finding DIRECTLY, not the
-# triage_validate_finding quorum, whose "any Reject is fatal + skeptical
-# tiebreak" semantics are wrong for a recall-safe demote. The vote file doubles
-# as the done-marker so a resume neither re-runs nor oscillates. Backend is the
-# run's own. Returns 0 if it demoted the finding (caller stops), else 1 (keep).
-_triage_trigger_provenance_gate() {
-  local d="$1" id="$2" desc="$3" bin_dir="$4"
-  [ "${LLM_DECIDE_DISABLE:-0}" = "1" ] && return 1
-  local vote_file="$d/.trigger-gate.json"
-  [ -s "$vote_file" ] && return 1           # already gated → keep as decided
-  [ -s "$desc" ] && [ -d "${TARGET_ROOT:-}" ] || return 1
+# Run the recall-safe trigger-provenance reviewer (`validate-finding --gate
+# trigger`) over a report. The independent reviewer reads the source tree but
+# not the report's own severity/verdict, and — by that tool's own rule — only
+# returns a Reject when it can name the source-level invariant that blocks every
+# attacker route into the triggering state; an unsupported Reject is downgraded
+# to Uncertain there. So this is purely demote-only: it can remove a fake, never
+# manufacture or upgrade a finding.
+#   $1 report path · $2 vote-file path · $3 bin_dir
+# Returns: 1 = disproof-backed Reject (caller demotes); 0 = keep
+# (Promote / Uncertain); 2 = no verdict yet → caller keeps, but the artifact
+# stays retryable (LLM disabled, no backend, missing report/target, or a
+# transient parse/backend failure).
+#
+# The vote file is the resume done-marker — but ONLY a CONCLUSIVE verdict
+# (Promote / Uncertain / Reject) short-circuits a re-run. validate-finding also
+# writes the file on a ParseFailure (transient backend/auth/parse error); that
+# is not a verdict, so it must NOT permanently disable the gate — we fall
+# through and let the next pass retry instead of caching a non-decision.
+_run_trigger_provenance_vote() {
+  local report="$1" vote_file="$2" bin_dir="$3"
+  if [ -s "$vote_file" ]; then
+    case "$(jq -r '.vote // empty' "$vote_file" 2>/dev/null)" in
+      Reject)            return 1 ;;          # cached verdict
+      Promote|Uncertain) return 0 ;;          # cached verdict
+      # ParseFailure / unparseable → not a verdict; fall through and retry.
+    esac
+  fi
+  [ "${LLM_DECIDE_DISABLE:-0}" = "1" ] && return 2
+  [ -s "$report" ] && [ -d "${TARGET_ROOT:-}" ] || return 2
   # The run's resolved single backend (a fork-inherited audit var, the same one
-  # llm_find_quality_decision uses here). Not AUDIT_BACKEND — that can be "all".
+  # llm_find_quality_decision uses). Not AUDIT_BACKEND — that can be "all".
   local vb="${ACTIVE_BACKEND:-}"
-  [ -n "$vb" ] || return 1
+  [ -n "$vb" ] || return 2
   # MODEL is the run's resolved model (fork-inherited, like ACTIVE_BACKEND). It
   # must be forwarded explicitly — validate-finding is a subprocess and would
   # otherwise fall back to the backend default (and oss has no usable default).
   local rc=0
-  "${bin_dir:-bin}/validate-finding" --finding "$desc" --target-path "$TARGET_ROOT" \
+  "${bin_dir:-bin}/validate-finding" --finding "$report" --target-path "$TARGET_ROOT" \
     --backend "$vb" ${MODEL:+--model "$MODEL"} --gate trigger --output "$vote_file" >/dev/null 2>&1 || rc=$?
-  # Recall-safe: ONLY rc=1 (a disproof-backed Reject) demotes; everything keeps.
+  case "$rc" in
+    1)   return 1 ;;   # disproof-backed Reject
+    0|2) return 0 ;;   # Promote / Uncertain → keep
+    *)   return 2 ;;   # ParseFailure (3) / usage (4) → no verdict, retry next pass
+  esac
+}
+
+# Demote-only trigger-provenance gate for an already-accepted finding. Rejects
+# (moves to findings-rejected/) ONLY on a disproof-backed Reject; Promote,
+# Uncertain and parse-failure all KEEP. It can never promote. Returns 0 if it
+# demoted the finding (caller stops), else 1 (keep).
+_triage_trigger_provenance_gate() {
+  local d="$1" id="$2" desc="$3" bin_dir="$4"
+  local rc=0
+  _run_trigger_provenance_vote "$desc" "$d/.trigger-gate.json" "$bin_dir" || rc=$?
   if [ "$rc" = 1 ]; then
     local msg="trigger-provenance: triggering state not attacker-reachable"
     _triage_quarantine_find_dir "$d" "$id" "$bin_dir" "$msg" "$msg" && return 0
   fi
   return 1
+}
+
+# Crash-side trigger-provenance gate — the same recall-safe reviewer, run on a
+# KEPT crash report. It closes a scoring blind spot: evaluate_crash_verdict
+# promotes any crash whose trigger ⊆ attacker_controls, so a crash whose trigger
+# is labelled `bytes` stays at full severity even when those bytes are internal
+# state the program produces itself (a serialized blob, a caller-owned
+# descriptor) that only a trusted in-process caller could forge — never an
+# external attacker. That set-difference cannot see provenance; this independent
+# source-reading reviewer can, and applies the SAME reachability test to every
+# trigger kind, so a `bytes`-labelled forgery is scrutinised exactly like a
+# `call-sequence` one (no taxonomy asymmetry).
+#
+# A sanitizer-confirmed crash is higher-consequence than an unproven finding, so
+# — unlike the findings gate — one validator is NOT enough to hard-remove it:
+# this requires TWO independent disproof-backed Rejects before routing the crash
+# to crashes-rejected/ (indexed, recoverable). A single or disagreeing Reject
+# keeps the crash (recall-safe); the second vote retries until it reaches a
+# conclusive verdict, so a transient backend failure can never finalise a
+# one-vote rejection. The quorum guards against a single hallucinated/
+# overconfident validator dropping a real bug. Opt out with CRASH_TRIGGER_GATE=0.
+# Returns 0 if it rejected the crash (caller stops), else 1 (keep).
+_triage_crash_trigger_provenance_gate() {
+  local d="$1" id="$2" report="$3" bin_dir="$4"
+  [ "${CRASH_TRIGGER_GATE:-1}" = "0" ] && return 1
+  local rc1=0
+  _run_trigger_provenance_vote "$report" "$d/.trigger-gate.json" "$bin_dir" || rc1=$?
+  [ "$rc1" = 1 ] || return 1
+  local rc2=0
+  _run_trigger_provenance_vote "$report" "$d/.trigger-gate-2.json" "$bin_dir" || rc2=$?
+  [ "$rc2" = 1 ] || return 1
+  _triage_route_rejection "$d" "$id" \
+    "trigger-provenance (2 independent rejects): triggering state not attacker-reachable from a public boundary"
 }
 
 _validate_one_find_dir() {
