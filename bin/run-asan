@@ -531,6 +531,10 @@ case "$MODE" in
         # args template already embeds the testcase via {TESTCASE}) tells
         # us NOT to insert the testcase between bin and trailing args.
         _asan_offline_sym=0
+        # Host RSS guard: bound the probe tree so a huge-allocation testcase is
+        # killed (host-protection class) instead of swap-wedging the box. Empty
+        # when uncapped. See sanitizer_generic_rss_limit_mb.
+        _asan_rss_mb="$(sanitizer_generic_rss_limit_mb)"
         if [[ "$asan_generic_disable_options" = "1" ]]; then
             _generic_env_args=()
         else
@@ -586,13 +590,13 @@ case "$MODE" in
             # symbolizer renders them — and falls open to the raw frames only
             # if the pass itself cannot run.
             _asan_capture="$(mktemp "${TMPDIR:-/tmp}/asan-generic-XXXXXX")"
-            audit_timeout_run "$GENERIC_TIMEOUT" "${_generic_run[@]}" \
+            audit_timeout_run_rss "$GENERIC_TIMEOUT" "${_asan_rss_mb:-0}" "${_generic_run[@]}" \
                 >"$_asan_capture" 2>&1 || rc=$?
             sanitizer_symbolize_file "$_asan_capture"
             cat "$_asan_capture"
             rm -f "$_asan_capture"
         else
-            audit_timeout_run "$GENERIC_TIMEOUT" "${_generic_run[@]}" || rc=$?
+            audit_timeout_run_rss "$GENERIC_TIMEOUT" "${_asan_rss_mb:-0}" "${_generic_run[@]}" || rc=$?
         fi
         if [ "$rc" -eq 124 ]; then
             echo "[run-asan] generic runner timed out after ${GENERIC_TIMEOUT}s" >&2

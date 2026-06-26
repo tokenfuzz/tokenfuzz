@@ -622,8 +622,12 @@ is_autodiscard_crash_output() {
     return 0
   fi
 
-  # OOM / allocator failure
-  if grep -qE 'AddressSanitizer: (allocation-size-too-big|out-of-memory)|AddressSanitizer failed to allocate|requested allocation size .* exceeds maximum' "$f" 2>/dev/null; then
+  # OOM / allocator failure. The `rss limit (exhausted|exceeded)` arm covers the
+  # generic probe RSS watchdog's host-protection kill (audit_timeout_run_rss,
+  # via sanitizer_generic_rss_limit_mb) as well as ASan's own hard_rss_limit_mb
+  # abort: both are host protection, not a memory-safety bug, so they autodiscard
+  # in the same class as a real OOM.
+  if grep -qE 'AddressSanitizer: (allocation-size-too-big|out-of-memory)|AddressSanitizer failed to allocate|requested allocation size .* exceeds maximum|rss limit (exhausted|exceeded)' "$f" 2>/dev/null; then
     return 0
   fi
 

@@ -88,4 +88,18 @@ for runner in run-asan run-ubsan run-msan run-tsan; do
   fi
 done
 
+# ── 5. Generic-probe RSS ceiling — host-protection cap for probe runs ──
+# sanitizer_generic_rss_limit_mb echoes the MB ceiling the generic runners hand
+# to audit_timeout_run_rss. The watchdog is allocator-agnostic, so the cap is
+# one host policy independent of the sanitizer (unlike the inert ASan flag it
+# replaces). Default 5120; PROBE_RSS_LIMIT_MB overrides; 0/empty disables.
+assert_eq "5120" "$(sanitizer_generic_rss_limit_mb)" \
+  "default generic RSS ceiling is 5120 MB"
+assert_eq "2048" "$(PROBE_RSS_LIMIT_MB=2048; sanitizer_generic_rss_limit_mb)" \
+  "PROBE_RSS_LIMIT_MB overrides the per-host ceiling"
+assert_eq "" "$(PROBE_RSS_LIMIT_MB=0; sanitizer_generic_rss_limit_mb)" \
+  "PROBE_RSS_LIMIT_MB=0 disables the ceiling (empty → uncapped)"
+assert_eq "" "$(PROBE_RSS_LIMIT_MB=nonsense; sanitizer_generic_rss_limit_mb)" \
+  "non-numeric PROBE_RSS_LIMIT_MB → uncapped (empty)"
+
 summary

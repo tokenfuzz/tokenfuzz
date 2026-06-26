@@ -1549,7 +1549,7 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
     # Allocator / resource exhaustion (OSS-Fuzz treats these as non-security
     # unless the size is attacker-amplified — that case is dos_amplification).
     if re.search(r"\ballocation-size-too-big\b|\bout-of-memory\b|"
-                 r"\brss limit exceeded\b|\bexceeds maximum supported size\b", t):
+                 r"\brss limit (?:exhausted|exceeded)\b|\bexceeds maximum supported size\b", t):
         return "oom", "allocation/OOM resource exhaustion"
 
     # MSan / KMSAN use of uninitialized memory — a literal *diagnostic*

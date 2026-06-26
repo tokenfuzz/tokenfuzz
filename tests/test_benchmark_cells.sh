@@ -204,8 +204,13 @@ gemini_unlimited_pid=$!
 # fake gemini binary never reads it; without it the cell would bail at preflight
 # and never reach the agent launch this deadlock regression needs to exercise.
 ( rc=0
+  # The wrapper timeout is only a deadlock safety net: a healthy run returns in
+  # a few seconds, while the regression (a stray tee child holding the
+  # command-substitution pipe) hangs forever. Size it well above a healthy run
+  # under the 6-way parallel launch above — a tight cap false-fails on a slow CI
+  # runner (observed on py3.12), not on the deadlock it guards.
   out=$(GEMINI_API_KEY=fake-benchmark-key USE_GEMINI_CLI=1 GEMINI_BIN="$fake_gemini" \
-    audit_timeout_run 20 bash "$BENCH" --target "$bench_target" --backend gemini \
+    audit_timeout_run 60 bash "$BENCH" --target "$bench_target" --backend gemini \
     --replicates 1 --conditions model-direct --budget-wall 0 \
     --bench-root "$gemini_cli_unlimited_root" 2>&1) || rc=$?
   printf '%s\n' "$out" > "$work/gemini_cli_unlimited.out"

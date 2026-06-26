@@ -75,6 +75,31 @@ marker_stays_absent_for "$tree_marker" 1 \
 audit_timeout_kill 1 bash -c 'trap "exit 42" TERM; sleep 5'
 assert_eq 124 $? "audit_timeout_kill returns 124 on timeout"
 
+# RSS watchdog: a 0 cap is byte-identical to audit_timeout_run (no watch path).
+audit_timeout_run_rss 2 0 bash -c 'exit 7'
+assert_eq 7 $? "audit_timeout_run_rss with 0 cap preserves exit code"
+audit_timeout_run_rss 1 0 bash -c 'sleep 5'
+assert_eq 124 $? "audit_timeout_run_rss with 0 cap still times out (124)"
+
+# A ballooning child is SIGKILLed once its RSS crosses the cap, well before the
+# generous wall-clock timeout — the host-protection path. The marker line the
+# watchdog prints is what triage/reachability classify as the OOM class.
+rss_done="$TEST_TMPDIR/rss-done"
+rss_out="$TEST_TMPDIR/rss-out"
+rm -f "$rss_done" "$rss_out"
+rss_rc=0
+audit_timeout_run_rss 30 200 perl -e '
+  my @a; while (1) { push @a, ("x" x (10*1024*1024)); select(undef,undef,undef,0.05); }
+  open my $f, ">", $ARGV[0]; print $f "done";
+' "$rss_done" >"$rss_out" 2>&1 || rss_rc=$?
+assert_eq 137 "$rss_rc" "audit_timeout_run_rss SIGKILLs a child that exceeds the RSS cap"
+[ ! -f "$rss_done" ] \
+  && pass "RSS-killed child did not run to completion" \
+  || fail "RSS-killed child did not run to completion" "child finished despite the cap"
+grep -qE 'rss limit (exhausted|exceeded)' "$rss_out" \
+  && pass "RSS watchdog prints the OOM/host-protection marker" \
+  || fail "RSS watchdog prints the OOM/host-protection marker" "$(cat "$rss_out" 2>/dev/null)"
+
 # Regression: a child that touches the inherited stdin must not be stopped
 # by SIGTTIN/SIGTTOU. Before the setsid fix, a background-pgrp child reading
 # from an inherited tty stdin got STOPPED and waitpid blocked until the

@@ -115,6 +115,35 @@ sanitizer_compose_options() {
   printf '%s' "$out"
 }
 
+# sanitizer_generic_rss_limit_mb — echo the per-run resident-memory ceiling (MB)
+# the generic runners pass to audit_timeout_run_rss, or nothing when uncapped.
+#
+# A single probe of a huge-allocation bug (size_t truncation, length overflow)
+# can balloon RSS and thrash the host into swap until it wedges, taking every
+# parallel agent down with it — a machine wedge, not a clean OOM-kill. The
+# generic runners enforce this ceiling with the external RSS watchdog in
+# audit_timeout_run_rss, which SIGKILLs the probe tree once its summed RSS
+# crosses the cap and prints an `rss limit exceeded` diagnostic. Recall-positive:
+# the bug is *caught* (host-protection class), not lost with the host, and real
+# memory-safety crashes reproduce identically under the cap.
+#
+# Why a watchdog and not ASan's hard_rss_limit_mb: that flag's RSS-monitor
+# thread is Linux-only in compiler-rt and silently inert on macOS/Apple clang
+# (verified — a 1024MB cap let a process reach 15GB and exit 0). The watchdog is
+# allocator-agnostic and cross-platform, so the same cap also covers ubsan (no
+# allocator) and any child the probe forks. Scope is generic/CLI mode only —
+# browser and xpcshell (Firefox+ASan) legitimately exceed several GB and never
+# call this. PROBE_RSS_LIMIT_MB overrides the per-host ceiling (default 5120);
+# set it to 0 to disable.
+sanitizer_generic_rss_limit_mb() {
+  local mb="${PROBE_RSS_LIMIT_MB:-5120}"
+  case "$mb" in
+    ''|*[!0-9]*) return 0 ;;   # non-numeric → uncapped
+  esac
+  [ "$mb" -gt 0 ] || return 0  # 0 → disabled
+  printf '%s' "$mb"
+}
+
 # Borrowed ClusterFuzz offline symbolizer, resolved relative to this file.
 _SANITIZER_SYMBOLIZER_PY="${BASH_SOURCE[0]%/*}/clusterfuzz_symbolizer.py"
 

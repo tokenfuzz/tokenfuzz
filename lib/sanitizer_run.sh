@@ -65,8 +65,13 @@ sanitizer_run_generic() {
   generic_testcase="$1"; shift
   skip_testcase="${SANITIZER_GENERIC_SKIP_TESTCASE:-${ASAN_GENERIC_SKIP_TESTCASE:-0}}"
 
-  local env_cmd runner_env_args kv offline_sym=0 san_opts
+  local env_cmd runner_env_args kv offline_sym=0 san_opts rss_mb
   san_opts="$(sanitizer_runtime_options "$san" "$opts")"
+  # Host RSS guard: bound the probe tree so a huge-allocation testcase is killed
+  # (host-protection class) instead of swap-wedging the box. Empty when uncapped
+  # — audit_timeout_run_rss then behaves like a plain timeout run. See
+  # sanitizer_generic_rss_limit_mb.
+  rss_mb="$(sanitizer_generic_rss_limit_mb)"
   # Decouple symbolization from the crashing run when an offline symbolizer is
   # available: symbolize=0 emits raw module+offset frames immediately (no
   # in-process atos to hang under the timeout), and we resolve them offline
@@ -104,13 +109,13 @@ sanitizer_run_generic() {
     # pass cannot run.
     local cap
     cap="$(mktemp "${TMPDIR:-/tmp}/${san}-generic-XXXXXX")"
-    audit_timeout_run "$timeout_val" "${env_cmd[@]}" "${generic_cmd[@]}" \
+    audit_timeout_run_rss "$timeout_val" "${rss_mb:-0}" "${env_cmd[@]}" "${generic_cmd[@]}" \
       >"$cap" 2>&1 || rc=$?
     sanitizer_symbolize_file "$cap"
     cat "$cap"
     rm -f "$cap"
   else
-    audit_timeout_run "$timeout_val" "${env_cmd[@]}" "${generic_cmd[@]}" || rc=$?
+    audit_timeout_run_rss "$timeout_val" "${rss_mb:-0}" "${env_cmd[@]}" "${generic_cmd[@]}" || rc=$?
   fi
   if [ "$rc" -eq 124 ]; then
     echo "[run-$san] generic runner timed out after ${timeout_val}s" >&2

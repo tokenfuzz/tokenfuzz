@@ -107,13 +107,17 @@ PY
 )"
 assert_eq "True" "$arch_ok" "is_valid_arch accepts arm64e"
 
-# ── atos fallback: no llvm-symbolizer, resolve via atos ──────────────────────
-# This is the stock-macOS case (Apple clang ships atos, not llvm-symbolizer)
-# and the reason we keep ClusterFuzz's whole symbolizer chain rather than
-# requiring llvm-symbolizer. A stub `atos` stands in for the platform tool.
-ATOSDIR="$TEST_TMPDIR/atosbin"
-mkdir -p "$ATOSDIR"
-cat > "$ATOSDIR/atos" <<'PY'
+# ── platform fallback: no llvm-symbolizer, resolve via the OS tool ───────────
+# Why we keep ClusterFuzz's whole symbolizer chain rather than requiring
+# llvm-symbolizer: when it is absent the chain falls back to the platform tool
+# — atos on macOS (Apple clang ships it, not llvm-symbolizer), addr2line on
+# Linux (SystemSymbolizerFactory picks by platform). Stub whichever tool this
+# host's symbolizer will actually invoke, so the fallback path has real coverage
+# on both. The two tools speak different pipe protocols, hence the two stubs.
+FALLBACKDIR="$TEST_TMPDIR/fallbackbin"
+mkdir -p "$FALLBACKDIR"
+if audit_is_darwin; then
+  cat > "$FALLBACKDIR/atos" <<'PY'
 #!/usr/bin/env python3
 # atos pipe protocol: read "0x<offset>" lines, emit "func (in module) (file:line)".
 import sys
@@ -127,14 +131,31 @@ for line in sys.stdin:
         sys.stdout.write('0x0 (in apptool) (??:0)\n')
     sys.stdout.flush()
 PY
-chmod +x "$ATOSDIR/atos"
-ATOS_OUT="$TEST_TMPDIR/atos_out.txt"
-# No llvm-symbolizer on PATH (only the stub atos); --llvm-symbolizer "" empty.
-env -u LLVM_SYMBOLIZER PATH="$ATOSDIR:/usr/bin:/bin" \
-  python3 "$SYM_PY" --llvm-symbolizer "" < "$RAW" > "$ATOS_OUT" 2>/dev/null
-assert_eq 0 $? "atos fallback: exits 0"
-assert_file_contains "$ATOS_OUT" 'in app_parse parse\.c:42' \
-  "atos fallback: user frame resolved via atos (no llvm-symbolizer)"
+  chmod +x "$FALLBACKDIR/atos"
+else
+  cat > "$FALLBACKDIR/addr2line" <<'PY'
+#!/usr/bin/env python3
+# addr2line -f protocol: per offset line, emit "function\nfile:line\n".
+import sys
+for line in sys.stdin:
+    off = line.strip()
+    if not off:
+        continue
+    if off == '0x100000934':
+        sys.stdout.write('app_parse\nparse.c:42\n')
+    else:
+        sys.stdout.write('??\n??:0\n')
+    sys.stdout.flush()
+PY
+  chmod +x "$FALLBACKDIR/addr2line"
+fi
+FB_OUT="$TEST_TMPDIR/fallback_out.txt"
+# No llvm-symbolizer on PATH (only the platform stub); --llvm-symbolizer "" empty.
+env -u LLVM_SYMBOLIZER PATH="$FALLBACKDIR:/usr/bin:/bin" \
+  python3 "$SYM_PY" --llvm-symbolizer "" < "$RAW" > "$FB_OUT" 2>/dev/null
+assert_eq 0 $? "platform fallback: exits 0"
+assert_file_contains "$FB_OUT" 'in app_parse parse\.c:42' \
+  "platform fallback: user frame resolved via the OS symbolizer (no llvm-symbolizer)"
 
 # ── Shell helpers ────────────────────────────────────────────────────────────
 source "$SCRIPT_ROOT/lib/timeout.sh"

@@ -371,6 +371,22 @@ EOF
 is_autodiscard_crash_output "$TEST_TMPDIR/alloc_asan.txt"
 assert_eq 0 $? "allocation-size-too-big → autodiscard"
 
+# Generic-probe RSS watchdog kill (host protection, not a memory-safety bug) →
+# discard in the OOM class. This is the marker audit_timeout_run_rss prints when
+# a probe tree crosses sanitizer_generic_rss_limit_mb.
+cat > "$TEST_TMPDIR/rss_watchdog.txt" <<'EOF'
+tokenfuzz: probe rss limit exceeded (5121Mb > 5120Mb) -- host-protection kill
+EOF
+is_autodiscard_crash_output "$TEST_TMPDIR/rss_watchdog.txt"
+assert_eq 0 $? "probe rss limit exceeded → autodiscard (OOM/host-protection class)"
+
+# ASan's own hard_rss_limit_mb abort (Linux hosts) → same OOM class.
+cat > "$TEST_TMPDIR/rss_asan.txt" <<'EOF'
+==12345==ERROR: AddressSanitizer: hard rss limit exhausted (5120Mb vs 5121Mb)
+EOF
+is_autodiscard_crash_output "$TEST_TMPDIR/rss_asan.txt"
+assert_eq 0 $? "hard rss limit exhausted → autodiscard (OOM/host-protection class)"
+
 # Stack-use-after-scope → keep
 cat > "$TEST_TMPDIR/suar.txt" <<'EOF'
 ==12345==ERROR: AddressSanitizer: stack-use-after-scope on address 0x7fff12345678
