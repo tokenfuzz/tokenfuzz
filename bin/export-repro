@@ -1245,7 +1245,7 @@ CLI_RUN = """\
 testcase="$(dirname "$0")/__INPUT_NAME__"
 echo "=== running __SANITIZER_LABEL__ repro: $testcase ===" >&2
 rc=0
-__SANITIZER_ENV_BLOCK__  "$san_bin" "$testcase" || rc=$?
+__SANITIZER_ENV_BLOCK__  "$san_bin" __CLI_ARGS__ || rc=$?
 echo "[repro] exit=$rc" >&2
 exit "$rc"
 """
@@ -2856,7 +2856,8 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
                                    sanitizer: str = "asan",
                                    extra_options: str = "", mode: str = "generic",
                                    recorded_env_options: str = "",
-                                   local_src: str = "") -> None:
+                                   local_src: str = "",
+                                   cli_args: str = '"$testcase"') -> None:
     meta = sanitizer_meta(sanitizer)
     if build_system == "swift" and not san_bin_rel:
         if not meta["flag"]:
@@ -2885,6 +2886,7 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
                 CLI_RUN,
                 __INPUT_NAME__=input_name,
                 __SANITIZER_LABEL__=meta["label"],
+                __CLI_ARGS__=cli_args,
                 __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
                     sanitizer, extra_options, mode, recorded_env_options
                 ),
@@ -3437,6 +3439,18 @@ def main(argv: list[str]) -> int:
                 local_src=local_src,
             )
         elif input_name:
+            # Replay the recorded argv when the crash needs non-default flags;
+            # {TESTCASE} maps to the staged input, the rest is shell-quoted.
+            # Defaults to the bare `"$testcase"` for a flag-less CLI crash.
+            repro_args = crash_artifacts.find_repro_args(
+                scan_dirs,
+                bin_names=[Path(san_bin_rel).name] if san_bin_rel else [],
+                testcase_name=testcase.name if testcase is not None else "",
+            )
+            cli_args = " ".join(
+                '"$testcase"' if a == crash_artifacts.TESTCASE_TOKEN else shq(a)
+                for a in repro_args
+            ) or '"$testcase"'
             write_cli_with_input_template(
                 repro_path,
                 build_system=build_system, upstream_url=upstream_url,
@@ -3446,7 +3460,7 @@ def main(argv: list[str]) -> int:
                 extra_options=sanitizer_extra_options,
                 mode=run_mode or "generic",
                 recorded_env_options=recorded_env_options,
-                local_src=local_src,
+                local_src=local_src, cli_args=cli_args,
             )
         else:
             # No runnable template (self-contained harness with no separate

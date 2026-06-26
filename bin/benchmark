@@ -1529,6 +1529,16 @@ if harness_bin:
 elif (testcase is not None and target_bin
       and os.path.exists(target_bin) and os.access(target_bin, os.X_OK)):
     print("SAN=%s\nMODE=cli\nBIN=%s\nTESTCASE=%s" % (san, target_bin, testcase))
+    # Extra CLI args the crash needs, else a flag-dependent bug reads as a
+    # false 0/N. Substitute the token here where the testcase path is known;
+    # one ARG= line per token (values may carry '=' but never a newline).
+    repro_args = ca.find_repro_args(
+        scan_dirs,
+        bin_names=[os.path.basename(target_bin)],
+        testcase_name=os.path.basename(str(testcase)),
+    )
+    for _a in repro_args:
+        print("ARG=%s" % (str(testcase) if _a == ca.TESTCASE_TOKEN else _a))
 else:
     print("MODE=none")
 PY
@@ -1539,6 +1549,12 @@ PY
   bin="$(printf '%s\n' "$resolved" | sed -n 's/^BIN=//p')"
   testcase="$(printf '%s\n' "$resolved" | sed -n 's/^TESTCASE=//p')"
   [ -n "$mode" ] && [ "$mode" != "none" ] || return 1
+  ## Extra CLI args (one per ARG= line) the crash needs, testcase already
+  ## substituted; empty for harness crashes and flag-less CLI crashes.
+  local -a reverify_args=()
+  while IFS= read -r _arg; do
+    reverify_args+=("$_arg")
+  done < <(printf '%s\n' "$resolved" | sed -n 's/^ARG=//p')
 
   local tmp="$cdir/sanitizer.txt.reverify.tmp" rc=0 upper
   rm -f "$tmp"
@@ -1546,6 +1562,16 @@ PY
     env SANITIZER_RUNS=5 SAN_OUTPUT_FILE="$tmp" AUDIT_BUILD_SUFFIX="${AUDIT_BUILD_SUFFIX:-}" \
       ASAN_GENERIC_BIN="$bin" ASAN_GENERIC_SKIP_TESTCASE=1 \
       "$SCRIPT_ROOT/bin/run-sanitizer-multi" asan generic /dev/null \
+      >/dev/null 2>&1 || rc=$?
+  elif [ "${#reverify_args[@]}" -gt 0 ]; then
+    ## Skip the auto-inserted testcase and pass the recorded argv (it already
+    ## carries the testcase). SKIP_TESTCASE covers both the ASAN_* and the
+    ## shared SANITIZER_* env spellings.
+    upper="$(printf '%s' "$san" | tr '[:lower:]' '[:upper:]')"
+    case "$san" in race|runner) upper="ASAN" ;; esac
+    env SANITIZER_RUNS=5 SAN_OUTPUT_FILE="$tmp" AUDIT_BUILD_SUFFIX="${AUDIT_BUILD_SUFFIX:-}" \
+      "${upper}_GENERIC_BIN=$bin" ASAN_GENERIC_SKIP_TESTCASE=1 SANITIZER_GENERIC_SKIP_TESTCASE=1 \
+      "$SCRIPT_ROOT/bin/run-sanitizer-multi" "$san" generic "$testcase" "${reverify_args[@]}" \
       >/dev/null 2>&1 || rc=$?
   else
     upper="$(printf '%s' "$san" | tr '[:lower:]' '[:upper:]')"

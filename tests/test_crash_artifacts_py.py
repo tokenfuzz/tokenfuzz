@@ -90,6 +90,87 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq(suffixed, ca.find_primary_asan([crash_dir, missing]),
               "find_primary_asan: suffix fallback scan tolerates missing dir")
 
+
+# ─── find_repro_args: argv recovery for flag-dependent CLI crashes ──
+
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    (cd / "input.txt").write_bytes(b"x")
+
+    # No repro.cmd / report.md → no extra args, callers keep bare invocation.
+    assert_eq([], ca.find_repro_args([cd], bin_names=["app"],
+                                     testcase_name="input.txt"),
+              "find_repro_args: absent sources → []")
+
+    # repro.cmd, args-only with {TESTCASE} → returned verbatim.
+    (cd / "repro.cmd").write_text("--flag -n ANY -o '(?<=a)(?=b)' {TESTCASE}\n",
+                                  encoding="utf-8")
+    assert_eq(["--flag", "-n", "ANY", "-o", "(?<=a)(?=b)", ca.TESTCASE_TOKEN],
+              ca.find_repro_args([cd], bin_names=["app"],
+                                 testcase_name="input.txt"),
+              "find_repro_args: repro.cmd args-only with token")
+
+    # args-only repro.cmd is used VERBATIM: a positional that itself looks like
+    # a NAME=value env assignment must NOT be stripped.
+    (cd / "repro.cmd").write_text("MODE=parse PATTERN=a=b {TESTCASE}\n",
+                                  encoding="utf-8")
+    assert_eq(["MODE=parse", "PATTERN=a=b", ca.TESTCASE_TOKEN],
+              ca.find_repro_args([cd], bin_names=["app"],
+                                 testcase_name="input.txt"),
+              "find_repro_args: repro.cmd NAME=value positional preserved")
+
+    # A literal input filename (no token) is rewritten and kept in position.
+    (cd / "repro.cmd").write_text("--flag input.txt\n", encoding="utf-8")
+    assert_eq(["--flag", ca.TESTCASE_TOKEN],
+              ca.find_repro_args([cd], bin_names=["app"],
+                                 testcase_name="input.txt"),
+              "find_repro_args: repro.cmd literal input rewritten to token")
+
+    # A bare `BIN input` (no real flags) reads as [] so behaviour is unchanged.
+    (cd / "repro.cmd").write_text("{TESTCASE}\n", encoding="utf-8")
+    assert_eq([], ca.find_repro_args([cd], bin_names=["app"],
+                                     testcase_name="input.txt"),
+              "find_repro_args: token-only → []")
+
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    (cd / "input.txt").write_bytes(b"x")
+    # Fallback: no repro.cmd, recover the fenced command block from report.md.
+    # The full command has its env prefix + binary + a spaced redirection
+    # stripped, a line-continuation joined, and the literal input → token.
+    (cd / "report.md").write_text(
+        "## Reproduction\n\n```sh\nenv ASAN_OPTIONS=x \\\n"
+        "  build/app --flag -o '(?<=a)(?=b)' input.txt 2> san.txt\n```\n",
+        encoding="utf-8")
+    assert_eq(["--flag", "-o", "(?<=a)(?=b)", ca.TESTCASE_TOKEN],
+              ca.find_repro_args([cd], bin_names=["app"],
+                                 testcase_name="input.txt"),
+              "find_repro_args: report.md fallback strips env/binary/redirect")
+
+    # Binary match is token-based: a substring like `apple` must not match.
+    (cd / "report.md").write_text(
+        "```sh\n./apple --x input.txt\n```\n", encoding="utf-8")
+    assert_eq([], ca.find_repro_args([cd], bin_names=["app"],
+                                     testcase_name="input.txt"),
+              "find_repro_args: report.md binary match is token-anchored")
+
+    # repro.cmd wins over report.md when both exist.
+    (cd / "repro.cmd").write_text("--from-cmd {TESTCASE}\n", encoding="utf-8")
+    assert_eq(["--from-cmd", ca.TESTCASE_TOKEN],
+              ca.find_repro_args([cd], bin_names=["app"],
+                                 testcase_name="input.txt"),
+              "find_repro_args: repro.cmd precedence over report.md")
+
+# repro.cmd must not be mistaken for the reproducing testcase.
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    (cd / "repro.cmd").write_text("--flag {TESTCASE}\n", encoding="utf-8")
+    real = cd / "input.bin"
+    real.write_bytes(b"\x00\x01\x02payload")
+    assert_eq(real, ca.find_testcase([cd]),
+              "find_testcase: repro.cmd excluded, real input chosen")
+
+
 total = _PASSED + _FAILED
 if _FAILED == 0:
     print(f"  {_GREEN}{_PASSED}/{total} passed{_NC}")

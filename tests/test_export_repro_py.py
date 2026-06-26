@@ -2233,6 +2233,29 @@ assert_not_in("in-place audit source", _h,
               "build_report_md: no recorded source omits the in-place hint")
 
 
+# ─── write_cli_with_input_template: recorded CLI args render ─────────
+# A flag-dependent CLI crash must replay its argv with {TESTCASE} mapped to the
+# staged input; a flag-less crash keeps the bare `"$san_bin" "$testcase"`.
+_cli_out = TMP / "reproduce-cli.sh"
+er.write_cli_with_input_template(
+    _cli_out, build_system="cmake", upstream_url="https://example.invalid/r;1",
+    pinned_rev="1", slug="x", san_bin_rel="build-asan/app",
+    cmake_target="", input_name="input.bin", sanitizer="asan",
+    cli_args='--flag -o \'(?<=a)(?=b)\' "$testcase"',
+)
+assert_in('"$san_bin" --flag -o \'(?<=a)(?=b)\' "$testcase"',
+          _cli_out.read_text(encoding="utf-8"),
+          "write_cli_with_input_template: recorded args render in order")
+
+er.write_cli_with_input_template(
+    _cli_out, build_system="cmake", upstream_url="https://example.invalid/r;1",
+    pinned_rev="1", slug="x", san_bin_rel="build-asan/app",
+    cmake_target="", input_name="input.bin", sanitizer="asan",
+)
+assert_in('"$san_bin" "$testcase"', _cli_out.read_text(encoding="utf-8"),
+          "write_cli_with_input_template: default is the bare invocation")
+
+
 # ─── Cleanup ────────────────────────────────────────────────────────
 
 shutil.rmtree(TMP, ignore_errors=True)

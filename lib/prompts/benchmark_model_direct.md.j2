@@ -253,13 +253,20 @@ For every CRASH:
 
   1. Create `{{ output_dir }}/crashes/CRASH-<n>/`  (n = 1, 2, 3, ...).
   2. Save the triggering input inside that directory.
-  3. Save the FULL sanitizer output as
+  3. If you drove a CLI binary with any non-default arguments (flags, a
+     subcommand, a pattern), save the exact argument list — everything
+     after the binary — to `{{ output_dir }}/crashes/CRASH-<n>/repro.cmd`
+     as one shell line, with `{TESTCASE}` marking where the input file
+     goes (e.g. `--buffer-size=10 -u -o '<pat>' {TESTCASE}`). Otherwise
+     the reproduction harness reruns the binary with no flags and a
+     flag-dependent crash will not reproduce.
+  4. Save the FULL sanitizer output as
      `{{ output_dir }}/crashes/CRASH-<n>/sanitizer.txt`
      (capture stderr — that's where AddressSanitizer writes).
-  4. If you wrote a driver, save it as
+  5. If you wrote a driver, save it as
      `{{ output_dir }}/crashes/CRASH-<n>/harness.c` -- one driver per
      crash, so each can be rebuilt and reproduced on its own.
-  5. Write a short `{{ output_dir }}/crashes/CRASH-<n>/report.md` naming
+  6. Write a short `{{ output_dir }}/crashes/CRASH-<n>/report.md` naming
      the file, function, and bug class.
 
 Work until you are out of time. Be thorough -- breadth and depth both

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Iterable, Optional
@@ -29,6 +30,9 @@ ARTIFACT_EXACT = {
     "harness.c",
     "reachability.json",
     "promotion.log",
+    # Recorded CLI argv (find_repro_args), not a testcase — excluded here
+    # because it would otherwise match the "repro." TESTCASE_PREFIXES.
+    "repro.cmd",
 }
 
 ARTIFACT_SUFFIXES = (
@@ -353,3 +357,140 @@ def find_testcase(scan_dirs: Iterable[Path], *, asan_files: Iterable[Path] = (),
             if is_testcase_candidate(p, min_bytes=min_bytes, relaxed=True):
                 return p
     return None
+
+
+# ── CLI argv recovery ───────────────────────────────────────────────
+# A crash that only fires under non-default arguments (extra flags, a
+# subcommand, a pattern) can't reproduce under the bare `BIN <testcase>` that
+# reverify and export-repro default to. The argv comes from one of two sources,
+# each parsed by its own shape:
+#   - repro.cmd: the args-only list after the binary (the prompt contract).
+#     Used verbatim — never stripped, so a positional like `MODE=parse` or
+#     `PATTERN=a=b` survives.
+#   - report.md fallback: a full pasted command. Here the env prefix, the
+#     binary, and redirections precede the argv and are stripped off.
+REPRO_CMD_FILE = "repro.cmd"
+TESTCASE_TOKEN = "{TESTCASE}"
+
+# A shell env assignment (NAME=VALUE) — only meaningful as a prefix on a full
+# command line, so it is stripped only on the report.md fallback path.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Spaced shell redirection operators a pasted command may carry. Glued forms
+# (`2>file`) are left as-is — rare in the model's spaced blocks, and a stray
+# arg fails loudly rather than mis-reproducing silently.
+_REDIRECT_OPS = {">", ">>", "<", "2>", "1>", "&>", ">&"}
+
+
+def _split(line: str) -> list[str]:
+    try:
+        return shlex.split(line)
+    except ValueError:
+        return []
+
+
+def _read_repro_cmd_line(scan_dirs: Iterable[Path]) -> str:
+    """First non-comment line of repro.cmd — the args-only argv."""
+    for d in (Path(x) for x in scan_dirs):
+        p = d / REPRO_CMD_FILE
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            s = raw.strip()
+            if s and not s.startswith("#"):
+                return s
+    return ""
+
+
+def _report_command_args(scan_dirs: Iterable[Path],
+                         bin_names: set[str]) -> list[str]:
+    """Args of the fenced report.md command whose tokens name the binary, with
+    the env prefix, the binary, and redirections stripped. [] when absent.
+
+    Fallback for crashes written before repro.cmd existed (and for a model that
+    documented the command only in prose). Anchored on a binary *token* (not a
+    substring), so report prose is never mistaken for a command.
+    """
+    if not bin_names:
+        return []
+    for d in (Path(x) for x in scan_dirs):
+        for name in ("report.md", "REPORT.md"):
+            p = d / name
+            if not p.is_file():
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            # Join shell line-continuations so a multi-line command reads as one
+            # logical line before we scan the fenced block.
+            text = text.replace("\\\n", " ")
+            in_fence = False
+            for line in text.splitlines():
+                if line.lstrip().startswith("```"):
+                    in_fence = not in_fence
+                    continue
+                if not in_fence:
+                    continue
+                toks = _split(line)
+                if any(os.path.basename(t) in bin_names for t in toks):
+                    return _strip_command_prefix(toks, bin_names)
+    return []
+
+
+def _strip_command_prefix(toks: list[str], bin_names: set[str]) -> list[str]:
+    """Drop a leading `env`, KEY=VAL env assignments, the binary token, and any
+    spaced redirection + its target, leaving the argv after the binary."""
+    i = 0
+    if i < len(toks) and toks[i] == "env":
+        i += 1
+    while i < len(toks) and _ENV_ASSIGN_RE.match(toks[i]):
+        i += 1
+    if i < len(toks) and os.path.basename(toks[i]) in bin_names:
+        i += 1
+    out: list[str] = []
+    skip_next = False
+    for tok in toks[i:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in _REDIRECT_OPS:
+            skip_next = True
+            continue
+        out.append(tok)
+    return out
+
+
+def _with_testcase_token(args: list[str], testcase_name: str) -> list[str]:
+    """Rewrite a literal testcase filename to {TESTCASE} and ensure the token is
+    present, so callers can place the staged input at the right position."""
+    out = [TESTCASE_TOKEN
+           if (testcase_name and os.path.basename(a) == testcase_name)
+           else a for a in args]
+    if TESTCASE_TOKEN not in out:
+        out.append(TESTCASE_TOKEN)
+    return out
+
+
+def find_repro_args(scan_dirs: Iterable[Path], *,
+                    bin_names: Iterable[str] = (),
+                    testcase_name: str = "") -> list[str]:
+    """Return the CLI argv a crash needs, with {TESTCASE} marking the input.
+
+    Prefers the args-only `repro.cmd` (used verbatim), else recovers the args
+    from report.md's fenced command block. Returns [] when only the testcase
+    remains (a bare `BIN <input>`), so callers keep their default invocation
+    unchanged for the common flag-less crash. Never raises.
+    """
+    names = {os.path.basename(b) for b in bin_names if b}
+    line = _read_repro_cmd_line(scan_dirs)
+    args = _split(line) if line else _report_command_args(scan_dirs, names)
+    if not args:
+        return []
+    args = _with_testcase_token(args, testcase_name)
+    if args == [TESTCASE_TOKEN]:
+        return []
+    return args

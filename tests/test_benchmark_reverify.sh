@@ -239,5 +239,42 @@ assert_eq "$before8" "$(cat "$pool8/crashes/CRASH-0001/sanitizer.txt")" \
   "T8: reverify refuses middle '..' components in asan_bin"
 rm -rf "$cfgdir8"
 
+# ── T9: a crash that only fires under recorded CLI args (repro.cmd) ──
+# The stub crashes ONLY when invoked with --boom; bare `stub <testcase>` runs
+# clean. Without argv replay this would record a false 0/5. repro.cmd carries
+# the args-only argv with {TESTCASE} at the position the bug needs.
+pool9="$TEST_TMPDIR/pool9"; tgt9="$TEST_TMPDIR/tgt9"
+mkdir -p "$tgt9/build-asan/src"
+cat > "$tgt9/target.toml" <<'TOML'
+target = "reverify-args"
+asan_bin = "build-asan/src/stub"
+[sanitizer]
+enabled = ["asan"]
+TOML
+cat > "$tgt9/build-asan/src/stub" <<'SH'
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = "--boom" ] && {
+  echo "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010"
+  echo "SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free"
+  exit 1
+}; done
+echo "ran clean"; exit 0
+SH
+chmod +x "$tgt9/build-asan/src/stub"
+_make_footerless_crash "$pool9/crashes/CRASH-0001"
+printf -- '--boom {TESTCASE}\n' > "$pool9/crashes/CRASH-0001/repro.cmd"
+_reverify_pool_crash_rates "$pool9" "$tgt9" test
+assert_file_contains "$pool9/crashes/CRASH-0001/sanitizer.txt" '^CRASH_RATE: 5/5' \
+  "T9: repro.cmd argv is replayed through reverify (flag-dependent crash → 5/5)"
+
+# ── T9b: same crash WITHOUT repro.cmd → bare invocation, honest 0/5 ──
+# Guards that the argv path is the cause of T9's 5/5, not the stub crashing
+# unconditionally.
+pool9b="$TEST_TMPDIR/pool9b"
+_make_footerless_crash "$pool9b/crashes/CRASH-0001"
+_reverify_pool_crash_rates "$pool9b" "$tgt9" test
+assert_file_contains "$pool9b/crashes/CRASH-0001/sanitizer.txt" '^CRASH_RATE: 0/5' \
+  "T9b: without repro.cmd the bare invocation runs clean (0/5)"
+
 teardown_test_env
 summary
