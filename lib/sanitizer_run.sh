@@ -65,8 +65,17 @@ sanitizer_run_generic() {
   generic_testcase="$1"; shift
   skip_testcase="${SANITIZER_GENERIC_SKIP_TESTCASE:-${ASAN_GENERIC_SKIP_TESTCASE:-0}}"
 
-  local env_cmd runner_env_args kv
-  env_cmd=(env "${SAN}_OPTIONS=$(sanitizer_runtime_options "$san" "$opts")")
+  local env_cmd runner_env_args kv offline_sym=0 san_opts
+  san_opts="$(sanitizer_runtime_options "$san" "$opts")"
+  # Decouple symbolization from the crashing run when an offline symbolizer is
+  # available: symbolize=0 emits raw module+offset frames immediately (no
+  # in-process atos to hang under the timeout), and we resolve them offline
+  # below. Same fix as bin/run-asan's generic path; see sanitizer_symbolize_file.
+  if sanitizer_symbolize_available; then
+    offline_sym=1
+    san_opts="${san_opts}:symbolize=0"
+  fi
+  env_cmd=(env "${SAN}_OPTIONS=$san_opts")
   runner_env_args=()
   if [[ -n "${TARGET_RUNNER_ENV+set}" && "${#TARGET_RUNNER_ENV[@]}" -gt 0 ]]; then
     target_runner_tokens_supported "$san" || return 2
@@ -87,7 +96,22 @@ sanitizer_run_generic() {
     generic_cmd+=("$@")
   fi
 
-  audit_timeout_run "$timeout_val" "${env_cmd[@]}" "${generic_cmd[@]}" || rc=$?
+  if [ "$offline_sym" -eq 1 ]; then
+    # Capture the report (symbolize=0), resolve frames offline, then emit it so
+    # run-sanitizer-multi sees a symbolized trace. The offline pass rewrites
+    # every frame (no-debug-info frames degrade to `in <module>`, as ASan's
+    # inline symbolizer renders them) and falls open to raw frames only if the
+    # pass cannot run.
+    local cap
+    cap="$(mktemp "${TMPDIR:-/tmp}/${san}-generic-XXXXXX")"
+    audit_timeout_run "$timeout_val" "${env_cmd[@]}" "${generic_cmd[@]}" \
+      >"$cap" 2>&1 || rc=$?
+    sanitizer_symbolize_file "$cap"
+    cat "$cap"
+    rm -f "$cap"
+  else
+    audit_timeout_run "$timeout_val" "${env_cmd[@]}" "${generic_cmd[@]}" || rc=$?
+  fi
   if [ "$rc" -eq 124 ]; then
     echo "[run-$san] generic runner timed out after ${timeout_val}s" >&2
     return "$rc"

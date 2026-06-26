@@ -609,8 +609,8 @@ LANGUAGES: tuple[Language, ...] = (
         # backend (see fuzz_backends) when ASan instrumentation is
         # actually needed.
         sanitizer_env=(
-            ("CFLAGS", "-O2 -g -DNDEBUG -fno-omit-frame-pointer"),
-            ("CXXFLAGS", "-O2 -g -DNDEBUG -fno-omit-frame-pointer"),
+            ("CFLAGS", "-O2 -g1 -DNDEBUG -fno-omit-frame-pointer"),
+            ("CXXFLAGS", "-O2 -g1 -DNDEBUG -fno-omit-frame-pointer"),
         ),
         fuzz_backends=("atheris",),
     ),

@@ -218,6 +218,34 @@ SUMMARY: AddressSanitizer: stack-buffer-overflow (testbin:arm64+0x100002f94) in 
 ok(stack_frames.first_interesting_frame(macos_start_only) is None,
    "skips macOS dyld start+ tail frames instead of using them as dedup keys")
 
+# Offline symbolization (symbolize=0 + atos/llvm) renders the same dyld entry
+# frame as the bare symbol `start (dyld)` — no `+offset` — which the native
+# `^start\+0x` rule does NOT catch. Without the `\bstart \(dyld\)` rule this
+# frame becomes the crash state and over-merges unrelated main-only CLI crashes.
+macos_start_only_offline = """\
+==18355==ERROR: AddressSanitizer: stack-buffer-overflow
+WRITE of size 1 at 0x1 thread T0
+    #0 0x10 in main (testbin)
+    #1 0x11 in start (dyld)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (testbin:arm64+0x100002f94) in main
+"""
+ok(stack_frames.first_interesting_frame(macos_start_only_offline) is None,
+   "skips offline-symbolized `start (dyld)` dyld tail frame (no +offset spelling)")
+
+# Precision: a target function genuinely named `start` (with its own source or
+# module, never `(dyld)`) must survive — the rule keys on the dyld module.
+user_start_fn = """\
+==18355==ERROR: AddressSanitizer: heap-buffer-overflow
+WRITE of size 1 at 0x1 thread T0
+    #0 0x10 in start /src/app/run.c:42
+    #1 0x11 in main (testbin)
+SUMMARY: AddressSanitizer: heap-buffer-overflow
+"""
+_usf = stack_frames.first_interesting_frame(user_start_fn)
+ok(_usf is not None and _usf.function == "start",
+   "keeps a real target function named `start` (dyld rule keys on the module)",
+   detail=f"function={_usf.function if _usf else None!r}")
+
 # ClusterFuzz _filter_stack_frame port: the function name that enters the
 # crash state has its parameter list, [abi:...] / [clone] suffixes, and
 # anonymous-namespace markers stripped. Template args in <...> are kept.

@@ -175,11 +175,17 @@ STACK_FRAME_IGNORE_REGEXES = [
     '^std::sys_common::backtrace',
     '^__rust_start_panic',
     '^__scrt_common_main_seh',
-    # DIVERGENCE: macOS dyld tail frame. The symbolizer emits this as e.g.
-    # ``start+0x1b4c`` without a source path, so the existing ``^_start``
-    # rule does not catch it. Letting it through collapses unrelated CLI
-    # crashes into the same dedup key.
+    # DIVERGENCE: macOS dyld process-entry tail frame, in both spellings.
+    # The inline (symbolize=1) symbolizer renders it as ``start+0x1b4c``
+    # with no source path; the offline pass (symbolize=0 + atos/llvm) renders
+    # the bare symbol ``start (dyld)`` (no ``+offset``). Neither is caught by
+    # the existing ``^_start`` rule, and letting either through collapses
+    # unrelated main-only CLI crashes into one dedup key. The ``(dyld)``
+    # module qualifier (matched against the raw frame line) keeps this from
+    # touching a target function genuinely named ``start``, which would render
+    # with its own module/source, never ``(dyld)``.
     '^start\\+0x',
+    '\\bstart \\(dyld\\)',
     '^libgcc_s.so.*',
     '.*ASAN_OnSIGSEGV',
     '.*BaseThreadInitThunk',

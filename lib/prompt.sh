@@ -1307,11 +1307,11 @@ ${missing:-- asan: set asan_bin/asan_lib in target.toml or build under ${ASAN_BU
 For ASan targets, the standard build directory is \`${ASAN_BUILD_DIR}/\`. Build with sanitizer flags only when the assigned work actually needs the missing artifact:
 \`\`\`
 jobs=\$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
-CC=clang CXX=clang++ CFLAGS="-fsanitize=address -O2 -g -DNDEBUG -fno-omit-frame-pointer" \\
+CC=clang CXX=clang++ CFLAGS="-fsanitize=address -O2 -g1 -DNDEBUG -fno-omit-frame-pointer" \\
   CXXFLAGS="\$CFLAGS" LDFLAGS="-fsanitize=address" \\
   ./configure --prefix=${ASAN_BUILD_DIR} && make -j"\$jobs" && make install
 \`\`\`
-**Sanitizer builds must mirror the release binary while keeping symbols.** Use optimized release profiles with explicit debug info: \`-O2 -g -DNDEBUG\` plus sanitizer flags in compile and link flags. Do NOT pass \`--enable-debug\` (autotools), \`-DCMAKE_BUILD_TYPE=Debug\` / \`RelWithDebInfo\` / \`-DENABLE_DEBUG=ON\` (cmake), \`--buildtype=debug\` / \`debugoptimized\` (meson), or \`ac_add_options --enable-debug\` (mozconfig). Prefer cmake \`-DCMAKE_BUILD_TYPE=Release\` and meson \`--buildtype=release -Db_ndebug=true\`. Debug toggles compile in \`DEBUGASSERT\` / \`MOZ_ASSERT\` / \`DCHECK\` / \`assert(...)\` aborts that are no-ops in shipped binaries — sanitizer hits on those are robustness signals, not security bugs.
+**Sanitizer builds must mirror the release binary while keeping symbols.** Use optimized release profiles with explicit debug info: \`-O2 -g1 -DNDEBUG\` plus sanitizer flags in compile and link flags. \`-g1\` (line tables only; clang and gcc both accept it) gives function + file:line for symbolized stacks without full \`-g\`'s build/size cost; plain \`-g\` also works. Do NOT pass \`--enable-debug\` (autotools), \`-DCMAKE_BUILD_TYPE=Debug\` / \`RelWithDebInfo\` / \`-DENABLE_DEBUG=ON\` (cmake), \`--buildtype=debug\` / \`debugoptimized\` (meson), or \`ac_add_options --enable-debug\` (mozconfig). Prefer cmake \`-DCMAKE_BUILD_TYPE=Release\` and meson \`--buildtype=release -Db_ndebug=true\`. Debug toggles compile in \`DEBUGASSERT\` / \`MOZ_ASSERT\` / \`DCHECK\` / \`assert(...)\` aborts that are no-ops in shipped binaries — sanitizer hits on those are robustness signals, not security bugs.
 Adapt the above to the target's actual build system (cmake, meson, cargo, go, etc.) and update \`target.toml\`.
 SANDIR
         ;;

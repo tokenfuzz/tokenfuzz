@@ -811,6 +811,12 @@ CMAKE_BUILD_TOP = """\
 # DCHECK_IS_ON, ...) that turn DEBUGASSERT / MOZ_ASSERT / DCHECK /
 # assert() into real aborts; those vanish in the shipped binary, so a
 # debug-only abort is a robustness signal, not a security bug.
+#
+# Full -g here (vs the audit build's lighter -g1) is deliberate:
+# this script is handed to a maintainer to reproduce and debug the crash
+# interactively, where variable/type DWARF earns its keep. The audit's
+# own builds only need function + file:line for clustering, so they use
+# the lighter line-tables-only flag.
 rm -f "$build/CMakeCache.txt"
 rm -rf "$build/CMakeFiles"
 cmake -S "$src" -B "$build" \\

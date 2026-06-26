@@ -530,10 +530,25 @@ case "$MODE" in
         # ASAN_GENERIC_SKIP_TESTCASE=1 (set by bin/probe when the [runner]
         # args template already embeds the testcase via {TESTCASE}) tells
         # us NOT to insert the testcase between bin and trailing args.
+        _asan_offline_sym=0
         if [[ "$asan_generic_disable_options" = "1" ]]; then
             _generic_env_args=()
         else
-            _generic_env_args=(env ASAN_OPTIONS="$(sanitizer_runtime_options asan "$ASAN_OPTS_FULL")")
+            _asan_opts="$(sanitizer_runtime_options asan "$ASAN_OPTS_FULL")"
+            # Decouple symbolization from the crashing run when we can resolve
+            # frames afterwards. symbolize=0 makes ASan print raw
+            # module+offset frames immediately — no in-process atos to hang or
+            # run long under GENERIC_TIMEOUT and truncate the report before any
+            # frame prints (the macOS failure that strands crashes in
+            # `pending:` with no crash_state). We symbolize the captured report
+            # below, via llvm-symbolizer or atos/addr2line. When no offline
+            # symbolizer exists at all we leave ASan's inline symbolizer in
+            # charge, so behaviour is unchanged where we couldn't re-symbolize.
+            if sanitizer_symbolize_available; then
+                _asan_offline_sym=1
+                _asan_opts="${_asan_opts}:symbolize=0"
+            fi
+            _generic_env_args=(env ASAN_OPTIONS="$_asan_opts")
         fi
         # Layer in [runner].env entries (KEY=VAL strings). These ride on
         # top of the sanitizer env wrapper so target-specific knobs like
@@ -558,16 +573,26 @@ case "$MODE" in
             _generic_cmd+=("$@")
         fi
         rc=0
-        if [ "${#_generic_env_args[@]}" -eq 0 ] \
-           && [ "${#_runner_env_args[@]}" -eq 0 ]; then
-            audit_timeout_run "$GENERIC_TIMEOUT" "${_generic_cmd[@]}" || rc=$?
+        # `env` accepts KEY=VAL prefixes in order — concatenate the sanitizer
+        # + runner env lists ahead of the command into one argv.
+        _generic_run=(${_generic_env_args[@]+"${_generic_env_args[@]}"} \
+                      ${_runner_env_args[@]+"${_runner_env_args[@]}"} \
+                      "${_generic_cmd[@]}")
+        if [ "$_asan_offline_sym" -eq 1 ]; then
+            # Capture the report (symbolize=0), resolve frames offline, then
+            # emit it so run-sanitizer-multi sees a symbolized trace. The
+            # offline pass rewrites every frame — frames with no debug info
+            # degrade to `in <module>` form, exactly as ASan's inline
+            # symbolizer renders them — and falls open to the raw frames only
+            # if the pass itself cannot run.
+            _asan_capture="$(mktemp "${TMPDIR:-/tmp}/asan-generic-XXXXXX")"
+            audit_timeout_run "$GENERIC_TIMEOUT" "${_generic_run[@]}" \
+                >"$_asan_capture" 2>&1 || rc=$?
+            sanitizer_symbolize_file "$_asan_capture"
+            cat "$_asan_capture"
+            rm -f "$_asan_capture"
         else
-            # `env` accepts KEY=VAL prefixes in order — concatenate the
-            # sanitizer + runner env lists.
-            audit_timeout_run "$GENERIC_TIMEOUT" \
-                ${_generic_env_args[@]+"${_generic_env_args[@]}"} \
-                ${_runner_env_args[@]+"${_runner_env_args[@]}"} \
-                "${_generic_cmd[@]}" || rc=$?
+            audit_timeout_run "$GENERIC_TIMEOUT" "${_generic_run[@]}" || rc=$?
         fi
         if [ "$rc" -eq 124 ]; then
             echo "[run-asan] generic runner timed out after ${GENERIC_TIMEOUT}s" >&2

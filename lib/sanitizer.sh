@@ -115,6 +115,83 @@ sanitizer_compose_options() {
   printf '%s' "$out"
 }
 
+# Borrowed ClusterFuzz offline symbolizer, resolved relative to this file.
+_SANITIZER_SYMBOLIZER_PY="${BASH_SOURCE[0]%/*}/clusterfuzz_symbolizer.py"
+
+# sanitizer_symbolizer_path — echo a usable llvm-symbolizer path, else empty.
+# llvm-symbolizer is the preferred backend; lib/clusterfuzz_symbolizer.py falls
+# back to atos/addr2line when it is absent, so an empty result is not fatal.
+sanitizer_symbolizer_path() {
+  local t
+  t="$(audit_llvm_tool llvm-symbolizer)"
+  case "$t" in
+    */*) [ -x "$t" ] && { printf '%s' "$t"; return 0; } ;;
+  esac
+  command -v llvm-symbolizer 2>/dev/null || true
+}
+
+# sanitizer_symbolize_available — succeed (rc 0) when we can actually
+# re-symbolize a symbolize=0 report: the CF symbolizer module is present AND
+# some backend it can drive is reachable — llvm-symbolizer, else the platform
+# tool (atos on macOS, addr2line on Linux). Callers gate symbolize=0 on this:
+# only decouple symbolization when both halves exist, otherwise leave the inline
+# symbolizer in charge. The module check matters because sanitizer_symbolize_file
+# falls open (no-ops) if the helper is missing — without this gate, a tree that
+# shipped the sanitizer.sh change but not clusterfuzz_symbolizer.py would set
+# symbolize=0 and then never re-symbolize, leaking raw frames into clustering.
+# The backend check is crucially true on stock macOS (Apple clang ships atos but
+# no llvm-symbolizer), which is the platform whose inline atos hang motivates the
+# whole fix.
+sanitizer_symbolize_available() {
+  [ -f "$_SANITIZER_SYMBOLIZER_PY" ] || return 1
+  [ -n "$(sanitizer_symbolizer_path)" ] && return 0
+  command -v atos >/dev/null 2>&1 && return 0
+  command -v addr2line >/dev/null 2>&1 && return 0
+  return 1
+}
+
+# sanitizer_report_has_raw_frames <file> — succeed (rc 0) when <file> holds at
+# least one unsymbolized `#N 0xpc (module+0xoffset)` frame, i.e. there is
+# something for the offline symbolizer to resolve. Lets the symbolize step skip
+# the interpreter spin-up on clean runs and already-symbolized reports. File
+# grep (no pipe → no pipefail/SIGPIPE hazard).
+sanitizer_report_has_raw_frames() {
+  grep -qE '^ *#[0-9]+ +0x[0-9a-f]+ +\([^)]*\+0x[0-9a-f]+\)' "$1" 2>/dev/null
+}
+
+# sanitizer_symbolize_file <file> — offline-symbolize a sanitizer report that
+# was captured with symbolize=0, rewriting <file> in place.
+#
+# This decouples symbolization from the crashing run. On macOS the sanitizer's
+# in-process symbolizer (atos) is slow and can deadlock while building a report,
+# so under the run timeout the report is killed after the "ERROR:" header but
+# before any frames print — leaving the crash with no state for
+# bin/cluster-crashes to dedup on (it then falls back to a per-crash
+# `pending:<id>` cluster). With symbolize=0 the crashing process emits raw
+# `#N 0xpc (module+0xoffset)` frames immediately; we resolve them here, with the
+# process already dead. See lib/clusterfuzz_symbolizer.py.
+#
+# Best-effort and falls open: on any failure or a >60s overrun, <file> is left
+# untouched so the raw (still ASLR-stable) frames survive. The module picks
+# llvm-symbolizer or atos/addr2line itself, so the llvm path here may be empty.
+# Never returns non-zero.
+sanitizer_symbolize_file() {
+  local f="$1" tmp
+  [ -s "$f" ] || return 0
+  [ -f "$_SANITIZER_SYMBOLIZER_PY" ] || return 0
+  # Skip the interpreter spin-up unless there is a raw frame to resolve, so
+  # clean runs and already-symbolized reports are a true no-op.
+  sanitizer_report_has_raw_frames "$f" || return 0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/sanitizer-symbolize-XXXXXX")" || return 0
+  if audit_timeout_run 60 python3 "$_SANITIZER_SYMBOLIZER_PY" \
+       --llvm-symbolizer "$(sanitizer_symbolizer_path)" <"$f" >"$tmp" 2>/dev/null \
+       && [ -s "$tmp" ]; then
+    cat "$tmp" >"$f"
+  fi
+  rm -f "$tmp"
+  return 0
+}
+
 # Path to the sanitizer option-string source of truth, resolved relative
 # to this file so it works regardless of the caller's CWD.
 _SANITIZER_OPTIONS_CONF="${BASH_SOURCE[0]%/*}/sanitizer_options.conf"

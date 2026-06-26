@@ -116,7 +116,14 @@ def detect_build_system(src: Path) -> str:
 #   * uses -O2 (matches what distros ship and what OSS-Fuzz uses;
 #     -O1 was the prior default and produced visibly different
 #     crash signatures vs. shipped binaries),
-#   * keeps -g for symbolised stack traces in the sanitizer report,
+#   * uses -g1 (line tables only) for symbolised stack traces. Line
+#     tables carry function + file:line, which is all crash
+#     symbolization and clustering need, at a fraction of full -g's
+#     DWARF; less debug info also symbolizes faster, which matters on
+#     macOS where slow in-process symbolization can truncate a report
+#     under the run timeout. -g1 is the portable spelling (clang and
+#     gcc both accept it; clang treats it as -gline-tables-only),
+#     whereas -gline-tables-only is clang-only.
 #   * keeps -fno-omit-frame-pointer for accurate ASan backtraces.
 # CMAKE_BUILD_TYPE=Release applies the same NDEBUG/-O2 baseline at
 # the CMake level for projects that read the type and not raw
@@ -132,8 +139,8 @@ cmake -S "$src" -B "$build" \\
     -DCMAKE_BUILD_TYPE=Release \\
     -DCMAKE_C_COMPILER="${CC:-clang}" \\
     -DCMAKE_CXX_COMPILER="${CXX:-clang++}" \\
-    -DCMAKE_C_FLAGS="-O2 -g -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
-    -DCMAKE_CXX_FLAGS="-O2 -g -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
+    -DCMAKE_C_FLAGS="-O2 -g1 -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
+    -DCMAKE_CXX_FLAGS="-O2 -g1 -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
     -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=__SAN__" \\
     -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=__SAN__"
 cmake --build "$build" -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
@@ -148,8 +155,8 @@ mkdir -p "$build"
 ( cd "$build" && \\
     CC="${CC:-clang}" \\
     CXX="${CXX:-clang++}" \\
-    CFLAGS="-O2 -g -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
-    CXXFLAGS="-O2 -g -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
+    CFLAGS="-O2 -g1 -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
+    CXXFLAGS="-O2 -g1 -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
     LDFLAGS="-fsanitize=__SAN__" \\
     "$src/configure" )
 ( cd "$build" && make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)" )
@@ -163,8 +170,8 @@ mkdir -p "$build"
 meson setup --reconfigure "$build" "$src" \\
     --buildtype=release \\
     -Db_sanitize=__SAN_MESON__ -Db_ndebug=true \\
-    -Dc_args="-g -fno-omit-frame-pointer" \\
-    -Dcpp_args="-g -fno-omit-frame-pointer"
+    -Dc_args="-g1 -fno-omit-frame-pointer" \\
+    -Dcpp_args="-g1 -fno-omit-frame-pointer"
 meson compile -C "$build"
 """
 

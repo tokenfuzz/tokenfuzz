@@ -38,6 +38,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$REPO_ROOT/lib/timeout.sh"
+# shellcheck source=../lib/platform.sh
+source "$REPO_ROOT/lib/platform.sh"  # audit_llvm_tool, used by the symbolize gate
 # shellcheck source=../lib/target_config.sh
 source "$REPO_ROOT/lib/target_config.sh"
 # shellcheck source=../lib/sanitizer.sh

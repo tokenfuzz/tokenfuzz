@@ -671,7 +671,7 @@ PY
         if [ -n "${LDFLAGS:-}" ]; then
           _probe_split_shell_words_into_array extra_link_args "$LDFLAGS" || return 2
         fi
-        "$compiler" "-fsanitize=$sanitize_flag" -g -O0 \
+        "$compiler" "-fsanitize=$sanitize_flag" -g1 -O0 \
           ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
           ${define_args[@]+"${define_args[@]}"} \
           ${inc_args[@]+"${inc_args[@]}"} \
@@ -684,7 +684,9 @@ PY
       rust)
         # Single-file rustc build. Sanitizer enablement is opt-in via
         # RUSTFLAGS — the harness inherits whatever the operator exported.
-        rustc -g -C opt-level=0 ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
+        # -Cdebuginfo=1 is line-tables-only (rustc's equivalent of clang's
+        # -gline-tables-only, and OSS-Fuzz's default for Rust sanitizer builds).
+        rustc -C debuginfo=1 -C opt-level=0 ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
           -o "$hb_path" "$harness_src" 2>"$cc_log" || rc=$?
         ;;
       go)
@@ -692,7 +694,7 @@ PY
           "$harness_src" 2>"$cc_log" || rc=$?
         ;;
       swift)
-        swiftc -g -O0 ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
+        swiftc -gline-tables-only -O0 ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
           -o "$hb_path" "$harness_src" 2>"$cc_log" || rc=$?
         ;;
       kotlin)

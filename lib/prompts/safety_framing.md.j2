@@ -135,7 +135,8 @@ that follows in release once the assert is compiled out. The same
 rule applies to FINDINGs.
 
 **Build sanitizer trees as optimized release builds with symbols, not debug.**
-When building a sanitizer binary or library yourself: use `-O2 -g -DNDEBUG`
+When building a sanitizer binary or library yourself: use
+`-O2 -g1 -DNDEBUG` (line tables only — clang and gcc both accept it; plain `-g` also works)
 with sanitizer flags in compile and link flags; cmake
 `-DCMAKE_BUILD_TYPE=Release`, meson `--buildtype=release -Db_ndebug=true`,
 and autotools without `--enable-debug` (pass `--disable-debug` when

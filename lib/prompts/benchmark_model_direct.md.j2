@@ -133,7 +133,7 @@ shipped to users. When you (re)configure a sanitizer build:
 
   - autotools: drop `--enable-debug` (pass `--disable-debug` if
     offered).
-  - cmake: `-DCMAKE_BUILD_TYPE=Release` plus `-O2 -g -DNDEBUG`;
+  - cmake: `-DCMAKE_BUILD_TYPE=Release` plus `-O2 -g1 -DNDEBUG`;
     never `RelWithDebInfo`, `Debug`, or any project-specific
     `*_DEBUG=ON` toggle.
   - meson: `--buildtype=release -Db_ndebug=true`, not `debug` or

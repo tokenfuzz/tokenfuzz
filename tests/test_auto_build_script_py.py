@@ -62,6 +62,20 @@ abs_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(abs_mod)
 
 
+# ─── debug-info flag (symbolization) ────────────────────────────────
+# Audit sanitizer builds use -g1 (line tables only): function + file:line for
+# symbolized crash stacks without full -g's DWARF, which also keeps
+# symbolization fast (slow symbolization is what truncated macOS reports under
+# the run timeout). -g1 is the portable spelling (clang and gcc both accept it;
+# -gline-tables-only is clang-only). Pin the flag so a future edit does not
+# silently drop debug info or regress to heavyweight -g.
+for _name in ("_INITIAL_CMAKE", "_INITIAL_AUTOTOOLS", "_INITIAL_MESON"):
+    _tmpl = getattr(abs_mod, _name)
+    ok("-g1" in _tmpl, f"{_name}: builds with -g1 (line tables only)")
+    ok(" -g " not in _tmpl and ' -g"' not in _tmpl,
+       f"{_name}: no bare -g (full DWARF) in build flags")
+
+
 # ─── detect_missing_commands ────────────────────────────────────────
 
 ok(abs_mod.detect_missing_commands("") == [],

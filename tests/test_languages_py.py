@@ -695,6 +695,24 @@ assert_eq(True, any("ThreadSanitizer" in p for p in _crash_pats),
           "all_crash_patterns: includes the TSan banner")
 
 
+# ─── sanitizer_env debug-info flag ─────────────────────────────────
+# Any debug flag a language injects for its (C/C++) sanitizer build must be
+# -g1 (line tables only), never full -g: line tables suffice for symbolized
+# crash stacks (function + file:line) and keep symbolization cheap, which is
+# what the macOS report-truncation fix relies on. -g1 is portable across clang
+# and gcc.
+for _lang in languages.LANGUAGES:
+    for _key, _val in _lang.sanitizer_env:
+        if _key not in ("CFLAGS", "CXXFLAGS"):
+            continue
+        _toks = _val.split()
+        assert_eq(False, "-g" in _toks,
+                  f"{_lang.name} {_key}: no bare -g (full DWARF)")
+        if any(t.startswith("-g") for t in _toks):
+            assert_in("-g1", _val,
+                      f"{_lang.name} {_key}: debug info is -g1 (line tables only)")
+
+
 # ─── Summary ───────────────────────────────────────────────────────
 
 print()
