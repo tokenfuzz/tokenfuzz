@@ -2710,7 +2710,16 @@ preflight_build_freshness() {
   state="$(python3 "$SCRIPT_ROOT/lib/target_config.py" \
              build-freshness "$TARGET_ROOT" asan 2>/dev/null || echo skip)"
   case "$state" in
-    fresh|skip) return 0 ;;
+    fresh)
+      # Build is current, so the rebuild path (setup-target, where .dSYMs are
+      # generated) is skipped — ensure them here too, for every enabled
+      # sanitizer build. On macOS the offline symbolizer needs a .dSYM to
+      # resolve library crash frames to file:line. Idempotent; best-effort;
+      # no-op on Linux. Stale/missing fall through to setup-target below, which
+      # generates .dSYMs after building.
+      audit_make_dsyms_for_target "$TARGET_ROOT" >/dev/null 2>&1 || true
+      return 0 ;;
+    skip) return 0 ;;
   esac
   log "PREFLIGHT: native ASan build is '${state}' relative to source — (re)building via bin/setup-target --build before agents start (fail-open: the audit proceeds even if this cannot complete)" | tee -a "$INDEX"
   local build_log="${LOGDIR:-$RESULTS_DIR}/setup-build.log"

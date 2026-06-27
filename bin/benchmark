@@ -524,6 +524,13 @@ if [ "$DRY_RUN" != "1" ] && [ "$DO_REGENERATE" != "1" ]; then
       ;;
   esac
   unset _bench_freshness
+  # The fresh path above skips setup-target, where .dSYMs are generated, so
+  # ensure them here too, for every enabled sanitizer build: on macOS the
+  # harness backend's offline symbolizer needs a .dSYM to resolve library crash
+  # frames to file:line. Idempotent, best-effort, no-op on Linux / when no build
+  # exists. (model-direct is unaffected — its single-step harness build already
+  # carries an auto-.dSYM.)
+  audit_make_dsyms_for_target "$SCRIPT_ROOT/targets/$TARGET_SLUG" >/dev/null 2>&1 || true
 fi
 
 # ── run setup ────────────────────────────────────────────────────────────

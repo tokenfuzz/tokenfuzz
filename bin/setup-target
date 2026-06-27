@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_ROOT="${AUDIT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 source "$SCRIPT_ROOT/lib/target_config.sh"
+source "$SCRIPT_ROOT/lib/platform.sh"
 
 usage() {
   cat <<'EOF'
@@ -813,6 +814,16 @@ if [ "$NATIVE_BUILD_SYSTEM" -eq 1 ] && [ "$RUN_BUILD" -eq 1 ]; then
         log "bootstrap: $san build failed (see $TARGET_ROOT/.audit/build-materialize.log); $san is best-effort, ASan is unaffected"
       fi
     fi
+    # macOS: bake each built dylib/exe debug map into a self-contained .dSYM so
+    # the audit's offline symbolizer (which prefers llvm-symbolizer, and
+    # llvm-symbolizer cannot follow a Mach-O debug map) resolves library crash
+    # frames to file:line. Run for any existing build dir, not just a fresh
+    # rebuild, so an already-fresh build is repaired without recompiling.
+    # Idempotent (skips up-to-date .dSYMs); best-effort; no-op on Linux. Done in
+    # the materialization path, not the recipe, so it covers existing
+    # .audit/build.sh files without regeneration and survives LLM revisions.
+    audit_make_dsyms "$SAN_BUILD_DIR" \
+      >> "$TARGET_ROOT/.audit/build-materialize.log" 2>&1 || true
   done
 fi
 

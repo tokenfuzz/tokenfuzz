@@ -68,6 +68,66 @@ audit_is_linux() {
   [ "$(audit_os)" = "Linux" ]
 }
 
+# audit_make_dsyms <build-dir>
+# macOS only, best-effort: give every Mach-O shared library / executable under
+# <build-dir> a self-contained .dSYM bundle.
+#
+# Why this exists: a CMake/-g1 build links a dylib whose DWARF lives only in the
+# .o object files, reachable through a Mach-O *debug map*; the linked dylib
+# carries no embedded DWARF and no .dSYM. atos follows the debug map, but
+# llvm-symbolizer does NOT — it reads DWARF only from the binary itself or a
+# .dSYM. The audit's offline symbolizer (lib/clusterfuzz_symbolizer.py) prefers
+# llvm-symbolizer and treats a function-only result as final, so without a .dSYM
+# library crash frames lose file:line and render as `func (module)`. dsymutil
+# bakes the debug map's DWARF into a sibling .dSYM that both backends consume,
+# making symbolization backend- and timing-independent. (Harness executables
+# built single-step by clang already get an auto-dSYM; this covers the
+# separately-linked artifacts a native target build emits.) No-op on Linux,
+# where -g1 DWARF is embedded directly in the ELF .so.
+audit_make_dsyms() {
+  audit_is_darwin || return 0
+  local build="${1:-}"
+  [ -n "$build" ] && [ -d "$build" ] || return 0
+  command -v dsymutil >/dev/null 2>&1 || return 0
+
+  local f ftype
+  while IFS= read -r -d '' f; do
+    # Incremental rebuilds: keep a .dSYM that is at least as new as its binary.
+    if [ -e "${f}.dSYM" ] && [ ! "$f" -nt "${f}.dSYM" ]; then
+      continue
+    fi
+    case "$f" in
+      *.dylib|*.so|*.so.*) : ;;          # shared library — always a candidate
+      *)
+        # Executable found via the +x sweep: only real Mach-O, never scripts.
+        ftype="$(file -b "$f" 2>/dev/null || true)"
+        case "$ftype" in *Mach-O*) : ;; *) continue ;; esac
+        ;;
+    esac
+    # Best-effort: a binary with no usable debug map just warns; never fatal.
+    dsymutil "$f" -o "${f}.dSYM" >/dev/null 2>&1 || true
+  done < <(find "$build" -type f \( \
+             -name '*.dylib' -o -name '*.so' -o -name '*.so.*' -o -perm -u+x \
+           \) ! -path '*/CMakeFiles/*' ! -path '*.dSYM/*' -print0 2>/dev/null)
+}
+
+# audit_make_dsyms_for_target <target-root>
+# Apply audit_make_dsyms to every sanitizer build tree under <target-root> —
+# the build-<san> dirs (build-asan, build-ubsan, build-msan, build-tsan, and any
+# AUDIT_BUILD_SUFFIX variants) that setup-target materializes. Lets the audit /
+# benchmark fresh-build paths repair all enabled sanitizers' .dSYMs without
+# hardcoding a sanitizer or duplicating the build-dir glob. The build-<san>
+# layout is a harness-wide convention, not target-specific. Idempotent;
+# macOS-only no-op.
+audit_make_dsyms_for_target() {
+  audit_is_darwin || return 0
+  local root="${1:-}" d
+  [ -n "$root" ] && [ -d "$root" ] || return 0
+  for d in "$root"/build-*; do
+    [ -d "$d" ] && audit_make_dsyms "$d"
+  done
+}
+
 audit_stat_mtime_epoch() {
   # Portable mtime in epoch seconds. Returns 0 on any failure so the
   # caller can do arithmetic / numeric comparison unconditionally.
