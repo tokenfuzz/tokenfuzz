@@ -52,5 +52,25 @@ printf '%s\n1\n' "$sig" > "$stamp"
 HOUSEKEEPING_UNCHANGED_RERUN_SECS=3600 housekeeping_run_if_dirty ttl-task tracked_task "$TEST_TMPDIR/input"
 assert_eq "2" "$(wc -l < "$CALLS" | tr -d ' ')" "housekeeping: old clean stamp reruns periodically"
 
+# The signature is metadata-only and must never read file contents: a sparse
+# repro (here 1 TiB logical, a few blocks on disk) must not cost a payload read,
+# yet size+mtime must still dirty-detect a change. If content-hashing is ever
+# reintroduced, this pass goes from instant to minutes and surfaces loudly here.
+LARGE_DIR="$TEST_TMPDIR/large"
+mkdir -p "$LARGE_DIR"
+if truncate -s 1T "$LARGE_DIR/big.input" 2>/dev/null \
+   || dd if=/dev/null of="$LARGE_DIR/big.input" bs=1 seek=1099511627776 count=0 2>/dev/null; then
+  sig_before=$(housekeeping_signature large-skip "$LARGE_DIR")
+  assert_eq "0" "$?" "housekeeping: signature over large sparse file succeeds"
+  assert_neq "" "$sig_before" "housekeeping: signature over large sparse file is non-empty"
+  # Growing the file (size change) must still flip the signature.
+  truncate -s 2T "$LARGE_DIR/big.input" 2>/dev/null \
+    || dd if=/dev/null of="$LARGE_DIR/big.input" bs=1 seek=2199023255552 count=0 2>/dev/null
+  sig_after=$(housekeeping_signature large-skip "$LARGE_DIR")
+  assert_neq "$sig_before" "$sig_after" "housekeeping: large file change is still dirty-detected by size"
+else
+  echo "SKIP: cannot create sparse file on this filesystem" >&2
+fi
+
 teardown_test_env
 summary

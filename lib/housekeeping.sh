@@ -48,7 +48,7 @@ housekeeping_signature() {
   tmp=$(mktemp "${TMPDIR:-/tmp}/housekeeping-sig-XXXXXXXX") || return 1
 
   {
-    printf 'schema=2\n'
+    printf 'schema=3\n'
     printf 'label=%s\n' "$label"
     printf 'target_slug=%s\n' "${TARGET_SLUG:-}"
     printf 'is_browser=%s\n' "${IS_BROWSER_TARGET:-}"
@@ -71,17 +71,18 @@ housekeeping_signature() {
   } > "$tmp"
 
   python3 - "$@" >> "$tmp" <<'PY' || { rm -f "$tmp"; return 1; }
-import hashlib
 import os
 import stat
 import sys
 
-def digest_file(path):
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+# Metadata-only dirty-check: record (mode, size, mtime_ns) per file, never file
+# contents. All inputs are harness-written artifact dirs (crashes/, findings/,
+# coverage/, corpus/, target.toml, patch files); the harness only ever creates,
+# appends to, or replaces them, and every such write bumps mtime, so size+mtime
+# already detects any change. Content-hashing added no signal here and made a
+# sparse repro (e.g. a file-size testcase, 1 TiB logical but a few KiB on disk)
+# cost minutes of CPU per pass. Target *source* identity, where content matters
+# and mtime is unreliable, is captured separately via VCS rev (see audit).
 
 def emit(path):
     try:
@@ -115,11 +116,7 @@ def emit(path):
         print(f"L\t{path}\t{mode:o}\t{st.st_size}\t{mtime_ns}\t{target}")
         return
     if stat.S_ISREG(mode):
-        try:
-            digest = digest_file(path)
-        except OSError as exc:
-            digest = f"ERR:{type(exc).__name__}"
-        print(f"F\t{path}\t{mode:o}\t{st.st_size}\t{mtime_ns}\t{digest}")
+        print(f"F\t{path}\t{mode:o}\t{st.st_size}\t{mtime_ns}")
         return
     print(f"O\t{path}\t{mode:o}\t{st.st_size}\t{mtime_ns}")
 
