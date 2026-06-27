@@ -307,6 +307,7 @@ xlbd="$xlink/benchmark-linky/20260301-000000"
 mkdir -p "$xlbd/pool/harness/crashes" "$xlbd/pool/harness/findings" \
          "$xlbd/pool/harness/findings-rejected"
 : > "$xlbd/pool/harness/crashes/CRASH-CLUSTERS.html"
+: > "$xlbd/pool/harness/findings/FINDING-CLUSTERS.html"
 : > "$xlbd/pool/harness/findings-rejected/REJECTED-FINDINGS.html"
 cat > "$xlbd/report.json" <<JSON
 {"bench_dir":"$xlbd",
@@ -314,7 +315,8 @@ cat > "$xlbd/report.json" <<JSON
   "replicates":1,"budget_wall":3600,"conditions":["harness"]},
  "conditions":[
   {"condition":"harness","crash_total":7,"unique_crash_clusters":3,
-   "rejected_finding_total":2,"finding_total":0,
+   "rejected_finding_total":2,"finding_total":5,
+   "unique_finding_clusters":2,"medium_plus_findings":1,
    "top_severity_level":"Medium","top_severity_rank":2,
    "medium_plus_bugs":1}],
  "crash_clusters":[],"finding_clusters":[],"token_usage":[]}
@@ -671,8 +673,8 @@ assert_eq "0" "$(cat "$work/t15a.rc" 2>/dev/null || true)" \
   "T15a: fixture ledger renders without a full benchmark rerun"
 # Scoreboard counts are reviewer links; the `harness` condition renders under
 # its product label `tokenfuzz`.
-assert_file_contains "$dledger2" 'tokenfuzz.*\[3\]\([^)]*pool/harness/crashes[^)]*\).*\[1\]\([^)]*CRASH-CLUSTERS\.[a-z]*[^)]*\)' \
-  "T15b: scoreboard shows 3 crashes deduplicated to 1 unique bug"
+assert_file_contains "$dledger2" 'tokenfuzz.*\[3\]\([^)]*pool/harness/crashes[^)]*\).*\[1 \(1 M\+\)\]\([^)]*CRASH-CLUSTERS\.[a-z]*[^)]*\)' \
+  "T15b: scoreboard shows 3 crashes deduplicated to 1 unique bug, annotated as 1 Medium+"
 assert_file_contains "$dledger2" 'Bugs by severity' \
   "T15c: ledger has the severity-sorted bug table"
 assert_dir_exists "$ddir/pool/crashes" \
@@ -867,8 +869,10 @@ assert_match '2\.5M' "$xt" \
 xtl=$(cat "$work/xtl.md" 2>/dev/null || true)
 assert_match '\[7\]\([^)]*pool/harness/crashes[^)]*\)' "$xtl" \
   "T19i: crosstab crash count links to the per-condition crash tree"
-assert_match '\[3\]\([^)]*CRASH-CLUSTERS\.html[^)]*\)' "$xtl" \
-  "T19j: crosstab unique-bug count links to the rendered cluster report"
+assert_match '\[3 \(1 M\+\)\]\([^)]*CRASH-CLUSTERS\.html[^)]*\)' "$xtl" \
+  "T19j: crosstab unique crash count is annotated with its Medium+ subset and links to the cluster report"
+assert_match '\[2 \(1 M\+\)\]\([^)]*FINDING-CLUSTERS\.html[^)]*\)' "$xtl" \
+  "T19j2: crosstab unique finding count is annotated with its Medium+ subset and links to the cluster report"
 assert_match '\[2\]\([^)]*REJECTED-FINDINGS\.html[^)]*\)' "$xtl" \
   "T19k: crosstab rejected finding count links to the rendered rejected list"
 

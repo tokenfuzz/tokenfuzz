@@ -357,6 +357,20 @@ def _artifact_report_link(label: object, artifact_dir: Path,
     return _md_link(label, artifact_dir)
 
 
+def _unique_with_medium_plus(unique: int, medium_plus: int) -> str:
+    """Label a unique-cluster count with its Medium+ subset: `6 (1 M+)`.
+
+    The parenthetical surfaces how many of the deduplicated reports the
+    reachability scorer rated Medium or higher — the security-yield subset —
+    without dropping the Low/unscored remainder from the headline count.
+    A gate on the count itself would zero out findings whose severity is
+    still blank/Pending (rank 0). An empty cell stays a bare `0`.
+    """
+    if not unique:
+        return "0"
+    return f"{unique} ({medium_plus} M+)"
+
+
 def _condition_pool_dir(bench_dir: Path, condition: str, kind: str) -> Path:
     """The per-condition pool subtree for *kind*.
 
@@ -2123,6 +2137,7 @@ def aggregate(bench_dir: Path) -> dict:
                 "top_severity_rank": cb.get("top_severity_rank", 0),
                 "medium_plus_bugs": cb.get("medium_plus", 0),
                 "unique_finding_clusters": fb.get("unique_clusters", 0),
+                "medium_plus_findings": fb.get("medium_plus", 0),
                 "wall_median": _median([float(x) for x in walls]),
                 "input_tokens_total": sum(r["input_tokens"] for r in token_rows),
                 "cached_input_tokens_total": sum(
@@ -2670,18 +2685,21 @@ def render_section(report: dict) -> str:
     lines.append("")
     # Column order: identity, then how the run was set up (how many times
     # it ran, how long each took), then results grouped by evidence type —
-    # findings (raw, deduplicated) followed by crashes (raw, deduplicated,
-    # then the two severity columns). Severity is scored only for crashes,
-    # so `Medium+ crashes` and `Top severity` close the crash group rather
-    # than floating as if they applied to findings too.
+    # findings (raw, then the deduplicated count) followed by crashes (same
+    # shape). `Unique findings` / `Unique crashes` show the clustered count
+    # annotated with its Medium+ subset — `N (M M+)` — so the security-yield
+    # subset is visible without dropping the Low/unscored remainder. `Top
+    # severity` is the single highest-severity display and stays crash-only,
+    # so it closes the crash group rather than floating as if it applied to
+    # findings too.
     lines.append(
         "| Condition | Replicates | Wall (h) "
         "| Rejected findings | Findings | Unique findings "
         "| Rejected crashes | Crashes | Unique crashes "
-        "| Medium+ crashes | Top severity |"
+        "| Top severity |"
     )
     lines.append(
-        "| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | :--: |"
+        "| --- | --: | --: | --: | --: | --: | --: | --: | --: | :--: |"
     )
     for c in sorted(conditions,
                     key=lambda c: (-c.get("top_severity_rank", 0),
@@ -2698,7 +2716,7 @@ def render_section(report: dict) -> str:
         )
         lines.append(
             "| {cond} | {rep} | {wall} | {rfi} | {fi} | {uf} "
-            "| {rcr} | {cr} | {uc} | {mp} | {sev} |".format(
+            "| {rcr} | {cr} | {uc} | {sev} |".format(
                 cond=_condition_cell(c["condition"], backend),
                 rep=(
                     "{d}/{t}".format(d=c.get("replicates_done", 0),
@@ -2726,17 +2744,22 @@ def render_section(report: dict) -> str:
                     "REJECTED-FINDINGS",
                 ),
                 fi=_md_link(c.get("finding_total", 0), cond_findings),
-                uf=_cluster_report_link(c.get("unique_finding_clusters", 0),
-                                        cond_findings, "FINDING-CLUSTERS"),
+                uf=_cluster_report_link(
+                    _unique_with_medium_plus(
+                        c.get("unique_finding_clusters", 0),
+                        c.get("medium_plus_findings", 0)),
+                    cond_findings, "FINDING-CLUSTERS"),
                 rcr=_artifact_report_link(
                     c.get("rejected_crash_total", 0),
                     cond_rejected_crashes,
                     "REJECTED-CRASHES",
                 ),
                 cr=_md_link(c.get("crash_total", 0), cond_crashes),
-                uc=_cluster_report_link(c.get("unique_crash_clusters", 0),
-                                        cond_crashes, "CRASH-CLUSTERS"),
-                mp=c.get("medium_plus_bugs", 0),
+                uc=_cluster_report_link(
+                    _unique_with_medium_plus(
+                        c.get("unique_crash_clusters", 0),
+                        c.get("medium_plus_bugs", 0)),
+                    cond_crashes, "CRASH-CLUSTERS"),
                 sev=_severity_cell(c.get("top_severity_level", "—")),
             )
         )
@@ -2753,10 +2776,12 @@ def render_section(report: dict) -> str:
         "**Crashes** counts only crash "
         "directories with real AddressSanitizer output on disk — an agent "
         "claiming a crash in prose never counts. **Unique findings** and "
-        "**Unique crashes** are those counts after `bin/cluster-crashes` "
-        "merges duplicate signatures. **Medium+ crashes** and **Top "
-        "severity** come from `bin/reachability`, which scores every crash "
-        "of both conditions on one scale — severity is a crash-only metric. "
+        "**Unique crashes** are those counts after `bin/cluster-findings` / "
+        "`bin/cluster-crashes` merge duplicate signatures, annotated `N (M "
+        "M+)` where `M` is how many of the `N` clusters `bin/reachability` "
+        "scored Medium or higher — the security-yield subset, on one scale "
+        "across both conditions. **Top severity** is the highest crash "
+        "severity in the row — the single-severity display stays crash-only. "
         f"`{baseline_label}` is a bare \"find the vulnerabilities\" prompt "
         "with no harness around it, so a large raw crash count there is "
         "mostly repeated noise. `tokenfuzz` is the audit harness — triage, "
@@ -3056,14 +3081,14 @@ def crosstab(bench_root: Path) -> str:
         "| Target | Backend | Condition | Run | Wall (h) | Replicates "
         "| Rejected findings | Findings | Unique findings "
         "| Rejected crashes | Crashes | Unique crashes "
-        "| Medium+ crashes | Top severity "
+        "| Top severity "
         "| Input | Output | Cost |"
     )
     lines.append(
         "| --- | --- | --- | --- | --: | --: "
         "| --: | --: | --: "
         "| --: | --: | --: "
-        "| --: | :--: "
+        "| :--: "
         "| --: | --: | --: |"
     )
 
@@ -3112,7 +3137,7 @@ def crosstab(bench_root: Path) -> str:
         if c is None:
             lines.append(
                 f"| {target_cell} | {backend_cell} | — | {run_cell} "
-                f"| — | — | — | — | — | — | — | — | — | · — | — | — | — |"
+                f"| — | — | — | — | — | — | — | — | · — | — | — | — |"
             )
             continue
         cond = c.get("condition", "?")
@@ -3135,7 +3160,7 @@ def crosstab(bench_root: Path) -> str:
             "| {tgt} | {bk} | {cond} | {rid} | {wall} | {reps} "
             "| {rfi} | {fi} | {uf} "
             "| {rcr} | {cr} | {uc} "
-            "| {mp} | {sev} | {inp} | {out} | {cost} |".format(
+            "| {sev} | {inp} | {out} | {cost} |".format(
                 bk=backend_cell,
                 rid=run_cell,
                 tgt=target_cell,
@@ -3175,17 +3200,22 @@ def crosstab(bench_root: Path) -> str:
                 ),
                 fi=_crosstab_count(c.get("finding_total", 0),
                                    findings_dir),
-                uf=_crosstab_count(c.get("unique_finding_clusters", 0),
-                                   findings_dir, "FINDING-CLUSTERS"),
+                uf=_crosstab_count(
+                    _unique_with_medium_plus(
+                        c.get("unique_finding_clusters", 0),
+                        c.get("medium_plus_findings", 0)),
+                    findings_dir, "FINDING-CLUSTERS"),
                 rcr=_crosstab_count(
                     c.get("rejected_crash_total", 0),
                     rejected_crashes_dir,
                     "REJECTED-CRASHES",
                 ),
                 cr=_crosstab_count(c.get("crash_total", 0), crashes_dir),
-                uc=_crosstab_count(c.get("unique_crash_clusters", 0),
-                                   crashes_dir, "CRASH-CLUSTERS"),
-                mp=c.get("medium_plus_bugs", 0),
+                uc=_crosstab_count(
+                    _unique_with_medium_plus(
+                        c.get("unique_crash_clusters", 0),
+                        c.get("medium_plus_bugs", 0)),
+                    crashes_dir, "CRASH-CLUSTERS"),
                 sev=_severity_cell(c.get("top_severity_level", "—")),
                 inp=_fmt_input_cell(c),
                 out=_fmt_output_cell(c),
@@ -3259,7 +3289,9 @@ def crosstab(bench_root: Path) -> str:
     )
     lines.append(
         "- **Unique findings** — validated findings after signature clustering "
-        "merges duplicate reports for the same issue."
+        "merges duplicate reports, shown as `N (M M+)`: `N` clustered findings, "
+        "`M` of them scored Medium or higher by reachability. The count links "
+        "to the finding cluster report."
     )
     lines.append("")
 
@@ -3282,22 +3314,22 @@ def crosstab(bench_root: Path) -> str:
     )
     lines.append(
         "- **Unique crashes** — accepted crashes after stack/signature "
-        "clustering. This is the better volume metric when one issue produces "
-        "many similar reports."
+        "clustering, shown as `N (M M+)`: `N` clustered crashes, `M` of them "
+        "scored Medium or higher by reachability — the headline security-yield "
+        "subset. The count links to the crash cluster report."
     )
     lines.append("")
 
     lines.append("**Severity.**")
     lines.append("")
     lines.append(
-        "Severity is crash-only and comes from the shared reachability scorer. "
-        "It lets a security team compare impact, not just raw report count."
+        "Severity comes from the shared reachability scorer, which scores both "
+        "findings and crashes on one scale so a security team can compare "
+        "impact, not just raw report count. The `M+` annotation on the "
+        "**Unique findings** and **Unique crashes** columns is that score; the "
+        "**Top severity** column below is crash-only."
     )
     lines.append("")
-    lines.append(
-        "- **Medium+ crashes** — unique accepted crashes scored Medium or "
-        "higher. This is the headline security-yield column."
-    )
     lines.append(
         "- **Top severity** — highest crash severity observed in the row, or "
         "`—` when no accepted crash was scored."

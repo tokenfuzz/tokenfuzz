@@ -165,11 +165,10 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Wall (h)` | Median wall-clock hours per completed cell. |
 | `Rejected findings` | FIND reports rejected by the validator. |
 | `Findings` | Validated non-crash security reports. |
-| `Unique findings` | Findings after duplicate signatures are clustered. |
+| `Unique findings` | Clustered findings, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the finding cluster report. |
 | `Rejected crashes` | Crash directories rejected by triage. |
 | `Crashes` | Crash directories with real sanitizer output on disk. |
-| `Unique crashes` | Crashes after duplicate signatures are clustered. |
-| `Medium+ crashes` | Unique crashes scored Medium or higher by reachability. |
+| `Unique crashes` | Clustered crashes, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the crash cluster report. |
 | `Top severity` | Highest crash severity observed in the cell. |
 
 The count cells are links. They point into the condition-specific
@@ -355,7 +354,8 @@ guessed one.
   direction; they do not settle stochastic behavior.
 - Compare more than one target. A harness change that helps one parser
   and hurts another should not disappear into a single headline row.
-- Read unique Medium+ crashes and top severity before raw crash count.
+- Read the Medium+ subset of unique crashes and top severity before raw
+  crash count.
   A pile of duplicated low-value crashes is not a stronger benchmark
   result than one clean, reachable reproducer.
 - Keep the target fixed while comparing harness changes. `run.json`
