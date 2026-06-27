@@ -116,9 +116,11 @@ assert_eq "True" "$arch_ok" "is_valid_arch accepts arm64e"
 # on both. The two tools speak different pipe protocols, hence the two stubs.
 FALLBACKDIR="$TEST_TMPDIR/fallbackbin"
 mkdir -p "$FALLBACKDIR"
+# Absolute interpreter so the stubs and the driver run with PATH pointed at the
+# stub dir alone (see below) — env-on-PATH lookup would not resolve there.
+PYBIN="$(command -v python3)"
 if audit_is_darwin; then
-  cat > "$FALLBACKDIR/atos" <<'PY'
-#!/usr/bin/env python3
+  { echo "#!$PYBIN"; cat <<'PY'; } > "$FALLBACKDIR/atos"
 # atos pipe protocol: read "0x<offset>" lines, emit "func (in module) (file:line)".
 import sys
 for line in sys.stdin:
@@ -133,8 +135,7 @@ for line in sys.stdin:
 PY
   chmod +x "$FALLBACKDIR/atos"
 else
-  cat > "$FALLBACKDIR/addr2line" <<'PY'
-#!/usr/bin/env python3
+  { echo "#!$PYBIN"; cat <<'PY'; } > "$FALLBACKDIR/addr2line"
 # addr2line -f protocol: per offset line, emit "function\nfile:line\n".
 import sys
 for line in sys.stdin:
@@ -150,9 +151,14 @@ PY
   chmod +x "$FALLBACKDIR/addr2line"
 fi
 FB_OUT="$TEST_TMPDIR/fallback_out.txt"
-# No llvm-symbolizer on PATH (only the platform stub); --llvm-symbolizer "" empty.
-env -u LLVM_SYMBOLIZER PATH="$FALLBACKDIR:/usr/bin:/bin" \
-  python3 "$SYM_PY" --llvm-symbolizer "" < "$RAW" > "$FB_OUT" 2>/dev/null
+# Restrict PATH to ONLY the platform-stub dir so the symbolizer chain cannot
+# discover a real llvm-symbolizer and short-circuit the OS-tool fallback this
+# test covers. Linux CI ships llvm-symbolizer in /usr/bin, so a PATH that
+# includes it makes shutil.which() resolve it, the chain "resolves" the fixture
+# binary to a module-only frame, and addr2line is never reached. --llvm-symbolizer
+# "" only suppresses the explicit arg, not the PATH fallback, so PATH is the gate.
+env -u LLVM_SYMBOLIZER PATH="$FALLBACKDIR" \
+  "$PYBIN" "$SYM_PY" --llvm-symbolizer "" < "$RAW" > "$FB_OUT" 2>/dev/null
 assert_eq 0 $? "platform fallback: exits 0"
 assert_file_contains "$FB_OUT" 'in app_parse parse\.c:42' \
   "platform fallback: user frame resolved via the OS symbolizer (no llvm-symbolizer)"

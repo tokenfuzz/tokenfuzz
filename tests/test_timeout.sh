@@ -88,8 +88,16 @@ rss_done="$TEST_TMPDIR/rss-done"
 rss_out="$TEST_TMPDIR/rss-out"
 rm -f "$rss_done" "$rss_out"
 rss_rc=0
+# Balloon with INCOMPRESSIBLE bytes from /dev/urandom. A run of identical bytes
+# ("x" x N) is collapsed by the macOS memory compressor once the host is under
+# RAM pressure, so its RSS never crosses the cap, the watchdog never fires, and
+# the run instead hits the wall-clock timeout (124) rather than the RSS kill
+# (137) — green on a roomy dev box, red on a low-RAM CI runner. Random pages
+# stay resident and cross the cap within a tick, exercising the watchdog
+# deterministically on every host.
 audit_timeout_run_rss 30 200 perl -e '
-  my @a; while (1) { push @a, ("x" x (10*1024*1024)); select(undef,undef,undef,0.05); }
+  open my $u, "<", "/dev/urandom" or die "urandom: $!";
+  my @a; while (1) { my $b; read($u, $b, 10*1024*1024); push @a, $b; select(undef,undef,undef,0.05); }
   open my $f, ">", $ARGV[0]; print $f "done";
 ' "$rss_done" >"$rss_out" 2>&1 || rss_rc=$?
 assert_eq 137 "$rss_rc" "audit_timeout_run_rss SIGKILLs a child that exceeds the RSS cap"
