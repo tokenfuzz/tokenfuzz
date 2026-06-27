@@ -152,5 +152,32 @@ IS_BROWSER_TARGET=1 validate_find_gate 2>/dev/null
 
 assert_dir_exists "$RESULTS_DIR/findings/FIND-007-nonweb" "non-web FIND kept under browser target"
 
+# ═══════════════════════════════════════════════════════════════
+# 8. Live find gate reconciles the caller-only contract flag, so a kept
+#    caller-only finding localises and floors exactly like its crash twin.
+#    (Crashes get this in triage_crash_dirs; findings must get it here too —
+#    a triage_fill_reach_fields_tree test alone would miss the live path.)
+# ═══════════════════════════════════════════════════════════════
+
+mkdir -p "$RESULTS_DIR/findings/FIND-008-calleronly"
+cat > "$RESULTS_DIR/findings/FIND-008-calleronly/report.md" <<'EOF'
+# heap-use-after-free WRITE via foreign-pointer detach
+
+Surface: library-api
+Caller controls: input bytes and the public detach/add call sequence
+Caller contract: unspecified
+Trigger source: both
+Reproduction rate: 5/5
+EOF
+
+TARGET_ATTACKER_CONTROLS_CSV="bytes" validate_find_gate 2>/dev/null
+
+assert_dir_exists "$RESULTS_DIR/findings/FIND-008-calleronly" "caller-only FIND kept"
+assert_file_exists "$RESULTS_DIR/findings/FIND-008-calleronly/.contract-flagged" \
+  "live find gate reconciles the caller-only contract flag (not just the pooled path)"
+assert_file_contains "$RESULTS_DIR/findings/FIND-008-calleronly/report.md" \
+  "requires \[call-sequence\] outside attacker_controls=\[bytes\]" \
+  "finding carries the same oob set-difference a crash twin gets"
+
 teardown_test_env
 summary

@@ -531,6 +531,11 @@ assert_eq "P" "$(metric "$vector" MAT)" "MAT:P for private trusted caller action
 # in-process caller → AV:L, and the required setup is an intrinsic AT:P. The
 # surface worst-case AV:N embedding does not apply. This is the cJSON bad-free
 # / DetachItemViaPointer shape: install hooks, reorder public calls, delete.
+# Reachability is a hard gate, not a one-band nudge: with no attacker crossing
+# a trust boundary, attacker-facing impact floors via MVC:N/MVI:N, so even a
+# code-execution double_free lands Low (a local caller crashing its own
+# process), NOT Medium. A genuine parse-the-bytes bug keeps AV:N and full
+# impact (asserted by the byte-guard case just below).
 seed_hits "demo_av_callseq" 0
 dir=$(make_crash "demo_av_callseq" CRASH-AV-CALLSEQ \
   "attempting free on address which was not malloc()-ed" \
@@ -541,12 +546,14 @@ cat >> "$dir/report.md" <<'EOF'
 
 Triage flagged a contract concern: trigger requires [call-sequence] outside attacker_controls=[bytes].
 EOF
-_CURRENT_TEST="derive: local call-sequence trigger (no byte path) → AV:L/AT:P"
+_CURRENT_TEST="derive: local call-sequence trigger (no byte path) → AV:L/AT:P, impact floored"
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "double_free" "$key" "bad-free classified as double_free"
 assert_eq "L" "$(metric "$vector" AV)" "AV:L for local-only call-sequence trigger"
 assert_eq "P" "$(metric "$vector" AT)" "AT:P intrinsic precondition for local call sequence"
-assert_eq "Medium" "$level" "local-API double-free is Medium, not High"
+assert_eq "N" "$(metric "$vector" MVC)" "MVC:N — caller-only reachable floors confidentiality"
+assert_eq "N" "$(metric "$vector" MVI)" "MVI:N — caller-only reachable floors integrity"
+assert_eq "Low" "$level" "caller-only double-free floors to Low (reachability is a hard gate, not a one-band nudge)"
 
 # Byte-guard: the SAME contract concern over a crash the caller triggers with
 # attacker-controlled BYTES keeps AV:N (an external boundary can reach it).
@@ -565,6 +572,10 @@ _CURRENT_TEST="derive: byte-controlled trigger keeps AV:N despite contract conce
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "N" "$(metric "$vector" AV)" "AV:N preserved when attacker controls bytes"
 assert_eq "P" "$(metric "$vector" MAT)" "MAT:P still derived from contract concern"
+# Recall guard: the caller-only impact floor must NOT fire on a byte-reachable
+# bug. No MVC override, and a genuine attacker-reachable double_free stays High.
+assert_eq "" "$(metric "$vector" MVC)" "no MVC floor when attacker controls bytes"
+assert_eq "High" "$level" "byte-reachable double_free keeps full impact (not floored)"
 
 # Content-word guard: "JSON string" is an attacker-controlled content path even
 # though it lacks the literal word "bytes". A call-sequence wrapper around
@@ -594,6 +605,112 @@ _CURRENT_TEST="derive: structured call-sequence trigger localises despite byte p
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "L" "$(metric "$vector" AV)" "AV:L — structured call-sequence trigger overrides incidental 'subject bytes' prose"
 assert_eq "P" "$(metric "$vector" AT)" "AT:P for the localised call-sequence trigger"
+
+# ── Caller-only IMPACT FLOOR scope (codex review #2): EVERY _local_caller_only
+# path floors attacker-facing C/I, not just the explicit call-sequence case.
+# Each path is paired with a byte-veto case proving a genuine attacker-reachable
+# bug is NOT floored (the recall guard).
+
+# (a) application-supplied parameter → AV:L → C/I floored → Low.
+seed_hits "demo_floor_param" 0
+dir=$(make_crash "demo_floor_param" CRASH-FLOOR-PARAM \
+  "heap-use-after-free WRITE of size 8" \
+  "library-api" "unspecified" "application configuration parameter" "5/5" "CL-x (singleton)")
+echo "Parameter control: application-supplied" >> "$dir/report.md"
+_CURRENT_TEST="floor: application-supplied parameter floors C/I → Low"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L for application-supplied parameter"
+assert_eq "N" "$(metric "$vector" MVC)" "MVC:N — application-supplied parameter floors confidentiality"
+assert_eq "Low" "$level" "application-supplied caller-only UAF floors to Low"
+
+# (a-veto) same report but attacker controls bytes → NOT floored, stays High.
+seed_hits "demo_floor_param_bytes" 0
+dir=$(make_crash "demo_floor_param_bytes" CRASH-FLOOR-PARAM-BYTES \
+  "heap-use-after-free WRITE of size 8" \
+  "library-api" "unspecified" "input bytes" "5/5" "CL-x (singleton)")
+echo "Parameter control: application-supplied" >> "$dir/report.md"
+_CURRENT_TEST="floor: byte path vetoes the application-supplied floor"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "" "$(metric "$vector" MVC)" "no MVC floor when attacker controls bytes (param path)"
+assert_eq "High" "$level" "byte-reachable UAF keeps full impact (param path)"
+
+# (b) trusted private action → AV:L → C/I floored → Low.
+seed_hits "demo_floor_trusted" 0
+dir=$(make_crash "demo_floor_trusted" CRASH-FLOOR-TRUSTED \
+  "heap-use-after-free WRITE of size 8" \
+  "library-api" "unspecified" "private internal state" "5/5" "CL-x (singleton)")
+echo "Trusted caller actions: private struct mutation" >> "$dir/report.md"
+_CURRENT_TEST="floor: trusted private action floors C/I → Low"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L for trusted private action"
+assert_eq "N" "$(metric "$vector" MVC)" "MVC:N — trusted private action floors confidentiality"
+assert_eq "Low" "$level" "trusted-action caller-only UAF floors to Low"
+
+# (b-veto) trusted action but attacker controls bytes → NOT floored.
+seed_hits "demo_floor_trusted_bytes" 0
+dir=$(make_crash "demo_floor_trusted_bytes" CRASH-FLOOR-TRUSTED-BYTES \
+  "heap-use-after-free WRITE of size 8" \
+  "library-api" "unspecified" "input bytes" "5/5" "CL-x (singleton)")
+echo "Trusted caller actions: private struct mutation" >> "$dir/report.md"
+_CURRENT_TEST="floor: byte path vetoes the trusted-action floor"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "" "$(metric "$vector" MVC)" "no MVC floor when attacker controls bytes (trusted path)"
+assert_eq "High" "$level" "byte-reachable UAF keeps full impact (trusted path)"
+
+# (c) Subsequent-system impact (ssrf, SC:L) must ALSO floor when caller-only,
+# else "no attacker crosses a trust boundary" contradicts a scored SC. Regression
+# for codex review #1 (floor both systems' C/I, not only VC/VI).
+seed_hits "demo_floor_ssrf" 0
+dir=$(make_crash "demo_floor_ssrf" CRASH-FLOOR-SSRF \
+  "server-side request forgery via unvalidated callback URL" \
+  "library-api" "unspecified" "public call sequence" "5/5" "CL-x (singleton)")
+printf '\nTrigger source: call-sequence\n' >> "$dir/report.md"
+_CURRENT_TEST="floor: caller-only ssrf floors subsequent-system confidentiality"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "ssrf" "$key" "ssrf classified"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L for caller-only ssrf"
+assert_eq "N" "$(metric "$vector" MSC)" "MSC:N — caller-only floors subsequent confidentiality (not just VC/VI)"
+# Lock the resulting band: with no attacker crossing the boundary, a caller-only
+# subsequent-impact class collapses to None (0.0) — a material M+ count change,
+# pinned here so it can't drift silently.
+assert_eq "None" "$level" "caller-only ssrf → None (no attacker crosses a trust boundary)"
+
+# (c-veto) byte-reachable ssrf: attacker controls the URL bytes → NOT floored,
+# stays a scored Medium. Proves the subsequent-impact floor never under-rates a
+# genuinely attacker-reachable web bug.
+seed_hits "demo_ssrf_bytes" 0
+dir=$(make_crash "demo_ssrf_bytes" CRASH-SSRF-BYTES \
+  "server-side request forgery via unvalidated callback URL" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="floor: byte-reachable ssrf is not floored"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "ssrf" "$key" "ssrf classified (byte path)"
+assert_eq "" "$(metric "$vector" MSC)" "no MSC floor when attacker controls bytes (ssrf)"
+assert_eq "Medium" "$level" "byte-reachable ssrf keeps its scored Medium band"
+
+# (d) caller-only xss carries BOTH SC and SI → both must floor (MSC:N/MSI:N).
+seed_hits "demo_floor_xss" 0
+dir=$(make_crash "demo_floor_xss" CRASH-FLOOR-XSS \
+  "stored XSS in profile bio rendered without escape" \
+  "library-api" "unspecified" "public call sequence" "5/5" "CL-x (singleton)")
+printf '\nTrigger source: call-sequence\n' >> "$dir/report.md"
+_CURRENT_TEST="floor: caller-only xss floors both subsequent C and I"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "xss" "$key" "xss classified"
+assert_eq "N" "$(metric "$vector" MSC)" "MSC:N — caller-only floors subsequent confidentiality (xss)"
+assert_eq "N" "$(metric "$vector" MSI)" "MSI:N — caller-only floors subsequent integrity (xss)"
+assert_eq "None" "$level" "caller-only xss → None"
+
+# (d-veto) byte-reachable xss → NOT floored, stays scored Medium.
+seed_hits "demo_xss_bytes" 0
+dir=$(make_crash "demo_xss_bytes" CRASH-XSS-BYTES \
+  "stored XSS in profile bio rendered without escape" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="floor: byte-reachable xss is not floored"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "xss" "$key" "xss classified (byte path)"
+assert_eq "" "$(metric "$vector" MSC)" "no MSC floor when attacker controls bytes (xss)"
+assert_eq "Medium" "$level" "byte-reachable xss keeps its scored Medium band"
 
 # Guard: a genuine parse-the-bytes crash carries trigger_source=bytes and must
 # NOT be localised even with the identical caller_controls prose → AV:N.

@@ -1362,6 +1362,46 @@ def _non_shipping_modified_impacts(surface_label: str,
     return mods, note
 
 
+def _caller_only_modified_impacts(local_only: bool,
+                                  metrics: dict[str, str]) -> tuple[dict[str, str], str]:
+    """Floor attacker-facing impact when only a trusted local caller can reach
+    the primitive (the AV:L/AT:P case from ``_local_caller_only``).
+
+    ``_local_caller_only`` already establishes — after vetoing every
+    attacker-controlled byte path and every remote-capable trigger — that no
+    attacker reaches this primitive; only the in-process caller can drive the
+    corrupt state (e.g. build an aliased/foreign-pointer object graph, then call
+    the public API). AV:L/AT:P/MAT:P record that *reachability*, but CVSS Base
+    impact still describes what the corruption can do, so a code-execution
+    primitive (uaf_write VC:H/VI:H/VA:H) only falls to Medium (~5.6).
+
+    Reachability is a hard gate, not a one-band nudge: with no attacker crossing
+    a trust boundary, the realised security impact is an in-process caller
+    corrupting/crashing its own process — no confidentiality or integrity gain
+    on either the vulnerable system (MVC:N/MVI:N) or a subsequent system
+    (MSC:N/MSI:N). Availability is left at the class Base reading (a genuine
+    crash is still a local DoS), which floors caller-only memory corruption to
+    Low *without erasing it* — it stays a Low hardening note, not None.
+
+    Recall-safe by construction: gated solely on ``_local_caller_only``, whose
+    byte/content veto means a genuine parse-the-bytes bug never localises (keeps
+    AV:N and full impact → unchanged High/Critical). This only completes the
+    impact half of a verdict the scorer already trusts enough to flip AV:N→AV:L.
+    DoS-only classes (C/I already N on both systems) are untouched: nothing to
+    floor.
+    """
+    if not local_only:
+        return {}, ""
+    mods = {mod: "N" for base, mod in (
+                ("VC", "MVC"), ("VI", "MVI"), ("SC", "MSC"), ("SI", "MSI"))
+            if metrics.get(base) not in (None, "N")}
+    if not mods:
+        return {}, ""
+    return mods, ("caller-only reachable (AV:L/AT:P) → attacker crosses no trust "
+                  "boundary → modified C/I impacts:N (availability left at Base: "
+                  "a local caller can still crash the process)")
+
+
 def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
                    reach: dict, contract_concern: bool,
                    report_dir: Path | None = None) -> tuple[dict[str, str] | None, list[str]]:
@@ -1411,6 +1451,12 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
         metrics["MAT"] = "P"
     mods, mods_note = _non_shipping_modified_impacts(surface_label, metrics)
     metrics.update(mods)
+    # Caller-only reachability floors attacker-facing impact (MVC:N/MVI:N).
+    # Applied after the non-shipping floor so the stronger reachability gate
+    # wins on confidentiality/integrity; both express the reduction CVSS-natively
+    # through Environmental M* metrics, never a post-score cap.
+    caller_mods, caller_mods_note = _caller_only_modified_impacts(local_only, metrics)
+    metrics.update(caller_mods)
     notes = [
         f"surface={surface_label} → AV:{surface_av}/UI:{ui}",
         f"class={prim_key} → VC:{vc}/VI:{vi}/VA:{va}/SC:{sc}/SI:{si}/SA:{sa}",
@@ -1434,6 +1480,8 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
         notes.append(limited_note)
     if mods_note:
         notes.append(mods_note)
+    if caller_mods_note:
+        notes.append(caller_mods_note)
     return metrics, notes
 
 

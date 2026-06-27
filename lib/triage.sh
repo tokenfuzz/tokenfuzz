@@ -1633,10 +1633,13 @@ _triage_run_reachability() {
 # tree, so findings produced WITHOUT the harness's per-cell triage (notably
 # the benchmark's model-direct condition) reach the deterministic scorer on
 # equal footing with harness findings. For each dir this runs the same
-# _triage_llm_fill_fields the per-cell pass runs; findings are additionally
-# scored here via _triage_run_reachability because bin/reachability --batch
-# only walks crashes/ (crashes are left for the caller's --batch step, so we
-# don't double-score them). Reads only on-disk reports — no live audit
+# _triage_llm_fill_fields the per-cell pass runs, then the same deterministic
+# caller-only contract reconciliation (so crash and finding twins of one bug
+# localise and floor identically — same scorer, now fed the same fields).
+# Findings are additionally scored here via _triage_run_reachability because
+# bin/reachability --batch only walks crashes/ (crashes are left for the
+# caller's --batch step, so we don't double-score them). Reads only on-disk
+# reports — no live audit
 # session — so it is safe to run during a --regenerate re-derivation as well
 # as a live run. Idempotent (complete sidecars skip; re-scoring is cached)
 # and best-effort. Honors LLM_FIELD_FILL_DISABLE / REACHABILITY_AUTO.
@@ -1656,6 +1659,14 @@ triage_fill_reach_fields_tree() {
       [ -d "$_d" ] || continue
       _id=$(basename "$_d")
       _triage_llm_fill_fields "$_d" "$_id"
+      # Reconcile the deterministic caller-only contract flag from the now-final
+      # fields BEFORE scoring, so a caller-only finding gets the same "## Contract
+      # concern" oob annotation (and impact floor) its crash twin gets. Crashes do
+      # this via _triage_reconcile_contract_flag; findings need the narrative-only
+      # variant because they carry no sanitizer artifact. Must precede
+      # _triage_run_reachability — unlike crashes (scored later by --batch),
+      # findings are scored inline right here.
+      _triage_reconcile_contract_flag_finding "$_d" "$_id"
       _triage_run_reachability "$_d" "$_id" "$_bin_dir"
     done
   fi
@@ -1742,7 +1753,7 @@ _triage_annotate_rejection_report() {
 # preferred, then report.md) so a reviewer opening the dir sees the
 # concern in-place.
 _triage_annotate_contract_concern() {
-  local d="$1" id="$2" reason="$3"
+  local d="$1" id="$2" reason="$3" noun="${4:-crash}"
   local report=""
   if [ -s "$d/REPORT.md" ]; then
     report="$d/REPORT.md"
@@ -1751,23 +1762,23 @@ _triage_annotate_contract_concern() {
   fi
 
   {
-    echo "# Contract-flagged by triage_crash_dirs"
+    echo "# Contract-flagged by triage"
     echo "# Reason: $reason"
     echo "# When: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "# Action: dir stays in crashes/. Reachability scorer derives CVSS-BTE Environmental MAT:P when REPORT.md carries the Contract concern section, so Severity is automatically adjusted without losing the crash from the count. Promote back to full severity only if the cited concern is independently disproven."
+    echo "# Action: dir stays in place. Reachability scorer derives CVSS-BTE Environmental MAT:P when the report carries the Contract concern section, so Severity is automatically adjusted without losing the ${noun} from the count. Promote back to full severity only if the cited concern is independently disproven."
   } >> "$d/.contract-flagged" 2>/dev/null || true
 
   [ -n "$report" ] || return 0
 
   local tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/contract-flag.XXXXXX") || return 0
-  awk -v reason="$reason" '
+  awk -v reason="$reason" -v noun="$noun" '
     function emit_block() {
       print "## Contract concern"
       print ""
-      print "Triage kept this crash in `crashes/` and flagged a contract concern: " reason "."
+      print "Triage kept this " noun " and flagged a contract concern: " reason "."
       print ""
-      print "The sanitizer diagnostic is real. The downstream reachability scorer rates contract-flagged crashes with CVSS-BTE Environmental MAT:P from this Contract concern section. Promote to a higher Severity only if the concern is independently disproven — e.g. the cited contract is undocumented or inferred, or the reach path does not actually require the prohibited caller action."
+      print "The reported diagnostic is real. The downstream reachability scorer rates contract-flagged results with CVSS-BTE Environmental MAT:P from this Contract concern section. Promote to a higher Severity only if the concern is independently disproven — e.g. the cited contract is undocumented or inferred, or the reach path does not actually require the prohibited caller action."
       print ""
     }
     BEGIN { inserted=0; skip=0 }
@@ -1856,6 +1867,33 @@ _triage_reconcile_contract_flag() {
       _triage_annotate_contract_concern "$d" "$id" "${verdict#contract-flag: }"
       ;;
   esac
+  return 0
+}
+
+# Finding analogue of _triage_reconcile_contract_flag: give a caller-only finding
+# the SAME "## Contract concern" oob annotation its crash twin gets, so both
+# localise and floor identically in compute_severity. Without it a finding
+# localises only via the byte-vetoed trigger_source regex, so a `both`-trigger
+# caller-only bug scores Low as a crash but High as a finding.
+#
+# Reuses evaluate_crash_verdict (narrative-only) rather than the crash reconcile,
+# whose security-evidence gate would "missing evidence"-reject a finding before
+# the verdict runs. Recall-safe: flags ONLY when a trigger component is outside
+# attacker_controls, so a genuine attacker-byte finding (trigger ⊆ attacker_
+# controls) stays unflagged at full severity; never removes a flag → only lowers.
+_triage_reconcile_contract_flag_finding() {
+  local d="$1" id="$2"
+  [ -d "$d" ] || return 0
+  [ -f "$d/.contract-flagged" ] && return 0
+  local report
+  report=$(find_primary_crash_narrative "$d" 2>/dev/null || true)
+  [ -n "$report" ] || return 0
+  local line verdict reason
+  line=$(evaluate_crash_verdict "$report" "${TARGET_ATTACKER_CONTROLS_CSV:-bytes}" 2>/dev/null) || return 0
+  verdict="${line%%	*}"
+  reason="${line#*	}"
+  [ "$verdict" = "contract-flag" ] && \
+    _triage_annotate_contract_concern "$d" "$id" "$reason" "finding"
   return 0
 }
 
@@ -3161,7 +3199,11 @@ _validate_one_find_dir() {
     # The LLM hybrid pass fills missing structured fields beforehand so
     # the deterministic scorer can class non-memory findings (open
     # redirect, SSRF, …) instead of falling through to "unclassified".
+    # Reconcile the caller-only contract flag from those final fields BEFORE
+    # scoring — the same deterministic step a live crash gets in triage_crash_dirs
+    # — so a caller-only finding and its crash twin localise and floor identically.
     _triage_llm_fill_fields "$d" "$id"
+    _triage_reconcile_contract_flag_finding "$d" "$id"
     _triage_run_reachability "$d" "$id" "$bin_dir"
   return 0
 }

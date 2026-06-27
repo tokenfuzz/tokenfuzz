@@ -967,7 +967,7 @@ assert_file_contains "$d/report.md" "^## Contract concern" \
 
 # Idempotent / sticky: re-running does not append a second sidecar block.
 _triage_reconcile_contract_flag "$d" CRASH-RC-ADD
-blocks=$(grep -c "Contract-flagged by triage_crash_dirs" "$d/.contract-flagged")
+blocks=$(grep -c "Contract-flagged by triage" "$d/.contract-flagged")
 assert_eq 1 "$blocks" "reconcile: idempotent — sidecar not duplicated on re-run"
 
 # A benign crash whose trigger is fully within the attacker boundary is NOT
@@ -1010,6 +1010,43 @@ if [ -f "$TEST_TMPDIR/reconcile_tree/crashes/CRASH-RC-TREE/.contract-flagged" ];
   pass "reconcile: triage_fill_reach_fields_tree flags a stale pooled crash"
 else
   fail "reconcile: triage_fill_reach_fields_tree flags a stale pooled crash" "no sidecar after tree run"
+fi
+
+# Crash/finding parity: a caller-only FINDING must get the SAME deterministic
+# contract-flag (and thus the same caller-only impact floor) its crash twin gets.
+# Before this, findings localised only via the byte-vetoed trigger_source regex,
+# so a `both`-trigger caller-only finding scored High while its crash twin floored
+# to Low. triage_fill_reach_fields_tree must now reconcile findings too.
+mkdir -p "$TEST_TMPDIR/parity_tree/findings/FIND-PARITY" \
+         "$TEST_TMPDIR/parity_tree/crashes/CRASH-PARITY"
+for _twin in findings/FIND-PARITY crashes/CRASH-PARITY; do
+  cat > "$TEST_TMPDIR/parity_tree/$_twin/report.md" <<'EOF'
+# heap-use-after-free WRITE
+Surface: library-api
+Caller controls: input bytes and the public detach/add call sequence
+Caller contract: unspecified
+Trigger source: both
+Reproduction rate: 5/5
+EOF
+done
+# Crash twin needs a sanitizer artifact so its own reconcile path (which gates on
+# security-impact evidence) fires; the finding twin must NOT need one.
+printf '==1==ERROR: AddressSanitizer: heap-use-after-free WRITE of size 8\n' \
+  > "$TEST_TMPDIR/parity_tree/crashes/CRASH-PARITY/asan.txt"
+LLM_FIELD_FILL_DISABLE=1 TARGET_ATTACKER_CONTROLS_CSV="bytes" \
+  triage_fill_reach_fields_tree "$TEST_TMPDIR/parity_tree" "$SCRIPT_ROOT/bin" >/dev/null 2>&1 || true
+if [ -f "$TEST_TMPDIR/parity_tree/findings/FIND-PARITY/.contract-flagged" ]; then
+  pass "parity: caller-only finding gets the deterministic contract-flag (not crash-only)"
+else
+  fail "parity: caller-only finding gets the deterministic contract-flag (not crash-only)" \
+    "finding lacks .contract-flagged after tree run"
+fi
+if grep -q "requires \[call-sequence\] outside attacker_controls=\[bytes\]" \
+    "$TEST_TMPDIR/parity_tree/findings/FIND-PARITY/report.md"; then
+  pass "parity: finding carries the same oob set-difference line as a crash twin"
+else
+  fail "parity: finding carries the same oob set-difference line as a crash twin" \
+    "no oob contract-concern line in finding report"
 fi
 
 teardown_test_env
