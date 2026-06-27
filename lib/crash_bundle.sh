@@ -39,7 +39,7 @@ crash_bundle_should_file() {
 
 # crash_bundle_materialize --results-dir D --agent N --testcase T --sanitizer S
 #                          [--san-name asan|ubsan|...] [--mode generic|...]
-#                          [--harness H] [--args "trailing args"]
+#                          [--harness H] [--arg ARG ...]
 #                          [--target "f:fn:line"] [--hyp ID] [--card ID]
 #                          [--strategy SN]
 #
@@ -50,21 +50,22 @@ crash_bundle_should_file() {
 # fall open without failing the probe.
 crash_bundle_materialize() {
   local results_dir="" agent="" testcase="" sanitizer="" san_name="" mode="" \
-        harness="" args="" target="" hyp="" card="" strategy=""
+        harness="" target="" hyp="" card="" strategy=""
+  local -a argsv=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --results-dir) results_dir="${2:-}"; shift 2 ;;
-      --agent)       agent="${2:-}";       shift 2 ;;
-      --testcase)    testcase="${2:-}";    shift 2 ;;
-      --sanitizer)   sanitizer="${2:-}";   shift 2 ;;
-      --san-name)    san_name="${2:-}";    shift 2 ;;
-      --mode)        mode="${2:-}";        shift 2 ;;
-      --harness)     harness="${2:-}";     shift 2 ;;
-      --args)        args="${2:-}";        shift 2 ;;
-      --target)      target="${2:-}";      shift 2 ;;
-      --hyp)         hyp="${2:-}";         shift 2 ;;
-      --card)        card="${2:-}";        shift 2 ;;
-      --strategy)    strategy="${2:-}";    shift 2 ;;
+      --results-dir)     results_dir="${2:-}";        shift 2 ;;
+      --agent)           agent="${2:-}";              shift 2 ;;
+      --testcase)        testcase="${2:-}";           shift 2 ;;
+      --sanitizer)       sanitizer="${2:-}";          shift 2 ;;
+      --san-name)        san_name="${2:-}";           shift 2 ;;
+      --mode)            mode="${2:-}";               shift 2 ;;
+      --harness)         harness="${2:-}";            shift 2 ;;
+      --arg)             argsv+=("${2:-}");           shift 2 ;;
+      --target)          target="${2:-}";             shift 2 ;;
+      --hyp)             hyp="${2:-}";                shift 2 ;;
+      --card)            card="${2:-}";               shift 2 ;;
+      --strategy)        strategy="${2:-}";           shift 2 ;;
       *) shift ;;
     esac
   done
@@ -89,9 +90,17 @@ crash_bundle_materialize() {
   if [ -n "$harness" ] && [ -f "$harness" ]; then
     harness_sha1="$(audit_sha1 "$harness" 2>/dev/null | awk '{print $1}')"
   fi
-  local args_clean identity
-  args_clean="$(printf '%s' "$args" | tr '\t\n' '  ')"   # keep the TSV one-line
-  identity="${sha1}:${san_name}:${mode}:${harness_sha1}:${args_clean}"
+  local args_sig identity a
+  args_sig="$(
+    {
+      printf 'argc=%s\n' "${#argsv[@]}"
+      for a in ${argsv[@]+"${argsv[@]}"}; do
+        printf '%s:%s\n' "${#a}" "$a"
+      done
+    } | audit_sha1 2>/dev/null | awk '{print $1}'
+  )"
+  [ -n "$args_sig" ] || args_sig="noargs"
+  identity="${sha1}:${san_name}:${mode}:${harness_sha1}:${args_sig}"
 
   # Same-identity dedup: a re-probe of the same probe (probe then --confirm)
   # must reuse the bundle, not spawn a second one.
@@ -136,6 +145,11 @@ crash_bundle_materialize() {
     cp "$harness" "$dir/$harness_name" 2>/dev/null || { rm -rf "$dir"; return 2; }
   fi
 
+  if [ "${#argsv[@]}" -gt 0 ]; then
+    _crash_bundle_write_repro_cmd "$dir/repro.cmd" "${argsv[@]}" \
+      || { rm -rf "$dir"; return 2; }
+  fi
+
   # Crash class straight from the sanitizer trace (deterministic, no LLM).
   local san_type
   san_type="$(grep -oE '(AddressSanitizer|UndefinedBehaviorSanitizer|MemorySanitizer|ThreadSanitizer|LeakSanitizer): [a-zA-Z0-9-]+' "$sanitizer" 2>/dev/null | head -1)"
@@ -177,4 +191,34 @@ crash_bundle_materialize() {
 
   printf 'FILED %s\n' "$id"
   return 0
+}
+
+_crash_bundle_shell_quote() {
+  local s="${1-}"
+  if [ -z "$s" ]; then
+    printf "''"
+    return 0
+  fi
+  case "$s" in
+    *[!A-Za-z0-9_./:=,+-]*)
+      printf "'"
+      printf '%s' "$s" | sed "s/'/'\\\\''/g"
+      printf "'"
+      ;;
+    *) printf '%s' "$s" ;;
+  esac
+}
+
+_crash_bundle_write_repro_cmd() {
+  local out="$1"; shift
+  {
+    printf '# Args after the target binary or harness. {TESTCASE} is replaced by export-repro.\n'
+    printf '{TESTCASE}'
+    local a
+    for a in "$@"; do
+      printf ' '
+      _crash_bundle_shell_quote "$a"
+    done
+    printf '\n'
+  } > "$out" 2>/dev/null
 }

@@ -130,5 +130,22 @@ out=$(crash_bundle_materialize --results-dir "$RESULTS_DIR" --agent 1 \
 assert_eq "FILED CRASH-004-1" "$out" "same bytes under a different sanitizer is a distinct crash"
 assert_dir_exists "$CRASHES/CRASH-004-1" "distinct-sanitizer bundle created (no false-dup suppression)"
 
+# ── 8. trailing argv is preserved and boundary-sensitive ───────────
+out=$(crash_bundle_materialize --results-dir "$RESULTS_DIR" --agent 1 \
+  --testcase "$tc" --sanitizer "$san" --san-name asan --mode generic \
+  --arg "--mode" --arg "a b" --hyp "H-aaaa")
+assert_eq "FILED CRASH-005-1" "$out" "same bytes with trailing args is a distinct execution identity"
+assert_file_exists "$CRASHES/CRASH-005-1/repro.cmd" "trailing args write repro.cmd"
+assert_file_contains "$CRASHES/CRASH-005-1/repro.cmd" "^\{TESTCASE\} --mode 'a b'$" \
+  "repro.cmd preserves testcase position and shell-quotes spaced args"
+out=$(crash_bundle_materialize --results-dir "$RESULTS_DIR" --agent 1 \
+  --testcase "$tc" --sanitizer "$san" --san-name asan --mode generic \
+  --arg "--mode" --arg "a b" --hyp "H-aaaa")
+assert_eq "DUP CRASH-005-1" "$out" "same argv vector reuses the bundle"
+out=$(crash_bundle_materialize --results-dir "$RESULTS_DIR" --agent 1 \
+  --testcase "$tc" --sanitizer "$san" --san-name asan --mode generic \
+  --arg "--mode a b" --hyp "H-aaaa")
+assert_eq "FILED CRASH-006-1" "$out" "different argv boundaries are not false-deduped"
+
 teardown_test_env
 summary

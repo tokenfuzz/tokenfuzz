@@ -1271,58 +1271,66 @@ if [ -n "$HYP_LINE" ] && [ -x "$SCRIPT_DIR/state" ]; then
 fi
 
 # Materialize the maintainer-facing crash bundle once a sanitizer diagnostic is
-# CONFIRMED, and tell the agent where it landed. Without this the agent only
-# learns "verdict=CRASH" and then hand-greps the crashes/ tree to find (or fails
-# to create) the bundle — wasted, replayed `find|xargs rg` output, and confirmed
-# reproducers stranded in scratch. Gated on a multi-run probe (ASAN_RUNS>=2, i.e.
-# --confirm) so a single exploratory run does not auto-file an unconfirmed flake.
-# Dedup keys on the full execution identity (testcase + sanitizer + mode +
-# harness + trailing args), so the same bytes under a different sanitizer/mode
-# still get their own bundle. Best-effort: never blocks probe's exit, never
-# changes the dedup/triage decision (it only ever adds a bundle).
+# CONFIRMED, and tell the agent where it landed. Interpreted HARNESS runs are
+# deliberately skipped until export-repro can round-trip that harness type;
+# auto-filing a non-exportable bundle is worse than a visible manual handoff.
+# Gated on a multi-run probe (ASAN_RUNS>=2, i.e. --confirm) so a single
+# exploratory run does not auto-file an unconfirmed flake. Dedup keys on the
+# full execution identity (testcase + sanitizer + mode + harness + trailing
+# args), so the same bytes under a different sanitizer/mode still get their own
+# bundle. Best-effort: never blocks probe's exit, never changes the dedup/triage
+# decision (it only ever adds a bundle).
 if crash_bundle_should_file "$verdict" "$PROBE_SANITIZER_SELECTED" "${ASAN_RUNS:-1}"; then
-  # Strategy attribution comes from the agent's assigned-strategy sidecar
-  # (bin/audit::agent_strategy_path), so auto-filed reports carry Strategy: S<N>.
-  _cb_strategy=""
-  if [ -f "$RESULTS_DIR/.agent_strategy_${AGENT_NUM}" ]; then
-    _cb_strategy="$(tr -d '[:space:]' < "$RESULTS_DIR/.agent_strategy_${AGENT_NUM}" 2>/dev/null | tr '[:lower:]' '[:upper:]')"
-    case "$_cb_strategy" in S[1-8]|REF) ;; *) _cb_strategy="" ;; esac
+  if [ -n "${harness_src:-}" ] && [ "${build_kind:-}" = "interpret" ]; then
+    echo "[probe] WARNING: crash confirmed but auto-file skipped for interpreted HARNESS; export-repro cannot round-trip this harness type yet. File the reproducer manually under $RESULTS_DIR/crashes/CRASH-NNN-$AGENT_NUM/." >&2
+  else
+    # Strategy attribution comes from the agent's assigned-strategy sidecar
+    # (bin/audit::agent_strategy_path), so auto-filed reports carry Strategy: S<N>.
+    _cb_strategy=""
+    if [ -f "$RESULTS_DIR/.agent_strategy_${AGENT_NUM}" ]; then
+      _cb_strategy="$(tr -d '[:space:]' < "$RESULTS_DIR/.agent_strategy_${AGENT_NUM}" 2>/dev/null | tr '[:lower:]' '[:upper:]')"
+      case "$_cb_strategy" in S[1-8]|REF) ;; *) _cb_strategy="" ;; esac
+    fi
+    # Build argv as an array so optional values (e.g. a harness path containing
+    # spaces) reach the helper intact and do not corrupt the dedup identity.
+    _cb_args=(--results-dir "$RESULTS_DIR" --agent "$AGENT_NUM"
+              --testcase "$TESTCASE" --sanitizer "$ASAN_OUTPUT_FILE"
+              --san-name "$PROBE_SANITIZER_SELECTED" --mode "$MODE")
+    [ -n "${harness_src:-}" ] && _cb_args+=(--harness "$harness_src")
+    for _cb_arg in "$@"; do
+      _cb_args+=(--arg "$_cb_arg")
+    done
+    unset _cb_arg
+    [ -n "$TARGET_LINE" ]     && _cb_args+=(--target "$TARGET_LINE")
+    [ -n "$HYP_LINE" ]        && _cb_args+=(--hyp "$HYP_LINE")
+    [ -n "$CARD_LINE" ]       && _cb_args+=(--card "$CARD_LINE")
+    [ -n "$_cb_strategy" ]    && _cb_args+=(--strategy "$_cb_strategy")
+    _cb_out="$(crash_bundle_materialize "${_cb_args[@]}" 2>/dev/null)"
+    _cb_rc=$?
+    case "$_cb_out" in
+      "FILED "*)
+        _cb_id="${_cb_out#FILED }"
+        echo "[probe] CRASH FILED: $RESULTS_DIR/crashes/$_cb_id — reproducer + sanitizer.txt copied in; enrich report.md there (do not re-file or leave it in scratch)"
+        if [ -n "$HYP_LINE" ] && [ -x "$SCRIPT_DIR/state" ]; then
+          "$SCRIPT_DIR/state" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+            add-note --agent "$AGENT_NUM" --hypothesis-id "$HYP_LINE" --card-id "${CARD_LINE:-}" \
+            --kind "decision" --text "bin/probe filed $_cb_id (reproducer + sanitizer trace materialized); enrich report.md, do not re-file" \
+            >/dev/null 2>&1 || true
+        fi
+        ;;
+      "DUP "*)
+        _cb_id="${_cb_out#DUP }"
+        echo "[probe] CRASH already filed (identical reproducer): $RESULTS_DIR/crashes/$_cb_id"
+        ;;
+      *)
+        # Confirmed crash but the bundle was not created (I/O, permissions, race).
+        # Never silent: the hypothesis is already marked CRASH, so a missing
+        # bundle would otherwise close the work with nothing on disk.
+        echo "[probe] WARNING: crash confirmed but bundle could not be created (rc=$_cb_rc). File the reproducer under $RESULTS_DIR/crashes/CRASH-NNN-$AGENT_NUM/ manually." >&2
+        ;;
+    esac
+    unset _cb_out _cb_id _cb_rc _cb_strategy _cb_args
   fi
-  # Build argv as an array so optional values (e.g. a harness path containing
-  # spaces) reach the helper intact and do not corrupt the dedup identity.
-  _cb_args=(--results-dir "$RESULTS_DIR" --agent "$AGENT_NUM"
-            --testcase "$TESTCASE" --sanitizer "$ASAN_OUTPUT_FILE"
-            --san-name "$PROBE_SANITIZER_SELECTED" --mode "$MODE" --args "$*")
-  [ -n "${harness_src:-}" ] && _cb_args+=(--harness "$harness_src")
-  [ -n "$TARGET_LINE" ]     && _cb_args+=(--target "$TARGET_LINE")
-  [ -n "$HYP_LINE" ]        && _cb_args+=(--hyp "$HYP_LINE")
-  [ -n "$CARD_LINE" ]       && _cb_args+=(--card "$CARD_LINE")
-  [ -n "$_cb_strategy" ]    && _cb_args+=(--strategy "$_cb_strategy")
-  _cb_out="$(crash_bundle_materialize "${_cb_args[@]}" 2>/dev/null)"
-  _cb_rc=$?
-  case "$_cb_out" in
-    "FILED "*)
-      _cb_id="${_cb_out#FILED }"
-      echo "[probe] CRASH FILED: $RESULTS_DIR/crashes/$_cb_id — reproducer + sanitizer.txt copied in; enrich report.md there (do not re-file or leave it in scratch)"
-      if [ -n "$HYP_LINE" ] && [ -x "$SCRIPT_DIR/state" ]; then
-        "$SCRIPT_DIR/state" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-          add-note --agent "$AGENT_NUM" --hypothesis-id "$HYP_LINE" --card-id "${CARD_LINE:-}" \
-          --kind "decision" --text "bin/probe filed $_cb_id (reproducer + sanitizer trace materialized); enrich report.md, do not re-file" \
-          >/dev/null 2>&1 || true
-      fi
-      ;;
-    "DUP "*)
-      _cb_id="${_cb_out#DUP }"
-      echo "[probe] CRASH already filed (identical reproducer): $RESULTS_DIR/crashes/$_cb_id"
-      ;;
-    *)
-      # Confirmed crash but the bundle was not created (I/O, permissions, race).
-      # Never silent: the hypothesis is already marked CRASH, so a missing
-      # bundle would otherwise close the work with nothing on disk.
-      echo "[probe] WARNING: crash confirmed but bundle could not be created (rc=$_cb_rc). File the reproducer under $RESULTS_DIR/crashes/CRASH-NNN-$AGENT_NUM/ manually." >&2
-      ;;
-  esac
-  unset _cb_out _cb_id _cb_rc _cb_strategy _cb_args
 fi
 
 exit "$rc"

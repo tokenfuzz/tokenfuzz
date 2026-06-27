@@ -1365,6 +1365,8 @@ assert_in('if [ -n "$san_lib_dir" ]; then', text_a,
           "c-harness asan_lib SET: env block guarded by san_lib_dir non-empty test")
 assert_in("quarantine_size_mb=256:redzone=64", text_a,
           "c-harness ASan defaults: reproducer keeps run-asan redzone/quarantine")
+assert_in('"$build/repro" "$here/input.bin"', text_a,
+          "c-harness default argv passes the testcase")
 # Header-only placeholder degrade: LIB_RESOLVE no longer hard-exits when
 # every fallback misses. The block blanks `san_lib` + `san_lib_dir` so
 # the `${san_lib:+...}` link-line expansion drops the archive (and the
@@ -1462,6 +1464,25 @@ assert_in("report_error_type=1", text_d,
           "c-harness UBSan: target ubsan_options included")
 assert_not_in("ASAN_OPTIONS=", text_d,
               "c-harness UBSan: does not set ASAN_OPTIONS")
+
+# Case E: recorded harness argv from repro.cmd keeps testcase position and
+# trailing args. Without this, auto-filed C harness bundles that required
+# `bin/probe testcase -- --flag value` exported a non-reproducing bare
+# `"$build/repro" "$here/input.bin"` command.
+harness_dir_e = TMP / "harness-recorded-args"
+harness_dir_e.mkdir()
+repro_e = harness_dir_e / "reproduce.sh"
+er.write_c_harness_template(
+    repro_e, build_system="cmake", upstream_url="https://x/y",
+    pinned_rev="abc", slug="x", san_bin_rel="build-asan/foo",
+    san_lib_rel="build-asan/libfoo.a",
+    includes_args="", link_libs="",
+    input_name="input.bin", harness_name="harness.c", harness_compiler="clang",
+    harness_args=' "$here/input.bin" --mode \'a b\'',
+)
+text_e = repro_e.read_text(encoding="utf-8")
+assert_in('"$build/repro" "$here/input.bin" --mode \'a b\'', text_e,
+          "c-harness recorded argv renders in order")
 
 # emit_lib_resolve unit checks — directly exercise the helper.
 assert_eq("", er.emit_lib_resolve(""),

@@ -82,13 +82,13 @@ LOGDIR=$TEST_TMPDIR/logs
 EOF
 
 # A harness with a deliberate ASan heap-buffer-overflow that triggers
-# the moment it runs against ANY input. This mirrors the production
+# only when the recorded trailing argv is replayed. This mirrors the production
 # pattern where harness.cpp reads a file, parses it, and exercises the
-# library — only here the bug is unconditional so the test doesn't
+# library — only here the bug is direct so the test doesn't
 # depend on testcase content. The catch-all guard is there on purpose:
 # the production CRASH-002-1 harness silently caught parse failures and
 # returned 0, which is exactly the path we want to outlaw. If the wrong
-# input ever gets selected here, the test fails loudly.
+# input or argv ever gets selected here, the test fails loudly.
 cat > "$CRASH_DIR/harness.c" <<'EOF'
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,6 +98,10 @@ int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <input>\n", argv[0]);
         return 2;
+    }
+    if (argc < 3 || strcmp(argv[2], "--needed") != 0) {
+        fprintf(stderr, "missing recorded flag\n");
+        return 0;
     }
     FILE *f = fopen(argv[1], "rb");
     if (!f) {
@@ -140,9 +144,12 @@ Boundary: input file
 Caller controls: bytes
 EOF
 
-# The real testcase the harness will read from. Content is irrelevant —
-# the bug fires unconditionally. Eight bytes so fread() returns >= 4.
+# The real testcase the harness will read from. Content is irrelevant once
+# the recorded flag is replayed. Eight bytes so fread() returns >= 4.
 printf 'AAAAAAAA' > "$CRASH_DIR/input.bin"
+cat > "$CRASH_DIR/repro.cmd" <<'EOF'
+{TESTCASE} --needed
+EOF
 
 # The regression bait: drop a `.audit/reachability.out` prose file in
 # the dir. Before the lib/crash_artifacts.py fix, find_testcase would
@@ -200,6 +207,8 @@ assert_file_contains "$CRASH_DIR/reproduce.sh" 'echo "\[repro\] exit=' \
   "reproduce.sh: prints exit code after run"
 assert_file_not_contains "$CRASH_DIR/reproduce.sh" '^exec "\$build/repro"' \
   "reproduce.sh: no bare exec that hides exit status"
+assert_file_contains "$CRASH_DIR/reproduce.sh" '"\$build/repro" "\$here/input\.bin" --needed' \
+  "reproduce.sh: replays recorded harness argv"
 # Submodule-dependent builds (e.g. a JIT engine vendored under deps/) need the
 # clone to pull submodules and the pinned-rev checkout to re-sync them.
 assert_file_contains "$CRASH_DIR/reproduce.sh" 'git clone --recurse-submodules' \

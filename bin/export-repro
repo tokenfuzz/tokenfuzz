@@ -1235,7 +1235,7 @@ __HARNESS_COMPILER__ -fsanitize=__SANITIZER_FLAG__ -g -O1__INCLUDES_ARGS__$gen_i
     -o "$build/repro"
 echo "=== running __SANITIZER_LABEL__ repro: __INPUT_DESC__ ===" >&2
 rc=0
-__SAN_LIB_RUN_ENV____SANITIZER_ENV_BLOCK__  "$build/repro"__INPUT_ARG__ || rc=$?
+__SAN_LIB_RUN_ENV____SANITIZER_ENV_BLOCK__  "$build/repro"__HARNESS_ARGS__ || rc=$?
 echo "[repro] exit=$rc" >&2
 exit "$rc"
 """
@@ -2770,7 +2770,8 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
                              extra_options: str = "", mode: str = "generic",
                              recorded_env_options: str = "",
                              audit_build_script: str = "",
-                             local_src: str = "") -> None:
+                             local_src: str = "",
+                             harness_args: str = "") -> None:
     meta = sanitizer_meta(sanitizer)
     if not meta["flag"]:
         die(f"C/C++ harness export for {meta['label']} needs target-specific compiler flags")
@@ -2832,7 +2833,8 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
             # takes no argv; pass the testcase only when one exists. The
             # leading space keeps the run line `… "$build/repro" "$here/x"`
             # spaced correctly while an empty arg collapses cleanly.
-            __INPUT_ARG__=(f' "$here/{input_name}"' if input_name else ""),
+            __HARNESS_ARGS__=(harness_args if harness_args else
+                              (f' "$here/{input_name}"' if input_name else "")),
             __INPUT_DESC__=(f"$here/{input_name}" if input_name
                             else "self-contained harness (no input file)"),
             __HARNESS_NAME__=harness_name,
@@ -3320,6 +3322,11 @@ def main(argv: list[str]) -> int:
             san_bin_rel = f"{sanitizer_meta(sanitizer)['build_dir']}/repro"
         sanitizer_extra_options = cfg.sanitizer_options.get(sanitizer, "")
         is_browser = cfg.is_browser == "1"
+        repro_args = crash_artifacts.find_repro_args(
+            scan_dirs,
+            bin_names=[Path(san_bin_rel).name] if san_bin_rel else [],
+            testcase_name=testcase.name if testcase is not None else "",
+        )
 
         # A local-only / unpinned target cannot be cloned by reproduce.sh (see
         # the clone gate in PREAMBLE_GENERIC). Point it at the in-place source
@@ -3410,6 +3417,13 @@ def main(argv: list[str]) -> int:
             # required `and input_name`, so a self-contained harness fell
             # through to the stub even though a real, runnable reproducer was
             # one compile away.
+            harness_cli_args = ""
+            if repro_args:
+                testcase_shell = f'"$here/{input_name}"' if input_name else ""
+                harness_cli_args = " " + " ".join(
+                    testcase_shell if a == crash_artifacts.TESTCASE_TOKEN else shq(a)
+                    for a in repro_args
+                )
             write_c_harness_template(
                 repro_path,
                 build_system=build_system, upstream_url=upstream_url,
@@ -3426,6 +3440,7 @@ def main(argv: list[str]) -> int:
                 recorded_env_options=recorded_env_options,
                 audit_build_script=audit_build_script,
                 local_src=local_src,
+                harness_args=harness_cli_args,
             )
         elif shell_wrapper is not None:
             write_shell_wrapper_template(
@@ -3442,11 +3457,6 @@ def main(argv: list[str]) -> int:
             # Replay the recorded argv when the crash needs non-default flags;
             # {TESTCASE} maps to the staged input, the rest is shell-quoted.
             # Defaults to the bare `"$testcase"` for a flag-less CLI crash.
-            repro_args = crash_artifacts.find_repro_args(
-                scan_dirs,
-                bin_names=[Path(san_bin_rel).name] if san_bin_rel else [],
-                testcase_name=testcase.name if testcase is not None else "",
-            )
             cli_args = " ".join(
                 '"$testcase"' if a == crash_artifacts.TESTCASE_TOKEN else shq(a)
                 for a in repro_args
