@@ -96,6 +96,18 @@ rendered=$(python3 "$renderer" audit_recon.md.j2 \
 assert_match "Find all security issues" "$rendered" "audit recon template keeps recall framing"
 assert_match '"slice": "slice-1"' "$rendered" "audit recon template injects slice"
 
+# triage_reachability_fields: resource-exhaustion converse-guard. The exhausting
+# QUANTITY (depth/count/size), not the field values, decides byte-reachability —
+# otherwise an API-built deep-recursion DoS whose depth a parser nesting limit
+# blocks from untrusted input gets mislabelled trigger_source=bytes (AV:N) and
+# over-scored. Recall-safe: only reclassifies when an input bound below the
+# exhaustion threshold is shown; genuine byte-driven DoS stays "bytes".
+rendered=$(python3 "$renderer" triage_reachability_fields.md.j2 --var 'narrative=x')
+assert_match "exhausting quantity, not the field values" "$rendered" \
+  "reachability fields: resource-exhaustion classified by exhausting quantity"
+assert_match "parser nesting or size limit" "$rendered" \
+  "reachability fields: input bound below threshold localises exhaustion to call-sequence"
+
 rendered=$(python3 "$renderer" suggest_threat_model.md.j2 \
   --var "slug=demo" \
   --var "upstream_url=https://example.com/demo" \

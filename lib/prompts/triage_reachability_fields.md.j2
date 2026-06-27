@@ -62,6 +62,19 @@ Rules:
   "bytes" and record the local precondition in caller_controls instead;
   mislabelling a byte-reachable bug as call-sequence would wrongly localise it
   (AV:L) and under-score it.
+- For resource/algorithmic-exhaustion primitives (stack_exhaustion,
+  dos_amplification, regex_dos, memory_leak, oom), classify trigger_source by
+  the exhausting quantity, not the field values. The exhausting quantity is the
+  nesting depth, element/iteration count, total size, or backtracking steps that
+  drives the blow-up. If the library's own input path provably bounds it below
+  the level that exhausts — e.g. a parser nesting or size limit lower than the
+  depth or count the crash needs — attacker-supplied bytes cannot reach the
+  threshold, and only a trusted caller building the structure through the API
+  can: set trigger_source to "call-sequence". Keep trigger_source "bytes" only
+  when the quantity is itself attacker-driven through input, e.g. catastrophic
+  regex backtracking from an attacker pattern/subject or deep nesting a parser
+  accepts with no lower limit. Controlling the field VALUES is not controlling
+  the exhausting quantity.
 - Output JSON only, no prose, no markdown fences.
 
 Report:
