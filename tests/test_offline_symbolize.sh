@@ -183,30 +183,56 @@ LLVM_PREFIX="$TEST_TMPDIR" _SANITIZER_SYMBOLIZER_PY="$TEST_TMPDIR/no-such-helper
   sanitizer_symbolize_available || rc=$?
 assert_eq 1 "$rc" "sanitizer_symbolize_available: false when the helper module is absent"
 
+# sanitizer_symbolize_file picks atos on macOS (debug-map-aware, no .dSYM
+# needed) and llvm-symbolizer elsewhere, so point each at its stub: the atos stub
+# on PATH for Darwin, the llvm stub via LLVM_PREFIX otherwise. This keeps the
+# in-place / fall-open plumbing covered on the backend each platform actually
+# uses.
+symbolize_with_stub() {  # <file>
+  if audit_is_darwin; then
+    # Put the llvm stub ($TEST_TMPDIR/bin) on PATH alongside the atos stub: the
+    # atos preference must skip it (atos's "parse.c:42" wins). Were it to leak to
+    # the PATH llvm-symbolizer, the llvm stub's distinct "/src/app/parse.c:42:10"
+    # would show instead and the macOS assertion below would fail.
+    PATH="$FALLBACKDIR:$TEST_TMPDIR/bin:$PATH" sanitizer_symbolize_file "$1"
+  else
+    LLVM_PREFIX="$TEST_TMPDIR" sanitizer_symbolize_file "$1"
+  fi
+}
+
 INPLACE="$TEST_TMPDIR/inplace.txt"
 cp "$RAW" "$INPLACE"
-LLVM_PREFIX="$TEST_TMPDIR" sanitizer_symbolize_file "$INPLACE"
+symbolize_with_stub "$INPLACE"
 assert_eq 0 $? "sanitizer_symbolize_file: returns 0"
-assert_file_contains "$INPLACE" 'in app_parse /src/app/parse\.c:42:10' \
-  "sanitizer_symbolize_file: rewrote file in place"
+if audit_is_darwin; then
+  # atos format: "func file:line" (no leading /src path, no :column).
+  assert_file_contains "$INPLACE" 'in app_parse parse\.c:42' \
+    "sanitizer_symbolize_file: rewrote file in place (atos backend)"
+else
+  assert_file_contains "$INPLACE" 'in app_parse /src/app/parse\.c:42:10' \
+    "sanitizer_symbolize_file: rewrote file in place (llvm-symbolizer backend)"
+fi
 
 # Empty file: best-effort no-op, never errors.
 EMPTY="$TEST_TMPDIR/empty.txt"
 : > "$EMPTY"
-LLVM_PREFIX="$TEST_TMPDIR" sanitizer_symbolize_file "$EMPTY"
+symbolize_with_stub "$EMPTY"
 assert_eq 0 $? "sanitizer_symbolize_file: no-op on empty file"
 
 # A binary the symbolizer can't resolve leaves the raw frames in place (fall
 # open) and still returns 0 — the stub only knows the fixture offsets, so an
-# unknown module stays as captured.
+# unknown module degrades to its module name regardless of backend.
 UNTOUCHED="$TEST_TMPDIR/untouched.txt"
 cat > "$UNTOUCHED" <<'EOF'
     #0 0x000109999999  (/build/asan/unknownmod:arm64+0xfeed)
 EOF
-LLVM_PREFIX="$TEST_TMPDIR" sanitizer_symbolize_file "$UNTOUCHED"
+symbolize_with_stub "$UNTOUCHED"
 assert_eq 0 $? "sanitizer_symbolize_file: returns 0 on unresolvable frames"
-assert_file_contains "$UNTOUCHED" 'in unknownmod' \
-  "sanitizer_symbolize_file: unresolved frame degrades to module name"
+# The module name must survive with no fabricated file:line. llvm renders this
+# as "in unknownmod"; atos keeps it in parens "(unknownmod)" — the unknownmod
+# offset is absent from the stub, so any resolution would be a bug.
+assert_file_contains "$UNTOUCHED" 'unknownmod' \
+  "sanitizer_symbolize_file: unresolved frame degrades to its module name"
 
 teardown_test_env
 summary

@@ -212,8 +212,22 @@ sanitizer_symbolize_file() {
   # clean runs and already-symbolized reports are a true no-op.
   sanitizer_report_has_raw_frames "$f" || return 0
   tmp="$(mktemp "${TMPDIR:-/tmp}/sanitizer-symbolize-XXXXXX")" || return 0
+  # Pick the offline backend. On macOS prefer atos: it resolves frames straight
+  # from the Mach-O debug map (the .o DWARF a CMake/-g1 build leaves behind) and
+  # from a .dSYM if one exists, so it needs no .dSYM and cannot be defeated by a
+  # .dSYM going stale after a relink. llvm-symbolizer follows neither a debug map
+  # nor a UUID-mismatched .dSYM, so reserve it for hosts without atos and for
+  # Linux (where -g1 DWARF lives in the ELF). Use --no-llvm-symbolizer, NOT an
+  # empty --llvm-symbolizer: the latter still falls through to a PATH
+  # llvm-symbolizer and never reaches atos.
+  local sym_args
+  if audit_is_darwin && command -v atos >/dev/null 2>&1; then
+    sym_args=(--no-llvm-symbolizer)
+  else
+    sym_args=(--llvm-symbolizer "$(sanitizer_symbolizer_path)")
+  fi
   if audit_timeout_run 60 python3 "$_SANITIZER_SYMBOLIZER_PY" \
-       --llvm-symbolizer "$(sanitizer_symbolizer_path)" <"$f" >"$tmp" 2>/dev/null \
+       "${sym_args[@]}" <"$f" >"$tmp" 2>/dev/null \
        && [ -s "$tmp" ]; then
     cat "$tmp" >"$f"
   fi

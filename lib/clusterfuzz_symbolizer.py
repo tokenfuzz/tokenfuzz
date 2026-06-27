@@ -466,10 +466,18 @@ class SymbolizationLoop:
     return symbolized_crash_stacktrace
 
 
-def _resolve_llvm_symbolizer(explicit):
+def _resolve_llvm_symbolizer(explicit, disable=False):
   """Resolve an llvm-symbolizer path. DIVERGENCE: replaces CF's
   environment.get_llvm_symbolizer_path(). Precedence: explicit arg, then the
-  LLVM_SYMBOLIZER env var, then PATH."""
+  LLVM_SYMBOLIZER env var, then PATH.
+
+  When ``disable`` is set, return '' without consulting any of those — the empty
+  path makes LLVMSymbolizer a no-op, so the chain falls straight to the platform
+  tool (atos on macOS, addr2line on Linux). Callers use this to force the
+  debug-map-aware backend; an empty ``explicit`` alone does NOT disable llvm
+  (it would still fall through to a PATH llvm-symbolizer)."""
+  if disable:
+    return ''
   for candidate in (explicit, os.environ.get('LLVM_SYMBOLIZER')):
     if candidate and os.path.exists(candidate):
       return candidate
@@ -479,7 +487,8 @@ def _resolve_llvm_symbolizer(explicit):
 
 def symbolize_stacktrace(unsymbolized_crash_stacktrace,
                          symbolizer_path=None,
-                         enable_inline_frames=False):
+                         enable_inline_frames=False,
+                         disable_llvm_symbolizer=False):
   """Symbolize a crash stacktrace produced with symbolize=0.
 
   Uses the ClusterFuzz symbolizer chain: llvm-symbolizer when available, else
@@ -497,7 +506,8 @@ def symbolize_stacktrace(unsymbolized_crash_stacktrace,
   stack_inlining = str(enable_inline_frames).lower()
   symbolizers = {}
 
-  llvm_symbolizer_path = _resolve_llvm_symbolizer(symbolizer_path)
+  llvm_symbolizer_path = _resolve_llvm_symbolizer(symbolizer_path,
+                                                  disable_llvm_symbolizer)
   loop = SymbolizationLoop()
   return loop.process_stacktrace(unsymbolized_crash_stacktrace)
 
@@ -510,11 +520,18 @@ def main(argv):
   parser.add_argument(
       '--llvm-symbolizer', default='',
       help='Path to llvm-symbolizer (else $LLVM_SYMBOLIZER, else PATH).')
+  parser.add_argument(
+      '--no-llvm-symbolizer', action='store_true',
+      help='Skip llvm-symbolizer entirely and use the platform tool (atos on '
+      'macOS, addr2line on Linux). atos is debug-map-aware, needs no .dSYM, and '
+      'is immune to a stale one — unlike llvm-symbolizer, which an empty '
+      '--llvm-symbolizer would still reach via PATH.')
   args = parser.parse_args(argv)
 
   raw = sys.stdin.read()
   sys.stdout.write(
-      symbolize_stacktrace(raw, symbolizer_path=args.llvm_symbolizer))
+      symbolize_stacktrace(raw, symbolizer_path=args.llvm_symbolizer,
+                           disable_llvm_symbolizer=args.no_llvm_symbolizer))
   return 0
 
 

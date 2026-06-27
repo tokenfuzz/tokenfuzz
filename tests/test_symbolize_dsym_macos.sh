@@ -165,4 +165,47 @@ assert_file_exists "$troot/build-ubsan/libsample.dylib.dSYM/Contents/Resources/D
 rc=0; audit_make_dsyms_for_target "$TEST_TMPDIR/no-such-target" || rc=$?
 assert_eq 0 "$rc" "audit_make_dsyms_for_target: no-op (rc 0) on a missing target root"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Production symbolize path: sanitizer_symbolize_file resolves via atos, which
+# follows the Mach-O debug map directly — so it needs NO .dSYM and is immune to
+# a .dSYM going stale after a mid-run relink (the benchmark failure: a binary
+# linked at T+5min symbolized against a .dSYM baked at T+0). macOS therefore does
+# not depend on llvm-symbolizer's fresh-.dSYM requirement; llvm-symbolizer
+# (exercised above) stays the fallback for hosts without atos and for Linux.
+# ═══════════════════════════════════════════════════════════════════════════
+source "$SCRIPT_ROOT/lib/timeout.sh"   # audit_timeout_run, used by the symbolize path
+source "$SCRIPT_ROOT/lib/sanitizer.sh"
+
+if command -v atos >/dev/null 2>&1; then
+  # No .dSYM at all (the just-linked state) — the debug map is all atos needs.
+  rm -rf "$build/libsample.dylib.dSYM" "$build/apptool.dSYM"
+  # Force the regression shape host-independently: a stub llvm-symbolizer on PATH
+  # that resolves the symbol but NO file:line (??:0:0) — exactly what real
+  # llvm-symbolizer does for a debug-map dylib with no .dSYM. If the atos
+  # preference is not explicit (an empty --llvm-symbolizer would fall through to
+  # this PATH binary), the frame degrades to "func (module)" and the assert below
+  # fails. With --no-llvm-symbolizer the stub is skipped and atos resolves.
+  stubdir="$TEST_TMPDIR/llvmstub"; mkdir -p "$stubdir"
+  { echo "#!$(command -v python3)"; cat <<'PY'; } > "$stubdir/llvm-symbolizer"
+import sys
+# llvm-symbolizer pipe protocol: per "<binary> <offset>" line emit
+# "function\nfile:line\n\n". Resolve the symbol but not file:line.
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    sys.stdout.write('sample_overflow\n??:0:0\n\n')
+    sys.stdout.flush()
+PY
+  chmod +x "$stubdir/llvm-symbolizer"
+  symd="$TEST_TMPDIR/symd.txt"; cp "$raw" "$symd"
+  PATH="$stubdir:$PATH" sanitizer_symbolize_file "$symd"
+  symd_frame="$(grep -E 'sample_overflow' "$symd" | head -1)"
+  assert_match 'sample\.c:[0-9]' "$symd_frame" \
+    "sanitizer_symbolize_file uses atos even with a file:line-less llvm-symbolizer on PATH (no .dSYM)"
+  assert_file_not_exists "$build/libsample.dylib.dSYM" \
+    "atos symbolize path needs no dsymutil — leaves no .dSYM behind"
+else
+  pass "skipped atos symbolize assert: atos not available"
+fi
+
 summary
