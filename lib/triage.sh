@@ -2282,8 +2282,22 @@ _triage_one_crash_dir() {
     # bundle has sanitizer.txt at root (legacy: asan.txt); pre-bundle
     # dirs may have *_confirm.asan.txt / *.asan.txt only.
     local missing=()
+    # Judge the audit-side report.md when present (the source the agent edits);
+    # a rendered REPORT.md may already exist from an earlier pass. An auto-filed
+    # bin/probe skeleton still carrying the `_TODO (agent):` markers in Root
+    # Cause / Data Flow is not yet enriched — hold it as promotion-pending
+    # rather than let a placeholder report ship as a maintainer-facing bundle.
     if [ ! -s "$d/report.md" ] && [ ! -s "$d/REPORT.md" ]; then
       missing+=("report.md")
+    elif [ -s "$d/report.md" ]; then
+      # Anchor to line start: only the unreplaced Root Cause / Data Flow
+      # placeholder lines begin with the marker. An instructional mention of
+      # it elsewhere (e.g. the skeleton's intro note) must not keep an
+      # otherwise-enriched report pending forever.
+      grep -q '^_TODO (agent):' "$d/report.md" 2>/dev/null \
+        && missing+=("report.md(auto-filed skeleton not yet enriched)")
+    elif grep -q '^_TODO (agent):' "$d/REPORT.md" 2>/dev/null; then
+      missing+=("report.md(auto-filed skeleton not yet enriched)")
     fi
     local asan_ok=0
     if [ -n "$asan_path" ] && _triage_has_sanitizer_diagnostic "$asan_path"; then

@@ -119,8 +119,16 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
    repo-root `scratch-N/` dirs.
 2. Run `bin/probe` in the same turn:
    bin/probe "${RESULTS_DIR}/scratch-N/testcase.html"
-3. EVALUATE: crash? → file under crashes/CRASH-NNN-N/. Clean? → 2+ variants.
-4. IF CRASH: write report.md (Summary, Classification, Root Cause, Reproduction, Data Flow). Format Data Flow bullets as `step: func (path/to/file.c:NN) — desc` so the post-render pass can inline source snippets. For a 1–3 line fix, save a surgical patch as sibling `patch.diff` whenever it passes the non-mutating `git -C "$TARGET_ROOT" apply --check` (never modify the target source to validate — for hg targets just save the `hg diff`); do NOT write a `## Patch` section in `report.md` — `bin/enrich-report` is the single writer of that section. Reserve `## Fix Direction` prose (no `patch.diff`) for ABI/API-impacting changes where a surgical diff isn't possible. The report must also carry the standard bare-label fields `Boundary:` / `Caller controls:` / `Trusted caller actions:` / `Caller contract:` / `Trigger source:` / `Strategy:` (see `.agents/references/session-rules.md`). `Strategy: S<N>` records which of S1..S8 (or REF) produced this report — the cluster tables and ROI surface use it to attribute bugs to the strategy that found them.
+3. EVALUATE: crash? → re-run with `--confirm`; on a stable crash `bin/probe`
+   auto-files the bundle. Clean? → 2+ variants.
+4. IF CRASH: once you `bin/probe --confirm` and the diagnostic reproduces across
+   runs, `bin/probe` materializes the bundle for you — it copies the reproducer +
+   `sanitizer.txt` into the next `crashes/CRASH-NNN-<agent>/` slot, writes a
+   `report.md` skeleton, and prints `[probe] CRASH FILED: <path>`. (A single
+   one-run probe does NOT auto-file — confirm first.) Do NOT hunt the crashes/
+   tree for it and do NOT open a second dir — re-confirming the same testcase
+   reuses the existing bundle. Go to the printed path and ENRICH `report.md`
+   (Summary, Classification, Root Cause, Reproduction, Data Flow). Format Data Flow bullets as `step: func (path/to/file.c:NN) — desc` so the post-render pass can inline source snippets. For a 1–3 line fix, save a surgical patch as sibling `patch.diff` whenever it passes the non-mutating `git -C "$TARGET_ROOT" apply --check` (never modify the target source to validate — for hg targets just save the `hg diff`); do NOT write a `## Patch` section in `report.md` — `bin/enrich-report` is the single writer of that section. Reserve `## Fix Direction` prose (no `patch.diff`) for ABI/API-impacting changes where a surgical diff isn't possible. The report must also carry the standard bare-label fields `Boundary:` / `Caller controls:` / `Trusted caller actions:` / `Caller contract:` / `Trigger source:` / `Strategy:` (see `.agents/references/session-rules.md`). `Strategy: S<N>` records which of S1..S8 (or REF) produced this report — the cluster tables and ROI surface use it to attribute bugs to the strategy that found them.
 ```
 
 **Techniques:** allocator shaping, GC/CC timing, object replacement, multi-trigger, `ASAN_OPTIONS=quarantine_size_mb=1`. Full templates: `.agents/references/reproducer-templates.md`.

@@ -252,5 +252,71 @@ LLM_DECIDE_DISABLE=1 triage_crash_dirs >/dev/null 2>&1
 assert_dir_not_exists "$RESULTS_DIR/findings/FIND-UBSAN-VPTR" \
   "UBSan vptr/Bad-cast: NOT demoted to findings/ (security class stays a crash)"
 
+# An auto-filed bin/probe skeleton (report.md still carries the
+# `_TODO (agent):` markers from lib/crash_bundle.sh) must be held as
+# promotion-pending — a placeholder report must not satisfy the completeness
+# gate and ship as a maintainer-facing bundle when LLM confirmation is off.
+# The same crash with a real (enriched) report passes the gate.
+UAF_TRACE=$(cat <<'EOF'
+==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010
+READ of size 4 at 0x602000000010 thread T0
+    #0 0x100 in app_consume child.c:91
+SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in app_consume
+EOF
+)
+SKEL_DIR="$RESULTS_DIR/crashes/CRASH-SKELETON"
+mkdir -p "$SKEL_DIR"
+printf '%s\n' "$UAF_TRACE" > "$SKEL_DIR/sanitizer.txt"
+printf 'reuse-after-free testcase bytes\n' > "$SKEL_DIR/testcase.tc"
+cat > "$SKEL_DIR/report.md" <<'EOF'
+# CRASH-SKELETON: AddressSanitizer: heap-use-after-free (auto-filed by bin/probe)
+## Root Cause
+_TODO (agent): describe the defect and why the sanitizer fires._
+## Data Flow
+_TODO (agent): step: func (file:line) — desc._
+Boundary:
+Trigger source:
+EOF
+ENR_DIR="$RESULTS_DIR/crashes/CRASH-ENRICHED"
+mkdir -p "$ENR_DIR"
+printf '%s\n' "$UAF_TRACE" > "$ENR_DIR/sanitizer.txt"
+printf 'reuse-after-free testcase bytes\n' > "$ENR_DIR/testcase.tc"
+cat > "$ENR_DIR/report.md" <<'EOF'
+# CRASH-ENRICHED: heap-use-after-free in app_consume
+## Root Cause
+The parent retains a stale pointer to a child freed during cleanup, so a later
+read dereferences freed memory.
+## Data Flow
+read: app_consume (child.c:91) — dereferences the freed child node.
+Boundary: public API call sequence
+Trigger source: call-sequence
+EOF
+# Enriched sections but a mid-line mention of the marker in the intro note
+# (e.g. "REPLACE the _TODO (agent): sections") must NOT keep the crash pending:
+# the sentinel check is anchored to line start, where only unreplaced
+# placeholders live.
+NOTE_DIR="$RESULTS_DIR/crashes/CRASH-ENRICHED-NOTE"
+mkdir -p "$NOTE_DIR"
+printf '%s\n' "$UAF_TRACE" > "$NOTE_DIR/sanitizer.txt"
+printf 'reuse-after-free testcase bytes\n' > "$NOTE_DIR/testcase.tc"
+cat > "$NOTE_DIR/report.md" <<'EOF'
+# CRASH-ENRICHED-NOTE: heap-use-after-free
+> Note: replace the `_TODO (agent):` sections before filing.
+## Root Cause
+The parent retains a stale pointer to a freed child, read during cleanup.
+## Data Flow
+read: app_consume (child.c:91) — dereferences the freed child node.
+Boundary: public API call sequence
+Trigger source: call-sequence
+EOF
+LLM_DECIDE_DISABLE=1 CRASH_CONFIRM_AUTO=0 CLUSTER_AUTO=0 triage_crash_dirs >/dev/null 2>&1
+assert_dir_exists "$SKEL_DIR" "auto-filed skeleton: held in crashes/ (not exported/rejected)"
+assert_file_exists "$SKEL_DIR/.promotion_pending" \
+  "auto-filed skeleton: marked promotion-pending until enriched"
+assert_file_not_exists "$ENR_DIR/.promotion_pending" \
+  "enriched report: passes the completeness gate (no skeleton markers)"
+assert_file_not_exists "$NOTE_DIR/.promotion_pending" \
+  "enriched report with a mid-line marker mention: not held (sentinel is line-anchored)"
+
 teardown_test_env
 summary
