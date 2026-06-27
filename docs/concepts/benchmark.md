@@ -169,7 +169,7 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Rejected crashes` | Crash directories rejected by triage. |
 | `Crashes` | Crash directories with real sanitizer output on disk. |
 | `Unique crashes` | Clustered crashes, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the crash cluster report. |
-| `Top severity` | Highest crash severity observed in the cell. |
+| `Top crash severity` | Highest crash severity observed in the cell. |
 
 The count cells are links. They point into the condition-specific
 crash, finding, rejected-crash, rejected-finding, and cluster reports
@@ -354,7 +354,7 @@ guessed one.
   direction; they do not settle stochastic behavior.
 - Compare more than one target. A harness change that helps one parser
   and hurts another should not disappear into a single headline row.
-- Read the Medium+ subset of unique crashes and top severity before raw
+- Read the Medium+ subset of unique crashes and top crash severity before raw
   crash count.
   A pile of duplicated low-value crashes is not a stronger benchmark
   result than one clean, reachable reproducer.

@@ -273,7 +273,7 @@ agg=$(python3 "$PY" aggregate "$bd")
 hd=$(echo "$agg" | jq -c '.conditions[] | select(.condition=="harness")')
 assert_eq "2" "$(echo "$hd" | jq -r '.crash_median')" "T4a: harness median of [3,1] is 2"
 assert_eq "—" "$(echo "$hd" | jq -r '.top_severity_level')" \
-  "T4b: no cluster JSON → top severity is unscored (—)"
+  "T4b: no cluster JSON → top crash severity is unscored (—)"
 assert_eq "4" "$(echo "$hd" | jq -r '.crash_total')" "T4c: harness crash total is 4"
 assert_eq "2" "$(echo "$hd" | jq -r '.replicates_done')" "T4d: both replicates done"
 nv=$(echo "$agg" | jq -c '.conditions[] | select(.condition=="model-direct")')

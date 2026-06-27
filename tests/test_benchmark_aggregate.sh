@@ -638,11 +638,11 @@ assert_eq "2" "$(echo "$aagg" | jq -r '.crash_clusters | length')" \
 # Without per-member severity (older cluster JSON) the cluster-level severity
 # is carried straight through to every condition that reached the cluster.
 assert_eq "Medium" "$(echo "$ahd" | jq -r '.top_severity_level')" \
-  "T14f: harness top severity is Medium (CL-1)"
+  "T14f: harness top crash severity is Medium (CL-1)"
 assert_eq "1" "$(echo "$ahd" | jq -r '.medium_plus_bugs')" \
   "T14g: harness has one Medium+ bug"
 assert_eq "Medium" "$(echo "$anv" | jq -r '.top_severity_level')" \
-  "T14h: model-direct top severity falls back to cluster-level Medium (no member_severity)"
+  "T14h: model-direct top crash severity falls back to cluster-level Medium (no member_severity)"
 assert_eq "1" "$(echo "$anv" | jq -r '.medium_plus_bugs')" \
   "T14h2: model-direct medium_plus falls back to the shared Medium cluster"
 assert_eq "6.5" \
@@ -659,9 +659,9 @@ aagg2=$(cat "$work/aagg2.json" 2>/dev/null || true)
 ahd2=$(echo "$aagg2" | jq -c '.conditions[] | select(.condition=="harness")')
 anv2=$(echo "$aagg2" | jq -c '.conditions[] | select(.condition=="model-direct")')
 assert_eq "Medium" "$(echo "$ahd2" | jq -r '.top_severity_level')" \
-  "T14j: harness top severity is its own Medium crash"
+  "T14j: harness top crash severity is its own Medium crash"
 assert_eq "Low" "$(echo "$anv2" | jq -r '.top_severity_level')" \
-  "T14k: model-direct top severity is its OWN Low crash, not the harness Medium"
+  "T14k: model-direct top crash severity is its OWN Low crash, not the harness Medium"
 assert_eq "0" "$(echo "$anv2" | jq -r '.medium_plus_bugs')" \
   "T14l: model-direct has no Medium+ bug (its only crash is Low)"
 assert_eq "1" "$(echo "$ahd2" | jq -r '.medium_plus_bugs')" \

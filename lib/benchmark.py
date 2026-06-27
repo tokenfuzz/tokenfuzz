@@ -1853,7 +1853,7 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
         model-direct crash (Low) sharing one crash state cluster together,
         and the cluster's canonical/overall severity is the harness Medium.
         Crediting model-direct with that Medium overstates the baseline — its
-        Top severity must reflect the Low crash it actually produced. So score
+        Top crash severity must reflect the Low crash it actually produced. So score
         each condition by the max severity among ITS members. Falls back to the
         cluster's overall severity when per-member data is absent (older
         cluster JSON without member_severity)."""
@@ -2689,14 +2689,12 @@ def render_section(report: dict) -> str:
     # shape). `Unique findings` / `Unique crashes` show the clustered count
     # annotated with its Medium+ subset — `N (M M+)` — so the security-yield
     # subset is visible without dropping the Low/unscored remainder. `Top
-    # severity` is the single highest-severity display and stays crash-only,
-    # so it closes the crash group rather than floating as if it applied to
-    # findings too.
+    # crash severity` is the single highest-severity crash display.
     lines.append(
         "| Condition | Replicates | Wall (h) "
         "| Rejected findings | Findings | Unique findings "
         "| Rejected crashes | Crashes | Unique crashes "
-        "| Top severity |"
+        "| Top crash severity |"
     )
     lines.append(
         "| --- | --: | --: | --: | --: | --: | --: | --: | --: | :--: |"
@@ -2780,8 +2778,8 @@ def render_section(report: dict) -> str:
         "`bin/cluster-crashes` merge duplicate signatures, annotated `N (M "
         "M+)` where `M` is how many of the `N` clusters `bin/reachability` "
         "scored Medium or higher — the security-yield subset, on one scale "
-        "across both conditions. **Top severity** is the highest crash "
-        "severity in the row — the single-severity display stays crash-only. "
+        "across both conditions. **Top crash severity** is the highest crash "
+        "severity in the row. "
         f"`{baseline_label}` is a bare \"find the vulnerabilities\" prompt "
         "with no harness around it, so a large raw crash count there is "
         "mostly repeated noise. `tokenfuzz` is the audit harness — triage, "
@@ -3081,7 +3079,7 @@ def crosstab(bench_root: Path) -> str:
         "| Target | Backend | Condition | Run | Wall (h) | Replicates "
         "| Rejected findings | Findings | Unique findings "
         "| Rejected crashes | Crashes | Unique crashes "
-        "| Top severity "
+        "| Top crash severity "
         "| Input | Output | Cost |"
     )
     lines.append(
@@ -3327,11 +3325,11 @@ def crosstab(bench_root: Path) -> str:
         "findings and crashes on one scale so a security team can compare "
         "impact, not just raw report count. The `M+` annotation on the "
         "**Unique findings** and **Unique crashes** columns is that score; the "
-        "**Top severity** column below is crash-only."
+        "**Top crash severity** column below is crash-only."
     )
     lines.append("")
     lines.append(
-        "- **Top severity** — highest crash severity observed in the row, or "
+        "- **Top crash severity** — highest crash severity observed in the row, or "
         "`—` when no accepted crash was scored."
     )
     lines.append("")

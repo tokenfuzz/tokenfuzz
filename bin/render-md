@@ -449,7 +449,7 @@ _HTML_HEAD = """<!DOCTYPE html>
   /* Aggregated benchmark crosstab — wide table, many columns. Let
      multi-word headers wrap onto a second line — by default `thead th`
      (and `.right`) carry `white-space: nowrap`, which keeps "Rejected
-     findings", "Unique crashes", "Top severity", etc. on a single
+     findings", "Unique crashes", "Top crash severity", etc. on a single
      line and consumes most of the table width.
      With the headers free to wrap, identifier cells (run id, condition
      slug) stay atomic on a single line instead of being chopped
