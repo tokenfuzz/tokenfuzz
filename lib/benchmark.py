@@ -825,6 +825,7 @@ def harvest_tokens(
     index_jsonl: Path,
     default_backend: str = "",
     default_model: str = "",
+    prompt_estimate_fallback: int = 0,
 ) -> dict:
     """Sum token usage + sanitizer invocations from a logs/index.jsonl.
 
@@ -900,6 +901,23 @@ def harvest_tokens(
         totals["cached_input_tokens"] += cache_read
         totals["cache_creation_tokens"] += cache_creation
         totals["output_tokens"] += output
+        # Tiered long-context pricing (e.g. gpt-5.5 @272K) is a PER-REQUEST
+        # boundary, but `raw_input` is the session's input summed across every
+        # request, so it crosses the threshold on conversation length alone and
+        # pins ~all multi-turn sessions to the high tier. Tier on the per-request
+        # prompt size instead: prompt_estimate_build is the build-time prompt for
+        # one request; fall back to prompt_estimate, then the caller's
+        # prompt_estimate_fallback (model-direct has no harness stash, so harvest
+        # derives this from the cell's persisted prompt.txt), then raw_input for
+        # rows that predate every estimate. Underestimates within-session context
+        # growth past the threshold, but errs far smaller than tiering on the
+        # cumulative sum.
+        tier_basis = (
+            _int(tok.get("prompt_estimate_build"))
+            or _int(tok.get("prompt_estimate"))
+            or prompt_estimate_fallback
+            or raw_input
+        )
         event_cost, source = _cost_decimal(
             backend,
             model,
@@ -907,7 +925,7 @@ def harvest_tokens(
             cached_input_tokens=cache_read,
             output_tokens=output,
             cache_creation_tokens=cache_creation,
-            prompt_tokens_for_tier=raw_input,
+            prompt_tokens_for_tier=tier_basis,
         )
         if event_cost is not None:
             totals["cost_usd"] = _decimal_text(
@@ -1418,8 +1436,29 @@ def harvest(
         _find_index_jsonl(results_dir),
         default_backend=default_backend,
         default_model=default_model,
+        prompt_estimate_fallback=_model_direct_prompt_estimate(results_dir),
     )
     return metrics
+
+
+def _model_direct_prompt_estimate(results_dir: Path) -> int:
+    """Per-request prompt size for a model-direct cell, from its persisted
+    prompt.txt (run_model_direct_cell writes it beside the results tree).
+
+    The harness condition stamps prompt_estimate_build into each index row, but
+    model-direct has no such stash — without this its tier basis falls back to
+    the session-cumulative input and pins the baseline to the high tier. Sizing
+    the prompt here re-prices both live and `--regenerate` runs (both go through
+    harvest) from an artifact already on disk. Harness results dirs carry no
+    root prompt.txt, so this is a no-op for them. The file is ASCII-dominant, so
+    byte size / 4 matches bin/audit's chars/4 estimate_tokens closely enough to
+    tier both conditions on the same yardstick — and stat avoids reading a large
+    prompt into memory.
+    """
+    try:
+        return (results_dir / "prompt.txt").stat().st_size // 4
+    except OSError:
+        return 0
 
 
 # ── rejected finding indexes ─────────────────────────────────────────────

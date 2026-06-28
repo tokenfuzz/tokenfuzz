@@ -229,6 +229,31 @@ g5v=$(python3 "$PY" harvest "$g5d" --backend codex --model gpt-5.5)
 assert_eq "0.645000" "$(echo "$g5v" | jq -r '.tokens.cost_usd')" \
   "T1q2: harvest applies GPT-5.5 long-context pricing per Codex request"
 
+# T1q3: a real multi-turn session has cumulative input in the millions, but the
+# tier is a PER-REQUEST boundary — it must tier on the build-time prompt size,
+# not the session sum, so a long session of small requests stays LOW-tier.
+# input 5_000_000 (sum over requests), full-rate=200_000, prompt_estimate_build
+# 16_000 < 272_000 → LOW: (200000*5 + 4800000*0.5 + 1000*30)/1e6 = 3.430000.
+# Tiering on the cumulative 5M (the old bug) would force HIGH → 6.845000.
+g5lo="$work/gpt55-tier-low/results"; mkdir -p "$g5lo/logs"
+printf '%s\n' \
+  '{"backend":"codex","model":"gpt-5.5","tokens":{"input":5000000,"cached_input":4800000,"output":1000,"prompt_estimate_build":16000}}' \
+  > "$g5lo/logs/index.jsonl"
+g5lov=$(python3 "$PY" harvest "$g5lo" --backend codex --model gpt-5.5)
+assert_eq "3.430000" "$(echo "$g5lov" | jq -r '.tokens.cost_usd')" \
+  "T1q3: GPT-5.5 tier follows per-request prompt size, not the session-cumulative input"
+
+# T1q4: the per-request threshold still fires — a single genuinely long-context
+# request (prompt_estimate_build 300_000 > 272_000) prices HIGH:
+# (300000*10 + 0 + 1000*45)/1e6 = 3.045000.
+g5hi="$work/gpt55-tier-high/results"; mkdir -p "$g5hi/logs"
+printf '%s\n' \
+  '{"backend":"codex","model":"gpt-5.5","tokens":{"input":300000,"cached_input":0,"output":1000,"prompt_estimate_build":300000}}' \
+  > "$g5hi/logs/index.jsonl"
+g5hiv=$(python3 "$PY" harvest "$g5hi" --backend codex --model gpt-5.5)
+assert_eq "3.045000" "$(echo "$g5hiv" | jq -r '.tokens.cost_usd')" \
+  "T1q4: GPT-5.5 high tier still applies when one request exceeds the threshold"
+
 # ── T2: UBSan / TSan signatures also count as confirmed ──────────────────
 ubd="$work/ub/results/crashes/CRASH-1"
 mkdir -p "$ubd"
@@ -469,6 +494,45 @@ printf 'prompt text\n' > "$work/no-usage-prompt.txt"
 u5=$(python3 "$USAGE_PY" codex "$work/codex-no-usage.log" "$work/no-usage-prompt.txt")
 assert_eq "0" "$(echo "$u5" | jq -r '.tokens.output')" \
   "T8i: codex no-usage log stays zero-cost instead of estimated"
+
+# T8n: a model-direct cell has no harness prompt stash in its index row, so
+# harvest must derive the per-request tier basis from the cell's persisted
+# prompt.txt. Cumulative input 3_000_000 (>272K) would pin the row HIGH on the
+# session sum; the 16_000-token prompt (64_000 chars / 4) keeps it LOW.
+# LOW: (200000*5 + 2800000*0.5 + 1000*30)/1e6 = 2.430000; the bug gives 4.845000.
+md_res="$work/md-tier/results"; mkdir -p "$md_res/logs"
+printf '%s\n' \
+  '{"backend":"codex","model":"gpt-5.5","tokens":{"input":3000000,"cached_input":2800000,"output":1000}}' \
+  > "$md_res/logs/index.jsonl"
+head -c 64000 /dev/zero | tr '\0' 'x' > "$md_res/prompt.txt"
+md_v=$(python3 "$PY" harvest "$md_res" --backend codex --model gpt-5.5)
+assert_eq "2.430000" "$(echo "$md_v" | jq -r '.tokens.cost_usd')" \
+  "T8n: model-direct tiers on its persisted prompt.txt, not the session-cumulative input"
+
+# T8o: an in-row prompt_estimate_build (the harness path) wins over a present
+# prompt.txt — the prompt.txt fallback only fills rows that lack an estimate, so
+# it can never down-tier a request that legitimately declares a large prompt.
+# build 300_000 > 272K → HIGH: (300000*10 + 0 + 1000*45)/1e6 = 3.045000, even
+# though the tiny prompt.txt alone would say LOW.
+mdp_res="$work/md-prec/results"; mkdir -p "$mdp_res/logs"
+printf '%s\n' \
+  '{"backend":"codex","model":"gpt-5.5","tokens":{"input":300000,"cached_input":0,"output":1000,"prompt_estimate_build":300000}}' \
+  > "$mdp_res/logs/index.jsonl"
+printf 'tiny prompt\n' > "$mdp_res/prompt.txt"
+mdp_v=$(python3 "$PY" harvest "$mdp_res" --backend codex --model gpt-5.5)
+assert_eq "3.045000" "$(echo "$mdp_v" | jq -r '.tokens.cost_usd')" \
+  "T8o: in-row prompt_estimate_build takes precedence over the prompt.txt fallback"
+
+# T8p: a run with neither an in-row estimate nor a prompt.txt (predates both)
+# still falls back to raw_input — graceful, same as before the per-request fix.
+# raw_input 300_000 > 272K → HIGH 3.045000.
+mdn_res="$work/md-none/results"; mkdir -p "$mdn_res/logs"
+printf '%s\n' \
+  '{"backend":"codex","model":"gpt-5.5","tokens":{"input":300000,"cached_input":0,"output":1000}}' \
+  > "$mdn_res/logs/index.jsonl"
+mdn_v=$(python3 "$PY" harvest "$mdn_res" --backend codex --model gpt-5.5)
+assert_eq "3.045000" "$(echo "$mdn_v" | jq -r '.tokens.cost_usd')" \
+  "T8p: with no estimate and no prompt.txt, tier basis falls back to raw_input"
 
 # ── T9: bin/benchmark --dry-run end-to-end ───────────────────────────────
 # (Invocation + fake-git fixture launched in the background at the top of
