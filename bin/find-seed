@@ -182,11 +182,21 @@ fi
 tmp="$(mktemp "${TMPDIR:-/tmp}/find-seed-XXXXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 
+# Skip pathologically large files. ripgrep is line-oriented, so a file with no
+# newlines is a single "line" it must buffer whole before matching: a 36GB
+# single-line PoC artifact (a generated JSON-Patch blob left in the target tree)
+# drove rg to ~36GB RSS and swap-wedged the host, taking every parallel agent
+# down with it. No real fuzz seed is that big, so cap per-file size for every
+# scan. FIND_SEED_MAX_FILESIZE overrides it for targets with genuinely large
+# legitimate seeds.
+rg_max_filesize="${FIND_SEED_MAX_FILESIZE:-64M}"
+
 # Standard testcase extensions. Spans markup/data shapes (HTML, XML,
 # JSON, YAML, proto, fbs), curl/openssl-style cert+config files, and
 # language-source files (rs/go/py/rb/...). Files that smell like test
 # inputs (test_*, *_test*) are picked up by name.
 rg_globs=(
+  --max-filesize "$rg_max_filesize"
   # ── Markup / data shapes ─────────────────────────────
   -g '*.html' -g '*.htm' -g '*.xhtml' -g '*.svg' -g '*.xml'
   -g '*.json' -g '*.yaml' -g '*.yml' -g '*.toml' -g '*.ini' -g '*.cfg'
@@ -250,6 +260,9 @@ awk -F'\t' '!seen[$2]++ {print}' "$tmp" \
   | while IFS=$'\t' read -r rank path; do
       ctx=""
       case "$rank" in
+        # $path comes only from the size-bounded listing scans above (FUNC/STEM
+        # ranks), so it can't be a giant artifact; --max-filesize is ignored on
+        # an explicit path arg anyway and is intentionally omitted here.
         FUNC) ctx=$(rg --no-heading --no-line-number -m1 "\b${FUNC}\b" "$path" 2>/dev/null | head -c 160) ;;
         STEM) ctx=$(rg --no-heading --no-line-number -m1 "\b${stem}\b" "$path" 2>/dev/null | head -c 160) ;;
         NAME) ctx="(filename match)" ;;
