@@ -304,17 +304,18 @@ tc.load_toml_into(cfg, out)
 assert_eq("bytes", cfg.attacker_controls_csv(),
           "seeded generic toml round-trips through loader")
 
-# Curated library slugs get a target-specific starter threat model,
-# sourced from .agents/references/threat_models.toml; uncurated slugs
-# (pcre2, zlib) fall back to the byte-only default. This end-to-end loop
-# also exercises the bundled references file.
+# No curated table is shipped: every non-browser slug seeds the conservative
+# byte-only default, and bin/suggest-threat-model (the LLM) derives the real
+# model per target (it already produces protocol-state for network targets like
+# ffmpeg and byte-only for parsers like pcre2). This loop confirms the byte-only
+# seed for a mix of slugs that previously carried hand-curated tokens.
 threat_model_tmpdir = TEST_TMPDIR / "threat-model-roundtrip"
 threat_model_tmpdir.mkdir()
 for slug, expected_csv in [
-    ("json", "bytes,call-sequence"),
-    ("libxml2", "bytes,call-sequence"),
-    ("curl", "bytes,call-sequence,protocol-state"),
-    ("c-ares", "bytes,call-sequence,protocol-state"),
+    ("json", "bytes"),
+    ("libxml2", "bytes"),
+    ("curl", "bytes"),
+    ("c-ares", "bytes"),
     ("pcre2", "bytes"),
     ("zlib", "bytes"),
 ]:
@@ -327,10 +328,10 @@ for slug, expected_csv in [
     assert_eq(expected_csv, cfg.attacker_controls_csv(),
               f"seed_toml: {slug} attacker_controls default")
 
-# threat_model_for: reads the operator-curated references file directly.
-# A curated slug returns its list; any uncurated slug returns [] so the
-# caller falls back to the byte-only default — this works for ANY project,
-# with no hardcoded per-project table in lib/.
+# threat_model_for: the mechanism still reads an OPTIONAL operator-provided
+# override file (no such file is shipped). A listed slug returns its tokens; any
+# other slug returns [] so the caller falls back to the byte-only default — this
+# works for ANY project, with no hardcoded per-project table in lib/.
 _tm_override = TEST_TMPDIR / "threat_models_override.toml"
 _tm_override.write_text(
     '[mylib]\nattacker_controls = ["bytes", "call-sequence"]\n'
@@ -351,8 +352,8 @@ assert_eq(["bytes", "call-sequence", "timing"],
           "attacker_controls_for_seed: browser uses structural model, ignores table")
 assert_eq([], tc.threat_model_for("mylib", TEST_TMPDIR / "no-such-file.toml"),
           "threat_model_for: missing file degrades to []")
-assert_eq(["bytes", "call-sequence"], tc.threat_model_for("libxml2"),
-          "threat_model_for: bundled threat_models.toml resolves libxml2")
+assert_eq([], tc.threat_model_for("libxml2"),
+          "threat_model_for: no bundled table shipped → default path resolves nothing")
 
 # Browser target widens the threat model
 fx = TEST_TMPDIR / "firefox"

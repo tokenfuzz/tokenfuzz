@@ -1125,7 +1125,7 @@ def _limited_caller_control(fields: dict) -> tuple[bool, str]:
                                r"trusted|application-supplied)\b", parameter):
         return True, "parameter control is indirect/trusted → MAT:P"
     if trusted and re.search(r"\b(private|internal|struct|mutation|harness-only|"
-                             r"callback|ordering|sequence)\b", trusted):
+                             r"ordering|sequence)\b", trusted):
         if not re.search(r"\b(?:normal(?:ly)?|public|documented|no private)\b", trusted):
             return True, "trusted caller action required → MAT:P"
 
@@ -1163,30 +1163,83 @@ _REMOTE_CAPABLE_RE = re.compile(r"\b(timing|race|data[- ]?race|"
 # free prose "both" is the ordinary English word ("both calls must run"), so it
 # is matched only when scoped to the structured trigger_source field.
 _CALL_SEQUENCE_RE = re.compile(r"\bcall[- ]sequence\b|"
-                               r"\bcall[- ]order(?:ing)?\b|\bcallback ordering\b|"
+                               r"\bcall[- ]order(?:ing)?\b|"
                                r"\bapi call[- ]sequence\b|"
                                r"\b(?:sequence|ordering|order) of (?:\w+\s+){0,3}calls?\b")
 
-# The structured set-difference lib/triage.sh records in the `## Contract
-# concern` section: `requires [<csv>] outside attacker_controls=[...]`. This is
-# the exact set of trigger components triage determined the attacker does NOT
-# control, computed once against the target's threat model (with triage's own
-# token normalisation/expansion). The scorer consumes that authoritative result
-# rather than re-deriving the set-difference — the tokens are already canonical.
-_CONTRACT_OOB_RE = re.compile(
-    r"requires\s*\[([^\]]*)\]\s*outside\s+attacker_controls=", re.IGNORECASE)
+# Token aliases, kept in lockstep with shell parse_trigger_source /
+# target_config.sh so Python scoring and shell triage canonicalise the same way.
+_TRIGGER_TOKEN_ALIASES = {
+    "data": "bytes", "data-driven": "bytes", "input": "bytes",
+    "call-order": "call-sequence", "call-seq": "call-sequence",
+    "sequence": "call-sequence",
+}
+
+
+def _normalise_attacker_control_token(token: str) -> str:
+    token = (token or "").strip().lower().replace("_", "-")
+    return _TRIGGER_TOKEN_ALIASES.get(token, token)
+
+
+def _attacker_controls_from_target_toml(path: Path | None) -> set[str]:
+    if path is None:
+        return set()
+    parsed = _parse_target_toml(path)
+    threat = parsed.get("threat_model", {})
+    raw = threat.get("attacker_controls", []) if isinstance(threat, dict) else []
+    if not isinstance(raw, list):
+        return {"bytes"}
+    controls = {
+        tok for tok in (
+            _normalise_attacker_control_token(str(v)) for v in raw
+        )
+        if tok in tc.ATTACKER_CONTROLS_VALID
+    }
+    return controls or {"bytes"}
+
+
+def _trigger_components_from_field(value: str) -> set[str]:
+    """Canonical trigger components from the structured Trigger source field.
+
+    The field is supposed to contain tokens from lib/triage.sh
+    (bytes/call-sequence/timing/race/env/protocol-state/fs-state/both), plus the
+    aliases shell parse_trigger_source accepts (data/data-driven/input → bytes;
+    call-order/call-seq/sequence → call-sequence). Keep this parser token-based:
+    when it cannot recognize the field, the scorer leaves the trigger/control
+    set-difference empty instead of guessing from prose.
+    """
+    text = (value or "").lower().replace("_", "-")
+    if not text.strip():
+        return set()
+    out: set[str] = set()
+    if re.search(r"\bboth\b", text):
+        out.update(("bytes", "call-sequence"))
+    token_re = re.compile(
+        r"\b(bytes|call-sequence|call-order|call-seq|sequence|"
+        r"data-driven|data|input|timing|race|env|protocol-state|fs-state)\b"
+    )
+    for m in token_re.finditer(text):
+        out.add(_normalise_attacker_control_token(m.group(1)))
+    return out
 
 
 def _contract_oob_components(fields: dict) -> set[str]:
-    """Trigger components triage recorded as outside the target's declared
-    attacker_controls. Empty set when the report carries no such annotation —
-    e.g. trigger ⊆ attacker_controls (promoted) or a contract concern raised for
-    a different reason (violated contract / harness-only parameters), neither of
-    which establishes that *only* a local call-sequence gates the primitive."""
-    m = _CONTRACT_OOB_RE.search(fields.get("_report_text", "") or "")
-    if not m:
-        return set()
-    return {t.strip().lower() for t in m.group(1).split(",") if t.strip()}
+    """Trigger components outside the target's current attacker_controls.
+
+    This is deliberately derived from structured state only: the report's
+    Trigger source field and the active target.toml threat model. Report prose,
+    `## Contract concern`, and `.contract-flagged` are annotations and may be
+    stale after benchmark pooling or threat-model edits.
+    """
+    controls_csv = fields.get("_attacker_controls_csv", "")
+    trigger_components = _trigger_components_from_field(fields.get("trigger_source", ""))
+    if controls_csv and trigger_components:
+        controls = {
+            _normalise_attacker_control_token(t)
+            for t in controls_csv.split(",") if t.strip()
+        }
+        return trigger_components - controls
+    return set()
 
 
 def _local_caller_only(fields: dict) -> tuple[bool, str]:
@@ -1214,8 +1267,8 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
     private/internal trusted action). A bare contract concern or generic
     ``Trigger source: api`` is intentionally NOT enough: those establish the
     trigger is not pure attacker bytes, but not that only a trusted local caller
-    can reach it. Contract concern is already represented as Environmental
-    MAT:P in ``_cvss4_metrics``.
+    can reach it. Structured contract concerns are already represented as
+    Environmental MAT:P in ``_cvss4_metrics``.
     """
     controls = (fields.get("caller_controls", "") or "").lower()
     trigger = (fields.get("trigger_source", "") or "").lower()
@@ -1265,13 +1318,13 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
     # A structured `call-sequence` trigger_source is authoritative: the triage
     # pass classified the trigger as a local call ordering, not attacker bytes,
     # so incidental byte/content words in the free-prose caller_controls /
-    # parameter_control (e.g. "caller controls … subject bytes, match-context
-    # callback") must NOT veto localisation — the same trigger-scoped reading
-    # already applied to the `both` token just above. A genuine parse-the-bytes
-    # bug instead carries trigger_source=bytes/both (vetoed here), so this never
+    # parameter_control (e.g. "caller controls … subject bytes, match context")
+    # must NOT veto localisation — the same trigger-scoped reading already
+    # applied to the `both` token just above. A genuine parse-the-bytes bug
+    # instead carries trigger_source=bytes/both (vetoed here), so this never
     # localises a real byte-reachable crash; it only stops the prose byte-word
-    # veto from over-scoring a re-entrancy/callback/call-order crash whose
-    # subject bytes are present but are not the proximate trigger.
+    # veto from over-scoring a re-entrancy/call-order crash whose subject bytes
+    # are present but are not the proximate trigger.
     trigger_is_call_sequence = bool(re.search(r"\bcall[- ]sequence\b", trigger)) \
         and not trigger_is_byte
     # Any attacker-controlled byte/content path means an external boundary can
@@ -1313,9 +1366,9 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
         return True, "trigger is a local API/call-sequence, not attacker bytes → AV:L/AT:P"
     if parameter and re.search(r"\b(trusted|application-supplied|harness-only)\b", parameter):
         return True, "trigger needs trusted/application-supplied parameters → AV:L/AT:P"
-    if (trusted and re.search(r"\b(private|internal|mutation|callback|ordering|sequence)\b", trusted)
+    if (trusted and re.search(r"\b(private|internal|mutation|ordering|sequence)\b", trusted)
             and not re.search(r"\b(?:normal(?:ly)?|public|documented|no private)\b", trusted)):
-        return True, "trigger needs a trusted private/callback caller action → AV:L/AT:P"
+        return True, "trigger needs a trusted private caller action → AV:L/AT:P"
     return False, ""
 
 
@@ -2133,32 +2186,16 @@ def _classify_surface(surface_value: str, boundary_value: str,
     return "unknown", f"surface type unrecognised: {s_type!r}"
 
 
-def _has_contract_concern(report_text: str) -> bool:
-    """True when triage annotated the report with a contract concern.
-
-    Triage keeps these crashes in ``crashes/`` but prepends a report-visible
-    ``## Contract concern`` section. That section is authoritative when present
-    so scoring stays reproducible from REPORT.md alone. It is not the *only*
-    trigger: ``extract_report_fields`` also honours the ``.contract-flagged``
-    sidecar so a flagged bundle whose section was never written (or was
-    dropped on regeneration) still derives MAT:P.
-    """
-    return bool(re.search(r"^## Contract concern\s*$", report_text or "", re.MULTILINE))
-
-
 def _contract_concern(fields: dict) -> tuple[bool, str]:
-    """Whether the caller contract is in question — drives CVSS MAT:P.
-
-    A violated/misused contract or a triage contract concern means the local
-    attack path carries a requirement in this target's environment
-    (CVSS v4.0 Modified Attack Requirements: P). An obeyed/unstated contract
-    is the standard reachable case.
-    """
+    """Whether structured reach fields imply an Environmental MAT:P concern."""
     v = (fields.get("caller_contract", "") or "").lower()
     if "violat" in v or "misuse" in v:
         return True, "caller contract violated → MAT:P"
-    if fields.get("_contract_flagged") or _has_contract_concern(fields.get("_report_text", "")):
-        return True, "triage contract concern → MAT:P"
+    parameter = (fields.get("parameter_control", "") or "").lower()
+    if re.search(r"\bharness[-_ ]only\b", parameter):
+        return True, "harness-only parameter control → MAT:P"
+    if _contract_oob_components(fields):
+        return True, "trigger component outside attacker_controls → MAT:P"
     return False, ""
 
 
@@ -2291,16 +2328,15 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
         "class_field":       out.get("class", ""),
         "advisory":          out.get("advisory", ""),
     }
+    attacker_controls: set[str] = set()
     if report_dir is not None:
         _merge_llm_fields_sidecar(report_dir, fields)
-        # Triage's machine-readable contract flag. The report-visible
-        # ``## Contract concern`` section is authoritative when present, but
-        # the sidecar is an independent trigger so a bundle that was flagged
-        # by an older triage (sidecar only) — or whose section was dropped by
-        # a later report regeneration — still derives Environmental MAT:P
-        # rather than silently scoring as if no concern existed.
-        if (report_dir / ".contract-flagged").is_file():
-            fields["_contract_flagged"] = "1"
+        attacker_controls = _attacker_controls_from_target_toml(_find_target_toml(report_dir))
+    # Match shell triage's ${TARGET_ATTACKER_CONTROLS_CSV:-bytes}: with no
+    # discoverable target.toml, default to the harness boundary {bytes} so a
+    # `Trigger source: both` still yields the call-sequence set-difference
+    # instead of scoring as if nothing were out of bounds.
+    fields["_attacker_controls_csv"] = ",".join(sorted(attacker_controls or {"bytes"}))
     return fields
 
 

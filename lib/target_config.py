@@ -906,14 +906,15 @@ def s4_diff_pairs_for(slug: str) -> dict[str, list[str]]:
     return {k: list(v) for k, v in _S4_DIFF_PAIRS_TAXONOMY.get(slug, {}).items()}
 
 
-# ─── Threat-model seed lookup (reads .agents/references/threat_models.toml) ──
+# ─── Threat-model seed lookup ───────────────────────────────────────────────
 #
-# The per-target threat-model seed table is operator-curated reference data,
-# not shared-harness logic — keeping a per-project dict literal in lib/ would
-# violate the target-agnostic rule. It lives in .agents/references/, the same
-# home as the S6 peers table, and is read at seed time. Unknown non-browser
-# targets fall back to the conservative byte-only default; browser targets
-# share one structural threat model keyed off is_browser (not a project list).
+# No per-project threat-model table is bundled: a hardcoded list doesn't scale
+# as targets grow and conflates a fuzz harness (a test artifact) with a real
+# attacker. Every non-browser target seeds the conservative byte-only default;
+# bin/suggest-threat-model (the LLM) derives the real model per target. The
+# lookup below stays as a generic, optional escape hatch — an operator MAY pass
+# a custom override file — but the default path resolves nothing. Browser
+# targets share one structural threat model keyed off is_browser.
 
 def _threat_models_toml_path() -> Path:
     """Resolve .agents/references/threat_models.toml relative to this file."""
@@ -925,12 +926,13 @@ def _threat_models_toml_path() -> Path:
 
 def threat_model_for(slug: str,
                      threat_models_path: Path | None = None) -> list[str]:
-    """Return the curated default attacker_controls for `slug`, or [] if none.
+    """Return attacker_controls for `slug` from an optional override file, or [].
 
-    Reads .agents/references/threat_models.toml (or the override path for
-    testing). An empty list means the slug has no curated entry — the caller
-    falls back to the byte-only default. Malformed/missing file degrades to
-    [] so seeding still proceeds.
+    No table is shipped by default, so the default path resolves nothing and
+    this returns [] — the caller then uses the byte-only default and lets
+    bin/suggest-threat-model (the LLM) derive the real model. Tests (and an
+    operator who wants one) may pass an explicit `threat_models_path`. A
+    malformed/missing file degrades to [] so seeding still proceeds.
     """
     path = threat_models_path if threat_models_path is not None else _threat_models_toml_path()
     if not path.is_file():
@@ -953,8 +955,9 @@ def attacker_controls_for_seed(slug: str, is_browser: bool,
     """Return default [threat_model].attacker_controls for a seeded target.
 
     Browser targets share one structural threat model. Non-browser targets
-    use the operator-curated seed from .agents/references/threat_models.toml,
-    falling back to the conservative byte-only default when no entry exists.
+    seed the conservative byte-only default (no curated table is shipped); the
+    real model is derived per target by bin/suggest-threat-model (the LLM), or
+    from an explicit operator override file if one is passed.
     """
     if is_browser:
         return ["bytes", "call-sequence", "timing"]

@@ -909,12 +909,11 @@ EOF
 export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":false,"reason":"callback releases active target object"}'
 reason=$(crash_dir_security_rejection_reason "$TEST_TMPDIR/legit_crash_bad_callback" || true)
 unset LLM_DECIDE_MOCK_LEGIT_CRASH
-# Callback-releases-active is now a contract-flag (kept in crashes/ with
-# .contract-flagged sidecar) rather than a hard reject. The reason text
-# is still emitted so downstream annotation can quote it, but it
-# carries the contract-flag: prefix that signals annotate-in-place.
-assert_match "contract-flag" "$reason" "legitimate crash gate: callback-releases-active emits contract-flag prefix"
-assert_match "callback" "$reason" "legitimate crash gate: callback-releases-active reason still names the pattern"
+# Callback wording is not a deterministic contract flag. If the LLM rejects it,
+# the reason is a normal rejection reason; soft contract flags come only from
+# structured Caller contract / Parameter control / Trigger source fields.
+assert_not_match "contract-flag" "$reason" "legitimate crash gate: callback wording is not a contract flag"
+assert_match "callback" "$reason" "legitimate crash gate: callback LLM reason is preserved"
 
 mkdir -p "$TEST_TMPDIR/legit_crash_private"
 cat > "$TEST_TMPDIR/legit_crash_private/asan.txt" <<'EOF'
@@ -930,10 +929,9 @@ EOF
 export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":false,"reason":"private/internal target API used"}'
 reason=$(crash_dir_security_rejection_reason "$TEST_TMPDIR/legit_crash_private" || true)
 unset LLM_DECIDE_MOCK_LEGIT_CRASH
-# Same: private/internal-include match is now a contract-flag, not a
-# hard reject.
-assert_match "contract-flag" "$reason" "legitimate crash gate: private include emits contract-flag prefix"
-assert_match "private" "$reason" "legitimate crash gate: private include reason still names the concern"
+# Private/internal wording is not a deterministic contract flag either.
+assert_not_match "contract-flag" "$reason" "legitimate crash gate: private wording is not a contract flag"
+assert_match "private" "$reason" "legitimate crash gate: private LLM reason is preserved"
 
 # ═══════════════════════════════════════════════════════════════
 # _triage_reconcile_contract_flag — re-derive a contract flag missed
@@ -971,7 +969,7 @@ blocks=$(grep -c "Contract-flagged by triage" "$d/.contract-flagged")
 assert_eq 1 "$blocks" "reconcile: idempotent — sidecar not duplicated on re-run"
 
 # A benign crash whose trigger is fully within the attacker boundary is NOT
-# flagged (additive-only: never invents a flag, no false positives).
+# flagged.
 mkdir -p "$TEST_TMPDIR/reconcile_benign/crashes/CRASH-RC-OK"
 cat > "$TEST_TMPDIR/reconcile_benign/crashes/CRASH-RC-OK/asan.txt" <<'EOF'
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000010
@@ -990,6 +988,35 @@ if [ -f "$d2/.contract-flagged" ]; then
 else
   pass "reconcile: benign in-boundary crash left unflagged"
 fi
+
+# Authoritative removal: if a stale sidecar/section says contract concern but
+# the current structured fields are within attacker_controls, reconciliation
+# clears the derived annotation before severity/benchmark rescoring.
+mkdir -p "$TEST_TMPDIR/reconcile_clear/crashes/CRASH-RC-CLEAR"
+cat > "$TEST_TMPDIR/reconcile_clear/crashes/CRASH-RC-CLEAR/asan.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000010
+EOF
+cat > "$TEST_TMPDIR/reconcile_clear/crashes/CRASH-RC-CLEAR/report.md" <<'EOF'
+# heap-buffer-overflow
+Boundary: file bytes
+Caller controls: input bytes
+Caller contract: obeyed
+Trigger source: bytes
+
+## Contract concern
+
+Triage kept this crash and flagged a contract concern: trigger requires [call-sequence] outside attacker_controls=[bytes].
+EOF
+dclear="$TEST_TMPDIR/reconcile_clear/crashes/CRASH-RC-CLEAR"
+printf '# Contract-flagged by triage\n# Reason: stale\n' > "$dclear/.contract-flagged"
+_triage_reconcile_contract_flag "$dclear" CRASH-RC-CLEAR
+if [ -f "$dclear/.contract-flagged" ]; then
+  fail "reconcile: stale in-boundary contract sidecar removed" "sidecar still present"
+else
+  pass "reconcile: stale in-boundary contract sidecar removed"
+fi
+assert_file_not_contains "$dclear/report.md" "^## Contract concern" \
+  "reconcile: stale Contract concern section removed"
 
 # Wiring: triage_fill_reach_fields_tree reconciles every pooled crash, so a
 # stale flag is restored before the scorer runs (LLM fill disabled to keep the

@@ -423,8 +423,12 @@ status_low=$(STRATEGY_MIN_EVIDENCE_S2=0 \
 assert_match '"threshold": 0' "$status_low" "fix#9: STRATEGY_MIN_EVIDENCE_S2=0 lowers the floor"
 
 # ════════════════════════════════════════════════════════════════
-# Fix #10: library threat models include call-sequence/protocol-state
-# where appropriate.
+# Threat-model seeding: no curated table is shipped, so every non-browser slug
+# seeds the conservative byte-only default. A fuzz harness exercising a stateful
+# API is a TEST artifact, not an attacker, so call-sequence is NOT seeded.
+# bin/suggest-threat-model (the LLM) is the per-target deriver — it already
+# produces protocol-state for network targets (ffmpeg) and byte-only for parsers
+# (pcre2), so no hardcoded per-project table is needed.
 # ════════════════════════════════════════════════════════════════
 
 threat_fixture="$TEST_TMPDIR/threat-model-fixtures"
@@ -433,27 +437,10 @@ for slug in json libxml2 curl c-ares pcre2 zlib; do
     python3 "$SCRIPT_ROOT/lib/target_config.py" seed-toml \
         "$threat_fixture/targets/$slug" \
         "$threat_fixture/output/$slug/target.toml" ""
+    assert_file_contains "$threat_fixture/output/$slug/target.toml" \
+        'attacker_controls = \["bytes"\]' \
+        "seed: $slug seeds byte-only (no curated table; LLM refines per target)"
 done
-
-assert_file_contains "$threat_fixture/output/json/target.toml" \
-    'attacker_controls = \["bytes", "call-sequence"\]' \
-    "fix#10: nlohmann/json includes call-sequence (header-only template lib)"
-assert_file_contains "$threat_fixture/output/libxml2/target.toml" \
-    'attacker_controls = \["bytes", "call-sequence"\]' \
-    "fix#10: libxml2 includes call-sequence (xmlPattern/xmlCatalog APIs)"
-assert_file_contains "$threat_fixture/output/curl/target.toml" \
-    'attacker_controls = \["bytes", "call-sequence", "protocol-state"\]' \
-    "fix#10: curl includes call-sequence and protocol-state"
-assert_file_contains "$threat_fixture/output/c-ares/target.toml" \
-    'attacker_controls = \["bytes", "call-sequence", "protocol-state"\]' \
-    "fix#10: c-ares includes call-sequence and protocol-state"
-# pcre2 + zlib stay byte-only (intentional — those are pure parsers).
-assert_file_contains "$threat_fixture/output/pcre2/target.toml" \
-    'attacker_controls = \["bytes"\]' \
-    "fix#10: pcre2 stays byte-only (regex is byte-driven)"
-assert_file_contains "$threat_fixture/output/zlib/target.toml" \
-    'attacker_controls = \["bytes"\]' \
-    "fix#10: zlib stays byte-only (streaming bytes is the surface)"
 
 # ── PRODUCTIVE classifier tightening ─────────────────────────────────────
 # A "PRODUCTIVE 0/0" iteration log line meant the third disjunct

@@ -1114,14 +1114,13 @@ crash_dir_static_legitimacy_rejection_reason() {
   # description.md, …) and run it through evaluate_crash_verdict against
   # the target's declared attacker_controls.
   #
-  # Contract-concern reasons (verdict=contract-flag from the matrix,
-  # callback-releases-active regex, private/internal include regex)
+  # Contract-concern reasons (verdict=contract-flag from the structured
+  # Caller contract / Parameter control / Trigger source matrix)
   # are returned with a `contract-flag:` prefix. triage_crash_dirs
   # then annotates the dir in place (.contract-flagged sidecar +
   # report block) and KEEPS it in crashes/. The downstream reachability
-  # scorer derives CVSS-BTE Environmental MAT:P when the report carries
-  # the "## Contract concern" section, so these are automatically rated
-  # lower in Severity. crashes-rejected/ stays reserved for non-security
+  # scorer recomputes the same structured fields and target.toml verdict.
+  # crashes-rejected/ stays reserved for non-security
   # classes (OOM, panic, null-deref, stack-overflow, no sanitizer
   # signal, threat-boundary failures, incomplete-bundle TTL).
   local _verdict_report
@@ -1137,16 +1136,6 @@ crash_dir_static_legitimacy_rejection_reason() {
         return 0
         ;;
     esac
-  fi
-
-  if crash_dir_contains_regex "$d" 'free[sd]?[[:space:]]+(the[[:space:]]+)?active[[:space:]]+(parser[[:space:]]+)?(context|callback|object)|callback[[:space:]].*(free|release)[sd]?[[:space:]]+(the[[:space:]]+)?active'; then
-    printf 'contract-flag: callback releases active target object\n'
-    return 0
-  fi
-
-  if crash_dir_contains_regex "$d" '#[[:space:]]*include[[:space:]]+[<"][^>"]*(private|internal)/'; then
-    printf 'contract-flag: private/internal target API used\n'
-    return 0
   fi
 
   return 1
@@ -1396,24 +1385,15 @@ _triage_bundle_crash_dir() {
 # deliberately not required here — its absence scores as ×1.0 (obeyed), so
 # it never collapses the side and needn't force a retry.
 #
-# trigger_source is required ONLY when caller_controls / trusted_caller_actions
-# names a caller call-sequence or callback ordering. There the scorer's
-# localisation hinges on whether attacker bytes also drive the trigger:
-# trigger_source=bytes keeps it AV:N, its absence makes bin/reachability
-# localise on caller_controls alone (AV:L) and under-score a byte-reachable
-# callback bug — the exact false-negative the trigger_source guardrail in
-# lib/prompts/triage_reachability_fields.md.j2 exists to prevent. Forcing a
-# re-fill makes the model commit to bytes-or-not instead of defaulting to local.
+# trigger_source is required for every filled sidecar because reachability and
+# contract scoring are derived from Trigger source ∩ attacker_controls, not from
+# callback/caller-control prose.
 _llm_fields_complete() {
   jq -e '
     (.surface // "")         != "" and
     (.primitive // "")       != "" and
     (.caller_controls // "") != "" and
-    (
-      (((.caller_controls // "") + " " + (.trusted_caller_actions // ""))
-        | ascii_downcase | test("call-sequence|call-order|callback")) as $is_seq
-      | ($is_seq | not) or ((.trigger_source // "") != "")
-    )
+    (.trigger_source // "")  != ""
   ' "$1" >/dev/null 2>&1
 }
 
@@ -1742,11 +1722,10 @@ _triage_annotate_rejection_report() {
 
 # Annotate a crash dir IN PLACE for contract concerns. The dir stays
 # in crashes/; the existing reachability scorer rates it lower when it
-# sees the report-visible "## Contract concern" section by deriving
-# CVSS-BTE Environmental MAT:P, so the downstream score reflects the
-# contract concern without losing the
-# crash from the count. Used by triage_crash_dirs step 4 when the static
-# gate or verdict matrix returns a `contract-flag:` reason.
+# recomputes the structured verdict from report fields and target.toml, so the
+# downstream score reflects the current contract concern without losing the
+# crash from the count. Used by triage_crash_dirs step 4 when the verdict matrix
+# returns a `contract-flag:` reason.
 #
 # Writes a `.contract-flagged` sidecar (machine-readable marker) and
 # prepends a "## Contract concern" block to the report (REPORT.md
@@ -1765,8 +1744,8 @@ _triage_annotate_contract_concern() {
     echo "# Contract-flagged by triage"
     echo "# Reason: $reason"
     echo "# When: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "# Action: dir stays in place. Reachability scorer derives CVSS-BTE Environmental MAT:P when the report carries the Contract concern section, so Severity is automatically adjusted without losing the ${noun} from the count. Promote back to full severity only if the cited concern is independently disproven."
-  } >> "$d/.contract-flagged" 2>/dev/null || true
+    echo "# Action: dir stays in place. This sidecar records the current structured contract verdict; reachability rescoring recomputes the verdict from fields and target.toml."
+  } > "$d/.contract-flagged" 2>/dev/null || true
 
   [ -n "$report" ] || return 0
 
@@ -1778,7 +1757,7 @@ _triage_annotate_contract_concern() {
       print ""
       print "Triage kept this " noun " and flagged a contract concern: " reason "."
       print ""
-      print "The reported diagnostic is real. The downstream reachability scorer rates contract-flagged results with CVSS-BTE Environmental MAT:P from this Contract concern section. Promote to a higher Severity only if the concern is independently disproven — e.g. the cited contract is undocumented or inferred, or the reach path does not actually require the prohibited caller action."
+      print "The reported diagnostic is real. This section records the current structured contract verdict; downstream scoring recomputes the severity impact from the report fields and target.toml."
       print ""
     }
     BEGIN { inserted=0; skip=0 }
@@ -1810,90 +1789,81 @@ _triage_annotate_contract_concern() {
   return 0
 }
 
-# Reconcile a single crash dir's contract flag against its FINAL fields.
-#
-# The flag is otherwise computed once, at per-cell audit time, often before the
-# structured Trigger source / Caller contract fields are finalized into the
-# report — so the gate sees an incomplete report, defaults the trigger to the
-# attacker-controlled boundary, and promotes. Nothing recomputes it afterward,
-# so a crash the deterministic gate *would* flag can reach the scorer unflagged
-# (two clustered copies of one bug then score differently: one flagged → MAT:P,
-# its twin un-flagged → MAT:X). Re-running the gate here, after fields
-# are final and before scoring, closes that gap.
-#
-# Additive only: applies a missing flag when the gate says contract-flag; it
-# never removes an existing flag — a flag is sticky until independently
-# disproven, per the `.contract-flagged` sidecar's own contract, and removal
-# would be the only path that could *raise* severity. Deterministic: uses only
-# the static legitimacy gate, never the LLM legitimacy fallback (which yields
-# reject/keep, never a contract-flag). Idempotent — a dir already carrying the
-# sidecar is left untouched.
-#
-# Why additive and not authoritative (flag := gate verdict, removing flags the
-# gate no longer supports):
-#   * The staleness bug is directional. It happens because the audit-time gate
-#     ran on an incomplete report, where parse_trigger_source returns empty and
-#     the gate DEFAULTS the trigger to the attacker boundary → promote → no
-#     flag. So the bug can only ever DROP a flag, never invent a spurious one.
-#     The correction it needs is therefore purely additive.
-#   * Empirically the removal case never fires: re-running the static gate over
-#     every already-flagged dir on disk re-flags 100% of them (DROP=0). So an
-#     authoritative pass would produce an identical result today, at the cost of
-#     removal machinery (strip the report section, delete the sidecar, and tell
-#     a genuine `promote` apart from a `reject` reason so we don't un-flag a
-#     crash that should instead be rejected).
-#   * Removal is the only direction that RAISES severity, and it would do so by
-#     trusting a mutable, agent-authored field (trigger_source) — the unsafe
-#     direction for a security tool. Additive trusts that same field only to
-#     LOWER severity.
-# Authoritative becomes the right call if the threat model evolves — e.g. a
-# target's attacker_controls is later widened to include call-sequence, which
-# SHOULD un-flag and re-raise previously-flagged crashes. Additive leaves those
-# stale (a safe-direction under-rating) until cleared. If/when that need is
-# real, upgrade this to re-run the FULL static gate (not just evaluate_crash_
-# verdict, or it would drop the regex-origin callback/private-include flags) and
-# remove a flag ONLY on an empty/promote verdict, never on a rejection reason.
+_triage_clear_contract_concern() {
+  local d="$1" report=""
+  rm -f "$d/.contract-flagged" 2>/dev/null || true
+  if [ -s "$d/REPORT.md" ]; then
+    report="$d/REPORT.md"
+  elif [ -s "$d/report.md" ]; then
+    report="$d/report.md"
+  fi
+  [ -n "$report" ] || return 0
+
+  local tmp
+  tmp=$(mktemp "${TMPDIR:-/tmp}/contract-clear.XXXXXX") || return 0
+  # Terminate the skipped region on the same anchors the inserter stops the
+  # block before: any "## " heading OR a bare "Summary:" line. Mirroring the
+  # inserter keeps a block placed ahead of a bare "Summary:" line from
+  # over-deleting that section on clear.
+  awk '
+    /^## Contract concern[[:space:]]*$/ { skip=1; next }
+    skip && (/^## / || /^Summary:[[:space:]]*$/) { skip=0 }
+    skip { next }
+    { print }
+  ' "$report" > "$tmp" 2>/dev/null && mv "$tmp" "$report" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null || true
+  }
+  return 0
+}
+
+# Reconcile a result dir's contract annotation against its FINAL structured
+# fields and the active target attacker_controls. The annotation is derived
+# state: if the current verdict promotes, stale .contract-flagged sidecars and
+# report sections are removed before scoring/benchmark aggregation.
 _triage_reconcile_contract_flag() {
   local d="$1" id="$2"
   [ -d "$d" ] || return 0
-  # Already flagged → sticky, nothing to do (also keeps this idempotent).
-  [ -f "$d/.contract-flagged" ] && return 0
-  # Need a report to read the final fields from.
-  find_primary_crash_narrative "$d" >/dev/null 2>&1 || return 0
-  local verdict
-  verdict=$(crash_dir_static_legitimacy_rejection_reason "$d" "${IS_BROWSER_TARGET:-0}" 2>/dev/null) || return 0
+  local report line verdict reason
+  report=$(find_primary_crash_narrative "$d" 2>/dev/null || true)
+  [ -n "$report" ] || { _triage_clear_contract_concern "$d"; return 0; }
+  line=$(evaluate_crash_verdict "$report" "${TARGET_ATTACKER_CONTROLS_CSV:-bytes}" 2>/dev/null) || line=""
+  verdict="${line%%	*}"
+  reason="${line#*	}"
   case "$verdict" in
-    contract-flag:*)
-      _triage_annotate_contract_concern "$d" "$id" "${verdict#contract-flag: }"
+    contract-flag)
+      _triage_annotate_contract_concern "$d" "$id" "$reason"
+      ;;
+    *)
+      _triage_clear_contract_concern "$d"
       ;;
   esac
   return 0
 }
 
-# Finding analogue of _triage_reconcile_contract_flag: give a caller-only finding
-# the SAME "## Contract concern" oob annotation its crash twin gets, so both
-# localise and floor identically in compute_severity. Without it a finding
-# localises only via the byte-vetoed trigger_source regex, so a `both`-trigger
-# caller-only bug scores Low as a crash but High as a finding.
+# Finding analogue of _triage_reconcile_contract_flag: keep the visible
+# "## Contract concern" annotation in sync with the same structured verdict a
+# crash twin would get.
 #
 # Reuses evaluate_crash_verdict (narrative-only) rather than the crash reconcile,
 # whose security-evidence gate would "missing evidence"-reject a finding before
 # the verdict runs. Recall-safe: flags ONLY when a trigger component is outside
 # attacker_controls, so a genuine attacker-byte finding (trigger ⊆ attacker_
-# controls) stays unflagged at full severity; never removes a flag → only lowers.
+# controls) stays unflagged at full severity; stale flags are removed.
 _triage_reconcile_contract_flag_finding() {
   local d="$1" id="$2"
   [ -d "$d" ] || return 0
-  [ -f "$d/.contract-flagged" ] && return 0
   local report
   report=$(find_primary_crash_narrative "$d" 2>/dev/null || true)
-  [ -n "$report" ] || return 0
+  [ -n "$report" ] || { _triage_clear_contract_concern "$d"; return 0; }
   local line verdict reason
-  line=$(evaluate_crash_verdict "$report" "${TARGET_ATTACKER_CONTROLS_CSV:-bytes}" 2>/dev/null) || return 0
+  line=$(evaluate_crash_verdict "$report" "${TARGET_ATTACKER_CONTROLS_CSV:-bytes}" 2>/dev/null) || line=""
   verdict="${line%%	*}"
   reason="${line#*	}"
-  [ "$verdict" = "contract-flag" ] && \
+  if [ "$verdict" = "contract-flag" ]; then
     _triage_annotate_contract_concern "$d" "$id" "$reason" "finding"
+  else
+    _triage_clear_contract_concern "$d"
+  fi
   return 0
 }
 
@@ -2457,14 +2427,13 @@ _triage_one_crash_dir() {
     #     no-sanitizer-signal / wrong-threat-boundary cases that
     #     crashes-rejected/ exists for, alongside Step 1 autodiscards
     #     (OOM / panic / null-deref).
-    #   - SOFT contract-flag (verdict=contract-flag from the matrix,
-    #     callback-releases-active regex, private/internal include
-    #     regex): annotate IN PLACE with a .contract-flagged sidecar
+    #   - SOFT contract-flag (verdict=contract-flag from the structured
+    #     caller-contract / parameter-control / trigger-source matrix):
+    #     annotate IN PLACE with a .contract-flagged sidecar
     #     + "## Contract concern" report block and KEEP in crashes/.
-    #     The downstream reachability scorer derives CVSS-BTE Environmental
-    #     MAT:P when it sees the report-visible Contract concern section
-    #     (see test_severity.sh), so these are automatically represented in
-    #     Severity without being lost from the crashes/ count or the
+    #     The downstream reachability scorer recomputes the same structured
+    #     verdict from report fields and target.toml, so these are represented
+    #     in Severity without being lost from the crashes/ count or the
     #     reachability/scoring pipeline.
     #   - demote-to-findings: existing path, routed through
     #     _triage_route_rejection.
@@ -2476,7 +2445,7 @@ _triage_one_crash_dir() {
         contract-flag:*)
           local flag_reason="${security_reject_reason#contract-flag: }"
           _triage_annotate_contract_concern "$d" "$id" "$flag_reason"
-          audit_log "CONTRACT-FLAG: crashes/${id} kept in crashes/ with contract-concern annotation — ${flag_reason}. Reachability scorer will rate this with CVSS-BTE Environmental MAT:P from the Contract concern section." | tee -a "$INDEX"
+          audit_log "CONTRACT-FLAG: crashes/${id} kept in crashes/ with contract-concern annotation — ${flag_reason}. Reachability scorer recomputes severity from fields and target.toml." | tee -a "$INDEX"
           ;;
         *)
           if [ ! -f "$d/.autodiscard" ]; then

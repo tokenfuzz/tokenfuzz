@@ -54,6 +54,11 @@ try:  # Shared sanitizer-artifact discovery — same policy as export/triage.
 except Exception:  # pragma: no cover - crash_artifacts should always import
     _ca = None
 
+try:  # Target config parser for preserving benchmark-pool threat models.
+    import target_config as _tc
+except Exception:  # pragma: no cover - target_config should always import
+    _tc = None
+
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 
 # ── sanitizer crash oracle ───────────────────────────────────────────────
@@ -2240,6 +2245,77 @@ def aggregate(bench_dir: Path) -> dict:
 # ── pooling for cross-condition clustering ───────────────────────────────
 
 
+def _find_output_target_toml(start: Path) -> Path | None:
+    """Find output/<slug>/target.toml for a cell results directory."""
+    cur = start.resolve()
+    if cur.is_file():
+        cur = cur.parent
+    for p in [cur, *cur.parents]:
+        if p.parent.name == "output" and (p / "target.toml").is_file():
+            return p / "target.toml"
+        if p.name == "output":
+            break
+    return None
+
+
+def _target_attacker_controls(path: Path) -> tuple[str, ...] | None:
+    if _tc is None:
+        return None
+    try:
+        parsed = _tc.parse_toml(path)
+    except Exception:
+        return None
+    threat = parsed.get("threat_model", {})
+    raw = threat.get("attacker_controls", []) if isinstance(threat, dict) else []
+    if not isinstance(raw, list):
+        return None
+    # Normalise (call-order → call-sequence), drop invalid tokens, and dedupe in
+    # target_config's canonical order, so two cells that differ only by an alias
+    # or token ordering still compare equal and pool correctly.
+    norm = {
+        _tc._normalize_attacker_control(str(v).strip())
+        for v in raw if str(v).strip()
+    }
+    controls = tuple(
+        t for t in _tc.ATTACKER_CONTROLS_VALID
+        if t in norm and _tc._is_valid_attacker_control(t)
+    )
+    return controls or ("bytes",)
+
+
+def _copy_pool_target_toml(pool: Path, candidates: list[Path]) -> None:
+    """Preserve target threat-model context for pooled severity rescoring.
+
+    build_pool() copies crash dirs away from each cell's output/<slug>/ tree.
+    The severity scorer walks upward from a crash dir to find target.toml, so a
+    pooled tree needs config at pool/target.toml. Copy the full file when every
+    cell config is byte-identical. If only incidental paths differ, synthesize a
+    minimal pool config when all cells agree on attacker_controls. Mixed threat
+    models remain unscored by target config rather than applying the wrong one.
+    """
+    unique: dict[str, Path] = {}
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        unique.setdefault(text, path)
+    if len(unique) != 1:
+        controls = {_target_attacker_controls(path) for path in candidates}
+        controls.discard(None)
+        if len(controls) != 1:
+            return
+        rendered = ", ".join(json.dumps(v) for v in next(iter(controls)))
+        (pool / "target.toml").write_text(
+            "# benchmark pool target config: threat model preserved from cells\n"
+            "[threat_model]\n"
+            f"attacker_controls = [{rendered}]\n",
+            encoding="utf-8",
+        )
+        return
+    shutil.copy2(next(iter(unique.values())), pool / "target.toml")
+
+
 def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
     """Copy every cell's confirmed crash + finding dirs into one pool.
 
@@ -2281,6 +2357,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
     rejected_crash_n = 0
     find_n = 0
     rejected_find_n = 0
+    target_toml_candidates: list[Path] = []
     for cell_dir in _cell_dirs(bench_dir):
         cj = cell_dir / "cell.json"
         mj = cell_dir / "metrics.json"
@@ -2300,6 +2377,9 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
         rd = Path(cell.get("results_dir") or "")
         if not rd.is_dir():
             continue
+        target_toml = _find_output_target_toml(rd)
+        if target_toml is not None:
+            target_toml_candidates.append(target_toml)
         metrics = {}
         if mj.is_file():
             try:
@@ -2378,6 +2458,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                    / f"DISCARDED-{cond}-{cell_dir.name}.md")
             dst.write_text(discarded_md, encoding="utf-8")
 
+    _copy_pool_target_toml(pool, target_toml_candidates)
     write_rejected_findings_index(pool / "findings-rejected")
     write_rejected_crashes_index(pool / "crashes-rejected")
 

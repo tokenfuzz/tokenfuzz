@@ -263,12 +263,11 @@ assert_file_not_exists "$RESULTS_DIR/findings/FIND-008-FIND/.promotion_pending" 
 assert_file_contains "$RESULTS_DIR/findings/FIND-008-FIND/report.md" "^## Triage decision" "demoted FIND carries triage decision"
 
 # ═══════════════════════════════════════════════════════════════
-# 9. triage_crash_dirs — callback-releases-active is a CONTRACT-FLAG.
+# 9. triage_crash_dirs — trigger outside attacker_controls is a CONTRACT-FLAG.
 # The dir STAYS in crashes/ with a .contract-flagged sidecar +
-# "## Contract concern" report block. The reachability scorer applies
-# CVSS-BTE Environmental MAT:P from that report block downstream, so
-# Severity is automatically rated lower. crashes-rejected/ is reserved for
-# non-security classes (OOM/panic/null-deref/no-signal/TTL).
+# "## Contract concern" report block. The reachability scorer recomputes the
+# same verdict from Trigger source and target.toml. crashes-rejected/ is
+# reserved for non-security classes (OOM/panic/null-deref/no-signal/TTL).
 # ═══════════════════════════════════════════════════════════════
 
 mkdir -p "$RESULTS_DIR/crashes/CRASH-009-1"
@@ -277,7 +276,9 @@ cat > "$RESULTS_DIR/crashes/CRASH-009-1/asan.txt" <<'EOF'
 EOF
 cat > "$RESULTS_DIR/crashes/CRASH-009-1/REPORT.md" <<'EOF'
 Boundary: file bytes
-The callback releases the active parser context before parsing continues.
+Caller controls: file bytes and public API call sequence
+Caller contract: unspecified
+Trigger source: both
 EOF
 cat > "$RESULTS_DIR/crashes/CRASH-009-1/input.c" <<'EOF'
 static void callback(void *ctx) { free(ctx); }
@@ -288,14 +289,12 @@ cat > "$RESULTS_DIR/crashes/CRASH-009-1/reproduce.sh" <<'EOF'
 exit 0
 EOF
 
-export LLM_DECIDE_MOCK_LEGIT_CRASH='{"legitimate":false,"reason":"callback releases active target object"}'
 triage_crash_dirs 2>/dev/null
-unset LLM_DECIDE_MOCK_LEGIT_CRASH
 
 assert_dir_exists "$RESULTS_DIR/crashes/CRASH-009-1" "contract-flagged crash stays in crashes/"
 assert_dir_not_exists "$RESULTS_DIR/crashes-rejected/CRASH-009-1" "contract-flagged crash is NOT moved to crashes-rejected/"
 assert_file_exists "$RESULTS_DIR/crashes/CRASH-009-1/.contract-flagged" "contract-flag sidecar created in crashes/"
-assert_file_contains "$RESULTS_DIR/crashes/CRASH-009-1/.contract-flagged" "callback" "contract-flag sidecar names the concern"
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-009-1/.contract-flagged" "call-sequence" "contract-flag sidecar names the concern"
 assert_file_contains "$RESULTS_DIR/crashes/CRASH-009-1/REPORT.md" "^## Contract concern" "report carries Contract concern section"
 
 # ═══════════════════════════════════════════════════════════════

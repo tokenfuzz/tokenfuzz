@@ -335,6 +335,69 @@ assert_match '## Discarded hypotheses' "$rejected_md" \
 assert_match 'DISCARDED-harness-d-r1.md' "$rejected_md" \
   "T28h: REJECTED-CRASHES.md links to the per-cell roster"
 
+# Pool severity rescoring needs the same threat model as the source cell.
+# build_pool preserves target.toml when every done cell belongs to the same
+# target config, so pooled crashes are not scored from stale Contract concern
+# prose after attacker_controls changes.
+cfg_bench="$work/pool-config-bench"
+cfg_rd="$cfg_bench/output/sampleproj/backend/results"
+cfg_rd2="$cfg_bench/output/sampleproj-r2/backend/results"
+mkdir -p "$cfg_rd" "$cfg_rd2" "$cfg_bench/cells/cfg-r1" "$cfg_bench/cells/cfg-r2"
+cat > "$cfg_bench/output/sampleproj/target.toml" <<'TOML'
+includes = ["/tmp/cell-one/generated"]
+[threat_model]
+attacker_controls = ["bytes", "call-sequence"]
+TOML
+cat > "$cfg_bench/output/sampleproj-r2/target.toml" <<'TOML'
+includes = ["/tmp/cell-two/generated"]
+[threat_model]
+attacker_controls = ["bytes", "call-sequence"]
+TOML
+cat > "$cfg_bench/cells/cfg-r1/cell.json" <<EOF
+{"condition":"harness","replicate":1,"experiment":"t","status":"done","wall_seconds":1,"results_dir":"$cfg_rd"}
+EOF
+cat > "$cfg_bench/cells/cfg-r2/cell.json" <<EOF
+{"condition":"harness","replicate":2,"experiment":"t","status":"done","wall_seconds":1,"results_dir":"$cfg_rd2"}
+EOF
+cat > "$cfg_bench/cells/cfg-r1/metrics.json" <<'JSON'
+{"crash_dirs":[]}
+JSON
+cat > "$cfg_bench/cells/cfg-r2/metrics.json" <<'JSON'
+{"crash_dirs":[]}
+JSON
+python3 "$PY" pool "$cfg_bench" >/dev/null
+assert_file_contains "$cfg_bench/pool/target.toml" 'attacker_controls = \["bytes", "call-sequence"\]' \
+  "T28l: build_pool preserves matching attacker_controls for pooled rescoring"
+
+# Cells whose configs differ only by an attacker_controls ALIAS (call-order vs
+# call-sequence) or token ordering still agree after normalisation, so the pool
+# gets a synthesized target.toml rather than going unscored.
+nrm_bench="$work/pool-normalize-bench"
+nrm_rd="$nrm_bench/output/sampleproj/backend/results"
+nrm_rd2="$nrm_bench/output/sampleproj-r2/backend/results"
+mkdir -p "$nrm_rd" "$nrm_rd2" "$nrm_bench/cells/n-r1" "$nrm_bench/cells/n-r2"
+cat > "$nrm_bench/output/sampleproj/target.toml" <<'TOML'
+includes = ["/tmp/cell-one/generated"]
+[threat_model]
+attacker_controls = ["call-order", "bytes"]
+TOML
+cat > "$nrm_bench/output/sampleproj-r2/target.toml" <<'TOML'
+includes = ["/tmp/cell-two/generated"]
+[threat_model]
+attacker_controls = ["bytes", "call-sequence"]
+TOML
+cat > "$nrm_bench/cells/n-r1/cell.json" <<EOF
+{"condition":"harness","replicate":1,"experiment":"t","status":"done","wall_seconds":1,"results_dir":"$nrm_rd"}
+EOF
+cat > "$nrm_bench/cells/n-r2/cell.json" <<EOF
+{"condition":"harness","replicate":2,"experiment":"t","status":"done","wall_seconds":1,"results_dir":"$nrm_rd2"}
+EOF
+echo '{"crash_dirs":[]}' > "$nrm_bench/cells/n-r1/metrics.json"
+echo '{"crash_dirs":[]}' > "$nrm_bench/cells/n-r2/metrics.json"
+python3 "$PY" pool "$nrm_bench" >/dev/null
+assert_file_contains "$nrm_bench/pool/target.toml" 'attacker_controls = \["bytes", "call-sequence"\]' \
+  "T28m: build_pool normalises call-order→call-sequence so aliased cells still pool"
+
 # A rejected crash directory must link to its rendered report, not the bare
 # directory. The source markdown points at the .md (canonical path); the
 # rendered HTML sibling rewrites it to .html so a click lands on the styled

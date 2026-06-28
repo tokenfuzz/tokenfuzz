@@ -12,11 +12,13 @@ then asks the LLM which attacker_controls tokens genuinely apply. Prints a
 [threat_model] TOML snippet the operator can review, or writes it into
 target.toml with --apply.
 
-`bin/audit --new-target` seeds a conservative default: the curated value
-from .agents/references/threat_models.toml, or byte-only (["bytes"]) for
-an uncurated target. Byte-only under-claims for stateful library APIs —
-call-sequence bugs would be demoted to robustness. This tool is the
-LLM-backed escape hatch for those targets, mirroring bin/suggest-peers.
+`bin/audit --new-target` seeds the conservative byte-only default (["bytes"])
+for every non-browser target — no curated per-project table is shipped, because
+it doesn't scale and conflates a fuzz harness (a test artifact) with a real
+attacker. This tool is the per-target deriver: it adds call-sequence ONLY for a
+genuine attacker-driven call surface (a scripting/plugin engine, an RPC/IPC API)
+and protocol-state for network protocols. Mirrors bin/suggest-peers. An operator
+may still pass a custom override file to lib/target_config, but none is bundled.
 
 Failure modes:
     - LLM unavailable / disabled       → exit 2

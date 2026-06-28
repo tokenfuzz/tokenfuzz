@@ -483,7 +483,9 @@ read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "N" "$(metric "$vector" AT)" "base AT remains intrinsic"
 assert_eq "P" "$(metric "$vector" MAT)" "MAT:P for violated contract"
 
-# A triage Contract concern section also yields MAT:P.
+# A Contract concern annotation alone is not severity input. MAT:P is derived
+# from structured fields (violated contract, harness-only parameter, or
+# trigger_source outside target.toml attacker_controls), not from stale prose.
 seed_hits "demo_at_concern" 0
 dir=$(make_crash "demo_at_concern" CRASH-AT-CONCERN \
   "heap-buffer-overflow WRITE of size 8" "library-api" "unspecified" "bytes" "5/5" "CL-x (singleton)")
@@ -493,10 +495,10 @@ cat >> "$dir/report.md" <<'EOF'
 
 Triage flagged a contract concern: trigger shape outside the declared input boundary.
 EOF
-_CURRENT_TEST="derive: triage Contract concern section → MAT:P"
+_CURRENT_TEST="derive: Contract concern section alone does not alter MAT"
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "N" "$(metric "$vector" AT)" "base AT remains intrinsic"
-assert_eq "P" "$(metric "$vector" MAT)" "MAT:P from Contract concern section"
+assert_eq "" "$(metric "$vector" MAT)" "no MAT:P from annotation prose alone"
 
 # Caller controls narrower than arbitrary bytes also derive MAT:P.
 seed_hits "demo_mat_number" 0
@@ -571,7 +573,7 @@ EOF
 _CURRENT_TEST="derive: byte-controlled trigger keeps AV:N despite contract concern"
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "N" "$(metric "$vector" AV)" "AV:N preserved when attacker controls bytes"
-assert_eq "P" "$(metric "$vector" MAT)" "MAT:P still derived from contract concern"
+assert_eq "" "$(metric "$vector" MAT)" "no MAT:P from stale contract concern prose"
 # Recall guard: the caller-only impact floor must NOT fire on a byte-reachable
 # bug. No MVC override, and a genuine attacker-reachable double_free stays High.
 assert_eq "" "$(metric "$vector" MVC)" "no MVC floor when attacker controls bytes"
@@ -605,6 +607,140 @@ _CURRENT_TEST="derive: structured call-sequence trigger localises despite byte p
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "L" "$(metric "$vector" AV)" "AV:L — structured call-sequence trigger overrides incidental 'subject bytes' prose"
 assert_eq "P" "$(metric "$vector" AT)" "AT:P for the localised call-sequence trigger"
+
+# Scoring is structured-only: callback NARRATIVE, a generated `## Contract
+# concern` section, and a `.contract-flagged` sidecar must NOT move severity.
+# Only the structured trigger ∩ attacker_controls (localisation) and
+# caller_contract/parameter_control (MAT:P) score. A byte-driven callback report
+# whose trigger ⊆ the declared attacker_controls stays attacker-reachable (AV:N,
+# High) no matter what the prose says — guarding against any prose-driven
+# callback heuristic. Placeholder symbols only (see docs/development.md).
+seed_hits "demo_callback_prose_no_score" 0
+src=$(make_crash "demo_callback_prose_no_score" CRASH-CB-PROSE \
+  "heap-use-after-free WRITE of size 4" \
+  "library-api" "unspecified" "both" "5/5" "CL-x (singleton)")
+mkdir -p "$TEST_TMPDIR/output/cbprose/backend/results/crashes" "$TEST_TMPDIR/output/cbprose"
+cat > "$TEST_TMPDIR/output/cbprose/target.toml" <<'TOML'
+[threat_model]
+attacker_controls = ["bytes", "call-sequence"]
+TOML
+dir="$TEST_TMPDIR/output/cbprose/backend/results/crashes/CRASH-CB-PROSE"
+cp -R "$src" "$dir"
+printf '\nTrigger source: both\n' >> "$dir/report.md"
+cat >> "$dir/report.md" <<'EOF'
+
+## Bug
+
+A public structured error callback frees the active parser context while the library is still using it.
+
+## Contract concern
+
+Triage kept this crash and flagged a contract concern: callback releases active target object.
+EOF
+cat > "$dir/.contract-flagged" <<'EOF'
+# Contract-flagged by triage
+# Reason: callback releases active target object
+EOF
+_CURRENT_TEST="structured-only: callback prose/annotation/sidecar do not change severity"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N — trigger ⊆ attacker_controls; prose does not localise"
+assert_eq "" "$(metric "$vector" MAT)" "no MAT:P — callback prose/annotation are not scoring inputs"
+assert_eq "High" "$level" "byte-reachable callback UAF stays High; only structure scores"
+
+# The structured de-rate path: a violated caller contract yields MAT:P (the same
+# byte-reachable crash, environmentally de-rated) — this is how a caller-contract
+# concern is represented, not via callback narrative.
+seed_hits "demo_caller_contract_violated" 0
+dir=$(make_crash "demo_caller_contract_violated" CRASH-CC-VIOLATED \
+  "heap-use-after-free WRITE of size 4" \
+  "library-api" "violated" "both" "5/5" "CL-x (singleton)")
+printf '\nTrigger source: both\n' >> "$dir/report.md"
+_CURRENT_TEST="structured: caller_contract=violated derives MAT:P"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "P" "$(metric "$vector" MAT)" "MAT:P from structured Caller contract: violated"
+
+# Active target.toml beats stale report prose. A benchmark pool may carry an
+# older Contract concern line saying call-sequence was outside
+# attacker_controls=[bytes]. If the current target model declares both bytes and
+# call-sequence attacker-controlled, rescoring must not localise.
+seed_hits "demo_stale_oob_allowed" 0
+src=$(make_crash "demo_stale_oob_allowed" CRASH-STALE-OOB-ALLOWED \
+  "attempting free on address which was not malloc()-ed" \
+  "library-api" "unspecified" "both" "5/5" "CL-x (singleton)")
+mkdir -p "$TEST_TMPDIR/output/allowed/backend/results/crashes" "$TEST_TMPDIR/output/allowed"
+cat > "$TEST_TMPDIR/output/allowed/target.toml" <<'TOML'
+[threat_model]
+attacker_controls = ["bytes", "call-sequence"]
+TOML
+dir="$TEST_TMPDIR/output/allowed/backend/results/crashes/CRASH-STALE-OOB-ALLOWED"
+cp -R "$src" "$dir"
+printf '\nTrigger source: both\n' >> "$dir/report.md"
+cat >> "$dir/report.md" <<'EOF'
+
+## Contract concern
+
+Triage flagged a contract concern: trigger requires [call-sequence] outside attacker_controls=[bytes].
+EOF
+_CURRENT_TEST="recall: current target.toml prevents stale call-sequence localisation"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N — active attacker_controls include call-sequence"
+assert_eq "" "$(metric "$vector" MVC)" "no MVC floor when active model makes trigger attacker-controlled"
+assert_eq "High" "$level" "stale report prose does not push attacker-reachable crash down"
+
+# Conversely, when the active target model controls only bytes, Trigger source:
+# both leaves call-sequence outside attacker control and the local-only gate
+# applies. This is the same structured rule as lib/triage.sh, not a callback
+# reason heuristic.
+seed_hits "demo_current_oob_local" 0
+src=$(make_crash "demo_current_oob_local" CRASH-CURRENT-OOB-LOCAL \
+  "attempting free on address which was not malloc()-ed" \
+  "library-api" "unspecified" "both" "5/5" "CL-x (singleton)")
+mkdir -p "$TEST_TMPDIR/output/localonly/backend/results/crashes" "$TEST_TMPDIR/output/localonly"
+cat > "$TEST_TMPDIR/output/localonly/target.toml" <<'TOML'
+[threat_model]
+attacker_controls = ["bytes"]
+TOML
+dir="$TEST_TMPDIR/output/localonly/backend/results/crashes/CRASH-CURRENT-OOB-LOCAL"
+cp -R "$src" "$dir"
+printf '\nTrigger source: both\n' >> "$dir/report.md"
+_CURRENT_TEST="derive: current target.toml localises call-sequence outside attacker_controls"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L — call-sequence is outside active attacker_controls"
+assert_eq "P" "$(metric "$vector" AT)" "AT:P for active call-sequence precondition"
+assert_eq "Low" "$level" "current structured model still floors local-only trigger"
+
+# Fix #5: with no discoverable target.toml, scoring defaults to attacker_controls
+# {bytes} (matching shell triage's ${TARGET_ATTACKER_CONTROLS_CSV:-bytes}), so a
+# `Trigger source: both` still derives the call-sequence set-difference and
+# localises — instead of silently scoring as if nothing were out of bounds.
+seed_hits "demo_default_bytes_oob" 0
+dir=$(make_crash "demo_default_bytes_oob" CRASH-DEFAULT-BYTES \
+  "attempting free on address which was not malloc()-ed" \
+  "library-api" "unspecified" "both" "5/5" "CL-x (singleton)")
+printf '\nTrigger source: both\n' >> "$dir/report.md"
+_CURRENT_TEST="derive: no target.toml defaults to {bytes}, so call-sequence localises"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L — default {bytes} leaves call-sequence outside"
+assert_eq "P" "$(metric "$vector" AT)" "AT:P from the defaulted set-difference"
+
+# Fix #4: the Python trigger parser accepts the same aliases as shell
+# parse_trigger_source. `sequence` canonicalises to call-sequence, so with a
+# bytes-only model it localises just like the literal token would.
+seed_hits "demo_trigger_alias" 0
+src=$(make_crash "demo_trigger_alias" CRASH-TRIGGER-ALIAS \
+  "attempting free on address which was not malloc()-ed" \
+  "library-api" "unspecified" "sequence" "5/5" "CL-x (singleton)")
+mkdir -p "$TEST_TMPDIR/output/aliasmodel/backend/results/crashes" "$TEST_TMPDIR/output/aliasmodel"
+cat > "$TEST_TMPDIR/output/aliasmodel/target.toml" <<'TOML'
+[threat_model]
+attacker_controls = ["bytes"]
+TOML
+dir="$TEST_TMPDIR/output/aliasmodel/backend/results/crashes/CRASH-TRIGGER-ALIAS"
+cp -R "$src" "$dir"
+printf '\nTrigger source: sequence\n' >> "$dir/report.md"
+_CURRENT_TEST="derive: trigger alias 'sequence' canonicalises to call-sequence and localises"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "L" "$(metric "$vector" AV)" "AV:L — 'sequence' alias treated as call-sequence, outside {bytes}"
 
 # ── Caller-only IMPACT FLOOR scope (codex review #2): EVERY _local_caller_only
 # path floors attacker-facing C/I, not just the explicit call-sequence case.
@@ -794,18 +930,26 @@ assert_eq "L" "$(metric "$vector" AV)" "AV:L from surface (unchanged)"
 assert_eq "P" "$(metric "$vector" AT)" "AT:P from local call-sequence even when AV already L"
 
 # `both` is the triage trigger token that expands to bytes + call-sequence
-# (lib/triage.sh _expand_trigger_components). It asserts a byte path alongside
-# the call-sequence, so it must veto localisation exactly like a bare `bytes`:
-# AV:N stays. Without the `both` veto, trigger_source=both + controls=call-
-# sequence would localise to AV:L and under-rate a genuinely byte-reachable bug.
+# (lib/triage.sh _expand_trigger_components). When the target model declares
+# BOTH components attacker-controlled, the trigger ⊆ attacker_controls: the bug
+# is genuinely byte-reachable and must NOT localise — AV:N stays. (When call-
+# sequence is OUTSIDE the model, the set-difference localises instead; that is
+# the demo_current_oob_local case.)
 seed_hits "demo_av_both" 0
-dir=$(make_crash "demo_av_both" CRASH-AV-BOTH \
+src=$(make_crash "demo_av_both" CRASH-AV-BOTH \
   "heap-use-after-free WRITE of size 8" "library-api" "unspecified" \
   "call-sequence" "5/5" "CL-x (singleton)")
+mkdir -p "$TEST_TMPDIR/output/bothmodel/backend/results/crashes" "$TEST_TMPDIR/output/bothmodel"
+cat > "$TEST_TMPDIR/output/bothmodel/target.toml" <<'TOML'
+[threat_model]
+attacker_controls = ["bytes", "call-sequence"]
+TOML
+dir="$TEST_TMPDIR/output/bothmodel/backend/results/crashes/CRASH-AV-BOTH"
+cp -R "$src" "$dir"
 echo "Trigger source: both" >> "$dir/report.md"
-_CURRENT_TEST="derive: trigger_source=both (bytes+call-seq) keeps AV:N, never localises"
+_CURRENT_TEST="derive: trigger_source=both fully in attacker_controls keeps AV:N"
 read level score key surface rating vector <<< "$(get_severity "$dir")"
-assert_eq "N" "$(metric "$vector" AV)" "AV:N — 'both' carries a byte path, vetoes localisation"
+assert_eq "N" "$(metric "$vector" AV)" "AV:N — both components attacker-controlled, trigger ⊆ model"
 
 # The `both` veto is scoped to the structured trigger_source token. In free-prose
 # caller_controls, "both" is the ordinary English word and must NOT veto: a

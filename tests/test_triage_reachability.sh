@@ -395,7 +395,7 @@ assert_file_contains "$RESULTS_DIR/findings/FIND-LLMFILL-5/.llm_fields.json" \
 assert_file_contains "$RESULTS_DIR/findings/FIND-LLMFILL-5/.llm_fields.json" \
   '"_fill_attempts"' "retry records an attempt counter"
 
-# A COMPLETE sidecar (surface + primitive + caller_controls) must be left
+# A COMPLETE sidecar (surface + primitive + caller_controls + trigger_source) must be left
 # untouched — no LLM budget spent, no risk of clobbering good fields.
 _CURRENT_TEST="llm-fill: complete sidecar left untouched"
 mkdir -p "$RESULTS_DIR/findings/FIND-LLMFILL-6"
@@ -404,10 +404,10 @@ cat > "$RESULTS_DIR/findings/FIND-LLMFILL-6/report.md" <<'EOF'
 ## Summary
 SSRF via user-controlled fetch URL.
 EOF
-printf '%s' '{"surface":"network","primitive":"ssrf","caller_controls":"bytes"}' \
+printf '%s' '{"surface":"network","primitive":"ssrf","caller_controls":"bytes","trigger_source":"bytes"}' \
   > "$RESULTS_DIR/findings/FIND-LLMFILL-6/.llm_fields.json"
 _fill6_before=$(cat "$RESULTS_DIR/findings/FIND-LLMFILL-6/.llm_fields.json")
-LLM_DECIDE_MOCK_REACHABILITY_FIELDS='{"surface":"OVERWRITTEN","primitive":"x","caller_controls":"x"}' \
+LLM_DECIDE_MOCK_REACHABILITY_FIELDS='{"surface":"OVERWRITTEN","primitive":"x","caller_controls":"x","trigger_source":"x"}' \
   _triage_llm_fill_fields "$RESULTS_DIR/findings/FIND-LLMFILL-6" "FIND-LLMFILL-6"
 _fill6_after=$(cat "$RESULTS_DIR/findings/FIND-LLMFILL-6/.llm_fields.json")
 assert_eq "$_fill6_before" "$_fill6_after" "complete sidecar unchanged (LLM not consulted)"

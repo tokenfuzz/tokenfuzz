@@ -148,12 +148,13 @@ TARGET_ATTACKER_CONTROLS=()
 target_load_toml "$TEST_TMPDIR/seeded.toml"
 assert_eq "bytes" "$(target_attacker_controls_csv)" "seeded generic toml round-trips through loader"
 
-# Known library slugs get target-specific starter threat models.
+# No curated table is shipped: every non-browser slug seeds byte-only, and
+# bin/suggest-threat-model (the LLM) derives the real model per target.
 for slug_expected in \
-  "json:bytes,call-sequence" \
-  "libxml2:bytes,call-sequence" \
-  "curl:bytes,call-sequence,protocol-state" \
-  "c-ares:bytes,call-sequence,protocol-state" \
+  "json:bytes" \
+  "libxml2:bytes" \
+  "curl:bytes" \
+  "c-ares:bytes" \
   "pcre2:bytes" \
   "zlib:bytes"; do
   slug="${slug_expected%%:*}"

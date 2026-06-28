@@ -1878,15 +1878,20 @@ rebuild_pool_artifacts() {
   ## split-pool so the per-condition copies inherit the corrected reports.
   if [ "$DRY_RUN" != "1" ] && [ -d "$POOL/crashes" ] \
      && declare -f _triage_reconcile_contract_flag >/dev/null 2>&1; then
-    local _rc_cdir _rc_new=0
+    # Reconcile is authoritative: it can ADD a late flag or CLEAR a stale one.
+    # Run it on every dir (do NOT skip already-flagged ones, or a stale flag the
+    # current fields/config no longer justify would survive) and count any change
+    # in sidecar state so a clear, not just an add, triggers the re-score/render.
+    local _rc_cdir _rc_changed=0 _rc_before _rc_after
     for _rc_cdir in "$POOL"/crashes/CRASH-*; do
       [ -d "$_rc_cdir" ] || continue
-      [ -f "$_rc_cdir/.contract-flagged" ] && continue
+      _rc_before=0; [ -f "$_rc_cdir/.contract-flagged" ] && _rc_before=1
       _triage_reconcile_contract_flag "$_rc_cdir" "$(basename "$_rc_cdir")"
-      [ -f "$_rc_cdir/.contract-flagged" ] && _rc_new=$((_rc_new + 1))
+      _rc_after=0; [ -f "$_rc_cdir/.contract-flagged" ] && _rc_after=1
+      [ "$_rc_before" != "$_rc_after" ] && _rc_changed=$((_rc_changed + 1))
     done
-    if [ "$_rc_new" -gt 0 ]; then
-      log "contract-flag reconcile: applied $_rc_new late flag(s) on final fields; re-scoring (severity-only)"
+    if [ "$_rc_changed" -gt 0 ]; then
+      log "contract-flag reconcile: $_rc_changed sidecar change(s) on final fields; re-scoring (severity-only)"
       "$SCRIPT_ROOT/bin/reachability" --batch "$POOL" --target "$TARGET_SLUG" --severity-only \
         >> "$BENCH_DIR/reachability.log" 2>&1 \
         || log "WARN: post-reconcile re-score returned non-zero ($reason)"

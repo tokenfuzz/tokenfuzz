@@ -1742,37 +1742,41 @@ PY
 then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "triaged genuine bug under-scored"; fi
 
 # ───────────────────────────────────────────────────────────────────
-# Contract-concern set-difference localises trigger shape (AV:L/AT:P).
-# A trusted callback/re-entrancy UAF carries trigger_source=both (bytes are
-# only setup) but triage records the call-sequence as outside attacker_controls.
-# The scorer must consume that authoritative set-difference and localise to
-# AV:L/AT:P — even though `both` asserts a byte path — dropping the HHH-impact
-# crash from High to Medium. Mirrors the benchmark callout-reentrancy reports.
+# Structured trigger/control set-difference localises trigger shape (AV:L/AT:P).
+# A re-entrancy UAF may carry trigger_source=both, but if target.toml says the
+# attacker controls only bytes, call-sequence is outside attacker_controls. The
+# scorer derives that current set-difference from fields/config and localises to
+# AV:L/AT:P, dropping the HHH-impact crash below High.
 # Placeholder symbols only (see docs/development.md testing discipline).
 _CURRENT_TEST="trigger-shape: call-sequence outside attacker_controls localises to AV:L/AT:P"
 if run_gate_py <<'PY' 2>/dev/null
 import importlib.util, sys
+import tempfile
+from pathlib import Path
 from importlib.machinery import SourceFileLoader
 _loader = SourceFileLoader("reachability", sys.argv[1])
 mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("reachability", _loader))
 _loader.exec_module(mod)
 reach = {"services": {"sourcegraph": {"status": "ok"}},
          "external_callers": 500, "vendored_copies": 0}
+crash_dir = (Path(tempfile.mkdtemp()) / "output" / "sampleproj" / "backend"
+             / "results" / "crashes" / "CRASH-1")
+crash_dir.mkdir(parents=True)
+(crash_dir.parents[3] / "target.toml").write_text(
+    '[threat_model]\nattacker_controls = ["bytes"]\n',
+    encoding="utf-8",
+)
 report = (
     "# CRASH-1: heap-use-after-free WRITE in app_match\n"
     "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60\n"
     "WRITE of size 8 at 0x60 thread T0\n"
     "    #0 app_match match.c:177\n"
     "SUMMARY: AddressSanitizer: heap-use-after-free match.c:177 in app_match\n"
-    "## Contract concern\n"
-    "Triage kept this crash and flagged a contract concern: trigger requires "
-    "[call-sequence] outside attacker_controls=[bytes]; this out-of-boundary "
-    "precondition is a robustness/hardening concern (CVSS AT:P/MAT:P).\n"
     "Surface: library-api — public entry point\n"
     "Trigger source: both\n"
-    "Caller controls: pattern bytes, subject bytes, callback, public API call sequence\n"
+    "Caller controls: pattern bytes, subject bytes, public API call sequence\n"
 )
-sev = mod.compute_severity(report, reach, cluster_size=2)
+sev = mod.compute_severity(report, reach, cluster_size=2, report_dir=crash_dir)
 # The localisation invariant — AV:L/AT:P — is what the fix asserts; it holds
 # regardless of Exploit Maturity (E), which the report's reproducer evidence
 # sets independently. The point is de-inflation: an attacker-bytes embedding
@@ -1781,7 +1785,7 @@ sev = mod.compute_severity(report, reach, cluster_size=2)
 assert "AV:L" in sev["cvss"]["vector"], sev["cvss"]["vector"]
 assert "AT:P" in sev["cvss"]["vector"], sev["cvss"]["vector"]
 assert sev["level"] not in ("High", "Critical"), \
-    f"localised callback/re-entrancy UAF must drop below High, got {sev['level']} ({sev['score']})"
+    f"localised re-entrancy UAF must drop below High, got {sev['level']} ({sev['score']})"
 PY
 then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "trigger-shape localisation did not fire"; fi
 
@@ -1816,21 +1820,29 @@ assert "AV:L" not in sev["cvss"]["vector"], sev["cvss"]["vector"]
 PY
 then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "byte-parser was wrongly localised"; fi
 
-# The subset test is exact: an out-of-attacker-control set that includes bytes
-# (alongside or instead of call-sequence) means a byte path is part of the
-# gating trigger, so the bug is NOT call-sequence-only — it must stay AV:N. This
-# is the precision guard: `trigger_source: both` alone must never localise; only
-# the {call-sequence} set-difference does. Placeholder symbols per docs.
+# The subset test is exact: if bytes are outside attacker_controls, the bug is
+# not call-sequence-only and must stay AV:N. Use a target model where only the
+# call-sequence is attacker-controlled, so Trigger source: both leaves bytes
+# outside the boundary.
 _CURRENT_TEST="trigger-shape: bytes in the out-of-control set keeps AV:N (no over-localisation)"
 if run_gate_py <<'PY' 2>/dev/null
 import importlib.util, sys
+import tempfile
+from pathlib import Path
 from importlib.machinery import SourceFileLoader
 _loader = SourceFileLoader("reachability", sys.argv[1])
 mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("reachability", _loader))
 _loader.exec_module(mod)
 reach = {"services": {"sourcegraph": {"status": "ok"}},
          "external_callers": 500, "vendored_copies": 0}
-base = (
+crash_dir = (Path(tempfile.mkdtemp()) / "output" / "sampleproj" / "backend"
+             / "results" / "crashes" / "CRASH-3")
+crash_dir.mkdir(parents=True)
+(crash_dir.parents[3] / "target.toml").write_text(
+    '[threat_model]\nattacker_controls = ["call-sequence"]\n',
+    encoding="utf-8",
+)
+report = (
     "# CRASH-3: heap-use-after-free WRITE in app_match\n"
     "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60\n"
     "WRITE of size 8 at 0x60 thread T0\n"
@@ -1839,15 +1851,9 @@ base = (
     "Surface: library-api — public entry point\n"
     "Trigger source: both\n"
 )
-for oob in ("bytes,call-sequence", "bytes"):
-    report = base + (
-        "## Contract concern\n"
-        f"Triage flagged a contract concern: trigger requires [{oob}] outside "
-        "attacker_controls=[]; this out-of-boundary precondition lowers severity.\n"
-    )
-    sev = mod.compute_severity(report, reach, cluster_size=2)
-    assert "AV:N" in sev["cvss"]["vector"], (oob, sev["cvss"]["vector"])
-    assert "AV:L" not in sev["cvss"]["vector"], (oob, sev["cvss"]["vector"])
+sev = mod.compute_severity(report, reach, cluster_size=2, report_dir=crash_dir)
+assert "AV:N" in sev["cvss"]["vector"], sev["cvss"]["vector"]
+assert "AV:L" not in sev["cvss"]["vector"], sev["cvss"]["vector"]
 PY
 then pass "$_CURRENT_TEST"; else fail "$_CURRENT_TEST" "bytes-in-OOB-set was wrongly localised"; fi
 

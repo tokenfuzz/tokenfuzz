@@ -21,9 +21,11 @@ Public API surface (header files found in the target tree):
 
 attacker_controls tokens — choose every token that genuinely applies:
   bytes           input file / stream / packet bytes (most parsers, codecs)
-  call-sequence   ordered public API or script calls — the attacker picks
-                  which calls run and in what order (stateful library APIs,
-                  scripting / plugin SDKs)
+  call-sequence   the ATTACKER picks which public API calls run and in what
+                  order — a scripting / plugin engine running attacker-supplied
+                  scripts, or an RPC/IPC surface exposing the API to attacker
+                  requests. NOT a library an application drives in a fixed order
+                  over attacker bytes (see guidance).
   timing          timing / scheduling control (browsers, JIT)
   race            concurrent threads or processes (servers, runtimes)
   protocol-state  multi-message protocol state machine (TLS, HTTP, DNS
@@ -34,10 +36,18 @@ attacker_controls tokens — choose every token that genuinely applies:
 
 Guidance:
 - Almost every parser / codec / format library has `bytes`.
-- Add `call-sequence` only if the attacker realistically drives the public
-  API call order — a fuzz harness exercising the library API, or a
-  scripting surface. Do NOT add it if the target is only ever run as a
-  fixed-argv command-line tool.
+- Add `call-sequence` ONLY when the attacker themselves chooses the public API
+  call order — a scripting/plugin engine that runs attacker-supplied scripts, or
+  an RPC/IPC surface that exposes the API to attacker requests. A fuzz harness
+  exploring call orders is a TEST artifact, not an attacker. For a library an
+  application drives in a FIXED order over attacker-supplied bytes — most
+  parsers, codecs, regex and format libraries — the call order is NOT
+  attacker-controlled: use `bytes` only. Do NOT add `call-sequence` just because
+  the API is stateful or is fuzzed call-by-call; that conflates the harness with
+  the attacker and turns caller-contract/robustness bugs into false security
+  reports. (Example: an XML or JSON parser an app calls to parse untrusted bytes
+  is `["bytes"]`, even though a callback freed mid-parse can crash it — that
+  callback is caller code, not attacker-controlled.)
 - Add `protocol-state` for network-protocol implementations.
 - Be conservative: never list a token the attacker cannot actually reach.
   Over-claiming turns upstream-robustness bugs into false security reports.
