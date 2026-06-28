@@ -17,8 +17,13 @@ if ! command -v "$cc_bin" >/dev/null 2>&1; then
 fi
 
 mkdir -p "$build"
+obj="$build/canary.o"
 "$cc_bin" \
   -O1 -g -fno-omit-frame-pointer -fsanitize=address \
   -I"$src/src" \
-  "$src/src/canary.c" \
+  -c "$src/src/canary.c" \
+  -o "$obj"
+"$cc_bin" \
+  -fsanitize=address \
+  "$obj" \
   -o "$build/canary"

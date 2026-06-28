@@ -31,6 +31,12 @@ Hard rules:
     optimisation — fix the configure error, do not drop release.
     Retain `-g` for symbolised stack traces; that's orthogonal to
     optimisation level.
+  * For direct compiler recipes (no real build system), compile
+    sources to durable object files under `$build` first, then link
+    those `.o` files. Do NOT use a single-step
+    `clang ... source.c -o binary` recipe: on macOS the linked Mach-O
+    debug map can point at deleted temporary objects, so sanitizer
+    stacks silently lose file:line.
   * No absolute host paths. Use `$1` / `$2` (or shell vars derived
     from them) for every file reference inside the source / build
     trees. Reject `$HOME`, `/Users/`, `/home/`, `/private/`.

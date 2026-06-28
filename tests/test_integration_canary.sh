@@ -42,6 +42,22 @@ fi
 BIN="$BUILD/canary"
 assert_file_exists "$BIN" "canary ASan binary produced"
 
+if [ "$(uname -s 2>/dev/null || echo unknown)" = "Darwin" ] &&
+   command -v dsymutil >/dev/null 2>&1 &&
+   command -v dwarfdump >/dev/null 2>&1; then
+  # macOS debug maps must point at durable object files. A single-step
+  # compile+link leaves the map pointing at clang's deleted temp object, making
+  # both dsymutil and atos degrade crash reports to function-only frames.
+  dsym_rc=0
+  dsym_out=$(dsymutil "$BIN" -o "$TEST_TMPDIR/canary.dSYM" 2>&1) || dsym_rc=$?
+  assert_eq 0 "$dsym_rc" "canary macOS dSYM generation succeeds"
+  assert_not_match 'unable to open object file|no debug symbols' "$dsym_out" \
+    "canary macOS debug map points at durable objects"
+  line_dump="$(dwarfdump --debug-line "$TEST_TMPDIR/canary.dSYM/Contents/Resources/DWARF/canary" 2>/dev/null || true)"
+  assert_match 'Address[[:space:]]+Line|src/canary\.c' "$line_dump" \
+    "canary macOS dSYM contains line tables"
+fi
+
 # handle_abort=1 mirrors lib/sanitizer_options.conf so the assert trap is
 # reported as an ASan ABRT (with the __assert frame the gate keys on).
 # abort_on_error=0 makes ASan _exit(1) instead of raising SIGABRT, which

@@ -75,7 +75,9 @@ clang -fsanitize=address -O1 -g1 -fno-omit-frame-pointer -c "$src/sample.c" \
   -o "$build/sample.o" 2>/dev/null
 clang -fsanitize=address -dynamiclib "$build/sample.o" \
   -o "$build/libsample.dylib" -install_name @rpath/libsample.dylib 2>/dev/null
-clang -fsanitize=address -O1 -g1 -fno-omit-frame-pointer -I "$src" "$src/apptool.c" \
+clang -fsanitize=address -O1 -g1 -fno-omit-frame-pointer -I "$src" -c "$src/apptool.c" \
+  -o "$build/apptool.o" 2>/dev/null
+clang -fsanitize=address "$build/apptool.o" \
   -o "$build/apptool" -L"$build" -lsample -Wl,-rpath,"$build" 2>/dev/null
 
 if [ ! -x "$build/apptool" ] || [ ! -e "$build/libsample.dylib" ]; then
@@ -127,7 +129,10 @@ else
 fi
 
 # ── Apply the fix exactly as bin/setup-target's materialization path does ──
-audit_make_dsyms "$build"
+dsym_log="$TEST_TMPDIR/dsym.log"
+audit_make_dsyms "$build" 2>"$dsym_log"
+assert_not_match 'incomplete dSYM' "$(cat "$dsym_log")" \
+  "audit_make_dsyms: durable-object fixture emits no incomplete-dSYM warning"
 assert_file_exists "$build/libsample.dylib.dSYM/Contents/Resources/DWARF/libsample.dylib" \
   "audit_make_dsyms: produced a self-contained .dSYM for the dylib"
 
@@ -140,9 +145,46 @@ if [ "$have_ls" -eq 1 ]; then
 fi
 
 # ── Idempotence: a second pass over an up-to-date tree is a harmless no-op ──
-audit_make_dsyms "$build"
+audit_make_dsyms "$build" 2>"$dsym_log"
+assert_not_match 'incomplete dSYM' "$(cat "$dsym_log")" \
+  "audit_make_dsyms: idempotent re-run keeps durable-object dSYM quiet"
 assert_file_exists "$build/libsample.dylib.dSYM/Contents/Resources/DWARF/libsample.dylib" \
   "audit_make_dsyms: idempotent re-run keeps the .dSYM"
+
+# ── Broken debug maps: object-file DWARF disappeared after link ──
+# This is what single-step clang recipes can leave behind: symbol names survive
+# from the binary, but line tables live in an object file that is gone by
+# symbolization time. The dSYM pass must not stay silent when it cannot preserve
+# file:line.
+broken="$TEST_TMPDIR/broken"; mkdir -p "$broken"
+cat > "$src/singlestep.c" <<'EOF'
+#include <stdlib.h>
+int main(void) { char *p = (char *)malloc(4); p[0] = 1; free(p); return 0; }
+EOF
+clang -O1 -g -fno-omit-frame-pointer -fsanitize=address -c "$src/singlestep.c" \
+  -o "$broken/singlestep.o" 2>/dev/null
+clang -fsanitize=address "$broken/singlestep.o" -o "$broken/singlestep" 2>/dev/null
+rm -f "$broken/singlestep.o"
+broken_log="$TEST_TMPDIR/broken-dsym.log"
+audit_make_dsyms "$broken" 2>"$broken_log"
+if _audit_dsym_has_line_tables "$broken/singlestep"; then
+  fail "audit_make_dsyms: broken debug-map fixture" "line tables unexpectedly survived deleted object"
+else
+  assert_file_contains "$broken_log" 'incomplete dSYM.*singlestep' \
+    "audit_make_dsyms: warns when the debug map points at a missing object"
+  audit_make_dsyms "$broken" 2>"$broken_log"
+  assert_file_contains "$broken_log" 'incomplete dSYM.*singlestep' \
+    "audit_make_dsyms: warns even when an incomplete dSYM is already up to date"
+fi
+
+# A prebuilt or intentionally stripped helper can be a real Mach-O executable
+# with no debug map at all. It should not look like the missing-object failure.
+nodebug="$TEST_TMPDIR/nodebug"; mkdir -p "$nodebug"
+clang -O1 "$src/singlestep.c" -o "$nodebug/nodebug" 2>/dev/null
+nodebug_log="$TEST_TMPDIR/nodebug-dsym.log"
+audit_make_dsyms "$nodebug" 2>"$nodebug_log"
+assert_not_match 'incomplete dSYM' "$(cat "$nodebug_log")" \
+  "audit_make_dsyms: no-debug Mach-O helper stays quiet"
 
 # ── Missing-tool / bad-input contract: never errors, returns 0 ──
 rc=0; audit_make_dsyms "$TEST_TMPDIR/does-not-exist" || rc=$?

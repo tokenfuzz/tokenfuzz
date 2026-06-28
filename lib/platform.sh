@@ -80,20 +80,64 @@ audit_is_linux() {
 # llvm-symbolizer and treats a function-only result as final, so without a .dSYM
 # library crash frames lose file:line and render as `func (module)`. dsymutil
 # bakes the debug map's DWARF into a sibling .dSYM that both backends consume,
-# making symbolization backend- and timing-independent. (Harness executables
-# built single-step by clang already get an auto-dSYM; this covers the
-# separately-linked artifacts a native target build emits.) No-op on Linux,
-# where -g1 DWARF is embedded directly in the ELF .so.
+# making symbolization backend- and timing-independent. Recipes that compile
+# and link source files in a single clang invocation can still produce an
+# unrepairable debug map pointing at deleted temporary objects; build recipes
+# should compile to durable object files under the build directory first. No-op
+# on Linux, where -g1 DWARF is embedded directly in the ELF .so.
+_audit_dsym_dwarf_file() {
+  local f="${1:-}"
+  [ -n "$f" ] || return 1
+  printf '%s.dSYM/Contents/Resources/DWARF/%s\n' "$f" "$(basename "$f")"
+}
+
+_audit_dsym_has_line_tables() {
+  local f="${1:-}" dwarf
+  dwarf="$(_audit_dsym_dwarf_file "$f")" || return 1
+  [ -f "$dwarf" ] || return 1
+  command -v dwarfdump >/dev/null 2>&1 || return 0
+  dwarfdump --debug-line "$dwarf" 2>/dev/null | awk '
+    /^Address[[:space:]]+Line[[:space:]]+Column/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+_audit_macho_has_debug_map_objects() {
+  local f="${1:-}" n
+  [ -n "$f" ] && command -v nm >/dev/null 2>&1 || return 1
+  n="$(nm -ap "$f" 2>/dev/null | awk '$5 == "OSO" { n++ } END { print n + 0 }')"
+  [ "${n:-0}" -gt 0 ]
+}
+
+_audit_warn_incomplete_dsym() {
+  local f="${1:-}" log="${2:-}" reason=""
+  [ -n "$f" ] || return 0
+  if [ -n "$log" ] && [ -s "$log" ]; then
+    reason="$(awk '
+      /unable to open object file|could not find object file/ { print; exit }
+    ' "$log" 2>/dev/null || true)"
+  fi
+  if [ -z "$reason" ] &&
+     _audit_macho_has_debug_map_objects "$f" &&
+     ! _audit_dsym_has_line_tables "$f"; then
+    reason="generated dSYM has no debug line table"
+  fi
+  [ -n "$reason" ] || return 0
+  printf '%s\n' "[audit_make_dsyms] WARN: incomplete dSYM for $f: $reason" >&2
+  printf '%s\n' "[audit_make_dsyms] WARN: sanitizer stacks for this binary may be function-only; compile sources to durable .o files under the build directory before linking." >&2
+}
+
 audit_make_dsyms() {
   audit_is_darwin || return 0
   local build="${1:-}"
   [ -n "$build" ] && [ -d "$build" ] || return 0
   command -v dsymutil >/dev/null 2>&1 || return 0
 
-  local f ftype
+  local f ftype log
   while IFS= read -r -d '' f; do
     # Incremental rebuilds: keep a .dSYM that is at least as new as its binary.
     if [ -e "${f}.dSYM" ] && [ ! "$f" -nt "${f}.dSYM" ]; then
+      _audit_warn_incomplete_dsym "$f" ""
       continue
     fi
     case "$f" in
@@ -105,7 +149,15 @@ audit_make_dsyms() {
         ;;
     esac
     # Best-effort: a binary with no usable debug map just warns; never fatal.
-    dsymutil "$f" -o "${f}.dSYM" >/dev/null 2>&1 || true
+    log="$(mktemp "${TMPDIR:-/tmp}/audit-dsymutil-XXXXXX")" || log=""
+    if [ -n "$log" ]; then
+      dsymutil "$f" -o "${f}.dSYM" >"$log" 2>&1 || true
+      _audit_warn_incomplete_dsym "$f" "$log"
+      rm -f "$log"
+    else
+      dsymutil "$f" -o "${f}.dSYM" >/dev/null 2>&1 || true
+      _audit_warn_incomplete_dsym "$f" ""
+    fi
   done < <(find "$build" -type f \( \
              -name '*.dylib' -o -name '*.so' -o -name '*.so.*' -o -perm -u+x \
            \) ! -path '*/CMakeFiles/*' ! -path '*.dSYM/*' -print0 2>/dev/null)
