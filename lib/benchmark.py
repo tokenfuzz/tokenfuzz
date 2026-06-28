@@ -436,6 +436,51 @@ def count_confirmed_crashes(crashes_dir: Path) -> tuple[int, list[str]]:
     return len(confirmed), confirmed
 
 
+def _finding_is_confirmed(finding_dir: Path) -> bool:
+    """True iff a FIND-* dir passed the find-quality gate, or is human-pinned.
+
+    Findings carry no sanitizer reproducer — that is the crashes/ contract,
+    not findings/ — so the finding analog of count_confirmed_crashes' "proof,
+    not assertion" is gate acceptance. The find-quality gate (lib/triage.sh)
+    writes `.llm-find-quality.json` with `accept: true` only for a FIND it
+    kept, and moves quorum-rejected FINDs out to findings-rejected/. A
+    `.keep`/`.reviewed` pin is a human override that bypasses the gate (same
+    precedence the gate itself applies). An un-adjudicated FIND — no verdict
+    cache, e.g. recon output a wall-clock-cut-off run never triaged — is NOT
+    confirmed; that is what keeps the count honest when triage did not finish.
+    Reuses the same accept/pin signal readers elsewhere key on
+    (lib/workqueue.py `_compact_finding`, bin/cluster-findings).
+    """
+    if (finding_dir / ".reviewed").is_file() or (finding_dir / ".keep").is_file():
+        return True
+    cache = finding_dir / ".llm-find-quality.json"
+    if not cache.is_file():
+        return False
+    return (_read_json(cache) or {}).get("accept") is True
+
+
+def count_confirmed_findings(findings_dir: Path) -> tuple[int, list[str]]:
+    """Count FIND-* subdirs the find-quality gate accepted (or a human pinned).
+
+    Returns (count, sorted list of FIND dir names). The mirror of
+    count_confirmed_crashes for findings: an un-adjudicated FIND (the gate
+    never rendered a verdict) is NOT counted, so a run whose triage was cut
+    off by the wall-clock cannot inflate its finding count with recon output
+    the gate never looked at. The raw `count_subdirs(findings_dir, "FIND-")`
+    total is kept alongside this so the un-gated remainder stays visible
+    rather than silently dropped.
+    """
+    if not findings_dir.is_dir():
+        return 0, []
+    confirmed: list[str] = []
+    for child in sorted(findings_dir.iterdir()):
+        if not child.is_dir() or not child.name.startswith("FIND-"):
+            continue
+        if _finding_is_confirmed(child):
+            confirmed.append(child.name)
+    return len(confirmed), confirmed
+
+
 def count_subdirs(parent: Path, prefix: str) -> int:
     """Count immediate subdirectories of *parent* whose name starts prefix."""
     if not parent.is_dir():
@@ -1415,6 +1460,9 @@ def harvest(
         crashes_dir / "CRASH-CLUSTERS.md", crash_count
     )
     finding_count = count_subdirs(findings_dir, "FIND-")
+    confirmed_finding_count, confirmed_finding_dirs = count_confirmed_findings(
+        findings_dir
+    )
     finding_clusters = parse_cluster_count(
         findings_dir / "FINDING-CLUSTERS.md", finding_count
     )
@@ -1429,6 +1477,8 @@ def harvest(
         ),
         "discarded_hypotheses": count_discarded_hypotheses(results_dir),
         "findings": finding_count,
+        "confirmed_findings": confirmed_finding_count,
+        "confirmed_finding_dirs": confirmed_finding_dirs,
         "finding_clusters": finding_clusters,
         "findings_rejected": count_subdirs(
             results_dir / "findings-rejected", "FIND-"
@@ -2135,6 +2185,9 @@ def aggregate(bench_dir: Path) -> dict:
         ]
         crashes = [c["metrics"].get("confirmed_crashes", 0) for c in done]
         findings = [c["metrics"].get("findings", 0) for c in done]
+        confirmed_findings = [
+            c["metrics"].get("confirmed_findings", 0) for c in done
+        ]
         rejected_findings = [
             c["metrics"].get("findings_rejected", 0) for c in done
         ]
@@ -2175,6 +2228,7 @@ def aggregate(bench_dir: Path) -> dict:
                 "rejected_finding_total": sum(rejected_findings),
                 "model_refusal_total": sum(model_refusals),
                 "finding_total": sum(findings),
+                "confirmed_finding_total": sum(confirmed_findings),
                 "unique_crash_clusters": cb.get("unique_clusters", 0),
                 "novel_crash_clusters": cb.get("novel_clusters", 0),
                 "top_severity_level": cb.get("top_severity_level", "—"),

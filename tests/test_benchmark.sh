@@ -143,6 +143,11 @@ printf 'WARN: MODEL_REFUSAL backend=codex refused to answer prompt: Review this 
   > "$rd/backend.raw.log.refusals.log"
 printf 'noise\nWARN: MODEL_REFUSAL backend=codex refused to answer prompt: Validate this finding...\n' \
   > "$rd/logs/refusals.log"
+# FIND-001 passed the find-quality gate (accept:true); FIND-002 is un-gated
+# recon output the gate never adjudicated. count_confirmed_findings counts
+# only the former; the raw `findings` count keeps both.
+printf '{"decision_version":1,"accept":true,"accept_count":2,"class":"memory-safety","severity":"High"}\n' \
+  > "$rd/findings/FIND-001/.llm-find-quality.json"
 
 # ── T1: harvest counts only sanitizer-confirmed crashes ──────────────────
 hv=$(python3 "$PY" harvest "$rd")
@@ -156,6 +161,10 @@ assert_eq "1" "$(echo "$hv" | jq -r '.crashes_rejected')" "T1c: rejected crash c
 assert_eq "0" "$(echo "$hv" | jq -r '.discarded_hypotheses')" \
   "T1c-discard-0: discarded_hypotheses=0 when state/hypotheses.jsonl is absent"
 assert_eq "2" "$(echo "$hv" | jq -r '.findings')" "T1d: FIND-* dirs counted"
+assert_eq "1" "$(echo "$hv" | jq -r '.confirmed_findings')" \
+  "T1d2: only the gate-accepted FIND counts as confirmed (un-gated FIND-002 excluded)"
+assert_eq "FIND-001" "$(echo "$hv" | jq -r '.confirmed_finding_dirs[0]')" \
+  "T1d3: confirmed finding dir is FIND-001"
 assert_eq "1" "$(echo "$hv" | jq -r '.findings_rejected')" "T1e: rejected findings counted"
 assert_eq "3" "$(echo "$hv" | jq -r '.recon_candidates')" "T1f: RECON-* dirs counted"
 assert_eq "1500" "$(echo "$hv" | jq -r '.tokens.input_tokens')" "T1g: input tokens summed"
@@ -165,6 +174,30 @@ assert_eq "2" "$(echo "$hv" | jq -r '.tokens.iterations')" "T1j: iteration count
 assert_eq "1200" "$(echo "$hv" | jq -r '.tokens.cached_input_tokens')" "T1k: cached input tokens summed"
 assert_eq "2" "$(echo "$hv" | jq -r '.model_refusals')" \
   "T1l: model refusal warning sidecars counted"
+
+# ── T1cf: confirmed-findings floor across every gate state ───────────────
+# The mirror of T1's confirmed-crash floor: a FIND counts as confirmed only
+# when the find-quality gate accepted it or a human pinned it. Un-gated and
+# below-quorum-rejected FINDs (the shape a wall-clock-cut-off run leaves on
+# disk) stay in the raw count but are excluded from confirmed.
+cf="$work/cf/results"
+mkdir -p "$cf/findings/FIND-A" "$cf/findings/FIND-B" "$cf/findings/FIND-C" \
+         "$cf/findings/FIND-D" "$cf/findings/FIND-E"
+printf '{"accept":true,"class":"dos","severity":"Medium"}\n' \
+  > "$cf/findings/FIND-A/.llm-find-quality.json"     # gate-accepted
+printf '{"accept":false,"reason":"robustness only"}\n' \
+  > "$cf/findings/FIND-B/.llm-find-quality.json"     # rejected below quorum, still on disk
+# FIND-C: un-gated (no verdict cache) — the leak case
+: > "$cf/findings/FIND-D/.keep"                       # human pin (override)
+: > "$cf/findings/FIND-E/.reviewed"                   # human pin (override)
+cfv=$(python3 "$PY" harvest "$cf")
+assert_eq "5" "$(echo "$cfv" | jq -r '.findings')" \
+  "T1cf-a: raw findings count keeps every FIND-* dir"
+assert_eq "3" "$(echo "$cfv" | jq -r '.confirmed_findings')" \
+  "T1cf-b: confirmed = accept:true + .keep + .reviewed (un-gated + accept:false excluded)"
+assert_eq "FIND-A FIND-D FIND-E" \
+  "$(echo "$cfv" | jq -r '.confirmed_finding_dirs | join(" ")')" \
+  "T1cf-c: confirmed dirs are the accepted FIND and the two pinned FINDs"
 
 # ── T1s: harvest finds index.jsonl when logs/ is a sibling of results/ ───
 # A harness run lays out output/<target>-<exp>/<backend>/{results,logs} —
@@ -275,16 +308,18 @@ cat > "$bd/run.json" <<'JSON'
 {"runid":"run1","target":"t","backend":"codex","replicates":2,"budget_wall":60,
  "conditions":["model-direct","harness"],"target_sha":"abc","harness_sha":"def"}
 JSON
-mk_cell() { # name condition replicate status crashes
+mk_cell() { # name condition replicate status crashes [rejected] [refusals] [confirmed_findings]
   local d="$bd/cells/$1"
   local rejected="${6:-0}"
   local refusals="${7:-0}"
+  local confirmed="${8:-0}"
   mkdir -p "$d"
   cat > "$d/cell.json" <<JSON
 {"condition":"$2","replicate":$3,"status":"$4","wall_seconds":42}
 JSON
   cat > "$d/metrics.json" <<JSON
 {"confirmed_crashes":$5,"crash_clusters":$5,"findings":0,
+ "confirmed_findings":$confirmed,
  "findings_rejected":$rejected,
  "model_refusals":$refusals,
  "tokens":{"output_tokens":111}}
@@ -292,10 +327,12 @@ JSON
 }
 mk_cell model-direct-r1            model-direct           1 done 0 2 1
 mk_cell model-direct-r2            model-direct           2 done 0
-mk_cell harness-r1 harness 1 done 3 0 2
-mk_cell harness-r2 harness 2 done 1
+mk_cell harness-r1 harness 1 done 3 0 2 2
+mk_cell harness-r2 harness 2 done 1 0 0 1
 agg=$(python3 "$PY" aggregate "$bd")
 hd=$(echo "$agg" | jq -c '.conditions[] | select(.condition=="harness")')
+assert_eq "3" "$(echo "$hd" | jq -r '.confirmed_finding_total')" \
+  "T4a0: harness confirmed_finding_total folds [2,1]"
 assert_eq "2" "$(echo "$hd" | jq -r '.crash_median')" "T4a: harness median of [3,1] is 2"
 assert_eq "—" "$(echo "$hd" | jq -r '.top_severity_level')" \
   "T4b: no cluster JSON → top crash severity is unscored (—)"

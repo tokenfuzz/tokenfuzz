@@ -1016,6 +1016,32 @@ sweep_target_tree_for_misplaced_output() {
   fi
 }
 
+# Drain the find-quality gate over a finished cell's findings/. bin/audit runs
+# this same gate as backgrounded, dirty-gated housekeeping, but the wall-clock
+# TERM it treats as its normal stop kills the sweeper mid-iteration — leaving
+# the final iteration's findings un-gated, which cluster-findings renders as
+# permanent "Pending" severities and harvest counts as findings. Running it
+# synchronously once the cell has ended resolves the un-gated remainder so a
+# finding counts only when adjudicated. Triage is measurement, not the timed
+# find work, so it correctly runs past the find budget; the gate caches
+# per-FIND, so this adds no LLM calls for already-decided findings. With
+# $2=validator, also runs the independent-validator quorum first — raw
+# model-direct findings have no audit pipeline behind them, harness findings
+# already passed the session's own triage.
+drain_cell_find_gate() {
+  local results_dir="$1" mode="${2:-}"
+  [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "1" ] || return 0
+  [ -n "$results_dir" ] && [ -d "$results_dir/findings" ] || return 0
+  if [ "$mode" = "validator" ]; then
+    TRIAGE_VALIDATE_BACKEND="$BACKEND" TRIAGE_VALIDATE_MODEL="$model" \
+      triage_validate_confirm_findings "$results_dir/findings" \
+        "$SCRIPT_ROOT/targets/$TARGET_SLUG" "$results_dir/findings-rejected" \
+        >/dev/null 2>&1
+  fi
+  RESULTS_DIR="$results_dir" ACTIVE_BACKEND="$BACKEND" MODEL="$model" \
+    validate_find_gate >/dev/null 2>&1 || true
+}
+
 run_model_direct_cell() {
   local cell_dir="$1" exp_name="$2"
   local target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
@@ -2223,32 +2249,20 @@ for cond in "${COND_ARR[@]}"; do
         status="incomplete"
         provider_unavailable=1
       fi
-      # Gate raw model-direct findings through the independent-validator
-      # quorum (lib/triage_validate.sh) — a FIND counts only on a Promote
-      # vote, matching count_confirmed_crashes' rule for crashes. Rejected
-      # / uncertain findings move to findings-rejected/ before harvest.
-      if [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "1" ] \
-          && [ -n "$results_dir" ] && [ -d "$results_dir/findings" ]; then
-        TRIAGE_VALIDATE_BACKEND="$BACKEND" TRIAGE_VALIDATE_MODEL="$model" \
-          triage_validate_confirm_findings "$results_dir/findings" \
-            "$SCRIPT_ROOT/targets/$TARGET_SLUG" "$results_dir/findings-rejected" \
-            >/dev/null 2>&1
-        # Run the full find-quality gate — score AND quarantine — the same
-        # gate bin/audit runs from housekeeping. A find-quality reject at
-        # quorum is MOVED to findings-rejected/ here too, matching the harness
-        # path; scoring alone would leave it in findings/ where cluster-findings
-        # renders it as a permanent "Pending" severity. The gate caches
-        # per-FIND, so re-running is idempotent and adds no LLM calls for
-        # already-decided findings.
-        RESULTS_DIR="$results_dir" ACTIVE_BACKEND="$BACKEND" MODEL="$model" \
-          validate_find_gate >/dev/null 2>&1 || true
-      fi
+      # Gate raw model-direct findings: the independent-validator quorum
+      # (lib/triage_validate.sh) plus the full find-quality gate. A FIND
+      # counts only on acceptance, matching count_confirmed_crashes' rule for
+      # crashes; rejects move to findings-rejected/ before harvest.
+      drain_cell_find_gate "$results_dir" validator
     else
       results_dir="$(run_harness_cell "$cell_dir" "$exp_name")" || status="failed"
       if [ -f "$cell_dir/.backend-unavailable" ] || [ -f "$cell_dir/.quota-exhausted" ]; then
         status="incomplete"
         provider_unavailable=1
       fi
+      # Drain the find-quality gate the harness session was running as
+      # backgrounded housekeeping until the wall-clock TERM killed it.
+      drain_cell_find_gate "$results_dir"
     fi
 
     end_epoch="$(date +%s)"
