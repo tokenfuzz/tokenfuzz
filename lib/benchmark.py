@@ -166,23 +166,22 @@ def _md_link(label: object, path: Path | str | None) -> str:
 
 
 def _finding_count_label(c: dict) -> object:
-    """Findings-cell label: the CONFIRMED finding count, with the un-gated
-    remainder shown when a cut-off triage left findings the gate never
-    adjudicated, e.g. ``1 (+285 un-gated)``. The headline total stays the
-    confirmed count; surfacing the remainder keeps it visible rather than
-    silently dropped, without inflating the count. Falls back to the raw total
-    for older metrics that predate confirmed_finding_total, so an
-    un-re-harvested run is not misreported as zero-confirmed.
+    """Findings-cell label: the CONFIRMED finding count, full stop.
+
+    The headline total is the count of FINDs the find-quality gate accepted (or
+    a human pinned). Any un-adjudicated remainder from a cut-off triage is NOT
+    shown here: regenerate now drains the gate to completion before harvest
+    (`drain_cell_find_gate` in the regenerate branch), so a finished run carries
+    no un-gated backlog to surface, and a drain that cannot finish (no backend /
+    rate-limited) is reported as a run-health WARN rather than as a parenthetical
+    on a backend-comparison row. Falls back to the raw total only for older
+    metrics that predate confirmed_finding_total, so an un-re-harvested run is
+    not misreported as zero-confirmed.
     """
-    raw = int(c.get("finding_total", 0) or 0)
     confirmed = c.get("confirmed_finding_total")
     if confirmed is None:
-        return raw
-    confirmed = int(confirmed or 0)
-    ungated = raw - confirmed
-    if ungated > 0:
-        return f"{confirmed} (+{ungated} un-gated)"
-    return confirmed
+        return int(c.get("finding_total", 0) or 0)
+    return int(confirmed or 0)
 
 
 def _local_path_replacements() -> list[tuple[str, str]]:
@@ -485,10 +484,12 @@ def count_confirmed_findings(findings_dir: Path) -> tuple[int, list[str]]:
     Returns (count, sorted list of FIND dir names). The mirror of
     count_confirmed_crashes for findings: an un-adjudicated FIND (the gate
     never rendered a verdict) is NOT counted, so a run whose triage was cut
-    off by the wall-clock cannot inflate its finding count with recon output
-    the gate never looked at. The raw `count_subdirs(findings_dir, "FIND-")`
-    total is kept alongside this so the un-gated remainder stays visible
-    rather than silently dropped.
+    off cannot inflate its finding count with recon output the gate never
+    looked at. The raw `count_subdirs(findings_dir, "FIND-")` total is kept
+    in metrics (`findings`) for auditability; regenerate drains the gate so a
+    cut-off run converges to its confirmed count, and any residual the drain
+    cannot resolve surfaces as a run-health WARN rather than being silently
+    dropped.
     """
     if not findings_dir.is_dir():
         return 0, []
@@ -3017,10 +3018,10 @@ def render_section(report: dict) -> str:
         "the independent validator gate and link to a table showing the "
         "reachability / guards / primitive booleans. **Findings** counts only "
         "FIND reports accepted by the find-quality gate or pinned by a human; "
-        "any un-adjudicated remainder from a cut-off triage is shown as "
-        "`N (+R un-gated)` and stays in cell metrics, but does not count in the "
-        "headline total or the unique-finding pool. Findings carry no on-disk "
-        "crash; "
+        "regenerate drains the gate to completion before harvest, so a cut-off "
+        "triage leaves no un-adjudicated remainder in the count (any drain that "
+        "cannot finish is logged as a run-health warning, not folded into this "
+        "total or the unique-finding pool). Findings carry no on-disk crash; "
         "**Crashes** counts only crash "
         "directories with real AddressSanitizer output on disk — an agent "
         "claiming a crash in prose never counts. **Unique findings** and "

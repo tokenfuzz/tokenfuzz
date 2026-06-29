@@ -199,13 +199,14 @@ assert_eq "FIND-A FIND-D FIND-E" \
   "$(echo "$cfv" | jq -r '.confirmed_finding_dirs | join(" ")')" \
   "T1cf-c: confirmed dirs are the accepted FIND and the two pinned FINDs"
 
-# ── T1cl: the report findings cell renders CONFIRMED, with the un-gated
-# remainder visible when a cut-off triage left findings the gate never
-# adjudicated. Falls back to the raw total for metrics that predate
+# ── T1cl: the report findings cell renders the CONFIRMED count only. Any
+# un-adjudicated remainder from a cut-off triage is resolved by the regenerate
+# drain (or surfaced as a run-health WARN), never as a "(+N un-gated)" suffix on
+# the comparison row. Falls back to the raw total for metrics that predate
 # confirmed_finding_total (so an un-re-harvested run is not misreported as 0).
 label() { python3 -c "import sys; sys.path.insert(0,'lib'); import benchmark; print(benchmark._finding_count_label($1))"; }
-assert_eq "1 (+285 un-gated)" "$(label '{"finding_total":286,"confirmed_finding_total":1}')" \
-  "T1cl-a: confirmed with un-gated remainder shown when triage was cut off"
+assert_eq "1" "$(label '{"finding_total":286,"confirmed_finding_total":1}')" \
+  "T1cl-a: cut-off triage shows the confirmed count only, no un-gated suffix"
 assert_eq "23" "$(label '{"finding_total":23,"confirmed_finding_total":23}')" \
   "T1cl-b: fully-gated run shows the confirmed count plainly (no remainder)"
 assert_eq "286" "$(label '{"finding_total":286}')" \
@@ -694,6 +695,15 @@ regen_rc=$?
 assert_eq "0" "$regen_rc" "T9r-a: --regenerate exits 0"
 assert_match 'no cells launched' "$regen_out" \
   "T9r-b: --regenerate does not launch cells"
+# The regenerate drain re-runs the find-gate before reharvest so a cut-off run
+# converges to its confirmed count. With the LLM disabled in tests the drain
+# fails open, leaving FIND-PENDING un-adjudicated — which must surface as a
+# run-health WARN (the replacement for the dropped "(+N un-gated)" suffix),
+# never a silent drop.
+assert_match 'regenerate: draining find-gate for' "$regen_out" \
+  "T9r-b2: --regenerate drains the find-gate before reharvest"
+assert_match 'WARN: .* finding\(s\) still un-adjudicated after drain' "$regen_out" \
+  "T9r-b3: --regenerate WARNs about findings the drain could not adjudicate"
 # --regenerate now runs the bundle pass too, but it is strictly additive: the
 # per-crash signature guard skips every already-bundled crash, so it never
 # re-bundles or re-renders an existing good report. It DOES bundle a crash that
@@ -728,6 +738,46 @@ assert_file_contains "$dbench/pool/findings/FIND-0001/report.md" 'Accepted findi
   "T9r-m: --regenerate pooled the accepted finding"
 assert_file_not_contains "$dbench/pool/findings/FIND-0001/report.md" 'Pending finding' \
   "T9r-n: --regenerate did not pool the pending raw finding"
+
+# A regenerate-only artifact tree can outlive the target checkout. In that
+# case the model-direct independent validator has no source tree to review, so
+# it must fail open: leave raw findings in place as unconfirmed, not move them
+# to findings-rejected/ via validate-finding's "target path not found" usage
+# failure.
+missing_target_root="$work/regen-missing-target"
+missing_slug="missing-target-t9r"
+missing_run="missing-run"
+missing_cell="$missing_target_root/codex/$missing_run/cells/model-direct-r1"
+mkdir -p "$missing_cell/findings/FIND-RAW" "$missing_cell/crashes" "$missing_cell/logs"
+cat > "$missing_target_root/codex/$missing_run/run.json" <<JSON
+{"runid":"$missing_run","target":"$missing_slug","backend":"codex","replicates":1,
+ "budget_wall":60,"conditions":["model-direct"],"target_sha":"abc","harness_sha":"def"}
+JSON
+cat > "$missing_cell/cell.json" <<JSON
+{"condition":"model-direct","replicate":1,"status":"done","wall_seconds":60,
+ "results_dir":"$missing_cell"}
+JSON
+cat > "$missing_cell/metrics.json" <<'JSON'
+{"findings":1,"confirmed_findings":0,"confirmed_finding_dirs":[],
+ "confirmed_crashes":0,"crash_dirs":[],"tokens":{"output_tokens":0}}
+JSON
+printf '# Raw model-direct finding\n\nLocation: catalog.c:3\n' \
+  > "$missing_cell/findings/FIND-RAW/report.md"
+missing_out=$(bash "$BENCH" --target "$missing_slug" --backend codex \
+  --run-id "$missing_run" --bench-root "$missing_target_root" --regenerate 2>&1)
+missing_rc=$?
+assert_eq "0" "$missing_rc" \
+  "T9r-o: --regenerate succeeds even when the target checkout is absent"
+assert_match 'WARN: skipping model-direct findings validator' "$missing_out" \
+  "T9r-p: missing target skips the model-direct source validator"
+assert_dir_exists "$missing_cell/findings/FIND-RAW" \
+  "T9r-q: missing-target regenerate leaves raw model-direct FIND in place"
+assert_dir_not_exists "$missing_cell/findings-rejected/FIND-RAW" \
+  "T9r-r: missing-target regenerate does not false-reject the raw FIND"
+assert_eq "1" "$(jq -r '.findings' "$missing_cell/metrics.json")" \
+  "T9r-s: missing-target regenerate preserves raw finding count"
+assert_eq "0" "$(jq -r '.confirmed_findings' "$missing_cell/metrics.json")" \
+  "T9r-t: missing-target regenerate does not confirm the raw finding"
 
 # --regenerate with no existing run under the backend is a clear error.
 # Wrap in set +e: the command is expected to fail, and a bare failing

@@ -659,11 +659,15 @@ assert_eq "2" "$(jq -r '.conditions[0].finding_total' "$cfbd/report.json")" \
 assert_eq "1" "$(jq -r '.conditions[0].confirmed_finding_total' "$cfbd/report.json")" \
   "T13m: aggregate carries confirmed_finding_total"
 python3 "$PY" ledger "$cfbd" --ledger "$cfbd/benchmark-results.md" >/dev/null
-assert_file_contains "$cfbd/benchmark-results.md" 'tokenfuzz.*\[1 \(\+1 un-gated\)\]\([^)]*pool/harness/findings[^)]*\)' \
-  "T13n: ledger Findings column renders confirmed count (1) with the un-gated remainder, not raw (2)"
+assert_file_contains "$cfbd/benchmark-results.md" 'tokenfuzz.*\[1\]\([^)]*pool/harness/findings[^)]*\)' \
+  "T13n: ledger Findings column renders the confirmed count (1) only, not raw (2) or an un-gated suffix"
+assert_file_not_contains "$cfbd/benchmark-results.md" 'un-gated' \
+  "T13n2: ledger Findings column carries no un-gated suffix"
 python3 "$PY" crosstab "$cfroot" --out "$cfroot/benchmark-result.md" >/dev/null
-assert_file_contains "$cfroot/benchmark-result.md" 'tokenfuzz.*\[1 \(\+1 un-gated\)\]\([^)]*pool/harness/findings[^)]*\)' \
-  "T13o: crosstab Findings column renders confirmed count (1) with the un-gated remainder, not raw (2)"
+assert_file_contains "$cfroot/benchmark-result.md" 'tokenfuzz.*\[1\]\([^)]*pool/harness/findings[^)]*\)' \
+  "T13o: crosstab Findings column renders the confirmed count (1) only, not raw (2) or an un-gated suffix"
+assert_file_not_contains "$cfroot/benchmark-result.md" 'un-gated' \
+  "T13o2: crosstab Findings column carries no un-gated suffix"
 
 # ── T14: aggregate attributes cluster-tool output to conditions ──────────
 wait "$pid_j3" || true

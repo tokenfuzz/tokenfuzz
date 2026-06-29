@@ -77,12 +77,16 @@
 #                            confirmed/pinned findings. BENCHMARK_VALIDATE_FINDINGS=0
 #                            has the same effect. Default: validate on.
 #   --regenerate             Re-derive EXISTING results from the artifacts
-#                            already on disk — no cells are launched and no LLM
-#                            is called. Re-runs the deterministic
-#                            post-processing: severity scoring, crash + finding
-#                            clustering (dedup), the per-condition cluster
-#                            reports, then rebuilds report.json, the ledger row,
-#                            and benchmark-result.{md,html}.
+#                            already on disk — no cells are launched. Re-runs
+#                            post-processing: finding-gate drain for
+#                            un-adjudicated FINDs (unless
+#                            --no-validate-findings), severity scoring, crash +
+#                            finding clustering (dedup), the per-condition
+#                            cluster reports, then rebuilds report.json, the
+#                            ledger row, and benchmark-result.{md,html}. The
+#                            drain and reach-field fill may call the LLM/probe
+#                            for artifacts that do not already have cached
+#                            verdicts/fields.
 #                            With --target: re-derives one run (named by
 #                            --run-id / BENCHMARK_RUNID, else the most recent
 #                            run under the backend). Without --target: walks the
@@ -410,7 +414,8 @@ fi
 # re-derives that run in a child invocation — then rebuilds the cross-backend
 # benchmark-result.{md,html} so the whole page reflects every config that was
 # ever run here. Each child takes the per-(target,backend) lock itself; the
-# driver runs them sequentially so locks never contend. No agents, no LLM.
+# driver runs them sequentially so locks never contend. No agents are launched;
+# undecided finding-gate / reach-field artifacts may still call the LLM/probe.
 if [ "$DO_REGENERATE" = "1" ] && [ -z "$TARGET_SLUG" ]; then
   self="$SCRIPT_ROOT/bin/benchmark"
   found=0 regen_failed=0
@@ -1034,13 +1039,37 @@ drain_cell_find_gate() {
   [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "1" ] || return 0
   [ -n "$results_dir" ] && [ -d "$results_dir/findings" ] || return 0
   if [ "$mode" = "validator" ]; then
+    local target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
+    if [ ! -d "$target_root" ]; then
+      log "WARN: skipping model-direct findings validator for ${results_dir#$BENCH_DIR/}: target tree missing at $target_root"
+      return 0
+    fi
     TRIAGE_VALIDATE_BACKEND="$BACKEND" TRIAGE_VALIDATE_MODEL="$model" \
       triage_validate_confirm_findings "$results_dir/findings" \
-        "$SCRIPT_ROOT/targets/$TARGET_SLUG" "$results_dir/findings-rejected" \
+        "$target_root" "$results_dir/findings-rejected" \
         >/dev/null 2>&1
   fi
   RESULTS_DIR="$results_dir" ACTIVE_BACKEND="$BACKEND" MODEL="$model" \
     validate_find_gate >/dev/null 2>&1 || true
+}
+
+# Run-health WARN for findings the gate never adjudicated after a drain (the
+# drain failed open because the backend was down / rate-limited). This is the
+# replacement signal for the dropped "(+N un-gated)" table suffix; without it a
+# capacity-limited run would silently render its confirmed count as if complete.
+# Reads the post-harvest metrics so it reflects what the count actually shows.
+# Caller gates on VALIDATE_FINDINGS / DRY_RUN — a count-only re-derive has no
+# drain to fall short of.
+warn_uncounted_findings() {
+  local cell_dir="$1" res
+  [ -f "$cell_dir/metrics.json" ] || return 0
+  res=$(python3 -c 'import json,sys
+m=json.load(open(sys.argv[1]))
+print(max(0, int(m.get("findings",0) or 0) - int(m.get("confirmed_findings",0) or 0)))' \
+    "$cell_dir/metrics.json" 2>/dev/null)
+  case "$res" in ''|*[!0-9]*) res=0 ;; esac
+  [ "$res" -gt 0 ] && log "WARN: ${cell_dir##*/} has $res finding(s) still un-adjudicated after drain (backend unavailable / rate-limited? re-run when healthy)"
+  return 0
 }
 
 run_model_direct_cell() {
@@ -2290,6 +2319,12 @@ for cond in "${COND_ARR[@]}"; do
       fi
     fi
 
+    # Same residual-WARN as the --regenerate path: the cell-end drain above can
+    # fail open if the backend went down mid-run, so flag any findings it left
+    # un-adjudicated rather than letting the count render as if complete.
+    [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "1" ] \
+      && warn_uncounted_findings "$cell_dir"
+
     if [ "$status" = "done" ]; then
       cells_done=$((cells_done + 1))
       log "cell $cell_name — done in $(format_duration "$wall")"
@@ -2307,10 +2342,46 @@ done
 fi  # end: cell loop skipped under --regenerate
 
 if [ "$DO_REGENERATE" = "1" ]; then
+  # Drain the find-quality gate over each cell BEFORE reharvest. A run whose
+  # original gate was cut off mid-quorum (provider rate-limit / wall-clock TERM)
+  # otherwise carries a permanent un-adjudicated remainder, because reharvest
+  # only re-counts — it never re-judges. The gate caches per-FIND, so a healthy
+  # cell costs no LLM calls; only un-adjudicated or sub-quorum FINDs are
+  # re-judged, and a drain that cannot reach the backend fails open (any
+  # residual surfaces as a WARN below). Honors VALIDATE_FINDINGS so
+  # --no-validate-findings still gives a pure count-only re-derive.
+  if [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "1" ]; then
+    for cell_dir in "$CELLS_DIR"/*/; do
+      [ -d "$cell_dir" ] && [ -f "$cell_dir/cell.json" ] || continue
+      _cond=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("condition",""))' \
+        "$cell_dir/cell.json" 2>/dev/null)
+      _rd=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("results_dir") or "")' \
+        "$cell_dir/cell.json" 2>/dev/null)
+      [ -n "$_rd" ] && [ -d "$_rd/findings" ] || continue
+      log "regenerate: draining find-gate for ${cell_dir##*/} (${_cond:-?})"
+      if [ "$_cond" = "model-direct" ]; then
+        drain_cell_find_gate "$_rd" validator
+      else
+        drain_cell_find_gate "$_rd"
+      fi
+    done
+  fi
+
   log "regenerate: re-deriving results from $(find "$CELLS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') cell(s) on disk"
   python3 "$PY_BENCH" reharvest-cells "$BENCH_DIR" \
     --backend "$BACKEND" --model "$model" \
     >/dev/null 2>&1 || log "WARN: regenerate metrics reharvest failed"
+
+  # Residual un-adjudicated findings after drain → run-health WARN. Dropping the
+  # "(+N un-gated)" table suffix must not silently hide a remainder the drain
+  # could not resolve (e.g. the backend was still capacity-limited). Skipped
+  # under --no-validate-findings: there un-adjudicated is the operator's explicit
+  # choice, not an anomaly worth flagging.
+  if [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "1" ]; then
+    for cell_dir in "$CELLS_DIR"/*/; do
+      warn_uncounted_findings "$cell_dir"
+    done
+  fi
 else
   log "cells complete: $cells_done done, $cells_failed failed"
 fi
