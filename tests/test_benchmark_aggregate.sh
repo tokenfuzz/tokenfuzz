@@ -620,6 +620,51 @@ assert_file_contains "$pbd/pool/findings/FIND-0001/report.md" \
   'targets/demo/find.c' \
   "T13h: pooled finding report keeps repo-relative target path"
 
+# T13i-n: confirmed findings, not raw FIND dirs, drive the benchmark headline
+# and pool. Raw volume stays in report.json for auditability, but a pending
+# FIND the gate never accepted must not inflate Findings or Unique findings.
+cfroot="$work/confirmed-findings-root"
+cfbd="$cfroot/codex/cf-run"
+cfrd="$cfbd/results"
+mkdir -p "$cfbd/cells/harness-r1" "$cfrd/findings/FIND-A" \
+         "$cfrd/findings/FIND-B"
+cat > "$cfbd/run.json" <<'JSON'
+{"runid":"cf-run","target":"sampleproj","backend":"codex","replicates":1,
+ "budget_wall":60,"conditions":["harness"],"target_sha":"abc","harness_sha":"def"}
+JSON
+cat > "$cfbd/cells/harness-r1/cell.json" <<JSON
+{"condition":"harness","replicate":1,"status":"done","wall_seconds":60,
+ "results_dir":"$cfrd"}
+JSON
+cat > "$cfbd/cells/harness-r1/metrics.json" <<'JSON'
+{"confirmed_crashes":0,"crash_dirs":[],"findings":2,
+ "confirmed_findings":1,"confirmed_finding_dirs":["FIND-A"],
+ "findings_rejected":0,"tokens":{"output_tokens":0}}
+JSON
+printf '# Accepted\n\nLocation: catalog.c:1\n' \
+  > "$cfrd/findings/FIND-A/report.md"
+printf '# Pending\n\nLocation: catalog.c:2\n' \
+  > "$cfrd/findings/FIND-B/report.md"
+python3 "$PY" pool "$cfbd" >/dev/null
+assert_eq "1" "$(find "$cfbd/pool/findings" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" \
+  "T13i: pool imports only confirmed finding dirs"
+assert_file_contains "$cfbd/pool/findings/FIND-0001/report.md" 'Accepted' \
+  "T13j: confirmed finding is pooled"
+assert_file_not_contains "$cfbd/pool/findings/FIND-0001/report.md" 'Pending' \
+  "T13k: unconfirmed finding is not pooled"
+python3 "$PY" split-pool "$cfbd" >/dev/null
+python3 "$PY" aggregate "$cfbd" --out "$cfbd/report.json" >/dev/null
+assert_eq "2" "$(jq -r '.conditions[0].finding_total' "$cfbd/report.json")" \
+  "T13l: aggregate preserves raw finding_total for auditability"
+assert_eq "1" "$(jq -r '.conditions[0].confirmed_finding_total' "$cfbd/report.json")" \
+  "T13m: aggregate carries confirmed_finding_total"
+python3 "$PY" ledger "$cfbd" --ledger "$cfbd/benchmark-results.md" >/dev/null
+assert_file_contains "$cfbd/benchmark-results.md" 'tokenfuzz.*\[1 \(\+1 un-gated\)\]\([^)]*pool/harness/findings[^)]*\)' \
+  "T13n: ledger Findings column renders confirmed count (1) with the un-gated remainder, not raw (2)"
+python3 "$PY" crosstab "$cfroot" --out "$cfroot/benchmark-result.md" >/dev/null
+assert_file_contains "$cfroot/benchmark-result.md" 'tokenfuzz.*\[1 \(\+1 un-gated\)\]\([^)]*pool/harness/findings[^)]*\)' \
+  "T13o: crosstab Findings column renders confirmed count (1) with the un-gated remainder, not raw (2)"
+
 # ── T14: aggregate attributes cluster-tool output to conditions ──────────
 wait "$pid_j3" || true
 aagg=$(cat "$work/aagg.json" 2>/dev/null || true)

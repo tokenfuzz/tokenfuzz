@@ -72,8 +72,9 @@
 #   --dry-run                Exercise the pipeline with synthetic cells, no LLM.
 #   --no-validate-findings   Skip the model-direct independent-validator
 #                            gate. Every raw FIND-<n>/ stays in findings/
-#                            so the ledger shows raw filing volume rather
-#                            than confirmed volume. BENCHMARK_VALIDATE_FINDINGS=0
+#                            and raw volume remains in cell metrics, but the
+#                            headline/pool finding metrics still count only
+#                            confirmed/pinned findings. BENCHMARK_VALIDATE_FINDINGS=0
 #                            has the same effect. Default: validate on.
 #   --regenerate             Re-derive EXISTING results from the artifacts
 #                            already on disk — no cells are launched and no LLM
@@ -201,9 +202,9 @@ RUN_ID=""
 # here for every backend with no opt-in; bin/audit defaults to the same but
 # accepts --enable-memory for cumulative learning. (See llm_apply_memory_policy.)
 llm_apply_memory_policy 0
-# Independent-validator gate on model-direct findings — default on; opt
-# out with --no-validate-findings or BENCHMARK_VALIDATE_FINDINGS=0 to see
-# raw filing volume rather than confirmed volume.
+# Independent-validator gate on model-direct findings — default on. Opting out
+# leaves raw FIND dirs on disk for inspection; headline benchmark finding
+# metrics still use the confirmed/pinned count.
 VALIDATE_FINDINGS="${BENCHMARK_VALIDATE_FINDINGS:-1}"
 # All benchmark state lives under one common root, BENCH_ROOT, with one
 # subdirectory per backend:

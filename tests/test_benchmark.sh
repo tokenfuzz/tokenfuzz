@@ -199,6 +199,20 @@ assert_eq "FIND-A FIND-D FIND-E" \
   "$(echo "$cfv" | jq -r '.confirmed_finding_dirs | join(" ")')" \
   "T1cf-c: confirmed dirs are the accepted FIND and the two pinned FINDs"
 
+# ── T1cl: the report findings cell renders CONFIRMED, with the un-gated
+# remainder visible when a cut-off triage left findings the gate never
+# adjudicated. Falls back to the raw total for metrics that predate
+# confirmed_finding_total (so an un-re-harvested run is not misreported as 0).
+label() { python3 -c "import sys; sys.path.insert(0,'lib'); import benchmark; print(benchmark._finding_count_label($1))"; }
+assert_eq "1 (+285 un-gated)" "$(label '{"finding_total":286,"confirmed_finding_total":1}')" \
+  "T1cl-a: confirmed with un-gated remainder shown when triage was cut off"
+assert_eq "23" "$(label '{"finding_total":23,"confirmed_finding_total":23}')" \
+  "T1cl-b: fully-gated run shows the confirmed count plainly (no remainder)"
+assert_eq "286" "$(label '{"finding_total":286}')" \
+  "T1cl-c: pre-metric data falls back to the raw total (not misreported as 0)"
+assert_eq "0" "$(label '{"finding_total":0,"confirmed_finding_total":0}')" \
+  "T1cl-d: zero findings render as 0"
+
 # ── T1s: harvest finds index.jsonl when logs/ is a sibling of results/ ───
 # A harness run lays out output/<target>-<exp>/<backend>/{results,logs} —
 # logs/ is a sibling of results/, not a child. harvest must still find the
@@ -647,6 +661,22 @@ assert_file_not_exists "$dbench/.pool.old" \
 regen_runid="$(basename "$dbench")"
 cells_before=$(find "$dbench/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
 runjson_before=$(jq -rS . "$dbench/run.json")
+regen_harness_cell=$(find "$dbench/cells" -mindepth 1 -maxdepth 1 -type d -name 'harness-*' | sort | head -1)
+regen_harness_results=$(jq -r '.results_dir' "$regen_harness_cell/cell.json")
+mkdir -p "$regen_harness_results/findings/FIND-ACCEPTED" \
+         "$regen_harness_results/findings/FIND-PENDING"
+printf '# Accepted finding\n\nLocation: catalog.c:1\n' \
+  > "$regen_harness_results/findings/FIND-ACCEPTED/report.md"
+printf '{"accept":true,"accept_count":2,"class":"memory-safety","severity":"Medium"}\n' \
+  > "$regen_harness_results/findings/FIND-ACCEPTED/.llm-find-quality.json"
+printf '# Pending finding\n\nLocation: catalog.c:2\n' \
+  > "$regen_harness_results/findings/FIND-PENDING/report.md"
+# Simulate a stale pre-confirmed-findings metrics file. --regenerate must
+# reharvest before rebuilding the pool, otherwise both raw FIND dirs would be
+# pooled and the headline finding count would stay inflated.
+jq '.findings=2 | del(.confirmed_findings, .confirmed_finding_dirs)' \
+  "$regen_harness_cell/metrics.json" > "$regen_harness_cell/metrics.json.tmp"
+mv "$regen_harness_cell/metrics.json.tmp" "$regen_harness_cell/metrics.json"
 # Overlap: T9s's regenerate-all (independent bench root, seeded at the top
 # of the file) runs in the background while T9r's regenerate runs here.
 # Its cells-before snapshot must precede its launch, so take it now.
@@ -687,6 +717,17 @@ assert_file_exists "$droot/benchmark-result.md" \
   "T9r-g: --regenerate rebuilds the cross-backend benchmark-result.md"
 assert_match 'benchmark-result update \(.*\): .*benchmark-result\.html' "$regen_out" \
   "T9r-h: --regenerate re-renders benchmark-result.html"
+assert_eq "1" "$(jq -r '.confirmed_findings' "$regen_harness_cell/metrics.json")" \
+  "T9r-j: --regenerate reharvests confirmed_findings from disk"
+assert_eq "FIND-ACCEPTED" "$(jq -r '.confirmed_finding_dirs | join(" ")' "$regen_harness_cell/metrics.json")" \
+  "T9r-k: --regenerate records only the accepted finding dir"
+pooled_regen_findings=$(find "$dbench/pool/findings" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+assert_eq "1" "$pooled_regen_findings" \
+  "T9r-l: --regenerate pool imports only confirmed findings"
+assert_file_contains "$dbench/pool/findings/FIND-0001/report.md" 'Accepted finding' \
+  "T9r-m: --regenerate pooled the accepted finding"
+assert_file_not_contains "$dbench/pool/findings/FIND-0001/report.md" 'Pending finding' \
+  "T9r-n: --regenerate did not pool the pending raw finding"
 
 # --regenerate with no existing run under the backend is a clear error.
 # Wrap in set +e: the command is expected to fail, and a bare failing

@@ -165,6 +165,26 @@ def _md_link(label: object, path: Path | str | None) -> str:
     return f"[{label}]({_path_uri(p)})"
 
 
+def _finding_count_label(c: dict) -> object:
+    """Findings-cell label: the CONFIRMED finding count, with the un-gated
+    remainder shown when a cut-off triage left findings the gate never
+    adjudicated, e.g. ``1 (+285 un-gated)``. The headline total stays the
+    confirmed count; surfacing the remainder keeps it visible rather than
+    silently dropped, without inflating the count. Falls back to the raw total
+    for older metrics that predate confirmed_finding_total, so an
+    un-re-harvested run is not misreported as zero-confirmed.
+    """
+    raw = int(c.get("finding_total", 0) or 0)
+    confirmed = c.get("confirmed_finding_total")
+    if confirmed is None:
+        return raw
+    confirmed = int(confirmed or 0)
+    ungated = raw - confirmed
+    if ungated > 0:
+        return f"{confirmed} (+{ungated} un-gated)"
+    return confirmed
+
+
 def _local_path_replacements() -> list[tuple[str, str]]:
     """Prefixes to remove from pooled benchmark review artifacts.
 
@@ -479,6 +499,30 @@ def count_confirmed_findings(findings_dir: Path) -> tuple[int, list[str]]:
         if _finding_is_confirmed(child):
             confirmed.append(child.name)
     return len(confirmed), confirmed
+
+
+def _pool_finding_names(metrics: dict, findings_dir: Path) -> list[str]:
+    """Finding directory names eligible for benchmark pooling.
+
+    Current metrics carry `confirmed_finding_dirs`, so the pool imports only
+    gate-accepted or human-pinned findings. Older metrics from before that
+    field are ambiguous; keep them readable by falling back to the historical
+    raw FIND-* import. `bin/benchmark --regenerate` reharvests cells before
+    rebuilding the pool, so regenerated runs get the confirmed-only behavior.
+    """
+    raw_names = [
+        child.name
+        for child in sorted(findings_dir.iterdir() if findings_dir.is_dir() else [])
+        if child.is_dir() and child.name.startswith("FIND-")
+    ]
+    names = metrics.get("confirmed_finding_dirs")
+    if isinstance(names, list):
+        wanted = {str(name) for name in names if str(name)}
+        return [name for name in raw_names if name in wanted]
+    if "confirmed_findings" in metrics:
+        _count, confirmed = count_confirmed_findings(findings_dir)
+        return confirmed
+    return raw_names
 
 
 def count_subdirs(parent: Path, prefix: str) -> int:
@@ -2480,8 +2524,9 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
             members["crashes"][dst_name] = cond
         findings_dir = rd / "findings"
         if findings_dir.is_dir():
-            for src in sorted(findings_dir.iterdir()):
-                if not src.is_dir() or not src.name.startswith("FIND-"):
+            for name in _pool_finding_names(metrics, findings_dir):
+                src = findings_dir / name
+                if not src.is_dir():
                     continue
                 find_n += 1
                 dst_name = f"FIND-{find_n:04d}"
@@ -2886,8 +2931,8 @@ def render_section(report: dict) -> str:
     lines.append("")
     # Column order: identity, then how the run was set up (how many times
     # it ran, how long each took), then results grouped by evidence type —
-    # findings (raw, then the deduplicated count) followed by crashes (same
-    # shape). `Unique findings` / `Unique crashes` show the clustered count
+    # findings (confirmed, then the deduplicated count) followed by crashes
+    # (same shape). `Unique findings` / `Unique crashes` show the clustered count
     # annotated with its Medium+ subset — `N (M M+)` — so the security-yield
     # subset is visible without dropping the Low/unscored remainder. `Top
     # crash severity` is the single highest-severity crash display.
@@ -2942,7 +2987,7 @@ def render_section(report: dict) -> str:
                     cond_rejected_findings,
                     "REJECTED-FINDINGS",
                 ),
-                fi=_md_link(c.get("finding_total", 0), cond_findings),
+                fi=_md_link(_finding_count_label(c), cond_findings),
                 uf=_cluster_report_link(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
@@ -2970,8 +3015,12 @@ def render_section(report: dict) -> str:
         "hours a cell actually spent. The result columns are grouped by "
         "evidence type. **Rejected findings** are FIND reports that failed "
         "the independent validator gate and link to a table showing the "
-        "reachability / guards / primitive booleans. **Findings** are "
-        "reported issues that survived triage but carry no on-disk crash; "
+        "reachability / guards / primitive booleans. **Findings** counts only "
+        "FIND reports accepted by the find-quality gate or pinned by a human; "
+        "any un-adjudicated remainder from a cut-off triage is shown as "
+        "`N (+R un-gated)` and stays in cell metrics, but does not count in the "
+        "headline total or the unique-finding pool. Findings carry no on-disk "
+        "crash; "
         "**Crashes** counts only crash "
         "directories with real AddressSanitizer output on disk — an agent "
         "claiming a crash in prose never counts. **Unique findings** and "
@@ -3397,8 +3446,7 @@ def crosstab(bench_root: Path) -> str:
                     rejected_findings_dir,
                     "REJECTED-FINDINGS",
                 ),
-                fi=_crosstab_count(c.get("finding_total", 0),
-                                   findings_dir),
+                fi=_crosstab_count(_finding_count_label(c), findings_dir),
                 uf=_crosstab_count(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
