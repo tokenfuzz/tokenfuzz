@@ -1480,5 +1480,44 @@ EOF
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "Unknown" "$level" "embedded clean probe log demotes an unconfirmed heap_write claim to Unknown"
 
+# RC#4: an unenriched bin/probe skeleton (Root Cause / Data Flow still carry the
+# `_TODO (agent):` placeholders) fails closed to Unknown — its structured fields
+# are placeholders, so a band scored off them is scored off junk — even though
+# the pasted ASan text would otherwise classify a heap-use-after-free. The crash
+# stays counted/pooled elsewhere; here we assert it is not granted a real band.
+dir="$TEST_TMPDIR/crashes/CRASH-SKEL"
+mkdir -p "$dir"
+cat > "$dir/report.md" <<'RPT'
+# CRASH-SKEL: heap-use-after-free in app_free
+
+> AUTO-FILED skeleton. bin/probe confirmed this sanitizer diagnostic.
+
+## Fields
+
+| Field             | Value |
+|:------------------|:------|
+| Surface           | library-api |
+| Caller contract   | violated |
+| Caller controls   | bytes |
+| Reproduction rate | 5/5 |
+
+## Root Cause
+_TODO (agent): describe the defect and why the sanitizer fires._
+
+## Data Flow
+_TODO (agent): step: func (file:line) — desc._
+
+```
+==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010
+    #0 app_free child.c:91
+```
+
+## Classification
+- **Severity**: TBD
+RPT
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "Unknown" "$level" "unenriched _TODO skeleton crash fails closed to Unknown"
+assert_eq "None" "$score" "no CVSS score for an unenriched skeleton crash"
+
 teardown_test_env
 summary

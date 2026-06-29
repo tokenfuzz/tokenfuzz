@@ -2409,6 +2409,13 @@ def _detect_cluster_size(report_text: str) -> int:
 # ── Top-level scorer ─────────────────────────────────────────────────────
 
 
+# An auto-filed `bin/probe` skeleton leaves `_TODO (agent):` placeholder lines
+# until an agent enriches the report. Line-anchored, matched exactly like
+# lib/triage.sh's promotion-pending check, so an enriched report (placeholders
+# replaced) never matches, nor does an instructional mention in prose.
+_SKELETON_TODO_RE = re.compile(r"^_TODO \(agent\):", re.MULTILINE)
+
+
 def compute_severity(report_text: str, reachability: dict | None,
                      cluster_size: int = 1, report_dir: Path | None = None) -> dict:
     """Score one report's severity as a CVSS v4.0 score.
@@ -2482,6 +2489,14 @@ def compute_severity(report_text: str, reachability: dict | None,
                                          concern, report_dir)
     repro_facts = _repro_facts(report_text, fields, cluster_size, report_dir)
     non_shipping = surface_label in NON_SHIPPING_SURFACES
+
+    # Fail closed on an unenriched skeleton: its fields are TODO placeholders,
+    # so any band is scored off junk. Drop to Unknown (rank 0 → never Medium+);
+    # the crash stays counted and pooled, and is never under-rated to Low.
+    if _SKELETON_TODO_RE.search(report_text or ""):
+        metrics = None
+        derivation = ["report is an unenriched bin/probe skeleton — severity "
+                      "pending enrichment"] + list(derivation or [])
 
     if metrics is None:
         # Unclassified crash — no CVSS vector. Honest placeholder; downstream

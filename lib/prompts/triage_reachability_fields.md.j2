@@ -20,7 +20,7 @@ evidence for it):
   "class":           "<short issue class, only if Primitive is unclear>",
   "caller_contract": "<obeyed | violated>",
   "caller_controls": "<bytes | length | number | flags | call-sequence | timing | none>",
-  "trigger_source":  "<bytes | call-sequence | timing | race | protocol-state | env | fs-state>",
+  "trigger_source":  "<bytes | both | call-sequence | timing | race | protocol-state | env | fs-state>",
   "parameter_control": "<direct | indirect | application-supplied | trusted | harness-only>",
   "trusted_caller_actions": "<normal public call | private mutation | callback ordering | harness-only>",
   "boundary":        "<short description of the attacker boundary>",
@@ -56,12 +56,24 @@ Rules:
   trusted_caller_actions to "callback ordering". Input bytes may control WHEN the
   callback fires, but the destructive callback is caller-installed code, not
   attacker bytes — so do not classify caller_controls as "bytes".
+- If the bug instead needs the caller to issue a SEQUENCE of public API calls
+  AFTER parsing — e.g. parse, then sort / delete / move / merge a node, then a
+  later call that dereferences the now-stale pointer — and attacker bytes only
+  supply the parsed object the sequence acts on (they do NOT choose or drive
+  the destructive ordering), the bytes are setup and the proximate trigger is
+  the caller's call-sequence. Set caller_controls to "call-sequence",
+  trusted_caller_actions to "normal public call", and trigger_source to "both"
+  (bytes set up the object; the out-of-attacker-control call-sequence fires the
+  bug). A single parse of the right bytes cannot reach the bug, so "bytes"
+  alone would over-rate it as attacker-byte-reachable.
 - Use trigger_source "call-sequence" ONLY for a purely local call-ordering
   trigger with no attacker byte/content path. If input bytes drive the trigger
-  at all — including merely controlling callback timing — keep trigger_source
-  "bytes" and record the local precondition in caller_controls instead;
-  mislabelling a byte-reachable bug as call-sequence would wrongly localise it
-  (AV:L) and under-score it.
+  at all — including merely controlling callback timing, or when a single
+  parse of attacker bytes itself reaches the fault — keep trigger_source
+  "bytes" and record any local precondition in caller_controls instead;
+  mislabelling a byte-reachable bug as call-sequence (or "both") would wrongly
+  localise it (AV:L) and under-score it. Reserve "both" for the case above,
+  where attacker bytes are only setup for a caller-driven destructive sequence.
 - For resource/algorithmic-exhaustion primitives (stack_exhaustion,
   dos_amplification, regex_dos, memory_leak, oom), classify trigger_source by
   the exhausting quantity, not the field values. The exhausting quantity is the

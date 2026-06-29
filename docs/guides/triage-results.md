@@ -139,7 +139,7 @@ bare-label form, and `REPORT.html` renders the table. The fields:
 
 ```text
 Surface: network|library-api|cli|maint-tool|unknown
-Trigger source: bytes|call-sequence|timing|race|protocol-state|env|fs-state
+Trigger source: bytes|both|call-sequence|timing|race|protocol-state|env|fs-state
 Caller contract: obeyed|violated|unspecified
 Boundary:
 Caller controls:

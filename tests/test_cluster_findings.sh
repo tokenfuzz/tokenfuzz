@@ -355,5 +355,41 @@ assert_file_contains "$agg_root/claude/results/findings/FIND-AGG-1/.dup-of" \
   && pass "aggregate canonical has NO .dup-of marker" \
   || fail "aggregate canonical has NO .dup-of marker" ".dup-of exists"
 
+# ── RC#2: evidence-gated canonical — proven (E:P) wins over unproven (E:U) ──
+# Two findings at one site cluster; the higher-severity member is an UNPROVEN
+# (E:U) theory, the lower is the PROVEN (E:P) manifestation. The canonical —
+# hence the cluster band — must be the proven member, so an unproven claim
+# cannot inflate the cluster above what is proven. (Without evidence-gating the
+# Medium unproven member would be canonical.)
+mk_find FIND-EVU \
+"# Unproven escalation theory
+## Location
+\`src/util.c:resolve_entry:242\`
+## Classification
+- **Class**: memory-safety
+- **Severity**: Medium (CVSS-BTE 4.0: 6.8)
+
+CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:U/CR:M/IR:M/AR:M" \
+  "memory-safety"
+mk_find FIND-EVP \
+"# Proven manifestation at the same site
+## Location
+\`src/util.c:resolve_entry:242\`
+## Classification
+- **Class**: memory-safety
+- **Severity**: Low (CVSS-BTE 4.0: 2.7)
+
+CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N/E:P/CR:M/IR:M/AR:M" \
+  "memory-safety"
+python3 "$CLUSTER" "$RESULTS_DIR" >/dev/null 2>&1 \
+  || fail "cluster-findings (RC#2) re-runs cleanly" "nonzero exit"
+assert_eq "$(cl_id FIND-EVU)" "$(cl_id FIND-EVP)" \
+  "RC#2: proven + unproven members at one site cluster together"
+assert_file_exists "$RESULTS_DIR/findings/FIND-EVU/.dup-of" \
+  "RC#2: unproven (E:U) member is non-canonical"
+[ ! -f "$RESULTS_DIR/findings/FIND-EVP/.dup-of" ] \
+  && pass "RC#2: proven (E:P) member is canonical" \
+  || fail "RC#2: proven (E:P) member is canonical" "proven member got .dup-of"
+
 teardown_test_env
 summary

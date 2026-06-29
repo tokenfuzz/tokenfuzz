@@ -102,6 +102,21 @@ def _severity_rank(severity: str) -> int:
     return _SEVERITY_RANK.get((severity or "").strip().lower(), 0)
 
 
+# Proven Exploit-Maturity (E:P reproducer/probe, E:A active) in the report's
+# CVSS vector; `/E:` appears only there, so this never matches prose.
+_PROVEN_E_RE = re.compile(r"/E:[PA]\b")
+
+
+def _evidence_rank(report_text: str) -> int:
+    """1 if the report shows proven exploit evidence (E:P/E:A), else 0.
+
+    First key in the canonical pick, so a proven member represents a mixed
+    cluster; when members share an evidence tier (e.g. an all-E:U cluster)
+    severity alone decides, unchanged — a real unproven High is never demoted.
+    """
+    return 1 if _PROVEN_E_RE.search(report_text or "") else 0
+
+
 def _severity_label(severity: str) -> str:
     """Display label for a finding's severity in the cluster table.
 
@@ -185,6 +200,7 @@ def _signature(find_dir: Path, target_root: str) -> dict:
     sig["severity_label"] = _severity_label(sev)
     sig["severity_rank"] = _severity_rank(sev)
     sig["severity_score"] = report_score
+    sig["evidence_rank"] = _evidence_rank(text)
     sig["strategy"] = _extract_strategy(text)
     status = "OK" if report and text else "NEEDS CONTENT"
     if (find_dir / ".needs-content").is_file():
@@ -251,13 +267,15 @@ def _make_clusters(sigs: list[dict], display_key: str = "id") -> list[dict]:
     clusters: list[dict] = []
     for comp in components:
         members = [by_disp[i] for i in comp["members"]]
-        # Canonical = highest severity, then lowest id (lexicographic).
+        # Canonical = proven-over-unproven, then severity, then id: an unproven
+        # theory can't outrank a proven duplicate. One evidence tier → falls
+        # through to severity, unchanged.
         canonical = max(members, key=lambda m: (
-            m["severity_rank"], -_lex_rank(disp(m))))
+            m.get("evidence_rank", 0), m["severity_rank"], -_lex_rank(disp(m))))
         cid = _component_cluster_id(canonical, display_key)
         can_disp = disp(canonical)
         ordered = sorted(members, key=lambda m: (
-            -m["severity_rank"], _lex_rank(disp(m))))
+            -m.get("evidence_rank", 0), -m["severity_rank"], _lex_rank(disp(m))))
         for m in members:
             m["cluster"] = cid
             m["is_canonical"] = (disp(m) == can_disp)

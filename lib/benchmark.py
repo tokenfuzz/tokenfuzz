@@ -441,6 +441,13 @@ def count_confirmed_crashes(crashes_dir: Path) -> tuple[int, list[str]]:
     Returns (count, sorted list of crash dir names). A claimed crash dir
     with no sanitizer text on disk is NOT counted — that is what keeps a
     model-direct condition honest: it gets credit for proof, not assertion.
+
+    A promotion-pending (unenriched `bin/probe` skeleton) crash is still
+    counted and pooled here: its sanitizer artifact is real, and crash_total
+    is sum(confirmed_crashes) with no raw fallback, so dropping it would hide a
+    genuine crash that merely failed enrichment. Instead the severity scorer
+    fails closed on the unenriched report (level Unknown, no band), so it cannot
+    headline as a (mis)scored Medium+ crash — visible, never under-rated.
     """
     if not crashes_dir.is_dir():
         return 0, []
