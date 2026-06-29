@@ -398,6 +398,40 @@ python3 "$PY" pool "$nrm_bench" >/dev/null
 assert_file_contains "$nrm_bench/pool/target.toml" 'attacker_controls = \["bytes", "call-sequence"\]' \
   "T28m: build_pool normalises call-order→call-sequence so aliased cells still pool"
 
+# T28n: the canonical live target.toml wins over a stale cell snapshot, so a
+# re-score reflects the CURRENT threat model — not the model frozen at run time.
+# (The threat model is target-level config; only the crash artifacts are
+# run-level data.) Falls back to the cell snapshots when no live model exists.
+tnp="$TEST_TMPDIR/pool-live-target"
+mkdir -p "$tnp/pool" "$tnp/cells"
+printf '[threat_model]\nattacker_controls = ["bytes", "call-sequence"]\n' > "$tnp/stale-cell.toml"
+printf '[threat_model]\nattacker_controls = ["bytes"]\n' > "$tnp/live.toml"
+python3 - "$tnp" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, "lib")
+import benchmark
+base = Path(sys.argv[1])
+# live model present → it wins over the stale cell snapshot
+benchmark._copy_pool_target_toml(base / "pool", [base / "stale-cell.toml"],
+                                 live_target_toml=base / "live.toml")
+PY
+assert_file_contains "$tnp/pool/target.toml" 'attacker_controls = \["bytes"\]' \
+  "T28n: live target.toml overrides stale cell snapshot on re-score"
+rm -f "$tnp/pool/target.toml"
+python3 - "$tnp" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, "lib")
+import benchmark
+base = Path(sys.argv[1])
+# no live model → fall back to the cell snapshot
+benchmark._copy_pool_target_toml(base / "pool", [base / "stale-cell.toml"],
+                                 live_target_toml=None)
+PY
+assert_file_contains "$tnp/pool/target.toml" 'attacker_controls = \["bytes", "call-sequence"\]' \
+  "T28n: falls back to cell snapshot when no live model is available"
+
 # A rejected crash directory must link to its rendered report, not the bare
 # directory. The source markdown points at the .md (canonical path); the
 # rendered HTML sibling rewrites it to .html so a click lands on the styled

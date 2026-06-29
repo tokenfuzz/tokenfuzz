@@ -2337,16 +2337,42 @@ def _target_attacker_controls(path: Path) -> tuple[str, ...] | None:
     return controls or ("bytes",)
 
 
-def _copy_pool_target_toml(pool: Path, candidates: list[Path]) -> None:
-    """Preserve target threat-model context for pooled severity rescoring.
+def _live_target_toml(bench_dir: Path) -> Path | None:
+    """The canonical live target.toml for this run's target, if present.
 
-    build_pool() copies crash dirs away from each cell's output/<slug>/ tree.
-    The severity scorer walks upward from a crash dir to find target.toml, so a
-    pooled tree needs config at pool/target.toml. Copy the full file when every
-    cell config is byte-identical. If only incidental paths differ, synthesize a
-    minimal pool config when all cells agree on attacker_controls. Mixed threat
-    models remain unscored by target config rather than applying the wrong one.
+    The threat model is target-level config, not run-level data: a pooled
+    re-score should reflect our CURRENT understanding of what the attacker
+    controls, not the snapshot frozen into the cell trees at run time. Resolve
+    the run's target slug from run.json and return SCRIPT_ROOT/output/<slug>/
+    target.toml when it exists; callers fall back to the cell snapshots.
     """
+    try:
+        run = json.loads((bench_dir / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    slug = run.get("target")
+    if not isinstance(slug, str) or not slug:
+        return None
+    live = SCRIPT_ROOT / "output" / slug / "target.toml"
+    return live if live.is_file() else None
+
+
+def _copy_pool_target_toml(pool: Path, candidates: list[Path],
+                           live_target_toml: Path | None = None) -> None:
+    """Provide target threat-model context for pooled severity rescoring.
+
+    The severity scorer walks upward from a pooled crash dir to find
+    target.toml, so the pool needs config at pool/target.toml. Prefer the
+    canonical live model (live_target_toml) so a re-score reflects the current
+    threat model rather than the snapshot frozen at run time. Falling back to
+    the cell snapshots: copy the full file when every cell config is byte-
+    identical; if only incidental paths differ, synthesize a minimal pool config
+    when all cells agree on attacker_controls; mixed threat models stay unscored
+    by target config rather than applying the wrong one.
+    """
+    if live_target_toml is not None and live_target_toml.is_file():
+        shutil.copy2(live_target_toml, pool / "target.toml")
+        return
     unique: dict[str, Path] = {}
     for path in candidates:
         try:
@@ -2512,7 +2538,8 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                    / f"DISCARDED-{cond}-{cell_dir.name}.md")
             dst.write_text(discarded_md, encoding="utf-8")
 
-    _copy_pool_target_toml(pool, target_toml_candidates)
+    _copy_pool_target_toml(pool, target_toml_candidates,
+                           live_target_toml=_live_target_toml(bench_dir))
     write_rejected_findings_index(pool / "findings-rejected")
     write_rejected_crashes_index(pool / "crashes-rejected")
 
