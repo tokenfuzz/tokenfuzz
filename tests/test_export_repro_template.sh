@@ -222,22 +222,22 @@ grep -q 'Trigger source:' <<<"$out" && fail "narrative dups stripped" "Trigger s
 grep -q 'Parameter control:' <<<"$out" && fail "narrative dups stripped" "Parameter control survived" \
   || pass "narrative dups stripped (Parameter control)"
 
-# ── reachability.json is never picked as a testcase ────────────
-# Regression guard: when bin/reachability has run on a previously-
-# bundled crash dir, .audit/reachability.json is the most prominent
+# ── severity.json is never picked as a testcase ────────────
+# Regression guard: when bin/severity has run on a previously-
+# bundled crash dir, severity.json is the most prominent
 # loose file in the crash root. The testcase finder must skip it by
-# name so reachability.json never gets installed as `input.json` and
+# name so severity.json never gets installed as `input.json` and
 # referenced from reproduce.sh.
 #
 # The exclude is by-name (not *.json) because a JSON-parser fuzzer
 # could legitimately produce a JSON testcase, and we don't want to
 # silently drop those.
-if grep -q '"reachability.json"' "$EXPORT_REPRO" \
+if grep -q '"severity.json"' "$EXPORT_REPRO" \
      && grep -q '_TESTCASE_SKIP_EXACT' "$EXPORT_REPRO"; then
-  pass "export-repro testcase finder excludes reachability.json"
+  pass "export-repro testcase finder excludes severity.json"
 else
-  fail "export-repro testcase finder excludes reachability.json" \
-    "no 'reachability.json' entry in _TESTCASE_SKIP_EXACT"
+  fail "export-repro testcase finder excludes severity.json" \
+    "no 'severity.json' entry in _TESTCASE_SKIP_EXACT"
 fi
 # Negative: a `.json` suffix in the skip-suffix tuple would silently
 # drop legitimate JSON testcases (e.g. a JSON-parser fuzzer's output).

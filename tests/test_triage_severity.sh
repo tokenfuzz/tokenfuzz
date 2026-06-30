@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Tests for the integration between lib/triage.sh and bin/reachability:
-#   1. triage_crash_dirs auto-invokes bin/reachability after evidence checks
+# Tests for the integration between lib/triage.sh and bin/severity:
+#   1. triage_crash_dirs auto-invokes bin/severity after evidence checks
 #   2. maintain_indexes surfaces the auto-Severity in crashes/CRASH-CLUSTERS.md
-#   3. REACHABILITY_AUTO=0 env disables the hook
-#   4. Reachability failures don't block crash preservation
+#   3. severity-scoring failures don't block crash preservation
 set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
@@ -15,29 +14,6 @@ source "$SCRIPT_ROOT/lib/triage.sh"
 llm_triage_crash_decision() { return 2; }
 crash_dir_security_rejection_reason() { return 0; }  # never reject
 export -f llm_triage_crash_decision crash_dir_security_rejection_reason
-
-# Set up reachability mocks. Automatic triage defaults to external mode
-# (REACHABILITY_AUTO=external, the default for OSS targets) so these mocks
-# are consulted for every promotion. Tests that need the older
-# --severity-only behaviour set REACHABILITY_AUTO=local explicitly.
-mkdir -p "$TEST_TMPDIR/reach-mock"
-export REACHABILITY_MOCK_DIR="$TEST_TMPDIR/reach-mock"
-export REACHABILITY_CACHE_DIR="$TEST_TMPDIR/reach-cache"
-# External caller search only runs for VCS-backed targets. Under a real audit
-# bin/audit exports TARGET_REPO_TYPE; this integration test models a git target
-# so the external opt-in path is exercised (repo_type=none would skip it).
-export TARGET_REPO_TYPE=git
-
-sha1_short() { printf '%s' "$1" | shasum -a 1 | awk '{print substr($1,1,16)}'; }
-
-# Mock for the symbol the report will reference.
-H_SYM=$(sha1_short "demo_triage_decode")
-cat > "$REACHABILITY_MOCK_DIR/sourcegraph-${H_SYM}.json" <<'EOF'
-{"status":"ok","hits":[{"repo":"third-party-app","path":"src/uses_demo.c"}]}
-EOF
-cat > "$REACHABILITY_MOCK_DIR/gh-${H_SYM}.json" <<'EOF'
-{"status":"unavailable","error":"n/a"}
-EOF
 
 # Build a complete maintainer bundle for triage_crash_dirs to promote.
 make_promotable_crash() {
@@ -73,18 +49,18 @@ EOF
 }
 
 # ───────────────────────────────────────────────────────────────────
-# 1. triage_crash_dirs invokes local severity recomputation and writes reachability.json
+# 1. triage_crash_dirs invokes severity scoring and writes severity.json
 # ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="triage promotion auto-invokes local reachability"
+_CURRENT_TEST="triage promotion auto-invokes severity scoring"
 make_promotable_crash CRASH-INTEG-1
-# CRASH-INTEG-3 (section 5's "reachability failure does not block triage"
+# CRASH-INTEG-3 (section 3's "scoring failure does not block triage"
 # fixture) is created up front so this single triage_crash_dirs pass covers
-# both sections — env and mocks are identical, and a second full pass over
-# the same crashes/ tree costs ~1s of redundant subprocess work.
+# both sections — a second full pass over the same crashes/ tree costs ~1s
+# of redundant subprocess work.
 make_promotable_crash CRASH-INTEG-3
 triage_crash_dirs >/dev/null 2>&1
-assert_file_exists "$RESULTS_DIR/crashes/CRASH-INTEG-1/reachability.json" \
-  "reachability.json written during triage"
+assert_file_exists "$RESULTS_DIR/crashes/CRASH-INTEG-1/severity.json" \
+  "severity.json written during triage"
 assert_file_contains "$RESULTS_DIR/crashes/CRASH-INTEG-1/REPORT.md" \
   "Severity\*\*: (Critical|High|Medium|Low|None) \(CVSS(-[A-Z]+)? 4\\.0:" \
   "report Severity line was rewritten during triage"
@@ -92,102 +68,68 @@ assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-INTEG-1/REPORT.html" \
   "report HTML is not rendered before final maintain_indexes pass"
 
 # ───────────────────────────────────────────────────────────────────
-# 2. REACHABILITY_AUTO=external opts automatic triage into public-caller search
+# 2. maintain_indexes surfaces the auto-Severity column
 # ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="REACHABILITY_AUTO=external opts into external caller search"
-make_promotable_crash CRASH-INTEG-EXT
-REACHABILITY_AUTO=external _triage_run_reachability \
-  "$RESULTS_DIR/crashes/CRASH-INTEG-EXT" "CRASH-INTEG-EXT" "$SCRIPT_ROOT/bin" \
-  >/dev/null 2>&1 || true
-assert_file_contains "$RESULTS_DIR/crashes/CRASH-INTEG-EXT/reachability.json" \
-  '"external_callers": 1' \
-  "external opt-in records mocked caller"
-
-# ───────────────────────────────────────────────────────────────────
-# 3. maintain_indexes surfaces Severity + Callers columns
-# ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="maintain_indexes carries Severity + Callers columns"
+_CURRENT_TEST="maintain_indexes carries the Severity column"
 maintain_indexes >/dev/null 2>&1
-assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| Severity +\| Callers' \
-  "CRASH-CLUSTERS.md header includes Severity + Callers"
-# The row for CRASH-INTEG-1 should have the level + score and caller count.
-# Each row's ID is now hyperlinked, so the row marker is `[CRASH-INTEG-1]`
-# rather than `| CRASH-INTEG-1 |`.
+assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" '\| Severity +\| Cluster' \
+  "CRASH-CLUSTERS.md header includes Severity"
+# The row for CRASH-INTEG-1 should carry the level + score. Each row's ID is
+# hyperlinked, so the row marker is `[CRASH-INTEG-1]`.
 row=$(grep -E '\[CRASH-INTEG-1\]' "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" || true)
 [ -n "$row" ] && pass "$_CURRENT_TEST: row present" || fail "$_CURRENT_TEST" "no cluster row for CRASH-INTEG-1"
 grep -qE '\| (Critical|High|Medium|Low) \(CVSS [0-9.]+\) \|' <<<"$row" \
   && pass "$_CURRENT_TEST: severity column populated" \
   || fail "$_CURRENT_TEST" "severity column missing/malformed: $row"
-# Caller count is a cluster-level maximum. CRASH-INTEG-EXT shares the same
-# root signature and was explicitly run with external reachability, so the
-# grouped row carries that one external caller.
-grep -qE '\| +1 \|' <<<"$row" \
-  && pass "$_CURRENT_TEST: caller count = 1 for grouped cluster" \
-  || fail "$_CURRENT_TEST" "caller count column wrong: $row"
 assert_file_contains "$RESULTS_DIR/crashes/CRASH-INTEG-1/REPORT.html" \
-  "Reachability — external callers" \
-  "maintain_indexes renders final report HTML after reachability"
+  "Severity rationale" \
+  "maintain_indexes renders final report HTML with the Severity section"
+
+# Fixture cleanup (wall-time): every assertion on CRASH-INTEG-1 has run, and
+# section 2's CRASH-CLUSTERS.md / REPORT.html snapshots are already asserted.
+# Remove it so later triage_crash_dirs calls only walk their own fixture.
+# (CRASH-INTEG-3 stays until section 3 has checked its promotion marker.)
+rm -rf "$RESULTS_DIR/crashes/CRASH-INTEG-1"
 
 # ───────────────────────────────────────────────────────────────────
-# 4. REACHABILITY_AUTO=0 disables the hook
+# 3. A failing severity run does not block triage
 # ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="REACHABILITY_AUTO=0 disables auto-invocation"
-# Fixture cleanup (wall-time): every assertion on the promoted dirs above
-# has run, and section 3's CRASH-CLUSTERS.md / REPORT.html snapshots are
-# already asserted. Remove them so this and later triage_crash_dirs calls
-# only walk their own fixture instead of re-gating the whole tree.
-# (CRASH-INTEG-3 stays until section 5 has checked its promotion marker.)
-rm -rf "$RESULTS_DIR/crashes/CRASH-INTEG-1" \
-       "$RESULTS_DIR/crashes/CRASH-INTEG-EXT"
-make_promotable_crash CRASH-INTEG-2
-REACHABILITY_AUTO=0 triage_crash_dirs >/dev/null 2>&1
-assert_file_not_exists "$RESULTS_DIR/crashes/CRASH-INTEG-2/reachability.json" \
-  "reachability.json NOT written when REACHABILITY_AUTO=0"
-
-# ───────────────────────────────────────────────────────────────────
-# 5. A failing reachability run does not block triage
-# ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="reachability failure does not block triage"
+_CURRENT_TEST="severity failure does not block triage"
 # CRASH-INTEG-3 was created in section 1 and promoted by the same
-# triage_crash_dirs pass (identical env + mocks — see the note there).
-# In practice the reachability script still succeeds (returning
-# all-unavailable) — the stronger test is to point REACHABILITY_AUTO at a
-# non-existent script via PATH manipulation (section "failure records
-# non-blocking marker" below). Here we just verify the crash is still
-# considered promoted (no .promotion_pending file) regardless of
-# reachability outcome.
+# triage_crash_dirs pass. Here we just verify the crash is still considered
+# promoted (no .promotion_pending file) regardless of scoring outcome.
 [ -d "$RESULTS_DIR/crashes/CRASH-INTEG-3" ] \
   && [ ! -f "$RESULTS_DIR/crashes/CRASH-INTEG-3/.promotion_pending" ] \
   && pass "$_CURRENT_TEST" \
   || fail "$_CURRENT_TEST" ".promotion_pending lingered after triage"
 
-_CURRENT_TEST="reachability failure records non-blocking marker"
+_CURRENT_TEST="severity failure records non-blocking marker"
 make_promotable_crash CRASH-INTEG-4
 mkdir -p "$TEST_TMPDIR/failing-bin"
-cat > "$TEST_TMPDIR/failing-bin/reachability" <<'MOCK'
+cat > "$TEST_TMPDIR/failing-bin/severity" <<'MOCK'
 #!/bin/bash
-echo "mock reachability failure" >&2
+echo "mock severity failure" >&2
 exit 9
 MOCK
-chmod +x "$TEST_TMPDIR/failing-bin/reachability"
-_triage_run_reachability "$RESULTS_DIR/crashes/CRASH-INTEG-4" "CRASH-INTEG-4" "$TEST_TMPDIR/failing-bin" >/dev/null 2>&1 || true
+chmod +x "$TEST_TMPDIR/failing-bin/severity"
+_triage_run_severity "$RESULTS_DIR/crashes/CRASH-INTEG-4" "CRASH-INTEG-4" "$TEST_TMPDIR/failing-bin" >/dev/null 2>&1 || true
 assert_dir_exists "$RESULTS_DIR/crashes/CRASH-INTEG-4" \
-  "reachability failure: crash dir stays preserved"
-assert_file_exists "$RESULTS_DIR/crashes/CRASH-INTEG-4/.reachability_failed" \
-  "reachability failure: marker written"
+  "severity failure: crash dir stays preserved"
+assert_file_exists "$RESULTS_DIR/crashes/CRASH-INTEG-4/.severity_failed" \
+  "severity failure: marker written"
 
-_CURRENT_TEST="disabled reachability records pending marker"
-make_promotable_crash CRASH-INTEG-5
-REACHABILITY_AUTO=0 _triage_run_reachability "$RESULTS_DIR/crashes/CRASH-INTEG-5" "CRASH-INTEG-5" "$SCRIPT_ROOT/bin" >/dev/null 2>&1 || true
-assert_file_exists "$RESULTS_DIR/crashes/CRASH-INTEG-5/.reachability_pending" \
-  "disabled reachability: pending marker written"
+_CURRENT_TEST="missing report records pending marker"
+mkdir -p "$RESULTS_DIR/crashes/CRASH-INTEG-5"
+_triage_run_severity "$RESULTS_DIR/crashes/CRASH-INTEG-5" "CRASH-INTEG-5" "$SCRIPT_ROOT/bin" >/dev/null 2>&1 || true
+assert_file_exists "$RESULTS_DIR/crashes/CRASH-INTEG-5/.severity_pending" \
+  "no report: pending marker written"
 
 # ───────────────────────────────────────────────────────────────────
-# 6. Security-rejected crashes are rejected before optional reachability.
-#    Reachability is post-processing for preserved crash candidates, not
-#    a prerequisite for rejecting invalid crash directories.
+# 4. Security-rejected crashes are rejected before optional severity scoring.
+#    Scoring is post-processing for preserved crash candidates, not a
+#    prerequisite for rejecting invalid crash directories.
 # ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="security-rejected dir does not require reachability"
+_CURRENT_TEST="security-rejected dir does not require scoring"
 # Override the reject mock for this one block: reject everything.
 crash_dir_security_rejection_reason() {
   printf '%s\n' "test-only injected rejection"
@@ -207,8 +149,8 @@ assert_dir_not_exists "$RESULTS_DIR/crashes/CRASH-INTEG-REJ" \
   "rejected crash removed from crashes/"
 assert_dir_exists "$RESULTS_DIR/crashes-rejected/CRASH-INTEG-REJ" \
   "rejected crash → crashes-rejected/"
-assert_file_not_exists "$RESULTS_DIR/crashes-rejected/CRASH-INTEG-REJ/reachability.json" \
-  "rejected dir: reachability not required before rejection"
+assert_file_not_exists "$RESULTS_DIR/crashes-rejected/CRASH-INTEG-REJ/severity.json" \
+  "rejected dir: scoring not required before rejection"
 # Restore the broad no-reject mock for subsequent tests.
 crash_dir_security_rejection_reason() { return 0; }
 export -f crash_dir_security_rejection_reason
@@ -231,16 +173,14 @@ grep -qE '\| +— +\|' <<<"$row" && pass "$_CURRENT_TEST: em-dash placeholder" \
   || fail "$_CURRENT_TEST" "expected em-dash placeholder: $row"
 
 # ───────────────────────────────────────────────────────────────────
-# 8. validate_find_gate auto-invokes local reachability on findings/.
+# 6. validate_find_gate auto-invokes severity scoring on findings/.
 #    Findings get the same severity annotation as crashes.
 # ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="validate_find_gate auto-invokes reachability on FIND"
+_CURRENT_TEST="validate_find_gate auto-invokes severity on FIND"
 
 # Prime an LLM mock so we don't depend on a live model.
 export LLM_DECIDE_MOCK_FIND_QUALITY='{"accept":true,"reason":"clear","class":"memory-safety:bounds","severity":"medium"}'
 
-# Build a FIND with a symbol that matches the reachability mocks above
-# (demo_triage_decode → sha1 H_SYM, already populated under reach-mock).
 mkdir -p "$RESULTS_DIR/findings/FIND-REACH-1"
 cat > "$RESULTS_DIR/findings/FIND-REACH-1/report.md" <<'EOF'
 # FIND-REACH-1: integration demo
@@ -260,56 +200,41 @@ EOF
 
 validate_find_gate >/dev/null 2>&1
 
-assert_file_exists "$RESULTS_DIR/findings/FIND-REACH-1/reachability.json" \
-  "reachability.json written during FIND triage"
-assert_file_exists "$RESULTS_DIR/findings/FIND-REACH-1/.reachability_ok" \
-  "FIND triage marks reachability_ok"
+assert_file_exists "$RESULTS_DIR/findings/FIND-REACH-1/severity.json" \
+  "severity.json written during FIND triage"
+assert_file_exists "$RESULTS_DIR/findings/FIND-REACH-1/.severity_ok" \
+  "FIND triage marks severity_ok"
 assert_file_contains "$RESULTS_DIR/findings/FIND-REACH-1/report.md" \
   "Severity\*\*: (Critical|High|Medium|Low|None) \(CVSS(-[A-Z]+)? 4\\.0:" \
-  "FIND report Severity line rewritten by reachability"
+  "FIND report Severity line rewritten by the scorer"
 
-# ───────────────────────────────────────────────────────────────────
-# 9. REACHABILITY_AUTO=0 disables the FIND-side hook too
-# ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="REACHABILITY_AUTO=0 disables reachability for findings"
-# Fixture cleanup (wall-time): FIND-REACH-1 is fully asserted; remove it so
-# this second validate_find_gate pass only walks its own fixture.
+# Fixture cleanup (wall-time): FIND-REACH-1 is fully asserted; remove it.
 rm -rf "$RESULTS_DIR/findings/FIND-REACH-1"
-mkdir -p "$RESULTS_DIR/findings/FIND-REACH-2"
-cat > "$RESULTS_DIR/findings/FIND-REACH-2/report.md" <<'EOF'
-# FIND-REACH-2
-Issue class: info-disclosure. Location: srv/leak.go:Emit:7.
-EOF
-REACHABILITY_AUTO=0 validate_find_gate >/dev/null 2>&1
-assert_file_not_exists "$RESULTS_DIR/findings/FIND-REACH-2/reachability.json" \
-  "reachability.json NOT written when REACHABILITY_AUTO=0 (findings)"
-assert_file_exists "$RESULTS_DIR/findings/FIND-REACH-2/.reachability_pending" \
-  "FIND with REACHABILITY_AUTO=0 carries .reachability_pending marker"
 
 # ───────────────────────────────────────────────────────────────────
-# 10. Reachability failure does not block FIND preservation
+# 7. Severity failure does not block FIND preservation
 # ───────────────────────────────────────────────────────────────────
-_CURRENT_TEST="reachability failure leaves FIND in findings/"
+_CURRENT_TEST="severity failure leaves FIND in findings/"
 mkdir -p "$RESULTS_DIR/findings/FIND-REACH-3"
 cat > "$RESULTS_DIR/findings/FIND-REACH-3/report.md" <<'EOF'
 # FIND-REACH-3
 Issue class: crypto:weak-hash. Location: util/hash.go:Hash:12.
 EOF
-_triage_run_reachability "$RESULTS_DIR/findings/FIND-REACH-3" "FIND-REACH-3" \
+_triage_run_severity "$RESULTS_DIR/findings/FIND-REACH-3" "FIND-REACH-3" \
   "$TEST_TMPDIR/failing-bin" >/dev/null 2>&1 || true
 assert_dir_exists "$RESULTS_DIR/findings/FIND-REACH-3" \
-  "reachability failure: FIND dir stays preserved"
-assert_file_exists "$RESULTS_DIR/findings/FIND-REACH-3/.reachability_failed" \
-  "reachability failure: marker written on FIND"
+  "severity failure: FIND dir stays preserved"
+assert_file_exists "$RESULTS_DIR/findings/FIND-REACH-3/.severity_failed" \
+  "severity failure: marker written on FIND"
 
 unset LLM_DECIDE_MOCK_FIND_QUALITY
 
 # ───────────────────────────────────────────────────────────────────
-# 11. LLM hybrid field-fill writes .llm_fields.json sidecar
+# 8. LLM hybrid field-fill writes .llm_fields.json sidecar
 # ───────────────────────────────────────────────────────────────────
 # When the agent omits structured fields (no Surface / Caller controls /
 # Primitive), _triage_llm_fill_fields asks the LLM to classify the
-# report and persists the JSON for bin/reachability to consume.
+# report and persists the JSON for bin/severity to consume.
 _CURRENT_TEST="llm-fill: writes .llm_fields.json when fields missing"
 mkdir -p "$RESULTS_DIR/findings/FIND-LLMFILL-1"
 cat > "$RESULTS_DIR/findings/FIND-LLMFILL-1/report.md" <<'EOF'
@@ -468,9 +393,9 @@ _fill7_after=$(cat "$RESULTS_DIR/findings/FIND-LLMFILL-7/.llm_fields.json")
 assert_eq "$_fill7_before" "$_fill7_after" "sidecar at attempt cap is left untouched"
 
 # ───────────────────────────────────────────────────────────────────
-# 12. Pool pass: triage_fill_reach_fields_tree fills model-direct-style
-# findings that never ran a per-cell triage. REACHABILITY_AUTO=0 keeps the
-# scoring side a no-op so the test exercises only the field-fill.
+# 9. Pool pass: triage_fill_reach_fields_tree fills model-direct-style
+# findings that never ran a per-cell triage. LLM_FIELD_FILL is mocked so the
+# test exercises the field-fill path deterministically.
 # ───────────────────────────────────────────────────────────────────
 _CURRENT_TEST="pool pass: fills reach fields for findings under a pooled tree"
 POOL_TREE="$TEST_TMPDIR/pool-tree"
@@ -480,7 +405,6 @@ cat > "$POOL_TREE/findings/FIND-0001/report.md" <<'EOF'
 ## Summary
 Integer overflow underallocates a buffer in the parser.
 EOF
-REACHABILITY_AUTO=0 \
 LLM_DECIDE_MOCK_REACHABILITY_FIELDS='{"surface":"library-api","primitive":"heap_write","caller_controls":"length"}' \
   triage_fill_reach_fields_tree "$POOL_TREE" "$SCRIPT_ROOT/bin"
 assert_file_exists "$POOL_TREE/findings/FIND-0001/.llm_fields.json" \

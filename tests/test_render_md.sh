@@ -200,12 +200,12 @@ assert_file_contains "$sev_html" 'id="some-heading"' "h2 has slug id"
 assert_file_contains "$sev_html" 'class="anchor"' "h2 has permalink anchor"
 
 # 12. Bullet lists render as <ul><li>, not as a run-on paragraph with
-#     literal hyphens (REPORT.md "Top callers" / "Vendored copies").
+#     literal hyphens (e.g. a report's "Affected files:" list).
 list_fix="$TEST_TMPDIR/list.md"
 cat > "$list_fix" <<'EOF'
 # Lists
 
-Top callers:
+Affected files:
 - `github.com/foo/bar` :: `src/x.c`
 - `github.com/baz/qux` :: `src/y.c`
 
@@ -325,10 +325,6 @@ A bug in the foo subsystem causes an out-of-bounds read.
 SUMMARY: AddressSanitizer: heap-buffer-overflow foo.c:42 in foo_parse
 ```
 
-## Reachability — external callers
-
-**External callers (genuine, after ignore + vendor filter): 87**
-
 ## Severity rationale
 
 Math goes here.
@@ -345,7 +341,6 @@ grep -q 'frame-func"><code>strlen' "$hero_html" \
   && fail "hero skips ClusterFuzz-ignored strlen frame" "hero selected strlen" \
   || pass "hero skips ClusterFuzz-ignored strlen frame"
 assert_file_contains "$hero_html" '<strong>Repro</strong> 5/5' "hero shows repro rate"
-assert_file_contains "$hero_html" '<strong>87</strong> external callers' "hero shows callers count"
 assert_file_contains "$hero_html" 'CL-deadbeef' "hero shows cluster"
 assert_file_contains "$hero_html" 'class="triage-summary">A bug in the foo subsystem' "hero shows summary"
 
@@ -660,7 +655,7 @@ PY
 [ $? -eq 0 ] && pass "no-H1 hero leads before the first section" \
   || fail "no-H1 hero leads before the first section" "card not above first heading"
 
-# ── Empty heading suppression: on a new report bin/reachability synthesizes a
+# ── Empty heading suppression: on a new report bin/severity synthesizes a
 #    `## Fields` table immediately below the harness `## Classification` block,
 #    leaving that heading empty. render-md must drop the empty heading so it
 #    does not render bare and does not duplicate the model's own

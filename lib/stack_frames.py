@@ -58,7 +58,7 @@ STATE_STOP_MARKERS = (
 # on a real memory-safety / UB / race fault — never something an agent can
 # fabricate in prose. This is the single source of truth for "this text is a
 # confirmed sanitizer crash"; it is shared by the benchmark's confirmed-crash
-# count (lib/benchmark.py) and the severity scorer (bin/reachability), and the
+# count (lib/benchmark.py) and the severity scorer (bin/severity), and the
 # bash gate `_triage_has_sanitizer_diagnostic` in lib/triage.sh mirrors it
 # cross-language. Matches EVERY sanitizer the harness builds — ASan, HWASan,
 # UBSan, TSan, MSan — so a crash from any of them is recognised identically.

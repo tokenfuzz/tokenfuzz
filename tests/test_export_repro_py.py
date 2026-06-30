@@ -1011,7 +1011,7 @@ assert_eq(stripped_table, stripped_table_2,
 # table, under an H1 like `# Mechanism` or no heading at all — never under a
 # canonical `## Summary` / `## Root Cause` H2. The old `## Fields` kill set a
 # skip flag that only reset at the next H2, so that prose was swallowed whole
-# (everything up to `## Reachability`), shipping a bundle with an empty body.
+# (everything up to `## Severity rationale`), shipping a bundle with an empty body.
 # The Fields kill must now eat ONLY the heading + table and stop at the first
 # non-table line.
 fields_then_prose_input = """\
@@ -1030,10 +1030,6 @@ Strategy: S7
 A trusted caller frees the cached result object; the later write to it
 is a use-after-free. This is the whole point of the report.
 
-## Reachability — external callers
-
-callers: 136
-
 ## Severity rationale
 
 score=26
@@ -1045,8 +1041,6 @@ assert_not_in("| Primitive | uaf_write", rendered_body,
               "render_agent_body: Fields table still stripped (no duplicate)")
 assert_not_in("| Severity  | Low (26)", rendered_body,
               "render_agent_body: Fields severity row stripped")
-assert_not_in("callers: 136", rendered_body,
-              "render_agent_body: Reachability section stripped")
 assert_not_in("score=26", rendered_body,
               "render_agent_body: Severity rationale section stripped")
 # The stray H1 is demoted to an H2 subsection (no second top-level heading).
@@ -1080,7 +1074,7 @@ assert_eq(False, er._body_has_prose("Boundary: x\nSurface: y\n- **Severity**: 5\
 # 5i. recover_agent_prose (the auto-repair fallback) keeps narrative verbatim
 # while dropping the auto-emitted sections, independent of strip's logic.
 recovered = er.recover_agent_prose(
-    "# CRASH-Z-1\n\n## Description\n\nThe defect is X.\n\n## Reachability\n\nc:9\n"
+    "# CRASH-Z-1\n\n## Description\n\nThe defect is X.\n\n## Severity rationale\n\nc:9\n"
 )
 assert_in("The defect is X.", recovered,
           "recover_agent_prose: narrative kept")
@@ -1089,7 +1083,7 @@ assert_in("## Description", recovered,
 assert_not_in("CRASH-Z-1", recovered,
               "recover_agent_prose: crash-title H1 dropped")
 assert_not_in("c:9", recovered,
-              "recover_agent_prose: Reachability auto-section dropped")
+              "recover_agent_prose: Severity rationale auto-section dropped")
 
 # 5j. render_agent_body falls back to recovery when strip yields no prose.
 # Guard against future strip regressions: if strip_audit_sections ever
@@ -1310,7 +1304,7 @@ assert_in("CRASH-resistant", er.render_agent_body("## CRASH-resistant design\n\n
 assert_not_in("CRASH-2", er.render_agent_body("## CRASH-2: heap overflow in foo\n\nNarrative.\n"),
               "5o-d: a 'CRASH-<digit>' restated title is dropped")
 
-# (e) Auto-emitted sections written as an H1 (`# Reproduction`, `# Reachability`)
+# (e) Auto-emitted sections written as an H1 (`# Reproduction`, `# Sanitizer output`)
 #     are killed like their H2 form — no duplicate section leaks, and the
 #     result is idempotent.
 h1dup = er.render_agent_body(
@@ -1614,23 +1608,22 @@ assert_eq(str(audit_header_stale / "testcase.xml"), str(pick) if pick else None,
           "find_testcase: .audit testcase beats stale ASAN_RUN_HEADER scratch path")
 
 # 6a. Regression for CRASH-002-1.20260509: when .audit/ holds the
-# reachability prose summary that lib/triage.sh writes
-# (.audit/reachability.out) AND the crash dir has the real testcase, the
-# selector picked reachability.out by alphabetic order, export-repro
+# severity prose summary that lib/triage.sh writes
+# (.audit/severity.out) AND the crash dir has the real testcase, the
+# selector picked severity.out by alphabetic order, export-repro
 # staged it as input.out, and the bundled reproduce.sh fed prose to the
 # harness → silent zero-output run that looked like the bug had vanished.
 # After the fix: .out / .err suffixes are audit-internal artifacts and
 # never qualify as testcases.
-tc_reach = TMP / "tc-reachability"
+tc_reach = TMP / "tc-severity"
 tc_reach.mkdir()
 audit_reach = tc_reach / ".audit"
 audit_reach.mkdir()
-(audit_reach / "reachability.out").write_text(
-    "Reachability for: foo, bar\n  External callers (genuine):  42\n"
-    "  sourcegraph status=ok          hits=10\n"
-    "Severity: Medium (score=31/100)\n", encoding="utf-8",
+(audit_reach / "severity.out").write_text(
+    "Severity: Medium (CVSS-BT 4.0: 5.3 Medium)\n"
+    "  vector     CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:N\n", encoding="utf-8",
 )
-(audit_reach / "reachability.err").write_text("debug noise\n", encoding="utf-8")
+(audit_reach / "severity.err").write_text("debug noise\n", encoding="utf-8")
 # The scratch testcase the ASan header originally pointed at is gone
 # (this is the production scenario — scratch dirs get reset between
 # audits), so the selector must fall back to the crash dir.
@@ -1643,14 +1636,14 @@ audit_reach.mkdir()
                                     encoding="utf-8")
 pick = er.find_testcase([audit_reach, tc_reach], tc_reach, audit_reach)
 assert_eq("input.txt", pick.name if pick else None,
-          "find_testcase: .audit/reachability.out is NOT picked over input.txt")
+          "find_testcase: .audit/severity.out is NOT picked over input.txt")
 
 # 6b. Stale `input.out` (left behind by a prior buggy bundle) next to
 # the correct `input.txt` must also be skipped — the .out suffix filter
 # applies to the crash dir scan, not just .audit/.
 tc_stale = TMP / "tc-stale-input-out"
 tc_stale.mkdir()
-(tc_stale / "input.out").write_text("Reachability for: leftover\n", encoding="utf-8")
+(tc_stale / "input.out").write_text("stale .out content\n", encoding="utf-8")
 (tc_stale / "input.txt").write_text('{"value":"z","stop":true}\n', encoding="utf-8")
 pick = er.find_testcase([tc_stale], tc_stale, tc_stale / ".audit")
 assert_eq("input.txt", pick.name if pick else None,
@@ -2050,15 +2043,14 @@ if result_t.returncode == 0:
                f"missing {html_path}")
 
 
-# ─── End-to-end: cached reachability.json is replayed on re-bundle ──
+# ─── End-to-end: severity is replayed on re-bundle ──
 #
 # Regression: bin/export-repro rebuilds REPORT.md from the agent's
-# report.md, which never carries the auto sections written by
-# bin/reachability. Without the replay step a second bundle drops the
-# `## Reachability — external callers` and `## Severity rationale`
-# sections even though reachability.json is still on disk. This block
-# fabricates that cached JSON and asserts the rebuilt REPORT.md picks
-# it up via the --severity-only re-injection.
+# report.md, which never carries the `## Severity rationale` section
+# written by bin/severity. Without the replay step a second bundle drops
+# the section even though severity.json (the scored marker) is on disk.
+# This block writes that marker and asserts the rebuilt REPORT.md gets
+# the Severity section re-applied.
 
 reach_crash_dir = results_dir / "crashes" / "CRASH-R-1"
 reach_crash_dir.mkdir(parents=True)
@@ -2078,7 +2070,7 @@ CRASH_RATE: 5/5
 
 ## Summary
 
-Reachability replay regression fixture.
+Severity replay regression fixture.
 
 Trigger source: call-sequence
 Caller contract: obeyed
@@ -2087,26 +2079,11 @@ Caller controls: bytes
 """, encoding="utf-8")
 (reach_crash_dir / "input.bin").write_bytes(b"\x01\x02\x03")
 
-# Cached reachability.json from a prior successful probe. The values
-# match the on-disk shape bin/reachability writes (see _format_reachability_section).
+# Scored marker from a prior run — its presence triggers the severity replay.
 import json as _json
-(reach_crash_dir / "reachability.json").write_text(_json.dumps({
-    "queried_at": "2026-05-10T00:00:00+00:00",
-    "symbols": ["child_free", "root_free"],
-    "ignore": [],
-    "external_callers": 7,
-    "vendored_copies": 2,
-    "services": {
-        "sourcegraph": {"status": "ok", "count": 3, "vendored_count": 1, "errors": []},
-        "gh": {"status": "ok", "count": 4, "vendored_count": 1, "errors": []},
-    },
-    "external_caller_hits": [
-        {"repo": "github.com/example/proj-a", "path": "src/foo.c", "matched_symbol": "child_free"},
-        {"repo": "github.com/example/proj-b", "path": "lib/bar.c", "matched_symbol": "root_free"},
-    ],
-    "vendored_copy_hits": [
-        {"repo": "github.com/vendor/copy-a", "path": "deps/sampleproj/root.c"},
-    ],
+(reach_crash_dir / "severity.json").write_text(_json.dumps({
+    "schema_version": 3,
+    "scored_at": "2026-05-10T00:00:00+00:00",
 }, indent=2, sort_keys=True), encoding="utf-8")
 
 result_r = subprocess.run(
@@ -2114,24 +2091,18 @@ result_r = subprocess.run(
     capture_output=True, text=True, env=env, cwd=output_root,
 )
 assert_eq(0, result_r.returncode,
-          f"export-repro (reachability replay) exits 0 "
+          f"export-repro (severity replay) exits 0 "
           f"(stdout={result_r.stdout[-200:]!r} stderr={result_r.stderr[-200:]!r})")
 
 if result_r.returncode == 0:
     report_r = (reach_crash_dir / "REPORT.md").read_text(encoding="utf-8")
-    assert_in("## Reachability — external callers", report_r,
-              "reachability replay: REPORT.md carries '## Reachability' section")
-    assert_in("External callers (genuine", report_r,
-              "reachability replay: callers count line emitted")
-    assert_in("github.com/example/proj-a", report_r,
-              "reachability replay: cached caller hits flow into REPORT.md")
     assert_in("## Severity rationale", report_r,
-              "reachability replay: '## Severity rationale' section emitted")
-    # reachability.json must remain at root (bundle filename, not migrated).
-    if (reach_crash_dir / "reachability.json").is_file():
-        passed("reachability replay: reachability.json kept at bundle root")
+              "severity replay: '## Severity rationale' section emitted")
+    # severity.json must remain at root (bundle filename, not migrated).
+    if (reach_crash_dir / "severity.json").is_file():
+        passed("severity replay: severity.json kept at bundle root")
     else:
-        failed("reachability replay: reachability.json kept at bundle root")
+        failed("severity replay: severity.json kept at bundle root")
 
     # A second bundle must remain idempotent — the section is still
     # present (replay re-applies on every run; no duplication either).
@@ -2144,12 +2115,10 @@ if result_r.returncode == 0:
               f"(stderr={result_r2.stderr[-200:]!r})")
     if result_r2.returncode == 0:
         report_r2 = (reach_crash_dir / "REPORT.md").read_text(encoding="utf-8")
-        assert_in("## Reachability — external callers", report_r2,
-                  "reachability replay: section preserved on second bundle")
-        assert_eq(1, report_r2.count("## Reachability — external callers"),
-                  "reachability replay: section not duplicated on second bundle")
+        assert_in("## Severity rationale", report_r2,
+                  "severity replay: section preserved on second bundle")
         assert_eq(1, report_r2.count("## Severity rationale"),
-                  "reachability replay: rationale not duplicated on second bundle")
+                  "severity replay: rationale not duplicated on second bundle")
 
 
 # ─── write_stub_reproduce: fail-open bundle (no runnable template) ───

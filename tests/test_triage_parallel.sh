@@ -22,9 +22,8 @@ source "$SCRIPT_ROOT/lib/triage.sh"
 
 setup_test_env
 
-# Deterministic gates only: no LLM, no reachability, no confirm agent.
+# Deterministic gates only: no LLM, no confirm agent.
 export LLM_DECIDE_DISABLE=1
-export REACHABILITY_AUTO=0
 export CRASH_CONFIRM_AUTO=0
 export LLM_FIELD_FILL_DISABLE=1
 export FIND_CLUSTER_DISABLE=1

@@ -2,7 +2,7 @@
 # Tests for recon-related additions:
 #   - NOVOCAB markers (lib/vocab.sh)
 #   - patch-card boost / version-only filter (lib/workqueue.py)
-#   - recon primitive classes are CVSS-classified (bin/reachability)
+#   - recon primitive classes are CVSS-classified (bin/severity)
 #   - recon_slicer.py basic invocation
 #   - triage_validate.sh class routing
 set -euo pipefail
@@ -193,8 +193,8 @@ verify_ge T_boost_typosquat 20
 # ── T2-9: new reachability primitives ───────────────────────────────────
 py_out=$(python3 - <<'PY'
 import importlib.machinery, importlib.util
-loader = importlib.machinery.SourceFileLoader("reach", "bin/reachability")
-spec = importlib.util.spec_from_loader("reach", loader)
+loader = importlib.machinery.SourceFileLoader("sev", "bin/severity")
+spec = importlib.util.spec_from_loader("sev", loader)
 mod = importlib.util.module_from_spec(spec)
 loader.exec_module(mod)
 k1, _ = mod.detect_primitive("DNS cache poisoning enables protocol downgrade")
@@ -207,7 +207,7 @@ print("P3", k3)
 # "unknown" band): _cvss4_metrics returns a metrics dict, and the class scores
 # a non-zero CVSS v4.0 value at a library surface.
 def cvss(key):
-    m, _ = mod._cvss4_metrics(key, "library", {}, {}, False)
+    m, _ = mod._cvss4_metrics(key, "library", {}, False)
     return int(mod.cvss4.score(m)) if m else 0   # floored for integer compare
 print("B1", cvss("protocol_state"))
 print("B2", cvss("dos_amplification"))

@@ -640,7 +640,7 @@ def find_shell_wrapper(scan_dirs: list[Path]) -> Optional[Path]:
     return None
 
 
-_TESTCASE_SKIP_EXACT = {"REPORT.md", "reproduce.sh", "asan.txt", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "reachability.json"}
+_TESTCASE_SKIP_EXACT = {"REPORT.md", "reproduce.sh", "asan.txt", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "severity.json"}
 _TESTCASE_SKIP_SUFFIX = (".asan.txt", ".msan.txt", ".tsan.txt", ".ubsan.txt", ".sanitizer.txt", ".md", ".log", ".sh")
 _BIN_FILE_RE = re.compile(r"executable|Mach-O|ELF")
 
@@ -663,7 +663,7 @@ def find_testcase(scan_dirs: list[Path], crash_dir: Path, audit_subdir: Path) ->
 
     Mirrors the bash globber:
       - skip canonical bundle filenames (REPORT.md / reproduce.sh /
-        sanitizer.txt / harness.c / reachability.json; plus legacy
+        sanitizer.txt / harness.c / severity.json; plus legacy
         asan.txt left behind by older bundles)
       - skip files whose suffix is a known artifact type
       - skip executable Mach-O/ELF/scripts
@@ -1629,14 +1629,12 @@ _FIELDS_HEADING_RE = re.compile(r"^#{1,6}\s+Fields\s*$", re.IGNORECASE)
 # full diagnostic under the canonical `## Expected sanitizer output`, so we
 # drop it to avoid two sanitizer sections in the rendered report. Matching
 # is case-insensitive on the leaf word so `Sanitizer`/`sanitizer` both go.
-# `Reachability — external callers` and `Severity rationale` are
-# bin/reachability's auto-appended sections — strip here so they get
-# re-appended at the END of the rebuilt report (after Reproduce) by the
-# `--severity-only` pass the caller runs immediately after; without
-# stripping, they'd sit in the body ahead of the sanitizer stack because
-# reachability ran against the previous-rebuild's report.
-# Match the section heading at ANY level (not just `## `): agents sometimes
-# write these auto-emitted sections as an H1 (`# Reachability`, `# Sanitizer
+# `Severity rationale` is bin/severity's auto-appended section — strip here so
+# it gets re-appended at the END of the rebuilt report (after Reproduce) by the
+# severity pass the caller runs immediately after; without stripping, it'd sit
+# in the body ahead of the sanitizer stack because the scorer ran against the
+# previous rebuild. Match the section heading at ANY level (not just `## `):
+# agents sometimes write these auto-emitted sections as an H1 (`# Sanitizer
 # output`). An H2-only match left the H1 form in the body — a duplicate of the
 # harness-appended section — and broke idempotency once demote_body_headings
 # turned the survivor into an H2 that a second pass would then kill.
@@ -1644,13 +1642,12 @@ _SECTION_REPRO_BLOCKS_RE = re.compile(
     r"^#{1,6} *(?:Reproduce"
     r"|(?:Expected\s+)?[Ss]anitizer\s+[Oo]utput"
     r"|ASan\s+(?:top\s+frames|[Oo]utput)"
-    r"|Reachability"
     r"|Severity\s+rationale)(?:\s|$)"
 )
 _SECTION_REPRODUCTION_HEADER_RE = re.compile(r"^#{1,6} *Reproduction(?:\s|$)")
 _BARE_REPRODUCTION_RE = re.compile(r"^Reproduction:\s*$")
 _END_SKIP_LABEL_RE = re.compile(
-    r"^(?:Data Flow|Patch|Reachability|Supplemental|Evidence|Boundary|Classification|Summary|Root Cause|Suggested fix|Notes)[: ]"
+    r"^(?:Data Flow|Patch|Supplemental|Evidence|Boundary|Classification|Summary|Root Cause|Suggested fix|Notes)[: ]"
 )
 _FULL_ORIGINAL_RE = re.compile(r"^Full original output:")
 _BARE_LABEL_RES = (
@@ -1701,7 +1698,7 @@ _SUMMARY_HEADING_RE = re.compile(r"^#{1,6}\s+Summary\s*$", re.IGNORECASE | re.MU
 # Prose `## Fix` (or near-variant) sections agents write between Summary
 # and the reproducer. Lifted out of the body in build_report_md so they
 # can sit at the END of the rebuilt report — after the sanitizer stack
-# and Reproduce — alongside Reachability / Severity rationale. The
+# and Reproduce — alongside the Severity rationale. The
 # variants mirror lib/report_enrich.py's `_FIX_SECTION_NAMES`.
 # `## Fix Direction` is intentionally excluded — that's the
 # advisory-no-patch narrative and load-bearing for downstream TL;DR mining.
@@ -1882,7 +1879,6 @@ _AUTO_SECTION_RE = re.compile(
     r"|Reproduce|Reproduction"
     r"|(?:Expected\s+)?[Ss]anitizer\s+[Oo]utput"
     r"|ASan\b"
-    r"|Reachability\b"
     r"|Severity\s+rationale)\b",
     re.IGNORECASE,
 )
@@ -1917,8 +1913,8 @@ def recover_agent_prose(text: str) -> str:
     """Conservative fallback recovery of an agent body.
 
     Drops only the leading crash-title H1 and the known auto-emitted
-    sections (Fields, Reproduce/Reproduction, sanitizer output, Reachability,
-    Severity rationale) by heading, plus stray structured lines, keeping
+    sections (Fields, Reproduce/Reproduction, sanitizer output, Severity
+    rationale) by heading, plus stray structured lines, keeping
     every other line verbatim. Section-based and deliberately independent of
     `strip_audit_sections` so it can still surface the narrative if that
     line-greedy function ever over-strips.
@@ -2706,12 +2702,12 @@ def _is_bundle_filename(name: str) -> bool:
     # doesn't carry a stale duplicate alongside the fresh sanitizer.txt.
     # Readers still accept asan.txt as a fallback for previously-shipped
     # bundles (lib/crash_artifacts.find_primary_asan, lib/triage.sh,
-    # bin/cluster-crashes, bin/reachability).
-    if name in {"REPORT.md", "REPORT.html", "reproduce.sh", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "reachability.json"}:
+    # bin/cluster-crashes, bin/severity).
+    if name in {"REPORT.md", "REPORT.html", "reproduce.sh", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "severity.json"}:
         return True
     if name in {".llm-triage.json", ".llm-confirm.json", ".llm-legit-crash.json",
-                ".llm-find-quality.json", ".reachability_ok", ".reachability_pending",
-                ".reachability_failed"}:
+                ".llm-find-quality.json", ".severity_ok", ".severity_pending",
+                ".severity_failed"}:
         return True
     if name.startswith("input."):
         return True
@@ -3147,7 +3143,7 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
     # (Classification, Root Cause, Data Flow, ...). The Summary itself was
     # emitted above Fields; the lifted `## Fix` is re-placed at the very end
     # — after Expected sanitizer output and Reproduce, alongside the
-    # auto-appended Reachability / Severity rationale. The triage card carries
+    # auto-appended Severity rationale. The triage card carries
     # the verdict; the remediation belongs next to the reference material.
     parts.append(body_rest)
     parts.append("\n")
@@ -3719,30 +3715,28 @@ def main(argv: list[str]) -> int:
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
-    # ── Re-apply cached reachability ─────────────────────────────────
+    # ── Re-apply severity ────────────────────────────────────────────
     # build_report_md rebuilds REPORT.md from the agent's report.md, which
-    # never carries the `## Reachability — external callers` /
-    # `## Severity rationale` sections written by bin/reachability. If a
-    # prior run already produced reachability.json, replay it now so a
-    # rebuild does not strip the section. --severity-only re-uses the
-    # cached JSON instead of probing the network. Best-effort.
-    reachability_json = out_dir / "reachability.json"
-    reachability_bin = SCRIPT_DIR / "reachability"
-    if reachability_json.is_file() and reachability_json.stat().st_size > 0 \
-            and reachability_bin.is_file():
+    # never carries the `## Severity rationale` section written by
+    # bin/severity. If a prior run already scored this dir (severity.json
+    # present), replay the offline scorer now so the rebuild does not lose
+    # the section. Best-effort.
+    severity_json = out_dir / "severity.json"
+    severity_bin = SCRIPT_DIR / "severity"
+    if severity_json.is_file() and severity_json.stat().st_size > 0 \
+            and severity_bin.is_file():
         try:
             subprocess.run(
-                [sys.executable, str(reachability_bin),
-                 "--report", str(out_dir), "--severity-only"],
+                [sys.executable, str(severity_bin), "--report", str(out_dir)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 check=False, timeout=30,
             )
         except (OSError, subprocess.SubprocessError):
             pass
 
-    # REPORT.html is rendered by maintain_indexes after reachability and
+    # REPORT.html is rendered by maintain_indexes after severity and
     # cluster post-processing have made their final REPORT.md edits. Rendering
-    # here would create a stale pre-reachability/pre-cluster HTML sibling.
+    # here would create a stale pre-severity/pre-cluster HTML sibling.
 
     # ── Mark this dir as bundled for triage. ─────────────────────────
     promotion_log = audit_subdir / "promotion.log"

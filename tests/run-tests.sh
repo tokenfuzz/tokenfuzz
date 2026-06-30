@@ -16,7 +16,7 @@ usage() {
 Usage:
   tests/run-tests.sh [options] [test_file_pattern...]
   tests/run-tests.sh --category integration
-  tests/run-tests.sh --jobs 4 test_triage.sh test_reachability.sh
+  tests/run-tests.sh --jobs 4 test_triage.sh test_severity.sh
   tests/run-tests.sh --image ubuntu:24.04 [options] [test_file_pattern...]
 
 Options:

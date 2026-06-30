@@ -68,7 +68,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 # truth in stack_frames.SANITIZER_SIGNATURE_RE — a deliberate mirror of the
 # triager's gate in lib/triage.sh (search: "_triage_has_sanitizer_diagnostic").
 # Sourcing it here (rather than re-spelling the alternation) keeps the
-# benchmark's confirmed-crash count, the severity scorer (bin/reachability),
+# benchmark's confirmed-crash count, the severity scorer (bin/severity),
 # and the triage gate in lockstep; this is the whole reason the benchmark
 # number is trustworthy.
 if _sf is not None:
@@ -385,7 +385,7 @@ def _unique_with_medium_plus(unique: int, medium_plus: int) -> str:
     """Label a unique-cluster count with its Medium+ subset: `6 (1 M+)`.
 
     The parenthetical surfaces how many of the deduplicated reports the
-    reachability scorer rated Medium or higher — the security-yield subset —
+    severity scorer rated Medium or higher — the security-yield subset —
     without dropping the Low/unscored remainder from the headline count.
     A gate on the count itself would zero out findings whose severity is
     still blank/Pending (rank 0). An empty cell stays a bare `0`.
@@ -1957,7 +1957,7 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
     A cluster is *novel* to a condition when every member maps to that
     condition. Severity (level / rank / score) is carried straight through
     from the cluster tool — bin/cluster-crashes already reads it out of
-    each report, which bin/reachability has scored. Returns:
+    each report, which bin/severity has scored. Returns:
       {
         "clusters": [{id, conditions, members, size, primitive,
                       severity_level, severity_rank, severity_score}],
@@ -2452,7 +2452,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
     """Copy every cell's confirmed crash + finding dirs into one pool.
 
     bin/benchmark then runs the SAME post-processing the harness uses —
-    bin/reachability (severity), bin/export-repro (reproducer bundle) and
+    bin/severity (severity), bin/export-repro (reproducer bundle) and
     bin/cluster-crashes / bin/cluster-findings (dedup) — over this one
     pool, so every condition is scored on an identical yardstick.
 
@@ -2782,7 +2782,7 @@ def _bug_link(bench_dir: Path, cid: str, members: list[str]) -> str:
     """Link a cluster id to its representative crash directory.
 
     The crash dir holds the full evidence — sanitizer output, input,
-    harness, reachability score — so a reviewer can audit the bug from
+    harness, severity score — so a reviewer can audit the bug from
     the id alone. Falls back to a plain code span if no member is known.
     """
     if members:
@@ -3034,7 +3034,7 @@ def render_section(report: dict) -> str:
         "claiming a crash in prose never counts. **Unique findings** and "
         "**Unique crashes** are those counts after `bin/cluster-findings` / "
         "`bin/cluster-crashes` merge duplicate signatures, annotated `N (M "
-        "M+)` where `M` is how many of the `N` clusters `bin/reachability` "
+        "M+)` where `M` is how many of the `N` clusters `bin/severity` "
         "scored Medium or higher — the security-yield subset, on one scale "
         "across both conditions. **Top crash severity** is the highest crash "
         "severity in the row. "
@@ -3545,7 +3545,7 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "- **Unique findings** — validated findings after signature clustering "
         "merges duplicate reports, shown as `N (M M+)`: `N` clustered findings, "
-        "`M` of them scored Medium or higher by reachability. The count links "
+        "`M` of them scored Medium or higher by severity. The count links "
         "to the finding cluster report."
     )
     lines.append("")
@@ -3570,7 +3570,7 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "- **Unique crashes** — accepted crashes after stack/signature "
         "clustering, shown as `N (M M+)`: `N` clustered crashes, `M` of them "
-        "scored Medium or higher by reachability — the headline security-yield "
+        "scored Medium or higher by severity — the headline security-yield "
         "subset. The count links to the crash cluster report."
     )
     lines.append("")
@@ -3578,7 +3578,7 @@ def crosstab(bench_root: Path) -> str:
     lines.append("**Severity.**")
     lines.append("")
     lines.append(
-        "Severity comes from the shared reachability scorer, which scores both "
+        "Severity comes from the shared severity scorer, which scores both "
         "findings and crashes on one scale so a security team can compare "
         "impact, not just raw report count. The `M+` annotation on the "
         "**Unique findings** and **Unique crashes** columns is that score; the "

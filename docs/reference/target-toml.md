@@ -54,8 +54,6 @@ link_libs    = ["-lz", "-llzma", "-lm"]
 
 is_browser   = "0"
 
-reachability_ignore = ["GNOME/libxml2"]
-
 [threat_model]
 attacker_controls = ["bytes"]
 ```
@@ -112,7 +110,6 @@ against.
 | Field | Meaning |
 | --- | --- |
 | `cmake_target` | CMake target name used when a generated bundle can rebuild a specific target. |
-| `reachability_ignore` | Substrings removed from external caller search results, such as the project itself or vendored copies. |
 
 `target.toml` is parsed as strict TOML. Invalid section headers
 or malformed arrays fail fast instead of silently falling back to

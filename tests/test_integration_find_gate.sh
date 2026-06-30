@@ -13,10 +13,8 @@ source "$SCRIPT_ROOT/lib/triage.sh"
 
 # Disable the LLM pre-check so verdicts depend only on the "has report
 # file" structural rule. The LLM path is covered by
-# test_decision_find_quality.sh. Disable reachability too so we don't
-# call out to the network during tests.
+# test_decision_find_quality.sh.
 export LLM_DECIDE_DISABLE=1
-export REACHABILITY_AUTO=0
 
 # ═══════════════════════════════════════════════════════════════
 # 1. FIND with a description.md → kept, no markers

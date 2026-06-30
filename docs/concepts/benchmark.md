@@ -10,7 +10,7 @@ You do not need to know the harness internals to run it or read the
 result. This page is for the person deciding whether the harness is
 earning its overhead: a security lead comparing approaches, a backend
 operator tuning model choice, or a maintainer checking whether a
-triage, clustering, reachability, or prompt change helped.
+triage, clustering, severity, or prompt change helped.
 
 The important word is **evidence**. A crash does not count because an
 agent claimed one in prose; it counts when sanitizer output is on disk.
@@ -28,7 +28,7 @@ Each benchmark run is a small controlled experiment:
 | Condition token | Rendered label | What runs |
 | --- | --- | --- |
 | `model-direct` | `<model>-direct` when the model is known, otherwise `<backend>-direct` | One agent with a bare vulnerability-hunting prompt. This is the control. |
-| `harness` | `tokenfuzz` | `bin/audit` as shipped: recon, ranked work cards, strategy rotation, `bin/probe`, triage, validation, clustering, reachability, and reproducer bundling. |
+| `harness` | `tokenfuzz` | `bin/audit` as shipped: recon, ranked work cards, strategy rotation, `bin/probe`, triage, validation, clustering, severity scoring, and reproducer bundling. |
 
 The `--conditions` flag always uses the stable tokens
 `model-direct` and `harness`. The rendered labels are reader-facing

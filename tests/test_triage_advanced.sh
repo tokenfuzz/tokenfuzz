@@ -419,7 +419,6 @@ assert_eq 1 $? "heap-OOB + MOZ_CRASH → keep (KEEP short-circuits)"
 # ═══════════════════════════════════════════════════════════════
 
 LLM_DECIDE_DISABLE=1
-REACHABILITY_AUTO=0
 
 # Memory-safety FIND with reproducer → kept.
 mkdir -p "$RESULTS_DIR/findings/FIND-T01-rich"
@@ -476,7 +475,6 @@ assert_file_contains "$RESULTS_DIR/findings/FIND-T04-empty/.needs-content" "no r
   || fail "no findings-rejected/ created for empty FIND" "findings-rejected/ exists"
 
 unset LLM_DECIDE_DISABLE
-unset REACHABILITY_AUTO
 
 # ═══════════════════════════════════════════════════════════════
 # 9. Wild-address SEGV → memory safety signal

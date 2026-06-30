@@ -331,7 +331,7 @@ def _insert_patch_section(text: str, patch_section: str) -> str:
     Fix narrative that precedes it) belong *after* the reproducer, next
     to the scoring sections. Per docs/development.md, prefix is preferred over an
     exhaustive enumeration of exact strings."""
-    tail_prefixes = ("reachability", "severity rationale")
+    tail_prefixes = ("severity rationale",)
     earliest: Optional[int] = None
     for m in _H2_RE.finditer(text):
         name_lower = m.group(1).strip().lower()

@@ -8,8 +8,7 @@ Before you run an audit, install three things:
 
 The harness itself is mostly shell and Python, and it writes state, logs,
 and reports to the local results directory. Hosted backends receive the
-prompts, source excerpts, state, and reports needed for the run, and
-optional reachability checks may query public code search. Use
+prompts, source excerpts, state, and reports needed for the run. Use
 `--backend oss` when policy requires model data flow to stay local.
 
 This page walks through each piece in order. Install commands are given
@@ -27,7 +26,7 @@ and during sanitizer builds.
 | `python3` 3.9+ | Parses target config and structured state. No extra packages. |
 | `perl` | Runs vocabulary normalization and timeout fallbacks. |
 | `git` | Clones, updates, and identifies revisions for most targets. |
-| `gh` | Lets reachability checks query GitHub Code Search when scoring crash exposure. |
+| `gh` | Queries the GitHub advisory database (`gh api`) for the cross-project strategy. |
 | `jq` | Reads and writes JSONL state records. |
 | `rg` | Fast, bounded source search through helper commands. |
 | `file` | Distinguishes testcase inputs from scripts and compiled artifacts. |

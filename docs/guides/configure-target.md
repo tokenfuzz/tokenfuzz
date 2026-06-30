@@ -265,19 +265,6 @@ Even when another sanitizer is enabled, ASan remains the usual first
 pass for crash prioritisation. It produces the clearest reproduction
 bundles, and the triage rules are tuned around that workflow.
 
-## Reachability scoring fields
-
-Add this when it helps:
-
-```toml
-reachability_ignore = ["GNOME/libxml2"]
-```
-
-`bin/reachability` searches public code for external callers of a
-crashing function when scoring severity. This list drops matches from
-the project's own sources and known vendored copies so they do not
-inflate the caller count.
-
 ## When the generated values need review
 
 Local edits should be small and easy to explain. Common cases:

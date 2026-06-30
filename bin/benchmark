@@ -1481,7 +1481,7 @@ _reenrich_and_render_pool_reports() {
 ## one tree, then run the harness's OWN tools over that pool so both
 ## conditions are measured on an identical yardstick:
 ##
-##   bin/reachability   severity, one lens over every crash of both conditions
+##   bin/severity       severity, one lens over every crash of both conditions
 ##   bin/export-repro   a REPORT.md / REPORT.html / reproduce.sh bundle per crash
 ##   bin/cluster-crashes / bin/cluster-findings   cross-condition deduplication
 ##
@@ -1729,28 +1729,25 @@ rebuild_pool_artifacts() {
   ## caller_controls is absent → ×0.4 and severity collapses to Low) or, for
   ## findings, only the model's freeform self-assessed severity. Fill the
   ## fields from each report's on-disk narrative — the SAME pass the harness
-  ## runs per cell — and score findings here (bin/reachability --batch below
+  ## runs per cell — and score findings here (bin/severity --batch below
   ## only walks crashes/). Reads on-disk reports only (no live session), so
   ## it runs correctly under --regenerate too; idempotent (complete sidecars
-  ## skip, re-score is cached) and best-effort. LLM_FIELD_FILL_DISABLE /
-  ## REACHABILITY_AUTO still gate the LLM / probe for a deterministic run.
+  ## skip, re-score is cached) and best-effort. LLM_FIELD_FILL_DISABLE still
+  ## gates the LLM for a deterministic run.
   if [ "$DRY_RUN" != "1" ] && declare -f triage_fill_reach_fields_tree >/dev/null 2>&1; then
     triage_fill_reach_fields_tree "$POOL" "$SCRIPT_ROOT/bin" \
       || log "WARN: pool reach-field fill returned non-zero ($reason)"
   fi
 
   if [ "$DRY_RUN" != "1" ] && [ -d "$POOL/crashes" ]; then
-    ## Severity: bin/reachability scores every pooled crash and writes the
+    ## Severity: bin/severity scores every pooled crash and writes the
     ## Severity line into its report. The un-triaged model-direct crashes
     ## and the harness's triaged ones go through the identical scorer —
-    ## that one lens is the whole point. Best-effort: the benchmark must
-    ## still produce a ledger if the reachability probe is offline.
-    ## reachability caches every (service, symbol) lookup on disk for 7 days
-    ## (~/.cache/sancov-reachability), so a re-derivation re-uses those hits
-    ## and stays fast without any special-casing here.
-    "$SCRIPT_ROOT/bin/reachability" --batch "$POOL" --target "$TARGET_SLUG" \
-      > "$BENCH_DIR/reachability.log" 2>&1 \
-      || log "WARN: reachability batch returned non-zero (see reachability.log, $reason)"
+    ## that one lens is the whole point. Scoring is offline and deterministic;
+    ## best-effort, so the benchmark still produces a ledger if it fails.
+    "$SCRIPT_ROOT/bin/severity" --batch "$POOL" \
+      > "$BENCH_DIR/severity.log" 2>&1 \
+      || log "WARN: severity batch returned non-zero (see severity.log, $reason)"
 
     ## Reproducer bundle: give every crash the same maintainer-facing
     ## REPORT.md / reproduce.sh bundle the harness ships. This is the one
@@ -1781,7 +1778,7 @@ rebuild_pool_artifacts() {
     ## are NEVER bundled at audit time (the bare CTF condition has no harness)
     ## and otherwise ship with no reproduce.sh / REPORT.md. They need no live
     ## audit session: export-repro resolves the build recipe from
-    ## targets/<slug>. (Severity scoring via bin/reachability above already ran
+    ## targets/<slug>. (Severity scoring via bin/severity above already ran
     ## for both conditions and is unaffected.)
     local _regen=0
     [ "${BENCH_REGEN_SKIP_REPORTS:-0}" = "1" ] && _regen=1
@@ -1814,7 +1811,7 @@ rebuild_pool_artifacts() {
       ## Under --regenerate, render only the bundle we just created so the
       ## HTML of already-bundled crashes is never rewritten. A full rebuild
       ## re-renders every crash below instead (to track the severity line
-      ## bin/reachability appended above).
+      ## bin/severity appended above).
       if [ "$_regen" = "1" ] && [ -x "$SCRIPT_ROOT/bin/render-md" ] && [ -f "$cdir/REPORT.md" ]; then
         python3 "$SCRIPT_ROOT/bin/render-md" "$cdir/REPORT.md" --html-sibling \
           >/dev/null 2>&1 || true
@@ -1863,7 +1860,7 @@ rebuild_pool_artifacts() {
       [ -n "$_tg_report" ] || continue
       if ( export RESULTS_DIR="$POOL" TARGET_ROOT="$_tg_target_root" \
                   TARGET_SLUG="$TARGET_SLUG" ACTIVE_BACKEND="$BACKEND" MODEL="$model" \
-                  INDEX="${INDEX:-$BENCH_DIR/reachability.log}" \
+                  INDEX="${INDEX:-$BENCH_DIR/severity.log}" \
                   CRASH_REJECT_SKIP_DO_NOT_REVISIT=0
            _triage_crash_trigger_provenance_gate "$_tg_cdir" \
              "$(basename "$_tg_cdir")" "$_tg_report" "$SCRIPT_ROOT/bin" ); then
@@ -1927,7 +1924,7 @@ rebuild_pool_artifacts() {
   ## source landed only at bundle/enrich time would reach the scorer unflagged
   ## (one clustered copy flagged, its twin not). Reconcile once more on the now-
   ## final fields; then — ONLY if something was newly flagged — re-score
-  ## (severity-only: reuse the reachability.json the batch above wrote, just
+  ## (reuse the severity.json the batch above wrote, just
   ## recompute the Severity number with the contract concern applied) and
   ## re-render so REPORT.html tracks it. Additive/idempotent: already-flagged
   ## crashes are skipped and a clean run does zero re-scoring. Runs before
@@ -1947,9 +1944,9 @@ rebuild_pool_artifacts() {
       [ "$_rc_before" != "$_rc_after" ] && _rc_changed=$((_rc_changed + 1))
     done
     if [ "$_rc_changed" -gt 0 ]; then
-      log "contract-flag reconcile: $_rc_changed sidecar change(s) on final fields; re-scoring (severity-only)"
-      "$SCRIPT_ROOT/bin/reachability" --batch "$POOL" --target "$TARGET_SLUG" --severity-only \
-        >> "$BENCH_DIR/reachability.log" 2>&1 \
+      log "contract-flag reconcile: $_rc_changed sidecar change(s) on final fields; re-scoring"
+      "$SCRIPT_ROOT/bin/severity" --batch "$POOL" \
+        >> "$BENCH_DIR/severity.log" 2>&1 \
         || log "WARN: post-reconcile re-score returned non-zero ($reason)"
       if [ -x "$SCRIPT_ROOT/bin/render-md" ]; then
         local -a _rcreps=()
@@ -1964,34 +1961,30 @@ rebuild_pool_artifacts() {
   fi
 
   ## Finding severity: enforce deterministic scoring on every finding.
-  ## A finding that never reached the scorer — no reachability.json, e.g. it was
-  ## materialised/renumbered after triage_fill_reach_fields_tree's finding pass,
-  ## or scoring ran offline (REACHABILITY_AUTO disables the external probe and
-  ## skips _triage_run_reachability entirely) — otherwise keeps its agent-
-  ## authored `| Severity | <level> |` cell, letting an unverified "High" ship,
-  ## against the no-unverified-model-claims invariant. Score those here with
-  ## --severity-only: it computes the deterministic severity from the report
-  ## fields offline (no probe, no REACHABILITY_AUTO dependency), so finding
-  ## scoring is mandatory, and it overwrites the agent cell with that value.
-  ## Idempotent: findings already carrying reachability.json (scored by the
-  ## audit/online pass) are skipped, preserving their established score. Runs
-  ## before split-pool so the per-condition copies and the ledger inherit it.
+  ## A finding that never reached the scorer — no severity.json, e.g. it was
+  ## materialised/renumbered after triage_fill_reach_fields_tree's finding pass
+  ## — otherwise keeps its agent-authored `| Severity | <level> |` cell, letting
+  ## an unverified "High" ship, against the no-unverified-model-claims
+  ## invariant. Score those here: it computes the deterministic severity from
+  ## the report fields offline, so finding scoring is mandatory, and it
+  ## overwrites the agent cell with that value. Idempotent: findings already
+  ## carrying severity.json (scored by the audit pass) are skipped, preserving
+  ## their established score. Runs before split-pool so the per-condition
+  ## copies and the ledger inherit it.
   if [ "$DRY_RUN" != "1" ] && [ -d "$POOL/findings" ] \
-     && declare -f _triage_run_reachability >/dev/null 2>&1; then
+     && declare -f _triage_run_severity >/dev/null 2>&1; then
     local _fd _frep _fscored=0
     local -a _fscored_reps=()
     for _fd in "$POOL"/findings/FIND-*; do
       [ -d "$_fd" ] || continue
-      [ -f "$_fd/reachability.json" ] && continue
+      [ -f "$_fd/severity.json" ] && continue
       _frep="$_fd/report.md"; [ -f "$_frep" ] || _frep="$_fd/REPORT.md"
       [ -f "$_frep" ] || continue
-      ## Reuse the SAME finding scorer the early pass runs (line ~1199), forced
-      ## to severity-only so it scores offline from the report fields with no
-      ## probe / REACHABILITY_AUTO dependency. Subshell so the forced setting and
-      ## the INDEX default do not leak into later pool steps.
-      ( export REACHABILITY_AUTO=severity-only INDEX="${INDEX:-$BENCH_DIR/reachability.log}"
-        _triage_run_reachability "$_fd" "$(basename "$_fd")" "$SCRIPT_ROOT/bin" )
-      if [ -f "$_fd/reachability.json" ]; then
+      ## Reuse the SAME finding scorer the early pass runs. Subshell so the
+      ## INDEX default does not leak into later pool steps.
+      ( export INDEX="${INDEX:-$BENCH_DIR/severity.log}"
+        _triage_run_severity "$_fd" "$(basename "$_fd")" "$SCRIPT_ROOT/bin" )
+      if [ -f "$_fd/severity.json" ]; then
         _fscored=$((_fscored + 1))
         _fscored_reps+=("$_frep")
       fi

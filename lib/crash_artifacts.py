@@ -28,7 +28,7 @@ ARTIFACT_EXACT = {
     "tsan.txt",
     "ubsan.txt",
     "harness.c",
-    "reachability.json",
+    "severity.json",
     "promotion.log",
     # Recorded CLI argv (find_repro_args), not a testcase — excluded here
     # because it would otherwise match the "repro." TESTCASE_PREFIXES.
@@ -45,9 +45,9 @@ ARTIFACT_SUFFIXES = (
     ".md",
     ".html.tmp",
     # `.out` / `.err` are reserved for audit-internal logs (e.g.
-    # .audit/reachability.out is the human-readable summary written by
+    # .audit/severity.out is the human-readable summary written by
     # lib/triage.sh:966). Without this exclusion, find_testcase happily
-    # selects reachability.out as the testcase, export-repro stages it
+    # selects severity.out as the testcase, export-repro stages it
     # as input.out, and the generated reproduce.sh feeds prose into the
     # harness — the harness silently catches its parse failure and the
     # reproducer "succeeds" with no output. Testcases never use these

@@ -70,13 +70,13 @@ _BLACK_EXACT_LOWER = {
     ".ds_store", ".gitignore", ".gitkeep", ".keep",
     ".harness-cache", ".enforced", ".config-hash", ".config_hash",
     ".promotion_pending", ".autodiscard",
-    ".reachability_failed", ".reachability_skipped", ".reachability_done",
+    ".severity_failed", ".severity_pending", ".severity_ok",
 }
 _BLACK_EXACT_PRESERVE_CASE = {
     "REPORT.md", "REPORT.html", "description.md",
     "reproduce.sh", "testcase.sh", "reproducer.sh",
     "asan.txt", "asan-output.txt", "asan_output.txt",
-    "reachability.json", "promotion.log",
+    "severity.json", "promotion.log",
 }
 
 # Suffix-based blacklist (lowercase). Mirrors the `case "$lower" in …` in

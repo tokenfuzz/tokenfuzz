@@ -521,8 +521,8 @@ _HTML_HEAD = """<!DOCTYPE html>
   }}
 
   /* Triage hero card — verdict at a glance, no scrolling required.
-     Pulls from the Fields table + Summary + ASan top frames +
-     Reachability so the security triager can decide in 2 seconds. */
+     Pulls from the Fields table + Summary + ASan top frames so the
+     security triager can decide in 2 seconds. */
   .triage-card {{
     margin: 1em 0 1.6em;
     padding: 1.1em 1.25em 1.15em;
@@ -1155,14 +1155,14 @@ def _render_table_html(header: list[str], align: list[str], body: list[list[str]
 
 # GFM lists. Indentation-aware: leading-whitespace count is preserved so
 # the renderer can nest sub-items as `<ul><li>…<ul><li>…</li></ul></li>…`.
-# Reachability calibration notes and other long bullet lists use this to
+# Severity rationale notes and other long bullet lists use this to
 # group sub-points (Memory-safety tiers, Surface tiers, etc.) under a
 # single top-level item.
 _UL_ITEM_RE = re.compile(r"^(?P<indent>\s*)[-*]\s+(?P<body>.*)$")
 _OL_ITEM_RE = re.compile(r"^(?P<indent>\s*)\d+\.\s+(?P<body>.*)$")
 
 # Structured fields the harness duplicates *below* the Fields table as
-# bare-label lines for downstream regex parsers (bin/reachability,
+# bare-label lines for downstream regex parsers (bin/severity,
 # bin/cluster-crashes, lib/triage.sh). They render as a wall of broken
 # key:value text in HTML and the same data is already on screen one
 # table up, so we drop the block from HTML output only — the markdown
@@ -1218,7 +1218,7 @@ def _render_definition_list(lines: list[str]) -> str | None:
 
 # Sections that are reference material, not headline. Rendered as
 # <details> in HTML (collapsed by default) so the eye lands on Summary,
-# Root Cause, Data Flow, the sanitizer block, and Reachability first.
+# Root Cause, Data Flow, and the sanitizer block first.
 # `## Expected sanitizer output` is intentionally NOT here: as of the
 # section consolidation it carries the full ASan stack and is the
 # canonical sanitizer view.
@@ -1267,7 +1267,7 @@ def _heading_renders_empty(lines: list[str], idx: int) -> bool:
     heading of the same or a higher level.
 
     This de-duplicates the two "Classification" headers on model-direct
-    reports: ``bin/reachability`` synthesizes a ``## Fields`` table immediately
+    reports: ``bin/severity`` synthesizes a ``## Fields`` table immediately
     below the harness ``## Classification`` block, leaving that heading with an
     empty body, while the model writes its own ``# Classification`` prose
     section. Dropping the empty harness heading leaves exactly one.
@@ -1303,9 +1303,6 @@ _SEV_BULLET_RE = re.compile(
 _SCORE_RE = re.compile(r"CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(\d+(?:\.\d+)?)(?![0-9./])")
 _SURFACE_FIELD_RE = re.compile(
     r"^(?P<kind>library-api|cli|maint-tool|unknown)\b(?:\s*—\s*(?P<reason>.+))?\s*$"
-)
-_CALLERS_RE = re.compile(
-    r"\*\*External callers[^:\n]*:\s*(?P<n>\d+)\*\*"
 )
 # Capture the WHOLE `## Summary` section body — every line up to the next ATX
 # heading, blank lines included. (The older `[^\n#]` form stopped at the first
@@ -1482,10 +1479,6 @@ def _extract_hero(text: str) -> dict:
         h["top_frame_func"] = frames[0].state_function
         h["top_frame_loc"] = frames[0].location
 
-    cm = _CALLERS_RE.search(text)
-    if cm:
-        h["callers"] = cm.group("n")
-
     sm = _SUMMARY_RE.search(text)
     if sm:
         # Drop enrichment blocks (`<!-- enrich:NAME -->...<!-- /enrich:NAME -->`)
@@ -1582,10 +1575,6 @@ def _render_hero(h: dict) -> str:
     meta: list[str] = []
     if h.get("repro"):
         meta.append(f'<span><strong>Repro</strong> {html.escape(h["repro"])}</span>')
-    if h.get("callers"):
-        meta.append(
-            f'<span><strong>{html.escape(h["callers"])}</strong> external callers</span>'
-        )
     if h.get("cluster"):
         # Linkify CRASH-* / FIND-* sibling references in the cluster
         # string so the reviewer can hop between siblings from the

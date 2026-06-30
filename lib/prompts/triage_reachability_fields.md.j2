@@ -7,7 +7,7 @@ evidence for it):
    below is the canonical trigger vocabulary — keep it identical to
    docs/guides/triage-results.md and lib/target_config.sh
    TARGET_ATTACKER_CONTROLS_VALID, and in sync with the trigger tokens the
-   deterministic scorer matches: bin/reachability _CALL_SEQUENCE_RE
+   deterministic scorer matches: bin/severity _CALL_SEQUENCE_RE
    (call-sequence / call-order / callback ordering → local AV:L/AT:P) and
    _REMOTE_CAPABLE_RE (timing / race / protocol-state / env / fs-state →
    remote, vetoes localisation). A value the scorer reads but the enum omits is

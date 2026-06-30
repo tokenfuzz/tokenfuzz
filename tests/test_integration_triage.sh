@@ -6,11 +6,10 @@ source "$(dirname "$0")/helpers.sh"
 setup_test_env
 source "$SCRIPT_ROOT/lib/triage.sh"
 
-# This suite verifies crash movement/classification. Reachability scoring and
-# the final confirm-agent have dedicated tests; leaving them on here makes each
-# scenario pay unrelated post-processing cost and causes preserved fixtures to
-# be revisited on later triage passes.
-export REACHABILITY_AUTO=0
+# This suite verifies crash movement/classification. The final confirm-agent
+# has dedicated tests; leaving it on here makes each scenario pay unrelated
+# post-processing cost and causes preserved fixtures to be revisited on later
+# triage passes. (Severity scoring runs offline and is not asserted here.)
 export CRASH_CONFIRM_AUTO=0
 
 # ═══════════════════════════════════════════════════════════════
@@ -265,7 +264,7 @@ assert_file_contains "$RESULTS_DIR/findings/FIND-008-FIND/report.md" "^## Triage
 # ═══════════════════════════════════════════════════════════════
 # 9. triage_crash_dirs — trigger outside attacker_controls is a CONTRACT-FLAG.
 # The dir STAYS in crashes/ with a .contract-flagged sidecar +
-# "## Contract concern" report block. The reachability scorer recomputes the
+# "## Contract concern" report block. The severity scorer recomputes the
 # same verdict from Trigger source and target.toml. crashes-rejected/ is
 # reserved for non-security classes (OOM/panic/null-deref/no-signal/TTL).
 # ═══════════════════════════════════════════════════════════════

@@ -249,7 +249,7 @@ The mechanisms that keep the loop honest:
 - multi-run confirmation for crash candidates;
 - first-class FIND validation for non-crashing security issues;
 - a rejected index for low-value crashes so they do not come back;
-- reachability, severity, and crash clustering as review aids;
+- severity scoring and crash clustering as review aids;
 - capped search wrappers and session seeds to keep prompts small;
 - effort-gated strategy rotation;
 - report fields that triage can parse mechanically.

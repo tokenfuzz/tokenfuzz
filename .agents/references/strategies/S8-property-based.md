@@ -31,8 +31,7 @@ check, a cache or signature lookup, an allocation size or resource limit? If
 yes, the property is in scope. If the output only reaches display, logging, or
 another pure-data path, a counter-example is an upstream correctness bug — note
 it in your state file and move on; do **not** file it.
-Use local source, call sites, comments, and docs for this filter; do not run
-external reachability or popularity probes just to choose an S8 target.
+Use local source, call sites, comments, and docs for this filter.
 
 | Category | In scope when the consumer is… | Security primitive it becomes |
 |----------|--------------------------------|-------------------------------|
@@ -400,7 +399,7 @@ When you do file, `report.md` must describe:
   concretely, don't file.
 
 **Severity:** property-violation FINDings without a sanitizer crash score on
-the same `bin/reachability` rubric (impact × reach × confidence) as any other
+the same `bin/severity` rubric (impact × reach × confidence) as any other
 FIND. Silent corruption in a public-API function reaches Medium ONLY when
 that public API is a security-sensitive function (see the list above); in a
 core security-boundary function it reaches High. Property violations in

@@ -466,10 +466,9 @@ IS_BROWSER_TARGET=0
 
 # Speed: the six fixture dirs below are created up front and triaged in ONE
 # triage_crash_dirs pass (the per-dir loop is independent, so each dir's
-# .promotion_pending outcome is identical to a per-dir run). Reachability
+# .promotion_pending outcome is identical to a per-dir run). Severity
 # enrichment is best-effort (never blocks promotion, no assertion below
 # reads its sidecars), so it is skipped via the supported knob.
-REACHABILITY_AUTO=0
 
 # .c reproducer should be recognized as a valid testcase
 mkdir -p "$RESULTS_DIR/crashes/CRASH-TC-C"
@@ -704,7 +703,6 @@ fi
 
 # Restore the real function for any later tests.
 eval "$_orig_llm_triage_crash_decision"
-unset REACHABILITY_AUTO
 
 # ═══════════════════════════════════════════════════════════════
 # 8c. Hard reject: null-deref / stack-exhaustion an LLM KEEP may not rescue
@@ -716,7 +714,6 @@ unset REACHABILITY_AUTO
 # ═══════════════════════════════════════════════════════════════
 
 IS_BROWSER_TARGET=0
-REACHABILITY_AUTO=0
 
 # Simulate an LLM that votes KEEP (rc=2, regex bypass) for every crash.
 _orig_llm_triage_crash_decision=$(declare -f llm_triage_crash_decision)
@@ -804,7 +801,6 @@ else
 fi
 
 eval "$_orig_llm_triage_crash_decision"
-unset REACHABILITY_AUTO
 
 # ═══════════════════════════════════════════════════════════════
 # 9. validate_find_gate — accepts any FIND with a report, regardless of
@@ -813,7 +809,6 @@ unset REACHABILITY_AUTO
 # ═══════════════════════════════════════════════════════════════
 
 LLM_DECIDE_DISABLE=1
-REACHABILITY_AUTO=0
 
 IS_BROWSER_TARGET=0
 mkdir -p "$RESULTS_DIR/findings/FIND-GENERIC-1"
@@ -849,7 +844,6 @@ fi
 
 IS_BROWSER_TARGET=0
 unset LLM_DECIDE_DISABLE
-unset REACHABILITY_AUTO
 
 # ═══════════════════════════════════════════════════════════════
 # 10. crash_dir_contains_regex scans .c files

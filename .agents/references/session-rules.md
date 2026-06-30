@@ -339,10 +339,8 @@ to `obeyed` inflates verdicts.
 
 `Entry` is optional but recommended: the public API function an external
 caller invokes to reach the bug, written call-shaped on its own line, e.g.
-``Entry: pcre2_match()``. Reachability *reporting* measures external-caller
-reach at this entry point (prioritisation metadata — it does not change the
-CVSS score); without it the probe falls back to inferring the entry from the
-deepest product frame in the sanitizer stack.
+``Entry: pcre2_match()``. It documents the reachable entry point for
+reviewers; it does not change the CVSS score.
 
 `Parameter control` is optional but required when the finding depends on a
 specific offset, size, index, count, callback return, lifetime transition, or
@@ -381,7 +379,7 @@ component is outside the target's `attacker_controls` (declared in
 
 The verdict above is a **severity** outcome triage applies, not a filing decision
 for you. A `robustness` verdict KEEPS the crash in `crashes/` (triage flags it and
-the reachability scorer deprioritizes it) — it is not moved to `findings/`. So when
+the severity scorer deprioritizes it) — it is not moved to `findings/`. So when
 a testcase reproduces a sanitizer diagnostic through a public boundary and clears
 conditions 1–3, file it under `crashes/` regardless of trigger source. Do not
 pre-demote a `call-sequence`/`env`/`race` crash to `findings/` just because the

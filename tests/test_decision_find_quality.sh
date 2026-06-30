@@ -17,8 +17,7 @@ source "$SCRIPT_ROOT/lib/llm_decide.sh"
 source "$SCRIPT_ROOT/lib/triage.sh"
 
 setup_test_env
-# Reachability would phone home — block it for the unit test.
-export REACHABILITY_AUTO=0
+# Keep clustering and field-fill off so the unit test is deterministic.
 export FIND_CLUSTER_DISABLE=1
 export LLM_FIELD_FILL_DISABLE=1
 # Mock LLM is deterministic; the budget cap exists to bound real-backend
@@ -387,7 +386,9 @@ real_report="$RESULTS_DIR/findings/FIND-REAL/report.md"
 grep -q '^Cluster:' "$real_report" \
   && pass "real-stamp: cluster-findings stamped report.md (Cluster: line present)" \
   || fail "real-stamp: cluster-findings stamped report.md" "no Cluster: line written"
-grep -q '| Class    | auth:bypass |' "$real_report" \
+# Column widths follow the widest cell — the Severity value now carries the
+# scorer's CVSS reading — so match the padded Class row tolerant of that width.
+grep -qE '\| Class +\| auth:bypass +\|' "$real_report" \
   && pass "real-stamp: report_enrich reformatted the Fields table (in-place rewrite)" \
   || fail "real-stamp: report_enrich reformatted the Fields table" "table not padded"
 : > "$llm_log"

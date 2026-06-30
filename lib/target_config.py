@@ -604,7 +604,7 @@ def write_session_env(
     d.mkdir(parents=True, exist_ok=True)
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     rev_v = rev or "unknown"
-    # Persist the VCS type so downstream tools (e.g. bin/reachability) get the
+    # Persist the VCS type so downstream tools (e.g. bin/severity) get the
     # authoritative decision from resumable state without re-resolving the
     # target root from output-path heuristics. Detected from the same
     # target_root the audit binds, so it cannot disagree with bin/audit.

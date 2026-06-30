@@ -16,11 +16,10 @@ source "$TESTS_DIR/helpers.sh"
 source "$SCRIPT_ROOT/lib/llm_decide.sh"
 source "$SCRIPT_ROOT/lib/triage.sh"
 
-# This suite focuses on the LLM-triage override path, not on reachability.
-# Disable the post-triage reachability hook so the assertions don't depend
-# on network state. Other suites (test_triage_reachability.sh) exercise
-# the reachability integration explicitly.
-export REACHABILITY_AUTO=0
+# This suite focuses on the LLM-triage override path, not on severity
+# scoring. Severity runs offline and deterministically, so the assertions
+# here don't depend on it; test_triage_severity.sh exercises the scoring
+# integration explicitly.
 
 setup_test_env
 

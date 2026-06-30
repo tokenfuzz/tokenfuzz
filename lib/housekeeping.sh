@@ -56,9 +56,7 @@ housekeeping_signature() {
     printf 'crash_confirm_auto=%s\n' "${CRASH_CONFIRM_AUTO:-1}"
     printf 'find_reject_needs_review=%s\n' "${FIND_REJECT_NEEDS_REVIEW:-1}"
     printf 'crash_reject_needs_review=%s\n' "${CRASH_REJECT_NEEDS_REVIEW:-1}"
-    printf 'reachability_auto=%s\n' "${REACHABILITY_AUTO:-1}"
     printf 'llm_decide_disable=%s\n' "${LLM_DECIDE_DISABLE:-}"
-    printf 'reachability_cache_dir=%s\n' "${REACHABILITY_CACHE_DIR:-}"
     if declare -f current_target_source_signature >/dev/null 2>&1; then
       case "$label" in
         patch-review|work-cards-refresh)

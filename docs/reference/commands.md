@@ -411,7 +411,7 @@ reading the normal review output:
 
 ```bash
 bin/export-repro CRASH-001-1 --slug "$TARGET"
-bin/reachability --report "$RESULTS/crashes/CRASH-001-1/" --severity-only
+bin/severity --report "$RESULTS/crashes/CRASH-001-1/"
 bin/validate-finding --finding "$RESULTS/findings/FIND-001" --target-path "targets/$TARGET" --backend "$BACKEND"
 bin/enrich-report "$RESULTS/crashes/CRASH-001-1/report.md" --slug "$TARGET"
 bin/find-crash-testcase "$RESULTS/crashes/CRASH-001-1"
@@ -421,11 +421,9 @@ bin/cluster-findings "$RESULTS"
 
 - `bin/export-repro` creates the maintainer bundle for an accepted
   crash.
-- `bin/reachability --severity-only` recomputes severity without
-  external queries. Omit `--severity-only` only when public caller
-  search is intended. The caller search filters by the target's
-  language (derived from the target tree; override with `--language`,
-  or `--language none` to disable the filter).
+- `bin/severity` recomputes the CVSS severity for a crash or finding
+  from its report and `target.toml`, offline. `--batch <results-dir>`
+  scores every `crashes/CRASH-*/` underneath.
 - `bin/validate-finding` — re-runs the finding substance gate on a
   candidate report or recon row.
 - `bin/enrich-report` — inlines source snippets, patch excerpts, and

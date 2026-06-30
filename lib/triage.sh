@@ -308,14 +308,13 @@ _triage_dir_pool_size() {
 # narrative (summary, impact, root cause, data flow, reproduction) changes
 # it. Inclusion criterion for the strip list: a section/line is stripped
 # ONLY if it is written by harness code, never by the reporting agent:
-#   ## Severity rationale            — bin/reachability SEV_HEADING
-#   ## Reachability — external callers — bin/reachability REACH_HEADING
+#   ## Severity rationale            — bin/severity SEV_HEADING
 #   ## Contract concern              — _triage_annotate_contract_concern
 #   ## Patch                         — bin/enrich-report (sole writer)
 #   <!-- enrich:name --> … fences    — bin/enrich-report idempotency blocks
 #   Cluster: <id> lines + |Cluster| table rows — bin/cluster-crashes
 #   Dedup frames: lines + |Dedup frames| rows  — bin/cluster-crashes
-#   - **Severity**: …(auto:/CVSS…)   — bin/reachability auto severity line
+#   - **Severity**: …(auto:/CVSS…)   — bin/severity auto severity line
 _triage_report_semantic_sha() {
   local report_path="$1"
   [ -s "$report_path" ] || return 1
@@ -327,7 +326,6 @@ _triage_report_semantic_sha() {
     /^<!-- \/enrich:[A-Za-z0-9_-]+ -->/ { fence=0; next }
     fence { next }
     /^## Severity rationale[[:space:]]*$/ { skip=1; next }
-    /^## Reachability — external callers[[:space:]]*$/ { skip=1; next }
     /^## Contract concern[[:space:]]*$/ { skip=1; next }
     /^## Patch[[:space:]]*$/ { skip=1; next }
     skip && /^## / { skip=0 }
@@ -471,7 +469,7 @@ _expand_trigger_components() {
 #                  component outside attacker_controls. The crash dir
 #                  STAYS in crashes/ with a `.contract-flagged`
 #                  sidecar and a "## Contract concern" report block.
-#                  The downstream reachability scorer derives CVSS-BTE
+#                  The downstream severity scorer derives CVSS-BTE
 #                  Environmental MAT:P when it sees the report-visible
 #                  "## Contract concern" section, so contract-flagged
 #                  crashes are automatically represented in Severity
@@ -719,7 +717,7 @@ llm_triage_crash_decision() {
 #   - regex/LLM trace triage (llm_triage_crash_decision)
 #   - file-completeness validation
 #   - export-repro bundling
-#   - optional reachability/severity annotation
+#   - optional severity annotation
 #   - caller-contract / Trigger source verdict matrix
 # and looks at the finished report.md (or REPORT.md after bundling) to ask:
 # is this a real, security-relevant sanitizer-class crash that an upstream
@@ -777,7 +775,7 @@ llm_confirm_crash_report() {
   fi
 
   # Asymmetric accept reuse — same rationale as llm_crash_legitimacy_decision:
-  # harness enrichment (severity/reachability/cluster/contract stamps)
+  # harness enrichment (severity/cluster/contract stamps)
   # rewrites report.md between triage passes without changing what the
   # gate judges, so keying the accept on raw report content re-litigated
   # every already-confirmed crash each sweep (observed: a full second
@@ -900,7 +898,7 @@ find_primary_testcase_in_crash_dir() {
     stem="${f##*/}"
     lower=$(printf '%s' "$stem" | tr '[:upper:]' '[:lower:]')
     case "$stem" in
-      .*|REPORT.md|REPORT.html|report.md|description.md|README.md|reproduce.sh|testcase.sh|reproducer.sh|sanitizer.txt|asan.txt|asan-output.txt|asan_output.txt|msan.txt|tsan.txt|ubsan.txt|harness.c|harness.cc|harness.cpp|harness.cxx|reachability.json|promotion.log|*.sanitizer.txt|*.asan.txt|*.msan.txt|*.tsan.txt|*.ubsan.txt|*.log|*.md) continue ;;
+      .*|REPORT.md|REPORT.html|report.md|description.md|README.md|reproduce.sh|testcase.sh|reproducer.sh|sanitizer.txt|asan.txt|asan-output.txt|asan_output.txt|msan.txt|tsan.txt|ubsan.txt|harness.c|harness.cc|harness.cpp|harness.cxx|severity.json|promotion.log|*.sanitizer.txt|*.asan.txt|*.msan.txt|*.tsan.txt|*.ubsan.txt|*.log|*.md) continue ;;
     esac
     case "$lower" in
       asan*|msan*|tsan*|ubsan*|*.asan.*|*.msan.*|*.tsan.*|*.ubsan.*) continue ;;
@@ -1118,7 +1116,7 @@ crash_dir_static_legitimacy_rejection_reason() {
   # Caller contract / Parameter control / Trigger source matrix)
   # are returned with a `contract-flag:` prefix. triage_crash_dirs
   # then annotates the dir in place (.contract-flagged sidecar +
-  # report block) and KEEPS it in crashes/. The downstream reachability
+  # report block) and KEEPS it in crashes/. The downstream severity
   # scorer recomputes the same structured fields and target.toml verdict.
   # crashes-rejected/ stays reserved for non-security
   # classes (OOM, panic, null-deref, stack-overflow, no sanitizer
@@ -1196,7 +1194,7 @@ llm_crash_legitimacy_decision() {
   hash=$(printf '%s' "$evidence" | _triage_text_sha1 2>/dev/null || true)
   cache="$d/.llm-legit-crash.json"
   # Asymmetric cache semantics: a positive (legitimate) decision is
-  # stable across idempotent reruns (auto-bundling and reachability can
+  # stable across idempotent reruns (auto-bundling and severity scoring can
   # mutate report fields without changing the underlying crash), so we
   # accept it on require_web match alone. A negative decision still
   # requires the exact evidence hash so a content edit can re-litigate.
@@ -1379,13 +1377,13 @@ _triage_bundle_crash_dir() {
 
 # True iff a .llm_fields.json sidecar already carries every scoring-relevant
 # reach field with a non-empty value. caller_controls is load-bearing: when
-# it is absent, bin/reachability falls back to its weakest controls gate
+# it is absent, bin/severity falls back to its weakest controls gate
 # (×0.4) and Reach collapses to Low, so a sidecar missing it is INCOMPLETE
 # and must be re-filled rather than accepted as final. caller_contract is
 # deliberately not required here — its absence scores as ×1.0 (obeyed), so
 # it never collapses the side and needn't force a retry.
 #
-# trigger_source is required for every filled sidecar because reachability and
+# trigger_source is required for every filled sidecar because severity scoring and
 # contract scoring are derived from Trigger source ∩ attacker_controls, not from
 # callback/caller-control prose.
 _llm_fields_complete() {
@@ -1400,7 +1398,7 @@ _llm_fields_complete() {
 # Run a single-shot LLM classification pass on the report's narrative to
 # fill structured fields the agent did not emit (Surface / Primitive
 # class / Caller controls / Caller contract). The result is written to
-# ``$d/.llm_fields.json`` so bin/reachability picks it up as a fallback
+# ``$d/.llm_fields.json`` so bin/severity picks it up as a fallback
 # — agent-authored fields always win. Best-effort: failure leaves the
 # report dir untouched.
 #
@@ -1488,125 +1486,54 @@ _triage_llm_fill_fields() {
   return 0
 }
 
-# Run bin/reachability against a crash dir after the sanitizer evidence,
-# testcase, and report are already present. This is post-processing for
-# severity/report annotation, not a discovery or preservation gate.
-# Best-effort with a wall-clock cap (REACHABILITY_TIMEOUT, default 180s).
-#
-# The external-caller search hits Sourcegraph + GitHub APIs serially; on
-# popular OSS symbols (hundreds of callers across many repos) those
-# round-trips legitimately take 60-120s. A 60s cap was producing empty
-# .err logs and a useless "timeout/error; see <empty file>" warning on
-# every finding. Default bumped to 180; override via REACHABILITY_TIMEOUT.
-#
-# REACHABILITY_AUTO controls behaviour:
-#   1 / external / unset (default) → query public code-search backends
-#                                    (Sourcegraph + GitHub) for external callers.
-#                                    This is the default because OSS targets'
-#                                    symbol names are already public — the
-#                                    external-caller reach enriches the
-#                                    Reachability report and triage
-#                                    prioritisation (it does not feed the CVSS
-#                                    score).
-#   local / severity-only          → skip backends; compute severity from
-#                                    the report fields only. Use this when
-#                                    auditing private code whose symbol
-#                                    names should not be exposed to public
-#                                    search.
-#   0                              → disable the hook entirely.
-#
-# REACHABILITY_EXTERNAL=1 is a legacy alias for REACHABILITY_AUTO=external.
-# Honors REACHABILITY_MOCK_DIR for tests.
-_triage_run_reachability() {
+# Run bin/severity against a crash/finding dir after the sanitizer evidence,
+# testcase, and report are present. Offline, deterministic CVSS scoring that
+# rewrites the report's Severity and writes severity.json; this is
+# post-processing for report annotation, never a discovery or preservation
+# gate. Best-effort: a failure leaves the dir preserved and unenriched, and
+# other gates still apply. A fixed wall-clock cap guards a parallel worker
+# against one pathological report (scoring is local and normally sub-second).
+_triage_run_severity() {
   local d="$1" id="$2" bin_dir="$3"
-  rm -f "$d/.reachability_ok" "$d/.reachability_pending" "$d/.reachability_failed" 2>/dev/null || true
+  rm -f "$d/.severity_ok" "$d/.severity_pending" "$d/.severity_failed" 2>/dev/null || true
 
-  local _reach_setting="${REACHABILITY_AUTO:-1}"
-  if [ "$_reach_setting" != "1" ] \
-     && [ "$_reach_setting" != "external" ] \
-     && [ "$_reach_setting" != "local" ] \
-     && [ "$_reach_setting" != "severity-only" ]; then
-    printf 'disabled by REACHABILITY_AUTO=%s\n' "$_reach_setting" > "$d/.reachability_pending" 2>/dev/null || true
-    return 0
-  fi
-
-  if [ ! -x "$bin_dir/reachability" ]; then
-    printf 'bin/reachability not executable: %s/reachability\n' "$bin_dir" > "$d/.reachability_pending" 2>/dev/null || true
+  if [ ! -x "$bin_dir/severity" ]; then
+    printf 'bin/severity not executable: %s/severity\n' "$bin_dir" > "$d/.severity_pending" 2>/dev/null || true
     return 0
   fi
   if [ ! -s "$d/report.md" ] && [ ! -s "$d/REPORT.md" ] && [ ! -s "$d/.audit/report.md" ]; then
-    printf 'report missing; reachability waits for report.md or REPORT.md\n' > "$d/.reachability_pending" 2>/dev/null || true
+    printf 'report missing; severity waits for report.md or REPORT.md\n' > "$d/.severity_pending" 2>/dev/null || true
     return 0
   fi
 
-  local _reach_target=()
-  [ -n "${TARGET_SLUG:-}" ] && _reach_target=(--target "$TARGET_SLUG")
-  # Default is external (full reachability). Opt out with
-  # REACHABILITY_AUTO=local or REACHABILITY_AUTO=severity-only.
-  local _reach_mode=()
-  if [ "$_reach_setting" = "local" ] || [ "$_reach_setting" = "severity-only" ]; then
-    _reach_mode=(--severity-only)
-  fi
   local audit_dir="$d/.audit"
   mkdir -p "$audit_dir" 2>/dev/null || true
-  local out_log="$audit_dir/reachability.out"
-  local err_log="$audit_dir/reachability.err"
-  local _reach_timeout="${REACHABILITY_TIMEOUT:-180}"
-
-  # Politeness lock for external mode: bin/reachability already fans out
-  # parallel Sourcegraph/GitHub queries with per-process throttling, so
-  # TRIAGE_DIR_PARALLEL pooled workers would multiply that and bypass the
-  # intended global rate limits. Serialize just this step across workers
-  # (the LLM gates stay parallel; severity-only/local mode has no
-  # external calls and skips the lock). mkdir is the portable atomic
-  # primitive; a stale lock from a killed holder is stolen once it is
-  # older than the reachability timeout + slack, and a worker that waits
-  # out the full window proceeds anyway — politeness is best-effort,
-  # crash preservation is not.
-  local _reach_lock=""
-  if [ "$_reach_setting" = "1" ] || [ "$_reach_setting" = "external" ]; then
-    _reach_lock="${RESULTS_DIR:-$d}/.reachability.lock"
-    local _stale_after=$(( _reach_timeout + 60 )) _waited=0
-    while ! mkdir "$_reach_lock" 2>/dev/null; do
-      local _lock_age
-      _lock_age=$(( $(date +%s) - $(audit_stat_mtime_epoch "$_reach_lock" 2>/dev/null || echo 0) ))
-      if [ "$_lock_age" -gt "$_stale_after" ]; then
-        rmdir "$_reach_lock" 2>/dev/null || true
-        continue
-      fi
-      if [ "$_waited" -ge $(( _stale_after * 4 )) ]; then
-        _reach_lock=""
-        break
-      fi
-      sleep 2
-      _waited=$(( _waited + 2 ))
-    done
-  fi
+  local out_log="$audit_dir/severity.out"
+  local err_log="$audit_dir/severity.err"
 
   local rc=0
   if declare -f audit_timeout_run >/dev/null 2>&1; then
-    audit_timeout_run "$_reach_timeout" "$bin_dir/reachability" --report "$d" ${_reach_target[@]+"${_reach_target[@]}"} ${_reach_mode[@]+"${_reach_mode[@]}"} >"$out_log" 2>"$err_log"
+    audit_timeout_run 120 "$bin_dir/severity" --report "$d" >"$out_log" 2>"$err_log"
     rc=$?
   else
-    "$bin_dir/reachability" --report "$d" ${_reach_target[@]+"${_reach_target[@]}"} ${_reach_mode[@]+"${_reach_mode[@]}"} >"$out_log" 2>"$err_log"
+    "$bin_dir/severity" --report "$d" >"$out_log" 2>"$err_log"
     rc=$?
   fi
-  [ -n "$_reach_lock" ] && rmdir "$_reach_lock" 2>/dev/null || true
   if [ "$rc" -eq 0 ]; then
-    printf 'ok\n' > "$d/.reachability_ok" 2>/dev/null || true
+    printf 'ok\n' > "$d/.severity_ok" 2>/dev/null || true
     return 0
   fi
   local reason
   reason=$(grep -m1 -v '^[[:space:]]*$' "$err_log" 2>/dev/null | head -c 220 || true)
   if [ -z "$reason" ]; then
     if [ "$rc" -eq 124 ]; then
-      reason="timed out after ${_reach_timeout}s (override via REACHABILITY_TIMEOUT)"
+      reason="timed out after 120s"
     else
       reason="exit ${rc} with no stderr; see ${err_log}"
     fi
   fi
-  printf '%s\n' "$reason" > "$d/.reachability_failed" 2>/dev/null || true
-  audit_log "WARN: skipped reachability analysis (severity / caller-chain enrichment) for crash ${id}: ${reason} — the crash dir is preserved without enrichment and other gates still apply" | tee -a "$INDEX"
+  printf '%s\n' "$reason" > "$d/.severity_failed" 2>/dev/null || true
+  audit_log "WARN: skipped severity scoring for ${id}: ${reason} — the dir is preserved without enrichment and other gates still apply" | tee -a "$INDEX"
 }
 
 # Fill missing reach fields + score every FIND/CRASH report under a pooled
@@ -1616,21 +1543,21 @@ _triage_run_reachability() {
 # _triage_llm_fill_fields the per-cell pass runs, then the same deterministic
 # caller-only contract reconciliation (so crash and finding twins of one bug
 # localise and floor identically — same scorer, now fed the same fields).
-# Findings are additionally scored here via _triage_run_reachability because
-# bin/reachability --batch only walks crashes/ (crashes are left for the
+# Findings are additionally scored here via _triage_run_severity because
+# bin/severity --batch only walks crashes/ (crashes are left for the
 # caller's --batch step, so we don't double-score them). Reads only on-disk
 # reports — no live audit
 # session — so it is safe to run during a --regenerate re-derivation as well
 # as a live run. Idempotent (complete sidecars skip; re-scoring is cached)
-# and best-effort. Honors LLM_FIELD_FILL_DISABLE / REACHABILITY_AUTO.
+# and best-effort. Honors LLM_FIELD_FILL_DISABLE.
 #
 # Usage: triage_fill_reach_fields_tree <pool_dir> [bin_dir]
 triage_fill_reach_fields_tree() {
   local _root="$1" _bin_dir="${2:-${SCRIPT_ROOT:-.}/bin}"
   [ -d "$_root" ] || return 0
-  # _triage_run_reachability logs its failure tail to $INDEX (bare). In the
+  # _triage_run_severity logs its failure tail to $INDEX (bare). In the
   # benchmark/pool context there is no audit INDEX, so default it here — under
-  # `set -u` an unset $INDEX on the reachability-failure path would abort the
+  # `set -u` an unset $INDEX on the severity-failure path would abort the
   # whole run. Dynamic scope makes this local visible to the callee.
   local INDEX="${INDEX:-/dev/null}"
   local _d _id
@@ -1644,10 +1571,10 @@ triage_fill_reach_fields_tree() {
       # concern" oob annotation (and impact floor) its crash twin gets. Crashes do
       # this via _triage_reconcile_contract_flag; findings need the narrative-only
       # variant because they carry no sanitizer artifact. Must precede
-      # _triage_run_reachability — unlike crashes (scored later by --batch),
+      # _triage_run_severity — unlike crashes (scored later by --batch),
       # findings are scored inline right here.
       _triage_reconcile_contract_flag_finding "$_d" "$_id"
-      _triage_run_reachability "$_d" "$_id" "$_bin_dir"
+      _triage_run_severity "$_d" "$_id" "$_bin_dir"
     done
   fi
   if [ -d "$_root/crashes" ]; then
@@ -1721,7 +1648,7 @@ _triage_annotate_rejection_report() {
 }
 
 # Annotate a crash dir IN PLACE for contract concerns. The dir stays
-# in crashes/; the existing reachability scorer rates it lower when it
+# in crashes/; the existing severity scorer rates it lower when it
 # recomputes the structured verdict from report fields and target.toml, so the
 # downstream score reflects the current contract concern without losing the
 # crash from the count. Used by triage_crash_dirs step 4 when the verdict matrix
@@ -1744,7 +1671,7 @@ _triage_annotate_contract_concern() {
     echo "# Contract-flagged by triage"
     echo "# Reason: $reason"
     echo "# When: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "# Action: dir stays in place. This sidecar records the current structured contract verdict; reachability rescoring recomputes the verdict from fields and target.toml."
+    echo "# Action: dir stays in place. This sidecar records the current structured contract verdict; severity rescoring recomputes the verdict from fields and target.toml."
   } > "$d/.contract-flagged" 2>/dev/null || true
 
   [ -n "$report" ] || return 0
@@ -2115,11 +2042,11 @@ _requeue_crash_needs_review_dirs() {
 #                                 maintainer bundle layout. Idempotent.
 #   4. Security-boundary check  — deterministic caller-contract / trigger
 #                                 checks plus crash legitimacy review.
-#                                 Reachability score absence is not a
+#                                 Severity score absence is not a
 #                                 rejection reason.
-#   5. Reachability             — best-effort post-processing. Writes
-#                                 reachability.json + Severity into the
-#                                 report and .reachability_* status markers.
+#   5. Severity                 — best-effort post-processing. Writes
+#                                 severity.json + Severity into the
+#                                 report and .severity_* status markers.
 #                                 Failure never moves a crash out of
 #                                 crashes/.
 #   5.5 Trigger-provenance gate — independent source-reading reviewer;
@@ -2161,10 +2088,10 @@ _triage_one_crash_dir() {
     # crashes-rejected/ so it leaves the crash count, not just the severity.
     # Conservative: a real library bug merely *exercised* by a harness keeps a
     # library frame in its stack and is NOT matched (see _crash_is_harness_rooted
-    # in bin/reachability — the single source of truth, reused here so the rule
+    # in bin/severity — the single source of truth, reused here so the rule
     # is not duplicated in shell).
     if [ -n "$asan_path" ] \
-       && python3 "$bin_dir/reachability" --report "$d" --harness-rooted-check >/dev/null 2>&1; then
+       && python3 "$bin_dir/severity" --report "$d" --harness-rooted-check >/dev/null 2>&1; then
       if [ ! -f "$d/.autodiscard" ]; then
         {
           echo "# Auto-rejected by triage_crash_dirs"
@@ -2431,13 +2358,13 @@ _triage_one_crash_dir() {
     #     caller-contract / parameter-control / trigger-source matrix):
     #     annotate IN PLACE with a .contract-flagged sidecar
     #     + "## Contract concern" report block and KEEP in crashes/.
-    #     The downstream reachability scorer recomputes the same structured
+    #     The downstream severity scorer recomputes the same structured
     #     verdict from report fields and target.toml, so these are represented
     #     in Severity without being lost from the crashes/ count or the
-    #     reachability/scoring pipeline.
+    #     severity scoring pipeline.
     #   - demote-to-findings: existing path, routed through
     #     _triage_route_rejection.
-    # This check must not depend on bin/reachability output.
+    # This check must not depend on bin/severity output.
     local security_reject_reason=""
     security_reject_reason=$(crash_dir_security_rejection_reason "$d" 2>/dev/null || true)
     if [ -n "$security_reject_reason" ]; then
@@ -2445,7 +2372,7 @@ _triage_one_crash_dir() {
         contract-flag:*)
           local flag_reason="${security_reject_reason#contract-flag: }"
           _triage_annotate_contract_concern "$d" "$id" "$flag_reason"
-          audit_log "CONTRACT-FLAG: crashes/${id} kept in crashes/ with contract-concern annotation — ${flag_reason}. Reachability scorer recomputes severity from fields and target.toml." | tee -a "$INDEX"
+          audit_log "CONTRACT-FLAG: crashes/${id} kept in crashes/ with contract-concern annotation — ${flag_reason}. The severity scorer recomputes from fields and target.toml." | tee -a "$INDEX"
           ;;
         *)
           if [ ! -f "$d/.autodiscard" ]; then
@@ -2466,12 +2393,12 @@ _triage_one_crash_dir() {
       esac
     fi
 
-    # ── 5. Reachability post-processing ────────────────────────────
+    # ── 5. Severity post-processing ───────────────────────────────
     # Best-effort severity/report enrichment only. Failure is recorded via
-    # .reachability_failed and never blocks crash preservation. The LLM
+    # .severity_failed and never blocks crash preservation. The LLM
     # hybrid pass fills any missing structured fields before scoring.
     _triage_llm_fill_fields "$d" "$id"
-    _triage_run_reachability "$d" "$id" "$bin_dir"
+    _triage_run_severity "$d" "$id" "$bin_dir"
 
     local crash_report=""
     crash_report=$(_triage_crash_report_path "$d") || crash_report=""
@@ -2555,7 +2482,7 @@ triage_crash_dirs() {
 
   # Each worker writes its own indexed outcome file ($outcome_dir/<n>); the
   # tally below cats them all AFTER the pool drains, so the bounded FIFO window
-  # (vs an all-jobs barrier that idles on the slowest 3-gate + reachability
+  # (vs an all-jobs barrier that idles on the slowest 3-gate + severity
   # chain) changes scheduling only, never a disposition.
   pool_run "$pool" _triage_crash_pool_worker "${crash_dirs[@]}"
 
@@ -2934,11 +2861,11 @@ llm_find_quality_decision() {
 #   3. If the verdict is accept=false at quorum, move the FIND dir to
 #      findings-rejected/ (override: .keep / .reviewed pins it). The audit log
 #      records the reject reason.
-#   4. Run bin/reachability against surviving FIND dirs for caller /
-#      severity annotation (same helper crashes use).
+#   4. Run bin/severity against surviving FIND dirs for severity
+#      annotation (same helper crashes use).
 #   5. report.md → report.html sibling render happens in maintain_indexes
 #      so the artifact set matches crashes/.
-# One FIND dir through the quality gate + reachability enrichment. Same
+# One FIND dir through the quality gate + severity enrichment. Same
 # isolation contract as _triage_one_crash_dir: every write lands inside
 # this dir or goes through flock'd bin/state, so the pool in
 # validate_find_gate can run different dirs concurrently.
@@ -3164,7 +3091,7 @@ _validate_one_find_dir() {
     # gate above; this can only move it to findings-rejected/, never promote.
     _triage_trigger_provenance_gate "$d" "$id" "$desc" "$bin_dir" && return 0
 
-    # Reachability annotation (same helper crashes use). Best-effort.
+    # Severity annotation (same helper crashes use). Best-effort.
     # The LLM hybrid pass fills missing structured fields beforehand so
     # the deterministic scorer can class non-memory findings (open
     # redirect, SSRF, …) instead of falling through to "unclassified".
@@ -3173,7 +3100,7 @@ _validate_one_find_dir() {
     # — so a caller-only finding and its crash twin localise and floor identically.
     _triage_llm_fill_fields "$d" "$id"
     _triage_reconcile_contract_flag_finding "$d" "$id"
-    _triage_run_reachability "$d" "$id" "$bin_dir"
+    _triage_run_severity "$d" "$id" "$bin_dir"
   return 0
 }
 
@@ -3199,7 +3126,7 @@ validate_find_gate() {
   done
 
   # Each FIND gate is 1-2 serial LLM calls plus an optional external
-  # reachability lookup (up to REACHABILITY_TIMEOUT, default 180s), so
+  # severity scoring, so
   # per-dir latency varies a lot. Run dirs through a bounded FIFO-windowed
   # pool: when full, wait on the OLDEST job (a specific pid — portable to
   # bash 3.2, which lacks `wait -n`) and launch the next immediately,
@@ -3720,9 +3647,9 @@ _rejected_finding_reason() {
 # Stable change-key for cluster-crashes: the active + rejected crash set
 # (basenames) plus, per crash, every input cluster-crashes::_signature() reads
 # — NOT just the sanitizer file. The crash cluster identity comes from asan
-# frames, but the table ALSO carries severity, strategy, external-caller counts
-# and promotion status, all of which are pulled from the maintainer report,
-# reachability.json and .promotion_pending. An earlier version keyed on asan
+# frames, but the table ALSO carries severity, strategy and promotion
+# status, all of which are pulled from the maintainer report,
+# severity.json and .promotion_pending. An earlier version keyed on asan
 # files alone, so an in-place severity edit (Low -> High) left CRASH-CLUSTERS.md
 # stale at the old rank. We content-hash the report (severity/strategy are
 # rewritten in place, possibly at the same mtime/size, so a stat key can miss
@@ -3746,7 +3673,7 @@ _maintain_crash_cluster_sig() {
              "$d"/.audit/*.asan.txt "$d"/.audit/*.msan.txt \
              "$d"/.audit/*.tsan.txt "$d"/.audit/*.ubsan.txt \
              "$d"/REPORT.md "$d"/report.md \
-             "$d"/reachability.json "$d"/.promotion_pending; do
+             "$d"/severity.json "$d"/.promotion_pending; do
       [ -f "$f" ] && out="${out}${f##*/}:$(_triage_file_sha1 "$f" 2>/dev/null || true),"
     done
     out="${out}"$'\n'
@@ -3886,7 +3813,7 @@ maintain_indexes() {
   # inlines them — a diff landing AFTER the first render must re-enrich),
   # the render/enrich tool identities, and the ENRICH_REPORT_AUTO toggle.
   # It records the POST-enrich markdown sha: enrich is idempotent, so a
-  # dir converges after one pass and re-renders only when reachability,
+  # dir converges after one pass and re-renders only when severity,
   # clustering, a new patch, or an agent actually changes an input.
   _maintain_render_sig() {
     local _d="$1" _report="$2" _render="$3" _enrich="$4"
@@ -3952,8 +3879,8 @@ maintain_indexes() {
 
   # Emit HTML siblings after all report/cluster mutations for this iteration.
   # Report HTML is intentionally owned here, not by export-repro,
-  # bin/reachability, or bin/cluster-crashes: those are intermediate mutators
-  # of REPORT.md/report.md, while maintain_indexes runs after reachability and
+  # bin/severity, or bin/cluster-crashes: those are intermediate mutators
+  # of REPORT.md/report.md, while maintain_indexes runs after severity and
   # after cluster-crashes has refreshed Cluster lines. This keeps REPORT.html
   # a single final render of the current markdown instead of a stale snapshot.
   # Best-effort: failures don't block the audit. Set INDEX_HTML_AUTO=0 to

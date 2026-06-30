@@ -15,7 +15,6 @@ source "$(dirname "$0")/helpers.sh"
 setup_test_env
 source "$SCRIPT_ROOT/lib/triage.sh"
 
-export REACHABILITY_AUTO=0                 # no network on the KEEP path
 # helpers.sh defaults LLM_DECIDE_DISABLE=1, and the gate honours it (no-op) —
 # unset it here so the gate actually runs. The only LLM caller on this path is
 # llm_find_quality_decision, neutralised below, so no real backend is hit.

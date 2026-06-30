@@ -1,772 +1,45 @@
 #!/usr/bin/env python3
-"""bin/reachability — external-caller probe + severity recompute for crash reports.
+"""bin/severity — offline CVSS v4.0 severity scorer for crash/finding reports.
 
-Two public code-search backends are queried in parallel:
+Reads a report (and any adjacent sanitizer output), classifies the bug
+primitive and the attack surface, derives CVSS v4.0 Base/Threat/Environmental
+metrics, and scores them with the vendored reference scorer (lib/cvss4). The
+score is labeled with the v4.0 nomenclature (CVSS-B/CVSS-BT/CVSS-BE/CVSS-BTE)
+and written back into the report's Classification block.
 
-  * Sourcegraph public stream API — https://sourcegraph.com/.api/search/stream
-                                    Unauthenticated, broad GitHub coverage.
-  * gh search code                — official GitHub Search API via the gh CLI.
-                                    Needs `gh auth login` or GH_TOKEN.
-
-Results are cached on disk for 7 days, the request carries a polite User-Agent,
-and transient failures get a single retry. 403/429 responses also create a
-short backend-level cooldown so repeated symbol probes do not hammer a
-rate-limited service. Each backend is independent: any one failing produces
-"status": "unavailable" without blocking the others.
-
-Filtering: hits whose repo or path contain any substring from the target's
-reachability_ignore list are dropped. The list is read from output/<slug>/
-target.toml and is the right place to silence the project's own sources and
-known vendored copies.
-
-Severity is the CVSS v4.0 score. The report's primitive/surface facts derive
-Base metrics; proof-of-concept evidence derives the Threat metric; local
-reachability, caller-control, and shipping-context facts derive Environmental
-metrics. The resulting score is labeled with the v4.0 nomenclature
-(CVSS-B/CVSS-BT/CVSS-BE/CVSS-BTE) and written back into the report's
-Classification block.
+Every input is local and deterministic: the report's primitive/surface facts
+derive Base metrics; proof-of-concept evidence derives the Threat metric;
+reachability, caller-control, and shipping-context facts (report fields plus
+the target's threat_model.attacker_controls in target.toml) derive
+Environmental metrics. No network access.
 
 Usage:
-  bin/reachability --symbol pcre2_serialize_decode [--symbol foo] [--json]
-  bin/reachability --report path/to/CRASH-XXX/      # update report.md +
-                                                     # write reachability.json
-  bin/reachability --report path/to/CRASH-XXX/ --severity-only
-                                                     # no network; use cached
-                                                     # reachability.json or zero
-
-Env:
-  REACHABILITY_MOCK_DIR   When set, backend HTTP/CLI calls are replaced by
-                          reads of <dir>/<service>-<sha1(symbol)>.json. This
-                          is what tests/test_reachability.sh uses; it also
-                          lets you record fixtures by saving real responses.
-  REACHABILITY_CACHE_DIR  Override the cache directory. Default:
-                          ~/.cache/sancov-reachability/
-  REACHABILITY_NEGATIVE_TTL_SECS
-                          Override the 403/429 backend cooldown. Default: 300.
+  bin/severity --report path/to/CRASH-XXX/   # rewrite Severity + write
+                                             # severity.json
+  bin/severity --batch path/to/results/      # score every crashes/CRASH-*/
+  bin/severity --report path/to/CRASH-XXX/ --harness-rooted-check
+                                             # read-only: is the crash rooted
+                                             # entirely in the audit harness?
 """
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
-import hashlib
 import json
-import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 HERE = Path(__file__).absolute().parent
 sys.path.insert(0, str(HERE.parent / "lib"))
 
 import cvss4  # noqa: E402
-import languages  # noqa: E402
 import stack_frames  # noqa: E402
 import target_config as tc  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
 
-USER_AGENT = "tokenfuzz-reachability/1.0"
-DEFAULT_TIMEOUT = 10.0
-BACKOFF_SECS = 30.0
-CACHE_TTL_SECS = 7 * 24 * 3600
-# Status codes worth a single retry. 403 is deliberately excluded: it is often
-# an auth or policy response, so repeated immediate retries are not useful.
-RETRY_STATUS = (429, 502, 503, 504)
-NEGATIVE_CACHE_STATUS = (403, 429)
-DEFAULT_NEGATIVE_TTL_SECS = 5 * 60
-# Per-backend minimum gap between consecutive symbol probes. gh is bound by the
-# GitHub Search API limit (30 req/min authenticated → ≥2.0s between calls);
-# Sourcegraph publishes no rate limit but we stay polite.
-SERVICE_THROTTLE_SECS = {
-    "sourcegraph": 0.5,
-    "gh": 2.0,
-}
 
-SERVICES = ("sourcegraph", "gh")
-
-
-# ─── Cache ────────────────────────────────────────────────────────────────
-
-
-def _cache_dir() -> Path:
-    p = os.environ.get("REACHABILITY_CACHE_DIR")
-    if p:
-        return Path(p)
-    return Path(os.path.expanduser("~/.cache/sancov-reachability"))
-
-
-def _cache_path(service: str, symbol: str, language: str = "c") -> Path:
-    """Cache key: (service, symbol, language) — the language filter changes
-    what a probe returns, so a C-target probe must not satisfy a JS-target
-    probe for the same identifier. Freshness is enforced by mtime, not by
-    a date suffix in the filename — putting the date in the name caused
-    near-midnight UTC misses where a freshly written file would be discarded
-    seconds later when the day rolled over."""
-    digest = hashlib.sha1(f"{language}|{symbol}".encode("utf-8")).hexdigest()[:16]
-    return _cache_dir() / f"{service}-{digest}.json"
-
-
-def _atomic_json_write(path: Path, payload: dict) -> None:
-    tmp_name = ""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as f:
-            tmp_name = f.name
-            json.dump(payload, f, sort_keys=True)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_name, path)
-        tmp_name = ""
-        try:
-            dir_fd = os.open(path.parent, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    finally:
-        if tmp_name:
-            try:
-                Path(tmp_name).unlink(missing_ok=True)
-            except OSError:
-                pass
-
-
-def _cache_read(service: str, symbol: str, language: str = "c") -> dict | None:
-    p = _cache_path(service, symbol, language)
-    if not p.is_file():
-        return None
-    try:
-        age = time.time() - p.stat().st_mtime
-    except OSError:
-        return None
-    if age > CACHE_TTL_SECS:
-        return None
-    try:
-        return json.loads(p.read_text("utf-8"))
-    except Exception:
-        return None
-
-
-def _cache_write(service: str, symbol: str, payload: dict, language: str = "c") -> None:
-    p = _cache_path(service, symbol, language)
-    try:
-        _atomic_json_write(p, payload)
-    except OSError:
-        pass
-
-
-def _negative_ttl_secs() -> float:
-    raw = os.environ.get("REACHABILITY_NEGATIVE_TTL_SECS")
-    if raw is None:
-        return float(DEFAULT_NEGATIVE_TTL_SECS)
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        return float(DEFAULT_NEGATIVE_TTL_SECS)
-
-
-def _negative_cache_path(service: str) -> Path:
-    return _cache_dir() / f"{service}-backoff.json"
-
-
-def _negative_cache_read(service: str) -> dict | None:
-    p = _negative_cache_path(service)
-    if not p.is_file():
-        return None
-    try:
-        age = time.time() - p.stat().st_mtime
-    except OSError:
-        return None
-    ttl = _negative_ttl_secs()
-    if ttl <= 0 or age > ttl:
-        return None
-    try:
-        payload = json.loads(p.read_text("utf-8"))
-    except Exception:
-        return None
-    status = payload.get("http_status", "?")
-    remaining = max(0, int(ttl - age))
-    return {
-        "status": "unavailable",
-        "error": f"backend cooldown after http {status} ({remaining}s remaining)",
-        "http_status": status,
-        "negative_cache": True,
-    }
-
-
-def _negative_cache_write(service: str, http_status: int) -> None:
-    if http_status not in NEGATIVE_CACHE_STATUS or _negative_ttl_secs() <= 0:
-        return
-    p = _negative_cache_path(service)
-    payload = {
-        "status": "unavailable",
-        "http_status": http_status,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    try:
-        _atomic_json_write(p, payload)
-    except OSError:
-        pass
-
-
-# ─── HTTP with one polite retry ───────────────────────────────────────────
-
-
-def _http_get(url: str, timeout: float, accept: str = "application/json") -> tuple[int, Any]:
-    """Return (status_code, body). For application/json the body is parsed JSON
-    when parseable, otherwise raw text. For any other accept value (e.g.
-    text/event-stream) the body is returned as a raw decoded string.
-    Raises urllib errors on transport failure."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
-        if accept == "application/json":
-            try:
-                return resp.status, json.loads(body)
-            except json.JSONDecodeError:
-                return resp.status, body
-        return resp.status, body
-
-
-def _http_with_retry(url: str, timeout: float, accept: str = "application/json") -> tuple[int, Any]:
-    """One retry on RETRY_STATUS after BACKOFF_SECS. Other codes return as-is."""
-    try:
-        status, body = _http_get(url, timeout, accept)
-    except urllib.error.HTTPError as e:
-        status = e.code
-        body = None
-        if status in RETRY_STATUS:
-            time.sleep(BACKOFF_SECS)
-            try:
-                return _http_get(url, timeout, accept)
-            except urllib.error.HTTPError as e2:
-                return e2.code, None
-        return status, body
-    if status in RETRY_STATUS:
-        time.sleep(BACKOFF_SECS)
-        try:
-            return _http_get(url, timeout, accept)
-        except urllib.error.HTTPError as e:
-            return e.code, None
-    return status, body
-
-
-# ─── Mock layer (test fixtures) ───────────────────────────────────────────
-
-
-def _mock_path(service: str, symbol: str) -> Path | None:
-    mock_dir = os.environ.get("REACHABILITY_MOCK_DIR")
-    if not mock_dir:
-        return None
-    digest = hashlib.sha1(symbol.encode("utf-8")).hexdigest()[:16]
-    return Path(mock_dir) / f"{service}-{digest}.json"
-
-
-def _read_mock(service: str, symbol: str) -> dict | None:
-    """Mock layer for tests.
-
-    When REACHABILITY_MOCK_DIR is set, the mock dir is treated as a hard wall:
-    if a mock file exists for (service, symbol), return it; if it doesn't,
-    return an "unavailable" result rather than falling through to a real
-    HTTP / gh-CLI call. This keeps the test suite hermetic even when a
-    report yields more symbols than the test fixture covers.
-    """
-    p = _mock_path(service, symbol)
-    if p is None:
-        return None  # mock layer disabled — fall through to real backend
-    if not p.is_file():
-        return {"status": "unavailable", "error": f"no mock for ({service}, {symbol})"}
-    try:
-        return json.loads(p.read_text("utf-8"))
-    except Exception:
-        return {"status": "unavailable", "error": "mock JSON unparseable"}
-
-
-# ─── Backends ─────────────────────────────────────────────────────────────
-
-
-# Result caps per (backend, symbol) probe. 100, not 30: the reported
-# external-caller reach (distinct dependent repos) saturates well below this on
-# popular APIs, and a low cap would understate that prevalence signal in the
-# Reachability section. The count is reporting metadata only — it does not feed
-# the CVSS score.
-SOURCEGRAPH_RESULT_LIMIT = 100
-GH_RESULT_LIMIT = 100
-
-
-def _parse_sourcegraph_sse(body: str) -> list[dict] | None:
-    """Extract all match items from a Sourcegraph stream response.
-
-    Returns None if the body has no SSE structure at all (no `event:` lines)
-    — signal of a schema drift or HTML error page returned with 200. Returns
-    an empty list when the stream is well-formed but emitted no `matches`
-    events (legitimate "0 hits" — Sourcegraph still emits `progress` and
-    `done` in that case).
-    """
-    matches: list[dict] = []
-    saw_event = False
-    cur_event: str | None = None
-    cur_data: list[str] = []
-
-    def _flush() -> None:
-        nonlocal cur_event, cur_data
-        if cur_event == "matches" and cur_data:
-            try:
-                items = json.loads("".join(cur_data))
-            except json.JSONDecodeError:
-                items = None
-            if isinstance(items, list):
-                matches.extend(items)
-        cur_event = None
-        cur_data = []
-
-    for line in body.splitlines():
-        if line == "":
-            _flush()
-            continue
-        if line.startswith("event:"):
-            saw_event = True
-            cur_event = line[6:].strip()
-        elif line.startswith("data:"):
-            v = line[5:]
-            if v.startswith(" "):
-                v = v[1:]
-            cur_data.append(v)
-    _flush()
-    if not saw_event:
-        return None
-    return matches
-
-
-def query_sourcegraph(symbol: str, timeout: float, language: str = "c") -> dict:
-    """Sourcegraph public stream API. The stream is bounded by `count:` in the
-    query so the response is small and terminates naturally; we read it whole
-    and pull repo+path out of every `event: matches` frame.
-
-    The `lang:` filter cuts out stray hits in other languages that happen to
-    share an identifier name. It is derived from the target tree (see
-    _detect_target_language) — hardcoding C made every probe for a JS/Go/Java
-    target return only C-file noise. Empty `language` disables the filter."""
-    mock = _read_mock("sourcegraph", symbol)
-    if mock is not None:
-        return mock
-    lang_filter = f" lang:{language}" if language else ""
-    url = "https://sourcegraph.com/.api/search/stream?" + urllib.parse.urlencode({
-        "q": f"{symbol}{lang_filter} count:{SOURCEGRAPH_RESULT_LIMIT}",
-        "display": str(SOURCEGRAPH_RESULT_LIMIT),
-    })
-    try:
-        status, body = _http_with_retry(url, timeout, accept="text/event-stream")
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
-        return {"status": "unavailable", "error": f"transport: {e!r}"}
-    if status != 200 or not isinstance(body, str):
-        return {"status": "unavailable", "error": f"http {status}", "http_status": status}
-    parsed = _parse_sourcegraph_sse(body)
-    if parsed is None:
-        return {"status": "unavailable", "error": "schema mismatch (no SSE event frames)"}
-    seen: dict[tuple[str, str], dict] = {}
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-        repo = str(item.get("repository", "") or "")
-        path = str(item.get("path", "") or "")
-        if not repo and not path:
-            continue
-        key = (repo, path)
-        if key not in seen:
-            seen[key] = {"repo": repo, "path": path}
-    return {"status": "ok", "hits": list(seen.values())}
-
-
-def query_gh(symbol: str, timeout: float, language: str = "c") -> dict:
-    """Use the gh CLI if available + authenticated. Anything else → unavailable."""
-    mock = _read_mock("gh", symbol)
-    if mock is not None:
-        return mock
-    if shutil.which("gh") is None:
-        return {"status": "unavailable", "error": "gh CLI not installed"}
-    cmd = ["gh", "search", "code", symbol, f"--limit={GH_RESULT_LIMIT}",
-           "--json", "repository,path"]
-    if language:
-        cmd.insert(4, f"--language={language}")
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True, text=True, timeout=timeout * 2,
-        )
-    except (subprocess.TimeoutExpired, OSError) as e:
-        return {"status": "unavailable", "error": f"gh exec: {e!r}"}
-    if proc.returncode != 0:
-        # Most common: not authenticated, or rate-limited.
-        return {"status": "unavailable", "error": (proc.stderr or "").strip()[:200] or f"gh exit {proc.returncode}"}
-    try:
-        items = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError as e:
-        return {"status": "unavailable", "error": f"gh JSON: {e!r}"}
-    seen: dict[tuple[str, str], dict] = {}
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        repo_obj = item.get("repository") or {}
-        repo = repo_obj.get("nameWithOwner") if isinstance(repo_obj, dict) else ""
-        path = item.get("path", "")
-        if not repo and not path:
-            continue
-        key = (str(repo), str(path))
-        if key not in seen:
-            seen[key] = {"repo": str(repo), "path": str(path)}
-    return {"status": "ok", "hits": list(seen.values())}
-
-
-BACKENDS = {
-    "sourcegraph": query_sourcegraph,
-    "gh": query_gh,
-}
-
-
-# ─── Driver: parallel, cached, filtered ───────────────────────────────────
-
-
-def _apply_ignore(hits: list[dict], ignore: list[str]) -> list[dict]:
-    if not ignore:
-        return hits
-    out = []
-    for h in hits:
-        repo = h.get("repo", "")
-        path = h.get("path", "")
-        if any(tok and (tok in repo or tok in path) for tok in ignore):
-            continue
-        out.append(h)
-    return out
-
-
-# Heuristic for "this hit is a vendored copy of the target's own source, not a
-# genuine external caller." Three signals:
-#   * the path contains a well-known vendored-deps subdir (vendor/, third_party/,
-#     contrib/, deps/, ext/, external/, jni/, thirdparty/, 3rd_src/, ...),
-#   * the path contains a basename that strongly identifies the upstream source
-#     (e.g. /pcre2_substring.c, /xmlschemas.c) and a vendored-style prefix,
-#   * the file is the project's own canonical source layout (e.g. .../pcre2/src/...).
-# Hits with these signals are kept in the "vendored_copies" bucket so the
-# severity formula isn't fooled by name collisions across repos that just
-# re-include the upstream code.
-_VENDORED_PREFIX_RE = re.compile(
-    r"(^|/)("
-    r"vendor|vendored|third_party|3rdparty|3rd[_-]?src|3rd[_-]?party|"
-    r"deps|contrib|jni|thirdparty|external|ext"
-    r")(/|$)",
-    re.IGNORECASE,
-)
-
-
-# A `-`/`_`-delimited numeric version suffix (`libxml2-2.9.14`, `pcre2_10`).
-# A trailing digit that is part of the name itself (`pcre2`, `libxml2`) is
-# NOT delimited and so is preserved.
-_VERSION_SUFFIX_RE = re.compile(r"[-_][0-9][0-9A-Za-z._]*$")
-
-
-def _target_name_variants(raw: str) -> set[str]:
-    """Project-name forms to match against vendored-path directory segments.
-
-    Returns the bare name plus a version-stripped form, so a vendored tree
-    named `libxml2-2.9.14` or `pcre2-10.42` still matches a `libxml2` /
-    `pcre2` audit. Names come from the live target tree and slug — there is
-    no hardcoded project list, so this works for any target.
-    """
-    raw = os.path.basename((raw or "").strip().lower().rstrip("/"))
-    if not raw:
-        return set()
-    variants = {raw}
-    stripped = _VERSION_SUFFIX_RE.sub("", raw)
-    if len(stripped) >= 2:
-        variants.add(stripped)
-    return variants
-
-
-def _segment_names_target(seg: str, target_names: set[str]) -> bool:
-    """True when path segment `seg` names the project under audit.
-
-    Matches the bare name and version/source-suffixed forms
-    (`libxml2`, `libxml2-2.9`, `pcre2_src`)."""
-    seg = seg.strip().lower()
-    if not seg:
-        return False
-    return any(
-        seg == name or seg.startswith(name + "-")
-        or seg.startswith(name + "_") or seg.startswith(name + ".")
-        for name in target_names
-    )
-
-
-def _is_vendored_copy(hit: dict, target_basenames: set[str],
-                      target_names: set[str]) -> bool:
-    path = hit.get("path", "") or ""
-    if not path:
-        return False
-    if _VENDORED_PREFIX_RE.search(path):
-        return True
-    # Path carries an upstream filename AND a directory segment naming the
-    # project under audit (e.g. somerepo/libxml2/xmlschemas.c is a vendored
-    # copy, not a real caller). The project name is derived at runtime from
-    # the target tree / slug, so this recognises any target — no hardcoded
-    # per-project enumeration.
-    if not (target_basenames and target_names):
-        return False
-    base = path.rsplit("/", 1)[-1]
-    if base not in target_basenames:
-        return False
-    return any(_segment_names_target(seg, target_names)
-               for seg in path.split("/")[:-1])
-
-
-def _split_vendored(hits: list[dict], target_basenames: set[str],
-                    target_names: set[str]) -> tuple[list[dict], list[dict]]:
-    """Return (genuine_callers, vendored_copies) by classifying each hit."""
-    genuine: list[dict] = []
-    vendored: list[dict] = []
-    for h in hits:
-        if _is_vendored_copy(h, target_basenames, target_names):
-            vendored.append(h)
-        else:
-            genuine.append(h)
-    return genuine, vendored
-
-
-def _query_one(service: str, symbol: str, timeout: float, use_cache: bool,
-               language: str = "c") -> dict:
-    if use_cache:
-        cached = _cache_read(service, symbol, language)
-        if cached is not None:
-            cached.setdefault("from_cache", True)
-            return cached
-        cooldown = _negative_cache_read(service)
-        if cooldown is not None:
-            cooldown.setdefault("from_cache", True)
-            return cooldown
-    fn = BACKENDS[service]
-    result = fn(symbol, timeout, language)
-    if use_cache and result.get("status") == "ok":
-        _cache_write(service, symbol, result, language)
-    elif use_cache:
-        try:
-            http_status = int(result.get("http_status", 0))
-        except (TypeError, ValueError):
-            http_status = 0
-        _negative_cache_write(service, http_status)
-    result.setdefault("from_cache", False)
-    return result
-
-
-def _service_throttle_secs(service: str) -> float:
-    if os.environ.get("REACHABILITY_MOCK_DIR"):
-        return 0.0
-    raw = os.environ.get(f"REACHABILITY_{service.upper()}_THROTTLE_SECS")
-    if raw is not None:
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            return SERVICE_THROTTLE_SECS.get(service, 0.0)
-    return SERVICE_THROTTLE_SECS.get(service, 0.0)
-
-
-def _query_service(service: str, symbols: list[str], timeout: float, use_cache: bool,
-                   language: str = "c") -> list[tuple[str, dict]]:
-    rows: list[tuple[str, dict]] = []
-    throttle = _service_throttle_secs(service)
-    for i, sym in enumerate(symbols):
-        r = _query_one(service, sym, timeout, use_cache, language)
-        rows.append((sym, r))
-        if i + 1 < len(symbols) and throttle > 0 and not r.get("from_cache"):
-            time.sleep(throttle)
-    return rows
-
-
-def query_all(symbols: list[str], ignore: list[str], timeout: float, use_cache: bool,
-              target_basenames: set[str] | None = None,
-              target_names: set[str] | None = None,
-              entry_symbol: str | None = None,
-              require_all_symbols: bool = False,
-              language: str = "c") -> dict:
-    """Run services in parallel, but keep each backend's symbol probes sequential.
-
-    target_basenames: filenames recognised as coming from the upstream project
-    (e.g. {"pcre2_substring.c", "pcre2_match.c"}).
-    target_names: project-name aliases for the target under audit (e.g.
-    {"pcre2"}), used to spot `…/<project>/…` vendored path segments.
-    Hits whose basename matches a target file AND whose path is vendored
-    (a vendored-style prefix, or a directory segment naming the project)
-    are bucketed into `vendored_copies` rather than `external_callers` —
-    those repos *ship* the bug, they don't call into a separate library.
-    This dramatically tightens the severity score (which weighs
-    external_callers heavily) for crashes where most search hits are
-    mirror-vendored sources.
-
-    entry_symbol: the public/caller entry point the bug is reached through.
-    When given, external-caller popularity counts genuine repos that match the
-    entry symbol any-frame — a real dependant reaches the entry point, not the
-    target's internal frames above it.
-
-    require_all_symbols: collision-resistance fallback when no entry symbol
-    was identified but the symbols are still a crash-state call chain. With
-    ≥2 probed symbols, a genuine external caller must match *every* probed
-    symbol in the same file (cross-backend) — a random project that merely
-    owns its own ``set_blob`` is a name collision and is dropped.
-
-    Neither flag set (manual --symbol, narrative-mined entry points) keeps
-    plain union/any-match. In every mode each unique symbol is queried at
-    most once.
-    """
-    per_service: dict[str, dict] = {svc: {"status": "ok", "hits": [], "errors": []} for svc in SERVICES}
-    target_basenames = target_basenames or set()
-    target_names = target_names or set()
-
-    max_workers = max(1, len(SERVICES))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_query_service, svc, symbols, timeout, use_cache,
-                               language): svc for svc in SERVICES}
-        for fut in concurrent.futures.as_completed(futures):
-            svc = futures[fut]
-            try:
-                rows = fut.result()
-            except Exception as e:
-                rows = [(sym, {"status": "unavailable", "error": f"executor: {e!r}"}) for sym in symbols]
-            entry = per_service[svc]
-            for sym, r in rows:
-                if r.get("status") != "ok":
-                    entry["errors"].append({"symbol": sym, "error": r.get("error", "unknown")})
-                    # If any symbol succeeds for a backend, the backend is still "ok"
-                    # for the union. Only mark unavailable if ALL symbols failed.
-                    continue
-                for h in r.get("hits", []):
-                    h2 = dict(h)
-                    h2["matched_symbol"] = sym
-                    entry["hits"].append(h2)
-
-    def _dedup(items: list[dict]) -> list[dict]:
-        """Collapse by (repo, path), first hit wins — per-backend diagnostics."""
-        seen: dict[tuple[str, str], dict] = {}
-        for h in items:
-            k = (h.get("repo", ""), h.get("path", ""))
-            if k not in seen:
-                seen[k] = h
-        return list(seen.values())
-
-    # Flip status to unavailable when nothing came back AND every probe errored,
-    # apply the ignore filter, split vendored copies out, and collect the
-    # surviving hits across backends for cross-backend aggregation.
-    all_genuine: list[dict] = []
-    all_vendored: list[dict] = []
-    for svc, entry in per_service.items():
-        if not entry["hits"] and entry["errors"]:
-            entry["status"] = "unavailable"
-        entry["hits"] = _apply_ignore(entry["hits"], ignore)
-        genuine, vendored = _split_vendored(entry["hits"], target_basenames, target_names)
-        all_genuine.extend(genuine)
-        all_vendored.extend(vendored)
-        # Per-backend diagnostic counts (the table); the authoritative count is
-        # the cross-backend aggregate below.
-        entry["hits"] = _dedup(genuine)
-        entry["vendored"] = _dedup(vendored)
-        entry["count"] = len(entry["hits"])
-        entry["vendored_count"] = len(entry["vendored"])
-
-    # Cross-backend aggregation: union by (repo, path), accumulating the set of
-    # probed symbols each file matched (across both backends), so an all-frames
-    # gate can ask whether a file matched the whole crash-state chain.
-    def _aggregate(items: list[dict]) -> dict[tuple[str, str], dict]:
-        agg: dict[tuple[str, str], dict] = {}
-        for h in items:
-            k = (h.get("repo", ""), h.get("path", ""))
-            rec = agg.get(k)
-            if rec is None:
-                rec = {"repo": h.get("repo", ""), "path": h.get("path", ""),
-                       "_symbols": set()}
-                agg[k] = rec
-            sym = h.get("matched_symbol")
-            if sym:
-                rec["_symbols"].add(sym)
-        return agg
-
-    def _finalize(agg: dict[tuple[str, str], dict]) -> list[dict]:
-        out: list[dict] = []
-        for rec in agg.values():
-            syms = sorted(rec["_symbols"])
-            out.append({
-                "repo": rec["repo"], "path": rec["path"],
-                "matched_symbols": syms,
-                # Back-compat single-symbol field used by older consumers.
-                "matched_symbol": syms[0] if syms else "",
-            })
-        return out
-
-    if entry_symbol not in set(symbols):
-        entry_symbol = None
-    probed = set(symbols)
-    genuine_agg = _aggregate(all_genuine)
-    vendored_agg = _aggregate(all_vendored)  # vendored copies are not frame-gated
-
-    if entry_symbol is not None:
-        # Popularity is "who calls the public entry point", so keep genuine
-        # repos that matched the entry symbol any-frame. The internal frames
-        # above it are deliberately not required — a real dependant never
-        # contains them.
-        caller_agg = {k: v for k, v in genuine_agg.items()
-                      if entry_symbol in v["_symbols"]}
-        match_mode = "entrypoint"
-    elif require_all_symbols and len(probed) >= 2:
-        # Crash-state chain with no identified entry point: keep only files
-        # that matched every probed symbol (collision-resistant).
-        caller_agg = {k: v for k, v in genuine_agg.items()
-                      if probed <= v["_symbols"]}
-        match_mode = "all-frames"
-    else:
-        caller_agg = genuine_agg
-        match_mode = "any-frame"
-
-    external_caller_hits = _finalize(caller_agg)
-    vendored_copy_hits = _finalize(vendored_agg)
-
-    services_responding = [svc for svc, e in per_service.items() if e["status"] == "ok"]
-    return {
-        "schema_version": 2,
-        "queried_at": datetime.now(timezone.utc).isoformat(),
-        "symbols": symbols,
-        "entry_symbol": entry_symbol,
-        "ignore": ignore,
-        "language": language,
-        "match_mode": match_mode,
-        "external_callers": len(external_caller_hits),
-        # Distinct repos, not files — the reported external-caller reach
-        # (dependent-project prevalence). One repo vendoring 40 matching files
-        # is one dependent project, not 40. Reporting metadata only; it does
-        # not feed the CVSS score.
-        "external_caller_repos": len({h["repo"] for h in external_caller_hits}),
-        "external_caller_hits": external_caller_hits,
-        "vendored_copies": len(vendored_copy_hits),
-        "vendored_copy_hits": vendored_copy_hits,
-        "services_responding": services_responding,
-        "services": per_service,
-    }
-
-
-# ─── target.toml discovery + ignore-list extraction ───────────────────────
+# ─── target.toml discovery ────────────────────────────────────────────────
 
 
 def _find_target_toml(start: Path) -> Path | None:
@@ -795,13 +68,6 @@ def _parse_target_toml(path: Path) -> dict:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
-
-
-def _parse_target_toml_ignore(path: Path) -> list[str]:
-    raw = _parse_target_toml(path).get("reachability_ignore", [])
-    if not isinstance(raw, list):
-        return []
-    return [str(item) for item in raw if str(item)]
 
 
 # ─── Severity scoring ─────────────────────────────────────────────────────
@@ -1459,7 +725,7 @@ def _caller_only_modified_impacts(local_only: bool,
 
 
 def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
-                   reach: dict, contract_concern: bool,
+                   contract_concern: bool,
                    report_dir: Path | None = None) -> tuple[dict[str, str] | None, list[str]]:
     """Derive CVSS v4.0 metrics for a classified crash.
 
@@ -1951,14 +1217,12 @@ _NARRATIVE_ONLY_PRIMITIVES = frozenset({
 #
 # The surface tier feeds CVSS AV/UI and helps derive the Environmental
 # requirement and non-shipping modified-impact metrics, purely from the surface
-# *kind*. External-caller counts / popularity do not enter the score — they are
-# ecosystem-prevalence prioritisation metadata, reported separately; vendored
-# copies likewise stay as reachability facts.
+# *kind*.
 
 
 # The set of surface tier labels the classifier can emit. Severity maps each
-# to CVSS AV/UI via _SURFACE_AVUI; the Reachability section displays the
-# label. There are no per-tier point values — the tier is a label, not a score.
+# to CVSS AV/UI via _SURFACE_AVUI. There are no per-tier point values — the
+# tier is a label, not a score.
 SURFACE_TIERS = frozenset({
     "network", "library", "file",
     "cli_production", "dev_tool", "internal", "unknown",
@@ -2140,10 +1404,7 @@ def _classify_surface(surface_value: str, boundary_value: str,
     calls a public library entry point` get classified as a dev_tool because
     of the word "harness".
 
-    The tier is a function of the surface *kind* only — never of external-caller
-    counts. Caller popularity is ecosystem prevalence, not a surface
-    characteristic, and is reported separately rather than folded into the
-    score (see _environmental_requirement).
+    The tier is a function of the surface *kind* only.
 
     Order:
       1. Dev/test/maintenance tool — first via type prefix, then path/name
@@ -2164,10 +1425,7 @@ def _classify_surface(surface_value: str, boundary_value: str,
     # Empty or literally "unknown" surface field. An un-triaged bare crash dir
     # (e.g. a benchmark `model-direct` baseline) and a triaged report whose
     # author just left Surface blank both land here; with no surface kind to
-    # anchor on, the conservative `unknown` tier applies. (Caller count is never
-    # consulted to rescue the tier — prevalence is not reachability evidence:
-    # every caller of an API is a "caller", but only a misusing one hits a
-    # misuse bug.)
+    # anchor on, the conservative `unknown` tier applies.
     if not s_type or s_type == "unknown":
         if not report_triaged:
             return ("unknown",
@@ -2203,7 +1461,7 @@ def _contract_concern(fields: dict) -> tuple[bool, str]:
 
 
 # Structured reach fields the harness's triage pass writes into REPORT.md.
-# A report carrying none of them has not been triaged — reachability is then
+# A report carrying none of them has not been triaged — the scorer is then
 # scoring raw sanitizer output, and an un-triaged report with no surface kind
 # stays at the conservative `unknown` tier (see _classify_surface).
 _TRIAGE_REACH_FIELDS = ("surface", "trigger_source", "caller_contract", "caller_controls")
@@ -2215,19 +1473,16 @@ def _report_is_triaged(fields: dict) -> bool:
     The harness fills Surface / Trigger source / Caller contract / Caller
     controls into a structured REPORT.md during triage. A bare crash dir
     (e.g. a benchmark `model-direct` workspace, or any un-triaged dir fed
-    straight to `bin/reachability`) carries none of them. reachability uses
-    this to decide whether the external-caller probe may rescue a missing
-    Surface field — see _classify_surface."""
+    straight to `bin/severity`) carries none of them — the surface then stays
+    at the conservative `unknown` tier (see _classify_surface)."""
     return any(
         str(fields.get(key, "") or "").strip() for key in _TRIAGE_REACH_FIELDS
     )
 
 
-def classify_surface(fields: dict, reach: dict) -> tuple[str, str]:
+def classify_surface(fields: dict) -> tuple[str, str]:
     """Resolve the surface tier label + reason from the report fields. The tier
-    feeds severity through CVSS AV/UI and Environmental metrics. The external-
-    caller probe (`reach`) is not consulted: prevalence is prioritisation
-    metadata, not a surface characteristic (see _environmental_requirement)."""
+    feeds severity through CVSS AV/UI and Environmental metrics."""
     return _classify_surface(
         fields.get("surface", ""), fields.get("boundary", ""),
         fields.get("_report_text", ""),
@@ -2419,7 +1674,7 @@ def _detect_cluster_size(report_text: str) -> int:
 _SKELETON_TODO_RE = re.compile(r"^_TODO \(agent\):", re.MULTILINE)
 
 
-def compute_severity(report_text: str, reachability: dict | None,
+def compute_severity(report_text: str,
                      cluster_size: int = 1, report_dir: Path | None = None) -> dict:
     """Score one report's severity as a CVSS v4.0 score.
 
@@ -2475,8 +1730,7 @@ def compute_severity(report_text: str, reachability: dict | None,
         prim_label = f"{prim_label} (unconfirmed: sanitizer ran clean)"
         prim_key = "unknown"
 
-    reach_data = reachability or {"services": {}, "external_callers": 0, "vendored_copies": 0}
-    surface_label, surface_reason = classify_surface(fields, reach_data)
+    surface_label, surface_reason = classify_surface(fields)
     # A crash that faults inside the audit harness/driver with no target frame
     # anywhere in the report is not a target vulnerability — score it as the
     # internal audit surface (non-shipping → modified impacts:N), which floors
@@ -2488,7 +1742,7 @@ def compute_severity(report_text: str, reachability: dict | None,
                           "frame anywhere in the report — harness-rooted, not a target bug")
     concern, concern_note = _contract_concern(fields)
 
-    metrics, derivation = _cvss4_metrics(prim_key, surface_label, fields, reach_data,
+    metrics, derivation = _cvss4_metrics(prim_key, surface_label, fields,
                                          concern, report_dir)
     repro_facts = _repro_facts(report_text, fields, cluster_size, report_dir)
     non_shipping = surface_label in NON_SHIPPING_SURFACES
@@ -2552,288 +1806,10 @@ def compute_severity(report_text: str, reachability: dict | None,
     }
 
 
-# ─── Report mode: rewrite Severity + Reachability section ─────────────────
+# ─── Report mode: rewrite Severity ────────────────────────────────────────
 
 
-REACH_HEADING = "## Reachability — external callers"
 SEV_HEADING = "## Severity rationale"
-
-
-# Match an identifier that is *immediately* followed by `(`, with optional
-# backticks and whitespace in between. This is the call-shape that matters —
-# struct fields and bytecode opcodes (start_subject, OP_CBRA) lack the `(`
-# and so are correctly excluded. The backtick form (``ident()``) catches the
-# common markdown rendering in reports.
-_CALL_RE = re.compile(r"`?([a-zA-Z_][a-zA-Z0-9_]{3,})`?\s*\(")
-# Library-shaped identifier. Two conventions are accepted everywhere:
-#   * snake_case with at least one underscore — pcre2_match, BIO_new, EVP_DigestInit
-#   * lowerCamelCase — at least two lowercase chars, then an uppercase letter,
-#     then more chars — xmlShellReadline, xmlConvertSGMLCatalog, htmlNewDoc
-# Plain lowercase identifiers (usershell, malloc, printf) are rejected: they
-# rarely correspond to externally-callable library APIs and add probe noise.
-# Plain PascalCase starting with an uppercase letter (FooBar) is accepted
-# only for the languages whose *externally-callable functions* are
-# conventionally PascalCase (see _PASCAL_OK_LANGUAGES). ALL_CAPS macros stay
-# rejected via _MACRO_SYMBOL_RE.
-_LIB_SYMBOL_RE = re.compile(
-    r"^(?:"
-    r"[a-zA-Z][a-zA-Z0-9]*_[a-zA-Z0-9_]+"
-    r"|"
-    r"[a-z][a-z0-9]+[A-Z][a-zA-Z0-9]+"
-    r")$"
-)
-# PascalCase with at least one lowercase letter (NewDecoder, ParseDocument).
-_PASCAL_SYMBOL_RE = re.compile(r"^[A-Z][a-zA-Z0-9]*[a-z][a-zA-Z0-9]*$")
-# Languages whose public, externally-callable API names are conventionally
-# PascalCase. Go exports are PascalCase by definition; Java/Kotlin/Swift/JS/TS
-# public methods commonly are too. Rust (snake_case fns; PascalCase = types),
-# Python (snake_case fns; PascalCase = classes), and PHP/Ruby are deliberately
-# EXCLUDED: there a PascalCase token is a type/class name, so probing it would
-# search type *definitions*, not callers, inflating the count. Those languages
-# still match snake_case / lowerCamelCase via _LIB_SYMBOL_RE. Tokens are
-# code-search language names (see _SEARCH_LANGUAGE / _detect_target_language).
-_PASCAL_OK_LANGUAGES = frozenset({
-    "go", "java", "kotlin", "swift", "javascript", "typescript",
-})
-
-
-def _symbol_shape_ok(tok: str, language: str = "c") -> bool:
-    """True when `tok` looks like an externally-callable API name for the
-    target's language."""
-    if _LIB_SYMBOL_RE.match(tok):
-        return True
-    if language.lower() in _PASCAL_OK_LANGUAGES:
-        return bool(_PASCAL_SYMBOL_RE.match(tok))
-    return False
-_SYMBOL_STOPLIST = {
-    "entry", "location", "trigger", "impact", "error", "class", "type",
-    "result", "size", "byte", "bytes", "addresssanitizer", "heap", "stack",
-    "global", "buffer", "overflow", "value", "offset", "false", "true",
-    "none", "null", "summary", "classification", "reproduction", "candidate",
-    "reachability", "data", "flow", "trace",
-}
-
-_RUNTIME_SYMBOL_RE = re.compile(
-    r"^(?:_?asan_|__asan|__sanitizer|__interceptor|asan_interceptors)",
-    re.IGNORECASE,
-)
-_MACRO_SYMBOL_RE = re.compile(r"^[A-Z0-9_]+$")
-# ASan frame parsing, the runtime/libc/sanitizer ignore filter, and crash-state
-# frame selection now live in lib/stack_frames (+ lib/clusterfuzz_stacktrace) —
-# the same pipeline the dedup signature uses. _extract_symbols_from_asan calls
-# into it rather than re-deriving its own ASan regexes here.
-
-
-def _symbol_token_ok(tok: str, language: str = "c") -> bool:
-    """Shared probe-symbol filter: drops runtime/macro/stop-listed tokens and
-    anything that fails the library-symbol shape for `language`."""
-    if _RUNTIME_SYMBOL_RE.search(tok):
-        return False
-    if _MACRO_SYMBOL_RE.match(tok):
-        return False
-    if tok.lower() in _SYMBOL_STOPLIST:
-        return False
-    return _symbol_shape_ok(tok, language)
-
-
-def _extract_symbols_from_report(report_text: str, language: str = "c") -> list[str]:
-    """Best-effort extraction of public API entry-point identifiers.
-
-    Hard rule: an identifier is only considered if it appears with ``(``
-    directly after it (with optional backticks/whitespace). That rules out
-    struct-field references like ``re->top_bracket`` and bytecode opcodes
-    like ``OP_CBRA`` that are common in crash-report prose but are not
-    callable symbols.
-
-    `language` widens the accepted identifier shape for non-C targets
-    (PascalCase Go exports etc.) — see _symbol_shape_ok.
-
-    Two-tier scanning order so Entry/Location lines are mined first:
-      tier 1: lines beginning with Entry: or Location:
-      tier 2: data-flow arrow lines (``→``, ``->``)
-      tier 3: any other line with a call-shape identifier
-
-    Returns up to 5 symbols in discovery order. The cap protects backends
-    from a noisy report producing dozens of throwaway probes.
-    """
-    out: list[str] = []
-    seen: set[str] = set()
-
-    tier1: list[str] = []
-    tier2: list[str] = []
-    tier3: list[str] = []
-    for raw in report_text.splitlines():
-        s = raw.strip()
-        if re.match(r"^-?\s*\*{0,2}(Entry|Location)\*{0,2}\s*:", s, re.IGNORECASE):
-            tier1.append(s)
-            continue
-        if "→" in s or "->" in s:
-            tier2.append(s)
-            continue
-        if _CALL_RE.search(s):
-            tier3.append(s)
-
-    for line in tier1 + tier2 + tier3:
-        for m in _CALL_RE.finditer(line):
-            tok = m.group(1)
-            if tok in seen:
-                continue
-            if not _symbol_token_ok(tok, language):
-                continue
-            seen.add(tok)
-            out.append(tok)
-            if len(out) >= 5:
-                return out
-    return out
-
-
-def _entry_symbol_from_report(report_text: str, language: str = "c") -> str | None:
-    """First public entry-point symbol from an explicit ``Entry:`` report line.
-
-    These lines are the report author's structured claim about how a normal
-    caller reaches the issue, so they are a better caller-popularity signal
-    than an internal fault frame when present. Only call-shaped identifiers are
-    accepted, using the same shape/stop-list as general report extraction.
-    """
-    for raw in (report_text or "").splitlines():
-        s = raw.strip()
-        if not re.match(r"^-?\s*\*{0,2}Entry\*{0,2}\s*:", s, re.IGNORECASE):
-            continue
-        for m in _CALL_RE.finditer(s):
-            tok = m.group(1)
-            if _symbol_token_ok(tok, language):
-                return tok
-    return None
-
-
-# Crash-state symbols are a fallback when no caller-entry symbol can be
-# identified. Normal sanitizer-backed reports use _crash_entrypoint_symbol
-# below so caller popularity is measured at the public/reachable entry point,
-# not the internal fault chain. We still keep this crash-state extractor for
-# older sparse reports because it is safer than mining free-text prose full of
-# internal helpers and generated scoring labels.
-#
-# How many fallback frames: the crash site (#0) plus its immediate caller.
-# ClusterFuzz caps crash state at 3 frames; we stay below that to bound queries
-# when the better entrypoint path is unavailable.
-CRASH_STATE_PROBE_FRAMES = 2
-
-
-def _frame_probe_symbol(frame: stack_frames.StackFrame, language: str = "c") -> str | None:
-    parts = frame.state_function.split("::")
-    leaf = parts[-1].strip()
-    # Shape filters apply to the bare callee name (the qualifier is just a
-    # disambiguator).
-    if not leaf or not _symbol_token_ok(leaf, language):
-        return None
-    # Probe form: method + immediate enclosing class when present.
-    return "::".join(p.strip() for p in parts[-2:]) if len(parts) >= 2 else leaf
-
-
-def _extract_symbols_from_asan(asan_text: str, language: str = "c") -> list[str]:
-    """Reachability symbols taken from the crash state's top frames.
-
-    Frame parsing, the runtime/libc/sanitizer/std-lib/main ignore filter, and
-    function-name normalization are delegated to lib/stack_frames — the same
-    crash-state pipeline the dedup signature uses — so a C++ frame like
-    ``sampledb::Engine::Store::set_blob(unsigned int, std::__1::vector<...>)``
-    is normalized to ``sampledb::Engine::Store::set_blob``.
-
-    The probe keeps **one level of the enclosing scope** — ``Store::set_blob``,
-    not the bare leaf ``set_blob``. A bare C++ method name is far too general
-    for code search: ``set_blob`` / ``parse_id`` collide with thousands of
-    unrelated projects, inflating the external-caller count with noise. One
-    qualifier level is distinctive enough to suppress those collisions while
-    still matching a genuine external reuse of the class; the fully qualified
-    path (``sampledb::Engine::Store::set_blob``) would be too narrow — it only
-    ever matches the target itself. C symbols have no ``::`` and probe as-is
-    (``pcre2_match``), so they are unaffected.
-
-    The leaf (callee) name is held to the same library-symbol shape and
-    stop-list as report-prose symbols so macro/runtime tokens are dropped.
-    Returns at most CRASH_STATE_PROBE_FRAMES symbols.
-    """
-    out: list[str] = []
-    seen: set[str] = set()
-    # Pull the full crash state (≤ MAX_CRASH_STATE_FRAMES) and keep the first
-    # CRASH_STATE_PROBE_FRAMES whose leaf survives the symbol-shape filter, so a
-    # leading frame whose leaf is not library-shaped (e.g. ``run``) does not
-    # cost us a usable probe.
-    for frame in stack_frames.interesting_frames(
-        asan_text, want=stack_frames.MAX_CRASH_STATE_FRAMES
-    ):
-        probe = _frame_probe_symbol(frame, language)
-        if not probe:
-            continue
-        if probe in seen:
-            continue
-        seen.add(probe)
-        out.append(probe)
-        if len(out) >= CRASH_STATE_PROBE_FRAMES:
-            break
-    return out
-
-
-def _primary_sanitizer_frames(sanitizer_text: str) -> list[stack_frames.StackFrame]:
-    """Primary fault-stack frames only, excluding allocation/free context.
-
-    ``lib/stack_frames`` intentionally builds the ClusterFuzz crash state and
-    may include UAF context frames after the fault stack for deduplication. For
-    caller-popularity scoring we need the normal call path into the fault, not
-    "freed by" / "previously allocated by" context, so this parser stops at the
-    first secondary-context marker.
-    """
-    frames: list[stack_frames.StackFrame] = []
-    fallback_frames: list[stack_frames.StackFrame] = []
-    in_report = False
-
-    def _context_starts(line: str) -> bool:
-        s = line.strip().lower()
-        if not s:
-            return False
-        if s.startswith("summary:"):
-            return True
-        if s.startswith("address "):
-            return True
-        if s.startswith(("shadow bytes", "hint:", "register values:")):
-            return True
-        if any(marker.lower() in s for marker in stack_frames.STATE_STOP_MARKERS):
-            return True
-        # MSan origin stacks: every origin description starts with this
-        # prefix ("… created by a heap allocation/deallocation/argument …").
-        if s.startswith("uninitialized value was created"):
-            return True
-        # TSan second access stack: "[Previous ][atomic ]read/write of size N
-        # at 0x… by thread T1:". The *first* access header precedes any frame,
-        # so this only ever cuts the secondary access stack.
-        if re.match(r"(?:previous )?(?:atomic )?(?:read|write) of size \d+", s):
-            return True
-        return (
-            "freed by thread" in s
-            or "previously allocated by" in s
-            or "allocated by thread" in s
-            or ("created by" in s and "thread" in s)
-        )
-
-    for line in (sanitizer_text or "").splitlines():
-        if re.search(r"\b(?:ERROR|WARNING):\s+(?:Address|HWAddress|Memory|Thread)Sanitizer\b", line):
-            in_report = True
-            frames = []
-            continue
-        frame = stack_frames.parse_asan_frame(line)
-        if not in_report:
-            if fallback_frames and _context_starts(line):
-                break
-            if frame is not None:
-                fallback_frames.append(frame)
-            continue
-        if frames and _context_starts(line):
-            break
-        if frame is not None:
-            frames.append(frame)
-
-    raw = frames or fallback_frames
-    return [frame for frame in raw if not stack_frames.is_ignored_frame(frame)]
 
 
 # Driver/entry functions that mark a harness frame rather than target code.
@@ -2907,168 +1883,6 @@ def _crash_is_harness_rooted(report_text: str) -> bool:
     return True
 
 
-def _crash_entrypoint_symbol(asan_text: str, language: str = "c",
-                             report_text: str = "") -> str | None:
-    """Caller entry point used for external-caller popularity.
-
-    Prefer an explicit report ``Entry:`` line. Otherwise use the deepest
-    interesting frame in the primary sanitizer fault stack, walking the full
-    primary stack rather than the capped ClusterFuzz crash state. Secondary
-    context stacks (allocation/free, MSan value origin, TSan second access,
-    thread creation) are ignored so cleanup or bookkeeping APIs do not become
-    the caller-popularity symbol.
-    """
-    sym = _entry_symbol_from_report(report_text, language)
-    if sym:
-        return sym
-    for frame in reversed(_primary_sanitizer_frames(asan_text)):
-        probe = _frame_probe_symbol(frame, language)
-        if probe:
-            return probe
-    return None
-
-
-def _no_symbols_reachability(ignore: list[str], symbols: list[str] | None = None,
-                             status: str = "no_symbols",
-                             reason: str = "no public API symbols extracted") -> dict:
-    symbols = symbols or []
-    return {
-        "schema_version": 2,
-        "queried_at": datetime.now(timezone.utc).isoformat(),
-        "status": status,
-        "symbols": symbols,
-        "ignore": ignore,
-        "external_callers": 0,
-        "external_caller_repos": 0,
-        "external_caller_hits": [],
-        "vendored_copies": 0,
-        "vendored_copy_hits": [],
-        "services_responding": [],
-        "services": {
-            svc: {
-                "status": "not_run",
-                "hits": [],
-                "vendored": [],
-                "count": 0,
-                "vendored_count": 0,
-                "errors": [{"symbol": symbols[0] if symbols else "", "error": reason}],
-            }
-            for svc in SERVICES
-        },
-    }
-
-
-def _asan_text_has_dev_path(asan_text: str) -> bool:
-    return bool(re.search(r"(^|[ /])(maint|test|tests|testing|fuzz|fuzzer|bench|example|examples)/", asan_text))
-
-
-def _format_reachability_section(reach: dict) -> str:
-    lines = [REACH_HEADING, ""]
-    # Each `_…_` italic note is its own paragraph (blank-line separated)
-    # so render-md doesn't fold them into a single line. Folded, the
-    # second underscore-pair (e.g. `_Symbols: cli_production…_`) is
-    # broken by the inner `_` in the symbol names and the literal
-    # underscores leak through to the rendered HTML.
-    notes: list[str] = [f"_Probed at: {reach.get('queried_at', '?')}_"]
-    if reach.get("status") == "no_symbols":
-        notes.append("_Status: no public API symbols extracted; external search was not run._")
-    elif reach.get("status") == "local_symbols_only":
-        notes.append("_Status: local ASan frame symbols only; external search skipped for dev/test surface._")
-    elif reach.get("status") == "external_skipped":
-        reason = ""
-        for block in (reach.get("services") or {}).values():
-            errors = block.get("errors") or []
-            if errors and errors[0].get("error"):
-                reason = errors[0]["error"]
-                break
-        if reason:
-            notes.append(f"_Status: external caller search skipped ({reason}); severity uses local report fields only._")
-        else:
-            notes.append("_Status: external caller search skipped; severity uses local report fields only._")
-    if reach.get("symbols"):
-        notes.append(f"_Symbols: {', '.join(reach['symbols'])}_")
-    if reach.get("language"):
-        notes.append(f"_Language filter: {reach['language']}_")
-    if reach.get("match_mode") == "entrypoint":
-        entry = reach.get("entry_symbol")
-        entry_note = f" (`{entry}`)" if entry else ""
-        notes.append(
-            "_Match mode: entrypoint — a caller matches the public entry "
-            f"point{entry_note} any-frame; the internal crash-state chain is "
-            "not required (a real dependant never contains it)._"
-        )
-    elif reach.get("match_mode") == "all-frames":
-        notes.append(
-            "_Match mode: all-frames — no public entry point identified, so a "
-            "caller must match every crash-state frame in one file "
-            "(collision-resistant)._"
-        )
-    if reach.get("ignore"):
-        notes.append(f"_Ignore filter: {', '.join(reach['ignore'])}_")
-    lines.append("\n\n".join(notes))
-    lines.append("")
-    n_external = reach.get("external_callers", 0)
-    n_vendored = reach.get("vendored_copies", 0)
-    frame_note = {
-        "entrypoint": " + entrypoint", "all-frames": " + all-frames",
-    }.get(reach.get("match_mode"), "")
-    lines.append(
-        f"**External callers (genuine, after ignore + vendor{frame_note} filter): {n_external}**"
-    )
-    if n_vendored:
-        lines.append(
-            f"**Vendored copies of upstream source (ship the bug, do not call): {n_vendored}**"
-        )
-    lines.append("")
-    lines.append("| Backend | Status | Genuine hits | Vendored copies |")
-    lines.append("|---------|--------|--------------|-----------------|")
-    for svc in SERVICES:
-        e = (reach.get("services") or {}).get(svc, {})
-        status = e.get("status", "?")
-        n = e.get("count", 0)
-        v = e.get("vendored_count", 0)
-        lines.append(f"| {svc} | {status} | {n} | {v} |")
-    errors_by_service = {
-        svc: (reach.get("services") or {}).get(svc, {}).get("errors") or []
-        for svc in SERVICES
-    }
-    if any(errors_by_service.values()):
-        lines.append("")
-        lines.append("Backend errors:")
-        for svc in SERVICES:
-            errors = errors_by_service.get(svc) or []
-            if not errors:
-                continue
-            shown = []
-            for err in errors[:3]:
-                sym = err.get("symbol", "?") if isinstance(err, dict) else "?"
-                msg = err.get("error", "unknown") if isinstance(err, dict) else str(err)
-                shown.append(f"{sym}: {msg}")
-            suffix = "" if len(errors) <= 3 else f"; +{len(errors) - 3} more"
-            lines.append(f"- `{svc}`: " + "; ".join(shown) + suffix)
-    hits = reach.get("external_caller_hits") or []
-    if hits:
-        lines.append("")
-        lines.append("Top genuine callers:")
-        for h in hits[:10]:
-            repo = h.get("repo", "")
-            path = h.get("path", "")
-            syms = h.get("matched_symbols") or ([h["matched_symbol"]] if h.get("matched_symbol") else [])
-            sym_note = f" (symbols: `{', '.join(syms)}`)" if syms else ""
-            lines.append(f"- `{repo}` :: `{path}`" + sym_note)
-    vhits = reach.get("vendored_copy_hits") or []
-    if vhits:
-        lines.append("")
-        lines.append("Vendored copies (these projects re-include the upstream source):")
-        for h in vhits[:5]:
-            repo = h.get("repo", "")
-            path = h.get("path", "")
-            lines.append(f"- `{repo}` :: `{path}`")
-        if len(vhits) > 5:
-            lines.append(f"- … +{len(vhits) - 5} more vendored copies")
-    return "\n".join(lines) + "\n"
-
-
 def _format_severity_line(sev: dict) -> str:
     """Single-line severity that downstream tools parse.
 
@@ -3137,7 +1951,7 @@ def _replace_structured_field(text: str, field: str, value: str) -> tuple[str, b
     """Replace an existing structured report field. Returns (new_text, changed).
 
     Agent reports commonly carry a top `| Field | Value |` table plus the
-    generated Classification severity line. `bin/reachability` is the owner of
+    generated Classification severity line. `bin/severity` is the owner of
     recomputed severity, so keep the table in sync when that row exists. We do
     not create a new table row here; reports without a structured field already
     have the generated severity line as the single source of truth.
@@ -3174,19 +1988,6 @@ def _replace_structured_field(text: str, field: str, value: str) -> tuple[str, b
                 break
     new_text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
     return new_text, changed
-
-
-def _replace_reachability_section(text: str, new_section: str) -> str:
-    """Append-or-replace the auto reachability section. Idempotent."""
-    if REACH_HEADING in text:
-        # Replace existing block: from REACH_HEADING up to next "## " heading or EOF.
-        pattern = re.compile(
-            r"^" + re.escape(REACH_HEADING) + r".*?(?=^## |\Z)",
-            re.MULTILINE | re.DOTALL,
-        )
-        return pattern.sub(new_section, text, count=1)
-    sep = "" if text.endswith("\n") else "\n"
-    return text + sep + "\n" + new_section
 
 
 def _format_severity_section(sev: dict) -> str:
@@ -3288,22 +2089,20 @@ def _format_severity_section(sev: dict) -> str:
 def _strip_auto_sections(text: str) -> str:
     """Remove auto-generated content before re-scoring.
 
-    On every --report run we regenerate the Reachability section, the
-    Severity rationale section, AND the `- **Severity**: ... (auto: ...)`
-    line. If any of those remain in the input we feed to the classifier,
-    their prose (which mentions 'tests/' and 'maint/' as examples, plus
-    the last run's reach reasons) loops back as input and trips the
-    dev/test path regex on every subsequent run. Strip them first so
-    scoring only sees the agent-authored part of the report.
+    On every --report run we regenerate the Severity rationale section and the
+    `- **Severity**: ... (auto: ...)` line. If either remains in the input we
+    feed to the classifier, its prose (which mentions 'tests/' and 'maint/' as
+    examples) loops back as input and trips the dev/test path regex on every
+    subsequent run. Strip them first so scoring only sees the agent-authored
+    part of the report.
     """
     out = text
-    for heading in (REACH_HEADING, SEV_HEADING):
-        if heading in out:
-            pattern = re.compile(
-                r"^" + re.escape(heading) + r".*?(?=^## |\Z)",
-                re.MULTILINE | re.DOTALL,
-            )
-            out = pattern.sub("", out)
+    if SEV_HEADING in out:
+        pattern = re.compile(
+            r"^" + re.escape(SEV_HEADING) + r".*?(?=^## |\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        out = pattern.sub("", out)
     # Drop any auto-generated Severity line(s) — they carry the previous
     # run's reach reasons/vector in their tail prose.
     out = re.sub(
@@ -3456,7 +2255,7 @@ def _synthesize_fields_table(text: str, severity: dict, used: dict) -> str:
     return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
 
 
-def update_report(report_path: Path, reachability: dict, severity: dict) -> None:
+def update_report(report_path: Path, severity: dict) -> None:
     text = report_path.read_text("utf-8", errors="replace")
     used = severity.get("fields_used") or {}
     # A report with no Fields table (model-direct / bare-label authors) gets one
@@ -3483,7 +2282,6 @@ def update_report(report_path: Path, reachability: dict, severity: dict) -> None
     text = _replace_severity_line(
         text, _format_severity_line(severity), synthesize=not fields_sev_updated,
     )
-    text = _replace_reachability_section(text, _format_reachability_section(reachability))
     text = _replace_severity_section(text, _format_severity_section(severity))
     report_path.write_text(text, "utf-8")
 
@@ -3491,336 +2289,26 @@ def update_report(report_path: Path, reachability: dict, severity: dict) -> None
 # ─── Human-readable summary ───────────────────────────────────────────────
 
 
-def render_human(reach: dict, severity: dict | None = None) -> str:
+def render_human(severity: dict) -> str:
     out: list[str] = []
-    out.append(f"Reachability for: {', '.join(reach['symbols'])}")
-    if reach.get("ignore"):
-        out.append(f"  Ignore filter: {', '.join(reach['ignore'])}")
-    out.append(f"  External callers (genuine):  {reach.get('external_callers', 0)}")
-    if reach.get("vendored_copies"):
-        out.append(f"  Vendored copies (excluded): {reach['vendored_copies']}")
-    for svc in SERVICES:
-        e = (reach.get("services") or {}).get(svc, {})
-        line = f"  {svc:9s} status={e.get('status', '?'):11s} hits={e.get('count', 0)}"
-        if e.get("vendored_count"):
-            line += f"  (+{e['vendored_count']} vendored)"
-        out.append(line)
-    if severity is not None:
-        out.append("")
-        cv = severity.get("cvss")
-        if cv is None:
-            out.append(f"Severity: Unknown (unclassified — no CVSS vector; "
-                       f"primitive={severity['primitive']})")
-        else:
-            out.append(f"Severity: {severity['level']} "
-                       f"({cv.get('nomenclature', 'CVSS-B')} 4.0: {cv['score']} {cv['rating']})")
-            out.append(f"  vector     {cv['vector']}")
-            out.append(f"  base       {cv['base_score']} {cv['base_rating']}  {cv['base_vector']}")
-            out.append(f"  primitive  {severity['primitive']} ({severity['primitive_key']})")
-            out.append(f"  surface    {severity['surface_label']}")
-            facts = severity.get("repro_facts") or []
-            if facts:
-                out.append(f"  verification (priority, not severity): {'; '.join(facts)}")
+    cv = severity.get("cvss")
+    if cv is None:
+        out.append(f"Severity: Unknown (unclassified — no CVSS vector; "
+                   f"primitive={severity['primitive']})")
+    else:
+        out.append(f"Severity: {severity['level']} "
+                   f"({cv.get('nomenclature', 'CVSS-B')} 4.0: {cv['score']} {cv['rating']})")
+        out.append(f"  vector     {cv['vector']}")
+        out.append(f"  base       {cv['base_score']} {cv['base_rating']}  {cv['base_vector']}")
+        out.append(f"  primitive  {severity['primitive']} ({severity['primitive_key']})")
+        out.append(f"  surface    {severity['surface_label']}")
+        facts = severity.get("repro_facts") or []
+        if facts:
+            out.append(f"  verification (priority, not severity): {'; '.join(facts)}")
     return "\n".join(out)
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────
-
-
-def _resolve_target_toml(args: argparse.Namespace,
-                         report_dir: Path | None) -> Path | None:
-    """Locate the target's output/<slug>/target.toml: from --target if given,
-    otherwise by walking up from the report dir. Shared by the ignore-list and
-    build-system readers."""
-    if args.target:
-        candidate = Path.cwd() / "output" / args.target / "target.toml"
-        return candidate if candidate.is_file() else None
-    if report_dir is not None:
-        return _find_target_toml(report_dir)
-    return None
-
-
-def _resolve_ignore(args: argparse.Namespace, report_dir: Path | None) -> list[str]:
-    ignore: list[str] = list(args.ignore or [])
-    seed_path = _resolve_target_toml(args, report_dir)
-    if seed_path is not None:
-        for tok in _parse_target_toml_ignore(seed_path):
-            if tok not in ignore:
-                ignore.append(tok)
-    return ignore
-
-
-def _session_env_value(report_dir: Path | None, key: str) -> str:
-    """Read an allowlisted KEY from the nearest .session-env at or above the
-    report dir, parsed by the shared target_config.read_session_env.
-
-    bin/audit writes one .session-env per results tree, so the nearest one on
-    the direct path up names the exact target even when the output slug differs
-    from the target slug (e.g. output/<slug>-<experiment>/). We walk direct
-    ancestors only — deliberately NOT tc.find_session_dir, whose sideways
-    output/* scan can bind a crash under one results tree to an unrelated
-    sibling target's session."""
-    if report_dir is None:
-        return ""
-    for anc in [report_dir.resolve(), *report_dir.resolve().parents]:
-        if not (anc / ".session-env").is_file():
-            continue
-        try:
-            return tc.read_session_env(anc).get(key, "").strip()
-        except Exception:
-            return ""
-    return ""
-
-
-def _authoritative_target_root(args: argparse.Namespace,
-                               report_dir: Path | None) -> Path | None:
-    """The target source checkout, from sources that name it unambiguously:
-    an explicit --target slug, the audit-exported TARGET_ROOT, or the
-    TARGET_ROOT recorded in the report tree's .session-env. Unlike the
-    slug/path heuristic these never bind the wrong project when the output
-    slug differs from the target slug."""
-    if args.target:
-        candidate = Path.cwd() / "targets" / args.target
-        if candidate.is_dir():
-            return candidate
-    env_root = os.environ.get("TARGET_ROOT", "").strip()
-    if env_root and Path(env_root).is_dir():
-        return Path(env_root)
-    sess_root = _session_env_value(report_dir, "TARGET_ROOT")
-    if sess_root and Path(sess_root).is_dir():
-        return Path(sess_root)
-    return None
-
-
-def _resolve_repo_type(args: argparse.Namespace, report_dir: Path | None) -> str:
-    """Resolve the target's VCS type (git/hg/none) the way the rest of the
-    harness does: the authoritative ``TARGET_REPO_TYPE`` the audit exports or
-    records in .session-env, else live detection on the authoritative
-    TARGET_ROOT (env / .session-env). repo_type is NOT a target.toml field —
-    bin/setup-target never seeds it (see lib/workqueue.py and bin/audit, which
-    use the same env-or-detect order).
-
-    Deliberately does NOT fall back to the slug/path heuristic: when the
-    output slug differs from the target slug, that heuristic can bind the
-    wrong project (and its repo type), which would mis-skip or mis-run
-    external search. An unresolved target stays no-signal ('') instead."""
-    env = os.environ.get("TARGET_REPO_TYPE", "").strip().lower()
-    if env:
-        return env
-    sess = _session_env_value(report_dir, "TARGET_REPO_TYPE").strip().lower()
-    if sess:
-        return sess
-    root = _authoritative_target_root(args, report_dir)
-    if root is None:
-        return ""
-    try:
-        return tc.detect_repo_type(root).strip().lower()
-    except Exception:
-        return ""
-
-
-# Registry language name → code-search language token. Both Sourcegraph's
-# `lang:` filter and `gh search code --language` accept linguist-style names
-# (case-insensitively), so one token serves both backends. Only `cpp` needs
-# renaming; every other lib/languages.py name is already the linguist name.
-_SEARCH_LANGUAGE = {"cpp": "c++"}
-
-# Directory names whose subtrees are NOT the target's own source: build
-# output, VCS metadata, and checked-in dependency / vendored trees. Tested
-# against the path's parts *relative to the target root*, never as an
-# absolute-substring match — a checkout under `/build/...`, or even a tmpdir
-# named `build_xxxx`, would otherwise make every path contain "/build" and
-# skip the whole tree (observed: language detection collapsing to "c" for a
-# Go target under such a path, which then disabled PascalCase probing). The
-# vendored names mirror _VENDORED_PREFIX_RE: a Go target with a big
-# `third_party/native/*.c` blob must not be language-detected as C.
-_SKIP_DIR_PARTS = frozenset({
-    "build", ".git", "node_modules",
-    "vendor", "vendored", "third_party", "thirdparty", "3rdparty",
-    "deps", "contrib", "external",
-})
-
-# Header extensions are shared/ambiguous (a .h sits in a C *or* C++ project,
-# and the registry assigns .h to C), so they are NEUTRAL for the C-vs-C++
-# language vote — only implementation files decide it. Without this, a C++
-# library that is mostly headers and a few .cc files would be detected as
-# plain C and searched with `lang:c`, missing the real C++ callers.
-_HEADER_EXTS = frozenset({".h", ".hh", ".hpp", ".hxx", ".h++"})
-
-# Build systems whose language is native C/C++ — for these the declared
-# build_system does not disambiguate C from C++, so we still vote on
-# implementation extensions. Every other build_system (cargo→rust, go→go,
-# maven/gradle→java, npm→javascript, …) names a language unambiguously and is
-# trusted directly.
-_NATIVE_SEARCH_LANGS = frozenset({"c", "c++"})
-
-
-def _is_skipped_path(path: Path, root: Path) -> bool:
-    try:
-        rel = path.relative_to(root)
-    except ValueError:
-        rel = path
-    return any(part in _SKIP_DIR_PARTS for part in rel.parts)
-
-
-def _detect_target_language(target_root: Path | None,
-                            declared: str = "") -> str:
-    """Code-search language token for the target tree.
-
-    `declared` is the linguist token derived from the target's build_system
-    (a structured source — lib/languages.py). When it names a non-native
-    language it is authoritative and returned directly. Otherwise (native
-    C/C++, or no build_system) the language is decided by majority
-    *implementation* extension across the target's own tree, with headers
-    treated as neutral and vendored/generated subtrees skipped. Defaults to
-    "c" when nothing resolves, preserving the historical filter."""
-    if declared and declared not in _NATIVE_SEARCH_LANGS:
-        return declared
-    if target_root is None:
-        return declared or "c"
-    tally: dict[str, int] = {}
-    try:
-        for path in target_root.rglob("*"):
-            if _is_skipped_path(path, target_root):
-                continue
-            ext = path.suffix.lower()
-            if ext in _HEADER_EXTS:
-                continue
-            lang = languages.for_source_ext(ext)
-            if lang is not None:
-                tally[lang.name] = tally.get(lang.name, 0) + 1
-    except OSError:
-        pass
-    if not tally:
-        return declared or "c"
-    name = max(tally.items(), key=lambda kv: kv[1])[0]
-    return _SEARCH_LANGUAGE.get(name, name)
-
-
-def _parse_target_toml_build_system(path: Path) -> str:
-    """Read the `build_system = "<slug>"` value from target.toml."""
-    raw = _parse_target_toml(path).get("build_system", "")
-    return str(raw).strip()
-
-
-def _declared_search_language(args: argparse.Namespace,
-                              report_dir: Path | None) -> str:
-    """Linguist code-search token derived from the target's build_system, or
-    "" when none resolves. build_system is a structured source, so it outranks
-    file-extension counting for the languages it identifies unambiguously."""
-    seed_path = _resolve_target_toml(args, report_dir)
-    if seed_path is None:
-        return ""
-    bs = _parse_target_toml_build_system(seed_path)
-    if not bs:
-        return ""
-    lang = languages.for_build_system(bs)
-    if lang is None:
-        return ""
-    return _SEARCH_LANGUAGE.get(lang.name, lang.name)
-
-
-def _resolve_target_root(args: argparse.Namespace,
-                         report_dir: Path | None) -> Path | None:
-    """Locate the target's source checkout under targets/<slug>. Prefer the
-    authoritative sources (--target / TARGET_ROOT / .session-env); only fall
-    back to a walk-up heuristic when none is available. Shared by identity
-    resolution and repo-type detection so both bind the same tree.
-
-    Note repo-type detection uses _authoritative_target_root directly and
-    skips the heuristic — a wrong bind there mis-skips/mis-runs external
-    search. The heuristic remains acceptable for identity (language /
-    vendored-name) enrichment, where a wrong bind only degrades filtering."""
-    root = _authoritative_target_root(args, report_dir)
-    if root is not None:
-        return root
-    return _heuristic_target_root(report_dir)
-
-
-def _heuristic_target_root(report_dir: Path | None) -> Path | None:
-    """Last-resort walk-up when no authoritative target root is available:
-    bind targets/<output-slug> when it exists, else the first sorted target
-    with a source layout. Can bind the wrong project when the output slug
-    differs from the target slug, so it is used only for identity enrichment,
-    never for repo-type decisions."""
-    if report_dir is None:
-        return None
-    source_exts = languages.all_source_exts()
-    # Recover the slug deterministically from the canonical
-    # output/<slug>/... layout the report lives under, so the right
-    # target is bound even when several exist under targets/. Falling
-    # back to "first child with source" could bind the wrong project
-    # (and therefore the wrong language/vendored-name set).
-    slug_hint = ""
-    cur = report_dir.resolve()
-    for anc in [cur, *cur.parents]:
-        if anc.parent is not None and anc.parent.name == "output":
-            slug_hint = anc.name
-            break
-    # Walk up to find <repo_root>/targets/<slug>/.
-    for p in [cur, *cur.parents]:
-        tt = p / "targets"
-        if not tt.is_dir():
-            continue
-        # Prefer the slug-matched dir; then deterministic (sorted) order so
-        # the bound target does not depend on filesystem iteration order.
-        # Pick the first with a recognizable source layout (top-level or
-        # src/ source files in any registry language).
-        candidates: list[Path] = []
-        if slug_hint and (tt / slug_hint).is_dir():
-            candidates.append(tt / slug_hint)
-        candidates += sorted(c for c in tt.iterdir() if c.is_dir())
-        for child in candidates:
-            children = list(child.glob("*")) + list((child / "src").glob("*"))
-            if any(c.suffix.lower() in source_exts for c in children):
-                return child
-    return None
-
-
-def _resolve_target_identity(args: argparse.Namespace,
-                             report_dir: Path | None) -> tuple[set[str], set[str], str]:
-    """Discover the upstream project's source filenames, name aliases, and
-    code-search language.
-
-    Walks upward to find a targets/<slug> source root, then enumerates
-    source-file basenames there (any registry language, not just C — a JS or
-    Go target's vendored copies must be recognisable too). Also derives
-    project-name aliases from the resolved root directory and the --target
-    slug, so a vendored `…/<project>/…` path segment can be recognised for
-    *any* target.
-
-    Returns (basenames, names, language). basenames/names may be empty when
-    nothing resolves — the prefix regex (third_party/, vendor/, …) still
-    catches the common case, and an empty name set simply disables the
-    segment heuristic. language falls back to "c"."""
-    source_exts = languages.all_source_exts()
-    target_root = _resolve_target_root(args, report_dir)
-    target_names: set[str] = set()
-    if args.target:
-        target_names |= _target_name_variants(args.target)
-    declared = _declared_search_language(args, report_dir)
-    if target_root is None:
-        return set(), target_names, _detect_target_language(None, declared)
-    target_names |= _target_name_variants(target_root.name)
-    basenames: set[str] = set()
-    try:
-        for path in target_root.rglob("*"):
-            # Stay inside the target's own tree but skip build output and
-            # checked-in dependency / vendored dirs — building a giant set
-            # across vendored deps inside the target itself defeats the
-            # purpose of this filter. Relative-parts check (not absolute
-            # substring) so a checkout under a `build`-named ancestor isn't
-            # skipped whole.
-            if _is_skipped_path(path, target_root):
-                continue
-            if path.suffix.lower() in source_exts:
-                basenames.add(path.name)
-    except OSError:
-        pass
-    return basenames, target_names, _detect_target_language(target_root, declared)
-
-
-def _run_batch(results_dir: Path, args: argparse.Namespace) -> int:
+def _run_batch(results_dir: Path) -> int:
     """Walk <results_dir>/crashes/CRASH-*/ and run --report on each.
 
     Per-crash failures don't stop the loop — they're logged and the run
@@ -3828,51 +2316,38 @@ def _run_batch(results_dir: Path, args: argparse.Namespace) -> int:
     """
     crashes_root = results_dir / "crashes"
     if not crashes_root.is_dir():
-        print(f"reachability: no crashes/ subdir under {results_dir}", file=sys.stderr)
+        print(f"severity: no crashes/ subdir under {results_dir}", file=sys.stderr)
         return 2
     dirs = sorted(p for p in crashes_root.iterdir()
                   if p.is_dir() and p.name.startswith("CRASH-")
                   and _find_report_md_in_dir(p) is not None)
     if not dirs:
-        print(f"reachability: no CRASH-*/report.md under {crashes_root}", file=sys.stderr)
+        print(f"severity: no CRASH-*/report.md under {crashes_root}", file=sys.stderr)
         return 0
-    rows: list[tuple[str, str, str, int, str]] = []
+    rows: list[tuple[str, str, str, str]] = []
     for cdir in dirs:
         sub_argv = ["--report", str(cdir), "--json"]
-        if args.no_cache:
-            sub_argv.append("--no-cache")
-        if args.severity_only:
-            sub_argv.append("--severity-only")
-        if args.target:
-            sub_argv += ["--target", args.target]
-        if args.language is not None:
-            sub_argv += ["--language", args.language]
-        for tok in args.ignore or []:
-            sub_argv += ["--ignore", tok]
-        sub_argv += ["--timeout", str(args.timeout)]
         try:
-            # Reuse main() in-process — same mocks/cache, same target.toml
-            # discovery. We capture its output by redirecting stdout.
+            # Reuse main() in-process so target.toml discovery is identical.
+            # We capture its output by redirecting stdout.
             import io, contextlib
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc = main(sub_argv)
             payload = json.loads(buf.getvalue() or "{}")
             sev = payload.get("severity") or {}
-            reach = payload.get("reachability") or {}
             rows.append((
                 cdir.name, "ok" if rc == 0 else f"rc={rc}",
-                sev.get("level", "?"), int(reach.get("external_callers", 0)),
-                sev.get("primitive", "?"),
+                sev.get("level", "?"), sev.get("primitive", "?"),
             ))
         except Exception as e:
-            rows.append((cdir.name, f"err: {e!r}", "?", 0, "?"))
+            rows.append((cdir.name, f"err: {e!r}", "?", "?"))
     # Summary table.
-    print(f"\n=== Reachability batch summary ({len(rows)} crash dirs) ===")
-    print(f"{'ID':<24} {'Status':<10} {'Severity':<10} {'Callers':>7}  Primitive")
-    print(f"{'-'*24} {'-'*10} {'-'*10} {'-'*7}  {'-'*30}")
-    for cid, status, level, callers, prim in rows:
-        print(f"{cid:<24} {status:<10} {level:<10} {callers:>7}  {prim}")
+    print(f"\n=== Severity batch summary ({len(rows)} crash dirs) ===")
+    print(f"{'ID':<24} {'Status':<10} {'Severity':<10}  Primitive")
+    print(f"{'-'*24} {'-'*10} {'-'*10}  {'-'*30}")
+    for cid, status, level, prim in rows:
+        print(f"{cid:<24} {status:<10} {level:<10}  {prim}")
     return 0
 
 
@@ -3898,204 +2373,95 @@ def _resolve_report_arg(report_arg: Path) -> tuple[Path, Path] | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="bin/reachability", description=__doc__,
+    ap = argparse.ArgumentParser(prog="bin/severity", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--symbol", action="append", default=[], help="Symbol to probe (repeatable)")
     ap.add_argument("--report", type=Path, default=None, help="Crash dir containing report.md")
     ap.add_argument("--batch", type=Path, default=None,
                     help="Results dir; runs --report on every crashes/CRASH-*/ underneath")
-    ap.add_argument("--target", default=None, help="Target slug (loads ignore from output/<slug>/target.toml)")
-    ap.add_argument("--ignore", action="append", default=[], help="Substring to drop from hits (repeatable)")
-    ap.add_argument("--language", default=None,
-                    help="Code-search language filter for both backends "
-                         "(linguist name, e.g. c, c++, go, javascript). "
-                         "Default: derived from the target tree; 'none' disables the filter")
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of human summary")
-    ap.add_argument("--no-cache", action="store_true", help="Bypass the 7-day cache")
-    ap.add_argument("--severity-only", action="store_true",
-                    help="With --report: only recompute Severity (uses adjacent reachability.json when present; otherwise skips external search)")
     ap.add_argument("--harness-rooted-check", action="store_true",
                     help="With --report: read-only — print 1 and exit 0 if the crash "
                          "faults entirely in the audit harness/driver (leaf frame is the "
                          "driver AND no target-library frame appears anywhere); else print "
-                         "0 and exit 1. No scoring, no external search.")
-    ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Per-request timeout (seconds)")
+                         "0 and exit 1. No scoring.")
     args = ap.parse_args(argv)
 
-    if args.severity_only and args.report is None and args.batch is None:
-        print("reachability: --severity-only requires --report or --batch", file=sys.stderr)
-        return 2
     if args.harness_rooted_check and args.report is None:
-        print("reachability: --harness-rooted-check requires --report", file=sys.stderr)
+        print("severity: --harness-rooted-check requires --report", file=sys.stderr)
         return 2
 
     if args.batch is not None:
-        return _run_batch(args.batch, args)
+        return _run_batch(args.batch)
 
-    use_cache = not args.no_cache
+    if args.report is None:
+        ap.print_help()
+        return 2
 
-    report_md: Path | None = None
-    report_dir: Path | None = None
+    resolved = _resolve_report_arg(args.report)
+    if resolved is None:
+        print(f"severity: report.md/REPORT.md not found under {args.report}", file=sys.stderr)
+        return 2
+    report_dir, report_md = resolved
+    report_text = report_md.read_text("utf-8", errors="replace")
+    # sanitizer.txt is canonical; asan.txt is a legacy alias kept as a
+    # fallback so older bundles shipped to maintainers stay readable.
     adjacent_asan_text = ""
-    symbols_from_asan = False
-    if args.report is not None:
-        resolved = _resolve_report_arg(args.report)
-        if resolved is None:
-            print(f"reachability: report.md/REPORT.md not found under {args.report}", file=sys.stderr)
-            return 2
-        report_dir, report_md = resolved
-        report_text = report_md.read_text("utf-8", errors="replace")
-        # sanitizer.txt is canonical; asan.txt is a legacy alias kept as a
-        # fallback so older bundles shipped to maintainers stay readable.
-        asan_path: Path | None = None
-        for name in ("sanitizer.txt", "asan.txt"):
-            candidate = report_dir / name
-            if candidate.is_file():
-                asan_path = candidate
-                break
-        if asan_path is not None:
+    for name in ("sanitizer.txt", "asan.txt"):
+        candidate = report_dir / name
+        if candidate.is_file():
             try:
-                adjacent_asan_text = asan_path.read_text("utf-8", errors="replace")
+                adjacent_asan_text = candidate.read_text("utf-8", errors="replace")
             except OSError:
                 adjacent_asan_text = ""
-        if args.harness_rooted_check:
-            # Read-only fast path: combine the report (which embeds the trace)
-            # with every adjacent sanitizer artifact so the leaf/context scan
-            # sees the full fault stack regardless of which file carries it or
-            # how it is named at triage time (sanitizer.txt, asan.txt,
-            # *_confirm.asan.txt, …) — not just one fixed filename.
-            texts = [report_text]
-            for name in ("sanitizer.txt", "asan.txt"):
-                p = report_dir / name
-                if p.is_file():
-                    texts.append(p.read_text("utf-8", errors="replace"))
-            for p in sorted(report_dir.glob("*.asan.txt")):
+            break
+
+    if args.harness_rooted_check:
+        # Read-only fast path: combine the report (which embeds the trace)
+        # with every adjacent sanitizer artifact so the leaf/context scan
+        # sees the full fault stack regardless of which file carries it or
+        # how it is named at triage time (sanitizer.txt, asan.txt,
+        # *_confirm.asan.txt, …) — not just one fixed filename.
+        texts = [report_text]
+        for name in ("sanitizer.txt", "asan.txt"):
+            p = report_dir / name
+            if p.is_file():
                 texts.append(p.read_text("utf-8", errors="replace"))
-            rooted = _crash_is_harness_rooted("\n".join(texts))
-            print("1" if rooted else "0")
-            return 0 if rooted else 1
-    else:
-        report_text = ""
-        if not args.symbol:
-            ap.print_help()
-            return 2
+        for p in sorted(report_dir.glob("*.asan.txt")):
+            texts.append(p.read_text("utf-8", errors="replace"))
+        rooted = _crash_is_harness_rooted("\n".join(texts))
+        print("1" if rooted else "0")
+        return 0 if rooted else 1
 
-    ignore = _resolve_ignore(args, report_dir)
-    repo_type = _resolve_repo_type(args, report_dir)
-    # Resolve the target's language BEFORE symbol extraction: the accepted
-    # identifier shape depends on it (Go exports are PascalCase; a C-only
-    # shape would never probe them).
-    target_basenames, target_names, language = _resolve_target_identity(args, report_dir)
-    if args.language is not None:
-        language = "" if args.language.strip().lower() == "none" else args.language.strip()
-
-    # Symbols: an explicit --symbol overrides everything. For sanitizer-backed
-    # reports, external-caller popularity is measured at one caller-entry
-    # symbol: an explicit report Entry line when available, otherwise the
-    # deepest product frame in the primary fault stack. That keeps severity
-    # tied to "who calls the public/reachable entry point" without requiring
-    # downstream projects to contain the target's internal crash chain. Report
-    # prose mining remains the fallback for findings with no sanitizer stack.
-    symbols = list(args.symbol)
-    entry_symbol: str | None = None
-    stripped_report_text = _strip_auto_sections(report_text) if report_md is not None else ""
-    if report_md is not None:
-        if not symbols and adjacent_asan_text:
-            entry_symbol = _crash_entrypoint_symbol(
-                adjacent_asan_text, language, stripped_report_text)
-            if entry_symbol:
-                symbols = [entry_symbol]
-                symbols_from_asan = True
-            else:
-                symbols = _extract_symbols_from_asan(adjacent_asan_text, language)
-                symbols_from_asan = bool(symbols)
-        if not symbols:
-            symbols = _extract_symbols_from_report(stripped_report_text, language)
-
-    reachability_json_path = report_dir / "reachability.json" if report_dir is not None else None
-
-    local_symbols_only = symbols_from_asan and _asan_text_has_dev_path(adjacent_asan_text)
-
-    if repo_type == "none":
-        reach = _no_symbols_reachability(
-            ignore,
-            symbols=symbols,
-            status="external_skipped",
-            reason="target repo_type=none; external caller search skipped",
-        )
-        if reachability_json_path is not None:
-            reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
-    elif args.severity_only:
-        if reachability_json_path is not None and reachability_json_path.is_file():
-            try:
-                reach = json.loads(reachability_json_path.read_text("utf-8"))
-            except Exception as e:
-                print(f"reachability: cannot read {reachability_json_path}: {e}", file=sys.stderr)
-                return 4
-        else:
-            reach = _no_symbols_reachability(
-                ignore,
-                symbols=symbols,
-                status="external_skipped",
-                reason="external search skipped by --severity-only",
-            )
-            if reachability_json_path is not None:
-                reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
-    elif local_symbols_only:
-        reach = _no_symbols_reachability(
-            ignore,
-            symbols=symbols,
-            status="local_symbols_only",
-            reason="local ASan frame symbol from dev/test surface; external search skipped",
-        )
-        if reachability_json_path is not None:
-            reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
-    elif not symbols and report_md is not None:
-        reach = _no_symbols_reachability(ignore)
-        if reachability_json_path is not None:
-            reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
-    else:
-        # Sanitizer-backed reports normally carry a caller-entry symbol:
-        # popularity counts callers of that entry, any-frame (see query_all).
-        # When no entry point was identified, crash-state symbols are still a
-        # call chain, so the all-frames collision gate applies. Manual
-        # --symbol lists and narrative-mined entry points stay union/any-match.
-        reach = query_all(symbols, ignore, args.timeout, use_cache,
-                          target_basenames, target_names,
-                          entry_symbol=entry_symbol,
-                          require_all_symbols=symbols_from_asan,
-                          language=language)
-        if reachability_json_path is not None:
-            reachability_json_path.write_text(json.dumps(reach, indent=2, sort_keys=True), "utf-8")
-
-    severity: dict | None = None
-    if report_md is not None:
-        cluster_size = _detect_cluster_size(report_text)
-        # Strip our own auto-generated sections before scoring — otherwise
-        # the explainer text in the rationale section (which mentions
-        # 'tests/', 'maint/' as examples) feeds back into the dev/test
-        # path detector on subsequent runs and spuriously collapses the
-        # surface tier. Scoring should only see the agent-authored part
-        # of the report.
-        scoring_text = _strip_auto_sections(report_text)
-        # Append asan.txt when adjacent — it has the canonical ASan summary
-        # (class + READ/WRITE of size N + SCARINESS line) that the report
-        # narrative may only paraphrase. Increases classifier accuracy without
-        # changing what gets persisted.
-        if report_dir is not None:
-            if adjacent_asan_text:
-                scoring_text = scoring_text + "\n" + adjacent_asan_text
-        severity = compute_severity(scoring_text, reach, cluster_size=cluster_size,
-                                    report_dir=report_dir)
-        update_report(report_md, reach, severity)
+    cluster_size = _detect_cluster_size(report_text)
+    # Strip our own auto-generated sections before scoring — otherwise the
+    # explainer text in the rationale section (which mentions 'tests/',
+    # 'maint/' as examples) feeds back into the dev/test path detector on
+    # subsequent runs and spuriously collapses the surface tier. Scoring
+    # should only see the agent-authored part of the report.
+    scoring_text = _strip_auto_sections(report_text)
+    # Append asan.txt when adjacent — it has the canonical ASan summary
+    # (class + READ/WRITE of size N + SCARINESS line) that the report
+    # narrative may only paraphrase. Increases classifier accuracy without
+    # changing what gets persisted.
+    if adjacent_asan_text:
+        scoring_text = scoring_text + "\n" + adjacent_asan_text
+    severity = compute_severity(scoring_text, cluster_size=cluster_size,
+                                report_dir=report_dir)
+    update_report(report_md, severity)
+    # severity.json is the on-disk "this report has been scored" marker that
+    # downstream gates (benchmark re-derive, bundle exports) test for. The
+    # score itself lives in the report; this file only records that scoring ran.
+    (report_dir / "severity.json").write_text(
+        json.dumps({"schema_version": 3,
+                    "scored_at": datetime.now(timezone.utc).isoformat()},
+                   indent=2, sort_keys=True),
+        "utf-8",
+    )
 
     if args.json:
-        payload: dict[str, Any] = {"reachability": reach}
-        if severity is not None:
-            payload["severity"] = severity
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        print(json.dumps({"severity": severity}, indent=2, sort_keys=True))
     else:
-        print(render_human(reach, severity))
+        print(render_human(severity))
 
     return 0
 

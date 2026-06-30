@@ -148,13 +148,13 @@ CRASH-001-1/
   harness.{c,cc,cpp,cxx} # present iff the bug uses a C/C++ harness
   sanitizer.txt         # original sanitizer output
   patch.diff            # optional: candidate fix
-  reachability.json     # optional: caller search + advisory severity
+  severity.json         # records that the report was scored
   .audit/
   .dup-of               # only on non-canonical cluster members
 ```
 
 Crash directories may also carry dot-files the triage gates leave
-behind (`.llm-*.json` vote caches, `.reachability_ok`, and similar
+behind (`.llm-*.json` vote caches, `.severity_ok`, and similar
 markers). They are harness internals — safe to ignore when reviewing.
 
 `REPORT.md` carries a `Cluster: <ID>` line. Non-canonical cluster
@@ -187,7 +187,7 @@ Findings use:
 FIND-001/
   report.md              # the narrative; hand-edit this (description.md also accepted)
   report.html            # auto-generated sibling of report.md (open in browser)
-  reachability.json      # caller / severity hints (when reachability analysis ran)
+  severity.json          # records that the report was scored
   affected-files.txt     # optional, operator-authored — the harness does not generate it
   .dup-of                # only on non-canonical cluster members
   .needs-content         # marker added when report.md is missing
@@ -225,9 +225,9 @@ reject. The harness drops a `.pending-drop` marker visible in the
 to address the marker, or `touch .reviewed` / `.keep` to override. On
 a second reject, the directory is moved to `findings-rejected/`.
 
-Reachability can also write `reachability.json` and update
-severity text for a FIND. That is useful context, not a
-requirement for the finding to exist.
+The severity scorer can also write `severity.json` and update the
+severity text for a FIND. That is useful context, not a requirement
+for the finding to exist.
 
 ## Logs
 

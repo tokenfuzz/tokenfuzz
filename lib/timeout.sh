@@ -167,7 +167,7 @@ audit_timeout__perl() {
         if ($rss_kb > $limit_kb) {
           my $used_mb = int($rss_kb / 1024);
           # Marker is matched by triage (is_autodiscard_crash_output) and
-          # bin/reachability detect_primitive — the OOM / host-protection class,
+          # bin/severity detect_primitive — the OOM / host-protection class,
           # so the kill is recorded, never promoted to a memory-safety bug.
           print STDERR "tokenfuzz: probe rss limit exceeded (${used_mb}Mb > ${rss_mb}Mb) -- host-protection kill\n";
           $kill_group->("KILL");

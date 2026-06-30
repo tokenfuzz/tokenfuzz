@@ -188,8 +188,7 @@ and rotated.
 - Only run TokenFuzz on software you are authorised to test.
 - All output is written to your local results directory; the harness
   does not publish anything itself. Hosted backends receive the prompts,
-  source excerpts, state, and reports needed for the run, and optional
-  reachability checks may query public code search.
+  source excerpts, state, and reports needed for the run.
 - When reporting upstream, use the project's normal security-disclosure
   process.
 - The repository's security policy is in

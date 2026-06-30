@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
-_REACH = _REPO / "bin" / "reachability"
+_SEVERITY = _REPO / "bin" / "severity"
 # Canonical column in a *-CLUSTERS.md row: "... | [CRASH-0008](CRASH-0008/REPORT.md) | ..."
 _CANON_RE = re.compile(r"\[((?:CRASH|FIND)-\d+)\]\([^)]*\)")
 
@@ -60,8 +60,7 @@ def _dirs(pool: Path, kind: str, pref: str) -> list[Path]:
 
 def _score(item: Path) -> dict:
     out = subprocess.run(
-        [sys.executable, str(_REACH), "--report", str(item),
-         "--severity-only", "--json", "--no-cache"],
+        [sys.executable, str(_SEVERITY), "--report", str(item), "--json"],
         capture_output=True, text=True)
     try:
         return json.loads(out.stdout)["severity"]

@@ -1,7 +1,7 @@
 site_name: TokenFuzz
 site_description: >-
   Open LLM-based vulnerability research platform for recon sweeps, eight
-  investigation strategies, reachability-labelled triage, cost-aware fleet
+  investigation strategies, severity-labelled triage, cost-aware fleet
   coordination, and maintainer-ready sanitizer reproducers.
 site_url: https://tokenfuzz.github.io/tokenfuzz/
 

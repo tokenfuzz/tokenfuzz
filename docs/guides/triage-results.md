@@ -152,12 +152,10 @@ Notes:
 - `Surface` describes where the crash is reachable from. Agents write
   a short label, optionally followed by prose (`library-api — C
   harness calls app_read_memory`); export normalises it to one of the
-  tokens above, and `bin/reachability` classifies it into a surface tier
+  tokens above, and `bin/severity` classifies it into a surface tier
   (e.g. `cli` → `cli_production`) from the surface *kind* alone before
-  computing the advisory severity. External-caller counts are not consulted
-  for the score — popularity is reported separately as reach metadata. An
-  unset `Surface` defaults to `unknown` and under-scores real
-  findings, so always set it.
+  computing severity. An unset `Surface` defaults to `unknown` and
+  under-scores real findings, so always set it.
 - `Trigger source` is compared against `attacker_controls` to set
   *severity*, not to decide filing: a trigger fully within
   `attacker_controls` scores as security; one with a component outside it
@@ -238,7 +236,7 @@ Notes on the fields:
 - `Dedup frames` is the top-3 ClusterFuzz-style frame chain used for
   duplicate detection.
 - The auto-Severity bullet (`- **Severity**: …`) is rewritten by
-  `bin/reachability` on every triage pass; hand-edits there are lost.
+  `bin/severity` on every triage pass; hand-edits there are lost.
 - Severity is the **CVSS v4.0 score** — one industry-standard
   metric, computed by the vendored FIRST reference scorer. The bullet
   and the Fields-table `Severity` row carry the level plus the score
@@ -358,7 +356,7 @@ CRASH-001-1/
   harness.{c,cc,cpp,cxx} # when applicable
   sanitizer.txt
   patch.diff             # optional: candidate fix that passes `git apply --check`
-  reachability.json      # optional: caller search + advisory severity
+  severity.json          # records that the report was scored
   .audit/
 ```
 
@@ -474,16 +472,15 @@ bin/cluster-crashes output/<target>
 bin/cluster-findings output/<target>
 bin/show-exclusions "$RESULTS"
 bin/export-repro CRASH-001-1 --slug <target>
-bin/reachability --report "$RESULTS/crashes/CRASH-001-1/" --severity-only
-bin/reachability --batch "$RESULTS"
+bin/severity --report "$RESULTS/crashes/CRASH-001-1/"
+bin/severity --batch "$RESULTS"
 ```
 
 What each command does:
 
 - `bin/export-repro` — builds the handoff bundle.
-- `bin/reachability --severity-only` — updates severity metadata
-  without public code-search queries. Run without that flag only
-  when external caller context is intended.
+- `bin/severity` — recomputes the CVSS severity for a crash or
+  finding from its report and `target.toml`, offline.
 - `bin/cluster-crashes` and `bin/cluster-findings` — group reports
   that share a root cause, write the cluster summaries, and stamp
   `Cluster:` and `Dedup key:` lines into each report. Both run

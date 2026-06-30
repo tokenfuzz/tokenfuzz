@@ -188,7 +188,7 @@ def extract_class(report_text: str) -> str:
 
 
 # ── Severity extraction ────────────────────────────────────────────
-# Severity is a CVSS v4.0 score written by bin/reachability in two
+# Severity is a CVSS v4.0 score written by bin/severity in two
 # shapes: the bare bullet ``- **Severity**: <Level> (CVSS-BTE 4.0: <score> …)``
 # and the Fields-table row ``| Severity | <Level> (CVSS-BTE 4.0 <score>) |``.
 # The CVSS score is a float in [0.0, 10.0]; an unclassified crash is
@@ -217,7 +217,7 @@ def extract_severity(report_text: str) -> tuple[str, int, float]:
     Prefers the bare ``- **Severity**: <Level> (CVSS-BTE 4.0: <score> …)`` line;
     falls back to the ``| Severity | <Level> (CVSS-BTE 4.0: <score>) |`` Fields-table
     row; then to ``('—', 0, 0.0)`` when no severity is recorded yet (e.g.
-    before bin/reachability has scored the report). Rank is the sort key —
+    before bin/severity has scored the report). Rank is the sort key —
     higher is more severe (Critical=4 > High=3 > Medium=2 > Low=1;
     None=Unknown=0)."""
     m = _SEVERITY_LEVEL_RE.search(report_text or "")

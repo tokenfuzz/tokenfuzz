@@ -9,7 +9,7 @@
 #   Nothing built the harness, ran it, and verified that an ASan stack
 #   trace + nonzero exit actually came out the other end. As a result, a
 #   testcase-selection bug in lib/crash_artifacts.py shipped silently:
-#   .audit/reachability.out was being chosen over the real testcase,
+#   .audit/severity.out was being chosen over the real testcase,
 #   harness.cpp swallowed the parse error in a catch, and `./reproduce.sh`
 #   produced ZERO output while reporting exit=0. The user thought the bug
 #   had vanished.
@@ -151,19 +151,15 @@ cat > "$CRASH_DIR/repro.cmd" <<'EOF'
 {TESTCASE} --needed
 EOF
 
-# The regression bait: drop a `.audit/reachability.out` prose file in
+# The regression bait: drop a `.audit/severity.out` prose file in
 # the dir. Before the lib/crash_artifacts.py fix, find_testcase would
 # happily select it (alphabetic) and export-repro would stage it as
 # `input.out`, producing a reproduce.sh that fed prose to the harness
 # and silently exited 0. The test below pins that this never recurs.
 mkdir -p "$CRASH_DIR/.audit"
-cat > "$CRASH_DIR/.audit/reachability.out" <<'EOF'
-Reachability for: main
-  External callers (genuine):  0
-  sourcegraph status=ok          hits=0
-  gh        status=ok          hits=0
-
-Severity: Low (score=10/100)
+cat > "$CRASH_DIR/.audit/severity.out" <<'EOF'
+Severity: Low (CVSS-BT 4.0: 2.0 Low)
+  vector     CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N
 EOF
 
 # ─── Run export-repro ────────────────────────────────────────────────
@@ -188,15 +184,15 @@ assert_file_exists "$CRASH_DIR/input.bin"    "bundle: input.bin preserved"
 assert_file_not_exists "$CRASH_DIR/input.out" \
   "bundle: stale-or-fake input.out NOT staged as testcase"
 
-# The reachability.out bait must NOT have leaked out of .audit/.
-if [ -f "$CRASH_DIR/reachability.out" ]; then
-  fail "bundle: reachability.out kept inside .audit/" \
-       "reachability.out leaked into bundle root"
+# The severity.out bait must NOT have leaked out of .audit/.
+if [ -f "$CRASH_DIR/severity.out" ]; then
+  fail "bundle: severity.out kept inside .audit/" \
+       "severity.out leaked into bundle root"
 else
-  pass "bundle: reachability.out kept inside .audit/"
+  pass "bundle: severity.out kept inside .audit/"
 fi
-assert_file_exists "$CRASH_DIR/.audit/reachability.out" \
-  "bundle: reachability.out preserved under .audit/"
+assert_file_exists "$CRASH_DIR/.audit/severity.out" \
+  "bundle: severity.out preserved under .audit/"
 
 # Stream-visibility guards — banner + exit code surface to the user.
 assert_file_contains "$CRASH_DIR/reproduce.sh" 'echo "=== running ASan repro:' \
@@ -237,8 +233,8 @@ assert_match '=== running ASan repro:' "$run_out" \
 assert_match '\[repro\] exit=' "$run_out" \
   "reproduce.sh: exit-code line printed at runtime"
 
-# Confirm reproduce.sh fed input.bin (not the reachability prose).
-# Without the crash_artifacts fix, find_testcase picked reachability.out
+# Confirm reproduce.sh fed input.bin (not the severity prose).
+# Without the crash_artifacts fix, find_testcase picked severity.out
 # and the produced script would reference input.out — assert it doesn't.
 assert_file_not_contains "$CRASH_DIR/reproduce.sh" 'input\.out\b' \
   "reproduce.sh: references input.bin, not input.out"

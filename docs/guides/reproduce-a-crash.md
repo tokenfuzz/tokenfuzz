@@ -39,7 +39,7 @@ CRASH-001-1/
 ├── harness.{c,cc,cpp,cxx} # present iff the bug uses a C/C++ harness
 ├── sanitizer.txt      # full sanitizer output captured during discovery
 ├── patch.diff         # optional: candidate fix, verified to apply cleanly
-├── reachability.json  # optional: caller search + advisory severity
+├── severity.json      # records that the report was scored
 └── .audit/            # audit-side originals, kept for provenance
 ```
 

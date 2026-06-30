@@ -212,9 +212,8 @@ What happens to each artifact:
   `findings-rejected/` — they are not deleted, so you can review the
   reasoning.
 
-Reachability and severity annotations are best-effort post-processing.
-A failed external-caller lookup does not remove an otherwise complete
-crash or finding.
+Severity annotation is best-effort post-processing. A failed scoring
+run does not remove an otherwise complete crash or finding.
 
 ## 8. Export to a maintainer bundle
 
@@ -229,7 +228,7 @@ input.<ext>        the testcase bytes
 harness.{c,cc,cpp,cxx} present iff the bug uses a C/C++ harness
 sanitizer.txt      full sanitizer output
 patch.diff         optional candidate fix
-reachability.json  optional: caller search + advisory severity
+severity.json      records that the report was scored
 .audit/            original agent-authored files, kept for provenance
 ```
 

@@ -267,13 +267,13 @@ assert_file_contains "$CDA/REPORT.md" "\+new$" \
 assert_file_contains "$CDA/REPORT.md" "^## Patch" \
   ".audit/ fallback also creates the canonical ## Patch heading"
 
-# ── Patch placement: Reproduce → Fix → Patch → Reachability ───────────
+# ── Patch placement: Reproduce → Fix → Patch → Severity rationale ─────
 # The reading order puts the patch right after the reproducer and before
-# the reference-material scoring sections (Reachability / Severity
-# rationale). `## Fix Direction` is the advisory-no-patch mechanism and
-# is NOT moved (only a prose `## Fix`/`Suggested fix` is lifted to sit
-# above `## Patch`). So with a Fix Direction present, Patch must land
-# AFTER Reproduce and BEFORE Reachability.
+# the reference-material Severity rationale section. `## Fix Direction` is
+# the advisory-no-patch mechanism and is NOT moved (only a prose
+# `## Fix`/`Suggested fix` is lifted to sit above `## Patch`). So with a
+# Fix Direction present, Patch must land AFTER Reproduce and BEFORE the
+# Severity rationale.
 CDP="$RESULTS_DIR/crashes/CRASH-001-P"
 mkdir -p "$CDP"
 cat > "$CDP/report.md" <<'EOF'
@@ -291,9 +291,6 @@ Validate the input before the call.
 ## Reproduce
 - Run: ./repro.sh
 
-## Reachability — external callers
-None observed.
-
 ## Severity rationale
 Worst case is an info-leak.
 EOF
@@ -307,14 +304,14 @@ diff --git a/x.c b/x.c
 EOF
 python3 "$ENRICH" --quiet "$CDP/report.md" \
   || fail "enrich-report failed on placement fixture"
-# Patch must land AFTER Reproduce and BEFORE Reachability.
+# Patch must land AFTER Reproduce and BEFORE Severity rationale.
 patch_line=$(grep -n "^## Patch$" "$CDP/report.md" | cut -d: -f1)
 repro_line=$(grep -n "^## Reproduce$" "$CDP/report.md" | cut -d: -f1)
-reach_line=$(grep -n "^## Reachability" "$CDP/report.md" | cut -d: -f1)
-[ -n "$patch_line" ] && [ -n "$repro_line" ] && [ -n "$reach_line" ] \
-  && [ "$patch_line" -gt "$repro_line" ] && [ "$patch_line" -lt "$reach_line" ]
+sev_line=$(grep -n "^## Severity rationale" "$CDP/report.md" | cut -d: -f1)
+[ -n "$patch_line" ] && [ -n "$repro_line" ] && [ -n "$sev_line" ] \
+  && [ "$patch_line" -gt "$repro_line" ] && [ "$patch_line" -lt "$sev_line" ]
 assert_eq 0 $? \
-  "## Patch lands between Reproduce (line $repro_line) and Reachability (line $reach_line); got $patch_line"
+  "## Patch lands between Reproduce (line $repro_line) and Severity rationale (line $sev_line); got $patch_line"
 
 # ── Prose `## Fix` is lifted to sit Reproduce → Fix → Patch ────────────
 # A model-authored prose `## Fix` section (distinct from `## Fix
@@ -334,8 +331,8 @@ Add a bounds check before the memcpy.
 ## Reproduce
 - Run: ./repro.sh
 
-## Reachability — external callers
-None observed.
+## Severity rationale
+Local crash only.
 EOF
 cp "$CDP/patch.diff" "$CDF/patch.diff"
 python3 "$ENRICH" --quiet "$CDF/report.md" \
@@ -343,11 +340,11 @@ python3 "$ENRICH" --quiet "$CDF/report.md" \
 repro_f=$(grep -n "^## Reproduce$" "$CDF/report.md" | cut -d: -f1)
 fix_f=$(grep -n "^## Fix$" "$CDF/report.md" | cut -d: -f1)
 patch_f=$(grep -n "^## Patch$" "$CDF/report.md" | cut -d: -f1)
-reach_f=$(grep -n "^## Reachability" "$CDF/report.md" | cut -d: -f1)
-[ -n "$repro_f" ] && [ -n "$fix_f" ] && [ -n "$patch_f" ] && [ -n "$reach_f" ] \
-  && [ "$repro_f" -lt "$fix_f" ] && [ "$fix_f" -lt "$patch_f" ] && [ "$patch_f" -lt "$reach_f" ]
+sev_f=$(grep -n "^## Severity rationale" "$CDF/report.md" | cut -d: -f1)
+[ -n "$repro_f" ] && [ -n "$fix_f" ] && [ -n "$patch_f" ] && [ -n "$sev_f" ] \
+  && [ "$repro_f" -lt "$fix_f" ] && [ "$fix_f" -lt "$patch_f" ] && [ "$patch_f" -lt "$sev_f" ]
 assert_eq 0 $? \
-  "order Reproduce($repro_f) < Fix($fix_f) < Patch($patch_f) < Reachability($reach_f)"
+  "order Reproduce($repro_f) < Fix($fix_f) < Patch($patch_f) < Severity rationale($sev_f)"
 # Exactly one ## Fix (moved, not duplicated).
 assert_eq 1 "$(grep -c "^## Fix$" "$CDF/report.md")" "## Fix not duplicated after move"
 # Idempotent: a second enrich must not change the file.
@@ -356,9 +353,9 @@ python3 "$ENRICH" --quiet "$CDF/report.md" >/dev/null 2>&1
 H2=$(shasum -a 1 "$CDF/report.md" | awk '{print $1}')
 assert_eq "$H1" "$H2" "fix-reorder enrichment is byte-stable across re-runs"
 
-# Sparse report: only Classification + Reachability + Severity rationale
-# (a real shape observed in live benchmark output). Patch must still
-# land BEFORE Reachability — not at end-of-report.
+# Sparse report: only Classification + Severity rationale (a real shape
+# observed in live benchmark output). Patch must still land BEFORE the
+# Severity rationale — not at end-of-report.
 CDP2="$RESULTS_DIR/crashes/CRASH-001-Q"
 mkdir -p "$CDP2"
 cat > "$CDP2/report.md" <<'EOF'
@@ -366,9 +363,6 @@ cat > "$CDP2/report.md" <<'EOF'
 
 ## Classification
 - **Severity**: Medium
-
-## Reachability — external callers
-None observed.
 
 ## Severity rationale
 Local crash only.
@@ -378,11 +372,11 @@ python3 "$ENRICH" --quiet "$CDP2/report.md" \
   || fail "enrich-report failed on sparse-report fixture"
 cls_line=$(grep -n "^## Classification$" "$CDP2/report.md" | cut -d: -f1)
 patch_line=$(grep -n "^## Patch$" "$CDP2/report.md" | cut -d: -f1)
-reach_line=$(grep -n "^## Reachability" "$CDP2/report.md" | cut -d: -f1)
-[ -n "$cls_line" ] && [ -n "$patch_line" ] && [ -n "$reach_line" ] \
-  && [ "$patch_line" -gt "$cls_line" ] && [ "$patch_line" -lt "$reach_line" ]
+sev_line=$(grep -n "^## Severity rationale" "$CDP2/report.md" | cut -d: -f1)
+[ -n "$cls_line" ] && [ -n "$patch_line" ] && [ -n "$sev_line" ] \
+  && [ "$patch_line" -gt "$cls_line" ] && [ "$patch_line" -lt "$sev_line" ]
 assert_eq 0 $? \
-  "## Patch lands between Classification ($cls_line) and Reachability ($reach_line); got $patch_line"
+  "## Patch lands between Classification ($cls_line) and Severity rationale ($sev_line); got $patch_line"
 
 # ── (f) Missing source tree degrades gracefully ─────────────────────
 CD2="$RESULTS_DIR/crashes/CRASH-002-1"

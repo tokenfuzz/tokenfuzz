@@ -9,7 +9,7 @@
 #   3. cached accept (matching SHA-1) → no LLM call, dir stays.
 #   4. cached reject (matching SHA-1) → no LLM call, dir gets rejected.
 #   5. asymmetric accept reuse: harness-stamped enrichment (Severity
-#      rationale / Reachability / Cluster / Contract concern) keeps a
+#      rationale / Cluster / Contract concern) keeps a
 #      cached accept while the sanitizer evidence is byte-identical; a
 #      substantive (agent-narrative) edit or changed evidence re-litigates.
 #   6. malformed JSON / LLM unavailable → undecided → dir kept (fall-through).
@@ -27,8 +27,6 @@ setup_test_env
 
 # Block any real LLM call. Per-test mocks (LLM_DECIDE_MOCK_*) still flow.
 export LLM_DECIDE_DISABLE=1
-# Triage helpers we don't exercise here; suppress reachability/bundling.
-export REACHABILITY_AUTO=0
 
 confirm_cache="$RESULTS_DIR/confirm-cache-fields.json"
 cat > "$confirm_cache" <<'EOF'
@@ -149,7 +147,7 @@ assert_eq 0 "$rc" "cached reject honored with LLM disabled"
 assert_match "hand-wavy" "$out" "cached reject reason replayed from disk"
 
 # ── 5a. harness-stamped enrichment keeps a cached accept ────────────
-# bin/reachability, bin/cluster-crashes, and the contract-concern
+# bin/severity, bin/cluster-crashes, and the contract-concern
 # annotator rewrite report.md between triage passes without changing
 # what the gate judges. A cached ACCEPT must survive those stamps while
 # the sanitizer evidence is byte-identical — re-asking the gate every
@@ -162,8 +160,6 @@ Dedup frames: app_parse|main
 ## Severity rationale
 - **Severity**: High (auto: CVSS-BTE 4.0: 8.7)
 Derived from reach=High and primitive=oob-write.
-## Reachability — external callers
-- 12 external callers via code search
 ## Patch
 <!-- enrich:patch-diff -->
 --- a/src/app.c

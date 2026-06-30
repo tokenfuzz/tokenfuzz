@@ -44,7 +44,7 @@ kept even when it is binary). Dropped from a crash/finding dir: its internal
 — the last two are machine-specific build output the recipient regenerates from
 the shipped source + reproduce.sh, and they embed an unscrubbable absolute build
 path. Excluded at the run level: cells/, recon-cache/, console.log,
-reachability.log — heavy harness internals and operator-side logs.
+severity.log — heavy harness internals and operator-side logs.
 
 Every text file is scrubbed of local /Users... paths via the harness
 path-replacer (lib/benchmark._scrub_local_paths) — the same collapse to
@@ -74,7 +74,7 @@ import benchmark as B  # noqa: E402  (runtime sys.path adjustment)
 # .audit/. cells/, recon-cache/ are heavy harness internals and the *.log files
 # are operator-side logs. A *.dSYM is a macOS debug-symbol bundle — build output
 # the recipient regenerates, and it embeds the absolute build path.
-EXCLUDE = ("cells", "recon-cache", ".audit", "console.log", "reachability.log")
+EXCLUDE = ("cells", "recon-cache", ".audit", "console.log", "severity.log")
 
 
 def log(msg: str) -> None:

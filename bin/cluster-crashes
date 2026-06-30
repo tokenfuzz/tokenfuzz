@@ -526,17 +526,6 @@ def _extract_strategy(report_text: str) -> str:
     return ""
 
 
-def _extract_external_callers(crash_dir: Path) -> int:
-    reach_path = crash_dir / "reachability.json"
-    if not reach_path.is_file():
-        return 0
-    try:
-        data = json.loads(_read_text(reach_path))
-        return int(data.get("external_callers", 0) or 0)
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return 0
-
-
 def _signature(crash_dir: Path) -> dict:
     asan = _find_asan(crash_dir)
     asan_text = _read_text(asan) if asan else ""
@@ -572,7 +561,6 @@ def _signature(crash_dir: Path) -> dict:
         "severity_level": sev_level,
         "severity_rank": sev_rank,
         "severity_score": sev_score,
-        "external_callers": _extract_external_callers(crash_dir),
         "strategy": _extract_strategy(report_text),
         "status": status,
     }
@@ -635,7 +623,6 @@ def _clusters_from_sigs(sigs: list[dict]) -> list[dict]:
         ))
         canonical = ordered[0]
         canonical_disp = canonical.get("display_id", canonical["id"])
-        max_callers = max((int(m.get("external_callers", 0) or 0) for m in members), default=0)
         statuses = sorted({m.get("status", "OK") for m in members})
         status = statuses[0] if len(statuses) == 1 else "; ".join(statuses)
         strategies = sorted({m.get("strategy", "") for m in members if m.get("strategy")})
@@ -665,7 +652,6 @@ def _clusters_from_sigs(sigs: list[dict]) -> list[dict]:
             "severity_level": canonical["severity_level"],
             "severity_rank": canonical["severity_rank"],
             "severity_score": canonical["severity_score"],
-            "external_callers": max_callers,
             "strategy": strategy_cell,
             "status": status,
             "_full": ordered,
@@ -811,8 +797,8 @@ def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
     lines.append("")
     # Severity is the leftmost data column so the highest-priority bugs
     # are visually first. Numeric Size right-aligned; everything else left.
-    lines.append("| Severity | Callers | Cluster | Size | Primitive | Strategy | Root signature | Canonical | Members | Status |")
-    lines.append("|:---------|--------:|:--------|-----:|:----------|:---------|:---------------|:----------|:--------|:-------|")
+    lines.append("| Severity | Cluster | Size | Primitive | Strategy | Root signature | Canonical | Members | Status |")
+    lines.append("|:---------|:--------|-----:|:----------|:---------|:---------------|:----------|:--------|:-------|")
     for c in clusters:
         # CRASH-CLUSTERS.md lives inside crashes/, so member links are
         # relative to that directory.
@@ -830,7 +816,7 @@ def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
         sev_score = c.get("severity_score", 0)
         sev_cell = f"{sev} (CVSS {sev_score})" if sev_score else sev
         lines.append(
-            f"| {sev_cell} | {c.get('external_callers', 0)} | `{c['id']}` | {c['size']} | "
+            f"| {sev_cell} | `{c['id']}` | {c['size']} | "
             f"{primitive} | "
             f"{strategy} | "
             f"`{signature}` | "
@@ -934,8 +920,8 @@ def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: b
     if all_sigs and clusters:
         md_lines.append(f"Dedup ratio: {len(all_sigs) / max(len(clusters), 1):.2f}x.")
     md_lines.append("")
-    md_lines.append("| Severity | Callers | Cluster | Size | Primitive | Strategy | Root signature | Canonical | Members | Status |")
-    md_lines.append("|:---------|--------:|:--------|-----:|:----------|:---------|:---------------|:----------|:--------|:-------|")
+    md_lines.append("| Severity | Cluster | Size | Primitive | Strategy | Root signature | Canonical | Members | Status |")
+    md_lines.append("|:---------|:--------|-----:|:----------|:---------|:---------------|:----------|:--------|:-------|")
     # Build a lookup from "<agent>/CRASH-XXX" → its report path, relative
     # to target_root. The agent dir layout is <slug>/<agent>/results/crashes/
     # so the relative link is "<agent>/results/crashes/CRASH-XXX/<report>".
@@ -959,7 +945,7 @@ def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: b
         sev_score = c.get("severity_score", 0)
         sev_cell = f"{sev} (CVSS {sev_score})" if sev_score else sev
         md_lines.append(
-            f"| {sev_cell} | {c.get('external_callers', 0)} | `{c['id']}` | {c['size']} | "
+            f"| {sev_cell} | `{c['id']}` | {c['size']} | "
             f"{primitive} | "
             f"{strategy} | "
             f"`{signature}` | "

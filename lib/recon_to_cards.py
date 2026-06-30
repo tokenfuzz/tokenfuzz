@@ -339,7 +339,7 @@ def _render_find_report(
     # the TL;DR (which `finding_signature.extract_location` matches via
     # `_INLINE_FILE_FUNC_LINE_RE`). `_CLASS_PATTERNS` in finding_signature
     # has a Fields-table entry, so Class extraction still works after
-    # the `- **Class**` bullet is dropped. `bin/reachability` skips the
+    # the `- **Class**` bullet is dropped. `bin/severity` skips the
     # `- **Severity**:` bullet entirely when the Fields-table Severity
     # row gets updated, so there's no risk of a stub Classification
     # heading being synthesized under us.
@@ -361,8 +361,8 @@ def _render_find_report(
         "",
         # Fields table mirrors the crash-report shape so a reviewer
         # sees the structured signal in one block. `Severity` is the
-        # row bin/reachability rewrites on scoring; it starts as `TBD`
-        # and becomes e.g. `Medium (32)` after the first reachability
+        # row bin/severity rewrites on scoring; it starts as `TBD`
+        # and becomes e.g. `Medium (32)` after the first severity
         # pass.
         "## Fields",
         "",
