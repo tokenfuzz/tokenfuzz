@@ -152,13 +152,22 @@ set -eu
 src="$1"; build="$2"
 mkdir -p "$build"
 ( cd "$src" && [ -x ./configure ] || { [ -x ./autogen.sh ] && ./autogen.sh; } )
+# Keep debug symbols in the linked binary. Some configure scripts strip by
+# default, which drops the symbol table and (on macOS) the Mach-O debug map,
+# so sanitizer stacks lose file:line despite -g1. Pass --disable-stripping
+# only when this configure advertises it, so a hand-written configure that
+# errors on unknown options is unaffected.
+strip_opt=""
+case "$(cd "$build" && "$src/configure" --help 2>/dev/null || true)" in
+    *--disable-stripping*) strip_opt="--disable-stripping" ;;
+esac
 ( cd "$build" && \\
     CC="${CC:-clang}" \\
     CXX="${CXX:-clang++}" \\
     CFLAGS="-O2 -g1 -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
     CXXFLAGS="-O2 -g1 -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
     LDFLAGS="-fsanitize=__SAN__" \\
-    "$src/configure" )
+    "$src/configure" $strip_opt )
 ( cd "$build" && make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)" )
 """
 
