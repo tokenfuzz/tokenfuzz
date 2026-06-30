@@ -2358,7 +2358,7 @@ if [ "$DO_REGENERATE" = "1" ]; then
       _rd=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("results_dir") or "")' \
         "$cell_dir/cell.json" 2>/dev/null)
       [ -n "$_rd" ] && [ -d "$_rd/findings" ] || continue
-      log "regenerate: draining find-gate for ${cell_dir##*/} (${_cond:-?})"
+      log "regenerate: draining find-gate for $(basename "$cell_dir") (${_cond:-?})"
       if [ "$_cond" = "model-direct" ]; then
         drain_cell_find_gate "$_rd" validator
       else
