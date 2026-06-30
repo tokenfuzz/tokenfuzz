@@ -186,6 +186,20 @@ STACK_FRAME_IGNORE_REGEXES = [
     # with its own module/source, never ``(dyld)``.
     '^start\\+0x',
     '\\bstart \\(dyld\\)',
+    # DIVERGENCE: POSIX thread-entry trampolines. The upstream list covers the
+    # Windows, Fuchsia, and sanitizer thread starters but omits the POSIX ones,
+    # which sit at the bottom of every threaded crash stack below the target's
+    # own frames. Left un-ignored, the deepest one became the reachability
+    # "public entry" symbol — a macOS `thread_start` (libsystem_pthread) matched
+    # every threaded project on earth. The first two match the raw frame line,
+    # where a `(module)` qualifier never appears on a target frame, so they drop
+    # any libsystem/libc runtime frame however its symbol renders; the last two
+    # catch glibc trampolines symbolized to source (no module qualifier), `\b`-
+    # anchored so a target function named `clone`/`start*` is never filtered.
+    '\\blibsystem_\\w+\\.dylib',
+    '\\blibc\\.so\\b',
+    '^start_thread\\b',
+    '^__clone3?\\b',
     '^libgcc_s.so.*',
     '.*ASAN_OnSIGSEGV',
     '.*BaseThreadInitThunk',

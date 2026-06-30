@@ -782,6 +782,99 @@ print("asan frame extraction OK; got:", syms)
 ' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "asan runtime frame leaked into symbols"
 
 # ───────────────────────────────────────────────────────────────────
+# 11b-thread. POSIX thread/process-entry trampolines never become the
+#      caller-popularity entry symbol. A threaded crash bottoms out in the
+#      libc/OS trampoline (macOS `thread_start`/`_pthread_start`, glibc
+#      `start_thread`/`__clone3`); left un-ignored the deepest such frame was
+#      probed as the "public entry point" and matched every threaded project on
+#      earth. The deepest *target* frame must be chosen instead.
+# ───────────────────────────────────────────────────────────────────
+_CURRENT_TEST="entrypoint: POSIX thread trampolines are not the caller entry"
+THREADENTRY_DIR="$TEST_TMPDIR/thread-entrypoint"
+mkdir -p "$THREADENTRY_DIR"
+cat > "$THREADENTRY_DIR/report.md" <<'EOF'
+# CRASH-THREAD-ENTRY
+Summary: heap overflow on a worker thread.
+EOF
+# macOS spelling: inline `sym+0x..` frames plus an offline bare `sym (module)`.
+cat > "$THREADENTRY_DIR/asan.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow
+WRITE of size 4
+    #0 0x1 in app_filter_run app_filter.c:222
+    #1 0x2 in worker_pump pool.c:48
+    #2 0x3 in pool_execute pool.c:214
+    #3 0x4 in task_run sched.c:2776
+    #4 0x5 in asan_thread_start(void*)+0x4c (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x3dd64)
+    #5 0x6 in _pthread_start+0x84 (libsystem_pthread.dylib:arm64e+0x6c54)
+    #6 0x7 in thread_start (libsystem_pthread.dylib)
+EOF
+out=$(python3 "$REACH" --report "$THREADENTRY_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "thread-entry report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+syms = json.load(sys.stdin)["reachability"]["symbols"]
+# Runtime trampolines must never be probed as a caller entry point.
+for bad in ("thread_start", "_pthread_start", "asan_thread_start"):
+    assert bad not in syms, (bad, syms)
+# The deepest target-source frame is the entry point instead.
+assert syms == ["task_run"], syms
+print("macos thread-entry OK; got:", syms)
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "thread trampoline leaked into entry symbol"
+
+# Same property for the glibc spelling, symbolized to source (no `(module)`
+# qualifier) so it exercises the bare-name rules, not the module backstop:
+# `start_thread` + the `__clone3` syscall tail.
+_CURRENT_TEST="entrypoint: glibc start_thread/clone are not the caller entry"
+GLIBCENTRY_DIR="$TEST_TMPDIR/glibc-entrypoint"
+mkdir -p "$GLIBCENTRY_DIR"
+cat > "$GLIBCENTRY_DIR/report.md" <<'EOF'
+# CRASH-GLIBC-ENTRY
+Summary: heap overflow on a worker thread (glibc).
+EOF
+cat > "$GLIBCENTRY_DIR/asan.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow
+WRITE of size 4
+    #0 0x1 in app_decode app.c:10
+    #1 0x2 in app_worker app.c:50
+    #2 0x3 in start_thread ../nptl/pthread_create.c:447
+    #3 0x4 in __clone3 ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+EOF
+out=$(python3 "$REACH" --report "$GLIBCENTRY_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "glibc thread-entry report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+syms = json.load(sys.stdin)["reachability"]["symbols"]
+for bad in ("start_thread", "__clone3"):
+    assert bad not in syms, (bad, syms)
+assert syms == ["app_worker"], syms
+print("glibc thread-entry OK; got:", syms)
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "glibc trampoline leaked into entry symbol"
+
+# A target function plainly named `clone`/`start*` must NOT be filtered — the
+# trampoline rules are `\b`-anchored to the exact runtime names, not prefixes.
+_CURRENT_TEST="entrypoint: target fn named clone/start survives trampoline filter"
+CLONEFP_DIR="$TEST_TMPDIR/clone-falsepos"
+mkdir -p "$CLONEFP_DIR"
+cat > "$CLONEFP_DIR/report.md" <<'EOF'
+# CRASH-CLONE-FP
+Summary: heap overflow in tree clone helper.
+EOF
+cat > "$CLONEFP_DIR/asan.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow
+WRITE of size 4
+    #0 0x1 in clone_node tree.c:10
+    #1 0x2 in start_handler srv.c:50
+EOF
+out=$(python3 "$REACH" --report "$CLONEFP_DIR" --json --no-cache 2>&1) || \
+  fail "$_CURRENT_TEST" "clone-falsepos report mode failed: $out"
+echo "$out" | python3 -c '
+import json, sys
+syms = json.load(sys.stdin)["reachability"]["symbols"]
+assert syms == ["start_handler"], syms
+print("clone false-positive guard OK; got:", syms)
+' >/dev/null && pass "$_CURRENT_TEST" || fail "$_CURRENT_TEST" "trampoline filter ate a target symbol"
+
+# ───────────────────────────────────────────────────────────────────
 # 11b-cpp. Entrypoint-first: when a sanitizer stack is present, caller
 #      popularity is probed at one caller-entry symbol from the primary fault
 #      stack, not at narrative helpers or scoring labels. For a C++ crash the
