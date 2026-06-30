@@ -2121,6 +2121,115 @@ if result_r.returncode == 0:
                   "severity replay: rationale not duplicated on second bundle")
 
 
+# ─── End-to-end: reach fields recovered from the .llm_fields.json sidecar ──
+#
+# Regression for the model-direct bundle: the crash prompt asks for only a
+# minimal report.md (file/function/class); the structured reachability fields
+# come from the `.llm_fields.json` sidecar the LLM hybrid pass writes. The
+# bundle build read fields ONLY from the report (bare labels / a `## Fields`
+# table) and never consulted the sidecar, so every reach row dashed out and
+# the severity re-score lost the call-sequence / contract facts — inflating an
+# AV:L/AT:P call-sequence UAF toward a worst-case AV:N base. This block gives a
+# report with NO reach fields plus a sidecar that carries them, and asserts
+# they flow into REPORT.md and into the replayed severity vector.
+
+sidecar_crash_dir = results_dir / "crashes" / "CRASH-S-1"
+sidecar_crash_dir.mkdir(parents=True)
+(sidecar_crash_dir / "asan.txt").write_text("""\
+=== Run 1/5 ===
+==44444==ERROR: AddressSanitizer: heap-use-after-free on address 0xc0de at pc 0xface
+WRITE of size 8 at 0xc0de thread T0
+    #0 0xdead in child_free /src/child.c:91
+    #1 0xfeed in table_free /src/table.c:236
+    #2 0xbead in root_free /src/root.c:868
+    #3 0xabcd in main /src/harness.c:58
+SUMMARY: AddressSanitizer: heap-use-after-free /src/child.c:91 in child_free
+CRASH_RATE: 5/5
+""", encoding="utf-8")
+# Minimal report.md — names file/function/class, carries NO reach fields
+# (neither bare labels nor a ## Fields table). This is the shape the
+# model-direct prompt actually asks a crash report to produce.
+(sidecar_crash_dir / "report.md").write_text("""\
+# CRASH-S-1
+
+## Summary
+
+Use-after-free write in `child_free` (`src/child.c`). Reachability fields
+live in the sidecar, not this report.
+""", encoding="utf-8")
+# The LLM hybrid pass's sidecar: the sole carrier of the reach fields.
+(sidecar_crash_dir / ".llm_fields.json").write_text(_json.dumps({
+    "surface": "library-api — sort/diff helper over a parsed document",
+    "primitive": "uaf_write",
+    "trigger_source": "both",
+    "caller_controls": "call-sequence",
+    "caller_contract": "obeyed",
+    "parameter_control": "application-supplied",
+    "trusted_caller_actions": "normal public call",
+    "boundary": "attacker bytes that a trusted caller sorts then mutates",
+}, indent=2, sort_keys=True), encoding="utf-8")
+(sidecar_crash_dir / "input.bin").write_bytes(b"\x01\x02\x03")
+
+result_s = subprocess.run(
+    [str(ROOT / "bin" / "export-repro"), "CRASH-S-1"],
+    capture_output=True, text=True, env=env, cwd=output_root,
+)
+assert_eq(0, result_s.returncode,
+          f"export-repro (sidecar reach) exits 0 "
+          f"(stdout={result_s.stdout[-200:]!r} stderr={result_s.stderr[-200:]!r})")
+
+if result_s.returncode == 0:
+    report_s = (sidecar_crash_dir / "REPORT.md").read_text(encoding="utf-8")
+    # The sidecar is a dotfile (not a bundle file) → migrated into .audit/.
+    if (sidecar_crash_dir / ".audit" / ".llm_fields.json").is_file():
+        passed("sidecar reach: .llm_fields.json migrated into .audit/")
+    else:
+        failed("sidecar reach: .llm_fields.json migrated into .audit/")
+
+    # Every reach row is populated from the sidecar — no `—` / `?`.
+    sidecar_rows = (
+        "Trigger source",
+        "Caller contract",
+        "Boundary",
+        "Caller controls",
+        "Trusted caller actions",
+    )
+    for label in sidecar_rows:
+        assert_in(f"| {label}", report_s,
+                  f"sidecar reach: '{label}' row present")
+        empty_re = re.compile(
+            rf"^\|\s*{re.escape(label)}\s*\|\s*[—?]\s*\|\s*$", re.MULTILINE)
+        if empty_re.search(report_s):
+            failed(f"sidecar reach: '{label}' row non-empty",
+                   "row dashed out despite a populated sidecar")
+        else:
+            passed(f"sidecar reach: '{label}' row non-empty")
+
+    # Specific sidecar values flow through.
+    assert_in("call-sequence", report_s,
+              "sidecar reach: 'call-sequence' caller controls flows through")
+    assert_in("normal public call", report_s,
+              "sidecar reach: trusted caller actions flows through")
+    assert_in("sorts then mutates", report_s,
+              "sidecar reach: Boundary text flows through")
+    # Trigger source took the sidecar value, not the 'bytes' default.
+    if (re.search(r"^Trigger source:\s*both\s*$", report_s, re.MULTILINE)
+            or re.search(r"\|\s*Trigger source\s*\|\s*both\s*\|", report_s)):
+        passed("sidecar reach: Trigger source is 'both' (sidecar), not 'bytes'")
+    else:
+        failed("sidecar reach: Trigger source is 'both' (sidecar), not 'bytes'")
+
+    # The reach facts reach the scorer: a call-sequence trigger carries the
+    # Environmental MAT:P modifier the dashed-out bundle dropped.
+    sev_proc = subprocess.run(
+        [str(ROOT / "bin" / "severity"), "--report",
+         str(sidecar_crash_dir / "REPORT.md")],
+        capture_output=True, text=True, env=env,
+    )
+    assert_in("MAT:P", sev_proc.stdout,
+              "sidecar reach: severity vector carries MAT:P from the reach facts")
+
+
 # ─── write_stub_reproduce: fail-open bundle (no runnable template) ───
 # Regression for the model-direct unification: export-repro used to
 # die("could not determine template") for a self-contained harness

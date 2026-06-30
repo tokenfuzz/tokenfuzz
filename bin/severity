@@ -1624,6 +1624,11 @@ def _merge_llm_fields_sidecar(report_dir: Path, fields: dict) -> None:
     proper fields remain authoritative."""
     sidecar = report_dir / ".llm_fields.json"
     if not sidecar.is_file():
+        # A built crash bundle stages the agent's originals (report.md, the
+        # sidecar) under .audit/ while REPORT.md lives at the bundle root, so
+        # the sidecar sits one level down. Check there before giving up.
+        sidecar = report_dir / ".audit" / ".llm_fields.json"
+    if not sidecar.is_file():
         return
     try:
         data = json.loads(sidecar.read_text("utf-8", errors="replace"))

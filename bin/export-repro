@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import json
 import os
 import re
 import secrets
@@ -2107,6 +2108,32 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
     return read_field_from_fields_table(path, label)
 
 
+def read_llm_sidecar_fields(scan_dirs: list[Path]) -> dict:
+    """Reach fields the harness LLM hybrid pass wrote to `.llm_fields.json`.
+
+    The model-direct prompt asks only for a minimal crash report.md
+    (file/function/class); the structured reachability fields (Surface /
+    Trigger source / Caller controls / Boundary / …) come from this sidecar —
+    the same fallback bin/severity already consumes. The bundle build must read
+    it too: without it every reach field the report omits collapses to a dash
+    and the severity re-score runs on empties. First sidecar in scan order
+    wins; a missing or malformed file yields {}. Values are returned verbatim
+    (stripped); blanks are dropped so callers can `or`-chain a report value
+    ahead of the sidecar.
+    """
+    sidecar = find_first_in_scan(scan_dirs, ".llm_fields.json")
+    if sidecar is None:
+        return {}
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v.strip() for k, v in data.items()
+            if isinstance(v, str) and v.strip()}
+
+
 _STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-8]|REF)\b", re.IGNORECASE)
 
 
@@ -3523,7 +3550,7 @@ def main(argv: list[str]) -> int:
         surface_value, surface_reason = infer_surface(harness_src, asan_file, cfg)
         primitive_label = infer_primitive_label("\n".join([asan_top, asan_expected, asan_summary]))
 
-        trigger_value = "bytes"
+        trigger_value = ""
         boundary_value = ""
         caller_controls_value = ""
         parameter_control_value = ""
@@ -3533,15 +3560,27 @@ def main(argv: list[str]) -> int:
         report_text = ""
         if report_md is not None:
             report_text = report_md.read_text(encoding="utf-8", errors="replace")
-            v = read_bare_field(report_md, "Trigger source")
-            if v:
-                trigger_value = v
+            trigger_value = read_bare_field(report_md, "Trigger source")
             boundary_value = read_bare_field(report_md, "Boundary")
             caller_controls_value = read_bare_field(report_md, "Caller controls")
             parameter_control_value = read_bare_field(report_md, "Parameter control")
             trusted_actions_value = read_bare_field(report_md, "Trusted caller actions")
             caller_contract_value = read_bare_field(report_md, "Caller contract")
             strategy_value = normalize_strategy(read_bare_field(report_md, "Strategy"))
+        # Fill any reach field the report itself does not carry from the
+        # `.llm_fields.json` sidecar (report value always wins). Model-direct
+        # reports keep these only here, so without the fallback the rebuilt
+        # REPORT.md dashes them out and the severity re-score loses the
+        # call-sequence / contract facts that should temper the score.
+        sidecar = read_llm_sidecar_fields(scan_dirs)
+        trigger_value = trigger_value or sidecar.get("trigger_source", "")
+        boundary_value = boundary_value or sidecar.get("boundary", "")
+        caller_controls_value = caller_controls_value or sidecar.get("caller_controls", "")
+        parameter_control_value = parameter_control_value or sidecar.get("parameter_control", "")
+        trusted_actions_value = trusted_actions_value or sidecar.get("trusted_caller_actions", "")
+        caller_contract_value = caller_contract_value or sidecar.get("caller_contract", "")
+        # Default to the harness input boundary when nothing named the trigger.
+        trigger_value = trigger_value or "bytes"
         surface_value, surface_reason = adjust_surface_from_report(
             surface_value, surface_reason, report_text, boundary_value,
             trusted_actions_value, cfg
