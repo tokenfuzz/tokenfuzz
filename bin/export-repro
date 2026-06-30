@@ -798,6 +798,12 @@ elif [ -d "$src/.hg" ]; then
   hg --cwd "$src" update -r "$REV" 2>/dev/null || true
 fi
 
+# Canonicalize to an absolute path now that the tree exists. Out-of-tree
+# autotools builds (and the inlined audit recipe) `cd "$build"` and then run
+# "$src/configure", which only resolves when $src is absolute. Running
+# `./reproduce.sh` yields a relative src (./<slug>), so resolve it here once;
+# $build derives from it and is absolute too.
+src="$(cd "$src" && pwd)"
 build="$src/__BUILD_DIR__"
 """
 

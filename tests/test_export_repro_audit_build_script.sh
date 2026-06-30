@@ -244,6 +244,13 @@ assert_file_contains "$CRASH_CLI/reproduce.sh" '\.audit-build\.sh' \
 assert_file_not_contains "$CRASH_CLI/reproduce.sh" 'configure --disable-shared --enable-static' \
   "cli: generic autotools bucket template NOT emitted when a recipe exists"
 
+# reproduce.sh must canonicalize $src to an absolute path before building.
+# Out-of-tree autotools (and the inlined recipe) `cd "$build"` then run
+# "$src/configure"; a relative src (./<slug> from `./reproduce.sh`) resolves
+# against the build dir and the configure script vanishes.
+assert_file_contains "$CRASH_CLI/reproduce.sh" 'src="\$\(cd "\$src" && pwd\)"' \
+  "cli: reproduce.sh resolves \$src to an absolute path before the build"
+
 # Pin the dispatch-level guard so a future writer that drops the recipe
 # (the regression that started all this) fails loudly instead of shipping
 # a guessed build.
