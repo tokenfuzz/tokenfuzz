@@ -415,6 +415,48 @@ def _condition_pool_dir(bench_dir: Path, condition: str, kind: str) -> Path:
     return bench_dir / "pool" / condition / kind
 
 
+def _reconcile_demoted_pool_crashes(
+    bench_dir: Path,
+    pool_name: str = "pool",
+) -> dict:
+    """Move stale member entries for crashes demoted after pooling."""
+    bench_dir = Path(bench_dir)
+    members_path = bench_dir / "pool-members.json"
+    if not members_path.is_file():
+        return {}
+    try:
+        members = json.loads(members_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(members, dict):
+        return {}
+    if not isinstance(members.get("crashes"), dict):
+        members["crashes"] = {}
+    if not isinstance(members.get("crashes-rejected"), dict):
+        members["crashes-rejected"] = {}
+    crashes = members["crashes"]
+    rejected = members["crashes-rejected"]
+    pool = bench_dir / pool_name
+    changed = False
+    for name, cond in list(crashes.items()):
+        if (pool / "crashes" / name).is_dir():
+            continue
+        if not (pool / "crashes-rejected" / name).is_dir():
+            continue
+        del crashes[name]
+        rejected[name] = cond
+        changed = True
+    if changed:
+        # Best-effort persist: an archived/read-only bench dir must not crash
+        # aggregate. The returned in-memory map is already reconciled either way.
+        try:
+            members_path.write_text(json.dumps(members, indent=2) + "\n",
+                                    encoding="utf-8")
+        except OSError:
+            pass
+    return members
+
+
 def _file_has_sanitizer_output(path: Path) -> bool:
     try:
         if path.stat().st_size > _MAX_SCAN_BYTES:
@@ -2201,7 +2243,7 @@ def aggregate(bench_dir: Path) -> dict:
                 return {}
         return {}
 
-    members = _load("pool-members.json")
+    members = _reconcile_demoted_pool_crashes(bench_dir)
     crash_attr = attribute_clusters(
         _load("clusters-crashes.json"), members.get("crashes", {})
     )
@@ -2210,6 +2252,17 @@ def aggregate(bench_dir: Path) -> dict:
     )
     crash_by_cond = crash_attr["by_condition"]
     finding_by_cond = finding_attr["by_condition"]
+    # Crashes a post-pool gate demoted out of the accepted pool keep their
+    # pooled-accepted name (CRASH-NNNN); cell-level rejects are CRASH-REJECTED-*.
+    # Reconcile re-files demoted entries under crashes-rejected, so a plain
+    # CRASH-NNNN there is exactly one crash the cell metrics still book as
+    # accepted. Count them per condition to move that delta across below.
+    demoted_crashes_by_cond: dict[str, int] = {}
+    for _name, _cond in members.get("crashes-rejected", {}).items():
+        if _name.startswith("CRASH-") and not _name.startswith("CRASH-REJECTED-"):
+            demoted_crashes_by_cond[_cond] = (
+                demoted_crashes_by_cond.get(_cond, 0) + 1
+            )
 
     conditions = []
     token_usage = []
@@ -2263,6 +2316,12 @@ def aggregate(bench_dir: Path) -> dict:
         token_usage.extend(token_rows)
         cb = crash_by_cond.get(cond, {})
         fb = finding_by_cond.get(cond, {})
+        # Cell sums stay authoritative — they alone carry the INDEX.md
+        # auto-rejected signature rows that never get a crash dir. Only re-book
+        # the post-pool demotions: subtract them from accepted, add to rejected.
+        demoted = demoted_crashes_by_cond.get(cond, 0)
+        crash_total = max(sum(crashes) - demoted, 0)
+        rejected_crash_total = sum(rejected_crashes) + demoted
         conditions.append(
             {
                 "condition": cond,
@@ -2274,8 +2333,8 @@ def aggregate(bench_dir: Path) -> dict:
                 "replicates_quota_exhausted": len(quota_exhausted),
                 "crashes": crashes,
                 "crash_median": _median([float(x) for x in crashes]),
-                "crash_total": sum(crashes),
-                "rejected_crash_total": sum(rejected_crashes),
+                "crash_total": crash_total,
+                "rejected_crash_total": rejected_crash_total,
                 "discarded_hypothesis_total": sum(discarded_hypotheses),
                 "rejected_finding_total": sum(rejected_findings),
                 "model_refusal_total": sum(model_refusals),
@@ -3714,10 +3773,7 @@ def split_pool(bench_dir: Path, pool_name: str = "pool") -> dict[str, int]:
     members_path = bench_dir / "pool-members.json"
     if not pool.is_dir() or not members_path.is_file():
         return {}
-    try:
-        members = json.loads(members_path.read_text("utf-8"))
-    except (OSError, ValueError):
-        return {}
+    members = _reconcile_demoted_pool_crashes(bench_dir, pool_name)
     tally: dict[str, int] = {}
     cleaned: set[Path] = set()
     for kind in ("crashes", "crashes-rejected", "findings", "findings-rejected"):

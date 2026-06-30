@@ -362,6 +362,77 @@ assert_eq "2" "$(echo "$hd" | jq -r '.model_refusal_total')" \
 assert_eq "1" "$(echo "$nv" | jq -r '.model_refusal_total')" \
   "T4h: aggregate carries model-direct model refusal totals"
 
+# Post-pool rejection gates may demote a pooled crash after pool-members.json
+# was written. split/aggregate must follow the final artifact tree, not the
+# stale pre-gate cell metric, so rejected crashes are counted and linkable.
+pbd="$work/post-pool-demoted"
+mkdir -p "$pbd/cells/model-direct-r1" \
+         "$pbd/pool/crashes" \
+         "$pbd/pool/crashes-rejected/CRASH-0001"
+cat > "$pbd/cells/model-direct-r1/cell.json" <<'JSON'
+{"condition":"model-direct","replicate":1,"status":"done","wall_seconds":1}
+JSON
+cat > "$pbd/cells/model-direct-r1/metrics.json" <<'JSON'
+{"confirmed_crashes":1,"crash_dirs":["CRASH-1"],"findings":0,
+ "confirmed_findings":0,"crashes_rejected":0}
+JSON
+cat > "$pbd/pool-members.json" <<'JSON'
+{"crashes":{"CRASH-0001":"model-direct"},"crashes-rejected":{},
+ "findings":{},"findings-rejected":{}}
+JSON
+cat > "$pbd/pool/crashes-rejected/CRASH-0001/report.md" <<'EOF_REJECTED_CRASH'
+# Rejected crash
+EOF_REJECTED_CRASH
+python3 "$PY" split-pool "$pbd" >/dev/null
+pagg=$(python3 "$PY" aggregate "$pbd")
+pd=$(echo "$pagg" | jq -c '.conditions[] | select(.condition=="model-direct")')
+assert_eq "0" "$(echo "$pd" | jq -r '.crash_total')" \
+  "T4i: post-pool demoted crash is not counted as accepted"
+assert_eq "1" "$(echo "$pd" | jq -r '.rejected_crash_total')" \
+  "T4j: post-pool demoted crash is counted as rejected"
+assert_eq "model-direct" "$(jq -r '.["crashes-rejected"]["CRASH-0001"]' "$pbd/pool-members.json")" \
+  "T4k: split-pool reconciles demoted crash membership"
+assert_file_exists "$pbd/pool/model-direct/crashes-rejected/CRASH-0001/report.md" \
+  "T4l: demoted rejected crash is split into condition link target"
+assert_file_contains "$pbd/pool/model-direct/crashes-rejected/REJECTED-CRASHES.md" "CRASH-0001" \
+  "T4m: rejected crash index links the demoted crash"
+
+# Auto-rejected crash signatures live only as INDEX.md rows (no crash dir), and
+# only the cell metric counts them. Once split-pool has run for a condition that
+# also has an accepted crash, the rejected total must still carry those rows —
+# they have no demoted dir, so re-deriving from the pool tree would lose them.
+ibd="$work/index-row-reject"
+mkdir -p "$ibd/cells/model-direct-r1" "$ibd/pool/crashes/CRASH-0001" \
+         "$ibd/pool/crashes-rejected"
+cat > "$ibd/cells/model-direct-r1/cell.json" <<'JSON'
+{"condition":"model-direct","replicate":1,"status":"done","wall_seconds":1}
+JSON
+cat > "$ibd/cells/model-direct-r1/metrics.json" <<'JSON'
+{"confirmed_crashes":1,"crash_dirs":["CRASH-1"],"findings":0,
+ "confirmed_findings":0,"crashes_rejected":3}
+JSON
+cat > "$ibd/pool/crashes/CRASH-0001/report.md" <<'EOF_ACCEPTED'
+# Accepted crash
+EOF_ACCEPTED
+cat > "$ibd/pool/crashes-rejected/INDEX-model-direct-r1.md" <<'EOF_INDEX'
+| ID | Crash site | Rejected at |
+| :-- | :-- | :-- |
+| CR-a | app_parse.c:10 | t1 |
+| CR-b | app_parse.c:20 | t2 |
+| CR-c | app_parse.c:30 | t3 |
+EOF_INDEX
+cat > "$ibd/pool-members.json" <<'JSON'
+{"crashes":{"CRASH-0001":"model-direct"},"crashes-rejected":{},
+ "findings":{},"findings-rejected":{}}
+JSON
+python3 "$PY" split-pool "$ibd" >/dev/null
+iagg=$(python3 "$PY" aggregate "$ibd")
+id=$(echo "$iagg" | jq -c '.conditions[] | select(.condition=="model-direct")')
+assert_eq "1" "$(echo "$id" | jq -r '.crash_total')" \
+  "T4n: accepted pooled crash still counts when only rejections are INDEX rows"
+assert_eq "3" "$(echo "$id" | jq -r '.rejected_crash_total')" \
+  "T4o: INDEX-row auto-rejections survive split-pool in the rejected total"
+
 # Rejected findings are pooled into a browsable list with validator booleans.
 rbd="$work/rejected-bench"
 rrd="$rbd/results"
