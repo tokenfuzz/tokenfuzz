@@ -45,6 +45,8 @@ eval "$(extract_fn cell_provider_issue)"
 eval "$(extract_fn cell_has_result_artifacts)"
 eval "$(extract_fn model_direct_capacity_blocked)"
 eval "$(extract_fn cell_log_has_quota_exhaustion)"
+eval "$(extract_fn set_cell_run_quality)"
+eval "$(extract_fn sync_harness_provider_markers)"
 
 # The terminal success record gemini-cli writes once the stream completes.
 RESULT_OK='{"type":"result","timestamp":"2026-06-07T01:21:56.849Z","status":"success","stats":{"tool_calls":124}}'
@@ -185,6 +187,44 @@ if model_direct_capacity_blocked "$(cell_provider_issue "$cell8")" 1 "$cell8"; t
   fail "T7e: a transient cell must NOT be provider-limited" "transient blocked"
 else
   pass "T7e: transient + rc!=0 + no artifacts is not provider-limited (plain failed)"
+fi
+
+# ── T8: harness provider markers sync from the LOGDIR sibling of results ─────
+# Regression: bin/audit writes .run-quality/.backend-unavailable to its LOGDIR
+# (<root>/<backend>/logs), a SIBLING of the results dir (.../results), not a
+# child. sync_harness_provider_markers used to read "$results_dir/logs", which
+# never existed, so a harness cell whose backend hit a capacity wall stayed
+# run_quality=clean and never armed the cross-cell skip — the quota death was
+# reported as a clean zero and the next replicate was launched into a preflight
+# FATAL. Pin the sibling path so the markers reach the cell.
+cell9="$work/cell-harness"
+results9="$cell9/repo-root/output/tgt-exp/claude/results"
+logs9="$cell9/repo-root/output/tgt-exp/claude/logs"
+mkdir -p "$cell9" "$results9" "$logs9"
+printf 'provider_limited\n' > "$logs9/.run-quality"
+: > "$logs9/.backend-unavailable"
+sync_harness_provider_markers "$cell9" "$results9"
+assert_eq "provider_limited" "$(cat "$cell9/.run-quality" 2>/dev/null)" \
+  "T8: .run-quality synced from the LOGDIR sibling of results"
+if [ -f "$cell9/.backend-unavailable" ]; then
+  pass "T8a: .backend-unavailable synced from the LOGDIR sibling (arms cross-cell skip)"
+else
+  fail "T8a: .backend-unavailable must sync from the LOGDIR sibling" "marker not copied"
+fi
+
+# ── T9: markers misplaced under results_dir/logs (the old wrong path) are NOT
+# read — guards against silently reverting to the child-path bug.
+cell10="$work/cell-harness-wrongpath"
+results10="$cell10/repo-root/output/tgt-exp/claude/results"
+mkdir -p "$cell10" "$results10/logs"
+printf 'provider_limited\n' > "$results10/logs/.run-quality"
+: > "$results10/logs/.backend-unavailable"
+sync_harness_provider_markers "$cell10" "$results10"
+if [ -f "$cell10/.backend-unavailable" ]; then
+  fail "T9: a marker under results_dir/logs must NOT be read (wrong path)" \
+    "child-path marker was synced — sync reverted to the buggy path"
+else
+  pass "T9: markers under results_dir/logs are ignored (sibling path only)"
 fi
 
 summary

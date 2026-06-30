@@ -867,7 +867,12 @@ set_cell_run_quality() {
 
 sync_harness_provider_markers() {
   local cell_dir="$1" results_dir="$2" logs_dir
-  logs_dir="$results_dir/logs"
+  # bin/audit writes .run-quality/.backend-unavailable to its LOGDIR, which is
+  # a SIBLING of the results dir (<root>/<backend>/logs vs .../results), not a
+  # child. Reading "$results_dir/logs" silently found nothing, so a harness
+  # cell whose backend hit a capacity wall stayed run_quality=clean and never
+  # armed the cross-cell skip — masking the quota death as a clean zero.
+  logs_dir="$(dirname "$results_dir")/logs"
   if [ -f "$logs_dir/.run-quality" ]; then
     cp "$logs_dir/.run-quality" "$cell_dir/.run-quality" 2>/dev/null || true
   fi
