@@ -367,8 +367,10 @@ assert_eq "1" "$(echo "$nv" | jq -r '.model_refusal_total')" \
 # stale pre-gate cell metric, so rejected crashes are counted and linkable.
 pbd="$work/post-pool-demoted"
 mkdir -p "$pbd/cells/model-direct-r1" \
-         "$pbd/pool/crashes" \
-         "$pbd/pool/crashes-rejected/CRASH-0001"
+         "$pbd/cells/model-direct-r2" \
+         "$pbd/pool/crashes/CRASH-0002" \
+         "$pbd/pool/crashes-rejected/CRASH-0001" \
+         "$pbd/pool/model-direct/crashes/CRASH-0001"
 cat > "$pbd/cells/model-direct-r1/cell.json" <<'JSON'
 {"condition":"model-direct","replicate":1,"status":"done","wall_seconds":1}
 JSON
@@ -376,18 +378,33 @@ cat > "$pbd/cells/model-direct-r1/metrics.json" <<'JSON'
 {"confirmed_crashes":1,"crash_dirs":["CRASH-1"],"findings":0,
  "confirmed_findings":0,"crashes_rejected":0}
 JSON
+cat > "$pbd/cells/model-direct-r2/cell.json" <<'JSON'
+{"condition":"model-direct","replicate":2,"status":"done","wall_seconds":1}
+JSON
+cat > "$pbd/cells/model-direct-r2/metrics.json" <<'JSON'
+{"confirmed_crashes":3,"crash_dirs":["CRASH-2","CRASH-3","CRASH-4"],"findings":0,
+ "confirmed_findings":0,"crashes_rejected":0}
+JSON
 cat > "$pbd/pool-members.json" <<'JSON'
-{"crashes":{"CRASH-0001":"model-direct"},"crashes-rejected":{},
+{"crashes":{"CRASH-0001":"model-direct","CRASH-0002":"model-direct"},
+ "crash_cells":{"CRASH-0001":"model-direct-r1","CRASH-0002":"model-direct-r2"},
+ "crashes-rejected":{},
  "findings":{},"findings-rejected":{}}
 JSON
+cat > "$pbd/pool/crashes/CRASH-0002/report.md" <<'EOF_ACCEPTED_CRASH'
+# Accepted crash
+EOF_ACCEPTED_CRASH
 cat > "$pbd/pool/crashes-rejected/CRASH-0001/report.md" <<'EOF_REJECTED_CRASH'
 # Rejected crash
 EOF_REJECTED_CRASH
+cat > "$pbd/pool/model-direct/crashes/CRASH-0001/report.md" <<'EOF_STALE_ACCEPTED'
+# Stale accepted crash copy
+EOF_STALE_ACCEPTED
 python3 "$PY" split-pool "$pbd" >/dev/null
 pagg=$(python3 "$PY" aggregate "$pbd")
 pd=$(echo "$pagg" | jq -c '.conditions[] | select(.condition=="model-direct")')
-assert_eq "0" "$(echo "$pd" | jq -r '.crash_total')" \
-  "T4i: post-pool demoted crash is not counted as accepted"
+assert_eq "3" "$(echo "$pd" | jq -r '.crash_total')" \
+  "T4i: post-pool demoted crash is subtracted from accepted total"
 assert_eq "1" "$(echo "$pd" | jq -r '.rejected_crash_total')" \
   "T4j: post-pool demoted crash is counted as rejected"
 assert_eq "model-direct" "$(jq -r '.["crashes-rejected"]["CRASH-0001"]' "$pbd/pool-members.json")" \
@@ -396,6 +413,14 @@ assert_file_exists "$pbd/pool/model-direct/crashes-rejected/CRASH-0001/report.md
   "T4l: demoted rejected crash is split into condition link target"
 assert_file_contains "$pbd/pool/model-direct/crashes-rejected/REJECTED-CRASHES.md" "CRASH-0001" \
   "T4m: rejected crash index links the demoted crash"
+assert_eq "[0,3]" "$(echo "$pd" | jq -c '.crashes')" \
+  "T4m2: post-pool demotion updates the source replicate crash vector"
+assert_eq "1.5" "$(echo "$pd" | jq -r '.crash_median')" \
+  "T4m3: post-pool demotion updates the accepted crash median"
+assert_file_not_exists "$pbd/pool/model-direct/crashes/CRASH-0001" \
+  "T4m4: split-pool removes stale accepted copy after demotion"
+assert_file_exists "$pbd/pool/model-direct/crashes/CRASH-0002/report.md" \
+  "T4m5: split-pool keeps current accepted crashes after stale cleanup"
 
 # Auto-rejected crash signatures live only as INDEX.md rows (no crash dir), and
 # only the cell metric counts them. Once split-pool has run for a condition that

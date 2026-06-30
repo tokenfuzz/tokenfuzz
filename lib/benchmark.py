@@ -434,6 +434,8 @@ def _reconcile_demoted_pool_crashes(
         members["crashes"] = {}
     if not isinstance(members.get("crashes-rejected"), dict):
         members["crashes-rejected"] = {}
+    if not isinstance(members.get("crash_cells"), dict):
+        members["crash_cells"] = {}
     crashes = members["crashes"]
     rejected = members["crashes-rejected"]
     pool = bench_dir / pool_name
@@ -2256,13 +2258,24 @@ def aggregate(bench_dir: Path) -> dict:
     # pooled-accepted name (CRASH-NNNN); cell-level rejects are CRASH-REJECTED-*.
     # Reconcile re-files demoted entries under crashes-rejected, so a plain
     # CRASH-NNNN there is exactly one crash the cell metrics still book as
-    # accepted. Count them per condition to move that delta across below.
+    # accepted. Count them per condition and, for new pools, by source cell so
+    # the per-replicate crash vector/median moves with the headline total.
     demoted_crashes_by_cond: dict[str, int] = {}
+    demoted_crashes_by_cell: dict[tuple[str, str], int] = {}
+    crash_cells = members.get("crash_cells", {})
+    if not isinstance(crash_cells, dict):
+        crash_cells = {}
     for _name, _cond in members.get("crashes-rejected", {}).items():
         if _name.startswith("CRASH-") and not _name.startswith("CRASH-REJECTED-"):
             demoted_crashes_by_cond[_cond] = (
                 demoted_crashes_by_cond.get(_cond, 0) + 1
             )
+            _cell = crash_cells.get(_name)
+            if isinstance(_cell, str) and _cell:
+                key = (_cond, _cell)
+                demoted_crashes_by_cell[key] = (
+                    demoted_crashes_by_cell.get(key, 0) + 1
+                )
 
     conditions = []
     token_usage = []
@@ -2320,7 +2333,28 @@ def aggregate(bench_dir: Path) -> dict:
         # auto-rejected signature rows that never get a crash dir. Only re-book
         # the post-pool demotions: subtract them from accepted, add to rejected.
         demoted = demoted_crashes_by_cond.get(cond, 0)
-        crash_total = max(sum(crashes) - demoted, 0)
+        attributed_demoted = 0
+        if demoted:
+            crashes = list(crashes)
+            for idx, cell in enumerate(done):
+                count = demoted_crashes_by_cell.get((cond, cell["cell"]), 0)
+                if count <= 0:
+                    continue
+                removed = min(crashes[idx], count)
+                crashes[idx] -= removed
+                attributed_demoted += removed
+            # Older pool-members.json files do not carry crash_cells. Keep the
+            # derived vector internally consistent with the accepted total; new
+            # pools take the exact branch above.
+            remaining = demoted - attributed_demoted
+            for idx in sorted(range(len(crashes)), key=lambda i: crashes[i],
+                              reverse=True):
+                if remaining <= 0:
+                    break
+                removed = min(crashes[idx], remaining)
+                crashes[idx] -= removed
+                remaining -= removed
+        crash_total = sum(crashes)
         rejected_crash_total = sum(rejected_crashes) + demoted
         conditions.append(
             {
@@ -2540,6 +2574,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
 
     members: dict[str, dict] = {
         "crashes": {},
+        "crash_cells": {},
         "crashes-rejected": {},
         "findings": {},
         "findings-rejected": {},
@@ -2589,6 +2624,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
             shutil.copytree(src, dst)
             _scrub_pooled_tree(dst)
             members["crashes"][dst_name] = cond
+            members["crash_cells"][dst_name] = cell_dir.name
         findings_dir = rd / "findings"
         if findings_dir.is_dir():
             for name in _pool_finding_names(metrics, findings_dir):
@@ -3776,7 +3812,22 @@ def split_pool(bench_dir: Path, pool_name: str = "pool") -> dict[str, int]:
     members = _reconcile_demoted_pool_crashes(bench_dir, pool_name)
     tally: dict[str, int] = {}
     cleaned: set[Path] = set()
-    for kind in ("crashes", "crashes-rejected", "findings", "findings-rejected"):
+    split_kinds = ("crashes", "crashes-rejected", "findings",
+                   "findings-rejected")
+    reserved = {"crashes", "crashes-rejected", "findings", "findings-rejected"}
+    conditions = {
+        cond
+        for kind in split_kinds
+        for cond in members.get(kind, {}).values()
+        if isinstance(cond, str) and cond
+    }
+    for child in pool.iterdir():
+        if child.is_dir() and child.name not in reserved:
+            conditions.add(child.name)
+    for cond in conditions:
+        for kind in split_kinds:
+            shutil.rmtree(pool / cond / kind, ignore_errors=True)
+    for kind in split_kinds:
         for name, cond in sorted(members.get(kind, {}).items()):
             src = pool / kind / name
             if not src.is_dir():
