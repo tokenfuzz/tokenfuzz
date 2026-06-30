@@ -200,6 +200,65 @@ def _looks_like_harness_source(path: Path) -> bool:
     return bool(_HARNESS_MAIN_RE.search(text))
 
 
+def _is_testcase_named(path: Path) -> bool:
+    """A name matching TESTCASE_PREFIXES advertises an input, not a harness."""
+    lower = path.name.lower()
+    return any(lower.startswith(p) for p in TESTCASE_PREFIXES)
+
+
+def _is_harness_named(path: Path) -> bool:
+    """The documented harness convention is `harness.*` / `*-harness.*` /
+    `*_harness.*` (lib/languages.py), so an explicit `harness` in the stem
+    marks the audit harness even when a descriptive prefix like `repro-`
+    would otherwise read as a testcase name."""
+    return "harness" in path.name.lower()
+
+
+def _is_harness_source(path: Path) -> bool:
+    """The single harness/testcase rule shared by find_harness_source and
+    is_testcase_candidate, so the two never disagree about one file. A
+    main()-bearing C/C++ source is the audit harness unless its name marks it
+    as an input — but an explicit harness name overrides a testcase prefix
+    (`repro-harness.c` is a harness, `input.c` / `reproducer.c` are inputs)."""
+    if not _looks_like_harness_source(path):
+        return False
+    return _is_harness_named(path) or not _is_testcase_named(path)
+
+
+def find_harness_source(dirs: Iterable[Path], *,
+                        exclude: Optional[Path] = None) -> Optional[Path]:
+    """Return a C/C++ source harness (a file defining main()) in scan order.
+
+    Source harnesses are API-level reproducers: a caller that cannot compile
+    one must not fall back to a target CLI invocation and treat that result as
+    a reproduction measurement. Discovery is harness-oriented, NOT
+    testcase-oriented: a testcase-named source (input.c, reproducer.c,
+    tc-*.cpp) is an input the CLI consumes, so it is excluded here exactly as
+    is_testcase_candidate accepts it — a given source is classified the same
+    way by both, and a compiler/parser target whose reproducer is `input.c`
+    still reverifies through the CLI rather than being skipped. A name that
+    advertises the harness role wins over an incidental main()-bearing source.
+
+    `exclude` is the already-resolved testcase. The ASAN_RUN_HEADER can name a
+    main()-bearing, harness-named source (e.g. `input_harness.c`) as the actual
+    input; that recorded path is ground truth and must never also be claimed as
+    the harness, so the caller passes it here to keep one file from being both.
+    """
+    excluded = exclude.resolve() if exclude is not None else None
+    fallback: Optional[Path] = None
+    for d in (Path(x) for x in dirs):
+        for p in _visible_files(d):
+            if excluded is not None and p.resolve() == excluded:
+                continue
+            if not _is_harness_source(p):
+                continue
+            if _is_harness_named(p):
+                return p
+            if fallback is None:
+                fallback = p
+    return fallback
+
+
 def is_testcase_candidate(path: Path, *, from_asan_header: bool = False,
                           min_bytes: int = 1, relaxed: bool = False) -> bool:
     """Return true when `path` is likely the reproducing testcase.
@@ -240,12 +299,14 @@ def is_testcase_candidate(path: Path, *, from_asan_header: bool = False,
     # audit harness (e.g. `to_json_throwing_string_harness.cpp`), not the
     # testcase. The exception is self-contained reproducer scripts whose
     # name advertises their role (`reproducer.c`, `tc-foo.cpp`); those
-    # match TESTCASE_PREFIXES and bypass the heuristic. Without this
-    # gate, find_testcase falls through past the rejected real testcase
-    # and picks the harness — which export-repro then stages as
-    # `input.cpp`, producing a reproduce.sh that compiles the harness as
+    # match TESTCASE_PREFIXES and are inputs — but an explicit `harness`
+    # name overrides that prefix (`_is_harness_source`), so the two
+    # classifiers stay in lock-step. ASan-recorded testcases always win.
+    # Without this gate, find_testcase falls through past the rejected
+    # real testcase and picks the harness — which export-repro then stages
+    # as `input.cpp`, producing a reproduce.sh that compiles the harness as
     # its own input. See CRASH-002-1.20260509 incident.
-    if not (prefixed or from_asan_header) and _looks_like_harness_source(path):
+    if not from_asan_header and _is_harness_source(path):
         return False
     if path.suffix.lower() in TEXT_EXTS_REQUIRING_PREFIX:
         if relaxed and path.stem.lower() not in NONINPUT_TEXT_STEMS:

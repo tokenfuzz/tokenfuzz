@@ -225,28 +225,42 @@ grep -q 'Parameter control:' <<<"$out" && fail "narrative dups stripped" "Parame
 # ── severity.json is never picked as a testcase ────────────
 # Regression guard: when bin/severity has run on a previously-
 # bundled crash dir, severity.json is the most prominent
-# loose file in the crash root. The testcase finder must skip it by
-# name so severity.json never gets installed as `input.json` and
-# referenced from reproduce.sh.
+# loose file in the crash root. The testcase finder (now shared in
+# lib/crash_artifacts) must skip it by name so severity.json never gets
+# installed as `input.json` and referenced from reproduce.sh.
 #
 # The exclude is by-name (not *.json) because a JSON-parser fuzzer
 # could legitimately produce a JSON testcase, and we don't want to
-# silently drop those.
-if grep -q '"severity.json"' "$EXPORT_REPRO" \
-     && grep -q '_TESTCASE_SKIP_EXACT' "$EXPORT_REPRO"; then
+# silently drop those — assert both behaviours directly rather than
+# grepping for an internal constant that can move.
+json_finder_out="$(SCRIPT_ROOT="$SCRIPT_ROOT" python3 - <<'PY' 2>&1
+import os, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.environ["SCRIPT_ROOT"], "lib"))
+import crash_artifacts as ca
+with tempfile.TemporaryDirectory() as td:
+    d = Path(td)
+    (d / "severity.json").write_text('{"severity":"High"}\n', encoding="utf-8")
+    (d / "input.json").write_text('{"payload":1}\n', encoding="utf-8")
+    excluded = not ca.is_testcase_candidate(d / "severity.json")
+    json_kept = ca.is_testcase_candidate(d / "input.json")
+    chosen = ca.find_testcase([d])
+    print("EXCLUDED" if excluded else "PICKED")
+    print("JSON_KEPT" if json_kept else "JSON_DROPPED")
+    print("CHOSE=%s" % (chosen.name if chosen else "none"))
+PY
+)"
+if grep -q 'EXCLUDED' <<<"$json_finder_out" && grep -q 'CHOSE=input.json' <<<"$json_finder_out"; then
   pass "export-repro testcase finder excludes severity.json"
 else
-  fail "export-repro testcase finder excludes severity.json" \
-    "no 'severity.json' entry in _TESTCASE_SKIP_EXACT"
+  fail "export-repro testcase finder excludes severity.json" "$json_finder_out"
 fi
-# Negative: a `.json` suffix in the skip-suffix tuple would silently
-# drop legitimate JSON testcases (e.g. a JSON-parser fuzzer's output).
-skip_suffix_lines=$(grep -E '_TESTCASE_SKIP_SUFFIX' "$EXPORT_REPRO" || true)
-if grep -q '"\.json"' <<<"$skip_suffix_lines"; then
-  fail "no *.json suffix exclude in testcase finder" \
-    "_TESTCASE_SKIP_SUFFIX contains '.json' — would drop legitimate JSON testcases"
-else
+# Negative: a real `.json` testcase must NOT be dropped by a blanket suffix rule.
+if grep -q 'JSON_KEPT' <<<"$json_finder_out"; then
   pass "no *.json suffix exclude in testcase finder"
+else
+  fail "no *.json suffix exclude in testcase finder" \
+    "a legitimate JSON testcase was dropped: $json_finder_out"
 fi
 
 teardown_test_env

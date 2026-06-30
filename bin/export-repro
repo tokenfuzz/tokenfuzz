@@ -575,23 +575,14 @@ def find_first_in_scan(scan_dirs: list[Path], pattern: str) -> Optional[Path]:
     return None
 
 
-def find_harness(scan_dirs: list[Path]) -> Optional[Path]:
-    """Any C/C++ file in scan dirs whose body contains a main() definition."""
-    main_re = re.compile(r"^(?:int\s+)?main\s*\(", re.MULTILINE)
-    for d in scan_dirs:
-        candidates: list[Path] = []
-        for pattern in ("*.c", "*.cc", "*.cpp", "*.cxx"):
-            candidates.extend(d.glob(pattern))
-        for f in sorted(candidates, key=_bash_glob_sort_key):
-            if not f.is_file():
-                continue
-            try:
-                text = f.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if main_re.search(text):
-                return f
-    return None
+def find_harness(scan_dirs: list[Path],
+                 exclude: Optional[Path] = None) -> Optional[Path]:
+    """Any C/C++ file in scan dirs whose body contains a main() definition.
+
+    `exclude` is the already-selected testcase; a source the ASAN_RUN_HEADER
+    records as the input must not also be staged as the harness.
+    """
+    return crash_artifacts.find_harness_source(scan_dirs, exclude=exclude)
 
 
 _SHELL_SHEBANG_RE = re.compile(r"^\s*#!.*\b(?:sh|bash|zsh|ksh)\b")
@@ -638,24 +629,6 @@ def find_shell_wrapper(scan_dirs: list[Path]) -> Optional[Path]:
             if p.is_file() and looks_like_shell_wrapper(p):
                 return p
     return None
-
-
-_TESTCASE_SKIP_EXACT = {"REPORT.md", "reproduce.sh", "asan.txt", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "severity.json"}
-_TESTCASE_SKIP_SUFFIX = (".asan.txt", ".msan.txt", ".tsan.txt", ".ubsan.txt", ".sanitizer.txt", ".md", ".log", ".sh")
-_BIN_FILE_RE = re.compile(r"executable|Mach-O|ELF")
-
-
-def _is_executable_binary(p: Path) -> bool:
-    """Mirror the bash `[ -x "$f" ] && file "$f" | grep -qE 'executable|Mach-O|ELF'`."""
-    if not os.access(p, os.X_OK):
-        return False
-    try:
-        out = subprocess.run(
-            ["file", str(p)], capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return bool(_BIN_FILE_RE.search(out.stdout))
 
 
 def find_testcase(scan_dirs: list[Path], crash_dir: Path, audit_subdir: Path) -> Optional[Path]:
@@ -3297,9 +3270,11 @@ def main(argv: list[str]) -> int:
     if report_md is None:
         report_md = find_first_in_scan(scan_dirs, "REPORT.md")
 
-    harness_src = find_harness(scan_dirs)
     shell_wrapper = find_shell_wrapper(scan_dirs)
     testcase = find_testcase(scan_dirs, crash_dir, audit_subdir)
+    # Resolve the harness after the testcase so a source the ASAN_RUN_HEADER
+    # names as the input is staged once (as input.*), never also as harness.*.
+    harness_src = find_harness(scan_dirs, exclude=testcase)
 
     # ── Stage outputs in a temp dir ──────────────────────────────────
     stage = Path(tempfile.mkdtemp(prefix="export-repro-", dir=os.environ.get("TMPDIR", "/tmp")))

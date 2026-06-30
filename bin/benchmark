@@ -1546,8 +1546,12 @@ for p in sorted(crash_dir.glob("harness*")):
     if ca.is_executable_binary(p):
         harness_bin = str(p)
         break
-
 testcase = ca.find_testcase(scan_dirs, asan_files=[asan] if asan else [])
+
+# Resolve the harness AFTER the testcase so a source the ASAN_RUN_HEADER
+# records as the input (e.g. input_harness.c) is never also taken as the
+# harness — the recorded testcase is ground truth and wins.
+harness_source = ca.find_harness_source(scan_dirs, exclude=testcase)
 
 # target.toml lives in the per-target CONFIG dir output/<slug> (the bin/audit
 # and bin/export-repro layout), NOT the build/source root target_root. Read it
@@ -1594,6 +1598,10 @@ target_bin = _resolve_target_path(bin_rel)
 
 if harness_bin:
     print("SAN=asan\nMODE=harness\nBIN=%s\nTESTCASE=" % harness_bin)
+elif harness_source is not None:
+    # A source harness is an API-level reproducer. Falling back to the target
+    # CLI would measure a different contract and can write a false CRASH_RATE: 0/N.
+    print("MODE=none\nREASON=source-harness-uncompiled")
 elif (testcase is not None and target_bin
       and os.path.exists(target_bin) and os.access(target_bin, os.X_OK)):
     print("SAN=%s\nMODE=cli\nBIN=%s\nTESTCASE=%s" % (san, target_bin, testcase))
@@ -1658,12 +1666,26 @@ PY
   ## preserved. read_confidence then reports the measured rate (it prefers
   ## the sanitizer.txt CRASH_RATE footer). No footer at all → discard the
   ## attempt, leave the crash footer-less so the rate stays an honest "?".
-  local footer num note
+  local footer num note success success_num
   footer="$(grep -Eo '^CRASH_RATE:[[:space:]]*[0-9]+/[0-9]+' "$tmp" 2>/dev/null \
             | head -1 | grep -Eo '[0-9]+/[0-9]+' | head -1)"
+  success="$(grep -Eo '^\[run-sanitizer-multi\][[:space:]]+SUCCESS_RATE:[[:space:]]*[0-9]+/[0-9]+' "$tmp" 2>/dev/null \
+             | head -1 | grep -Eo '[0-9]+/[0-9]+' | head -1)"
   rm -f "$tmp"
   [ -n "$footer" ] || return 1
   num="${footer%%/*}"
+  success_num="${success%%/*}"
+  if [ "$num" -eq 0 ] 2>/dev/null && { [ -z "$success" ] || ! [ "$success_num" -gt 0 ] 2>/dev/null; }; then
+    ## 0 crashes AND not one clean run. We gate on SUCCESS_RATE, not
+    ## EXECUTION_RATE, on purpose: a non-zero exit with no sanitizer report is
+    ## ambiguous — it can be a target validly rejecting a now-stale input
+    ## (a real 0/N) OR the saved input meeting a different contract than the
+    ## one that crashed (wrong/missing argv, an API-level repro run through the
+    ## CLI). Only a clean run proves the input was processed-without-crashing,
+    ## so without one we leave the rate unset rather than fabricate a 0/N that
+    ## could demote a real crash. Recall-safe: under-measure, never over-demote.
+    return 1
+  fi
   if [ "$num" -gt 0 ] 2>/dev/null; then
     note="reproduced in ${footer} reverification runs"
   else

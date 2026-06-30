@@ -91,6 +91,91 @@ with tempfile.TemporaryDirectory() as td:
               "find_primary_asan: suffix fallback scan tolerates missing dir")
 
 
+# ─── find_harness_source: shared C/C++ harness detection ────────────
+
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    missing = cd / "missing"
+    (cd / "input.bin").write_bytes(b"\x00\x01")
+    (cd / "helper.c").write_text("void helper(void) {}\n", encoding="utf-8")
+    assert_eq(None, ca.find_harness_source([missing, cd]),
+              "find_harness_source: no main() source → None, missing dir tolerated")
+
+    harness = cd / "api_harness.cpp"
+    harness.write_text("#include <stdio.h>\nint main(int argc, char **argv){return 0;}\n",
+                       encoding="utf-8")
+    assert_eq(harness, ca.find_harness_source([missing, cd]),
+              "find_harness_source: detects C++ source harness with main()")
+
+# A testcase-named C source (a compiler/parser target's reproducer) defines
+# main() but is an input, not a harness: it must NOT shadow a real harness,
+# and on its own must read as "no harness" so the CLI reverify path runs.
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    (cd / "input.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    (cd / "harness.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    assert_eq("harness.c", ca.find_harness_source([cd]).name,
+              "find_harness_source: harness.c wins over a main()-bearing input.c")
+
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    (cd / "input.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    assert_eq(None, ca.find_harness_source([cd]),
+              "find_harness_source: lone input.c is a testcase, not a harness")
+
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    (cd / "reproducer.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    assert_eq(None, ca.find_harness_source([cd]),
+              "find_harness_source: lone reproducer.c is a testcase, not a harness")
+
+# Harness-named source wins even when an unrelated main()-bearing source sorts
+# first and lives in an earlier scan dir.
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    audit = cd / ".audit"; audit.mkdir()
+    (audit / "aaa_driver.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    (cd / "fuzz_harness.cc").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    assert_eq("fuzz_harness.cc", ca.find_harness_source([audit, cd]).name,
+              "find_harness_source: a *harness* name wins over an incidental main() source")
+
+# An explicit `harness` in the name overrides a testcase prefix, and BOTH
+# classifiers must agree (else export-repro double-stages the file as harness
+# AND input). `repro-harness.c` reads as a harness; `is_testcase_candidate`
+# must reject it for the same reason.
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    rh = cd / "repro-harness.c"
+    rh.write_text("int main(void){return 0;}\n", encoding="utf-8")
+    assert_eq(rh, ca.find_harness_source([cd]),
+              "find_harness_source: *-harness name beats a repro- testcase prefix")
+    assert_eq(False, ca.is_testcase_candidate(rh),
+              "is_testcase_candidate: repro-harness.c is a harness, not a testcase")
+    # but an ASan-recorded testcase path always wins (explicit input signal).
+    assert_eq(True, ca.is_testcase_candidate(rh, from_asan_header=True),
+              "is_testcase_candidate: ASAN_RUN_HEADER overrides the harness name")
+
+# When the ASAN_RUN_HEADER records a harness-named source AS the input, that
+# recorded testcase is ground truth: it must be the testcase, NOT also the
+# harness. The caller passes the resolved testcase as `exclude` so one file is
+# never classified as both (which would skip CLI reverify and double-stage it).
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    f = cd / "input_harness.c"
+    f.write_text("int main(void){return 0;}\n", encoding="utf-8")
+    asan = cd / "sanitizer.txt"
+    asan.write_text("ASAN_RUN_HEADER sanitizer=asan testcase=input_harness.c\n"
+                    "ERROR: AddressSanitizer: heap-buffer-overflow\n", encoding="utf-8")
+    tc = ca.find_testcase([cd], asan_files=[asan])
+    assert_eq("input_harness.c", tc.name if tc else None,
+              "find_testcase: ASAN-recorded harness-named source is the input")
+    assert_eq(None, ca.find_harness_source([cd], exclude=tc),
+              "find_harness_source: the recorded testcase is excluded from harness discovery")
+    # Without the exclusion it would (wrongly) double-classify — guards the contract.
+    assert_eq("input_harness.c", ca.find_harness_source([cd]).name,
+              "find_harness_source: filename-only would double-classify (why exclude is needed)")
+
+
 # ─── find_repro_args: argv recovery for flag-dependent CLI crashes ──
 
 with tempfile.TemporaryDirectory() as td:

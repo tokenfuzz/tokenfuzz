@@ -56,6 +56,12 @@ echo "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x60200000
 echo "SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free"
 exit 1
 SH
+  elif [ "$behavior" = "invalid" ]; then
+    cat > "$root/build-asan/src/stub" <<'SH'
+#!/usr/bin/env bash
+echo "usage: missing required option" >&2
+exit 2
+SH
   else
     cat > "$root/build-asan/src/stub" <<'SH'
 #!/usr/bin/env bash
@@ -101,6 +107,25 @@ assert_file_contains "$pool2/crashes/CRASH-0001/sanitizer.txt" '^CRASH_RATE: 0/5
   "T2: non-reproducing crash records an honest 0/5"
 assert_file_contains "$pool2/crashes/CRASH-0001/sanitizer.txt" 'heap-use-after-free child.c:91' \
   "T2b: non-reproducing crash keeps its original diagnostic (evidence preserved)"
+
+# ── T2c: invalid execution leaves rate unset, not false 0/5 ──
+pool2c="$TEST_TMPDIR/pool2c"; tgt2c="$TEST_TMPDIR/tgt2c"
+_make_target_root "$tgt2c" invalid
+_make_footerless_crash "$pool2c/crashes/CRASH-0001"
+before2c="$(cat "$pool2c/crashes/CRASH-0001/sanitizer.txt")"
+_reverify_pool_crash_rates "$pool2c" "$tgt2c" test
+assert_eq "$before2c" "$(cat "$pool2c/crashes/CRASH-0001/sanitizer.txt")" \
+  "T2c: invalid runner execution is left unmeasured (no fabricated 0/5)"
+
+# ── T2d: source harness crash does not fall back to target CLI ──
+pool2d="$TEST_TMPDIR/pool2d"; tgt2d="$TEST_TMPDIR/tgt2d"
+_make_target_root "$tgt2d" clean
+_make_footerless_crash "$pool2d/crashes/CRASH-0001"
+printf 'int main(void){return 0;}\n' > "$pool2d/crashes/CRASH-0001/harness.c"
+before2d="$(cat "$pool2d/crashes/CRASH-0001/sanitizer.txt")"
+_reverify_pool_crash_rates "$pool2d" "$tgt2d" test
+assert_eq "$before2d" "$(cat "$pool2d/crashes/CRASH-0001/sanitizer.txt")" \
+  "T2d: uncompiled source harness is not reverified through the CLI fallback"
 
 # ── T3: a crash already carrying a measured footer is left untouched ──
 pool3="$TEST_TMPDIR/pool3"; tgt3="$TEST_TMPDIR/tgt3"
