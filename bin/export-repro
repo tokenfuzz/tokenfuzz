@@ -1330,6 +1330,14 @@ def emit_cmake_build(extra_target: str = "", sanitizer: str = "asan") -> str:
     )
 
 
+# Sentinel proving a reproduce.sh build block was inlined from the audit's
+# converged recipe rather than a generic bucket template. Emitted by
+# emit_audit_build_script and asserted by the dispatch-level guard, so a writer
+# that forgets to thread audit_build_script fails loudly instead of silently
+# shipping a guessed build.
+AUDIT_BUILD_MARKER = ".audit-build.sh"
+
+
 def emit_audit_build_script(script_text: str) -> str:
     """Emit a reproduce.sh fragment that materializes and runs the
     audit-validated build recipe verbatim, in place of the hardcoded
@@ -1351,10 +1359,10 @@ def emit_audit_build_script(script_text: str) -> str:
         "# Build recipe inlined from the audit's .audit/build.sh — the EXACT\n"
         "# script bin/auto-build-script converged on at audit time. Inlined\n"
         "# verbatim so the reproducer build matches the audit build.\n"
-        f"cat > \"$src/.audit-build.sh\" <<'{delim}'\n"
+        f"cat > \"$src/{AUDIT_BUILD_MARKER}\" <<'{delim}'\n"
         f"{body}{delim}\n"
-        'chmod +x "$src/.audit-build.sh"\n'
-        '"$src/.audit-build.sh" "$src" "$build"\n'
+        f'chmod +x "$src/{AUDIT_BUILD_MARKER}"\n'
+        f'"$src/{AUDIT_BUILD_MARKER}" "$src" "$build"\n'
     )
 
 
@@ -2716,11 +2724,13 @@ def write_browser_template(out: Path, *, build_system: str, upstream_url: str,
                            pinned_rev: str, slug: str, san_bin_rel: str,
                            input_name: str, sanitizer: str = "asan",
                            extra_options: str = "", mode: str = "browser",
-                           recorded_env_options: str = "") -> None:
+                           recorded_env_options: str = "",
+                           audit_build_script: str = "") -> None:
     meta = sanitizer_meta(sanitizer)
     text = (
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
-        + emit_build(build_system, sanitizer=sanitizer)
+        + emit_build(build_system, sanitizer=sanitizer,
+                     audit_build_script=audit_build_script)
         + _sub_template(
             BROWSER_RUN,
             __SAN_BIN_REL__=shq(san_bin_rel),
@@ -2740,11 +2750,13 @@ def write_js_shell_template(out: Path, *, build_system: str, upstream_url: str,
                             pinned_rev: str, slug: str, san_bin_rel: str,
                             input_name: str, sanitizer: str = "asan",
                             extra_options: str = "", mode: str = "js",
-                            recorded_env_options: str = "") -> None:
+                            recorded_env_options: str = "",
+                            audit_build_script: str = "") -> None:
     meta = sanitizer_meta(sanitizer)
     text = (
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
-        + emit_build(build_system, sanitizer=sanitizer)
+        + emit_build(build_system, sanitizer=sanitizer,
+                     audit_build_script=audit_build_script)
         + _sub_template(
             JS_SHELL_RUN,
             __INPUT_NAME__=input_name,
@@ -2859,7 +2871,8 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
                                    extra_options: str = "", mode: str = "generic",
                                    recorded_env_options: str = "",
                                    local_src: str = "",
-                                   cli_args: str = '"$testcase"') -> None:
+                                   cli_args: str = '"$testcase"',
+                                   audit_build_script: str = "") -> None:
     meta = sanitizer_meta(sanitizer)
     if build_system == "swift" and not san_bin_rel:
         if not meta["flag"]:
@@ -2882,7 +2895,8 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
         text = (
             emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel,
                           sanitizer, local_src)
-            + emit_build(build_system, cmake_target, sanitizer)
+            + emit_build(build_system, cmake_target, sanitizer,
+                         audit_build_script=audit_build_script)
             + emit_bin_resolve(san_bin_rel, sanitizer)
             + _sub_template(
                 CLI_RUN,
@@ -2959,11 +2973,13 @@ def write_shell_wrapper_template(out: Path, *, build_system: str, upstream_url: 
                                   input_name: str = "",
                                   target_root: str = "",
                                   sanitizer: str = "asan",
-                                  local_src: str = "") -> None:
+                                  local_src: str = "",
+                                  audit_build_script: str = "") -> None:
     parts = [
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel,
                       sanitizer, local_src),
-        emit_build(build_system, cmake_target, sanitizer),
+        emit_build(build_system, cmake_target, sanitizer,
+                   audit_build_script=audit_build_script),
     ]
     if san_bin_rel:
         # Legacy CLI-binary wrapper: the inlined body launches `$san_bin`.
@@ -3386,6 +3402,9 @@ def main(argv: list[str]) -> int:
         # ── Choose reproduce.sh template ────────────────────────────
         repro_path = stage / "reproduce.sh"
         input_ext_lower = input_name.rsplit(".", 1)[-1].lower() if input_name else ""
+        # The stub path emits no build block, so the recipe guard below must
+        # skip it; every other branch runs a build and must honor the recipe.
+        repro_is_stub = False
         if is_browser:
             if input_ext_lower in ("html", "htm", "xhtml", "svg"):
                 write_browser_template(
@@ -3396,6 +3415,7 @@ def main(argv: list[str]) -> int:
                     sanitizer=sanitizer, extra_options=sanitizer_extra_options,
                     mode=run_mode or "browser",
                     recorded_env_options=recorded_env_options,
+                    audit_build_script=audit_build_script,
                 )
             elif input_ext_lower in ("js", "mjs"):
                 write_js_shell_template(
@@ -3406,6 +3426,7 @@ def main(argv: list[str]) -> int:
                     sanitizer=sanitizer, extra_options=sanitizer_extra_options,
                     mode=run_mode or "js",
                     recorded_env_options=recorded_env_options,
+                    audit_build_script=audit_build_script,
                 )
             else:
                 die(f"browser target {cfg.slug}: unsupported testcase ext '{input_ext_lower}'")
@@ -3452,6 +3473,7 @@ def main(argv: list[str]) -> int:
                 target_root=cfg.target_root or "",
                 sanitizer=sanitizer,
                 local_src=local_src,
+                audit_build_script=audit_build_script,
             )
         elif input_name:
             # Replay the recorded argv when the crash needs non-default flags;
@@ -3471,6 +3493,7 @@ def main(argv: list[str]) -> int:
                 mode=run_mode or "generic",
                 recorded_env_options=recorded_env_options,
                 local_src=local_src, cli_args=cli_args,
+                audit_build_script=audit_build_script,
             )
         else:
             # No runnable template (self-contained harness with no separate
@@ -3479,6 +3502,7 @@ def main(argv: list[str]) -> int:
             # is the report, not the convenience script. Previously this
             # die()'d and dropped the whole bundle, which is why model-direct
             # crashes never got the canonical REPORT.md.
+            repro_is_stub = True
             _stub_reason = "self-contained harness, no separate testcase" \
                 if harness_src is not None else "no harness/testcase/wrapper captured"
             write_stub_reproduce(
@@ -3490,6 +3514,27 @@ def main(argv: list[str]) -> int:
                 f"[export-repro] no runnable reproduce.sh template for "
                 f"{args.crash_id} ({_stub_reason}); wrote a stub and continued "
                 f"with the REPORT.md bundle.\n"
+            )
+
+        # ── Guard: the audit recipe must not be silently dropped ─────
+        # A converged .audit/build.sh was loaded but the build-emitting
+        # template did not inline it (marker absent). That can only mean a
+        # writer forgot to thread audit_build_script — the exact regression
+        # that shipped guessed builds for every CLI/shell/browser target. It
+        # is a code defect, not an operator/data condition, so fail loudly
+        # rather than ship a reproduce.sh that rebuilds the wrong binary.
+        if (
+            audit_build_script
+            and not repro_is_stub
+            and (build_system or "") in {"cmake", "autotools", "meson"}
+            and AUDIT_BUILD_MARKER not in repro_path.read_text(encoding="utf-8")
+        ):
+            die(
+                f"[export-repro] internal error: {cfg.target_root}/.audit/build.sh "
+                f"was loaded but reproduce.sh for {args.crash_id} did not inline it "
+                f"(build_system={build_system!r}). A reproduce.sh template is not "
+                f"threading audit_build_script into emit_build(); fix the writer so "
+                f"the reproducer build matches the audit build."
             )
 
         # ── Build REPORT.md ──────────────────────────────────────────
