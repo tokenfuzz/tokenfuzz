@@ -1821,8 +1821,9 @@ _loader = SourceFileLoader("reachability", sys.argv[1])
 mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("reachability", _loader))
 _loader.exec_module(mod)
 # 500 callers used to promote this to library_popular (CR/IR/AR:H). Popularity
-# no longer touches the score: the tier is `library` (CR/IR/AR:M) on surface
-# kind alone, and the bug still scores Medium+ on its class.
+# no longer touches the score: caller count is prevalence metadata, not asset
+# importance, so CR/IR/AR stay Not Defined and the bug scores Medium+ on its
+# class alone.
 reach = {"services": {"sourcegraph": {"status": "ok"}},
          "external_callers": 500, "external_caller_repos": 500, "vendored_copies": 0}
 structured = sys.argv[2] + ("Surface: library-api — public entry point on caller bytes\n"

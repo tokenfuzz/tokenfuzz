@@ -1189,10 +1189,10 @@ _CURRENT_TEST="score: network UAF WRITE → 8.9 High BTE"
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "8.9" "$score" "score 8.9"
 assert_eq "High" "$level" "level High"
-assert_eq "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P/CR:H/IR:H/AR:H" "$vector" "BTE vector"
+assert_eq "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P" "$vector" "BTE vector"
 
-# Library OOB small read — Medium: low impacts (VC:L/VA:L) tempered by the
-# ordinary-library environment (CR/IR/AR:M), not by a UI discount.
+# Library OOB small read — Medium: held down by the low impacts (VC:L/VA:L)
+# themselves, not by any environmental discount (CR/IR/AR are Not Defined).
 seed_hits "demo_score_libread" 0
 dir=$(make_crash "demo_score_libread" CRASH-SCORE-LIBREAD \
   "heap-buffer-overflow READ of size 1" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
@@ -1318,18 +1318,19 @@ assert_file_contains "$dir/report.md" "without a custom cap" "environmental expl
 # Transient-crash DoS (stack_exhaustion/null_deref/bus) carries a supplemental
 # Recovery=Automatic (R:A) note: score-unchanged, operational-severity context.
 _CURRENT_TEST="section: stack-overflow carries supplemental R:A recovery note"
-seed_hits "demo_recover" 60   # caller count no longer affects the score: an ordinary library → CR/IR/AR:M
+seed_hits "demo_recover" 60   # caller count never affects the score (prevalence != asset importance)
 dir=$(make_crash "demo_recover" CRASH-RECOVER \
   "stack-overflow on address 0xfeed (deep recursion)" \
   "library-api — C harness calls a public library entry point" \
   "obeyed" "bytes" "5/5" "CL-x (singleton)")
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "stack_exhaustion" "$key" "stack-overflow classifies as stack_exhaustion"
-# A DoS-only stack-exhaustion (VA:H only) in an ordinary deployed library scores
-# Medium (6.8): popularity no longer bumps CR/IR/AR to H. The R:A supplemental
-# note still does not change the score — it is the score's invariance under the
-# note, not the band itself, that this case pins.
-assert_eq "Medium" "$level" "stack_exhaustion DoS scored Medium (ordinary library, no popularity bump)"
+# A byte-reachable DoS-only stack-exhaustion (AV:N/VA:H, E:P) scores High (7.7) —
+# the CVSS-B reading for a remote availability impact, the same band NVD applies
+# to remote-DoS CVEs (no environmental discount: CR/IR/AR are Not Defined). The
+# R:A supplemental note still does not change the score — it is the score's
+# invariance under the note, not the band itself, that this case pins.
+assert_eq "High" "$level" "stack_exhaustion DoS scored High (remote availability impact, CVSS-B reading)"
 python3 "$REACH" --report "$dir" --no-cache >/dev/null 2>&1
 assert_file_contains "$dir/report.md" "Recovery: Automatic" "R:A supplemental note present"
 assert_file_contains "$dir/report.md" "score unchanged" "note disclaims any score effect"

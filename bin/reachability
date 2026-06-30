@@ -1373,27 +1373,25 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
 
 
 def _environmental_requirement(surface_label: str) -> tuple[str, str]:
-    """Local CR/IR/AR importance from the *shipping context* of the surface.
+    """CR/IR/AR are left Not Defined (X): the scorer does not derive
+    environmental Security Requirements from the deployment surface.
 
-    Deliberately not a function of external-caller counts. How many third-party
-    projects depend on an API measures ecosystem prevalence, not the importance
-    of the affected asset to a consuming environment — the concept CR/IR/AR is
-    defined for. Prevalence is prioritisation metadata (reported separately as
-    external-caller reach), so it must not move the CVSS score. Tiering here is
-    purely deployment surface: an internet-facing service warrants H; an
-    ordinary shipped library/file/CLI warrants M; non-shipping code L."""
-    if surface_label in NON_SHIPPING_SURFACES:
-        return "L", f"non-shipping {surface_label} use → CR/IR/AR:L"
-    if surface_label == "network":
-        return "H", "network-facing deployment → CR/IR/AR:H"
-    if surface_label in {"library", "file", "cli_production"}:
-        return "M", "ordinary deployed library/file/CLI use → CR/IR/AR:M"
-    # Unclassified surface (e.g. `unknown`): no deployment context to tier on.
-    # Leave the requirement Not Defined so scoring falls back to the CVSS-B
-    # worst case (CR/IR/AR default to H), rather than discounting on the absence
-    # of caller evidence — that absence is a popularity signal, not an asset-
-    # importance one, and must not lower the score.
-    return "X", "surface kind unclassified → CR/IR/AR not defined (CVSS-B baseline)"
+    CR/IR/AR model how much C/I/A matter to a *specific deploying organization*;
+    their CVSS default (Not Defined, scored as H) is the right worst case for a
+    generic, org-agnostic score — the reading NVD/CNAs publish. Tiering them by
+    surface only ever *discounts* (the default is already the max) and
+    double-counts the surface, which AV/UI already encode (cli → AV:L/UI:P): a
+    shipped heap-write with E:P then reads Medium instead of the High its
+    CVSS-B baseline warrants. The genuine "attacker can't reach this"
+    reductions stay where they belong — _non_shipping_modified_impacts
+    (internal/dev) and _caller_only_modified_impacts (caller-only triggers) —
+    which floor the modified *impacts* on real reachability facts, not on
+    shipping context. A future operator/target environmental profile could
+    supply real CR/IR/AR here.
+    """
+    del surface_label  # deployment tier lives in AV/UI, not CR/IR/AR
+    return ("X", "CR/IR/AR not defined — environmental requirements are a "
+                 "deployer concern (CVSS-B baseline)")
 
 
 def _non_shipping_modified_impacts(surface_label: str,
@@ -1432,9 +1430,12 @@ def _caller_only_modified_impacts(local_only: bool,
     a trust boundary, the realised security impact is an in-process caller
     corrupting/crashing its own process — no confidentiality or integrity gain
     on either the vulnerable system (MVC:N/MVI:N) or a subsequent system
-    (MSC:N/MSI:N). Availability is left at the class Base reading (a genuine
-    crash is still a local DoS), which floors caller-only memory corruption to
-    Low *without erasing it* — it stays a Low hardening note, not None.
+    (MSC:N/MSI:N). Availability is floored to L — a self-inflicted crash of the
+    caller's own process is a local hardening note, not the Base VA:H an
+    attacker-triggered cross-boundary outage would warrant — which floors
+    caller-only memory corruption to Low *without erasing it* (not None). The
+    availability floor makes this self-sufficient: it reaches Low on the impacts
+    alone, independent of CR/IR/AR (which the scorer leaves Not Defined).
 
     Recall-safe by construction: gated solely on ``_local_caller_only``, whose
     byte/content veto means a genuine parse-the-bytes bug never localises (keeps
@@ -1450,9 +1451,11 @@ def _caller_only_modified_impacts(local_only: bool,
             if metrics.get(base) not in (None, "N")}
     if not mods:
         return {}, ""
+    if metrics.get("VA") not in (None, "N"):
+        mods["MVA"] = "L"
     return mods, ("caller-only reachable (AV:L/AT:P) → attacker crosses no trust "
-                  "boundary → modified C/I impacts:N (availability left at Base: "
-                  "a local caller can still crash the process)")
+                  "boundary → modified C/I impacts:N, availability floored to L "
+                  "(a local caller can only crash its own process)")
 
 
 def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
@@ -3211,10 +3214,14 @@ def _format_severity_section(sev: dict) -> str:
         "computed by the vendored FIRST reference scorer. Base metrics come "
         "from the primitive and surface, with Attack Vector/Requirements also "
         "reflecting the trigger's caller-control facts (a trusted local "
-        "API/call-sequence reads as AV:L/AT:P). Threat/Environmental metrics "
-        "come from reproducibility, caller control, reachability, and local "
-        "shipping context. Cluster size remains a priority/verification fact "
-        "because CVSS v4.0 has no cluster metric._"
+        "API/call-sequence reads as AV:L/AT:P). The Threat metric (E) comes "
+        "from reproducer evidence; the Environmental Security Requirements "
+        "(CR/IR/AR) are left Not Defined — they model a deploying "
+        "organisation's asset importance, which the scorer cannot derive, so a "
+        "generic score keeps the CVSS-B worst case. Environmental *modified "
+        "impacts* are set only to floor impact where reachability facts justify "
+        "it (non-shipping surfaces, caller-only triggers). Cluster size remains "
+        "a priority/verification fact because CVSS v4.0 has no cluster metric._"
     )
     lines.append("")
     lines.append(f"**{cv.get('nomenclature', 'CVSS-B')} v4.0**: `{cv['vector']}` → **{cv['score']} ({cv['rating']})**")
@@ -3238,11 +3245,11 @@ def _format_severity_section(sev: dict) -> str:
     lines.append(f"| Subseq Conf/Integ/Avail   | {m['SC']}/{m['SI']}/{m['SA']} | primitive class |")
     if any(k in m for k in ("E", "CR", "IR", "AR", "MAT", "MAV", "MUI", "MVC", "MVI", "MVA", "MSC", "MSI", "MSA")):
         lines.append(f"| Threat Exploit Maturity (E) | {m.get('E', 'X')} | reproducer / exploit evidence |")
-        lines.append(f"| Env Requirements (CR/IR/AR) | {m.get('CR', 'X')}/{m.get('IR', 'X')}/{m.get('AR', 'X')} | reachability + local use |")
+        lines.append(f"| Env Requirements (CR/IR/AR) | {m.get('CR', 'X')}/{m.get('IR', 'X')}/{m.get('AR', 'X')} | not defined — deployer-set asset importance (CVSS-B baseline) |")
         env_attack = "/".join(m.get(k, "X") for k in ("MAV", "MAC", "MAT", "MPR", "MUI"))
-        lines.append(f"| Env Modified AV/AC/AT/PR/UI | {env_attack} | caller control / local deployment |")
+        lines.append(f"| Env Modified AV/AC/AT/PR/UI | {env_attack} | caller control / contract concern |")
         env_impact = "/".join(m.get(k, "X") for k in ("MVC", "MVI", "MVA", "MSC", "MSI", "MSA"))
-        lines.append(f"| Env Modified C/I/A impacts | {env_impact} | local shipping context |")
+        lines.append(f"| Env Modified C/I/A impacts | {env_impact} | non-shipping / caller-only reachability floor |")
     lines.append("")
     lines.append(f"**Severity level: {sev['level']}** — CVSS bands: Critical ≥ 9.0, "
                  "High ≥ 7.0, Medium ≥ 4.0, Low ≥ 0.1, None = 0.0.")

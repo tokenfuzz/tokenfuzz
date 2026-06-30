@@ -247,9 +247,12 @@ Notes on the fields:
   report's classification and Fields.
 - The CVSS vector is derived mechanically: **AV/UI** from the surface
   tier; **VC/VI/VA/SC/SI/SA** from the primitive class; **E** from
-  reproducer/exploit evidence; **CR/IR/AR** from local reach and usage;
-  **MAT** from caller-control or contract concerns. **PR:N** is the
-  worst-case default because the harness has no auth signal. Review
+  reproducer/exploit evidence; **CR/IR/AR** are left Not Defined (they
+  model a deployer's asset importance, not anything the scorer can derive,
+  so a generic score keeps the CVSS-B worst case); **MAT** and Environmental
+  modified impacts from caller-control, contract concerns, and non-shipping
+  reachability. **PR:N** is the worst-case default because the harness has
+  no auth signal. Review
   those assumptions against the real deployment before filing an
   advisory — each derivation line is a reviewable claim.
 - **Non-shipping code** (test/maintenance/internal harness) is represented
