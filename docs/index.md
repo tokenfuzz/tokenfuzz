@@ -7,36 +7,34 @@ triage it. Point it at any source tree you are authorized to test —
 C/C++, Rust, Go, Python, Java, and more, including browsers — and it runs
 as a pipeline:
 
-- **Recon sweep.** A cold-start pass runs a CTF-style "find all
-  vulnerabilities" survey, split across parallel agents over
-  directory-coherent, LOC-balanced slices of the source. On a large
-  codebase it scopes to recently-changed code so the pass stays
-  bounded. Results land in a prioritized queue. See
+- **Finds bugs from scratch.** A cold-start survey sweeps the source in
+  parallel — no crashing input or bug list handed in — and turns what it
+  sees into a prioritized queue of leads. On a large codebase it scopes to
+  recently-changed code so the pass stays bounded. See
   [Recon discovery](guides/recon-discovery.md).
-- **Eight investigation strategies.** Deep agents work that queue with
-  prior-fix mining, invariant negation, spec-vs-implementation,
-  differential testing, lifetime and state, cross-project peer-fix
-  mining, adversarial input and fuzz engineering, and property
-  oracles — across Claude,
-  Codex, Gemini, or a local OpenCode-backed model behind one probe-and-triage
-  contract. See [Strategy model](concepts/strategy-model.md) and
+- **Investigates with real method.** A fleet of agents works that queue
+  through eight named strategies — mining recent fixes, breaking
+  invariants, spec-vs-code, differential testing, lifetime and state,
+  peer-fix mining, adversarial input, and property oracles — across Claude,
+  Codex, Gemini, or a local open-source model behind one contract. See
+  [Strategy model](concepts/strategy-model.md) and
   [Backends and ensembling](guides/backends.md).
-- **Reachability-labelled findings.** Every finding separates
-  attacker-controlled-byte issues from internal caller-misuse and pure
-  test- or maintenance-tool surface, so triage moves on signal instead of
-  drowning in null-derefs, OOMs, and assertion-only aborts.
-- **Cost as a first-class resource.** Prompt caching, capped state views,
-  per-agent sanitizer-run budgets, soft turn caps, work-card leases, and
-  SHA-pinned recon reuse keep unattended multi-agent runs affordable. See
+- **Tells real risk from noise.** Every finding is labelled by who can
+  reach it — attacker-controlled input versus internal misuse — so triage
+  moves on signal instead of drowning in null-derefs, OOMs, and harmless
+  assert-only aborts.
+- **Keeps long runs affordable.** Prompt caching, capped reads, per-agent
+  run budgets, and turn limits make cost a first-class control, so an
+  unattended overnight audit doesn't quietly turn into a large bill. See
   [Cost model](concepts/cost-model.md).
-- **Fleet coordination.** Shared logging and cluster-level dedup keep
-  parallel agents accumulating work rather than repeating each other; an
-  independent validator pass with no shared context catches a model's own
-  reasoning errors before anything is accepted.
-- **Maintainer-ready handoff.** Every accepted crash exports as a bundle —
-  sanitizer trace, reproducer testcase, one-command `reproduce.sh`,
-  candidate fix direction, and optional `patch.diff` — that rebuilds
-  against a clean upstream checkout.
+- **Coordinates instead of colliding.** Shared state and automatic
+  clustering keep parallel agents building on each other, and an
+  independent reviewer with no shared context checks the work before
+  anything is accepted.
+- **Hands off fix-ready evidence.** Every accepted crash exports as a
+  bundle — sanitizer trace, reproducer input, one-command reproduce script,
+  fix direction, and optional patch — that rebuilds against a clean
+  upstream checkout.
 
 The platform does the discovery, the analysis, the triage, and the
 handoff; the final security judgment stays with you.
