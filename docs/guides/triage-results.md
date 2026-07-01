@@ -230,9 +230,10 @@ Notes on the fields:
 
 - `Cluster` is filled in by `bin/cluster-crashes` after triage; agents
   leave it blank or use the generated marker.
-- `Advisory: yes` is added (above `Surface`) when the fix requires an
-  ABI/API-impacting change — see the `Fix Direction` section in the
-  agent's narrative.
+- `Advisory: yes` is added (above `Surface`) when no `patch.diff` is
+  attached and the fix is described in prose instead — either a
+  non-surgical (ABI/API-impacting) change or simply no clean diff
+  captured. See the `Fix Direction` section in the agent's narrative.
 - `Dedup frames` is the top-3 ClusterFuzz-style frame chain used for
   duplicate detection.
 - The auto-Severity bullet (`- **Severity**: …`) is rewritten by

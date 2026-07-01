@@ -214,19 +214,12 @@ Operational caps: 1 FIND/agent/iteration when you also promote a CRASH;
 up to 3 FINDs/iteration in source-only mode. Distinct `file:function:line`
 with independent rationales.
 
-Optional but encouraged: `patch.diff` in the FIND/CRASH dir, captured
-via `git diff` / `hg diff` of the surgical fix. Save it whenever
-`git -C "$TARGET_ROOT" apply --check` succeeds — a non-mutating check;
-`hg import --no-commit` is not a dry run, so for hg targets save the
-`hg diff` and skip apply-validation rather than modify the source. Build/repro
-confirmation is an optional quality upgrade, not a gate; if you apply a
-fix to test it, revert the touched files immediately so probes run
-against unmodified source.
-**Do not write a `## Patch` section in `report.md`** — `bin/enrich-report`
-is the single writer of that section and inlines the diff from the
-sibling file on render. Reserve `## Fix Direction` prose (omit
-`patch.diff`) for fixes that require ABI/API-impacting changes where
-a surgical diff isn't possible.
+Point at the fix (best-effort, never blocks filing): always end `report.md`
+with a `## Fix Direction` heading (on its own line) + a one-sentence body.
+When the fix is a surgical diff, save it
+as `patch.diff` in the FIND/CRASH dir instead — `bin/enrich-report` inlines
+it as `## Patch`, so don't write that section yourself. Capture/validation
+mechanics: `.agents/references/session-rules.md`.
 
 ## Pre-file checks
 

@@ -3003,19 +3003,26 @@ def write_shell_wrapper_template(out: Path, *, build_system: str, upstream_url: 
     os.chmod(out, 0o755)
 
 
+# Matches a Fix-Direction-class heading. Accepts both the conventional
+# section form (`## Fix Direction` on its own line, body below) and an
+# inline form (`## Fix Direction: add the bounds check`) so advisory
+# detection never silently misses a prose fix pointer. Advisory-only
+# (display metadata), so an occasional over-match on a fix-prose line is
+# benign — and only fires when no patch.diff is present.
 _FIX_DIRECTION_HEADING_RE = re.compile(
     r"(?im)^[#\s>*\-]*\b(?:Fix\s+Direction|Suggested\s+Fix|Recommended\s+Fix|"
-    r"Mitigation|Remediation)\b[: ]*$"
+    r"Mitigation|Remediation)\b[ \t]*(?:[:\-–—].*)?$"
 )
 
 
 def detect_advisory_status(report_md: Optional[Path], patch_path: Optional[Path]) -> str:
     """Return ``yes``/``no`` for the Advisory field, or '' if unknown.
 
-    A crash bundle is *advisory* when no patch can be supplied but the
-    agent has explained a fix direction in prose — typical for
-    ABI-impacting issues (a destructor signature change, a removed
-    extern symbol) that can't be expressed as a surgical diff.
+    A crash bundle is *advisory* when no patch.diff is attached but the
+    agent has explained the fix in prose — either because the fix is
+    non-surgical (an ABI-impacting signature change, a removed extern
+    symbol) or because no clean diff was captured. Advisory says only
+    "fix is prose, not an applyable diff"; the reason lives in the prose.
 
     The triage pipeline already accepts bundles without patch.diff,
     but downstream maintainers and the LLM confirm-agent benefit from
@@ -3094,7 +3101,7 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
     if advisory_value:
         parts.append(emit_field(
             "Advisory", advisory_value,
-            "no patch — fix requires ABI/API-impacting change, see Fix Direction"
+            "no patch.diff — fix described in prose, see Fix Direction"
             if advisory_value == "yes" else ""
         ))
     parts.append(emit_field("Surface", surface_value, surface_reason))
@@ -3599,11 +3606,11 @@ def main(argv: list[str]) -> int:
 
         confidence_value = read_confidence(report_md, asan_file)
 
-        # Advisory marker: patch.diff is optional. When absent + the
+        # Advisory marker: patch.diff is best-effort. When absent + the
         # agent's narrative documents a Fix Direction, the bundle is
-        # an "advisory" — the issue ships for human review even
-        # though no surgical patch was possible (ABI/API-impacting
-        # fixes don't fit a one-line diff).
+        # an "advisory" — the issue ships for human review with the fix
+        # as prose rather than an applyable diff (non-surgical fix, or
+        # no clean diff captured).
         advisory_value = detect_advisory_status(
             report_md, stage / "patch.diff"
         )

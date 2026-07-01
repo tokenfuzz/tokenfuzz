@@ -61,12 +61,15 @@ assert_match "S8 property-based" "$directive" \
   "directive: names source-only strategy S8"
 assert_match "non-security FINDs" "$directive" \
   "directive: warns about non-security FIND quarantine"
-assert_match 'apply --check' "$directive" \
-  "directive: patch validation uses git apply --check"
-assert_match "non-mutating" "$directive" \
-  "directive: describes apply --check as non-mutating"
-assert_match "not a dry run" "$directive" \
-  "directive: corrects the hg import --no-commit dry-run myth"
+# Patch guidance: the directive carries only a short best-effort nudge and
+# delegates the capture/validation mechanics to the canonical session-rules
+# doc (asserted in section 9). Best-effort = never gates a finding.
+assert_match "Fix Direction" "$directive" \
+  "directive: nudges a one-line Fix Direction"
+assert_match "best-effort" "$directive" \
+  "directive: patch/fix is best-effort, never blocks filing"
+assert_match "session-rules.md" "$directive" \
+  "directive: delegates patch mechanics to canonical session-rules"
 
 # Negative — the directive must not promote non-security correctness bugs.
 assert_not_match "pure correctness.*are findings" "$directive" \
@@ -222,6 +225,17 @@ assert_file_contains "$rules" "Source-only strategies" \
   "session-rules: names source-only strategies"
 assert_file_contains "$rules" "the FIND still ships" \
   "session-rules: states the preservation guarantee"
+
+# session-rules.md owns the canonical patch capture/validation mechanics
+# (moved here so the per-iteration directive stays a short pointer).
+assert_file_contains "$rules" "apply --check" \
+  "session-rules: patch validation uses git apply --check"
+assert_file_contains "$rules" "non-mutating" \
+  "session-rules: describes apply --check as non-mutating"
+assert_file_contains "$rules" "not a dry run" \
+  "session-rules: corrects the hg import --no-commit dry-run myth"
+assert_file_contains "$rules" "never blocks or" \
+  "session-rules: patch/fix is best-effort, never gates a finding"
 
 # ═══════════════════════════════════════════════════════════════
 # 10. session-rules.md FIND cap is conditional, not blanket

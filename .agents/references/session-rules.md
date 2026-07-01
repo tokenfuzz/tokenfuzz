@@ -420,10 +420,20 @@ If the reproducer never lands, the FIND still ships. If the reproducer
 does land, the FIND already exists and the CRASH becomes the evidence
 attachment — no rewrite needed.
 
-Optional but encouraged:
-- **`patch.diff`** — a surgical patch saved as a file named exactly
+Always try to point at the fix — best-effort, it never blocks or
+downgrades a finding:
+- **`## Fix Direction`** — the `## Fix Direction` heading on its own line,
+  then one sentence naming where the fix goes and what changes (the missing
+  check, the corrected bound, the inverted predicate); keep the heading bare
+  so the exporter detects it. Cheap, so write it on every FIND and CRASH. The
+  only time you omit it is when you attach a `patch.diff` instead (below).
+- **`patch.diff`** — the upgrade over the prose line: a surgical patch saved
+  as a file named exactly
   `patch.diff` in the FIND directory (alongside `report.md`), or in
-  the CRASH directory for CRASH reports. The format must match the
+  the CRASH directory for CRASH reports. Write one whenever the fix is a
+  surgical diff you can capture; skip it (and let the `## Fix Direction`
+  line stand) when you can't — don't stall a finding over it. The format
+  must match the
   target's VCS so maintainers can apply it directly. See
   `.agents/references/vcs-commands.md` for the capture command; the
   short forms are:
@@ -458,13 +468,11 @@ Optional but encouraged:
   diagnostic stops) can be noted in your narrative prose; there is no
   required label vocabulary.
 
-  **Advisory bundles (no patch).** Some classes of fix can't be
-  captured as a surgical diff — ABI-impacting renames, signature
-  changes that break extern users, replacing a raw `char *` extractor
-  with a capacity-aware API, etc. In that case **omit `patch.diff`**
-  entirely and add a `## Fix Direction` section to `report.md`
-  describing the maintainer-facing change. The bundle exporter
-  detects the heading and marks the report with `Advisory: yes` so
+  **Advisory bundles (no patch).** When no `patch.diff` is attached — the
+  fix is non-surgical (ABI-impacting rename, signature change, replacing a
+  raw `char *` extractor with a capacity-aware API) or you simply couldn't
+  capture one — the `## Fix Direction` line stands alone. The bundle
+  exporter detects the heading and marks the report `Advisory: yes` so
   triage and downstream readers know the omission is intentional. Do
   **not** invent a non-surgical patch just to fill the file —
   reviewers prefer prose to a misleading diff.

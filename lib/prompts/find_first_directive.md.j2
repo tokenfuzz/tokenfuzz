@@ -35,23 +35,11 @@ Augment that dir — never create a new `FIND-NNN-<slug>/` for the same
 defect. The pre-filed id is the canonical record; double-filing inflates
 the benchmark count and breaks cluster dedup.
 
-**Optional but encouraged — `patch.diff`.** When your fix is a surgical
-diff (a missing check, a corrected size, an inverted predicate),
-save it as a file named exactly `patch.diff` in the FIND directory
-alongside `report.md`. `bin/enrich-report` is the sole writer of the
-`## Patch` section and will inline the sibling diff on render — so
-**do not write a `## Patch` section in `report.md` yourself**. Same
-filename and rule apply for CRASH directories. Capture with the
-target's VCS (`git -C "$TARGET_ROOT" diff -- path/to/file > "$DIR/patch.diff"`
-or `hg -R "$TARGET_ROOT" diff path/to/file > "$DIR/patch.diff"`); save
-whenever `git -C "$TARGET_ROOT" apply --check` succeeds — a
-non-mutating check that never touches the source. (`hg
-import --no-commit` is not a dry run; for hg targets save the `hg diff`
-and skip apply-validation rather than modify the source.) Build/repro
-confirmation is a quality upgrade, not a gate; if you apply a fix to
-test it, revert the touched files immediately so probes run against
-unmodified source. When the fix is non-surgical (ABI rename,
-signature change, API replacement),
-omit `patch.diff` entirely and add a `## Fix Direction` prose section
-instead — the exporter marks the bundle `Advisory: yes` so reviewers
-know the omission is intentional.
+**Point at the fix (best-effort, never blocks filing).** End `report.md`
+with exactly one fix pointer: a `## Fix Direction` heading followed by a
+one-sentence body (where the fix goes + what changes) — keep the heading on
+its own line so the exporter detects it — or — when the fix is a surgical
+diff — a `patch.diff`
+in the FIND/CRASH directory *instead* (`bin/enrich-report` inlines it as the
+`## Patch` section, so don't write that section yourself). Capture and
+validation mechanics are in `.agents/references/session-rules.md`.

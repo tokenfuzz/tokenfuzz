@@ -989,9 +989,9 @@ _STRATEGY_NAMES = {
 _STRATEGY_CELL_RE = re.compile(r"^\s*(S[1-8]|REF)\s*$")
 
 # Advisory field is a yes/no flag — `yes` means the bundle ships a
-# `## Fix Direction` narrative *without* a surgical patch.diff, by
-# design (ABI-breaking, capacity-aware-API replacement, etc.). The
-# inline explanation tells a triager which of the two the report is.
+# `## Fix Direction` narrative *without* a surgical patch.diff (the fix
+# is non-surgical, or no clean diff was captured). The inline
+# explanation tells a triager which of the two the report is.
 _ADVISORY_HINTS = {
     "no":  "patch.diff included",
     "yes": "advisory only — no patch",

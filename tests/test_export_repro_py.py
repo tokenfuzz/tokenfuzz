@@ -278,6 +278,20 @@ with tempfile.TemporaryDirectory() as td:
         rpt.write_text(f"## {heading}\nDo X.\n", encoding="utf-8")
         assert_eq("yes", er.detect_advisory_status(rpt, patch),
                   f"advisory: heading variant '{heading}' detected")
+    # Inline form (heading + prose on the same line) must still flag advisory —
+    # agents sometimes write `## Fix Direction: <sentence>` instead of a bare
+    # heading; missing it was a false negative against the fix-pointer policy.
+    for inline in ("## Fix Direction: add the missing bounds check",
+                   "## Fix Direction - add the bounds check",
+                   "## Remediation: clamp the length"):
+        rpt.write_text(f"## Summary\nBug.\n\n{inline}\n", encoding="utf-8")
+        assert_eq("yes", er.detect_advisory_status(rpt, patch),
+                  f"advisory: inline heading '{inline[:24]}…' detected")
+    # Negative: a prose line merely mentioning the word mid-sentence is not a
+    # heading and must not flag advisory.
+    rpt.write_text("## Summary\nThe remediation here is unclear.\n", encoding="utf-8")
+    assert_eq("", er.detect_advisory_status(rpt, patch),
+              "advisory: mid-sentence 'remediation' is not a heading")
 
 # ─── extract_summary_section (Summary-before-Fields layout) ─────────
 # The Summary section (plus any leading enrichment blocks) is split off the

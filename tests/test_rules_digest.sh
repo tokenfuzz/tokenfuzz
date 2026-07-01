@@ -67,8 +67,8 @@ expected_topics=(
   "Trigger source"                     # CRASH Promotion Gate
   "Parameter control"                  # CRASH Promotion Gate
   "FIND"                               # FIND Quality Bar
-  "patch.diff"                         # FIND patch optional
-  "single writer"                      # enrich-report owns ## Patch section
+  "patch.diff"                         # FIND patch best-effort
+  "write that section"                 # enrich-report owns ## Patch section
   "differential"                       # Differential Testing (case-insensitive ok)
 )
 for topic in "${expected_topics[@]}"; do
@@ -93,10 +93,13 @@ assert_file_contains "$FULL_RULES" "non-mutating" \
   "full rules describe apply --check as non-mutating"
 assert_file_contains "$FULL_RULES" "not a dry run" \
   "full rules correct the hg import --no-commit dry-run myth"
-assert_file_contains "$DIGEST" "apply --check" \
-  "digest names git apply --check as the patch.diff save floor"
-assert_file_contains "$DIGEST" "not a dry run" \
-  "digest corrects the hg import --no-commit dry-run myth"
+# The digest carries only the short best-effort nudge; the apply --check /
+# dry-run mechanics live in the full rules (asserted above) and the digest
+# points there for drill-down, matching its drill-down pattern.
+assert_file_contains "$DIGEST" "Fix Direction" \
+  "digest nudges a one-line Fix Direction"
+assert_file_contains "$DIGEST" "best-effort" \
+  "digest frames patch/fix as best-effort, never blocking"
 
 # ── The digest must inline the bin/state cheat sheet ────────────────
 # Agents historically burned ~5 `bin/state … --help` round-trips per
