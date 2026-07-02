@@ -108,6 +108,21 @@ assert_match "exhausting quantity, not the field values" "$rendered" \
 assert_match "parser nesting or size limit" "$rendered" \
   "reachability fields: input bound below threshold localises exhaustion to call-sequence"
 
+# triage_reachability_fields: env/fs-state delivery-vs-trust guard. A fuzz input's
+# CONTENTS delivered via file/argv/stdin/corpus are attacker bytes, not env/fs-state.
+# This rule only steers severity from the RENDERED prompt — it previously lived in a
+# {# #} comment stripped at render time, which let a caller-only UAF mislabel env and
+# score Medium instead of Low. Assert it survives rendering, and that the "both"
+# carveout stays so file-delivered setup + caller sequence is not forced to plain bytes.
+assert_match 'argv, stdin, or fuzz corpus are "bytes"' "$rendered" \
+  "reachability fields: file/argv/stdin/corpus contents are bytes"
+assert_match 'never "env"/"fs-state"' "$rendered" \
+  "reachability fields: input-file contents are not env/fs-state"
+assert_match "reading a testcase via fopen" "$rendered" \
+  "reachability fields: fopen/stdin delivery does not change the trust class"
+assert_match 'or "both" when they only set up' "$rendered" \
+  "reachability fields: file-delivered setup + caller sequence stays both, not plain bytes"
+
 rendered=$(python3 "$renderer" suggest_threat_model.md.j2 \
   --var "slug=demo" \
   --var "upstream_url=https://example.com/demo" \

@@ -74,6 +74,13 @@ Rules:
   mislabelling a byte-reachable bug as call-sequence (or "both") would wrongly
   localise it (AV:L) and under-score it. Reserve "both" for the case above,
   where attacker bytes are only setup for a caller-driven destructive sequence.
+- "env" and "fs-state" are for state the fuzz input does NOT control: "env" is
+  process environment variables; "fs-state" is filesystem path/presence/
+  permission/symlink layout. The CONTENTS of an attacker-supplied input file,
+  argv, stdin, or fuzz corpus are "bytes" (or "both" when they only set up a
+  caller-driven sequence) — never "env"/"fs-state". Delivery does not change the
+  trust class: reading a testcase via fopen(argv[1]) or stdin does not make its
+  bytes environmental or filesystem state.
 - For resource/algorithmic-exhaustion primitives (stack_exhaustion,
   dos_amplification, regex_dos, memory_leak, oom), classify trigger_source by
   the exhausting quantity, not the field values. The exhausting quantity is the
