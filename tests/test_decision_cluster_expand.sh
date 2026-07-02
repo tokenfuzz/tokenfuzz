@@ -129,5 +129,20 @@ row_lines=$(grep -c 'pool-driver sibling row' "$state_file")
 assert_eq 3 "$block_headers" "exactly one block header per crash"
 assert_eq 3 "$row_lines" "exactly one appended row per crash (no torn appends)"
 
+# 7. Timeout floor: cluster_expand investigates the tree and runs far longer
+# than the classification gates, so _cluster_expand_decide must send a ceiling
+# well above the shared default — while still honoring a higher operator value.
+mk_crash_with_frames CRASH-TO >/dev/null
+llm_decide() { echo "timeout=$3"; }   # stub: echo the timeout arg it was handed
+
+LLM_DECISION_TIMEOUT=45 \
+  got=$(_cluster_expand_decide "$RESULTS_DIR/crashes/CRASH-TO")
+assert_eq "timeout=600" "$got" "shared default is floored to 600 for cluster_expand"
+
+LLM_DECISION_TIMEOUT=900 \
+  got=$(_cluster_expand_decide "$RESULTS_DIR/crashes/CRASH-TO")
+assert_eq "timeout=900" "$got" "a higher operator override still wins over the floor"
+unset -f llm_decide
+
 teardown_test_env
 summary

@@ -3211,7 +3211,14 @@ _cluster_expand_decide() {
     --var "id=${id}" \
     --var "frames=${frames}" \
     --var "source_block=${source_block}") || return 1
-  printf '%s' "$prompt" | llm_decide cluster_expand "rows" "$LLM_DECISION_TIMEOUT"
+  # cluster_expand is the one AGENTIC decision: every backend investigates the
+  # tree to name siblings, so it runs far longer than the classification gates.
+  # A too-short cap kills and discards the call (the crash then retries every
+  # housekeeping pass); give it a generous ceiling. The cap is a max, so fast
+  # calls still return early, and a higher operator override still wins.
+  local timeout="$LLM_DECISION_TIMEOUT"
+  if [ "$timeout" -lt 600 ]; then timeout=600; fi
+  printf '%s' "$prompt" | llm_decide cluster_expand "rows" "$timeout"
 }
 
 # Append cluster-expansion rows to a state file.

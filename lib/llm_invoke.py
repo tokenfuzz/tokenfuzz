@@ -544,15 +544,23 @@ def agent_flags(
 
 
 def decide_flags(backend: str, model: str = "") -> list[str]:
-    """Build the flag array for a single-shot decision call.
+    """Build the flag array for a decision call.
 
-    No tools, text output, read-only sandbox where applicable. Used by
-    lib/llm_decide.py's backend dispatcher (imported, not subprocessed).
+    Read-only tools, text output, and no turn cap: every backend runs a
+    decision bounded by the decision timeout, not a fixed number of turns, so a
+    decision that reads source to judge (find_quality, reachability, cluster
+    siblings, …) can — with the same read-only reach across backends: codex
+    --sandbox read-only, gemini --approval-mode=plan, claude --permission-mode
+    plan. Used by lib/llm_decide.py's backend dispatcher (imported, not
+    subprocessed).
     """
     resolved_model = resolve_model_name(backend, model)
 
     if backend == "claude":
-        flags = ["--print", "--max-turns", "1", "--output-format", "text"]
+        # plan is claude's read-only mode: Read/Grep/Glob for source-grounded
+        # verdicts, writes and exec blocked. Mode-enforced, so it stays
+        # read-only as tools evolve — no allow/deny list to keep complete.
+        flags = ["--print", "--output-format", "text", "--permission-mode", "plan"]
         if resolved_model:
             flags += ["--model", resolved_model]
         return flags

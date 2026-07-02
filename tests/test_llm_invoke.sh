@@ -180,10 +180,15 @@ declare -a d_claude=()
 llm_decide_flags claude d_claude ""
 flags_str="${d_claude[*]}"
 assert_match "--print"               "$flags_str" "decide claude has --print"
-assert_match "--max-turns 1"         "$flags_str" "decide claude pins max-turns 1"
+if grep -q -- "--max-turns" <<< "$flags_str"; then
+  fail "decide claude must NOT cap turns (timeout-bounded, like codex/gemini)"
+else
+  pass "decide claude has no turn cap"
+fi
 assert_match "--output-format text"  "$flags_str" "decide claude has text output"
+assert_match "--permission-mode plan" "$flags_str" "decide claude uses read-only plan mode (source-grounded, no writes)"
 if grep -q -- "--dangerously-skip-permissions" <<< "$flags_str"; then
-  fail "decide claude must NOT include --dangerously-skip-permissions (no tools)"
+  fail "decide claude must NOT include --dangerously-skip-permissions (read-only, not full access)"
 else
   pass "decide claude omits --dangerously-skip-permissions"
 fi

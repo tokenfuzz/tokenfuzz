@@ -226,11 +226,11 @@ print("\ndecide-flags")
 proc = run(["decide-flags", "claude"], check=True)
 f = flags(proc)
 ok("--print" in f, "decide claude --print")
-ok("--max-turns" in f, "decide claude pins max-turns")
-turns_idx = f.index("--max-turns")
-assert_eq("1", f[turns_idx + 1], "decide claude max-turns 1")
+ok("--max-turns" not in f, "decide claude has no turn cap (timeout-bounded, like codex/gemini)")
 ok("text" in f, "decide claude text output")
-ok("--dangerously-skip-permissions" not in f, "decide claude omits skip-permissions (no tools)")
+turns_idx = f.index("--permission-mode")
+assert_eq("plan", f[turns_idx + 1], "decide claude uses read-only plan mode")
+ok("--dangerously-skip-permissions" not in f, "decide claude omits skip-permissions (read-only, not full access)")
 
 proc = run(["decide-flags", "codex"], check=True)
 f = proc.stdout
@@ -390,7 +390,8 @@ os.environ.pop("USE_GEMINI_CLI", None)
 
 decide_claude = inv.decide_flags("claude")
 ok("--print" in decide_claude, "decide_flags('claude') has --print")
-ok("--max-turns" in decide_claude, "decide_flags('claude') has --max-turns")
+ok("--max-turns" not in decide_claude, "decide_flags('claude') has no turn cap")
+ok("plan" in decide_claude, "decide_flags('claude') uses read-only plan mode")
 
 agent_codex = inv.agent_flags("codex", add_dirs="/x,/y")
 ok("--json" in agent_codex and "--sandbox" in agent_codex,
