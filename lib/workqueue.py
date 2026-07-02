@@ -140,6 +140,7 @@ AUDIT_PATCH_BOOST_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
     # ── Injection (all flavours) ─────────────────────────────────────
     r"\b(?:sql|command|os|shell|code|template|ssti|ldap|xpath|crlf|"
     r"header|log|http[- ]?header|nosql|expression|html|css)[- ]?injection\b",
+    r"\brce\b|\bremote code execution\b",
     r"\bunsafe (?:eval|exec|spawn|deserialization|unserialize|pickle|yaml)\b",
     r"\b(?:insecure|unsafe) deserialization\b",
     r"\bpickle deserialization\b",
@@ -198,7 +199,8 @@ AUDIT_PATCH_BOOST_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"\b(?:zip|decompression) bomb\b",
     r"\balgorithmic (?:complexity|amplification)\b",
     r"\b(?:hash|collision)[- ]?flood(?:ing)?\b",
-    r"\b(?:dos|denial[- ]?of[- ]?service) (?:vector|amplifier)\b",
+    r"\b(?:dos|denial[- ]?of[- ]?service) (?:vector|amplifier|amplification)\b",
+    r"\bstack exhaustion\b|\b(?:unbounded|uncontrolled|infinite|excessive|deep) recursion\b",
 
     # ── Supply chain ─────────────────────────────────────────────────
     r"\b(?:malicious|backdoor(?:ed)?|compromised) (?:dependency|package|crate|gem|module)\b",

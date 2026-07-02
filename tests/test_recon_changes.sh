@@ -144,6 +144,9 @@ print("T_boost_uninit", patch_audit_boost("Fix uninitialized memory read in pars
 print("T_boost_crlf", patch_audit_boost("CRLF injection in logger"))
 print("T_boost_openredir", patch_audit_boost("Open redirect via crafted Location header"))
 print("T_boost_typosquat", patch_audit_boost("Patch typosquat in npm install path"))
+print("T_boost_rce", patch_audit_boost("Fix remote code execution in request handler"))
+print("T_boost_stackexh", patch_audit_boost("Prevent stack exhaustion from deeply nested input"))
+print("T_boost_amplification", patch_audit_boost("Mitigate DoS amplification in resolver"))
 PY
 )
 
@@ -189,6 +192,9 @@ verify_ge T_boost_uninit 20
 verify_ge T_boost_crlf 20
 verify_ge T_boost_openredir 20
 verify_ge T_boost_typosquat 20
+verify_ge T_boost_rce 20
+verify_ge T_boost_stackexh 20
+verify_ge T_boost_amplification 20
 
 # ── T2-9: new reachability primitives ───────────────────────────────────
 py_out=$(python3 - <<'PY'
@@ -224,6 +230,65 @@ verify_ge B1 5
 verify_ge B2 4
 verify_ge B3 2
 verify_ge B4 5
+
+# ── Drift guard: patch_audit_boost vs the bin/severity class taxonomy ───
+# bin/severity.CVSS4_CLASS is the authoritative set of crash/vuln classes the
+# harness scores. Every such class a prior-fix COMMIT could name should earn a
+# patch_audit_boost so S1 ranks it; classes intentionally NOT boosted from
+# commit text are listed with a reason. A new CVSS4_CLASS key in neither map
+# fails this test — forcing a conscious decision instead of silent drift.
+drift_out=$(python3 - <<'PY'
+import sys, importlib.machinery, importlib.util
+sys.path.insert(0, "lib")
+import workqueue as wq
+loader = importlib.machinery.SourceFileLoader("sev", "bin/severity")
+sev = importlib.util.module_from_spec(importlib.util.spec_from_loader("sev", loader))
+loader.exec_module(sev)
+
+# class key -> a representative commit phrase that MUST boost
+COVERAGE = {
+    "uaf_write": "use-after-free write", "uaf_read": "use-after-free read",
+    "double_free": "double free", "wild_write": "wild pointer write",
+    "wild_read": "wild pointer read", "type_confusion": "type confusion",
+    "heap_write": "heap buffer overflow", "heap_read_big": "heap buffer over-read",
+    "heap_read_small": "out-of-bounds read", "stack_write": "stack buffer overflow",
+    "stack_read": "stack buffer over-read", "global_write": "global buffer overflow",
+    "global_read": "global buffer over-read", "data_race": "data race",
+    "info_leak": "uninitialized memory read", "null_deref": "null pointer dereference",
+    "stack_exhaustion": "stack exhaustion via deep recursion",
+    "integer_overflow": "integer overflow", "regex_dos": "ReDoS catastrophic backtracking",
+    "dos_amplification": "DoS amplification", "command_injection": "remote code execution",
+    "deserialization": "insecure deserialization", "ssti": "server-side template injection",
+    "sqli": "SQL injection", "authn_bypass": "authentication bypass",
+    "authz_bypass": "authorization bypass", "idor": "insecure direct object reference",
+    "path_traversal": "path traversal", "xxe": "XML external entity",
+    "secrets_exposure": "hard-coded credential leak", "ssrf": "server-side request forgery",
+    "prototype_pollution": "prototype pollution", "xss": "cross-site scripting",
+    "open_redirect": "open redirect", "csrf": "cross-site request forgery",
+    "crypto_weakness": "weak cryptography", "injection": "CRLF injection",
+}
+# class key -> why it is deliberately NOT boosted from commit prose
+BOOST_EXEMPT = {
+    "memory_leak": "leak fixes are high-volume maintenance noise; would drown real defects",
+    "oom": "OOM/resource-exhaustion fixes are high-volume and rarely security-relevant in prose",
+    "bus": "SIGBUS/unaligned is sanitizer-detected; the bare token would false-match ordinary words",
+    "protocol_state": "severity narrative fallback; concrete protocol bugs are boosted individually",
+    "logic_regression": "severity meta-class (defense-in-depth), not a class named in fix commits",
+}
+keys = set(sev.CVSS4_CLASS)
+overlap = set(COVERAGE) & set(BOOST_EXEMPT)
+unaccounted = keys - set(COVERAGE) - set(BOOST_EXEMPT)
+stray = (set(COVERAGE) | set(BOOST_EXEMPT)) - keys
+no_boost = sorted(k for k, p in COVERAGE.items() if wq.patch_audit_boost(p) == 0)
+if overlap:      print("DRIFT fail: keys in both COVERAGE and EXEMPT:", sorted(overlap))
+elif unaccounted:print("DRIFT fail: CVSS4_CLASS keys not covered or exempted:", sorted(unaccounted))
+elif stray:      print("DRIFT fail: map keys absent from CVSS4_CLASS:", sorted(stray))
+elif no_boost:   print("DRIFT fail: representative phrase did not boost:", no_boost)
+else:            print("DRIFT ok")
+PY
+)
+assert_eq "DRIFT ok" "$drift_out" \
+  "patch_audit_boost covers every bin/severity CVSS4_CLASS class (or explicitly exempts it)"
 
 # ── T1-5: slicer produces non-overlapping coverage ─────────────────────
 fake_target=$(mktemp -d)

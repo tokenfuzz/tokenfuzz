@@ -15,7 +15,12 @@ from workqueue import add_common_args, build_patch_cards, context_from_args, wri
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Build ranked S1 prior-fix patch cards")
     add_common_args(parser)
-    parser.add_argument("--limit", type=int, default=80)
+    # Emitted-card cap. 120 matches the audit's RANK_WORK_LIMIT (bin/audit passes
+    # it explicitly) and stays under rank-work's LLM rerank cap (--llm-top-n 160)
+    # so every emitted card gets reranked; the audit queue auto-expands beyond
+    # this on demand (RANK_WORK_EXPAND_STEP), so a larger batch here would only
+    # front-load rank/rerank cost without speeding up agent-bound throughput.
+    parser.add_argument("--limit", type=int, default=120)
     parser.add_argument("--inspect-commits", type=int, default=24,
                         help="Best-effort VCS file lookup for the top N "
                         "rows by pre-score (defect-keyword / severity / "
