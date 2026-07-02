@@ -49,6 +49,9 @@ Environment knobs (mirrors the prior bash contract exactly):
                                          before the breaker opens and skips
                                          re-issuing that decision (default 2,
                                          0 = disabled).
+  LLM_DECIDE_TYPE_FAIL_THRESHOLD=<n>     consecutive fast backend errors for a
+                                         decision type before that whole class
+                                         is paused (default 8, 0 = disabled).
   LLM_DECIDE_FAIL_COOLDOWN=<secs>        once tripped, how long a key stays
                                          skipped before one half-open retry is
                                          allowed (so a transiently unhealthy
@@ -325,6 +328,19 @@ def _fail_threshold() -> int:
         return 2
 
 
+def _type_fail_threshold() -> int:
+    """Consecutive fast-backend-error count that opens the per-DECISION-TYPE
+    breaker. Set higher than the per-prompt threshold: the type breaker
+    sidelines a whole decision class (every prompt of it), so it must be sure
+    the class — not one unlucky prompt — is the thing failing. A single success
+    re-arms it. Set to 0 to disable."""
+    raw = os.environ.get("LLM_DECIDE_TYPE_FAIL_THRESHOLD", "8")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 8
+
+
 # Backend-tiered cooldown defaults: oss retries pay an expensive (~180s)
 # usually-deterministic timeout, so they back off hard; cloud APIs fail
 # transiently and retry cheaply, so they recover fast. (The long tier is any
@@ -347,6 +363,12 @@ def _fail_cooldown() -> float:
 def _failcache_key(decision: str, prompt: str) -> str:
     digest = hashlib.sha1(prompt.encode("utf-8", "replace")).hexdigest()[:16]
     return f"{decision}:{digest}"
+
+
+def _type_key(decision: str) -> str:
+    # Distinct namespace from a per-prompt key ("{decision}:{sha1}") so the
+    # per-prompt and per-type breakers never collide in the failcache map.
+    return f"__type__:{decision}"
 
 
 def _entry(value) -> tuple[int, float]:
@@ -422,58 +444,103 @@ def _failcache_update(mutate, default):
             pass
 
 
-def _failcache_should_skip(decision: str, prompt: str) -> bool:
-    """True iff this exact (decision, prompt) should be skipped now.
+def _breaker_step(data, key: str, threshold: int, cooldown: float) -> "tuple[bool, bool]":
+    """Half-open breaker verdict for one failcache key. Returns (skip, dirty).
 
-    Atomically decides AND claims: a key past the threshold is skipped until
-    its cooldown elapses, after which exactly ONE caller is let through (the
-    half-open retry) by stamping the entry's timestamp to now under the lock;
-    concurrent callers then see a fresh window and skip. This is why the
-    decide and the claim must share one locked section — a read-only check
-    would let every concurrent caller retry at once.
+    A key at/above `threshold` failures is skipped until `cooldown` elapses
+    since its last failure, after which exactly ONE half-open retry is claimed
+    (its timestamp stamped to now → dirty=True) and let through; concurrent
+    callers then see a fresh window and skip. Below threshold — or threshold
+    <= 0 — never skips. Operates on the caller's already-locked `data` so the
+    per-prompt and per-type checks share one atomic read-decide-write.
     """
-    threshold = _fail_threshold()
     if threshold <= 0:
+        return False, False
+    count, last = _entry(data.get(key))
+    if count < threshold:
+        return False, False      # not tripped → don't skip, no write
+    if cooldown <= 0:
+        return True, False       # open for the whole session → skip
+    if not last or (time.time() - last) >= cooldown:
+        data[key] = [count, time.time()]
+        return False, True       # claim the single half-open retry
+    return True, False           # still cooling down → skip
+
+
+def _failcache_should_skip(decision: str, prompt: str) -> bool:
+    """True iff this decision call should be skipped now.
+
+    Two breakers share one locked read-decide-write. The per-PROMPT breaker
+    stops a repeat of the identical (decision, prompt) that keeps failing. The
+    per-TYPE breaker stops a whole decision class that is erroring FAST on this
+    backend right now (rate-limit / overload) — which the per-prompt breaker
+    never catches, because a storm is a stream of DIFFERENT prompts, each a
+    fresh key at count 0. Either tripping skips the call; the single locked
+    section keeps concurrent decide subprocesses from all claiming a half-open
+    retry at once.
+    """
+    prompt_threshold = _fail_threshold()
+    type_threshold = _type_fail_threshold()
+    if prompt_threshold <= 0 and type_threshold <= 0:
         return False
-    key = _failcache_key(decision, prompt)
+    pkey = _failcache_key(decision, prompt)
+    tkey = _type_key(decision)
     cooldown = _fail_cooldown()
 
     def mutate(data):
-        count, last = _entry(data.get(key))
-        if count < threshold:
-            return False, False  # not tripped → don't skip, no write
-        if cooldown <= 0:
-            return True, False   # open for the whole session → skip
-        if not last or (time.time() - last) >= cooldown:
-            # Claim the single half-open retry: stamp now so other concurrent
-            # callers see a fresh failure window and skip. Count is unchanged;
-            # _failcache_note records the retry's actual outcome.
-            data[key] = [count, time.time()]
-            return False, True   # let THIS caller through
-        return True, False       # still cooling down → skip
+        skip_p, dirty_p = _breaker_step(data, pkey, prompt_threshold, cooldown)
+        if skip_p:
+            return True, dirty_p
+        skip_t, dirty_t = _breaker_step(data, tkey, type_threshold, cooldown)
+        return skip_t, (dirty_p or dirty_t)
 
     return _failcache_update(mutate, default=False)
 
 
-def _failcache_note(decision: str, prompt: str, success: bool) -> None:
-    """Record one real-backend outcome: success clears the key, failure bumps it.
+def _failcache_note(decision: str, prompt: str, success: bool,
+                    backend_error: bool = False) -> None:
+    """Record one real-backend outcome.
 
-    A success when no key exists short-circuits without a rewrite — the
-    common path pays nothing.
+    success       → clears BOTH the per-prompt and per-type keys: the backend
+                    answered, so neither breaker should stay armed.
+    failure       → always bumps the per-prompt key (a repeated identical
+                    failure is worth short-circuiting). Bumps the per-type key
+                    ONLY when `backend_error` — a fast non-zero exit
+                    (rate-limit / overload). NOT a timeout (which means "needed
+                    more time", addressed by the decision-timeout floors, not by
+                    sidelining the class) and NOT a malformed-output parse
+                    failure (the backend answered fine; the model's output was
+                    bad for THIS prompt only). Keying the type breaker on fast
+                    backend errors is what stops it sidelining a gate that is
+                    merely slow.
+
+    A success (or a non-backend failure) that touches no existing key rewrites
+    nothing — the common path pays nothing.
     """
-    if _fail_threshold() <= 0:
+    prompt_threshold = _fail_threshold()
+    type_threshold = _type_fail_threshold()
+    if prompt_threshold <= 0 and type_threshold <= 0:
         return
-    key = _failcache_key(decision, prompt)
+    pkey = _failcache_key(decision, prompt)
+    tkey = _type_key(decision)
 
     def mutate(data):
+        dirty = False
         if success:
-            if key not in data:
-                return None, False
-            data.pop(key, None)
-            return None, True
-        count, _ = _entry(data.get(key))
-        data[key] = [count + 1, time.time()]
-        return None, True
+            for key in (pkey, tkey):
+                if key in data:
+                    data.pop(key, None)
+                    dirty = True
+            return None, dirty
+        if prompt_threshold > 0:
+            count, _ = _entry(data.get(pkey))
+            data[pkey] = [count + 1, time.time()]
+            dirty = True
+        if type_threshold > 0 and backend_error:
+            count, _ = _entry(data.get(tkey))
+            data[tkey] = [count + 1, time.time()]
+            dirty = True
+        return None, dirty
 
     _failcache_update(mutate, default=None)
 
@@ -884,20 +951,25 @@ def llm_decide(
     # consuming budget or paying another backend timeout. Mocks are
     # deterministic test fixtures and are never circuit-broken.
     if not mock_val and _failcache_should_skip(decision, prompt):
-        _llm_log(f"{decision} SKIP circuit-open threshold={_fail_threshold()}")
+        _llm_log(
+            f"{decision} SKIP circuit-open prompt_threshold={_fail_threshold()} "
+            f"type_threshold={_type_fail_threshold()}"
+        )
         return None
 
     if not budget_available():
         _llm_log(f"{decision} SKIP budget-exhausted max={_budget_cap()}")
         return None
 
-    result = _run_decision(decision, required_keys, prompt, timeout, mock_val)
+    result, backend_error = _run_decision(decision, required_keys, prompt, timeout, mock_val)
 
-    # Update the breaker on real-backend outcomes only: a failure arms it,
-    # a success clears the key. Mock outcomes are deterministic and must not
-    # arm or disarm the breaker.
+    # Update the breaker on real-backend outcomes only: a success clears the
+    # keys, a failure arms the per-prompt key, and a fast backend error
+    # (rate-limit / overload) additionally arms the per-type key. Mock outcomes
+    # are deterministic and must not arm or disarm the breaker.
     if not mock_val:
-        _failcache_note(decision, prompt, success=result is not None)
+        _failcache_note(decision, prompt, success=result is not None,
+                        backend_error=backend_error)
 
     return result
 
@@ -908,12 +980,17 @@ def _run_decision(
     prompt: str,
     timeout: int,
     mock_val: str,
-) -> Optional[dict | list]:
+) -> "tuple[Optional[dict | list], bool]":
     """Dispatch one decision (mock or real backend) and validate its JSON.
 
     The disable / empty-prompt / circuit-breaker / budget gates have already
     run in llm_decide(); this is the dispatch+extract+validate body. Returns
-    the parsed JSON or None on any failure.
+    (parsed_json_or_None, backend_error). `backend_error` is True only when the
+    backend RAN and exited non-zero (rate-limit / overload / crash) — the fast
+    storm signal the per-type breaker keys on. It is deliberately False for an
+    rc=124 timeout ("needed more time") and for malformed output (the backend
+    answered; the model's JSON was bad for this prompt), so neither sidelines a
+    whole decision class.
     """
     prompt_bytes = len(prompt.encode("utf-8", "replace"))
     t_start = time.time()
@@ -923,7 +1000,7 @@ def _run_decision(
         loaded = _load_mock(mock_val)
         if loaded is None:
             _llm_log(f"{decision} FAIL mock-missing {mock_val} bytes={prompt_bytes}")
-            return None
+            return None, False
         raw = loaded
         elapsed = int(time.time() - t_start)
         _llm_log(f"{decision} MOCK bytes={prompt_bytes} elapsed={elapsed}s")
@@ -937,46 +1014,58 @@ def _run_decision(
         backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
         if not backend:
             _llm_log(f"{decision} FAIL no-backend-set bytes={prompt_bytes}")
-            return None
+            return None, False
         if backend not in _KNOWN_BACKENDS:
             _llm_log(f"{decision} FAIL unknown-backend={backend} bytes={prompt_bytes}")
-            return None
+            return None, False
         try:
             raw = _invoke_backend(backend, prompt, timeout, decision, required_keys) or ""
         except FileNotFoundError as exc:
+            # Missing CLI binary — a permanent config error, not a transient
+            # backend storm. Don't arm the per-type breaker (backend_error=False):
+            # the per-prompt breaker still catches a repeated identical call.
             _llm_log(f"{decision} FAIL {exc} bytes={prompt_bytes}")
-            return None
+            return None, False
         except subprocess.TimeoutExpired:
+            # Timeout = "needed more time", not "backend is failing". Addressed
+            # by the decision-timeout floors, so it must NOT arm the per-type
+            # breaker or it would sideline a gate that is merely slow.
             elapsed = int(time.time() - t_start)
             _llm_log(
                 f"{decision} FAIL {backend}-rc=124 bytes={prompt_bytes} "
                 f"elapsed={elapsed}s timeout={timeout}s"
             )
-            return None
+            return None, False
         except subprocess.CalledProcessError as exc:
+            # The backend RAN and exited non-zero — rate-limit / overload /
+            # crash. This is the fast storm signal: backend_error=True so a
+            # run of these opens the per-type breaker.
             elapsed = int(time.time() - t_start)
             _llm_log(
                 f"{decision} FAIL {backend}-rc={exc.returncode} bytes={prompt_bytes} "
                 f"elapsed={elapsed}s timeout={timeout}s"
             )
-            return None
+            return None, True
 
     elapsed = int(time.time() - t_start)
 
+    # Beyond this point the backend answered; any failure is a content problem
+    # for THIS prompt (bad/empty/malformed JSON), not a failing decision class,
+    # so backend_error stays False — the per-type breaker must not arm.
     json_text = _extract_json(raw)
     if json_text is None:
         _llm_log(f"{decision} FAIL extract-json bytes={prompt_bytes} elapsed={elapsed}s")
-        return None
+        return None, False
     parsed = _try_load(json_text)
     if not _validate_required_keys(parsed, required_keys):
         _llm_log(f"{decision} FAIL missing-keys={required_keys} bytes={prompt_bytes} elapsed={elapsed}s")
-        return None
+        return None, False
     if not _validate_decision_shape(decision, parsed):
         _llm_log(f"{decision} FAIL invalid-shape bytes={prompt_bytes} elapsed={elapsed}s")
-        return None
+        return None, False
 
     _llm_log(f"{decision} OK bytes={prompt_bytes} elapsed={elapsed}s")
-    return parsed
+    return parsed, False
 
 
 # ── CLI dispatch (used by the bash shim) ────────────────────────────

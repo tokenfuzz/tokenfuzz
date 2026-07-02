@@ -716,5 +716,162 @@ fi
 unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
   LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD LLM_DECIDE_FAIL_COOLDOWN
 
+# 17h. Per-TYPE circuit breaker: a decision class that is erroring FAST (the
+#      backend runs and exits non-zero — rate-limit / overload) must be paused
+#      even though every request is a DIFFERENT prompt, which the per-prompt
+#      breaker can never catch (each is a fresh key at count 0). Per-prompt
+#      threshold is set out of reach (100) to isolate the type breaker.
+unset rc LLM_DECIDE_MOCK
+export ACTIVE_BACKEND=codex
+export CODEX_BIN="$fake_fail"                 # exit 1 → backend error
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-type.calls"
+: > "$FAKE_CB_CALLS"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-type"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-type"
+export LLM_DECIDE_FAIL_THRESHOLD=100          # per-prompt effectively off
+export LLM_DECIDE_TYPE_FAIL_THRESHOLD=2
+export LLM_DECIDE_FAIL_COOLDOWN=600
+echo "s1" | llm_decide demo "keep" 5 >/dev/null 2>&1 || true
+echo "s2" | llm_decide demo "keep" 5 >/dev/null 2>&1 || true   # type count hits 2
+echo "s3" | llm_decide demo "keep" 5 >/dev/null 2>&1 || true   # tripped → skipped
+assert_eq "2" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "type breaker: fast backend errors on different prompts open the class after threshold"
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD LLM_DECIDE_TYPE_FAIL_THRESHOLD \
+  LLM_DECIDE_FAIL_COOLDOWN
+
+# 17h2. Bash callers often set harness knobs as shell variables before calling
+#       llm_decide; the shim must force-export the type threshold just like the
+#       older failcache knobs. An unexported 0 disables the type breaker, so all
+#       nine different prompts reach the failing backend instead of tripping at
+#       the default threshold of 8.
+unset rc LLM_DECIDE_MOCK LLM_DECIDE_TYPE_FAIL_THRESHOLD
+export ACTIVE_BACKEND=codex
+export CODEX_BIN="$fake_fail"
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-type-disable.calls"
+: > "$FAKE_CB_CALLS"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-type-disable"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-type-disable"
+export LLM_DECIDE_FAIL_THRESHOLD=100
+LLM_DECIDE_TYPE_FAIL_THRESHOLD=0             # intentionally not exported
+export LLM_DECIDE_FAIL_COOLDOWN=600
+for p in d1 d2 d3 d4 d5 d6 d7 d8 d9; do
+  echo "$p" | llm_decide demo "keep" 5 >/dev/null 2>&1 || true
+done
+assert_eq "9" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "type breaker: unexported disable knob is forwarded by the bash shim"
+if grep -q '"__type__:demo"' "$LLM_DECIDE_FAILCACHE_FILE" 2>/dev/null; then
+  fail "type breaker: disabled type breaker must not create a type key"
+else
+  pass "type breaker: disabled type breaker leaves the type key unset"
+fi
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD LLM_DECIDE_TYPE_FAIL_THRESHOLD \
+  LLM_DECIDE_FAIL_COOLDOWN
+
+# 17i. The type breaker must NOT arm on malformed output: the backend answered
+#      (exit 0) but its JSON was unusable for THIS prompt. That is a per-prompt
+#      content problem, not a failing class, so different prompts keep flowing.
+fake_garbage="$TEST_TMPDIR/fake-codex-garbage"
+cat > "$fake_garbage" <<'EOF'
+#!/usr/bin/env bash
+echo call >> "$FAKE_CB_CALLS"
+cat >/dev/null
+printf 'not json at all\n'
+EOF
+chmod +x "$fake_garbage"
+unset rc LLM_DECIDE_MOCK
+export ACTIVE_BACKEND=codex
+export CODEX_BIN="$fake_garbage"
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-garbage.calls"
+: > "$FAKE_CB_CALLS"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-garbage"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-garbage"
+export LLM_DECIDE_FAIL_THRESHOLD=100
+export LLM_DECIDE_TYPE_FAIL_THRESHOLD=2
+export LLM_DECIDE_FAIL_COOLDOWN=600
+echo "g1" | llm_decide demo "keep" 5 >/dev/null 2>&1 || true
+echo "g2" | llm_decide demo "keep" 5 >/dev/null 2>&1 || true
+echo "g3" | llm_decide demo "keep" 5 >/dev/null 2>&1 || true
+assert_eq "3" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "type breaker: malformed output does not open the class (backend still answered)"
+if grep -q '"__type__:demo"' "$LLM_DECIDE_FAILCACHE_FILE" 2>/dev/null; then
+  fail "type breaker: malformed output must not create a type key"
+else
+  pass "type breaker: malformed output leaves the type key unset"
+fi
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD LLM_DECIDE_TYPE_FAIL_THRESHOLD \
+  LLM_DECIDE_FAIL_COOLDOWN
+
+# 17j. The type breaker must NOT arm on a timeout (rc=124). A timeout means
+#      "needed more time" — handled by the decision-timeout floors — not "the
+#      backend is failing". Arming here would sideline a gate that is merely
+#      slow (the cluster_expand trap). The fake sleeps past the 1s cap.
+fake_slow="$TEST_TMPDIR/fake-codex-slow"
+cat > "$fake_slow" <<'EOF'
+#!/usr/bin/env bash
+echo call >> "$FAKE_CB_CALLS"
+cat >/dev/null
+sleep 3
+printf '{"keep":true}\n'
+EOF
+chmod +x "$fake_slow"
+unset rc LLM_DECIDE_MOCK
+export ACTIVE_BACKEND=codex
+export CODEX_BIN="$fake_slow"
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-slow.calls"
+: > "$FAKE_CB_CALLS"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-slow"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-slow"
+export LLM_DECIDE_FAIL_THRESHOLD=100
+export LLM_DECIDE_TYPE_FAIL_THRESHOLD=2
+export LLM_DECIDE_FAIL_COOLDOWN=600
+echo "t1" | llm_decide demo "keep" 1 >/dev/null 2>&1 || true   # timeout at 1s
+echo "t2" | llm_decide demo "keep" 1 >/dev/null 2>&1 || true
+echo "t3" | llm_decide demo "keep" 1 >/dev/null 2>&1 || true
+assert_eq "3" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "type breaker: timeouts do not open the class (slow != failing)"
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD LLM_DECIDE_TYPE_FAIL_THRESHOLD \
+  LLM_DECIDE_FAIL_COOLDOWN
+
+# 17k. Half-open + self-heal for the type key: a tripped class is skipped within
+#      cooldown, then one probe reaches the backend after cooldown; a success
+#      clears the type key so the class resumes normally.
+unset rc LLM_DECIDE_MOCK
+type_key="__type__:demo"
+export ACTIVE_BACKEND=codex
+export FAKE_CB_CALLS="$TEST_TMPDIR/fake-typeheal.calls"
+: > "$FAKE_CB_CALLS"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-typeheal"
+export LLM_DECIDE_FAILCACHE_FILE="$TEST_TMPDIR/llm-failcache-typeheal"
+export LLM_DECIDE_FAIL_THRESHOLD=100
+export LLM_DECIDE_TYPE_FAIL_THRESHOLD=2
+export LLM_DECIDE_FAIL_COOLDOWN=600
+# Fresh tripped type key (ts=now) → class paused within cooldown.
+export CODEX_BIN="$fake_ok"
+now=$(date +%s)
+printf '{"%s":[3,%s]}' "$type_key" "$now" > "$LLM_DECIDE_FAILCACHE_FILE"
+unset rc
+out=$(echo "z1" | llm_decide demo "keep,reason" 5 2>/dev/null) || rc=$?
+assert_eq "1" "${rc:-0}" "type breaker: tripped class within cooldown is skipped"
+assert_eq "0" "$(wc -l < "$FAKE_CB_CALLS" | tr -d ' ')" \
+  "type breaker: paused class does not reach the backend"
+# Ancient ts → cooldown elapsed → one half-open probe reaches the backend,
+# succeeds, and clears the class.
+printf '{"%s":[3,1.0]}' "$type_key" > "$LLM_DECIDE_FAILCACHE_FILE"
+unset rc
+out=$(echo "z2" | llm_decide demo "keep,reason" 5 2>/dev/null) || rc=$?
+assert_eq "0" "${rc:-0}" "type breaker: half-open probe after cooldown succeeds"
+if grep -q "\"$type_key\"" "$LLM_DECIDE_FAILCACHE_FILE" 2>/dev/null; then
+  fail "type breaker: a successful probe did not clear the class"
+else
+  pass "type breaker: a successful probe cleared the class (self-heal)"
+fi
+unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
+  LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD LLM_DECIDE_TYPE_FAIL_THRESHOLD \
+  LLM_DECIDE_FAIL_COOLDOWN
+
 teardown_test_env
 summary
