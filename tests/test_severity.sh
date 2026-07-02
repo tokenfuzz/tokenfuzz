@@ -964,6 +964,151 @@ else
   pass "--harness-rooted-check exits non-zero (keep) for a library faulting frame"
 fi
 
+# CLI target whose bug lives in (or is inlined into) `main`: the fault leaf is
+# `main <target>.c` with no other frame. `main` is the shipped tool's own entry,
+# NOT the audit driver (which is named harness.c / *_harness.c), so this is a
+# real target bug and must keep its shipping surface — not be zeroed to internal.
+# Regression: a hard-coded `main`-is-harness rule mis-tiered this to internal,
+# floored its impacts (MVC:N/MVI:N/MVA:N) and scored it None.
+dir=$(make_crash "demo_cli_main" CRASH-CLI-MAIN \
+  "stack-buffer-overflow WRITE of size 1" "cli — shipped CLI tool" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+{
+  echo '```'
+  echo '==1==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x16d000058'
+  echo '    #2 0x104 in main main.c:28'
+  echo '```'
+} >> "$dir/report.md"
+_CURRENT_TEST="CLI-target bug in main (only frame) → NOT harness-rooted, stays shipping"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "cli_production" "$surface" "a CLI target's own main is target code, not the audit driver"
+assert_neq "0.0" "$score" "a confirmed CLI stack overflow is not zeroed to None"
+_CURRENT_TEST="flag: --harness-rooted-check exits non-zero (keep) for a CLI-main crash"
+if "$REACH" --report "$dir" --harness-rooted-check >/dev/null 2>&1; then
+  fail "--harness-rooted-check on CLI-main crash" "wrongly zeroed a real CLI target bug"
+else
+  pass "--harness-rooted-check exits non-zero (keep) for a CLI target's own main"
+fi
+
+# Target-owned `main` in a CONTEXT stack: the leaf is the harness, but the
+# freed/allocated-by stack faults in the shipped tool's own `main <target>.c`.
+# That target frame must count — a UAF whose freed memory is target-owned is a
+# real bug, not harness-rooted. Regression: is_ignored_frame's `^main` dedup
+# rule dropped the context `main` frame, so the report zeroed to internal.
+dir=$(make_crash "demo_ctx_main" CRASH-CTX-MAIN \
+  "heap-use-after-free WRITE of size 8" "cli — shipped CLI tool" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+{
+  echo '```'
+  echo '==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60d000000058'
+  echo '    #0 0x100 in main harness.c:84'
+  echo 'freed by thread T0 here:'
+  echo '    #1 0x188 in main main.c:40'
+  echo '```'
+} >> "$dir/report.md"
+_CURRENT_TEST="target main in freed-by context → NOT harness-rooted"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_neq "internal" "$surface" "a target-owned main frame in the context stack keeps shipping scoring"
+
+# A sanitizer/runtime frame in a context stack is NOT target source: on Linux
+# ASan symbolizes it WITH a real source path (`free` in compiler-rt), so a bare
+# location check would count it as library and wrongly keep a harness-only crash.
+# It is excluded by PATH (_SYSTEM_SOURCE_RE), not by function name → harness-rooted.
+dir=$(make_crash "demo_runtime_ctx" CRASH-RUNTIME-CTX \
+  "heap-use-after-free READ of size 8" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+{
+  echo '```'
+  echo '==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60d000000058'
+  echo '    #0 0x100 in main lib_fuzz_harness.c:84'
+  echo 'freed by thread T0 here:'
+  echo '    #1 0x188 in free /src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:52:3'
+  echo '    #2 0x190 in main lib_fuzz_harness.c:70'
+  echo '```'
+} >> "$dir/report.md"
+_CURRENT_TEST="Linux runtime frame in context is not target source → harness-rooted"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "internal" "$surface" "a compiler-rt runtime frame is not counted as target library"
+
+# A target can itself be glibc/compiler-rt/libc++; shared severity code must not
+# hard-code those path segments as non-target when the frame is under the active
+# TARGET_ROOT. The same stack shape as above is kept because the context frame is
+# target-owned, not sanitizer runtime boilerplate.
+target_root="$TEST_TMPDIR/targets/glibc"
+mkdir -p "$target_root"
+mkdir -p "$TEST_TMPDIR/output/rootmatch/backend/results"
+cat > "$TEST_TMPDIR/output/rootmatch/backend/results/.session-env" <<EOF
+TARGET_ROOT=$target_root
+TARGET_SLUG=rootmatch
+RESULTS_DIR=$TEST_TMPDIR/output/rootmatch/backend/results
+EOF
+dir=$(make_crash "demo_target_named_glibc" CRASH-TARGET-NAMED-GLIBC \
+  "heap-use-after-free READ of size 8" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+{
+  echo '```'
+  echo '==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60d000000058'
+  echo '    #0 0x100 in main lib_fuzz_harness.c:84'
+  echo 'freed by thread T0 here:'
+  echo "    #1 0x188 in app_release ${target_root}/malloc/malloc.c:40"
+  echo '```'
+} >> "$dir/report.md"
+_CURRENT_TEST="target-root glibc path in context is target source → kept"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_neq "internal" "$surface" "a target checked out under glibc is not dropped as runtime"
+_CURRENT_TEST="flag: target-root glibc context exits non-zero (keep)"
+if "$REACH" --report "$dir" --harness-rooted-check >/dev/null 2>&1; then
+  fail "--harness-rooted-check on target-root glibc context" "wrongly zeroed a target-owned runtime-named path"
+else
+  pass "--harness-rooted-check exits non-zero (keep) for target-root glibc context"
+fi
+
+# Conversely, an installed C++ standard-library header in the context stack is
+# still external runtime/stdlib code. Counting it as target source would inflate
+# a harness-only report into a shipped library crash.
+dir=$(make_crash "demo_libstdcxx_ctx" CRASH-LIBSTDCXX-CTX \
+  "heap-use-after-free READ of size 8" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+{
+  echo '```'
+  echo '==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60d000000058'
+  echo '    #0 0x100 in main lib_fuzz_harness.c:84'
+  echo 'freed by thread T0 here:'
+  echo '    #1 0x188 in std::vector<int>::~vector() /usr/include/c++/12/bits/stl_vector.h:735:7'
+  echo '    #2 0x190 in main lib_fuzz_harness.c:70'
+  echo '```'
+} >> "$dir/report.md"
+_CURRENT_TEST="external libstdc++ header in context is not target source → harness-rooted"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "internal" "$surface" "an installed libstdc++ header is not counted as target library"
+
+# A REAL target frame whose function name merely shares an ignored crash-state
+# prefix (`free_node` vs `^free`, `operator delete` vs `^operator`) must still
+# count as target. Ownership is judged by path, not name — else a harness-leaf
+# UAF freed inside `free_node src/tree.c` would be wrongly zeroed to internal.
+dir=$(make_crash "demo_prefix_target" CRASH-PREFIX-TARGET \
+  "heap-use-after-free READ of size 8" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+{
+  echo '```'
+  echo '==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x60d000000058'
+  echo '    #0 0x100 in main lib_fuzz_harness.c:84'
+  echo 'freed by thread T0 here:'
+  echo '    #1 0x188 in free_node src/tree.c:40'
+  echo '```'
+} >> "$dir/report.md"
+_CURRENT_TEST="target free_node src/tree.c (^free prefix) is target, not runtime → kept"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_neq "internal" "$surface" "a target function sharing an ignore-rule prefix is not dropped as runtime"
+
+# libFuzzer's entrypoint symbolized WITH its parameter list is still the harness:
+# match the normalized state_function, not the raw `func(args)` spelling.
+dir=$(make_crash "demo_libfuzzer_args" CRASH-LIBFUZZER-ARGS \
+  "heap-buffer-overflow READ of size 1" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+{
+  echo '```'
+  echo '==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000058'
+  echo '    #0 0x100 in LLVMFuzzerTestOneInput(unsigned char const*, unsigned long) FuzzerMain.cpp:20'
+  echo '```'
+} >> "$dir/report.md"
+_CURRENT_TEST="LLVMFuzzerTestOneInput with param list → harness-rooted"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "internal" "$surface" "libFuzzer entrypoint matches on the normalized name despite its argument list"
+
 # XSS sets subsequent-system impact (SC:L/SI:L).
 dir=$(make_crash "demo_xss_sub" CRASH-XSS-SUB \
   "stored XSS in profile bio rendered without escape" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")

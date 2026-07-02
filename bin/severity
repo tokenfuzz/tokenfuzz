@@ -1741,7 +1741,9 @@ def compute_severity(report_text: str,
     # internal audit surface (non-shipping → modified impacts:N), which floors
     # the impact instead of crediting it as a library-popular AV:N crash. Only
     # overrides a shipping surface; an already-internal/dev tier is unchanged.
-    if surface_label not in NON_SHIPPING_SURFACES and _crash_is_harness_rooted(report_text):
+    target_root = _target_root_for_report(report_dir)
+    if (surface_label not in NON_SHIPPING_SURFACES
+            and _crash_is_harness_rooted(report_text, target_root=target_root)):
         surface_label = "internal"
         surface_reason = ("crash faults in the audit harness/driver with no target-library "
                           "frame anywhere in the report — harness-rooted, not a target bug")
@@ -1817,34 +1819,87 @@ def compute_severity(report_text: str,
 SEV_HEADING = "## Severity rationale"
 
 
-# Driver/entry functions that mark a harness frame rather than target code.
-_HARNESS_DRIVER_FUNCS = frozenset({"main", "llvmfuzzertestoneinput"})
+# libFuzzer's fixed entrypoint marks a harness frame by name; no shipped target
+# defines it. `main` is deliberately NOT here — it is equally a shipped CLI
+# target's own entry, so a `main <target>.c` fault is real target code. A driver
+# `main` is recognised by its file instead (`harness.c` / `*_harness.c`).
+_HARNESS_DRIVER_FUNCS = frozenset({"llvmfuzzertestoneinput"})
 # A source file whose name marks it as the audit harness/driver (agents write
 # `*_harness.c` / `harness.c`), not the target library under audit.
 _HARNESS_FILE_RE = re.compile(r"(?:^|[\\/_-])harness[\w-]*\.[ch]\w*\b", re.IGNORECASE)
 # A `file.ext:line` location (real source) vs a bare module offset such as
 # `(dyld:arm64e+0x..)`, which is a system/runtime frame, not target source.
-_SOURCE_LOC_RE = re.compile(r"[\w.+-]+\.\w+:\d+")
+_SOURCE_LOC_RE = re.compile(r"^(?P<path>.+\.\w+):\d+(?::\d+)?$")
+
+
+def _target_root_for_report(report_dir: Path | None) -> str:
+    """Absolute TARGET_ROOT from the report's existing harness session metadata."""
+    if report_dir is None:
+        return ""
+    try:
+        session_dir = tc.find_session_dir(report_dir)
+        if session_dir is None:
+            return ""
+        root = tc.read_session_env(session_dir).get("TARGET_ROOT", "").strip()
+        return str(Path(root).expanduser().resolve(strict=False)) if root else ""
+    except Exception:
+        return ""
+
+
+def _frame_source_path(frame: stack_frames.StackFrame) -> str:
+    match = _SOURCE_LOC_RE.match(frame.location or "")
+    return match.group("path") if match else ""
+
+
+def _path_is_under_root(path: str, root: str) -> bool:
+    if not path.startswith("/") or not root:
+        return False
+    try:
+        frame_path = Path(path).expanduser().resolve(strict=False)
+        target_root = Path(root).expanduser().resolve(strict=False)
+    except OSError:
+        return False
+    return frame_path == target_root or target_root in frame_path.parents
 
 
 def _frame_is_harness_driver(frame: stack_frames.StackFrame) -> bool:
-    """A fault frame that belongs to the audit harness/driver, not the target."""
-    if (frame.function or "").strip().lower() in _HARNESS_DRIVER_FUNCS:
+    """A fault frame that belongs to the audit harness/driver, not the target.
+
+    Recognised by libFuzzer's fixed entrypoint — compared on the normalized
+    ``state_function`` so a symbolized ``LLVMFuzzerTestOneInput(unsigned char
+    const*, unsigned long)`` still matches — or by the harness file-name
+    convention (`harness.c` / `*_harness.c`). `main` alone is NOT a driver
+    signal; a shipped CLI's own `main` is target code."""
+    if (frame.state_function or "").strip().lower() in _HARNESS_DRIVER_FUNCS:
         return True
     return bool(_HARNESS_FILE_RE.search(frame.location or ""))
 
 
-def _frame_is_target_source(frame: stack_frames.StackFrame) -> bool:
-    """A fault frame in real source that is neither the harness nor a
-    system/runtime frame — i.e. the target library (or a dependency)."""
-    if stack_frames.is_ignored_frame(frame):
-        return False
+def _frame_is_target_source(frame: stack_frames.StackFrame, target_root: str = "") -> bool:
+    """A fault frame in real target source — not the harness, not a system frame.
+
+    Target = a real ``file.ext:line`` location owned by the audit target:
+    target-relative paths count, and absolute paths count only when they sit
+    under the active ``TARGET_ROOT`` from ``.session-env``. This avoids
+    open-ended Linux/macOS runtime path deny-lists. We do NOT gate on
+    ``stack_frames.is_ignored_frame``: its ClusterFuzz rules trim crash-STATE
+    dedup boilerplate by function NAME (``^main`` / ``^free`` / ``^operator`` …)
+    and would drop real target frames whose symbols share those prefixes
+    (``main``, ``free_node``, ``operator delete``). System frames are excluded by
+    ownership instead: absolute source paths outside the target root are not
+    target frames. Module/offset frames carry no ``file.ext:line`` and are
+    excluded by ``_SOURCE_LOC_RE``."""
     if _frame_is_harness_driver(frame):
         return False
-    return bool(_SOURCE_LOC_RE.search(frame.location or ""))
+    source_path = _frame_source_path(frame)
+    if not source_path:
+        return False
+    if not source_path.startswith("/"):
+        return True
+    return _path_is_under_root(source_path, target_root)
 
 
-def _crash_is_harness_rooted(report_text: str) -> bool:
+def _crash_is_harness_rooted(report_text: str, target_root: str = "") -> bool:
     """True when the crash faults in the audit harness/driver itself and the
     target library is absent from the ENTIRE sanitizer report.
 
@@ -1883,7 +1938,7 @@ def _crash_is_harness_rooted(report_text: str) -> bool:
         return False
     for line in (report_text or "").splitlines():
         frame = stack_frames.parse_asan_frame(line)
-        if frame is not None and _frame_is_target_source(frame):
+        if frame is not None and _frame_is_target_source(frame, target_root=target_root):
             return False
     return True
 
@@ -2433,7 +2488,10 @@ def main(argv: list[str] | None = None) -> int:
                 texts.append(p.read_text("utf-8", errors="replace"))
         for p in sorted(report_dir.glob("*.asan.txt")):
             texts.append(p.read_text("utf-8", errors="replace"))
-        rooted = _crash_is_harness_rooted("\n".join(texts))
+        rooted = _crash_is_harness_rooted(
+            "\n".join(texts),
+            target_root=_target_root_for_report(report_dir),
+        )
         print("1" if rooted else "0")
         return 0 if rooted else 1
 
