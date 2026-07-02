@@ -461,6 +461,53 @@ rej_idx_html=$(cat "$rej_idx/REJECTED-CRASHES.html")
 assert_match 'href="CRASH-REJECTED-0001/REPORT\.html"' "$rej_idx_html" \
   "T28k: rendered REJECTED-CRASHES.html href points to the report's HTML sibling"
 
+# Cluster pages must link to the same semantic rejected-summary artifact in
+# both layouts. INDEX.* remains a compatibility alias, but new browser links
+# should not depend on the generic directory-index filename.
+cluster_links="$work/rejected-cluster-links"
+mkdir -p "$cluster_links/results/crashes" \
+         "$cluster_links/results/crashes-rejected" \
+         "$cluster_links/results/findings" \
+         "$cluster_links/results/findings-rejected" \
+         "$cluster_links/pool/harness/crashes" \
+         "$cluster_links/pool/harness/crashes-rejected" \
+         "$cluster_links/pool/harness/findings" \
+         "$cluster_links/pool/harness/findings-rejected"
+echo '# Rejected crash index' > "$cluster_links/results/crashes-rejected/INDEX.md"
+echo '# Rejected crash index' \
+  > "$cluster_links/results/crashes-rejected/REJECTED-CRASHES.md"
+echo '# Rejected finding index' > "$cluster_links/results/findings-rejected/INDEX.md"
+echo '# Rejected finding index' \
+  > "$cluster_links/results/findings-rejected/REJECTED-FINDINGS.md"
+echo '# Rejected crash pool summary' \
+  > "$cluster_links/pool/harness/crashes-rejected/REJECTED-CRASHES.md"
+echo '# Rejected crash pool summary' \
+  > "$cluster_links/pool/harness/crashes-rejected/INDEX.md"
+echo '# Rejected finding pool summary' \
+  > "$cluster_links/pool/harness/findings-rejected/REJECTED-FINDINGS.md"
+echo '# Rejected finding pool summary' \
+  > "$cluster_links/pool/harness/findings-rejected/INDEX.md"
+python3 "$SCRIPT_ROOT/bin/cluster-crashes" "$cluster_links/results" >/dev/null
+python3 "$SCRIPT_ROOT/bin/cluster-findings" "$cluster_links/results" >/dev/null
+python3 "$SCRIPT_ROOT/bin/cluster-crashes" "$cluster_links/pool/harness" >/dev/null
+python3 "$SCRIPT_ROOT/bin/cluster-findings" "$cluster_links/pool/harness" >/dev/null
+regular_crash_html=$(cat "$cluster_links/results/crashes/CRASH-CLUSTERS.html")
+regular_finding_html=$(cat "$cluster_links/results/findings/FINDING-CLUSTERS.html")
+pool_crash_html=$(cat "$cluster_links/pool/harness/crashes/CRASH-CLUSTERS.html")
+pool_finding_html=$(cat "$cluster_links/pool/harness/findings/FINDING-CLUSTERS.html")
+assert_match 'href="../crashes-rejected/REJECTED-CRASHES\.html"' "$regular_crash_html" \
+  "T28r: regular crash clusters link to REJECTED-CRASHES.html"
+assert_match 'href="../findings-rejected/REJECTED-FINDINGS\.html"' "$regular_finding_html" \
+  "T28s: regular finding clusters link to REJECTED-FINDINGS.html"
+assert_match 'href="../crashes-rejected/REJECTED-CRASHES\.html"' "$pool_crash_html" \
+  "T28t: benchmark crash clusters link to REJECTED-CRASHES.html"
+assert_match 'href="../findings-rejected/REJECTED-FINDINGS\.html"' "$pool_finding_html" \
+  "T28u: benchmark finding clusters link to REJECTED-FINDINGS.html"
+assert_not_match 'href="../crashes-rejected/INDEX\.html"' "$pool_crash_html" \
+  "T28v: benchmark crash clusters do not use generic INDEX.html as canonical"
+assert_not_match 'href="../findings-rejected/INDEX\.html"' "$pool_finding_html" \
+  "T28w: benchmark finding clusters do not use generic INDEX.html as canonical"
+
 # ═══════════════════════════════════════════════════════════════
 # P6: cell.json records actual_agents vs requested_agents
 # ═══════════════════════════════════════════════════════════════

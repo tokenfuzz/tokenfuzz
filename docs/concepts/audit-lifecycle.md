@@ -203,7 +203,7 @@ What happens to each artifact:
 - Borderline rejections sit in `crashes-needs-review/` for one more
   pass before final demotion.
 - Hard rejections move to `crashes-rejected/` with a reason rendered in
-  `INDEX.html`.
+  `REJECTED-CRASHES.html`.
 - Runtime-diagnostic crashes from findings-only targets are demoted
   to `findings/` rather than promoted as sanitizer crashes.
 - Findings with no report get a `.needs-content` marker and surface
@@ -252,7 +252,7 @@ output/<target>/CRASH-CLUSTERS.html
 output/<target>/FINDING-CLUSTERS.html
 output/<target>/<backend>/results/crashes/
 output/<target>/<backend>/results/findings/
-output/<target>/<backend>/results/crashes-rejected/INDEX.html
+output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
 ```
 
 See [Artifact layout](../reference/artifacts.md) and

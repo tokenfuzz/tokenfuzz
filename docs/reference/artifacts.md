@@ -18,7 +18,7 @@ Open the generated HTML pages first:
 ```text
 $RESULTS/crashes/CRASH-CLUSTERS.html
 $RESULTS/findings/FINDING-CLUSTERS.html
-$RESULTS/crashes-rejected/INDEX.html
+$RESULTS/crashes-rejected/REJECTED-CRASHES.html
 $RESULTS/crashes/CRASH-*/REPORT.html   # report.html before export-repro runs
 $RESULTS/findings/FIND-*/report.html
 ```
@@ -84,7 +84,7 @@ The paths an operator inspects after a run:
 | Path | Purpose |
 | --- | --- |
 | `crashes/` | Accepted or pending crash artifacts. |
-| `crashes-rejected/` | Rejected crash artifacts and `INDEX.html` / `INDEX.md`. |
+| `crashes-rejected/` | Rejected crash artifacts and `REJECTED-CRASHES.html` / `REJECTED-CRASHES.md`. |
 | `findings/` | All security findings — any class, with or without a reproducer. See note below. |
 | `findings-rejected/` | FIND directories rejected by the LLM substance gate at quorum. |
 | `recon/` | One `RECON-*` directory per breadth-first recon candidate — an **unverified** raw claim. Holds `finding.json`, `validator-vote-*.json`, and a human-readable `REPORT.md`/`REPORT.html`. A sibling of `findings/`, not part of it. |
@@ -252,7 +252,7 @@ For normal audit progress, prefer the generated HTML:
 
 - `crashes/CRASH-CLUSTERS.html`;
 - `findings/FINDING-CLUSTERS.html`;
-- `crashes-rejected/INDEX.html`;
+- `crashes-rejected/REJECTED-CRASHES.html`;
 - per-result `REPORT.html` / `report.html`.
 
 For debugging a run, start with `logs/README.md`, then `index.log`.

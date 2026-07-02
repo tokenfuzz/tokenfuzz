@@ -3555,8 +3555,9 @@ _ensure_find_quality_coverage() {
 
 # ─── Rejection-index cell helpers ─────────────────────────────────
 # These render the shared ID | Site | Reason | Report rejection ledger
-# (crashes-rejected/INDEX.md + findings-rejected/INDEX.md). lib/benchmark.py
-# carries python equivalents for the benchmark pool; keep the two in sync.
+# (REJECTED-CRASHES.md / REJECTED-FINDINGS.md, plus INDEX.md compatibility
+# aliases). lib/benchmark.py carries python equivalents for the benchmark pool;
+# keep the two in sync.
 
 # Flatten one cell to a single markdown-table-safe line: collapse
 # whitespace and escape pipes. Reasons are kept in full — rejected pages
@@ -3663,9 +3664,9 @@ _maintain_crash_cluster_sig() {
   local d f out=""
   out="tool=${_cluster_statkey:-}"$'\n'
   out="${out}env=${CLUSTER_LCS_THRESHOLD:-}|${CLUSTER_FUZZY_MATCH:-}|${CLUSTER_FUZZY_THRESHOLD:-}"$'\n'
-  # The "rejected crashes index" footer is now UNCONDITIONAL in cluster-crashes,
-  # so CRASH-CLUSTERS.md no longer depends on whether crashes-rejected/INDEX.md
-  # exists — no rejected-index term is needed in this skip key.
+  # The "rejected crashes index" footer is unconditional in cluster-crashes, so
+  # CRASH-CLUSTERS.md no longer depends on whether the rejected summary exists —
+  # no rejected-index term is needed in this skip key.
   for d in "$RESULTS_DIR"/crashes/CRASH-*/ "$RESULTS_DIR"/crashes-rejected/CRASH-*/; do
     [ -d "$d" ] || continue
     d="${d%/}"; out="${out}${d##*/}|"
@@ -3681,12 +3682,13 @@ _maintain_crash_cluster_sig() {
   printf '%s' "$out"
 }
 
-# Build crashes-rejected/INDEX.md and findings-rejected/INDEX.md. Both share one
-# schema — ID | Site | Reason | Report — so the two pages, plus the benchmark
-# pool equivalents in lib/benchmark.py, read identically. ID stays plain text
-# (rejected dirs are not meant to be re-opened); Report is a Link to the
-# rendered per-dir report (render-md rewrites the .md target to its .html
-# sibling).
+# Build rejected summary pages. The named REJECTED-*.md reports are the
+# canonical browser targets; INDEX.md is kept as a compatibility alias for
+# older prompts/docs and direct links. Both share one schema — ID | Site |
+# Reason | Report — so live audit pages and benchmark pool equivalents read
+# identically. ID stays plain text (rejected dirs are not meant to be re-opened);
+# Report is a Link to the rendered per-dir report (render-md rewrites the .md
+# target to its .html sibling).
 #
 # Both pages are ALWAYS written, even when empty (just the header row). The
 # cluster tables link to them unconditionally, so an always-present page means
@@ -3697,7 +3699,8 @@ _maintain_crash_cluster_sig() {
 # so the cost is bounded and the output is always current.
 _maintain_rejected_index_one() {
   local parent="$1" prefix="$2" kind="$3" title="$4"
-  local idx="$parent/INDEX.md"
+  local report_name="$5"
+  local idx="$parent/$report_name"
   local d id site reason link
   mkdir -p "$parent" 2>/dev/null || true
   {
@@ -3719,15 +3722,18 @@ _maintain_rejected_index_one() {
       printf '| `%s` | %s | %s | %s |\n' "$id" "${site:-—}" "${reason:-—}" "$link"
     done
   } > "$idx" 2>/dev/null || true
+  cp "$idx" "$parent/INDEX.md" 2>/dev/null || true
   # Drop the now-unused skip-cache sidecar from older versions.
   rm -f "$parent/.index-sig" 2>/dev/null || true
 }
 
 _maintain_rejected_indexes() {
   _maintain_rejected_index_one "$RESULTS_DIR/crashes-rejected" "CRASH-" crash \
-    "Rejected crashes — non-finding classes (DO NOT RE-FILE)"
+    "Rejected crashes — non-finding classes (DO NOT RE-FILE)" \
+    "REJECTED-CRASHES.md"
   _maintain_rejected_index_one "$RESULTS_DIR/findings-rejected" "FIND-" find \
-    "Rejected findings — non-actionable (DO NOT RE-FILE)"
+    "Rejected findings — non-actionable (DO NOT RE-FILE)" \
+    "REJECTED-FINDINGS.md"
 }
 
 maintain_indexes() {
@@ -3947,8 +3953,10 @@ maintain_indexes() {
       local -a _summary_md=()
       for _f in \
         "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" \
+        "$RESULTS_DIR/crashes-rejected/REJECTED-CRASHES.md" \
         "$RESULTS_DIR/crashes-rejected/INDEX.md" \
         "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" \
+        "$RESULTS_DIR/findings-rejected/REJECTED-FINDINGS.md" \
         "$RESULTS_DIR/findings-rejected/INDEX.md"; do
         [ -s "$_f" ] && _summary_md+=("$_f")
       done

@@ -6839,7 +6839,8 @@ run_agent() {
 # Produces human-browsable cluster summaries plus the rejected-crash index:
 #   - crashes/CRASH-CLUSTERS.md   → accepted/pending crash candidates
 #   - findings/FINDING-CLUSTERS.md → curated confirmed security findings
-#   - crashes-rejected/INDEX.md   → auto-rejected crash classes; this is the
+#   - crashes-rejected/REJECTED-CRASHES.md
+#                                 → auto-rejected crash classes; this is the
 #                                   "don't re-file" list agents should grep
 #                                   before promoting a new crash.
 # Each is regenerated from on-disk state; safe to delete and recreate.

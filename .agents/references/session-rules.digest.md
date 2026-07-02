@@ -223,7 +223,7 @@ mechanics: `.agents/references/session-rules.md`.
 
 ## Pre-file checks
 
-- Before `crashes/CRASH-*/`: check `crashes-rejected/INDEX.md`.
+- Before `crashes/CRASH-*/`: check `crashes-rejected/REJECTED-CRASHES.md`.
 - Before `findings/FIND-*/`: confirm security (above), scan
   `findings/FINDING-CLUSTERS.md` for existing FINDs on same location
   (Status `NEEDS CONTENT` means fix in place, don't open a duplicate).

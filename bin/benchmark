@@ -2081,7 +2081,11 @@ rebuild_pool_artifacts() {
         _s=$((_s + 400))
       done
       local -a _rejidx=()
-      for rej in "$POOL"/findings-rejected/REJECTED-FINDINGS.md \
+      for rej in "$POOL"/findings-rejected/INDEX.md \
+                 "$POOL"/*/findings-rejected/INDEX.md \
+                 "$POOL"/crashes-rejected/INDEX.md \
+                 "$POOL"/*/crashes-rejected/INDEX.md \
+                 "$POOL"/findings-rejected/REJECTED-FINDINGS.md \
                  "$POOL"/*/findings-rejected/REJECTED-FINDINGS.md \
                  "$POOL"/crashes-rejected/REJECTED-CRASHES.md \
                  "$POOL"/*/crashes-rejected/REJECTED-CRASHES.md; do

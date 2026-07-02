@@ -3,7 +3,7 @@
 
 - **BLOCKLISTED:** {{ blocklist_text }}. Do NOT audit blocklisted subsystems.
 - **Guard-chain rule:** if 3+ hypotheses die to the same guard, find a path past it or rotate.
-- **Check rejected crashes** before filing: `{{ results_dir }}/crashes-rejected/INDEX.md`.
+- **Check rejected crashes** before filing: `{{ results_dir }}/crashes-rejected/REJECTED-CRASHES.md`.
 - **Fuzz leads:** scan `{{ fuzz_leads_path }}` for recent non-noise libFuzzer crashes.
 - **After compression:** read your state file's Working Context, resume top PENDING. No new recon.
 - **Session rules digest** is embedded below; drill into `{{ reference_dir }}/session-rules.md` only when the digest is ambiguous.

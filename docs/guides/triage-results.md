@@ -84,7 +84,7 @@ reproducible crash; triage scores the threat-model fit.
 Before filing a similar crash, check:
 
 ```text
-<RESULTS_DIR>/crashes-rejected/INDEX.html
+<RESULTS_DIR>/crashes-rejected/REJECTED-CRASHES.html
 ```
 
 For findings, scan `<RESULTS_DIR>/findings/FINDING-CLUSTERS.html` and

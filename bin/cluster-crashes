@@ -776,6 +776,13 @@ def _member_link(crashes_root: Path, member_id: str, link_prefix: str = "") -> s
     return f"[{member_id}]({link_prefix}{member_id}/{name})"
 
 
+def _rejected_report_link(crashes_root: Path) -> str:
+    rejected_root = crashes_root.parent / "crashes-rejected"
+    if not (rejected_root / "REJECTED-CRASHES.md").is_file():
+        return "../crashes-rejected/INDEX.md"
+    return "../crashes-rejected/REJECTED-CRASHES.md"
+
+
 def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
     lines = ["# Crash Clusters", ""]
     lines.append(
@@ -825,17 +832,15 @@ def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
             f"{c.get('status', 'OK')} |"
         )
     lines.append("")
-    # Footer: always point readers at the sibling rejected index. maintain_indexes
-    # always writes crashes-rejected/INDEX.md (an empty table when nothing was
-    # triaged out), so the link is never dead — and making it unconditional keeps
-    # this table independent of whether/when the index file exists, which removes
-    # the build-ordering and skip-cache coupling that the conditional caused.
+    # Footer: always point readers at the sibling rejected report. Live audit
+    # and benchmark pool builders both write this named report, with INDEX.md
+    # kept as a compatibility alias for older links.
     lines.append("---")
     lines.append("")
     lines.append(
         "_Crashes triaged out as non-actionable (duplicates, non-crashes, "
         "or out-of-scope) are tracked separately — see the "
-        "[rejected crashes index](../crashes-rejected/INDEX.md)._"
+        f"[rejected crashes index]({_rejected_report_link(crashes_root)})._"
     )
     lines.append("")
     return "\n".join(lines) + "\n"

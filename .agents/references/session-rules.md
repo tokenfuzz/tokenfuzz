@@ -292,7 +292,7 @@ PATCH_CONTEXT=N | PATCH_MAX_LINES=N | PATCH_MAX_BYTES=N   widen show-patch
 
 ## Rejected Crashes & Findings
 
-Before filing `crashes/CRASH-*/`, check `crashes-rejected/INDEX.md`.
+Before filing `crashes/CRASH-*/`, check `crashes-rejected/REJECTED-CRASHES.md`.
 Before filing `findings/FIND-*/`, do BOTH:
 1. Confirm the issue is a SECURITY finding — crosses or weakens a security boundary, lets an caller read/write/escalate/bypass/leak/corrupt. Pure correctness, data-integrity, robustness, or spec-deviation bugs are NOT security findings; log them as state notes only. The harness gate moves rejected FINDs to `findings-rejected/`.
 2. Scan `findings/FINDING-CLUSTERS.md` for an existing FIND on the same location. The Status column flags content-less directories (NEEDS CONTENT) — fix those in place instead of opening a duplicate.

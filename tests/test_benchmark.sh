@@ -496,6 +496,8 @@ echo "# RECON-deadbeefcafef00d — synthetic recon vote" \
 python3 "$PY" pool "$rbd" >/dev/null
 assert_file_exists "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   "T4g: rejected finding markdown index written for combined pool"
+assert_file_exists "$rbd/pool/findings-rejected/INDEX.md" \
+  "T4g2: rejected finding INDEX.md compatibility alias written for combined pool"
 assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   'FULL-RATIONALE-END' \
   "T4h: rejected finding index keeps the full validator rationale"
@@ -527,8 +529,12 @@ assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.html" \
 python3 "$PY" split-pool "$rbd" >/dev/null
 assert_file_exists "$rbd/pool/model-direct/findings-rejected/REJECTED-FINDINGS.md" \
   "T4i: rejected finding markdown index written for condition pool"
+assert_file_exists "$rbd/pool/model-direct/findings-rejected/INDEX.md" \
+  "T4i2: rejected finding INDEX.md compatibility alias written for condition pool"
 assert_file_contains "$BENCH" 'REJECTED-FINDINGS.md' \
   "T4j: bin/benchmark renders rejected finding markdown indexes through render-md"
+assert_file_contains "$BENCH" 'findings-rejected/INDEX.md' \
+  "T4j2: bin/benchmark also renders rejected finding INDEX aliases"
 
 # ── T5: aggregate degrades gracefully on a partial run ───────────────────
 mk_cell harness-r3 harness 3 failed 0

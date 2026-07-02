@@ -129,7 +129,7 @@ required. A run usually creates some combination of these artifacts under
 | `findings-rejected/FIND-*` | FIND reports the quality gate rejected after repeated review. Typical examples are vague "suspicious code" notes or correctness-only issues with no security impact. They are moved here, not deleted, so you can audit false rejects. |
 | `crashes/CRASH-*` | A finding the harness also reproduced under a sanitizer. Triage exports a maintainer-ready bundle with `REPORT.md`, `reproduce.sh`, `sanitizer.txt`, `input.<ext>`, and `harness.*` when an API harness is needed. |
 | `crashes/CRASH-CLUSTERS.html` | Per-backend cluster summary for crashes. |
-| `crashes-rejected/INDEX.html` | Crash candidates that failed triage, with reasons. Examples include null derefs, OOMs, and other low-value crash classes; the original artifacts are retained for review. |
+| `crashes-rejected/REJECTED-CRASHES.html` | Crash candidates that failed triage, with reasons. Examples include null derefs, OOMs, and other low-value crash classes; the original artifacts are retained for review. |
 
 When you run multiple backends against the same target, the per-backend
 tables are rolled up at the target root:

@@ -90,7 +90,7 @@ Common fixes:
 Open the rejected index in a browser:
 
 ```text
-output/<target>/<backend>/results/crashes-rejected/INDEX.html
+output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
 ```
 
 Common reasons:

@@ -227,11 +227,15 @@ assert_file_contains "$RESULTS_DIR/crashes/CRASH-001-1/report.html" "$cluster_id
   "maintain_indexes renders report HTML after cluster update"
 
 # ═══════════════════════════════════════════════════════════════
-# 2. crashes-rejected/INDEX.md remains the rejection ledger
+# 2. crashes-rejected/ keeps semantic reports plus INDEX.md compatibility aliases.
 # ═══════════════════════════════════════════════════════════════
 
 assert_file_exists "$RESULTS_DIR/crashes-rejected/INDEX.md" "crashes-rejected/INDEX.md created"
+assert_file_exists "$RESULTS_DIR/crashes-rejected/REJECTED-CRASHES.md" \
+  "crashes-rejected/REJECTED-CRASHES.md created"
 assert_file_contains "$RESULTS_DIR/crashes-rejected/INDEX.md" "CRASH-010-1" "rejected index has CRASH-010"
+assert_file_contains "$RESULTS_DIR/crashes-rejected/REJECTED-CRASHES.md" "CRASH-010-1" \
+  "rejected crashes report has CRASH-010"
 assert_file_contains "$RESULTS_DIR/crashes-rejected/INDEX.md" "DO NOT RE-FILE" "rejected index warns against re-filing"
 # Unified schema: ID | Site | Reason | Report, with a hyperlinked report.
 # (assert_file_contains greps with -E, so table pipes / link brackets escape.)
@@ -244,8 +248,12 @@ assert_file_contains "$RESULTS_DIR/crashes-rejected/INDEX.md" '\[Link\]\(CRASH-0
 
 # 2b. findings-rejected/INDEX.md mirrors the crashes-rejected schema.
 assert_file_exists "$RESULTS_DIR/findings-rejected/INDEX.md" "findings-rejected/INDEX.md created"
+assert_file_exists "$RESULTS_DIR/findings-rejected/REJECTED-FINDINGS.md" \
+  "findings-rejected/REJECTED-FINDINGS.md created"
 assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" '[|] *ID *[|] *Site *[|] *Reason *[|] *Report *[|]' \
   "findings-rejected index uses the same unified header"
+assert_file_contains "$RESULTS_DIR/findings-rejected/REJECTED-FINDINGS.md" '[|] *ID *[|] *Site *[|] *Reason *[|] *Report *[|]' \
+  "findings-rejected report uses the same unified header"
 assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" "app_parse.c:app_parse:42" \
   "findings-rejected index surfaces the finding site from the Fields table"
 assert_file_contains "$RESULTS_DIR/findings-rejected/INDEX.md" "robustness only; no security boundary" \
@@ -310,6 +318,16 @@ if command -v python3 >/dev/null 2>&1; then
     "findings: FINDING-CLUSTERS.md to FINDING-CLUSTERS.html sibling rendered"
   assert_file_exists "$RESULTS_DIR/crashes/CRASH-CLUSTERS.html" \
     "crashes: CRASH-CLUSTERS.md to CRASH-CLUSTERS.html sibling rendered"
+  assert_file_exists "$RESULTS_DIR/crashes-rejected/REJECTED-CRASHES.html" \
+    "crashes-rejected: REJECTED-CRASHES.md to REJECTED-CRASHES.html sibling rendered"
+  assert_file_exists "$RESULTS_DIR/findings-rejected/REJECTED-FINDINGS.html" \
+    "findings-rejected: REJECTED-FINDINGS.md to REJECTED-FINDINGS.html sibling rendered"
+  assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.html" \
+    '../crashes-rejected/REJECTED-CRASHES.html' \
+    "crash clusters link to the semantic rejected crashes report"
+  assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.html" \
+    '../findings-rejected/REJECTED-FINDINGS.html' \
+    "finding clusters link to the semantic rejected findings report"
 fi
 
 # ═══════════════════════════════════════════════════════════════

@@ -132,7 +132,7 @@ browser, are the fastest way to read it:
 | `$RESULTS/findings/` | Concrete security findings, with or without a reproducer. |
 | `$RESULTS/findings/FINDING-CLUSTERS.html` | Finding review table. |
 | `$RESULTS/findings-rejected/` | Findings the LLM substance gate rejected twice. |
-| `$RESULTS/crashes-rejected/INDEX.html` | Rejected crash candidates, with reasons. |
+| `$RESULTS/crashes-rejected/REJECTED-CRASHES.html` | Rejected crash candidates, with reasons. |
 | `$RESULTS/crashes-needs-review/` | Borderline rejections paused for one more pass before final demotion. |
 | `output/$TARGET/CRASH-CLUSTERS.html` | Cross-backend crash rollup for the target. |
 | `output/$TARGET/FINDING-CLUSTERS.html` | Cross-backend finding rollup for the target. |
@@ -147,7 +147,7 @@ issues are obvious from a single look:
 - `$LOGS/session_*_*.log` — trimmed transcript for each agent
   session. Use `$LOGS/.raw/session_*_*.log.raw` only when you need
   the full backend transcript.
-- `$RESULTS/crashes-rejected/INDEX.html` — if crashes happened but were
+- `$RESULTS/crashes-rejected/REJECTED-CRASHES.html` — if crashes happened but were
   demoted, the reasons are here (`null-deref`, `OOM`, `out-of-bounds
   beyond target code`, etc.).
 - `$RESULTS/state/runs.jsonl` — every probe verdict on disk. `wc -l

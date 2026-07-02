@@ -588,7 +588,8 @@ def count_subdirs(parent: Path, prefix: str) -> int:
     )
 
 
-# Markdown table row in the per-cell `crashes-rejected/INDEX.md` ledger.
+# Markdown table row in the per-cell `crashes-rejected/REJECTED-CRASHES.md`
+# ledger (schema shared with the INDEX.md alias).
 # Triage writes one row per rejected crash (id, site, rejected-at) — these
 # never get a CRASH-* subdir, so the row count is the only place they show
 # up. Header rows ("| ID | ... |" / "| :-- | ... |") are skipped so they
@@ -597,7 +598,7 @@ _REJECTED_CRASH_ROW_RE = re.compile(r"^\|\s*[^|\s]+[^|]*\|")
 
 
 def count_rejected_crash_rows(index_md: Path) -> int:
-    """Count rejected-crash rows in a `crashes-rejected/INDEX.md` ledger.
+    """Count rejected-crash rows in a rejected-crashes ledger.
 
     The harness writes one row per crash dir it auto-rejected from the
     main `crashes/` tree (runtime-diagnostic class, caller-misuse class,
@@ -633,14 +634,21 @@ def count_crashes_rejected(rejected_dir: Path) -> int:
     Two sources, both legitimate:
       * CRASH-* subdirs — full crash dirs the harness moved out of
         crashes/ after triage decided they were non-security.
-      * INDEX.md rows — auto-rejected signatures (runtime-diagnostic
-        class, etc.) that never got a CRASH-* dir, only a ledger row.
+      * REJECTED-CRASHES.md rows — auto-rejected signatures (runtime-
+        diagnostic class, etc.) that never got a CRASH-* dir, only a
+        ledger row.
     Summing both is what makes the column total honest: a reader who
     sees 7 here can find 7 rejection records (subdir or row) below.
+
+    Prefer the canonical REJECTED-CRASHES.md, falling back to the
+    INDEX.md alias so cells produced before the rename still count.
     """
+    ledger = rejected_dir / "REJECTED-CRASHES.md"
+    if not ledger.is_file():
+        ledger = rejected_dir / "INDEX.md"
     return (
         count_subdirs(rejected_dir, "CRASH-")
-        + count_rejected_crash_rows(rejected_dir / "INDEX.md")
+        + count_rejected_crash_rows(ledger)
     )
 
 
@@ -725,8 +733,7 @@ def _format_discarded_hypotheses_roster(
     Returns an empty string when nothing was discarded so the caller
     can skip writing a noise-only page. The roster is intended to live
     under the pool's `crashes-rejected/` directory and be linked from
-    REJECTED-CRASHES.md so the bumped column total has a concrete
-    landing page.
+    the rejected index so the bumped column total has a concrete landing page.
     """
     rows = list(iter_discarded_hypotheses(results_dir))
     if not rows:
@@ -1693,9 +1700,9 @@ def _report_link_name(finding_dir: Path) -> str:
 
 
 # ── rejection-index cell helpers (shared schema with lib/triage.sh) ──────
-# The audit writes crashes-rejected/INDEX.md + findings-rejected/INDEX.md via
-# lib/triage.sh; these mirror its Site/Reason extraction so the benchmark
-# pool's REJECTED-CRASHES.md / REJECTED-FINDINGS.md read identically.
+# The audit writes named REJECTED-*.md reports plus INDEX.md compatibility
+# aliases via lib/triage.sh; these mirror its Site/Reason extraction so
+# benchmark pools expose the same artifact names.
 
 _REJECT_FRAME_SKIP_RE = re.compile(
     r"__asan|__sanitizer|__interceptor|libc\+\+|libsystem_|libdyld|libobjc|"
@@ -1862,8 +1869,8 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
     md.append("## Rejected crash directories")
     md.append("")
     if subdirs:
-        # Shared schema with lib/triage.sh's crashes-rejected/INDEX.md and the
-        # findings index below: ID | Site | Reason | Report.
+        # Shared schema with lib/triage.sh's rejected summaries and the findings
+        # index below: ID | Site | Reason | Report.
         md.append("| ID | Site | Reason | Report |")
         md.append("| :--- | :--- | :--- | :--- |")
         for p in subdirs:
@@ -1923,9 +1930,9 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
     else:
         md.append("_No DISCARDED hypotheses were pooled._")
     md.append("")
-    (rejected_dir / "REJECTED-CRASHES.md").write_text(
-        "\n".join(md), encoding="utf-8"
-    )
+    text = "\n".join(md)
+    for name in ("INDEX.md", "REJECTED-CRASHES.md"):
+        (rejected_dir / name).write_text(text, encoding="utf-8")
 
 
 def write_rejected_findings_index(rejected_dir: Path) -> None:
@@ -1970,9 +1977,9 @@ def write_rejected_findings_index(rejected_dir: Path) -> None:
     else:
         md_lines.append("_No rejected findings._")
     md_lines.append("")
-    (rejected_dir / "REJECTED-FINDINGS.md").write_text(
-        "\n".join(md_lines), encoding="utf-8"
-    )
+    text = "\n".join(md_lines)
+    for name in ("INDEX.md", "REJECTED-FINDINGS.md"):
+        (rejected_dir / name).write_text(text, encoding="utf-8")
 
 
 # ── aggregation across a benchmark run's cells ───────────────────────────

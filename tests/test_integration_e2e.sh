@@ -119,7 +119,11 @@ assert_file_exists "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" "e2e: crash clusters
 assert_file_contains "$RESULTS_DIR/crashes/CRASH-CLUSTERS.md" "CRASH-E2E-001-1" "e2e: kept crash in clusters"
 assert_file_not_exists "$RESULTS_DIR/crashes/INDEX.md" "e2e: crash index not generated"
 assert_file_exists "$RESULTS_DIR/crashes-rejected/INDEX.md" "e2e: rejected index generated"
+assert_file_exists "$RESULTS_DIR/crashes-rejected/REJECTED-CRASHES.md" \
+  "e2e: rejected crashes report generated"
 assert_file_contains "$RESULTS_DIR/crashes-rejected/INDEX.md" "CRASH-E2E-002-1" "e2e: null-deref in rejected index"
+assert_file_contains "$RESULTS_DIR/crashes-rejected/REJECTED-CRASHES.md" "CRASH-E2E-002-1" \
+  "e2e: null-deref in rejected crashes report"
 
 # ═══════════════════════════════════════════════════════════════
 # 5. Deep investigation prompt builds on current state

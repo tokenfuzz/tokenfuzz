@@ -391,7 +391,7 @@ output/$TARGET/CRASH-CLUSTERS.html
 output/$TARGET/FINDING-CLUSTERS.html
 $RESULTS/crashes/CRASH-CLUSTERS.html
 $RESULTS/findings/FINDING-CLUSTERS.html
-$RESULTS/crashes-rejected/INDEX.html
+$RESULTS/crashes-rejected/REJECTED-CRASHES.html
 ```
 
 Then follow the linked cluster member to the report:
@@ -403,7 +403,7 @@ $RESULTS/findings/FIND-*/report.html
 
 Use the target-level cluster HTML files when comparing multiple
 backends. Use the backend-local cluster HTML files when reviewing one
-run. `crashes-rejected/INDEX.html` explains rejected crash candidates
+run. `crashes-rejected/REJECTED-CRASHES.html` explains rejected crash candidates
 so the next operator does not repeat already-triaged work.
 
 These commands are for regenerating or enriching artifacts, not for
