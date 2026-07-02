@@ -12,8 +12,8 @@ prompts, source excerpts, state, and reports needed for the run. Use
 `--backend oss` when policy requires model data flow to stay local.
 
 This page walks through each piece in order. Install commands are given
-for macOS, Debian / Ubuntu, and Fedora / RHEL. The last two sections
-verify the install before you point the harness at a real target.
+for macOS, Debian / Ubuntu, and Fedora / RHEL. Sections 4 and 5 verify
+the install before you point the harness at a real target.
 
 ## 1. Host tools
 
@@ -23,14 +23,14 @@ and during sanitizer builds.
 | Tool | Why it is needed |
 | --- | --- |
 | `bash` 3.2+ | Runs the orchestrator and shell wrappers. macOS system Bash is fine. |
-| `python3` 3.9+ | Parses target config and structured state. No extra packages. |
+| `python3` 3.9+ with `venv` support | Parses target config and structured state. `venv` is used by `bin/docs`, Python-target bootstraps, and the vLLM quick path below. |
 | `perl` | Runs vocabulary normalization and timeout fallbacks. |
 | `git` | Clones, updates, and identifies revisions for most targets. |
-| `gh` | Queries the GitHub advisory database (`gh api`) for the cross-project strategy. |
+| `gh` | Queries GitHub advisory metadata (`gh api`) for the cross-project strategy. |
 | `jq` | Reads and writes JSONL state records. |
 | `rg` | Fast, bounded source search through helper commands. |
 | `file` | Distinguishes testcase inputs from scripts and compiled artifacts. |
-| `curl`, CA certificates | Fetch backend installers and remote metadata over HTTPS. |
+| `curl`, CA certificates | Fetch backend and tool installers over HTTPS. |
 | `node`, `npm` | Install npm-based backend CLIs and run backend diagnostics. |
 
 `bin/audit` preflight-checks `jq`, `python3`, and `perl` at startup and
@@ -50,7 +50,7 @@ For sanitizer builds, you also need LLVM:
 | `llvm-symbolizer` | Turn sanitizer PCs into readable stack traces. |
 | `sancov` | Enable coverage-gated probes on supported targets. |
 | `nm` | Detect candidate sanitizer binaries in build trees. |
-| `otool` (macOS) | Inspect the dynamic loader's view of an instrumented binary. |
+| `otool` (macOS) | Inspect Mach-O sections in coverage-instrumented binaries. |
 | `readelf`, `llvm-readelf`, or `objdump` (Linux) | Inspect ELF sections in coverage-instrumented binaries. |
 
 The LLVM tools ship with LLVM. On macOS, `otool` comes from Apple's
@@ -71,6 +71,8 @@ support files, `python3`, `nm`, and `otool`). macOS already includes
 Bash, Perl, `curl`, CA certificates, and `file`. If the command-line
 tools are already installed, macOS will say so. Git is not guaranteed on
 a fresh macOS install until those command-line tools are installed.
+If `python3 -m venv` is unavailable or creates an environment without
+`pip`, install Homebrew Python with `brew install python`.
 
 ### Debian / Ubuntu
 
@@ -78,7 +80,7 @@ a fresh macOS install until those command-line tools are installed.
 sudo apt-get update
 sudo apt-get install -y \
   bash binutils ca-certificates clang curl file gh git jq libclang-rt-dev \
-  llvm nodejs npm perl procps python3 ripgrep
+  llvm nodejs npm perl procps python3 python3-venv ripgrep
 ```
 
 Notes:
@@ -98,18 +100,22 @@ Notes:
 - `nodejs` and `npm` are needed by the npm-based backend CLIs
   (`codex`, `@google/gemini-cli`) and by a few harness diagnostics
   that call `node`.
+- `python3-venv` is needed by `bin/docs`, Python-target bootstraps, and
+  the vLLM setup commands shown below.
+
 ### Fedora / RHEL
 
 ```bash
 sudo dnf install -y \
   bash binutils ca-certificates clang coreutils curl diffutils file findutils \
   compiler-rt gawk gh git grep jq llvm nodejs npm perl procps-ng python3 \
-  ripgrep sed which
+  python3-pip ripgrep sed which
 ```
 
-No extra Perl or Python packages are needed. The command includes
-standard userland packages that full Fedora/RHEL hosts usually already
-have, because minimal container images often do not.
+No extra Perl packages are needed. The command includes standard
+userland packages that full Fedora/RHEL hosts usually already have,
+because minimal container images often do not. `python3-pip` is included
+so environments created with `python3 -m venv` get a working `pip`.
 
 ## 2. One agent backend
 
@@ -119,8 +125,8 @@ supported backends before pointing TokenFuzz at a real target.
 Backend CLIs have their own install and authentication steps. The OS
 commands above already include their common installer prerequisites:
 
-- Codex and Google Gemini CLI use npm-based installers; the host-tool
-  commands above install Node.js and npm for that path.
+- Codex and Google Gemini CLI have npm install paths; the host-tool
+  commands above install Node.js and npm for those paths.
 - The default Gemini path uses the Antigravity installer, which needs
   `curl` and valid CA certificates, also installed above.
 - The local `oss` backend needs OpenCode plus a local model server.
@@ -129,10 +135,10 @@ commands above already include their common installer prerequisites:
 
 | Backend | Install and authenticate | Audit command |
 | --- | --- | --- |
-| Claude Code | Install from the [Claude Code docs](https://docs.claude.com/en/docs/claude-code), then authenticate the `claude` CLI (`claude` will prompt on first use). Pass `--model <id>` to override the default model. | `bin/audit --backend claude` |
-| Codex | `npm install -g @openai/codex`, then authenticate the `codex` CLI. Pass `--model <id>` to override the default model. | `bin/audit --backend codex` |
+| Claude Code | Install from the [Claude Code docs](https://docs.claude.com/en/docs/claude-code), then authenticate the `claude` CLI (`claude` will prompt on first use). Pass `--model <id>` to override the default model. | `bin/audit --backend claude --target <name>` |
+| Codex | Follow the [Codex CLI setup](https://developers.openai.com/codex/cli#cli-setup), or install directly with `curl -fsSL https://chatgpt.com/codex/install.sh \| sh`, then authenticate the `codex` CLI. Alternatives: `npm install -g @openai/codex` or `brew install --cask codex`. Pass `--model <id>` to override the default model. | `bin/audit --backend codex --target <name>` |
 | Gemini | Default: install [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) with `curl -fsSL https://antigravity.google/cli/install.sh \| bash`, then run `agy` once to authenticate. Pass `--model` as a config slug or an exact `agy models` label to override the default. Alternative: install Google Gemini CLI, set `USE_GEMINI_CLI=1` (this path also needs `GEMINI_API_KEY` or `GOOGLE_API_KEY`), and pass `--model <id>` when needed. If Gemini CLI logs `Ripgrep is not available`, apply the [bundled ripgrep symlink](../guides/backends.md#google-gemini-cli-ripgrep). | `bin/audit --backend gemini --target <name>` |
-| Local model (`oss`) | Install [OpenCode](https://opencode.ai/download). Then run a local model through [vLLM](https://docs.vllm.ai/en/latest/getting_started/installation/) (recommended for larger GPU-backed models) or [Ollama](https://ollama.com/download). `--model` is **required** for `oss` and must match the served model name. | `bin/audit --backend oss --model qwen3-8b` |
+| Local model (`oss`) | Install [OpenCode](https://opencode.ai/download). Then run a local model through [vLLM](https://docs.vllm.ai/en/latest/getting_started/installation/) (recommended for larger GPU-backed models) or [Ollama](https://ollama.com/download). `--model` is **required** for `oss` and must match the served model name. | `bin/audit --backend oss --model qwen3-8b --target <name>` |
 
 Local model quick paths:
 
@@ -151,6 +157,9 @@ vllm serve <hf-model-or-local-path> --served-model-name qwen3-8b
 
 bin/audit --backend oss --model qwen3-8b --target <name> 1
 ```
+
+The served model name is the exact string TokenFuzz checks against the
+local server's `/v1/models` endpoint — pass the same value to `--model`.
 
 Examples:
 
@@ -255,10 +264,11 @@ wrappers, and testcase classification.
 The `--image` forms are a portability sanity check: they re-run the
 same tests inside a clean Linux Docker container, which is the easiest
 way to catch a missing dependency without rebuilding your host. Image
-mode installs the baseline Linux tools inside the container before
-running the suite. For apt-based images such as `ubuntu:24.04`, that
-includes the Debian / Ubuntu package set above, including
-`libclang-rt-dev`.
+mode provisions the container with
+`tests/run-tests.sh --install-container-deps` before running the suite.
+For apt-based images such as `ubuntu:24.04`, that installs the Debian /
+Ubuntu package set above, including `libclang-rt-dev` and
+`python3-venv`.
 
 ## 5. Verify the audit pipeline end-to-end
 

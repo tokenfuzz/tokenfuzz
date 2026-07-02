@@ -88,25 +88,25 @@ while [ "$#" -gt 0 ]; do
           apt-get update
           apt-get install -y --no-install-recommends \
             bash binutils ca-certificates clang curl file gh git jq libclang-rt-dev llvm \
-            nodejs npm perl procps python3 ripgrep
+            nodejs npm perl procps python3 python3-venv ripgrep
         elif command -v dnf >/dev/null 2>&1; then
           dnf install -y \
             bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-            grep jq less llvm nodejs npm perl procps-ng python3 ripgrep sed which \
+            grep jq less llvm nodejs npm perl procps-ng python3 python3-pip ripgrep sed which \
             || dnf install -y \
               bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-              grep jq less llvm nodejs npm perl procps-ng python3 sed which
+              grep jq less llvm nodejs npm perl procps-ng python3 python3-pip sed which
         elif command -v microdnf >/dev/null 2>&1; then
           microdnf install -y \
             bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-            grep jq less llvm nodejs npm perl procps-ng python3 sed which
+            grep jq less llvm nodejs npm perl procps-ng python3 python3-pip sed which
         elif command -v yum >/dev/null 2>&1; then
           yum install -y \
             bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-            grep jq less llvm nodejs npm perl procps-ng python3 ripgrep sed which \
+            grep jq less llvm nodejs npm perl procps-ng python3 python3-pip ripgrep sed which \
             || yum install -y \
               bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-              grep jq less llvm nodejs npm perl procps-ng python3 sed which
+              grep jq less llvm nodejs npm perl procps-ng python3 python3-pip sed which
         else
           echo "tests/run-tests.sh: no supported package manager found; install bash python3 perl file git gh jq clang llvm ripgrep nodejs npm curl" >&2
           exit 2
@@ -123,6 +123,13 @@ while [ "$#" -gt 0 ]; do
       for tool in bash python3 perl file git gh jq clang llvm-ar rg node npm curl; do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
       done
+      venv_probe="$(mktemp -d "${TMPDIR:-/tmp}/tokenfuzz-venv-check.XXXXXX" 2>/dev/null || true)"
+      if [ -n "$venv_probe" ]; then
+        python3 -m venv "$venv_probe/venv" >/dev/null 2>&1 || missing+=("python3-venv")
+        rm -rf "$venv_probe"
+      else
+        missing+=("mktemp")
+      fi
       if [ "${#missing[@]}" -gt 0 ]; then
         echo "tests/run-tests.sh: --install-container-deps completed but tools still missing: ${missing[*]}" >&2
         echo "tests/run-tests.sh: re-run the container build, or retry inside this container, to fetch them." >&2
