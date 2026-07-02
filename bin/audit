@@ -41,16 +41,12 @@ unset _lib
 _ts() { date +%H:%M:%S; }
 log() { echo "[$(_ts)] $*"; }
 
-# Append a line to a file under an exclusive advisory lock. perl flock
-# works on macOS and Linux; GNU flock(1) does not ship on macOS. Best-effort
-# — a lock/open failure must never abort an audit over a log line.
+# Append a line to a file under an exclusive advisory lock. Python fcntl
+# flock works on macOS and Linux; GNU flock(1) does not ship on macOS.
+# Best-effort — a lock/open failure must never abort an audit over a log
+# line.
 audit_flock_append() {
-  perl -e '
-    use Fcntl qw(:flock);
-    open(my $fh, ">>", $ARGV[0]) or exit 0;
-    flock($fh, LOCK_EX) or exit 0;
-    print $fh $ARGV[1], "\n";
-  ' "$1" "$2" 2>/dev/null || true
+  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" flock-append "$1" "$2" 2>/dev/null || true
 }
 
 # Instance lock — prevents two bin/audit invocations from writing to the
@@ -2742,7 +2738,7 @@ preflight_build_freshness() {
 
 # Validate required external tools before doing anything expensive.
 _missing_tools=()
-for _tool in jq python3 perl; do
+for _tool in jq python3; do
   command_exists "$_tool" || _missing_tools+=("$_tool")
 done
 if [ "${#_missing_tools[@]}" -gt 0 ]; then
@@ -2927,7 +2923,7 @@ export TARGET_SANITIZERS_ENABLED_CSV
 detect_sanitizer_builds
 
 # Cache the safety framing once at startup — it never changes and was being
-# regenerated + piped through perl neutralization on every prompt build.
+# regenerated + piped through vocab neutralization on every prompt build.
 SAFETY_FRAMING_CACHED="$(build_safety_framing | neutralize_qa_vocab_string)"
 
 # Cache the runtime guide content once at startup. AGENT_GUIDE_PATH resolves

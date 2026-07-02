@@ -88,27 +88,27 @@ while [ "$#" -gt 0 ]; do
           apt-get update
           apt-get install -y --no-install-recommends \
             bash binutils ca-certificates clang curl file gh git jq libclang-rt-dev llvm \
-            nodejs npm perl procps python3 python3-venv ripgrep
+            nodejs npm procps python3 python3-venv ripgrep
         elif command -v dnf >/dev/null 2>&1; then
           dnf install -y \
             bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-            grep jq less llvm nodejs npm perl procps-ng python3 python3-pip ripgrep sed which \
+            grep jq less llvm nodejs npm procps-ng python3 python3-pip ripgrep sed which \
             || dnf install -y \
               bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-              grep jq less llvm nodejs npm perl procps-ng python3 python3-pip sed which
+              grep jq less llvm nodejs npm procps-ng python3 python3-pip sed which
         elif command -v microdnf >/dev/null 2>&1; then
           microdnf install -y \
             bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-            grep jq less llvm nodejs npm perl procps-ng python3 python3-pip sed which
+            grep jq less llvm nodejs npm procps-ng python3 python3-pip sed which
         elif command -v yum >/dev/null 2>&1; then
           yum install -y \
             bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-            grep jq less llvm nodejs npm perl procps-ng python3 python3-pip ripgrep sed which \
+            grep jq less llvm nodejs npm procps-ng python3 python3-pip ripgrep sed which \
             || yum install -y \
               bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-              grep jq less llvm nodejs npm perl procps-ng python3 python3-pip sed which
+              grep jq less llvm nodejs npm procps-ng python3 python3-pip sed which
         else
-          echo "tests/run-tests.sh: no supported package manager found; install bash python3 perl file git gh jq clang llvm ripgrep nodejs npm curl" >&2
+          echo "tests/run-tests.sh: no supported package manager found; install bash python3 file git gh jq clang llvm ripgrep nodejs npm curl" >&2
           exit 2
         fi
       ) || {
@@ -120,7 +120,7 @@ while [ "$#" -gt 0 ]; do
       # If a fetch silently dropped one of them, fail loudly here so the
       # error message points at the install step, not at bin/audit later.
       missing=()
-      for tool in bash python3 perl file git gh jq clang llvm-ar rg node npm curl; do
+      for tool in bash python3 file git gh jq clang llvm-ar rg node npm curl; do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
       done
       venv_probe="$(mktemp -d "${TMPDIR:-/tmp}/tokenfuzz-venv-check.XXXXXX" 2>/dev/null || true)"

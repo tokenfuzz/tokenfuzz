@@ -7,63 +7,23 @@
 # scratch directory headers, and finding descriptions. Does NOT touch
 # crash reports, ASan output, or final deliverables.
 
+# All three neutralizers delegate to lib/vocab_rules.py, which holds the
+# single copy of the rewrite-rule table. The `command -v python3` guard is
+# fall-open: if the interpreter is somehow absent, pass content through
+# unchanged rather than abort a prompt build.
+_vocab_rules_py() { printf '%s' "$SCRIPT_ROOT/lib/vocab_rules.py"; }
+
 neutralize_qa_vocab_file() {
   local f="$1"
   local header_only="${2:-0}"
   [ -f "$f" ] && [ -w "$f" ] || return 0
-  if ! perl -e 'exit(-T $ARGV[0] ? 0 : 1)' "$f" 2>/dev/null; then
-    return 0
-  fi
-  command -v perl >/dev/null 2>&1 || return 0
-  local tmp
-  tmp=$(mktemp -t qavocab.XXXXXX) || return 0
-  perl -e '
-    use strict; use warnings;
-    require "'"$SCRIPT_ROOT"'/lib/vocab-rules.pl";
-    my $hdr = shift;
-    my @lines = <STDIN>;
-    for (my $i = 0; $i < @lines; $i++) {
-      next if $hdr && $i >= 12;
-      neutralize_line(\$lines[$i]);
-    }
-    print @lines;
-  ' "$header_only" < "$f" > "$tmp" 2>/dev/null \
-    && [ -s "$tmp" ] \
-    && mv "$tmp" "$f" 2>/dev/null \
-    || rm -f "$tmp"
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 "$(_vocab_rules_py)" neutralize-file "$f" "$header_only" 2>/dev/null || true
 }
 
 neutralize_qa_vocab_string() {
-  command -v perl >/dev/null 2>&1 || { cat; return 0; }
-  perl -e '
-    use strict; use warnings;
-    require "'"$SCRIPT_ROOT"'/lib/vocab-rules.pl";
-    my @lines = <STDIN>;
-    my $skip = 0;
-    for my $line (@lines) {
-      # NOVOCAB markers protect literal prompt blocks (e.g. the
-      # "use X (not Y)" vocabulary instruction examples) from being
-      # rewritten by the neutralizer onto themselves. We DO NOT strip
-      # the markers in this function — that is the job of
-      # strip_novocab_markers, called exactly once after the LAST
-      # scrub pass that will touch this string.
-      #
-      # Previously, this function stripped the markers AND protected
-      # content. That left the protected region unprotected on any
-      # downstream re-scrub: e.g. the safety_framing template was
-      # scrubbed once at SAFETY_FRAMING_CACHED build time (markers
-      # stripped here), then the final-prompt assembly scrubbed the
-      # combined prompt a second time — and the "use X (not Y)"
-      # vocabulary example lines were rewritten into "use X (not X)"
-      # because the protective markers were already gone. Keeping the
-      # markers in place across all scrubs and stripping them only at
-      # the end of the pipeline fixes that.
-      if ($line =~ /<!--\s*NOVOCAB\s*-->/) { $skip = 1; }
-      elsif ($line =~ /<!--\s*\/NOVOCAB\s*-->/) { $skip = 0; }
-      elsif (!$skip) { neutralize_line_prompt(\$line); }
-    }
-    print @lines;
-  '
+  command -v python3 >/dev/null 2>&1 || { cat; return 0; }
+  python3 "$(_vocab_rules_py)" neutralize-string
 }
 
 # strip_novocab_markers: remove NOVOCAB sentinel comments from the
@@ -73,11 +33,8 @@ neutralize_qa_vocab_string() {
 # once, immediately before the prompt is written to disk / sent to
 # the backend, AFTER every scrub pass that the prompt will go through.
 strip_novocab_markers() {
-  command -v perl >/dev/null 2>&1 || { cat; return 0; }
-  perl -ne '
-    s{<!--\s*/?\s*NOVOCAB\s*-->\s*\n?}{}g;
-    print;
-  '
+  command -v python3 >/dev/null 2>&1 || { cat; return 0; }
+  python3 "$(_vocab_rules_py)" strip-markers
 }
 
 neutralize_qa_vocab() {

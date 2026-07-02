@@ -43,7 +43,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work" 2>/dev/null || true; teardown_test_env 2>/dev/null || true' EXIT
 
 poll_pause() {
-  perl -e 'select undef, undef, undef, 0.1'
+  python3 -c 'import time; time.sleep(0.1)'
 }
 
 # Deadlines passed to these helpers are failure bounds, not expected
@@ -260,7 +260,7 @@ sleep_child=""
 for _ in \$(seq 1 50); do
   sleep_child="\$(pgrep -P "\$watcher" 2>/dev/null | head -1 || true)"
   [ -n "\$sleep_child" ] && break
-  perl -e 'select undef, undef, undef, 0.1'
+  python3 -c 'import time; time.sleep(0.1)'
 done
 [ -n "\$sleep_child" ] || exit 2
 

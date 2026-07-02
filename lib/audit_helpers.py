@@ -1076,6 +1076,46 @@ def _cmd_extract_vote_json(_args: argparse.Namespace) -> int:
     return 1
 
 
+# ── locked appends ──────────────────────────────────────────────────
+
+def _locked_append(path: Path, line: str) -> None:
+    """Append one line under an exclusive flock, for files SHARED across
+    parallel agents + orchestrator (see docs/development.md logging
+    discipline). Short rows are already PIPE_BUF-atomic via POSIX O_APPEND,
+    but long payloads can exceed PIPE_BUF and a Python buffered write can
+    be split into multiple os.write() syscalls. Take an exclusive flock and
+    flush INSIDE the locked region so the actual kernel append happens
+    while the lock is held — otherwise the lock would be released before
+    close() flushes the userspace buffer. Open/write failures propagate as
+    OSError; callers decide whether that is fatal."""
+    with path.open("a", encoding="utf-8") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            # Lock unsupported (rare: some network FS). Fall through to
+            # plain append — single-line writes under PIPE_BUF stay atomic.
+            pass
+        try:
+            f.write(line + "\n")
+            f.flush()
+        finally:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+
+
+def _cmd_flock_append(args: argparse.Namespace) -> int:
+    # Serializes index.log appends from backgrounded run_agent processes
+    # (bin/audit index_log). Best-effort — a lock/open failure must never
+    # abort an audit over a log line.
+    try:
+        _locked_append(Path(args.file), args.line)
+    except OSError:
+        pass
+    return 0
+
+
 # ── emit-event ──────────────────────────────────────────────────────
 
 def _cmd_emit_event(args: argparse.Namespace) -> int:
@@ -1109,33 +1149,11 @@ def _cmd_emit_event(args: argparse.Namespace) -> int:
     payload["created_at"] = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     payload["event"] = args.event_name
 
-    # events.jsonl is SHARED across parallel agents + orchestrator (see
-    # docs/development.md logging discipline). Short rows are already
-    # PIPE_BUF-atomic via
-    # POSIX O_APPEND, but long payloads can exceed PIPE_BUF and a Python
-    # buffered write can be split into multiple os.write() syscalls. Take
-    # an exclusive flock and flush INSIDE the locked region so the actual
-    # kernel append happens while the lock is held — otherwise the lock
-    # would be released before close() flushes the userspace buffer.
     try:
         events_path = Path(args.events_file)
         events_path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(payload, separators=(",", ":"), sort_keys=False) + "\n"
-        with events_path.open("a", encoding="utf-8") as f:
-            try:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            except OSError:
-                # Lock unsupported (rare: some network FS). Fall through to
-                # plain append — single-line writes under PIPE_BUF stay atomic.
-                pass
-            try:
-                f.write(line)
-                f.flush()
-            finally:
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
+        _locked_append(events_path,
+                       json.dumps(payload, separators=(",", ":"), sort_keys=False))
     except OSError:
         return 0
     return 0
@@ -1227,6 +1245,12 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Extract first brace-balanced vote JSON object from stdin "
                             "(repairing invalid string escapes if needed).")
     s.set_defaults(func=_cmd_extract_vote_json)
+
+    s = sub.add_parser("flock-append",
+                       help="Append one line to a shared file under an exclusive flock.")
+    s.add_argument("file")
+    s.add_argument("line")
+    s.set_defaults(func=_cmd_flock_append)
 
     s = sub.add_parser("emit-event", help="Append a JSONL observability event.")
     s.add_argument("events_file")

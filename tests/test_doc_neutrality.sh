@@ -17,11 +17,7 @@ while IFS= read -r -d '' f; do
 done < <(find "$SCRIPT_ROOT/.agents/references" -type f -name '*.md' -print0 2>/dev/null)
 
 run_helper() {
-  perl -e '
-    use strict; use warnings;
-    require "'"$SCRIPT_ROOT"'/lib/vocab-rules.pl";
-    while (my $l = <STDIN>) { neutralize_line(\$l); print $l; }
-  '
+  python3 "$SCRIPT_ROOT/lib/vocab_rules.py" line-core
 }
 
 for doc in "${DOC_TARGETS[@]}"; do

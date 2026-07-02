@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Unit tests for lib/vocab-rules.pl and lib/vocab.sh
+# Unit tests for lib/vocab_rules.py and lib/vocab.sh
 #
-# Scope mirrors lib/vocab-rules.pl: only safety-classifier-sensitive
+# Scope mirrors lib/vocab_rules.py: only safety-classifier-sensitive
 # vocabulary (exploit/attack/attacker/malicious/weaponize/vulnerability).
 # Pure technical jargon (UAF, OOB, type confusion, etc.) is NOT
 # rewritten — those terms pass through verbatim.
@@ -13,23 +13,11 @@ source "$SCRIPT_ROOT/lib/vocab.sh"
 
 # ── Helper: run a string through the core neutralizer ──────────
 neutralize_core() {
-  printf '%s' "$1" | perl -e '
-    use strict; use warnings;
-    require "'"$SCRIPT_ROOT"'/lib/vocab-rules.pl";
-    my @lines = <STDIN>;
-    for my $line (@lines) { neutralize_line(\$line); }
-    print @lines;
-  '
+  printf '%s' "$1" | python3 "$SCRIPT_ROOT/lib/vocab_rules.py" line-core
 }
 
 neutralize_prompt() {
-  printf '%s' "$1" | perl -e '
-    use strict; use warnings;
-    require "'"$SCRIPT_ROOT"'/lib/vocab-rules.pl";
-    my @lines = <STDIN>;
-    for my $line (@lines) { neutralize_line_prompt(\$line); }
-    print @lines;
-  '
+  printf '%s' "$1" | python3 "$SCRIPT_ROOT/lib/vocab_rules.py" line-prompt
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -160,6 +148,17 @@ assert_file_not_contains "$TEST_TMPDIR/test_full.md" "exploit" "file mode: explo
 assert_file_not_contains "$TEST_TMPDIR/test_full.md" "attacker" "file mode: attacker fully removed"
 assert_file_not_contains "$TEST_TMPDIR/test_full.md" "malicious" "file mode: malicious fully removed"
 assert_file_not_contains "$TEST_TMPDIR/test_full.md" "vulnerability" "file mode: vulnerability fully removed"
+
+# File mode rewrites via temp+replace; preserve the original mode instead of
+# turning rewritten artifacts into mkstemp's 0600 files.
+cat > "$TEST_TMPDIR/test_mode.md" <<'EOF'
+exploit
+EOF
+chmod 755 "$TEST_TMPDIR/test_mode.md"
+mode_before=$(python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o7777))' "$TEST_TMPDIR/test_mode.md")
+neutralize_qa_vocab_file "$TEST_TMPDIR/test_mode.md" 0
+mode_after=$(python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o7777))' "$TEST_TMPDIR/test_mode.md")
+assert_eq "$mode_before" "$mode_after" "file mode: preserves permissions across atomic replace"
 
 # Header-only mode (only first 12 lines)
 {

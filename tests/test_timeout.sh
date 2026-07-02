@@ -15,7 +15,7 @@ marker_stays_absent_for() {
   start=$SECONDS
   while [ $((SECONDS - start)) -lt "$seconds" ]; do
     [ ! -f "$marker" ] || return 1
-    perl -e 'select undef, undef, undef, 0.1'
+    python3 -c 'import time; time.sleep(0.1)'
   done
   [ ! -f "$marker" ]
 }
@@ -28,7 +28,24 @@ assert_eq 124 $? "audit_timeout_run returns 124 on timeout"
 
 escaped_marker="$TEST_TMPDIR/escaped-marker"
 rm -f "$escaped_marker"
-audit_timeout_run 1 bash -c 'perl -e "setpgrp(0,0); sleep 2; open my \$fh, q(>), shift; print \$fh q(leaked)" "'"$escaped_marker"'"'
+# A descendant that escapes into its OWN session/process group then writes a
+# marker after the wrapper's deadline. audit_timeout_run must find it via the
+# descendant ps-scan and kill it before the marker lands. The escapee forks a
+# child and calls setsid() there: a fresh fork is never a session leader, so
+# the new session always succeeds regardless of any exec optimization above
+# it. A temp .py file keeps the fixture free of nested-quote escaping.
+escapee_py="$TEST_TMPDIR/escapee.py"
+cat > "$escapee_py" <<'PY'
+import os, sys, time
+if os.fork() == 0:
+    os.setsid()
+    time.sleep(2)
+    with open(sys.argv[1], "w") as fh:
+        fh.write("leaked")
+    os._exit(0)
+os.wait()
+PY
+audit_timeout_run 1 python3 "$escapee_py" "$escaped_marker"
 assert_eq 124 $? "audit_timeout_run times out escaped child process group"
 marker_stays_absent_for "$escaped_marker" 2 \
   && pass "audit_timeout_run reaps descendant process groups on timeout" \
@@ -46,8 +63,8 @@ rm -f "$interrupt_marker" "$interrupt_rc" "$interrupt_trigger"
 ) &
 interrupt_shell=$!
 sleep 1
-interrupt_perl="$(pgrep -P "$interrupt_shell" 2>/dev/null | head -1 || true)"
-[ -n "$interrupt_perl" ] && kill -INT "$interrupt_perl" 2>/dev/null || true
+interrupt_wrapper="$(pgrep -P "$interrupt_shell" 2>/dev/null | head -1 || true)"
+[ -n "$interrupt_wrapper" ] && kill -INT "$interrupt_wrapper" 2>/dev/null || true
 wait "$interrupt_shell" 2>/dev/null || true
 assert_eq 130 "$(cat "$interrupt_rc" 2>/dev/null || echo missing)" \
   "audit_timeout_run returns 130 on interrupt"
@@ -95,11 +112,20 @@ rss_rc=0
 # (137) — green on a roomy dev box, red on a low-RAM CI runner. Random pages
 # stay resident and cross the cap within a tick, exercising the watchdog
 # deterministically on every host.
-audit_timeout_run_rss 30 200 perl -e '
-  open my $u, "<", "/dev/urandom" or die "urandom: $!";
-  my @a; while (1) { my $b; read($u, $b, 10*1024*1024); push @a, $b; select(undef,undef,undef,0.05); }
-  open my $f, ">", $ARGV[0]; print $f "done";
-' "$rss_done" >"$rss_out" 2>&1 || rss_rc=$?
+balloon_py="$TEST_TMPDIR/balloon.py"
+cat > "$balloon_py" <<'PY'
+import sys, time
+chunks = []
+with open("/dev/urandom", "rb") as u:
+    while True:
+        chunks.append(u.read(10 * 1024 * 1024))
+        time.sleep(0.05)
+# Unreachable before the RSS cap kills us; kept so the fixture reads as a
+# program that would otherwise finish and drop the marker.
+with open(sys.argv[1], "w") as f:
+    f.write("done")
+PY
+audit_timeout_run_rss 30 200 python3 "$balloon_py" "$rss_done" >"$rss_out" 2>&1 || rss_rc=$?
 assert_eq 137 "$rss_rc" "audit_timeout_run_rss SIGKILLs a child that exceeds the RSS cap"
 [ ! -f "$rss_done" ] \
   && pass "RSS-killed child did not run to completion" \

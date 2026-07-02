@@ -24,7 +24,7 @@ and during sanitizer builds.
 | --- | --- |
 | `bash` 3.2+ | Runs the orchestrator and shell wrappers. macOS system Bash is fine. |
 | `python3` 3.9+ with `venv` support | Parses target config and structured state. `venv` is used by `bin/docs`, Python-target bootstraps, and the vLLM quick path below. |
-| `perl` | Runs vocabulary normalization and timeout fallbacks. |
+| `perl` | Only needed to build and run Perl-language audit *targets*. The harness and its test suite do not invoke it. |
 | `git` | Clones, updates, and identifies revisions for most targets. |
 | `gh` | Queries GitHub advisory metadata (`gh api`) for the cross-project strategy. |
 | `jq` | Reads and writes JSONL state records. |
@@ -33,7 +33,7 @@ and during sanitizer builds.
 | `curl`, CA certificates | Fetch backend and tool installers over HTTPS. |
 | `node`, `npm` | Install npm-based backend CLIs and run backend diagnostics. |
 
-`bin/audit` preflight-checks `jq`, `python3`, and `perl` at startup and
+`bin/audit` preflight-checks `jq` and `python3` at startup and
 exits with a clear "FATAL: missing required tool(s): ..." message if
 any are absent. The remaining tools are required by individual commands
 (`bash` runs every shell wrapper, `git` is invoked by `bin/setup-target`,
@@ -68,7 +68,7 @@ brew install gh jq node ripgrep llvm
 
 `xcode-select --install` provides Apple's command-line tools (Git, Clang
 support files, `python3`, `nm`, and `otool`). macOS already includes
-Bash, Perl, `curl`, CA certificates, and `file`. If the command-line
+Bash, `curl`, CA certificates, and `file`. If the command-line
 tools are already installed, macOS will say so. Git is not guaranteed on
 a fresh macOS install until those command-line tools are installed.
 If `python3 -m venv` is unavailable or creates an environment without
@@ -80,7 +80,7 @@ If `python3 -m venv` is unavailable or creates an environment without
 sudo apt-get update
 sudo apt-get install -y \
   bash binutils ca-certificates clang curl file gh git jq libclang-rt-dev \
-  llvm nodejs npm perl procps python3 python3-venv ripgrep
+  llvm nodejs npm procps python3 python3-venv ripgrep
 ```
 
 Notes:
@@ -108,12 +108,12 @@ Notes:
 ```bash
 sudo dnf install -y \
   bash binutils ca-certificates clang coreutils curl diffutils file findutils \
-  compiler-rt gawk gh git grep jq llvm nodejs npm perl procps-ng python3 \
+  compiler-rt gawk gh git grep jq llvm nodejs npm procps-ng python3 \
   python3-pip ripgrep sed which
 ```
 
-No extra Perl packages are needed. The command includes standard
-userland packages that full Fedora/RHEL hosts usually already have,
+The command includes standard userland packages that full Fedora/RHEL
+hosts usually already have,
 because minimal container images often do not. `python3-pip` is included
 so environments created with `python3 -m venv` get a working `pip`.
 
@@ -257,9 +257,9 @@ bash tests/run-tests.sh --image fedora:latest
 
 The suite does **not** call out to any real LLM backend — it stubs the
 agent invocations in [`tests/helpers.sh`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/helpers.sh) so it can run before you
-configure any backend CLI. It exercises the local shell, Python, Perl,
-jq, target config parsing, triage logic, state handling, search
-wrappers, and testcase classification.
+configure any backend CLI. It exercises the local shell, Python, jq,
+target config parsing, triage logic, state handling, search wrappers,
+and testcase classification.
 
 The `--image` forms are a portability sanity check: they re-run the
 same tests inside a clean Linux Docker container, which is the easiest

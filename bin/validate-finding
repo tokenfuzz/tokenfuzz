@@ -36,7 +36,7 @@ source "$SCRIPT_ROOT/lib/llm_invoke.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_ROOT/lib/prompt_template.sh"
 # Portable timeout helper (audit_timeout_run) — GNU `timeout` is not on
-# the default PATH on macOS; the harness uses the perl-based shim instead.
+# the default PATH on macOS; the harness uses the python3-based shim instead.
 # shellcheck disable=SC1091
 source "$SCRIPT_ROOT/lib/timeout.sh"
 

@@ -2700,19 +2700,7 @@ CARDS
 # never returned, so we cap the call. A passing fix completes in well
 # under one second; we allow 5 seconds of headroom for slow CI.
 _csps_started=$(date +%s)
-_csps_pick=$(perl -e '
-  use strict; use warnings;
-  use POSIX qw(setsid);
-  my $secs = shift @ARGV;
-  my @cmd = @ARGV;
-  my $pid = fork(); die "fork: $!" unless defined $pid;
-  if ($pid == 0) { setsid(); exec @cmd or die "exec: $!"; }
-  $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid($pid, 0); exit 124; };
-  alarm int($secs);
-  waitpid($pid, 0);
-  alarm 0;
-  exit ($? >> 8);
-' 5 bash -c "
+_csps_pick=$(python3 "$SCRIPT_ROOT/lib/timeout.py" 5 KILL 0 bash -c "
   $(declare -f agent_strategy_path agent_strategy_streak_path get_agent_strategy effective_work_card_rows unclaimed_strategy_counts pick_cold_start_strategy structured_state_latest_strategy count_active_hypotheses_for_agent state_file_path)
   RESULTS_DIR='$RESULTS_DIR' NUM_AGENTS=3 pick_cold_start_strategy 1
 " 2>/dev/null) || _csps_rc=$?
