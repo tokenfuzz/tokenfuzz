@@ -12,7 +12,11 @@ Use browser mode for:
 
 ## Enable browser mode
 
-In `output/<target>/target.toml`:
+`bin/setup-target` already sets `is_browser = "1"` automatically when the
+target slug is one of the four it recognises as a browser — `firefox`,
+`chromium`, `webkit`, or `servo` — and seeds the browser threat model and
+binary paths to match. Any other slug (a fork, a rename, a JS engine)
+needs the edit below. In `output/<target>/target.toml`:
 
 ```toml
 is_browser = "1"

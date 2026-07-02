@@ -153,9 +153,13 @@ CRASH-001-1/
   .dup-of               # only on non-canonical cluster members
 ```
 
-Crash directories may also carry dot-files the triage gates leave
-behind (`.llm-*.json` vote caches, `.severity_ok`, and similar
-markers). They are harness internals — safe to ignore when reviewing.
+Accepted crashes (and findings) also carry the reachability gate's
+output: `reachability.json` records the external-caller reachability
+evidence triage used to judge the crash, and a `.reachability_ok` marker
+records that the gate passed. Crash directories may carry other dot-files
+the triage gates leave behind as well (`.llm-*.json` vote caches,
+`.severity_ok`, and similar markers). All of these are harness
+internals — safe to ignore when reviewing.
 
 `REPORT.md` carries a `Cluster: <ID>` line. Non-canonical cluster
 members also have a `.dup-of` file naming the canonical CRASH. The

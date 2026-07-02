@@ -17,6 +17,7 @@ source.
 | `NUM_AGENTS` | auto (`3`) | Flat worker count for generic targets. On browser targets, setting it overrides the browser/shell split. |
 | `BROWSER_AGENTS` | `1` | Number of browser-mode agents for browser targets. |
 | `SHELL_AGENTS` | `2` | Number of JS shell agents for browser targets. |
+| `AGENT_ROLES` | auto | Comma-separated per-agent role list (e.g. `analysis,reproduce,analysis`) that overrides the automatic role split. Its length must match the agent count. |
 
 `auto` means three workers in the normal case:
 
@@ -33,6 +34,18 @@ overloaded.
 Set `NUM_AGENTS=N` when you want a generic target to run exactly `N`
 parallel workers. For browser targets, prefer `BROWSER_AGENTS` and
 `SHELL_AGENTS` when you care about the browser-vs-shell mix.
+
+## Session length and loop control
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AGENT_TIMEOUT` | `7200` | Per-agent session wall-clock ceiling in seconds (120 min). A runaway guard — a healthy agent finishes its iteration well before this. |
+| `MAX_DRY_SESSIONS` | `10` | Stop a continuous (no iteration count) run after this many consecutive iterations with no new confirmed result. Auto-clamped upward if it is too low to give per-agent strategy rotation a fair chance. |
+
+Cross-run agent memory is a separate control. It is **off by default**;
+opt back in with the `--enable-memory` flag (or `TOKENFUZZ_MEMORY_ENABLED=1`).
+See [Cross-run memory is off by default](commands.md#cross-run-memory-is-off-by-default)
+for why, and the per-backend mechanics.
 
 ## Timeouts
 
@@ -74,6 +87,7 @@ Defaults by platform:
 | --- | --- | --- |
 | `BROWSER_ASAN_RUN_BUDGET` | `25` | Maximum ASan invocations per browser agent per iteration. |
 | `SHELL_ASAN_RUN_BUDGET` | `60` | Maximum ASan invocations per shell agent per iteration. |
+| `ASAN_RUN_BUDGET_PER_ITERATION` | (unset) | Convenience override that sets **both** budgets above to one value. |
 | `SANITIZER_RUNS` | `5` | Number of runs `bin/run-sanitizer-multi` uses for `bin/probe --confirm` and export, to measure the reproduction rate. (Legacy alias: `ASAN_RUNS`.) |
 
 These budgets protect long sessions from spending too much ASan
@@ -158,6 +172,14 @@ bounded by default.
 `target.toml` paths whose first segment is one of those four resolve
 through the suffix; absolute paths and already-distinct directories
 like `build-asan-other/` are left literal.
+
+The container helper also honours two runtime overrides, both with flag
+equivalents:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CONTAINER_RUNTIME` | `docker` | Container engine `bin/audit-container-shell` invokes (e.g. `podman`). |
+| `AUDIT_DOCKER_RUNTIME` | (unset) | OCI runtime passed to `docker run` (e.g. `runsc` for gVisor). Same as `--docker-runtime`; `--gvisor` is shorthand for `runsc`. |
 
 ## Peer mining (S6)
 

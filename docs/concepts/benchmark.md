@@ -149,6 +149,11 @@ Every pooled crash that survives triage is bundled under the run's
 `pool/crashes/` tree with a `REPORT.md`, rendered `REPORT.html`, and
 `reproduce.sh`.
 
+To hand a finished run to someone else, `bin/export-benchmark` packages
+it into a self-contained, path-scrubbed archive (`--format zip|tar|dir`),
+taking the same `--backend` / `--target` / `--run-id` selectors as
+`bin/benchmark`.
+
 ## Reading the ledger
 
 Each run section is ordered for review:
@@ -161,7 +166,7 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | Column | Meaning |
 | --- | --- |
 | `Condition` | `tokenfuzz` or the direct baseline label. |
-| `Replicates` | `done/total`; `(Nq)` means N cells exhausted provider quota. |
+| `Replicates` | `done/total`, with a suffix for cells that hit provider trouble: `(Nr)` recovered after a mid-run blip, `(Np)` provider-limited, `(Nq)` quota-exhausted. |
 | `Wall (h)` | Median wall-clock hours per completed cell. |
 | `Rejected findings` | FIND reports rejected by the validator. |
 | `Findings` | Validated non-crash security reports. |

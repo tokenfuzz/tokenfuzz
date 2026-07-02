@@ -180,7 +180,7 @@ illustration.)
 | Field                 | Value |
 |:----------------------|:------|
 | Primitive             | heap-buffer-overflow READ of size 4 |
-| Severity              | Medium (CVSS-BTE 4.0: 5.5) |
+| Severity              | Medium (CVSS-BT 4.0: 5.5) |
 | Surface               | library-api (C harness calls app_read_memory) |
 | Trigger source        | bytes |
 | Caller contract       | obeyed |
@@ -201,7 +201,7 @@ Boundary: Untrusted document bytes parsed by the library.
 Caller controls: Document contents and length.
 Parameter control: direct
 Strategy: S7
-- **Severity**: Medium (CVSS-BTE 4.0: 5.5 Medium; CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:L/SC:N/SI:N/SA:N/E:P/CR:M/IR:M/AR:M; primitive=heap READ of 4 byte(s); surface=library)
+- **Severity**: Medium (CVSS-BT 4.0: 5.5 Medium; CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:L/SC:N/SI:N/SA:N/E:P; primitive=heap READ of 4 byte(s); surface=library)
 
 Out-of-bounds 4-byte read in `app_next_char` reached from
 `app_parse_char_ref` while consuming a malformed numeric character
@@ -241,9 +241,12 @@ Notes on the fields:
 - Severity is the **CVSS v4.0 score** — one industry-standard
   metric, computed by the vendored FIRST reference scorer. The bullet
   and the Fields-table `Severity` row carry the level plus the score
-  (`Medium (CVSS-BTE 4.0: 5.5)`); the generated `## Severity rationale` section
+  (`Medium (CVSS-BT 4.0: 5.5)`); the generated `## Severity rationale` section
   shows the full vector and how each metric was derived from the
-  report's classification and Fields.
+  report's classification and Fields. The label suffix reflects which
+  metric groups are populated: `CVSS-BT` for this in-scope crash (base +
+  threat), and `CVSS-BTE` once an Environmental metric is set — for
+  example the `MAT:P` a contract concern adds.
 - The CVSS vector is derived mechanically: **AV/UI** from the surface
   tier; **VC/VI/VA/SC/SI/SA** from the primitive class; **E** from
   reproducer/exploit evidence; **CR/IR/AR** are left Not Defined (they

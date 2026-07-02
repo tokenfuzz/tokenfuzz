@@ -46,10 +46,13 @@ upstream-derived [`lib/clusterfuzz_stacktrace.py`](https://github.com/tokenfuzz/
    argument list, anonymous-namespace markers, and `[abi:...]` tags, so
    `Store::set_blob(unsigned int)` and `Store::set_blob` are one symbol.
 4. **Take the top N** interesting frames (`MAX_CRASH_STATE_FRAMES: 3`) — the
-   *crash state*. Two crashes with the same crash state are the same bug.
-5. **Bucket** crashes by crash state. Near-identical stacks that differ
-   only in deep tail frames still group via a longest-common-subsequence
-   comparison of the top frames (implemented in `bin/cluster-crashes`).
+   *crash state*. Two crashes with the same crash state **and the same
+   sanitizer primitive** (e.g. `heap-buffer-overflow READ`) are the same
+   bug; identical stacks that report different primitives do not merge.
+5. **Bucket** crashes by that (primitive, crash state) pair. Near-identical
+   stacks that differ only in deep tail frames still group via a
+   longest-common-subsequence comparison of the top frames (implemented in
+   `bin/cluster-crashes`).
    An additional per-line fuzzy-similarity fallback exists but is
    opt-in via `CLUSTER_FUZZY_MATCH=1` — by default only exact and
    LCS matches merge.
@@ -89,7 +92,8 @@ Crash B: state [decode_body, read_record, run]
 `bin/cluster-crashes` writes `CRASH-CLUSTERS.md` (one row per cluster, sorted
 by max-member severity then size) and stamps a `Cluster:` line into each
 member `REPORT.md`. Each row names a **Canonical** member — the
-highest-severity crash in the cluster, ties broken by lowest id — and the
+highest-severity crash in the cluster (the CVSS score breaks ties within a
+severity band, then lowest id) — and the
 **Members** column lists every crash sharing the root cause, ordered by
 severity descending with the canonical in **bold**. This mirrors
 `bin/cluster-findings`, so both pages pick and present the canonical the same
@@ -130,8 +134,11 @@ Two findings merge if they share **either** of:
 A [**union-find**](https://en.wikipedia.org/wiki/Disjoint-set_data_structure)
 over those edges produces one cluster per root cause; the signals compose, so
 if A and B share a site and B and C share a crash state, all three land in one
-cluster. The canonical member is the highest-severity finding (ties → lowest
-id).
+cluster. The canonical member is chosen by **evidence first, then severity,
+then id**: a finding backed by a proven exploit or reproducer outranks an
+unproven one *even if the unproven one scores higher* — so a proven Low can be
+canonical over an unproven Critical. Severity breaks ties among equally-proven
+members, and lowest lexicographic id breaks the rest.
 
 That is the whole algorithm: union on exact equality of either signal. No
 similarity threshold, no *O(N²)* scan, no cap on distinct root causes — order
@@ -221,8 +228,8 @@ These cases are pinned in [`tests/test_finding_dedup_py.py`](https://github.com/
 `bin/cluster-findings` writes `FINDING-CLUSTERS.md` (one row per cluster,
 sorted by max-member severity then size), stamps a `Cluster:` line into
 each member report, and drops a `.dup-of` marker in every non-canonical
-member pointing at the canonical FIND. The canonical is the
-highest-severity member, ties broken by lexicographic id.
+member pointing at the canonical FIND. The canonical is picked by
+evidence rank first, then severity, then lexicographic id (see above).
 
 Every merge is deterministic: a multi-member cluster was auto-merged on an
 identical `(class, file, line)` site or normalized crash state, and a

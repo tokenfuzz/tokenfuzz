@@ -89,7 +89,7 @@ The other ecosystems differ only in the `[runner]` fields:
 | Ecosystem | `build_system` | `bin` | `args` | Notable `env` |
 | --- | --- | --- | --- | --- |
 | Python | `python` | `python3` | `["{TESTCASE}"]` | `PYTHONDEVMODE=1` |
-| Go | `go` | `go` | `["run", "{TESTCASE}"]` | `GORACE=halt_on_error=1` |
+| Go | `go` | `go` | `["run", "{TESTCASE}"]` | `GOFLAGS=-mod=mod`, `GORACE=halt_on_error=1` |
 | Rust | `cargo` | `cargo` | `["run", "--quiet", "--manifest-path", "{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]` | — |
 | Swift | `swift` | `swift` | `["run", "--quiet", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]` | — |
 | Ruby | `bundler` | `ruby` | `["{TESTCASE}"]` | — |
@@ -109,6 +109,10 @@ A few ecosystem notes:
 - **Rust** can opt into a sanitizer build later — set
   `[sanitizer] enabled = ["asan"]` once you have a nightly+sanitizer
   build.
+- **Swift** is the exception to the "non-native → findings-only" rule
+  in the decision tree: its seeded `[runner]` compiles the package with
+  `-sanitize={SWIFT_SANITIZER}`, so a sanitizer diagnostic routes to
+  `crashes/` like a C/C++ target rather than staying findings-only.
 - **Java** — single-file Java is supported (JEP 330): `java <file.java>`
   compiles and runs in one shot. This is the seeded default. When seeding,
   `bin/setup-target`

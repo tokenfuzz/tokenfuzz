@@ -7476,7 +7476,7 @@ update_subsystem_dry_streaks() {
 # single investigation. Now all agents get a PERSISTENT prompt that tells them to
 # continue their previous investigation OR pick a new strategy if stuck.
 #
-# Agent count is NUM_AGENTS (default 4). Agents coordinate via state files
+# Agent count is NUM_AGENTS (default 3). Agents coordinate via state files
 # to avoid overlapping subsystems; the natural spread across browser-mode
 # and shell-mode subsystems falls out of that check.
 

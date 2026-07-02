@@ -162,8 +162,10 @@ does not cost a triage round on Tuesday and Wednesday too.
 The harness records each iteration's usage in the structured session
 index (`logs/index.jsonl`). Backends report usage differently — Claude
 and Codex emit real token counts, while the `gemini` backend (`agy`)
-surfaces no usage telemetry, so its rows leave the real token fields
-null and carry only the build-time `tokens.prompt_estimate`.
+surfaces no usage telemetry, so its token counts are **estimated** from
+the prompt bytes and transcript length (roughly 4 characters per token)
+and flagged `estimated: true` rather than measured. Treat those rows as
+approximate, not exact.
 
 The numbers to watch in `logs/index.jsonl`:
 

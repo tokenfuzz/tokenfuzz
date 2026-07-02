@@ -118,6 +118,9 @@ Notes:
 - `--strategy S1`…`S8` pins one investigation strategy (rotation is
   suspended) — handy for comparing runs. `--skip-recon` runs the audit
   loop without the cold-start recon seed on a multi-iteration run.
+- `--new-target <slug>` seeds a starter `output/<target>/target.toml`
+  and exits without launching an audit (equivalent to the config-only
+  half of `bin/setup-target`).
 - Use `--model` with the `claude` or `codex` backend. The harness
   forwards it to that backend's native model flag. For `oss`,
   `--model` is required and names the local model served through
@@ -302,10 +305,10 @@ search cannot flood a prompt. They are plain CLI tools, and they are
 just as useful to an operator poking at a large target tree:
 
 ```bash
-bin/rg-safe <pattern> targets/$TARGET/src     # rg with line + byte caps
-bin/peek targets/$TARGET/src/parser.c 200 260 # clamped line-range view
-bin/peek <pattern> targets/$TARGET/src/file.c # clamped grep-with-context
-bin/show-patch <commit> [paths...]            # git show with narrow context + caps
+bin/rg-safe <pattern> targets/$TARGET/src       # rg with line + byte caps
+bin/peek targets/$TARGET/src/parser.c:200-260   # clamped line-range view (FILE:START-END)
+bin/peek <pattern> targets/$TARGET/src/file.c   # clamped grep-with-context
+bin/show-patch <commit> [paths...]              # git show with narrow context + caps
 ```
 
 Each prints a footer when a cap fires, so truncation is visible
@@ -412,6 +415,7 @@ reading the normal review output:
 ```bash
 bin/export-repro CRASH-001-1 --slug "$TARGET"
 bin/severity --report "$RESULTS/crashes/CRASH-001-1/"
+bin/severity-sweep "$RESULTS"
 bin/validate-finding --finding "$RESULTS/findings/FIND-001" --target-path "targets/$TARGET" --backend "$BACKEND"
 bin/enrich-report "$RESULTS/crashes/CRASH-001-1/report.md" --slug "$TARGET"
 bin/find-crash-testcase "$RESULTS/crashes/CRASH-001-1"
@@ -424,6 +428,10 @@ bin/cluster-findings "$RESULTS"
 - `bin/severity` recomputes the CVSS severity for a crash or finding
   from its report and `target.toml`, offline. `--batch <results-dir>`
   scores every `crashes/CRASH-*/` underneath.
+- `bin/severity-sweep` re-scores every canonical cluster representative
+  under a results dir and prints one CSV row per crash/finding — the
+  reproducible way to diff old-vs-new severities after changing the
+  scorer. Read-only; also accepts `--batch output/benchmark`.
 - `bin/validate-finding` — re-runs the finding substance gate on a
   candidate report or recon row.
 - `bin/enrich-report` — inlines source snippets, patch excerpts, and
@@ -516,6 +524,18 @@ cross-backend page. Either way it refreshes `benchmark-result.{md,html}` and
 the cluster reports and does not rebuild each crash's `export-repro` report
 bundle. See [Benchmarking](../concepts/benchmark.md#regenerating-results-after-code-changes).
 
+To hand a completed benchmark run to someone else, package it into a
+self-contained, path-scrubbed archive:
+
+```bash
+bin/export-benchmark --backend "$BACKEND" --target "$TARGET" --format zip
+```
+
+`bin/export-benchmark` takes the same `--backend` / `--target` / `--run-id`
+/ `--bench-root` selectors as `bin/benchmark`, writes `zip`, `tar`, or `dir`
+output (`--format`, `--out`), and scrubs local paths so the archive is safe
+to share.
+
 ## Helpers the harness runs for you
 
 The remaining commands in `bin/` are invoked by the harness itself.
@@ -529,7 +549,7 @@ directory listing from being mysterious:
 | `bin/rank-work` | `bin/audit` | Builds and ranks the concrete work cards agents claim. |
 | `bin/patch-cards` | `bin/audit` | Builds S1 prior-fix cards from the target's recent fix commits. |
 | `bin/peer-fix-cards` | `bin/audit` | Builds S6 cards from the `[s6_peers]` projects in `target.toml`. |
-| `bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`, `bin/run-tsan` | `bin/probe` | Per-sanitizer single-shot execution wrappers (browser, JS, generic, and fuzz modes). |
+| `bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`, `bin/run-tsan` | `bin/probe` | Per-sanitizer single-shot execution wrappers (generic, JS, and fuzz modes; `run-asan` and `run-ubsan` also drive browser mode). |
 | `bin/run-sanitizer-multi` | `bin/probe --confirm`, `export-repro` | Multi-run normalizer (default 5 runs, `SANITIZER_RUNS` overrides) that measures the reproduction rate. `bin/run-asan-multi` is a compatibility shim forwarding to it. |
 | `bin/triage-fuzz-crashes` | triage | Triages libFuzzer artifacts under `fuzz-crashes/` into a single `fuzz-leads.md` agents can pick leads from. |
 | `bin/render-md` | triage, clustering, benchmark | Renders a markdown report or index to its styled `.html` sibling. |

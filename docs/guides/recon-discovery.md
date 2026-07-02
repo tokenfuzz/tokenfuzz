@@ -64,13 +64,17 @@ The standalone command writes the same two files the auto-run does:
    suspicious arithmetic, unchecked input, lifetime patterns,
    protocol-state quirks. The agent is asked for **recall, not
    precision**; it is told *not* to pre-filter.
-4. **A validator votes each candidate once.** After the sweep, an
-   independent model reviews every emission and votes it Promote,
-   Reject, or Uncertain. Promoted candidates move to the front of
-   the audit queue; rejected and uncertain ones are demoted but
-   retained, so later sanitizer evidence can still overturn the
-   vote. The verdict is recorded on the work card — the validator
-   does not keep re-ranking the queue during the audit.
+4. **A validator gate votes the candidates.** After the sweep, near-duplicate
+   emissions are collapsed to one representative each (so the same defect
+   spotted from several slices is judged once), a triage pass votes each
+   representative Promote, Reject, or Uncertain, and the strongest survivors
+   get a deeper independent second look. That deep pass is bounded, so a
+   thousand-candidate emission cannot blow up validation cost — anything past
+   the cap keeps its triage verdict, marked Uncertain. Promoted candidates
+   move to the front of the audit queue; rejected and uncertain ones are
+   demoted but retained, so later sanitizer evidence can still overturn the
+   vote. The verdict is recorded on the work card — the validator does not
+   keep re-ranking the queue during the audit.
 5. **Candidates become work cards for `bin/audit`.** When the audit
    starts, the deep agents pick up recon-derived cards before falling
    back to their own ranked queue. If the target enables multiple
