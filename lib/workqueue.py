@@ -1069,6 +1069,11 @@ def iter_source_files(root: Path, max_files: int = 0) -> Iterable[Path]:
         "node_modules",
         "__pycache__",
     }
+    # When the target is a git/hg checkout, restrict the surface to VCS-tracked
+    # files so untracked scratch (agent PoCs, prior-run leftovers) never becomes
+    # a work card. None => not a checkout / probe failed => audit everything.
+    import target_config  # lazy: see import note at top of file
+    tracked = target_config.vcs_tracked_files(root)
     seen = 0
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
@@ -1083,6 +1088,8 @@ def iter_source_files(root: Path, max_files: int = 0) -> Iterable[Path]:
                 continue
             rel = relpath(path, root)
             if is_excluded_work_path(rel):
+                continue
+            if tracked is not None and rel not in tracked:
                 continue
             seen += 1
             yield path

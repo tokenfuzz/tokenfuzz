@@ -346,6 +346,91 @@ PY
     --output "$dormant_cards" --quiet
   assert_eq 1 "$(grep -c . "$dormant_cards" 2>/dev/null || echo 0)" \
     "patch-cards: dormant target (all commits pre-lookback) still yields S1 cards"
+
+  # ── untracked scratch is dropped from the audit source surface ──
+  # Agent PoCs / prior-run leftovers dropped into a checkout are untracked and
+  # must never become work cards or recon slices. The name deliberately avoids
+  # the test*/fuzz* stems is_excluded_work_path already filters, so this
+  # isolates the VCS-tracked filter. A plain (non-VCS) tree must fall open and
+  # keep the same file (tracked probe returns None).
+  printf 'int scratch;\n' > "$git_target/poc_scratch.c"       # untracked, at root
+  printf 'int scratch;\n' > "$git_target/src/poc_scratch.c"   # untracked, inside src/
+  printf 'int staged;\n'  > "$git_target/src/staged.c"        # staged, not committed
+  git -C "$git_target" add src/staged.c
+  plain_tree="$TEST_TMPDIR/plain-tree"
+  mkdir -p "$plain_tree"
+  printf 'int scratch;\n' > "$plain_tree/poc_scratch.c"
+  untracked_out=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$git_target" "$plain_tree" <<'PY'
+import sys
+import workqueue as W, recon_slicer as RS, target_config as TC
+from pathlib import Path
+gitroot, plain = Path(sys.argv[1]), Path(sys.argv[2])
+work = {p.name for p in W.iter_source_files(gitroot)}
+slic = {p.name for p in RS.collect_source_files(gitroot)}
+git_ok = ("poc_scratch.c" not in work and "alpha.c" in work
+          and "poc_scratch.c" not in slic and "alpha.c" in slic
+          and "staged.c" in work and "staged.c" in slic  # staged-but-uncommitted is tracked
+          and TC.vcs_tracked_files(gitroot) is not None)
+# recon slices the detected source root (src/), which has no .git of its own;
+# the tracked filter must still apply, keyed via the checkout root passed as
+# checkout_root. Without it, asking about a bare src/ returns None and the
+# filter silently falls open — so also assert that fall-open on a bare subtree.
+sub = {p.name for p in RS.collect_source_files(gitroot / "src", gitroot)}
+bare = {p.name for p in RS.collect_source_files(gitroot / "src")}
+sub_ok = ("poc_scratch.c" not in sub and "alpha.c" in sub
+          and "poc_scratch.c" in bare)
+pwork = {p.name for p in W.iter_source_files(plain)}
+plain_ok = ("poc_scratch.c" in pwork and TC.vcs_tracked_files(plain) is None)
+print("ok" if (git_ok and sub_ok and plain_ok) else
+      f"FAIL git_ok={git_ok} sub_ok={sub_ok} plain_ok={plain_ok} "
+      f"work={sorted(work)} slice={sorted(slic)} sub={sorted(sub)}")
+PY
+)
+  assert_eq "ok" "$untracked_out" \
+    "source surface: untracked scratch dropped in git checkout (root + src/ subtree), kept in non-VCS tree"
+
+  # ── committed submodule source stays in scope ──
+  # A checked-out submodule's tracked source (e.g. pcre2's deps/sljit, which
+  # its JIT build compiles) is real audit surface. Plain `git ls-files` lists
+  # only the gitlink dir, so the tracked filter must recurse into submodules or
+  # it would see the nested source on disk yet drop every file as "untracked".
+  # The submodule is placed at ext/ (not deps/vendor/third_party, which recon
+  # skips by name) so both walkers exercise the tracked filter, not skip-dirs.
+  subm_child="$TEST_TMPDIR/subm-child"
+  subm_super="$TEST_TMPDIR/subm-super"
+  git init -q "$subm_child"
+  git -C "$subm_child" config user.email "test@example.invalid"
+  git -C "$subm_child" config user.name "Test User"
+  printf 'int nested;\n' > "$subm_child/nested.c"
+  git -C "$subm_child" add nested.c
+  git -C "$subm_child" commit -q -m "init submodule"
+  git init -q "$subm_super"
+  git -C "$subm_super" config user.email "test@example.invalid"
+  git -C "$subm_super" config user.name "Test User"
+  mkdir -p "$subm_super/src"
+  printf 'int main_;\n' > "$subm_super/src/main.c"
+  git -C "$subm_super" add src/main.c
+  git -C "$subm_super" commit -q -m "init super"
+  if git -C "$subm_super" -c protocol.file.allow=always \
+       submodule add -q "$subm_child" ext/sub 2>/dev/null; then
+    git -C "$subm_super" commit -q -m "add submodule"
+    subm_out=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$subm_super" <<'PY'
+import sys
+import workqueue as W, recon_slicer as RS
+from pathlib import Path
+root = Path(sys.argv[1])
+work = {p.relative_to(root).as_posix() for p in W.iter_source_files(root)}
+slic = {p.relative_to(root).as_posix() for p in RS.collect_source_files(root, root)}
+ok = ("ext/sub/nested.c" in work and "src/main.c" in work
+      and "ext/sub/nested.c" in slic and "src/main.c" in slic)
+print("ok" if ok else f"FAIL work={sorted(work)} slice={sorted(slic)}")
+PY
+)
+    assert_eq "ok" "$subm_out" \
+      "source surface: committed submodule source kept in scope (recurse-submodules)"
+  else
+    pass "source surface: submodule test skipped (git submodule add unavailable)"
+  fi
 else
   pass "patch-cards: VCS patch-cards skipped (git unavailable)"
 fi
@@ -381,6 +466,25 @@ PY
 )
   assert_eq "new noold" "$hg_lb_files" \
     "patch-cards: hg default 5-year lookback excludes commits older than the window"
+
+  # ── untracked scratch dropped in an hg checkout ──
+  # `hg files` lists tracked (committed + added) paths only; an unadded scratch
+  # file must be filtered from the source surface just like the git case.
+  printf 'int s;\n' > "$hg_lb/poc_scratch.c"   # untracked (never `hg add`ed)
+  hg_untracked_out=$(HGRCPATH=/dev/null PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$hg_lb" <<'PY'
+import sys
+import workqueue as W, target_config as TC
+from pathlib import Path
+root = Path(sys.argv[1])
+tracked = TC.vcs_tracked_files(root)
+work = {p.name for p in W.iter_source_files(root)}
+ok = (tracked is not None and "poc_scratch.c" not in work
+      and ("old.c" in work or "new.c" in work))
+print("ok" if ok else f"FAIL tracked_is_none={tracked is None} work={sorted(work)}")
+PY
+)
+  assert_eq "ok" "$hg_untracked_out" \
+    "source surface: untracked scratch dropped in hg checkout"
 else
   pass "patch-cards: hg lookback skipped (hg unavailable)"
 fi

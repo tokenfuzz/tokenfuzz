@@ -173,16 +173,29 @@ def find_source_root(target_path: Path) -> Path:
     return target_path
 
 
-def collect_source_files(root: Path) -> list[Path]:
-    """All auditable source files under root, modulo SKIP_DIR_NAMES."""
+def collect_source_files(root: Path, checkout_root: Path | None = None) -> list[Path]:
+    """All auditable source files under root, modulo SKIP_DIR_NAMES and — when
+    the target is a git/hg checkout — untracked scratch files (agent PoCs,
+    prior-run leftovers).
+
+    root is the subtree being sliced; find_source_root often descends into
+    src/, which has no .git of its own. checkout_root is the target directory
+    that owns the VCS metadata — the tracked set and membership test are keyed
+    to it, since asking vcs_tracked_files about a bare src/ would return None
+    and silently disable the filter. It defaults to root for a whole-tree
+    slice. None from vcs_tracked_files (non-VCS tree / probe failure) means no
+    filter, so a plain-tarball target still slices its whole source."""
+    base = checkout_root or root
+    tracked = target_config.vcs_tracked_files(base)
     out: list[Path] = []
     for path in root.rglob("*"):
         if not path.is_file():
             continue
         if path.suffix not in SOURCE_EXTS:
             continue
-        rel_parts = path.relative_to(root).parts
-        if any(_is_skipped_dir(part) for part in rel_parts[:-1]):
+        if any(_is_skipped_dir(part) for part in path.relative_to(root).parts[:-1]):
+            continue
+        if tracked is not None and path.relative_to(base).as_posix() not in tracked:
             continue
         out.append(path)
     out.sort()
@@ -212,7 +225,7 @@ def changed_source_files(target_path: Path, root: Path, ref: str) -> list[Path]:
     except subprocess.CalledProcessError:
         return []
     repo = Path(repo_root)
-    in_scope = set(collect_source_files(root))
+    in_scope = set(collect_source_files(root, target_path))
     out: list[Path] = []
     seen: set[Path] = set()
     for rel in diff.splitlines():
@@ -698,7 +711,7 @@ def main(argv: list[str]) -> int:
             Path(args.out_dir).expanduser().resolve().mkdir(parents=True, exist_ok=True)
             return EXIT_EMPTY_CHANGED_SET
     else:
-        files = collect_source_files(src_root)
+        files = collect_source_files(src_root, target_path)
         print(f"Found {len(files)} source file(s)", file=sys.stderr)
         if not files:
             print("FATAL: no source files found", file=sys.stderr)

@@ -722,6 +722,57 @@ def detect_rev(target_root: str | os.PathLike) -> str:
     return ""
 
 
+def vcs_tracked_files(target_root: str | os.PathLike) -> "set[str] | None":
+    """Set of VCS-tracked files under a target checkout — root-relative,
+    forward-slash — or None when the target is not a git/hg checkout (or the
+    VCS query fails/times out).
+
+    Purpose: drop untracked scratch files (agent-authored PoCs and prior-run
+    leftovers dropped into the target tree) from the audit source surface, so
+    they never become ranked work cards or recon slices. A file the project's
+    own VCS does not track is not the product's source.
+
+    "Tracked" means committed or staged/added-but-uncommitted; untracked and
+    ignored files are excluded. An empty set (a checkout that tracks no files)
+    is a valid answer, distinct from None.
+
+    None means "do not filter": callers fall open and audit everything, so a
+    plain-tarball target or a transient VCS hiccup never hides real source.
+    Both `git ls-files` and `hg files` emit paths relative to the checkout
+    root with forward slashes, matching how the source walkers key files.
+
+    Nested checkouts count as tracked: git submodules (--recurse-submodules)
+    and hg subrepos (-S) are walked so their committed source — e.g. pcre2's
+    deps/sljit, which its JIT build compiles — is kept in scope. Without
+    recursion the parent lists only the gitlink/subrepo directory, so the
+    walker would see the nested source on disk but find no matching tracked
+    entry and drop all of it.
+
+    Paths are read as bytes and decoded with os.fsdecode (the NUL-delimited
+    `-z`/`-0` output is raw, unquoted bytes). fsdecode is the same
+    surrogateescape roundtrip os.walk/pathlib use for on-disk names, so a
+    non-UTF-8 tracked path is preserved and still matches the walker's key —
+    it is not dropped, and it never raises a decode error.
+    """
+    root = Path(target_root)
+    repo_type = detect_repo_type(root)
+    if repo_type == "git":
+        cmd = ["git", "-C", str(root), "ls-files", "--recurse-submodules", "-z"]
+    elif repo_type == "hg":
+        cmd = ["hg", "--cwd", str(root), "files", "-S", "-0"]
+    else:
+        return None
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        # Fall open on a VCS failure — missing binary or timeout. A tooling
+        # hiccup must never hide real source.
+        return None
+    if out.returncode != 0:
+        return None
+    return {os.fsdecode(p) for p in out.stdout.split(b"\0") if p}
+
+
 # ─── Seed a starter target.toml ─────────────────────────────────────
 
 _BROWSER_SLUGS = {"firefox", "chromium", "webkit", "servo"}
