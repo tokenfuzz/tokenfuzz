@@ -277,10 +277,13 @@ llm_known_backend "$BACKEND" || {
 }
 
 # Validator runs in a tool-using stream-json shape (it needs to read
-# source). 120 turns matches the prior claude budget; codex and the
-# gemini backend (Antigravity CLI) self-pace within $TIMEOUT_SECS.
+# source). max_turns 0 means "no turn cap" — the wall-clock $TIMEOUT_SECS
+# is the single budget for every backend, so claude validates as deeply as
+# codex and the gemini backend, which only self-pace within $TIMEOUT_SECS
+# (they ignore max_turns). A turn cap only ever bound claude and, at its
+# turn rate, sat well above what fits in the wall budget anyway.
 declare -a validator_flags=()
-llm_agent_flags "$BACKEND" validator_flags "${MODEL:-}" 120 "$SCRIPT_ROOT,$TARGET_PATH"
+llm_agent_flags "$BACKEND" validator_flags "${MODEL:-}" 0 "$SCRIPT_ROOT,$TARGET_PATH"
 
 # Claude refuses --dangerously-skip-permissions under root unless
 # IS_SANDBOX=1. Other backends ignore it. Setting unconditionally is
