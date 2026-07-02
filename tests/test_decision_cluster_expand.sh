@@ -144,5 +144,17 @@ LLM_DECISION_TIMEOUT=900 \
 assert_eq "timeout=900" "$got" "a higher operator override still wins over the floor"
 unset -f llm_decide
 
+# 8. _triage_decision_timeout floors: the agentic gates read the report/tree
+# before voting, so they get headroom above the base classification timeout;
+# non-reading gates keep the base; a higher operator value always wins.
+LLM_DECISION_TIMEOUT=45
+assert_eq 600 "$(_triage_decision_timeout cluster_expand)" "cluster_expand floors to 600"
+assert_eq 180 "$(_triage_decision_timeout crash_confirm)"  "crash_confirm floors to 180"
+assert_eq 180 "$(_triage_decision_timeout legit_crash)"    "legit_crash floors to 180"
+assert_eq 45  "$(_triage_decision_timeout crash_triage)"   "crash_triage keeps the base timeout (no floor)"
+assert_eq 45  "$(_triage_decision_timeout find_quality)"   "find_quality keeps the base timeout (no floor)"
+LLM_DECISION_TIMEOUT=300
+assert_eq 300 "$(_triage_decision_timeout crash_confirm)"  "operator timeout above the floor still wins"
+
 teardown_test_env
 summary

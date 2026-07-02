@@ -255,7 +255,7 @@ _triage_gate_quorum_vote() {
   _TRIAGE_GATE_VOTES=0
   local rejects=0 vote_json verdict
   while :; do
-    vote_json=$(printf '%s' "$prompt" | llm_decide "$decision" "$keys" "$LLM_DECISION_TIMEOUT")
+    vote_json=$(printf '%s' "$prompt" | llm_decide "$decision" "$keys" "$(_triage_decision_timeout "$decision")")
     [ -n "$vote_json" ] || return 1
     verdict=$(printf '%s' "$vote_json" | jq -r --arg f "$field" '.[$f]' 2>/dev/null)
     case "$verdict" in
@@ -283,6 +283,24 @@ _triage_gate_quorum() {
   case "$quorum" in ''|*[!0-9]*) quorum=2 ;; esac
   [ "$quorum" -ge 1 ] || quorum=1
   printf '%s' "$quorum"
+}
+
+# Effective decision timeout for a gate. The agentic gates read the crash
+# report or source tree before voting, so under parallel backend contention
+# they can exceed the base decision timeout; a too-short cap kills and
+# discards the call (the crash then retries every housekeeping pass). Floor
+# those decisions to enough headroom to absorb the spikes — cluster_expand
+# explores the tree and needs the most; the confirm gates read one report and
+# need less. Non-reading classification gates keep the base timeout. The floor
+# is a minimum, so fast calls still return early and a higher operator
+# LLM_DECISION_TIMEOUT override still wins.
+_triage_decision_timeout() {
+  local decision="$1" base="$LLM_DECISION_TIMEOUT" floor=0
+  case "$decision" in
+    cluster_expand) floor=600 ;;
+    crash_confirm|legit_crash) floor=180 ;;
+  esac
+  if [ "$base" -lt "$floor" ]; then printf '%s' "$floor"; else printf '%s' "$base"; fi
 }
 
 # How many crash/finding dirs are triaged concurrently. Each per-dir
@@ -3211,14 +3229,9 @@ _cluster_expand_decide() {
     --var "id=${id}" \
     --var "frames=${frames}" \
     --var "source_block=${source_block}") || return 1
-  # cluster_expand is the one AGENTIC decision: every backend investigates the
-  # tree to name siblings, so it runs far longer than the classification gates.
-  # A too-short cap kills and discards the call (the crash then retries every
-  # housekeeping pass); give it a generous ceiling. The cap is a max, so fast
-  # calls still return early, and a higher operator override still wins.
-  local timeout="$LLM_DECISION_TIMEOUT"
-  if [ "$timeout" -lt 600 ]; then timeout=600; fi
-  printf '%s' "$prompt" | llm_decide cluster_expand "rows" "$timeout"
+  # cluster_expand investigates the crash tree to name siblings, so it gets the
+  # widest headroom (see _triage_decision_timeout).
+  printf '%s' "$prompt" | llm_decide cluster_expand "rows" "$(_triage_decision_timeout cluster_expand)"
 }
 
 # Append cluster-expansion rows to a state file.
