@@ -1008,5 +1008,10 @@ assert_dir_exists "$lock_root/codex/20260104-010002" \
 assert_file_not_exists "$guard_lock" \
   "T15t: the run releases its target+backend lock on exit"
 
+# ── T22: shallow checkout warning is wired into benchmark startup ────────
+assert_file_contains "$BENCH" 'target_git_is_shallow_checkout "\$SCRIPT_ROOT/targets/\$TARGET_SLUG"' \
+  "T22a: benchmark checks for shallow git targets"
+assert_file_contains "$BENCH" 'S1 prior-fix history and benchmark work-card queues may be incomplete' \
+  "T22b: benchmark explains shallow checkout impact"
 
 summary

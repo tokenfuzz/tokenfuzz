@@ -2730,6 +2730,10 @@ assert_file_contains "$SCRIPT_ROOT/bin/audit" 'Re-probe rather than trust the ex
   "build-freshness: success is re-probed, not inferred from setup-target exit code"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'fresh|skip) return 0' \
   "build-freshness: fresh or skip short-circuits without building"
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'target_git_is_shallow_checkout "\$TARGET_ROOT"' \
+  "startup warning: bin/audit checks for shallow git targets"
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'S1 prior-fix history and patch-card queues may be incomplete' \
+  "startup warning: bin/audit explains shallow checkout impact"
 # Must run BEFORE the harness canary (which would otherwise smoke-test a stale
 # build).
 _bf_ln=$(grep -n '^preflight_build_freshness$' "$SCRIPT_ROOT/bin/audit" | tail -1 | cut -d: -f1)

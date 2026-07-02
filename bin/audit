@@ -2891,6 +2891,9 @@ audit_acquire_instance_lock
 # One consolidated agent-pool decision line. Logged after target
 # classification so the message describes the *actual* pool shape the
 # audit will run with, not the early defaults.
+if target_git_is_shallow_checkout "$TARGET_ROOT"; then
+  log "WARN: target git checkout is shallow; S1 prior-fix history and patch-card queues may be incomplete. Run: git -C \"$TARGET_ROOT\" fetch --unshallow" | tee -a "$INDEX"
+fi
 if [ "$IS_BROWSER_TARGET" -eq 1 ]; then
   log "Agent pool: ${NUM_AGENTS} worker(s) total — ${BROWSER_AGENTS} browser-mode + ${SHELL_AGENTS} shell-mode (browser target: ${TARGET_SLUG}). Set BROWSER_AGENTS / SHELL_AGENTS in the environment to override." | tee -a "$INDEX"
 else

@@ -264,5 +264,53 @@ TARGET_ATTACKER_CONTROLS=()
 target_load_toml "$TEST_TMPDIR/dup.toml"
 assert_eq "bytes,timing" "$(target_attacker_controls_csv)" "duplicate tokens collapsed in csv output"
 
+# ───────────────────────────────────────────────────────────────────
+# 11. Shallow git checkout detection covers normal clones and worktrees
+# ───────────────────────────────────────────────────────────────────
+
+if command -v git >/dev/null 2>&1; then
+  git_src="$TEST_TMPDIR/shallow-src"
+  git_full="$TEST_TMPDIR/full-clone"
+  git_shallow="$TEST_TMPDIR/shallow-clone"
+  git_worktree="$TEST_TMPDIR/shallow-worktree"
+  mkdir -p "$git_src/src"
+  git -C "$git_src" init -q
+  git -C "$git_src" config user.email "test@example.invalid"
+  git -C "$git_src" config user.name "Test User"
+  printf 'int a;\n' > "$git_src/src/a.c"
+  git -C "$git_src" add src/a.c
+  git -C "$git_src" commit -q -m "initial"
+  printf 'int b;\n' > "$git_src/src/b.c"
+  git -C "$git_src" add src/b.c
+  git -C "$git_src" commit -q -m "second"
+
+  git clone -q "file://$git_src" "$git_full" 2>/dev/null
+  if target_git_is_shallow_checkout "$git_full"; then
+    fail "target_git_is_shallow_checkout: full clone is not shallow" "reported shallow"
+  else
+    pass "target_git_is_shallow_checkout: full clone is not shallow"
+  fi
+
+  git clone -q --depth 1 "file://$git_src" "$git_shallow" 2>/dev/null
+  if [ -f "$git_shallow/.git/shallow" ] && target_git_is_shallow_checkout "$git_shallow"; then
+    pass "target_git_is_shallow_checkout: shallow clone detected"
+  else
+    fail "target_git_is_shallow_checkout: shallow clone detected" "not detected"
+  fi
+
+  if [ -f "$git_shallow/.git/shallow" ] \
+      && git -C "$git_shallow" worktree add -q "$git_worktree" HEAD 2>/dev/null; then
+    if target_git_is_shallow_checkout "$git_worktree"; then
+      pass "target_git_is_shallow_checkout: shallow linked worktree detected"
+    else
+      fail "target_git_is_shallow_checkout: shallow linked worktree detected" "not detected"
+    fi
+  else
+    pass "target_git_is_shallow_checkout: shallow linked worktree skipped (worktree unavailable)"
+  fi
+else
+  pass "target_git_is_shallow_checkout: git checks skipped (git unavailable)"
+fi
+
 teardown_test_env
 summary

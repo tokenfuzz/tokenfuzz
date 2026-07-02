@@ -631,6 +631,16 @@ target_detect_rev() {
   python3 "$_TARGET_CONFIG_PY" detect-rev "$1"
 }
 
+# Return 0 when TARGET_ROOT is a shallow git checkout; non-git trees and probe
+# failures return 1 so callers can warn opportunistically.
+target_git_is_shallow_checkout() {
+  local root="$1" out
+  [ -n "$root" ] && [ -d "$root" ] || return 1
+  command -v git >/dev/null 2>&1 || return 1
+  out=$(git -C "$root" rev-parse --is-shallow-repository 2>/dev/null) || return 1
+  [ "$out" = "true" ]
+}
+
 # Seed a starter target.toml by introspecting TARGET_ROOT. Best-effort:
 # generated placeholders are reviewed after the build exists.
 target_seed_toml() {
