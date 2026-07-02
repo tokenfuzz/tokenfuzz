@@ -269,14 +269,120 @@ PY
   git clone -q --depth 1 "file://$shallow_src" "$shallow_clone" 2>/dev/null
   if [ -f "$shallow_clone/.git/shallow" ]; then
     shallow_out=$(TARGET_ROOT="$shallow_clone" TARGET_SLUG="shallow-target" TARGET_REPO_TYPE=git RESULTS_DIR="$git_results" \
-      "$PATCH_CARDS" --limit 10 --output "$TEST_TMPDIR/shallow-cards.jsonl" --quiet 2>&1)
+      "$PATCH_CARDS" --limit 10 --inspect-commits 10 \
+      --output "$TEST_TMPDIR/shallow-cards.jsonl" --quiet 2>&1)
     assert_match 'shallow clone' "$shallow_out" "patch-cards: warns on shallow clone"
     assert_match 'fetch --unshallow' "$shallow_out" "patch-cards: shallow warning names the remedy"
+    # A shallow-boundary commit diffs against the empty tree, so `git show`
+    # reports pre-existing files as touched. src/alpha.c is the oldest file in
+    # the fixture and predates the depth-1 tip; it must NOT be fabricated onto a
+    # card's touched_files (the codex-reported S1 false positive).
+    boundary_leak=$(python3 - "$TEST_TMPDIR/shallow-cards.jsonl" <<'PY'
+import json, sys
+touched = set()
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if line:
+        touched |= set(json.loads(line).get("touched_files", []))
+print("leak" if "src/alpha.c" in touched else "clean")
+PY
+)
+    assert_eq "clean" "$boundary_leak" \
+      "patch-cards: shallow-boundary commit does not fabricate pre-existing touched_files"
   else
     pass "patch-cards: shallow-clone warning (shallow clone unavailable here)"
   fi
+
+  # ── default lookback excludes commits older than the window ──
+  # Two same-scoring defect fixes: one dated well beyond the 5-year lookback,
+  # one recent. The default window (no PATCH_SCAN_WINDOW / --scan-window) must
+  # date-filter the ancient one out and keep the recent one. A fixed absolute
+  # 2010 date keeps the assertion portable (no `date` arithmetic).
+  lookback_target="$TEST_TMPDIR/lookback-target"
+  mkdir -p "$lookback_target/src"
+  git -C "$lookback_target" init -q
+  git -C "$lookback_target" config user.email "test@example.invalid"
+  git -C "$lookback_target" config user.name "Test User"
+  printf 'int o;\n' > "$lookback_target/src/old.c"
+  git -C "$lookback_target" add src/old.c
+  GIT_AUTHOR_DATE="2010-01-01T00:00:00" GIT_COMMITTER_DATE="2010-01-01T00:00:00" \
+    git -C "$lookback_target" commit -q -m "Fix heap overflow in oldmod"
+  printf 'int n;\n' > "$lookback_target/src/new.c"
+  git -C "$lookback_target" add src/new.c
+  git -C "$lookback_target" commit -q -m "Fix heap overflow in newmod"
+  lookback_cards="$TEST_TMPDIR/lookback-cards.jsonl"
+  TARGET_ROOT="$lookback_target" TARGET_SLUG="lookback-target" TARGET_REPO_TYPE=git RESULTS_DIR="$git_results" \
+    "$PATCH_CARDS" --limit 50 --inspect-commits 50 \
+    --output "$lookback_cards" --quiet
+  lb_files=$(python3 - "$lookback_cards" <<'PY'
+import json, sys
+files = set()
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if line:
+        files |= set(json.loads(line).get("touched_files", []))
+print(("new" if "src/new.c" in files else "nonew"),
+      ("old" if "src/old.c" in files else "noold"))
+PY
+)
+  assert_eq "new noold" "$lb_files" \
+    "patch-cards: default 5-year lookback excludes commits older than the window"
+
+  # ── dormant target: every commit predates the lookback → count-only fallback ──
+  # A frozen library whose newest commit is >5 years old must not silently
+  # yield zero S1 cards; the lookback falls back to a count-only scan.
+  dormant_target="$TEST_TMPDIR/dormant-target"
+  mkdir -p "$dormant_target/src"
+  git -C "$dormant_target" init -q
+  git -C "$dormant_target" config user.email "test@example.invalid"
+  git -C "$dormant_target" config user.name "Test User"
+  printf 'int a;\n' > "$dormant_target/src/oldfix.c"
+  git -C "$dormant_target" add src/oldfix.c
+  GIT_AUTHOR_DATE="2009-03-04T00:00:00" GIT_COMMITTER_DATE="2009-03-04T00:00:00" \
+    git -C "$dormant_target" commit -q -m "Fix out-of-bounds read in oldfix"
+  dormant_cards="$TEST_TMPDIR/dormant-cards.jsonl"
+  TARGET_ROOT="$dormant_target" TARGET_SLUG="dormant-target" TARGET_REPO_TYPE=git RESULTS_DIR="$git_results" \
+    "$PATCH_CARDS" --limit 50 --inspect-commits 50 \
+    --output "$dormant_cards" --quiet
+  assert_eq 1 "$(grep -c . "$dormant_cards" 2>/dev/null || echo 0)" \
+    "patch-cards: dormant target (all commits pre-lookback) still yields S1 cards"
 else
   pass "patch-cards: VCS patch-cards skipped (git unavailable)"
+fi
+
+# The default lookback also gates the hg scan (hg -d ">date"); mirror the git
+# lookback test so the Mercurial date-filter path is covered too.
+if command -v hg >/dev/null 2>&1; then
+  hg_lb="$TEST_TMPDIR/hg-lookback"
+  HGRCPATH=/dev/null hg init "$hg_lb"
+  mkdir -p "$hg_lb/src"
+  printf 'int o;\n' > "$hg_lb/src/old.c"
+  HGRCPATH=/dev/null hg -R "$hg_lb" add "$hg_lb/src/old.c" -q
+  HGRCPATH=/dev/null hg -R "$hg_lb" commit -q -u "t <t@t>" -d "2010-01-01 00:00:00" \
+    -m "Fix heap overflow in oldmod"
+  printf 'int n;\n' > "$hg_lb/src/new.c"
+  HGRCPATH=/dev/null hg -R "$hg_lb" add "$hg_lb/src/new.c" -q
+  HGRCPATH=/dev/null hg -R "$hg_lb" commit -q -u "t <t@t>" -d "2026-06-01 00:00:00" \
+    -m "Fix heap overflow in newmod"
+  hg_lb_cards="$TEST_TMPDIR/hg-lookback-cards.jsonl"
+  HGRCPATH=/dev/null TARGET_ROOT="$hg_lb" TARGET_SLUG="hg-lookback" TARGET_REPO_TYPE=hg RESULTS_DIR="$TEST_TMPDIR/hg-results" \
+    "$PATCH_CARDS" --limit 50 --inspect-commits 50 \
+    --output "$hg_lb_cards" --quiet
+  hg_lb_files=$(python3 - "$hg_lb_cards" <<'PY'
+import json, sys
+files = set()
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if line:
+        files |= set(json.loads(line).get("touched_files", []))
+print(("new" if "src/new.c" in files else "nonew"),
+      ("old" if "src/old.c" in files else "noold"))
+PY
+)
+  assert_eq "new noold" "$hg_lb_files" \
+    "patch-cards: hg default 5-year lookback excludes commits older than the window"
+else
+  pass "patch-cards: hg lookback skipped (hg unavailable)"
 fi
 
 # Two stateless workqueue unit checks share ONE python invocation (the
@@ -298,15 +404,17 @@ def check(label, fn):
         print(f"{label}:FAIL {exc}")
 
 def scan_window():
-    assert wq._patch_scan_window(80) == 80 * 25, wq._patch_scan_window(80)
-    os.environ["PATCH_SCAN_WINDOW"] = "500"
-    assert wq._patch_scan_window(80) == 500, wq._patch_scan_window(80)
-    os.environ["PATCH_SCAN_WINDOW"] = "10"        # honoured verbatim, even < limit
-    assert wq._patch_scan_window(80) == 10, wq._patch_scan_window(80)
-    os.environ["PATCH_SCAN_WINDOW"] = "bogus"     # non-numeric → default
-    assert wq._patch_scan_window(80) == 80 * 25, wq._patch_scan_window(80)
-    os.environ["PATCH_SCAN_WINDOW"] = "0"         # non-positive → default
-    assert wq._patch_scan_window(80) == 80 * 25, wq._patch_scan_window(80)
+    default = (wq._PATCH_SCAN_MAX_COUNT, wq._PATCH_SCAN_LOOKBACK_DAYS)
+    # default: 25k-commit cap paired with a 5-year lookback (whichever smaller)
+    assert wq._patch_scan_window() == default, wq._patch_scan_window()
+    os.environ["PATCH_SCAN_WINDOW"] = "500"        # verbatim count, no date floor
+    assert wq._patch_scan_window() == (500, None), wq._patch_scan_window()
+    os.environ["PATCH_SCAN_WINDOW"] = "10"         # honoured verbatim, even tiny
+    assert wq._patch_scan_window() == (10, None), wq._patch_scan_window()
+    os.environ["PATCH_SCAN_WINDOW"] = "bogus"      # non-numeric → default
+    assert wq._patch_scan_window() == default, wq._patch_scan_window()
+    os.environ["PATCH_SCAN_WINDOW"] = "0"          # non-positive → default
+    assert wq._patch_scan_window() == default, wq._patch_scan_window()
     del os.environ["PATCH_SCAN_WINDOW"]
 
 def policy():

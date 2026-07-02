@@ -1789,30 +1789,52 @@ def likely_hash_columns(row: dict) -> list[str]:
     return cols
 
 
-# S1 prior-fix scan window. build_patch_cards scores this many recent
-# commits and emits only the top `limit`; the window must therefore be
-# wider than the output count, or a repo whose tip is dominated by
-# sync-bot / test churn (e.g. mozilla-unified) never reaches a real
-# defect fix. The scan is one `git log` / `hg log` and per-row work is
-# pure-Python — VCS-sourced commit hashes skip subprocess validation —
-# so a wide window is cheap. The multiple is a starting point, not a
-# cap: PATCH_SCAN_WINDOW (or --scan-window) pins an absolute count.
-_PATCH_SCAN_WINDOW_MULT = 25
+# S1 prior-fix scan window. build_patch_cards scores the commits in this
+# window and emits only the top `limit`; the window must therefore be wider
+# than the output count, or a repo whose tip is dominated by sync-bot / test
+# churn (e.g. mozilla-unified) never reaches a real defect fix. The scan is one
+# `git log` / `hg log` and per-row work is pure-Python — VCS-sourced commit
+# hashes skip subprocess validation — so a wide window is cheap.
+#
+# The default is sized for *security* recall, not a fixed commit count. A flat
+# count is the wrong axis: commit velocity varies by orders of magnitude across
+# targets, so one count is a low-velocity project's entire history yet only a
+# thin recent slice of a high-velocity one — starving prior-fix mining exactly
+# where the history is richest. Instead the default scans the most recent
+# _PATCH_SCAN_LOOKBACK_DAYS days, capped at _PATCH_SCAN_MAX_COUNT commits,
+# whichever is smaller: a low-velocity target gets its full recent history, a
+# high-velocity one gets multi-year coverage, and neither scans an unbounded
+# backlog. The count cap is a scan-cost ceiling, not a recall target — it only
+# binds for a repo whose 5-year history alone exceeds it. PATCH_SCAN_WINDOW (or
+# --scan-window) still pins an absolute commit count, honoured verbatim with no
+# date floor, as an escape hatch for an operator who wants a specific raw scan.
+_PATCH_SCAN_MAX_COUNT = 25000
+_PATCH_SCAN_LOOKBACK_DAYS = 5 * 365
 
 
-def _patch_scan_window(limit: int) -> int:
-    """Resolve how many commits build_patch_cards should scan.
+def _patch_scan_window() -> tuple[int, int | None]:
+    """Resolve the S1 scan bound as (max_commits, lookback_days).
 
-    PATCH_SCAN_WINDOW pins an absolute count and is used verbatim when
-    positive (so an operator can deliberately narrow the scan); a non-
-    numeric / non-positive value falls back to the default of a fixed
-    multiple of `limit`. This mirrors the --scan-window flag, which is
-    likewise honoured as-is.
+    Default: the most recent _PATCH_SCAN_LOOKBACK_DAYS days, capped at
+    _PATCH_SCAN_MAX_COUNT commits (whichever is smaller). PATCH_SCAN_WINDOW,
+    when a positive integer, pins an absolute commit count used verbatim with
+    no date floor (lookback_days None) — mirroring the --scan-window flag — so
+    an operator can deliberately widen or narrow the raw scan.
     """
     raw = os.environ.get("PATCH_SCAN_WINDOW", "").strip()
     if raw.isdigit() and int(raw) > 0:
-        return int(raw)
-    return limit * _PATCH_SCAN_WINDOW_MULT
+        return int(raw), None
+    return _PATCH_SCAN_MAX_COUNT, _PATCH_SCAN_LOOKBACK_DAYS
+
+
+# Subprocess ceiling for the `git`/`hg log` window scan. The 25k-commit default
+# makes the log sizeable and hg is slow on a large history, so the old fixed 10s
+# bound could time out on a mega repo and silently return no S1 cards (the empty
+# scan then hits the dormant fallback, which also times out, leaving S1 blind).
+# 60s is ample headroom for the default scan — git finishes in well under a
+# second, hg in a few — while still failing fast on a genuinely stuck log rather
+# than hanging the work-card refresh.
+_VCS_LOG_TIMEOUT = 60
 
 
 def _git_is_shallow(target_root: Path) -> bool:
@@ -1838,21 +1860,54 @@ def _git_is_shallow(target_root: Path) -> bool:
     return out == "true"
 
 
+def _git_shallow_boundary(target_root: Path) -> set[str]:
+    """Full SHAs of the shallow-boundary commits (their parent is truncated).
+
+    `git show`/diff on a boundary commit treats the missing parent as the empty
+    tree, so it reports every file that already existed as "added" — a fix card
+    would then claim files it never touched (an S1 false positive on an
+    externally-supplied shallow checkout). `.git/shallow` is the authoritative
+    list; reading it is cheap and needs no subprocess. Empty when the repo is
+    not shallow or the list can't be read, so a full clone (the harness default)
+    costs nothing and the guard is a no-op.
+    """
+    git_dir = target_root / ".git"
+    if not git_dir.is_dir():
+        return set()
+    shallow = git_dir / "shallow"
+    try:
+        return {ln.strip() for ln in shallow.read_text().splitlines() if ln.strip()}
+    except OSError:
+        return set()
+
+
 def build_patch_cards(
     ctx: Context, limit: int, inspect_commits: int,
     scan_window: int | None = None,
 ) -> list[dict]:
-    if scan_window is None or scan_window <= 0:
-        scan_window = _patch_scan_window(limit)
-    rows: list[dict] = vcs_log_rows(ctx, scan_window)
+    if scan_window is not None and scan_window > 0:
+        count, lookback_days = scan_window, None   # explicit override: verbatim count
+    else:
+        count, lookback_days = _patch_scan_window()
+    rows: list[dict] = vcs_log_rows(ctx, count, lookback_days)
+    if not rows and lookback_days:
+        # Dormant target: its newest commit predates the lookback, so the
+        # date-bounded scan came back empty. Fall back to a count-only scan so
+        # S1 still mines the (stale but real) prior fixes rather than silently
+        # producing nothing and looking like a worthless strategy.
+        rows = vcs_log_rows(ctx, count)
 
     # Surface a shallow clone: it silently caps S1 history depth, so the
-    # operator should know the requested window could not be honoured.
-    if ctx.repo_type == "git" and len(rows) < scan_window \
+    # operator should know the requested window could not be honoured. The
+    # harness itself never shallow-clones (setup-target / export-repro both do
+    # a full clone), so this only fires for an externally-supplied checkout;
+    # deepening is left to the operator rather than run as network I/O in the
+    # audit hot path.
+    if ctx.repo_type == "git" and len(rows) < count \
             and _git_is_shallow(ctx.target_root):
         print(
             f"[patch-cards] {ctx.target_slug}: scanned {len(rows)} commit(s) "
-            f"but a window of {scan_window} was requested — repository is a "
+            f"but a window of {count} was requested — repository is a "
             f"shallow clone, so S1 prior-fix history is truncated. Run "
             f"`git -C {ctx.target_root} fetch --unshallow` for full depth.",
             file=sys.stderr,
@@ -1912,11 +1967,20 @@ def build_patch_cards(
 
     # ── Inspection: spend the commit_files budget on the top rows by
     # pre-score. Ties resolve by idx (recency) for deterministic output.
+    # Skip file lookups on shallow-boundary commits: their diff-against-the-
+    # empty-tree reports pre-existing files as touched, which would fabricate
+    # the card's `touched_files` (empty for a full clone, so this is a no-op
+    # there). The boundary card can still surface on its fix hash alone.
+    shallow_boundary = (
+        _git_shallow_boundary(ctx.target_root) if ctx.repo_type == "git" else set()
+    )
     for entry in sorted(
         parsed, key=lambda e: (-e["prescore"], e["idx"]),
     )[:max(0, inspect_commits)]:
         touched: list[str] = []
         for h in entry["hashes"][:4]:
+            if h in shallow_boundary:
+                continue
             touched.extend(commit_files(ctx, h))
         entry["touched"] = sorted(dict.fromkeys(
             f for f in touched if is_auditable_source_path(f)))
@@ -2008,23 +2072,35 @@ def build_patch_cards(
     return deduped
 
 
-def vcs_log_rows(ctx: Context, limit: int) -> list[dict]:
+def vcs_log_rows(ctx: Context, limit: int,
+                 lookback_days: int | None = None) -> list[dict]:
+    # A positive lookback bounds the scan to commits on or after `since`, so the
+    # window is min(most-recent `limit`, commits within lookback) — this is what
+    # normalizes recall across commit velocity. `since` is an absolute date so
+    # both VCSes parse it identically (git --since / hg -d ">…").
+    since = None
+    if lookback_days and lookback_days > 0:
+        since = (datetime.now(timezone.utc)
+                 - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     if ctx.repo_type == "hg":
+        cmd = [
+            "hg",
+            "-R",
+            str(ctx.target_root),
+            "log",
+            "-l",
+            str(limit),
+            "--template",
+            "{node|short}\t{date|shortdate}\t{desc|firstline}\n",
+        ]
+        if since:
+            cmd += ["-d", f">{since}"]
         try:
             out = subprocess.check_output(
-                [
-                    "hg",
-                    "-R",
-                    str(ctx.target_root),
-                    "log",
-                    "-l",
-                    str(limit),
-                    "--template",
-                    "{node|short}\t{date|shortdate}\t{desc|firstline}\n",
-                ],
+                cmd,
                 stderr=subprocess.DEVNULL,
                 text=True,
-                timeout=10,
+                timeout=_VCS_LOG_TIMEOUT,
             )
         except Exception:
             return []
@@ -2039,19 +2115,22 @@ def vcs_log_rows(ctx: Context, limit: int) -> list[dict]:
         return list(reversed(rows))
     if ctx.repo_type != "git":
         return []
+    git_cmd = [
+        "git",
+        "-C",
+        str(ctx.target_root),
+        "log",
+        "--format=%H%x09%cs%x09%s",
+        f"-n{limit}",
+    ]
+    if since:
+        git_cmd.append(f"--since={since}")
     try:
         out = subprocess.check_output(
-            [
-                "git",
-                "-C",
-                str(ctx.target_root),
-                "log",
-                "--format=%H%x09%cs%x09%s",
-                f"-n{limit}",
-            ],
+            git_cmd,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=10,
+            timeout=_VCS_LOG_TIMEOUT,
         )
     except Exception:
         return []

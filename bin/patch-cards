@@ -21,11 +21,13 @@ def main(argv: list[str]) -> int:
                         "rows by pre-score (defect-keyword / severity / "
                         "revision signal) — not the N newest commits")
     parser.add_argument("--scan-window", type=int, default=None,
-                        help="Commits to scan before ranking down to "
-                        "--limit (default: PATCH_SCAN_WINDOW env, else "
-                        "25x --limit). A wider window surfaces fixes "
-                        "buried under sync-bot / test churn; the scan is "
-                        "a single git/hg log call so it stays cheap.")
+                        help="Absolute commit count to scan before ranking "
+                        "down to --limit, used verbatim with no date floor "
+                        "(default: PATCH_SCAN_WINDOW env, else the most recent "
+                        "5 years capped at 25k commits, whichever is smaller). "
+                        "A wider window surfaces fixes buried under sync-bot / "
+                        "test churn; the scan is a single git/hg log call so it "
+                        "stays cheap.")
     parser.add_argument("--output", help="Output JSONL path; defaults to <RESULTS_DIR>/patch-cards.jsonl")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
