@@ -113,6 +113,16 @@ assert_match 'aws-sigv4-size.*CRASH' "$output" "family: aws-sigv4-size marked wi
 output2=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 2 2>&1)
 assert_match 'version_string *3 testcase' "$output2" "family: version_string_<N> collapses"
 
+# ── 7b. Harness-only scratch is valid under nounset / Bash 3.2 ─────────
+S3="$RESULTS_DIR/scratch-3"
+mkdir -p "$S3"
+cat > "$S3/harness.c" <<'EOF'
+int main(void) { return 0; }
+EOF
+output3=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 3 --files 2>&1)
+assert_not_match 'unbound variable' "$output3" "harness-only: no empty-array nounset failure"
+assert_match '\[scratch-3\] 0 testcases .* 1 harness sources' "$output3" "harness-only: reports harness source"
+
 # ── 8. --terse omits family/newest sections ──────────────────────────
 output_terse=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 1 --terse 2>&1)
 assert_match '\[scratch-1\]' "$output_terse" "terse: header present"

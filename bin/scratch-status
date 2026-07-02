@@ -267,20 +267,22 @@ emit_scratch() {
   local fam_count=0
 
   local tc verdict stem fam mt
-  for tc in "${testcases[@]}"; do
-    verdict=$(verdict_for "$tc")
-    case "$verdict" in
-      CRASH)   n_crash=$((n_crash + 1))   ;;
-      CLEAN)   n_clean=$((n_clean + 1))   ;;
-      EXEC_FAIL) n_execfail=$((n_execfail + 1)) ;;
-      NO_EXEC) n_noexec=$((n_noexec + 1)) ;;
-      ORPHAN)  n_orphan=$((n_orphan + 1)) ;;
-    esac
-    stem="${tc##*/}"
-    fam=$(family_of "$stem")
-    mt=$(mtime_of "$tc")
-    entries+="${mt}"$'\t'"${tc}"$'\t'"${verdict}"$'\t'"${fam}"$'\n'
-  done
+  if [ "$tc_count" -gt 0 ]; then
+    for tc in "${testcases[@]}"; do
+      verdict=$(verdict_for "$tc")
+      case "$verdict" in
+        CRASH)   n_crash=$((n_crash + 1))   ;;
+        CLEAN)   n_clean=$((n_clean + 1))   ;;
+        EXEC_FAIL) n_execfail=$((n_execfail + 1)) ;;
+        NO_EXEC) n_noexec=$((n_noexec + 1)) ;;
+        ORPHAN)  n_orphan=$((n_orphan + 1)) ;;
+      esac
+      stem="${tc##*/}"
+      fam=$(family_of "$stem")
+      mt=$(mtime_of "$tc")
+      entries+="${mt}"$'\t'"${tc}"$'\t'"${verdict}"$'\t'"${fam}"$'\n'
+    done
+  fi
 
   # Header line — always emitted.
   local hdr
