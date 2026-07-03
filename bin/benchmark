@@ -1040,26 +1040,20 @@ sweep_target_tree_for_misplaced_output() {
 # synchronously once the cell has ended resolves the un-gated remainder so a
 # finding counts only when adjudicated. Triage is measurement, not the timed
 # find work, so it correctly runs past the find budget; the gate caches
-# per-FIND, so this adds no LLM calls for already-decided findings. With
-# $2=validator, also runs the independent-validator quorum first — raw
-# model-direct findings have no audit pipeline behind them, harness findings
-# already passed the session's own triage.
+# per-FIND, so this adds no LLM calls for already-decided findings. Both
+# conditions drain through this one gate: find-quality acceptance is the sole
+# confirmation authority the harvest reads (lib/benchmark.py
+# count_confirmed_findings), so model-direct and harness are gated identically,
+# with TARGET_ROOT/TARGET_SLUG threaded so the source-reading trigger step runs
+# for both. A model-direct-only validator quorum once ran first here, but it
+# could never write the accept flag the count reads and only removed findings
+# the harness path kept, so it was dropped (the helper stays for recon).
 drain_cell_find_gate() {
-  local results_dir="$1" mode="${2:-}"
+  local results_dir="$1"
   [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "1" ] || return 0
   [ -n "$results_dir" ] && [ -d "$results_dir/findings" ] || return 0
-  if [ "$mode" = "validator" ]; then
-    local target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
-    if [ ! -d "$target_root" ]; then
-      log "WARN: skipping model-direct findings validator for ${results_dir#$BENCH_DIR/}: target tree missing at $target_root"
-      return 0
-    fi
-    TRIAGE_VALIDATE_BACKEND="$BACKEND" TRIAGE_VALIDATE_MODEL="$model" \
-      triage_validate_confirm_findings "$results_dir/findings" \
-        "$target_root" "$results_dir/findings-rejected" \
-        >/dev/null 2>&1
-  fi
   RESULTS_DIR="$results_dir" ACTIVE_BACKEND="$BACKEND" MODEL="$model" \
+    TARGET_ROOT="$SCRIPT_ROOT/targets/$TARGET_SLUG" TARGET_SLUG="$TARGET_SLUG" \
     validate_find_gate >/dev/null 2>&1 || true
 }
 
@@ -2331,11 +2325,11 @@ for cond in "${COND_ARR[@]}"; do
         status="incomplete"
         provider_unavailable=1
       fi
-      # Gate raw model-direct findings: the independent-validator quorum
-      # (lib/triage_validate.sh) plus the full find-quality gate. A FIND
-      # counts only on acceptance, matching count_confirmed_crashes' rule for
-      # crashes; rejects move to findings-rejected/ before harvest.
-      drain_cell_find_gate "$results_dir" validator
+      # Gate raw model-direct findings through the same find-quality gate the
+      # harness path below uses. A FIND counts only on acceptance, matching
+      # count_confirmed_crashes' rule for crashes; rejects move to
+      # findings-rejected/ before harvest.
+      drain_cell_find_gate "$results_dir"
     else
       results_dir="$(run_harness_cell "$cell_dir" "$exp_name")" || status="failed"
       if [ -f "$cell_dir/.backend-unavailable" ] || [ -f "$cell_dir/.quota-exhausted" ]; then
@@ -2416,11 +2410,7 @@ if [ "$DO_REGENERATE" = "1" ]; then
         "$cell_dir/cell.json" 2>/dev/null)
       [ -n "$_rd" ] && [ -d "$_rd/findings" ] || continue
       log "regenerate: draining find-gate for $(basename "$cell_dir") (${_cond:-?})"
-      if [ "$_cond" = "model-direct" ]; then
-        drain_cell_find_gate "$_rd" validator
-      else
-        drain_cell_find_gate "$_rd"
-      fi
+      drain_cell_find_gate "$_rd"
     done
   fi
 

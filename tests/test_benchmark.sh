@@ -842,10 +842,9 @@ assert_file_not_contains "$dbench/pool/findings/FIND-0001/report.md" 'Pending fi
   "T9r-n: --regenerate did not pool the pending raw finding"
 
 # A regenerate-only artifact tree can outlive the target checkout. In that
-# case the model-direct independent validator has no source tree to review, so
-# it must fail open: leave raw findings in place as unconfirmed, not move them
-# to findings-rejected/ via validate-finding's "target path not found" usage
-# failure.
+# case the model-direct find-gate points TARGET_ROOT at a missing tree, so its
+# source-reading step self-guards and the LLM-disabled drain fails open: raw
+# findings stay in place as unconfirmed, never moved to findings-rejected/.
 missing_target_root="$work/regen-missing-target"
 missing_slug="missing-target-t9r"
 missing_run="missing-run"
@@ -870,8 +869,8 @@ missing_out=$(bash "$BENCH" --target "$missing_slug" --backend codex \
 missing_rc=$?
 assert_eq "0" "$missing_rc" \
   "T9r-o: --regenerate succeeds even when the target checkout is absent"
-assert_match 'WARN: skipping model-direct findings validator' "$missing_out" \
-  "T9r-p: missing target skips the model-direct source validator"
+assert_match 'regenerate: draining find-gate for' "$missing_out" \
+  "T9r-p: missing-target regenerate still drains the find-gate (no validator pre-gate)"
 assert_dir_exists "$missing_cell/findings/FIND-RAW" \
   "T9r-q: missing-target regenerate leaves raw model-direct FIND in place"
 assert_dir_not_exists "$missing_cell/findings-rejected/FIND-RAW" \

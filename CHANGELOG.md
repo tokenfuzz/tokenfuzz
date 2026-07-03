@@ -26,6 +26,13 @@
   agents to build harnesses and corpora, and its scratch is reclaimed after
   harvest — dropping wasted setup that yielded no crashes and hundreds of MB.
 
+- **Symmetric finding confirmation.** Model-direct findings are confirmed by the
+  same single find-quality gate as harness findings. A redundant validator
+  pre-gate — which could reject a finding the scorer would keep but never write
+  the acceptance the count reads — is dropped, ending an asymmetric recall
+  penalty and per-finding validator burn; the gate's source-reading reachability
+  step now runs for both conditions.
+
 - **Decision-class circuit breaker.** A gate that is fast-failing on a
   rate-limited or overloaded backend is paused, arming only on real backend
   errors — never a timeout or a one-off malformed reply — so a throttling storm
