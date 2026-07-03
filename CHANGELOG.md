@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1 - 2026-07-02
+## 1.0.1 - 2026-07-03
 
 - **Frame-ownership scoring.** Harness vs. target code is decided by source
   ownership, not function name, so a real `main`/`free_node`/`operator delete`
