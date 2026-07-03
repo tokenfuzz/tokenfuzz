@@ -242,4 +242,36 @@ assert_eq "1200" "$(xf cached_input_tokens claude "$multi_raw")" \
 assert_eq "55"   "$(xf cache_creation_input_tokens claude "$multi_raw")" \
   "T10d: two result events → cache_creation summed (50+5)"
 
+# ── T11: Claude modelUsage is the whole-session token total ────────
+# Claude's per-result `usage` covers only the final turn; the top-level
+# `modelUsage` block is the session-cumulative total (all turns, all
+# models) and is repeated verbatim across terminal events. Accounting
+# must prefer the largest modelUsage snapshot and must NOT sum the
+# repeats, or a multi-turn cell is mis-billed. Two identical events must
+# yield one snapshot (101), not two (202).
+claude_model_usage_raw="$work/claude-model-usage.raw"
+cat > "$claude_model_usage_raw" <<'EOF'
+{"type":"result","usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40},"modelUsage":{"claude-opus":{"inputTokens":100,"cacheCreationInputTokens":200,"cacheReadInputTokens":300,"outputTokens":400},"claude-haiku":{"inputTokens":1,"cacheCreationInputTokens":2,"cacheReadInputTokens":3,"outputTokens":4}}}
+{"type":"result","usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40},"modelUsage":{"claude-opus":{"inputTokens":100,"cacheCreationInputTokens":200,"cacheReadInputTokens":300,"outputTokens":400},"claude-haiku":{"inputTokens":1,"cacheCreationInputTokens":2,"cacheReadInputTokens":3,"outputTokens":4}}}
+EOF
+
+assert_eq "101" "$(xf input_tokens claude "$claude_model_usage_raw")" \
+  "T11a: Claude modelUsage input = largest snapshot, repeats not summed"
+assert_eq "303" "$(xf cached_input_tokens claude "$claude_model_usage_raw")" \
+  "T11b: Claude modelUsage cache reads = largest snapshot"
+assert_eq "202" "$(xf cache_creation_input_tokens claude "$claude_model_usage_raw")" \
+  "T11c: Claude modelUsage cache creation = largest snapshot"
+assert_eq "404" "$(xf output_tokens claude "$claude_model_usage_raw")" \
+  "T11d: Claude modelUsage output = largest snapshot"
+
+# A later, smaller modelUsage must not displace the largest snapshot
+# (proves max-wins, not last-wins).
+claude_mu_max_raw="$work/claude-mu-max.raw"
+cat > "$claude_mu_max_raw" <<'EOF'
+{"type":"result","usage":{"input_tokens":0,"output_tokens":0},"modelUsage":{"claude-opus":{"inputTokens":900,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":100}}}
+{"type":"result","usage":{"input_tokens":0,"output_tokens":0},"modelUsage":{"claude-opus":{"inputTokens":5,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}}
+EOF
+assert_eq "900" "$(xf input_tokens claude "$claude_mu_max_raw")" \
+  "T11e: largest modelUsage snapshot wins over a later smaller one"
+
 summary

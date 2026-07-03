@@ -71,6 +71,11 @@
   card gate are removed; a missing sanitizer build flag should surface as a
   build-coverage problem, not silently remove critical source from audit scope.
 
+- **Full-session Claude cost.** Benchmark and audit token accounting now read
+  Claude Code's cumulative `modelUsage` when present; the per-result `usage`
+  covers only the final turn, so multi-turn and recon sessions are no longer
+  billed at a fraction of what they actually spent.
+
 ## 1.0.0 - First Version Launch
 
 TokenFuzz 1.0.0 is the first public release of the audit harness: a local,

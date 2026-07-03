@@ -140,6 +140,38 @@ def _find_usage(obj: object) -> dict | None:
     return None
 
 
+def _model_usage_tokens(obj: object) -> dict | None:
+    """Sum Claude Code's top-level `modelUsage` across models.
+
+    Claude's per-result `usage` reports only the final turn, so a
+    multi-turn or resumed session undercounts the model's own spend
+    (measured up to ~24x on recon slices). `modelUsage` is the
+    session-cumulative total keyed by model; its per-model tokens are
+    summed here and priced at the cell's model downstream. Top-level
+    only, so nested JSON in tool output cannot inflate usage.
+    """
+    if not isinstance(obj, dict):
+        return None
+    model_usage = obj.get("modelUsage")
+    if not isinstance(model_usage, dict):
+        return None
+    keymap = {
+        "input": "inputTokens",
+        "cached_input": "cacheReadInputTokens",
+        "cache_creation": "cacheCreationInputTokens",
+        "output": "outputTokens",
+    }
+    out = {"input": 0, "cached_input": 0, "cache_creation": 0, "output": 0}
+    for val in model_usage.values():
+        if not isinstance(val, dict):
+            continue
+        for dst, src in keymap.items():
+            v = val.get(src)
+            if isinstance(v, (int, float)):
+                out[dst] += int(v)
+    return out if any(out.values()) else None
+
+
 def _estimate_tokens(text: str) -> int:
     return math.ceil(len(text) / _CHARS_PER_TOKEN) if text else 0
 
@@ -237,6 +269,15 @@ def extract_usage_from_text(
     # such event holds one invocation's cumulative total, and a cell may
     # contain several (re-invoked / resumed agent). Summing is the only
     # correct reduction; see _TERMINAL_TYPES for why last-wins undercounts.
+    #
+    # Exception: for Claude, prefer the top-level `modelUsage` block. The
+    # foreground `usage` covers only the final turn, while `modelUsage` is
+    # the session-cumulative total (all turns). It repeats verbatim or grows
+    # across terminal events, so the largest snapshot is the session total;
+    # summing it would multiply-count the repeats. Other backends emit no
+    # modelUsage and fall through to the sum below.
+    model_usage_best: dict | None = None
+    model_usage_best_total = 0
     summed = {"input": 0, "cached_input": 0, "cache_creation": 0, "output": 0}
     saw_terminal = False
     for line in raw.splitlines():
@@ -249,6 +290,12 @@ def extract_usage_from_text(
             continue
         if not isinstance(obj, dict) or obj.get("type") not in _TERMINAL_TYPES:
             continue
+        mu = _model_usage_tokens(obj)
+        if mu is not None:
+            total = sum(mu.values())
+            if total > model_usage_best_total:
+                model_usage_best = mu
+                model_usage_best_total = total
         usage = _find_usage(obj)
         if usage is None:
             continue
@@ -262,6 +309,9 @@ def extract_usage_from_text(
             saw_terminal = True
             for k in summed:
                 summed[k] += candidate[k]
+    if model_usage_best is not None:
+        return {"tokens": model_usage_best, "probe": {}, "estimated": False,
+                "backend": backend}
     if saw_terminal:
         return {"tokens": summed, "probe": {}, "estimated": False,
                 "backend": backend}
