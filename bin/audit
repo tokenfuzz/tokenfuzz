@@ -1537,6 +1537,14 @@ configure_active_backend() {
   local backend="$1"
   ACTIVE_BACKEND="$backend"
   MODEL="$(resolve_model)"
+  # Export so child Python tools that import llm_decide in-process
+  # (bin/peer-fix-cards, rank-work's llm_rerank) resolve the same backend,
+  # model, and CLI binary the audit uses, instead of failing
+  # no-backend-set / no-op'ing on a wrong-binary preflight. Held
+  # unexported otherwise. Re-run per backend, so ensemble cycling keeps
+  # the exported set fresh; the inactive backends' bin overrides are
+  # harmless (only the active one is read).
+  export ACTIVE_BACKEND MODEL CLAUDE_BIN CODEX_BIN GEMINI_BIN OPENCODE_BIN
 
   # Output layout: output/<target>[-<experiment>]/<backend>/{results,logs}. Raw model
   # dialogue dumps (session_*.log.raw, recon_*.raw) live under

@@ -704,6 +704,8 @@ assert_file_contains "$SCRIPT_ROOT/bin/audit" 'RATE_LIMIT_DEFAULT_BACKOFF="\$\{R
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'RATE_LIMIT_MAX_BACKOFF="\$\{RATE_LIMIT_MAX_BACKOFF:-1800\}"' "rate limit: max backoff is configurable"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'LLM_DECIDE_COUNTER_FILE="\$LOGDIR/\.llm_decisions_harness"' \
   "llm budget: harness counter is scoped to backend logdir"
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'export ACTIVE_BACKEND MODEL CLAUDE_BIN CODEX_BIN GEMINI_BIN OPENCODE_BIN' \
+  "backend env: backend/model/CLI-binary exported so child llm_decide tools (peer-fix-cards, rank-work rerank) resolve the same backend the audit uses"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'LLM_DECIDE_COUNTER_FILE="\$LOGDIR/\.llm_decisions_\$\{agent_num\}"' \
   "llm budget: agent counters are scoped per agent logdir"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'LLM_DECIDE_MAX_CALLS="\$\{LLM_DECIDE_MAX_CALLS:-1000\}"' \
