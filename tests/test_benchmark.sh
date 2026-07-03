@@ -234,6 +234,23 @@ assert_eq "5" "$(echo "$shv" | jq -r '.tokens.asan_invocations')" \
 assert_eq "1" "$(echo "$shv" | jq -r '.model_refusals')" \
   "T1s4: harvest reads model refusals from sibling logs/ dir"
 
+# ── T1sa: model-direct sanitizer logs imply at least one ASan run ────────
+# The model-direct baseline can run the sanitizer by hand and leave only
+# crashes/CRASH-*/sanitizer.txt, with no harness probe telemetry in
+# logs/index.jsonl. Count confirmed crash artifacts as a lower-bound effort
+# floor so such a cell is not reported as zero sanitizer work.
+mdsan="$work/model-direct-sanitizer"
+mkdir -p "$mdsan/crashes/CRASH-001" "$mdsan/logs"
+printf '%s\n  #0 foo bar\n' "$ASAN_LINE" > "$mdsan/crashes/CRASH-001/sanitizer.txt"
+mdsan_hv=$(python3 "$PY" harvest "$mdsan")
+assert_eq "1" "$(echo "$mdsan_hv" | jq -r '.tokens.asan_invocations')" \
+  "T1sa: sanitizer artifact floors ASan invocation count when no probe index exists"
+printf '{"backend":"codex","tokens":{"input":10,"cached_input":0,"output":1},"probe":{"asan_invocations":7}}\n' \
+  > "$mdsan/logs/index.jsonl"
+mdsan_hv=$(python3 "$PY" harvest "$mdsan")
+assert_eq "7" "$(echo "$mdsan_hv" | jq -r '.tokens.asan_invocations')" \
+  "T1sa2: explicit probe telemetry wins over sanitizer-artifact floor"
+
 # ── T1n: harvest normalizes input across backends + folds cache writes ───
 # Across backends, `input_tokens` means "tokens processed at the full
 # input rate (≥100% of base)" — for claude that's fresh `input` plus

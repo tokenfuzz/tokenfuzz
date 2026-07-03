@@ -1596,6 +1596,12 @@ def harvest(
         default_model=default_model,
         prompt_estimate_fallback=_model_direct_prompt_estimate(results_dir),
     )
+    # Model-direct can leave sanitizer.txt under crashes/ without probe
+    # telemetry; each confirmed crash proves at least one sanitizer run.
+    metrics["tokens"]["asan_invocations"] = max(
+        int(metrics["tokens"].get("asan_invocations") or 0),
+        crash_count,
+    )
     return metrics
 
 
