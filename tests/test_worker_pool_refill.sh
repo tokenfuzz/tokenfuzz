@@ -90,6 +90,7 @@ mkdir -p "$RAW_DIR"
 NUM_AGENTS=3
 
 eval "$(audit_extract_function _launch_agent_into_slot)"
+eval "$(audit_extract_function signal_name_for_exit_status)"
 eval "$(audit_extract_function _finalize_agent_slot)"
 eval "$(audit_extract_function _should_refill_slot)"
 eval "$(audit_extract_function launch_agents_and_wait)"
@@ -138,6 +139,38 @@ assert_eq 1 "$rc" "_should_refill_slot: per-slot cap (1) already reached → fal
 
 _should_refill_slot 1 0 1; rc=$?
 assert_eq 0 "$rc" "_should_refill_slot: under-cap + other running → true"
+
+# ─────────────────────────────────────────────────────────────────────
+# 4. A signal-killed agent (wait status 128+N) is flagged distinctly from a
+#    plain non-zero exit, so an external kill is diagnosable at reap time.
+# ─────────────────────────────────────────────────────────────────────
+: > "$INDEX"
+# Identity normalize so the signal status is not masked to 0 for this case.
+normalize_agent_exit_code() { echo "${2:-0}"; }
+bash -c 'kill -TERM $$' & sig_pid=$!
+_finalize_agent_slot 2 "deep_investigation" "deep_investigation-2-generic-r1" \
+  "$sig_pid" "unknown" "20260528_000003"
+assert_eq 143 "$_slot_rc" "_finalize_agent_slot: reap status is 128+SIGTERM (143)"
+assert_file_contains "$INDEX" "signal-range status 143" \
+  "_finalize_agent_slot: signal-killed agent flagged distinctly from a plain exit"
+# Agents do not run under timeout.py, so the message must not send the reader to
+# a per-agent wrapper log; it points at the agent's own raw session log instead.
+assert_file_not_contains "$INDEX" "timeout.py" \
+  "_finalize_agent_slot: does not cite a non-existent per-agent timeout wrapper"
+assert_file_contains "$INDEX" "session_20260528_000003_deep_investigation-2-generic-r1.log.raw" \
+  "_finalize_agent_slot: points at the agent's own raw session log"
+
+: > "$INDEX"
+normalize_agent_exit_code() { echo "255"; }
+bash -c 'exit 255' & high_pid=$!
+_finalize_agent_slot 2 "deep_investigation" "deep_investigation-2-generic-r1" \
+  "$high_pid" "unknown" "20260528_000004"
+assert_eq 255 "$_slot_rc" "_finalize_agent_slot: preserves high non-signal exit status"
+assert_file_not_contains "$INDEX" "signal-range status 255" \
+  "_finalize_agent_slot: does not mislabel high non-signal exits as signals"
+assert_file_contains "$INDEX" "exited with non-zero code 255" \
+  "_finalize_agent_slot: logs high non-signal exits as ordinary non-zero exits"
+normalize_agent_exit_code() { echo "0"; }
 
 teardown_test_env
 summary

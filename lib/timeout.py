@@ -23,6 +23,28 @@ def _die(msg):
     sys.exit(255)
 
 
+def _log(msg):
+    """Signal-path breadcrumb to stderr (unbuffered). macOS does not record an
+    ordinary SIGTERM anywhere, so the wrapper closest to a killed process is the
+    only place that can name it — the difference between a diagnosable exit and a
+    cell that dies mid-run with no operator-visible cause."""
+    print("tokenfuzz: timeout.py: %s" % msg, file=sys.stderr, flush=True)
+
+
+def _signame(num):
+    try:
+        return signal.Signals(num).name
+    except ValueError:
+        return "SIG%d" % num
+
+
+def _known_signame(num):
+    try:
+        return signal.Signals(num).name
+    except ValueError:
+        return None
+
+
 def _ps_rows(fields, ncols):
     """Rows of `ps -axo <fields>` as int tuples; empty list if ps fails."""
     try:
@@ -140,6 +162,12 @@ def main():
     }
 
     def on_forwarded(signum, _frame):
+        # The wrapper itself was signaled — the kill entered via our parent
+        # (the benchmark cell / orchestrator side), not the child directly.
+        _log("wrapper pid=%d ppid=%d received %s; forwarding to child group %d "
+             "and exiting %d"
+             % (os.getpid(), os.getppid(), _signame(signum), pid,
+                exit_for_signal[signum]))
         kill_group(signal.SIGTERM)
         time.sleep(1)
         kill_group(signal.SIGKILL)
@@ -206,8 +234,30 @@ def main():
             pass
 
     if os.WIFSIGNALED(status):
-        sys.exit(128 + os.WTERMSIG(status))
-    sys.exit(os.WEXITSTATUS(status))
+        term_sig = os.WTERMSIG(status)
+        # The child died from a signal while the wrapper was NOT signaled (that
+        # path exits via on_forwarded above) and we did not time out (that exits
+        # via escalate_and_exit) — so the kill hit the child directly.
+        _log("child pid=%d (%s) killed by %s; exiting %d (wrapper was not "
+             "signaled, so the kill hit the child directly)"
+             % (pid, os.path.basename(cmd[0]), _signame(term_sig),
+                128 + term_sig))
+        sys.exit(128 + term_sig)
+    code = os.WEXITSTATUS(status)
+    term_sig_name = _known_signame(code - 128) if code > 128 else None
+    if term_sig_name:
+        # The child exited *normally* but with a signal-range status (128+N).
+        # It was not signaled directly (that is WIFSIGNALED, above) and we did
+        # not time it out (that exits 124 via escalate_and_exit). This is the
+        # shape a harness cell takes when bin/audit aborts under `set -e` after
+        # an inner foreground command it ran was killed by a signal — the
+        # status propagates up as a plain exit code, so nothing else logs it.
+        _log("child pid=%d (%s) exited %d (128+%s, signal range): not a direct "
+             "kill of the child — a command it ran was terminated by %s and the "
+             "status propagated (e.g. under set -e)"
+             % (pid, os.path.basename(cmd[0]), code, term_sig_name,
+                term_sig_name))
+    sys.exit(code)
 
 
 if __name__ == "__main__":

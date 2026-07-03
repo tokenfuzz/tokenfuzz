@@ -2744,5 +2744,32 @@ else
   fail "build-freshness: preflight runs before the harness canary" "bf=$_bf_ln canary=$_canary_ln"
 fi
 
+# audit_exit_trap: a 128+N exit is annotated so the script's own last line names
+# a signal-driven abort (the harness-r1 shape, otherwise a bare "rc=143"); a
+# normal exit is left unannotated.
+exit_trap_index="$TEST_TMPDIR/exit-trap-index.log"
+: > "$exit_trap_index"
+(
+  INDEX="$exit_trap_index"
+  log() { printf '%s\n' "$*"; }
+  wait_for_background_housekeeping() { :; }
+  audit_release_instance_lock() { :; }
+  eval "$(audit_extract_function signal_name_for_exit_status)"
+  eval "$(audit_extract_function audit_exit_trap)"
+  audit_exit_trap 6981 143 2>/dev/null
+  audit_exit_trap 200 255 2>/dev/null
+  audit_exit_trap 100 0 2>/dev/null
+)
+assert_file_contains "$exit_trap_index" 'rc=143.*128\+SIGTERM' \
+  "audit_exit_trap: annotates a 128+N signal-range exit"
+assert_file_contains "$exit_trap_index" 'rc=255' \
+  "audit_exit_trap: still logs high non-signal exits"
+assert_file_not_contains "$exit_trap_index" 'rc=255.*128\+SIG' \
+  "audit_exit_trap: does not annotate high non-signal exits as signal range"
+assert_file_contains "$exit_trap_index" 'rc=0' \
+  "audit_exit_trap: still logs a normal exit"
+assert_file_not_contains "$exit_trap_index" 'rc=0.*128\+SIG' \
+  "audit_exit_trap: leaves a normal exit unannotated"
+
 teardown_test_env
 summary

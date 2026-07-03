@@ -6927,9 +6927,22 @@ _launch_agent_into_slot() {
 # Finalize one agent's run: wait for the recorded PID, normalize exit
 # code, log waste line / subsystem claim. Used by both paths.
 # Sets _slot_rc to the final exit code.
+signal_name_for_exit_status() {
+  local rc="$1" sig name
+  case "${rc:-}" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$rc" -gt 128 ] || return 1
+  sig=$((rc - 128))
+  name=$(kill -l "$sig" 2>/dev/null) || return 1
+  [ -n "$name" ] || return 1
+  case "$name" in
+    SIG*) printf '%s\n' "$name" ;;
+    *)    printf 'SIG%s\n' "$name" ;;
+  esac
+}
+
 _finalize_agent_slot() {
   local slot="$1" role_prefix="$2" role_name="$3" pid="$4" before_subsystem="$5" ts="$6"
-  local rc wait_raw normalized_rc
+  local rc wait_raw normalized_rc signal_name
   wait "$pid" 2>/dev/null && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then
     wait_raw="$RAW_DIR/session_${ts}_${role_name}.log.raw"
@@ -6940,7 +6953,14 @@ _finalize_agent_slot() {
     fi
   fi
   record_subsystem_claim "$slot" "$role_prefix" "$role_name" "$before_subsystem" "$(get_agent_subsystem "$slot" 2>/dev/null || echo "unknown")"
-  if [ "$rc" -ne 0 ]; then
+  if signal_name=$(signal_name_for_exit_status "$rc"); then
+    # 128+N: the agent subshell was terminated by signal N, or (more often)
+    # it exited with that status after the backend CLI it ran was signaled and
+    # the code propagated — `wait` cannot tell the two apart. Agents run the
+    # backend directly under a bash watchdog, not timeout.py, so point at the
+    # agent's own raw session log, not a wrapper log.
+    log "WARNING: Agent A${slot} (${role_name}) reaped with signal-range status ${rc} (128+${signal_name}): the agent process or the backend command it ran was terminated by ${signal_name} — inspect ${wait_raw} for where it stopped" | tee -a "$INDEX"
+  elif [ "$rc" -ne 0 ]; then
     log "WARNING: Agent A${slot} (${role_name}) exited with non-zero code ${rc}" | tee -a "$INDEX"
   fi
   _slot_rc="$rc"
@@ -7500,8 +7520,18 @@ audit_exit_trap() {
   # Release the output-dir instance lock so a follow-up audit on the
   # same target+backend can start cleanly.
   audit_release_instance_lock 2>/dev/null || true
-  log "SCRIPT EXITING (line=${line} rc=${rc})" >> "$INDEX" 2>/dev/null || true
-  log "SCRIPT EXITING (line=${line} rc=${rc})" >&2 || true
+  # A 128+N exit means the script (or an inner foreground command it ran under
+  # set -e) was terminated by signal N and the status propagated up — the
+  # harness-r1 shape, which otherwise appears as a bare "rc=143" with no cause.
+  # Name it here, in the script's own last log line. macOS records no sender
+  # for an ordinary SIGTERM, so the origin still needs the timeout.py wrapper
+  # breadcrumbs, not this line.
+  local _rc_note="" _signal_name=""
+  if _signal_name=$(signal_name_for_exit_status "$rc"); then
+    _rc_note=" [128+${_signal_name}: script or an inner foreground command was terminated by ${_signal_name}; sender not recorded by the OS]"
+  fi
+  log "SCRIPT EXITING (line=${line} rc=${rc})${_rc_note}" >> "$INDEX" 2>/dev/null || true
+  log "SCRIPT EXITING (line=${line} rc=${rc})${_rc_note}" >&2 || true
 }
 
 trap 'log "UNEXPECTED EXIT at line $LINENO (rc=$?)" >> "$INDEX" 2>/dev/null; log "UNEXPECTED EXIT at line $LINENO (rc=$?)" >&2' ERR

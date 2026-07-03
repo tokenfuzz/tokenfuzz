@@ -161,5 +161,94 @@ marker_stays_absent_for "$reap_marker" 2 \
   || fail "audit_timeout_kill reaps backgrounded grandchildren on normal exit" \
           "grandchild survived the process-group sweep"
 
+# A child killed by a signal (not the wrapper, not a timeout) exits 128+sig,
+# and the wrapper logs which signal hit the child — the fingerprint an external
+# kill needs, since macOS records no ordinary SIGTERM. This is the path that a
+# `kill`/`pkill` landing on an agent process would take.
+sigchild_out="$TEST_TMPDIR/sigchild-out"
+sigchild_rc=0
+audit_timeout_run 10 bash -c 'kill -TERM $$' >"$sigchild_out" 2>&1 || sigchild_rc=$?
+assert_eq 143 "$sigchild_rc" "audit_timeout_run reports 128+SIGTERM for a signal-killed child"
+grep -qE 'child pid=[0-9]+ .* killed by SIGTERM' "$sigchild_out" \
+  && pass "timeout wrapper logs a child killed directly by a signal" \
+  || fail "timeout wrapper logs a child killed directly by a signal" \
+          "$(cat "$sigchild_out" 2>/dev/null)"
+
+# The wrapper itself taking a signal logs distinctly ("received … forwarding"),
+# so an operator can tell a kill that entered via the wrapper/parent apart from
+# one that hit the child directly (above).
+fwd_out="$TEST_TMPDIR/fwd-out"
+fwd_rc_file="$TEST_TMPDIR/fwd-rc"
+rm -f "$fwd_out" "$fwd_rc_file"
+(
+  rc=0
+  audit_timeout_run 20 bash -c 'trap "" TERM; sleep 10' >"$fwd_out" 2>&1 || rc=$?
+  printf '%s' "$rc" > "$fwd_rc_file"
+) &
+fwd_shell=$!
+sleep 1
+fwd_wrapper="$(pgrep -P "$fwd_shell" 2>/dev/null | head -1 || true)"
+[ -n "$fwd_wrapper" ] && kill -TERM "$fwd_wrapper" 2>/dev/null || true
+wait "$fwd_shell" 2>/dev/null || true
+assert_eq 143 "$(cat "$fwd_rc_file" 2>/dev/null || echo missing)" \
+  "audit_timeout_run returns 143 when the wrapper itself is SIGTERMed"
+grep -qE 'wrapper pid=[0-9]+ ppid=[0-9]+ received SIGTERM' "$fwd_out" \
+  && pass "timeout wrapper logs a signal it received and forwarded" \
+  || fail "timeout wrapper logs a signal it received and forwarded" \
+          "$(cat "$fwd_out" 2>/dev/null)"
+
+# A child that exits with a signal-range status (128+N) but was NOT itself
+# signaled — the propagated-status case. This is the shape bin/audit takes when
+# it aborts under set -e after an inner command was killed; the first pass
+# (WIFSIGNALED-only) missed it, so it produced no breadcrumb at all.
+propagated_out="$TEST_TMPDIR/propagated-out"
+propagated_rc=0
+audit_timeout_run 10 bash -c 'exit 143' >"$propagated_out" 2>&1 || propagated_rc=$?
+assert_eq 143 "$propagated_rc" "audit_timeout_run preserves a signal-range exit code (143)"
+grep -qE 'exited 143 .*signal range' "$propagated_out" \
+  && pass "timeout wrapper labels a propagated signal-range exit" \
+  || fail "timeout wrapper labels a propagated signal-range exit" \
+          "$(cat "$propagated_out" 2>/dev/null)"
+
+# harness-r1 shape end-to-end: an inner foreground command under set -e is
+# SIGTERMed, so the wrapped script exits 143 by propagation (WIFEXITED 143), not
+# by being signaled itself. The wrapper must still leave a breadcrumb.
+nested_out="$TEST_TMPDIR/nested-out"
+nested_rc_file="$TEST_TMPDIR/nested-rc"
+nested_pidfile="$TEST_TMPDIR/nested-inner-pid"
+rm -f "$nested_out" "$nested_rc_file" "$nested_pidfile"
+(
+  rc=0
+  audit_timeout_run 20 bash -c 'set -e; sleep 30 & echo $! > "$1"; wait "$!"' \
+    _ "$nested_pidfile" >"$nested_out" 2>&1 || rc=$?
+  printf '%s' "$rc" > "$nested_rc_file"
+) &
+nested_shell=$!
+nested_inner=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ -s "$nested_pidfile" ] && { nested_inner="$(cat "$nested_pidfile")"; break; }
+  python3 -c 'import time; time.sleep(0.2)'
+done
+[ -n "$nested_inner" ] && kill -TERM "$nested_inner" 2>/dev/null || true
+wait "$nested_shell" 2>/dev/null || true
+assert_eq 143 "$(cat "$nested_rc_file" 2>/dev/null || echo missing)" \
+  "audit_timeout_run: an inner-command SIGTERM propagates to a 143 script exit"
+grep -qE 'exited 143 .*signal range' "$nested_out" \
+  && pass "timeout wrapper logs a signal-range WIFEXITED child (harness-r1 shape)" \
+  || fail "timeout wrapper logs a signal-range WIFEXITED child (harness-r1 shape)" \
+          "$(cat "$nested_out" 2>/dev/null)"
+
+# A program can deliberately use an arbitrary high exit code. Do not invent
+# fake signals for values whose 128+N component is not a real signal on this
+# platform (for example 255 -> 127 on macOS/Linux).
+high_exit_out="$TEST_TMPDIR/high-exit-out"
+high_exit_rc=0
+audit_timeout_run 10 bash -c 'exit 255' >"$high_exit_out" 2>&1 || high_exit_rc=$?
+assert_eq 255 "$high_exit_rc" "audit_timeout_run preserves a high non-signal exit code"
+grep -q 'signal range' "$high_exit_out" \
+  && fail "timeout wrapper does not label non-signal high exit codes as signal range" \
+          "$(cat "$high_exit_out" 2>/dev/null)" \
+  || pass "timeout wrapper does not label non-signal high exit codes as signal range"
+
 teardown_test_env
 summary
