@@ -1,6 +1,73 @@
 # Changelog
 
-## [1.0.0] - First Version Launch
+## 1.0.1 - 2026-07-02
+
+- **Frame-ownership scoring.** Harness vs. target code is decided by source
+  ownership, not function name, so a real `main`/`free_node`/`operator delete`
+  fault is scored instead of zeroed as ClusterFuzz boilerplate.
+
+- **Honest input trust class.** Fuzz input from file/argv/stdin is classified as
+  bytes, not env/fs-state, removing a spurious Medium outlier from otherwise-Low
+  clusters that share one root cause.
+
+- **Source surface on tracked files only.** The audit reads just what the
+  project's VCS tracks, so agents stop spending budget on generated output,
+  vendored deps, and the harness's own venv; it falls open for non-VCS tarballs.
+
+- **Wider prior-fix window.** S1 mining scans a 5-year / 25k-commit lookback
+  instead of a flat count, giving fast- and slow-moving histories comparable
+  coverage at near-zero cost — richest history no longer starves lead generation.
+
+- **Complete prior-fix vocabulary.** Ranking recognizes the full severity class
+  set (stack exhaustion, DoS amplification, RCE phrasing), with a CI guard tying
+  it to `bin/severity` so a new class can never silently go unranked.
+
+- **Non-prescriptive baseline.** The model-direct benchmark no longer nudges
+  agents to build harnesses and corpora, and its scratch is reclaimed after
+  harvest — dropping wasted setup that yielded no crashes and hundreds of MB.
+
+- **Decision-class circuit breaker.** A gate that is fast-failing on a
+  rate-limited or overloaded backend is paused, arming only on real backend
+  errors — never a timeout or a one-off malformed reply — so a throttling storm
+  stops paying dead round trips.
+
+- **One wall-clock budget.** Confirm gates gain a 180s timeout floor so slow-but-
+  valid votes aren't killed and retried, and claude, codex, and gemini all answer
+  under the same clock rather than diverging on hidden turn caps.
+
+- **Read-only source for decisions.** Every backend can read the code to judge
+  reachability and clustering while staying sandboxed, bounded by the decision
+  timeout rather than an arbitrary turn count.
+
+- **Diagnosable external kills.** The layers closest to a kill log a stray
+  SIGTERM's shape, so a cell that dies mid-run leaves a trail in state instead of
+  vanishing and orphaning agents that keep writing.
+
+- **Shallow-checkout warning.** A truncated git history raises a startup warning
+  with the `--unshallow` remedy, surfacing quiet coverage loss that would
+  otherwise never show up as an error.
+
+- **Python-only runtime.** The harness and test suite depend only on `python3`
+  outside Perl-language targets; the timeout shim and vocabulary neutralizer are
+  ported off inline Perl, shrinking the install footprint.
+
+- **Robust `scratch-status`.** It no longer aborts on harness-only scratch dirs
+  under macOS Bash 3.2 with `set -u`, returning a file inventory instead of an
+  unbound-variable crash.
+
+- **Verified prerequisites.** Install lists now require `venv`/`pip` and every
+  listed tool is checked against a real caller, so a fresh setup has exactly what
+  the docs and vLLM path need.
+
+- **Handbook trued up.** The docs are corrected and completed against current
+  code — dedup and severity examples, operator env knobs, reachability
+  artifacts — so a failed run is diagnosable without first reading raw logs.
+
+- **Named rejection ledgers.** Rejected artifacts write semantic
+  `REJECTED-CRASHES.md` / `REJECTED-FINDINGS.md` as canonical browsable targets,
+  with `INDEX.md` kept as a compatibility alias so older runs still count.
+
+## 1.0.0 - First Version Launch
 
 TokenFuzz 1.0.0 is the first public release of the audit harness: a local,
 evidence-driven way to put LLM agents to work on source code you are authorized
