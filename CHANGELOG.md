@@ -67,6 +67,10 @@
   `REJECTED-CRASHES.md` / `REJECTED-FINDINGS.md` as canonical browsable targets,
   with `INDEX.md` kept as a compatibility alias so older runs still count.
 
+- **No build-based source hiding.** The build-feature probe and `features.json`
+  card gate are removed; a missing sanitizer build flag should surface as a
+  build-coverage problem, not silently remove critical source from audit scope.
+
 ## 1.0.0 - First Version Launch
 
 TokenFuzz 1.0.0 is the first public release of the audit harness: a local,

@@ -888,115 +888,6 @@ def is_auditable_work_card(card: dict) -> bool:
     return True
 
 
-# Cache the features manifest per process — workqueue.py is imported by
-# many short-lived scripts (bin/state, bin/rank-work) and each invocation
-# may check many cards. Cache keyed by absolute path so distinct
-# RESULTS_DIRs in the same process (rare, but possible during ensemble
-# orchestration) don't collide.
-_FEATURES_CACHE: dict[str, dict | None] = {}
-
-
-def _features_manifest_path(ctx: Context) -> Path:
-    return state_dir(ctx.results_dir) / "features.json"
-
-
-def _load_features_for_ctx(ctx: Context) -> dict | None:
-    """Load features.json for ctx, with per-process cache. Fail-open."""
-    p = _features_manifest_path(ctx)
-    key = str(p.resolve()) if p.exists() else str(p)
-    if key in _FEATURES_CACHE:
-        return _FEATURES_CACHE[key]
-    data: dict | None = None
-    try:
-        # Import lazily so workqueue.py callers that never use the gate
-        # don't pay the import cost.
-        import build_probe as _bp
-        data = _bp.load_features(p)
-    except Exception:
-        data = None
-    _FEATURES_CACHE[key] = data
-    return data
-
-
-def _is_stub_tu_path(features: dict | None, path: str) -> bool:
-    """Thin wrapper around build_probe.is_tu_stub; fail-open."""
-    if not features or not path:
-        return False
-    try:
-        import build_probe as _bp
-        return _bp.is_tu_stub(features, path)
-    except Exception:
-        return False
-
-
-def is_stub_tu_card(card: dict, features: dict | None) -> bool:
-    """True iff the card's primary TU is listed as a stub in features.
-
-    Checks `card['file']` first (the primary surface) and falls back to
-    `card['touched_files']` so cards that name a header in 'file' but
-    target a .c TU in touched_files still get gated. Fail-open: a
-    missing/unknown manifest returns False (do not block).
-    """
-    if not features:
-        return False
-    primary = card.get("file", "")
-    if primary and _is_stub_tu_path(features, primary):
-        return True
-    touched = card.get("touched_files") or []
-    if isinstance(touched, list):
-        for t in touched:
-            if isinstance(t, str) and _is_stub_tu_path(features, t):
-                return True
-    return False
-
-
-def mark_stub_tu_cards_blocked(ctx: Context, features: dict | None = None) -> int:
-    """Walk the persisted work-card queue; mark stub-TU cards as `blocked`.
-
-    Idempotent: cards already in a terminal status are skipped. Returns
-    the number of newly-blocked cards. Fail-open: no manifest → 0.
-    Used at startup (after `run_build_feature_probe` writes the
-    manifest) so the queue is clean before the rotator runs.
-    """
-    if features is None:
-        features = _load_features_for_ctx(ctx)
-    if not features:
-        return 0
-    stubs = features.get("stub_tus") or []
-    if not stubs:
-        return 0
-    cards_path = work_cards_path(ctx)
-    if not cards_path.is_file():
-        return 0
-    latest = latest_claims_by_card(ctx)
-    claims_path = state_dir(ctx.results_dir) / "claims.jsonl"
-    blocked = 0
-    with jsonl_lock(claims_path):
-        for card in read_jsonl(cards_path):
-            cid = card.get("id", "")
-            if not cid:
-                continue
-            cur = latest.get(cid)
-            if cur and cur.get("status", "") in TERMINAL_CARD_STATUSES:
-                continue
-            if not is_stub_tu_card(card, features):
-                continue
-            _append_jsonl_unlocked(
-                claims_path,
-                {
-                    "card_id": cid,
-                    "agent": "",
-                    "status": "blocked",
-                    "updated_at": now_iso(),
-                    "source": "build-probe-stub-tu",
-                    "note": f"TU not compiled in current sanitizer build "
-                            f"(features.json: {card.get('file','')})",
-                },
-            )
-            blocked += 1
-    return blocked
-
-
 def dedupe_work_cards(cards: list[dict]) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
@@ -2927,7 +2818,6 @@ def _queue_status_row(
     claimed_surfaces: set[str],
     saturated_subsystems: set[str],
     owned_subsystems: set[str],
-    features_manifest: dict,
     agent_modes: list[str],
     strategy: str = "",
 ) -> dict:
@@ -2937,8 +2827,6 @@ def _queue_status_row(
     surface = work_surface(card)
     if not is_auditable_work_card(card):
         reason = "not-auditable"
-    elif is_stub_tu_card(card, features_manifest):
-        reason = "tu-not-compiled"
     elif card_closed_for_run(ctx, card, status, dry_streaks=dry_streaks):
         # done/discarded/blocked, or a crash/find whose subsystem has gone
         # dry. A productive crash/find on a still-hot subsystem is NOT
@@ -2995,7 +2883,6 @@ def explain_queue(
     claimed_surfaces, claimed_subsystems = _claimed_card_queue_sets(cards_by_id, latest, ttl, now)
     owned_subsystems = active_subsystems | claimed_subsystems
     saturated_subsystems = guard_saturated_subsystems(ctx)
-    features_manifest = _load_features_for_ctx(ctx)
     dry_streaks: dict[str, int] = {}
     rows: list[dict] = []
     for card in cards:
@@ -3012,7 +2899,6 @@ def explain_queue(
                 claimed_surfaces=claimed_surfaces,
                 saturated_subsystems=saturated_subsystems,
                 owned_subsystems=owned_subsystems,
-                features_manifest=features_manifest,
                 agent_modes=agent_modes,
                 strategy=strategy,
             )
@@ -3162,22 +3048,12 @@ def _claim_next_card_locked(
     # below still apply — we don't want two agents on the same surface.
     promoted_override = bool(promoted_unclaimed) and not promoted_active
 
-    # Build-feature manifest: when present, cards whose TU is a stub
-    # in the current sanitizer build are filtered out. Fail-open — no
-    # manifest means no filtering. See lib/build_probe.py.
-    features_manifest = _load_features_for_ctx(ctx)
-
     def _build_candidates(override: bool) -> list[dict]:
         out: list[dict] = []
         eff_filter = "" if override else strategy_filter
         for card in cards:
             cid = card.get("id", "")
             if not is_auditable_work_card(card):
-                continue
-            if is_stub_tu_card(card, features_manifest):
-                # Stub TU in current build — gate before any other check.
-                # Build-probe sweep at startup also writes a `blocked`
-                # claim row for these; this is the live safety net.
                 continue
             if cid and cid in rejected_card_ids:
                 # P5: previously rejected for this agent — do not re-offer.
@@ -4286,7 +4162,6 @@ def list_work_cards(
     claimed_surfaces, claimed_subsystems = _claimed_card_queue_sets(cards_by_id, latest, ttl, now)
     owned_subsystems = active_subsystems | claimed_subsystems
     saturated_subsystems = guard_saturated_subsystems(ctx)
-    features_manifest = _load_features_for_ctx(ctx)
     agent_modes = [mode] if mode else []
     subsystem_needles = [str(s).strip().lower() for s in (subsystem_filters or []) if str(s).strip()]
     contains_needles = [str(s).strip().lower() for s in (contains_filters or []) if str(s).strip()]
@@ -4311,7 +4186,6 @@ def list_work_cards(
             claimed_surfaces=claimed_surfaces,
             saturated_subsystems=saturated_subsystems,
             owned_subsystems=owned_subsystems,
-            features_manifest=features_manifest,
             agent_modes=agent_modes,
         )
         visible_status = str(status_row.get("status", ""))

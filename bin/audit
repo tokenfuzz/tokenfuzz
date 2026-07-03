@@ -178,9 +178,6 @@ SANITIZER_BUILD_AVAILABLE=0
 SANITIZER_BUILD_SUMMARY=""
 SANITIZER_BUILD_MISSING=""
 SANITIZER_BUILD_DISABLED=0
-BUILD_FEATURES_JSON=""
-BUILD_FEATURES_SUMMARY=""
-BUILD_FEATURES_STUB_COUNT=0
 RESULTS_DIR=""
 LOGDIR=""
 INDEX=""
@@ -1576,222 +1573,6 @@ configure_active_backend() {
     "$TARGET_SLUG" "$target_rev" "$LOGDIR"
 }
 
-# Build feature probe — non-blocking, fail-open. Walks the detected
-# sanitizer build tree once per backend and writes a structured
-# features.json under state/. Downstream consumers (workqueue gate,
-# recon prompt, agent prompts) read it; absence/malformed manifests
-# never block work.
-#
-# Target-agnostic: the probe runs nm/--version against existing
-# artifacts and classifies TUs by symbol coverage. No per-target
-# config; outputs are derived from what the build actually produced.
-# See lib/build_probe.py for the algorithm.
-run_build_feature_probe() {
-  [ "${IS_BROWSER_TARGET:-0}" -eq 0 ] || return 0
-  [ "${SANITIZER_BUILD_DISABLED:-0}" -eq 0 ] || return 0
-  [ -n "${RESULTS_DIR:-}" ] || return 0
-  command -v python3 >/dev/null 2>&1 || return 0
-
-  # Pick the first available sanitizer build to probe. ASan has
-  # priority since it's by far the most common; the others fall
-  # through as fallbacks.
-  local probe_build_dir="" probe_binary="" probe_san=""
-  if [ "${ASAN_BUILD_AVAILABLE:-0}" -eq 1 ] && [ -d "${ASAN_BUILD_DIR:-/nonexistent}" ]; then
-    probe_build_dir="$ASAN_BUILD_DIR"
-    probe_binary="${ASAN_BUILD_BINARY:-}"
-    probe_san="asan"
-  elif [ -n "${UBSAN_BUILD_DIR:-}" ] && [ -d "${UBSAN_BUILD_DIR}" ]; then
-    probe_build_dir="$UBSAN_BUILD_DIR"
-    probe_binary="${TARGET_UBSAN_BIN:-}"
-    probe_san="ubsan"
-  elif [ -n "${MSAN_BUILD_DIR:-}" ] && [ -d "${MSAN_BUILD_DIR}" ]; then
-    probe_build_dir="$MSAN_BUILD_DIR"
-    probe_binary="${TARGET_MSAN_BIN:-}"
-    probe_san="msan"
-  elif [ -n "${TSAN_BUILD_DIR:-}" ] && [ -d "${TSAN_BUILD_DIR}" ]; then
-    probe_build_dir="$TSAN_BUILD_DIR"
-    probe_binary="${TARGET_TSAN_BIN:-}"
-    probe_san="tsan"
-  else
-    return 0
-  fi
-
-  local features_json="${RESULTS_DIR}/state/features.json"
-  BUILD_FEATURES_JSON="$features_json"
-  export BUILD_FEATURES_JSON
-
-  # Look for a recent build log under standard locations. The probe
-  # reads the last configure-summary block from it if present.
-  local build_log=""
-  local cand
-  for cand in "${probe_build_dir}/config.log" "${probe_build_dir}/CMakeCache.txt" "${probe_build_dir}/meson-info/meson-info.json"; do
-    if [ -f "$cand" ]; then
-      build_log="$cand"
-      break
-    fi
-  done
-
-  local probe_args=(
-    "$SCRIPT_ROOT/lib/build_probe.py" probe
-    --target-root "$TARGET_ROOT"
-    --build-dir "$probe_build_dir"
-    --sanitizer "$probe_san"
-    --output "$features_json"
-  )
-  [ -n "$probe_binary" ] && probe_args+=(--binary "$probe_binary")
-  [ -n "$build_log" ] && probe_args+=(--build-log "$build_log")
-
-  # Content-addressed skip: the manifest is a pure function of the build
-  # artifacts, but this probe used to re-run nm over the object tree at
-  # every iteration boundary. The signature REQUIRES an EXISTING probed
-  # binary, keyed by its content sha1: a relink rewrites the binary on
-  # any rebuild, so its bytes track the objects linked into it (content
-  # beats mtime:size, which can miss a same-second same-size relink —
-  # and audit_stat_key prints "0:0" for missing paths, which must never
-  # cache). The binary alone is NOT the whole story: stub_tus come from
-  # scanning every .o under the build dir, including objects the probed
-  # binary does not link, so the key also folds in an object-tree
-  # signature (relpath + size + mtime_ns over *.o). If that signature
-  # cannot be computed, fail open by re-probing. config.log /
-  # CMakeCache.txt alone is likewise insufficient — it survives
-  # incremental rebuilds unchanged while .o files move — so
-  # library-style targets with no probed binary always re-probe
-  # (fail-open, pre-cache behaviour). The build log only sharpens the
-  # key when present.
-  local probe_sig="" sig_file="${RESULTS_DIR}/state/.features.probe-sig"
-  local _bin_sha="" _obj_sig="" _log_key
-  if [ -n "$probe_binary" ] && [ -f "$probe_binary" ]; then
-    _bin_sha=$(audit_sha1 "$probe_binary" 2>/dev/null | awk '{print $1}')
-  fi
-  if [ -n "$_bin_sha" ]; then
-    _obj_sig=$(python3 - "$probe_build_dir" <<'PY' 2>/dev/null || true
-import hashlib, sys
-from pathlib import Path
-root = Path(sys.argv[1])
-h = hashlib.sha1()
-for p in sorted(root.rglob("*.o")):
-    try:
-        st = p.stat()
-    except OSError:
-        continue
-    h.update(f"{p.relative_to(root)}\x00{st.st_size}\x00{st.st_mtime_ns}\n".encode())
-print(h.hexdigest())
-PY
-)
-  fi
-  if [ -n "$_bin_sha" ] && [ -n "$_obj_sig" ]; then
-    probe_sig="bin=${probe_binary}=${_bin_sha};objs=${_obj_sig};"
-    if [ -n "$build_log" ] && [ -f "$build_log" ]; then
-      _log_key=$(audit_stat_key "$build_log" 2>/dev/null || true)
-      [ -n "$_log_key" ] && probe_sig="${probe_sig}log=${build_log}=${_log_key};"
-    fi
-    probe_sig="${probe_sig}san=${probe_san};root=${TARGET_ROOT}"
-    if [ -s "$features_json" ] && [ -s "$sig_file" ] \
-       && [ "$(cat "$sig_file" 2>/dev/null)" = "$probe_sig" ]; then
-      probe_sig=""   # cache hit — skip the probe, keep banner + gating below
-    fi
-  else
-    probe_sig="__always_probe__"
-  fi
-
-  if [ -n "$probe_sig" ]; then
-    # Run probe with a generous timeout. Fail-open: any failure leaves
-    # BUILD_FEATURES_JSON pointed at a non-existent / partial file which
-    # downstream consumers treat as "no manifest" (no gating).
-    if ! python3 "${probe_args[@]}" >/dev/null 2>>"$LOGDIR/build_probe.log"; then
-      log "Build feature probe failed (fail-open; see $LOGDIR/build_probe.log) — queue gate disabled for this run" | tee -a "$INDEX" || true
-      return 0
-    fi
-    [ "$probe_sig" = "__always_probe__" ] \
-      || { printf '%s' "$probe_sig" > "$sig_file" 2>/dev/null || true; }
-  fi
-
-  # Surface the manifest summary to the operator: stub count, missing
-  # major features. Banner is the single most valuable line for spotting
-  # a crippled build at run start.
-  if [ -f "$features_json" ]; then
-    local summary
-    summary=$(python3 - "$features_json" <<'PY' 2>/dev/null || true
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        m = json.load(f)
-except Exception:
-    sys.exit(0)
-stubs = m.get("stub_tus") or []
-probed = m.get("probed_object_count") or 0
-binary = m.get("binary") or {}
-feats = binary.get("features") or []
-protos = binary.get("protocols") or []
-parts = [f"sanitizer={m.get('sanitizer','?')}", f"objects_probed={probed}", f"stub_tus={len(stubs)}"]
-if feats:
-    parts.append("features=" + " ".join(feats))
-if protos:
-    parts.append("protocols=" + " ".join(protos))
-print(" ".join(parts))
-if stubs:
-    # Group by top directory for compact display.
-    from collections import Counter
-    c = Counter()
-    for s in stubs:
-        head = s.split("/", 1)[0] if "/" in s else s
-        c[head] += 1
-    head_summary = ", ".join(f"{d}({n})" for d, n in c.most_common(8))
-    print("stub-tu-hotspots: " + head_summary)
-PY
-)
-    if [ -n "$summary" ]; then
-      local first_line tail_line
-      first_line="$(printf '%s\n' "$summary" | head -1)"
-      tail_line="$(printf '%s\n' "$summary" | sed -n 2p)"
-      log "Build feature manifest: ${first_line}" | tee -a "$INDEX" || true
-      [ -n "$tail_line" ] && log "Build feature manifest: ${tail_line}" | tee -a "$INDEX" || true
-      BUILD_FEATURES_SUMMARY="$summary"
-      BUILD_FEATURES_STUB_COUNT="$(printf '%s\n' "$summary" | head -1 | sed -n 's/.*stub_tus=\([0-9]*\).*/\1/p')"
-      [ -n "$BUILD_FEATURES_STUB_COUNT" ] || BUILD_FEATURES_STUB_COUNT=0
-      export BUILD_FEATURES_SUMMARY BUILD_FEATURES_STUB_COUNT
-
-      # WARN-level banner only when the build is meaningfully crippled
-      # (stubs present). A clean build stays quiet.
-      if [ "${BUILD_FEATURES_STUB_COUNT:-0}" -gt 0 ]; then
-        log "WARN: sanitizer build has ${BUILD_FEATURES_STUB_COUNT} stub TU(s) — recon and work queue will skip them; fix target.toml configure flags if these subsystems are in scope" | tee -a "$INDEX" || true
-      fi
-    fi
-
-    # Block any already-enqueued work card whose primary TU is a stub.
-    # Cards generated later (recon, ranking) are also gated at claim
-    # time inside _claim_next_card_locked. This pass writes the
-    # `blocked` claim row up-front so queue inspectors and the next
-    # rotation cycle see the disposition immediately.
-    SCRIPT_ROOT="$SCRIPT_ROOT" RESULTS_DIR="$RESULTS_DIR" \
-      TARGET_ROOT="$TARGET_ROOT" TARGET_SLUG="$TARGET_SLUG" \
-      TARGET_REPO_TYPE="${TARGET_REPO_TYPE:-none}" \
-      python3 - <<'PY' >>"$LOGDIR/build_probe.log" 2>&1 || true
-import os, sys
-from pathlib import Path
-script_root = os.environ.get("SCRIPT_ROOT") or os.getcwd()
-sys.path.insert(0, str(Path(script_root) / "lib"))
-try:
-    from workqueue import Context, mark_stub_tu_cards_blocked
-except Exception as e:
-    print(f"build-probe gate: cannot import workqueue: {e}")
-    sys.exit(0)
-ctx = Context(
-    script_root=Path(script_root).resolve(),
-    target_root=Path(os.environ["TARGET_ROOT"]).resolve(),
-    target_slug=os.environ.get("TARGET_SLUG", ""),
-    results_dir=Path(os.environ["RESULTS_DIR"]).resolve(),
-    repo_type=os.environ.get("TARGET_REPO_TYPE", "none"),
-)
-try:
-    n = mark_stub_tu_cards_blocked(ctx)
-    print(f"build-probe gate: marked {n} stub-TU card(s) blocked")
-except Exception as e:
-    print(f"build-probe gate: error (fail-open): {e}")
-PY
-  fi
-}
-
 prepare_active_backend_runtime() {
   mkdir -p "$LOGDIR" "$RESULTS_DIR" \
            "$RESULTS_DIR/crashes" "$RESULTS_DIR/crashes-rejected" "$RESULTS_DIR/findings" \
@@ -1836,10 +1617,6 @@ PY
   # Compress old text logs opportunistically; raw transcript cleanup is handled
   # explicitly by bin/cleanup_logs so retention is not tied to audit startup.
   find "$LOGDIR" -name "*.log" -mtime +3 ! -name "index.log" ! -name ".session_counter" -exec gzip -q {} \; 2>/dev/null || true
-
-  # Probe the sanitizer build for compiled-in TUs/features. Writes
-  # state/features.json. Non-blocking, fail-open.
-  run_build_feature_probe || true
 }
 
 select_ensemble_backend_for_iteration() {
@@ -4206,26 +3983,6 @@ target_exhausted_hard_stop_ready() {
   launch_evidence_is_new && return 1
   if eligible_work_card_exists; then
     [ "${dry_streak:-0}" -ge "$MAX_DRY_SESSIONS" ] || return 1
-  fi
-  # Build-probe guard: refuse to declare exhaustion when the sanitizer
-  # build is crippled (stub TUs present) AND the run has produced no
-  # security results yet. The natural failure mode without this gate is
-  # a silent "audited cleanly" report on a build that excluded the
-  # actual attack surfaces (e.g. curl ASan build minus TLS/SSH). Wall
-  # time still terminates the run; the operator just sees the WARN
-  # banner from `run_build_feature_probe` and the audit keeps trying
-  # to find bugs in compiled-in code instead of stopping early.
-  #
-  # Once at least one crash/finding has been produced, exhaustion is
-  # honoured normally — the operator clearly has something to act on
-  # and continuing burns budget for diminishing returns.
-  if [ "${BUILD_FEATURES_STUB_COUNT:-0}" -gt 0 ]; then
-    local results_seen
-    results_seen=$(count_active_security_results 2>/dev/null || echo 0)
-    if [ "${results_seen:-0}" -eq 0 ]; then
-      log "HARD-STOP-DEFERRED: sanitizer build has ${BUILD_FEATURES_STUB_COUNT} stub TU(s) and no security results yet — refusing to declare exhaustion on a crippled build. Fix target.toml configure flags to bring the missing subsystems into scope, or let wall-time terminate the run." | tee -a "$INDEX" || true
-      return 1
-    fi
   fi
   return 0
 }

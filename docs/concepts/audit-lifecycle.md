@@ -80,13 +80,6 @@ as append-only rows under `state/`. That structured state — not the
 agent's transcript — is the source of truth across resume, compaction,
 and crash recovery.
 
-At startup the harness also runs a quick, fail-open **build-feature
-probe**: when object files are available, it inspects them to learn
-which translation units the current sanitizer build actually compiled.
-The result lives in `state/features.json` and blocks work cards whose
-source was stubbed out of the build — agents do not burn hours probing
-code the binary cannot reach.
-
 ## 4. Breadth-first recon (cold start only)
 
 The first time `bin/audit` sees a given commit of the target source,

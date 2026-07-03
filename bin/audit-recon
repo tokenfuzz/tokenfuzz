@@ -536,19 +536,6 @@ for f in "${slice_files[@]}"; do
 done
 
 # ── Per-slice prompt builder ────────────────────────────────────────────
-# Cache the build-feature block once per process so we don't shell out
-# to python3 for every slice. Empty when no manifest exists (fail-open).
-BUILD_FEATURES_BLOCK_CACHED=""
-_build_features_block_loaded=0
-_load_build_features_block() {
-  [ "$_build_features_block_loaded" -eq 0 ] || return 0
-  _build_features_block_loaded=1
-  local features_json="${BUILD_FEATURES_JSON:-${RESULTS_DIR:-}/state/features.json}"
-  [ -f "$features_json" ] || return 0
-  command -v python3 >/dev/null 2>&1 || return 0
-  BUILD_FEATURES_BLOCK_CACHED="$(python3 "$SCRIPT_ROOT/lib/build_probe.py" summary --features "$features_json" 2>/dev/null || true)"
-}
-
 build_recon_prompt() {
   local slice_name="$1"
   local slice_file="$2"
@@ -564,8 +551,6 @@ not wander the rest of the tree.
 ${files_block}
 SCOPE
 )
-
-  _load_build_features_block
 
   # NOTE: this template is cache-replayed on every tool call inside an
   # agent session. Each KB removed here saves N_tool_calls KB of
@@ -583,7 +568,6 @@ SCOPE
     --var "goal_framing=${goal_framing}" \
     --var "target_slug=${TARGET_SLUG}" \
     --var "scope_block=${scope_block}" \
-    --var "build_features_block=${BUILD_FEATURES_BLOCK_CACHED}" \
     --var "slice_name=${slice_name}" \
     --var "timeout_secs=${TIMEOUT_SECS}"
 }

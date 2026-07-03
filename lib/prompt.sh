@@ -1414,25 +1414,6 @@ CFGDIR
 build_asan_build_directive() {
   build_sanitizer_build_directive
   build_target_config_directive
-  build_build_features_directive
-}
-
-# Surface the build-feature manifest (stub TUs / compiled-in features)
-# to the agent. Empty output when no manifest exists or no stubs were
-# detected — keeps prompts unchanged on healthy builds. Cached at first
-# call to avoid spawning python3 per cache-replayed prompt render.
-_BUILD_FEATURES_DIRECTIVE_CACHED=""
-_BUILD_FEATURES_DIRECTIVE_LOADED=0
-build_build_features_directive() {
-  if [ "$_BUILD_FEATURES_DIRECTIVE_LOADED" -eq 0 ]; then
-    _BUILD_FEATURES_DIRECTIVE_LOADED=1
-    local features_json="${BUILD_FEATURES_JSON:-${RESULTS_DIR:-}/state/features.json}"
-    if [ -f "$features_json" ] && command -v python3 >/dev/null 2>&1; then
-      _BUILD_FEATURES_DIRECTIVE_CACHED="$(python3 "${SCRIPT_ROOT:-.}/lib/build_probe.py" summary --features "$features_json" 2>/dev/null || true)"
-    fi
-  fi
-  [ -n "$_BUILD_FEATURES_DIRECTIVE_CACHED" ] || return 0
-  printf '\n%s\n' "$_BUILD_FEATURES_DIRECTIVE_CACHED"
 }
 
 # Surface persistent harness build failures to the agent so it closes the

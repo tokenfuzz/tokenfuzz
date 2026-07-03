@@ -89,11 +89,6 @@ Three other card sources sit on top of the ranked list:
   declares peer projects, so a fix landing in one project becomes a
   probe against the unfixed analogue here.
 
-Before any of these cards reach an agent, the build-feature probe
-can mark cards as `blocked` when their translation unit is stubbed
-out of the current sanitizer build. That is a statement about *this*
-build configuration, not about the source.
-
 ## How a card gets to an agent
 
 Each iteration:

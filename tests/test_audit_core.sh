@@ -318,31 +318,7 @@ target_exhausted_hard_stop_ready
 assert_eq 1 $? "hard stop: active hypotheses still allow launch"
 TEST_ACTIVE=0
 
-# ─── Build-probe guard: refuse hard-stop on crippled build with no results ───
-# Set up: queue stale, dry streak at threshold, would normally stop.
-TEST_ELIGIBLE_WORK=0
-dry_streak="$MAX_DRY_SESSIONS"
-refresh_launch_evidence_signatures
-
-# Stubs present, no security results yet → guard defers hard-stop.
-BUILD_FEATURES_STUB_COUNT=14
-TEST_SECURITY_RESULTS=0
-target_exhausted_hard_stop_ready
-assert_eq 1 $? "hard stop: deferred when sanitizer build has stub TUs and no results yet"
-
-# Stubs present, but at least one security result → exhaustion allowed.
-TEST_SECURITY_RESULTS=1
-target_exhausted_hard_stop_ready
-assert_eq 0 $? "hard stop: allowed even with stub TUs once a security result exists"
-
-# No stubs → guard inert, exhaustion follows the normal path.
-BUILD_FEATURES_STUB_COUNT=0
-TEST_SECURITY_RESULTS=0
-target_exhausted_hard_stop_ready
-assert_eq 0 $? "hard stop: clean build with no results stops normally (guard does not fire)"
-
 # Restore defaults so subsequent test sections start from a known state.
-BUILD_FEATURES_STUB_COUNT=0
 TEST_SECURITY_RESULTS=0
 TEST_ELIGIBLE_WORK=1
 

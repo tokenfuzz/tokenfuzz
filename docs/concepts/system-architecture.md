@@ -93,7 +93,6 @@ crashes and compactions:
 
 ```text
 work-cards.jsonl       ranked source, recon, patch, and peer-fix cards
-state/features.json    translation units the current build actually compiled
 state/claims.jsonl     card leases and terminal status
 state/hypotheses.jsonl active and closed hypotheses
 state/runs.jsonl       probe verdicts
@@ -101,14 +100,8 @@ state/notes.jsonl      compact supporting notes
 state/events.jsonl     audit event log shared across agents and orchestrator
 ```
 
-`features.json` is the output of a fail-open build probe that runs
-once at audit startup, when the sanitizer build's object files are
-available for inspection. It is how cards whose source was stubbed
-out of the current build are marked `blocked` — a statement about
-this build configuration, not about the source.
-
 An agent skips cards that are already claimed, on a surface another
-agent owns, mode-incompatible, build-blocked, in a guard-saturated
+agent owns, mode-incompatible, in a guard-saturated
 subsystem, or in a subsystem another generic-mode agent already owns
 (unless the current agent has produced a crash or finding there).
 Claims expire on a timer so a wedged agent does not poison the queue.

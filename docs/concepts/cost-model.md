@@ -30,7 +30,6 @@ running.
 | Sanitizer runs | Each run takes wall-clock + RAM; browsers cost more | Per-agent sanitizer-run budget; coverage gate before sanitizer run. |
 | Redundant work | Two agents re-exploring the same surface | Work-card leases, per-agent input memory, rejected indexes. |
 | Cold-start recon | Breadth-first survey of the in-scope source set | Cached on target source SHA so subsequent audits against the same commit skip recon entirely. |
-| Dead build surfaces | Agents probing source the sanitizer build never compiled | Build-feature probe writes `state/features.json`; queue blocks cards on stubbed translation units. |
 
 The two anchors are simple. **Avoid re-reading**: every byte the
 agent has already seen should not be sent again. **Avoid re-running**:

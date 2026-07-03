@@ -55,9 +55,8 @@
   <text x="220" y="178" class="title-w">bin/audit</text>
   <text x="220" y="200" class="sub">Reads config, detects revision, creates result tree, launches agents.</text>
 
-  <!-- Audit → recon and build-feature -->
+  <!-- Audit → recon -->
   <path d="M360,212 L260,242" class="arrow" marker-end="url(#sa-arrow)"/>
-  <path d="M600,212 L700,242" class="arrow" marker-end="url(#sa-arrow)"/>
 
   <!-- Discovery row -->
   <text x="40" y="236" class="lane-tag">Discovery</text>
@@ -67,15 +66,8 @@
   <text x="140" y="308" class="sub">Validator votes Promote / Reject / Uncertain.</text>
   <text x="140" y="322" class="micro">Cached on the source SHA; later runs skip this box.</text>
 
-  <g filter="url(#sa-shadow)"><rect x="540" y="242" width="300" height="86" class="gate"/></g>
-  <text x="560" y="266" class="title">build-feature probe</text>
-  <text x="560" y="288" class="sub">Inspects objects for compiled TUs.</text>
-  <text x="560" y="308" class="sub">Writes state/features.json.</text>
-  <text x="560" y="322" class="micro">Stubbed TUs block their cards.</text>
-
   <!-- Discovery → queue -->
   <path d="M310,328 L420,352" class="arrow" marker-end="url(#sa-arrow)"/>
-  <path d="M690,328 L580,352" class="arrow" marker-end="url(#sa-arrow)"/>
 
   <!-- Work queue -->
   <text x="40" y="346" class="lane-tag">Work queue</text>
