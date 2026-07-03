@@ -76,6 +76,13 @@
   covers only the final turn, so multi-turn and recon sessions are no longer
   billed at a fraction of what they actually spent.
 
+- **Copy-overlap is a write.** ASan's `*-param-overlap` family prints no
+  `WRITE of size N` line, so severity defaulted it to the read tier (an unbounded
+  `strcpy` stack smash scored Low, not High) and clustering left it
+  `unclassified` (skewing labels and grouping). Both now classify the copy
+  destination as a WRITE — matched on the `cpy`/`cat` verbs so a comparison
+  overlap can't, and anchored to the ASan headline so prose mentions can't.
+
 ## 1.0.0 - First Version Launch
 
 TokenFuzz 1.0.0 is the first public release of the audit harness: a local,

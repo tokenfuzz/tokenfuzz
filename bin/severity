@@ -874,6 +874,36 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
     if re.search(r"wild[- ]addr[- ]write|wild-?addr.*write|wild[- ]address[ -]write", t):
         return "wild_write", "wild-addr WRITE"
 
+    # libc copy-overlap family (strcpy/strncpy/strcat/memcpy-param-overlap): an
+    # overlapping source/destination in a copy — always a WRITE into the
+    # destination buffer. ASan emits every overlap error through one
+    # `%s-param-overlap` format string, and only its copy/concat interceptors
+    # call the overlap check, so the function name always ends in `cpy`
+    # (strcpy/strncpy/stpcpy/memcpy/wcscpy…) or `cat` (strcat/strncat/wcscat…).
+    # Comparison interceptors end in `cmp` (strcmp/memcmp) and `memmove` ends in
+    # `move`; those are reads / overlap-legal and NEVER emit `-param-overlap`,
+    # so the `(?:cpy|cat)` anchor is what keeps a read/move token from being
+    # mis-scored as a write. ASan prints no `WRITE of size N` line for overlap
+    # errors, so without this branch the overflow-class branches below match on
+    # report prose ("stack-buffer-overflow") yet default to the READ tier,
+    # under-scoring a write-class corruption as a disclosure (seen: an unbounded
+    # strcpy stack smash scored Low). Route to the destination region's write
+    # class; all three write classes carry identical H/H/H impact, so the region
+    # only refines the label. Matched before the stack/heap/global branches so
+    # surrounding prose cannot steal it into the read tier. Anchored to a
+    # canonical ASan diagnostic line — the `==N==ERROR:`/`ERROR:`/`SUMMARY:`
+    # headline shape (severity appends the sibling sanitizer.txt before scoring)
+    # — not the bare `AddressSanitizer:` substring, so a negated or quoted prose
+    # mention ("No AddressSanitizer: strcpy-param-overlap was observed") in a
+    # FIND/triage report cannot mint a write primitive.
+    if re.search(r"(?m)^(?:==\d+==error:\s+|error:\s+|summary:\s+)"
+                 r"addresssanitizer:\s*[a-z]*(?:cpy|cat)-param-overlap\b", t):
+        if re.search(r"\bstack of thread\b|\bstack-buffer-overflow\b", t):
+            return "stack_write", "stack WRITE (copy-overlap)"
+        if re.search(r"\bglobal-buffer-overflow\b|\bglobal variable\b", t):
+            return "global_write", "global WRITE (copy-overlap)"
+        return "heap_write", "heap WRITE (copy-overlap)"
+
     if re.search(r"\bstack-buffer-overflow\b|\bstack-use-after-(?:scope|return)\b|"
                  r"\bdynamic-stack-buffer-overflow\b", t):
         if rw == "write":

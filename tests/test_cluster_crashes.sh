@@ -398,6 +398,30 @@ python3 "$CLUSTER" "$ubsan_root" >/dev/null 2>&1
 assert_file_contains "$ubsan_root/crashes/CRASH-CLUSTERS.md" 'ubsan-out-of-bounds' \
   "generic 'undefined-behavior' SUMMARY falls through to substring ladder"
 
+# ── libc copy-overlap primitive ──
+# ASan's `<fn>-param-overlap` (strcpy/memcpy copy overlap) prints no
+# "READ/WRITE of size" line, so it used to fall through to `unclassified` —
+# mislabeling the cluster and merging with unrelated unclassified crashes via
+# _same_cf_cluster's primitive similarity. It must be extracted as its own
+# primitive.
+overlap_root="$TEST_TMPDIR/copy-overlap"
+mkdir -p "$overlap_root/crashes/CRASH-OVERLAP-1"
+cat > "$overlap_root/crashes/CRASH-OVERLAP-1/asan.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: strcpy-param-overlap: memory ranges [0x10,0x41) and [0x30, 0x61) overlap
+    #0 0x100000000 in app_copy app.c:42
+    #1 0x100000010 in app_parse app.c:88
+SUMMARY: AddressSanitizer: strcpy-param-overlap app.c:42 in app_copy
+EOF
+cat > "$overlap_root/crashes/CRASH-OVERLAP-1/REPORT.md" <<'EOF'
+# CRASH-OVERLAP-1
+Surface: library-api
+Target: app.c:app_copy:42
+EOF
+python3 "$CLUSTER" "$overlap_root" >/dev/null 2>&1 \
+  || fail "copy-overlap: cluster-crashes runs cleanly" "exit nonzero"
+assert_file_contains "$overlap_root/crashes/CRASH-CLUSTERS.md" 'strcpy-param-overlap' \
+  "copy-overlap primitive is extracted, not collapsed to 'unclassified'"
+
 # ── LCS threshold env knob ──
 # Default LCS threshold is 2 (ClusterFuzz behavior). Tightening to 3
 # via CLUSTER_LCS_THRESHOLD=3 must split A1/A2 (which share 2 frames)

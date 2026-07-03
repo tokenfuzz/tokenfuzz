@@ -114,6 +114,62 @@ _CURRENT_TEST="class: 1-byte heap READ"
 read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "heap_read_small" "$key" "heap_read_small detected"
 
+# libc copy-overlap family (strcpy/memcpy-param-overlap): a WRITE into the copy
+# destination. ASan prints no "WRITE of size N" line for these, so without a
+# dedicated branch the direction heuristic defaults the overflow to the READ
+# tier and under-scores a write-class corruption as a disclosure (High → Low).
+# Fixtures write a real sanitizer.txt (severity appends it) so the match is
+# anchored to the canonical ==N==ERROR:/SUMMARY: line, not report prose. A
+# stack-region marker routes this one to stack_write.
+dir=$(make_crash "demo_overlap_stack" CRASH-OVERLAP-STACK \
+  "copy-overlap crash" "cli" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+cat > "$dir/sanitizer.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: strcpy-param-overlap: memory ranges [0x10,0x41) and [0x30, 0x61) overlap
+Address 0x10 is located in stack of thread T0 at offset 32 in frame
+EOF
+_CURRENT_TEST="class: strcpy-param-overlap (stack) → stack_write, not read tier"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "stack_write" "$key" "strcpy-param-overlap classifies as a stack WRITE"
+assert_eq "High" "$rating" "copy-overlap stack WRITE scores High, not Low"
+
+# A SUMMARY-line diagnostic with no region marker defaults to the heap write
+# class (all three write classes carry identical H/H/H impact; region only
+# labels) — and proves the SUMMARY: anchor works, not just the ERROR: headline.
+dir=$(make_crash "demo_overlap_heap" CRASH-OVERLAP-HEAP \
+  "copy-overlap crash" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+cat > "$dir/sanitizer.txt" <<'EOF'
+SUMMARY: AddressSanitizer: memcpy-param-overlap app.c:42 in app_copy
+EOF
+_CURRENT_TEST="class: memcpy-param-overlap (SUMMARY, no region) → heap_write"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "heap_write" "$key" "memcpy-param-overlap defaults to heap WRITE"
+
+# A comparison-function overlap is a READ, not a copy write. ASan never emits
+# one (only copy/concat interceptors check overlap), but the write branch must
+# not blindly claim any `*-param-overlap` token: a name ending in `cmp` must
+# NOT classify as a write. It carries no other class, so it stays unclassified.
+dir=$(make_crash "demo_overlap_cmp" CRASH-OVERLAP-CMP \
+  "copy-overlap crash" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+cat > "$dir/sanitizer.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: strcmp-param-overlap: memory ranges [0x10,0x41) and [0x30, 0x61) overlap
+Address 0x10 is located in stack of thread T0 at offset 32 in frame
+EOF
+_CURRENT_TEST="class: strcmp-param-overlap must NOT be a write"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_eq "unknown" "$key" "a comparison overlap (cmp) is not classified as a copy write"
+
+# Prose that only *quotes* the token while ruling it out — even with the exact
+# `AddressSanitizer:` prefix — must not mint a write primitive. The branch is
+# anchored to the canonical ==N==ERROR:/SUMMARY: line shape, not the substring,
+# so a FIND/triage report that references the token in prose stays unclassified.
+dir=$(make_crash "demo_overlap_prose" CRASH-OVERLAP-PROSE \
+  "No AddressSanitizer: strcpy-param-overlap was observed; open-redirect lead only" \
+  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
+_CURRENT_TEST="class: negated prefixed prose strcpy-param-overlap does not classify as write"
+read level score key surface rating vector <<< "$(get_severity "$dir")"
+assert_neq "heap_write" "$key" "prose-only overlap mention is not an authoritative write"
+assert_neq "stack_write" "$key" "prose-only overlap mention is not an authoritative write"
+
 dir=$(make_crash "demo_bus" CRASH-BUS \
   "BUS error" "cli" "obeyed" "bytes" "5/5" "CL-x (singleton)")
 _CURRENT_TEST="class: BUS (DoS-only)"
