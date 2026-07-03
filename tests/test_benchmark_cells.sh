@@ -403,4 +403,31 @@ fi
 assert_file_contains "$BENCH" 'audit_args\+=\(--skip-recon\)' \
   "T16p: --skip-recon is forwarded to bin/audit instead of shadowing bin/audit-recon"
 
+# ── T17: cleanup_model_direct_scratch reclaims model-direct scratch/ only ──────
+# It must delete the throwaway scratch/ dir but never the harness's scratch-N/
+# (canonical crash testcases + verified ASan) or the canonical crashes/ /
+# findings/ trees. Exercised in isolation under `set -u` with no global cell_dir,
+# which also guards against regressing the helper to read a dynamically-scoped
+# cell_dir instead of its own arg.
+t17_fn="$(awk '/^cleanup_model_direct_scratch\(\) \{/,/^\}/' "$BENCH")"
+if [ -z "$t17_fn" ]; then
+  fail "T17: could not extract cleanup_model_direct_scratch from bin/benchmark"
+else
+  t17_cell="$work/md-cell"
+  mkdir -p "$t17_cell/scratch/sub" "$t17_cell/scratch-1" \
+    "$t17_cell/crashes/CRASH-1" "$t17_cell/findings/FIND-1"
+  : > "$t17_cell/scratch/junk.bin"
+  : > "$t17_cell/scratch-1/tc.txt"
+  : > "$t17_cell/crashes/CRASH-1/report.md"
+  : > "$t17_cell/findings/FIND-1/report.md"
+  t17_rc=0
+  ( set -euo pipefail; log() { :; }; eval "$t17_fn"
+    cleanup_model_direct_scratch "$t17_cell" ) || t17_rc=$?
+  assert_eq 0 "$t17_rc" "T17a: cleanup runs clean under set -u with no global cell_dir"
+  assert_dir_not_exists "$t17_cell/scratch"       "T17b: model-direct scratch/ is reclaimed"
+  assert_dir_exists     "$t17_cell/scratch-1"     "T17c: harness scratch-N/ is left untouched"
+  assert_dir_exists     "$t17_cell/crashes/CRASH-1" "T17d: canonical crashes/ is left untouched"
+  assert_dir_exists     "$t17_cell/findings/FIND-1" "T17e: canonical findings/ is left untouched"
+fi
+
 summary

@@ -1082,6 +1082,29 @@ print(max(0, int(m.get("findings",0) or 0) - int(m.get("confirmed_findings",0) o
   return 0
 }
 
+# Reclaim a finished MODEL-DIRECT cell's scratch/ dir. In model-direct the
+# canonical artifacts (findings, crashes, and their saved inputs/drivers) are
+# written under findings/ and crashes/; scratch/ holds only throwaway
+# intermediate state, so it is safe to drop once metrics are harvested. A bare
+# agent can bloat scratch/ into a self-authored fuzzer corpus (tens of
+# thousands of files), so wiping it bounds the disk/inode blast radius.
+#
+# MODEL-DIRECT ONLY: harness (bin/audit) runs place REAL artifacts under
+# scratch-N in the results dir — crash testcases and verified ASan runs that
+# crash bundles and resume reference — so this must never run there. The
+# caller's [ cond = model-direct ] guard + the fixed scratch/ (not scratch-N)
+# path both keep it model-direct-scoped.
+cleanup_model_direct_scratch() {
+  local cell_dir="$1" scratch n sz
+  scratch="$cell_dir/scratch"
+  [ -d "$scratch" ] || return 0
+  n="$(find "$scratch" -type f 2>/dev/null | wc -l | tr -d ' ')"
+  sz="$(du -sh "$scratch" 2>/dev/null | cut -f1)"
+  rm -rf "$scratch" 2>/dev/null || true
+  log "cell ${cell_dir##*/} — reclaimed scratch/ (${n:-0} file(s), ${sz:-?})"
+  return 0
+}
+
 run_model_direct_cell() {
   local cell_dir="$1" exp_name="$2"
   local target_root="$SCRIPT_ROOT/targets/$TARGET_SLUG"
@@ -2339,6 +2362,11 @@ for cond in "${COND_ARR[@]}"; do
 
     write_cell_json "$cell_json" "$cond" "$rep" "$exp_name" \
       "$results_dir" "$wall" "$status" "$AGENTS"
+
+    # Metrics are now on disk; reclaim the model-direct scratch corpus so a
+    # self-authored fuzzer run can't leave hundreds of MB / tens of thousands
+    # of throwaway files behind.
+    [ "$cond" = "model-direct" ] && cleanup_model_direct_scratch "$cell_dir"
 
     if [ "$cond" = "model-direct" ] && [ -f "$cell_dir/metrics.json" ]; then
       if [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "0" ]; then
