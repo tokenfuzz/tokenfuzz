@@ -444,6 +444,7 @@ def agent_flags(
     if backend == "claude":
         flags = [
             "--print",
+            "--safe-mode",
             "--verbose",
             "--output-format", "stream-json",
             "--dangerously-skip-permissions",
@@ -560,7 +561,18 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         # plan is claude's read-only mode: Read/Grep/Glob for source-grounded
         # verdicts, writes and exec blocked. Mode-enforced, so it stays
         # read-only as tools evolve — no allow/deny list to keep complete.
-        flags = ["--print", "--output-format", "text", "--permission-mode", "plan"]
+        #
+        # Safe mode keeps one-shot harness decisions from loading operator
+        # plugins/skills/hooks/statusline context. Unlike full audit-agent
+        # sessions, decide calls are never resumed, so session persistence is
+        # disabled too.
+        flags = [
+            "--print",
+            "--safe-mode",
+            "--no-session-persistence",
+            "--output-format", "text",
+            "--permission-mode", "plan",
+        ]
         if resolved_model:
             flags += ["--model", resolved_model]
         return flags

@@ -79,6 +79,7 @@ declare -a flags_claude=()
 llm_agent_flags claude flags_claude "" 80 ""
 flags_str="${flags_claude[*]}"
 assert_match "--print"                       "$flags_str" "agent claude has --print"
+assert_match "--safe-mode"                   "$flags_str" "agent claude disables user plugins/skills/hooks"
 assert_match "--output-format stream-json"   "$flags_str" "agent claude has stream-json output"
 assert_match "--dangerously-skip-permissions" "$flags_str" "agent claude has skip-permissions"
 assert_match "--max-turns 80"                "$flags_str" "agent claude has max-turns"
@@ -180,6 +181,8 @@ declare -a d_claude=()
 llm_decide_flags claude d_claude ""
 flags_str="${d_claude[*]}"
 assert_match "--print"               "$flags_str" "decide claude has --print"
+assert_match "--safe-mode"           "$flags_str" "decide claude disables user plugins/skills/hooks"
+assert_match "--no-session-persistence" "$flags_str" "decide claude disables transcript persistence"
 if grep -q -- "--max-turns" <<< "$flags_str"; then
   fail "decide claude must NOT cap turns (timeout-bounded, like codex/gemini)"
 else

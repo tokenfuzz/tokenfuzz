@@ -390,6 +390,8 @@ os.environ.pop("USE_GEMINI_CLI", None)
 
 decide_claude = inv.decide_flags("claude")
 ok("--print" in decide_claude, "decide_flags('claude') has --print")
+ok("--safe-mode" in decide_claude, "decide_flags('claude') disables user customizations")
+ok("--no-session-persistence" in decide_claude, "decide_flags('claude') disables persistence")
 ok("--max-turns" not in decide_claude, "decide_flags('claude') has no turn cap")
 ok("plan" in decide_claude, "decide_flags('claude') uses read-only plan mode")
 
@@ -404,6 +406,9 @@ ok(agent_codex[agent_codex.index("--add-dir") + 1] == "/y",
 # max_turns kwarg is only consumed by claude (CLI-side: codex and the
 # Antigravity-CLI gemini backend don't take a --max-turns flag).
 agent_claude = inv.agent_flags("claude", max_turns=120)
+ok("--safe-mode" in agent_claude, "agent_flags('claude') disables user customizations")
+ok("--no-session-persistence" not in agent_claude,
+   "agent_flags('claude') stays persistable so audit resume can work")
 ok(agent_claude[agent_claude.index("--max-turns") + 1] == "120",
    "max_turns kwarg threaded through claude flag list")
 
