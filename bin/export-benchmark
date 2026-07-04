@@ -5,8 +5,8 @@ shareable archive.
 A benchmark run leaves its evidence spread across
 `output/benchmark/<backend>/<runid>/` — rendered comparison pages, per-backend
 ledgers, and a `pool/` of cluster + crash reports — with the heavy, internal
-`cells/` and `recon-cache/` trees alongside. This tool selects the runs you
-want, copies just the shareable, path-scrubbed artifacts into a staging tree,
+`cells/` tree alongside. This tool selects the runs you want, copies just the
+shareable, path-scrubbed artifacts into a staging tree,
 re-renders the comparison page and ledgers so every link resolves *inside* the
 bundle, and zips it. The recipient unzips and opens `benchmark-result.html`
 offline — no network, no `/Users/...` paths, no harness checkout required.
@@ -43,8 +43,8 @@ kept even when it is binary). Dropped from a crash/finding dir: its internal
 .audit/ (harness session state), *.dSYM debug bundles, and compiled executables
 — the last two are machine-specific build output the recipient regenerates from
 the shipped source + reproduce.sh, and they embed an unscrubbable absolute build
-path. Excluded at the run level: cells/, recon-cache/, console.log,
-severity.log — heavy harness internals and operator-side logs.
+path. Excluded at the run level: cells/, console.log, severity.log — heavy
+harness internals and operator-side logs.
 
 Every text file is scrubbed of local /Users... paths via the harness
 path-replacer (lib/benchmark._scrub_local_paths) — the same collapse to
@@ -71,10 +71,10 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 import benchmark as B  # noqa: E402  (runtime sys.path adjustment)
 
 # Run-level subtrees / files never shipped, plus each crash dir's internal
-# .audit/. cells/, recon-cache/ are heavy harness internals and the *.log files
-# are operator-side logs. A *.dSYM is a macOS debug-symbol bundle — build output
+# .audit/. cells/ are heavy harness internals and the *.log files are
+# operator-side logs. A *.dSYM is a macOS debug-symbol bundle — build output
 # the recipient regenerates, and it embeds the absolute build path.
-EXCLUDE = ("cells", "recon-cache", ".audit", "console.log", "severity.log")
+EXCLUDE = ("cells", ".audit", "console.log", "severity.log")
 
 
 def log(msg: str) -> None:

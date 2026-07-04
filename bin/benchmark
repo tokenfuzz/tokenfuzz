@@ -1283,7 +1283,7 @@ run_harness_cell() {
   local cell_dir="$1" exp_name="$2"
   local rc=0 facade
   local -a audit_env
-  audit_env=(env "AUDIT_RECON_CACHE_DIR=$BENCH_DIR/recon-cache")
+  audit_env=(env)
   [ -n "$AGENTS" ] && audit_env+=("NUM_AGENTS=$AGENTS")
   # A cell has a fixed wall budget that is far shorter than the audit's
   # sustained-streak halt, so a far-off capacity/account reset must stop the
@@ -1292,11 +1292,6 @@ run_harness_cell() {
   audit_env+=("RATE_LIMIT_CAPACITY_HARD_STOP=1")
   # Rotation thresholds are left at harness defaults — the harness
   # condition measures the product as shipped, rotation behaviour included.
-  #
-  # Every harness replicate in this run shares one target SHA and backend,
-  # so its cold-start recon is identical. A per-run shared recon cache lets
-  # only the first cell pay the recon cost; later cells get a cache hit and
-  # spend their whole budget on investigation instead of re-running recon.
   #
   # Run through a per-cell repo facade instead of the real harness root.
   # bin/audit intentionally cd's to its SCRIPT_ROOT; for benchmark cells,

@@ -9,7 +9,7 @@
 #   3. --target confines to runs whose run.json target matches (across
 #      backends), reading the recorded slug — not the directory name.
 #   4. --run-id requires --backend (run ids are not unique across backends).
-#   5. cells/, recon-cache/, and per-crash .audit/ are excluded.
+#   5. cells/ and per-crash .audit/ are excluded.
 #   6. Compiled executables are dropped; the testcase input (the crash trigger,
 #      binary or not) is kept.
 #   7. Local /Users... paths are scrubbed from every shipped text file.
@@ -34,7 +34,7 @@ make_run() {  # <backend> <runid> <target>
   local be="$1" runid="$2" tgt="$3"
   local d="$ROOT/$be/$runid"
   mkdir -p "$d/pool/codeqcrashes" "$d/cells/harness-r1" \
-           "$d/recon-cache" "$d/pool/crashes/CRASH-0001/.audit"
+           "$d/pool/crashes/CRASH-0001/.audit"
   cat > "$d/run.json" <<EOF
 {"runid":"$runid","target":"$tgt","backend":"$be","conditions":["harness"]}
 EOF
@@ -78,7 +78,6 @@ assert_dir_exists  "$OUT/gemini"                "no-flag export: gemini included
 
 # ── 5. Heavy/internal trees excluded ───────────────────────────────────────
 assert_dir_not_exists "$OUT/codex/20260101-000000/cells" "cells/ excluded"
-assert_dir_not_exists "$OUT/codex/20260101-000000/recon-cache" "recon-cache/ excluded"
 assert_dir_not_exists "$OUT/codex/20260101-000000/pool/crashes/CRASH-0001/.audit" \
   ".audit/ excluded"
 

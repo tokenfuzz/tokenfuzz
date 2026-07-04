@@ -290,7 +290,7 @@ SCOPE_AUTO_THRESHOLD="${RECON_SCOPE_AUTO_THRESHOLD:-500}"
 # Per-target recon checkpoint: the target HEAD sha at the last successful
 # recon. A change-driven (--scope since) run audits from this checkpoint
 # forward when it is available, falling back to the lookback window when
-# it is not. Lives next to the recon-cache marker under RESULTS_DIR.
+# it is not. Lives under RESULTS_DIR.
 CHECKPOINT_FILE="$RESULTS_DIR/.recon-checkpoint"
 
 # count_source_files <dir> — count in-scope source files under a tree,

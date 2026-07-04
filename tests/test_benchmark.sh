@@ -93,11 +93,15 @@ resume_root="$work/dry-resume-bench"
 resume_run="resume-$$"
 resume_cell="$resume_root/codex/$resume_run/cells/harness-r1"
 mkdir -p "$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results"
+mkdir -p "$resume_cell/results"
 cat > "$resume_cell/cell.json" <<JSON
 {"condition":"harness","replicate":1,"experiment":"bench-$resume_run-harness-r1","results_dir":"$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results","wall_seconds":0,"status":"running"}
 JSON
 printf 'stale result that must not survive in live cell\n' \
   > "$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results/stale-sentinel.txt"
+printf '{"id":"RECON-stale","title":"must not survive"}\n' \
+  > "$resume_cell/results/recon-hypotheses.jsonl"
+printf 'stale marker\n' > "$resume_cell/results/.recon-cache-marker"
 (
   set +e
   bash "$BENCH" --target dummytarget --dry-run --backend codex \
@@ -995,6 +999,10 @@ assert_eq "0" "$resume_rc" \
 assert_file_not_exists \
   "$resume_cell/repo-root/output/dummytarget-bench-$resume_run-harness-r1/codex/results/stale-sentinel.txt" \
   "T9o: stale output is not left under the live rerun cell"
+assert_file_not_exists "$resume_cell/results/recon-hypotheses.jsonl" \
+  "T9o2: stale local recon output is not left under the live rerun cell"
+assert_file_not_exists "$resume_cell/results/.recon-cache-marker" \
+  "T9o3: stale local recon marker is not left under the live rerun cell"
 assert_file_exists "$resume_cell/results/crashes/CRASH-001/sanitizer.txt" \
   "T9p: rerun wrote fresh dry-run results after cleanup"
 

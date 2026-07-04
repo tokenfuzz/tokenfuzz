@@ -192,7 +192,6 @@ output/<target>/<backend>/results/
   s6-peer-cards.jsonl          peer-project fix cards (strategy S6)
   recon-hypotheses.jsonl       recon candidates (cold-start survey)
   recon-findings.md            human-readable recon report
-  .recon-cache-marker          (target SHA, recon prompt SHA) — cache key
   .session-env                 probe discovery file for this result tree
 ```
 

@@ -618,8 +618,7 @@ def load_jsonl(path: Path, label: str = "") -> list[dict]:
     """Load a JSONL file, tolerating blank and malformed lines.
 
     Malformed lines are skipped but counted; the count is logged to stderr
-    so a silent recon-cache poisoning incident is visible (previously the
-    parse failures were swallowed with no diagnostic at all).
+    so parse failures are visible instead of being swallowed.
     """
     out: list[dict] = []
     if not path.exists():

@@ -99,23 +99,23 @@ and `output/<target>/target.toml` reviewed. The shortest path is the
 [Add a target](../getting-started/add-a-target.md) flow.
 
 Treat a two-replicate, three-hour run as a layout and sanity check,
-not as a statistical claim. LLM runs are stochastic; the first
-TokenFuzz cell may also spend 10-30 minutes on cold recon before deep
-investigation begins. For a result you would cite, use at least five
-replicates and more than one target.
+not as a statistical claim. LLM runs are stochastic; every TokenFuzz
+cell spends 10-30 minutes on cold recon before deep investigation
+begins. For a result you would cite, use at least five replicates and
+more than one target.
 
 ## Recon and budget
 
 The `harness` condition is `bin/audit` as shipped, so a cold target
-starts with recon. During a benchmark run, harness cells share a
-per-run recon cache keyed to the target source and backend. The first
-harness cell usually pays the cold-start recon cost; later harness
-cells normally reuse the cache and spend more of their budget on
-investigation.
+starts with recon. Recon is not cached or shared: every harness cell
+runs its own cold recon, so each replicate is an independent product
+run and all replicates carry the recon cost equally. Recon is
+stochastic, so the seeded hypotheses differ across replicates — that
+variance is part of what the benchmark measures.
 
-Short budgets can therefore favor `model-direct`, especially when the
-first harness cell is all recon and little probing. This is not a bug
-in the benchmark. It is measuring whether TokenFuzz can repay its
+Short budgets can therefore favor `model-direct`, since every harness
+cell spends part of its budget on recon before probing. This is not a
+bug in the benchmark. It is measuring whether TokenFuzz can repay its
 startup cost inside the budget you gave it.
 
 ## Where results land

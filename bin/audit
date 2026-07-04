@@ -5293,63 +5293,13 @@ patch_cards_path() {
   printf '%s/patch-cards.jsonl' "$RESULTS_DIR"
 }
 
-# Content signature for a target tree without a usable VCS revision:
-# sha1 over (relpath, content bytes) of the source files recon actually
-# sweeps — the extension set comes from the shared languages registry and
-# the directory exclusions from recon_slicer.SKIP_DIR_NAMES, so the key
-# covers exactly the files recon reads (a .tsx/.pyx edit invalidates it
-# the same way a .c edit does). Hashing real bytes (not size/mtime) means
-# an edit can never slip past the key; os.walk prunes skipped trees
-# before descending. Source trees are small relative to the 10-30 minute
-# recon this guards, and this runs once per cold start, not per
-# iteration. Prints nothing on failure (caller falls back to "norev").
-recon_target_tree_sha() {
-  local target_root="$1"
-  command -v python3 >/dev/null 2>&1 || return 0
-  python3 - "$target_root" "$SCRIPT_ROOT" <<'PY' 2>/dev/null
-import hashlib, os, sys
-
-root, script_root = sys.argv[1], sys.argv[2]
-sys.path.insert(0, os.path.join(script_root, "lib"))
-from languages import all_source_exts
-from recon_slicer import SKIP_DIR_NAMES
-
-exts = set(all_source_exts())
-h = hashlib.sha1()
-for dirpath, dirnames, filenames in os.walk(root):
-    dirnames[:] = sorted(
-        d for d in dirnames
-        if d not in SKIP_DIR_NAMES and not d.startswith("build-")
-    )
-    for fn in sorted(filenames):
-        if os.path.splitext(fn)[1].lower() not in exts:
-            continue
-        p = os.path.join(dirpath, fn)
-        if not os.path.isfile(p):
-            continue
-        rel = os.path.relpath(p, root)
-        h.update(rel.encode("utf-8", "replace") + b"\0")
-        try:
-            with open(p, "rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    h.update(chunk)
-        except OSError:
-            h.update(b"<unreadable>")
-        h.update(b"\0")
-print(h.hexdigest())
-PY
-}
-
 # Run breadth-first recon at cold start and seed its findings into the
-# work-card pool. Cached on (target-source-git-SHA, recon-prompt-SHA)
-# so subsequent cold-starts on the same code don't re-pay the recon
-# cost. Returns 0 on success or cache-hit; non-zero on hard error
-# (caller logs but continues without recon-seeded cards).
+# work-card pool. Returns 0 on success; non-zero on hard error (caller
+# logs but continues without recon-seeded cards).
 maybe_seed_recon_cards() {
   local backend="$1"
   local recon_out="$RESULTS_DIR/recon-hypotheses.jsonl"
   local recon_report="$RESULTS_DIR/recon-findings.md"
-  local marker="$RESULTS_DIR/.recon-cache-marker"
   local work_file
   work_file=$(work_cards_path)
 
@@ -5366,85 +5316,8 @@ maybe_seed_recon_cards() {
   [ -x "$SCRIPT_ROOT/bin/audit-recon" ] || { log "Recon seed: bin/audit-recon not executable; skipping" | tee -a "$INDEX"; return 1; }
   [ -x "$SCRIPT_ROOT/lib/recon_to_cards.py" ] || { log "Recon seed: lib/recon_to_cards.py not executable; skipping" | tee -a "$INDEX"; return 1; }
 
-  # Cache key = (target HEAD SHA, hash of every harness file the recon
-  # output depends on). Any of these changing means the cached
-  # hypotheses + their interpretation could be stale, so re-run.
-  # Files hashed:
-  #   bin/audit-recon              — discovery driver + prompt template
-  #   lib/recon_slicer.py          — how the target is partitioned
-  #   lib/recon_to_cards.py        — hypothesis → work-card mapping
-  #   lib/triage_validate.sh       — validator quorum rules
-  #   bin/validate-finding         — per-validator prompt + parsing
-  local current_target_sha current_logic_sha
-  case "${TARGET_REPO_TYPE:-none}" in
-    git)
-      current_target_sha=$(git -C "$TARGET_ROOT" rev-parse HEAD 2>/dev/null || echo "norev")
-      ;;
-    hg)
-      current_target_sha=$(hg -R "$TARGET_ROOT" id -i 2>/dev/null | sed 's/+//g' || echo "norev")
-      ;;
-    *)
-      current_target_sha="norev"
-      ;;
-  esac
-  # Local / no-VCS targets (and failed rev lookups) have no commit id, and
-  # a bare "norev" key made the cache insensitive to content: the first
-  # recon run cached forever, so edits to a local target silently reused
-  # stale hypotheses. Derive a cheap content signature instead; fall back
-  # to "norev" (logic-sha-only key) only when the walk fails.
-  if [ "$current_target_sha" = "norev" ]; then
-    local tree_sig
-    tree_sig=$(recon_target_tree_sha "$TARGET_ROOT")
-    [ -n "$tree_sig" ] && current_target_sha="tree-${tree_sig}"
-  fi
-  current_logic_sha=$(cat \
-      "$SCRIPT_ROOT/bin/audit-recon" \
-      "$SCRIPT_ROOT/lib/recon_slicer.py" \
-      "$SCRIPT_ROOT/lib/recon_to_cards.py" \
-      "$SCRIPT_ROOT/lib/triage_validate.sh" \
-      "$SCRIPT_ROOT/bin/validate-finding" \
-      2>/dev/null | audit_sha1 | awk '{print $1}')
-  local current_key="$current_target_sha/$current_logic_sha"
-
-  if [ -f "$marker" ] && [ -s "$recon_out" ]; then
-    local cached_key
-    cached_key=$(cat "$marker" 2>/dev/null)
-    if [ "$cached_key" = "$current_key" ]; then
-      local recon_count
-      recon_count=$(grep -cE '^\{.*"id"[[:space:]]*:[[:space:]]*"REC(ON)?-' "$recon_out" 2>/dev/null || true)
-      recon_count=${recon_count:-0}
-      log "Recon seed: cache HIT for target SHA $current_target_sha ($recon_count hypothesis line(s)); reusing without re-running" | tee -a "$INDEX"
-      _seed_cards_from_recon "$recon_out" "$work_file" || return 1
-      return 0
-    fi
-  fi
-
-  # Shared recon cache: a directory consulted across sibling runs on
-  # identical source — e.g. the benchmark's three harness replicates,
-  # which share a target SHA and backend and so produce the same recon.
-  # When AUDIT_RECON_CACHE_DIR is set, the first run pays the cold recon
-  # cost and the rest get a hit. The cache key still includes the recon
-  # logic SHA, so a harness change invalidates it. Recon is backend- and
-  # source-specific, so callers must scope the directory per backend.
-  local shared_dir="${AUDIT_RECON_CACHE_DIR:-}"
-  local shared_marker="" shared_out=""
-  if [ -n "$shared_dir" ]; then
-    shared_marker="$shared_dir/.recon-cache-marker"
-    shared_out="$shared_dir/recon-hypotheses.jsonl"
-    if [ -f "$shared_marker" ] && [ -s "$shared_out" ] \
-        && [ "$(cat "$shared_marker" 2>/dev/null)" = "$current_key" ]; then
-      cp "$shared_out" "$recon_out" 2>/dev/null || true
-      printf '%s\n' "$current_key" > "$marker"
-      local recon_count
-      recon_count=$(grep -cE '^\{.*"id"[[:space:]]*:[[:space:]]*"REC(ON)?-' "$recon_out" 2>/dev/null || true)
-      recon_count=${recon_count:-0}
-      log "Recon seed: shared-cache HIT ($shared_dir; $recon_count hypothesis line(s)); reusing without re-running" | tee -a "$INDEX"
-      _seed_cards_from_recon "$recon_out" "$work_file" || return 1
-      return 0
-    fi
-  fi
-
-  log "Recon seed: cache MISS (target SHA $current_target_sha); launching bin/audit-recon (this may take 10-30 minutes)" | tee -a "$INDEX"
+  rm -f "$recon_out" "$recon_report" 2>/dev/null || true
+  log "Recon seed: launching bin/audit-recon (this may take 10-30 minutes)" | tee -a "$INDEX"
   # Pass the resolved model through: hosted backends fall back to a config
   # default, but oss has no default and the OpenCode provider config errors
   # without an explicit served-model name (recon would emit empty output).
@@ -5456,23 +5329,14 @@ maybe_seed_recon_cards() {
       --out "$recon_out" \
       --report "$recon_report" \
       2>&1 | sed -u 's/^/[recon-seed] /' | tee -a "$INDEX"; then
-    printf '%s\n' "$current_key" > "$marker"
     local recon_count
     recon_count=$(grep -cE '^\{.*"id"[[:space:]]*:[[:space:]]*"REC(ON)?-' "$recon_out" 2>/dev/null || true)
     recon_count=${recon_count:-0}
-    log "Recon seed: completed and cached ($recon_count hypothesis line(s) at $recon_out)" | tee -a "$INDEX"
-    # Populate the shared cache so sibling runs on identical source skip
-    # the cold recon entirely.
-    if [ -n "$shared_marker" ]; then
-      mkdir -p "$shared_dir" 2>/dev/null \
-        && cp "$recon_out" "$shared_out" 2>/dev/null \
-        && printf '%s\n' "$current_key" > "$shared_marker" \
-        && log "Recon seed: shared cache refreshed at $shared_dir" | tee -a "$INDEX"
-    fi
+    log "Recon seed: completed ($recon_count hypothesis line(s) at $recon_out)" | tee -a "$INDEX"
     _seed_cards_from_recon "$recon_out" "$work_file" || return 1
     return 0
   fi
-  log "Recon seed: bin/audit-recon exited non-zero; not caching" | tee -a "$INDEX"
+  log "Recon seed: bin/audit-recon exited non-zero" | tee -a "$INDEX"
   return 1
 }
 
@@ -7426,8 +7290,8 @@ while true; do
     # surfaces candidate bugs the rotator's S1-S8 strategies otherwise
     # take many iterations to discover (e.g. re-entrant cancel/destroy
     # UAFs in ares_process.c — found by recon, missed by S1 on the
-    # same target). Cached on the target source SHA so re-entry doesn't
-    # re-pay the recon cost on the same code.
+    # same target). Runs only on a genuine cold start (no agent state),
+    # so a resumed audit does not re-pay the recon cost.
     maybe_seed_recon_cards "$ACTIVE_BACKEND" || \
       log "Recon seed: skipped or failed; cold-start continues without recon-seeded cards" | tee -a "$INDEX"
     CURRENT_LAUNCH_AGENT_COUNT="$NUM_AGENTS"
