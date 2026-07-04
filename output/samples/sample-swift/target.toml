@@ -1,0 +1,35 @@
+# target.toml — sample-swift synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+
+target        = "samples/sample-swift"
+upstream_url  = "synthetic — TokenFuzz per-language benchmark (Swift)"
+build_system  = "swift"
+pinned_rev    = "norev"
+
+is_browser    = "0"
+
+[threat_model]
+# The CLI turns one attacker-supplied job file into a single ReportKit call;
+# the job bytes are the only attacker-controlled surface.
+attacker_controls = ["bytes"]
+
+# Swift is the exception to the non-native/findings-only rule: the runner
+# compiles the package under AddressSanitizer, so a sanitizer diagnostic routes
+# to crashes/ like a C/C++ target. {SWIFT_SANITIZER} expands from the asan slug.
+[sanitizer]
+enabled = ["asan"]
+
+[runner]
+bin  = "swift"
+args = [
+  "run", "--quiet", "-c", "release",
+  "-Xswiftc", "-sanitize={SWIFT_SANITIZER}",
+  "-Xswiftc", "-O",
+  "--package-path", "{TARGET_ROOT}",
+  "sample-swift", "{TESTCASE}",
+]
+crash_patterns = [
+  "Fatal error:",
+  "==\\d+==ERROR: AddressSanitizer",
+  "WARNING: ThreadSanitizer:",
+]

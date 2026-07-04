@@ -676,13 +676,33 @@ audit_raw_path() {
 
 sanitize_target_slug() {
   local raw="$1"
-  raw="${raw##*/}"
-  raw=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
-  raw=$(printf '%s' "$raw" | tr -cs '[:alnum:]._-' '-')
-  raw="${raw#-}"
-  raw="${raw%-}"
-  [ -n "$raw" ] || { log "FATAL: target slug resolved to empty string" >&2; exit 1; }
-  echo "$raw"
+  local slug
+  # Derive the slug as the path relative to <repo>/targets when the target
+  # lives there, so a nested target (targets/samples/sample-ruby) keeps its
+  # full relative slug 'samples/sample-ruby' instead of collapsing to the
+  # basename. A target provisioned outside the tree (via --target-path) has no
+  # such relation, so fall back to its basename. Every path component is
+  # sanitized the same way a flat slug always was (lowercased; runs of other
+  # characters folded to a single dash; leading/trailing dashes trimmed).
+  slug=$(python3 - "$raw" "$SCRIPT_ROOT/targets" <<'PY'
+import os, re, sys
+raw = sys.argv[1]
+targets_root = os.path.realpath(sys.argv[2])
+raw_real = os.path.realpath(raw)
+if raw_real == targets_root or raw_real.startswith(targets_root + os.sep):
+    rel = os.path.relpath(raw_real, targets_root)
+else:
+    rel = os.path.basename(raw.rstrip("/")) or raw
+parts = []
+for comp in rel.split(os.sep):
+    c = re.sub(r"[^a-z0-9._-]+", "-", comp.lower()).strip("-")
+    if c:
+        parts.append(c)
+print("/".join(parts))
+PY
+)
+  [ -n "$slug" ] || { log "FATAL: target slug resolved to empty string" >&2; exit 1; }
+  echo "$slug"
 }
 
 resolve_target_root() {
@@ -2630,7 +2650,11 @@ TARGET_CONFIG_DIR="$(target_output_root "$SCRIPT_ROOT" "$TARGET_SLUG" "" "$AUDIT
 TARGET_TOML="$TARGET_CONFIG_DIR/target.toml"
 mkdir -p "$TARGET_CONFIG_DIR"
 if [ "$EXPERIMENT_FLAG_PROVIDED" -eq 1 ] && [ ! -e "$TARGET_TOML" ] && [ ! -L "$TARGET_TOML" ]; then
-  ln -s "../${TARGET_SLUG}/target.toml" "$TARGET_TOML" 2>/dev/null \
+  # The experiment dir output/<slug>-<exp>/ is a sibling of the base target dir
+  # output/<slug>/ under the same parent, so the relative link is the base
+  # target's basename — not the full slug, which would double the nesting for a
+  # nested target (output/samples/sample-ruby-exp -> ../samples/... is wrong).
+  ln -s "../$(basename "${TARGET_SLUG}")/target.toml" "$TARGET_TOML" 2>/dev/null \
     || cp "$TARGET_BASE_TOML" "$TARGET_TOML"
 fi
 

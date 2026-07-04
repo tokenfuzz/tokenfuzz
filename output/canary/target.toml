@@ -1,8 +1,5 @@
-# target.toml — canary ground-truth target (hand-authored, committed).
-# The answer key lib/benchmark.py scores a run against lives beside this
-# file at output/canary/ground-truth.json — deliberately outside the target
-# tree (targets/canary/) so the audited agents are not handed it. Paths
-# below are relative to target_root.
+# target.toml — canary benchmark calibration target (hand-authored,
+# committed). Paths below are relative to target_root.
 
 target        = "canary"
 upstream_url  = "synthetic — TokenFuzz benchmark calibration fixture"

@@ -6,7 +6,18 @@ output/*
 !output/canary/
 output/canary/*
 !output/canary/target.toml
-!output/canary/ground-truth.json
+!output/canary/.ground-truth.json
+# Per-language synthetic benchmark targets live under samples/ and follow the
+# canary's model: commit only their config + answer key; every other file is
+# runtime. output/* ignores the samples container, so re-include it first, then
+# each per-language dir, then only its config + answer key.
+!output/samples/
+output/samples/*
+!output/samples/sample-*/
+output/samples/sample-*/*
+!output/samples/sample-*/target.toml
+!output/samples/sample-*/.ground-truth.json
+output/samples/sample-*-asan/
 scratch/
 scratch-*/
 targets/*
@@ -15,6 +26,16 @@ targets/*
 # (build-asan, build-ubsan, …); *.log under it is already ignored below.
 !targets/canary/
 targets/canary/build-*/
+# Per-language synthetic benchmark targets live under samples/ and are committed
+# like the canary; re-include the samples container, then skip each target's
+# sanitizer/interpreter build dirs and language caches.
+!targets/samples/
+targets/samples/sample-*/build-*/
+targets/samples/sample-*/target/
+targets/samples/sample-*/node_modules/
+targets/samples/sample-*/.build/
+targets/samples/sample-*/.audit/*
+!targets/samples/sample-*/.audit/build.sh
 
 # bin/benchmark ledger + run artifacts (operator data, not source)
 benchmark-results.md
@@ -24,6 +45,12 @@ benchmark-results.*.bak.md
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+# Static-analyzer output (scan-build/clang) dropped at the repo root when a
+# target is built there — byproducts, never source. A committed .plist can leak
+# a target's planted diagnostics. Root-scoped so a target's own Info.plist under
+# targets/<slug>/ is still tracked.
+/*.plist
 
 # Editor and IDE files
 *~
@@ -53,3 +80,6 @@ lib/wrappers/_zdotdir/.zcompdump*
 
 # Documentation builds
 /site/
+
+# Built Go benchmark binary (rebuilt by bootstrap)
+targets/samples/sample-go/sample-go

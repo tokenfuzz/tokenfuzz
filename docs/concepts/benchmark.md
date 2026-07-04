@@ -65,8 +65,11 @@ bin/benchmark --target <target>
 ```
 
 The target must already exist under `targets/<target>/` and have a
-usable `output/<target>/target.toml`. If you have not created that
-yet, start with [Add a target](../getting-started/add-a-target.md).
+usable `output/<target>/target.toml`. A target slug may be nested, such
+as `samples/sample-python`, which maps to
+`targets/samples/sample-python/` and `output/samples/sample-python/`.
+If you have not created that yet, start with
+[Add a target](../getting-started/add-a-target.md).
 
 With all defaults, the command means:
 
@@ -211,7 +214,7 @@ reviewer but are not a memory-safety fault), enough to exercise detection,
 triage, clustering, and severity scoring end to end.
 
 The answer key is deliberately **not** in the target tree. It lives at
-`output/canary/ground-truth.json`, outside the directory handed to the
+`output/canary/.ground-truth.json`, outside the directory handed to the
 audited agents, so the score stays blind — an agent auditing the canary is
 not also handed a list of which inputs are real bugs and which are traps.
 The deterministic scorer reads it after the run. Each planted bug pins its
@@ -249,7 +252,7 @@ Score an existing results or pool tree directly:
 
 ```bash
 python3 lib/benchmark.py score output/canary/<backend>/results \
-  --ground-truth output/canary/ground-truth.json
+  --ground-truth output/canary/.ground-truth.json
 ```
 
 This is the labelled signal to tune gate thresholds against. Tune
@@ -258,9 +261,9 @@ a regression the canary catches before it reaches a real audit.
 
 ### Measuring recall on real bugs
 
-The same `ground-truth.json` shape works for any target. To measure
+The same `.ground-truth.json` shape works for any target. To measure
 recall against real CVEs, add a manifest at
-`output/<slug>/ground-truth.json` whose `planted_bugs` reference the real
+`output/<slug>/.ground-truth.json` whose `planted_bugs` reference the real
 crashing symbols and primitives, pin the target to a vulnerable revision,
 and run the benchmark as usual. The scorer needs no code change — it keys
 on the `(primitive, signature_symbol)` pair the clustering pipeline already
@@ -271,7 +274,7 @@ produces.
     discloses unreleased bug detail — exactly what the
     [neutral-fixture rule](https://github.com/tokenfuzz/tokenfuzz/blob/main/docs/development.md)
     forbids. `output/` is gitignored precisely so these stay private, so a
-    real-bug `output/<slug>/ground-truth.json` is uncommitted by default —
+    real-bug `output/<slug>/.ground-truth.json` is uncommitted by default —
     leave it that way. The synthetic `canary` answer key is the one committed
     exception because it implements no real project.
 

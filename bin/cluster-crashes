@@ -1007,8 +1007,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.results_dir.name == "crashes":
         crashes_root = args.results_dir
         out_md = crashes_root / "CRASH-CLUSTERS.md"
-    elif args.results_dir.parent.name == "output":
-        # Target-root mode: walk every <slug>/<agent>/results/crashes/.
+    elif (args.results_dir / "target.toml").is_file():
+        # Target-root mode: walk every <slug>/<agent>/results/crashes/. A target
+        # root is identified only by its target.toml (the canonical rule in
+        # lib/target_config.py), so a nested container like output/samples/ —
+        # which has no target.toml — is not mistaken for one.
         return _aggregate_target_root(args.results_dir, dry_run=args.dry_run, want_json=args.json)
     else:
         crashes_root = args.results_dir

@@ -311,6 +311,10 @@ assert_file_exists "$RESULTS_DIR/findings/FIND-A1/.dup-of" \
 agg_root="$TEST_TMPDIR/output/demo"
 mkdir -p "$agg_root/claude/results/findings/FIND-AGG-1" \
          "$agg_root/codex/results/findings/FIND-AGG-2"
+# A target root is identified by its target.toml (the canonical rule); write
+# one so this behaves like a real target root rather than relying on the
+# dropped parent==output fallback.
+printf 'target = "demo"\n' > "$agg_root/target.toml"
 cat > "$agg_root/claude/results/findings/FIND-AGG-1/report.md" <<'EOF'
 # Aggregate duplicate A
 
@@ -355,6 +359,35 @@ assert_file_contains "$agg_root/claude/results/findings/FIND-AGG-1/.dup-of" \
   && pass "aggregate canonical has NO .dup-of marker" \
   || fail "aggregate canonical has NO .dup-of marker" ".dup-of exists"
 
+agg_nested="$TEST_TMPDIR/output/samples/demo"
+mkdir -p "$agg_nested/codex/results/findings/FIND-NEST-1"
+printf 'target = "demo"\n' > "$agg_nested/target.toml"
+cat > "$agg_nested/codex/results/findings/FIND-NEST-1/report.md" <<'EOF'
+# Nested aggregate finding
+
+Location: `src/nested/session.go:Validate:40`
+Class: auth:bypass
+EOF
+sha1=$(shasum -a 1 "$agg_nested/codex/results/findings/FIND-NEST-1/report.md" | awk '{print $1}')
+cat > "$agg_nested/codex/results/findings/FIND-NEST-1/.llm-find-quality.json" <<EOF
+{"decision":"find_quality","decision_version":"v10","content_sha1":"$sha1","accept":true,"reason":"test","class":"auth:bypass","severity":"low","cached_at":"2026-05-12T00:00:00Z"}
+EOF
+python3 "$CLUSTER" "$agg_nested" >/dev/null 2>&1 \
+  || fail "nested aggregate cluster-findings runs cleanly" "exit nonzero"
+assert_file_exists "$agg_nested/FINDING-CLUSTERS.md" \
+  "nested aggregate FINDING-CLUSTERS.md written"
+assert_file_contains "$agg_nested/FINDING-CLUSTERS.md" 'codex/FIND-NEST-1' \
+  "nested aggregate FINDING-CLUSTERS.md links member"
+
+# A nested CONTAINER dir (output/samples/, no target.toml) is NOT a target
+# root: identified by target.toml alone, it falls through to plain results-dir
+# mode (findings_root key), not the bogus target-root aggregate (target_root
+# key) it used to reach via the dropped parent==output fallback.
+container_json=$(python3 "$CLUSTER" "$TEST_TMPDIR/output/samples" --json 2>/dev/null)
+assert_eq "yes" \
+  "$(printf '%s' "$container_json" | python3 -c "import json,sys;d=json.load(sys.stdin);print('yes' if 'findings_root' in d and 'target_root' not in d else 'no')")" \
+  "container dir (no target.toml) is not aggregated as a target root"
+
 # ── RC#2: evidence-gated canonical — proven (E:P) wins over unproven (E:U) ──
 # Two findings at one site cluster; the higher-severity member is an UNPROVEN
 # (E:U) theory, the lower is the PROVEN (E:P) manifestation. The canonical —
@@ -390,6 +423,32 @@ assert_file_exists "$RESULTS_DIR/findings/FIND-EVU/.dup-of" \
 [ ! -f "$RESULTS_DIR/findings/FIND-EVP/.dup-of" ] \
   && pass "RC#2: proven (E:P) member is canonical" \
   || fail "RC#2: proven (E:P) member is canonical" "proven member got .dup-of"
+
+# _derive_target_root scans the <agent>/{results,logs} marker from the RIGHT,
+# so a nested slug whose own first component is named "results" or "logs" is not
+# mistaken for the structural marker (which would corrupt the strip-prefix and
+# split duplicate findings by citation shape).
+derive_out=$(python3 - <<'PY'
+import importlib.machinery, importlib.util
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader("cf", "bin/cluster-findings")
+spec = importlib.util.spec_from_loader("cf", loader)
+cf = importlib.util.module_from_spec(spec); loader.exec_module(cf)
+cases = {
+    "/x/output/results/demo/codex/results/findings/FIND-1/report.md": "targets/results/demo",
+    "/x/output/samples/sample-c/codex/results/findings/FIND-1/report.md": "targets/samples/sample-c",
+    "/x/output/cjson/claude/results/findings/FIND-1/report.md": "targets/cjson",
+}
+for p, exp in cases.items():
+    got = cf._derive_target_root(Path(p))
+    print(f"{'OK' if got == exp else 'FAIL'} {p} -> {got}")
+PY
+)
+if printf '%s' "$derive_out" | grep -q FAIL; then
+  fail "_derive_target_root scans the results/logs marker from the right" "$derive_out"
+else
+  pass "_derive_target_root scans the results/logs marker from the right (nested slug named 'results' handled)"
+fi
 
 teardown_test_env
 summary

@@ -1,0 +1,82 @@
+{
+  "target": "samples/sample-go",
+  "language": "go",
+  "findings_only": true,
+  "description": "Answer key for the synthetic sample-go target (reportkit report toolkit). Kept under output/samples/sample-go/ — NOT inside targets/samples/sample-go/ — so the audited agents are not handed the answer while being measured. The deterministic scorer reads it after the run. The `go build` bootstrap produces the sample-go binary; every planted bug is reachable through it from a single job file. This is a findings-only target: every planted bug is an observable security boundary crossing (template injection info-disclosure, zip-slip arbitrary write, command injection, read/write path traversal) — deliberately NOT memory-safe DoS panics, since Go's runtime makes a nil-deref or slice-out-of-range a benign crash that a correctly-calibrated auditor discards. Reproducer job files live in /tmp (not committed) to keep the target tree free of answer leakage. The two false-positive traps look dangerous to a naive scanner but are safe.",
+  "runner": "sample-go",
+  "planted_bugs": [
+    {
+      "id": "template-injection",
+      "kind": "real",
+      "primitive": "template-injection",
+      "access": "READ",
+      "signature_symbol": "renderTemplate",
+      "input": "/tmp/go-render.job",
+      "cwe": "CWE-1336",
+      "modeled_on": "server-side template injection class — text/template.Parse on an attacker-controlled template string executed against a context holding a secret",
+      "summary": "renderTemplate parses the whole job body as a text/template and executes it against a renderContext that carries an internal SigningKey. Because the template text is attacker-controlled, a body of '{{.SigningKey}}' exfiltrates the signing credential (and any other in-scope field or method). /tmp/go-render.job renders {{.SigningKey}} and leaks 'dev-signing-key-do-not-ship'."
+    },
+    {
+      "id": "zip-slip",
+      "kind": "real",
+      "primitive": "path-traversal",
+      "access": "WRITE",
+      "signature_symbol": "extractBundle",
+      "input": "/tmp/go-extract.job",
+      "cwe": "CWE-22",
+      "modeled_on": "zip-slip archive-extraction class — filepath.Join(dest, entry.Name) with no containment check on the archive entry name",
+      "summary": "extractBundle unpacks a zip archive by writing each entry to filepath.Join(dest, f.Name) with no '..' containment check, so an entry named '../x' escapes the destination directory. /tmp/go-extract.job unpacks /tmp/go-evil.zip (entry '../go-zipslip-escaped.txt') to write outside the destination."
+    },
+    {
+      "id": "shell-command-injection",
+      "kind": "real",
+      "primitive": "command-injection",
+      "access": "EXEC",
+      "signature_symbol": "runExport",
+      "input": "/tmp/go-export.job",
+      "cwe": "CWE-78",
+      "modeled_on": "OS command injection class — exec.Command(\"sh\", \"-c\", <attacker>) on an attacker string",
+      "summary": "runExport runs its hook string through 'sh -c', so any export hook is arbitrary command execution. /tmp/go-export.job runs 'true; echo injected' to prove the string is executed as a shell command."
+    },
+    {
+      "id": "path-traversal-read",
+      "kind": "real",
+      "primitive": "path-traversal",
+      "access": "READ",
+      "signature_symbol": "readAsset",
+      "input": "/tmp/go-asset.job",
+      "cwe": "CWE-22",
+      "modeled_on": "path traversal class — filepath.Join(root, name) with no containment check",
+      "summary": "readAsset joins an attacker-supplied name onto the asset root with no '..' containment check, so a name like ../etc/passwd reads any file the process can. /tmp/go-asset.job reads /etc/passwd from outside the root."
+    },
+    {
+      "id": "path-traversal-write",
+      "kind": "real",
+      "primitive": "path-traversal",
+      "access": "WRITE",
+      "signature_symbol": "saveRender",
+      "input": "/tmp/go-save.job",
+      "cwe": "CWE-22",
+      "modeled_on": "arbitrary file write via unchecked filepath.Join of an attacker name onto an output root",
+      "summary": "saveRender joins an attacker-supplied name onto the output root with no containment check, so a name like ../x writes outside the output root. /tmp/go-save.job writes go-save-escaped.txt above the root."
+    }
+  ],
+  "false_positive_traps": [
+    {
+      "id": "json-config",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "parseConfig",
+      "input": "/tmp/go-config.job",
+      "refute_reason": "parseConfig uses encoding/json into a map[string]any, which yields only strings/numbers/bools/slices/maps — never a pointer to dereference or a program to run. It looks like a state loader that might crash or execute but does not; a nil-deref or code-execution report here is a false positive."
+    },
+    {
+      "id": "fixed-command",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "runCommand",
+      "input": "/tmp/go-command.job",
+      "refute_reason": "runCommand calls exec.Command with a fixed executable (echo) and the caller argument as a separate argv element; exec.Command spawns no shell, so a caller controls neither which program runs nor a shell. It looks like the sibling of runExport but is not injectable; a command-injection report here is a false positive."
+    }
+  ]
+}

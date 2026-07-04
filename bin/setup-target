@@ -121,9 +121,31 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$TARGET_NAME" ] || { usage >&2; exit 1; }
+# A target name is a relative path under targets/, so a nested target such as
+# samples/sample-ruby is allowed. Each '/'-separated component must be a plain
+# name (letters, numbers, dot, underscore, dash); reject anything that could
+# escape the tree (absolute, empty, '.'/'..', hidden, or doubled slashes).
 case "$TARGET_NAME" in
-  *[!A-Za-z0-9._-]*|'') die "target must contain only letters, numbers, dot, underscore, or dash" ;;
+  /*|*/) die "target name must not start or end with '/'" ;;
+  *//*) die "target name must not contain an empty path component ('//')" ;;
 esac
+_tn="$TARGET_NAME"
+while :; do
+  _comp="${_tn%%/*}"
+  case "$_comp" in
+    ''|.|..|.*) die "each target path component must be a plain name (no '.', '..', or leading dot)" ;;
+    *[!A-Za-z0-9._-]*) die "target components may contain only letters, numbers, dot, underscore, or dash" ;;
+    # 'output'/'benchmark' are harness-reserved directory names: target-root
+    # enumeration (lib/target_config.iter_target_roots) treats a nested output/
+    # as a benchmark repo-root facade boundary and skips the top-level benchmark
+    # artifact tree, so a target named with either component would be silently
+    # un-enumerable. Reject them here to keep that invariant sound.
+    output|benchmark) die "'$_comp' is a reserved directory name and cannot be a target path component" ;;
+  esac
+  [ "$_tn" = "$_comp" ] && break
+  _tn="${_tn#*/}"
+done
+unset _tn _comp
 case "$REPO_TYPE" in auto|git|hg) ;; *) die "--repo-type must be auto, git, or hg" ;; esac
 
 TARGET_ROOT="$SCRIPT_ROOT/targets/$TARGET_NAME"
@@ -168,7 +190,7 @@ link_target() {
   local src="$1" dest
   dest="$(cd "$src" 2>/dev/null && pwd)" || die "source directory not found: $src"
   [ -d "$dest" ] || die "source is not a directory: $dest"
-  mkdir -p "$SCRIPT_ROOT/targets"
+  mkdir -p "$(dirname "$TARGET_ROOT")"
   if [ -L "$TARGET_ROOT" ]; then
     log "Re-pointing targets/$TARGET_NAME -> $dest"
     rm -f "$TARGET_ROOT"
@@ -182,7 +204,7 @@ link_target() {
 clone_target() {
   local repo_type="$1"
   [ -n "$REPO_URL" ] || die "targets/$TARGET_NAME does not exist; pass a repo URL to clone it"
-  mkdir -p "$SCRIPT_ROOT/targets"
+  mkdir -p "$(dirname "$TARGET_ROOT")"
   case "$repo_type" in
     git)
       log "Cloning git source into targets/$TARGET_NAME"

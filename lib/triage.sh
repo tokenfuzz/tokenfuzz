@@ -3797,7 +3797,7 @@ maintain_indexes() {
         # loser exits 0 immediately so this never stalls our audit loop.
         local _target_root="$(dirname "$RESULTS_DIR")"
         _target_root="$(dirname "$_target_root")"
-        if [ -d "$_target_root" ] && [ "$(basename "$(dirname "$_target_root")")" = "output" ]; then
+        if [ -d "$_target_root" ] && [ -f "$_target_root/target.toml" ]; then
           python3 "$_cluster_bin" "$_target_root" >/dev/null 2>&1 \
             || audit_log "WARN: cluster-crashes target-root aggregate failed" \
                  | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
@@ -3818,7 +3818,7 @@ maintain_indexes() {
              | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true
       local _target_root="$(dirname "$RESULTS_DIR")"
       _target_root="$(dirname "$_target_root")"
-      if [ -d "$_target_root" ] && [ "$(basename "$(dirname "$_target_root")")" = "output" ]; then
+      if [ -d "$_target_root" ] && [ -f "$_target_root/target.toml" ]; then
         TARGET_ROOT="${TARGET_ROOT:-}" python3 "$_finding_cluster_bin" "$_target_root" >/dev/null 2>&1 \
           || audit_log "WARN: cluster-findings target-root aggregate failed" \
                | tee -a "${INDEX:-/dev/null}" >/dev/null 2>&1 || true

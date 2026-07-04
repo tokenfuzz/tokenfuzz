@@ -2,7 +2,7 @@
 # Integration test for the canary ground-truth target.
 #
 # Builds targets/canary with AddressSanitizer and drives every planted bug
-# and false-positive trap straight from targets/canary/ground-truth.json,
+# and false-positive trap straight from output/canary/.ground-truth.json,
 # so the manifest is self-checking: if canary.c drifts from its answer key
 # (a bug stops firing, changes primitive, or loses its frame), this fails.
 # It also confirms the two FP traps are correctly *not* counted as security
@@ -17,7 +17,7 @@ source "$SCRIPT_ROOT/lib/triage.sh"
 # The answer key lives OUTSIDE the target tree (output/canary/, not handed to
 # audited agents) so the benchmark score stays blind; the test reads it here.
 CANARY="$SCRIPT_ROOT/targets/canary"
-MANIFEST="$SCRIPT_ROOT/output/canary/ground-truth.json"
+MANIFEST="$SCRIPT_ROOT/output/canary/.ground-truth.json"
 
 assert_file_exists "$MANIFEST" "ground-truth manifest present"
 

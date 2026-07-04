@@ -224,6 +224,37 @@ assert_eq(legacy_only.resolve(), ses.resolve() if ses else None,
 assert_eq(None, tc.find_slug_session_dir(TEST_TMPDIR / "no-such-slug"),
           "find_slug_session_dir returns None when neither copy exists")
 
+# find_session_dir scans into a NESTED slug (output/samples/sample-x/...)
+# reached from an ancestor's output/ tree. output/samples/ is a container, not
+# a slug, so the scan must descend into it rather than treat it as a target.
+nroot = TEST_TMPDIR / "nested_root"
+n_results = nroot / "output" / "samples" / "sample-x" / "codex" / "results"
+n_results.mkdir(parents=True)
+(nroot / "output" / "samples" / "sample-x" / "target.toml").write_text(
+    'target = "samples/sample-x"\n', encoding="utf-8")
+(n_results / ".session-env").write_text(
+    "RESULTS_DIR=nested\n", encoding="utf-8")
+found = tc.find_session_dir(nroot)
+assert_eq(n_results.resolve(), found.resolve() if found else None,
+          "find_session_dir scan descends into a nested slug container")
+
+# A benchmark repo-root facade under output/benchmark/ carries its own
+# output/<slug>/target.toml and session, but is a harness artifact — never a
+# real target. Both the enumerator and session discovery must skip it.
+facade = (nroot / "output" / "benchmark" / "codex" / "run-1" / "cells"
+          / "harness-r1" / "repo-root" / "output" / "cjson")
+(facade / "codex" / "results").mkdir(parents=True)
+(facade / "target.toml").write_text('target = "cjson"\n', encoding="utf-8")
+(facade / "codex" / "results" / ".session-env").write_text(
+    "RESULTS_DIR=facade\n", encoding="utf-8")
+roots = sorted(str(r.relative_to(nroot / "output"))
+               for r in tc.iter_target_roots(nroot / "output"))
+assert_eq(["samples/sample-x"], roots,
+          "iter_target_roots excludes benchmark repo-root facades")
+found = tc.find_session_dir(nroot)
+assert_eq(n_results.resolve(), found.resolve() if found else None,
+          "find_session_dir skips a benchmark facade and returns the real target")
+
 # Negative: outside any output/ tree returns None.
 empty = TEST_TMPDIR / "elsewhere"
 empty.mkdir()

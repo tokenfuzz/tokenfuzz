@@ -40,7 +40,12 @@ A few real examples:
 bin/setup-target libxml2 https://gitlab.gnome.org/GNOME/libxml2.git
 bin/setup-target zlib    https://github.com/madler/zlib.git
 bin/setup-target firefox https://hg.mozilla.org/mozilla-unified --repo-type hg
+bin/setup-target samples/sample-python /path/to/local/source
 ```
+
+`<target>` may include path components. For example,
+`samples/sample-python` creates `targets/samples/sample-python/` and
+`output/samples/sample-python/target.toml`.
 
 Three useful variants:
 

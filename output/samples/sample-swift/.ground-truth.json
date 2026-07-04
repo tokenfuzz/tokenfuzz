@@ -1,0 +1,81 @@
+{
+  "target": "samples/sample-swift",
+  "language": "swift",
+  "description": "Answer key for the synthetic sample-swift target (ReportKit report toolkit). Kept under output/samples/sample-swift/ \u2014 NOT inside targets/samples/sample-swift/ \u2014 so the audited agents are not handed the answer while being measured. The swift runner compiles the target under AddressSanitizer (-sanitize=address), so memory-corruption bugs surface as a clean ASan report; every planted bug is reachable from a single job file. Planted bugs are all observable memory-safety or security boundary crossings \u2014 an integer-overflow heap out-of-bounds write, an UnsafeBufferPointer out-of-bounds read, command injection, and read/write path traversal \u2014 deliberately NOT a memory-safe force-unwrap trap (a clean abort with no leverage that a correctly calibrated auditor discards). Reproducer job files live in /tmp (not committed). The two false-positive traps look dangerous to a naive scanner but are safe.",
+  "runner": "sample-swift",
+  "planted_bugs": [
+    {
+      "id": "unsafe-buffer-oob-read",
+      "kind": "real",
+      "primitive": "out-of-bounds-read",
+      "access": "READ",
+      "signature_symbol": "sumWindow",
+      "input": "/tmp/swift-window.job",
+      "cwe": "CWE-125",
+      "modeled_on": "Swift UnsafeBufferPointer misuse class \u2014 subscripting a raw buffer pointer with an unvalidated index",
+      "summary": "sumWindow reads buf[off + i] through withUnsafeBufferPointer with no bounds check, so an out-of-range window reads past the buffer. Under AddressSanitizer case-window (256 bytes at offset 4096 of a short buffer) reports heap-buffer-overflow. (Release -O may inline the read into the caller frame.)"
+    },
+    {
+      "id": "integer-overflow-oob-write",
+      "kind": "real",
+      "primitive": "out-of-bounds-write",
+      "access": "WRITE",
+      "signature_symbol": "packTable",
+      "input": "/tmp/swift-table.job",
+      "cwe": "CWE-787",
+      "modeled_on": "integer-overflow-to-heap-overflow class (CWE-190 -> CWE-787): a 32-bit cell-count multiply truncates the allocation while the fill loop writes the full-width product",
+      "summary": "packTable sizes its buffer from UInt32(truncatingIfNeeded: rows &* width) but the withUnsafeMutableBufferPointer fill loop writes rows*width cells computed at full Int width. When rows*width exceeds UInt32.max the buffer is far too small and the loop writes past it \u2014 a heap out-of-bounds write caught by AddressSanitizer. /tmp/swift-table.job packs a 65536 x 65537 grid."
+    },
+    {
+      "id": "shell-command-injection",
+      "kind": "real",
+      "primitive": "command-injection",
+      "access": "EXEC",
+      "signature_symbol": "runExport",
+      "input": "/tmp/swift-export.job",
+      "cwe": "CWE-78",
+      "modeled_on": "OS command injection class \u2014 Process running /bin/sh -c on an attacker string",
+      "summary": "runExport runs its hook string through '/bin/sh -c', so any export hook is arbitrary command execution. case-export runs 'true; echo injected' to prove the string is executed as a shell command."
+    },
+    {
+      "id": "path-traversal-read",
+      "kind": "real",
+      "primitive": "path-traversal",
+      "access": "READ",
+      "signature_symbol": "readAsset",
+      "input": "/tmp/swift-asset.job",
+      "cwe": "CWE-22",
+      "modeled_on": "path traversal class \u2014 root + \"/\" + name with no containment check",
+      "summary": "readAsset concatenates an attacker-supplied name onto the asset root with no '..' containment check, so a name like ../etc/passwd reads any file the process can. case-asset reads /etc/passwd from outside the root."
+    },
+    {
+      "id": "path-traversal-write",
+      "kind": "real",
+      "primitive": "path-traversal",
+      "access": "WRITE",
+      "signature_symbol": "saveRender",
+      "input": "/tmp/swift-save.job",
+      "cwe": "CWE-22",
+      "modeled_on": "arbitrary file write via unchecked join of an attacker name onto an output root",
+      "summary": "saveRender concatenates an attacker-supplied name onto the output root with no containment check, so a name like ../tmp/x writes outside the output root. case-save writes reportkit-escaped.txt above the root."
+    }
+  ],
+  "false_positive_traps": [
+    {
+      "id": "safe-config",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "parseConfig",
+      "input": "/tmp/swift-config.job",
+      "refute_reason": "parseConfig uses guard/compactMap, so malformed lines are skipped rather than force-unwrapped and it never traps or reads out of bounds \u2014 untrusted config text stays inert data. It reads like a parser that might mishandle bad input but does not; a trap/DoS or memory-safety report here is a false positive."
+    },
+    {
+      "id": "fixed-command",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "runCommand",
+      "input": "/tmp/swift-command.job",
+      "refute_reason": "runCommand runs /bin/echo with the caller argument as a separate argv element and no shell, so a caller controls neither which program runs nor a shell. It looks like the sibling of runExport but is not injectable; a command-injection report here is a false positive."
+    }
+  ]
+}

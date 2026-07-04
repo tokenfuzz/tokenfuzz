@@ -634,17 +634,31 @@ def _derive_target_root(path: Path) -> str:
     """Derive the `targets/<slug>` strip-prefix from an output/<slug>/... path.
 
     Reports cite paths as `targets/<slug>/src/foo.cpp`; stripping this
-    prefix yields the stable target-relative `src/foo.cpp`. The slug is
-    the path segment directly under `output/` in any of the supported
-    layouts (output/<slug>/, output/<slug>/<agent>/results/, ...). Returns
-    "" when no `output` ancestor is present (caller leaves paths as-is).
+    prefix yields the stable target-relative `src/foo.cpp`. The slug is the
+    path from directly under `output/` up to the `<agent>/results` (or
+    `logs`) marker, so a nested slug like `samples/sample-ruby` keeps every
+    segment. Returns "" when no `output` ancestor is present (caller leaves
+    paths as-is).
     """
     parts = path.parts
-    if "output" in parts:
-        i = parts.index("output")
-        if i + 1 < len(parts):
-            return f"targets/{parts[i + 1]}"
-    return ""
+    if "output" not in parts:
+        return ""
+    tail = parts[parts.index("output") + 1:]
+    if not tail:
+        return ""
+    # output/<slug...>/<agent>/{results,logs}/... — the slug is every segment
+    # before the <agent> dir that owns the results/logs marker. Scan from the
+    # RIGHT: the structural <agent>/results (or /logs) suffix is the deepest
+    # one, so a slug component that happens to be named "results"/"logs"
+    # (appearing earlier) is not mistaken for the marker.
+    for marker in ("results", "logs"):
+        if marker in tail:
+            k = len(tail) - 1 - tail[::-1].index(marker)
+            if k >= 2:
+                return "targets/" + "/".join(tail[:k - 1])
+    # No <agent>/results marker: the path is the bare output/<slug> target
+    # root, so the whole tail is the slug.
+    return "targets/" + "/".join(tail)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -681,7 +695,10 @@ def main(argv: list[str] | None = None) -> int:
         findings_root = rd
         out_md = findings_root / "FINDING-CLUSTERS.md"
         link_prefix = ""
-    elif rd.parent.name == "output":
+    elif (rd / "target.toml").is_file():
+        # A target root is identified only by its target.toml (the canonical
+        # rule in lib/target_config.py), so a nested container like
+        # output/samples/ — which has no target.toml — is not mistaken for one.
         return _aggregate_target_root(rd, target_root, dry_run=args.dry_run,
                                       want_json=args.json)
     else:

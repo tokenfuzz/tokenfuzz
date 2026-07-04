@@ -1,0 +1,32 @@
+# target.toml — sample-typescript synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+#
+# The runner drives the sources through ts-node (transpile-only), so ts-node
+# must be installed and on PATH (npm i -g typescript ts-node).
+
+target        = "samples/sample-typescript"
+upstream_url  = "synthetic — TokenFuzz per-language benchmark (TypeScript)"
+build_system  = "npm"
+pinned_rev    = "norev"
+
+is_browser    = "0"
+
+[threat_model]
+# The CLI turns one attacker-supplied job file into a single reportkit call;
+# the job bytes are the only attacker-controlled surface.
+attacker_controls = ["bytes"]
+
+[sanitizer]
+enabled = []
+
+[runner]
+bin            = "ts-node"
+args           = ["--transpile-only", "{TARGET_ROOT}/reportkit_cli.ts", "{TESTCASE}"]
+env            = ["TS_NODE_TRANSPILE_ONLY=1"]
+crash_patterns = [
+  "^FATAL ERROR:",
+  "RangeError: Maximum call stack",
+  "Allocation failed",
+  "^\\w*Error:",
+  "node:internal/",
+]

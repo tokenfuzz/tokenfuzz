@@ -432,6 +432,23 @@ PY
 assert_file_contains "$tnp/pool/target.toml" 'attacker_controls = \["bytes", "call-sequence"\]' \
   "T28n: falls back to cell snapshot when no live model is available"
 
+# T28o: a nested target slug (output/samples/demo/...) resolves its target.toml
+# from a cell results dir even though the target root is not a direct child of
+# output/. Without this the pooled rescore silently loses its threat model.
+tnest="$TEST_TMPDIR/pool-nested-toml"
+mkdir -p "$tnest/output/samples/demo/backend/results/findings"
+printf '[threat_model]\nattacker_controls = ["bytes"]\n' > "$tnest/output/samples/demo/target.toml"
+found_nested=$(python3 - "$tnest/output/samples/demo/backend/results" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, "lib")
+import benchmark
+print(benchmark._find_output_target_toml(Path(sys.argv[1])) or "")
+PY
+)
+assert_match '/output/samples/demo/target.toml$' "$found_nested" \
+  "T28o: nested slug resolves target.toml from a cell results dir"
+
 # A rejected crash directory must link to its rendered report, not the bare
 # directory. The source markdown points at the .md (canonical path); the
 # rendered HTML sibling rewrites it to .html so a click lands on the styled

@@ -1,0 +1,14 @@
+[package]
+name = "sample-rust"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sample-rust"
+path = "src/main.rs"
+
+[profile.release]
+# Release mode turns off debug-assertions and overflow-checks, matching how a
+# distributed build ships — so a planted panic reflects a real reachable crash,
+# not a debug-only invariant.
+panic = "unwind"

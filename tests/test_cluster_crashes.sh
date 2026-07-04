@@ -305,6 +305,10 @@ assert_eq "$mtime_before" "$mtime_after" "--dry-run does not touch REPORT.md"
 agg_root="$TEST_TMPDIR/output/demo"
 mkdir -p "$agg_root/claude/results/crashes/CRASH-AGG-1" \
          "$agg_root/codex/results/crashes/CRASH-AGG-2"
+# A target root is identified by its target.toml (the canonical rule); write
+# one so this behaves like a real target root rather than relying on the
+# dropped parent==output fallback.
+printf 'target = "demo"\n' > "$agg_root/target.toml"
 cat > "$agg_root/claude/results/crashes/CRASH-AGG-1/asan.txt" <<'EOF'
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow
 #0 0x1 in shared_bug src/shared.c:10
@@ -334,6 +338,33 @@ assert_file_contains "$agg_root/CRASH-CLUSTERS.md" 'codex/CRASH-AGG-2' \
   "aggregate CRASH-CLUSTERS.md links codex member"
 assert_file_not_exists "$agg_root/CLUSTERS.md" \
   "aggregate removes legacy CLUSTERS.md"
+
+agg_nested="$TEST_TMPDIR/output/samples/demo"
+mkdir -p "$agg_nested/codex/results/crashes/CRASH-NEST-1"
+printf 'target = "demo"\n' > "$agg_nested/target.toml"
+cat > "$agg_nested/codex/results/crashes/CRASH-NEST-1/sanitizer.txt" <<'EOF'
+==3==ERROR: AddressSanitizer: heap-buffer-overflow
+#0 0x1 in nested_bug src/nested.c:10
+EOF
+cat > "$agg_nested/codex/results/crashes/CRASH-NEST-1/REPORT.md" <<'EOF'
+# Nested aggregate crash
+Surface: library-api
+EOF
+python3 "$CLUSTER" "$agg_nested" >/dev/null 2>&1 \
+  || fail "nested aggregate cluster-crashes runs cleanly" "exit nonzero"
+assert_file_exists "$agg_nested/CRASH-CLUSTERS.md" \
+  "nested aggregate CRASH-CLUSTERS.md written"
+assert_file_contains "$agg_nested/CRASH-CLUSTERS.md" 'codex/CRASH-NEST-1' \
+  "nested aggregate CRASH-CLUSTERS.md links member"
+
+# A nested CONTAINER dir (output/samples/, no target.toml) is NOT a target
+# root: a target root is identified by target.toml alone. The container must
+# fall through to plain results-dir mode (crashes_root key), not the bogus
+# target-root aggregate mode (target_root key) it used to via parent==output.
+container_json=$(python3 "$CLUSTER" "$TEST_TMPDIR/output/samples" --json 2>/dev/null)
+assert_eq "yes" \
+  "$(printf '%s' "$container_json" | python3 -c "import json,sys;d=json.load(sys.stdin);print('yes' if 'crashes_root' in d and 'target_root' not in d else 'no')")" \
+  "container dir (no target.toml) is not aggregated as a target root"
 
 # ── UBSan distinct-primitive regression ──
 # Two UBSan crashes with DIFFERENT sub-kinds (signed-integer-overflow

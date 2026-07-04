@@ -10,7 +10,7 @@ set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
 
-MANIFEST="$SCRIPT_ROOT/output/canary/ground-truth.json"
+MANIFEST="$SCRIPT_ROOT/output/canary/.ground-truth.json"
 assert_file_exists "$MANIFEST" "ground-truth manifest present (out of the target tree)"
 
 POOL="$TEST_TMPDIR/pool/crashes"
@@ -250,6 +250,17 @@ assert_eq "" \
 assert_eq "yes" \
   "$(python3 -c "import sys;sys.path.insert(0,'lib');import benchmark as b;print('yes' if 'not scored' in '\n'.join(b._render_ground_truth(None,['oops'])) else 'no')")" \
   "invalid manifest renders an explicit error block, not a silent skip"
+
+# ── A findings-only target renders 'not scored', not a fake 0% recall ──
+# Its planted bugs land under findings/, which the crash oracle can't grade;
+# scoring its empty crashes/ would report a misleading 0% recall.
+fo_render="$(python3 -c "import sys;sys.path.insert(0,'lib');import benchmark as b;print('\n'.join(b._render_ground_truth({'not_scored':'findings-only'})))")"
+assert_eq "yes" \
+  "$(printf '%s' "$fo_render" | grep -qi 'not scored' && echo yes || echo no)" \
+  "findings-only target renders an explicit not-scored block"
+assert_eq "no" \
+  "$(printf '%s' "$fo_render" | grep -qi 'precision / recall' && echo yes || echo no)" \
+  "findings-only target does NOT render a precision/recall table"
 
 # ── A canonically-named sanitizer file with no diagnostic is NOT a crash ─
 # find_primary_asan selects sanitizer.txt by name+size; the scorer must still

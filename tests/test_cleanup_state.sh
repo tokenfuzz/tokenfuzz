@@ -53,13 +53,13 @@ done
 # Section 1a: canary ground truth is preserved with target metadata.
 sec1a="$TEST_TMPDIR/out1a"
 mk_mock_target "$sec1a" canary
-echo "{}" > "$sec1a/canary/ground-truth.json"
+echo "{}" > "$sec1a/canary/.ground-truth.json"
 tracked_out=$("$CLEANUP" --output-root "$sec1a" --target canary 2>&1)
 rc=$?
 assert_eq 0 "$rc" "ground truth: clean exits 0"
 assert_match 'removed 7 entries, 2 preserved' "$tracked_out" "ground truth: reports preserved metadata"
 assert_file_exists "$sec1a/canary/target.toml" "ground truth: target.toml preserved"
-assert_file_exists "$sec1a/canary/ground-truth.json" "ground truth: ground truth preserved"
+assert_file_exists "$sec1a/canary/.ground-truth.json" "ground truth: ground truth preserved"
 assert_dir_not_exists "$sec1a/canary/codex" "ground truth: generated backend removed"
 assert_dir_not_exists "$sec1a/canary/claude" "ground truth: generated backend removed"
 assert_file_not_exists "$sec1a/canary/CRASH-CLUSTERS.md" "ground truth: generated cluster removed"
@@ -230,6 +230,69 @@ assert_eq 1 "$logs_rc" "cleanup_logs invalid target traversal: exits non-zero"
 assert_match 'invalid target component' "$logs_out" "cleanup_logs invalid target traversal: reports"
 assert_file_exists "$sec15/libxml2/codex/logs/index.log" \
     "cleanup_logs invalid target traversal: no cleanup performed"
+
+# Section 16: default enumeration finds nested real targets but never a
+# benchmark repo-root facade. Benchmark cells stage their own
+# output/<slug>/target.toml under output/benchmark/.../repo-root/output/, and a
+# default cleanup must not delete that run state.
+sec16="$TEST_TMPDIR/out16"
+mk_mock_target "$sec16" "samples/sample-x"
+facade="$sec16/benchmark/codex/run-1/cells/harness-r1/repo-root/output/cjson"
+mkdir -p "$facade/claude/results/scratch-1"
+echo "[meta]" > "$facade/target.toml"
+echo "tc" > "$facade/claude/results/scratch-1/tc.input"
+
+dry16=$("$CLEANUP" --output-root "$sec16" --dry-run 2>&1)
+assert_match 'samples/sample-x' "$dry16" \
+    "default enumeration includes the nested real target"
+if printf '%s' "$dry16" | grep -q 'benchmark/'; then
+    fail "benchmark facade must not be enumerated by default cleanup" "$dry16"
+else
+    pass "benchmark facade is not enumerated by default cleanup"
+fi
+
+"$CLEANUP" --output-root "$sec16" --quiet
+assert_file_not_exists "$sec16/samples/sample-x/codex/results/scratch-1/tc.input" \
+    "nested real target state is cleaned"
+assert_file_exists "$sec16/samples/sample-x/target.toml" \
+    "nested real target.toml preserved"
+assert_file_exists "$facade/claude/results/scratch-1/tc.input" \
+    "benchmark facade state is left untouched by default cleanup"
+
+# Section 17: cleanup_logs matches cleanup_state on nested slugs — its default
+# enumeration reaches output/samples/<slug>/<backend>/logs and its explicit
+# --target accepts a nested slug, while a benchmark repo-root facade's logs are
+# never enumerated by a default run.
+sec17="$TEST_TMPDIR/out17"
+mk_mock_target "$sec17" "samples/sample-x"
+lfacade="$sec17/benchmark/codex/run-1/cells/harness-r1/repo-root/output/cjson"
+mkdir -p "$lfacade/codex/logs"
+echo "[meta]" > "$lfacade/target.toml"
+echo "facade" > "$lfacade/codex/logs/index.log"
+
+# Explicit nested --target clears just that target's logs (regression: slug
+# validation used to reject the '/').
+"$CLEANUP_LOGS" --output-root "$sec17" --target samples/sample-x --backend codex --quiet
+assert_file_not_exists "$sec17/samples/sample-x/codex/logs/index.log" \
+    "cleanup_logs explicit nested target: logs cleared"
+assert_file_exists "$sec17/samples/sample-x/claude/logs/index.log" \
+    "cleanup_logs explicit nested target: other backend untouched"
+
+# Default enumeration reaches the nested target but never the benchmark facade.
+echo "log" > "$sec17/samples/sample-x/codex/logs/index.log"
+dry17=$("$CLEANUP_LOGS" --output-root "$sec17" --dry-run 2>&1)
+assert_match 'samples/sample-x' "$dry17" \
+    "cleanup_logs default enumeration includes the nested real target"
+if printf '%s' "$dry17" | grep -q 'benchmark/'; then
+    fail "cleanup_logs must not enumerate a benchmark facade by default" "$dry17"
+else
+    pass "cleanup_logs does not enumerate a benchmark facade by default"
+fi
+"$CLEANUP_LOGS" --output-root "$sec17" --quiet
+assert_file_not_exists "$sec17/samples/sample-x/claude/logs/index.log" \
+    "cleanup_logs default run: nested target logs cleared"
+assert_file_exists "$lfacade/codex/logs/index.log" \
+    "cleanup_logs default run: benchmark facade logs untouched"
 
 teardown_test_env
 summary

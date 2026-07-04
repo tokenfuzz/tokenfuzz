@@ -1,0 +1,32 @@
+# target.toml — sample-go synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+
+target        = "samples/sample-go"
+upstream_url  = "synthetic — TokenFuzz per-language benchmark (Go)"
+build_system  = "go"
+pinned_rev    = "norev"
+
+is_browser    = "0"
+
+[threat_model]
+# The CLI turns one attacker-supplied job file into a single reportkit call;
+# the job bytes are the only attacker-controlled surface.
+attacker_controls = ["bytes"]
+
+# Findings-only: the `go build` bootstrap produces the sample-go binary the
+# runner drives. Runtime panics and LLM-reported security issues both land under
+# findings/.
+[sanitizer]
+enabled = []
+
+[runner]
+bin            = "sample-go"
+args           = ["{TESTCASE}"]
+env            = ["GORACE=halt_on_error=1"]
+crash_patterns = [
+  "panic: runtime error:",
+  "panic:",
+  "fatal error: stack overflow",
+  "runtime: out of memory",
+  "^goroutine \\d+ \\[",
+]

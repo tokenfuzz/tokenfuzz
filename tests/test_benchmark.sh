@@ -975,6 +975,26 @@ assert_eq "true" "$(jq -r .skip_recon "$multiroot/codex/mt-dummytarget/run.json"
 assert_file_exists "$multiroot/benchmark-result.md" \
   "T9t-i: multi-target run rebuilds the shared cross-backend page"
 
+nestedroot="$work/nested-target"
+set +e
+nested_out=$(bash "$BENCH" --target samples/sample-python --dry-run \
+  --replicates 1 --conditions model-direct,harness --backend codex \
+  --bench-root "$nestedroot" --run-id nested-smoke 2>&1)
+nested_rc=$?
+set -e
+assert_eq "0" "$nested_rc" "T9u-a: nested target dry-run exits 0"
+assert_file_exists "$nestedroot/codex/nested-smoke/run.json" \
+  "T9u-b: nested target writes run metadata"
+assert_eq "samples/sample-python" "$(jq -r .target "$nestedroot/codex/nested-smoke/run.json")" \
+  "T9u-c: nested target slug is preserved in run.json"
+assert_file_exists "$nestedroot/codex/nested-smoke/cells/harness-r1/cell.json" \
+  "T9u-d: nested target harness cell is recorded"
+assert_file_exists "$nestedroot/codex/nested-smoke/cells/model-direct-r1/cell.json" \
+  "T9u-e: nested target model-direct cell is recorded"
+[ ! -d "$nestedroot/codex/.run-samples" ] \
+  && pass "T9u-f: nested target lock path is one safe component" \
+  || fail "T9u-f: nested target lock path is one safe component" "$nested_out"
+
 # An empty/whitespace-only comma list is rejected, not silently a no-op.
 set +e
 bash "$BENCH" --target " , " --dry-run --replicates 1 --conditions harness \
@@ -1005,6 +1025,24 @@ assert_file_not_exists "$resume_cell/results/.recon-cache-marker" \
   "T9o3: stale local recon marker is not left under the live rerun cell"
 assert_file_exists "$resume_cell/results/crashes/CRASH-001/sanitizer.txt" \
   "T9p: rerun wrote fresh dry-run results after cleanup"
+
+# T9q: a committed benchmark target.toml must not name its .ground-truth.json
+# answer key. bin/benchmark copies each config into the cell's repo-root facade,
+# so any hidden-dotfile path written here becomes a breadcrumb an audited agent
+# can follow — inflating recall/precision. The answer key stays outside the
+# audited tree; the config must not point back at it.
+gt_leak=""
+for _cfg in "$SCRIPT_ROOT"/output/samples/*/target.toml "$SCRIPT_ROOT"/output/canary/target.toml; do
+  [ -f "$_cfg" ] || continue
+  if grep -q 'ground-truth' "$_cfg"; then
+    gt_leak="$gt_leak $_cfg"
+  fi
+done
+if [ -n "$gt_leak" ]; then
+  fail "T9q: benchmark target.toml must not disclose the .ground-truth.json path" "$gt_leak"
+else
+  pass "T9q: no committed benchmark target.toml discloses its answer-key path"
+fi
 
 
 summary

@@ -1,0 +1,31 @@
+# target.toml — sample-python synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+
+target        = "samples/sample-python"
+upstream_url  = "synthetic — TokenFuzz per-language benchmark (Python)"
+build_system  = "python"
+pinned_rev    = "norev"
+
+is_browser    = "0"
+
+[threat_model]
+# The CLI turns one attacker-supplied job file into a single reportkit call;
+# the job bytes are the only attacker-controlled surface.
+attacker_controls = ["bytes"]
+
+# Pure-Python target: no sanitizer build. Runtime crashes and LLM-reported
+# security issues both land under findings/.
+[sanitizer]
+enabled = []
+
+[runner]
+bin            = "python3"
+args           = ["{TARGET_ROOT}/reportkit_cli.py", "{TESTCASE}"]
+env            = ["PYTHONDEVMODE=1", "PYTHONPATH={TARGET_ROOT}:{TARGET_ROOT}/src"]
+crash_patterns = [
+  "Traceback \\(most recent call last\\):",
+  "MemoryError",
+  "RecursionError",
+  "SystemError",
+  "Fatal Python error:",
+]

@@ -1,0 +1,22 @@
+# target.toml — sample-c synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+
+target        = "samples/sample-c"
+upstream_url  = "synthetic — TokenFuzz per-language benchmark (C)"
+build_system  = "cmake"
+pinned_rev    = "norev"
+
+# Direct CLI binary — what `bin/run-asan generic` runs by default.
+asan_bin      = "build-asan/rcfg"
+
+includes      = ["include"]
+
+is_browser    = "0"
+
+[threat_model]
+# The decoder reads an attacker-supplied RCF byte stream through a single
+# stateless entry point (rcfg_decode); nothing else is attacker-controlled.
+attacker_controls = ["bytes"]
+
+[sanitizer]
+enabled = ["asan"]

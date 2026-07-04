@@ -1,0 +1,29 @@
+# target.toml — sample-kotlin synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+#
+# The runner drives the script through `kotlinc -script`, so kotlinc must be
+# installed and on PATH (e.g. `brew install kotlin`).
+
+target        = "samples/sample-kotlin"
+upstream_url  = "synthetic — TokenFuzz per-language benchmark (Kotlin)"
+build_system  = "kotlin"
+pinned_rev    = "norev"
+
+is_browser    = "0"
+
+[threat_model]
+# The script turns one attacker-supplied job file into a single reportkit call;
+# the job bytes are the only attacker-controlled surface.
+attacker_controls = ["bytes"]
+
+[sanitizer]
+enabled = []
+
+[runner]
+bin            = "kotlinc"
+args           = ["-script", "{TARGET_ROOT}/reportkit.kts", "{TESTCASE}"]
+crash_patterns = [
+  "Exception in thread",
+  "kotlin\\.\\w+(Exception|Error):",
+  "java\\.lang\\.\\w+(Exception|Error)",
+]

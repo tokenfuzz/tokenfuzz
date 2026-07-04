@@ -98,6 +98,20 @@ valid_component() {
     return 0
 }
 
+# A target slug may be nested (e.g. samples/sample-ruby), so validate every
+# '/'-separated component individually with valid_component.
+valid_slug() {
+    local rest="$1" comp
+    [ -n "$rest" ] || return 1
+    while :; do
+        comp="${rest%%/*}"
+        valid_component "$comp" || return 1
+        [ "$rest" = "$comp" ] && break
+        rest="${rest#*/}"
+    done
+    return 0
+}
+
 path_is_under() {
     python3 - "$1" "$2" <<'PY'
 import os
@@ -152,11 +166,16 @@ for k in "${preserve[@]+"${preserve[@]}"}"; do
     esac
 done
 
-# If no --target given, enumerate every direct subdir of output_root.
+# If no --target given, enumerate every canonical target under output_root.
+# A target is a dir carrying a target.toml and may be nested
+# (output/samples/sample-ruby). Delegate to the shared enumerator so the rule
+# for what counts as a real target — nested slugs in, container dirs and
+# benchmark repo-root facades out — lives in one place (lib/target_config.py).
 if [ "${#targets[@]}" -eq 0 ]; then
-    while IFS= read -r -d '' d; do
-        targets+=("$(basename "$d")")
-    done < <(find "$output_root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+    _tc="$(cd "$(dirname "$0")/.." && pwd)/lib/target_config.py"
+    while IFS= read -r slug; do
+        [ -n "$slug" ] && targets+=("$slug")
+    done < <(python3 "$_tc" list-target-roots "$output_root" 2>/dev/null)
 fi
 
 if [ "${#targets[@]}" -eq 0 ]; then
@@ -174,7 +193,7 @@ is_preserved() {
     local name="$1"
     local p
     [ "$name" = "target.toml" ] && return 0
-    [ "$name" = "ground-truth.json" ] && return 0
+    [ "$name" = ".ground-truth.json" ] && return 0
     for p in "${preserve[@]+"${preserve[@]}"}"; do
         [ "$name" = "$p" ] && return 0
     done
@@ -182,7 +201,7 @@ is_preserved() {
 }
 
 for target in "${targets[@]}"; do
-    if ! valid_component "$target"; then
+    if ! valid_slug "$target"; then
         echo "[cleanup_state] invalid target component: '$target'" >&2
         failed=$((failed + 1))
         continue

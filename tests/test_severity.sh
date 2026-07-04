@@ -1090,6 +1090,10 @@ assert_eq "internal" "$surface" "a compiler-rt runtime frame is not counted as t
 target_root="$TEST_TMPDIR/targets/glibc"
 mkdir -p "$target_root"
 mkdir -p "$TEST_TMPDIR/output/rootmatch/backend/results"
+# A real target root always carries target.toml alongside its session (see
+# session discovery in lib/target_config.py); write it so this behaves like a
+# genuine target when severity resolves the session from an ancestor path.
+echo '[meta]' > "$TEST_TMPDIR/output/rootmatch/target.toml"
 cat > "$TEST_TMPDIR/output/rootmatch/backend/results/.session-env" <<EOF
 TARGET_ROOT=$target_root
 TARGET_SLUG=rootmatch

@@ -164,6 +164,22 @@ except Exception:
 PYEOF
 }
 
+benchmark_target_key() {
+  local raw="$1" safe hash
+  case "$raw" in
+    ""|*[!A-Za-z0-9._-]*)
+      safe=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]._-' '-')
+      safe="${safe#-}"
+      safe="${safe%-}"
+      hash=$(printf '%s' "$raw" | audit_sha1 2>/dev/null | awk '{print substr($1,1,8)}')
+      printf '%s-%s\n' "${safe:-target}" "${hash:-nohash}"
+      ;;
+    *)
+      printf '%s\n' "$raw"
+      ;;
+  esac
+}
+
 usage() {
   sed -n '3,101p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
@@ -308,7 +324,7 @@ case "$TARGET_SLUG" in
       # A shared explicit --run-id would collide across targets (run dirs are
       # keyed by id under <bench-root>/<backend>/, not by slug); make it
       # per-target so each keeps a distinct, resumable directory.
-      [ -n "$RUN_ID" ] && multi_child_args+=(--run-id "${RUN_ID}-${_mt}")
+      [ -n "$RUN_ID" ] && multi_child_args+=(--run-id "${RUN_ID}-$(benchmark_target_key "$_mt")")
       log "multi-target ($multi_total): target=$_mt — starting"
       if "$self" "${multi_child_args[@]}"; then
         log "multi-target: target=$_mt — completed"
@@ -363,7 +379,7 @@ BENCH_LOCK=""
 # create-then-describe window); regular files are more portable than flock(1),
 # absent on macOS, or FIFOs, which some mounts reject.
 acquire_benchmark_lock() {
-  BENCH_LOCK="$BENCH_BACKEND_ROOT/.run-$TARGET_SLUG.lock"
+  BENCH_LOCK="$BENCH_BACKEND_ROOT/.run-$(benchmark_target_key "$TARGET_SLUG").lock"
   mkdir -p "$BENCH_BACKEND_ROOT" \
     || { echo "FATAL: cannot create $BENCH_BACKEND_ROOT" >&2; exit 1; }
   local tries=0 holder
@@ -839,14 +855,7 @@ cell_log_has_quota_exhaustion() {
 cell_provider_issue() {
   local cell_dir="$1" file issue saw_transient=0
   [ -d "$cell_dir" ] || { printf '%s\n' none; return; }
-  for file in \
-    "$cell_dir/backend.raw.log" \
-    "$cell_dir"/repo-root/output/*/*/results/logs/.raw/session_*.log.raw \
-    "$cell_dir"/repo-root/output/*/*/results/logs/index.log \
-    "$cell_dir"/repo-root/output/*/*/results/logs/model-preflight-*.raw \
-    "$cell_dir"/repo-root/output/*/*/logs/index.log \
-    "$cell_dir"/repo-root/output/*/*/logs/model-preflight-*.raw
-  do
+  for file in "$cell_dir/backend.raw.log"; do
     [ -f "$file" ] || continue
     issue="$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-issue "$file" 2>/dev/null || echo none)"
     case "$issue" in
@@ -854,6 +863,21 @@ cell_provider_issue() {
       transient) saw_transient=1 ;;
     esac
   done
+  if [ -d "$cell_dir/repo-root/output" ]; then
+    while IFS= read -r -d '' file; do
+      issue="$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-issue "$file" 2>/dev/null || echo none)"
+      case "$issue" in
+        capacity_limited) printf '%s\n' capacity_limited; return 0 ;;
+        transient) saw_transient=1 ;;
+      esac
+    done < <(
+      find "$cell_dir/repo-root/output" -type f \( \
+        -path '*/logs/.raw/session_*.log.raw' -o \
+        -path '*/logs/index.log' -o \
+        -path '*/logs/model-preflight-*.raw' \
+      \) -print0 2>/dev/null
+    )
+  fi
   if [ "$saw_transient" -eq 1 ]; then
     printf '%s\n' transient
   else

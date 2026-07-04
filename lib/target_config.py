@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 # `languages` for the rest of this module.
 import languages
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 NO_REV = "norev"
 
@@ -484,6 +484,43 @@ def _emit_legacy_stream(parsed: dict) -> bytes:
 
 # ─── Discovery ──────────────────────────────────────────────────────
 
+# Directory names directly under output/ that are harness artifacts, never
+# targets. bin/benchmark stages each cell as a facade repo tree containing its
+# own output/<slug>/target.toml under output/benchmark/ (its default
+# --bench-root). Enumerating those facades as real targets would let
+# cleanup_state delete benchmark run state and let session discovery bind a
+# stale cell as TARGET_ROOT.
+_OUTPUT_ARTIFACT_DIRS = {"benchmark"}
+
+
+def iter_target_roots(output_root: str | os.PathLike) -> Iterator[Path]:
+    """Yield the canonical target-root dirs under output/, in sorted order.
+
+    A target root is a directory holding target.toml; its slug (path relative
+    to output_root) may be nested, e.g. output/samples/sample-c. The walk
+    descends through container dirs (output/samples/) but never into a target
+    root's own subtree, skips the benchmark artifact tree, and never follows a
+    nested output/ — so a benchmark repo-root facade is excluded regardless of
+    where --bench-root points.
+    """
+    root = Path(output_root)
+
+    def walk(d: Path) -> Iterator[Path]:
+        try:
+            entries = sorted(p for p in d.iterdir() if p.is_dir())
+        except OSError:
+            return
+        for e in entries:
+            if e.name == "output" or (d == root and e.name in _OUTPUT_ARTIFACT_DIRS):
+                continue
+            if (e / "target.toml").is_file():
+                yield e                # target root — do not descend
+            else:
+                yield from walk(e)     # container dir — recurse
+
+    yield from walk(root)
+
+
 def find_session_dir(start: str | os.PathLike) -> Optional[Path]:
     """Walk up from `start` looking for the nearest .session-env.
 
@@ -506,26 +543,13 @@ def find_session_dir(start: str | os.PathLike) -> Optional[Path]:
         out_dir = base / "output"
         if not out_dir.is_dir():
             return None
-        try:
-            targets = sorted(out_dir.iterdir())
-        except OSError:
-            return None
-        for target in targets:
-            if not target.is_dir():
-                continue
-            # Backend-local output/<slug>/<backend>/results/.session-env is
-            # authoritative; prefer it over the legacy output/<slug>/
-            # .session-env copy, which concurrent backends race on.
-            try:
-                backends = sorted(target.iterdir())
-            except OSError:
-                backends = []
-            for backend in backends:
-                cand = backend / "results"
-                if cand.is_dir() and (cand / ".session-env").is_file():
-                    return cand
-            if (target / ".session-env").is_file():
-                return target
+        # Return the first real target root that carries a session.
+        # find_slug_session_dir() prefers the backend-local results/.session-env
+        # over the legacy slug copy.
+        for target in iter_target_roots(out_dir):
+            found = find_slug_session_dir(target)
+            if found is not None:
+                return found
         return None
 
     while True:
@@ -2393,6 +2417,17 @@ def _cmd_find_session_dir(args) -> int:
     return 0
 
 
+def _cmd_list_target_roots(args) -> int:
+    """Print each canonical target root's slug (relative to output_root)."""
+    root = Path(args.output_root)
+    for target in iter_target_roots(root):
+        try:
+            print(target.relative_to(root))
+        except ValueError:
+            print(target)
+    return 0
+
+
 def _cmd_read_session_env(args) -> int:
     """Emit `export KEY="value"` lines for the bash shim to eval.
 
@@ -2489,6 +2524,10 @@ def main(argv: list[str]) -> int:
     sp = sub.add_parser("find-session-dir")
     sp.add_argument("start", nargs="?")
     sp.set_defaults(func=_cmd_find_session_dir)
+
+    sp = sub.add_parser("list-target-roots")
+    sp.add_argument("output_root")
+    sp.set_defaults(func=_cmd_list_target_roots)
 
     sp = sub.add_parser("read-session-env")
     sp.add_argument("slug_dir")

@@ -1197,7 +1197,7 @@ def count_model_refusals(results_dir: Path) -> int:
 # ordinary target there is no oracle for *which* planted bug a crash is, so
 # a run's precision and recall are unknowable — and none of the triage gate
 # thresholds can be calibrated against a labelled answer. The canary target
-# ships a ground-truth manifest (targets/<slug>/ground-truth.json) that pins
+# ships a ground-truth manifest (output/<slug>/.ground-truth.json) that pins
 # every planted bug to a stable (primitive, symbol) signature and every
 # deliberate false-positive trap to its refutation. Scoring a results tree
 # against that manifest converts the raw crash count into measured precision
@@ -1297,7 +1297,7 @@ def ground_truth_path_for(target: str, repo_root: Path | None = None) -> Path:
     target shipping this file is scored; everything else is unaffected.
     """
     root = Path(repo_root) if repo_root else Path(__file__).resolve().parent.parent
-    return root / "output" / str(target) / "ground-truth.json"
+    return root / "output" / str(target) / ".ground-truth.json"
 
 
 # Evidence is read ONLY from the sanitizer runtime's own output, never from
@@ -2443,6 +2443,12 @@ def aggregate(bench_dir: Path) -> dict:
                 else manifest_errors(manifest))
         if errs:
             report["ground_truth_error"] = errs
+        elif manifest.get("findings_only"):
+            # A findings-only target ships no sanitizer; its planted bugs
+            # surface under findings/, which the deterministic crash oracle
+            # cannot grade. Scoring its (empty) crashes would report a
+            # misleading 0% recall, so mark it not-scored instead.
+            report["ground_truth_scoring"] = {"not_scored": "findings-only"}
         elif pool_crashes.is_dir():
             report["ground_truth_scoring"] = score_ground_truth(
                 pool_crashes,
@@ -2462,8 +2468,12 @@ def _find_output_target_toml(start: Path) -> Path | None:
     cur = start.resolve()
     if cur.is_file():
         cur = cur.parent
+    # The slug may be nested (output/samples/sample-python/...), so match the
+    # target root by its target.toml at any depth rather than requiring it to
+    # be a direct child of output/. Stop at the output/ boundary so we never
+    # climb past it into an unrelated tree.
     for p in [cur, *cur.parents]:
-        if p.parent.name == "output" and (p / "target.toml").is_file():
+        if (p / "target.toml").is_file():
             return p / "target.toml"
         if p.name == "output":
             break
@@ -2945,6 +2955,14 @@ def _render_ground_truth(scoring: dict | None,
         return lines
     if not scoring:
         return []
+    if scoring.get("not_scored") == "findings-only":
+        return [
+            "### Ground truth", "",
+            "> **Findings-only target — not scored.** This target ships no "
+            "sanitizer; its planted bugs surface under `findings/`, which the "
+            "deterministic crash oracle does not grade. Run the audit and "
+            "review `findings/` against the answer key by hand.", "",
+        ]
     overall = scoring.get("overall", {})
     by_cond = scoring.get("by_condition", {})
     lines = ["### Ground truth (precision / recall)", ""]
@@ -2974,7 +2992,7 @@ def _render_ground_truth(scoring: dict | None,
     lines.append("")
     lines.append(
         "> **How to read this.** Scored against the target's "
-        "`ground-truth.json` answer key. **Recall** is the share of planted "
+        "`.ground-truth.json` answer key. **Recall** is the share of planted "
         "real bugs confirmed at the crash site by a runtime sanitizer "
         "artifact; **Precision** is the share of confirmed crashes that are "
         "real planted bugs — a fired false-positive trap, an unexpected crash, "
@@ -4050,7 +4068,7 @@ def main(argv: list[str]) -> int:
     p_sc.add_argument("crashes_dir", type=Path,
                       help="a crashes/ dir, or a results/pool dir holding one")
     p_sc.add_argument("--ground-truth", type=Path, required=True,
-                      help="path to the target's ground-truth.json")
+                      help="path to the target's .ground-truth.json")
     p_sc.add_argument("--members", type=Path, default=None,
                       help="optional pool-members.json for per-condition scores")
     p_sc.add_argument("--conditions", default="",

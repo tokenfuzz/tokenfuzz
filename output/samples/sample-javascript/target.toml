@@ -1,0 +1,30 @@
+# target.toml — sample-javascript synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+
+target        = "samples/sample-javascript"
+upstream_url  = "synthetic — TokenFuzz per-language benchmark (JavaScript/Node)"
+build_system  = "npm"
+pinned_rev    = "norev"
+
+is_browser    = "0"
+
+[threat_model]
+# The CLI turns one attacker-supplied job file into a single reportkit call;
+# the job bytes are the only attacker-controlled surface.
+attacker_controls = ["bytes"]
+
+# Pure-Node target: no sanitizer build. Runtime crashes and LLM-reported
+# security issues both land under findings/.
+[sanitizer]
+enabled = []
+
+[runner]
+bin            = "node"
+args           = ["{TARGET_ROOT}/reportkit_cli.js", "{TESTCASE}"]
+crash_patterns = [
+  "^FATAL ERROR:",
+  "RangeError: Maximum call stack",
+  "Allocation failed",
+  "^\\w*Error:",
+  "node:internal/",
+]

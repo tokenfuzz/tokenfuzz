@@ -1,0 +1,29 @@
+# target.toml — sample-php synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+
+target        = "samples/sample-php"
+upstream_url  = "synthetic — TokenFuzz per-language benchmark (PHP)"
+build_system  = "composer"
+pinned_rev    = "norev"
+
+is_browser    = "0"
+
+[threat_model]
+# The CLI turns one attacker-supplied job file into a single ReportKit call;
+# the job bytes are the only attacker-controlled surface.
+attacker_controls = ["bytes"]
+
+# Pure-PHP target: no sanitizer build. Runtime crashes and LLM-reported
+# security issues both land under findings/.
+[sanitizer]
+enabled = []
+
+[runner]
+bin            = "php"
+args           = ["{TARGET_ROOT}/reportkit_cli.php", "{TESTCASE}"]
+crash_patterns = [
+  "Fatal error:",
+  "PHP Fatal error:",
+  "Stack trace:",
+  "Uncaught \\w+Error:",
+]

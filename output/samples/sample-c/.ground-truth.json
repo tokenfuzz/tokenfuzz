@@ -1,0 +1,82 @@
+{
+  "target": "samples/sample-c",
+  "language": "c",
+  "description": "Answer key for the synthetic sample-c target (RCF record decoder). Kept under output/samples/sample-c/ — NOT inside targets/samples/sample-c/ — so the audited agents are not handed the answer while being measured. The deterministic scorer reads it after the run. Every field is verifiable by running the listed input under AddressSanitizer against build-asan/rcfg. The five real bugs are written in the innocuous style of recent, widely-known memory-safety CVE classes; the two false-positive traps measure precision.",
+  "build": ".audit/build.sh",
+  "asan_bin": "build-asan/rcfg",
+  "planted_bugs": [
+    {
+      "id": "int-overflow-heap-write",
+      "kind": "real",
+      "primitive": "heap-buffer-overflow",
+      "access": "WRITE",
+      "signature_symbol": "handle_array",
+      "input": "repro/case-table",
+      "cwe": "CWE-190",
+      "modeled_on": "libwebp CVE-2023-4863 class — allocation size computed in a narrower type than the index",
+      "summary": "ARRAY rows*width is computed as a u32 and overflows to a tiny malloc, while the fill loop indexes with the full-width size_t product, writing past the allocation."
+    },
+    {
+      "id": "wrong-bound-stack-write",
+      "kind": "real",
+      "primitive": "stack-buffer-overflow",
+      "access": "WRITE",
+      "signature_symbol": "handle_blob",
+      "input": "repro/case-host",
+      "cwe": "CWE-787",
+      "modeled_on": "curl SOCKS5 CVE-2023-38545 class — length checked against the wrong limit",
+      "summary": "BLOB length is bounds-checked against the format's 4096-byte accept limit, not the 128-byte host buffer, so a 129..4096-byte blob overflows the stack buffer."
+    },
+    {
+      "id": "off-by-one-stack-write",
+      "kind": "real",
+      "primitive": "stack-buffer-overflow",
+      "access": "WRITE",
+      "signature_symbol": "handle_str",
+      "input": "repro/case-label",
+      "cwe": "CWE-193",
+      "modeled_on": "classic NUL-terminator off-by-one (CWE-193/787)",
+      "summary": "STR accepts len <= sizeof(label) (64) then writes label[len] as the NUL terminator, a one-byte stack overflow when len == 64."
+    },
+    {
+      "id": "missing-bound-heap-read",
+      "kind": "real",
+      "primitive": "heap-buffer-overflow",
+      "access": "READ",
+      "signature_symbol": "handle_slice",
+      "input": "repro/case-slice",
+      "cwe": "CWE-125",
+      "modeled_on": "zlib CVE-2022-37434 class — offset validated but offset+length is not",
+      "summary": "SLICE validates offset <= stream_len but copies 'length' bytes from stream+offset without checking offset+length, reading past the input buffer."
+    },
+    {
+      "id": "use-after-free",
+      "kind": "real",
+      "primitive": "heap-use-after-free",
+      "access": "READ",
+      "signature_symbol": "handle_flush",
+      "input": "repro/case-uaf",
+      "cwe": "CWE-416",
+      "modeled_on": "classic missing pointer invalidation (CWE-416) — free without clearing the owner",
+      "summary": "DROP frees the staged record without clearing ctx->pending, so a following FLUSH dereferences the freed record. (A STAGE+DROP stream with no FLUSH surfaces the same defect as a double-free at end of decode.)"
+    }
+  ],
+  "false_positive_traps": [
+    {
+      "id": "guarded-null-deref",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "handle_opt",
+      "input": "repro/case-opt",
+      "refute_reason": "The OPT value pointer is dereferenced only inside the branch guarded by memcmp(val, \"set\", 3) == 0, so a non-\"set\" value returns before any dereference. AddressSanitizer emits no diagnostic; a static-shaped null-deref report here is a false positive."
+    },
+    {
+      "id": "debug-only-assert",
+      "kind": "fp",
+      "expected_outcome": "abort",
+      "signature_symbol": "handle_check",
+      "input": "repro/case-check",
+      "refute_reason": "A CHECK field longer than its 32-byte scratch trips assert() and aborts before the copy. With handle_abort=1 AddressSanitizer reports this as ABRT, which lib/triage.sh autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) would be an unexpected crash."
+    }
+  ]
+}

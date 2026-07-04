@@ -446,6 +446,21 @@ TOML
     "rendered asan invocation hint uses the absolute output-dir crashes path"
   assert_match "$hint_target/build-asan/src/fake_cli" "$hint_rendered" \
     "asan_bin resolves to TARGET_ROOT/build-asan/... without doubling the prefix"
+  # Nested slug regression: targets/samples/<slug> must resolve its config at
+  # output/samples/<slug>/target.toml, not the basename output/<slug>/. Before
+  # the fix the renderer keyed on target.name and the hint blocks rendered
+  # empty for every nested sample (config, [runner], sanitizer settings lost).
+  nest_target="$hint_root/targets/samples/fakenest"
+  mkdir -p "$nest_target/build-asan/src"
+  cp "$hint_target/build-asan/src/fake_cli" "$nest_target/build-asan/src/fake_cli"
+  chmod +x "$nest_target/build-asan/src/fake_cli"
+  mkdir -p "$hint_root/output/samples/fakenest"
+  cat > "$hint_root/output/samples/fakenest/target.toml" <<TOML
+asan_bin = "build-asan/src/fake_cli"
+TOML
+  nest_rendered=$(python3 "$render_py" "$nest_target" /tmp/cell "$hint_root")
+  assert_match "$nest_target/build-asan/src/fake_cli" "$nest_rendered" \
+    "render.py resolves a nested slug's config at output/samples/<slug>/target.toml"
   # End-to-end: the python helper must inject the shared goal_framing so the
   # baseline opens with the same authorized-QA framing recon uses.
   assert_match "authorized, owner-run local" "$hint_rendered" \

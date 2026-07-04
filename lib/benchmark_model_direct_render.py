@@ -316,7 +316,17 @@ def _resolve_toml_path(target: Path, script_root: str) -> Path | None:
     in-tree path is kept only as a fallback for fixtures that ship a
     committed target.toml (e.g. tests/ early-cellbench targets).
     """
-    slug = target.name
+    # Derive the slug as the target's path relative to <repo>/targets so a
+    # nested target (targets/samples/sample-python) resolves its config at
+    # output/samples/sample-python/target.toml instead of collapsing to the
+    # basename. A target provisioned outside that tree (--target-path) has no
+    # such relation, so fall back to its basename — matching bin/audit's
+    # sanitize_target_slug.
+    targets_root = Path(script_root) / "targets"
+    try:
+        slug: Path = target.resolve().relative_to(targets_root.resolve())
+    except ValueError:
+        slug = Path(target.name)
     canonical = Path(script_root) / "output" / slug / "target.toml"
     if canonical.is_file():
         return canonical

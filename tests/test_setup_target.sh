@@ -278,6 +278,42 @@ else
   fail "$_CURRENT_TEST" "$out"
 fi
 
+_CURRENT_TEST="setup-target symlinks a nested local non-VCS target"
+nested_link_src="$TEST_TMPDIR/external-nested-plain"
+mkdir -p "$nested_link_src"
+printf 'print("hello")\n' > "$nested_link_src/app.py"
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 "$SCRIPT_ROOT/bin/setup-target" samples/extlink "$nested_link_src" 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] &&
+   [ -L "$ROOT/targets/samples/extlink" ] &&
+   [ -f "$ROOT/targets/samples/extlink/app.py" ] &&
+   [ -f "$ROOT/output/samples/extlink/target.toml" ] &&
+   grep -q 'Symlinking targets/samples/extlink' <<<"$out"; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "$out"
+fi
+
+_CURRENT_TEST="setup-target rejects harness-reserved slug components (output/benchmark)"
+# 'output' and 'benchmark' are reserved directory names: iter_target_roots treats
+# a nested output/ as a benchmark-facade boundary and skips the top-level benchmark
+# tree, so a target named with either would be silently un-enumerable. Rejection
+# must fire on any component and create nothing.
+reserved_ok=1
+for slug in output benchmark samples/output/demo samples/benchmark/demo; do
+  out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 "$SCRIPT_ROOT/bin/setup-target" "$slug" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] ||
+     ! grep -q 'reserved directory name' <<<"$out" ||
+     [ -e "$ROOT/targets/$slug" ] ||
+     [ -e "$ROOT/output/$slug" ]; then
+    reserved_ok=0
+    fail "$_CURRENT_TEST" "slug=$slug rc=$rc out=$out"
+    break
+  fi
+done
+[ "$reserved_ok" -eq 1 ] && pass "$_CURRENT_TEST"
+
 _CURRENT_TEST="setup-target clones a local git checkout rather than symlinking it"
 # A local directory that IS its own git checkout keeps the existing clone
 # behaviour — an isolated checkout under targets/, not a symlink.

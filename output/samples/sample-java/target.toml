@@ -1,0 +1,30 @@
+# target.toml — sample-java synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+
+target        = "samples/sample-java"
+upstream_url  = "synthetic — TokenFuzz per-language benchmark (Java)"
+build_system  = "maven"
+pinned_rev    = "norev"
+
+is_browser    = "0"
+
+[threat_model]
+# The CLI turns one attacker-supplied job file into a single ReportKit call;
+# the job bytes are the only attacker-controlled surface.
+attacker_controls = ["bytes"]
+
+# Single-file Java (JEP 330), no sanitizer: java compiles and runs the source in
+# one shot. Runtime crashes and LLM-reported security issues both land under
+# findings/.
+[sanitizer]
+enabled = []
+
+[runner]
+bin            = "java"
+args           = ["{TARGET_ROOT}/ReportKit.java", "{TESTCASE}"]
+crash_patterns = [
+  "Exception in thread",
+  "java\\.lang\\.OutOfMemoryError",
+  "java\\.lang\\.StackOverflowError",
+  "^\\s+at \\S+\\(\\S+:\\d+\\)",
+]
