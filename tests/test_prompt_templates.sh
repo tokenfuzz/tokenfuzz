@@ -19,6 +19,7 @@ required_templates=(
   find_first_directive.md.j2
   strategy_picker.md.j2
   audit_goal_framing.md.j2
+  audit_bug_contract.md.j2
   audit_recon.md.j2
   validate_finding.md.j2
   validate_trigger_provenance.md.j2
@@ -175,6 +176,26 @@ assert_file_contains "$md_direct" "{{ goal_framing }}" \
 recon_tmpl="$SCRIPT_ROOT/lib/prompts/audit_recon.md.j2"
 assert_file_contains "$recon_tmpl" "{{ goal_framing }}" \
   "recon template wires the shared goal_framing placeholder"
+
+# Shared definitional floor (audit_bug_contract): one source rendered into
+# both recon and model-direct, pinning the quality bar so it can't drift.
+bug_contract_rendered=$(python3 "$renderer" audit_bug_contract.md.j2)
+assert_match "What counts as a security issue" "$bug_contract_rendered" \
+  "shared bug-contract partial renders the what-counts header"
+assert_match "trusted-caller / caller-contract misuse" "$bug_contract_rendered" \
+  "shared bug-contract excludes caller-contract misuse"
+assert_match "non-product surface" "$bug_contract_rendered" \
+  "shared bug-contract excludes non-product surface"
+assert_match "any bug class, not just memory-safety" "$bug_contract_rendered" \
+  "shared bug-contract keeps the escape hatch class-general, not memory-safety-only"
+assert_match "not attacker-driven" "$bug_contract_rendered" \
+  "shared bug-contract keeps resource-exhaustion DoS in scope"
+assert_match "Recall-safe" "$bug_contract_rendered" \
+  "shared bug-contract keeps the keep-on-unsure recall floor"
+assert_file_contains "$recon_tmpl" "{{ bug_contract }}" \
+  "recon template wires the shared bug_contract placeholder"
+assert_file_contains "$md_direct" "{{ bug_contract }}" \
+  "model-direct template wires the shared bug_contract placeholder"
 # The aligned framing replaced model-direct's bare CTF opener; guard it.
 if grep -qF -- "CTF-style" "$md_direct"; then
   fail "model-direct reintroduced the bare 'CTF-style' opener (framing drift vs recon)"

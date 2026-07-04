@@ -561,11 +561,16 @@ SCOPE
   # output contract, and the slice_name / TIMEOUT_SECS interpolations.
   # tests/test_recon_changes.sh enforces a byte-size ceiling plus
   # presence of every essential marker.
-  local goal_framing
+  local goal_framing bug_contract
   goal_framing="$(render_prompt_template audit_goal_framing.md.j2)"
+  # Shared definitional floor (what is NOT a security issue) — same partial
+  # model-direct renders, so recon stops emitting caller-misuse NULL-derefs
+  # and other categorical non-issues the find-quality gate already rejects.
+  bug_contract="$(render_prompt_template audit_bug_contract.md.j2)"
 
   render_prompt_template audit_recon.md.j2 \
     --var "goal_framing=${goal_framing}" \
+    --var "bug_contract=${bug_contract}" \
     --var "target_slug=${TARGET_SLUG}" \
     --var "scope_block=${scope_block}" \
     --var "slice_name=${slice_name}" \

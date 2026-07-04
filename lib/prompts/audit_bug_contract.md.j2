@@ -1,0 +1,45 @@
+{# Shared definitional floor: what is NOT a security issue on its own.
+
+   Rendered into BOTH the recon seed prompt (bin/audit-recon
+   build_recon_prompt) and the model-direct baseline
+   (lib/benchmark_model_direct_render.py), the same way audit_goal_framing.md.j2
+   shares the authorization opener. Recon emits JSONL and model-direct files
+   artifacts, but "what counts as a security issue" is identical for both;
+   one source stops the two paths from drifting apart on the quality bar the
+   way they drifted on framing before goal_framing existed.
+
+   The categories mirror the reject taxonomy the downstream find-quality gate
+   already enforces (lib/prompts/triage_find_quality.md.j2: caller-contract
+   misuse, OOM-only, debug-only assert, non-product surface), so recon stops
+   emitting exactly what the validator is built to reject — one vocabulary
+   across emit -> triage -> validate. The recall-safe footer mirrors that
+   gate's keep-on-unsure rule, so this only suppresses CLEAR categorical
+   non-issues, never a genuine-but-unproven bug.
+
+   Intentionally var-free and output-neutral (says "report", not "file" or
+   "emit") so it reads correctly whichever consumer renders it. Keep it terse:
+   the recon copy is cache-replayed on every tool call, under the byte ceiling
+   guarded by tests/test_recon_changes.sh. #}
+## What counts as a security issue
+
+When you can, name the untrusted input — parser bytes, an attacker-driven
+call sequence, or protocol state — that reaches the issue, and what the
+attacker gains. The categories below are not security issues on their
+own; skip one unless a real attacker gain follows from it — memory
+corruption, an auth or access-control bypass, secret disclosure, injection,
+or similar (any bug class, not just memory-safety):
+
+- **trusted-caller / caller-contract misuse** — a NULL-deref or crash
+  reachable only because a trusted caller passed NULL or out-of-contract
+  arguments to an API that documents valid ones;
+- **OOM / allocation-failure only** — a NULL crash, leaked allocation, or
+  stale error flag when a single allocation fails (not attacker-driven
+  resource exhaustion, which is in scope);
+- **debug-only `assert` / `*_CHECK`** that the shipped release build
+  compiles out;
+- **non-product surface** — code that does not ship in the product: test or
+  fuzz drivers, examples, demos, build or codegen scripts.
+
+Recall-safe: if you cannot tell whether input reaches it, whether the file
+ships, or whether a real attacker gain follows, report it — a missed bug
+costs more than a weak lead the validator can drop.

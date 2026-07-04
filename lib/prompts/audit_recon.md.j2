@@ -11,7 +11,10 @@ Do not pre-filter. Validator quorum runs later; optimize recall, not precision.
 Untrusted bytes (parser input), call sequence (API misuse from trusted
 host), and protocol-state are attacker-controlled per target.toml.
 Local config / filesystem state is trusted unless target.toml says
-otherwise. Caller-misuse and exotic-environment paths are in-scope.
+otherwise. Caller-misuse and exotic-environment paths count only when
+they lead to a real attacker gain of any bug class (see below).
+
+{{ bug_contract }}
 
 ## Output
 
@@ -26,8 +29,9 @@ emit candidate JSONL in assistant text only.
 
 All emissions are labeled `NEEDS-VERIFICATION` — the validator
 decides what gets promoted. Do **not** demote to `AUDIT-CLEAN` just
-because you cannot fully prove exploitability in budget. If you spot
-something off, emit it.
+because you cannot fully prove exploitability in budget; that is the
+validator's call, not yours. The one exception is the categorical
+non-issues above — skip those. If you spot anything else off, emit it.
 
 ## Schema (per line)
 
@@ -39,7 +43,7 @@ something off, emit it.
     "line": <integer or 0>,
     "function": "<fully-qualified demangled symbol (ns::Class::method) from stack frame #0 if a crash exists, else the defining function; no args/line/path; empty if none>",
     "class": "memory-safety|auth|injection|info-disclosure|crypto|race|boundary|deserialization|config|logic|side-channel|dos|other",
-    "notes": "1-3 sentences: why it looks like a bug. Include input shape or call sequence if you have one.",
+    "notes": "1-3 sentences: why it looks like a bug, plus the untrusted input shape or call sequence that reaches it when you can name one.",
     "confidence": "NEEDS-VERIFICATION"
   }
 

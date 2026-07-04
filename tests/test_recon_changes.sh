@@ -845,7 +845,9 @@ bash -c '
 # which narrows recall (Claude follows it literally). Broadened to be
 # class-diverse and added model_direct's "starting point, not a fence"
 # escape so the list reads as illustrative, not exhaustive.
-prompt_ceiling=3120
+# Raised 3120 → 5000 for the shared audit_bug_contract partial (definitional
+# floor recon renders to stop emitting what the find-quality gate rejects).
+prompt_ceiling=5000
 
 fl_size=$(wc -c < "$prompt_tmpdir/prompt-fl.txt" | tr -d ' ')
 
@@ -907,6 +909,13 @@ for variant in fl; do
   done
   # Recall enforcement: agents must not self-censor to AUDIT-CLEAN.
   assert_prompt_contains "$f" 'pre-filter' "$vlabel-no-prefilter"
+  # Shared definitional floor (audit_bug_contract partial) — categorical
+  # non-issues recon must stop emitting; class-general escape keeps it recall-safe.
+  assert_prompt_contains "$f" 'What counts as a security issue' "$vlabel-bug-contract"
+  assert_prompt_contains "$f" 'caller-contract misuse' "$vlabel-excl-caller-misuse"
+  assert_prompt_contains "$f" 'non-product surface' "$vlabel-excl-non-product"
+  assert_prompt_contains "$f" 'any bug class, not just memory-safety' "$vlabel-escape-class-general"
+  assert_prompt_contains "$f" 'Recall-safe' "$vlabel-contract-recall-safe"
   # The two labels recall mode emits.
   assert_prompt_contains "$f" 'NEEDS-VERIFICATION' "$vlabel-needs-ver"
   assert_prompt_contains "$f" 'AUDIT-CLEAN' "$vlabel-audit-clean"

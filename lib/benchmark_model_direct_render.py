@@ -385,6 +385,11 @@ def render(target_path: str, output_dir: str, script_root: str) -> str:
         # prompt framed identically so the benchmark measures harness
         # machinery, not a framing difference.
         "goal_framing": render_template("audit_goal_framing.md.j2", {}),
+        # Shared definitional floor (what is NOT a security issue), the same
+        # partial bin/audit-recon renders. Keeps the recon seed and this
+        # baseline on one quality bar so neither drifts into filing (or
+        # emitting) caller-misuse NULL-derefs the find-quality gate rejects.
+        "bug_contract": render_template("audit_bug_contract.md.j2", {}),
         "target_path": target_path,
         "output_dir": output_dir,
         "crash_objective": _build_crash_objective(
