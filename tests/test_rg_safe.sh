@@ -157,47 +157,83 @@ expected=$(rg 'a' "$SMALL")
 assert_eq "$expected" "$output" "rg-safe: small output stays byte-identical with byte cap added"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Default exclusions — `**/logs/**` and `**/.git/**`. Nothing under a logs/
-# directory is searchable by default, regardless of file extension; .git/ is
-# always excluded. Audit data showed zero legitimate agent reads inside
-# logs/ across 405 sessions, so the broader directory-level exclusion is
-# strictly an improvement over file-by-file rules.
+# Default exclusions — the harness output-logs tree and VCS metadata. The
+# harness writes self-output under `output/`, so `**/output/**/logs/**` hides
+# every self-output file (transcripts, prompt dumps, recon logs, index.*, .raw/
+# spills, and the vendored .gemini-home/) while a target's own source under a
+# `logs/` package (no output/ ancestor) stays searchable. Source a target keeps
+# under its own output/.../logs/ is also hidden (accepted: output/ is normally
+# build output; --include-logs reaches it). .git/ and .hg/ are always excluded.
 # ─────────────────────────────────────────────────────────────────────────────
 
 LOGTREE="$TEST_TMPDIR/logtree"
-mkdir -p "$LOGTREE/output/foo/codex/logs" "$LOGTREE/output/foo/codex/.git" "$LOGTREE/source"
-echo 'PATCH-deadbeef found here' > "$LOGTREE/source/code.c"
+mkdir -p "$LOGTREE/output/foo/codex/logs/.raw" \
+  "$LOGTREE/output/foo/codex/logs/.gemini-home/chats" \
+  "$LOGTREE/output/foo/codex/.git" "$LOGTREE/output/foo/codex/.hg" \
+  "$LOGTREE/targets/foo/src/logs" "$LOGTREE/targets/foo/src/.raw" \
+  "$LOGTREE/targets/foo/output/pkg/logs"
+# Target source: a real logs/ package, a non-harness .raw/ corpus dir, and a
+# source file under a nested output/.../logs/ (accepted collateral exclusion).
+echo 'PATCH-deadbeef found here' > "$LOGTREE/targets/foo/src/code.c"
+echo 'PATCH-deadbeef found here' > "$LOGTREE/targets/foo/src/logs/parser.c"
+echo 'PATCH-deadbeef found here' > "$LOGTREE/targets/foo/src/.raw/corpus.txt"
+echo 'PATCH-deadbeef found here' > "$LOGTREE/targets/foo/output/pkg/logs/source.c"
+# Harness self-output under output/**/logs/ — including the top-level prompt/
+# recon logs that a file-basename list historically leaked, plus the vendored
+# gemini home.
+echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/logs/session_x.prompt.md"
+echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/logs/recon_1.log"
 echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/logs/sess.log.raw"
+echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/logs/.raw/session.raw"
 echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/logs/index.log"
-echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/logs/index.jsonl"
 echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/logs/session_x.log"
-echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/logs/session_x.log.summary.md"
+echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/logs/.gemini-home/chats/s.jsonl"
 echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/.git/HEAD"
+echo 'PATCH-deadbeef found here' > "$LOGTREE/output/foo/codex/.hg/store"
 
-# Default: source matches; everything under logs/ and .git/ is skipped.
+# Default: target src/logs/ matches; nothing under any output/**/logs/ does —
+# neither harness logs nor a target's own output/.../logs/ source.
 output=$("$RG_SAFE" 'PATCH-deadbeef' "$LOGTREE" 2>&1)
-assert_match 'source/code\.c' "$output" "rg-safe: default scan finds source matches"
-assert_not_match 'sess\.log\.raw' "$output" "rg-safe: default excludes *.log.raw under logs/"
+assert_match 'src/code\.c' "$output" "rg-safe: default scan finds source matches"
+assert_match 'src/logs/parser\.c' "$output" \
+  "rg-safe: default scan does not hide target source dirs named logs"
+assert_not_match 'output/pkg/logs/source\.c' "$output" \
+  "rg-safe: default excludes any output/**/logs (incl. a target's own; --include-logs reaches it)"
+assert_not_match 'session_x\.prompt\.md' "$output" "rg-safe: default excludes prompt dumps under output logs"
+assert_not_match 'recon_1\.log' "$output" "rg-safe: default excludes recon logs under output logs"
+assert_not_match 'sess\.log\.raw' "$output" "rg-safe: default excludes *.log.raw under output logs"
+assert_not_match 'codex/logs/\.raw/session\.raw' "$output" "rg-safe: default excludes output logs/.raw/"
 assert_not_match 'codex/logs/index\.log' "$output" "rg-safe: default excludes index.log"
-assert_not_match 'codex/logs/index\.jsonl' "$output" "rg-safe: default excludes index.jsonl"
 assert_not_match 'session_x\.log:' "$output" "rg-safe: default excludes session text logs"
-assert_not_match 'session_x\.log\.summary\.md' "$output" "rg-safe: default excludes summary md under logs/"
 assert_not_match '\.git/HEAD' "$output" "rg-safe: default excludes .git/"
+assert_not_match '\.hg/store' "$output" "rg-safe: default excludes .hg/"
 
-# --include-logs: matches everywhere under logs/, but .git/ stays excluded.
+# With --hidden, ripgrep searches dotdirs. The output-logs glob still hides the
+# vendored gemini home and .raw/ spill; a non-harness .raw/ under target source
+# stays visible.
+output=$("$RG_SAFE" --hidden 'PATCH-deadbeef' "$LOGTREE" 2>&1)
+assert_match 'src/\.raw/corpus\.txt' "$output" \
+  "rg-safe: --hidden keeps non-log .raw dirs under target source"
+assert_not_match 'gemini-home' "$output" "rg-safe: --hidden still excludes vendored home under output logs"
+assert_not_match 'codex/logs/\.raw/session\.raw' "$output" "rg-safe: --hidden still excludes output logs/.raw/"
+assert_not_match '\.git/HEAD' "$output" "rg-safe: --hidden still excludes .git/"
+assert_not_match '\.hg/store' "$output" "rg-safe: --hidden still excludes .hg/"
+
+# --include-logs: matches under output logs too, but VCS metadata stays excluded.
 output=$("$RG_SAFE" --include-logs 'PATCH-deadbeef' "$LOGTREE" 2>&1)
-assert_match 'source/code\.c' "$output" "rg-safe: --include-logs still finds source matches"
-assert_match 'sess\.log\.raw' "$output" "rg-safe: --include-logs allows *.log.raw"
+assert_match 'src/code\.c' "$output" "rg-safe: --include-logs still finds source matches"
+assert_match 'session_x\.prompt\.md' "$output" "rg-safe: --include-logs allows output logs"
 assert_match 'codex/logs/index\.log' "$output" "rg-safe: --include-logs allows codex/logs/"
 assert_not_match '\.git/HEAD' "$output" "rg-safe: --include-logs still excludes .git/"
+assert_not_match '\.hg/store' "$output" "rg-safe: --include-logs still excludes .hg/"
 
-# RG_INCLUDE_LOGS=1 also drops the logs/ exclusion.
+# RG_INCLUDE_LOGS=1 also drops the output-logs exclusion.
 output=$(RG_INCLUDE_LOGS=1 "$RG_SAFE" 'PATCH-deadbeef' "$LOGTREE" 2>&1)
-assert_match 'sess\.log\.raw' "$output" "rg-safe: RG_INCLUDE_LOGS=1 env honored"
+assert_match 'session_x\.prompt\.md' "$output" "rg-safe: RG_INCLUDE_LOGS=1 env honored"
 
 # Caller --glob still works alongside the default exclusions.
-output=$("$RG_SAFE" --glob '!**/source/**' 'PATCH-deadbeef' "$LOGTREE" 2>&1) || true
-assert_not_match 'source/code\.c' "$output" "rg-safe: caller --glob still applies"
+output=$(cd "$LOGTREE" && "$RG_SAFE" --glob '!**/src/**' 'PATCH-deadbeef' . 2>&1) || true
+assert_not_match 'src/code\.c' "$output" "rg-safe: caller --glob still applies"
 assert_not_match 'sess\.log\.raw' "$output" "rg-safe: default log exclusion still applies under caller --glob"
 
 # The byte-cap clip works when scanning a real .log.raw via --include-logs:
@@ -232,6 +268,19 @@ assert_not_match 'capped at' "$output" "rg-safe (wrapped PATH): --no-cap suppres
 output=$(PATH="$WRAPPED_PATH" "$RG_SAFE" match "$FIX" 2>&1)
 data_lines=$(printf '%s\n' "$output" | grep -c '^line')
 assert_eq "500" "$data_lines" "rg-safe (wrapped PATH): full result passes through, no double-cap"
+
+# Finding 1 regression: --include-logs must actually re-expose output logs even
+# with lib/wrappers/rg first on PATH. rg-safe execs the real rg (skipping the
+# wrapper), so the wrapper's own log glob can't silently undo the escape hatch.
+output=$(PATH="$WRAPPED_PATH" AGENT_WRAPPERS_PATH="$SCRIPT_ROOT/lib/wrappers" \
+  "$RG_SAFE" --include-logs -l 'PATCH-deadbeef' "$LOGTREE" 2>&1)
+assert_match 'session_x\.prompt\.md' "$output" \
+  "rg-safe (wrapped PATH): --include-logs re-exposes output logs (Finding 1)"
+# And the default still excludes them under the wrapped PATH.
+output=$(PATH="$WRAPPED_PATH" AGENT_WRAPPERS_PATH="$SCRIPT_ROOT/lib/wrappers" \
+  "$RG_SAFE" -l 'PATCH-deadbeef' "$LOGTREE" 2>&1) || true
+assert_not_match 'session_x\.prompt\.md' "$output" \
+  "rg-safe (wrapped PATH): default still excludes output logs"
 
 # Byte-cap escape (RG_BYTES=0) must also pass full huge match through, not
 # silently clip at the wrapper's default.

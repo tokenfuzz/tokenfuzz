@@ -29,6 +29,32 @@ assert_not_match "clipped" "$output" "large: no cap footer under the byte budget
 output=$("$RG_WRAPPER" --count "match" "$TEST_TMPDIR/large.txt" 2>/dev/null)
 assert_match "500" "$output" "--count flag: count is exact"
 
+# Any output/**/logs/ tree and VCS metadata are skipped, but a target's own
+# src/logs/ source stays visible (no output/ ancestor). Source a target keeps
+# under its own output/.../logs/ is also excluded — accepted, since output/ is
+# normally build output and rg-safe --include-logs can reach it.
+LOGTREE="$TEST_TMPDIR/logtree"
+mkdir -p "$LOGTREE/src/logs" "$LOGTREE/output/sample/codex/logs/.raw" \
+  "$LOGTREE/output/sample/codex/logs/.gemini-home/chats" \
+  "$LOGTREE/output/sample/codex/.hg" "$LOGTREE/src/.raw"
+echo 'PATCH-rg-wrapper' > "$LOGTREE/src/logs/logger.c"
+echo 'PATCH-rg-wrapper' > "$LOGTREE/src/.raw/corpus.txt"
+echo 'PATCH-rg-wrapper' > "$LOGTREE/output/sample/codex/logs/session_1.prompt.md"
+echo 'PATCH-rg-wrapper' > "$LOGTREE/output/sample/codex/logs/session_1.log"
+echo 'PATCH-rg-wrapper' > "$LOGTREE/output/sample/codex/logs/.raw/session_1.log.raw"
+echo 'PATCH-rg-wrapper' > "$LOGTREE/output/sample/codex/logs/.gemini-home/chats/s.jsonl"
+echo 'PATCH-rg-wrapper' > "$LOGTREE/output/sample/codex/.hg/store"
+output=$("$RG_WRAPPER" 'PATCH-rg-wrapper' "$LOGTREE" 2>/dev/null)
+assert_match 'src/logs/logger\.c' "$output" "log paths: target source logs dir remains searchable"
+assert_not_match 'session_1\.prompt\.md' "$output" "log paths: harness prompt dump excluded"
+assert_not_match 'session_1\.log' "$output" "log paths: harness session log excluded"
+assert_not_match '\.hg/store' "$output" "log paths: Mercurial metadata excluded"
+output=$("$RG_WRAPPER" --hidden 'PATCH-rg-wrapper' "$LOGTREE" 2>/dev/null)
+assert_match 'src/\.raw/corpus\.txt' "$output" "log paths: --hidden keeps non-log .raw dir searchable"
+assert_not_match 'logs/\.raw/session_1\.log\.raw' "$output" "log paths: --hidden still excludes harness raw log"
+assert_not_match 'gemini-home' "$output" "log paths: --hidden still excludes vendored gemini home"
+assert_not_match '\.hg/store' "$output" "log paths: --hidden still excludes Mercurial metadata"
+
 out="$TEST_TMPDIR/stderr.out"
 err="$TEST_TMPDIR/stderr.err"
 rc=0

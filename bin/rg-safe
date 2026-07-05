@@ -7,13 +7,16 @@
 # log.raw JSON line can be 1 MB, which a line cap misses), so the line cap is
 # off by default (RG_CAP=0). Pass --cap N / RG_CAP=N to opt in.
 #
-# Why default exclusions: `logs/` is agent self-output (transcripts, prompt
-# dumps, summaries, indices) — greppy hash hunts there self-poison by
-# matching prior tool outputs. `.git/` is VCS internals and never useful
-# bug-finding context. Override the `logs/` half with `--include-logs`;
-# the `.git/` exclusion is always on. Audit data shows zero legitimate
-# agent reads inside `logs/` across 405 sessions, so wholesale exclusion
-# is strictly an improvement over the older file-by-file list.
+# Why default exclusions: everything under a harness `logs/` dir (session
+# transcripts, prompt dumps, recon logs, `index.*`, `.raw/` forensic spills,
+# and the vendored backend home under `.gemini-home/`) is agent self-output —
+# greppy hash hunts there self-poison by matching prior tool outputs. The
+# harness writes those under `output/`, so exclude `**/output/**/logs/**` — not
+# any dir merely named `logs`, which would hide a target's own `src/logs/`
+# source. A target that keeps source under its own `output/.../logs/` is also
+# hidden (rare — `output/` is normally build output; pass `--include-logs` to
+# reach it). `.git/` and `.hg/` are VCS internals and always excluded.
+# `--include-logs` drops only the output-logs exclusion; VCS stays on.
 #
 # Usage:
 #   bin/rg-safe [--cap N | --no-cap | RG_CAP=N]                    line cap
@@ -23,7 +26,7 @@
 #
 # Defaults: RG_CAP=0 (line cap off; byte cap governs), RG_BYTES=131072.
 # `--no-cap` disables both caps.
-# `--include-logs` drops the default log-file exclusions. User-supplied
+# `--include-logs` drops the default output-logs exclusion. User-supplied
 # `--glob` flags still apply.
 #
 # stderr passes through unchanged. Exit code is rg's exit code (0 = match,
@@ -64,28 +67,44 @@ if ! command -v rg >/dev/null 2>&1; then
   exit 2
 fi
 
-# Default-exclude logs/ and .git/. rg `--glob !pat` is additive with caller
-# globs, so prepending these never undoes a user-supplied include.
-# `--include-logs` drops only the logs/ half — .git/ is always excluded.
-RG_PREFIX_ARGS=(--glob '!**/.git/**')
+# Default-exclude the harness output-logs tree and VCS metadata. rg `--glob !pat`
+# is additive with caller globs, so prepending these never undoes a user-supplied
+# include. `**/output/**/logs/**` hides all harness self-output (hidden/vendored
+# children too — `logs/.raw/**`, `logs/.gemini-home/**` — under `rg --hidden`)
+# while target `src/logs/` source (no `output/` ancestor) stays searchable.
+# `--include-logs` drops it; VCS dirs are always excluded.
+RG_PREFIX_ARGS=(--glob '!**/.git/**' --glob '!**/.hg/**')
 if [ "$INCLUDE_LOGS" != "1" ]; then
-  RG_PREFIX_ARGS+=(--glob '!**/logs/**')
+  RG_PREFIX_ARGS+=(--glob '!**/output/**/logs/**')
 fi
+
+# Resolve the REAL ripgrep, skipping lib/wrappers/rg (first on the agent PATH).
+# rg-safe must apply only its own caps and globs: if it called `rg` by name the
+# wrapper would re-inject its cap (double-capping --no-cap/--cap N) AND its log
+# glob — the latter silently defeating --include-logs, since no env disables the
+# wrapper's glob the way CAP_BYTES=0 disables its cap. Skip the wrapper dir the
+# same way lib/wrappers/_cap does; fall back to PATH lookup if none is found.
+_wrap_dir="${AGENT_WRAPPERS_PATH:-$_RGSAFE_DIR/../lib/wrappers}"
+# Normalize so the PATH string-compare below matches regardless of how the
+# wrapper dir is spelled (e.g. the fallback's `bin/../lib/wrappers`).
+_wrap_dir="$(cd "$_wrap_dir" 2>/dev/null && pwd || printf '%s' "$_wrap_dir")"
+_real_rg=""
+IFS=: read -ra _path_dirs <<< "$PATH"
+for _pd in "${_path_dirs[@]}"; do
+  [ "$_pd" = "$_wrap_dir" ] && continue
+  if [ -x "$_pd/rg" ]; then _real_rg="$_pd/rg"; break; fi
+done
+[ -n "$_real_rg" ] || _real_rg="rg"
 
 tmp=$(mktemp "${TMPDIR:-/tmp}/rg-safe-XXXXXXXX")
 trap 'rm -f "$tmp"' EXIT
 
 # stdout → tmp, stderr → caller's stderr. `set -u` on bash 3.2 (macOS) trips
 # on empty-array expansion, so dispatch by whether RG_PREFIX_ARGS has entries.
-#
-# Disable any inherited cap from lib/wrappers/rg (which sits on PATH in the
-# agent shell). Without this, --no-cap / --cap N>200 silently top out at 200
-# lines because the wrapper clips before rg-safe can see the raw output.
-# rg-safe enforces its own caps below; the wrapper one would just double-cap.
 if [ "${#RG_PREFIX_ARGS[@]}" -gt 0 ]; then
-  CAP_LINES=0 CAP_BYTES=0 rg "${RG_PREFIX_ARGS[@]}" "${PASS_ARGS[@]}" > "$tmp"
+  "$_real_rg" "${RG_PREFIX_ARGS[@]}" "${PASS_ARGS[@]}" > "$tmp"
 else
-  CAP_LINES=0 CAP_BYTES=0 rg "${PASS_ARGS[@]}" > "$tmp"
+  "$_real_rg" "${PASS_ARGS[@]}" > "$tmp"
 fi
 rc=$?
 

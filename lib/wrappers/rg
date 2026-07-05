@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# rg wrapper: caps output via lib/wrappers/_cap and skips logs/ and .git/
-# regardless of caller scope — both contain self-output (transcripts) or
-# VCS internals that agents have no legitimate need to grep, and explicit
-# search roots like `rg PAT output/<t>` or `rg PAT targets/<t>/.git`
-# would otherwise pull megabytes of noise.
+# rg wrapper: caps output via lib/wrappers/_cap and skips the harness output-logs
+# tree plus VCS metadata. `**/output/**/logs/**` hides all agent self-output the
+# harness writes under output/ (transcripts, prompt dumps, recon logs, index.*,
+# .raw/ spills, vendored .gemini-home/ — hidden children included, so `rg
+# --hidden` stays clean) while a target's own `src/logs/` source (no output/
+# ancestor) stays searchable.
 _dir="$(cd "$(dirname "$0")" && pwd)"
 exec "$_dir/_cap" "$_dir" rg "-c,--count,-l,--files-with-matches,-q,--quiet,--files" \
-  --glob '!**/logs/**' --glob '!**/.git/**' "$@"
+  --glob '!**/.git/**' \
+  --glob '!**/.hg/**' \
+  --glob '!**/output/**/logs/**' \
+  "$@"

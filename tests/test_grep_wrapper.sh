@@ -41,6 +41,30 @@ echo "match" > "$TEST_TMPDIR/match.txt"
 output=$("$GREP_WRAPPER" -l "match" "$TEST_TMPDIR/match.txt" 2>/dev/null)
 assert_match "match.txt" "$output" "-l flag: filename shown"
 
+# Recursive grep skips every logs/ dir plus VCS metadata. Unlike rg, grep's
+# --exclude-dir matches only a directory's own name (BSD and GNU), so it cannot
+# restrict the skip to the harness output tree; a full logs/ skip is the safe
+# choice — no self-output leak (prompt dumps, .raw/, vendored gemini home). A
+# target's own logs/ source is reached via bin/rg-safe instead. Non-log dirs
+# such as .raw/ stay searchable.
+LOGTREE="$TEST_TMPDIR/logtree"
+mkdir -p "$LOGTREE/src/logs" "$LOGTREE/output/sample/codex/logs/.raw" \
+  "$LOGTREE/output/sample/codex/logs/.gemini-home/chats" \
+  "$LOGTREE/output/sample/codex/.hg" "$LOGTREE/src/.raw"
+echo 'PATCH-grep-wrapper' > "$LOGTREE/src/logs/logger.c"
+echo 'PATCH-grep-wrapper' > "$LOGTREE/src/.raw/corpus.txt"
+echo 'PATCH-grep-wrapper' > "$LOGTREE/output/sample/codex/logs/session_1.prompt.md"
+echo 'PATCH-grep-wrapper' > "$LOGTREE/output/sample/codex/logs/.raw/session_1.log.raw"
+echo 'PATCH-grep-wrapper' > "$LOGTREE/output/sample/codex/logs/.gemini-home/chats/s.jsonl"
+echo 'PATCH-grep-wrapper' > "$LOGTREE/output/sample/codex/.hg/store"
+output=$("$GREP_WRAPPER" -R 'PATCH-grep-wrapper' "$LOGTREE" 2>/dev/null)
+assert_match 'src/\.raw/corpus\.txt' "$output" "log paths: non-log .raw dir remains searchable"
+assert_not_match 'src/logs/logger\.c' "$output" "log paths: grep conservatively skips every logs/ dir"
+assert_not_match 'session_1\.prompt\.md' "$output" "log paths: harness prompt dump excluded"
+assert_not_match 'session_1\.log\.raw' "$output" "log paths: harness raw log excluded"
+assert_not_match 'gemini-home' "$output" "log paths: vendored gemini home excluded"
+assert_not_match '\.hg/store' "$output" "log paths: Mercurial metadata excluded"
+
 # ═══════════════════════════════════════════════════════════════
 # 5. -q flag passes through (silent)
 # ═══════════════════════════════════════════════════════════════

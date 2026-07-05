@@ -47,9 +47,9 @@ done
 
 # AGENT_WRAPPERS_BYPASS runs named tools UNCAPPED — a space/comma list, or
 # "all". It exists to A/B the cap's effect on bug-finding per tool (e.g.
-# AGENT_WRAPPERS_BYPASS=rg leaves grep/sed capped). Glob exclusions the
-# rg/grep wrapper already put in "$@" (logs/, .git/) are kept, so a bypassed
-# rg still skips self-output noise.
+# AGENT_WRAPPERS_BYPASS=rg leaves grep/sed capped). The exclusions the rg/grep
+# wrapper already put in "$@" (the harness output-logs tree, VCS metadata) are
+# kept, so a bypassed rg still skips self-output noise.
 _bypass=" ${AGENT_WRAPPERS_BYPASS:-} "   # pad so the glob matches whole words
 case "${_bypass//,/ }" in                # commas optional
   *" all "*|*" ${_tool} "*) exec "$_real" "$@" ;;
