@@ -2110,6 +2110,32 @@ def _median(values: list[float]) -> float | int:
     return int(m) if float(m).is_integer() else float(m)
 
 
+def _effective_wall(cell: dict):
+    """Productive wall for a cell: elapsed minus any session-recovery pause.
+
+    Uses cell.json's `wall_effective_seconds` when present, else derives it
+    from `wall_seconds - paused_seconds`. Old cells (no pause fields) fall back
+    to raw `wall_seconds`, so comparisons stay backward-compatible.
+    """
+    wall = cell.get("wall_seconds")
+    if wall is None:
+        return None
+    eff = cell.get("wall_effective_seconds")
+    if eff is not None:
+        try:
+            return max(0, int(eff))
+        except (TypeError, ValueError):
+            pass
+    try:
+        paused = int(cell.get("paused_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        paused = 0
+    try:
+        return max(0, int(wall) - paused)
+    except (TypeError, ValueError):
+        return wall
+
+
 def _tokens_for_cell(cell: dict) -> dict:
     """Return a normalized token row for one aggregated benchmark cell."""
     metrics = cell.get("metrics") or {}
@@ -2135,7 +2161,11 @@ def _tokens_for_cell(cell: dict) -> dict:
         "experiment": cell.get("experiment", ""),
         "cell": cell.get("cell"),
         "status": cell.get("status", "unknown"),
-        "wall_seconds": int(cell.get("wall_seconds") or 0),
+        # `wall_seconds` here is productive wall (session-recovery pause excluded)
+        # so token/throughput rows compare investigation time, not idle waiting.
+        # `wall_elapsed_seconds` keeps the raw wall for reference.
+        "wall_seconds": int(_effective_wall(cell) or 0),
+        "wall_elapsed_seconds": int(cell.get("wall_seconds") or 0),
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input,
         "cache_creation_tokens": cache_creation,
@@ -2242,6 +2272,8 @@ def aggregate(bench_dir: Path) -> dict:
             "status": cell.get("status", "unknown"),
             "run_quality": cell.get("run_quality", "clean"),
             "wall_seconds": cell.get("wall_seconds"),
+            "paused_seconds": cell.get("paused_seconds", 0) or 0,
+            "wall_effective_seconds": _effective_wall(cell),
             "metrics": metrics,
         }
         by_condition.setdefault(cond, []).append(merged)
@@ -2337,7 +2369,10 @@ def aggregate(bench_dir: Path) -> dict:
         model_refusals = [
             c["metrics"].get("model_refusals", 0) for c in done
         ]
-        walls = [c["wall_seconds"] for c in done if c.get("wall_seconds")]
+        # Productive wall (session-recovery pause excluded) so the median wall
+        # column reflects investigation time, not idle waiting on a reset.
+        walls = [c["wall_effective_seconds"] for c in done
+                 if c.get("wall_effective_seconds")]
         token_rows = [_tokens_for_cell(c) for c in done]
         token_usage.extend(token_rows)
         cb = crash_by_cond.get(cond, {})
@@ -3639,9 +3674,10 @@ def crosstab(bench_root: Path) -> str:
     lines.append("**Effort.**")
     lines.append("")
     lines.append(
-        "- **Wall (h)** — median wall-clock hours for completed replicates. "
-        "Harness cells normally consume the configured time budget; direct "
-        "cells may end early when the model stops."
+        "- **Wall (h)** — median productive wall-clock hours for completed "
+        "replicates (time spent paused for a provider session-recovery reset is "
+        "excluded). Harness cells normally consume the configured time budget; "
+        "direct cells may end early when the model stops."
     )
     lines.append(
         "- **Replicates** — `done/total`. A `(Nr)` suffix means N done replicates "

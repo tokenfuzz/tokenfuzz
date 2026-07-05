@@ -543,6 +543,7 @@ p6_write_cell_json() {
 import json, os, sys
 path, cond, rep, exp, rd, wall, status = sys.argv[1:8]
 requested_agents = sys.argv[8] if len(sys.argv) > 8 else ""
+paused_arg = sys.argv[9] if len(sys.argv) > 9 else "0"
 cell_dir = os.path.dirname(path)
 run_quality = "clean"
 rq_path = os.path.join(cell_dir, ".run-quality")
@@ -564,6 +565,14 @@ out = {
     "status": status,
     "run_quality": run_quality,
 }
+try:
+    paused_seconds = max(0, int(paused_arg))
+except (TypeError, ValueError):
+    paused_seconds = 0
+# wall_seconds stays raw elapsed; effective wall subtracts provider-recovery
+# pause so downstream throughput comparisons use productive time only.
+out["paused_seconds"] = paused_seconds
+out["wall_effective_seconds"] = max(0, int(wall) - paused_seconds)
 def _ri(s):
     s = (s or "").strip()
     if not s:

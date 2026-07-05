@@ -847,8 +847,15 @@ def _cmd_append_guard_card(args: argparse.Namespace) -> int:
 
 # ── provider-reset-at / codex-usage-reset-at ────────────────────────
 
-_USAGE_TIME_PATTERNS = [
+# Absolute clock-time reset forms (hour[:minute] am/pm), tried before the
+# relative-duration forms. Codex says "try again at 9:01 AM"; Claude's session
+# cap says "resets 9:40am" (requires minutes, so a bare "resets 9" duration
+# form is not mistaken for a clock time).
+_USAGE_CLOCK_PATTERNS = [
     r"try again at\s+([0-9]{1,2})(?::([0-9]{2}))?\s*([AaPp]\.?[Mm]\.?)?",
+    r"reset(?:s|ting)?(?:\s+(?:at|around))?\s+([0-9]{1,2}):([0-9]{2})\s*([AaPp]\.?[Mm]\.?)?",
+]
+_USAGE_DURATION_PATTERNS = [
     r"reset(?:s|ting)?(?: after| in)?\s+([0-9]+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hour|hours)\b",
     r"retry after\s+([0-9]+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hour|hours)\b",
 ]
@@ -871,25 +878,26 @@ def _cmd_provider_reset(args: argparse.Namespace) -> int:
             return 1
     else:
         now = _dt.datetime.now()
-    for m in re.finditer(_USAGE_TIME_PATTERNS[0], text, re.IGNORECASE):
-        hour = int(m.group(1))
-        minute = int(m.group(2) or "0")
-        ampm = (m.group(3) or "").lower().replace(".", "")
-        if ampm == "pm" and hour != 12:
-            hour += 12
-        elif ampm == "am" and hour == 12:
-            hour = 0
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            continue
-        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if candidate <= now:
-            candidate += _dt.timedelta(days=1)
-            if (candidate - now).total_seconds() > _CODEX_CLOCK_ROLLOVER_MAX_SECS:
+    for pat in _USAGE_CLOCK_PATTERNS:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            hour = int(m.group(1))
+            minute = int(m.group(2) or "0")
+            ampm = (m.group(3) or "").lower().replace(".", "")
+            if ampm == "pm" and hour != 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
                 continue
-        print(int(time.mktime(candidate.timetuple())))
-        return 0
+            candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if candidate <= now:
+                candidate += _dt.timedelta(days=1)
+                if (candidate - now).total_seconds() > _CODEX_CLOCK_ROLLOVER_MAX_SECS:
+                    continue
+            print(int(time.mktime(candidate.timetuple())))
+            return 0
 
-    for pat in _USAGE_TIME_PATTERNS[1:]:
+    for pat in _USAGE_DURATION_PATTERNS:
         m = re.search(pat, text, re.IGNORECASE)
         if not m:
             continue

@@ -72,6 +72,9 @@ eval "$(audit_extract_functions \
   log_has_rate_limit_rejection \
   extract_raw_status \
   handle_rate_limit_backoff \
+  session_recovery_pause \
+  record_session_pause \
+  session_paused_path \
   codex_raw_has_completed_turn \
   codex_raw_has_failed_turn \
   gemini_raw_has_success_result \
@@ -1258,6 +1261,58 @@ EOF
     "sustained halt: call sites capture the backoff return code set-e-safely"
   assert_file_contains "$SCRIPT_ROOT/bin/audit" 'MAX_RATE_LIMIT_BACKOFFS="\$\{MAX_RATE_LIMIT_BACKOFFS:-6\}"' \
     "sustained halt: consecutive-backoff cap is configurable"
+
+  # ═════════════════════════════════════════════════════════════
+  # Session-recovery pause: an account/session usage limit (any backend — this
+  # subshell uses codex to prove it is not Claude-specific) waits out the reset
+  # window (excluded from the productive budget) instead of the short backoff,
+  # does NOT count as an unhealthy-backend streak, and stops as
+  # backend-unavailable once the cumulative pause cap is spent.
+  (
+    INDEX=/dev/null
+    LOGDIR="$TEST_TMPDIR"
+    ACTIVE_BACKEND=codex
+    SESSION_PAUSE_CHUNK=7            # re-probe step; sleep is stubbed out below
+    SESSION_PAUSE_MAX_TOTAL=100
+    SESSION_PAUSED_TOTAL=0
+    RATE_LIMIT_BACKOFF_STREAK=5
+    sleep() { :; }
+    log() { :; }
+    fmt_secs() { printf '%ss' "$1"; }
+    audit_format_epoch_local() { printf 'sometime'; }
+    mark_run_quality() { :; }
+    mark_backend_unavailable() { echo UNAVAIL > "$TEST_TMPDIR/sp_unavail"; }
+    clear_rate_limit_cooldown() { :; }
+    persist_rate_limit_cooldown() { :; }
+    provider_issue_for_timestamp() { echo capacity_limited; }
+    # Unknown reset → one 7s chunk of pause (sleep stubbed), streak reset, rc 0.
+    detect_rate_limit() { echo unknown; }
+    rc=0; handle_rate_limit_backoff ts1 || rc=$?
+    [ "$rc" -eq 0 ] && [ "$RATE_LIMIT_BACKOFF_STREAK" -eq 0 ] \
+      && echo "PAUSE_OK paused=$SESSION_PAUSED_TOTAL" \
+      || echo "PAUSE_BAD rc=$rc streak=$RATE_LIMIT_BACKOFF_STREAK"
+    # Cumulative cap spent → stops as backend-unavailable.
+    SESSION_PAUSED_TOTAL=100
+    rc=0; session_recovery_pause unknown || rc=$?
+    [ "$rc" -eq 2 ] && [ -f "$TEST_TMPDIR/sp_unavail" ] \
+      && echo "BUDGET_HALT" || echo "BUDGET_BAD rc=$rc"
+  ) > "$TEST_TMPDIR/sp.out" 2>/dev/null
+  assert_match 'PAUSE_OK paused=7' "$(cat "$TEST_TMPDIR/sp.out")" \
+    "session pause: capacity limit pauses, resets the backoff streak, returns 0 (continue)"
+  assert_match 'BUDGET_HALT' "$(cat "$TEST_TMPDIR/sp.out")" \
+    "session pause: cumulative pause cap spent returns 2 (backend-unavailable)"
+  assert_file_contains "$SCRIPT_ROOT/bin/audit" 'Press Ctrl\+C to stop waiting' \
+    "session pause: unknown-reset pause tells the user how to stop waiting"
+
+  # Productive-wall deadline excludes paused time and is wired at the loop top.
+  assert_file_contains "$SCRIPT_ROOT/bin/audit" '_wall_now - RUN_START_EPOCH - SESSION_PAUSED_TOTAL' \
+    "session pause: productive wall deadline subtracts paused time"
+  # bin/benchmark always hands the cell its productive budget and widens the
+  # outer wall timeout by the pause backstop (Finding 1: no opt-out overrun).
+  assert_file_contains "$SCRIPT_ROOT/bin/benchmark" 'AUDIT_WALL_BUDGET_SECS=\$BUDGET_WALL' \
+    "session pause: benchmark passes the per-cell productive budget to bin/audit"
+  assert_file_contains "$SCRIPT_ROOT/bin/benchmark" 'BUDGET_WALL \+ SESSION_PAUSE_BACKSTOP' \
+    "session pause: benchmark widens the outer wall timeout by the pause backstop"
 
   # ═════════════════════════════════════════════════════════════
   # 7b. extract_usage_field — agy (gemini) plain-text estimator

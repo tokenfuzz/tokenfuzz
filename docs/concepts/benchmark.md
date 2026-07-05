@@ -315,6 +315,11 @@ run cleanly, so half-written artifacts are never folded into the
 result. `--replicates` is the desired total, so you can raise it during
 resume to add more cells.
 
+A mid-run account/session usage limit (any backend) no longer ends a cell: the
+harness pauses it until the backend's reset — that wait is excluded from the
+cell's productive budget and from the reported `Wall (h)` — and marks it
+provider-limited only if the backend has still not recovered after 6h.
+
 ## Regenerating results after code changes
 
 When you change deterministic post-processing, the cells on disk can

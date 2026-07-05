@@ -2987,16 +2987,6 @@ fi
 if ! [[ "$RATE_LIMIT_MAX_BACKOFF" =~ ^[0-9]+$ ]] || [ "$RATE_LIMIT_MAX_BACKOFF" -lt 1 ]; then
   RATE_LIMIT_MAX_BACKOFF=1800
 fi
-# When a capacity/account limit's reset is further away than the backoff cap,
-# stop the audit immediately as provider-limited instead of sleeping the cap and
-# retrying. Default off: a standalone audit has no deadline and should keep
-# waiting so a recoverable window (e.g. a 1-hour quota reset) resumes the
-# session. bin/benchmark sets this to 1 because a cell's wall budget is far
-# shorter than the sustained-streak halt (MAX_RATE_LIMIT_BACKOFFS × cap), so
-# without an early stop the cell is SIGTERM'd mid-backoff and mis-recorded as a
-# clean done instead of provider-limited.
-RATE_LIMIT_CAPACITY_HARD_STOP="${RATE_LIMIT_CAPACITY_HARD_STOP:-0}"
-[ "$RATE_LIMIT_CAPACITY_HARD_STOP" = "1" ] || RATE_LIMIT_CAPACITY_HARD_STOP=0
 # After this many *consecutive* iterations whose only outcome was a
 # rate-limit / overload backoff (the whole pool was rejected, no forward
 # progress), stop with a distinct BACKEND_UNAVAILABLE reason instead of
@@ -3010,6 +3000,36 @@ if ! [[ "$MAX_RATE_LIMIT_BACKOFFS" =~ ^[0-9]+$ ]]; then
   MAX_RATE_LIMIT_BACKOFFS=6
 fi
 RATE_LIMIT_BACKOFF_STREAK=0
+
+# ── Session-recovery pause ─────────────────────────────────────────────
+# Backend-agnostic. When any backend reports an account/session usage limit
+# (Claude session cap, Codex usage limit, Gemini quota, or a bare 429), wait out
+# the reset window instead of the short RATE_LIMIT_MAX_BACKOFF cap, so a long
+# reset resumes the run rather than losing it. The wait is recorded and excluded
+# from the productive wall budget, and pausing before the next launch avoids a
+# storm of parallel requests retrying into the same limit. When no reset time is
+# reported, wait 30 min and re-probe; give up after 6h of cumulative wait so a
+# genuinely dead account still stops. Always on — no toggle: waiting out a
+# recoverable reset is strictly better than losing the run.
+SESSION_PAUSE_MAX_TOTAL=21600   # give up after this much cumulative pause (6h)
+SESSION_PAUSE_CHUNK=1800        # re-probe step when no reset time is reported (30m)
+SESSION_PAUSED_TOTAL=0
+RUN_START_EPOCH=0
+# Productive wall budget (seconds); session-recovery pauses are excluded from
+# it. 0 = no cap (standalone). bin/benchmark passes this = per-cell budget so a
+# pause never eats a cell's investigation time. Not a user knob — it is how the
+# benchmark hands the budget to the cell; stamped against RUN_START_EPOCH.
+AUDIT_WALL_BUDGET_SECS="${AUDIT_WALL_BUDGET_SECS:-0}"
+if ! [[ "$AUDIT_WALL_BUDGET_SECS" =~ ^[0-9]+$ ]]; then AUDIT_WALL_BUDGET_SECS=0; fi
+
+session_paused_path() { printf '%s/.paused_secs' "$LOGDIR"; }
+
+record_session_pause() {
+  local secs="$1"
+  case "$secs" in ''|*[!0-9]*) return 0 ;; esac
+  SESSION_PAUSED_TOTAL=$((SESSION_PAUSED_TOTAL + secs))
+  printf '%s\n' "$SESSION_PAUSED_TOTAL" > "$(session_paused_path)" 2>/dev/null || true
+}
 
 run_quality_path() {
   printf '%s/.run-quality' "$LOGDIR"
@@ -3186,6 +3206,19 @@ handle_rate_limit_backoff() {
   local now wait_secs reset_human
   now=$(date +%s)
 
+  # Account/session usage limit (e.g. a multi-hour session cap): wait out the
+  # whole reset window instead of the short transient backoff, and exclude the
+  # wait from the productive budget. A recoverable pause is not an unhealthy-
+  # backend streak, so it neither counts toward nor is capped by
+  # MAX_RATE_LIMIT_BACKOFFS.
+  if [ "$provider_issue" = "capacity_limited" ]; then
+    local sp_rc=0
+    session_recovery_pause "$reset_at" || sp_rc=$?
+    [ "$sp_rc" -eq 2 ] && return 2
+    RATE_LIMIT_BACKOFF_STREAK=0
+    return 0
+  fi
+
   if [ "$reset_at" = "unknown" ]; then
     wait_secs="$RATE_LIMIT_DEFAULT_BACKOFF"
     reset_human="unknown (using ${wait_secs}s default backoff)"
@@ -3199,12 +3232,10 @@ handle_rate_limit_backoff() {
     reset_human=$(audit_format_epoch_local "$reset_at" '%H:%M:%S %Z' 2>/dev/null || echo "unknown")
     reset_human="${reset_human} (+30s buffer)"
   fi
+  # Only transient rejections reach here — capacity/usage limits are handled by
+  # the session-recovery pause above. A far-off transient reset just sleeps the
+  # cap and retries sooner.
   if [ "$wait_secs" -gt "$RATE_LIMIT_MAX_BACKOFF" ]; then
-    if [ "$provider_issue" = "capacity_limited" ] && [ "$RATE_LIMIT_CAPACITY_HARD_STOP" = "1" ]; then
-      log "BACKEND_UNAVAILABLE: the ${ACTIVE_BACKEND:-LLM} API is capacity-limited until ${reset_human}, which is $(fmt_secs "$wait_secs") away and exceeds RATE_LIMIT_MAX_BACKOFF=$(fmt_secs "$RATE_LIMIT_MAX_BACKOFF") — stopping this audit as provider-limited instead of sleeping out the benchmark budget." | tee -a "$INDEX"
-      mark_backend_unavailable
-      return 2
-    fi
     log "RATE_LIMIT: the API reset is $(fmt_secs "$wait_secs") away, which exceeds the configured backoff cap RATE_LIMIT_MAX_BACKOFF=$(fmt_secs "$RATE_LIMIT_MAX_BACKOFF") — sleeping the cap instead and will retry sooner." | tee -a "$INDEX"
     wait_secs="$RATE_LIMIT_MAX_BACKOFF"
   fi
@@ -3220,6 +3251,39 @@ handle_rate_limit_backoff() {
     mark_backend_unavailable
     return 2
   fi
+  return 0
+}
+
+# Wait out an account/session usage-limit reset. Returns 0 when the pause
+# completed (caller relaunches next iteration and re-probes), or 2 when the
+# cumulative pause budget is exhausted (caller stops as backend-unavailable).
+# Known reset → sleep to it once; unknown reset → sleep one 30-min chunk and
+# let the loop re-probe. The wait is capped by the remaining pause budget.
+session_recovery_pause() {
+  local reset_at="$1" now wait remaining human
+  now=$(date +%s)
+  remaining=$(( SESSION_PAUSE_MAX_TOTAL - SESSION_PAUSED_TOTAL ))
+  if [ "$remaining" -le 0 ]; then
+    log "BACKEND_UNAVAILABLE: the ${ACTIVE_BACKEND:-LLM} backend is still usage-limited after $(fmt_secs "$SESSION_PAUSED_TOTAL") of session-recovery pause (cap $(fmt_secs "$SESSION_PAUSE_MAX_TOTAL")) — stopping as provider-limited." | tee -a "$INDEX"
+    mark_backend_unavailable
+    return 2
+  fi
+  if [ "$reset_at" = "unknown" ] || ! [[ "$reset_at" =~ ^[0-9]+$ ]] || [ "$reset_at" -le "$now" ]; then
+    wait="$SESSION_PAUSE_CHUNK"
+    human="no reset time was reported — re-probing after $(fmt_secs "$wait")"
+  else
+    wait=$(( reset_at - now + 30 ))
+    human="the reported reset around $(audit_format_epoch_local "$reset_at" '%H:%M:%S %Z' 2>/dev/null || echo "$reset_at")"
+  fi
+  [ "$wait" -gt "$remaining" ] && wait="$remaining"
+  [ "$wait" -lt 1 ] && wait=1
+  mark_run_quality provider_recovered
+  log "SESSION_PAUSE: the ${ACTIVE_BACKEND:-LLM} backend's account/session usage limit is exhausted — pausing all agents for $(fmt_secs "$wait") (${human}). Paused time is excluded from the productive budget (paused so far: $(fmt_secs "$SESSION_PAUSED_TOTAL")). Press Ctrl+C to stop waiting and end the run." | tee -a "$INDEX"
+  sleep "$wait"
+  record_session_pause "$wait"
+  # The short cooldown persist_rate_limit_cooldown left is now stale — clear it
+  # so the loop-top cooldown sleep does not double up on this pause.
+  clear_rate_limit_cooldown
   return 0
 }
 
@@ -7193,10 +7257,23 @@ trap 'audit_signal_trap INT 130' INT
 trap 'audit_signal_trap TERM 143' TERM
 trap 'audit_exit_trap "$LINENO" "$?"' EXIT
 
+RUN_START_EPOCH=$(date +%s)
 while true; do
   if [ "$MAX_ITERATIONS" -gt 0 ] && [ "$total_iterations" -ge "$MAX_ITERATIONS" ]; then
     log "Reached the configured iteration limit (--max-iterations=${MAX_ITERATIONS}); stopping the audit cleanly. Restart bin/audit without that limit to continue the campaign."
     break
+  fi
+
+  # Productive wall budget: stop cleanly once investigation time (elapsed minus
+  # session-recovery pauses) reaches the budget, so a long provider pause does
+  # not consume the run's real working time. 0 disables (standalone default).
+  if [ "$AUDIT_WALL_BUDGET_SECS" -gt 0 ]; then
+    _wall_now=$(date +%s)
+    _wall_prod=$(( _wall_now - RUN_START_EPOCH - SESSION_PAUSED_TOTAL ))
+    if [ "$_wall_prod" -ge "$AUDIT_WALL_BUDGET_SECS" ]; then
+      log "Reached the productive wall budget (AUDIT_WALL_BUDGET_SECS=$(fmt_secs "$AUDIT_WALL_BUDGET_SECS")$( [ "$SESSION_PAUSED_TOTAL" -gt 0 ] && printf '; %s of session-recovery pause excluded' "$(fmt_secs "$SESSION_PAUSED_TOTAL")")) — stopping the audit cleanly." | tee -a "$INDEX"
+      break
+    fi
   fi
 
   select_ensemble_backend_for_iteration

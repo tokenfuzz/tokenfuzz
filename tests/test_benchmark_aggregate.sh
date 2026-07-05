@@ -236,6 +236,31 @@ cat > "$tbd/cells/model-direct-r1/metrics.json" <<'JSON'
 JSON
 tled="$work/tokens-ledger.md"
 
+# T18-pause fixture: a cell that paused for a provider session-recovery reset
+# reports PRODUCTIVE wall (pause excluded), not raw elapsed. r1 paused 2000s of
+# 5000s elapsed (effective 3000); r2 is an old-style cell with no pause fields,
+# so its effective wall falls back to raw wall_seconds (3000).
+pausbd="$work/pause-bench"
+mkdir -p "$pausbd/cells/harness-r1" "$pausbd/cells/harness-r2"
+cat > "$pausbd/run.json" <<'JSON'
+{"runid":"pause","target":"t","backend":"claude","replicates":2}
+JSON
+cat > "$pausbd/cells/harness-r1/cell.json" <<'JSON'
+{"condition":"harness","replicate":1,"status":"done","wall_seconds":5000,
+ "paused_seconds":2000,"wall_effective_seconds":3000,
+ "experiment":"bench-pause-harness-r1"}
+JSON
+cat > "$pausbd/cells/harness-r1/metrics.json" <<'JSON'
+{"confirmed_crashes":0,"tokens":{"input_tokens":1,"output_tokens":1}}
+JSON
+cat > "$pausbd/cells/harness-r2/cell.json" <<'JSON'
+{"condition":"harness","replicate":2,"status":"done","wall_seconds":3000,
+ "experiment":"bench-pause-harness-r2"}
+JSON
+cat > "$pausbd/cells/harness-r2/metrics.json" <<'JSON'
+{"confirmed_crashes":0,"tokens":{"input_tokens":1,"output_tokens":1}}
+JSON
+
 # T18p fixture: zero-usage rows render as 'unknown', big counts compact.
 ubd="$work/unknown-tokens-bench"
 mkdir -p "$ubd/cells/harness-r1" "$ubd/cells/harness-r2"
@@ -479,6 +504,7 @@ pid_j4=$!
 # J5 (T18 + T18p): token-usage aggregates and their ledgers.
 ( set +e
   python3 "$PY" aggregate "$tbd" > "$work/tagg.json"
+  python3 "$PY" aggregate "$pausbd" > "$work/pausagg.json"
   python3 "$PY" ledger "$tbd" --ledger "$tled" >/dev/null
   python3 "$PY" aggregate "$ubd" > "$work/uagg.json"
   python3 "$PY" ledger "$ubd" --ledger "$uled" >/dev/null
@@ -822,6 +848,19 @@ assert_eq "3600" \
   "T18i: token_usage rows carry per-cell wall_seconds"
 assert_eq "3600" "$(echo "$th" | jq -r '.wall_median')" \
   "T18j: harness wall_median aggregated"
+
+# T18-pause: aggregation consumes productive wall (session-recovery pause
+# excluded), not raw elapsed — the Finding-2 regression.
+pausagg=$(cat "$work/pausagg.json" 2>/dev/null || true)
+assert_eq "3000" \
+  "$(echo "$pausagg" | jq -r '.token_usage[]|select(.cell=="harness-r1")|.wall_seconds')" \
+  "T18-pause-a: token row wall_seconds is productive (2000s pause excluded)"
+assert_eq "5000" \
+  "$(echo "$pausagg" | jq -r '.token_usage[]|select(.cell=="harness-r1")|.wall_elapsed_seconds')" \
+  "T18-pause-b: token row keeps raw elapsed as wall_elapsed_seconds"
+assert_eq "3000" \
+  "$(echo "$pausagg" | jq -r '.conditions[]|select(.condition=="harness")|.wall_median')" \
+  "T18-pause-c: wall_median uses productive wall (pause excluded from comparisons)"
 assert_file_contains "$tled" 'Wall \(h\)' \
   "T18k: ledger Token usage / Scoreboard expose a Wall column"
 assert_file_contains "$tled" '1\.00h' \

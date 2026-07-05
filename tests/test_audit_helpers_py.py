@@ -681,6 +681,19 @@ try:
 finally:
     os.unlink(p1_rollover)
 
+# Claude session-limit prose ("resets 9:40am") parses as an absolute clock time.
+claude_now = int(time.mktime(dt.datetime(2026, 7, 4, 8, 0, 0).timetuple()))
+with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+    p_claude = f.name
+    f.write('{"type":"agent_message","message":"You\'ve hit your session limit \\u00b7 resets 9:40am"}\n')
+try:
+    proc = run(["provider-reset-at", p_claude, "--now-epoch", str(claude_now)])
+    expected = int(time.mktime(dt.datetime(2026, 7, 4, 9, 40, 0).timetuple()))
+    assert_eq(0, proc.returncode, "claude 'resets 9:40am' clock reset rc=0")
+    assert_eq(str(expected), proc.stdout.strip(), "claude 'resets 9:40am' → 9:40 same day epoch")
+finally:
+    os.unlink(p_claude)
+
 with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
     p2 = f.name
     f.write("rate limited, retry after 15 minutes\n")
