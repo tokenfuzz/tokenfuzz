@@ -1610,6 +1610,7 @@ build_compact_fresh_prompt() {
     --var "role=$role" \
     --var "mode=$mode" \
     --var "safety_framing=$SAFETY_FRAMING_CACHED" \
+    --var "find_first_directive=$(build_find_first_directive)" \
     --var "guide_section=$(build_guide_section deep)" \
     --var "state_strategy_arg=$(state_strategy_arg "$agent_num")" \
     --var "scratch_dir=$(scratch_dir_path "$agent_num")" \

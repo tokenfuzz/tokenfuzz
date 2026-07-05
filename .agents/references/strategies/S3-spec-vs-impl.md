@@ -6,7 +6,7 @@ in context simultaneously and reason about divergence.**
 Covers two related bug classes: (1) implementation deviates from spec, and (2)
 optimized fast-paths skip validation that the slow-path enforces.
 
-**Review gate:** after 5 spec requirements or fast-path pairs checked and all are correct, rotate strategy. Do not stop while a mismatch still needs a testcase or differential probe.
+**Review gate:** after 5 spec requirements or fast-path pairs checked and all are correct, rotate strategy. Do not stop while a mismatch still needs a testcase or differential probe. A source-proven, security-relevant mismatch is already a finding: file (or augment) its `findings/FIND-*` first, then pursue the testcase/differential probe (see "FILE FIND FIRST" in session-rules.md).
 
 ## Part 1: Spec Compliance Audit
 

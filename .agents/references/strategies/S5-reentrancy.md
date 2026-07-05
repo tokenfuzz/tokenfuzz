@@ -171,7 +171,10 @@ each step's role:
 ```
 
 This commenting is part of the technique — the chain is the bug. A reviewer
-can audit the chain even before the testcase runs.
+can audit the chain even before the testcase runs. Because the chain is the
+bug, file (or augment) its `findings/FIND-*` as soon as the chain is
+source-proven and security-relevant — before running the testcase (see
+"FILE FIND FIRST" in session-rules.md).
 
 ### Step 4 — Iterate when the chain breaks
 

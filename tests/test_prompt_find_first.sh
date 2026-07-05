@@ -267,5 +267,32 @@ assert_file_contains "$rules" "sanitizer reproducer, runnable testcase, or web-r
 assert_file_contains "$rules" "A reproducer / testcase / ASan output is a bonus, not a requirement" \
   "session-rules: reproducer-is-a-bonus line preserved"
 
+# ═══════════════════════════════════════════════════════════════
+# 12. Compact-fresh prompt embeds the directive (post-compaction)
+# ═══════════════════════════════════════════════════════════════
+#
+# compact_fresh is the continuation prompt after a context compaction —
+# precisely the moment an un-filed source finding is most at risk of
+# being lost. It must carry the FIND-first directive, and the directive
+# must precede the "write one testcase / bin/probe" FIRST ACTION so the
+# agent files the FIND before entering the reproducer loop.
+
+IS_BROWSER_TARGET=0
+result=$(build_compact_fresh_prompt 1)
+assert_match "COMPACT FRESH START.*Agent 1.*role=reproduce" "$result" \
+  "compact fresh: header"
+assert_match "FILE FIND FIRST, REPRODUCE SECOND" "$result" \
+  "compact fresh: directive embedded"
+assert_match "findings/FIND-NNN-<slug>/report.md" "$result" \
+  "compact fresh: FIND path present"
+
+dir_line=$(printf '%s\n' "$result" | grep -n "FILE FIND FIRST, REPRODUCE SECOND" | head -1 | cut -d: -f1)
+action_line=$(printf '%s\n' "$result" | grep -n "^## FIRST ACTION" | head -1 | cut -d: -f1)
+if [ -n "$dir_line" ] && [ -n "$action_line" ] && [ "$dir_line" -lt "$action_line" ]; then
+  pass "compact fresh: directive precedes FIRST ACTION reproducer step"
+else
+  fail "compact fresh: directive must appear before FIRST ACTION (directive=$dir_line action=$action_line)"
+fi
+
 teardown_test_env
 summary

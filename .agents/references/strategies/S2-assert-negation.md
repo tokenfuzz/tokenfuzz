@@ -103,3 +103,7 @@ an explicit assert:
 2. For EACH: can untrusted input make the assumption false?
 3. If yes → in production, code continues with violated invariant → write testcase
 4. Prioritize: bounds > size > type > state > null
+
+Once step 3 source-proves a security-relevant defect, file (or augment) its
+`findings/FIND-*` before building the reproducer — the testcase is confirmation,
+not a precondition (see "FILE FIND FIRST" in session-rules.md).

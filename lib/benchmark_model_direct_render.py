@@ -132,7 +132,8 @@ def _build_crash_objective(present: bool, build_dir: Path,
             "Your **primary**\n"
             "deliverable is at least one CRASH on disk — a real\n"
             "`WARNING: DATA RACE` trace from a real input or driver.\n"
-            "FINDINGs are valuable but secondary; do not finish the session\n"
+            "File every source-proven FINDING as you go — findings stay\n"
+            "first-class. But do not finish the session\n"
             f"with an empty `{output_dir}/crashes/` if a candidate looks\n"
             "reachable through the configured runner.\n"
         )
@@ -141,8 +142,9 @@ def _build_crash_objective(present: bool, build_dir: Path,
             f"A sanitizer build exists at `{build_dir}/` ({label}). Your "
             "**primary**\n"
             "deliverable is at least one CRASH on disk — a real sanitizer\n"
-            "trace from a real input or driver. FINDINGs are valuable but\n"
-            "secondary; do not finish the session with an empty\n"
+            "trace from a real input or driver. File every source-proven\n"
+            "FINDING as you go — findings stay first-class. But do not\n"
+            "finish the session with an empty\n"
             f"`{output_dir}/crashes/` if a candidate looks reachable from a\n"
             "sanitizer-instrumented binary.\n"
         )
