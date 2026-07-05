@@ -19,14 +19,15 @@ assert_match "baz" "$output" "small: all lines present"
 assert_not_match "truncated" "$output" "small: no truncation footer when under cap"
 
 # ═══════════════════════════════════════════════════════════════
-# 2. Line-range read clamped at default 200 lines
+# 2. Line cap: off by default (byte cap governs); explicit CAP_LINES=N fires it
 # ═══════════════════════════════════════════════════════════════
 
 seq 1 500 > "$TEST_TMPDIR/large.txt"
+# The line range passes through whole; the byte cap (not a line cap) bounds size.
 output=$("$SED_WRAPPER" -n '1,500p' "$TEST_TMPDIR/large.txt" 2>/dev/null)
-assert_match "truncated to 200" "$output" "large line-range: truncation footer shown"
 line_count=$(printf '%s\n' "$output" | wc -l | tr -d ' ')
-assert_eq "201" "$line_count" "large line-range: 200 data lines + 1 footer"
+assert_eq "500" "$line_count" "line-range: full range passes through (no line cap)"
+assert_not_match "truncated" "$output" "line-range: no line-cap footer"
 
 # ═══════════════════════════════════════════════════════════════
 # 3. Byte cap defends against single huge match (e.g. minified file)
@@ -62,7 +63,8 @@ assert_not_match "truncated" "$output" "escape: CAP_*=0 suppresses footer"
 # ═══════════════════════════════════════════════════════════════
 
 stream_output=$(seq 1 500 | "$SED_WRAPPER" -n 'p' 2>/dev/null)
-assert_match "truncated to 200" "$stream_output" "stream: line cap fires on stdin pipeline"
+stream_lines=$(printf '%s\n' "$stream_output" | wc -l | tr -d ' ')
+assert_eq "500" "$stream_lines" "stream: stdin pipeline passes through (byte cap governs size)"
 
 # ═══════════════════════════════════════════════════════════════
 # 6. In-place edit (-i) preserves file mutation, emits no stdout to cap

@@ -28,44 +28,30 @@ assert_eq "$expected" "$output" "range: FILE:10-15 returns exactly those lines"
 # Footer does not fire when range ≤ PEEK_MAX_LINES.
 assert_not_match 'clamped' "$output" "range: no footer when range fits"
 
-# FILE:START-END exceeding PEEK_MAX_LINES clamps to first PEEK_MAX_LINES.
-output=$(PEEK_MAX_LINES=10 "$PEEK" "$FIX:1-500")
+# Default (PEEK_MAX_LINES=0): a large explicit range is honored, not clamped;
+# the byte cap is the only size guard.
+output=$("$PEEK" "$FIX:1-500")
 data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "10" "$data_lines" "range: PEEK_MAX_LINES=10 clamps at 10 data lines"
-assert_match 'clamped to 10 lines' "$output" "range: footer reports cap"
-assert_match 'requested 500' "$output" "range: footer reports requested span"
-assert_match 'PEEK_MAX_LINES=N' "$output" "range: footer mentions env override"
-# Helper uses `grep -qE`, which treats a leading `--` as end-of-options.
-# Anchor the match on the right-side substring to avoid that quirk.
-assert_match 'no-cap to widen' "$output" "range: footer mentions --no-cap"
+assert_eq "500" "$data_lines" "range: default honors full range (line clamp off)"
+assert_not_match 'clamped' "$output" "range: no clamp footer by default"
 
-# Clamp keeps the START anchor (head of requested range, not tail).
-output=$(PEEK_MAX_LINES=5 "$PEEK" "$FIX:50-100")
-first_line=$(printf '%s\n' "$output" | grep '^line' | head -1)
-last_data=$(printf '%s\n' "$output" | grep '^line' | tail -1)
-assert_eq "line 50" "$first_line" "range clamp: keeps START anchor"
-assert_eq "line 54" "$last_data" "range clamp: drops tail past clamp"
-
-# --no-cap returns the full range even when it exceeds PEEK_MAX_LINES.
-output=$(PEEK_MAX_LINES=10 "$PEEK" --no-cap "$FIX:1-500")
+# --no-cap returns the full range and disables the byte cap.
+output=$("$PEEK" --no-cap "$FIX:1-500")
 data_lines=$(printf '%s\n' "$output" | grep -c '^line')
 assert_eq "500" "$data_lines" "range --no-cap: returns full range"
 assert_not_match 'clamped' "$output" "range --no-cap: suppresses footer"
 
-# Single-int form FILE:START → returns up to PEEK_MAX_LINES from START.
-output=$(PEEK_MAX_LINES=20 "$PEEK" "$FIX:100")
+# Single-int form FILE:START → returns START..end of file.
+output=$("$PEEK" "$FIX:100")
 data_lines=$(printf '%s\n' "$output" | grep -c '^line')
 first_line=$(printf '%s\n' "$output" | grep '^line' | head -1)
-assert_eq "20" "$data_lines" "range FILE:N: defaults to PEEK_MAX_LINES rows"
+assert_eq "401" "$data_lines" "range FILE:N: shows START..end of file"
 assert_eq "line 100" "$first_line" "range FILE:N: starts at requested line"
-# No footer for the single-int form — by construction we never request more
-# than PEEK_MAX_LINES, so clamping is a no-op.
-assert_not_match 'clamped' "$output" "range FILE:N: no footer (request equals cap)"
 
-# Bare FILE form → first PEEK_MAX_LINES lines (or whole file if smaller).
-output=$(PEEK_MAX_LINES=12 "$PEEK" "$FIX")
+# Bare FILE form → whole file (byte-capped).
+output=$("$PEEK" "$FIX")
 data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "12" "$data_lines" "range bare-file: emits PEEK_MAX_LINES lines"
+assert_eq "500" "$data_lines" "range bare-file: shows whole file"
 first_line=$(printf '%s\n' "$output" | head -1)
 assert_eq "line 1" "$first_line" "range bare-file: starts at line 1"
 
@@ -114,24 +100,6 @@ output=$("$PEEK" "$FIX:0-10" 2>&1) && rc=$? || rc=$?
 assert_eq "2" "$rc" "range: start<1 exits 2"
 unset rc
 
-# PEEK_MAX_LINES=0 means "no cap" (parity with rg-safe RG_CAP=0). Without
-# the no-cap translation, every range path collapses to empty/negative.
-output=$(PEEK_MAX_LINES=0 "$PEEK" "$FIX:1-500" 2>&1)
-data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "500" "$data_lines" "range PEEK_MAX_LINES=0: returns full requested range"
-assert_not_match 'clamped' "$output" "range PEEK_MAX_LINES=0: no clamp footer"
-
-# PEEK_MAX_LINES=0 in bare-file mode reads the whole file, not zero lines.
-output=$(PEEK_MAX_LINES=0 "$PEEK" "$FIX" 2>&1)
-data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "500" "$data_lines" "range PEEK_MAX_LINES=0 bare-file: emits full file"
-
-# PEEK_MAX_LINES=0 with FILE:N reads from N to EOF.
-output=$(PEEK_MAX_LINES=0 "$PEEK" "$FIX:200" 2>&1)
-data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "301" "$data_lines" "range PEEK_MAX_LINES=0 FILE:N: emits from N to EOF"
-first_line=$(printf '%s\n' "$output" | grep '^line' | head -1)
-assert_eq "line 200" "$first_line" "range PEEK_MAX_LINES=0 FILE:N: starts at requested line"
 
 # ──────────────────────────────────────────────────────────────────────
 # Grep mode (-A / -B / -C clamping)
@@ -254,13 +222,12 @@ output=$(PATH="$WRAPPED_PATH" "$PEEK" --no-cap "$BIG":1-500 2>&1)
 line_count=$(printf '%s\n' "$output" | wc -l | tr -d ' ')
 assert_eq "500" "$line_count" "peek (wrapped PATH): --no-cap returns full 500 lines"
 
-# Default range view still clamps at PEEK_MAX_LINES (200) — the wrapper cap
-# is suppressed, so peek's own clamp is the one in effect.
+# A range under the byte cap passes through whole — peek suppresses the sed
+# wrapper's own cap, so there is no double-cap (no wrapper truncation footer).
 output=$(PATH="$WRAPPED_PATH" "$PEEK" "$BIG":1-500 2>&1)
 data_lines=$(printf '%s\n' "$output" | grep -c '^[0-9]')
-assert_eq "200" "$data_lines" "peek (wrapped PATH): default clamp keeps own 200-line limit"
-assert_match 'clamped to 200 lines' "$output" "peek (wrapped PATH): own footer fires (not wrapper's)"
-assert_not_match 'output truncated to 200' "$output" "peek (wrapped PATH): wrapper footer suppressed"
+assert_eq "500" "$data_lines" "peek (wrapped PATH): full range passes through (no double-cap)"
+assert_not_match 'output truncated' "$output" "peek (wrapped PATH): sed wrapper footer suppressed"
 
 # Grep mode --no-cap with many matches passes full output through.
 MANY="$TEST_TMPDIR/many.txt"
@@ -275,9 +242,8 @@ assert_eq "500" "$match_lines" "peek grep --no-cap (wrapped PATH): all 500 match
 # does. Range mode and grep mode both flow through cap_output_file.
 # ──────────────────────────────────────────────────────────────────────
 
-# A 200-line file at ~1 KB / line → ~200 KB, well over the 50 KB cap. The
-# line cap (PEEK_MAX_LINES=200 by default) won't fire because the request
-# fits the line budget; only the byte cap can save the agent here.
+# A 200-line file at ~1 KB / line → ~200 KB, well over the 50 KB cap. There
+# is no line cap; only the byte cap bounds this.
 LONGLINES="$TEST_TMPDIR/longlines.c"
 python3 -c '
 import sys

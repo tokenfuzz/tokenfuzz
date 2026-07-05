@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit tests for lib/wrappers/rg — output truncation wrapper
+# Unit tests for lib/wrappers/rg — byte-cap output wrapper (line cap removed)
 set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
@@ -18,12 +18,13 @@ output=$("$RG_WRAPPER" "a" "$TEST_TMPDIR/small.txt" 2>/dev/null)
 assert_match "alpha" "$output" "small: passes through"
 assert_match "gamma" "$output" "small: all matching lines present"
 
+# Many short matching lines stay under the byte cap → the full result passes
+# through unmodified (no line cap; the byte cap is the only size guard).
 seq 1 500 | sed 's/$/ match/' > "$TEST_TMPDIR/large.txt"
 output=$("$RG_WRAPPER" "match" "$TEST_TMPDIR/large.txt" 2>/dev/null)
 data_lines=$(printf '%s\n' "$output" | grep -c 'match')
-assert_eq "200" "$data_lines" "large: caps stdout at 200 data lines"
-assert_match "total stdout lines" "$output" "large: stdout truncation footer"
-assert_match "at least 201 total stdout lines" "$output" "large: broad search stops after visible budget"
+assert_eq "500" "$data_lines" "large: full result passes through (no line cap)"
+assert_not_match "clipped" "$output" "large: no cap footer under the byte budget"
 
 output=$("$RG_WRAPPER" --count "match" "$TEST_TMPDIR/large.txt" 2>/dev/null)
 assert_match "500" "$output" "--count flag: count is exact"
@@ -36,28 +37,13 @@ assert_neq 0 "$rc" "stderr: exit code preserved for rg diagnostic"
 assert_eq "" "$(cat "$out")" "stderr: diagnostic not mixed into stdout"
 assert_match "missing.txt" "$(cat "$err")" "stderr: diagnostic preserved on stderr"
 
-many_args=()
-i=1
-while [ "$i" -le 250 ]; do
-  many_args+=("$TEST_TMPDIR/missing-$i.txt")
-  i=$((i + 1))
-done
-rc=0
-"$RG_WRAPPER" "needle" "${many_args[@]}" >"$out" 2>"$err" || rc=$?
-stdout_lines=$(wc -l < "$out" | tr -d ' ')
-stderr_lines=$(wc -l < "$err" | tr -d ' ')
-assert_eq "0" "$stdout_lines" "stderr cap: stdout remains empty"
-assert_eq "201" "$stderr_lines" "stderr cap: 200 diagnostics plus footer"
-assert_match "total stderr lines" "$(tail -1 "$err")" "stderr cap: footer emitted on stderr"
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Byte cap (CAP_BYTES) — defends against single huge match lines that would
-# otherwise slip past the line cap (e.g. when scanning JSON-shaped haystacks).
+# Byte cap (CAP_BYTES) — the sole size guard. Defends against single huge match
+# lines (e.g. JSON-shaped haystacks) and large result sets alike.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# One match line of ~150 KiB. Line count is 1 so the line cap doesn't fire,
-# but the default head+tail byte cap must trim it to roughly 50 KiB and
-# leave a spill marker.
+# One match line of ~150 KiB. The default head+tail byte cap must trim it to
+# roughly 50 KiB and leave a spill marker.
 HUGE="$TEST_TMPDIR/huge_line.txt"
 python3 -c 'import sys; sys.stdout.write("Z" * 150000 + " match\n")' > "$HUGE"
 output=$("$RG_WRAPPER" "match" "$HUGE" 2>/dev/null)
@@ -84,21 +70,19 @@ output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
   || fail "byte cap: CAP_BYTES=0 expected ≥150000 bytes, got ${output_bytes}"
 assert_not_match "clipped" "$output" "byte cap: CAP_BYTES=0 suppresses clip footer"
 
-# Both caps fire together. The line cap applies first (200 lines kept), so
-# we need each surviving line big enough that the cumulative bytes still
-# blow past the default output-cap threshold — 800 chars × 200 lines ≈ 160 KiB.
+# A large multi-line result set is byte-capped by the default head+tail helper.
 COMBO="$TEST_TMPDIR/combo.txt"
 python3 -c '
 for i in range(500):
     print("W" * 800 + f" match {i}")
 ' > "$COMBO"
 output=$("$RG_WRAPPER" "match" "$COMBO" 2>/dev/null)
-assert_match "total stdout lines" "$output" "combined: line-cap footer present"
-assert_match "output_cap: rg-stdout truncated" "$output" "combined: default byte-cap marker present"
+combo_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
+[ "$combo_bytes" -le 56000 ] && pass "byte cap: large result set head+tail capped (got ${combo_bytes})" \
+  || fail "byte cap: large result set should be capped, got ${combo_bytes} bytes"
+assert_match "output_cap: rg-stdout truncated" "$output" "byte cap: default byte-cap marker present"
 
-# Byte clip aligns to last newline (no partial trailing line). Cap must be
-# big enough to fit at least one full line, otherwise no newline boundary
-# exists to align to. ~50-byte lines + 600-byte cap = 10+ full lines kept.
+# Byte clip aligns to last newline (no partial trailing line).
 ALIGN="$TEST_TMPDIR/align.txt"
 python3 -c '
 for i in range(200):
@@ -112,55 +96,40 @@ case "$last_data" in
 esac
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stdin pipeline — `printf | rg PATTERN` with no FILE arg. Wrapper must cap
-# stdout the same way it caps file-mode output. Without this coverage, a
-# regression that broke piped reads would slip through.
+# Stdin pipeline — `printf | rg PATTERN` with no FILE arg passes through and is
+# byte-capped the same as file mode.
 # ─────────────────────────────────────────────────────────────────────────────
 stream_output=$(seq 1 500 | "$RG_WRAPPER" '[0-9]+' 2>/dev/null)
 stream_lines=$(printf '%s\n' "$stream_output" | grep -cE '^[0-9]+$' || true)
-assert_eq "200" "$stream_lines" "stream: stdin pipeline still capped at 200"
-assert_match "total stdout lines" "$stream_output" "stream: stdout cap footer fires"
-assert_match "at least 201 total stdout lines" "$stream_output" "stream: broad stdin search stops after visible budget"
+assert_eq "500" "$stream_lines" "stream: stdin pipeline passes through (byte cap governs size)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Passthrough boundary — a positional arg equal to a passthrough flag (e.g.
-# pattern `--count` after `--`, or filename `-l`) must NOT trigger
-# passthrough. The cap should still fire on huge output. Before the
-# `--`-stop fix, the flag-equality scan walked all positionals and would
-# wrongly bypass capping.
+# Passthrough boundary — a positional arg equal to a passthrough flag (pattern
+# `--count` after `--`) must NOT trigger passthrough, so the byte cap still
+# fires on huge output.
 # ─────────────────────────────────────────────────────────────────────────────
 PASSTHRU_HAYSTACK="$TEST_TMPDIR/passthru.txt"
-i=1
-while [ "$i" -le 500 ]; do
-  printf -- '--count\n' >> "$PASSTHRU_HAYSTACK"
-  i=$((i + 1))
-done
+python3 -c 'import sys; sys.stdout.write(("--count " + "Z"*400 + "\n") * 400)' > "$PASSTHRU_HAYSTACK"
 output=$("$RG_WRAPPER" -- '\-\-count' "$PASSTHRU_HAYSTACK" 2>/dev/null)
-data_lines=$(printf '%s\n' "$output" | grep -cF -- '--count' || true)
-assert_eq "200" "$data_lines" "passthrough boundary: literal '--count' pattern after -- still capped"
-assert_match "total stdout lines" "$output" "passthrough boundary: cap footer fires"
-assert_match "at least 201 total stdout lines" "$output" "passthrough boundary: capped literal search stops early"
+out_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
+[ "$out_bytes" -le 56000 ] && pass "passthrough boundary: literal '--count' pattern after -- still byte-capped" \
+  || fail "passthrough boundary: expected ≤56000 bytes, got ${out_bytes}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-tool bypass — AGENT_WRAPPERS_BYPASS runs the named tool uncapped while
-# leaving the others capped, so an operator can A/B the cap's effect on
-# bug-finding. large.txt has 500 matching lines; capped output keeps 200.
+# leaving the others capped. Distinguish by bytes on the huge single line.
 # ─────────────────────────────────────────────────────────────────────────────
 GREP_WRAPPER="$SCRIPT_ROOT/lib/wrappers/grep"
+bytes_of() { AGENT_WRAPPERS_BYPASS="$1" "$2" match "$HUGE" 2>/dev/null | wc -c | tr -d ' '; }
 
-# matches <bypass-value> <wrapper> -> count of "match" lines surfaced.
-matches() { AGENT_WRAPPERS_BYPASS="$1" "$2" match "$TEST_TMPDIR/large.txt" 2>/dev/null | grep -c match; }
-
-assert_eq "500" "$(matches rg      "$RG_WRAPPER")"   "bypass=rg: rg runs uncapped (all 500 lines)"
-assert_eq "200" "$(matches rg      "$GREP_WRAPPER")" "bypass=rg: grep stays capped (bypass is per-tool)"
-assert_eq "500" "$(matches grep,rg "$GREP_WRAPPER")" "bypass list: comma-separated entry uncaps grep"
-assert_eq "500" "$(matches all     "$RG_WRAPPER")"   "bypass=all: rg uncapped"
-assert_eq "200" "$(matches ''      "$RG_WRAPPER")"   "bypass unset: default 200-line cap unchanged"
-
-# Uncapped output also drops the truncation footer.
-assert_not_match "total stdout lines" \
-  "$(AGENT_WRAPPERS_BYPASS=rg "$RG_WRAPPER" match "$TEST_TMPDIR/large.txt" 2>/dev/null)" \
-  "bypass=rg: no truncation footer when uncapped"
+[ "$(bytes_of rg  "$RG_WRAPPER")"   -ge 150000 ] && pass "bypass=rg: rg runs uncapped (full huge line)" \
+  || fail "bypass=rg: rg should be uncapped"
+[ "$(bytes_of rg  "$GREP_WRAPPER")" -le 56000 ]  && pass "bypass=rg: grep stays capped (bypass is per-tool)" \
+  || fail "bypass=rg: grep should stay byte-capped"
+[ "$(bytes_of all "$RG_WRAPPER")"   -ge 150000 ] && pass "bypass=all: rg uncapped" \
+  || fail "bypass=all: rg should be uncapped"
+[ "$(bytes_of ''  "$RG_WRAPPER")"   -le 56000 ]  && pass "bypass unset: default byte cap unchanged" \
+  || fail "bypass unset: rg should be byte-capped"
 
 teardown_test_env
 summary

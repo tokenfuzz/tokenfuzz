@@ -16,15 +16,14 @@ assert_match "foo" "$output" "small: passes through"
 assert_match "baz" "$output" "small: all lines present"
 
 # ═══════════════════════════════════════════════════════════════
-# 2. Large output truncated to 200 lines
+# 2. Many short lines under the byte cap pass through whole (no line cap)
 # ═══════════════════════════════════════════════════════════════
 
 seq 1 500 > "$TEST_TMPDIR/large.txt"
 output=$("$GREP_WRAPPER" "." "$TEST_TMPDIR/large.txt" 2>/dev/null)
 line_count=$(echo "$output" | wc -l | tr -d ' ')
-# Should be 201 lines (200 data + 1 truncation notice)
-assert_match "truncated to 200" "$output" "large: truncation notice shown"
-assert_match "at least 201 total stdout lines" "$output" "large: broad search stops after visible budget"
+assert_eq "500" "$line_count" "large: full result passes through (no line cap)"
+assert_not_match "truncated" "$output" "large: no cap footer under the byte budget"
 
 # ═══════════════════════════════════════════════════════════════
 # 3. -c flag passes through (bounded output)
@@ -86,9 +85,8 @@ done
 "$GREP_WRAPPER" "needle" "${many_args[@]}" >"$out" 2>"$err" || rc=$?
 stdout_lines=$(wc -l < "$out" | tr -d ' ')
 stderr_lines=$(wc -l < "$err" | tr -d ' ')
-assert_eq "0" "$stdout_lines" "stderr cap: stdout remains empty"
-assert_eq "201" "$stderr_lines" "stderr cap: 200 diagnostics plus footer"
-assert_match "total stderr lines" "$(tail -1 "$err")" "stderr cap: footer emitted on stderr"
+assert_eq "0" "$stdout_lines" "stderr: stdout stays empty (diagnostics kept on stderr)"
+assert_eq "250" "$stderr_lines" "stderr: diagnostics pass through on stderr (byte cap governs size)"
 rc=0
 
 # ═══════════════════════════════════════════════════════════════
@@ -125,9 +123,7 @@ assert_not_match "clipped" "$output" "byte cap: CAP_BYTES=0 disables clip"
 # broke piped reads would slip through both grep and rg wrappers.
 stream_output=$(seq 1 500 | "$GREP_WRAPPER" '.' 2>/dev/null)
 stream_lines=$(printf '%s\n' "$stream_output" | grep -cE '^[0-9]+$' || true)
-assert_eq "200" "$stream_lines" "stream: stdin pipeline still capped at 200"
-assert_match "total stdout lines" "$stream_output" "stream: stdout cap footer fires"
-assert_match "at least 201 total stdout lines" "$stream_output" "stream: broad stdin search stops after visible budget"
+assert_eq "500" "$stream_lines" "stream: stdin pipeline passes through (byte cap governs size)"
 
 # ═══════════════════════════════════════════════════════════════
 # 10. Passthrough boundary — positional arg equal to a passthrough flag
@@ -136,16 +132,11 @@ assert_match "at least 201 total stdout lines" "$stream_output" "stream: broad s
 # ═══════════════════════════════════════════════════════════════
 
 PASSTHRU_HAYSTACK="$TEST_TMPDIR/passthru.txt"
-i=1
-while [ "$i" -le 500 ]; do
-  printf -- '-c hit\n' >> "$PASSTHRU_HAYSTACK"
-  i=$((i + 1))
-done
+python3 -c 'import sys; sys.stdout.write(("-c " + "Z"*400 + "\n") * 500)' > "$PASSTHRU_HAYSTACK"
 output=$("$GREP_WRAPPER" -- '-c' "$PASSTHRU_HAYSTACK" 2>/dev/null)
-data_lines=$(printf '%s\n' "$output" | grep -cF -- '-c hit' || true)
-assert_eq "200" "$data_lines" "passthrough boundary: literal '-c' pattern after -- still capped"
-assert_match "total stdout lines" "$output" "passthrough boundary: cap footer fires"
-assert_match "at least 201 total stdout lines" "$output" "passthrough boundary: capped literal search stops early"
+out_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
+[ "$out_bytes" -le 56000 ] && pass "passthrough boundary: literal '-c' pattern after -- still byte-capped" \
+  || fail "passthrough boundary: expected ≤56000 bytes, got ${out_bytes}"
 
 # Real -c flag still triggers passthrough (count is bounded output).
 output=$("$GREP_WRAPPER" -c '.' "$PASSTHRU_HAYSTACK" 2>/dev/null)

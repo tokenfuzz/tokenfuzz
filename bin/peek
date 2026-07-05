@@ -6,23 +6,22 @@
 # (`sed -n '1,500p' file.c`) or wide grep context (`grep -A 95 -B 20`).
 # Each call is small individually, but they dominate cumulative tool-output
 # bytes (~30-40 MB across libxml2/pcre2/json combined). bin/peek clamps
-# both forms to defaults that cover normal function-context viewing
-# (PEEK_MAX_LINES=200, PEEK_GREP_AFTER=30, PEEK_GREP_BEFORE=8) and emits a
-# footer when clamping fires so the agent can decide to widen.
+# The ~50 KiB byte cap (via lib/output_cap.sh) is the only size guard on a line
+# range — an explicit `peek f:1-500` is honored as asked. Grep -A/-B context is
+# still clamped (PEEK_GREP_AFTER=30, PEEK_GREP_BEFORE=8). --no-cap disables both.
 #
 # Two forms:
 #
 #   1. Line-range view (alternative to sed -n):
 #        bin/peek <FILE>:<START>-<END>           show lines START..END
-#        bin/peek <FILE>:<START>                 show lines START..START+199
-#        bin/peek <FILE>                         show lines 1..200
+#        bin/peek <FILE>:<START>                 show lines START..end of file
+#        bin/peek <FILE>                         show whole file (byte-capped)
 #
 #   2. Grep with clamped context (alternative to grep -A/-B/-C):
 #        bin/peek [-A N] [-B M] [-C K] [grep flags] PATTERN FILE...
 #
-# Override: --no-cap disables both line-range and -A/-B clamping (passes -A
-# and -B values through verbatim and emits the full range). Per-knob env:
-#   PEEK_MAX_LINES=N       line cap for range mode
+# Override: --no-cap disables the byte cap and -A/-B clamping (passes -A and -B
+# values through verbatim and emits the full range). Per-knob env:
 #   PEEK_GREP_AFTER=N      clamp value for -A / --after-context (and the
 #                          'after' half of -C)
 #   PEEK_GREP_BEFORE=N     clamp value for -B / --before-context (and the
@@ -42,7 +41,6 @@ if [ -r "$_PEEK_DIR/../lib/output_cap.sh" ]; then
   . "$_PEEK_DIR/../lib/output_cap.sh"
 fi
 
-PEEK_MAX_LINES="${PEEK_MAX_LINES:-200}"
 PEEK_GREP_AFTER="${PEEK_GREP_AFTER:-30}"
 PEEK_GREP_BEFORE="${PEEK_GREP_BEFORE:-8}"
 NO_CAP=0
@@ -50,13 +48,13 @@ NO_CAP=0
 print_usage() {
   cat >&2 <<'USAGE'
 Usage:
-  bin/peek <FILE>:<START>-<END>            show line range (clamped)
-  bin/peek <FILE>:<START>                  show 200 lines from START
-  bin/peek <FILE>                          show first 200 lines
+  bin/peek <FILE>:<START>-<END>            show line range (byte-capped)
+  bin/peek <FILE>:<START>                  show START..end of file
+  bin/peek <FILE>                          show whole file (byte-capped)
   bin/peek [grep flags] PATTERN FILE...    grep with clamped -A/-B/-C
 
-Env knobs: PEEK_MAX_LINES (default 200), PEEK_GREP_AFTER (30),
-PEEK_GREP_BEFORE (8). Pass --no-cap to disable clamping.
+Env knobs: PEEK_GREP_AFTER (30), PEEK_GREP_BEFORE (8). The ~50 KiB byte cap
+bounds size. Pass --no-cap to disable clamping.
 USAGE
 }
 
@@ -78,22 +76,12 @@ if [ "${#ARGS[@]}" -eq 0 ]; then
 fi
 
 # Validate env knobs (cheap, surfaces typos early).
-for var in PEEK_MAX_LINES PEEK_GREP_AFTER PEEK_GREP_BEFORE; do
+for var in PEEK_GREP_AFTER PEEK_GREP_BEFORE; do
   val="$(eval "printf '%s' \"\$${var}\"")"
   case "$val" in
     ''|*[!0-9]*) echo "[peek] non-numeric ${var}: $val" >&2; exit 2 ;;
   esac
 done
-
-# PEEK_MAX_LINES=0 means "no cap" (parity with rg-safe's RG_CAP=0). Without
-# this, every range arithmetic path produces an empty/negative range
-# (end=start+0-1 < start) and silently emits nothing. PEEK_GREP_AFTER=0
-# and PEEK_GREP_BEFORE=0 retain their grep meaning ("no after/before
-# context") and are left untouched.
-if [ "$PEEK_MAX_LINES" -eq 0 ]; then
-  NO_CAP=1
-  PEEK_MAX_LINES=2147483647
-fi
 
 # ── Range-mode detection ──────────────────────────────────────────────
 # Range mode is the documented single-argument form after peek's own flags:
@@ -137,7 +125,7 @@ if [ "$is_range" -eq 1 ]; then
   # Parse FILE[:START[-END]]. FILE may itself contain ':' on Windows (we
   # don't care here — agents work on POSIX paths) so we split on the FIRST
   # ':' and treat the rest as the range spec. An empty range spec means
-  # "from line 1 to PEEK_MAX_LINES".
+  # "from line 1 to end of file".
   raw="$first_positional"
   if [[ "$raw" == *:* ]]; then
     file="${raw%%:*}"
@@ -152,10 +140,11 @@ if [ "$is_range" -eq 1 ]; then
     exit 2
   fi
 
+  # `$` is sed's last-line address, so a start-only or bare-file request runs
+  # to end of file; the byte cap below bounds the size.
   if [ -z "$spec" ]; then
     start=1
-    end="$PEEK_MAX_LINES"
-    requested_span="$PEEK_MAX_LINES"
+    end='$'
   elif [[ "$spec" == *-* ]]; then
     start="${spec%%-*}"
     end="${spec##*-}"
@@ -166,44 +155,26 @@ if [ "$is_range" -eq 1 ]; then
       echo "[peek] bad range '$spec': require 1 <= start <= end" >&2
       exit 2
     fi
-    requested_span=$((end - start + 1))
   else
     start="$spec"
     case "$start" in
       *[!0-9]*|'') echo "[peek] bad start '$spec': must be a positive integer" >&2; exit 2 ;;
     esac
     [ "$start" -lt 1 ] && { echo "[peek] bad start '$spec': must be >= 1" >&2; exit 2; }
-    end=$((start + PEEK_MAX_LINES - 1))
-    requested_span="$PEEK_MAX_LINES"
+    end='$'
   fi
 
-  cap_fired=0
-  if [ "$NO_CAP" -eq 0 ] && [ "$requested_span" -gt "$PEEK_MAX_LINES" ]; then
-    end=$((start + PEEK_MAX_LINES - 1))
-    cap_fired=1
-  fi
-
-  # Disable any cap from lib/wrappers/sed (on PATH in the agent shell). peek
-  # already clamps the line range itself; without this, --no-cap silently
-  # tops out at the wrapper's own output cap. We capture into a temp so the
-  # byte-cap pass below can act on the result without re-running sed.
+  # Render the requested range with the sed wrapper's own caps off (peek
+  # applies the byte cap once, below). The ~50 KiB byte cap is the only size
+  # guard — an explicit range is honored as asked, no line clamp.
   _peek_tmp=$(mktemp "${TMPDIR:-/tmp}/peek-range-XXXXXXXX")
   trap 'rm -f "$_peek_tmp"' EXIT
   CAP_LINES=0 CAP_BYTES=0 sed -n "${start},${end}p" "$file" > "$_peek_tmp"
 
-  # Byte-cap pass: if the rendered range is still over OUTCAP_MAX_BYTES
-  # (long lines blow past line-only caps — common for minified JS, generated
-  # tables, single-line JSON). Skipped when output_cap.sh wasn't sourced or
-  # when the user requested --no-cap.
   if [ "$NO_CAP" -eq 1 ] || ! declare -F cap_output_file >/dev/null 2>&1; then
     cat "$_peek_tmp"
   else
     cap_output_file "$_peek_tmp" peek-range
-  fi
-
-  if [ "$cap_fired" -eq 1 ]; then
-    printf '[peek: clamped to %d lines (requested %d). PEEK_MAX_LINES=N or --no-cap to widen.]\n' \
-      "$PEEK_MAX_LINES" "$requested_span"
   fi
   exit 0
 fi

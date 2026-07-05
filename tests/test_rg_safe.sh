@@ -26,48 +26,17 @@ done
 bash -n "$RG_SAFE" 2>/dev/null
 assert_eq 0 $? "rg-safe: syntax check passes"
 
-# ── Default cap is 200; footer fires when total > cap. ──
+# ── Line cap removed: output under the byte cap passes through whole. ──
 output=$("$RG_SAFE" match "$FIX" 2>&1)
 data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "200" "$data_lines" "rg-safe: default cap keeps exactly 200 data lines"
-assert_match 'capped at 200 of 500 lines' "$output" "rg-safe: footer reports cap and total"
-assert_match 'RG_CAP=0' "$output" "rg-safe: footer mentions opt-out"
+assert_eq "500" "$data_lines" "rg-safe: full result passes through (byte cap is the only guard)"
+assert_not_match 'capped at' "$output" "rg-safe: no cap footer under the byte budget"
 
-# Last data line is line 200 — head from top, not tail.
-assert_match '^line 200 match$' "$output" "rg-safe: keeps head (lines 1..N)"
-assert_not_match '^line 201 match$' "$output" "rg-safe: drops past-cap lines"
-
-# ── --cap N overrides default. ──
-output=$("$RG_SAFE" --cap 50 match "$FIX" 2>&1)
-data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "50" "$data_lines" "rg-safe: --cap N caps at N"
-assert_match 'capped at 50 of 500' "$output" "rg-safe: --cap reflected in footer"
-
-# ── --cap=N (= form) also works. ──
-output=$("$RG_SAFE" --cap=25 match "$FIX" 2>&1)
-data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "25" "$data_lines" "rg-safe: --cap=N (equals form)"
-
-# ── RG_CAP env var overrides default; --cap flag wins over env. ──
-output=$(RG_CAP=10 "$RG_SAFE" match "$FIX" 2>&1)
-data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "10" "$data_lines" "rg-safe: RG_CAP env var honored"
-
-output=$(RG_CAP=10 "$RG_SAFE" --cap 30 match "$FIX" 2>&1)
-data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "30" "$data_lines" "rg-safe: --cap wins over RG_CAP env"
-
-# ── --no-cap bypasses entirely; no footer. ──
+# ── --no-cap suppresses the byte cap too; small output unchanged. ──
 output=$("$RG_SAFE" --no-cap match "$FIX" 2>&1)
 data_lines=$(printf '%s\n' "$output" | grep -c '^line')
 assert_eq "500" "$data_lines" "rg-safe: --no-cap returns all matches"
 assert_not_match 'capped at' "$output" "rg-safe: --no-cap suppresses footer"
-
-# ── RG_CAP=0 also bypasses. ──
-output=$(RG_CAP=0 "$RG_SAFE" match "$FIX" 2>&1)
-data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "500" "$data_lines" "rg-safe: RG_CAP=0 bypasses cap"
-assert_not_match 'capped at' "$output" "rg-safe: RG_CAP=0 suppresses footer"
 
 # ── Output below cap is byte-identical to plain rg, no footer. ──
 SMALL="$TEST_TMPDIR/small.txt"
@@ -83,18 +52,10 @@ assert_eq "1" "$?" "rg-safe: exit code 1 for no match (rg semantics)"
 "$RG_SAFE" 'foo' "$SMALL" >/dev/null 2>&1
 assert_eq "0" "$?" "rg-safe: exit code 0 on match"
 
-# ── Invalid --cap value rejected with explanatory error. ──
-output=$("$RG_SAFE" --cap notanumber match "$FIX" 2>&1) || true
-assert_match 'non-numeric --cap' "$output" "rg-safe: rejects non-numeric --cap"
-
-# ── --cap with no value errors out. ──
-"$RG_SAFE" --cap 2>/dev/null
-assert_neq "0" "$?" "rg-safe: --cap with no value exits non-zero"
-
 # ── Pass-through of -- separator: args after -- go to rg verbatim. ──
-output=$("$RG_SAFE" --cap 5 -- match "$FIX" 2>&1)
+output=$("$RG_SAFE" -- match "$FIX" 2>&1)
 data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "5" "$data_lines" "rg-safe: '--' passthrough still respects cap"
+assert_eq "500" "$data_lines" "rg-safe: '--' passthrough returns all matches"
 
 # ── PATH lookup failure: invoking with no rg in PATH returns helpful error.
 # Invoke through an absolute bash path so PATH can be completely isolated.
@@ -163,16 +124,14 @@ assert_not_match 'capped at' "$output" "rg-safe: --no-cap-bytes disables byte ca
 output=$("$RG_SAFE" --no-cap match "$HUGE_LINE" 2>&1)
 assert_not_match 'capped at' "$output" "rg-safe: --no-cap disables both line and byte caps"
 
-# Both caps fire simultaneously: many lines, each large enough that the
-# byte cap also fires before the line cap finishes counting.
+# Byte cap fires on a large multi-line result set.
 COMBO="$TEST_TMPDIR/combo.txt"
 python3 -c '
 for i in range(500):
     print("Y" * 200 + f" match {i}")
 ' > "$COMBO"
-output=$("$RG_SAFE" --cap 100 --cap-bytes 4096 match "$COMBO" 2>&1)
-assert_match 'capped at 100 of 500 lines AND' "$output" "rg-safe: combined footer when both caps fire"
-assert_match 'bytes' "$output" "rg-safe: combined footer mentions bytes"
+output=$("$RG_SAFE" --cap-bytes 4096 match "$COMBO" 2>&1)
+assert_match 'capped at 4096 of' "$output" "rg-safe: byte cap fires on large result set"
 
 # Byte clip falls back to last newline (no partial trailing line).
 output=$("$RG_SAFE" --cap-bytes 500 match "$COMBO" 2>&1)
@@ -257,32 +216,22 @@ output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Production-PATH interaction: lib/wrappers/rg sits on PATH in the agent shell
-# (see lib/wrappers/_zdotdir/.zprofile). Without explicit cap suppression,
-# rg-safe's invocation of `rg` resolves to the wrapper, which clips at 200
-# lines / byte cap BEFORE rg-safe sees the output. That silently breaks
-# --no-cap, --cap N>200, and the "X of Y" line-count footer (Y stops at 201).
-# These tests exercise the production config to catch any regression.
+# (see lib/wrappers/_zdotdir/.zprofile). rg-safe suppresses the inherited
+# wrapper cap so it can apply its own byte cap once, without double-capping.
 # ─────────────────────────────────────────────────────────────────────────────
 
 WRAPPED_PATH="$SCRIPT_ROOT/lib/wrappers:$PATH"
 
-# --no-cap with wrappers on PATH must return ALL matches, not 200.
+# --no-cap with wrappers on PATH must return ALL matches.
 output=$(PATH="$WRAPPED_PATH" "$RG_SAFE" --no-cap match "$FIX" 2>&1)
 data_lines=$(printf '%s\n' "$output" | grep -c '^line')
 assert_eq "500" "$data_lines" "rg-safe (wrapped PATH): --no-cap returns all 500 matches"
-assert_not_match 'capped at' "$output" "rg-safe (wrapped PATH): --no-cap suppresses both footers"
+assert_not_match 'capped at' "$output" "rg-safe (wrapped PATH): --no-cap suppresses the footer"
 
-# --cap N>200 must return up to N, not silently top at 200.
-output=$(PATH="$WRAPPED_PATH" "$RG_SAFE" --cap 350 match "$FIX" 2>&1)
-data_lines=$(printf '%s\n' "$output" | grep -c '^line')
-assert_eq "350" "$data_lines" "rg-safe (wrapped PATH): --cap 350 actually returns 350"
-assert_match 'capped at 350 of 500' "$output" "rg-safe (wrapped PATH): footer reports true total"
-
-# Default cap (200) footer must report true total (500), not the wrapper's
-# pre-clipped 201.
+# A result set under the byte cap passes through whole (no double-cap).
 output=$(PATH="$WRAPPED_PATH" "$RG_SAFE" match "$FIX" 2>&1)
-assert_match 'capped at 200 of 500 lines' "$output" "rg-safe (wrapped PATH): default footer reports true 500-line total"
-assert_not_match 'capped at 200 of 201' "$output" "rg-safe (wrapped PATH): no spurious 'of 201' from double-cap"
+data_lines=$(printf '%s\n' "$output" | grep -c '^line')
+assert_eq "500" "$data_lines" "rg-safe (wrapped PATH): full result passes through, no double-cap"
 
 # Byte-cap escape (RG_BYTES=0) must also pass full huge match through, not
 # silently clip at the wrapper's default.

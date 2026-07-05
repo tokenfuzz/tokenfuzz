@@ -155,18 +155,16 @@ can dump tens of KB of JSONL into the transcript; use
   `list-findings` first. Read the full `REPORT.md` only when editing that
   report or reproducing that specific artifact.
 - For broad source/repo searches, use `bin/rg-safe <rg args>` instead of bare
-  `rg`. It enforces a 200-line cap plus a ~50 KiB head+tail spill cap and
-  excludes log paths by default. Override with `--no-cap` / `RG_CAP=0`,
-  `--no-cap-bytes` / `RG_BYTES=0`, or `--include-logs` only when you really
-  need them.
+  `rg`. It caps output at a ~50 KiB head+tail spill and excludes log paths by
+  default. Override with `--no-cap` / `RG_BYTES=0` or `--include-logs` only when
+  you really need them.
 - For viewing source ranges, prefer `bin/peek <FILE>:<start>-<end>` or
   `bin/peek -A N -B M PATTERN FILE` over `sed -n 'X,Yp'` and `grep -A 95`.
   `bin/peek` clamps `-A` to 30 and `-B` to 8 by default (the values that
   cover normal function-context viewing); pass `--no-cap` to widen.
-  Bare `sed` is also output-capped (200 lines plus the same ~50 KiB
-  head+tail spill cap) so a stray `sed -n '1,500p' BIG_FILE` no longer
-  floods context. Set `CAP_LINES=0 CAP_BYTES=0 sed …` for the rare
-  full-stream case.
+  Bare `sed` output is byte-capped (~50 KiB head+tail spill) so a stray
+  `sed -n '1,500p' BIG_FILE` no longer floods context. Set `CAP_BYTES=0 sed …`
+  for the rare full-stream case.
 - When an output cap marker names an `outcap-*` spill file, inspect it with
   bounded reads (`bin/peek <path>:1-200`, `tail -50 <path>`, or a narrow
   `bin/rg-safe` query). Do not `cat` the spill unless you intentionally want
@@ -266,10 +264,9 @@ Resume payload tuning (env vars, set per call when needed):
 STATE_RESUME_RECENT_LIMIT=N      max rows in each Recent-* section (default 3)
 STATE_RESUME_INCLUDE_TRIED=1     add Recent Tried Inputs section back to resume
 STATE_RESUME_QUEUE_HEALTH_LIMIT  max queue-health rows (default 8)
-RG_CAP=N | RG_BYTES=N            override rg-safe line / byte caps
-CAP_LINES=N | CAP_BYTES=N        override generic rg/grep/sed wrapper caps
+RG_BYTES=N                       override rg-safe byte cap (0 = off)
+CAP_BYTES=N                      override generic rg/grep/sed wrapper byte cap
 PEEK_GREP_AFTER=N | _BEFORE=N    override bin/peek -A / -B clamps
-PEEK_MAX_LINES=N                 override bin/peek line-range clip
 PATCH_CONTEXT=N | PATCH_MAX_LINES=N | PATCH_MAX_BYTES=N   widen show-patch
                                  (defaults: ctx=10, lines=1500, bytes=32 KiB;
                                  either clip fires a per-file --stat tail)

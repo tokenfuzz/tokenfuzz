@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
-# Output-capping wrapper used by lib/wrappers/grep and lib/wrappers/rg.
-# Caps stdout/stderr separately so a runaway match doesn't flood agent context
-# and diagnostics don't look like search results. For plain rg/grep searches,
-# stop reading stdout after the visible line budget is exceeded; otherwise a
-# broad match still pays to emit megabytes that the wrapper later discards.
-# Pass-through flags exit early since their output is already bounded.
+# Output-capping wrapper used by lib/wrappers/grep, lib/wrappers/rg and
+# lib/wrappers/sed. Runs the real tool and caps stdout/stderr separately by
+# BYTES, so a runaway match doesn't flood agent context and diagnostics don't
+# look like search results.
 #
-# Two caps fire independently:
-#   line cap   — CAP_LINES (default 200)     protects against many small matches
-#   byte cap   — default head+tail cap       protects against few huge matches
-#                explicit CAP_BYTES=N keeps the legacy chop-at-N behavior
+# Size is bounded by the byte cap: a ~50 KiB head+tail spill via
+# lib/output_cap.sh. Bytes are the right bound whatever the match shape — a
+# single JSON-shaped match line in a codex .log.raw can be hundreds of KB, so a
+# line count would miss it. The full stream is spilled under logs/.raw/outcap
+# when RESULTS_DIR is set. Set CAP_BYTES=N for a hard chop-at-N instead, or
+# CAP_BYTES=0 to disable the byte cap.
+#
 # Per-tool bypass: AGENT_WRAPPERS_BYPASS (space/comma list, or "all") runs the
-#   named tools uncapped — e.g. AGENT_WRAPPERS_BYPASS=rg leaves grep/sed capped.
-#   Intended for A/B experiments on the cap's effect on bug-finding.
-# A single match line in a JSON-shaped haystack (codex .log.raw transcripts)
-# can be hundreds of KB, defeating the line cap alone. The default byte path
-# uses lib/output_cap.sh's ~50 KiB head+tail spill so the agent sees enough
-# context without replaying a huge command result on every later turn. The
-# full stream is saved under logs/.raw/outcap when RESULTS_DIR is available.
+#   named tools uncapped — for A/B experiments on the cap's effect on bug-finding.
+# Pass-through flags (-c/-l/-q/...) exit early since their output is bounded.
 #
 # Stub usage:
 #   exec "$_dir/_cap" "$_dir" <tool> "<flag>,<flag>,..." "$@"
@@ -27,13 +23,9 @@ _wrapper_dir="$1"; shift
 _tool="$1"; shift
 _passthrough="$1"; shift
 
-_cap_lines="${CAP_LINES:-200}"
 _cap_bytes_explicit=0
 [ "${CAP_BYTES+x}" = "x" ] && _cap_bytes_explicit=1
 _cap_bytes="${CAP_BYTES:-131072}"
-case "$_cap_lines" in
-  ''|*[!0-9]*) echo "${_tool}: CAP_LINES must be a non-negative integer" >&2; exit 2 ;;
-esac
 case "$_cap_bytes" in
   ''|*[!0-9]*) echo "${_tool}: CAP_BYTES must be a non-negative integer" >&2; exit 2 ;;
 esac
@@ -69,7 +61,7 @@ esac
 # The scan stops at the `--` end-of-options separator so a positional
 # argument that happens to equal a passthrough flag (e.g. a literal
 # pattern `-c` in `grep -- -c FILE`, or a filename `-l`) cannot falsely
-# trigger passthrough and bypass the line/byte caps.
+# trigger passthrough and bypass the byte cap.
 if [ -n "$_passthrough" ]; then
   IFS=','
   read -ra _flags <<< "$_passthrough"
@@ -109,34 +101,14 @@ PY
 _emit_capped() {
   local _file="$1"
   local _stream="$2"
-  local _line_count_kind="${3:-exact}"
-  local _orig_lines _orig_bytes _line_capped=0 _byte_capped=0
-  # Empty stream → nothing to emit and nothing to cap (0 lines/bytes trips
-  # neither cap), so skip the wc/cat work entirely. stderr is empty on the
-  # large majority of grep/rg/sed calls, so this drops ~3 forks per call —
-  # it compounds across the thousands of search calls an audit makes.
+  local _orig_bytes _byte_capped=0
+  # Empty stream → nothing to emit or cap. stderr is empty on the large
+  # majority of grep/rg/sed calls, so this drops the wc/cat forks per call.
   [ -s "$_file" ] || return 0
-  # One `wc -lc` instead of separate `wc -l` + `wc -c`: both BSD and GNU wc
-  # print "<lines> <bytes>" for -lc. `read` strips the leading whitespace,
-  # so no `tr` fork is needed either.
-  read -r _orig_lines _orig_bytes <<< "$(wc -lc < "$_file")"
-  _orig_lines=${_orig_lines:-0}
-  _orig_bytes=${_orig_bytes:-0}
 
-  # 1) Line cap: rewrite file in place so the byte step sees the clipped form.
-  if [ "$_cap_lines" -gt 0 ] && [ "$_orig_lines" -gt "$_cap_lines" ]; then
-    local _clip_tmp; _clip_tmp=$(mktemp) || return 1
-    head -n "$_cap_lines" "$_file" > "$_clip_tmp"
-    mv "$_clip_tmp" "$_file"
-    _line_capped=1
-  fi
-
-  # 2) Byte cap on whatever survived.
-  #
-  # Default path: use output_cap.sh's head+tail replacement so broad
-  # searches show both ends and spill the full original to disk. If the
-  # operator explicitly sets CAP_BYTES, preserve the historical chop-at-N
-  # contract and footer shape for compatibility/debugging.
+  # Default path: output_cap.sh's head+tail replacement so broad output shows
+  # both ends and spills the full original to disk. An explicit CAP_BYTES keeps
+  # the historical chop-at-N contract and footer shape for debugging.
   local _use_output_cap=0
   if [ "$_cap_bytes_explicit" -eq 0 ] \
      && [ "$_cap_bytes" -gt 0 ] \
@@ -144,93 +116,35 @@ _emit_capped() {
     _use_output_cap=1
   fi
 
+  if [ "$_use_output_cap" -eq 1 ]; then
+    if [ "$_stream" = "stderr" ]; then cap_output_file "$_file" "${_tool}-${_stream}" >&2
+    else cap_output_file "$_file" "${_tool}-${_stream}"; fi
+    return 0
+  fi
+
+  _orig_bytes=$(wc -c < "$_file" | tr -d ' ')
+  _orig_bytes=${_orig_bytes:-0}
+  _clip_to_bytes "$_file" "$_cap_bytes" && _byte_capped=1
   if [ "$_stream" = "stderr" ]; then
-    if [ "$_use_output_cap" -eq 1 ]; then
-      cap_output_file "$_file" "${_tool}-${_stream}" >&2
-    else
-      _clip_to_bytes "$_file" "$_cap_bytes" && _byte_capped=1
-      cat "$_file" >&2
-    fi
-    if [ "$_line_capped" -eq 1 ]; then
-      if [ "$_line_count_kind" = "at-least" ]; then
-        printf '... (at least %s total stderr lines — output truncated to %s. Narrow your search.)\n' \
-          "$_orig_lines" "$_cap_lines" >&2
-      else
-        printf '... (%s total stderr lines — output truncated to %s. Narrow your search.)\n' \
-          "$_orig_lines" "$_cap_lines" >&2
-      fi
-    fi
-    if [ "$_use_output_cap" -eq 0 ] && [ "$_byte_capped" -eq 1 ]; then
-      printf '... (stderr clipped at %s bytes of %s. Narrow your search.)\n' \
-        "$_cap_bytes" "$_orig_bytes" >&2
-    fi
+    cat "$_file" >&2
+    [ "$_byte_capped" -eq 1 ] && printf '... (stderr clipped at %s bytes of %s. Narrow your search.)\n' \
+      "$_cap_bytes" "$_orig_bytes" >&2
   else
-    if [ "$_use_output_cap" -eq 1 ]; then
-      cap_output_file "$_file" "${_tool}-${_stream}"
-    else
-      _clip_to_bytes "$_file" "$_cap_bytes" && _byte_capped=1
-      cat "$_file"
-    fi
-    if [ "$_line_capped" -eq 1 ]; then
-      if [ "$_line_count_kind" = "at-least" ]; then
-        printf '... (at least %s total stdout lines — output truncated to %s. Narrow your search.)\n' \
-          "$_orig_lines" "$_cap_lines"
-      else
-        printf '... (%s total stdout lines — output truncated to %s. Narrow your search.)\n' \
-          "$_orig_lines" "$_cap_lines"
-      fi
-    fi
-    if [ "$_use_output_cap" -eq 0 ] && [ "$_byte_capped" -eq 1 ]; then
-      printf '... (stdout clipped at %s bytes of %s. Narrow your search.)\n' \
-        "$_cap_bytes" "$_orig_bytes"
-    fi
+    cat "$_file"
+    [ "$_byte_capped" -eq 1 ] && printf '... (stdout clipped at %s bytes of %s. Narrow your search.)\n' \
+      "$_cap_bytes" "$_orig_bytes"
   fi
 }
 
-# Capture stdout and stderr separately, cap each stream, and preserve the
-# stream they are emitted on. This avoids mixing diagnostics into matches.
+# Capture stdout and stderr separately, byte-cap each, and preserve the stream
+# they are emitted on. This avoids mixing diagnostics into matches.
 _out_tmp=$(mktemp) || exit 1
 _err_tmp=$(mktemp) || { rm -f "$_out_tmp"; exit 1; }
 trap 'rm -f "$_out_tmp" "$_err_tmp"' EXIT
 
-_stdout_line_count_kind=exact
-_fast_stdout_cap=0
-case "$_tool" in
-  rg|grep)
-    # For normal search output, we only ever display CAP_LINES lines plus a
-    # footer. Read one extra line, then let head close the pipe so broad
-    # matches stop early. Count/list/quiet modes have already passed through
-    # above, so this does not affect exact query modes.
-    if [ "$_cap_lines" -gt 0 ]; then
-      _fast_stdout_cap=1
-    fi
-    ;;
-esac
+"$_real" "$@" > "$_out_tmp" 2> "$_err_tmp"
+_rc=$?
 
-if [ "$_fast_stdout_cap" -eq 1 ]; then
-  _line_limit=$((_cap_lines + 1))
-  "$_real" "$@" 2> "$_err_tmp" | head -n "$_line_limit" > "$_out_tmp"
-  _pipe_status=("${PIPESTATUS[@]}")
-  _rc="${_pipe_status[0]:-0}"
-  _head_rc="${_pipe_status[1]:-0}"
-  if [ "$_head_rc" -eq 0 ]; then
-    _captured_lines=$(wc -l < "$_out_tmp" | tr -d ' ')
-    _captured_lines=${_captured_lines:-0}
-    if [ "$_captured_lines" -gt "$_cap_lines" ]; then
-      _stdout_line_count_kind=at-least
-      # rg/grep often report SIGPIPE after head has collected enough visible
-      # output. The visible result is a successful capped search, not a tool
-      # diagnostic.
-      case "$_rc" in
-        13|141) _rc=0 ;;
-      esac
-    fi
-  fi
-else
-  "$_real" "$@" > "$_out_tmp" 2> "$_err_tmp"
-  _rc=$?
-fi
-
-_emit_capped "$_out_tmp" stdout "$_stdout_line_count_kind"
+_emit_capped "$_out_tmp" stdout
 _emit_capped "$_err_tmp" stderr
 exit "$_rc"
