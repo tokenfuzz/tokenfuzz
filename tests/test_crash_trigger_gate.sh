@@ -74,6 +74,13 @@ export STUB_VOTE=Reject; : > "$STUB_CALLS"
 d3=$(mkcrash CRASH-0003 bytes); rc=1; run_gate "$d3" && rc=0
 assert_eq 0 "$rc" "bytes 2×Reject: gate acts (rc=0)"
 assert_dir_exists "$RESULTS_DIR/crashes-rejected/CRASH-0003" "bytes 2×Reject: routed to crashes-rejected/"
+assert_file_contains "$RESULTS_DIR/crashes-rejected/CRASH-0003/.autodiscard" \
+  "trigger-provenance" \
+  "bytes 2×Reject: rejected dir records index reason"
+_maintain_rejected_indexes
+assert_file_contains "$RESULTS_DIR/crashes-rejected/REJECTED-CRASHES.md" \
+  "trigger-provenance" \
+  "bytes 2×Reject: rejected-crashes index surfaces reason"
 assert_eq 2 "$(ncalls)" "bytes 2×Reject: quorum sought a second vote"
 
 # ── 4. TWO Rejects route the same way for a CALL-SEQUENCE trigger ──

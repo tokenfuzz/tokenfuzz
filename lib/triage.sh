@@ -1609,8 +1609,30 @@ triage_fill_reach_fields_tree() {
   return 0
 }
 
+# Ensure the rejected-crash index has a machine-readable reason. Some callers
+# write richer .autodiscard details before routing; preserve those, but make
+# the common move helper fill the marker when a rejection path only supplied the
+# reason argument.
+_triage_ensure_autodiscard_reason() {
+  local d="$1" reason="$2" marker="$1/.autodiscard"
+  if [ -f "$marker" ] && grep -q '^# Reason:' "$marker" 2>/dev/null; then
+    return 0
+  fi
+  if [ -f "$marker" ]; then
+    {
+      echo "# Reason: $reason"
+      echo "# When: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } >> "$marker" 2>/dev/null || true
+    return 0
+  fi
+  {
+    echo "# Auto-rejected by triage"
+    echo "# Reason: $reason"
+    echo "# When: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$marker" 2>/dev/null || true
+}
+
 # Move a triaged dir into crashes-rejected/ with an .autodiscard marker.
-# Caller has already populated $d/.autodiscard if needed.
 _triage_annotate_rejection_report() {
   local d="$1" id="$2" reason="$3"
   local report=""
@@ -1897,6 +1919,7 @@ _triage_log_ttl_false_negative() {
 
 _triage_move_to_rejected() {
   local d="$1" id="$2" reason="$3"
+  _triage_ensure_autodiscard_reason "$d" "$reason"
   _triage_annotate_rejection_report "$d" "$id" "$reason"
   _triage_clear_promotion_sidecars "$d"
   local dest="$RESULTS_DIR/crashes-rejected/${id}"
