@@ -1,10 +1,80 @@
 # Changelog
 
+## 1.0.2 - 2026-07-05
+
+- **Pause and resume through usage limits.** A backend usage cap (Claude session
+  limit, Codex/Gemini quota, bare 429) now pauses the run — a plain sleep with no
+  agents burning tokens — until the reported reset, or in 30-minute re-probe
+  steps when none is reported, instead of hard-stopping cells or giving up after
+  short backoffs. Detection is unified into one Python pass that also catches a
+  cap surfacing only in a refill agent's log, and the post-run finding drain now
+  resumes across caps (opt-in) rather than reporting zero confirmed findings when
+  a cap lands mid-drain — with unadjudicated findings surfaced so a gate left
+  unfinished no longer reads as nothing found. The wait is excluded from the
+  productive wall budget, so it costs no investigation time and benchmark cells
+  compare on paused-excluded wall.
+
+- **Security findings, not just crashes, are the mission.** Per-agent sessions
+  were still driven by crash-centric framing while the "find all security issues"
+  goal reached only recon and model-direct. The mission is restated across
+  `safety_framing`, `AGENTS.md`, and post-compaction — findings first, sanitizer
+  reproducers where feasible — with file-the-finding steps added to the method;
+  crash-promotion pressure is preserved.
+
+- **Shared bug-quality floor for recon.** Reconnaissance drifted from the
+  find-quality gate, emitting trusted-caller NULL-derefs, OOM-only, debug-assert,
+  and non-product-surface noise (one slice: 965 raw leads → 2 promoted). A shared
+  `audit_bug_contract` now renders one definitional floor into both recon and
+  model-direct, cutting emission noise at the source while keeping the
+  keep-on-unsure rule so auth/injection/DoS paths and unproven leads still surface.
+
+- **Search hides output logs, not source.** The old wrappers excluded any `logs/`
+  directory — hiding a target's own `src/logs/` source — and leaked harness prompt
+  dumps and vendored chat logs that self-poisoned greppy searches. `rg`/`rg-safe`
+  now exclude the harness tree by location (`**/output/**/logs/**`), keeping a
+  target's `src/logs/` searchable, and `rg-safe` execs the real `rg` so
+  `--include-logs` can't be silently defeated in agent shells.
+
+- **No silent line-cap recall boundary.** The 200-line cap on `rg`/`grep`/`sed`/
+  `peek` output was redundant with the ~50 KiB byte cap and clipped legitimate
+  file views and explicit ranges below budget, spilling to a file agents never
+  re-read. The byte cap is now the sole size guard; explicit ranges and searches
+  pass through whole up to ~50 KiB.
+
+- **Per-language benchmark targets.** A suite of synthetic "reportkit" targets
+  across 14 languages (c, cpp, go, java, javascript, kotlin, perl, php, python, r,
+  ruby, rust, swift, typescript) lands under `targets/samples/`, each seeding
+  recent high-severity bug classes written innocuously plus false-positive traps,
+  with answer keys hidden outside the audited tree. Supporting this, target slugs
+  may now nest to arbitrary depth (`targets/a/b/c`) across setup, enumeration,
+  cleanup, and benchmark cell staging.
+
+- **Isolated Claude decision calls.** Claude Code runs under `--safe-mode` from
+  the shared flag builder, so audit, recon, validation, and decision calls skip
+  operator plugins, skills, hooks, and statusline context; one-shot decision calls
+  also disable session persistence while full audit sessions stay resumable.
+
+- **Always-fresh recon.** Cold-start seeding always runs reconnaissance instead of
+  reusing per-results or shared benchmark cache state; the cache markers, wiring,
+  and stale docs are removed.
+
+- **ASan effort floored from crash artifacts.** Model-direct cells can run
+  sanitizers outside `bin/probe`, leaving crashes without probe telemetry; harvest
+  now treats confirmed crash artifacts as a lower-bound ASan-invocation floor while
+  explicit probe counts still win when higher.
+
 ## 1.0.1 - 2026-07-03
 
 - **Frame-ownership scoring.** Harness vs. target code is decided by source
   ownership, not function name, so a real `main`/`free_node`/`operator delete`
   fault is scored instead of zeroed as ClusterFuzz boilerplate.
+
+- **Copy-overlap is a write.** ASan's `*-param-overlap` family prints no
+  `WRITE of size N` line, so severity defaulted it to the read tier (an unbounded
+  `strcpy` stack smash scored Low, not High) and clustering left it
+  `unclassified` (skewing labels and grouping). Both now classify the copy
+  destination as a WRITE — matched on the `cpy`/`cat` verbs so a comparison
+  overlap can't, and anchored to the ASan headline so prose mentions can't.
 
 - **Honest input trust class.** Fuzz input from file/argv/stdin is classified as
   bytes, not env/fs-state, removing a spurious Medium outlier from otherwise-Low
@@ -14,6 +84,17 @@
   project's VCS tracks, so agents stop spending budget on generated output,
   vendored deps, and the harness's own venv; it falls open for non-VCS tarballs.
 
+- **No build-based source hiding.** The build-feature probe and `features.json`
+  card gate are removed; a missing sanitizer build flag should surface as a
+  build-coverage problem, not silently remove critical source from audit scope.
+
+- **Symmetric finding confirmation.** Model-direct findings are confirmed by the
+  same single find-quality gate as harness findings. A redundant validator
+  pre-gate — which could reject a finding the scorer would keep but never write
+  the acceptance the count reads — is dropped, ending an asymmetric recall
+  penalty and per-finding validator burn; the gate's source-reading reachability
+  step now runs for both conditions.
+
 - **Wider prior-fix window.** S1 mining scans a 5-year / 25k-commit lookback
   instead of a flat count, giving fast- and slow-moving histories comparable
   coverage at near-zero cost — richest history no longer starves lead generation.
@@ -22,16 +103,9 @@
   set (stack exhaustion, DoS amplification, RCE phrasing), with a CI guard tying
   it to `bin/severity` so a new class can never silently go unranked.
 
-- **Non-prescriptive baseline.** The model-direct benchmark no longer nudges
-  agents to build harnesses and corpora, and its scratch is reclaimed after
-  harvest — dropping wasted setup that yielded no crashes and hundreds of MB.
-
-- **Symmetric finding confirmation.** Model-direct findings are confirmed by the
-  same single find-quality gate as harness findings. A redundant validator
-  pre-gate — which could reject a finding the scorer would keep but never write
-  the acceptance the count reads — is dropped, ending an asymmetric recall
-  penalty and per-finding validator burn; the gate's source-reading reachability
-  step now runs for both conditions.
+- **Read-only source for decisions.** Every backend can read the code to judge
+  reachability and clustering while staying sandboxed, bounded by the decision
+  timeout rather than an arbitrary turn count.
 
 - **Decision-class circuit breaker.** A gate that is fast-failing on a
   rate-limited or overloaded backend is paused, arming only on real backend
@@ -42,9 +116,14 @@
   valid votes aren't killed and retried, and claude, codex, and gemini all answer
   under the same clock rather than diverging on hidden turn caps.
 
-- **Read-only source for decisions.** Every backend can read the code to judge
-  reachability and clustering while staying sandboxed, bounded by the decision
-  timeout rather than an arbitrary turn count.
+- **Full-session Claude cost.** Benchmark and audit token accounting now read
+  Claude Code's cumulative `modelUsage` when present; the per-result `usage`
+  covers only the final turn, so multi-turn and recon sessions are no longer
+  billed at a fraction of what they actually spent.
+
+- **Non-prescriptive baseline.** The model-direct benchmark no longer nudges
+  agents to build harnesses and corpora, and its scratch is reclaimed after
+  harvest — dropping wasted setup that yielded no crashes and hundreds of MB.
 
 - **Diagnosable external kills.** The layers closest to a kill log a stray
   SIGTERM's shape, so a cell that dies mid-run leaves a trail in state instead of
@@ -54,13 +133,17 @@
   with the `--unshallow` remedy, surfacing quiet coverage loss that would
   otherwise never show up as an error.
 
-- **Python-only runtime.** The harness and test suite depend only on `python3`
-  outside Perl-language targets; the timeout shim and vocabulary neutralizer are
-  ported off inline Perl, shrinking the install footprint.
+- **Named rejection ledgers.** Rejected artifacts write semantic
+  `REJECTED-CRASHES.md` / `REJECTED-FINDINGS.md` as canonical browsable targets,
+  with `INDEX.md` kept as a compatibility alias so older runs still count.
 
 - **Robust `scratch-status`.** It no longer aborts on harness-only scratch dirs
   under macOS Bash 3.2 with `set -u`, returning a file inventory instead of an
   unbound-variable crash.
+
+- **Python-only runtime.** The harness and test suite depend only on `python3`
+  outside Perl-language targets; the timeout shim and vocabulary neutralizer are
+  ported off inline Perl, shrinking the install footprint.
 
 - **Verified prerequisites.** Install lists now require `venv`/`pip` and every
   listed tool is checked against a real caller, so a fresh setup has exactly what
@@ -69,26 +152,6 @@
 - **Handbook trued up.** The docs are corrected and completed against current
   code — dedup and severity examples, operator env knobs, reachability
   artifacts — so a failed run is diagnosable without first reading raw logs.
-
-- **Named rejection ledgers.** Rejected artifacts write semantic
-  `REJECTED-CRASHES.md` / `REJECTED-FINDINGS.md` as canonical browsable targets,
-  with `INDEX.md` kept as a compatibility alias so older runs still count.
-
-- **No build-based source hiding.** The build-feature probe and `features.json`
-  card gate are removed; a missing sanitizer build flag should surface as a
-  build-coverage problem, not silently remove critical source from audit scope.
-
-- **Full-session Claude cost.** Benchmark and audit token accounting now read
-  Claude Code's cumulative `modelUsage` when present; the per-result `usage`
-  covers only the final turn, so multi-turn and recon sessions are no longer
-  billed at a fraction of what they actually spent.
-
-- **Copy-overlap is a write.** ASan's `*-param-overlap` family prints no
-  `WRITE of size N` line, so severity defaulted it to the read tier (an unbounded
-  `strcpy` stack smash scored Low, not High) and clustering left it
-  `unclassified` (skewing labels and grouping). Both now classify the copy
-  destination as a WRITE — matched on the `cpy`/`cat` verbs so a comparison
-  overlap can't, and anchored to the ASan headline so prose mentions can't.
 
 ## 1.0.0 - First Version Launch
 
