@@ -3128,6 +3128,32 @@ _validate_find_pool_worker() {
   _validate_one_find_dir "$1" "$bin_dir" || true
 }
 
+# Opt-in pause-and-resume for the find-gate drain across a provider usage limit.
+# OFF by default: bin/audit runs validate_find_gate as a backgrounded
+# housekeeping sweeper, and wait_for_background_housekeeping would block the next
+# iteration on a multi-hour pause. Only the benchmark's post-run drain
+# (drain_cell_find_gate) sets FIND_GATE_RESUME_ON_LIMIT=1, where the run has
+# ended and blocking to wait out the reset — instead of leaving findings
+# permanently un-adjudicated — is exactly the goal. Env-overridable for tests.
+FIND_GATE_PAUSE_MAX_TOTAL="${FIND_GATE_PAUSE_MAX_TOTAL:-21600}"  # 6h cumulative cap
+FIND_GATE_PAUSE_CHUNK="${FIND_GATE_PAUSE_CHUNK:-1800}"           # 30m when reset unknown
+FIND_GATE_MAX_PAUSES="${FIND_GATE_MAX_PAUSES:-12}"               # hard loop bound
+
+# Read the provider-limit reset the decide path recorded during a drain pass.
+# The decide workers append one line per capacity-limited call: a reset epoch,
+# or "unknown" when the backend reported no reset. pool_run barriers on all
+# workers, so this reads a quiescent file. Emits the largest epoch, else
+# "unknown" if a cap was seen without a parseable reset, else "" (no cap).
+_find_gate_limit_reset() {
+  local file="$1"
+  [ -s "$file" ] || return 0
+  awk '
+    /^[0-9]+$/ { if ($1 + 0 > max) max = $1; seen = 1; next }
+    NF         { unknown = 1 }
+    END        { if (seen) print max; else if (unknown) print "unknown" }
+  ' "$file" 2>/dev/null || true
+}
+
 validate_find_gate() {
   local bin_dir
   bin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && pwd)
@@ -3154,7 +3180,44 @@ validate_find_gate() {
   # below stays AFTER the final wait — it reads every surviving report.
   local pool
   pool=$(_triage_dir_pool_size)
-  pool_run "$pool" _validate_find_pool_worker ${find_dirs[@]+"${find_dirs[@]}"}
+  if [ "${FIND_GATE_RESUME_ON_LIMIT:-0}" != "1" ]; then
+    # Default path (bin/audit background sweeper): a single pass, never blocks.
+    pool_run "$pool" _validate_find_pool_worker ${find_dirs[@]+"${find_dirs[@]}"}
+  else
+    # Benchmark post-run drain: re-run until no pass reports a provider usage
+    # limit, pausing for the reset in between. The per-FIND cache means each
+    # retry re-judges only the FINDs still lacking a verdict, so already-decided
+    # findings cost no LLM calls. Bounded by FIND_GATE_MAX_PAUSES and the 6h
+    # cumulative budget: if the backend never recovers the loop still exits and
+    # the residual surfaces as an un-adjudicated remainder (WARN + metrics).
+    local _limit_file _reset _now _wait _paused=0 _attempt=0 _remaining
+    _limit_file="$RESULTS_DIR/.find-gate-limit"
+    export LLM_DECIDE_LIMIT_FILE="$_limit_file"
+    while : ; do
+      : > "$_limit_file" 2>/dev/null || true
+      pool_run "$pool" _validate_find_pool_worker ${find_dirs[@]+"${find_dirs[@]}"}
+      _reset=$(_find_gate_limit_reset "$_limit_file")
+      [ -z "$_reset" ] && break                       # no cap this pass → done
+      _attempt=$((_attempt + 1))
+      [ "$_attempt" -gt "$FIND_GATE_MAX_PAUSES" ] && break
+      _remaining=$(( FIND_GATE_PAUSE_MAX_TOTAL - _paused ))
+      [ "$_remaining" -le 0 ] && break
+      _now=$(date +%s)
+      if [ "$_reset" = "unknown" ] || ! [[ "$_reset" =~ ^[0-9]+$ ]] || [ "$_reset" -le "$_now" ]; then
+        _wait="$FIND_GATE_PAUSE_CHUNK"
+      else
+        _wait=$(( _reset - _now + 30 ))
+      fi
+      [ "$_wait" -gt "$_remaining" ] && _wait="$_remaining"
+      [ "$_wait" -lt 1 ] && _wait=1
+      printf 'SESSION_PAUSE: find-gate drain hit a provider usage limit — pausing %ss before re-judging un-adjudicated findings (paused so far: %ss).\n' \
+        "$_wait" "$_paused" >&2
+      sleep "$_wait"
+      _paused=$(( _paused + _wait ))
+    done
+    unset LLM_DECIDE_LIMIT_FILE
+    rm -f "$_limit_file" 2>/dev/null || true
+  fi
 
   # Layered dedup: write FINDING-CLUSTERS.md and stamp Cluster: lines into
   # each report.md. Mirrors how maintain_indexes runs bin/cluster-crashes

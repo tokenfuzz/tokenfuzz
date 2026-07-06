@@ -974,6 +974,45 @@ def llm_decide(
     return result
 
 
+def _maybe_record_provider_limit(*chunks: str) -> None:
+    """Record a provider usage-limit reset seen in a failed decide call.
+
+    A decision LLM call has no session log for the shared rate-limit detector to
+    scan, so when the find-gate drain wants to pause and resume through an
+    account/session cap it needs a signal from here. Opt-in: only writes when the
+    caller sets LLM_DECIDE_LIMIT_FILE (the benchmark drain does; the agent and
+    bin/audit housekeeping paths do not), so the normal decide path is untouched.
+    Detection reuses the same event-scoped classifier the main loop uses
+    (audit_helpers), so a cap is judged identically here and there — no divergent
+    false positives. Best-effort throughout: any failure leaves the drain to fall
+    back to its bounded pass count, never raising into the decision path.
+    """
+    target = os.environ.get("LLM_DECIDE_LIMIT_FILE")
+    if not target:
+        return
+    raw = "\n".join(part for part in chunks if part)
+    if not raw:
+        return
+    try:
+        from audit_helpers import (
+            _latest_rejected_reset_at,
+            _provider_issue_from_lines,
+        )
+    except Exception:
+        return
+    try:
+        lines = raw.splitlines()
+        # Only a genuine account/session cap is worth pausing for; a transient
+        # 5xx blip is retried by the drain's next pass without a long wait.
+        if _provider_issue_from_lines(lines) != "capacity_limited":
+            return
+        reset = _latest_rejected_reset_at(lines)
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(f"{reset if reset else 'unknown'}\n")
+    except Exception:
+        return
+
+
 def _run_decision(
     decision: str,
     required_keys: str,
@@ -1045,6 +1084,8 @@ def _run_decision(
                 f"{decision} FAIL {backend}-rc={exc.returncode} bytes={prompt_bytes} "
                 f"elapsed={elapsed}s timeout={timeout}s"
             )
+            # CLIs differ on whether provider caps land on stdout or stderr.
+            _maybe_record_provider_limit(exc.output, exc.stderr)
             return None, True
 
     elapsed = int(time.time() - t_start)
@@ -1055,6 +1096,9 @@ def _run_decision(
     json_text = _extract_json(raw)
     if json_text is None:
         _llm_log(f"{decision} FAIL extract-json bytes={prompt_bytes} elapsed={elapsed}s")
+        # Some backends surface a usage limit as a rate-limit event on stdout
+        # while still exiting 0 (no CalledProcessError); catch that here too.
+        _maybe_record_provider_limit(raw)
         return None, False
     parsed = _try_load(json_text)
     if not _validate_required_keys(parsed, required_keys):

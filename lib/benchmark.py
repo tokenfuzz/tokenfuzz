@@ -1581,6 +1581,12 @@ def harvest(
         "discarded_hypotheses": count_discarded_hypotheses(results_dir),
         "findings": finding_count,
         "confirmed_findings": confirmed_finding_count,
+        # FINDs still on disk with no gate verdict (findings minus accepted;
+        # rejected FINDs have already moved to findings-rejected/). Non-zero
+        # means the gate did not finish — usually a provider limit cut the drain
+        # short — so a reader never mistakes an un-drained 0-confirmed run for a
+        # clean "found nothing". Pure arithmetic on disk state; no LLM call.
+        "findings_unadjudicated": max(0, finding_count - confirmed_finding_count),
         "confirmed_finding_dirs": confirmed_finding_dirs,
         "finding_clusters": finding_clusters,
         "findings_rejected": count_subdirs(
@@ -2422,6 +2428,13 @@ def aggregate(bench_dir: Path) -> dict:
                 "model_refusal_total": sum(model_refusals),
                 "finding_total": sum(findings),
                 "confirmed_finding_total": sum(confirmed_findings),
+                # Findings the gate never adjudicated (drain cut short, e.g. a
+                # provider limit). Makes confirmed_finding_total=0 legible: 0
+                # confirmed with a non-zero remainder is "gate unfinished", not
+                # "nothing found". Mirrors the per-cell findings_unadjudicated.
+                "unadjudicated_finding_total": sum(
+                    max(0, f - c) for f, c in zip(findings, confirmed_findings)
+                ),
                 "unique_crash_clusters": cb.get("unique_clusters", 0),
                 "novel_crash_clusters": cb.get("novel_clusters", 0),
                 "top_severity_level": cb.get("top_severity_level", "—"),

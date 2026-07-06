@@ -70,6 +70,8 @@ eval "$(audit_extract_functions \
   write_session_log_summary \
   count_structural_refusal_signals \
   log_has_rate_limit_rejection \
+  _iteration_provider_status \
+  _provider_status_value \
   extract_raw_status \
   handle_rate_limit_backoff \
   session_recovery_pause \
@@ -691,7 +693,7 @@ assert_match '^env_blocked=1$' "$snapshot" "iteration snapshot: structured path 
 # default — it takes the same generic pool as every other backend and is
 # tuned with NUM_AGENTS. The old GEMINI_DEFAULT_AGENTS special-case must
 # stay gone (a period-quota failure is concurrency-independent, so the cap
-# never prevented it; RAM auto-tune + detect_rate_limit cover the rest).
+# never prevented it; RAM auto-tune + handle_rate_limit_backoff cover the rest).
 assert_file_not_contains "$SCRIPT_ROOT/bin/audit" 'GEMINI_DEFAULT_AGENTS' "backend: gemini has no special-case agent cap"
 assert_file_not_contains "$SCRIPT_ROOT/bin/audit" 'larger pools self-throttle' "backend: gemini self-throttle rationale removed with the cap"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'timeout.sh target_config.sh' "vcs signature: timeout helper is sourced before prelaunch housekeeping"
@@ -1234,7 +1236,7 @@ EOF
     log() { :; }
     fmt_secs() { printf '%ss' "$1"; }
     # Overload present this iteration → "unknown" reset → default backoff.
-    detect_rate_limit() { echo unknown; }
+    _iteration_provider_status() { printf 'rate_limit=1\nissue=transient\nreset_at=unknown\n'; }
 
     rc=0; handle_rate_limit_backoff ts1 || rc=$?
     [ "$rc" -eq 0 ] && [ "$RATE_LIMIT_BACKOFF_STREAK" -eq 1 ] \
@@ -1244,7 +1246,7 @@ EOF
       && echo "B2_HALT" || echo "B2_BAD rc=$rc streak=$RATE_LIMIT_BACKOFF_STREAK"
 
     # Recovery: no rejection → streak resets, returns 1 (proceed normally).
-    detect_rate_limit() { return 1; }
+    _iteration_provider_status() { printf 'rate_limit=0\nissue=none\nreset_at=\n'; }
     rc=0; handle_rate_limit_backoff ts3 || rc=$?
     [ "$rc" -eq 1 ] && [ "$RATE_LIMIT_BACKOFF_STREAK" -eq 0 ] \
       && echo "RECOVER_OK" || echo "RECOVER_BAD rc=$rc streak=$RATE_LIMIT_BACKOFF_STREAK"
@@ -1255,6 +1257,23 @@ EOF
     "sustained halt: streak at MAX_RATE_LIMIT_BACKOFFS returns 2 (BACKEND_UNAVAILABLE)"
   assert_match 'RECOVER_OK' "$(cat "$TEST_TMPDIR/rl_streak.out")" \
     "sustained halt: a clean iteration resets the backoff streak"
+
+  (
+    # The scan globs session_<ts>_*.log.raw, so a refill's -rN log is covered
+    # with no agent enumeration (NUM_AGENTS is irrelevant to the detector).
+    RAW_DIR="$TEST_TMPDIR/refill-raw"
+    mkdir -p "$RAW_DIR"
+    cat > "$RAW_DIR/session_tsref_deep_investigation-1-generic-r1.log.raw" <<'JSON'
+{"type":"result","api_error_status":429}
+{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":2000}}
+JSON
+    status="$(_iteration_provider_status tsref 2>/dev/null || true)"
+    reset="$(_provider_status_value "$status" reset_at)"
+    issue="$(_provider_status_value "$status" issue)"
+    printf 'reset=%s issue=%s\n' "$reset" "$issue"
+  ) > "$TEST_TMPDIR/refill-rate-limit.out" 2>/dev/null
+  assert_match 'reset=2000 issue=capacity_limited' "$(cat "$TEST_TMPDIR/refill-rate-limit.out")" \
+    "rate limit: iteration detector scans refill raw logs (-rN), not only initial agent logs"
 
   # Call sites stop the run (break) on the sustained-halt return code.
   assert_file_contains "$SCRIPT_ROOT/bin/audit" 'handle_rate_limit_backoff "\$timestamp" 2>/dev/null \|\| rl_rc=\$\?' \
@@ -1284,9 +1303,8 @@ EOF
     mark_backend_unavailable() { echo UNAVAIL > "$TEST_TMPDIR/sp_unavail"; }
     clear_rate_limit_cooldown() { :; }
     persist_rate_limit_cooldown() { :; }
-    provider_issue_for_timestamp() { echo capacity_limited; }
     # Unknown reset → one 7s chunk of pause (sleep stubbed), streak reset, rc 0.
-    detect_rate_limit() { echo unknown; }
+    _iteration_provider_status() { printf 'rate_limit=1\nissue=capacity_limited\nreset_at=unknown\n'; }
     rc=0; handle_rate_limit_backoff ts1 || rc=$?
     [ "$rc" -eq 0 ] && [ "$RATE_LIMIT_BACKOFF_STREAK" -eq 0 ] \
       && echo "PAUSE_OK paused=$SESSION_PAUSED_TOTAL" \

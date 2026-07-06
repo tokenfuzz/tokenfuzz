@@ -873,5 +873,53 @@ unset ACTIVE_BACKEND CODEX_BIN FAKE_CB_CALLS LLM_DECIDE_COUNTER_FILE \
   LLM_DECIDE_FAILCACHE_FILE LLM_DECIDE_FAIL_THRESHOLD LLM_DECIDE_TYPE_FAIL_THRESHOLD \
   LLM_DECIDE_FAIL_COOLDOWN
 
+# 14. Provider usage-limit recorder. A failed decide call whose backend output
+# is a real account/session cap records the reset epoch to LLM_DECIDE_LIMIT_FILE
+# (opt-in) so the find-gate drain can pause for it. A transient 5xx or non-error
+# output must NOT record — that would pause the drain on a false positive.
+_rec_limit() {
+  # $1=raw backend stdout, $2=set|unset (whether LLM_DECIDE_LIMIT_FILE is set);
+  # prints the recorded file contents (empty when nothing was recorded).
+  local f; f="$TEST_TMPDIR/limit.$RANDOM"
+  : > "$f"
+  local pyc='import sys; sys.path.insert(0, sys.argv[2]); import llm_decide; llm_decide._maybe_record_provider_limit(sys.argv[1])'
+  if [ "$2" = "set" ]; then
+    LLM_DECIDE_LIMIT_FILE="$f" python3 -c "$pyc" "$1" "$SCRIPT_ROOT/lib"
+  else
+    python3 -c "$pyc" "$1" "$SCRIPT_ROOT/lib"
+  fi
+  tr -d '\n' < "$f"
+}
+_cap_raw='{"type":"result","api_error_status":429}
+{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1777850000}}'
+assert_eq "1777850000" "$(_rec_limit "$_cap_raw" set)" \
+  "recorder: a 429 cap records its reset epoch when opted in"
+fake_limit_stderr="$TEST_TMPDIR/fake-limit-stderr"
+cat > "$fake_limit_stderr" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"type":"result","api_error_status":429}' >&2
+printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1777850000}}' >&2
+exit 1
+EOF
+chmod +x "$fake_limit_stderr"
+limit_stderr_file="$TEST_TMPDIR/limit-stderr.out"
+ACTIVE_BACKEND=codex CODEX_BIN="$fake_limit_stderr" \
+  LLM_DECIDE_LIMIT_FILE="$limit_stderr_file" \
+  LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/limit-stderr.count" \
+  LLM_DECIDE_MAX_CALLS=10 \
+  python3 "$SCRIPT_ROOT/lib/llm_decide.py" decide find_quality accept,reason,class,severity 5 \
+  >/dev/null 2>&1 <<'EOF' || true
+prompt
+EOF
+assert_eq "1777850000" "$(tr -d '\n' < "$limit_stderr_file" 2>/dev/null)" \
+  "recorder: a 429 cap emitted on stderr by a failed backend records its reset epoch"
+assert_eq "" "$(_rec_limit '{"type":"result","api_error_status":503}' set)" \
+  "recorder: a transient 5xx is not recorded (no false-positive pause)"
+assert_eq "" "$(_rec_limit 'plain tool output, no error' set)" \
+  "recorder: non-error output is not recorded"
+assert_eq "" "$(_rec_limit "$_cap_raw" unset)" \
+  "recorder: no LLM_DECIDE_LIMIT_FILE → no-op (default decide path untouched)"
+
 teardown_test_env
 summary

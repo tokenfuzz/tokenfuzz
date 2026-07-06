@@ -55,6 +55,11 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
       Parse provider text for the next reset epoch.
       Prints the epoch on stdout and exits 0 if found, exits 1 otherwise.
 
+  iteration-provider-status <raw_dir> <timestamp>
+      Aggregate an iteration's session_<timestamp>_*.log.raw logs in one pass.
+      Prints rate_limit=<0|1>, issue=<none|transient|capacity_limited>, and
+      reset_at=<epoch|unknown|> (empty when no rejection).
+
   claims-activity-since <claims_file> <since_epoch>
       Summarize state/claims.jsonl events at or after <since_epoch>.
       Prints `total=N status:k ... claimed_ids=[id1,id2,...]` or exits 0
@@ -864,19 +869,50 @@ _USAGE_DURATION_PATTERNS = [
 _CODEX_CLOCK_ROLLOVER_MAX_SECS = 6 * 3600
 
 
-def _cmd_provider_reset(args: argparse.Namespace) -> int:
+def _event_reset_at(event) -> int | None:
+    if not isinstance(event, dict) or event.get("type") != "rate_limit_event":
+        return None
+    info = event.get("rate_limit_info")
+    if not isinstance(info, dict):
+        info = event
+    status = str(info.get("status") or "").lower()
+    if status in {"allowed", "allowed_warning"}:
+        return None
     try:
-        with open(args.logfile, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
-    except OSError:
-        return 1
+        reset_at = int(info.get("resetsAt"))
+    except (TypeError, ValueError):
+        return None
+    return reset_at if reset_at > 0 else None
 
-    if args.now_epoch is not None:
+
+def _latest_rejected_reset_at(lines) -> int | None:
+    latest = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
         try:
-            now = _dt.datetime.fromtimestamp(int(args.now_epoch))
-        except (TypeError, ValueError, OSError, OverflowError):
-            return 1
-    else:
+            parsed = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        reset_at = _event_reset_at(parsed)
+        if reset_at is not None and (latest is None or reset_at > latest):
+            latest = reset_at
+    return latest
+
+
+def _provider_reset_from_text(text: str, now: "_dt.datetime | None" = None) -> "int | None":
+    """Next provider reset epoch from a transcript, or None.
+
+    Single source of truth for reset extraction, shared by the provider-reset-at
+    CLI and the iteration-provider-status scan. Machine-readable event resetsAt
+    wins; a human-text clock/duration is the fallback, resolved against `now`.
+    """
+    event_reset_at = _latest_rejected_reset_at(text.splitlines())
+    if event_reset_at is not None:
+        return event_reset_at
+
+    if now is None:
         now = _dt.datetime.now()
     for pat in _USAGE_CLOCK_PATTERNS:
         for m in re.finditer(pat, text, re.IGNORECASE):
@@ -894,8 +930,7 @@ def _cmd_provider_reset(args: argparse.Namespace) -> int:
                 candidate += _dt.timedelta(days=1)
                 if (candidate - now).total_seconds() > _CODEX_CLOCK_ROLLOVER_MAX_SECS:
                     continue
-            print(int(time.mktime(candidate.timetuple())))
-            return 0
+            return int(time.mktime(candidate.timetuple()))
 
     for pat in _USAGE_DURATION_PATTERNS:
         m = re.search(pat, text, re.IGNORECASE)
@@ -909,10 +944,76 @@ def _cmd_provider_reset(args: argparse.Namespace) -> int:
             secs = n * 60
         else:
             secs = n
-        print(int(time.time() + secs))
-        return 0
+        return int(time.time() + secs)
 
-    return 1
+    return None
+
+
+def _cmd_provider_reset(args: argparse.Namespace) -> int:
+    try:
+        with open(args.logfile, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return 1
+    now = None
+    if args.now_epoch is not None:
+        try:
+            now = _dt.datetime.fromtimestamp(int(args.now_epoch))
+        except (TypeError, ValueError, OSError, OverflowError):
+            return 1
+    reset_at = _provider_reset_from_text(text, now)
+    if reset_at is None:
+        return 1
+    print(reset_at)
+    return 0
+
+
+def _iteration_provider_status(raw_dir: str, timestamp: str) -> "tuple[bool, str, int | None]":
+    """Aggregate one iteration's provider status across its session raw logs.
+
+    Globs session_<timestamp>_*.log.raw — one wildcard that covers every agent
+    and its -rN refills, and cannot silently miss a future role/mode — then, in a
+    single pass per file, reuses the same classifier the per-file callers use:
+      * rejection gate == (_provider_issue_from_lines != "none"), the exact
+        equivalence _raw_status_from_lines encodes, so this stays consistent with
+        log_has_rate_limit_rejection;
+      * issue is the max over files (capacity_limited > transient > none);
+      * reset_at is the max epoch over rejected files.
+    Returns (saw_rejection, issue, reset_at|None).
+    """
+    saw_rejection = False
+    issue = "none"
+    reset_at: "int | None" = None
+    for path in sorted(Path(raw_dir).glob(f"session_{timestamp}_*.log.raw")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        file_issue = _provider_issue_from_lines(text.splitlines())
+        if file_issue == "none":
+            continue
+        saw_rejection = True
+        if file_issue == "capacity_limited":
+            issue = "capacity_limited"
+        elif issue != "capacity_limited":
+            issue = "transient"
+        candidate = _provider_reset_from_text(text)
+        if candidate is not None and candidate > 0 and (reset_at is None or candidate > reset_at):
+            reset_at = candidate
+    return saw_rejection, issue, reset_at
+
+
+def _cmd_iteration_provider_status(args: argparse.Namespace) -> int:
+    saw_rejection, issue, reset_at = _iteration_provider_status(args.raw_dir, args.timestamp)
+    print(f"rate_limit={1 if saw_rejection else 0}")
+    print(f"issue={issue}")
+    if reset_at is not None:
+        print(f"reset_at={reset_at}")
+    else:
+        # A rejection with no parseable reset is "unknown"; no rejection at all
+        # leaves reset_at empty so the caller can tell the two apart.
+        print("reset_at=unknown" if saw_rejection else "reset_at=")
+    return 0
 
 
 # ── claims-activity-since ───────────────────────────────────────────
@@ -1235,6 +1336,12 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("logfile")
     s.add_argument("--now-epoch")
     s.set_defaults(func=_cmd_provider_reset)
+
+    s = sub.add_parser("iteration-provider-status",
+                       help="Aggregate an iteration's rate_limit/issue/reset_at across its session raw logs.")
+    s.add_argument("raw_dir")
+    s.add_argument("timestamp")
+    s.set_defaults(func=_cmd_iteration_provider_status)
 
     s = sub.add_parser("claims-activity-since", help="Summarize claims.jsonl events since epoch.")
     s.add_argument("claims_file")

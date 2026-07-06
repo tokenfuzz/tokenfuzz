@@ -694,6 +694,76 @@ try:
 finally:
     os.unlink(p_claude)
 
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    p_rejected_reset = f.name
+    f.write(json.dumps({
+        "type": "rate_limit_event",
+        "rate_limit_info": {"status": "allowed_warning", "resetsAt": 9999999999},
+    }, separators=(",", ":")) + "\n")
+    f.write(json.dumps({
+        "type": "rate_limit_event",
+        "rate_limit_info": {"status": "rejected", "resetsAt": 1777850000},
+    }, separators=(",", ":")) + "\n")
+try:
+    proc = run(["provider-reset-at", p_rejected_reset])
+    assert_eq(0, proc.returncode, "provider-reset-at rejected rate_limit_event rc=0")
+    assert_eq("1777850000", proc.stdout.strip(), "provider-reset-at ignores allowed_warning resetsAt")
+finally:
+    os.unlink(p_rejected_reset)
+
+# ── iteration-provider-status ───────────────────────────────────────
+print("\niteration-provider-status")
+
+
+def _ips(raw_dir: str, timestamp: str) -> dict:
+    proc = run(["iteration-provider-status", raw_dir, timestamp])
+    assert proc.returncode == 0, proc.stderr
+    out = {}
+    for line in proc.stdout.splitlines():
+        k, _, v = line.partition("=")
+        out[k] = v
+    return out
+
+
+_ips_dir = tempfile.mkdtemp()
+try:
+    # A refill's -rN log is covered by the session_<ts>_*.log.raw glob.
+    Path(_ips_dir, "session_tsref_deep_investigation-1-generic-r1.log.raw").write_text(
+        '{"type":"result","api_error_status":429}\n'
+        '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":2000}}\n'
+    )
+    r = _ips(_ips_dir, "tsref")
+    assert_eq("1", r.get("rate_limit"), "iteration-provider-status: refill cap → rate_limit=1")
+    assert_eq("capacity_limited", r.get("issue"), "iteration-provider-status: refill cap → capacity_limited")
+    assert_eq("2000", r.get("reset_at"), "iteration-provider-status: refill cap reset_at from event")
+
+    # No log for this timestamp → no rejection, empty reset (distinct from unknown).
+    r = _ips(_ips_dir, "absent")
+    assert_eq("0", r.get("rate_limit"), "iteration-provider-status: no logs → rate_limit=0")
+    assert_eq("none", r.get("issue"), "iteration-provider-status: no logs → issue=none")
+    assert_eq("", r.get("reset_at"), "iteration-provider-status: no logs → reset_at empty")
+
+    # Transient 5xx with no parseable reset → unknown (distinct from empty).
+    Path(_ips_dir, "session_ts2_cold-start-1-generic.log.raw").write_text(
+        '{"type":"result","api_error_status":503}\n'
+    )
+    r = _ips(_ips_dir, "ts2")
+    assert_eq("1", r.get("rate_limit"), "iteration-provider-status: 5xx → rate_limit=1")
+    assert_eq("transient", r.get("issue"), "iteration-provider-status: 5xx → transient")
+    assert_eq("unknown", r.get("reset_at"), "iteration-provider-status: 5xx no reset → unknown")
+
+    # Capacity beats transient across the pool, and reset_at is the max epoch.
+    Path(_ips_dir, "session_ts2_deep_investigation-2-shell.log.raw").write_text(
+        '{"type":"result","api_error_status":429}\n'
+        '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":5000}}\n'
+    )
+    r = _ips(_ips_dir, "ts2")
+    assert_eq("capacity_limited", r.get("issue"), "iteration-provider-status: capacity beats transient")
+    assert_eq("5000", r.get("reset_at"), "iteration-provider-status: reset_at is the pool max")
+finally:
+    import shutil
+    shutil.rmtree(_ips_dir, ignore_errors=True)
+
 with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
     p2 = f.name
     f.write("rate limited, retry after 15 minutes\n")

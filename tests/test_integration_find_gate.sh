@@ -177,5 +177,65 @@ assert_file_contains "$RESULTS_DIR/findings/FIND-008-calleronly/report.md" \
   "requires \[call-sequence\] outside attacker_controls=\[bytes\]" \
   "finding carries the same oob set-difference a crash twin gets"
 
+# ═══════════════════════════════════════════════════════════════
+# 9. Drain resume across a provider usage limit (opt-in).
+#    FIND_GATE_RESUME_ON_LIMIT=1 makes validate_find_gate re-run the gate,
+#    pausing for the reset, until a pass records no provider cap — so a cap hit
+#    mid-drain no longer leaves findings permanently un-adjudicated. Bounded so
+#    a backend that never recovers still terminates. Default (no opt-in) runs a
+#    single pass and never blocks (the bin/audit background-sweeper contract).
+#    The pool worker is stubbed to simulate the decide path recording a cap, so
+#    the drain's control flow is exercised without a backend.
+# ═══════════════════════════════════════════════════════════════
+
+_triage_dir_pool_size() { echo 1; }
+
+( # opt-in: cap on pass 1 clears on pass 2 → exactly two passes, then stop
+  export RESULTS_DIR="$TEST_TMPDIR/drain-resume"
+  mkdir -p "$RESULTS_DIR/findings/FIND-x"
+  export FIND_GATE_RESUME_ON_LIMIT=1 FIND_GATE_PAUSE_CHUNK=1 \
+         FIND_GATE_PAUSE_MAX_TOTAL=10 FIND_GATE_MAX_PAUSES=5 FIND_CLUSTER_DISABLE=1
+  _P=0
+  _validate_find_pool_worker() {
+    _P=$((_P + 1))
+    [ "$_P" -eq 1 ] && printf 'unknown\n' >> "$LLM_DECIDE_LIMIT_FILE"
+  }
+  validate_find_gate 2>/dev/null
+  printf '%s\n' "$_P" > "$TEST_TMPDIR/drain-resume-passes"
+  [ -e "$RESULTS_DIR/.find-gate-limit" ] && echo LEFT > "$TEST_TMPDIR/drain-resume-leftover"
+)
+assert_eq "2" "$(cat "$TEST_TMPDIR/drain-resume-passes")" \
+  "drain resume: re-judges after a cap clears (initial pass + one retry)"
+assert_file_not_exists "$TEST_TMPDIR/drain-resume-leftover" \
+  "drain resume: cleans up the transient limit file"
+
+( # opt-in but cap never clears → bounded by FIND_GATE_MAX_PAUSES, still exits
+  export RESULTS_DIR="$TEST_TMPDIR/drain-stuck"
+  mkdir -p "$RESULTS_DIR/findings/FIND-x"
+  export FIND_GATE_RESUME_ON_LIMIT=1 FIND_GATE_PAUSE_CHUNK=1 \
+         FIND_GATE_PAUSE_MAX_TOTAL=100 FIND_GATE_MAX_PAUSES=3 FIND_CLUSTER_DISABLE=1
+  _P=0
+  _validate_find_pool_worker() { _P=$((_P + 1)); printf 'unknown\n' >> "$LLM_DECIDE_LIMIT_FILE"; }
+  validate_find_gate 2>/dev/null
+  printf '%s\n' "$_P" > "$TEST_TMPDIR/drain-stuck-passes"
+)
+assert_eq "4" "$(cat "$TEST_TMPDIR/drain-stuck-passes")" \
+  "drain resume: an unrecovering cap terminates at FIND_GATE_MAX_PAUSES (1 + 3)"
+
+( # default (no opt-in): a single pass, never loops even if a cap is recorded
+  export RESULTS_DIR="$TEST_TMPDIR/drain-default"
+  mkdir -p "$RESULTS_DIR/findings/FIND-x"
+  export FIND_CLUSTER_DISABLE=1
+  _P=0
+  _validate_find_pool_worker() {
+    _P=$((_P + 1))
+    [ -n "${LLM_DECIDE_LIMIT_FILE:-}" ] && printf 'unknown\n' >> "$LLM_DECIDE_LIMIT_FILE"
+  }
+  validate_find_gate 2>/dev/null
+  printf '%s\n' "$_P" > "$TEST_TMPDIR/drain-default-passes"
+)
+assert_eq "1" "$(cat "$TEST_TMPDIR/drain-default-passes")" \
+  "drain default: no opt-in → single pass, never blocks (background-sweeper contract)"
+
 teardown_test_env
 summary

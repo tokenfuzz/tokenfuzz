@@ -684,6 +684,8 @@ assert_eq "2" "$(jq -r '.conditions[0].finding_total' "$cfbd/report.json")" \
   "T13l: aggregate preserves raw finding_total for auditability"
 assert_eq "1" "$(jq -r '.conditions[0].confirmed_finding_total' "$cfbd/report.json")" \
   "T13m: aggregate carries confirmed_finding_total"
+assert_eq "1" "$(jq -r '.conditions[0].unadjudicated_finding_total' "$cfbd/report.json")" \
+  "T13m2: aggregate carries unadjudicated_finding_total (finding_total 2 - confirmed 1), so confirmed=0 is legible as gate-unfinished"
 python3 "$PY" ledger "$cfbd" --ledger "$cfbd/benchmark-results.md" >/dev/null
 assert_file_contains "$cfbd/benchmark-results.md" 'tokenfuzz.*\[1\]\([^)]*pool/harness/findings[^)]*\)' \
   "T13n: ledger Findings column renders the confirmed count (1) only, not raw (2) or an un-gated suffix"

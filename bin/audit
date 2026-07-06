@@ -1741,13 +1741,6 @@ extract_raw_status() {
     || printf 'rate_limit=0\ncodex_completed=0\ncodex_failed=0\ngemini_success=0\n'
 }
 
-log_provider_issue() {
-  local file="$1"
-  [ -f "$file" ] || { printf '%s\n' none; return; }
-  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-issue "$file" 2>/dev/null \
-    || printf '%s\n' none
-}
-
 extract_finish_fields() {
   local file="$1"
   local backend="${2:-${ACTIVE_BACKEND:-${AUDIT_BACKEND:-claude}}}"
@@ -2625,8 +2618,8 @@ fi
 # 1-agent default for agy was removed: it did not prevent the failure it
 # targeted (agy's per-account quota is a *period* allocation, exhausted by
 # total usage regardless of how many sessions run in parallel), and a
-# genuine 429 is handled reactively by detect_rate_limit. Operators tune
-# gemini parallelism with NUM_AGENTS, exactly like claude/codex/oss.
+# genuine 429 is handled reactively by handle_rate_limit_backoff. Operators
+# tune gemini parallelism with NUM_AGENTS, exactly like claude/codex/oss.
 
 # Per-target config: output/<slug>/target.toml (gitignored, generated then reviewed).
 # With --experiment, output/<slug>-<experiment>/target.toml links to that base
@@ -2846,11 +2839,6 @@ count_structural_refusal_signals() {
 #   at ..." or "reset after ...", parse that as a reset too. Backends without
 #   any reset window fall back to the default backoff.
 
-provider_text_reset_at() {
-  local logfile="$1"
-  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-reset-at "$logfile" 2>/dev/null
-}
-
 log_has_rate_limit_rejection() {
   local logfile="$1"
   [ -f "$logfile" ] || return 1
@@ -2931,52 +2919,18 @@ normalize_agent_exit_code() {
   echo "${exit_code:-0}"
 }
 
-detect_rate_limit() {
-  local timestamp="$1"
-  local reset_at="" saw_provider_rejection=0
-  local i role mode logfile
-  for i in $(seq 1 "$NUM_AGENTS"); do
-    for role in cold-start deep_investigation; do
-      for mode in generic browser shell; do
-        logfile="$RAW_DIR/session_${timestamp}_${role}-${i}-${mode}.log.raw"
-        [ -f "$logfile" ] || continue
-        # Same single source of truth as everywhere else (429/5xx, all
-        # backends, event-scoped). detect_rate_limit only adds the
-        # reset-time extraction on top of that boolean.
-        log_has_rate_limit_rejection "$logfile" || continue
-        saw_provider_rejection=1
-        # Some providers include a reset window only as human text.
-        local text_reset
-        text_reset=$(provider_text_reset_at "$logfile" 2>/dev/null || true)
-        if [ -n "$text_reset" ] && [ "$text_reset" -gt 0 ] 2>/dev/null; then
-          if [ -z "$reset_at" ] || [ "$text_reset" -gt "$reset_at" ] 2>/dev/null; then
-            reset_at="$text_reset"
-          fi
-        fi
-        # Stage 2: pick a usable resetsAt from a non-allowed* rate_limit_event.
-        local candidate
-        candidate=$(grep -F '"type":"rate_limit_event"' "$logfile" 2>/dev/null \
-          | grep -v '"status":"allowed"' \
-          | grep -v '"status":"allowed_warning"' \
-          | grep -m1 -o '"resetsAt":[0-9]*' || true)
-        if [ -n "$candidate" ]; then
-          candidate="${candidate#*:}"
-          if [ -z "$reset_at" ] || [ "$candidate" -gt "$reset_at" ] 2>/dev/null; then
-            reset_at="$candidate"
-          fi
-        fi
-      done
-    done
-  done
-  if [ -n "$reset_at" ] && [ "$reset_at" -gt 0 ] 2>/dev/null; then
-    printf '%s\n' "$reset_at"
-    return 0
-  fi
-  if [ "$saw_provider_rejection" -eq 1 ]; then
-    printf '%s\n' "unknown"
-    return 0
-  fi
-  return 1
+# Whole-iteration provider status. The scan (glob session_<ts>_*.log.raw,
+# classify each log, extract the reset) is one Python pass in audit_helpers.py
+# (iteration-provider-status) — the same event-scoped classifier
+# log_has_rate_limit_rejection uses per file — so detection lives in one place
+# and one subprocess replaces a bash loop that spawned Python per log.
+_iteration_provider_status() {
+  python3 "$SCRIPT_ROOT/lib/audit_helpers.py" \
+    iteration-provider-status "$RAW_DIR" "$1" 2>/dev/null
+}
+
+_provider_status_value() {
+  printf '%s\n' "$1" | sed -n "s/^$2=//p" | tail -1
 }
 
 RATE_LIMIT_DEFAULT_BACKOFF="${RATE_LIMIT_DEFAULT_BACKOFF:-300}"  # 5 minutes when no reset time is available
@@ -3056,30 +3010,6 @@ mark_run_quality() {
 mark_backend_unavailable() {
   mark_run_quality provider_limited
   : > "$(backend_unavailable_path)" 2>/dev/null || true
-}
-
-provider_issue_for_timestamp() {
-  local timestamp="$1"
-  local issue saw_transient=0
-  local i role mode logfile
-  for i in $(seq 1 "$NUM_AGENTS"); do
-    for role in cold-start deep_investigation; do
-      for mode in generic browser shell; do
-        logfile="$RAW_DIR/session_${timestamp}_${role}-${i}-${mode}.log.raw"
-        [ -f "$logfile" ] || continue
-        issue="$(log_provider_issue "$logfile")"
-        case "$issue" in
-          capacity_limited) printf '%s\n' capacity_limited; return 0 ;;
-          transient) saw_transient=1 ;;
-        esac
-      done
-    done
-  done
-  if [ "$saw_transient" -eq 1 ]; then
-    printf '%s\n' transient
-  else
-    printf '%s\n' none
-  fi
 }
 
 rate_limit_cooldown_path() {
@@ -3195,11 +3125,15 @@ sleep_for_active_rate_limit_cooldown() {
 #          stop the run with a BACKEND_UNAVAILABLE outcome).
 handle_rate_limit_backoff() {
   local timestamp="$1"
-  local reset_at provider_issue
+  local status reset_at provider_issue saw
   # No rejection this iteration — the backend responded, so a prior streak
   # is over. Reset and let the caller run its normal accounting.
-  reset_at=$(detect_rate_limit "$timestamp" 2>/dev/null) || { RATE_LIMIT_BACKOFF_STREAK=0; return 1; }
-  provider_issue="$(provider_issue_for_timestamp "$timestamp" 2>/dev/null || echo none)"
+  status="$(_iteration_provider_status "$timestamp")" || { RATE_LIMIT_BACKOFF_STREAK=0; return 1; }
+  saw="$(_provider_status_value "$status" rate_limit)"
+  [ "$saw" = "1" ] || { RATE_LIMIT_BACKOFF_STREAK=0; return 1; }
+  reset_at="$(_provider_status_value "$status" reset_at)"
+  [ -n "$reset_at" ] && [ "$reset_at" != "unknown" ] || reset_at=unknown
+  provider_issue="$(_provider_status_value "$status" issue)"
   [ "$provider_issue" = "none" ] && provider_issue=transient
   persist_rate_limit_cooldown "$timestamp" "$reset_at" || true
 

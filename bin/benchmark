@@ -1081,8 +1081,14 @@ drain_cell_find_gate() {
   local results_dir="$1"
   [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "1" ] || return 0
   [ -n "$results_dir" ] && [ -d "$results_dir/findings" ] || return 0
+  # FIND_GATE_RESUME_ON_LIMIT: this drain runs after the cell has ended, so if a
+  # provider usage limit (e.g. the Claude session cap) is hit mid-drain, pausing
+  # to wait out the reset and resuming is strictly better than leaving findings
+  # un-adjudicated until a manual --regenerate. Safe to block here (unlike the
+  # in-run bin/audit sweeper, which must never stall the next iteration).
   RESULTS_DIR="$results_dir" ACTIVE_BACKEND="$BACKEND" MODEL="$model" \
     TARGET_ROOT="$SCRIPT_ROOT/targets/$TARGET_SLUG" TARGET_SLUG="$TARGET_SLUG" \
+    FIND_GATE_RESUME_ON_LIMIT=1 \
     validate_find_gate >/dev/null 2>&1 || true
 }
 

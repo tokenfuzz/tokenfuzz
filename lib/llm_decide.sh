@@ -61,6 +61,8 @@ llm_decide() {
     export LLM_DECIDE_FAIL_THRESHOLD="${LLM_DECIDE_FAIL_THRESHOLD:-}"
     export LLM_DECIDE_TYPE_FAIL_THRESHOLD="${LLM_DECIDE_TYPE_FAIL_THRESHOLD:-}"
     export LLM_DECIDE_FAIL_COOLDOWN="${LLM_DECIDE_FAIL_COOLDOWN:-}"
+    # Opt-in sink for a provider usage-limit reset (find-gate drain resume path).
+    export LLM_DECIDE_LIMIT_FILE="${LLM_DECIDE_LIMIT_FILE:-}"
     export LOGDIR="${LOGDIR:-}"
     # Per-decision mocks (LLM_DECIDE_MOCK_<UPPER>) have dynamic names —
     # enumerate them via compgen and forward each.
