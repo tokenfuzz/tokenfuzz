@@ -507,7 +507,12 @@ def iter_target_roots(output_root: str | os.PathLike) -> Iterator[Path]:
 
     def walk(d: Path) -> Iterator[Path]:
         try:
-            entries = sorted(p for p in d.iterdir() if p.is_dir())
+            # Skip symlinked dirs: a benchmark repo-root facade symlinks back to
+            # the source tree (which contains its own output/), so following it
+            # would recurse without bound. is_dir() alone follows the link.
+            entries = sorted(
+                p for p in d.iterdir() if p.is_dir() and not p.is_symlink()
+            )
         except OSError:
             return
         for e in entries:

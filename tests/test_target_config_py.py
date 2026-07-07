@@ -255,6 +255,19 @@ found = tc.find_session_dir(nroot)
 assert_eq(n_results.resolve(), found.resolve() if found else None,
           "find_session_dir skips a benchmark facade and returns the real target")
 
+# A symlinked container dir (e.g. a benchmark repo-root facade linking back to
+# the source tree, which carries its own output/) forms a cycle. The walk must
+# not descend it — following the link recurses without bound and hangs the scan.
+symroot = TEST_TMPDIR / "symloop"
+(symroot / "output" / "samples" / "sample-y").mkdir(parents=True)
+(symroot / "output" / "samples" / "sample-y" / "target.toml").write_text(
+    'target = "samples/sample-y"\n', encoding="utf-8")
+(symroot / "output" / "loop").symlink_to(symroot, target_is_directory=True)
+roots = sorted(str(r.relative_to(symroot / "output"))
+               for r in tc.iter_target_roots(symroot / "output"))
+assert_eq(["samples/sample-y"], roots,
+          "iter_target_roots skips a symlinked dir cycle and still finds real targets")
+
 # Negative: outside any output/ tree returns None.
 empty = TEST_TMPDIR / "elsewhere"
 empty.mkdir()
