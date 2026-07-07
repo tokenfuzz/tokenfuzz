@@ -33,12 +33,20 @@ count_active_hypotheses_for_agent() { echo "${__active_for_agent:-0}"; }
 agent_mode() { echo "generic"; }
 agent_role() { echo "reproduce"; }
 get_agent_subsystem() { echo "unknown"; }
+state_strategy_arg() { printf '%s\n' "${__strategy_arg:-}"; }
 __fuzz_empty=1
 fuzz_leads_empty() { return "${__fuzz_empty:-0}"; }
 # bin/state stub — controlled per-test via __peek_exit.
 mkdir -p "$TEST_TMPDIR/binstub"
 cat > "$TEST_TMPDIR/binstub/state" <<'STUB'
 #!/usr/bin/env bash
+[ -n "${STATE_ARGS_LOG:-}" ] && printf '%s\n' "$*" >> "$STATE_ARGS_LOG"
+if [ "${REQUIRE_STRATEGY:-0}" = "1" ]; then
+  case " $* " in
+    *" --strategy S7 "*) exit 0 ;;
+    *) exit 1 ;;
+  esac
+fi
 # Exit code is read from $PEEK_EXIT (default 1: no eligible card).
 exit "${PEEK_EXIT:-1}"
 STUB
@@ -96,6 +104,27 @@ if audit_should_skip_launch 2; then
 else
   pass "eligible card keeps slot alive"
 fi
+
+# ── Strategy filter: same next-card lane as prompt construction ───
+STATE_ARGS_LOG="$TEST_TMPDIR/state-args.log"
+: > "$STATE_ARGS_LOG"
+REQUIRE_STRATEGY=1
+export STATE_ARGS_LOG REQUIRE_STRATEGY
+__strategy_arg="--strategy S7"
+__active_for_agent=0
+__fuzz_empty=0
+PEEK_EXIT=1       # ignored by REQUIRE_STRATEGY
+export PEEK_EXIT
+if audit_should_skip_launch 2; then
+  fail "strategy-compatible card should keep slot alive"
+else
+  pass "strategy-compatible card keeps slot alive"
+fi
+assert_file_contains "$STATE_ARGS_LOG" 'strategy S7' \
+  "audit_should_skip_launch passes current strategy to next-card"
+REQUIRE_STRATEGY=0
+__strategy_arg=""
+export REQUIRE_STRATEGY
 
 # ── Fuzz leads present: do NOT skip ──────────────────────────────
 __active_for_agent=0

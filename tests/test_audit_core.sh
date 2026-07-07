@@ -119,7 +119,14 @@ eval "$(audit_extract_functions \
   _audit_detect_race_runner \
   detect_sanitizer_builds)"
 run_agent_src="$(audit_extract_function run_agent)"
-eval "$(audit_extract_functions count_iteration_progress_snapshot load_iteration_progress_snapshot)"
+eval "$(audit_extract_functions \
+  count_security_crash_candidates \
+  count_confirmed_findings \
+  _cluster_count_from_tool \
+  count_security_crash_root_causes \
+  count_confirmed_finding_root_causes \
+  count_iteration_progress_snapshot \
+  load_iteration_progress_snapshot)"
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -689,6 +696,53 @@ EOF
 snapshot=$(count_iteration_progress_snapshot)
 assert_match '^actionable=3$' "$snapshot" "iteration snapshot: structured path counts suffixed CRASH/FIND statuses"
 assert_match '^env_blocked=1$' "$snapshot" "iteration snapshot: structured path counts ENV-BLOCKED rows"
+
+rm -rf "$RESULTS_DIR/crashes" "$RESULTS_DIR/findings" "$RESULTS_DIR/state"
+mkdir -p "$RESULTS_DIR/crashes/CRASH-001-1" "$RESULTS_DIR/crashes/CRASH-002-1" \
+         "$RESULTS_DIR/findings/FIND-001-a" "$RESULTS_DIR/findings/FIND-002-a"
+for d in "$RESULTS_DIR"/crashes/CRASH-00{1,2}-1; do
+  cat > "$d/sanitizer.txt" <<'EOF'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000010
+    #0 0x1 in tool_resolve_entry catalog.c:42
+    #1 0x2 in app_parse app.c:10
+SUMMARY: AddressSanitizer: heap-buffer-overflow catalog.c:42 in tool_resolve_entry
+EOF
+  cat > "$d/REPORT.md" <<'EOF'
+# Crash report
+
+Strategy: S7
+Boundary: library-api
+Caller controls: bytes
+Trigger source: testcase
+EOF
+done
+for d in "$RESULTS_DIR"/findings/FIND-00{1,2}-a; do
+  cat > "$d/report.md" <<'EOF'
+# Finding report
+
+Location: src/catalog.c:42
+Issue class: memory-safety
+Strategy: S7
+Boundary: library-api
+Caller controls: bytes
+Trigger source: testcase
+EOF
+done
+snapshot=$(count_iteration_progress_snapshot)
+assert_match '^security_crashes=2$' "$snapshot" "iteration snapshot: raw crash dirs still counted"
+assert_match '^security_crash_roots=1$' "$snapshot" "iteration snapshot: duplicate crash dirs collapse to one root cause"
+assert_match '^confirmed_findings=2$' "$snapshot" "iteration snapshot: raw finding dirs still counted"
+assert_match '^confirmed_finding_roots=1$' "$snapshot" "iteration snapshot: duplicate finding dirs collapse to one root cause"
+finding_roots=0 crash_roots=0
+load_iteration_progress_snapshot _c _sc _a _e finding_roots crash_roots
+assert_eq "1" "$finding_roots" "iteration root loader: finding roots assigned"
+assert_eq "1" "$crash_roots" "iteration root loader: crash roots assigned"
+
+# The clusterer runs inside per-iteration accounting, so its call must be
+# time-bounded — an unbounded re-cluster over thousands of dirs would stall
+# the loop. On timeout the caller falls back to the raw dir count.
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'audit_timeout_run "\$cluster_timeout" python3 "\$tool" "\$root" --json' "root-count clusterer call is time-bounded"
+
 # The gemini backend is no longer capped to a conservative 1-agent
 # default — it takes the same generic pool as every other backend and is
 # tuned with NUM_AGENTS. The old GEMINI_DEFAULT_AGENTS special-case must

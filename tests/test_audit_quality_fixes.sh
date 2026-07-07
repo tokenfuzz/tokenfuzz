@@ -459,7 +459,7 @@ assert_file_not_contains "$audit_src" \
 # Both PRODUCTIVE branches now log under the tightened condition; the
 # combined trigger uses only new_confirmed_findings/new_security_crashes.
 assert_file_contains "$audit_src" \
-  'PRODUCTIVE requires a promoted finding or crash candidate' \
+  'PRODUCTIVE requires a promoted, unique root cause' \
   "PRODUCTIVE: tightened branch carries the rationale comment"
 # is_state_productive() is dead code — removing it stops the scratch-only
 # productive path entirely.

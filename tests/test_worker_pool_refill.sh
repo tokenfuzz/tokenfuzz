@@ -47,6 +47,7 @@ AGENT_DUR[3]=0
 # Fake the per-agent helpers _launch_agent_into_slot delegates to.
 get_agent_subsystem() { echo "src/parser.c"; }
 agent_mode() { echo "generic"; }
+audit_should_skip_launch() { return 1; }
 neutralize_qa_vocab_string() { cat; }
 strip_novocab_markers() { cat; }
 estimate_tokens() { printf '%d\n' "$(($(wc -c <<<"$1") / 4))"; }
@@ -139,6 +140,34 @@ assert_eq 1 "$rc" "_should_refill_slot: per-slot cap (1) already reached → fal
 
 _should_refill_slot 1 0 1; rc=$?
 assert_eq 0 "$rc" "_should_refill_slot: under-cap + other running → true"
+
+# ─────────────────────────────────────────────────────────────────────
+# 3. Refill consults the same launch eligibility gate as initial launches.
+#    A slot that has no strategy-compatible work is left idle instead of
+#    paying for a replacement LLM turn.
+# ─────────────────────────────────────────────────────────────────────
+: > "$LAUNCHES_LOG"
+: > "$INDEX"
+SKIP_REFILL_SLOT=2
+SKIP_CALLS_1=0
+SKIP_CALLS_2=0
+SKIP_CALLS_3=0
+audit_should_skip_launch() {
+  local slot="$1" var count
+  var="SKIP_CALLS_${slot}"
+  eval "count=\${$var:-0}"
+  count=$((count + 1))
+  eval "$var=$count"
+  [ "${SKIP_REFILL_SLOT:-}" = "$slot" ] && [ "$count" -gt 1 ]
+}
+launch_agents_and_wait "cold-start" fake_prompt_builder "20260528_000002" >/dev/null
+launches_total=$(grep -c "^LAUNCH" "$LAUNCHES_LOG")
+assert_eq 4 "$launches_total" "refill eligibility: skipped slot 2 refill, slot 3 still refilled"
+slot2_refills=$(awk '/^LAUNCH / && $2 == "slot=2" && $3 ~ /-r/ {n++} END {print n+0}' "$LAUNCHES_LOG")
+assert_eq 0 "$slot2_refills" "refill eligibility: slot 2 did not refill when launch gate skipped it"
+assert_file_contains "$INDEX" "SKIP_REFILL: agent=2" \
+  "refill eligibility: skipped refill is logged"
+audit_should_skip_launch() { return 1; }
 
 # ─────────────────────────────────────────────────────────────────────
 # 4. A signal-killed agent (wait status 128+N) is flagged distinctly from a

@@ -3418,33 +3418,48 @@ count_iteration_progress_snapshot() {
 
   case "${actionable:-0}" in ''|*[!0-9]*) actionable=0 ;; esac
   case "${env_blocked:-0}" in ''|*[!0-9]*) env_blocked=0 ;; esac
+  local confirmed_finding_roots=0 security_crash_roots=0
+  confirmed_finding_roots=$(count_confirmed_finding_root_causes 2>/dev/null || echo "$confirmed_findings")
+  security_crash_roots=$(count_security_crash_root_causes 2>/dev/null || echo "$security_crashes")
+  case "${confirmed_finding_roots:-0}" in ''|*[!0-9]*) confirmed_finding_roots="$confirmed_findings" ;; esac
+  case "${security_crash_roots:-0}" in ''|*[!0-9]*) security_crash_roots="$security_crashes" ;; esac
   printf 'confirmed_findings=%s\n' "$confirmed_findings"
   printf 'security_crashes=%s\n' "$security_crashes"
+  printf 'confirmed_finding_roots=%s\n' "$confirmed_finding_roots"
+  printf 'security_crash_roots=%s\n' "$security_crash_roots"
   printf 'actionable=%s\n' "$actionable"
   printf 'env_blocked=%s\n' "$env_blocked"
 }
 
 load_iteration_progress_snapshot() {
   local _v_confirmed="$1" _v_crashes="$2" _v_actionable="$3" _v_env_blocked="$4"
+  local _v_find_roots="${5:-}" _v_crash_roots="${6:-}"
   local _confirmed=0 _crashes=0 _actionable=0 _env_blocked=0
+  local _find_roots=0 _crash_roots=0
   local _snapshot _key _value
   _snapshot=$(count_iteration_progress_snapshot)
   while IFS='=' read -r _key _value; do
     case "$_key" in
       confirmed_findings) _confirmed="$_value" ;;
       security_crashes) _crashes="$_value" ;;
+      confirmed_finding_roots) _find_roots="$_value" ;;
+      security_crash_roots) _crash_roots="$_value" ;;
       actionable) _actionable="$_value" ;;
       env_blocked) _env_blocked="$_value" ;;
     esac
   done <<< "$_snapshot"
   case "${_confirmed:-0}" in ''|*[!0-9]*) _confirmed=0 ;; esac
   case "${_crashes:-0}" in ''|*[!0-9]*) _crashes=0 ;; esac
+  case "${_find_roots:-0}" in ''|*[!0-9]*) _find_roots=0 ;; esac
+  case "${_crash_roots:-0}" in ''|*[!0-9]*) _crash_roots=0 ;; esac
   case "${_actionable:-0}" in ''|*[!0-9]*) _actionable=0 ;; esac
   case "${_env_blocked:-0}" in ''|*[!0-9]*) _env_blocked=0 ;; esac
   printf -v "$_v_confirmed" '%s' "$_confirmed"
   printf -v "$_v_crashes" '%s' "$_crashes"
   printf -v "$_v_actionable" '%s' "$_actionable"
   printf -v "$_v_env_blocked" '%s' "$_env_blocked"
+  [ -n "$_v_find_roots" ] && printf -v "$_v_find_roots" '%s' "$_find_roots"
+  [ -n "$_v_crash_roots" ] && printf -v "$_v_crash_roots" '%s' "$_crash_roots"
 }
 
 # ─── Subsystem exhaustion & overlap detection ──────────────────────
@@ -3635,6 +3650,69 @@ eligible_work_card_exists() {
   return 1
 }
 
+_cluster_count_from_tool() {
+  local tool="$1" root="$2" exclude_prefixes="${3:-}"
+  [ -x "$tool" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  local out n
+  # Bound the clusterer. This runs inside per-iteration progress accounting,
+  # so on a target with thousands of result dirs an unbounded re-cluster could
+  # stall the loop (the "harness feels stuck" failure mode). On timeout we
+  # return 1 and the caller falls back to the raw dir count — identical to any
+  # other clustering failure, never a hang. Override the bound with
+  # AUDIT_CLUSTER_COUNT_TIMEOUT for exceptionally large trees.
+  local cluster_timeout="${AUDIT_CLUSTER_COUNT_TIMEOUT:-120}"
+  out=$(audit_timeout_run "$cluster_timeout" python3 "$tool" "$root" --json 2>/dev/null) || return 1
+  n=$(printf '%s' "$out" | python3 -c '
+import json
+import sys
+
+prefixes = tuple(p for p in sys.argv[1].split(",") if p)
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+count = 0
+for cluster in data.get("clusters") or []:
+    status = str(cluster.get("status", "") or "").upper()
+    if prefixes and any(status.startswith(prefix) for prefix in prefixes):
+        continue
+    count += 1
+print(count)
+' "$exclude_prefixes" 2>/dev/null
+  ) || return 1
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$n"
+}
+
+count_security_crash_root_causes() {
+  local raw
+  raw=$(count_security_crash_candidates 2>/dev/null || echo 0)
+  case "${raw:-0}" in ''|*[!0-9]*) raw=0 ;; esac
+  [ "$raw" -le 1 ] && { printf '%s\n' "$raw"; return 0; }
+
+  local n
+  if n=$(_cluster_count_from_tool "$SCRIPT_ROOT/bin/cluster-crashes" "$RESULTS_DIR" "PENDING"); then
+    printf '%s\n' "$n"
+  else
+    printf '%s\n' "$raw"
+  fi
+}
+
+count_confirmed_finding_root_causes() {
+  local raw
+  raw=$(count_confirmed_findings 2>/dev/null || echo 0)
+  case "${raw:-0}" in ''|*[!0-9]*) raw=0 ;; esac
+  [ "$raw" -le 1 ] && { printf '%s\n' "$raw"; return 0; }
+
+  local n
+  if n=$(_cluster_count_from_tool "$SCRIPT_ROOT/bin/cluster-findings" "$RESULTS_DIR" "NEEDS,REJECT"); then
+    printf '%s\n' "$n"
+  else
+    printf '%s\n' "$raw"
+  fi
+}
+
 # Per-agent pre-launch skip decision. Returns 0 (skip) when ALL three
 # sources of work are dry for THIS agent:
 #   - No eligible work card claimable by agent N (--peek check)
@@ -3657,11 +3735,12 @@ audit_should_skip_launch() {
   [ "$active" -gt 0 ] && return 1
   # Eligible card for THIS agent? --peek does not claim, only tests.
   if [ -x "bin/state" ] && [ -s "${RESULTS_DIR:-}/work-cards.jsonl" ]; then
-    local mode role
+    local mode role strategy_arg
     mode=$(agent_mode "$agent_num" 2>/dev/null || echo "")
     role=$(agent_role "$agent_num" 2>/dev/null || echo "")
+    strategy_arg=$(state_strategy_arg "$agent_num" 2>/dev/null || true)
     if bin/state --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-        next-card --agent "$agent_num" --mode "$mode" --role "$role" --peek >/dev/null 2>&1; then
+        next-card --agent "$agent_num" --mode "$mode" --role "$role" ${strategy_arg} --peek >/dev/null 2>&1; then
       return 1
     fi
   fi
@@ -6745,6 +6824,11 @@ launch_agents_and_wait() {
         [ "${slot_active[$i]:-0}" = "0" ] || continue
         local used="${refill_used[$i]}"
         if _should_refill_slot "$i" "$used" "$any_active"; then
+          if audit_should_skip_launch "$i"; then
+            log "SKIP_REFILL: agent=${i} role=${role_prefix} — no eligible strategy-compatible work for this slot; leaving it idle until the next iteration" | tee -a "$INDEX"
+            refill_used[$i]=99
+            continue
+          fi
           local next=$((used + 1))
           log "Worker-pool refill: slot ${i} finished early, launching refill r${next} (prior agents still running)" | tee -a "$INDEX"
           _launch_agent_into_slot "$i" "$role_prefix" "$prompt_builder" "$ts" "$next"
@@ -7235,7 +7319,8 @@ while true; do
 
   timestamp=$(date +%Y%m%d_%H%M%S)
   load_iteration_progress_snapshot \
-    confirmed_findings_before security_crashes_before actionable_before env_blocked_before
+    confirmed_findings_before security_crashes_before actionable_before env_blocked_before \
+    confirmed_finding_roots_before security_crash_roots_before
 
   # Reset the per-iteration ASan-run counter for every agent. The wrapper
   # increments this and prints BUDGET: N/${ASAN_RUN_BUDGET_PER_ITERATION}
@@ -7298,20 +7383,24 @@ while true; do
     run_post_iteration_housekeeping || true
 
     load_iteration_progress_snapshot \
-      confirmed_findings_after security_crashes_after actionable_after env_blocked_after
+      confirmed_findings_after security_crashes_after actionable_after env_blocked_after \
+      confirmed_finding_roots_after security_crash_roots_after
     new_confirmed_findings=$((confirmed_findings_after - confirmed_findings_before))
     new_security_crashes=$((security_crashes_after - security_crashes_before))
+    new_confirmed_finding_roots=$((confirmed_finding_roots_after - confirmed_finding_roots_before))
+    new_security_crash_roots=$((security_crash_roots_after - security_crash_roots_before))
     new_env_blocked=$((env_blocked_after - env_blocked_before))
-    # PRODUCTIVE only when triage actually promoted something to a
-    # confirmed finding or a crash candidate. A non-autodiscard ASan
-    # crash that landed in scratch but never made it through triage
-    # (rejected, dedup'd, or still in flight) is NOT productive — if
-    # it were, dry_streak would reset every iteration on the same
-    # scratch artifact and STALL_STOP would never fire. See
-    # is_state_productive() for the prior, looser semantics.
-    if [ "$new_confirmed_findings" -gt 0 ] || [ "$new_security_crashes" -gt 0 ]; then
+    # PRODUCTIVE only when triage promoted a NEW UNIQUE root cause. A
+    # duplicate CRASH/FIND dir is worth keeping for evidence, but it is
+    # not campaign progress: letting duplicates reset dry_streak keeps
+    # small hot targets alive forever on the same clustered bug.
+    if [ "$new_confirmed_finding_roots" -gt 0 ] || [ "$new_security_crash_roots" -gt 0 ]; then
       dry_streak=0
       update_subsystem_dry_streaks 1 || true
+    elif [ "$new_confirmed_findings" -gt 0 ] || [ "$new_security_crashes" -gt 0 ]; then
+      dry_streak=$((dry_streak + 1))
+      log "Iteration finished — DUPLICATE-ONLY: ${new_confirmed_findings} new finding dir(s) and ${new_security_crashes} new crash dir(s), but 0 new unique root cause(s); dry streak is now ${dry_streak}/${MAX_DRY_SESSIONS}" | tee -a "$INDEX"
+      update_subsystem_dry_streaks 0 || true
     elif [ "$new_env_blocked" -gt 0 ]; then
       # Diagnostic iteration: cards dispositioned to ENV-BLOCKED narrow
       # the search space (the queue marks them `blocked` and stops
@@ -7372,18 +7461,21 @@ while true; do
   # logs never call pending crash candidates "findings". Productivity still
   # includes net-new actionable state entries (CRASH- / FIND- / NEEDS_TESTCASE).
   load_iteration_progress_snapshot \
-    confirmed_findings_after security_crashes_after actionable_after env_blocked_after
+    confirmed_findings_after security_crashes_after actionable_after env_blocked_after \
+    confirmed_finding_roots_after security_crash_roots_after
   new_confirmed_findings=$((confirmed_findings_after - confirmed_findings_before))
   new_security_crashes=$((security_crashes_after - security_crashes_before))
+  new_confirmed_finding_roots=$((confirmed_finding_roots_after - confirmed_finding_roots_before))
+  new_security_crash_roots=$((security_crash_roots_after - security_crash_roots_before))
   new_env_blocked=$((env_blocked_after - env_blocked_before))
 
   iteration_was_productive=0
-  # PRODUCTIVE requires a promoted finding or crash candidate. The
-  # prior is_state_productive() disjunct also returned true for
-  # untriaged scratch ASan output, which let dry_streak reset on
-  # rejected/dedup'd crashes — "PRODUCTIVE: 0 new finding(s) and 0
-  # new crash candidate(s)" appeared in the log because of that.
-  if [ "$new_confirmed_findings" -gt 0 ] || [ "$new_security_crashes" -gt 0 ]; then
+  # PRODUCTIVE requires a promoted, unique root cause. The prior
+  # is_state_productive() disjunct returned true for untriaged scratch
+  # ASan output; counting raw result dirs has the same shape when agents
+  # re-file duplicates of an already-clustered bug. Both are evidence
+  # artifacts, not a reason to reset the campaign dry streak.
+  if [ "$new_confirmed_finding_roots" -gt 0 ] || [ "$new_security_crash_roots" -gt 0 ]; then
     iteration_was_productive=1
   fi
   update_subsystem_dry_streaks "$iteration_was_productive" || log "WARN: update_subsystem_dry_streaks failed (rc=$?)" | tee -a "$INDEX"
@@ -7418,7 +7510,10 @@ while true; do
   iter_dur_secs=$(( $(date +%s) - ${iteration_start_epoch:-$(date +%s)} ))
   if [ "$iteration_was_productive" -eq 1 ]; then
     dry_streak=0
-    log "Iteration ${iteration} finished in $(fmt_secs "$iter_dur_secs") — PRODUCTIVE: ${new_confirmed_findings} new confirmed finding(s) and ${new_security_crashes} new crash candidate(s) this round; cumulative totals are now ${confirmed_findings_after} finding(s) / ${security_crashes_after} crash(es); resetting dry streak to 0" | tee -a "$INDEX"
+    log "Iteration ${iteration} finished in $(fmt_secs "$iter_dur_secs") — PRODUCTIVE: ${new_confirmed_findings} new confirmed finding dir(s) and ${new_security_crashes} new crash candidate dir(s) this round (${new_confirmed_finding_roots} finding root(s), ${new_security_crash_roots} crash root(s)); cumulative totals are now ${confirmed_findings_after} finding(s) / ${security_crashes_after} crash(es); resetting dry streak to 0" | tee -a "$INDEX"
+  elif [ "$new_confirmed_findings" -gt 0 ] || [ "$new_security_crashes" -gt 0 ]; then
+    dry_streak=$((dry_streak + 1))
+    log "Iteration ${iteration} finished in $(fmt_secs "$iter_dur_secs") — DUPLICATE-ONLY: ${new_confirmed_findings} new finding dir(s) and ${new_security_crashes} new crash candidate dir(s), but 0 new unique root cause(s); dry streak is now ${dry_streak}/${MAX_DRY_SESSIONS}; cumulative totals: ${confirmed_findings_after} finding(s) / ${security_crashes_after} crash(es)" | tee -a "$INDEX"
   elif [ "$new_env_blocked" -gt 0 ]; then
     # Diagnostic iteration: the harness ruled out dead-code subsystems
     # (TLS/SSH backends not compiled, platform-only TUs, etc.) but did
