@@ -3260,9 +3260,9 @@ validate_find_gate() {
 # ─── Bug cluster expansion ────────────────────────────────────────
 # After a CRASH lands, ask the LLM to enumerate 3 sibling hypotheses
 # (same-file siblings, neighbor handlers with the same pattern, callers
-# that share the bug class). Each hypothesis is appended as a PENDING
-# table row to the agent state file pointed to by AGENT_CLUSTER_STATE
-# (or the first AUDIT_STATE-*.md file in RESULTS_DIR if unset).
+# that share the bug class). Each hypothesis is routed into structured
+# state (bin/state add-cluster-hyps) as a PENDING lead owned by the
+# crash's agent, so `bin/state resume` surfaces it for investigation.
 
 # Collect the top frames from the primary ASan output. Returns up to 8 lines.
 _cluster_top_frames() {
@@ -3303,7 +3303,7 @@ _cluster_nearby_source() {
 
 # Pure decision step: prints the cluster-expansion JSON for one crash
 # dir on stdout (no state writes), so the driver below can run several
-# decisions concurrently and keep the state-file appends serial.
+# decisions concurrently and keep the structured-state writes serial.
 _cluster_expand_decide() {
   local d="$1"
   local id frames source_block prompt
@@ -3320,20 +3320,15 @@ _cluster_expand_decide() {
   printf '%s' "$prompt" | llm_decide cluster_expand "rows" "$(_triage_decision_timeout cluster_expand)"
 }
 
-# Append cluster-expansion rows to a state file.
+# Route a crash's cluster-expansion siblings into structured state.
 expand_cluster_for_crash() {
   local d="$1"
-  local state_file="${2:-${AGENT_CLUSTER_STATE:-}}"
 
   declare -f llm_decide >/dev/null 2>&1 || return 0
   [ -d "$d" ] || return 0
-
-  if [ -z "$state_file" ]; then
-    state_file=$(find "${RESULTS_DIR:-/nonexistent}" -maxdepth 1 -name 'AUDIT_STATE-*.md' \
-                 -type f 2>/dev/null | sort | head -1)
-  fi
-  [ -n "$state_file" ] || return 0
-  [ -f "$state_file" ] || return 0
+  local state_bin="${SCRIPT_ROOT:-.}/bin/state"
+  [ -x "$state_bin" ] || return 0
+  [ -n "${RESULTS_DIR:-}" ] || return 0
 
   # Skip if this CRASH has already been expanded.
   local id; id=$(basename "$d")
@@ -3353,44 +3348,79 @@ expand_cluster_for_crash() {
     [ -n "$json" ] || return 0
   fi
 
-  # Validate and append rows.
-  local count
-  count=$(printf '%s' "$json" | jq -r '.rows | length' 2>/dev/null) || return 0
-  [ "${count:-0}" -ge 1 ] || return 0
-
-  {
-    echo ""
-    echo "<!-- cluster-expansion ${id} $(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
-    echo "## Cluster expansion from ${id}"
-    echo ""
-    echo "| # | Hypothesis | File:Function:Line | Input Shape | Guard Gap | Expected Diagnostic | Strategy | Status |"
-    echo "|---|-----------|--------------------|-------------|-----------|--------------------|----------|--------|"
-    printf '%s' "$json" | jq -r --arg src "$id" '
-      .rows[] | "| - | \(.hypothesis) | \(.file):\(.function):\(.line) | (sibling of \($src)) | (unknown) | \(.category) issue diagnostic | S5 | PENDING |"
-    ' 2>/dev/null
-  } >> "$state_file"
+  # Route rows through bin/state: it validates the JSON, resolves the owning
+  # agent, dedupes, and writes each sibling under the shared JSONL lock. Mark
+  # the dir expanded only on a clean write — a valid empty rows[] ("no
+  # siblings") is a completed expansion, but malformed JSON or a state-write
+  # failure leaves the dir unmarked so the next pass retries.
+  local out
+  out=$(printf '%s' "$json" | "$state_bin" --results-dir "$RESULTS_DIR" \
+      ${TARGET_SLUG:+--target-slug "$TARGET_SLUG"} \
+      ${TARGET_ROOT:+--target-path "$TARGET_ROOT"} \
+      add-cluster-hyps --crash-id "$id" 2>&1) || {
+    audit_log "DEBUG: cluster-expand ${id}: ${out}"
+    return 0
+  }
 
   : > "$d/.cluster_expanded" 2>/dev/null || true
-  audit_log "CLUSTER-EXPAND: ${id} → ${count} sibling hypotheses appended to $(basename "$state_file")" \
-    | tee -a "${INDEX:-/dev/null}"
+  audit_log "CLUSTER-EXPAND: ${id} → ${out#OK: }" | tee -a "${INDEX:-/dev/null}"
 }
 
 # Run cluster expansion across all CRASH-* dirs that have not yet been
-# expanded. Best-effort. The per-crash LLM decisions (the slow part,
-# 5-20s each) are pre-computed concurrently through the shared triage
-# pool; the state-file appends stay serial in expand_cluster_for_crash
-# so table blocks never interleave in the shared markdown.
+# expanded. Best-effort. The per-crash LLM decisions (the slow part) are
+# pre-computed concurrently through the shared triage pool; the structured
+# writes stay serial in expand_cluster_for_crash.
 # Worker for the cluster-expand precompute pool: $1=crash dir. Writes its own
 # per-dir temp file that the serial apply step below consumes.
 _cluster_expand_pool_worker() {
   _cluster_expand_decide "$1" > "$1/.cluster_rows.json.tmp" 2>/dev/null || true
 }
 
+_cluster_indexed_crash_ids() {
+  local index_file="${RESULTS_DIR:-}/crashes/CRASH-CLUSTERS.md"
+  [ -s "$index_file" ] || return 0
+  # grep exits non-zero when the index carries no crash ids yet (header only);
+  # under pipefail that surfaces as a helper failure, which would abort the
+  # migration's command substitution under set -e. "No ids" is a valid result,
+  # so fall open.
+  grep -Eo 'CRASH-[[:alnum:]._-]+' "$index_file" 2>/dev/null \
+    | grep -Fvx 'CRASH-CLUSTERS' 2>/dev/null \
+    | sort -u || true
+}
+
 expand_clusters_for_new_crashes() {
   declare -f llm_decide >/dev/null 2>&1 || return 0
   [ -d "${RESULTS_DIR:-/nonexistent}/crashes" ] || return 0
+  # Guard before the expensive precompute: with no structured-state backend
+  # there is nowhere to route siblings, so spend zero LLM calls.
+  [ -x "${SCRIPT_ROOT:-.}/bin/state" ] || return 0
   local -a dirs=()
-  local d
+  local d id migrated backlog_ids
+  # One-time backlog migration. The structured-state path arrived after many runs
+  # already had crashes indexed in CRASH-CLUSTERS.md but no .cluster_expanded
+  # marker; replaying that whole history through slow LLM expansion is waste. On
+  # the first run only, mark the already-indexed crash DIRS as expanded, then rely
+  # solely on the per-dir marker thereafter. Mark physical dirs, never a frozen id
+  # list: crash ids get recycled once a higher-numbered crash is rejected out of
+  # crashes/ (crash_bundle.sh allocates max+1 over current dirs), so a permanent
+  # id skip-list would suppress a genuinely new crash that reused a backlog id.
+  # maintain_indexes runs after this stage, so at migration only historical
+  # crashes are indexed — this session's new crashes are not, and still expand.
+  migrated="$RESULTS_DIR/state/.cluster-expand-backlog-done"
+  if [ ! -f "$migrated" ]; then
+    mkdir -p "$RESULTS_DIR/state" 2>/dev/null || true
+    # Space-delimited set; the space boundaries in the case match below keep it an
+    # exact-id test (CRASH-039-1 ≠ CRASH-039-10).
+    backlog_ids=" $(_cluster_indexed_crash_ids 2>/dev/null | tr '\n' ' ') "
+    for d in "$RESULTS_DIR"/crashes/CRASH-*/; do
+      [ -d "$d" ] || continue
+      id=$(basename "$d")
+      case "$backlog_ids" in
+        *" $id "*) : > "$d/.cluster_expanded" 2>/dev/null || true ;;
+      esac
+    done
+    : > "$migrated" 2>/dev/null || true
+  fi
   for d in "$RESULTS_DIR"/crashes/CRASH-*/; do
     [ -d "$d" ] || continue
     [ -f "$d/.cluster_expanded" ] && continue

@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from workqueue import (
+    add_cluster_hypotheses,
     add_common_args,
     add_hypothesis,
     add_note,
@@ -26,6 +27,7 @@ from workqueue import (
     context_from_args,
     DuplicateHypothesisIdError,
     explain_queue,
+    HYPOTHESIS_DIAGNOSTIC_CATEGORIES,
     init_state,
     list_work_cards,
     list_crashes,
@@ -235,11 +237,18 @@ def main(argv: list[str]) -> int:
         "--category",
         dest="diagnostic",
         required=True,
-        choices=["bounds", "lifetime", "type", "size", "uninit", "state"],
+        choices=list(HYPOTHESIS_DIAGNOSTIC_CATEGORIES),
     )
     p_add.add_argument("--strategy", required=True)
     p_add.add_argument("--status", default="PENDING")
     p_add.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
+
+    # Crash-cluster expansion: reads a {"rows":[...]} decision on stdin and adds
+    # each sibling as a PENDING hypothesis owned by the crash's agent.
+    p_cluster = sub.add_parser("add-cluster-hyps")
+    p_cluster.add_argument("--crash-id", required=True)
+    p_cluster.add_argument("--strategy", default="")
+    p_cluster.add_argument("--json", action="store_true", help="emit the {agent,added,skipped} result as JSON")
 
     p_up = sub.add_parser("update-hyp")
     p_up.add_argument("id_pos", nargs="?", default="", help=argparse.SUPPRESS)
@@ -509,6 +518,31 @@ def main(argv: list[str]) -> int:
             print(f"[state] {exc}", file=sys.stderr)
             return 2
         _emit_mutator("add-hyp", row, args.json)
+        return 0
+    if args.cmd == "add-cluster-hyps":
+        # The rows arrive as a piped JSON decision (see triage.sh). If stdin is a
+        # terminal, json.load would block forever waiting for EOF — fail fast so a
+        # misconfigured caller can never hang the housekeeping sweep.
+        if sys.stdin.isatty():
+            print("[state] add-cluster-hyps: expects a {\"rows\":[...]} payload on stdin", file=sys.stderr)
+            return 2
+        try:
+            payload = json.load(sys.stdin)
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"[state] add-cluster-hyps: invalid JSON on stdin: {exc}", file=sys.stderr)
+            return 2
+        rows = payload.get("rows") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            print("[state] add-cluster-hyps: expected an object with a 'rows' array", file=sys.stderr)
+            return 2
+        result = add_cluster_hypotheses(ctx, args.crash_id, rows, args.strategy)
+        if args.json:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            print(
+                f"OK: add-cluster-hyps crash={args.crash_id} "
+                f"agent={result['agent']} added={result['added']} skipped={result['skipped']}"
+            )
         return 0
     if args.cmd == "update-hyp":
         if not args.id and args.id_pos:

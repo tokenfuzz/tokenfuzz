@@ -2158,6 +2158,14 @@ def is_active_hypothesis_status(status: str) -> bool:
     return (status or "") in {"PENDING", "INVESTIGATING", "NEEDS_TESTCASE"}
 
 
+# Canonical hypothesis bug-class taxonomy (the sanitizer-oriented `diagnostic`
+# field). This is the sink axis — distinct from bin/severity's security-impact
+# primitive classes (heap_write, uaf_read, …), which score an already-confirmed
+# crash. It backs bin/state add-hyp's --diagnostic choices (a human-input
+# guardrail); keep in sync with bin/probe / safety_framing.
+HYPOTHESIS_DIAGNOSTIC_CATEGORIES = ("bounds", "lifetime", "type", "size", "uninit", "state")
+
+
 # Status keys returned by agent_counts(). Kept as a constant so callers
 # (bin/state, tests, bash wrappers) can rely on the exact key set.
 AGENT_COUNT_KEYS = (
@@ -2384,20 +2392,19 @@ def card_reject_skips_for_agent(ctx: Context, agent: str) -> set[str]:
     return skipped
 
 
-def lookup_crash_origin(ctx: Context, crash_id: str) -> dict | None:
-    """Find the hypothesis row that filed `crash_id`, if any.
+def _crash_origin_from_hyps(hyps: list[dict], crash_id: str) -> dict | None:
+    """Find the hypothesis row (from an already-read list) that filed `crash_id`.
 
     Hypothesis filings store the crash id in the row's `status` field as
-    "CRASH-<id>" (see bin/state update-hyp / add-hyp). This walks
-    hypotheses.jsonl newest-row-wins per id and returns the matching
-    row so callers (the rejection gate) can recover the originating
-    card_id + agent without scanning the crash dir bundle.
+    "CRASH-<id>" (see bin/state update-hyp / add-hyp). Newest-row-wins per id.
+    Split from `lookup_crash_origin` so callers holding hypotheses.jsonl in
+    memory can reuse the match without a second read.
     """
     cid_target = (crash_id or "").strip()
     if not cid_target:
         return None
     latest: dict[str, dict] = {}
-    for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"):
+    for row in hyps:
         hid = str(row.get("id", "")).strip()
         if hid:
             latest[hid] = row
@@ -2409,6 +2416,18 @@ def lookup_crash_origin(ctx: Context, crash_id: str) -> dict | None:
         if status == cid_norm or status.startswith(cid_norm + " "):
             return row
     return None
+
+
+def lookup_crash_origin(ctx: Context, crash_id: str) -> dict | None:
+    """Find the hypothesis row that filed `crash_id`, if any.
+
+    Walks hypotheses.jsonl and returns the matching row so callers (the
+    rejection gate) can recover the originating card_id + agent without
+    scanning the crash dir bundle.
+    """
+    return _crash_origin_from_hyps(
+        read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"), crash_id
+    )
 
 
 def claim_row_expiry(row: dict, ttl: timedelta) -> datetime | None:
@@ -3268,6 +3287,117 @@ def add_hypothesis(ctx: Context, args: argparse.Namespace) -> dict:
                     },
                 )
     return row
+
+
+def _cluster_owner_agent(crash_id: str) -> str:
+    """Agent that should investigate crash_id's siblings.
+
+    Crash dirs are named CRASH-<n>-<agent> (see triage.sh), so the trailing
+    numeric segment is the filing agent — the natural owner for same-surface
+    siblings, and `resume` only surfaces an agent's own PENDING hypotheses.
+    Clamp to the live NUM_AGENTS range (crash dirs persist across runs that may
+    relaunch with fewer agents) so a sibling is always owned by an agent that
+    actually resumes. Falls back to agent 1 for an id with no agent suffix.
+    """
+    core = re.sub(r"^(?:CRASH|FIND)-", "", (crash_id or "").strip(), flags=re.IGNORECASE)
+    nums = [s for s in core.split("-") if s.isdigit()]
+    agent = int(nums[-1]) if len(nums) >= 2 else 1
+    raw = os.environ.get("NUM_AGENTS", "")
+    num_agents = int(raw) if raw.isdigit() and int(raw) >= 1 else 0
+    if num_agents and not (1 <= agent <= num_agents):
+        agent = (agent - 1) % num_agents + 1
+    return str(agent)
+
+
+def add_cluster_hypotheses(
+    ctx: Context, crash_id: str, rows: list[dict], strategy: str = ""
+) -> dict:
+    """Route crash-cluster sibling rows into structured state as PENDING
+    hypotheses owned by the crash's agent. Returns {agent, added, skipped}.
+
+    Deduped against existing active hypotheses (and within the batch) on
+    (file:function:line, hypothesis) so overlapping siblings from crashes in the
+    same file don't pile duplicate leads. Only rows missing a file or hypothesis
+    are dropped; the diagnostic category is a hint and never discards a sibling.
+    """
+    init_state(ctx)
+    agent = _cluster_owner_agent(crash_id)
+    hyp_path = state_dir(ctx.results_dir) / "hypotheses.jsonl"
+
+    def surface_key(file_field: str, hypothesis: str) -> str:
+        return f"{file_field.strip().lower()}::{' '.join(hypothesis.split()).lower()}"
+
+    added = 0
+    skipped = 0
+    now = now_iso()
+    with jsonl_lock(hyp_path):
+        existing = _read_jsonl_unlocked(hyp_path)
+        # Siblings share the parent crash's bug class, so attribute them to the
+        # strategy that found it — anything else skews ROI (strategy_yield) and
+        # the resume brief. Derived from `existing` (no second read). "S5" is the
+        # historical fallback when the crash has no structured origin hypothesis.
+        if not strategy:
+            origin = _crash_origin_from_hyps(existing, crash_id)
+            strategy = str(origin.get("strategy", "")).strip() if origin else ""
+        strategy = strategy or "S5"
+        existing_ids = {str(h.get("id", "")) for h in existing}
+        seen = {
+            surface_key(str(h.get("file", "")), str(h.get("hypothesis", "")))
+            for h in existing
+            if is_active_hypothesis_status(h.get("status", ""))
+        }
+        for row in rows:
+            file_path = str(row.get("file", "")).strip() if isinstance(row, dict) else ""
+            hypothesis = str(row.get("hypothesis", "")).strip() if isinstance(row, dict) else ""
+            category = str(row.get("category", "")).strip().lower() if isinstance(row, dict) else ""
+            # file + hypothesis are the investigable content; a row missing either
+            # is not a usable lead. The diagnostic category is a display-only hint,
+            # so it must never gate acceptance — dropping a row on a non-canonical
+            # label would silently lose a real sibling while the crash still marks
+            # expanded. Keep the row, but fold any off-taxonomy label (blank, or a
+            # sanitizer-class term the model volunteered) into the broad "state"
+            # bucket so structured state stays inside the six-value taxonomy.
+            if not file_path or not hypothesis:
+                skipped += 1
+                continue
+            category = category if category in HYPOTHESIS_DIAGNOSTIC_CATEGORIES else "state"
+            # Fold function:line into the file surface, matching bin/state add-hyp.
+            # "0" means "line unknown" (see the prompt), so it is not folded in.
+            func = str(row.get("function", "")).strip()
+            line = str(row.get("line", "")).strip()
+            if (func or line not in ("", "0")) and file_path.count(":") < 2:
+                file_path = ":".join(p for p in (file_path, func, line if line != "0" else "") if p)
+            key = surface_key(file_path, hypothesis)
+            if key in seen:
+                skipped += 1
+                continue
+            seed = f"{agent}:{file_path}:{hypothesis}:{now}:{added}"
+            hid = "H-" + hashlib.sha1(seed.encode()).hexdigest()[:10]
+            counter = 0
+            while hid in existing_ids:
+                counter += 1
+                hid = "H-" + hashlib.sha1(f"{seed}:{counter}".encode()).hexdigest()[:10]
+            existing_ids.add(hid)
+            seen.add(key)
+            _append_jsonl_unlocked(
+                hyp_path,
+                {
+                    "id": hid,
+                    "agent": agent,
+                    "card_id": "",
+                    "hypothesis": hypothesis,
+                    "file": file_path,
+                    "input_shape": f"sibling of {crash_id}",
+                    "guard_gap": "unknown",
+                    "diagnostic": category,
+                    "strategy": strategy,
+                    "status": "PENDING",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            added += 1
+    return {"agent": agent, "added": added, "skipped": skipped}
 
 
 # Note fingerprints that indicate an environmental / build wall: the

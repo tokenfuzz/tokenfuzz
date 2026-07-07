@@ -3,8 +3,10 @@ hypotheses worth investigating next. Look for same-file siblings,
 neighbor handlers with the same pattern, callers that share the bug
 class, or peer functions in the same file.
 
-Output a single JSON object with key "rows" containing an array of
-EXACTLY 3 sibling hypotheses. Each row needs:
+Output a single JSON object with key "rows" containing an array of up to 3
+genuine sibling hypotheses — return only the ones you actually suspect (fewer,
+or an empty array if there are no strong siblings; do not pad with weak guesses).
+Each row needs:
   file        string  file path (e.g. "src/foo/Bar.cpp")
   function    string  function or method name
   line        integer best-guess line number (use 0 if unsure)
