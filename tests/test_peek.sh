@@ -25,11 +25,11 @@ output=$("$PEEK" "$FIX:10-15")
 expected=$'line 10\nline 11\nline 12\nline 13\nline 14\nline 15'
 assert_eq "$expected" "$output" "range: FILE:10-15 returns exactly those lines"
 
-# Footer does not fire when range ≤ PEEK_MAX_LINES.
+# Footer does not fire for an in-range request.
 assert_not_match 'clamped' "$output" "range: no footer when range fits"
 
-# Default (PEEK_MAX_LINES=0): a large explicit range is honored, not clamped;
-# the byte cap is the only size guard.
+# A large explicit range is honored, not clamped; the byte cap is the only
+# size guard (there is no line-count cap on range mode).
 output=$("$PEEK" "$FIX:1-500")
 data_lines=$(printf '%s\n' "$output" | grep -c '^line')
 assert_eq "500" "$data_lines" "range: default honors full range (line clamp off)"

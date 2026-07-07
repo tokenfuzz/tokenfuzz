@@ -50,16 +50,6 @@ done
 _ts() { date +%H:%M:%S; }
 log() { echo "[$(_ts)] [recon] $*"; }
 
-append_csv() {
-  local existing="$1"
-  local item="$2"
-  if [ -z "$existing" ]; then
-    printf '%s' "$item"
-  else
-    printf '%s, %s' "$existing" "$item"
-  fi
-}
-
 usage() {
   cat <<'EOF'
 Usage:

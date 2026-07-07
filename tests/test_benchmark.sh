@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for bin/benchmark + lib/benchmark.py + lib/benchmark_model_direct_usage.py:
+# Tests for bin/benchmark + lib/benchmark.py + lib/benchmark_model_direct_render.py:
 #   - harvest: AddressSanitizer-confirmed crash counting, cluster parse,
 #              finding/recon/rejected counts, token sums
 #   - aggregate: per-condition fold, median/range

@@ -200,7 +200,6 @@ class Language:
 
 
 _ASAN_BANNER = r"==\d+==ERROR: AddressSanitizer"
-_UBSAN_BANNER = r"==\d+==.*runtime error:"
 _TSAN_BANNER = r"WARNING: ThreadSanitizer:"
 _MSAN_BANNER = r"WARNING: MemorySanitizer:"
 

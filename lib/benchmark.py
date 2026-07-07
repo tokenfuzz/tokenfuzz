@@ -588,15 +588,6 @@ def count_subdirs(parent: Path, prefix: str) -> int:
     )
 
 
-# Markdown table row in the per-cell `crashes-rejected/REJECTED-CRASHES.md`
-# ledger (schema shared with the INDEX.md alias).
-# Triage writes one row per rejected crash (id, site, rejected-at) — these
-# never get a CRASH-* subdir, so the row count is the only place they show
-# up. Header rows ("| ID | ... |" / "| :-- | ... |") are skipped so they
-# don't inflate the count.
-_REJECTED_CRASH_ROW_RE = re.compile(r"^\|\s*[^|\s]+[^|]*\|")
-
-
 def count_rejected_crash_rows(index_md: Path) -> int:
     """Count rejected-crash rows in a rejected-crashes ledger.
 
@@ -1667,14 +1658,6 @@ def _choose_find_quality(finding_dir: Path) -> dict:
     if not cache.is_file():
         return {}
     return _read_json(cache) or {}
-
-
-def _bool_label(value: object) -> str:
-    if value is True:
-        return "yes"
-    if value is False:
-        return "no"
-    return "?"
 
 
 def _md_cell(value: object) -> str:
@@ -3403,25 +3386,6 @@ def _benchmark_roots(bench_root: Path) -> list[Path]:
                for d in child.iterdir() if d.is_dir()):
             roots.append(child)
     return roots
-
-
-def _latest_report(bench_root: Path) -> dict | None:
-    """The most recent run's report.json under a benchmark root, or None.
-
-    Run directories are timestamp-named (`YYYYMMDD-HHMMSS`), so a plain
-    name sort puts the newest last.
-    """
-    candidates = sorted(
-        (d for d in bench_root.iterdir()
-         if d.is_dir() and (d / "report.json").is_file()),
-        key=lambda d: d.name,
-    )
-    for run_dir in reversed(candidates):
-        try:
-            return json.loads((run_dir / "report.json").read_text("utf-8"))
-        except (OSError, ValueError):
-            continue
-    return None
 
 
 def _reports_by_run_target(bench_root: Path) -> list[dict]:

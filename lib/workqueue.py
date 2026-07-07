@@ -1065,15 +1065,12 @@ def _recent_touched_files(target_root: Path, days: int = 180) -> set[str]:
     actively edited?" A 2014 fix in code that was rewritten in 2024 is
     high-value (variant patterns may have been re-introduced); a 2014
     fix in dormant code is low-value (years of OSS-Fuzz on top of it).
-    Best-effort: returns empty set on git failure, on a non-git tree,
-    or when the env var WORK_QUEUE_DISABLE_RECENCY_BOOST=1 is set.
+    Best-effort: returns empty set on git failure or on a non-git tree.
 
     Cached at call site via _recent_touched_files_for; callers should
     use that wrapper, not this function, so the git invocation only
     fires once per workqueue load.
     """
-    if os.environ.get("WORK_QUEUE_DISABLE_RECENCY_BOOST", "0") == "1":
-        return set()
     if not target_root or not target_root.is_dir():
         return set()
     git_dir = target_root / ".git"
@@ -4353,32 +4350,6 @@ def _plain_markdown_cell(value: str) -> str:
     return re.sub(r"\s+", " ", value)
 
 
-def _markdown_table_rows(path: Path) -> list[dict[str, str]]:
-    if not path.is_file():
-        return []
-    rows: list[dict[str, str]] = []
-    header: list[str] = []
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except Exception:
-        return []
-    for line in lines:
-        cells = _markdown_cells(line)
-        if not cells:
-            if header and rows:
-                break
-            continue
-        if not header:
-            header = [_plain_markdown_cell(c).lower() for c in cells]
-            continue
-        if _is_markdown_separator(cells):
-            continue
-        if len(cells) < len(header):
-            cells.extend([""] * (len(header) - len(cells)))
-        rows.append({header[i]: _plain_markdown_cell(cells[i]) for i in range(len(header))})
-    return rows
-
-
 def _report_path(artifact_dir: Path) -> Path | None:
     for name in ("REPORT.md", "report.md", "description.md"):
         p = artifact_dir / name
@@ -5121,9 +5092,6 @@ def last_terminal_reason(ctx: Context, agent: str = "", rows: list[dict] | None 
     if note:
         parts.append(f"Reason: {note}")
     return " | ".join(parts) + "\n"
-
-
-_TRIED_LINE_RE = None
 
 
 def _parse_tried_line(line: str) -> dict:

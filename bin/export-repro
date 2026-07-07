@@ -29,7 +29,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 # .absolute() not .resolve(): inside a benchmark cell facade bin/ is a
 # symlink to the real tree; .resolve() would chase it and make us read
@@ -459,16 +459,6 @@ def cfg_sanitizer_lib(cfg: target_config.Config, sanitizer: str) -> str:
     if hasattr(cfg, "sanitizer_lib"):
         return cfg.sanitizer_lib(sanitizer)
     return getattr(cfg, f"{sanitizer}_lib", "") if sanitizer != "asan" else cfg.asan_lib
-
-
-def shell_join_args(args: Iterable[str]) -> str:
-    # Items already containing a `$` are shell expressions
-    # (`"$link_lib_0"` from emit_link_libs_with_resolves); shell-quoting
-    # them would freeze the variable name as a literal. Pass those through
-    # verbatim — they were produced by us and don't need further escaping.
-    return "".join(
-        (f" {a}" if "$" in a else f" {shq(a)}") for a in args if a
-    )
 
 
 _LINK_LIB_RESOLVE_BLOCK = """\
@@ -1408,10 +1398,6 @@ def _san_lib_is_unset(san_lib_rel: str) -> bool:
     generated reproduce.sh has no broken library reference.
     """
     return not san_lib_rel or "FILL_ME" in san_lib_rel
-
-
-def _asan_lib_is_unset(asan_lib_rel: str) -> bool:
-    return _san_lib_is_unset(asan_lib_rel)
 
 
 def emit_lib_resolve(san_lib_rel: str, sanitizer: str = "asan") -> str:

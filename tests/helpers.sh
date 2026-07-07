@@ -116,10 +116,6 @@ setup_test_env() {
     case "$1" in 2) echo "analysis" ;; *) echo "reproduce" ;; esac
   }
   get_agent_subsystem() { echo "unknown"; }
-  count_env_blocked() {
-    local sf="$1"; [ -f "$sf" ] || { echo 0; return; }
-    local n; n=$(grep -c "ENV-BLOCKED" "$sf" 2>/dev/null) || true; echo "${n:-0}"
-  }
   count_active_security_results() {
     local count=0 d
     for d in "$RESULTS_DIR"/crashes/CRASH-*/ "$RESULTS_DIR"/findings/FIND-*/; do
@@ -209,7 +205,7 @@ setup_test_env() {
   export -f fuzz_leads_path handoff_file_path
   export -f agent_strategy_path agent_strategy_streak_path agent_tenure_path
   export -f guard_chain_path asan_run_counter_path agent_mode agent_role
-  export -f get_agent_subsystem count_env_blocked count_active_security_results
+  export -f get_agent_subsystem count_active_security_results
   export -f count_security_crash_candidates count_confirmed_findings
   export -f blocklist_description subsystem_is_blocklisted load_blocklist
   export -f detect_guard_saturation get_agent_tenure_secs get_agent_strategy

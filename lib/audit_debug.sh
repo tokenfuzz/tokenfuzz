@@ -59,49 +59,6 @@ audit_emit_event() {
   python3 "$_AUDIT_HELPERS_PY" emit-event "$events" "$event" "$@" 2>/dev/null || true
 }
 
-audit_count_pending_for_agent() {
-  local agent_num="$1" sf c
-  if declare -F structured_state_agent_pending_count >/dev/null 2>&1 \
-     && structured_state_agent_has_rows "$agent_num" 2>/dev/null; then
-    structured_state_agent_pending_count "$agent_num" 2>/dev/null || echo 0
-    return
-  fi
-  sf=$(state_file_path "$agent_num" 2>/dev/null || true)
-  [ -f "$sf" ] || { echo 0; return; }
-  c=$(grep -c "PENDING" "$sf" 2>/dev/null || true)
-  echo "${c:-0}"
-}
-
-audit_count_active_for_agent() {
-  local agent_num="$1" sf c
-  if declare -F structured_state_agent_active_count >/dev/null 2>&1 \
-     && structured_state_agent_has_rows "$agent_num" 2>/dev/null; then
-    structured_state_agent_active_count "$agent_num" 2>/dev/null || echo 0
-    return
-  fi
-  if declare -F count_active_hypotheses_for_agent >/dev/null 2>&1; then
-    count_active_hypotheses_for_agent "$agent_num" 2>/dev/null || echo 0
-    return
-  fi
-  sf=$(state_file_path "$agent_num" 2>/dev/null || true)
-  [ -f "$sf" ] || { echo 0; return; }
-  c=$(grep -cE "PENDING|INVESTIGATING|NEEDS_TESTCASE" "$sf" 2>/dev/null || true)
-  echo "${c:-0}"
-}
-
-audit_count_discards_for_agent() {
-  local agent_num="$1" sf c
-  if declare -F structured_state_agent_discard_count >/dev/null 2>&1 \
-     && structured_state_agent_has_rows "$agent_num" 2>/dev/null; then
-    structured_state_agent_discard_count "$agent_num" 2>/dev/null || echo 0
-    return
-  fi
-  sf=$(state_file_path "$agent_num" 2>/dev/null || true)
-  [ -f "$sf" ] || { echo 0; return; }
-  c=$(grep -c "DISCARDED" "$sf" 2>/dev/null || true)
-  echo "${c:-0}"
-}
-
 audit_count_asan_runs_for_agent() {
   local agent_num="$1"
   if declare -F count_verified_asan_runs >/dev/null 2>&1; then

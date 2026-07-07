@@ -312,17 +312,6 @@ assert_eq "reproduce" "$(agent_role 2)" "agent 2 → reproduce (override)"
 AGENT_ROLES=""
 
 # ═══════════════════════════════════════════════════════════════
-# 12. count_env_blocked
-# ═══════════════════════════════════════════════════════════════
-
-cat > "$TEST_TMPDIR/state_env.md" <<'EOF'
-| 1 | H1 | foo.cpp | shape | guard | bounds | A | ENV-BLOCKED |
-| 2 | H2 | bar.cpp | shape | guard | bounds | A | ENV-BLOCKED |
-| 3 | H3 | baz.cpp | shape | guard | bounds | A | PENDING |
-EOF
-assert_eq "2" "$(count_env_blocked "$TEST_TMPDIR/state_env.md")" "2 ENV-BLOCKED entries"
-
-# ═══════════════════════════════════════════════════════════════
 # 13. count_total_pending
 # ═══════════════════════════════════════════════════════════════
 

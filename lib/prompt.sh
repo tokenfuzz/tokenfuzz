@@ -20,11 +20,6 @@
 # the template is the human-readable shape and the bash glue keeps
 # resolving runtime values at call time.
 
-_prompt_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_PROMPT_RENDER_PY="$_prompt_dir/prompt_render.py"
-_PROMPTS_DIR="$_prompt_dir/prompts"
-unset _prompt_dir
-
 if ! declare -F render_prompt_template >/dev/null 2>&1; then
   # shellcheck disable=SC1090
   source "${SCRIPT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/lib/prompt_template.sh"

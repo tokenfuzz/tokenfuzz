@@ -136,8 +136,6 @@ _ASAN_FRAME_RE = re.compile(
     re.VERBOSE,
 )
 
-_LIST_BULLET_RE = re.compile(r"^(?P<indent>\s*)(?P<bul>[-*]|\d+\.)\s+(?P<rest>.+?)\s*$")
-
 _SEVERITY_RE = re.compile(
     r"^[-*]\s*\*\*Severity\*\*:\s*(?P<word>Critical|High|Medium|Low|None|TBD)\b",
     re.IGNORECASE | re.MULTILINE,

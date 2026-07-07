@@ -64,10 +64,6 @@ audit_is_darwin() {
   [ "$(audit_os)" = "Darwin" ]
 }
 
-audit_is_linux() {
-  [ "$(audit_os)" = "Linux" ]
-}
-
 # audit_make_dsyms <build-dir>
 # macOS only, best-effort: give every Mach-O shared library / executable under
 # <build-dir> a self-contained .dSYM bundle.

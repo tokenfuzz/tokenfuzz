@@ -1077,18 +1077,6 @@ append a new entry with the corrected bypass rather than editing.
 GDB
 }
 
-# Count ENV-BLOCKED rows in an agent's state file (supports the
-# rotation-gate carve-out: if an agent has hit ≥ N environment walls in
-# the same subsystem, that subsystem is done for this host — rotation
-# should be permitted even without the full effort gate.)
-count_env_blocked() {
-  local state_file="$1"
-  [ -f "$state_file" ] || { echo 0; return; }
-  local n
-  n=$(grep -c "ENV-BLOCKED" "$state_file" 2>/dev/null) || true
-  echo "${n:-0}"
-}
-
 resolve_guide_path() {
   echo "AGENTS.md"  # unified browser + generic audit guide
 }
@@ -3378,32 +3366,6 @@ count_actionable_state_entries() {
   echo "$count"
 }
 
-# Total ENV-BLOCKED markers across all agent state files. Compared
-# before vs after an iteration to detect "diagnostic-only" iterations
-# (mapped out a dead subsystem but produced no findings/crashes), which
-# should not count against the global dry_streak — they are forward
-# progress, just narrowing the search space rather than producing
-# results. The queue's natural exhaustion (target_exhausted_hard_stop_ready
-# + eligible_work_card_exists) fires STALL_STOP when there is genuinely
-# no work left, so no per-streak cap is needed on top.
-count_total_env_blocked() {
-  if structured_state_available 2>/dev/null; then
-    structured_state_count_all_status_regex '^ENV-BLOCKED$' 2>/dev/null || echo 0
-    return
-  fi
-  local total=0
-  for i in $(seq 1 "$NUM_AGENTS"); do
-    local f
-    f=$(state_file_path "$i" 2>/dev/null || true)
-    if [ -f "$f" ]; then
-      local c
-      c=$(count_env_blocked "$f" 2>/dev/null || echo 0)
-      total=$((total + ${c:-0}))
-    fi
-  done
-  echo "$total"
-}
-
 count_iteration_progress_snapshot() {
   # One-pass progress snapshot for iteration dry-streak accounting. This
   # replaces separate scans for crash candidates, findings, actionable state,
@@ -3901,17 +3863,6 @@ backend_resume_enabled() {
       return 1
       ;;
   esac
-}
-
-generate_resume_session_id() {
-  if command -v uuidgen >/dev/null 2>&1; then
-    uuidgen | tr '[:upper:]' '[:lower:]'
-  else
-    python3 - <<'PY'
-import uuid
-print(uuid.uuid4())
-PY
-  fi
 }
 
 agent_active_card_id() {
