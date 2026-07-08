@@ -37,6 +37,11 @@ meta_file=""
 
 assert_file_exists "$prompt_file" "prompt artifact: prompt markdown written"
 assert_file_contains "$prompt_file" "hello prompt" "prompt artifact: prompt body preserved"
+assert_match '/logs/\.raw/session_20260508_010203_cold-start-1-generic\.prompt\.md$' "$prompt_file" \
+  "prompt artifact: prompt markdown lives under logs/.raw"
+[ ! -f "$LOGDIR/session_20260508_010203_cold-start-1-generic.prompt.md" ] \
+  && pass "prompt artifact: no top-level prompt dump" \
+  || fail "prompt artifact: no top-level prompt dump" "found top-level prompt markdown"
 # The metadata stash is consumed by run_agent's finish handler and folded
 # into the index.jsonl row. Verify the stash records every field that the
 # old session_*.prompt.meta.json carried.
@@ -66,13 +71,15 @@ EOF
 record_subsystem_suggest 1 generic "src/lib" "coverage-cache" "src/net" "third_party/rust" 2>/dev/null
 log_agent_plan 1 "cold-start" "cold-start-1-generic" 12 "$prompt_file" "$meta_file" 2>/dev/null
 
-assert_file_contains "$INDEX" "SUBSYSTEM_SUGGEST: agent=1 mode=generic selected=src/lib" "suggest: line logged"
+assert_file_contains "$INDEX" "Agent 1 subsystem suggestion: selected=src/lib mode=generic" "suggest: line logged"
 assert_file_contains "$INDEX" "skipped_claimed=\"src/net\"" "suggest: claimed skip logged"
-assert_file_contains "$INDEX" "PLAN: agent=1 launch=cold-start" "plan: line logged"
+assert_file_contains "$INDEX" "Agent 1 plan: cold-start reproduce \\(generic\\)" "plan: line logged"
+assert_file_contains "$INDEX" "prompt=.raw/session_20260508_010203_cold-start-1-generic.prompt.md" \
+  "plan: prompt artifact shown as raw-path hint"
 assert_file_contains "$INDEX" "subsystem=src/lib" "plan: subsystem logged"
 assert_file_contains "$INDEX" "suggested=src/lib" "plan: latest suggestion logged"
 assert_file_contains "$INDEX" "strategy=S1" "plan: strategy logged"
-assert_file_contains "$INDEX" "active=1 pending=1 discards=1 asan_runs=3 hits=1" "plan: critical counts logged"
+assert_file_contains "$INDEX" "queue active=1 pending=1 discarded=1 | probes=3 hits=1" "plan: critical counts logged"
 assert_file_contains "$(audit_events_path)" '"event":"subsystem-suggest"' "events: subsystem suggest event written"
 assert_file_contains "$(audit_events_path)" '"event":"agent-plan"' "events: plan event written"
 
@@ -84,7 +91,7 @@ cat > "$RESULTS_DIR/state/hypotheses.jsonl" <<'EOF'
 {"id":"H-json-4","agent":"1","status":"DISCARDED","file":"src/lib/D.cpp"}
 EOF
 log_agent_plan 1 "deep_investigation" "deep_investigation-1-generic" 14 "$prompt_file" "$meta_file" 2>/dev/null
-assert_file_contains "$INDEX" "PLAN: agent=1 launch=deep_investigation.*active=3 pending=2 discards=1 asan_runs=3 hits=1" \
+assert_file_contains "$INDEX" "Agent 1 plan: deep_investigation reproduce \\(generic\\).*queue active=3 pending=2 discarded=1 | probes=3 hits=1" \
   "plan: structured state counts loaded in one pass"
 
 # ═══════════════════════════════════════════════════════════════
@@ -93,8 +100,8 @@ assert_file_contains "$INDEX" "PLAN: agent=1 launch=deep_investigation.*active=3
 
 record_subsystem_claim 1 "deep_investigation" "deep_investigation-1-generic" "unknown" "src/lib" 2>/dev/null
 
-assert_file_contains "$INDEX" "SUBSYSTEM_CLAIM: agent=1 launch=deep_investigation" "claim: line logged"
-assert_file_contains "$INDEX" "before=unknown after=src/lib changed=1" "claim: before/after logged"
+assert_file_contains "$INDEX" "Agent 1 subsystem: unknown -> src/lib" "claim: line logged"
+assert_file_contains "$INDEX" "changed=1, launch=deep_investigation" "claim: before/after logged"
 assert_file_contains "$(audit_events_path)" '"event":"subsystem-claim"' "events: claim event written"
 
 # ═══════════════════════════════════════════════════════════════
@@ -104,8 +111,8 @@ assert_file_contains "$(audit_events_path)" '"event":"subsystem-claim"' "events:
 log_strategy_status 1 "src/lib" "S1" 2 8 0 "keep" 2>/dev/null
 log_strategy_rotation 1 "src/lib" "S1" "S2" 8 8 "llm" "S1 exhausted" 2>/dev/null
 
-assert_file_contains "$INDEX" "STRATEGY_STATUS: agent=1 subsystem=src/lib strategy=S1 dry=2/8 productive=0 action=keep" "strategy status: line logged"
-assert_file_contains "$INDEX" "STRATEGY_ROTATION: agent=1 subsystem=src/lib from=S1 to=S2 dry=8/8 picker=llm reason=\"S1 exhausted\"" "strategy rotation: line logged"
+assert_file_contains "$INDEX" "Agent 1 strategy status: subsystem=src/lib strategy=S1 dry=2/8 productive=0 action=keep" "strategy status: line logged"
+assert_file_contains "$INDEX" "Agent 1 strategy rotation: subsystem=src/lib S1->S2 dry=8/8 picker=llm reason=\"S1 exhausted\"" "strategy rotation: line logged"
 assert_file_contains "$(audit_events_path)" '"event":"strategy-status"' "events: strategy status event written"
 assert_file_contains "$(audit_events_path)" '"event":"strategy-rotation"' "events: strategy rotation event written"
 
@@ -130,7 +137,7 @@ export -f get_agent_subsystem
 
 suggested=$(assign_subsystem_from_coverage 2 2>/dev/null)
 assert_eq "js/src/wasm" "$suggested" "assign: stdout contains only selected subsystem"
-assert_file_contains "$INDEX" "SUBSYSTEM_SUGGEST: agent=2 mode=shell selected=js/src/wasm source=coverage-cache" "assign: suggestion logged"
+assert_file_contains "$INDEX" "Agent 2 subsystem suggestion: selected=js/src/wasm mode=shell source=coverage-cache" "assign: suggestion logged"
 assert_file_contains "$INDEX" "skipped_claimed=\"js/src/jit\"" "assign: claimed subsystem skip logged"
 
 teardown_test_env

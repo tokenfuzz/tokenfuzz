@@ -626,35 +626,36 @@ discover_ensemble_backends() {
 audit_write_logdir_readme() {
   local logdir="$1"
   local readme="$logdir/README.md"
-  [ -f "$readme" ] && return 0
+  if [ -f "$readme" ] && grep -q '^# Log Tour$' "$readme" 2>/dev/null; then
+    return 0
+  fi
   cat > "$readme" <<'EOF' 2>/dev/null || true
-# Debugging tour
+# Log Tour
 
-Start here when investigating token waste, errors, or unexpected agent behavior.
-Files are listed in roughly the order you should consult them.
+Start here when investigating backend errors, orchestration failures, or unusual
+agent cost. Normal audit results live under `results/`.
 
-## High-signal entry points (read first)
+## Read First
 
 | File | What it tells you |
 |---|---|
-| `index.log`          | Human-readable per-iteration timeline. Each agent gets `finished` + `waste` lines with tokens, tool counts, top commands, largest output, cache-hit %. Grep here first. |
-| `index.jsonl`        | One JSON row per agent session. Same data as `index.log` but structured — ideal for `jq`. Append is `flock`-guarded so rows never interleave under concurrent agents. |
-| `llm-decisions.log`  | Ledger of harness sub-LLM calls (`crash_triage`, `crash_confirm`, …). Use to attribute cost / failures to specific decision paths. |
-| `*.summary.md`       | Per-session digest (one screen per agent). Read after you've spotted a session of interest in `index.log`. |
-| `*.prompt.md`        | The exact system prompt sent to each agent. Critical when input tokens look bloated — input cost IS the prompt. |
+| `index.log` | Timeline for launches, findings, rejections, and per-agent finish lines. Grep here first. |
+| `*.summary.md` | One-screen digest for a session named in `index.log`. |
+| `index.jsonl` | Structured session rows for scripts and dashboards. |
+| `llm-decisions.log` | Harness sub-LLM decisions such as crash triage and confirmation. |
 
-## Forensic dumps (under `.raw/`, rarely useful)
+## Forensic Files
 
-`.raw/session_*.log.raw` and `.raw/recon_*.raw` are the full backend JSON
-dialogue streams. They're hidden so default `ls`/`find` and the agent
-permission model skip them. Only read when you need the literal model
-output.
+The `.raw/` directory holds large artifacts that are rarely the first thing to
+open: full backend transcripts (`session_*.log.raw`), recon transcripts
+(`recon_*.raw`), and rendered prompts (`session_*.prompt.md`). Keep them out of
+normal scans unless you need literal model output or exact prompt text.
 
 Failed model preflights leave a `model-preflight-*.raw` at this level
 (no sibling `.message`); successful preflights leave only the
 `.model_preflight_*.ok` marker.
 
-## Orchestrator scratch (dotfiles)
+## Orchestrator Scratch
 
 `.session_id_*`, `.prev_*`, `.iter_cache/`, `.warns/`, `.prompt_meta_*`
 etc. are per-iteration state read by the next iteration's prompt
@@ -1410,7 +1411,7 @@ validate_model_for_backend() {
     export AGY_LOG_FILE="$_agy_preflight_log"
   fi
 
-  log "Model preflight: checking that ${backend} backend can reach model='${model}' (timeout per attempt=$(fmt_secs "$timeout_secs"), up to ${max_attempts} attempt(s) with exponential backoff)" | tee -a "$INDEX"
+  log "Model preflight: backend=${backend} model='${model}' timeout=$(fmt_secs "$timeout_secs") attempts=${max_attempts}" | tee -a "$INDEX"
   local attempt
   for ((attempt=1; attempt<=max_attempts; attempt++)); do
     rc=0
@@ -1534,7 +1535,7 @@ validate_model_for_backend() {
   # early-return path above.
   printf -v "$process_guard" 1
   export "$process_guard"
-  log "Model preflight passed: ${backend} backend can reach model='${model}' — proceeding with agent launches" | tee -a "$INDEX"
+  log "Model preflight passed: backend=${backend} model='${model}'" | tee -a "$INDEX"
 }
 
 validate_active_model() {
@@ -1773,6 +1774,43 @@ extract_waste_telemetry() {
     || echo 'tool_bytes=0 max_output=0 over8k=0 native_tools=Read:0,Grep:0,Glob:0 top_cmds=error largest="parser-error"'
 }
 
+format_waste_for_index() {
+  local telemetry="$1"
+  [ -n "$telemetry" ] || {
+    printf '%s\n' "tool output: none"
+    return
+  }
+
+  PYTHONPATH="$SCRIPT_ROOT/lib${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 - "$telemetry" <<'PY' 2>/dev/null || {
+import json
+import sys
+
+from audit_log_summary import _fmt_count, parse_waste
+
+parsed = parse_waste(sys.argv[1] if len(sys.argv) > 1 else "")
+parts = [
+    f"bytes={_fmt_count(parsed.get('tool_bytes'))}",
+    f"max={_fmt_count(parsed.get('max_output'))}",
+]
+over = int(parsed.get("over8k") or 0)
+if over:
+    parts.append(f"oversized={over}")
+top = parsed.get("top_commands") or {}
+if top:
+    parts.append("top=" + ",".join(f"{name}:{count}" for name, count in list(top.items())[:5]))
+native = {k: v for k, v in (parsed.get("native_tools") or {}).items() if v}
+if native:
+    parts.append("native=" + ",".join(f"{name}:{count}" for name, count in native.items()))
+largest = parsed.get("largest") or "none"
+if largest != "none":
+    parts.append("largest=" + json.dumps(str(largest), ensure_ascii=False))
+print("tool output: " + " ".join(parts))
+PY
+    printf '%s\n' "tool output: $telemetry"
+  }
+}
+
 write_session_log_summary() {
   local rawfile="$1"
   local logfile="$2"
@@ -1851,9 +1889,58 @@ write_session_log_summary() {
     "$rawfile" "$logfile" "$summary_md" "$index_jsonl" 2>/dev/null || true
 }
 
-# ─── Log recovery for failed sessions ─────────��───────────────────
-# When --output-last-message fails (e.g., Codex SDK crash), recover
-# partial output from the raw JSON stream so we have observability.
+# ─── Log recovery for failed sessions ───────────────────────────────
+# When a structured backend does not write its final-message file (for
+# example because the harness stopped a long turn at the command cap),
+# keep the operator console readable: recover assistant text into the
+# normal session log and leave raw JSON under logs/.raw/ for forensics.
+
+audit_raw_display_path() {
+  local rawfile="$1"
+  local rawdir="${RAW_DIR:-${LOGDIR:-}/.raw}"
+  if [ -n "$rawdir" ]; then
+    case "$rawfile" in
+      "$rawdir"/*) printf '.raw/%s\n' "${rawfile##*/}"; return 0 ;;
+    esac
+  fi
+  printf '%s\n' "$rawfile"
+}
+
+recover_structured_text_log() {
+  local backend="$1" logfile="$2"
+  local rawfile="$(audit_raw_path "$logfile")"
+  local recovered="${logfile}.recovered"
+
+  [ -f "$rawfile" ] || return 1
+  [ -f "$logfile" ] && [ -s "$logfile" ] && return 0
+
+  rm -f "$recovered" 2>/dev/null || true
+  llm_extract_text "$backend" "$rawfile" > "$recovered" 2>/dev/null || true
+  if [ -s "$recovered" ]; then
+    mv "$recovered" "$logfile"
+    return 0
+  fi
+
+  rm -f "$recovered" 2>/dev/null || true
+  printf 'No final assistant message was captured; raw transcript kept at %s\n' \
+    "$(audit_raw_display_path "$rawfile")" > "$logfile"
+  return 1
+}
+
+emit_agent_session_text() {
+  local backend="$1" logfile="$2" prefix="$3"
+
+  if [ ! -s "$logfile" ]; then
+    recover_structured_text_log "$backend" "$logfile" >/dev/null 2>&1 || true
+  fi
+  if [ -s "$logfile" ]; then
+    sed -u "s|^|${prefix} |" "$logfile"
+  else
+    local rawfile="$(audit_raw_path "$logfile")"
+    printf '%s session ended before a final assistant message; raw transcript kept at %s\n' \
+      "$prefix" "$(audit_raw_display_path "$rawfile")"
+  fi
+}
 
 recover_log_from_raw() {
   local logfile="$1"
@@ -1864,33 +1951,10 @@ recover_log_from_raw() {
   # Log already exists and is non-empty — no recovery needed
   [ -f "$logfile" ] && [ -s "$logfile" ] && return 0
 
-  log "Codex did not write its --output-last-message file as expected — reconstructing the agent's final assistant message from the raw JSON stream so the session log isn't lost" | tee -a "$INDEX"
-  # Extract assistant text from supported raw JSONL streams. Codex emits
-  # item.agent_message; Claude emits assistant message.content text
-  # blocks. The gemini backend (Antigravity CLI) emits plain text — the
-  # raw file *is* the assistant message and no JSON extraction is needed.
-  jq -Rr '
-    fromjson? |
-    (
-      select(.item.type? == "agent_message") | .item.text // empty
-    ),
-    (
-      select(.type? == "message" and .role? == "assistant") | .content // empty
-    ),
-    (
-      select(.type? == "assistant") |
-      .message.content[]? |
-      select(.type? == "text") |
-      .text // empty
-    )
-  ' "$rawfile" 2>/dev/null > "${logfile}.recovered" || true
-
-  if [ -s "${logfile}.recovered" ]; then
-    mv "${logfile}.recovered" "$logfile"
+  if recover_structured_text_log "${ACTIVE_BACKEND:-codex}" "$logfile" >/dev/null 2>&1; then
+    [ -n "${INDEX:-}" ] && log "Session text: recovered assistant text from $(audit_raw_display_path "$rawfile")" | tee -a "$INDEX" >/dev/null
   else
-    # Fallback: grab last few lines of raw output for debugging
-    tail -20 "$rawfile" > "$logfile" 2>/dev/null || true
-    rm -f "${logfile}.recovered"
+    [ -n "${INDEX:-}" ] && log "Session text: no final assistant message; raw transcript kept at $(audit_raw_display_path "$rawfile")" | tee -a "$INDEX" >/dev/null
   fi
 }
 
@@ -2175,7 +2239,7 @@ llm_pick_next_strategy() {
 
   local recent_log_block=""
   if [ -f "${INDEX:-}" ]; then
-    recent_log_block=$(grep -E 'STRATEGY_ROTATION|CRASH-|FIND-|GUARD_SATURATION' "$INDEX" 2>/dev/null \
+    recent_log_block=$(grep -E 'strategy rotation|STRATEGY_ROTATION|CRASH-|FIND-|GUARD_SATURATION' "$INDEX" 2>/dev/null \
       | tail -10)
   fi
   [ -n "$recent_log_block" ] || recent_log_block="(no events)"
@@ -2503,7 +2567,7 @@ preflight_build_freshness() {
       return 0 ;;
     skip) return 0 ;;
   esac
-  log "PREFLIGHT: native ASan build is '${state}' relative to source — (re)building via bin/setup-target --build before agents start (fail-open: the audit proceeds even if this cannot complete)" | tee -a "$INDEX"
+  log "ASan preflight: build=${state}; running bin/setup-target --build (fail-open)" | tee -a "$INDEX"
   local build_log="${LOGDIR:-$RESULTS_DIR}/setup-build.log"
   "$SCRIPT_ROOT/bin/setup-target" "$TARGET_SLUG" --build >> "$build_log" 2>&1 || true
   # Re-probe rather than trust the exit status: `setup-target --build` exits 0
@@ -2515,9 +2579,9 @@ preflight_build_freshness() {
              build-freshness "$TARGET_ROOT" asan 2>/dev/null || echo skip)"
   case "$after" in
     fresh|skip)
-      log "PREFLIGHT: ASan build refreshed (log: $build_log)" | tee -a "$INDEX" ;;
+      log "ASan preflight: build refreshed | log=$build_log" | tee -a "$INDEX" ;;
     *)
-      log "PREFLIGHT WARN: ASan build is still '${after}' after auto-build (see $build_log); agents will treat missing/stale artifacts as ENV-BLOCKED — audit continues" | tee -a "$INDEX" ;;
+      log "ASan preflight WARN: build still ${after}; agents may ENV-BLOCK missing/stale artifacts | log=$build_log" | tee -a "$INDEX" ;;
   esac
   return 0
 }
@@ -2682,15 +2746,15 @@ audit_acquire_instance_lock
 # classification so the message describes the *actual* pool shape the
 # audit will run with, not the early defaults.
 if target_git_is_shallow_checkout "$TARGET_ROOT"; then
-  log "WARN: target git checkout is shallow; S1 prior-fix history and patch-card queues may be incomplete. Run: git -C \"$TARGET_ROOT\" fetch --unshallow" | tee -a "$INDEX"
+  log "WARN shallow checkout: S1 history + patch-card queue may be incomplete | fix: git -C \"$TARGET_ROOT\" fetch --unshallow" | tee -a "$INDEX"
 fi
 if [ "$IS_BROWSER_TARGET" -eq 1 ]; then
-  log "Agent pool: ${NUM_AGENTS} worker(s) total — ${BROWSER_AGENTS} browser-mode + ${SHELL_AGENTS} shell-mode (browser target: ${TARGET_SLUG}). Set BROWSER_AGENTS / SHELL_AGENTS in the environment to override." | tee -a "$INDEX"
+  log "Agent pool: ${NUM_AGENTS} workers = ${BROWSER_AGENTS} browser + ${SHELL_AGENTS} shell (browser target ${TARGET_SLUG}) | override with BROWSER_AGENTS/SHELL_AGENTS" | tee -a "$INDEX"
 else
-  log "Agent pool: flat pool of ${NUM_AGENTS} generic worker(s) (non-browser target). Set NUM_AGENTS in the environment to override." | tee -a "$INDEX"
+  log "Agent pool: flat pool of ${NUM_AGENTS} generic worker(s) | override with NUM_AGENTS" | tee -a "$INDEX"
 fi
 if [ "$MAX_ITERATIONS" -eq 1 ]; then
-  log "Smoke test mode: max_iterations=1 clamps the run to one worker and skips recon seeding." | tee -a "$INDEX"
+  log "Smoke test: max_iterations=1 → one worker, recon seeding skipped" | tee -a "$INDEX"
 fi
 
 # Export the threat-model CSV so lib/triage.sh evaluate_crash_verdict
@@ -3053,7 +3117,7 @@ clear_startup_rate_limit_cooldowns() {
     [ -f "$path" ] || continue
     rm -f "$path" 2>/dev/null || continue
     cleared=$((cleared + 1))
-    log "RATE_LIMIT: cleared the stale ${backend} cooldown from a previous run — the backend will be re-probed when the next agent launches." | tee -a "$INDEX"
+    log "Rate limit: cleared stale ${backend} cooldown from a prior run; will re-probe on next launch" | tee -a "$INDEX"
   done
   [ "$cleared" -gt 0 ] || return 0
 }
@@ -3100,7 +3164,7 @@ sleep_for_active_rate_limit_cooldown() {
   else
     human="unknown"
   fi
-  log "RATE_LIMIT: the ${ACTIVE_BACKEND:-LLM} API is currently rate-limited (reset reported as ${reset_at}); sleeping $(fmt_secs "$wait") before launching agents — agent state and dry_streak are left unchanged so we don't lose progress. Cooldown expires around ${human}." | tee -a "$INDEX"
+  log "Rate limit: ${ACTIVE_BACKEND:-LLM} cooling down | sleeping $(fmt_secs "$wait") before launch, expires ~${human} | reset=${reset_at}, agent state preserved" | tee -a "$INDEX"
   sleep "$wait"
   return 0
 }
@@ -3158,18 +3222,18 @@ handle_rate_limit_backoff() {
   # the session-recovery pause above. A far-off transient reset just sleeps the
   # cap and retries sooner.
   if [ "$wait_secs" -gt "$RATE_LIMIT_MAX_BACKOFF" ]; then
-    log "RATE_LIMIT: the API reset is $(fmt_secs "$wait_secs") away, which exceeds the configured backoff cap RATE_LIMIT_MAX_BACKOFF=$(fmt_secs "$RATE_LIMIT_MAX_BACKOFF") — sleeping the cap instead and will retry sooner." | tee -a "$INDEX"
+    log "Rate limit: reset $(fmt_secs "$wait_secs") away exceeds cap $(fmt_secs "$RATE_LIMIT_MAX_BACKOFF") (RATE_LIMIT_MAX_BACKOFF) | sleeping the cap and retrying sooner" | tee -a "$INDEX"
     wait_secs="$RATE_LIMIT_MAX_BACKOFF"
   fi
   RATE_LIMIT_BACKOFF_STREAK=$((RATE_LIMIT_BACKOFF_STREAK + 1))
   mark_run_quality provider_recovered
-  log "RATE_LIMIT: the ${ACTIVE_BACKEND:-LLM} API returned a provider rejection (${provider_issue}) — sleeping $(fmt_secs "$wait_secs") until ${reset_human} before retrying (consecutive backoff ${RATE_LIMIT_BACKOFF_STREAK}$( [ "$MAX_RATE_LIMIT_BACKOFFS" -gt 0 ] && printf '/%s' "$MAX_RATE_LIMIT_BACKOFFS"))." | tee -a "$INDEX"
+  log "Rate limit: ${ACTIVE_BACKEND:-LLM} rejected (${provider_issue}) | sleeping $(fmt_secs "$wait_secs") until ${reset_human} | backoff=${RATE_LIMIT_BACKOFF_STREAK}$( [ "$MAX_RATE_LIMIT_BACKOFFS" -gt 0 ] && printf '/%s' "$MAX_RATE_LIMIT_BACKOFFS")" | tee -a "$INDEX"
   sleep "$wait_secs"
   # Sustained, pool-wide rejection that is not clearing: stop loudly rather
   # than burn the rest of the budget retrying, and so the run never reports a
   # clean exhaustion when the real cause was an unreachable backend.
   if [ "$MAX_RATE_LIMIT_BACKOFFS" -gt 0 ] && [ "$RATE_LIMIT_BACKOFF_STREAK" -ge "$MAX_RATE_LIMIT_BACKOFFS" ]; then
-    log "BACKEND_UNAVAILABLE: the ${ACTIVE_BACKEND:-LLM} API rejected every agent for ${RATE_LIMIT_BACKOFF_STREAK} consecutive iteration(s) (sustained provider rejection: ${provider_issue}) — stopping the audit. Results are partial, not a clean exhaustion; re-run when the backend is healthy, or raise MAX_RATE_LIMIT_BACKOFFS to wait longer." | tee -a "$INDEX"
+    log "Backend unavailable: ${ACTIVE_BACKEND:-LLM} rejected every agent for ${RATE_LIMIT_BACKOFF_STREAK} iteration(s) (${provider_issue}) | stopping with partial results | re-run when healthy or raise MAX_RATE_LIMIT_BACKOFFS" | tee -a "$INDEX"
     mark_backend_unavailable
     return 2
   fi
@@ -3186,7 +3250,7 @@ session_recovery_pause() {
   now=$(date +%s)
   remaining=$(( SESSION_PAUSE_MAX_TOTAL - SESSION_PAUSED_TOTAL ))
   if [ "$remaining" -le 0 ]; then
-    log "BACKEND_UNAVAILABLE: the ${ACTIVE_BACKEND:-LLM} backend is still usage-limited after $(fmt_secs "$SESSION_PAUSED_TOTAL") of session-recovery pause (cap $(fmt_secs "$SESSION_PAUSE_MAX_TOTAL")) — stopping as provider-limited." | tee -a "$INDEX"
+    log "Backend unavailable: ${ACTIVE_BACKEND:-LLM} still usage-limited after $(fmt_secs "$SESSION_PAUSED_TOTAL") pause (cap $(fmt_secs "$SESSION_PAUSE_MAX_TOTAL")) | stopping as provider-limited" | tee -a "$INDEX"
     mark_backend_unavailable
     return 2
   fi
@@ -3200,7 +3264,7 @@ session_recovery_pause() {
   [ "$wait" -gt "$remaining" ] && wait="$remaining"
   [ "$wait" -lt 1 ] && wait=1
   mark_run_quality provider_recovered
-  log "SESSION_PAUSE: the ${ACTIVE_BACKEND:-LLM} backend's account/session usage limit is exhausted — pausing all agents for $(fmt_secs "$wait") (${human}). Paused time is excluded from the productive budget (paused so far: $(fmt_secs "$SESSION_PAUSED_TOTAL")). Press Ctrl+C to stop waiting and end the run." | tee -a "$INDEX"
+  log "Session pause: ${ACTIVE_BACKEND:-LLM} usage limit exhausted | pausing all agents $(fmt_secs "$wait") (${human}) | paused so far $(fmt_secs "$SESSION_PAUSED_TOTAL"), excluded from budget | Ctrl+C to stop" | tee -a "$INDEX"
   sleep "$wait"
   record_session_pause "$wait"
   # The short cooldown persist_rate_limit_cooldown left is now stale — clear it
@@ -3254,17 +3318,14 @@ if [ "$ENSEMBLE_MODE" -eq 1 ]; then
   log "Ensemble mode: cycling through backends ${ENSEMBLE_BACKENDS[*]} across iterations (artifacts written under output/${TARGET_OUTPUT_SLUG}/<backend>/)" | tee -a "$INDEX"
 fi
 log "Target under audit: slug=${TARGET_SLUG} path=${TARGET_ROOT} repo_type=${TARGET_REPO_TYPE} agent_guide=${AGENT_GUIDE_PATH}" | tee -a "$INDEX"
-log "Artifact output roots: results (crashes/findings/state) → ${RESULTS_DIR}/    logs (sessions/index) → ${LOGDIR}/" | tee -a "$INDEX"
+log "Output roots: results=${RESULTS_DIR}/ (crashes/findings/state) logs=${LOGDIR}/ (sessions/index)" | tee -a "$INDEX"
 
 # One-time legend so the rest of the log is self-explanatory for readers
 # who aren't familiar with the harness conventions. The codes embedded
 # in subsequent lines (strategy IDs, hypothesis states, K=V tokens) are
 # defined here once instead of being expanded inline on every line.
 if [ "${AUDIT_LOG_LEGEND:-1}" = "1" ]; then
-  log "Legend — investigation strategies (one is active per agent at a time; the K=V token 'strategy=Sn' uses the short code, prose/prefix use the full 'StrategyN(name)' form): Strategy1(Prior-fix-review), Strategy2(Invariant-negation), Strategy3(Spec-vs-impl), Strategy4(Differential-build), Strategy5(Lifetime-and-state), Strategy6(Cross-project-mining), Strategy7(Adversarial-input), Strategy8(Property-oracle)" | tee -a "$INDEX"
-  log "Legend — hypothesis lifecycle states (appear in agent state files and log summaries): PENDING=hypothesis written, waiting on a testcase | INVESTIGATING=agent is actively probing it | NEEDS_TESTCASE=evidence is in, awaiting a reproducer | ACTIVE=shorthand for any of the previous three | DISCARDED=rejected as non-security or not reproducible" | tee -a "$INDEX"
-  log "Legend — per-agent log line prefix: [AgentN·(cold|deep)·StrategyX(short-name)·probe budget=remaining/total] — cold = first iteration with no prior agent state, deep = resuming an in-progress investigation, probe budget = sanitizer/runner test runs left in this iteration before the wrapper asks the agent to stop opening new hypotheses" | tee -a "$INDEX"
-  log "Legend — recurring metric names: asan_runs=probe executions recorded in scratch output | hits=testcases that triggered a sanitizer or runner diagnostic | cards=work items waiting in the queue | dry=iterations in a row without finding anything new | cmds=shell commands the agent ran via Bash | tools=LLM tool calls (Read/Grep/Glob/etc.) | tokens=LLM input/output token count" | tee -a "$INDEX"
+  log "Legend: strategy=S1..S8, states=PENDING/INVESTIGATING/NEEDS_TESTCASE/DISCARDED, metrics=asan_runs/hits/cards/dry/cmds/tools/tokens. See ${LOGDIR}/README.md for file layout and raw-log guidance." | tee -a "$INDEX"
 fi
 
 # Pre-flight: Firefox-specific build check (other browser targets must handle their own builds).
@@ -5369,7 +5430,7 @@ maybe_seed_recon_cards() {
   [ -x "$SCRIPT_ROOT/lib/recon_to_cards.py" ] || { log "Recon seed: lib/recon_to_cards.py not executable; skipping" | tee -a "$INDEX"; return 1; }
 
   rm -f "$recon_out" "$recon_report" 2>/dev/null || true
-  log "Recon seed: launching bin/audit-recon (this may take 10-30 minutes)" | tee -a "$INDEX"
+  log "Recon seed: starting bin/audit-recon (10-30m typical)" | tee -a "$INDEX"
   # Pass the resolved model through: hosted backends fall back to a config
   # default, but oss has no default and the OpenCode provider config errors
   # without an explicit served-model name (recon would emit empty output).
@@ -5818,7 +5879,7 @@ run_agent() {
 
   local total_prompt_tokens
   total_prompt_tokens=$(estimate_tokens "$prompt_with_budget")
-  log "Starting agent $_role_display mode=${agent_mode_kind} probe_budget=${agent_asan_budget} prompt=$(fmt_count "$total_prompt_tokens")tok turns=$max_turns timeout=$(fmt_secs "$AGENT_TIMEOUT") resume=${use_resume} model=$model"
+  log "$_role_display started: mode=${agent_mode_kind} strategy=${_strat} probe_budget=${agent_asan_budget} prompt=$(fmt_count "$total_prompt_tokens")tok timeout=$(fmt_secs "$AGENT_TIMEOUT") resume=${use_resume} model=$model"
 
   # Run the entire pipeline in a subshell. The watchdog uses pkill -P to
   # recursively kill all descendants when the timeout fires.
@@ -5994,11 +6055,7 @@ run_agent() {
               > "$(audit_raw_path "$logfile")" 2>&1 || _gemini_rc=$?
           llm_extract_text gemini "$(audit_raw_path "$logfile")" > "$logfile" 2>/dev/null || true
         fi
-        if [ -s "$logfile" ]; then
-          sed -u "s|^|${_log_prefix} |" "$logfile"
-        else
-          sed -u "s|^|${_log_prefix} |" "$(audit_raw_path "$logfile")"
-        fi
+        emit_agent_session_text gemini "$logfile" "$_log_prefix"
         exit "$_gemini_rc"
       else
         # agy raw stdout IS the assistant transcript. We background agy
@@ -6047,11 +6104,7 @@ run_agent() {
           "$prompt_with_budget" \
           > "$(audit_raw_path "$logfile")" 2>&1 || _opencode_rc=$?
       llm_extract_text oss "$(audit_raw_path "$logfile")" > "$logfile" 2>/dev/null || true
-      if [ -s "$logfile" ]; then
-        sed -u "s|^|${_log_prefix} |" "$logfile"
-      else
-        sed -u "s|^|${_log_prefix} |" "$(audit_raw_path "$logfile")"
-      fi
+      emit_agent_session_text oss "$logfile" "$_log_prefix"
       exit "$_opencode_rc"
     else
       # Shared flag picker; audit-only addition is --output-last-message.
@@ -6119,11 +6172,7 @@ run_agent() {
           | "$CODEX_BIN" exec "${codex_fresh_flags[@]}" - \
               > "$(audit_raw_path "$logfile")" 2>&1 || _codex_rc=$?
       fi
-      if [ -f "$logfile" ] && [ -s "$logfile" ]; then
-        sed -u "s|^|${_log_prefix} |" "$logfile"
-      else
-        sed -u "s|^|${_log_prefix} |" "$(audit_raw_path "$logfile")"
-      fi
+      emit_agent_session_text codex "$logfile" "$_log_prefix"
       unset -f _codex_drop_flag_args _codex_drop_ephemeral 2>/dev/null || true
       exit "$_codex_rc"
     fi
@@ -6210,7 +6259,7 @@ run_agent() {
           _offset="$_next_offset"
         fi
         if [ "$_count" -ge "$_turncap_cap" ]; then
-          index_log "TURN_SOFT_CAP: Agent $_turncap_role hit ${_count} completed commands (soft cap=${_turncap_cap}) — stopping the session so it resumes on the next iteration"
+          index_log "$_turncap_role command cap: commands=${_count} cap=${_turncap_cap}; stopping cleanly so it resumes next iteration"
           # Gentle stop first — let codex flush --output-last-message.
           pkill -TERM -P "$_turncap_subshell" 2>/dev/null || true
           sleep 5
@@ -6332,9 +6381,9 @@ run_agent() {
     if [ "$denom" -gt 0 ] && [ "${cached_input_tokens:-0}" -gt 0 ]; then
       cache_pct=$(( cached_input_tokens * 100 / denom ))
     fi
-    index_log "Agent $_role_display finished exit=$exit_code dur=$(fmt_ms "${duration_ms:-0}") in=$(fmt_count "${input_tokens:-0}") cached=$(fmt_count "${cached_input_tokens:-0}")(${cache_pct}%) create=$(fmt_count "${cache_creation_tokens:-0}") out=$(fmt_count "${output_tokens:-0}") cmds=${command_count:-0} tools=${tool_uses:-0}"
+    index_log "$_role_display done: exit=$exit_code duration=$(fmt_ms "${duration_ms:-0}") | tokens in=$(fmt_count "${input_tokens:-0}") cache_read=$(fmt_count "${cached_input_tokens:-0}")(${cache_pct}%) cache_create=$(fmt_count "${cache_creation_tokens:-0}") out=$(fmt_count "${output_tokens:-0}") | commands=${command_count:-0} tools=${tool_uses:-0}"
   else
-    index_log "Agent $_role_display finished exit=$exit_code dur=$(fmt_ms "${duration_ms:-0}") tokens=$(fmt_count "${total_tokens:-0}") cmds=${command_count:-0} tools=${tool_uses:-0}"
+    index_log "$_role_display done: exit=$exit_code duration=$(fmt_ms "${duration_ms:-0}") | tokens=$(fmt_count "${total_tokens:-0}") | commands=${command_count:-0} tools=${tool_uses:-0}"
   fi
   waste_telemetry=$(write_session_log_summary "$raw_logfile" "$logfile" \
     "${logfile}.summary.md" "${LOG_INDEX_JSONL:-$LOGDIR/index.jsonl}" \
@@ -6344,7 +6393,7 @@ run_agent() {
   if [ -z "$waste_telemetry" ]; then
     waste_telemetry=$(extract_waste_telemetry "$raw_logfile")
   fi
-  index_log "Agent $_role_display waste: ${waste_telemetry}"
+  index_log "$_role_display $(format_waste_for_index "$waste_telemetry")"
 
   # Stash tool-use count, ASan run count, and active-result baseline for
   # quality-feedback and reverse-turn-budget directives next iteration.
@@ -6597,7 +6646,7 @@ _launch_agent_into_slot() {
   else
     role_name="${role_prefix}-${slot}-${mode}"
   fi
-  log "Prompt built for agent A${slot} (${role_name}): ~$(fmt_count "$prompt_tokens") tokens / ${#prompt} chars"
+  log "Agent ${slot} prompt ready: ${role_name} (~$(fmt_count "$prompt_tokens") tokens, ${#prompt} chars)"
   prompt_file=$(write_prompt_artifacts "$ts" "$role_name" "$slot" "$role_prefix" "$prompt" "$prompt_tokens")
   log_agent_plan "$slot" "$role_prefix" "$role_name" "$prompt_tokens" "$prompt_file" ""
   run_agent "$role_name" "$slot" "$MODEL" "$turns" "$prompt" "$ts" &
@@ -6740,7 +6789,7 @@ launch_agents_and_wait() {
         fi
       done <<<"$_iter_subsystem_keys"
       if [ "$_collides" -eq 1 ]; then
-        log "PLAN_DEDUP: agent=${i} resume-pinned to '${_resume_pinned_sub}' (canonical='${_resume_pinned_key}') already held by another slot this iteration; clearing resume state so the queue picks fresh work" | tee -a "$INDEX"
+        log "Agent ${i} resume reset: subsystem '${_resume_pinned_sub}' is already assigned this iteration; clearing resume state so the queue picks fresh work" | tee -a "$INDEX"
         clear_agent_resume_state "$i" 2>/dev/null || true
       fi
     fi
@@ -6768,7 +6817,7 @@ launch_agents_and_wait() {
       pid_summary+="${i}=${pids[$i]} "
     fi
   done
-  log "Agents now running in parallel (agent_number=process_id pairs): ${pid_summary}— waiting for all to finish before scoring the iteration"
+  log "Agents running: ${pid_summary}(waiting for the iteration to finish)"
 
   local rc_summary=""
 
@@ -6846,7 +6895,7 @@ launch_agents_and_wait() {
     fi
     sleep "$refill_poll_secs"
   done
-  log "Agent exit codes: ${rc_summary}" | tee -a "$INDEX"
+  log "Agent exits: ${rc_summary}" | tee -a "$INDEX"
   return 0
 }
 
@@ -7332,9 +7381,9 @@ while true; do
 
   iteration_start_epoch=$(date +%s)
   if [ "$IS_BROWSER_TARGET" -eq 1 ]; then
-    log "═══ Iteration ${iteration} starting (run #${total_iterations} this session, backend=${ACTIVE_BACKEND}); agent pool: ${BROWSER_AGENTS} browser + ${SHELL_AGENTS} shell, probe budget per agent: ${BROWSER_ASAN_RUN_BUDGET} (browser) / ${SHELL_ASAN_RUN_BUDGET} (shell); progress so far: ${confirmed_findings_before} confirmed finding(s), ${security_crashes_before} crash candidate(s), ${dry_streak}/${MAX_DRY_SESSIONS} dry iterations (stops at ${MAX_DRY_SESSIONS}) ═══" | tee -a "$INDEX"
+    log "Iteration ${iteration} starting: run=${total_iterations} backend=${ACTIVE_BACKEND} pool=${BROWSER_AGENTS} browser + ${SHELL_AGENTS} shell probe_budget=${BROWSER_ASAN_RUN_BUDGET}/${SHELL_ASAN_RUN_BUDGET} totals=${confirmed_findings_before} findings/${security_crashes_before} crashes dry=${dry_streak}/${MAX_DRY_SESSIONS}" | tee -a "$INDEX"
   else
-    log "═══ Iteration ${iteration} starting (run #${total_iterations} this session, backend=${ACTIVE_BACKEND}); agent pool: ${NUM_AGENTS} worker(s), probe budget per agent: ${SHELL_ASAN_RUN_BUDGET}; progress so far: ${confirmed_findings_before} confirmed finding(s), ${security_crashes_before} crash candidate(s), ${dry_streak}/${MAX_DRY_SESSIONS} dry iterations (stops at ${MAX_DRY_SESSIONS}) ═══" | tee -a "$INDEX"
+    log "Iteration ${iteration} starting: run=${total_iterations} backend=${ACTIVE_BACKEND} pool=${NUM_AGENTS} workers probe_budget=${SHELL_ASAN_RUN_BUDGET} totals=${confirmed_findings_before} findings/${security_crashes_before} crashes dry=${dry_streak}/${MAX_DRY_SESSIONS}" | tee -a "$INDEX"
   fi
 
   # Preflight: warn if free RAM is tight. Rough envelope: browsers ~3 GB
@@ -7369,9 +7418,9 @@ while true; do
     CURRENT_LAUNCH_AGENT_LIST="$(seq 1 "$NUM_AGENTS" | tr '\n' ' ' | sed 's/ $//')"
     _agent_display="$(printf '%s\n' "$CURRENT_LAUNCH_AGENT_LIST" | tr ' ' ',')"
     if [ "$IS_BROWSER_TARGET" -eq 1 ]; then
-      log "Cold start: no prior agent state files exist for this target/backend, so the harness is launching all ${CURRENT_LAUNCH_AGENT_COUNT} of ${NUM_AGENTS} configured agents [${_agent_display}] in parallel (split: ${BROWSER_AGENTS} browser + ${SHELL_AGENTS} shell). Each agent will pick its own subsystem from the queue." | tee -a "$INDEX"
+      log "Starting cold audit: agents=${_agent_display} launched=${CURRENT_LAUNCH_AGENT_COUNT}/${NUM_AGENTS} state=fresh pool=${BROWSER_AGENTS} browser+${SHELL_AGENTS} shell; queue chooses work" | tee -a "$INDEX"
     else
-      log "Cold start: no prior agent state files exist for this target/backend, so the harness is launching all ${CURRENT_LAUNCH_AGENT_COUNT} of ${NUM_AGENTS} configured agents [${_agent_display}] in parallel. Each agent will pick its own subsystem from the queue." | tee -a "$INDEX"
+      log "Starting cold audit: agents=${_agent_display} launched=${CURRENT_LAUNCH_AGENT_COUNT}/${NUM_AGENTS} state=fresh; queue chooses work" | tee -a "$INDEX"
     fi
     launch_agents_and_wait "cold-start" build_cold_start_prompt "$timestamp"
     rl_rc=0; handle_rate_limit_backoff "$timestamp" 2>/dev/null || rl_rc=$?
@@ -7399,7 +7448,7 @@ while true; do
       update_subsystem_dry_streaks 1 || true
     elif [ "$new_confirmed_findings" -gt 0 ] || [ "$new_security_crashes" -gt 0 ]; then
       dry_streak=$((dry_streak + 1))
-      log "Iteration finished — DUPLICATE-ONLY: ${new_confirmed_findings} new finding dir(s) and ${new_security_crashes} new crash dir(s), but 0 new unique root cause(s); dry streak is now ${dry_streak}/${MAX_DRY_SESSIONS}" | tee -a "$INDEX"
+      log "Iteration ${iteration} result: duplicate-only | new=${new_confirmed_findings} finding dirs/${new_security_crashes} crash dirs unique=0 | dry=${dry_streak}/${MAX_DRY_SESSIONS}" | tee -a "$INDEX"
       update_subsystem_dry_streaks 0 || true
     elif [ "$new_env_blocked" -gt 0 ]; then
       # Diagnostic iteration: cards dispositioned to ENV-BLOCKED narrow
@@ -7408,7 +7457,7 @@ while true; do
       # the agent only ever env-blocks, the eligible queue drains and
       # the existing exhaustion handler fires STALL_STOP without a
       # streak cap.
-      log "Iteration finished — ENV-BLOCKED-DIAGNOSTIC: marked ${new_env_blocked} new env-blocked entry(ies) but produced no findings/crashes; dry_streak stays at ${dry_streak}/${MAX_DRY_SESSIONS} (queue exhaustion governs stall, not a per-streak cap)" | tee -a "$INDEX"
+      log "Iteration ${iteration} result: env-blocked | blocked=${new_env_blocked} new entries | dry=${dry_streak}/${MAX_DRY_SESSIONS} unchanged (queue exhaustion controls stall)" | tee -a "$INDEX"
       update_subsystem_dry_streaks 0 || true
     else
       dry_streak=$((dry_streak + 1))
@@ -7440,9 +7489,9 @@ while true; do
   fi
   _agent_display="$(printf '%s\n' "$CURRENT_LAUNCH_AGENT_LIST" | tr ' ' ',')"
   if [ "$IS_BROWSER_TARGET" -eq 1 ]; then
-    log "Resuming ${CURRENT_LAUNCH_AGENT_COUNT} of ${NUM_AGENTS} agent(s) [${_agent_display}] in parallel for a deep-investigation pass over their prior hypotheses (${active_before_launch} open hypothesis(es) across the pool; pool split: ${BROWSER_AGENTS} browser + ${SHELL_AGENTS} shell)" | tee -a "$INDEX"
+    log "Deep investigation: launching ${CURRENT_LAUNCH_AGENT_COUNT}/${NUM_AGENTS} agents [${_agent_display}] with ${active_before_launch} open hypotheses (pool=${BROWSER_AGENTS} browser + ${SHELL_AGENTS} shell)" | tee -a "$INDEX"
   else
-    log "Resuming ${CURRENT_LAUNCH_AGENT_COUNT} of ${NUM_AGENTS} agent(s) [${_agent_display}] in parallel for a deep-investigation pass over their prior hypotheses (${active_before_launch} open hypothesis(es) across the pool)" | tee -a "$INDEX"
+    log "Deep investigation: launching ${CURRENT_LAUNCH_AGENT_COUNT}/${NUM_AGENTS} agents [${_agent_display}] with ${active_before_launch} open hypotheses" | tee -a "$INDEX"
   fi
   launch_agents_and_wait "deep_investigation" build_deep_investigation_prompt "$timestamp"
 
@@ -7510,10 +7559,10 @@ while true; do
   iter_dur_secs=$(( $(date +%s) - ${iteration_start_epoch:-$(date +%s)} ))
   if [ "$iteration_was_productive" -eq 1 ]; then
     dry_streak=0
-    log "Iteration ${iteration} finished in $(fmt_secs "$iter_dur_secs") — PRODUCTIVE: ${new_confirmed_findings} new confirmed finding dir(s) and ${new_security_crashes} new crash candidate dir(s) this round (${new_confirmed_finding_roots} finding root(s), ${new_security_crash_roots} crash root(s)); cumulative totals are now ${confirmed_findings_after} finding(s) / ${security_crashes_after} crash(es); resetting dry streak to 0" | tee -a "$INDEX"
+    log "Iteration ${iteration} result: productive in $(fmt_secs "$iter_dur_secs") | new=${new_confirmed_findings} findings/${new_security_crashes} crashes unique=${new_confirmed_finding_roots} finding roots/${new_security_crash_roots} crash roots | totals=${confirmed_findings_after} findings/${security_crashes_after} crashes | dry=0/${MAX_DRY_SESSIONS}" | tee -a "$INDEX"
   elif [ "$new_confirmed_findings" -gt 0 ] || [ "$new_security_crashes" -gt 0 ]; then
     dry_streak=$((dry_streak + 1))
-    log "Iteration ${iteration} finished in $(fmt_secs "$iter_dur_secs") — DUPLICATE-ONLY: ${new_confirmed_findings} new finding dir(s) and ${new_security_crashes} new crash candidate dir(s), but 0 new unique root cause(s); dry streak is now ${dry_streak}/${MAX_DRY_SESSIONS}; cumulative totals: ${confirmed_findings_after} finding(s) / ${security_crashes_after} crash(es)" | tee -a "$INDEX"
+    log "Iteration ${iteration} result: duplicate-only in $(fmt_secs "$iter_dur_secs") | new=${new_confirmed_findings} findings/${new_security_crashes} crashes unique=0 | totals=${confirmed_findings_after} findings/${security_crashes_after} crashes | dry=${dry_streak}/${MAX_DRY_SESSIONS}" | tee -a "$INDEX"
   elif [ "$new_env_blocked" -gt 0 ]; then
     # Diagnostic iteration: the harness ruled out dead-code subsystems
     # (TLS/SSH backends not compiled, platform-only TUs, etc.) but did
@@ -7522,10 +7571,10 @@ while true; do
     # such iteration — once it empties, the existing
     # target_exhausted_hard_stop_ready / eligible_work_card_exists path
     # fires STALL_STOP naturally. Do not bump dry_streak.
-    log "Iteration ${iteration} finished in $(fmt_secs "$iter_dur_secs") — ENV-BLOCKED-DIAGNOSTIC: marked ${new_env_blocked} new env-blocked entry(ies) but produced no findings/crashes; dry_streak stays at ${dry_streak}/${MAX_DRY_SESSIONS} (queue exhaustion governs stall, not a per-streak cap); cumulative totals: ${confirmed_findings_after} finding(s) / ${security_crashes_after} crash(es)" | tee -a "$INDEX"
+    log "Iteration ${iteration} result: env-blocked in $(fmt_secs "$iter_dur_secs") | blocked=${new_env_blocked} new entries | totals=${confirmed_findings_after} findings/${security_crashes_after} crashes | dry=${dry_streak}/${MAX_DRY_SESSIONS} unchanged" | tee -a "$INDEX"
   else
     dry_streak=$((dry_streak + 1))
-    log "Iteration ${iteration} finished in $(fmt_secs "$iter_dur_secs") — DRY: no new findings, no new crashes, no state changes this round; dry streak is now ${dry_streak}/${MAX_DRY_SESSIONS} (audit stops when it hits ${MAX_DRY_SESSIONS}); cumulative totals: ${confirmed_findings_after} finding(s) / ${security_crashes_after} crash(es)" | tee -a "$INDEX"
+    log "Iteration ${iteration} result: dry in $(fmt_secs "$iter_dur_secs") | no new findings/crashes/state changes | totals=${confirmed_findings_after} findings/${security_crashes_after} crashes | dry=${dry_streak}/${MAX_DRY_SESSIONS}" | tee -a "$INDEX"
   fi
 
   # Queue snapshot — one line per iteration so rotation/starvation

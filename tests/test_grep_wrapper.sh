@@ -53,7 +53,7 @@ mkdir -p "$LOGTREE/src/logs" "$LOGTREE/output/sample/codex/logs/.raw" \
   "$LOGTREE/output/sample/codex/.hg" "$LOGTREE/src/.raw"
 echo 'PATCH-grep-wrapper' > "$LOGTREE/src/logs/logger.c"
 echo 'PATCH-grep-wrapper' > "$LOGTREE/src/.raw/corpus.txt"
-echo 'PATCH-grep-wrapper' > "$LOGTREE/output/sample/codex/logs/session_1.prompt.md"
+echo 'PATCH-grep-wrapper' > "$LOGTREE/output/sample/codex/logs/.raw/session_1.prompt.md"
 echo 'PATCH-grep-wrapper' > "$LOGTREE/output/sample/codex/logs/.raw/session_1.log.raw"
 echo 'PATCH-grep-wrapper' > "$LOGTREE/output/sample/codex/logs/.gemini-home/chats/s.jsonl"
 echo 'PATCH-grep-wrapper' > "$LOGTREE/output/sample/codex/.hg/store"

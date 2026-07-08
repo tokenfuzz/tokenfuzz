@@ -25,6 +25,23 @@ from audit_helpers import (
 )
 
 
+def _fmt_count(value):
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return "0"
+    if number >= 1_000_000:
+        text = f"{number / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{text}M"
+    if number >= 1_000:
+        return f"{number // 1_000}k"
+    return str(number)
+
+
+def _summary_value(value):
+    return "n/a" if value is None or value == "" else str(value)
+
+
 # Exclusive lock on a sibling .lock file so concurrent agent finish
 # handlers don't interleave bytes when their JSON rows exceed PIPE_BUF.
 # Mirrors lib/workqueue.py's jsonl_lock pattern for consistency.
@@ -486,25 +503,34 @@ def write_summary(payload, summary_md, index_jsonl):
     Path(summary_md).parent.mkdir(parents=True, exist_ok=True)
     with open(summary_md, "w", encoding="utf-8") as out:
         out.write("# Session Summary\n\n")
-        out.write(f"- Agent: {payload['role']} #{payload['agent']} ({payload['backend']}, {payload['mode']})\n")
-        out.write(f"- Exit: {payload['exit_code']}  Duration: {payload['runtime']['duration_ms']}ms\n")
         out.write(
-            f"- Tokens: in={payload['tokens']['input']} "
-            f"cache_read={payload['tokens']['cache_read']} "
-            f"cache_creation={payload['tokens']['cache_creation']} "
-            f"out={payload['tokens']['output']} total={payload['tokens']['total']}\n"
+            f"- Session: {payload['role']} agent={payload['agent']} "
+            f"backend={payload['backend']} mode={payload['mode']} strategy={_summary_value(payload.get('strategy'))}\n"
         )
         out.write(
-            f"- Tools: commands={payload['tools']['commands']} total={payload['tools']['total']} "
-            f"output_bytes={payload['tools']['output_bytes']} max_output={payload['tools']['max_output_bytes']} "
-            f"over8k={payload['tools']['outputs_over_8k']}\n"
+            f"- Result: exit={payload['exit_code']} duration={_summary_value(payload['runtime']['duration_ms'])}ms "
+            f"subsystem={_summary_value(payload.get('subsystem'))}\n"
         )
         out.write(
-            f"- Probe: commands={payload['probe']['commands']} asan_runs={payload['probe']['asan_invocations']} "
+            f"- Tokens: total={_summary_value(payload['tokens']['total'])} "
+            f"in={_summary_value(payload['tokens']['input'])} "
+            f"cache_read={_summary_value(payload['tokens']['cache_read'])} "
+            f"cache_create={_summary_value(payload['tokens']['cache_creation'])} "
+            f"out={_summary_value(payload['tokens']['output'])}\n"
+        )
+        out.write(
+            f"- Tools: calls={payload['tools']['total']} commands={payload['tools']['commands']} "
+            f"output={_fmt_count(payload['tools']['output_bytes'])} "
+            f"max={_fmt_count(payload['tools']['max_output_bytes'])} "
+            f"oversized={payload['tools']['outputs_over_8k']}\n"
+        )
+        out.write(
+            f"- Probe: commands={payload['probe']['commands']} sanitizer_runs={payload['probe']['asan_invocations']} "
             f"verdicts={json.dumps(payload['probe']['verdicts'], sort_keys=True)}\n"
         )
-        out.write(f"- Largest output: {payload['tools']['largest_output']}\n")
-        out.write("\nRaw log retained for explicit post-mortem use; prefer this summary for ranking and triage.\n")
+        out.write(f"- Largest tool output: {payload['tools']['largest_output']}\n")
+        raw_hint = f".raw/{payload['files']['raw']}" if payload["files"].get("raw") else "n/a"
+        out.write(f"\nRaw transcript: `{raw_hint}`. Open it only for literal backend output.\n")
     Path(index_jsonl).parent.mkdir(parents=True, exist_ok=True)
     # Concurrent agent finish handlers race here. Without flock, rows
     # larger than PIPE_BUF (4096 on Linux/macOS) can interleave; even

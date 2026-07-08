@@ -233,7 +233,7 @@ assert_file_exists "$target_dir/file.c" \
   "T25f: target source files stay in place"
 
 # --no-validate-findings is announced in the cell log.
-assert_match 'model-direct findings gate: DISABLED' "$early_out" \
+assert_match 'Cell model-direct-r1 validation: DISABLED' "$early_out" \
   "T25g: --no-validate-findings is announced in the cell log"
 assert_match 'findings: rejected=0 confirmed=0 unique=0; crashes: rejected=0 confirmed=0 unique=0' "$early_out" \
   "T25g2: model-direct gate logs findings and crashes counts"

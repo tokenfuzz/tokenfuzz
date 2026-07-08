@@ -68,6 +68,10 @@ eval "$(audit_extract_functions \
   extract_waste_telemetry \
   extract_raw_status \
   write_session_log_summary \
+  audit_raw_path \
+  audit_raw_display_path \
+  recover_structured_text_log \
+  emit_agent_session_text \
   count_structural_refusal_signals \
   log_has_rate_limit_rejection \
   _iteration_provider_status \
@@ -601,6 +605,10 @@ assert_match 'llm_agent_flags claude claude_base_flags "\$model"'   "$run_agent_
 assert_match 'llm_agent_flags gemini gemini_flags "\$model"'        "$run_agent_src" "model: gemini launch delegates to llm_agent_flags with \$model"
 assert_match 'llm_agent_flags codex codex_flags "\$model"'          "$run_agent_src" "model: codex launch delegates to llm_agent_flags with \$model"
 assert_match 'llm_agent_flags oss opencode_flags "\$model"'         "$run_agent_src" "backend: oss launch routes through llm_agent_flags oss"
+assert_match 'emit_agent_session_text codex "\$logfile" "\$_log_prefix"' \
+  "$run_agent_src" "backend: codex console prints recovered assistant text, not raw JSON"
+assert_not_match 'sed -u "s\|\^\|\$\{_log_prefix\} \|" "\$\(audit_raw_path "\$logfile"\)"' \
+  "$run_agent_src" "backend: structured raw logs are never streamed directly to console"
 # Gemini's full add-dirs CSV (script root, target tree, results dir)
 # becomes repeated --add-dir flags inside llm_agent_flags. The harness
 # call site still joins them verbatim from the add_dirs argument.
@@ -626,6 +634,38 @@ assert_match 'STREAM_IDLE_RETRY: agent=\$\{agent_num\} role=\$\{role\}' \
   "$run_agent_src" "backend: claude stream-idle retry logs the run_agent role argument"
 assert_not_match 'STREAM_IDLE_RETRY: agent=\$\{agent_num\} role=\$\{role_name\}' \
   "$run_agent_src" "backend: claude stream-idle retry does not reference launcher-local role_name"
+
+# Regression: Codex can miss --output-last-message when the command-cap
+# watchdog stops a productive session. The live console should recover the
+# assistant text from JSONL, or print one compact note, but must never dump
+# raw structured events.
+_raw_console_tmp="$TEST_TMPDIR/raw-console"
+LOGDIR="$_raw_console_tmp/logs"
+RAW_DIR="$LOGDIR/.raw"
+mkdir -p "$RAW_DIR"
+_raw_console_log="$LOGDIR/session.log"
+_raw_console_raw="$(audit_raw_path "$_raw_console_log")"
+cat > "$_raw_console_raw" <<'EOF'
+{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Recovered final message"}}
+EOF
+_raw_console_out="$(emit_agent_session_text codex "$_raw_console_log" "[Agent1-test]" 2>&1)"
+assert_match '\[Agent1-test\] Recovered final message' "$_raw_console_out" \
+  "backend: codex raw fallback emits assistant text"
+assert_not_match '\{"type":"thread.started"' "$_raw_console_out" \
+  "backend: codex raw fallback suppresses structured JSON events"
+assert_file_contains "$_raw_console_log" "Recovered final message" \
+  "backend: codex raw fallback writes recovered text log"
+
+_raw_console_empty_log="$LOGDIR/session-empty.log"
+_raw_console_empty_raw="$(audit_raw_path "$_raw_console_empty_log")"
+printf '{"type":"thread.started","thread_id":"t2"}\n' > "$_raw_console_empty_raw"
+_raw_console_empty_out="$(emit_agent_session_text codex "$_raw_console_empty_log" "[Agent1-test]" 2>&1)"
+assert_match 'No final assistant message was captured; raw transcript kept at \.raw/session-empty\.log\.raw' \
+  "$_raw_console_empty_out" "backend: codex raw fallback emits compact no-message note"
+assert_not_match '\{"type":"thread.started"' "$_raw_console_empty_out" \
+  "backend: codex compact fallback also suppresses structured JSON events"
 
 # Work-card refresh summary used to scan the newly-written queue three times:
 # wc for total lines, jq/sort/uniq for strategy histogram, jq/sort/uniq for
@@ -1373,7 +1413,7 @@ JSON
     "session pause: capacity limit pauses, resets the backoff streak, returns 0 (continue)"
   assert_match 'BUDGET_HALT' "$(cat "$TEST_TMPDIR/sp.out")" \
     "session pause: cumulative pause cap spent returns 2 (backend-unavailable)"
-  assert_file_contains "$SCRIPT_ROOT/bin/audit" 'Press Ctrl\+C to stop waiting' \
+  assert_file_contains "$SCRIPT_ROOT/bin/audit" 'Ctrl\+C to stop' \
     "session pause: unknown-reset pause tells the user how to stop waiting"
 
   # Productive-wall deadline excludes paused time and is wired at the loop top.
@@ -1474,6 +1514,11 @@ assert_match 'over8k=1' "$result" "waste: codex counts oversized outputs"
 assert_match 'native_tools=Read:0,Grep:0,Glob:0' "$result" "waste: codex has no Claude native tools"
 assert_match 'top_cmds=ls:1,probe:1' "$result" "waste: codex normalizes command patterns"
 assert_match 'largest="probe: bin/probe scratch-1/testcase.html"' "$result" "waste: codex names largest command"
+eval "$(audit_extract_function format_waste_for_index)"
+formatted=$(format_waste_for_index "$result")
+assert_match '^tool output: bytes=9k max=9k oversized=1 top=ls:1,probe:1 largest="probe: bin/probe scratch-1/testcase.html"$' "$formatted" \
+  "waste: index line is compact and readable"
+assert_not_match 'native=Read:0' "$formatted" "waste: index line omits zero native counters"
 
 cat > "$TEST_TMPDIR/codex_error_message_string.jsonl" <<EOF
 {"type":"item.completed","item":{"type":"command_execution","command":"sed -n '1,20p' file.cc","aggregated_output":"abc"}}
@@ -1587,7 +1632,8 @@ assert_match '^rate_limit=$' "$finish_fields_failed" "finish-fields failure: bla
 assert_match '^codex_completed=$' "$finish_fields_failed" "finish-fields failure: blank codex completion re-enables shell fallback"
 assert_match '^gemini_success=$' "$finish_fields_failed" "finish-fields failure: blank gemini success re-enables shell fallback"
 
-assert_match 'Agent \$_role_display waste: \$\{waste_telemetry\}' "$run_agent_src" "run_agent: writes waste telemetry to index"
+assert_match 'index_log "\$_role_display \$\(format_waste_for_index "\$waste_telemetry"\)' "$run_agent_src" \
+  "run_agent: writes compact tool-output telemetry to index"
 assert_match 'finish_fields=\$\(extract_finish_fields "\$raw_logfile" "\$ACTIVE_BACKEND"\)' "$run_agent_src" "run_agent: extracts finish fields in one raw-log read"
 assert_not_match 'usage_fields=\$\(extract_usage_fields "\$raw_logfile"\)' "$run_agent_src" "run_agent: avoids separate usage raw-log scan"
 assert_not_match 'extract_usage_field "\$raw_logfile" total_tokens' "$run_agent_src" "run_agent: avoids per-field usage raw-log scans"
@@ -1675,7 +1721,10 @@ row_size = len(json.dumps(row, sort_keys=True, separators=(",", ":")))
 assert row_size < 3500, f"index.jsonl row size {row_size} >= 3500 — splitting unsafe without flock"
 PY
 assert_eq "0" "$?" "summary: index.jsonl row is parseable and excludes summary_json field"
-assert_file_contains "$TEST_TMPDIR/session_summary.summary.md" 'Raw log retained for explicit post-mortem use' "summary: markdown tells readers not to default to raw logs"
+assert_file_contains "$TEST_TMPDIR/session_summary.summary.md" 'Raw transcript: `.raw/session_summary.raw`' \
+  "summary: markdown points raw transcript behind the compact summary"
+assert_file_contains "$TEST_TMPDIR/session_summary.summary.md" 'Largest tool output:' \
+  "summary: markdown labels largest tool output clearly"
 
 # Gemini stream-json: a run_shell_command tool_result carrying probe/ASan
 # output must feed the probe/verdict scan, exactly like the codex
@@ -2036,7 +2085,7 @@ AUDIT_MODEL_PREFLIGHT_TIMEOUT=5
 
 validate_model_for_backend claude "claude-good"
 assert_file_exists "$(model_preflight_stamp_path claude "claude-good")" "model preflight: claude accepted model writes stamp"
-assert_file_contains "$INDEX" "Model preflight passed: claude backend can reach model='claude-good'" "model preflight: claude pass logged"
+assert_file_contains "$INDEX" "Model preflight passed: backend=claude model='claude-good'" "model preflight: claude pass logged"
 # Success path must not leave model-preflight-*.{raw,message} sidecars
 # behind. The .ok stamp above is the only on-disk evidence we keep on
 # success; .raw/.message are only retained on failure (asserted below).
@@ -2047,15 +2096,15 @@ assert_eq "0" "${#pf_sidecars[@]}" "model preflight: claude success leaves no .r
 
 validate_model_for_backend codex "codex-good"
 assert_file_exists "$(model_preflight_stamp_path codex "codex-good")" "model preflight: codex accepted model writes stamp"
-assert_file_contains "$INDEX" "Model preflight passed: codex backend can reach model='codex-good'" "model preflight: codex pass logged"
+assert_file_contains "$INDEX" "Model preflight passed: backend=codex model='codex-good'" "model preflight: codex pass logged"
 
 validate_model_for_backend gemini "gemini-good"
 assert_file_exists "$(model_preflight_stamp_path gemini "gemini-good")" "model preflight: gemini accepted model writes stamp"
-assert_file_contains "$INDEX" "Model preflight passed: gemini backend can reach model='gemini-good'" "model preflight: gemini pass logged"
+assert_file_contains "$INDEX" "Model preflight passed: backend=gemini model='gemini-good'" "model preflight: gemini pass logged"
 
 validate_model_for_backend oss "oss-good"
 assert_file_exists "$(model_preflight_stamp_path oss "oss-good")" "model preflight: oss accepted tool-capable model writes stamp"
-assert_file_contains "$INDEX" "Model preflight passed: oss backend can reach model='oss-good'" "model preflight: oss pass logged"
+assert_file_contains "$INDEX" "Model preflight passed: backend=oss model='oss-good'" "model preflight: oss pass logged"
 
 # Regression: agy can exit 0 AND echo MODEL_PREFLIGHT_OK while silently
 # running a different model (handed a name it cannot resolve to a label). The
@@ -2087,7 +2136,7 @@ saved_model_preflight_timeout="$AUDIT_MODEL_PREFLIGHT_TIMEOUT"
 unset AUDIT_MODEL_PREFLIGHT_TIMEOUT
 : > "$INDEX"
 USE_GEMINI_CLI=1 validate_model_for_backend gemini "gemini-cli-default-timeout"
-assert_file_contains "$INDEX" 'timeout per attempt=5m00s' \
+assert_file_contains "$INDEX" 'timeout=5m00s' \
   "model preflight: Gemini CLI default timeout allows slow startup"
 AUDIT_MODEL_PREFLIGHT_TIMEOUT="$saved_model_preflight_timeout"
 unset USE_GEMINI_CLI
@@ -2127,16 +2176,16 @@ chmod +x "$model_preflight_bin/claude-preflight"
 
 : > "$INDEX"
 validate_model_for_backend claude "claude-good-sc"
-short_circuit_passes_first=$(grep -c "Model preflight passed: claude backend can reach model='claude-good-sc'" "$INDEX" || true)
+short_circuit_passes_first=$(grep -c "Model preflight passed: backend=claude model='claude-good-sc'" "$INDEX" || true)
 validate_model_for_backend claude "claude-good-sc"
-short_circuit_passes_second=$(grep -c "Model preflight passed: claude backend can reach model='claude-good-sc'" "$INDEX" || true)
+short_circuit_passes_second=$(grep -c "Model preflight passed: backend=claude model='claude-good-sc'" "$INDEX" || true)
 assert_eq 1 "$short_circuit_passes_first" "preflight short-circuit: first call logs pass"
 assert_eq 1 "$short_circuit_passes_second" "preflight short-circuit: second call for same backend+model is silent"
 
 # Different model for the same backend must still preflight — guards
 # are keyed by backend+model, not backend alone.
 validate_model_for_backend claude "claude-good-sc2" 2>/dev/null || true
-short_circuit_other_model_passes=$(grep -c "Model preflight passed: claude backend can reach model='claude-good-sc2'" "$INDEX" || true)
+short_circuit_other_model_passes=$(grep -c "Model preflight passed: backend=claude model='claude-good-sc2'" "$INDEX" || true)
 assert_eq 1 "$short_circuit_other_model_passes" \
   "preflight short-circuit: different model on same backend still preflights"
 
@@ -2335,7 +2384,7 @@ retry_output=$(sleep() { :; }; validate_model_for_backend claude "retry-good" 2>
 retry_rc=$?
 assert_eq "0" "$retry_rc" "model preflight retry: succeeds after one transient failure"
 assert_match 'attempt 1/3 .* failed' "$retry_output" "model preflight retry: attempt 1 failure logged"
-assert_match "Model preflight passed: claude backend can reach model='retry-good'" "$retry_output" \
+assert_match "Model preflight passed: backend=claude model='retry-good'" "$retry_output" \
   "model preflight retry: success line logged after retry"
 assert_file_exists "$(model_preflight_stamp_path claude "retry-good")" \
   "model preflight retry: stamp written after retry success"
@@ -2730,11 +2779,15 @@ mkdir -p "$readme_logdir"
 eval "$(audit_extract_function audit_write_logdir_readme)"
 audit_write_logdir_readme "$readme_logdir"
 assert_file_exists "$readme_logdir/README.md" "logs README: written at init"
-assert_file_contains "$readme_logdir/README.md" "High-signal entry points" "logs README: points at the right files"
+assert_file_contains "$readme_logdir/README.md" "Read First" "logs README: points at the right files"
+assert_file_contains "$readme_logdir/README.md" 'session_.*\.prompt\.md' "logs README: prompt dumps documented as forensic files"
 size_before=$(wc -c < "$readme_logdir/README.md" | tr -d ' ')
 audit_write_logdir_readme "$readme_logdir"
 size_after=$(wc -c < "$readme_logdir/README.md" | tr -d ' ')
 assert_eq "$size_before" "$size_after" "logs README: idempotent (no rewrite if present)"
+printf '%s\n' '# Debugging tour' 'old generated README' > "$readme_logdir/README.md"
+audit_write_logdir_readme "$readme_logdir"
+assert_file_contains "$readme_logdir/README.md" '^# Log Tour$' "logs README: stale generated README refreshed"
 
 # ═══════════════════════════════════════════════════════════════
 # Subsystem mode lists: read from the lib/subsystems/<slug>.txt overlay,
@@ -2829,7 +2882,7 @@ assert_file_contains "$SCRIPT_ROOT/bin/audit" 'build-freshness "\$TARGET_ROOT" a
   "build-freshness: preflight probes the asan tree via target_config.py"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'setup-target" "\$TARGET_SLUG" --build' \
   "build-freshness: a stale/missing tree is (re)built via setup-target --build"
-assert_file_contains "$SCRIPT_ROOT/bin/audit" 'PREFLIGHT WARN: ASan build is still' \
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'ASan preflight WARN: build still' \
   "build-freshness: a build that stays stale warns and the audit continues (fail-open)"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'Re-probe rather than trust the exit status' \
   "build-freshness: success is re-probed, not inferred from setup-target exit code"
@@ -2837,7 +2890,7 @@ assert_file_contains "$SCRIPT_ROOT/bin/audit" 'fresh|skip) return 0' \
   "build-freshness: fresh or skip short-circuits without building"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'target_git_is_shallow_checkout "\$TARGET_ROOT"' \
   "startup warning: bin/audit checks for shallow git targets"
-assert_file_contains "$SCRIPT_ROOT/bin/audit" 'S1 prior-fix history and patch-card queues may be incomplete' \
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'S1 history \+ patch-card queue may be incomplete' \
   "startup warning: bin/audit explains shallow checkout impact"
 # Must run BEFORE the harness canary (which would otherwise smoke-test a stale
 # build).

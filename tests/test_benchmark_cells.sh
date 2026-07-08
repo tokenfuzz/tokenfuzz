@@ -224,7 +224,7 @@ wait "$codex_pid" "$codex_rel_pid" "$claude_fail_pid" \
 codex_rc=$(<"$work/codex.rc")
 codex_out=$(<"$work/codex.out")
 assert_eq "0" "$codex_rc" "T16a: model-direct codex cell succeeds with one --cd"
-assert_match "cells complete: 1 done, 0 failed" "$codex_out" \
+assert_match "Cells complete: 1 done, 0 failed" "$codex_out" \
   "T16b: codex benchmark cell marked done"
 assert_match "refusals=0" "$codex_out" \
   "T16b-refusals: benchmark summary prints refusal count"
@@ -250,9 +250,9 @@ assert_file_exists \
 codex_rel_rc=$(<"$work/codex_rel.rc")
 codex_rel_out=$(<"$work/codex_rel.out")
 assert_eq "0" "$codex_rel_rc" "T16c: model-direct codex cell succeeds with relative --bench-root"
-assert_match "cells complete: 1 done, 0 failed" "$codex_rel_out" \
+assert_match "Cells complete: 1 done, 0 failed" "$codex_rel_out" \
   "T16d: relative-root codex benchmark cell marked done"
-assert_match "live log: $SCRIPT_ROOT/output/benchmark-reltest-$$/codex/.*/cells/model-direct-r1/backend.raw.log" "$codex_rel_out" \
+assert_match "Cell model-direct-r1 live log: $SCRIPT_ROOT/output/benchmark-reltest-$$/codex/.*/cells/model-direct-r1/backend.raw.log" "$codex_rel_out" \
   "T16d2: relative-root benchmark prints an absolute live log path"
 assert_not_match "live log: .*file://" "$codex_rel_out" \
   "T16d3: live log path is not printed as a file:// URI"
@@ -299,7 +299,7 @@ fi
 # nonzero benchmark exit code is expected, so only the output is asserted.
 claude_fail_out=$(<"$work/claude_fail.out")
 rm -rf "$reltest_root-claudefail" 2>/dev/null || true
-assert_match "cells complete: 0 done, 1 failed" "$claude_fail_out" \
+assert_match "Cells complete: 0 done, 1 failed" "$claude_fail_out" \
   "T16g: a genuinely failed claude cell stays failed"
 
 # ── T16h-k: model-direct cells do not dirty the real repo root ───────────
@@ -308,7 +308,7 @@ gemini_direct_rc=$(<"$work/gemini_direct.rc")
 gemini_direct_out=$(<"$work/gemini_direct.out")
 assert_eq "0" "$gemini_direct_rc" \
   "T16h: fake-gemini model-direct benchmark cell exits cleanly"
-assert_match "cells complete: 1 done, 0 failed" "$gemini_direct_out" \
+assert_match "Cells complete: 1 done, 0 failed" "$gemini_direct_out" \
   "T16i: fake-gemini model-direct benchmark cell marked done"
 assert_file_not_exists "$SCRIPT_ROOT/$model_direct_junk_name" \
   "T16j: model-direct benchmark does not create bare junk in the real repo root"
@@ -328,7 +328,7 @@ gemini_cli_unlimited_rc=$(<"$work/gemini_cli_unlimited.rc")
 gemini_cli_unlimited_out=$(<"$work/gemini_cli_unlimited.out")
 assert_eq "0" "$gemini_cli_unlimited_rc" \
   "T16k4: captured Gemini CLI unlimited benchmark exits without tee deadlock"
-assert_match "cells complete: 1 done, 0 failed" "$gemini_cli_unlimited_out" \
+assert_match "Cells complete: 1 done, 0 failed" "$gemini_cli_unlimited_out" \
   "T16k5: captured Gemini CLI unlimited benchmark cell marked done"
 assert_file_contains "$BENCH" 'start_gemini_watchdog .* >&2 &' \
   "T16k6: model-direct watchdog cannot hold the results_dir capture pipe"
@@ -360,7 +360,7 @@ assert_file_contains "$BENCH" 'model-direct\) cell_log="\$cell_dir/backend\.raw\
   "T16m2: benchmark console points model-direct cells at backend.raw.log"
 assert_file_contains "$BENCH" 'harness\) cell_log="\$cell_dir/audit\.log"' \
   "T16m3: benchmark console points harness cells at audit.log"
-assert_file_contains "$BENCH" 'cell \$cell_name .* live log: \$cell_log' \
+assert_file_contains "$BENCH" 'Cell \$cell_name live log: \$cell_log' \
   "T16m4: benchmark console prints one live log path per real cell"
 assert_file_not_contains "$BENCH" 'live log:.*artifact_uri' \
   "T16m5: live log paths are printed without file:// URI decoration"

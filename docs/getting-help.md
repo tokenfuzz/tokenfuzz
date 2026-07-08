@@ -61,10 +61,9 @@ Include:
 6. **What you expected** vs. **what you got**.
 7. **Relevant logs** — paste the useful part of `$LOGS/index.log`.
    If it points at one agent session, include the matching
-   `$LOGS/session_<TS>_<role>-<n>-<mode>.log.summary.md` or
-   `$LOGS/session_<TS>_<role>-<n>-<mode>.log`. Use the raw transcript
-   under `$LOGS/.raw/` only as a last resort, and trim it to the
-   failing section.
+   `$LOGS/session_<TS>_<role>-<n>-<mode>.log.summary.md`. Use the
+   session log or raw transcript under `$LOGS/.raw/` only as a last
+   resort, and trim it to the failing section.
 
 A minimal template:
 
@@ -91,9 +90,9 @@ target.toml:
 
 ## What not to include
 
-- **Full raw backend transcripts.** They are huge, expensive to read,
-  and almost never the first thing needed. Start with `index.log` and
-  a session summary.
+- **Full raw backend transcripts or prompt dumps.** They are huge,
+  expensive to read, and almost never the first thing needed. Start
+  with `index.log` and a session summary.
 - **Target source code.** We do not need it; pointing at the
   upstream revision is enough.
 - **API keys, tokens, or anything from `~/.config/<backend>/`.**

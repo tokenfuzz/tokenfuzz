@@ -180,7 +180,7 @@ audit_latest_subsystem_suggestion() {
 }
 
 write_prompt_artifacts() {
-  # Writes the per-session prompt markdown and stashes (subsystem,
+  # Writes the per-session prompt markdown under logs/.raw/ and stashes (subsystem,
   # suggested_subsystem, strategy, prompt_tokens_est, launch) for the
   # finish handler to pull into the index.jsonl row. The legacy
   # session_*.prompt.meta.json sidecar is no longer written — every
@@ -188,13 +188,14 @@ write_prompt_artifacts() {
   # lib/audit_log_summary.py.
   local timestamp="$1" role_name="$2" agent_num="$3" launch="$4" prompt="$5" prompt_tokens="$6"
   [ -n "${LOGDIR:-}" ] || return 0
-  local prompt_file subsystem strategy suggestion stash
-  prompt_file="$LOGDIR/session_${timestamp}_${role_name}.prompt.md"
+  local prompt_root prompt_file subsystem strategy suggestion stash
+  prompt_root="${RAW_DIR:-$LOGDIR/.raw}"
+  prompt_file="$prompt_root/session_${timestamp}_${role_name}.prompt.md"
   subsystem=$(get_agent_subsystem "$agent_num" 2>/dev/null || echo "unknown")
   strategy=$(audit_strategy_for_agent "$agent_num")
   suggestion=$(audit_latest_subsystem_suggestion "$agent_num")
 
-  mkdir -p "$LOGDIR" 2>/dev/null || true
+  mkdir -p "$LOGDIR" "$prompt_root" 2>/dev/null || true
   printf '%s\n' "$prompt" > "$prompt_file"
 
   # Per-agent stash file picked up by run_agent's finish handler so the
@@ -228,8 +229,12 @@ log_agent_plan() {
 
   local prompt_basename meta_basename
   prompt_basename=$(basename "${prompt_file:-}" 2>/dev/null)
+  if [ -n "${LOGDIR:-}" ] && [ -n "${prompt_file:-}" ] \
+    && [ "${prompt_file#"$LOGDIR/.raw/"}" != "$prompt_file" ]; then
+    prompt_basename=".raw/$prompt_basename"
+  fi
   meta_basename=$(basename "${meta_file:-}" 2>/dev/null)
-  audit_emit_log "PLAN: agent=${agent_num} launch=${launch} strategy=${strategy} strat_streak=${streak}/${threshold} subsystem=${subsystem} suggested=${suggestion:-none} mode=${mode} role=${role} active=${active} pending=${pending} discards=${discards} asan_runs=${asan_runs} hits=${hits} role_name=${role_name} prompt=${prompt_basename} meta=${meta_basename}"
+  audit_emit_log "Agent ${agent_num} plan: ${launch} ${role} (${mode}) | strategy=${strategy} dry=${streak}/${threshold} | subsystem=${subsystem} suggested=${suggestion:-none} | queue active=${active} pending=${pending} discarded=${discards} | probes=${asan_runs} hits=${hits} | prompt=${prompt_basename}"
 
   audit_emit_event "agent-plan" \
     "agent=$agent_num" "launch=$launch" "role_name=$role_name" \
@@ -247,7 +252,7 @@ log_agent_plan() {
 record_subsystem_suggest() {
   local agent_num="$1" mode="$2" selected="$3" source="$4" skipped_claimed="${5:-}" skipped_blocklisted="${6:-}"
   [ -n "${LOGDIR:-}" ] && printf '%s' "${selected:-none}" > "$LOGDIR/.subsystem_suggest_${agent_num}" 2>/dev/null || true
-  audit_emit_log "SUBSYSTEM_SUGGEST: agent=${agent_num} mode=${mode} selected=${selected:-none} source=${source:-unknown} skipped_claimed=\"${skipped_claimed:-none}\" skipped_blocklisted=\"${skipped_blocklisted:-none}\""
+  audit_emit_log "Agent ${agent_num} subsystem suggestion: selected=${selected:-none} mode=${mode} source=${source:-unknown} skipped_claimed=\"${skipped_claimed:-none}\" skipped_blocklisted=\"${skipped_blocklisted:-none}\""
 
   audit_emit_event "subsystem-suggest" \
     "agent=$agent_num" "mode=$mode" "selected=${selected:-}" \
@@ -260,7 +265,7 @@ record_subsystem_claim() {
   local agent_num="$1" launch="$2" role_name="$3" before="$4" after="$5"
   local changed=0
   [ "${before:-unknown}" != "${after:-unknown}" ] && changed=1
-  audit_emit_log "SUBSYSTEM_CLAIM: agent=${agent_num} launch=${launch} before=${before:-unknown} after=${after:-unknown} changed=${changed} role_name=${role_name}"
+  audit_emit_log "Agent ${agent_num} subsystem: ${before:-unknown} -> ${after:-unknown} (changed=${changed}, launch=${launch}, role=${role_name})"
 
   audit_emit_event "subsystem-claim" \
     "agent=$agent_num" "launch=$launch" "role_name=$role_name" \
@@ -271,7 +276,7 @@ record_subsystem_claim() {
 
 log_strategy_status() {
   local agent_num="$1" subsystem="$2" strategy="$3" streak="$4" threshold="$5" productive="$6" action="${7:-keep}" extras="${8:-}"
-  audit_emit_log "STRATEGY_STATUS: agent=${agent_num} subsystem=${subsystem:-unknown} strategy=${strategy:-unknown} dry=${streak:-0}/${threshold:-0} productive=${productive:-0} action=${action}${extras:+ ${extras}}"
+  audit_emit_log "Agent ${agent_num} strategy status: subsystem=${subsystem:-unknown} strategy=${strategy:-unknown} dry=${streak:-0}/${threshold:-0} productive=${productive:-0} action=${action}${extras:+ ${extras}}"
 
   audit_emit_event "strategy-status" \
     "agent=$agent_num" "subsystem=${subsystem:-unknown}" \
@@ -282,7 +287,7 @@ log_strategy_status() {
 
 log_strategy_rotation() {
   local agent_num="$1" subsystem="$2" from_strategy="$3" to_strategy="$4" streak="$5" threshold="$6" picker="$7" reason="${8:-}" extras="${9:-}"
-  audit_emit_log "STRATEGY_ROTATION: agent=${agent_num} subsystem=${subsystem:-unknown} from=${from_strategy:-unknown} to=${to_strategy:-unknown} dry=${streak:-0}/${threshold:-0} picker=${picker:-unknown} reason=\"${reason:-none}\"${extras:+ ${extras}}"
+  audit_emit_log "Agent ${agent_num} strategy rotation: subsystem=${subsystem:-unknown} ${from_strategy:-unknown}->${to_strategy:-unknown} dry=${streak:-0}/${threshold:-0} picker=${picker:-unknown} reason=\"${reason:-none}\"${extras:+ ${extras}}"
 
   audit_emit_event "strategy-rotation" \
     "agent=$agent_num" "subsystem=${subsystem:-unknown}" \

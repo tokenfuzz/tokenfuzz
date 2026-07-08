@@ -721,7 +721,7 @@ assert_eq "0" "$rc" "T9a: dry-run exits 0"
 assert_file_exists "$dledger" "T9b: dry-run writes the ledger"
 assert_match "crash median=1" "$dry_out" "T9c: harness scores 1 crash/cell in dry-run"
 assert_match "model-direct .*crash median=0" "$dry_out" "T9d: model-direct scores 0 in dry-run"
-assert_match "harness recon: skipped \\(--skip-recon\\)" "$dry_out" \
+assert_match "Harness recon: skipped \\(--skip-recon\\)" "$dry_out" \
   "T9d2: --skip-recon is accepted and logged"
 # 2 replicates x harness, each synthetic cell has one real crash.
 assert_file_contains "$dledger" 'Scoreboard' "T9e: ledger has the redesigned Scoreboard section"
@@ -825,7 +825,7 @@ assert_match 'no cells launched' "$regen_out" \
 # fails open, leaving FIND-PENDING un-adjudicated — which must surface as a
 # run-health WARN (the replacement for the dropped "(+N un-gated)" suffix),
 # never a silent drop.
-assert_match 'regenerate: draining find-gate for' "$regen_out" \
+assert_match 'Regenerate: draining find-gate for' "$regen_out" \
   "T9r-b2: --regenerate drains the find-gate before reharvest"
 assert_match 'WARN: .* finding\(s\) still un-adjudicated after drain' "$regen_out" \
   "T9r-b3: --regenerate WARNs about findings the drain could not adjudicate"
@@ -840,7 +840,7 @@ assert_match 'reproducer bundles created' "$regen_out" \
   "T9r-c2: --regenerate bundles a crash that had no canonical bundle yet"
 assert_file_exists "$dbench/pool/crashes/CRASH-0001/reproduce.sh" \
   "T9r-c3: the newly bundled crash gains a reproduce.sh under --regenerate"
-assert_not_match 'cell .* — starting' "$regen_out" \
+assert_not_match 'Cell .* starting' "$regen_out" \
   "T9r-d: --regenerate prints no cell-start lines"
 cells_after=$(find "$dbench/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
 assert_eq "$cells_before" "$cells_after" \
@@ -892,7 +892,7 @@ missing_out=$(bash "$BENCH" --target "$missing_slug" --backend codex \
 missing_rc=$?
 assert_eq "0" "$missing_rc" \
   "T9r-o: --regenerate succeeds even when the target checkout is absent"
-assert_match 'regenerate: draining find-gate for' "$missing_out" \
+assert_match 'Regenerate: draining find-gate for' "$missing_out" \
   "T9r-p: missing-target regenerate still drains the find-gate (no validator pre-gate)"
 assert_dir_exists "$missing_cell/findings/FIND-RAW" \
   "T9r-q: missing-target regenerate leaves raw model-direct FIND in place"
@@ -925,11 +925,11 @@ wait "$t9s_all_job" 2>/dev/null || true
 all_out=$(cat "$work/t9s-all.out")
 all_rc=$(cat "$work/t9s-all.rc")
 assert_eq "0" "$all_rc" "T9s-a: --regenerate (no target) exits 0"
-assert_match 'regenerate-all: target=dummytarget backend=codex run=ra-codex' "$all_out" \
+assert_match 'Regenerate-all: target=dummytarget backend=codex run=ra-codex' "$all_out" \
   "T9s-b: re-derives the codex run"
-assert_match 'regenerate-all: target=othertarget backend=gemini run=ra-gemini' "$all_out" \
+assert_match 'Regenerate-all: target=othertarget backend=gemini run=ra-gemini' "$all_out" \
   "T9s-c: re-derives the gemini run"
-assert_match 'regenerate-all: rebuilt .*benchmark-result\.md \(2 run\(s\), 0 failed\)' "$all_out" \
+assert_match 'Regenerate-all: rebuilt .*benchmark-result\.md \(2 run\(s\), 0 failed\)' "$all_out" \
   "T9s-d: rebuilds the full cross-backend page over both runs"
 assert_file_exists "$allroot/benchmark-result.html" \
   "T9s-e: cross-backend benchmark-result.html is rendered"
@@ -956,11 +956,11 @@ wait "$t9t_job" 2>/dev/null || true
 multi_out=$(cat "$work/t9t-multi.out")
 multi_rc=$(cat "$work/t9t-multi.rc")
 assert_eq "0" "$multi_rc" "T9t-a: multi-target dry-run exits 0"
-assert_match 'multi-target \(1\): target=dummytarget' "$multi_out" \
+assert_match 'Multi-target 1: dummytarget' "$multi_out" \
   "T9t-b: first slug runs (surrounding whitespace trimmed)"
-assert_match 'multi-target \(2\): target=othertarget' "$multi_out" \
+assert_match 'Multi-target 2: othertarget' "$multi_out" \
   "T9t-c: second slug runs after the first"
-assert_match 'multi-target: complete — 2/2 target\(s\) succeeded' "$multi_out" \
+assert_match 'Multi-target complete: 2/2 target\(s\) succeeded' "$multi_out" \
   "T9t-d: driver reports an all-success summary"
 # Each target lands its own resumable run dir, suffixed from the shared id.
 assert_file_exists "$multiroot/codex/mt-dummytarget/run.json" \
@@ -1045,6 +1045,27 @@ if [ -n "$gt_leak" ]; then
 else
   pass "T9q: no committed benchmark target.toml discloses its answer-key path"
 fi
+
+# ── T9u: cell_metrics_summary distinguishes an unavailable cell from a clean
+# zero-yield one. A missing/corrupt metrics.json or the exists:false sentinel
+# (written for a cell with no results dir) must not read as crashes=0/0. ──────
+eval "$(sed -n '/^cell_metrics_summary() {/,/^}/p' "$BENCH")"
+cms_tmp="$work/cms"; mkdir -p "$cms_tmp"
+printf '{"exists": false}\n' > "$cms_tmp/absent.json"
+printf 'not json{{{\n' > "$cms_tmp/corrupt.json"
+printf '{}\n' > "$cms_tmp/empty.json"
+printf '{"confirmed_crashes":2,"crash_clusters":1,"confirmed_findings":3,"finding_clusters":2,"exists":true}\n' \
+  > "$cms_tmp/real.json"
+assert_eq "metrics=unavailable" "$(cell_metrics_summary "$cms_tmp/absent.json")" \
+  "T9v: exists:false cell reads as unavailable, not crashes=0/0"
+assert_eq "metrics=unavailable" "$(cell_metrics_summary "$cms_tmp/corrupt.json")" \
+  "T9v2: corrupt metrics.json reads as unavailable"
+assert_eq "metrics=unavailable" "$(cell_metrics_summary "$cms_tmp/empty.json")" \
+  "T9v3: empty metrics.json reads as unavailable"
+assert_eq "metrics=unavailable" "$(cell_metrics_summary "$cms_tmp/missing.json")" \
+  "T9v4: missing metrics.json reads as unavailable"
+assert_eq "crashes=2/1 unique | findings=3/2 unique" "$(cell_metrics_summary "$cms_tmp/real.json")" \
+  "T9v5: a real cell still reports its crash/finding counts"
 
 
 summary

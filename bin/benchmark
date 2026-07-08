@@ -325,17 +325,17 @@ case "$TARGET_SLUG" in
       # keyed by id under <bench-root>/<backend>/, not by slug); make it
       # per-target so each keeps a distinct, resumable directory.
       [ -n "$RUN_ID" ] && multi_child_args+=(--run-id "${RUN_ID}-$(benchmark_target_key "$_mt")")
-      log "multi-target ($multi_total): target=$_mt — starting"
+      log "Multi-target $multi_total: $_mt starting"
       if "$self" "${multi_child_args[@]}"; then
-        log "multi-target: target=$_mt — completed"
+        log "Multi-target: $_mt done"
       else
         multi_failed=$((multi_failed + 1))
-        log "multi-target: WARN target=$_mt exited non-zero"
+        log "Multi-target: WARN $_mt exited non-zero"
       fi
     done
     [ "$multi_total" -gt 0 ] \
       || { echo "FATAL: --target contained no non-empty slugs" >&2; exit 1; }
-    log "multi-target: complete — $((multi_total - multi_failed))/$multi_total target(s) succeeded"
+    log "Multi-target complete: $((multi_total - multi_failed))/$multi_total target(s) succeeded"
     [ "$multi_failed" -eq 0 ]
     exit $?
     ;;
@@ -447,15 +447,15 @@ if [ "$DO_REGENERATE" = "1" ] && [ -z "$TARGET_SLUG" ]; then
     fi
     [ -n "$rb" ] || rb="$backend_from_path"
     if [ -z "$rt" ]; then
-      log "regenerate-all: skipping $backend_from_path/$runid (no target in run.json)"
+      log "Regenerate-all: skipping $backend_from_path/$runid (no target in run.json)"
       continue
     fi
     found=$((found + 1))
-    log "regenerate-all: target=$rt backend=$rb run=$runid"
+    log "Regenerate-all: target=$rt backend=$rb run=$runid"
     if ! "$self" --regenerate --target "$rt" --backend "$rb" \
         --run-id "$runid" --bench-root "$BENCH_ROOT"; then
       regen_failed=$((regen_failed + 1))
-      log "regenerate-all: WARN re-derivation failed for $rt/$rb/$runid"
+      log "Regenerate-all: WARN re-derivation failed for $rt/$rb/$runid"
     fi
   done < <(find "$BENCH_ROOT" -mindepth 3 -maxdepth 3 -type d -name cells 2>/dev/null \
             | LC_ALL=C sort)
@@ -467,9 +467,9 @@ if [ "$DO_REGENERATE" = "1" ] && [ -z "$TARGET_SLUG" ]; then
   if python3 "$PY_BENCH" crosstab "$BENCH_ROOT" --out "$crosstab" >/dev/null 2>&1; then
     [ -x "$SCRIPT_ROOT/bin/render-md" ] \
       && python3 "$SCRIPT_ROOT/bin/render-md" "$crosstab" --html-sibling >/dev/null 2>&1
-    log "regenerate-all: rebuilt $crosstab ($found run(s), $regen_failed failed)"
+    log "Regenerate-all: rebuilt $crosstab ($found run(s), $regen_failed failed)"
   else
-    log "regenerate-all: WARN crosstab render failed ($found run(s), $regen_failed failed)"
+    log "Regenerate-all: WARN crosstab render failed ($found run(s), $regen_failed failed)"
   fi
   [ "$found" -gt 0 ] || { echo "FATAL: --regenerate: no runs found under $BENCH_ROOT" >&2; exit 1; }
   [ "$regen_failed" -eq 0 ]
@@ -536,7 +536,7 @@ if [ "$DRY_RUN" != "1" ] && [ "$DO_REGENERATE" != "1" ]; then
                         build-freshness "$SCRIPT_ROOT/targets/$TARGET_SLUG" asan 2>/dev/null || echo skip)"
   case "$_bench_freshness" in
     missing|stale)
-      log "native ASan build is '$_bench_freshness' relative to source — (re)building via bin/setup-target --build (fail-open)"
+      log "ASan build: '$_bench_freshness' vs source | (re)building via bin/setup-target --build (fail-open)"
       "$SCRIPT_ROOT/bin/setup-target" "$TARGET_SLUG" --build >/dev/null 2>&1 || true
       # Re-probe rather than trust the exit status: `setup-target --build`
       # exits 0 even when it skips convergence (no backend) or a materialize
@@ -544,8 +544,8 @@ if [ "$DRY_RUN" != "1" ] && [ "$DO_REGENERATE" != "1" ]; then
       _bench_after="$(python3 "$SCRIPT_ROOT/lib/target_config.py" \
                         build-freshness "$SCRIPT_ROOT/targets/$TARGET_SLUG" asan 2>/dev/null || echo skip)"
       case "$_bench_after" in
-        fresh|skip) log "ASan build refreshed" ;;
-        *) log "WARN: ASan build is still '$_bench_after' after auto-build; model-direct cells may render file-FINDs only — benchmark continues" ;;
+        fresh|skip) log "ASan build: refreshed" ;;
+        *) log "WARN: ASan build still '$_bench_after' after auto-build | model-direct cells may render file-FINDs only; benchmark continues" ;;
       esac
       unset _bench_after
       ;;
@@ -687,7 +687,7 @@ start_console_log
 
 if [ "$DRY_RUN" != "1" ] && [ "$DO_REGENERATE" != "1" ] \
     && target_git_is_shallow_checkout "$SCRIPT_ROOT/targets/$TARGET_SLUG"; then
-  log "WARN: target git checkout is shallow; S1 prior-fix history and benchmark work-card queues may be incomplete. Run: git -C \"$SCRIPT_ROOT/targets/$TARGET_SLUG\" fetch --unshallow"
+  log "WARN shallow checkout: S1 history + work-card queue may be incomplete | fix: git -C \"$SCRIPT_ROOT/targets/$TARGET_SLUG\" fetch --unshallow"
 fi
 
 target_sha="$(target_detect_rev "$SCRIPT_ROOT/targets/$TARGET_SLUG" 2>/dev/null || true)"
@@ -729,19 +729,19 @@ PYEOF
 fi
 
 if [ "$DO_REGENERATE" = "1" ]; then
-  log "regenerate $RUNID — re-deriving results for target=$TARGET_SLUG backend=$BACKEND (no cells launched; reach-field fill + scoring may call the LLM/probe)"
+  log "Regenerating run $RUNID: target=$TARGET_SLUG backend=$BACKEND (no cells launched; scoring may call the LLM/probe)"
 else
   if [ "$BUDGET_WALL" = "0" ]; then
-    log "run $RUNID — target=$TARGET_SLUG backend=$BACKEND replicates=$REPLICATES budget=unlimited"
+    log "Benchmark run $RUNID: target=$TARGET_SLUG backend=$BACKEND model=${model:-?} replicates=$REPLICATES budget=unlimited"
   else
-    log "run $RUNID — target=$TARGET_SLUG backend=$BACKEND replicates=$REPLICATES budget=${BUDGET_WALL}s"
+    log "Benchmark run $RUNID: target=$TARGET_SLUG backend=$BACKEND model=${model:-?} replicates=$REPLICATES budget=$(format_duration "$BUDGET_WALL") per cell"
   fi
-  log "conditions: $CONDITIONS"
-  log "agents: harness=${AGENTS:-bin/audit-default}, model-direct=1"
-  [ "$SKIP_RECON" = "1" ] && log "harness recon: skipped (--skip-recon)"
-  [ "$DRY_RUN" = "1" ] && log "DRY RUN — synthetic cells, no LLM calls"
+  log "Conditions: $CONDITIONS"
+  log "Agents: harness=${AGENTS:-bin/audit-default}, model-direct=1"
+  [ "$SKIP_RECON" = "1" ] && log "Harness recon: skipped (--skip-recon)"
+  [ "$DRY_RUN" = "1" ] && log "Dry run: synthetic cells, no LLM calls"
 fi
-log "bench dir: $BENCH_DIR"
+log "Output: $BENCH_DIR"
 
 # ── model-direct CTF prompt ──────────────────────────────────────────────
 # A bare CTF instruction with an output contract. Body lives in
@@ -1035,7 +1035,7 @@ sweep_target_tree_for_misplaced_output() {
         fi
         if mv "$entry" "$dest" 2>/dev/null; then
           moved=$((moved + 1))
-          log "  sweep: rescued $parent_name/$base from source tree → $dest" >&2
+          log "  Sweep: rescued $parent_name/$base from source tree → $dest" >&2
         fi
       done
     done < <(
@@ -1057,7 +1057,7 @@ sweep_target_tree_for_misplaced_output() {
   rm -f "$marker" 2>/dev/null || true
 
   if [ "$moved" -gt 0 ]; then
-    log "cell ${cell_dir##*/} — pollution sweep: rescued $moved artifact(s) from $target_root" >&2
+    log "Cell ${cell_dir##*/} sweep: rescued $moved artifact(s) from $target_root" >&2
   fi
 }
 
@@ -1130,7 +1130,7 @@ cleanup_model_direct_scratch() {
   n="$(find "$scratch" -type f 2>/dev/null | wc -l | tr -d ' ')"
   sz="$(du -sh "$scratch" 2>/dev/null | cut -f1)"
   rm -rf "$scratch" 2>/dev/null || true
-  log "cell ${cell_dir##*/} — reclaimed scratch/ (${n:-0} file(s), ${sz:-?})"
+  log "Cell ${cell_dir##*/}: reclaimed scratch/ (${n:-0} file(s), ${sz:-?})"
   return 0
 }
 
@@ -1236,17 +1236,17 @@ run_model_direct_cell() {
   # if it killed the cell, the rc!=0 below makes it a plain failed cell that the
   # next replicate re-runs — it must NOT abandon the remaining replicates.
   if model_direct_capacity_blocked "$provider_issue" "$rc" "$out_dir"; then
-    log "cell ${cell_dir##*/} — provider capacity-limited; no terminal result or artifacts" >&2
+    log "Cell ${cell_dir##*/}: provider capacity-limited, no terminal result or artifacts" >&2
     : > "$cell_dir/.backend-unavailable"
     set_cell_run_quality "$cell_dir" provider_limited
   elif [ "$BACKEND" = "gemini" ] && cell_log_has_quota_exhaustion "$cell_dir"; then
-    log "cell ${cell_dir##*/} — gemini quota exhausted (quota diagnostic found)" >&2
+    log "Cell ${cell_dir##*/}: gemini quota exhausted (quota diagnostic found)" >&2
     touch "$cell_dir/.quota-exhausted"
     : > "$cell_dir/.backend-unavailable"
     set_cell_run_quality "$cell_dir" provider_limited
   elif [ "$BACKEND" = "gemini" ] && [ ! -s "$raw_log" ] \
       && ! cell_has_result_artifacts "$out_dir"; then
-    log "cell ${cell_dir##*/} — backend produced empty output and no artifacts" >&2
+    log "Cell ${cell_dir##*/}: backend produced empty output and no artifacts" >&2
     return 44
   fi
 
@@ -1307,7 +1307,7 @@ prepare_cell_dir_for_rerun() {
       sleep 1
     done
     if [ -e "$cell_dir" ]; then
-      log "cell $cell_name — cannot clear incomplete prior attempt at $cell_dir"
+      log "Cell $cell_name: cannot clear incomplete prior attempt at $cell_dir"
       return 1
     fi
   fi
@@ -1500,6 +1500,79 @@ print(
         cu=int(m.get("crash_clusters", 0) or 0),
     )
 )
+PYEOF
+}
+
+cell_metrics_summary() {
+  python3 - "$1" <<'PYEOF'
+import json
+import sys
+
+
+def as_int(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def fmt_count(value):
+    n = as_int(value)
+    if n >= 1_000_000:
+        text = f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{text}M"
+    if n >= 1_000:
+        return f"{n // 1_000}k"
+    return str(n)
+
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        m = json.load(fh)
+except (OSError, ValueError):
+    m = {}
+
+# A missing/corrupt metrics.json or an explicit exists:false sentinel (written
+# for a cell with no results dir) is not a clean zero-yield cell — say so
+# rather than printing crashes=0/0 that reads like a real empty run.
+if not m or m.get("exists") is False:
+    print("metrics=unavailable")
+    sys.exit(0)
+
+t = m.get("tokens") or {}
+parts = [
+    "crashes={}/{} unique".format(
+        as_int(m.get("confirmed_crashes")),
+        as_int(m.get("crash_clusters")),
+    ),
+    "findings={}/{} unique".format(
+        as_int(m.get("confirmed_findings", m.get("findings"))),
+        as_int(m.get("finding_clusters")),
+    ),
+]
+rejected = as_int(m.get("crashes_rejected")) + as_int(m.get("findings_rejected"))
+if rejected:
+    parts.append(f"rejected={rejected}")
+unadjudicated = as_int(m.get("findings_unadjudicated"))
+if unadjudicated:
+    parts.append(f"unadjudicated_findings={unadjudicated}")
+asan = as_int(t.get("asan_invocations"))
+if asan:
+    parts.append(f"probes={asan}")
+if any(as_int(t.get(k)) for k in ("input_tokens", "cached_input_tokens", "cache_creation_tokens", "output_tokens", "prompt_estimate_tokens")):
+    parts.append(
+        "tokens=in:{} cache:{} create:{} out:{} prompt_est:{}".format(
+            fmt_count(t.get("input_tokens")),
+            fmt_count(t.get("cached_input_tokens")),
+            fmt_count(t.get("cache_creation_tokens")),
+            fmt_count(t.get("output_tokens")),
+            fmt_count(t.get("prompt_estimate_tokens")),
+        )
+    )
+refusals = as_int(m.get("model_refusals"))
+if refusals:
+    parts.append(f"refusals={refusals}")
+print(" | ".join(parts))
 PYEOF
 }
 
@@ -2291,7 +2364,7 @@ for cond in "${COND_ARR[@]}"; do
     # Resumability: a cell already marked done is skipped on re-invocation
     # against the same bench dir (re-run with --bench-root to resume).
     if [ -f "$cell_json" ] && grep -q '"status": "done"' "$cell_json" 2>/dev/null; then
-      log "cell $cell_name already done — skipping"
+      log "Cell $cell_name: already done, skipping"
       cells_done=$((cells_done + 1))
       rep=$((rep + 1))
       continue
@@ -2302,7 +2375,7 @@ for cond in "${COND_ARR[@]}"; do
       exp_name="bench-${RUNID}-${cond}-r${rep}"
       : > "$cell_dir/.backend-unavailable"
       set_cell_run_quality "$cell_dir" provider_limited
-      log "cell $cell_name — skipping (provider unavailable earlier in this run)"
+      log "Cell $cell_name: skipped because the provider was unavailable earlier in this run"
       write_cell_json "$cell_json" "$cond" "$rep" "$exp_name" \
         "" 0 "incomplete" "$AGENTS"
       cells_failed=$((cells_failed + 1))
@@ -2317,7 +2390,7 @@ for cond in "${COND_ARR[@]}"; do
     # Cells already done were skipped above, so this only ever discards
     # incomplete work.
     if ! prepare_cell_dir_for_rerun "$cell_dir" "$cell_name"; then
-      log "cell $cell_name — FAILED before launch (could not prepare clean cell dir)"
+      log "Cell $cell_name: FAILED before launch (could not prepare clean cell dir)"
       cells_failed=$((cells_failed + 1))
       rep=$((rep + 1))
       continue
@@ -2331,7 +2404,7 @@ for cond in "${COND_ARR[@]}"; do
     else
       cell_agents="${AGENTS:-default}"
     fi
-    log "cell $cell_name — starting (exp=$exp_name agents=$cell_agents model=${model:-?})"
+    log "Cell $cell_name starting: condition=$cond replicate=$rep agents=$cell_agents model=${model:-?} experiment=$exp_name"
     if [ "$DRY_RUN" != "1" ]; then
       case "$cond" in
         model-direct) cell_log="$cell_dir/backend.raw.log" ;;
@@ -2340,7 +2413,7 @@ for cond in "${COND_ARR[@]}"; do
       esac
       if [ -n "$cell_log" ]; then
         cell_log="$(absolute_path "$cell_log")"
-        log "cell $cell_name — live log: $cell_log"
+        log "Cell $cell_name live log: $cell_log"
       fi
     fi
     start_epoch="$(date +%s)"
@@ -2418,9 +2491,9 @@ for cond in "${COND_ARR[@]}"; do
 
     if [ "$cond" = "model-direct" ] && [ -f "$cell_dir/metrics.json" ]; then
       if [ "$DRY_RUN" != "1" ] && [ "$VALIDATE_FINDINGS" = "0" ]; then
-        log "cell $cell_name — model-direct findings gate: DISABLED (--no-validate-findings); $(metric_gate_summary "$cell_dir/metrics.json")"
+        log "Cell $cell_name validation: DISABLED (--no-validate-findings); $(metric_gate_summary "$cell_dir/metrics.json")"
       elif [ "$DRY_RUN" != "1" ]; then
-        log "cell $cell_name — model-direct findings gate: $(metric_gate_summary "$cell_dir/metrics.json")"
+        log "Cell $cell_name validation: $(metric_gate_summary "$cell_dir/metrics.json")"
       fi
     fi
 
@@ -2434,13 +2507,13 @@ for cond in "${COND_ARR[@]}"; do
     [ "${paused_secs:-0}" -gt 0 ] && _paused_note=" (+$(format_duration "$paused_secs") session-recovery pause, excluded)"
     if [ "$status" = "done" ]; then
       cells_done=$((cells_done + 1))
-      log "cell $cell_name — done in $(format_duration "$wall")${_paused_note}"
+      log "Cell $cell_name done in $(format_duration "$wall")${_paused_note}: $(cell_metrics_summary "$cell_dir/metrics.json")"
     elif [ "$status" = "incomplete" ] || [ "$status" = "quota_exhausted" ]; then
       cells_failed=$((cells_failed + 1))
-      log "cell $cell_name — incomplete after $(format_duration "$wall")${_paused_note} (provider limited; see $cell_dir)"
+      log "Cell $cell_name incomplete after $(format_duration "$wall")${_paused_note}: provider limited; $(cell_metrics_summary "$cell_dir/metrics.json"); see $cell_dir"
     else
       cells_failed=$((cells_failed + 1))
-      log "cell $cell_name — FAILED after $(format_duration "$wall") (see $cell_dir)"
+      log "Cell $cell_name FAILED after $(format_duration "$wall"): $(cell_metrics_summary "$cell_dir/metrics.json"); see $cell_dir"
     fi
     update_benchmark_result "after $cell_name"
     rep=$((rep + 1))
@@ -2465,12 +2538,12 @@ if [ "$DO_REGENERATE" = "1" ]; then
       _rd=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("results_dir") or "")' \
         "$cell_dir/cell.json" 2>/dev/null)
       [ -n "$_rd" ] && [ -d "$_rd/findings" ] || continue
-      log "regenerate: draining find-gate for $(basename "$cell_dir") (${_cond:-?})"
+      log "Regenerate: draining find-gate for $(basename "$cell_dir") (${_cond:-?})"
       drain_cell_find_gate "$_rd"
     done
   fi
 
-  log "regenerate: re-deriving results from $(find "$CELLS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') cell(s) on disk"
+  log "Regenerate: re-deriving results from $(find "$CELLS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') cell(s) on disk"
   python3 "$PY_BENCH" reharvest-cells "$BENCH_DIR" \
     --backend "$BACKEND" --model "$model" \
     >/dev/null 2>&1 || log "WARN: regenerate metrics reharvest failed"
@@ -2486,7 +2559,7 @@ if [ "$DO_REGENERATE" = "1" ]; then
     done
   fi
 else
-  log "cells complete: $cells_done done, $cells_failed failed"
+  log "Cells complete: $cells_done done, $cells_failed failed"
 fi
 
 # ── aggregate + ledger ───────────────────────────────────────────────────
@@ -2512,7 +2585,7 @@ update_benchmark_result "final"
 
 # ── stdout summary ───────────────────────────────────────────────────────
 echo
-log "summary for run $RUNID:"
+log "Run $RUNID summary:"
 python3 - "$BENCH_DIR/report.json" <<'PYEOF'
 import json, sys
 try:
@@ -2543,11 +2616,11 @@ PYEOF
 )
 case "$refusal_total" in ''|*[!0-9]*) refusal_total=0 ;; esac
 if [ "$refusal_total" -gt 0 ]; then
-  log "model refusals: $refusal_total total MODEL_REFUSAL warning(s); examples are in $BENCH_DIR/console.log and each cell's live log path"
+  log "Model refusals: $refusal_total MODEL_REFUSAL warning(s) | examples in $BENCH_DIR/console.log and each cell's live log"
 fi
 echo
-log "ledger: $LEDGER"
-log "done."
+log "Ledger: $LEDGER"
+log "Benchmark complete."
 
 [ "$cells_failed" -eq 0 ]
 main_rc=$?

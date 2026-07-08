@@ -1029,7 +1029,7 @@ assert_dir_exists "$resume_root/codex/rerun01" \
 assert_dir_not_exists "$resume_root/codex/rerun01-2" \
   "T15n: a repeated run-id reuses its dir instead of forking a -2 suffix"
 resume_out=$(cat "$work/resume.out" 2>/dev/null || true)
-assert_match 'already done — skipping' "$resume_out" \
+assert_match 'Cell model-direct-r1: already done, skipping' "$resume_out" \
   "T15o: resume skips a replicate already marked done"
 assert_dir_not_exists "$bad_cell/findings/FIND-STALE" \
   "T15o2: resume wipes a half-finished replicate before re-running it"
@@ -1052,7 +1052,7 @@ assert_file_not_exists "$guard_lock" \
 # ── T22: shallow checkout warning is wired into benchmark startup ────────
 assert_file_contains "$BENCH" 'target_git_is_shallow_checkout "\$SCRIPT_ROOT/targets/\$TARGET_SLUG"' \
   "T22a: benchmark checks for shallow git targets"
-assert_file_contains "$BENCH" 'S1 prior-fix history and benchmark work-card queues may be incomplete' \
+assert_file_contains "$BENCH" 'S1 history \+ work-card queue may be incomplete' \
   "T22b: benchmark explains shallow checkout impact"
 
 summary

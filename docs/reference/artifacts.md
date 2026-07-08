@@ -244,6 +244,8 @@ output/<target>/<backend>/logs/
   session_<TS>_<role>-<n>-<mode>.log
   session_<TS>_<role>-<n>-<mode>.log.summary.md
   .raw/
+    session_<TS>_<role>-<n>-<mode>.log.raw
+    session_<TS>_<role>-<n>-<mode>.prompt.md
 ```
 
 Logs are useful for:
@@ -260,6 +262,8 @@ For normal audit progress, prefer the generated HTML:
 - per-result `REPORT.html` / `report.html`.
 
 For debugging a run, start with `logs/README.md`, then `index.log`.
+Open the matching `*.summary.md` for the session named in the timeline.
 Use `index.jsonl` when you want the same session data in a scriptable
-form. Full backend transcripts live under `logs/.raw/`; they are
-intentionally out of the way because they can be large.
+form. Full backend transcripts and exact prompt dumps live under
+`logs/.raw/`; they are intentionally out of the way because they can be
+large and are rarely the first artifact you need.

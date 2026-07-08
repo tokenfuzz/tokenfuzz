@@ -39,7 +39,7 @@ mkdir -p "$LOGTREE/src/logs" "$LOGTREE/output/sample/codex/logs/.raw" \
   "$LOGTREE/output/sample/codex/.hg" "$LOGTREE/src/.raw"
 echo 'PATCH-rg-wrapper' > "$LOGTREE/src/logs/logger.c"
 echo 'PATCH-rg-wrapper' > "$LOGTREE/src/.raw/corpus.txt"
-echo 'PATCH-rg-wrapper' > "$LOGTREE/output/sample/codex/logs/session_1.prompt.md"
+echo 'PATCH-rg-wrapper' > "$LOGTREE/output/sample/codex/logs/.raw/session_1.prompt.md"
 echo 'PATCH-rg-wrapper' > "$LOGTREE/output/sample/codex/logs/session_1.log"
 echo 'PATCH-rg-wrapper' > "$LOGTREE/output/sample/codex/logs/.raw/session_1.log.raw"
 echo 'PATCH-rg-wrapper' > "$LOGTREE/output/sample/codex/logs/.gemini-home/chats/s.jsonl"
