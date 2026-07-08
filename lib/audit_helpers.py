@@ -1074,7 +1074,10 @@ def _cmd_effective_work_cards(args: argparse.Namespace) -> int:
         from workqueue import (
             Context,
             card_closed_for_run,
+            card_conclusion_counts,
+            card_distinct_hypothesis_counts,
             latest_claims_by_card,
+            latest_terminal_status_by_card,
             read_jsonl,
             visible_card_status,
             work_card_claim_ttl,
@@ -1095,28 +1098,39 @@ def _cmd_effective_work_cards(args: argparse.Namespace) -> int:
             return 0
         latest = latest_claims_by_card(ctx)
         ttl = work_card_claim_ttl()
+        conclusion_counts = card_conclusion_counts(ctx)
+        distinct_counts = card_distinct_hypothesis_counts(ctx)
+        terminal_status = latest_terminal_status_by_card(ctx)
     except Exception:
         return 0
     out: list[str] = []
-    # Memo so card_closed_for_run reads each subsystem's dry-streak once.
     dry_streaks: dict[str, int] = {}
     for card in cards:
         updated = dict(card)
-        claim = latest.get(card.get("id", ""))
+        cid = card.get("id", "")
+        claim = latest.get(cid)
         if claim is not None:
             status = visible_card_status(claim, ttl)
             # Single source of truth for "is this card still claimable?":
             # card_closed_for_run keeps the claim path, the explain view, and
-            # this audit-facing overlay in agreement. Lease lifecycle rows
-            # ("released") and a *productive* crash/find on a still-hot
-            # subsystem collapse to "unclaimed" so strategy rotation, queue
-            # counts, and diversity recovery see the same reopened cards the
-            # claimer does; done/discarded/blocked and mined-out (dry) crash/
-            # find stay terminal.
-            if status != "claimed" and not card_closed_for_run(
-                ctx, card, status, dry_streaks=dry_streaks
-            ):
-                status = "unclaimed"
+            # this audit-facing overlay in agreement. A still-yielding concrete
+            # crash/find, a broad crash/find on a still-hot subsystem, and a
+            # released lease collapse to "unclaimed" so strategy rotation,
+            # queue counts, and diversity recovery see the same reopened cards
+            # the claimer does; done/discarded/blocked, mined-out (re-
+            # discovered) concrete cards, and dry broad cards stay terminal.
+            if status != "claimed":
+                if not card_closed_for_run(
+                    ctx, card, status,
+                    conclusion_counts=conclusion_counts, distinct_counts=distinct_counts,
+                    dry_streaks=dry_streaks,
+                ):
+                    status = "unclaimed"
+                elif status in ("released", "unclaimed"):
+                    # Closed, but the latest row is a lifecycle mask — surface the
+                    # conclusion it hides so this mined card is not counted as
+                    # available (status "unclaimed") by the queue consumers.
+                    status = terminal_status.get(cid, status)
             updated["status"] = status
         out.append(json.dumps(updated, sort_keys=True))
     if out:

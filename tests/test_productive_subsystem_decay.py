@@ -98,6 +98,13 @@ def _set_dry_streak(results_dir: Path, subsystem: str, value: int) -> None:
     (results_dir / f".subsystem_dry_{slug}").write_text(str(value))
 
 
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+
+
 # subsystem_dry_streak helper — reads what bin/audit wrote.
 with tempfile.TemporaryDirectory() as td:
     rdir = Path(td) / "results"
@@ -212,6 +219,204 @@ with tempfile.TemporaryDirectory() as td:
                   "decay (mixed): stale subsystem dropped")
     assert_in("src/codec.c", decayed_mixed,
               "decay (mixed): fresh subsystem kept")
+
+
+# A productive card may be claimed again while it is still being mined. If
+# that later lease goes stale, cleanup must not replace the previous
+# crash/find conclusion with "released"; otherwise card_closed_for_run reads
+# a non-terminal status and the card looks freshly eligible forever, and the
+# released row must not inflate the conclusion count that drives closure.
+with tempfile.TemporaryDirectory() as td:
+    rdir = Path(td) / "results"
+    rdir.mkdir()
+    target = Path(td) / "target"
+    target.mkdir()
+    ctx = _ctx(rdir, target)
+    workqueue.init_state(ctx)
+    _write_jsonl(rdir / "work-cards.jsonl", [{
+        "id": "WORK-hot",
+        "kind": "ranked-source",
+        "file": "src/parser.c",
+        "subsystem": "src/parser.c",
+        "mode": "auto",
+        "strategy": "S7",
+        "status": "unclaimed",
+    }])
+    _write_jsonl(rdir / "state" / "claims.jsonl", [
+        {
+            "card_id": "WORK-hot",
+            "agent": "1",
+            "status": "crash",
+            "updated_at": "2026-01-01T00:00:00Z",
+        },
+        {
+            "card_id": "WORK-hot",
+            "agent": "1",
+            "status": "claimed",
+            "claimed_at": "2026-01-01T00:01:00Z",
+            "expires_at": "2026-01-01T00:31:00Z",
+        },
+    ])
+    released = workqueue.release_stale_claims(
+        ctx,
+        grace=workqueue.timedelta(seconds=0),
+        now=workqueue.datetime(2026, 1, 1, 1, 0, 0, tzinfo=workqueue.timezone.utc),
+    )
+    assert_eq(1, len(released),
+              "release_stale_claims: stale post-crash lease is cleaned up")
+    assert_eq("crash", released[0].get("status"),
+              "release_stale_claims: preserves previous productive terminal status")
+    latest = workqueue.latest_claims_by_card(ctx).get("WORK-hot", {})
+    assert_eq("crash", latest.get("status"),
+              "latest status remains crash after stale lease cleanup")
+    assert_eq(1, workqueue.card_conclusion_counts(ctx).get("WORK-hot"),
+              "preserved terminal cleanup row does not inflate conclusion count")
+
+
+# Distinct-hypothesis closure (card_closed_for_run): a productive crash/find
+# card stays claimable while it keeps yielding new distinct hypotheses, and
+# retires once it has been re-concluded more times than it has distinct
+# hypotheses (re-discovery of an already-recorded bug). This is the per-card
+# signal that replaced subsystem-heat keep-alive.
+def _hyp(card_id: str, shape: str, status: str = "CRASH-x") -> dict:
+    return {
+        "id": f"H-{card_id}-{shape}",
+        "card_id": card_id,
+        "agent": "1",
+        "subsystem": "src/parser.c",
+        "file": "src/parser.c",
+        "hypothesis": shape,
+        "strategy": "S7",
+        "status": status,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+
+
+def _crash_claim(card_id: str) -> dict:
+    return {"card_id": card_id, "agent": "1", "status": "crash",
+            "updated_at": "2026-01-01T00:00:00Z"}
+
+
+# Concrete cards (recon-hypothesis) name a specific site: their opened
+# hypotheses ARE their search space, so re-discovery is a valid exhaustion
+# signal for them.
+def _card(card_id: str, kind: str = "recon-hypothesis") -> dict:
+    return {"id": card_id, "kind": kind, "file": "src/parser.c",
+            "function": "foo", "subsystem": "src/parser.c", "mode": "auto",
+            "strategy": "S7", "status": "unclaimed"}
+
+
+assert_eq(1, workqueue._PRODUCTIVE_REDISCOVERY_MARGIN,
+          "_PRODUCTIVE_REDISCOVERY_MARGIN: current value is 1")
+
+# Concrete-card re-discovery closure.
+with tempfile.TemporaryDirectory() as td:
+    rdir = Path(td) / "results"
+    rdir.mkdir()
+    target = Path(td) / "target"
+    target.mkdir()
+    ctx = _ctx(rdir, target)
+    workqueue.init_state(ctx)
+    _write_jsonl(rdir / "work-cards.jsonl", [
+        _card("WORK-single"), _card("WORK-rich"), _card("WORK-fresh"),
+    ])
+    _write_jsonl(rdir / "state" / "hypotheses.jsonl", [
+        # single-bug surface: one distinct shape, concluded twice below.
+        _hyp("WORK-single", "s1"),
+        # rich surface: three distinct shapes.
+        _hyp("WORK-rich", "r1"), _hyp("WORK-rich", "r2"), _hyp("WORK-rich", "r3"),
+        # fresh surface: one distinct shape, concluded once.
+        _hyp("WORK-fresh", "f1"),
+    ])
+    _write_jsonl(rdir / "state" / "claims.jsonl", [
+        _crash_claim("WORK-single"), _crash_claim("WORK-single"),  # C=2, D=1 → closed
+        _crash_claim("WORK-rich"), _crash_claim("WORK-rich"),      # C=2, D=3 → open
+        _crash_claim("WORK-fresh"),                                # C=1, D=1 → open
+    ])
+    rows = {r.get("id"): r.get("reason") for r in workqueue.explain_queue(ctx, ["generic"])}
+    assert_eq("terminal:crash", rows.get("WORK-single"),
+              "concrete closure: re-concluded past distinct-hypothesis count → terminal")
+    assert_eq("eligible", rows.get("WORK-rich"),
+              "concrete closure: still has un-mined distinct hypotheses → stays eligible")
+    assert_eq("eligible", rows.get("WORK-fresh"),
+              "concrete closure: first conclusion with a distinct hypothesis → re-offerable")
+
+
+# Broad ranked-source cards cover a whole file, whose bugs live across
+# functions never yet hypothesised — so re-discovery must NOT close them
+# (that would abandon the file after one bug). They retire on the file-level
+# dry signal instead.
+with tempfile.TemporaryDirectory() as td:
+    rdir = Path(td) / "results"
+    rdir.mkdir()
+    target = Path(td) / "target"
+    target.mkdir()
+    ctx = _ctx(rdir, target)
+    workqueue.init_state(ctx)
+    _write_jsonl(rdir / "work-cards.jsonl", [_card("WORK-broad", kind="ranked-source")])
+    _write_jsonl(rdir / "state" / "hypotheses.jsonl", [_hyp("WORK-broad", "b1")])
+    _write_jsonl(rdir / "state" / "claims.jsonl", [
+        _crash_claim("WORK-broad"), _crash_claim("WORK-broad"),  # C=2, D=1 (re-discovery)
+    ])
+    reason_hot = workqueue.explain_queue(ctx, ["generic"])[0].get("reason")
+    assert_eq("eligible", reason_hot,
+              "broad closure: re-discovery alone does NOT close a whole-file card")
+    _set_dry_streak(rdir, "src/parser.c", workqueue._PRODUCTIVE_DECAY_AFTER_ITERS)
+    reason_dry = workqueue.explain_queue(ctx, ["generic"])[0].get("reason")
+    assert_eq("terminal:crash", reason_dry,
+              "broad closure: retires once its subsystem dry-streak crosses the threshold")
+
+
+# Legacy released mask: a bare "released" row (written before terminal
+# preservation, or any resumed pre-fix state) must not reopen a mined card.
+# The recorded conclusion still routes closure.
+with tempfile.TemporaryDirectory() as td:
+    rdir = Path(td) / "results"
+    rdir.mkdir()
+    target = Path(td) / "target"
+    target.mkdir()
+    ctx = _ctx(rdir, target)
+    workqueue.init_state(ctx)
+    _write_jsonl(rdir / "work-cards.jsonl", [_card("WORK-mask")])
+    _write_jsonl(rdir / "state" / "hypotheses.jsonl", [_hyp("WORK-mask", "m1")])
+    _write_jsonl(rdir / "state" / "claims.jsonl", [
+        _crash_claim("WORK-mask"), _crash_claim("WORK-mask"),  # C=2, D=1 → re-discovery
+        # legacy stale-lease cleanup wrote a bare "released" (no preserved status).
+        {"card_id": "WORK-mask", "agent": "1", "status": "released",
+         "reason": "all-hypotheses-terminal", "source": "release-stale-claims",
+         "updated_at": "2026-01-01T00:02:00Z"},
+    ])
+    reason_masked = workqueue.explain_queue(ctx, ["generic"])[0].get("reason")
+    assert_eq("terminal:released", reason_masked,
+              "legacy released mask: recorded conclusion still closes a mined concrete card")
+
+
+# Expired-lease mask: a re-claimed card whose lease later expires reads back as
+# "unclaimed"; that must NOT reopen a mined card either. A *live* claim, by
+# contrast, is left open — the owner is still investigating.
+with tempfile.TemporaryDirectory() as td:
+    rdir = Path(td) / "results"
+    rdir.mkdir()
+    target = Path(td) / "target"
+    target.mkdir()
+    ctx = _ctx(rdir, target)
+    workqueue.init_state(ctx)
+    _write_jsonl(rdir / "work-cards.jsonl", [_card("WORK-exp"), _card("WORK-live")])
+    _write_jsonl(rdir / "state" / "hypotheses.jsonl", [_hyp("WORK-exp", "e1"), _hyp("WORK-live", "l1")])
+    _write_jsonl(rdir / "state" / "claims.jsonl", [
+        _crash_claim("WORK-exp"), _crash_claim("WORK-exp"),   # C=2, D=1 → re-discovery
+        {"card_id": "WORK-exp", "agent": "1", "status": "claimed",
+         "claimed_at": "2026-01-01T00:02:00Z", "expires_at": "2026-01-01T00:32:00Z"},  # long expired
+        _crash_claim("WORK-live"), _crash_claim("WORK-live"),  # C=2, D=1 → re-discovery
+        {"card_id": "WORK-live", "agent": "1", "status": "claimed",
+         "claimed_at": "2999-01-01T00:00:00Z", "expires_at": "2999-01-01T01:00:00Z"},  # live lease
+    ])
+    rows = {r.get("id"): r for r in workqueue.explain_queue(ctx, ["generic"])}
+    assert_eq("terminal:unclaimed", rows.get("WORK-exp", {}).get("reason"),
+              "expired-lease mask: recorded conclusion still closes a mined card (no reopen as unclaimed)")
+    assert_eq("claimed", rows.get("WORK-live", {}).get("status"),
+              "live lease: a card still being investigated is left open, not force-closed")
 
 
 print()

@@ -1149,9 +1149,10 @@ assert_match '"status": "done"' "$compat_pos_card" "state: update-card accepts p
 # Productive-card lifecycle: crash/find no longer drain a finite queue.
 #   1. crash verification gate (update_card_status): a `crash` close must
 #      be backed by a runs.jsonl CRASH verdict, else it bounces back.
-#   2. keep-alive + decay (card_closed_for_run): a verified crash keeps the
-#      surface claimable while the subsystem is hot, retiring only after
-#      the dry-streak crosses _PRODUCTIVE_DECAY_AFTER_ITERS.
+#   2. scope-aware keep-alive (card_closed_for_run): a broad ranked-source
+#      card retires on the file-level dry signal (2a); a concrete recon card
+#      retires on re-discovery — conclusions past distinct hypotheses,
+#      _PRODUCTIVE_REDISCOVERY_MARGIN — even while the file is hot (2b).
 #   3. anti-camp demotion (card_conclusion_counts): an already-cracked card
 #      sinks below fresher siblings so the agent diversifies instead of
 #      re-hitting the same card sequentially.
@@ -1195,18 +1196,31 @@ real_crash_close() { # results_dir card_id
     update-card --agent 1 --card-id "$cid" --status crash >/dev/null
 }
 
-# (2) keep-alive while hot, retire once the subsystem goes dry ---------------
+# A real crash comes from a distinct hypothesis; distinct-hypothesis closure
+# keys on those, so fixtures record one (terminal status, so it is not a
+# still-active hypothesis) per distinct bug the surface yields.
+open_hypothesis() { # results_dir card_id shape
+  local rd="$1" cid="$2" shape="$3"
+  printf '{"id":"H-%s-%s","card_id":"%s","agent":"1","subsystem":"zeta/hot","hypothesis":"%s","strategy":"S1","status":"CRASH-%s","created_at":"2026-06-01T00:00:00Z","updated_at":"2026-06-01T00:00:00Z"}\n' \
+    "$cid" "$shape" "$cid" "$shape" "$shape" >> "$rd/state/hypotheses.jsonl"
+}
+
+# (2a) broad ranked-source card: whole-file search space, so retirement uses
+# the file-level dry signal, NOT re-discovery (one bug + a duplicate must not
+# close the whole file before its other functions are explored).
 alive_results="$TEST_TMPDIR/productive-alive-results"
 mk_state_dir "$alive_results"
 printf '{"id":"WORK-HOT","kind":"ranked-source","target_slug":"%s","file":"zeta/hot/big.c","subsystem":"zeta/hot","mode":"generic","strategy":"S1","score":10,"reason":"test","status":"unclaimed"}\n' \
   "$TARGET_SLUG" >> "$alive_results/work-cards.jsonl"
 real_crash_close "$alive_results" "WORK-HOT"
+# A re-discovery alone must NOT close a broad card (this is the false-negative
+# the scope-aware rule guards against): re-conclude, then confirm still offered.
+real_crash_close "$alive_results" "WORK-HOT"
 alive_peek=$("$STATE" --results-dir "$alive_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --peek 2>/dev/null || true)
-assert_match '"id": "WORK-HOT"' "$alive_peek" "queue: verified crash card stays claimable while subsystem is hot"
+assert_match '"id": "WORK-HOT"' "$alive_peek" "queue: broad crash card stays claimable while its file is hot (re-discovery alone does not close it)"
 # Split-brain guard: the audit-facing overlay (effective-work-cards, which
-# strategy rotation / queue counts / diversity recovery consume) MUST agree
-# with the claimer — a hot crash card reports as claimable, not terminal.
+# strategy rotation / queue counts / diversity recovery consume) MUST agree.
 eff_hot=$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" effective-work-cards \
   "$SCRIPT_ROOT" "$TARGET_ROOT" "$TARGET_SLUG" "$alive_results" 2>/dev/null || true)
 eff_hot_status=$(printf '%s\n' "$eff_hot" | python3 -c 'import json,sys
@@ -1215,17 +1229,16 @@ for l in sys.stdin:
  if not l: continue
  r=json.loads(l)
  if r.get("id")=="WORK-HOT": print(r.get("status"))')
-assert_eq "unclaimed" "$eff_hot_status" "effective-work-cards: hot crash card overlays as unclaimed (no split-brain)"
-# Drive the subsystem dry past the decay threshold (default 2).
+assert_eq "unclaimed" "$eff_hot_status" "effective-work-cards: hot broad crash card overlays as unclaimed (no split-brain)"
+# Drive the subsystem dry past the decay threshold (default 2) — now it retires.
 printf '2\n' > "$alive_results/.subsystem_dry_zeta_hot"
 if "$STATE" --results-dir "$alive_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
     next-card --agent 1 --mode generic --peek >/dev/null 2>&1; then
-  fail "queue: crash card retires once subsystem dry-streak crosses the decay threshold" \
+  fail "queue: broad crash card retires once its subsystem dry-streak crosses the threshold" \
     "next-card still offered the mined-out card"
 else
-  pass "queue: crash card retires once subsystem dry-streak crosses the decay threshold"
+  pass "queue: broad crash card retires once its subsystem dry-streak crosses the threshold"
 fi
-# ...and the overlay agrees the mined-out card is terminal again.
 eff_dry=$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" effective-work-cards \
   "$SCRIPT_ROOT" "$TARGET_ROOT" "$TARGET_SLUG" "$alive_results" 2>/dev/null || true)
 eff_dry_status=$(printf '%s\n' "$eff_dry" | python3 -c 'import json,sys
@@ -1234,7 +1247,28 @@ for l in sys.stdin:
  if not l: continue
  r=json.loads(l)
  if r.get("id")=="WORK-HOT": print(r.get("status"))')
-assert_eq "crash" "$eff_dry_status" "effective-work-cards: mined-out crash card overlays as terminal (crash)"
+assert_eq "crash" "$eff_dry_status" "effective-work-cards: mined-out broad crash card overlays as terminal (crash)"
+
+# (2b) concrete recon card: its opened hypotheses ARE its search space, so it
+# retires on re-discovery (conclusions past distinct hypotheses) even while the
+# subsystem is still hot.
+conc_results="$TEST_TMPDIR/productive-concrete-results"
+mk_state_dir "$conc_results"
+printf '{"id":"WORK-CONC","kind":"recon-hypothesis","target_slug":"%s","file":"zeta/hot/c.c","function":"foo","subsystem":"zeta/hot","mode":"generic","strategy":"S1","score":10,"reason":"test","status":"unclaimed"}\n' \
+  "$TARGET_SLUG" >> "$conc_results/work-cards.jsonl"
+open_hypothesis "$conc_results" "WORK-CONC" "c1"
+real_crash_close "$conc_results" "WORK-CONC"   # conclusions=1, distinct=1 → still open
+conc_peek=$("$STATE" --results-dir "$conc_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+  next-card --agent 1 --mode generic --peek 2>/dev/null || true)
+assert_match '"id": "WORK-CONC"' "$conc_peek" "queue: concrete crash card stays claimable while it still yields distinct hypotheses"
+real_crash_close "$conc_results" "WORK-CONC"   # conclusions=2, distinct=1 → re-discovery → closed
+if "$STATE" --results-dir "$conc_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+    next-card --agent 1 --mode generic --peek >/dev/null 2>&1; then
+  fail "queue: concrete crash card retires on re-discovery even while its subsystem is hot" \
+    "next-card still offered the mined-out card"
+else
+  pass "queue: concrete crash card retires on re-discovery even while its subsystem is hot"
+fi
 # Hard-terminal statuses are never reopened by the productive path.
 hardterm_results="$TEST_TMPDIR/hardterm-results"
 mk_state_dir "$hardterm_results"
@@ -1252,6 +1286,37 @@ for l in sys.stdin:
  if r.get("id")=="WORK-DISC": print(r.get("status"))')
 assert_eq "discarded" "$eff_disc_status" "effective-work-cards: discarded card stays terminal (hard-close, no reopen)"
 
+# Expired-lease mask must not leak a mined card back as "unclaimed" in the
+# overlay (queue consumers select on status=="unclaimed" for available work).
+mask_results="$TEST_TMPDIR/mask-overlay-results"
+mk_state_dir "$mask_results"
+printf '{"id":"WORK-MASK","kind":"recon-hypothesis","target_slug":"%s","file":"zeta/hot/m.c","function":"foo","subsystem":"zeta/hot","mode":"generic","strategy":"S1","score":10,"reason":"test","status":"unclaimed"}\n' \
+  "$TARGET_SLUG" >> "$mask_results/work-cards.jsonl"
+open_hypothesis "$mask_results" "WORK-MASK" "m1"
+real_crash_close "$mask_results" "WORK-MASK"   # C=1, D=1
+real_crash_close "$mask_results" "WORK-MASK"   # C=2, D=1 → re-discovery → closed
+# a later claim whose lease has long expired reads back as "unclaimed"
+printf '{"card_id":"WORK-MASK","agent":"1","status":"claimed","claimed_at":"2026-01-01T00:00:00Z","expires_at":"2026-01-01T00:30:00Z"}\n' \
+  >> "$mask_results/state/claims.jsonl"
+eff_mask=$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" effective-work-cards \
+  "$SCRIPT_ROOT" "$TARGET_ROOT" "$TARGET_SLUG" "$mask_results" 2>/dev/null || true)
+eff_mask_status=$(printf '%s\n' "$eff_mask" | python3 -c 'import json,sys
+for l in sys.stdin:
+ l=l.strip()
+ if not l: continue
+ r=json.loads(l)
+ if r.get("id")=="WORK-MASK": print(r.get("status"))')
+assert_eq "crash" "$eff_mask_status" "effective-work-cards: expired-lease mask over a mined card resolves to terminal, not unclaimed"
+# ...and the claimer must agree: next-card must NOT re-offer the mined card
+# whose lease expired (guards the explain/overlay-vs-claimer split-brain).
+if "$STATE" --results-dir "$mask_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+    next-card --agent 9 --mode generic --peek >/dev/null 2>&1; then
+  fail "queue: mined card with an expired lease is not re-offered by next-card" \
+    "next-card returned the mask-resolved terminal card"
+else
+  pass "queue: mined card with an expired lease is not re-offered by next-card"
+fi
+
 # (3) anti-camp demotion: a cracked card sinks below a fresher sibling -------
 demote_results="$TEST_TMPDIR/demote-results"
 mk_state_dir "$demote_results"
@@ -1262,7 +1327,8 @@ printf '{"id":"WORK-B","kind":"ranked-source","target_slug":"%s","file":"zeta/co
 demote_control=$("$STATE" --results-dir "$demote_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --peek 2>/dev/null || true)
 assert_match '"id": "WORK-A"' "$demote_control" "queue: top-ranked card is offered first before any conclusion"
-# WORK-A produces a verified crash but stays eligible (zeta/hot still hot).
+# WORK-A produces a verified crash but stays eligible (broad card, zeta/hot
+# still hot — subsystem not dry).
 real_crash_close "$demote_results" "WORK-A"
 demote_after=$("$STATE" --results-dir "$demote_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --peek 2>/dev/null || true)
@@ -1281,7 +1347,7 @@ printf '{"id":"WORK-LA","kind":"ranked-source","target_slug":"%s","file":"zeta/h
   "$TARGET_SLUG" >> "$lease_results/work-cards.jsonl"
 printf '{"id":"WORK-LB","kind":"ranked-source","target_slug":"%s","file":"zeta/cold/b.c","subsystem":"zeta/cold","mode":"generic","strategy":"S1","score":50,"reason":"test","status":"unclaimed"}\n' \
   "$TARGET_SLUG" >> "$lease_results/work-cards.jsonl"
-real_crash_close "$lease_results" "WORK-LA"
+real_crash_close "$lease_results" "WORK-LA"   # broad card, zeta/hot hot → stays open
 # Re-lease WORK-LA to agent 1 (active, future expiry) — the in-flight claim.
 printf '{"card_id":"WORK-LA","agent":"1","mode":"generic","role":"reproduce","status":"claimed","claimed_at":"%s","expires_at":"%s"}\n' \
   "$lease_at" "$lease_exp" >> "$lease_results/state/claims.jsonl"

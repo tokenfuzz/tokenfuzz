@@ -2269,12 +2269,31 @@ TERMINAL_CARD_STATUSES = PERMANENT_TERMINAL_CARD_STATUSES | SOFT_TERMINAL_CARD_S
 _PRODUCTIVE_DECAY_AFTER_ITERS = 2
 
 # crash/find are *productive* terminal conclusions, not dead ends: a
-# verified bug means the surface is hot and — on targets with a few very
-# large files (where a file:strategy card is the whole file) — likely
-# holds more. These stay claimable while the subsystem is still yielding
-# (see card_closed_for_run); done/discarded/blocked are hard-closed for
-# the run. Keep this a strict subset of PERMANENT_TERMINAL_CARD_STATUSES.
+# verified bug means the surface may hold more (a large file:strategy card
+# often spans many bugs, each a different hypothesis). These stay claimable
+# while the surface keeps yielding new distinct hypotheses (see
+# card_closed_for_run); done/discarded/blocked are hard-closed for the run.
+# Keep this a strict subset of PERMANENT_TERMINAL_CARD_STATUSES.
 _PRODUCTIVE_TERMINAL_CARD_STATUSES = {"crash", "find"}
+
+# A concrete productive card is retired once it has been re-concluded more
+# times than it has distinct hypotheses: the surplus conclusions are
+# re-discoveries of an already-recorded bug, not new ones. A margin of 1
+# tolerates a single unproductive re-conclusion before closing. Applies only
+# to concrete cards (see _is_broad_file_card / card_closed_for_run).
+_PRODUCTIVE_REDISCOVERY_MARGIN = 1
+
+
+def _is_broad_file_card(card: dict) -> bool:
+    """A whole-file/strategy card whose search space is the file, not the
+    hypotheses opened against it.
+
+    ``ranked-source`` cards rank a whole file for a strategy; their bugs live
+    across functions never yet hypothesised, so re-discovery is not an
+    exhaustion proof for them. Concrete cards (recon-hypothesis, patch cards)
+    name a specific site, so their opened hypotheses *are* their search space.
+    """
+    return str(card.get("kind", "")) == "ranked-source"
 
 
 def active_hypothesis_card_ids(ctx: Context) -> set[str]:
@@ -2453,6 +2472,23 @@ def latest_claims_by_card(ctx: Context) -> dict[str, dict]:
     return latest
 
 
+def latest_terminal_status_by_card(ctx: Context) -> dict[str, str]:
+    """Per-card last real terminal status (crash/find/done/discarded/blocked).
+
+    Ignores stale-lease bookkeeping rows. Used to resolve a card whose latest
+    row is a lifecycle mask (``released``, or an expired ``claimed`` that reads
+    back as ``unclaimed``) to the conclusion it hides, so status-only consumers
+    do not mistake a mined card for available work.
+    """
+    out: dict[str, str] = {}
+    for claim in read_jsonl(state_dir(ctx.results_dir) / "claims.jsonl"):
+        cid = claim.get("card_id", "")
+        st = str(claim.get("status", ""))
+        if cid and st in TERMINAL_CARD_STATUSES and claim.get("source", "") != "release-stale-claims":
+            out[cid] = st
+    return out
+
+
 def release_stale_claims(
     ctx: Context,
     grace: timedelta | None = None,
@@ -2479,7 +2515,16 @@ def release_stale_claims(
     if now is None:
         now = datetime.now(timezone.utc)
 
-    latest = latest_claims_by_card(ctx)
+    claim_rows = read_jsonl(state_dir(ctx.results_dir) / "claims.jsonl")
+    latest: dict[str, dict] = {}
+    latest_terminal: dict[str, dict] = {}
+    for claim in claim_rows:
+        cid = claim.get("card_id", "")
+        if not cid:
+            continue
+        latest[cid] = claim
+        if claim.get("status", "") in TERMINAL_CARD_STATUSES:
+            latest_terminal[cid] = claim
     if not latest:
         return []
 
@@ -2523,15 +2568,18 @@ def release_stale_claims(
             reason = "no-hypothesis-after-grace"
         else:
             reason = "all-hypotheses-terminal"
+        prior_terminal = latest_terminal.get(cid)
         row = {
             "card_id": cid,
             "agent": claim.get("agent", ""),
-            "status": "released",
+            "status": prior_terminal.get("status", "released") if prior_terminal else "released",
             "updated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "released_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "reason": reason,
             "source": "release-stale-claims",
         }
+        if prior_terminal:
+            row["preserved_terminal_status"] = prior_terminal.get("status", "")
         append_jsonl(state_dir(ctx.results_dir) / "claims.jsonl", row)
         released.append(row)
     return released
@@ -2599,62 +2647,75 @@ def card_closed_for_run(
     card: dict,
     status: str,
     *,
+    conclusion_counts: dict[str, int] | None = None,
+    distinct_counts: dict[str, int] | None = None,
     dry_streaks: dict[str, int] | None = None,
 ) -> bool:
     """Is a card at ``status`` closed for the *current* run (not re-offerable)?
 
-    ``done``/``discarded``/``blocked`` are hard-closed. ``crash``/``find``
-    are productive conclusions, kept claimable while the card's *subsystem*
-    is still yielding and retired once that subsystem has gone dry for
-    ``_PRODUCTIVE_DECAY_AFTER_ITERS`` consecutive iterations — the same
-    signal the productive-subsystem relaxation in ``_claim_next_card_locked``
-    already uses.
+    ``done``/``discarded``/``blocked`` are hard-closed. ``crash``/``find`` are
+    productive conclusions whose retirement is **scope-aware**, because the
+    right exhaustion signal depends on what the card covers:
 
-    Scope, stated plainly: this is **subsystem-grain keep-alive**, not
-    per-card or per-signature decay. While a subsystem is hot, *every*
-    crash/find card in it stays claimable (the "bugs cluster" bias). The
-    anti-camp guarantee is separate: ``card_conclusion_counts`` demotes an
-    already-cracked card below fresher siblings in the claim ranker, so a
-    productive surface is revisited by least-mined-first rotation, not hit
-    sequentially. Keep-alive provides breadth across the hot file; demotion
-    provides the diversification.
+    * **Concrete cards** (recon-hypothesis, patch cards) name one specific
+      site, so the hypotheses opened against them *are* their search space.
+      They retire once re-concluded more times than they have distinct
+      hypotheses (``conclusions - distinct >= _PRODUCTIVE_REDISCOVERY_MARGIN``)
+      — the surplus conclusions are re-discoveries of an already-recorded bug.
 
-    Why this exists: terminal-on-first-conclusion drains a finite, one-shot
-    card queue before the wall budget — recon runs once and nothing
-    replenishes. Fast backends reach conclusions quickly and hit
-    QUEUE_EXHAUSTED in a fraction of the budget (gemini exited a cjson run
-    in ~69 min of 240). Slower backends merely reach the same wall later;
-    queue sizes also differ per backend, so this is a structural-supply
-    fix, not a per-backend one. Keeping a productive surface open until it
-    is mined out lets the run find the *other* bugs a large file holds.
+    * **Broad ranked-source cards** cover a whole file/strategy, whose search
+      space is far larger than the hypotheses tried so far. ``conclusions -
+      distinct`` is NOT a valid exhaustion proof there: one bug plus a
+      duplicate crash would close the whole file before its other functions
+      are explored. These keep the file-level signal — retire once the
+      subsystem has gone dry for ``_PRODUCTIVE_DECAY_AFTER_ITERS`` iterations
+      (``subsystem_dry_streak``, reset only by triage-promoted artifacts on
+      disk, so a fabricated crash cannot keep a dry file alive).
 
-    Fabrication-*resistant*, not fabrication-proof: ``subsystem_dry_streak``
-    is reset only by triage-promoted CRASH/FIND artifacts on disk
-    (bin/audit:agent_iteration_productive), never by an ``update-card``
-    claim — so a fabricated crash/find in an otherwise-dry subsystem cannot
-    keep itself alive. It can ride a subsystem kept hot by a *real* sibling
-    artifact, which the per-card demotion then sinks; the crash evidence
-    gate in ``update_card_status`` is the primary defence against fabricated
-    crash closures.
+    A lease-lifecycle status can mask a prior productive conclusion: a bare
+    ``released`` row (legacy stale-lease cleanup, or resumed pre-fix state) or
+    an expired ``claimed`` row that reads back as ``unclaimed``. When the card
+    has a recorded productive conclusion, it is treated as productive-terminal
+    so neither mask reopens a mined card. A *live* claim (status ``claimed``)
+    is left open — the owner is still investigating. The anti-camp guarantee
+    stays separate: ``card_conclusion_counts`` demotes an already-cracked card
+    below fresher siblings so a still-open surface is revisited least-mined-
+    first.
 
-    ``dry_streaks`` is an optional per-call memo so a candidate loop reads
-    each subsystem's streak file at most once.
+    ``conclusion_counts``/``distinct_counts``/``dry_streaks`` are optional
+    per-call memos so a candidate loop reads state at most once.
     """
-    if status not in TERMINAL_CARD_STATUSES:
-        return False
-    if status in _PRODUCTIVE_TERMINAL_CARD_STATUSES:
+    cid = card.get("id", "")
+    if conclusion_counts is None:
+        conclusion_counts = card_conclusion_counts(ctx)
+    concluded = conclusion_counts.get(cid, 0) if cid else 0
+    # Resolve a released/expired-lease mask back to the conclusion it hides, but
+    # leave a live "claimed" open — its owner is still investigating (docstring).
+    is_productive = status in _PRODUCTIVE_TERMINAL_CARD_STATUSES or (
+        status in ("released", "unclaimed") and concluded > 0
+    )
+    if not is_productive:
+        # done/discarded/blocked hard-close; anything else stays claimable.
+        return status in TERMINAL_CARD_STATUSES
+    if not cid:
+        return True
+    if _is_broad_file_card(card):
         subsystem = str(card.get("subsystem", "") or "")
-        if subsystem and subsystem != "unknown":
-            if dry_streaks is None:
+        if not subsystem or subsystem == "unknown":
+            return True
+        if dry_streaks is None:
+            streak = subsystem_dry_streak(ctx, subsystem)
+        else:
+            streak = dry_streaks.get(subsystem)
+            if streak is None:
                 streak = subsystem_dry_streak(ctx, subsystem)
-            else:
-                streak = dry_streaks.get(subsystem)
-                if streak is None:
-                    streak = subsystem_dry_streak(ctx, subsystem)
-                    dry_streaks[subsystem] = streak
-            if streak < _PRODUCTIVE_DECAY_AFTER_ITERS:
-                return False
-    return True
+                dry_streaks[subsystem] = streak
+        return streak >= _PRODUCTIVE_DECAY_AFTER_ITERS
+    if distinct_counts is None:
+        distinct = card_distinct_hypothesis_count(ctx, cid)
+    else:
+        distinct = distinct_counts.get(cid, 0)
+    return concluded - distinct >= _PRODUCTIVE_REDISCOVERY_MARGIN
 
 
 def agent_productive_subsystems(ctx: Context, agent: str) -> set[str]:
@@ -2825,6 +2886,8 @@ def _queue_status_row(
     card: dict,
     *,
     ctx: Context,
+    conclusion_counts: dict[str, int],
+    distinct_counts: dict[str, int],
     dry_streaks: dict[str, int],
     latest: dict[str, dict],
     ttl: timedelta,
@@ -2843,11 +2906,16 @@ def _queue_status_row(
     surface = work_surface(card)
     if not is_auditable_work_card(card):
         reason = "not-auditable"
-    elif card_closed_for_run(ctx, card, status, dry_streaks=dry_streaks):
-        # done/discarded/blocked, or a crash/find whose subsystem has gone
-        # dry. A productive crash/find on a still-hot subsystem is NOT
-        # closed here — it falls through and stays eligible so the run
-        # keeps mining the surface for the other bugs a large file holds.
+    elif card_closed_for_run(
+        ctx, card, status,
+        conclusion_counts=conclusion_counts, distinct_counts=distinct_counts,
+        dry_streaks=dry_streaks,
+    ):
+        # done/discarded/blocked; a concrete crash/find re-concluded past its
+        # distinct hypotheses; or a broad ranked-source crash/find whose
+        # subsystem has gone dry. A productive card still yielding (concrete)
+        # or on a still-hot file (broad) is NOT closed here — it stays
+        # eligible so the run keeps mining the surface for other bugs.
         reason = f"terminal:{status}"
     elif strategy and not card_strategy_matches(card, strategy):
         reason = f"strategy-incompatible:{card.get('strategy') or 'none'}"
@@ -2899,6 +2967,8 @@ def explain_queue(
     claimed_surfaces, claimed_subsystems = _claimed_card_queue_sets(cards_by_id, latest, ttl, now)
     owned_subsystems = active_subsystems | claimed_subsystems
     saturated_subsystems = guard_saturated_subsystems(ctx)
+    conclusion_counts = card_conclusion_counts(ctx)
+    distinct_counts = card_distinct_hypothesis_counts(ctx)
     dry_streaks: dict[str, int] = {}
     rows: list[dict] = []
     for card in cards:
@@ -2906,6 +2976,8 @@ def explain_queue(
             _queue_status_row(
                 card,
                 ctx=ctx,
+                conclusion_counts=conclusion_counts,
+                distinct_counts=distinct_counts,
                 dry_streaks=dry_streaks,
                 latest=latest,
                 ttl=ttl,
@@ -2979,8 +3051,10 @@ def _claim_next_card_locked(
     owned_surfaces = active_hypothesis_surfaces(ctx) | claimed_card_surfaces(ctx, ttl, now)
     owned_subsystems = active_hypothesis_subsystems(ctx) | claimed_card_subsystems(ctx, ttl, now)
     saturated_subsystems = guard_saturated_subsystems(ctx)
-    # Per-claim memo for card_closed_for_run so the candidate loops read
-    # each subsystem's dry-streak file at most once.
+    # Per-claim memos for card_closed_for_run (and the demotion sort below)
+    # so the candidate loops read claims/hypotheses/dry-streaks at most once.
+    conclusion_counts = card_conclusion_counts(ctx)
+    distinct_counts = card_distinct_hypothesis_counts(ctx)
     dry_streaks: dict[str, int] = {}
     # Agents that have already produced a confirmed CRASH/FIND are
     # "productive" — they have working data-flow context for that
@@ -3080,13 +3154,17 @@ def _claim_next_card_locked(
                 if not card_strategy_matches(card, eff_filter):
                     continue
             latest_claim = latest.get(cid)
-            latest_status = latest_claim.get("status", "claimed") if latest_claim else ""
+            # Resolve through the visible status (an expired "claimed" reads back
+            # as "unclaimed") so the claimer's closed/eligible decision matches
+            # explain_queue and the effective-work-cards overlay — otherwise a
+            # mined card whose lease expired is silently re-offered here.
+            latest_status = visible_card_status(latest_claim, ttl, now)
             blocks_card = claim_blocks_card(latest_claim, ttl, now)
             own_active_claim = bool(blocks_card and latest_claim and str(latest_claim.get("agent", "")) == str(agent))
             # Blocked cards are retryable in a fresh result set, but not in
             # the same run where the target configuration has already proven
             # the surface unreachable.
-            if card_closed_for_run(ctx, card, latest_status, dry_streaks=dry_streaks) or cid in active_cards or (blocks_card and not own_active_claim):
+            if card_closed_for_run(ctx, card, latest_status, conclusion_counts=conclusion_counts, distinct_counts=distinct_counts, dry_streaks=dry_streaks) or cid in active_cards or (blocks_card and not own_active_claim):
                 continue
             surface = work_surface(card)
             if surface and surface in owned_surfaces and not own_active_claim:
@@ -3163,7 +3241,6 @@ def _claim_next_card_locked(
     # stranding the lease until TTL. Skipped when nothing has been concluded
     # yet (the common early-run case).
     if len(preferred) > 1:
-        conclusion_counts = card_conclusion_counts(ctx)
         if conclusion_counts:
             def _demotion_key(c: dict) -> tuple[int, int]:
                 cid = c.get("id", "")
@@ -3608,11 +3685,29 @@ def card_conclusion_counts(ctx: Context) -> dict[str, int]:
     """
     counts: dict[str, int] = {}
     for row in read_jsonl(state_dir(ctx.results_dir) / "claims.jsonl"):
+        if row.get("source", "") == "release-stale-claims" and row.get("preserved_terminal_status", ""):
+            continue
         if str(row.get("status", "")) in _PRODUCTIVE_TERMINAL_CARD_STATUSES:
             cid = str(row.get("card_id", ""))
             if cid:
                 counts[cid] = counts.get(cid, 0) + 1
     return counts
+
+
+def _hypothesis_shape(h: dict) -> str:
+    """Stable identity for a hypothesis's investigative angle.
+
+    Two hypotheses with the same shape are the same bug re-derived; a new
+    shape is a genuinely new angle. Falls back to the row id when the shape
+    fields are all empty, and to "" when even the id is missing (skipped).
+    """
+    shape = "\x1f".join(
+        str(h.get(k, "")).strip().lower()
+        for k in ("hypothesis", "input_shape", "guard_gap", "diagnostic", "strategy")
+    )
+    if shape.strip("\x1f"):
+        return shape
+    return str(h.get("id", ""))
 
 
 def card_distinct_hypothesis_count(ctx: Context, card_id: str) -> int:
@@ -3622,15 +3717,26 @@ def card_distinct_hypothesis_count(ctx: Context, card_id: str) -> int:
     seen: set[str] = set()
     for h in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"):
         if h.get("card_id", "") == card_id:
-            shape = "\x1f".join(
-                str(h.get(k, "")).strip().lower()
-                for k in ("hypothesis", "input_shape", "guard_gap", "diagnostic", "strategy")
-            )
-            if shape.strip("\x1f"):
-                seen.add(shape)
-            elif h.get("id", ""):
-                seen.add(str(h.get("id", "")))
+            key = _hypothesis_shape(h)
+            if key:
+                seen.add(key)
     return len(seen)
+
+
+def card_distinct_hypothesis_counts(ctx: Context) -> dict[str, int]:
+    """Per-card distinct-hypothesis-shape counts — the plural memo of
+    ``card_distinct_hypothesis_count`` for candidate loops that would
+    otherwise re-read hypotheses.jsonl once per card.
+    """
+    by_card: dict[str, set[str]] = {}
+    for h in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"):
+        cid = h.get("card_id", "")
+        if not cid:
+            continue
+        key = _hypothesis_shape(h)
+        if key:
+            by_card.setdefault(cid, set()).add(key)
+    return {cid: len(s) for cid, s in by_card.items()}
 
 
 # ── Per-strategy completion gates (Fix #9) ─────────────────────────
@@ -4292,6 +4398,8 @@ def list_work_cards(
     agent_modes = [mode] if mode else []
     subsystem_needles = [str(s).strip().lower() for s in (subsystem_filters or []) if str(s).strip()]
     contains_needles = [str(s).strip().lower() for s in (contains_filters or []) if str(s).strip()]
+    conclusion_counts = card_conclusion_counts(ctx)
+    distinct_counts = card_distinct_hypothesis_counts(ctx)
     dry_streaks: dict[str, int] = {}
     rows: list[dict] = []
     for card in cards:
@@ -4304,6 +4412,8 @@ def list_work_cards(
         status_row = _queue_status_row(
             card,
             ctx=ctx,
+            conclusion_counts=conclusion_counts,
+            distinct_counts=distinct_counts,
             dry_streaks=dry_streaks,
             latest=latest,
             ttl=ttl,
