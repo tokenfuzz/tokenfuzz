@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.0.3 - 2026-07-08
+
+- **Productive cards retire by scope-aware exhaustion.** Keep-alive re-offered
+  already-cracked cards indefinitely on small or deep targets, grinding runs to
+  the `MAX_DRY` cap re-mining their own findings. Concrete cards (recon-hypothesis,
+  patch) now retire once conclusions exhaust their distinct hypotheses (C≥D), while
+  broad ranked-source cards keep the file-level dry signal; mined cards are never
+  reopened as work across the claim path, explain view, and work-card overlay.
+
+- **Iteration progress gates on unique root causes.** Duplicate `CRASH-`/`FIND-`
+  dirs for an already-clustered bug reset `dry_streak`, keeping small hot targets
+  claimable forever. An iteration counts as productive only when a new unique root
+  cause appears; duplicate-only rounds advance the streak. Fails open to raw
+  counts if clustering fails or times out, so no finding is suppressed.
+
+- **Source-proven reachability rejects.** Self-sabotage and unreachable-trigger
+  rejection moves into the recall-safe trigger-provenance gate, which rejects only
+  source-proven caller self-sabotage and preserves real, reachability-limited
+  defects. Reachability wording is now threat-model-generic — keyed on the
+  target's `attacker_controls`, not hard-coded to bytes — and vocabulary
+  normalization maps "attacker" to "external", not "caller", so the
+  untrusted-source vs trusted-application distinction survives rewriting.
+
+- **Cluster siblings route to structured state.** Cluster expansion appended to
+  per-agent `AUDIT_STATE-N.md`, which structured state no longer produces, so
+  every call was discarded and housekeeping re-expanded every dir each pass
+  (12 calls, 1517s, 0 results on a tiny target). Siblings now land as PENDING
+  hypotheses via `bin/state add-cluster-hyps`, deduped under one lock; a one-time
+  migration marks already-indexed crashes expanded, and off-taxonomy sibling
+  labels fold into the canonical state bucket instead of being dropped.
+
+- **Target scan stops following symlinked dirs.** `iter_target_roots` walked
+  `output/` with a symlink-following `is_dir()`, so a benchmark repo-root facade
+  (a symlink back to a source tree carrying its own `output/`) recursed without
+  bound and hung `find_session_dir` and untargeted `run-asan`. Symlinked dirs are
+  now skipped, delivering the exclusion the docstring already promised.
+
+- **Rejected crashes keep their reason.** The trigger-provenance gate moved
+  crashes to `crashes-rejected/` without writing `.autodiscard`, so
+  `REJECTED-CRASHES.md`, `show-exclusions`, and the benchmark ledger all showed
+  `—`. The reason is now backfilled at the common move chokepoint, covering every
+  current and future rejection path; display-only, no count or severity changes.
+
+- **Unified live-run status lines.** Rate-limit/pause, agent-pool, cell, and
+  iteration-result output is reworked into one compact `Subject: key=val | group`
+  style; per-session prompt dumps move under `logs/.raw` so default scans skip
+  them, and `cell_metrics_summary` reports `metrics=unavailable` for missing or
+  corrupt cells instead of a misleading `crashes=0/0`.
+
+- **Dead code and a legacy knob removed.** Unreferenced functions, constants, a
+  hidden untested env toggle, an orphan reference doc, and stale comments/tests
+  are gone. No behavior change.
+
 ## 1.0.2 - 2026-07-05
 
 - **Pause and resume through usage limits.** A backend usage cap (Claude session

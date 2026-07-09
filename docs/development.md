@@ -195,6 +195,25 @@ bin/docs serve           # install deps, then preview at http://127.0.0.1:4000/
 missing nav entry, or unrecognised reference fails the build. Fix those before
 opening a docs PR.
 
+## Releasing
+
+`CHANGELOG.md` is the release log. When a release is asked for:
+
+- **Pick the bump first.** Read the commits since the last tagged section and
+  decide minor vs. patch: a patch (`x.y.Z`) is bug fixes, quality gates, and
+  internal cleanup with no contract change; a minor (`x.Y.0`) adds a capability,
+  changes the audit contract, or alters an operator-visible interface. Say which
+  and why before writing notes.
+- **Write crisp, impactful bullets.** One `**bold lead.**` per change stating the
+  user-facing effect, then a sentence or two of what broke and what changed —
+  the shape the existing sections use. Fold pure-internal churn (doc-only
+  tweaks, refactors with no behavior change) into a single line or omit it.
+- **Order by impact, not by commit date.** Lead with what most changes a run's
+  results or an operator's day; end with cleanup. Group several small related
+  commits into one bullet when they tell one story.
+- Date the section with today's date and commit as `changelog: add <version>
+  release notes`.
+
 ## Product invariants
 
 These should continue to hold:
