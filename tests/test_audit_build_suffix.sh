@@ -318,5 +318,14 @@ else
   pass
 fi
 
+# ───────────────────────────────────────────────────────────────────
+# Suite hygiene: a container shell's exported suffix must not reach a
+# suite's fixtures, which create bare build-<san>/ trees.
+# ───────────────────────────────────────────────────────────────────
+leaked=$(AUDIT_BUILD_SUFFIX="-leaked" bash -c \
+  'source "$1/tests/helpers.sh" >/dev/null 2>&1; printf "%s" "${AUDIT_BUILD_SUFFIX:-}"' \
+  _ "$SCRIPT_ROOT")
+assert_eq "" "$leaked" "helpers.sh clears an inherited AUDIT_BUILD_SUFFIX"
+
 teardown_test_env
 summary

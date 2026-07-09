@@ -11,6 +11,10 @@ export SCRIPT_ROOT
 # (LLM_DECIDE_MOCK_*) still run — DISABLE only gates the real backend.
 export LLM_DECIDE_DISABLE="${LLM_DECIDE_DISABLE:-1}"
 
+# Container shells export AUDIT_BUILD_SUFFIX; fixtures build bare build-<san>/
+# trees. Clear it here too — python suites never source tests/helpers.sh.
+unset AUDIT_BUILD_SUFFIX
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -79,36 +83,37 @@ while [ "$#" -gt 0 ]; do
       # that the cause was an apt fetch timeout.
       (
         set -e
-        # nodejs+npm are required: bin/audit:gemini_cli_check_bundled_ripgrep
-        # uses node for realpath/platform detection, and the npm-based
-        # backends (codex, @google/gemini-cli) need npm to install. curl
-        # is needed for the Antigravity CLI installer and CA fetches.
+        # nodejs is required: bin/audit:gemini_cli_check_bundled_ripgrep uses
+        # node for realpath/platform detection, and test_audit_helpers.sh
+        # asserts its WARN path. CA certificates are needed for HTTPS git/gh
+        # traffic in minimal images. npm and curl are backend-install-path
+        # dependencies, not test-suite prerequisites.
         if command -v apt-get >/dev/null 2>&1; then
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
           apt-get install -y --no-install-recommends \
-            bash binutils ca-certificates clang curl file gh git jq libclang-rt-dev llvm \
-            nodejs npm procps python3 python3-venv ripgrep
+            bash binutils ca-certificates clang file gh git jq libclang-rt-dev llvm \
+            nodejs procps python3 python3-venv ripgrep
         elif command -v dnf >/dev/null 2>&1; then
           dnf install -y \
-            bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-            grep jq less llvm nodejs npm procps-ng python3 python3-pip ripgrep sed which \
+            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk gh git \
+            grep jq llvm nodejs procps-ng python3 python3-pip ripgrep sed \
             || dnf install -y \
-              bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-              grep jq less llvm nodejs npm procps-ng python3 python3-pip sed which
+              bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk gh git \
+              grep jq llvm nodejs procps-ng python3 python3-pip sed
         elif command -v microdnf >/dev/null 2>&1; then
           microdnf install -y \
-            bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-            grep jq less llvm nodejs npm procps-ng python3 python3-pip sed which
+            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk gh git \
+            grep jq llvm nodejs procps-ng python3 python3-pip sed
         elif command -v yum >/dev/null 2>&1; then
           yum install -y \
-            bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-            grep jq less llvm nodejs npm procps-ng python3 python3-pip ripgrep sed which \
+            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk gh git \
+            grep jq llvm nodejs procps-ng python3 python3-pip ripgrep sed \
             || yum install -y \
-              bash binutils ca-certificates clang compiler-rt coreutils curl diffutils file findutils gawk gh git \
-              grep jq less llvm nodejs npm procps-ng python3 python3-pip sed which
+              bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk gh git \
+              grep jq llvm nodejs procps-ng python3 python3-pip sed
         else
-          echo "tests/run-tests.sh: no supported package manager found; install bash python3 file git gh jq clang llvm ripgrep nodejs npm curl" >&2
+          echo "tests/run-tests.sh: no supported package manager found; install bash python3 file git gh jq clang llvm binutils nodejs ripgrep ca-certificates" >&2
           exit 2
         fi
       ) || {
@@ -119,8 +124,9 @@ while [ "$#" -gt 0 ]; do
       # Verify the critical tools the audit harness assumes are present.
       # If a fetch silently dropped one of them, fail loudly here so the
       # error message points at the install step, not at bin/audit later.
+      # sancov is not checked: the Debian/Ubuntu llvm package does not ship it.
       missing=()
-      for tool in bash python3 file git gh jq clang llvm-ar rg node npm curl; do
+      for tool in bash python3 file git gh jq clang clang++ nm ar node rg llvm-symbolizer; do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
       done
       venv_probe="$(mktemp -d "${TMPDIR:-/tmp}/tokenfuzz-venv-check.XXXXXX" 2>/dev/null || true)"

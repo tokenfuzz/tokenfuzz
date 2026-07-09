@@ -27,6 +27,16 @@ readlink_f_re='readlink[[:space:]]+-f([[:space:]]|$)'
 find_printf_re='find[^\n]*[[:space:]]-printf[[:space:]]'
 stat_fallback_re="stat[[:space:]]+-f[[:space:]]+%[mz][^|;]*[|][|][[:space:]]*stat[[:space:]]+-c[[:space:]]+%[Ys]"
 
+# A prompt piped into an agent CLI, directly or through audit_timeout_run.
+# Under pipefail a CLI that exits before draining stdin kills the writer with
+# SIGPIPE, and the pipeline reports 141 instead of the CLI's own rc — which
+# reads as an agent crash rather than the quota/auth refusal it is. Feed the
+# prompt by redirect instead. The words below are the shell expansions that
+# resolve to an agent CLI binary; llm_decide is absent on purpose, as it
+# drains stdin before any early return.
+backend_cli_word='"\$(CODEX_BIN|CLAUDE_BIN|GEMINI_BIN|OPENCODE_BIN|gemini_bin|bin)"|\$\(llm_backend_bin'
+pipe_to_cli_re='\|[[:space:]]*(audit_timeout_run[[:space:]][^|]*)?('"$backend_cli_word"')'
+
 # ── The lint itself ────────────────────────────────────────────────
 timeout_hits=$(rg -n "$timeout_re" bin lib 2>/dev/null || true)
 assert_eq "" "$timeout_hits" \
@@ -47,6 +57,10 @@ assert_eq "" "$find_printf_hits" \
 stat_fallback_hits=$(rg -n "$stat_fallback_re" bin lib 2>/dev/null || true)
 assert_eq "" "$stat_fallback_hits" \
   "no open-coded 'stat -f ... || stat -c ...' in bin/ or lib — use lib/platform.sh"
+
+pipe_to_cli_hits=$(rg -n "$pipe_to_cli_re" bin lib 2>/dev/null || true)
+assert_eq "" "$pipe_to_cli_hits" \
+  "no prompt piped into an agent CLI in bin/ or lib — redirect, or pipefail reports the writer's SIGPIPE as the CLI's rc"
 
 # ── Self-check: the patterns must actually fire ────────────────────
 # A silently-broken regex would make the lint above pass forever. Run the
@@ -84,6 +98,31 @@ assert_match "find.*-printf" "$probe_find_printf" \
 probe_stat_fallback=$(rg -n "$stat_fallback_re" "$probe" 2>/dev/null || true)
 assert_match "stat -f %m" "$probe_stat_fallback" \
   "lint detects open-coded BSD/GNU stat fallback"
+
+# The CLI-pipe rule must fire on every launch shape that carried the bug, and
+# stay silent on the redirect that replaced it and on the llm_decide pipes,
+# which are safe. A rule that flags those would block correct code.
+cli_probe="$TEST_TMPDIR/cli-pipe-probe.sh"
+printf '%s\n' \
+  '          | "$gemini_bin" "${gemini_flags[@]}" -p ""' \
+  '          | "$CODEX_BIN" exec resume "${flags[@]}" "$sid" -' \
+  '        | audit_timeout_run "$t" "$bin" exec "${flags[@]}" -' \
+  '      | audit_timeout_run "$T" "$(llm_backend_bin gemini)" "${f[@]}" -p ""' \
+  '  "$CODEX_BIN" exec - < <(printf "%s" "$prompt") > "$raw" 2>&1' \
+  '  json=$(printf "%s" "$prompt" | llm_decide strategy_pick "strategy" 12)' \
+  > "$cli_probe"
+
+probe_cli_pipe=$(rg -n "$pipe_to_cli_re" "$cli_probe" 2>/dev/null || true)
+assert_match 'gemini_bin'  "$probe_cli_pipe" "lint detects a prompt piped into the gemini CLI"
+assert_match 'CODEX_BIN'   "$probe_cli_pipe" "lint detects a prompt piped into codex resume"
+assert_match 'audit_timeout_run .*\$bin' "$probe_cli_pipe" \
+  "lint detects a prompt piped through audit_timeout_run into a backend bin"
+assert_match 'llm_backend_bin' "$probe_cli_pipe" \
+  "lint detects a prompt piped into \$(llm_backend_bin ...)"
+assert_not_match '< <(printf' "$probe_cli_pipe" \
+  "lint ignores the redirect form that replaced the pipe"
+assert_not_match 'llm_decide' "$probe_cli_pipe" \
+  "lint ignores llm_decide pipes — it drains stdin before any early return"
 
 # ── Behavioral: the two fixed scripts ──────────────────────────────
 # Both must source the portable timeout helper so audit_timeout_run is

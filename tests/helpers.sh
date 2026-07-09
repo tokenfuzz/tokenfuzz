@@ -19,6 +19,12 @@ source "$SCRIPT_ROOT/lib/platform.sh"
 # tests/run-tests.sh). Per-decision mocks override.
 export LLM_DECIDE_DISABLE="${LLM_DECIDE_DISABLE:-1}"
 
+# bin/audit-container-shell exports AUDIT_BUILD_SUFFIX so images don't share
+# build trees. Fixtures here create bare build-<san>/ dirs, so an inherited
+# suffix would rewrite every configured path out from under them. Suites that
+# exercise the suffix set it themselves.
+unset AUDIT_BUILD_SUFFIX
+
 _SUITE_PASS=0
 _SUITE_FAIL=0
 _CURRENT_TEST=""

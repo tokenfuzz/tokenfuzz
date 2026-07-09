@@ -24,14 +24,11 @@ and during sanitizer builds.
 | --- | --- |
 | `bash` 3.2+ | Runs the orchestrator and shell wrappers. macOS system Bash is fine. |
 | `python3` 3.9+ with `venv` support | Parses target config and structured state. `venv` is used by `bin/docs`, Python-target bootstraps, and the vLLM quick path below. |
-| `perl` | Only needed to build and run Perl-language audit *targets*. The harness and its test suite do not invoke it. |
 | `git` | Clones, updates, and identifies revisions for most targets. |
 | `gh` | Queries GitHub advisory metadata (`gh api`) for the cross-project strategy. |
 | `jq` | Reads and writes JSONL state records. |
 | `rg` | Fast, bounded source search through helper commands. |
 | `file` | Distinguishes testcase inputs from scripts and compiled artifacts. |
-| `curl`, CA certificates | Fetch backend and tool installers over HTTPS. |
-| `node`, `npm` | Install npm-based backend CLIs and run backend diagnostics. |
 
 `bin/audit` preflight-checks `jq` and `python3` at startup and
 exits with a clear "FATAL: missing required tool(s): ..." message if
@@ -46,24 +43,33 @@ For sanitizer builds, you also need LLVM:
 | Tool | Why it is needed |
 | --- | --- |
 | `clang`, `clang++` | Build target code with sanitizer instrumentation. |
-| `llvm-ar` | Build and test static-library sanitizer harnesses. |
 | `llvm-symbolizer` | Turn sanitizer PCs into readable stack traces. |
 | `sancov` | Enable coverage-gated probes on supported targets. |
 | `nm` | Detect candidate sanitizer binaries in build trees. |
 | `otool` (macOS) | Inspect Mach-O sections in coverage-instrumented binaries. |
 | `readelf`, `llvm-readelf`, or `objdump` (Linux) | Inspect ELF sections in coverage-instrumented binaries. |
 
-The LLVM tools ship with LLVM. On macOS, `otool` comes from Apple's
-command-line tools. On Linux, section-inspection tools come from
-binutils or LLVM packages. Distro LLVM packages are usually fine;
+The LLVM-specific tools (`llvm-symbolizer`, `sancov`, `llvm-readelf`)
+ship with LLVM. On macOS, `otool` and `atos` come from Apple's
+command-line tools. On Linux, `nm`, `readelf`, `objdump`, and
+`addr2line` come from binutils. Distro LLVM packages are usually fine;
 install LLVM-project packages directly only when your target needs a
 newer compiler than the distro provides.
+
+One gap to know about: the Debian / Ubuntu `llvm` package omits
+`sancov`, so coverage-gated probes (`bin/hits`) exit 2 there. Fedora's
+`llvm`, Homebrew's `llvm`, and [apt.llvm.org](https://apt.llvm.org/) all
+ship it.
+
+Tools your *target's* build needs — an archiver, a package manager, a
+language runtime — come from the target's own build requirements, not
+from TokenFuzz.
 
 ### macOS
 
 ```bash
 xcode-select --install
-brew install gh jq node ripgrep llvm
+brew install gh jq ripgrep llvm
 ```
 
 `xcode-select --install` provides Apple's command-line tools (Git, Clang
@@ -79,56 +85,53 @@ If `python3 -m venv` is unavailable or creates an environment without
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  bash binutils ca-certificates clang curl file gh git jq libclang-rt-dev \
-  llvm nodejs npm procps python3 python3-venv ripgrep
+  binutils clang file gh git jq libclang-rt-dev llvm python3 python3-venv ripgrep
 ```
 
 Notes:
 
-- `libclang-rt-dev` provides the compiler-rt sanitizer runtimes used
-  when the test suite builds small sanitizer-instrumented C/C++
-  harnesses.
-- The meta package tracks the default `clang` / `llvm` version on
-  apt-based distros. If you install a non-default LLVM major version,
-  also install the matching `libclang-rt-<N>-dev`, `clang-<N>`, and
-  `llvm-<N>`.
-- Standard POSIX/GNU utilities — `awk`, `sed`, `grep`, `find`, `sort`,
-  `head`, `tail`, `stat`, `wc` — are already present in Debian/Ubuntu
-  base images.
-- `file` is called out explicitly because the harness uses it to
-  distinguish compiled reproducers from scripts.
-- `nodejs` and `npm` are needed by the npm-based backend CLIs
-  (`codex`, `@google/gemini-cli`) and by a few harness diagnostics
-  that call `node`.
+- `binutils` provides `nm`, `readelf`, `objdump`, and `addr2line`; the
+  `llvm` package provides `llvm-symbolizer` and `llvm-readelf`.
+- `libclang-rt-dev` supplies the compiler-rt sanitizer runtimes.
+- The meta packages track the default `clang` / `llvm` version. If you
+  install a non-default LLVM major version, also install the matching
+  `libclang-rt-<N>-dev`, `clang-<N>`, and `llvm-<N>`.
 - `python3-venv` is needed by `bin/docs`, Python-target bootstraps, and
   the vLLM setup commands shown below.
+- Minimal container images also need `bash`, `ca-certificates`, and
+  `procps`; a normal host already has them.
 
 ### Fedora / RHEL
 
 ```bash
 sudo dnf install -y \
-  bash binutils ca-certificates clang coreutils curl diffutils file findutils \
-  compiler-rt gawk gh git grep jq llvm nodejs npm procps-ng python3 \
-  python3-pip ripgrep sed which
+  binutils clang compiler-rt file gh git jq llvm python3 python3-pip ripgrep
 ```
 
-The command includes standard userland packages that full Fedora/RHEL
-hosts usually already have,
-because minimal container images often do not. `python3-pip` is included
-so environments created with `python3 -m venv` get a working `pip`.
+`compiler-rt` supplies the sanitizer runtimes that `libclang-rt-dev`
+provides on Debian / Ubuntu. `python3-pip` is included so environments
+created with `python3 -m venv` get a working `pip`.
+
+Minimal container images also need `bash`, `ca-certificates`,
+`coreutils`, `diffutils`, `findutils`, `gawk`, `grep`, `procps-ng`, and
+`sed`; a normal Fedora / RHEL host already has them.
 
 ## 2. One agent backend
 
 Agents run through an external CLI. Install and authenticate one of the
 supported backends before pointing TokenFuzz at a real target.
 
-Backend CLIs have their own install and authentication steps. The OS
-commands above already include their common installer prerequisites:
+Backend CLIs have their own install and authentication steps:
 
-- Codex and Google Gemini CLI have npm install paths; the host-tool
-  commands above install Node.js and npm for those paths.
+- Install `curl` only when you choose an installer command that pipes an
+  HTTPS script, such as the direct Codex, Antigravity, OpenCode, or
+  Ollama install snippets below.
+- Install Node.js and npm only when you choose an npm-based backend CLI
+  install path, such as `npm install -g @openai/codex`,
+  `@google/gemini-cli`, or `opencode-ai`. They are also needed for
+  JavaScript / TypeScript audit targets.
 - The default Gemini path uses the Antigravity installer, which needs
-  `curl` and valid CA certificates, also installed above.
+  `curl` and valid CA certificates.
 - The local `oss` backend needs OpenCode plus a local model server.
   vLLM is the recommended default for fast GPU inference; Ollama is the
   simple desktop fallback.
@@ -241,7 +244,8 @@ instructions require on your host.
 Browser targets, Mercurial-hosted projects, and very large codebases may
 need extra compilers, package managers, language runtimes, or source
 control tools. Follow the target project's own build documentation for
-those dependencies. TokenFuzz needs the resulting sanitizer binary,
+those dependencies. For example, Perl-language targets need `perl`.
+TokenFuzz needs the resulting sanitizer binary,
 library, or harness configuration — it does not replace the target's
 build system.
 

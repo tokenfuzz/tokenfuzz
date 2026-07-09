@@ -697,5 +697,33 @@ fi
 assert_eq "FAILED:UNSET" "$(cat "$TEST_TMPDIR/mem-gem-noauth")" \
   "memory off + Gemini CLI without an API key fails loud (no silent memory leak)"
 
+# ── 9. Stdin-fed backends report the CLI's rc, not the writer's SIGPIPE ──
+# A CLI that exits before draining stdin (quota rejection, auth failure)
+# kills the prompt writer with SIGPIPE. When the writer sat in a pipeline,
+# pipefail surfaced its 141 as the CLI's status, so callers never saw the
+# rc==0 that gates their empty-output and quota diagnostics. The prompt must
+# exceed the 64 KiB pipe buffer or the writer completes and the bug hides.
+source "$SCRIPT_ROOT/lib/timeout.sh"
+
+nodrain_cli="$TEST_TMPDIR/nodrain-cli"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$nodrain_cli"
+chmod +x "$nodrain_cli"
+big_prompt="$(head -c 200000 /dev/zero | tr '\0' 'x')"
+
+rc=0
+GEMINI_BIN="$nodrain_cli" USE_GEMINI_CLI=1 \
+  llm_run_agent_prompt gemini "$big_prompt" 30 "$TEST_TMPDIR/nodrain-gemini.raw" || rc=$?
+assert_eq "0" "$rc" "gemini: CLI exiting without draining stdin reports its own rc, not 141"
+
+rc=0
+CODEX_BIN="$nodrain_cli" \
+  llm_run_agent_prompt codex "$big_prompt" 30 "$TEST_TMPDIR/nodrain-codex.raw" || rc=$?
+assert_eq "0" "$rc" "codex: CLI exiting without draining stdin reports its own rc, not 141"
+
+rc=0
+GEMINI_BIN="$nodrain_cli" USE_GEMINI_CLI=1 \
+  llm_run_agent_prompt_no_timeout gemini "$big_prompt" "$TEST_TMPDIR/nodrain-gemini-nt.raw" || rc=$?
+assert_eq "0" "$rc" "gemini (no_timeout): CLI exiting without draining stdin reports its own rc"
+
 teardown_test_env
 summary

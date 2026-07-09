@@ -1734,9 +1734,11 @@ assert_eq "1" "$(jq -r '.strategies[] | select(.strategy=="S8") | .diff' <<<"$yi
 assert_eq "3" "$(jq -r '.strategies[] | select(.strategy=="S8") | .recon_runs' <<<"$yield_json")" "strategy-yield: S8 recon_runs includes the refreshed-away card via prefix"
 assert_eq "2" "$(jq -r '.strategies[] | select(.strategy=="S8") | .recon_crash' <<<"$yield_json")" "strategy-yield: S8 recon_crash counts only CRASH"
 assert_eq "1" "$(jq -r '.strategies[] | select(.strategy=="S8") | .recon_diff' <<<"$yield_json")" "strategy-yield: S8 recon_diff counts only DIFF"
-assert_eq "1.0" "$(jq -r '.strategies[] | select(.strategy=="S8") | .yield' <<<"$yield_json")" "strategy-yield: S8 yield = 1.0"
+# Compare the number, not its rendering: jq >= 1.7 echoes the literal 1.0
+# back verbatim, jq 1.6 canonicalizes it through a double and prints 1.
+assert_eq "true" "$(jq -r '.strategies[] | select(.strategy=="S8") | .yield == 1.0' <<<"$yield_json")" "strategy-yield: S8 yield = 1.0"
 # S5: one CLEAN run + one EXEC_FAIL (unknown verdict -> other, NOT clean).
-assert_eq "0.0" "$(jq -r '.strategies[] | select(.strategy=="S5") | .yield' <<<"$yield_json")" "strategy-yield: S5 yield = 0"
+assert_eq "true" "$(jq -r '.strategies[] | select(.strategy=="S5") | .yield == 0.0' <<<"$yield_json")" "strategy-yield: S5 yield = 0"
 assert_eq "1" "$(jq -r '.strategies[] | select(.strategy=="S5") | .clean' <<<"$yield_json")" "strategy-yield: S5 one clean run"
 assert_eq "1" "$(jq -r '.strategies[] | select(.strategy=="S5") | .other' <<<"$yield_json")" "strategy-yield: EXEC_FAIL buckets under other, not clean"
 assert_eq "0" "$(jq -r '.strategies[] | select(.strategy=="S5") | .recon_runs' <<<"$yield_json")" "strategy-yield: S5 has no recon-origin runs"

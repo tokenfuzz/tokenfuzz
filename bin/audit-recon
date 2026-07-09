@@ -676,9 +676,10 @@ run_recon_agent() {
           # slower recon slice before the outer budget is reached.
           gemini_recon_flags+=(--print-timeout "${TIMEOUT_SECS}s")
         fi
-        printf '%s' "$prompt" \
-          | audit_timeout_run "$TIMEOUT_SECS" "$(llm_backend_bin gemini)" "${gemini_recon_flags[@]}" -p "" \
-          > "$agent_raw" 2>&1 || backend_rc=$?
+        # Redirect, not a pipe: a CLI that exits without draining stdin would
+        # SIGPIPE the writer, and pipefail would report 141 as the CLI's rc.
+        audit_timeout_run "$TIMEOUT_SECS" "$(llm_backend_bin gemini)" "${gemini_recon_flags[@]}" -p "" \
+          < <(printf '%s' "$prompt") > "$agent_raw" 2>&1 || backend_rc=$?
         ;;
     esac
 

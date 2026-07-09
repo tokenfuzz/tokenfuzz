@@ -366,15 +366,19 @@ llm_run_agent_prompt() {
   declare -a flags=()
   llm_agent_flags "$backend" flags "$model" "$max_turns" "$add_dirs" || return $?
 
+  # Stdin-fed backends take the prompt through a redirect, never a pipe: a
+  # CLI that exits before draining stdin (quota rejection, auth failure)
+  # kills the writer with SIGPIPE, and pipefail would report that 141 as the
+  # CLI's own status — masking the rc==0 empty-output and quota diagnostics
+  # below. A redirect keeps the writer out of the pipeline's status.
   case "$backend" in
     claude)
       ( cd "$cwd" && audit_timeout_run "$timeout_secs" "$bin" "${flags[@]}" \
         -p "$prompt" ) > "$raw_log" 2>&1 || rc=$?
       ;;
     codex)
-      ( cd "$cwd" && printf '%s' "$prompt" \
-        | audit_timeout_run "$timeout_secs" "$bin" exec "${flags[@]}" - ) \
-        > "$raw_log" 2>&1 || rc=$?
+      ( cd "$cwd" && audit_timeout_run "$timeout_secs" "$bin" exec "${flags[@]}" - \
+        < <(printf '%s' "$prompt") ) > "$raw_log" 2>&1 || rc=$?
       ;;
     oss)
       # OpenCode `run` takes the prompt as a positional argument; it has no
@@ -389,14 +393,12 @@ llm_run_agent_prompt() {
       ;;
     gemini)
       if llm_use_gemini_cli; then
-        ( cd "$cwd" && printf '%s' "$prompt" \
-          | audit_timeout_run "$timeout_secs" "$bin" "${flags[@]}" -p "" ) \
-          > "$raw_log" 2>&1 || rc=$?
+        ( cd "$cwd" && audit_timeout_run "$timeout_secs" "$bin" "${flags[@]}" -p "" \
+          < <(printf '%s' "$prompt") ) > "$raw_log" 2>&1 || rc=$?
       else
-        ( cd "$cwd" && printf '%s' "$prompt" \
-          | audit_timeout_run "$timeout_secs" "$bin" "${flags[@]}" \
-              --print-timeout "${timeout_secs}s" -p "" ) \
-          > "$raw_log" 2>&1 || rc=$?
+        ( cd "$cwd" && audit_timeout_run "$timeout_secs" "$bin" "${flags[@]}" \
+            --print-timeout "${timeout_secs}s" -p "" \
+          < <(printf '%s' "$prompt") ) > "$raw_log" 2>&1 || rc=$?
         [ -s "$raw_log" ] || llm_capture_gemini_cli_log_diag "$raw_log"
       fi
       ;;
@@ -425,7 +427,7 @@ llm_run_agent_prompt_no_timeout() {
       ( cd "$cwd" && "$bin" "${flags[@]}" -p "$prompt" ) > "$raw_log" 2>&1 || rc=$?
       ;;
     codex)
-      ( cd "$cwd" && printf '%s' "$prompt" | "$bin" exec "${flags[@]}" - ) \
+      ( cd "$cwd" && "$bin" exec "${flags[@]}" - < <(printf '%s' "$prompt") ) \
         > "$raw_log" 2>&1 || rc=$?
       ;;
     oss)
@@ -439,10 +441,10 @@ llm_run_agent_prompt_no_timeout() {
       ;;
     gemini)
       if llm_use_gemini_cli; then
-        ( cd "$cwd" && printf '%s' "$prompt" | "$bin" "${flags[@]}" -p "" ) \
+        ( cd "$cwd" && "$bin" "${flags[@]}" -p "" < <(printf '%s' "$prompt") ) \
           > "$raw_log" 2>&1 || rc=$?
       else
-        ( cd "$cwd" && printf '%s' "$prompt" | "$bin" "${flags[@]}" -p "" ) \
+        ( cd "$cwd" && "$bin" "${flags[@]}" -p "" < <(printf '%s' "$prompt") ) \
           > "$raw_log" 2>&1 || rc=$?
         [ -s "$raw_log" ] || llm_capture_gemini_cli_log_diag "$raw_log"
       fi

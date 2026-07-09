@@ -328,11 +328,13 @@ case "$BACKEND" in
     llm_run_agent_prompt oss "$prompt" "$TIMEOUT_SECS" "$raw_log" "${MODEL:-}" 1 "$TARGET_PATH,$SCRIPT_ROOT" "$validator_cwd" || backend_rc=$?
     ;;
   gemini)
-    # Gemini backend reads the prompt from stdin when -p "".
+    # Gemini backend reads the prompt from stdin when -p "". Redirect, not a
+    # pipe: a CLI that exits without draining stdin would SIGPIPE the writer
+    # and pipefail would surface 141 instead of the CLI's real status.
     backend_rc=0
-    ( cd "$validator_cwd" && printf '%s' "$prompt" \
-      | audit_timeout_run "$TIMEOUT_SECS" "$(llm_backend_bin gemini)" "${validator_flags[@]}" -p "" \
-      > "$raw_log" 2> "$raw_err" ) || backend_rc=$?
+    ( cd "$validator_cwd" \
+      && audit_timeout_run "$TIMEOUT_SECS" "$(llm_backend_bin gemini)" "${validator_flags[@]}" -p "" \
+      < <(printf '%s' "$prompt") > "$raw_log" 2> "$raw_err" ) || backend_rc=$?
     ;;
 esac
 

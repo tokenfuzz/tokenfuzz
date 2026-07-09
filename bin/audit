@@ -6036,9 +6036,12 @@ run_agent() {
       gemini_bin="$(llm_backend_bin gemini)"
       if llm_use_gemini_cli; then
         local _gemini_rc=0
-        printf '%s' "$prompt_with_budget" \
-          | "$gemini_bin" "${gemini_flags[@]}" -p "" \
-            > "$(audit_raw_path "$logfile")" 2>&1 || _gemini_rc=$?
+        # Redirect, never a pipe: a CLI that exits before draining stdin
+        # SIGPIPEs the writer, and pipefail would report that 141 as the
+        # CLI's rc — misreading a quota/auth refusal as an agent crash.
+        "$gemini_bin" "${gemini_flags[@]}" -p "" \
+          < <(printf '%s' "$prompt_with_budget") \
+          > "$(audit_raw_path "$logfile")" 2>&1 || _gemini_rc=$?
         llm_extract_text gemini "$(audit_raw_path "$logfile")" > "$logfile" 2>/dev/null || true
         if [ "$use_resume" -eq 1 ] \
            && { [ "$_gemini_rc" -ne 0 ] || ! _agent_attempt_has_text gemini "$(audit_raw_path "$logfile")" "$logfile"; } \
@@ -6050,9 +6053,9 @@ run_agent() {
           gemini_flags=()
           llm_agent_flags gemini gemini_flags "$model" 80 "$SCRIPT_ROOT,$TARGET_ROOT,$RESULTS_DIR"
           _gemini_rc=0
-          printf '%s' "$prompt_with_budget" \
-            | "$gemini_bin" "${gemini_flags[@]}" -p "" \
-              > "$(audit_raw_path "$logfile")" 2>&1 || _gemini_rc=$?
+          "$gemini_bin" "${gemini_flags[@]}" -p "" \
+            < <(printf '%s' "$prompt_with_budget") \
+            > "$(audit_raw_path "$logfile")" 2>&1 || _gemini_rc=$?
           llm_extract_text gemini "$(audit_raw_path "$logfile")" > "$logfile" 2>/dev/null || true
         fi
         emit_agent_session_text gemini "$logfile" "$_log_prefix"
@@ -6067,8 +6070,12 @@ run_agent() {
         # stuck agent.
         local _agy_raw _agy_pid _agy_watcher_pid _agy_rc=0
         _agy_raw="$(audit_raw_path "$logfile")"
-        printf '%s' "$prompt_with_budget" \
-          | "$gemini_bin" "${gemini_flags[@]}" -p "" \
+        # `wait "$_agy_pid"` already reads agy's own status rather than the
+        # pipeline's, so this path never leaked a writer SIGPIPE — but keep
+        # the redirect uniform so no launch site can reintroduce one. $! is
+        # still agy's pid, which the watchdog needs to kill the process tree.
+        "$gemini_bin" "${gemini_flags[@]}" -p "" \
+          < <(printf '%s' "$prompt_with_budget") \
           > "$_agy_raw" 2>&1 &
         _agy_pid=$!
         start_gemini_watchdog "$_agy_raw" "$_agy_pid" \
@@ -6151,14 +6158,15 @@ run_agent() {
       fi
       _codex_drop_flag_args codex_resume_flags "${codex_flags[@]}"
       local _codex_rc=0
+      # Redirect, never a pipe — see the gemini launch above.
       if [ "$use_resume" -eq 1 ] && [ -n "$prev_session_id" ]; then
-        printf '%s' "$prompt_with_budget" \
-          | "$CODEX_BIN" exec resume "${codex_resume_flags[@]}" "$prev_session_id" - \
-              > "$(audit_raw_path "$logfile")" 2>&1 || _codex_rc=$?
+        "$CODEX_BIN" exec resume "${codex_resume_flags[@]}" "$prev_session_id" - \
+          < <(printf '%s' "$prompt_with_budget") \
+          > "$(audit_raw_path "$logfile")" 2>&1 || _codex_rc=$?
       else
-        printf '%s' "$prompt_with_budget" \
-          | "$CODEX_BIN" exec "${codex_fresh_flags[@]}" - \
-              > "$(audit_raw_path "$logfile")" 2>&1 || _codex_rc=$?
+        "$CODEX_BIN" exec "${codex_fresh_flags[@]}" - \
+          < <(printf '%s' "$prompt_with_budget") \
+          > "$(audit_raw_path "$logfile")" 2>&1 || _codex_rc=$?
       fi
       if [ "$use_resume" -eq 1 ] \
          && { [ "$_codex_rc" -ne 0 ] || ! _agent_attempt_has_text codex "$(audit_raw_path "$logfile")" "$logfile"; } \
@@ -6168,9 +6176,9 @@ run_agent() {
         resume_state_write "$agent_num" fallback "1"
         _archive_resume_attempt "resume-attempt-1"
         _codex_rc=0
-        printf '%s' "$prompt_with_budget" \
-          | "$CODEX_BIN" exec "${codex_fresh_flags[@]}" - \
-              > "$(audit_raw_path "$logfile")" 2>&1 || _codex_rc=$?
+        "$CODEX_BIN" exec "${codex_fresh_flags[@]}" - \
+          < <(printf '%s' "$prompt_with_budget") \
+          > "$(audit_raw_path "$logfile")" 2>&1 || _codex_rc=$?
       fi
       emit_agent_session_text codex "$logfile" "$_log_prefix"
       unset -f _codex_drop_flag_args _codex_drop_ephemeral 2>/dev/null || true
