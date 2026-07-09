@@ -73,8 +73,11 @@ assert_match "oss-tool-sentinel.txt" "$rendered" "oss preflight template names t
 # evidence) so a future edit can't silently turn it into an eager rejecter.
 rendered=$(python3 "$renderer" validate_trigger_provenance.md.j2 \
   --var 'target_path=/tmp/tgt' --var 'candidate_json={"id":"X"}' \
+  --var 'attacker_controls=bytes,call-sequence' \
   --var 'skeptic_block=' --var 'timeout_secs=300')
 assert_match "/tmp/tgt" "$rendered" "trigger gate interpolates target_path"
+assert_match "bytes,call-sequence" "$rendered" \
+  "trigger gate interpolates the target's attacker_controls threat model"
 assert_match '"id":"X"' "$rendered" "trigger gate interpolates candidate_json"
 assert_match "affirmative disproof" "$rendered" "trigger gate keeps the affirmative-disproof rule"
 assert_match "NOT evidence" "$rendered" "trigger gate keeps the fields-are-not-evidence guard"

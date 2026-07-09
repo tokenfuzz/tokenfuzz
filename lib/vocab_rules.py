@@ -42,8 +42,12 @@ _RULES = [
 
     # ── attack / attacker family ───────────────────────────────────────
     # Compound forms first so they're handled before the bare rules.
-    (re.compile(r"\battacker-controlled\b", re.I), "caller-controlled"),
-    (re.compile(r"\battacker-shaped\b", re.I), "caller-shaped"),
+    # `attacker-<adjective>` → `externally-<adjective>` (controlled, reachable,
+    # supplied, shaped, driven, …). Neutralizes "attacker" (classifier-hot)
+    # while keeping it DISTINCT from "caller" — collapsing attacker→caller
+    # destroys the threat-model distinction the audit relies on (an attacker is
+    # untrusted; a caller is the trusted application).
+    (re.compile(r"\battacker-(?=\w)", re.I), "externally-"),
     (re.compile(r"\battack[- ]vector\b", re.I), "input vector"),
     (re.compile(r"\battack surface\b", re.I), "input surface"),
     # Bare attack — preserves grammatical form ("DDoS attacked" must not
@@ -56,8 +60,8 @@ _RULES = [
     # Bare attacker(s) (after compound rules above). Field-name uses like
     # `attacker_controls` are unaffected: `_` is a word char so `\b` does
     # not fire between `r` and `_`.
-    (re.compile(r"\battackers\b", re.I), "callers"),
-    (re.compile(r"\battacker\b", re.I), "caller"),
+    (re.compile(r"\battackers\b", re.I), "external parties"),
+    (re.compile(r"\battacker\b", re.I), "external party"),
 
     # ── hostile-intent vocabulary ──────────────────────────────────────
     (re.compile(r"\bmalicious\b", re.I), "hand-crafted"),

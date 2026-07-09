@@ -80,6 +80,11 @@ TIEBREAK=0
 OUTPUT=""
 TIMEOUT_SECS=300
 GATE="finding"
+# Rendered into validate_trigger_provenance.md.j2 so the reachability reviewer
+# knows the target's in-scope attacker components (used to CONSTRUCT paths, not
+# as a reject rule). Env-provided by the audit/benchmark caller; conservative
+# bytes-only default when run standalone.
+ATTACKER_CONTROLS="${TARGET_ATTACKER_CONTROLS_CSV:-bytes}"
 
 require_arg() {
   # Guard value-bearing flags against missing values under `set -u`.
@@ -255,6 +260,7 @@ build_prompt() {
   render_prompt_template "$template" \
     --var "target_path=${TARGET_PATH}" \
     --var "candidate_json=${CANDIDATE_JSON}" \
+    --var "attacker_controls=${ATTACKER_CONTROLS}" \
     --var "skeptic_block=${skeptic_block}" \
     --var "timeout_secs=${TIMEOUT_SECS}"
 }

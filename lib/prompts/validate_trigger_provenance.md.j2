@@ -28,9 +28,31 @@ state**, not the bug mechanics:
 >       a corrupted handle, a struct with a field no public path can set);
 >   (b) calling an internal-only / private mutator that has no caller chain
 >       from any public, attacker-reachable entry;
->   (c) the *caller* violating a precondition that the LIBRARY itself is not
->       responsible for enforcing on untrusted input (a documented-contract
->       "violation" the application, not an attacker, would have to commit);
+>   (c) the *caller* violating a precondition the LIBRARY is not responsible
+>       for enforcing on untrusted input — a documented-contract "violation"
+>       the application, not an attacker, would have to commit. CLEAR cases,
+>       safe to reject: freeing, reallocating, or mutating a buffer / node /
+>       document / handle while an in-flight library call — or a callback / push
+>       sequence the library is driving — still owns or will read it; or
+>       destroying the object being processed from inside its own callback. No
+>       correct application does these and no attacker input forces them.
+>       For anything that merely LOOKS like misuse — moving a node between two
+>       trees / documents, a direct length / offset / index the caller chose, or
+>       an input shape the library's internal callers do not produce — do NOT
+>       assume it is forbidden. Reject only if you READ the public constructor /
+>       guard and it PROVABLY rejects or cannot reach that state — e.g. the API's
+>       only in-tree callers always pass NUL-terminated data, so attacker bytes
+>       cannot form the non-NUL buffer the bug needs. Tree / list APIs
+>       legitimately move nodes between trees, so a crash there is a REAL defect
+>       unless source shows the operation is rejected; a `len` the implementation
+>       ignores is a library bug unless no in-scope attacker path supplies the shape.
+>       (Contrast — NOT (c), keep it: the library fails to maintain its OWN
+>       invariant across a NORMAL, contract-obeying public sequence — parse,
+>       then remove / move / merge a node through a documented API used
+>       correctly, then a later call dereferences state the library should have
+>       updated. That is a real library defect. Its reachability may still be
+>       limited to an application-chosen call-sequence, which the severity
+>       scorer down-ranks — that is a severity question, not a reason to Reject.)
 >   (d) the location living in code that does not ship in the product
 >       (test/fuzz/example/benchmark/demo harness, a language-binding test
 >       driver, a code generator, or a dead `#ifdef` not compiled in the
@@ -46,10 +68,22 @@ state**, not the bug mechanics:
 
 1. Identify the triggering state the primitive needs (the exact object,
    buffer, length, or call-sequence that must hold for the bug to fire).
-2. Start from a public / attacker-reachable entry per the threat model and
-   **try to CONSTRUCT a path to that state** — an input byte string, a file,
-   or a concrete sequence of public API calls. Spend at least one tool call
-   actually attempting the construction by reading source.
+2. Start from a public / attacker-reachable entry per the threat model — the
+   attacker controls: **{{ attacker_controls }}** — and **try to CONSTRUCT a
+   path to that state** — an input byte string, a file, or a concrete sequence
+   of public API calls. A trigger reachable through any listed component is
+   real; do NOT reject a crash merely because reaching it also needs an
+   application call-sequence over that in-scope input (that is the Contrast case
+   in (c), a keep). Spend at least one tool call
+   actually attempting the construction by reading source. When the bug needs a
+   specific parameter *shape* (a buffer, length, object lifetime, or
+   cross-object relationship), read who reaches this entry point on the in-scope
+   attacker path above — for `bytes`, the internal parser / reader / SAX driver /
+   tree builder; for a listed `call-sequence`, the public API sequence the attacker
+   drives: if every in-scope path supplies only the safe shape and the triggering
+   shape needs a caller acting OUTSIDE the listed controls (e.g. a direct external
+   caller a bytes-only attacker cannot be), the attacker's input does not reach it
+   — that is (c). Being declared in a public header is not reachability.
 3. If you reach the state, write down the path (the real bug survives).
 4. If you cannot, determine WHY: read the constructor/guard that stands in
    the way and confirm it enforces the invariant on every path. Affirmative

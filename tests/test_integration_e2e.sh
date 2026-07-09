@@ -106,7 +106,7 @@ neutralize_qa_vocab
 
 assert_file_contains "$(state_file_path 1)" "reproducer" "e2e: state-1 neutralized (exploit→reproducer)"
 assert_file_not_contains "$(state_file_path 1)" "exploit" "e2e: exploit removed from state-1"
-assert_file_contains "$(state_file_path 2)" "caller-controlled" "e2e: state-2 neutralized (attacker→caller)"
+assert_file_contains "$(state_file_path 2)" "externally-controlled" "e2e: state-2 neutralized (attacker→externally)"
 assert_file_contains "$(combined_state_path)" "reproducer" "e2e: combined state neutralized"
 
 # ═══════════════════════════════════════════════════════════════

@@ -74,7 +74,7 @@ INPUT
 # strip_novocab_markers, called once at the end of the pipeline.
 out=$(SCRIPT_ROOT="$SCRIPT_ROOT" bash -c '. "$1/lib/vocab.sh"; cat "$2" | neutralize_qa_vocab_string' _ "$SCRIPT_ROOT" "$tmp_input")
 
-if grep -q 'Line about reproducer and caller\.' <<<"$out"; then
+if grep -q 'Line about reproducer and external party\.' <<<"$out"; then
   pass "neutralizer substitutes outside NOVOCAB markers"
 else
   fail "expected substitution outside markers; got: $out"

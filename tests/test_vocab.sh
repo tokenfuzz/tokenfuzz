@@ -39,9 +39,10 @@ assert_eq "reproducer" "$(neutralize_core "Exploit")" "Exploit (capitalized) →
 # 2. attack / attacker family
 # ═══════════════════════════════════════════════════════════════
 
-assert_eq "caller-controlled" "$(neutralize_core "attacker-controlled")" "attacker-controlled → caller-controlled"
-assert_eq "caller-controlled" "$(neutralize_core "Attacker-Controlled")" "mixed case attacker-controlled"
-assert_eq "caller-shaped" "$(neutralize_core "attacker-shaped")" "attacker-shaped → caller-shaped"
+assert_eq "externally-controlled" "$(neutralize_core "attacker-controlled")" "attacker-controlled → externally-controlled (kept distinct from caller)"
+assert_eq "externally-Controlled" "$(neutralize_core "Attacker-Controlled")" "mixed case attacker- prefix neutralized"
+assert_eq "externally-shaped" "$(neutralize_core "attacker-shaped")" "attacker-shaped → externally-shaped"
+assert_eq "externally-reachable" "$(neutralize_core "attacker-reachable")" "attacker-reachable → externally-reachable (compound coverage)"
 assert_eq "input vector" "$(neutralize_core "attack vector")" "attack vector → input vector"
 assert_eq "input surface" "$(neutralize_core "attack surface")" "attack surface → input surface"
 # Bare attack — preserves grammatical form (verb tenses + plural).
@@ -50,8 +51,8 @@ assert_eq "reaches" "$(neutralize_core "attacks")" "attacks (plural/3sg) → rea
 assert_eq "reached" "$(neutralize_core "attacked")" "attacked (past) → reached"
 assert_eq "reaching" "$(neutralize_core "attacking")" "attacking (gerund) → reaching"
 # Bare attacker(s).
-assert_eq "caller" "$(neutralize_core "attacker")" "bare attacker → caller"
-assert_eq "callers" "$(neutralize_core "attackers")" "bare attackers → callers"
+assert_eq "external party" "$(neutralize_core "attacker")" "bare attacker → external party (distinct from caller)"
+assert_eq "external parties" "$(neutralize_core "attackers")" "bare attackers → external parties"
 # Field-name protection: attacker_controls must survive (underscore is
 # a regex word char, so \b does not fire between r and _).
 assert_eq "attacker_controls = [\"bytes\"]" "$(neutralize_core "attacker_controls = [\"bytes\"]")" "passthrough: attacker_controls field name"
@@ -142,7 +143,7 @@ EOF
 neutralize_qa_vocab_file "$TEST_TMPDIR/test_full.md" 0
 assert_file_contains "$TEST_TMPDIR/test_full.md" "reproducer" "file mode: exploit → reproducer"
 assert_file_contains "$TEST_TMPDIR/test_full.md" "security issue" "file mode: vulnerability → security issue"
-assert_file_contains "$TEST_TMPDIR/test_full.md" "caller-controlled" "file mode: attacker-controlled → caller-controlled"
+assert_file_contains "$TEST_TMPDIR/test_full.md" "externally-controlled" "file mode: attacker-controlled → externally-controlled"
 assert_file_contains "$TEST_TMPDIR/test_full.md" "hand-crafted" "file mode: malicious → hand-crafted"
 assert_file_not_contains "$TEST_TMPDIR/test_full.md" "exploit" "file mode: exploit fully removed"
 assert_file_not_contains "$TEST_TMPDIR/test_full.md" "attacker" "file mode: attacker fully removed"
@@ -225,7 +226,7 @@ EOF
 
 neutralize_qa_vocab
 assert_file_contains "$RESULTS_DIR/AUDIT_STATE-1.md" "reproducer" "batch: state-1 neutralized"
-assert_file_contains "$RESULTS_DIR/AUDIT_STATE-2.md" "caller-controlled" "batch: state-2 neutralized"
+assert_file_contains "$RESULTS_DIR/AUDIT_STATE-2.md" "externally-controlled" "batch: state-2 neutralized"
 assert_file_contains "$RESULTS_DIR/AUDIT_STATE.md" "reproducer" "batch: combined neutralized"
 assert_file_contains "$RESULTS_DIR/findings/FIND-001-test/description.md" "security issue" "batch: finding description neutralized (vulnerability→security issue)"
 assert_file_contains "$RESULTS_DIR/scratch-1/tc_H1.html" "reproducer" "batch: scratch header neutralized"
