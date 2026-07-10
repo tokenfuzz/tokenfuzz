@@ -1,18 +1,26 @@
-{{ goal_framing }} In **{{ target_slug }}**, emit every guard gap, unchecked
-input, suspicious arithmetic, lifecycle/protocol-state oddity, memory-safety,
-injection, auth, info-leak, race, or resource-exhaustion weakness. That list is
-a starting point, not a fence: emit anything that weakens a security boundary.
-Do not pre-filter. Validator quorum runs later; optimize recall, not precision.
+{{ goal_framing }} In **{{ target_slug }}**, find concrete candidate security
+issues of any class: injection, auth, info-leak, race, resource-exhaustion, or
+anything else that weakens a security boundary. This list is a
+starting point, not a fence. A candidate needs a named source location and an
+observed dangerous operation, broken invariant, or security check, plus a
+plausible reason its guard is missing or defeatable. Do not emit a dangerous
+API, unchecked value, arithmetic expression, or TODO merely because it looks risky.
+
+Do not pre-filter a concrete candidate for lacking full exploit proof. If its
+reachability or impact is uncertain, emit it and name that missing link in
+`notes`; validator quorum will investigate it. Optimize recall, not precision,
+among specific, falsifiable hypotheses rather than producing generic suspicion.
 
 {{ scope_block }}
 
 ## Threat model
 
-Untrusted bytes (parser input), call sequence (API misuse from trusted
-host), and protocol-state are attacker-controlled per target.toml.
-Local config / filesystem state is trusted unless target.toml says
-otherwise. Caller-misuse and exotic-environment paths count only when
-they lead to a real attacker gain of any bug class (see below).
+The target's configured attacker controls are: **{{ attacker_controls }}**.
+Treat only those sources as untrusted. A public function or accepted value is
+not proof that a remote or file-input attacker controls it; trace the configured
+boundary when possible. Local config, filesystem state, and application-chosen
+call sequences are trusted unless listed above. If unsure, emit a concrete
+candidate but state which reachability edge remains unverified.
 
 {{ bug_contract }}
 
@@ -43,7 +51,7 @@ non-issues above — skip those. If you spot anything else off, emit it.
     "line": <integer or 0>,
     "function": "<fully-qualified demangled symbol (ns::Class::method) from stack frame #0 if a crash exists, else the defining function; no args/line/path; empty if none>",
     "class": "memory-safety|auth|injection|info-disclosure|crypto|race|boundary|deserialization|config|logic|side-channel|dos|other",
-    "notes": "1-3 sentences: why it looks like a bug, plus the untrusted input shape or call sequence that reaches it when you can name one.",
+    "notes": "1-3 sentences: dangerous operation or broken check; missing/defeatable guard; configured untrusted path, or the exact reachability edge still unverified.",
     "confidence": "NEEDS-VERIFICATION"
   }
 

@@ -119,6 +119,40 @@ ok(abs_mod.detect_missing_commands(
    "detect: command name extracted, path 'not found' lines ignored")
 
 
+# ─── prompt assembly ───────────────────────────────────────────────
+
+captured_prompts: list[str] = []
+original_llm_decide = abs_mod.llm_decide
+
+
+def capture_prompt(_decision: str, _keys: str, prompt: str, **_kwargs):
+    captured_prompts.append(prompt)
+    return {"script": "#!/bin/bash\nset -eu\necho ok\n"}
+
+
+abs_mod.llm_decide = capture_prompt
+try:
+    abs_mod.ask_llm_for_revision(
+        slug="sampleproj", build_system="cmake", sanitizer="asan",
+        current_script="#!/bin/bash\nset -eu\n", build_log="failed",
+        readme_excerpt="Use the bundled configure preset.", timeout_secs=10,
+    )
+    abs_mod.ask_llm_for_revision(
+        slug="sampleproj", build_system="cmake", sanitizer="asan",
+        current_script="#!/bin/bash\nset -eu\n", build_log="failed",
+        readme_excerpt="", timeout_secs=10,
+    )
+finally:
+    abs_mod.llm_decide = original_llm_decide
+
+ok("Use the bundled configure preset." in captured_prompts[0],
+   "prompt: caller includes a non-empty README excerpt")
+ok("Upstream README build-instructions excerpt" not in captured_prompts[1],
+   "prompt: caller omits the README section when no excerpt exists")
+ok(all("{%" not in prompt and "%}" not in prompt for prompt in captured_prompts),
+   "prompt: unsupported template control tags never reach the model")
+
+
 # ─── End-to-end: iter 1 detects missing toolchain, exits 3 ──────────
 #
 # We can't run a real cmake build inside the test harness portably, so

@@ -45,7 +45,7 @@ Read the source at {{ target_path }} and independently verify:
 Output ONE JSON object on a single line, nothing else:
 
 ```json
-{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","verified":{"reachability":true|false,"guards":true|false,"primitive":true|false,"boundary":true|false},"caveats":"<open questions or conditions you couldn't verify>"}
+{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","verified":{"reachability":true|false|null,"guards":true|false|null,"primitive":true|false|null,"boundary":true|false|null},"caveats":"<open questions or conditions you couldn't verify>"}
 ```
 
 Definitions:
@@ -53,10 +53,11 @@ Definitions:
   are all verified independently from source. The finding is real, reachable,
   and security-relevant in the target's product model.
 - **Reject**: At least one of reachability / guards / primitive / boundary is
-  wrong on independent re-read, or a concrete counter-fact you found defeats
-  the claim. The finding is junk, already mitigated, non-product, trusted-only,
-  or not a security issue.
+  disproved by a concrete source fact. Name the guard, call-chain boundary,
+  build fact, or invariant that defeats the claim. A search that failed to find
+  support is not disproof.
 - **Uncertain**: You cannot definitively verify or refute one component
-  in the time budget. Name what would settle it.
+  in the time budget. Set that component to `null` and name what would settle
+  it; reserve `false` for a component you affirmatively disproved.
 
 Budget: {{ timeout_secs }}s wall time, ~60 tool calls. Be calibrated.

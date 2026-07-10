@@ -227,6 +227,26 @@ if [ -n "$EXPERIMENT_NAME" ]; then
   EXPERIMENT_SUFFIX="-$EXPERIMENT_NAME"
 fi
 TARGET_OUTPUT_SLUG="$(target_output_slug "$TARGET_SLUG" "" "$EXPERIMENT_SUFFIX")"
+
+# Recon must use the same threat model as the deep audit. Without loading the
+# target config, its prompt used to claim that bytes, call sequences, and
+# protocol state were all attacker-controlled for every target, manufacturing
+# reachability on trusted application-driven surfaces.
+RECON_TARGET_TOML="$(target_output_root "$SCRIPT_ROOT" "$TARGET_SLUG" "" "$EXPERIMENT_SUFFIX")/target.toml"
+RECON_BASE_TOML="$(target_output_root "$SCRIPT_ROOT" "$TARGET_SLUG" "" "")/target.toml"
+if [ ! -f "$RECON_TARGET_TOML" ] && [ -f "$RECON_BASE_TOML" ]; then
+  RECON_TARGET_TOML="$RECON_BASE_TOML"
+elif [ ! -f "$RECON_TARGET_TOML" ] && [ -f "$TARGET_PATH/target.toml" ]; then
+  RECON_TARGET_TOML="$TARGET_PATH/target.toml"
+fi
+if [ -f "$RECON_TARGET_TOML" ]; then
+  target_load_toml "$RECON_TARGET_TOML" || {
+    echo "FATAL: target config does not parse: $RECON_TARGET_TOML" >&2
+    exit 1
+  }
+fi
+ATTACKER_CONTROLS_PROMPT="$(target_attacker_controls_csv)"
+
 RESULTS_DIR="$(target_backend_results_dir "$BACKEND" "$SCRIPT_ROOT" "$TARGET_SLUG" "" "$EXPERIMENT_SUFFIX")"
 LOGDIR="$(target_backend_logs_dir "$BACKEND" "$SCRIPT_ROOT" "$TARGET_SLUG" "" "$EXPERIMENT_SUFFIX")"
 # Raw model-dialogue dumps (recon_*.raw) live under logs/.raw/ so the
@@ -562,6 +582,7 @@ SCOPE
     --var "goal_framing=${goal_framing}" \
     --var "bug_contract=${bug_contract}" \
     --var "target_slug=${TARGET_SLUG}" \
+    --var "attacker_controls=${ATTACKER_CONTROLS_PROMPT:-bytes}" \
     --var "scope_block=${scope_block}" \
     --var "slice_name=${slice_name}" \
     --var "timeout_secs=${TIMEOUT_SECS}"

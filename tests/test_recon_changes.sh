@@ -1428,6 +1428,17 @@ else
   fail "recon batch-triage lets a guard quote reject a named-bypass hypothesis"
 fi
 
+# Recon discovery and deep investigation must share target.toml's threat model.
+# A hard-coded union of every control class manufactures reachability for
+# trusted application-driven call sequences and environment state.
+if grep -qF 'target_load_toml "$RECON_TARGET_TOML"' "$SCRIPT_ROOT/bin/audit-recon" \
+  && grep -qF -- '--var "attacker_controls=${ATTACKER_CONTROLS_PROMPT:-bytes}"' "$SCRIPT_ROOT/bin/audit-recon" \
+  && grep -qF '{{ attacker_controls }}' "$SCRIPT_ROOT/lib/prompts/audit_recon.md.j2"; then
+  pass "audit-recon loads and renders target.toml attacker_controls"
+else
+  fail "audit-recon does not propagate target.toml attacker_controls into its prompt"
+fi
+
 # Benchmark cells and other isolated callers pass explicit --out/--report
 # paths. Validation scratch and raw model logs must follow that output path,
 # otherwise recon writes RECON-* dirs into the shared output/<target>/<backend>

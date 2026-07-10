@@ -253,7 +253,7 @@ fi
 build_prompt() {
   local skeptic_block=""
   if [ "$TIEBREAK" = "1" ]; then
-    skeptic_block=$'\n# Tiebreak mode\n\nA prior validator was Uncertain. Raise your bar. Default to **Reject**\nunless the evidence is unambiguous. Specifically:\n- If you cannot reproduce the reach path from a public-API entry to the\n  bug site by reading source, vote Reject.\n- If any named guard is actually sufficient on careful re-reading, vote\n  Reject.\n- If the primitive is "could potentially" or "may eventually" without a\n  concrete attacker-controlled value, vote Reject.\n'
+    skeptic_block="$(render_prompt_template validate_tiebreak.md.j2)" || return 1
   fi
   local template="validate_finding.md.j2"
   [ "$GATE" = "trigger" ] && template="validate_trigger_provenance.md.j2"

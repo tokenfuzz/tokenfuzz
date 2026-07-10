@@ -299,13 +299,21 @@ def ask_llm_for_revision(*, slug: str, build_system: str, sanitizer: str,
                          current_script: str, build_log: str,
                          readme_excerpt: str,
                          timeout_secs: int) -> str | None:
+    readme_block = ""
+    if readme_excerpt:
+        readme_block = (
+            "Upstream README build-instructions excerpt (truncated):\n"
+            "```\n"
+            f"{readme_excerpt}\n"
+            "```"
+        )
     prompt = render_template("auto_build_script.md.j2", {
         "slug": slug,
         "build_system": build_system,
         "sanitizer": sanitizer,
         "current_script": current_script,
         "build_log": build_log[-_BUILD_LOG_TAIL_BYTES:],
-        "upstream_readme_excerpt": readme_excerpt,
+        "upstream_readme_block": readme_block,
     })
     obj = llm_decide("build-script-converge", "script", prompt,
                     timeout=timeout_secs)

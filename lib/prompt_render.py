@@ -41,6 +41,7 @@ _PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 # editor notes / sentinels in .md.j2 sources without inflating the prompt
 # token cost or confusing the model. Multiline-friendly.
 _COMMENT_RE = re.compile(r"\{#.*?#\}", re.DOTALL)
+_CONTROL_TAG_RE = re.compile(r"\{%.*?%\}", re.DOTALL)
 
 
 def render(template_text: str, context: dict[str, str]) -> str:
@@ -56,6 +57,13 @@ def render(template_text: str, context: dict[str, str]) -> str:
     alone, matching the prior bash heredoc semantics.
     """
     template_text = _COMMENT_RE.sub("", template_text)
+    control_tag = _CONTROL_TAG_RE.search(template_text)
+    if control_tag:
+        tag = " ".join(control_tag.group(0).split())
+        raise ValueError(
+            f"unsupported template control tag {tag!r}; "
+            "compute optional blocks in the caller and pass them as variables"
+        )
 
     def replace(m: re.Match) -> str:
         key = m.group(1)
@@ -97,6 +105,9 @@ def main(argv=None) -> int:
         rendered = render_template(args.template, context)
     except OSError as exc:
         print(f"prompt_render: cannot read {args.template}: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"prompt_render: cannot render {args.template}: {exc}", file=sys.stderr)
         return 2
 
     # Byte-transparent output, matching the bash heredocs this replaced.

@@ -27,7 +27,7 @@ cat > "$recon_dir/finding.json" <<'JSON'
 JSON
 
 cat > "$recon_dir/validator-vote-1.json" <<'JSON'
-{"vote":"Reject","rationale":"No attacker-reachable path supplies SIZE_MAX; the exported API caps length at INT_MAX.","verified":{"reachability":false,"guards":false,"primitive":false},"caveats":"Source tracing only; no dynamic reproducer."}
+{"vote":"Reject","rationale":"No attacker-reachable path supplies SIZE_MAX; the exported API caps length at INT_MAX.","verified":{"reachability":false,"guards":null,"primitive":false},"caveats":"Source tracing only; no dynamic reproducer."}
 JSON
 
 cat > "$recon_dir/validator-vote-2.json" <<'JSON'
@@ -57,6 +57,8 @@ assert_file_contains "$recon_dir/REPORT.md" \
   'No attacker-reachable path' "T2h: validator rationale included"
 assert_file_contains "$recon_dir/REPORT.md" \
   'reachability=no' "T2i: verified checks rendered"
+assert_file_contains "$recon_dir/REPORT.md" \
+  'guards=unknown' "T2j: unknown validator checks are not rendered as disproved"
 
 # ── T3: idempotency — second run produces identical output ───────────────
 sum1=$(shasum "$recon_dir/REPORT.md" | awk '{print $1}')

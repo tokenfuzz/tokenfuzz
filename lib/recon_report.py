@@ -181,7 +181,8 @@ def render_report_md(recon_dir: Path) -> str:
         verified = vote.get("verified")
         if isinstance(verified, dict) and verified:
             checks = ", ".join(
-                f"{k}={'yes' if v else 'no'}" for k, v in verified.items()
+                f"{k}={'unknown' if v is None else ('yes' if v else 'no')}"
+                for k, v in verified.items()
             )
             out.append(f"- **Verified:** {checks}")
         caveats = vote.get("caveats")

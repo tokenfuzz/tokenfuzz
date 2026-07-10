@@ -22,6 +22,7 @@ required_templates=(
   audit_bug_contract.md.j2
   audit_recon.md.j2
   validate_finding.md.j2
+  validate_tiebreak.md.j2
   validate_trigger_provenance.md.j2
   suggest_peers.md.j2
   suggest_threat_model.md.j2
@@ -48,6 +49,27 @@ rendered=$(python3 "$renderer" triage_crash_trace.md.j2 \
   --var $'trace=ASAN: heap-use-after-free\n#0 f')
 assert_match "AddressSanitizer trace" "$rendered" "triage trace template renders heading"
 assert_match "heap-use-after-free" "$rendered" "triage trace template injects trace"
+
+# The renderer deliberately implements substitutions, not Jinja control flow.
+# Unsupported tags used to leak verbatim into auto_build_script prompts.
+rendered=$(python3 "$renderer" auto_build_script.md.j2 \
+  --var "slug=demo" --var "build_system=cmake" --var "sanitizer=asan" \
+  --var "current_script=#!/bin/bash" --var "build_log=failed" \
+  --var $'upstream_readme_block=Upstream README excerpt:\n```\nBuild me\n```')
+assert_not_match '\{%|%\}' "$rendered" \
+  "auto-build prompt contains no unsupported control tags"
+assert_match "Build me" "$rendered" \
+  "auto-build prompt includes the caller-rendered optional README block"
+
+bad_template="$TEST_TMPDIR/unsupported-prompt.md.j2"
+printf '%s\n' '{% if value %}bad{% endif %}' > "$bad_template"
+set +e
+bad_render=$(python3 "$renderer" "$bad_template" 2>&1)
+bad_rc=$?
+set -e
+assert_eq "2" "$bad_rc" "prompt renderer rejects unsupported control tags"
+assert_match "unsupported template control tag" "$bad_render" \
+  "prompt renderer explains how to fix unsupported control tags"
 
 # triage_crash_confirm criterion 1 must accept the full sanitizer-class
 # taxonomy, not just ASan — otherwise the final gate rejects real TSan /
@@ -94,11 +116,16 @@ recon_goal_framing=$(python3 "$renderer" audit_goal_framing.md.j2)
 rendered=$(python3 "$renderer" audit_recon.md.j2 \
   --var "goal_framing=$recon_goal_framing" \
   --var "target_slug=demo" \
+  --var "attacker_controls=bytes,protocol-state" \
   --var "scope_block=## Scope"$'\n'"- src/a.c" \
   --var "slice_name=slice-1" \
   --var "timeout_secs=1800")
 assert_match "Find all security issues" "$rendered" "audit recon template keeps recall framing"
 assert_match '"slice": "slice-1"' "$rendered" "audit recon template injects slice"
+assert_match "bytes,protocol-state" "$rendered" \
+  "audit recon template uses configured attacker controls"
+assert_match "falsifiable hypotheses" "$rendered" \
+  "audit recon template rejects generic risky-pattern noise without dropping concrete leads"
 
 # triage_reachability_fields: resource-exhaustion converse-guard. The exhausting
 # QUANTITY (depth/count/size), not the field values, decides byte-reachability —
@@ -269,10 +296,21 @@ vf_rendered=$(python3 "$renderer" validate_finding.md.j2 \
   --var 'timeout_secs=300')
 assert_match "Product surface and boundary" "$vf_rendered" \
   "finding validator requires product surface and boundary verification"
-assert_match '"boundary":true\|false' "$vf_rendered" \
+assert_match '"boundary":true\|false\|null' "$vf_rendered" \
   "finding validator emits an explicit boundary verification field"
 assert_match "writing around the gap" "$vf_rendered" \
   "finding validator records inconclusive checks instead of writing around them"
+assert_match "search that failed to find" "$vf_rendered" \
+  "finding validator does not turn incomplete searches into false rejects"
+
+vt_rendered=$(python3 "$renderer" validate_tiebreak.md.j2)
+assert_match "Do not convert" "$vt_rendered" \
+  "validator tiebreak preserves uncertainty when evidence is incomplete"
+assert_match "named source fact" "$vt_rendered" \
+  "validator tiebreak requires affirmative evidence to reject"
+assert_file_contains "$SCRIPT_ROOT/bin/validate-finding" \
+  "render_prompt_template validate_tiebreak.md.j2" \
+  "validator tiebreak body is centralized in lib/prompts"
 
 # Divergence guard (SMOKE TEST, not a semantic-equivalence proof): the FINDINGS
 # gate (triage_find_quality) and the CRASH gates (triage_crash_confirm,
