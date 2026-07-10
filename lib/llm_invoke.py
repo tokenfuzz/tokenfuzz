@@ -20,6 +20,9 @@ CLI subcommands (`python3 lib/llm_invoke.py …`):
       CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT / GROK_MODEL_DEFAULT)
       wins when set. Exit 1 on unknown backend.
 
+  default-effort <backend>
+      Print the backend-native reasoning effort from config/models.toml.
+
   agent-flags <backend> [--model …] [--max-turns N] [--add-dirs CSV]
       Print the agent-mode flag list, one flag per line. Used for
       interactive tool-using agent calls.
@@ -91,16 +94,20 @@ _MODEL_ENV_OVERRIDE = {
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.toml"
 
 
-def _config_models() -> dict:
-    """Return the [models] table from config/models.toml as {backend: model}."""
+def _config_table(name: str) -> dict:
+    """Return one table from config/models.toml."""
     try:
         toml = _load_tomllib()
     except ModuleNotFoundError:
         from target_config import parse_toml
 
-        return parse_toml(_CONFIG_PATH).get("models", {})
+        return parse_toml(_CONFIG_PATH).get(name, {})
     with open(_CONFIG_PATH, "rb") as fh:
-        return toml.load(fh).get("models", {})
+        return toml.load(fh).get(name, {})
+
+
+def _config_models() -> dict:
+    return _config_table("models")
 
 
 def known_backend(backend: str) -> bool:
@@ -165,6 +172,7 @@ _GEMINI_ISOLATION_MARKER = ".tokenfuzz-memory-isolated"
 # Cache the staged isolated home for the lifetime of one process so repeated
 # memory_env("gemini") calls reuse the one staged dir.
 _gemini_iso_home: "str | None" = None
+_gemini_effort_settings: dict[tuple[str, str], str] = {}
 
 
 def _is_tokenfuzz_gemini_home(path: str) -> bool:
@@ -319,6 +327,48 @@ def memory_env(backend: str) -> dict:
     return {}
 
 
+def prepare_gemini_effort_settings(model: str = "") -> "str | None":
+    """Write a Gemini CLI system-settings override for configured thinking."""
+    if not use_gemini_cli():
+        return None
+    resolved_model = resolve_model_name("gemini", model).strip()
+    effort = default_effort("gemini").strip().upper()
+    if not resolved_model or not effort:
+        return None
+    key = (resolved_model, effort)
+    existing = _gemini_effort_settings.get(key)
+    if existing:
+        return existing
+    root = Path(tempfile.mkdtemp(prefix="tokenfuzz-gemini-settings-"))
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
+    path = root / "settings.json"
+    payload = {
+        "modelConfigs": {
+            "customOverrides": [{
+                "match": {"model": resolved_model},
+                "modelConfig": {
+                    "generateContentConfig": {
+                        "thinkingConfig": {"thinkingLevel": effort},
+                    },
+                },
+            }],
+        },
+    }
+    path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+    _gemini_effort_settings[key] = str(path)
+    return str(path)
+
+
+def invocation_env(backend: str, model: str = "") -> dict[str, str]:
+    """Return environment controls needed for one backend invocation."""
+    environment = memory_env(backend)
+    if backend == "gemini" and use_gemini_cli():
+        settings = prepare_gemini_effort_settings(model)
+        if settings:
+            environment["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = settings
+    return environment
+
+
 # Codex memory-disable controls, added to the flag list when memory is
 # disabled. All are `-c` config overrides rather than `--disable memories`:
 # an unknown `-c` key is accepted and ignored on any Codex version, whereas
@@ -350,6 +400,14 @@ def default_model(backend: str) -> str:
         if primary:
             return primary
     return _config_models().get(backend, "")
+
+
+def default_effort(backend: str) -> str:
+    """Return the configured backend-native reasoning effort."""
+    if backend not in _KNOWN_BACKENDS:
+        raise ValueError(f"unknown backend: {backend}")
+    key = "agy" if backend == "gemini" and not use_gemini_cli() else backend
+    return str(_config_table("effort").get(key, "")).strip()
 
 
 def _ensure_http_url(value: str) -> str:
@@ -428,11 +486,14 @@ def local_model_available(model: str) -> bool:
 # slug to the exact label here; bin/audit's model preflight parses agy's log
 # for the unresolved-flag signature as the hard backstop.
 _AGY_SLUG_TO_LABEL = {
-    "gemini-3.1-pro-preview": "Gemini 3.1 Pro (High)",
+    "gemini-3.1-pro-preview": {
+        "high": "Gemini 3.1 Pro (High)",
+        "low": "Gemini 3.1 Pro (Low)",
+    },
 }
 
 
-def agy_model_label(model: str) -> str:
+def agy_model_label(model: str, effort: str = "") -> str:
     """Map a harness model identifier to an ``agy --model`` display label.
 
     A known slug maps to its label; anything else (an empty string, or a value
@@ -441,7 +502,13 @@ def agy_model_label(model: str) -> str:
     is responsible for catching that.
     """
     m = (model or "").strip()
-    return _AGY_SLUG_TO_LABEL.get(m, m)
+    labels = _AGY_SLUG_TO_LABEL.get(m)
+    if not labels:
+        return m
+    selected = (effort or default_effort("gemini")).lower()
+    if selected not in labels:
+        raise ValueError(f"agy effort {selected!r} is not available for {m}")
+    return labels[selected]
 
 
 def agent_flags(
@@ -458,6 +525,7 @@ def agent_flags(
     boundary (same reasoning as IS_SANDBOX=1 for claude).
     """
     resolved_model = resolve_model_name(backend, model)
+    effort = default_effort(backend)
 
     if backend == "claude":
         flags = [
@@ -474,6 +542,8 @@ def agent_flags(
             flags += ["--max-turns", str(max_turns)]
         if resolved_model:
             flags += ["--model", resolved_model]
+        if effort:
+            flags += ["--effort", effort]
         for d in (add_dirs or "").split(","):
             d = d.strip()
             if d:
@@ -490,6 +560,8 @@ def agent_flags(
         ]
         if resolved_model:
             flags += ["--model", resolved_model]
+        if effort:
+            flags += ["-c", f'model_reasoning_effort="{effort}"']
         dirs = [d.strip() for d in (add_dirs or "").split(",") if d.strip()]
         if dirs:
             flags += ["--cd", dirs[0]]
@@ -547,7 +619,7 @@ def agent_flags(
         # per-probe path so the unresolved-flag signature can be read back
         # deterministically.
         flags = ["--dangerously-skip-permissions"]
-        label = agy_model_label(resolved_model)
+        label = agy_model_label(resolved_model, effort)
         if label:
             flags += ["--model", label]
         agy_log = os.environ.get("AGY_LOG_FILE", "").strip()
@@ -571,6 +643,8 @@ def agent_flags(
             flags += ["--max-turns", str(max_turns)]
         if resolved_model:
             flags += ["--model", resolved_model]
+        if effort:
+            flags += ["--reasoning-effort", effort]
         dirs = [d.strip() for d in (add_dirs or "").split(",") if d.strip()]
         if dirs:
             flags += ["--cwd", dirs[0]]
@@ -598,7 +672,7 @@ def run_agent_prompt(
     first_dir = next((p.strip() for p in add_dirs.split(",") if p.strip()), "")
     working_dir = Path(cwd or first_dir or Path.cwd())
     environment = os.environ.copy()
-    environment.update(memory_env(backend))
+    environment.update(invocation_env(backend, model))
     if extra_env:
         environment.update({str(key): str(value) for key, value in extra_env.items()})
     if backend == "claude":
@@ -730,6 +804,7 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
     subprocessed).
     """
     resolved_model = resolve_model_name(backend, model)
+    effort = default_effort(backend)
 
     if backend == "claude":
         # plan is claude's read-only mode: Read/Grep/Glob for source-grounded
@@ -749,12 +824,16 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         ]
         if resolved_model:
             flags += ["--model", resolved_model]
+        if effort:
+            flags += ["--effort", effort]
         return flags
 
     if backend == "codex":
         flags = ["--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only"]
         if resolved_model:
             flags += ["--model", resolved_model]
+        if effort:
+            flags += ["-c", f'model_reasoning_effort="{effort}"']
         if not memory_enabled():
             flags += _CODEX_MEMORY_OFF_FLAGS
         return flags
@@ -783,7 +862,7 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         # --dangerously-skip-permissions keeps decide calls non-interactive.
         # See agent_flags for the --model label-mapping rationale.
         flags = ["--dangerously-skip-permissions"]
-        label = agy_model_label(resolved_model)
+        label = agy_model_label(resolved_model, effort)
         if label:
             flags += ["--model", label]
         return flags
@@ -798,6 +877,8 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         flags.append("--experimental-memory" if memory_enabled() else "--no-memory")
         if resolved_model:
             flags += ["--model", resolved_model]
+        if effort:
+            flags += ["--reasoning-effort", effort]
         return flags
 
     raise ValueError(f"unknown backend: {backend}")
@@ -1354,6 +1435,14 @@ def _cmd_default_model(args) -> int:
         return 1
 
 
+def _cmd_default_effort(args) -> int:
+    try:
+        sys.stdout.write(default_effort(args.backend) + "\n")
+        return 0
+    except ValueError:
+        return 1
+
+
 def _cmd_resolve_model(args) -> int:
     try:
         sys.stdout.write(resolve_model_name(args.backend, args.model or "") + "\n")
@@ -1462,6 +1551,10 @@ def _build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("default-model")
     s.add_argument("backend")
     s.set_defaults(func=_cmd_default_model)
+
+    s = sub.add_parser("default-effort")
+    s.add_argument("backend")
+    s.set_defaults(func=_cmd_default_effort)
 
     s = sub.add_parser("resolve-model")
     s.add_argument("backend")

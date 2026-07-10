@@ -8,7 +8,18 @@
 
 [models]
 claude = "claude-opus-4-8"
-codex  = "gpt-5.5"
+codex  = "gpt-5.6-sol"
 gemini = "gemini-3.1-pro-preview"
 grok   = "grok-build-0.1"
+oss    = ""
+
+# Backend-native reasoning controls. The gemini backend uses `agy` by default
+# and Google Gemini CLI when USE_GEMINI_CLI=1, so those dialects have separate
+# entries. Leave a value empty to let that CLI choose its own default.
+[effort]
+claude = "high"
+codex  = "high"
+agy    = "high"
+gemini = "high"
+grok   = "high"
 oss    = ""

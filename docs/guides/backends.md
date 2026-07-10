@@ -63,7 +63,8 @@ The default model is `grok-build-0.1`. Override it with `--model`,
 `GROK_MODEL_DEFAULT`, or `config/models.toml`; use `GROK_BIN` when the
 binary is not named `grok` or is outside `PATH`. TokenFuzz runs Grok in
 headless streaming-JSON mode, auto-approves audit tools, disables Grok's
-nested subagents, and resumes the CLI session on later iterations. See
+nested subagents, applies the configured reasoning effort, and resumes the
+CLI session on later iterations. See
 xAI's [Grok Build overview](https://docs.x.ai/build/overview) and
 [headless mode reference](https://docs.x.ai/build/cli/headless-scripting) for the
 upstream CLI contract.

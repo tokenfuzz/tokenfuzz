@@ -103,7 +103,7 @@ from llm_invoke import (  # noqa: E402
     default_model as _default_model,
     extract_text as _extract_backend_text,
     gemini_default_bin as _gemini_default_bin,
-    memory_env as _memory_env,
+    invocation_env as _invocation_env,
     opencode_config as _opencode_config,
 )
 
@@ -613,7 +613,7 @@ def _invoke_backend(
     # policy, so set it here too, keyed on TOKENFUZZ_MEMORY_ENABLED.
     # codex carries its disable as `-c` flags already in the decide flags.
     child_env = os.environ.copy()
-    child_env.update(_memory_env(backend))
+    child_env.update(_invocation_env(backend, model))
     temp_dir = None
     run_input = prompt
     if backend == "grok":

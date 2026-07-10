@@ -68,7 +68,7 @@ selected backend:
 | Backend | Default without `--model` |
 |---------|---------------------------|
 | `claude` | `claude-opus-4-8` |
-| `codex` | `gpt-5.5` |
+| `codex` | `gpt-5.6-sol` |
 | `gemini` with Antigravity CLI (`agy`) | `gemini-3.1-pro-preview`, mapped to its `agy models` label. Override with `--model` as a config slug or an exact `agy models` label. |
 | `gemini` with Google Gemini CLI (`USE_GEMINI_CLI=1`) | `gemini-3.1-pro-preview` |
 | `grok` | `grok-build-0.1` |
@@ -77,6 +77,8 @@ selected backend:
 The defaults come from `config/models.toml`; override them per run
 with `--model` or per shell with the `*_MODEL_DEFAULT` variables in
 [Model selection](../reference/environment.md#model-selection).
+The same file's `[effort]` table defaults the hosted reasoning-capable
+backends to `high`.
 
 For a focused smoke test (one strategy only, easier to compare across
 runs), add `--strategy S1` (or `S2`, …, `S8`). Strategy rotation is

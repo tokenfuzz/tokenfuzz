@@ -85,12 +85,16 @@ print("\ndefault-model")
 proc = run(["default-model", "claude"], check=True)
 assert_eq("claude-opus-4-8", proc.stdout.strip(), "claude default")
 proc = run(["default-model", "codex"], check=True)
-assert_eq("gpt-5.5", proc.stdout.strip(), "codex default")
+assert_eq("gpt-5.6-sol", proc.stdout.strip(), "codex default")
 proc = run(["default-model", "gemini"], check=True)
 assert_eq("gemini-3.1-pro-preview", proc.stdout.strip(), "gemini default")
 proc = run(["default-model", "grok"], check=True)
 assert_eq("grok-build-0.1", proc.stdout.strip(), "grok default")
 assert_eq(1, run(["default-model", "openai"]).returncode, "unknown → rc=1")
+
+for backend in ("claude", "codex", "gemini", "grok"):
+    proc = run(["default-effort", backend], check=True)
+    assert_eq("high", proc.stdout.strip(), f"{backend} default effort")
 
 # Env override
 env = os.environ.copy()
@@ -123,12 +127,14 @@ ok("--dangerously-skip-permissions" in f, "claude has skip-permissions")
 ok("--max-turns" in f, "claude has --max-turns")
 ok("80" in f, "claude default max-turns 80")
 ok("claude-opus-4-8" in f, "claude default model wired")
+assert_eq("high", f[f.index("--effort") + 1], "claude agent wires configured effort")
 
 proc = run(["agent-flags", "codex"], check=True)
 f = proc.stdout
 ok("--json" in f, "codex has --json", f)
 ok("danger-full-access" in f, "codex has danger-full-access sandbox")
 ok("--dangerously-bypass-approvals-and-sandbox" in f, "codex bypasses approvals")
+ok('model_reasoning_effort="high"' in f, "codex agent wires configured effort")
 
 proc = run(["agent-flags", "oss"], check=True)
 f = flags(proc)
@@ -205,6 +211,7 @@ ok("--no-subagents" in f, "Grok agent keeps harness-owned concurrency")
 ok("--no-memory" in f, "Grok agent disables cross-run memory by default")
 assert_eq("23", f[f.index("--max-turns") + 1], "Grok agent wires max turns")
 assert_eq("grok-build-0.1", f[f.index("--model") + 1], "Grok agent wires default model")
+assert_eq("high", f[f.index("--reasoning-effort") + 1], "Grok agent wires configured effort")
 
 assert_eq(1, run(["agent-flags", "openai"]).returncode, "unknown backend → rc=1")
 
@@ -251,11 +258,13 @@ ok("text" in f, "decide claude text output")
 turns_idx = f.index("--permission-mode")
 assert_eq("plan", f[turns_idx + 1], "decide claude uses read-only plan mode")
 ok("--dangerously-skip-permissions" not in f, "decide claude omits skip-permissions (read-only, not full access)")
+assert_eq("high", f[f.index("--effort") + 1], "decide claude wires configured effort")
 
 proc = run(["decide-flags", "codex"], check=True)
 f = proc.stdout
 ok("read-only" in f, "decide codex read-only sandbox")
 ok("danger-full-access" not in f, "decide codex NOT danger-full-access")
+ok('model_reasoning_effort="high"' in f, "decide codex wires configured effort")
 
 proc = run(["decide-flags", "gemini"], check=True)
 f = flags(proc)
@@ -282,6 +291,7 @@ assert_eq("plan", f[f.index("--permission-mode") + 1], "Grok decide uses read-on
 ok("plain" in f, "Grok decide uses plain assistant output")
 ok("--no-memory" in f, "Grok decide disables cross-run memory")
 ok("--always-approve" not in f, "Grok decide does not allow writes")
+assert_eq("high", f[f.index("--reasoning-effort") + 1], "decide Grok wires configured effort")
 
 
 # ── extract-text per backend ────────────────────────────────────────
@@ -417,7 +427,7 @@ import llm_invoke as inv  # noqa: E402
 ok(inv.known_backend("claude") is True, "known_backend('claude') True")
 ok(inv.known_backend("openai") is False, "known_backend('openai') False")
 assert_eq("claude-opus-4-8", inv.default_model("claude"), "default_model claude")
-assert_eq("gpt-5.5", inv.default_model("codex"), "default_model codex")
+assert_eq("gpt-5.6-sol", inv.default_model("codex"), "default_model codex")
 assert_eq("gemini-3.1-pro-preview", inv.default_model("gemini"), "default_model gemini")
 assert_eq("grok-build-0.1", inv.default_model("grok"), "default_model grok")
 os.environ["USE_GEMINI_CLI"] = "1"
@@ -549,6 +559,16 @@ ok(not any((iso_gemini / e).is_symlink() for e in os.listdir(iso_gemini)),
 ok(inv.memory_env("gemini")["GEMINI_CLI_HOME"] == iso_home,
    "isolated home is cached per process (no leak of a dir per call)")
 
+invoke_env = inv.invocation_env("gemini")
+settings_path = Path(invoke_env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"])
+settings = json.loads(settings_path.read_text())
+override = settings["modelConfigs"]["customOverrides"][0]
+assert_eq("gemini-3.1-pro-preview", override["match"]["model"],
+          "Gemini effort override targets the configured model")
+assert_eq("HIGH", override["modelConfig"]["generateContentConfig"]
+          ["thinkingConfig"]["thinkingLevel"],
+          "Gemini CLI wires configured effort as thinkingLevel")
+
 # Re-staging (a fresh run reusing the same $LOGDIR) wipes a stale throwaway
 # GEMINI.md so a killed run's memory can't be read back on resume.
 (iso_gemini / "GEMINI.md").write_text("STALE\n")
@@ -637,12 +657,27 @@ ok(cfg_path.is_file(), "config/models.toml exists")
 _saved_cfg_path = inv._CONFIG_PATH
 with tempfile.TemporaryDirectory() as _td:
     alt = Path(_td) / "models.toml"
-    alt.write_text('[models]\nclaude = "claude-from-config"\n')
+    alt.write_text(
+        '[models]\nclaude = "claude-from-config"\n'
+        '[effort]\nclaude = "low"\ncodex = "xhigh"\n'
+        'agy = "low"\ngemini = "medium"\ngrok = "max"\n'
+    )
     try:
         inv._CONFIG_PATH = alt
         os.environ.pop("CLAUDE_MODEL_DEFAULT", None)
         assert_eq("claude-from-config", inv.default_model("claude"),
                   "default_model reads value from config/models.toml")
+        assert_eq("low", inv.default_effort("claude"),
+                  "default_effort reads the backend-specific value")
+        assert_eq("xhigh", inv.default_effort("codex"),
+                  "Codex effort does not reuse another backend's value")
+        os.environ.pop("USE_GEMINI_CLI", None)
+        assert_eq("low", inv.default_effort("gemini"),
+                  "agy dialect reads its separate effort value")
+        os.environ["USE_GEMINI_CLI"] = "1"
+        assert_eq("medium", inv.default_effort("gemini"),
+                  "Gemini CLI dialect reads its separate effort value")
+        os.environ.pop("USE_GEMINI_CLI", None)
         _saved_loader = inv._load_tomllib
         try:
             inv._load_tomllib = lambda: (_ for _ in ()).throw(ModuleNotFoundError("tomli"))
