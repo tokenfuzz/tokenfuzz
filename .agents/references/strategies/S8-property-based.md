@@ -29,8 +29,8 @@ Instead, choose what to test by walking *forward* from the function: does its
 output reach a security decision — a sanitiser, an ACL / SOP / CSP / auth
 check, a cache or signature lookup, an allocation size or resource limit? If
 yes, the property is in scope. If the output only reaches display, logging, or
-another pure-data path, a counter-example is an upstream correctness bug — note
-it in your state file and move on; do **not** file it.
+another pure-data path, a counter-example is an upstream correctness bug — record
+it with `bin/state add-note` and move on; do **not** file it.
 Use local source, call sites, comments, and docs for this filter.
 
 | Category | In scope when the consumer is… | Security primitive it becomes |
@@ -364,7 +364,7 @@ When the property is violated and ASan is clean, **first decide whether the
 violation has a security implication** — the same consumer test from *Pick the
 target by its security consumer* (above). Only security-relevant property
 violations belong under `findings/FIND-*`. Pure correctness / data-integrity
-/ robustness / spec-deviation violations stay in your state file as a note
+/ robustness / spec-deviation violations stay in structured state as a note
 and are NOT filed — `findings/` is for issues a security QA team needs to
 triage, not a wishlist of upstream correctness bugs.
 

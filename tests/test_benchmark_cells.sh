@@ -14,7 +14,6 @@ SCRIPT_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 source "$TESTS_DIR/helpers.sh"
 # shellcheck disable=SC1091
-source "$SCRIPT_ROOT/lib/timeout.sh"
 
 setup_test_env
 # These tests use fake Gemini backends that exit immediately. Keep the
@@ -106,16 +105,7 @@ fake_gemini="$work/fake-gemini"
 cat > "$fake_gemini" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-prompt="$(cat 2>/dev/null || true)"
-case "$prompt" in
-  *MODEL_PREFLIGHT_OK*)
-    if [ -n "${FAKE_BACKEND_RELATIVE_WRITE:-}" ]; then
-      printf 'junk from preflight %s\n' "$(pwd)" > "$FAKE_BACKEND_RELATIVE_WRITE"
-    fi
-    printf 'MODEL_PREFLIGHT_OK\n'
-    exit 0
-    ;;
-esac
+cat >/dev/null 2>&1 || true
 if [ -n "${FAKE_BACKEND_RELATIVE_WRITE:-}" ]; then
   printf 'junk from %s\n' "$(pwd)" > "$FAKE_BACKEND_RELATIVE_WRITE"
 fi
@@ -141,7 +131,7 @@ rm -f "$SCRIPT_ROOT/$model_direct_junk_name" 2>/dev/null || true
 # the job's own `set -e` from doing the same.
 ( rc=0
   CODEX_BIN="$fake_codex" \
-    bash "$BENCH" --target "$bench_target" --backend codex --replicates 1 \
+    "$BENCH" --target "$bench_target" --backend codex --replicates 1 \
     --conditions model-direct --budget-wall 5 --bench-root "$codex_root" \
     > "$work/codex.out" 2>&1 || rc=$?
   printf '%s' "$rc" > "$work/codex.rc"
@@ -153,7 +143,7 @@ codex_pid=$!
 # rejects a relative or missing --cd, so a clean run proves the fix.
 ( rc=0
   cd "$SCRIPT_ROOT" && CODEX_BIN="$fake_codex" \
-    bash "$BENCH" --target "$bench_target" --backend codex --replicates 1 \
+    "$BENCH" --target "$bench_target" --backend codex --replicates 1 \
     --conditions model-direct --budget-wall 5 \
     --bench-root "output/benchmark-reltest-$$" \
     > "$work/codex_rel.out" 2>&1 || rc=$?
@@ -163,7 +153,7 @@ codex_rel_pid=$!
 
 ( rc=0
   cd "$SCRIPT_ROOT" && CLAUDE_BIN="$fake_claude_fail" \
-    bash "$BENCH" --target "$bench_target" --backend claude --replicates 1 \
+    "$BENCH" --target "$bench_target" --backend claude --replicates 1 \
     --conditions model-direct --budget-wall 5 \
     --bench-root "$reltest_root-claudefail" \
     > "$work/claude_fail.out" 2>&1 || rc=$?
@@ -173,7 +163,7 @@ claude_fail_pid=$!
 
 ( rc=0
   GEMINI_BIN="$fake_gemini" FAKE_BACKEND_RELATIVE_WRITE="$model_direct_junk_name" \
-    bash "$BENCH" --target "$bench_target" --backend gemini \
+    "$BENCH" --target "$bench_target" --backend gemini \
     --replicates 1 --conditions model-direct --budget-wall 5 \
     --bench-root "$gemini_direct_root" \
     > "$work/gemini_direct.out" 2>&1 || rc=$?
@@ -183,7 +173,7 @@ gemini_direct_pid=$!
 
 ( rc=0
   GEMINI_BIN="$fake_gemini" \
-    bash "$BENCH" --target "$bench_target" --backend gemini \
+    "$BENCH" --target "$bench_target" --backend gemini \
     --replicates 1 --conditions model-direct --budget-wall 0 \
     --bench-root "$gemini_unlimited_root" \
     > "$work/gemini_unlimited.out" 2>&1 || rc=$?
@@ -210,7 +200,7 @@ gemini_unlimited_pid=$!
   # under the 6-way parallel launch above — a tight cap false-fails on a slow CI
   # runner (observed on py3.12), not on the deadlock it guards.
   out=$(GEMINI_API_KEY=fake-benchmark-key USE_GEMINI_CLI=1 GEMINI_BIN="$fake_gemini" \
-    audit_timeout_run 60 bash "$BENCH" --target "$bench_target" --backend gemini \
+    "$BENCH" --target "$bench_target" --backend gemini \
     --replicates 1 --conditions model-direct --budget-wall 0 \
     --bench-root "$gemini_cli_unlimited_root" 2>&1) || rc=$?
   printf '%s\n' "$out" > "$work/gemini_cli_unlimited.out"
@@ -263,13 +253,7 @@ assert_not_match "live log: .*file://" "$codex_rel_out" \
 # (observed: 120 tool calls of pure recon, zero findings written before the
 # cap fired). The benchmark passes max_turns=0 to llm_agent_flags, which
 # must omit --max-turns entirely so claude self-paces against the timeout.
-claude_flags_out=$(bash -c '
-  set -euo pipefail
-  source '"$SCRIPT_ROOT"'/lib/llm_invoke.sh
-  declare -a flags=()
-  llm_agent_flags claude flags "" 0 "/tmp"
-  printf "%s\n" "${flags[@]}"
-')
+claude_flags_out=$(python3 "$SCRIPT_ROOT/lib/llm_invoke.py" agent-flags claude --max-turns 0 --add-dirs /tmp)
 if printf '%s\n' "$claude_flags_out" | grep -qx -- '--max-turns'; then
   fail "T16e: max_turns=0 must omit --max-turns from claude flags" \
     "got: $claude_flags_out"
@@ -277,13 +261,7 @@ else
   pass "T16e: max_turns=0 omits --max-turns from claude flags"
 fi
 # Sanity: a positive max_turns still emits the flag.
-claude_flags_capped=$(bash -c '
-  set -euo pipefail
-  source '"$SCRIPT_ROOT"'/lib/llm_invoke.sh
-  declare -a flags=()
-  llm_agent_flags claude flags "" 80 "/tmp"
-  printf "%s\n" "${flags[@]}"
-')
+claude_flags_capped=$(python3 "$SCRIPT_ROOT/lib/llm_invoke.py" agent-flags claude --max-turns 80 --add-dirs /tmp)
 if printf '%s\n' "$claude_flags_capped" | grep -qx -- '--max-turns'; then
   pass "T16f: positive max_turns still emits --max-turns (sub-agents stay capped)"
 else
@@ -330,10 +308,8 @@ assert_eq "0" "$gemini_cli_unlimited_rc" \
   "T16k4: captured Gemini CLI unlimited benchmark exits without tee deadlock"
 assert_match "Cells complete: 1 done, 0 failed" "$gemini_cli_unlimited_out" \
   "T16k5: captured Gemini CLI unlimited benchmark cell marked done"
-assert_file_contains "$BENCH" 'start_gemini_watchdog .* >&2 &' \
-  "T16k6: model-direct watchdog cannot hold the results_dir capture pipe"
-assert_file_not_contains "$BENCH" 'results_dir="\$\(run_model_direct_cell' \
-  "T16k7: model-direct cell finalization does not depend on command substitution"
+assert_file_not_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'stdout=subprocess.PIPE.*run_model_direct' \
+  "T16k6: model-direct execution is not captured through a blocking result pipe"
 
 # ── T16l-o: benchmark harness cells do not dirty the real repo root ──────
 # bin/audit cd's to its SCRIPT_ROOT before launching backend agents. In a
@@ -342,46 +318,39 @@ assert_file_not_contains "$BENCH" 'results_dir="\$\(run_model_direct_cell' \
 # testcase leaves files like test_logic.c in /Users/.../work.
 root_junk_name="benchmark-root-junk-$$.txt"
 rm -f "$SCRIPT_ROOT/$root_junk_name" 2>/dev/null || true
-if grep -qF 'facade="$(prepare_harness_facade "$cell_dir")"' "$BENCH"; then
+if grep -qF 'facade = prepare_facade(cell_dir, target_slug)' "$SCRIPT_ROOT/lib/benchmark_runner.py"; then
   pass "T16l: harness cells prepare a repo facade"
 else
   fail "T16l: harness cells prepare a repo facade" \
     "run_harness_cell no longer calls prepare_harness_facade"
 fi
 
-if grep -qF 'cd "$facade" || exit 1' "$BENCH" \
-    && grep -qF '"$facade/bin/audit"' "$BENCH"; then
+if grep -qF 'cwd=facade' "$SCRIPT_ROOT/lib/benchmark_runner.py" \
+    && grep -qF 'str(facade / "bin" / "audit")' "$SCRIPT_ROOT/lib/benchmark_runner.py"; then
   pass "T16m: harness cells launch bin/audit from the facade cwd"
 else
   fail "T16m: harness cells launch bin/audit from the facade cwd" \
     "run_harness_cell no longer cd's into the facade before launching facade/bin/audit"
 fi
-assert_file_contains "$BENCH" 'model-direct\) cell_log="\$cell_dir/backend\.raw\.log"' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" "backend.raw.log.*resolve" \
   "T16m2: benchmark console points model-direct cells at backend.raw.log"
-assert_file_contains "$BENCH" 'harness\) cell_log="\$cell_dir/audit\.log"' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" "audit.log.*resolve" \
   "T16m3: benchmark console points harness cells at audit.log"
-assert_file_contains "$BENCH" 'Cell \$cell_name live log: \$cell_log' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'Cell \{name\} live log:' \
   "T16m4: benchmark console prints one live log path per real cell"
-assert_file_not_contains "$BENCH" 'live log:.*artifact_uri' \
+assert_file_not_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'live log:.*as_uri' \
   "T16m5: live log paths are printed without file:// URI decoration"
-
-prepare_harness_facade_src=$(awk '
-  /^prepare_harness_facade\(\) \{/ { in_func=1 }
-  in_func {
-    line=$0
-    opens=gsub(/\{/, "{", line)
-    closes=gsub(/\}/, "}", line)
-    depth += opens - closes
-    print
-    if (depth == 0) exit
-  }
-' "$BENCH")
-eval "$prepare_harness_facade_src"
 
 harness_cell_dir="$work/harness-facade-cell"
 TARGET_SLUG="$bench_target"
-facade="$(prepare_harness_facade "$harness_cell_dir")"
-printf 'MODEL_PREFLIGHT_OK\n' | (
+facade=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$harness_cell_dir" "$TARGET_SLUG" <<'PY'
+import sys
+from pathlib import Path
+from benchmark_runner import prepare_facade
+print(prepare_facade(Path(sys.argv[1]), sys.argv[2]))
+PY
+)
+printf 'fixture prompt\n' | (
   cd "$facade" || exit 1
   FAKE_BACKEND_RELATIVE_WRITE="$root_junk_name" "$fake_gemini"
 ) >/dev/null
@@ -400,7 +369,7 @@ else
     "file not found: ${facade_junk:-<empty>}"
 fi
 
-assert_file_contains "$BENCH" 'audit_args\+=\(--skip-recon\)' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'command.append\("--skip-recon"\)' \
   "T16p: --skip-recon is forwarded to bin/audit instead of shadowing bin/audit-recon"
 
 # ── T17: cleanup_model_direct_scratch reclaims model-direct scratch/ only ──────
@@ -409,25 +378,22 @@ assert_file_contains "$BENCH" 'audit_args\+=\(--skip-recon\)' \
 # findings/ trees. Exercised in isolation under `set -u` with no global cell_dir,
 # which also guards against regressing the helper to read a dynamically-scoped
 # cell_dir instead of its own arg.
-t17_fn="$(awk '/^cleanup_model_direct_scratch\(\) \{/,/^\}/' "$BENCH")"
-if [ -z "$t17_fn" ]; then
-  fail "T17: could not extract cleanup_model_direct_scratch from bin/benchmark"
-else
-  t17_cell="$work/md-cell"
-  mkdir -p "$t17_cell/scratch/sub" "$t17_cell/scratch-1" \
-    "$t17_cell/crashes/CRASH-1" "$t17_cell/findings/FIND-1"
-  : > "$t17_cell/scratch/junk.bin"
-  : > "$t17_cell/scratch-1/tc.txt"
-  : > "$t17_cell/crashes/CRASH-1/report.md"
-  : > "$t17_cell/findings/FIND-1/report.md"
-  t17_rc=0
-  ( set -euo pipefail; log() { :; }; eval "$t17_fn"
-    cleanup_model_direct_scratch "$t17_cell" ) || t17_rc=$?
-  assert_eq 0 "$t17_rc" "T17a: cleanup runs clean under set -u with no global cell_dir"
-  assert_dir_not_exists "$t17_cell/scratch"       "T17b: model-direct scratch/ is reclaimed"
-  assert_dir_exists     "$t17_cell/scratch-1"     "T17c: harness scratch-N/ is left untouched"
-  assert_dir_exists     "$t17_cell/crashes/CRASH-1" "T17d: canonical crashes/ is left untouched"
-  assert_dir_exists     "$t17_cell/findings/FIND-1" "T17e: canonical findings/ is left untouched"
-fi
+t17_cell="$work/md-cell"
+mkdir -p "$t17_cell/scratch/sub" "$t17_cell/scratch-1" \
+  "$t17_cell/crashes/CRASH-1" "$t17_cell/findings/FIND-1"
+: > "$t17_cell/scratch/junk.bin"
+: > "$t17_cell/scratch-1/tc.txt"
+: > "$t17_cell/crashes/CRASH-1/report.md"
+: > "$t17_cell/findings/FIND-1/report.md"
+PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$t17_cell" <<'PY'
+import sys
+from pathlib import Path
+from benchmark_runner import cleanup_model_direct_scratch
+cleanup_model_direct_scratch(Path(sys.argv[1]))
+PY
+assert_dir_not_exists "$t17_cell/scratch"       "T17b: model-direct scratch/ is reclaimed"
+assert_dir_exists     "$t17_cell/scratch-1"     "T17c: harness scratch-N/ is left untouched"
+assert_dir_exists     "$t17_cell/crashes/CRASH-1" "T17d: canonical crashes/ is left untouched"
+assert_dir_exists     "$t17_cell/findings/FIND-1" "T17e: canonical findings/ is left untouched"
 
 summary

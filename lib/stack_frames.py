@@ -59,7 +59,7 @@ STATE_STOP_MARKERS = (
 # fabricate in prose. This is the single source of truth for "this text is a
 # confirmed sanitizer crash"; it is shared by the benchmark's confirmed-crash
 # count (lib/benchmark.py) and the severity scorer (bin/severity), and the
-# bash gate `_triage_has_sanitizer_diagnostic` in lib/triage.sh mirrors it
+# The diagnostic gate in lib/triage.py mirrors it
 # cross-language. Matches EVERY sanitizer the harness builds — ASan, HWASan,
 # UBSan, TSan, MSan — so a crash from any of them is recognised identically.
 SANITIZER_SIGNATURE_RE = re.compile(
@@ -69,14 +69,14 @@ SANITIZER_SIGNATURE_RE = re.compile(
     r"|SUMMARY: (?:ThreadSanitizer|MemorySanitizer):"
     r"|^WARNING: DATA RACE$"
     r"|UndefinedBehaviorSanitizer:"
-    r"|: runtime error:",
+    r"|^[^\s].*:\d+:\d+: runtime error:",
     re.MULTILINE,
 )
 
 
 def has_sanitizer_diagnostic(text: str) -> bool:
     """True when *text* carries a sanitizer runtime diagnostic for a real fault
-    (any sanitizer the harness builds). The Python twin of lib/triage.sh's
+    (any sanitizer the harness builds). The Python twin of lib/triage.py's
     ``_triage_has_sanitizer_diagnostic`` and the single gate behind the
     benchmark's confirmed-crash count — use it instead of hand-rolling an
     ASan-only ``ERROR: AddressSanitizer`` check, which silently misses
@@ -259,7 +259,7 @@ def crash_signature(text: str, want: int = MAX_CRASH_STATE_FRAMES) -> list[str]:
     """Address-stable fingerprint for a crash.
 
     Returns up to `want` (function, location) lines from the top of the
-    interesting-frame stream. Used by run-asan-multi to detect when reruns
+    interesting-frame stream. Used by run-sanitizer-multi to detect when reruns
     reproduce the same crash even though addresses, allocation tags, and
     thread ids differ between runs.
 

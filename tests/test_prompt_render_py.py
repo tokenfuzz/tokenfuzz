@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Tests for lib/prompt_render.py — `{{ var }}` template substitution.
 
-The renderer is the boundary between the bash prompt orchestrator
-(lib/prompt.sh) and the .md.j2 templates under lib/prompts/. Tests
+The renderer is the boundary between the Python prompt orchestrator
+(lib/prompt.py) and the .md.j2 templates under lib/prompts/. Tests
 cover: clean substitution, missing keys render empty, multi-line values
-survive, repeated placeholders all substitute, embedded `{{` in values
-is NOT recursively substituted (mirrors prior bash heredoc semantics).
+survive, repeated placeholders all substitute, and embedded `{{` in values
+is NOT recursively substituted.
 """
 
 from __future__ import annotations

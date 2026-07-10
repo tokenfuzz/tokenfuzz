@@ -76,7 +76,7 @@
       "expected_outcome": "abort",
       "signature_symbol": "handle_check",
       "input": "repro/case-check",
-      "refute_reason": "A CHECK field longer than its 32-byte scratch trips assert() and aborts before the copy. AddressSanitizer reports this as ABRT, which lib/triage.sh autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) would be an unexpected crash."
+      "refute_reason": "A CHECK field longer than its 32-byte scratch trips assert() and aborts before the copy. AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) would be an unexpected crash."
     }
   ]
 }

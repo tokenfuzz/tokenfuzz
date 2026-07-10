@@ -54,7 +54,7 @@ EOF
 
 # ─── Build a fake output/<slug>/ + crash dir ────────────────────────
 OUTPUT_ROOT="$TEST_TMPDIR/output/exr-run-test"
-RESULTS="$TEST_TMPDIR/results"
+RESULTS="$OUTPUT_ROOT/codex/results"
 CRASH_DIR="$RESULTS/crashes/CRASH-RUN-1"
 mkdir -p "$OUTPUT_ROOT" "$CRASH_DIR"
 
@@ -73,7 +73,7 @@ is_browser = "0"
 attacker_controls = ["bytes"]
 EOF
 
-cat > "$OUTPUT_ROOT/.session-env" <<EOF
+cat > "$RESULTS/.session-env" <<EOF
 RESULTS_DIR=$RESULTS
 TARGET_ROOT=$SRC
 TARGET_SLUG=exr-run-test
@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
 }
 EOF
 
-cat > "$CRASH_DIR/asan.txt" <<'EOF'
+cat > "$CRASH_DIR/sanitizer.txt" <<'EOF'
 ASAN_RUN_HEADER: runs=5 mode=generic testcase=output/exr-run-test/scratch/missing.bin started=x
 === Run 1/5 ===
 ==99999==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xdead at pc 0xface
@@ -178,8 +178,6 @@ fi
 # ─── Inspect the staged bundle ───────────────────────────────────────
 assert_file_exists "$CRASH_DIR/reproduce.sh" "bundle: reproduce.sh emitted"
 assert_file_exists "$CRASH_DIR/sanitizer.txt" "bundle: neutral sanitizer output emitted"
-assert_file_not_exists "$CRASH_DIR/asan.txt" \
-  "bundle: legacy asan.txt alias NOT emitted (readers still accept it as a fallback)"
 assert_file_exists "$CRASH_DIR/input.bin"    "bundle: input.bin preserved"
 assert_file_not_exists "$CRASH_DIR/input.out" \
   "bundle: stale-or-fake input.out NOT staged as testcase"

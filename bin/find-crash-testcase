@@ -27,10 +27,10 @@ def main(argv: list[str] | None = None) -> int:
     if audit.is_dir():
         scan_dirs.append(audit)
     scan_dirs.append(d)
-    asan = crash_artifacts.find_primary_asan(scan_dirs)
+    sanitizer = crash_artifacts.find_primary_sanitizer(scan_dirs)
     testcase = crash_artifacts.find_testcase(
         scan_dirs,
-        asan_files=[asan] if asan else [],
+        sanitizer_files=[sanitizer] if sanitizer else [],
         min_bytes=max(1, args.min_bytes),
     )
     if testcase is None:

@@ -276,7 +276,7 @@ def _probe_ran_clean_text(report_text: str) -> bool:
     input and produced no crash (verdict=CLEAN / NO CRASHES / CRASH_RATE 0/N) —
     a recorded failed reproduction, equivalent to a structured 0/N rate. Lets
     the threat gate and the clean-run demotion react to clean evidence embedded
-    in report.md, not only to adjacent sanitizer.txt/*.asan.txt files."""
+    in report.md, not only to adjacent sanitizer artifacts."""
     return bool(_PROBE_CLEAN_RE.search(report_text or ""))
 
 
@@ -295,7 +295,7 @@ def _sanitizer_ran_clean(report_dir: Path | None) -> bool:
     if report_dir is None:
         return False
     texts: list[str] = []
-    for name in ("sanitizer.txt", "asan.txt"):
+    for name in ("sanitizer.txt",):
         p = report_dir / name
         if p.is_file():
             texts.append(p.read_text("utf-8", errors="replace"))
@@ -433,8 +433,7 @@ _CALL_SEQUENCE_RE = re.compile(r"\bcall[- ]sequence\b|"
                                r"\bapi call[- ]sequence\b|"
                                r"\b(?:sequence|ordering|order) of (?:\w+\s+){0,3}calls?\b")
 
-# Token aliases, kept in lockstep with shell parse_trigger_source /
-# target_config.sh so Python scoring and shell triage canonicalise the same way.
+# Token aliases shared by report parsing and target configuration.
 _TRIGGER_TOKEN_ALIASES = {
     "data": "bytes", "data-driven": "bytes", "input": "bytes",
     "call-order": "call-sequence", "call-seq": "call-sequence",
@@ -467,9 +466,9 @@ def _attacker_controls_from_target_toml(path: Path | None) -> set[str]:
 def _trigger_components_from_field(value: str) -> set[str]:
     """Canonical trigger components from the structured Trigger source field.
 
-    The field is supposed to contain tokens from lib/triage.sh
+    The field is supposed to contain tokens from lib/triage.py
     (bytes/call-sequence/timing/race/env/protocol-state/fs-state/both), plus the
-    aliases shell parse_trigger_source accepts (data/data-driven/input → bytes;
+    accepted aliases (data/data-driven/input → bytes;
     call-order/call-seq/sequence → call-sequence). Keep this parser token-based:
     when it cannot recognize the field, the scorer leaves the trigger/control
     set-difference empty instead of guessing from prose.
@@ -573,7 +572,7 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
                          r"string|text|char|data|message|body|header|token|"
                          r"json|xml|html|url|uri|utf-?8|unicode|encoding)\b")
     # `both` is the structured triage trigger-source token that expands to
-    # `bytes,call-sequence` (lib/triage.sh _expand_trigger_components): it
+    # `bytes,call-sequence` (lib/triage.py _expand_trigger_components): it
     # asserts a byte path alongside the call-sequence, so it must veto
     # localisation exactly like a bare `bytes` would. Scope it to the
     # trigger_source field ONLY — in free-prose caller_controls/parameter_control
@@ -1539,7 +1538,7 @@ def _repro_facts(report_text: str, fields: dict, cluster_size: int,
     if cluster_size >= 2:
         facts.append(f"cluster of {cluster_size} reports")
     if report_dir is not None:
-        have_san = (any((report_dir / n).is_file() for n in ("sanitizer.txt", "asan.txt"))
+        have_san = ((report_dir / "sanitizer.txt").is_file()
                     or any(report_dir.glob("*.asan.txt")))
         have_tc = any(report_dir.glob("testcase*")) or any(report_dir.glob("poc*"))
         if have_san and have_tc:
@@ -1576,14 +1575,8 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
     First win is kept (the table is rendered first), so a stray bare line
     later in the narrative cannot override the canonical table value.
 
-    If a sidecar ``.llm_fields.json`` exists in ``report_dir``, its values
-    are merged in as a *fallback* — they fill only the fields the report
-    left blank. The agent-authored Fields table is always authoritative.
-    This is the LLM hybrid pass: an inexpensive single-shot LLM call
-    classifies the report into the enums the scorer understands (Surface
-    tier, Primitive class, Caller controls/contract) when the agent did
-    not write them. Scoring stays deterministic from the resulting field
-    values.
+    ``report_dir`` is used only to load the active target threat model. Report
+    fields are the sole scoring input; auxiliary field sidecars are not read.
     """
     out: dict[str, str] = {}
     for raw in report_text.splitlines():
@@ -1618,60 +1611,13 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
     }
     attacker_controls: set[str] = set()
     if report_dir is not None:
-        _merge_llm_fields_sidecar(report_dir, fields)
         attacker_controls = _attacker_controls_from_target_toml(_find_target_toml(report_dir))
-    # Match shell triage's ${TARGET_ATTACKER_CONTROLS_CSV:-bytes}: with no
-    # discoverable target.toml, default to the harness boundary {bytes} so a
+    # With no discoverable target.toml, default to the harness boundary
+    # {bytes} so a
     # `Trigger source: both` still yields the call-sequence set-difference
     # instead of scoring as if nothing were out of bounds.
     fields["_attacker_controls_csv"] = ",".join(sorted(attacker_controls or {"bytes"}))
     return fields
-
-
-# Mapping from LLM-sidecar JSON keys to internal field names. Both the
-# JSON key set and the enum values are documented in lib/triage.sh
-# alongside the prompt. The sidecar can also carry free-form text — e.g.
-# the LLM may emit `surface: "library-api — Ghost members public API"`
-# which is merged verbatim (the same prose an agent would write).
-_LLM_FIELD_SIDECAR_KEYS = (
-    ("surface",         "surface"),
-    ("primitive",       "primitive_field"),
-    ("trigger_source",  "trigger_source"),
-    ("caller_contract", "caller_contract"),
-    ("caller_controls", "caller_controls"),
-    ("trusted_caller_actions", "trusted_caller_actions"),
-    ("parameter_control", "parameter_control"),
-    ("boundary",        "boundary"),
-    ("class",           "class_field"),
-    ("advisory",        "advisory"),
-)
-
-
-def _merge_llm_fields_sidecar(report_dir: Path, fields: dict) -> None:
-    """If ``.llm_fields.json`` exists alongside the report, fill blanks
-    in ``fields`` from it. Existing (agent-authored) values are never
-    overridden — the LLM pass is a fallback only, so agents that emit
-    proper fields remain authoritative."""
-    sidecar = report_dir / ".llm_fields.json"
-    if not sidecar.is_file():
-        # A built crash bundle stages the agent's originals (report.md, the
-        # sidecar) under .audit/ while REPORT.md lives at the bundle root, so
-        # the sidecar sits one level down. Check there before giving up.
-        sidecar = report_dir / ".audit" / ".llm_fields.json"
-    if not sidecar.is_file():
-        return
-    try:
-        data = json.loads(sidecar.read_text("utf-8", errors="replace"))
-    except (OSError, ValueError):
-        return
-    if not isinstance(data, dict):
-        return
-    for sidecar_key, internal_key in _LLM_FIELD_SIDECAR_KEYS:
-        if fields.get(internal_key):
-            continue  # agent value wins
-        v = data.get(sidecar_key)
-        if isinstance(v, str) and v.strip():
-            fields[internal_key] = v.strip()
 
 
 _CLUSTER_SIZE_RE = re.compile(r"\((\d+)\s+reports?\b", re.IGNORECASE)
@@ -1704,7 +1650,7 @@ def _detect_cluster_size(report_text: str) -> int:
 
 # An auto-filed `bin/probe` skeleton leaves `_TODO (agent):` placeholder lines
 # until an agent enriches the report. Line-anchored, matched exactly like
-# lib/triage.sh's promotion-pending check, so an enriched report (placeholders
+# lib/triage.py's promotion-pending check, so an enriched report (placeholders
 # replaced) never matches, nor does an instructional mention in prose.
 _SKELETON_TODO_RE = re.compile(r"^_TODO \(agent\):", re.MULTILINE)
 
@@ -1733,7 +1679,7 @@ def compute_severity(report_text: str,
     fields["_report_text"] = report_text
 
     # Primitive: prefer a structured Primitive field that names a known class
-    # (the LLM hybrid pass writes this) when the narrative detector fell
+    # when the narrative detector fell
     # through to "unknown" or matched only a prose-regex web/recon class. A
     # precise sanitizer-class match (ASan / UBSan / TSan) is never overridden.
     prim_key, prim_label = detect_primitive(report_text)
@@ -2214,13 +2160,9 @@ def _replace_severity_section(text: str, new_section: str) -> str:
     return text + sep + "\n" + new_section
 
 
-# Reach fields the scorer resolves (from the report, or the LLM sidecar as a
-# fallback) and surfaces into the Fields table when a report omits them. This
-# makes a model-direct report — whose freeform model author wrote none of these
-# and which never ran the harness's per-cell triage — read in the same style as
-# a harness crash, where the audit agent authors these rows directly. Display
-# labels and order mirror the harness report template. Keyed by the internal
-# field name used in severity["fields_used"].
+# Reach fields the scorer resolves from the report and surfaces into the Fields
+# table when the author used bare labels. Missing fields remain unknown and
+# score conservatively; the scorer never invents reachability evidence.
 _SURFACED_REACH_FIELDS = (
     ("class_field",     "Class"),
     ("primitive_field", "Primitive"),
@@ -2320,7 +2262,7 @@ def _synthesize_fields_table(text: str, severity: dict, used: dict) -> str:
     `bin/export-repro` and the harness report template both use), and any bare
     `Field: value` lines are left in place: the harness deliberately keeps the
     Fields table duplicated as bare labels below it so downstream regex parsers
-    (`bin/export-repro`, `bin/cluster-crashes`, `lib/triage.sh`) keep working,
+    (`bin/export-repro`, `bin/cluster-crashes`, `lib/triage.py`) keep working,
     and `bin/render-md` hides that duplicate block from HTML. Removing the bare
     labels here would make those fields invisible to export. No-op if there is
     nothing beyond Severity to table (keeps the slim recon template unchanged)."""
@@ -2365,7 +2307,7 @@ def update_report(report_path: Path, severity: dict) -> None:
     ]
     if to_add:
         text = _insert_fields_rows(text, to_add)
-    # Always update an existing `- **Severity**: …` bullet (legacy crash
+    # Always update an existing `- **Severity**: …` bullet (alternate crash
     # reports rely on the auto-formula being kept in sync), but never
     # synthesize one — that would inject a stub `## Classification`
     # heading into the slim recon-finding template on every run.
@@ -2449,7 +2391,7 @@ def _find_report_md_in_dir(report_dir: Path) -> Path | None:
     # name).is_file() probe returns a Path with whatever case we asked
     # for, and a later write_text through that Path can leave the
     # visible entry under the wrong case — which then trips the
-    # exact-case bundle gate in lib/triage.sh:_triage_has_exact_file.
+    # exact-case bundle gate in lib/triage.py:_triage_has_exact_file.
     return exact_child_file(report_dir, ("report.md", "REPORT.md"))
 
 
@@ -2493,10 +2435,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     report_dir, report_md = resolved
     report_text = report_md.read_text("utf-8", errors="replace")
-    # sanitizer.txt is canonical; asan.txt is a legacy alias kept as a
-    # fallback so older bundles shipped to maintainers stay readable.
     adjacent_asan_text = ""
-    for name in ("sanitizer.txt", "asan.txt"):
+    for name in ("sanitizer.txt",):
         candidate = report_dir / name
         if candidate.is_file():
             try:
@@ -2509,10 +2449,9 @@ def main(argv: list[str] | None = None) -> int:
         # Read-only fast path: combine the report (which embeds the trace)
         # with every adjacent sanitizer artifact so the leaf/context scan
         # sees the full fault stack regardless of which file carries it or
-        # how it is named at triage time (sanitizer.txt, asan.txt,
-        # *_confirm.asan.txt, …) — not just one fixed filename.
+        # how it is named at triage time (sanitizer.txt or a probe sidecar).
         texts = [report_text]
-        for name in ("sanitizer.txt", "asan.txt"):
+        for name in ("sanitizer.txt",):
             p = report_dir / name
             if p.is_file():
                 texts.append(p.read_text("utf-8", errors="replace"))
@@ -2532,7 +2471,7 @@ def main(argv: list[str] | None = None) -> int:
     # subsequent runs and spuriously collapses the surface tier. Scoring
     # should only see the agent-authored part of the report.
     scoring_text = _strip_auto_sections(report_text)
-    # Append asan.txt when adjacent — it has the canonical ASan summary
+    # Append sanitizer.txt when adjacent — it has the canonical runtime summary
     # (class + READ/WRITE of size N + SCARINESS line) that the report
     # narrative may only paraphrase. Increases classifier accuracy without
     # changing what gets persisted.

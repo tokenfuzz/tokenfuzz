@@ -56,7 +56,7 @@ correct runner from the testcase's header: coverage-gated ASan for browser/js
 when possible, generic ASan for generic targets, and differential mode when the
 testcase has `MODE: js-diff`. **No env vars to set** — TARGET, HYPOTHESIS-ID,
 HARNESS, and (derived) WANT all come from the header. RESULTS_DIR / TARGET_ROOT
-are discovered by walking up to `output/<slug>/.session-env`.
+are discovered by walking up to `output/<slug>/<backend>/results/.session-env`.
 
 ```
 bin/probe "${RESULTS_DIR}/scratch-N/tc.html"               # 1 run (exploration)
@@ -70,11 +70,13 @@ bin/probe "${RESULTS_DIR}/scratch-N/tc.xml" -- 8 100       # trailing args go to
   `bin/probe`.
 - MISSED → revise input, don't discard. Don't spend ASan budget.
 - Generic C/C++ targets do not support coverage gating; `bin/probe` falls back
-  to `bin/run-asan-multi generic` and saves a sibling `.asan.txt`.
+  to `bin/run-sanitizer-multi asan generic` and saves a sibling `.asan.txt`.
 - Clean (no-crash) runs whose stdout exceeds ~200 lines are auto-truncated to
-  first 80 + last 120, with a `[run-asan-multi] DIGEST: …` marker pointing at the
-  full `.asan.txt`. Crash runs are never truncated. Override per-call with
-  `ASAN_DIGEST_HEAD=N ASAN_DIGEST_TAIL=M bin/probe …` or `ASAN_NO_DIGEST=1`.
+  first 80 + last 120, with a `[run-sanitizer-multi] DIGEST: …` marker pointing at the
+  full `.asan.txt`. Crash runs bypass this line digest but still use the shared
+  output byte cap. Override per-call with `SANITIZER_DIGEST_HEAD=N
+  SANITIZER_DIGEST_TAIL=M bin/probe …`, `SANITIZER_NO_DIGEST=1`, or
+  `OUTCAP_MAX_BYTES=0`.
 
 ## Testcase Header Coupling
 
@@ -94,7 +96,7 @@ Python uses `# TARGET: ...`, C/C++/JS use `// TARGET: ...`, and HTML uses
 `bin/probe` builds C/C++ harnesses on demand against
 `output/<slug>/target.toml`'s `asan_lib` + includes + link_libs, and also
 supports compiled `.rs/.go/.swift` harnesses plus interpreted language
-harnesses by extension. Replaces hand-written `testcase.sh` shell wrappers.
+harnesses by extension and records the executed command.
 
 ## Seed Corpus First
 
@@ -117,7 +119,7 @@ When your testcase dies to a reproducible guard string, append a new entry.
 
 ## Tried-Inputs Memory (Survives Compression)
 
-Every `bin/probe` / `bin/run-asan-multi` run appends to `TRIED_INPUTS_LOG`. After context compression:
+Every `bin/probe` / `bin/run-sanitizer-multi` run appends to `TRIED_INPUTS_LOG`. After context compression:
 ```
 bin/state recent-tried --agent N --limit 40
 ```
@@ -186,13 +188,11 @@ documentation.
 ```
 bin/state resume        --agent N [--mode browser|js|generic] [--role reproduce|analysis]
 bin/state next-card     --agent N [--mode browser|js|generic] [--peek]
-bin/state show-card     CARD_ID|--card-id ID [--mode MODE]       # compact JSON
-bin/state explain-card  CARD_ID|--card-id ID [--mode MODE]       # alias
+bin/state show-card     CARD_ID [--mode MODE]                    # compact JSON
 bin/state list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
-bin/state dump-queue    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]  # alias
-bin/state show-crash    CRASH-ID|--crash-id ID                  # compact JSON
+bin/state show-crash    CRASH-ID                                # compact JSON
 bin/state list-crashes  [--status OK|NEW|...] [--limit N]
-bin/state show-finding  FIND-ID|--finding-id ID                 # compact JSON
+bin/state show-finding  FIND-ID                                 # compact JSON
 bin/state list-findings [--status OK|NEW|...] [--limit N]
 bin/state add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:func:line \
                         --input-shape 'shape' --guard-gap 'gap' \
@@ -201,16 +201,15 @@ bin/state update-hyp    --id H-... --status STATUS [--note NOTE]
 bin/state update-card   --card-id PATCH-... --status {claimed|done|discarded|crash|find|blocked}
 bin/state add-run       --agent N --hypothesis-id H-... --mode MODE --testcase TC \
                         --asan-output ASAN --verdict VERDICT \
-                        [--testcase-sha1 HEX] [--asan-runs N]   # bin/probe sets these
+                        [--testcase-sha1 HEX] [--sanitizer-runs N]   # bin/probe sets these
 bin/state add-note      --agent N --hypothesis-id H-... \
                         --kind data-flow|guard|variants|decision|context --text '...'
 bin/state show-recent   [--agent N] [--hyps N] [--runs N] [--claims N] [--notes N]
 bin/state recent-hyps   [--agent N] [--card-id ID] [--status REGEX] [--strategy S] [--limit N]
 bin/state recent-runs   [--agent N] [--hypothesis-id H-...] [--card-id ID] [--verdict REGEX] [--limit N]
 bin/state recent-notes  [--agent N] [--hypothesis-id H-...] [--kind KIND] [--limit N]
-bin/state list-notes    [--agent N] [--hypothesis-id H-...] [--kind KIND] [--limit N]  # alias
 bin/state recent-tried  --agent N|all [--verdict REGEX] [--hypothesis H-...] [--target SUBSTR] [--limit N]
-bin/state explain-queue [--agent N] [--mode MODE] [--role ROLE] [--strategy S] [--top N] [--all]
+bin/state explain-queue [--mode MODE] [--strategy S] [--top N] [--all]
 ```
 
 `bin/state resume` includes Runtime Feedback derived from recent probe
@@ -220,7 +219,7 @@ filing/discard evidence.
 Search & diff helpers:
 
 ```
-bin/rg-safe <rg args>            source search under targets/; line+byte caps
+bin/rg-safe <rg args>            source search under targets/; byte-capped output
 bin/scratch-search PATTERN       audit-artifact path inventory under $RESULTS_DIR
                                  (scratch-*, corpus, crashes, findings; per-
                                  section labeled output). Default is paths only.
@@ -254,7 +253,7 @@ Use `bin/scratch-status --agent N` for scratch directory status and
 filenames. Do not use raw `ls -la` on scratch dirs unless exact permissions or
 link targets matter.
 Before re-probing reflexively, check `bin/probe-history <testcase>` — if a
-confirmed verdict (asan_runs=5) exists in this session, you already have the
+confirmed verdict (sanitizer_runs=5) exists in this session, you already have the
 evidence; only re-run when state has shifted (binary rebuilt, harness edited,
 or you want to refute a flaky single-run result).
 
@@ -272,20 +271,19 @@ PATCH_CONTEXT=N | PATCH_MAX_LINES=N | PATCH_MAX_BYTES=N   widen show-patch
                                  either clip fires a per-file --stat tail)
 ```
 
-## State File Management
+## Structured State Management
 
 - Use NEUTRAL vocabulary. Describe by LOCATION: "issue in File:Function:Line".
-- Expected Diagnostic column uses ONLY: lifetime / bounds / type / size / uninit / state.
-- Keep `## Primary Subsystem: <path>` at the top, updated on every rotation.
+- `bin/state add-hyp --diagnostic` uses ONLY: lifetime / bounds / type / size / uninit / state.
 - Max 3 NEEDS_TESTCASE, max 3 ENV-BLOCKED at any time.
-- Write Working Context after each investigation milestone.
+- Record milestones with `bin/state add-note` (`data-flow`, `guard`, `variants`, `decision`, or `context`).
 
 ## After Context Compression
 
-1. Read your state file's Working Context section first
+1. Run `bin/state resume --agent N` and read the recent structured notes
 2. Resume top PENDING hypothesis
 3. No new recon
-4. Do NOT re-read files already in Working Context
+4. Do NOT re-read ranges listed in `PRIOR SESSION SEED`
 
 ## Rejected Crashes & Findings
 

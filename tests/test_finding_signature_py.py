@@ -438,10 +438,10 @@ ok(fs.cluster_id(("auth", "src/foo.go", "Bar"))
 print("\nextract_severity")
 assert_eq(("Low", 1, 3.1), fs.extract_severity("| Severity | Low (CVSS-BTE 4.0: 3.1) |"),
           "Fields-table row with CVSS-BTE 4.0 score")
-# Backward compatibility: the pre-colon Fields form still parses, so already
+# The pre-colon Fields form also parses, so
 # persisted reports keep their scores after the format change.
 assert_eq(("Low", 1, 3.1), fs.extract_severity("| Severity | Low (CVSS-BTE 4.0 3.1) |"),
-          "legacy no-colon Fields-table row still parses")
+          "no-colon Fields-table row parses")
 assert_eq(("High", 3, 8.7),
           fs.extract_severity("- **Severity**: High (CVSS-BTE 4.0: 8.7 High; "
                               "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N; primitive=x)"),

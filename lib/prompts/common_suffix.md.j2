@@ -5,7 +5,7 @@
 - **Guard-chain rule:** if 3+ hypotheses die to the same guard, find a path past it or rotate.
 - **Check rejected crashes** before filing: `{{ results_dir }}/crashes-rejected/REJECTED-CRASHES.md`.
 - **Fuzz leads:** scan `{{ fuzz_leads_path }}` for recent non-noise libFuzzer crashes.
-- **After compression:** read your state file's Working Context, resume top PENDING. No new recon.
+- **After compression:** run `bin/state resume --agent {{ agent_num }}`, resume top PENDING. No new recon.
 - **Session rules digest** is embedded below; drill into `{{ reference_dir }}/session-rules.md` only when the digest is ambiguous.
 
 ## CONTEXT ECONOMICS
@@ -16,7 +16,6 @@ Every turn re-reads the whole conversation, so fewer turns and less added text a
 - **Do NOT `tail` or `cat` raw `state/*.jsonl`.** Each row is multi-KB JSON. Use `bin/state show-recent --hyps 10 --runs 10 --claims 10` (one call, ~3 KB) or the per-section `bin/state recent-hyps|recent-runs|recent-claims|recent-notes` helpers — each returns slim pipe-delimited rows instead of full JSON. `grep -r` across `output/<slug>/` JSONL files is the same antipattern; filter via `bin/state` flags instead.
 - **Do not run `bin/rank-work` just to browse cards.** It rewrites the queue and can dump tens of KB; use `bin/state explain-queue` or `bin/state list-cards --limit N` for inspection.
 - **Default Grep tool calls to `context: 2` and `head_limit: 30`.** Wider contexts return tens of KB of redundant text; tighten to `context: 2` / `head_limit: 30` and widen only after a confirmed hit you need to inspect.
-- **Watch for the 100K context warning.** When the harness injects "CONTEXT NEAR COMPACTION", checkpoint findings to your state file's Working Context immediately. Auto-compaction at ~165K otherwise drops un-checkpointed evidence.
 
 ## SEARCH DISCIPLINE
 

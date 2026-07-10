@@ -134,7 +134,6 @@ browser, are the fastest way to read it:
 | `$RESULTS/findings/FINDING-CLUSTERS.html` | Finding review table. |
 | `$RESULTS/findings-rejected/` | Findings the LLM substance gate rejected twice. |
 | `$RESULTS/crashes-rejected/REJECTED-CRASHES.html` | Rejected crash candidates, with reasons. |
-| `$RESULTS/crashes-needs-review/` | Borderline rejections paused for one more pass before final demotion. |
 | `output/$TARGET/CRASH-CLUSTERS.html` | Cross-backend crash rollup for the target. |
 | `output/$TARGET/FINDING-CLUSTERS.html` | Cross-backend finding rollup for the target. |
 

@@ -15,8 +15,6 @@ Validated waste:
 
 Edge cases handled:
 - Range merging: overlapping (offset, limit) pairs collapse to a single span.
-- AUDIT_STATE files are excluded from the "do not re-read" list — agents
-  legitimately re-read state after compaction.
 - Empty/binary tool_results don't pollute the seed (we record what was
   requested, not what was returned).
 - Malformed JSON lines are skipped silently (logs may be truncated).
@@ -33,7 +31,6 @@ MAX_SEED_BYTES = 2048
 DEFAULT_READ_LIMIT = 2000  # Claude Code's Read default
 MAX_SEARCH_COMMANDS = 8
 EXCLUDE_PATTERNS = (
-    'AUDIT_STATE',
     '.session_seed',
     '.read_log',
     '.static-prompt-rules',
@@ -510,24 +507,38 @@ def render_seed(reads, writes, read_order, searches=None):
 
     return body
 
+
+def write_session_seed(raw_path, out_path):
+    """Refresh a seed from one completed launch. Return True when replaced."""
+    if not os.path.exists(raw_path):
+        return False
+    reads, writes, read_order, searches = parse_raw_log(raw_path)
+    if not reads and not writes and not searches:
+        # Do not erase a useful prior seed after an empty backend session.
+        return False
+    body = render_seed(reads, writes, read_order, searches)
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    temporary = f'{out_path}.{os.getpid()}.tmp'
+    try:
+        with open(temporary, 'w', encoding='utf-8') as f:
+            f.write(body)
+        os.replace(temporary, out_path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+    return True
+
+
 def main(argv):
     if len(argv) != 3:
         print(f'Usage: {argv[0]} <raw-log-path> <output-seed-path>', file=sys.stderr)
         return 2
     raw_path, out_path = argv[1], argv[2]
-    if not os.path.exists(raw_path):
-        # No prior log — nothing to seed. Don't create an empty file.
-        return 0
-    reads, writes, read_order, searches = parse_raw_log(raw_path)
-    if not reads and not writes and not searches:
-        # Empty/short session — skip writing to avoid stomping a useful prior seed.
-        return 0
-    body = render_seed(reads, writes, read_order, searches)
-    out_dir = os.path.dirname(out_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    with open(out_path, 'w', encoding='utf-8') as f:
-        f.write(body)
+    write_session_seed(raw_path, out_path)
     return 0
 
 

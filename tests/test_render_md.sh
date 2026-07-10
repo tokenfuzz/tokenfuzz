@@ -395,32 +395,6 @@ grep -q '<details[^>]*id="expected-sanitizer-output"' "$hero_html" \
   && fail "Expected sanitizer output not collapsible" "Expected sanitizer output was wrapped in <details>" \
   || pass "Expected sanitizer output not collapsible"
 
-# 14b2. Hero top-frame extraction is heading-agnostic — finds the #0
-#       frame whether it lives in the new consolidated `## Expected
-#       sanitizer output` block (current shape) or the legacy `## ASan
-#       top frames` block (older bundles still on disk).
-legacy_fix="$TEST_TMPDIR/legacy_frames.md"
-cat > "$legacy_fix" <<'EOF'
-# CRASH-LEGACY-1
-
-## Fields
-
-| Field     | Value                |
-|:----------|:---------------------|
-| Primitive | heap-buffer-overflow |
-| Severity  | High (CVSS-BTE 4.0: 8.1) |
-
-## ASan top frames
-
-```
-    #0 <addr> in legacy_func legacy.c:11
-```
-EOF
-python3 "$RENDER" "$legacy_fix" --html-sibling >/dev/null 2>&1
-legacy_html="$TEST_TMPDIR/legacy_frames.html"
-assert_file_contains "$legacy_html" '<code>legacy_func</code>' "hero finds top frame in legacy ASan top frames heading"
-assert_file_contains "$legacy_html" 'legacy.c:11' "hero finds frame loc in legacy heading"
-
 # 14b3. Label-style report sections from audit-authored reports render as
 #       proper sections, and multi-line key:value blocks render as a compact
 #       definition list instead of one run-on paragraph.

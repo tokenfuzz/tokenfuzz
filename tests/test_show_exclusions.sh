@@ -9,15 +9,20 @@ SHOW_EXCLUSIONS="$SCRIPT_ROOT/bin/show-exclusions"
 mkdir -p "$RESULTS_DIR/crashes/CRASH-001-alpha"
 mkdir -p "$RESULTS_DIR/findings/FIND-010-state"
 mkdir -p "$RESULTS_DIR/crashes-rejected/CRASH-002-null"
+mkdir -p "$RESULTS_DIR/crashes-rejected/CRASH-003-timeout"
 mkdir -p "$RESULTS_DIR/fuzz-crashes/FuzzerA/shutdown-noise"
 
 cat > "$RESULTS_DIR/crashes-rejected/CRASH-002-null/.autodiscard" <<'EOF'
 # Auto-rejected by triage
 # Reason: null-deref
 EOF
+cat > "$RESULTS_DIR/crashes-rejected/CRASH-003-timeout/.autodiscard" <<'EOF'
+  # Auto-rejected by triage
+  # Reason: timeout-only
+EOF
 printf 'shutdown noise\n' > "$RESULTS_DIR/fuzz-crashes/FuzzerA/shutdown-noise/crash-da39"
 
-output=$(bash "$SHOW_EXCLUSIONS" "$RESULTS_DIR" 2>&1)
+output=$("$SHOW_EXCLUSIONS" "$RESULTS_DIR" 2>&1)
 rc=$?
 
 assert_eq "0" "$rc" "show-exclusions: exits successfully"
@@ -25,10 +30,12 @@ assert_match "Active crash candidates" "$output" "show-exclusions: active sectio
 assert_match "CRASH-001-alpha" "$output" "show-exclusions: lists current CRASH layout"
 assert_match "FIND-010-state" "$output" "show-exclusions: lists current FIND layout"
 assert_match "CRASH-002-null[[:space:]]+null-deref" "$output" "show-exclusions: rejected reason"
+assert_match "CRASH-003-timeout[[:space:]]+timeout-only" "$output" \
+  "show-exclusions: indented rejection reason"
 assert_match "fuzz-crashes/FuzzerA/shutdown-noise/crash-da39" "$output" "show-exclusions: shutdown-noise entry"
 assert_match "active crashes:[[:space:]]+1" "$output" "show-exclusions: active count"
 assert_match "confirmed findings:[[:space:]]+1" "$output" "show-exclusions: finding count"
-assert_match "rejected crashes:[[:space:]]+1" "$output" "show-exclusions: rejected count"
+assert_match "rejected crashes:[[:space:]]+2" "$output" "show-exclusions: rejected count"
 assert_match "fuzz noise moved:[[:space:]]+1" "$output" "show-exclusions: noise count"
 assert_not_match "VULN-" "$output" "show-exclusions: no stale VULN layout"
 

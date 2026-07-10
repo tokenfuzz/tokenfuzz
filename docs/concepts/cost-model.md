@@ -25,7 +25,7 @@ running.
 | Cost driver | Why it grows | How TokenFuzz contains it |
 | --- | --- | --- |
 | Cached input tokens per turn | Conversation length × cache-read price | Shared prompt cache; capped state views; session seeds across compactions. |
-| New input tokens per turn | Source dumps, raw logs, transcripts | Capped source-reading wrappers; structured state views. |
+| New input tokens per turn | Source dumps, raw logs, transcripts | Capped source-reading commands; structured state views. |
 | Output tokens | Long model prose, narration | Strategy quality bar: agents are graded on testcases written, not words. |
 | Sanitizer runs | Each run takes wall-clock + RAM; browsers cost more | Per-agent sanitizer-run budget; coverage gate before sanitizer run. |
 | Redundant work | Two agents re-exploring the same surface | Work-card leases, per-agent input memory, rejected indexes. |
@@ -80,18 +80,13 @@ KB; the equivalent slim view was about 3 KB.
 
 ## Session seeds across compaction
 
-When the conversation approaches the model's compaction window, the
-harness:
-
-1. Injects a `CONTEXT NEAR COMPACTION` warning so the agent can
-   checkpoint findings to its working-context section.
-2. On the next iteration, directs the seed prompt to read that
-   checkpoint plus a small set of files and line windows it has
-   already covered.
-3. Tells the agent explicitly **not** to re-read those ranges.
+After each completed agent launch, the harness extracts a small seed from
+the structured transcript. The seed records source searches, file ranges,
+and testcase paths already used. The next iteration combines it with
+`bin/state resume --agent <n>` and tells the agent not to repeat those reads.
 
 Net effect: an agent that has been compacted does not pay for
-re-reading the last hour's source.
+re-reading the last iteration's source after a fresh launch or compaction.
 
 ## Per-agent sanitizer budget
 

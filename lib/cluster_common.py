@@ -1,8 +1,7 @@
 """cluster_common.py — shared helpers for bin/cluster-crashes + bin/cluster-findings.
 
 Both clustering tools emit a `*-CLUSTERS.md` report, render an HTML
-sibling next to it, sweep away renamed legacy report files, and — when
-asked to aggregate a whole target root — serialize concurrent backends
+sibling next to it, and — when asked to aggregate a whole target root — serialize concurrent backends
 behind an advisory file lock. That scaffolding is identical between the
 two tools; only the signatures, file names, and stack-frame logic differ.
 Keeping the scaffolding here means a fix (e.g. to the render timeout or
@@ -142,21 +141,6 @@ def render_member_report_siblings(clusters: Iterable[dict]) -> None:
             stale.append(path)
     # One batched render-md process for all stale members (was one per member).
     render_md_batch(stale)
-
-
-def remove_legacy_cluster_files(paths: Iterable[Path]) -> None:
-    """Delete renamed-away cluster report files (and their .html siblings).
-
-    A clustering tool that once wrote ``CLUSTERS.md`` and now writes
-    ``CRASH-CLUSTERS.md`` calls this with the old name so a stale report
-    does not linger beside the current one.
-    """
-    for path in paths:
-        for candidate in (path, path.with_suffix(".html")):
-            try:
-                candidate.unlink()
-            except OSError:
-                pass
 
 
 def run_under_aggregate_lock(

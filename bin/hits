@@ -1,655 +1,349 @@
-#!/bin/bash
-# Coverage probe — runs a testcase under the coverage-instrumented ASan build
-# (build-asan-cov) and reports whether it reached a caller-named target symbol.
-#
-# Usage:
-#   bin/hits --testcase <path> --want <symbol-regex> [--mode browser|js]
-#                   [--timeout N] [--save <hits-file>] [-- extra args...]
-#
-#   extra args are forwarded to the browser/js runtime. This is mainly for
-#   JS-shell feature flags such as `--enable-promise-allkeyed`.
-#
-# Exit codes:
-#   0  HIT   (target symbol appears in executed PCs)
-#   1  MISSED
-#   2  build/tool problem (coverage build missing, sancov unavailable)
-#   3  testcase never executed (harness problem)
-#
-# Output:
-#   HIT: <file:function:line>                  (stdout, single line) on success
-#   MISSED — closest reached: <frame>          (stdout) on miss
-#   Full hit list written to --save if provided, else to a temp file path
-#   echoed on stderr as "hits-file: <path>".
-#
-# The wrapper invokes run-asan.sh-style launch logic but points at
-# build-asan-cov (not build-asan) and adds coverage=1 to ASAN_OPTIONS so the
-# sancov writer emits <module>.<pid>.sancov per library.
+#!/usr/bin/env python3
+"""Run a testcase under SanitizerCoverage and report symbol reachability."""
 
-set -uo pipefail
+from __future__ import annotations
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-source "$REPO_ROOT/lib/timeout.sh"
-# shellcheck source=../lib/platform.sh
-source "$REPO_ROOT/lib/platform.sh"
-# shellcheck source=../lib/target_config.sh
-source "$REPO_ROOT/lib/target_config.sh"
-# shellcheck source=../lib/sanitizer.sh
-source "$REPO_ROOT/lib/sanitizer.sh"
-sanitizer_prepare_runtime_env asan
-TARGET_ROOT="${TARGET_ROOT:-}"
-COV_APP="${COV_APP:-}"
-COV_BROWSER="${COV_BROWSER:-}"
-COV_XUL="${COV_XUL:-}"
-COV_JS="${COV_JS:-}"
-SANCOV="${SANCOV:-$(audit_llvm_tool sancov)}"
-SYMBOLIZER="${SYMBOLIZER:-$(audit_llvm_tool llvm-symbolizer)}"
+import argparse
+import datetime as dt
+import hashlib
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
 
-TESTCASE=""
-WANT=""
-MODE="browser"
-TIMEOUT="20"
-SAVE=""
-LOG=""   # append-only per-agent verdict log; one line per invocation
-EXTRA_ARGS=()
-SLUG="${TARGET_SLUG:-}"          # routes edge journals to output/<slug>/coverage/
-AGENT="${AUDIT_AGENT_NUM:-${AGENT_NUM:-0}}" # journal namespace; 0 = un-attributed standalone run
-TMP_ROOT="${TMPDIR:-/tmp}"
-TMP_ROOT="${TMP_ROOT%/}"
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
 
-# Edge bookkeeping is best-effort. EDGES_HIT / NEW_EDGES are computed
-# below and emitted alongside the legacy HIT/MISSED verdict; the verdict
-# log line gains "edges=N new=M" fields without disturbing the existing
-# `frame=` field, so older grep callers keep working.
-EDGES_HIT_COUNT=0
-NEW_EDGES_COUNT=0
+import edges
+import sanitizer
+import target_config
+from timeout import run_timeout
 
-die() { echo "[hits] $*" >&2; exit 2; }
+NOISE_RE = re.compile(
+    r"ne_context_new|cubeb_|nrappkit|nspr|nss_init|sqlite3|^ld-|^dyld_|gmp_|"
+    r"dns_init|libsystem_|CoreFoundation|NSApplication|XPCOMGlueLoad|nsAppRunner|"
+    r"NS_LogInit|InitGlobalCallback|GeckoMain|XRE_main$|loadXULBundle|"
+    r"MOZ_NewProcessBinding"
+)
+PROFILE_PREFS = '''user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("dom.allow_scripts_to_close_windows", true);
+user_pref("devtools.console.stdout.content", true);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.startup.page", 0);
+'''
 
-file_stat_key() {
-  local path="$1" st
-  st=$(audit_stat_key "$path" 2>/dev/null || true)
-  [ -n "$st" ] || return 1
-  printf '%s:%s\n' "$path" "$st"
-}
 
-hits_cache_dir() {
-  local d="${RESULTS_DIR:-${LOGDIR:-}}"
-  if [ -n "$d" ]; then
-    d="${d%/}/.hits-cache"
-  else
-    d="${TMP_ROOT}/audit-hits-cache-${USER:-user}"
-  fi
-  mkdir -p "$d" 2>/dev/null || return 1
-  printf '%s\n' "$d"
-}
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--testcase", required=True)
+    result.add_argument("--want", required=True)
+    result.add_argument("--mode", choices=("browser", "js"), default="browser")
+    result.add_argument("--timeout", type=int, default=20)
+    result.add_argument("--save")
+    result.add_argument("--log")
+    result.add_argument("--slug", default=os.environ.get("TARGET_SLUG", ""))
+    result.add_argument("--agent", default=os.environ.get("AUDIT_AGENT_NUM", os.environ.get("AGENT_NUM", "0")))
+    result.add_argument("extra", nargs=argparse.REMAINDER)
+    return result
 
-sancov_section_output_contains() {
-  local output="$1" needle="$2"
-  case "$output" in
-    *"$needle"*) return 0 ;;
-    *)           return 1 ;;
-  esac
-}
 
-require_arg() {
-  # Guard against `bin/hits --testcase` (no value) under `set -u`.
-  if [ "$#" -lt 2 ]; then
-    echo "[hits] $1 requires a value" >&2
-    exit 2
-  fi
-}
+def llvm_tool(name: str, override: str = "") -> str:
+    return override or sanitizer.llvm_tool(name)
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --testcase) require_arg "$@"; TESTCASE="$2"; shift 2 ;;
-    --want)     require_arg "$@"; WANT="$2";     shift 2 ;;
-    --mode)     require_arg "$@"; MODE="$2";     shift 2 ;;
-    --timeout)  require_arg "$@"; TIMEOUT="$2";  shift 2 ;;
-    --save)     require_arg "$@"; SAVE="$2";     shift 2 ;;
-    --log)      require_arg "$@"; LOG="$2";      shift 2 ;;
-    --slug)     require_arg "$@"; SLUG="$2";     shift 2 ;;
-    --agent)    require_arg "$@"; AGENT="$2";    shift 2 ;;
-    --)
-      shift
-      EXTRA_ARGS=("$@")
-      break
-      ;;
-    -h|--help)
-      sed -n '2,18p' "$0"; exit 0 ;;
-    *) die "unknown arg: $1" ;;
-  esac
-done
 
-# Source edge bookkeeping helpers. Best-effort: if the lib is missing the
-# rest of the wrapper still works, we just don't track novelty.
-if [ -f "$REPO_ROOT/lib/edges.sh" ]; then
-  # shellcheck disable=SC1091
-  source "$REPO_ROOT/lib/edges.sh"
-fi
+def stat_key(path: Path) -> str:
+    stat = path.stat()
+    return f"{path}:{int(stat.st_mtime)}:{stat.st_size}"
 
-# Append a single-line verdict to LOG if set. The audit harness (see
-# build_rotation_directive in bin/audit) greps this log for
-# "^HIT:" lines to count coverage-confirmed reaches per agent. Format
-# stable: <verdict> <ts> testcase=<path> want=<re> edges=N new=M frame=<...>.
-# `edges=` and `new=` are appended after the addition of edge novelty
-# tracking; older readers that only parse `^HIT:|^MISSED:` continue to
-# work because the new fields are positional after `want=`.
-append_verdict() {
-  [ -n "$LOG" ] || return 0
-  mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
-  local verdict="$1"; shift
-  local frame="${1:-}"
-  local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf '%s %s testcase=%s want=%q edges=%s new=%s frame=%s\n' \
-    "$verdict" "$ts" "$TESTCASE" "$WANT" \
-    "${EDGES_HIT_COUNT:-0}" "${NEW_EDGES_COUNT:-0}" \
-    "${frame:-<none>}" >> "$LOG"
-}
 
-# Compute edge novelty against the per-target master union, record new
-# edges into the agent's journal, and update EDGES_HIT_COUNT /
-# NEW_EDGES_COUNT for append_verdict to log. Best-effort: any failure
-# leaves both counters at 0 and does not affect the legacy verdict.
-update_edge_counters() {
-  declare -f edges_extract_from_hits_file >/dev/null 2>&1 || return 0
-  local hf="${1:-}"
-  [ -n "$hf" ] && [ -s "$hf" ] || return 0
+def cache_dir() -> Path:
+    base = os.environ.get("RESULTS_DIR", os.environ.get("LOGDIR", ""))
+    if base:
+        result = Path(base) / ".hits-cache"
+    else:
+        result = Path(tempfile.gettempdir()) / f"audit-hits-cache-{os.environ.get('USER', 'user')}"
+    result.mkdir(parents=True, exist_ok=True)
+    return result
 
-  local run_edges
-  run_edges=$(mktemp "${TMP_ROOT}/hits-edges-XXXXXXXX") || return 0
-  edges_extract_from_hits_file "$hf" > "$run_edges" 2>/dev/null || true
-  local hit_n
-  hit_n=$(wc -l < "$run_edges" 2>/dev/null | tr -d ' ')
-  EDGES_HIT_COUNT="${hit_n:-0}"
 
-  if [ -n "$SLUG" ] && [ "${EDGES_HIT_COUNT:-0}" -gt 0 ]; then
-    local new_n
-    new_n=$(edges_count_new "$SLUG" "$run_edges" 2>/dev/null || echo 0)
-    NEW_EDGES_COUNT="${new_n:-0}"
-    if [ "${NEW_EDGES_COUNT:-0}" -gt 0 ]; then
-      edges_record_run "$SLUG" "${AGENT:-0}" "$run_edges" 2>/dev/null || true
-    fi
-  fi
-  rm -f "$run_edges" 2>/dev/null || true
-}
+def probe_sancov(label: str, binary: Path) -> None:
+    if os.environ.get("HITS_SKIP_SANCOV_PROBE") == "1":
+        return
+    key_text = stat_key(binary)
+    cache = cache_dir() / f"sancov-{hashlib.sha1(key_text.encode()).hexdigest()}.ok"
+    if cache.is_file() and cache.stat().st_size:
+        return
+    if sys.platform == "darwin":
+        command = ["otool", "-l", str(binary)]
+        needle = "sectname __sancov_guards"
+    else:
+        tool = shutil.which("readelf") or shutil.which("llvm-readelf") or shutil.which("objdump")
+        if not tool:
+            raise RuntimeError(f"cannot inspect ELF sections for {label} ({binary}): install binutils or LLVM tools")
+        command = [tool, "-WS" if Path(tool).name == "readelf" else "-S" if Path(tool).name == "llvm-readelf" else "-h", str(binary)]
+        needle = "__sancov_guards"
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    output = completed.stdout + completed.stderr
+    if completed.returncode:
+        raise RuntimeError(f"{Path(command[0]).name} failed on {label} ({binary}): {output or '<no output>'}")
+    if needle not in output:
+        raise RuntimeError(f"{label} lacks sancov instrumentation (__sancov_guards section not present in {binary}) - rebuild with ff-bsan coverage")
+    cache.write_text(key_text + "\n")
 
-[ -n "$TESTCASE" ] || die "--testcase required"
-[ -n "$WANT" ]     || die "--want <symbol-regex> required"
-[ -f "$TESTCASE" ] || die "testcase not found: $TESTCASE"
 
-target_load "$TESTCASE" 2>/dev/null || true
-TARGET_ROOT="${TARGET_ROOT:-${REPO_ROOT}/targets/firefox}"
+class Hits:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.testcase = Path(args.testcase)
+        if not self.testcase.is_file():
+            raise ValueError(f"testcase not found: {self.testcase}")
+        try:
+            self.want = re.compile(args.want)
+        except re.error as exc:
+            raise ValueError(f"invalid --want regex: {exc}") from exc
+        try:
+            self.config = target_config.load(self.testcase)
+        except (FileNotFoundError, ValueError):
+            self.config = None
+        self.target_root = Path(self.config.target_root if self.config else os.environ.get("TARGET_ROOT", ROOT / "targets/firefox"))
+        self.asan_build = sanitizer.build_dir("asan", str(self.target_root))
+        self.build = sanitizer.build_dir("asan-cov", str(self.target_root))
+        self.app = Path(os.environ.get("COV_APP", self.build / "dist/Nightly.app"))
+        self.browser = Path(os.environ.get("COV_BROWSER", self._browser_from_config()))
+        self.xul = Path(os.environ.get("COV_XUL", self._default_xul()))
+        self.js = Path(os.environ.get("COV_JS", self.build / "dist/bin/js"))
+        self.sancov = Path(llvm_tool("sancov", os.environ.get("SANCOV", "")))
+        self.symbolizer = Path(llvm_tool("llvm-symbolizer", os.environ.get("SYMBOLIZER", "")))
+        self.edge_count = 0
+        self.new_edges = 0
 
-ASAN_BUILD_DIR="$(sanitizer_build_dir asan)"
-COV_BUILD_DIR="$(sanitizer_build_dir asan-cov)"
+    def _browser_from_config(self) -> Path:
+        if self.config and self.config.asan_bin:
+            configured = self.config.asan_bin
+            configured = configured.replace(self.asan_build.name + "/", self.build.name + "/")
+            return Path(self.config.resolve_path(configured))
+        if sys.platform == "darwin":
+            return self.build / "dist/Nightly.app/Contents/MacOS/firefox"
+        return self.build / "dist/bin/firefox"
 
-_cov_bin_from_asan_config() {
-  if [ -n "${TARGET_ASAN_BIN:-}" ]; then
-    # Rewrite asan path to the coverage build using their basenames so the
-    # AUDIT_BUILD_SUFFIX-suffixed variants substitute cleanly.
-    local p="${TARGET_ASAN_BIN/$(basename "$ASAN_BUILD_DIR")\//$(basename "$COV_BUILD_DIR")/}"
-    target_resolve_path "$p"
-    return
-  fi
-  return 1
-}
+    def _default_xul(self) -> Path:
+        if sys.platform == "darwin":
+            return self.build / "dist/Nightly.app/Contents/MacOS/XUL"
+        return self.build / "dist/bin/libxul.so"
 
-if [ -z "$COV_BROWSER" ]; then
-  if cov_from_cfg="$(_cov_bin_from_asan_config 2>/dev/null)" && [ -n "$cov_from_cfg" ]; then
-    COV_BROWSER="$cov_from_cfg"
-  elif audit_is_darwin; then
-    COV_BROWSER="${COV_BUILD_DIR}/dist/Nightly.app/Contents/MacOS/firefox"
-  else
-    COV_BROWSER="${COV_BUILD_DIR}/dist/bin/firefox"
-  fi
-fi
-if [ -z "$COV_APP" ]; then
-  COV_APP="${COV_BUILD_DIR}/dist/Nightly.app"
-fi
-if [ -z "$COV_XUL" ]; then
-  if audit_is_darwin; then
-    COV_XUL="${COV_BUILD_DIR}/dist/Nightly.app/Contents/MacOS/XUL"
-  else
-    COV_XUL="${COV_BUILD_DIR}/dist/bin/libxul.so"
-  fi
-fi
-COV_JS="${COV_JS:-${COV_BUILD_DIR}/dist/bin/js}"
+    def validate(self) -> None:
+        if self.args.mode == "browser":
+            if not os.access(self.browser, os.X_OK):
+                raise RuntimeError(f"coverage browser missing: {self.browser} - run ff-bsan coverage first")
+            if not self.xul.is_file():
+                raise RuntimeError(f"coverage XUL missing: {self.xul} - run ff-bsan coverage first")
+            probe_sancov("XUL", self.xul)
+        else:
+            if not os.access(self.js, os.X_OK):
+                raise RuntimeError(f"coverage js shell missing: {self.js}")
+            probe_sancov("coverage js shell", self.js)
+        if not os.access(self.sancov, os.X_OK):
+            raise RuntimeError(f"sancov not found at {self.sancov} - install LLVM tools or set LLVM_PREFIX")
+        if not os.access(self.symbolizer, os.X_OK):
+            raise RuntimeError(f"llvm-symbolizer not found at {self.symbolizer} - install LLVM tools or set LLVM_PREFIX")
 
-# Validate coverage build exists and has sancov instrumentation. Firefox's
-# launcher is thin, so probe the main code image (XUL/libxul.so) for
-# __sancov_guards instead of relying on the launcher binary.
-probe_sancov() {
-  local what="$1" bin="$2" lc cache_dir cache_key cache_file stat_key
-  [ "${HITS_SKIP_SANCOV_PROBE:-}" = "1" ] && return 0
-  stat_key=$(file_stat_key "$bin" 2>/dev/null || true)
-  cache_dir=$(hits_cache_dir 2>/dev/null || true)
-  if [ -n "$stat_key" ] && [ -n "$cache_dir" ]; then
-    cache_key=$(printf '%s\n' "$stat_key" | audit_sha1 2>/dev/null | awk '{print $1}')
-    cache_file="$cache_dir/sancov-${cache_key}.ok"
-    if [ -s "$cache_file" ]; then
-      return 0
-    fi
-  fi
-  if audit_is_darwin; then
-    lc="$(otool -l "$bin" 2>&1)" \
-      || die "otool -l failed on $what ($bin): ${lc:-<no output>}"
-    [ -n "$lc" ] \
-      || die "otool -l produced no output for $what ($bin) — transient tool failure, rerun bin/hits; if it persists verify 'otool -l $bin | head' by hand"
-    sancov_section_output_contains "$lc" 'sectname __sancov_guards' \
-      || die "$what lacks sancov instrumentation (__sancov_guards section not present in $bin) — rebuild with ff-bsan coverage"
-  else
-    if command -v readelf >/dev/null 2>&1; then
-      lc="$(readelf -WS "$bin" 2>&1)" \
-        || die "readelf -WS failed on $what ($bin): ${lc:-<no output>}"
-    elif command -v llvm-readelf >/dev/null 2>&1; then
-      lc="$(llvm-readelf -S "$bin" 2>&1)" \
-        || die "llvm-readelf -S failed on $what ($bin): ${lc:-<no output>}"
-    elif command -v objdump >/dev/null 2>&1; then
-      lc="$(objdump -h "$bin" 2>&1)" \
-        || die "objdump -h failed on $what ($bin): ${lc:-<no output>}"
-    else
-      die "cannot inspect ELF sections for $what ($bin): install binutils or LLVM tools"
-    fi
-    sancov_section_output_contains "$lc" '__sancov_guards' \
-      || die "$what lacks sancov instrumentation (__sancov_guards section not present in $bin) — rebuild with ff-bsan coverage"
-  fi
-  [ -n "${cache_file:-}" ] && printf '%s\n' "$stat_key" > "$cache_file" 2>/dev/null || true
-}
+    def append_verdict(self, verdict: str, frame: str = "") -> None:
+        if not self.args.log:
+            return
+        destination = Path(self.args.log)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with destination.open("a") as stream:
+            stream.write(
+                f"{verdict} {timestamp} testcase={self.testcase} want={self.args.want!r} "
+                f"edges={self.edge_count} new={self.new_edges} frame={frame or '<none>'}\n"
+            )
 
-case "$MODE" in
-  browser)
-    [ -x "$COV_BROWSER" ] || die "coverage browser missing: $COV_BROWSER  — run ff-bsan coverage first"
-    [ -f "$COV_XUL" ]     || die "coverage XUL missing: $COV_XUL — run ff-bsan coverage first"
-    probe_sancov "XUL" "$COV_XUL"
-    ;;
-  js)
-    [ -x "$COV_JS" ] || die "coverage js shell missing: $COV_JS"
-    probe_sancov "coverage js shell" "$COV_JS"
-    ;;
-  *) die "--mode must be browser or js" ;;
-esac
-[ -x "$SANCOV" ]     || die "sancov not found at $SANCOV — install LLVM tools or set LLVM_PREFIX"
-[ -x "$SYMBOLIZER" ] || die "llvm-symbolizer not found at $SYMBOLIZER — install LLVM tools or set LLVM_PREFIX"
+    def run_target(self, coverage_dir: Path) -> tuple[bytes, int | None]:
+        option_string = f"detect_leaks=0:coverage=1:halt_on_error=0:coverage_dir={coverage_dir}"
+        environment = sanitizer.prepare_runtime_env("asan")
+        environment["ASAN_OPTIONS"] = option_string
+        if self.args.mode == "js":
+            flags: list[str] = []
+            script_args: list[str] = []
+            for arg in self.args.extra:
+                if not script_args and arg.startswith("-"):
+                    flags.append(arg)
+                else:
+                    script_args.append(arg)
+            completed = run_timeout(
+                [str(self.js), *flags, str(self.testcase), *script_args],
+                self.args.timeout,
+                env=environment,
+                capture_output=True,
+            )
+            return completed.stdout + completed.stderr, None
 
-# Per-run coverage dir.
-cov_dir="$(mktemp -d "${TMP_ROOT}/hits-cov-XXXXXXXX")"
-browser_out="$(mktemp "${TMP_ROOT}/hits-out-XXXXXXXX")"
-# shellcheck disable=SC2064
-trap "rm -rf \"$cov_dir\" \"$browser_out\"" EXIT
+        environment.update({"MOZ_DISABLE_CONTENT_SANDBOX": "1", "MOZ_HEADLESS": "1"})
+        with tempfile.TemporaryDirectory(prefix="hits-profile-") as profile_name:
+            profile = Path(profile_name)
+            prefs = PROFILE_PREFS
+            if os.environ.get("FIREFOX_EXTRA_PREFS"):
+                prefs += "\n" + os.environ["FIREFOX_EXTRA_PREFS"] + "\n"
+            (profile / "user.js").write_text(prefs)
+            (profile / "prefs.js").write_text(prefs)
+            process = subprocess.Popen(
+                [str(self.browser), "--profile", str(profile), "--no-remote", *self.args.extra, self.testcase.resolve().as_uri()],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=environment,
+                start_new_session=True,
+            )
+            parent_pid = process.pid
+            deadline = time.monotonic() + self.args.timeout
+            while process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=25)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            output = process.communicate()[0] if process.stdout else b""
+            time.sleep(0.5)
+            return output, parent_pid
 
-# ASan/sancov options. `coverage=1` + `coverage_dir=...` enable the
-# compiler-rt SanitizerCoverage atexit dumper that emits
-# <module>.<pid>.sancov per instrumented image. `coverage_pcs` was
-# rejected as unrecognized by LLVM 22's compiler-rt (harmless warning
-# on stderr), so it is omitted here.
-ASAN_OPTS="detect_leaks=0:coverage=1:halt_on_error=0:coverage_dir=${cov_dir}"
+    def binary_map(self) -> tuple[list[Path], Path]:
+        dist = self.build / "dist/bin"
+        if self.args.mode == "js":
+            return [self.js, *dist.glob("*.dylib"), *dist.glob("*.so")], self.js
+        if sys.platform == "darwin":
+            mac = self.app / "Contents/MacOS"
+            return [self.browser, self.xul, mac / "plugin-container", *mac.glob("*.dylib")], self.xul
+        return [self.browser, self.xul, dist / "plugin-container", *dist.glob("*.so")], self.xul
 
-run_browser() {
-  # Historically this wrapper launched Firefox via `open -W -n -g -a` and
-  # relied on `launchctl setenv ASAN_OPTIONS` for env propagation. On
-  # macOS 14/15 that combination silently drops ASAN_OPTIONS for the
-  # LaunchServices-spawned browser: the process runs, but the
-  # SanitizerCoverage runtime writes nothing because `coverage_dir` is
-  # empty in its view of the environment, producing the
-  # `NO_COVERAGE — no sancov files` outcome observed in hits-*.log.
-  #
-  # Invoke the binary directly with ASAN_OPTIONS in the child's env.
-  # Use MOZ_HEADLESS=1 so we don't need WindowServer/LaunchServices
-  # registration, which also removes the need for the global launch
-  # lock — each hits.sh invocation has its own process env, so
-  # concurrent runs no longer trample a global `launchctl setenv`.
-  local profile
-  profile="$(mktemp -d "${TMP_ROOT}/hits-profile-XXXXXXXX")"
-  printf 'user_pref("browser.shell.checkDefaultBrowser", false);\nuser_pref("browser.tabs.warnOnClose", false);\nuser_pref("dom.allow_scripts_to_close_windows", true);\nuser_pref("devtools.console.stdout.content", true);\nuser_pref("browser.sessionstore.resume_from_crash", false);\nuser_pref("browser.startup.page", 0);\n' > "$profile/user.js"
-  cp "$profile/user.js" "$profile/prefs.js"
-  if [ -n "${FIREFOX_EXTRA_PREFS:-}" ]; then
-    printf '\n%s\n' "${FIREFOX_EXTRA_PREFS}" >> "$profile/user.js"
-    printf '\n%s\n' "${FIREFOX_EXTRA_PREFS}" >> "$profile/prefs.js"
-  fi
-  # shellcheck disable=SC2064
-  trap "rm -rf \"$profile\"; rm -rf \"$cov_dir\" \"$browser_out\"" EXIT
+    def symbolize(self, coverage_dir: Path, parent_pid: int | None) -> tuple[list[str], list[str]]:
+        binaries, fallback = self.binary_map()
+        by_name = {path.name: path for path in binaries if path.is_file()}
+        all_lines: list[str] = []
+        content_lines: list[str] = []
+        for coverage in coverage_dir.glob("*.sancov"):
+            stem = coverage.name.removesuffix(".sancov")
+            base, _, pid_text = stem.rpartition(".")
+            target = by_name.get(base, fallback)
+            printed = subprocess.run([str(self.sancov), "-print", str(coverage)], capture_output=True, check=False)
+            symbolized = subprocess.run(
+                [str(self.symbolizer), "-e", str(target), "--inlines", "--demangle"],
+                input=printed.stdout,
+                capture_output=True,
+                check=False,
+            ).stdout.decode(errors="replace").splitlines()
+            all_lines.extend(symbolized)
+            if self.args.mode == "js" or parent_pid is None or pid_text != str(parent_pid):
+                content_lines.extend(symbolized)
+        return all_lines, content_lines
 
-  local abs_tc
-  abs_tc="file://$(cd "$(dirname "$TESTCASE")" && pwd)/$(basename "$TESTCASE")"
+    def write_hits(self, lines: list[str], content: list[str]) -> Path:
+        if self.args.save:
+            destination = Path(self.args.save)
+        else:
+            fd, name = tempfile.mkstemp(prefix="hits-list-")
+            os.close(fd)
+            destination = Path(name)
+        destination.write_text("\n".join(lines) + ("\n" if lines else ""))
+        Path(str(destination) + ".content").write_text("\n".join(content) + ("\n" if content else ""))
+        return destination
 
-  # Start firefox in the background so we can observe it, then wait up
-  # to $TIMEOUT seconds before asking it to exit. The child inherits
-  # ASAN_OPTIONS directly — no launchctl / LaunchServices involved.
-  local browser_cmd=("$COV_BROWSER" --profile "$profile" --no-remote)
-  if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
-    browser_cmd+=("${EXTRA_ARGS[@]}")
-  fi
-  browser_cmd+=("$abs_tc")
+    def update_edges(self, hits_file: Path) -> None:
+        try:
+            extracted = edges.extract(hits_file)
+            self.edge_count = len(extracted)
+            if self.args.slug and extracted:
+                with tempfile.NamedTemporaryFile(mode="w") as run_edges:
+                    run_edges.write("\n".join(extracted) + "\n")
+                    run_edges.flush()
+                    self.new_edges = len(edges.diff_new(self.args.slug, run_edges.name))
+                    if self.new_edges:
+                        edges.record_run(self.args.slug, str(self.args.agent), run_edges.name)
+        except OSError:
+            self.edge_count = self.new_edges = 0
 
-  ASAN_OPTIONS="$ASAN_OPTS" \
-  MOZ_DISABLE_CONTENT_SANDBOX=1 \
-  MOZ_HEADLESS=1 \
-    "${browser_cmd[@]}" > "$browser_out" 2>&1 &
-  local fx_pid=$!
-  # Record the parent pid so the post-run analysis can split sancov files
-  # into parent-process vs content/GPU/utility children. Without this split,
-  # the parent's audio/networking/GMP startup symbols (ne_context_new,
-  # cubeb_set_log_callback, dns_init, …) flood the hit list and crowd out
-  # the content process where the testcase actually ran. Reported as the
-  # `closest reached` frame on MISSED, those parent symbols are misleading
-  # and cause agents to discard testcases that actually executed their
-  # target. See: 2026-04 hits-*.log, MISSED entries with cubeb/ne frames.
-  printf '%s' "$fx_pid" > "$cov_dir/.parent_pid"
+    def result(self, hits_file: Path, all_lines: list[str], content: list[str]) -> int:
+        self.update_edges(hits_file)
+        print(f"EDGES_HIT: {self.edge_count}")
+        print(f"NEW_EDGES: {self.new_edges}")
+        content_match = next((line for line in content if self.want.search(line)), "")
+        full_match = next((line for line in all_lines if self.want.search(line)), "")
+        match = content_match or full_match
+        if match:
+            if not content_match and content and not any(value in self.args.want for value in ("chrome/", "browser/", "toolkit/components/")):
+                print(f"MISSED - want symbol only seen in parent process (likely startup noise): {match}")
+                print(f"hits-file: {hits_file}", file=sys.stderr)
+                self.append_verdict("MISSED:", f"parent-only:{match}")
+                return 1
+            print(f"HIT: {match}")
+            print(f"hits-file: {hits_file}", file=sys.stderr)
+            self.append_verdict("HIT:", match)
+            return 0
+        closest = self.closest(content, all_lines)
+        if closest:
+            print(f"MISSED - closest reached: {closest}")
+            self.append_verdict("MISSED:", closest)
+        else:
+            print("MISSED - NO_PROXIMITY: testcase ran but no want-related code executed (likely upstream guard rejection)")
+            self.append_verdict("MISSED:", "NO_PROXIMITY")
+        print(f"hits-file: {hits_file}", file=sys.stderr)
+        return 1
 
-  # Let the page load and script run.
-  local runtime=0
-  while [ "$runtime" -lt "$TIMEOUT" ]; do
-    if ! kill -0 "$fx_pid" 2>/dev/null; then break; fi
-    sleep 1
-    runtime=$((runtime + 1))
-  done
+    def closest(self, content: list[str], all_lines: list[str]) -> str:
+        tokens = re.findall(r"[A-Za-z_][A-Za-z_0-9:./]+", self.args.want.replace("\\", ""))
+        tokens = sorted(set(tokens), key=lambda token: (-len(token), token))
+        for token in tokens:
+            if len(token) < 5:
+                continue
+            for label, pool in (("content", content), ("full", all_lines)):
+                line = next((line for line in pool if token in line and not NOISE_RE.search(line)), "")
+                if line:
+                    return f"{line} [pool={label} (token={token})]"
+        line = next((line for line in content if not NOISE_RE.search(line)), "")
+        return f"{line} [pool=content (denoised head)]" if line else ""
 
-  # Ask the browser to shut down gracefully — SIGTERM triggers Firefox's
-  # normal exit path, which in turn lets the SanitizerCoverage atexit
-  # handler flush <module>.<pid>.sancov files for the parent and every
-  # content/gpu/rdd/utility helper it spawned. A direct pkill on the
-  # parent isn't enough; helpers run as sibling processes sharing the
-  # profile path, so we match on the profile dir to cover all of them.
-  pkill -TERM -f "$profile" 2>/dev/null || true
-  kill -TERM "$fx_pid" 2>/dev/null || true
+    def run(self) -> int:
+        self.validate()
+        with tempfile.TemporaryDirectory(prefix="hits-cov-") as coverage_name:
+            coverage_dir = Path(coverage_name)
+            output, parent_pid = self.run_target(coverage_dir)
+            if self.args.mode == "browser" and not output:
+                print("EXEC_FAIL - browser produced no stdout/stderr at all (launch failure)")
+                self.append_verdict("EXEC_FAIL:")
+                return 3
+            all_lines, content = self.symbolize(coverage_dir, parent_pid)
+            hits_file = self.write_hits(all_lines, content)
+            if not all_lines:
+                print("NO_COVERAGE - no sancov files or empty hit list (check mozconfig + ASAN_OPTIONS coverage=1)")
+                print(f"hits-file: {hits_file}", file=sys.stderr)
+                self.append_verdict("NO_COVERAGE:")
+                return 3
+            return self.result(hits_file, all_lines, content)
 
-  # Wait for every process tied to this profile to exit before we enumerate
-  # sancov files. Without this, the enumeration races the atexit writer
-  # and finds zero files — the original NO_COVERAGE failure mode.
-  local shutdown_deadline=$((SECONDS + 25))
-  while pgrep -f "$profile" >/dev/null 2>&1; do
-    if [ "$SECONDS" -ge "$shutdown_deadline" ]; then
-      # Hard-kill any stragglers. Their sancov files won't flush, but
-      # the siblings that already exited cleanly have theirs on disk.
-      pkill -KILL -f "$profile" 2>/dev/null || true
-      break
-    fi
-    sleep 0.2
-  done
-  # Brief grace window for fsync after the last pgrep match disappears.
-  sleep 0.5
-  wait "$fx_pid" 2>/dev/null || true
-}
 
-run_js() {
-  local js_cmd=("$COV_JS")
-  local js_shell_flags=()
-  local js_script_args=()
-  local arg
-  if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
-    for arg in "${EXTRA_ARGS[@]}"; do
-      if [ "${#js_script_args[@]}" -eq 0 ] && [[ "$arg" == -* ]]; then
-        js_shell_flags+=("$arg")
-      else
-        js_script_args+=("$arg")
-      fi
-    done
-  fi
-  if [ "${#js_shell_flags[@]}" -gt 0 ]; then
-    js_cmd+=("${js_shell_flags[@]}")
-  fi
-  js_cmd+=("$TESTCASE")
-  if [ "${#js_script_args[@]}" -gt 0 ]; then
-    js_cmd+=("${js_script_args[@]}")
-  fi
-  # Pass SanitizerCoverage settings to the shell itself, not the shell-local
-  # `local` builtin, or js-mode coverage never writes .sancov files.
-  ASAN_OPTIONS="$ASAN_OPTS" \
-    audit_timeout_run "$TIMEOUT" "${js_cmd[@]}" > "$browser_out" 2>&1 || true
-}
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    if args.extra and args.extra[0] == "--":
+        args.extra.pop(0)
+    try:
+        return Hits(args).run()
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(f"[hits] {exc}", file=sys.stderr)
+        return 2
 
-case "$MODE" in
-  browser) run_browser ;;
-  js)      run_js ;;
-esac
 
-# Confirm the testcase actually executed before interpreting coverage.
-# A browser testcase won't usually print the JS-shell "TESTCASE_EXECUTED"
-# sentinel, so the original TESTCASE_EXECUTED|ASan grep was unreliable
-# (it only survived on the incidental ASan banner). The authoritative
-# execution signal is the .sancov footprint checked further below; here
-# we only guard against a complete launch failure (zero bytes written
-# to stdout+stderr after the timeout). That distinguishes "binary never
-# ran" from "binary ran but coverage didn't flush".
-if [ "$MODE" = "browser" ] && [ ! -s "$browser_out" ]; then
-  echo "EXEC_FAIL — browser produced no stdout/stderr at all (launch failure)"
-  append_verdict "EXEC_FAIL:"
-  exit 3
-fi
-
-# Symbolize every .sancov file produced into one flat list of
-# function/file:line entries we can grep.
-#
-# LLVM 22 tool-surface notes:
-#   * `sancov --symbolize` produces JSON whose "covered-points" array is
-#     just hex PC strings — no file/function/line. The old field names
-#     ("function"/"file"/"line") this script used to extract with jq no
-#     longer exist, so that pass silently produced an empty file even on
-#     good coverage runs. Don't rely on `--symbolize` here.
-#   * `sancov --strip-path-prefix=...` was removed — passing it aborts
-#     the tool entirely.
-#   * `llvm-symbolizer -obj=<file>` is parsed character-by-character by
-#     recent versions ("unknown argument '-o' '-b' '-j'") — use the
-#     documented `-e <file>` / `--obj=<file>` spelling instead.
-# The pipe below uses `sancov -print` (raw PC list) -> llvm-symbolizer
-# -e, which is the supported contract across LLVM 18..22.
-# BSD mktemp (macOS) does NOT substitute trailing Xs when a literal
-# suffix like `.txt` follows — `hits-list-XXXXXXXX.txt` becomes a
-# literal filename and subsequent calls fail with "File exists". Keep
-# the template suffix-free.
-hits_file="${SAVE:-$(mktemp "${TMP_ROOT}/hits-list-XXXXXXXX")}"
-: > "$hits_file"
-# Process-class split: in browser mode we also keep a `<hits_file>.content`
-# subset that excludes anything emitted by the parent process (browser
-# launcher / chrome process). The testcase JS runs in a *content* child;
-# parent-process symbols (audio init, networking init, GMP, DNS, …) are
-# noise for proximity reporting. JS-shell mode has only one process, so
-# `.content` mirrors `hits_file`.
-content_hits="${hits_file}.content"
-: > "$content_hits"
-parent_pid=""
-if [ -f "$cov_dir/.parent_pid" ]; then
-  parent_pid="$(tr -d '[:space:]' < "$cov_dir/.parent_pid" 2>/dev/null || true)"
-fi
-shopt -s nullglob
-# Binary map covers every instrumented image that can emit a .sancov. In
-# browser mode that's everything inside the Nightly bundle; in JS mode
-# it's the js shell + sibling dylibs under build-asan-cov/dist/bin. Keep
-# these lists mode-scoped: if browser-mode binaries are used for a JS
-# shell run, js.<pid>.sancov falls back to XUL and PCs symbolize as
-# "??" (the exact failure that produced a 50k-frame hit list with zero
-# `js::` matches before this fix).
-case "$MODE" in
-  browser)
-    if audit_is_darwin; then
-      binaries=(
-        "$COV_BROWSER"
-        "$COV_XUL"
-        "$COV_APP/Contents/MacOS/plugin-container"
-        "$COV_APP/Contents/MacOS/"*.dylib
-      )
-    else
-      binaries=(
-        "$COV_BROWSER"
-        "$COV_XUL"
-        "${COV_BUILD_DIR}/dist/bin/plugin-container"
-        "${COV_BUILD_DIR}/dist/bin/"*.so
-      )
-    fi
-    fallback_target="$COV_XUL"
-    ;;
-  js)
-    binaries=(
-      "$COV_JS"
-      "${COV_BUILD_DIR}/dist/bin/"*.dylib
-      "${COV_BUILD_DIR}/dist/bin/"*.so
-    )
-    fallback_target="$COV_JS"
-    ;;
-esac
-for cov in "$cov_dir"/*.sancov; do
-  # Sancov filenames are <binary-basename>.<pid>.sancov, e.g.
-  # libxul.dylib.45123.sancov. Strip the trailing `.sancov`, then take
-  # the segment after the final `.` as the pid and everything before it
-  # as the binary basename. The previous `${base%%.*}` truncated at the
-  # first dot and broke `libxul.dylib.<pid>.sancov`.
-  cov_base="$(basename "$cov")"
-  cov_stem="${cov_base%.sancov}"          # libxul.dylib.45123
-  cov_pid="${cov_stem##*.}"               # 45123
-  base="${cov_stem%.*}"                   # libxul.dylib
-  target=""
-  for b in "${binaries[@]}"; do
-    [ -f "$b" ] || continue
-    if [ "$(basename "$b")" = "$base" ]; then target="$b"; break; fi
-  done
-  # Fall back to the mode-specific primary module (XUL for browser, js
-  # shell for js) rather than $COV_BROWSER — XUL/js hold the bulk of
-  # instrumented code so even an imperfect pairing there is more useful
-  # than symbolizing against a launcher/shim binary.
-  [ -n "$target" ] || target="$fallback_target"
-  # sancov -print emits one hex PC per line; llvm-symbolizer -e emits
-  # `function\nfile:line:col\n\n` for each. Streaming both together is
-  # the format the later `grep -m1 -E "$WANT"` step expects.
-  per_pid_tmp="$(mktemp "${TMP_ROOT}/hits-pid-XXXXXXXX")"
-  "$SANCOV" -print "$cov" 2>/dev/null \
-    | "$SYMBOLIZER" -e "$target" --inlines --demangle 2>/dev/null \
-    > "$per_pid_tmp" || true
-  cat "$per_pid_tmp" >> "$hits_file" || true
-  # Content classification: js-shell mode has one process so everything
-  # is "content". Browser mode: only files NOT matching the parent pid
-  # go into the content subset.
-  if [ "$MODE" = "js" ] || [ -z "$parent_pid" ] || [ "$cov_pid" != "$parent_pid" ]; then
-    cat "$per_pid_tmp" >> "$content_hits" || true
-  fi
-  rm -f "$per_pid_tmp"
-done
-
-[ -s "$hits_file" ] || { echo "NO_COVERAGE — no sancov files or empty hit list (check mozconfig + ASAN_OPTIONS coverage=1)"; echo "hits-file: $hits_file" >&2; append_verdict "NO_COVERAGE:"; exit 3; }
-
-# Edge-novelty bookkeeping. Run once before the verdict branches below
-# so HIT, MISSED, and NO_PROXIMITY paths all log identical edges= /
-# new= fields. Best-effort: failures leave the counters at 0.
-update_edge_counters "$hits_file"
-echo "EDGES_HIT: ${EDGES_HIT_COUNT:-0}"
-echo "NEW_EDGES: ${NEW_EDGES_COUNT:-0}"
-
-# Match priority: content-process hits first (where the testcase actually
-# ran), then full hit list as a fallback. This protects the verdict
-# against an accidental content/parent split where the testcase symbol
-# was inlined or static-linked into a parent-side library.
-match=""
-match_pool=""
-if [ -s "$content_hits" ]; then
-  match="$(grep -m1 -E "$WANT" "$content_hits" 2>/dev/null || true)"
-  [ -n "$match" ] && match_pool="content"
-fi
-if [ -z "$match" ]; then
-  match="$(grep -m1 -E "$WANT" "$hits_file" 2>/dev/null || true)"
-  [ -n "$match" ] && match_pool="full"
-fi
-if [ -n "$match" ]; then
-  if [ "$match_pool" = "full" ] && [ -s "$content_hits" ]; then
-    # Hit only in the parent process. That's almost always test-irrelevant
-    # (chrome init touched the symbol once at startup). Demote to MISSED-
-    # like proximity report unless WANT explicitly targets a chrome path
-    # (chrome/, browser/, toolkit/components/) where a parent-only hit is
-    # legitimate.
-    case "$WANT" in
-      *chrome/*|*browser/*|*toolkit/components/*) ;;  # legit parent hit
-      *)
-        echo "MISSED — want symbol only seen in parent process (likely startup noise): $match"
-        echo "hits-file: $hits_file" >&2
-        append_verdict "MISSED:" "parent-only:$match"
-        exit 1
-        ;;
-    esac
-  fi
-  echo "HIT: $match"
-  echo "hits-file: $hits_file" >&2
-  append_verdict "HIT:" "$match"
-  exit 0
-fi
-
-# ---- MISSED: layered proximity reporting ---------------------------------
-# Old behavior fell back to `head -1 $hits_file`, which is whatever symbol
-# happened to flush first — almost always parent-process startup. That
-# produced misleading "closest: ne_context_new" reports that caused agents
-# to discard testcases that actually executed near their target. The new
-# strategy:
-#   1. Pull every identifier-like and path-like token out of WANT.
-#   2. For each token (longest first, so most-specific wins), grep the
-#      content subset; on no hit, grep the full subset.
-#   3. Skip lines matching a known noise denylist (audio/dns/gmp init,
-#      cubeb, content-process bootstrap) so a near-target match outranks
-#      "first thing the parent loaded."
-#   4. If nothing matches any token after the denylist, report a clean
-#      NO_PROXIMITY verdict — better silence than misleading nonsense.
-
-NOISE_RE='ne_context_new|cubeb_|nrappkit|nspr|nss_init|sqlite3|^ld-|^dyld_|gmp_|dns_init|libsystem_|CoreFoundation|NSApplication|XPCOMGlueLoad|nsAppRunner|NS_LogInit|InitGlobalCallback|GeckoMain|XRE_main$|loadXULBundle|MOZ_NewProcessBinding'
-
-# Tokenize WANT into identifier candidates. Split on regex alternation,
-# strip backslash escapes, keep identifier-like tokens, sort longest
-# first so the most-specific symbol wins. Bash 3.2 (the macOS system
-# bash) has no `mapfile`, so use a portable while-read accumulator —
-# without this, search_tokens is silently empty and the proximity search
-# falls all the way through to the denoised-head fallback.
-search_tokens=()
-while IFS= read -r tok; do
-  [ -n "$tok" ] && search_tokens+=("$tok")
-done < <(printf '%s\n' "$WANT" \
-  | tr '|' '\n' \
-  | sed -E 's/\\\(/(/g; s/\\(.)/\1/g' \
-  | sed -E 's/[[:space:]]+/\n/g' \
-  | grep -oE '[A-Za-z_][A-Za-z_0-9:./]+' \
-  | awk '{ print length, $0 }' \
-  | sort -k1,1nr -k2 -u \
-  | awk '{ $1=""; sub(/^ /,""); print }')
-
-closest=""
-closest_pool=""
-for tok in "${search_tokens[@]}"; do
-  [ -n "$tok" ] || continue
-  # Skip tokens that are too short to be meaningfully unique (e.g. "do",
-  # "if"). The 5-char floor empirically excludes generic verbs while
-  # keeping subsystem prefixes and class names.
-  [ "${#tok}" -ge 5 ] || continue
-  for pool_name in content full; do
-    pool_file="$content_hits"
-    [ "$pool_name" = "full" ] && pool_file="$hits_file"
-    [ -s "$pool_file" ] || continue
-    line="$(grep -F -- "$tok" "$pool_file" 2>/dev/null \
-            | grep -vE -- "$NOISE_RE" \
-            | head -1)"
-    if [ -n "$line" ]; then
-      closest="$line"
-      closest_pool="$pool_name (token=$tok)"
-      break 2
-    fi
-  done
-done
-
-# Even with no token hit, take a denylist-filtered head from the content
-# subset so the agent at least sees what the testcase touched. If the
-# content subset itself is empty (test never spawned a content process),
-# leave closest blank — silence beats lying.
-if [ -z "$closest" ] && [ -s "$content_hits" ]; then
-  line="$(grep -vE -- "$NOISE_RE" "$content_hits" 2>/dev/null | head -1)"
-  if [ -n "$line" ]; then
-    closest="$line"
-    closest_pool="content (denoised head)"
-  fi
-fi
-
-if [ -n "$closest" ]; then
-  echo "MISSED — closest reached: ${closest} [pool=${closest_pool}]"
-  append_verdict "MISSED:" "$closest"
-else
-  # NO_PROXIMITY: no want-token landed in any non-noise frame. Report
-  # explicitly so the agent knows the testcase didn't get anywhere near
-  # the target instead of seeing a misleading first-symbol artifact.
-  echo "MISSED — NO_PROXIMITY: testcase ran but no want-related code executed (likely upstream guard rejection)"
-  append_verdict "MISSED:" "NO_PROXIMITY"
-fi
-echo "hits-file: $hits_file" >&2
-exit 1
+if __name__ == "__main__":
+    raise SystemExit(main())

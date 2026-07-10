@@ -39,6 +39,7 @@ import re
 import shutil
 import statistics
 import sys
+import tempfile
 import urllib.parse
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
@@ -66,7 +67,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 # A "confirmed crash" is a directory holding at least one file whose text
 # carries a sanitizer diagnostic. The signature set is the single source of
 # truth in stack_frames.SANITIZER_SIGNATURE_RE — a deliberate mirror of the
-# triager's gate in lib/triage.sh (search: "_triage_has_sanitizer_diagnostic").
+# triager's gate in lib/triage.py (search: "_triage_has_sanitizer_diagnostic").
 # Sourcing it here (rather than re-spelling the alternation) keeps the
 # benchmark's confirmed-crash count, the severity scorer (bin/severity),
 # and the triage gate in lockstep; this is the whole reason the benchmark
@@ -74,8 +75,10 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 if _sf is not None:
     SANITIZER_SIGNATURE_RE = _sf.SANITIZER_SIGNATURE_RE
 else:  # pragma: no cover - stack_frames should always import
-    SANITIZER_SIGNATURE_RE = re.compile(r": runtime error:|ERROR: \w*Sanitizer",
-                                        re.MULTILINE)
+    SANITIZER_SIGNATURE_RE = re.compile(
+        r"^[^\s].*:\d+:\d+: runtime error:|ERROR: \w*Sanitizer",
+        re.MULTILINE,
+    )
 
 # Files large enough to be a build artifact rather than a sanitizer log
 # are skipped during the grep so harvest stays fast on big result trees.
@@ -174,13 +177,13 @@ def _finding_count_label(c: dict) -> object:
     (`drain_cell_find_gate` in the regenerate branch), so a finished run carries
     no un-gated backlog to surface, and a drain that cannot finish (no backend /
     rate-limited) is reported as a run-health WARN rather than as a parenthetical
-    on a backend-comparison row. Falls back to the raw total only for older
-    metrics that predate confirmed_finding_total, so an un-re-harvested run is
-    not misreported as zero-confirmed.
+    on a backend-comparison row. A metrics row missing the confirmed field is
+    incomplete and renders as unknown rather than treating raw FIND directories
+    as accepted findings.
     """
     confirmed = c.get("confirmed_finding_total")
     if confirmed is None:
-        return int(c.get("finding_total", 0) or 0)
+        return "—"
     return int(confirmed or 0)
 
 
@@ -268,7 +271,7 @@ def _scrub_pooled_tree(root: Path) -> None:
 # verbatim. Negative lookaheads/lookbehinds keep the linker idempotent
 # by skipping hashes already inside a `[…](…)` markdown link.
 _RECON_LINK_PATTERNS = (
-    # `- **Recon ID:** RECON-<hash>` (legacy bolded form).
+    # `- **Recon ID:** RECON-<hash>` (alternate bolded form).
     re.compile(
         r"(?<!\[)(?<!\]\()"
         r"(?<=\*\*Recon ID:\*\*\s)"
@@ -511,7 +514,7 @@ def _finding_is_confirmed(finding_dir: Path) -> bool:
 
     Findings carry no sanitizer reproducer — that is the crashes/ contract,
     not findings/ — so the finding analog of count_confirmed_crashes' "proof,
-    not assertion" is gate acceptance. The find-quality gate (lib/triage.sh)
+    not assertion" is gate acceptance. The find-quality gate (lib/triage.py)
     writes `.llm-find-quality.json` with `accept: true` only for a FIND it
     kept, and moves quorum-rejected FINDs out to findings-rejected/. A
     `.keep`/`.reviewed` pin is a human override that bypasses the gate (same
@@ -556,11 +559,10 @@ def count_confirmed_findings(findings_dir: Path) -> tuple[int, list[str]]:
 def _pool_finding_names(metrics: dict, findings_dir: Path) -> list[str]:
     """Finding directory names eligible for benchmark pooling.
 
-    Current metrics carry `confirmed_finding_dirs`, so the pool imports only
-    gate-accepted or human-pinned findings. Older metrics from before that
-    field are ambiguous; keep them readable by falling back to the historical
-    raw FIND-* import. `bin/benchmark --regenerate` reharvests cells before
-    rebuilding the pool, so regenerated runs get the confirmed-only behavior.
+    Metrics carry `confirmed_finding_dirs`, so the pool imports only
+    gate-accepted or human-pinned findings. A missing or malformed field is
+    treated as no confirmed membership; `bin/benchmark --regenerate` reharvests
+    cells before rebuilding the pool.
     """
     raw_names = [
         child.name
@@ -571,10 +573,7 @@ def _pool_finding_names(metrics: dict, findings_dir: Path) -> list[str]:
     if isinstance(names, list):
         wanted = {str(name) for name in names if str(name)}
         return [name for name in raw_names if name in wanted]
-    if "confirmed_findings" in metrics:
-        _count, confirmed = count_confirmed_findings(findings_dir)
-        return confirmed
-    return raw_names
+    return []
 
 
 def count_subdirs(parent: Path, prefix: str) -> int:
@@ -631,12 +630,8 @@ def count_crashes_rejected(rejected_dir: Path) -> int:
     Summing both is what makes the column total honest: a reader who
     sees 7 here can find 7 rejection records (subdir or row) below.
 
-    Prefer the canonical REJECTED-CRASHES.md, falling back to the
-    INDEX.md alias so cells produced before the rename still count.
     """
     ledger = rejected_dir / "REJECTED-CRASHES.md"
-    if not ledger.is_file():
-        ledger = rejected_dir / "INDEX.md"
     return (
         count_subdirs(rejected_dir, "CRASH-")
         + count_rejected_crash_rows(ledger)
@@ -735,7 +730,7 @@ def _format_discarded_hypotheses_roster(
         (
             "Agent-side rejections: leads the agent opened, investigated, "
             "and then closed as non-actionable (no crash, false positive, "
-            "guard-saturated, etc.). One row per hypothesis."
+            "blocked by a validated guard, etc.). One row per hypothesis."
         ),
         "",
         "| # | Agent | File | Hypothesis | Note | Updated |",
@@ -1337,16 +1332,14 @@ def _find_sanitizer_file(crash_dir: Path) -> Path | None:
     """Canonical sanitizer-output file in a crash dir, or None.
 
     Delegates to the shared crash-artifact policy so the benchmark accepts
-    exactly the sanitizer filenames export/triage/cluster do (sanitizer.txt,
-    asan.txt, asan_output.txt, asan-raw*, root msan/tsan/ubsan.txt, suffix
-    files) and skips empty files in favour of a non-empty sibling — otherwise
+    exactly the sanitizer files export/triage/cluster do (sanitizer.txt and
+    probe sidecars) and skips empty files in favour of a non-empty sibling — otherwise
     a dir the confirmed-crash oracle counts could yield no evidence and be
     mis-scored. The small fallback covers the (never-expected) case where the
     shared module is unimportable."""
     if _ca is not None:
-        return _ca.find_primary_asan([crash_dir, crash_dir / ".audit"])
-    for name in ("sanitizer.txt", "asan.txt", "asan-output.txt",
-                 "asan_output.txt", "msan.txt", "tsan.txt", "ubsan.txt"):
+        return _ca.find_primary_sanitizer([crash_dir, crash_dir / ".audit"])
+    for name in ("sanitizer.txt",):
         p = crash_dir / name
         if p.is_file() and p.stat().st_size > 0:
             return p
@@ -1383,8 +1376,8 @@ def _attribution_evidence(crash_dir: Path) -> tuple[str, set[str]] | None:
     """Trusted runtime evidence for attribution, or None.
 
     `(primitive, crash-site function names)` parsed from a CANONICAL sanitizer
-    artifact — the sanitizer runtime's own output file (find_primary_asan:
-    sanitizer.txt, asan.txt, asan_output.txt, the .audit captures, …),
+    artifact — the sanitizer runtime's own output file (find_primary_sanitizer:
+    sanitizer.txt or a probe sidecar),
     content-verified to carry a real diagnostic.
 
     Attribution is NEVER read from an agent-authored report.md. Prose that
@@ -1657,7 +1650,7 @@ def _choose_vote(finding_dir: Path) -> dict:
 
 
 def _choose_find_quality(finding_dir: Path) -> dict:
-    """Read the FIND-quality gate cache (lib/triage.sh) when present.
+    """Read the FIND-quality gate cache (lib/triage.py) when present.
 
     Rejections via the FIND-quality LLM gate write
     `.llm-find-quality.json` with `accept/reason/class/severity` — not
@@ -1704,10 +1697,9 @@ def _report_link_name(finding_dir: Path) -> str:
     return report.name if report is not None else ""
 
 
-# ── rejection-index cell helpers (shared schema with lib/triage.sh) ──────
-# The audit writes named REJECTED-*.md reports plus INDEX.md compatibility
-# aliases via lib/triage.sh; these mirror its Site/Reason extraction so
-# benchmark pools expose the same artifact names.
+# ── rejection-index cell helpers (shared schema with lib/triage.py) ──────
+# These helpers mirror triage's Site/Reason extraction so benchmark pools
+# expose the same named rejected-result artifacts.
 
 _REJECT_FRAME_SKIP_RE = re.compile(
     r"__asan|__sanitizer|__interceptor|libc\+\+|libsystem_|libdyld|libobjc|"
@@ -1718,7 +1710,7 @@ _REJECT_FRAME_PREFIX_RE = re.compile(r"^\s*#\d+\s+0[xX][0-9a-fA-F]+\s+in\s+")
 
 def _first_crash_frame(text: str) -> str:
     """First interesting "func file:line" frame, skipping sanitizer/libc/
-    runtime frames — the awk-fallback twin of lib/triage.sh's site column
+    runtime frames — the awk-fallback twin of lib/triage.py's site column
     (lib/stack_frames.py returns nothing for UBSan traces)."""
     for line in text.splitlines():
         if not re.match(r"^\s*#\d+", line):
@@ -1732,7 +1724,7 @@ def _first_crash_frame(text: str) -> str:
 def _crash_sanitizer_text(crash_dir: Path) -> str:
     direct = _exact_child_file(
         crash_dir,
-        ("sanitizer.txt", "asan.txt", "msan.txt", "tsan.txt", "ubsan.txt"),
+        ("sanitizer.txt",),
     )
     candidates: list[Path] = [direct] if direct is not None else []
     if not candidates:
@@ -1843,7 +1835,7 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
     Two sources are stitched together so the column can link to a single
     artifact: (1) any pooled `CRASH-REJECTED-NNNN/` subdirs (crash dirs
     moved out of crashes/ during triage), and (2) the per-cell
-    `INDEX-<cond>-<cell>.md` rosters (auto-rejected signatures that
+    `CELL-REJECTIONS-<cond>-<cell>.md` rosters (auto-rejected signatures that
     never got a full crash dir). Empty rosters still produce a page so
     the link target exists even when the count is 0.
     """
@@ -1854,7 +1846,7 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
         p for p in rejected_dir.iterdir()
         if p.is_dir() and p.name.startswith("CRASH-")
     )
-    rosters = sorted(rejected_dir.glob("INDEX-*.md"))
+    rosters = sorted(rejected_dir.glob("CELL-REJECTIONS-*.md"))
     discarded_rosters = sorted(rejected_dir.glob("DISCARDED-*.md"))
 
     md = [
@@ -1874,7 +1866,7 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
     md.append("## Rejected crash directories")
     md.append("")
     if subdirs:
-        # Shared schema with lib/triage.sh's rejected summaries and the findings
+        # Shared schema with lib/triage.py's rejected summaries and the findings
         # index below: ID | Site | Reason | Report.
         md.append("| ID | Site | Reason | Report |")
         md.append("| :--- | :--- | :--- | :--- |")
@@ -1936,8 +1928,7 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
         md.append("_No DISCARDED hypotheses were pooled._")
     md.append("")
     text = "\n".join(md)
-    for name in ("INDEX.md", "REJECTED-CRASHES.md"):
-        (rejected_dir / name).write_text(text, encoding="utf-8")
+    (rejected_dir / "REJECTED-CRASHES.md").write_text(text, encoding="utf-8")
 
 
 def write_rejected_findings_index(rejected_dir: Path) -> None:
@@ -1957,7 +1948,7 @@ def write_rejected_findings_index(rejected_dir: Path) -> None:
         (
             "Findings rejected by triage. **Reason** is the validator's "
             "rationale when a recon vote exists, otherwise the "
-            "FIND-quality gate's rejection reason (`lib/triage.sh`)."
+            "FIND-quality gate's rejection reason (`lib/triage.py`)."
         ),
         "",
     ]
@@ -1983,8 +1974,7 @@ def write_rejected_findings_index(rejected_dir: Path) -> None:
         md_lines.append("_No rejected findings._")
     md_lines.append("")
     text = "\n".join(md_lines)
-    for name in ("INDEX.md", "REJECTED-FINDINGS.md"):
-        (rejected_dir / name).write_text(text, encoding="utf-8")
+    (rejected_dir / "REJECTED-FINDINGS.md").write_text(text, encoding="utf-8")
 
 
 # ── aggregation across a benchmark run's cells ───────────────────────────
@@ -2056,9 +2046,9 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
         and the cluster's canonical/overall severity is the harness Medium.
         Crediting model-direct with that Medium overstates the baseline — its
         Top crash severity must reflect the Low crash it actually produced. So score
-        each condition by the max severity among ITS members. Falls back to the
-        cluster's overall severity when per-member data is absent (older
-        cluster JSON without member_severity)."""
+        each condition by the max severity among ITS members. Missing
+        per-member severity stays unscored; crediting the cluster's canonical
+        severity to every condition would inflate weaker baselines."""
         msev = c.get("member_severity") or {}
         best: tuple[int, int, str] | None = None
         for m in c["members"]:
@@ -2076,7 +2066,7 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
                 best = cand
         if best is not None:
             return best
-        return (c["severity_rank"], c["severity_score"], c["severity_level"])
+        return (0, 0, "—")
 
     by_condition: dict[str, dict] = {}
     for cond, ids in cond_clusters.items():
@@ -2114,7 +2104,7 @@ def _effective_wall(cell: dict):
 
     Uses cell.json's `wall_effective_seconds` when present, else derives it
     from `wall_seconds - paused_seconds`. Old cells (no pause fields) fall back
-    to raw `wall_seconds`, so comparisons stay backward-compatible.
+    to raw `wall_seconds` when provider-active timing is unavailable.
     """
     wall = cell.get("wall_seconds")
     if wall is None:
@@ -2326,19 +2316,13 @@ def aggregate(bench_dir: Path) -> dict:
     for cond, cells in sorted(by_condition.items()):
         done = [c for c in cells if c["status"] == "done"]
         # incomplete is written when provider/account limits made the cell
-        # unsuitable as a clean benchmark replicate. Older runs used
-        # quota_exhausted for the Gemini-only variant; keep that status in
-        # the same excluded bucket for regenerate/backward compatibility.
-        incomplete = [
-            c for c in cells if c["status"] in ("incomplete", "quota_exhausted")
-        ]
+        # unsuitable as a clean benchmark replicate.
+        incomplete = [c for c in cells if c["status"] == "incomplete"]
         provider_limited = [
             c
             for c in incomplete
             if c.get("run_quality") == "provider_limited"
-            or c["status"] == "quota_exhausted"
         ]
-        quota_exhausted = [c for c in cells if c["status"] == "quota_exhausted"]
         # done cells that recovered from a provider blip mid-run. They ARE
         # counted in the clean totals (the run finished usefully), but surfaced
         # so a reader knows those metrics include a disrupted session.
@@ -2376,11 +2360,10 @@ def aggregate(bench_dir: Path) -> dict:
         token_usage.extend(token_rows)
         cb = crash_by_cond.get(cond, {})
         fb = finding_by_cond.get(cond, {})
-        # Cell sums stay authoritative — they alone carry the INDEX.md
+        # Cell sums stay authoritative — they alone carry the rejection-ledger
         # auto-rejected signature rows that never get a crash dir. Only re-book
         # the post-pool demotions: subtract them from accepted, add to rejected.
         demoted = demoted_crashes_by_cond.get(cond, 0)
-        attributed_demoted = 0
         if demoted:
             crashes = list(crashes)
             for idx, cell in enumerate(done):
@@ -2389,18 +2372,6 @@ def aggregate(bench_dir: Path) -> dict:
                     continue
                 removed = min(crashes[idx], count)
                 crashes[idx] -= removed
-                attributed_demoted += removed
-            # Older pool-members.json files do not carry crash_cells. Keep the
-            # derived vector internally consistent with the accepted total; new
-            # pools take the exact branch above.
-            remaining = demoted - attributed_demoted
-            for idx in sorted(range(len(crashes)), key=lambda i: crashes[i],
-                              reverse=True):
-                if remaining <= 0:
-                    break
-                removed = min(crashes[idx], remaining)
-                crashes[idx] -= removed
-                remaining -= removed
         crash_total = sum(crashes)
         rejected_crash_total = sum(rejected_crashes) + demoted
         conditions.append(
@@ -2411,7 +2382,6 @@ def aggregate(bench_dir: Path) -> dict:
                 "replicates_incomplete": len(incomplete),
                 "replicates_provider_limited": len(provider_limited),
                 "replicates_provider_recovered": len(provider_recovered),
-                "replicates_quota_exhausted": len(quota_exhausted),
                 "crashes": crashes,
                 "crash_median": _median([float(x) for x in crashes]),
                 "crash_total": crash_total,
@@ -2725,16 +2695,16 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 shutil.copytree(src, dst)
                 _scrub_pooled_tree(dst)
                 members["crashes-rejected"][dst_name] = cond
-            # The per-cell INDEX.md is the human-readable rejection ledger
+            # The per-cell named report is the human-readable rejection ledger
             # (rows for triage-rejected crash signatures that did NOT get a
             # full CRASH-* dir copied above — runtime-diagnostic dedups,
             # caller-misuse classes, etc.). Copy it alongside so the
             # reviewer can see *why* a cell counted N rejections even when
             # zero rejection dirs exist.
-            index_md = rejected_crashes_dir / "INDEX.md"
+            index_md = rejected_crashes_dir / "REJECTED-CRASHES.md"
             if index_md.is_file():
                 dst = (pool / "crashes-rejected"
-                       / f"INDEX-{cond}-{cell_dir.name}.md")
+                       / f"CELL-REJECTIONS-{cond}-{cell_dir.name}.md")
                 shutil.copy2(index_md, dst)
         # DISCARDED hypotheses live in state/hypotheses.jsonl (one row
         # per investigated-then-dropped lead). Surface them in the
@@ -3148,11 +3118,6 @@ def render_section(report: dict) -> str:
                     + (
                         " ({p}p)".format(p=c.get("replicates_provider_limited", 0))
                         if int(c.get("replicates_provider_limited", 0) or 0) > 0
-                        else ""
-                    )
-                    + (
-                        " ({q}q)".format(q=c.get("replicates_quota_exhausted", 0))
-                        if int(c.get("replicates_quota_exhausted", 0) or 0) > 0
                         else ""
                     )
                 ),
@@ -3589,13 +3554,6 @@ def crosstab(bench_root: Path) -> str:
                         if int(c.get("replicates_provider_limited", 0) or 0) > 0
                         else ""
                     )
-                    + (
-                        " ({q}q)".format(
-                            q=int(c.get("replicates_quota_exhausted", 0) or 0)
-                        )
-                        if int(c.get("replicates_quota_exhausted", 0) or 0) > 0
-                        else ""
-                    )
                 ),
                 rfi=_crosstab_count(
                     c.get("rejected_finding_total", 0),
@@ -3670,7 +3628,7 @@ def crosstab(bench_root: Path) -> str:
         "- **Replicates** — `done/total`. A `(Nr)` suffix means N done replicates "
         "recovered from a provider blip and ARE counted (their metrics include a "
         "disrupted session); `(Np)` means N provider-limited replicates were "
-        "excluded from clean totals; legacy `(Nq)` marks the older "
+        "excluded from clean totals; `(Nq)` marks the alternate "
         "quota-exhausted subset."
     )
     lines.append("")
@@ -3897,17 +3855,17 @@ def split_pool(bench_dir: Path, pool_name: str = "pool") -> dict[str, int]:
     write_rejected_findings_index(pool / "findings-rejected")
     write_rejected_crashes_index(pool / "crashes-rejected")
     # split_pool only copies the CRASH-REJECTED-* dirs into the
-    # per-condition tree. The per-cell INDEX-*.md rosters live in the
+    # per-condition tree. The per-cell CELL-REJECTIONS-*.md rosters live in the
     # combined pool's crashes-rejected/ — partition them by condition
-    # name embedded in the filename (INDEX-<cond>-<cell>.md) so each
+    # name embedded in the filename (CELL-REJECTIONS-<cond>-<cell>.md) so each
     # condition's index reflects only its own rejection rows.
     combined_rejected = pool / "crashes-rejected"
     if combined_rejected.is_dir():
-        for roster in sorted(combined_rejected.glob("INDEX-*.md")):
-            # Filename: INDEX-<cond>-<cell>.md.  Take the longest known
+        for roster in sorted(combined_rejected.glob("CELL-REJECTIONS-*.md")):
+            # Take the longest known
             # condition prefix that matches so a hyphenated condition
             # name ("model-direct") is recognised correctly.
-            stem = roster.name[len("INDEX-"):-len(".md")]
+            stem = roster.name[len("CELL-REJECTIONS-"):-len(".md")]
             cond_match = None
             for cond_dir in pool.iterdir():
                 if not cond_dir.is_dir() or cond_dir.name in {
@@ -4020,12 +3978,386 @@ def _write_json(path: Path | None, obj: dict) -> None:
         Path(path).write_text(text + "\n", encoding="utf-8")
 
 
+def _read_json_object(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _atomic_write_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            json.dump(value, output, indent=2)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _as_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _format_count(value: object) -> str:
+    number = _as_int(value)
+    if number >= 1_000_000:
+        text = f"{number / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{text}M"
+    if number >= 1_000:
+        return f"{number // 1_000}k"
+    return str(number)
+
+
+def _cmd_artifact_uri(args: argparse.Namespace) -> int:
+    try:
+        print(Path(args.path).resolve().as_uri())
+    except Exception:
+        print(args.path)
+    return 0
+
+
+def _cmd_absolute_path(args: argparse.Namespace) -> int:
+    try:
+        print(Path(args.path).resolve())
+    except Exception:
+        print(args.path)
+    return 0
+
+
+def _cmd_json_fields(args: argparse.Namespace) -> int:
+    value = _read_json_object(Path(args.path))
+    for field in args.fields:
+        item = value.get(field, "")
+        if item is None:
+            item = ""
+        sys.stdout.buffer.write(str(item).encode("utf-8", errors="surrogateescape") + b"\0")
+    return 0
+
+
+def _cmd_write_run(args: argparse.Namespace) -> int:
+    payload = {
+        "runid": args.runid,
+        "target": args.target,
+        "backend": args.backend,
+        "model": args.model,
+        "replicates": args.replicates,
+        "budget_wall": args.budget_wall,
+        "harness_agents": _optional_int(args.harness_agents),
+        "model_direct_agents": 1,
+        "conditions": args.conditions.split(","),
+        "skip_recon": bool(args.skip_recon),
+        "target_sha": args.target_sha,
+        "tokenfuzz_sha": args.tokenfuzz_sha,
+        "harness_sha": args.harness_sha,
+        "dry_run": bool(args.dry_run),
+    }
+    _atomic_write_json(Path(args.path), payload)
+    return 0
+
+
+def _optional_int(value: str) -> int | None:
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _cmd_write_cell(args: argparse.Namespace) -> int:
+    path = Path(args.path)
+    run_quality = "clean"
+    try:
+        value = (path.parent / ".run-quality").read_text(encoding="utf-8").strip()
+        if value in {"clean", "provider_recovered", "provider_limited"}:
+            run_quality = value
+    except OSError:
+        pass
+    if args.status == "incomplete" and run_quality == "clean":
+        run_quality = "provider_limited"
+    paused = max(0, _as_int(args.paused_seconds))
+    payload = {
+        "condition": args.condition,
+        "replicate": int(args.replicate),
+        "experiment": args.experiment,
+        "results_dir": args.results_dir,
+        "wall_seconds": int(args.wall_seconds),
+        "status": args.status,
+        "run_quality": run_quality,
+        "paused_seconds": paused,
+        "wall_effective_seconds": max(0, int(args.wall_seconds) - paused),
+    }
+    requested = _optional_int(args.requested_agents)
+    if requested is not None:
+        payload["requested_agents"] = requested
+    config = _read_json_object(Path(args.results_dir) / "state" / "run-config.json")
+    actual = config.get("num_agents")
+    if isinstance(actual, int) and actual > 0:
+        payload["actual_agents"] = actual
+        if requested is not None and requested != actual:
+            payload["agent_count_mismatch"] = True
+    _atomic_write_json(path, payload)
+    return 0
+
+
+def _cmd_uncounted_findings(args: argparse.Namespace) -> int:
+    metrics = _read_json_object(Path(args.path))
+    print(max(0, _as_int(metrics.get("findings")) - _as_int(metrics.get("confirmed_findings"))))
+    return 0
+
+
+def _cmd_metric_gate_summary(args: argparse.Namespace) -> int:
+    metrics = _read_json_object(Path(args.path))
+    print(
+        "findings: rejected={fr} confirmed={fc} unique={fu}; "
+        "crashes: rejected={cr} confirmed={cc} unique={cu}".format(
+            fr=_as_int(metrics.get("findings_rejected")),
+            fc=_as_int(metrics.get("findings")),
+            fu=_as_int(metrics.get("finding_clusters")),
+            cr=_as_int(metrics.get("crashes_rejected")),
+            cc=_as_int(metrics.get("confirmed_crashes")),
+            cu=_as_int(metrics.get("crash_clusters")),
+        )
+    )
+    return 0
+
+
+def _cmd_cell_metrics_summary(args: argparse.Namespace) -> int:
+    metrics = _read_json_object(Path(args.path))
+    if not metrics or metrics.get("exists") is False:
+        print("metrics=unavailable")
+        return 0
+    tokens = metrics.get("tokens") or {}
+    parts = [
+        f"crashes={_as_int(metrics.get('confirmed_crashes'))}/"
+        f"{_as_int(metrics.get('crash_clusters'))} unique",
+        f"findings={_as_int(metrics.get('confirmed_findings', metrics.get('findings')))}/"
+        f"{_as_int(metrics.get('finding_clusters'))} unique",
+    ]
+    rejected = _as_int(metrics.get("crashes_rejected")) + _as_int(metrics.get("findings_rejected"))
+    if rejected:
+        parts.append(f"rejected={rejected}")
+    unadjudicated = _as_int(metrics.get("findings_unadjudicated"))
+    if unadjudicated:
+        parts.append(f"unadjudicated_findings={unadjudicated}")
+    probes = _as_int(tokens.get("asan_invocations"))
+    if probes:
+        parts.append(f"probes={probes}")
+    token_keys = ("input_tokens", "cached_input_tokens", "cache_creation_tokens", "output_tokens", "prompt_estimate_tokens")
+    if any(_as_int(tokens.get(key)) for key in token_keys):
+        parts.append(
+            "tokens=in:{} cache:{} create:{} out:{} prompt_est:{}".format(
+                _format_count(tokens.get("input_tokens")),
+                _format_count(tokens.get("cached_input_tokens")),
+                _format_count(tokens.get("cache_creation_tokens")),
+                _format_count(tokens.get("output_tokens")),
+                _format_count(tokens.get("prompt_estimate_tokens")),
+            )
+        )
+    refusals = _as_int(metrics.get("model_refusals"))
+    if refusals:
+        parts.append(f"refusals={refusals}")
+    print(" | ".join(parts))
+    return 0
+
+
+def _cmd_report_summary(args: argparse.Namespace) -> int:
+    report = _read_json_object(Path(args.path))
+    if not report:
+        print("  (no report.json)")
+        return 0
+    for condition in report.get("conditions", []):
+        crashes = condition.get("crashes", [])
+        spread = f"{min(crashes)}-{max(crashes)}" if crashes else "-"
+        print(
+            "  {cond:<18} done={done}/{total}  crash median={median:g}  "
+            "range={spread}  total={crashes}  refusals={refusals}".format(
+                cond=condition["condition"],
+                done=condition["replicates_done"],
+                total=condition["replicates_total"],
+                median=condition["crash_median"],
+                spread=spread,
+                crashes=condition["crash_total"],
+                refusals=_as_int(condition.get("model_refusal_total")),
+            )
+        )
+    return 0
+
+
+def _cmd_report_refusals(args: argparse.Namespace) -> int:
+    report = _read_json_object(Path(args.path))
+    print(sum(_as_int(row.get("model_refusal_total")) for row in report.get("conditions", [])))
+    return 0
+
+
+def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
+    if _ca is None:
+        return 1
+    crash_dir = Path(args.crash_dir)
+    target_root = Path(args.target_root)
+    scan_dirs = []
+    audit_dir = crash_dir / ".audit"
+    if audit_dir.is_dir():
+        scan_dirs.append(audit_dir)
+    scan_dirs.append(crash_dir)
+
+    diagnostic = _ca.find_primary_sanitizer(scan_dirs)
+    text = ""
+    if diagnostic is not None:
+        try:
+            text = diagnostic.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+    match = re.search(r"sanitizer=([a-z]+)", text)
+    sanitizer = match.group(1) if match else "asan"
+    if sanitizer not in {"asan", "ubsan", "msan", "tsan", "race", "runner"}:
+        sanitizer = "asan"
+
+    harness_binary = ""
+    for candidate in sorted(crash_dir.glob("harness*")):
+        if _ca.is_executable_binary(candidate):
+            harness_binary = str(candidate)
+            break
+    testcase = _ca.find_testcase(
+        scan_dirs,
+        sanitizer_files=[diagnostic] if diagnostic else [],
+    )
+    harness_source = _ca.find_harness_source(scan_dirs, exclude=testcase)
+
+    config = {}
+    config_path = target_root / "target.toml"
+    if args.target_slug:
+        split_config = SCRIPT_ROOT / "output" / args.target_slug / "target.toml"
+        if split_config.is_file():
+            config_path = split_config
+    if _tc is not None and config_path.is_file():
+        try:
+            config = _tc.parse_toml(config_path)
+        except Exception:
+            config = {}
+    sanitizer_table = config.get("sanitizer", {}) or {}
+    binary_relative = (
+        config.get(f"{sanitizer}_bin")
+        or sanitizer_table.get(f"{sanitizer}_bin")
+        or config.get("asan_bin")
+        or ""
+    )
+
+    target_binary = ""
+    if binary_relative:
+        if os.path.isabs(binary_relative):
+            target_binary = binary_relative
+        elif not any(part == ".." for part in Path(binary_relative).parts):
+            normalized = os.path.normpath(binary_relative)
+            suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+            if suffix:
+                head, separator, rest = normalized.partition("/")
+                if head in {"build-asan", "build-ubsan", "build-msan", "build-tsan"}:
+                    normalized = f"{head}{suffix}{separator}{rest}"
+            target_binary = str(target_root / normalized)
+
+    if harness_binary:
+        print(f"SAN=asan\nMODE=harness\nBIN={harness_binary}\nTESTCASE=")
+        return 0
+    if harness_source is not None:
+        print("MODE=none\nREASON=source-harness-uncompiled")
+        return 0
+    if (
+        testcase is not None
+        and target_binary
+        and os.path.exists(target_binary)
+        and os.access(target_binary, os.X_OK)
+    ):
+        print(f"SAN={sanitizer}\nMODE=cli\nBIN={target_binary}\nTESTCASE={testcase}")
+        replay_args = _ca.find_repro_args(
+            scan_dirs,
+            bin_names=[os.path.basename(target_binary)],
+            testcase_name=os.path.basename(str(testcase)),
+        )
+        for replay_arg in replay_args:
+            value = str(testcase) if replay_arg == _ca.TESTCASE_TOKEN else replay_arg
+            print(f"ARG={value}")
+        return 0
+    print("MODE=none")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("artifact-uri", help="render a local artifact as a file URI")
+    p.add_argument("path")
+
+    p = sub.add_parser("absolute-path", help="resolve a local path")
+    p.add_argument("path")
+
+    p = sub.add_parser("json-fields", help="emit selected JSON fields as NUL records")
+    p.add_argument("path")
+    p.add_argument("fields", nargs="+")
+
+    p = sub.add_parser("write-run", help="atomically write run.json metadata")
+    p.add_argument("path")
+    p.add_argument("runid")
+    p.add_argument("target")
+    p.add_argument("backend")
+    p.add_argument("model")
+    p.add_argument("replicates", type=int)
+    p.add_argument("budget_wall", type=int)
+    p.add_argument("harness_agents")
+    p.add_argument("conditions")
+    p.add_argument("skip_recon", type=int)
+    p.add_argument("target_sha")
+    p.add_argument("tokenfuzz_sha")
+    p.add_argument("harness_sha")
+    p.add_argument("dry_run", type=int)
+
+    p = sub.add_parser("write-cell", help="atomically write cell.json metadata")
+    p.add_argument("path")
+    p.add_argument("condition")
+    p.add_argument("replicate")
+    p.add_argument("experiment")
+    p.add_argument("results_dir")
+    p.add_argument("wall_seconds")
+    p.add_argument("status")
+    p.add_argument("requested_agents", nargs="?", default="")
+    p.add_argument("paused_seconds", nargs="?", default="0")
+
+    for name, help_text in (
+        ("uncounted-findings", "count findings not accepted by the gate"),
+        ("metric-gate-summary", "format gate counts from metrics JSON"),
+        ("cell-metrics-summary", "format one cell's compact metrics summary"),
+        ("report-summary", "format a benchmark report for stdout"),
+        ("report-refusals", "count model refusals in a benchmark report"),
+    ):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("path")
+
+    p = sub.add_parser("resolve-reverify", help="resolve a pooled crash rerun contract")
+    p.add_argument("crash_dir")
+    p.add_argument("target_root")
+    p.add_argument("target_slug", nargs="?", default="")
 
     p_h = sub.add_parser("harvest", help="metric counts for one results dir")
     p_h.add_argument("results_dir", type=Path)
@@ -4100,6 +4432,22 @@ def main(argv: list[str]) -> int:
     p_sc.add_argument("--out", type=Path, default=None)
 
     args = ap.parse_args(argv)
+
+    direct_commands = {
+        "artifact-uri": _cmd_artifact_uri,
+        "absolute-path": _cmd_absolute_path,
+        "json-fields": _cmd_json_fields,
+        "write-run": _cmd_write_run,
+        "write-cell": _cmd_write_cell,
+        "uncounted-findings": _cmd_uncounted_findings,
+        "metric-gate-summary": _cmd_metric_gate_summary,
+        "cell-metrics-summary": _cmd_cell_metrics_summary,
+        "report-summary": _cmd_report_summary,
+        "report-refusals": _cmd_report_refusals,
+        "resolve-reverify": _cmd_resolve_reverify,
+    }
+    if args.cmd in direct_commands:
+        return direct_commands[args.cmd](args)
 
     if args.cmd == "harvest":
         if not args.results_dir.is_dir():

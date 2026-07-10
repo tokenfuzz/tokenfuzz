@@ -22,6 +22,7 @@ source "$TESTS_DIR/helpers.sh"
 setup_test_env
 
 PY="$SCRIPT_ROOT/lib/benchmark.py"
+PY_BENCH="$PY"
 USAGE_PY="$SCRIPT_ROOT/lib/llm_usage.py"
 BENCH="$SCRIPT_ROOT/bin/benchmark"
 RENDER_MD="$SCRIPT_ROOT/bin/render-md"
@@ -58,7 +59,7 @@ chmod +x "$fake_git_bin/git"
 (
   set +e
   REAL_GIT="$real_git" FAKE_GIT_LOG="$fake_git_log" \
-    PATH="$fake_git_bin:$PATH" bash "$BENCH" --target dummytarget --dry-run --replicates 2 \
+    PATH="$fake_git_bin:$PATH" "$BENCH" --target dummytarget --dry-run --replicates 2 \
     --agents 2 --conditions model-direct,harness --skip-recon --ledger "$dledger" \
     --bench-root "$droot" > "$work/t9-dry.out" 2>&1
   echo $? > "$work/t9-dry.rc"
@@ -70,9 +71,9 @@ t9_job=$!
 allroot="$work/regen-all"
 (
   set +e
-  bash "$BENCH" --target dummytarget --dry-run --replicates 1 --conditions harness \
+  "$BENCH" --target dummytarget --dry-run --replicates 1 --conditions harness \
     --backend codex --bench-root "$allroot" --run-id ra-codex >/dev/null 2>&1
-  bash "$BENCH" --target othertarget --dry-run --replicates 1 --conditions harness \
+  "$BENCH" --target othertarget --dry-run --replicates 1 --conditions harness \
     --backend gemini --bench-root "$allroot" --run-id ra-gemini >/dev/null 2>&1
 ) &
 t9s_seed_job=$!
@@ -81,7 +82,7 @@ t9s_seed_job=$!
 multiroot="$work/multi-target"
 (
   set +e
-  bash "$BENCH" --target " dummytarget , othertarget " --dry-run \
+  "$BENCH" --target " dummytarget , othertarget " --dry-run \
     --replicates 1 --conditions harness --backend codex --skip-recon \
     --bench-root "$multiroot" --run-id mt > "$work/t9t-multi.out" 2>&1
   echo $? > "$work/t9t-multi.rc"
@@ -104,18 +105,18 @@ printf '{"id":"RECON-stale","title":"must not survive"}\n' \
 printf 'stale marker\n' > "$resume_cell/results/.recon-cache-marker"
 (
   set +e
-  bash "$BENCH" --target dummytarget --dry-run --backend codex \
+  "$BENCH" --target dummytarget --dry-run --backend codex \
     --replicates 1 --conditions harness --bench-root "$resume_root" \
     --run-id "$resume_run" > "$work/t9n-resume.out" 2>&1
   echo $? > "$work/t9n-resume.rc"
 ) &
 t9n_job=$!
 
-assert_file_contains "$BENCH" 'LLM_DECIDE_LOG="\$BENCH_DIR/llm-decisions\.log"' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'LLM_DECIDE_LOG.*llm-decisions\.log' \
   "T0a: benchmark cluster-findings keeps keyer telemetry under the run dir"
-assert_file_contains "$BENCH" 'ACTIVE_BACKEND="\$BACKEND" BACKEND="\$BACKEND" MODEL="\$model"' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" '"ACTIVE_BACKEND": backend' \
   "T0b: benchmark cluster-findings exports backend/model context"
-assert_file_not_contains "$BENCH" 'cluster-findings".*2>/dev/null' \
+assert_file_not_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'cluster-findings".*stderr=subprocess.DEVNULL' \
   "T0c: benchmark cluster-findings stderr is not hidden"
 
 ASAN_LINE='==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602'
@@ -208,15 +209,15 @@ assert_eq "2" "$(echo "$cfv" | jq -r '.findings_unadjudicated')" \
 # ── T1cl: the report findings cell renders the CONFIRMED count only. Any
 # un-adjudicated remainder from a cut-off triage is resolved by the regenerate
 # drain (or surfaced as a run-health WARN), never as a "(+N un-gated)" suffix on
-# the comparison row. Falls back to the raw total for metrics that predate
-# confirmed_finding_total (so an un-re-harvested run is not misreported as 0).
+# the comparison row. Missing confirmation metrics render as unknown rather
+# than counting raw, unadjudicated FIND directories.
 label() { python3 -c "import sys; sys.path.insert(0,'lib'); import benchmark; print(benchmark._finding_count_label($1))"; }
 assert_eq "1" "$(label '{"finding_total":286,"confirmed_finding_total":1}')" \
   "T1cl-a: cut-off triage shows the confirmed count only, no un-gated suffix"
 assert_eq "23" "$(label '{"finding_total":23,"confirmed_finding_total":23}')" \
   "T1cl-b: fully-gated run shows the confirmed count plainly (no remainder)"
-assert_eq "286" "$(label '{"finding_total":286}')" \
-  "T1cl-c: pre-metric data falls back to the raw total (not misreported as 0)"
+assert_eq "—" "$(label '{"finding_total":286}')" \
+  "T1cl-c: incomplete metrics do not count raw findings as confirmed"
 assert_eq "0" "$(label '{"finding_total":0,"confirmed_finding_total":0}')" \
   "T1cl-d: zero findings render as 0"
 
@@ -456,7 +457,7 @@ assert_file_not_exists "$pbd/pool/model-direct/crashes/CRASH-0001" \
 assert_file_exists "$pbd/pool/model-direct/crashes/CRASH-0002/report.md" \
   "T4m5: split-pool keeps current accepted crashes after stale cleanup"
 
-# Auto-rejected crash signatures live only as INDEX.md rows (no crash dir), and
+# Auto-rejected crash signatures live only as named ledger rows (no crash dir), and
 # only the cell metric counts them. Once split-pool has run for a condition that
 # also has an accepted crash, the rejected total must still carry those rows —
 # they have no demoted dir, so re-deriving from the pool tree would lose them.
@@ -473,7 +474,7 @@ JSON
 cat > "$ibd/pool/crashes/CRASH-0001/report.md" <<'EOF_ACCEPTED'
 # Accepted crash
 EOF_ACCEPTED
-cat > "$ibd/pool/crashes-rejected/INDEX-model-direct-r1.md" <<'EOF_INDEX'
+cat > "$ibd/pool/crashes-rejected/CELL-REJECTIONS-model-direct-r1.md" <<'EOF_INDEX'
 | ID | Crash site | Rejected at |
 | :-- | :-- | :-- |
 | CR-a | app_parse.c:10 | t1 |
@@ -530,8 +531,6 @@ echo "# RECON-deadbeefcafef00d — synthetic recon vote" \
 python3 "$PY" pool "$rbd" >/dev/null
 assert_file_exists "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   "T4g: rejected finding markdown index written for combined pool"
-assert_file_exists "$rbd/pool/findings-rejected/INDEX.md" \
-  "T4g2: rejected finding INDEX.md compatibility alias written for combined pool"
 assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   'FULL-RATIONALE-END' \
   "T4h: rejected finding index keeps the full validator rationale"
@@ -563,12 +562,8 @@ assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.html" \
 python3 "$PY" split-pool "$rbd" >/dev/null
 assert_file_exists "$rbd/pool/model-direct/findings-rejected/REJECTED-FINDINGS.md" \
   "T4i: rejected finding markdown index written for condition pool"
-assert_file_exists "$rbd/pool/model-direct/findings-rejected/INDEX.md" \
-  "T4i2: rejected finding INDEX.md compatibility alias written for condition pool"
-assert_file_contains "$BENCH" 'REJECTED-FINDINGS.md' \
-  "T4j: bin/benchmark renders rejected finding markdown indexes through render-md"
-assert_file_contains "$BENCH" 'findings-rejected/INDEX.md' \
-  "T4j2: bin/benchmark also renders rejected finding INDEX aliases"
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'REJECTED-FINDINGS.md' \
+  "T4j: benchmark runner renders rejected finding markdown indexes through render-md"
 
 # ── T5: aggregate degrades gracefully on a partial run ───────────────────
 mk_cell harness-r3 harness 3 failed 0
@@ -614,7 +609,7 @@ printf '%s\n' \
   '{"type":"item.started"}' \
   '{"type":"item.completed","usage":{"input_tokens":2000,"cached_input_tokens":1800,"output_tokens":90}}' \
   > "$codex_log"
-u=$(python3 "$USAGE_PY" codex "$codex_log")
+u=$(python3 "$USAGE_PY" extract-usage codex "$codex_log")
 assert_eq "2000" "$(echo "$u" | jq -r '.tokens.input')" "T8a: codex input tokens"
 assert_eq "1800" "$(echo "$u" | jq -r '.tokens.cached_input')" "T8b: codex cached tokens"
 assert_eq "90" "$(echo "$u" | jq -r '.tokens.output')" "T8c: codex output tokens"
@@ -628,7 +623,7 @@ printf '%s\n' \
   '{"type":"text","part":{"type":"text","text":"done"}}' \
   '{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":1200,"output":34,"reasoning":0,"cache":{"read":900,"write":25}}}}' \
   > "$oss_log"
-u_oss=$(python3 "$USAGE_PY" oss "$oss_log")
+u_oss=$(python3 "$USAGE_PY" extract-usage oss "$oss_log")
 assert_eq "1200" "$(echo "$u_oss" | jq -r '.tokens.input')" \
   "T8c4: oss/OpenCode input tokens from step_finish"
 assert_eq "900" "$(echo "$u_oss" | jq -r '.tokens.cached_input')" \
@@ -643,7 +638,7 @@ printf '%s\n' \
   '{"type":"assistant","message":{"usage":{"input_tokens":5,"output_tokens":7}}}' \
   '{"type":"result","usage":{"input_tokens":50,"cache_read_input_tokens":40,"cache_creation_input_tokens":15,"output_tokens":12}}' \
   > "$claude_log"
-u2=$(python3 "$USAGE_PY" claude "$claude_log")
+u2=$(python3 "$USAGE_PY" extract-usage claude "$claude_log")
 assert_eq "50" "$(echo "$u2" | jq -r '.tokens.input')" "T8d: claude input (last usage wins)"
 assert_eq "40" "$(echo "$u2" | jq -r '.tokens.cached_input')" "T8e: claude cache_read alias"
 assert_eq "15" "$(echo "$u2" | jq -r '.tokens.cache_creation')" \
@@ -660,7 +655,7 @@ printf '%s\n' \
   '{"type":"init","model":"gemini-3.1-pro-preview"}' \
   '{"type":"result","status":"success","stats":{"total_tokens":58000080,"input_tokens":58000000,"output_tokens":80,"cached":55000000,"input":3000000}}' \
   > "$gemini_log"
-u_gem=$(python3 "$USAGE_PY" gemini "$gemini_log")
+u_gem=$(python3 "$USAGE_PY" extract-usage gemini "$gemini_log")
 assert_eq "58000000" "$(echo "$u_gem" | jq -r '.tokens.input')" \
   "T8j: gemini raw input_tokens captured (cumulative cached+fresh)"
 assert_eq "55000000" "$(echo "$u_gem" | jq -r '.tokens.cached_input')" \
@@ -671,15 +666,15 @@ assert_eq "false" "$(echo "$u_gem" | jq -r '.estimated')" \
 
 empty_log="$work/empty.log"
 : > "$empty_log"
-u3=$(python3 "$USAGE_PY" gemini "$empty_log")
+u3=$(python3 "$USAGE_PY" extract-usage gemini "$empty_log")
 assert_eq "0" "$(echo "$u3" | jq -r '.tokens.output')" "T8f: empty log yields zero tokens"
-u4=$(python3 "$USAGE_PY" codex "$work/does-not-exist.log")
+u4=$(python3 "$USAGE_PY" extract-usage codex "$work/does-not-exist.log")
 assert_eq "0" "$(echo "$u4" | jq -r '.tokens.input // 0')" "T8g: missing log is safe"
 assert_eq "false" "$(echo "$u4" | jq -r '.estimated')" \
   "T8h: missing codex usage is not estimated from stderr"
 printf 'codex auth failure without usage\n' > "$work/codex-no-usage.log"
 printf 'prompt text\n' > "$work/no-usage-prompt.txt"
-u5=$(python3 "$USAGE_PY" codex "$work/codex-no-usage.log" "$work/no-usage-prompt.txt")
+u5=$(python3 "$USAGE_PY" extract-usage codex "$work/codex-no-usage.log" "$work/no-usage-prompt.txt")
 assert_eq "0" "$(echo "$u5" | jq -r '.tokens.output')" \
   "T8i: codex no-usage log stays zero-cost instead of estimated"
 
@@ -731,7 +726,7 @@ rc=$(cat "$work/t9-dry.rc")
 assert_eq "0" "$rc" "T9a: dry-run exits 0"
 assert_file_exists "$dledger" "T9b: dry-run writes the ledger"
 assert_match "crash median=1" "$dry_out" "T9c: harness scores 1 crash/cell in dry-run"
-assert_match "model-direct .*crash median=0" "$dry_out" "T9d: model-direct scores 0 in dry-run"
+assert_match "model-direct: crash median=0" "$dry_out" "T9d: model-direct scores 0 in dry-run"
 assert_match "Harness recon: skipped \\(--skip-recon\\)" "$dry_out" \
   "T9d2: --skip-recon is accepted and logged"
 # 2 replicates x harness, each synthetic cell has one real crash.
@@ -749,19 +744,19 @@ else
   fail "T9f4: benchmark-result is refreshed after each dry-run cell" \
     "saw $dry_updates update lines in: $dry_out"
 fi
-# Pins the update_benchmark_result change-guard: the pre-ledger + final passes
-# follow no new cell, so their inputs are unchanged and the full rebuild must be
-# skipped. Without the guard every one of the N+2 calls re-rendered the pool —
+# Pins the update_result change guard: the pre-ledger pass follows no new cell,
+# so its inputs are unchanged and the full rebuild must be skipped. Without the
+# guard every one of the N+1 calls re-rendered the pool —
 # the benchmark's recurring slowness. If this drops below 2, someone removed the
 # guard or added unconditional work that re-dirties the inputs; the suite must
 # go red BEFORE the slowness ships, not after the next person notices 90s tests.
 dry_skips=$(printf '%s\n' "$dry_out" \
   | grep -c 'benchmark-result update (.*): inputs unchanged, skipped rebuild' || true)
-if [ "$dry_skips" -ge 2 ]; then
-  pass "T9f5: redundant pre-ledger/final re-renders are skipped (no N+2 rebuild bloat)"
+if [ "$dry_skips" -ge 1 ]; then
+  pass "T9f5: redundant pre-ledger re-render is skipped"
 else
-  fail "T9f5: redundant pre-ledger/final re-renders must be skipped" \
-    "expected >=2 'inputs unchanged' skips, saw $dry_skips in: $dry_out"
+  fail "T9f5: redundant pre-ledger re-render must be skipped" \
+    "expected an 'inputs unchanged' skip, saw $dry_skips in: $dry_out"
 fi
 drun_json=$(find "$droot/codex" -mindepth 2 -maxdepth 2 -name run.json | head -1)
 assert_file_exists "$drun_json" "T9g: dry-run writes run metadata"
@@ -821,11 +816,11 @@ wait "$t9s_seed_job" 2>/dev/null || true
 codex_cells_before=$(find "$allroot/codex/ra-codex/cells" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
 (
   set +e
-  bash "$BENCH" --regenerate --bench-root "$allroot" > "$work/t9s-all.out" 2>&1
+  "$BENCH" --regenerate --bench-root "$allroot" > "$work/t9s-all.out" 2>&1
   echo $? > "$work/t9s-all.rc"
 ) &
 t9s_all_job=$!
-regen_out=$(bash "$BENCH" --target dummytarget --regenerate \
+regen_out=$("$BENCH" --target dummytarget --regenerate \
   --bench-root "$droot" --run-id "$regen_runid" 2>&1)
 regen_rc=$?
 assert_eq "0" "$regen_rc" "T9r-a: --regenerate exits 0"
@@ -898,7 +893,7 @@ cat > "$missing_cell/metrics.json" <<'JSON'
 JSON
 printf '# Raw model-direct finding\n\nLocation: catalog.c:3\n' \
   > "$missing_cell/findings/FIND-RAW/report.md"
-missing_out=$(bash "$BENCH" --target "$missing_slug" --backend codex \
+missing_out=$("$BENCH" --target "$missing_slug" --backend codex \
   --run-id "$missing_run" --bench-root "$missing_target_root" --regenerate 2>&1)
 missing_rc=$?
 assert_eq "0" "$missing_rc" \
@@ -919,7 +914,7 @@ assert_eq "0" "$(jq -r '.confirmed_findings' "$missing_cell/metrics.json")" \
 # command under `set -euo pipefail` aborts the whole suite before $? is read.
 regen_empty="$work/regen-empty"
 set +e
-bash "$BENCH" --target dummytarget --regenerate --bench-root "$regen_empty" \
+"$BENCH" --target dummytarget --regenerate --bench-root "$regen_empty" \
   >/dev/null 2>&1
 regen_norun_rc=$?
 set -e
@@ -950,7 +945,7 @@ assert_eq "$codex_cells_before" "$codex_cells_after" \
 
 # --regenerate (no target) on an empty tree is a clear error.
 set +e
-bash "$BENCH" --regenerate --bench-root "$work/regen-all-empty" >/dev/null 2>&1
+"$BENCH" --regenerate --bench-root "$work/regen-all-empty" >/dev/null 2>&1
 all_empty_rc=$?
 set -e
 assert_neq "0" "$all_empty_rc" \
@@ -990,7 +985,7 @@ assert_file_exists "$multiroot/benchmark-result.md" \
 
 nestedroot="$work/nested-target"
 set +e
-nested_out=$(bash "$BENCH" --target samples/sample-python --dry-run \
+nested_out=$("$BENCH" --target samples/sample-python --dry-run \
   --replicates 1 --conditions model-direct,harness --backend codex \
   --bench-root "$nestedroot" --run-id nested-smoke 2>&1)
 nested_rc=$?
@@ -1010,7 +1005,7 @@ assert_file_exists "$nestedroot/codex/nested-smoke/cells/model-direct-r1/cell.js
 
 # An empty/whitespace-only comma list is rejected, not silently a no-op.
 set +e
-bash "$BENCH" --target " , " --dry-run --replicates 1 --conditions harness \
+"$BENCH" --target " , " --dry-run --replicates 1 --conditions harness \
   --bench-root "$work/multi-empty" >/dev/null 2>&1
 multi_empty_rc=$?
 set -e
@@ -1060,7 +1055,7 @@ fi
 # ── T9u: cell_metrics_summary distinguishes an unavailable cell from a clean
 # zero-yield one. A missing/corrupt metrics.json or the exists:false sentinel
 # (written for a cell with no results dir) must not read as crashes=0/0. ──────
-eval "$(sed -n '/^cell_metrics_summary() {/,/^}/p' "$BENCH")"
+cell_metrics_summary() { python3 "$PY" cell-metrics-summary "$1"; }
 cms_tmp="$work/cms"; mkdir -p "$cms_tmp"
 printf '{"exists": false}\n' > "$cms_tmp/absent.json"
 printf 'not json{{{\n' > "$cms_tmp/corrupt.json"

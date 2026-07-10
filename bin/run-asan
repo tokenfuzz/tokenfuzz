@@ -1,131 +1,25 @@
-#!/bin/bash
-# AddressSanitizer execution wrapper.
-# Supports: browser, browser-minimal, js, xpcshell, js-diff, fuzz,
-#           fuzz-repro, fuzz-js, generic
-#
-# Mode taxonomy:
-#   browser          Full Firefox/browser run for web-content testcases. Uses
-#                    the high-signal ASan options (large quarantine/redzone,
-#                    scariness, abort handling) and a temp profile.
-#   browser-minimal  Same browser surface, smaller options. Kept for quick
-#                    smoke checks or environments where the full profile is
-#                    too expensive. bin/probe does not select it by default.
-#   js               Standalone JS shell (`dist/bin/js`) running a script.
-#                    This is normal JS-engine execution, not libFuzzer.
-#   xpcshell         Parent-process JS/XPCOM runner for shell-only Firefox
-#                    components; triage treats xpcshell-only reachability
-#                    differently from web/content reachability.
-#   js-diff          Differential JS execution. Runs target-configured flag
-#                    pairs (SpiderMonkey defaults when absent) and reports
-#                    textual divergence; used by S4, no ASan crash required.
-#   generic          Target CLI or probe-built HARNESS executable. This is the
-#                    normal non-browser path used by bin/probe.
-#   fuzz             Browser-integrated libFuzzer target over a corpus. Uses
-#                    halt_on_error=0 so a fuzzing session can continue and
-#                    write multiple artifacts.
-#   fuzz-repro       One existing fuzzer crash file, rerun with
-#                    halt_on_error=1 and a short timeout to get a clean
-#                    single diagnostic for triage/export.
-#   fuzz-js          Standalone SpiderMonkey `fuzz-tests` binary for JS engine
-#                    fuzzers such as Wasm/RegExp/StructuredClone. Different
-#                    harness ABI and artifact flow from `js`.
-#
-# Usage: bin/run-asan <mode> <testcase> [args...]
-#
-# Reads target paths (asan_bin, asan_lib, etc.) from output/<slug>/target.toml,
-# discovered via lib/target_config.sh by walking up from the testcase or CWD.
-#
-# Timeout env vars (all optional):
-#   ASAN_TIMEOUT             — overrides browser/js/xpcshell/generic defaults
-#   FUZZ_ASAN_TIMEOUT        — fuzz-mode timeout (default 600). Kept separate
-#                              from ASAN_TIMEOUT so a short repro override can't
-#                              accidentally starve a fuzz loop.
-#   ASAN_FUZZ_REPRO_TIMEOUT  — fuzz-repro timeout (default 20)
+#!/usr/bin/env python3
+"""AddressSanitizer runner for browser, shell, CLI, and fuzz testcases."""
 
-set -euo pipefail
+from __future__ import annotations
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-source "$REPO_ROOT/lib/timeout.sh"
-# shellcheck source=../lib/platform.sh
-source "$REPO_ROOT/lib/platform.sh"
-# shellcheck source=../lib/target_config.sh
-source "$REPO_ROOT/lib/target_config.sh"
-# shellcheck source=../lib/sanitizer.sh
-source "$REPO_ROOT/lib/sanitizer.sh"
+import difflib
+import os
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
 
-# Discover target config from CWD/testcase. Best-effort — fuzz/firefox callers
-# may set TARGET_ROOT themselves; only fail late if a needed binary is missing.
-_probe_path="${2:-$PWD}"
-target_load "$_probe_path" 2>/dev/null || true
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
 
-# _fuzz_timeout / _fuzz_default_crash_dir / _validate_fuzzer_name /
-# filter_browser_output live in lib/sanitizer.sh — sourced above.
+import sanitizer
+import target_config
+from sanitizer_helpers import _BROWSER_NOISE, firefox_fuzz_targets
+from timeout import run_timeout
 
-# Validate required tools.
-command -v python3 &>/dev/null || { echo "[run-asan] FATAL: python3 is required" >&2; exit 1; }
-
-# Target root — set by target_load (above) when discovery succeeded; else
-# fall back to the firefox checkout for back-compat with direct invocations.
-TARGET_ROOT="${TARGET_ROOT:-${REPO_ROOT}/targets/firefox}"
-
-ASAN_BUILD_DIR="$(sanitizer_build_dir asan)"
-
-_default_asan_browser() {
-    if [[ -n "${TARGET_ASAN_BIN:-}" ]]; then
-        target_resolve_path "$TARGET_ASAN_BIN"
-        return
-    fi
-    local darwin_bin="${ASAN_BUILD_DIR}/dist/Nightly.app/Contents/MacOS/firefox"
-    local linux_bin="${ASAN_BUILD_DIR}/dist/bin/firefox"
-    if audit_is_darwin; then
-        [ -x "$darwin_bin" ] && echo "$darwin_bin" || echo "$linux_bin"
-    else
-        [ -x "$linux_bin" ] && echo "$linux_bin" || echo "$darwin_bin"
-    fi
-}
-
-ASAN_APP="${ASAN_APP:-${ASAN_BUILD_DIR}/dist/Nightly.app}"
-ASAN_BROWSER="${ASAN_BROWSER:-$(_default_asan_browser)}"
-ASAN_JS="${ASAN_JS:-${ASAN_BUILD_DIR}/dist/bin/js}"
-# xpcshell: parent-process JS runtime (XPCOM + necko, no content split).
-ASAN_XPCSHELL="${ASAN_XPCSHELL:-${ASAN_BUILD_DIR}/dist/bin/xpcshell}"
-ASAN_XPCSHELL_APPDIR="${ASAN_XPCSHELL_APPDIR:-${ASAN_APP}/Contents/Resources/browser}"
-
-# Per-mode timeouts. ASAN_TIMEOUT overrides browser/js/xpcshell/generic;
-# fuzz uses its own knob so a short repro override can't shorten fuzz loops.
-BROWSER_TIMEOUT="${ASAN_TIMEOUT:-15}"
-JS_TIMEOUT="${ASAN_TIMEOUT:-10}"
-XPCSHELL_TIMEOUT="${ASAN_TIMEOUT:-15}"
-FUZZ_TIMEOUT="${FUZZ_ASAN_TIMEOUT:-600}"
-FUZZ_REPRO_TIMEOUT="${ASAN_FUZZ_REPRO_TIMEOUT:-20}"
-GENERIC_TIMEOUT="${ASAN_TIMEOUT:-15}"
-
-# Per-mode option strings come from lib/sanitizer_options.conf via
-# sanitizer_options_for (lib/sanitizer.sh) — the single source of truth
-# shared with bin/export-repro. Do not re-hardcode option strings here.
-ASAN_OPTS_FULL="$(sanitizer_options_for asan full)"
-ASAN_OPTS_MINIMAL="$(sanitizer_options_for asan minimal)"
-ASAN_OPTS_JS="$(sanitizer_options_for asan js)"
-ASAN_OPTS_XPCSHELL="$(sanitizer_options_for asan xpcshell)"
-ASAN_OPTS_FUZZ="$(sanitizer_options_for asan fuzz)"
-ASAN_OPTS_FUZZ_REPRO="$(sanitizer_options_for asan fuzz-repro)"
-
-# Append target.toml [sanitizer].asan_suppressions / asan_options. Missing
-# suppression files warn but do not abort.
-ASAN_OPTS_FULL="$(sanitizer_compose_options asan "$ASAN_OPTS_FULL")"
-ASAN_OPTS_MINIMAL="$(sanitizer_compose_options asan "$ASAN_OPTS_MINIMAL")"
-ASAN_OPTS_JS="$(sanitizer_compose_options asan "$ASAN_OPTS_JS")"
-ASAN_OPTS_XPCSHELL="$(sanitizer_compose_options asan "$ASAN_OPTS_XPCSHELL")"
-ASAN_OPTS_FUZZ="$(sanitizer_compose_options asan "$ASAN_OPTS_FUZZ")"
-ASAN_OPTS_FUZZ_REPRO="$(sanitizer_compose_options asan "$ASAN_OPTS_FUZZ_REPRO")"
-
-make_temp_profile() {
-    local tmpdir
-    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/asan-profile-XXXXXXXX")"
-    mkdir -p "${tmpdir}"
-    cat > "${tmpdir}/user.js" <<'PREFS'
-user_pref("browser.shell.checkDefaultBrowser", false);
+PROFILE_PREFS = '''user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.policy.dataSubmissionEnabled", false);
 user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
 user_pref("browser.aboutConfig.showWarning", false);
@@ -158,639 +52,357 @@ user_pref("extensions.webcompat.enable_shims", false);
 user_pref("extensions.webcompat.smartblockEmbeds.enabled", false);
 user_pref("extensions.webcompat-reporter.enabled", false);
 user_pref("devtools.console.stdout.content", true);
-PREFS
-    cp "${tmpdir}/user.js" "${tmpdir}/prefs.js"
-    if [[ -n "${FIREFOX_EXTRA_PREFS:-}" ]]; then
-        printf '\n%s\n' "${FIREFOX_EXTRA_PREFS}" >> "${tmpdir}/user.js"
-        printf '\n%s\n' "${FIREFOX_EXTRA_PREFS}" >> "${tmpdir}/prefs.js"
-    fi
-    echo "$tmpdir"
-}
+'''
 
-cleanup() {
-    # Kill only the firefox process(es) launched by THIS invocation,
-    # identified by the unique temp profile path. This avoids killing
-    # other agents' parallel browser instances.
-    if [[ -n "${TEMP_PROFILE:-}" ]]; then
-        pkill -f "$TEMP_PROFILE" 2>/dev/null || true
-        sleep 1
-    fi
-    # Restore env vars set via launchctl (only if we set them)
-    if [ "${LAUNCHCTL_ENV_SET:-0}" = "1" ]; then
-        launchctl unsetenv ASAN_OPTIONS 2>/dev/null || true
-        launchctl unsetenv MOZ_DISABLE_CONTENT_SANDBOX 2>/dev/null || true
-        launchctl unsetenv MOZ_FUZZ 2>/dev/null || true
-    fi
-    # Clean temp profile
-    if [[ -n "${TEMP_PROFILE:-}" && -d "$TEMP_PROFILE" ]]; then
-        rm -rf "$TEMP_PROFILE" 2>/dev/null || true
-    fi
-}
 
-run_browser() {
-    local asan_opts="$1"; shift
-    local timeout_val="$1"; shift
+def load_config():
+    probe = sys.argv[2] if len(sys.argv) > 2 else Path.cwd()
+    try:
+        return target_config.load(probe)
+    except (FileNotFoundError, ValueError):
+        return None
 
-    # Resolve relative file paths to absolute file:// URLs.
-    # 'open -a' via LaunchServices does NOT inherit cwd, so relative paths
-    # silently fail to load — the browser opens but JS never executes.
-    local resolved_args=()
-    for arg in "$@"; do
-        if [[ "$arg" != -* && -f "$arg" ]]; then
-            resolved_args+=("file://$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")")
-        else
-            resolved_args+=("$arg")
-        fi
-    done
-    set -- ${resolved_args[@]+"${resolved_args[@]}"}
 
-    TEMP_PROFILE="$(make_temp_profile)"
-    trap cleanup EXIT
+CONFIG = load_config()
+BASE_ENV = dict(os.environ)
+TARGET_ROOT = CONFIG.target_root if CONFIG else BASE_ENV.get("TARGET_ROOT", str(ROOT / "targets/firefox"))
+BUILD_DIR = sanitizer.build_dir("asan", TARGET_ROOT, BASE_ENV)
 
-    # Output file — captures both browser stdout/stderr and ASan reports.
-    # Each invocation gets its own output dir with a unique name to avoid
-    # collisions when multiple instances run in parallel.
-    local output_dir
-    output_dir="$(mktemp -d "${TMPDIR:-/tmp}/asan-output-XXXXXXXX")"
-    local output_file="${output_dir}/browser-output.txt"
 
-    # Use per-instance log_path to avoid collisions when multiple browser
-    # instances run in parallel. Each instance writes ASan logs to its own
-    # directory (keyed by PID-unique output_dir), not a shared path.
-    local asan_opts_with_log="${asan_opts}:log_path=${output_dir}/asan.log"
+def browser_binary() -> str:
+    if BASE_ENV.get("ASAN_BROWSER"):
+        return BASE_ENV["ASAN_BROWSER"]
+    if CONFIG and CONFIG.asan_bin:
+        return CONFIG.resolve_path(CONFIG.asan_bin)
+    darwin = BUILD_DIR / "dist/Nightly.app/Contents/MacOS/firefox"
+    linux = BUILD_DIR / "dist/bin/firefox"
+    preferred = darwin if sys.platform == "darwin" else linux
+    fallback = linux if sys.platform == "darwin" else darwin
+    return str(preferred if os.access(preferred, os.X_OK) else fallback)
 
-    # Launch the browser directly in headless mode so the child inherits
-    # ASAN_OPTIONS and the testcase file URL deterministically. This mirrors
-    # the coverage harness in hits.sh.
-    audit_timeout_run "$timeout_val" env \
-        ASAN_OPTIONS="$asan_opts_with_log" \
-        MOZ_DISABLE_CONTENT_SANDBOX=1 \
-        MOZ_HEADLESS=1 \
-        "$ASAN_BROWSER" --profile "$TEMP_PROFILE" --no-remote "$@" \
-        > "$output_file" 2>&1 \
-    || {
-        local rc=$?
-        if [ "$rc" -eq 124 ]; then
-            # Timeout is expected — kill only THIS instance (matched by unique temp profile)
-            pkill -f "$TEMP_PROFILE" 2>/dev/null || true
-            sleep 1
-        fi
-    }
 
-    # Display browser output (includes console.log when devtools.console.stdout.content is true)
-    if [ -f "$output_file" ] && [ -s "$output_file" ]; then
-        filter_browser_output "$output_file"
-    fi
+def options(mode: str) -> str:
+    return sanitizer.compose_options("asan", sanitizer.options_for("asan", mode), CONFIG)
 
-    # Collect and display ASan crash logs (written as separate log_path.PID files)
-    local found_crash=0
-    for f in "$output_dir"/asan.log.*; do
-        if [ -f "$f" ] && [ -s "$f" ]; then
-            echo "=== ASan report: $(basename "$f") ==="
-            cat "$f"
-            found_crash=1
-        fi
-    done
 
-    # Check execution evidence from the captured output
-    if [ "$found_crash" -eq 1 ]; then
-        echo "[run-asan] CRASH DETECTED: ASan error found" >&2
-        # Preserve raw ASan log files on crash — copy to a persistent location
-        # so the caller can examine log_path.PID files that may contain extra
-        # detail not captured by --stdout/--stderr (e.g., child process crashes).
-        local persist_dir="${ASAN_CRASH_LOG_DIR:-}"
-        if [ -n "$persist_dir" ] && [ -d "$persist_dir" ]; then
-            cp -f "$output_dir"/asan.log.* "$persist_dir/" 2>/dev/null || true
-            [ -f "$output_file" ] && cp -f "$output_file" "$persist_dir/browser-output.txt" 2>/dev/null || true
-            echo "[run-asan] Raw ASan logs preserved in $persist_dir" >&2
-        fi
-    elif [ -f "$output_file" ] && grep -q "TESTCASE_EXECUTED" "$output_file" 2>/dev/null; then
-        echo "[run-asan] browser EXECUTION VERIFIED (post-run, marker=TESTCASE_EXECUTED)" >&2
-    else
-        echo "[run-asan] WARNING: no crash and no execution evidence — testcase may not have run" >&2
-    fi
-
-    rm -rf "$output_dir"
-}
-
-if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 {browser|browser-minimal|js|xpcshell|js-diff|fuzz|fuzz-repro|fuzz-js|generic} [args...]"
-    exit 1
-fi
-
-MODE="$1"; shift
-
-asan_generic_disable_options=0
-if [[ "$MODE" = "generic" ]] \
-   && { [[ "${ASAN_GENERIC_DISABLE_OPTIONS:-0}" = "1" ]] \
-        || [[ "${TARGET_SANITIZERS_EXPLICITLY_DISABLED:-0}" = "1" ]]; }; then
-    asan_generic_disable_options=1
-    sanitizer_prepare_runtime_env none
-else
-    sanitizer_prepare_runtime_env asan
-    sanitizer_warn_if_disabled asan
-fi
-
-case "$MODE" in
-    browser)
-        run_browser "$ASAN_OPTS_FULL" "$BROWSER_TIMEOUT" "$@"
-        ;;
-    browser-minimal)
-        run_browser "$ASAN_OPTS_MINIMAL" "$BROWSER_TIMEOUT" "$@"
-        ;;
-    js)
-        if [[ $# -lt 1 ]]; then
-            echo "Usage: $0 js <testcase.js> [shell flags or script args...]" >&2
-            exit 1
-        fi
-        js_testcase="$1"; shift
-        js_shell_flags=()
-        js_script_args=()
-        while [[ $# -gt 0 ]]; do
-            if [[ ${#js_script_args[@]} -eq 0 && "$1" == -* ]]; then
-                js_shell_flags+=("$1")
-            else
-                js_script_args+=("$1")
-            fi
-            shift
-        done
-        js_cmd=("$ASAN_JS")
-        if [[ ${#js_shell_flags[@]} -gt 0 ]]; then
-            js_cmd+=("${js_shell_flags[@]}")
-        fi
-        js_cmd+=("$js_testcase")
-        if [[ ${#js_script_args[@]} -gt 0 ]]; then
-            js_cmd+=("${js_script_args[@]}")
-        fi
-        rc=0
-        audit_timeout_run "$JS_TIMEOUT" env \
-            ASAN_OPTIONS="$ASAN_OPTS_JS" \
-            "${js_cmd[@]}" \
-        || rc=$?
-        if [ "$rc" -eq 124 ]; then
-            echo "[run-asan] JS shell timed out after ${JS_TIMEOUT}s" >&2
-            exit "$rc"
-        fi
-        if [ "$rc" -eq 0 ]; then
-            echo "[run-asan] js EXECUTION VERIFIED (post-run, rc=0)" >&2
-        else
-            echo "[run-asan] js EXECUTION INCONCLUSIVE (post-run, rc=${rc})" >&2
-        fi
-        exit "$rc"
-        ;;
-    xpcshell)
-        # Parent-process JS runtime (Axis D). Useful for IPC/nsIFile/
-        # observer/XPCOM/sqlite paths that never execute in the content
-        # process. XPCShell starts XPCOM + networking (necko) + prefs,
-        # then executes the testcase as a plain JS file with full
-        # chrome-privileged nsI* access.
-        if [[ $# -lt 1 ]]; then
-            echo "Usage: $0 xpcshell <testcase.js> [extra args...]" >&2
-            exit 1
-        fi
-        xpcshell_testcase="$1"; shift
-        xpcshell_cmd=("$ASAN_XPCSHELL" "$xpcshell_testcase")
-        if [[ "$(uname -s)" == "Darwin" && -x "$ASAN_BROWSER" && -d "$ASAN_XPCSHELL_APPDIR" ]]; then
-            # The standalone xpcshell binary on this host reaches shutdown
-            # with no app bundle and falls into a socket-process null page.
-            # Launching through the app binary mirrors Mozilla's test harness
-            # and provides the bundle metadata xpcshell expects on macOS.
-            xpcshell_cmd=(
-                "$ASAN_BROWSER" "--xpcshell"
-                -g "${ASAN_BUILD_DIR}/dist/bin"
-                -a "$ASAN_XPCSHELL_APPDIR"
-                -m "$xpcshell_testcase"
-            )
-        fi
-        if [ ! -x "${xpcshell_cmd[0]}" ]; then
-            echo "[run-asan] xpcshell runner missing: ${xpcshell_cmd[0]}" >&2
-            echo "[run-asan] Build with ff-bsan asan first (the build-asan build produces xpcshell)." >&2
-            exit 2
-        fi
-        # Run xpcshell, then emit a POST-RUN EXECUTION VERIFIED marker only
-        # if the runner exited cleanly. A pre-run marker is unsound: it
-        # falsely promotes testcases that fail to parse args or panic
-        # before the body executes (lib/quality.sh and bin/probe both
-        # treat the marker as evidence of a clean run).
-        rc=0
-        audit_timeout_run "$XPCSHELL_TIMEOUT" env \
-            ASAN_OPTIONS="$(sanitizer_runtime_options asan "$ASAN_OPTS_XPCSHELL")" \
-            MOZ_DISABLE_CONTENT_SANDBOX=1 \
-            "${xpcshell_cmd[@]}" "$@" \
-        || rc=$?
-        if [ "$rc" -eq 124 ]; then
-            echo "[run-asan] xpcshell timed out after ${XPCSHELL_TIMEOUT}s" >&2
-            exit "$rc"
-        fi
-        if [ "$rc" -eq 0 ]; then
-            echo "[run-asan] xpcshell EXECUTION VERIFIED (post-run, rc=0)" >&2
-        else
-            # Non-zero exit may be a real ASan crash (handled by the
-            # caller scanning the captured output for ERROR: AddressSanitizer)
-            # or an early-exit/panic. Be explicit so downstream gates can
-            # tell them apart instead of guessing.
-            echo "[run-asan] xpcshell EXECUTION INCONCLUSIVE (post-run, rc=${rc})" >&2
-        fi
-        exit "$rc"
-        ;;
-    js-diff)
-        # Differential execution mode testing (Strategy S4).
-        # Per-engine JIT toggle flags come from target.toml [s4_diff_pairs].
-        # Falls back to SpiderMonkey flags when target.toml lacks the section
-        # (legacy configs without --new-target regen).
-        if [[ $# -lt 1 ]]; then
-            echo "Usage: $0 js-diff <testcase.js> [extra args...]" >&2
-            exit 1
-        fi
-        testcase="$1"; shift
-        js_shell_flags=()
-        js_script_args=()
-        while [[ $# -gt 0 ]]; do
-            if [[ ${#js_script_args[@]} -eq 0 && "$1" == -* ]]; then
-                js_shell_flags+=("$1")
-            else
-                js_script_args+=("$1")
-            fi
-            shift
-        done
-
-        # Read per-engine flag sets; fall back to SpiderMonkey defaults so
-        # existing target.toml files (no [s4_diff_pairs] section) keep working.
-        s4_jit_off=("${TARGET_S4_JIT_OFF[@]:-}")
-        s4_jit_eager=("${TARGET_S4_JIT_EAGER[@]:-}")
-        if [[ ${#TARGET_S4_JIT_OFF[@]} -eq 0 ]]; then
-            s4_jit_off=("--no-ion")
-        fi
-        if [[ ${#TARGET_S4_JIT_EAGER[@]} -eq 0 ]]; then
-            s4_jit_eager=("--ion-eager")
-        fi
-
-        eager_cmd=("$ASAN_JS" "${s4_jit_eager[@]}")
-        off_cmd=("$ASAN_JS" "${s4_jit_off[@]}")
-        if [[ ${#js_shell_flags[@]} -gt 0 ]]; then
-            eager_cmd+=("${js_shell_flags[@]}")
-            off_cmd+=("${js_shell_flags[@]}")
-        fi
-        eager_cmd+=("$testcase")
-        off_cmd+=("$testcase")
-        if [[ ${#js_script_args[@]} -gt 0 ]]; then
-            eager_cmd+=("${js_script_args[@]}")
-            off_cmd+=("${js_script_args[@]}")
-        fi
-
-        eager_label="${s4_jit_eager[*]}"
-        off_label="${s4_jit_off[*]}"
-
-        eager_out="$(mktemp "${TMPDIR:-/tmp}/asan-jit-eager-XXXXXXXX")"
-        off_out="$(mktemp "${TMPDIR:-/tmp}/asan-jit-off-XXXXXXXX")"
-        jsdiff_cleanup() { rm -f "$eager_out" "$off_out"; }
-        trap 'jsdiff_cleanup' EXIT
-
-        echo "=== Running with ${eager_label} (JIT eager) ===" >&2
-        audit_timeout_run "$JS_TIMEOUT" env \
-            ASAN_OPTIONS="$ASAN_OPTS_JS" \
-            "${eager_cmd[@]}" > "$eager_out" 2>&1 || true
-
-        echo "=== Running with ${off_label} (JIT off) ===" >&2
-        audit_timeout_run "$JS_TIMEOUT" env \
-            ASAN_OPTIONS="$ASAN_OPTS_JS" \
-            "${off_cmd[@]}" > "$off_out" 2>&1 || true
-
-        echo "=== ${eager_label} output ==="
-        cat "$eager_out"
-        echo ""
-        echo "=== ${off_label} output ==="
-        cat "$off_out"
-        echo ""
-
-        jsdiff_rc=0
-        if diff -q "$eager_out" "$off_out" > /dev/null 2>&1; then
-            echo "[run-asan] DIFFERENTIAL: outputs MATCH (no divergence)" >&2
-        else
-            echo "[run-asan] DIFFERENTIAL: outputs DIFFER — potential JIT bug!" >&2
-            echo "=== Diff ===" >&2
-            diff -u "$off_out" "$eager_out" || true
-            jsdiff_rc=1
-        fi
-
-        if grep -q "ERROR: AddressSanitizer" "$eager_out" 2>/dev/null; then
-            echo "[run-asan] CRASH in ${eager_label} mode" >&2
-            jsdiff_rc=1
-        fi
-        if grep -q "ERROR: AddressSanitizer" "$off_out" 2>/dev/null; then
-            echo "[run-asan] CRASH in ${off_label} mode" >&2
-            jsdiff_rc=1
-        fi
-
-        rm -f "$eager_out" "$off_out"
-        trap - EXIT
-        exit "$jsdiff_rc"
-        ;;
-    generic)
-        if [[ $# -lt 1 ]]; then
-            echo "Usage: $0 generic <testcase> [target args...]" >&2
-            exit 1
-        fi
-        generic_testcase="$1"; shift
-        # Binary precedence: explicit ASAN_GENERIC_BIN (set by bin/probe for
-        # // HARNESS: builds OR target.toml [runner] fallback), else
-        # target.toml asan_bin, else target.toml [runner].bin (language
-        # runtime / interpreter for findings-only mode). Failing all three
-        # we surface a guidance message that names every valid path.
-        if [[ -z "${ASAN_GENERIC_BIN:-}" ]] && [[ -n "${TARGET_ASAN_BIN:-}" ]]; then
-            ASAN_GENERIC_BIN="$(target_resolve_path "$TARGET_ASAN_BIN")"
-        fi
-        if [[ -z "${ASAN_GENERIC_BIN:-}" ]] && [[ -n "${TARGET_RUNNER_BIN:-}" ]]; then
-            if command -v "$TARGET_RUNNER_BIN" >/dev/null 2>&1; then
-                ASAN_GENERIC_BIN="$TARGET_RUNNER_BIN"
-            elif [[ -x "$TARGET_RUNNER_BIN" ]]; then
-                ASAN_GENERIC_BIN="$TARGET_RUNNER_BIN"
-            else
-                ASAN_GENERIC_BIN="$(target_resolve_path "$TARGET_RUNNER_BIN")"
-            fi
-        fi
-        if [[ -z "${ASAN_GENERIC_BIN:-}" ]]; then
-            echo "[run-asan] generic runner unset (and no asan_bin/runner.bin in target.toml)" >&2
-            echo "[run-asan] set one of:" >&2
-            echo "  - asan_bin            (output/<slug>/target.toml; ASan-instrumented CLI)" >&2
-            echo "  - [runner] bin = ...  (output/<slug>/target.toml; language runtime for findings-only mode)" >&2
-            echo "  - ASAN_GENERIC_BIN=   (env override)" >&2
-            exit 2
-        fi
-        # PATH-lookup fallback: ASAN_GENERIC_BIN may name an interpreter
-        # like "python3" or "node" that lives on PATH but does not resolve
-        # via -x. Accept either an executable file path or a PATH command.
-        if [[ ! -x "$ASAN_GENERIC_BIN" ]] && ! command -v "$ASAN_GENERIC_BIN" >/dev/null 2>&1; then
-            echo "[run-asan] generic runner not executable / not on PATH: $ASAN_GENERIC_BIN" >&2
-            exit 2
-        fi
-        # ASan options are only meaningful when a sanitizer is enabled for
-        # the target. Findings-only mode (interpreted-language audits)
-        # skips ASAN_OPTIONS so the language runtime sees a clean env.
-        # ASAN_GENERIC_SKIP_TESTCASE=1 (set by bin/probe when the [runner]
-        # args template already embeds the testcase via {TESTCASE}) tells
-        # us NOT to insert the testcase between bin and trailing args.
-        _asan_offline_sym=0
-        # Host RSS guard: bound the probe tree so a huge-allocation testcase is
-        # killed (host-protection class) instead of swap-wedging the box. Empty
-        # when uncapped. See sanitizer_generic_rss_limit_mb.
-        _asan_rss_mb="$(sanitizer_generic_rss_limit_mb)"
-        if [[ "$asan_generic_disable_options" = "1" ]]; then
-            _generic_env_args=()
-        else
-            _asan_opts="$(sanitizer_runtime_options asan "$ASAN_OPTS_FULL")"
-            # Decouple symbolization from the crashing run when we can resolve
-            # frames afterwards. symbolize=0 makes ASan print raw
-            # module+offset frames immediately — no in-process atos to hang or
-            # run long under GENERIC_TIMEOUT and truncate the report before any
-            # frame prints (the macOS failure that strands crashes in
-            # `pending:` with no crash_state). We symbolize the captured report
-            # below, via llvm-symbolizer or atos/addr2line. When no offline
-            # symbolizer exists at all we leave ASan's inline symbolizer in
-            # charge, so behaviour is unchanged where we couldn't re-symbolize.
-            if sanitizer_symbolize_available; then
-                _asan_offline_sym=1
-                _asan_opts="${_asan_opts}:symbolize=0"
-            fi
-            _generic_env_args=(env ASAN_OPTIONS="$_asan_opts")
-        fi
-        # Layer in [runner].env entries (KEY=VAL strings). These ride on
-        # top of the sanitizer env wrapper so target-specific knobs like
-        # GORACE / PYTHONDEVMODE / NODE_OPTIONS work in both modes.
-        _runner_env_args=()
-        if [[ -n "${TARGET_RUNNER_ENV+set}" && "${#TARGET_RUNNER_ENV[@]}" -gt 0 ]]; then
-            if [ "${#_generic_env_args[@]}" -eq 0 ]; then
-                _generic_env_args=(env)
-            fi
-            while IFS= read -r _kv; do
-                [ -n "$_kv" ] || continue
-                _runner_env_args+=("$_kv")
-            done < <(target_runner_env_expanded)
-        fi
-        # Build the argv. Drop $generic_testcase when ASAN_GENERIC_SKIP_TESTCASE
-        # is set; otherwise it stays in the conventional first position.
-        _generic_cmd=("$ASAN_GENERIC_BIN")
-        if [[ "${ASAN_GENERIC_SKIP_TESTCASE:-0}" != "1" ]]; then
-            _generic_cmd+=("$generic_testcase")
-        fi
-        if [ "$#" -gt 0 ]; then
-            _generic_cmd+=("$@")
-        fi
-        rc=0
-        # `env` accepts KEY=VAL prefixes in order — concatenate the sanitizer
-        # + runner env lists ahead of the command into one argv.
-        _generic_run=(${_generic_env_args[@]+"${_generic_env_args[@]}"} \
-                      ${_runner_env_args[@]+"${_runner_env_args[@]}"} \
-                      "${_generic_cmd[@]}")
-        if [ "$_asan_offline_sym" -eq 1 ]; then
-            # Capture the report (symbolize=0), resolve frames offline, then
-            # emit it so run-sanitizer-multi sees a symbolized trace. The
-            # offline pass rewrites every frame — frames with no debug info
-            # degrade to `in <module>` form, exactly as ASan's inline
-            # symbolizer renders them — and falls open to the raw frames only
-            # if the pass itself cannot run.
-            _asan_capture="$(mktemp "${TMPDIR:-/tmp}/asan-generic-XXXXXX")"
-            audit_timeout_run_rss "$GENERIC_TIMEOUT" "${_asan_rss_mb:-0}" "${_generic_run[@]}" \
-                >"$_asan_capture" 2>&1 || rc=$?
-            sanitizer_symbolize_file "$_asan_capture"
-            cat "$_asan_capture"
-            rm -f "$_asan_capture"
-        else
-            audit_timeout_run_rss "$GENERIC_TIMEOUT" "${_asan_rss_mb:-0}" "${_generic_run[@]}" || rc=$?
-        fi
-        if [ "$rc" -eq 124 ]; then
-            echo "[run-asan] generic runner timed out after ${GENERIC_TIMEOUT}s" >&2
-            exit "$rc"
-        fi
-        if [ "$rc" -eq 0 ]; then
-            echo "[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)" >&2
-        else
-            echo "[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=${rc})" >&2
-        fi
-        exit "$rc"
-        ;;
-    fuzz)
-        # Browser-integrated fuzz targets (image, media, DOM, networking, etc.)
-        # Requires FUZZER=<TargetName> env var to select the target.
-        # Runs the binary directly (not via 'open -a') so libfuzzer output is captured.
-        # The fuzzer runs during XRE_mainStartup before any UI, so no GUI is needed.
-        if [[ -z "${FUZZER:-}" ]]; then
-            echo "Error: FUZZER env var must be set. Example: FUZZER=ImagePNG $0 fuzz /tmp/corpus" >&2
-            echo "To list targets: FUZZER=list $0 fuzz" >&2
-            exit 1
-        fi
-        _validate_fuzzer_name || exit $?
-        # FUZZER=list: enumerate registered targets from source instead of
-        # launching the browser. Previously this fell through to a headless
-        # Firefox start that crashed in GeckoChildProcessHost and dumped a
-        # large IPC/sandbox stack trace into the agent's context.
-        if [[ "$FUZZER" == "list" ]]; then
-            if [ ! -d "$TARGET_ROOT" ]; then
-                echo "Error: source tree not found at $TARGET_ROOT" >&2
-                exit 1
-            fi
-            echo "Registered fuzz targets (MOZ_FUZZING_INTERFACE_{RAW,STREAM}):"
-            python3 - "$TARGET_ROOT" <<'PY'
-import os, re, sys
-root = sys.argv[1]
-pat = re.compile(
-    r'MOZ_FUZZING_INTERFACE_(?:RAW|STREAM)\s*\('
-    r'\s*[^,]+,\s*[^,]+,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)',
-    re.MULTILINE | re.DOTALL,
-)
-targets = set()
-exts = ('.cpp', '.cc', '.h', '.c')
-skip_exact = {'.git', '.hg', 'obj-opt'}
-# Match all sanitizer build trees, including suffixed ones (build-asan-<id>)
-# produced when AUDIT_BUILD_SUFFIX is set inside a container.
-skip_prefixes = ('build-asan', 'build-ubsan', 'build-msan', 'build-tsan')
-for dirpath, dirnames, filenames in os.walk(root):
-    dirnames[:] = [d for d in dirnames
-                   if d not in skip_exact and not d.startswith(skip_prefixes)]
-    for fn in filenames:
-        if not fn.endswith(exts):
-            continue
-        p = os.path.join(dirpath, fn)
-        try:
-            with open(p, 'r', encoding='utf-8', errors='replace') as f:
-                data = f.read()
-        except OSError:
-            continue
-        if 'MOZ_FUZZING_INTERFACE_' not in data:
-            continue
-        for m in pat.finditer(data):
-            targets.add(m.group(1))
-for t in sorted(targets):
-    print(t)
-PY
-            exit 0
-        fi
-        # Strip -fork=N from args (fails on several fuzzers)
-        fuzz_args=()
-        for arg in "$@"; do
-            [[ "$arg" =~ ^-fork= ]] || fuzz_args+=("$arg")
-        done
-        FUZZ_CRASH_DIR="${FUZZ_CRASH_DIR:-$(_fuzz_default_crash_dir)}"
-        mkdir -p "$FUZZ_CRASH_DIR"
-        # Guard against set -u tripping on an empty array expansion.
-        # _fuzz_timeout uses SIGKILL to bypass libFuzzer's clean-exit handler
-        # (see comment on _fuzz_timeout definition).
-        ( cd "$FUZZ_CRASH_DIR" && \
-          _fuzz_timeout "$FUZZ_TIMEOUT" env \
-            FUZZER="$FUZZER" \
-            MOZ_RUN_GTEST=1 \
-            MOZ_FUZZ=1 \
-            LIBFUZZER=1 \
-            MOZ_DISABLE_CONTENT_SANDBOX=1 \
-            ASAN_OPTIONS="$ASAN_OPTS_FUZZ" \
-            "$ASAN_BROWSER" ${fuzz_args[@]+"${fuzz_args[@]}"} \
-        ) || {
-            rc=$?
-            # 124 = audit timeout wrapper exit, 137 = SIGKILL (128+9)
-            if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-                echo "[run-asan] Fuzz target killed after ${FUZZ_TIMEOUT}s" >&2
-            fi
+def runtime_env(option_string: str, selected: str = "asan") -> dict[str, str]:
+    environment = sanitizer.prepare_runtime_env(selected, BASE_ENV)
+    if selected == "asan":
+        environment["ASAN_OPTIONS"] = sanitizer.runtime_options("asan", option_string, BASE_ENV)
+    if CONFIG:
+        swift = {"asan": "address"}.get(selected, "")
+        replacements = {
+            "{TESTCASE}": "",
+            "{SANITIZER}": selected,
+            "{SWIFT_SANITIZER}": swift,
+            "{TARGET_ROOT}": CONFIG.target_root,
+            "{RESULTS_DIR}": CONFIG.results_dir,
+            "{TARGET_SLUG}": CONFIG.slug,
         }
-        # Lingering firefox/content children are reaped by _fuzz_timeout
-        # itself: it runs the browser in its own process group and sweeps
-        # that group on exit (lib/timeout.sh). A name-pattern pkill here
-        # would also kill a sibling agent running the same FUZZER.
-        # Move the known DeinitXPCOM shutdown-panic artifact to noise/
-        SHUTDOWN_NOISE_SHA="crash-da39a3ee5e6b4b0d3255bfef95601890afd80709"
-        if [ -f "$FUZZ_CRASH_DIR/$SHUTDOWN_NOISE_SHA" ]; then
-            mkdir -p "$FUZZ_CRASH_DIR/shutdown-noise"
-            mv "$FUZZ_CRASH_DIR/$SHUTDOWN_NOISE_SHA" \
-               "$FUZZ_CRASH_DIR/shutdown-noise/$SHUTDOWN_NOISE_SHA.$(date +%s)" 2>/dev/null || true
-            echo "[run-asan] Suppressed libFuzzer shutdown-path artifact ($SHUTDOWN_NOISE_SHA) → shutdown-noise/" >&2
-        fi
-        echo "[run-asan] Fuzz artifacts (if any): $FUZZ_CRASH_DIR" >&2
-        ;;
-    fuzz-repro)
-        # Reproduce a fuzz crash with halt_on_error=1 (unlike fuzz mode which continues).
-        # Usage: FUZZER=<TargetName> bin/run-asan fuzz-repro <crash-file>
-        # Timeout is 60s (longer than browser default) since some crashes need setup time.
-        if [[ -z "${FUZZER:-}" ]]; then
-            echo "Error: FUZZER env var must be set. Example: FUZZER=ImagePNG $0 fuzz-repro crash-file" >&2
-            exit 1
-        fi
-        _validate_fuzzer_name || exit $?
-        if [[ $# -lt 1 ]]; then
-            echo "Error: provide a crash file to reproduce. Example: $0 fuzz-repro firefox-results/fuzzers/fuzz-Foo/crash-abc123" >&2
-            exit 1
-        fi
-        # Resolve input to absolute path BEFORE cd so libFuzzer can read it
-        # after we switch CWD into FUZZ_CRASH_DIR.
-        repro_args=()
-        for arg in "$@"; do
-            if [[ "$arg" != -* && -f "$arg" ]]; then
-                repro_args+=("$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")")
-            else
-                repro_args+=("$arg")
-            fi
-        done
-        FUZZ_CRASH_DIR="${FUZZ_CRASH_DIR:-$(_fuzz_default_crash_dir)}"
-        mkdir -p "$FUZZ_CRASH_DIR"
-        ( cd "$FUZZ_CRASH_DIR" && \
-          _fuzz_timeout "$FUZZ_REPRO_TIMEOUT" env \
-            FUZZER="$FUZZER" \
-            MOZ_RUN_GTEST=1 \
-            MOZ_FUZZ=1 \
-            LIBFUZZER=1 \
-            MOZ_DISABLE_CONTENT_SANDBOX=1 \
-            ASAN_OPTIONS="$ASAN_OPTS_FUZZ_REPRO" \
-            "$ASAN_BROWSER" "${repro_args[@]}" \
-        ) || {
-            rc=$?
-            if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-                echo "[run-asan] Fuzz repro killed after ${FUZZ_REPRO_TIMEOUT}s" >&2
-            fi
-        }
-        # _fuzz_timeout reaps the browser's process group on exit; no
-        # name-pattern pkill (it would catch sibling agents' fuzz runs).
-        ;;
-    fuzz-js)
-        # Standalone SpiderMonkey fuzz targets (Wasm, RegExp, StructuredClone, etc.)
-        # Requires FUZZER=<TargetName> env var to select the target.
-        FUZZ_TESTS="${ASAN_BUILD_DIR}/dist/bin/fuzz-tests"
-        if [[ ! -x "$FUZZ_TESTS" ]]; then
-            echo "Error: fuzz-tests binary not found at $FUZZ_TESTS. Run ff-bsan asan first." >&2
-            exit 1
-        fi
-        if [[ -z "${FUZZER:-}" ]]; then
-            echo "Error: FUZZER env var must be set. Example: FUZZER=Wasm $0 fuzz-js /tmp/corpus" >&2
-            echo "To list targets: FUZZER=list $0 fuzz-js" >&2
-            exit 1
-        fi
-        _validate_fuzzer_name || exit $?
-        # Strip -fork=N from args (fails on several fuzzers). Also
-        # resolve any positional corpus/input paths to absolute so they
-        # survive the cd into FUZZ_CRASH_DIR.
-        fuzz_args=()
-        for arg in "$@"; do
-            [[ "$arg" =~ ^-fork= ]] && continue
-            if [[ "$arg" != -* && -e "$arg" ]]; then
-                fuzz_args+=("$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")")
-            else
-                fuzz_args+=("$arg")
-            fi
-        done
-        FUZZ_CRASH_DIR="${FUZZ_CRASH_DIR:-$(_fuzz_default_crash_dir)}"
-        mkdir -p "$FUZZ_CRASH_DIR"
-        ( cd "$FUZZ_CRASH_DIR" && \
-          audit_timeout_run "$FUZZ_TIMEOUT" env \
-            FUZZER="$FUZZER" \
-            ASAN_OPTIONS="$ASAN_OPTS_FUZZ" \
-            "$FUZZ_TESTS" ${fuzz_args[@]+"${fuzz_args[@]}"} \
-        ) || {
-            rc=$?
-            if [ "$rc" -eq 124 ]; then
-                echo "[run-asan] Fuzz target timed out after ${FUZZ_TIMEOUT}s" >&2
-            fi
-        }
-        echo "[run-asan] Fuzz artifacts (if any): $FUZZ_CRASH_DIR" >&2
-        ;;
-    *)
-        echo "Usage: $0 {browser|browser-minimal|js|xpcshell|js-diff|fuzz|fuzz-repro|fuzz-js|generic} [args...]"
-        exit 1
-        ;;
-esac
+        for entry in CONFIG.runner_env:
+            for token, value in replacements.items():
+                entry = entry.replace(token, value)
+            key, value = entry.split("=", 1)
+            environment[key] = value
+    return environment
+
+
+def filtered_output(data: bytes) -> bytes:
+    return "".join(
+        line for line in data.decode(errors="replace").splitlines(keepends=True)
+        if not any(pattern.search(line) for pattern in _BROWSER_NOISE)
+    ).encode()
+
+
+def run_browser(option_string: str, timeout: int, args: list[str]) -> int:
+    resolved = [
+        Path(arg).resolve().as_uri() if not arg.startswith("-") and Path(arg).is_file() else arg
+        for arg in args
+    ]
+    with tempfile.TemporaryDirectory(prefix="asan-profile-") as profile_name, tempfile.TemporaryDirectory(prefix="asan-output-") as output_name:
+        profile = Path(profile_name)
+        output_dir = Path(output_name)
+        prefs = PROFILE_PREFS
+        if BASE_ENV.get("FIREFOX_EXTRA_PREFS"):
+            prefs += "\n" + BASE_ENV["FIREFOX_EXTRA_PREFS"] + "\n"
+        (profile / "user.js").write_text(prefs)
+        (profile / "prefs.js").write_text(prefs)
+        environment = runtime_env(f"{option_string}:log_path={output_dir / 'asan.log'}")
+        environment.update({"MOZ_DISABLE_CONTENT_SANDBOX": "1", "MOZ_HEADLESS": "1"})
+        completed = run_timeout(
+            [browser_binary(), "--profile", str(profile), "--no-remote", *resolved],
+            timeout,
+            env=environment,
+            capture_output=True,
+        )
+        output = completed.stdout + completed.stderr
+        sys.stdout.buffer.write(filtered_output(output))
+        reports = [path for path in output_dir.glob("asan.log.*") if path.stat().st_size]
+        for report in reports:
+            print(f"=== ASan report: {report.name} ===")
+            sys.stdout.buffer.write(report.read_bytes())
+        if reports:
+            print("[run-asan] CRASH DETECTED: ASan error found", file=sys.stderr)
+            persist = BASE_ENV.get("ASAN_CRASH_LOG_DIR")
+            if persist and Path(persist).is_dir():
+                for report in reports:
+                    shutil.copy2(report, persist)
+                (Path(persist) / "browser-output.txt").write_bytes(output)
+                print(f"[run-asan] Raw ASan logs preserved in {persist}", file=sys.stderr)
+        elif b"TESTCASE_EXECUTED" in output:
+            print("[run-asan] browser EXECUTION VERIFIED (post-run, marker=TESTCASE_EXECUTED)", file=sys.stderr)
+        else:
+            print("[run-asan] WARNING: no crash and no execution evidence - testcase may not have run", file=sys.stderr)
+        return completed.returncode
+
+
+def split_js_args(args: list[str]) -> tuple[list[str], list[str], list[str]]:
+    testcase, *rest = args
+    flags: list[str] = []
+    script_args: list[str] = []
+    for arg in rest:
+        if not script_args and arg.startswith("-"):
+            flags.append(arg)
+        else:
+            script_args.append(arg)
+    return [testcase], flags, script_args
+
+
+def run_js(option_string: str, timeout: int, args: list[str]) -> int:
+    if not args:
+        print("Usage: run-asan js <testcase.js> [shell flags or script args...]", file=sys.stderr)
+        return 1
+    testcase, flags, script_args = split_js_args(args)
+    js = BASE_ENV.get("ASAN_JS", str(BUILD_DIR / "dist/bin/js"))
+    completed = run_timeout([js, *flags, *testcase, *script_args], timeout, env=runtime_env(option_string))
+    if completed.returncode == 124:
+        print(f"[run-asan] JS shell timed out after {timeout}s", file=sys.stderr)
+    elif completed.returncode == 0:
+        print("[run-asan] js EXECUTION VERIFIED (post-run, rc=0)", file=sys.stderr)
+    else:
+        print(f"[run-asan] js EXECUTION INCONCLUSIVE (post-run, rc={completed.returncode})", file=sys.stderr)
+    return completed.returncode
+
+
+def run_xpcshell(option_string: str, timeout: int, args: list[str]) -> int:
+    if not args:
+        print("Usage: run-asan xpcshell <testcase.js> [extra args...]", file=sys.stderr)
+        return 1
+    testcase, *extra = args
+    xpcshell = BASE_ENV.get("ASAN_XPCSHELL", str(BUILD_DIR / "dist/bin/xpcshell"))
+    app = Path(BASE_ENV.get("ASAN_APP", str(BUILD_DIR / "dist/Nightly.app")))
+    appdir = Path(BASE_ENV.get("ASAN_XPCSHELL_APPDIR", str(app / "Contents/Resources/browser")))
+    command = [xpcshell, testcase]
+    browser = browser_binary()
+    if sys.platform == "darwin" and os.access(browser, os.X_OK) and appdir.is_dir():
+        command = [browser, "--xpcshell", "-g", str(BUILD_DIR / "dist/bin"), "-a", str(appdir), "-m", testcase]
+    if not os.access(command[0], os.X_OK):
+        print(f"[run-asan] xpcshell runner missing: {command[0]}", file=sys.stderr)
+        print("[run-asan] Build with ff-bsan asan first (the build-asan build produces xpcshell).", file=sys.stderr)
+        return 2
+    environment = runtime_env(option_string)
+    environment["MOZ_DISABLE_CONTENT_SANDBOX"] = "1"
+    completed = run_timeout([*command, *extra], timeout, env=environment)
+    if completed.returncode == 124:
+        print(f"[run-asan] xpcshell timed out after {timeout}s", file=sys.stderr)
+    elif completed.returncode == 0:
+        print("[run-asan] xpcshell EXECUTION VERIFIED (post-run, rc=0)", file=sys.stderr)
+    else:
+        print(f"[run-asan] xpcshell EXECUTION INCONCLUSIVE (post-run, rc={completed.returncode})", file=sys.stderr)
+    return completed.returncode
+
+
+def run_js_diff(option_string: str, timeout: int, args: list[str]) -> int:
+    if not args:
+        print("Usage: run-asan js-diff <testcase.js> [extra args...]", file=sys.stderr)
+        return 1
+    testcase, flags, script_args = split_js_args(args)
+    eager = CONFIG.s4_diff_pairs.get("jit_eager", []) if CONFIG else []
+    off = CONFIG.s4_diff_pairs.get("jit_off", []) if CONFIG else []
+    eager = eager or ["--ion-eager"]
+    off = off or ["--no-ion"]
+    js = BASE_ENV.get("ASAN_JS", str(BUILD_DIR / "dist/bin/js"))
+    print(f"=== Running with {' '.join(eager)} (JIT eager) ===", file=sys.stderr)
+    eager_run = run_timeout([js, *eager, *flags, *testcase, *script_args], timeout, env=runtime_env(option_string), capture_output=True)
+    print(f"=== Running with {' '.join(off)} (JIT off) ===", file=sys.stderr)
+    off_run = run_timeout([js, *off, *flags, *testcase, *script_args], timeout, env=runtime_env(option_string), capture_output=True)
+    eager_out = eager_run.stdout + eager_run.stderr
+    off_out = off_run.stdout + off_run.stderr
+    print(f"=== {' '.join(eager)} output ===")
+    sys.stdout.buffer.write(eager_out)
+    print(f"\n=== {' '.join(off)} output ===")
+    sys.stdout.buffer.write(off_out)
+    print()
+    result = 0
+    if eager_out == off_out:
+        print("[run-asan] DIFFERENTIAL: outputs MATCH (no divergence)", file=sys.stderr)
+    else:
+        result = 1
+        print("[run-asan] DIFFERENTIAL: outputs DIFFER - potential JIT bug!", file=sys.stderr)
+        print("=== Diff ===", file=sys.stderr)
+        print("\n".join(difflib.unified_diff(
+            off_out.decode(errors="replace").splitlines(),
+            eager_out.decode(errors="replace").splitlines(),
+            lineterm="",
+        )), file=sys.stderr)
+    if b"ERROR: AddressSanitizer" in eager_out:
+        print(f"[run-asan] CRASH in {' '.join(eager)} mode", file=sys.stderr)
+        result = 1
+    if b"ERROR: AddressSanitizer" in off_out:
+        print(f"[run-asan] CRASH in {' '.join(off)} mode", file=sys.stderr)
+        result = 1
+    return result
+
+
+def resolve_command(name: str) -> str:
+    found = shutil.which(name)
+    return found or name
+
+
+def run_generic(option_string: str, timeout: int, args: list[str]) -> int:
+    if not args:
+        print("Usage: run-asan generic <testcase> [target args...]", file=sys.stderr)
+        return 1
+    testcase, *extra = args
+    binary = BASE_ENV.get("ASAN_GENERIC_BIN", "")
+    if not binary and CONFIG and CONFIG.asan_bin:
+        binary = CONFIG.resolve_path(CONFIG.asan_bin)
+    if not binary and CONFIG and CONFIG.runner_bin:
+        binary = shutil.which(CONFIG.runner_bin) or (
+            CONFIG.runner_bin if os.access(CONFIG.runner_bin, os.X_OK) else CONFIG.resolve_path(CONFIG.runner_bin)
+        )
+    if not binary:
+        print("[run-asan] generic runner unset (and no asan_bin/runner.bin in target.toml)", file=sys.stderr)
+        print("[run-asan] set one of:\n  - asan_bin\n  - [runner] bin = ...\n  - ASAN_GENERIC_BIN=", file=sys.stderr)
+        return 2
+    binary = resolve_command(binary)
+    if not os.access(binary, os.X_OK):
+        print(f"[run-asan] generic runner not executable / not on PATH: {binary}", file=sys.stderr)
+        return 2
+    disabled = BASE_ENV.get("ASAN_GENERIC_DISABLE_OPTIONS") == "1" or bool(CONFIG and CONFIG.sanitizers_explicitly_disabled)
+    environment = runtime_env(option_string, "none" if disabled else "asan")
+    offline = not disabled and sanitizer.symbolize_available()
+    if offline:
+        environment["ASAN_OPTIONS"] += ":symbolize=0"
+    command = [binary]
+    if BASE_ENV.get("ASAN_GENERIC_SKIP_TESTCASE", "0") != "1":
+        command.append(testcase)
+    command.extend(extra)
+    completed = run_timeout(
+        command,
+        timeout,
+        rss_mb=sanitizer.generic_rss_limit_mb(BASE_ENV),
+        env=environment,
+        capture_output=offline,
+    )
+    if offline:
+        with tempfile.NamedTemporaryFile() as report:
+            report.write(completed.stdout + completed.stderr)
+            report.flush()
+            sanitizer.symbolize_file(report.name)
+            sys.stdout.buffer.write(Path(report.name).read_bytes())
+    if completed.returncode == 124:
+        print(f"[run-asan] generic runner timed out after {timeout}s", file=sys.stderr)
+    elif completed.returncode == 0:
+        print("[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)", file=sys.stderr)
+    else:
+        print(f"[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc={completed.returncode})", file=sys.stderr)
+    return completed.returncode
+
+
+def require_fuzzer() -> tuple[str, int]:
+    fuzzer = BASE_ENV.get("FUZZER", "")
+    if not fuzzer:
+        print("Error: FUZZER env var must be set.", file=sys.stderr)
+        return "", 1
+    if not sanitizer.validate_fuzzer_name(fuzzer):
+        print(f"Error: FUZZER must match ^[A-Za-z_][A-Za-z0-9_]*$ (got '{fuzzer}')", file=sys.stderr)
+        return "", 2
+    return fuzzer, 0
+
+
+def fuzz_environment(option_string: str, fuzzer: str) -> dict[str, str]:
+    environment = runtime_env(option_string)
+    environment.update({
+        "FUZZER": fuzzer, "MOZ_RUN_GTEST": "1", "MOZ_FUZZ": "1",
+        "LIBFUZZER": "1", "MOZ_DISABLE_CONTENT_SANDBOX": "1",
+    })
+    return environment
+
+
+def run_fuzz(option_string: str, timeout: int, args: list[str], repro: bool = False) -> int:
+    fuzzer, error = require_fuzzer()
+    if error:
+        return error
+    if fuzzer == "list" and not repro:
+        if not Path(TARGET_ROOT).is_dir():
+            print(f"Error: source tree not found at {TARGET_ROOT}", file=sys.stderr)
+            return 1
+        print("Registered fuzz targets (MOZ_FUZZING_INTERFACE_{RAW,STREAM}):")
+        print("\n".join(firefox_fuzz_targets(TARGET_ROOT)))
+        return 0
+    if repro and not args:
+        print("Error: provide a crash file to reproduce.", file=sys.stderr)
+        return 1
+    clean_args = [
+        str(Path(arg).resolve()) if repro and not arg.startswith("-") and Path(arg).is_file() else arg
+        for arg in args if repro or not arg.startswith("-fork=")
+    ]
+    crash_dir = Path(BASE_ENV.get("FUZZ_CRASH_DIR", str(sanitizer.default_fuzz_crash_dir(BASE_ENV))))
+    crash_dir.mkdir(parents=True, exist_ok=True)
+    completed = run_timeout(
+        [browser_binary(), *clean_args], timeout, kill=True, cwd=crash_dir,
+        env=fuzz_environment(option_string, fuzzer),
+    )
+    if completed.returncode in {124, 137}:
+        print(f"[run-asan] Fuzz {'repro ' if repro else ''}killed after {timeout}s", file=sys.stderr)
+    if not repro:
+        noise = crash_dir / "crash-da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        if noise.is_file():
+            destination = crash_dir / "shutdown-noise" / f"{noise.name}.{int(time.time())}"
+            destination.parent.mkdir(exist_ok=True)
+            noise.replace(destination)
+        print(f"[run-asan] Fuzz artifacts (if any): {crash_dir}", file=sys.stderr)
+    return 0 if not repro else completed.returncode
+
+
+def run_fuzz_js(option_string: str, timeout: int, args: list[str]) -> int:
+    fuzzer, error = require_fuzzer()
+    if error:
+        return error
+    binary = BUILD_DIR / "dist/bin/fuzz-tests"
+    if not os.access(binary, os.X_OK):
+        print(f"Error: fuzz-tests binary not found at {binary}. Run ff-bsan asan first.", file=sys.stderr)
+        return 1
+    clean_args = [
+        str(Path(arg).resolve()) if not arg.startswith("-") and Path(arg).exists() else arg
+        for arg in args if not arg.startswith("-fork=")
+    ]
+    crash_dir = Path(BASE_ENV.get("FUZZ_CRASH_DIR", str(sanitizer.default_fuzz_crash_dir(BASE_ENV))))
+    crash_dir.mkdir(parents=True, exist_ok=True)
+    run_timeout([str(binary), *clean_args], timeout, cwd=crash_dir, env=runtime_env(option_string) | {"FUZZER": fuzzer})
+    print(f"[run-asan] Fuzz artifacts (if any): {crash_dir}", file=sys.stderr)
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    modes = {"browser", "browser-minimal", "js", "xpcshell", "js-diff", "generic", "fuzz", "fuzz-repro", "fuzz-js"}
+    if not argv or argv[0] not in modes:
+        print("Usage: run-asan {browser|browser-minimal|js|xpcshell|js-diff|generic|fuzz|fuzz-repro|fuzz-js} [args...]")
+        return 1
+    mode, args = argv[0], argv[1:]
+    sanitizer.warn_if_disabled("asan", CONFIG)
+    normal_timeout = int(BASE_ENV.get("ASAN_TIMEOUT", "15"))
+    if mode == "browser": return run_browser(options("full"), normal_timeout, args)
+    if mode == "browser-minimal": return run_browser(options("minimal"), normal_timeout, args)
+    if mode == "js": return run_js(options("js"), int(BASE_ENV.get("ASAN_TIMEOUT", "10")), args)
+    if mode == "xpcshell": return run_xpcshell(options("xpcshell"), normal_timeout, args)
+    if mode == "js-diff": return run_js_diff(options("js"), int(BASE_ENV.get("ASAN_TIMEOUT", "10")), args)
+    if mode == "generic": return run_generic(options("full"), normal_timeout, args)
+    if mode == "fuzz": return run_fuzz(options("fuzz"), int(BASE_ENV.get("FUZZ_ASAN_TIMEOUT", "600")), args)
+    if mode == "fuzz-repro": return run_fuzz(options("fuzz-repro"), int(BASE_ENV.get("ASAN_FUZZ_REPRO_TIMEOUT", "20")), args, True)
+    return run_fuzz_js(options("fuzz"), int(BASE_ENV.get("FUZZ_ASAN_TIMEOUT", "600")), args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -248,7 +248,7 @@ def lookup_route(results_dir: Path, *keys: str) -> str:
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
-# Three subcommands for shell-side callers (bin/probe):
+# Subcommands for inspection and automation:
 #   sentinel  <file>
 #     exit 0 + print "feature_disabled" if the file matches.
 #   enumerate <target_root> <asan_bin>

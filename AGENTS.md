@@ -73,7 +73,7 @@ browser binaries live at
 on macOS or `build-asan${AUDIT_BUILD_SUFFIX:-}/dist/bin/firefox` on Linux.
 Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 `bin/run-tsan`, `bin/hits`) — they resolve the suffix through
-`lib/sanitizer.sh::sanitizer_build_dir`.
+`lib/sanitizer.py::build_dir`.
 
 ---
 
@@ -81,7 +81,7 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 
 1. Run `bin/state resume --agent <n>` for your agent first — structured JSONL is the source of truth for the hypothesis queue and resume position. Resume highest PENDING/NEEDS_TESTCASE.
 2. Leftover testcase without sanitizer output? Run the sanitizer NOW or delete.
-3. **Cold start:** Create state from `.agents/references/state-template.md`. Recon ONE subsystem. Generate 3-5 hypotheses.
+3. **Cold start:** Use `bin/state add-hyp` to record 3-5 hypotheses from one recon subsystem.
 4. **After compression:** Start from structured state (`bin/state resume --agent <n>`); resume top PENDING. No new recon.
 5. The harness embeds a condensed **session-rules digest** in your prompt (coverage-gate workflow, guards-db, search discipline, FIND quality bar). Rely on it. Read the full `.agents/references/session-rules.md` only if the digest is ambiguous for your situation — it is ~22 KB and re-sends on every later turn once read.
 
@@ -165,7 +165,7 @@ plain stack-overflow. Filing these wastes work — the harness moves them to
 same-origin, cross-origin, sandbox, privilege-boundary, auth, injection, info
 disclosure, crypto, race, logic flaw — with or without a reproducer.
 
-Before filing: grep `<RESULTS_DIR>/crashes-rejected/INDEX.md` for your crash site.
+Before filing: grep `<RESULTS_DIR>/crashes-rejected/REJECTED-CRASHES.md` for your crash site.
 
 **Bundle layout (post-triage, automatic):** after a crash dir passes triage, the harness runs `bin/export-repro` to convert it into a maintainer-facing bundle. Root files become `REPORT.md`, `reproduce.sh`, `input.<ext>`, `harness.c` (if applicable), and `sanitizer.txt` — one command (`./reproduce.sh /path/to/src`) reproduces against a clean upstream checkout. Audit-side originals (your `report.md`, `reproducer.sh`, H-prefixed scratch artifacts) move into `<crash>/.audit/` for provenance.
 
@@ -181,28 +181,28 @@ Required:
 - The report must name a concrete location (file:function:line, endpoint, config key, etc.), state the security issue class, and give a rationale a reviewer can act on (impact, caller control, what is wrong).
 - Include the standard bare-label fields the crash gate expects, including `Strategy: S<N>` (S1..S8 or REF) so FINDING-CLUSTERS attributes the finding to the strategy that produced it.
 
-**Do NOT create FINDs for:** vague suspicions with no nameable location, "code looks suspicious" without saying why, provably unreachable code, OR pure correctness / data-integrity / robustness / spec-deviation bugs that don't cross a security boundary. "Empty input decodes to wrong bytes", "roundtrip drops whitespace", "format differs from spec" are upstream quality bugs, not security findings — log them in your state file and move on, don't file under `findings/`. The harness gate moves rejected FINDs to `findings-rejected/`; saving the cycles by not filing them in the first place is faster.
+**Do NOT create FINDs for:** vague suspicions with no nameable location, "code looks suspicious" without saying why, provably unreachable code, OR pure correctness / data-integrity / robustness / spec-deviation bugs that don't cross a security boundary. "Empty input decodes to wrong bytes", "roundtrip drops whitespace", "format differs from spec" are upstream quality bugs, not security findings — record them with `bin/state add-note` and move on, don't file under `findings/`. The harness gate moves rejected FINDs to `findings-rejected/`; saving the cycles by not filing them in the first place is faster.
 
 ---
 
-## STATE JOURNAL
+## STRUCTURED STATE
 
-See `.agents/references/state-template.md`. Key rules:
+Use `bin/state`; do not maintain a parallel Markdown journal. Key rules:
 - Each hypothesis fills ALL columns: File:Function:Line, Input Shape, Guard Gap, Expected Diagnostic
 - NEUTRAL vocabulary. "Issue in File:Function:Line" not defect class names
 - Valid statuses: PENDING, INVESTIGATING, NEEDS_TESTCASE, ENV-BLOCKED, DISCARDED, CRASH-XXX, FIND-XXX
 - Max 3 NEEDS_TESTCASE, 3 ENV-BLOCKED at any time
 - Update after EVERY hypothesis closure, not at session end
-- Keep live state compact: max 8 active rows, max 15 recent terminal rows, max 30 Working Context rows. Move long history into reports or crash/finding dirs, not the live state file.
+- Keep live state compact: max 8 active rows and max 15 recent terminal rows. Move long history into reports or crash/finding dirs.
 
 ---
 
 ## TOOL DISCIPLINE
 
 - **Search:** `rg -l` first, then read 2-3 files. Scope with `--glob` or narrow directory. No output directory scanning.
-- **Bash:** chain with `&&`, pipe `hg log` through `| head -N`.
-- **Timeouts:** do not call the GNU `timeout`/`gtimeout` CLI. Source `lib/timeout.sh` and use `audit_timeout_run` or `audit_timeout_kill`.
-- **Portability:** use `lib/platform.sh` helpers for `stat`, in-place `sed`, SHA1, LLVM tool discovery, and OS checks. Do not add macOS-only or GNU-only command forms directly to `bin/*` or `lib/*`.
+- **Shell:** chain commands with `&&`, and pipe `hg log` through `| head -N`.
+- **Timeouts:** do not call GNU `timeout`/`gtimeout`; use `python3 lib/timeout.py <seconds> TERM <rss-mb> <command> ...` or the `lib.timeout.run_timeout` API.
+- **Portability:** use Python standard-library filesystem/process APIs and the helpers in `lib/sanitizer.py` for LLVM discovery. Do not add macOS-only or GNU-only command forms directly to `bin/*` or `lib/*`.
 - **VCS:** Use `git -C <target_root>` or `hg -R <target_root>` instead of changing directories. See `.agents/references/vcs-commands.md`.
 - **Never orphan runnable testcases.** Write + run the sanitizer in the same turn. For C/C++ harnesses, the runnable testcase is the compiled sanitizer executable plus its saved output; do not leave piles of unrun source/build artifacts in scratch.
 - **Honor `PRIOR SESSION SEED`.** If the prompt lists a file with a line range you already covered, do NOT re-read that same range — work from memory, or request a different range (Claude: `offset`/`limit`; codex/shell: a different `sed -n 'A,Bp'` window). Testcases in the seed are already on disk; reuse paths instead of regenerating.

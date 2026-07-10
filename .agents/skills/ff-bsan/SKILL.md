@@ -23,12 +23,12 @@ binaries`; otherwise run the full `mach build`. Do not run multiple Firefox
 ## Build Command
 
 ```bash
-bash .agents/skills/ff-bsan/scripts/build.sh asan
-bash .agents/skills/ff-bsan/scripts/build.sh ubsan
-bash .agents/skills/ff-bsan/scripts/build.sh msan
-bash .agents/skills/ff-bsan/scripts/build.sh coverage
-bash .agents/skills/ff-bsan/scripts/build.sh all
-bash .agents/skills/ff-bsan/scripts/build.sh --binaries asan ubsan msan
+.agents/skills/ff-bsan/scripts/build.py asan
+.agents/skills/ff-bsan/scripts/build.py ubsan
+.agents/skills/ff-bsan/scripts/build.py msan
+.agents/skills/ff-bsan/scripts/build.py coverage
+.agents/skills/ff-bsan/scripts/build.py all
+.agents/skills/ff-bsan/scripts/build.py --binaries asan ubsan msan
 ```
 
 ## Verification
@@ -64,8 +64,10 @@ xul=targets/firefox/build-asan-cov/dist/Nightly.app/Contents/MacOS/XUL
 test -f "$xul" || xul=targets/firefox/build-asan-cov/dist/bin/libxul.so
 (otool -l "$xul" 2>/dev/null || readelf -WS "$xul" 2>/dev/null) | grep -q '__sancov_guards' && echo "sancov edges OK: $xul"
 mkdir -p /tmp/ff-bsan-coverage-smoke && rm -f /tmp/ff-bsan-coverage-smoke/*.sancov
+b=targets/firefox/build-asan-cov/dist/Nightly.app/Contents/MacOS/firefox
+test -x "$b" || b=targets/firefox/build-asan-cov/dist/bin/firefox
 ASAN_OPTIONS="detect_leaks=0:coverage=1:coverage_dir=/tmp/ff-bsan-coverage-smoke:coverage_pcs=1" \
-  bash -lc 'source lib/timeout.sh; b=targets/firefox/build-asan-cov/dist/Nightly.app/Contents/MacOS/firefox; test -x "$b" || b=targets/firefox/build-asan-cov/dist/bin/firefox; audit_timeout_run 8 "$b" about:blank --headless' 2>/dev/null || true
+  python3 lib/timeout.py 8 TERM 0 "$b" about:blank --headless 2>/dev/null || true
 ls /tmp/ff-bsan-coverage-smoke/*.sancov 2>/dev/null | head -3
 ```
 

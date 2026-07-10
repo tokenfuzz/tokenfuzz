@@ -49,7 +49,7 @@ them, in the order a change actually happens.
   that keeps growing is the signal to stop and find the smaller shape. Prefer
   deleting to adding.
 - **Reuse before writing.** Find the existing helper (`lib/workqueue.py`,
-  platform/timeout helpers, prompt renderers) before adding logic; if you
+  `lib/timeout.py`, `lib/process_tree.py`, file tools, prompt renderers) before adding logic; if you
   write the same shape twice, factor it.
 - **Handle real failure modes, not imaginary ones.** This harness runs many
   agents in parallel against flaky backends over long sessions: handle
@@ -137,9 +137,9 @@ fixtures and assertions in
   toggles. Make real operator choices visible, documented, and test-covered;
   add an env var only when an operator genuinely varies it across routine
   runs.
-- **Use shared helpers.** Shell code uses the existing platform and timeout
-  helpers; shared JSONL state goes through `lib/workqueue.py`; parallel logs
-  are per-agent or uniquely named.
+- **Use shared helpers.** Process deadlines and tree termination go through
+  `lib/timeout.py` and `lib/process_tree.py`; shared JSONL state goes through
+  `lib/workqueue.py`; parallel logs are per-agent or uniquely named.
 - **Avoid early-exit pipe failures.** Under `set -euo pipefail`, do not pipe
   long-running producers into `grep -q` — it exits early and can turn a
   successful match into a producer `SIGPIPE`. Use `grep -c` or another

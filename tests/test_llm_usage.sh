@@ -8,9 +8,8 @@
 # It now delegates to lib/llm_usage.py — the same helper bin/benchmark
 # uses — so the plain-text estimator is shared, not duplicated.
 #
-# The legacy `<backend> <raw>` invocation that bin/benchmark uses for
-# extract-usage is covered by tests/test_benchmark.sh (T16-series + the
-# explicit backward-compat path). This file covers extract-field
+# The `extract-usage <backend> <raw>` invocation used by the benchmark is
+# covered by tests/test_benchmark.sh. This file covers extract-field
 # specifically: the per-field CLI shape audit consumes.
 
 set -uo pipefail
@@ -222,16 +221,6 @@ py_out=$(python3 "$USAGE_PY" extract-field output_tokens 2>/dev/null)
 py_rc=$?
 assert_eq "0" "$py_rc" "T7b: extract-field with only field name exits 0"
 assert_eq "" "$py_out" "T7b: extract-field with only field name prints ''"
-
-# ── T8: legacy form (benchmark backward-compat) still works ─────────
-
-legacy_out=$(python3 "$USAGE_PY" claude "$claude_raw" 2>&1)
-if [[ "$legacy_out" == *'"input": 1500'* ]] && [[ "$legacy_out" == *'"output": 80'* ]]; then
-  pass "T8: legacy '<backend> <raw>' form still produces a full JSON usage object"
-else
-  fail "T8: legacy '<backend> <raw>' form still produces a full JSON usage object" \
-    "got: $legacy_out"
-fi
 
 # ── T9: unknown subcommand → empty JSON, exit 0 ─────────────────────
 

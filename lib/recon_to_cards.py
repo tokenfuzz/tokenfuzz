@@ -150,22 +150,8 @@ def subsystem_for_path(rel_path: str) -> str:
     """
     if not rel_path:
         return "other"
-    # workqueue is imported lazily to avoid a circular import at module
-    # load time (workqueue does not import recon_to_cards, but adding
-    # an unconditional `from workqueue import ...` here would force any
-    # consumer of recon_to_cards to pay the workqueue import cost). The
-    # function is cheap; this path is hit O(recon-hypotheses) times.
-    try:
-        from workqueue import subsystem_for as _ws_subsystem_for
-        return _ws_subsystem_for(rel_path)
-    except Exception:
-        # Defensive fallback: legacy first-segment keying, but unlike
-        # the old code we return the bare filename (not "root") for
-        # flat-layout targets so cards stay distinguishable.
-        parts = [p for p in rel_path.split("/") if p]
-        while parts and parts[0] in {"src", "lib"}:
-            parts = parts[1:]
-        return parts[0] if parts else "other"
+    from workqueue import subsystem_for as _ws_subsystem_for
+    return _ws_subsystem_for(rel_path)
 
 
 def derive_card_id(
@@ -182,9 +168,7 @@ def derive_card_id(
     multiply cards in the queue.
 
     Suffixes are appended when non-empty so fan-out cards have distinct,
-    debuggable IDs. Empty sanitizer + empty strategy preserves the legacy
-    single-card-per-finding ID for back-compat with existing on-disk
-    work-card pools.
+    debuggable IDs. Empty dimensions produce the base finding ID.
     """
     key = f"{target_slug}:recon:{rec_id}:{file_path}:{line}"
     if sanitizer:
@@ -234,8 +218,7 @@ def derive_card_id(
 #   3. validator_verdict == "reject" routes the FIND directly to
 #      findings-rejected/ (still counted in the rejected ledger but not in
 #      the headline count).
-#   4. The existing LLM-quality gate (triage.sh::llm_find_quality_decision)
-#      and the validator-quorum gate (triage_validate_confirm_findings)
+#   4. The finding-quality and validator-quorum gates
 #      run over every FIND-* dir regardless of provenance; low-quality
 #      auto-materialized FINDs get demoted by the same machinery that
 #      handles agent-filed ones.
@@ -410,14 +393,12 @@ def materialize_find(
     target_slug: str,
     file_path: str,
     line: int,
-    results_dir: Path | None,
+    results_dir: Path,
 ) -> str:
     """Create FIND-RECON-* dir for a recon row, return its id (or "").
 
     Returns the FIND id when a dir was created or already existed; "" when
-    materialization was skipped (missing results_dir, AUDIT-CLEAN, or
-    sparse fields). The empty-return path is what lets non-find_id work
-    cards continue to flow through the queue as before.
+    materialization was skipped (AUDIT-CLEAN or sparse fields).
 
     Routing:
       validator_verdict == "reject"  →  skipped (no FIND); the agent's
@@ -447,8 +428,6 @@ def materialize_find(
     overwrite — agent augmentations (ASan output, reproducer, severity
     bumps) survive a recon re-run unmolested.
     """
-    if results_dir is None:
-        return ""
     if not _has_find_fields(finding, file_path, line):
         return ""
     rec_id = finding.get("id", "")
@@ -477,7 +456,7 @@ def finding_to_cards(
     target_slug: str,
     target_path: str,
     sanitizers: list[str],
-    results_dir: Path | None = None,
+    results_dir: Path,
 ) -> list[dict]:
     """Convert one recon finding into the cross-product of work-cards
     spanning (enabled sanitizers) × (suggested strategies).
@@ -554,15 +533,11 @@ def finding_to_cards(
     # NEEDS-VERIFICATION / CONFIRMED-* leads where two independent probe
     # angles (S5 lifetime, S7 adversarial-input) are worth exploring
     # separately, since neither has the validator's seal.
-    # Materialize the FIND-RECON-* dir BEFORE emitting cards so every
-    # card we emit can carry the find_id pointer. Returns "" when results_dir
-    # is missing (back-compat callers) or the row is too sparse to be a
-    # standalone finding — in those cases the cards still go out, just
-    # without a find_id, and the legacy "agent decides whether to file"
-    # path applies.
+    # Materialize the FIND-RECON-* dir before emitting cards. Sparse rows can
+    # still become work cards, but complete rows always carry their find_id.
     find_id = materialize_find(finding, target_slug, file_path, line, results_dir)
     is_promoted = (verdict or "").strip().lower() == "promote"
-    sans = sanitizers or ["asan"]
+    sans = sanitizers or ["generic"]
     cards: list[dict] = []
     if is_promoted:
         primary_strategy = "S7" if "S7" in strategies else strategies[0]
@@ -658,19 +633,14 @@ def main(argv: list[str]) -> int:
                     "cards kept, recon-hypothesis cards rewritten)")
     ap.add_argument(
         "--sanitizers", default="",
-        help="Comma-separated list of sanitizers to fan out per finding "
-        "(e.g. 'asan,ubsan'). Sourced from target.toml [sanitizer].enabled "
-        "by the caller. Empty or missing → default to 'asan' only for "
-        "back-compat with older callers.",
+        help="Comma-separated enabled sanitizers to fan out per finding "
+        "(e.g. 'asan,ubsan'). Empty means findings-only generic mode.",
     )
     ap.add_argument(
         "--results-dir", default="",
         help="Results directory under which to materialize FIND-RECON-* dirs "
         "(non-AUDIT-CLEAN recon rows that pass the field-completeness gate "
-        "get a FIND in <results-dir>/findings/; validator-Reject rows go to "
-        "<results-dir>/findings-rejected/). When omitted, no FINDs are "
-        "materialized and emitted cards have no find_id — preserves the "
-        "pre-fix behavior for callers that do not yet pass this arg.",
+        "get a FIND in <results-dir>/findings/; validator-Reject rows are skipped).",
     )
     ap.add_argument(
         "--quiet", action="store_true",
@@ -678,15 +648,11 @@ def main(argv: list[str]) -> int:
     )
     args = ap.parse_args(argv)
 
-    results_dir: Path | None = None
-    if args.results_dir:
-        results_dir = Path(args.results_dir).expanduser().resolve()
-
     # Conversion mode: require the conversion-specific args that were
     # previously declared as `required=True`. We validate here so both
     # modes can share the same argparse without conflict.
     missing = [
-        name for name in ("target_slug", "target_path", "recon_jsonl", "work_cards")
+        name for name in ("target_slug", "target_path", "recon_jsonl", "work_cards", "results_dir")
         if not getattr(args, name, "")
     ]
     if missing:
@@ -698,6 +664,7 @@ def main(argv: list[str]) -> int:
         return 2
     recon_path = Path(args.recon_jsonl).expanduser().resolve()
     cards_path = Path(args.work_cards).expanduser().resolve()
+    results_dir = Path(args.results_dir).expanduser().resolve()
     target_path = str(Path(args.target_path).expanduser().resolve())
     sanitizers = [s.strip() for s in (args.sanitizers or "").split(",") if s.strip()]
 

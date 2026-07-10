@@ -1,101 +1,138 @@
-#!/bin/bash
-# show-exclusions — single-pane debug view of which audit results were kept
-# vs. excluded, and why. Read-only — never modifies state.
-#
-# Usage:
-#   bin/show-exclusions <results_dir>
-#   bin/show-exclusions output/firefox/codex/results
-#
-# Produces four sections:
-#   1. Active crash candidates      (crashes/CRASH-*)
-#   2. Confirmed findings          (findings/FIND-*)
-#   3. Rejected crash candidates   (crashes-rejected/CRASH-* with reason)
-#   4. Fuzz-crash noise            (shutdown-noise/ entries moved by run-asan)
-#
-# Exit code: 0 always (this is a report, not a gate).
+#!/usr/bin/env python3
+"""Show active, confirmed, rejected, and infrastructure-noise results."""
 
-set -uo pipefail
+from __future__ import annotations
 
-RESULTS_DIR="${1:-}"
-if [ -z "$RESULTS_DIR" ] || [ ! -d "$RESULTS_DIR" ]; then
-  echo "usage: $0 <results_dir>" >&2
-  echo "  e.g.  $0 output/firefox/codex/results" >&2
-  exit 2
-fi
+import os
+import re
+import stat
+import sys
+from pathlib import Path
 
-crashes=0
-findings=0
-rejected=0
-noise=0
+REASON_RE = re.compile(r"^(?:#\s*)?reason:\s*(.*)$", re.IGNORECASE)
+REJECTION_FILES = (
+    "REJECTION.md",
+    "rejection.md",
+    ".rejection",
+    ".audit/REJECTION.md",
+    ".audit/rejection.md",
+)
 
-rejection_reason() {
-  local d="$1"
-  local reason=""
 
-  if [ -f "$d/.autodiscard" ]; then
-    reason=$(sed -nE 's/^# Reason:[[:space:]]*(.*)$/\1/p' "$d/.autodiscard" 2>/dev/null | head -1)
-    [ -n "$reason" ] || reason=$(grep -v '^#' "$d/.autodiscard" 2>/dev/null | head -1)
-  fi
+def is_directory(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
 
-  if [ -z "$reason" ]; then
-    local f
-    for f in "$d/REJECTION.md" "$d/rejection.md" "$d/.rejection" "$d/.audit/REJECTION.md" "$d/.audit/rejection.md"; do
-      [ -f "$f" ] || continue
-      reason=$(sed -nE 's/^# Reason:[[:space:]]*(.*)$/\1/p; s/^[Rr]eason:[[:space:]]*(.*)$/\1/p' "$f" 2>/dev/null | head -1)
-      [ -n "$reason" ] || reason=$(grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null | head -1)
-      [ -n "$reason" ] && break
-    done
-  fi
 
-  [ -n "$reason" ] || reason="(no rejection reason found)"
-  printf '%s\n' "$reason"
-}
+def directories(parent: Path, prefix: str) -> list[Path]:
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return []
+    return sorted(
+        (entry for entry in entries if entry.name.startswith(prefix) and is_directory(entry)),
+        key=lambda entry: os.fsencode(entry.name),
+    )
 
-echo "=== Exclusion report: $RESULTS_DIR ==="
-echo ""
 
-echo "--- Active crash candidates (pending triage/security review) ---"
-for d in "$RESULTS_DIR"/crashes/CRASH-*/; do
-  [ -d "$d" ] || continue
-  crashes=$((crashes + 1))
-  printf '  %s\n' "$(basename "$d")"
-done
-[ "$crashes" -eq 0 ] && echo "  (none)"
-echo ""
+def reason_from_file(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        match = REASON_RE.fullmatch(line.strip())
+        if match and match.group(1):
+            return match.group(1)
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return stripped
+    return ""
 
-echo "--- Confirmed findings ---"
-for d in "$RESULTS_DIR"/findings/FIND-*/; do
-  [ -d "$d" ] || continue
-  findings=$((findings + 1))
-  printf '  %s\n' "$(basename "$d")"
-done
-[ "$findings" -eq 0 ] && echo "  (none)"
-echo ""
 
-echo "--- Rejected crash candidates (excluded from active results) ---"
-for d in "$RESULTS_DIR"/crashes-rejected/CRASH-*/; do
-  [ -d "$d" ] || continue
-  rejected=$((rejected + 1))
-  id=$(basename "$d")
-  reason=$(rejection_reason "$d")
-  printf '  %-24s  %s\n' "$id" "$reason"
-done
-[ "$rejected" -eq 0 ] && echo "  (none)"
-echo ""
+def rejection_reason(directory: Path) -> str:
+    reason = reason_from_file(directory / ".autodiscard")
+    if reason:
+        return reason
+    for relative in REJECTION_FILES:
+        reason = reason_from_file(directory / relative)
+        if reason:
+            return reason
+    return "(no rejection reason found)"
 
-echo "--- Fuzz-crash infrastructure noise (shutdown-noise/) ---"
-if [ -d "$RESULTS_DIR/fuzz-crashes" ]; then
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    noise=$((noise + 1))
-    printf '  %s\n' "${f#$RESULTS_DIR/}"
-  done < <(find "$RESULTS_DIR/fuzz-crashes" -type f -path '*/shutdown-noise/*' 2>/dev/null | sort)
-fi
-[ "$noise" -eq 0 ] && echo "  (none)"
-echo ""
 
-echo "--- Summary ---"
-printf '  active crashes:      %d\n' "$crashes"
-printf '  confirmed findings:  %d\n' "$findings"
-printf '  rejected crashes:    %d\n' "$rejected"
-printf '  fuzz noise moved:    %d\n' "$noise"
+def noise_files(root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+    files: list[Path] = []
+    for current, _directories, names in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        try:
+            relative_parent = current_path.relative_to(root)
+        except ValueError:
+            continue
+        if "shutdown-noise" not in relative_parent.parts:
+            continue
+        for name in names:
+            path = current_path / name
+            try:
+                if stat.S_ISREG(path.lstat().st_mode):
+                    files.append(path)
+            except OSError:
+                continue
+    return sorted(files, key=lambda path: os.fsencode(str(path)))
+
+
+def report(results_arg: str) -> str:
+    results = Path(results_arg)
+    crashes = directories(results / "crashes", "CRASH-")
+    findings = directories(results / "findings", "FIND-")
+    rejected = directories(results / "crashes-rejected", "CRASH-")
+    noise = noise_files(results / "fuzz-crashes")
+
+    lines = [f"=== Exclusion report: {results_arg} ===", ""]
+    lines.append("--- Active crash candidates (pending triage/security review) ---")
+    lines.extend(f"  {entry.name}" for entry in crashes)
+    if not crashes:
+        lines.append("  (none)")
+    lines.extend(["", "--- Confirmed findings ---"])
+    lines.extend(f"  {entry.name}" for entry in findings)
+    if not findings:
+        lines.append("  (none)")
+    lines.extend(["", "--- Rejected crash candidates (excluded from active results) ---"])
+    lines.extend(
+        f"  {entry.name:<24}  {rejection_reason(entry)}" for entry in rejected
+    )
+    if not rejected:
+        lines.append("  (none)")
+    lines.extend(["", "--- Fuzz-crash infrastructure noise (shutdown-noise/) ---"])
+    lines.extend(f"  {path.relative_to(results)}" for path in noise)
+    if not noise:
+        lines.append("  (none)")
+    lines.extend(
+        [
+            "",
+            "--- Summary ---",
+            f"  active crashes:      {len(crashes)}",
+            f"  confirmed findings:  {len(findings)}",
+            f"  rejected crashes:    {len(rejected)}",
+            f"  fuzz noise moved:    {len(noise)}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str]) -> int:
+    if not argv or not Path(argv[0]).is_dir():
+        print(f"usage: {sys.argv[0]} <results_dir>", file=sys.stderr)
+        print(f"  e.g.  {sys.argv[0]} output/firefox/codex/results", file=sys.stderr)
+        return 2
+    sys.stdout.write(report(argv[0]))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

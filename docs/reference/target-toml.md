@@ -301,8 +301,8 @@ legitimately control. Triage compares crash report
 | `fs-state` | Filesystem paths, presence, permissions, or layout. |
 
 Unknown tokens are logged on stderr and ignored; if the resulting list
-is empty, the loader defaults to `["bytes"]`. The legacy spelling
-`call-order` is accepted and normalised to `call-sequence`.
+is empty, the loader defaults to `["bytes"]`. The synonym `call-order` is
+normalised to `call-sequence`.
 
 Examples:
 
@@ -340,12 +340,6 @@ Browser mode enables:
 - browser and JS testcase assumptions;
 - coverage-gated browser or shell runs when available;
 - JS differential mode.
-
-For browser targets, triage can also require plausible
-web / content reachability before a crash stays in `crashes/`.
-Shell-only or privileged-only crashes may still be useful
-engineering evidence, but they should not be presented as
-web-reachable security crashes without a real product path.
 
 Firefox path conventions differ by platform. macOS builds
 normally use:
@@ -416,8 +410,8 @@ LLM-bootstrap a real `[threat_model]` and `[s6_peers]` instead of the
 conservative defaults; you can re-run that derivation at any time:
 
 ```bash
-bin/suggest-threat-model <slug> --apply --force-config   # re-derive attacker_controls
-bin/suggest-peers <slug> --apply --force-config          # re-derive [s6_peers]
+bin/suggest-threat-model <slug> --apply --force   # re-derive attacker_controls
+bin/suggest-peers <slug> --apply --force          # re-derive [s6_peers]
 ```
 
 `bin/setup-target` accepts `--no-llm-config` to keep the deterministic

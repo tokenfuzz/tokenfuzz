@@ -47,7 +47,6 @@ import finding_signature  # noqa: E402
 import finding_dedup  # noqa: E402
 from cluster_common import (  # noqa: E402
     exact_child_file,
-    remove_legacy_cluster_files,
     render_member_report_siblings,
     render_md_sibling,
     run_under_aggregate_lock,
@@ -597,9 +596,7 @@ def _format_clusters_md(clusters: list[dict], findings_root: Path,
             f"{members_cell} | {c.get('status', 'OK')} |"
         )
     lines.append("")
-    # Footer: always point readers at the sibling rejected report. Live audit
-    # and benchmark pool builders both write this named report, with INDEX.md
-    # kept as a compatibility alias for older links.
+    # Footer: always point readers at the sibling rejected report.
     lines.append("---")
     lines.append("")
     lines.append(
@@ -624,9 +621,6 @@ def _member_link(findings_root: Path, member_id: str, link_prefix: str = "") -> 
 
 
 def _rejected_report_link(findings_root: Path) -> str:
-    rejected_root = findings_root.parent / "findings-rejected"
-    if not (rejected_root / "REJECTED-FINDINGS.md").is_file():
-        return "../findings-rejected/INDEX.md"
     return "../findings-rejected/REJECTED-FINDINGS.md"
 
 
@@ -721,7 +715,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     _atomic_write_text(out_md, md)
-    remove_legacy_cluster_files([out_md.parent / "FIND-CLUSTERS.md"])
     n_updated = update_reports(clusters, dry_run=False)
     render_member_report_siblings(clusters)
     render_md_sibling(out_md)
@@ -739,7 +732,7 @@ def _aggregate_target_root(target_root: Path, llm_target_root_prefix: str,
     across all of them, and write output/<slug>/FINDING-CLUSTERS.md.
 
     Per-agent FINDING-CLUSTERS.md files are still owned by per-results
-    invocations from lib/triage.sh; this top-level write is the
+    invocations from lib/triage.py; this top-level write is the
     cross-agent rollup. Concurrent backends serialize through an
     advisory flock on <slug>/.find-cluster-lock — see
     lib/cluster_common.run_under_aggregate_lock.
@@ -833,7 +826,6 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
         return 0
 
     _atomic_write_text(out_md, md)
-    remove_legacy_cluster_files([target_root / "FIND-CLUSTERS.md"])
     n_updated = update_aggregate_reports(clusters, dry_run=False)
     render_member_report_siblings(clusters)
     render_md_sibling(out_md)

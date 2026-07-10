@@ -1,6 +1,6 @@
 # Strategy S4: Advanced Differential Testing
 
-**Basic differential (--ion-eager vs --no-ion) is now automatic** — `run-asan-multi`
+**Basic differential (--ion-eager vs --no-ion) is now automatic** — `run-sanitizer-multi`
 runs it on every js/xpcshell testcase. This strategy covers advanced differential
 techniques that require deliberate setup.
 

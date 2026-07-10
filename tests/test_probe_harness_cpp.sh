@@ -172,7 +172,7 @@ mkdir -p "$defined_results/scratch-1" "$defined_target/build" "$slug_dir" "$TEST
 printf 'void audit_defined_symbol(void) {}\n' > "$defined_target/build/dummy.c"
 "${CC:-clang}" -c "$defined_target/build/dummy.c" -o "$defined_target/build/dummy.o"
 ar rcs "$defined_target/build/libtarget.a" "$defined_target/build/dummy.o"
-cat > "$slug_dir/.session-env" <<EOF_ENV
+cat > "$defined_results/.session-env" <<EOF_ENV
 RESULTS_DIR=$defined_results
 TARGET_ROOT=$defined_target
 TARGET_SLUG=defined-target
@@ -237,7 +237,6 @@ for san in ubsan msan tsan; do
     "probe: C++ HARNESS ${san} links selected sanitizer lib"
   assert_match "sanitizer=${san}" "$out" "probe: C++ HARNESS ${san} dry-run records selected sanitizer"
   assert_match "run-sanitizer-multi ${san} generic" "$out" "probe: C++ HARNESS ${san} routes through the generic multi-run wrapper"
-  assert_not_match "run-asan-multi" "$out" "probe: C++ HARNESS ${san} does not use the legacy ASan-only wrapper"
 done
 
 # Missing sanitizer-lib fallback: when ubsan_lib/msan_lib/tsan_lib is

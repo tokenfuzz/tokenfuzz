@@ -5,7 +5,7 @@ Usage:
     bin/suggest-peers <slug>               # print TOML snippet
     bin/suggest-peers <slug> --apply       # append to output/<slug>/target.toml
     bin/suggest-peers <slug> --apply --force  # overwrite existing [s6_peers]
-    bin/suggest-peers <slug> --apply --force-config  # alias for --force
+    bin/suggest-peers <slug> --apply --force
 
 Reads target.toml + the target's README and the S6 strategy doc taxonomy,
 then asks the LLM to pick 3-5 peer OSS projects that implement the same
@@ -21,7 +21,7 @@ Failure modes:
     - Target slug not found in output/ → exit 1
     - target.toml missing → exit 1
     - LLM response invalid → exit 3
-    - [s6_peers] already present + no --force/--force-config → exit 4
+    - [s6_peers] already present + no --force → exit 4
 """
 from __future__ import annotations
 
@@ -138,7 +138,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("slug", help="target slug (matches output/<slug>/)")
     parser.add_argument("--apply", action="store_true",
                         help="append the snippet to output/<slug>/target.toml")
-    parser.add_argument("--force", "--force-config", dest="force", action="store_true",
+    parser.add_argument("--force", action="store_true",
                         help="overwrite an existing [s6_peers] section when --apply")
     parser.add_argument("--timeout", type=int, default=120,
                         help="LLM-call timeout seconds (default 120)")
@@ -223,7 +223,7 @@ def main(argv: list[str]) -> int:
     if has_live_s6_section(current):
         if not args.force:
             print(f"[suggest-peers] target.toml already has [s6_peers]; "
-                  f"pass --force (or --force-config) to overwrite",
+                  f"pass --force to overwrite",
                   file=sys.stderr)
             return 4
         # Naive overwrite: strip the existing section before appending.

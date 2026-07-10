@@ -21,7 +21,7 @@ them to exit.
 audit iterations against the same target and backend, normally
 rooted in the same `output/<target>/<backend>/` tree.
 
-**Cold start.** An iteration where no agent has a state file yet
+**Cold start.** An iteration where no agent has structured state yet
 — typically the first iteration of a fresh target. Cold start
 also runs the recon survey before the deep agents launch.
 
@@ -51,7 +51,7 @@ cache from cold start is re-used.
 **Compaction.** The backend's automatic shortening of the
 conversation when it nears the context limit. The harness emits
 a checkpoint warning before compaction so the agent can save
-findings to its state file.
+progress to structured state.
 
 **Session seed.** A small set of `PRIOR SESSION SEED` ranges
 (files + line windows) the agent already covered. The prompt
@@ -73,10 +73,6 @@ sustained dry effort. Effort-gated, not iteration-gated.
 **Guard chain.** A repeating upstream error string ("Error:
 regexp too big", `NS_ERROR_…`) that blocks a run of testcases in
 one subsystem.
-
-**GUARD-… card.** A synthetic work card the harness appends when
-a guard chain saturates, asking the agent for a path past the
-guard.
 
 ## Probe and execution
 
@@ -184,7 +180,7 @@ state files directly.
 ### Work-card pipeline
 
 **Work card.** A single unit of audit work — one source file ×
-strategy, or one prior fix, or a synthetic GUARD-… task. Lives
+strategy, one prior fix, one recon hypothesis, or one peer fix. Lives
 in `work-cards.jsonl` / `patch-cards.jsonl`.
 
 **Patch card.** A prior-fix work card (strategy S1), built by
@@ -210,8 +206,7 @@ sharing a subsystem at the same time.
 
 **Subsystem.** The first one to five path components of a source
 file (`parser/xml`, `crypto/aes`, …). Used for blocklisting,
-ownership, and guard-saturation tracking. Depth is auto-picked
-at startup.
+ownership, and work distribution. Depth is auto-picked at startup.
 
 **Dry streak.** Consecutive iterations on the same strategy with
 no confirmed result. Tracked per agent in
@@ -237,7 +232,7 @@ See [Cost model](../concepts/cost-model.md) for full context.
 **Prompt cache.** Cached cross-agent prompt fragments built
 once per iteration into `.static-prompt-rules.md`.
 
-**Capping wrappers.** `bin/rg-safe`, `bin/peek`,
+**Capping commands.** `bin/rg-safe`, `bin/peek`,
 `bin/show-patch`, `bin/scratch-search` — enforce per-call
 byte / line ceilings so agents cannot dump raw source into
 context.

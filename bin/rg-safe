@@ -1,150 +1,84 @@
-#!/bin/bash
-# rg-safe — `rg` wrapper that caps stdout (lines AND bytes), excludes
-# noisy log paths by default, and emits a single footer when capping fires.
-#
-# Output size is bounded by the byte cap: a ~50 KiB head+tail spill via
-# lib/output_cap.sh. Bytes bound context cost whatever the match shape (a single
-# log.raw JSON line can be 1 MB, which a line cap misses), so the line cap is
-# off by default (RG_CAP=0). Pass --cap N / RG_CAP=N to opt in.
-#
-# Why default exclusions: everything under a harness `logs/` dir (session
-# transcripts, prompt dumps, recon logs, `index.*`, `.raw/` forensic spills,
-# and the vendored backend home under `.gemini-home/`) is agent self-output —
-# greppy hash hunts there self-poison by matching prior tool outputs. The
-# harness writes those under `output/`, so exclude `**/output/**/logs/**` — not
-# any dir merely named `logs`, which would hide a target's own `src/logs/`
-# source. A target that keeps source under its own `output/.../logs/` is also
-# hidden (rare — `output/` is normally build output; pass `--include-logs` to
-# reach it). `.git/` and `.hg/` are VCS internals and always excluded.
-# `--include-logs` drops only the output-logs exclusion; VCS stays on.
-#
-# Usage:
-#   bin/rg-safe [--cap N | --no-cap | RG_CAP=N]                    line cap
-#               [--cap-bytes N | --no-cap-bytes | RG_BYTES=N]      byte cap
-#               [--include-logs | RG_INCLUDE_LOGS=1]               allow logs
-#               <rg args...>
-#
-# Defaults: RG_CAP=0 (line cap off; byte cap governs), RG_BYTES=131072.
-# `--no-cap` disables both caps.
-# `--include-logs` drops the default output-logs exclusion. User-supplied
-# `--glob` flags still apply.
-#
-# stderr passes through unchanged. Exit code is rg's exit code (0 = match,
-# 1 = no match, 2 = error). Caps fire only on stdout.
+#!/usr/bin/env python3
+"""Run ripgrep with audit-log exclusions and bounded stdout."""
 
-set -uo pipefail
+from __future__ import annotations
 
-# Load the shared replacement-cap helper. Soft dependency — rg-safe falls
-# back to legacy chop-the-tail byte capping if the lib isn't present.
-_RGSAFE_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -r "$_RGSAFE_DIR/../lib/output_cap.sh" ]; then
-  # shellcheck source=../lib/output_cap.sh
-  . "$_RGSAFE_DIR/../lib/output_cap.sh"
-fi
-
-BYTES_CAP="${RG_BYTES:-131072}"
-INCLUDE_LOGS="${RG_INCLUDE_LOGS:-0}"
-PASS_ARGS=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --no-cap|--no-cap-bytes) BYTES_CAP=0; shift ;;
-    --cap-bytes)
-      [ $# -ge 2 ] || { echo "[rg-safe] --cap-bytes needs a value" >&2; exit 2; }
-      BYTES_CAP="$2"; shift 2 ;;
-    --cap-bytes=*) BYTES_CAP="${1#--cap-bytes=}"; shift ;;
-    --include-logs) INCLUDE_LOGS=1; shift ;;
-    --) PASS_ARGS+=("$1"); shift; while [ $# -gt 0 ]; do PASS_ARGS+=("$1"); shift; done ;;
-    *) PASS_ARGS+=("$1"); shift ;;
-  esac
-done
-
-case "$BYTES_CAP" in
-  ''|*[!0-9]*) echo "[rg-safe] non-numeric --cap-bytes: $BYTES_CAP" >&2; exit 2 ;;
-esac
-
-if ! command -v rg >/dev/null 2>&1; then
-  echo "[rg-safe] rg (ripgrep) not found in PATH" >&2
-  exit 2
-fi
-
-# Default-exclude the harness output-logs tree and VCS metadata. rg `--glob !pat`
-# is additive with caller globs, so prepending these never undoes a user-supplied
-# include. `**/output/**/logs/**` hides all harness self-output (hidden/vendored
-# children too — `logs/.raw/**`, `logs/.gemini-home/**` — under `rg --hidden`)
-# while target `src/logs/` source (no `output/` ancestor) stays searchable.
-# `--include-logs` drops it; VCS dirs are always excluded.
-RG_PREFIX_ARGS=(--glob '!**/.git/**' --glob '!**/.hg/**')
-if [ "$INCLUDE_LOGS" != "1" ]; then
-  RG_PREFIX_ARGS+=(--glob '!**/output/**/logs/**')
-fi
-
-# Resolve the REAL ripgrep, skipping lib/wrappers/rg (first on the agent PATH).
-# rg-safe must apply only its own caps and globs: if it called `rg` by name the
-# wrapper would re-inject its cap (double-capping --no-cap/--cap N) AND its log
-# glob — the latter silently defeating --include-logs, since no env disables the
-# wrapper's glob the way CAP_BYTES=0 disables its cap. Skip the wrapper dir the
-# same way lib/wrappers/_cap does; fall back to PATH lookup if none is found.
-_wrap_dir="${AGENT_WRAPPERS_PATH:-$_RGSAFE_DIR/../lib/wrappers}"
-# Normalize so the PATH string-compare below matches regardless of how the
-# wrapper dir is spelled (e.g. the fallback's `bin/../lib/wrappers`).
-_wrap_dir="$(cd "$_wrap_dir" 2>/dev/null && pwd || printf '%s' "$_wrap_dir")"
-_real_rg=""
-IFS=: read -ra _path_dirs <<< "$PATH"
-for _pd in "${_path_dirs[@]}"; do
-  [ "$_pd" = "$_wrap_dir" ] && continue
-  if [ -x "$_pd/rg" ]; then _real_rg="$_pd/rg"; break; fi
-done
-[ -n "$_real_rg" ] || _real_rg="rg"
-
-tmp=$(mktemp "${TMPDIR:-/tmp}/rg-safe-XXXXXXXX")
-trap 'rm -f "$tmp"' EXIT
-
-# stdout → tmp, stderr → caller's stderr. `set -u` on bash 3.2 (macOS) trips
-# on empty-array expansion, so dispatch by whether RG_PREFIX_ARGS has entries.
-if [ "${#RG_PREFIX_ARGS[@]}" -gt 0 ]; then
-  "$_real_rg" "${RG_PREFIX_ARGS[@]}" "${PASS_ARGS[@]}" > "$tmp"
-else
-  "$_real_rg" "${PASS_ARGS[@]}" > "$tmp"
-fi
-rc=$?
-
-total_bytes=$(wc -c < "$tmp" 2>/dev/null | tr -d ' ')
-total_bytes=${total_bytes:-0}
-byte_capped=0
-
-# Byte cap: prefer the head+tail+spill helper (lib/output_cap.sh) at the
-# default limit — it shows both ends and spills the full original to disk.
-# An explicit RG_BYTES=N (or --cap-bytes) keeps the historical chop-at-N
-# footer for debugging workflows that grep it.
-if [ "$BYTES_CAP" -eq 131072 ] && declare -F cap_output_file >/dev/null 2>&1; then
-  cap_output_file "$tmp" rg-safe
-  exit "$rc"
-fi
-
-if [ "$BYTES_CAP" -gt 0 ] && [ "$total_bytes" -gt "$BYTES_CAP" ]; then
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "[rg-safe] python3 not found in PATH (required for --cap-bytes)" >&2
-    exit 2
-  fi
-  python3 - "$tmp" "$BYTES_CAP" <<'PY' || exit 2
+import os
+import subprocess
 import sys
-path, cap = sys.argv[1], int(sys.argv[2])
-with open(path, "rb") as f:
-    data = f.read(cap)
-i = data.rfind(b"\n")
-if i >= 0:
-    data = data[:i + 1]
-with open(path, "wb") as f:
-    f.write(data)
-PY
-  byte_capped=1
-fi
+from pathlib import Path
 
-cat "$tmp"
 
-if [ "$byte_capped" -eq 1 ]; then
-  printf '[rg-safe: capped at %d of %d bytes. Pass --no-cap-bytes, RG_BYTES=0, --include-logs, or refine your query to widen.]\n' \
-    "$BYTES_CAP" "$total_bytes"
-fi
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+from file_tools import cap_output_bytes
+from command_tools import find_executable
 
-exit "$rc"
+
+def error(message: str) -> int:
+    print(f"[rg-safe] {message}", file=sys.stderr)
+    return 2
+
+
+def real_rg() -> str | None:
+    wrapper = Path(
+        os.environ.get("AGENT_WRAPPERS_PATH", str(ROOT / "lib" / "wrappers"))
+    ).resolve()
+    return find_executable("rg", skip=(wrapper,))
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    byte_value = os.environ.get("RG_BYTES")
+    include_logs = os.environ.get("RG_INCLUDE_LOGS", "0") == "1"
+    passthrough: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in ("--no-cap", "--no-cap-bytes"):
+            byte_value = "0"
+        elif arg == "--cap-bytes":
+            if index + 1 >= len(args):
+                return error("--cap-bytes needs a value")
+            index += 1
+            byte_value = args[index]
+        elif arg.startswith("--cap-bytes="):
+            byte_value = arg.split("=", 1)[1]
+        elif arg == "--include-logs":
+            include_logs = True
+        elif arg == "--":
+            passthrough.extend(args[index:])
+            break
+        else:
+            passthrough.append(arg)
+        index += 1
+
+    if byte_value is not None and not byte_value.isdigit():
+        return error(f"non-numeric --cap-bytes: {byte_value}")
+    executable = real_rg()
+    if not executable:
+        return error("rg (ripgrep) not found in PATH")
+
+    prefix = ["--glob", "!**/.git/**", "--glob", "!**/.hg/**"]
+    if not include_logs:
+        prefix.extend(("--glob", "!**/output/**/logs/**"))
+    completed = subprocess.run([executable, *prefix, *passthrough], stdout=subprocess.PIPE)
+    output = completed.stdout
+    cap_env = None
+    if byte_value is not None:
+        byte_cap = int(byte_value)
+        cap_env = dict(os.environ)
+        cap_env["OUTCAP_MAX_BYTES"] = str(byte_cap)
+        cap_env["OUTCAP_HEAD_BYTES"] = str(byte_cap * 3 // 5)
+        cap_env["OUTCAP_TAIL_BYTES"] = str(byte_cap * 2 // 5)
+    try:
+        output = cap_output_bytes(output, "rg-safe", cap_env)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    sys.stdout.buffer.write(output)
+    return completed.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -98,7 +98,7 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     reject on contract grounds. A public callback (lockfunc, write/header
     callback, …) fired while the library's own invariants are not yet
     established is a library defect, not caller misuse — keep it; the fix is
-    library-side. (This matches the crash-triage gates so the two paths agree.)
+    library-side. (This matches the crash pipeline so the two paths agree.)
   - Intentional extension or code-execution surface controlled by the
     trusted application/operator, such as dynamic module/plugin loading,
     callback registration, serializer version strings, or local developer

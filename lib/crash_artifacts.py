@@ -18,15 +18,7 @@ ARTIFACT_EXACT = {
     "description.md",
     "README.md",
     "reproduce.sh",
-    "testcase.sh",
-    "reproducer.sh",
     "sanitizer.txt",
-    "asan.txt",
-    "asan-output.txt",
-    "asan_output.txt",
-    "msan.txt",
-    "tsan.txt",
-    "ubsan.txt",
     "harness.c",
     "severity.json",
     "promotion.log",
@@ -46,7 +38,7 @@ ARTIFACT_SUFFIXES = (
     ".html.tmp",
     # `.out` / `.err` are reserved for audit-internal logs (e.g.
     # .audit/severity.out is the human-readable summary written by
-    # lib/triage.sh:966). Without this exclusion, find_testcase happily
+    # lib/triage.py:966). Without this exclusion, find_testcase happily
     # selects severity.out as the testcase, export-repro stages it
     # as input.out, and the generated reproduce.sh feeds prose into the
     # harness — the harness silently catches its parse failure and the
@@ -151,9 +143,8 @@ def _looks_like_asan_artifact(name: str) -> bool:
 # the audit harness, never the testcase. We derive the tuple from the
 # language registry so adding a new compiled C-family extension flows
 # through automatically. Non-C compiled harness extensions (.rs/.go/
-# .swift/.kt) are NOT included: they don't reach a free-standing main()
-# the way C/C++ ones do, and the historical heuristic only fired on
-# the C-family set.
+# .swift/.kt) are NOT included: their entrypoint syntax is different, so
+# this C-family main() test cannot classify them reliably.
 def _harness_source_suffixes() -> tuple[str, ...]:
     # Lazy import to avoid a circular dep if crash_artifacts is loaded
     # before lib/ is on sys.path (e.g. when run as a script).
@@ -192,12 +183,10 @@ def _looks_like_harness_source(path: Path) -> bool:
     if suffix not in _HARNESS_SOURCE_SUFFIXES:
         return False
     try:
-        # Cap the read — main() should be in the first few KB; very large
-        # generated sources still scan in negligible time.
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            return any(_HARNESS_MAIN_RE.search(line) for line in stream)
     except OSError:
         return False
-    return bool(_HARNESS_MAIN_RE.search(text))
 
 
 def _is_testcase_named(path: Path) -> bool:
@@ -327,14 +316,15 @@ def _resolve_header_path(token: str, bases: Iterable[Path]) -> Optional[Path]:
     return None
 
 
-def testcase_from_asan_header(asan_files: Iterable[Path], bases: Iterable[Path],
-                              min_bytes: int = 1) -> Optional[Path]:
+def testcase_from_sanitizer_header(sanitizer_files: Iterable[Path], bases: Iterable[Path],
+                                   min_bytes: int = 1) -> Optional[Path]:
     base_list = [Path.cwd(), *(Path(b) for b in bases)]
-    for asan in asan_files:
-        if not asan.is_file():
+    for sanitizer in sanitizer_files:
+        if not sanitizer.is_file():
             continue
         try:
-            text = asan.read_text(encoding="utf-8", errors="replace")
+            with sanitizer.open(encoding="utf-8", errors="replace") as stream:
+                text = stream.read(256 * 1024)
         except OSError:
             continue
         m = _ASAN_TESTCASE_RE.search(text)
@@ -346,33 +336,18 @@ def testcase_from_asan_header(asan_files: Iterable[Path], bases: Iterable[Path],
     return None
 
 
-def find_primary_asan(scan_dirs: Iterable[Path]) -> Optional[Path]:
-    # Historical API name: callers still ask for "asan", but probe/export use
-    # this for every sanitizer family and normalize the bundle to asan.txt.
-    preferred = (
-        "sanitizer.txt",
-        "asan.txt",
-        "asan-output.txt",
-        "asan_output.txt",
-        "msan.txt",
-        "tsan.txt",
-        "ubsan.txt",
-    )
+def find_primary_sanitizer(scan_dirs: Iterable[Path]) -> Optional[Path]:
     dirs = [Path(d) for d in scan_dirs]
     for d in dirs:
-        for name in preferred:
-            p = d / name
-            if p.is_file() and p.stat().st_size > 0:
-                return p
+        p = d / "sanitizer.txt"
+        if p.is_file() and p.stat().st_size > 0:
+            return p
     matches: list[Path] = []
     for d in dirs:
         for p in _visible_files(d):
             name = p.name
             if (
-                name.startswith("asan-output")
-                or name.startswith("asan_output")
-                or name.startswith("asan-raw")
-                or name.endswith(".asan.txt")
+                name.endswith(".asan.txt")
                 or name.endswith(".msan.txt")
                 or name.endswith(".tsan.txt")
                 or name.endswith(".ubsan.txt")
@@ -381,7 +356,7 @@ def find_primary_asan(scan_dirs: Iterable[Path]) -> Optional[Path]:
     return sorted(matches, key=lambda p: p.name.casefold())[0] if matches else None
 
 
-def find_testcase(scan_dirs: Iterable[Path], *, asan_files: Iterable[Path] = (),
+def find_testcase(scan_dirs: Iterable[Path], *, sanitizer_files: Iterable[Path] = (),
                   min_bytes: int = 1) -> Optional[Path]:
     dirs = [Path(d) for d in scan_dirs if Path(d).is_dir()]
 
@@ -396,8 +371,8 @@ def find_testcase(scan_dirs: Iterable[Path], *, asan_files: Iterable[Path] = (),
             if is_testcase_candidate(p, min_bytes=min_bytes):
                 return p
 
-    header_hit = testcase_from_asan_header(
-        asan_files,
+    header_hit = testcase_from_sanitizer_header(
+        sanitizer_files,
         [*dirs, *(d.parent for d in dirs)],
         min_bytes=min_bytes,
     )

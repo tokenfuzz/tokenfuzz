@@ -19,8 +19,7 @@
 #      a card but no FIND and no find_id.
 #   5. Re-running recon_to_cards is idempotent: same FIND id, report.md
 #      is not overwritten (an agent augmentation between runs survives).
-#   6. Without --results-dir (back-compat caller), no FINDs are
-#      materialized and no card carries find_id.
+#   6. --results-dir is mandatory, so complete rows cannot lose find_id.
 #   7. Multi-sanitizer fan-out shares one find_id across cards.
 #   8. Dedup signature includes class — distinct bug classes in the
 #      same function do NOT collapse, preserving bug-finding capability
@@ -67,6 +66,11 @@ run_with_results_dir() {
 }
 
 run_with_results_dir
+modes=$(python3 -c "
+import json
+print(','.join(sorted({json.loads(line)['mode'] for line in open('$work_cards') if line.strip()})))
+")
+assert_eq "generic" "$modes" "empty sanitizer list emits findings-only generic cards"
 
 # ── Helpers ────────────────────────────────────────────────────────────
 find_id_for_rec() {
@@ -228,37 +232,27 @@ augmented_sha_after=$(shasum "$report" | awk '{print $1}')
 assert_eq "$augmented_sha_before" "$augmented_sha_after" \
   "agent augmentation in report.md survives a recon_to_cards re-run"
 
-# ── 9. Back-compat: no --results-dir ⇒ no FINDs, no find_id on cards ──
+# ── 9. --results-dir is mandatory so complete rows always materialize ──
 nodir_cards="$tmp/work-cards-nodir.jsonl"
-python3 lib/recon_to_cards.py \
+nodir_out=$(python3 lib/recon_to_cards.py \
   --target-slug testproject --target-path "$target_path" \
-  --recon-jsonl "$recon_jsonl" --work-cards "$nodir_cards" --quiet
-has_any_find_id=$(python3 -c "
-import json
-for line in open('$nodir_cards'):
-    line = line.strip()
-    if not line: continue
-    c = json.loads(line)
-    if c.get('find_id'):
-        print('yes'); break
-else:
-    print('no')
-")
-assert_eq "$has_any_find_id" "no" "no --results-dir ⇒ no find_id on any card (back-compat)"
+  --recon-jsonl "$recon_jsonl" --work-cards "$nodir_cards" --quiet 2>&1; echo "rc=$?")
+assert_match 'missing required arg.*--results-dir' "$nodir_out" \
+  "no --results-dir is rejected before cards can lose find_id"
 
 # ── 10. bin/audit wires --results-dir through to recon_to_cards.py ────
-if grep -q -- '--results-dir "$RESULTS_DIR"' "$SCRIPT_ROOT/bin/audit"; then
+if grep -q -- '"--results-dir", str(runtime.results)' "$SCRIPT_ROOT/lib/audit_runner.py"; then
   pass "bin/audit passes --results-dir to recon_to_cards.py"
 else
   fail "bin/audit missing --results-dir flag in _seed_cards_from_recon"
 fi
 
-# ── 11. prompt.sh renders the PRE-FILED FIND block when find_id set ───
-if grep -qF "PRE-FILED FIND" "$SCRIPT_ROOT/lib/prompt.sh" \
-    && grep -qF "find_id" "$SCRIPT_ROOT/lib/prompt.sh"; then
-  pass "lib/prompt.sh renders PRE-FILED FIND augment-don't-refile contract"
+# ── 11. prompt.py renders the PRE-FILED FIND block when find_id set ───
+if grep -qF "PRE-FILED FIND" "$SCRIPT_ROOT/lib/prompt.py" \
+    && grep -qF "find_id" "$SCRIPT_ROOT/lib/prompt.py"; then
+  pass "lib/prompt.py renders PRE-FILED FIND augment-don't-refile contract"
 else
-  fail "lib/prompt.sh missing PRE-FILED FIND block for find_id-bearing cards"
+  fail "lib/prompt.py missing PRE-FILED FIND block for find_id-bearing cards"
 fi
 if grep -qF "PRE-FILED FIND" "$SCRIPT_ROOT/lib/prompts/find_first_directive.md.j2"; then
   pass "find_first_directive carves out the pre-filed FIND case"

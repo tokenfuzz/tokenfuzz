@@ -3,7 +3,7 @@
 #
 # These tests synthesize runs.jsonl directly and never invoke bin/probe, so
 # we exercise the digester independently of the harness. See bin/probe-history
-# for the schema fields exercised here (asan_runs, testcase_sha1).
+# for the schema fields exercised here (sanitizer_runs, testcase_sha1).
 
 set -o pipefail
 source "$(dirname "$0")/helpers.sh"
@@ -14,10 +14,9 @@ PH="$SCRIPT_ROOT/bin/probe-history"
 # ── Fixtures ─────────────────────────────────────────────────────────
 # We hand-craft a runs.jsonl covering:
 #   - two paths sharing one content sha1 (rename scenario)
-#   - a confirmed (asan_runs=5) CRASH and an unconfirmed one
+#   - a confirmed (sanitizer_runs=5) CRASH and an unconfirmed one
 #   - a NO_EXEC entry
 #   - a different hypothesis / agent / mode for filter coverage
-#   - one legacy row missing asan_runs and testcase_sha1 (older schema)
 
 STATE_DIR="$RESULTS_DIR/state"
 mkdir -p "$STATE_DIR"
@@ -35,12 +34,11 @@ TC_OTHER_SHA1=$(shasum -a 1 "$TC_OTHER" | awk '{print $1}')
 
 # Synthesize runs.jsonl.
 cat > "$STATE_DIR/runs.jsonl" <<EOF
-{"id":"RUN-aaaa000001","agent":"1","hypothesis_id":"H-altsvc","card_id":"PATCH-001","mode":"generic","testcase":"$TC1","testcase_sha1":"$TC1_SHA1","asan_output":"$TC1.asan.txt","verdict":"NO_EXEC","asan_runs":1,"created_at":"2026-05-11T14:13:00Z"}
-{"id":"RUN-aaaa000002","agent":"1","hypothesis_id":"H-altsvc","card_id":"PATCH-001","mode":"generic","testcase":"$TC1","testcase_sha1":"$TC1_SHA1","asan_output":"$TC1.asan.txt","verdict":"CRASH","asan_runs":1,"created_at":"2026-05-11T14:18:00Z"}
-{"id":"RUN-aaaa000003","agent":"1","hypothesis_id":"H-altsvc","card_id":"PATCH-001","mode":"generic","testcase":"$TC1","testcase_sha1":"$TC1_SHA1","asan_output":"$TC1.asan.txt","verdict":"CRASH","asan_runs":5,"created_at":"2026-05-11T14:21:00Z"}
-{"id":"RUN-aaaa000004","agent":"3","hypothesis_id":"H-altsvc","card_id":"PATCH-001","mode":"generic","testcase":"$TC2","testcase_sha1":"$TC1_SHA1","asan_output":"$TC2.asan.txt","verdict":"CRASH","asan_runs":5,"created_at":"2026-05-11T15:04:00Z"}
-{"id":"RUN-bbbb000005","agent":"2","hypothesis_id":"H-version","card_id":"PATCH-002","mode":"generic","testcase":"$TC_OTHER","testcase_sha1":"$TC_OTHER_SHA1","asan_output":"$TC_OTHER.asan.txt","verdict":"CLEAN","asan_runs":1,"created_at":"2026-05-11T15:10:00Z"}
-{"id":"RUN-cccc000006","agent":"1","hypothesis_id":"H-legacy","card_id":"","mode":"browser","testcase":"$TC1","asan_output":"$TC1.asan.txt","verdict":"CLEAN","created_at":"2026-05-10T09:00:00Z"}
+{"id":"RUN-aaaa000001","agent":"1","hypothesis_id":"H-altsvc","card_id":"PATCH-001","mode":"generic","testcase":"$TC1","testcase_sha1":"$TC1_SHA1","asan_output":"$TC1.asan.txt","verdict":"NO_EXEC","sanitizer_runs":1,"created_at":"2026-05-11T14:13:00Z"}
+{"id":"RUN-aaaa000002","agent":"1","hypothesis_id":"H-altsvc","card_id":"PATCH-001","mode":"generic","testcase":"$TC1","testcase_sha1":"$TC1_SHA1","asan_output":"$TC1.asan.txt","verdict":"CRASH","sanitizer_runs":1,"created_at":"2026-05-11T14:18:00Z"}
+{"id":"RUN-aaaa000003","agent":"1","hypothesis_id":"H-altsvc","card_id":"PATCH-001","mode":"generic","testcase":"$TC1","testcase_sha1":"$TC1_SHA1","asan_output":"$TC1.asan.txt","verdict":"CRASH","sanitizer_runs":5,"created_at":"2026-05-11T14:21:00Z"}
+{"id":"RUN-aaaa000004","agent":"3","hypothesis_id":"H-altsvc","card_id":"PATCH-001","mode":"generic","testcase":"$TC2","testcase_sha1":"$TC1_SHA1","asan_output":"$TC2.asan.txt","verdict":"CRASH","sanitizer_runs":5,"created_at":"2026-05-11T15:04:00Z"}
+{"id":"RUN-bbbb000005","agent":"2","hypothesis_id":"H-version","card_id":"PATCH-002","mode":"generic","testcase":"$TC_OTHER","testcase_sha1":"$TC_OTHER_SHA1","asan_output":"$TC_OTHER.asan.txt","verdict":"CLEAN","sanitizer_runs":1,"created_at":"2026-05-11T15:10:00Z"}
 EOF
 
 # ── 1. Help and usage ────────────────────────────────────────────────
@@ -73,23 +71,18 @@ out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" "$TC1" 2>&1) ; rc=$?
 assert_eq 0 "$rc" "by path: exit 0 when history exists"
 assert_match "altsvc-expire-size-3.bin" "$out" "by path: testcase displayed"
 assert_match "sha1=${TC1_SHA1:0:12}" "$out" "by path: on-disk sha1 shown"
-# We seeded 4 runs at $TC1 and 1 run at $TC2 sharing the same sha1.
-# Path-OR-sha1 lookup matches all five (the sixth row has no sha1 but
-# the same path so still counts).
-assert_match '5 runs across 2 agents' "$out" "by path: matches both paths via sha1 + path"
-# Legacy row (RUN-cccc000006) is included because its testcase path matches.
-# It uses mode=browser/verdict=CLEAN; both TC1 (4 rows with sha1+legacy) and
-# TC2 (1 row with sha1) match → 5 rows visible under --limit 0.
-out_with_legacy=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" "$TC1" --limit 0 2>&1)
-body_rows=$(echo "$out_with_legacy" | grep -c '^  202')
-assert_eq 5 "$body_rows" "by path --limit 0: shows all 5 body rows uncapped"
-if grep -q "more)" <<<"$out_with_legacy"; then
+# We seeded 3 runs at $TC1 and 1 run at $TC2 sharing the same sha1.
+assert_match '4 runs across 2 agents' "$out" "by path: matches both paths via sha1 + path"
+out_all=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" "$TC1" --limit 0 2>&1)
+body_rows=$(echo "$out_all" | grep -c '^  202')
+assert_eq 4 "$body_rows" "by path --limit 0: shows all 4 body rows uncapped"
+if grep -q "more)" <<<"$out_all"; then
   fail "by path --limit 0: should NOT show 'more' overflow"
 else
   pass "by path --limit 0: no overflow line"
 fi
-# Confirmed marker present on the asan_runs=5 rows.
-assert_match "← confirmed" "$out" "by path: ← confirmed marker on asan_runs=5"
+# Confirmed marker present on the sanitizer_runs=5 rows.
+assert_match "← confirmed" "$out" "by path: ← confirmed marker on sanitizer_runs=5"
 # Footer reflects presence of a confirmed verdict.
 assert_match "confirmed verdict" "$out" "by path: footer mentions confirmed verdict"
 
@@ -97,9 +90,7 @@ assert_match "confirmed verdict" "$out" "by path: footer mentions confirmed verd
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" --sha1 "$TC1_SHA1" 2>&1) ; rc=$?
 assert_eq 0 "$rc" "by sha1: exit 0"
 assert_match "${TC1_SHA1:0:12}" "$out" "by sha1: hash echoed in header"
-# Legacy row has no testcase_sha1 → excluded from sha1-only lookup.
-# We expect the 4 runs that recorded testcase_sha1.
-assert_match "4 runs across 2 agents" "$out" "by sha1: legacy rows without sha1 excluded"
+assert_match "4 runs across 2 agents" "$out" "by sha1: matches recorded hashes"
 
 # ── 4. Filter by --hypothesis-id ─────────────────────────────────────
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" --hypothesis-id H-version 2>&1) ; rc=$?
@@ -114,15 +105,15 @@ assert_match "no matching runs" "$out_miss" "by hyp miss: clear status"
 # ── 5. Filter by --card-id ───────────────────────────────────────────
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" --card-id PATCH-001 2>&1)
 assert_match "PATCH-001" "$out" "by card-id: header references card filter"
-# 4 runs are recorded under PATCH-001 (legacy row has empty card_id).
+# 4 runs are recorded under PATCH-001.
 assert_match "4 runs" "$out" "by card-id: count is 4"
 
 # ── 6. --agent filter ────────────────────────────────────────────────
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" "$TC1" --agent 3 2>&1)
 assert_match "1 runs" "$out" "by path + agent: filtered to one"
-# agent=1 still has 4 rows at TC1 (3 with sha1 + 1 legacy).
+# agent=1 has 3 rows at TC1.
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" "$TC1" --agent 1 2>&1)
-assert_match "4 runs" "$out" "by path + agent=1: matches 4 rows"
+assert_match "3 runs" "$out" "by path + agent=1: matches 3 rows"
 
 # ── 7. --verdict regex filter ────────────────────────────────────────
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" --all --verdict CRASH 2>&1)
@@ -135,22 +126,22 @@ fi
 
 # ── 8. --all mode ────────────────────────────────────────────────────
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" --all --limit 0 2>&1)
-assert_match "6 runs" "$out" "--all: includes legacy row too"
+assert_match "5 runs" "$out" "--all: includes every row"
 assert_match "all runs" "$out" "--all: header shows filter label"
 
 # ── 9. --format tsv ──────────────────────────────────────────────────
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" --all --format tsv 2>&1)
 header=$(echo "$out" | head -1)
 assert_match "created_at" "$header" "tsv: header row present"
-assert_match "asan_runs" "$header" "tsv: header includes asan_runs"
-# Body row count = 6 (excluding header).
+assert_match "sanitizer_runs" "$header" "tsv: header includes sanitizer_runs"
+# Body row count = 5 (excluding header).
 body_count=$(echo "$out" | tail -n +2 | grep -c '^20')
-assert_eq 6 "$body_count" "tsv: body has 6 data rows"
+assert_eq 5 "$body_count" "tsv: body has 5 data rows"
 
 # ── 10. --format json ────────────────────────────────────────────────
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" --all --format json 2>&1)
 line_count=$(echo "$out" | grep -c '^{')
-assert_eq 6 "$line_count" "json: one object per run"
+assert_eq 5 "$line_count" "json: one object per run"
 # Confirm the first JSON line round-trips via python.
 first=$(echo "$out" | head -1)
 python3 -c "import json,sys; obj=json.loads(sys.argv[1]); assert 'verdict' in obj" "$first"
@@ -159,8 +150,8 @@ assert_eq 0 $? "json: first row is valid JSON with verdict field"
 # ── 11. --limit cap ──────────────────────────────────────────────────
 out=$(RESULTS_DIR="$RESULTS_DIR" python3 "$PH" --all --limit 2 2>&1)
 assert_match "more)" "$out" "--limit 2: shows overflow indicator"
-assert_match "6 runs across 3 agents" "$out" "--limit 2: summary still counts all matches"
-assert_match "\\[summary\\] 3 CRASH · 2 CLEAN · 1 NO_EXEC" "$out" \
+assert_match "5 runs across 3 agents" "$out" "--limit 2: summary still counts all matches"
+assert_match "\\[summary\\] 3 CRASH · 1 CLEAN · 1 NO_EXEC" "$out" \
   "--limit 2: verdict summary still counts all matches"
 # Body rows (start with "  202") capped at 2.
 body=$(echo "$out" | grep -c '^  202')
@@ -190,7 +181,7 @@ rm -rf "$missing_dir"
 nc_dir=$(mktemp -d)
 mkdir -p "$nc_dir/state"
 cat > "$nc_dir/state/runs.jsonl" <<EOF
-{"id":"RUN-dddd000001","agent":"1","hypothesis_id":"H-x","card_id":"","mode":"generic","testcase":"/tmp/x.bin","testcase_sha1":"abc","asan_output":"/tmp/x.asan.txt","verdict":"CLEAN","asan_runs":1,"created_at":"2026-05-11T16:00:00Z"}
+{"id":"RUN-dddd000001","agent":"1","hypothesis_id":"H-x","card_id":"","mode":"generic","testcase":"/tmp/x.bin","testcase_sha1":"abc","asan_output":"/tmp/x.asan.txt","verdict":"CLEAN","sanitizer_runs":1,"created_at":"2026-05-11T16:00:00Z"}
 EOF
 out=$(RESULTS_DIR="$nc_dir" python3 "$PH" --all 2>&1)
 assert_match "no --confirm run recorded yet" "$out" "no-confirm: encourages --confirm refresh"
@@ -218,7 +209,7 @@ big_dir=$(mktemp -d)
 mkdir -p "$big_dir/state"
 big_runs="$big_dir/state/runs.jsonl"
 for i in $(seq 1 200); do
-  printf '{"id":"RUN-eeee%06d","agent":"1","hypothesis_id":"H-bulk","card_id":"PATCH-bulk","mode":"generic","testcase":"%s","testcase_sha1":"%s","asan_output":"x.asan.txt","verdict":"CLEAN","asan_runs":1,"created_at":"2026-05-11T17:00:%02dZ"}\n' \
+  printf '{"id":"RUN-eeee%06d","agent":"1","hypothesis_id":"H-bulk","card_id":"PATCH-bulk","mode":"generic","testcase":"%s","testcase_sha1":"%s","asan_output":"x.asan.txt","verdict":"CLEAN","sanitizer_runs":1,"created_at":"2026-05-11T17:00:%02dZ"}\n' \
     "$i" "$TC1" "$TC1_SHA1" "$((i % 60))" >> "$big_runs"
 done
 # Write to a real file so we can inspect the trailing byte (bash $() strips

@@ -1,606 +1,405 @@
-#!/bin/bash
-# Generic sanitizer multi-run normalizer — default 5 runs, SANITIZER_RUNS
-# (legacy alias ASAN_RUNS) overrides. Drives the per-sanitizer single-shot
-# runner repeatedly and aggregates crash/execution results into one
-# structured footer every downstream consumer relies on (bin/probe verdict,
-# export-repro reproduction rate, lib/quality run-counting).
-# Timing-dependent bugs (UAFs, races) may not crash on every run.
-#
-# Usage: bin/run-sanitizer-multi <asan|ubsan|msan|tsan|race|runner> <mode> <testcase> [extra args...]
-# Output: per-run digests + a summary:
-#   <ASAN_RUN_HEADER|SANITIZER_RUN_HEADER>: sanitizer=<name> runs=N ...
-#   CRASH_RATE: <crashes>/<RUNS>
-#   [run-sanitizer-multi] EXECUTION_RATE: <executions>/<RUNS>
-#   [run-sanitizer-multi] SUCCESS_RATE: <clean rc=0 executions>/<RUNS>
-#
-# All output is also appended to $SAN_OUTPUT_FILE (legacy alias
-# $ASAN_OUTPUT_FILE) if set, for callers piping to their scratch dir.
-#
-# bin/run-asan-multi is a thin compatibility shim: run-sanitizer-multi asan "$@".
+#!/usr/bin/env python3
+"""Repeat a sanitizer runner and emit one normalized execution verdict."""
 
-set -uo pipefail
+from __future__ import annotations
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# ── Sanitizer selection: first positional arg. The remaining args
-# (<mode> <testcase> [extra...]) are forwarded verbatim to the child runner,
-# so every ${1}/${2} reference below (mode/testcase) stays valid after shift.
-SAN="${1:-}"
-case "$SAN" in
-  asan|ubsan|msan|tsan|race|runner) shift ;;
-  "")
-    echo "[run-sanitizer-multi] ERROR: sanitizer argument required." >&2
-    echo "  Usage: bin/run-sanitizer-multi <asan|ubsan|msan|tsan|race|runner> <mode> <testcase> [extra args...]" >&2
-    exit 2 ;;
-  *)
-    echo "[run-sanitizer-multi] ERROR: unknown sanitizer '$SAN' (want asan|ubsan|msan|tsan|race|runner)." >&2
-    exit 2 ;;
-esac
-
-# Child single-shot runner for this sanitizer. race/runner reuse run-asan's
-# generic path (driven by ASAN_GENERIC_BIN + ASAN_GENERIC_DISABLE_OPTIONS,
-# exactly as bin/probe wires them).
-case "$SAN" in
-  asan|race|runner) CHILD_RUNNER="run-asan" ;;
-  ubsan)            CHILD_RUNNER="run-ubsan" ;;
-  msan)             CHILD_RUNNER="run-msan" ;;
-  tsan)             CHILD_RUNNER="run-tsan" ;;
-esac
-
-# Header keyword: asan keeps the historical ASAN_RUN_HEADER (consumed by
-# lib/quality count_verified_asan_runs and bin/audit); every other sanitizer
-# emits the neutral SANITIZER_RUN_HEADER. Both are parsed by export-repro.
-if [ "$SAN" = "asan" ]; then
-  HEADER_KW="ASAN_RUN_HEADER"
-else
-  HEADER_KW="SANITIZER_RUN_HEADER"
-fi
-
-# Options env var for the selected sanitizer (mirrors bin/probe
-# _probe_selected_options_env_name). race/runner run options-disabled.
-case "$SAN" in
-  asan)  OPTIONS_ENV_NAME="ASAN_OPTIONS" ;;
-  ubsan) OPTIONS_ENV_NAME="UBSAN_OPTIONS" ;;
-  msan)  OPTIONS_ENV_NAME="MSAN_OPTIONS" ;;
-  tsan)  OPTIONS_ENV_NAME="TSAN_OPTIONS" ;;
-  *)     OPTIONS_ENV_NAME="" ;;
-esac
-
-RUNS="${SANITIZER_RUNS:-${ASAN_RUNS:-5}}"
-
-if [ -r "$SCRIPT_DIR/../lib/platform.sh" ]; then
-  # shellcheck source=../lib/platform.sh
-  source "$SCRIPT_DIR/../lib/platform.sh"
-else
-  audit_sha1() {
-    if command -v shasum >/dev/null 2>&1; then
-      shasum -a 1 "$@"
-    elif command -v sha1sum >/dev/null 2>&1; then
-      sha1sum "$@"
-    else
-      cksum "$@"
-    fi
-  }
-fi
-
-# Optional: shared head+tail+spill cap for crash output that runs to hundreds
-# of KB (stack-overflow with thousands of repeated frames; UBSan cascades).
-# When sourced, _digest_asan routes crash-path output through the helper if
-# size exceeds the threshold. Soft dep: legacy "no truncation on crash"
-# behavior kicks in if the lib is absent.
-if [ -r "$SCRIPT_DIR/../lib/output_cap.sh" ]; then
-  # shellcheck source=../lib/output_cap.sh
-  . "$SCRIPT_DIR/../lib/output_cap.sh"
-fi
-
-# Sanitizer-neutral crash classification. When lib/verdict.sh is reachable,
-# per-run crash COUNTING uses verdict_file_has_crash, so Go data races, Rust
-# panics, MSan/TSan/UBSan markers, etc. all count identically across
-# sanitizers. In isolated test harnesses that copy this script without lib/,
-# _verdict_loaded stays 0 and the per-run count falls back to the legacy
-# ASan-oriented grep below.
-_verdict_loaded=0
-if [ -r "$SCRIPT_DIR/../lib/verdict.sh" ]; then
-  # shellcheck source=../lib/verdict.sh
-  . "$SCRIPT_DIR/../lib/verdict.sh" && _verdict_loaded=1
-fi
-
-# bin/probe sets SAN_OUTPUT_FILE/ASAN_OUTPUT_FILE to <testcase>.asan.txt and
-# is the normal entry point. If callers invoke this wrapper directly without
-# it, derive the same default from the testcase argument so the artifact
-# still lands in a predictable place. *_OPTIONAL=1 disables file output
-# entirely (smoke tests, preflight). The .asan.txt extension is kept across
-# all sanitizers because count_verified_asan_runs globs it.
-if [ -z "${SAN_OUTPUT_FILE:-${ASAN_OUTPUT_FILE:-}}" ] \
-   && [ -z "${SAN_OUTPUT_FILE_OPTIONAL:-${ASAN_OUTPUT_FILE_OPTIONAL:-}}" ]; then
-    _tc="${2:-}"
-    if [ -n "$_tc" ]; then
-        SAN_OUTPUT_FILE="${_tc%.*}.asan.txt"
-    else
-        echo "[run-sanitizer-multi] ERROR: cannot derive output file — pass a testcase or use bin/probe." >&2
-        exit 2
-    fi
-fi
-OUTPUT_FILE="${SAN_OUTPUT_FILE:-${ASAN_OUTPUT_FILE:-}}"
-
-# Seed the output file with a deterministic header the audit harness
-# can grep to count VERIFIED runs (see count_verified_asan_runs in
-# bin/audit). This protects against agents creating empty
-# .asan.txt files as shortcut credits.
-if [ -n "$OUTPUT_FILE" ]; then
-    mkdir -p "$(dirname "$OUTPUT_FILE")" 2>/dev/null || true
-    _env_options_b64=""
-    _selected_options=""
-    if [ -n "$OPTIONS_ENV_NAME" ]; then
-        _selected_options="${!OPTIONS_ENV_NAME:-}"
-    fi
-    if [ -n "$_selected_options" ]; then
-        _env_options_b64="$(
-            python3 - "${_selected_options}" <<'PY'
 import base64
+import datetime as dt
+import hashlib
+import os
+import re
+import subprocess
 import sys
-print(base64.b64encode(sys.argv[1].encode()).decode())
-PY
-        )"
-    fi
-    {
-        echo "${HEADER_KW}: sanitizer=$SAN runs=$RUNS mode=${1:-?} testcase=${SANITIZER_RECORDED_TESTCASE:-${ASAN_RECORDED_TESTCASE:-${2:-?}}} env_options_b64=$_env_options_b64 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } > "$OUTPUT_FILE"
-fi
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 
-# ── Auto coverage-gate: if WANT is set and bin/hits exists, run a cheap
-# coverage check BEFORE spending ASan budget. Only a real MISSED verdict
-# skips ASan. Coverage build/tool/execution failures continue ungated so
-# a broken coverage build cannot suppress a sanitizer diagnostic.
-# Set SKIP_COVERAGE_GATE=1 to bypass (used by enforce_asan_for_orphans).
-coverage_mode="${1:-browser}"
-if [ -n "${WANT:-}" ] && [ -z "${SKIP_COVERAGE_GATE:-}" ] && [ -x "$SCRIPT_DIR/hits" ] \
-   && { [ "$coverage_mode" = "browser" ] || [ "$coverage_mode" = "js" ]; }; then
-  coverage_testcase="${2:-}"
-  coverage_timeout="${HITS_TIMEOUT:-${COV_TIMEOUT:-20}}"
-  if [ -n "$coverage_testcase" ] && [ -f "$coverage_testcase" ]; then
-    coverage_args=(--testcase "$coverage_testcase" --want "$WANT" --mode "$coverage_mode" --timeout "$coverage_timeout")
-    [ -n "${HITS_LOG_PATH:-}" ] && coverage_args+=(--log "$HITS_LOG_PATH")
-    coverage_output="$(mktemp "${TMPDIR:-/tmp}/asan5x-cov-XXXXXXXX")"
-    "$SCRIPT_DIR/hits" "${coverage_args[@]}" > "$coverage_output" 2>&1
-    cov_rc=$?
-    if [ "$cov_rc" -ne 0 ]; then
-      cat "$coverage_output"
-      if [ "$cov_rc" -eq 1 ]; then
-        # MISSED — print the closest frame and skip ASan entirely.
-        _closest="$(grep -m1 '^MISSED' "$coverage_output" | sed 's/^MISSED — closest reached: //' | head -c 200)"
-        [ -z "$_closest" ] && _closest="$(grep -m1 '^EXEC_FAIL\|^NO_COVERAGE' "$coverage_output" | head -c 200)"
-        rm -f "$coverage_output"
-        # Record the miss in tried-inputs
-        if [ -n "${TRIED_INPUTS_LOG:-}" ] && [ -n "$coverage_testcase" ]; then
-          mkdir -p "$(dirname "$TRIED_INPUTS_LOG")" 2>/dev/null || true
-          _tc_hash="?"
-          _tc_hash="$(audit_sha1 "$coverage_testcase" 2>/dev/null | awk '{print $1}')"
-          printf '%s verdict=NO_HIT mode=%s testcase=%s hash=%s hypothesis=%s target=%s closest=%q\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$coverage_mode" "$coverage_testcase" \
-            "${_tc_hash:0:12}" "${HYPOTHESIS_ID:-?}" "${TARGET:-?}" \
-            "${_closest:-<none>}" \
-            >> "$TRIED_INPUTS_LOG"
-        fi
-        if [ -n "$OUTPUT_FILE" ]; then
-          echo "COVERAGE_GATE: MISSED — ASan skipped. Revise testcase (closest: ${_closest:-<none>})" >> "$OUTPUT_FILE"
-        fi
-        echo "[run-sanitizer-multi] COVERAGE GATE: MISSED — ASan skipped. Revise testcase (closest: ${_closest:-<none>})"
-        exit 1
-      fi
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = Path(os.environ.get("SCRIPT_ROOT", SCRIPT_DIR.parent)) / "lib"
+sys.path.insert(0, str(LIB_DIR))
 
-      cov_label="COVERAGE_ENV_FAIL"
-      [ "$cov_rc" -eq 3 ] && cov_label="COVERAGE_EXEC_FAIL"
-      _closest="$(grep -m1 '^EXEC_FAIL\|^NO_COVERAGE' "$coverage_output" | head -c 200)"
-      [ -z "$_closest" ] && _closest="hits exited $cov_rc"
-      export HITS_VERDICT="$cov_label"
-      if [ -n "$OUTPUT_FILE" ]; then
-        echo "COVERAGE_GATE: ${cov_label} — ASan proceeding ungated (hits rc=${cov_rc}; ${_closest})" >> "$OUTPUT_FILE"
-      fi
-      echo "[run-sanitizer-multi] COVERAGE GATE: ${cov_label} — proceeding to ASan ungated (hits rc=${cov_rc}; ${_closest})"
-      rm -f "$coverage_output"
-    fi
-    if [ "$cov_rc" -eq 0 ]; then
-      # HIT — print verdict and continue to ASan runs below
-      cat "$coverage_output"
-      export CLOSEST_FRAME="$(grep -m1 '^HIT:' "$coverage_output" | sed 's/^HIT: //' | head -c 200)"
-      export HITS_VERDICT="HIT"
-      rm -f "$coverage_output"
-      echo "[run-sanitizer-multi] COVERAGE GATE: HIT — proceeding to ASan"
-    fi
-  fi
-fi
+from file_tools import cap_output_bytes
+from verdict import CRASH_PATTERNS
 
-# Validate: mode is required, testcase file should exist when provided.
-if [ $# -lt 1 ]; then
-  echo "[run-sanitizer-multi] ERROR: mode argument required." >&2
-  echo "  Usage: bin/run-sanitizer-multi <sanitizer> <mode> <testcase> [extra args...]" >&2
-  exit 2
-fi
-if [ $# -ge 2 ] && [ ! -f "${2}" ]; then
-  echo "[run-sanitizer-multi] ERROR: testcase not found: ${2}" >&2
-  exit 2
-fi
-
-crashes=0
-executions=0
-successes=0
-diff_divergences=0
-
-# Tee to output file if requested
-_out() {
-  if [ -n "$OUTPUT_FILE" ]; then
-    echo "$@" | tee -a "$OUTPUT_FILE"
-  else
-    echo "$@"
-  fi
+VALID_SANITIZERS = {"asan", "ubsan", "msan", "tsan", "race", "runner"}
+RUNNERS = {
+    "asan": "run-asan", "race": "run-asan", "runner": "run-asan",
+    "ubsan": "run-ubsan", "msan": "run-msan", "tsan": "run-tsan",
 }
-
-# Emit one address-stable signature line per top interesting frame for $1's
-# ASan output. Empty stdout + exit 0 = no parseable crash (clean run or
-# non-ASan failure). Non-zero exit = python3 itself failed (broken module,
-# unreadable file, etc.) — caller MUST treat that as "unknown" and fall
-# back to full digest, NOT as "matches run 1". Stable across runs because
-# addresses, alloc tags, and thread ids are stripped — see
-# lib/stack_frames.py crash_signature().
-_run_signature() {
-  python3 "$_STACK_FRAMES_PY" --signature "$1" 2>/dev/null
+OPTION_NAMES = {
+    "asan": "ASAN_OPTIONS", "ubsan": "UBSAN_OPTIONS",
+    "msan": "MSAN_OPTIONS", "tsan": "TSAN_OPTIONS",
 }
+CRASH_RE = re.compile("|".join(CRASH_PATTERNS), re.MULTILINE)
+EXEC_VERIFIED_RE = re.compile(
+    r"^\[run-(?:asan|ubsan|msan|tsan)\] "
+    r"(?:browser|js|xpcshell|generic) EXECUTION VERIFIED \(post-run|"
+    r"^\[run-ubsan\] EXECUTION VERIFIED:",
+    re.MULTILINE,
+)
+EXEC_INCONCLUSIVE_RE = re.compile(
+    r"^\[run-(?:asan|ubsan|msan|tsan)\] "
+    r"(?:browser|js|xpcshell|generic) EXECUTION INCONCLUSIVE \(post-run",
+    re.MULTILINE,
+)
+DIGEST_CRASH_RE = re.compile(
+    r"ERROR: AddressSanitizer|AddressSanitizer:DEADLYSIGNAL|CRASH DETECTED|"
+    r"Hit MOZ_CRASH\(|^==[0-9]+==ABORTING|runtime error:",
+    re.MULTILINE,
+)
 
-# Resolve the helper once; fall back to full-digest behavior on every run if
-# python3 isn't reachable or the module file is missing (e.g. test harness
-# that copies this script into an isolated mock dir without lib/).
-_STACK_FRAMES_PY="$SCRIPT_DIR/../lib/stack_frames.py"
-_can_dedupe=0
-if command -v python3 >/dev/null 2>&1 && [ -f "$_STACK_FRAMES_PY" ]; then
-  _can_dedupe=1
-fi
 
-# Track signature of run 1 so we can short-circuit duplicate output for
-# matching reruns. Empty signature with `_run1_sig_ok=1` is a meaningful
-# "no crash" answer; `_run1_sig_ok=0` means we never got a clean reading
-# (parse error / missing python) — comparison must NOT match in that case.
-# `_seen_run1` distinguishes "not yet captured" from "captured empty".
-_run1_sig=""
-_run1_sig_ok=0
-_run1_crashed=0
-_seen_run1=0
+def _integer_env(name: str, default: int) -> int:
+    value = os.environ.get(name, str(default))
+    try:
+        return int(value)
+    except ValueError:
+        print(
+            f"[run-sanitizer-multi] WARN: {name} must be an integer; using {default} (got {value!r})",
+            file=sys.stderr,
+        )
+        return default
 
-# Filter known-noise lines out of stdout while leaving $OUTPUT_FILE byte-identical.
-# Filtered patterns are universally diagnostic-only in the Firefox-headless ASan
-# build: framebuffer warnings on every clean run, the shadow-bytes hex block on
-# every crash. On clean runs whose total exceeds head+tail, keep first
-# ASAN_DIGEST_HEAD + last ASAN_DIGEST_TAIL lines and elide the middle, pointing
-# at OUTPUT_FILE for the full trace. Crash runs are never truncated. Set
-# ASAN_NO_DIGEST=1 to disable both filtering and truncation. Set
-# ASAN_DIGEST_HEAD=0 or ASAN_DIGEST_TAIL=0 to disable truncation only.
-_digest_asan() {
-  local f="$1"
-  if [ -n "${SANITIZER_NO_DIGEST:-${ASAN_NO_DIGEST:-}}" ]; then cat "$f"; return; fi
 
-  local digest_head="${SANITIZER_DIGEST_HEAD:-${ASAN_DIGEST_HEAD:-80}}"
-  local digest_tail="${SANITIZER_DIGEST_TAIL:-${ASAN_DIGEST_TAIL:-120}}"
+@dataclass(frozen=True)
+class Outcome:
+    crashed: bool
+    executed: bool
+    succeeded: bool
+    signature: tuple[str, ...] | None
 
-  # Single-pass noise filter (drops headless/framebuffer chatter, elides shadow
-  # bytes block on crashes). Same awk used for both crash and clean paths.
-  local filtered_tmp
-  filtered_tmp=$(mktemp "${TMPDIR:-/tmp}/asan-digest-XXXXXXXX")
-  # The skip flag elides the shadow-bytes block. Under halt_on_error=0
-  # (ASAN_OPTS_FUZZ), one run can emit multiple ASan reports — without the
-  # explicit reset on the next ==N==ERROR header, skip stays latched after
-  # the first shadow block and the second crash's ERROR/stack/SUMMARY are
-  # silently consumed by `skip { next }` until the final ABORTING.
-  awk -v outfile="${OUTPUT_FILE:-}" '
-    /^\*\*\* You are running in headless mode\./ { next }
-    /^Crash Annotation GraphicsCriticalError:.*RenderCompositorSWGL failed mapping default framebuffer/ { next }
-    /^==[0-9]+==ERROR:/ { skip = 0 }
-    /^Shadow bytes around the buggy address:/ {
-      msg = "[Shadow bytes block elided"
-      if (outfile != "") msg = msg " — see " outfile
-      print msg "]"
-      skip = 1
-      next
-    }
-    skip && /^==[0-9]+==ABORTING/ { skip = 0; print; next }
-    skip { next }
-    { print }
-  ' "$f" > "$filtered_tmp"
 
-  # Crash detection runs against the raw input (not the filtered tmp) so a
-  # marker that the awk filter ever drops still gates the truncation path.
-  # This is deliberately NOT lib/verdict.sh's classifier: this regex gates
-  # output digest-truncation, not the audit verdict, so it is tuned for
-  # that job — it adds ^==NN==ABORTING and a bare "runtime error:" (an
-  # aborted/UBSan run should not be truncated) and omits the language-
-  # runtime fatals verdict.sh carries. Keep the two independent.
-  local has_crash=0
-  if grep -qE 'ERROR: AddressSanitizer|AddressSanitizer:DEADLYSIGNAL|CRASH DETECTED|Hit MOZ_CRASH\(|^==[0-9]+==ABORTING|runtime error:' "$f" 2>/dev/null; then
-    has_crash=1
-  fi
+class MultiRun:
+    def __init__(self, sanitizer: str, args: list[str]):
+        self.sanitizer = sanitizer
+        self.args = args
+        self.runs = int(os.environ.get("SANITIZER_RUNS", "5"))
+        self.child = SCRIPT_DIR / RUNNERS[sanitizer]
+        self.header = "ASAN_RUN_HEADER" if sanitizer == "asan" else "SANITIZER_RUN_HEADER"
+        self.output_display = os.environ.get("SAN_OUTPUT_FILE", os.environ.get("ASAN_OUTPUT_FILE", ""))
+        self.output_file = self._output_file()
+        if not self.output_display and self.output_file:
+            self.output_display = str(self.output_file)
+        self.no_digest = bool(os.environ.get("SANITIZER_NO_DIGEST"))
+        self.digest_head = _integer_env("SANITIZER_DIGEST_HEAD", 80)
+        self.digest_tail = _integer_env("SANITIZER_DIGEST_TAIL", 120)
+        sibling_frames = SCRIPT_DIR.parent / "lib" / "stack_frames.py"
+        self.stack_frames = sibling_frames if sibling_frames.is_file() else LIB_DIR / "stack_frames.py"
+        self.crashes = 0
+        self.executions = 0
+        self.successes = 0
+        self.diff_divergences = 0
 
-  # Crash path: historically passed through verbatim ("crash runs are never
-  # truncated"). That meant a stack-overflow with ~10K identical frames
-  # could emit 200+ KB, which then poisoned every later turn's cached
-  # transcript. Route through cap_output_file when (a) the helper is loaded
-  # and (b) the filtered output is past OUTCAP_MAX_BYTES. The helper keeps
-  # the ERROR header + first ~150 frames + SUMMARY + ABORTING (head 24 KB,
-  # tail 20 KB), spills the full text to disk, and leaves $OUTPUT_FILE
-  # untouched — the full trace is always recoverable from the .asan.txt
-  # file plus the spill.
-  if [ "$has_crash" -eq 1 ] || [ "$digest_head" -le 0 ] || [ "$digest_tail" -le 0 ]; then
-    if [ "$has_crash" -eq 1 ] \
-       && declare -F cap_output_file >/dev/null 2>&1 \
-       && [ "${OUTCAP_MAX_BYTES:-51200}" -gt 0 ]; then
-      local _filtered_bytes
-      _filtered_bytes=$(wc -c < "$filtered_tmp" 2>/dev/null | tr -d ' ')
-      _filtered_bytes=${_filtered_bytes:-0}
-      if [ "$_filtered_bytes" -gt "${OUTCAP_MAX_BYTES:-51200}" ]; then
-        cap_output_file "$filtered_tmp" asan-crash
-        rm -f "$filtered_tmp"
-        return
-      fi
-    fi
-    cat "$filtered_tmp"
-    rm -f "$filtered_tmp"
-    return
-  fi
+    def _output_file(self) -> Path | None:
+        configured = os.environ.get("SAN_OUTPUT_FILE", os.environ.get("ASAN_OUTPUT_FILE", ""))
+        if configured:
+            return Path(configured)
+        optional = os.environ.get("SAN_OUTPUT_FILE_OPTIONAL", os.environ.get("ASAN_OUTPUT_FILE_OPTIONAL", ""))
+        if optional:
+            return None
+        testcase = self.args[1] if len(self.args) > 1 else ""
+        if not testcase:
+            raise ValueError("cannot derive output file - pass a testcase or use bin/probe")
+        path = Path(testcase)
+        return path.with_suffix(".asan.txt") if path.suffix else Path(f"{path}.asan.txt")
 
-  local total
-  total=$(wc -l < "$filtered_tmp" 2>/dev/null | tr -d ' ')
-  total=${total:-0}
-  if [ "$total" -le $((digest_head + digest_tail)) ]; then
-    cat "$filtered_tmp"
-    rm -f "$filtered_tmp"
-    return
-  fi
+    def emit(self, message: str = "") -> None:
+        print(message)
+        if self.output_file:
+            with self.output_file.open("a", encoding="utf-8") as stream:
+                stream.write(message + "\n")
 
-  local elided=$((total - digest_head - digest_tail))
-  head -n "$digest_head" "$filtered_tmp"
-  if [ -n "${OUTPUT_FILE:-}" ]; then
-    printf '[run-sanitizer-multi] DIGEST: clean run, %d middle line(s) elided (showing first %d + last %d) — full output in %s. Override: ASAN_DIGEST_HEAD/ASAN_DIGEST_TAIL or ASAN_NO_DIGEST=1.\n' \
-      "$elided" "$digest_head" "$digest_tail" "$OUTPUT_FILE"
-  else
-    printf '[run-sanitizer-multi] DIGEST: clean run, %d middle line(s) elided (showing first %d + last %d). Override: ASAN_DIGEST_HEAD/ASAN_DIGEST_TAIL or ASAN_NO_DIGEST=1.\n' \
-      "$elided" "$digest_head" "$digest_tail"
-  fi
-  tail -n "$digest_tail" "$filtered_tmp"
-  rm -f "$filtered_tmp"
-}
+    def seed_output(self) -> None:
+        if not self.output_file:
+            return
+        self.output_file.parent.mkdir(parents=True, exist_ok=True)
+        option_name = OPTION_NAMES.get(self.sanitizer, "")
+        option_value = os.environ.get(option_name, "") if option_name else ""
+        encoded = base64.b64encode(option_value.encode()).decode() if option_value else ""
+        testcase = os.environ.get(
+            "SANITIZER_RECORDED_TESTCASE",
+            os.environ.get("ASAN_RECORDED_TESTCASE", self.args[1] if len(self.args) > 1 else "?"),
+        )
+        started = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.output_file.write_text(
+            f"{self.header}: sanitizer={self.sanitizer} runs={self.runs} "
+            f"mode={self.args[0] if self.args else '?'} testcase={testcase} "
+            f"env_options_b64={encoded} started={started}\n"
+        )
 
-# Budget accounting — when the audit harness sets ASAN_RUN_COUNTER_FILE and
-# ASAN_RUN_BUDGET, increment a per-iteration run counter (each invocation
-# = one logical "exploration block," regardless of RUNS). Print a budget
-# line the agent can see so it can self-throttle. Enforcement is soft:
-# we do NOT refuse to run when over budget — the signal is enough; hard
-# blocking would corrupt in-flight testcases.
-_RUN_COUNTER_FILE="${SANITIZER_RUN_COUNTER_FILE:-${ASAN_RUN_COUNTER_FILE:-}}"
-_RUN_BUDGET="${SANITIZER_RUN_BUDGET:-${ASAN_RUN_BUDGET:-}}"
-if [ -n "$_RUN_COUNTER_FILE" ]; then
-  mkdir -p "$(dirname "$_RUN_COUNTER_FILE")" 2>/dev/null || true
-  prev_budget=0
-  if [ -f "$_RUN_COUNTER_FILE" ]; then
-    prev_budget=$(cat "$_RUN_COUNTER_FILE" 2>/dev/null || echo 0)
-    prev_budget=${prev_budget//[^0-9]/}
-    : "${prev_budget:=0}"
-  fi
-  cur_budget=$((prev_budget + 1))
-  printf '%s' "$cur_budget" > "$_RUN_COUNTER_FILE"
-  if [ -n "$_RUN_BUDGET" ] && [ "$_RUN_BUDGET" -gt 0 ] 2>/dev/null; then
-    _out "[run-sanitizer-multi] BUDGET: ${cur_budget}/${_RUN_BUDGET} sanitizer invocations used this iteration"
-    if [ "$cur_budget" -gt "$_RUN_BUDGET" ]; then
-      _out "[run-sanitizer-multi] BUDGET: EXCEEDED — stop opening new hypotheses; wrap up the current one and exit"
-    fi
-  else
-    _out "[run-sanitizer-multi] BUDGET: ${cur_budget} sanitizer invocation(s) this iteration"
-  fi
-fi
+    def coverage_gate(self) -> int | None:
+        mode = self.args[0] if self.args else "browser"
+        if not os.environ.get("WANT") or os.environ.get("SKIP_COVERAGE_GATE") or mode not in {"browser", "js"}:
+            return None
+        hits = SCRIPT_DIR / "hits"
+        testcase = self.args[1] if len(self.args) > 1 else ""
+        if not os.access(hits, os.X_OK) or not testcase or not Path(testcase).is_file():
+            return None
+        command = [
+            str(hits), "--testcase", testcase, "--want", os.environ["WANT"],
+            "--mode", mode, "--timeout", os.environ.get("HITS_TIMEOUT", os.environ.get("COV_TIMEOUT", "20")),
+        ]
+        if os.environ.get("HITS_LOG_PATH"):
+            command.extend(("--log", os.environ["HITS_LOG_PATH"]))
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        output = completed.stdout + completed.stderr
+        print(output, end="")
+        closest_match = re.search(r"^(?:MISSED . closest reached: |EXEC_FAIL|NO_COVERAGE:? ?)(.*)$", output, re.MULTILINE)
+        closest = (closest_match.group(1) if closest_match else f"hits exited {completed.returncode}")[:200]
+        if completed.returncode == 1:
+            self.emit(f"COVERAGE_GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
+            self._record_coverage_miss(testcase, mode, closest)
+            print(f"[run-sanitizer-multi] COVERAGE GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
+            return 1
+        if completed.returncode:
+            label = "COVERAGE_EXEC_FAIL" if completed.returncode == 3 else "COVERAGE_ENV_FAIL"
+            os.environ["HITS_VERDICT"] = label
+            self.emit(f"COVERAGE_GATE: {label} - ASan proceeding ungated (hits rc={completed.returncode}; {closest})")
+            print(f"[run-sanitizer-multi] COVERAGE GATE: {label} - proceeding to ASan ungated (hits rc={completed.returncode}; {closest})")
+        else:
+            hit = re.search(r"^HIT: (.*)$", output, re.MULTILINE)
+            os.environ["CLOSEST_FRAME"] = (hit.group(1) if hit else "")[:200]
+            os.environ["HITS_VERDICT"] = "HIT"
+            print("[run-sanitizer-multi] COVERAGE GATE: HIT - proceeding to ASan")
+        return None
 
-for i in $(seq 1 "$RUNS"); do
-  _out "=== Run $i/$RUNS ==="
-  run_tmp="$(mktemp "${TMPDIR:-/tmp}/sanitizer-multi-run-XXXXXXXX")"
-  "$SCRIPT_DIR/$CHILD_RUNNER" "$@" >"$run_tmp" 2>&1 || true
+    def _record_coverage_miss(self, testcase: str, mode: str, closest: str) -> None:
+        log = os.environ.get("TRIED_INPUTS_LOG")
+        if not log:
+            return
+        destination = Path(log)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha1(Path(testcase).read_bytes()).hexdigest()[:12]
+        with destination.open("a") as stream:
+            stream.write(
+                f"{now()} verdict=NO_HIT mode={mode} testcase={testcase} hash={digest} "
+                f"hypothesis={os.environ.get('HYPOTHESIS_ID', '?')} "
+                f"target={os.environ.get('TARGET', '?')} closest={closest or '<none>'}\n"
+            )
 
-  if [ -n "$OUTPUT_FILE" ]; then
-    cat "$run_tmp" >> "$OUTPUT_FILE"
-  fi
+    def account_budget(self) -> None:
+        counter_name = os.environ.get("SANITIZER_RUN_COUNTER_FILE", "")
+        if not counter_name:
+            return
+        counter = Path(counter_name)
+        counter.parent.mkdir(parents=True, exist_ok=True)
+        previous_text = counter.read_text(errors="ignore") if counter.is_file() else ""
+        digits = "".join(ch for ch in previous_text if ch.isdigit())
+        current = int(digits or 0) + 1
+        counter.write_text(str(current))
+        budget_text = os.environ.get("SANITIZER_RUN_BUDGET", "")
+        budget = int(budget_text) if budget_text.isdigit() else 0
+        if budget:
+            self.emit(f"[run-sanitizer-multi] BUDGET: {current}/{budget} sanitizer invocations used this iteration")
+            if current > budget:
+                self.emit("[run-sanitizer-multi] BUDGET: EXCEEDED - stop opening new hypotheses; wrap up the current one and exit")
+        else:
+            self.emit(f"[run-sanitizer-multi] BUDGET: {current} sanitizer invocation(s) this iteration")
 
-  # Check for crash. Prefer the sanitizer-neutral classifier in
-  # lib/verdict.sh (catches ASan/UBSan/MSan/TSan plus Go-race / Rust-panic /
-  # language-runtime fatals identically). Fall back to the legacy ASan grep
-  # only when verdict.sh wasn't sourceable (isolated mock-bin test).
-  this_crashed=0
-  this_executed=0
-  this_success=0
-  if [ "$_verdict_loaded" -eq 1 ]; then
-    if verdict_file_has_crash "$run_tmp"; then
-      crashes=$((crashes + 1))
-      this_crashed=1
-    fi
-  elif grep -q "CRASH DETECTED" "$run_tmp" || grep -qE 'ERROR: AddressSanitizer|Hit MOZ_CRASH\(' "$run_tmp"; then
-    crashes=$((crashes + 1))
-    this_crashed=1
-  fi
-  # Check for wrapper-issued post-run execution evidence (any sanitizer's
-  # single-shot runner). VERIFIED means the child runner completed cleanly
-  # (rc=0); INCONCLUSIVE means the target still ran but returned non-zero. Do
-  # not trust raw TESTCASE_EXECUTED from testcase stdout; it can be printed
-  # before an early non-sanitizer failure and would poison CLEAN accounting.
-  if grep -Eq '^\[run-(asan|ubsan|msan|tsan)\] (browser|js|xpcshell|generic) EXECUTION VERIFIED \(post-run' "$run_tmp" \
-     || grep -Eq '^\[run-ubsan\] EXECUTION VERIFIED:' "$run_tmp"; then
-    executions=$((executions + 1))
-    successes=$((successes + 1))
-    this_executed=1
-    this_success=1
-  elif grep -Eq '^\[run-(asan|ubsan|msan|tsan)\] (browser|js|xpcshell|generic) EXECUTION INCONCLUSIVE \(post-run' "$run_tmp"; then
-    executions=$((executions + 1))
-    this_executed=1
-  fi
-  # A recognized runtime/sanitizer diagnostic proves the target reached the
-  # relevant runner even if it aborts before a post-run marker is printed.
-  if [ "$this_crashed" -eq 1 ] && [ "$this_executed" -eq 0 ]; then
-    executions=$((executions + 1))
-    this_executed=1
-  fi
+    def classify(self, data: bytes) -> Outcome:
+        text = data.decode(errors="replace")
+        crashed = CRASH_RE.search(text) is not None
+        succeeded = EXEC_VERIFIED_RE.search(text) is not None
+        executed = succeeded or EXEC_INCONCLUSIVE_RE.search(text) is not None or crashed
+        signature = self._signature(data)
+        return Outcome(crashed, executed, succeeded, signature)
 
-  # Compute address-stable crash signature so reruns can be summarized
-  # against run 1 instead of re-emitting full ~50 KB stacks. ASan output
-  # is ~50 KB per crash run, so 5× would otherwise put 200–300 KB into the
-  # agent's transcript on every `--confirm`. The dedup only fires when
-  # (a) we got a clean signature reading from BOTH this run and run 1,
-  # (b) crash status matches run 1, AND (c) the top-3 interesting frames
-  # match. Divergent reruns still get a full digest because they actually
-  # carry new information.
-  #
-  # If python3 itself fails (broken stack_frames.py, missing python),
-  # `this_sig_ok=0` and we fail-closed by emitting the full digest — never
-  # treat a parsing failure as "matches run 1", because that would silently
-  # hide real divergence behind a misleading VERIFIED line on stdout while
-  # the raw $OUTPUT_FILE truth remains hidden from the agent's transcript.
-  #
-  # Set ASAN_NO_DIGEST=1 to disable. _can_dedupe=0 (python3 unavailable or
-  # lib/stack_frames.py missing — e.g. isolated test harnesses) also keeps
-  # the original full-digest-every-run behavior.
-  this_sig=""
-  this_sig_ok=0
-  if [ "$_can_dedupe" -eq 1 ]; then
-    if this_sig=$(_run_signature "$run_tmp"); then
-      this_sig_ok=1
-    fi
-  fi
+    def _signature(self, data: bytes) -> tuple[str, ...] | None:
+        if not self.stack_frames.is_file():
+            return None
+        with tempfile.NamedTemporaryFile() as report:
+            report.write(data)
+            report.flush()
+            completed = subprocess.run(
+                [sys.executable, str(self.stack_frames), "--signature", report.name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode:
+            return None
+        return tuple(completed.stdout.splitlines())
 
-  if [ "$_seen_run1" -eq 0 ]; then
-    # Run 1: full digest, capture baseline.
-    _digest_asan "$run_tmp"
-    _run1_sig="$this_sig"
-    _run1_sig_ok="$this_sig_ok"
-    _run1_crashed="$this_crashed"
-    _run1_executed="$this_executed"
-    _run1_success="$this_success"
-    _seen_run1=1
-  elif [ "$_can_dedupe" -eq 0 ] || [ -n "${SANITIZER_NO_DIGEST:-${ASAN_NO_DIGEST:-}}" ]; then
-    # Dedup unavailable or user opted out — emit unconditionally.
-    _digest_asan "$run_tmp"
-  elif [ "$this_sig_ok" -eq 0 ] || [ "$_run1_sig_ok" -eq 0 ]; then
-    # Either run had a parsing failure — fail closed with full digest.
-    _digest_asan "$run_tmp"
-  elif [ "$this_crashed" = "$_run1_crashed" ] \
-       && [ "$this_executed" = "$_run1_executed" ] \
-       && [ "$this_success" = "$_run1_success" ] \
-       && [ "$this_sig" = "$_run1_sig" ]; then
-    # Matches run 1 — short summary instead of dumping the full stack again.
-    if [ "$this_crashed" = "1" ]; then
-      # Show the first stable frame so the agent can eyeball the match.
-      _first_frame=$(printf '%s\n' "$_run1_sig" | head -n 1)
-      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: VERIFIED — same crash signature as run 1 (${_first_frame})"
-    elif [ "$this_success" = "1" ]; then
-      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: VERIFIED — clean (matches run 1)"
-    elif [ "$this_executed" = "1" ]; then
-      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: REPEATED — execution failed (matches run 1)"
-    else
-      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: REPEATED — no execution evidence (matches run 1)"
-    fi
-  else
-    # Divergent — full digest. The divergence itself is information
-    # (timing-dependent UAF, intermittent OOB, JIT correctness flake, …).
-    if [ "$this_crashed" = "1" ] && [ "$_run1_crashed" = "0" ]; then
-      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: DIVERGED — crashed where run 1 was clean"
-    elif [ "$this_crashed" = "0" ] && [ "$_run1_crashed" = "1" ]; then
-      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: DIVERGED — clean where run 1 crashed"
-    elif [ "$this_success" != "$_run1_success" ]; then
-      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: DIVERGED — clean-exit status differs from run 1"
-    elif [ "$this_executed" != "$_run1_executed" ]; then
-      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: DIVERGED — execution evidence differs from run 1"
-    else
-      _out "[run-sanitizer-multi] Run ${i}/${RUNS}: DIVERGED — different crash signature than run 1"
-    fi
-    _digest_asan "$run_tmp"
-  fi
+    def digest(self, data: bytes) -> bytes:
+        if self.no_digest:
+            return data
+        lines = data.decode(errors="replace").splitlines(keepends=True)
+        filtered: list[str] = []
+        skip_shadow = False
+        for line in lines:
+            if line.startswith("*** You are running in headless mode.") or (
+                line.startswith("Crash Annotation GraphicsCriticalError:")
+                and "RenderCompositorSWGL failed mapping default framebuffer" in line
+            ):
+                continue
+            if re.match(r"^==[0-9]+==ERROR:", line):
+                skip_shadow = False
+            if line.startswith("Shadow bytes around the buggy address:"):
+                suffix = f" - see {self.output_display}" if self.output_file else ""
+                filtered.append(f"[Shadow bytes block elided{suffix}]\n")
+                skip_shadow = True
+                continue
+            if skip_shadow and re.match(r"^==[0-9]+==ABORTING", line):
+                skip_shadow = False
+                filtered.append(line)
+                continue
+            if not skip_shadow:
+                filtered.append(line)
+        result = "".join(filtered).encode()
+        if DIGEST_CRASH_RE.search(data.decode(errors="replace")):
+            try:
+                return cap_output_bytes(result, "asan-crash")
+            except ValueError:
+                return result
+        head = self.digest_head
+        tail = self.digest_tail
+        if head <= 0 or tail <= 0 or len(filtered) <= head + tail:
+            return result
+        elided = len(filtered) - head - tail
+        location = f" - full output in {self.output_display}" if self.output_file else ""
+        marker = (
+            f"[run-sanitizer-multi] DIGEST: clean run, {elided} middle line(s) elided "
+            f"(showing first {head} + last {tail}){location}. Override: "
+            "SANITIZER_DIGEST_HEAD/SANITIZER_DIGEST_TAIL or SANITIZER_NO_DIGEST=1.\n"
+        )
+        return "".join(filtered[:head] + [marker] + filtered[-tail:]).encode()
 
-  rm -f "$run_tmp"
-  _out ""
-done
+    def append_raw(self, data: bytes) -> None:
+        if self.output_file:
+            with self.output_file.open("ab") as stream:
+                stream.write(data)
 
-_out "=== SUMMARY ==="
-_out "CRASH_RATE: ${crashes}/${RUNS}"
-_out "[run-sanitizer-multi] EXECUTION_RATE: ${executions}/${RUNS}"
-_out "[run-sanitizer-multi] SUCCESS_RATE: ${successes}/${RUNS}"
+    def run_repetitions(self) -> None:
+        baseline: Outcome | None = None
+        for index in range(1, self.runs + 1):
+            self.emit(f"=== Run {index}/{self.runs} ===")
+            completed = subprocess.run([str(self.child), *self.args], capture_output=True, check=False)
+            data = completed.stdout + completed.stderr
+            self.append_raw(data)
+            outcome = self.classify(data)
+            self.crashes += int(outcome.crashed)
+            self.executions += int(outcome.executed)
+            self.successes += int(outcome.succeeded)
+            if baseline is None:
+                sys.stdout.flush()
+                sys.stdout.buffer.write(self.digest(data))
+                baseline = outcome
+            elif outcome.signature is None or baseline.signature is None:
+                sys.stdout.flush()
+                sys.stdout.buffer.write(self.digest(data))
+            elif self.no_digest or outcome != baseline:
+                if outcome != baseline:
+                    if outcome.crashed and not baseline.crashed:
+                        self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - crashed where run 1 was clean")
+                    elif not outcome.crashed and baseline.crashed:
+                        self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - clean where run 1 crashed")
+                    else:
+                        self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - result differs from run 1")
+                sys.stdout.flush()
+                sys.stdout.buffer.write(self.digest(data))
+            elif outcome.crashed:
+                first = outcome.signature[0] if outcome.signature else "no stable frame"
+                self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: VERIFIED — same crash signature as run 1 ({first})")
+            elif outcome.succeeded:
+                self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: VERIFIED - clean (matches run 1)")
+            elif outcome.executed:
+                self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: REPEATED - execution failed (matches run 1)")
+            else:
+                self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: REPEATED - no execution evidence (matches run 1)")
+            self.emit()
 
-# ── Auto-differential testing (Strategy S4 baked in) ──────────────
-# For js and xpcshell modes, automatically run a differential check
-# (--ion-eager vs --no-ion) on every testcase. This catches JIT value
-# corruption that ASan cannot see. Costs ~2 extra js shell invocations
-# (~1s each) — negligible compared to the ASan run itself.
-# ASan-only: js-diff is a SpiderMonkey JIT differential the other sanitizers
-# do not participate in (and it shells out to run-asan). Gating on $SAN keeps
-# today's behavior — only ASan js/xpcshell ever reached this block.
-diff_mode="${1:-}"
-diff_testcase="${2:-}"
-if [ "$SAN" = "asan" ] \
-   && { [ "$diff_mode" = "js" ] || [ "$diff_mode" = "xpcshell" ]; } \
-   && [ -n "$diff_testcase" ] && [ -f "$diff_testcase" ] \
-   && [ "$crashes" -eq 0 ] \
-   && [ "$executions" -gt 0 ]; then
-  _out ""
-  _out "=== AUTO-DIFFERENTIAL (--ion-eager vs --no-ion) ==="
-  _diff_tmp="$(mktemp "${TMPDIR:-/tmp}/asan-5x-diff-XXXXXXXX")"
-  "$SCRIPT_DIR/run-asan" js-diff "$diff_testcase" >"$_diff_tmp" 2>&1 || true
-  # Check for divergence
-  if grep -q "outputs DIFFER" "$_diff_tmp" 2>/dev/null; then
-    _out "[run-sanitizer-multi] AUTO-DIFF: DIVERGENCE DETECTED — potential JIT correctness issue"
-    [ -n "$OUTPUT_FILE" ] && cat "$_diff_tmp" >> "$OUTPUT_FILE"
-    _digest_asan "$_diff_tmp"
-    diff_divergences=$((diff_divergences + 1))
-  elif grep -q "ERROR: AddressSanitizer" "$_diff_tmp" 2>/dev/null; then
-    _out "[run-sanitizer-multi] AUTO-DIFF: ASan crash in differential mode!"
-    [ -n "$OUTPUT_FILE" ] && cat "$_diff_tmp" >> "$OUTPUT_FILE"
-    _digest_asan "$_diff_tmp"
-    crashes=$((crashes + 1))
-  else
-    _out "[run-sanitizer-multi] AUTO-DIFF: outputs match (no JIT divergence)"
-  fi
-  rm -f "$_diff_tmp"
-fi
+    def auto_diff(self) -> None:
+        mode = self.args[0] if self.args else ""
+        testcase = self.args[1] if len(self.args) > 1 else ""
+        if self.sanitizer != "asan" or mode not in {"js", "xpcshell"} or not Path(testcase).is_file() or self.crashes or not self.executions:
+            return
+        self.emit("\n=== AUTO-DIFFERENTIAL (--ion-eager vs --no-ion) ===")
+        completed = subprocess.run([str(SCRIPT_DIR / "run-asan"), "js-diff", testcase], capture_output=True, check=False)
+        data = completed.stdout + completed.stderr
+        if b"outputs DIFFER" in data:
+            self.emit("[run-sanitizer-multi] AUTO-DIFF: DIVERGENCE DETECTED - potential JIT correctness issue")
+            self.append_raw(data)
+            sys.stdout.buffer.write(self.digest(data))
+            self.diff_divergences += 1
+        elif b"ERROR: AddressSanitizer" in data:
+            self.emit("[run-sanitizer-multi] AUTO-DIFF: ASan crash in differential mode!")
+            self.append_raw(data)
+            sys.stdout.buffer.write(self.digest(data))
+            self.crashes += 1
+        else:
+            self.emit("[run-sanitizer-multi] AUTO-DIFF: outputs match (no JIT divergence)")
 
-# Append-only memory of every testcase this agent has run. Keyed on
-# (testcase, mode) so the agent can check `grep -F <tc>` before
-# rewriting a variant it already tried and got the same verdict. Log
-# survives context compression. Caller sets TRIED_INPUTS_LOG to the
-# per-agent path; bin/audit provides it in agent env.
-if [ -n "${TRIED_INPUTS_LOG:-}" ]; then
-  mkdir -p "$(dirname "$TRIED_INPUTS_LOG")" 2>/dev/null || true
-  verdict="CLEAN"
-  [ "$crashes" -gt 0 ] && verdict="CRASH"
-  [ "$crashes" -eq 0 ] && [ "$diff_divergences" -gt 0 ] && verdict="DIFF"
-  [ "$crashes" -eq 0 ] && [ "$executions" -eq 0 ] && verdict="NO_EXEC"
-  [ "$crashes" -eq 0 ] && [ "$diff_divergences" -eq 0 ] && [ "$executions" -gt 0 ] && [ "$successes" -eq 0 ] && verdict="EXEC_FAIL"
-  # Hash the testcase bytes so the agent can tell a literal rerun apart
-  # from a textual variant even if the path is the same.
-  tc_hash="?"
-  if [ -f "${2:-/dev/null}" ]; then
-    tc_hash="$(audit_sha1 "$2" 2>/dev/null | awk '{print $1}')"
-  fi
-  # Extra fields (hypothesis/target/closest_frame) let post-compression
-  # log reads decide without reopening the testcase.
-  printf '%s verdict=%s mode=%s testcase=%s hash=%s runs=%d crashes=%d execs=%d hypothesis=%s target=%q closest=%q hits_verdict=%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$verdict" "${1:-?}" "${2:-?}" \
-    "${tc_hash:0:12}" "$RUNS" "$crashes" "$executions" \
-    "${HYPOTHESIS_ID:-?}" "${TARGET:-?}" "${CLOSEST_FRAME:-<none>}" \
-    "${HITS_VERDICT:-?}" \
-    >> "$TRIED_INPUTS_LOG"
-fi
+    def record_tried(self) -> None:
+        configured = os.environ.get("TRIED_INPUTS_LOG")
+        if not configured:
+            return
+        testcase = self.args[1] if len(self.args) > 1 else ""
+        digest = hashlib.sha1(Path(testcase).read_bytes()).hexdigest()[:12] if Path(testcase).is_file() else "?"
+        verdict = "CRASH" if self.crashes else "DIFF" if self.diff_divergences else "NO_EXEC" if not self.executions else "EXEC_FAIL" if not self.successes else "CLEAN"
+        destination = Path(configured)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("a") as stream:
+            stream.write(
+                f"{now()} verdict={verdict} mode={self.args[0] if self.args else '?'} testcase={testcase or '?'} "
+                f"hash={digest} runs={self.runs} crashes={self.crashes} execs={self.executions} "
+                f"hypothesis={os.environ.get('HYPOTHESIS_ID', '?')} target={os.environ.get('TARGET', '?')} "
+                f"closest={os.environ.get('CLOSEST_FRAME', '<none>')} hits_verdict={os.environ.get('HITS_VERDICT', '?')}\n"
+            )
 
-if [ "$crashes" -gt 0 ]; then
-  _out "[run-sanitizer-multi] CRASHES FOUND: ${crashes}/${RUNS} runs crashed"
-  exit 1
-elif [ "$diff_divergences" -gt 0 ]; then
-  _out "[run-sanitizer-multi] DIFFERENTIAL FINDING: ${diff_divergences} divergent js-diff check(s)"
-  exit 1
-elif [ "$executions" -eq 0 ]; then
-  _out "[run-sanitizer-multi] WARNING: testcase may not have executed in any run"
-  exit 2
-elif [ "$successes" -eq 0 ]; then
-  _out "[run-sanitizer-multi] EXECUTION FAILED in ${RUNS} runs (${executions} reached target, 0 completed cleanly)"
-  exit 1
-else
-  _out "[run-sanitizer-multi] NO CRASHES in ${RUNS} runs (${successes} completed cleanly, ${executions} reached target)"
-fi
+    def finish(self) -> int:
+        self.emit("=== SUMMARY ===")
+        self.emit(f"CRASH_RATE: {self.crashes}/{self.runs}")
+        self.emit(f"[run-sanitizer-multi] EXECUTION_RATE: {self.executions}/{self.runs}")
+        self.emit(f"[run-sanitizer-multi] SUCCESS_RATE: {self.successes}/{self.runs}")
+        self.auto_diff()
+        self.record_tried()
+        if self.crashes:
+            self.emit(f"[run-sanitizer-multi] CRASHES FOUND: {self.crashes}/{self.runs} runs crashed")
+            return 1
+        if self.diff_divergences:
+            self.emit(f"[run-sanitizer-multi] DIFFERENTIAL FINDING: {self.diff_divergences} divergent js-diff check(s)")
+            return 1
+        if not self.executions:
+            self.emit("[run-sanitizer-multi] WARNING: testcase may not have executed in any run")
+            return 2
+        if not self.successes:
+            self.emit(f"[run-sanitizer-multi] EXECUTION FAILED in {self.runs} runs ({self.executions} reached target, 0 completed cleanly)")
+            return 1
+        self.emit(f"[run-sanitizer-multi] NO CRASHES in {self.runs} runs ({self.successes} completed cleanly, {self.executions} reached target)")
+        return 0
+
+
+def now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        print("[run-sanitizer-multi] ERROR: sanitizer argument required.", file=sys.stderr)
+        return 2
+    sanitizer_name, *args = argv
+    if sanitizer_name not in VALID_SANITIZERS:
+        print(f"[run-sanitizer-multi] ERROR: unknown sanitizer '{sanitizer_name}' (want asan|ubsan|msan|tsan|race|runner).", file=sys.stderr)
+        return 2
+    if not args:
+        print("[run-sanitizer-multi] ERROR: mode argument required.", file=sys.stderr)
+        return 2
+    if len(args) >= 2 and not Path(args[1]).is_file():
+        print(f"[run-sanitizer-multi] ERROR: testcase not found: {args[1]}", file=sys.stderr)
+        return 2
+    try:
+        run = MultiRun(sanitizer_name, args)
+    except (ValueError, OSError) as exc:
+        print(f"[run-sanitizer-multi] ERROR: {exc}", file=sys.stderr)
+        return 2
+    run.seed_output()
+    coverage_status = run.coverage_gate()
+    if coverage_status is not None:
+        return coverage_status
+    run.account_budget()
+    run.run_repetitions()
+    return run.finish()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

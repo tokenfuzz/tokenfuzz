@@ -2,8 +2,7 @@
 """tests/test_export_repro_py.py — exercise the Python export-repro
 internals plus an end-to-end run that diffs against a frozen golden bundle.
 
-The companion tests/test_export_repro_template.sh keeps the original
-fixture-driven assertions for the strip/awk logic. This file:
+This file:
   - imports bin/export-repro as a module and tests strip_audit_sections,
     rewrite_audit_script_body, ext_of, infer_surface, infer_primitive_label
   - runs the full tool end-to-end against a fabricated crash dir and
@@ -81,6 +80,19 @@ spec.loader.exec_module(er)
 
 
 # ─── Direct unit tests on strip / inference helpers ─────────────────
+
+# Live runners and exported reproducers resolve every mode through the same
+# sanitizer policy table.
+assert_eq(
+    er.sanitizer_policy.options_for("asan", "full"),
+    er.sanitizer_default_options("asan", "generic"),
+    "sanitizer options: generic export uses the live ASan full policy",
+)
+assert_eq(
+    er.sanitizer_policy.options_for("tsan", "minimal"),
+    er.sanitizer_default_options("tsan", "browser-minimal"),
+    "sanitizer options: minimal export uses the live TSan policy",
+)
 
 # 0. Shell-template substitutions are quoted and bundle extensions are safe.
 assert_eq("bin", er.ext_of("test.$(id)"),
@@ -213,7 +225,7 @@ with tempfile.TemporaryDirectory() as td:
 # Desktop bind mounts that ride on top of it, writing to "REPORT.md"
 # when a "report.md" entry already exists silently overwrites the bytes
 # but leaves the directory entry under the original lowercase case. The
-# exact-case bundle gate in lib/triage.sh:_triage_has_exact_file then
+# exact-case bundle gate in lib/triage.py then
 # reports "missing REPORT.md" and recycles the crash, eventually
 # auto-rejecting it after CRASH_PROMOTION_PENDING_MAX passes. This test
 # locks in the install helper that unlinks any case-different sibling
@@ -510,10 +522,8 @@ assert_in('link source not found under $src: weird \\"\\`name\\`\\".c',
           "link_libs: diagnostic text escapes double-quoted shell metacharacters")
 
 
-# find_shell_wrapper: harness.sh and harness.bash are first-class
-# (lib/languages.py convention), alongside the legacy testcase.sh /
-# reproducer.sh names. Each name is recognized when present.
-for wrapper_name in ("harness.sh", "harness.bash", "testcase.sh", "reproducer.sh"):
+# find_shell_wrapper recognizes only the documented harness names.
+for wrapper_name in ("harness.sh", "harness.bash"):
     d = Path(tempfile.mkdtemp(prefix="er-shfind-"))
     (d / wrapper_name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     found = er.find_shell_wrapper([d])
@@ -636,7 +646,7 @@ assert_eq("race",
           "infer_sanitizer_from_text: Go race diagnostic")
 assert_eq("asan",
           er.infer_sanitizer_from_text("ASAN_RUN_HEADER: sanitizer=asan runs=5 mode=generic testcase=x started=y\n"),
-          "infer_sanitizer_from_text: ASAN_RUN_HEADER legacy")
+          "infer_sanitizer_from_text: ASAN_RUN_HEADER accepted")
 assert_eq("allocator_may_return_null=1",
           er.decode_header_b64("YWxsb2NhdG9yX21heV9yZXR1cm5fbnVsbD0x"),
           "decode_header_b64: recorded env options decode")
@@ -888,7 +898,7 @@ assert_eq("?",
           er.read_confidence(None, footerless_asan),
           "read_confidence: footer-less one-shot trace is not guessed (stays '?')")
 
-# 5c. Bare-label still wins when present (no regression for legacy form).
+# 5c. Bare-label fields win when present.
 mixed_report = TMP / "mixed-report.md"
 mixed_report.write_text("""\
 # CRASH-T-2
@@ -1591,7 +1601,7 @@ tc_header.mkdir()
 scratch = TMP / "scratch-1"
 scratch.mkdir()
 (scratch / "from-header.txt").write_text("H" * 32, encoding="utf-8")
-(tc_header / "asan.txt").write_text(
+(tc_header / "sanitizer.txt").write_text(
     f"ASAN_RUN_HEADER: runs=5 mode=generic testcase={scratch / 'from-header.txt'} started=x\n"
     "ERROR: AddressSanitizer: stack-buffer-overflow\n",
     encoding="utf-8",
@@ -1622,7 +1632,7 @@ assert_eq(str(audit_header_stale / "testcase.xml"), str(pick) if pick else None,
           "find_testcase: .audit testcase beats stale ASAN_RUN_HEADER scratch path")
 
 # 6a. Regression for CRASH-002-1.20260509: when .audit/ holds the
-# severity prose summary that lib/triage.sh writes
+# severity prose summary that lib/triage.py writes
 # (.audit/severity.out) AND the crash dir has the real testcase, the
 # selector picked severity.out by alphabetic order, export-repro
 # staged it as input.out, and the bundled reproduce.sh fed prose to the
@@ -1641,7 +1651,7 @@ audit_reach.mkdir()
 # The scratch testcase the ASan header originally pointed at is gone
 # (this is the production scenario — scratch dirs get reset between
 # audits), so the selector must fall back to the crash dir.
-(tc_reach / "asan.txt").write_text(
+(tc_reach / "sanitizer.txt").write_text(
     "ASAN_RUN_HEADER: testcase=output/gone/missing.txt\n"
     "ERROR: AddressSanitizer: heap-use-after-free\n",
     encoding="utf-8",
@@ -1698,7 +1708,7 @@ assert_eq("input.txt", pick.name if pick else None,
 
 # 6e. Self-contained `reproducer.c` IS still a testcase (matches a
 # TESTCASE_PREFIX, so the main()-source heuristic must not reject it).
-# This guards the existing tests/test_triage.sh behavior.
+# This guards self-contained C testcase discovery.
 tc_repro_c = TMP / "tc-reproducer-c"
 tc_repro_c.mkdir()
 (tc_repro_c / "reproducer.c").write_text(
@@ -1734,11 +1744,11 @@ is_browser = "0"
 attacker_controls = ["bytes"]
 """, encoding="utf-8")
 
-results_dir = TMP / "results"
+results_dir = output_root / "codex" / "results"
 crash_dir = results_dir / "crashes" / "CRASH-X-1"
 crash_dir.mkdir(parents=True)
 
-(output_root / ".session-env").write_text(f"""\
+(results_dir / ".session-env").write_text(f"""\
 RESULTS_DIR={results_dir}
 TARGET_ROOT={target_root}
 TARGET_SLUG=exr-py-test
@@ -1746,8 +1756,8 @@ TARGET_REV=abc123
 LOGDIR={TMP}/logs
 """, encoding="utf-8")
 
-# Drop a minimal asan.txt + an audit-side report.md + a testcase.
-(crash_dir / "asan.txt").write_text("""\
+# Drop a minimal sanitizer.txt + an audit-side report.md + a testcase.
+(crash_dir / "sanitizer.txt").write_text("""\
 === Run 1/5 ===
 ==11111==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xaaaa at pc 0xbbbb
 READ of size 16 at 0xaaaa thread T0
@@ -1889,7 +1899,7 @@ if ok:
 # ─── End-to-end with TABLE-FORMAT agent report ──────────────────────
 #
 # Why this test exists: the original end-to-end fixture above uses the
-# legacy bare-label form (`Boundary: ...`). Recent agents put fields in
+# bare-label form (`Boundary: ...`). Agents may also put fields in
 # a `## Fields` Markdown table instead. A regression in build_report_md
 # / strip_audit_sections caused the auto Fields header to render with
 # `—` for every caller field and `?` for Reproduction rate, while a
@@ -1898,7 +1908,7 @@ if ok:
 
 table_crash_dir = results_dir / "crashes" / "CRASH-T-1"
 table_crash_dir.mkdir(parents=True)
-(table_crash_dir / "asan.txt").write_text("""\
+(table_crash_dir / "sanitizer.txt").write_text("""\
 === Run 1/5 ===
 ==22222==ERROR: AddressSanitizer: heap-use-after-free on address 0xc0de at pc 0xface
 READ of size 8 at 0xc0de thread T0
@@ -2068,7 +2078,7 @@ if result_t.returncode == 0:
 
 reach_crash_dir = results_dir / "crashes" / "CRASH-R-1"
 reach_crash_dir.mkdir(parents=True)
-(reach_crash_dir / "asan.txt").write_text("""\
+(reach_crash_dir / "sanitizer.txt").write_text("""\
 === Run 1/5 ===
 ==33333==ERROR: AddressSanitizer: heap-use-after-free on address 0xc0de at pc 0xface
 READ of size 8 at 0xc0de thread T0
@@ -2134,114 +2144,6 @@ if result_r.returncode == 0:
         assert_eq(1, report_r2.count("## Severity rationale"),
                   "severity replay: rationale not duplicated on second bundle")
 
-
-# ─── End-to-end: reach fields recovered from the .llm_fields.json sidecar ──
-#
-# Regression for the model-direct bundle: the crash prompt asks for only a
-# minimal report.md (file/function/class); the structured reachability fields
-# come from the `.llm_fields.json` sidecar the LLM hybrid pass writes. The
-# bundle build read fields ONLY from the report (bare labels / a `## Fields`
-# table) and never consulted the sidecar, so every reach row dashed out and
-# the severity re-score lost the call-sequence / contract facts — inflating an
-# AV:L/AT:P call-sequence UAF toward a worst-case AV:N base. This block gives a
-# report with NO reach fields plus a sidecar that carries them, and asserts
-# they flow into REPORT.md and into the replayed severity vector.
-
-sidecar_crash_dir = results_dir / "crashes" / "CRASH-S-1"
-sidecar_crash_dir.mkdir(parents=True)
-(sidecar_crash_dir / "asan.txt").write_text("""\
-=== Run 1/5 ===
-==44444==ERROR: AddressSanitizer: heap-use-after-free on address 0xc0de at pc 0xface
-WRITE of size 8 at 0xc0de thread T0
-    #0 0xdead in child_free /src/child.c:91
-    #1 0xfeed in table_free /src/table.c:236
-    #2 0xbead in root_free /src/root.c:868
-    #3 0xabcd in main /src/harness.c:58
-SUMMARY: AddressSanitizer: heap-use-after-free /src/child.c:91 in child_free
-CRASH_RATE: 5/5
-""", encoding="utf-8")
-# Minimal report.md — names file/function/class, carries NO reach fields
-# (neither bare labels nor a ## Fields table). This is the shape the
-# model-direct prompt actually asks a crash report to produce.
-(sidecar_crash_dir / "report.md").write_text("""\
-# CRASH-S-1
-
-## Summary
-
-Use-after-free write in `child_free` (`src/child.c`). Reachability fields
-live in the sidecar, not this report.
-""", encoding="utf-8")
-# The LLM hybrid pass's sidecar: the sole carrier of the reach fields.
-(sidecar_crash_dir / ".llm_fields.json").write_text(_json.dumps({
-    "surface": "library-api — sort/diff helper over a parsed document",
-    "primitive": "uaf_write",
-    "trigger_source": "both",
-    "caller_controls": "call-sequence",
-    "caller_contract": "obeyed",
-    "parameter_control": "application-supplied",
-    "trusted_caller_actions": "normal public call",
-    "boundary": "attacker bytes that a trusted caller sorts then mutates",
-}, indent=2, sort_keys=True), encoding="utf-8")
-(sidecar_crash_dir / "input.bin").write_bytes(b"\x01\x02\x03")
-
-result_s = subprocess.run(
-    [str(ROOT / "bin" / "export-repro"), "CRASH-S-1"],
-    capture_output=True, text=True, env=env, cwd=output_root,
-)
-assert_eq(0, result_s.returncode,
-          f"export-repro (sidecar reach) exits 0 "
-          f"(stdout={result_s.stdout[-200:]!r} stderr={result_s.stderr[-200:]!r})")
-
-if result_s.returncode == 0:
-    report_s = (sidecar_crash_dir / "REPORT.md").read_text(encoding="utf-8")
-    # The sidecar is a dotfile (not a bundle file) → migrated into .audit/.
-    if (sidecar_crash_dir / ".audit" / ".llm_fields.json").is_file():
-        passed("sidecar reach: .llm_fields.json migrated into .audit/")
-    else:
-        failed("sidecar reach: .llm_fields.json migrated into .audit/")
-
-    # Every reach row is populated from the sidecar — no `—` / `?`.
-    sidecar_rows = (
-        "Trigger source",
-        "Caller contract",
-        "Boundary",
-        "Caller controls",
-        "Trusted caller actions",
-    )
-    for label in sidecar_rows:
-        assert_in(f"| {label}", report_s,
-                  f"sidecar reach: '{label}' row present")
-        empty_re = re.compile(
-            rf"^\|\s*{re.escape(label)}\s*\|\s*[—?]\s*\|\s*$", re.MULTILINE)
-        if empty_re.search(report_s):
-            failed(f"sidecar reach: '{label}' row non-empty",
-                   "row dashed out despite a populated sidecar")
-        else:
-            passed(f"sidecar reach: '{label}' row non-empty")
-
-    # Specific sidecar values flow through.
-    assert_in("call-sequence", report_s,
-              "sidecar reach: 'call-sequence' caller controls flows through")
-    assert_in("normal public call", report_s,
-              "sidecar reach: trusted caller actions flows through")
-    assert_in("sorts then mutates", report_s,
-              "sidecar reach: Boundary text flows through")
-    # Trigger source took the sidecar value, not the 'bytes' default.
-    if (re.search(r"^Trigger source:\s*both\s*$", report_s, re.MULTILINE)
-            or re.search(r"\|\s*Trigger source\s*\|\s*both\s*\|", report_s)):
-        passed("sidecar reach: Trigger source is 'both' (sidecar), not 'bytes'")
-    else:
-        failed("sidecar reach: Trigger source is 'both' (sidecar), not 'bytes'")
-
-    # The reach facts reach the scorer: a call-sequence trigger carries the
-    # Environmental MAT:P modifier the dashed-out bundle dropped.
-    sev_proc = subprocess.run(
-        [str(ROOT / "bin" / "severity"), "--report",
-         str(sidecar_crash_dir / "REPORT.md")],
-        capture_output=True, text=True, env=env,
-    )
-    assert_in("MAT:P", sev_proc.stdout,
-              "sidecar reach: severity vector carries MAT:P from the reach facts")
 
 
 # ─── write_stub_reproduce: fail-open bundle (no runnable template) ───

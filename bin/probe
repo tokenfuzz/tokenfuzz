@@ -1,96 +1,57 @@
-#!/usr/bin/env bash
-# probe — single entry point for coverage-gated sanitizer/differential runs.
-#
-# ── Why this is bash, not Python ─────────────────────────────────────
-# probe consumes eight bash arrays exported by lib/target_config.sh
-# (TARGET_SANITIZERS_ENABLED, TARGET_INCLUDES, TARGET_DEFINES,
-# TARGET_LINK_LIBS, TARGET_RUNNER_ARGS, TARGET_RUNNER_CRASH_PATTERNS,
-# GENERIC_PREARGS, INTERPRETER_PREARGS) plus the shared crash-marker set
-# from lib/verdict.sh,
-# and dispatches to 26 distinct external subprocesses (5 language
-# toolchains × N interpreters, the run-asan/ubsan/msan/tsan wrappers, jq,
-# stat, file, base64, shasum, etc.) across 9 case-statement modes. The
-# bash arrays are a bash-language construct: porting to Python forces
-# either (a) reimplementing target_config.sh's TOML→array projection in
-# Python — duplicating logic that lives correctly in lib/target_config.py
-# already — or (b) subprocessing back to bash for every array unpack on a
-# hot per-testcase path. The expensive parts that ARE in Python
-# (lib/languages.py registry, lib/target_config.py TOML parsing) are
-# imported indirectly via the bash glue. probe stays in bash; the
-# compute lives in Python.
-#
-# Usage:
-#   bin/probe [--confirm] [--mode auto|browser|js|generic|js-diff] \
-#             [--want REGEX] testcase [-- harness-args...]
-#
-# Discovery (walks up from testcase path, then CWD):
-#   output/<slug>/<backend>/results/.session-env
-#                                  — RESULTS_DIR, TARGET_ROOT, TARGET_REV
-#   output/<slug>/.session-env     — legacy fallback for manual calls
-#   output/<slug>/target.toml      — sanitizer bins/libs, includes, link_libs
-#
-# Inferred from testcase:
-#   // TARGET:        — defect site, sets TARGET, derives WANT
-#   // HYPOTHESIS-ID: — links runs to state hypothesis row
-#   // CARD-ID:       — links runs to work card
-#   // MODE:          — overrides --mode
-#   // HARNESS:       — relative path to a harness source file. The
-#                       toolchain is selected from lib/languages.py's
-#                       registry (`python3 lib/languages.py list` to
-#                       inspect). Compiled extensions are built once
-#                       and cached (clang/clang++/rustc/go/swiftc/
-#                       kotlinc); interpreted extensions run directly
-#                       through their interpreter (python3/node/ts-node/
-#                       ruby/php/perl/Rscript/java/kotlinc-script/bash).
-#                       C/C++ harnesses use the selected sanitizer's
-#                       compile flag and library: asan_lib for ASan, or
-#                       optional [sanitizer].ubsan_lib/msan_lib/tsan_lib.
-#                       Includes, defines, and link_libs come from target.toml.
-#                       Interpreted-language harnesses are invoked as
-#                       <interpreter> <harness-source> <testcase> <trailing args>.
-#
-# Agent number is inferred from the scratch-N/ directory the testcase lives in.
-#
-# PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner overrides the default
-# sanitizer selection. Without an override, probe uses the first sanitizer
-# listed in target.toml; findings-only targets use the configured runner.
-#
-# --confirm: replaces ASAN_RUNS=5 (5 runs to prove reproducibility).
+#!/usr/bin/env python3
+"""Coverage-gated sanitizer and differential testcase runner."""
 
-set -uo pipefail
+from __future__ import annotations
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=../lib/platform.sh
-source "$SCRIPT_ROOT/lib/platform.sh"
-# shellcheck source=../lib/verdict.sh
-source "$SCRIPT_ROOT/lib/verdict.sh"
-# shellcheck source=../lib/target_config.sh
-source "$SCRIPT_ROOT/lib/target_config.sh"
-# shellcheck source=../lib/crash_bundle.sh
-source "$SCRIPT_ROOT/lib/crash_bundle.sh"
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Sequence
 
-MODE="auto"
-WANT_ARG=""
-CONFIRM=0
-DRY_RUN=0
+ROOT = Path(__file__).resolve().parent.parent
+BIN_DIR = ROOT / "bin"
+LIB_DIR = ROOT / "lib"
+sys.path.insert(0, str(LIB_DIR))
 
-usage() {
-  cat <<'EOF'
-Usage:
-  bin/probe [--confirm] [--dry-run] [--mode auto|browser|js|generic|js-diff] \
+import build_routes
+import crash_bundle
+import languages
+import target_config
+import verdict as verdict_lib
+from probe_helpers import _nonnegative_int
+
+VALID_MODES = {"auto", "browser", "js", "generic", "js-diff"}
+VALID_SANITIZERS = {"asan", "ubsan", "msan", "tsan", "race", "runner"}
+MODE_MATRIX = {
+    "asan": {"browser", "js", "generic", "js-diff"},
+    "ubsan": {"browser", "js", "generic", "js-diff"},
+    "msan": {"js", "generic"},
+    "tsan": {"js", "generic"},
+    "race": {"generic"},
+    "runner": {"generic"},
+}
+COMPILE_SANITIZERS = {"asan": "address", "ubsan": "undefined", "msan": "memory", "tsan": "thread"}
+SCRIPT_EXTENSIONS = {"js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "rb", "php", "pl", "pm", "r", "sh", "bash", "zsh", "kts"}
+HEADER_RE = {
+    "target": re.compile(r"^[^A-Za-z]*TARGET:\s*(.+?)\s*(?:-->|\*/)?\s*$", re.M),
+    "hypothesis": re.compile(r"HYPOTHESIS-ID:\s*([^\s>*]+)"),
+    "card": re.compile(r"CARD-ID:\s*([^\s>*]+)"),
+    "mode": re.compile(r"^[^A-Za-z]*MODE:\s*([A-Za-z0-9_-]+)", re.M),
+    "harness": re.compile(r"^[^A-Za-z]*HARNESS:\s*([^\s>*]+)", re.M),
+}
+BARE_METADATA = re.compile(r"^\s*(TARGET|HYPOTHESIS-ID|CARD-ID|CATEGORY|MODE|HARNESS|PROPERTY):\s*")
+HELP = """Usage:
+  bin/probe [--confirm] [--dry-run] [--mode auto|browser|js|generic|js-diff] \\
             [--want REGEX] testcase [-- harness-args...]
-
-Runs one testcase through the active audit target. Browser/JS probes use the
-coverage gate when supported, then run the selected sanitizer. Generic probes
-run the selected sanitizer or the configured [runner] for findings-only targets.
-
-Common commands:
-  bin/probe "$RESULTS_DIR/scratch-1/testcase.html"
-  bin/probe --confirm "$RESULTS_DIR/scratch-1/testcase.html"
-  bin/probe --dry-run "$RESULTS_DIR/scratch-1/testcase.dat"
-  PROBE_SANITIZER=ubsan bin/probe "$RESULTS_DIR/scratch-1/testcase.dat"
-  bin/probe "$RESULTS_DIR/scratch-1/testcase.dat" -- extra harness args
 
 Required testcase headers:
   TARGET: <file[:function[:line]]>
@@ -98,1239 +59,652 @@ Required testcase headers:
   CATEGORY: bounds|lifetime|type|size|uninit|state
 
 Optional testcase headers:
-  MODE: auto|browser|js|generic|js-diff  Override mode inference.
-  HARNESS: harness.c                     Build or run a sibling API harness.
-  CARD-ID: <id>                          Link the run to a work card.
+  MODE: auto|browser|js|generic|js-diff
+  HARNESS: harness.c
+  CARD-ID: <id>
 
-Options:
-  --confirm      Run 5 times instead of 1 to confirm reproducibility.
-  --dry-run      Print the resolved mode, sanitizer, output path, and command
-                 without executing the testcase.
-  --mode MODE    Force mode; otherwise MODE header and file extension decide.
-  --want REGEX   Expected stack/function regex. Use --want auto, or omit it,
-                 to derive from TARGET.
+PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner overrides target.toml.
+--confirm runs five times; --dry-run resolves and prints the command only.
+"""
 
-Discovery:
-  probe walks up from the testcase path to find:
-    output/<slug>/<backend>/results/.session-env
-                                    RESULTS_DIR, TARGET_ROOT, TARGET_REV
-    output/<slug>/.session-env     legacy fallback for manual calls
-    output/<slug>/target.toml      sanitizer, runner, harness build settings
 
-Sanitizer selection:
-  Default: first [sanitizer].enabled entry in target.toml, or runner when
-  enabled = [].
-  Override one run with:
-    PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False, usage=argparse.SUPPRESS)
+    parser.add_argument("--mode", default="auto")
+    parser.add_argument("--confirm", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--want", default="")
+    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument("testcase", nargs="?")
+    parser.add_argument("args", nargs=argparse.REMAINDER)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        print(HELP, file=sys.stderr)
+        raise
+    if args.help:
+        print(HELP)
+        raise SystemExit(0)
+    if not args.testcase:
+        print(HELP, file=sys.stderr)
+        raise SystemExit(2)
+    if args.mode not in VALID_MODES:
+        raise ValueError(f"invalid mode: {args.mode}")
+    if args.want == "auto":
+        args.want = ""
+    if args.args and args.args[0] == "--":
+        args.args.pop(0)
+    return args
 
-Notes:
-  The testcase normally must live under RESULTS_DIR/scratch-N/. For C/C++ API
-  probes, put the harness source next to the testcase and reference it with
-  HARNESS:; probe builds and caches the executable.
-EOF
-}
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --mode)    [ $# -ge 2 ] || { echo "[probe] --mode needs a value" >&2; exit 2; }; MODE="$2"; shift 2 ;;
-    --mode=*)  MODE="${1#--mode=}"; shift ;;
-    --confirm) CONFIRM=1; shift ;;
-    --dry-run) DRY_RUN=1; shift ;;
-    --want)    [ $# -ge 2 ] || { echo "[probe] --want needs a value" >&2; exit 2; }; WANT_ARG="$2"; shift 2 ;;
-    --want=*)  WANT_ARG="${1#--want=}"; shift ;;
-    -h|--help) usage; exit 0 ;;
-    --)        shift; break ;;
-    -*)        echo "[probe] unknown option: $1" >&2; usage >&2; exit 2 ;;
-    *)         break ;;
-  esac
-done
+def path_under(root: Path, path: Path) -> bool:
+    try:
+        return os.path.commonpath((root.resolve(), path.resolve())) == str(root.resolve())
+    except ValueError:
+        return False
 
-# Back-compat: --want auto is a no-op (default behavior derives from TARGET header).
-[ "$WANT_ARG" = "auto" ] && WANT_ARG=""
 
-TESTCASE="${1:-}"
-[ -n "$TESTCASE" ] || { usage >&2; exit 2; }
-shift || true
+def load_config(testcase: Path) -> target_config.Config:
+    try:
+        cfg = target_config.load(testcase)
+    except (FileNotFoundError, ValueError):
+        results = os.environ.get("RESULTS_DIR", "")
+        target_root = os.environ.get("TARGET_ROOT", "")
+        if not results or not target_root:
+            raise RuntimeError(
+                f"could not locate output/<slug>/<backend>/results/.session-env above {testcase}; "
+                "run `bin/audit --target <slug>` first"
+            )
+        cfg = target_config.Config(
+            results_dir=results,
+            target_root=target_root,
+            slug=os.environ.get("TARGET_SLUG", ""),
+            target_rev=os.environ.get("TARGET_REV", ""),
+            logdir=os.environ.get("LOGDIR", ""),
+        )
+        toml_path = Path(results).resolve().parent.parent / "target.toml"
+        if toml_path.is_file():
+            target_config.load_toml_into(cfg, toml_path)
+        elif not cfg.sanitizers_enabled:
+            cfg.sanitizers_enabled.append("asan")
+    overrides = {
+        "asan_bin": "TARGET_ASAN_BIN", "asan_lib": "TARGET_ASAN_LIB",
+        "ubsan_bin": "TARGET_UBSAN_BIN", "ubsan_lib": "TARGET_UBSAN_LIB",
+        "msan_bin": "TARGET_MSAN_BIN", "msan_lib": "TARGET_MSAN_LIB",
+        "tsan_bin": "TARGET_TSAN_BIN", "tsan_lib": "TARGET_TSAN_LIB",
+        "runner_bin": "TARGET_RUNNER_BIN",
+    }
+    for attribute, variable in overrides.items():
+        if variable in os.environ:
+            setattr(cfg, attribute, os.environ[variable])
+    return cfg
 
-_probe_realpath() {
-  python3 - "$1" <<'PY'
-import os
-import sys
-print(os.path.realpath(sys.argv[1]))
-PY
-}
 
-_probe_path_under() {
-  python3 - "$1" "$2" <<'PY'
-import os
-import sys
-root = os.path.realpath(sys.argv[1])
-path = os.path.realpath(sys.argv[2])
-try:
-    ok = os.path.commonpath([root, path]) == root
-except ValueError:
-    ok = False
-sys.exit(0 if ok else 1)
-PY
-}
+def parse_header(testcase: Path) -> dict[str, str]:
+    data = testcase.read_bytes()[:16384]
+    text = "".join(chr(byte) for byte in data if byte in (9, 10) or 32 <= byte <= 126)
+    text = "\n".join(text.splitlines()[:16])
+    result: dict[str, str] = {}
+    for name, pattern in HEADER_RE.items():
+        match = pattern.search(text)
+        result[name] = match.group(1).strip() if match else ""
+    return result
 
-# Agents commonly type `bin/probe scratch-N/tc` from the repository root.
-# Treat that as shorthand for the active audit scratch dir when RESULTS_DIR is
-# already in the session environment. If a cwd scratch file with the same
-# relative path also exists, fail rather than silently probing stale results.
-case "$TESTCASE" in
-  ./*) _probe_rel="${TESTCASE#./}" ;;
-  *) _probe_rel="$TESTCASE" ;;
-esac
-case "$_probe_rel" in
-  scratch-[0-9]*/*)
-    if [ -n "${RESULTS_DIR:-}" ]; then
-      _probe_results_path="${RESULTS_DIR%/}/$_probe_rel"
-      if [ -f "$_probe_rel" ] && [ -f "$_probe_results_path" ]; then
-        _probe_cwd_real="$(_probe_realpath "$_probe_rel")"
-        _probe_results_real="$(_probe_realpath "$_probe_results_path")"
-        if [ "$_probe_cwd_real" != "$_probe_results_real" ]; then
-          echo "[probe] ambiguous scratch path: cwd $_probe_rel exists, but probe would use $_probe_results_path" >&2
-          echo "[probe] use the absolute RESULTS_DIR scratch path, or remove the cwd scratch file." >&2
-          exit 2
-        fi
-      fi
-      TESTCASE="$_probe_results_path"
-    fi
-    ;;
-esac
-unset _probe_rel _probe_results_path _probe_cwd_real _probe_results_real
 
-[ -f "$TESTCASE" ] || { echo "[probe] testcase not found: $TESTCASE" >&2; exit 2; }
+def derive_want(target: str) -> str:
+    if ":" in target:
+        without_line = target.rsplit(":", 1)[0]
+        _, separator, function = without_line.partition(":")
+        if separator and function:
+            return re.escape(function)
+    filename = Path(target.split(":", 1)[0]).name
+    return re.escape(filename)
 
-# Discover session + target config from the testcase path first. This matches
-# the documented probe contract and avoids stale audit env causing the wrong
-# runner / sanitizer settings to be used for an on-disk testcase. Environment
-# fallback is retained for legacy/manual calls where the testcase is outside
-# output/<slug>/.
-if ! target_load "$TESTCASE" 2>/dev/null; then
-  if [ -n "${RESULTS_DIR:-}" ] && [ -n "${TARGET_ROOT:-}" ]; then
-    _target_toml="$(target_toml_from_results "$RESULTS_DIR" 2>/dev/null || true)"
-    [ -f "$_target_toml" ] && target_load_toml "$_target_toml" 2>/dev/null || true
-  else
-    echo "[probe] could not locate output/<slug>/<backend>/results/.session-env above $TESTCASE" >&2
-    echo "[probe] run \`bin/audit --target <slug>\` first, or run probe inside an audit session." >&2
-    exit 2
-  fi
-fi
-unset _target_toml
 
-# Re-export so child wrappers (run-asan, run-asan-multi) can read them.
-export RESULTS_DIR TARGET_ROOT TARGET_SLUG TARGET_REV LOGDIR
+def prepare_exec_testcase(testcase: Path, config: target_config.Config, agent: str) -> Path:
+    extension = testcase.suffix.lstrip(".")
+    if extension not in SCRIPT_EXTENSIONS:
+        return testcase
+    lines = testcase.read_text(errors="replace").splitlines(keepends=True)
+    if not any(BARE_METADATA.match(line) for line in lines[:16]):
+        return testcase
+    digest = hashlib.sha1(testcase.read_bytes()).hexdigest()
+    destination_dir = Path(config.results_dir) / f"scratch-{agent}" / ".probe-exec"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / f"{testcase.stem}.{digest}.exec.{extension}"
+    output: list[str] = []
+    for index, line in enumerate(lines):
+        if index == 0 and line.startswith("#!"):
+            output.append(line)
+        elif not BARE_METADATA.match(line):
+            output.append(line)
+    destination.write_text("".join(output))
+    destination.chmod(testcase.stat().st_mode & 0o777)
+    return destination
 
-TESTCASE="$(_probe_realpath "$TESTCASE")"
-RESULTS_REAL="$(_probe_realpath "$RESULTS_DIR")"
-if [ "${PROBE_ALLOW_EXTERNAL_TESTCASE:-0}" != "1" ]; then
-  if ! _probe_path_under "$RESULTS_REAL" "$TESTCASE"; then
-    echo "[probe] testcase must live under RESULTS_DIR/scratch-N: $TESTCASE" >&2
-    echo "[probe] active RESULTS_DIR: $RESULTS_REAL" >&2
-    echo "[probe] set PROBE_ALLOW_EXTERNAL_TESTCASE=1 only for trusted local experiments" >&2
-    exit 2
-  fi
-  case "$TESTCASE" in
-    "$RESULTS_REAL"/scratch-[0-9]*/*) ;;
-    *)
-      echo "[probe] testcase must live under RESULTS_DIR/scratch-N: $TESTCASE" >&2
-      echo "[probe] active RESULTS_DIR: $RESULTS_REAL" >&2
-      echo "[probe] set PROBE_ALLOW_EXTERNAL_TESTCASE=1 only for trusted local experiments" >&2
-      exit 2 ;;
-  esac
-fi
-unset RESULTS_REAL
 
-# Derive agent number from scratch-N path or fall back to 1.
-AGENT_NUM=""
-case "$TESTCASE" in
-  */scratch-*/*)
-    _frag="${TESTCASE#*/scratch-}"
-    AGENT_NUM="${_frag%%/*}"
-    ;;
-esac
-[ -n "$AGENT_NUM" ] || AGENT_NUM=1
-export AUDIT_AGENT_NUM="$AGENT_NUM"
+def resolve_executable(value: str, config: target_config.Config) -> str:
+    return shutil.which(value) or (value if os.access(value, os.X_OK) else config.resolve_path(value))
 
-# Derived per-agent paths (replaces TRIED_INPUTS_LOG / HITS_LOG_PATH env).
-export TRIED_INPUTS_LOG="$RESULTS_DIR/tried-inputs-${AGENT_NUM}.log"
-export HITS_LOG_PATH="$RESULTS_DIR/hits-${AGENT_NUM}.log"
 
-# Read the testcase header for TARGET / HYPOTHESIS-ID / CARD-ID / MODE / HARNESS.
-# Binary testcases have no text header; strip non-printable bytes in the C locale so
-# the sed/grep below never abort with "RE error: illegal byte sequence" on macOS. The
-# header keywords are ASCII, so text headers parse identically after sanitizing.
-# The `head -c 16384` byte cap is load-bearing and must not be removed: this is NOT
-# an LLM/token optimisation (no model sees this text — it only feeds local routing and
-# state linkage). `head -n 16` is *line*-bounded, so on a binary testcase with no/sparse
-# newlines it reads to EOF — a multi-MB repro gets slurped whole into a shell variable,
-# then scanned byte-by-byte by tr. Capping at 16 KB bounds that worst case; the line cap
-# keeps the "metadata lives at the top" semantic and avoids deep false TARGET: matches.
-# 16 KB holds far more than 16 lines of ASCII header, so nothing is lost in practice.
-HEADER="$(head -c 16384 "$TESTCASE" 2>/dev/null | head -n 16 | LC_ALL=C tr -cd '[:print:]\n\t')"
-TARGET_LINE="$(printf '%s\n' "$HEADER" | sed -nE 's/^[^A-Za-z]*TARGET:[[:space:]]*(.+)$/\1/p' | head -1 | sed -E 's/[[:space:]]*(-->|\*\/)[[:space:]]*$//')"
-HYP_LINE="$(printf '%s\n' "$HEADER" | grep -oE 'HYPOTHESIS-ID:[[:space:]]*[^[:space:]>*]+' | head -1 | awk '{print $NF}')"
-CARD_LINE="$(printf '%s\n' "$HEADER" | grep -oE 'CARD-ID:[[:space:]]*[^[:space:]>*]+' | head -1 | awk '{print $NF}')"
-HEADER_MODE="$(printf '%s\n' "$HEADER" | sed -nE 's/^[^A-Za-z]*MODE:[[:space:]]*([A-Za-z0-9_-]+).*$/\1/p' | head -1)"
-HARNESS_LINE="$(printf '%s\n' "$HEADER" | sed -nE 's/^[^A-Za-z]*HARNESS:[[:space:]]*([^[:space:]>*]+).*$/\1/p' | head -1)"
+def expand_runner(value: str, testcase: Path, sanitizer_name: str, config: target_config.Config) -> str:
+    swift = {"asan": "address", "ubsan": "undefined", "tsan": "thread"}.get(sanitizer_name)
+    if "{SWIFT_SANITIZER}" in value and swift is None:
+        raise ValueError(f"Swift runner does not support sanitizer '{sanitizer_name}'")
+    replacements = {
+        "{TESTCASE}": str(testcase), "{SANITIZER}": sanitizer_name,
+        "{SWIFT_SANITIZER}": swift or "", "{TARGET_ROOT}": config.target_root,
+        "{RESULTS_DIR}": config.results_dir, "{TARGET_SLUG}": config.slug,
+    }
+    for token, replacement in replacements.items():
+        value = value.replace(token, replacement)
+    return value
 
-case "$MODE" in
-  auto|browser|js|generic|js-diff) ;;
-  *) echo "[probe] invalid mode: $MODE" >&2; exit 2 ;;
-esac
 
-if [ "$MODE" = "auto" ] && [ -n "$HEADER_MODE" ]; then
-  MODE="$HEADER_MODE"
-fi
+def stat_key(path: str) -> str:
+    try:
+        stat = Path(path).stat()
+        return f"{int(stat.st_mtime)}:{stat.st_size}"
+    except OSError:
+        return ""
 
-if [ "$MODE" = "auto" ]; then
-  case "$TESTCASE" in
-    *.html|*.htm|*.xhtml|*.svg) MODE="browser" ;;
-    *.js|*.mjs)
-      if [ "${TARGET_IS_BROWSER:-0}" = "0" ]; then MODE="generic"; else MODE="js"; fi ;;
-    *) MODE="generic" ;;
-  esac
-fi
 
-base="${TESTCASE%.*}"
-ASAN_OUTPUT_FILE="${base}.asan.txt"
-export ASAN_OUTPUT_FILE
-[ -n "$HYP_LINE" ]    && export HYPOTHESIS_ID="$HYP_LINE"
-[ -n "$TARGET_LINE" ] && export TARGET="$TARGET_LINE"
+class HarnessBuilder:
+    def __init__(self, probe: "Probe", source: Path):
+        self.probe = probe
+        self.source = source
+        self.dispatch = languages.probe_dispatch(source.suffix)
+        if self.dispatch is None:
+            raise ValueError(f"HARNESS source has unsupported extension: {source}")
 
-# Some agents still write audit metadata as bare leading lines in script-like
-# testcases:
-#   TARGET: ...
-#   HYPOTHESIS-ID: ...
-# Those lines are useful to probe but invalid Python/JS/TS syntax. Execute a
-# hidden copy with only those bare audit lines removed, while preserving the
-# original testcase for metadata, output naming, state history, and reports.
-EXEC_TESTCASE="$TESTCASE"
-_probe_prepare_exec_testcase() {
-  local src="$1" ext bare_hash exec_dir exec_path
-  ext="${src##*.}"
-  case "$ext" in
-    js|mjs|cjs|ts|tsx|jsx|py|rb|php|pl|pm|r|R|sh|bash|zsh|kts) ;;
-    *) return 0 ;;
-  esac
-  if ! head -n 16 "$src" 2>/dev/null \
-      | grep -Eq '^[[:space:]]*(TARGET|HYPOTHESIS-ID|CARD-ID|CATEGORY|MODE|HARNESS|PROPERTY):[[:space:]]*'; then
-    return 0
-  fi
-  bare_hash="$(audit_sha1 "$src" 2>/dev/null | awk '{print $1}')"
-  [ -n "$bare_hash" ] || bare_hash="$(date +%s)"
-  exec_dir="$RESULTS_DIR/scratch-${AGENT_NUM}/.probe-exec"
-  mkdir -p "$exec_dir"
-  exec_path="$exec_dir/$(basename "${src%.*}").${bare_hash}.exec.${ext}"
-  awk '
-    NR == 1 && /^#!/ { print; next }
-    /^[[:space:]]*(TARGET|HYPOTHESIS-ID|CARD-ID|CATEGORY|MODE|HARNESS|PROPERTY):[[:space:]]*/ { next }
-    { print }
-  ' "$src" > "$exec_path"
-  chmod +r "$exec_path" 2>/dev/null || true
-  [ -x "$src" ] && chmod +x "$exec_path" 2>/dev/null || true
-  EXEC_TESTCASE="$exec_path"
-}
-_probe_prepare_exec_testcase "$TESTCASE"
-if [ "$EXEC_TESTCASE" != "$TESTCASE" ]; then
-  export ASAN_RECORDED_TESTCASE="$TESTCASE"
-fi
+    def build(self) -> tuple[str, list[str], str]:
+        kind = self.dispatch["build_kind"]
+        if kind == "interpret":
+            override = os.environ.get(self.dispatch["interpreter_env"], "")
+            binary = override or self.dispatch["interpreter_default"]
+            return binary, [*self.dispatch["interpreter_preargs"], str(self.source)], kind
+        compiler = os.environ.get(self.dispatch["compiler_env"], "") or self.dispatch["compiler_default"]
+        flags = shlex.split(os.environ.get(self.dispatch["flags_env"], ""))
+        cache = Path(self.probe.config.results_dir) / f"scratch-{self.probe.agent}" / ".harness-cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        sanitizer_lib = self._sanitizer_lib() if kind == "cc" else ""
+        identity = "\n".join((
+            "schema=4", f"source={hashlib.sha1(self.source.read_bytes()).hexdigest()}",
+            f"compiler={shutil.which(compiler) or compiler}", f"compiler_stat={stat_key(shutil.which(compiler) or compiler)}",
+            f"kind={kind}", f"flags={flags}", f"sanitizer={self.probe.sanitizer}",
+            f"library={sanitizer_lib}", f"library_stat={stat_key(sanitizer_lib)}",
+            f"includes={self.probe.config.includes}", f"defines={self.probe.config.defines}",
+            f"links={self.probe.config.link_libs}", f"ldflags={os.environ.get('LDFLAGS', '')}",
+        ))
+        digest = hashlib.sha1(identity.encode()).hexdigest()
+        binary = cache / f"{self.source.name}.{digest}.bin"
+        failed_log = cache / f"{self.source.name}.{digest}.build.log"
+        lock = cache / f"{self.source.name}.{digest}.lock"
+        if os.access(binary, os.X_OK):
+            return str(binary), [], kind
+        if failed_log.is_file() and failed_log.stat().st_size:
+            self._show_failure(failed_log, cached=True)
+        self._acquire(lock, binary, failed_log)
+        try:
+            if os.access(binary, os.X_OK):
+                return str(binary), [], kind
+            if failed_log.is_file() and failed_log.stat().st_size:
+                self._show_failure(failed_log)
+            command = self._command(kind, compiler, flags, binary, sanitizer_lib)
+            completed = subprocess.run(command, capture_output=True, check=False)
+            if completed.returncode:
+                failed_log.write_bytes(completed.stderr + completed.stdout)
+                binary.unlink(missing_ok=True)
+                self._show_failure(failed_log)
+            failed_log.unlink(missing_ok=True)
+            print(f"[probe] built harness: {binary}")
+            return str(binary), [], kind
+        finally:
+            (lock / "owner").unlink(missing_ok=True)
+            try:
+                lock.rmdir()
+            except OSError:
+                pass
 
-_probe_cap_asan_output_file() {
-  local f="$1"
-  [ -s "$f" ] || return 0
-  local max_bytes="${PROBE_ASAN_OUTPUT_MAX_BYTES:-8388608}"
-  local head_bytes="${PROBE_ASAN_OUTPUT_HEAD_BYTES:-262144}"
-  local tail_bytes="${PROBE_ASAN_OUTPUT_TAIL_BYTES:-262144}"
-  case "$max_bytes:$head_bytes:$tail_bytes" in
-    *[!0-9:]*|:*|*:) return 0 ;;
-  esac
-  [ "$max_bytes" -gt 0 ] || return 0
-  local size
-  size="$(audit_stat_size "$f" 2>/dev/null || true)"
-  case "$size" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$size" -gt "$max_bytes" ] || return 0
-  local tmp
-  tmp="$(mktemp "${TMPDIR:-/tmp}/probe-asan-cap-XXXXXX")" || return 0
-  {
-    printf '[probe] ASAN_OUTPUT_FILE truncated for storage after verdict classification: original_size_bytes=%s max_bytes=%s\n' "$size" "$max_bytes"
-    printf '[probe] showing first %s byte(s) and last %s byte(s); rerun with PROBE_ASAN_OUTPUT_MAX_BYTES=0 to preserve full output.\n' "$head_bytes" "$tail_bytes"
-    head -c "$head_bytes" "$f" 2>/dev/null || true
-    printf '\n[probe] ... middle omitted from oversized ASan output ...\n'
-    tail -c "$tail_bytes" "$f" 2>/dev/null || true
-  } > "$tmp" && cat "$tmp" > "$f"
-  rm -f "$tmp"
-}
+    def _sanitizer_lib(self) -> str:
+        raw = self.probe.config.sanitizer_lib(self.probe.sanitizer)
+        library = self.probe.config.resolve_path(raw) if raw else ""
+        if self.probe.sanitizer == "asan" and not library:
+            raise ValueError("target.toml asan_lib missing")
+        if library and not Path(library).is_file():
+            if self.probe.sanitizer == "asan" or os.environ.get("PROBE_REQUIRE_SANITIZER_LIB") == "1":
+                raise ValueError(f"target.toml {self.probe.sanitizer}_lib missing: {library}")
+            print(
+                f"[probe] WARN: target.toml {self.probe.sanitizer}_lib missing ({library}); "
+                f"building with -fsanitize={COMPILE_SANITIZERS[self.probe.sanitizer]} only",
+                file=sys.stderr,
+            )
+            return ""
+        return library
 
-derive_want_from_target() {
-  local target="$1"
-  [ -n "$target" ] || return 1
-  case "$target" in
-    *:*)
-      local without_line func
-      without_line="${target%:*}"
-      func="${without_line#*:}"
-      if [ "$func" != "$without_line" ] && [ -n "$func" ]; then
-        printf '%s' "$func"
+    def _command(self, kind: str, compiler: str, flags: list[str], binary: Path, library: str) -> list[str]:
+        if kind == "cc":
+            sanitizer_flag = COMPILE_SANITIZERS.get(self.probe.sanitizer)
+            if not sanitizer_flag:
+                raise ValueError(f"compiled C/C++ HARNESS does not support sanitizer: {self.probe.sanitizer}")
+            includes = [value for path in self.probe.config.includes for value in ("-I", self.probe.config.resolve_path(path))]
+            library_args = [library] if library else []
+            if library and Path(library).parent != Path("."):
+                library_args.append(f"-Wl,-rpath,{Path(library).parent}")
+            return [
+                compiler, f"-fsanitize={sanitizer_flag}", "-g1", "-O0", *flags,
+                *self.probe.config.defines, *includes, str(self.source), *library_args,
+                *self.probe.config.link_libs, *shlex.split(os.environ.get("LDFLAGS", "")), "-o", str(binary),
+            ]
+        if kind == "rust":
+            return [compiler, "-C", "debuginfo=1", "-C", "opt-level=0", *flags, "-o", str(binary), str(self.source)]
+        if kind == "go":
+            return [compiler, "build", "-o", str(binary), *flags, str(self.source)]
+        if kind == "swift":
+            return [compiler, "-gline-tables-only", "-O0", *flags, "-o", str(binary), str(self.source)]
+        if kind == "kotlin":
+            jar = Path(str(binary) + ".jar")
+            command = [compiler, *flags, str(self.source), "-include-runtime", "-d", str(jar)]
+            completed = subprocess.run(command, capture_output=True, check=False)
+            if completed.returncode:
+                raise subprocess.CalledProcessError(completed.returncode, command, completed.stdout, completed.stderr)
+            binary.write_text(
+                "#!/usr/bin/env python3\nimport os,sys\nos.execvp(" + repr(os.environ.get("JAVA", "java")) + ", [" + repr(os.environ.get("JAVA", "java")) + ", '-jar', " + repr(str(jar)) + ", *sys.argv[1:]])\n"
+            )
+            binary.chmod(0o755)
+            return ["true"]
+        raise ValueError(f"unknown build kind: {kind}")
+
+    def _acquire(self, lock: Path, binary: Path, failed: Path) -> None:
+        timeout = int(os.environ.get("PROBE_HARNESS_BUILD_LOCK_TIMEOUT", "600"))
+        started = time.monotonic()
+        while True:
+            try:
+                lock.mkdir()
+                (lock / "owner").write_text(f"pid={os.getpid()}\nstarted={dt.datetime.now().astimezone().isoformat()}\n")
+                return
+            except FileExistsError:
+                if failed.is_file() and failed.stat().st_size:
+                    self._show_failure(failed, cached=True)
+                if self._stale(lock):
+                    stolen = lock.with_name(f"{lock.name}.stale.{os.getpid()}")
+                    try:
+                        lock.rename(stolen)
+                        shutil.rmtree(stolen, ignore_errors=True)
+                        print(f"[probe] reaped stale harness build lock: {lock}", file=sys.stderr)
+                    except OSError:
+                        pass
+                if time.monotonic() - started >= timeout:
+                    raise RuntimeError(f"timed out waiting for harness build lock: {lock}")
+                time.sleep(0.05)
+
+    def _stale(self, lock: Path) -> bool:
+        owner = lock / "owner"
+        if owner.is_file():
+            match = re.search(r"^pid=([0-9]+)", owner.read_text(errors="ignore"), re.M)
+            if match:
+                try:
+                    os.kill(int(match.group(1)), 0)
+                    return False
+                except ProcessLookupError:
+                    return True
+                except PermissionError:
+                    return False
+        grace = int(os.environ.get("PROBE_HARNESS_LOCK_STALE_MIN", "5")) * 60
+        return grace <= 0 or time.time() - lock.stat().st_mtime > grace
+
+    def _show_failure(self, path: Path, *, cached: bool = False) -> None:
+        data = path.read_bytes()
+        head = _nonnegative_int(os.environ.get("PROBE_BUILD_LOG_HEAD_BYTES", "8192"), 8192)
+        tail = _nonnegative_int(os.environ.get("PROBE_BUILD_LOG_TAIL_BYTES", "8192"), 8192)
+        prefix = "cached harness build failure" if cached else "harness build failed"
+        print(f"[probe] {prefix}: {self.source}", file=sys.stderr)
+        print(f"[probe] full compiler log: {path}", file=sys.stderr)
+        if len(data) <= head + tail + 256:
+            sys.stderr.buffer.write(data)
+        else:
+            sys.stderr.buffer.write(data[:head])
+            print(f"\n[probe] compiler log elided {len(data) - head - tail} bytes; full log: {path}", file=sys.stderr)
+            sys.stderr.buffer.write(data[-tail:])
+        raise RuntimeError("harness build failed")
+
+
+class Probe:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.testcase = self._resolve_testcase(Path(args.testcase))
+        self.config = load_config(self.testcase)
+        self.testcase = self.testcase.resolve()
+        self._validate_location()
+        self.agent = self._agent_number()
+        self.header = parse_header(self.testcase)
+        self.mode = self._mode()
+        self.output = self.testcase.with_suffix(".asan.txt") if self.testcase.suffix else Path(str(self.testcase) + ".asan.txt")
+        self.exec_testcase = prepare_exec_testcase(self.testcase, self.config, self.agent)
+        self.want = args.want or derive_want(self.header["target"])
+        self.card = self.header["card"] or self._card_from_state()
+        self.sanitizer = self._sanitizer()
+        self.harness_source: Path | None = None
+        self.build_kind = ""
+        self.environment = self._environment()
+        self.command = self._command()
+
+    def _resolve_testcase(self, testcase: Path) -> Path:
+        relative = str(testcase)[2:] if str(testcase).startswith("./") else str(testcase)
+        if re.match(r"^scratch-[0-9]+/", relative) and os.environ.get("RESULTS_DIR"):
+            result_path = Path(os.environ["RESULTS_DIR"]) / relative
+            if Path(relative).is_file() and result_path.is_file() and Path(relative).resolve() != result_path.resolve():
+                raise ValueError(f"ambiguous scratch path: cwd {relative} exists, but probe would use {result_path}")
+            testcase = result_path
+        if not testcase.is_file():
+            raise ValueError(f"testcase not found: {testcase}")
+        return testcase
+
+    def _validate_location(self) -> None:
+        if os.environ.get("PROBE_ALLOW_EXTERNAL_TESTCASE") == "1":
+            return
+        results = Path(self.config.results_dir).resolve()
+        if not path_under(results, self.testcase):
+            raise ValueError(f"testcase must live under RESULTS_DIR/scratch-N: {self.testcase}")
+        relative = self.testcase.relative_to(results)
+        if not relative.parts or not re.fullmatch(r"scratch-[0-9]+", relative.parts[0]):
+            raise ValueError(f"testcase must live under RESULTS_DIR/scratch-N: {self.testcase}")
+
+    def _agent_number(self) -> str:
+        match = re.search(r"/scratch-([0-9]+)/", str(self.testcase))
+        return match.group(1) if match else "1"
+
+    def _mode(self) -> str:
+        mode = self.args.mode
+        if mode == "auto" and self.header["mode"]:
+            mode = self.header["mode"]
+        if mode == "auto":
+            if self.testcase.suffix.lower() in {".html", ".htm", ".xhtml", ".svg"}:
+                mode = "browser"
+            elif self.testcase.suffix.lower() in {".js", ".mjs"}:
+                mode = "js" if self.config.is_browser != "0" else "generic"
+            else:
+                mode = "generic"
+        if mode not in VALID_MODES - {"auto"}:
+            raise ValueError(f"invalid mode: {mode}")
+        return mode
+
+    def _card_from_state(self) -> str:
+        hypothesis = self.header["hypothesis"]
+        state = Path(self.config.results_dir) / "state/hypotheses.jsonl"
+        if not hypothesis or not state.is_file():
+            return ""
+        card = ""
+        for line in state.read_text(errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("id") == hypothesis:
+                card = str(row.get("card_id", ""))
+        return card
+
+    def _sanitizer(self) -> str:
+        selected = os.environ.get("PROBE_SANITIZER", "").lower()
+        if not selected:
+            selected = "runner" if self.config.sanitizers_explicitly_disabled else (self.config.sanitizers_enabled[0] if self.config.sanitizers_enabled else "asan")
+        if selected not in VALID_SANITIZERS:
+            raise ValueError(f"unsupported sanitizer: {selected}")
+        if selected != "runner":
+            if self.config.sanitizers_explicitly_disabled:
+                raise ValueError("target.toml has [sanitizer].enabled = []; use PROBE_SANITIZER=runner or enable a sanitizer")
+            if selected not in self.config.sanitizers_enabled and os.environ.get("PROBE_ALLOW_DISABLED_SANITIZER") != "1":
+                raise ValueError(f"sanitizer '{selected}' is not enabled for this target; enabled sanitizers: {self.config.sanitizers_enabled_csv()}")
+        if self.mode not in MODE_MATRIX[selected]:
+            raise ValueError(f"sanitizer '{selected}' does not support mode '{self.mode}'")
+        return selected
+
+    def _environment(self) -> dict[str, str]:
+        environment = dict(os.environ)
+        environment.update({
+            "RESULTS_DIR": self.config.results_dir, "TARGET_ROOT": self.config.target_root,
+            "TARGET_SLUG": self.config.slug, "TARGET_REV": self.config.target_rev,
+            "LOGDIR": self.config.logdir, "AUDIT_AGENT_NUM": self.agent,
+            "TRIED_INPUTS_LOG": str(Path(self.config.results_dir) / f"tried-inputs-{self.agent}.log"),
+            "HITS_LOG_PATH": str(Path(self.config.results_dir) / f"hits-{self.agent}.log"),
+            "ASAN_OUTPUT_FILE": str(self.output), "PROBE_SANITIZER_SELECTED": self.sanitizer,
+            "SANITIZER_RUNS": "5" if self.args.confirm else environment.get("SANITIZER_RUNS", "1"),
+        })
+        if self.header["hypothesis"]:
+            environment["HYPOTHESIS_ID"] = self.header["hypothesis"]
+        if self.header["target"]:
+            environment["TARGET"] = self.header["target"]
+        if self.want:
+            environment["WANT"] = self.want
+        if self.exec_testcase != self.testcase:
+            environment["ASAN_RECORDED_TESTCASE"] = str(self.testcase)
+        return environment
+
+    def _command(self) -> list[str]:
+        override = ""
+        preargs: list[str] = []
+        harness = self.header["harness"]
+        if harness:
+            raw = Path(harness)
+            if os.environ.get("PROBE_ALLOW_EXTERNAL_HARNESS") != "1" and (raw.is_absolute() or ".." in raw.parts):
+                raise ValueError(f"HARNESS must stay under the testcase directory: {harness}")
+            source = (self.testcase.parent / raw).resolve()
+            if not source.is_file():
+                raise ValueError(f"HARNESS source not found: {source}")
+            if os.environ.get("PROBE_ALLOW_EXTERNAL_HARNESS") != "1" and not path_under(self.testcase.parent, source):
+                raise ValueError(f"HARNESS resolves outside testcase directory: {harness}")
+            self.harness_source = source
+            override, preargs, self.build_kind = HarnessBuilder(self, source).build()
+            self.mode = "generic"
+        elif self.mode == "generic" and self.exec_testcase.suffix.lower() in {".ts", ".tsx"} and self._can_use_runner():
+            if Path(self.config.runner_bin).name == "node":
+                ts_node = Path(self.config.target_root) / "node_modules/.bin/ts-node"
+                found = str(ts_node) if os.access(ts_node, os.X_OK) else shutil.which("ts-node") or ""
+                if found:
+                    override = found
+                    preargs = ["--transpile-only", "--skip-project", "--compiler-options", '{"module":"CommonJS","moduleResolution":"node","target":"ES2022","ignoreDeprecations":"6.0"}']
+        if self.mode == "js-diff":
+            runner = BIN_DIR / ("run-asan" if self.sanitizer == "asan" else "run-ubsan")
+            return [str(runner), "js-diff", str(self.exec_testcase), *self.args.args]
+        if self.mode in {"browser", "js"}:
+            return [str(BIN_DIR / "run-sanitizer-multi"), self.sanitizer, self.mode, str(self.exec_testcase), *self.args.args]
+
+        uses_runner = False
+        raw_bin = self.config.sanitizer_bin(self.sanitizer)
+        if override:
+            binary = override
+        elif raw_bin:
+            binary = self.config.resolve_path(raw_bin)
+        elif self.config.runner_bin:
+            binary = resolve_executable(self.config.runner_bin, self.config)
+            uses_runner = True
+        else:
+            binary = ""
+        env_name = f"{self.sanitizer.upper()}_GENERIC_BIN" if self.sanitizer in {"asan", "ubsan", "msan", "tsan"} else "ASAN_GENERIC_BIN"
+        if binary:
+            self.environment[env_name] = binary
+        if self.sanitizer in {"runner", "race"}:
+            self.environment["ASAN_GENERIC_DISABLE_OPTIONS"] = "1"
+        generic_args: list[str] = []
+        skip = False
+        if not harness and not preargs and uses_runner and self.config.runner_args:
+            generic_args = [expand_runner(value, self.exec_testcase, self.sanitizer, self.config) for value in self.config.runner_args]
+            skip = any("{TESTCASE}" in value for value in self.config.runner_args)
+            if not skip:
+                generic_args.append(str(self.exec_testcase))
+                skip = True
+        elif preargs:
+            generic_args = [*preargs, str(self.exec_testcase)]
+            skip = True
+        elif self.exec_testcase != self.testcase:
+            generic_args = [str(self.exec_testcase)]
+            skip = True
+        self.environment["ASAN_GENERIC_SKIP_TESTCASE"] = "1" if skip else "0"
+        self.environment["SANITIZER_GENERIC_SKIP_TESTCASE"] = "1" if skip else "0"
+        return [
+            str(BIN_DIR / "run-sanitizer-multi"), self.sanitizer, "generic",
+            str(self.exec_testcase), *generic_args, *self.args.args,
+        ]
+
+    def _can_use_runner(self) -> bool:
+        return bool(self.config.runner_bin and (self.sanitizer in {"runner", "race"} or not self.config.sanitizer_bin(self.sanitizer)))
+
+    def dry_run(self) -> int:
+        print(
+            f"[probe] mode={self.mode} sanitizer={self.sanitizer} asan_output={self.output} "
+            f"target={self.header['target']} hypothesis={self.header['hypothesis']} "
+            f"want={self.want} card={self.card}"
+        )
+        if self.exec_testcase != self.testcase:
+            print(f"[probe] exec_testcase={self.exec_testcase} original_testcase={self.testcase}")
+        print(f"[probe] command: {shlex.join(self.command)}")
         return 0
-      fi
-      ;;
-  esac
-  local basefile
-  basefile="${target##*/}"
-  basefile="${basefile%%:*}"
-  [ -n "$basefile" ] || return 1
-  printf '%s' "$basefile"
-}
 
-escape_regex_literal() { sed 's/[][\\.^$*+?{}()|]/\\&/g'; }
+    def execute(self) -> int:
+        confirmation = " confirm=1" if self.args.confirm else ""
+        print(f"[probe] mode={self.mode} testcase={self.testcase} asan_output={self.output}{confirmation}")
+        if self.mode == "js-diff":
+            completed = subprocess.run(self.command, capture_output=True, env=self.environment, check=False)
+            data = completed.stdout + completed.stderr
+            self.output.parent.mkdir(parents=True, exist_ok=True)
+            self.output.write_bytes(data)
+            sys.stdout.buffer.write(data)
+        else:
+            completed = subprocess.run(self.command, env=self.environment, check=False)
+        result = completed.returncode
+        probe_verdict = self._classify(result)
+        result, probe_verdict = self._auto_route(result, probe_verdict)
+        self._cap_output()
+        print(f"[probe] verdict={probe_verdict}")
+        self._record_state(probe_verdict)
+        self._file_crash(probe_verdict)
+        return result
 
-if [ -z "$WANT_ARG" ]; then
-  WANT_ARG="$(derive_want_from_target "$TARGET_LINE" 2>/dev/null | escape_regex_literal || true)"
-fi
-[ -n "$WANT_ARG" ] && export WANT="$WANT_ARG"
+    def _classify(self, returncode: int) -> str:
+        if self.output.is_file() and self.output.stat().st_size:
+            if verdict_lib.file_has_crash(self.output, tuple(self.config.runner_crash_patterns)):
+                return "CRASH"
+            text = self.output.read_text(errors="replace")
+            if "DIFFERENTIAL: outputs DIFFER" in text:
+                return "DIFF"
+            if verdict_lib.file_is_clean(self.output):
+                return "CLEAN"
+            return "NO_EXEC"
+        return "CLEAN" if returncode == 0 else "NO_EXEC"
 
-# Card derivation from state if header didn't supply one.
-if [ -z "$CARD_LINE" ] && [ -n "$HYP_LINE" ] && command -v jq >/dev/null 2>&1 \
-   && [ -f "$RESULTS_DIR/state/hypotheses.jsonl" ]; then
-  CARD_LINE=$(jq -r --arg id "$HYP_LINE" 'select(.id == $id) | .card_id // empty' \
-    "$RESULTS_DIR/state/hypotheses.jsonl" 2>/dev/null | tail -1)
-fi
+    def _auto_route(self, returncode: int, current: str) -> tuple[int, str]:
+        binary = self.environment.get("ASAN_GENERIC_BIN", "")
+        if os.environ.get("PROBE_AUTO_ROUTE", "1") == "0" or self.mode != "generic" or self.sanitizer != "asan" or current in {"CRASH", "DIFF"} or not binary or not self.output.is_file():
+            return returncode, current
+        text = self.output.read_text(errors="replace")
+        if not build_routes.output_is_feature_disabled(text):
+            return returncode, current
+        keys = ([f"card:{self.card}"] if self.card else []) + ([f"file:{self.header['target'].split(':')[0]}"] if self.header["target"] else [])
+        candidates: list[str] = []
+        cached = build_routes.lookup_route(Path(self.config.results_dir), *keys) if keys else ""
+        if cached:
+            candidates.append(cached)
+        candidates.extend(str(candidate.binary) for candidate in build_routes.enumerate_sibling_builds(Path(self.config.target_root), Path(binary)) if str(candidate.binary) != cached)
+        feature_match = build_routes.FEATURE_DISABLED_RE.search(text)
+        feature = feature_match.group(0) if feature_match else "feature-disabled"
+        for candidate in candidates:
+            if not os.access(candidate, os.X_OK):
+                continue
+            environment = {**self.environment, "ASAN_GENERIC_BIN": candidate}
+            completed = subprocess.run(self.command, capture_output=True, env=environment, check=False)
+            data = completed.stdout + completed.stderr
+            if build_routes.output_is_feature_disabled(data.decode(errors="replace")):
+                continue
+            self.output.write_bytes(data)
+            routed = self._classify(completed.returncode)
+            print(f"[probe] ROUTED: feature='{feature}' canonical='{binary}' -> '{candidate}' verdict={routed}")
+            for key in keys:
+                build_routes.record_route(Path(self.config.results_dir), key=key, binary=candidate, feature=feature, canonical_binary=binary)
+            return completed.returncode, routed
+        print(f"[probe] ROUTE_MISS: feature='{feature}' canonical='{binary}' - no sibling build exercised this feature")
+        return returncode, current
 
-# Confirmation = 5 runs (timing-dependent UAFs need this).
-[ "$CONFIRM" -eq 1 ] && export ASAN_RUNS=5 || export ASAN_RUNS="${ASAN_RUNS:-1}"
+    def _cap_output(self) -> None:
+        if not self.output.is_file() or not self.output.stat().st_size:
+            return
+        maximum = _nonnegative_int(os.environ.get("PROBE_ASAN_OUTPUT_MAX_BYTES", "8388608"), 8388608)
+        head = _nonnegative_int(os.environ.get("PROBE_ASAN_OUTPUT_HEAD_BYTES", "262144"), 262144)
+        tail = _nonnegative_int(os.environ.get("PROBE_ASAN_OUTPUT_TAIL_BYTES", "262144"), 262144)
+        data = self.output.read_bytes()
+        if maximum and len(data) > maximum:
+            marker = (
+                f"[probe] ASAN_OUTPUT_FILE truncated for storage after verdict classification: original_size_bytes={len(data)} max_bytes={maximum}\n"
+                f"[probe] showing first {head} byte(s) and last {tail} byte(s); rerun with PROBE_ASAN_OUTPUT_MAX_BYTES=0 to preserve full output.\n"
+            ).encode()
+            self.output.write_bytes(marker + data[:head] + b"\n[probe] ... middle omitted from oversized ASan output ...\n" + data[-tail:])
 
-_probe_first_enabled_sanitizer() {
-  if [ "${TARGET_SANITIZERS_EXPLICITLY_DISABLED:-0}" = "1" ]; then
-    printf '%s\n' "runner"
-    return 0
-  fi
-  if [ -n "${TARGET_SANITIZERS_ENABLED+set}" ] && [ "${#TARGET_SANITIZERS_ENABLED[@]}" -gt 0 ]; then
-    printf '%s\n' "${TARGET_SANITIZERS_ENABLED[0]}"
-    return 0
-  fi
-  printf '%s\n' "asan"
-}
+    def _state_command(self, *args: str) -> None:
+        state = BIN_DIR / "state"
+        if not os.access(state, os.X_OK):
+            return
+        subprocess.run([
+            str(state), "--results-dir", self.config.results_dir, "--target-path", self.config.target_root,
+            "--target-slug", self.config.slug, *args,
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
-_probe_sanitizer_is_enabled() {
-  local name="$1" san
-  if [ -n "${TARGET_SANITIZERS_ENABLED+set}" ]; then
-    for san in "${TARGET_SANITIZERS_ENABLED[@]}"; do
-      [ "$san" = "$name" ] && return 0
-    done
-    return 1
-  fi
-  [ "$name" = "asan" ]
-}
+    def _record_state(self, probe_verdict: str) -> None:
+        hypothesis = self.header["hypothesis"]
+        if not hypothesis:
+            return
+        self._state_command(
+            "add-run", "--agent", self.agent, "--hypothesis-id", hypothesis, "--card-id", self.card,
+            "--mode", self.mode, "--testcase", str(self.testcase),
+            "--testcase-sha1", hashlib.sha1(self.testcase.read_bytes()).hexdigest(),
+            "--asan-output", str(self.output), "--verdict", probe_verdict,
+            "--sanitizer-runs", self.environment["SANITIZER_RUNS"],
+        )
+        if probe_verdict == "CRASH" and self.sanitizer != "runner":
+            self._state_command("update-hyp", "--id", hypothesis, "--status", "CRASH", "--note", "bin/probe observed sanitizer diagnostic")
+            if self.card:
+                self._state_command("update-card", "--card-id", self.card, "--status", "crash")
+        elif probe_verdict == "CRASH":
+            self._state_command(
+                "add-note", "--agent", self.agent, "--hypothesis-id", hypothesis,
+                "--card-id", self.card, "--kind", "decision",
+                "--text", "bin/probe observed runner diagnostic in findings-only mode; keep hypothesis/card active until a FIND report or explicit discard closes it",
+            )
 
-_probe_resolve_executable() {
-  local raw="$1"
-  [ -n "$raw" ] || return 1
-  if command -v "$raw" >/dev/null 2>&1; then
-    command -v "$raw"
-  elif [ -x "$raw" ]; then
-    printf '%s\n' "$raw"
-  else
-    target_resolve_path "$raw"
-  fi
-}
+    def _file_crash(self, probe_verdict: str) -> None:
+        runs = int(self.environment["SANITIZER_RUNS"])
+        if not crash_bundle.should_file(probe_verdict, self.sanitizer, runs):
+            return
+        if self.harness_source and self.build_kind == "interpret":
+            print(f"[probe] WARNING: crash confirmed but auto-file skipped for interpreted HARNESS. File it under {self.config.results_dir}/crashes/.", file=sys.stderr)
+            return
+        strategy_path = Path(self.config.results_dir) / f".agent_strategy_{self.agent}"
+        strategy = strategy_path.read_text().strip().upper() if strategy_path.is_file() else ""
+        if not re.fullmatch(r"S[1-8]|REF", strategy):
+            strategy = ""
+        try:
+            status, crash_id = crash_bundle.materialize(
+                self.config.results_dir, self.agent, self.testcase, self.output,
+                self.sanitizer, self.mode, harness=self.harness_source, args=self.args.args,
+                target=self.header["target"], hypothesis=self.header["hypothesis"],
+                card=self.card, strategy=strategy,
+            )
+        except OSError as exc:
+            print(f"[probe] WARNING: crash confirmed but bundle could not be created: {exc}", file=sys.stderr)
+            return
+        if status == "FILED":
+            print(f"[probe] CRASH FILED: {self.config.results_dir}/crashes/{crash_id} - reproducer + sanitizer.txt copied in; enrich report.md there")
+        else:
+            print(f"[probe] CRASH already filed (identical reproducer): {self.config.results_dir}/crashes/{crash_id}")
 
-_probe_selected_sanitizer_bin_raw() {
-  case "${1:-}" in
-    asan)  printf '%s\n' "${TARGET_ASAN_BIN:-}" ;;
-    ubsan) printf '%s\n' "${TARGET_UBSAN_BIN:-}" ;;
-    msan)  printf '%s\n' "${TARGET_MSAN_BIN:-}" ;;
-    tsan)  printf '%s\n' "${TARGET_TSAN_BIN:-}" ;;
-    *)     printf '\n' ;;
-  esac
-}
 
-_probe_selected_can_use_runner() {
-  [ -n "${TARGET_RUNNER_BIN:-}" ] || return 1
-  case "${1:-}" in
-    runner|race) return 0 ;;
-    asan|ubsan|msan|tsan)
-      [ -z "$(_probe_selected_sanitizer_bin_raw "$1")" ] && return 0
-      ;;
-  esac
-  return 1
-}
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        args = parse_args(sys.argv[1:] if argv is None else argv)
+        probe = Probe(args)
+        return probe.dry_run() if args.dry_run else probe.execute()
+    except (ValueError, RuntimeError, OSError, subprocess.CalledProcessError) as exc:
+        print(f"[probe] {exc}", file=sys.stderr)
+        return 2
 
-PROBE_SANITIZER_SELECTED="${PROBE_SANITIZER:-}"
-if [ -n "$PROBE_SANITIZER_SELECTED" ]; then
-  PROBE_SANITIZER_SELECTED="$(printf '%s' "$PROBE_SANITIZER_SELECTED" | tr '[:upper:]' '[:lower:]')"
-else
-  PROBE_SANITIZER_SELECTED="$(_probe_first_enabled_sanitizer)"
-fi
-case "$PROBE_SANITIZER_SELECTED" in
-  asan|ubsan|msan|tsan|race|runner) ;;
-  *) echo "[probe] unsupported sanitizer: $PROBE_SANITIZER_SELECTED" >&2; exit 2 ;;
-esac
-if [ "$PROBE_SANITIZER_SELECTED" != "runner" ]; then
-  if [ "${TARGET_SANITIZERS_EXPLICITLY_DISABLED:-0}" = "1" ]; then
-    echo "[probe] target.toml has [sanitizer].enabled = []; use PROBE_SANITIZER=runner or enable a sanitizer" >&2
-    exit 2
-  fi
-  if ! _probe_sanitizer_is_enabled "$PROBE_SANITIZER_SELECTED" \
-     && [ "${PROBE_ALLOW_DISABLED_SANITIZER:-0}" != "1" ]; then
-    echo "[probe] sanitizer '$PROBE_SANITIZER_SELECTED' is not enabled for this target" >&2
-    echo "[probe] enabled sanitizers: $(target_sanitizers_enabled_csv 2>/dev/null || echo asan)" >&2
-    echo "[probe] set PROBE_ALLOW_DISABLED_SANITIZER=1 only for trusted local experiments" >&2
-    exit 2
-  fi
-fi
 
-case "$PROBE_SANITIZER_SELECTED:$MODE" in
-  asan:*|ubsan:browser|ubsan:js|ubsan:js-diff|ubsan:generic|msan:js|msan:generic|tsan:js|tsan:generic|race:generic|runner:generic) ;;
-  race:*|runner:*)
-    echo "[probe] sanitizer '$PROBE_SANITIZER_SELECTED' is only supported in generic mode" >&2
-    exit 2 ;;
-  msan:browser|msan:js-diff|tsan:browser|tsan:js-diff)
-    echo "[probe] sanitizer '$PROBE_SANITIZER_SELECTED' does not support mode '$MODE' in this harness" >&2
-    exit 2 ;;
-  *)
-    echo "[probe] sanitizer '$PROBE_SANITIZER_SELECTED' does not support mode '$MODE'" >&2
-    exit 2 ;;
-esac
-export PROBE_SANITIZER_SELECTED
-
-# // HARNESS: build or interpret on demand, then route through generic mode.
-#
-# Dispatch by extension. Compiled-language harnesses produce a cached
-# executable under <RESULTS_DIR>/scratch-<N>/.harness-cache/ keyed by a
-# content-hash of the source + flags + asan_lib. Interpreted-language
-# harnesses skip the build step entirely; probe just remembers the
-# interpreter + harness source and hands them to run-asan generic as
-# the binary + leading arg.
-GENERIC_BIN_OVERRIDE=""
-GENERIC_PREARGS=()
-
-_probe_split_shell_words_into_array() {
-  local __out_name="$1" __words="$2" __tmp __rc __arg
-  __tmp="$(mktemp "${TMPDIR:-/tmp}/probe-argv-XXXXXX")" || return 2
-  python3 - "$__words" > "$__tmp" <<'PY'
-import shlex
-import sys
-try:
-    parts = shlex.split(sys.argv[1])
-except ValueError as e:
-    print(f"[probe] cannot parse shell words: {e}", file=sys.stderr)
-    sys.exit(2)
-for part in parts:
-    print(part)
-PY
-  __rc=$?
-  if [ "$__rc" -ne 0 ]; then
-    rm -f "$__tmp"
-    return "$__rc"
-  fi
-  while IFS= read -r __arg; do
-    eval "$__out_name+=(\"\$__arg\")"
-  done < "$__tmp"
-  rm -f "$__tmp"
-}
-
-_probe_sanitizer_compile_flag() {
-  case "$1" in
-    asan)  printf '%s\n' "address" ;;
-    ubsan) printf '%s\n' "undefined" ;;
-    msan)  printf '%s\n' "memory" ;;
-    tsan)  printf '%s\n' "thread" ;;
-    *)     return 1 ;;
-  esac
-}
-
-if [ -n "$HARNESS_LINE" ]; then
-  testcase_dir="$(cd "$(dirname "$TESTCASE")" && pwd -P)"
-  if [ "${PROBE_ALLOW_EXTERNAL_HARNESS:-0}" != "1" ]; then
-    case "$HARNESS_LINE" in
-      /*|..|../*|*/..|*/../*)
-        echo "[probe] HARNESS must stay under the testcase directory: $HARNESS_LINE" >&2
-        echo "[probe] set PROBE_ALLOW_EXTERNAL_HARNESS=1 only for trusted local experiments" >&2
-        exit 2 ;;
-    esac
-  fi
-  harness_src="$testcase_dir/$HARNESS_LINE"
-  [ -f "$harness_src" ] || { echo "[probe] HARNESS source not found: $harness_src" >&2; exit 2; }
-  harness_src="$(_probe_realpath "$harness_src")"
-  if [ "${PROBE_ALLOW_EXTERNAL_HARNESS:-0}" != "1" ] && ! _probe_path_under "$testcase_dir" "$harness_src"; then
-    echo "[probe] HARNESS resolves outside testcase directory: $HARNESS_LINE" >&2
-    echo "[probe] set PROBE_ALLOW_EXTERNAL_HARNESS=1 only for trusted local experiments" >&2
-    exit 2
-  fi
-  hb_dir="$RESULTS_DIR/scratch-${AGENT_NUM}/.harness-cache"
-  mkdir -p "$hb_dir"
-  harness_ext="${harness_src##*.}"
-
-  _probe_print_build_log_digest() {
-    local log_file="$1"
-    [ -f "$log_file" ] || return 0
-    local head_bytes="${PROBE_BUILD_LOG_HEAD_BYTES:-8192}"
-    local tail_bytes="${PROBE_BUILD_LOG_TAIL_BYTES:-8192}"
-    python3 - "$log_file" "$head_bytes" "$tail_bytes" <<'PY'
-import sys
-
-path, head_s, tail_s = sys.argv[1:4]
-try:
-    head = max(0, int(head_s))
-    tail = max(0, int(tail_s))
-except ValueError:
-    head, tail = 8192, 8192
-
-with open(path, "rb") as f:
-    data = f.read()
-
-size = len(data)
-if head == 0 and tail == 0:
-    out = b""
-elif size <= head + tail + 256:
-    out = data
-else:
-    omitted = size - head - tail
-    marker = f"\n[probe] compiler log elided {omitted} bytes; full log: {path}\n".encode()
-    out = data[:head] + marker + data[-tail:]
-
-sys.stderr.write(out.decode("utf-8", errors="replace"))
-if out and not out.endswith(b"\n"):
-    sys.stderr.write("\n")
-PY
-  }
-
-  _probe_build_native() {
-    # Build a sanitizer-instrumented binary out of a C/C++/Rust/Go/Swift
-    # source, or a cached runnable wrapper for Kotlin .kt sources. The caller
-    # has set $compiler, $flag_string, $build_kind, and the cache stem; on
-    # success this exports $hb_path = the built binary/wrapper.
-    local cc_log
-    cc_log="$(mktemp "${TMPDIR:-/tmp}/probe-harness-XXXXXX")"
-    local extra_compile_args=()
-    if [ -n "$flag_string" ]; then
-      _probe_split_shell_words_into_array extra_compile_args "$flag_string" || return 2
-    fi
-    local rc=0
-    case "$build_kind" in
-      cc)
-        # C/C++ HARNESS builds are sanitizer-specific. Never link an ASan
-        # archive into a UBSan/MSan/TSan harness: the selected sanitizer owns
-        # both the -fsanitize flag and the optional target library.
-        local sanitize_flag sanitizer_lib
-        sanitize_flag="$(_probe_sanitizer_compile_flag "$PROBE_SANITIZER_SELECTED")" || {
-          echo "[probe] compiled C/C++ HARNESS does not support sanitizer: $PROBE_SANITIZER_SELECTED" >&2
-          rm -f "$cc_log"
-          return 2
-        }
-        sanitizer_lib="$(target_sanitizer_lib_path "$PROBE_SANITIZER_SELECTED" 2>/dev/null || true)"
-        # ASan is the primary instrumentation path; without an asan_lib
-        # archive there is nothing to link, so a missing asan_lib is a
-        # hard failure. UBSan/MSan/TSan, on the other hand, are usually
-        # useful with just `-fsanitize=...` even when no instrumented
-        # archive of the target library is available — the runtime hooks
-        # the operator code paths in the harness itself, and many real
-        # bugs are catchable that way. So for those sanitizers we
-        # downgrade a missing lib to a warning and continue. Override
-        # with PROBE_REQUIRE_SANITIZER_LIB=1 to restore the strict
-        # behavior (e.g. when the operator wants to guarantee the target
-        # itself is instrumented).
-        if [ "$PROBE_SANITIZER_SELECTED" = "asan" ] && [ -z "$sanitizer_lib" ]; then
-          echo "[probe] target.toml asan_lib missing" >&2
-          rm -f "$cc_log"
-          return 2
-        fi
-        if [ -n "$sanitizer_lib" ] && [ ! -f "$sanitizer_lib" ]; then
-          if [ "$PROBE_SANITIZER_SELECTED" = "asan" ] || [ "${PROBE_REQUIRE_SANITIZER_LIB:-0}" = "1" ]; then
-            echo "[probe] target.toml ${PROBE_SANITIZER_SELECTED}_lib missing: $sanitizer_lib" >&2
-            rm -f "$cc_log"
-            return 2
-          fi
-          echo "[probe] WARN: target.toml ${PROBE_SANITIZER_SELECTED}_lib missing ($sanitizer_lib); building with -fsanitize=$sanitize_flag only" >&2
-          sanitizer_lib=""
-        fi
-        local sanitizer_lib_args=()
-        if [ -n "$sanitizer_lib" ]; then
-          sanitizer_lib_args+=("$sanitizer_lib")
-          # Bake an rpath pointing at the lib's directory so the harness binary
-          # self-locates a shared sanitizer_lib at exec time. Without this,
-          # run-asan would invoke the binary on a Linux host and the loader
-          # would fail with "cannot open shared object file" because the build
-          # tree isn't in ld.so's search path. Harmless for static archives.
-          # Shared with bin/export-repro's reproduce.sh template via the
-          # ${lib%/*} convention in target_sanitizer_rpath_args.
-          local _rpath_arg
-          _rpath_arg="$(target_sanitizer_rpath_args "$sanitizer_lib")"
-          [ -n "$_rpath_arg" ] && sanitizer_lib_args+=("$_rpath_arg")
-        fi
-        local inc_args=() inc
-        for inc in "${TARGET_INCLUDES[@]:-}"; do
-          [ -n "$inc" ] && inc_args+=("-I" "$(target_resolve_path "$inc")")
-        done
-        local define_args=() define
-        for define in "${TARGET_DEFINES[@]:-}"; do
-          [ -n "$define" ] && define_args+=("$define")
-        done
-        local extra_link_args=()
-        if [ -n "${LDFLAGS:-}" ]; then
-          _probe_split_shell_words_into_array extra_link_args "$LDFLAGS" || return 2
-        fi
-        "$compiler" "-fsanitize=$sanitize_flag" -g1 -O0 \
-          ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
-          ${define_args[@]+"${define_args[@]}"} \
-          ${inc_args[@]+"${inc_args[@]}"} \
-          "$harness_src" \
-          ${sanitizer_lib_args[@]+"${sanitizer_lib_args[@]}"} \
-          "${TARGET_LINK_LIBS[@]:-}" \
-          ${extra_link_args[@]+"${extra_link_args[@]}"} \
-          -o "$hb_path" 2>"$cc_log" || rc=$?
-        ;;
-      rust)
-        # Single-file rustc build. Sanitizer enablement is opt-in via
-        # RUSTFLAGS — the harness inherits whatever the operator exported.
-        # -Cdebuginfo=1 is line-tables-only (rustc's equivalent of clang's
-        # -gline-tables-only, and OSS-Fuzz's default for Rust sanitizer builds).
-        rustc -C debuginfo=1 -C opt-level=0 ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
-          -o "$hb_path" "$harness_src" 2>"$cc_log" || rc=$?
-        ;;
-      go)
-        go build -o "$hb_path" ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
-          "$harness_src" 2>"$cc_log" || rc=$?
-        ;;
-      swift)
-        swiftc -gline-tables-only -O0 ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
-          -o "$hb_path" "$harness_src" 2>"$cc_log" || rc=$?
-        ;;
-      kotlin)
-        local jar_path="${hb_path}.jar"
-        "$compiler" ${extra_compile_args[@]+"${extra_compile_args[@]}"} \
-          "$harness_src" -include-runtime -d "$jar_path" 2>"$cc_log" || rc=$?
-        if [ "$rc" -eq 0 ]; then
-          {
-            printf '#!/usr/bin/env bash\n'
-            printf 'exec %q -jar %q "$@"\n' "${JAVA:-java}" "$jar_path"
-          } > "$hb_path" || rc=$?
-          [ "$rc" -eq 0 ] && chmod +x "$hb_path"
-        fi
-        ;;
-      *)
-        echo "[probe] internal: unknown build_kind=$build_kind" >&2; rc=2;;
-    esac
-    if [ "$rc" -ne 0 ]; then
-      mv "$cc_log" "$hb_fail_log" 2>/dev/null || cp "$cc_log" "$hb_fail_log" 2>/dev/null || true
-      rm -f "$cc_log"
-      rm -f "$hb_path"
-      echo "[probe] harness build failed: $harness_src" >&2
-      echo "[probe] full compiler log: $hb_fail_log" >&2
-      _probe_print_build_log_digest "$hb_fail_log"
-      return 2
-    fi
-    rm -f "$cc_log"
-    rm -f "$hb_fail_log"
-    echo "[probe] built harness: $hb_path"
-    return 0
-  }
-
-  _probe_reap_stale_harness_lock() {
-    # The harness build lock is a directory; the holder records its pid in an
-    # `owner` file. If that process dies mid-build the directory would wedge
-    # every later probe for the full lock timeout. Reap it when the owner is
-    # gone — either the recorded pid no longer exists, or (for the brief
-    # mkdir-before-owner-write window) the directory is older than the grace.
-    local lock_dir="$1" owner_pid="" stale=0
-    [ -d "$lock_dir" ] || return 0
-    if [ -f "$lock_dir/owner" ]; then
-      owner_pid=$(grep '^pid=' "$lock_dir/owner" 2>/dev/null | head -1 | cut -d= -f2)
-      if [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
-        stale=1
-      fi
-    else
-      local grace="${PROBE_HARNESS_LOCK_STALE_MIN:-5}"
-      if [ "$grace" -le 0 ]; then
-        stale=1
-      elif [ -n "$(find "$lock_dir" -maxdepth 0 -mmin +"$grace" 2>/dev/null)" ]; then
-        stale=1
-      fi
-    fi
-    [ "$stale" -eq 1 ] || return 0
-    # Steal the directory by renaming it: only one racing reaper can win the
-    # mv, so the lock is removed exactly once.
-    local steal_dir="${lock_dir}.stale.$$"
-    if mv "$lock_dir" "$steal_dir" 2>/dev/null; then
-      rm -rf "$steal_dir" 2>/dev/null || true
-      echo "[probe] reaped stale harness build lock: $lock_dir (owner pid ${owner_pid:-unknown})" >&2
-    fi
-  }
-
-  # Harness toolchain dispatch is driven by lib/languages.py — the
-  # single registry shared with workqueue, target_config, and
-  # crash_artifacts. The CLI emits bash variable assignments we eval
-  # in. Compiled extensions set BUILD_KIND/COMPILER_ENV/COMPILER_DEFAULT/
-  # FLAGS_ENV; interpreted extensions set BUILD_KIND=interpret plus
-  # INTERPRETER_ENV/INTERPRETER_DEFAULT/INTERPRETER_PREARGS.
-  if ! dispatch_eval="$(python3 "$SCRIPT_ROOT/lib/languages.py" probe-dispatch "$harness_ext" 2>/dev/null)"; then
-    echo "[probe] HARNESS source has unsupported extension: $harness_src" >&2
-    compiled_exts="$(python3 "$SCRIPT_ROOT/lib/languages.py" exts --kind harness-compiled 2>/dev/null | paste -sd' ' -)"
-    interp_exts="$(python3 "$SCRIPT_ROOT/lib/languages.py" exts --kind harness-interpreted 2>/dev/null | paste -sd' ' -)"
-    echo "[probe] supported (compiled):    $compiled_exts" >&2
-    echo "[probe] supported (interpreted): $interp_exts" >&2
-    exit 2
-  fi
-  # Reset every var dispatch_eval might set so a prior iteration's
-  # leftovers cannot leak into this dispatch.
-  BUILD_KIND=""; COMPILER_ENV=""; COMPILER_DEFAULT=""; FLAGS_ENV=""
-  INTERPRETER_ENV=""; INTERPRETER_DEFAULT=""; INTERPRETER_PREARGS=()
-  eval "$dispatch_eval"
-
-  case "$BUILD_KIND" in
-    interpret)
-      # ── Interpreted-language harnesses: no build step ────────────
-      # Hand the harness source to the interpreter via GENERIC_PREARGS
-      # so run-asan generic executes:
-      #   <interpreter> [<preargs>] <harness-src> <testcase> <args>
-      # Indirect expansion (`${!VAR}`) reads the env override; absent
-      # values fall back to the registry default.
-      interpreter_override="${!INTERPRETER_ENV:-}"
-      GENERIC_BIN_OVERRIDE="${interpreter_override:-$INTERPRETER_DEFAULT}"
-      GENERIC_PREARGS=("${INTERPRETER_PREARGS[@]:-}" "$harness_src")
-      # Drop the placeholder empty-string when INTERPRETER_PREARGS was empty.
-      if [ ${#INTERPRETER_PREARGS[@]} -eq 0 ]; then
-        GENERIC_PREARGS=("$harness_src")
-      fi
-      build_kind=interpret
-      ;;
-    cc|rust|go|swift|kotlin)
-      compiler_override="${!COMPILER_ENV:-}"
-      compiler="${compiler_override:-$COMPILER_DEFAULT}"
-      flag_string="${!FLAGS_ENV:-}"
-      build_kind="$BUILD_KIND"
-      ;;
-    *)
-      echo "[probe] internal: unexpected build_kind=$BUILD_KIND from lib/languages.py" >&2
-      exit 2 ;;
-  esac
-
-  if [ "$build_kind" != "interpret" ]; then
-    hb_stem="$(basename "$harness_src")"
-    sanitizer_flag_for_hash=""
-    sanitizer_lib_for_hash=""
-    if [ "$build_kind" = "cc" ]; then
-      sanitizer_flag_for_hash="$(_probe_sanitizer_compile_flag "$PROBE_SANITIZER_SELECTED" 2>/dev/null || true)"
-      sanitizer_lib_for_hash="$(target_sanitizer_lib_path "$PROBE_SANITIZER_SELECTED" 2>/dev/null || true)"
-    fi
-    sanitizer_lib_stat=$(audit_stat_key "$sanitizer_lib_for_hash" 2>/dev/null || true)
-    compiler_for_hash="$compiler"
-    if command -v "$compiler" >/dev/null 2>&1; then
-      compiler_for_hash="$(command -v "$compiler")"
-    fi
-    compiler_stat=$(audit_stat_key "$compiler_for_hash" 2>/dev/null || true)
-    config_hash="$({
-      printf 'schema=4\ncompiler=%s\ncompiler_stat=%s\nbuild_kind=%s\nflags=%s\nsanitizer=%s\nsanitize_flag=%s\nsanitizer_lib=%s\nsanitizer_lib_stat=%s\n' \
-        "$compiler_for_hash" "$compiler_stat" "$build_kind" "$flag_string" \
-        "$PROBE_SANITIZER_SELECTED" "$sanitizer_flag_for_hash" "$sanitizer_lib_for_hash" "$sanitizer_lib_stat"
-      printf 'includes=%s\ndefines=%s\nlinks=%s\nldflags=%s\n' "${TARGET_INCLUDES[*]:-}" "${TARGET_DEFINES[*]:-}" "${TARGET_LINK_LIBS[*]:-}" "${LDFLAGS:-}"
-      audit_sha1 "$harness_src" 2>/dev/null
-    } | audit_sha1 2>/dev/null | awk '{print $1}')"
-    [ -n "$config_hash" ] || config_hash="$(date +%s)"
-    hb_path="$hb_dir/${hb_stem}.${config_hash}.bin"
-    hb_fail_log="$hb_dir/${hb_stem}.${config_hash}.build.log"
-    hb_lock_dir="$hb_dir/${hb_stem}.${config_hash}.lock"
-    if [ ! -x "$hb_path" ]; then
-      hb_waited=0
-      hb_have_lock=0
-      hb_lock_timeout="${PROBE_HARNESS_BUILD_LOCK_TIMEOUT:-600}"
-      while true; do
-        if mkdir "$hb_lock_dir" 2>/dev/null; then
-          hb_have_lock=1
-          break
-        fi
-        if [ -x "$hb_path" ]; then
-          break
-        fi
-        if [ -s "$hb_fail_log" ]; then
-          echo "[probe] cached harness build failure: $harness_src" >&2
-          echo "[probe] full compiler log: $hb_fail_log" >&2
-          _probe_print_build_log_digest "$hb_fail_log"
-          exit 2
-        fi
-        _probe_reap_stale_harness_lock "$hb_lock_dir"
-        if [ "$hb_waited" -ge "$hb_lock_timeout" ]; then
-          echo "[probe] timed out waiting for harness build lock: $hb_lock_dir" >&2
-          exit 2
-        fi
-        sleep 1
-        hb_waited=$((hb_waited + 1))
-      done
-      if [ "$hb_have_lock" -eq 1 ]; then
-        # We hold the lock: every exit path below must release it so the
-        # directory never wedges a later probe.
-        if [ -x "$hb_path" ]; then
-          # A peer finished the build between our last check and mkdir.
-          rmdir "$hb_lock_dir" 2>/dev/null || true
-        else
-          {
-            printf 'pid=%s\n' "$$"
-            date '+started=%Y-%m-%dT%H:%M:%S%z'
-          } > "$hb_lock_dir/owner" 2>/dev/null || true
-          if [ -s "$hb_fail_log" ]; then
-            rm -f "$hb_lock_dir/owner" 2>/dev/null || true
-            rmdir "$hb_lock_dir" 2>/dev/null || true
-            echo "[probe] cached harness build failure: $harness_src" >&2
-            echo "[probe] full compiler log: $hb_fail_log" >&2
-            _probe_print_build_log_digest "$hb_fail_log"
-            exit 2
-          fi
-          _probe_build_native
-          hb_rc=$?
-          rm -f "$hb_lock_dir/owner" 2>/dev/null || true
-          rmdir "$hb_lock_dir" 2>/dev/null || true
-          if [ "$hb_rc" -ne 0 ]; then
-            exit "$hb_rc"
-          fi
-        fi
-      fi
-    fi
-    GENERIC_BIN_OVERRIDE="$hb_path"
-  fi
-  MODE="generic"
-fi
-
-# npm targets default to `node`, but TypeScript testcases need a transpiling
-# runner. Prefer the target-local ts-node when present; otherwise leave the
-# configured node runner untouched so plain JS behavior is unchanged.
-if [ "$MODE" = "generic" ] \
-   && [ -z "$HARNESS_LINE" ] \
-   && [ -z "$GENERIC_BIN_OVERRIDE" ] \
-   && _probe_selected_can_use_runner "$PROBE_SANITIZER_SELECTED"; then
-  case "$EXEC_TESTCASE" in
-    *.ts|*.tsx)
-      _runner_base="$(basename "${TARGET_RUNNER_BIN:-}")"
-      if [ "$_runner_base" = "node" ]; then
-        _ts_node=""
-        if [ -x "$TARGET_ROOT/node_modules/.bin/ts-node" ]; then
-          _ts_node="$TARGET_ROOT/node_modules/.bin/ts-node"
-        elif command -v ts-node >/dev/null 2>&1; then
-          _ts_node="$(command -v ts-node)"
-        fi
-        if [ -n "$_ts_node" ]; then
-          GENERIC_BIN_OVERRIDE="$_ts_node"
-          GENERIC_PREARGS=(
-            --transpile-only
-            --skip-project
-            --compiler-options '{"module":"CommonJS","moduleResolution":"node","target":"ES2022","ignoreDeprecations":"6.0"}'
-          )
-        fi
-      fi
-      unset _runner_base _ts_node
-      ;;
-  esac
-fi
-
-# Generic mode binary: select exactly one sanitizer/runtime for this probe
-# invocation. Default is the first configured sanitizer in target.toml; set
-# PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner to override explicitly.
-probe_generic_uses_runner=0
-if [ "$MODE" = "generic" ]; then
-  case "$PROBE_SANITIZER_SELECTED" in
-    asan)
-      if [ -n "$GENERIC_BIN_OVERRIDE" ]; then
-        export ASAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
-      elif [ -n "${TARGET_ASAN_BIN:-}" ]; then
-        export ASAN_GENERIC_BIN="$(target_resolve_path "$TARGET_ASAN_BIN")"
-      elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
-        export ASAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
-        probe_generic_uses_runner=1
-      fi
-      ;;
-    ubsan)
-      if [ -n "$GENERIC_BIN_OVERRIDE" ]; then
-        export UBSAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
-      elif [ -n "${TARGET_UBSAN_BIN:-}" ]; then
-        export UBSAN_GENERIC_BIN="$(target_resolve_path "$TARGET_UBSAN_BIN")"
-      elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
-        export UBSAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
-        probe_generic_uses_runner=1
-      fi
-      ;;
-    msan)
-      if [ -n "$GENERIC_BIN_OVERRIDE" ]; then
-        export MSAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
-      elif [ -n "${TARGET_MSAN_BIN:-}" ]; then
-        export MSAN_GENERIC_BIN="$(target_resolve_path "$TARGET_MSAN_BIN")"
-      elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
-        export MSAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
-        probe_generic_uses_runner=1
-      fi
-      ;;
-    tsan)
-      if [ -n "$GENERIC_BIN_OVERRIDE" ]; then
-        export TSAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
-      elif [ -n "${TARGET_TSAN_BIN:-}" ]; then
-        export TSAN_GENERIC_BIN="$(target_resolve_path "$TARGET_TSAN_BIN")"
-      elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
-        export TSAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
-        probe_generic_uses_runner=1
-      fi
-      ;;
-    runner|race)
-      if [ -n "$GENERIC_BIN_OVERRIDE" ]; then
-        export ASAN_GENERIC_BIN="$GENERIC_BIN_OVERRIDE"
-      elif [ -n "${TARGET_RUNNER_BIN:-}" ]; then
-        export ASAN_GENERIC_BIN="$(_probe_resolve_executable "$TARGET_RUNNER_BIN")"
-        probe_generic_uses_runner=1
-      fi
-      # run-asan generic is also the historical generic runner wrapper.
-      # Suppress sanitizer option env for runner/race mode so a Go -race or
-      # language runtime execution does not inherit the wrong runtime state.
-      export ASAN_GENERIC_DISABLE_OPTIONS=1
-      export TARGET_SANITIZERS_EXPLICITLY_DISABLED=1
-      ;;
-  esac
-fi
-
-# Compose generic-mode invocation. The dispatch below routes every sanitizer
-# through `run-sanitizer-multi <san> generic ...`, which drives the matching
-# single-shot runner (run-asan/run-ubsan/run-msan/run-tsan; race/runner reuse
-# run-asan) N times. Three argv shapes feed that wrapper:
-#
-#   (a) Default (no runner, no // HARNESS:):
-#       run-sanitizer-multi <san> generic <testcase> <args>
-#       → bin runs `<sanitizer_bin> <testcase> <args>`
-#
-#   (b) Interpreted // HARNESS: (harness.py / harness.rb / ...):
-#       GENERIC_PREARGS=(harness.py <testcase>).
-#       → bin runs `<interpreter> <harness.py> <testcase> <args>`
-#
-#   (c) target.toml [runner] with args containing "{TESTCASE}":
-#       Pre-args already include the testcase path after substitution.
-#       Sentinel "" passed as testcase so run-sanitizer-multi's coverage gate +
-#       budget accounting still see the file (via TARGET= header read).
-#       *_GENERIC_SKIP_TESTCASE=1 tells the runner NOT to insert <testcase>
-#       again — bin runs `<runner_bin> <expanded args> <trailing>`.
-declare -a cmd
-declare -a generic_pre_args=()
-generic_skip_testcase=0
-if [ "$MODE" = "generic" ]; then
-  if [ "$probe_generic_uses_runner" -eq 1 ]; then
-    target_runner_tokens_supported "$PROBE_SANITIZER_SELECTED" || exit 2
-  fi
-  if [ -z "$HARNESS_LINE" ] \
-     && [ "${#GENERIC_PREARGS[@]}" -eq 0 ] \
-     && [ "$probe_generic_uses_runner" -eq 1 ] \
-     && [ "${#TARGET_RUNNER_ARGS[@]}" -gt 0 ]; then
-    while IFS= read -r _ra; do
-      generic_pre_args+=("$_ra")
-    done < <(target_runner_args_for_testcase "$EXEC_TESTCASE" "$PROBE_SANITIZER_SELECTED")
-    # If any template arg references {TESTCASE}, the runner has placed the
-    # testcase explicitly (possibly embedded, e.g. --input={TESTCASE}) — don't
-    # let run-asan generic prepend it again. Otherwise the runner template did
-    # NOT reference {TESTCASE}, so the testcase should still go in the canonical
-    # position (<bin> <pre-args> <testcase> <trailing>).
-    for _ra in "${TARGET_RUNNER_ARGS[@]}"; do
-      [[ "$_ra" == *"{TESTCASE}"* ]] && { generic_skip_testcase=1; break; }
-    done
-    if [ "$generic_skip_testcase" -eq 0 ]; then
-      generic_pre_args+=("$EXEC_TESTCASE")
-      generic_skip_testcase=1
-    fi
-  elif [ "${#GENERIC_PREARGS[@]}" -gt 0 ]; then
-    generic_pre_args=("${GENERIC_PREARGS[@]}" "$EXEC_TESTCASE")
-    generic_skip_testcase=1
-  elif [ "$EXEC_TESTCASE" != "$TESTCASE" ]; then
-    generic_pre_args=("$EXEC_TESTCASE")
-    generic_skip_testcase=1
-  fi
-fi
-export ASAN_GENERIC_SKIP_TESTCASE="$generic_skip_testcase"
-export SANITIZER_GENERIC_SKIP_TESTCASE="$generic_skip_testcase"
-
-case "$MODE" in
-  js-diff)
-    # js-diff is a single-shot SpiderMonkey differential, NOT an N-run crash
-    # confirmation, so it does not go through the multi-run normalizer (which
-    # would loop the differential N times, double-write $ASAN_OUTPUT_FILE
-    # against the tee below, and mis-count EXECUTION_RATE). Both sanitizers
-    # run their single-shot runner directly; the tee below captures output.
-    case "$PROBE_SANITIZER_SELECTED" in
-      asan)  cmd=("$SCRIPT_DIR/run-asan" "js-diff" "$EXEC_TESTCASE" "$@") ;;
-      ubsan) cmd=("$SCRIPT_DIR/run-ubsan" "js-diff" "$EXEC_TESTCASE" "$@") ;;
-    esac ;;
-  browser|js)
-    # Every sanitizer goes through the generic multi-run normalizer, which
-    # owns the run header, CRASH_RATE/EXECUTION_RATE footer, and verdict
-    # detection uniformly (see bin/run-sanitizer-multi).
-    cmd=("$SCRIPT_DIR/run-sanitizer-multi" "$PROBE_SANITIZER_SELECTED" "$MODE" "$EXEC_TESTCASE" "$@") ;;
-  generic)
-    if [ "${#generic_pre_args[@]}" -gt 0 ]; then
-      cmd=("$SCRIPT_DIR/run-sanitizer-multi" "$PROBE_SANITIZER_SELECTED" "generic" "$EXEC_TESTCASE"
-           "${generic_pre_args[@]}" "$@")
-    else
-      cmd=("$SCRIPT_DIR/run-sanitizer-multi" "$PROBE_SANITIZER_SELECTED" "generic" "$EXEC_TESTCASE" "$@")
-    fi
-    ;;
-esac
-
-if [ "$DRY_RUN" -eq 1 ]; then
-  printf '[probe] mode=%s sanitizer=%s asan_output=%s target=%s hypothesis=%s want=%s card=%s\n' \
-    "$MODE" "$PROBE_SANITIZER_SELECTED" "$ASAN_OUTPUT_FILE" "${TARGET_LINE:-}" "${HYP_LINE:-}" "${WANT:-}" "${CARD_LINE:-}"
-  if [ "$EXEC_TESTCASE" != "$TESTCASE" ]; then
-    printf '[probe] exec_testcase=%s original_testcase=%s\n' "$EXEC_TESTCASE" "$TESTCASE"
-  fi
-  printf '[probe] command:'
-  printf ' %q' "${cmd[@]}"
-  printf '\n'
-  exit 0
-fi
-
-_confirm_tag=""
-[ "$CONFIRM" -eq 1 ] && _confirm_tag=" confirm=1"
-echo "[probe] mode=$MODE testcase=$TESTCASE asan_output=$ASAN_OUTPUT_FILE${_confirm_tag}"
-rc=0
-if [ "$MODE" = "js-diff" ]; then
-  mkdir -p "$(dirname "$ASAN_OUTPUT_FILE")" 2>/dev/null || true
-  "${cmd[@]}" 2>&1 | tee "$ASAN_OUTPUT_FILE"
-  rc=${PIPESTATUS[0]}
-else
-  # Every sanitizer runs through run-sanitizer-multi, which writes the run
-  # header + CRASH_RATE/EXECUTION_RATE footer into $ASAN_OUTPUT_FILE itself
-  # and echoes to stdout — so probe just runs it (no separate capture loop).
-  "${cmd[@]}" || rc=$?
-fi
-
-# Crash / clean classification lives in lib/verdict.sh — the single
-# source shared with bin/scratch-status and lib/quality.sh. Built-in
-# runtime-fatal markers are VERDICT_CRASH_PATTERNS; per-target additions
-# from [runner].crash_patterns flow through TARGET_RUNNER_CRASH_PATTERNS,
-# which verdict_file_has_crash unions in.
-#
-# Classify against the FULL raw output — never the capped digest. A real
-# diagnostic can land in the middle of an oversized log, so capping before
-# the verdict would silently turn a CRASH into NO_EXEC/CLEAN (false
-# negative). The artifact is capped for storage only after every verdict
-# decision below (including any auto-route reclassification).
-verdict="NO_EXEC"
-if [ -s "$ASAN_OUTPUT_FILE" ]; then
-  if verdict_file_has_crash "$ASAN_OUTPUT_FILE"; then
-    verdict="CRASH"
-  elif grep -q 'DIFFERENTIAL: outputs DIFFER' "$ASAN_OUTPUT_FILE" 2>/dev/null; then
-    verdict="DIFF"
-  elif verdict_file_is_clean "$ASAN_OUTPUT_FILE"; then
-    verdict="CLEAN"
-  fi
-elif [ "$rc" -eq 0 ]; then
-  verdict="CLEAN"
-fi
-
-# ── Auto-route to alternate sanitizer builds on feature-disabled ────
-# Many C/C++ targets ship multiple ASan builds because different code
-# paths need different configure flags (pcre2 JIT lives in
-# build-asan-jit/, not build-asan/). If the canonical binary returned a
-# "not compiled in" / "JIT not available" / "not supported in this
-# build" signature, sweep $TARGET_ROOT/build-*/ for siblings with the
-# same binary name and retry against each. First candidate whose output
-# no longer carries the sentinel wins. The route is cached in
-# $RESULTS_DIR/build-routes.jsonl so future probes skip the sweep.
-#
-# Skip when:
-#   * verdict is already CRASH/DIFF — we found something interesting,
-#     stick with the canonical build.
-#   * we're not in generic ASan mode — feature-disabled phrasing is
-#     specific to ASan native probes; runner/race/ubsan/msan/tsan don't
-#     benefit.
-#   * ASAN_GENERIC_BIN isn't set or doesn't live under a build-* dir —
-#     no anchor to extrapolate from.
-#   * PROBE_AUTO_ROUTE=0 — escape hatch for tests / debugging.
-_probe_auto_route() {
-  [ "${PROBE_AUTO_ROUTE:-1}" != "0" ] || return 0
-  [ "$MODE" = "generic" ] || return 0
-  [ "$PROBE_SANITIZER_SELECTED" = "asan" ] || return 0
-  case "$verdict" in CRASH|DIFF) return 0 ;; esac
-  [ -s "$ASAN_OUTPUT_FILE" ] || return 0
-  [ -n "${ASAN_GENERIC_BIN:-}" ] || return 0
-  [ -n "${TARGET_ROOT:-}" ] || return 0
-
-  python3 "$SCRIPT_DIR/../lib/build_routes.py" sentinel "$ASAN_OUTPUT_FILE" >/dev/null 2>&1 || return 0
-
-  # Try the cached route first — no rediscovery cost if we already
-  # found the right binary on a prior probe for this surface.
-  local route_key route_keys=() cached
-  if [ -n "${CARD_LINE:-}" ]; then
-    route_keys+=("card:${CARD_LINE}")
-  fi
-  if [ -n "${TARGET_LINE:-}" ]; then
-    # TARGET_LINE is "file:function:line"; the file portion is the
-    # routing key (siblings on the same file route to the same binary).
-    local _tf="${TARGET_LINE%%:*}"
-    [ -n "$_tf" ] && route_keys+=("file:${_tf}")
-  fi
-  cached=""
-  if [ -n "${RESULTS_DIR:-}" ] && [ "${#route_keys[@]}" -gt 0 ]; then
-    cached=$(python3 "$SCRIPT_DIR/../lib/build_routes.py" lookup "$RESULTS_DIR" "${route_keys[@]}" 2>/dev/null || true)
-  fi
-
-  local cand_bin found_bin="" feature_label
-  feature_label=$(grep -oE -m1 '(not compiled in|not enabled at configure(\s+time)?|not supported in this build|JIT not (available|supported|compiled)|no just-in-time (compiler )?support|feature (is )?disabled|(built|compiled) without [A-Za-z][A-Za-z0-9_+-]* support)' \
-    "$ASAN_OUTPUT_FILE" 2>/dev/null | head -1)
-  feature_label="${feature_label:-feature-disabled}"
-
-  # Build candidate list: cached route first (if any), then live sweep.
-  local -a candidates=()
-  [ -n "$cached" ] && candidates+=("$cached")
-  while IFS= read -r cand_bin; do
-    [ -n "$cand_bin" ] || continue
-    # De-dup: skip the cached entry if the sweep surfaces it again.
-    if [ -n "$cached" ] && [ "$cand_bin" = "$cached" ]; then
-      continue
-    fi
-    candidates+=("$cand_bin")
-  done < <(python3 "$SCRIPT_DIR/../lib/build_routes.py" enumerate "$TARGET_ROOT" "$ASAN_GENERIC_BIN" 2>/dev/null)
-
-  [ "${#candidates[@]}" -gt 0 ] || return 0
-
-  local retry_out retry_rc retry_label
-  for cand_bin in "${candidates[@]}"; do
-    [ -x "$cand_bin" ] || continue
-    retry_out=$(mktemp -t probe-route-XXXX.txt 2>/dev/null) || continue
-    retry_rc=0
-    ASAN_GENERIC_BIN="$cand_bin" \
-      "${cmd[@]}" >"$retry_out" 2>&1 || retry_rc=$?
-    # Skip candidates that also feature-disable.
-    if python3 "$SCRIPT_DIR/../lib/build_routes.py" sentinel "$retry_out" >/dev/null 2>&1; then
-      rm -f "$retry_out"
-      continue
-    fi
-    # Found a candidate that exercised the feature. Adopt its output
-    # as the canonical probe result and update rc/verdict.
-    mv "$retry_out" "$ASAN_OUTPUT_FILE"
-    rc="$retry_rc"
-    verdict="NO_EXEC"
-    if [ -s "$ASAN_OUTPUT_FILE" ]; then
-      if verdict_file_has_crash "$ASAN_OUTPUT_FILE"; then
-        verdict="CRASH"
-      elif grep -q 'DIFFERENTIAL: outputs DIFFER' "$ASAN_OUTPUT_FILE" 2>/dev/null; then
-        verdict="DIFF"
-      elif verdict_file_is_clean "$ASAN_OUTPUT_FILE"; then
-        verdict="CLEAN"
-      fi
-    elif [ "$rc" -eq 0 ]; then
-      verdict="CLEAN"
-    fi
-    found_bin="$cand_bin"
-    echo "[probe] ROUTED: feature='${feature_label}' canonical='${ASAN_GENERIC_BIN}' → '${cand_bin}' verdict=${verdict}"
-    # Cache the route for this surface so future probes skip rediscovery.
-    if [ -n "${RESULTS_DIR:-}" ]; then
-      local _rk
-      for _rk in "${route_keys[@]}"; do
-        python3 "$SCRIPT_DIR/../lib/build_routes.py" record \
-          "$RESULTS_DIR" "$_rk" "$cand_bin" \
-          --feature "$feature_label" \
-          --canonical "$ASAN_GENERIC_BIN" >/dev/null 2>&1 || true
-      done
-    fi
-    break
-  done
-  if [ -z "$found_bin" ]; then
-    echo "[probe] ROUTE_MISS: feature='${feature_label}' canonical='${ASAN_GENERIC_BIN}' — no sibling build exercised this feature; the hypothesis is genuinely env-blocked for this checkout"
-  fi
-  return 0
-}
-_probe_auto_route || true
-
-# Cap the on-disk artifact for storage now that every verdict (initial +
-# any auto-route reclassification) has been decided against the full raw
-# output. This bounds disk/token cost without ever hiding a diagnostic
-# from classification.
-_probe_cap_asan_output_file "$ASAN_OUTPUT_FILE"
-
-echo "[probe] verdict=$verdict"
-
-# State recording (best-effort; only if state machinery is available).
-if [ -n "$HYP_LINE" ] && [ -x "$SCRIPT_DIR/state" ]; then
-  state_args=(--results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG")
-  # Capture testcase content sha1 so bin/probe-history can correlate runs
-  # across renames/moves. audit_sha1 lives in lib/platform.sh; output is
-  # "<sha1>  <path>", so awk to the hash.
-  _tc_sha1=$(audit_sha1 "$TESTCASE" 2>/dev/null | awk '{print $1}')
-  "$SCRIPT_DIR/state" "${state_args[@]}" \
-    add-run --agent "$AGENT_NUM" --hypothesis-id "$HYP_LINE" --card-id "${CARD_LINE:-}" \
-    --mode "$MODE" --testcase "$TESTCASE" --testcase-sha1 "${_tc_sha1:-}" \
-    --asan-output "$ASAN_OUTPUT_FILE" --verdict "$verdict" \
-    --asan-runs "$ASAN_RUNS" >/dev/null 2>&1 || true
-  if [ "$verdict" = "CRASH" ] && [ "$PROBE_SANITIZER_SELECTED" != "runner" ]; then
-    "$SCRIPT_DIR/state" "${state_args[@]}" \
-      update-hyp --id "$HYP_LINE" --status "CRASH" --note "bin/probe observed sanitizer diagnostic" \
-      >/dev/null 2>&1 || true
-    if [ -n "$CARD_LINE" ]; then
-      "$SCRIPT_DIR/state" "${state_args[@]}" \
-        update-card --card-id "$CARD_LINE" --status "crash" >/dev/null 2>&1 || true
-    fi
-  elif [ "$verdict" = "CRASH" ]; then
-    "$SCRIPT_DIR/state" "${state_args[@]}" \
-      add-note --agent "$AGENT_NUM" --hypothesis-id "$HYP_LINE" --card-id "${CARD_LINE:-}" \
-      --kind "decision" --text "bin/probe observed runner diagnostic in findings-only mode; keep hypothesis/card active until a FIND report or explicit discard closes it" \
-      >/dev/null 2>&1 || true
-  fi
-fi
-
-# Materialize the maintainer-facing crash bundle once a sanitizer diagnostic is
-# CONFIRMED, and tell the agent where it landed. Interpreted HARNESS runs are
-# deliberately skipped until export-repro can round-trip that harness type;
-# auto-filing a non-exportable bundle is worse than a visible manual handoff.
-# Gated on a multi-run probe (ASAN_RUNS>=2, i.e. --confirm) so a single
-# exploratory run does not auto-file an unconfirmed flake. Dedup keys on the
-# full execution identity (testcase + sanitizer + mode + harness + trailing
-# args), so the same bytes under a different sanitizer/mode still get their own
-# bundle. Best-effort: never blocks probe's exit, never changes the dedup/triage
-# decision (it only ever adds a bundle).
-if crash_bundle_should_file "$verdict" "$PROBE_SANITIZER_SELECTED" "${ASAN_RUNS:-1}"; then
-  if [ -n "${harness_src:-}" ] && [ "${build_kind:-}" = "interpret" ]; then
-    echo "[probe] WARNING: crash confirmed but auto-file skipped for interpreted HARNESS; export-repro cannot round-trip this harness type yet. File the reproducer manually under $RESULTS_DIR/crashes/CRASH-NNN-$AGENT_NUM/." >&2
-  else
-    # Strategy attribution comes from the agent's assigned-strategy sidecar
-    # (bin/audit::agent_strategy_path), so auto-filed reports carry Strategy: S<N>.
-    _cb_strategy=""
-    if [ -f "$RESULTS_DIR/.agent_strategy_${AGENT_NUM}" ]; then
-      _cb_strategy="$(tr -d '[:space:]' < "$RESULTS_DIR/.agent_strategy_${AGENT_NUM}" 2>/dev/null | tr '[:lower:]' '[:upper:]')"
-      case "$_cb_strategy" in S[1-8]|REF) ;; *) _cb_strategy="" ;; esac
-    fi
-    # Build argv as an array so optional values (e.g. a harness path containing
-    # spaces) reach the helper intact and do not corrupt the dedup identity.
-    _cb_args=(--results-dir "$RESULTS_DIR" --agent "$AGENT_NUM"
-              --testcase "$TESTCASE" --sanitizer "$ASAN_OUTPUT_FILE"
-              --san-name "$PROBE_SANITIZER_SELECTED" --mode "$MODE")
-    [ -n "${harness_src:-}" ] && _cb_args+=(--harness "$harness_src")
-    for _cb_arg in "$@"; do
-      _cb_args+=(--arg "$_cb_arg")
-    done
-    unset _cb_arg
-    [ -n "$TARGET_LINE" ]     && _cb_args+=(--target "$TARGET_LINE")
-    [ -n "$HYP_LINE" ]        && _cb_args+=(--hyp "$HYP_LINE")
-    [ -n "$CARD_LINE" ]       && _cb_args+=(--card "$CARD_LINE")
-    [ -n "$_cb_strategy" ]    && _cb_args+=(--strategy "$_cb_strategy")
-    _cb_out="$(crash_bundle_materialize "${_cb_args[@]}" 2>/dev/null)"
-    _cb_rc=$?
-    case "$_cb_out" in
-      "FILED "*)
-        _cb_id="${_cb_out#FILED }"
-        echo "[probe] CRASH FILED: $RESULTS_DIR/crashes/$_cb_id — reproducer + sanitizer.txt copied in; enrich report.md there (do not re-file or leave it in scratch)"
-        if [ -n "$HYP_LINE" ] && [ -x "$SCRIPT_DIR/state" ]; then
-          "$SCRIPT_DIR/state" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-            add-note --agent "$AGENT_NUM" --hypothesis-id "$HYP_LINE" --card-id "${CARD_LINE:-}" \
-            --kind "decision" --text "bin/probe filed $_cb_id (reproducer + sanitizer trace materialized); enrich report.md, do not re-file" \
-            >/dev/null 2>&1 || true
-        fi
-        ;;
-      "DUP "*)
-        _cb_id="${_cb_out#DUP }"
-        echo "[probe] CRASH already filed (identical reproducer): $RESULTS_DIR/crashes/$_cb_id"
-        ;;
-      *)
-        # Confirmed crash but the bundle was not created (I/O, permissions, race).
-        # Never silent: the hypothesis is already marked CRASH, so a missing
-        # bundle would otherwise close the work with nothing on disk.
-        echo "[probe] WARNING: crash confirmed but bundle could not be created (rc=$_cb_rc). File the reproducer under $RESULTS_DIR/crashes/CRASH-NNN-$AGENT_NUM/ manually." >&2
-        ;;
-    esac
-    unset _cb_out _cb_id _cb_rc _cb_strategy _cb_args
-  fi
-fi
-
-exit "$rc"
+if __name__ == "__main__":
+    raise SystemExit(main())

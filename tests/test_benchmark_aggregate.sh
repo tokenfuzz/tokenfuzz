@@ -88,7 +88,7 @@ mkdir -p "$pbd/cells"
 mkpoolcell() { # cellname condition  -> a cell with one confirmed crash
   local d="$pbd/cells/$1" rdp="$pbd/cells/$1/results"
   mkdir -p "$d" "$rdp/crashes/CRASH-001" "$rdp/findings/FIND-001"
-  printf '%s\n  #0 f a.c\n' "$ASAN_LINE" > "$rdp/crashes/CRASH-001/asan.txt"
+  printf '%s\n  #0 f a.c\n' "$ASAN_LINE" > "$rdp/crashes/CRASH-001/sanitizer.txt"
   printf '# Crash report\nTarget: `%s/work/targets/demo/crash.c`\n' "$HOME" \
     > "$rdp/crashes/CRASH-001/REPORT.md"
   printf '# Finding report\nLocation: `%s/work/targets/demo/find.c`\n' "$HOME" \
@@ -97,7 +97,8 @@ mkpoolcell() { # cellname condition  -> a cell with one confirmed crash
 {"condition":"$2","replicate":1,"status":"done","results_dir":"$rdp"}
 JSON
   cat > "$d/metrics.json" <<'JSON'
-{"confirmed_crashes":1,"crash_dirs":["CRASH-001"]}
+{"confirmed_crashes":1,"crash_dirs":["CRASH-001"],
+ "confirmed_findings":1,"confirmed_finding_dirs":["FIND-001"]}
 JSON
 }
 mkpoolcell model-direct-r1 model-direct
@@ -189,7 +190,10 @@ JSON
 cat > "$ddir/clusters-crashes.json" <<'JSON'
 {"clusters":[{"id":"CL-DRY","members":["CRASH-0001","CRASH-0002","CRASH-0003"],
  "size":3,"primitive":"heap-buffer-overflow","severity_level":"Medium",
- "severity_rank":2,"severity_score":6.4}]}
+ "severity_rank":2,"severity_score":6.4,
+ "member_severity":{"CRASH-0001":{"level":"Medium","rank":2,"score":44},
+                    "CRASH-0002":{"level":"Medium","rank":2,"score":44},
+                    "CRASH-0003":{"level":"Medium","rank":2,"score":44}}}]}
 JSON
 touch "$ddir/pool/harness/crashes/CRASH-CLUSTERS.html"
 dledger2="$ddir/benchmark-results.md"
@@ -357,7 +361,7 @@ mkdir -p "$rbd/cells/harness-r1" "$rbd/cells/model-direct-r1"
 # A harness cell: results_dir points to an experiment tree outside the run.
 ext="$work/ext-c-ares-bench-xyz-harness-r1"
 mkdir -p "$ext/codex/results/crashes/CRASH-0001"
-: > "$ext/codex/results/crashes/CRASH-0001/asan.txt"
+: > "$ext/codex/results/crashes/CRASH-0001/sanitizer.txt"
 cat > "$rbd/cells/harness-r1/cell.json" <<JSON
 {"condition":"harness","replicate":1,"status":"done","wall_seconds":1,
  "results_dir":"$ext/codex/results"}
@@ -375,8 +379,8 @@ JSON
 sbd="$work/split-bench"
 mkdir -p "$sbd/pool/crashes/CRASH-0001" "$sbd/pool/crashes/CRASH-0002" \
          "$sbd/pool/findings/FIND-0001"
-: > "$sbd/pool/crashes/CRASH-0001/asan.txt"
-: > "$sbd/pool/crashes/CRASH-0002/asan.txt"
+: > "$sbd/pool/crashes/CRASH-0001/sanitizer.txt"
+: > "$sbd/pool/crashes/CRASH-0002/sanitizer.txt"
 : > "$sbd/pool/findings/FIND-0001/REPORT.md"
 cat > "$sbd/pool-members.json" <<'JSON'
 {"crashes":{"CRASH-0001":"harness","CRASH-0002":"model-direct"},
@@ -387,7 +391,7 @@ JSON
 pnb="$work/poolname-bench"
 pnrd="$pnb/results"
 mkdir -p "$pnb/cells/harness-r1" "$pnrd/crashes/CRASH-x"
-: > "$pnrd/crashes/CRASH-x/asan.txt"
+: > "$pnrd/crashes/CRASH-x/sanitizer.txt"
 cat > "$pnb/cells/harness-r1/cell.json" <<JSON
 {"condition":"harness","replicate":1,"status":"done","wall_seconds":1,
  "results_dir":"$pnrd"}
@@ -405,7 +409,7 @@ JSON
 # default 3×2 = 6 dry-run cells (~20s); the assertion only checks the exit
 # code, so pin to a single cell.
 ( set +e
-  bash "$BENCH" --target t --dry-run --bench-root "$t10_root" \
+  "$BENCH" --target t --dry-run --bench-root "$t10_root" \
     --budget-wall 0 --replicates 1 --conditions harness >/dev/null 2>&1
   echo "$?" > "$work/t10e2.rc"
 ) &
@@ -417,7 +421,7 @@ pid_u=$!
 # into the resumed result. Plant a half-finished SECOND replicate (failed,
 # with a stale finding) between the runs, as an interrupted run would leave.
 ( set +e
-  bash "$BENCH" --target dummytarget --run-id rerun01 \
+  "$BENCH" --target dummytarget --run-id rerun01 \
     --dry-run --replicates 1 --conditions model-direct \
     --bench-root "$resume_root" >/dev/null 2>&1
   mkdir -p "$bad_cell/findings/FIND-STALE"
@@ -426,7 +430,7 @@ pid_u=$!
 JSON
   # Resume with replicates bumped to 2: r1 (done) is skipped, r2 (failed)
   # is wiped clean and re-run.
-  bash "$BENCH" --target dummytarget --run-id rerun01 \
+  "$BENCH" --target dummytarget --run-id rerun01 \
     --dry-run --replicates 2 --conditions model-direct \
     --bench-root "$resume_root" > "$work/resume.out" 2>&1
 ) &
@@ -441,14 +445,14 @@ pid_r=$!
 # ($$ inside the ( ) subshell is still THIS test process — a live holder.)
 ( set +e
   printf '%s\n' "$$" > "$guard_lock"
-  BENCHMARK_RUNID=20260104-010001 bash "$BENCH" --target dummytarget \
+  BENCHMARK_RUNID=20260104-010001 "$BENCH" --target dummytarget \
     --dry-run --replicates 1 --conditions model-direct \
     --bench-root "$lock_root" > "$work/lock.out" 2>&1
   echo "$?" > "$work/lock.rc"
   # An empty lock file (owner never recorded / process gone) is treated as
   # stale, reclaimed, and the run proceeds — then releases the lock on exit.
   : > "$guard_lock"
-  BENCHMARK_RUNID=20260104-010002 bash "$BENCH" --target dummytarget \
+  BENCHMARK_RUNID=20260104-010002 "$BENCH" --target dummytarget \
     --dry-run --replicates 1 --conditions model-direct \
     --bench-root "$lock_root" >/dev/null 2>&1
 ) &
@@ -456,10 +460,10 @@ pid_l=$!
 
 # J1 (T12): the four llm_usage.py probes.
 ( set +e
-  python3 "$USAGE_PY" gemini "$gem_log"  "$gem_prompt" > "$work/gu1.json"
-  python3 "$USAGE_PY" gemini "$gem_log2" "$gem_prompt" > "$work/gu2.json"
-  python3 "$USAGE_PY" gemini "$gem_log3" "$gem_prompt" > "$work/gu3.json"
-  python3 "$USAGE_PY" codex  "$codex_log"              > "$work/cu.json"
+  python3 "$USAGE_PY" extract-usage gemini "$gem_log"  "$gem_prompt" > "$work/gu1.json"
+  python3 "$USAGE_PY" extract-usage gemini "$gem_log2" "$gem_prompt" > "$work/gu2.json"
+  python3 "$USAGE_PY" extract-usage gemini "$gem_log3" "$gem_prompt" > "$work/gu3.json"
+  python3 "$USAGE_PY" extract-usage codex  "$codex_log"              > "$work/cu.json"
 ) &
 pid_j1=$!
 
@@ -564,20 +568,20 @@ pid_j8=$!
 # case that passes parsing (--budget-wall 0) runs as chain U above and is
 # asserted with the other dry-run chains at the bottom of the file.
 set +e
-bash "$BENCH" --dry-run --bench-root "$t10_root" 2>/dev/null; rc_notarget=$?
-bash "$BENCH" --target t --dry-run --bench-root "$t10_root" \
+"$BENCH" --dry-run --bench-root "$t10_root" 2>/dev/null; rc_notarget=$?
+"$BENCH" --target t --dry-run --bench-root "$t10_root" \
   --replicates 0 2>/dev/null; rc_badrep=$?
-bash "$BENCH" --target t --dry-run --bench-root "$t10_root" \
+"$BENCH" --target t --dry-run --bench-root "$t10_root" \
   --replicates abc 2>/dev/null; rc_nanrep=$?
-bash "$BENCH" --target t --dry-run --bench-root "$t10_root" \
+"$BENCH" --target t --dry-run --bench-root "$t10_root" \
   --conditions bogus 2>/dev/null; rc_badcond=$?
-bash "$BENCH" --target t --dry-run --bench-root "$t10_root" \
+"$BENCH" --target t --dry-run --bench-root "$t10_root" \
   --budget-wall xyz 2>/dev/null; rc_badbudget=$?
-bash "$BENCH" --target t --dry-run --bench-root "$t10_root" \
+"$BENCH" --target t --dry-run --bench-root "$t10_root" \
   --agents 0 2>/dev/null; rc_badagents=$?
-bash "$BENCH" --target t --dry-run --bench-root "$t10_root" \
+"$BENCH" --target t --dry-run --bench-root "$t10_root" \
   --agents abc 2>/dev/null; rc_nanagents=$?
-bash "$BENCH" --target t --dry-run --bench-root "$t10_root" \
+"$BENCH" --target t --dry-run --bench-root "$t10_root" \
   --frobnicate 2>/dev/null; rc_badflag=$?
 set -e
 assert_neq "0" "$rc_notarget" "T10a: missing --target rejected"
@@ -592,7 +596,7 @@ assert_neq "0" "$rc_badflag" "T10h: unknown flag rejected"
 # ── T11: --reset via bin/benchmark archives an existing ledger ───────────
 rledger="$work/reset-me.md"
 printf '# Benchmark results\n\nold content\n' > "$rledger"
-bash "$BENCH" --reset --ledger "$rledger" >/dev/null 2>&1
+"$BENCH" --reset --ledger "$rledger" >/dev/null 2>&1
 assert_file_not_exists "$rledger" "T11a: bin/benchmark --reset archives the ledger"
 rarch=$(ls "$work"/reset-me.*.bak.md 2>/dev/null | head -1)
 assert_file_exists "$rarch" "T11b: archive created by bin/benchmark --reset"
@@ -712,16 +716,17 @@ assert_eq "0" "$(echo "$anv" | jq -r '.novel_crash_clusters')" \
   "T14d: model-direct has no novel cluster"
 assert_eq "2" "$(echo "$aagg" | jq -r '.crash_clusters | length')" \
   "T14e: report carries the cross-condition cluster list"
-# Without per-member severity (older cluster JSON) the cluster-level severity
-# is carried straight through to every condition that reached the cluster.
-assert_eq "Medium" "$(echo "$ahd" | jq -r '.top_severity_level')" \
-  "T14f: harness top crash severity is Medium (CL-1)"
-assert_eq "1" "$(echo "$ahd" | jq -r '.medium_plus_bugs')" \
-  "T14g: harness has one Medium+ bug"
-assert_eq "Medium" "$(echo "$anv" | jq -r '.top_severity_level')" \
-  "T14h: model-direct top crash severity falls back to cluster-level Medium (no member_severity)"
-assert_eq "1" "$(echo "$anv" | jq -r '.medium_plus_bugs')" \
-  "T14h2: model-direct medium_plus falls back to the shared Medium cluster"
+# Without per-member severity, neither condition inherits the canonical
+# member's score. That avoids crediting a weaker condition with another
+# condition's crash severity.
+assert_eq "—" "$(echo "$ahd" | jq -r '.top_severity_level')" \
+  "T14f: missing per-member severity leaves harness unscored"
+assert_eq "0" "$(echo "$ahd" | jq -r '.medium_plus_bugs')" \
+  "T14g: missing per-member severity does not fabricate a Medium+ bug"
+assert_eq "—" "$(echo "$anv" | jq -r '.top_severity_level')" \
+  "T14h: missing per-member severity leaves model-direct unscored"
+assert_eq "0" "$(echo "$anv" | jq -r '.medium_plus_bugs')" \
+  "T14h2: model-direct does not inherit the shared canonical severity"
 assert_eq "6.5" \
   "$(echo "$aagg" | jq -r '.crash_clusters[] | select(.id=="CL-1") | .severity_score')" \
   "T14i: cluster list carries severity_score from the cluster tool"
@@ -1050,9 +1055,9 @@ assert_file_not_exists "$guard_lock" \
   "T15t: the run releases its target+backend lock on exit"
 
 # ── T22: shallow checkout warning is wired into benchmark startup ────────
-assert_file_contains "$BENCH" 'target_git_is_shallow_checkout "\$SCRIPT_ROOT/targets/\$TARGET_SLUG"' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" '_is_shallow_checkout.*target' \
   "T22a: benchmark checks for shallow git targets"
-assert_file_contains "$BENCH" 'S1 history \+ work-card queue may be incomplete' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'S1 history \+ work-card queue may be incomplete' \
   "T22b: benchmark explains shallow checkout impact"
 
 summary

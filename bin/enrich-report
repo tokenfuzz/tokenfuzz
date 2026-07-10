@@ -19,7 +19,6 @@ so manual use is only needed when iterating on a single report.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -46,7 +45,7 @@ def _resolve_report_path(arg: Path) -> Path | None:
         # to enrich_file matches whatever the FS stored. Writing through
         # a wrong-case Path on case-insensitive filesystems (macOS APFS,
         # Docker Desktop bind mounts) can silently flip the visible case
-        # and break lib/triage.sh's exact-case bundle gate.
+        # and break lib/triage.py's exact-case bundle gate.
         return exact_child_file(arg, _REPORT_CANDIDATES)
     return None
 
@@ -66,9 +65,7 @@ def _resolve_context(report_path: Path, slug: str | None,
     # ASan-frame mining when the report has no fenced excerpt.
     for cand in (
         report_path.parent / "sanitizer.txt",
-        report_path.parent / "asan.txt",
         report_path.parent / ".audit" / "sanitizer.txt",
-        report_path.parent / ".audit" / "asan.txt",
     ):
         if cand.is_file():
             try:
@@ -84,8 +81,6 @@ def _resolve_context(report_path: Path, slug: str | None,
         try:
             if slug:
                 slug_dir = SCRIPT_ROOT / "output" / slug
-                # Prefer the backend-local results/.session-env over the
-                # legacy output/<slug>/.session-env copy.
                 session_dir = target_config.find_slug_session_dir(slug_dir)
                 if session_dir is None:
                     raise FileNotFoundError(

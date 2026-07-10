@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Integration tests for bin/suggest-peers and bin/peer-fix-cards.
-# Both binaries invoke lib/llm_decide.sh through the Python bridge; we
+# Both binaries invoke lib/llm_decide.py; we
 # use LLM_DECIDE_MOCK_<UPPER> to drive deterministic responses.
 set -o pipefail
 source "$(dirname "$0")/helpers.sh"
@@ -62,15 +62,6 @@ python3 "$SCRIPT_ROOT/bin/suggest-peers" myxml --apply --force >/dev/null 2>&1
 rc=$?
 assert_eq 0 "$rc" "suggest-peers: --force overwrites existing section"
 assert_file_contains "$SANDBOX/output/myxml/target.toml" 'unbound' "suggest-peers --force: new peers replaced old"
-
-# --force-config is accepted as the same overwrite intent as --force so
-# operators can use the same flag spelling as setup-target.
-SCRIPT_ROOT="$SANDBOX" \
-LLM_DECIDE_MOCK_S6_PEER_SUGGEST='{"domain":"JSON","peers":["rapidjson","simdjson","json-c"],"reasoning":"x"}' \
-python3 "$SCRIPT_ROOT/bin/suggest-peers" myxml --apply --force-config >/dev/null 2>&1
-rc=$?
-assert_eq 0 "$rc" "suggest-peers: --force-config aliases --force"
-assert_file_contains "$SANDBOX/output/myxml/target.toml" 'rapidjson' "suggest-peers --force-config: new peers replaced old"
 
 # LLM unavailable → exit 2
 output=$(

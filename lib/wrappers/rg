@@ -1,13 +1,23 @@
-#!/usr/bin/env bash
-# rg wrapper: caps output via lib/wrappers/_cap and skips the harness output-logs
+#!/usr/bin/env python3
+# rg wrapper: caps output via wrapper_tools and skips the harness output-logs
 # tree plus VCS metadata. `**/output/**/logs/**` hides all agent self-output the
 # harness writes under output/ (transcripts, prompt dumps, recon logs, index.*,
 # .raw/ spills, vendored .gemini-home/ — hidden children included, so `rg
 # --hidden` stays clean) while a target's own `src/logs/` source (no output/
 # ancestor) stays searchable.
-_dir="$(cd "$(dirname "$0")" && pwd)"
-exec "$_dir/_cap" "$_dir" rg "-c,--count,-l,--files-with-matches,-q,--quiet,--files" \
-  --glob '!**/.git/**' \
-  --glob '!**/.hg/**' \
-  --glob '!**/output/**/logs/**' \
-  "$@"
+import sys
+
+from wrapper_tools import capped_command
+
+raise SystemExit(
+    capped_command(
+        "rg",
+        sys.argv[1:],
+        prefix=(
+            "--glob", "!**/.git/**",
+            "--glob", "!**/.hg/**",
+            "--glob", "!**/output/**/logs/**",
+        ),
+        passthrough=("-c", "--count", "-l", "--files-with-matches", "-q", "--quiet", "--files"),
+    )
+)

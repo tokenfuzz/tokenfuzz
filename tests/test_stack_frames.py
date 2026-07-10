@@ -456,6 +456,7 @@ for _line, _want, _why in [
     ("WARNING: ThreadSanitizer: data race", True, "TSan"),
     ("SUMMARY: MemorySanitizer: use-of-uninitialized-value foo.c:1", True, "MSan"),
     ("foo.c:9:5: runtime error: signed integer overflow", True, "UBSan runtime error"),
+    ("panic: runtime error: index out of range", False, "Go panic is not UBSan"),
     ("SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior foo.c:9:5", True, "UBSan summary"),
     ("CRASH_RATE: 0/1", False, "clean probe footer is not a crash"),
     ("NO CRASHES in 1 runs (1 completed cleanly)", False, "clean run footer is not a crash"),

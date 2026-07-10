@@ -2,9 +2,8 @@
 """Single-shot LLM JSON decision engine.
 
 This module owns the budget-counter RMW, mock dispatch, backend subprocess
-invocation, JSON extraction, and required-key validation. lib/llm_decide.sh
-is now a 30-line bash shim that exec's into this module; Python callers
-import `llm_decide()` directly.
+invocation, JSON extraction, and required-key validation. Production callers
+import `llm_decide()` directly; the CLI exposes the same engine.
 
 Subcommands (run as `python3 lib/llm_decide.py <name> ...`):
 
@@ -16,7 +15,7 @@ Subcommands (run as `python3 lib/llm_decide.py <name> ...`):
   budget-check [<max-calls>]
       Race-safe per-process budget RMW. Increments the counter file
       atomically under fcntl.flock and exits 0 if under cap, 1 if over.
-      Used by the bash shim's `llm_decide_budget_available` function.
+      Available to command-line callers that need an explicit budget probe.
 
 Public Python API (for direct import from bin/peer-fix-cards etc.):
 
@@ -26,7 +25,7 @@ Public Python API (for direct import from bin/peer-fix-cards etc.):
       # disabled / budget / extract / validate failure — fall back
       ...
 
-Environment knobs (mirrors the prior bash contract exactly):
+Environment controls:
 
   LLM_DECIDE_DISABLE=1                   block real backend calls
   LLM_DECIDE_MOCK=<json|@path>           global mock for every decision
@@ -104,7 +103,6 @@ from llm_invoke import (  # noqa: E402
     default_model as _default_model,
     extract_text as _extract_backend_text,
     gemini_default_bin as _gemini_default_bin,
-    known_backend as _known_backend,
     memory_env as _memory_env,
     opencode_config as _opencode_config,
 )
@@ -278,11 +276,9 @@ def budget_available() -> bool:
 
 
 # ── Failed-decision circuit breaker ─────────────────────────────────
-# A failed decision writes no success marker, so callers re-issue the
-# identical request every pass and re-pay the full backend timeout — e.g.
-# triage's cluster_expand re-times-out on the same crash dir on every
-# triage pass because expand_cluster_for_crash only marks .cluster_expanded
-# on success. We record failures keyed by (decision, prompt hash) in a
+# A failed decision writes no success marker, so callers can re-issue the
+# identical request every pass and re-pay the full backend timeout. We record
+# failures keyed by (decision, prompt hash) in a
 # session-scoped file beside the budget counter; once a key reaches the
 # threshold the breaker opens and identical requests are skipped without a
 # backend call. A later success clears the key and re-arms the breaker, so
@@ -374,20 +370,19 @@ def _type_key(decision: str) -> str:
 def _entry(value) -> tuple[int, float]:
     """Parse a failcache entry into (failure_count, last_failure_epoch).
 
-    Accepts the [count, ts] shape or a legacy bare int, and tolerates any
-    corrupt / partially written / tampered value (→ (0, 0.0)) so the
+    Accepts the [count, ts] shape and tolerates any corrupt, partially written,
+    or tampered value (→ (0, 0.0)) so the
     best-effort failcache never raises into the decision path — the same
     "fall open, never crash" discipline as _llm_log and budget_available.
     """
     count, ts = 0, 0.0
     try:
-        if isinstance(value, list):
-            if value:
-                count = int(value[0])
-            if len(value) >= 2:
-                ts = float(value[1])
-        else:
-            count = int(value)
+        if not isinstance(value, list):
+            return 0, 0.0
+        if value:
+            count = int(value[0])
+        if len(value) >= 2:
+            ts = float(value[1])
     except (TypeError, ValueError):
         return 0, 0.0
     return count, ts
@@ -546,9 +541,8 @@ def _failcache_note(decision: str, prompt: str, success: bool,
 
 
 # ── Backend dispatch ────────────────────────────────────────────────
-# Flag construction lives in lib/llm_invoke.py (single source of truth
-# shared with the bash shim). We just wrap that here for callsite
-# clarity — _backend_flags is the local name used in _invoke_backend.
+# Flag construction lives in lib/llm_invoke.py as the single source of truth.
+# This local wrapper keeps the invocation callsite concise.
 
 def _backend_flags(backend: str, model: str) -> list[str]:
     return _decide_flags_for_backend(backend, model)
@@ -578,11 +572,8 @@ def _invoke_backend(
     """Run the backend CLI and return its stdout text, or None on failure."""
     model = os.environ.get("MODEL", "") or _default_model(backend)
 
-    # `or default` (not `, default`): the bash shim force-exports these
-    # env vars as empty strings to bridge inherited-but-unexported caller
-    # state, so `os.environ.get("CLAUDE_BIN", "claude")` would return "" —
-    # subprocess.run([""], ...) PermissionErrors, swallowed as raw="",
-    # surfaced as `FAIL extract-json`. Match the gemini branch below.
+    # Empty overrides mean "use the default binary"; get(key, default) would
+    # instead pass an empty executable name to subprocess.
     if backend == "claude":
         bin_name = os.environ.get("CLAUDE_BIN") or "claude"
         flags = _backend_flags("claude", model)
@@ -616,11 +607,10 @@ def _invoke_backend(
         # Caller logs the specific no-<backend>-bin reason.
         raise FileNotFoundError(f"no-{backend}-bin")
 
-    # Disable each backend's cross-run auto-memory by default, the same as the
-    # agent launch path. The bash entry points export these (CLAUDE_CODE_DISABLE_AUTO_MEMORY,
-    # GEMINI_CLI_HOME) via llm_apply_memory_policy, but standalone tools that
-    # import llm_decide directly (bin/setup-target, bin/suggest-*, etc.) never
-    # call it — so set them here too, keyed on TOKENFUZZ_MEMORY_ENABLED.
+    # Disable each backend's cross-run auto-memory by default, as the agent
+    # launch path does. Standalone tools that import llm_decide directly
+    # (bin/setup-target, bin/suggest-*, etc.) do not apply the runner's memory
+    # policy, so set it here too, keyed on TOKENFUZZ_MEMORY_ENABLED.
     # codex carries its disable as `-c` flags already in the decide flags.
     child_env = os.environ.copy()
     child_env.update(_memory_env(backend))
@@ -818,9 +808,7 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     valid but type-wrong object from reaching consumers.
     """
     known_decisions = {
-        "strategy_pick", "crash_triage", "crash_confirm", "legit_crash",
-        "find_quality", "cluster_expand", "patch_review",
-        "work_rerank", "s6-peer-suggest", "threat-model-suggest",
+        "find_quality", "work_rerank", "s6-peer-suggest", "threat-model-suggest",
         "s6-peer-distill", "s6-peer-map",
     }
     if decision not in known_decisions:
@@ -828,19 +816,6 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     if not isinstance(parsed, dict):
         return False
 
-    if decision == "strategy_pick":
-        return _is_string(parsed.get("strategy")) and _is_string(parsed.get("reason"))
-    if decision == "crash_triage":
-        return _is_bool(parsed.get("keep")) and _is_string(parsed.get("reason"))
-    if decision == "crash_confirm":
-        concerns = parsed.get("concerns", [])
-        return (
-            _is_bool(parsed.get("accept"))
-            and _is_string(parsed.get("reason"))
-            and _is_string_list(concerns)
-        )
-    if decision == "legit_crash":
-        return _is_bool(parsed.get("legitimate")) and _is_string(parsed.get("reason"))
     if decision == "find_quality":
         # find_quality is the QUALITY gate (accept/class/severity). Identity is
         # the deterministic (class, file, line) site computed at cluster time
@@ -851,24 +826,6 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
             and _is_string(parsed.get("class"))
             and _is_string(parsed.get("severity"))
         )
-    if decision == "cluster_expand":
-        rows = parsed.get("rows")
-        if not isinstance(rows, list):
-            return False
-        for row in rows:
-            if not isinstance(row, dict):
-                return False
-            if not (
-                _is_string(row.get("file"))
-                and _is_string(row.get("function"))
-                and _is_int(row.get("line"))
-                and _is_string(row.get("hypothesis"))
-                and _is_string(row.get("category"))
-            ):
-                return False
-        return True
-    if decision == "patch_review":
-        return _is_string_list(parsed.get("fixed"))
     if decision == "work_rerank":
         cards = parsed.get("cards")
         if not isinstance(cards, list):
@@ -931,7 +888,7 @@ def llm_decide(
     """Run one LLM decision. Returns the parsed JSON, or None on any failure.
 
     The function pre-validates the mock contract so DISABLE=1 with a mock
-    set still runs the mock (matches the prior bash precedence). On real
+    set still runs the mock. On real
     backend dispatch, telemetry lines `<decision> <state> bytes=N elapsed=Ns`
     are emitted to the LLM decision log so cost-analysis tooling can sum
     prompt bytes + wall-clock per decision.
@@ -943,10 +900,7 @@ def llm_decide(
         return None
 
     if not prompt or not prompt.strip():
-        # Reject whitespace-only prompts too. The prior bash engine
-        # accepted them (bash `[ -n "$prompt" ]` is true for "   "), but
-        # the prior Python wrapper rejected them, and existing tests
-        # codify the stricter rule.
+        # Reject whitespace-only prompts before they consume decision budget.
         # Validated BEFORE budget so a malformed/empty call from a buggy
         # caller does not deduct from the per-session backend budget.
         _llm_log(f"{decision} FAIL empty-prompt")
@@ -1050,9 +1004,7 @@ def _run_decision(
         elapsed = int(time.time() - t_start)
         _llm_log(f"{decision} MOCK bytes={prompt_bytes} elapsed={elapsed}s")
     else:
-        # Treat env-set-to-empty as unset (the bash shim exports vars with
-        # default "" to bridge the unexported-variable gap; "" must fall
-        # through the same way an unset var would). Require an explicit
+        # Treat an empty backend override as unset. Require an explicit
         # ACTIVE_BACKEND is the concrete backend selected by bin/audit after
         # resolving AUDIT_BACKEND=all. Standalone helpers may use BACKEND.
         # If both are unset, fail rather than silently preferring a vendor.
@@ -1118,13 +1070,10 @@ def _run_decision(
     return parsed, False
 
 
-# ── CLI dispatch (used by the bash shim) ────────────────────────────
+# ── CLI dispatch ───────────────────────────────────────────────────
 
 def _cmd_decide(args) -> int:
-    # Mimic bash $(cat) — strip trailing newlines so byte-count telemetry
-    # matches the prior bash engine's measurement (echo-piped prompts
-    # carry a trailing \n that bash silently drops via command substitution).
-    prompt = sys.stdin.read().rstrip("\n")
+    prompt = sys.stdin.read()
     result = llm_decide(args.decision, args.required_keys or "", prompt, args.timeout)
     if result is None:
         return 1

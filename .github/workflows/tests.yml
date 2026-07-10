@@ -21,9 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.12 is the floor (ubuntu:24.04 system python); the newest stable
-        # leg catches stdlib behaviour divergences in both directions.
-        python-version: ["3.12", "3.14"]
+        # Test the documented floor and newest stable Python. The container and
+        # macOS jobs cover the system Python versions between them.
+        python-version: ["3.10", "3.14"]
     env:
       LLM_DECIDE_DISABLE: "1"
       TEST_JOBS_MAX: "4"

@@ -14,7 +14,7 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 # ── Syntax check ──
-bash -n "$SHOW_PATCH" 2>/dev/null
+python3 -m py_compile "$SHOW_PATCH" 2>/dev/null
 assert_eq 0 $? "show-patch: syntax check passes"
 
 # ── Build a tiny git repo with a commit whose changed function spans
@@ -264,7 +264,7 @@ diff_lines=$(printf '%s\n' "$diff_args" | wc -l | tr -d ' ')
 [ "$diff_lines" -gt 100 ] && pass "show-patch: different args bypass memoization" \
   || fail "show-patch: different args expected >100 lines, got $diff_lines"
 
-# Without RESULTS_DIR set, memoization is skipped (back-compat). We use
+# Without RESULTS_DIR set, memoization is skipped. We use
 # `env -u RESULTS_DIR` to actually drop the var — setup_test_env exports
 # RESULTS_DIR, so omitting it from the inline env wouldn't be enough.
 nocache_a=$(env -u RESULTS_DIR "$SHOW_PATCH" "$BIG_COMMIT" 2>&1)

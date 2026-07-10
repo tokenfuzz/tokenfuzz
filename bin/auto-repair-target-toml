@@ -9,7 +9,7 @@ missing translation unit or header. This script:
   1. Reads the most-recent harness build-log digest from stdin (a
      trimmed transcript chosen by the caller).
   2. Reads the current target.toml.
-  3. Asks the active LLM backend (via lib/llm_decide.sh) to propose
+  3. Asks the active LLM backend (via lib/llm_decide.py) to propose
      additive edits to the three whitelisted top-level array fields:
      ``includes``, ``link_libs``, ``defines``.
   4. Applies the edits if they parse as TOML, change at least one
@@ -45,7 +45,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +62,7 @@ SCRIPT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 from prompt_render import render_template  # noqa: E402
+import llm_decide  # noqa: E402
 
 # ─── Safety rails ────────────────────────────────────────────────
 
@@ -124,34 +124,9 @@ def _sha1(data: bytes) -> str:
 
 
 def _llm_propose(prompt: str, *, timeout_secs: int = 30) -> dict | None:
-    """Run the prompt through lib/llm_decide.sh and parse JSON."""
-    helper = SCRIPT_ROOT / "lib" / "llm_decide.sh"
-    if not helper.is_file():
-        return None
-    try:
-        proc = subprocess.run(
-            [
-                "bash",
-                "-c",
-                'source "$1" && llm_decide target-toml-repair "" "$2"',
-                "llm-decide",
-                str(helper),
-                str(timeout_secs),
-            ],
-            input=prompt, capture_output=True, text=True, check=False,
-            timeout=timeout_secs + 5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return None
-    try:
-        obj = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(obj, dict):
-        return None
-    return obj
+    """Request and validate one structured repair proposal."""
+    proposal = llm_decide.llm_decide("target-toml-repair", "", prompt, timeout_secs)
+    return proposal if isinstance(proposal, dict) else None
 
 
 def _coerce_list(val) -> list[str]:

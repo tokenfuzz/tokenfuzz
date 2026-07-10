@@ -30,7 +30,7 @@ seed_toml() {
 target = "demo"
 upstream_url = "https://example.com/demo"
 
-# ── Threat model (drives lib/triage.sh verdict matrix) ──
+# ── Threat model (drives lib/triage.py verdict matrix) ──
 [threat_model]
 attacker_controls = ["bytes"]
 EOF
@@ -90,14 +90,6 @@ assert_file_contains "$SANDBOX/output/demo/target.toml" 'protocol-state' \
   "--force: new tokens written"
 markers=$(grep -c 'set by bin/suggest-threat-model' "$SANDBOX/output/demo/target.toml")
 assert_eq 1 "$markers" "--force: stale marker comment replaced, not duplicated"
-
-# --force-config is accepted as the same overwrite intent as --force so
-# operators can use the same flag spelling as setup-target.
-SCRIPT_ROOT="$SANDBOX" LLM_DECIDE_MOCK_THREAT_MODEL_SUGGEST="$MOCK" \
-  python3 "$SUG" demo --apply --force-config >/dev/null 2>&1
-assert_eq 0 "$?" "--apply --force-config aliases --force"
-assert_file_contains "$SANDBOX/output/demo/target.toml" 'call-sequence' \
-  "--force-config: new tokens written"
 
 # ═══════════════════════════════════════════════════════════════
 # 5. Token normalization: call-order → call-sequence, unknown token dropped

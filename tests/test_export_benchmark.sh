@@ -49,7 +49,7 @@ EOF
 # CRASH-0001
 Testcase at $SCRIPT_ROOT/output/benchmark/$be/$runid/x.tc
 EOF
-  printf 'sanitizer output\n' > "$d/pool/crashes/CRASH-0001/asan.txt"
+  printf 'sanitizer output\n' > "$d/pool/crashes/CRASH-0001/sanitizer.txt"
   # .audit/ internal state (excluded); a compiled executable (binary + exec bit
   # => dropped, it embeds an unscrubbable build path); and a binary testcase
   # INPUT (binary, no exec bit => kept, it is the crash trigger).

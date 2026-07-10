@@ -47,7 +47,7 @@
       "expected_outcome": "abort",
       "signature_symbol": "pack_field",
       "input": "inputs/case-pack",
-      "refute_reason": "An over-long input trips assert() and aborts before the copy. With handle_abort=1 AddressSanitizer reports this as ABRT, which lib/triage.sh autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real memory-safety primitive here (e.g. a release build with -DNDEBUG) is an unexpected crash."
+      "refute_reason": "An over-long input trips assert() and aborts before the copy. With handle_abort=1 AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real memory-safety primitive here (e.g. a release build with -DNDEBUG) is an unexpected crash."
     }
   ]
 }

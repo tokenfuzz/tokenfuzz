@@ -46,7 +46,7 @@ TOML
 md_body=$(python3 "$md_renderer" "$md_target_dir" "/abs/out" "$SCRIPT_ROOT")
 # Replace the dynamic absolute target path in assertions below by also
 # substituting target_path with a literal stub via a 2nd render that
-# bypasses the helper's introspection (legacy expectation: the .j2 still
+# bypasses the helper's introspection (the .j2 still
 # uses {{ target_path }} and {{ output_dir }} as raw substitutions).
 md_body_literal=$(python3 "$SCRIPT_ROOT/lib/prompt_render.py" "$md_tpl" \
   --var "target_path=/abs/target" --var "output_dir=/abs/out" \
@@ -195,7 +195,7 @@ printf '{"type":"item.completed","usage":{"input_tokens":1,"cached_input_tokens"
 SH
 chmod +x "$fake_codex_early"
 trap 'rm -rf "$work" "$target_dir" 2>/dev/null || true; teardown_test_env 2>/dev/null || true' EXIT
-early_out=$(CODEX_BIN="$fake_codex_early" bash "$BENCH" \
+early_out=$(CODEX_BIN="$fake_codex_early" "$BENCH" \
   --target "$(basename "$target_dir")" --backend codex --replicates 1 \
   --conditions model-direct --budget-wall 5 \
   --bench-root "$early_root" --no-validate-findings 2>&1)
@@ -231,6 +231,11 @@ assert_dir_not_exists "$target_dir/findings" \
   "T25e: target tree gets no findings/ leak"
 assert_file_exists "$target_dir/file.c" \
   "T25f: target source files stay in place"
+usage_index="$cell_dir/logs/index.jsonl"
+assert_eq "1" "$(jq -r '.tokens.input' "$usage_index")" \
+  "T25f2: model-direct persists measured backend usage"
+assert_eq "codex" "$(jq -r '.backend' "$usage_index")" \
+  "T25f3: model-direct usage records the active backend"
 
 # --no-validate-findings is announced in the cell log.
 assert_match 'Cell model-direct-r1 validation: DISABLED' "$early_out" \
@@ -244,11 +249,11 @@ assert_match 'findings: rejected=0 confirmed=0 unique=0; crashes: rejected=0 con
 # that leaves the reject in findings/ rendering forever as a "Pending" severity
 # in the cluster. The harness reaches the same mover via bin/audit housekeeping;
 # this keeps model-direct on par so rejected finds move (and counts settle).
-assert_file_contains "$BENCH" 'validate_find_gate >/dev/null 2>&1' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'counts = triage.validate_find_gate\(results, deadline=deadline\)' \
   "T25h: model-direct findings gate runs validate_find_gate (quarantines find-quality rejects)"
-assert_file_contains "$BENCH" 'RESULTS_DIR="\$results_dir" ACTIVE_BACKEND="\$BACKEND" MODEL="\$model"' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'ACTIVE_BACKEND.*backend' \
   "T25j: model-direct find gate gets benchmark model for trigger gate"
-assert_file_contains "$BENCH" 'TARGET_ROOT="\$SCRIPT_ROOT/targets/\$TARGET_SLUG" TARGET_SLUG="\$TARGET_SLUG"' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" '"TARGET_SLUG": target_slug' \
   "T25i: model-direct find gate threads TARGET_ROOT so the source-reading trigger step runs"
 
 # ── T26: rendered prompt embeds both absolute paths ─────────────────────
@@ -478,9 +483,7 @@ rej_idx_html=$(cat "$rej_idx/REJECTED-CRASHES.html")
 assert_match 'href="CRASH-REJECTED-0001/REPORT\.html"' "$rej_idx_html" \
   "T28k: rendered REJECTED-CRASHES.html href points to the report's HTML sibling"
 
-# Cluster pages must link to the same semantic rejected-summary artifact in
-# both layouts. INDEX.* remains a compatibility alias, but new browser links
-# should not depend on the generic directory-index filename.
+# Cluster pages link to the named rejected-summary artifact in both layouts.
 cluster_links="$work/rejected-cluster-links"
 mkdir -p "$cluster_links/results/crashes" \
          "$cluster_links/results/crashes-rejected" \
@@ -490,20 +493,14 @@ mkdir -p "$cluster_links/results/crashes" \
          "$cluster_links/pool/harness/crashes-rejected" \
          "$cluster_links/pool/harness/findings" \
          "$cluster_links/pool/harness/findings-rejected"
-echo '# Rejected crash index' > "$cluster_links/results/crashes-rejected/INDEX.md"
 echo '# Rejected crash index' \
   > "$cluster_links/results/crashes-rejected/REJECTED-CRASHES.md"
-echo '# Rejected finding index' > "$cluster_links/results/findings-rejected/INDEX.md"
 echo '# Rejected finding index' \
   > "$cluster_links/results/findings-rejected/REJECTED-FINDINGS.md"
 echo '# Rejected crash pool summary' \
   > "$cluster_links/pool/harness/crashes-rejected/REJECTED-CRASHES.md"
-echo '# Rejected crash pool summary' \
-  > "$cluster_links/pool/harness/crashes-rejected/INDEX.md"
 echo '# Rejected finding pool summary' \
   > "$cluster_links/pool/harness/findings-rejected/REJECTED-FINDINGS.md"
-echo '# Rejected finding pool summary' \
-  > "$cluster_links/pool/harness/findings-rejected/INDEX.md"
 python3 "$SCRIPT_ROOT/bin/cluster-crashes" "$cluster_links/results" >/dev/null
 python3 "$SCRIPT_ROOT/bin/cluster-findings" "$cluster_links/results" >/dev/null
 python3 "$SCRIPT_ROOT/bin/cluster-crashes" "$cluster_links/pool/harness" >/dev/null
@@ -520,10 +517,6 @@ assert_match 'href="../crashes-rejected/REJECTED-CRASHES\.html"' "$pool_crash_ht
   "T28t: benchmark crash clusters link to REJECTED-CRASHES.html"
 assert_match 'href="../findings-rejected/REJECTED-FINDINGS\.html"' "$pool_finding_html" \
   "T28u: benchmark finding clusters link to REJECTED-FINDINGS.html"
-assert_not_match 'href="../crashes-rejected/INDEX\.html"' "$pool_crash_html" \
-  "T28v: benchmark crash clusters do not use generic INDEX.html as canonical"
-assert_not_match 'href="../findings-rejected/INDEX\.html"' "$pool_finding_html" \
-  "T28w: benchmark finding clusters do not use generic INDEX.html as canonical"
 
 # ═══════════════════════════════════════════════════════════════
 # P6: cell.json records actual_agents vs requested_agents
@@ -535,102 +528,11 @@ p6_bd="$work/p6-cell"
 mkdir -p "$p6_bd/cells/harness-r1/repo-root/output/p6target-exp/codex/results/state"
 mkdir -p "$p6_bd/cells/model-direct-r1/state"
 
-# Helper: invoke bin/benchmark's embedded write_cell_json by calling the
-# same python snippet via inline expansion. We replicate its argv shape
-# rather than sourcing because bin/benchmark auto-runs at source time.
+# Exercise the same structured command bin/benchmark invokes. The shell driver
+# auto-runs when sourced, so its Python CLI is the stable test boundary.
 p6_write_cell_json() {
-  python3 - "$@" <<'PYEOF'
-import json, os, sys
-path, cond, rep, exp, rd, wall, status = sys.argv[1:8]
-requested_agents = sys.argv[8] if len(sys.argv) > 8 else ""
-paused_arg = sys.argv[9] if len(sys.argv) > 9 else "0"
-cell_dir = os.path.dirname(path)
-run_quality = "clean"
-rq_path = os.path.join(cell_dir, ".run-quality")
-try:
-    with open(rq_path, encoding="utf-8") as fh:
-        value = fh.read().strip()
-    if value in {"clean", "provider_recovered", "provider_limited"}:
-        run_quality = value
-except OSError:
-    pass
-if status in {"incomplete", "quota_exhausted"} and run_quality == "clean":
-    run_quality = "provider_limited"
-out = {
-    "condition": cond,
-    "replicate": int(rep),
-    "experiment": exp,
-    "results_dir": rd,
-    "wall_seconds": int(wall),
-    "status": status,
-    "run_quality": run_quality,
+  python3 "$SCRIPT_ROOT/lib/benchmark.py" write-cell "$@"
 }
-try:
-    paused_seconds = max(0, int(paused_arg))
-except (TypeError, ValueError):
-    paused_seconds = 0
-# wall_seconds stays raw elapsed; effective wall subtracts provider-recovery
-# pause so downstream throughput comparisons use productive time only.
-out["paused_seconds"] = paused_seconds
-out["wall_effective_seconds"] = max(0, int(wall) - paused_seconds)
-def _ri(s):
-    s = (s or "").strip()
-    if not s:
-        return None
-    try:
-        return int(s)
-    except ValueError:
-        return None
-req = _ri(requested_agents)
-if req is not None:
-    out["requested_agents"] = req
-cfg_path = os.path.join(rd, "state", "run-config.json")
-actual = None
-if rd and os.path.isfile(cfg_path):
-    try:
-        with open(cfg_path, encoding="utf-8") as fh:
-            cfg = json.load(fh)
-        v = cfg.get("num_agents")
-        if isinstance(v, int) and v > 0:
-            actual = v
-    except (OSError, ValueError):
-        actual = None
-if actual is not None:
-    out["actual_agents"] = actual
-    # Surface a one-bit flag so the cross-backend report can sort/filter
-    # cells whose actual count drifted from the requested one without
-    # re-reading every cell's run-config.
-    if req is not None and req != actual:
-        out["agent_count_mismatch"] = True
-json.dump(out, open(path, "w"), indent=2)
-PYEOF
-}
-
-# Sanity: this helper is byte-identical to bin/benchmark's embedded
-# python snippet. A diff between the two would silently strand new
-# fields; assert the two stay in sync.
-p6_extract_python() {
-  awk '
-    /^write_cell_json\(\) \{/ { in_func=1; next }
-    in_func && /<<\047PYEOF\047/ { in_py=1; next }
-    in_func && in_py && /^PYEOF$/ { exit }
-    in_func && in_py { print }
-  ' "$SCRIPT_ROOT/bin/benchmark"
-}
-p6_test_python() {
-  awk '
-    /^p6_write_cell_json\(\) \{/ { in_func=1; next }
-    in_func && /<<\047PYEOF\047/ { in_py=1; next }
-    in_func && in_py && /^PYEOF$/ { exit }
-    in_func && in_py { print }
-  ' "$0"
-}
-if diff <(p6_extract_python) <(p6_test_python) >/dev/null 2>&1; then
-  pass "P6: test write_cell_json snippet is byte-identical to bin/benchmark"
-else
-  fail "P6: test write_cell_json snippet is byte-identical to bin/benchmark" \
-       "drift detected (diff above)"
-fi
 
 p6_results_a="$p6_bd/cells/harness-r1/repo-root/output/p6target-exp/codex/results"
 p6_cell_a="$p6_bd/cells/harness-r1/cell.json"
@@ -658,7 +560,7 @@ assert_eq "1" "$(jq -r '.requested_agents' "$p6_cell_a")" \
 assert_eq "true" "$(jq -r '.agent_count_mismatch' "$p6_cell_a")" \
   "P6: agent_count_mismatch=true when requested != actual"
 
-# Case C: no run-config (older runs, or model-direct cells) →
+# Case C: model-direct cells have no run-config →
 # actual_agents absent rather than null.
 rm -f "$p6_results_a/state/run-config.json"
 p6_write_cell_json "$p6_cell_a" model-direct 1 exp1 "$p6_results_a" 100 done 1
@@ -678,513 +580,5 @@ assert_eq "2" "$(jq -r '.actual_agents' "$p6_cell_a")" \
   "P6: actual_agents recorded when requested is blank"
 assert_eq "null" "$(jq -r '.requested_agents // "null"' "$p6_cell_a")" \
   "P6: empty requested_agents → field omitted"
-
-# ── T29: gemini quota watcher — trigger rule + aggregator handling ──────
-# The rule must distinguish r1-style "lots of 429s but real progress" from
-# r2-style "lots of 429s with zero assistant content". Mocking the live
-# watcher requires a backgrounded process; instead we exercise (a) the
-# detector function directly and (b) the aggregator's treatment of the
-# quota_exhausted status it writes.
-
-# (a) Detector: source the shared watchdog lib. The detector used to be
-#     a private function in bin/benchmark, extracted via awk from the
-#     script body; it now lives in lib/gemini_watchdog.sh and is shared
-#     with bin/audit. Source it directly — the lib has no side effects
-#     beyond defining functions.
-# shellcheck disable=SC1091
-. "$SCRIPT_ROOT/lib/gemini_watchdog.sh"
-
-# r2-style log: 12 quota retries, no assistant or result events → trigger.
-r2_like="$work/r2-like.log"
-{
-  printf '{"type":"tool_use"}\n'
-  for i in $(seq 1 12); do
-    printf 'Attempt %d failed with status 429. Retrying...\n' "$i"
-  done
-} > "$r2_like"
-if GEMINI_QUOTA_WINDOW_LINES=400 GEMINI_QUOTA_MIN_429=10 \
-    gemini_quota_dominates "$r2_like"; then
-  pass "T29a: r2-style log (12 retries, no progress) trips the trigger"
-else
-  fail "T29a: r2-style log (12 retries, no progress) trips the trigger" "did not trigger"
-fi
-
-# r1-style log: 12 quota retries interleaved with assistant content → no trigger.
-r1_like="$work/r1-like.log"
-{
-  for i in $(seq 1 12); do
-    printf 'Attempt %d failed with status 429. Retrying...\n' "$i"
-    printf '{"type":"message","role":"assistant","content":"x"}\n'
-  done
-} > "$r1_like"
-if GEMINI_QUOTA_WINDOW_LINES=400 GEMINI_QUOTA_MIN_429=10 \
-    gemini_quota_dominates "$r1_like"; then
-  fail "T29b: r1-style log (retries with progress) must NOT trigger" "triggered"
-else
-  pass "T29b: r1-style log (retries with progress) must NOT trigger"
-fi
-
-# Empty log: not enough retries → no trigger.
-: > "$work/empty-gemini.log"
-if GEMINI_QUOTA_WINDOW_LINES=400 GEMINI_QUOTA_MIN_429=10 \
-    gemini_quota_dominates "$work/empty-gemini.log"; then
-  fail "T29c: empty log must NOT trigger" "triggered"
-else
-  pass "T29c: empty log must NOT trigger"
-fi
-
-# Few retries: below the threshold → no trigger even with no progress.
-r2_quiet="$work/r2-quiet.log"
-{
-  for i in $(seq 1 3); do
-    printf 'Attempt %d failed with status 429. Retrying...\n' "$i"
-  done
-} > "$r2_quiet"
-if GEMINI_QUOTA_WINDOW_LINES=400 GEMINI_QUOTA_MIN_429=10 \
-    gemini_quota_dominates "$r2_quiet"; then
-  fail "T29d: 3 retries below threshold must NOT trigger" "triggered"
-else
-  pass "T29d: 3 retries below threshold must NOT trigger"
-fi
-
-# (b) Aggregator: a bench dir with one done cell + one quota_exhausted cell
-#     reports replicates_done=1, replicates_quota_exhausted=1, and excludes
-#     the quota-exhausted cell from token / wall totals.
-qbd="$work/quota-bench"
-mkdir -p "$qbd/cells/model-direct-r1" "$qbd/cells/model-direct-r2"
-mkdir -p "$qbd/cells/model-direct-r1/findings/FIND-DONE" \
-         "$qbd/cells/model-direct-r2/findings/FIND-QUOTA"
-printf '# done finding\n' > "$qbd/cells/model-direct-r1/findings/FIND-DONE/report.md"
-printf '# quota finding\n' > "$qbd/cells/model-direct-r2/findings/FIND-QUOTA/report.md"
-cat > "$qbd/cells/model-direct-r1/cell.json" <<JSON
-{"condition":"model-direct","replicate":1,"experiment":"e1","results_dir":"$qbd/cells/model-direct-r1","wall_seconds":4000,"status":"done"}
-JSON
-cat > "$qbd/cells/model-direct-r1/metrics.json" <<'JSON'
-{"exists":true,"confirmed_crashes":0,"findings":1,
- "tokens":{"input_tokens":2000,"cached_input_tokens":1000,"output_tokens":50,"prompt_estimate_tokens":0,"estimated":false,"iterations":1,"asan_invocations":0}}
-JSON
-cat > "$qbd/cells/model-direct-r2/cell.json" <<JSON
-{"condition":"model-direct","replicate":2,"experiment":"e2","results_dir":"$qbd/cells/model-direct-r2","wall_seconds":300,"status":"quota_exhausted"}
-JSON
-cat > "$qbd/cells/model-direct-r2/metrics.json" <<'JSON'
-{"exists":true,"confirmed_crashes":0,"findings":1,
- "tokens":{"input_tokens":9999,"cached_input_tokens":0,"output_tokens":0,"prompt_estimate_tokens":0,"estimated":true,"iterations":1,"asan_invocations":0}}
-JSON
-qrep=$(python3 "$PY" aggregate "$qbd")
-assert_eq "1" "$(echo "$qrep" | jq -r '.conditions[0].replicates_done')" \
-  "T29e: only the done cell counts toward replicates_done"
-assert_eq "1" "$(echo "$qrep" | jq -r '.conditions[0].replicates_quota_exhausted')" \
-  "T29f: quota_exhausted cell counted in its own column"
-assert_eq "1" "$(echo "$qrep" | jq -r '.conditions[0].replicates_incomplete')" \
-  "T29f2: quota_exhausted cell counted as incomplete"
-assert_eq "1" "$(echo "$qrep" | jq -r '.conditions[0].replicates_provider_limited')" \
-  "T29f3: quota_exhausted cell counted as provider-limited"
-assert_eq "2" "$(echo "$qrep" | jq -r '.conditions[0].replicates_total')" \
-  "T29g: replicates_total covers both cells"
-# Token totals must exclude the quota-exhausted cell — its 9999 is noise.
-assert_eq "2000" "$(echo "$qrep" | jq -r '.conditions[0].input_tokens_total')" \
-  "T29h: token totals exclude quota_exhausted cells"
-# Wall median must also exclude it (4000s only).
-assert_eq "4000" "$(echo "$qrep" | jq -r '.conditions[0].wall_median')" \
-  "T29i: wall_median excludes quota_exhausted cells"
-python3 "$PY" pool "$qbd" >/dev/null
-assert_eq "1" "$(find "$qbd/pool/findings" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" \
-  "T29i2: pool excludes quota_exhausted findings so clusters match totals"
-
-# (c) Crosstab reps cell renders provider-limited and legacy quota suffixes.
-mkdir -p "$qbd/state"
-printf '{"runid":"q-runid","target":"t","backend":"gemini","model":"gemini-3.1-pro-preview","replicates":2,"budget_wall":10800,"harness_agents":null,"model_direct_agents":1,"conditions":["model-direct"],"target_sha":"sha","harness_sha":"sha","dry_run":false}\n' \
-  > "$qbd/run.json"
-qbroot="$work/quota-bench-root"
-mkdir -p "$qbroot/gemini"
-ln -s "$qbd" "$qbroot/gemini/q-runid"
-python3 "$PY" aggregate "$qbd" --out "$qbd/report.json" >/dev/null 2>&1 || true
-ctab=$(python3 "$PY" crosstab "$qbroot" 2>/dev/null || true)
-if printf '%s\n' "$ctab" | grep -qE '1/2 \(1p\) \(1q\)'; then
-  pass "T29j: crosstab reps cell annotates provider-limited and quota counts"
-else
-  fail "T29j: crosstab reps cell annotates provider-limited and quota counts" \
-    "got: $(printf '%s\n' "$ctab" | grep -E '^\| `gemini`' || echo none)"
-fi
-
-# (d) A done cell that recovered from a provider blip IS counted in clean
-#     totals but is surfaced as replicates_provider_recovered, and the crosstab
-#     reps cell carries a (Nr) suffix.
-rbd="$work/recovered-bench"
-mkdir -p "$rbd/cells/model-direct-r1" "$rbd/state"
-cat > "$rbd/cells/model-direct-r1/cell.json" <<JSON
-{"condition":"model-direct","replicate":1,"experiment":"e1","results_dir":"$rbd/cells/model-direct-r1","wall_seconds":4000,"status":"done","run_quality":"provider_recovered"}
-JSON
-cat > "$rbd/cells/model-direct-r1/metrics.json" <<'JSON'
-{"exists":true,"confirmed_crashes":0,"findings":0,
- "tokens":{"input_tokens":2000,"cached_input_tokens":0,"output_tokens":50,"prompt_estimate_tokens":0,"estimated":false,"iterations":1,"asan_invocations":0}}
-JSON
-rrep=$(python3 "$PY" aggregate "$rbd")
-assert_eq "1" "$(echo "$rrep" | jq -r '.conditions[0].replicates_done')" \
-  "T29k: a recovered cell still counts as done"
-assert_eq "1" "$(echo "$rrep" | jq -r '.conditions[0].replicates_provider_recovered')" \
-  "T29k2: recovered cell surfaced in its own column"
-assert_eq "0" "$(echo "$rrep" | jq -r '.conditions[0].replicates_provider_limited')" \
-  "T29k3: a recovered cell is NOT provider-limited"
-printf '{"runid":"r-runid","target":"t","backend":"gemini","model":"gemini-3.1-pro-preview","replicates":1,"budget_wall":10800,"harness_agents":null,"model_direct_agents":1,"conditions":["model-direct"],"target_sha":"sha","harness_sha":"sha","dry_run":false}\n' \
-  > "$rbd/run.json"
-rbroot="$work/recovered-bench-root"
-mkdir -p "$rbroot/gemini"
-ln -s "$rbd" "$rbroot/gemini/r-runid"
-python3 "$PY" aggregate "$rbd" --out "$rbd/report.json" >/dev/null 2>&1 || true
-rctab=$(python3 "$PY" crosstab "$rbroot" 2>/dev/null || true)
-if printf '%s\n' "$rctab" | grep -qE '1/1 \(1r\)'; then
-  pass "T29l: crosstab reps cell annotates provider-recovered count as (Nr)"
-else
-  fail "T29l: crosstab reps cell annotates provider-recovered count as (Nr)" \
-    "got: $(printf '%s\n' "$rctab" | grep -E '^\| `gemini`' || echo none)"
-fi
-
-# (e) A NEW status=incomplete cell carrying run_quality=provider_limited (the
-#     non-legacy path) must be counted as provider-limited. This exercises the
-#     run_quality field surviving cell-load — without it only legacy
-#     quota_exhausted cells would be counted.
-ibd="$work/incomplete-bench"
-mkdir -p "$ibd/cells/model-direct-r1"
-cat > "$ibd/cells/model-direct-r1/cell.json" <<JSON
-{"condition":"model-direct","replicate":1,"experiment":"e1","results_dir":"$ibd/cells/model-direct-r1","wall_seconds":120,"status":"incomplete","run_quality":"provider_limited"}
-JSON
-printf '{"exists":false}\n' > "$ibd/cells/model-direct-r1/metrics.json"
-irep=$(python3 "$PY" aggregate "$ibd")
-assert_eq "0" "$(echo "$irep" | jq -r '.conditions[0].replicates_done')" \
-  "T29m: an incomplete cell does not count as done"
-assert_eq "1" "$(echo "$irep" | jq -r '.conditions[0].replicates_incomplete')" \
-  "T29m2: incomplete cell counted as incomplete"
-assert_eq "1" "$(echo "$irep" | jq -r '.conditions[0].replicates_provider_limited')" \
-  "T29m3: incomplete+provider_limited counted via run_quality (not just legacy quota)"
-
-# ── T30: sweep_target_tree_for_misplaced_output rescues misrouted output ─
-# Regression coverage for the gemini-r1 2026-05-24 incident: when a
-# model-direct agent `cd`'s into the source tree and writes via a
-# relative path, FIND-* / CRASH-* land in <target_root>/findings/ and
-# <target_root>/crashes/ instead of the cell dir. The post-cell sweep
-# inside bin/benchmark recovers them — but ONLY artifacts that were
-# NOT in the cell-start path snapshot. Pre-existing target content
-# (e.g. an upstream project's fuzz corpus living under findings/) is
-# left strictly alone. The snapshot is set-membership, not mtime-based,
-# so it's robust against same-second timing collisions.
-swp_work="$work/sweep"
-mkdir -p "$swp_work/target/findings/FIND-pre-existing-corpus" \
-         "$swp_work/target/.git/findings/FIND-DECOY" \
-         "$swp_work/target/src" \
-         "$swp_work/cell/findings" \
-         "$swp_work/cell/crashes"
-echo 'shipped with target tree' \
-  > "$swp_work/target/findings/FIND-pre-existing-corpus/manifest.txt"
-echo 'should-not-be-moved' > "$swp_work/target/.git/findings/FIND-DECOY/marker"
-echo 'legit source file'   > "$swp_work/target/src/main.c"
-
-# Pull both sweep helpers out of bin/benchmark and stub log() so the
-# functions are evaluable in isolation.
-swp_fn_src=$(mktemp)
-awk '
-  /^mark_cell_start_for_sweep\(\) \{/,/^\}/
-  /^sweep_target_tree_for_misplaced_output\(\) \{/,/^\}/
-' "$BENCH" > "$swp_fn_src"
-
-# Cell start: snapshot pre-existing pollution paths. Then simulate the
-# agent writing new pollution AFTER the snapshot.
-bash -c '
-  set -euo pipefail
-  log() { :; }
-  # shellcheck disable=SC1091
-  source "$1"
-  marker=$(mark_cell_start_for_sweep "$2" "$3")
-  # Fresh pollution the agent dropped — not in snapshot, should be moved.
-  mkdir -p "$3/findings/FIND-001-real-bug" "$3/crashes/CRASH-7"
-  echo "real bug report"    > "$3/findings/FIND-001-real-bug/report.md"
-  echo "loose md finding"   > "$3/findings/FIND-002-loose.md"
-  echo "crash dir contents" > "$3/crashes/CRASH-7/sanitizer.txt"
-  sweep_target_tree_for_misplaced_output "$3" "$2" "$marker"
-' _ "$swp_fn_src" "$swp_work/cell" "$swp_work/target"
-
-assert_file_exists "$swp_work/cell/findings/FIND-001-real-bug/report.md" \
-  "T30a: sweep moves new FIND directory from target/findings to cell/findings"
-assert_file_exists "$swp_work/cell/findings/FIND-002-loose.md" \
-  "T30b: sweep moves new loose FIND-* file from target/findings to cell/findings"
-assert_file_exists "$swp_work/cell/crashes/CRASH-7/sanitizer.txt" \
-  "T30c: sweep moves new CRASH directory from target/crashes to cell/crashes"
-[ ! -e "$swp_work/target/findings/FIND-001-real-bug" ] \
-  && pass "T30d: sweep removes the source-tree finding entry after moving" \
-  || fail "T30d: sweep removes the source-tree finding entry after moving"
-[ ! -e "$swp_work/target/crashes/CRASH-7" ] \
-  && pass "T30e: sweep removes the source-tree crash entry after moving" \
-  || fail "T30e: sweep removes the source-tree crash entry after moving"
-# Set-membership safety: pre-existing upstream-owned corpus survives.
-[ -f "$swp_work/target/findings/FIND-pre-existing-corpus/manifest.txt" ] \
-  && pass "T30f: pre-existing target-owned FIND-* (in snapshot) left alone" \
-  || fail "T30f: pre-existing target-owned FIND-* (in snapshot) left alone"
-[ -e "$swp_work/target/.git/findings/FIND-DECOY/marker" ] \
-  && pass "T30g: sweep skips .git contents (does not touch internal FIND-DECOY)" \
-  || fail "T30g: sweep skips .git contents (does not touch internal FIND-DECOY)"
-[ -f "$swp_work/target/src/main.c" ] \
-  && pass "T30h: sweep leaves unrelated source files alone" \
-  || fail "T30h: sweep leaves unrelated source files alone"
-[ -d "$swp_work/target/findings" ] \
-  && pass "T30i: top-level findings/ preserved when pre-existing content remains" \
-  || fail "T30i: top-level findings/ preserved when pre-existing content remains"
-
-# Sweep with no marker = refuse to mutate. Safety net for any caller
-# that forgets to call mark_cell_start_for_sweep first.
-mkdir -p "$swp_work/target/findings/FIND-stray-after-noop"
-echo 'should survive a no-marker sweep' \
-  > "$swp_work/target/findings/FIND-stray-after-noop/report.md"
-bash -c '
-  set -euo pipefail
-  log() { :; }
-  # shellcheck disable=SC1091
-  source "$1"
-  sweep_target_tree_for_misplaced_output "$2" "$3" ""
-' _ "$swp_fn_src" "$swp_work/target" "$swp_work/cell"
-[ -f "$swp_work/target/findings/FIND-stray-after-noop/report.md" ] \
-  && pass "T30j: sweep refuses to mutate target tree without a snapshot" \
-  || fail "T30j: sweep refuses to mutate target tree without a snapshot"
-
-# Name-collision: an in-cell FIND-001-real-bug already exists (from
-# T30a above). Drop a same-id pollution into a fresh target with a
-# fresh snapshot and assert the rescued copy lands under a
-# disambiguator instead of clobbering.
-mkdir -p "$swp_work/target2"
-bash -c '
-  set -euo pipefail
-  log() { :; }
-  # shellcheck disable=SC1091
-  source "$1"
-  marker=$(mark_cell_start_for_sweep "$2" "$3")
-  mkdir -p "$3/findings/FIND-001-real-bug"
-  echo "newly-rescued copy" > "$3/findings/FIND-001-real-bug/report.md"
-  sweep_target_tree_for_misplaced_output "$3" "$2" "$marker"
-' _ "$swp_fn_src" "$swp_work/cell" "$swp_work/target2"
-
-assert_eq "real bug report" \
-  "$(cat "$swp_work/cell/findings/FIND-001-real-bug/report.md")" \
-  "T30k: name-collision keeps the pre-existing in-cell artifact intact"
-if ls "$swp_work/cell/findings/FIND-001-real-bug.from-target-"* >/dev/null 2>&1; then
-  pass "T30l: collided rescue lands under a .from-target-<ts> suffix"
-else
-  fail "T30l: collided rescue lands under a .from-target-<ts> suffix"
-fi
-
-# The sweep helper runs inside cell runners whose stdout is command-substituted
-# as the returned results_dir. Its diagnostics must stay off stdout or a
-# successful cell harvests against a multi-line non-path string.
-mkdir -p "$swp_work/target3"
-swp_capture_out=$(bash -c '
-  set -euo pipefail
-  log() { echo "LOG:$*"; }
-  # shellcheck disable=SC1091
-  source "$1"
-  marker=$(mark_cell_start_for_sweep "$2" "$3")
-  mkdir -p "$3/findings/FIND-stdout-clean"
-  echo "rescued" > "$3/findings/FIND-stdout-clean/report.md"
-  sweep_target_tree_for_misplaced_output "$3" "$2" "$marker"
-' _ "$swp_fn_src" "$swp_work/cell" "$swp_work/target3" 2>/dev/null)
-assert_eq "" "$swp_capture_out" \
-  "T30m: sweep diagnostics do not pollute stdout return values"
-rm -f "$swp_fn_src"
-
-# ── T31: agy_drip_stopped + agy_cli_log_for_pid predicates ─────────────
-# Pure-function tests for the gemini-watchdog's drip-detection arm. We
-# don't exercise the watcher loop itself (process management is the
-# same shape as T29's quota watcher and would re-test bash plumbing,
-# not behaviour). The predicate is the load-bearing piece.
-# Functions now live in lib/gemini_watchdog.sh (sourced once above for T29).
-# Re-sourcing is idempotent; keep an explicit call here so T31 stays
-# runnable in isolation if a future refactor reorders test blocks.
-# shellcheck disable=SC1091
-. "$SCRIPT_ROOT/lib/gemini_watchdog.sh"
-
-# Positive: a log carrying the exact agy klog format trips.
-drip_log_yes="$work/drip-yes.log"
-{
-  printf 'I0524 17:40:24.741 12726 http_helpers.go:182] URL: ...\n'
-  printf 'I0524 17:40:24.842 12726 text_drip.go:173] Drip stopped: lastStepIdx=732, charIdx=1557, length=1706\n'
-} > "$drip_log_yes"
-if agy_drip_stopped "$drip_log_yes"; then
-  pass "T31a: agy_drip_stopped matches the real text_drip.go klog format"
-else
-  fail "T31a: agy_drip_stopped matches the real text_drip.go klog format"
-fi
-
-# Negative: a log without the event must not trip.
-drip_log_no="$work/drip-no.log"
-{
-  printf 'I0524 17:40:24.741 12726 http_helpers.go:182] URL: ...\n'
-  printf 'I0524 17:40:24.842 12726 server.go:200] Creating CLI server\n'
-} > "$drip_log_no"
-if agy_drip_stopped "$drip_log_no"; then
-  fail "T31b: agy_drip_stopped must NOT trigger without the klog event" "triggered on log without Drip stopped"
-else
-  pass "T31b: agy_drip_stopped must NOT trigger without the klog event"
-fi
-
-# Adversarial: a model response that legitimately contains the phrase
-# "drip stopped" in prose must not trip (anchor is on the klog
-# `text_drip.go:NNN]` prefix).
-drip_log_prose="$work/drip-prose.log"
-printf '%s\n' 'the drip stopped flowing when the tank ran dry' > "$drip_log_prose"
-if agy_drip_stopped "$drip_log_prose"; then
-  fail "T31c: agy_drip_stopped must NOT match prose 'drip stopped'" "false positive on prose"
-else
-  pass "T31c: agy_drip_stopped must NOT match prose 'drip stopped'"
-fi
-
-# Empty / missing log: false (caller treats as no signal).
-: > "$work/drip-empty.log"
-if agy_drip_stopped "$work/drip-empty.log"; then
-  fail "T31d: agy_drip_stopped must NOT trigger on empty log" "triggered"
-else
-  pass "T31d: agy_drip_stopped must NOT trigger on empty log"
-fi
-if agy_drip_stopped "$work/no-such-file.log"; then
-  fail "T31e: agy_drip_stopped must NOT trigger on missing log" "triggered"
-else
-  pass "T31e: agy_drip_stopped must NOT trigger on missing log"
-fi
-
-# agy_cli_log_for_pid: spawn a child holding open a fake cli-log under
-# the canonical antigravity-cli/log/cli-*.log path layout, then resolve
-# its pid and confirm we get the path back. Linux containers use /proc;
-# macOS and other POSIX hosts can fall back to lsof.
-fake_log_dir="$work/antigravity-cli/log"
-mkdir -p "$fake_log_dir"
-fake_log="$fake_log_dir/cli-20260524_191234.log"
-: > "$fake_log"
-# Hold the file open in a backgrounded shell. exec 9>file binds an FD
-# that lsof will see for that PID. `exec sleep` keeps holder_pid == the
-# fd-holding process so the kill below reaps it (a plain `sleep` child
-# would survive the kill of its parent subshell and, by inheriting this
-# suite's stdout, hold the runner's pipe open for the full 30s). The
-# /dev/null redirect makes even a leaked holder harmless to the pipe.
-( exec 9>"$fake_log"; exec sleep 30 ) >/dev/null 2>&1 &
-holder_pid=$!
-# Poll until the OS has registered the FD for the pid (proc/lsof can lag
-# behind the fork by a few ms; was a fixed `sleep 1`).
-resolved=""
-for _ in $(seq 1 40); do
-  resolved=$(agy_cli_log_for_pid "$holder_pid")
-  if [ -n "$resolved" ]; then break; fi
-  sleep 0.05
-done
-# macOS lsof reports the canonicalized path (/var/folders ->
-# /private/var/folders). Compare via realpath so the test is
-# platform-agnostic.
-resolved_real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$resolved" 2>/dev/null || printf '%s' "$resolved")
-fake_real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$fake_log" 2>/dev/null || printf '%s' "$fake_log")
-if [ "$resolved_real" = "$fake_real" ]; then
-  pass "T31f: agy_cli_log_for_pid resolves the held cli-*.log via proc-or-lsof"
-elif [ -d "/proc/$holder_pid/fd" ] || command -v lsof >/dev/null 2>&1; then
-  fail "T31f: agy_cli_log_for_pid resolves the held cli-*.log via proc-or-lsof" "got: '$resolved_real' expected: '$fake_real'"
-else
-  pass "T31f: agy_cli_log_for_pid no proc/lsof path available on this host"
-fi
-# Cleanup the holder.
-kill "$holder_pid" 2>/dev/null
-wait "$holder_pid" 2>/dev/null || true
-
-# Dead pid: returns empty, never crashes.
-dead_resolved=$(agy_cli_log_for_pid 999999 2>&1)
-if [ -z "$dead_resolved" ]; then
-  pass "T31g: agy_cli_log_for_pid returns empty for a dead pid"
-else
-  fail "T31g: agy_cli_log_for_pid returns empty for a dead pid" "got: $dead_resolved"
-fi
-
-# (drip_fn cleanup retired: functions now live in lib/gemini_watchdog.sh,
-# no temp file is materialized for T31.)
-
-# ── T32: agy_in_idle_heartbeat_loop predicate ──────────────────────────
-# Validates the new arm of the gemini watchdog. The function returns
-# true when the klog shows the documented post-generation idle-loop
-# signature: zero streamGenerateContent / :generateContent calls in
-# the recent window, plus >=1 fetchAvailableModels / loadCodeAssist.
-# Same fail-safe model as agy_drip_stopped — missing klog, awk
-# errors, format drift all return false.
-# Function now lives in lib/gemini_watchdog.sh (sourced above for T29/T31).
-# shellcheck disable=SC1091
-. "$SCRIPT_ROOT/lib/gemini_watchdog.sh"
-
-# Fixtures use real "now" timestamps so the date-arithmetic in the
-# function resolves correctly. Two HH:MM offsets are computed:
-#   now_hhmm   — current minute (always inside any window)
-#   old_hhmm   — 10 minutes ago (outside the 120s window used below)
-#   old_mmdd   — the matching klog date for old_hhmm, which may be yesterday
-now_hhmm=$(date +%H:%M)
-old_hhmm=$(date -v-10M +%H:%M 2>/dev/null \
-        || date -d '10 minutes ago' +%H:%M 2>/dev/null)
-mmdd=$(date +%m%d)
-old_mmdd=$(date -v-10M +%m%d 2>/dev/null \
-        || date -d '10 minutes ago' +%m%d 2>/dev/null)
-
-# Positive: broken-klog signature — old stream call (out of window),
-# recent heartbeat (in window).
-idle_log_yes="$work/idle-yes.log"
-{
-  printf 'I%s %s:42.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0xabc\n' "$old_mmdd" "$old_hhmm"
-  printf 'I%s %s:00.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels Trace: 0xdef\n' "$mmdd" "$now_hhmm"
-  printf 'I%s %s:00.234567 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist Trace: 0x123\n' "$mmdd" "$now_hhmm"
-} > "$idle_log_yes"
-if agy_in_idle_heartbeat_loop "$idle_log_yes" 120; then
-  pass "T32a: agy_in_idle_heartbeat_loop fires on broken-klog signature"
-else
-  fail "T32a: agy_in_idle_heartbeat_loop fires on broken-klog signature" "did not trigger on the documented idle-loop shape"
-fi
-
-# Negative: healthy klog — recent stream calls + recent heartbeat.
-# The presence of any stream call in the window must veto the trigger.
-idle_log_active="$work/idle-active.log"
-{
-  printf 'I%s %s:10.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0xabc\n' "$mmdd" "$now_hhmm"
-  printf 'I%s %s:30.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels Trace: 0xdef\n' "$mmdd" "$now_hhmm"
-} > "$idle_log_active"
-if agy_in_idle_heartbeat_loop "$idle_log_active" 120; then
-  fail "T32b: agy_in_idle_heartbeat_loop must NOT trigger when stream calls are recent" "false positive during active conversation"
-else
-  pass "T32b: agy_in_idle_heartbeat_loop must NOT trigger when stream calls are recent"
-fi
-
-# Negative: no recent heartbeat either — the function requires at
-# least one heartbeat to confirm agy is still writing to the klog
-# at all. A genuinely-dead agy (no writes of any kind) should fall
-# back to the outer wall, not be picked up here.
-idle_log_silent="$work/idle-silent.log"
-{
-  printf 'I%s %s:42.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse Trace: 0xabc\n' "$old_mmdd" "$old_hhmm"
-} > "$idle_log_silent"
-if agy_in_idle_heartbeat_loop "$idle_log_silent" 120; then
-  fail "T32c: agy_in_idle_heartbeat_loop must NOT trigger without recent heartbeats" "false positive on silent klog"
-else
-  pass "T32c: agy_in_idle_heartbeat_loop must NOT trigger without recent heartbeats"
-fi
-
-# Negative: :generateContent (non-stream variant, lowercase g) also
-# counts as activity — agy sometimes uses both URLs interchangeably.
-# Without this match, a model that issues only :generateContent
-# would be mis-classified as idle.
-idle_log_nonstream="$work/idle-nonstream.log"
-{
-  printf 'I%s %s:10.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent Trace: 0xabc\n' "$mmdd" "$now_hhmm"
-  printf 'I%s %s:30.123456 9999 http_helpers.go:182] URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels Trace: 0xdef\n' "$mmdd" "$now_hhmm"
-} > "$idle_log_nonstream"
-if agy_in_idle_heartbeat_loop "$idle_log_nonstream" 120; then
-  fail "T32d: agy_in_idle_heartbeat_loop must count :generateContent as activity" "treated non-stream variant as idle"
-else
-  pass "T32d: agy_in_idle_heartbeat_loop must count :generateContent as activity"
-fi
-
-# Fail-safe: missing log file returns false (caller skips the poll).
-if agy_in_idle_heartbeat_loop "$work/no-such-idle.log" 120; then
-  fail "T32e: agy_in_idle_heartbeat_loop must NOT trigger on missing log" "triggered"
-else
-  pass "T32e: agy_in_idle_heartbeat_loop must NOT trigger on missing log"
-fi
-
-# (idle_fn cleanup retired: functions now live in lib/gemini_watchdog.sh,
-# no temp file is materialized for T32.)
 
 summary

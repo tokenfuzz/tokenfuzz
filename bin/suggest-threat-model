@@ -5,7 +5,7 @@ Usage:
     bin/suggest-threat-model <slug>                # print [threat_model] snippet
     bin/suggest-threat-model <slug> --apply        # set it in output/<slug>/target.toml
     bin/suggest-threat-model <slug> --apply --force # overwrite a non-default model
-    bin/suggest-threat-model <slug> --apply --force-config # alias for --force
+    bin/suggest-threat-model <slug> --apply --force
 
 Reads target.toml + the target's README and public-header API surface,
 then asks the LLM which attacker_controls tokens genuinely apply. Prints a
@@ -24,7 +24,7 @@ Failure modes:
     - LLM unavailable / disabled       → exit 2
     - target slug / target.toml absent → exit 1
     - LLM response invalid             → exit 3
-    - target.toml already has a non-default threat model, no --force/--force-config → exit 4
+    - target.toml already has a non-default threat model, no --force → exit 4
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ _API_SKIP_DIRS = {
     ".git",
 }
 _MARKER_BODY = "attacker_controls set by bin/suggest-threat-model"
-# Legacy callers (tests, in-place stale-comment detection) match against the
+# Tests and in-place stale-comment detection match against the
 # fully-rendered comment line. Keep that string spelled exactly once.
 _MARKER = "# " + _MARKER_BODY
 
@@ -210,7 +210,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("slug", help="target slug (matches output/<slug>/)")
     parser.add_argument("--apply", action="store_true",
                         help="write the threat model into output/<slug>/target.toml")
-    parser.add_argument("--force", "--force-config", dest="force", action="store_true",
+    parser.add_argument("--force", action="store_true",
                         help="overwrite a non-default [threat_model] when --apply")
     parser.add_argument("--timeout", type=int, default=120,
                         help="LLM-call timeout seconds (default 120)")
@@ -274,7 +274,7 @@ def main(argv: list[str]) -> int:
     current = cfg.attacker_controls or ["bytes"]
     if current != ["bytes"] and not args.force:
         print(f"[suggest-threat-model] target.toml already has a non-default "
-              f"threat model {current}; pass --force (or --force-config) "
+              f"threat model {current}; pass --force "
               f"to overwrite.", file=sys.stderr)
         return 4
 

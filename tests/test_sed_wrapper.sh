@@ -41,13 +41,13 @@ output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
   || fail "byte cap: huge single line should be head+tail capped" "got ${output_bytes} bytes"
 assert_match "output_cap: sed-stdout truncated" "$output" "byte cap: default path emits output_cap marker"
 
-# Explicit CAP_BYTES preserves the historical chop-and-footer behavior.
+# Explicit CAP_BYTES changes the shared head+tail threshold.
 output=$(CAP_BYTES=65536 "$SED_WRAPPER" -n '1p' "$TEST_TMPDIR/huge.txt" 2>/dev/null)
-assert_match "stdout clipped at 65536" "$output" "byte cap: explicit CAP_BYTES uses legacy footer"
+assert_match "output_cap: sed-stdout truncated" "$output" "byte cap: explicit CAP_BYTES uses shared marker"
 
 # CAP_BYTES env override.
 output=$(CAP_BYTES=4096 "$SED_WRAPPER" -n '1p' "$TEST_TMPDIR/huge.txt" 2>/dev/null)
-assert_match "stdout clipped at 4096" "$output" "byte cap: CAP_BYTES env honored"
+assert_match "output_cap: sed-stdout truncated" "$output" "byte cap: CAP_BYTES env honored"
 
 # ═══════════════════════════════════════════════════════════════
 # 4. CAP_LINES=0 / CAP_BYTES=0 escape hatch — for legitimate large reads

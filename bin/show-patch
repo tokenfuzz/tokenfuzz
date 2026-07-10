@@ -1,288 +1,256 @@
-#!/bin/bash
-# show-patch — `git show` wrapper that defaults to a narrower diff context
-# and caps total output so generated-table commits don't dump 600 KB.
-#
-# Why: agent-authored `git show --unified=80` calls were returning 50-90 KB
-# per patch — context the agent rarely needed. --unified=10 covers normal
-# function-header + leading/trailing logic for the cases agents actually
-# investigate, and shrinks output to ~6-15 KB. Two parallel caps prevent
-# pathological cases:
-#   PATCH_MAX_LINES (default 1500)   protects against many short lines
-#   PATCH_MAX_BYTES (default 32768)  protects against few dense lines
-# Either cap firing triggers a per-file --stat tail so the agent sees the
-# structure of what was hidden and can drill in via path scoping. The byte
-# cap is what catches the typical refactor-on-one-file blowout (e.g. a 51 KB
-# lib/url.c rewrite where 1500 lines still ≈ 51 KB).
-#
-# Why pre-validate the commit: agents sometimes mistype hashes or pass a
-# patch-card ID like `f5b4e3fe8162` that has no fix revision recorded. Bare
-# `git show <bad>` emits a 4-line "ambiguous argument" splat that gets
-# replayed as billed input on every subsequent turn. Pre-validating with
-# `git rev-parse --verify` lets us emit a one-line `[show-patch] unknown
-# revision: <ref>` and exit cleanly.
-#
-# Usage:
-#   bin/show-patch <commit> [<path>...] [git show flags]
-#   PATCH_CONTEXT=80 bin/show-patch <commit>           # widen for one call
-#   bin/show-patch <commit> --unified=80               # explicit override
-#   PATCH_MAX_LINES=5000 bin/show-patch <commit>       # widen the line cap
-#   PATCH_MAX_LINES=0 bin/show-patch <commit>          # disable line cap
-#   PATCH_MAX_BYTES=65536 bin/show-patch <commit>      # widen the byte cap
-#   PATCH_MAX_BYTES=0 bin/show-patch <commit>          # disable byte cap
-#
-# If the caller passes their own --unified=N or -U N, we don't second-guess
-# them — pass-through wins. Stat-only and message-only views (--stat,
-# --no-patch) also pass through unchanged. Within a single audit session
-# (RESULTS_DIR set), repeat calls with identical args return a 1-line note
-# instead of re-emitting the same patch — see PATCH_NO_CACHE=1 to force.
-# When TARGET_ROOT is set by bin/audit, commits and paths are resolved in that
-# target repository even if the current shell is the harness repo.
+#!/usr/bin/env python3
+"""Show a bounded Git patch with compact errors and per-session memoization."""
 
-set -uo pipefail
+from __future__ import annotations
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=../lib/platform.sh
-source "$REPO_ROOT/lib/platform.sh"
+import hashlib
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-CTX="${PATCH_CONTEXT:-10}"
-MAX_LINES="${PATCH_MAX_LINES:-1500}"
-MAX_BYTES="${PATCH_MAX_BYTES:-32768}"
-STAT_TAIL_LINES="${PATCH_STAT_TAIL_LINES:-20}"
 
-# Agents often muscle-memory `git --no-pager show ...` as
-# `bin/show-patch <commit> --no-pager`. `--no-pager` is a top-level git
-# option, not a `git show` option; this wrapper already captures and caps
-# output, so accepting and dropping it is equivalent to the intended behavior.
-_filtered_args=()
-for _arg in "$@"; do
-  case "$_arg" in
-    --no-pager) ;;
-    *) _filtered_args+=("$_arg") ;;
-  esac
-done
-if [ "${#_filtered_args[@]}" -gt 0 ]; then
-  set -- "${_filtered_args[@]}"
-else
-  set --
-fi
-unset _filtered_args _arg
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+from command_tools import find_executable
+from file_tools import clipped_prefix_bytes
 
-if [ $# -eq 0 ]; then
-  cat >&2 <<USAGE
-Usage: bin/show-patch <commit> [<path>...] [git show flags]
-  Defaults to --unified=\${PATCH_CONTEXT:-10}; pass --unified=N or set
+
+USAGE = """Usage: bin/show-patch <commit> [<path>...] [git show flags]
+  Defaults to --unified=${PATCH_CONTEXT:-10}; pass --unified=N or set
   PATCH_CONTEXT=N to override. Caller flags (--stat, --no-patch, --unified)
   pass through unchanged.
-USAGE
-  exit 2
-fi
+"""
 
-case "$CTX" in
-  ''|*[!0-9]*) echo "[show-patch] non-numeric PATCH_CONTEXT: $CTX" >&2; exit 2 ;;
-esac
-case "$MAX_LINES" in
-  ''|*[!0-9]*) echo "[show-patch] non-numeric PATCH_MAX_LINES: $MAX_LINES" >&2; exit 2 ;;
-esac
-case "$MAX_BYTES" in
-  ''|*[!0-9]*) echo "[show-patch] non-numeric PATCH_MAX_BYTES: $MAX_BYTES" >&2; exit 2 ;;
-esac
-case "$STAT_TAIL_LINES" in
-  ''|*[!0-9]*) echo "[show-patch] non-numeric PATCH_STAT_TAIL_LINES: $STAT_TAIL_LINES" >&2; exit 2 ;;
-esac
 
-# Detect explicit caller overrides we should not stomp on. Both -U N and the
-# joined -UN form are git-supported; we treat both as overrides.
-USER_OVERRIDE=0
-for a in "$@"; do
-  case "$a" in
-    --unified=*|--unified|-U|-U[0-9]*|--stat|--no-patch|--shortstat|--name-only|--name-status)
-      USER_OVERRIDE=1; break ;;
-  esac
-done
+def fail(message: str, status: int = 2) -> int:
+    print(f"[show-patch] {message}", file=sys.stderr)
+    return status
 
-if ! command -v git >/dev/null 2>&1; then
-  echo "[show-patch] git not found in PATH" >&2
-  exit 2
-fi
 
-PATCH_REPO_ROOT=""
-if [ -n "${SHOW_PATCH_REPO_ROOT:-}" ]; then
-  PATCH_REPO_ROOT="$SHOW_PATCH_REPO_ROOT"
-  if [ ! -e "$PATCH_REPO_ROOT/.git" ] || ! git -C "$PATCH_REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    printf '[show-patch] not a git repository: %s\n' "$PATCH_REPO_ROOT" >&2
-    exit 2
-  fi
-elif [ -n "${TARGET_ROOT:-}" ] && [ -e "$TARGET_ROOT/.git" ] && git -C "$TARGET_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  PATCH_REPO_ROOT="$TARGET_ROOT"
-fi
+def numeric_env(name: str, default: int) -> tuple[int, int]:
+    value = os.environ.get(name, str(default))
+    if not value.isdigit():
+        return 0, fail(f"non-numeric {name}: {value}")
+    return int(value), 0
 
-if [ -z "$PATCH_REPO_ROOT" ]; then
-  PATCH_REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-  if [ -z "$PATCH_REPO_ROOT" ]; then
-    echo "[show-patch] not inside a git repository and TARGET_ROOT is unset" >&2
-    exit 2
-  fi
-fi
 
-# Pre-validate the commit reference (first positional). git's own error for
-# an unknown ref is multi-line and gets replayed turn after turn — replace
-# it with a one-liner. Skip this check when the first positional looks like
-# a flag (starts with -); git will surface the right error in that case.
-case "$1" in
-  -*) ;;
-  *)
-    if ! git -C "$PATCH_REPO_ROOT" rev-parse --verify --quiet "$1^{commit}" >/dev/null 2>&1; then
-      printf '[show-patch] unknown revision: %s (try a longer hash, or check `git log`)\n' "$1" >&2
-      exit 128
-    fi
-    ;;
-esac
+def git_run(
+    git: str,
+    repository: Path,
+    args: list[str],
+    *,
+    capture: bool = False,
+    quiet_stderr: bool = False,
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [git, "-C", str(repository), *args],
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.DEVNULL if quiet_stderr else None,
+    )
 
-# Per-session memoization: if the same args were already shown earlier in
-# this audit session (RESULTS_DIR is the per-target results root, exported
-# by bin/audit), return a short pointer instead of re-emitting. The cache
-# key is sha1(argv); we tolerate either shasum or sha1sum being absent.
-_cache_key=""
-_cache_dir=""
-_cache_marker=""
-_cache_out=""
-_cache_meta=""
-if [ "${PATCH_NO_CACHE:-0}" != "1" ] && [ -n "${RESULTS_DIR:-}" ] && [ -d "$RESULTS_DIR" ]; then
-  # Include CTX, MAX_LINES and MAX_BYTES in the key so two calls with the
-  # same argv but different env settings produce different cache entries —
-  # the visible output genuinely differs in all three cases.
-  _cache_key=$(printf 'REPO=%s\0CTX=%s\0LINES=%s\0BYTES=%s\0%s\0' "$PATCH_REPO_ROOT" "$CTX" "$MAX_LINES" "$MAX_BYTES" "$*" | audit_sha1 2>/dev/null | awk '{print $1}')
-  if [ -n "$_cache_key" ]; then
-    _cache_dir="$RESULTS_DIR/.show-patch-cache"
-    _cache_marker="$_cache_dir/$_cache_key"
-    _cache_out="$_cache_dir/$_cache_key.out"
-    _cache_meta="$_cache_dir/$_cache_key.meta"
-    if [ -f "$_cache_out" ]; then
-      _hits=$(cat "$_cache_marker" 2>/dev/null)
-      _hits=$(( ${_hits:-1} + 1 ))
-      printf '%s\n' "$_hits" > "$_cache_marker" 2>/dev/null || true
-      _bytes=$(wc -c < "$_cache_out" 2>/dev/null | tr -d ' '); _bytes=${_bytes:-0}
-      _lines=$(wc -l < "$_cache_out" 2>/dev/null | tr -d ' '); _lines=${_lines:-0}
-      printf '[show-patch: cached at %s (%d bytes, %d lines, call #%d). First 40 lines below; Read the cache file for full, or re-run with PATCH_NO_CACHE=1.]\n' \
-        "$_cache_out" "$_bytes" "$_lines" "$_hits"
-      head -n 40 "$_cache_out"
-      if [ "$_lines" -gt 40 ]; then
-        printf '... (%d more lines in %s)\n' "$((_lines - 40))" "$_cache_out"
-      fi
-      exit 0
-    fi
-    mkdir -p "$_cache_dir" 2>/dev/null || { _cache_marker=""; _cache_out=""; _cache_meta=""; }
-  fi
-fi
 
-run_git_show() {
-  if [ "$USER_OVERRIDE" -eq 1 ]; then
-    git -C "$PATCH_REPO_ROOT" show "$@"
-  else
-    git -C "$PATCH_REPO_ROOT" show --unified="$CTX" "$@"
-  fi
-}
+def repository_root(git: str) -> tuple[Path | None, int]:
+    explicit = os.environ.get("SHOW_PATCH_REPO_ROOT")
+    target = os.environ.get("TARGET_ROOT")
+    if explicit:
+        candidate = Path(explicit)
+        valid = candidate.joinpath(".git").exists() and git_run(
+            git, candidate, ["rev-parse", "--git-dir"], capture=True, quiet_stderr=True
+        ).returncode == 0
+        if not valid:
+            return None, fail(f"not a git repository: {candidate}")
+        return candidate, 0
+    if target:
+        candidate = Path(target)
+        if candidate.joinpath(".git").exists() and git_run(
+            git, candidate, ["rev-parse", "--git-dir"], capture=True, quiet_stderr=True
+        ).returncode == 0:
+            return candidate, 0
+    completed = subprocess.run(
+        [git, "rev-parse", "--show-toplevel"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if completed.returncode != 0:
+        return None, fail("not inside a git repository and TARGET_ROOT is unset")
+    return Path(completed.stdout.decode().strip()), 0
 
-# Mark this arg combination as "seen" before producing output, so a SIGPIPE
-# mid-stream doesn't cause the next identical call to also emit the giant diff.
-[ -n "$_cache_marker" ] && printf '1\n' > "$_cache_marker" 2>/dev/null || true
 
-# Fast path: both caps disabled means stream straight through.
-if [ "$MAX_LINES" -le 0 ] && [ "$MAX_BYTES" -le 0 ]; then
-  run_git_show "$@"
-  exit $?
-fi
+def cache_paths(
+    repository: Path, args: list[str], context: int, lines: int, byte_cap: int
+) -> tuple[Path | None, Path | None]:
+    results = os.environ.get("RESULTS_DIR")
+    if os.environ.get("PATCH_NO_CACHE", "0") == "1" or not results:
+        return None, None
+    results_path = Path(results)
+    if not results_path.is_dir():
+        return None, None
+    payload = (
+        f"REPO={repository}\0CTX={context}\0LINES={lines}\0BYTES={byte_cap}\0"
+        + " ".join(args)
+        + "\0"
+    ).encode()
+    key = hashlib.sha1(payload).hexdigest()
+    cache_dir = results_path / ".show-patch-cache"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None, None
+    return cache_dir / key, cache_dir / f"{key}.out"
 
-# Buffer to a tempfile so we can count lines/bytes and clip without losing
-# the upstream exit code. Two clip stages run in series:
-#   1. line cap → keeps the first N lines
-#   2. byte cap → keeps the first M bytes of whatever survived, snapping
-#                 down to the nearest \n so we never emit a half-line.
-_tmp=$(mktemp "${TMPDIR:-/tmp}/show-patch-XXXXXX")
-_view="$_tmp"
-trap 'rm -f "$_tmp" "${_view_tmp:-}"' EXIT
-run_git_show "$@" > "$_tmp"
-_rc=$?
 
-_total_lines=$(wc -l < "$_tmp" 2>/dev/null | tr -d ' ')
-_total_lines=${_total_lines:-0}
-_total_bytes=$(wc -c < "$_tmp" 2>/dev/null | tr -d ' ')
-_total_bytes=${_total_bytes:-0}
+def emit_cached(marker: Path, cached: Path) -> bool:
+    if not cached.is_file():
+        return False
+    try:
+        hits = int(marker.read_text().strip() or "1") + 1
+    except (OSError, ValueError):
+        hits = 2
+    try:
+        marker.write_text(f"{hits}\n")
+    except OSError:
+        pass
+    data = cached.read_bytes()
+    lines = data.count(b"\n")
+    print(
+        f"[show-patch: cached at {cached} ({len(data)} bytes, {lines} lines, "
+        f"call #{hits}). First 40 lines below; Read the cache file for full, or "
+        "re-run with PATCH_NO_CACHE=1.]"
+    )
+    preview_lines = data.splitlines(keepends=True)[:40]
+    sys.stdout.flush()
+    sys.stdout.buffer.write(b"".join(preview_lines))
+    if lines > 40:
+        print(f"... ({lines - 40} more lines in {cached})")
+    return True
 
-_line_clipped=0
-_byte_clipped=0
 
-# Stage 1: line cap. Operates on $_tmp → $_view_tmp when active.
-if [ "$MAX_LINES" -gt 0 ] && [ "$_total_lines" -gt "$MAX_LINES" ]; then
-  _view_tmp=$(mktemp "${TMPDIR:-/tmp}/show-patch-view-XXXXXX")
-  head -n "$MAX_LINES" "$_tmp" > "$_view_tmp"
-  _view="$_view_tmp"
-  _line_clipped=1
-fi
+def main(argv: list[str] | None = None) -> int:
+    args = [arg for arg in (sys.argv[1:] if argv is None else argv) if arg != "--no-pager"]
+    if not args:
+        print(USAGE, file=sys.stderr, end="")
+        return 2
 
-# Stage 2: byte cap. Operates on whatever $_view points at. Uses python3 to
-# clip down to the nearest newline so the last visible line is always whole.
-# This mirrors bin/scratch-search's clip_bytes pattern — deliberately
-# duplicated so each tool's caps stay self-contained and tunable.
-if [ "$MAX_BYTES" -gt 0 ]; then
-  _view_bytes=$(wc -c < "$_view" 2>/dev/null | tr -d ' ')
-  _view_bytes=${_view_bytes:-0}
-  if [ "$_view_bytes" -gt "$MAX_BYTES" ]; then
-    if command -v python3 >/dev/null 2>&1; then
-      _byte_tmp=$(mktemp "${TMPDIR:-/tmp}/show-patch-byte-XXXXXX")
-      python3 - "$_view" "$MAX_BYTES" > "$_byte_tmp" <<'PY'
-import sys
-path, cap = sys.argv[1], int(sys.argv[2])
-with open(path, "rb") as f:
-    data = f.read(cap)
-i = data.rfind(b"\n")
-if i >= 0:
-    data = data[:i + 1]
-sys.stdout.buffer.write(data)
-PY
-      # Replace _view, freeing the prior tmpfile if it was the line-cap output.
-      if [ "$_view" != "$_tmp" ]; then rm -f "$_view"; fi
-      _view="$_byte_tmp"
-      _view_tmp="$_byte_tmp"
-      _byte_clipped=1
-    fi
-  fi
-fi
+    context, status = numeric_env("PATCH_CONTEXT", 10)
+    if status:
+        return status
+    max_lines, status = numeric_env("PATCH_MAX_LINES", 1500)
+    if status:
+        return status
+    max_bytes, status = numeric_env("PATCH_MAX_BYTES", 32768)
+    if status:
+        return status
+    stat_tail_lines, status = numeric_env("PATCH_STAT_TAIL_LINES", 20)
+    if status:
+        return status
 
-# Emit the (possibly clipped) view, and persist a copy to the per-session cache
-# so subsequent identical-argv calls (any agent in this RESULTS_DIR) can return a
-# cheap pointer + first-40-lines preview instead of re-emitting the same patch.
-if [ -n "$_cache_out" ]; then
-  cp "$_view" "$_cache_out" 2>/dev/null || true
-fi
-cat "$_view"
+    git = find_executable("git")
+    if not git:
+        return fail("git not found in PATH")
+    repository, status = repository_root(git)
+    if status or repository is None:
+        return status
 
-# If anything fired, append a structured tail: the clip notice plus a
-# per-file --stat so the agent sees what was hidden and can drill in by path.
-if [ "$_line_clipped" -eq 1 ] || [ "$_byte_clipped" -eq 1 ]; then
-  if [ "$_line_clipped" -eq 1 ] && [ "$_byte_clipped" -eq 1 ]; then
-    printf '\n[show-patch: clipped at %d of %d lines AND %d of %d bytes. Tree of this commit:\n' \
-      "$MAX_LINES" "$_total_lines" "$MAX_BYTES" "$_total_bytes"
-  elif [ "$_line_clipped" -eq 1 ]; then
-    printf '\n[show-patch: clipped at %d of %d lines. Tree of this commit:\n' \
-      "$MAX_LINES" "$_total_lines"
-  else
-    printf '\n[show-patch: clipped at %d of %d bytes. Tree of this commit:\n' \
-      "$MAX_BYTES" "$_total_bytes"
-  fi
-  # `git show --stat --format=` suppresses the commit message header and
-  # emits only the per-file shortstat. Head-cap to PATCH_STAT_TAIL_LINES
-  # so even a 200-file commit can't blow the tail itself.
-  _stat_total=$(git -C "$PATCH_REPO_ROOT" show --stat --format= "$@" 2>/dev/null | wc -l | tr -d ' ')
-  _stat_total=${_stat_total:-0}
-  git -C "$PATCH_REPO_ROOT" show --stat --format= "$@" 2>/dev/null | head -n "$STAT_TAIL_LINES"
-  if [ "$_stat_total" -gt "$STAT_TAIL_LINES" ]; then
-    printf '  ... (%d more files; PATCH_STAT_TAIL_LINES=0 to widen)\n' \
-      "$((_stat_total - STAT_TAIL_LINES))"
-  fi
-  printf 'Drill in: bin/show-patch %s -- <file>, or PATCH_MAX_LINES=0 PATCH_MAX_BYTES=0 for the full diff.]\n' \
-    "$1"
-fi
+    if not args[0].startswith("-"):
+        verified = git_run(
+            git,
+            repository,
+            ["rev-parse", "--verify", "--quiet", f"{args[0]}^{{commit}}"],
+            capture=True,
+            quiet_stderr=True,
+        )
+        if verified.returncode != 0:
+            return fail(
+                f"unknown revision: {args[0]} (try a longer hash, or check `git log`)",
+                128,
+            )
 
-exit "$_rc"
+    marker, cached = cache_paths(repository, args, context, max_lines, max_bytes)
+    if marker is not None and cached is not None and emit_cached(marker, cached):
+        return 0
+    if marker is not None:
+        try:
+            marker.write_text("1\n")
+        except OSError:
+            pass
+
+    override = any(
+        arg.startswith("--unified=")
+        or arg in (
+            "--unified",
+            "-U",
+            "--stat",
+            "--no-patch",
+            "--shortstat",
+            "--name-only",
+            "--name-status",
+        )
+        or (arg.startswith("-U") and arg[2:].isdigit())
+        for arg in args
+    )
+    show_args = ["show", *(args if override else [f"--unified={context}", *args])]
+    if max_lines <= 0 and max_bytes <= 0:
+        return git_run(git, repository, show_args).returncode
+
+    completed = git_run(git, repository, show_args, capture=True)
+    original = completed.stdout
+    total_lines = original.count(b"\n")
+    total_bytes = len(original)
+    view = original
+    line_clipped = max_lines > 0 and total_lines > max_lines
+    if line_clipped:
+        view = b"".join(original.splitlines(keepends=True)[:max_lines])
+    byte_clipped = max_bytes > 0 and len(view) > max_bytes
+    if byte_clipped:
+        view = clipped_prefix_bytes(view, max_bytes)
+
+    if cached is not None:
+        try:
+            cached.write_bytes(view)
+        except OSError:
+            pass
+    sys.stdout.buffer.write(view)
+    sys.stdout.flush()
+
+    if line_clipped or byte_clipped:
+        if line_clipped and byte_clipped:
+            print(
+                f"\n[show-patch: clipped at {max_lines} of {total_lines} lines AND "
+                f"{max_bytes} of {total_bytes} bytes. Tree of this commit:"
+            )
+        elif line_clipped:
+            print(
+                f"\n[show-patch: clipped at {max_lines} of {total_lines} lines. "
+                "Tree of this commit:"
+            )
+        else:
+            print(
+                f"\n[show-patch: clipped at {max_bytes} of {total_bytes} bytes. "
+                "Tree of this commit:"
+            )
+        stat = git_run(
+            git,
+            repository,
+            ["show", "--stat", "--format=", *args],
+            capture=True,
+            quiet_stderr=True,
+        ).stdout
+        stat_lines = stat.splitlines(keepends=True)
+        sys.stdout.flush()
+        sys.stdout.buffer.write(b"".join(stat_lines[:stat_tail_lines]))
+        sys.stdout.flush()
+        if len(stat_lines) > stat_tail_lines:
+            print(
+                f"  ... ({len(stat_lines) - stat_tail_lines} more files; "
+                "PATCH_STAT_TAIL_LINES=0 to widen)"
+            )
+        print(
+            f"Drill in: bin/show-patch {args[0]} -- <file>, or "
+            "PATCH_MAX_LINES=0 PATCH_MAX_BYTES=0 for the full diff.]"
+        )
+    return completed.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

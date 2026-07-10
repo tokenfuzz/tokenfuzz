@@ -78,16 +78,16 @@ output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
   || fail "byte cap: huge match should be head+tail capped, got ${output_bytes} bytes"
 assert_match "output_cap: rg-stdout truncated" "$output" "byte cap: default path emits output_cap marker"
 
-# Explicit CAP_BYTES preserves the historical chop-and-footer behavior.
+# Explicit CAP_BYTES changes the shared head+tail threshold.
 output=$(CAP_BYTES=65536 "$RG_WRAPPER" "match" "$HUGE" 2>/dev/null)
-assert_match "stdout clipped at 65536 bytes" "$output" "byte cap: explicit CAP_BYTES uses legacy footer"
+assert_match "output_cap: rg-stdout truncated" "$output" "byte cap: explicit CAP_BYTES uses shared marker"
 
 # CAP_BYTES env override.
 output=$(CAP_BYTES=4096 "$RG_WRAPPER" "match" "$HUGE" 2>/dev/null)
 output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
 [ "$output_bytes" -le 5000 ] && pass "byte cap: CAP_BYTES=4096 honored (got ${output_bytes})" \
   || fail "byte cap: CAP_BYTES=4096 expected ≤5000 bytes, got ${output_bytes}"
-assert_match "stdout clipped at 4096" "$output" "byte cap: CAP_BYTES env reflected in footer"
+assert_match "output_cap: rg-stdout truncated" "$output" "byte cap: CAP_BYTES env reflected in marker"
 
 # CAP_BYTES=0 disables byte cap (full huge line passes through).
 output=$(CAP_BYTES=0 "$RG_WRAPPER" "match" "$HUGE" 2>/dev/null)

@@ -16,7 +16,7 @@ setup_test_env
 trap 'teardown_test_env' EXIT
 
 OUT="$TEST_TMPDIR/output/abs-test"
-RESULTS="$OUT/results"
+RESULTS="$OUT/codex/results"
 CRASH="$RESULTS/crashes/CRASH-ABS-1"
 SRC="$TEST_TMPDIR/fake-src"
 mkdir -p "$OUT" "$CRASH" "$SRC/.git" "$SRC/.audit"
@@ -35,7 +35,7 @@ is_browser = "0"
 [threat_model]
 attacker_controls = ["bytes"]
 EOF
-cat > "$OUT/.session-env" <<EOF
+cat > "$RESULTS/.session-env" <<EOF
 RESULTS_DIR=$RESULTS
 TARGET_ROOT=$SRC
 TARGET_SLUG=abs-test
@@ -62,7 +62,7 @@ cat > "$CRASH/harness.c" <<'EOF'
 int main(int argc, char **argv) { (void)argc; (void)argv; return 0; }
 EOF
 printf 'AAAA' > "$CRASH/input.bin"
-cat > "$CRASH/asan.txt" <<'EOF'
+cat > "$CRASH/sanitizer.txt" <<'EOF'
 ASAN_RUN_HEADER: runs=1 mode=generic testcase=output/x/scratch/x.bin started=x
 === Run 1/1 ===
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xdead at pc 0xface
@@ -97,7 +97,7 @@ assert_file_contains "$CRASH/reproduce.sh" "$SENTINEL" \
 assert_file_contains "$CRASH/reproduce.sh" '\.audit-build\.sh' \
   "splice: reproduce.sh invokes the materialized audit-build script"
 assert_file_not_contains "$CRASH/reproduce.sh" 'DCMAKE_BUILD_TYPE=RelWithDebInfo' \
-  "splice: legacy hardcoded cmake template NOT also emitted"
+  "splice: hardcoded cmake template NOT also emitted"
 assert_file_contains "$CRASH/reproduce.sh" 'AUDIT_BUILD_SCRIPT_EOF' \
   "splice: heredoc delimiter present"
 
@@ -137,7 +137,7 @@ cat > "$CRASH2/harness.c" <<'EOF'
 int main(int argc, char **argv) { (void)argc; (void)argv; return 0; }
 EOF
 printf 'AAAA' > "$CRASH2/input.bin"
-cat > "$CRASH2/asan.txt" <<'EOF'
+cat > "$CRASH2/sanitizer.txt" <<'EOF'
 ASAN_RUN_HEADER: runs=1 mode=generic testcase=output/x/scratch/x.bin started=x
 === Run 1/1 ===
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xdead at pc 0xface
@@ -175,7 +175,7 @@ assert_file_contains "$TEST_TMPDIR/out2" 'setup-target.*--build' \
 # emitting template inlines .audit/build.sh, and the dispatch-level guard
 # hard-fails if one ever stops.
 OUT_CLI="$TEST_TMPDIR/output/cli-test"
-RESULTS_CLI="$OUT_CLI/results"
+RESULTS_CLI="$OUT_CLI/codex/results"
 CRASH_CLI="$RESULTS_CLI/crashes/CRASH-CLI-1"
 SRC_CLI="$TEST_TMPDIR/fake-src-cli"
 mkdir -p "$OUT_CLI" "$CRASH_CLI" "$SRC_CLI/.git" "$SRC_CLI/.audit"
@@ -193,7 +193,7 @@ is_browser = "0"
 [threat_model]
 attacker_controls = ["bytes"]
 EOF
-cat > "$OUT_CLI/.session-env" <<EOF
+cat > "$RESULTS_CLI/.session-env" <<EOF
 RESULTS_DIR=$RESULTS_CLI
 TARGET_ROOT=$SRC_CLI
 TARGET_SLUG=cli-test
@@ -212,7 +212,7 @@ EOF
 chmod +x "$SRC_CLI/.audit/build.sh"
 # No harness.c — a bare CLI testcase routes through the input_name branch.
 printf 'AAAA' > "$CRASH_CLI/input.bin"
-cat > "$CRASH_CLI/asan.txt" <<'EOF'
+cat > "$CRASH_CLI/sanitizer.txt" <<'EOF'
 ASAN_RUN_HEADER: runs=1 mode=generic testcase=output/x/scratch/x.bin started=x
 === Run 1/1 ===
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xdead at pc 0xface

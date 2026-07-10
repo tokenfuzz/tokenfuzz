@@ -15,7 +15,7 @@
 set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
-source "$SCRIPT_ROOT/lib/platform.sh"
+audit_stat_mtime_epoch() { python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$1"; }
 
 CLUSTER="$SCRIPT_ROOT/bin/cluster-findings"
 [ -x "$CLUSTER" ] || { echo "missing $CLUSTER"; exit 1; }
@@ -336,13 +336,10 @@ cat > "$agg_root/codex/results/findings/FIND-AGG-2/.llm-find-quality.json" <<EOF
 {"decision":"find_quality","decision_version":"v10","content_sha1":"$sha1","accept":true,"reason":"test","class":"auth:bypass","severity":"high","cached_at":"2026-05-12T00:00:00Z"}
 EOF
 
-echo "# legacy" > "$agg_root/FIND-CLUSTERS.md"
 python3 "$CLUSTER" "$agg_root" >/dev/null 2>&1 \
   || fail "aggregate cluster-findings runs cleanly" "exit nonzero"
 assert_file_exists "$agg_root/FINDING-CLUSTERS.md" \
   "aggregate FINDING-CLUSTERS.md written"
-assert_file_not_exists "$agg_root/FIND-CLUSTERS.md" \
-  "aggregate removes legacy FIND-CLUSTERS.md"
 assert_file_contains "$agg_root/FINDING-CLUSTERS.md" 'claude/FIND-AGG-1' \
   "aggregate FINDING-CLUSTERS.md links claude member"
 assert_file_contains "$agg_root/FINDING-CLUSTERS.md" 'codex/FIND-AGG-2' \

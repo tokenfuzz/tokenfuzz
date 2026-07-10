@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-# sed wrapper: caps output via lib/wrappers/_cap. _cap resolves the real sed
+#!/usr/bin/env python3
+# sed wrapper: caps output via wrapper_tools. The helper resolves the real sed
 # binary by skipping this wrapper directory in PATH.
 #
 # Why wrap sed: agents routinely invoke `sed -n 'X,Yp' FILE` thinking they've
@@ -14,5 +14,8 @@
 # pipelines (cat foo | sed ...) and in-place edits (sed -i ...) are unaffected:
 # in-place mode emits no stdout to cap, and stream output is capped in line
 # with rg/grep behavior. Use CAP_LINES=0 CAP_BYTES=0 to disable.
-_dir="$(cd "$(dirname "$0")" && pwd)"
-exec "$_dir/_cap" "$_dir" sed "" "$@"
+import sys
+
+from wrapper_tools import capped_command
+
+raise SystemExit(capped_command("sed", sys.argv[1:]))

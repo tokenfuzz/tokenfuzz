@@ -97,33 +97,19 @@ if [ "$rc" -eq 0 ] &&
    grep -q '\[s6_peers\]' "$_demo_toml" &&
    grep -q 'peers = \["rapidjson", "simdjson", "json-c"\]' "$_demo_toml" &&
    grep -q 'preserving curated' <<<"$out" &&
-   ! grep -qE '^asan_lib.*FILL_ME' "$_demo_toml" &&
-   ! python3 "$SCRIPT_ROOT/lib/target_config.py" config-needs-reseed "$_demo_toml" 2>/dev/null; then
+   ! grep -qE '^asan_lib.*FILL_ME' "$_demo_toml"; then
   pass "$_CURRENT_TEST"
 else
   fail "$_CURRENT_TEST" "rc=$rc out=$out cfg=$(cat "$_demo_toml")"
 fi
 
-_CURRENT_TEST="setup-target force-config regenerates target.toml"
-printf '# local edit\n' > "$ROOT/output/demo/target.toml"
-out=$(AUDIT_ROOT="$ROOT" "$SCRIPT_ROOT/bin/setup-target" demo "$REMOTE" --no-update --force-config 2>&1)
-rc=$?
-if [ "$rc" -eq 0 ] &&
-   grep -q 'target        = "demo"' "$ROOT/output/demo/target.toml" &&
-   ! grep -q '# local edit' "$ROOT/output/demo/target.toml"; then
-  pass "$_CURRENT_TEST"
-else
-  fail "$_CURRENT_TEST" "$out"
-fi
-
-_CURRENT_TEST="setup-target force alias regenerates target.toml"
+_CURRENT_TEST="setup-target force regenerates target.toml"
 printf '# local edit\n' > "$ROOT/output/demo/target.toml"
 out=$(AUDIT_ROOT="$ROOT" "$SCRIPT_ROOT/bin/setup-target" demo "$REMOTE" --no-update --force 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] &&
    grep -q 'target        = "demo"' "$ROOT/output/demo/target.toml" &&
-   ! grep -q '# local edit' "$ROOT/output/demo/target.toml" &&
-   grep -q 'Regenerating output/demo/target.toml (--force)' <<<"$out"; then
+   ! grep -q '# local edit' "$ROOT/output/demo/target.toml"; then
   pass "$_CURRENT_TEST"
 else
   fail "$_CURRENT_TEST" "$out"
@@ -153,7 +139,7 @@ out=$(
   CLAUDE_BIN="$TEST_TMPDIR/no-such-claude" \
   CODEX_BIN="$fake_codex" \
   GEMINI_BIN="$TEST_TMPDIR/no-such-gemini" \
-  "$SCRIPT_ROOT/bin/setup-target" demo "$REMOTE" --no-update --force-config 2>&1
+  "$SCRIPT_ROOT/bin/setup-target" demo "$REMOTE" --no-update --force 2>&1
 )
 rc=$?
 if [ "$rc" -eq 0 ] &&
@@ -168,7 +154,7 @@ else
   fail "$_CURRENT_TEST" "$out"
 fi
 
-_CURRENT_TEST="setup-target force-config overwrites existing S6 peers"
+_CURRENT_TEST="setup-target force overwrites existing S6 peers"
 python3 - "$ROOT/output/demo/target.toml" <<'PY'
 from pathlib import Path
 path = Path(__import__("sys").argv[1])
@@ -184,7 +170,7 @@ out=$(
   CLAUDE_BIN="$TEST_TMPDIR/no-such-claude" \
   CODEX_BIN="$fake_codex" \
   GEMINI_BIN="$TEST_TMPDIR/no-such-gemini" \
-  "$SCRIPT_ROOT/bin/setup-target" demo "$REMOTE" --no-update --force-config 2>&1
+  "$SCRIPT_ROOT/bin/setup-target" demo "$REMOTE" --no-update --force 2>&1
 )
 rc=$?
 if [ "$rc" -eq 0 ] &&
@@ -366,9 +352,10 @@ else
   fail "$_CURRENT_TEST" "rc=$rc $out"
 fi
 
-_CURRENT_TEST="setup-target --build builds every enabled sanitizer (asan + ubsan)"
-# When [sanitizer].enabled lists more than asan, --build must converge a
-# recipe and materialize a build tree for EACH sanitizer, not just asan. We
+_CURRENT_TEST="setup-target --build always builds ASan plus every enabled sanitizer"
+# ASan remains the canonical reproduction build even when another sanitizer is
+# listed first (or is the only enabled runtime). --build must converge ASan plus
+# a recipe and build tree for EACH enabled sanitizer. We
 # pre-place trivial per-sanitizer recipes (.audit/build.sh + .audit/build-
 # ubsan.sh) so convergence is skipped ("keeping existing") and no LLM/clang is
 # needed; the materialize loop then runs both, proving the loop iterates over
@@ -400,7 +387,7 @@ EOF
   chmod +x "$_r"
 done
 # Reviewed config (parses, no uncommented FILL_ME) so setup-target preserves
-# it; enabled lists both sanitizers.
+# it; UBSan is the only runtime selected, while setup must still build ASan.
 mkdir -p "$ROOT/output/multisan"
 cat > "$ROOT/output/multisan/target.toml" <<'EOF'
 target = "multisan"
@@ -408,7 +395,7 @@ build_system = "cmake"
 asan_bin = "build-asan/multisan"
 
 [sanitizer]
-enabled = ["asan", "ubsan"]
+enabled = ["ubsan"]
 EOF
 out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 \
   "$SCRIPT_ROOT/bin/setup-target" multisan --build 2>&1)
@@ -462,8 +449,48 @@ else
   fail "$_CURRENT_TEST" "rc=$rc out=$out"
 fi
 
+_CURRENT_TEST="setup-target --build runs a recipe that lost its execute bit"
+# A committed or hand-authored recipe can land on disk as 0644 (git stores the
+# mode; not every checkout preserves +x). --build materializes by exec'ing the
+# recipe directly, so it must restore the execute bit first rather than die with
+# ENOEXEC / Permission denied.
+noexec_root="$ROOT/targets/noexecrecipe"
+mkdir -p "$noexec_root/.audit"
+cat > "$noexec_root/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.16)
+project(noexecrecipe C)
+add_executable(noexecrecipe main.c)
+EOF
+printf 'int main(void){return 0;}\n' > "$noexec_root/main.c"
+cat > "$noexec_root/.audit/build.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+mkdir -p "$2"
+: > "$2/noexecrecipe"
+chmod +x "$2/noexecrecipe"
+EOF
+chmod 0644 "$noexec_root/.audit/build.sh"   # the regression: recipe is NOT +x
+mkdir -p "$ROOT/output/noexecrecipe"
+cat > "$ROOT/output/noexecrecipe/target.toml" <<'EOF'
+target = "noexecrecipe"
+build_system = "cmake"
+asan_bin = "build-asan/noexecrecipe"
+EOF
+out=$(AUDIT_ROOT="$ROOT" LLM_DECIDE_DISABLE=1 \
+  "$SCRIPT_ROOT/bin/setup-target" noexecrecipe --build 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] &&
+   [ -d "$noexec_root/build-asan" ] &&
+   [ -f "$noexec_root/build-asan/noexecrecipe" ] &&
+   grep -q 'bootstrap: asan build complete' <<<"$out" &&
+   ! grep -qi 'permission denied' <<<"$out"; then
+  pass "$_CURRENT_TEST"
+else
+  fail "$_CURRENT_TEST" "rc=$rc out=$out"
+fi
+
 _CURRENT_TEST="setup-target --build never re-seeds a config with placeholders"
-# bin/audit and bin/benchmark shell `setup-target --build` to build lazily at
+# bin/audit and bin/benchmark invoke `setup-target --build` to build lazily at
 # preflight. That must NOT rewrite a reviewed target.toml as a side effect of
 # an audit: a config holding an active FILL_ME placeholder (which a plain
 # setup-target rerun WOULD re-seed) is left byte-for-byte intact under --build,

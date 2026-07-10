@@ -1,90 +1,78 @@
-#!/usr/bin/env bash
-# docs - create/update the local documentation venv and run MkDocs.
-#
-# Usage:
-#   bin/docs                                  # show this help
-#   bin/docs serve [mkdocs-serve-args...]     # build site/ if missing, then preview
-#   bin/docs build [mkdocs-build-args...]     # strict build, like CI
-#   bin/docs install                          # only install docs deps
-#   bin/docs mkdocs <args...>                 # pass through to mkdocs
+#!/usr/bin/env python3
+"""Create/update the documentation venv and run MkDocs.
 
-set -euo pipefail
+Usage:
+  bin/docs                                  # show this help
+  bin/docs serve [mkdocs-serve-args...]     # build site/ if missing, then preview
+  bin/docs build [mkdocs-build-args...]     # strict build, like CI
+  bin/docs install                          # only install docs deps
+  bin/docs mkdocs <args...>                 # pass through to mkdocs
+"""
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+from __future__ import annotations
 
-DOCS_VENV="${DOCS_VENV:-$SCRIPT_ROOT/.venv}"
-DOCS_SITE_DIR="${DOCS_SITE_DIR:-$SCRIPT_ROOT/site}"
-PYTHON="${PYTHON:-python3}"
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-usage() {
-  sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
-}
 
-ensure_docs_venv() {
-  if [ ! -x "$DOCS_VENV/bin/python" ]; then
-    "$PYTHON" -m venv "$DOCS_VENV"
-  fi
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+VENV = Path(os.environ.get("DOCS_VENV", SCRIPT_ROOT / ".venv"))
+SITE_DIR = Path(os.environ.get("DOCS_SITE_DIR", SCRIPT_ROOT / "site"))
+PYTHON = os.environ.get("PYTHON", "python3")
 
-  "$DOCS_VENV/bin/python" -m pip install -r "$SCRIPT_ROOT/requirements.txt"
-}
 
-serve_docs() {
-  if [ ! -f "$DOCS_SITE_DIR/index.html" ]; then
-    "$DOCS_VENV/bin/mkdocs" build --strict
-  fi
+def usage(stream=sys.stdout) -> None:
+    print(__doc__.strip(), file=stream)
 
-  exec "$DOCS_VENV/bin/mkdocs" serve "$@"
-}
 
-if [ "$#" -eq 0 ]; then
-  usage
-  exit 0
-fi
+def ensure_venv() -> None:
+    venv_python = VENV / "bin" / "python"
+    if not os.access(venv_python, os.X_OK):
+        subprocess.run([PYTHON, "-m", "venv", str(VENV)], check=True)
+    subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "-r", str(SCRIPT_ROOT / "requirements.txt")],
+        check=True,
+    )
 
-cmd="$1"
 
-case "$cmd" in
-  -h|--help|help)
-    usage
-    exit 0
-    ;;
-  install)
-    shift
-    if [ "$#" -ne 0 ]; then
-      echo "[docs] install does not accept arguments" >&2
-      usage >&2
-      exit 2
-    fi
-    ensure_docs_venv
-    ;;
-  build)
-    shift
-    ensure_docs_venv
-    exec "$DOCS_VENV/bin/mkdocs" build --strict "$@"
-    ;;
-  mkdocs)
-    shift
-    if [ "$#" -eq 0 ]; then
-      echo "[docs] mkdocs needs arguments" >&2
-      usage >&2
-      exit 2
-    fi
-    ensure_docs_venv
-    exec "$DOCS_VENV/bin/mkdocs" "$@"
-    ;;
-  serve)
-    shift
-    ensure_docs_venv
-    serve_docs "$@"
-    ;;
-  -*)
-    ensure_docs_venv
-    serve_docs "$@"
-    ;;
-  *)
-    echo "[docs] unknown command: $cmd" >&2
-    usage >&2
-    exit 2
-    ;;
-esac
+def exec_mkdocs(arguments: list[str]) -> None:
+    os.execv(VENV / "bin" / "mkdocs", [str(VENV / "bin" / "mkdocs"), *arguments])
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in {"-h", "--help", "help"}:
+        usage()
+        return 0
+    command, *arguments = argv
+    if command == "install":
+        if arguments:
+            print("[docs] install does not accept arguments", file=sys.stderr)
+            usage(sys.stderr)
+            return 2
+        ensure_venv()
+        return 0
+    if command == "build":
+        ensure_venv()
+        exec_mkdocs(["build", "--strict", *arguments])
+    if command == "mkdocs":
+        if not arguments:
+            print("[docs] mkdocs needs arguments", file=sys.stderr)
+            usage(sys.stderr)
+            return 2
+        ensure_venv()
+        exec_mkdocs(arguments)
+    if command == "serve" or command.startswith("-"):
+        serve_arguments = arguments if command == "serve" else argv
+        ensure_venv()
+        if not (SITE_DIR / "index.html").is_file():
+            subprocess.run([str(VENV / "bin" / "mkdocs"), "build", "--strict"], check=True)
+        exec_mkdocs(["serve", *serve_arguments])
+    print(f"[docs] unknown command: {command}", file=sys.stderr)
+    usage(sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

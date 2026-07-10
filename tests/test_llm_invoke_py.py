@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Regression tests for lib/llm_invoke.py.
 
-The bash shim at lib/llm_invoke.sh delegates to this module — the
-existing tests/test_llm_invoke.sh exercises the integration end-to-end.
-This file complements that with focused Python-level assertions on
+The audit and benchmark runners delegate backend launches to this module.
+This file exercises focused Python-level behavior for
 each subcommand (and the importable API used by lib/llm_decide.py).
 """
 
@@ -709,6 +708,12 @@ for _name, _c in _TT_TRANSIENT.items():
     ok(_tt(_c) is True, f"transient_tail fires: {_name}")
 for _name, _c in _TT_CLEAN.items():
     ok(_tt(_c) is False, f"transient_tail clean: {_name}")
+with tempfile.NamedTemporaryFile("w", suffix=".raw", delete=False) as _fh:
+    _fh.write("old event\n" * 500_000)
+    _fh.write("API Error: 529 Overloaded.\n\n")
+    _large_tail = _fh.name
+ok(inv.transient_tail(_large_tail), "transient_tail finds a terminal error without scanning semantics drift")
+os.unlink(_large_tail)
 # Subcommand exit codes mirror the API (0 = transient, 1 = clean/missing).
 with tempfile.NamedTemporaryFile("w", suffix=".raw", delete=False) as _fh:
     _fh.write("API Error: 529 Overloaded.\n")

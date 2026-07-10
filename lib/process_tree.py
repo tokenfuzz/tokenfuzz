@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small process-tree helpers for shell entrypoints."""
+"""Small process-tree helpers for backend orchestrators."""
 
 from __future__ import annotations
 

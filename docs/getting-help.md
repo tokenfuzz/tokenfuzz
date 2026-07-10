@@ -52,8 +52,8 @@ Include:
 
 1. **TokenFuzz revision** — `git rev-parse HEAD` (run from inside
    the repository).
-2. **Host details** — OS name and version, Bash version, Python
-   version, `clang --version`.
+2. **Host details** — OS name and version, Python version, and
+   `clang --version`.
 3. **The exact command you ran** — copy-paste, not paraphrased.
 4. **The smoke-test output** —
    `bin/audit --target <target> --backend <backend> 1 2>&1 | head -80`.
@@ -70,7 +70,6 @@ A minimal template:
 ```text
 TokenFuzz: <git rev-parse HEAD output>
 OS: <uname -a>
-Bash: <bash --version | head -1>
 Python: <python3 --version>
 Clang: <clang --version | head -1>
 

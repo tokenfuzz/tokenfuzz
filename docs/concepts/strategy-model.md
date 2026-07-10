@@ -103,7 +103,6 @@ A card is skipped if it is:
 - on the same active surface another agent owns;
 - incompatible with the agent's mode;
 - build-blocked (current build didn't compile its translation unit);
-- in a guard-saturated subsystem the run is steering away from;
 - in a subsystem already owned by another generic-mode agent —
   *unless* the current agent has confirmed a crash or finding there.
 
@@ -132,30 +131,17 @@ not complete a strategy.* S1 is held longer than the other
 strategies before rotation, since patch review often takes several
 iterations to bear fruit.
 
-When the streak crosses its threshold, an LLM picker chooses the
-next strategy based on:
-
-- this session's per-strategy ROI;
-- the subsystem;
-- the recent event history.
-
-If that picker is unavailable, it falls back to the deterministic
-rotation order S1 → S2 → … → S8. A safety valve also forces rotation
-on an agent that never produces enough evidence to clear the formal
-completion gate — so one stuck method cannot stall the run forever.
+When the streak crosses its threshold, the harness chooses the
+eligible strategy with the largest unclaimed card pool, preferring a
+strategy no other agent currently holds. Ties follow the deterministic
+S1 → S2 → … → S8 order. A safety valve also forces rotation on an
+agent that never produces enough evidence to clear the formal
+completion gate, so one stuck method cannot stall the run forever.
 
 The rule of thumb: **rotate the method, not the subsystem.** A
 subsystem should not be abandoned merely because notes were
 written. There must be probe runs, discarded variants, or
 environment blockers on disk first.
-
-A second rotation lever is the *guard chain*. If the same upstream
-guard string ("Error: regexp too big", "too much recursion",
-`NS_ERROR_…`) blocks a run of testcases in one subsystem, the
-harness appends a synthetic guard-bypass work card. The card asks
-the agent for a path past that guard or proof that the guard is the
-boundary. That is how the system escapes locally optimal but
-globally unproductive loops.
 
 ## A good hypothesis
 

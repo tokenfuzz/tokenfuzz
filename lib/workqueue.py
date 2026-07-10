@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Iterable
 
 import languages
-from audit_scope import EXCLUDED_PATH_SEGMENTS, is_excluded_path_part
+from audit_scope import is_excluded_path_part
 # target_config (only detect_repo_type, below) and prompt_render.render_template
 # (only the work_rerank gate) are imported lazily inside their single call sites:
 # workqueue backs bin/state, which agents invoke 30+ times per session, and each
@@ -646,8 +646,8 @@ def relpath(path: Path, root: Path) -> str:
         return path.as_posix()
 
 
-# Auto-detected partition depth for the current target. ``None`` means
-# "fall back to the historical default of 2". Set once per process by
+# Auto-detected partition depth for the current target. ``None`` selects the
+# default depth of 2. Set once per process by
 # :func:`init_subsystem_depth` after the source tree has been scanned;
 # header-only / monolithic targets (where every source file lives under
 # a single 2-component prefix like ``include/nlohmann``) get a deeper
@@ -845,7 +845,7 @@ def work_surface(card: dict) -> str:
       * `file:S<n>`     — same file, but the originating strategy
                           differentiates the angle of attack.
       * `file`          — fallback when neither function nor strategy
-                          is available (matches legacy patch cards).
+                          is available (matches file-only patch cards).
       * `touched[0]`    — vendored/multi-file patches.
       * `id`            — last resort, never lossy.
     """
@@ -1449,7 +1449,7 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160, timeout:
         return cards
     mock_present = "LLM_DECIDE_MOCK_WORK_RERANK" in os.environ or "LLM_DECIDE_MOCK" in os.environ
     # DISABLE blocks real backend calls but mocks still run — mirrors
-    # lib/llm_decide.sh so a test mock keeps working with the global default.
+    # lib/llm_decide.py so a test mock keeps working with the global default.
     if not mock_present and os.environ.get("LLM_DECIDE_DISABLE") == "1":
         return cards
     engine = ctx.script_root / "lib" / "llm_decide.py"
@@ -1457,15 +1457,13 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160, timeout:
         return cards
     # No vendor default — ACTIVE_BACKEND must be set explicitly (unset or
     # empty both bail). If only a mock is present (tests), the backend name
-    # is irrelevant because llm_decide.sh short-circuits to the mock before
+    # is irrelevant because llm_decide.py short-circuits to the mock before
     # touching any binary.
     backend = os.environ.get("ACTIVE_BACKEND", "")
     if not mock_present and not backend:
         return cards
-    # `or default`, not `, default`: an exported empty binary override
-    # (the bash shim's force-export pattern) must fall through to the
-    # vendor default the same way an unset var does, or path_has_executable("")
-    # silently bails the preflight. Matches the gemini-branch idiom.
+    # An empty binary override falls through to the vendor default; otherwise
+    # path_has_executable("") would silently fail the preflight.
     if not mock_present and backend == "claude" and not path_has_executable(os.environ.get("CLAUDE_BIN") or "claude"):
         return cards
     if not mock_present and backend == "codex" and not path_has_executable(os.environ.get("CODEX_BIN") or "codex"):
@@ -2163,8 +2161,8 @@ def is_active_hypothesis_status(status: str) -> bool:
 HYPOTHESIS_DIAGNOSTIC_CATEGORIES = ("bounds", "lifetime", "type", "size", "uninit", "state")
 
 
-# Status keys returned by agent_counts(). Kept as a constant so callers
-# (bin/state, tests, bash wrappers) can rely on the exact key set.
+# Status keys returned by agent_counts(). Kept as a constant so CLI callers
+# and tests can rely on the exact key set.
 AGENT_COUNT_KEYS = (
     "pending",
     "investigating",
@@ -2179,7 +2177,7 @@ AGENT_COUNT_KEYS = (
 def _classify_hypothesis_status(status: str) -> list[str]:
     """Map a raw status string to the bucket names it contributes to.
 
-    Mirrors the regex semantics of `lib/structured_state.sh`:
+    Mirrors the regex semantics of `lib/structured_state.py`:
       * pending           = ^PENDING$
       * investigating     = ^INVESTIGATING$
       * needs_testcase    = ^NEEDS_TESTCASE$
@@ -2616,14 +2614,12 @@ def claimed_card_subsystems(ctx: Context, ttl: timedelta, now: datetime) -> set[
 
 
 def subsystem_dry_streak(ctx: Context, subsystem: str) -> int:
-    """Read the global per-subsystem dry-iter counter written by bin/audit.
+    """Read the global per-subsystem dry-iteration counter.
 
-    `bin/audit` maintains `.subsystem_dry_<slug>` flat files under
-    ``RESULTS_DIR`` via ``bump_subsystem_dry_streak`` /
-    ``reset_subsystem_dry_streak``. The file holds an integer count of
-    consecutive iterations during which the subsystem produced no new
-    productive artifact (CRASH/FIND across any agent). When a new
-    artifact appears the file is removed.
+    The orchestrator maintains `.subsystem_dry_<slug>` flat files under
+    ``RESULTS_DIR``. The file holds the number of consecutive iterations
+    during which the subsystem produced no new CRASH/FIND. A productive
+    iteration removes it.
 
     Returns 0 when the file is absent or unreadable (productive
     subsystem on the current iteration, or never tracked).
@@ -2640,6 +2636,38 @@ def subsystem_dry_streak(ctx: Context, subsystem: str) -> int:
         return max(0, int(raw))
     except ValueError:
         return 0
+
+
+def record_subsystem_iteration(ctx: Context, subsystem: str, productive: bool) -> bool:
+    """Reset or advance one subsystem's consecutive dry-iteration count.
+
+    This is called once per touched subsystem, not once per agent. Two agents
+    mining the same area therefore cannot age it twice as fast, while a result
+    from either agent resets the shared count.
+    """
+    if not subsystem or subsystem == "unknown":
+        return True
+    slug = subsystem.replace("/", "_")
+    path = ctx.results_dir / f".subsystem_dry_{slug}"
+    if productive:
+        try:
+            path.unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+    value = subsystem_dry_streak(ctx, subsystem) + 1
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(f"{value}\n", encoding="utf-8")
+        os.replace(temporary, path)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def card_closed_for_run(
@@ -2672,9 +2700,8 @@ def card_closed_for_run(
       (``subsystem_dry_streak``, reset only by triage-promoted artifacts on
       disk, so a fabricated crash cannot keep a dry file alive).
 
-    A lease-lifecycle status can mask a prior productive conclusion: a bare
-    ``released`` row (legacy stale-lease cleanup, or resumed pre-fix state) or
-    an expired ``claimed`` row that reads back as ``unclaimed``. When the card
+    An expired ``claimed`` lease can mask a prior productive conclusion by
+    reading back as ``unclaimed``. When the card
     has a recorded productive conclusion, it is treated as productive-terminal
     so neither mask reopens a mined card. A *live* claim (status ``claimed``)
     is left open — the owner is still investigating. The anti-camp guarantee
@@ -2689,10 +2716,10 @@ def card_closed_for_run(
     if conclusion_counts is None:
         conclusion_counts = card_conclusion_counts(ctx)
     concluded = conclusion_counts.get(cid, 0) if cid else 0
-    # Resolve a released/expired-lease mask back to the conclusion it hides, but
+    # Resolve an expired-lease mask back to the conclusion it hides, but
     # leave a live "claimed" open — its owner is still investigating (docstring).
     is_productive = status in _PRODUCTIVE_TERMINAL_CARD_STATUSES or (
-        status in ("released", "unclaimed") and concluded > 0
+        status == "unclaimed" and concluded > 0
     )
     if not is_productive:
         # done/discarded/blocked hard-close; anything else stays claimable.
@@ -2732,10 +2759,9 @@ def agent_productive_subsystems(ctx: Context, agent: str) -> set[str]:
     lock prevents it.
 
     A subsystem ends up in this set when ANY of the agent's hypotheses
-    in that subsystem resolved with a CRASH-* or FIND-* status. Once
-    productive, the subsystem stays in the set for the rest of the
-    audit run — the agent's accumulated context on that area remains
-    high-value even after iterations of work elsewhere.
+    in that subsystem resolved with a CRASH-* or FIND-* status. The claim
+    path applies a short dry-iteration decay so this historical signal does
+    not keep an exhausted area preferred forever.
     """
     if not agent:
         return set()
@@ -2762,19 +2788,34 @@ def agent_productive_subsystems(ctx: Context, agent: str) -> set[str]:
     return subsystems
 
 
-def guard_saturated_subsystems(ctx: Context) -> set[str]:
-    path = ctx.results_dir / ".guard_saturated_subsystems"
-    if not path.exists():
-        return set()
-    out: set[str] = set()
-    try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.split("#", 1)[0].strip()
-            if line:
-                out.add(line)
-    except OSError:
-        return set()
-    return out
+def agent_current_subsystem(ctx: Context, agent: str) -> str:
+    """Return the subsystem represented by an agent's latest live/result row."""
+    selected = [
+        row for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
+        if str(row.get("agent", "")) == str(agent)
+    ]
+    if not selected:
+        return ""
+    relevant = [
+        row for row in selected
+        if str(row.get("status", "")).startswith(
+            ("PENDING", "INVESTIGATING", "NEEDS_TESTCASE", "ENV-BLOCKED", "CRASH", "FIND")
+        )
+    ]
+    row = relevant[-1] if relevant else selected[-1]
+    subsystem = str(row.get("subsystem", "") or "")
+    if not subsystem:
+        card_id = str(row.get("card_id", "") or "")
+        if card_id:
+            cards = {
+                str(card.get("id", "")): card
+                for card in read_jsonl(work_cards_path(ctx))
+            }
+            subsystem = str((cards.get(card_id) or {}).get("subsystem", "") or "")
+    if not subsystem:
+        source = str(row.get("file", "") or "").split(":", 1)[0]
+        subsystem = subsystem_for(source) if source else ""
+    return "" if subsystem == "unknown" else subsystem
 
 
 # Card `mode` describes the execution surface needed by the testcase. The
@@ -2895,7 +2936,6 @@ def _queue_status_row(
     active_cards: set[str],
     active_surfaces: set[str],
     claimed_surfaces: set[str],
-    saturated_subsystems: set[str],
     owned_subsystems: set[str],
     agent_modes: list[str],
     strategy: str = "",
@@ -2934,8 +2974,6 @@ def _queue_status_row(
             reason = f"claimed-until:{expires_at}"
     elif surface and surface in claimed_surfaces:
         reason = "claimed-surface"
-    elif card.get("subsystem", "") in saturated_subsystems:
-        reason = "guard-saturated-subsystem"
     elif (card.get("mode") or "auto") in ("", "auto", "generic") and card.get("subsystem", "") in owned_subsystems:
         reason = "claimed-subsystem"
     elif agent_modes and not any(card_mode_matches(card.get("mode") or "auto", mode) for mode in agent_modes):
@@ -2966,7 +3004,6 @@ def explain_queue(
     active_cards, active_surfaces, active_subsystems = _active_hypothesis_queue_sets(cards_by_id, hypotheses)
     claimed_surfaces, claimed_subsystems = _claimed_card_queue_sets(cards_by_id, latest, ttl, now)
     owned_subsystems = active_subsystems | claimed_subsystems
-    saturated_subsystems = guard_saturated_subsystems(ctx)
     conclusion_counts = card_conclusion_counts(ctx)
     distinct_counts = card_distinct_hypothesis_counts(ctx)
     dry_streaks: dict[str, int] = {}
@@ -2985,7 +3022,6 @@ def explain_queue(
                 active_cards=active_cards,
                 active_surfaces=active_surfaces,
                 claimed_surfaces=claimed_surfaces,
-                saturated_subsystems=saturated_subsystems,
                 owned_subsystems=owned_subsystems,
                 agent_modes=agent_modes,
                 strategy=strategy,
@@ -3050,7 +3086,6 @@ def _claim_next_card_locked(
     ttl = work_card_claim_ttl()
     owned_surfaces = active_hypothesis_surfaces(ctx) | claimed_card_surfaces(ctx, ttl, now)
     owned_subsystems = active_hypothesis_subsystems(ctx) | claimed_card_subsystems(ctx, ttl, now)
-    saturated_subsystems = guard_saturated_subsystems(ctx)
     # Per-claim memos for card_closed_for_run (and the demotion sort below)
     # so the candidate loops read claims/hypotheses/dry-streaks at most once.
     conclusion_counts = card_conclusion_counts(ctx)
@@ -3080,7 +3115,6 @@ def _claim_next_card_locked(
             for s in productive_subsystems
             if subsystem_dry_streak(ctx, s) < _PRODUCTIVE_DECAY_AFTER_ITERS
         }
-    diversity_floor = _int_env("WORK_CARD_SUBSYSTEM_DIVERSITY_MIN_ELIGIBLE", 8)
 
     # P5: cards whose previous filing by *this agent* was rejected at
     # the triage gate (e.g. caller-misuse "crashes"). Skip them so the
@@ -3102,34 +3136,30 @@ def _claim_next_card_locked(
     # Gating "at least one agent" by counting *active* claims (not
     # historical) means: once an agent picks the Promote card up, others
     # fall through to normal strategy-filtered claiming. If the holder
-    # times out / discards, the next caller is re-steered. Override is
-    # opt-out via WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 for the rare case
-    # an operator wants to A/B without it.
-    promoted_recon_precedence = _int_env("WORK_CARD_PROMOTED_RECON_PRECEDENCE", 1) > 0
+    # times out or discards, the next caller is re-steered.
     promoted_unclaimed: list[dict] = []
     promoted_active = False
-    if promoted_recon_precedence:
-        for card in cards:
-            if not is_promoted_recon_card(card):
-                continue
-            if not is_auditable_work_card(card):
-                continue
-            cid = card.get("id", "")
-            latest_claim = latest.get(cid)
-            latest_status = latest_claim.get("status", "claimed") if latest_claim else ""
-            # Promoted precedence must NOT re-fire on an already-concluded
-            # card. A productive crash/find promoted card stays claimable via
-            # the normal queue below (and is rank-demoted by conclusion
-            # count), but re-granting it precedence — which bypasses the
-            # strategy filter — would let it preempt breadth every iteration
-            # until the subsystem goes dry. Hard-terminal check on purpose.
-            if latest_status in TERMINAL_CARD_STATUSES or cid in active_cards:
-                continue
-            if claim_blocks_card(latest_claim, ttl, now):
-                # Another agent (or this one) holds it actively.
-                promoted_active = True
-                continue
-            promoted_unclaimed.append(card)
+    for card in cards:
+        if not is_promoted_recon_card(card):
+            continue
+        if not is_auditable_work_card(card):
+            continue
+        cid = card.get("id", "")
+        latest_claim = latest.get(cid)
+        latest_status = latest_claim.get("status", "claimed") if latest_claim else ""
+        # Promoted precedence must NOT re-fire on an already-concluded
+        # card. A productive crash/find promoted card stays claimable via
+        # the normal queue below (and is rank-demoted by conclusion
+        # count), but re-granting it precedence — which bypasses the
+        # strategy filter — would let it preempt breadth every iteration
+        # until the subsystem goes dry. Hard-terminal check on purpose.
+        if latest_status in TERMINAL_CARD_STATUSES or cid in active_cards:
+            continue
+        if claim_blocks_card(latest_claim, ttl, now):
+            # Another agent (or this one) holds it actively.
+            promoted_active = True
+            continue
+        promoted_unclaimed.append(card)
 
     strategy_filter = strategy.strip().upper()
     # When the precedence gate is armed (no agent on a Promoted card AND
@@ -3180,10 +3210,7 @@ def _claim_next_card_locked(
     # sibling — multiple angles on the same surface are exactly where
     # parallel exploration finds the most bugs. For generic agents we
     # prefer disjoint subsystems even on small queues; the
-    # `diversity_floor` gate still applies to *saturated* subsystems
-    # (where the agent has already exhausted the area and should move
-    # on regardless of queue size) but not to owned ones, where we want
-    # to spread work even when only a few cards remain. Promoted-recon
+    # spread work even when only a few cards remain. Promoted-recon
     # cards skip the diversity gate entirely — the validator signal
     # outranks any owned-subsystem preference.
     def _apply_diversity(candidates: list[dict]) -> list[dict]:
@@ -3197,10 +3224,8 @@ def _claim_next_card_locked(
                 and claim_blocks_card(latest_claim, ttl, now)
             )
             subsystem = str(card.get("subsystem", "") or "")
-            generic_mode = (mode == "generic") or ((card.get("mode") or "auto") in ("", "auto", "generic") and not mode)
+            generic_mode = (mode in ("generic", "shell")) or ((card.get("mode") or "auto") in ("", "auto", "generic") and not mode)
             if generic_mode and subsystem and not is_promoted_recon_card(card):
-                if subsystem in saturated_subsystems and len(candidates) >= diversity_floor:
-                    continue
                 # Productive-agent relaxation: an agent that already has a
                 # confirmed CRASH/FIND in this subsystem keeps picking from
                 # it (bug-cluster expansion). Without this, the
@@ -3361,117 +3386,6 @@ def add_hypothesis(ctx: Context, args: argparse.Namespace) -> dict:
                     },
                 )
     return row
-
-
-def _cluster_owner_agent(crash_id: str) -> str:
-    """Agent that should investigate crash_id's siblings.
-
-    Crash dirs are named CRASH-<n>-<agent> (see triage.sh), so the trailing
-    numeric segment is the filing agent — the natural owner for same-surface
-    siblings, and `resume` only surfaces an agent's own PENDING hypotheses.
-    Clamp to the live NUM_AGENTS range (crash dirs persist across runs that may
-    relaunch with fewer agents) so a sibling is always owned by an agent that
-    actually resumes. Falls back to agent 1 for an id with no agent suffix.
-    """
-    core = re.sub(r"^(?:CRASH|FIND)-", "", (crash_id or "").strip(), flags=re.IGNORECASE)
-    nums = [s for s in core.split("-") if s.isdigit()]
-    agent = int(nums[-1]) if len(nums) >= 2 else 1
-    raw = os.environ.get("NUM_AGENTS", "")
-    num_agents = int(raw) if raw.isdigit() and int(raw) >= 1 else 0
-    if num_agents and not (1 <= agent <= num_agents):
-        agent = (agent - 1) % num_agents + 1
-    return str(agent)
-
-
-def add_cluster_hypotheses(
-    ctx: Context, crash_id: str, rows: list[dict], strategy: str = ""
-) -> dict:
-    """Route crash-cluster sibling rows into structured state as PENDING
-    hypotheses owned by the crash's agent. Returns {agent, added, skipped}.
-
-    Deduped against existing active hypotheses (and within the batch) on
-    (file:function:line, hypothesis) so overlapping siblings from crashes in the
-    same file don't pile duplicate leads. Only rows missing a file or hypothesis
-    are dropped; the diagnostic category is a hint and never discards a sibling.
-    """
-    init_state(ctx)
-    agent = _cluster_owner_agent(crash_id)
-    hyp_path = state_dir(ctx.results_dir) / "hypotheses.jsonl"
-
-    def surface_key(file_field: str, hypothesis: str) -> str:
-        return f"{file_field.strip().lower()}::{' '.join(hypothesis.split()).lower()}"
-
-    added = 0
-    skipped = 0
-    now = now_iso()
-    with jsonl_lock(hyp_path):
-        existing = _read_jsonl_unlocked(hyp_path)
-        # Siblings share the parent crash's bug class, so attribute them to the
-        # strategy that found it — anything else skews ROI (strategy_yield) and
-        # the resume brief. Derived from `existing` (no second read). "S5" is the
-        # historical fallback when the crash has no structured origin hypothesis.
-        if not strategy:
-            origin = _crash_origin_from_hyps(existing, crash_id)
-            strategy = str(origin.get("strategy", "")).strip() if origin else ""
-        strategy = strategy or "S5"
-        existing_ids = {str(h.get("id", "")) for h in existing}
-        seen = {
-            surface_key(str(h.get("file", "")), str(h.get("hypothesis", "")))
-            for h in existing
-            if is_active_hypothesis_status(h.get("status", ""))
-        }
-        for row in rows:
-            file_path = str(row.get("file", "")).strip() if isinstance(row, dict) else ""
-            hypothesis = str(row.get("hypothesis", "")).strip() if isinstance(row, dict) else ""
-            category = str(row.get("category", "")).strip().lower() if isinstance(row, dict) else ""
-            # file + hypothesis are the investigable content; a row missing either
-            # is not a usable lead. The diagnostic category is a display-only hint,
-            # so it must never gate acceptance — dropping a row on a non-canonical
-            # label would silently lose a real sibling while the crash still marks
-            # expanded. Keep the row, but fold any off-taxonomy label (blank, or a
-            # sanitizer-class term the model volunteered) into the broad "state"
-            # bucket so structured state stays inside the six-value taxonomy.
-            if not file_path or not hypothesis:
-                skipped += 1
-                continue
-            category = category if category in HYPOTHESIS_DIAGNOSTIC_CATEGORIES else "state"
-            # Fold function:line into the file surface, matching bin/state add-hyp.
-            # "0" means "line unknown" (see the prompt), so it is not folded in.
-            func = str(row.get("function", "")).strip()
-            line = str(row.get("line", "")).strip()
-            if (func or line not in ("", "0")) and file_path.count(":") < 2:
-                file_path = ":".join(p for p in (file_path, func, line if line != "0" else "") if p)
-            key = surface_key(file_path, hypothesis)
-            if key in seen:
-                skipped += 1
-                continue
-            seed = f"{agent}:{file_path}:{hypothesis}:{now}:{added}"
-            hid = "H-" + hashlib.sha1(seed.encode()).hexdigest()[:10]
-            counter = 0
-            while hid in existing_ids:
-                counter += 1
-                hid = "H-" + hashlib.sha1(f"{seed}:{counter}".encode()).hexdigest()[:10]
-            existing_ids.add(hid)
-            seen.add(key)
-            _append_jsonl_unlocked(
-                hyp_path,
-                {
-                    "id": hid,
-                    "agent": agent,
-                    "card_id": "",
-                    "hypothesis": hypothesis,
-                    "file": file_path,
-                    "input_shape": f"sibling of {crash_id}",
-                    "guard_gap": "unknown",
-                    "diagnostic": category,
-                    "strategy": strategy,
-                    "status": "PENDING",
-                    "created_at": now,
-                    "updated_at": now,
-                },
-            )
-            added += 1
-    return {"agent": agent, "added": added, "skipped": skipped}
 
 
 # Note fingerprints that indicate an environmental / build wall: the
@@ -3930,18 +3844,9 @@ def strategy_evidence_count(ctx: Context, agent: str, strategy: str) -> int:
 
 
 def strategy_completion_threshold(strategy: str) -> int:
-    """Minimum evidence count before rotation off `strategy` is allowed.
-
-    Override per-strategy via STRATEGY_MIN_EVIDENCE_<S> env vars. The
-    aggregate cap STRATEGY_MIN_EVIDENCE_DISABLE=1 zeroes every threshold
-    (audit becomes free to rotate on the iteration counter alone — the
-    prior behavior).
-    """
-    if os.environ.get("STRATEGY_MIN_EVIDENCE_DISABLE") == "1":
-        return 0
+    """Minimum evidence count before rotation off `strategy` is allowed."""
     spec = STRATEGY_KEYWORDS.get(strategy.upper())
-    default = spec[1] if spec else 0
-    return _int_env(f"STRATEGY_MIN_EVIDENCE_{strategy.upper()}", default)
+    return spec[1] if spec else 0
 
 
 def strategy_completion_status(ctx: Context, agent: str, strategy: str) -> dict:
@@ -4056,8 +3961,6 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
         ≥WORK_CARD_MIN_HYPS_BEFORE_DISCARD (default 2) distinct hypothesis
         shapes: a clean variant set must have actually been run, and one
         shallow hypothesis must not retire a file/strategy surface.
-        Override: WORK_CARD_ALLOW_NORUNS_DISCARD=1 warns and proceeds
-        (tests / one-shot tooling).
       * `crash` requires ≥1 runs.jsonl row with a CRASH verdict for the
         card — bin/probe writes that verdict before it auto-closes the
         card. An `update-card --status crash` with no such row is bounced
@@ -4067,7 +3970,6 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
         at all — gemini filed CRASH dirs with no valid sanitizer output);
         it is an anti-fabrication gate, not proof the diagnostic is genuine
         (add-run is callable), so triage's artifact checks still apply.
-        Override: WORK_CARD_ALLOW_NORUNS_CRASH=1 (tests / one-shot repair).
       * `find` is intentionally NOT gated here: a finding's evidence is a
         substantive report dir that the separate finding/triage gate
         already validates (and the product allows findings with no
@@ -4092,33 +3994,18 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
         hyps = card_distinct_hypothesis_count(ctx, card_id)
         ok = runs >= min_runs and hyps >= min_hyps
         if not ok:
-            allow_override = os.environ.get("WORK_CARD_ALLOW_NORUNS_DISCARD") == "1"
-            if not allow_override:
-                raise CardStatusUpdateError(
-                    f"update-card refuses discard for {card_id}: "
-                    f"runs={runs} (need {min_runs}); "
-                    f"distinct_hypotheses={hyps} (need {min_hyps}). "
-                    "Run bin/probe variants and add a hypothesis first, or set "
-                    "WORK_CARD_ALLOW_NORUNS_DISCARD=1 to override."
-                )
-            sys.stderr.write(
-                f"[workqueue] WARN: forced discard of {card_id} with "
-                f"runs={runs}/{min_runs} hyps={hyps}/{min_hyps} "
-                f"(WORK_CARD_ALLOW_NORUNS_DISCARD=1)\n"
+            raise CardStatusUpdateError(
+                f"update-card refuses discard for {card_id}: "
+                f"runs={runs} (need {min_runs}); "
+                f"distinct_hypotheses={hyps} (need {min_hyps}). "
+                "Run bin/probe variants and add a hypothesis first."
             )
     elif status == "crash" and card_run_count(ctx, card_id, verdict="CRASH") < 1:
-        allow_override = os.environ.get("WORK_CARD_ALLOW_NORUNS_CRASH") == "1"
-        if not allow_override:
-            raise CardStatusUpdateError(
-                f"update-card refuses crash for {card_id}: no runs.jsonl "
-                "CRASH verdict references this card. Run the testcase "
-                "through bin/probe to verify the crash (it records the "
-                "verdict and re-files the artifact), or set "
-                "WORK_CARD_ALLOW_NORUNS_CRASH=1 to override."
-            )
-        sys.stderr.write(
-            f"[workqueue] WARN: forced crash close of {card_id} with no "
-            "runs.jsonl CRASH verdict (WORK_CARD_ALLOW_NORUNS_CRASH=1)\n"
+        raise CardStatusUpdateError(
+            f"update-card refuses crash for {card_id}: no runs.jsonl "
+            "CRASH verdict references this card. Run the testcase "
+            "through bin/probe to verify the crash; it records the "
+            "verdict and files the artifact."
         )
     row = {
         "card_id": card_id,
@@ -4186,9 +4073,9 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
     init_state(ctx)
     rid = "RUN-" + hashlib.sha1(f"{args.agent}:{args.testcase}:{now_iso()}".encode()).hexdigest()[:10]
     try:
-        asan_runs = int(getattr(args, "asan_runs", "") or 0) or 1
+        sanitizer_runs = int(getattr(args, "sanitizer_runs", "") or 0) or 1
     except (TypeError, ValueError):
-        asan_runs = 1
+        sanitizer_runs = 1
     row = {
         "id": rid,
         "agent": args.agent,
@@ -4199,7 +4086,7 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
         "testcase_sha1": (getattr(args, "testcase_sha1", "") or "").lower(),
         "asan_output": args.asan_output,
         "verdict": args.verdict,
-        "asan_runs": asan_runs,
+        "sanitizer_runs": sanitizer_runs,
         "created_at": now_iso(),
     }
     append_jsonl(state_dir(ctx.results_dir) / "runs.jsonl", row)
@@ -4355,7 +4242,7 @@ def _list_card_row(compact: dict, *, verbose: bool = False) -> dict:
 def show_work_card(ctx: Context, card_id: str, mode: str = "") -> dict | None:
     """Return compact JSON for one work card.
 
-    Agents repeatedly tried `show-card`/`explain-card`; keep this read-only
+    Keep this read-only
     and bounded so they don't fall back to verbose `--help` or raw JSONL.
     """
     init_state(ctx)
@@ -4365,8 +4252,8 @@ def show_work_card(ctx: Context, card_id: str, mode: str = "") -> dict | None:
             status_rows = _status_rows_by_card(ctx, mode, cards=cards)
             return _compact_card(ctx, card, status_rows.get(card_id))
 
-    # Fallback for older states or direct PATCH-* lookups before work-cards
-    # have been refreshed. Patch-card rows don't participate in queue status.
+    # Direct PATCH-* lookups before work-cards have been refreshed do not
+    # participate in queue status.
     for card in read_jsonl(ctx.results_dir / "patch-cards.jsonl"):
         if card.get("id", "") == card_id:
             return _compact_card(ctx, card, {"status": "unclaimed", "reason": "patch-card"})
@@ -4394,7 +4281,6 @@ def list_work_cards(
     active_cards, active_surfaces, active_subsystems = _active_hypothesis_queue_sets(cards_by_id, hypotheses)
     claimed_surfaces, claimed_subsystems = _claimed_card_queue_sets(cards_by_id, latest, ttl, now)
     owned_subsystems = active_subsystems | claimed_subsystems
-    saturated_subsystems = guard_saturated_subsystems(ctx)
     agent_modes = [mode] if mode else []
     subsystem_needles = [str(s).strip().lower() for s in (subsystem_filters or []) if str(s).strip()]
     contains_needles = [str(s).strip().lower() for s in (contains_filters or []) if str(s).strip()]
@@ -4421,7 +4307,6 @@ def list_work_cards(
             active_cards=active_cards,
             active_surfaces=active_surfaces,
             claimed_surfaces=claimed_surfaces,
-            saturated_subsystems=saturated_subsystems,
             owned_subsystems=owned_subsystems,
             agent_modes=agent_modes,
         )
@@ -4658,7 +4543,7 @@ def state_resume(
     """Compact, deterministic startup brief for an agent.
 
     This is the primary resume surface for prompts. It intentionally avoids
-    dumping raw JSONL or legacy markdown state files; agents get just enough
+    dumping raw JSONL state files; agents get just enough
     context to continue active hypotheses or start the next work card.
     """
     init_state(ctx)

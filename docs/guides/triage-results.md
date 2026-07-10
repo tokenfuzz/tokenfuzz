@@ -10,14 +10,13 @@ A reproducible crash is the strongest kind of prioritisation evidence
 there is. A non-crashing issue, or a security issue without a
 sanitizer reproducer, belongs in `findings/` with a clear report.
 
-## The four kinds of result
+## The three kinds of result
 
 | Type | Directory | Use when |
 | --- | --- | --- |
 | Crash | `crashes/CRASH-NNN-N/` | A testcase produces sanitizer evidence or an accepted security-boundary violation. |
 | Finding | `findings/FIND-NNN/` | Any concrete security issue — see below. |
 | Rejected crash | `crashes-rejected/` | A crash candidate is low value, out of scope, or incomplete. |
-| Needs-review crash | `crashes-needs-review/` | A borderline LLM-confirm rejection is requeued for another pass before hard rejection. |
 
 `findings/` accepts any concrete security class — memory safety,
 logic, auth, injection, info disclosure, crypto, race, boundary
@@ -30,9 +29,9 @@ directory while the report waits for content or a second review:
 
 - `.needs-content` — the FIND directory has no `report.md` or
   `description.md` yet.
-- `.pending-drop` — the LLM substance gate has rejected the report
-  once. Cleared on the next accept; on a second reject the FIND is
-  moved to `findings-rejected/` rather than deleted.
+- `.pending-drop` — a review pass ended with at least one Reject but did
+  not reach reject quorum. Cleared on the next accept; once quorum is
+  reached the FIND moves to `findings-rejected/` rather than being deleted.
 
 The `.needs-content` marker surfaces as a `NEEDS CONTENT` value in the
 `Status` column of `findings/FINDING-CLUSTERS.html`; `.pending-drop` is
@@ -44,19 +43,18 @@ state as-is.
 
 ## How the gates decide
 
-The LLM-backed crash gates (trace validity, report completeness,
-legitimacy) are multi-vote and fail open. A single keep vote keeps
-the crash; a rejection sticks only once independent negative votes
-reach quorum (two by default, `CRASH_GATE_QUORUM`). A crash that
-collects one negative vote without reaching quorum is parked in
-`crashes-needs-review/` and requeued for another pass instead of
-being rejected outright.
+Crash classification is deterministic: sanitizer class, artifact
+completeness, harness-rooted stacks, caller-contract fields, and the
+configured threat model decide the normal disposition. An independent
+source-reading trigger reviewer can reject a sanitizer crash only after two
+disproof-backed Reject votes. Missing or inconclusive reviewer output fails
+open and keeps the crash.
 
 Findings face a parallel mechanism: the substance gate needs two
-rejects before a FIND moves to `findings-rejected/` (the
-`.pending-drop` marker records the first), and findings promoted
-without sanitizer evidence need two independent Promote votes from
-the validator.
+accepts to confirm or two rejects before a FIND moves to
+`findings-rejected/`. An accepted finding then receives one
+source-reading trigger-provenance review; only a Reject carrying a concrete
+disproof can demote it.
 
 ## Common rejection reasons
 
@@ -92,8 +90,7 @@ look at the `Status` column (`OK`, `NEEDS CONTENT`, or `NEEDS
 ATTENTION`). `NEEDS CONTENT` means no `report.md` yet; `NEEDS ATTENTION`
 is set by a `.needs-attention` marker the harness drops on a report that
 needs a closer human look. A separate `.pending-drop` marker (not shown
-in this column) means the LLM substance gate rejected the report once; a
-second reject moves it to `findings-rejected/`.
+in this column) means a review pass ended below reject quorum.
 
 ## What a strong crash looks like
 
@@ -340,9 +337,9 @@ What does not belong:
 Triage asks an LLM to filter out vacuous reports. Substantive
 findings without a reproducer are kept.
 
-When the LLM substance gate rejects a FIND once, the directory stays
-put with `.pending-drop`. A later accept clears that marker. If the
-reject quorum is reached, the directory moves to `findings-rejected/`
+When a substance-gate pass ends with Reject votes below quorum, the
+directory stays put with `.pending-drop`. A later accept clears that
+marker. If reject quorum is reached, the directory moves to `findings-rejected/`
 so QA can audit false rejects and recover anything worth keeping. Add
 `.reviewed` or `.keep` when a human has confirmed the report is
 intentionally terse.

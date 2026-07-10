@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable timeout runner backing lib/timeout.sh.
+"""Portable process-tree timeout runner and importable subprocess API.
 
 Invoked as: timeout.py <secs> <TERM|KILL> <rss_mb> <cmd...>
 
@@ -11,11 +11,46 @@ wall-clock timeout, 137 on an RSS-cap kill, and 129/130/143 when the
 wrapper itself is HUP/INT/TERM'd.
 """
 
+from __future__ import annotations
+
 import os
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
+from typing import Mapping, Sequence
+
+
+def run_timeout(
+    command: Sequence[str],
+    seconds: int,
+    *,
+    kill: bool = False,
+    rss_mb: int = 0,
+    cwd: str | os.PathLike[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    capture_output: bool = False,
+    stdout=None,
+    stderr=None,
+) -> subprocess.CompletedProcess:
+    """Run a command through the portable process-tree timeout wrapper."""
+    return subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            str(seconds),
+            "KILL" if kill else "TERM",
+            str(rss_mb),
+            *command,
+        ],
+        cwd=cwd,
+        env=env,
+        capture_output=capture_output,
+        stdout=stdout,
+        stderr=stderr,
+        check=False,
+    )
 
 
 def _die(msg):

@@ -100,7 +100,7 @@ rm -rf "$empty"
 assert_eq "0" "$rc" "T8: empty dir is a clean no-op (exit 0)"
 
 # ── T9: bin/audit-recon files RECON-* under recon/, not findings/ ────────
-if grep -qE 'finding_dir="\$RESULTS_DIR/recon/\$fid"' "$SCRIPT_ROOT/bin/audit-recon"; then
+if grep -qE 'results_dir / "recon" / fid' "$SCRIPT_ROOT/bin/audit-recon"; then
   pass "T9a: audit-recon writes RECON dirs under recon/"
 else
   fail "T9a: audit-recon writes RECON dirs under recon/" \

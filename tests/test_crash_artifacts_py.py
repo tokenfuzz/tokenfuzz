@@ -69,26 +69,26 @@ with tempfile.TemporaryDirectory() as td:
     # The exact call shape benchmark.py uses: a real crash dir plus a
     # speculative .audit subdir that was never created.
     try:
-        assert_eq(None, ca.find_primary_asan([crash_dir, missing]),
-                  "find_primary_asan: missing .audit scan dir tolerated")
+        assert_eq(None, ca.find_primary_sanitizer([crash_dir, missing]),
+                  "find_primary_sanitizer: missing .audit scan dir tolerated")
     except FileNotFoundError as e:
-        failed("find_primary_asan: missing .audit scan dir tolerated",
+        failed("find_primary_sanitizer: missing .audit scan dir tolerated",
                f"raised {e!r}")
 
     # And the canonical artifact is still found when present.
     san = crash_dir / "sanitizer.txt"
     san.write_text("==1==ERROR: AddressSanitizer: heap-buffer-overflow\n",
                    encoding="utf-8")
-    assert_eq(san, ca.find_primary_asan([crash_dir, missing]),
-              "find_primary_asan: preferred name found beside missing .audit")
+    assert_eq(san, ca.find_primary_sanitizer([crash_dir, missing]),
+              "find_primary_sanitizer: preferred name found beside missing .audit")
 
     # Suffix-named fallback artifacts go through _visible_files too.
     san.unlink()
     suffixed = crash_dir / "run-1.asan.txt"
     suffixed.write_text("==1==ERROR: AddressSanitizer: heap-buffer-overflow\n",
                         encoding="utf-8")
-    assert_eq(suffixed, ca.find_primary_asan([crash_dir, missing]),
-              "find_primary_asan: suffix fallback scan tolerates missing dir")
+    assert_eq(suffixed, ca.find_primary_sanitizer([crash_dir, missing]),
+              "find_primary_sanitizer: suffix fallback scan tolerates missing dir")
 
 
 # ─── find_harness_source: shared C/C++ harness detection ────────────
@@ -166,7 +166,7 @@ with tempfile.TemporaryDirectory() as td:
     asan = cd / "sanitizer.txt"
     asan.write_text("ASAN_RUN_HEADER sanitizer=asan testcase=input_harness.c\n"
                     "ERROR: AddressSanitizer: heap-buffer-overflow\n", encoding="utf-8")
-    tc = ca.find_testcase([cd], asan_files=[asan])
+    tc = ca.find_testcase([cd], sanitizer_files=[asan])
     assert_eq("input_harness.c", tc.name if tc else None,
               "find_testcase: ASAN-recorded harness-named source is the input")
     assert_eq(None, ca.find_harness_source([cd], exclude=tc),

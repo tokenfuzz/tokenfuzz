@@ -118,7 +118,7 @@ bin/audit-container-shell
 
 See
 [Where to run the audit](../getting-started/first-audit.md#where-to-run-the-audit)
-for what the helper builds, the base-image and gVisor flags, and why a
+for what the helper builds, the image and gVisor flags, and why a
 container is the recommended default. The helper does **not** start an
 audit automatically.
 

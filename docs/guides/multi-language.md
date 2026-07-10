@@ -188,7 +188,7 @@ crash_patterns = [
 
 These patterns layer on top of the built-in language-agnostic
 markers (`Traceback`, `panic:`, `Exception in thread`, …) that
-[`lib/triage.sh`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/triage.sh) already recognises.
+[`lib/triage.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/triage.py) already recognises.
 
 ## `reproduce.sh` templates
 

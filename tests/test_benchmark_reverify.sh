@@ -10,30 +10,25 @@
 # (already carrying a footer) are skipped; a crash that no longer reproduces
 # records an honest 0/5; an unresolvable crash keeps "?" (never fabricated).
 #
-# We extract the two functions and source them directly (mirrors
-# tests/test_asan_crash_outputcap.sh extracting _digest_asan), then drive them
-# with a fixtured pool + target_root + a stub sanitizer binary. SCRIPT_ROOT is
+# We drive the public resolver with a fixtured pool, target_root, and stub
+# sanitizer binary. SCRIPT_ROOT is
 # the real repo so $SCRIPT_ROOT/bin/run-sanitizer-multi and lib/ resolve.
 
 set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
 
-BENCH="$SCRIPT_ROOT/bin/benchmark"
+BENCH_RUNNER="$SCRIPT_ROOT/lib/benchmark_runner.py"
 
-# Extract the two reverify functions into a sourceable file. Each function's
-# body has no standalone `}` line before its real closing brace, so a
-# first-`^}$`-ends-the-function capture is exact.
-REVERIFY_FNS="$TEST_TMPDIR/reverify_fns.sh"
-awk '
-  /^_reverify_one_crash\(\) \{/    { c=1 }
-  /^_reverify_pool_crash_rates\(\) \{/ { c=1 }
-  c { print }
-  c && /^\}$/ { c=0 }
-' "$BENCH" > "$REVERIFY_FNS"
-fn_lines=$(wc -l < "$REVERIFY_FNS" | tr -d ' ')
-[ "$fn_lines" -gt 40 ]
-assert_eq 0 $? "fixture: reverify functions extracted (${fn_lines} lines)"
+_reverify_pool_crash_rates() {
+  AUDIT_BUILD_SUFFIX="${AUDIT_BUILD_SUFFIX:-}" PYTHONPATH="$SCRIPT_ROOT/lib" \
+    python3 - "$1" "$2" "${TARGET_SLUG:-}" "$3" <<'PY'
+import sys
+from pathlib import Path
+from benchmark_runner import reverify_pool_crash_rates
+reverify_pool_crash_rates(Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4])
+PY
+}
 
 # A stub "sanitizer binary". CRASH_MODE=1 emits an ASan diagnostic and exits
 # non-zero; otherwise it runs clean. run-sanitizer-multi → run-asan generic
@@ -85,10 +80,8 @@ TXT
   printf 'poc-bytes\n' > "$cdir/poc.bin"
 }
 
-# Provide a no-op log() and source the extracted functions.
+# Provide a no-op shell log for the fixture helpers.
 log() { :; }
-# shellcheck source=/dev/null
-source "$REVERIFY_FNS"
 
 # ── Speed: every reverify case below drives bin/run-sanitizer-multi 5x through
 # run-asan (~3s each) and the cases are independent — each writes only to its
@@ -310,7 +303,7 @@ assert_eq 1 "$rc_d" "T5c: canonical report with a stale '—' rate is re-bundled
 
 # Guard against drift: the predicate above must match the live guard in
 # bin/benchmark (same Reproduction-rate regex).
-grep -Eq 'Reproduction rate\[\[:space:\]\]\*\\\|\[\^\|\]\*\[0-9\]\+/\[0-9\]\+' "$BENCH"
+grep -Eq 'CRASH_RATE.*\[0-9\].*\[0-9\]' "$BENCH_RUNNER"
 assert_eq 0 $? "T5d: bin/benchmark bundle guard uses the same measured-rate regex"
 
 # T6

@@ -35,7 +35,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 import target_config  # sibling lib/ module; callers put lib/ on sys.path
 
@@ -158,7 +158,7 @@ class EnrichContext:
     source_root: Optional[Path] = None
     upstream_url: str = ""
     pinned_rev: str = ""
-    # Optional: full text of the sibling sanitizer.txt / asan.txt so we
+    # Optional: full text of the sibling sanitizer.txt so we
     # can mine ASan-frame snippets without re-reading from disk later.
     sanitizer_text: str = ""
 

@@ -13,7 +13,8 @@
 # Coverage is split into: (1) primitive classification, (2) surface → AV/UI
 # and caller-control → MAT derivation, (3) CVSS scores/ratings on canonical
 # shapes, (4) non-shipping Environmental impact, (5) report line + rationale
-# shape, (6) the LLM sidecar field-fill. Cluster size is not part of severity.
+# shape, (6) conservative handling of omitted reach fields. Cluster size is not
+# part of severity.
 #
 # Strategy: drive bin/severity --report on synthetic crash dirs. The scorer is
 # fully offline and deterministic, so no mocks or network are involved.
@@ -659,7 +660,7 @@ assert_eq "High" "$level" "stale report prose does not push attacker-reachable c
 
 # Conversely, when the active target model controls only bytes, Trigger source:
 # both leaves call-sequence outside attacker control and the local-only gate
-# applies. This is the same structured rule as lib/triage.sh, not a callback
+# applies. This is the same structured rule as lib/triage.py, not a callback
 # reason heuristic.
 src=$(make_crash "demo_current_oob_local" CRASH-CURRENT-OOB-LOCAL \
   "attempting free on address which was not malloc()-ed" \
@@ -679,7 +680,7 @@ assert_eq "P" "$(metric "$vector" AT)" "AT:P for active call-sequence preconditi
 assert_eq "Low" "$level" "current structured model still floors local-only trigger"
 
 # Fix #5: with no discoverable target.toml, scoring defaults to attacker_controls
-# {bytes} (matching shell triage's ${TARGET_ATTACKER_CONTROLS_CSV:-bytes}), so a
+# {bytes}, so a
 # `Trigger source: both` still derives the call-sequence set-difference and
 # localises — instead of silently scoring as if nothing were out of bounds.
 dir=$(make_crash "demo_default_bytes_oob" CRASH-DEFAULT-BYTES \
@@ -883,7 +884,7 @@ assert_eq "L" "$(metric "$vector" AV)" "AV:L from surface (unchanged)"
 assert_eq "P" "$(metric "$vector" AT)" "AT:P from local call-sequence even when AV already L"
 
 # `both` is the triage trigger token that expands to bytes + call-sequence
-# (lib/triage.sh _expand_trigger_components). When the target model declares
+# (lib/triage.py trigger evaluation). When the target model declares
 # BOTH components attacker-controlled, the trigger ⊆ attacker_controls: the bug
 # is genuinely byte-reachable and must NOT localise — AV:N stays. (When call-
 # sequence is OUTSIDE the model, the set-difference localises instead; that is
@@ -1419,130 +1420,8 @@ python3 "$REACH" --report "$dir" >/dev/null 2>&1
 assert_file_not_contains "$dir/report.md" "Recovery: Automatic" "no R:A note on persistent-corruption class"
 
 # ───────────────────────────────────────────────────────────────────
-# 7. LLM hybrid field-fill: .llm_fields.json sidecar
+# 7. Report fields are the sole scoring input
 # ───────────────────────────────────────────────────────────────────
-
-make_finding_no_fields() {
-  local id="$1" narrative="$2"
-  local dir="$TEST_TMPDIR/findings/$id"
-  mkdir -p "$dir"
-  {
-    echo "# $id"
-    echo
-    echo "## Summary"
-    echo "$narrative"
-    echo
-    echo "## Classification"
-    echo "- **Severity**: TBD"
-  } > "$dir/report.md"
-  printf '%s\n' "$dir"
-}
-
-# Sidecar fills Surface + Primitive when the report omits them.
-_CURRENT_TEST="llm-fill: sidecar fills missing Surface/Primitive"
-dir=$(make_finding_no_fields FIND-LLMFILL-FULL \
-  "Open redirect via startsWith on http://localhost:2368@attacker.example/")
-cat > "$dir/.llm_fields.json" <<'JSON'
-{
-  "surface":         "library-api — public members signin redirect handler",
-  "primitive":       "open_redirect",
-  "caller_contract": "obeyed",
-  "caller_controls": "bytes"
-}
-JSON
-read level score key surface rating vector <<< "$(get_severity "$dir")"
-assert_eq "open_redirect" "$key" "primitive filled from sidecar"
-assert_eq "library" "$surface" "surface filled from sidecar"
-
-# Sidecar must NEVER override an agent-authored field.
-_CURRENT_TEST="llm-fill: sidecar does NOT override agent Surface"
-dir=$(make_crash "demo_llm_override" CRASH-LLMFILL-OVR \
-  "heap-buffer-overflow READ of size 1" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
-cat > "$dir/.llm_fields.json" <<'JSON'
-{ "surface": "dev-tool — maintenance script", "primitive": "unknown", "caller_controls": "flags" }
-JSON
-read level score key surface rating vector <<< "$(get_severity "$dir")"
-assert_eq "library" "$surface" "agent Surface preserved, sidecar dev-tool ignored"
-
-# Narrative sanitizer-class wins over a sidecar primitive.
-_CURRENT_TEST="llm-fill: narrative sanitizer-class wins over sidecar primitive"
-dir=$(make_crash "demo_llm_prim" CRASH-LLMFILL-PRIM \
-  "heap-use-after-free WRITE of size 8" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
-cat > "$dir/.llm_fields.json" <<'JSON'
-{ "surface": "library-api", "primitive": "open_redirect" }
-JSON
-read level score key surface rating vector <<< "$(get_severity "$dir")"
-assert_eq "uaf_write" "$key" "uaf_write wins over sidecar open_redirect"
-
-# Malformed sidecar must not break scoring.
-_CURRENT_TEST="llm-fill: malformed sidecar JSON is ignored"
-dir=$(make_crash "demo_llm_bad" CRASH-LLMFILL-BAD \
-  "heap-buffer-overflow READ of size 1" "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
-printf 'not valid json{' > "$dir/.llm_fields.json"
-read level score key surface rating vector <<< "$(get_severity "$dir")"
-assert_eq "heap_read_small" "$key" "primitive detected despite bad sidecar"
-
-# Recon-class sidecar primitive is a valid enum and gets a CVSS vector.
-_CURRENT_TEST="llm-fill: recon-class sidecar primitive (protocol_state) scored"
-dir=$(make_crash "demo_llm_recon" CRASH-LLMFILL-RECON \
-  "validator quorum promoted a state-handling flaw in the session layer" \
-  "library-api" "obeyed" "bytes" "5/5" "CL-x (singleton)")
-cat > "$dir/.llm_fields.json" <<'JSON'
-{ "surface": "library-api", "primitive": "protocol_state" }
-JSON
-read level score key surface rating vector <<< "$(get_severity "$dir")"
-assert_eq "protocol_state" "$key" "sidecar protocol_state adopted"
-[ "$score" != "None" ] && pass "protocol_state scored a CVSS vector ($score)" \
-  || fail "protocol_state scored" "no score"
-
-# Fix 3b: a sidecar HIGH-IMPACT primitive (deserialization) that no sanitizer
-# class confirmed AND that an on-disk sanitizer run CONTRADICTS (ran clean, no
-# crash) is demoted to unclassified — an unverified model claim must not score
-# H/H/H. Regression for the codex "parser accepts raw control bytes" findings
-# scored 8.0 High over a clean ASan run.
-_CURRENT_TEST="llm-fill: sidecar high-impact primitive + clean sanitizer run → unclassified"
-dir=$(make_finding_no_fields FIND-3B-CLEAN \
-  "Parser accepts non-conforming input in field values (spec-leniency lead).")
-cat > "$dir/.llm_fields.json" <<'JSON'
-{ "surface": "library-api", "primitive": "deserialization", "caller_controls": "bytes" }
-JSON
-printf 'ASAN_RUN_HEADER: sanitizer=asan runs=1\n[run-sanitizer-multi] NO CRASHES in 1 runs (1 completed cleanly, 1 reached target)\n' \
-  > "$dir/H-spec.asan.txt"
-read level score key surface rating vector <<< "$(get_severity "$dir")"
-assert_eq "Unknown" "$level" "clean sanitizer run demotes an unconfirmed deserialization claim to Unknown"
-assert_eq "None" "$score" "no CVSS score for a sanitizer-contradicted high-impact claim"
-
-# Control: the SAME class of sidecar claim with NO sanitizer artifact (a pure
-# static code-review lead) is NOT demoted — it keeps its vector and is graded
-# down through E:U instead. This preserves TokenFuzz's no-sanitizer findings.
-_CURRENT_TEST="llm-fill: sidecar high-impact primitive, no sanitizer run → kept (scored)"
-dir=$(make_finding_no_fields FIND-3B-STATIC \
-  "Static review lead: an unchecked length permits a crafted record to write past the allocation.")
-cat > "$dir/.llm_fields.json" <<'JSON'
-{ "surface": "library-api", "primitive": "heap_write", "caller_controls": "bytes" }
-JSON
-read level score key surface rating vector <<< "$(get_severity "$dir")"
-assert_eq "heap_write" "$key" "a pure-static high-impact finding (no sanitizer run) keeps its primitive"
-
-# Fix 3b via EMBEDDED clean log: a sidecar high-impact primitive whose clean
-# evidence (verdict=CLEAN) lives in the report BODY — not an adjacent
-# *.asan.txt — is still demoted to unclassified. Regression for the real
-# benchmark layout (gemini FIND-0011: 32-bit claim, clean 64-bit run).
-_CURRENT_TEST="llm-fill: embedded clean probe log demotes sidecar high-impact primitive"
-dir=$(make_finding_no_fields FIND-3B-EMBED \
-  "32-bit size_t overflow lead; the 64-bit audited build did not crash.")
-cat > "$dir/.llm_fields.json" <<'JSON'
-{ "surface": "library-api", "primitive": "heap_write", "caller_controls": "bytes" }
-JSON
-cat >> "$dir/report.md" <<'EOF'
-
-```
-CRASH_RATE: 0/1
-[probe] verdict=CLEAN
-```
-EOF
-read level score key surface rating vector <<< "$(get_severity "$dir")"
-assert_eq "Unknown" "$level" "embedded clean probe log demotes an unconfirmed heap_write claim to Unknown"
 
 # RC#4: an unenriched bin/probe skeleton (Root Cause / Data Flow still carry the
 # `_TODO (agent):` placeholders) fails closed to Unknown — its structured fields

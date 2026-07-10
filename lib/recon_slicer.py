@@ -656,7 +656,28 @@ def write_slices(slices: list[tuple[str, list[Path]]], out_dir: Path) -> None:
               file=sys.stderr)
 
 
+def count_source_files(root: Path) -> int:
+    count = 0
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in SOURCE_EXTS:
+            continue
+        relative = path.relative_to(root).parts
+        if any(part in SKIP_DIR_NAMES for part in relative[:-1]):
+            continue
+        count += 1
+    return count
+
+
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "count-source-files":
+        if len(argv) != 2:
+            print("usage: recon_slicer.py count-source-files <dir>", file=sys.stderr)
+            return 2
+        root = Path(argv[1]).expanduser().resolve()
+        if not root.is_dir():
+            return 1
+        print(count_source_files(root))
+        return 0
     ap = argparse.ArgumentParser(
         description="Slice a target's source tree into N non-overlapping audit groups.")
     ap.add_argument("--target-path", required=True,

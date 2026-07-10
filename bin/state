@@ -14,7 +14,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from workqueue import (
-    add_cluster_hypotheses,
     add_common_args,
     add_hypothesis,
     add_note,
@@ -126,9 +125,7 @@ def main(argv: list[str]) -> int:
     p_next.add_argument("--peek", action="store_true", help="print next eligible card without claiming it")
 
     p_explain = sub.add_parser("explain-queue")
-    p_explain.add_argument("--agent", default="", help="accepted for resume/next-card compatibility")
     p_explain.add_argument("--mode", action="append", default=[], help="agent mode to test for compatibility; repeatable")
-    p_explain.add_argument("--role", default="", help="accepted for resume/next-card compatibility")
     p_explain.add_argument("--strategy", default="", help="optional strategy filter, e.g. S2")
     p_explain.add_argument(
         "--top",
@@ -143,14 +140,8 @@ def main(argv: list[str]) -> int:
     )
 
     p_show = sub.add_parser("show-card", help="compact JSON for one work card")
-    p_show.add_argument("card_id_pos", nargs="?", default="", help="card id")
-    p_show.add_argument("--card-id", default="", help="card id")
+    p_show.add_argument("card_id", help="card id")
     p_show.add_argument("--mode", default="", help="optional mode for queue-status calculation")
-
-    p_explain_card = sub.add_parser("explain-card", help="alias for show-card")
-    p_explain_card.add_argument("card_id_pos", nargs="?", default="", help="card id")
-    p_explain_card.add_argument("--card-id", default="", help="card id")
-    p_explain_card.add_argument("--mode", default="", help="optional mode for queue-status calculation")
 
     p_list = sub.add_parser("list-cards", help="compact JSONL listing of work cards")
     p_list.add_argument("--mode", default="")
@@ -171,70 +162,37 @@ def main(argv: list[str]) -> int:
     p_list.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
     p_list.add_argument("--verbose", action="store_true", help="include prose-heavy ranking/detail fields")
 
-    p_dump_queue = sub.add_parser(
-        "dump-queue",
-        help="compatibility alias for list-cards (compact JSONL, capped)",
-    )
-    p_dump_queue.add_argument("--mode", default="")
-    p_dump_queue.add_argument("--status", default="", help="filter by visible status or queue reason, e.g. eligible")
-    p_dump_queue.add_argument("--strategy", default="", help="filter by primary/allowed strategy, e.g. S5")
-    p_dump_queue.add_argument(
-        "--subsystem",
-        action="append",
-        default=[],
-        help="case-insensitive subsystem substring filter; repeat for OR",
-    )
-    p_dump_queue.add_argument(
-        "--contains",
-        action="append",
-        default=[],
-        help="case-insensitive substring filter over compact card fields; repeat for OR",
-    )
-    p_dump_queue.add_argument("--limit", type=int, default=50, help="max rows (0 = no cap)")
-    p_dump_queue.add_argument("--verbose", action="store_true", help="include prose-heavy ranking/detail fields")
-
     p_show_crash = sub.add_parser("show-crash", help="compact JSON for one crash artifact")
-    p_show_crash.add_argument("crash_id_pos", nargs="?", default="", help="crash id")
-    p_show_crash.add_argument("--crash-id", default="", help="crash id")
+    p_show_crash.add_argument("crash_id", help="crash id")
 
     p_list_crashes = sub.add_parser("list-crashes", help="compact JSONL listing of crash artifacts")
     p_list_crashes.add_argument("--status", default="", help="filter by status or cluster")
     p_list_crashes.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
-    p_list_crashes.add_argument("--agent", default="", help=argparse.SUPPRESS)
 
     p_show_finding = sub.add_parser("show-finding", help="compact JSON for one finding artifact")
-    p_show_finding.add_argument("finding_id_pos", nargs="?", default="", help="finding id")
-    p_show_finding.add_argument("--finding-id", default="", help="finding id")
+    p_show_finding.add_argument("finding_id", help="finding id")
 
     p_list_findings = sub.add_parser("list-findings", help="compact JSONL listing of finding artifacts")
     p_list_findings.add_argument("--status", default="", help="filter by status or class")
     p_list_findings.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
-    p_list_findings.add_argument("--agent", default="", help=argparse.SUPPRESS)
 
     p_resume = sub.add_parser("resume", help="compact structured startup brief for one agent")
     p_resume.add_argument("--agent", required=True)
     p_resume.add_argument("--mode", default="")
     p_resume.add_argument("--role", default="")
     p_resume.add_argument("--strategy", default="", help="optional strategy filter for assigned cards")
-    p_resume.add_argument("--claim", action="store_true", help="compatibility no-op; resume claims assigned cards by default")
     p_resume.add_argument("--peek", action="store_true", help="render the next eligible card without claiming it")
 
     p_add = sub.add_parser("add-hyp")
-    # Hypothesis id accepts --id / --hypothesis-id / --hyp-id interchangeably so the
-    # same spelling works across add-hyp, update-hyp, add-run, and add-note.
-    p_add.add_argument("--id", "--hypothesis-id", "--hyp-id", dest="id", default="")
+    p_add.add_argument("--id", default="")
     p_add.add_argument("--agent", required=True)
     p_add.add_argument("--card-id", default="")
     p_add.add_argument("--hypothesis", required=True)
     p_add.add_argument("--file", required=True)
-    p_add.add_argument("--function", default="", help=argparse.SUPPRESS)
-    p_add.add_argument("--line", default="", help=argparse.SUPPRESS)
     p_add.add_argument("--input-shape", required=True)
     p_add.add_argument("--guard-gap", required=True)
     p_add.add_argument(
         "--diagnostic",
-        "--expected-diagnostic",
-        "--category",
         dest="diagnostic",
         required=True,
         choices=list(HYPOTHESIS_DIAGNOSTIC_CATEGORIES),
@@ -243,30 +201,18 @@ def main(argv: list[str]) -> int:
     p_add.add_argument("--status", default="PENDING")
     p_add.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
-    # Crash-cluster expansion: reads a {"rows":[...]} decision on stdin and adds
-    # each sibling as a PENDING hypothesis owned by the crash's agent.
-    p_cluster = sub.add_parser("add-cluster-hyps")
-    p_cluster.add_argument("--crash-id", required=True)
-    p_cluster.add_argument("--strategy", default="")
-    p_cluster.add_argument("--json", action="store_true", help="emit the {agent,added,skipped} result as JSON")
-
     p_up = sub.add_parser("update-hyp")
-    p_up.add_argument("id_pos", nargs="?", default="", help=argparse.SUPPRESS)
-    p_up.add_argument("--id", "--hypothesis-id", "--hyp-id", dest="id", default="")
+    p_up.add_argument("--id", default="")
     p_up.add_argument("--agent", default="", help="optional agent scope for non-unique ids")
-    p_up.add_argument("--card-id", default="", help=argparse.SUPPRESS)
     p_up.add_argument("--status", required=True)
-    p_up.add_argument("--note", "--reason", dest="note", default="")
+    p_up.add_argument("--note", default="")
     p_up.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
     p_card = sub.add_parser("update-card")
-    p_card.add_argument("card_id_pos", nargs="?", default="", help=argparse.SUPPRESS)
-    # --id is accepted as an alias for --card-id: update-card has no hypothesis, so
-    # there is no ambiguity, and it matches the --id spelling used by sibling mutators.
-    p_card.add_argument("--card-id", "--id", dest="card_id", default="")
+    p_card.add_argument("--card-id", default="")
     p_card.add_argument("--status", required=True)
     p_card.add_argument("--agent", default="")
-    p_card.add_argument("--note", "--reason", dest="note", default="")
+    p_card.add_argument("--note", default="")
     p_card.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
     p_reject_skip = sub.add_parser(
@@ -296,24 +242,24 @@ def main(argv: list[str]) -> int:
 
     p_run = sub.add_parser("add-run")
     p_run.add_argument("--agent", required=True)
-    p_run.add_argument("--hypothesis-id", "--id", "--hyp-id", dest="hypothesis_id", required=True)
+    p_run.add_argument("--hypothesis-id", required=True)
     p_run.add_argument("--card-id", default="")
     p_run.add_argument("--mode", required=True)
     p_run.add_argument("--testcase", required=True)
     p_run.add_argument("--testcase-sha1", default="", help="sha1 of testcase contents at run time")
     p_run.add_argument("--asan-output", required=True)
     p_run.add_argument("--verdict", required=True)
-    p_run.add_argument("--asan-runs", default="", help="ASAN_RUNS count for this run (1 default, 5 for --confirm)")
+    p_run.add_argument("--sanitizer-runs", default="", help="SANITIZER_RUNS count for this run (1 default, 5 for --confirm)")
     p_run.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
     p_note = sub.add_parser("add-note")
     p_note.add_argument("--agent", required=True)
-    p_note.add_argument("--hypothesis-id", "--id", "--hyp-id", dest="hypothesis_id", default="")
+    p_note.add_argument("--hypothesis-id", default="")
     p_note.add_argument("--card-id", default="")
     p_note.add_argument(
         "--kind",
         required=True,
-        choices=["data-flow", "guard", "variants", "decision", "context", "working-context", "validation"],
+        choices=["data-flow", "guard", "variants", "decision", "context"],
     )
     p_note.add_argument("--text", required=True)
     p_note.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
@@ -347,13 +293,6 @@ def main(argv: list[str]) -> int:
     p_notes.add_argument("--hypothesis-id", default="")
     p_notes.add_argument("--card-id", default="")
     p_notes.add_argument("--kind", default="")
-
-    p_list_notes = sub.add_parser("list-notes", help="compatibility alias for recent-notes")
-    p_list_notes.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
-    p_list_notes.add_argument("--agent", default="")
-    p_list_notes.add_argument("--hypothesis-id", default="")
-    p_list_notes.add_argument("--card-id", default="")
-    p_list_notes.add_argument("--kind", default="")
 
     p_claims = sub.add_parser(
         "recent-claims",
@@ -399,10 +338,6 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="suppress per-row JSON output; print only the release count",
     )
-    # release-stale-claims is global (it scans every claim); accept and ignore --agent
-    # so the reflexive `--agent N` that agents append to per-agent commands does not error.
-    p_release.add_argument("--agent", default="", help=argparse.SUPPRESS)
-
     p_strat = sub.add_parser(
         "strategy-status",
         help="report strategy-completion evidence (used by the rotation gate)",
@@ -421,12 +356,6 @@ def main(argv: list[str]) -> int:
         help="single-pass status histogram for one agent (replaces N separate jq counters)",
     )
     p_counts.add_argument("--agent", required=True)
-    p_counts.add_argument(
-        "--format",
-        choices=("json", "shell"),
-        default="json",
-        help="json (default) emits one JSON object; shell emits key=value lines suitable for `eval`",
-    )
 
     args = parser.parse_args(argv)
     ctx = context_from_args(args)
@@ -447,18 +376,14 @@ def main(argv: list[str]) -> int:
             for row in summarize_queue(ctx, args.mode, args.top, strategy=args.strategy):
                 print(json.dumps(row, sort_keys=True))
         return 0
-    if args.cmd in ("show-card", "explain-card"):
-        card_id = args.card_id or args.card_id_pos
-        if not card_id:
-            print("[state] show-card requires CARD_ID or --card-id CARD_ID", file=sys.stderr)
-            return 2
-        row = show_work_card(ctx, card_id, mode=args.mode)
+    if args.cmd == "show-card":
+        row = show_work_card(ctx, args.card_id, mode=args.mode)
         if row is None:
-            print(f"[state] card not found: {card_id}", file=sys.stderr)
+            print(f"[state] card not found: {args.card_id}", file=sys.stderr)
             return 1
         print(json.dumps(row, sort_keys=True))
         return 0
-    if args.cmd in ("list-cards", "dump-queue"):
+    if args.cmd == "list-cards":
         for row in list_work_cards(
             ctx,
             mode=args.mode,
@@ -472,13 +397,9 @@ def main(argv: list[str]) -> int:
             print(json.dumps(row, sort_keys=True))
         return 0
     if args.cmd == "show-crash":
-        crash_id = args.crash_id or args.crash_id_pos
-        if not crash_id:
-            print("[state] show-crash requires CRASH-ID or --crash-id CRASH-ID", file=sys.stderr)
-            return 2
-        row = show_crash(ctx, crash_id)
+        row = show_crash(ctx, args.crash_id)
         if row is None:
-            print(f"[state] crash not found: {crash_id}", file=sys.stderr)
+            print(f"[state] crash not found: {args.crash_id}", file=sys.stderr)
             return 1
         print(json.dumps(row, sort_keys=True))
         return 0
@@ -487,13 +408,9 @@ def main(argv: list[str]) -> int:
             print(json.dumps(row, sort_keys=True))
         return 0
     if args.cmd == "show-finding":
-        finding_id = args.finding_id or args.finding_id_pos
-        if not finding_id:
-            print("[state] show-finding requires FIND-ID or --finding-id FIND-ID", file=sys.stderr)
-            return 2
-        row = show_finding(ctx, finding_id)
+        row = show_finding(ctx, args.finding_id)
         if row is None:
-            print(f"[state] finding not found: {finding_id}", file=sys.stderr)
+            print(f"[state] finding not found: {args.finding_id}", file=sys.stderr)
             return 1
         print(json.dumps(row, sort_keys=True))
         return 0
@@ -505,13 +422,6 @@ def main(argv: list[str]) -> int:
         print(state_resume(ctx, args.agent, args.mode, args.role, claim=not args.peek, strategy=args.strategy), end="")
         return 0
     if args.cmd == "add-hyp":
-        if (args.function or args.line) and args.file.count(":") < 2:
-            parts = [args.file]
-            if args.function:
-                parts.append(args.function)
-            if args.line:
-                parts.append(args.line)
-            args.file = ":".join(parts)
         try:
             row = add_hypothesis(ctx, args)
         except DuplicateHypothesisIdError as exc:
@@ -519,36 +429,9 @@ def main(argv: list[str]) -> int:
             return 2
         _emit_mutator("add-hyp", row, args.json)
         return 0
-    if args.cmd == "add-cluster-hyps":
-        # The rows arrive as a piped JSON decision (see triage.sh). If stdin is a
-        # terminal, json.load would block forever waiting for EOF — fail fast so a
-        # misconfigured caller can never hang the housekeeping sweep.
-        if sys.stdin.isatty():
-            print("[state] add-cluster-hyps: expects a {\"rows\":[...]} payload on stdin", file=sys.stderr)
-            return 2
-        try:
-            payload = json.load(sys.stdin)
-        except (json.JSONDecodeError, ValueError) as exc:
-            print(f"[state] add-cluster-hyps: invalid JSON on stdin: {exc}", file=sys.stderr)
-            return 2
-        rows = payload.get("rows") if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            print("[state] add-cluster-hyps: expected an object with a 'rows' array", file=sys.stderr)
-            return 2
-        result = add_cluster_hypotheses(ctx, args.crash_id, rows, args.strategy)
-        if args.json:
-            print(json.dumps(result, sort_keys=True))
-        else:
-            print(
-                f"OK: add-cluster-hyps crash={args.crash_id} "
-                f"agent={result['agent']} added={result['added']} skipped={result['skipped']}"
-            )
-        return 0
     if args.cmd == "update-hyp":
-        if not args.id and args.id_pos:
-            args.id = args.id_pos
         if not args.id:
-            print("[state] update-hyp requires --id or positional id", file=sys.stderr)
+            print("[state] update-hyp requires --id", file=sys.stderr)
             return 2
         try:
             row = update_hypothesis(ctx, args.id, args.status, args.note, agent=args.agent)
@@ -561,10 +444,8 @@ def main(argv: list[str]) -> int:
         _emit_mutator("update-hyp", row, args.json)
         return 0
     if args.cmd == "update-card":
-        if not args.card_id and args.card_id_pos:
-            args.card_id = args.card_id_pos
         if not args.card_id:
-            print("[state] update-card requires --card-id or positional card id", file=sys.stderr)
+            print("[state] update-card requires --card-id", file=sys.stderr)
             return 2
         allowed_card_status = {"claimed", "done", "discarded", "crash", "find", "blocked"}
         requested_status = args.status.strip()
@@ -636,8 +517,6 @@ def main(argv: list[str]) -> int:
         _emit_mutator("add-run", add_run(ctx, args), args.json)
         return 0
     if args.cmd == "add-note":
-        if args.kind == "working-context":
-            args.kind = "context"
         _emit_mutator("add-note", add_note(ctx, args), args.json)
         return 0
     if args.cmd == "recent-hyps":
@@ -666,7 +545,7 @@ def main(argv: list[str]) -> int:
             end="",
         )
         return 0
-    if args.cmd in ("recent-notes", "list-notes"):
+    if args.cmd == "recent-notes":
         print(
             recent_notes(
                 ctx,
@@ -740,11 +619,7 @@ def main(argv: list[str]) -> int:
         counts = agent_counts(ctx, args.agent)
         # Always emit every key — callers parse without conditionals.
         full = {k: int(counts.get(k, 0)) for k in AGENT_COUNT_KEYS}
-        if args.format == "shell":
-            for k in AGENT_COUNT_KEYS:
-                print(f"{k}={full[k]}")
-        else:
-            print(json.dumps(full, sort_keys=True))
+        print(json.dumps(full, sort_keys=True))
         return 0
     return 2
 

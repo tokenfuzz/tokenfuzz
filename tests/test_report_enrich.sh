@@ -235,16 +235,14 @@ assert_file_not_contains "$CDP/report.md" "View at" \
 assert_file_not_contains "$CDP/report.md" "blob/norev" \
   "no dead FILL_ME/blob/norev link emitted"
 
-# ── patch.diff in .audit/ is still found by enrichment ────────────
-# Older bundles that pre-date the _is_bundle_filename allowlist update
-# carry patch.diff under .audit/. Enrichment must still inline it.
+# ── patch.diff in .audit/ is found from export provenance ──────────
 CDA="$RESULTS_DIR/crashes/CRASH-001-A"
 mkdir -p "$CDA/.audit"
 cat > "$CDA/REPORT.md" <<'EOF'
-# CRASH-001-A: legacy bundle layout
+# CRASH-001-A: exported bundle provenance
 
 ## Summary
-Crash in legacy bundle whose patch landed in .audit/.
+Crash whose audit-side patch landed in .audit/.
 
 ## Classification
 - **Severity**: Medium
@@ -259,13 +257,13 @@ diff --git a/x.c b/x.c
 +new
 EOF
 python3 "$ENRICH" --quiet "$CDA/REPORT.md" \
-  || fail "enrich-report failed on legacy .audit/ layout"
+  || fail "enrich-report failed on .audit/ provenance layout"
 assert_file_contains "$CDA/REPORT.md" "enrich:patch-diff" \
-  "patch.diff in .audit/ inlined via fallback search"
+  "patch.diff in .audit/ inlined from provenance search"
 assert_file_contains "$CDA/REPORT.md" "\+new$" \
   "patch body from .audit/patch.diff appears in REPORT.md"
 assert_file_contains "$CDA/REPORT.md" "^## Patch" \
-  ".audit/ fallback also creates the canonical ## Patch heading"
+  ".audit/ patch also creates the canonical ## Patch heading"
 
 # ── Patch placement: Reproduce → Fix → Patch → Severity rationale ─────
 # The reading order puts the patch right after the reproducer and before

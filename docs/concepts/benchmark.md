@@ -78,7 +78,7 @@ With all defaults, the command means:
 | `--backend` | `codex` | Agent backend. Valid values are `claude`, `codex`, `gemini`, `grok`, and `oss`. |
 | `--model` | backend config default | Optional model override used by both conditions. |
 | `--replicates` | `3` | Runs per condition. |
-| `--budget-wall` | `10800` | Seconds allowed per cell; `0` disables the outer timeout. |
+| `--budget-wall` | `10800` | Productive seconds per cell, shared by recon, agents, and in-cell validation. Provider-recovery pauses are excluded; `0` is unlimited. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
 | `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |
 | `--run-id` | UTC timestamp | Run directory under `output/benchmark/<backend>/`; reuse it to resume. |
@@ -170,7 +170,7 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | Column | Meaning |
 | --- | --- |
 | `Condition` | `tokenfuzz` or the direct baseline label. |
-| `Replicates` | `done/total`, with a suffix for cells that hit provider trouble: `(Nr)` recovered after a mid-run blip, `(Np)` provider-limited, `(Nq)` quota-exhausted. |
+| `Replicates` | `done/total`, with a suffix for cells that hit provider trouble: `(Nr)` recovered after a mid-run blip, `(Np)` provider-limited. |
 | `Wall (h)` | Median wall-clock hours per completed cell. |
 | `Rejected findings` | FIND reports rejected by the validator. |
 | `Findings` | Validated non-crash security reports. |

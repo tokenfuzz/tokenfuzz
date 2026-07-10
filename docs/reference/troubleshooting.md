@@ -101,6 +101,13 @@ Common reasons:
 - The testcase violates a caller contract that real product input
   cannot violate.
 
+If the crash is still under `crashes/` with `.promotion_pending`, read that
+marker first. Triage is waiting for an enriched report, a valid sanitizer
+diagnostic, a testcase, or a complete exported bundle. Fix the named artifact
+and rerun triage. Do not delete the `.sig` or `.count` sidecars merely to extend
+the wait; raise `CRASH_PROMOTION_PENDING_MAX` when the normal ten passes are
+genuinely too short.
+
 A trigger source outside `attacker_controls` is **not** a rejection
 reason — such crashes stay in `crashes/` with a contract concern and
 a lower severity. See
@@ -126,8 +133,8 @@ Then open the FIND directory and read the marker file:
 
 - `.needs-content` — the FIND directory has no `report.md` or
   `description.md`. Write one.
-- `.pending-drop` — the LLM substance gate has rejected the report
-  once. A second reject moves the directory to `findings-rejected/`.
+- `.pending-drop` — a substance-gate pass ended with Reject votes below
+  quorum. Reaching quorum moves the directory to `findings-rejected/`.
 
 Add the missing concrete location, security impact, and
 reviewer-actionable rationale, then rerun triage. If a human has

@@ -1163,7 +1163,7 @@ _OL_ITEM_RE = re.compile(r"^(?P<indent>\s*)\d+\.\s+(?P<body>.*)$")
 
 # Structured fields the harness duplicates *below* the Fields table as
 # bare-label lines for downstream regex parsers (bin/severity,
-# bin/cluster-crashes, lib/triage.sh). They render as a wall of broken
+# bin/cluster-crashes, lib/triage.py). They render as a wall of broken
 # key:value text in HTML and the same data is already on screen one
 # table up, so we drop the block from HTML output only — the markdown
 # source is left untouched so parsers keep working.
@@ -1625,8 +1625,8 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
         # Drop the bare-label duplicate block (kept in markdown only for
         # regex consumers — already rendered as the Fields table above).
         #
-        # Legacy reports sometimes place prose immediately before a bare
-        # label without an intervening blank line. Filter those metadata
+        # Reports sometimes place prose immediately before a bare label
+        # without an intervening blank line. Filter those metadata
         # lines out before rendering so they do not get folded into prose.
         paragraph[:] = [l for l in paragraph if not _is_bare_label_line(l)]
         if not paragraph:

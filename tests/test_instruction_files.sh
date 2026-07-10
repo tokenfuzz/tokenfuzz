@@ -19,7 +19,7 @@ assert_file_not_contains "$SCRIPT_ROOT/AGENTS.md" "Logging Discipline" "$_CURREN
 
 _CURRENT_TEST="bin/audit injects AGENTS.md directly without dev-block stripping"
 assert_file_not_contains "$SCRIPT_ROOT/bin/audit" "harness-dev-only" "$_CURRENT_TEST"
-assert_file_contains "$SCRIPT_ROOT/bin/audit" "development guidance lives in docs/development.md" "$_CURRENT_TEST"
+assert_file_contains "$SCRIPT_ROOT/lib/audit_runner.py" 'root / "AGENTS.md"' "$_CURRENT_TEST"
 
 _CURRENT_TEST="development docs explain root development-agent startup"
 startup_prompt="Read docs/development.md first, then help me with: <task>"

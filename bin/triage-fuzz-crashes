@@ -1,125 +1,167 @@
-#!/bin/bash
-# Triage libFuzzer crash artifacts in $RESULTS_DIR/fuzz-crashes/<FUZZER>/
-# and produce a single $RESULTS_DIR/fuzz-leads.md file that the audit
-# agent directives can reference. One line per non-noise crash, with the
-# top ASan frames extracted from a short repro so the agent can pick up
-# the lead without having to discover the fuzz-crashes directory itself.
-#
-# This closes the loop: fuzz produces crashes → triage script extracts
-# the signature → agents see them in their next iteration prompt and
-# convert them into state-file hypotheses (or VULN dirs on repro).
-#
-# Usage:
-#   bin/triage-fuzz-crashes <results_dir> [max_leads]
-#
-# Conservative defaults: max_leads=20, skip any file under shutdown-noise/
-# (already shunted by run-asan.sh), skip empty files (libFuzzer oom-empty
-# artifacts), skip files whose sha1 filename is the well-known DeinitXPCOM
-# Glean-panic signature.
+#!/usr/bin/env python3
+"""Summarize non-noise libFuzzer artifacts for audit agents."""
 
-set -uo pipefail
+from __future__ import annotations
 
-RESULTS_DIR="${1:-}"
-MAX_LEADS="${2:-20}"
-SHUTDOWN_SHA1="crash-da39a3ee5e6b4b0d3255bfef95601890afd80709"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=../lib/platform.sh
-source "$REPO_ROOT/lib/platform.sh"
+import heapq
+import os
+import stat
+import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
-if [ -z "$RESULTS_DIR" ] || [ ! -d "$RESULTS_DIR" ]; then
-  echo "[triage] usage: $0 <results_dir> [max_leads]" >&2
-  exit 2
-fi
+TOOL = "triage"
+DEFAULT_MAX_LEADS = 20
+SHUTDOWN_SHA1 = "crash-da39a3ee5e6b4b0d3255bfef95601890afd80709"
+CANDIDATE_PREFIXES = ("crash-", "oom-", "timeout-")
 
-FUZZ_ROOT="$RESULTS_DIR/fuzz-crashes"
-OUT="$RESULTS_DIR/fuzz-leads.md"
 
-if [ ! -d "$FUZZ_ROOT" ]; then
-  # No fuzz runs yet — write an empty marker so the agent prompt can
-  # reference the file unconditionally without a confusing "file not
-  # found" feedback loop.
-  {
-    echo "# Fuzz Crash Leads"
-    echo ""
-    echo "_No $FUZZ_ROOT yet — run a fuzz target first._"
-  } > "$OUT"
-  exit 0
-fi
+@dataclass(frozen=True)
+class Candidate:
+    path: Path
+    mtime: int
+    size: int
 
-# Collect candidate files: anything under fuzz-crashes/* that starts with
-# crash- or oom- and is NOT in shutdown-noise/. Newest first so fresh
-# findings surface at the top; agents typically read only the first N
-# leads before hitting turn 20.
-#
-# macOS default bash (3.2) has no `mapfile`, so we collect via a tmpfile
-# + newline-delimited read loop.
-_candidates_tmp="$(mktemp "${TMPDIR:-/tmp}/triage-cands-XXXXXXXX")"
-trap 'rm -f "$_candidates_tmp"' EXIT
-find "$FUZZ_ROOT" -type f \
-     \( -name 'crash-*' -o -name 'oom-*' -o -name 'timeout-*' \) \
-     -not -path '*/shutdown-noise/*' \
-     2>/dev/null \
-  | while IFS= read -r p; do
-      m=$(audit_stat_mtime_epoch "$p" 2>/dev/null || echo 0)
-      printf '%s\t%s\n' "$m" "$p"
-    done \
-  | sort -rn \
-  | cut -f2- \
-  > "$_candidates_tmp"
 
-{
-  echo "# Fuzz Crash Leads"
-  echo ""
-  echo "_Generated $(date -u +%Y-%m-%dT%H:%M:%SZ) — newest first, max ${MAX_LEADS}._"
-  echo ""
-  echo "Each lead is a libFuzzer artifact that survived infrastructure-noise"
-  echo "filtering. Convert high-value leads into state-file hypotheses:"
-  echo ""
-  echo "1. Derive FUZZER name from the parent dir."
-  echo "2. Reproduce: \`FUZZER=<Name> bin/run-asan fuzz-repro <path>\`"
-  echo "3. If the ASan trace points at product code (not libFuzzer runtime,"
-  echo "   not shutdown-path Glean), add a hypothesis row + write a minimal"
-  echo "   hand-authored testcase that reaches the same sink."
-  echo ""
-  echo "---"
-  echo ""
-} > "$OUT"
+def parse_limit(raw: str) -> int | None:
+    if not raw.isascii() or not raw.isdigit():
+        return None
+    return int(raw)
 
-emitted=0
-while IFS= read -r f; do
-  [ -n "$f" ] || continue
-  [ -f "$f" ] || continue
-  # Drop the known DeinitXPCOM shutdown-panic SHA1 even if it somehow
-  # escaped the shutdown-noise move (defence-in-depth for bullet 8).
-  base="$(basename "$f")"
-  if [ "$base" = "$SHUTDOWN_SHA1" ]; then
-    continue
-  fi
-  # Drop zero-byte artifacts — libFuzzer OOM minimizer emits them.
-  if [ ! -s "$f" ]; then
-    continue
-  fi
-  fuzzer="$(basename "$(dirname "$f")")"
-  size="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
-  mtime="$(audit_mtime_utc "$f" '%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '?')"
-  {
-    echo "## ${fuzzer} / ${base}"
-    echo ""
-    echo "- **Path:** \`$f\`"
-    echo "- **Size:** ${size} bytes"
-    echo "- **Modified:** ${mtime}"
-    echo "- **Reproduce:** \`FUZZER=${fuzzer} bin/run-asan fuzz-repro $f\`"
-    echo ""
-  } >> "$OUT"
-  emitted=$((emitted + 1))
-  if [ "$emitted" -ge "$MAX_LEADS" ]; then
-    break
-  fi
-done < "$_candidates_tmp"
 
-if [ "$emitted" -eq 0 ]; then
-  echo "_No non-noise fuzz crashes found._" >> "$OUT"
-fi
+def candidates(fuzz_root: Path):
+    def ignore_walk_error(_error: OSError) -> None:
+        return
 
-echo "[triage] wrote $OUT (${emitted} leads)"
+    for current, directories, names in os.walk(
+        fuzz_root, topdown=True, followlinks=False, onerror=ignore_walk_error
+    ):
+        directories[:] = [name for name in directories if name != "shutdown-noise"]
+        current_path = Path(current)
+        for name in names:
+            if not name.startswith(CANDIDATE_PREFIXES) or name == SHUTDOWN_SHA1:
+                continue
+            path = current_path / name
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+                continue
+            yield Candidate(path=path, mtime=int(info.st_mtime), size=info.st_size)
+
+
+def newest_candidates(fuzz_root: Path, limit: int) -> list[Candidate]:
+    return heapq.nlargest(
+        limit,
+        candidates(fuzz_root),
+        key=lambda item: (item.mtime, os.fsencode(str(item.path))),
+    )
+
+
+def render_no_fuzz_root(fuzz_root_display: str) -> str:
+    return "\n".join(
+        [
+            "# Fuzz Crash Leads",
+            "",
+            f"_No {fuzz_root_display} yet — run a fuzz target first._",
+            "",
+        ]
+    )
+
+
+def render_leads(
+    leads: list[Candidate], max_leads: int, fuzz_root: Path, fuzz_root_display: str
+) -> str:
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = [
+        "# Fuzz Crash Leads",
+        "",
+        f"_Generated {generated} — newest first, max {max_leads}._",
+        "",
+        "Each lead is a libFuzzer artifact that survived infrastructure-noise",
+        "filtering. Convert high-value leads into state-file hypotheses:",
+        "",
+        "1. Derive FUZZER name from the parent dir.",
+        "2. Reproduce: `FUZZER=<Name> bin/run-asan fuzz-repro <path>`",
+        "3. If the ASan trace points at product code (not libFuzzer runtime,",
+        "   not shutdown-path Glean), add a hypothesis row + write a minimal",
+        "   hand-authored testcase that reaches the same sink.",
+        "",
+        "---",
+        "",
+    ]
+    for lead in leads:
+        fuzzer = lead.path.parent.name
+        relative_path = lead.path.relative_to(fuzz_root)
+        display_path = f"{fuzz_root_display}/{relative_path}"
+        modified = datetime.fromtimestamp(lead.mtime, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        lines.extend(
+            [
+                f"## {fuzzer} / {lead.path.name}",
+                "",
+                f"- **Path:** `{display_path}`",
+                f"- **Size:** {lead.size} bytes",
+                f"- **Modified:** {modified}",
+                f"- **Reproduce:** `FUZZER={fuzzer} bin/run-asan fuzz-repro {display_path}`",
+                "",
+            ]
+        )
+    if not leads:
+        lines.append("_No non-noise fuzz crashes found._")
+    return "\n".join(lines) + "\n"
+
+
+def atomic_write(path: Path, content: str) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(content)
+            output.flush()
+        temporary_path.chmod(0o644)
+        os.replace(temporary_path, path)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def main(argv: list[str]) -> int:
+    results_arg = argv[0] if argv else ""
+    if not results_arg or not Path(results_arg).is_dir():
+        print(f"[{TOOL}] usage: {sys.argv[0]} <results_dir> [max_leads]", file=sys.stderr)
+        return 2
+
+    raw_limit = argv[1] if len(argv) > 1 else str(DEFAULT_MAX_LEADS)
+    max_leads = parse_limit(raw_limit)
+    if max_leads is None:
+        print(f"[{TOOL}] max_leads must be a non-negative integer", file=sys.stderr)
+        return 2
+
+    results = Path(results_arg)
+    fuzz_root = results / "fuzz-crashes"
+    output = results / "fuzz-leads.md"
+    fuzz_root_display = f"{results_arg}/fuzz-crashes"
+    output_display = f"{results_arg}/fuzz-leads.md"
+    try:
+        if not fuzz_root.is_dir():
+            atomic_write(output, render_no_fuzz_root(fuzz_root_display))
+            return 0
+        leads = newest_candidates(fuzz_root, max_leads)
+        atomic_write(output, render_leads(leads, max_leads, fuzz_root, fuzz_root_display))
+    except OSError as error:
+        print(f"[{TOOL}] failed to write {output_display}: {error}", file=sys.stderr)
+        return 1
+
+    print(f"[{TOOL}] wrote {output_display} ({len(leads)} leads)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

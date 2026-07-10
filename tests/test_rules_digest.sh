@@ -19,7 +19,6 @@ set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
 
-PROMPT_SH="$SCRIPT_ROOT/lib/prompt.sh"
 FULL_RULES="$SCRIPT_ROOT/.agents/references/session-rules.md"
 DIGEST="$SCRIPT_ROOT/.agents/references/session-rules.digest.md"
 
@@ -60,7 +59,7 @@ expected_topics=(
   "bin/peek"                           # Search Discipline (peek subsection)
   "show-patch"                         # Search Discipline (show-patch subsection)
   "NEUTRAL"                            # State File Management
-  "Working Context"                    # After Context Compression
+  "bin/state resume --agent"           # After Context Compression
   "crashes-rejected"                   # Rejected Crashes
   "FINDING-CLUSTERS"                   # Rejected Findings
   "Caller contract"                    # CRASH Promotion Gate
@@ -113,12 +112,12 @@ for sub in add-hyp update-hyp add-note update-card; do
   assert_file_contains "$DIGEST" "$sub" \
     "digest cheat sheet documents bin/state $sub"
 done
-for sub in show-recent dump-queue list-notes recent-claims recent-tried; do
+for sub in show-recent list-cards recent-notes recent-claims recent-tried; do
   assert_file_contains "$DIGEST" "$sub" \
     "digest cheat sheet documents compact state accessor $sub"
 done
 assert_file_contains "$DIGEST" "explain-queue" \
-  "digest cheat sheet documents resume-shaped explain-queue flags"
+  "digest cheat sheet documents explain-queue filters"
 assert_file_contains "$DIGEST" "strategy S" \
   "digest cheat sheet documents explain-queue strategy flag"
 assert_file_contains "$DIGEST" "bin/state recent-tried --agent N --limit 40" \
@@ -145,130 +144,25 @@ assert_file_contains "$FULL_RULES" "single writer" \
 assert_file_contains "$FULL_RULES" "Fix Direction" \
   "full rules name ## Fix Direction as the advisory case"
 
-# ── Prompt builder integration ────────────────────────────────────
-# Source the prompt builder in a contained shell so its globals don't
-# leak. We can't fully drive build_common_suffix without the rest of
-# bin/audit's setup, so we test the digest emitter directly — that's the
-# function the suffix calls.
-output=$(REFERENCE_DIR="$SCRIPT_ROOT/.agents/references" bash -c "
-  set -u
-  source '$PROMPT_SH'
-  build_session_rules_digest
-")
-assert_match 'Session Rules — Digest' "$output" \
-  "build_session_rules_digest emits the digest header"
-assert_match 'bin/probe' "$output" \
-  "build_session_rules_digest emits digest content"
-assert_match 'RESULTS_DIR.*/scratch-N' "$output" \
-  "build_session_rules_digest tells agents to use RESULTS_DIR scratch"
-assert_not_match 'bin/probe scratch-N' "$output" \
-  "build_session_rules_digest avoids bare root-scratch probe examples"
-assert_match 'Drill-down' "$output" \
-  "build_session_rules_digest emits drill-down section"
 
-# Caching: a second call within the same shell must return identical
-# bytes (the cache variable should hold).
-output2=$(REFERENCE_DIR="$SCRIPT_ROOT/.agents/references" bash -c "
-  set -u
-  source '$PROMPT_SH'
-  build_session_rules_digest
-  build_session_rules_digest
-")
-# Two emissions should be exactly 2x the bytes of one emission (no leading
-# initialization output, no per-call slack).
-single_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
-double_bytes=$(printf '%s' "$output2" | wc -c | tr -d ' ')
-expected=$(( single_bytes * 2 ))
-# Allow ±2 bytes for trailing-newline accounting.
-diff=$(( double_bytes - expected ))
-[ "$diff" -lt 0 ] && diff=$(( -diff ))
-[ "$diff" -le 2 ]
-assert_eq 0 $? \
-  "build_session_rules_digest cache: 2 calls = 2x bytes (got $double_bytes vs $expected)"
+# ── Python prompt integration ─────────────────────────────────────
+output=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$SCRIPT_ROOT/.agents/references" <<'PY'
+import sys
+from pathlib import Path
+import prompt
+print(prompt.session_rules_digest(Path(sys.argv[1])))
+PY
+)
+assert_match 'Session Rules.*Digest' "$output" "session_rules_digest emits the digest header"
+assert_match 'bin/probe' "$output" "session_rules_digest emits probe guidance"
 
-# ── Regression: an empty static cache must NOT strip the digest ─────
-# A failed/raced/truncating write left .static-prompt-rules.md at 0 bytes;
-# build_common_suffix's old `-f` test cat'd it to nothing, silently
-# dropping the entire digest from every deep-investigation prompt for a
-# whole resumed run. build_common_suffix must fall back to live
-# computation when the cache is empty, and write_static_prompt_file must
-# publish atomically (no empty/partial reads, no leftover temp files).
-suffix_probe=$(REFERENCE_DIR="$SCRIPT_ROOT/.agents/references" bash -c '
-  set -u
-  source "'"$PROMPT_SH"'"
-  cached_blocklist_description(){ echo "<none>"; }
-  fuzz_leads_path(){ echo "/tmp/fl"; }
-  neutralize_qa_vocab_string(){ cat; }
-  RESULTS_DIR=$(mktemp -d); export RESULTS_DIR
-  sf="$RESULTS_DIR/.static-prompt-rules.md"
-  : > "$sf"                                   # 0-byte cache (the bug trigger)
-  empty_out=$(build_common_suffix)
-  printf "EMPTY_DIGEST=%s\n" "$(printf "%s" "$empty_out" | grep -c "PATH CONVENTION")"
-  printf "SUFFIX_DIGEST_API=%s\n" "$(printf "%s" "$empty_out" | grep -c "digest below is the API for .bin/probe. and .bin/state")"
-  printf "SUFFIX_PROBE_HELP_EXAMPLE=%s\n" "$(printf "%s" "$empty_out" | grep -c "bin/probe --help")"
-  write_static_prompt_file                    # atomic publish
-  printf "STATIC_NONEMPTY=%s\n" "$([ -s "$sf" ] && echo 1 || echo 0)"
-  printf "TMP_LEFTOVER=%s\n" "$(ls "$sf".tmp.* 2>/dev/null | wc -l | tr -d " ")"
-  cached_out=$(build_common_suffix)
-  printf "CACHED_DIGEST=%s\n" "$(printf "%s" "$cached_out" | grep -c "PATH CONVENTION")"
-  rm -rf "$RESULTS_DIR"
-')
-assert_match 'EMPTY_DIGEST=[1-9]' "$suffix_probe" \
-  "build_common_suffix falls back to live digest when static cache is empty"
-assert_match 'SUFFIX_DIGEST_API=[1-9]' "$suffix_probe" \
-  "build_common_suffix tells agents the digest is the bin/probe/bin/state API"
-assert_match 'SUFFIX_PROBE_HELP_EXAMPLE=0' "$suffix_probe" \
-  "build_common_suffix no longer nudges agents toward bin/probe --help"
-assert_match 'STATIC_NONEMPTY=1' "$suffix_probe" \
-  "write_static_prompt_file publishes a non-empty static cache"
-assert_match 'TMP_LEFTOVER=0' "$suffix_probe" \
-  "write_static_prompt_file leaves no temp files behind"
-assert_match 'CACHED_DIGEST=[1-9]' "$suffix_probe" \
-  "build_common_suffix serves the digest from a populated cache"
-
-# ── Graceful degradation when digest file is missing ──────────────
-# Test envs and partially provisioned trees should still build prompts.
-output=$(REFERENCE_DIR="$TEST_TMPDIR/no-such-refs" bash -c "
-  set -u
-  source '$PROMPT_SH'
-  build_session_rules_digest
-")
-assert_match 'digest missing' "$output" \
-  "missing digest: graceful fallback message"
-# The fallback should still point at the long file so agents know where to look.
-assert_match 'session-rules.md' "$output" \
-  "missing digest: fallback names the long file"
-
-# ── No regression: the dropped 'Read … ONCE at session start' line ──
-# The whole point of this fix is that agents stop re-reading the long
-# file every session. If any prompt builder still emits that instruction,
-# the per-session re-read returns and the fix is moot.
-#
-# We grep the prompt builders for the dropped sentence shape. The new
-# code emits "drill into … session-rules.md only when the digest is
-# ambiguous" — that's an allowed mention. The old shape was
-# "read … session-rules.md ONCE at session start" — that one must be gone.
-# grep -c exits 1 when the pattern isn't found; we don't want the `|| echo 0`
-# trick because it emits a second line on top of grep's "0", which then trips
-# integer-equality assertions. `grep -c | head -1` keeps a single number.
-old_count=$(grep -c 'session-rules\.md.*ONCE at session start' "$PROMPT_SH" 2>/dev/null | head -1)
-old_count="${old_count:-0}"
-assert_eq 0 "$old_count" \
-  "prompt.sh no longer instructs agents to re-read session-rules.md once per session"
-
-# Same regression guard for the runtime-loaded AGENTS.md: its SESSION START
-# step must not tell agents to read the long session-rules.md unconditionally
-# ("ONCE"). The digest is embedded in the prompt; the long file is a
-# drill-down only. An unconditional read re-sends ~22 KB on every later turn.
-AGENTS_MD="$SCRIPT_ROOT/AGENTS.md"
-agents_old=$(grep -c 'session-rules\.md.*ONCE' "$AGENTS_MD" 2>/dev/null | head -1)
-agents_old="${agents_old:-0}"
-assert_eq 0 "$agents_old" \
-  "AGENTS.md no longer instructs agents to read session-rules.md ONCE per session"
-# It should still name the file as a conditional drill-down so agents know
-# where to look when the embedded digest is ambiguous.
-assert_match 'session-rules\.md' "$(cat "$AGENTS_MD")" \
-  "AGENTS.md still names session-rules.md as a drill-down"
+missing=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - <<'PY'
+from pathlib import Path
+import prompt
+print(prompt.session_rules_digest(Path("/no/such/reference")))
+PY
+)
+assert_match 'digest missing' "$missing" "missing digest degrades with drill-down guidance"
 
 teardown_test_env
 summary

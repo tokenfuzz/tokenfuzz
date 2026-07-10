@@ -1,365 +1,238 @@
-#!/usr/bin/env bash
-# scratch-status — digest of an agent scratch dir.
-#
-# Replaces `ls -la output/<slug>/<backend>/results/scratch-N`, which can dump
-# 30-40 KB once scratch has hundreds of testcase / asan.txt pairs and the
-# permissions/owner/size columns the agent never uses dominate the output.
-#
-# What the agent actually needs from "what's in my scratch":
-#   - counts: testcases written, ASan-verified, ORPHAN (no .asan.txt)
-#   - verdict breakdown: CRASH vs CLEAN
-#   - families (testcases sharing a stem-minus-variant) for at-a-glance recall
-#   - newest activity, especially unverified testcases that need bin/probe
-#   - harness sources present (so the agent reuses them via // HARNESS:)
-#
-# Testcase classification + orphan detection reuses lib/quality.sh so the
-# digest's notion of "runnable testcase" matches the harness's auto-enforce
-# pass — agents that see "0 orphan" here will not be surprised by the
-# enforcement gate.
-#
-# Usage:
-#   bin/scratch-status                       # all scratch-* under $RESULTS_DIR
-#   bin/scratch-status --agent N             # only scratch-N
-#   bin/scratch-status scratch-1             # explicit dir (relative or abs)
-#   bin/scratch-status --terse               # one summary line per scratch
-#   bin/scratch-status --files --agent N     # bounded recent file inventory
-#
-# Output ~1-3 KB typical, capped near 5 KB. Use `--files` for a bounded
-# newest-file inventory; reserve raw `ls -la <scratch>` for exact permission
-# or link-target checks.
+#!/usr/bin/env python3
+"""Bounded digest of one or more agent scratch directories."""
 
-set -uo pipefail
+from __future__ import annotations
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+import argparse
+import os
+import re
+import sys
+import time
+from collections import Counter
+from pathlib import Path
 
-# shellcheck source=../lib/platform.sh
-source "$SCRIPT_ROOT/lib/platform.sh"
-# shellcheck source=../lib/quality.sh
-source "$SCRIPT_ROOT/lib/quality.sh"
-# shellcheck source=../lib/verdict.sh
-source "$SCRIPT_ROOT/lib/verdict.sh"
 
-TERSE=0
-FILES=0
-FILE_LIMIT=20
-EXPLICIT_AGENTS=()
-EXPLICIT_DIRS=()
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+import quality  # noqa: E402
+import verdict as verdict_lib  # noqa: E402
 
-usage() {
-  sed -n '2,28p' "$0"
-}
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --agent)
-      [ $# -ge 2 ] || { echo "[scratch-status] --agent needs a value" >&2; exit 2; }
-      EXPLICIT_AGENTS+=("$2"); shift 2 ;;
-    --agent=*) EXPLICIT_AGENTS+=("${1#--agent=}"); shift ;;
-    --terse) TERSE=1; shift ;;
-    --files) FILES=1; shift ;;
-    --files=*) FILES=1; FILE_LIMIT="${1#--files=}"; shift ;;
-    --file-limit)
-      [ $# -ge 2 ] || { echo "[scratch-status] --file-limit needs a value" >&2; exit 2; }
-      FILE_LIMIT="$2"; shift 2 ;;
-    --file-limit=*) FILE_LIMIT="${1#--file-limit=}"; shift ;;
-    -h|--help) usage; exit 0 ;;
-    --) shift; while [ $# -gt 0 ]; do EXPLICIT_DIRS+=("$1"); shift; done ;;
-    -*) echo "[scratch-status] unknown option: $1" >&2; usage >&2; exit 2 ;;
-    *) EXPLICIT_DIRS+=("$1"); shift ;;
-  esac
-done
+def family_of(filename: str) -> str:
+    stem = filename.split(".", 1)[0]
+    while re.search(r"[-_]\d+$", stem):
+        stem = re.sub(r"[-_]\d+$", "", stem)
+    return stem
 
-case "$FILE_LIMIT" in
-  ''|*[!0-9]*) echo "[scratch-status] --files / --file-limit must be numeric" >&2; exit 2 ;;
-esac
 
-# ── Resolve target scratch dirs ───────────────────────────────────────
-SCRATCH_DIRS=()
+def verdict_for(testcase: Path) -> str:
+    base = testcase.with_suffix("")
+    candidates = (Path(f"{base}.asan.txt"), Path(f"{testcase}.asan.txt"))
+    output = next((path for path in candidates if path.is_file()), None)
+    if output is None:
+        return "ORPHAN"
+    try:
+        if output.stat().st_size == 0:
+            return "NO_EXEC"
+    except OSError:
+        return "NO_EXEC"
+    if verdict_lib.file_has_crash(output):
+        return "CRASH"
+    if verdict_lib.file_is_clean(output):
+        return "CLEAN"
+    text = output.read_text(encoding="utf-8", errors="replace")
+    if re.search(r"EXECUTION_RATE: [1-9][0-9]*/[0-9]+", text):
+        return "EXEC_FAIL"
+    return "NO_EXEC"
 
-if [ "${#EXPLICIT_DIRS[@]}" -gt 0 ]; then
-  for d in "${EXPLICIT_DIRS[@]}"; do
-    # If relative and we have $RESULTS_DIR, resolve against it; else cwd.
-    case "$d" in
-      /*) SCRATCH_DIRS+=("$d") ;;
-      *)
-        if [ -n "${RESULTS_DIR:-}" ] && [ -d "$RESULTS_DIR/$d" ]; then
-          SCRATCH_DIRS+=("$RESULTS_DIR/$d")
-        else
-          SCRATCH_DIRS+=("$d")
-        fi
-        ;;
-    esac
-  done
-elif [ "${#EXPLICIT_AGENTS[@]}" -gt 0 ]; then
-  if [ -z "${RESULTS_DIR:-}" ]; then
-    echo "[scratch-status] --agent requires RESULTS_DIR (run inside an audit session)" >&2
-    exit 2
-  fi
-  for n in "${EXPLICIT_AGENTS[@]}"; do
-    SCRATCH_DIRS+=("$RESULTS_DIR/scratch-$n")
-  done
-else
-  # Default: every scratch-* under $RESULTS_DIR (or cwd as fallback).
-  base="${RESULTS_DIR:-$PWD}"
-  while IFS= read -r d; do
-    SCRATCH_DIRS+=("$d")
-  done < <(find "$base" -maxdepth 1 -type d -name 'scratch-*' 2>/dev/null | sort)
-fi
 
-if [ "${#SCRATCH_DIRS[@]}" -eq 0 ]; then
-  echo "[scratch-status] no scratch dirs found (RESULTS_DIR=${RESULTS_DIR:-unset})" >&2
-  exit 1
-fi
+def ago(modified: float) -> str:
+    delta = int(time.time() - modified)
+    if delta < 60:
+        return f"{delta}s ago"
+    if delta < 3600:
+        return f"{delta // 60}m ago"
+    if delta < 86400:
+        return f"{delta // 3600}h ago"
+    return f"{delta // 86400}d ago"
 
-# ── Helpers ──────────────────────────────────────────────────────────
 
-# Family name = testcase stem minus trailing -<digits> variant suffix.
-# Examples:
-#   altsvc-expire-size-3.txt   -> altsvc-expire-size
-#   socks5-gss-len-12.bin      -> socks5-gss-len
-#   solo-tc.html               -> solo-tc
-family_of() {
-  local stem="$1"
-  # Strip ALL extensions (everything after the first dot). Handles common
-  # double-extensions like foo-3.txt.hsts where the variant number lives
-  # before the inner extension. Single-dot names round-trip correctly.
-  stem="${stem%%.*}"
-  # Strip trailing variant index: -<digits> or _<digits>. Loop to support
-  # multi-digit variants (-99). Agents use both dash and underscore.
-  while [[ "$stem" =~ [-_][0-9]+$ ]]; do
-    if [[ "$stem" =~ -[0-9]+$ ]]; then
-      stem="${stem%-*}"
-    else
-      stem="${stem%_*}"
-    fi
-  done
-  printf '%s' "$stem"
-}
+def file_kind(path: Path) -> str:
+    name = path.name
+    if (
+        name.endswith((".asan.txt", ".ubsan.txt"))
+        or name.startswith(("asan_output", "asan-output"))
+    ):
+        return "sanitizer-output"
+    if re.match(r"^(?:.*_harness|harness.*)\.(?:c|cc|cpp)$", name, re.IGNORECASE):
+        return "harness"
+    if name.endswith((".o", ".a", ".so", ".dylib")):
+        return "build-artifact"
+    return "testcase" if quality.testcase_mode_for_file(str(path)) else "artifact"
 
-# Verdict for a testcase: CRASH | CLEAN | EXEC_FAIL | NO_EXEC | ORPHAN.
-# Read-only on disk; classification uses the shared lib/verdict.sh
-# helpers, so a testcase reads the same here as in bin/probe.
-verdict_for() {
-  local tc="$1"
-  local base="${tc%.*}"
-  local out=""
-  if [ -f "${base}.asan.txt" ]; then out="${base}.asan.txt";
-  elif [ -f "${tc}.asan.txt" ]; then out="${tc}.asan.txt";
-  else printf '%s' ORPHAN; return; fi
-  if [ ! -s "$out" ]; then printf '%s' NO_EXEC; return; fi
-  if verdict_file_has_crash "$out"; then
-    printf '%s' CRASH
-  elif verdict_file_is_clean "$out"; then
-    printf '%s' CLEAN
-  elif grep -qE 'EXECUTION_RATE: [1-9][0-9]*/[0-9]+' "$out" 2>/dev/null; then
-    printf '%s' EXEC_FAIL
-  else
-    printf '%s' NO_EXEC
-  fi
-}
 
-# Human "N sec/min/hr/day ago" from a mtime epoch.
-ago_of() {
-  local mtime="$1"
-  local now; now=$(date +%s)
-  local d=$((now - mtime))
-  if   [ "$d" -lt 60 ];     then printf '%ds ago' "$d"
-  elif [ "$d" -lt 3600 ];   then printf '%dm ago' "$((d / 60))"
-  elif [ "$d" -lt 86400 ];  then printf '%dh ago' "$((d / 3600))"
-  else                            printf '%dd ago' "$((d / 86400))"
-  fi
-}
+def harness_count(directory: Path) -> int:
+    return sum(
+        1
+        for path in directory.iterdir()
+        if path.is_file()
+        and re.match(r"^(?:.*_harness|harness.*)\.(?:c|cc|cpp)$", path.name, re.IGNORECASE)
+    )
 
-# mtime epoch for a file (portable across BSD / GNU stat).
-mtime_of() {
-  audit_stat_mtime_epoch "$1"
-}
 
-size_of() {
-  audit_stat_size "$1"
-}
+def emit_recent_files(directory: Path, limit: int) -> None:
+    files = [path for path in directory.iterdir() if path.is_file()]
+    if not files:
+        return
+    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    print(f"  recent files (newest {limit} of {len(files)}):")
+    for path in files[:limit]:
+        info = path.stat()
+        print(
+            f"    {path.name:<50} {info.st_size:>8} B  "
+            f"{ago(info.st_mtime):<16} [{file_kind(path)}]"
+        )
+    remaining = len(files) - min(limit, len(files))
+    if remaining:
+        print(
+            f"    ... ({remaining} more files; narrow by name with "
+            "bin/scratch-search PATTERN)"
+        )
 
-kind_of_file() {
-  local path="$1" base="${1##*/}" mode
-  case "$base" in
-    *.asan.txt|*.ubsan.txt|asan_output*.txt|asan-output*.txt) printf '%s' sanitizer-output; return ;;
-    *_harness.c|*_harness.cc|*_harness.cpp|harness*.c|harness*.cc|harness*.cpp) printf '%s' harness; return ;;
-    *.o|*.a|*.so|*.dylib) printf '%s' build-artifact; return ;;
-  esac
-  mode=$(testcase_mode_for_file "$path" 2>/dev/null || true)
-  if [ -n "$mode" ]; then
-    printf '%s' testcase
-  else
-    printf '%s' artifact
-  fi
-}
 
-# Sort entries by mtime desc. Input lines: "<mtime>\t<path>\t<verdict>"
-sort_newest() {
-  sort -t $'\t' -k1,1nr
-}
+def emit_scratch(directory: Path, *, terse: bool, files: bool, file_limit: int) -> None:
+    label = directory.name
+    if not directory.is_dir():
+        print(f"[{label}] (missing)")
+        return
+    testcases = [Path(path) for path in quality.list_testcases(str(directory))]
+    harnesses = harness_count(directory)
+    if not testcases and not harnesses:
+        print(f"[{label}] empty")
+        return
 
-emit_recent_files() {
-  local dir="$1" total f mt sz rows kind shown
-  total=$(find "$dir" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
-  total=${total:-0}
-  [ "$total" -gt 0 ] || return
+    entries = []
+    counts: Counter[str] = Counter()
+    families: dict[str, Counter[str]] = {}
+    for testcase in testcases:
+        state = verdict_for(testcase)
+        counts[state] += 1
+        family = family_of(testcase.name)
+        family_counts = families.setdefault(family, Counter())
+        family_counts["total"] += 1
+        family_counts[state] += 1
+        entries.append((testcase.stat().st_mtime, testcase, state, family))
+    entries.sort(key=lambda row: row[0], reverse=True)
 
-  printf '  recent files (newest %d of %d):\n' "$FILE_LIMIT" "$total"
-  rows=$(
-    while IFS= read -r -d '' f; do
-      mt=$(mtime_of "$f")
-      sz=$(size_of "$f")
-      printf '%s\t%s\t%s\n' "$mt" "$sz" "$f"
-    done < <(find "$dir" -maxdepth 1 -type f -print0 2>/dev/null)
-  )
-  shown=0
-  printf '%s\n' "$rows" \
-    | sort_newest \
-    | head -n "$FILE_LIMIT" \
-    | while IFS=$'\t' read -r mt sz f; do
-        [ -n "$f" ] || continue
-        kind=$(kind_of_file "$f")
-        printf '    %-50s %8s B  %-16s [%s]\n' "${f##*/}" "${sz:-0}" "$(ago_of "$mt")" "$kind"
-      done
-  shown="$FILE_LIMIT"
-  [ "$shown" -gt "$total" ] && shown="$total"
-  [ "$total" -gt "$shown" ] && printf '    ... (%d more files; narrow by name with bin/scratch-search PATTERN)\n' "$((total - shown))"
-}
+    header = (
+        f"[{label}] {len(testcases)} testcases | {counts['CLEAN']} CLEAN | "
+        f"{counts['CRASH']} CRASH"
+    )
+    for state in ("EXEC_FAIL", "NO_EXEC"):
+        if counts[state]:
+            header += f" | {counts[state]} {state}"
+    if counts["ORPHAN"]:
+        header += f" | ** {counts['ORPHAN']} ORPHAN **"
+    if harnesses:
+        header += f" | {harnesses} harness sources"
+    print(header)
+    if terse:
+        return
 
-# ── Per-scratch digest ───────────────────────────────────────────────
+    if counts["ORPHAN"]:
+        print("  ORPHANS (run bin/probe on these):")
+        orphans = [entry for entry in entries if entry[2] == "ORPHAN"]
+        for modified, path, _state, _family in orphans[:10]:
+            print(f"    {path}  {ago(modified)}")
+        if len(orphans) > 10:
+            print(f"    ... ({len(orphans) - 10} more orphan testcases)")
 
-emit_scratch() {
-  local dir="$1"
-  local label="${dir##*/}"
-  local inventory_hint
+    if families:
+        print("  families:")
+        ranked = sorted(families.items(), key=lambda item: (-item[1]["total"], item[0]))
+        for family, family_counts in ranked[:10]:
+            marks = ""
+            if family_counts["CRASH"]:
+                marks += f" CRASH×{family_counts['CRASH']}"
+            if family_counts["ORPHAN"]:
+                marks += f" ORPHAN×{family_counts['ORPHAN']}"
+            print(
+                f"    {family:<30} {family_counts['total']} testcase(s){marks}"
+            )
+        if len(ranked) > 10:
+            print(f"    ... ({len(ranked) - 10} more families)")
 
-  if [ ! -d "$dir" ]; then
-    printf '[%s] (missing)\n' "$label"
-    return
-  fi
+    if entries:
+        print("  newest 5:")
+        for modified, path, state, _family in entries[:5]:
+            print(f"    {path.name:<50} {ago(modified):<10} [{state}]")
+    if files:
+        emit_recent_files(directory, file_limit)
+    if label.startswith("scratch-"):
+        hint = f"bin/scratch-status --files --agent {label.removeprefix('scratch-')}"
+    else:
+        hint = f"bin/scratch-status --files {directory}"
+    print(f"  (file inventory: {hint})")
 
-  # Gather testcase paths via lib/quality.sh classifier.
-  local testcases=()
-  while IFS= read -r -d '' f; do
-    testcases+=("$f")
-  done < <(list_scratch_testcases "$dir")
 
-  local tc_count="${#testcases[@]}"
-  local harness_count
-  harness_count=$(find "$dir" -maxdepth 1 -type f \( \
-                    -name '*_harness.c' -o -name '*_harness.cc' -o -name '*_harness.cpp' \
-                    -o -name 'harness*.c' -o -name 'harness*.cc' -o -name 'harness*.cpp' \
-                    \) 2>/dev/null | wc -l | tr -d ' ')
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="scratch-status",
+        description="Bounded digest of agent scratch directories.",
+    )
+    parser.add_argument("directories", nargs="*")
+    parser.add_argument("--agent", action="append", default=[])
+    parser.add_argument("--terse", action="store_true")
+    parser.add_argument("--files", nargs="?", const="20")
+    parser.add_argument("--file-limit", default="")
+    args = parser.parse_args()
+    raw_limit = args.file_limit or args.files or "20"
+    try:
+        args.file_limit = int(raw_limit)
+    except ValueError:
+        parser.error("--files / --file-limit must be numeric")
+    if args.file_limit < 0:
+        parser.error("--files / --file-limit must be numeric")
+    return args
 
-  if [ "$tc_count" -eq 0 ] && [ "$harness_count" -eq 0 ]; then
-    printf '[%s] empty\n' "$label"
-    return
-  fi
 
-  # Classify each testcase once. Build a flat record per testcase:
-  #   <mtime>\t<path>\t<verdict>\t<family>
-  # Downstream pipelines aggregate via awk so we don't need bash-4
-  # associative arrays (macOS default bash is 3.2).
-  local n_crash=0 n_clean=0 n_execfail=0 n_noexec=0 n_orphan=0
-  local entries=""
-  local fam_count=0
+def main() -> int:
+    args = parse_args()
+    results_dir = os.environ.get("RESULTS_DIR", "")
+    if args.directories:
+        directories = []
+        for raw in args.directories:
+            path = Path(raw)
+            candidate = Path(results_dir) / path if results_dir and not path.is_absolute() else path
+            directories.append(candidate if candidate.is_dir() else path)
+    elif args.agent:
+        if not results_dir:
+            print(
+                "[scratch-status] --agent requires RESULTS_DIR "
+                "(run inside an audit session)",
+                file=sys.stderr,
+            )
+            return 2
+        directories = [Path(results_dir) / f"scratch-{agent}" for agent in args.agent]
+    else:
+        base = Path(results_dir or os.getcwd())
+        directories = sorted(path for path in base.glob("scratch-*") if path.is_dir())
+    if not directories:
+        print(
+            f"[scratch-status] no scratch dirs found "
+            f"(RESULTS_DIR={results_dir or 'unset'})",
+            file=sys.stderr,
+        )
+        return 1
+    for directory in directories:
+        emit_scratch(
+            directory,
+            terse=args.terse,
+            files=args.files is not None,
+            file_limit=args.file_limit,
+        )
+    return 0
 
-  local tc verdict stem fam mt
-  if [ "$tc_count" -gt 0 ]; then
-    for tc in "${testcases[@]}"; do
-      verdict=$(verdict_for "$tc")
-      case "$verdict" in
-        CRASH)   n_crash=$((n_crash + 1))   ;;
-        CLEAN)   n_clean=$((n_clean + 1))   ;;
-        EXEC_FAIL) n_execfail=$((n_execfail + 1)) ;;
-        NO_EXEC) n_noexec=$((n_noexec + 1)) ;;
-        ORPHAN)  n_orphan=$((n_orphan + 1)) ;;
-      esac
-      stem="${tc##*/}"
-      fam=$(family_of "$stem")
-      mt=$(mtime_of "$tc")
-      entries+="${mt}"$'\t'"${tc}"$'\t'"${verdict}"$'\t'"${fam}"$'\n'
-    done
-  fi
 
-  # Header line — always emitted.
-  local hdr
-  hdr=$(printf '[%s] %d testcases | %d CLEAN | %d CRASH' \
-          "$label" "$tc_count" "$n_clean" "$n_crash")
-  [ "$n_execfail" -gt 0 ] && hdr="$hdr | $n_execfail EXEC_FAIL"
-  [ "$n_noexec" -gt 0 ] && hdr="$hdr | $n_noexec NO_EXEC"
-  [ "$n_orphan" -gt 0 ] && hdr="$hdr | ** $n_orphan ORPHAN **"
-  [ "$harness_count" -gt 0 ] && hdr="$hdr | $harness_count harness sources"
-  printf '%s\n' "$hdr"
-
-  if [ "$TERSE" -eq 1 ]; then
-    return
-  fi
-
-  # Orphans first — actionable, agent must run bin/probe.
-  if [ "$n_orphan" -gt 0 ]; then
-    printf '  ORPHANS (run bin/probe on these):\n'
-    printf '%s' "$entries" \
-      | awk -F'\t' '$3=="ORPHAN"' \
-      | sort_newest \
-      | head -10 \
-      | while IFS=$'\t' read -r mt path _v _fam; do
-          printf '    %s  %s\n' "$path" "$(ago_of "$mt")"
-        done
-    [ "$n_orphan" -gt 10 ] && printf '    ... (%d more orphan testcases)\n' "$((n_orphan - 10))"
-  fi
-
-  # Families — aggregate via awk, top 10 by testcase count. Mark families
-  # that contain crashes or orphans so the agent can target follow-up.
-  local fam_table
-  fam_table=$(printf '%s' "$entries" | awk -F'\t' '
-    NF >= 4 {
-      tot[$4]++
-      if ($3 == "CRASH")  cr[$4]++
-      if ($3 == "ORPHAN") orph[$4]++
-    }
-    END {
-      for (k in tot) printf "%d\t%s\t%d\t%d\n", tot[k], k, cr[k]+0, orph[k]+0
-    }
-  ')
-  fam_count=$(printf '%s\n' "$fam_table" | awk 'NF{n++} END{print n+0}')
-  if [ "$fam_count" -gt 0 ]; then
-    printf '  families:\n'
-    printf '%s\n' "$fam_table" | sort -rn -k1,1 | head -10 \
-      | while IFS=$'\t' read -r tot fam cr orph; do
-          [ -z "$fam" ] && continue
-          marks=""
-          [ "${cr:-0}" -gt 0 ]   && marks="$marks CRASH×$cr"
-          [ "${orph:-0}" -gt 0 ] && marks="$marks ORPHAN×$orph"
-          printf '    %-30s %d testcase(s)%s\n' "$fam" "$tot" "$marks"
-        done
-    [ "$fam_count" -gt 10 ] && printf '    ... (%d more families)\n' "$((fam_count - 10))"
-  fi
-
-  # Newest 5 testcases (any verdict) so the agent sees recent activity.
-  if [ "$tc_count" -gt 0 ]; then
-    printf '  newest 5:\n'
-    printf '%s' "$entries" \
-      | sort_newest \
-      | head -5 \
-      | while IFS=$'\t' read -r mt path verdict _fam; do
-          printf '    %-50s %-10s [%s]\n' "${path##*/}" "$(ago_of "$mt")" "$verdict"
-        done
-  fi
-
-  if [ "$FILES" -eq 1 ]; then
-    emit_recent_files "$dir"
-  fi
-
-  case "$label" in
-    scratch-*) inventory_hint="bin/scratch-status --files --agent ${label#scratch-}" ;;
-    *) inventory_hint="bin/scratch-status --files $dir" ;;
-  esac
-  printf '  (file inventory: %s)\n' "$inventory_hint"
-}
-
-for d in "${SCRATCH_DIRS[@]}"; do
-  emit_scratch "$d"
-done
+if __name__ == "__main__":
+    raise SystemExit(main())

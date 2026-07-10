@@ -128,7 +128,7 @@ assert_file_exists "$RESULTS/s6-peer-cards.jsonl" \
 # line, child Python tools fall back to file-based ROOT (which the
 # .absolute() fix now also makes safe, but the export is the primary
 # guarantee bin/audit relies on).
-assert_file_contains "$SCRIPT_ROOT/bin/audit" '^export SCRIPT_ROOT$' \
+assert_file_contains "$SCRIPT_ROOT/lib/audit_runner.py" 'os.environ\["SCRIPT_ROOT"\] = str\(root\)' \
   "bin/audit exports SCRIPT_ROOT so child Python tools see the facade path"
 
 summary

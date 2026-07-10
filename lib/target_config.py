@@ -7,34 +7,19 @@ Two files describe a target under output/<slug>/ (gitignored):
                                 bin/audit, then reviewed as needed.
   output/<slug>/<backend>/results/.session-env
                               — per-backend session captures, rewritten by
-                                bin/audit at session start. A legacy
-                                output/<slug>/.session-env may also exist for
-                                callers that are not starting from a testcase.
+                                bin/audit at session start.
 
-Two interfaces:
-
-1. Python API (for python callers like bin/export-repro):
+Python API:
        cfg = target_config.load(start_path)
        cfg.target_root, cfg.includes, cfg.attacker_controls, ...
-
-2. Subcommand CLI (for the bash shim in lib/target_config.sh):
-       python3 lib/target_config.py parse-toml <file>
-       python3 lib/target_config.py seed-toml <root> <out> [url]
-       python3 lib/target_config.py detect-repo-type <root>
-       python3 lib/target_config.py detect-rev <root>
-       python3 lib/target_config.py find-session-dir [<start>]
-       python3 lib/target_config.py read-session-env <slug_dir>
-       python3 lib/target_config.py write-session-env <args...>
 """
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import os
 import re
 import shutil
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -178,8 +163,8 @@ def toml_comment_lines(text: str) -> str:
 
 
 # Canonical attacker_controls tokens. Anything outside this set is logged on
-# stderr and dropped (silent acceptance would weaken lib/triage.sh's verdict
-# matrix). Order matches lib/target_config.sh:TARGET_ATTACKER_CONTROLS_VALID.
+# stderr and dropped (silent acceptance would weaken lib/triage.py's verdict
+# matrix). Order matches lib/target_config.py:TARGET_ATTACKER_CONTROLS_VALID.
 ATTACKER_CONTROLS_VALID = (
     "bytes", "call-sequence", "call-order", "timing",
     "race", "env", "protocol-state", "fs-state",
@@ -189,22 +174,15 @@ ATTACKER_CONTROLS_VALID = (
 # opted in per target via [sanitizer].enabled because MSan needs the whole
 # dependency tree instrumented, and UBSan/TSan benefit from triage-aware
 # suppression files. Go's race detector ("race") is wired in for Go targets —
-# it emits "WARNING: DATA RACE" reports that lib/triage.sh treats as
+# it emits "WARNING: DATA RACE" reports that lib/triage.py treats as
 # diagnostic signal. Anything outside this set is logged on stderr and dropped.
 SANITIZERS_VALID = ("asan", "ubsan", "msan", "tsan", "race")
 
-# .session-env keys we trust to import into the parent shell environment.
+# .session-env keys trusted by the runtime.
 SESSION_ENV_ALLOW = (
     "RESULTS_DIR", "TARGET_ROOT", "TARGET_SLUG",
     "TARGET_REV", "TARGET_REPO_TYPE", "SESSION_STARTED", "LOGDIR",
 )
-
-# Section/key names emitted as shell variables must restrict to [A-Za-z0-9_]
-# so they're safe to splice into TARGET_<SECTION>_<KEY>. The legacy parser
-# used this to discard invalid section headers; default parsing is now strict
-# and only uses the legacy behavior when TARGET_TOML_LENIENT=1.
-_SHELL_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
-
 
 def _normalize_attacker_control(v: str) -> str:
     v = v.lower()
@@ -217,36 +195,8 @@ def _is_valid_attacker_control(v: str) -> bool:
     return v in ATTACKER_CONTROLS_VALID
 
 
-def _strip_bad_section_headers(text: str) -> str:
-    """Drop `[<name>]` headers whose name has chars outside [A-Za-z0-9_].
-
-    Mirrors the bash parser, which silently absorbed bad sections and let
-    the keys after them fall back to top-level. Real TOML would error on
-    `[bad section name with spaces]`; this preserves the lenient behavior.
-    """
-    out_lines = []
-    section_re = re.compile(r"^\s*\[([^\]]*)\]\s*(?:#.*)?$")
-    for line in text.splitlines(keepends=True):
-        m = section_re.match(line.rstrip("\n"))
-        if m:
-            name = m.group(1).strip()
-            if not name or not _SHELL_NAME_RE.match(name):
-                # Drop the header — keys that follow go to the previous
-                # (or top-level) scope. Replace with blank to keep line
-                # numbers stable for any future error messages.
-                out_lines.append("\n")
-                continue
-        out_lines.append(line)
-    return "".join(out_lines)
-
-
 def _toml_value_to_str(v) -> str:
-    """Render a scalar TOML value the way the bash parser produced it.
-
-    Strings come through as-is. Bools/ints/floats render as their Python
-    str() form. The bash parser only emitted strings, so any non-string
-    scalar in target.toml is a behavior change (loud, not silent).
-    """
+    """Normalize a scalar TOML value for string-valued runtime fields."""
     if isinstance(v, str):
         return v
     if isinstance(v, bool):
@@ -414,72 +364,13 @@ def _parse_simple_toml(text: str) -> dict:
 
 
 def parse_toml(path: str | os.PathLike) -> dict:
-    """Parse a target.toml.
-
-    Strict TOML parsing is the default. Set TARGET_TOML_LENIENT=1 only for
-    migration of legacy local configs that relied on the old bash parser's
-    behavior of ignoring invalid section headers.
-    """
+    """Parse a target.toml."""
     with open(path, "rb") as f:
         raw = f.read()
     text = raw.decode("utf-8", errors="replace")
-    if os.environ.get("TARGET_TOML_LENIENT") == "1":
-        pre = _strip_bad_section_headers(text)
-    else:
-        pre = text
     if tomllib is not None:
-        return tomllib.loads(pre)
-    return _parse_simple_toml(pre)
-
-
-def _emit_legacy_stream(parsed: dict) -> bytes:
-    """Emit the NUL-delimited KEY\\0VALUE\\0... stream consumed by the
-    bash target_load_toml loop.
-
-    Output keys match the bash parser exactly:
-      top-level scalar foo  -> TARGET_FOO\\0value\\0
-      top-level array  foo  -> TARGET_FOO_LIST\\0joined\\0  (entries \\n-terminated)
-      [section] scalar bar  -> TARGET_<SECTION>_BAR\\0value\\0
-      [section] array  bar  -> TARGET_<SECTION>_BAR_LIST\\0joined\\0
-    """
-    out = bytearray()
-
-    def emit_scalar(key: str, value: str) -> None:
-        out.extend(key.encode("utf-8"))
-        out.append(0)
-        out.extend(value.encode("utf-8"))
-        out.append(0)
-
-    def emit_list(key: str, items: list) -> None:
-        joined = ""
-        for item in items:
-            if isinstance(item, str):
-                joined += item + "\n"
-            else:
-                joined += _toml_value_to_str(item) + "\n"
-        out.extend(key.encode("utf-8"))
-        out.append(0)
-        out.extend(joined.encode("utf-8"))
-        out.append(0)
-
-    def visit(d: dict, prefix: str) -> None:
-        for k, v in d.items():
-            if not _SHELL_NAME_RE.match(k):
-                # Section or key with chars unsafe for shell-var splicing
-                # — preserve bash behavior of silently dropping it.
-                continue
-            shell_key = f"{prefix}{k.upper()}"
-            if isinstance(v, dict):
-                # Single nested section per key, e.g. [threat_model].
-                # Bash parser flattens to TARGET_<SECTION>_<KEY>.
-                visit(v, f"{shell_key}_")
-            elif isinstance(v, list):
-                emit_list(f"{shell_key}_LIST", v)
-            else:
-                emit_scalar(shell_key, _toml_value_to_str(v))
-
-    visit(parsed, "TARGET_")
-    return bytes(out)
+        return tomllib.loads(text)
+    return _parse_simple_toml(text)
 
 
 # ─── Discovery ──────────────────────────────────────────────────────
@@ -531,9 +422,8 @@ def find_session_dir(start: str | os.PathLike) -> Optional[Path]:
 
     Testcases live under output/<slug>/<backend>/results/scratch-N, so the
     nearest backend-local results/.session-env wins and avoids cross-backend
-    races. For legacy/manual callers outside a results tree, also scan
-    output/<slug>/.session-env and output/<slug>/<backend>/results/.session-env
-    below each ancestor.
+    races. Callers outside a results tree scan backend result directories
+    below each ancestor's output tree.
     """
     p = Path(start)
     if not p.exists():
@@ -549,8 +439,6 @@ def find_session_dir(start: str | os.PathLike) -> Optional[Path]:
         if not out_dir.is_dir():
             return None
         # Return the first real target root that carries a session.
-        # find_slug_session_dir() prefers the backend-local results/.session-env
-        # over the legacy slug copy.
         for target in iter_target_roots(out_dir):
             found = find_slug_session_dir(target)
             if found is not None:
@@ -560,6 +448,12 @@ def find_session_dir(start: str | os.PathLike) -> Optional[Path]:
     while True:
         if (cur / ".session-env").is_file():
             return cur
+        # A caller may start at output/<slug> rather than inside its results
+        # tree. Resolve that target before scanning a broader ancestor whose
+        # output/ directory may contain several unrelated targets.
+        found = find_slug_session_dir(cur)
+        if found is not None:
+            return found
         found = scan_output_tree(cur)
         if found is not None:
             return found
@@ -569,12 +463,9 @@ def find_session_dir(start: str | os.PathLike) -> Optional[Path]:
 
 
 def target_toml_for_session_dir(session_dir: str | os.PathLike) -> Path:
-    """Return target.toml for a legacy slug dir or backend results dir."""
+    """Return target.toml for a backend results directory."""
     d = Path(session_dir)
-    # output/<slug>/<backend>/results/.session-env -> output/<slug>/target.toml
-    if d.name == "results":
-        return d.parent.parent / "target.toml"
-    return d / "target.toml"
+    return d.parent.parent / "target.toml"
 
 
 def find_slug_session_dir(slug_dir: str | os.PathLike) -> Optional[Path]:
@@ -583,10 +474,8 @@ def find_slug_session_dir(slug_dir: str | os.PathLike) -> Optional[Path]:
     `find_session_dir` walks *up* from an arbitrary path; this resolves
     the other direction — caller already knows the slug dir and wants its
     .session-env. A backend-local output/<slug>/<backend>/results/
-    .session-env is authoritative and wins over the legacy
-    output/<slug>/.session-env copy (which concurrent backends race on).
-    With several backends present the lexicographically-first is returned
-    so the choice is deterministic. Returns None when neither exists.
+    .session-env is authoritative. With several backends present the
+    lexicographically-first is returned so the choice is deterministic.
     """
     d = Path(slug_dir)
     if d.is_dir():
@@ -596,8 +485,6 @@ def find_slug_session_dir(slug_dir: str | os.PathLike) -> Optional[Path]:
             cand = backend / "results"
             if (cand / ".session-env").is_file():
                 return cand
-    if (d / ".session-env").is_file():
-        return d
     return None
 
 
@@ -1391,7 +1278,7 @@ def _detect_build_system(target_root: Path) -> str:
 # detected build system. The mapping below names the interpreter or
 # driver plus its argument template; "{TESTCASE}" is substituted at
 # run time. crash_patterns are language-specific runtime diagnostic
-# strings (panics, tracebacks, race-detector reports) that lib/triage.sh
+# strings (panics, tracebacks, race-detector reports) that lib/triage.py
 # treats as crash signals.
 #
 # This table is derived from the language registry in lib/languages.py.
@@ -1734,7 +1621,7 @@ def seed_toml(
         "# Browser target? (1 enables browser/js mode, 0 = generic)",
         f'is_browser    = "{1 if is_browser else 0}"',
         "",
-        "# ── Threat model (drives lib/triage.sh verdict matrix) ──────────",
+        "# ── Threat model (drives lib/triage.py verdict matrix) ──────────",
         "# attacker_controls lists what an attacker can supply to the target.",
         "# A crash report's Trigger source: must be a subset of this set, or",
         "# triage demotes it from security to robustness. Tokens:",
@@ -1881,7 +1768,7 @@ def seed_toml(
     # Always emit a [runner] block (commented unless we have a default
     # for the detected build_system). bin/probe and bin/run-asan generic
     # consult it when no sanitizer binary is configured. crash_patterns
-    # is read by lib/triage.sh to detect runtime crashes (panics,
+    # is read by lib/triage.py to detect runtime crashes (panics,
     # tracebacks, race-detector reports) on top of its built-in markers.
     runner_default = language_runner_defaults(build_system)
 
@@ -1895,7 +1782,7 @@ def seed_toml(
             "# probes here when [sanitizer].enabled = [] or no <san>_bin is set.",
             "# The token '{TESTCASE}' is substituted with the testcase path at",
             "# run time. crash_patterns are regex strings layered on top of",
-            "# lib/triage.sh's built-in language-agnostic crash markers.",
+            "# lib/triage.py's built-in language-agnostic crash markers.",
             "[runner]",
             f'bin            = {_toml_string(runner_default["bin"])}',
             "args           = ["
@@ -1972,10 +1859,7 @@ def seed_toml(
 
 @dataclass
 class Config:
-    """Parsed + normalized target config for Python consumers.
-
-    Field names mirror the TARGET_* shell vars callers used to read.
-    """
+    """Parsed and normalized target configuration."""
     slug: str = ""
     target_root: str = ""
     results_dir: str = ""
@@ -1998,6 +1882,7 @@ class Config:
     is_browser: str = "0"
 
     includes: list[str] = field(default_factory=list)
+    defines: list[str] = field(default_factory=list)
     link_libs: list[str] = field(default_factory=list)
     attacker_controls: list[str] = field(default_factory=list)
 
@@ -2009,7 +1894,7 @@ class Config:
     sanitizer_suppressions: dict = field(default_factory=dict)
     sanitizer_options: dict = field(default_factory=dict)
     # True when [sanitizer].enabled was present and explicitly empty (`= []`).
-    # Used to skip the legacy ["asan"] default — an interpreted-language target
+    # Used to skip the default ["asan"] build — an interpreted-language target
     # has no ASan build to detect, and forcing ASan would block bin/probe at
     # startup. Absent section keeps the existing default behavior.
     sanitizers_explicitly_disabled: bool = False
@@ -2031,7 +1916,7 @@ class Config:
     # `args` list takes literal arguments; the token "{TESTCASE}" is
     # substituted with the testcase path. The `env` list is a flat list
     # of "KEY=VAL" strings layered on the runtime environment.
-    # `crash_patterns` is a list of regex strings that lib/triage.sh
+    # `crash_patterns` is a list of regex strings that lib/triage.py
     # treats as additional crash signals (Go data races, Python panics,
     # any project-specific runtime markers). Empty list means
     # triage uses only its built-in language-agnostic patterns.
@@ -2153,17 +2038,16 @@ def _apply_sanitizer_section(cfg: Config, raw: dict, source_path: str) -> None:
     Unknown sanitizer slugs in `enabled` get a stderr warning and are
     dropped. If `enabled` is present and explicitly empty (`= []`), the
     loader honors it as findings-only mode — used by interpreted-language
-    targets without a sanitizer build. Absent `enabled` keeps the legacy
-    fallback to ["asan"].
+    targets without a sanitizer build. Absent `enabled` defaults to ["asan"].
     """
     # Distinguish "key absent" from "key present but empty". Real TOML
-    # parsing returns the actual list; the lenient fallback parser also
+    # parsing returns the actual list; the Python 3.10 fallback parser also
     # accepts an empty `[]`. Using a sentinel default avoids confusing
     # them with each other.
     _SENTINEL: object = object()
     raw_enabled = raw.get("enabled", _SENTINEL)
     if raw_enabled is _SENTINEL:
-        # Section present but `enabled` key absent → keep legacy default
+        # Section present but `enabled` key absent → keep the default
         # (caller will append "asan" if cfg.sanitizers_enabled ends empty).
         pass
     elif isinstance(raw_enabled, list):
@@ -2191,7 +2075,7 @@ def _apply_sanitizer_section(cfg: Config, raw: dict, source_path: str) -> None:
             cfg.sanitizer_options[san] = raw[opt_key]
         bin_key = f"{san}_bin"
         if isinstance(raw.get(bin_key), str) and raw[bin_key]:
-            # asan_bin stays at top level for back-compat; only fill the
+            # asan_bin is the primary top-level build field; only fill the
             # ubsan/msan/tsan/race overrides from this section. (Go's race
             # detector does not have a separate Config field — it is
             # detected from any binary's output by the runtime crash signal.)
@@ -2203,7 +2087,7 @@ def _apply_sanitizer_section(cfg: Config, raw: dict, source_path: str) -> None:
                 cfg.tsan_bin = raw[bin_key]
         lib_key = f"{san}_lib"
         if isinstance(raw.get(lib_key), str) and raw[lib_key]:
-            # asan_lib stays at top level for back-compat; non-ASan
+            # asan_lib is the primary top-level library field; non-ASan
             # libraries live under [sanitizer] so one probe run cannot
             # accidentally link an ASan archive into an MSan/TSan/UBSan build.
             if san == "ubsan":
@@ -2226,7 +2110,7 @@ def _apply_runner_section(cfg: Config, raw: dict, source_path: str) -> None:
       crash_patterns = ["my project's crash header"]  # extra regex signals
 
     Unknown keys are ignored. The loader keeps all the literal strings —
-    bin/probe and lib/triage.sh substitute "{TESTCASE}" at run time.
+    bin/probe and lib/triage.py substitute "{TESTCASE}" at run time.
     """
     if isinstance(raw.get("bin"), str) and raw["bin"]:
         cfg.runner_bin = raw["bin"]
@@ -2243,14 +2127,15 @@ def _apply_runner_section(cfg: Config, raw: dict, source_path: str) -> None:
 def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     """Parse a target.toml and populate the Config in-place.
 
-    Mirrors target_load_toml: handles the [threat_model] section,
-    normalizes call-order → call-sequence, drops unknown tokens with a
-    stderr warning, defaults attacker_controls to ["bytes"] when empty.
+    Handles the [threat_model] section, normalizes call-order to
+    call-sequence, drops unknown tokens with a stderr warning, and defaults
+    attacker_controls to ["bytes"] when empty.
     """
     parsed = parse_toml(toml_path)
     p = str(toml_path)
     cfg.attacker_controls = []
     cfg.includes = []
+    cfg.defines = []
     cfg.link_libs = []
     cfg.sanitizers_enabled = []
     cfg.sanitizer_suppressions = {}
@@ -2288,6 +2173,8 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
             cfg.is_browser = _toml_value_to_str(v)
         elif k == "includes" and isinstance(v, list):
             cfg.includes = [x for x in v if isinstance(x, str) and x]
+        elif k == "defines" and isinstance(v, list):
+            cfg.defines = [x for x in v if isinstance(x, str) and x]
         elif k == "link_libs" and isinstance(v, list):
             cfg.link_libs = [x for x in v if isinstance(x, str) and x]
         elif k == "threat_model" and isinstance(v, dict):
@@ -2317,7 +2204,7 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     # `[sanitizer].enabled = []`, which means findings-only mode for
     # interpreted-language / sanitizer-less targets. The
     # sanitizers_explicitly_disabled flag preserves that distinction
-    # across legacy callers that look at sanitizers_enabled directly.
+    # for every consumer of sanitizers_enabled.
     if not cfg.sanitizers_enabled and not cfg.sanitizers_explicitly_disabled:
         cfg.sanitizers_enabled.append("asan")
 
@@ -2364,7 +2251,7 @@ def load(start: str | os.PathLike) -> Config:
     slug_dir = find_session_dir(start)
     if slug_dir is None:
         raise FileNotFoundError(
-            f"no output/<slug>/.session-env found above: {start} "
+            f"no backend results/.session-env found above: {start} "
             f"(run bin/audit first, or pass --target)"
         )
     cfg = Config()
@@ -2380,176 +2267,3 @@ def load(start: str | os.PathLike) -> Config:
         raise FileNotFoundError(f"target.toml not found: {toml_path}")
     load_toml_into(cfg, toml_path)
     return cfg
-
-
-# ─── CLI subcommands (called by lib/target_config.sh shim) ──────────
-
-def _cmd_parse_toml(args) -> int:
-    try:
-        parsed = parse_toml(args.file)
-    except FileNotFoundError:
-        sys.stderr.write(f"[target] target.toml not found: {args.file}\n")
-        return 1
-    except (tomllib.TOMLDecodeError if tomllib is not None else _FallbackTOMLDecodeError) as e:
-        sys.stderr.write(f"[target] target.toml parse error in {args.file}: {e}\n")
-        return 1
-    sys.stdout.buffer.write(_emit_legacy_stream(parsed))
-    return 0
-
-
-def _cmd_seed_toml(args) -> int:
-    seed_toml(args.target_root, args.out, args.upstream_url or "",
-              preserve_curated=args.preserve_curated)
-    return 0
-
-
-def _cmd_detect_rev(args) -> int:
-    print(detect_rev(args.target_root))
-    return 0
-
-
-def _cmd_detect_repo_type(args) -> int:
-    print(detect_repo_type(args.target_root))
-    return 0
-
-
-def _cmd_find_session_dir(args) -> int:
-    start = args.start or os.getcwd()
-    d = find_session_dir(start)
-    if d is None:
-        return 1
-    print(str(d))
-    return 0
-
-
-def _cmd_list_target_roots(args) -> int:
-    """Print each canonical target root's slug (relative to output_root)."""
-    root = Path(args.output_root)
-    for target in iter_target_roots(root):
-        try:
-            print(target.relative_to(root))
-        except ValueError:
-            print(target)
-    return 0
-
-
-def _cmd_read_session_env(args) -> int:
-    """Emit `export KEY="value"` lines for the bash shim to eval.
-
-    Single-quote escape: replace ' with '\\'' which is the standard
-    POSIX-shell literal-quote-with-embedded-quote idiom.
-    """
-    try:
-        env = read_session_env(args.slug_dir)
-    except FileNotFoundError as e:
-        sys.stderr.write(f"[target] {e}\n")
-        return 1
-    for k, v in env.items():
-        # shlex.quote produces the safest single-quoted form.
-        sys.stdout.write(f"export {k}={shlex.quote(v)}\n")
-    return 0
-
-
-def _cmd_write_session_env(args) -> int:
-    write_session_env(
-        args.slug_dir, args.results, args.target_root,
-        args.slug, args.rev, args.logdir,
-    )
-    return 0
-
-
-def _cmd_refresh_build_fields(args) -> int:
-    changed = refresh_detected_build_fields(Path(args.target_root), Path(args.out))
-    print("changed" if changed else "unchanged")
-    return 0
-
-
-def _cmd_config_needs_reseed(args) -> int:
-    # Exit 0 when an active placeholder needs a re-seed, 1 otherwise — shaped
-    # for use as a shell `if` condition in bin/setup-target.
-    return 0 if config_has_live_placeholder(Path(args.file)) else 1
-
-
-def _cmd_build_freshness(args) -> int:
-    # Print skip|missing|stale|fresh for the bash callers to branch on.
-    print(build_freshness(args.target_root, args.sanitizer))
-    return 0
-
-
-def _cmd_build_write_stamp(args) -> int:
-    build_write_stamp(args.target_root, args.sanitizer)
-    return 0
-
-
-def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="lib/target_config.py", description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
-
-    sp = sub.add_parser("parse-toml")
-    sp.add_argument("file")
-    sp.set_defaults(func=_cmd_parse_toml)
-
-    sp = sub.add_parser("seed-toml")
-    sp.add_argument("target_root")
-    sp.add_argument("out")
-    sp.add_argument("upstream_url", nargs="?", default="")
-    sp.add_argument("--preserve-curated", action="store_true",
-                    help="carry curated [threat_model]/[s6_peers] forward from "
-                         "an existing out file (placeholder refresh)")
-    sp.set_defaults(func=_cmd_seed_toml)
-
-    sp = sub.add_parser("refresh-build-fields")
-    sp.add_argument("target_root")
-    sp.add_argument("out")
-    sp.set_defaults(func=_cmd_refresh_build_fields)
-
-    sp = sub.add_parser("config-needs-reseed")
-    sp.add_argument("file")
-    sp.set_defaults(func=_cmd_config_needs_reseed)
-
-    sp = sub.add_parser("build-freshness")
-    sp.add_argument("target_root")
-    sp.add_argument("sanitizer", nargs="?", default="asan")
-    sp.set_defaults(func=_cmd_build_freshness)
-
-    sp = sub.add_parser("build-write-stamp")
-    sp.add_argument("target_root")
-    sp.add_argument("sanitizer", nargs="?", default="asan")
-    sp.set_defaults(func=_cmd_build_write_stamp)
-
-    sp = sub.add_parser("detect-rev")
-    sp.add_argument("target_root")
-    sp.set_defaults(func=_cmd_detect_rev)
-
-    sp = sub.add_parser("detect-repo-type")
-    sp.add_argument("target_root")
-    sp.set_defaults(func=_cmd_detect_repo_type)
-
-    sp = sub.add_parser("find-session-dir")
-    sp.add_argument("start", nargs="?")
-    sp.set_defaults(func=_cmd_find_session_dir)
-
-    sp = sub.add_parser("list-target-roots")
-    sp.add_argument("output_root")
-    sp.set_defaults(func=_cmd_list_target_roots)
-
-    sp = sub.add_parser("read-session-env")
-    sp.add_argument("slug_dir")
-    sp.set_defaults(func=_cmd_read_session_env)
-
-    sp = sub.add_parser("write-session-env")
-    sp.add_argument("slug_dir")
-    sp.add_argument("results")
-    sp.add_argument("target_root")
-    sp.add_argument("slug")
-    sp.add_argument("rev")
-    sp.add_argument("logdir")
-    sp.set_defaults(func=_cmd_write_session_env)
-
-    ns = ap.parse_args(argv)
-    return ns.func(ns)
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

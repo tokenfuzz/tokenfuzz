@@ -78,7 +78,7 @@ assert_eq "$expected" "$actual" "full rotation cycle: S1→...→S8→S1"
 # 5. Core reference files exist
 # ═══════════════════════════════════════════════════════════════
 
-for ref_file in state-template.md session-rules.md; do
+for ref_file in session-rules.md; do
   if [ -f "$REFERENCES_DIR/$ref_file" ]; then
     pass "reference file exists: $ref_file"
   else
@@ -126,19 +126,6 @@ for letter in S1 S2 S3 S4 S5 S6 S7 S8 REF; do
     fail "strategy $letter too small (${size}B)" "expected > 100 bytes"
   fi
 done
-
-# ═══════════════════════════════════════════════════════════════
-# 8. State template has required sections
-# ═══════════════════════════════════════════════════════════════
-
-template="$REFERENCES_DIR/state-template.md"
-if [ -f "$template" ]; then
-  assert_file_contains "$template" "Entry Point" "template has Entry Point"
-  assert_file_contains "$template" "Hypothesis" "template has Hypothesis section"
-  assert_file_contains "$template" "Working Context" "template has Working Context"
-else
-  fail "state-template.md missing"
-fi
 
 # ═══════════════════════════════════════════════════════════════
 # 9. session-rules.md has key workflow rules
@@ -515,27 +502,14 @@ assert_eq "ok" "$s8_keyword_check" "S8 STRATEGY_KEYWORDS regex: categories class
 # ═══════════════════════════════════════════════════════════════
 
 AUDIT_BIN="$SCRIPT_ROOT/bin/audit"
-if [ -f "$AUDIT_BIN" ]; then
-  assert_file_contains "$AUDIT_BIN" "S1|S2|S3|S4|S5|S6|S7|S8" "bin/audit --strategy accepts S8"
-  assert_file_contains "$AUDIT_BIN" 'one of S1, S2, S3, S4, S5, S6, S7, S8' \
-    "bin/audit FATAL message lists S8"
-  assert_file_contains "$AUDIT_BIN" "STRATEGY_ROTATION_ORDER=\(S1 S2 S3 S4 S5 S6 S7 S8\)" \
-    "bin/audit rotation order includes S8"
-else
-  fail "bin/audit missing" "expected at $AUDIT_BIN"
-fi
-
-# Prompt builder priority strings include S8.
-PROMPT_LIB="$SCRIPT_ROOT/lib/prompt.sh"
-if [ -f "$PROMPT_LIB" ]; then
-  if grep -qE 'S1 > S2 > S3 > S4 > S5 > S6 > S7$' "$PROMPT_LIB"; then
-    fail "lib/prompt.sh still has stale 7-strategy priority string"
-  else
-    pass "lib/prompt.sh priority string updated past S7"
-  fi
-  assert_file_contains "$PROMPT_LIB" "S1 > S2 > S3 > S4 > S5 > S6 > S7 > S8" \
-    "lib/prompt.sh fallback priority lists S8"
-fi
+help_out=$("$AUDIT_BIN" --help 2>&1)
+assert_match 'S1,S2,S3,S4,S5,S6,S7,S8' "$help_out" "bin/audit --strategy accepts S8"
+PYTHONPATH="$SCRIPT_ROOT/lib" python3 - <<'PY'
+import prompt
+assert list(prompt._STRATEGIES) == ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "REF"]
+assert "Property oracle" in prompt.strategy_brief("S8", prompt.SCRIPT_ROOT / ".agents" / "references")
+PY
+assert_eq 0 $? "Python prompt strategy registry includes S8 and REF"
 
 teardown_test_env
 summary

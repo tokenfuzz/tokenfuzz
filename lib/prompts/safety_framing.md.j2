@@ -31,7 +31,7 @@ The harness may append generic notes after tool results. These are defaults, not
 per-file findings. Treat them as background guidance and continue with the next
 investigation step unless a note is directly relevant to the file or testcase.
 
-- Keep testcase headers minimal and put mechanism reasoning in the state file or
+- Keep testcase headers minimal and put mechanism reasoning in structured notes or
   report, where maintainers can review it with source context.
 - Avoid speculative intent language. Describe caller control, input shape, and
   observed sanitizer evidence precisely.
@@ -55,8 +55,8 @@ Use concrete engineering language:
 
 Testcase file headers MUST be minimal: exactly `TARGET:`, `HYPOTHESIS-ID:`, and a
 one-line `CATEGORY:` drawn from the six neutral categories. Do NOT inline mechanism
-descriptions in the testcase — keep mechanism reasoning in the state file's Working
-Context section using the neutral vocabulary.
+descriptions in the testcase — keep mechanism reasoning in structured state
+notes using the neutral vocabulary.
 
 ## CRASH PROMOTION GATE — LEGITIMATE CRASHES ONLY
 

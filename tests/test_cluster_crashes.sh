@@ -7,13 +7,13 @@
 set -o pipefail
 source "$(dirname "$0")/helpers.sh"
 setup_test_env
-source "$SCRIPT_ROOT/lib/platform.sh"
+audit_stat_mtime_epoch() { python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$1"; }
 
 CLUSTER="$SCRIPT_ROOT/bin/cluster-crashes"
 [ -x "$CLUSTER" ] || { echo "missing $CLUSTER"; exit 1; }
 
 # ── Fixture: 5 crashes, 2 should cluster on code_start, 1 on name_table,
-#    2 standalone. The harness writes CRASH-*/asan.txt (for primitive +
+#    2 standalone. The harness writes CRASH-*/sanitizer.txt (for primitive +
 #    top frames) and CRASH-*/REPORT.md (for boundary + root cause). ──
 make_crash_with_chain() {
   local id="$1" prim="$2" topfunc="$3" rootbody="$4"
@@ -21,7 +21,7 @@ make_crash_with_chain() {
   local caller2="${6:-tail}"
   local d="$RESULTS_DIR/crashes/$id"
   mkdir -p "$d"
-  cat > "$d/asan.txt" <<EOF
+  cat > "$d/sanitizer.txt" <<EOF
 ==12345==ERROR: AddressSanitizer: ${prim} on address 0x60200000abcd
 READ of size 4 at 0x60200000abcd
     #0 0x100000000 in strlen+0x40 (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x3ec80)
@@ -74,7 +74,7 @@ make_start_only_xmlcatalog_crash() {
   local id="$1" target_line="$2" object="$3" object_line="$4"
   local d="$RESULTS_DIR/crashes/$id"
   mkdir -p "$d"
-  cat > "$d/asan.txt" <<EOF
+  cat > "$d/sanitizer.txt" <<EOF
 ==12345==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x1
 WRITE of size 1 at 0x1 thread T0
     #0 0x100000000 in main+0x1aac (xmlcatalog:arm64+0x100002f94)
@@ -110,7 +110,7 @@ make_start_only_xmlcatalog_crash CRASH-G1-1 138 command 116
 make_start_only_xmlcatalog_crash CRASH-H1-1 155 arg 117
 
 mkdir -p "$RESULTS_DIR/crashes/CRASH-I1-1"
-cat > "$RESULTS_DIR/crashes/CRASH-I1-1/asan.txt" <<'EOF'
+cat > "$RESULTS_DIR/crashes/CRASH-I1-1/sanitizer.txt" <<'EOF'
 parser.c:77:5: runtime error: index 4 out of bounds for type 'int[4]'
     #0 0x100000000 in parse_token parser.c:77
 SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior parser.c:77:5
@@ -254,7 +254,7 @@ mk_sev_crash() {
   local id="$1" top="$2" level="$3" score="$4"
   local d="$sev_root/crashes/$id"
   mkdir -p "$d"
-  cat > "$d/asan.txt" <<EOF
+  cat > "$d/sanitizer.txt" <<EOF
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow
 READ of size 4 at 0x60200000abcd
     #0 0x1 in ${top} src/x.c:10
@@ -309,12 +309,12 @@ mkdir -p "$agg_root/claude/results/crashes/CRASH-AGG-1" \
 # one so this behaves like a real target root rather than relying on the
 # dropped parent==output fallback.
 printf 'target = "demo"\n' > "$agg_root/target.toml"
-cat > "$agg_root/claude/results/crashes/CRASH-AGG-1/asan.txt" <<'EOF'
+cat > "$agg_root/claude/results/crashes/CRASH-AGG-1/sanitizer.txt" <<'EOF'
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow
 #0 0x1 in shared_bug src/shared.c:10
 #1 0x2 in entry_a src/a.c:20
 EOF
-cat > "$agg_root/codex/results/crashes/CRASH-AGG-2/asan.txt" <<'EOF'
+cat > "$agg_root/codex/results/crashes/CRASH-AGG-2/sanitizer.txt" <<'EOF'
 ==2==ERROR: AddressSanitizer: heap-buffer-overflow
 #0 0x1 in shared_bug src/shared.c:10
 #1 0x2 in entry_b src/b.c:20
@@ -327,7 +327,6 @@ cat > "$agg_root/codex/results/crashes/CRASH-AGG-2/REPORT.md" <<'EOF'
 # Aggregate crash B
 Surface: library-api
 EOF
-echo "# legacy" > "$agg_root/CLUSTERS.md"
 python3 "$CLUSTER" "$agg_root" >/dev/null 2>&1 \
   || fail "aggregate cluster-crashes runs cleanly" "exit nonzero"
 assert_file_exists "$agg_root/CRASH-CLUSTERS.md" \
@@ -336,8 +335,6 @@ assert_file_contains "$agg_root/CRASH-CLUSTERS.md" 'claude/CRASH-AGG-1' \
   "aggregate CRASH-CLUSTERS.md links claude member"
 assert_file_contains "$agg_root/CRASH-CLUSTERS.md" 'codex/CRASH-AGG-2' \
   "aggregate CRASH-CLUSTERS.md links codex member"
-assert_file_not_exists "$agg_root/CLUSTERS.md" \
-  "aggregate removes legacy CLUSTERS.md"
 
 agg_nested="$TEST_TMPDIR/output/samples/demo"
 mkdir -p "$agg_nested/codex/results/crashes/CRASH-NEST-1"
@@ -376,7 +373,7 @@ assert_eq "yes" \
 ubsan_root="$TEST_TMPDIR/ubsan-distinct"
 mkdir -p "$ubsan_root/crashes/CRASH-UBSAN-SHIFT" \
          "$ubsan_root/crashes/CRASH-UBSAN-OVERFLOW"
-cat > "$ubsan_root/crashes/CRASH-UBSAN-SHIFT/asan.txt" <<'EOF'
+cat > "$ubsan_root/crashes/CRASH-UBSAN-SHIFT/sanitizer.txt" <<'EOF'
 src/encoder.c:42:9: runtime error: shift exponent 33 is too large for 32-bit type 'int'
     #0 0x100000000 in encode_value src/encoder.c:42:9
     #1 0x100000010 in run_encode src/driver.c:88
@@ -387,7 +384,7 @@ cat > "$ubsan_root/crashes/CRASH-UBSAN-SHIFT/REPORT.md" <<'EOF'
 Surface: library-api
 Target: src/encoder.c:encode_value:42
 EOF
-cat > "$ubsan_root/crashes/CRASH-UBSAN-OVERFLOW/asan.txt" <<'EOF'
+cat > "$ubsan_root/crashes/CRASH-UBSAN-OVERFLOW/sanitizer.txt" <<'EOF'
 src/parser.c:120:14: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented in type 'int'
     #0 0x200000000 in add_token src/parser.c:120:14
     #1 0x200000010 in scan_input src/parser.c:200
@@ -415,7 +412,7 @@ ubsan_ovf_cluster=$(grep -m1 -E '^Cluster: CL-' "$ubsan_root/crashes/CRASH-UBSAN
 # substring ladder (so a "runtime error: index ... out of bounds" line
 # becomes ubsan-out-of-bounds, not ubsan-undefined-behavior).
 mkdir -p "$ubsan_root/crashes/CRASH-UBSAN-FALLBACK"
-cat > "$ubsan_root/crashes/CRASH-UBSAN-FALLBACK/asan.txt" <<'EOF'
+cat > "$ubsan_root/crashes/CRASH-UBSAN-FALLBACK/sanitizer.txt" <<'EOF'
 src/lookup.c:9:5: runtime error: index 4 out of bounds for type 'int[4]'
     #0 0x300000000 in idx_lookup src/lookup.c:9
 SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior src/lookup.c:9:5
@@ -437,7 +434,7 @@ assert_file_contains "$ubsan_root/crashes/CRASH-CLUSTERS.md" 'ubsan-out-of-bound
 # primitive.
 overlap_root="$TEST_TMPDIR/copy-overlap"
 mkdir -p "$overlap_root/crashes/CRASH-OVERLAP-1"
-cat > "$overlap_root/crashes/CRASH-OVERLAP-1/asan.txt" <<'EOF'
+cat > "$overlap_root/crashes/CRASH-OVERLAP-1/sanitizer.txt" <<'EOF'
 ==1==ERROR: AddressSanitizer: strcpy-param-overlap: memory ranges [0x10,0x41) and [0x30, 0x61) overlap
     #0 0x100000000 in app_copy app.c:42
     #1 0x100000010 in app_parse app.c:88
@@ -459,7 +456,7 @@ assert_file_contains "$overlap_root/crashes/CRASH-CLUSTERS.md" 'strcpy-param-ove
 # into separate clusters.
 lcs_root="$TEST_TMPDIR/lcs-threshold"
 mkdir -p "$lcs_root/crashes/CRASH-LCS-A" "$lcs_root/crashes/CRASH-LCS-B"
-cat > "$lcs_root/crashes/CRASH-LCS-A/asan.txt" <<'EOF'
+cat > "$lcs_root/crashes/CRASH-LCS-A/sanitizer.txt" <<'EOF'
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow
 READ of size 4 at 0x60200000abcd
     #0 0x100000000 in unique_top_a src/a.c:42
@@ -470,7 +467,7 @@ cat > "$lcs_root/crashes/CRASH-LCS-A/REPORT.md" <<'EOF'
 # A
 Surface: library-api
 EOF
-cat > "$lcs_root/crashes/CRASH-LCS-B/asan.txt" <<'EOF'
+cat > "$lcs_root/crashes/CRASH-LCS-B/sanitizer.txt" <<'EOF'
 ==2==ERROR: AddressSanitizer: heap-buffer-overflow
 READ of size 4 at 0x60200000abcd
     #0 0x200000000 in unique_top_b src/b.c:88
@@ -506,7 +503,7 @@ lcs_b_strict=$(grep -m1 -E '^Cluster: CL-' "$lcs_root/crashes/CRASH-LCS-B/REPORT
 # exact frames but have token-shape similarity must NOT cluster.
 fuzzy_root="$TEST_TMPDIR/fuzzy-match"
 mkdir -p "$fuzzy_root/crashes/CRASH-FUZZ-A" "$fuzzy_root/crashes/CRASH-FUZZ-B"
-cat > "$fuzzy_root/crashes/CRASH-FUZZ-A/asan.txt" <<'EOF'
+cat > "$fuzzy_root/crashes/CRASH-FUZZ-A/sanitizer.txt" <<'EOF'
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow
 READ of size 4 at 0x60200000abcd
     #0 0x100000000 in parse_token_a src/a.c:10
@@ -517,7 +514,7 @@ cat > "$fuzzy_root/crashes/CRASH-FUZZ-A/REPORT.md" <<'EOF'
 # Fuzz A
 Surface: library-api
 EOF
-cat > "$fuzzy_root/crashes/CRASH-FUZZ-B/asan.txt" <<'EOF'
+cat > "$fuzzy_root/crashes/CRASH-FUZZ-B/sanitizer.txt" <<'EOF'
 ==2==ERROR: AddressSanitizer: heap-buffer-overflow
 READ of size 4 at 0x60200000abcd
     #0 0x200000000 in parse_token_b src/b.c:11
@@ -542,7 +539,7 @@ fuzz_b=$(grep -m1 -E '^Cluster: CL-' "$fuzzy_root/crashes/CRASH-FUZZ-B/REPORT.md
 # unscored ('—'), so the crosstab severity matches the report.
 sevtbl_root="$TEST_TMPDIR/severity-table-form"
 mkdir -p "$sevtbl_root/crashes/CRASH-TBLONLY"
-cat > "$sevtbl_root/crashes/CRASH-TBLONLY/asan.txt" <<'EOF'
+cat > "$sevtbl_root/crashes/CRASH-TBLONLY/sanitizer.txt" <<'EOF'
 ==1==ERROR: AddressSanitizer: heap-use-after-free
 READ of size 4 at 0x60200000abcd
     #0 0x1 in tbl_only_fn src/t.c:10

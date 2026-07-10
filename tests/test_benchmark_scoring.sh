@@ -135,18 +135,15 @@ assert_eq "heap-oob-write,stack-oob-write,use-after-free" \
 assert_eq "0.6667" "$(zget by_condition harness recall)" "explicit conditions keep real per-condition rows"
 
 # ── Sanitizer-file discovery matches the shared crash-artifact policy ──
-# A confirmed crash whose ASan text lives in asan_output.txt — or whose
-# sanitizer.txt is empty with a valid sibling — must still be scored, not
-# mis-counted as unexpected.
+# Canonical sanitizer artifacts must be scored consistently across crashes.
 DISC="$TEST_TMPDIR/disc/crashes"
 mkdir -p "$DISC/DISC-0001" "$DISC/DISC-0002"
-cat > "$DISC/DISC-0001/asan_output.txt" <<'EOF'
+cat > "$DISC/DISC-0001/sanitizer.txt" <<'EOF'
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000010
 WRITE of size 64 at 0x602000000010 thread T0
     #1 0x0000 in render_cell canary.c:40
 EOF
-: > "$DISC/DISC-0002/sanitizer.txt"   # empty: must fall through to the sibling
-cat > "$DISC/DISC-0002/asan_output.txt" <<'EOF'
+cat > "$DISC/DISC-0002/sanitizer.txt" <<'EOF'
 ==2==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x7ffd00000010
 WRITE of size 64 at 0x7ffd00000010 thread T0
     #1 0x0000 in format_line canary.c:51
@@ -156,7 +153,7 @@ python3 "$SCRIPT_ROOT/lib/benchmark.py" score "$TEST_TMPDIR/disc" \
   --ground-truth "$MANIFEST" --out "$DISC_SCORE"
 assert_eq "heap-oob-write,stack-oob-write" \
   "$(python3 -c "import json;print(','.join(json.load(open('$DISC_SCORE'))['overall']['detected']))")" \
-  "asan_output.txt and empty-sanitizer fallback are both scored"
+  "canonical sanitizer artifacts are scored"
 
 # ── Malformed manifest is rejected with an explicit, non-zero error ────
 BADMAN="$TEST_TMPDIR/bad-manifest.json"
@@ -263,7 +260,7 @@ assert_eq "no" \
   "findings-only target does NOT render a precision/recall table"
 
 # ── A canonically-named sanitizer file with no diagnostic is NOT a crash ─
-# find_primary_asan selects sanitizer.txt by name+size; the scorer must still
+# find_primary_sanitizer selects sanitizer.txt by name+size; the scorer must still
 # content-check it so the scored set equals the confirmed-crash oracle. A dir
 # whose only sanitizer.txt carries no signature must be ignored, exactly like
 # the oracle ignores it — not counted as an unexpected crash.

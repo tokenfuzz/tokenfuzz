@@ -18,7 +18,7 @@ crashes/CRASH-NNN-N/
 └── .audit/             # your scratch artifacts (provenance, gitignored from share)
 ```
 
-The maintainer runs `./reproduce.sh /path/to/upstream-src` (or no arg to clone fresh). You don't write `reproduce.sh` — it's generated from `target.toml` + your testcase + `// HARNESS:` header. Keep your scratch reproducer.sh / testcase.sh agent-internal; they end up in `.audit/`.
+The maintainer runs `./reproduce.sh /path/to/upstream-src` (or no arg to clone fresh). You don't write `reproduce.sh` — it's generated from `target.toml` + your testcase + `// HARNESS:` header. Scratch-only helper scripts stay agent-internal under `.audit/`.
 
 ## Testcase header requirements (MANDATORY)
 
@@ -29,7 +29,7 @@ score. Use this exact comment format (adapt the comment delimiter per file type)
 
 ```
 // TARGET: <relative/file.cpp>:<Function>:<line>
-// HYPOTHESIS-ID: H<n>     (must match an entry in your AUDIT_STATE-<agent>.md)
+// HYPOTHESIS-ID: H-<id>   (must match a structured `bin/state` hypothesis)
 // CATEGORY: <bounds|lifetime|type|size|uninit|state>
 // HARNESS: <relative sibling harness source> (OPTIONAL)
 ```
@@ -37,8 +37,8 @@ score. Use this exact comment format (adapt the comment delimiter per file type)
 Use native comments for testcase headers: `# TARGET: ...` in Python,
 `// TARGET: ...` in C/C++/JS shell testcases, and
 `<!-- TARGET: ... -->` in HTML.
-If the hypothesis ID does not yet exist in your state file, add the hypothesis
-row BEFORE writing the testcase. This is the coupling rule.
+If the hypothesis ID does not yet exist in structured state, run
+`bin/state add-hyp` BEFORE writing the testcase. This is the coupling rule.
 
 **`// HARNESS:` API probes:** point to a sibling harness source file.
 For `.c`, `.cc`, `.cpp`, `.cxx`, or `.C`, `bin/probe` builds it on demand
@@ -46,8 +46,7 @@ using the target's ASan static library, includes, and link libs (read from
 `output/<slug>/target.toml`). Probe also supports compiled `.rs`, `.go`,
 `.swift`, and `.kt` harnesses plus interpreted harnesses such as
 `.py`, `.rb`, `.php`, `.js`, `.mjs`, `.ts`, `.tsx`, `.java`, `.kts`,
-`.r`, `.R`, `.sh`, and `.bash`. You no longer
-need to write a `testcase.sh` that hand-codes the command.
+`.r`, `.R`, `.sh`, and `.bash`.
 
 ## Seed corpus — prefer seed-plus-delta when the tree has seeds
 
@@ -73,16 +72,16 @@ aid, not a prerequisite.
 ## Coverage validation — coverage gate FIRST, ASan second
 
 Default workflow: `bin/probe <testcase>` chooses the right runner.
-For browser/js targets, `run-asan-multi` runs `hits.sh` first (cheap, no launch
+For browser/js targets, `run-sanitizer-multi asan` runs `bin/hits` first (cheap, no launch
 lock) and only invokes ASan when the testcase reached the target. This prevents
 0/5 variants from burning browser launches per dead-end. Generic C/C++ targets
-do not support coverage gating; `bin/probe` uses `run-asan-multi generic` and
+do not support coverage gating; `bin/probe` uses `run-sanitizer-multi asan generic` and
 saves a sibling `.asan.txt`.
 
 ```
 # Preferred wrapper — coverage-gated ASan in one call when supported.
 # bin/probe reads TARGET / HYPOTHESIS-ID / HARNESS from the testcase header
-# and discovers TARGET_ROOT/RESULTS_DIR by walking up to output/<slug>/.session-env.
+# and discovers TARGET_ROOT/RESULTS_DIR from the backend results session.
 bin/probe "${RESULTS_DIR}/scratch-1/tc_H3.html"
 
 # Write under `$RESULTS_DIR/scratch-1/...`; do not write repo-root scratch dirs
@@ -113,7 +112,7 @@ bin/hits --testcase ${RESULTS_DIR}/scratch-1/tc_H3.html \
                 --mode browser
 ```
 
-Record the HIT/MISSED verdict in your state file's Working Context. A MISSED
+`bin/probe` records the HIT/MISSED verdict in structured run state. A MISSED
 result means the hypothesis is not disproven — the input didn't even run the
 code. Discarding on a MISSED is invalid.
 

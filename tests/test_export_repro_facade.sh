@@ -54,7 +54,7 @@ is_browser = "0"
 attacker_controls = ["bytes"]
 EOF
 
-cat > "$FACADE_SLUG_DIR/.session-env" <<EOF
+cat > "$RESULTS/.session-env" <<EOF
 RESULTS_DIR=$RESULTS
 TARGET_ROOT=$SRC
 TARGET_SLUG=$SLUG
@@ -70,7 +70,7 @@ EOF
 
 printf 'AAAA' > "$CRASH_DIR/input.bin"
 
-cat > "$CRASH_DIR/asan.txt" <<'EOF'
+cat > "$CRASH_DIR/sanitizer.txt" <<'EOF'
 ASAN_RUN_HEADER: runs=1 mode=generic testcase=output/x/scratch/x.bin started=x
 === Run 1/1 ===
 ==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xdead at pc 0xface

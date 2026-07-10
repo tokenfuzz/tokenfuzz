@@ -101,8 +101,7 @@ state/events.jsonl     audit event log shared across agents and orchestrator
 ```
 
 An agent skips cards that are already claimed, on a surface another
-agent owns, mode-incompatible, in a guard-saturated
-subsystem, or in a subsystem another generic-mode agent already owns
+agent owns, mode-incompatible, or in a subsystem another generic-mode agent already owns
 (unless the current agent has produced a crash or finding there).
 Claims expire on a timer so a wedged agent does not poison the queue.
 [Strategy model](strategy-model.md#how-a-card-gets-to-an-agent)
@@ -164,12 +163,11 @@ Triage is the boundary between "an agent produced an artifact" and
   issue class, and a rationale a reviewer can act on. A sanitizer
   reproducer is *not* required.
 
-Both contracts are enforced by multi-vote LLM gates that fail open:
-a single keep vote keeps a crash, and a rejection sticks only at
-quorum (two independent negative votes by default). Findings without
-sanitizer evidence additionally face an independent validator — two
-Promote votes to promote, one Reject is fatal, Uncertain triggers a
-skeptical tiebreak.
+Crash class and bundle completeness are deterministic. A source-reading
+trigger reviewer needs two disproof-backed Reject votes to remove a
+sanitizer-confirmed crash and otherwise fails open. Findings need two
+substance-gate accepts to confirm (or two rejects to quarantine), followed by
+one source-reading trigger review that rejects only with concrete disproof.
 
 Empty FIND directories stay in place marked `.needs-content`.
 Findings rejected twice by the substance gate are quarantined to
@@ -181,7 +179,6 @@ Findings rejected twice by the substance gate are quarantined to
 output/<target>/<backend>/results/
   scratch-N/                   in-progress testcase work
   crashes/                     accepted reproducible crashes
-  crashes-needs-review/        borderline rejections paused for review
   crashes-rejected/            rejected with reasons (skipped next session)
   findings/                    concrete security issues (with or without repro)
   findings-rejected/           findings the substance gate rejected (quorum)

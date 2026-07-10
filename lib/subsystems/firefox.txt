@@ -2,7 +2,7 @@
 #
 #   1. Path → focus-area attribution: longest-prefix match so a path like
 #      dom/media/webcodecs/Foo.cpp resolves to "dom/media/webcodecs"
-#      (lib/parse_state.py).
+#      (lib/subsystem_paths.py).
 #   2. Cold-start subsystem candidates per agent mode: which subsystems a
 #      browser-mode vs shell-mode agent may pick (bin/audit
 #      browser_mode_subsystems / shell_mode_subsystems).

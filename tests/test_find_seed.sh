@@ -11,22 +11,22 @@ MOCK_TARGET="$SCRIPT_ROOT/tests/fixtures/mock-target"
 # 1. --help shows usage
 # ═══════════════════════════════════════════════════════════════
 
-output=$(bash "$FIND_SEED" --help 2>&1)
+output=$("$FIND_SEED" --help 2>&1)
 assert_match "find-seed" "$output" "help: shows usage"
 
 # ═══════════════════════════════════════════════════════════════
 # 2. No args shows usage
 # ═══════════════════════════════════════════════════════════════
 
-output=$(bash "$FIND_SEED" 2>&1)
+output=$("$FIND_SEED" 2>&1)
 assert_match "find-seed" "$output" "no args: shows usage"
 
 # ═══════════════════════════════════════════════════════════════
 # 3. Syntax check passes
 # ═══════════════════════════════════════════════════════════════
 
-bash -n "$FIND_SEED" 2>/dev/null
-assert_eq 0 $? "find-seed: syntax check passes"
+python3 -m py_compile "$FIND_SEED" 2>/dev/null
+assert_eq 0 $? "find-seed: Python syntax check passes"
 
 # ═══════════════════════════════════════════════════════════════
 # 4. Spec parsing — file only
@@ -80,14 +80,14 @@ assert_match "subsys=Foo.cpp" "$output" "parse: single-component subsys"
 # 7. Non-existent target root → error
 # ═══════════════════════════════════════════════════════════════
 
-output=$(TARGET_ROOT="/nonexistent/path" bash "$FIND_SEED" "test.cpp" 2>&1) || true
+output=$(TARGET_ROOT="/nonexistent/path" "$FIND_SEED" "test.cpp" 2>&1) || true
 assert_match "not set or not a directory" "$output" "missing target: error message"
 
 # ═══════════════════════════════════════════════════════════════
 # 8. Missing ripgrep → error
 # ═══════════════════════════════════════════════════════════════
 
-output=$(PATH="/usr/bin" TARGET_ROOT="$MOCK_TARGET" bash "$FIND_SEED" "test.cpp" 2>&1) || true
+output=$(PATH="/usr/bin" TARGET_ROOT="$MOCK_TARGET" "$FIND_SEED" "test.cpp" 2>&1) || true
 # May succeed if rg is in /usr/bin, otherwise shows error
 if grep -q "ripgrep" <<<"$output"; then
   pass "missing rg: shows ripgrep requirement"
@@ -107,7 +107,7 @@ echo '<html><!-- CanvasRenderingContext2D test --><body><canvas/></body></html>'
 echo 'drawImage test in <canvas>' > "$seed_dir/testing/web-platform/tests/canvas.html"
 
 if command -v rg >/dev/null 2>&1; then
-  output=$(TARGET_ROOT="$seed_dir" bash "$FIND_SEED" "dom/canvas/CanvasRenderingContext2D.cpp" 2 2>&1) || true
+  output=$(TARGET_ROOT="$seed_dir" "$FIND_SEED" "dom/canvas/CanvasRenderingContext2D.cpp" 2 2>&1) || true
   assert_neq "" "$output" "output format: produces output"
 else
   pass "rg not available — skipping output format test"
@@ -123,7 +123,7 @@ printf '<html><body>seed file without body keyword</body></html>\n' \
   > "$fallback_dir/testing/web-platform/tests/nested/decode[thing]-case.html"
 
 if command -v rg >/dev/null 2>&1; then
-  output=$(TARGET_ROOT="$fallback_dir" bash "$FIND_SEED" "dom/codec/Codec.cpp:Decode[Thing]" 5 2>&1) || true
+  output=$(TARGET_ROOT="$fallback_dir" "$FIND_SEED" "dom/codec/Codec.cpp:Decode[Thing]" 5 2>&1) || true
   assert_match $'NAME\t.*/decode\\[thing\\]-case\\.html\t\\(filename match\\)' "$output" \
     "filename fallback: function name matched literally"
 else
@@ -149,7 +149,7 @@ if command -v rg >/dev/null 2>&1; then
   # Query for filename "test" — every fixture file matches by NAME rank.
   # This proves the discovery walked to tests/data and rg/awk found the
   # fixture files (rather than bailing out at "no seed-corpus roots").
-  output=$(TARGET_ROOT="$curl_like" RESULTS_DIR="$cache_dir" bash "$FIND_SEED" "lib/test.c" 5 2>&1) || true
+  output=$(TARGET_ROOT="$curl_like" RESULTS_DIR="$cache_dir" "$FIND_SEED" "lib/test.c" 5 2>&1) || true
   assert_match "tests/data/test" "$output" "auto-discovery: curl-like tree/tests/data surfaces"
   # The cache file must list tests/data and must NOT list docs/.
   cache_file="$cache_dir/.seed-roots".*
@@ -171,7 +171,7 @@ fi
 if command -v rg >/dev/null 2>&1; then
   cache_dir2=$(mktemp -d "$TEST_TMPDIR/results-XXXXXX")
   # First call populates the cache.
-  TARGET_ROOT="$curl_like" RESULTS_DIR="$cache_dir2" bash "$FIND_SEED" "lib/test.c" 1 >/dev/null 2>&1 || true
+  TARGET_ROOT="$curl_like" RESULTS_DIR="$cache_dir2" "$FIND_SEED" "lib/test.c" 1 >/dev/null 2>&1 || true
   cache_path=$(ls "$cache_dir2"/.seed-roots.* 2>/dev/null | head -1)
   assert_neq "" "$cache_path" "cache: file created on first call"
   # Bump the cache mtime forward of TARGET_ROOT so the freshness check sees
@@ -180,7 +180,7 @@ if command -v rg >/dev/null 2>&1; then
   touch "$cache_path"
   sentinel="$TEST_TMPDIR/cache-sentinel-does-not-exist"
   printf '%s\n' "$sentinel" >> "$cache_path"
-  TARGET_ROOT="$curl_like" RESULTS_DIR="$cache_dir2" bash "$FIND_SEED" "lib/test.c" 1 >/dev/null 2>&1 || true
+  TARGET_ROOT="$curl_like" RESULTS_DIR="$cache_dir2" "$FIND_SEED" "lib/test.c" 1 >/dev/null 2>&1 || true
   assert_file_contains "$cache_path" "$sentinel" "cache: not rebuilt when TARGET_ROOT unchanged"
 else
   pass "rg not available — skipping cache reuse test"
@@ -197,7 +197,7 @@ if command -v rg >/dev/null 2>&1; then
   printf 'needle from curated override\n' > "$override_target/curated/seeds/test_good.txt"
   cache_dir3=$(mktemp -d "$TEST_TMPDIR/results-XXXXXX")
   printf '%s\n' "$override_target/curated/seeds" > "$cache_dir3/.seed-roots"
-  output=$(TARGET_ROOT="$override_target" RESULTS_DIR="$cache_dir3" bash "$FIND_SEED" "lib/test.c" 5 2>&1) || true
+  output=$(TARGET_ROOT="$override_target" RESULTS_DIR="$cache_dir3" "$FIND_SEED" "lib/test.c" 5 2>&1) || true
   assert_match "curated/seeds/test_good" "$output" "cache override: .seed-roots is honored"
   assert_not_match "bad/tests/test_bad" "$output" "cache override: auto-discovered dirs ignored"
   leftover_tmp=$(find "$cache_dir3" -maxdepth 1 -name '.seed-roots.*.tmp' -print | wc -l | tr -d ' ')

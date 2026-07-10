@@ -77,8 +77,8 @@ eval "$(awk '/^prioritize_parallel_tests\(\) \{/,/^}/' "$RUNNER")"
 # --- cold start (no timing artifact): bootstrap leads, rest is coarse ---
 PRIOR_TIMINGS=""
 heavy_w=$(test_weight test_workqueue.sh)
-timeout_w=$(test_weight test_timeout.sh)
-core_w=$(test_weight test_audit_core.sh)
+sanitizer_w=$(test_weight test_sanitizer_multi.sh)
+core_w=$(test_weight test_severity.sh)
 light_w=$(test_weight test_argparse_need_arg.sh)
 if [ "$heavy_w" -gt "$light_w" ] && [ "$heavy_w" -ge 15 ]; then
   pass "runner: cold-start bootstrap ranks a known-slow suite above a trivial one"
@@ -86,17 +86,17 @@ else
   fail "runner: cold-start bootstrap ranks a known-slow suite above a trivial one" \
     "workqueue=$heavy_w argparse=$light_w"
 fi
-if [ "$timeout_w" -gt "$light_w" ] && [ "$timeout_w" -ge 10 ]; then
-  pass "runner: cold-start bootstrap ranks timeout coverage above trivial suites"
+if [ "$sanitizer_w" -gt "$light_w" ] && [ "$sanitizer_w" -ge 10 ]; then
+  pass "runner: cold-start bootstrap ranks sanitizer coverage above trivial suites"
 else
-  fail "runner: cold-start bootstrap ranks timeout coverage above trivial suites" \
-    "timeout=$timeout_w argparse=$light_w"
+  fail "runner: cold-start bootstrap ranks sanitizer coverage above trivial suites" \
+    "sanitizer=$sanitizer_w argparse=$light_w"
 fi
 if [ "$core_w" -gt "$light_w" ] && [ "$core_w" -ge 15 ]; then
-  pass "runner: cold-start bootstrap ranks audit-core coverage above trivial suites"
+  pass "runner: cold-start bootstrap ranks severity coverage above trivial suites"
 else
-  fail "runner: cold-start bootstrap ranks audit-core coverage above trivial suites" \
-    "audit_core=$core_w argparse=$light_w"
+  fail "runner: cold-start bootstrap ranks severity coverage above trivial suites" \
+    "severity=$core_w argparse=$light_w"
 fi
 assert_eq "1" "$(test_weight test_audit_helpers_py.py)" \
   "runner: python suites weigh 1 by category fallback"
@@ -120,9 +120,9 @@ assert_eq "3" "$(test_weight test_benchmark.sh)" \
 # so a heavier suite appearing after a lighter one would start late.
 PRIOR_TIMINGS=""   # back to bootstrap weights for a predictable order
 TEST_FILES=(
-  "$TESTS_DIR/test_argparse_need_arg.sh"   # light
+  "$TESTS_DIR/test_benchmark_scoring.sh"   # light
   "$TESTS_DIR/test_benchmark.sh"           # heaviest (bootstrap)
-  "$TESTS_DIR/test_prompt.sh"              # mid (category)
+  "$TESTS_DIR/test_sanitizer_multi.sh"      # mid (bootstrap)
   "$TESTS_DIR/test_workqueue.sh"           # heavy (bootstrap)
 )
 prioritize_parallel_tests

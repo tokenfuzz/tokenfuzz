@@ -1,3 +1,7 @@
-#!/usr/bin/env bash
-_dir="$(cd "$(dirname "$0")" && pwd -P)"
-exec "$_dir/_compile_guard" "$_dir" gcc "$@"
+#!/usr/bin/env python3
+from pathlib import Path
+import sys
+
+from wrapper_tools import compiler_guard
+
+raise SystemExit(compiler_guard(Path(__file__).name, sys.argv[1:]))

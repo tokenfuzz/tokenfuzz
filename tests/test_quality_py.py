@@ -2,7 +2,7 @@
 """Regression tests for lib/quality.py.
 
 Each subcommand is exercised through the argparse CLI shape that
-lib/quality.sh uses in production. Tests build the real on-disk state
+production audit code uses. Tests build the real on-disk state
 (scratch directories, .asan.txt sidecars, hits.log, corpus root) so the
 assertions reflect what bin/audit observes at runtime.
 """
@@ -63,6 +63,10 @@ with tempfile.TemporaryDirectory() as td:
     (p / "tc-1.txt").write_bytes(b"some input")
     (p / "notes.txt").write_bytes(b"just notes")  # ambiguous .txt without stem prefix
     (p / "input.empty").write_bytes(b"")
+    (p / "testcase.py").write_text(
+        "# TARGET: src/module.py\n# HYPOTHESIS-ID: H9\nprint('probe')\n"
+    )
+    (p / "helper.py").write_text("print('not a testcase')\n")
 
     assert_eq(0, run(["testcase-mode", str(p / "input.html")]).returncode, "html → 0")
     assert_eq("browser", run(["testcase-mode", str(p / "input.html")]).stdout.strip(), "html → browser")
@@ -75,6 +79,10 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq("generic", run(["testcase-mode", str(p / "tc-1.txt")]).stdout.strip(), "tc-* txt → generic")
     assert_eq(1, run(["testcase-mode", str(p / "notes.txt")]).returncode, "plain notes.txt skipped")
     assert_eq(1, run(["testcase-mode", str(p / "input.empty")]).returncode, "zero-byte file skipped")
+    assert_eq("generic", run(["testcase-mode", str(p / "testcase.py")]).stdout.strip(),
+              "header-bearing managed-language testcase is recognized")
+    assert_eq(1, run(["testcase-mode", str(p / "helper.py")]).returncode,
+              "unmarked source helper is not treated as a testcase")
 
 
 # ── count-asan-runs + has-verified-asan ──────────────────────────────
@@ -117,11 +125,11 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq("1", run(["count-orphans", str(p)], check=True).stdout.strip(), "count-orphans=1 (good2.js)")
 
     proc = run(["scan-scratch", str(p)], check=True)
-    assert_eq("asan_runs=1 testcases=2 orphans=1", proc.stdout.strip(), "scan-scratch one-line tally")
+    assert_eq("sanitizer_runs=1 testcases=2 orphans=1", proc.stdout.strip(), "scan-scratch one-line tally")
 
     proc = run(["scan-scratch", str(p), "--list-orphans"], check=True)
     body, _, tail = proc.stdout.partition("\n")
-    assert_eq("asan_runs=1 testcases=2 orphans=1", body, "scan-scratch with orphans → stats line first")
+    assert_eq("sanitizer_runs=1 testcases=2 orphans=1", body, "scan-scratch with orphans → stats line first")
     orphan_paths = [s for s in tail.split("\0") if s]
     ok(len(orphan_paths) == 1 and orphan_paths[0].endswith("good2.js"),
        "orphan path emitted", str(orphan_paths))
@@ -191,15 +199,23 @@ with tempfile.TemporaryDirectory() as td:
        "metadata contains hypothesis + category", meta_text[:200])
     ok("**New edges contributed:** 3" in meta_text, "new-edge count recorded", meta_text[:300])
 
-    # Re-running with the same hits log should NOT re-promote (basename
-    # dedup) and tally should report 0 promoted.
+    # Re-running unchanged should not duplicate the same input.
     proc = run(["promote-corpus", str(hits_log), str(scratch), str(corpus), "7"], check=True)
     ok("promoted=0" in proc.stdout, "idempotent: no double-promotion", proc.stdout.strip())
 
-    # Index regen: should write INDEX.md with our single row.
+    # Agents commonly overwrite testcase.js in place. A changed input with the
+    # same basename is distinct corpus material and must not be lost.
+    promotable.write_text(promotable.read_text() + "\n<!-- changed input -->\n")
+    proc = run(["promote-corpus", str(hits_log), str(scratch), str(corpus), "7"], check=True)
+    ok("promoted=1" in proc.stdout, "same basename with new content is promoted", proc.stdout.strip())
+    proc = run(["promote-corpus", str(hits_log), str(scratch), str(corpus), "7"], check=True)
+    ok("promoted=0" in proc.stdout, "changed input remains content-idempotent", proc.stdout.strip())
+
+    # Index regen should list both distinct inputs.
     run(["regenerate-corpus-index", str(corpus)], check=True)
     idx_text = (corpus / "INDEX.md").read_text()
     ok("COVER-001-7" in idx_text, "index lists promoted COVER", idx_text)
+    ok("COVER-002-7" in idx_text, "index lists same-name changed input", idx_text)
     ok("H42" in idx_text, "index includes hypothesis column", idx_text)
 
     # CORPUS_REQUIRE_NEW_EDGES=0 should also promote new=0 testcases.

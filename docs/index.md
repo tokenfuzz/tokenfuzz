@@ -44,7 +44,8 @@ handoff; the final security judgment stays with you.
 A Unix-like host (macOS or Linux), a small set of standard tools, an
 LLVM toolchain, and at least one agent backend.
 
-- **Host tools:** `bash`, `jq`, `python3`, `git`, `rg`, `file`.
+- **Host tools:** `python3` 3.10+, `git`, `rg`, `file`. Bash and `jq` are only
+  needed for the repository test driver, generated recipes, or shell targets.
 - **LLVM tools:** `clang`, `llvm-symbolizer`, `sancov` — only needed
   for building or running sanitizer artifacts.
 - **Backend:** one of Claude Code (`claude`), Codex (`codex`), the

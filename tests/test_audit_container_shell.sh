@@ -124,12 +124,12 @@ else
 fi
 
 out=$(AUDIT_ROOT="$ROOT" HOME="$HOST_HOME" "$SCRIPT_ROOT/bin/audit-container-shell" \
-  --dry-run --rebuild --base-image fedora 2>&1)
+  --dry-run --rebuild --image fedora 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] && grep -q "BASE_IMAGE=fedora:latest" <<<"$out"; then
-  pass "audit-container-shell keeps --base-image as alias"
+  pass "audit-container-shell accepts --image"
 else
-  fail "audit-container-shell keeps --base-image as alias" "$out"
+  fail "audit-container-shell accepts --image" "$out"
 fi
 
 _CURRENT_TEST="audit-container-shell does not forward credentials by default"
@@ -293,7 +293,7 @@ _CURRENT_TEST="audit-container-shell reports docker missing"
 STUB_DIR="$TEST_TMPDIR/stub-empty"
 mkdir -p "$STUB_DIR"
 out=$(AUDIT_ROOT="$ROOT" HOME="$HOST_HOME" PATH="$STUB_DIR" \
-  /bin/bash "$SCRIPT_ROOT/bin/audit-container-shell" --runtime docker 2>&1)
+  "$(command -v python3)" "$SCRIPT_ROOT/bin/audit-container-shell" --runtime docker 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ] &&
    grep -q "docker not installed" <<<"$out"; then

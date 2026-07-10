@@ -1,271 +1,217 @@
-#!/usr/bin/env bash
-# find-seed — locate in-tree testcases likely to exercise a target function/file.
-#
-# Seeds bootstrap mutation. AGENTS.md prefers seed-plus-delta over from-scratch
-# testcases when the tree has relevant inputs. Writing from scratch is still
-# allowed; this tool surfaces candidates so the preference can be acted on in
-# one shell command.
-#
-# Usage:
-#   bin/find-seed <path.ext>[:<Function>] [max_results]
-#
-# Examples:
-#   bin/find-seed lib/url.c:Curl_disconnect
-#   bin/find-seed src/parser.c 20
-#   bin/find-seed editor/libeditor/HTMLEditor.cpp:RemoveInlinePropertyAsAction
-#
-# Ranking:
-#   FUNC — testcase body mentions the exact function name  (highest)
-#   STEM — testcase body mentions the source-file basename without extension
-#   NAME — testcase FILENAME contains the stem / function  (weakest)
-#
-# Seed roots are auto-discovered from $TARGET_ROOT by scoring directories for
-# testcase-shaped file density plus name signals (test/fuzz/corpus/testdata/
-# crashtests/...). Auto-discovery is cached at
-# $RESULTS_DIR/.seed-roots.<target-root-hash> so different targets never
-# share a cache. To override discovery for the active session, drop a
-# hand-edited list at $RESULTS_DIR/.seed-roots before calling find-seed.
-#
-# Prints `<rank>\t<path>\t<first-match-context>` — the agent can copy the
-# most promising paths into its scratch dir and apply mutations on top.
+#!/usr/bin/env python3
+"""Locate in-tree testcases likely to exercise a target file or function."""
 
-set -uo pipefail
+from __future__ import annotations
 
-SPEC="${1:-}"
-LIMIT="${2:-15}"
+import argparse
+import fnmatch
+import hashlib
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
 
-if [ -z "$SPEC" ] || [ "$SPEC" = "-h" ] || [ "$SPEC" = "--help" ]; then
-  sed -n '2,32p' "$0"
-  exit 0
-fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=../lib/platform.sh
-source "$REPO_ROOT/lib/platform.sh"
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
-# Resolve TARGET_ROOT. If not in env (bin/audit sets it), try to source it
-# from the nearest output/<slug>/.session-env so callers running outside an
-# audit session still work.
-if [ -z "${TARGET_ROOT:-}" ]; then
-  # shellcheck source=../lib/target_config.sh
-  source "$REPO_ROOT/lib/target_config.sh" 2>/dev/null || true
-  target_load "$PWD" 2>/dev/null || true
-fi
-if [ -z "${TARGET_ROOT:-}" ] || [ ! -d "$TARGET_ROOT" ]; then
-  echo "[find-seed] TARGET_ROOT not set or not a directory (run inside an audit session, or export TARGET_ROOT)" >&2
-  exit 2
-fi
 
-if ! command -v rg >/dev/null 2>&1; then
-  echo "[find-seed] ripgrep (rg) is required" >&2
-  exit 2
-fi
-
-# Split spec into file and optional function.
-FILE="${SPEC%%:*}"
-FUNC=""
-if [ "$FILE" != "$SPEC" ]; then
-  FUNC="${SPEC#*:}"
-fi
-
-basename="${FILE##*/}"
-stem="${basename%.*}"
-
-# ── Seed-root discovery ──────────────────────────────────────────────
-# Score each directory under TARGET_ROOT by:
-#   (a) count of testcase-shaped files at depth 1
-#   (b) name signal: test|tests|testdata|fuzz|corpus|crashtests|seed|samples|inputs
-#   (c) parent-name signal (boosts e.g. tests/data, fuzz/inputs)
-# Prune build/install/doc/VCS directories to avoid scoring binaries and docs.
-#
-# Discovery is cached at $RESULTS_DIR/.seed-roots.<target-root-hash> (one
-# absolute path per line). Cache is rebuilt when TARGET_ROOT mtime is newer
-# than the cache. A hand-edited $RESULTS_DIR/.seed-roots takes precedence and
-# is never rewritten by this script.
-
-discover_seed_roots() {
-  local root="$1"
-  find "$root" -maxdepth 5 -type d \
-    \( -name 'build-*' -o -name '*-install' -o -name 'obj-*' \
-       -o -name '_build' -o -name 'dist' -o -name '.git' -o -name '.hg' \
-       -o -name 'doc' -o -name 'docs' -o -name 'man' -o -name 'man3' \
-       -o -name 'CMakeFiles' -o -name '*.dSYM' -o -name 'node_modules' \
-       -o -name 'venv' -o -name '.venv' -o -name '__pycache__' \
-       -o -name 'target' -o -name '.gradle' -o -name '.cargo' \
-       -o -name 'vendor' -o -name 'third_party' \) -prune \
-    -o -type d -print 2>/dev/null \
-  | while read -r d; do
-      # Language-agnostic seed-file density. The glob list spans
-      # markup, data, script, and language-source file shapes so the
-      # discovery rank works for C/C++ (xml/html), Rust (rs tests),
-      # Go (_test.go fixtures), Python (py + json), Java/Kotlin tests,
-      # Ruby (rb spec), PHP/Swift/etc.
-      n=$(find "$d" -maxdepth 1 -type f \( \
-            -iname '*.html' -o -iname '*.htm' -o -iname '*.xhtml' \
-            -o -iname '*.svg' -o -iname '*.xml' \
-            -o -iname '*.js'   -o -iname '*.mjs' -o -iname '*.json' \
-            -o -iname '*.css' \
-            -o -iname '*.pem' -o -iname '*.cer' -o -iname '*.crt' -o -iname '*.der' \
-            -o -iname '*.cfg' -o -iname '*.conf' -o -iname '*.ini' -o -iname '*.toml' \
-            -o -iname '*.bin' -o -iname '*.dat' -o -iname '*.raw' \
-            -o -iname 'test*' -o -iname '*_test*' -o -iname 'crash-*' \
-            -o -iname 'oom-*' -o -iname 'slow-unit-*' -o -iname '*.dict' \
-            -o -iname '*.input' -o -iname '*.expect*' -o -iname '*.golden' \
-            -o -iname '*.py' -o -iname '*.rb' -o -iname '*.go' \
-            -o -iname '*.rs' -o -iname '*.java' -o -iname '*.kt' \
-            -o -iname '*.kts' -o -iname '*.ts' \
-            -o -iname '*.tsx' -o -iname '*.pl' \
-            -o -iname '*.pm' -o -iname '*.php' -o -iname '*.swift' \
-            -o -iname '*.ml' -o -iname '*.r' -o -iname '*.R' \
-            -o -iname '*.clj' -o -iname '*.cljs' \
-            -o -iname '*.sh' -o -iname '*.bash' \
-            -o -iname '*.yaml' -o -iname '*.yml' \
-            -o -iname '*.proto' -o -iname '*.fbs' \
-            \) 2>/dev/null | wc -l | tr -d ' ')
-      name=$(basename "$d" | tr 'A-Z' 'a-z')
-      nb=0
-      case "$name" in
-        test|tests|testdata|test_data|test-data|fuzz|corpus|crashtests|seed|seeds|samples|inputs|regression|regressions|spec|specs|fixtures|fixture|examples|example|sample|cases)
-          nb=10 ;;
-        *test*|*fuzz*|*corpus*|*crashtest*|*seed*|*spec*|*fixture*) nb=4 ;;
-      esac
-      parent=$(basename "$(dirname "$d")" | tr 'A-Z' 'a-z')
-      case "$parent" in
-        test|tests|fuzz|testdata|corpus|crashtests|inputs|spec|specs|fixtures|examples) nb=$((nb + 4)) ;;
-      esac
-      score=$((n + nb * 3))
-      [ "$score" -ge 12 ] && printf '%d\t%s\n' "$score" "$d"
-    done \
-  | sort -rn \
-  | head -25 \
-  | cut -f2-
+SEED_GLOBS = (
+    "*.html", "*.htm", "*.xhtml", "*.svg", "*.xml",
+    "*.json", "*.yaml", "*.yml", "*.toml", "*.ini", "*.cfg",
+    "*.proto", "*.fbs", "*.pem", "*.cer", "*.crt", "*.der",
+    "*.conf", "*.input", "*.dat", "*.bin",
+    "*.js", "*.mjs", "*.ts", "*.tsx", "*.py", "*.rb", "*.go",
+    "*.rs", "*.java", "*.kt", "*.kts", "*.pl", "*.pm", "*.php",
+    "*.swift", "*.ml", "*.r", "*.clj", "*.cljs", "*.sh", "*.bash",
+    "test*", "*_test*", "*_spec*", "spec_*",
+)
+DISCOVERY_GLOBS = SEED_GLOBS + (
+    "*.css", "*.raw", "test*", "crash-*", "oom-*", "slow-unit-*",
+    "*.dict", "*.expect*", "*.golden", "*.R",
+)
+PRUNE_NAMES = {
+    "_build", "dist", ".git", ".hg", "doc", "docs", "man", "man3",
+    "CMakeFiles", "node_modules", "venv", ".venv", "__pycache__",
+    "target", ".gradle", ".cargo", "vendor", "third_party",
+}
+STRONG_NAMES = {
+    "test", "tests", "testdata", "test_data", "test-data", "fuzz",
+    "corpus", "crashtests", "seed", "seeds", "samples", "inputs",
+    "regression", "regressions", "spec", "specs", "fixtures", "fixture",
+    "examples", "example", "sample", "cases",
+}
+PARENT_NAMES = {
+    "test", "tests", "fuzz", "testdata", "corpus", "crashtests",
+    "inputs", "spec", "specs", "fixtures", "examples",
 }
 
-# Cache path. Always key by a hash of TARGET_ROOT so different targets never
-# share a cache file (e.g. CLI calls, or tests pointing at different fixture
-# roots within the same RESULTS_DIR). $RESULTS_DIR holds the cache when set
-# (lives with the session), else TMPDIR.
-_tr_hash=$(printf '%s' "$TARGET_ROOT" | audit_sha1 2>/dev/null | awk '{print $1}')
-[ -n "$_tr_hash" ] || _tr_hash=$(printf '%s' "$TARGET_ROOT" | tr / _)
-cache_dir="${RESULTS_DIR:-${TMPDIR:-/tmp}}"
-override_cache="$cache_dir/.seed-roots"
-auto_cache="$cache_dir/.seed-roots.${_tr_hash}"
-cache="$auto_cache"
-if [ -s "$override_cache" ]; then
-  cache="$override_cache"
-elif [ ! -s "$auto_cache" ] || [ "$TARGET_ROOT" -nt "$auto_cache" ]; then
-  mkdir -p "$cache_dir" 2>/dev/null || true
-  tmp_cache="$(mktemp "$cache_dir/.seed-roots.${_tr_hash}.XXXXXXXX.tmp" 2>/dev/null || true)"
-  if [ -n "$tmp_cache" ]; then
-    discover_seed_roots "$TARGET_ROOT" > "$tmp_cache" 2>/dev/null || true
-  fi
-  if [ -n "$tmp_cache" ] && [ -s "$tmp_cache" ]; then
-    mv "$tmp_cache" "$auto_cache"
-  else
-    [ -n "$tmp_cache" ] && rm -f "$tmp_cache"
-  fi
-fi
 
-existing_roots=()
-if [ -s "$cache" ]; then
-  while IFS= read -r r; do
-    [ -d "$r" ] && existing_roots+=("$r")
-  done < "$cache"
-fi
+def matches_any(name: str, patterns: tuple[str, ...]) -> bool:
+    lower = name.lower()
+    return any(fnmatch.fnmatch(lower, pattern.lower()) for pattern in patterns)
 
-if [ "${#existing_roots[@]}" -eq 0 ]; then
-  echo "[find-seed] no seed-corpus roots found under $TARGET_ROOT — writing from scratch is fine, seeds are a bootstrap aid, not a requirement" >&2
-  exit 1
-fi
 
-tmp="$(mktemp "${TMPDIR:-/tmp}/find-seed-XXXXXXXX")"
-trap 'rm -f "$tmp"' EXIT
+def pruned(name: str) -> bool:
+    return (
+        name in PRUNE_NAMES
+        or name.startswith(("build-", "obj-"))
+        or name.endswith(("-install", ".dSYM"))
+    )
 
-# Skip pathologically large files. ripgrep is line-oriented, so a file with no
-# newlines is a single "line" it must buffer whole before matching: a 36GB
-# single-line PoC artifact (a generated JSON-Patch blob left in the target tree)
-# drove rg to ~36GB RSS and swap-wedged the host, taking every parallel agent
-# down with it. No real fuzz seed is that big, so cap per-file size for every
-# scan. FIND_SEED_MAX_FILESIZE overrides it for targets with genuinely large
-# legitimate seeds.
-rg_max_filesize="${FIND_SEED_MAX_FILESIZE:-64M}"
 
-# Standard testcase extensions. Spans markup/data shapes (HTML, XML,
-# JSON, YAML, proto, fbs), curl/openssl-style cert+config files, and
-# language-source files (rs/go/py/rb/...). Files that smell like test
-# inputs (test_*, *_test*) are picked up by name.
-rg_globs=(
-  --max-filesize "$rg_max_filesize"
-  # ── Markup / data shapes ─────────────────────────────
-  -g '*.html' -g '*.htm' -g '*.xhtml' -g '*.svg' -g '*.xml'
-  -g '*.json' -g '*.yaml' -g '*.yml' -g '*.toml' -g '*.ini' -g '*.cfg'
-  -g '*.proto' -g '*.fbs'
-  # ── Crypto / cert formats ────────────────────────────
-  -g '*.pem' -g '*.cer' -g '*.crt' -g '*.der'
-  # ── Config / log shapes ──────────────────────────────
-  -g '*.conf' -g '*.input' -g '*.dat' -g '*.bin'
-  # ── Language source / script (seeds for non-C/C++ targets) ──
-  -g '*.js' -g '*.mjs' -g '*.ts' -g '*.tsx'
-  -g '*.py' -g '*.rb' -g '*.go' -g '*.rs'
-  -g '*.java' -g '*.kt' -g '*.kts'
-  -g '*.pl' -g '*.pm' -g '*.php'
-  -g '*.swift'
-  -g '*.ml' -g '*.r' -g '*.R'
-  -g '*.clj' -g '*.cljs'
-  -g '*.sh' -g '*.bash'
-  # ── Name-shape matches: test fixtures ────────────────
-  -g 'test_*' -g '*_test*' -g '*_spec*' -g 'spec_*'
-)
+def discover_seed_roots(root: Path) -> list[Path]:
+    scored = []
+    root_depth = len(root.parts)
+    for directory, dirnames, filenames in os.walk(root):
+        path = Path(directory)
+        depth = len(path.parts) - root_depth
+        dirnames[:] = [] if depth >= 5 else [name for name in dirnames if not pruned(name)]
+        count = sum(1 for name in filenames if matches_any(name, DISCOVERY_GLOBS))
+        name = path.name.lower()
+        bonus = 10 if name in STRONG_NAMES else 4 if re.search(
+            r"test|fuzz|corpus|crashtest|seed|spec|fixture", name
+        ) else 0
+        if path.parent.name.lower() in PARENT_NAMES:
+            bonus += 4
+        score = count + bonus * 3
+        if score >= 12:
+            scored.append((score, path))
+    scored.sort(key=lambda row: (-row[0], str(row[1])))
+    return [path for _score, path in scored[:25]]
 
-# Rank 1: function-name body match.
-if [ -n "$FUNC" ]; then
-  func_re=$(printf '%s' "$FUNC" | sed 's/[.[\*^$()+?{|]/\\&/g')
-  rg -l --no-heading "${rg_globs[@]}" "\b${func_re}\b" \
-     "${existing_roots[@]}" 2>/dev/null \
-   | awk '{print "FUNC\t" $0}' >> "$tmp" || true
-fi
 
-# Rank 2: file-stem body match.
-stem_re=$(printf '%s' "$stem" | sed 's/[.[\*^$()+?{|]/\\&/g')
-rg -l --no-heading "${rg_globs[@]}" "\b${stem_re}\b" \
-   "${existing_roots[@]}" 2>/dev/null \
- | awk -v s="STEM" '{print s "\t" $0}' >> "$tmp" || true
+def parse_size(value: str) -> int:
+    match = re.fullmatch(r"(\d+)([KMG]?)", value.strip(), re.IGNORECASE)
+    if not match:
+        raise ValueError(value)
+    multiplier = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}[match.group(2).upper()]
+    return int(match.group(1)) * multiplier
 
-# Rank 3: filename match.
-{
-  for r in "${existing_roots[@]}"; do
-    find "$r" -type f 2>/dev/null
-  done
-} | awk -v stem="$stem" -v fn="$FUNC" '
-    BEGIN { stem = tolower(stem); fn = tolower(fn) }
-    {
-      path = $0
-      name = path
-      sub(/^.*\//, "", name)
-      low = tolower(name)
-      if (index(low, stem) > 0 || (fn != "" && index(low, fn) > 0)) {
-        print "NAME\t" path
-      }
-    }
-  ' >> "$tmp" || true
 
-if [ ! -s "$tmp" ]; then
-  echo "[find-seed] no seeds matched $SPEC under $TARGET_ROOT (writing from scratch is fine)" >&2
-  exit 1
-fi
+def resolve_target_root() -> Path | None:
+    configured = os.environ.get("TARGET_ROOT", "")
+    if not configured:
+        return None
+    path = Path(configured).expanduser()
+    return path.resolve() if path.is_dir() else None
 
-awk -F'\t' '!seen[$2]++ {print}' "$tmp" \
-  | head -n "$LIMIT" \
-  | while IFS=$'\t' read -r rank path; do
-      ctx=""
-      case "$rank" in
-        # $path comes only from the size-bounded listing scans above (FUNC/STEM
-        # ranks), so it can't be a giant artifact; --max-filesize is ignored on
-        # an explicit path arg anyway and is intentionally omitted here.
-        FUNC) ctx=$(rg --no-heading --no-line-number -m1 "\b${FUNC}\b" "$path" 2>/dev/null | head -c 160) ;;
-        STEM) ctx=$(rg --no-heading --no-line-number -m1 "\b${stem}\b" "$path" 2>/dev/null | head -c 160) ;;
-        NAME) ctx="(filename match)" ;;
-      esac
-      printf '%s\t%s\t%s\n' "$rank" "$path" "${ctx:-<no-ctx>}"
-    done
+
+def cached_roots(root: Path) -> list[Path]:
+    cache_dir = Path(os.environ.get("RESULTS_DIR") or os.environ.get("TMPDIR") or "/tmp")
+    override = cache_dir / ".seed-roots"
+    digest = hashlib.sha1(str(root).encode()).hexdigest()
+    automatic = cache_dir / f".seed-roots.{digest}"
+    cache = override if override.exists() and override.stat().st_size > 0 else automatic
+    if cache == automatic and (
+        not automatic.exists()
+        or automatic.stat().st_size == 0
+        or root.stat().st_mtime > automatic.stat().st_mtime
+    ):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        roots = discover_seed_roots(root)
+        if roots:
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=cache_dir,
+                    prefix=f".{automatic.name}.", suffix=".tmp", delete=False,
+                ) as output:
+                    temporary = Path(output.name)
+                    output.write("".join(f"{path}\n" for path in roots))
+                os.replace(temporary, automatic)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        cache = automatic
+    if not cache.exists():
+        return []
+    return [
+        path for line in cache.read_text(encoding="utf-8", errors="replace").splitlines()
+        if (path := Path(line)).is_dir()
+    ]
+
+
+def candidate_files(roots: list[Path], max_bytes: int):
+    seen = set()
+    for root in roots:
+        for directory, dirnames, filenames in os.walk(root):
+            dirnames[:] = [name for name in dirnames if not pruned(name)]
+            for filename in filenames:
+                if not matches_any(filename, SEED_GLOBS):
+                    continue
+                path = Path(directory) / filename
+                try:
+                    if path.stat().st_size > max_bytes:
+                        continue
+                except OSError:
+                    continue
+                key = str(path)
+                if key not in seen:
+                    seen.add(key)
+                    yield path
+
+
+def first_context(path: Path, pattern: re.Pattern[str]) -> str:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as source:
+            for line in source:
+                if pattern.search(line):
+                    return line.rstrip("\n")[:160]
+    except OSError:
+        pass
+    return "<no-ctx>"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="find-seed", description=__doc__)
+    parser.add_argument("spec", nargs="?")
+    parser.add_argument("max_results", nargs="?", type=int, default=15)
+    args = parser.parse_args()
+    if not args.spec:
+        parser.print_help()
+        return 0
+    root = resolve_target_root()
+    if root is None or not root.is_dir():
+        print(
+            "[find-seed] TARGET_ROOT not set or not a directory "
+            "(run inside an audit session, or export TARGET_ROOT)", file=sys.stderr
+        )
+        return 2
+    file_part, separator, function = args.spec.partition(":")
+    stem = Path(file_part).stem
+    roots = cached_roots(root)
+    if not roots:
+        print(
+            f"[find-seed] no seed-corpus roots found under {root} - writing from "
+            "scratch is fine, seeds are a bootstrap aid, not a requirement",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        max_bytes = parse_size(os.environ.get("FIND_SEED_MAX_FILESIZE", "64M"))
+    except ValueError:
+        max_bytes = 64 * 1024 * 1024
+    function_re = re.compile(rf"\b{re.escape(function)}\b", re.IGNORECASE) if separator else None
+    stem_re = re.compile(rf"\b{re.escape(stem)}\b", re.IGNORECASE)
+    ranked: list[tuple[str, Path, str]] = []
+    for path in candidate_files(roots, max_bytes):
+        if function_re and first_context(path, function_re) != "<no-ctx>":
+            ranked.append(("FUNC", path, first_context(path, function_re)))
+        elif first_context(path, stem_re) != "<no-ctx>":
+            ranked.append(("STEM", path, first_context(path, stem_re)))
+        elif stem.lower() in path.name.lower() or (function and function.lower() in path.name.lower()):
+            ranked.append(("NAME", path, "(filename match)"))
+    if not ranked:
+        print(f"[find-seed] no seeds matched {args.spec} under {root} (writing from scratch is fine)", file=sys.stderr)
+        return 1
+    order = {"FUNC": 0, "STEM": 1, "NAME": 2}
+    ranked.sort(key=lambda row: (order[row[0]], str(row[1])))
+    for rank, path, context in ranked[: max(0, args.max_results)]:
+        print(f"{rank}\t{path}\t{context}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

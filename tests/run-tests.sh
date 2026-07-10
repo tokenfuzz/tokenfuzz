@@ -20,7 +20,7 @@ usage() {
 Usage:
   tests/run-tests.sh [options] [test_file_pattern...]
   tests/run-tests.sh --category integration
-  tests/run-tests.sh --jobs 4 test_triage.sh test_severity.sh
+  tests/run-tests.sh --jobs 4 test_py_migration_regressions.py test_severity.sh
   tests/run-tests.sh --image ubuntu:24.04 [options] [test_file_pattern...]
 
 Options:
@@ -84,7 +84,7 @@ while [ "$#" -gt 0 ]; do
       (
         set -e
         # nodejs is required: bin/audit:gemini_cli_check_bundled_ripgrep uses
-        # node for realpath/platform detection, and test_audit_helpers.sh
+        # node for realpath/platform detection and audit-runner checks
         # asserts its WARN path. CA certificates are needed for HTTPS git/gh
         # traffic in minimal images. npm and curl are backend-install-path
         # dependencies, not test-suite prerequisites.
@@ -222,7 +222,7 @@ test_category() {
     test_integration_*|test_mock_target) echo "integration" ;;
     test_*_py|test_stack_frames|test_target_config_py) echo "python" ;;
     test_doc_neutrality|test_hits_cache_static|test_portability_lint|test_strategy_validation|test_vocab) echo "static" ;;
-    test_grep_wrapper|test_rg_wrapper|test_sed_wrapper|test_rg_safe|test_platform|test_timeout|test_zdotdir_shim) echo "wrapper" ;;
+    test_grep_wrapper|test_rg_wrapper|test_sed_wrapper|test_rg_safe|test_zdotdir_shim) echo "wrapper" ;;
     *) echo "unit" ;;
   esac
 }
@@ -258,8 +258,8 @@ load_prior_timings() {
 bootstrap_weight() {
   case "$1" in
     test_workqueue|test_benchmark) echo 25 ;;
-    test_audit_core|test_triage|test_decision_triage|test_probe_harness_cpp|test_severity|test_setup_target|test_stall_rotation) echo 15 ;;
-    test_timeout|test_integration_e2e|test_multilang_support|test_benchmark_cells) echo 10 ;;
+    test_severity|test_sanitizer_multi|test_probe_harness_cpp|test_setup_target|test_py_migration_regressions|test_llm_invoke_py) echo 15 ;;
+    test_multilang_support|test_benchmark_cells|test_benchmark_reverify|test_recon_changes) echo 10 ;;
     *) echo "" ;;
   esac
 }

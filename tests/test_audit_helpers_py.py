@@ -70,6 +70,119 @@ proc = run(["relpath-list", str(ROOT)], stdin="\n\n")
 assert_eq("", proc.stdout, "relpath-list ignores blank stdin lines")
 
 
+# ── sanitize-target-slug ───────────────────────────────────────────
+print("\nsanitize-target-slug")
+with tempfile.TemporaryDirectory() as td:
+    targets = Path(td) / "targets"
+    nested = targets / "Samples" / "Sample Ruby"
+    external = Path(td) / "External Project!"
+    nested.mkdir(parents=True)
+    external.mkdir()
+    proc = run(["sanitize-target-slug", str(nested), str(targets)])
+    assert_eq(0, proc.returncode, "sanitize-target-slug nested exit code")
+    assert_eq(
+        "samples/sample-ruby",
+        proc.stdout.strip(),
+        "sanitize-target-slug preserves nested target slug",
+    )
+    proc = run(["sanitize-target-slug", str(external), str(targets)])
+    assert_eq(
+        "external-project",
+        proc.stdout.strip(),
+        "sanitize-target-slug external path uses sanitized basename",
+    )
+
+proc = run(["sanitize-target-slug", "v1.2_Test", "/path/that/cannot/contain/input"])
+assert_eq("v1.2_test", proc.stdout.strip(), "sanitize-target-slug preserves dot and underscore")
+
+
+# ── run metadata and display formatting ──────────────────────────────────
+print("\nwrite-run-config")
+with tempfile.TemporaryDirectory() as td:
+    config = Path(td) / "run-config.json"
+    proc = run([
+        "write-run-config", str(config), "3", "bad", "1", "codex",
+        "model-name", "sample/target", "1",
+    ])
+    assert_eq(0, proc.returncode, "write-run-config exit code")
+    assert_eq(
+        {
+            "agent_count_overridden": True,
+            "backend": "codex",
+            "browser_agents": 0,
+            "model": "model-name",
+            "num_agents": 3,
+            "shell_agents": 1,
+            "target_slug": "sample/target",
+        },
+        json.loads(config.read_text()),
+        "write-run-config preserves schema and integer coercion",
+    )
+    proc = run([
+        "write-run-config", str(config), "4", "2", "2", "claude",
+        "next-model", "sample/target", "true",
+    ])
+    assert_eq(False, json.loads(config.read_text())["agent_count_overridden"],
+              "write-run-config accepts only integer one as override")
+
+print("\nformat-waste")
+telemetry = (
+    'tool_bytes=9003 max_output=9000 over8k=1 '
+    'native_tools=Read:1,Grep:0,Glob:0 top_cmds=ls:1,probe:1 '
+    'largest="probe: bin/probe scratch-1/testcase.html"'
+)
+proc = run(["format-waste", telemetry])
+assert_eq(
+    'tool output: bytes=9k max=9k oversized=1 top=ls:1,probe:1 '
+    'native=Read:1 largest="probe: bin/probe scratch-1/testcase.html"',
+    proc.stdout.strip(),
+    "format-waste renders compact nonzero fields",
+)
+proc = run(["format-waste", ""])
+assert_eq("tool output: bytes=0 max=0", proc.stdout.strip(),
+          "format-waste renders empty structured telemetry")
+
+print("\ncluster-count")
+clusters = json.dumps({"clusters": [
+    {"status": "PROMOTED"}, {"status": "pending-review"}, {"status": ""},
+]})
+proc = run(["cluster-count", "PENDING,REJECTED"], stdin=clusters)
+assert_eq(0, proc.returncode, "cluster-count valid JSON exit code")
+assert_eq("2", proc.stdout.strip(), "cluster-count excludes status prefixes")
+proc = run(["cluster-count", ""], stdin=clusters)
+assert_eq("3", proc.stdout.strip(), "cluster-count with no exclusions counts every cluster")
+proc = run(["cluster-count", ""], stdin="not json")
+assert_eq(1, proc.returncode, "cluster-count malformed JSON exits nonzero")
+
+print("\nmarkdown-finding and json-field")
+with tempfile.TemporaryDirectory() as td:
+    report = Path(td) / "report.md"
+    report.write_text(
+        "# Finding\n\n"
+        "**File and function:** src/sample.c:parse:42\n"
+        "**Bug class:** bounds\n"
+        "Caller controls: bytes\n"
+        "  and length\n"
+        "Strategy: S2\n",
+        encoding="utf-8",
+    )
+    proc = run(["markdown-finding", str(report)])
+    candidate = json.loads(proc.stdout)
+    assert_eq("markdown-report", candidate["format"],
+              "markdown-finding records source format")
+    assert_eq("src/sample.c:parse:42", candidate["location"],
+              "markdown-finding recognizes bold prose label")
+    assert_eq("bytes and length", candidate["caller_controls"],
+              "markdown-finding joins continuation line")
+    ok("# Finding" in candidate["report_text"],
+       "markdown-finding preserves full report text")
+
+proc = run(["json-field", "card_id"], stdin='{"card_id":"CARD-7"}')
+assert_eq("CARD-7", proc.stdout.strip(), "json-field reads requested field")
+proc = run(["json-field", "card_id"], stdin="invalid")
+assert_eq("", proc.stdout.strip(), "json-field fails open on invalid JSON")
+
+
 # ── waste-telemetry ─────────────────────────────────────────────────
 print("\nwaste-telemetry")
 
@@ -602,57 +715,15 @@ finally:
     os.unlink(delta_path)
 
 
-# ── append-guard-card ───────────────────────────────────────────────
-print("\nappend-guard-card")
-with tempfile.TemporaryDirectory() as td:
-    work = Path(td) / "work-cards.jsonl"
-    proc = run(
-        [
-            "append-guard-card",
-            str(work),
-            "GUARD-aaa",
-            "libxml2",
-            "parser",
-            "if (ctxt->state == XML_PARSER_DTD)",
-            "2026-05-18T00:00:00Z",
-        ],
-        check=True,
-    )
-    assert_eq(0, proc.returncode, "append-guard-card rc=0")
-    rows = [json.loads(ln) for ln in work.read_text().splitlines() if ln.strip()]
-    assert_eq(1, len(rows), "single row appended")
-    row = rows[0]
-    assert_eq("GUARD-aaa", row["id"], "id field")
-    assert_eq("guard-bypass", row["kind"], "kind field")
-    assert_eq("S2", row["strategy"], "strategy is S2")
-    assert_eq("unclaimed", row["status"], "status is unclaimed")
-    assert_eq(100, row["score"], "score is 100")
-    ok(
-        "bypass-only" in row["reason"] and "XML_PARSER_DTD" in row["reason"],
-        "reason embeds the guard string",
-        row["reason"],
-    )
-
-    run(
-        [
-            "append-guard-card", str(work), "GUARD-aaa", "libxml2", "parser",
-            "g", "2026-05-18T00:00:00Z",
-        ],
-        check=True,
-    )
-    rows = [json.loads(ln) for ln in work.read_text().splitlines() if ln.strip()]
-    assert_eq(2, len(rows), "second invocation appends a second row (dedup is caller's job)")
-
-
-# ── codex-usage-reset-at ────────────────────────────────────────────
-print("\ncodex-usage-reset-at")
+# ── provider-reset-at ───────────────────────────────────────────────
+print("\nprovider-reset-at")
 
 with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
     p1 = f.name
     future_clock = (dt.datetime.now() + dt.timedelta(minutes=15)).strftime("%I:%M %p").lstrip("0")
     f.write(f"You've hit your usage limit. Please try again at {future_clock}.\n")
 try:
-    proc = run(["codex-usage-reset-at", p1])
+    proc = run(["provider-reset-at", p1])
     assert_eq(0, proc.returncode, "absolute time form rc=0")
     out = proc.stdout.strip()
     ok(re.fullmatch(r"\d{9,11}", out) is not None, "prints integer epoch", out)
@@ -664,7 +735,7 @@ with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
     p1_stale = f.name
     f.write("You've hit your usage limit. Please try again at 10:55 PM.\n")
 try:
-    proc = run(["codex-usage-reset-at", p1_stale, "--now-epoch", str(fixed_now)])
+    proc = run(["provider-reset-at", p1_stale, "--now-epoch", str(fixed_now)])
     assert_eq(1, proc.returncode, "stale same-day clock reset does not roll to tomorrow")
     assert_eq("", proc.stdout, "stale same-day clock reset → empty stdout")
 finally:
@@ -674,7 +745,7 @@ with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
     p1_rollover = f.name
     f.write("You've hit your usage limit. Please try again at 12:10 AM.\n")
 try:
-    proc = run(["codex-usage-reset-at", p1_rollover, "--now-epoch", str(fixed_now)])
+    proc = run(["provider-reset-at", p1_rollover, "--now-epoch", str(fixed_now)])
     expected = int(time.mktime(dt.datetime(2026, 6, 15, 0, 10, 0).timetuple()))
     assert_eq(0, proc.returncode, "near-midnight next-day clock reset rc=0")
     assert_eq(str(expected), proc.stdout.strip(), "near-midnight next-day clock reset rolls forward")
@@ -769,7 +840,7 @@ with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
     f.write("rate limited, retry after 15 minutes\n")
 try:
     before = int(time.time())
-    proc = run(["codex-usage-reset-at", p2])
+    proc = run(["provider-reset-at", p2])
     after = int(time.time())
     assert_eq(0, proc.returncode, "relative form rc=0")
     parsed = int(proc.stdout.strip())
@@ -785,7 +856,7 @@ with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
     p3 = f.name
     f.write("a routine log line that mentions nothing about limits\n")
 try:
-    proc = run(["codex-usage-reset-at", p3])
+    proc = run(["provider-reset-at", p3])
     assert_eq(1, proc.returncode, "no match → rc=1")
     assert_eq("", proc.stdout, "no match → empty stdout")
 finally:

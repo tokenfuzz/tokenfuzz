@@ -8,12 +8,8 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 export SCRIPT_ROOT
 
-# Foundational shared lib (pure function defs, no source-time side effects).
-# Production sources it before every other lib; load it here too so tests that
-# source lib/triage.sh or lib/*.sh directly still get its helpers (audit_log,
-# pool_run, …) without each test having to source it itself.
-# shellcheck disable=SC1091
-source "$SCRIPT_ROOT/lib/platform.sh"
+# Python production modules are imported directly by tests and entry points.
+export PYTHONPATH="$SCRIPT_ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"
 
 # Block real Claude/Codex calls when a test is run directly (not via
 # tests/run-tests.sh). Per-decision mocks override.
@@ -28,10 +24,6 @@ unset AUDIT_BUILD_SUFFIX
 _SUITE_PASS=0
 _SUITE_FAIL=0
 _CURRENT_TEST=""
-# Dummy counters for compatibility (runner counts from stdout)
-PASSED=0
-FAILED=0
-
 # ── Test environment setup ──────────────────────────────────────
 # Creates a temp dir with the full directory structure expected by
 # the audit harness, and exports all required env vars.
@@ -62,7 +54,7 @@ setup_test_env() {
   export SAFETY_FRAMING_CACHED="(test-framing)"
   export AGENT_GUIDE_CACHED="(test-guide-content)"
   export MIN_DISCARDS_BEFORE_ROTATE=6
-  export MIN_ASAN_RUNS_BEFORE_ROTATE=15
+  export MIN_SANITIZER_RUNS_BEFORE_ROTATE=15
   export ENV_BLOCKED_BEFORE_ROTATE=2
   export PER_HYPOTHESIS_TURN_LIMIT=120
   export MAX_DRY_SESSIONS=5
@@ -92,9 +84,7 @@ setup_test_env() {
   echo "0" > "$COUNTER_FILE"
 
   # Stub helper functions that the libs expect from bin/audit
-  state_file_path()      { printf '%s/AUDIT_STATE-%s.md' "$RESULTS_DIR" "$1"; }
   scratch_dir_path()     { printf '%s/scratch-%s' "$RESULTS_DIR" "$1"; }
-  combined_state_path()  { printf '%s/AUDIT_STATE.md' "$RESULTS_DIR"; }
   hits_log_path()        { printf '%s/hits-%s.log' "$RESULTS_DIR" "$1"; }
   tried_inputs_log_path(){ printf '%s/tried-inputs-%s.log' "$RESULTS_DIR" "$1"; }
   quality_feedback_path(){ printf '%s/.quality_feedback_%s' "$RESULTS_DIR" "$1"; }
@@ -108,7 +98,7 @@ setup_test_env() {
     local slug; slug=$(printf '%s' "$1" | tr '/' '_')
     printf '%s/.guard_chain_%s' "$RESULTS_DIR" "$slug"
   }
-  asan_run_counter_path(){ printf '%s/.asan_runs_%s' "$LOGDIR" "$1"; }
+  sanitizer_run_counter_path(){ printf '%s/.sanitizer_runs_%s' "$LOGDIR" "$1"; }
   agent_mode() {
     if [ "$IS_BROWSER_TARGET" -eq 0 ]; then echo generic
     elif [ "$1" -le "$BROWSER_AGENTS" ]; then echo browser
@@ -206,11 +196,11 @@ setup_test_env() {
   list_candidate_subsystems() { echo "src/lib"; echo "src/crypto"; echo "src/net"; }
 
   # Export all stubs so subshells see them
-  export -f state_file_path scratch_dir_path combined_state_path hits_log_path
+  export -f scratch_dir_path hits_log_path
   export -f tried_inputs_log_path quality_feedback_path corpus_dir_root
   export -f fuzz_leads_path handoff_file_path
   export -f agent_strategy_path agent_strategy_streak_path agent_tenure_path
-  export -f guard_chain_path asan_run_counter_path agent_mode agent_role
+  export -f guard_chain_path sanitizer_run_counter_path agent_mode agent_role
   export -f get_agent_subsystem count_active_security_results
   export -f count_security_crash_candidates count_confirmed_findings
   export -f blocklist_description subsystem_is_blocklisted load_blocklist
@@ -229,8 +219,6 @@ teardown_test_env() {
 pass() {
   local name="${1:-$_CURRENT_TEST}"
   _SUITE_PASS=$((_SUITE_PASS + 1))
-  # Also increment parent's PASSED counter
-  PASSED=$((PASSED + 1))
   printf "  \033[0;32m✓\033[0m %s\n" "$name"
 }
 
@@ -238,7 +226,6 @@ fail() {
   local name="${1:-$_CURRENT_TEST}"
   local detail="${2:-}"
   _SUITE_FAIL=$((_SUITE_FAIL + 1))
-  FAILED=$((FAILED + 1))
   printf "  \033[0;31m✗\033[0m %s\n" "$name"
   [ -n "$detail" ] && printf "    %s\n" "$detail"
 }

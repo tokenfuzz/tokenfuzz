@@ -172,11 +172,11 @@ concern noted. The scorer represents that local precondition with
 CVSS-BTE Environmental **MAT:P**, because the threat-model fit is a
 scoring question, not a filing question.
 
-The LLM-backed crash gates (trace validity, report completeness,
-legitimacy) are **multi-vote**: a single keep vote keeps the crash,
-while a rejection only sticks once independent negative votes reach
-quorum (two by default). The gates fail open — an undecided crash is
-kept rather than dropped.
+Crash class, artifact completeness, harness ownership, and contract fields are
+checked deterministically. A final source-reading trigger-provenance gate is
+recall-safe: it needs two independent Reject votes with concrete disproof to
+remove a sanitizer-confirmed crash. An unavailable or inconclusive reviewer
+keeps the crash.
 
 **For findings, the gates are about substance:**
 
@@ -193,8 +193,6 @@ Reject is fatal; an Uncertain vote triggers a skeptical tiebreak.
 What happens to each artifact:
 
 - Accepted crashes stay under `crashes/`.
-- Borderline rejections sit in `crashes-needs-review/` for one more
-  pass before final demotion.
 - Hard rejections move to `crashes-rejected/` with a reason rendered in
   `REJECTED-CRASHES.html`.
 - Runtime-diagnostic crashes from findings-only targets are demoted

@@ -28,11 +28,11 @@ harness's harvester only looks under `${RESULTS_DIR}`.
   - Do not create repo-root `scratch-N/` dirs; a bare relative path writes to
     the shell cwd, not the active audit scratch dir.
   - MISSED → revise input, don't discard. Don't burn ASan budget.
-  - Generic C/C++ falls back to `bin/run-asan-multi generic` + `.asan.txt`.
+  - Generic C/C++ falls back to `bin/run-sanitizer-multi asan generic` + `.asan.txt`.
 - Clean runs over ~200 lines auto-truncate to head+tail with a
-  `[run-asan-multi] DIGEST: …` marker pointing at the full `.asan.txt`.
+  `[run-sanitizer-multi] DIGEST: …` marker pointing at the full `.asan.txt`.
 - Crash output over ~50 KB also truncates (head+tail+spill, full trace in
-  `.asan.txt`). Override per-call: `ASAN_DIGEST_HEAD/TAIL`, `ASAN_NO_DIGEST=1`,
+  `.asan.txt`). Override per-call: `SANITIZER_DIGEST_HEAD/TAIL`, `SANITIZER_NO_DIGEST=1`,
   or `OUTCAP_MAX_BYTES=0`.
 
 ## Testcase header (mandatory)
@@ -81,7 +81,7 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
   `tail`/`sed`/`cat` directly.
 - Crash/finding reports: `bin/state show-crash|show-finding|list-*` first;
   read full `REPORT.md` only when editing it.
-- Source ranges: `bin/peek <FILE>:<start>-<end>` (line + 50 KB byte cap),
+- Source ranges: `bin/peek <FILE>:<start>-<end>` (exact range + 50 KB byte cap),
   or `bin/peek -A N -B M PAT FILE` (A clamped to 30, B to 8). Bare `sed`
   is also output-capped. `--no-cap` or `OUTCAP_MAX_BYTES=0` to widen.
 - Prior-fix patches: `bin/show-patch <commit> [<path>]` (10-line ctx,
@@ -97,7 +97,7 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
   unless you intentionally want the full output in the transcript. Disable
   with `OUTCAP_MAX_BYTES=0`.
 - Don't run `bin/state … --help` — the cheat sheet below is the argument
-  shape for every subcommand you need. Flags accept the aliases shown.
+  shape for every subcommand you need.
 - Scratch helpers: `bin/scratch-status --agent N` for status; add
   `--files --file-limit 20` for a bounded recent file inventory.
 
@@ -106,11 +106,10 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
 ```
 resume        --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1..S8]
 next-card     --agent N [--mode MODE] [--peek]
-show-card     CARD_ID|--card-id ID [--mode MODE]        # compact JSON
+show-card     CARD_ID [--mode MODE]                     # compact JSON
 list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
-dump-queue    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]  # alias
-show-crash    CRASH-ID|--crash-id ID ;  list-crashes [--status OK|NEW] [--limit N]
-show-finding  FIND-ID|--finding-id ID ;  list-findings [--status OK|NEW] [--limit N]
+show-crash    CRASH-ID ;  list-crashes [--status OK|NEW] [--limit N]
+show-finding  FIND-ID ;  list-findings [--status OK|NEW] [--limit N]
 add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:func:line \
               --input-shape 'shape' --guard-gap 'gap' \
               --diagnostic bounds|lifetime|type|size|uninit|state --strategy S1
@@ -123,15 +122,14 @@ show-recent   [--agent N] [--hyps N] [--runs N] [--claims N] [--notes N]
 recent-hyps   [--agent N] [--card-id ID] [--status REGEX] [--strategy S] [--limit N]
 recent-runs   [--agent N] [--hypothesis-id H-...] [--verdict REGEX] [--limit N]
 recent-notes  [--agent N] [--hypothesis-id H-...] [--kind KIND] [--limit N]
-list-notes    [--agent N] [--hypothesis-id H-...] [--kind KIND] [--limit N]  # alias
 recent-tried  --agent N|all [--verdict REGEX] [--target SUBSTR] [--limit N]
-explain-queue [--agent N] [--mode MODE] [--role ROLE] [--strategy S] [--top N] [--all]
+explain-queue [--mode MODE] [--strategy S] [--top N] [--all]
 ```
 
 `resume` Runtime Feedback is next-mutation or harness-repair guidance from
 recent probe artifacts. It is not filing or discard evidence.
 
-## State file discipline
+## Structured state discipline
 
 - NEUTRAL vocabulary, describe by LOCATION (`File:Function:Line`).
 - Expected Diagnostic: lifetime / bounds / type / size / uninit / state.
@@ -142,8 +140,8 @@ recent probe artifacts. It is not filing or discard evidence.
   `ASAN_GENERIC_BIN=…/build-asan-XYZ/bin/<binary>`. The harness also
   auto-routes; look for `[probe] ROUTED:`. Missing library / header is
   true ENV-BLOCKED — no alternate build helps.
-- After context compression: read Working Context, resume top PENDING,
-  no new recon, do not re-read files already in Working Context.
+- After context compression: run `bin/state resume --agent N`, resume top
+  PENDING, do no new recon, and do not re-read `PRIOR SESSION SEED` ranges.
 
 ## CRASH promotion gate
 

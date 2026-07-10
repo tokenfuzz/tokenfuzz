@@ -6,20 +6,10 @@ claude / codex / oss (OpenCode against local OpenAI-compatible servers) /
 gemini / grok. The `gemini` backend keeps
 one harness-visible name while supporting two CLI dialects underneath:
 Antigravity (`agy`, default) and Google Gemini CLI (`gemini` when
-USE_GEMINI_CLI=1). Previously this logic lived in lib/llm_invoke.sh
-(sourced by bin/audit, bin/audit-recon, bin/validate-finding) with the
-decide-mode flag subset duplicated into lib/llm_decide.py. That
-duplication is now gone: lib/llm_decide.py imports `decide_flags()` from
-here, and lib/llm_invoke.sh is a thin bash shim that subprocess-calls
-this module so the same flag arrays reach bash callers without drift.
+USE_GEMINI_CLI=1). Audit, recon, validation, and decision callers import
+this module directly, so backend flags and invocation behavior cannot drift.
 
-Why bash kept its function-call interface (vs. having callers
-subprocess directly): the three binaries above use bash arrays for the
-agent-flag list (`"${flags[@]}"`) — that's the natural shape for
-forwarding into `exec`. Replacing the array pattern with shell-quoted
-strings would be a larger callsite refactor with no readability gain.
-
-CLI subcommands (used by the bash shim — `python3 lib/llm_invoke.py …`):
+CLI subcommands (`python3 lib/llm_invoke.py …`):
 
   known-backend <backend>
       Exit 0 if backend ∈ {claude, codex, oss, gemini, grok}; else 1.
@@ -48,7 +38,7 @@ CLI subcommands (used by the bash shim — `python3 lib/llm_invoke.py …`):
   gemini-isolated-home
       Stage (when cross-run memory is off and USE_GEMINI_CLI=1) a throwaway
       Gemini CLI home that excludes the global GEMINI.md, and print its path
-      for the bash entry point to export as GEMINI_CLI_HOME. Prints nothing
+      for the caller to export as GEMINI_CLI_HOME. Prints nothing
       when isolation does not apply.
 """
 
@@ -60,8 +50,10 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -124,13 +116,38 @@ def gemini_default_bin() -> str:
     return "gemini" if use_gemini_cli() else "agy"
 
 
+def apply_memory_policy(enabled: bool | None = None) -> None:
+    """Set the process-wide backend memory policy inherited by child CLIs."""
+    if enabled is None:
+        enabled = os.environ.get("TOKENFUZZ_MEMORY_ENABLED", "0") == "1"
+    os.environ["TOKENFUZZ_MEMORY_ENABLED"] = "1" if enabled else "0"
+    if enabled:
+        os.environ.pop("CLAUDE_CODE_DISABLE_AUTO_MEMORY", None)
+    else:
+        os.environ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+
+
+def backend_bin(backend: str) -> str:
+    configured = {
+        "claude": ("CLAUDE_BIN", "claude"),
+        "codex": ("CODEX_BIN", "codex"),
+        "oss": ("OPENCODE_BIN", "opencode"),
+        "gemini": ("GEMINI_BIN", gemini_default_bin()),
+        "grok": ("GROK_BIN", "grok"),
+    }
+    if backend not in configured:
+        raise ValueError(f"unknown backend: {backend}")
+    variable, default = configured[backend]
+    return os.environ.get(variable) or default
+
+
 def memory_enabled() -> bool:
     """Cross-run backend auto-memory is OFF unless TOKENFUZZ_MEMORY_ENABLED=1.
 
     Default-off (unset / empty / anything but "1") so every flag builder
     injects the per-backend disable controls automatically — no entry point
     can forget to. bin/audit's --enable-memory exports it as 1; bin/benchmark
-    always leaves it off. See lib/llm_invoke.sh:llm_apply_memory_policy.
+    always leaves it off. See lib/llm_invoke.py:llm_apply_memory_policy.
     """
     return os.environ.get("TOKENFUZZ_MEMORY_ENABLED", "").strip() == "1"
 
@@ -282,7 +299,7 @@ def memory_env(backend: str) -> dict:
     decide_flags, OpenCode does not need a harness memory knob for local OSS
     runs, and headless agy has no auth-preserving home/profile isolation wired
     here. Apply this on top of the child env at every launch
-    site (lib/llm_decide.py's subprocess, and lib/llm_invoke.sh's agent
+    site (lib/llm_decide.py's subprocess, and lib/llm_invoke.py's agent
     launchers via llm_apply_memory_policy) so even standalone llm_decide tools
     get the same isolation bin/audit gets.
 
@@ -562,6 +579,145 @@ def agent_flags(
     raise ValueError(f"unknown backend: {backend}")
 
 
+def run_agent_prompt(
+    backend: str,
+    prompt: str,
+    timeout_secs: int,
+    raw_log: str | os.PathLike[str],
+    *,
+    model: str = "",
+    max_turns: int = 80,
+    add_dirs: str = "",
+    cwd: str | os.PathLike[str] | None = None,
+    extra_env: dict[str, str] | None = None,
+    watchdog_marker_dir: str | os.PathLike[str] | None = None,
+) -> int:
+    """Launch a tool-using backend and write its combined raw transcript."""
+    binary = backend_bin(backend)
+    flags = agent_flags(backend, model, max_turns, add_dirs)
+    first_dir = next((p.strip() for p in add_dirs.split(",") if p.strip()), "")
+    working_dir = Path(cwd or first_dir or Path.cwd())
+    environment = os.environ.copy()
+    environment.update(memory_env(backend))
+    if extra_env:
+        environment.update({str(key): str(value) for key, value in extra_env.items()})
+    if backend == "claude":
+        command, input_text = [binary, *flags, "-p", prompt], None
+    elif backend == "codex":
+        command, input_text = [binary, "exec", *flags, "-"], prompt
+    elif backend == "oss":
+        environment["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_config(model), separators=(",", ":"))
+        command, input_text = [binary, *flags, prompt], None
+    elif backend == "gemini":
+        command = [binary, *flags]
+        if not use_gemini_cli():
+            command.extend(("--print-timeout", f"{timeout_secs}s"))
+        command.extend(("-p", ""))
+        input_text = prompt
+    elif backend == "grok":
+        command, input_text = [binary, *flags, "-p", prompt], None
+    else:
+        raise ValueError(f"unknown backend: {backend}")
+    launch_command = command
+    if timeout_secs > 0:
+        launch_command = [
+            sys.executable, str(Path(__file__).with_name("timeout.py")),
+            str(timeout_secs), "TERM", "0", *command,
+        ]
+    try:
+        if backend == "gemini" and timeout_secs > 0:
+            returncode = _run_gemini_with_watchdog(
+                launch_command, input_text, raw_log, working_dir, environment,
+                watchdog_marker_dir,
+            )
+        else:
+            with Path(raw_log).open("w", encoding="utf-8") as sink:
+                completed = subprocess.run(
+                    launch_command,
+                    input=input_text,
+                    stdout=sink,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    cwd=working_dir,
+                    env=environment,
+                    check=False,
+                )
+            returncode = completed.returncode
+    except OSError as exc:
+        Path(raw_log).write_text(str(exc) + "\n", encoding="utf-8")
+        return 127
+    warning = refusal_warning(backend, str(raw_log), prompt)
+    if warning:
+        print(warning, file=sys.stderr)
+        Path(f"{raw_log}.refusals.log").write_text(warning + "\n")
+    return returncode
+
+
+def _run_gemini_with_watchdog(
+    launch_command, input_text, raw_log, cwd, environment, marker_dir=None
+) -> int:
+    """Run a gemini agent with the health watchdog armed. The transcript is
+    streamed to raw_log live (not buffered) so the watchdog can poll it for
+    sustained 429 quota exhaustion; the agy klog arms cover the drip/idle
+    hangs. On a confirmed stall the watchdog terminates the process tree, which
+    lets proc.wait() return well before the wall-clock timeout."""
+    import gemini_watchdog
+
+    raw = Path(raw_log)
+    agent_num = environment.get("AGENT_NUM", "")
+    label = f"Agent{agent_num}" if agent_num else "gemini agent"
+    marker = Path(marker_dir) if marker_dir is not None else raw.parent
+    with raw.open("w", encoding="utf-8") as sink:
+        process = subprocess.Popen(
+            launch_command,
+            stdin=subprocess.PIPE if input_text is not None else None,
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=cwd,
+            env=environment,
+        )
+        watchdog = None
+        feeder = None
+        try:
+            watchdog = gemini_watchdog.Watchdog(
+                raw, process.pid, marker, label, use_cli=use_gemini_cli()
+            )
+            watchdog.start()
+            if input_text is not None:
+                # Feed stdin from a thread so a prompt larger than the pipe
+                # buffer cannot deadlock against a child that streams stdout
+                # first. stdout goes to a file, so the child never blocks there.
+                def _feed() -> None:
+                    try:
+                        process.stdin.write(input_text)
+                    except (OSError, ValueError):
+                        pass
+                    finally:
+                        try:
+                            process.stdin.close()
+                        except OSError:
+                            pass
+
+                feeder = threading.Thread(target=_feed, daemon=True)
+                feeder.start()
+            process.wait()
+        finally:
+            if watchdog is not None:
+                watchdog.stop()
+                watchdog.join(timeout=7)
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            if feeder is not None:
+                feeder.join(timeout=1)
+    return process.returncode
+
+
 def decide_flags(backend: str, model: str = "") -> list[str]:
     """Build the flag array for a decision call.
 
@@ -667,9 +823,8 @@ def _iter_json_values(lines):
 def _iter_json_lines(raw_log_path: str):
     """Yield JSON objects from a raw transcript, tolerating non-JSON lines.
 
-    Some CLIs interleave stream-json lines with stderr banner output.
-    The bash version uses `jq -R … fromjson?` to drop those; we mirror
-    by simply skipping any line that doesn't parse.
+    Some CLIs interleave stream-json lines with stderr banner output, so
+    non-JSON lines are skipped.
     """
     try:
         with open(raw_log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -752,8 +907,8 @@ def extract_text(backend: str, raw_log_path: str) -> str:
       - empty / missing-content transcript
       - log file unreadable (caller distinguishes via separate check)
 
-    Raises FileNotFoundError when <raw_log_path> does not exist — the
-    bash shim translates this to rc=1 to match the prior contract.
+    Raises FileNotFoundError when <raw_log_path> does not exist so callers can
+    distinguish a missing transcript from an empty response.
     """
     if not os.path.isfile(raw_log_path):
         raise FileNotFoundError(raw_log_path)
@@ -788,8 +943,7 @@ def extract_text(backend: str, raw_log_path: str) -> str:
             if isinstance(result, str):
                 result_pieces.append(result)
         pieces = msg_pieces if msg_pieces else result_pieces
-        # `-r` semantics: each value on its own line. The bash version
-        # uses `jq -r` which puts each emitted value on a new line.
+        # Each extracted value is emitted on its own line.
         return "\n".join(pieces) + ("\n" if pieces else "")
 
     if backend == "codex":
@@ -933,17 +1087,9 @@ def transient_tail(raw_log_path: str, tail_lines: int = 4) -> bool:
     """
     if not os.path.isfile(raw_log_path):
         return False
-    from collections import deque
+    from file_tools import tail_lines as read_tail_lines
 
-    tail: deque = deque(maxlen=max(1, tail_lines))
-    try:
-        with open(raw_log_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.rstrip("\n")
-                if line.strip():
-                    tail.append(line)
-    except OSError:
-        return False
+    tail = read_tail_lines(Path(raw_log_path), max(1, tail_lines), nonempty=True)
     for line in tail:
         if _ERROR_LINE.search(line) and _TRANSIENT_KW.search(line):
             return True
@@ -1183,7 +1329,7 @@ def refusal_warning(backend: str, raw_log_path: str, prompt: str) -> str:
     )
 
 
-# ── CLI dispatch (used by the bash shim) ────────────────────────────
+# ── CLI dispatch ───────────────────────────────────────────────────
 
 
 def _print_flags(flags: list[str]) -> int:
@@ -1297,7 +1443,7 @@ def _cmd_refusal_warning(args) -> int:
 
 def _cmd_gemini_isolated_home(_args) -> int:
     # Stage the isolated Gemini CLI home (when memory is off and USE_GEMINI_CLI=1)
-    # and print its path so the bash entry point can export GEMINI_CLI_HOME.
+    # and print its path so the caller can export GEMINI_CLI_HOME.
     # Prints nothing when isolation does not apply.
     home = prepare_gemini_memory_isolation()
     if home:

@@ -779,9 +779,8 @@ TARGET_ROOT="$TARGET_ROOT" RESULTS_DIR="$batch_results" "$RANK_WORK" \
 mk_state_dir "$batch_results"
 IFS= read -r first_batch_line < "$batch_results/work-cards.jsonl"
 first_batch_id=$(json_id "$first_batch_line")
-WORK_CARD_ALLOW_NORUNS_DISCARD=1 \
-"$STATE" --results-dir "$batch_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --card-id "$first_batch_id" --status discarded >/dev/null
+printf '{"card_id":"%s","agent":"1","status":"discarded","updated_at":"2026-01-01T00:00:00Z"}\n' \
+  "$first_batch_id" >> "$batch_results/state/claims.jsonl"
 if "$STATE" --results-dir "$batch_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
     next-card --agent 1 --mode generic --peek >/dev/null 2>&1; then
   fail "batch queue: exhausted one-card batch has no eligible work" "next-card unexpectedly found work"
@@ -848,9 +847,6 @@ assert_match "\"id\": \"$card_id\"" "$shown_card" "state: show-card accepts posi
 assert_match '"why_ranked":' "$shown_card" "state: show-card emits compact ranking context"
 assert_not_match 'usage: state' "$shown_card" "state: show-card does not fall through to argparse help"
 
-shown_card_flag=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  show-card --card-id "$card_id" --mode generic)
-assert_match "\"id\": \"$card_id\"" "$shown_card_flag" "state: show-card accepts --card-id"
 show_card_src=$(awk '
   /^def show_work_card\(/ { in_func=1 }
   in_func { print }
@@ -860,10 +856,6 @@ assert_match '_status_rows_by_card\(ctx, mode, cards=cards\)' "$show_card_src" \
   "state: show-card reuses preloaded work cards for status rows"
 show_card_reads=$(grep -c 'read_jsonl(work_cards_path(ctx))' <<< "$show_card_src" || true)
 assert_eq "1" "$show_card_reads" "state: show-card keeps one work-cards JSONL read"
-
-explained_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  explain-card --card-id "$card_id")
-assert_eq "$shown_card" "$explained_card" "state: explain-card is a show-card alias"
 
 patch_only=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   show-card PATCH-maint-only)
@@ -890,12 +882,6 @@ eligible_cards=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_RO
   list-cards --mode generic --status eligible --limit 3)
 assert_match '"reason": "eligible"' "$eligible_cards" "state: list-cards can filter by queue reason"
 
-dumped_queue=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  dump-queue --mode generic --status eligible --limit 2)
-dumped_count=$(printf '%s\n' "$dumped_queue" | grep -c '^{' || true)
-assert_eq "2" "$dumped_count" "state: dump-queue alias honors --limit"
-assert_match '"reason": "eligible"' "$dumped_queue" "state: dump-queue alias preserves list-cards filtering"
-assert_not_match 'usage: state' "$dumped_queue" "state: dump-queue alias does not fall through to argparse help"
 list_cards_src=$(awk '
   /^def list_work_cards\(/ { in_func=1 }
   in_func { print }
@@ -966,17 +952,13 @@ listed_crashes=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_RO
 assert_match '"id": "CRASH-900-1"' "$listed_crashes" "state: list-crashes filters by status"
 crash_lines=$(printf '%s\n' "$listed_crashes" | grep -c '^{' || true)
 assert_eq "1" "$crash_lines" "state: list-crashes honors --limit"
-listed_crashes_agent=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  list-crashes --agent 3 --status OK --limit 1)
-assert_match '"id": "CRASH-900-1"' "$listed_crashes_agent" "state: list-crashes accepts legacy --agent filter"
-
 missing_crash=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   show-crash CRASH-does-not-exist 2>&1 || true)
 assert_match 'crash not found' "$missing_crash" "state: show-crash unknown id is friendly"
 
 shown_finding=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  show-finding --finding-id FIND-900-demo)
-assert_match '"id": "FIND-900-demo"' "$shown_finding" "state: show-finding accepts --finding-id"
+  show-finding FIND-900-demo)
+assert_match '"id": "FIND-900-demo"' "$shown_finding" "state: show-finding accepts a positional id"
 assert_match '"cluster": "FCL-demo"' "$shown_finding" "state: show-finding emits cluster"
 assert_match '"dedup": "\[llm\] demo-key"' "$shown_finding" "state: show-finding emits dedup key"
 assert_match '"surface": "Public C API"' "$shown_finding" "state: show-finding emits surface"
@@ -989,10 +971,6 @@ listed_findings=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_R
 assert_match '"id": "FIND-900-demo"' "$listed_findings" "state: list-findings filters by status"
 finding_lines=$(printf '%s\n' "$listed_findings" | grep -c '^{' || true)
 assert_eq "1" "$finding_lines" "state: list-findings honors --limit"
-listed_findings_agent=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  list-findings --agent 3 --status OK --limit 1)
-assert_match '"id": "FIND-900-demo"' "$listed_findings_agent" "state: list-findings accepts legacy --agent filter"
-
 fresh_claim_next=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --peek)
 fresh_claim_next_id=$(json_id "$fresh_claim_next")
@@ -1073,29 +1051,6 @@ note=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --targ
 assert_match '"kind": "data-flow"' "$note" "state: records structured note"
 assert_match "$hyp_id" "$note" "state: note links to hypothesis"
 
-compat_hyp=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-hyp --agent 1 --card-id "$card_id" --hypothesis "legacy flag shape" \
-  --file "alpha/core/Legacy.cpp" --function "LegacyRead" --line 9 \
-  --input-shape "legacy byte input" --guard-gap "legacy guard" \
-  --expected-diagnostic bounds --strategy S1 --json)
-assert_match '"diagnostic": "bounds"' "$compat_hyp" "state: add-hyp accepts --expected-diagnostic alias"
-assert_match 'alpha/core/Legacy.cpp:LegacyRead:9' "$compat_hyp" "state: add-hyp folds legacy function/line flags into file"
-
-compat_note=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-note --agent 1 --card-id "$card_id" --kind working-context \
-  --text "legacy context note without hypothesis id" --json)
-assert_match '"kind": "context"' "$compat_note" "state: add-note maps working-context to context"
-
-compat_validation_note=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  add-note --agent 1 --hypothesis-id "$hyp_id" --card-id "$card_id" --kind validation \
-  --text "legacy validation note kind" --json)
-assert_match '"kind": "validation"' "$compat_validation_note" "state: add-note accepts validation note kind"
-
-compat_update=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-hyp "$hyp_id" --agent 1 --status INVESTIGATING --reason "legacy reason alias" --json)
-assert_match '"status": "INVESTIGATING"' "$compat_update" "state: update-hyp accepts positional id"
-assert_match 'legacy reason alias' "$compat_update" "state: update-hyp maps --reason to note"
-
 # Anti-fabrication gate: update-card --status discarded must refuse before
 # the runs.jsonl trail meets the floor (default 2 runs + 1 hypothesis).
 # We only logged one run above, so this attempt should be rejected.
@@ -1115,9 +1070,9 @@ printf '{"id": "%s", "agent": "1", "card_id": "%s", "hypothesis": "ThingProcesso
 printf '{"id": "NOTE-2nd000001", "agent": "1", "hypothesis_id": "%s", "card_id": "%s", "kind": "data-flow", "text": "ThingProcessorRead copies into callback-owned state before close", "created_at": "2026-06-01T00:00:01Z"}\n' \
   "$second_hyp_id" "$card_id" >> "$RESULTS_DIR/state/notes.jsonl"
 {
-  printf '{"id": "RUN-floor00001", "agent": "1", "hypothesis_id": "%s", "card_id": "%s", "mode": "generic", "testcase": "%s/scratch-1/tc.input", "testcase_sha1": "", "asan_output": "%s/scratch-1/tc.asan.txt", "verdict": "CLEAN", "asan_runs": 1, "created_at": "2026-06-01T00:00:01Z"}\n' \
+  printf '{"id": "RUN-floor00001", "agent": "1", "hypothesis_id": "%s", "card_id": "%s", "mode": "generic", "testcase": "%s/scratch-1/tc.input", "testcase_sha1": "", "asan_output": "%s/scratch-1/tc.asan.txt", "verdict": "CLEAN", "sanitizer_runs": 1, "created_at": "2026-06-01T00:00:01Z"}\n' \
     "$hyp_id" "$card_id" "$RESULTS_DIR" "$RESULTS_DIR"
-  printf '{"id": "RUN-floor00002", "agent": "1", "hypothesis_id": "%s", "card_id": "%s", "mode": "generic", "testcase": "%s/scratch-1/tc2.input", "testcase_sha1": "", "asan_output": "%s/scratch-1/tc2.asan.txt", "verdict": "CLEAN", "asan_runs": 1, "created_at": "2026-06-01T00:00:02Z"}\n' \
+  printf '{"id": "RUN-floor00002", "agent": "1", "hypothesis_id": "%s", "card_id": "%s", "mode": "generic", "testcase": "%s/scratch-1/tc2.input", "testcase_sha1": "", "asan_output": "%s/scratch-1/tc2.asan.txt", "verdict": "CLEAN", "sanitizer_runs": 1, "created_at": "2026-06-01T00:00:02Z"}\n' \
     "$second_hyp_id" "$card_id" "$RESULTS_DIR" "$RESULTS_DIR"
 } >> "$RESULTS_DIR/state/runs.jsonl"
 card_update=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
@@ -1125,26 +1080,18 @@ card_update=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT"
 assert_match '"status": "discarded"' "$card_update" "state: updates card status"
 assert_match "$card_id" "$(tail -1 "$RESULTS_DIR/state/claims.jsonl")" "state: card status appended to claims"
 compat_discard_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status DISCARDED --note "legacy uppercase discard" --json)
+  update-card --agent 1 --card-id "$card_id" --status DISCARDED --note "uppercase discard" --json)
 assert_match '"status": "discarded"' "$compat_discard_card" "state: update-card normalizes uppercase terminal statuses"
 compat_find_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   update-card --agent 1 --card-id "$card_id" --status FIND-123 --note "promoted finding" --json)
 assert_match '"status": "find"' "$compat_find_card" "state: update-card maps FIND-* status to find"
 assert_match 'artifact=FIND-123' "$compat_find_card" "state: update-card preserves mapped FIND-* artifact id in note"
 compat_env_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status ENV-BLOCKED --note "legacy env block" --json)
+  update-card --agent 1 --card-id "$card_id" --status ENV-BLOCKED --note "environment block" --json)
 assert_match '"status": "blocked"' "$compat_env_card" "state: update-card maps ENV-BLOCKED to blocked"
 compat_mode_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status mode-incompatible:asan --note "legacy mode wall" --json)
+  update-card --agent 1 --card-id "$card_id" --status mode-incompatible:asan --note "mode wall" --json)
 assert_match '"status": "blocked"' "$compat_mode_card" "state: update-card maps mode-incompatible:* to blocked"
-compat_reason_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "$card_id" --status blocked --reason "legacy card reason alias" --json)
-assert_match '"status": "blocked"' "$compat_reason_card" "state: update-card accepts --reason alias"
-assert_match 'legacy card reason alias' "$compat_reason_card" "state: update-card maps --reason to note"
-compat_pos_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card "$card_id" --agent 1 --status done --note "legacy positional card id" --json)
-assert_match '"status": "done"' "$compat_pos_card" "state: update-card accepts positional card id"
-
 # ─────────────────────────────────────────────────────────────────────
 # Productive-card lifecycle: crash/find no longer drain a finite queue.
 #   1. crash verification gate (update_card_status): a `crash` close must
@@ -1172,25 +1119,17 @@ assert_match 'refuses crash' "$gate_refused" "state: crash close refused with no
 assert_not_match '"status": "crash"' "$(tail -1 "$gate_results/state/claims.jsonl" 2>/dev/null || true)" \
   "state: refused crash does not enter claims"
 # Provide the harness-written evidence a real bin/probe run would record.
-printf '{"id":"RUN-gate00001","agent":"1","hypothesis_id":"","card_id":"WORK-GATE","mode":"generic","testcase":"%s/tc.input","verdict":"CRASH","asan_runs":1,"created_at":"2026-06-01T00:00:01Z"}\n' \
+printf '{"id":"RUN-gate00001","agent":"1","hypothesis_id":"","card_id":"WORK-GATE","mode":"generic","testcase":"%s/tc.input","verdict":"CRASH","sanitizer_runs":1,"created_at":"2026-06-01T00:00:01Z"}\n' \
   "$gate_results" >> "$gate_results/state/runs.jsonl"
 gate_ok=$("$STATE" --results-dir "$gate_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   update-card --agent 1 --card-id "WORK-GATE" --status crash --note "verified" --json)
 assert_match '"status": "crash"' "$gate_ok" "state: crash close accepted once a CRASH verdict references the card"
-# Explicit operator override bypasses the gate (tests / off-contract tooling).
-printf '{"id":"WORK-GATE2","kind":"ranked-source","target_slug":"%s","file":"zeta/hot/gate.c","subsystem":"zeta/hot","mode":"generic","strategy":"S1","score":10,"reason":"test","status":"unclaimed"}\n' \
-  "$TARGET_SLUG" >> "$gate_results/work-cards.jsonl"
-gate_override=$(WORK_CARD_ALLOW_NORUNS_CRASH=1 "$STATE" --results-dir "$gate_results" \
-  --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-card --agent 1 --card-id "WORK-GATE2" --status crash --note "override" --json 2>/dev/null)
-assert_match '"status": "crash"' "$gate_override" "state: WORK_CARD_ALLOW_NORUNS_CRASH=1 overrides the crash gate"
-
 # Model the real crash-close path: record a CRASH run, then close the card
 # through the gated update-card (not a hand-written claim row), so these
 # fixtures exercise the verifier instead of bypassing it.
 real_crash_close() { # results_dir card_id
   local rd="$1" cid="$2"
-  printf '{"id":"RUN-%s","agent":"1","hypothesis_id":"","card_id":"%s","mode":"generic","testcase":"%s/tc.input","verdict":"CRASH","asan_runs":1,"created_at":"2026-06-01T00:00:01Z"}\n' \
+  printf '{"id":"RUN-%s","agent":"1","hypothesis_id":"","card_id":"%s","mode":"generic","testcase":"%s/tc.input","verdict":"CRASH","sanitizer_runs":1,"created_at":"2026-06-01T00:00:01Z"}\n' \
     "$cid" "$cid" "$rd" >> "$rd/state/runs.jsonl"
   "$STATE" --results-dir "$rd" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
     update-card --agent 1 --card-id "$cid" --status crash >/dev/null
@@ -1388,7 +1327,7 @@ ok_hyp_id=$(printf '%s\n' "$ok_hyp" | sed -nE 's/.*id=(H-[0-9a-f]+).*/\1/p')
 assert_match '^H-[0-9a-f]{10}$' "$ok_hyp_id" "state: OK line id is parseable"
 
 ok_update=$("$STATE" --results-dir "$ok_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-hyp "$ok_hyp_id" --agent 1 --status DISCARDED --note "ok-default check")
+  update-hyp --id "$ok_hyp_id" --agent 1 --status DISCARDED --note "ok-default check")
 assert_match '^OK: update-hyp id='"$ok_hyp_id"' status=DISCARDED' "$ok_update" \
   "state: update-hyp default emits terse OK line with id+status"
 
@@ -1555,7 +1494,7 @@ assert_match '^id\|status\|agent\|strategy\|file\|card_id\|hypothesis$' "$recent
 assert_match "$hyp_id" "$recent" "recent-hyps: includes existing hypothesis"
 assert_match 'PENDING' "$recent" "recent-hyps: shows status column"
 recent_lines=$(printf '%s\n' "$recent" | grep -c '^H' || true)
-assert_eq "3" "$recent_lines" "recent-hyps: three data rows for three hypothesis shapes"
+assert_eq "2" "$recent_lines" "recent-hyps: two data rows for two hypothesis shapes"
 
 # Add a few extra rows so filters and --limit have something to cut.
 # Pure setup (add-hyp/update-hyp are exercised above and below): append the
@@ -1600,11 +1539,6 @@ PY
 )
 assert_eq "1:PENDING|2:DISCARDED" "$dup_statuses" \
   "state: scoped update-hyp changes only matching agent row"
-compat_hyp_card=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  update-hyp --id "H-DUP" --agent 2 --card-id "$card_id" --status CRASH-001 --note "legacy extra card-id" --json)
-assert_match '"status": "CRASH-001"' "$compat_hyp_card" "state: update-hyp accepts legacy --card-id"
-assert_match "legacy extra card-id" "$compat_hyp_card" "state: update-hyp keeps note with legacy --card-id"
-
 # --agent filter
 recent_a1=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   recent-hyps --agent 1)
@@ -1654,9 +1588,9 @@ assert_match 'invalid --status regex' "$bad_status" "recent-hyps: bad regex repo
 # so verdict filtering has something to discriminate on. add-run itself is
 # exercised above; seed these reader fixtures directly.
 {
-  printf '{"id": "RUN-recent0001", "agent": "1", "hypothesis_id": "H-BETA", "card_id": "%s", "mode": "generic", "testcase": "%s/scratch-1/tc-crash.input", "testcase_sha1": "", "asan_output": "%s/scratch-1/tc-crash.asan.txt", "verdict": "CRASH", "asan_runs": 1, "created_at": "2026-06-01T00:00:07Z"}\n' \
+  printf '{"id": "RUN-recent0001", "agent": "1", "hypothesis_id": "H-BETA", "card_id": "%s", "mode": "generic", "testcase": "%s/scratch-1/tc-crash.input", "testcase_sha1": "", "asan_output": "%s/scratch-1/tc-crash.asan.txt", "verdict": "CRASH", "sanitizer_runs": 1, "created_at": "2026-06-01T00:00:07Z"}\n' \
     "$card_id" "$RESULTS_DIR" "$RESULTS_DIR"
-  printf '{"id": "RUN-recent0002", "agent": "2", "hypothesis_id": "H-ALPHA", "card_id": "%s", "mode": "browser", "testcase": "%s/scratch-2/tc.html", "testcase_sha1": "", "asan_output": "%s/scratch-2/tc.asan.txt", "verdict": "CLEAN", "asan_runs": 1, "created_at": "2026-06-01T00:00:08Z"}\n' \
+  printf '{"id": "RUN-recent0002", "agent": "2", "hypothesis_id": "H-ALPHA", "card_id": "%s", "mode": "browser", "testcase": "%s/scratch-2/tc.html", "testcase_sha1": "", "asan_output": "%s/scratch-2/tc.asan.txt", "verdict": "CLEAN", "sanitizer_runs": 1, "created_at": "2026-06-01T00:00:08Z"}\n' \
     "$card_id" "$RESULTS_DIR" "$RESULTS_DIR"
 } >> "$RESULTS_DIR/state/runs.jsonl"
 
@@ -1836,10 +1770,6 @@ assert_match 'H-BETA' "$recent_notes_beta" "recent-notes --hypothesis-id: keeps 
 recent_notes_kind=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   recent-notes --kind variants)
 assert_match 'variants' "$recent_notes_kind" "recent-notes --kind: filters kind"
-list_notes_a2=$("$STATE" --results-dir "$RESULTS_DIR" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  list-notes --agent 2)
-assert_eq "$recent_notes_a2" "$list_notes_a2" "state: list-notes is a recent-notes alias"
-
 # ── recent-tried: parses tried-inputs-N.log key=value records ──
 TRIED_LOG="$RESULTS_DIR/tried-inputs-1.log"
 {
@@ -1921,8 +1851,6 @@ assert_match 'bin/state recent-hyps' "$sr_content" "cheat-sheet: session-rules l
 assert_match 'bin/state recent-runs' "$sr_content" "cheat-sheet: session-rules lists recent-runs"
 assert_match 'bin/state show-recent' "$sr_content" "cheat-sheet: session-rules lists show-recent"
 assert_match 'bin/state recent-tried' "$sr_content" "cheat-sheet: session-rules lists recent-tried"
-assert_match 'bin/state dump-queue' "$sr_content" "cheat-sheet: session-rules lists dump-queue"
-assert_match 'bin/state list-notes' "$sr_content" "cheat-sheet: session-rules lists list-notes"
 assert_match 'bin/state recent-tried --agent N --limit 40' "$sr_content" "cheat-sheet: session-rules uses recent-tried for tried-inputs memory"
 assert_not_match 'tail -40 <RESULTS_DIR>/tried-inputs-N.log' "$sr_content" "cheat-sheet: session-rules does not recommend raw tried-input tails"
 assert_match 'bin/state explain-queue' "$sr_content" "cheat-sheet: session-rules lists explain-queue"
@@ -2088,114 +2016,6 @@ assert_match 'run-sanitizer-multi asan browser' "$dry" "probe: browser uses run-
 assert_not_match 'hits-then-asan' "$dry" "probe: browser avoids duplicate coverage wrapper"
 
 : > "$RESULTS_DIR/state/claims.jsonl"
-source "$SCRIPT_ROOT/lib/structured_state.sh"
-source "$SCRIPT_ROOT/lib/prompt.sh"
-# Enable build_work_card_directive's stderr diagnostic so that if this
-# block ever flakes again (it has, historically — see SIGPIPE fix in
-# tests/helpers.sh and the relative-bin/state path fix), the captured
-# output explains *why* the directive came back empty.
-export WORK_CARD_DIRECTIVE_DEBUG=1
-directive=$(build_work_card_directive 1 2>/tmp/wcd-debug-block.$$ )
-debug_block=$(cat /tmp/wcd-debug-block.$$ 2>/dev/null); rm -f /tmp/wcd-debug-block.$$
-assert_eq "" "$directive" "prompt: structured active hypothesis blocks new card claim${debug_block:+ (debug: $debug_block)}"
-export WORK_CARD_FORCE_CLAIM=1
-directive=$(build_work_card_directive 1 2>/tmp/wcd-debug-render.$$ )
-debug_render=$(cat /tmp/wcd-debug-render.$$ 2>/dev/null); rm -f /tmp/wcd-debug-render.$$
-unset WORK_CARD_FORCE_CLAIM
-unset WORK_CARD_DIRECTIVE_DEBUG
-assert_match 'ASSIGNED WORK CARD' "$directive" "prompt: work card directive renders${debug_render:+ (debug: $debug_render)}"
-assert_match '\*\*File:\*\* `' "$directive" "prompt: work card directive includes file"
-assert_match '\*\*Fix commits:\*\* ' "$directive" "prompt: work card directive includes fix-hash field"
-assert_match 'PATCH-\* is only the work-card id, not a VCS revision' "$directive" \
-  "prompt: work card directive warns not to use card id as commit"
-wcd_src=$(awk '
-  /^build_work_card_directive\(\) \{/ { in_func=1 }
-  in_func { print }
-  in_func && $0 == "}" { exit }
-' "$SCRIPT_ROOT/lib/prompt.sh")
-wcd_card_jq_calls=$(grep -cF 'printf '\''%s'\'' "$card" | jq' <<< "$wcd_src" || true)
-assert_eq "1" "$wcd_card_jq_calls" "prompt: work card directive parses card JSON in one jq pass"
-
-prompt_claim_results="$TEST_TMPDIR/prompt-claim-results"
-mkdir -p "$prompt_claim_results/state"
-mk_state_dir "$prompt_claim_results"
-cat > "$prompt_claim_results/work-cards.jsonl" <<'JSONL'
-{"id":"WORK-PROMPT-A","kind":"ranked-source","target_slug":"testproject","subsystem":"alpha","file":"alpha/a.c","mode":"generic","strategy":"S1","score":100,"status":"unclaimed"}
-{"id":"WORK-PROMPT-B","kind":"ranked-source","target_slug":"testproject","subsystem":"beta","file":"beta/b.c","mode":"generic","strategy":"S1","score":90,"status":"unclaimed"}
-JSONL
-prompt_claim_a=$(RESULTS_DIR="$prompt_claim_results" build_work_card_directive 1)
-prompt_claim_b=$(RESULTS_DIR="$prompt_claim_results" build_work_card_directive 2)
-prompt_claim_a_id=$(printf '%s\n' "$prompt_claim_a" | sed -n 's/^- \*\*ID:\*\* //p' | head -1)
-prompt_claim_b_id=$(printf '%s\n' "$prompt_claim_b" | sed -n 's/^- \*\*ID:\*\* //p' | head -1)
-assert_eq "WORK-PROMPT-A" "$prompt_claim_a_id" "prompt: first work card directive claims top card"
-assert_eq "WORK-PROMPT-B" "$prompt_claim_b_id" "prompt: second work card directive skips freshly claimed card"
-prompt_claim_rows=$(grep -c '"status": "claimed"' "$prompt_claim_results/state/claims.jsonl" 2>/dev/null || true)
-assert_eq "2" "$prompt_claim_rows" "prompt: work card directive records prompt-time leases"
-
-prompt_fields_results="$TEST_TMPDIR/prompt-fields-results"
-mkdir -p "$prompt_fields_results/state"
-mk_state_dir "$prompt_fields_results"
-cat > "$prompt_fields_results/work-cards.jsonl" <<'JSONL'
-{"id":"WORK-FIELDS","kind":"recon-hypothesis","target_slug":"testproject","subsystem":"alpha/core","file":"alpha/core/a.c","mode":"generic","strategy":"S1","score":321,"status":"unclaimed","reason":"recon hypothesis | class=bounds | validator=Promote | tricky title with spaces | notes with punctuation: a=b, c/d","seed":"seed with spaces","fix_hashes":["abc123","def456"],"patch_cards":["PATCH-one","PATCH two"],"find_id":"FIND-777","recon":{"id":"RECON-777","class":"bounds","line":77,"validator_verdict":"Promote"}}
-JSONL
-fields_list=$("$STATE" --results-dir "$prompt_fields_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  list-cards --mode generic --limit 1)
-assert_match '"fix_hashes": \["abc123", "def456"\]' "$fields_list" \
-  "state: list-cards keeps non-empty fix hashes"
-assert_match '"patch_cards": \["PATCH-one", "PATCH two"\]' "$fields_list" \
-  "state: list-cards keeps non-empty related patch cards"
-assert_match '"seed": "seed with spaces"' "$fields_list" "state: list-cards keeps non-empty seed"
-assert_not_match '"invalid_fix_hashes": \[\]' "$fields_list" "state: list-cards drops empty optional hash fields"
-prompt_fields=$(RESULTS_DIR="$prompt_fields_results" build_work_card_directive 1)
-assert_match 'Seed.*seed with spaces' "$prompt_fields" \
-  "prompt: one-pass card parser preserves seed with spaces"
-assert_match 'Fix commits.*abc123, def456' "$prompt_fields" \
-  "prompt: one-pass card parser joins fix hashes"
-assert_match 'Related patch cards.*PATCH-one, PATCH two' "$prompt_fields" \
-  "prompt: one-pass card parser joins patch cards"
-assert_match 'Recon ID:.*RECON-777' "$prompt_fields" \
-  "prompt: one-pass card parser renders recon id"
-assert_match 'Line:.*77' "$prompt_fields" \
-  "prompt: one-pass card parser renders recon line"
-assert_match 'Validator verdict:.*Promote' "$prompt_fields" \
-  "prompt: one-pass card parser renders validator verdict"
-assert_match 'findings/FIND-777/report.md' "$prompt_fields" \
-  "prompt: one-pass card parser renders pre-filed FIND path"
-
-# ── Diagnostic surface for build_work_card_directive ─────────────────
-# Each silent-return branch emits a stderr line under
-# WORK_CARD_DIRECTIVE_DEBUG=1. Future flakes (the function has six
-# return-empty paths) leave evidence in the captured assertion output.
-
-# Branch 1: missing work-cards.jsonl.
-diag_tmp=$(mktemp -d)
-WORK_CARD_DIRECTIVE_DEBUG=1 RESULTS_DIR="$diag_tmp" \
-  build_work_card_directive 1 >/dev/null 2>"$diag_tmp/err"
-diag=$(cat "$diag_tmp/err")
-assert_match 'work-cards.jsonl missing or empty' "$diag" \
-  "build_work_card_directive: debug names missing work-cards.jsonl"
-rm -rf "$diag_tmp"
-
-# Branch 2: bin/state absent / not executable.
-diag_tmp=$(mktemp -d)
-WORK_CARD_DIRECTIVE_DEBUG=1 SCRIPT_ROOT="$diag_tmp" RESULTS_DIR="$diag_tmp" \
-  build_work_card_directive 1 >/dev/null 2>"$diag_tmp/err"
-diag=$(cat "$diag_tmp/err")
-assert_match 'bin/state not executable' "$diag" \
-  "build_work_card_directive: debug names missing bin/state"
-rm -rf "$diag_tmp"
-
-# Absolute-path resolution: function works regardless of CWD. Run it from
-# inside /tmp (where bin/state is not on the relative path) and confirm
-# the directive still renders. Prior implementation broke here.
-pushd /tmp >/dev/null
-export WORK_CARD_FORCE_CLAIM=1
-directive_abs=$(build_work_card_directive 1)
-unset WORK_CARD_FORCE_CLAIM
-popd >/dev/null
-assert_match 'ASSIGNED WORK CARD' "$directive_abs" \
-  "build_work_card_directive: renders when invoked from non-project CWD (absolute bin/state)"
-
 # ── explain-queue: aggregated default + --all + --top sizing ──
 explain_results="$TEST_TMPDIR/explain-queue-results"
 mkdir -p "$explain_results"
@@ -2235,8 +2055,8 @@ assert_match '"count": 2, "reason": "claimed-until"' "$default_out" \
   "explain-queue: claimed-until bucket counts both freshly-claimed cards"
 
 context_out=$("$STATE" --results-dir "$explain_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  explain-queue --agent 3 --mode generic --role reproduce --strategy S3 --top 12)
-assert_not_match 'usage: state' "$context_out" "explain-queue: accepts resume-shaped agent/role/strategy flags"
+  explain-queue --mode generic --strategy S3 --top 12)
+assert_not_match 'usage: state' "$context_out" "explain-queue: accepts mode/strategy filters"
 assert_match '"reason": "strategy-incompatible:none"' "$context_out" \
   "explain-queue --strategy: explains otherwise eligible nonmatching cards"
 explain_src=$(awk '
@@ -2324,14 +2144,7 @@ diverse_card=$("$STATE" --results-dir "$diversity_results" --target-path "$TARGE
   next-card --agent 2 --mode generic --role reproduce --peek)
 assert_match '"subsystem": "src/parser"' "$diverse_card" "state: generic card claims prefer different subsystem when queue has depth"
 
-printf 'include/nlohmann\n' > "$diversity_results/.guard_saturated_subsystems"
-guard_diverse_card=$("$STATE" --results-dir "$diversity_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  next-card --agent 3 --mode generic --role reproduce --peek)
-assert_match '"subsystem": "src/parser"' "$guard_diverse_card" "state: guard-saturated subsystem is skipped while alternatives exist"
-
-# Small queues still enforce one subsystem/card per agent. This covers the
-# regression where the diversity floor allowed overlap whenever fewer than
-# WORK_CARD_SUBSYSTEM_DIVERSITY_MIN_ELIGIBLE cards remained.
+# Small queues still enforce one subsystem/card per agent.
 disjoint_results="$TEST_TMPDIR/disjoint-results"
 mkdir -p "$disjoint_results/state"
 : > "$disjoint_results/state/claims.jsonl"
@@ -2464,23 +2277,6 @@ unpromo_claim=$("$STATE" --results-dir "$unpromo_results" --target-path "$TARGET
 unpromo_claim_id=$(json_id "$unpromo_claim")
 assert_eq "WORK-PATCH-S2" "$unpromo_claim_id" \
   "state: NEEDS-VERIFICATION recon does NOT trigger Promote precedence"
-
-# Operator opt-out: WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 disables the
-# gate even when a Promote card is unclaimed. Useful for A/B comparing
-# the old behaviour without code changes.
-optout_results="$TEST_TMPDIR/promoted-optout-results"
-mkdir -p "$optout_results/state"
-: > "$optout_results/state/claims.jsonl"
-: > "$optout_results/state/runs.jsonl"
-: > "$optout_results/state/events.jsonl"
-: > "$optout_results/state/notes.jsonl"
-: > "$optout_results/state/hypotheses.jsonl"
-cp "$promoted_results/work-cards.jsonl" "$optout_results/work-cards.jsonl"
-optout_claim=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$optout_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
-  next-card --agent 1 --mode generic --role reproduce --strategy S2)
-optout_claim_id=$(json_id "$optout_claim")
-assert_eq "WORK-PATCH-S2" "$optout_claim_id" \
-  "state: WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 disables the gate"
 
 # ── P3 (G): override gracefully falls through on surface block ──────
 # When every unclaimed Promote card shares an owned surface (an agent
@@ -2621,7 +2417,7 @@ assert_match '"card_id": "WORK-P5-B"' "$explicit_out" "P5: mark-card-reject-skip
 # After P7, a Promote finding emits one card whose primary `strategy`
 # is S7 but whose `allowed_strategies` covers [S5, S7]. The claim
 # filter must accept the card under EITHER strategy filter without
-# breaking the legacy single-strategy comparison for non-recon cards.
+# changing exact strategy comparison for non-recon cards.
 p7_results="$TEST_TMPDIR/p7-allowed-strategies"
 mkdir -p "$p7_results/state"
 : > "$p7_results/state/claims.jsonl"
@@ -2630,34 +2426,33 @@ mkdir -p "$p7_results/state"
 : > "$p7_results/state/notes.jsonl"
 : > "$p7_results/state/hypotheses.jsonl"
 cat > "$p7_results/work-cards.jsonl" <<'JSONL'
-{"id":"WORK-P7-PROMO","kind":"recon-hypothesis","target_slug":"tp","subsystem":"src/a","file":"src/a/x.c","mode":"generic","strategy":"S7","allowed_strategies":["S5","S7"],"score":1000,"status":"unclaimed","recon":{"id":"RECON-p7","validator_verdict":"Promote","line":10,"class":"OOB-write"}}
+{"id":"WORK-P7-PROMO","kind":"recon-hypothesis","target_slug":"tp","subsystem":"src/a","file":"src/a/x.c","mode":"generic","strategy":"S7","allowed_strategies":["S5","S7"],"score":1000,"status":"unclaimed","recon":{"id":"RECON-p7","validator_verdict":"NEEDS-VERIFICATION","line":10,"class":"OOB-write"}}
 {"id":"WORK-P7-S2","kind":"s1-patch","target_slug":"tp","subsystem":"src/b","file":"src/b/y.c","mode":"generic","strategy":"S2","score":50,"status":"unclaimed","description":"plain S2"}
 JSONL
 
 # (a) S5-filtered agent must receive the Promote card via P3 precedence
 # anyway, but if we disable precedence to isolate P7, the S5 claim still
 # matches the multi-strategy card.
-p7_s5=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+p7_s5=$("$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 1 --mode generic --role reproduce --strategy S5 --peek)
 p7_s5_id=$(json_id "$p7_s5")
 assert_eq "WORK-P7-PROMO" "$p7_s5_id" "P7: --strategy S5 matches via allowed_strategies"
 
 # (b) S7-filtered agent matches via primary strategy (unchanged semantics).
-p7_s7=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+p7_s7=$("$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 2 --mode generic --role reproduce --strategy S7 --peek)
 p7_s7_id=$(json_id "$p7_s7")
 assert_eq "WORK-P7-PROMO" "$p7_s7_id" "P7: --strategy S7 matches via primary strategy"
 
-# (c) Non-recon S2 card is still gated by exact strategy match (legacy
-# single-strategy behaviour preserved).
-p7_s2=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+# (c) Non-recon S2 card is gated by exact strategy match.
+p7_s2=$("$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 3 --mode generic --role reproduce --strategy S2 --peek)
 p7_s2_id=$(json_id "$p7_s2")
 assert_eq "WORK-P7-S2" "$p7_s2_id" "P7: non-recon S2 cards still use exact-match comparison"
 
 # (d) An unrelated strategy (S3) finds neither card — allowed_strategies
 # only matches the explicit list, not "all".
-p7_s3=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+p7_s3=$("$STATE" --results-dir "$p7_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 4 --mode generic --role reproduce --strategy S3 --peek 2>/dev/null || true)
 if [ -z "$p7_s3" ] || ! grep -q '"id"' <<<"$p7_s3"; then
   pass "P7: strategy outside allowed_strategies returns no card"
@@ -2680,7 +2475,7 @@ cat > "$p7_mode_results/work-cards.jsonl" <<'JSONL'
 {"id":"WORK-P7-ASAN-PROMO","kind":"recon-hypothesis","target_slug":"tp","subsystem":"src/a","file":"src/a/asan.c","mode":"asan","strategy":"S7","allowed_strategies":["S5","S7"],"score":1000,"status":"unclaimed","recon":{"id":"RECON-p7-asan","validator_verdict":"Promote","line":10,"class":"bounds"}}
 {"id":"WORK-P7-GENERIC-S2","kind":"s1-patch","target_slug":"tp","subsystem":"src/b","file":"src/b/generic.c","mode":"generic","strategy":"S2","score":50,"status":"unclaimed","description":"plain S2"}
 JSONL
-p7_asan=$(WORK_CARD_PROMOTED_RECON_PRECEDENCE=0 "$STATE" --results-dir "$p7_mode_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
+p7_asan=$("$STATE" --results-dir "$p7_mode_results" --target-path "$TARGET_ROOT" --target-slug "$TARGET_SLUG" \
   next-card --agent 5 --mode generic --role reproduce --strategy S7 --peek)
 p7_asan_id=$(json_id "$p7_asan")
 assert_eq "WORK-P7-ASAN-PROMO" "$p7_asan_id" "P7: generic agents can claim sanitizer-mode Promote cards"

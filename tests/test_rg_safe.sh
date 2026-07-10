@@ -23,7 +23,7 @@ while [ "$i" -le 500 ]; do
 done
 
 # ── Syntax check ──
-bash -n "$RG_SAFE" 2>/dev/null
+python3 -m py_compile "$RG_SAFE" 2>/dev/null
 assert_eq 0 $? "rg-safe: syntax check passes"
 
 # ── Line cap removed: output under the byte cap passes through whole. ──
@@ -60,7 +60,8 @@ assert_eq "500" "$data_lines" "rg-safe: '--' passthrough returns all matches"
 # ── PATH lookup failure: invoking with no rg in PATH returns helpful error.
 # Invoke through an absolute bash path so PATH can be completely isolated.
 mkdir -p "$TEST_TMPDIR/no-rg-bin"
-output=$(PATH="$TEST_TMPDIR/no-rg-bin" /bin/bash "$RG_SAFE" foo "$SMALL" 2>&1) || true
+PYTHON_BIN=$(command -v python3)
+output=$(PATH="$TEST_TMPDIR/no-rg-bin" "$PYTHON_BIN" "$RG_SAFE" foo "$SMALL" 2>&1) || true
 assert_match 'rg .ripgrep. not found' "$output" "rg-safe: helpful error when rg missing"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -69,16 +70,13 @@ assert_match 'rg .ripgrep. not found' "$output" "rg-safe: helpful error when rg 
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Single line of ~150 KiB, well over the 50 KB default head+tail cap and
-# also over the legacy 128 KiB byte cap, but only 1 line so the line cap
+# also over the former 128 KiB threshold, but only 1 line so the line cap
 # never fires.
 HUGE_LINE="$TEST_TMPDIR/huge_line.txt"
 python3 -c 'import sys; sys.stdout.write("X" * 150000 + " match\n")' > "$HUGE_LINE"
 
-# With the default RG_BYTES (131072), rg-safe routes through the head+tail+
-# spill helper from lib/output_cap.sh — strictly more informative than the
-# legacy "capped at N of M bytes" footer. The total emitted should be at
-# most ~55 KB (50 KB head+tail + marker overhead), well under the legacy
-# 128 KiB ceiling.
+# The default routes through the shared head+tail+spill helper. The total
+# emitted should be at most ~55 KB (50 KB head+tail + marker overhead).
 output=$("$RG_SAFE" match "$HUGE_LINE" 2>&1)
 output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
 [ "$output_bytes" -le 56000 ] && pass "rg-safe: helper-path caps single huge match line (got ${output_bytes} bytes)" \
@@ -88,26 +86,29 @@ assert_match 'output_cap: rg-safe truncated' "$output" \
 assert_match 'OUTCAP_MAX_BYTES=0 to disable' "$output" \
   "rg-safe: output_cap marker advertises the disable knob"
 
-# Legacy clip-and-footer path is still reachable via explicit RG_BYTES.
-# This proves callers that pinned the historical contract still get it.
+# Explicit RG_BYTES changes the shared head+tail threshold.
 output=$(RG_BYTES=65536 "$RG_SAFE" match "$HUGE_LINE" 2>&1)
-assert_match 'capped at 65536 of' "$output" \
-  "rg-safe: explicit RG_BYTES uses legacy chop-and-footer path"
+assert_match 'output_cap: rg-safe truncated' "$output" \
+  "rg-safe: explicit RG_BYTES uses shared output cap"
 
 # RG_BYTES env override: 8 KiB.
 output=$(RG_BYTES=8192 "$RG_SAFE" match "$HUGE_LINE" 2>&1)
 output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
 [ "$output_bytes" -le 9000 ] && pass "rg-safe: RG_BYTES=8192 honored (got ${output_bytes} bytes)" \
   || fail "rg-safe: RG_BYTES=8192 expected ≤9000 bytes, got ${output_bytes}"
-assert_match 'capped at 8192 of' "$output" "rg-safe: --cap-bytes reflected in footer"
+assert_match 'output_cap: rg-safe truncated' "$output" "rg-safe: RG_BYTES emits shared marker"
 
 # --cap-bytes wins over RG_BYTES env.
 output=$(RG_BYTES=8192 "$RG_SAFE" --cap-bytes 4096 match "$HUGE_LINE" 2>&1)
-assert_match 'capped at 4096 of' "$output" "rg-safe: --cap-bytes wins over RG_BYTES env"
+output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
+[ "$output_bytes" -le 5000 ] && pass "rg-safe: --cap-bytes wins over RG_BYTES env" \
+  || fail "rg-safe: --cap-bytes expected ≤5000 bytes, got ${output_bytes}"
 
 # --cap-bytes=N (equals form).
 output=$("$RG_SAFE" --cap-bytes=2048 match "$HUGE_LINE" 2>&1)
-assert_match 'capped at 2048 of' "$output" "rg-safe: --cap-bytes=N (equals form)"
+output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
+[ "$output_bytes" -le 3000 ] && pass "rg-safe: --cap-bytes=N (equals form)" \
+  || fail "rg-safe: --cap-bytes=N expected ≤3000 bytes, got ${output_bytes}"
 
 # RG_BYTES=0 disables byte cap (huge line passes through unclipped).
 output=$(RG_BYTES=0 "$RG_SAFE" match "$HUGE_LINE" 2>&1)
@@ -122,7 +123,7 @@ assert_not_match 'capped at' "$output" "rg-safe: --no-cap-bytes disables byte ca
 
 # --no-cap disables BOTH caps.
 output=$("$RG_SAFE" --no-cap match "$HUGE_LINE" 2>&1)
-assert_not_match 'capped at' "$output" "rg-safe: --no-cap disables both line and byte caps"
+assert_not_match 'capped at' "$output" "rg-safe: --no-cap disables the byte cap"
 
 # Byte cap fires on a large multi-line result set.
 COMBO="$TEST_TMPDIR/combo.txt"
@@ -131,7 +132,7 @@ for i in range(500):
     print("Y" * 200 + f" match {i}")
 ' > "$COMBO"
 output=$("$RG_SAFE" --cap-bytes 4096 match "$COMBO" 2>&1)
-assert_match 'capped at 4096 of' "$output" "rg-safe: byte cap fires on large result set"
+assert_match 'output_cap: rg-safe truncated' "$output" "rg-safe: byte cap fires on large result set"
 
 # Byte clip falls back to last newline (no partial trailing line).
 output=$("$RG_SAFE" --cap-bytes 500 match "$COMBO" 2>&1)

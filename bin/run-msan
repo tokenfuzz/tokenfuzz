@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env python3
 # MemorySanitizer execution wrapper.
 # Supports: generic, js, fuzz, fuzz-repro, fuzz-js
 #
@@ -17,7 +17,7 @@
 #                    fuzzers such as Wasm/RegExp/StructuredClone. Different
 #                    harness ABI and artifact flow from `js`.
 #
-# The per-mode dispatch is shared with bin/run-tsan via lib/sanitizer_run.sh;
+# The per-mode dispatch is shared with bin/run-tsan via lib/sanitizer_run.py;
 # this script only declares the MSan-specific option strings and timeouts.
 #
 # MSan detects reads of uninitialized memory. It is the second-highest-signal
@@ -33,79 +33,18 @@
 #   FUZZ_MSAN_TIMEOUT        — fuzz-mode timeout (default 600)
 #   MSAN_FUZZ_REPRO_TIMEOUT  — fuzz-repro timeout (default 20)
 
-set -euo pipefail
+from pathlib import Path
+import sys
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-source "$REPO_ROOT/lib/timeout.sh"
-# shellcheck source=../lib/platform.sh
-source "$REPO_ROOT/lib/platform.sh"  # audit_llvm_tool, used by the symbolize gate
-# shellcheck source=../lib/target_config.sh
-source "$REPO_ROOT/lib/target_config.sh"
-# shellcheck source=../lib/sanitizer.sh
-source "$REPO_ROOT/lib/sanitizer.sh"
-# shellcheck source=../lib/sanitizer_run.sh
-source "$REPO_ROOT/lib/sanitizer_run.sh"
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
 
-_probe_path="${2:-$PWD}"
-target_load "$_probe_path" 2>/dev/null || true
+import target_config
+from sanitizer_run import run_standard
 
-sanitizer_prepare_runtime_env msan
-sanitizer_warn_if_disabled msan
+try:
+    config = target_config.load(sys.argv[2] if len(sys.argv) > 2 else Path.cwd())
+except (FileNotFoundError, ValueError):
+    config = None
 
-command -v python3 &>/dev/null || { echo "[run-msan] FATAL: python3 is required" >&2; exit 1; }
-
-MSAN_BUILD_DIR="$(sanitizer_build_dir msan)"
-
-JS_TIMEOUT="${MSAN_TIMEOUT:-10}"
-FUZZ_TIMEOUT="${FUZZ_MSAN_TIMEOUT:-600}"
-FUZZ_REPRO_TIMEOUT="${MSAN_FUZZ_REPRO_TIMEOUT:-20}"
-GENERIC_TIMEOUT="${MSAN_TIMEOUT:-15}"
-
-# Per-mode option strings come from lib/sanitizer_options.conf via
-# sanitizer_options_for (lib/sanitizer.sh) — the single source of truth
-# shared with bin/export-repro. Do not re-hardcode option strings here.
-MSAN_OPTS_FULL="$(sanitizer_options_for msan full)"
-MSAN_OPTS_JS="$(sanitizer_options_for msan js)"
-MSAN_OPTS_FUZZ="$(sanitizer_options_for msan fuzz)"
-MSAN_OPTS_FUZZ_REPRO="$(sanitizer_options_for msan fuzz-repro)"
-
-# Append target.toml [sanitizer].msan_suppressions / msan_options. MSan
-# suppressions are how operators silence reads through uninstrumented
-# dependencies pending a full clean rebuild.
-MSAN_OPTS_FULL="$(sanitizer_compose_options msan "$MSAN_OPTS_FULL")"
-MSAN_OPTS_JS="$(sanitizer_compose_options msan "$MSAN_OPTS_JS")"
-MSAN_OPTS_FUZZ="$(sanitizer_compose_options msan "$MSAN_OPTS_FUZZ")"
-MSAN_OPTS_FUZZ_REPRO="$(sanitizer_compose_options msan "$MSAN_OPTS_FUZZ_REPRO")"
-
-if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 {generic|js|fuzz|fuzz-repro|fuzz-js} [args...]"
-    exit 1
-fi
-
-MODE="$1"; shift
-rc=0
-
-case "$MODE" in
-    generic)
-        sanitizer_run_generic msan "$MSAN_OPTS_FULL" "$GENERIC_TIMEOUT" "$@" || rc=$?
-        ;;
-    js)
-        sanitizer_run_js msan "$MSAN_OPTS_JS" "$JS_TIMEOUT" "$@" || rc=$?
-        ;;
-    fuzz)
-        sanitizer_run_fuzz msan "$MSAN_OPTS_FUZZ" "$FUZZ_TIMEOUT" "$@" || rc=$?
-        ;;
-    fuzz-repro)
-        sanitizer_run_fuzz_repro msan "$MSAN_OPTS_FUZZ_REPRO" "$FUZZ_REPRO_TIMEOUT" "$@" || rc=$?
-        ;;
-    fuzz-js)
-        sanitizer_run_fuzz_js msan "$MSAN_OPTS_FUZZ" "$FUZZ_TIMEOUT" "$@" || rc=$?
-        ;;
-    *)
-        echo "Usage: $0 {generic|js|fuzz|fuzz-repro|fuzz-js} [args...]"
-        exit 1
-        ;;
-esac
-
-exit "$rc"
+raise SystemExit(run_standard("msan", sys.argv[1:], config))

@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
-import json
 import os
 import re
 import secrets
@@ -39,6 +38,7 @@ SCRIPT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import crash_artifacts  # noqa: E402  (runtime sys.path adjustment)
+import sanitizer as sanitizer_policy  # noqa: E402
 import stack_frames  # noqa: E402  (runtime sys.path adjustment)
 import target_config  # noqa: E402  (runtime sys.path adjustment)
 
@@ -220,10 +220,8 @@ def safe_slug(value: str) -> str:
     return cleaned[:80]
 
 
-# Per-sanitizer metadata. Runtime *_OPTIONS strings are NOT stored here —
-# they live in lib/sanitizer_options.conf (the single source of truth shared
-# with the bin/run-* shell runners) and are loaded by
-# _load_sanitizer_mode_options() below.
+# Per-sanitizer metadata. Runtime *_OPTIONS strings live in
+# lib/sanitizer_options.conf and are read through lib/sanitizer.py.
 SANITIZER_META = {
     "asan": {
         "label": "ASan",
@@ -303,7 +301,7 @@ SANITIZER_META = {
 #                    normal `js` shell execution.
 #
 # The option strings themselves live in lib/sanitizer_options.conf (the
-# single source of truth shared with the shell runners), keyed by the
+# single source of truth shared with the live runners), keyed by the
 # canonical modes full/minimal/js/xpcshell/fuzz/fuzz-repro. The map below
 # translates each export-repro mode onto its canonical row — e.g. browser
 # and generic both run the `full` options; fuzz-js reuses `fuzz`.
@@ -321,34 +319,6 @@ _EXPORT_MODE_TO_CANONICAL = {
 }
 
 
-def _load_sanitizer_mode_options() -> dict[str, dict[str, str]]:
-    """Parse lib/sanitizer_options.conf into {sanitizer: {mode: options}}.
-
-    This is the single source of truth shared with the bin/run-* shell
-    runners (lib/sanitizer.sh:sanitizer_options_for). Keys are the canonical
-    modes; export-repro modes reach them via _EXPORT_MODE_TO_CANONICAL.
-    """
-    table: dict[str, dict[str, str]] = {}
-    conf = SCRIPT_ROOT / "lib" / "sanitizer_options.conf"
-    try:
-        text = conf.read_text(encoding="utf-8")
-    except OSError:
-        return table
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(None, 2)
-        if len(parts) != 3:
-            continue
-        san, mode, opts = parts
-        table.setdefault(san, {})[mode] = opts
-    return table
-
-
-SANITIZER_MODE_OPTIONS = _load_sanitizer_mode_options()
-
-
 def sanitizer_meta(name: str) -> dict[str, str]:
     return SANITIZER_META.get(name.lower(), SANITIZER_META["asan"])
 
@@ -364,10 +334,8 @@ def sanitizer_default_options(sanitizer: str, mode: str = "") -> str:
     a sanitizer does not define, falls back to that sanitizer's `full` row;
     a sanitizer with no rows at all (e.g. the Go race detector) yields "".
     """
-    san = sanitizer.lower()
     canonical = _EXPORT_MODE_TO_CANONICAL.get((mode or "generic").lower(), "full")
-    per_mode = SANITIZER_MODE_OPTIONS.get(san, {})
-    return per_mode.get(canonical) or per_mode.get("full") or ""
+    return sanitizer_policy.options_for(sanitizer.lower(), canonical)
 
 
 def _parse_header_line(line: str) -> dict[str, str]:
@@ -536,31 +504,26 @@ def emit_link_libs_with_resolves(link_libs: list[str], sanitizer: str) -> tuple[
     return resolver_block, link_args_string
 
 
-def _bash_glob_sort_key(p: Path) -> str:
-    """Sort key matching bash's default `*` glob ordering on a UTF-8 locale —
-    case-insensitive lexical. Bash on a C locale puts uppercase first, but
-    every developer setup we ship to has LANG=*.UTF-8.
-    """
+def _glob_sort_key(p: Path) -> str:
+    """Deterministic case-insensitive ordering for artifact discovery."""
     return p.name.casefold()
 
 
 def _list_visible_entries(d: Path) -> list[Path]:
-    """Equivalent to bash `for f in "$d"/*` — skips dotfiles and sorts
-    case-insensitively.
-    """
+    """Return non-dot entries in deterministic case-insensitive order."""
     return sorted(
         (e for e in d.iterdir() if not e.name.startswith(".")),
-        key=_bash_glob_sort_key,
+        key=_glob_sort_key,
     )
 
 
 def find_first_in_scan(scan_dirs: list[Path], pattern: str) -> Optional[Path]:
     """Glob `pattern` against each scan dir in order. First match wins.
 
-    Mirrors the bash `for dir in SCAN_DIRS; for f in $dir/$pattern; do ...`.
+    Directories and matches are considered in deterministic order.
     """
     for d in scan_dirs:
-        for f in sorted(d.glob(pattern), key=_bash_glob_sort_key):
+        for f in sorted(d.glob(pattern), key=_glob_sort_key):
             if f.is_file():
                 return f
     return None
@@ -576,48 +539,14 @@ def find_harness(scan_dirs: list[Path],
     return crash_artifacts.find_harness_source(scan_dirs, exclude=exclude)
 
 
-_SHELL_SHEBANG_RE = re.compile(r"^\s*#!.*\b(?:sh|bash|zsh|ksh)\b")
-_SHELL_WRAPPER_HINT_RE = re.compile(
-    r'(?m)(?:'
-    r'^\s*set\s+-|'
-    r'^\s*(?:ROOT|SRC|BUILD|SCRATCH|HARNESS_C|HARNESS_BIN|CATALOG_BIN|BIN)=|'
-    r'^\s*(?:if|for|while)\s+|'
-    r'^\s*exec\s+|'
-    r'"\$(?:CATALOG_BIN|BIN|HARNESS_BIN|san_bin)"|'
-    r'\$(?:CATALOG_BIN|BIN|HARNESS_BIN|san_bin|repro_src)\b|'
-    r'/build-(?:a|ub|m|t)san/'
-    r')'
-)
-
-
-def looks_like_shell_wrapper(path: Path) -> bool:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    first_line = text.splitlines()[0] if text.splitlines() else ""
-    if _SHELL_SHEBANG_RE.search(first_line):
-        return True
-    return bool(_SHELL_WRAPPER_HINT_RE.search(text))
-
-
 def find_shell_wrapper(scan_dirs: list[Path]) -> Optional[Path]:
     # `harness.sh` / `harness.bash` is the documented convention in
     # lib/languages.py: a `// HARNESS:` directive may name a shell driver
     # that compiles+runs upstream sources directly (no pre-built asan_bin).
-    # `testcase.sh` / `reproducer.sh` are legacy hand-coded wrappers that
-    # launch an already-built CLI binary. Do not treat every .sh with one of
-    # those names as shell code: language runners can preserve a `.sh`
-    # testcase that contains only probe metadata plus input bytes. Those must
-    # be staged as `input.sh` and passed to the runner, not inlined as shell.
     for d in scan_dirs:
         for name in ("harness.sh", "harness.bash"):
             p = d / name
             if p.is_file():
-                return p
-        for name in ("testcase.sh", "reproducer.sh"):
-            p = d / name
-            if p.is_file() and looks_like_shell_wrapper(p):
                 return p
     return None
 
@@ -625,19 +554,12 @@ def find_shell_wrapper(scan_dirs: list[Path]) -> Optional[Path]:
 def find_testcase(scan_dirs: list[Path], crash_dir: Path, audit_subdir: Path) -> Optional[Path]:
     """Find a non-script, non-binary, non-bundle file to use as the testcase.
 
-    Mirrors the bash globber:
-      - skip canonical bundle filenames (REPORT.md / reproduce.sh /
-        sanitizer.txt / harness.c / severity.json; plus legacy
-        asan.txt left behind by older bundles)
-      - skip files whose suffix is a known artifact type
-      - skip executable Mach-O/ELF/scripts
-      - prefer .audit/ originals when both new- and old-layout files exist
-
-    Iteration order matches bash's `for f in "$dir"/*` — dotfiles skipped,
-    case-insensitive sort.
+    Canonical bundle files, known sidecars, executable artifacts, and harness
+    sources are excluded. Audit originals take precedence when present.
     """
-    asan = crash_artifacts.find_primary_asan(scan_dirs)
-    return crash_artifacts.find_testcase(scan_dirs, asan_files=[asan] if asan else [])
+    sanitizer = crash_artifacts.find_primary_sanitizer(scan_dirs)
+    return crash_artifacts.find_testcase(
+        scan_dirs, sanitizer_files=[sanitizer] if sanitizer else [])
 
 
 def demangle(text: str) -> str:
@@ -657,9 +579,7 @@ def demangle(text: str) -> str:
 
 # ─── reproduce.sh templates ─────────────────────────────────────────
 # Templates use literal `__PLACEHOLDER__` tokens for substitutions. The
-# bash heredoc text is preserved byte-for-byte except for those tokens
-# (so a diff against a pre-port bundle on the same input is empty for
-# everything not being substituted).
+# template body is otherwise emitted byte-for-byte.
 
 PREAMBLE_MACH = """\
 #!/usr/bin/env bash
@@ -2094,32 +2014,6 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
     return read_field_from_fields_table(path, label)
 
 
-def read_llm_sidecar_fields(scan_dirs: list[Path]) -> dict:
-    """Reach fields the harness LLM hybrid pass wrote to `.llm_fields.json`.
-
-    The model-direct prompt asks only for a minimal crash report.md
-    (file/function/class); the structured reachability fields (Surface /
-    Trigger source / Caller controls / Boundary / …) come from this sidecar —
-    the same fallback bin/severity already consumes. The bundle build must read
-    it too: without it every reach field the report omits collapses to a dash
-    and the severity re-score runs on empties. First sidecar in scan order
-    wins; a missing or malformed file yields {}. Values are returned verbatim
-    (stripped); blanks are dropped so callers can `or`-chain a report value
-    ahead of the sidecar.
-    """
-    sidecar = find_first_in_scan(scan_dirs, ".llm_fields.json")
-    if sidecar is None:
-        return {}
-    try:
-        data = json.loads(sidecar.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {k: v.strip() for k, v in data.items()
-            if isinstance(v, str) and v.strip()}
-
-
 _STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-8]|REF)\b", re.IGNORECASE)
 
 
@@ -2682,17 +2576,9 @@ def _install_with_exact_case(src: Path, dst: Path) -> None:
 
 
 def _is_bundle_filename(name: str) -> bool:
-    # Note: asan.txt is intentionally NOT in the bundle set — the canonical
-    # filename is sanitizer.txt, and any legacy asan.txt left over from an
-    # older bundle should migrate into .audit/ on re-export so the root
-    # doesn't carry a stale duplicate alongside the fresh sanitizer.txt.
-    # Readers still accept asan.txt as a fallback for previously-shipped
-    # bundles (lib/crash_artifacts.find_primary_asan, lib/triage.sh,
-    # bin/cluster-crashes, bin/severity).
     if name in {"REPORT.md", "REPORT.html", "reproduce.sh", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "severity.json"}:
         return True
-    if name in {".llm-triage.json", ".llm-confirm.json", ".llm-legit-crash.json",
-                ".llm-find-quality.json", ".severity_ok", ".severity_pending",
+    if name in {".llm-find-quality.json", ".severity_ok", ".severity_pending",
                 ".severity_failed"}:
         return True
     if name.startswith("input."):
@@ -2970,7 +2856,7 @@ def write_shell_wrapper_template(out: Path, *, build_system: str, upstream_url: 
                    audit_build_script=audit_build_script),
     ]
     if san_bin_rel:
-        # Legacy CLI-binary wrapper: the inlined body launches `$san_bin`.
+        # CLI-binary wrapper: the inlined body launches `$san_bin`.
         parts.append(emit_bin_resolve(san_bin_rel, sanitizer))
     elif input_name:
         # Self-compiling wrapper (`harness.sh` that compiles upstream sources
@@ -3011,8 +2897,8 @@ def detect_advisory_status(report_md: Optional[Path], patch_path: Optional[Path]
     "fix is prose, not an applyable diff"; the reason lives in the prose.
 
     The triage pipeline already accepts bundles without patch.diff,
-    but downstream maintainers and the LLM confirm-agent benefit from
-    an explicit marker that distinguishes "advisory, by design" from
+    but downstream maintainers benefit from an explicit marker that distinguishes
+    "advisory, by design" from
     "agent forgot to capture the patch".
 
     Decision:
@@ -3146,7 +3032,7 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
     if asan_expected:
         parts.append(asan_expected + "\n")
     else:
-        # Legacy fallback for malformed/truncated logs that only expose
+        # Recovery path for malformed or truncated logs that only expose
         # isolated sanitizer lines.
         if asan_top:
             parts.append(asan_top + "\n")
@@ -3202,8 +3088,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--out")
     parser.add_argument("--slug")
     # Override the default RESULTS_DIR/crashes/<id> path. Used by maintenance
-    # passes that regenerate bundles for crashes-rejected/ and
-    # crashes-needs-review/ dirs without having to move them.
+    # passes that regenerate bundles outside the live crashes/ directory.
     parser.add_argument("--crash-dir")
     parser.add_argument("-h", "--help", action="store_true")
     try:
@@ -3223,9 +3108,6 @@ def main(argv: list[str]) -> int:
     cfg = target_config.Config()
     if args.slug:
         slug_dir = SCRIPT_ROOT / "output" / args.slug
-        # Prefer the backend-local output/<slug>/<backend>/results/
-        # .session-env over the legacy output/<slug>/.session-env copy,
-        # which concurrent backends race on.
         session_dir = target_config.find_slug_session_dir(slug_dir)
         if session_dir is not None:
             env = target_config.read_session_env(session_dir)
@@ -3255,7 +3137,7 @@ def main(argv: list[str]) -> int:
         try:
             cfg = target_config.load(os.getcwd())
         except FileNotFoundError:
-            die(f"no output/<slug>/.session-env above {os.getcwd()}; use --slug")
+            die(f"no backend results/.session-env above {os.getcwd()}; use --slug")
 
     if args.crash_dir:
         crash_dir = Path(args.crash_dir).resolve()
@@ -3274,7 +3156,7 @@ def main(argv: list[str]) -> int:
     scan_dirs.append(crash_dir)
 
     # ── Locate audit-side artifacts ──────────────────────────────────
-    asan_file = crash_artifacts.find_primary_asan(scan_dirs)
+    asan_file = crash_artifacts.find_primary_sanitizer(scan_dirs)
     if asan_file is None:
         die(f"no sanitizer output in {crash_dir} (or .audit/)")
     try:
@@ -3361,7 +3243,7 @@ def main(argv: list[str]) -> int:
         # splice it into reproduce.sh in place of the hardcoded cmake/autotools
         # template. This is the only way the reproducer build is guaranteed to
         # match the audit's build — same script, same flags, same library
-        # naming. Absent the file we fall back to the legacy template.
+        # naming. Without the file, use the generated build template.
         audit_build_script = ""
         if cfg.target_root:
             _abs = Path(cfg.target_root) / ".audit" / "build.sh"
@@ -3560,18 +3442,6 @@ def main(argv: list[str]) -> int:
             trusted_actions_value = read_bare_field(report_md, "Trusted caller actions")
             caller_contract_value = read_bare_field(report_md, "Caller contract")
             strategy_value = normalize_strategy(read_bare_field(report_md, "Strategy"))
-        # Fill any reach field the report itself does not carry from the
-        # `.llm_fields.json` sidecar (report value always wins). Model-direct
-        # reports keep these only here, so without the fallback the rebuilt
-        # REPORT.md dashes them out and the severity re-score loses the
-        # call-sequence / contract facts that should temper the score.
-        sidecar = read_llm_sidecar_fields(scan_dirs)
-        trigger_value = trigger_value or sidecar.get("trigger_source", "")
-        boundary_value = boundary_value or sidecar.get("boundary", "")
-        caller_controls_value = caller_controls_value or sidecar.get("caller_controls", "")
-        parameter_control_value = parameter_control_value or sidecar.get("parameter_control", "")
-        trusted_actions_value = trusted_actions_value or sidecar.get("trusted_caller_actions", "")
-        caller_contract_value = caller_contract_value or sidecar.get("caller_contract", "")
         # Default to the harness input boundary when nothing named the trigger.
         trigger_value = trigger_value or "bytes"
         surface_value, surface_reason = adjust_surface_from_report(
@@ -3667,12 +3537,6 @@ def main(argv: list[str]) -> int:
         # ── Migrate junk into .audit/ ────────────────────────────────
         if out_dir == crash_dir:
             audit_subdir.mkdir(parents=True, exist_ok=True)
-            legacy_repro = crash_dir / "repro"
-            if legacy_repro.is_dir():
-                dest = audit_subdir / "legacy-repro"
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.move(str(legacy_repro), str(dest))
             # Bash uses `shopt -s dotglob nullglob` here so dotfiles are also
             # migrated; mirror that by walking iterdir() (which already lists
             # hidden files) instead of _list_visible_entries.

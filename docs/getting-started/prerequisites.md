@@ -6,8 +6,9 @@ Before you run an audit, install three things:
 - an LLVM toolchain for sanitizer builds;
 - one authenticated agent backend.
 
-The harness itself is mostly shell and Python, and it writes state, logs,
-and reports to the local results directory. Hosted backends receive the
+The harness uses Python for orchestration, structured data, filesystem
+operations, sanitizer launchers, and triage. It writes state, logs, and reports to the local results
+directory. Hosted backends receive the
 prompts, source excerpts, state, and reports needed for the run. Use
 `--backend oss` when policy requires model data flow to stay local.
 
@@ -22,21 +23,21 @@ and during sanitizer builds.
 
 | Tool | Why it is needed |
 | --- | --- |
-| `bash` 3.2+ | Runs the orchestrator and shell wrappers. macOS system Bash is fine. |
-| `python3` 3.9+ with `venv` support | Parses target config and structured state. `venv` is used by `bin/docs`, Python-target bootstraps, and the vLLM quick path below. |
+| `python3` 3.10+ with `venv` support | Runs every TokenFuzz orchestration, sanitizer, state, reporting, and triage command. `venv` is used by `bin/docs`, Python-target bootstraps, and the vLLM quick path below. |
 | `git` | Clones, updates, and identifies revisions for most targets. |
-| `gh` | Queries GitHub advisory metadata (`gh api`) for the cross-project strategy. |
-| `jq` | Reads and writes JSONL state records. |
 | `rg` | Fast, bounded source search through helper commands. |
 | `file` | Distinguishes testcase inputs from scripts and compiled artifacts. |
 
-`bin/audit` preflight-checks `jq` and `python3` at startup and
-exits with a clear "FATAL: missing required tool(s): ..." message if
-any are absent. The remaining tools are required by individual commands
-(`bash` runs every shell wrapper, `git` is invoked by `bin/setup-target`,
-`rg` by `bin/rg-safe`, `file` by triage classification) but are not
-gated centrally — install them all up front to avoid scattered failures
-mid-run.
+Optional host tools are workload-specific:
+
+| Tool | When it is needed |
+| --- | --- |
+| `gh` | Cross-project advisory queries (`gh api`) used by Strategy S6. |
+| `bash` | Running `tests/run-tests.sh`, generated `reproduce.sh`/build recipes, or auditing a shell-language target. |
+| `jq` | Running the repository's Bash-based test suites; production commands parse JSON in Python. |
+
+`bin/audit` itself requires Python. Individual workflows invoke `git`, `rg`,
+`file`, LLVM tools, or optional `gh` only when that capability is used.
 
 For sanitizer builds, you also need LLVM:
 
@@ -69,12 +70,12 @@ from TokenFuzz.
 
 ```bash
 xcode-select --install
-brew install gh jq ripgrep llvm
+brew install gh ripgrep llvm
 ```
 
 `xcode-select --install` provides Apple's command-line tools (Git, Clang
 support files, `python3`, `nm`, and `otool`). macOS already includes
-Bash, `curl`, CA certificates, and `file`. If the command-line
+`curl`, CA certificates, and `file`. If the command-line
 tools are already installed, macOS will say so. Git is not guaranteed on
 a fresh macOS install until those command-line tools are installed.
 If `python3 -m venv` is unavailable or creates an environment without
@@ -85,7 +86,7 @@ If `python3 -m venv` is unavailable or creates an environment without
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  binutils clang file gh git jq libclang-rt-dev llvm python3 python3-venv ripgrep
+  binutils clang file gh git libclang-rt-dev llvm python3 python3-venv ripgrep
 ```
 
 Notes:
@@ -98,23 +99,23 @@ Notes:
   `libclang-rt-<N>-dev`, `clang-<N>`, and `llvm-<N>`.
 - `python3-venv` is needed by `bin/docs`, Python-target bootstraps, and
   the vLLM setup commands shown below.
-- Minimal container images also need `bash`, `ca-certificates`, and
-  `procps`; a normal host already has them.
+- Minimal container images also need `ca-certificates` and `procps`; add
+  `bash` and `jq` when running the repository test suite.
 
 ### Fedora / RHEL
 
 ```bash
 sudo dnf install -y \
-  binutils clang compiler-rt file gh git jq llvm python3 python3-pip ripgrep
+  binutils clang compiler-rt file gh git llvm python3 python3-pip ripgrep
 ```
 
 `compiler-rt` supplies the sanitizer runtimes that `libclang-rt-dev`
 provides on Debian / Ubuntu. `python3-pip` is included so environments
 created with `python3 -m venv` get a working `pip`.
 
-Minimal container images also need `bash`, `ca-certificates`,
+Minimal container images also need `ca-certificates`,
 `coreutils`, `diffutils`, `findutils`, `gawk`, `grep`, `procps-ng`, and
-`sed`; a normal Fedora / RHEL host already has them.
+`sed`; add `bash` and `jq` for the repository test suite.
 
 ## 2. One agent backend
 
@@ -254,6 +255,9 @@ build system.
 
 From the repository root:
 
+The test driver and several shell fixtures use Bash and `jq`. Install
+those two development-only tools before running this section.
+
 ```bash
 bash tests/run-tests.sh
 bash tests/run-tests.sh --image ubuntu:24.04
@@ -262,8 +266,8 @@ bash tests/run-tests.sh --image fedora:latest
 
 The suite does **not** call out to any real LLM backend — it stubs the
 agent invocations in [`tests/helpers.sh`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/helpers.sh) so it can run before you
-configure any backend CLI. It exercises the local shell, Python, jq,
-target config parsing, triage logic, state handling, search wrappers,
+configure any backend CLI. It exercises the Python runtime, shell fixtures,
+target config parsing, triage logic, state handling, search commands,
 and testcase classification.
 
 The `--image` forms are a portability sanity check: they re-run the
@@ -344,9 +348,9 @@ gVisor.
 
 A few things worth knowing on macOS:
 
-- You do not need GNU coreutils. Scripts work with BSD `stat`, `date`,
-  `sed`, and `mktemp`, and tolerate a missing `realpath`.
-- System Bash 3.2 is sufficient — no need to install a newer Bash.
+- You do not need GNU coreutils. Production commands use Python filesystem
+  and process APIs instead of platform-specific `stat`, `sed`, or `realpath` forms.
+- System Bash is sufficient for the test driver and generated recipes.
 - Homebrew LLVM is auto-detected at `/opt/homebrew/opt/llvm` and
   `/usr/local/opt/llvm`. Set `LLVM_PREFIX` only when you want to force a
   different LLVM install.

@@ -12,13 +12,13 @@ S1="$RESULTS_DIR/scratch-1"
 mkdir -p "$S1"
 
 # Three CLEAN testcases (same family) — verdict via EXECUTION VERIFIED marker.
-# Use .bin since lib/quality.sh treats *.txt as ambiguous (notes vs input)
+# Use .bin since lib/quality.py treats *.txt as ambiguous (notes vs input)
 # unless the stem matches input*/testcase*/tc-*/repro-* prefixes.
 for i in 1 2 3; do
   printf 'GET / HTTP/1.1\r\n' > "$S1/altsvc-expire-size-${i}.bin"
   cat > "$S1/altsvc-expire-size-${i}.asan.txt" <<EOF
 ASAN_RUN_HEADER: runs=1 mode=generic
-[run-asan-multi] EXECUTION_RATE: 1/1
+[run-sanitizer-multi] EXECUTION_RATE: 1/1
 [run-asan] generic EXECUTION VERIFIED (post-run, rc=0)
 EOF
 done
@@ -49,29 +49,28 @@ mkdir -p "$S2"
 for i in 1 2 3; do
   printf 'cfg %d\n' "$i" > "$S2/version_string_${i}.conf"
   cat > "$S2/version_string_${i}.asan.txt" <<'EOF'
-[run-asan-multi] EXECUTION_RATE: 1/1
+[run-sanitizer-multi] EXECUTION_RATE: 1/1
 EOF
 done
 
 # ── 1. Help text ─────────────────────────────────────────────────────
-output=$(bash "$SCRATCH_STATUS" --help 2>&1)
+output=$("$SCRATCH_STATUS" --help 2>&1)
 assert_match "scratch-status" "$output" "help: shows usage"
 
 # ── 2. Syntax check ──────────────────────────────────────────────────
-bash -n "$SCRATCH_STATUS" 2>/dev/null
-assert_eq 0 $? "syntax check passes"
+python3 -m py_compile "$SCRATCH_STATUS" 2>/dev/null
+assert_eq 0 $? "Python syntax check passes"
 
 # ── 3. --agent N output ──────────────────────────────────────────────
-output=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 1 2>&1)
+output=$(RESULTS_DIR="$RESULTS_DIR" "$SCRATCH_STATUS" --agent 1 2>&1)
 assert_match '\[scratch-1\] 6 testcases' "$output" "scratch-1 totals: 6 testcases"
 assert_match '3 CLEAN' "$output" "scratch-1 verdict: 3 CLEAN"
 assert_match '1 CRASH' "$output" "scratch-1 verdict: 1 CRASH"
 assert_match '2 ORPHAN' "$output" "scratch-1 verdict: 2 ORPHAN flagged"
 assert_match '1 harness sources' "$output" "scratch-1 harness count"
 
-# Force the Linux branch of lib/platform.sh on a macOS host. GNU `stat -f`
-# succeeds but returns filesystem data rather than file mtime; scratch-status
-# must use audit_stat_mtime_epoch instead of `stat -f ... || stat -c ...`.
+# Put misleading platform utilities first on PATH. The Python implementation
+# must use os.stat rather than parsing platform-specific command output.
 mkdir -p "$TEST_TMPDIR/fake-linux-bin"
 cat > "$TEST_TMPDIR/fake-linux-bin/uname" <<'SH'
 #!/usr/bin/env bash
@@ -90,7 +89,7 @@ fi
 exec /usr/bin/stat "$@"
 SH
 chmod +x "$TEST_TMPDIR/fake-linux-bin/uname" "$TEST_TMPDIR/fake-linux-bin/stat"
-output_linux=$(PATH="$TEST_TMPDIR/fake-linux-bin:$PATH" RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 1 2>&1)
+output_linux=$(PATH="$TEST_TMPDIR/fake-linux-bin:$PATH" RESULTS_DIR="$RESULTS_DIR" "$SCRATCH_STATUS" --agent 1 2>&1)
 assert_not_match 'syntax error|operand expected' "$output_linux" \
   "linux stat branch: no arithmetic error from GNU stat -f output"
 assert_match 'ago' "$output_linux" "linux stat branch: age fields still render"
@@ -110,7 +109,7 @@ assert_eq 1 "$fam_lines" "family: altsvc-expire-size collapses to one row"
 assert_match 'aws-sigv4-size.*CRASH' "$output" "family: aws-sigv4-size marked with CRASH"
 
 # ── 7. Underscore variants collapse too (scratch-2 fixture) ──────────
-output2=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 2 2>&1)
+output2=$(RESULTS_DIR="$RESULTS_DIR" "$SCRATCH_STATUS" --agent 2 2>&1)
 assert_match 'version_string *3 testcase' "$output2" "family: version_string_<N> collapses"
 
 # ── 7b. Harness-only scratch is valid under nounset / Bash 3.2 ─────────
@@ -119,12 +118,12 @@ mkdir -p "$S3"
 cat > "$S3/harness.c" <<'EOF'
 int main(void) { return 0; }
 EOF
-output3=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 3 --files 2>&1)
+output3=$(RESULTS_DIR="$RESULTS_DIR" "$SCRATCH_STATUS" --agent 3 --files 2>&1)
 assert_not_match 'unbound variable' "$output3" "harness-only: no empty-array nounset failure"
 assert_match '\[scratch-3\] 0 testcases .* 1 harness sources' "$output3" "harness-only: reports harness source"
 
 # ── 8. --terse omits family/newest sections ──────────────────────────
-output_terse=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 1 --terse 2>&1)
+output_terse=$(RESULTS_DIR="$RESULTS_DIR" "$SCRATCH_STATUS" --agent 1 --terse 2>&1)
 assert_match '\[scratch-1\]' "$output_terse" "terse: header present"
 if grep -q 'families:' <<<"$output_terse"; then
   fail "terse: families section should be omitted"
@@ -152,12 +151,12 @@ else
 fi
 
 # ── 10. Missing agent dir → (missing) marker, exit 0 ─────────────────
-output_missing=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 99 2>&1)
+output_missing=$(RESULTS_DIR="$RESULTS_DIR" "$SCRATCH_STATUS" --agent 99 2>&1)
 assert_match '\(missing\)' "$output_missing" "missing scratch dir: shows (missing)"
 
 # ── 11. No scratch dirs at all → error to stderr ─────────────────────
 empty_dir=$(mktemp -d)
-output_empty=$(RESULTS_DIR="$empty_dir" bash "$SCRATCH_STATUS" 2>&1) || true
+output_empty=$(RESULTS_DIR="$empty_dir" "$SCRATCH_STATUS" 2>&1) || true
 assert_match 'no scratch dirs found' "$output_empty" "no scratch: error message"
 rm -rf "$empty_dir"
 
@@ -175,7 +174,7 @@ fi
 for i in $(seq 1 25); do
   printf 'artifact %d\n' "$i" > "$S1/artifact-${i}.tmp"
 done
-output_files=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 1 --files --file-limit 5 2>&1)
+output_files=$(RESULTS_DIR="$RESULTS_DIR" "$SCRATCH_STATUS" --agent 1 --files --file-limit 5 2>&1)
 assert_match 'recent files \(newest 5 of [0-9]+\)' "$output_files" "files: section header includes bounded count"
 assert_match 'artifact-[0-9]+\.tmp' "$output_files" "files: artifacts listed"
 assert_match '\[artifact\]' "$output_files" "files: generic artifact kind shown"
@@ -183,7 +182,7 @@ assert_match 'more files; narrow by name with bin/scratch-search PATTERN' "$outp
 file_rows=$(grep -c '^    .* B  ' <<<"$output_files" || true)
 assert_eq 5 "$file_rows" "files: honors --file-limit"
 
-output_files_wide=$(RESULTS_DIR="$RESULTS_DIR" bash "$SCRATCH_STATUS" --agent 1 --files --file-limit 80 2>&1)
+output_files_wide=$(RESULTS_DIR="$RESULTS_DIR" "$SCRATCH_STATUS" --agent 1 --files --file-limit 80 2>&1)
 assert_match '\[testcase\]' "$output_files_wide" "files: testcase kind shown"
 assert_match '\[sanitizer-output\]' "$output_files_wide" "files: sanitizer-output kind shown"
 

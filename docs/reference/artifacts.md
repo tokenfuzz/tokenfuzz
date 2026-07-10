@@ -88,7 +88,7 @@ The paths an operator inspects after a run:
 | `findings/` | All security findings — any class, with or without a reproducer. See note below. |
 | `findings-rejected/` | FIND directories rejected by the LLM substance gate at quorum. |
 | `recon/` | One `RECON-*` directory per breadth-first recon candidate — an **unverified** raw claim. Holds `finding.json`, `validator-vote-*.json`, and a human-readable `REPORT.md`/`REPORT.html`. A sibling of `findings/`, not part of it. |
-| `corpus/` | Promoted inputs useful for future work. |
+| `corpus/` | Clean HIT inputs that contributed new coverage, promoted after each iteration for reuse by the ranker. Inputs are deduplicated by content, so agents may safely reuse names such as `testcase.js`. |
 | `scratch-N/` | Active testcase work for agent `N`. |
 | `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `LOGDIR`, and `SESSION_STARTED` values read by `bin/probe`. |
 
@@ -98,9 +98,6 @@ You rarely need to open these directly; the two worth knowing are:
 
 - `state/runs.jsonl` — one row per `bin/probe` invocation. `wc -l` on
   it is the fastest "did anything actually run?" check.
-- `crashes-needs-review/` — borderline LLM-rejections held for one
-  more pass before final demotion to `crashes-rejected/`.
-
 Everything else (`work-cards.jsonl`, `patch-cards.jsonl`, the recon
 survey files, the other `state/*.jsonl` streams, per-agent
 `hits-N.log` / `tried-inputs-N.log`, `.static-prompt-rules.md`, and
@@ -109,10 +106,10 @@ harness internals. The recon outputs are explained in
 [Recon discovery](../guides/recon-discovery.md).
 
 FIND directories without a report get a `.needs-content` marker and
-surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. After one LLM
-substance reject the directory carries a `.pending-drop` marker; a
-second reject moves it to `findings-rejected/` rather than deleting
-it. `touch .reviewed` (or `.keep`) inside a FIND directory pins it
+surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. A gate pass with
+Reject votes below quorum leaves `.pending-drop`; reaching quorum moves
+the directory to `findings-rejected/` rather than deleting it. `touch
+.reviewed` (or `.keep`) inside a FIND directory pins it
 past either gate.
 
 A short run may leave `crashes/` and `findings/` empty — that is
@@ -126,16 +123,18 @@ Before export, a crash directory commonly includes:
 ```text
 CRASH-001-1/
   testcase.<ext>        # .html, .js, .py, .dat, … depending on the target
-  asan.txt              # sanitizer output sidecar; msan.txt / tsan.txt /
-                        # ubsan.txt appear for the matching sanitizer
+  sanitizer.txt         # saved sanitizer output
   report.md             # agent-authored narrative + fields
-  reproducer.sh         # agent-authored rerun script
   patch.diff            # optional agent-suggested fix
 ```
 
 A crash that triage has accepted but not finished promoting carries a
-`.promotion_pending` marker; it clears when the bundle below is
-written.
+`.promotion_pending` marker. The adjacent `.promotion_pending.sig` and
+`.promotion_pending.count` files record whether the same artifact set has
+remained incomplete across triage passes. They clear when the bundle below is
+complete. A directory that remains incomplete for the configured TTL is
+preserved under `crashes-rejected/` with the missing artifacts named in its
+rejection report.
 
 After export, the maintainer-facing bundle has:
 
@@ -223,11 +222,10 @@ needs:
 - what is wrong from a security standpoint;
 - a rationale a reviewer can act on.
 
-Vacuous candidates are not moved out of `findings/` after a single
-reject. The harness drops a `.pending-drop` marker visible in the
-`Status` column of `findings/FINDING-CLUSTERS.html`. Edit the report
-to address the marker, or `touch .reviewed` / `.keep` to override. On
-a second reject, the directory is moved to `findings-rejected/`.
+Vacuous candidates are not moved out of `findings/` below reject
+quorum. The harness drops a `.pending-drop` marker in the FIND directory.
+Edit the report to address the marker, or `touch .reviewed` / `.keep` to
+override. At quorum, the directory is moved to `findings-rejected/`.
 
 The severity scorer can also write `severity.json` and update the
 severity text for a FIND. That is useful context, not a requirement

@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-# grep wrapper: caps output via lib/wrappers/_cap and skips any `logs/` dir plus
+#!/usr/bin/env python3
+# grep wrapper: caps output via wrapper_tools and skips any `logs/` dir plus
 # VCS metadata in recursive scans. Unlike rg, `--exclude-dir` (BSD and GNU) only
 # matches a directory's own name, not its ancestors, so grep cannot restrict the
 # skip to the harness output tree the way rg-safe/rg do. A full `logs/` skip is
@@ -8,9 +8,15 @@
 # happens to live under a `logs/` dir stays reachable via `bin/rg-safe`, the
 # documented source-search tool. `--exclude-dir` is a no-op without -r/-R, so
 # always-on is safe for single-file calls.
-_dir="$(cd "$(dirname "$0")" && pwd)"
-exec "$_dir/_cap" "$_dir" grep "-c,-l,-q,-L" \
-  --exclude-dir=logs \
-  --exclude-dir=.git \
-  --exclude-dir=.hg \
-  "$@"
+import sys
+
+from wrapper_tools import capped_command
+
+raise SystemExit(
+    capped_command(
+        "grep",
+        sys.argv[1:],
+        prefix=("--exclude-dir=logs", "--exclude-dir=.git", "--exclude-dir=.hg"),
+        passthrough=("-c", "-l", "-q", "-L"),
+    )
+)

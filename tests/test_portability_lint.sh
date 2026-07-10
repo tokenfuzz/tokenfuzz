@@ -1,154 +1,31 @@
 #!/usr/bin/env bash
-# tests/test_portability_lint.sh — production shell scripts must not depend
-# on GNU-only tooling.
-#
-# macOS ships neither coreutils `timeout` nor a `realpath` that understands
-# `--relative-to`, and docs/getting-started/prerequisites.md explicitly
-# promises GNU coreutils is NOT required. The harness already has portable
-# substitutes: audit_timeout_run (lib/timeout.sh) and python3 os.path.
-# This lint keeps bin/ and lib/ from regressing to the GNU-only forms.
-
+# Portability lint for production Python entrypoints and remaining generated shell.
 set -uo pipefail
-
-TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$TESTS_DIR/helpers.sh"
-
+source "$(dirname "$0")/helpers.sh"
 setup_test_env
 
 cd "$SCRIPT_ROOT" || exit 1
 
-# A bare `timeout`/`gtimeout` invocation at a command position — line start
-# (after indentation) or right after a pipe. Deliberately does NOT match
-# `--timeout` flags, `$TIMEOUT_SECS` variables, or the `audit_timeout_run`
-# shim, since none of those are the GNU `timeout` binary.
-timeout_re='(^|\|)[[:space:]]*g?timeout[[:space:]]'
-realpath_re='realpath[[:space:]]+--relative-to'
-readlink_f_re='readlink[[:space:]]+-f([[:space:]]|$)'
-find_printf_re='find[^\n]*[[:space:]]-printf[[:space:]]'
-stat_fallback_re="stat[[:space:]]+-f[[:space:]]+%[mz][^|;]*[|][|][[:space:]]*stat[[:space:]]+-c[[:space:]]+%[Ys]"
+realpath_hits=$(rg -n 'realpath[[:space:]]+--relative-to|readlink[[:space:]]+-f' bin lib 2>/dev/null || true)
+assert_eq "" "$realpath_hits" "production code does not require GNU realpath/readlink"
+find_printf_hits=$(rg -n 'find[^\n]*[[:space:]]-printf[[:space:]]' bin lib 2>/dev/null || true)
+assert_eq "" "$find_printf_hits" "production code does not use non-portable find -printf"
 
-# A prompt piped into an agent CLI, directly or through audit_timeout_run.
-# Under pipefail a CLI that exits before draining stdin kills the writer with
-# SIGPIPE, and the pipeline reports 141 instead of the CLI's own rc — which
-# reads as an agent crash rather than the quota/auth refusal it is. Feed the
-# prompt by redirect instead. The words below are the shell expansions that
-# resolve to an agent CLI binary; llm_decide is absent on purpose, as it
-# drains stdin before any early return.
-backend_cli_word='"\$(CODEX_BIN|CLAUDE_BIN|GEMINI_BIN|GROK_BIN|OPENCODE_BIN|gemini_bin|bin)"|\$\(llm_backend_bin'
-pipe_to_cli_re='\|[[:space:]]*(audit_timeout_run[[:space:]][^|]*)?('"$backend_cli_word"')'
+shell_entrypoints=""
+while IFS= read -r candidate; do
+  first=$(head -1 "$candidate" 2>/dev/null || true)
+  case "$first" in *bash*) shell_entrypoints="${shell_entrypoints}${shell_entrypoints:+$'\n'}$candidate" ;; esac
+done < <(find bin lib .agents -type f -perm -111)
+assert_eq "" "$shell_entrypoints" "production entrypoints contain no Bash implementations"
 
-# ── The lint itself ────────────────────────────────────────────────
-timeout_hits=$(rg -n "$timeout_re" bin lib 2>/dev/null || true)
-assert_eq "" "$timeout_hits" \
-  "no bare GNU timeout/gtimeout in bin/ or lib/ — use audit_timeout_run"
+python3 -m compileall -q bin lib .agents/skills/ff-bsan/scripts
+assert_eq 0 $? "all production Python entrypoints compile"
 
-realpath_hits=$(rg -n "$realpath_re" bin lib 2>/dev/null || true)
-assert_eq "" "$realpath_hits" \
-  "no GNU 'realpath --relative-to' in bin/ or lib/"
-
-readlink_f_hits=$(rg -n "$readlink_f_re" bin lib 2>/dev/null || true)
-assert_eq "" "$readlink_f_hits" \
-  "no GNU 'readlink -f' in bin/ or lib/; use audit_realpath"
-
-find_printf_hits=$(rg -n "$find_printf_re" bin lib 2>/dev/null || true)
-assert_eq "" "$find_printf_hits" \
-  "no GNU/BSD-incompatible find -printf in bin/ or lib/"
-
-stat_fallback_hits=$(rg -n "$stat_fallback_re" bin lib 2>/dev/null || true)
-assert_eq "" "$stat_fallback_hits" \
-  "no open-coded 'stat -f ... || stat -c ...' in bin/ or lib — use lib/platform.sh"
-
-pipe_to_cli_hits=$(rg -n "$pipe_to_cli_re" bin lib 2>/dev/null || true)
-assert_eq "" "$pipe_to_cli_hits" \
-  "no prompt piped into an agent CLI in bin/ or lib — redirect, or pipefail reports the writer's SIGPIPE as the CLI's rc"
-
-# ── Self-check: the patterns must actually fire ────────────────────
-# A silently-broken regex would make the lint above pass forever. Run the
-# exact patterns against a known-bad sample and confirm they catch the bad
-# forms while leaving the portable shim alone.
-probe="$TEST_TMPDIR/portability-probe.sh"
-printf '%s\n' \
-  '        timeout 30 claude -p x' \
-  '        audit_timeout_run 30 claude -p x' \
-  '  printf x | gtimeout 5 agy' \
-  '    rel=$(realpath --relative-to="$A" "$B")' \
-  '    abs=$(readlink -f "$d")' \
-  '    find "$d" -maxdepth 1 -type f -printf "%f\n"' \
-  '    stat -f %m "$f" 2>/dev/null || stat -c %Y "$f"' \
-  > "$probe"
-
-probe_timeout=$(rg -n "$timeout_re" "$probe" 2>/dev/null || true)
-assert_match "timeout 30 claude" "$probe_timeout" "lint detects a bare timeout call"
-assert_match "gtimeout 5 agy"    "$probe_timeout" "lint detects gtimeout after a pipe"
-assert_not_match "audit_timeout_run" "$probe_timeout" \
-  "lint ignores the portable audit_timeout_run shim"
-
-probe_realpath=$(rg -n "$realpath_re" "$probe" 2>/dev/null || true)
-assert_match "realpath --relative-to" "$probe_realpath" \
-  "lint detects realpath --relative-to"
-
-probe_readlink_f=$(rg -n "$readlink_f_re" "$probe" 2>/dev/null || true)
-assert_match "readlink -f" "$probe_readlink_f" \
-  "lint detects readlink -f"
-
-probe_find_printf=$(rg -n "$find_printf_re" "$probe" 2>/dev/null || true)
-assert_match "find.*-printf" "$probe_find_printf" \
-  "lint detects find -printf"
-
-probe_stat_fallback=$(rg -n "$stat_fallback_re" "$probe" 2>/dev/null || true)
-assert_match "stat -f %m" "$probe_stat_fallback" \
-  "lint detects open-coded BSD/GNU stat fallback"
-
-# The CLI-pipe rule must fire on every launch shape that carried the bug, and
-# stay silent on the redirect that replaced it and on the llm_decide pipes,
-# which are safe. A rule that flags those would block correct code.
-cli_probe="$TEST_TMPDIR/cli-pipe-probe.sh"
-printf '%s\n' \
-  '          | "$gemini_bin" "${gemini_flags[@]}" -p ""' \
-  '          | "$CODEX_BIN" exec resume "${flags[@]}" "$sid" -' \
-  '        | audit_timeout_run "$t" "$bin" exec "${flags[@]}" -' \
-  '      | audit_timeout_run "$T" "$(llm_backend_bin gemini)" "${f[@]}" -p ""' \
-  '  "$CODEX_BIN" exec - < <(printf "%s" "$prompt") > "$raw" 2>&1' \
-  '  json=$(printf "%s" "$prompt" | llm_decide strategy_pick "strategy" 12)' \
-  > "$cli_probe"
-
-probe_cli_pipe=$(rg -n "$pipe_to_cli_re" "$cli_probe" 2>/dev/null || true)
-assert_match 'gemini_bin'  "$probe_cli_pipe" "lint detects a prompt piped into the gemini CLI"
-assert_match 'CODEX_BIN'   "$probe_cli_pipe" "lint detects a prompt piped into codex resume"
-assert_match 'audit_timeout_run .*\$bin' "$probe_cli_pipe" \
-  "lint detects a prompt piped through audit_timeout_run into a backend bin"
-assert_match 'llm_backend_bin' "$probe_cli_pipe" \
-  "lint detects a prompt piped into \$(llm_backend_bin ...)"
-assert_not_match '< <(printf' "$probe_cli_pipe" \
-  "lint ignores the redirect form that replaced the pipe"
-assert_not_match 'llm_decide' "$probe_cli_pipe" \
-  "lint ignores llm_decide pipes — it drains stdin before any early return"
-
-# ── Behavioral: the two fixed scripts ──────────────────────────────
-# Both must source the portable timeout helper so audit_timeout_run is
-# defined when the backend-dispatch case statement runs.
-assert_file_contains "$SCRIPT_ROOT/bin/audit-recon" "timeout.sh" \
-  "bin/audit-recon sources lib/timeout.sh"
-assert_file_contains "$SCRIPT_ROOT/bin/validate-finding" "lib/timeout.sh" \
-  "bin/validate-finding sources lib/timeout.sh"
-
-# They must still parse after the edits.
-bash -n "$SCRIPT_ROOT/bin/audit-recon"
-assert_eq 0 $? "bin/audit-recon parses cleanly"
-bash -n "$SCRIPT_ROOT/bin/validate-finding"
-assert_eq 0 $? "bin/validate-finding parses cleanly"
-
-# ── Behavioral: the portable realpath replacement ──────────────────
-# audit-recon derives a slice's path relative to the target root via
-# python3 instead of `realpath --relative-to`. Confirm that mechanism
-# yields the same answer GNU realpath would, with no GNU dependency.
-rel=$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
-  /tmp/proj/libxml2/parser /tmp/proj/libxml2 2>/dev/null)
-assert_eq "parser" "$rel" "python relpath yields a correct relative path"
-
-rel_nested=$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
-  /tmp/proj/src/dom/media /tmp/proj 2>/dev/null)
-assert_eq "src/dom/media" "$rel_nested" "python relpath handles nested directories"
+for script in bin/audit bin/audit-recon bin/benchmark bin/hits bin/probe \
+  bin/run-asan bin/run-msan bin/run-tsan bin/run-ubsan bin/setup-target bin/validate-finding; do
+  first=$(head -1 "$script")
+  assert_match 'python3' "$first" "$script uses the Python runtime"
+done
 
 teardown_test_env
 summary

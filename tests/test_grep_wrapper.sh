@@ -127,13 +127,13 @@ output_bytes=$(printf '%s' "$output" | wc -c | tr -d ' ')
   || fail "byte cap: huge match should be head+tail capped, got ${output_bytes} bytes"
 assert_match "output_cap: grep-stdout truncated" "$output" "byte cap: default path emits output_cap marker"
 
-# Explicit CAP_BYTES preserves the historical chop-and-footer behavior.
+# Explicit CAP_BYTES changes the shared head+tail threshold.
 output=$(CAP_BYTES=65536 "$GREP_WRAPPER" "match" "$HUGE" 2>/dev/null)
-assert_match "stdout clipped at 65536" "$output" "byte cap: explicit CAP_BYTES uses legacy footer"
+assert_match "output_cap: grep-stdout truncated" "$output" "byte cap: explicit CAP_BYTES uses shared marker"
 
 # CAP_BYTES env override.
 output=$(CAP_BYTES=4096 "$GREP_WRAPPER" "match" "$HUGE" 2>/dev/null)
-assert_match "stdout clipped at 4096" "$output" "byte cap: CAP_BYTES env reflected"
+assert_match "output_cap: grep-stdout truncated" "$output" "byte cap: CAP_BYTES env reflected"
 
 # CAP_BYTES=0 disables byte cap.
 output=$(CAP_BYTES=0 "$GREP_WRAPPER" "match" "$HUGE" 2>/dev/null)
@@ -168,8 +168,6 @@ assert_eq "500" "$output" "passthrough: real -c flag still passes through unchan
 
 # ═══════════════════════════════════════════════════════════════
 # 11. Empty streams emit nothing and preserve grep's exit code.
-#     _cap early-returns on an empty stdout/stderr (skipping the wc/cat
-#     work); this locks that optimization to byte-identical behavior.
 # ═══════════════════════════════════════════════════════════════
 echo "needle" > "$TEST_TMPDIR/nomatch.txt"
 out=$("$GREP_WRAPPER" "ABSENT_PATTERN_XYZ" "$TEST_TMPDIR/nomatch.txt" 2>/dev/null); rc=$?

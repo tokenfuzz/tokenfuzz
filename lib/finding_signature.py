@@ -340,7 +340,7 @@ _INLINE_FILE_ONLY_RE = re.compile(rf"`(?P<file>{_PATH_FRAG})`")
 #     for `func` when a crash exists.
 #
 # Findings with no crash (pure source analysis) have no frame #0; they
-# fall through to the table row and then the legacy patterns.
+# fall through to the table row and then prose patterns.
 
 _FIELDS_FILE_RE = re.compile(
     r"^\s*\|\s*File\s*\|\s*`?(?P<file>[^|`\n]+?)`?\s*\|", re.MULTILINE | re.IGNORECASE,
@@ -393,7 +393,7 @@ def _clean_func(func: str) -> str:
     return f
 
 
-def _legacy_location(text: str) -> tuple[str, str]:
+def _prose_location(text: str) -> tuple[str, str]:
     """File/func from the Location: header or inline prose (raw, un-normalized)."""
     m = _LOCATION_HEADER_RE.search(text)
     if m:
@@ -433,10 +433,10 @@ def extract_location(report_text: str, target_root: str = "") -> tuple[str, str]
     f0_file, f0_func = _extract_frame0(text)
     ft_file = _fields_row(text, _FIELDS_FILE_RE)
     ft_func = _fields_row(text, _FIELDS_FUNC_RE)
-    lg_file, lg_func = _legacy_location(text)
+    prose_file, prose_func = _prose_location(text)
 
-    file = _first(ft_file, lg_file, f0_file)
-    func = _first(f0_func, ft_func, lg_func)
+    file = _first(ft_file, prose_file, f0_file)
+    func = _first(f0_func, ft_func, prose_func)
     return normalize_path(file, target_root), _clean_func(func)
 
 

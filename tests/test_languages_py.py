@@ -509,22 +509,21 @@ assert_in("c", out_lines, "CLI exts --kind source includes c")
 assert_in("ts", out_lines, "CLI exts --kind source includes ts")
 
 out, _, _ = run(CLI + ["probe-dispatch", "py"])
-assert_in("BUILD_KIND=interpret", out, "CLI probe-dispatch py emits BUILD_KIND=interpret")
-assert_in("INTERPRETER_DEFAULT=python3", out,
-          "CLI probe-dispatch py emits INTERPRETER_DEFAULT=python3")
+info = json.loads(out)
+assert_eq("interpret", info["build_kind"], "CLI probe-dispatch py emits build kind")
+assert_eq("python3", info["interpreter_default"],
+          "CLI probe-dispatch py emits interpreter")
 
 out, _, _ = run(CLI + ["probe-dispatch", "rs"])
-assert_in("BUILD_KIND=rust", out, "CLI probe-dispatch rs emits BUILD_KIND=rust")
-assert_in("COMPILER_DEFAULT=rustc", out, "CLI probe-dispatch rs emits compiler")
+info = json.loads(out)
+assert_eq("rust", info["build_kind"], "CLI probe-dispatch rs emits build kind")
+assert_eq("rustc", info["compiler_default"], "CLI probe-dispatch rs emits compiler")
 
 out, _, _ = run(CLI + ["probe-dispatch", "kts"])
-assert_in("BUILD_KIND=interpret", out, "CLI probe-dispatch kts emits interpret")
-assert_in("INTERPRETER_PREARGS=(-script)", out,
-          "CLI probe-dispatch kts emits -script preargs")
-
-out, _, _ = run(CLI + ["probe-dispatch", "py", "--format", "json"])
 info = json.loads(out)
-assert_eq("interpret", info["build_kind"], "CLI probe-dispatch py --format json")
+assert_eq("interpret", info["build_kind"], "CLI probe-dispatch kts emits build kind")
+assert_eq(["-script"], info["interpreter_preargs"],
+          "CLI probe-dispatch kts emits -script preargs")
 
 # Unknown ext exits 2.
 out, _, err = run(CLI + ["probe-dispatch", "xyz"], expect_rc=2)
@@ -578,6 +577,38 @@ with tempfile.TemporaryDirectory() as td:
               "bootstrap-plan python: CFLAGS carries -DNDEBUG (release mode)")
     assert_in("O2", cflags,
               "bootstrap-plan python: CFLAGS carries -O2 (release optimisation)")
+
+# The setup-target executor runs argv directly, falls back only on the final
+# command, persists the successful recipe, and records complete output.
+with tempfile.TemporaryDirectory() as td:
+    target_root = Path(td)
+    log_path = target_root / ".audit" / "bootstrap.log"
+    recipe_path = target_root / ".audit" / "bootstrap.sh"
+    plan = {
+        "cmds": [
+            [sys.executable, "-c", "print('first-ok')"],
+            [sys.executable, "-c", "print('primary-failed'); raise SystemExit(7)"],
+        ],
+        "alternatives": [
+            [sys.executable, "-c", "import os; print(os.environ['SETUP_SENTINEL'])"],
+        ],
+        "env": [["SETUP_SENTINEL", "fallback ok"]],
+    }
+    rc = languages.execute_bootstrap_plan(target_root, plan, log_path, recipe_path)
+    assert_eq(0, rc, "bootstrap executor: successful final alternative returns zero")
+    log_text = log_path.read_text()
+    assert_in("first-ok", log_text, "bootstrap executor: logs successful command output")
+    assert_in("primary-failed", log_text, "bootstrap executor: logs failed command output")
+    assert_in("fallback ok", log_text, "bootstrap executor: applies plan environment")
+    recipe_text = recipe_path.read_text()
+    assert_in("export SETUP_SENTINEL='fallback ok'", recipe_text,
+              "bootstrap executor: quotes environment in recipe")
+    assert_in("first-ok", recipe_text,
+              "bootstrap executor: recipe retains successful preceding command")
+    assert_in("SETUP_SENTINEL", recipe_text,
+              "bootstrap executor: recipe records successful alternative")
+    assert_eq(True, bool(recipe_path.stat().st_mode & 0o111),
+              "bootstrap executor: recipe is executable")
 
 # fuzz-backends CLI returns the maintained toolchains per build_system.
 out, _, _ = run(CLI + ["fuzz-backends", "python"])

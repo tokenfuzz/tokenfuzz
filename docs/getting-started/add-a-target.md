@@ -166,7 +166,7 @@ Then open the file and edit only:
 - `attacker_controls`, when the default input boundary is too narrow
   or too broad. Valid tokens are `bytes`, `call-sequence`, `timing`,
   `race`, `env`, `protocol-state`, and `fs-state` (see
-  [`lib/target_config.sh`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/target_config.sh) / [`lib/target_config.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/target_config.py)).
+  [`lib/target_config.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/target_config.py)).
 
 For the review checklist, see
 [Configure a target](../guides/configure-target.md). For complete

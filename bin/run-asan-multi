@@ -1,7 +1,0 @@
-#!/bin/bash
-# Compatibility shim — ASan multi-run is now one case of the generic
-# normalizer bin/run-sanitizer-multi. Historical callers invoke
-# `run-asan-multi <mode> <testcase> ...`; forward as `run-sanitizer-multi
-# asan <mode> <testcase> ...`. See bin/run-sanitizer-multi for the logic and
-# the SANITIZER_*/ASAN_* env contract.
-exec "$(dirname "$0")/run-sanitizer-multi" asan "$@"

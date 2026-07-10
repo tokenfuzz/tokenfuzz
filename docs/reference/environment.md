@@ -26,11 +26,6 @@ source.
 - browser targets: `BROWSER_AGENTS=1` and `SHELL_AGENTS=2`, for three
   workers total.
 
-When `NUM_AGENTS` is not set, the orchestrator can reduce the
-agent pool if it detects low memory or another audit process.
-That keeps unattended sessions from failing because the host is
-overloaded.
-
 Set `NUM_AGENTS=N` when you want a generic target to run exactly `N`
 parallel workers. For browser targets, prefer `BROWSER_AGENTS` and
 `SHELL_AGENTS` when you care about the browser-vs-shell mix.
@@ -61,9 +56,9 @@ dramatically slower or faster than ASan on your target:
 `FUZZ_ASAN_TIMEOUT` (UBSan reuses `UBSAN_TIMEOUT` for fuzz mode).
 Most runs never need any of them.
 
-Do not use shell `timeout` directly in audit workflows. The
-harness timeout helpers keep behaviour consistent across macOS
-and Linux.
+Do not use a platform `timeout` executable directly in audit workflows.
+`lib/timeout.py` keeps process-group termination and RSS limits consistent
+across macOS and Linux.
 
 ## LLVM
 
@@ -85,13 +80,16 @@ Defaults by platform:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BROWSER_ASAN_RUN_BUDGET` | `25` | Maximum ASan invocations per browser agent per iteration. |
-| `SHELL_ASAN_RUN_BUDGET` | `60` | Maximum ASan invocations per shell agent per iteration. |
-| `ASAN_RUN_BUDGET_PER_ITERATION` | (unset) | Convenience override that sets **both** budgets above to one value. |
-| `SANITIZER_RUNS` | `5` | Number of runs `bin/run-sanitizer-multi` uses for `bin/probe --confirm` and export, to measure the reproduction rate. (Legacy alias: `ASAN_RUNS`.) |
+| `BROWSER_SANITIZER_RUN_BUDGET` | `25` | Maximum sanitizer invocations per browser agent per iteration. |
+| `SHELL_SANITIZER_RUN_BUDGET` | `60` | Maximum sanitizer invocations per shell agent per iteration. |
+| `SANITIZER_RUN_BUDGET_PER_ITERATION` | (unset) | Convenience override that sets **both** budgets above to one value. |
+| `SANITIZER_RUNS` | `5` | Number of runs `bin/run-sanitizer-multi` uses for `bin/probe --confirm` and export, to measure the reproduction rate. |
+| `SANITIZER_DIGEST_HEAD` | `80` | Clean-run lines retained from the start of sanitizer output. Set `0` to disable clean-run truncation. |
+| `SANITIZER_DIGEST_TAIL` | `120` | Clean-run lines retained from the end of sanitizer output. Set `0` to disable clean-run truncation. |
+| `SANITIZER_NO_DIGEST` | unset | Preserve complete sanitizer output in the agent transcript for one probe. Full output is always preserved in the diagnostic file. |
 
-These budgets protect long sessions from spending too much ASan
-time on a single agent iteration. UBSan, MSan, and TSan runners
+The budget controls protect long sessions from spending too much sanitizer
+time on a single agent iteration. The individual runners
 use their own timeout knobs and are normally invoked for targeted
 follow-up rather than the default probe budget.
 
@@ -124,6 +122,25 @@ default Antigravity CLI (`agy`), `--model` takes a config slug or an
 exact `agy models` label, which the harness maps and a preflight
 validates; under `USE_GEMINI_CLI=1` it is forwarded to the Google Gemini
 CLI directly.
+
+### Gemini health checks
+
+The Gemini backend watches live output for sustained quota failures. The
+default Antigravity CLI path also detects its two known post-generation stall
+states. These limits normally need no adjustment.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GEMINI_WATCHDOG_POLL_SECS` | `10` | Seconds between backend-health checks. |
+| `GEMINI_QUOTA_WINDOW_LINES` | `400` | Recent raw-log lines inspected for a quota-dominated retry loop. |
+| `GEMINI_QUOTA_MIN_429` | `10` | HTTP 429 retry lines, with no assistant progress, required before the run is stopped as quota-exhausted. |
+| `AGY_DRIP_GRACE_SECS` | `60` | Grace period after Antigravity reports that output streaming stopped. Set `0` to disable this check. |
+| `AGY_IDLE_WINDOW_SECS` | `600` | Recent Antigravity log window checked for heartbeat-only activity. |
+| `AGY_IDLE_CONFIRM_POLLS` | `2` | Consecutive heartbeat-only checks required before termination. Set `0` to disable this check. |
+
+On a quota stop, the harness writes `.quota-exhausted` in the agent scratch
+directory or benchmark cell. The outer audit/benchmark loop uses the raw
+provider status and this marker to classify the interrupted run.
 
 ## Where to put overrides
 
@@ -158,8 +175,7 @@ bounded by default.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `RG_CAP` | `200` | Line cap used by `bin/rg-safe`. |
-| `RG_BYTES` | `131072` | Compatibility byte threshold for `bin/rg-safe`; the default value routes through the ~50 KiB head+tail spill cap, while non-default values use the legacy hard clip. |
+| `RG_BYTES` | `51200` | Byte threshold for `bin/rg-safe` head/tail output. Set `0` to disable clipping. |
 | `PEEK_GREP_AFTER` | `30` | Clamp for `bin/peek -A`. |
 | `PEEK_GREP_BEFORE` | `8` | Clamp for `bin/peek -B`. |
 | `RANK_WORK_LIMIT` | `120` | Number of work cards produced by the ranker. |
@@ -204,4 +220,9 @@ separately.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TRIAGE_DIR_PARALLEL` | `4` | How many `CRASH-*`/`FIND-*` dirs the triage sweep processes concurrently. Each dir's pipeline (LLM gates, bundling, severity scoring) stays serial internally; dirs are independent, so the pool only changes wall-clock, never verdicts. Set `1` to restore the fully serial sweep, or lower it if parallel triage decisions hit backend rate limits. |
+| `CRASH_PROMOTION_PENDING_MAX` | `10` | Consecutive triage passes allowed for an incomplete crash or failed maintainer-bundle export. On expiry, the preserved directory moves to `crashes-rejected/` with a possible-false-negative warning. Set `0` for immediate rejection. |
+| `CRASH_TRIGGER_GATE` | `1` | Run the source-grounded trigger-provenance gate before promotion. Set `0` only to bypass it; rejection normally requires two independent disproof-backed votes. |
+| `REPORT_GATE_MAX_BYTES` | `262144` | Maximum report bytes sent to one LLM triage gate. Oversize reports use a visible head-and-tail slice and emit a possible-false-negative warning. |
+| `FIND_GATE_MAX_PAUSES` | `12` | Maximum provider-limit pauses while draining finding validation at the end of a benchmark cell. |
+| `FIND_GATE_PAUSE_MAX_TOTAL` | `21600` | Maximum total seconds a benchmark cell may pause for finding validation. |
+| `FIND_GATE_PAUSE_CHUNK` | `1800` | Retry delay when the provider does not report an exact reset time. |

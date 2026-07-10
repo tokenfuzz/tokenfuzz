@@ -1,15 +1,29 @@
 #!/usr/bin/env python3
 """Helper subcommands extracted from bin/audit and bin/validate-finding.
 
-Each subcommand replaces a one-off `python3 -c` / `python3 - <<PY` block
-that used to live inline in the shell driver. The bash driver still owns
-its argv plumbing and stdout capture; this module owns the parsing.
+The audit and validation runners import these helpers directly. The CLI
+subcommands remain useful for operator inspection and focused tests.
 
 Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
 
   relpath-list <root>
       Read newline-separated paths from stdin and print each one as a
       path relative to <root>, dropping "." entries.
+
+  sanitize-target-slug <raw_path> <targets_root>
+      Preserve a target's nested path relative to targets_root, or use an
+      external target's basename, then normalize every slug component.
+
+  write-run-config <path> <num> <browser> <shell> <backend> <model> <target> <overridden>
+      Atomically write the structured run configuration consumed by
+      bin/benchmark. Invalid integer fields are stored as zero.
+
+  format-waste <telemetry>
+      Render one waste-telemetry row for the human-readable session index.
+
+  cluster-count <exclude_prefixes>
+      Read cluster JSON from stdin and count clusters whose status does not
+      start with a comma-separated excluded prefix. Invalid JSON exits 1.
 
   waste-telemetry <log_file>
       Stream a raw agent transcript (claude / codex stream-json) and emit
@@ -26,13 +40,13 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
 
   count-tools-all <log_file>
       Count both shell-command tool calls and all tool calls in one transcript
-      pass. Prints key=value lines for shell callers.
+      pass. Prints key=value lines for automation callers.
 
   raw-status <log_file>
       Stream a raw transcript once and print status booleans used by the
       agent finish path: rate_limit, codex_completed, codex_failed,
       gemini_success. This replaces several independent grep passes over
-      the same file while preserving the shell predicates' broad text checks.
+      the same file while preserving broad provider-status checks.
 
   finish-fields <log_file> <backend> [--prompt <prompt_file>]
       Stream/read a raw transcript once and print every agent finish-path
@@ -45,14 +59,6 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
       appended at or after <offset>. Prints count=N and offset=N. The returned
       offset stops after the last complete line so a partially-written event is
       retried on the next poll.
-
-  append-guard-card <work_file> <id> <slug> <subsystem> <guard> <now>
-      Append a guard-bypass work-card JSONL row. No-op if a row with the
-      same id already exists. Output: nothing.
-
-  codex-usage-reset-at <logfile> [--now-epoch N]
-      Compatibility alias for provider-reset-at.
-      Prints the epoch on stdout and exits 0 if found, exits 1 otherwise.
 
   provider-reset-at <logfile> [--now-epoch N]
       Parse provider text for the next reset epoch.
@@ -100,6 +106,7 @@ import os
 import re
 import shlex
 import sys
+import tempfile
 import time
 from collections import Counter
 from pathlib import Path
@@ -116,6 +123,225 @@ def _cmd_relpath_list(args: argparse.Namespace) -> int:
         rel = os.path.relpath(os.path.realpath(path), root)
         if rel != ".":
             print(rel)
+    return 0
+
+
+# ── sanitize-target-slug ───────────────────────────────────────────
+
+def sanitize_target_slug(raw: str, targets_root: str) -> str:
+    targets_real = os.path.realpath(targets_root)
+    raw_real = os.path.realpath(raw)
+    if raw_real == targets_real or raw_real.startswith(targets_real + os.sep):
+        relative = os.path.relpath(raw_real, targets_real)
+    else:
+        relative = os.path.basename(raw.rstrip("/")) or raw
+
+    parts = []
+    for component in relative.split(os.sep):
+        normalized = re.sub(r"[^a-z0-9._-]+", "-", component.lower()).strip("-")
+        if normalized:
+            parts.append(normalized)
+    return "/".join(parts)
+
+
+def _cmd_sanitize_target_slug(args: argparse.Namespace) -> int:
+    print(sanitize_target_slug(args.raw_path, args.targets_root))
+    return 0
+
+
+# ── run metadata and display formatting ──────────────────────────────────
+
+def _int_or_zero(value: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fmt_count(value: object) -> str:
+    number = _int_or_zero(str(value or 0))
+    if number >= 1_000_000:
+        text = f"{number / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{text}M"
+    if number >= 1_000:
+        return f"{number // 1_000}k"
+    return str(number)
+
+
+def _parse_waste(text: str) -> dict:
+    parsed = dict(
+        tool_bytes=0, max_output=0, over8k=0,
+        native_tools={}, top_commands={}, largest="none",
+    )
+    try:
+        parts = shlex.split(text or "")
+    except ValueError:
+        parts = []
+    for part in parts:
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        if key in ("tool_bytes", "max_output", "over8k"):
+            parsed[key] = _int_or_zero(value)
+        elif key == "native_tools":
+            parsed[key] = {
+                name: _int_or_zero(count)
+                for entry in value.split(",") if ":" in entry
+                for name, count in (entry.rsplit(":", 1),)
+            }
+        elif key == "top_cmds":
+            parsed["top_commands"] = {
+                name: _int_or_zero(count)
+                for entry in value.split(",") if ":" in entry and value != "none"
+                for name, count in (entry.rsplit(":", 1),)
+            }
+        elif key == "largest":
+            parsed[key] = value
+    return parsed
+
+
+def _cmd_write_run_config(args: argparse.Namespace) -> int:
+    path = Path(args.path)
+    payload = {
+        "num_agents": _int_or_zero(args.num_agents),
+        "browser_agents": _int_or_zero(args.browser_agents),
+        "shell_agents": _int_or_zero(args.shell_agents),
+        "backend": args.backend,
+        "model": args.model,
+        "target_slug": args.target_slug,
+        "agent_count_overridden": _int_or_zero(args.agent_count_overridden) == 1,
+    }
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            json.dump(payload, output, indent=2, sort_keys=True)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+    return 0
+
+
+def _cmd_format_waste(args: argparse.Namespace) -> int:
+    parsed = _parse_waste(args.telemetry)
+    parts = [
+        f"bytes={_fmt_count(parsed.get('tool_bytes'))}",
+        f"max={_fmt_count(parsed.get('max_output'))}",
+    ]
+    over = int(parsed.get("over8k") or 0)
+    if over:
+        parts.append(f"oversized={over}")
+    top = parsed.get("top_commands") or {}
+    if top:
+        parts.append("top=" + ",".join(
+            f"{name}:{count}" for name, count in list(top.items())[:5]
+        ))
+    native = {k: v for k, v in (parsed.get("native_tools") or {}).items() if v}
+    if native:
+        parts.append("native=" + ",".join(f"{name}:{count}" for name, count in native.items()))
+    largest = parsed.get("largest") or "none"
+    if largest != "none":
+        parts.append("largest=" + json.dumps(str(largest), ensure_ascii=False))
+    print("tool output: " + " ".join(parts))
+    return 0
+
+
+def _cmd_cluster_count(args: argparse.Namespace) -> int:
+    prefixes = tuple(prefix for prefix in args.exclude_prefixes.split(",") if prefix)
+    try:
+        data = json.load(sys.stdin)
+        clusters = data.get("clusters") or []
+        count = 0
+        for cluster in clusters:
+            status = str(cluster.get("status", "") or "").upper()
+            if prefixes and any(status.startswith(prefix) for prefix in prefixes):
+                continue
+            count += 1
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return 1
+    print(count)
+    return 0
+
+
+_FINDING_LABELS = {
+    "summary": "summary", "classification": "classification",
+    "root cause": "root_cause", "file and function": "location",
+    "location": "location", "bug class": "class", "class": "class",
+    "input shape and reach path": "input_shape", "input shape": "input_shape",
+    "reach path": "reach_path", "guards passed": "guards", "guards": "guards",
+    "primitive": "primitive", "falsification attempt": "falsification",
+    "boundary": "boundary", "caller controls": "caller_controls",
+    "trusted caller actions": "trusted_caller_actions",
+    "caller contract": "caller_contract", "trigger source": "trigger_source",
+    "strategy": "strategy",
+}
+_FINDING_LABEL_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:\*\*)?"
+    r"([A-Za-z][A-Za-z0-9 /_-]{0,80}?)"
+    r"(?:\*\*)?\s*:\s*(.*)$"
+)
+
+
+def _finding_label(line: str) -> tuple[str, str] | None:
+    match = _FINDING_LABEL_RE.match(line)
+    if not match:
+        return None
+    raw = re.sub(r"\s+", " ", match.group(1).strip()).lower()
+    key = _FINDING_LABELS.get(raw)
+    if not key:
+        return None
+    value = match.group(2).strip()
+    # Markdown commonly bolds the colon inside the label (`**Class:** x`),
+    # leaving the closing marker after the regex's colon separator.
+    if value.startswith("**"):
+        value = value[2:].lstrip()
+    return key, value
+
+
+def _cmd_markdown_finding(args: argparse.Namespace) -> int:
+    text_value = Path(args.path).read_text(encoding="utf-8", errors="replace")
+    lines = text_value.splitlines()
+    candidate = {"format": "markdown-report", "report_text": text_value.strip()}
+    index = 0
+    while index < len(lines):
+        parsed = _finding_label(lines[index])
+        if not parsed:
+            index += 1
+            continue
+        key, value = parsed
+        index += 1
+        continuation = []
+        while index < len(lines):
+            if _finding_label(lines[index]) or lines[index].startswith("#"):
+                break
+            if not lines[index].strip():
+                break
+            continuation.append(lines[index].strip())
+            index += 1
+        parts = [part for part in (value, " ".join(continuation).strip()) if part]
+        if parts:
+            candidate[key] = " ".join(parts)
+    print(json.dumps(candidate, ensure_ascii=False))
+    return 0
+
+
+def _cmd_json_field(args: argparse.Namespace) -> int:
+    try:
+        value = json.load(sys.stdin)
+        result = value.get(args.field, "") if isinstance(value, dict) else ""
+    except (TypeError, ValueError, json.JSONDecodeError):
+        result = ""
+    print("" if result is None else result)
     return 0
 
 
@@ -221,7 +447,7 @@ def _command_pattern(cmd):
         return "python" if tool.startswith("python") else tool
     if re.search(r"(?:^|[;&| ])bin/state\s+(?:--help|-h)\b", squashed):
         return "state-help"
-    if re.search(r"(?:^|[;&| ])bin/state\s+(?:show-card|explain-card|list-cards)\b", squashed):
+    if re.search(r"(?:^|[;&| ])bin/state\s+(?:show-card|list-cards)\b", squashed):
         return "state-card"
     for name in ("probe", "peek", "find-seed", "show-patch", "scratch-status", "scratch-search", "probe-history"):
         if re.search(r"(?:^|[;&| ])bin/" + re.escape(name) + r"\b", squashed):
@@ -527,7 +753,7 @@ def _status_class(match) -> str:
     return ""
 
 
-def _provider_issue_from_lines(lines) -> str:
+def _provider_issue_from_lines(lines, quota_marker: Path | None = None) -> str:
     """Classify backend/provider failures as none, transient, or capacity_limited.
 
     Capacity wins over transient when both appear. Detection is scoped so that
@@ -536,6 +762,12 @@ def _provider_issue_from_lines(lines) -> str:
     line (gemini stderr), never in tool output or assistant prose. The account
     usage-limit notice is the sole exception and needs a two-part match.
     """
+
+    # The Gemini watchdog observes the live retry stream and writes this marker
+    # before terminating a quota-stalled process. It is stronger evidence than
+    # transcript classification and therefore also outranks a transient error.
+    if quota_marker is not None and quota_marker.is_file():
+        return "capacity_limited"
 
     cap = trans = False              # credited in a backend error context
     cap_plain = trans_plain = False  # seen on a non-JSON (provider-CLI) line
@@ -827,33 +1059,7 @@ def _cmd_codex_turn_delta(args: argparse.Namespace) -> int:
     return 0
 
 
-# ── append-guard-card ───────────────────────────────────────────────
-
-def _cmd_append_guard_card(args: argparse.Namespace) -> int:
-    path = Path(args.work_file)
-    card = {
-        "id": args.id,
-        "kind": "guard-bypass",
-        "target_slug": args.slug,
-        "subsystem": args.subsystem,
-        "file": "",
-        "function": "",
-        "mode": "generic",
-        "strategy": "S2",
-        "score": 100,
-        "reason": (
-            f"bypass-only: repeated upstream guard {args.guard!r}; "
-            "write a testcase that gets past this guard or proves the guard boundary"
-        ),
-        "status": "unclaimed",
-        "created_at": args.now,
-    }
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(card, sort_keys=True) + "\n")
-    return 0
-
-
-# ── provider-reset-at / codex-usage-reset-at ────────────────────────
+# ── provider-reset-at ───────────────────────────────────────────────
 
 # Absolute clock-time reset forms (hour[:minute] am/pm), tried before the
 # relative-duration forms. Codex says "try again at 9:01 AM"; Claude's session
@@ -1248,8 +1454,7 @@ def _cmd_emit_event(args: argparse.Namespace) -> int:
     payload: dict = {}
     # Order: defaults (string), then typed overrides. A key declared with
     # --int wins over the same key declared as plain key=value, regardless
-    # of argv order — this mirrors how the bash callers used --argjson
-    # for numeric keys to keep them as JSON numbers.
+    # of argv order, so numeric keys stay JSON numbers.
     for kv in args.kvs or []:
         if "=" not in kv:
             continue
@@ -1298,6 +1503,43 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("root")
     s.set_defaults(func=_cmd_relpath_list)
 
+    s = sub.add_parser("sanitize-target-slug",
+                       help="Normalize a target path to its output slug.")
+    s.add_argument("raw_path")
+    s.add_argument("targets_root")
+    s.set_defaults(func=_cmd_sanitize_target_slug)
+
+    s = sub.add_parser("write-run-config",
+                       help="Atomically write benchmark-consumable run metadata.")
+    s.add_argument("path")
+    s.add_argument("num_agents")
+    s.add_argument("browser_agents")
+    s.add_argument("shell_agents")
+    s.add_argument("backend")
+    s.add_argument("model")
+    s.add_argument("target_slug")
+    s.add_argument("agent_count_overridden")
+    s.set_defaults(func=_cmd_write_run_config)
+
+    s = sub.add_parser("format-waste",
+                       help="Format waste telemetry for the human-readable index.")
+    s.add_argument("telemetry")
+    s.set_defaults(func=_cmd_format_waste)
+
+    s = sub.add_parser("cluster-count",
+                       help="Count stdin cluster JSON, excluding status prefixes.")
+    s.add_argument("exclude_prefixes")
+    s.set_defaults(func=_cmd_cluster_count)
+
+    s = sub.add_parser("markdown-finding",
+                       help="convert a Markdown finding report to structured JSON")
+    s.add_argument("path")
+    s.set_defaults(func=_cmd_markdown_finding)
+
+    s = sub.add_parser("json-field", help="read one top-level JSON field from stdin")
+    s.add_argument("field")
+    s.set_defaults(func=_cmd_json_field)
+
     s = sub.add_parser("waste-telemetry", help="Compute waste telemetry from an agent transcript.")
     s.add_argument("log_file")
     s.set_defaults(func=_cmd_waste_telemetry)
@@ -1334,20 +1576,6 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("log_file")
     s.add_argument("offset")
     s.set_defaults(func=_cmd_codex_turn_delta)
-
-    s = sub.add_parser("append-guard-card", help="Append a guard-bypass work-card row.")
-    s.add_argument("work_file")
-    s.add_argument("id")
-    s.add_argument("slug")
-    s.add_argument("subsystem")
-    s.add_argument("guard")
-    s.add_argument("now")
-    s.set_defaults(func=_cmd_append_guard_card)
-
-    s = sub.add_parser("codex-usage-reset-at", help="Compatibility alias for provider-reset-at.")
-    s.add_argument("logfile")
-    s.add_argument("--now-epoch")
-    s.set_defaults(func=_cmd_provider_reset)
 
     s = sub.add_parser("provider-reset-at", help="Parse provider text for next reset epoch.")
     s.add_argument("logfile")

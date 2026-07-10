@@ -91,7 +91,7 @@ EOF
 
 # ─── Fake output/<slug>/ + crash dir ────────────────────────────────
 OUTPUT_ROOT="$TEST_TMPDIR/output/exr-libdisc"
-RESULTS="$TEST_TMPDIR/results"
+RESULTS="$OUTPUT_ROOT/codex/results"
 CRASH_DIR="$RESULTS/crashes/CRASH-LIB-1"
 mkdir -p "$OUTPUT_ROOT" "$CRASH_DIR"
 
@@ -111,7 +111,7 @@ is_browser = "0"
 attacker_controls = ["bytes"]
 EOF
 
-cat > "$OUTPUT_ROOT/.session-env" <<EOF
+cat > "$RESULTS/.session-env" <<EOF
 RESULTS_DIR=$RESULTS
 TARGET_ROOT=$SRC
 TARGET_SLUG=exr-libdisc
@@ -130,7 +130,7 @@ int main(void) {
 }
 EOF
 
-cat > "$CRASH_DIR/asan.txt" <<'EOF'
+cat > "$CRASH_DIR/sanitizer.txt" <<'EOF'
 ASAN_RUN_HEADER: runs=1 mode=generic testcase= started=x
 ==99999==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xdead at pc 0xface
 READ of size 1 at 0xdead thread T0

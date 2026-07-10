@@ -167,20 +167,17 @@ python3 "$GEN" "$raw" "$out"
 assert_file_contains "$out" "lib/foo.sh: 1-149, 200-249" "overlapping ranges merge; disjoint preserved"
 
 # ═══════════════════════════════════════════════════════════════
-# 6. AUDIT_STATE files excluded (legitimate re-reads)
+# 6. Generated session metadata is excluded
 # ═══════════════════════════════════════════════════════════════
-
 raw="$TEST_TMPDIR/exclude.raw"
 out="$TEST_TMPDIR/exclude.seed"
 {
-  emit_read_pair "tid1" "/tmp/results/AUDIT_STATE-1.md" 1 100
-  emit_read_pair "tid2" "/tmp/results/.session_seed_1.md" 1 100
-  emit_read_pair "tid3" "/tmp/results/.read_log_1" 1 100
-  emit_read_pair "tid4" "/tmp/results/.static-prompt-rules.md" 1 100
-  emit_read_pair "tid5" "/Users/dev/work/lib/foo.sh" 1 100
+  emit_read_pair "tid1" "/tmp/results/.session_seed_1.md" 1 100
+  emit_read_pair "tid2" "/tmp/results/.read_log_1" 1 100
+  emit_read_pair "tid3" "/tmp/results/.static-prompt-rules.md" 1 100
+  emit_read_pair "tid4" "/Users/dev/work/lib/foo.sh" 1 100
 } > "$raw"
 python3 "$GEN" "$raw" "$out"
-assert_file_not_contains "$out" "AUDIT_STATE" "AUDIT_STATE excluded"
 assert_file_not_contains "$out" "session_seed" "session_seed excluded"
 assert_file_not_contains "$out" "read_log" "read_log excluded"
 assert_file_not_contains "$out" "static-prompt-rules" "static-prompt-rules excluded"
@@ -359,20 +356,7 @@ assert_file_contains "$out" "Testcases written" "codex: writes section present"
 assert_file_contains "$out" "H1-test.html" "codex: testcase 1 listed"
 assert_file_contains "$out" "H2-test.html" "codex: testcase 2 listed"
 
-# 20. Codex: AUDIT_STATE writes excluded
-raw="$TEST_TMPDIR/codex_state.raw"
-out="$TEST_TMPDIR/codex_state.seed"
-{
-  emit_codex_header
-  emit_codex_cmd "/bin/zsh -lc \"sed -n '1,10p' /tmp/foo.cpp\""
-  emit_codex_file_change "/tmp/results/AUDIT_STATE-1.md"
-  emit_codex_file_change "/tmp/results/scratch-1/test.html"
-} > "$raw"
-python3 "$GEN" "$raw" "$out"
-assert_file_not_contains "$out" "AUDIT_STATE" "codex: AUDIT_STATE write excluded"
-assert_file_contains "$out" "test.html" "codex: scratch write retained"
-
-# 21. Codex: malformed sed → skipped, valid commands still parsed
+# 20. Codex: malformed sed → skipped, valid commands still parsed
 raw="$TEST_TMPDIR/codex_bad.raw"
 out="$TEST_TMPDIR/codex_bad.seed"
 {

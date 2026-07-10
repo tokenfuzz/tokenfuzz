@@ -1,53 +1,21 @@
-#!/bin/bash
-# peek — clamped source viewer that replaces unbounded `sed -n 'X,Yp'`
-# and `grep -A 95 -B 8` patterns common in agent workflows.
-#
-# Why: agents reading source frequently emit either a wide line range
-# (`sed -n '1,500p' file.c`) or wide grep context (`grep -A 95 -B 20`).
-# Each call is small individually, but they dominate cumulative tool-output
-# bytes (~30-40 MB across libxml2/pcre2/json combined). bin/peek clamps
-# The ~50 KiB byte cap (via lib/output_cap.sh) is the only size guard on a line
-# range — an explicit `peek f:1-500` is honored as asked. Grep -A/-B context is
-# still clamped (PEEK_GREP_AFTER=30, PEEK_GREP_BEFORE=8). --no-cap disables both.
-#
-# Two forms:
-#
-#   1. Line-range view (alternative to sed -n):
-#        bin/peek <FILE>:<START>-<END>           show lines START..END
-#        bin/peek <FILE>:<START>                 show lines START..end of file
-#        bin/peek <FILE>                         show whole file (byte-capped)
-#
-#   2. Grep with clamped context (alternative to grep -A/-B/-C):
-#        bin/peek [-A N] [-B M] [-C K] [grep flags] PATTERN FILE...
-#
-# Override: --no-cap disables the byte cap and -A/-B clamping (passes -A and -B
-# values through verbatim and emits the full range). Per-knob env:
-#   PEEK_GREP_AFTER=N      clamp value for -A / --after-context (and the
-#                          'after' half of -C)
-#   PEEK_GREP_BEFORE=N     clamp value for -B / --before-context (and the
-#                          'before' half of -C)
-#
-# Exit code: passes through grep's exit code in grep mode (0 = match,
-# 1 = no match, 2 = error). Range mode exits 0 unless the file is missing
-# or the range is malformed (exit 2).
+#!/usr/bin/env python3
+"""Display bounded source ranges or run grep with bounded context."""
 
-set -uo pipefail
+from __future__ import annotations
 
-# Load the shared replacement-cap helper (head + tail + on-disk spill).
-# Sourced lazily; if the file is absent, peek still runs with its line cap.
-_PEEK_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -r "$_PEEK_DIR/../lib/output_cap.sh" ]; then
-  # shellcheck source=../lib/output_cap.sh
-  . "$_PEEK_DIR/../lib/output_cap.sh"
-fi
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-PEEK_GREP_AFTER="${PEEK_GREP_AFTER:-30}"
-PEEK_GREP_BEFORE="${PEEK_GREP_BEFORE:-8}"
-NO_CAP=0
 
-print_usage() {
-  cat >&2 <<'USAGE'
-Usage:
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+from file_tools import cap_output_bytes
+from command_tools import find_executable
+
+
+USAGE = """Usage:
   bin/peek <FILE>:<START>-<END>            show line range (byte-capped)
   bin/peek <FILE>:<START>                  show START..end of file
   bin/peek <FILE>                          show whole file (byte-capped)
@@ -55,292 +23,211 @@ Usage:
 
 Env knobs: PEEK_GREP_AFTER (30), PEEK_GREP_BEFORE (8). The ~50 KiB byte cap
 bounds size. Pass --no-cap to disable clamping.
-USAGE
-}
+"""
 
-# Phase 1: pull our own flags off the front (--no-cap, -h/--help). Anything
-# else flows into ARGS as-is so grep flags pass through unchanged.
-ARGS=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --no-cap) NO_CAP=1; shift ;;
-    -h|--help) print_usage; exit 0 ;;
-    --) ARGS+=("$1"); shift; while [ $# -gt 0 ]; do ARGS+=("$1"); shift; done ;;
-    *) ARGS+=("$1"); shift ;;
-  esac
-done
 
-if [ "${#ARGS[@]}" -eq 0 ]; then
-  print_usage
-  exit 2
-fi
+def fail(message: str) -> int:
+    print(f"[peek] {message}", file=sys.stderr)
+    return 2
 
-# Validate env knobs (cheap, surfaces typos early).
-for var in PEEK_GREP_AFTER PEEK_GREP_BEFORE; do
-  val="$(eval "printf '%s' \"\$${var}\"")"
-  case "$val" in
-    ''|*[!0-9]*) echo "[peek] non-numeric ${var}: $val" >&2; exit 2 ;;
-  esac
-done
 
-# ── Range-mode detection ──────────────────────────────────────────────
-# Range mode is the documented single-argument form after peek's own flags:
-#   bin/peek FILE[:START[-END]]
-# Anything with additional grep flags or operands is grep mode. This avoids
-# misrouting `bin/peek -e PATTERN` into range mode when PATTERN happens to name
-# a real file.
-first_positional="${ARGS[0]}"
-is_range=0
-# `peek -- FILE` (or `peek -- FILE:range`): the `--` explicitly marks the next
-# token as an operand, not a flag. Collapse it to the single-operand range form
-# so a dash-prefixed or literal filename is range-read, not routed to grep mode
-# (which would treat FILE as a pattern and block on / exit-1 from stdin).
-if [ "${#ARGS[@]}" -eq 2 ] && [ "${ARGS[0]}" = "--" ]; then
-  ARGS=("${ARGS[1]}")
-  first_positional="${ARGS[0]}"
-  case "$first_positional" in
-    *:*-*|*:*) is_range=1 ;;
-    *) [ -e "$first_positional" ] && is_range=1 ;;
-  esac
-elif [ "${#ARGS[@]}" -eq 1 ]; then
-  case "$first_positional" in
-    -*) ;;
-    *:*-*|*:*) is_range=1 ;;
-    *)
-      [ -e "$first_positional" ] && is_range=1
-      ;;
-  esac
-fi
+def real_command(name: str) -> str | None:
+    wrapper = Path(
+        os.environ.get("AGENT_WRAPPERS_PATH", str(ROOT / "lib" / "wrappers"))
+    ).resolve()
+    return find_executable(name, skip=(wrapper,))
 
-if [ "${#ARGS[@]}" -eq 1 ] && [ "$is_range" -eq 0 ]; then
-  case "$first_positional" in
-    */*|*.[A-Za-z0-9][A-Za-z0-9]*)
-      echo "[peek] file not found: $first_positional" >&2
-      exit 2
-      ;;
-  esac
-fi
 
-if [ "$is_range" -eq 1 ]; then
-  # Parse FILE[:START[-END]]. FILE may itself contain ':' on Windows (we
-  # don't care here — agents work on POSIX paths) so we split on the FIRST
-  # ':' and treat the rest as the range spec. An empty range spec means
-  # "from line 1 to end of file".
-  raw="$first_positional"
-  if [[ "$raw" == *:* ]]; then
-    file="${raw%%:*}"
-    spec="${raw#*:}"
-  else
-    file="$raw"
-    spec=""
-  fi
+def emit(data: bytes, label: str, no_cap: bool) -> int:
+    if not no_cap:
+        try:
+            data = cap_output_bytes(data, label)
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+    sys.stdout.buffer.write(data)
+    return 0
 
-  if [ ! -f "$file" ]; then
-    echo "[peek] file not found: $file" >&2
-    exit 2
-  fi
 
-  # `$` is sed's last-line address, so a start-only or bare-file request runs
-  # to end of file; the byte cap below bounds the size.
-  if [ -z "$spec" ]; then
-    start=1
-    end='$'
-  elif [[ "$spec" == *-* ]]; then
-    start="${spec%%-*}"
-    end="${spec##*-}"
-    case "$start$end" in
-      *[!0-9]*|'') echo "[peek] bad range '$spec': start and end must be positive integers" >&2; exit 2 ;;
-    esac
-    if [ "$start" -lt 1 ] || [ "$end" -lt "$start" ]; then
-      echo "[peek] bad range '$spec': require 1 <= start <= end" >&2
-      exit 2
-    fi
-  else
-    start="$spec"
-    case "$start" in
-      *[!0-9]*|'') echo "[peek] bad start '$spec': must be a positive integer" >&2; exit 2 ;;
-    esac
-    [ "$start" -lt 1 ] && { echo "[peek] bad start '$spec': must be >= 1" >&2; exit 2; }
-    end='$'
-  fi
+def range_mode(raw: str, no_cap: bool) -> int:
+    if ":" in raw:
+        filename, spec = raw.split(":", 1)
+    else:
+        filename, spec = raw, ""
+    path = Path(filename)
+    if not path.is_file():
+        return fail(f"file not found: {filename}")
 
-  # Render the requested range with the sed wrapper's own caps off (peek
-  # applies the byte cap once, below). The ~50 KiB byte cap is the only size
-  # guard — an explicit range is honored as asked, no line clamp.
-  _peek_tmp=$(mktemp "${TMPDIR:-/tmp}/peek-range-XXXXXXXX")
-  trap 'rm -f "$_peek_tmp"' EXIT
-  CAP_LINES=0 CAP_BYTES=0 sed -n "${start},${end}p" "$file" > "$_peek_tmp"
+    if not spec:
+        start, end = 1, None
+    elif "-" in spec:
+        start_text, end_text = spec.split("-", 1)
+        if not start_text.isdigit() or not end_text.isdigit():
+            return fail(
+                f"bad range '{spec}': start and end must be positive integers"
+            )
+        start, end = int(start_text), int(end_text)
+        if start < 1 or end < start:
+            return fail(f"bad range '{spec}': require 1 <= start <= end")
+    else:
+        if not spec.isdigit():
+            return fail(f"bad start '{spec}': must be a positive integer")
+        start, end = int(spec), None
+        if start < 1:
+            return fail(f"bad start '{spec}': must be >= 1")
 
-  if [ "$NO_CAP" -eq 1 ] || ! declare -F cap_output_file >/dev/null 2>&1; then
-    cat "$_peek_tmp"
-  else
-    cap_output_file "$_peek_tmp" peek-range
-  fi
-  exit 0
-fi
+    lines = path.read_bytes().splitlines(keepends=True)
+    data = b"".join(lines[start - 1 : end])
+    return emit(data, "peek-range", no_cap)
 
-# ── Grep mode ─────────────────────────────────────────────────────────
-# Walk ARGS and clamp -A / -B / -C / their long forms when their value
-# exceeds the limit. Both -A30 (joined) and -A 30 (separate) are valid
-# grep syntax; we handle both.
 
-if ! command -v grep >/dev/null 2>&1; then
-  echo "[peek] grep not found in PATH" >&2
-  exit 2
-fi
+def clamp(value: str, maximum: int, no_cap: bool) -> str:
+    if no_cap or not value.isdigit():
+        return value
+    return str(min(int(value), maximum))
 
-clamp_value() {
-  # $1 = value, $2 = max → echoes clamped numeric (or original if not a
-  # plain number, which lets odd grep usage like -A0 pass untouched).
-  case "$1" in
-    *[!0-9]*|'') printf '%s' "$1" ;;
-    *)
-      if [ "$NO_CAP" -eq 1 ]; then
-        printf '%s' "$1"
-      elif [ "$1" -gt "$2" ]; then
-        printf '%s' "$2"
-      else
-        printf '%s' "$1"
-      fi
-      ;;
-  esac
-}
 
-OUT=()
-clamped_after=""
-clamped_before=""
-i=0
-n="${#ARGS[@]}"
-while [ "$i" -lt "$n" ]; do
-  a="${ARGS[$i]}"
-  case "$a" in
-    -A)
-      [ $((i + 1)) -lt "$n" ] || { OUT+=("$a"); i=$((i + 1)); continue; }
-      v="${ARGS[$((i + 1))]}"
-      cv=$(clamp_value "$v" "$PEEK_GREP_AFTER")
-      [ "$cv" != "$v" ] && clamped_after="$v->$cv"
-      OUT+=("-A" "$cv")
-      i=$((i + 2))
-      ;;
-    -A*)
-      v="${a#-A}"
-      cv=$(clamp_value "$v" "$PEEK_GREP_AFTER")
-      [ "$cv" != "$v" ] && clamped_after="$v->$cv"
-      OUT+=("-A$cv")
-      i=$((i + 1))
-      ;;
-    --after-context=*)
-      v="${a#--after-context=}"
-      cv=$(clamp_value "$v" "$PEEK_GREP_AFTER")
-      [ "$cv" != "$v" ] && clamped_after="$v->$cv"
-      OUT+=("--after-context=$cv")
-      i=$((i + 1))
-      ;;
-    --after-context)
-      [ $((i + 1)) -lt "$n" ] || { OUT+=("$a"); i=$((i + 1)); continue; }
-      v="${ARGS[$((i + 1))]}"
-      cv=$(clamp_value "$v" "$PEEK_GREP_AFTER")
-      [ "$cv" != "$v" ] && clamped_after="$v->$cv"
-      OUT+=("$a" "$cv")
-      i=$((i + 2))
-      ;;
-    -B)
-      [ $((i + 1)) -lt "$n" ] || { OUT+=("$a"); i=$((i + 1)); continue; }
-      v="${ARGS[$((i + 1))]}"
-      cv=$(clamp_value "$v" "$PEEK_GREP_BEFORE")
-      [ "$cv" != "$v" ] && clamped_before="$v->$cv"
-      OUT+=("-B" "$cv")
-      i=$((i + 2))
-      ;;
-    -B*)
-      v="${a#-B}"
-      cv=$(clamp_value "$v" "$PEEK_GREP_BEFORE")
-      [ "$cv" != "$v" ] && clamped_before="$v->$cv"
-      OUT+=("-B$cv")
-      i=$((i + 1))
-      ;;
-    --before-context=*)
-      v="${a#--before-context=}"
-      cv=$(clamp_value "$v" "$PEEK_GREP_BEFORE")
-      [ "$cv" != "$v" ] && clamped_before="$v->$cv"
-      OUT+=("--before-context=$cv")
-      i=$((i + 1))
-      ;;
-    --before-context)
-      [ $((i + 1)) -lt "$n" ] || { OUT+=("$a"); i=$((i + 1)); continue; }
-      v="${ARGS[$((i + 1))]}"
-      cv=$(clamp_value "$v" "$PEEK_GREP_BEFORE")
-      [ "$cv" != "$v" ] && clamped_before="$v->$cv"
-      OUT+=("$a" "$cv")
-      i=$((i + 2))
-      ;;
-    -C)
-      [ $((i + 1)) -lt "$n" ] || { OUT+=("$a"); i=$((i + 1)); continue; }
-      v="${ARGS[$((i + 1))]}"
-      cb=$(clamp_value "$v" "$PEEK_GREP_BEFORE")
-      ca=$(clamp_value "$v" "$PEEK_GREP_AFTER")
-      [ "$cb" != "$v" ] && clamped_before="$v->$cb"
-      [ "$ca" != "$v" ] && clamped_after="$v->$ca"
-      OUT+=("-B" "$cb" "-A" "$ca")
-      i=$((i + 2))
-      ;;
-    -C*)
-      v="${a#-C}"
-      cb=$(clamp_value "$v" "$PEEK_GREP_BEFORE")
-      ca=$(clamp_value "$v" "$PEEK_GREP_AFTER")
-      [ "$cb" != "$v" ] && clamped_before="$v->$cb"
-      [ "$ca" != "$v" ] && clamped_after="$v->$ca"
-      OUT+=("-B$cb" "-A$ca")
-      i=$((i + 1))
-      ;;
-    --context=*)
-      v="${a#--context=}"
-      cb=$(clamp_value "$v" "$PEEK_GREP_BEFORE")
-      ca=$(clamp_value "$v" "$PEEK_GREP_AFTER")
-      [ "$cb" != "$v" ] && clamped_before="$v->$cb"
-      [ "$ca" != "$v" ] && clamped_after="$v->$ca"
-      OUT+=("--before-context=$cb" "--after-context=$ca")
-      i=$((i + 1))
-      ;;
-    --context)
-      [ $((i + 1)) -lt "$n" ] || { OUT+=("$a"); i=$((i + 1)); continue; }
-      v="${ARGS[$((i + 1))]}"
-      cb=$(clamp_value "$v" "$PEEK_GREP_BEFORE")
-      ca=$(clamp_value "$v" "$PEEK_GREP_AFTER")
-      [ "$cb" != "$v" ] && clamped_before="$v->$cb"
-      [ "$ca" != "$v" ] && clamped_after="$v->$ca"
-      OUT+=("--before-context=$cb" "--after-context=$ca")
-      i=$((i + 2))
-      ;;
-    *)
-      OUT+=("$a")
-      i=$((i + 1))
-      ;;
-  esac
-done
+def clamp_grep_args(
+    args: list[str], after: int, before: int, no_cap: bool
+) -> tuple[list[str], str, str]:
+    output: list[str] = []
+    clamped_after = ""
+    clamped_before = ""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        separate = {
+            "-A": (after, "after"),
+            "--after-context": (after, "after"),
+            "-B": (before, "before"),
+            "--before-context": (before, "before"),
+        }
+        if arg in separate and index + 1 < len(args):
+            maximum, side = separate[arg]
+            value = args[index + 1]
+            current = clamp(value, maximum, no_cap)
+            if current != value:
+                if side == "after":
+                    clamped_after = f"{value}->{current}"
+                else:
+                    clamped_before = f"{value}->{current}"
+            output.extend((arg, current))
+            index += 2
+            continue
+        handled = False
+        for prefix, maximum, side in (
+            ("-A", after, "after"),
+            ("-B", before, "before"),
+            ("--after-context=", after, "after"),
+            ("--before-context=", before, "before"),
+        ):
+            if arg.startswith(prefix) and arg != prefix:
+                value = arg[len(prefix) :]
+                current = clamp(value, maximum, no_cap)
+                if current != value:
+                    if side == "after":
+                        clamped_after = f"{value}->{current}"
+                    else:
+                        clamped_before = f"{value}->{current}"
+                output.append(prefix + current)
+                handled = True
+                break
+        if handled:
+            index += 1
+            continue
 
-# Disable any cap from lib/wrappers/grep (on PATH in the agent shell). peek
-# already clamps -A/-B/-C itself; without this, --no-cap silently tops out
-# at the wrapper's own output cap when there are many matches.
-# Capture so the byte cap below can act on the result; preserves the real
-# grep exit code via PIPESTATUS.
-_peek_grep_tmp=$(mktemp "${TMPDIR:-/tmp}/peek-grep-XXXXXXXX")
-trap 'rm -f "$_peek_grep_tmp"' EXIT
-CAP_LINES=0 CAP_BYTES=0 grep "${OUT[@]}" > "$_peek_grep_tmp"
-rc=$?
+        context_value: str | None = None
+        joined = False
+        if arg in ("-C", "--context") and index + 1 < len(args):
+            context_value = args[index + 1]
+        elif arg.startswith("-C") and arg != "-C":
+            context_value = arg[2:]
+            joined = True
+        elif arg.startswith("--context="):
+            context_value = arg.split("=", 1)[1]
+            joined = True
+        if context_value is not None:
+            current_before = clamp(context_value, before, no_cap)
+            current_after = clamp(context_value, after, no_cap)
+            if current_before != context_value:
+                clamped_before = f"{context_value}->{current_before}"
+            if current_after != context_value:
+                clamped_after = f"{context_value}->{current_after}"
+            output.extend(("-B" + current_before, "-A" + current_after))
+            index += 1 if joined else 2
+            continue
 
-if [ "$NO_CAP" -eq 1 ] || ! declare -F cap_output_file >/dev/null 2>&1; then
-  cat "$_peek_grep_tmp"
-else
-  cap_output_file "$_peek_grep_tmp" peek-grep
-fi
+        output.append(arg)
+        index += 1
+    return output, clamped_after, clamped_before
 
-if [ "$NO_CAP" -eq 0 ] && { [ -n "$clamped_after" ] || [ -n "$clamped_before" ]; }; then
-  msg="[peek: clamped grep context"
-  [ -n "$clamped_after" ]  && msg="$msg -A $clamped_after"
-  [ -n "$clamped_before" ] && msg="$msg -B $clamped_before"
-  msg="$msg. PEEK_GREP_AFTER=N, PEEK_GREP_BEFORE=N, or --no-cap to widen.]"
-  printf '%s\n' "$msg"
-fi
 
-exit "$rc"
+def main(argv: list[str] | None = None) -> int:
+    incoming = list(sys.argv[1:] if argv is None else argv)
+    args: list[str] = []
+    no_cap = False
+    index = 0
+    while index < len(incoming):
+        arg = incoming[index]
+        if arg == "--no-cap":
+            no_cap = True
+        elif arg in ("-h", "--help"):
+            print(USAGE, file=sys.stderr, end="")
+            return 0
+        elif arg == "--":
+            args.extend(incoming[index:])
+            break
+        else:
+            args.append(arg)
+        index += 1
+    if not args:
+        print(USAGE, file=sys.stderr, end="")
+        return 2
+
+    after_text = os.environ.get("PEEK_GREP_AFTER", "30")
+    before_text = os.environ.get("PEEK_GREP_BEFORE", "8")
+    if not after_text.isdigit():
+        return fail(f"non-numeric PEEK_GREP_AFTER: {after_text}")
+    if not before_text.isdigit():
+        return fail(f"non-numeric PEEK_GREP_BEFORE: {before_text}")
+
+    explicit_operand = len(args) == 2 and args[0] == "--"
+    if explicit_operand:
+        args = args[1:]
+    first = args[0]
+    is_range = len(args) == 1 and (
+        explicit_operand
+        or (not first.startswith("-") and (":" in first or Path(first).exists()))
+    )
+    if len(args) == 1 and not is_range and (
+        "/" in first or ("." in Path(first).name and not first.startswith("-"))
+    ):
+        return fail(f"file not found: {first}")
+    if is_range:
+        return range_mode(first, no_cap)
+
+    grep = real_command("grep")
+    if not grep:
+        return fail("grep not found in PATH")
+    adjusted, changed_after, changed_before = clamp_grep_args(
+        args, int(after_text), int(before_text), no_cap
+    )
+    completed = subprocess.run([grep, *adjusted], stdout=subprocess.PIPE)
+    rc = emit(completed.stdout, "peek-grep", no_cap)
+    if rc != 0:
+        return rc
+    if not no_cap and (changed_after or changed_before):
+        message = "[peek: clamped grep context"
+        if changed_after:
+            message += f" -A {changed_after}"
+        if changed_before:
+            message += f" -B {changed_before}"
+        message += (
+            ". PEEK_GREP_AFTER=N, PEEK_GREP_BEFORE=N, or --no-cap to widen.]\n"
+        )
+        sys.stdout.write(message)
+    return completed.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

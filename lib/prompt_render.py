@@ -8,7 +8,7 @@ case would create more friction than it removes.
 
 The {{ var }} syntax is universally recognised by OSS readers as
 Jinja2-flavoured templating, which is why the .md.j2 extension is used.
-Anything more complex (conditionals, loops) is computed in lib/prompt.sh
+Anything more complex (conditionals, loops) is computed in lib/prompt.py
 and passed in as a pre-rendered string — keeping the templates readable
 as plain markdown.
 
@@ -16,17 +16,16 @@ CLI:
     python3 lib/prompt_render.py <template.md.j2> \\
         --var key=value [--var key=value ...]
 
-Each --var argument is one `name=multi line value` pair. argv survives
-embedded newlines fine, so bash callers pass values directly:
+Each --var argument is one `name=multi line value` pair. argv preserves
+embedded newlines:
 
     python3 lib/prompt_render.py cold_start.md.j2 \\
         --var agent_num="$agent_num" \\
         --var role="$role" \\
         --var guide_section="$guide_section"
 
-Missing placeholders render as empty (matches bash heredoc semantics
-where an unset `${var}` expands to empty). Unknown variables in the
-context are ignored.
+Missing placeholders render as empty. Unknown variables in the context
+are ignored.
 """
 
 from __future__ import annotations
@@ -53,8 +52,7 @@ def render(template_text: str, context: dict[str, str]) -> str:
     Unknown names render as the empty string. Whitespace inside the
     `{{ … }}` braces is tolerated (`{{ x }}`, `{{x}}`, `{{   x   }}`
     all match the same key). The replacement is non-recursive — a
-    placeholder that itself appears in a substituted value is left
-    alone, matching the prior bash heredoc semantics.
+    placeholder that itself appears in a substituted value is left alone.
     """
     template_text = _COMMENT_RE.sub("", template_text)
     control_tag = _CONTROL_TAG_RE.search(template_text)
@@ -110,8 +108,8 @@ def main(argv=None) -> int:
         print(f"prompt_render: cannot render {args.template}: {exc}", file=sys.stderr)
         return 2
 
-    # Byte-transparent output, matching the bash heredocs this replaced.
-    # Python decodes the OS's byte-oriented argv with errors="surrogateescape",
+    # Preserve arbitrary bytes passed through the OS argument vector. Python
+    # decodes the byte-oriented argv with errors="surrogateescape",
     # so a --var value carrying an undecodable byte (e.g. a stray 0xC2 from a
     # latin-1 / mojibake target string) arrives as a lone surrogate like
     # \udcc2. Re-encode with the same handler and write the raw bytes so that

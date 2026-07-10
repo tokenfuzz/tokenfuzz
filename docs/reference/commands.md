@@ -64,7 +64,7 @@ Advanced flags:
 
 ```bash
 bin/setup-target <target> <repo-url> --no-update
-bin/setup-target <target> --force-config
+bin/setup-target <target> --force
 bin/setup-target <target> --build
 bin/setup-target <target> --no-llm-config
 ```
@@ -72,7 +72,7 @@ bin/setup-target <target> --no-llm-config
 What each flag does:
 
 - `--no-update` — skip the pull when passing a repo URL or ref.
-- `--force-config` — explicitly regenerate `target.toml` and overwrite
+- `--force` — explicitly regenerate `target.toml` and overwrite
   LLM-suggested `[threat_model]` / `[s6_peers]` sections.
 - `--build` — optional: build the checkout now (converge the C/C++ ASan
   recipe and compile `build-<san>/`, or run the language build step:
@@ -88,8 +88,8 @@ What each flag does:
 LLM-backed config helpers can be run explicitly after setup:
 
 ```bash
-bin/suggest-threat-model "$TARGET" --apply --force-config
-bin/suggest-peers "$TARGET" --apply --force-config
+bin/suggest-threat-model "$TARGET" --apply --force
+bin/suggest-peers "$TARGET" --apply --force
 ```
 
 Use these when the deterministic seed is too conservative and you want
@@ -300,14 +300,14 @@ bin/coverage-summary --results-dir "$RESULTS"
   subsystem coverage summary. It is only useful after coverage data
   exists for the run.
 
-### Capped source-reading wrappers
+### Capped source-reading commands
 
-Agents read source through wrappers that cap output size so a single
+Agents read source through commands that cap output size so a single
 search cannot flood a prompt. They are plain CLI tools, and they are
 just as useful to an operator poking at a large target tree:
 
 ```bash
-bin/rg-safe <pattern> targets/$TARGET/src       # rg with line + byte caps
+bin/rg-safe <pattern> targets/$TARGET/src       # rg with a byte cap
 bin/peek targets/$TARGET/src/parser.c:200-260   # clamped line-range view (FILE:START-END)
 bin/peek <pattern> targets/$TARGET/src/file.c   # clamped grep-with-context
 bin/show-patch <commit> [paths...]              # git show with narrow context + caps
@@ -316,6 +316,10 @@ bin/show-patch <commit> [paths...]              # git show with narrow context +
 Each prints a footer when a cap fires, so truncation is visible
 rather than silent. The caps are tunable — see
 [Environment](environment.md#context-and-ranking-budgets).
+
+These four entrypoints are executable Python programs. Invoke them as shown,
+or run `python3 bin/<command> ...` when an environment requires an explicit
+interpreter.
 
 ### `bin/audit-recon` — breadth-first survey of the source tree
 
@@ -442,7 +446,7 @@ bin/cluster-findings "$RESULTS"
   source-link rewrites; `--quiet` suppresses the changed/unchanged
   line.
 - `bin/find-crash-testcase` — prints the testcase path selected from a
-  crash directory, useful when an old artifact layout is ambiguous.
+  crash directory, useful for maintenance tools operating outside a session.
 - `bin/cluster-crashes` / `bin/cluster-findings` — group reports that
   share a root cause, write the `CRASH-CLUSTERS` /
   `FINDING-CLUSTERS` summaries, and stamp `Cluster:` lines into each
@@ -546,12 +550,12 @@ directory listing from being mysterious:
 
 | Command | Invoked by | What it does |
 | --- | --- | --- |
-| `bin/auto-build-script` | `bin/audit` (lazy, first run); `setup-target --build` | Converges on a working sanitizer build recipe via an LLM and writes it to `targets/<target>/.audit/build.sh`. |
+| `bin/auto-build-script` | `bin/audit` and `bin/benchmark` (lazy, first run); `setup-target --build` | Converges on a working sanitizer build recipe via an LLM and writes it to `targets/<target>/.audit/build.sh`. |
 | `bin/auto-repair-target-toml` | triage, after repeated C/C++ harness build failures | Proposes a conservative additive repair to `includes` / `defines` / `link_libs`, with a `target.toml.bak.<timestamp>` backup. Disable with `TARGET_TOML_AUTO_REPAIR=0`. |
 | `bin/rank-work` | `bin/audit` | Builds and ranks the concrete work cards agents claim. |
 | `bin/patch-cards` | `bin/audit` | Builds S1 prior-fix cards from the target's recent fix commits. |
 | `bin/peer-fix-cards` | `bin/audit` | Builds S6 cards from the `[s6_peers]` projects in `target.toml`. |
 | `bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`, `bin/run-tsan` | `bin/probe` | Per-sanitizer single-shot execution wrappers (generic, JS, and fuzz modes; `run-asan` and `run-ubsan` also drive browser mode). |
-| `bin/run-sanitizer-multi` | `bin/probe --confirm`, `export-repro` | Multi-run normalizer (default 5 runs, `SANITIZER_RUNS` overrides) that measures the reproduction rate. `bin/run-asan-multi` is a compatibility shim forwarding to it. |
+| `bin/run-sanitizer-multi` | `bin/probe --confirm`, `export-repro` | Multi-run normalizer (default 5 runs, `SANITIZER_RUNS` overrides) that measures the reproduction rate. Pass the sanitizer slug first, for example `bin/run-sanitizer-multi asan generic <testcase>`. |
 | `bin/triage-fuzz-crashes` | triage | Triages libFuzzer artifacts under `fuzz-crashes/` into a single `fuzz-leads.md` agents can pick leads from. |
 | `bin/render-md` | triage, clustering, benchmark | Renders a markdown report or index to its styled `.html` sibling. |

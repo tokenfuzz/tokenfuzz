@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """tests/test_target_config_py.py — exercise the Python target_config API.
 
-Runs alongside the existing tests/test_target_threat_model.sh, which
-covers the bash-shim interface. This file tests the Python module
-directly: parse_toml, load_toml_into, find_session_dir, read_session_env,
+Tests the Python module directly: parse_toml, load_toml_into,
+find_session_dir, read_session_env,
 write_session_env, detect_rev, seed_toml, and the Config helpers.
 
 Output format matches helpers.sh — `✓ name` for pass / `✗ name` for fail —
@@ -126,7 +125,7 @@ assert_eq(["bytes"], cfg.attacker_controls,
           "load_toml_into: empty attacker_controls defaults to ['bytes']")
 
 
-# ─── 3. Bad section header is strict by default, lenient only by env ───
+# ─── 3. Bad section headers are rejected ───────────────────────────
 
 write("bad-section.toml",
       'slug = "malformed"\n[bad section name with spaces]\nasan_bin = "build-asan/post-bad"\n')
@@ -136,16 +135,6 @@ try:
            "parse_toml succeeded unexpectedly")
 except Exception:
     passed("parse_toml: bad [section] header rejected by default")
-
-cfg = tc.Config()
-os.environ["TARGET_TOML_LENIENT"] = "1"
-try:
-    tc.load_toml_into(cfg, TEST_TMPDIR / "bad-section.toml")
-finally:
-    os.environ.pop("TARGET_TOML_LENIENT", None)
-assert_eq("build-asan/post-bad", cfg.asan_bin,
-          "bad [section] header requires TARGET_TOML_LENIENT=1")
-
 
 # ─── 4. Invalid attacker_controls token: stderr warning + drop ──────
 
@@ -168,12 +157,6 @@ assert_in("magic-pony", warn, "stderr warning mentions the bad token")
 
 slug_dir = TEST_TMPDIR / "out_root" / "output" / "demo"
 slug_dir.mkdir(parents=True)
-(slug_dir / ".session-env").write_text("RESULTS_DIR=foo\n", encoding="utf-8")
-nested = slug_dir / "results" / "scratch-1"
-nested.mkdir(parents=True)
-found = tc.find_session_dir(nested)
-assert_eq(slug_dir.resolve(), found.resolve() if found else None,
-          "find_session_dir walks up to slug dir")
 backend_results = slug_dir / "codex" / "results"
 backend_scratch = backend_results / "scratch-1"
 backend_scratch.mkdir(parents=True)
@@ -198,31 +181,20 @@ assert_eq("/backend/results", loaded.results_dir,
 assert_eq("timing", loaded.attacker_controls_csv(),
           "load derives target.toml from backend results session dir")
 
-# find_slug_session_dir resolves a known slug dir, preferring the
-# backend-local results/.session-env over the legacy slug-dir copy
-# (both exist here — the slug dir got a .session-env earlier).
+# find_slug_session_dir resolves a known slug dir to a backend session.
 slug_session = tc.find_slug_session_dir(slug_dir)
 assert_eq(backend_results.resolve(),
           slug_session.resolve() if slug_session else None,
-          "find_slug_session_dir prefers the backend-local session env")
+          "find_slug_session_dir returns the backend-local session env")
 
 # find_session_dir reached through an ancestor's output/ tree (a
 # CWD-based call, not a testcase path) also prefers backend-local.
 found = tc.find_session_dir(TEST_TMPDIR / "out_root")
 assert_eq(backend_results.resolve(), found.resolve() if found else None,
-          "find_session_dir scan prefers backend-local over legacy")
+          "find_session_dir scan returns backend-local session")
 
-# With only the legacy copy present, find_slug_session_dir falls back
-# to the slug dir itself; with neither copy it returns None.
-legacy_only = TEST_TMPDIR / "out_root" / "output" / "legacyonly"
-legacy_only.mkdir(parents=True)
-(legacy_only / ".session-env").write_text(
-    "RESULTS_DIR=leg\n", encoding="utf-8")
-ses = tc.find_slug_session_dir(legacy_only)
-assert_eq(legacy_only.resolve(), ses.resolve() if ses else None,
-          "find_slug_session_dir falls back to the legacy slug dir")
 assert_eq(None, tc.find_slug_session_dir(TEST_TMPDIR / "no-such-slug"),
-          "find_slug_session_dir returns None when neither copy exists")
+          "find_slug_session_dir returns None when no session exists")
 
 # find_session_dir scans into a NESTED slug (output/samples/sample-x/...)
 # reached from an ancestor's output/ tree. output/samples/ is a container, not
@@ -528,8 +500,8 @@ else:
            f"got {cfg.s6_domain!r}")
 
 # Existing target.toml without [s6_peers] does not get implicit peers.
-legacy_toml = TEST_TMPDIR / "legacy-libxml2.toml"
-legacy_toml.write_text(
+minimal_toml = TEST_TMPDIR / "minimal-libxml2.toml"
+minimal_toml.write_text(
     'target = "libxml2"\n'
     'build_system = "cmake"\n'
     'asan_bin = "build-asan/xmllint"\n'
@@ -538,16 +510,16 @@ legacy_toml.write_text(
     encoding="utf-8",
 )
 cfg = tc.Config()
-tc.load_toml_into(cfg, legacy_toml)
+tc.load_toml_into(cfg, minimal_toml)
 if cfg.s6_peers == []:
-    passed("load_toml_into: legacy target.toml without s6_peers stays empty")
+    passed("load_toml_into: target.toml without s6_peers stays empty")
 else:
-    failed("load_toml_into: legacy target.toml without s6_peers stays empty",
+    failed("load_toml_into: target.toml without s6_peers stays empty",
            f"got s6_peers={cfg.s6_peers!r}")
 if cfg.s6_domain == "":
-    passed("load_toml_into: legacy target.toml leaves s6_domain empty")
+    passed("load_toml_into: target.toml leaves s6_domain empty")
 else:
-    failed("load_toml_into: legacy target.toml leaves s6_domain empty",
+    failed("load_toml_into: target.toml leaves s6_domain empty",
            f"got s6_domain={cfg.s6_domain!r}")
 
 # Operator-explicit empty override (peers = []) disables S6 for that target.
@@ -565,40 +537,6 @@ if cfg.s6_peers == []:
 else:
     failed("load_toml_into: explicit empty peers disables S6",
            f"got {cfg.s6_peers!r}")
-
-
-# ─── 10. Subcommand CLI parity with the bash shim's NUL stream ──────
-
-# parse-toml subcommand emits the same NUL-delimited KEY\0VALUE\0 stream
-# the bash _target_parse_toml has always produced.
-write("link.toml",
-      'slug = "linked"\nlink_libs = ["-lm", "-lpthread"]\n')
-out = subprocess.run(
-    ["python3", str(ROOT / "lib" / "target_config.py"),
-     "parse-toml", str(TEST_TMPDIR / "link.toml")],
-    capture_output=True, check=True,
-)
-stream = out.stdout
-# Should contain TARGET_LINK_LIBS_LIST tokens.
-if b"TARGET_LINK_LIBS_LIST\x00" in stream:
-    passed("parse-toml CLI: TARGET_LINK_LIBS_LIST emitted")
-else:
-    target_keys = [
-        s for s in stream.split(b"\x00")
-        if s.startswith(b"TARGET_")
-    ][:6]
-    failed("parse-toml CLI: TARGET_LINK_LIBS_LIST emitted",
-           f"keys present: {target_keys}")
-
-# read-session-env subcommand emits eval-safe `export K='v'` lines.
-out = subprocess.run(
-    ["python3", str(ROOT / "lib" / "target_config.py"),
-     "read-session-env", str(env_dir)],
-    capture_output=True, text=True, check=True,
-)
-assert_in("export RESULTS_DIR=", out.stdout, "read-session-env CLI: emits RESULTS_DIR export")
-assert_in("export TARGET_ROOT=", out.stdout, "read-session-env CLI: emits TARGET_ROOT export")
-assert_not_in("UNALLOWED", out.stdout, "read-session-env CLI: drops non-allowlisted keys")
 
 
 # ─── 10b. [sanitizer] section: defaults, parsing, helpers ──────────
@@ -1110,12 +1048,11 @@ assert_eq('https://ex.com/q?a="b"&c=\\d', parsed["upstream_url"],
 
 
 # ─── load_toml_into strips target_root prefix from path fields ───────
-# auto-repair-target-toml occasionally accepts (or older runs stored)
+# auto-repair-target-toml can accept
 # absolute audit-machine paths in asan_lib / asan_bin / link_libs.
 # Downstream consumers (bin/export-repro's _strip_sanitizer_build_prefix,
-# the build/lib resolution shell snippet) only handle target_root-relative
-# form. The loader normalizes silently so legacy target.toml files keep
-# working without manual repair.
+# the build/lib resolution code) use target_root-relative form. The loader
+# normalizes these paths at the boundary.
 strip_dir = TEST_TMPDIR / "strip_root"
 strip_dir.mkdir(parents=True, exist_ok=True)
 strip_root = strip_dir / "targets" / "sampleproj"

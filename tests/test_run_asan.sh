@@ -11,21 +11,21 @@ RUN_ASAN="$SCRIPT_ROOT/bin/run-asan"
 # 1. --help / no args exits with usage
 # ═══════════════════════════════════════════════════════════════
 
-output=$(bash "$RUN_ASAN" 2>&1) || true
+output=$("$RUN_ASAN" 2>&1) || true
 assert_match "Usage:" "$output" "no args: shows usage or error"
 
 # ═══════════════════════════════════════════════════════════════
 # 2. Mode validation — invalid mode
 # ═══════════════════════════════════════════════════════════════
 
-output=$(bash "$RUN_ASAN" invalid_mode /dev/null 2>&1) || true
+output=$("$RUN_ASAN" invalid_mode /dev/null 2>&1) || true
 assert_match "Usage:" "$output" "invalid mode: error message"
 
 # ═══════════════════════════════════════════════════════════════
 # 3. Source file parses without syntax errors
 # ═══════════════════════════════════════════════════════════════
 
-bash -n "$RUN_ASAN" 2>/dev/null
+python3 -m py_compile "$RUN_ASAN" 2>/dev/null
 assert_eq 0 $? "run-asan: syntax check passes"
 
 # ═══════════════════════════════════════════════════════════════
@@ -104,14 +104,14 @@ chmod +x "$mock_js"
 
 same_tc="$TEST_TMPDIR/same.js"
 echo "print('same')" > "$same_tc"
-output=$(ASAN_JS="$mock_js" bash "$RUN_ASAN" js-diff "$same_tc" 2>&1)
+output=$(ASAN_JS="$mock_js" "$RUN_ASAN" js-diff "$same_tc" 2>&1)
 rc=$?
 assert_eq "0" "$rc" "js-diff: matching outputs exit 0"
 assert_match "outputs MATCH" "$output" "js-diff: matching outputs reported"
 
 diff_tc="$TEST_TMPDIR/diff.js"
 echo "DIFF" > "$diff_tc"
-output=$(ASAN_JS="$mock_js" bash "$RUN_ASAN" js-diff "$diff_tc" 2>&1)
+output=$(ASAN_JS="$mock_js" "$RUN_ASAN" js-diff "$diff_tc" 2>&1)
 rc=$?
 assert_eq "1" "$rc" "js-diff: divergent outputs exit 1"
 assert_match "outputs DIFFER" "$output" "js-diff: divergent outputs reported"
@@ -128,16 +128,16 @@ s4_slug="chromium"
 s4_cfg_dir="$s4_root/output/$s4_slug"
 mkdir -p "$s4_cfg_dir"
 
-# Minimal .session-env (TARGET_ROOT/SLUG are required for target_load).
-cat > "$s4_cfg_dir/.session-env" <<EOF
-export RESULTS_DIR='$s4_cfg_dir/results'
-export TARGET_ROOT='$s4_root'
-export TARGET_SLUG='$s4_slug'
-export TARGET_REV='deadbeef'
-export SESSION_STARTED='2026-05-12T00:00:00Z'
-export LOGDIR='$s4_cfg_dir/logs'
+# Minimal backend results session (TARGET_ROOT/SLUG are required for target_load).
+mkdir -p "$s4_cfg_dir/codex/results/scratch-1" "$s4_cfg_dir/logs"
+cat > "$s4_cfg_dir/codex/results/.session-env" <<EOF
+RESULTS_DIR=$s4_cfg_dir/codex/results
+TARGET_ROOT=$s4_root
+TARGET_SLUG=$s4_slug
+TARGET_REV=deadbeef
+SESSION_STARTED=2026-05-12T00:00:00Z
+LOGDIR=$s4_cfg_dir/logs
 EOF
-mkdir -p "$s4_cfg_dir/results" "$s4_cfg_dir/logs"
 
 # Hand-write target.toml with V8-style jit flags. seed_toml would emit
 # the same shape, but we want this test independent of seed_toml's output.
@@ -161,13 +161,13 @@ echo same
 EOF
 chmod +x "$mock_v8"
 
-same_tc2="$s4_cfg_dir/same2.js"
+same_tc2="$s4_cfg_dir/codex/results/scratch-1/same2.js"
 echo "print('same')" > "$same_tc2"
 
-# Run from inside the slug dir so target_load discovers the .session-env.
+# Run from inside the results tree so target_load discovers the session.
 (
-  cd "$s4_cfg_dir"
-  LOG="$log_v8" ASAN_JS="$mock_v8" bash "$RUN_ASAN" js-diff "$same_tc2" >/dev/null 2>&1
+  cd "$s4_cfg_dir/codex/results"
+  LOG="$log_v8" ASAN_JS="$mock_v8" "$RUN_ASAN" js-diff "$same_tc2" >/dev/null 2>&1
 )
 
 # Mock should have been invoked with the V8 flags, not --ion-eager / --no-ion.
@@ -185,12 +185,12 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# 7. run-asan-multi syntax check
+# 7. run-sanitizer-multi syntax check
 # ═══════════════════════════════════════════════════════════════
 
-bash -n "$SCRIPT_ROOT/bin/run-asan-multi" 2>/dev/null
-assert_eq 0 $? "run-asan-multi: syntax check passes"
-bash -n "$SCRIPT_ROOT/bin/run-sanitizer-multi" 2>/dev/null
+python3 -m py_compile "$SCRIPT_ROOT/bin/run-sanitizer-multi" 2>/dev/null
+assert_eq 0 $? "run-sanitizer-multi: syntax check passes"
+python3 -m py_compile "$SCRIPT_ROOT/bin/run-sanitizer-multi" 2>/dev/null
 assert_eq 0 $? "run-sanitizer-multi: syntax check passes"
 
 # ═══════════════════════════════════════════════════════════════
@@ -198,7 +198,7 @@ assert_eq 0 $? "run-sanitizer-multi: syntax check passes"
 # ═══════════════════════════════════════════════════════════════
 
 if [ -f "$SCRIPT_ROOT/bin/hits" ]; then
-  bash -n "$SCRIPT_ROOT/bin/hits" 2>/dev/null
+  python3 -m py_compile "$SCRIPT_ROOT/bin/hits" 2>/dev/null
   assert_eq 0 $? "bin/hits: syntax check passes"
 else
   pass "bin/hits: file not present (optional)"
@@ -209,7 +209,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 
 if [ -f "$SCRIPT_ROOT/bin/run-ubsan" ]; then
-  bash -n "$SCRIPT_ROOT/bin/run-ubsan" 2>/dev/null
+  python3 -m py_compile "$SCRIPT_ROOT/bin/run-ubsan" 2>/dev/null
   assert_eq 0 $? "bin/run-ubsan: syntax check passes"
 else
   pass "bin/run-ubsan: file not present (optional)"
@@ -220,7 +220,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 
 bad_fuzzer_rc=0
-bad_fuzzer_out=$(FUZZER='../bad' bash "$RUN_ASAN" fuzz "$TEST_TMPDIR/corpus" 2>&1) || bad_fuzzer_rc=$?
+bad_fuzzer_out=$(FUZZER='../bad' "$RUN_ASAN" fuzz "$TEST_TMPDIR/corpus" 2>&1) || bad_fuzzer_rc=$?
 assert_eq "2" "$bad_fuzzer_rc" "FUZZER traversal token exits 2"
 assert_match 'FUZZER must match' "$bad_fuzzer_out" "FUZZER traversal token rejected"
 

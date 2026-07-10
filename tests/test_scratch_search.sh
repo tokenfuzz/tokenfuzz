@@ -38,21 +38,21 @@ echo 'ALTSVC_NEEDLE in harness cache compile binary' > "$S1/.harness-cache/cache
 echo 'ALTSVC_NEEDLE inside cache dir' > "$S1/.harness-cache/foo.c"
 
 # ── 1. Help and basic invocation ─────────────────────────────────────
-output=$(bash "$SS" --help 2>&1)
+output=$("$SS" --help 2>&1)
 assert_match "scratch-search" "$output" "help: shows usage"
 
 # Missing PATTERN should exit 2 with usage hint.
-output=$(bash "$SS" 2>&1) ; rc=$?
+output=$("$SS" 2>&1) ; rc=$?
 assert_eq 2 "$rc" "missing pattern: exit code 2"
 assert_match "PATTERN is required" "$output" "missing pattern: error message"
 
 # Missing RESULTS_DIR should exit 2.
-output=$(RESULTS_DIR="" bash "$SS" foo 2>&1) ; rc=$?
+output=$(RESULTS_DIR="" "$SS" foo 2>&1) ; rc=$?
 assert_eq 2 "$rc" "missing RESULTS_DIR: exit code 2"
 
 # ── 2. Per-section labeling and counts ───────────────────────────────
 if command -v rg >/dev/null 2>&1; then
-  output=$(RESULTS_DIR="$RESULTS_DIR" bash "$SS" ALTSVC_NEEDLE 2>&1)
+  output=$(RESULTS_DIR="$RESULTS_DIR" "$SS" ALTSVC_NEEDLE 2>&1)
   assert_match '\[scratch-1\] 2 files' "$output" "scratch-1: default count is 2 matching files"
   assert_match '\[scratch-2\] no matches' "$output" "scratch-2: no-match label present"
   assert_match '\[corpus\] 1 file' "$output" "corpus: 1 matching file"
@@ -91,7 +91,7 @@ if command -v rg >/dev/null 2>&1; then
   assert_match "scratch-1/altsvc_harness.c" "$output" "paths: relative path emitted"
 
   # ── 5. --section filter restricts output ───────────────────────────
-  output_filt=$(RESULTS_DIR="$RESULTS_DIR" bash "$SS" --section scratch-1 ALTSVC_NEEDLE 2>&1)
+  output_filt=$(RESULTS_DIR="$RESULTS_DIR" "$SS" --section scratch-1 ALTSVC_NEEDLE 2>&1)
   assert_match '\[scratch-1\]' "$output_filt" "section filter: scratch-1 present"
   if grep -q 'corpus' <<<"$output_filt"; then
     fail "section filter: corpus should not be searched"
@@ -100,11 +100,11 @@ if command -v rg >/dev/null 2>&1; then
   fi
 
   # ── 6. --include-asan opts the sidecar back in ─────────────────────
-  output_asan=$(RESULTS_DIR="$RESULTS_DIR" bash "$SS" --include-asan ALTSVC_NEEDLE 2>&1)
+  output_asan=$(RESULTS_DIR="$RESULTS_DIR" "$SS" --include-asan ALTSVC_NEEDLE 2>&1)
   assert_match 'asan.txt' "$output_asan" "--include-asan: sidecar appears"
 
   # ── 7. --files-only preserves the default path-only mode ───────────
-  output_fo=$(RESULTS_DIR="$RESULTS_DIR" bash "$SS" --files-only ALTSVC_NEEDLE 2>&1)
+  output_fo=$(RESULTS_DIR="$RESULTS_DIR" "$SS" --files-only ALTSVC_NEEDLE 2>&1)
   assert_match '\[scratch-1\] 2 files' "$output_fo" "--files-only: scratch-1 file count"
   # The match-line context body should NOT appear in files-only mode.
   if grep -q '/\*' <<<"$output_fo"; then
@@ -114,13 +114,13 @@ if command -v rg >/dev/null 2>&1; then
   fi
 
   # ── 7b. --lines preserves the old file:line:body behavior ─────────
-  output_lines=$(RESULTS_DIR="$RESULTS_DIR" bash "$SS" --lines ALTSVC_NEEDLE 2>&1)
+  output_lines=$(RESULTS_DIR="$RESULTS_DIR" "$SS" --lines ALTSVC_NEEDLE 2>&1)
   assert_match '\[scratch-1\] 4 matches in 2 files' "$output_lines" "--lines: old match count shown"
   assert_match 'scratch-1/altsvc_harness.c:[0-9]+:  /\* ALTSVC_NEEDLE entry point \*/' "$output_lines" "--lines: match body shown"
   assert_match '\[corpus\] 1 match in 1 file' "$output_lines" "--lines: singular match grammar"
 
   # ── 8. Pattern with no hits anywhere → exit 1 ──────────────────────
-  output_miss=$(RESULTS_DIR="$RESULTS_DIR" bash "$SS" ZZZ_NEVER_THERE_ZZZ 2>&1) ; rc=$?
+  output_miss=$(RESULTS_DIR="$RESULTS_DIR" "$SS" ZZZ_NEVER_THERE_ZZZ 2>&1) ; rc=$?
   assert_eq 1 "$rc" "no matches anywhere: exit 1"
   assert_match '\[scratch-1\] no matches' "$output_miss" "no matches: per-section label still printed"
 
@@ -136,7 +136,7 @@ if command -v rg >/dev/null 2>&1; then
   # Plant 50 matches in one file, set cap to 5.
   big="$S1/big_match.c"
   for i in $(seq 1 50); do echo "line $i ALTSVC_NEEDLE" >> "$big"; done
-  output_cap=$(RESULTS_DIR="$RESULTS_DIR" bash "$SS" --lines --cap 5 ALTSVC_NEEDLE 2>&1)
+  output_cap=$(RESULTS_DIR="$RESULTS_DIR" "$SS" --lines --cap 5 ALTSVC_NEEDLE 2>&1)
   assert_match '\[scratch-1\] 54 matches' "$output_cap" "cap: total still shown in header"
   assert_match 'more matches in this section' "$output_cap" "cap: footer present when clipped"
 else

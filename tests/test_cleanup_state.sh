@@ -297,5 +297,38 @@ assert_file_not_exists "$sec17/samples/sample-x/claude/logs/index.log" \
 assert_file_exists "$lfacade/codex/logs/index.log" \
     "cleanup_logs default run: benchmark facade logs untouched"
 
+# Section 18: a nested .gitkeep protects its containing directory while other
+# log entries are removed. The cleanup count describes entries actually
+# removed, not ancestors which must remain to hold the preserved file.
+sec18="$TEST_TMPDIR/out18"
+mkdir -p "$sec18/libxml2/codex/logs/archive"
+echo "[meta]" > "$sec18/libxml2/target.toml"
+echo "keep" > "$sec18/libxml2/codex/logs/archive/.gitkeep"
+echo "log" > "$sec18/libxml2/codex/logs/index.log"
+dry18=$("$CLEANUP_LOGS" --output-root "$sec18" --target libxml2 --backend codex --dry-run 2>&1)
+assert_match '1 entries' "$dry18" "cleanup_logs nested .gitkeep: dry-run counts only removable entries"
+keep_rc=0
+"$CLEANUP_LOGS" --output-root "$sec18" --target libxml2 --backend codex --quiet || keep_rc=$?
+assert_eq 0 "$keep_rc" "cleanup_logs nested .gitkeep: cleanup succeeds"
+assert_file_exists "$sec18/libxml2/codex/logs/archive/.gitkeep" \
+    "cleanup_logs nested .gitkeep: marker preserved"
+assert_file_not_exists "$sec18/libxml2/codex/logs/index.log" \
+    "cleanup_logs nested .gitkeep: other logs removed"
+
+# Section 19: an unreadable target must fail loud instead of looking empty.
+# Execute permission keeps the target path resolvable while lack of read
+# permission prevents enumerating its direct children.
+sec19="$TEST_TMPDIR/out19"
+mkdir -p "$sec19/sample/generated"
+echo "[meta]" > "$sec19/sample/target.toml"
+echo "state" > "$sec19/sample/generated/value"
+chmod 311 "$sec19/sample"
+unreadable_rc=0
+unreadable_out=$("$CLEANUP" --output-root "$sec19" --target sample 2>&1) || unreadable_rc=$?
+chmod 700 "$sec19/sample"
+assert_eq 1 "$unreadable_rc" "unreadable target: exits as partial failure"
+assert_match 'failed to inspect' "$unreadable_out" "unreadable target: reports inspection failure"
+assert_file_exists "$sec19/sample/generated/value" "unreadable target: generated state is not misreported as removed"
+
 teardown_test_env
 summary

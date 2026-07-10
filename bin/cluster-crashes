@@ -29,7 +29,7 @@ above the ClusterFuzz threshold.
 
 The tool is read-mostly for the report bundles: it only edits the
 "Cluster:" line in each REPORT.md. It does NOT touch any other section,
-the asan.txt, or the harness, and it is idempotent.
+the sanitizer.txt, or the harness, and it is idempotent.
 
 The rendered Root signature column is the representative crash's exact
 top-three dedup frame chain (function plus source location) when available.
@@ -61,7 +61,6 @@ import clusterfuzz_stacktrace as cf_stack  # noqa: E402
 import finding_signature  # noqa: E402
 from cluster_common import (  # noqa: E402
     exact_child_file,
-    remove_legacy_cluster_files,
     render_member_report_siblings,
     render_md_sibling,
     run_under_aggregate_lock,
@@ -136,17 +135,13 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def _find_asan(crash_dir: Path) -> Path | None:
-    # Canonical bundle filename is sanitizer.txt. asan.txt is a legacy
-    # alias kept here as a fallback so older bundles already shipped to
-    # maintainers remain readable.
-    for name in ("sanitizer.txt", "asan.txt"):
-        p = crash_dir / name
-        if p.is_file():
-            return p
-    # Pre-bundle layout — first sanitizer diagnostic under .audit/ or the
-    # crash root. Probe historically uses *.asan.txt for every sanitizer, but
-    # accept explicit sanitizer suffixes too.
+def _find_sanitizer(crash_dir: Path) -> Path | None:
+    p = crash_dir / "sanitizer.txt"
+    if p.is_file():
+        return p
+    # Audit layout — first sanitizer diagnostic under .audit/ or the crash
+    # root. Probe uses *.asan.txt for the primary run sidecar; explicit
+    # sanitizer suffixes are also valid.
     candidates = []
     audit = crash_dir / ".audit"
     for root in (crash_dir, audit):
@@ -154,7 +149,6 @@ def _find_asan(crash_dir: Path) -> Path | None:
             for name in sorted(p.name for p in root.iterdir() if p.is_file()):
                 if (
                     name.endswith((".asan.txt", ".msan.txt", ".tsan.txt", ".ubsan.txt"))
-                    or name in {"asan_output.txt", "msan.txt", "tsan.txt", "ubsan.txt"}
                 ):
                     candidates.append(root / name)
     return candidates[0] if candidates else None
@@ -534,7 +528,7 @@ def _extract_strategy(report_text: str) -> str:
 
 
 def _signature(crash_dir: Path) -> dict:
-    asan = _find_asan(crash_dir)
+    asan = _find_sanitizer(crash_dir)
     asan_text = _read_text(asan) if asan else ""
     report = _find_report(crash_dir)
     report_text = _read_text(report) if report else ""
@@ -784,9 +778,6 @@ def _member_link(crashes_root: Path, member_id: str, link_prefix: str = "") -> s
 
 
 def _rejected_report_link(crashes_root: Path) -> str:
-    rejected_root = crashes_root.parent / "crashes-rejected"
-    if not (rejected_root / "REJECTED-CRASHES.md").is_file():
-        return "../crashes-rejected/INDEX.md"
     return "../crashes-rejected/REJECTED-CRASHES.md"
 
 
@@ -839,9 +830,7 @@ def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
             f"{c.get('status', 'OK')} |"
         )
     lines.append("")
-    # Footer: always point readers at the sibling rejected report. Live audit
-    # and benchmark pool builders both write this named report, with INDEX.md
-    # kept as a compatibility alias for older links.
+    # Footer: always point readers at the sibling rejected report.
     lines.append("---")
     lines.append("")
     lines.append(
@@ -973,12 +962,11 @@ def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: b
         return 0
 
     _atomic_write_text(out_md, md)
-    remove_legacy_cluster_files([target_root / "CLUSTERS.md"])
     render_md_sibling(out_md)
 
     # Per-agent CRASH-CLUSTERS.md and REPORT.md Cluster: lines are owned by the
     # single-results-dir invocation each backend already runs from its own
-    # maintain_indexes (lib/triage.sh). Rewriting them here would race with
+    # maintain_indexes (lib/triage.py). Rewriting them here would race with
     # those concurrent writers across backends; keep the target-root
     # invocation strictly to <slug>/CRASH-CLUSTERS.md.
 
@@ -1033,13 +1021,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     _atomic_write_text(out_md, md)
-    legacy_paths: list[Path] = []
-    if out_md.parent.name == "crashes":
-        legacy_paths.extend([
-            out_md.parent.parent / "CLUSTERS.md",
-            out_md.parent.parent / "CRASH-CLUSTERS.md",
-        ])
-    remove_legacy_cluster_files(legacy_paths)
     n_updated = update_reports(clusters, dry_run=False)
 
     render_member_report_siblings(clusters)

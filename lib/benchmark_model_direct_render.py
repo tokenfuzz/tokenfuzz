@@ -38,7 +38,7 @@ from pathlib import Path
 # Per-sanitizer prompt metadata for the C/C++ clang sanitizers. The runtime
 # *_OPTIONS strings are NOT duplicated here — they are read from
 # lib/sanitizer_options.conf (the single source of truth shared with
-# lib/sanitizer.sh and bin/export-repro) by _san_options(). Only the stable
+# lib/sanitizer.py and bin/export-repro) by _san_options(). Only the stable
 # name → (clang -fsanitize flag, *_OPTIONS env var, short/long label) mapping
 # lives here.
 #
@@ -71,7 +71,7 @@ def _san_options(script_root: str, san: str, mode: str = "full") -> str:
     """Canonical *_OPTIONS string for `san`, read from the shared conf.
 
     lib/sanitizer_options.conf is the single source of truth (also consumed by
-    the bin/run-* shell runners and bin/export-repro). We never re-hardcode an
+    the live runners and bin/export-repro). We never re-hardcode an
     option string here. Falls back to the sanitizer's `full` row, then "".
     """
     conf = Path(script_root) / "lib" / "sanitizer_options.conf"

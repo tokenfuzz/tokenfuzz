@@ -18,10 +18,6 @@ CLI shapes:
   llm_usage.py extract-usage <backend> <raw-log-path> [prompt-file]
       Print one JSON object on stdout: {tokens:{input, cached_input,
       cache_creation, output}, probe:{}, estimated:bool, backend}.
-      The legacy benchmark form (no `extract-usage` subcommand, the
-      first arg is a known backend name) is still accepted so
-      pre-rename callers keep working.
-
   llm_usage.py extract-field <field> <backend> <raw-log-path>
                             [--prompt prompt-file]
       Print one integer (or empty string for unknown) on stdout.
@@ -34,7 +30,7 @@ CLI shapes:
       total_tokens, input_tokens, cached_input_tokens,
       cache_creation_input_tokens, output_tokens, duration_ms.
 
-On any internal failure both shapes print empty and exit 0 — a
+On any internal failure these commands print empty and exit 0 — a
 missing cost number must never fail a benchmark cell or an audit
 session.
 
@@ -363,10 +359,6 @@ def extract_usage_from_text(
     return {"tokens": tokens, "probe": {}, "estimated": True, "backend": backend}
 
 
-# ── Known backends; used to detect the legacy `backend raw [prompt]` form
-# (no subcommand). Kept in sync with lib/llm_invoke.py::_KNOWN_BACKENDS.
-_KNOWN_BACKENDS = ("claude", "codex", "gemini", "grok", "oss")
-
 # ── Field-name aliases for extract-field so callers can ask for the
 # field shape they're used to ("output_tokens", "duration_ms") without
 # knowing this module's compact internal keys ("output").
@@ -386,20 +378,18 @@ def extract_field(
     backend: str = "",
     prompt_path: str | None = None,
 ) -> str:
-    """Return one usage field as a string ('' for unknown), suitable for
-    a bash `$(... )` substitution. Aggregation matches the legacy jq
-    pipeline: scan the whole stream, return the MAX of any candidate
+    """Return one usage field as a string ('' for unknown). Scan the whole
+    stream and return the maximum candidate
     value (Claude's running totals grow per turn; the LAST/MAX is the
     cumulative final).
 
     For `total_tokens` (no native field on any backend), sum the input
     and output components from the picked usage record.
-    duration_ms is read from the legacy field name directly.
+    duration_ms is read from provider event fields directly.
 
     Missing files return '' on every backend — including the gemini
     plain-text path which would otherwise estimate 0. That matches the
-    legacy jq-based extract_usage_field's `[ -f "$file" ] || echo ""`
-    guard and keeps "I never wrote a raw log" distinguishable from "the
+    caller contract and keeps "I never wrote a raw log" distinguishable from "the
     agent produced no output."
     """
     if not os.path.isfile(raw_log_path):
@@ -421,9 +411,8 @@ def extract_field(
     # tokens dict whether a usage block was found AND read as zero
     # (vanishingly rare on Claude/Codex) or no usage block existed at
     # all. The latter is the common case for empty / corrupt / wrong-
-    # format raw logs, and the right bash semantic there is the empty
-    # string (audit's `$(extract_usage_field …)` consumers all use
-    # `${var:-0}` to floor). Distinguish by summing measured fields:
+    # format raw logs. Return an empty field so callers can distinguish
+    # missing telemetry from a measured zero. Distinguish by summing fields:
     # all-zero AND not estimated = nothing to report.
     measured_sum = 0
     for k in ("input", "output", "cached_input", "cache_creation"):
@@ -549,21 +538,6 @@ def main(argv: list[str]) -> int:
 
     head = argv[0]
 
-    # Legacy form: <backend> <raw-log> [prompt-file]
-    if head in _KNOWN_BACKENDS:
-        if len(argv) < 2:
-            print("{}")
-            return 0
-        backend = head
-        raw_log = argv[1]
-        prompt_path = argv[2] if len(argv) >= 3 else None
-        try:
-            print(json.dumps(extract_usage(raw_log, prompt_path, backend=backend)))
-        except Exception:  # noqa: BLE001 — cost extraction must never fail a cell
-            print("{}")
-        return 0
-
-    # Subcommand form: extract-usage / extract-field
     if head == "extract-usage":
         if len(argv) < 3:
             print("{}")

@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-"""File-scan helpers for lib/quality.sh.
+"""Testcase and sanitizer-evidence filesystem classification.
 
-The bash module is sourced by bin/audit and keeps the orchestration that
-depends on the bash runtime (NUM_AGENTS, state_file_path, scratch_dir_path,
-agent_role, $LOGDIR, $RESULTS_DIR, the ASan runner binary, etc.). What
-this Python module owns is the pure file-system scanning + classification:
+This module owns the filesystem scanning and classification used by audit
+commands:
 which files look like testcases, which sanitizer-output files contain a
 verifiable ASan run, how many of the testcases are "orphans" (no .asan.txt).
 
-A single `scan-scratch` call replaces three previously distinct bash
-while-loops + per-file `grep` invocations (count_verified_asan_runs,
-count_scratch_input_files, count_orphan_testcases) with one os.scandir
-pass that classifies every file once. For a directory with N files,
-that turns O(3N) grep-subprocess spawns into one process pass.
+`scan-scratch` classifies every directory entry in one `os.scandir` pass,
+instead of launching a subprocess for each predicate.
 
 Subcommands (run as `python3 lib/quality.py <name> ...`):
 
@@ -26,7 +21,7 @@ Subcommands (run as `python3 lib/quality.py <name> ...`):
 
   list-testcases <dir>
       Print null-separated paths of testcases under <dir> (non-recursive).
-      Drop-in for the bash `list_scratch_testcases` helper.
+      Emit paths for callers that need to inspect scratch inputs.
 
   count-asan-runs <dir>
       Print the integer count of verifiable .asan.txt files in <dir>.
@@ -39,9 +34,9 @@ Subcommands (run as `python3 lib/quality.py <name> ...`):
       sibling.
 
   scan-scratch <dir>
-      Print a single line `asan_runs=N testcases=M orphans=K` plus an
+      Print a single line `sanitizer_runs=N testcases=M orphans=K` plus an
       optional second line listing orphan paths (used by enforcement).
-      One pass — preferred replacement for three bash count helpers.
+      The directory is scanned once.
 
   promote-corpus <hits_log> <scratch_dir> <corpus_root> <agent_num>
       Walk a hits.log, copy promotable testcases (plus their .asan.txt)
@@ -57,15 +52,16 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import os
 import re
 import shutil
 import sys
-from pathlib import Path
+
+import languages
 
 # Sidecar blacklist: filenames that are never testcases. Lowercased stem
-# matches except where explicitly noted. The bash side enumerated these
-# inline; we mirror the same set so promotion behaviour is identical.
+# matches except where explicitly noted.
 _BLACK_EXACT_LOWER = {
     ".ds_store", ".gitignore", ".gitkeep", ".keep",
     ".harness-cache", ".enforced", ".config-hash", ".config_hash",
@@ -74,13 +70,11 @@ _BLACK_EXACT_LOWER = {
 }
 _BLACK_EXACT_PRESERVE_CASE = {
     "REPORT.md", "REPORT.html", "description.md",
-    "reproduce.sh", "testcase.sh", "reproducer.sh",
-    "asan.txt", "asan-output.txt", "asan_output.txt",
+    "reproduce.sh",
     "severity.json", "promotion.log",
 }
 
-# Suffix-based blacklist (lowercase). Mirrors the `case "$lower" in …` in
-# lib/quality.sh — log files, sanitizer outputs, docs, build artifacts,
+# Suffix-based blacklist (lowercase): log files, sanitizer outputs, docs, build artifacts,
 # JSON sidecars. Pattern: a tuple is checked as suffix or as a glob with
 # the wildcard expressed as a prefix-match.
 _BLACK_GLOB_LOWER = (
@@ -109,13 +103,11 @@ _ASAN_VERIFIED_RE = re.compile(
     r"\[run-asan\] (?:browser|js|js-diff|xpcshell|generic)? ?EXECUTION VERIFIED|"
     r"ERROR: AddressSanitizer)"
 )
-# Clean-success evidence for corpus promotion. Mirrors lib/verdict.sh:
-# SUCCESS_RATE means rc=0 execution; the run-asan-multi EXECUTION_RATE label is
-# kept only for historical artifacts. A bare run-sanitizer-multi EXECUTION_RATE
-# now only proves the target was reached, so it no longer counts as clean.
+# Clean-success evidence for corpus promotion. Mirrors lib/verdict.py:
+# SUCCESS_RATE means rc=0 execution. A bare run-sanitizer-multi EXECUTION_RATE
+# only proves the target was reached, so it does not count as clean.
 _CLEAN_EVIDENCE_RE = re.compile(
     r"(\[run-sanitizer-multi\] SUCCESS_RATE: [1-9][0-9]*/[0-9]+|"
-    r"\[run-asan-multi\] EXECUTION_RATE: [1-9][0-9]*/[0-9]+|"
     r"\[run-(?:asan|ubsan|msan|tsan)\] (?:browser|js|xpcshell|generic) EXECUTION VERIFIED \(post-run|"
     r"\[run-ubsan\] EXECUTION VERIFIED:|"
     r"ERROR: AddressSanitizer)"
@@ -125,6 +117,8 @@ _HIT_LINE_RE = re.compile(r"^HIT:")
 _HID_RE = re.compile(r"HYPOTHESIS-ID:\s*(H[0-9]+)")
 _TARGET_RE = re.compile(r"^[^A-Za-z]*TARGET:\s*(.+?)(?:\s*(?:-->|\*/)\s*)?$")
 _CATEGORY_RE = re.compile(r"^[^A-Za-z]*(?:CATEGORY|INTENT):\s*(.+?)(?:\s*(?:-->|\*/)\s*)?$")
+_C_FAMILY_HARNESS_EXTS = frozenset((".c", ".cc", ".cpp", ".cxx"))
+_RUNNABLE_SOURCE_EXTS = languages.all_harness_exts() - _C_FAMILY_HARNESS_EXTS
 
 
 def _is_testcase_blacklisted(stem: str, lower: str) -> bool:
@@ -170,13 +164,18 @@ _TXT_TESTCASE_PREFIXES = (
 def testcase_mode_for_file(path: str) -> str | None:
     """Classify a file as a testcase mode, or return None if not a testcase.
 
-    Matches the policy in lib/quality.sh: invert the prior allowlist. Anything
+    Matches the policy in lib/quality.py: invert the prior allowlist. Anything
     not on the sidecar blacklist (sanitizer output, docs, source, build
     artifacts) is assumed to be a testcase. Plain *.txt requires an explicit
     testcase-shaped stem.
     """
     stem = os.path.basename(path)
     lower = stem.lower()
+    suffix = os.path.splitext(lower)[1]
+    if suffix in _RUNNABLE_SOURCE_EXTS:
+        header = _read_header(path)
+        if _HID_RE.search(header) and any(_TARGET_RE.match(line) for line in header.splitlines()):
+            return "js" if suffix in (".js", ".mjs", ".cjs", ".ts", ".tsx") else "generic"
     if _is_testcase_blacklisted(stem, lower):
         return None
 
@@ -200,11 +199,8 @@ def testcase_mode_for_file(path: str) -> str | None:
     if st.st_size <= 0:
         return None
     if st.st_mode & 0o111:
-        # Executable file. Without libmagic we can't reliably distinguish a
-        # Mach-O/ELF/dSYM from a shell wrapper; treat any executable that
-        # passed the blacklist as a generic input. The bash side preferred
-        # the file(1) probe; here we keep behaviour conservative-permissive
-        # since rejecting executables would skip compiled reproducers.
+        # Executable testcases include compiled reproducers and script inputs.
+        # The sidecar blacklist has already removed known harness artifacts.
         return "generic"
 
     return "generic"
@@ -213,10 +209,9 @@ def testcase_mode_for_file(path: str) -> str | None:
 def _file_has_verified_asan(path: str) -> bool:
     """Return True if `path` is a .asan.txt-shaped file with a verifiable run.
 
-    Matches the bash predicate exactly: presence of any of ASAN_RUN_HEADER,
-    CRASH_RATE, EXECUTION_RATE, run-asan CRASH/VERIFIED markers, or AddressSanitizer
-    error line — UNLESS the file also carries COVERAGE_GATE: MISSED, which
-    disqualifies it entirely.
+    Accepts ASAN_RUN_HEADER, CRASH_RATE, EXECUTION_RATE, run-asan
+    CRASH/VERIFIED markers, or an AddressSanitizer error line. A
+    COVERAGE_GATE: MISSED marker disqualifies the run.
     """
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -228,7 +223,7 @@ def _file_has_verified_asan(path: str) -> bool:
     return bool(_ASAN_VERIFIED_RE.search(text))
 
 
-def count_verified_asan_runs(directory: str) -> int:
+def count_verified_sanitizer_runs(directory: str) -> int:
     if not os.path.isdir(directory):
         return 0
     n = 0
@@ -349,8 +344,8 @@ def _cmd_list_testcases(args) -> int:
     return 0
 
 
-def _cmd_count_asan_runs(args) -> int:
-    print(count_verified_asan_runs(args.dir))
+def _cmd_count_sanitizer_runs(args) -> int:
+    print(count_verified_sanitizer_runs(args.dir))
     return 0
 
 
@@ -365,8 +360,8 @@ def _cmd_count_orphans(args) -> int:
 
 
 def _cmd_scan_scratch(args) -> int:
-    asan_runs, testcases, orphans = scan_scratch(args.dir)
-    print(f"asan_runs={asan_runs} testcases={len(testcases)} orphans={len(orphans)}")
+    sanitizer_runs, testcases, orphans = scan_scratch(args.dir)
+    print(f"sanitizer_runs={sanitizer_runs} testcases={len(testcases)} orphans={len(orphans)}")
     if args.list_orphans and orphans:
         for tc in orphans:
             sys.stdout.write(tc + "\0")
@@ -406,6 +401,17 @@ def _parse_hit_line(line: str) -> dict[str, str]:
     return out
 
 
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
+
+
 def _cmd_promote_corpus(args) -> int:
     hits_log = args.hits_log
     scratch_dir = args.scratch_dir
@@ -425,15 +431,16 @@ def _cmd_promote_corpus(args) -> int:
     skipped_no_header = 0
     skipped_no_new_edges = 0
 
-    # Existing testcase basenames already promoted somewhere under
-    # corpus_root/<COVER-...>/<file>. Used to skip duplicates.
-    existing_basenames: set[str] = set()
+    # Agents routinely reuse names such as testcase.js. Deduplicate the bytes,
+    # not the basename, so a new coverage input is never discarded by name.
+    existing_digests: set[str] = set()
     try:
         for cover in os.scandir(corpus_root):
             if cover.is_dir() and cover.name.startswith("COVER-"):
                 for entry in os.scandir(cover.path):
-                    if entry.is_file():
-                        existing_basenames.add(entry.name)
+                    if entry.is_file() and testcase_mode_for_file(entry.path) is not None:
+                        if digest := _file_sha256(entry.path):
+                            existing_digests.add(digest)
     except OSError:
         pass
 
@@ -484,7 +491,8 @@ def _cmd_promote_corpus(args) -> int:
             target = _extract_header_field(header, _TARGET_RE)
             category = _extract_header_field(header, _CATEGORY_RE)
 
-            if stem in existing_basenames:
+            digest = _file_sha256(tc)
+            if not digest or digest in existing_digests:
                 continue
 
             new_edges_raw = fields.get("new", "")
@@ -556,7 +564,7 @@ def _cmd_promote_corpus(args) -> int:
             except OSError:
                 pass
 
-            existing_basenames.add(stem)
+            existing_digests.add(digest)
             promoted += 1
 
     print(
@@ -641,7 +649,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("count-asan-runs")
     s.add_argument("dir")
-    s.set_defaults(func=_cmd_count_asan_runs)
+    s.set_defaults(func=_cmd_count_sanitizer_runs)
 
     s = sub.add_parser("count-testcases")
     s.add_argument("dir")

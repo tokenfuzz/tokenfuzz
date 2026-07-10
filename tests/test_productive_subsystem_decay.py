@@ -8,7 +8,7 @@ keeps the agent re-investigating an already-closed bug every iteration
 even after the subsystem stops producing new artifacts.
 
 This file pins the decay contract: once the global per-subsystem dry
-counter (written by ``bin/audit``'s ``bump_subsystem_dry_streak``)
+counter (written by the audit orchestrator)
 reaches ``_PRODUCTIVE_DECAY_AFTER_ITERS`` (a module constant), the
 subsystem drops out of the productive-relaxation set and the diversity
 gate re-applies normally.
@@ -139,7 +139,15 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq(0, workqueue.subsystem_dry_streak(ctx, "neg"),
               "subsystem_dry_streak: negative payload clamped to 0")
 
-# Slash-bearing subsystems map to the same file layout bin/audit uses
+    workqueue.record_subsystem_iteration(ctx, "src/new", False)
+    workqueue.record_subsystem_iteration(ctx, "src/new", False)
+    assert_eq(2, workqueue.subsystem_dry_streak(ctx, "src/new"),
+              "subsystem dry producer advances once per dry iteration")
+    workqueue.record_subsystem_iteration(ctx, "src/new", True)
+    assert_eq(0, workqueue.subsystem_dry_streak(ctx, "src/new"),
+              "subsystem dry producer resets after a confirmed result")
+
+# Slash-bearing subsystems map to the same file layout the orchestrator uses
 # (slash → underscore). A mismatch here would silently make the helper
 # return 0 forever.
 with tempfile.TemporaryDirectory() as td:
@@ -366,30 +374,6 @@ with tempfile.TemporaryDirectory() as td:
     reason_dry = workqueue.explain_queue(ctx, ["generic"])[0].get("reason")
     assert_eq("terminal:crash", reason_dry,
               "broad closure: retires once its subsystem dry-streak crosses the threshold")
-
-
-# Legacy released mask: a bare "released" row (written before terminal
-# preservation, or any resumed pre-fix state) must not reopen a mined card.
-# The recorded conclusion still routes closure.
-with tempfile.TemporaryDirectory() as td:
-    rdir = Path(td) / "results"
-    rdir.mkdir()
-    target = Path(td) / "target"
-    target.mkdir()
-    ctx = _ctx(rdir, target)
-    workqueue.init_state(ctx)
-    _write_jsonl(rdir / "work-cards.jsonl", [_card("WORK-mask")])
-    _write_jsonl(rdir / "state" / "hypotheses.jsonl", [_hyp("WORK-mask", "m1")])
-    _write_jsonl(rdir / "state" / "claims.jsonl", [
-        _crash_claim("WORK-mask"), _crash_claim("WORK-mask"),  # C=2, D=1 → re-discovery
-        # legacy stale-lease cleanup wrote a bare "released" (no preserved status).
-        {"card_id": "WORK-mask", "agent": "1", "status": "released",
-         "reason": "all-hypotheses-terminal", "source": "release-stale-claims",
-         "updated_at": "2026-01-01T00:02:00Z"},
-    ])
-    reason_masked = workqueue.explain_queue(ctx, ["generic"])[0].get("reason")
-    assert_eq("terminal:released", reason_masked,
-              "legacy released mask: recorded conclusion still closes a mined concrete card")
 
 
 # Expired-lease mask: a re-claimed card whose lease later expires reads back as
