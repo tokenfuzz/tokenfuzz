@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Shared backend-flag picker and assistant-text extractor.
 
-Single source of truth for the four LLM backends the harness drives —
+Single source of truth for the five LLM backends the harness drives —
 claude / codex / oss (OpenCode against local OpenAI-compatible servers) /
-gemini. The `gemini` backend keeps
+gemini / grok. The `gemini` backend keeps
 one harness-visible name while supporting two CLI dialects underneath:
 Antigravity (`agy`, default) and Google Gemini CLI (`gemini` when
 USE_GEMINI_CLI=1). Previously this logic lived in lib/llm_invoke.sh
@@ -22,12 +22,12 @@ strings would be a larger callsite refactor with no readability gain.
 CLI subcommands (used by the bash shim — `python3 lib/llm_invoke.py …`):
 
   known-backend <backend>
-      Exit 0 if backend ∈ {claude, codex, oss, gemini}; else 1.
+      Exit 0 if backend ∈ {claude, codex, oss, gemini, grok}; else 1.
 
   default-model <backend>
       Print the project's default model name for <backend>, read from
       config/models.toml. A per-backend env override (CLAUDE_MODEL_DEFAULT /
-      CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT)
+      CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT / GROK_MODEL_DEFAULT)
       wins when set. Exit 1 on unknown backend.
 
   agent-flags <backend> [--model …] [--max-turns N] [--add-dirs CSV]
@@ -43,7 +43,7 @@ CLI subcommands (used by the bash shim — `python3 lib/llm_invoke.py …`):
       to stdout. Per-backend: claude (.message.content[].text, with
       .result as fallback only), codex (item.completed/agent_message),
       oss (OpenCode JSON output), gemini (agy plain stdout, or Gemini CLI
-      stream-json assistant text).
+      stream-json assistant text), grok (Grok Build streaming-json text).
 
   gemini-isolated-home
       Stage (when cross-run memory is off and USE_GEMINI_CLI=1) a throwaway
@@ -83,7 +83,7 @@ def _load_tomllib():
         return tomli
 
 
-_KNOWN_BACKENDS = ("claude", "codex", "oss", "gemini")
+_KNOWN_BACKENDS = ("claude", "codex", "oss", "gemini", "grok")
 
 # Per-backend env var that overrides the configured default (CI / throttled
 # runs). When unset, the default comes from config/models.toml.
@@ -91,6 +91,7 @@ _MODEL_ENV_OVERRIDE = {
     "claude": "CLAUDE_MODEL_DEFAULT",
     "codex": "CODEX_MODEL_DEFAULT",
     "gemini": "GEMINI_MODEL_DEFAULT",
+    "grok": "GROK_MODEL_DEFAULT",
 }
 
 # config/models.toml (repo root) is the single source of truth for the
@@ -541,6 +542,23 @@ def agent_flags(
                 flags += ["--add-dir", d]
         return flags
 
+    if backend == "grok":
+        flags = [
+            "--no-auto-update",
+            "--no-subagents",
+            "--always-approve",
+            "--output-format", "streaming-json",
+        ]
+        flags.append("--experimental-memory" if memory_enabled() else "--no-memory")
+        if max_turns > 0:
+            flags += ["--max-turns", str(max_turns)]
+        if resolved_model:
+            flags += ["--model", resolved_model]
+        dirs = [d.strip() for d in (add_dirs or "").split(",") if d.strip()]
+        if dirs:
+            flags += ["--cwd", dirs[0]]
+        return flags
+
     raise ValueError(f"unknown backend: {backend}")
 
 
@@ -612,6 +630,18 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         label = agy_model_label(resolved_model)
         if label:
             flags += ["--model", label]
+        return flags
+
+    if backend == "grok":
+        flags = [
+            "--no-auto-update",
+            "--no-subagents",
+            "--permission-mode", "plan",
+            "--output-format", "plain",
+        ]
+        flags.append("--experimental-memory" if memory_enabled() else "--no-memory")
+        if resolved_model:
+            flags += ["--model", resolved_model]
         return flags
 
     raise ValueError(f"unknown backend: {backend}")
@@ -844,6 +874,15 @@ def extract_text(backend: str, raw_log_path: str) -> str:
         except OSError:
             return ""
 
+    if backend == "grok":
+        for ev in _iter_json_lines(raw_log_path):
+            if not isinstance(ev, dict) or ev.get("type") != "text":
+                continue
+            data = ev.get("data")
+            if isinstance(data, str):
+                pieces.append(data)
+        return "".join(pieces).rstrip("\n")
+
     raise ValueError(f"unknown backend: {backend}")
 
 
@@ -1045,6 +1084,11 @@ def _cli_assistant_texts(backend: str, ev: dict) -> list[str]:
             text = ev.get(key)
             if isinstance(text, str):
                 pieces.append(text)
+
+    if backend == "grok" and ev.get("type") == "text":
+        data = ev.get("data")
+        if isinstance(data, str):
+            pieces.append(data)
 
     return pieces
 

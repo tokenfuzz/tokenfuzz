@@ -774,12 +774,14 @@ def parse_cluster_count(clusters_md: Path, fallback: int) -> int:
 # gemini-cli's `result.stats.input_tokens` is likewise cumulative (it
 # also emits a separate fresh-only `input`, but the priority order in
 # _INPUT_KEYS picks `input_tokens` first, so the same subtract-cached
-# normalization applies). Claude reports fresh input only and stays out
+# normalization applies). The xAI Responses API uses the same total-input
+# convention if Grok Build exposes usage in a future CLI release. Claude
+# reports fresh input only and stays out
 # of this list. harvest_tokens subtracts the cached part for these so
 # the per-turn delta is comparable across backends. Backend names are
 # industry vocabulary, not target-specific, so this list is
 # harness-shared by design.
-_INPUT_INCLUDES_CACHED = ("codex", "oss", "gemini")
+_INPUT_INCLUDES_CACHED = ("codex", "oss", "gemini", "grok")
 
 _MILLION = Decimal("1000000")
 
@@ -900,6 +902,14 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
                 "source": "gemini-api-3-flash-standard",
             }
 
+    if b == "grok":
+        if "grok-build" in m:
+            return {
+                "input": _money("1"),
+                "cache_read": _money("0.20"),
+                "output": _money("2"),
+                "source": "xai-code-api-grok-build-0.1",
+            }
     return None
 
 
@@ -979,7 +989,7 @@ def harvest_tokens(
       * input_tokens — tokens the model processed this turn at the
         full input rate (≥100%). On Claude this is `input + cache_creation`
         (cache writes are billed at 125% of base input and represent
-        genuinely new content the model just read). On codex/oss/gemini
+        genuinely new content the model just read). On codex/oss/gemini/grok
         the SDK's `input` is cumulative — cache_read is subtracted so the
         remainder is the new content this turn. End result: one number
         meaning "non-cache-hit input the model paid full freight on,"
@@ -996,9 +1006,9 @@ def harvest_tokens(
         "cache_creation_tokens": 0,
         "output_tokens": 0,
         "asan_invocations": 0,
-        # prompt_estimate is the only token signal the gemini backend
-        # (Antigravity CLI) produces — agy surfaces no real usage, so the
-        # harness estimates the prompt side. Summed here so a gemini cell
+        # prompt_estimate is the only input-token signal from backends whose
+        # CLI omits usage (Antigravity and Grok Build), so the harness
+        # estimates the prompt side. Summed here so such a cell
         # is not silently scored as zero-cost.
         "prompt_estimate_tokens": 0,
         "estimated": False,
@@ -1080,7 +1090,7 @@ def harvest_tokens(
             val = tok.get(field)
             if isinstance(val, (int, float)):
                 totals["prompt_estimate_tokens"] += int(val)
-                if raw_input == 0 and backend == "gemini":
+                if raw_input == 0 and backend in ("gemini", "grok"):
                     estimate_cost, source = _cost_decimal(
                         backend,
                         model,
@@ -2863,7 +2873,7 @@ def _fmt_input_cell(agg: dict) -> str:
 def _fmt_output_cell(agg: dict) -> str:
     """Output column for the cross-backend rollup.
 
-    When the backend reports no measured output (gemini) and we only
+    When the backend reports no measured output (gemini or grok) and we only
     have an input-side prompt estimate, render an em dash rather than
     `0` — there is no output estimate, and printing `0` falsely implies
     the model produced nothing.

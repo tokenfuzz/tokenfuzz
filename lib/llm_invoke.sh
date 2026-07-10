@@ -19,7 +19,7 @@
 # Public API (preserved exactly):
 #
 #   llm_known_backend <backend>
-#       rc=0 if backend ∈ {claude, codex, oss, gemini}, else rc=1.
+#       rc=0 if backend ∈ {claude, codex, oss, gemini, grok}, else rc=1.
 #
 #   llm_use_gemini_cli
 #       rc=0 when USE_GEMINI_CLI=1 selects the Google Gemini CLI dialect.
@@ -35,7 +35,7 @@
 #
 #   llm_default_model <backend>
 #       Echo the project-wide default model name. Honours CLAUDE_MODEL_DEFAULT
-#       / CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT env vars.
+#       / CODEX_MODEL_DEFAULT / GEMINI_MODEL_DEFAULT / GROK_MODEL_DEFAULT env vars.
 #
 #   llm_agent_flags <backend> <out-array-name> [model] [max_turns] [add_dirs_csv]
 #       Populate <out-array-name> with agent-mode flags (stream-json, sandbox
@@ -97,8 +97,9 @@ llm_gemini_default_bin() {
 #
 # Some backend CLIs accumulate learned notes across runs and inject them into
 # every later session's context: Claude Code's MEMORY.md + memory/*, Codex's
-# ~/.codex/memories/, and Google Gemini CLI's save_memory tool (appends to the
-# global ~/.gemini/GEMINI.md). One wrong note then steers every future run — a
+# ~/.codex/memories/, Google Gemini CLI's save_memory tool (appends to the
+# global ~/.gemini/GEMINI.md), and Grok Build memory. One wrong note then
+# steers every future run — a
 # confirmed failure mode (a stale "this surface is saturated" note walked an
 # audit straight past a real bug). The harness disables it by DEFAULT so each
 # run reasons from the target code, not from a prior run's guesses.
@@ -113,6 +114,8 @@ llm_gemini_default_bin() {
 #   codex   `-c features.memories=false` + memories.use_memories/generate=false,
 #           injected by llm_invoke.py's flag builders keyed on
 #           TOKENFUZZ_MEMORY_ENABLED, so EVERY launch path gets them.
+#   grok    `--no-memory` by default; `--experimental-memory` when the operator
+#           explicitly enables memory. Both are injected by llm_invoke.py.
 #   oss     OpenCode is launched with a per-call provider config. No
 #           cross-run memory controls are currently needed.
 #   gemini  (Google Gemini CLI) GEMINI_CLI_HOME relocated to a clean, EMPTY
@@ -209,7 +212,7 @@ llm_stage_gemini_memory_home() {
 # explicit assignment) but bash function callers may not have exported
 # them. Each subprocess invocation needs them visible.
 _llm_invoke_export_env() {
-  export CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT
+  export CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT GROK_MODEL_DEFAULT
   export AUDIT_LOCAL_BASE_URL AUDIT_LOCAL_API_KEY OPENCODE_BIN
   export USE_GEMINI_CLI="${USE_GEMINI_CLI:-}"
   # The flag builders gate the per-backend memory-disable flags on this; an
@@ -281,6 +284,7 @@ llm_backend_bin() {
     codex) printf '%s\n' "${CODEX_BIN:-codex}" ;;
     oss) printf '%s\n' "${OPENCODE_BIN:-opencode}" ;;
     gemini) printf '%s\n' "${GEMINI_BIN:-$(llm_gemini_default_bin)}" ;;
+    grok) printf '%s\n' "${GROK_BIN:-grok}" ;;
     *) return 1 ;;
   esac
 }
@@ -402,6 +406,10 @@ llm_run_agent_prompt() {
         [ -s "$raw_log" ] || llm_capture_gemini_cli_log_diag "$raw_log"
       fi
       ;;
+    grok)
+      ( cd "$cwd" && audit_timeout_run "$timeout_secs" "$bin" "${flags[@]}" \
+        -p "$prompt" ) > "$raw_log" 2>&1 || rc=$?
+      ;;
     *)
       return 1
       ;;
@@ -448,6 +456,10 @@ llm_run_agent_prompt_no_timeout() {
           > "$raw_log" 2>&1 || rc=$?
         [ -s "$raw_log" ] || llm_capture_gemini_cli_log_diag "$raw_log"
       fi
+      ;;
+    grok)
+      ( cd "$cwd" && "$bin" "${flags[@]}" -p "$prompt" ) \
+        > "$raw_log" 2>&1 || rc=$?
       ;;
     *)
       return 1

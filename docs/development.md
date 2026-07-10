@@ -11,7 +11,7 @@ issues and feature pitches at
 
 ## Development agents
 
-Start your coding agent (`claude`, `codex`, `gemini`) from the repository
+Start your coding agent (`claude`, `codex`, `gemini`, `grok`) from the repository
 root, then send:
 
 ```text

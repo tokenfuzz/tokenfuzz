@@ -67,11 +67,11 @@ Environment knobs (mirrors the prior bash contract exactly):
                                          target recovers fast.
   LLM_DECIDE_LOG=<path>                  audit-trail log file
   ACTIVE_BACKEND=<backend>                 concrete backend to dispatch to
-                                           (one of: claude, codex, gemini, oss)
+                                           (one of: claude, codex, gemini, grok, oss)
   BACKEND=<backend>                        alias used when ACTIVE_BACKEND is
                                            unset, for standalone helper calls
   MODEL=<name>                           per-backend model override
-  CLAUDE_BIN / CODEX_BIN / GEMINI_BIN /
+  CLAUDE_BIN / CODEX_BIN / GEMINI_BIN / GROK_BIN /
   OPENCODE_BIN                           backend binary overrides
   USE_GEMINI_CLI=1                       make the gemini backend invoke
                                          Google Gemini CLI instead of agy
@@ -110,7 +110,7 @@ from llm_invoke import (  # noqa: E402
 )
 
 
-_KNOWN_BACKENDS = ("claude", "codex", "oss", "gemini")
+_KNOWN_BACKENDS = ("claude", "codex", "oss", "gemini", "grok")
 
 
 def _utc_iso() -> str:
@@ -605,6 +605,10 @@ def _invoke_backend(
         # Empty -p arg forces non-interactive mode while the prompt is
         # read from stdin.
         cmd = [bin_name, *flags, "-p", ""]
+    elif backend == "grok":
+        bin_name = os.environ.get("GROK_BIN") or "grok"
+        flags = _backend_flags("grok", model)
+        cmd = [bin_name, *flags, "-p", prompt]
     else:
         return None
 
@@ -622,6 +626,8 @@ def _invoke_backend(
     child_env.update(_memory_env(backend))
     temp_dir = None
     run_input = prompt
+    if backend == "grok":
+        run_input = None
     if backend == "oss":
         # Build the config first: _opencode_config can raise ValueError (no
         # model), and doing it before TemporaryDirectory() avoids leaking an

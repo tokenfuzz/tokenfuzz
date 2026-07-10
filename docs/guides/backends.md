@@ -21,16 +21,16 @@ bin/audit --backend all --target <target-name>   # cycle installed hosted backen
 How to choose:
 
 - `--backend all` (or omitting `--backend` entirely) discovers the
-  hosted CLIs installed locally (`claude → codex → gemini` order) and
+  hosted CLIs installed locally (`claude → codex → gemini → grok` order) and
   **cycles between them** iteration by iteration. Each backend writes
   to its own `output/<target>/<backend>/results/` tree, so the cycle
   does not race or overwrite. `oss` is excluded from the hosted cycle
   because it needs an explicit `--model`.
 - Use an explicit `--backend` when you want reproducible runs or cost
   control.
-- `<backend>` is one of `all`, `claude`, `codex`, `gemini`, or `oss`.
+- `<backend>` is one of `all`, `claude`, `codex`, `gemini`, `grok`, or `oss`.
   `all` is the no-`--backend` default described above.
-- `--model` overrides the model name for `claude` and `codex`; for
+- `--model` overrides the model name for `claude`, `codex`, and `grok`; for
   `oss`, it is required and names the local model served through OpenCode.
   OpenCode is always configured with one local provider ref,
   `local/<model>`. The default local endpoint is vLLM-style
@@ -46,6 +46,33 @@ How to choose:
   [Model selection](../reference/environment.md#model-selection).
 - For `--backend oss`, `--model` is required and must match the exact
   model id listed by the selected provider's `/v1/models` endpoint.
+
+### Grok Build
+
+Install xAI's Grok Build CLI, set its API key, and verify one headless
+request before starting an audit:
+
+```bash
+curl -fsSL https://x.ai/cli/install.sh | bash
+export XAI_API_KEY="<xai-api-key>"
+grok -p "Reply exactly: tokenfuzz-grok-auth-ok"
+bin/audit --backend grok --target <target-name> 1
+```
+
+The default model is `grok-build-0.1`. Override it with `--model`,
+`GROK_MODEL_DEFAULT`, or `config/models.toml`; use `GROK_BIN` when the
+binary is not named `grok` or is outside `PATH`. TokenFuzz runs Grok in
+headless streaming-JSON mode, auto-approves audit tools, disables Grok's
+nested subagents, and resumes the CLI session on later iterations. See
+xAI's [Grok Build overview](https://docs.x.ai/build/overview) and
+[headless mode reference](https://docs.x.ai/build/cli/headless-scripting) for the
+upstream CLI contract.
+
+Grok Build's stream does not currently expose token-usage counters, so
+TokenFuzz marks its prompt and output token counts as estimates. Cost
+reports apply xAI's
+[published Grok Build API pricing](https://docs.x.ai/developers/models/grok-build-0.1)
+to those estimates.
 
 ### Google Gemini CLI ripgrep
 
@@ -96,7 +123,7 @@ container is the recommended default. The helper does **not** start an
 audit automatically.
 
 The shell mounts no host CLI credential directories (`~/.claude`,
-`~/.codex`, `~/.gemini`), so it starts logged out. Log in to the
+`~/.codex`, `~/.gemini`, `~/.grok`), so it starts logged out. Log in to the
 backend you plan to use, or pass `--forward-credentials` to forward API
 key/token environment variables before launching the helper. With
 `--forward-credentials`, `~/.config/gcloud` and a
@@ -115,10 +142,13 @@ Then verify auth before launching an audit:
 # codex login status
 # claude -p "Reply exactly: tokenfuzz-claude-auth-ok"
 # agy -p "Reply exactly: tokenfuzz-gemini-auth-ok"
+# grok -p "Reply exactly: tokenfuzz-grok-auth-ok"
 ```
 
-`codex login status` is a local check; the `claude`/`agy` checks make one
-small model request and print the reply. If a check hangs at a prompt,
+`codex login status` is a local check; the `claude`/`agy`/`grok` checks make one
+small model request and print the reply. Grok needs `XAI_API_KEY` in the
+container, normally via `--forward-credentials`, unless you logged in there.
+If a check hangs at a prompt,
 press Ctrl+C and finish that backend's login before starting
 `./bin/audit` from `/root/work`. An in-container login lasts only for
 that container session, since the shell runs disposable (`--rm`).
@@ -144,7 +174,7 @@ When `--backend` is omitted or set to `all`, `bin/audit` runs in
 this order:
 
 ```text
-claude → codex → gemini
+claude → codex → gemini → grok
 ```
 
 Only installed and authenticated CLIs join the cycle. `oss` is excluded
@@ -157,6 +187,7 @@ that order and writes into a separate result tree per backend:
 output/<target>/claude/results/
 output/<target>/codex/results/
 output/<target>/gemini/results/
+output/<target>/grok/results/
 ```
 
 That separation keeps backend-local state, logs, scratch inputs, and
@@ -205,7 +236,7 @@ When you inspect backend-specific output:
 4. Inspect each result tree separately:
 
    ```bash
-   for B in claude codex gemini oss; do
+   for B in claude codex gemini grok oss; do
      R="output/<target>/$B/results"
      echo "== $B =="
      ls "$R/crashes" "$R/findings" 2>/dev/null | head

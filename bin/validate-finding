@@ -51,10 +51,11 @@ Required:
   --target-path <path>  Target root the finding lives in.
 
 Options:
-  --backend <backend>       Required; one of: claude, codex, gemini, oss
+  --backend <backend>       Required; one of: claude, codex, gemini, grok, oss
                             (no vendor default)
   --model <model>           Default: backend's default in lib/llm_invoke.sh
-                            (claude-opus-4-8 / gpt-5.5 / CLI default)
+                            (claude-opus-4-8 / gpt-5.5 / CLI default /
+                            grok-build)
   --tiebreak                Use the tiebreak prompt: more skeptical, requires
                             stronger evidence to vote Promote. Use for the
                             third validator after an initial Uncertain.
@@ -114,10 +115,10 @@ done
 [ -f "$FINDING" ] || { echo "FATAL: finding file not found: $FINDING" >&2; exit 4; }
 [ -n "$TARGET_PATH" ] || { echo "FATAL: --target-path required" >&2; exit 4; }
 [ -d "$TARGET_PATH" ] || { echo "FATAL: target path not found: $TARGET_PATH" >&2; exit 4; }
-[ -n "$BACKEND" ] || { echo "FATAL: --backend required (one of: claude, codex, gemini, oss)" >&2; exit 4; }
+[ -n "$BACKEND" ] || { echo "FATAL: --backend required (one of: claude, codex, gemini, grok, oss)" >&2; exit 4; }
 case "$BACKEND" in
-  claude|codex|gemini|oss) ;;
-  *) echo "FATAL: --backend must be one of: claude, codex, gemini, oss (got: $BACKEND)" >&2; exit 4 ;;
+  claude|codex|gemini|grok|oss) ;;
+  *) echo "FATAL: --backend must be one of: claude, codex, gemini, grok, oss (got: $BACKEND)" >&2; exit 4 ;;
 esac
 case "$GATE" in
   finding|trigger) ;;
@@ -335,6 +336,12 @@ case "$BACKEND" in
     ( cd "$validator_cwd" \
       && audit_timeout_run "$TIMEOUT_SECS" "$(llm_backend_bin gemini)" "${validator_flags[@]}" -p "" \
       < <(printf '%s' "$prompt") > "$raw_log" 2> "$raw_err" ) || backend_rc=$?
+    ;;
+  grok)
+    backend_rc=0
+    : > "$raw_err"
+    llm_run_agent_prompt grok "$prompt" "$TIMEOUT_SECS" "$raw_log" \
+      "${MODEL:-}" 0 "$TARGET_PATH,$SCRIPT_ROOT" "$validator_cwd" || backend_rc=$?
     ;;
 esac
 

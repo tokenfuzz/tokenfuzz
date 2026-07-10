@@ -75,7 +75,7 @@ With all defaults, the command means:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `--backend` | `codex` | Agent backend. Valid values are `claude`, `codex`, `gemini`, and `oss`. |
+| `--backend` | `codex` | Agent backend. Valid values are `claude`, `codex`, `gemini`, `grok`, and `oss`. |
 | `--model` | backend config default | Optional model override used by both conditions. |
 | `--replicates` | `3` | Runs per condition. |
 | `--budget-wall` | `10800` | Seconds allowed per cell; `0` disables the outer timeout. |
@@ -87,13 +87,14 @@ Run `bin/benchmark --help` for the full option list.
 
 ## What a run looks like
 
-The commands below run the same target through three backends, two
+The commands below run the same target through four hosted backends, two
 replicates per condition, at the default 3-hour cell budget:
 
 ```bash
 bin/benchmark --target <target> --backend claude --replicates 2 --budget-wall 10800
 bin/benchmark --target <target> --backend codex  --replicates 2 --budget-wall 10800
 bin/benchmark --target <target> --backend gemini --replicates 2 --budget-wall 10800
+bin/benchmark --target <target> --backend grok   --replicates 2 --budget-wall 10800
 ```
 
 That target has to be bootstrapped first: source in

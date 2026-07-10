@@ -178,7 +178,7 @@ def main(argv: list[str]) -> int:
             print(
                 f"[suggest-peers] backend={backend} returned no usable response — "
                 f"hand-edit [s6_peers] in {target_toml} (see {S6_DOC}), or set "
-                f"BACKEND=claude|codex|gemini|oss and rerun. See lib/llm_decide.log "
+                f"BACKEND=claude|codex|gemini|grok|oss and rerun. See lib/llm_decide.log "
                 f"for call telemetry.",
                 file=sys.stderr,
             )

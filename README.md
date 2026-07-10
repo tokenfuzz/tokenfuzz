@@ -17,7 +17,7 @@ as a pipeline:
   through eight named strategies — mining recent fixes, breaking
   invariants, spec-vs-code, differential testing, lifetime and state,
   peer-fix mining, adversarial input, and property oracles — across
-  Claude, Codex, Gemini, or a local open-source model behind one contract.
+  Claude, Codex, Gemini, Grok, or a local open-source model behind one contract.
 - **Tells real risk from noise.** Every finding is labelled by who can
   reach it — attacker-controlled input versus internal misuse — so triage
   moves on signal instead of drowning in null-derefs, OOMs, and harmless

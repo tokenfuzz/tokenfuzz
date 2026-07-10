@@ -35,7 +35,7 @@ starting an audit:
 
 ```bash
 export TARGET=curl
-export BACKEND="<backend>"     # one of: claude, codex, gemini, oss
+export BACKEND="<backend>"     # one of: claude, codex, gemini, grok, oss
 bin/audit-recon --target "$TARGET" --backend "$BACKEND"
 ls "output/$TARGET/$BACKEND/results/recon-findings.md"
 ```

@@ -28,6 +28,7 @@ if [ "$rc" -eq 0 ] &&
    grep -q "# codex login status" <<<"$out" &&
    grep -q '# claude -p "Reply exactly: tokenfuzz-claude-auth-ok"' <<<"$out" &&
    grep -q '# agy -p "Reply exactly: tokenfuzz-gemini-auth-ok"' <<<"$out" &&
+   grep -q '# grok -p "Reply exactly: tokenfuzz-grok-auth-ok"' <<<"$out" &&
    grep -q "press Ctrl+C" <<<"$out" &&
    ! grep -q "AUDIT_CONTAINER_CLAUDE_JSON" <<<"$out" &&
    ! grep -q -- "--skip-git-repo-check" <<<"$out" &&
@@ -52,11 +53,13 @@ if [ "$rc" -eq 0 ] &&
    grep -q "@openai/codex@latest" <<<"$out" &&
    grep -q "@google/gemini-cli@latest" <<<"$out" &&
    grep -q "AGY_INSTALL_URL=https://antigravity.google/cli/install.sh" <<<"$out" &&
+   grep -q "GROK_INSTALL_URL=https://x.ai/cli/install.sh" <<<"$out" &&
    grep -q -- "-v $ROOT:/root/work" <<<"$out" &&
    ! grep -q -- ":/root/.claude:ro" <<<"$out" &&
    ! grep -q -- ":/root/.claude.json:ro" <<<"$out" &&
    ! grep -q -- ":/root/.codex:ro" <<<"$out" &&
    ! grep -q -- ":/root/.gemini:ro" <<<"$out" &&
+   ! grep -q -- ":/root/.grok:ro" <<<"$out" &&
    grep -q -- "-e GEMINI_CLI_TRUST_WORKSPACE=true" <<<"$out" &&
    grep -q -- "-e IS_SANDBOX=1" <<<"$out" &&
    grep -q -- "--security-opt no-new-privileges" <<<"$out"; then
@@ -92,6 +95,7 @@ out=$(AUDIT_ROOT="$ROOT" HOME="$HOST_HOME" \
   CODEX_NPM_SPEC="codex-test@latest" \
   GEMINI_CLI_NPM_SPEC="gemini-cli-test@latest" \
   AGY_INSTALL_URL="https://example.test/agy-install.sh" \
+  GROK_INSTALL_URL="https://example.test/grok-install.sh" \
   "$SCRIPT_ROOT/bin/audit-container-shell" \
   --dry-run --rebuild --docker-runtime runsc --image node:22-bookworm 2>&1)
 rc=$?
@@ -102,7 +106,8 @@ if [ "$rc" -eq 0 ] &&
    grep -q "claude-test@latest" <<<"$out" &&
    grep -q "codex-test@latest" <<<"$out" &&
    grep -q "gemini-cli-test@latest" <<<"$out" &&
-   grep -q "AGY_INSTALL_URL=https://example.test/agy-install.sh" <<<"$out"; then
+   grep -q "AGY_INSTALL_URL=https://example.test/agy-install.sh" <<<"$out" &&
+   grep -q "GROK_INSTALL_URL=https://example.test/grok-install.sh" <<<"$out"; then
   pass "$_CURRENT_TEST"
 else
   fail "$_CURRENT_TEST" "$out"
@@ -131,13 +136,14 @@ _CURRENT_TEST="audit-container-shell does not forward credentials by default"
 ADC_FILE="$TEST_TMPDIR/google-adc.json"
 printf '{}\n' > "$ADC_FILE"
 mkdir -p "$HOST_HOME/.config/gcloud"
-out=$(AUDIT_ROOT="$ROOT" HOME="$HOST_HOME" GEMINI_API_KEY="test-key" USE_GEMINI_CLI=1 \
+out=$(AUDIT_ROOT="$ROOT" HOME="$HOST_HOME" GEMINI_API_KEY="test-key" USE_GEMINI_CLI=1 XAI_API_KEY="xai-test" \
   GOOGLE_APPLICATION_CREDENTIALS="$ADC_FILE" \
   "$SCRIPT_ROOT/bin/audit-container-shell" --dry-run 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] &&
    ! grep -q -- "-e GEMINI_API_KEY" <<<"$out" &&
    ! grep -q -- "-e USE_GEMINI_CLI" <<<"$out" &&
+   ! grep -q -- "-e XAI_API_KEY" <<<"$out" &&
    ! grep -q -- "GOOGLE_APPLICATION_CREDENTIALS=/root/.config/audit-google-application-credentials.json" <<<"$out" &&
    ! grep -q -- ":/root/.config/gcloud:ro" <<<"$out" &&
    grep -q -- "--forward-credentials" <<<"$out"; then
@@ -147,13 +153,14 @@ else
 fi
 
 _CURRENT_TEST="audit-container-shell forwards selected credentials when requested"
-out=$(AUDIT_ROOT="$ROOT" HOME="$HOST_HOME" GEMINI_API_KEY="test-key" USE_GEMINI_CLI=1 \
+out=$(AUDIT_ROOT="$ROOT" HOME="$HOST_HOME" GEMINI_API_KEY="test-key" USE_GEMINI_CLI=1 XAI_API_KEY="xai-test" \
   GOOGLE_APPLICATION_CREDENTIALS="$ADC_FILE" \
   "$SCRIPT_ROOT/bin/audit-container-shell" --dry-run --forward-credentials 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] &&
    grep -q -- "-e GEMINI_API_KEY" <<<"$out" &&
    grep -q -- "-e USE_GEMINI_CLI" <<<"$out" &&
+   grep -q -- "-e XAI_API_KEY" <<<"$out" &&
    grep -q -- "-e GOOGLE_APPLICATION_CREDENTIALS=/root/.config/audit-google-application-credentials.json" <<<"$out" &&
    grep -q -- "$ADC_FILE:/root/.config/audit-google-application-credentials.json:ro" <<<"$out" &&
    grep -q -- "$HOST_HOME/.config/gcloud:/root/.config/gcloud:ro" <<<"$out" &&
@@ -171,6 +178,7 @@ mkdir -p "$EMPTY_HOME"
 out=$(AUDIT_ROOT="$ROOT" HOME="$EMPTY_HOME" \
   env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u OPENAI_API_KEY \
   -u GEMINI_API_KEY -u USE_GEMINI_CLI -u GOOGLE_API_KEY \
+  -u XAI_API_KEY \
   -u GOOGLE_CLOUD_PROJECT -u GOOGLE_CLOUD_QUOTA_PROJECT \
   -u GOOGLE_APPLICATION_CREDENTIALS \
   "$SCRIPT_ROOT/bin/audit-container-shell" --dry-run --forward-credentials 2>&1)

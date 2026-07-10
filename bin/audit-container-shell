@@ -15,14 +15,14 @@ Usage:
   bin/audit-container-shell [options]
 
 Reuses the local audit-cli-shell Docker image (built with the latest CLIs for
-Claude Code, Codex, Antigravity CLI, and Google Gemini CLI), mounts this
+Claude Code, Codex, Antigravity CLI, Google Gemini CLI, and Grok Build), mounts this
 repository at /root/work, and opens an interactive shell. It does not run
 bin/audit.
 
 CLI credentials are ephemeral by default: each container starts logged out.
 Pass --forward-credentials to forward token/API-key env vars (and Google
 ADC / gcloud config) from the host, or log in inside the container per
-session. ~/.claude, ~/.codex, ~/.gemini are never mounted — see
+session. ~/.claude, ~/.codex, ~/.gemini, ~/.grok are never mounted — see
 "Authenticating the CLIs" below for the threat-model reasoning.
 
 By default the build phase is skipped. The helper fails fast if the
@@ -45,7 +45,7 @@ Options:
   --env-file <path>     Pass a Docker env-file through to the container
   --forward-credentials Forward host LLM token/API-key env vars and Google
                         ADC / gcloud config when present. Does NOT mount
-                        ~/.claude, ~/.codex, ~/.gemini — see "Authenticating
+                        ~/.claude, ~/.codex, ~/.gemini, ~/.grok — see "Authenticating
                         the CLIs" below for why and what to do instead.
   --rebuild             Build the image. Use this on the first run, or to
                         refresh the image after bumping a CLI npm spec.
@@ -62,6 +62,8 @@ Environment overrides:
                         (default: https://antigravity.google/cli/install.sh).
                         The script downloads the agy binary and stages it
                         on PATH.
+  GROK_INSTALL_URL      URL of the Grok Build install script
+                        (default: https://x.ai/cli/install.sh).
   AUDIT_CONTAINER_AUTO_START     Set to 0 to disable best-effort Docker daemon
                                  start (default 1; tries Docker Desktop /
                                  Colima / systemctl as available)
@@ -88,7 +90,7 @@ Authenticating the CLIs:
 
     1. --forward-credentials (recommended). Forwards these env vars when set:
          ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY,
-         GEMINI_API_KEY, USE_GEMINI_CLI, GOOGLE_API_KEY,
+         GEMINI_API_KEY, USE_GEMINI_CLI, GOOGLE_API_KEY, XAI_API_KEY,
          GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_QUOTA_PROJECT
        plus GOOGLE_APPLICATION_CREDENTIALS and ~/.config/gcloud read-only.
        For Claude, generate a long-lived headless token on the host first:
@@ -100,7 +102,7 @@ Authenticating the CLIs:
        Lasts for that container session only (the --rm discards it on exit).
 
   What --forward-credentials does NOT do, and why:
-    It does not mount ~/.claude, ~/.codex, or ~/.gemini from the host. The
+    It does not mount ~/.claude, ~/.codex, ~/.gemini, or ~/.grok from the host. The
     container runs LLM agents with --dangerously-skip-permissions and builds
     + executes adversary-shaped C/C++ under sanitizers; the container is the
     sandbox boundary. Mounting those dirs would expose your OAuth refresh
@@ -120,16 +122,18 @@ passed --forward-credentials and exported a usable API key or token):
   # codex login         opens an OAuth URL; codex login status to confirm
   # claude              run it once and follow the login prompt
   # agy                 run it once and follow the printed OAuth URL
+  # grok login          opens a browser or prints a device login flow
 
 Then confirm auth before starting an audit. Each check prints one line and
 exits; if one hangs at a prompt, press Ctrl+C:
   # codex login status
   # claude -p "Reply exactly: tokenfuzz-claude-auth-ok"
   # agy -p "Reply exactly: tokenfuzz-gemini-auth-ok"
+  # grok -p "Reply exactly: tokenfuzz-grok-auth-ok"
 
 Then run a single audit invocation from /root/work, e.g.:
   ./bin/audit --backend <backend> --target <target-name> [--model <model>]
-  # backend: one of claude, codex, gemini, oss
+  # backend: one of claude, codex, gemini, grok, oss
 EOF
 }
 
@@ -241,6 +245,7 @@ CLAUDE_NPM_SPEC="${CLAUDE_NPM_SPEC:-@anthropic-ai/claude-code@latest}"
 CODEX_NPM_SPEC="${CODEX_NPM_SPEC:-@openai/codex@latest}"
 GEMINI_CLI_NPM_SPEC="${GEMINI_CLI_NPM_SPEC:-@google/gemini-cli@latest}"
 AGY_INSTALL_URL="${AGY_INSTALL_URL:-https://antigravity.google/cli/install.sh}"
+GROK_INSTALL_URL="${GROK_INSTALL_URL:-https://x.ai/cli/install.sh}"
 
 runtime_status() {
   # 0 = usable, 1 = not installed, 2 = installed but daemon unreachable
@@ -373,6 +378,7 @@ ARG CLAUDE_NPM_SPEC=@anthropic-ai/claude-code@latest
 ARG CODEX_NPM_SPEC=@openai/codex@latest
 ARG GEMINI_CLI_NPM_SPEC=@google/gemini-cli@latest
 ARG AGY_INSTALL_URL=https://antigravity.google/cli/install.sh
+ARG GROK_INSTALL_URL=https://x.ai/cli/install.sh
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
@@ -403,6 +409,12 @@ RUN npm install -g "${CLAUDE_NPM_SPEC}" "${CODEX_NPM_SPEC}" "${GEMINI_CLI_NPM_SP
 # Installed via the upstream one-liner per
 # https://github.com/google-antigravity/antigravity-cli#installation.
 RUN curl -fsSL "${AGY_INSTALL_URL}" | bash
+
+# Grok Build — official xAI coding-agent CLI.
+RUN curl -fsSL "${GROK_INSTALL_URL}" -o /tmp/grok-install.sh \
+  && bash /tmp/grok-install.sh \
+  && rm -f /tmp/grok-install.sh
+ENV PATH="/root/.grok/bin:${PATH}"
 
 RUN cat >/usr/local/bin/audit-container-entry <<'ENTRY' \
   && chmod +x /usr/local/bin/audit-container-entry
@@ -436,16 +448,18 @@ This container starts logged out. Log in to the backend you plan to use
   # codex login         opens an OAuth URL; codex login status to confirm
   # claude              run it once and follow the login prompt
   # agy                 run it once and follow the printed OAuth URL
+  # grok login          opens a browser or prints a device login flow
 
 Then confirm auth by uncommenting a check. Each prints one line and exits;
 if one hangs at a prompt, press Ctrl+C:
   # codex login status
   # claude -p "Reply exactly: tokenfuzz-claude-auth-ok"
   # agy -p "Reply exactly: tokenfuzz-gemini-auth-ok"
+  # grok -p "Reply exactly: tokenfuzz-grok-auth-ok"
 
 Then run a single audit invocation from /root/work, e.g.:
   ./bin/audit --backend <backend> --target <target-name> [--model <model>]
-  # backend: one of claude, codex, gemini, oss
+  # backend: one of claude, codex, gemini, grok, oss
 
 BANNER
 fi
@@ -466,6 +480,7 @@ EOF
     --build-arg "CODEX_NPM_SPEC=$CODEX_NPM_SPEC"
     --build-arg "GEMINI_CLI_NPM_SPEC=$GEMINI_CLI_NPM_SPEC"
     --build-arg "AGY_INSTALL_URL=$AGY_INSTALL_URL"
+    --build-arg "GROK_INSTALL_URL=$GROK_INSTALL_URL"
     -f "$DOCKERFILE"
     "$SCRIPT_ROOT"
   )
@@ -474,7 +489,7 @@ EOF
     log "build command:"
     quote_command "${build_args[@]}"
   else
-    log "Building $IMAGE_TAG from $BASE_IMAGE with claude=$CLAUDE_NPM_SPEC, codex=$CODEX_NPM_SPEC, gemini-cli=$GEMINI_CLI_NPM_SPEC, agy=$AGY_INSTALL_URL"
+    log "Building $IMAGE_TAG from $BASE_IMAGE with claude=$CLAUDE_NPM_SPEC, codex=$CODEX_NPM_SPEC, gemini-cli=$GEMINI_CLI_NPM_SPEC, agy=$AGY_INSTALL_URL, grok=$GROK_INSTALL_URL"
     "${build_args[@]}"
   fi
 fi
@@ -527,6 +542,7 @@ fi
 credential_env_names=(
   ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
   GEMINI_API_KEY USE_GEMINI_CLI GOOGLE_API_KEY
+  XAI_API_KEY
   GOOGLE_CLOUD_PROJECT GOOGLE_CLOUD_QUOTA_PROJECT
 )
 
@@ -566,11 +582,11 @@ if [ "$FORWARD_CREDENTIALS" = "1" ]; then
     log "--forward-credentials set but no host credential env vars or Google config found to forward; log in inside the container"
   fi
 
-  # CLI credential directories (~/.claude, ~/.codex, ~/.gemini) are
+  # CLI credential directories (~/.claude, ~/.codex, ~/.gemini, ~/.grok) are
   # intentionally not mounted even with --forward-credentials. The CLIs
   # must write to those dirs (state, logs, refreshed tokens) and a
   # read-only host mount would break agy in particular.
-  log "Note: host CLI credential directories (~/.claude, ~/.codex, ~/.gemini) are not mounted; --forward-credentials only forwards env vars and Google config"
+  log "Note: host CLI credential directories (~/.claude, ~/.codex, ~/.gemini, ~/.grok) are not mounted; --forward-credentials only forwards env vars and Google config"
 else
   host_credential_hint=0
   for env_name in "${credential_env_names[@]}" GOOGLE_APPLICATION_CREDENTIALS; do
@@ -588,7 +604,7 @@ else
   fi
 
   # Credentials are intentionally not mounted from the host. The CLIs keep
-  # their own writable config under /root/{.claude,.codex,.gemini} inside the
+  # their own writable config under /root/{.claude,.codex,.gemini,.grok} inside the
   # container's ephemeral layer — a read-only host mount would break agy,
   # which must write logs, project state, and its OAuth token to ~/.gemini.
   # Authenticate by logging in inside the container, by passing an env-file, or

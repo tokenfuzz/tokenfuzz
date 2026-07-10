@@ -121,7 +121,7 @@ Usage:
 Options:
   --target <dir-name>                 Target directory name under targets/ (default: firefox)
   --target-path <path>                Override target path directly
-  --backend <backend>               Select one backend. One of: all, claude, codex, gemini, oss. If omitted, cycle configured hosted backends like --backend all. 'oss' runs OpenCode against a local OpenAI-compatible endpoint and requires --model.
+  --backend <backend>               Select one backend. One of: all, claude, codex, gemini, grok, oss. If omitted, cycle configured hosted backends like --backend all. 'oss' runs OpenCode against a local OpenAI-compatible endpoint and requires --model.
   --model <model>                   Override the model for supported backends. Required for --backend oss, where it must match the exact local served model name from /v1/models. For --backend gemini with agy, pass either the config slug (e.g. gemini-3.1-pro-preview) or an exact 'agy models' label (e.g. "Gemini 3.1 Pro (High)"); the harness maps the slug to a label and the preflight rejects an unresolved one.
   --experiment <name>               Isolate artifacts under output/<target>-<name>/
   --strategy <S1|S2|S3|S4|S5|S6|S7|S8> Pin the first investigation strategy for
@@ -130,6 +130,7 @@ Options:
   --claude-bin <path>               Claude CLI binary to use (default: claude)
   --codex-bin <path>                Codex CLI binary to use (default: codex)
   --gemini-bin <path>               Gemini backend binary to use (default: agy, or gemini with USE_GEMINI_CLI=1)
+  --grok-bin <path>                 Grok Build CLI binary to use (default: grok)
   --new-target <slug>               Seed output/<slug>/target.toml from
                                     targets/<slug>/ introspection and backend
                                     bootstrap suggestions, then exit.
@@ -144,8 +145,9 @@ Options:
   --enable-memory                   Opt back in to the backend's cross-run
                                     auto-memory (Claude Code MEMORY.md/memory/*,
                                     Codex ~/.codex/memories/, Gemini CLI
-                                    save_memory). OFF by default: a single wrong
-                                    learned note poisons every later run. With
+                                    save_memory, and Grok Build memory). OFF by
+                                    default: a single wrong learned note poisons
+                                    every later run. With
                                     this flag, watch those memory files and
                                     prune stale entries. (Default agy/Antigravity
                                     keeps persistent state under
@@ -363,6 +365,7 @@ OPENCODE_BIN="${OPENCODE_BIN:-opencode}"
 # invokes Antigravity (`agy`); USE_GEMINI_CLI=1 switches the underlying
 # dialect to Google Gemini CLI (`gemini`) without changing artifact paths.
 GEMINI_BIN="${GEMINI_BIN:-$(llm_gemini_default_bin)}"
+GROK_BIN="${GROK_BIN:-grok}"
 AGENT_GUIDE_PATH=""
 REFERENCE_DIR=".agents/references"
 
@@ -468,6 +471,15 @@ while [ $# -gt 0 ]; do
       GEMINI_BIN="$2"
       shift 2
       ;;
+    --grok-bin=*)
+      GROK_BIN="${1#--grok-bin=}"
+      shift
+      ;;
+    --grok-bin)
+      [ $# -ge 2 ] || { log "FATAL: --grok-bin requires a value" >&2; usage; exit 1; }
+      GROK_BIN="$2"
+      shift 2
+      ;;
     --new-target=*)
       NEW_TARGET_SLUG="${1#--new-target=}"
       shift
@@ -554,6 +566,7 @@ backend_bin() {
     claude) printf '%s\n' "$CLAUDE_BIN" ;;
     codex)  printf '%s\n' "$CODEX_BIN" ;;
     gemini) printf '%s\n' "$GEMINI_BIN" ;;
+    grok)   printf '%s\n' "$GROK_BIN" ;;
     *) return 1 ;;
   esac
 }
@@ -585,6 +598,17 @@ backend_configured() {
         "$bin" changelog >/dev/null 2>&1
       fi
       ;;
+    grok)
+      # `grok models` is non-interactive and token-free. Unlike --version, it
+      # reports whether an API key or cached login is available, so an
+      # installed-but-logged-out CLI does not poison hosted ensemble startup.
+      local grok_models
+      grok_models=$("$bin" models 2>&1) || return 1
+      case "$grok_models" in
+        *"not authenticated"*) return 1 ;;
+      esac
+      return 0
+      ;;
     *)
       return 1
       ;;
@@ -613,7 +637,7 @@ discover_ensemble_backends() {
   # mode cycles through these per iteration, so the listing order only
   # decides which backend ACTIVE_BACKEND defaults to at cold-start.
   local backend
-  for backend in claude codex gemini; do
+  for backend in claude codex gemini grok; do
     if backend_configured "$backend"; then
       printf '%s\n' "$backend"
     fi
@@ -1086,13 +1110,13 @@ init_backend_selection() {
   case "$AUDIT_BACKEND" in
     all)
       if [ "$MODEL_FLAG_PROVIDED" -eq 1 ]; then
-        log "FATAL: --model requires a single backend. Use --backend claude, --backend codex, --backend oss, or --backend gemini with USE_GEMINI_CLI=1." >&2
+        log "FATAL: --model requires a single backend. Use --backend claude, --backend codex, --backend gemini, --backend grok, or --backend oss." >&2
         exit 1
       fi
       local discovered
       discovered=$(discover_ensemble_backends)
       if [ -z "$discovered" ]; then
-        log "FATAL: none of '$CLAUDE_BIN', '$CODEX_BIN', '$GEMINI_BIN' is installed and authenticated/configured" >&2
+        log "FATAL: none of '$CLAUDE_BIN', '$CODEX_BIN', '$GEMINI_BIN', '$GROK_BIN' is installed and authenticated/configured" >&2
         exit 1
       fi
       ENSEMBLE_BACKENDS=()
@@ -1117,6 +1141,10 @@ EOF
       backend_configured gemini || { log "FATAL: '$GEMINI_BIN' not found or the gemini backend CLI is not configured" >&2; exit 1; }
       ACTIVE_BACKEND="gemini"
       ;;
+    grok)
+      backend_configured grok || { log "FATAL: '$GROK_BIN' not found or the Grok Build CLI is not configured" >&2; exit 1; }
+      ACTIVE_BACKEND="grok"
+      ;;
     oss)
       command_exists "$OPENCODE_BIN" || { log "FATAL: '$OPENCODE_BIN' not found in PATH. Install OpenCode, or set OPENCODE_BIN=/path/to/opencode." >&2; exit 1; }
       if [ -z "${AUDIT_MODEL:-}" ]; then
@@ -1135,7 +1163,7 @@ EOF
       ACTIVE_BACKEND="oss"
       ;;
     *)
-      log "FATAL: AUDIT_BACKEND must be all, claude, codex, gemini, or oss (got '$AUDIT_BACKEND')" >&2
+      log "FATAL: AUDIT_BACKEND must be all, claude, codex, gemini, grok, or oss (got '$AUDIT_BACKEND')" >&2
       exit 1
       ;;
   esac
@@ -1158,7 +1186,7 @@ resolve_model() {
     model="$AUDIT_MODEL"
   else
     case "${ACTIVE_BACKEND}" in
-      claude|codex|gemini|oss) model="$(llm_default_model "$ACTIVE_BACKEND")" ;;
+      claude|codex|gemini|grok|oss) model="$(llm_default_model "$ACTIVE_BACKEND")" ;;
       *)
         log "FATAL: unsupported backend: ${ACTIVE_BACKEND}" >&2
         exit 1
@@ -1167,7 +1195,7 @@ resolve_model() {
   fi
   case "${ACTIVE_BACKEND}" in
     oss) llm_resolve_model_name oss "$model" ;;
-    claude|codex|gemini) printf '%s\n' "$model" ;;
+    claude|codex|gemini|grok) printf '%s\n' "$model" ;;
     *)
       log "FATAL: unsupported backend: ${ACTIVE_BACKEND}" >&2
       exit 1
@@ -1341,7 +1369,7 @@ validate_model_for_backend() {
   fi
 
   case "$backend" in
-    claude|codex|gemini|oss) ;;
+    claude|codex|gemini|grok|oss) ;;
     *)
       log "FATAL: unsupported backend for model preflight: $backend" >&2
       exit 1
@@ -1423,7 +1451,7 @@ validate_model_for_backend() {
     # shape, sandbox bypass, model selection, and --add-dir / --cd. No
     # hand-rolled flag lists to drift out of sync. max_turns=1 keeps this a
     # one-token litmus; the prompt asks the model to echo MODEL_PREFLIGHT_OK.
-    # Claude/codex success is the CLI exit code; the gemini branch below
+    # Claude/codex success is the CLI exit code; the Gemini/Grok check below
     # additionally requires the assistant to have echoed MODEL_PREFLIGHT_OK
     # (agy can exit 0 with no output on upstream quota rejection).
     if [ "$backend" = "oss" ]; then
@@ -1432,15 +1460,15 @@ validate_model_for_backend() {
       llm_run_agent_prompt "$backend" "$prompt" "$timeout_secs" "$raw" \
         "$model" 1 "$SCRIPT_ROOT" "$SCRIPT_ROOT" || rc=$?
     fi
-    # Some gemini CLI failures can exit 0 while emitting no assistant text
+    # Some hosted CLIs can exit 0 while emitting no assistant text
     # (for agy this has happened on upstream RESOURCE_EXHAUSTED / 429 /
     # quota failures written only to private logs). A genuine preflight
     # success always echoes the assistant reply, so missing extracted
     # assistant text is a failure even if stream-json metadata exists.
-    if [ "$rc" -eq 0 ] && [ "$backend" = "gemini" ]; then
-      local gemini_preflight_text
-      gemini_preflight_text=$(llm_extract_text gemini "$raw" 2>/dev/null || true)
-      if ! grep -qx 'MODEL_PREFLIGHT_OK' <<<"$gemini_preflight_text"; then
+    if [ "$rc" -eq 0 ] && { [ "$backend" = "gemini" ] || [ "$backend" = "grok" ]; }; then
+      local preflight_text
+      preflight_text=$(llm_extract_text "$backend" "$raw" 2>/dev/null || true)
+      if ! grep -qx 'MODEL_PREFLIGHT_OK' <<<"$preflight_text"; then
         rc=44
         # agy exits 0 with empty stdout when the upstream request is rejected;
         # the real cause is only in agy's private CLI log. Pull it into $raw so
@@ -1449,16 +1477,16 @@ validate_model_for_backend() {
         # its errors to stderr, which is already captured in $raw, and does
         # not use agy's log dir, so scraping it there would mis-attribute a
         # stale agy quota error to a different CLI.
-        if [ "${USE_GEMINI_CLI:-0}" != "1" ]; then
+        if [ "$backend" = "gemini" ] && [ "${USE_GEMINI_CLI:-0}" != "1" ]; then
           gemini_capture_cli_log_diag "$raw"
         fi
-        if [ "$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-issue "$raw" 2>/dev/null || printf '%s\n' none)" = "capacity_limited" ]; then
+        if [ "$backend" = "gemini" ] && [ "$(python3 "$SCRIPT_ROOT/lib/audit_helpers.py" provider-issue "$raw" 2>/dev/null || printf '%s\n' none)" = "capacity_limited" ]; then
           gemini_quota_blocked=1
           log "WARN: gemini preflight: agy reports the account quota is exhausted — retrying will not help until it resets" | tee -a "$INDEX"
-        elif [ -n "$gemini_preflight_text" ]; then
-          log "WARN: gemini preflight: CLI did not return MODEL_PREFLIGHT_OK — treating as failure" | tee -a "$INDEX"
+        elif [ -n "$preflight_text" ]; then
+          log "WARN: ${backend} preflight: CLI did not return MODEL_PREFLIGHT_OK — treating as failure" | tee -a "$INDEX"
         else
-          log "WARN: gemini preflight: CLI exited 0 but produced no output — treating as failure" | tee -a "$INDEX"
+          log "WARN: ${backend} preflight: CLI exited 0 but produced no output — treating as failure" | tee -a "$INDEX"
         fi
       fi
     fi
@@ -1553,7 +1581,7 @@ configure_active_backend() {
   # unexported otherwise. Re-run per backend, so ensemble cycling keeps
   # the exported set fresh; the inactive backends' bin overrides are
   # harmless (only the active one is read).
-  export ACTIVE_BACKEND MODEL CLAUDE_BIN CODEX_BIN GEMINI_BIN OPENCODE_BIN
+  export ACTIVE_BACKEND MODEL CLAUDE_BIN CODEX_BIN GEMINI_BIN GROK_BIN OPENCODE_BIN
 
   # Output layout: output/<target>[-<experiment>]/<backend>/{results,logs}. Raw model
   # dialogue dumps (session_*.log.raw, recon_*.raw) live under
@@ -3112,7 +3140,7 @@ clear_rate_limit_cooldown() {
 
 clear_startup_rate_limit_cooldowns() {
   local backend path cleared=0
-  for backend in claude codex gemini oss; do
+  for backend in claude codex gemini grok oss; do
     path="$(target_backend_logs_dir "$backend")/.rate_limit_cooldown"
     [ -f "$path" ] || continue
     rm -f "$path" 2>/dev/null || continue
@@ -3998,6 +4026,9 @@ backend_resume_enabled() {
     gemini)
       llm_use_gemini_cli || return 1
       resume_bool_enabled "${GEMINI_RESUME:-1}"
+      ;;
+    grok)
+      resume_bool_enabled "${GROK_RESUME:-1}"
       ;;
     *)
       return 1
@@ -6099,6 +6130,31 @@ run_agent() {
         fi
         exit "$_agy_rc"
       fi
+    elif [ "$ACTIVE_BACKEND" = "grok" ]; then
+      declare -a grok_base_flags=() grok_flags=()
+      llm_agent_flags grok grok_base_flags "$model" "$max_turns" "$SCRIPT_ROOT,$TARGET_ROOT,$RESULTS_DIR"
+      grok_flags=("${grok_base_flags[@]}")
+      if [ "$use_resume" -eq 1 ] && [ -n "$prev_session_id" ]; then
+        grok_flags+=(--resume "$prev_session_id")
+      fi
+      local _grok_rc=0
+      "$GROK_BIN" "${grok_flags[@]}" -p "$prompt_with_budget" \
+        > "$(audit_raw_path "$logfile")" 2>&1 || _grok_rc=$?
+      llm_extract_text grok "$(audit_raw_path "$logfile")" > "$logfile" 2>/dev/null || true
+      if [ "$use_resume" -eq 1 ] \
+         && { [ "$_grok_rc" -ne 0 ] || ! _agent_attempt_has_text grok "$(audit_raw_path "$logfile")" "$logfile"; } \
+         && ! log_has_rate_limit_rejection "$(audit_raw_path "$logfile")"; then
+        index_log "RESUME_FALLBACK: Agent${agent_num} backend=grok resume failed or produced no assistant text; clearing resume state and retrying fresh once" >/dev/null 2>&1 || true
+        clear_agent_resume_state "$agent_num"
+        resume_state_write "$agent_num" fallback "1"
+        _archive_resume_attempt "resume-attempt-1"
+        _grok_rc=0
+        "$GROK_BIN" "${grok_base_flags[@]}" -p "$prompt_with_budget" \
+          > "$(audit_raw_path "$logfile")" 2>&1 || _grok_rc=$?
+        llm_extract_text grok "$(audit_raw_path "$logfile")" > "$logfile" 2>/dev/null || true
+      fi
+      emit_agent_session_text grok "$logfile" "$_log_prefix"
+      exit "$_grok_rc"
     elif [ "$ACTIVE_BACKEND" = "oss" ]; then
       declare -a opencode_flags=()
       llm_agent_flags oss opencode_flags "$model" 80 "$SCRIPT_ROOT,$TARGET_ROOT,$RESULTS_DIR"
@@ -6303,13 +6359,14 @@ run_agent() {
   # Extract usage and command counts from the raw JSON stream.
   # extract_* helpers are backend-aware (see function docstrings).
   local total_tokens tool_uses duration_ms input_tokens cached_input_tokens cache_creation_tokens output_tokens command_count waste_telemetry
-  local raw_logfile finish_fields finish_key finish_value
+  local raw_logfile prompt_artifact finish_fields finish_key finish_value
   raw_logfile="$(audit_raw_path "$logfile")"
+  prompt_artifact="${raw_logfile%.log.raw}.prompt.md"
   local rate_limit_rejected=0
   local raw_codex_completed="" raw_codex_failed="" raw_gemini_success=""
   command_count=0
   tool_uses=0
-  finish_fields=$(extract_finish_fields "$raw_logfile" "$ACTIVE_BACKEND")
+  finish_fields=$(extract_finish_fields "$raw_logfile" "$ACTIVE_BACKEND" "$prompt_artifact")
   while IFS='=' read -r finish_key finish_value; do
     case "$finish_key" in
       total_tokens) total_tokens="$finish_value" ;;
@@ -6447,6 +6504,12 @@ run_agent() {
       if [ "$use_resume" -eq 1 ] && [ "$resume_fallback_used" -eq 0 ]; then
         new_session_id="$prev_session_id"
       fi
+    fi
+  elif [ "$ACTIVE_BACKEND" = "grok" ]; then
+    new_session_id=$(jq -r 'select(.type == "end") | .sessionId // empty' \
+      "$raw_logfile" 2>/dev/null | tail -1)
+    if [ -z "$new_session_id" ] && [ "$use_resume" -eq 1 ] && [ "$resume_fallback_used" -eq 0 ]; then
+      new_session_id="$prev_session_id"
     fi
   fi
   if [ "$exit_code" -eq 0 ] \

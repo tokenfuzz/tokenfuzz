@@ -434,6 +434,16 @@ cat > "$fake_backend_dir/gemini-missing-auth" <<'EOF'
 [ "$1" = "--list-sessions" ] && exit 41
 exit 1
 EOF
+cat > "$fake_backend_dir/grok-ok" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "models" ] && { printf 'Default model: grok-build-0.1\n'; exit 0; }
+exit 1
+EOF
+cat > "$fake_backend_dir/grok-logged-out" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "models" ] && { printf 'You are not authenticated.\n'; exit 0; }
+exit 1
+EOF
 cat > "$fake_backend_dir/opencode" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -455,6 +465,7 @@ ACTIVE_BACKEND=""
 CLAUDE_BIN="$fake_backend_dir/claude-ok"
 CODEX_BIN="$fake_backend_dir/codex-ok"
 GEMINI_BIN="$fake_backend_dir/gemini-missing-auth"
+GROK_BIN="$fake_backend_dir/gemini-missing-auth"
 init_backend_selection
 assert_eq "1" "$ENSEMBLE_MODE" "backend: omitted backend enables ensemble mode"
 assert_eq "claude" "$ACTIVE_BACKEND" "backend: ensemble starts with first configured backend"
@@ -470,10 +481,26 @@ ACTIVE_BACKEND=""
 CLAUDE_BIN="$fake_backend_dir/gemini-missing-auth"
 CODEX_BIN="$fake_backend_dir/codex-ok"
 GEMINI_BIN="$fake_backend_dir/gemini-missing-auth"
+GROK_BIN="$fake_backend_dir/gemini-missing-auth"
 init_backend_selection
 assert_eq "1" "$ENSEMBLE_MODE" "backend: explicit --backend all enables ensemble mode"
 assert_eq "codex" "$ACTIVE_BACKEND" "backend: explicit all starts with first configured backend"
 assert_eq "codex" "${ENSEMBLE_BACKENDS[*]}" "backend: explicit all skips unconfigured hosted backends"
+
+AUDIT_BACKEND=grok
+BACKEND_FLAG_PROVIDED=1
+MODEL_FLAG_PROVIDED=0
+AUDIT_MODEL=""
+ACTIVE_BACKEND=""
+GROK_BIN="$fake_backend_dir/grok-ok"
+init_backend_selection
+assert_eq "grok" "$ACTIVE_BACKEND" "backend: grok selects the installed Grok Build CLI"
+GROK_BIN="$fake_backend_dir/grok-logged-out"
+if backend_configured grok; then
+  fail "backend: grok logged-out CLI is excluded from ensemble discovery"
+else
+  pass "backend: grok logged-out CLI is excluded from ensemble discovery"
+fi
 
 AUDIT_BACKEND=oss
 BACKEND_FLAG_PROVIDED=1
@@ -485,6 +512,7 @@ ACTIVE_BACKEND=""
 CLAUDE_BIN="$fake_backend_dir/gemini-missing-auth"
 CODEX_BIN="$fake_backend_dir/codex-ok"
 GEMINI_BIN="$fake_backend_dir/gemini-missing-auth"
+GROK_BIN="$fake_backend_dir/gemini-missing-auth"
 OPENCODE_BIN="$fake_backend_dir/opencode"
 init_backend_selection
 assert_eq "oss" "$ACTIVE_BACKEND" "backend: oss selects local OpenCode path without hosted login check"
@@ -573,6 +601,11 @@ unset GEMINI_MODEL_DEFAULT
   AUDIT_MODEL="gemini-cli-model"
   assert_eq "gemini-cli-model" "$(resolve_model)" "model: gemini CLI accepts launch-time override"
 )
+ACTIVE_BACKEND=grok
+assert_eq "grok-build-0.1" "$(resolve_model)" "model: grok default"
+GROK_MODEL_DEFAULT="grok-custom"
+assert_eq "grok-custom" "$(resolve_model)" "model: grok canonical default override"
+unset GROK_MODEL_DEFAULT
 
 AUDIT_MODEL="custom-backend-model"
 ACTIVE_BACKEND=claude
@@ -584,6 +617,8 @@ ACTIVE_BACKEND=gemini
 # llm_invoke.py), so resolve_model now passes the override through like the
 # other backends instead of rejecting it.
 assert_eq "custom-backend-model" "$(resolve_model)" "model: override applies to gemini"
+ACTIVE_BACKEND=grok
+assert_eq "custom-backend-model" "$(resolve_model)" "model: override applies to grok"
 ACTIVE_BACKEND=oss
 assert_eq "custom-backend-model" "$(resolve_model)" "model: override applies to oss"
 
@@ -604,6 +639,7 @@ assert_match 'export IS_SANDBOX=1' "$claude_branch_src" \
 assert_match 'llm_agent_flags claude claude_base_flags "\$model"'   "$run_agent_src" "model: claude launch delegates to llm_agent_flags with \$model"
 assert_match 'llm_agent_flags gemini gemini_flags "\$model"'        "$run_agent_src" "model: gemini launch delegates to llm_agent_flags with \$model"
 assert_match 'llm_agent_flags codex codex_flags "\$model"'          "$run_agent_src" "model: codex launch delegates to llm_agent_flags with \$model"
+assert_match 'llm_agent_flags grok grok_base_flags "\$model"'       "$run_agent_src" "model: grok launch delegates to llm_agent_flags with \$model"
 assert_match 'llm_agent_flags oss opencode_flags "\$model"'         "$run_agent_src" "backend: oss launch routes through llm_agent_flags oss"
 assert_match 'emit_agent_session_text codex "\$logfile" "\$_log_prefix"' \
   "$run_agent_src" "backend: codex console prints recovered assistant text, not raw JSON"
@@ -803,7 +839,7 @@ assert_file_contains "$SCRIPT_ROOT/bin/audit" 'RATE_LIMIT_DEFAULT_BACKOFF="\$\{R
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'RATE_LIMIT_MAX_BACKOFF="\$\{RATE_LIMIT_MAX_BACKOFF:-1800\}"' "rate limit: max backoff is configurable"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'LLM_DECIDE_COUNTER_FILE="\$LOGDIR/\.llm_decisions_harness"' \
   "llm budget: harness counter is scoped to backend logdir"
-assert_file_contains "$SCRIPT_ROOT/bin/audit" 'export ACTIVE_BACKEND MODEL CLAUDE_BIN CODEX_BIN GEMINI_BIN OPENCODE_BIN' \
+assert_file_contains "$SCRIPT_ROOT/bin/audit" 'export ACTIVE_BACKEND MODEL CLAUDE_BIN CODEX_BIN GEMINI_BIN GROK_BIN OPENCODE_BIN' \
   "backend env: backend/model/CLI-binary exported so child llm_decide tools (peer-fix-cards, rank-work rerank) resolve the same backend the audit uses"
 assert_file_contains "$SCRIPT_ROOT/bin/audit" 'LLM_DECIDE_COUNTER_FILE="\$LOGDIR/\.llm_decisions_\$\{agent_num\}"' \
   "llm budget: agent counters are scoped per agent logdir"
@@ -1078,6 +1114,11 @@ USE_GEMINI_CLI=1 GEMINI_RESUME=0 backend_resume_enabled gemini
 assert_eq 1 $? "resume enabled: gemini knob disables resume"
 unset USE_GEMINI_CLI
 GEMINI_RESUME=1
+GROK_RESUME=1 backend_resume_enabled grok
+assert_eq 0 $? "resume enabled: grok defaults on"
+GROK_RESUME=0 backend_resume_enabled grok
+assert_eq 1 $? "resume enabled: grok knob disables resume"
+GROK_RESUME=1
 
 resume_meta_results="$TEST_TMPDIR/resume-meta-results"
 resume_meta_logs="$TEST_TMPDIR/resume-meta-logs"
@@ -1634,7 +1675,8 @@ assert_match '^gemini_success=$' "$finish_fields_failed" "finish-fields failure:
 
 assert_match 'index_log "\$_role_display \$\(format_waste_for_index "\$waste_telemetry"\)' "$run_agent_src" \
   "run_agent: writes compact tool-output telemetry to index"
-assert_match 'finish_fields=\$\(extract_finish_fields "\$raw_logfile" "\$ACTIVE_BACKEND"\)' "$run_agent_src" "run_agent: extracts finish fields in one raw-log read"
+assert_match 'prompt_artifact="\${raw_logfile%\.log\.raw}\.prompt\.md"' "$run_agent_src" "run_agent: derives prompt artifact beside raw log"
+assert_match 'finish_fields=\$\(extract_finish_fields "\$raw_logfile" "\$ACTIVE_BACKEND" "\$prompt_artifact"\)' "$run_agent_src" "run_agent: extracts prompt-aware finish fields in one raw-log read"
 assert_not_match 'usage_fields=\$\(extract_usage_fields "\$raw_logfile"\)' "$run_agent_src" "run_agent: avoids separate usage raw-log scan"
 assert_not_match 'extract_usage_field "\$raw_logfile" total_tokens' "$run_agent_src" "run_agent: avoids per-field usage raw-log scans"
 assert_not_match 'tool_counts=\$\(extract_tool_counts "\$raw_logfile"\)' "$run_agent_src" "run_agent: avoids separate tool-count raw-log scan"
@@ -2070,11 +2112,20 @@ token=$(cat oss-tool-sentinel.txt)
 printf '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"completed"}}}\n'
 printf '{"type":"text","part":{"type":"text","text":"%s"}}\n' "$token"
 EOF
+cat > "$model_preflight_bin/grok-preflight" <<'EOF'
+#!/usr/bin/env bash
+if [ "${GROK_EMPTY:-0}" = "1" ]; then
+  exit 0
+fi
+printf '{"type":"text","data":"MODEL_PREFLIGHT_OK"}\n'
+printf '{"type":"end","stopReason":"EndTurn","sessionId":"preflight"}\n'
+EOF
 chmod +x "$model_preflight_bin/"*
 
 CLAUDE_BIN="$model_preflight_bin/claude-preflight"
 CODEX_BIN="$model_preflight_bin/codex-preflight"
 GEMINI_BIN="$model_preflight_bin/gemini-preflight"
+GROK_BIN="$model_preflight_bin/grok-preflight"
 OPENCODE_BIN="$model_preflight_bin/opencode-preflight"
 LOGDIR="$TEST_TMPDIR/model-preflight-logs"
 INDEX="$LOGDIR/index.log"
@@ -2101,6 +2152,10 @@ assert_file_contains "$INDEX" "Model preflight passed: backend=codex model='code
 validate_model_for_backend gemini "gemini-good"
 assert_file_exists "$(model_preflight_stamp_path gemini "gemini-good")" "model preflight: gemini accepted model writes stamp"
 assert_file_contains "$INDEX" "Model preflight passed: backend=gemini model='gemini-good'" "model preflight: gemini pass logged"
+
+validate_model_for_backend grok "grok-good"
+assert_file_exists "$(model_preflight_stamp_path grok "grok-good")" "model preflight: grok accepted model writes stamp"
+assert_file_contains "$INDEX" "Model preflight passed: backend=grok model='grok-good'" "model preflight: grok pass logged"
 
 validate_model_for_backend oss "oss-good"
 assert_file_exists "$(model_preflight_stamp_path oss "oss-good")" "model preflight: oss accepted tool-capable model writes stamp"
@@ -2278,6 +2333,14 @@ empty_rc=$?
 assert_eq "1" "$empty_rc" "model preflight: gemini empty output exits early"
 assert_match 'produced no output' "$empty_output" "model preflight: gemini empty output names the empty-output failure"
 assert_file_not_exists "$(model_preflight_stamp_path gemini "gemini-3.1-flash-lite")" "model preflight: gemini empty output writes no .ok stamp"
+
+grok_empty_output=$(GROK_EMPTY=1 validate_model_for_backend grok "grok-empty" 2>&1)
+grok_empty_rc=$?
+assert_eq "1" "$grok_empty_rc" "model preflight: grok empty output exits early"
+assert_match 'grok preflight: CLI exited 0 but produced no output' "$grok_empty_output" \
+  "model preflight: grok empty output names the failure"
+assert_file_not_exists "$(model_preflight_stamp_path grok "grok-empty")" \
+  "model preflight: grok empty output writes no .ok stamp"
 unset AUDIT_MODEL_PREFLIGHT_OPTIONAL
 
 # agy surfaces a 429 / RESOURCE_EXHAUSTED account-quota rejection only in

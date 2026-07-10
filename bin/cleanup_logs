@@ -1,7 +1,7 @@
 #!/bin/bash
 # cleanup_logs — wipe output/<target>/<backend>/logs/ for every target × backend.
 #
-# Backends: claude, codex, gemini, oss (override with --backend NAME or --backends a,b,c).
+# Backends: claude, codex, gemini, grok, oss (override with --backend NAME or --backends a,b,c).
 # Targets: every canonical target under output/ — a dir carrying a target.toml,
 #   possibly nested like samples/sample-ruby (override with --target NAME, repeatable).
 #
@@ -30,7 +30,7 @@ usage() {
 
 dry_run=0
 quiet=0
-backends_csv="claude,codex,gemini,oss"
+backends_csv="claude,codex,gemini,grok,oss"
 targets=()
 output_root=""
 

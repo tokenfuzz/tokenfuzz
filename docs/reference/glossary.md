@@ -163,7 +163,7 @@ to be exported by hand.
 ## Backends
 
 **Backend.** The LLM CLI driving the agent loop — `claude`,
-`codex`, `gemini`, or `oss` (OpenCode against a local vLLM or Ollama
+`codex`, `gemini`, `grok`, or `oss` (OpenCode against a local vLLM or Ollama
 server).
 
 **Ensemble mode.** `--backend all` (or omitted) — cycles

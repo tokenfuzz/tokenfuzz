@@ -59,7 +59,7 @@ Options:
   --target <slug>           Target slug under targets/ (required)
   --target-path <path>      Override target path
   --backend <backend>       LLM backend (required; one of: claude, codex,
-                            gemini, oss — the harness does not default to
+                            gemini, grok, oss — the harness does not default to
                             any vendor)
   --model <model>           Model override
   --experiment <name>       Isolate artifacts under output/<target>-<name>/
@@ -200,13 +200,13 @@ if [ -z "$TARGET_SLUG" ]; then
 fi
 
 if [ -z "$BACKEND" ]; then
-  echo "FATAL: --backend is required (one of: claude, codex, gemini, oss)" >&2
+  echo "FATAL: --backend is required (one of: claude, codex, gemini, grok, oss)" >&2
   usage >&2
   exit 2
 fi
 case "$BACKEND" in
-  claude|codex|gemini|oss) ;;
-  *) echo "FATAL: --backend must be one of: claude, codex, gemini, oss (got: $BACKEND)" >&2; exit 2 ;;
+  claude|codex|gemini|grok|oss) ;;
+  *) echo "FATAL: --backend must be one of: claude, codex, gemini, grok, oss (got: $BACKEND)" >&2; exit 2 ;;
 esac
 
 # Inherit the spawning audit's cross-run memory decision (default off when run
@@ -701,6 +701,10 @@ run_recon_agent() {
         # SIGPIPE the writer, and pipefail would report 141 as the CLI's rc.
         audit_timeout_run "$TIMEOUT_SECS" "$(llm_backend_bin gemini)" "${gemini_recon_flags[@]}" -p "" \
           < <(printf '%s' "$prompt") > "$agent_raw" 2>&1 || backend_rc=$?
+        ;;
+      grok)
+        llm_run_agent_prompt grok "$prompt" "$TIMEOUT_SECS" "$agent_raw" \
+          "${MODEL:-}" 80 "$recon_add_dirs" "$TARGET_PATH" || backend_rc=$?
         ;;
     esac
 

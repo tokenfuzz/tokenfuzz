@@ -16,7 +16,7 @@ as a pipeline:
   through eight named strategies — mining recent fixes, breaking
   invariants, spec-vs-code, differential testing, lifetime and state,
   peer-fix mining, adversarial input, and property oracles — across Claude,
-  Codex, Gemini, or a local open-source model behind one contract. See
+  Codex, Gemini, Grok, or a local open-source model behind one contract. See
   [Strategy model](concepts/strategy-model.md) and
   [Backends and ensembling](guides/backends.md).
 - **Tells real risk from noise.** Every finding is labelled by who can
@@ -48,7 +48,8 @@ LLVM toolchain, and at least one agent backend.
 - **LLVM tools:** `clang`, `llvm-symbolizer`, `sancov` — only needed
   for building or running sanitizer artifacts.
 - **Backend:** one of Claude Code (`claude`), Codex (`codex`), the
-  Antigravity CLI (`gemini`, run via the `agy` binary), or a local
+  Antigravity CLI (`gemini`, run via the `agy` binary), Grok Build
+  (`grok`), or a local
   model via `--backend oss --model <name>` (OpenCode against a local
   OpenAI-compatible endpoint; set `AUDIT_LOCAL_BASE_URL` when it is not
   on `http://127.0.0.1:8000/v1`).
@@ -65,7 +66,7 @@ cd tokenfuzz
 bash tests/run-tests.sh
 
 export TARGET=libxml2               # any directory name under targets/
-export BACKEND="<backend>"          # one of: claude, codex, gemini, oss
+export BACKEND="<backend>"          # one of: claude, codex, gemini, grok, oss
 # Optional convenience path for inspecting results.
 export RESULTS="output/$TARGET/$BACKEND/results"
 

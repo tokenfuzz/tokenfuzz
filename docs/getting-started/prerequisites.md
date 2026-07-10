@@ -124,7 +124,7 @@ supported backends before pointing TokenFuzz at a real target.
 Backend CLIs have their own install and authentication steps:
 
 - Install `curl` only when you choose an installer command that pipes an
-  HTTPS script, such as the direct Codex, Antigravity, OpenCode, or
+  HTTPS script, such as the direct Codex, Antigravity, Grok Build, OpenCode, or
   Ollama install snippets below.
 - Install Node.js and npm only when you choose an npm-based backend CLI
   install path, such as `npm install -g @openai/codex`,
@@ -141,6 +141,7 @@ Backend CLIs have their own install and authentication steps:
 | Claude Code | Install from the [Claude Code docs](https://docs.claude.com/en/docs/claude-code), then authenticate the `claude` CLI (`claude` will prompt on first use). Pass `--model <id>` to override the default model. | `bin/audit --backend claude --target <name>` |
 | Codex | Follow the [Codex CLI setup](https://developers.openai.com/codex/cli#cli-setup), or install directly with `curl -fsSL https://chatgpt.com/codex/install.sh \| sh`, then authenticate the `codex` CLI. Alternatives: `npm install -g @openai/codex` or `brew install --cask codex`. Pass `--model <id>` to override the default model. | `bin/audit --backend codex --target <name>` |
 | Gemini | Default: install [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) with `curl -fsSL https://antigravity.google/cli/install.sh \| bash`, then run `agy` once to authenticate. Pass `--model` as a config slug or an exact `agy models` label to override the default. Alternative: install Google Gemini CLI, set `USE_GEMINI_CLI=1` (this path also needs `GEMINI_API_KEY` or `GOOGLE_API_KEY`), and pass `--model <id>` when needed. If Gemini CLI logs `Ripgrep is not available`, apply the [bundled ripgrep symlink](../guides/backends.md#google-gemini-cli-ripgrep). | `bin/audit --backend gemini --target <name>` |
+| Grok Build | Follow xAI's [Grok Build setup](https://docs.x.ai/build/overview), or install directly with `curl -fsSL https://x.ai/cli/install.sh \| bash`, then export `XAI_API_KEY`. Pass `--model <id>` to override the `grok-build-0.1` default. | `bin/audit --backend grok --target <name>` |
 | Local model (`oss`) | Install [OpenCode](https://opencode.ai/download). Then run a local model through [vLLM](https://docs.vllm.ai/en/latest/getting_started/installation/) (recommended for larger GPU-backed models) or [Ollama](https://ollama.com/download). `--model` is **required** for `oss` and must match the served model name. | `bin/audit --backend oss --model qwen3-8b --target <name>` |
 
 Local model quick paths:
@@ -204,7 +205,7 @@ bin/audit --backend oss --model glm-5.2:cloud --target <name> 1
 ```
 
 When you pass `--backend all` (or omit `--backend` entirely), `bin/audit`
-cycles installed hosted backends in `claude → codex → gemini` order,
+cycles installed hosted backends in `claude → codex → gemini → grok` order,
 iteration by iteration. Each backend writes to its own
 `output/<target>/<backend>/results/` tree, so you can ensemble without
 overlap. See [Backends and ensembling](../guides/backends.md) for

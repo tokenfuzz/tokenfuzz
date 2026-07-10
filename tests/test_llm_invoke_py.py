@@ -31,6 +31,7 @@ for key in (
     "CLAUDE_MODEL_DEFAULT",
     "CODEX_MODEL_DEFAULT",
     "GEMINI_MODEL_DEFAULT",
+    "GROK_MODEL_DEFAULT",
     "AUDIT_LOCAL_BASE_URL",
     "AUDIT_LOCAL_API_KEY",
 ):
@@ -74,7 +75,7 @@ def flags(proc):
 
 # ── known-backend ───────────────────────────────────────────────────
 print("known-backend")
-for b in ("claude", "codex", "oss", "gemini"):
+for b in ("claude", "codex", "oss", "gemini", "grok"):
     assert_eq(0, run(["known-backend", b]).returncode, f"{b} → rc=0")
 assert_eq(1, run(["known-backend", "openai"]).returncode, "openai → rc=1")
 assert_eq(1, run(["known-backend", ""]).returncode, "empty → rc=1")
@@ -88,6 +89,8 @@ proc = run(["default-model", "codex"], check=True)
 assert_eq("gpt-5.5", proc.stdout.strip(), "codex default")
 proc = run(["default-model", "gemini"], check=True)
 assert_eq("gemini-3.1-pro-preview", proc.stdout.strip(), "gemini default")
+proc = run(["default-model", "grok"], check=True)
+assert_eq("grok-build-0.1", proc.stdout.strip(), "grok default")
 assert_eq(1, run(["default-model", "openai"]).returncode, "unknown → rc=1")
 
 # Env override
@@ -99,6 +102,10 @@ env = os.environ.copy()
 env["GEMINI_MODEL_DEFAULT"] = "gemini-3.1-flash-lite-high"
 proc = run(["default-model", "gemini"], env=env, check=True)
 assert_eq("gemini-3.1-flash-lite-high", proc.stdout.strip(), "GEMINI_MODEL_DEFAULT override honoured")
+env = os.environ.copy()
+env["GROK_MODEL_DEFAULT"] = "custom-grok"
+proc = run(["default-model", "grok"], env=env, check=True)
+assert_eq("custom-grok", proc.stdout.strip(), "GROK_MODEL_DEFAULT override honoured")
 
 env = os.environ.copy()
 env["USE_GEMINI_CLI"] = "1"
@@ -190,6 +197,16 @@ ok(f[indices[0] + 1] == "/a", "first Gemini CLI include dir = /a")
 ok(f[indices[1] + 1] == "/b", "second Gemini CLI include dir = /b")
 ok("--dangerously-skip-permissions" not in f, "Gemini CLI agent omits agy skip-permissions")
 
+proc = run(["agent-flags", "grok", "--max-turns", "23"], check=True)
+f = flags(proc)
+ok("--always-approve" in f, "Grok agent auto-approves tools")
+ok("streaming-json" in f, "Grok agent uses streaming JSON")
+ok("--no-auto-update" in f, "Grok agent disables background updates")
+ok("--no-subagents" in f, "Grok agent keeps harness-owned concurrency")
+ok("--no-memory" in f, "Grok agent disables cross-run memory by default")
+assert_eq("23", f[f.index("--max-turns") + 1], "Grok agent wires max turns")
+assert_eq("grok-build-0.1", f[f.index("--model") + 1], "Grok agent wires default model")
+
 assert_eq(1, run(["agent-flags", "openai"]).returncode, "unknown backend → rc=1")
 
 
@@ -212,6 +229,10 @@ assert_eq("/a", f[cd_idx + 1], "codex --cd uses first add-dir")
 indices = [i for i, x in enumerate(f) if x == "--add-dir"]
 assert_eq(1, len(indices), "codex emits one --add-dir for the second dir")
 ok(f[indices[0] + 1] == "/b", "codex grants second add-dir")
+
+proc = run(["agent-flags", "grok", "--add-dirs", "/a,/b"], check=True)
+f = flags(proc)
+assert_eq("/a", f[f.index("--cwd") + 1], "grok --cwd uses first add-dir")
 
 proc = run(["agent-flags", "gemini", "--add-dirs", "/a,/b"], check=True)
 f = flags(proc)
@@ -255,6 +276,13 @@ ok("--skip-trust" in f, "Gemini CLI decide skips workspace trust prompt")
 model_idx = f.index("--model")
 assert_eq("gemini-3.1-pro-preview", f[model_idx + 1], "Gemini CLI decide wires model")
 ok("--dangerously-skip-permissions" not in f, "Gemini CLI decide omits agy skip-permissions")
+
+proc = run(["decide-flags", "grok"], check=True)
+f = flags(proc)
+assert_eq("plan", f[f.index("--permission-mode") + 1], "Grok decide uses read-only plan mode")
+ok("plain" in f, "Grok decide uses plain assistant output")
+ok("--no-memory" in f, "Grok decide disables cross-run memory")
+ok("--always-approve" not in f, "Grok decide does not allow writes")
 
 
 # ── extract-text per backend ────────────────────────────────────────
@@ -348,6 +376,15 @@ with tempfile.TemporaryDirectory() as td:
     proc = run(["extract-text", "gemini", str(p / "gemini-cli.jsonl")], env=env, check=True)
     assert_eq("hello from gemini cli", proc.stdout, "Gemini CLI stream-json assistant text extracted")
 
+    (p / "grok.jsonl").write_text(
+        '{"type":"text","data":"{\\"vote\\":\\"Promote\\","}\n'
+        '{"type":"text","data":"\\"rationale\\":\\"grok\\"}"}\n'
+        '{"type":"end","stopReason":"EndTurn","sessionId":"session-1"}\n'
+    )
+    proc = run(["extract-text", "grok", str(p / "grok.jsonl")], check=True)
+    assert_eq('{"vote":"Promote","rationale":"grok"}', proc.stdout,
+              "Grok streaming JSON text deltas are reassembled")
+
     (p / "gemini-cli-deltas.jsonl").write_text(
         '{"type":"init","session_id":"s"}\n'
         '{"type":"message","role":"assistant","content":"{\\"id\\"","delta":true}\n'
@@ -383,6 +420,7 @@ ok(inv.known_backend("openai") is False, "known_backend('openai') False")
 assert_eq("claude-opus-4-8", inv.default_model("claude"), "default_model claude")
 assert_eq("gpt-5.5", inv.default_model("codex"), "default_model codex")
 assert_eq("gemini-3.1-pro-preview", inv.default_model("gemini"), "default_model gemini")
+assert_eq("grok-build-0.1", inv.default_model("grok"), "default_model grok")
 os.environ["USE_GEMINI_CLI"] = "1"
 os.environ.pop("GEMINI_MODEL_DEFAULT", None)
 assert_eq("gemini-3.1-pro-preview", inv.default_model("gemini"), "default_model gemini CLI")
@@ -403,8 +441,8 @@ ok(agent_codex[agent_codex.index("--cd") + 1] == "/x",
 ok(agent_codex[agent_codex.index("--add-dir") + 1] == "/y",
    "codex --add-dir grants second add-dir entry")
 
-# max_turns kwarg is only consumed by claude (CLI-side: codex and the
-# Antigravity-CLI gemini backend don't take a --max-turns flag).
+# max_turns is consumed by Claude and Grok; Codex and the Antigravity-CLI
+# Gemini backend do not take a --max-turns flag.
 agent_claude = inv.agent_flags("claude", max_turns=120)
 ok("--safe-mode" in agent_claude, "agent_flags('claude') disables user customizations")
 ok("--no-session-persistence" not in agent_claude,
@@ -446,6 +484,9 @@ os.environ.pop("USE_GEMINI_CLI", None)
 
 ok(not any("memor" in x.lower() for x in inv.agent_flags("claude")),
    "claude agent flags carry no memory flag (env-driven)")
+for builder in (inv.agent_flags, inv.decide_flags):
+    ok("--no-memory" in builder("grok"),
+       f"grok.{builder.__name__} disables cross-run memory by default")
 
 # --enable-memory (switch=1): every per-backend memory disable disappears.
 os.environ["TOKENFUZZ_MEMORY_ENABLED"] = "1"
@@ -453,6 +494,9 @@ for builder in (inv.agent_flags, inv.decide_flags):
     fl = builder("codex")
     ok(not any("memories" in x for x in fl),
        f"codex.{builder.__name__} omits memory flags when memory enabled", fl)
+    grok_flags = builder("grok")
+    ok("--experimental-memory" in grok_flags and "--no-memory" not in grok_flags,
+       f"grok.{builder.__name__} enables memory only on explicit opt-in", grok_flags)
 os.environ["USE_GEMINI_CLI"] = "1"
 ok("--admin-policy" not in inv.agent_flags("gemini"),
    "Gemini CLI agent omits admin-policy when memory enabled")
@@ -470,8 +514,8 @@ os.environ.pop("TOKENFUZZ_MEMORY_ENABLED", None)
 os.environ.pop("USE_GEMINI_CLI", None)
 os.environ.pop("GEMINI_CLI_HOME", None)
 
-# Default (memory off): claude gets the disable env var; codex has CLI flags;
-# oss has no harness memory knob; agy-dialect gemini has no auth-preserving
+# Default (memory off): claude gets the disable env var; codex and Grok have
+# CLI flags; oss has no harness memory knob; agy-dialect gemini has no auth-preserving
 # isolation mechanism wired for Antigravity CLI.
 ok(inv.memory_env("claude") == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
    "claude memory_env sets CLAUDE_CODE_DISABLE_AUTO_MEMORY by default")

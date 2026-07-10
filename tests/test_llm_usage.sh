@@ -65,6 +65,13 @@ function parse_input reads up to 4096 bytes into a fixed buffer. I
 filed FIND-001 documenting an unchecked memcpy. End of session.
 EOF
 
+grok_raw="$work/grok.raw"
+cat > "$grok_raw" <<'EOF'
+{"type":"text","data":"First output chunk. "}
+{"type":"text","data":"Second output chunk."}
+{"type":"end","stopReason":"EndTurn","sessionId":"session-1"}
+EOF
+
 # An empty file (any backend): truly no telemetry.
 empty_raw="$work/empty.raw"
 : > "$empty_raw"
@@ -158,6 +165,19 @@ if ! printf '%s\n' "$fields_with_prompt" | grep -Eq '^output_tokens=[1-9][0-9]*$
     "got '$fields_with_prompt'"
 else
   pass "T4e: extract-fields agy output_tokens estimates > 0"
+fi
+
+# Grok Build uses text/end streaming events but currently emits no usage block.
+grok_fields=$(xfs grok "$grok_raw" --prompt "$prompt_file")
+if ! printf '%s\n' "$grok_fields" | grep -Eq '^input_tokens=[1-9][0-9]*$'; then
+  fail "T4f: Grok input_tokens estimates > 0 with --prompt" "got '$grok_fields'"
+else
+  pass "T4f: Grok input_tokens estimates > 0 with --prompt"
+fi
+if ! printf '%s\n' "$grok_fields" | grep -Eq '^output_tokens=[1-9][0-9]*$'; then
+  fail "T4g: Grok text events estimate output_tokens > 0" "got '$grok_fields'"
+else
+  pass "T4g: Grok text events estimate output_tokens > 0"
 fi
 
 # ── T5: unknown-telemetry → empty string (preserves audit's

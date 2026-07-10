@@ -298,7 +298,32 @@ else
 fi
 unset ACTIVE_BACKEND USE_GEMINI_CLI GEMINI_BIN FAKE_GEMINI_CLI_ARGS LLM_DECIDE_COUNTER_FILE
 
-# 11c. Cross-run memory is disabled at the ENV level for the claude subprocess
+# 11c. Grok decisions use the coding-agent CLI in read-only plan mode and
+# pass the one-shot prompt through -p.
+fake_grok="$TEST_TMPDIR/fake-grok-decision"
+cat > "$fake_grok" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$FAKE_GROK_ARGS"
+printf '{"keep":true,"reason":"grok"}\n'
+EOF
+chmod +x "$fake_grok"
+unset rc LLM_DECIDE_DISABLE
+export ACTIVE_BACKEND=grok
+export GROK_BIN="$fake_grok"
+export FAKE_GROK_ARGS="$TEST_TMPDIR/fake-grok-decision.args"
+export LLM_DECIDE_COUNTER_FILE="$TEST_TMPDIR/llm-count-grok"
+out=$(echo "grok prompt" | llm_decide demo "keep,reason" 2)
+assert_eq "0" "$?" "grok backend: llm_decide succeeds through fake Grok CLI"
+assert_match '"reason":"grok"|\"reason\": \"grok\"' "$out" "grok backend: parses fake Grok JSON"
+grok_args=$(cat "$FAKE_GROK_ARGS")
+assert_match '.*--permission-mode plan' "$grok_args" "grok backend: decision uses plan mode"
+assert_match '.*--output-format plain' "$grok_args" "grok backend: decision uses plain output"
+assert_match '.*--no-memory' "$grok_args" "grok backend: decision disables memory"
+assert_match '.*--model grok-build-0.1' "$grok_args" "grok backend: decision wires default model"
+assert_match '.* -p grok prompt' "$grok_args" "grok backend: passes prompt through -p"
+unset ACTIVE_BACKEND GROK_BIN FAKE_GROK_ARGS LLM_DECIDE_COUNTER_FILE
+
+# 11d. Cross-run memory is disabled at the ENV level for the claude subprocess
 #      llm_decide launches — covers standalone tools (bin/setup-target,
 #      bin/suggest-*) that import llm_decide without going through a bash entry
 #      point's llm_apply_memory_policy. The fake claude echoes the env var it
@@ -327,7 +352,7 @@ assert_eq "UNSET" "$(cat "$FAKE_CLAUDE_MEM_ENV")" \
   "claude memory: --enable-memory leaves CLAUDE_CODE_DISABLE_AUTO_MEMORY unset"
 unset TOKENFUZZ_MEMORY_ENABLED ACTIVE_BACKEND CLAUDE_BIN FAKE_CLAUDE_MEM_ENV LLM_DECIDE_COUNTER_FILE
 
-# 11d. The Gemini CLI subprocess is launched with GEMINI_CLI_HOME relocated to
+# 11e. The Gemini CLI subprocess is launched with GEMINI_CLI_HOME relocated to
 #      a throwaway home that excludes the global GEMINI.md — read+write
 #      isolation, since denying save_memory alone does not stop the auto-load
 #      of ~/.gemini/GEMINI.md nor write_file appends to it.

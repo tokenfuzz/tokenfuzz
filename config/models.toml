@@ -2,11 +2,13 @@
 # to switch a backend's model. Override per-run with --model / $MODEL or
 # per-backend via *_MODEL_DEFAULT env vars. "oss" has no default — pass --model
 # so the local OpenCode provider can match the served model name explicitly.
-# Keep API slugs (they key the benchmark pricing table). For gemini on agy the
-# slug is mapped to an `agy models` label in lib/llm_invoke.py:agy_model_label.
+# Keep provider/CLI model identifiers (they key the benchmark pricing table).
+# For gemini on agy the slug is mapped to an `agy models` label in
+# lib/llm_invoke.py:agy_model_label.
 
 [models]
 claude = "claude-opus-4-8"
 codex  = "gpt-5.5"
 gemini = "gemini-3.1-pro-preview"
+grok   = "grok-build-0.1"
 oss    = ""

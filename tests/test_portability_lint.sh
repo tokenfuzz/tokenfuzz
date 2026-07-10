@@ -34,7 +34,7 @@ stat_fallback_re="stat[[:space:]]+-f[[:space:]]+%[mz][^|;]*[|][|][[:space:]]*sta
 # prompt by redirect instead. The words below are the shell expansions that
 # resolve to an agent CLI binary; llm_decide is absent on purpose, as it
 # drains stdin before any early return.
-backend_cli_word='"\$(CODEX_BIN|CLAUDE_BIN|GEMINI_BIN|OPENCODE_BIN|gemini_bin|bin)"|\$\(llm_backend_bin'
+backend_cli_word='"\$(CODEX_BIN|CLAUDE_BIN|GEMINI_BIN|GROK_BIN|OPENCODE_BIN|gemini_bin|bin)"|\$\(llm_backend_bin'
 pipe_to_cli_re='\|[[:space:]]*(audit_timeout_run[[:space:]][^|]*)?('"$backend_cli_word"')'
 
 # ── The lint itself ────────────────────────────────────────────────

@@ -8,7 +8,7 @@ Set the active result directory once when you start inspecting:
 
 ```bash
 export TARGET=<your-target>
-export BACKEND="<backend>"        # one of: claude, codex, gemini, oss
+export BACKEND="<backend>"        # one of: claude, codex, gemini, grok, oss
 # Optional convenience path for inspecting results.
 export RESULTS="output/$TARGET/$BACKEND/results"
 ```
@@ -75,7 +75,7 @@ providers do not overwrite each other's state.
 
 - If you ran `--backend <backend>`, inspect
   `output/<target>/<backend>/results/`, where `<backend>` is one of
-  `claude`, `codex`, `gemini`, or `oss`.
+  `claude`, `codex`, `gemini`, `grok`, or `oss`.
 
 ## Results directory
 

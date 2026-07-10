@@ -44,7 +44,7 @@
 #                            A comma list (spaces allowed) benchmarks each
 #                            target one after another, every other flag held
 #                            constant; the run fails if any target fails.
-#   --backend <backend>      Agent backend, one of: claude, codex, gemini, oss.
+#   --backend <backend>      Agent backend, one of: claude, codex, gemini, grok, oss.
 #   --model <model>          Override the model for both conditions. Defaults to
 #                            the per-backend config/models.toml value. For
 #                            gemini on agy, pass the config slug or an exact
@@ -841,7 +841,7 @@ cell_backend_succeeded() {
 
 # cell_log_has_quota_exhaustion — compatibility wrapper for older Gemini quota
 # handling. Provider classification itself lives in lib/audit_helpers.py and is
-# shared across Claude, Codex, Gemini, and OpenCode/oss.
+# shared across Claude, Codex, Gemini, Grok, and OpenCode/oss.
 # This is the post-run confirmation that pairs with the live watchdog: even
 # when the watchdog never fired (e.g. the cell finished on its own with a
 # quota error in the tail), a quota line on disk marks the cell quota-dead so

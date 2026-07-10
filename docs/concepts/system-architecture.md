@@ -210,7 +210,7 @@ bin/audit --backend all --target <target>   # cycle installed hosted backends ac
 ```
 
 In ensemble mode, each iteration selects the next configured hosted
-backend in `claude → codex → gemini` order. Each backend writes into
+backend in `claude → codex → gemini → grok` order. Each backend writes into
 its own result tree. That is the ensembling surface: same target
 revision, same probe and triage rules, and independent evidence
 directories per backend.

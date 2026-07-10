@@ -102,9 +102,12 @@ follow-up rather than the default probe budget.
 | `CLAUDE_MODEL_DEFAULT` | `claude-opus-4-8` | Default model name passed to the `claude` CLI when `--model` is omitted. |
 | `CODEX_MODEL_DEFAULT` | `gpt-5.5` | Default model name passed to the `codex` CLI when `--model` is omitted. |
 | `GEMINI_MODEL_DEFAULT` | `gemini-3.1-pro-preview` | Default model for the `gemini` backend. Used by both the default Antigravity CLI (`agy`, mapped to its `agy models` label) and Google Gemini CLI (`USE_GEMINI_CLI=1`). |
-| `AUDIT_BACKEND` | (none) | Alternative to `--backend`. Same accepted values: `all`, `claude`, `codex`, `gemini`, `oss`. |
+| `GROK_MODEL_DEFAULT` | `grok-build-0.1` | Default model name passed to the Grok Build CLI when `--model` is omitted. |
+| `AUDIT_BACKEND` | (none) | Alternative to `--backend`. Same accepted values: `all`, `claude`, `codex`, `gemini`, `grok`, `oss`. |
 | `USE_GEMINI_CLI` | `0` | Set to `1` to drive the `gemini` backend through Google Gemini CLI (`gemini`) instead of the default Antigravity CLI (`agy`). |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | (none) | Required for the `USE_GEMINI_CLI=1` path when memory is off; the harness fails fast if neither is set. Not needed for the default `agy` path, which uses its own login. |
+| `XAI_API_KEY` | (none) | API key used by the Grok Build CLI. `bin/audit-container-shell --forward-credentials` forwards it into the container. |
+| `GROK_BIN` | `grok` | Grok Build binary used by `--backend grok` when it is not on `PATH` under the default name. |
 | `AUDIT_LOCAL_BASE_URL` | `http://127.0.0.1:8000/v1` | OpenAI-compatible endpoint for `--backend oss`. `/v1` is appended automatically when omitted. Set this to `http://127.0.0.1:11434/v1` for Ollama. |
 | `AUDIT_LOCAL_API_KEY` | `EMPTY` | API key sent to the local OpenAI-compatible endpoint. Set it only if your server requires a token. |
 | `OPENCODE_BIN` | `opencode` | OpenCode binary used by `--backend oss` when it is not on `PATH` under the default name. |

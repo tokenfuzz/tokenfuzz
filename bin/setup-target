@@ -373,7 +373,7 @@ fi
 
 append_unique_backend() {
   local candidate="$1"
-  case "$candidate" in claude|codex|gemini|oss) ;; *) return 0 ;; esac
+  case "$candidate" in claude|codex|gemini|grok|oss) ;; *) return 0 ;; esac
   case " $LLM_BACKEND_CANDIDATES " in
     *" $candidate "*) return 0 ;;
   esac
@@ -389,6 +389,7 @@ build_llm_backend_candidates() {
   append_unique_backend claude
   append_unique_backend codex
   append_unique_backend gemini
+  append_unique_backend grok
   if [ "$requested" = "oss" ] || [ -n "${MODEL:-${AUDIT_MODEL:-}}" ]; then
     append_unique_backend oss
   fi
@@ -864,5 +865,5 @@ cat <<EOF
 
 Next steps:
   1. Review output/$TARGET_NAME/target.toml and edit only unresolved or target-specific fields.
-  2. Smoke-test with: bin/audit --target $TARGET_NAME --backend <claude|codex|gemini|oss> 1
+  2. Smoke-test with: bin/audit --target $TARGET_NAME --backend <claude|codex|gemini|grok|oss> 1
 EOF

@@ -15,11 +15,14 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
       Stream a raw agent transcript (claude / codex stream-json) and emit
       a single-line `key=value` waste-telemetry summary. Gemini CLI
       stream-json logs are supported; the older Antigravity CLI emits
-      plain text and naturally produces empty telemetry.
+      plain text and naturally produces empty telemetry. Grok Build's
+      stream currently exposes text and terminal events but no tool events,
+      so it likewise produces empty tool telemetry.
 
   count-tools <log_file> <command_execution|all_tools>
       Count shell-command tool calls or all tool calls in a raw transcript.
-      Supports Codex, Claude, and Gemini CLI stream-json shapes.
+      Supports Codex, Claude, and Gemini CLI stream-json shapes. Grok Build
+      currently exposes no tool-call events to count.
 
   count-tools-all <log_file>
       Count both shell-command tool calls and all tool calls in one transcript

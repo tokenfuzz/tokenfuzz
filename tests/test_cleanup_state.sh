@@ -209,8 +209,9 @@ assert_file_exists "$sec15a/libxml2/claude/logs/index.log" \
 
 sec15b="$TEST_TMPDIR/out15b"
 mk_mock_target "$sec15b" libxml2
-mkdir -p "$sec15b/libxml2/gemini/logs" "$sec15b/libxml2/oss/logs"
+mkdir -p "$sec15b/libxml2/gemini/logs" "$sec15b/libxml2/grok/logs" "$sec15b/libxml2/oss/logs"
 echo "log" > "$sec15b/libxml2/gemini/logs/index.log"
+echo "log" > "$sec15b/libxml2/grok/logs/index.log"
 echo "log" > "$sec15b/libxml2/oss/logs/index.log"
 "$CLEANUP_LOGS" --output-root "$sec15b" --target libxml2 --quiet
 assert_file_not_exists "$sec15b/libxml2/claude/logs/index.log" \
@@ -219,6 +220,8 @@ assert_file_not_exists "$sec15b/libxml2/codex/logs/index.log" \
     "cleanup_logs default backends: codex logs cleared"
 assert_file_not_exists "$sec15b/libxml2/gemini/logs/index.log" \
     "cleanup_logs default backends: gemini logs cleared"
+assert_file_not_exists "$sec15b/libxml2/grok/logs/index.log" \
+    "cleanup_logs default backends: grok logs cleared"
 assert_file_not_exists "$sec15b/libxml2/oss/logs/index.log" \
     "cleanup_logs default backends: oss logs cleared"
 

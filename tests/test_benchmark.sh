@@ -290,6 +290,17 @@ chv=$(python3 "$PY" harvest "$crd" --backend claude --model claude-opus-4-8)
 assert_eq "0.083500" "$(echo "$chv" | jq -r '.tokens.cost_usd')" \
   "T1q: harvest prices fresh input + cache writes + cache reads + output"
 
+grd="$work/grok-cost/results"
+mkdir -p "$grd/logs"
+printf '%s\n' \
+  '{"backend":"grok","model":"grok-build-0.1","tokens":{"input":3000,"cached_input":2000,"output":3000}}' \
+  > "$grd/logs/index.jsonl"
+grv=$(python3 "$PY" harvest "$grd" --backend grok --model grok-build-0.1)
+assert_eq "0.007400" "$(echo "$grv" | jq -r '.tokens.cost_usd')" \
+  "T1q1: harvest applies xAI Grok Build token pricing"
+assert_eq "xai-code-api-grok-build-0.1" "$(echo "$grv" | jq -r '.tokens.cost_source')" \
+  "T1q1b: Grok cost identifies its public pricing source"
+
 g5d="$work/gpt55-cost/results"
 mkdir -p "$g5d/logs"
 printf '%s\n' \

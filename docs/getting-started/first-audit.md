@@ -37,7 +37,7 @@ To keep the commands consistent, set a few variables once:
 
 ```bash
 export TARGET=libxml2       # any directory name under targets/
-export BACKEND="<backend>"  # one of: claude, codex, gemini, oss
+export BACKEND="<backend>"  # one of: claude, codex, gemini, grok, oss
 # Optional convenience paths for inspecting results.
 export RESULTS="output/$TARGET/$BACKEND/results"
 export LOGS="output/$TARGET/$BACKEND/logs"
@@ -45,7 +45,7 @@ export LOGS="output/$TARGET/$BACKEND/logs"
 
 Because the command below passes `--backend "$BACKEND"`, leaving
 `$BACKEND` unset sends an empty value and fails with
-`AUDIT_BACKEND must be all, claude, codex, gemini, or oss`. (Omitting
+`AUDIT_BACKEND must be all, claude, codex, gemini, grok, or oss`. (Omitting
 `--backend` altogether instead cycles every installed hosted backend —
 that is the `all` default.)
 
@@ -71,6 +71,7 @@ selected backend:
 | `codex` | `gpt-5.5` |
 | `gemini` with Antigravity CLI (`agy`) | `gemini-3.1-pro-preview`, mapped to its `agy models` label. Override with `--model` as a config slug or an exact `agy models` label. |
 | `gemini` with Google Gemini CLI (`USE_GEMINI_CLI=1`) | `gemini-3.1-pro-preview` |
+| `grok` | `grok-build-0.1` |
 | `oss` | No default; `--model <served-model-name>` is required. |
 
 The defaults come from `config/models.toml`; override them per run
@@ -280,12 +281,12 @@ prerequisites for the basic Docker and gVisor configuration.
 The harness ships a helper that:
 
 - builds a disposable image with Claude Code, Codex, Antigravity CLI
-  (`agy`), and Google Gemini CLI installed;
+  (`agy`), Google Gemini CLI, and Grok Build installed;
 - mounts the repository at `/root/work`;
 - drops you into a shell.
 
 It mounts no host CLI credential directories (`~/.claude`, `~/.codex`,
-`~/.gemini`): the container starts logged out, so you log in to each
+`~/.gemini`, `~/.grok`): the container starts logged out, so you log in to each
 backend inside the shell or pass `--forward-credentials` to forward API
 key/token environment variables. This keeps the host's credential stores
 off the container and avoids breaking `agy`, which needs a writable

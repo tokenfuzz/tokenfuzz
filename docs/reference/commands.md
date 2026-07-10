@@ -27,7 +27,7 @@ once:
 
 ```bash
 export TARGET=<your-target>
-export BACKEND="<backend>"        # one of: claude, codex, gemini, oss
+export BACKEND="<backend>"        # one of: claude, codex, gemini, grok, oss
 # Optional convenience path for inspecting results.
 export RESULTS="output/$TARGET/$BACKEND/results"
 ```
@@ -109,7 +109,7 @@ Notes:
 
 - The optional final argument limits iterations. Omit it, or pass
   `0`, to run continuously.
-- `<backend>` is one of `all`, `claude`, `codex`, `gemini`, or `oss`.
+- `<backend>` is one of `all`, `claude`, `codex`, `gemini`, `grok`, or `oss`.
   Omitting `--backend` is the same as `all` — it cycles every installed
   hosted backend.
 - Start with `1` to verify target config, backend CLI, results
@@ -121,7 +121,7 @@ Notes:
 - `--new-target <slug>` seeds a starter `output/<target>/target.toml`
   and exits without launching an audit (equivalent to the config-only
   half of `bin/setup-target`).
-- Use `--model` with the `claude` or `codex` backend. The harness
+- Use `--model` with the `claude`, `codex`, or `grok` backend. The harness
   forwards it to that backend's native model flag. For `oss`,
   `--model` is required and names the local model served through
   OpenCode. The value must match the exact model id returned by the
@@ -158,13 +158,15 @@ the harness applies the right per-backend "off" control for you:
 | --- | --- | --- |
 | `claude` | `MEMORY.md` + `memory/*.md`, auto-recalled into context and auto-saved mid-run | sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (Claude Code's own off switch) |
 | `codex` | learned memories under `~/.codex/memories/`, reloaded into context and regenerated | passes `-c features.memories=false -c memories.use_memories=false -c memories.generate_memories=false` |
+| `grok` | Grok Build's cross-session memory | passes `--no-memory`; `--enable-memory` replaces it with Grok's `--experimental-memory` opt-in |
 | `oss` through OpenCode | no harness-managed cross-run memory channel | no memory flag is needed |
 | `gemini` with `USE_GEMINI_CLI=1` (Google Gemini CLI) | global `~/.gemini/GEMINI.md` plus private project memory under Gemini's user storage, loaded into later sessions and writable by memory commands or direct file edits | runs the CLI under a clean, **empty** per-run `GEMINI_CLI_HOME` (staged at `$LOGDIR/.gemini-home`, no `GEMINI.md`, no state, no credential files) so nothing is read or written; auth rides on the `GEMINI_API_KEY` the harness forwards. An `--admin-policy` denying `save_memory` stays as a backstop |
 | `gemini` default (`agy` / Antigravity CLI) | persistent Antigravity CLI state under `~/.gemini/antigravity-cli` (`brain/`, `implicit/`, conversations, logs) | nothing automatic — `agy` exposes no documented memory-off flag or auth-preserving isolated home/profile switch in headless `-p`; naive `HOME` relocation creates fresh state but breaks auth (a false "successful" empty run). Use `USE_GEMINI_CLI=1` when strict Gemini memory isolation is required |
 
-Every row was confirmed by **running the CLI**, not just reading its docs: with
-memory on, the model recalls a planted fact; with the harness's control
-applied, it does not. For Gemini CLI in particular, denying `save_memory` alone
+The Claude, Codex, and Gemini controls were confirmed by **running the CLI**:
+with memory on, the model recalls a planted fact; with the harness's control
+applied, it does not. Grok uses its documented native `--no-memory` and
+`--experimental-memory` flags. For Gemini CLI in particular, denying `save_memory` alone
 was *not* enough — the global memory is loaded regardless of tool policy and the
 model can write it directly, and no flag or setting disables that load. So the
 harness relocates the home to an empty per-run directory: a planted fact in the
@@ -205,7 +207,7 @@ export LOGS="output/$TARGET/$BACKEND/logs"
 - Use `logs/` when startup, backend authentication, or wrapper
   behaviour needs debugging.
 
-Supported single backends: `claude`, `codex`, `gemini`, `oss`.
+Supported single backends: `claude`, `codex`, `gemini`, `grok`, `oss`.
 Use `--backend all`, or omit `--backend`, to cycle installed hosted
 backends across iterations. Use the same explicit backend when
 comparing runs — backend names are part of the output path, so each

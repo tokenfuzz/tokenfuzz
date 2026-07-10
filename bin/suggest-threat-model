@@ -249,7 +249,7 @@ def main(argv: list[str]) -> int:
             print(
                 f"[suggest-threat-model] backend={backend} returned no usable "
                 f"response — hand-edit [threat_model] in {target_toml}, or set "
-                f"BACKEND=claude|codex|gemini|oss and rerun. See lib/llm_decide.log "
+                f"BACKEND=claude|codex|gemini|grok|oss and rerun. See lib/llm_decide.log "
                 f"for call telemetry.",
                 file=sys.stderr,
             )

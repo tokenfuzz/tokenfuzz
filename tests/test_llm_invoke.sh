@@ -2,7 +2,7 @@
 # tests/test_llm_invoke.sh — Unit tests for lib/llm_invoke.sh
 #
 # Covers:
-#   1. llm_known_backend recognises the four supported backends
+#   1. llm_known_backend recognises the supported backends
 #      and rejects unknown ones.
 #   2. llm_default_model returns each backend's project default and
 #      honours env overrides.
@@ -27,13 +27,13 @@ set -uo pipefail
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$TESTS_DIR/helpers.sh"
 unset USE_GEMINI_CLI TOKENFUZZ_MEMORY_ENABLED
-unset CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT AUDIT_LOCAL_BASE_URL AUDIT_LOCAL_API_KEY
+unset CLAUDE_MODEL_DEFAULT CODEX_MODEL_DEFAULT GEMINI_MODEL_DEFAULT GROK_MODEL_DEFAULT AUDIT_LOCAL_BASE_URL AUDIT_LOCAL_API_KEY
 source "$SCRIPT_ROOT/lib/llm_invoke.sh"
 
 setup_test_env
 
 # ── 1. llm_known_backend ────────────────────────────────────────
-for b in claude codex gemini oss; do
+for b in claude codex gemini grok oss; do
   if llm_known_backend "$b"; then
     pass "llm_known_backend recognises $b"
   else
@@ -50,6 +50,7 @@ fi
 assert_eq "claude-opus-4-8" "$(llm_default_model claude)" "claude default model"
 assert_eq "gpt-5.5"          "$(llm_default_model codex)"  "codex default model"
 assert_eq "gemini-3.1-pro-preview" "$(llm_default_model gemini)" "gemini default model"
+assert_eq "grok-build-0.1"       "$(llm_default_model grok)"   "grok default model"
 assert_eq "agy"              "$(llm_gemini_default_bin)"    "gemini backend defaults to agy binary"
 
 # Env override
@@ -65,6 +66,10 @@ USE_GEMINI_CLI=1 \
   bash -c 'unset GEMINI_MODEL_DEFAULT; source "$1"/lib/llm_invoke.sh; llm_default_model gemini; llm_gemini_default_bin' _ "$SCRIPT_ROOT" \
   > "$TEST_TMPDIR/m2-cli" 2>/dev/null
 assert_eq $'gemini-3.1-pro-preview\ngemini' "$(cat "$TEST_TMPDIR/m2-cli")" "USE_GEMINI_CLI switches gemini binary and keeps pro-preview default model"
+GROK_MODEL_DEFAULT="custom-grok" \
+  bash -c 'source "$1"/lib/llm_invoke.sh; llm_default_model grok' _ "$SCRIPT_ROOT" \
+  > "$TEST_TMPDIR/m3" 2>/dev/null
+assert_eq "custom-grok" "$(cat "$TEST_TMPDIR/m3")" "grok default honours GROK_MODEL_DEFAULT"
 
 # Unknown backend
 if llm_default_model "frontier-model" >/dev/null 2>&1; then
@@ -157,6 +162,20 @@ else
   pass "llm_agent_flags rejects unknown backend"
 fi
 
+declare -a flags_grok=()
+llm_agent_flags grok flags_grok "" 23 ""
+flags_str="${flags_grok[*]}"
+assert_match "--always-approve" "$flags_str" "agent grok auto-approves tools"
+assert_match "--output-format streaming-json" "$flags_str" "agent grok uses streaming JSON"
+assert_match "--no-auto-update" "$flags_str" "agent grok disables background updates"
+assert_match "--no-subagents" "$flags_str" "agent grok disables nested agent concurrency"
+assert_match "--no-memory" "$flags_str" "agent grok disables cross-run memory"
+assert_match "--max-turns 23" "$flags_str" "agent grok wires max turns"
+assert_match "--model grok-build-0.1" "$flags_str" "agent grok wires default model"
+declare -a flags_grok_dirs=()
+llm_agent_flags grok flags_grok_dirs "" 23 "/workspace,/evidence"
+assert_match "--cwd /workspace" "${flags_grok_dirs[*]}" "agent grok uses first add-dir as working directory"
+
 # ── 4. add_dirs wiring ──────────────────────────────────────────
 declare -a flags_a=()
 llm_agent_flags claude flags_a "" 80 "/root/work,/root/target"
@@ -235,6 +254,13 @@ if grep -q -- "--dangerously-skip-permissions" "$TEST_TMPDIR/gemini-cli-decide-f
 else
   pass "decide gemini CLI omits agy-only flags"
 fi
+
+declare -a d_grok=()
+llm_decide_flags grok d_grok ""
+flags_str="${d_grok[*]}"
+assert_match "--permission-mode plan" "$flags_str" "decide grok uses read-only plan mode"
+assert_match "--output-format plain" "$flags_str" "decide grok uses plain output"
+assert_match "--no-memory" "$flags_str" "decide grok disables cross-run memory"
 
 # ── 6. llm_extract_text per backend ─────────────────────────────
 # Claude — message.content[].text. The trailing result event echoes
@@ -335,6 +361,14 @@ EOF
 ' _ "$SCRIPT_ROOT" "$TEST_TMPDIR" > "$TEST_TMPDIR/gemini-cli-extract"
 assert_eq "hello from gemini cli" "$(cat "$TEST_TMPDIR/gemini-cli-extract")" \
   "extract gemini CLI stream-json assistant text"
+
+cat > "$TEST_TMPDIR/raw_grok.jsonl" <<'EOF'
+{"type":"text","data":"hello "}
+{"type":"text","data":"from grok"}
+{"type":"end","stopReason":"EndTurn","sessionId":"session-1"}
+EOF
+out=$(llm_extract_text grok "$TEST_TMPDIR/raw_grok.jsonl")
+assert_eq "hello from grok" "$out" "extract grok streaming-json text deltas"
 
 # ── 7. Empty / missing raw_log behaviour ─────────────────────────
 : > "$TEST_TMPDIR/empty.log"
@@ -460,6 +494,17 @@ if llm_log_refusal_warning gemini "$refusal_prompt" \
   pass "refusal warning helper detects Gemini CLI no-tool prose refusal"
 else
   fail "refusal warning helper should detect Gemini CLI no-tool prose refusal"
+fi
+
+cat > "$TEST_TMPDIR/raw_grok_cli_prose_refusal.jsonl" <<'EOF'
+{"type":"text","data":"Sorry, I cannot fulfill your request to analyze this concrete project for security vulnerabilities. I can help with general defensive guidance."}
+{"type":"end","stopReason":"EndTurn","sessionId":"s"}
+EOF
+if llm_log_refusal_warning grok "$refusal_prompt" \
+    "$TEST_TMPDIR/raw_grok_cli_prose_refusal.jsonl" >/dev/null 2>&1; then
+  pass "refusal warning helper detects Grok Build no-tool prose refusal"
+else
+  fail "refusal warning helper should detect Grok Build no-tool prose refusal"
 fi
 
 python3 - "$TEST_TMPDIR/raw_large_refusal_edges.jsonl" <<'PY'
@@ -697,7 +742,29 @@ fi
 assert_eq "FAILED:UNSET" "$(cat "$TEST_TMPDIR/mem-gem-noauth")" \
   "memory off + Gemini CLI without an API key fails loud (no silent memory leak)"
 
-# ── 9. Stdin-fed backends report the CLI's rc, not the writer's SIGPIPE ──
+# ── 9. Grok shared runner launches headlessly and preserves JSONL ──
+fake_grok="$TEST_TMPDIR/fake-grok"
+cat > "$fake_grok" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$GROK_ARGS_FILE"
+printf '{"type":"text","data":"runner-ok"}\n'
+printf '{"type":"end","stopReason":"EndTurn","sessionId":"runner-session"}\n'
+EOF
+chmod +x "$fake_grok"
+export GROK_ARGS_FILE="$TEST_TMPDIR/grok-runner.args"
+GROK_BIN="$fake_grok" llm_run_agent_prompt_no_timeout grok "runner prompt" \
+  "$TEST_TMPDIR/grok-runner.raw" "grok-build-0.1" 7 "/workspace,/evidence" "$TEST_TMPDIR"
+assert_eq "runner-ok" "$(llm_extract_text grok "$TEST_TMPDIR/grok-runner.raw")" \
+  "grok shared runner captures extractable streaming JSON"
+grok_runner_args=$(tr '\n' ' ' < "$GROK_ARGS_FILE")
+assert_match "--output-format streaming-json" "$grok_runner_args" \
+  "grok shared runner requests streaming JSON"
+assert_match "--cwd /workspace" "$grok_runner_args" \
+  "grok shared runner sets the requested workspace"
+assert_match "-p runner prompt" "$grok_runner_args" \
+  "grok shared runner passes the prompt through headless mode"
+
+# ── 10. Stdin-fed backends report the CLI's rc, not the writer's SIGPIPE ──
 # A CLI that exits before draining stdin (quota rejection, auth failure)
 # kills the prompt writer with SIGPIPE. When the writer sat in a pipeline,
 # pipefail surfaced its 141 as the CLI's status, so callers never saw the

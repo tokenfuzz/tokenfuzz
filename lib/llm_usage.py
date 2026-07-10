@@ -42,10 +42,10 @@ Two extraction paths:
 
   measured  — codex and claude emit a usage object in their JSON event
               stream; it is read directly. `estimated` is false.
-  estimated — the gemini backend (Antigravity CLI / agy 1.0.0) emits NO
-              usage telemetry on any surface: not in --print output, not
-              in ~/.gemini/antigravity-cli/log/, only an undocumented
-              protobuf conversation store. When no usage object is found
+  estimated — the gemini backend (Antigravity CLI / agy 1.0.0) emits no
+              usage telemetry in --print output or its text logs, and Grok
+              Build's streaming JSON exposes no usage object. When no usage
+              object is found
               and a prompt file is supplied, tokens are ESTIMATED from
               character counts and the row is flagged `estimated: true`
               so the ledger never presents an estimate as a measurement.
@@ -92,7 +92,7 @@ _OUTPUT_KEYS = ("output_tokens", "completion_tokens", "output")
 _TERMINAL_TYPES = ("result", "turn.completed", "step_finish", "step-finish")
 
 # Rough chars-per-token ratio for the estimated path. ~4 is the common
-# heuristic for English + code; it is only ever used when a backend (agy)
+# heuristic for English + code; it is only ever used when a backend (agy/Grok)
 # refuses to report real usage, and the row is flagged `estimated`.
 _CHARS_PER_TOKEN = 4
 
@@ -177,11 +177,11 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _sum_assistant_content_chars(raw: str) -> int:
-    """Estimate assistant-content char count from a gemini raw log.
+    """Estimate assistant-content char count from a text/streaming raw log.
 
     Two shapes show up here:
 
-      stream-json  — gemini-cli emits a JSON event stream. When the
+      stream-json  — gemini-cli and Grok Build emit JSON event streams. When the
                      stream dies before reporting usage (commonly a 429),
                      restricting the estimate to role=="assistant"
                      content avoids billing node.js stack traces and
@@ -213,6 +213,9 @@ def _sum_assistant_content_chars(raw: str) -> int:
         if not isinstance(obj, dict):
             continue
         saw_json_event = True
+        if obj.get("type") == "text" and isinstance(obj.get("data"), str):
+            total += len(obj["data"])
+            continue
         if obj.get("role") != "assistant":
             continue
         content = obj.get("content")
@@ -344,10 +347,10 @@ def extract_usage_from_text(
         return {"tokens": measured, "probe": {}, "estimated": False,
                 "backend": backend}
 
-    # Estimated path: no usage telemetry (agy). Do not estimate Codex /
+    # Estimated path: no usage telemetry (agy/Grok Build). Do not estimate Codex /
     # Claude failures from stderr; those backends have real JSON usage when
     # they actually run, so an absent usage object means "unknown".
-    if backend != "gemini":
+    if backend not in ("gemini", "grok"):
         return {**_zero_usage(), "backend": backend}
 
     assistant_chars = _sum_assistant_content_chars(raw)
@@ -362,7 +365,7 @@ def extract_usage_from_text(
 
 # ── Known backends; used to detect the legacy `backend raw [prompt]` form
 # (no subcommand). Kept in sync with lib/llm_invoke.py::_KNOWN_BACKENDS.
-_KNOWN_BACKENDS = ("claude", "codex", "gemini", "oss")
+_KNOWN_BACKENDS = ("claude", "codex", "gemini", "grok", "oss")
 
 # ── Field-name aliases for extract-field so callers can ask for the
 # field shape they're used to ("output_tokens", "duration_ms") without
