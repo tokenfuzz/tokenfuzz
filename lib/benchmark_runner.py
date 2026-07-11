@@ -993,12 +993,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 if condition == "model-direct":
                     cleanup_model_direct_scratch(cell_dir)
                 summary = metrics.harvest(results, args.backend, model) if results.is_dir() else {}
-                log(
-                    f"Cell {name} findings: rejected={summary.get('findings_rejected', 0)} "
-                    f"confirmed={summary.get('findings', 0)} unique={summary.get('finding_clusters', 0)}; "
-                    f"crashes: rejected={summary.get('crashes_rejected', 0)} "
-                    f"confirmed={summary.get('confirmed_crashes', 0)} unique={summary.get('crash_clusters', 0)}"
-                )
+                log(f"Cell {name} {metrics.metric_gate_summary(summary)}")
                 if status == "done":
                     done += 1
                     log(

@@ -205,6 +205,11 @@ assert_eq "FIND-A FIND-D FIND-E" \
   "T1cf-c: confirmed dirs are the accepted FIND and the two pinned FINDs"
 assert_eq "2" "$(echo "$cfv" | jq -r '.findings_unadjudicated')" \
   "T1cf-d: findings_unadjudicated = raw(5) - confirmed(3), the not-yet-confirmed remainder (matches the drain WARN)"
+printf '%s\n' "$cfv" > "$cf/metrics.json"
+assert_eq \
+  "findings: rejected=0 confirmed=3 pending=2 roots=5; crashes: rejected=0 confirmed=0 unique=0" \
+  "$(python3 "$PY" metric-gate-summary "$cf/metrics.json")" \
+  "T1cf-e: gate summary distinguishes confirmed findings from pending raw roots"
 
 # ── T1cl: the report findings cell renders the CONFIRMED count only. Any
 # un-adjudicated remainder from a cut-off triage is resolved by the regenerate

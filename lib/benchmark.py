@@ -4025,6 +4025,22 @@ def _format_count(value: object) -> str:
     return str(number)
 
 
+def metric_gate_summary(metrics: dict) -> str:
+    """Format accepted, pending, and rejected benchmark artifact counts."""
+    return (
+        "findings: rejected={fr} confirmed={fc} pending={fp} roots={ft}; "
+        "crashes: rejected={cr} confirmed={cc} unique={cu}"
+    ).format(
+        fr=_as_int(metrics.get("findings_rejected")),
+        fc=_as_int(metrics.get("confirmed_findings")),
+        fp=_as_int(metrics.get("findings_unadjudicated")),
+        ft=_as_int(metrics.get("findings")),
+        cr=_as_int(metrics.get("crashes_rejected")),
+        cc=_as_int(metrics.get("confirmed_crashes")),
+        cu=_as_int(metrics.get("crash_clusters")),
+    )
+
+
 def _cmd_artifact_uri(args: argparse.Namespace) -> int:
     try:
         print(Path(args.path).resolve().as_uri())
@@ -4126,17 +4142,7 @@ def _cmd_uncounted_findings(args: argparse.Namespace) -> int:
 
 def _cmd_metric_gate_summary(args: argparse.Namespace) -> int:
     metrics = _read_json_object(Path(args.path))
-    print(
-        "findings: rejected={fr} confirmed={fc} unique={fu}; "
-        "crashes: rejected={cr} confirmed={cc} unique={cu}".format(
-            fr=_as_int(metrics.get("findings_rejected")),
-            fc=_as_int(metrics.get("findings")),
-            fu=_as_int(metrics.get("finding_clusters")),
-            cr=_as_int(metrics.get("crashes_rejected")),
-            cc=_as_int(metrics.get("confirmed_crashes")),
-            cu=_as_int(metrics.get("crash_clusters")),
-        )
-    )
+    print(metric_gate_summary(metrics))
     return 0
 
 
