@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -423,6 +424,33 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     check(
         (direct_crash / ".trigger-gate-bypass.json").is_file(),
         "trigger bypass leaves machine-readable provenance",
+    )
+    published_results = root / "published-results"
+    nested_crash = published_results / "session" / "results" / "crashes" / direct_id
+    nested_crash.parent.mkdir(parents=True)
+    shutil.copytree(direct_crash, nested_crash)
+    published_crash = published_results / "crashes" / "CRASH-1"
+    published_crash.mkdir(parents=True)
+    shutil.copy2(direct_crash / direct_case.name, published_crash / "input.bin")
+    shutil.copy2(direct_crash / "sanitizer.txt", published_crash / "sanitizer.txt")
+    (published_crash / "report.md").write_text("Trigger source: bytes\n", encoding="utf-8")
+    with mock.patch.object(benchmark_runner.triage, "triage_crash_dirs", return_value={"promoted": 1}):
+        benchmark_runner.triage_cell_crashes(
+            published_results, direct_target, "direct-target", workers=1,
+        )
+    check(
+        crash_bundle.verified_probe_context(published_crash) is not None
+        and triage._direct_probe_trigger_bypass(published_crash, direct_target, ["bytes"]),
+        "model-direct triage restores exact nested probe provenance after testcase rename",
+    )
+    mismatched = published_results / "crashes" / "CRASH-2"
+    shutil.copytree(published_crash, mismatched)
+    (mismatched / ".probe-context.json").unlink()
+    (mismatched / ".probe-identity").unlink()
+    (mismatched / "sanitizer.txt").write_text("different evidence\n", encoding="utf-8")
+    check(
+        not crash_bundle.restore_probe_context([nested_crash], mismatched),
+        "model-direct provenance recovery fails closed on changed sanitizer evidence",
     )
     with mock.patch.object(crash_bundle, "verified_probe_context", return_value={
         **direct_context, "harness": True,

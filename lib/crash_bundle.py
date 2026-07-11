@@ -114,6 +114,80 @@ def verified_probe_context(crash_dir: Path) -> dict | None:
     return context
 
 
+def restore_probe_context(sources: Sequence[Path], destination: Path) -> bool:
+    """Restore probe provenance after a verified bundle was copied or renamed.
+
+    Model-direct agents may publish the same testcase and sanitizer evidence in
+    their benchmark result root without copying hidden probe sidecars.  Recover
+    those sidecars only from a still-valid probe bundle and only when both
+    evidence files match exactly.  Any missing or ambiguous evidence fails
+    closed and leaves normal trigger review in place.
+    """
+    destination_sanitizer = destination / "sanitizer.txt"
+    if not destination_sanitizer.is_file():
+        return False
+    try:
+        sanitizer_sha1 = _sha1(destination_sanitizer)
+        contexts = []
+        for source in sources:
+            context = verified_probe_context(source)
+            source_sanitizer = source / "sanitizer.txt"
+            if (
+                context is not None
+                and source_sanitizer.is_file()
+                and _sha1(source_sanitizer) == sanitizer_sha1
+            ):
+                contexts.append(context)
+    except OSError:
+        return False
+    unique = {
+        json.dumps(
+            {key: value for key, value in context.items() if key != "testcase"},
+            sort_keys=True,
+        ): context
+        for context in contexts
+    }
+    if len(unique) != 1:
+        return False
+    context = next(iter(unique.values()))
+    try:
+        testcase_sha1 = context["testcase_sha1"]
+        excluded = {
+            "sanitizer.txt", "report.md", "REPORT.md", "reproduce.sh", "reproducer.sh",
+        }
+        testcases = [
+            path for path in destination.iterdir()
+            if path.is_file() and not path.name.startswith(".")
+            and path.name not in excluded and _sha1(path) == testcase_sha1
+        ]
+    except (KeyError, OSError):
+        return False
+    if len(testcases) != 1:
+        return False
+
+    restored = dict(context)
+    restored["testcase"] = testcases[0].name
+    identity = str(restored.get("identity") or "")
+    if not identity:
+        return False
+    identity_tmp = destination / ".probe-identity.tmp"
+    context_tmp = destination / ".probe-context.json.tmp"
+    try:
+        identity_tmp.write_text(identity + "\n", encoding="utf-8")
+        context_tmp.write_text(json.dumps(restored, sort_keys=True) + "\n", encoding="utf-8")
+        identity_tmp.replace(destination / ".probe-identity")
+        context_tmp.replace(destination / ".probe-context.json")
+    except OSError:
+        identity_tmp.unlink(missing_ok=True)
+        context_tmp.unlink(missing_ok=True)
+        return False
+    if verified_probe_context(destination) is not None:
+        return True
+    (destination / ".probe-identity").unlink(missing_ok=True)
+    (destination / ".probe-context.json").unlink(missing_ok=True)
+    return False
+
+
 def _identity(testcase: Path, sanitizer: str, mode: str, harness: Path | None, args: Sequence[str]) -> str:
     argument_data = f"argc={len(args)}\n" + "".join(f"{len(arg)}:{arg}\n" for arg in args)
     argument_hash = hashlib.sha1(argument_data.encode()).hexdigest()

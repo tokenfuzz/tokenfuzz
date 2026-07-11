@@ -26,6 +26,7 @@ import audit_helpers
 import benchmark as metrics
 import benchmark_model_direct_render
 import build_preflight
+import crash_bundle
 import llm_invoke
 import process_tree
 import target_config
@@ -183,6 +184,13 @@ def triage_cell_crashes(
     deadline: float | None = None,
 ) -> dict[str, int]:
     """Apply the audit crash gate to a finished benchmark cell."""
+    nested_crashes = results / "session" / "results" / "crashes"
+    if nested_crashes.is_dir():
+        sources = [path for path in nested_crashes.iterdir() if path.is_dir()]
+        for destination in (results / "crashes").iterdir():
+            if not destination.is_dir() or crash_bundle.verified_probe_context(destination) is not None:
+                continue
+            crash_bundle.restore_probe_context(sources, destination)
     config = benchmark_target_config(results, target, target_slug)
     return triage.triage_crash_dirs(
         results, target, target_slug, config.attacker_controls,
