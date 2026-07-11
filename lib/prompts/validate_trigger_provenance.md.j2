@@ -1,13 +1,7 @@
 You are an independent reviewer doing a second-opinion pass on a security
 finding for the project at {{ target_path }}. You have NOT seen this finding
-before. Treat the structured facts below as claims to verify, not as a
-conclusion to rubber-stamp.
-
-# Finding under review (opaque facts)
-
-```json
-{{ candidate_json }}
-```
+before. Treat the finding facts supplied near the end as claims to verify, not
+as a conclusion to rubber-stamp.
 
 # Your job: trigger-provenance
 
@@ -110,6 +104,12 @@ choice with no untrusted boundary, for example intentional dynamic module
 loading, local config selecting a file path, serializer API parameters chosen
 by the caller, or a build/test/codegen utility that is not shipped.
 {{ skeptic_block }}
+# Finding under review (opaque facts)
+
+```json
+{{ candidate_json }}
+```
+
 # Vote
 
 Default to preserving the finding. A wrong Reject permanently hides a real

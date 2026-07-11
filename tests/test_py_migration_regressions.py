@@ -249,6 +249,7 @@ with tempfile.TemporaryDirectory(
     def _record_gate(
         _directory, report_path, _target_root, _deadline=None, _usage_index=None,
         _target_root_is_product=False,
+        _attacker_controls=None,
     ):
         reviewed_paths.append(report_path)
         return False
@@ -511,6 +512,43 @@ with tempfile.TemporaryDirectory(
         "configured benchmark target root is the product boundary" in product_prompt
         and "Clause\n(d) still applies" in product_prompt,
         "product-root scope preserves non-shipping review below the root",
+    )
+    second_product_prompt = validator["render_validator_prompt"](
+        validator_args, {"report": "different candidate"}
+    )
+    product_prefix = product_prompt.split("# Finding under review", 1)[0]
+    second_prefix = second_product_prompt.split("# Finding under review", 1)[0]
+    check(
+        product_prefix == second_prefix and len(product_prefix) > 4000,
+        "trigger validators share a long invariant prefix before candidate-specific facts",
+    )
+    finding_args = validator["parse_args"]([
+        "--finding", str(report_path), "--target-path", str(root),
+        "--backend", "codex", "--gate", "finding",
+    ])
+    finding_prompt_a = validator["render_validator_prompt"](finding_args, {"report": "A"})
+    finding_prompt_b = validator["render_validator_prompt"](finding_args, {"report": "B"})
+    check(
+        finding_prompt_a.split("# Finding under review", 1)[0]
+        == finding_prompt_b.split("# Finding under review", 1)[0],
+        "source validators place changing facts after their cacheable preamble",
+    )
+    validator_output = root / "validator-output.json"
+    with mock.patch.object(
+        validator["llm_invoke"], "run_agent_prompt", return_value=0,
+    ) as validator_launch, mock.patch.object(
+        validator["llm_invoke"], "extract_text",
+        return_value='{"vote":"Uncertain","rationale":"open","trigger_path":"","disproof":"","surface_applies":"yes"}',
+    ):
+        validator_rc = validator["main"]([
+            "--finding", str(report_path), "--target-path", str(root),
+            "--backend", "codex", "--gate", "trigger",
+            "--output", str(validator_output),
+        ])
+    check(
+        validator_rc == 2
+        and validator_launch.call_args.kwargs.get("cwd") == root / ".validator-cwd",
+        "validator launches reuse a stable isolated cwd",
     )
     finding_root = root / "finding-trigger"
     finding = finding_root / "findings" / "FIND-001"

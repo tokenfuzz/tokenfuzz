@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -25,10 +26,128 @@ def _sha1(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _binary_identity(binary: str | os.PathLike[str] | None) -> dict:
+    """Cheap build identity for a probe binary; empty when it cannot be proven."""
+    if not binary:
+        return {}
+    try:
+        path = Path(binary).resolve(strict=True)
+        before = path.stat()
+        digest = _sha1(path)
+        after = path.stat()
+    except OSError:
+        return {}
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        return {}
+    return {
+        "path": str(path),
+        "size": after.st_size,
+        "mtime_ns": after.st_mtime_ns,
+        "sha1": digest,
+    }
+
+
+def _probe_context_path(crash_dir: Path) -> Path | None:
+    for path in (
+        crash_dir / ".probe-context.json",
+        crash_dir / ".audit" / ".probe-context.json",
+    ):
+        if path.is_file():
+            return path
+    return None
+
+
+def verified_probe_context(crash_dir: Path) -> dict | None:
+    """Return probe-authored context only while its testcase and build still match."""
+    path = _probe_context_path(Path(crash_dir))
+    if path is None:
+        return None
+    try:
+        context = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(context, dict) or context.get("version") != 1:
+        return None
+    testcase_name = context.get("testcase")
+    if not isinstance(testcase_name, str) or not testcase_name:
+        return None
+    testcase = next(
+        (
+            root / testcase_name
+            for root in (crash_dir, crash_dir / ".audit")
+            if (root / testcase_name).is_file()
+        ),
+        None,
+    )
+    if testcase is None:
+        return None
+    try:
+        if _sha1(testcase) != context.get("testcase_sha1"):
+            return None
+    except OSError:
+        return None
+    recorded_binary = context.get("binary")
+    if not isinstance(recorded_binary, dict) or not recorded_binary:
+        return None
+    current_binary = _binary_identity(recorded_binary.get("path"))
+    if current_binary != recorded_binary:
+        return None
+    identity = str(context.get("identity") or "")
+    if not identity:
+        return None
+    identity_path = next(
+        (
+            candidate
+            for candidate in (
+                crash_dir / ".probe-identity",
+                crash_dir / ".audit" / ".probe-identity",
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    try:
+        if identity_path is None or identity_path.read_text(encoding="utf-8").strip() != identity:
+            return None
+    except OSError:
+        return None
+    return context
+
+
 def _identity(testcase: Path, sanitizer: str, mode: str, harness: Path | None, args: Sequence[str]) -> str:
     argument_data = f"argc={len(args)}\n" + "".join(f"{len(arg)}:{arg}\n" for arg in args)
     argument_hash = hashlib.sha1(argument_data.encode()).hexdigest()
     return ":".join((_sha1(testcase), sanitizer, mode, _sha1(harness) if harness else "", argument_hash))
+
+
+def _write_probe_context(
+    destination: Path,
+    *,
+    identity: str,
+    testcase: Path,
+    sanitizer: str,
+    mode: str,
+    harness: Path | None,
+    args: Sequence[str],
+    binary: str | os.PathLike[str] | None,
+) -> None:
+    (destination / ".probe-context.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "identity": identity,
+                "testcase": testcase.name,
+                "testcase_sha1": _sha1(testcase),
+                "sanitizer": sanitizer,
+                "mode": mode,
+                "harness": bool(harness),
+                "args": list(args),
+                "binary": _binary_identity(binary),
+            },
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
 
 
 def materialize(
@@ -45,6 +164,7 @@ def materialize(
     hypothesis: str = "",
     card: str = "",
     strategy: str = "",
+    binary: str | os.PathLike[str] | None = None,
 ) -> tuple[str, str]:
     testcase_path = Path(testcase)
     sanitizer_path = Path(sanitizer_output)
@@ -64,6 +184,11 @@ def materialize(
         for line in index_lines:
             key, separator, crash_id = line.partition("\t")
             if separator and key == identity and (crashes / crash_id).is_dir():
+                _write_probe_context(
+                    crashes / crash_id, identity=identity, testcase=testcase_path,
+                    sanitizer=sanitizer, mode=mode, harness=harness_path,
+                    args=args, binary=binary,
+                )
                 return "DUP", crash_id
     maximum = 0
     pattern = re.compile(rf"^CRASH-([0-9]+)-{re.escape(str(agent))}$")
@@ -74,6 +199,11 @@ def materialize(
             for identity_path in (path / ".probe-identity", path / ".audit" / ".probe-identity"):
                 try:
                     if identity_path.read_text(encoding="utf-8").strip() == identity:
+                        _write_probe_context(
+                            path, identity=identity, testcase=testcase_path,
+                            sanitizer=sanitizer, mode=mode, harness=harness_path,
+                            args=args, binary=binary,
+                        )
                         return "DUP", path.name
                 except OSError:
                     pass
@@ -82,6 +212,11 @@ def materialize(
     destination.mkdir()
     try:
         (destination / ".probe-identity").write_text(identity + "\n", encoding="utf-8")
+        _write_probe_context(
+            destination, identity=identity, testcase=testcase_path,
+            sanitizer=sanitizer, mode=mode, harness=harness_path, args=args,
+            binary=binary,
+        )
         shutil.copy2(testcase_path, destination / testcase_path.name)
         shutil.copy2(sanitizer_path, destination / "sanitizer.txt")
         if harness_path:

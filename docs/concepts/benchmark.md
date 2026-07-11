@@ -141,6 +141,20 @@ demo code below that root remains subject to the same exclusion review. The
 validator also receives the target's configured `attacker_controls` from
 `target.toml`.
 
+Crash trigger review is skipped only when probe-authored evidence proves all
+of the following: `bin/probe --confirm` reproduced the sanitizer crash 5/5,
+the testcase and sanitizer binary still match their recorded identities, the
+ordinary target binary was invoked without a custom harness or extra argv, the
+first source-bearing fault frame belongs to the target tree, and the input
+class is included in `attacker_controls`. Missing or stale evidence falls back
+to the normal two-vote trigger review. Severity, clustering, bundling, and all
+finding validation remain unchanged.
+
+Source validators put their invariant instructions and target context before
+candidate-specific facts. Repeated calls can therefore reuse the provider's
+prompt-prefix cache without shortening the source-reading budget or changing
+the vote contract.
+
 Harness benchmark cells disable early-worker refills. This prevents the
 configured agent count from silently expanding provider demand; standalone
 `bin/audit` runs retain refills unless passed `--no-refill-workers`.

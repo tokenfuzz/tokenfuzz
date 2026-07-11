@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,6 +61,22 @@ def output_path(finding: Path, configured: str | None) -> Path:
     return finding.parent / f"validator-vote-{index}.json"
 
 
+def validator_cwd(finding: Path, target: Path) -> Path:
+    """Return one stable, isolated source view shared by this results tree."""
+    results = next((parent for parent in finding.parents if parent.name == "results"), None)
+    cwd = (results or finding.parent) / ".validator-cwd"
+    cwd.mkdir(parents=True, exist_ok=True)
+    for entry in target.iterdir():
+        link = cwd / entry.name
+        try:
+            link.symlink_to(entry, target_is_directory=entry.is_dir())
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            print(f"WARN: validator source link unavailable ({entry}): {exc}", file=sys.stderr)
+    return cwd
+
+
 def render_validator_prompt(args, facts: dict) -> str:
     skeptic = prompt_render.render_template("validate_tiebreak.md.j2", {}) if args.tiebreak else ""
     template = "validate_trigger_provenance.md.j2" if args.gate == "trigger" else "validate_finding.md.j2"
@@ -111,17 +126,13 @@ def main(argv=None) -> int:
     destination = output_path(finding, args.output)
     prompt = render_validator_prompt(args, candidate(finding))
     raw = destination.with_suffix(".raw.log")
-    with tempfile.TemporaryDirectory(prefix="validator-cwd-") as cwd_name:
-        cwd = Path(cwd_name)
-        for entry in target.iterdir():
-            try:
-                (cwd / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
-            except OSError:
-                pass
-        status = llm_invoke.run_agent_prompt(
-            args.backend, prompt, args.timeout, raw, model=args.model,
-            max_turns=0, add_dirs=f"{ROOT},{target}", cwd=cwd,
-        )
+    # A stable isolated cwd keeps the CLI's system context identical across
+    # validators, allowing the invariant prompt prefix to hit provider caches
+    # without letting incidental writes land in the target checkout.
+    status = llm_invoke.run_agent_prompt(
+        args.backend, prompt, args.timeout, raw, model=args.model,
+        max_turns=0, add_dirs=f"{ROOT},{target}", cwd=validator_cwd(finding, target),
+    )
     llm_usage.append_usage_event(
         args.usage_index, backend=args.backend, model=args.model,
         kind=f"decision:{args.gate}-validator", prompt_text=prompt, raw_path=raw,

@@ -392,6 +392,101 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "bundle-local identity preserves dedup when the optional index was not written",
     )
 
+    direct_target = root / "direct-target"
+    (direct_target / "src").mkdir(parents=True)
+    (direct_target / "src" / "app.c").write_text("int app_parse(void) { return 0; }\n")
+    direct_binary = direct_target / "build-asan" / "app"
+    direct_binary.parent.mkdir()
+    direct_binary.write_bytes(b"sanitizer build\n")
+    direct_binary.chmod(0o755)
+    direct_case = root / "direct-input.bin"
+    direct_case.write_bytes(b"input")
+    direct_san = root / "direct.asan.txt"
+    direct_san.write_text(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\n"
+        "    #0 0x1 in app_parse src/app.c:1\n"
+        "CRASH_RATE: 5/5\n",
+        encoding="utf-8",
+    )
+    direct_results = root / "direct-results"
+    _, direct_id = crash_bundle.materialize(
+        direct_results, "1", direct_case, direct_san, "asan", "generic",
+        binary=direct_binary,
+    )
+    direct_crash = direct_results / "crashes" / direct_id
+    direct_context = crash_bundle.verified_probe_context(direct_crash)
+    check(direct_context is not None, "probe context verifies testcase and sanitizer build identity")
+    check(
+        triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["bytes"]),
+        "5/5 standard target byte-input crash bypasses only trigger review",
+    )
+    check(
+        (direct_crash / ".trigger-gate-bypass.json").is_file(),
+        "trigger bypass leaves machine-readable provenance",
+    )
+    with mock.patch.object(crash_bundle, "verified_probe_context", return_value={
+        **direct_context, "harness": True,
+    }):
+        check(
+            not triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["bytes"]),
+            "custom harness evidence cannot bypass trigger review",
+        )
+    with mock.patch.object(crash_bundle, "verified_probe_context", return_value={
+        **direct_context, "args": ["--nonstandard"],
+    }):
+        check(
+            not triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["bytes"]),
+            "non-standard argv cannot bypass trigger review",
+        )
+    check(
+        not triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["call-sequence"]),
+        "out-of-model input cannot bypass trigger review",
+    )
+    filed_sanitizer = direct_crash / "sanitizer.txt"
+    filed_sanitizer.write_text(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\n"
+        "    #0 0x1 in app_parse src/app.c:1\n"
+        "CRASH_RATE: 4/5\n",
+        encoding="utf-8",
+    )
+    check(
+        not triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["bytes"]),
+        "non-deterministic crash cannot bypass trigger review",
+    )
+    filed_sanitizer.write_text(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\n"
+        "    #0 0x1 in wrapper /outside/wrapper.c:1\n"
+        "CRASH_RATE: 5/5\n",
+        encoding="utf-8",
+    )
+    check(
+        not triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["bytes"]),
+        "fault frame outside the target cannot bypass trigger review",
+    )
+    filed_sanitizer.write_text(direct_san.read_text(encoding="utf-8"), encoding="utf-8")
+    with mock.patch.object(triage, "_direct_probe_trigger_bypass", return_value=True), \
+         mock.patch.object(triage, "_trigger_vote") as trigger_vote:
+        check(
+            triage._crash_trigger_gate(
+                direct_crash, direct_crash / "report.md", direct_target,
+                attacker_controls=["bytes"],
+            ) is False and trigger_vote.call_count == 0,
+            "direct proof bypasses only the LLM trigger votes",
+        )
+    filed_testcase = direct_crash / direct_case.name
+    filed_testcase.write_bytes(b"changed input")
+    check(
+        crash_bundle.verified_probe_context(direct_crash) is None,
+        "changed testcase invalidates direct-probe evidence",
+    )
+    filed_testcase.write_bytes(direct_case.read_bytes())
+    direct_binary.write_bytes(b"changed sanitizer build\n")
+    check(
+        crash_bundle.verified_probe_context(direct_crash) is None
+        and not triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["bytes"]),
+        "changed sanitizer build invalidates direct-probe bypass",
+    )
+
     artifact_target = root / "artifact-target"
     old = artifact_target / "findings" / "FIND-OLD"
     old.mkdir(parents=True)

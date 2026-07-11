@@ -642,6 +642,7 @@ class Probe:
             print(f"[probe] ROUTED: feature='{feature}' canonical='{binary}' -> '{candidate}' verdict={routed}")
             for key in keys:
                 build_routes.record_route(Path(self.config.results_dir), key=key, binary=candidate, feature=feature, canonical_binary=binary)
+            self.environment["ASAN_GENERIC_BIN"] = candidate
             return completed.returncode, routed
         print(f"[probe] ROUTE_MISS: feature='{feature}' canonical='{binary}' - no sibling build exercised this feature")
         return returncode, current
@@ -721,6 +722,12 @@ class Probe:
                 self.sanitizer, self.mode, harness=self.harness_source, args=self.args.args,
                 target=self.header["target"], hypothesis=self.header["hypothesis"],
                 card=self.card, strategy=strategy,
+                binary=self.environment.get(
+                    f"{self.sanitizer.upper()}_GENERIC_BIN"
+                    if self.sanitizer in {"asan", "ubsan", "msan", "tsan"}
+                    else "ASAN_GENERIC_BIN",
+                    "",
+                ),
             )
         except OSError as exc:
             print(f"[probe] WARNING: crash confirmed but bundle could not be created: {exc}", file=sys.stderr)

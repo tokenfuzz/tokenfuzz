@@ -17,6 +17,7 @@ from pathlib import Path
 
 import benchmark
 import crash_artifacts
+import crash_bundle
 import llm_decide
 import llm_usage
 import stack_frames
@@ -771,6 +772,97 @@ def _harness_rooted(crash_dir: Path) -> bool:
         return False
 
 
+_SOURCE_FRAME_RE = re.compile(r"^(?P<path>.+\.\w+):\d+(?::\d+)?$")
+
+
+def _fault_frame_is_in_target(sanitizer_text: str, target_root: Path) -> bool:
+    """Prove the first source-bearing fault frame belongs to the target tree."""
+    try:
+        root = target_root.resolve(strict=True)
+    except OSError:
+        return False
+    for line in sanitizer_text.splitlines():
+        frame = stack_frames.parse_asan_frame(line)
+        if frame is None:
+            continue
+        match = _SOURCE_FRAME_RE.match(frame.location or "")
+        if not match:
+            continue
+        source = Path(match.group("path"))
+        if source.is_absolute():
+            try:
+                return source.resolve(strict=False) == root or root in source.resolve(strict=False).parents
+            except OSError:
+                return False
+        if ".." in source.parts:
+            return False
+        direct = root / source
+        if direct.is_file():
+            return True
+        if len(source.parts) != 1:
+            return False
+        try:
+            matches = [path for path in root.rglob(source.name) if path.is_file()]
+        except OSError:
+            return False
+        return len(matches) == 1
+    return False
+
+
+def _direct_probe_trigger_bypass(
+    crash_dir: Path,
+    target_root: Path,
+    attacker_controls: list[str],
+) -> bool:
+    """Prove a confirmed crash came from the target's ordinary byte-input path.
+
+    Every condition is machine-authored and fail-closed. Missing legacy evidence
+    simply keeps the existing LLM trigger review; it never rejects a crash.
+    """
+    bypass = crash_dir / ".trigger-gate-bypass.json"
+    bypass.unlink(missing_ok=True)
+    controls = {str(value).strip().lower() for value in attacker_controls}
+    context = crash_bundle.verified_probe_context(crash_dir)
+    if (
+        "bytes" not in controls
+        or context is None
+        or context.get("mode") != "generic"
+        or context.get("sanitizer") == "runner"
+        or context.get("harness") is not False
+        or context.get("args") != []
+    ):
+        return False
+    binary = (context.get("binary") or {}).get("path")
+    try:
+        binary_path = Path(binary).resolve(strict=True)
+        root = target_root.resolve(strict=True)
+    except (OSError, TypeError):
+        return False
+    if binary_path != root and root not in binary_path.parents:
+        return False
+    if not os.access(binary_path, os.X_OK):
+        return False
+    sanitizer = _sanitizer_file(crash_dir)
+    if sanitizer is None:
+        return False
+    sanitizer_text = _read(sanitizer)
+    rates = re.findall(r"^CRASH_RATE:\s*(\d+)\s*/\s*(\d+)\s*$", sanitizer_text, re.MULTILINE)
+    if not rates or rates[-1] != ("5", "5"):
+        return False
+    if not _fault_frame_is_in_target(sanitizer_text, root):
+        return False
+    _write_atomic_json(
+        bypass,
+        {
+            "decision_version": "direct-probe-v1",
+            "bypass": True,
+            "reason": "bin/probe --confirm 5/5 through standard target byte-input invocation",
+            "binary": str(binary_path),
+        },
+    )
+    return True
+
+
 def _finding_trigger_rejected(
     finding_dir: Path, report: Path, deadline: float | None = None,
     usage_index: str | os.PathLike[str] | None = None,
@@ -855,6 +947,7 @@ def _crash_trigger_gate(
     deadline: float | None = None,
     usage_index: str | os.PathLike[str] | None = None,
     target_root_is_product: bool = False,
+    attacker_controls: list[str] | None = None,
 ) -> bool:
     """Recall-safe trigger-provenance gate for a kept crash. A `bytes`-labelled
     trigger passes evaluate_crash_verdict's set-difference even when those bytes
@@ -865,6 +958,10 @@ def _crash_trigger_gate(
     rejection — a single or disagreeing vote keeps the crash. Default on; opt out
     with CRASH_TRIGGER_GATE=0. Returns True to reject."""
     if os.environ.get("CRASH_TRIGGER_GATE", "1") == "0":
+        return False
+    if _direct_probe_trigger_bypass(
+        crash_dir, target_root, attacker_controls or ["bytes"],
+    ):
         return False
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     model = os.environ.get("MODEL", "")
@@ -983,7 +1080,7 @@ def triage_one_crash(
         _clear_contract_concern(report)
     if _crash_trigger_gate(
         crash_dir, report, Path(target_root), deadline, usage_index,
-        target_root_is_product,
+        target_root_is_product, attacker_controls,
     ):
         _reject(
             crash_dir, rejected_root,
