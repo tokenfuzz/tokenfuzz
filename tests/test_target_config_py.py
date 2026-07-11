@@ -246,6 +246,34 @@ empty.mkdir()
 assert_eq(None, tc.find_session_dir(empty),
           "find_session_dir returns None when no output/<slug> ancestor")
 
+# Regression: the upward walk probes sibling trees under shared ancestors it
+# does not own (e.g. snapd's mode-0700 /tmp/snap-private-tmp on CI runners). A
+# permission-denied sibling must fall open, not crash the scan. Python <3.14's
+# is_file() propagates PermissionError, so this reproduced only off 3.14.
+perm_root = TEST_TMPDIR / "permwalk"
+start = perm_root / "start"
+start.mkdir(parents=True)
+denied = perm_root / "denied" / "results"
+denied.mkdir(parents=True)
+os.chmod(perm_root / "denied", 0o000)
+try:
+    if os.access(denied, os.R_OK):  # running as root bypasses the mode; skip
+        passed("find_session_dir falls open on a permission-denied sibling (skipped: root)")
+    else:
+        name = "find_session_dir falls open on a permission-denied sibling"
+        res = None
+        try:
+            res = tc.find_session_dir(start)
+            ok = res is None
+        except OSError:
+            ok = False
+        if ok:
+            passed(name)
+        else:
+            failed(name, f"raised or returned {res!r}")
+finally:
+    os.chmod(perm_root / "denied", 0o700)
+
 
 # ─── 7. read_session_env allowlists keys ────────────────────────────
 

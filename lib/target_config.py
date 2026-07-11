@@ -384,6 +384,28 @@ def parse_toml(path: str | os.PathLike) -> dict:
 _OUTPUT_ARTIFACT_DIRS = {"benchmark"}
 
 
+def _is_file(p: Path) -> bool:
+    """is_file() that falls open on OSError.
+
+    Session discovery walks up to shared ancestors like /tmp and probes
+    sibling trees it does not own (e.g. snapd's mode-0700 /tmp/snap-private-tmp).
+    A permission-denied sibling must read as "not a session", not crash the
+    walk. Python <3.14's is_file() propagates PermissionError.
+    """
+    try:
+        return p.is_file()
+    except OSError:
+        return False
+
+
+def _is_dir(p: Path) -> bool:
+    """is_dir() that falls open on OSError; see _is_file."""
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
 def iter_target_roots(output_root: str | os.PathLike) -> Iterator[Path]:
     """Yield the canonical target-root dirs under output/, in sorted order.
 
@@ -402,14 +424,14 @@ def iter_target_roots(output_root: str | os.PathLike) -> Iterator[Path]:
             # the source tree (which contains its own output/), so following it
             # would recurse without bound. is_dir() alone follows the link.
             entries = sorted(
-                p for p in d.iterdir() if p.is_dir() and not p.is_symlink()
+                p for p in d.iterdir() if _is_dir(p) and not p.is_symlink()
             )
         except OSError:
             return
         for e in entries:
             if e.name == "output" or (d == root and e.name in _OUTPUT_ARTIFACT_DIRS):
                 continue
-            if (e / "target.toml").is_file():
+            if _is_file(e / "target.toml"):
                 yield e                # target root — do not descend
             else:
                 yield from walk(e)     # container dir — recurse
@@ -436,7 +458,7 @@ def find_session_dir(start: str | os.PathLike) -> Optional[Path]:
         return None
     def scan_output_tree(base: Path) -> Optional[Path]:
         out_dir = base / "output"
-        if not out_dir.is_dir():
+        if not _is_dir(out_dir):
             return None
         # Return the first real target root that carries a session.
         for target in iter_target_roots(out_dir):
@@ -446,7 +468,7 @@ def find_session_dir(start: str | os.PathLike) -> Optional[Path]:
         return None
 
     while True:
-        if (cur / ".session-env").is_file():
+        if _is_file(cur / ".session-env"):
             return cur
         # A caller may start at output/<slug> rather than inside its results
         # tree. Resolve that target before scanning a broader ancestor whose
@@ -478,12 +500,16 @@ def find_slug_session_dir(slug_dir: str | os.PathLike) -> Optional[Path]:
     lexicographically-first is returned so the choice is deterministic.
     """
     d = Path(slug_dir)
-    if d.is_dir():
-        for backend in sorted(d.iterdir()):
-            if not backend.is_dir():
+    if _is_dir(d):
+        try:
+            backends = sorted(d.iterdir())
+        except OSError:
+            return None
+        for backend in backends:
+            if not _is_dir(backend):
                 continue
             cand = backend / "results"
-            if (cand / ".session-env").is_file():
+            if _is_file(cand / ".session-env"):
                 return cand
     return None
 

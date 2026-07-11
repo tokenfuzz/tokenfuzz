@@ -317,18 +317,25 @@ assert_file_not_exists "$sec18/libxml2/codex/logs/index.log" \
 
 # Section 19: an unreadable target must fail loud instead of looking empty.
 # Execute permission keeps the target path resolvable while lack of read
-# permission prevents enumerating its direct children.
+# permission prevents enumerating its direct children. Root (e.g. the audit
+# container shell) bypasses the read bit, so the unreadable precondition cannot
+# be established there — skip rather than assert a failure that cannot occur.
 sec19="$TEST_TMPDIR/out19"
 mkdir -p "$sec19/sample/generated"
 echo "[meta]" > "$sec19/sample/target.toml"
 echo "state" > "$sec19/sample/generated/value"
 chmod 311 "$sec19/sample"
-unreadable_rc=0
-unreadable_out=$("$CLEANUP" --output-root "$sec19" --target sample 2>&1) || unreadable_rc=$?
-chmod 700 "$sec19/sample"
-assert_eq 1 "$unreadable_rc" "unreadable target: exits as partial failure"
-assert_match 'failed to inspect' "$unreadable_out" "unreadable target: reports inspection failure"
-assert_file_exists "$sec19/sample/generated/value" "unreadable target: generated state is not misreported as removed"
+if ls "$sec19/sample" >/dev/null 2>&1; then
+    chmod 700 "$sec19/sample"
+    pass "unreadable target: skipped (reader bypasses the read bit, e.g. root)"
+else
+    unreadable_rc=0
+    unreadable_out=$("$CLEANUP" --output-root "$sec19" --target sample 2>&1) || unreadable_rc=$?
+    chmod 700 "$sec19/sample"
+    assert_eq 1 "$unreadable_rc" "unreadable target: exits as partial failure"
+    assert_match 'failed to inspect' "$unreadable_out" "unreadable target: reports inspection failure"
+    assert_file_exists "$sec19/sample/generated/value" "unreadable target: generated state is not misreported as removed"
+fi
 
 teardown_test_env
 summary
