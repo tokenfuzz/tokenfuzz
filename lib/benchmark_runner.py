@@ -347,7 +347,7 @@ def write_cell(
     _write_json(path, payload)
 
 
-def dryrun_cell(cell_dir: Path, condition: str, replicate: int) -> Path:
+def dryrun_cell(cell_dir: Path, condition: str, replicate: int, backend: str) -> Path:
     results = cell_dir / "results"
     good = results / "crashes" / "CRASH-001"
     decoy = results / "crashes" / "CRASH-002"
@@ -364,7 +364,12 @@ def dryrun_cell(cell_dir: Path, condition: str, replicate: int) -> Path:
         )
     (decoy / "notes.txt").write_text("this directory has no sanitizer output\n", encoding="utf-8")
     (results / "logs" / "index.jsonl").write_text(
-        json.dumps({"tokens": {"input": 1000, "cached_input": 900, "output": replicate * 100}, "probe": {"asan_invocations": 3}}) + "\n",
+        json.dumps({
+            "backend": backend,
+            "resolved_effort": llm_invoke.default_effort(backend),
+            "tokens": {"input": 1000, "cached_input": 900, "output": replicate * 100},
+            "probe": {"asan_invocations": 3},
+        }) + "\n",
         encoding="utf-8",
     )
     return results
@@ -496,7 +501,14 @@ def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wal
         ],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
     )
-    (cell_dir / "logs" / "index.jsonl").write_text(usage.stdout or "{}\n", encoding="utf-8")
+    try:
+        usage_event = json.loads(usage.stdout or "{}")
+    except ValueError:
+        usage_event = {}
+    usage_event["resolved_effort"] = llm_invoke.default_effort(backend)
+    (cell_dir / "logs" / "index.jsonl").write_text(
+        json.dumps(usage_event, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
     issue = _record_provider_quality(cell_dir, cell_dir, rc)
     if issue == "capacity_limited" and (cell_dir / ".backend-unavailable").is_file():
         return 0
@@ -884,7 +896,8 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
     if not args.regenerate:
         run_data = {
             "runid": run_id, "target": args.target, "backend": args.backend,
-            "model": model, "replicates": args.replicates,
+            "model": model, "resolved_effort": llm_invoke.default_effort(args.backend),
+            "replicates": args.replicates,
             "budget_wall": args.budget_wall, "harness_agents": args.agents,
             "finalize_wall": getattr(args, "finalize_wall", 3600),
             "model_direct_agents": 1, "conditions": conditions,
@@ -938,7 +951,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 start = time.monotonic()
                 status = "done"
                 if args.dry_run:
-                    results = dryrun_cell(cell_dir, condition, replicate)
+                    results = dryrun_cell(cell_dir, condition, replicate, args.backend)
                     rc = 0
                 elif condition == "model-direct":
                     log(f"Cell {name} live log: {(cell_dir / 'backend.raw.log').resolve()}")

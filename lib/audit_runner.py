@@ -428,7 +428,8 @@ def validate_model(runtime: Runtime) -> None:
 def _write_run_config(path, total, browser, shell, backend, model, slug) -> None:
     payload = {
         "num_agents": total, "browser_agents": browser, "shell_agents": shell,
-        "backend": backend, "model": model, "target_slug": slug,
+        "backend": backend, "model": model,
+        "resolved_effort": llm_invoke.default_effort(backend), "target_slug": slug,
         "agent_count_overridden": bool(os.environ.get("NUM_AGENTS")),
     }
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -1066,6 +1067,7 @@ def run_agent(
     event = {
         "timestamp": datetime.now(timezone.utc).isoformat(), "iteration": iteration,
         "agent": agent, "role": role, "backend": runtime.backend, "model": runtime.model,
+        "resolved_effort": llm_invoke.default_effort(runtime.backend),
         "returncode": rc, "provider_issue": issue, "prompt_chars": len(rendered),
         "raw_log": str(raw_path), "text_log": str(text_path), **usage,
     }

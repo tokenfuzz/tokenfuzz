@@ -151,6 +151,11 @@ output/benchmark/
       pool/
 ```
 
+`run.json` records both the selected model and `resolved_effort`. Every
+`logs/index.jsonl` usage event repeats `resolved_effort`, so archived runs show
+the backend-native reasoning setting that was actually passed to the CLI even
+when the operator's global backend settings differ.
+
 The root `benchmark-result.html` is the cross-backend comparison. It is
 refreshed as cells complete and again at the end of each run.
 

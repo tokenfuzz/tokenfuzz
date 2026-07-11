@@ -204,6 +204,8 @@ def _parse_waste(text: str) -> dict:
 
 
 def _cmd_write_run_config(args: argparse.Namespace) -> int:
+    import llm_invoke
+
     path = Path(args.path)
     payload = {
         "num_agents": _int_or_zero(args.num_agents),
@@ -211,6 +213,7 @@ def _cmd_write_run_config(args: argparse.Namespace) -> int:
         "shell_agents": _int_or_zero(args.shell_agents),
         "backend": args.backend,
         "model": args.model,
+        "resolved_effort": llm_invoke.default_effort(args.backend),
         "target_slug": args.target_slug,
         "agent_count_overridden": _int_or_zero(args.agent_count_overridden) == 1,
     }

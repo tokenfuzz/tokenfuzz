@@ -69,6 +69,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import llm_invoke
+
 _INPUT_KEYS = ("input_tokens", "prompt_tokens", "input")
 # gemini-cli's result.stats names its cache-read counter `cached` (no
 # `_input` / `_tokens` suffix); without this alias the 55M+ tokens it bills
@@ -404,6 +406,7 @@ def append_usage_event(
         "role": kind,
         "backend": backend,
         "model": model,
+        "resolved_effort": llm_invoke.default_effort(backend),
         **usage,
     }
     try:

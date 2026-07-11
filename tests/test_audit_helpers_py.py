@@ -112,6 +112,7 @@ with tempfile.TemporaryDirectory() as td:
             "browser_agents": 0,
             "model": "model-name",
             "num_agents": 3,
+            "resolved_effort": "high",
             "shell_agents": 1,
             "target_slug": "sample/target",
         },

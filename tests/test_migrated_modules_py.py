@@ -23,6 +23,7 @@ import benchmark_runner
 import crash_bundle
 import edges
 import llm_decide
+import llm_invoke
 import prompt
 import sanitizer
 import sanitizer_run
@@ -796,9 +797,11 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "agent and probe share the canonical per-agent evidence journals",
         repr(launch_env),
     )
+    launch_usage_row = json.loads((launch_logs / "index.jsonl").read_text())
     check(
         (launch_logs / ".index.jsonl.lock").is_file()
-        and json.loads((launch_logs / "index.jsonl").read_text())["agent"] == 1,
+        and launch_usage_row["agent"] == 1
+        and launch_usage_row["resolved_effort"] == "high",
         "agent usage writes share the JSONL lock used by concurrent harness writers",
     )
     corpus_testcase = launch_scratch / "coverage.html"
@@ -1122,7 +1125,8 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
             and usage_row["tokens"]["input"] == 100
             and usage_row["tokens"]["output"] > 0
             and usage_row["role"] == "decision:find_quality"
-            and usage_row["backend"] == usage_backend,
+            and usage_row["backend"] == usage_backend
+            and usage_row["resolved_effort"] == llm_invoke.default_effort(usage_backend),
             f"{usage_backend} one-shot decisions append labeled estimated usage",
             repr(usage_row),
         )

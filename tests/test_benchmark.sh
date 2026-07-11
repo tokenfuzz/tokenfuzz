@@ -773,6 +773,14 @@ assert_match '^[0-9a-f]{40}$' "$(jq -r '.tokenfuzz_sha' "$drun_json")" \
   "T9i2: dry-run records the full TokenFuzz repo hash"
 assert_eq "true" "$(jq -r '.skip_recon' "$drun_json")" \
   "T9i2b: --skip-recon is recorded in run metadata"
+assert_eq "high" "$(jq -r '.resolved_effort' "$drun_json")" \
+  "T9i2c: dry-run records the resolved backend effort"
+if find "$(dirname "$drun_json")/cells" -name index.jsonl -type f -exec jq -e \
+    '.resolved_effort == "high"' {} + >/dev/null; then
+  pass "T9i2d: every dry-run ledger event records resolved effort"
+else
+  fail "T9i2d: every dry-run ledger event records resolved effort"
+fi
 assert_file_contains "$fake_git_log" 'safe[.]directory=' \
   "T9i3: benchmark asks git to trust the mounted TokenFuzz checkout"
 assert_file_contains "$dledger" 'Harness agents.*2' \
