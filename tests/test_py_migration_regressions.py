@@ -26,6 +26,7 @@ import benchmark_runner
 import gemini_watchdog
 import llm_invoke
 import process_tree
+import target_config
 import triage
 import verdict
 import vocab_rules
@@ -738,14 +739,36 @@ with tempfile.TemporaryDirectory(
     pf_target.mkdir(parents=True)
     pf_logs = root / "preflight-logs"
     pf_logs.mkdir()
-    pf_runtime = mock.Mock(
-        root=pf_harness, target_root=pf_target, target_slug="sampleproj", logs=pf_logs,
-        index=pf_logs / "index.log",
-        backend="claude", model="",
-        config=mock.Mock(
-            is_browser="0", sanitizers_explicitly_disabled=False,
+    pf_results = root / "preflight-results"
+    pf_raw = pf_logs / ".raw"
+    pf_results.mkdir()
+    pf_raw.mkdir()
+    pf_runtime = audit_runner.Runtime(
+        root=pf_harness,
+        target_root=pf_target,
+        target_slug="sampleproj",
+        output_slug="sampleproj",
+        backend="claude",
+        model="",
+        config=target_config.Config(
+            target_root=str(pf_target),
+            is_browser="0",
+            sanitizers_explicitly_disabled=False,
             sanitizers_enabled=["asan"],
         ),
+        target_rev="HEAD",
+        repo_type="none",
+        results=pf_results,
+        logs=pf_logs,
+        raw=pf_raw,
+        index=pf_logs / "index.log",
+        index_jsonl=pf_logs / "index.jsonl",
+        num_agents=1,
+        browser_agents=0,
+        shell_agents=1,
+        agent_roles=(),
+        fixed_strategy="",
+        decision_timeout=45,
     )
     with mock.patch.object(audit_runner.target_config, "build_freshness", return_value="fresh"), \
          mock.patch.object(audit_runner.build_preflight.subprocess, "run") as pf_run_fresh:
@@ -818,19 +841,32 @@ with tempfile.TemporaryDirectory(
         "preflight never redirects an external target build to the in-tree slug",
     )
     pf_runtime.target_root = pf_target
-    # Browser and sanitizer-disabled targets have no ASan recipe: never probe.
-    for skip_reason, attrs in (("browser", {"is_browser": "1"}),
-                               ("disabled", {"sanitizers_explicitly_disabled": True})):
-        pf_runtime.config.is_browser = "0"
-        pf_runtime.config.sanitizers_explicitly_disabled = False
-        for key, value in attrs.items():
-            setattr(pf_runtime.config, key, value)
-        with mock.patch.object(audit_runner.target_config, "build_freshness") as pf_skip_probe:
-            audit_runner.preflight_build(pf_runtime)
-        check(
-            pf_skip_probe.call_count == 0,
-            f"preflight skips {skip_reason} targets without probing freshness",
+    # Browser targets skip native build probing, then exercise the sanitizer
+    # wrapper canary before agents launch.
+    pf_runtime.config.is_browser = "1"
+    def write_canary(*_args, **_kwargs):
+        (pf_results / ".preflight" / "canary-asan.txt").write_text(
+            "TESTCASE_EXECUTED\n", encoding="utf-8",
         )
+        return mock.Mock(returncode=0)
+    with mock.patch.object(audit_runner.target_config, "build_freshness") as pf_browser_probe, \
+         mock.patch.object(audit_runner.subprocess, "run", side_effect=write_canary) as pf_canary:
+        audit_runner.preflight_build(pf_runtime)
+    check(
+        pf_browser_probe.call_count == 0 and pf_canary.call_count == 1,
+        "browser preflight skips native freshness and runs the sanitizer canary",
+    )
+
+    # Sanitizer-disabled generic targets have no native build recipe or canary.
+    pf_runtime.config.is_browser = "0"
+    pf_runtime.config.sanitizers_explicitly_disabled = True
+    with mock.patch.object(audit_runner.target_config, "build_freshness") as pf_disabled_probe, \
+         mock.patch.object(audit_runner.subprocess, "run") as pf_disabled_run:
+        audit_runner.preflight_build(pf_runtime)
+    check(
+        pf_disabled_probe.call_count == 0 and pf_disabled_run.call_count == 0,
+        "preflight skips sanitizer-disabled targets without probing or running a canary",
+    )
 
     # Pool finalization must persist LLM-derived reach facts into the report:
     # bin/severity intentionally ignores auxiliary sidecars after the Python

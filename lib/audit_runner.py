@@ -1514,7 +1514,7 @@ def preflight_build(runtime: Runtime) -> None:
         runtime.logs, runtime.backend, runtime.model,
         lambda message: index_log(runtime, message),
     )
-    if runtime.is_browser is not True:
+    if runtime.config.is_browser not in ("1", "true", "True"):
         return
     canary_dir = runtime.results / ".preflight"
     canary_dir.mkdir(parents=True, exist_ok=True)
