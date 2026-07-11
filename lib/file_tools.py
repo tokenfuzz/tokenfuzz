@@ -7,10 +7,14 @@ import argparse
 import hashlib
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Iterator, Mapping, Sequence
 
 
 def reverse_lines(path: Path):
@@ -106,6 +110,39 @@ def _spill_output(data: bytes, label: str, env: Mapping[str, str]) -> str:
         return ""
 
 
+def _spill_output_file(path: Path, label: str, env: Mapping[str, str]) -> str:
+    configured = env.get("OUTCAP_SPILL_DIR")
+    if configured:
+        spill_dir = Path(configured)
+    elif env.get("RESULTS_DIR"):
+        spill_dir = Path(env["RESULTS_DIR"]) / "logs" / ".raw" / "outcap"
+    else:
+        spill_dir = Path(tempfile.mkdtemp(prefix="outcap-", dir=env.get("TMPDIR")))
+    try:
+        spill_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        spill_dir.chmod(0o700)
+        digest = hashlib.sha1()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        destination = spill_dir / f"outcap-{label}-{digest.hexdigest()[:12]}.txt"
+        fd, temporary = tempfile.mkstemp(prefix=".outcap-", dir=spill_dir)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as target, path.open("rb") as source:
+                fd = -1
+                shutil.copyfileobj(source, target, 1024 * 1024)
+            os.replace(temporary, destination)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            Path(temporary).unlink(missing_ok=True)
+            raise
+        return str(destination)
+    except OSError:
+        return ""
+
+
 def render_head_tail(
     data: bytes, head_bytes: int, tail_bytes: int, label: str, spill_path: str = ""
 ) -> bytes:
@@ -119,9 +156,17 @@ def render_head_tail(
     if newline >= 0 and newline + 1 < len(tail):
         tail = tail[newline + 1 :]
 
-    elided = max(0, len(data) - len(head) - len(tail))
+    return _render_head_tail_parts(head, tail, len(data), label, spill_path)
+
+
+def _render_head_tail_parts(
+    head: bytes, tail: bytes, total_bytes: int, label: str, spill_path: str,
+) -> bytes:
+    """Render already line-aligned ends with the shared truncation marker."""
+
+    elided = max(0, total_bytes - len(head) - len(tail))
     prefix = (
-        f"\n[output_cap: {label} truncated — {len(data):,} total bytes, "
+        f"\n[output_cap: {label} truncated — {total_bytes:,} total bytes, "
         f"{len(head):,} head + {len(tail):,} tail shown, {elided:,} bytes elided. "
     )
     disable = (
@@ -154,6 +199,69 @@ def cap_output_bytes(
     return render_head_tail(data, head, tail, safe_label, spill_path)
 
 
+def cap_output_file(
+    path: Path, label: str, env: Mapping[str, str] | None = None,
+) -> bytes:
+    """Render a capped file while keeping large producer output off the heap."""
+    environment = os.environ if env is None else env
+    maximum = _non_negative_int(environment, "OUTCAP_MAX_BYTES", 51200)
+    head_bytes = _non_negative_int(environment, "OUTCAP_HEAD_BYTES", 24576)
+    tail_bytes = _non_negative_int(environment, "OUTCAP_TAIL_BYTES", 20480)
+    size = path.stat().st_size
+    if maximum == 0 or size <= maximum:
+        return path.read_bytes()
+    safe_label = re.sub(r"[^A-Za-z0-9._-]", "-", label) or "output"
+    spill_path = _spill_output_file(path, safe_label, environment)
+    with path.open("rb") as source:
+        head = source.read(head_bytes)
+        source.seek(max(0, size - tail_bytes))
+        tail = source.read(tail_bytes)
+    head_newline = head.rfind(b"\n")
+    if head_newline >= 0:
+        head = head[: head_newline + 1]
+    tail_newline = tail.find(b"\n")
+    if tail_newline >= 0 and tail_newline + 1 < len(tail):
+        tail = tail[tail_newline + 1 :]
+    return _render_head_tail_parts(head, tail, size, safe_label, spill_path)
+
+
+@dataclass(frozen=True)
+class CapturedCommand:
+    returncode: int
+    stdout: Path
+    stderr: Path | None
+
+
+@contextmanager
+def capture_command(
+    command: Sequence[str], *, merge_stderr: bool = False,
+    capture_stderr: bool = True, **kwargs,
+) -> Iterator[CapturedCommand]:
+    """Run a command into temporary files and remove them after consumption."""
+    if merge_stderr and not capture_stderr:
+        raise ValueError("merge_stderr and capture_stderr=False are incompatible")
+    with tempfile.TemporaryDirectory(prefix="command-capture-") as directory:
+        stdout_path = Path(directory) / "stdout"
+        stderr_path = Path(directory) / "stderr" if capture_stderr and not merge_stderr else None
+        with stdout_path.open("wb") as stdout_stream:
+            if merge_stderr:
+                completed = subprocess.run(
+                    command, stdout=stdout_stream, stderr=subprocess.STDOUT,
+                    check=False, **kwargs,
+                )
+            elif capture_stderr:
+                with stderr_path.open("wb") as stderr_stream:
+                    completed = subprocess.run(
+                        command, stdout=stdout_stream, stderr=stderr_stream,
+                        check=False, **kwargs,
+                    )
+            else:
+                completed = subprocess.run(
+                    command, stdout=stdout_stream, check=False, **kwargs,
+                )
+        yield CapturedCommand(completed.returncode, stdout_path, stderr_path)
+
+
 def _cmd_clip(args: argparse.Namespace) -> int:
     data = clipped_prefix(Path(args.path), args.cap)
     if args.in_place:
@@ -182,7 +290,7 @@ def _cmd_cap_output(args: argparse.Namespace) -> int:
     if not path.is_file():
         return 0
     try:
-        rendered = cap_output_bytes(path.read_bytes(), args.label)
+        rendered = cap_output_file(path, args.label)
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2

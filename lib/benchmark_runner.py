@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -26,11 +27,14 @@ import benchmark as metrics
 import benchmark_model_direct_render
 import build_preflight
 import llm_invoke
+import process_tree
 import target_config
+import triage
 from timeout import run_timeout
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 SESSION_PAUSE_BACKSTOP = 21600
+_RESULT_SIGNATURES: dict[str, str] = {}
 
 
 def log(message: str) -> None:
@@ -43,11 +47,35 @@ def format_duration(seconds: int) -> str:
 
 
 @contextmanager
-def _decision_environment(backend: str, model: str, target: Path, target_slug: str):
+def _signal_cleanup():
+    """Ensure terminating a benchmark also terminates backend descendants."""
+    watched = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+    previous = {sig: signal.getsignal(sig) for sig in watched}
+
+    def stop(signum, _frame):
+        process_tree.kill_descendants(os.getpid(), signal.SIGTERM, 1.0)
+        raise SystemExit(128 + signum)
+
+    for sig in watched:
+        signal.signal(sig, stop)
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+@contextmanager
+def _decision_environment(
+    backend: str, model: str, target: Path, target_slug: str,
+    decision_log: Path | None = None,
+):
     values = {
         "ACTIVE_BACKEND": backend, "BACKEND": backend, "MODEL": model,
         "TARGET_ROOT": str(target), "TARGET_SLUG": target_slug,
     }
+    if decision_log is not None:
+        values["LLM_DECIDE_LOG"] = str(decision_log)
     previous = {key: os.environ.get(key) for key in values}
     os.environ.update(values)
     try:
@@ -364,6 +392,7 @@ def _provider_issue(cell_dir: Path) -> str:
     saw_transient = False
     candidates = [cell_dir / "backend.raw.log", cell_dir / "audit.log"]
     candidates.extend((cell_dir / "repo-root" / "output").glob("**/logs/.raw/session_*.log.raw"))
+    candidates.extend((cell_dir / "repo-root" / "output").glob("**/logs/.raw/model-preflight-*.raw"))
     candidates.extend((cell_dir / "repo-root" / "output").glob("**/logs/index.log"))
     for path in candidates:
         try:
@@ -381,7 +410,7 @@ def _has_artifacts(results: Path) -> bool:
     return any(path.is_dir() for root in (results / "crashes", results / "findings") if root.is_dir() for path in root.iterdir())
 
 
-def _record_provider_quality(cell_dir: Path, results: Path) -> str:
+def _record_provider_quality(cell_dir: Path, results: Path, rc: int = 1) -> str:
     """Persist provider quality, letting conclusive capacity evidence outrank rc."""
     if (cell_dir / ".backend-unavailable").is_file():
         (cell_dir / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
@@ -389,8 +418,16 @@ def _record_provider_quality(cell_dir: Path, results: Path) -> str:
     issue = _provider_issue(cell_dir)
     if issue == "none":
         return issue
-    (cell_dir / ".run-quality").write_text("provider_recovered\n", encoding="utf-8")
-    if issue == "capacity_limited" and not _has_artifacts(results):
+    existing = ""
+    try:
+        existing = (cell_dir / ".run-quality").read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    (cell_dir / ".run-quality").write_text(
+        (existing if existing in {"provider_recovered", "normal"} else "provider_recovered") + "\n",
+        encoding="utf-8",
+    )
+    if issue == "capacity_limited" and rc not in (0, 124) and not _has_artifacts(results):
         (cell_dir / ".backend-unavailable").touch()
         (cell_dir / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
     return issue
@@ -405,12 +442,19 @@ def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wal
     for marker in (".quota-exhausted", ".backend-unavailable", ".run-quality"):
         (cell_dir / marker).unlink(missing_ok=True)
     marked = mark_target_artifacts(target)
+    previous_logdir = os.environ.get("LOGDIR")
     os.environ["LOGDIR"] = str(cell_dir / "logs")
-    rc = llm_invoke.run_agent_prompt(
-        backend, prompt, wall, raw, model=model, max_turns=0,
-        add_dirs=f"{cell_dir},{target}", cwd=cell_dir,
-        watchdog_marker_dir=cell_dir,
-    )
+    try:
+        rc = llm_invoke.run_agent_prompt(
+            backend, prompt, wall, raw, model=model, max_turns=0,
+            add_dirs=f"{cell_dir},{target}", cwd=cell_dir,
+            watchdog_marker_dir=cell_dir,
+        )
+    finally:
+        if previous_logdir is None:
+            os.environ.pop("LOGDIR", None)
+        else:
+            os.environ["LOGDIR"] = previous_logdir
     sweep_target_artifacts(target, cell_dir, marked)
     usage = subprocess.run(
         [
@@ -420,7 +464,7 @@ def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wal
         text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
     )
     (cell_dir / "logs" / "index.jsonl").write_text(usage.stdout or "{}\n", encoding="utf-8")
-    issue = _record_provider_quality(cell_dir, cell_dir)
+    issue = _record_provider_quality(cell_dir, cell_dir, rc)
     if issue == "capacity_limited" and (cell_dir / ".backend-unavailable").is_file():
         return 0
     if backend == "gemini" and not raw.stat().st_size and not _has_artifacts(cell_dir):
@@ -483,8 +527,8 @@ def run_harness(
             shutil.copy2(source, cell_dir / marker)
     # This also catches a provider-limited startup/preflight before the audit
     # runtime had a chance to create its own marker.
-    _record_provider_quality(cell_dir, result_dir)
-    return rc, result_dir
+    _record_provider_quality(cell_dir, result_dir, rc)
+    return (0 if rc == 124 else rc), result_dir
 
 
 def _run_tool(name: str, *args: str, env: dict | None = None, stdout=None) -> int:
@@ -574,6 +618,20 @@ def reverify_pool_crash_rates(pool: Path, target_root: Path, target_slug: str, r
     return reverified
 
 
+def _finalize_condition_pools(
+    pool: Path, target_root: Path, backend: str, model: str, target_slug: str,
+    decision_log: Path,
+) -> None:
+    """Build condition-local indexes after split_pool has copied its members."""
+    reserved = {"crashes", "crashes-rejected", "findings", "findings-rejected"}
+    with _decision_environment(backend, model, target_root, target_slug, decision_log):
+        for condition in sorted(pool.iterdir()):
+            if not condition.is_dir() or condition.name in reserved:
+                continue
+            if not triage.maintain_indexes(condition, target_root):
+                log(f"WARN: per-condition index maintenance failed ({condition.name})")
+
+
 def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dry_run: bool, reason: str) -> None:
     stage_name = ".pool.staging"
     metrics.build_pool(bench_dir, stage_name)
@@ -587,15 +645,28 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
         "TARGET_SLUG": target_slug,
         "LLM_DECIDE_LOG": str(bench_dir / "llm-decisions.log"),
     })
+    target = SCRIPT_ROOT / "targets" / target_slug
     bundled = 0
-    if not dry_run and (pool / "crashes").is_dir():
-        reverify_pool_crash_rates(pool, SCRIPT_ROOT / "targets" / target_slug, target_slug, reason)
+    if not dry_run:
+        with _decision_environment(
+            backend, model, target, target_slug, bench_dir / "llm-decisions.log"
+        ):
+            triage.fill_reach_fields_tree(pool)
+        if (pool / "crashes").is_dir():
+            reverify_pool_crash_rates(pool, target, target_slug, reason)
         with (bench_dir / "severity.log").open("w", encoding="utf-8") as output:
-            _run_tool("severity", "--batch", str(pool), env=environment, stdout=output)
-        target = SCRIPT_ROOT / "targets" / target_slug
+            for finding in sorted((pool / "findings").glob("FIND-*")):
+                if finding.is_dir():
+                    _run_tool("severity", "--report", str(finding), env=environment, stdout=output)
+            if (pool / "crashes").is_dir():
+                _run_tool("severity", "--batch", str(pool), env=environment, stdout=output)
         for crash in sorted((pool / "crashes").glob("CRASH-*")):
             reports = list(crash.glob("[Rr][Ee][Pp][Oo][Rr][Tt].md"))
-            canonical = any("## Expected sanitizer output" in report.read_text(encoding="utf-8", errors="replace") for report in reports)
+            canonical = any(
+                "## Expected sanitizer output" in (text := report.read_text(encoding="utf-8", errors="replace"))
+                and re.search(r"^CRASH_RATE:\s*[0-9]+/[0-9]+", text, re.MULTILINE)
+                for report in reports
+            )
             if not canonical:
                 export_env = environment | {"RESULTS_DIR": str(pool), "TARGET_ROOT": str(target)}
                 if _run_tool("export-repro", crash.name, "--crash-dir", str(crash), "--slug", target_slug, env=export_env) == 0:
@@ -615,10 +686,16 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
                 output.write('{"clusters":[]}\n')
         _run_tool(tool, str(pool), env=environment)
     metrics.split_pool(bench_dir, stage_name)
+    if not triage.maintain_indexes(pool, target):
+        log("WARN: combined pool index maintenance failed")
+    _finalize_condition_pools(
+        pool, target, backend, model, target_slug, bench_dir / "llm-decisions.log"
+    )
     rejected_indexes = [
-        *pool.glob("**/findings-rejected/REJECTED-FINDINGS.md"),
-        *pool.glob("**/crashes-rejected/REJECTED-CRASHES.md"),
+        pool / "findings-rejected" / "REJECTED-FINDINGS.md",
+        pool / "crashes-rejected" / "REJECTED-CRASHES.md",
     ]
+    rejected_indexes = [path for path in rejected_indexes if path.is_file()]
     if rejected_indexes:
         subprocess.run(
             [str(SCRIPT_ROOT / "bin" / "render-md"), *map(str, rejected_indexes), "--html-sibling"],
@@ -648,13 +725,10 @@ def _result_signature(bench_dir: Path) -> str:
 
 def update_result(bench_dir: Path, bench_root: Path, target: str, backend: str, model: str, dry_run: bool, reason: str) -> dict:
     signature = _result_signature(bench_dir)
-    signature_path = bench_dir / ".result-signature"
-    try:
-        if signature_path.read_text(encoding="utf-8").strip() == signature and (bench_dir / "report.json").is_file():
-            log(f"benchmark-result update ({reason}): inputs unchanged, skipped rebuild")
-            return json.loads((bench_dir / "report.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        pass
+    signature_key = str(bench_dir.resolve())
+    if _RESULT_SIGNATURES.get(signature_key) == signature and (bench_dir / "report.json").is_file():
+        log(f"benchmark-result update ({reason}): inputs unchanged, skipped rebuild")
+        return json.loads((bench_dir / "report.json").read_text(encoding="utf-8"))
     rebuild_pool(bench_dir, target, backend, model, dry_run, reason)
     report = metrics.aggregate(bench_dir)
     _write_json(bench_dir / "report.json", report)
@@ -664,7 +738,8 @@ def update_result(bench_dir: Path, bench_root: Path, target: str, backend: str, 
     if render.is_file():
         subprocess.run([str(render), str(crosstab), "--html-sibling"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     artifact = crosstab.with_suffix(".html") if crosstab.with_suffix(".html").is_file() else crosstab
-    signature_path.write_text(f"{signature}\n", encoding="utf-8")
+    (bench_dir / ".result-signature").unlink(missing_ok=True)
+    _RESULT_SIGNATURES[signature_key] = signature
     log(f"benchmark-result update ({reason}): {artifact} ({artifact.resolve().as_uri()})")
     return report
 
@@ -851,6 +926,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 if not args.dry_run and args.validate_findings and results.is_dir() and (results / "findings").is_dir():
                     if deadline is not None and time.monotonic() >= deadline:
                         log(f"Cell {name} validation deferred: cell budget exhausted")
+                        status = "incomplete"
                     else:
                         log(f"Cell {name}: draining find-gate before metrics")
                         try:
@@ -864,6 +940,8 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                                 f"Cell {name} validation: accepted={counts.get('accepted', 0)} "
                                 f"rejected={counts.get('rejected', 0)} pending={counts.get('pending', 0)}"
                             )
+                            if counts.get("pending", 0):
+                                status = "incomplete"
                         except Exception as exc:
                             log(f"WARN: find-gate drain failed for {name}: {exc}")
                 elif not args.dry_run and condition == "model-direct" and not args.validate_findings:
@@ -941,7 +1019,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
     return 1 if failed else 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     bench_root = Path(args.bench_root)
     if not bench_root.is_absolute():
@@ -967,6 +1045,11 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
         return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    with _signal_cleanup():
+        return _main(argv)
 
 
 if __name__ == "__main__":

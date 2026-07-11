@@ -4,15 +4,15 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 from command_tools import find_executable
-from file_tools import clipped_prefix_bytes
+from file_tools import capture_command, clipped_prefix
 
 
 USAGE = """scratch-search — search across all audit artifacts under $RESULTS_DIR.
@@ -125,16 +125,6 @@ def section_paths(results: Path, requested: str) -> list[tuple[str, Path]]:
     return sections
 
 
-def relative_lines(data: bytes, results: Path) -> bytes:
-    prefix = (str(results) + os.sep).encode()
-    rendered = []
-    for line in data.splitlines(keepends=True):
-        if line.startswith(prefix):
-            line = line[len(prefix) :]
-        rendered.append(b"    " + line)
-    return b"".join(rendered)
-
-
 def emit_section(
     rg: str,
     label: str,
@@ -165,56 +155,67 @@ def emit_section(
         str(options["pattern"]),
         str(path),
     ]
-    completed = subprocess.run(
-        command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    raw = completed.stdout
-    lines = raw.splitlines(keepends=True)
-    total_lines = len(lines)
-    if files_only:
-        total_files = total_lines
-    else:
-        total_files = len({line.split(b":", 1)[0] for line in lines if line})
-    if completed.returncode == 2 or total_lines == 0:
-        print(f"[{label}] no matches")
-        return False
-
-    file_word = "file" if total_files == 1 else "files"
-    match_word = "match" if total_lines == 1 else "matches"
-    if files_only:
-        print(f"[{label}] {total_files} {file_word}")
-    else:
-        print(f"[{label}] {total_lines} {match_word} in {total_files} {file_word}")
-    sys.stdout.flush()
-
     cap_lines = int(options["cap_lines"])
     cap_bytes = int(options["cap_bytes"])
-    line_capped = cap_lines > 0 and total_lines > cap_lines
-    selected = b"".join(lines[:cap_lines] if line_capped else lines)
-    selected = relative_lines(selected, results)
-    byte_capped = len(selected) > cap_bytes
-    if byte_capped:
-        selected = clipped_prefix_bytes(selected, cap_bytes)
-    sys.stdout.buffer.write(selected)
-    sys.stdout.flush()
+    with capture_command(command) as completed, tempfile.TemporaryDirectory(
+        prefix="scratch-search-"
+    ) as directory:
+        selected_path = Path(directory) / "selected"
+        total_lines = total_files = 0
+        previous_file = b""
+        prefix = (str(results) + os.sep).encode()
+        with completed.stdout.open("rb") as source, selected_path.open("wb") as selected:
+            for line in source:
+                total_lines += 1
+                if files_only:
+                    total_files += 1
+                else:
+                    current_file = line.split(b":", 1)[0]
+                    if current_file != previous_file:
+                        total_files += 1
+                        previous_file = current_file
+                if cap_lines == 0 or total_lines <= cap_lines:
+                    if line.startswith(prefix):
+                        line = line[len(prefix) :]
+                    selected.write(b"    " + line)
+        if completed.returncode == 2 or total_lines == 0:
+            print(f"[{label}] no matches")
+            return False
 
-    if line_capped or byte_capped:
-        remaining = max(0, total_lines - cap_lines)
+        file_word = "file" if total_files == 1 else "files"
+        match_word = "match" if total_lines == 1 else "matches"
         if files_only:
-            print(
-                f"    [{remaining} more files in this section. Re-run with narrower "
-                f"PATTERN or --lines --section {label} for match bodies.]"
-            )
+            print(f"[{label}] {total_files} {file_word}")
         else:
-            print(
-                f"    [{remaining} more matches in this section. Re-run with narrower "
-                "PATTERN, higher --cap, or default files-only mode to widen path inventory.]"
-            )
-    elif files_only:
-        print(
-            f"    [paths only. Re-run with --lines --section {label} for match bodies.]"
+            print(f"[{label}] {total_lines} {match_word} in {total_files} {file_word}")
+        sys.stdout.flush()
+
+        line_capped = cap_lines > 0 and total_lines > cap_lines
+        byte_capped = cap_bytes > 0 and selected_path.stat().st_size > cap_bytes
+        selected_bytes = (
+            clipped_prefix(selected_path, cap_bytes)
+            if byte_capped else selected_path.read_bytes()
         )
-    return True
+        sys.stdout.buffer.write(selected_bytes)
+        sys.stdout.flush()
+
+        if line_capped or byte_capped:
+            remaining = max(0, total_lines - cap_lines) if cap_lines else 0
+            if files_only:
+                print(
+                    f"    [{remaining} more files in this section. Re-run with narrower "
+                    f"PATTERN or --lines --section {label} for match bodies.]"
+                )
+            else:
+                print(
+                    f"    [{remaining} more matches in this section. Re-run with narrower "
+                    "PATTERN, higher --cap, or default files-only mode to widen path inventory.]"
+                )
+        elif files_only:
+            print(
+                f"    [paths only. Re-run with --lines --section {label} for match bodies.]"
+            )
+        return True
 
 
 def main(argv: list[str] | None = None) -> int:

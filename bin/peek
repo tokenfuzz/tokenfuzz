@@ -4,14 +4,14 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
-from file_tools import cap_output_bytes
+from file_tools import cap_output_file, capture_command
 from command_tools import find_executable
 
 
@@ -38,13 +38,17 @@ def real_command(name: str) -> str | None:
     return find_executable(name, skip=(wrapper,))
 
 
-def emit(data: bytes, label: str, no_cap: bool) -> int:
-    if not no_cap:
-        try:
-            data = cap_output_bytes(data, label)
-        except ValueError as exc:
-            print(exc, file=sys.stderr)
-            return 2
+def emit_file(path: Path, label: str, no_cap: bool) -> int:
+    if no_cap:
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                sys.stdout.buffer.write(chunk)
+        return 0
+    try:
+        data = cap_output_file(path, label)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     sys.stdout.buffer.write(data)
     return 0
 
@@ -76,9 +80,18 @@ def range_mode(raw: str, no_cap: bool) -> int:
         if start < 1:
             return fail(f"bad start '{spec}': must be >= 1")
 
-    lines = path.read_bytes().splitlines(keepends=True)
-    data = b"".join(lines[start - 1 : end])
-    return emit(data, "peek-range", no_cap)
+    if start == 1 and end is None:
+        return emit_file(path, "peek-range", no_cap)
+    with tempfile.TemporaryDirectory(prefix="peek-range-") as directory:
+        selected = Path(directory) / "range"
+        with path.open("rb") as source, selected.open("wb") as target:
+            for number, line in enumerate(source, 1):
+                if number < start:
+                    continue
+                if end is not None and number > end:
+                    break
+                target.write(line)
+        return emit_file(selected, "peek-range", no_cap)
 
 
 def clamp(value: str, maximum: int, no_cap: bool) -> str:
@@ -212,21 +225,21 @@ def main(argv: list[str] | None = None) -> int:
     adjusted, changed_after, changed_before = clamp_grep_args(
         args, int(after_text), int(before_text), no_cap
     )
-    completed = subprocess.run([grep, *adjusted], stdout=subprocess.PIPE)
-    rc = emit(completed.stdout, "peek-grep", no_cap)
-    if rc != 0:
-        return rc
-    if not no_cap and (changed_after or changed_before):
-        message = "[peek: clamped grep context"
-        if changed_after:
-            message += f" -A {changed_after}"
-        if changed_before:
-            message += f" -B {changed_before}"
-        message += (
-            ". PEEK_GREP_AFTER=N, PEEK_GREP_BEFORE=N, or --no-cap to widen.]\n"
-        )
-        sys.stdout.write(message)
-    return completed.returncode
+    with capture_command([grep, *adjusted], capture_stderr=False) as completed:
+        rc = emit_file(completed.stdout, "peek-grep", no_cap)
+        if rc != 0:
+            return rc
+        if not no_cap and (changed_after or changed_before):
+            message = "[peek: clamped grep context"
+            if changed_after:
+                message += f" -A {changed_after}"
+            if changed_before:
+                message += f" -B {changed_before}"
+            message += (
+                ". PEEK_GREP_AFTER=N, PEEK_GREP_BEFORE=N, or --no-cap to widen.]\n"
+            )
+            sys.stdout.write(message)
+        return completed.returncode
 
 
 if __name__ == "__main__":

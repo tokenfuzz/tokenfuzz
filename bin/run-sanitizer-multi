@@ -8,6 +8,8 @@ import datetime as dt
 import hashlib
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,7 +20,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 LIB_DIR = Path(os.environ.get("SCRIPT_ROOT", SCRIPT_DIR.parent)) / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
-from file_tools import cap_output_bytes
+from file_tools import cap_output_file, capture_command
 from verdict import CRASH_PATTERNS
 
 VALID_SANITIZERS = {"asan", "ubsan", "msan", "tsan", "race", "runner"}
@@ -49,6 +51,33 @@ DIGEST_CRASH_RE = re.compile(
 )
 
 
+def _file_matches(path: Path, pattern: re.Pattern[str]) -> bool:
+    """Search a text file with bounded memory, carrying only the trailing
+    partial line across chunks.
+
+    Carrying the tail *after the last newline* — not an arbitrary byte window —
+    keeps the next chunk's position 0 at a genuine line start, so a MULTILINE
+    ``^``-anchored pattern cannot false-match at an artificial mid-line chunk
+    join. The carry is bounded: a pathological line longer than one chunk is
+    clipped to its tail, which only re-introduces the mid-line risk for a single
+    logical line exceeding 64 KB (sanitizer lines never do).
+    """
+    carry = ""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            while chunk := stream.read(64 * 1024):
+                text = carry + chunk
+                if pattern.search(text):
+                    return True
+                cut = text.rfind("\n")
+                carry = text[cut + 1:] if cut >= 0 else text
+                if len(carry) > 64 * 1024:
+                    carry = carry[-4096:]
+    except OSError:
+        return False
+    return False
+
+
 def _integer_env(name: str, default: int) -> int:
     value = os.environ.get(name, str(default))
     try:
@@ -59,6 +88,10 @@ def _integer_env(name: str, default: int) -> int:
             file=sys.stderr,
         )
         return default
+
+
+def _env(primary: str, legacy: str, default: str = "") -> str:
+    return os.environ.get(primary, os.environ.get(legacy, default))
 
 
 @dataclass(frozen=True)
@@ -73,16 +106,20 @@ class MultiRun:
     def __init__(self, sanitizer: str, args: list[str]):
         self.sanitizer = sanitizer
         self.args = args
-        self.runs = int(os.environ.get("SANITIZER_RUNS", "5"))
+        self.runs = int(_env("SANITIZER_RUNS", "ASAN_RUNS", "5"))
         self.child = SCRIPT_DIR / RUNNERS[sanitizer]
         self.header = "ASAN_RUN_HEADER" if sanitizer == "asan" else "SANITIZER_RUN_HEADER"
         self.output_display = os.environ.get("SAN_OUTPUT_FILE", os.environ.get("ASAN_OUTPUT_FILE", ""))
         self.output_file = self._output_file()
         if not self.output_display and self.output_file:
             self.output_display = str(self.output_file)
-        self.no_digest = bool(os.environ.get("SANITIZER_NO_DIGEST"))
-        self.digest_head = _integer_env("SANITIZER_DIGEST_HEAD", 80)
-        self.digest_tail = _integer_env("SANITIZER_DIGEST_TAIL", 120)
+        self.no_digest = bool(_env("SANITIZER_NO_DIGEST", "ASAN_NO_DIGEST"))
+        self.digest_head = _integer_env(
+            "SANITIZER_DIGEST_HEAD" if "SANITIZER_DIGEST_HEAD" in os.environ else "ASAN_DIGEST_HEAD", 80
+        )
+        self.digest_tail = _integer_env(
+            "SANITIZER_DIGEST_TAIL" if "SANITIZER_DIGEST_TAIL" in os.environ else "ASAN_DIGEST_TAIL", 120
+        )
         sibling_frames = SCRIPT_DIR.parent / "lib" / "stack_frames.py"
         self.stack_frames = sibling_frames if sibling_frames.is_file() else LIB_DIR / "stack_frames.py"
         self.crashes = 0
@@ -141,27 +178,39 @@ class MultiRun:
         ]
         if os.environ.get("HITS_LOG_PATH"):
             command.extend(("--log", os.environ["HITS_LOG_PATH"]))
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
-        output = completed.stdout + completed.stderr
-        print(output, end="")
-        closest_match = re.search(r"^(?:MISSED . closest reached: |EXEC_FAIL|NO_COVERAGE:? ?)(.*)$", output, re.MULTILINE)
-        closest = (closest_match.group(1) if closest_match else f"hits exited {completed.returncode}")[:200]
-        if completed.returncode == 1:
-            self.emit(f"COVERAGE_GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
-            self._record_coverage_miss(testcase, mode, closest)
-            print(f"[run-sanitizer-multi] COVERAGE GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
-            return 1
-        if completed.returncode:
-            label = "COVERAGE_EXEC_FAIL" if completed.returncode == 3 else "COVERAGE_ENV_FAIL"
-            os.environ["HITS_VERDICT"] = label
-            self.emit(f"COVERAGE_GATE: {label} - ASan proceeding ungated (hits rc={completed.returncode}; {closest})")
-            print(f"[run-sanitizer-multi] COVERAGE GATE: {label} - proceeding to ASan ungated (hits rc={completed.returncode}; {closest})")
-        else:
-            hit = re.search(r"^HIT: (.*)$", output, re.MULTILINE)
-            os.environ["CLOSEST_FRAME"] = (hit.group(1) if hit else "")[:200]
-            os.environ["HITS_VERDICT"] = "HIT"
-            print("[run-sanitizer-multi] COVERAGE GATE: HIT - proceeding to ASan")
-        return None
+        with capture_command(command, merge_stderr=True) as completed:
+            try:
+                sys.stdout.buffer.write(cap_output_file(completed.stdout, "coverage-gate"))
+            except ValueError as exc:
+                print(f"[run-sanitizer-multi] WARN: {exc}; emitting uncapped coverage output", file=sys.stderr)
+                with completed.stdout.open("rb") as source:
+                    shutil.copyfileobj(source, sys.stdout.buffer, 1024 * 1024)
+            closest = ""
+            hit_frame = ""
+            with completed.stdout.open(encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    match = re.match(r"^(?:MISSED . closest reached: |EXEC_FAIL|NO_COVERAGE:? ?)(.*)$", line)
+                    if match and not closest:
+                        closest = match.group(1).strip()[:200]
+                    match = re.match(r"^HIT: (.*)$", line)
+                    if match and not hit_frame:
+                        hit_frame = match.group(1).strip()[:200]
+            closest = closest or f"hits exited {completed.returncode}"
+            if completed.returncode == 1:
+                self.emit(f"COVERAGE_GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
+                self._record_coverage_miss(testcase, mode, closest)
+                print(f"[run-sanitizer-multi] COVERAGE GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
+                return 1
+            if completed.returncode:
+                label = "COVERAGE_EXEC_FAIL" if completed.returncode == 3 else "COVERAGE_ENV_FAIL"
+                os.environ["HITS_VERDICT"] = label
+                self.emit(f"COVERAGE_GATE: {label} - ASan proceeding ungated (hits rc={completed.returncode}; {closest})")
+                print(f"[run-sanitizer-multi] COVERAGE GATE: {label} - proceeding to ASan ungated (hits rc={completed.returncode}; {closest})")
+            else:
+                os.environ["CLOSEST_FRAME"] = hit_frame
+                os.environ["HITS_VERDICT"] = "HIT"
+                print("[run-sanitizer-multi] COVERAGE GATE: HIT - proceeding to ASan")
+            return None
 
     def _record_coverage_miss(self, testcase: str, mode: str, closest: str) -> None:
         log = os.environ.get("TRIED_INPUTS_LOG")
@@ -172,13 +221,15 @@ class MultiRun:
         digest = hashlib.sha1(Path(testcase).read_bytes()).hexdigest()[:12]
         with destination.open("a") as stream:
             stream.write(
-                f"{now()} verdict=NO_HIT mode={mode} testcase={testcase} hash={digest} "
+                f"{now()} verdict=NO_HIT mode={shlex.quote(mode)} "
+                f"testcase={shlex.quote(testcase)} hash={digest} "
                 f"hypothesis={os.environ.get('HYPOTHESIS_ID', '?')} "
-                f"target={os.environ.get('TARGET', '?')} closest={closest or '<none>'}\n"
+                f"target={shlex.quote(os.environ.get('TARGET', '?'))} "
+                f"closest={shlex.quote(closest or '<none>')}\n"
             )
 
     def account_budget(self) -> None:
-        counter_name = os.environ.get("SANITIZER_RUN_COUNTER_FILE", "")
+        counter_name = _env("SANITIZER_RUN_COUNTER_FILE", "ASAN_RUN_COUNTER_FILE")
         if not counter_name:
             return
         counter = Path(counter_name)
@@ -187,7 +238,7 @@ class MultiRun:
         digits = "".join(ch for ch in previous_text if ch.isdigit())
         current = int(digits or 0) + 1
         counter.write_text(str(current))
-        budget_text = os.environ.get("SANITIZER_RUN_BUDGET", "")
+        budget_text = _env("SANITIZER_RUN_BUDGET", "ASAN_RUN_BUDGET")
         budget = int(budget_text) if budget_text.isdigit() else 0
         if budget:
             self.emit(f"[run-sanitizer-multi] BUDGET: {current}/{budget} sanitizer invocations used this iteration")
@@ -196,116 +247,129 @@ class MultiRun:
         else:
             self.emit(f"[run-sanitizer-multi] BUDGET: {current} sanitizer invocation(s) this iteration")
 
-    def classify(self, data: bytes) -> Outcome:
-        text = data.decode(errors="replace")
-        crashed = CRASH_RE.search(text) is not None
-        succeeded = EXEC_VERIFIED_RE.search(text) is not None
-        executed = succeeded or EXEC_INCONCLUSIVE_RE.search(text) is not None or crashed
-        signature = self._signature(data)
+    def classify(self, path: Path) -> Outcome:
+        crashed = _file_matches(path, CRASH_RE)
+        succeeded = _file_matches(path, EXEC_VERIFIED_RE)
+        executed = succeeded or _file_matches(path, EXEC_INCONCLUSIVE_RE) or crashed
+        signature = self._signature(path)
         return Outcome(crashed, executed, succeeded, signature)
 
-    def _signature(self, data: bytes) -> tuple[str, ...] | None:
+    def _signature(self, path: Path) -> tuple[str, ...] | None:
         if not self.stack_frames.is_file():
             return None
-        with tempfile.NamedTemporaryFile() as report:
-            report.write(data)
-            report.flush()
-            completed = subprocess.run(
-                [sys.executable, str(self.stack_frames), "--signature", report.name],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+        completed = subprocess.run(
+            [sys.executable, str(self.stack_frames), "--signature", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if completed.returncode:
             return None
         return tuple(completed.stdout.splitlines())
 
-    def digest(self, data: bytes) -> bytes:
+    def write_digest(self, path: Path) -> None:
         if self.no_digest:
-            return data
-        lines = data.decode(errors="replace").splitlines(keepends=True)
-        filtered: list[str] = []
-        skip_shadow = False
-        for line in lines:
-            if line.startswith("*** You are running in headless mode.") or (
-                line.startswith("Crash Annotation GraphicsCriticalError:")
-                and "RenderCompositorSWGL failed mapping default framebuffer" in line
-            ):
-                continue
-            if re.match(r"^==[0-9]+==ERROR:", line):
-                skip_shadow = False
-            if line.startswith("Shadow bytes around the buggy address:"):
-                suffix = f" - see {self.output_display}" if self.output_file else ""
-                filtered.append(f"[Shadow bytes block elided{suffix}]\n")
-                skip_shadow = True
-                continue
-            if skip_shadow and re.match(r"^==[0-9]+==ABORTING", line):
-                skip_shadow = False
-                filtered.append(line)
-                continue
-            if not skip_shadow:
-                filtered.append(line)
-        result = "".join(filtered).encode()
-        if DIGEST_CRASH_RE.search(data.decode(errors="replace")):
-            try:
-                return cap_output_bytes(result, "asan-crash")
-            except ValueError:
-                return result
-        head = self.digest_head
-        tail = self.digest_tail
-        if head <= 0 or tail <= 0 or len(filtered) <= head + tail:
-            return result
-        elided = len(filtered) - head - tail
-        location = f" - full output in {self.output_display}" if self.output_file else ""
-        marker = (
-            f"[run-sanitizer-multi] DIGEST: clean run, {elided} middle line(s) elided "
-            f"(showing first {head} + last {tail}){location}. Override: "
-            "SANITIZER_DIGEST_HEAD/SANITIZER_DIGEST_TAIL or SANITIZER_NO_DIGEST=1.\n"
-        )
-        return "".join(filtered[:head] + [marker] + filtered[-tail:]).encode()
+            with path.open("rb") as source:
+                shutil.copyfileobj(source, sys.stdout.buffer, 1024 * 1024)
+            return
+        with tempfile.TemporaryDirectory(prefix="sanitizer-digest-") as directory:
+            filtered = Path(directory) / "filtered"
+            count = 0
+            skip_shadow = False
+            with path.open(encoding="utf-8", errors="replace") as source, filtered.open("wb") as target:
+                for line in source:
+                    if line.startswith("*** You are running in headless mode.") or (
+                        line.startswith("Crash Annotation GraphicsCriticalError:")
+                        and "RenderCompositorSWGL failed mapping default framebuffer" in line
+                    ):
+                        continue
+                    if re.match(r"^==[0-9]+==ERROR:", line):
+                        skip_shadow = False
+                    if line.startswith("Shadow bytes around the buggy address:"):
+                        suffix = f" - see {self.output_display}" if self.output_file else ""
+                        line = f"[Shadow bytes block elided{suffix}]\n"
+                        skip_shadow = True
+                    elif skip_shadow and re.match(r"^==[0-9]+==ABORTING", line):
+                        skip_shadow = False
+                    elif skip_shadow:
+                        continue
+                    target.write(line.encode("utf-8", errors="replace"))
+                    count += 1
+            if _file_matches(path, DIGEST_CRASH_RE):
+                try:
+                    sys.stdout.buffer.write(cap_output_file(filtered, "asan-crash"))
+                except ValueError:
+                    with filtered.open("rb") as source:
+                        shutil.copyfileobj(source, sys.stdout.buffer, 1024 * 1024)
+                return
+            head = self.digest_head
+            tail = self.digest_tail
+            if head <= 0 or tail <= 0 or count <= head + tail:
+                with filtered.open("rb") as source:
+                    shutil.copyfileobj(source, sys.stdout.buffer, 1024 * 1024)
+                return
+            with filtered.open("rb") as source:
+                for number in range(head):
+                    line = source.readline()
+                    if not line:
+                        break
+                    sys.stdout.buffer.write(line)
+            elided = count - head - tail
+            location = f" - full output in {self.output_display}" if self.output_file else ""
+            marker = (
+                f"[run-sanitizer-multi] DIGEST: clean run, {elided} middle line(s) elided "
+                f"(showing first {head} + last {tail}){location}. Override: "
+                "SANITIZER_DIGEST_HEAD/SANITIZER_DIGEST_TAIL or SANITIZER_NO_DIGEST=1.\n"
+            )
+            sys.stdout.buffer.write(marker.encode())
+            with filtered.open("rb") as source:
+                start_index = max(0, count - tail)
+                for number, line in enumerate(source):
+                    if number >= start_index:
+                        sys.stdout.buffer.write(line)
 
-    def append_raw(self, data: bytes) -> None:
+    def append_raw(self, path: Path) -> None:
         if self.output_file:
-            with self.output_file.open("ab") as stream:
-                stream.write(data)
+            with path.open("rb") as source, self.output_file.open("ab") as stream:
+                shutil.copyfileobj(source, stream, 1024 * 1024)
 
     def run_repetitions(self) -> None:
         baseline: Outcome | None = None
         for index in range(1, self.runs + 1):
             self.emit(f"=== Run {index}/{self.runs} ===")
-            completed = subprocess.run([str(self.child), *self.args], capture_output=True, check=False)
-            data = completed.stdout + completed.stderr
-            self.append_raw(data)
-            outcome = self.classify(data)
-            self.crashes += int(outcome.crashed)
-            self.executions += int(outcome.executed)
-            self.successes += int(outcome.succeeded)
-            if baseline is None:
-                sys.stdout.flush()
-                sys.stdout.buffer.write(self.digest(data))
-                baseline = outcome
-            elif outcome.signature is None or baseline.signature is None:
-                sys.stdout.flush()
-                sys.stdout.buffer.write(self.digest(data))
-            elif self.no_digest or outcome != baseline:
-                if outcome != baseline:
-                    if outcome.crashed and not baseline.crashed:
-                        self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - crashed where run 1 was clean")
-                    elif not outcome.crashed and baseline.crashed:
-                        self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - clean where run 1 crashed")
-                    else:
-                        self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - result differs from run 1")
-                sys.stdout.flush()
-                sys.stdout.buffer.write(self.digest(data))
-            elif outcome.crashed:
-                first = outcome.signature[0] if outcome.signature else "no stable frame"
-                self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: VERIFIED — same crash signature as run 1 ({first})")
-            elif outcome.succeeded:
-                self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: VERIFIED - clean (matches run 1)")
-            elif outcome.executed:
-                self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: REPEATED - execution failed (matches run 1)")
-            else:
-                self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: REPEATED - no execution evidence (matches run 1)")
+            with capture_command([str(self.child), *self.args], merge_stderr=True) as completed:
+                data = completed.stdout
+                self.append_raw(data)
+                outcome = self.classify(data)
+                self.crashes += int(outcome.crashed)
+                self.executions += int(outcome.executed)
+                self.successes += int(outcome.succeeded)
+                if baseline is None:
+                    sys.stdout.flush()
+                    self.write_digest(data)
+                    baseline = outcome
+                elif outcome.signature is None or baseline.signature is None:
+                    sys.stdout.flush()
+                    self.write_digest(data)
+                elif self.no_digest or outcome != baseline:
+                    if outcome != baseline:
+                        if outcome.crashed and not baseline.crashed:
+                            self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - crashed where run 1 was clean")
+                        elif not outcome.crashed and baseline.crashed:
+                            self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - clean where run 1 crashed")
+                        else:
+                            self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - result differs from run 1")
+                    sys.stdout.flush()
+                    self.write_digest(data)
+                elif outcome.crashed:
+                    first = outcome.signature[0] if outcome.signature else "no stable frame"
+                    self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: VERIFIED — same crash signature as run 1 ({first})")
+                elif outcome.succeeded:
+                    self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: VERIFIED - clean (matches run 1)")
+                elif outcome.executed:
+                    self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: REPEATED - execution failed (matches run 1)")
+                else:
+                    self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: REPEATED - no execution evidence (matches run 1)")
             self.emit()
 
     def auto_diff(self) -> None:
@@ -314,20 +378,21 @@ class MultiRun:
         if self.sanitizer != "asan" or mode not in {"js", "xpcshell"} or not Path(testcase).is_file() or self.crashes or not self.executions:
             return
         self.emit("\n=== AUTO-DIFFERENTIAL (--ion-eager vs --no-ion) ===")
-        completed = subprocess.run([str(SCRIPT_DIR / "run-asan"), "js-diff", testcase], capture_output=True, check=False)
-        data = completed.stdout + completed.stderr
-        if b"outputs DIFFER" in data:
-            self.emit("[run-sanitizer-multi] AUTO-DIFF: DIVERGENCE DETECTED - potential JIT correctness issue")
-            self.append_raw(data)
-            sys.stdout.buffer.write(self.digest(data))
-            self.diff_divergences += 1
-        elif b"ERROR: AddressSanitizer" in data:
-            self.emit("[run-sanitizer-multi] AUTO-DIFF: ASan crash in differential mode!")
-            self.append_raw(data)
-            sys.stdout.buffer.write(self.digest(data))
-            self.crashes += 1
-        else:
-            self.emit("[run-sanitizer-multi] AUTO-DIFF: outputs match (no JIT divergence)")
+        with capture_command(
+            [str(SCRIPT_DIR / "run-asan"), "js-diff", testcase], merge_stderr=True
+        ) as completed:
+            if _file_matches(completed.stdout, re.compile(r"outputs DIFFER")):
+                self.emit("[run-sanitizer-multi] AUTO-DIFF: DIVERGENCE DETECTED - potential JIT correctness issue")
+                self.append_raw(completed.stdout)
+                self.write_digest(completed.stdout)
+                self.diff_divergences += 1
+            elif _file_matches(completed.stdout, re.compile(r"ERROR: AddressSanitizer")):
+                self.emit("[run-sanitizer-multi] AUTO-DIFF: ASan crash in differential mode!")
+                self.append_raw(completed.stdout)
+                self.write_digest(completed.stdout)
+                self.crashes += 1
+            else:
+                self.emit("[run-sanitizer-multi] AUTO-DIFF: outputs match (no JIT divergence)")
 
     def record_tried(self) -> None:
         configured = os.environ.get("TRIED_INPUTS_LOG")
@@ -340,10 +405,14 @@ class MultiRun:
         destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("a") as stream:
             stream.write(
-                f"{now()} verdict={verdict} mode={self.args[0] if self.args else '?'} testcase={testcase or '?'} "
+                f"{now()} verdict={verdict} "
+                f"mode={shlex.quote(self.args[0] if self.args else '?')} "
+                f"testcase={shlex.quote(testcase or '?')} "
                 f"hash={digest} runs={self.runs} crashes={self.crashes} execs={self.executions} "
-                f"hypothesis={os.environ.get('HYPOTHESIS_ID', '?')} target={os.environ.get('TARGET', '?')} "
-                f"closest={os.environ.get('CLOSEST_FRAME', '<none>')} hits_verdict={os.environ.get('HITS_VERDICT', '?')}\n"
+                f"hypothesis={shlex.quote(os.environ.get('HYPOTHESIS_ID', '?'))} "
+                f"target={shlex.quote(os.environ.get('TARGET', '?'))} "
+                f"closest={shlex.quote(os.environ.get('CLOSEST_FRAME', '<none>'))} "
+                f"hits_verdict={shlex.quote(os.environ.get('HITS_VERDICT', '?'))}\n"
             )
 
     def finish(self) -> int:

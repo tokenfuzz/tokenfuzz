@@ -85,12 +85,15 @@ def validate_finding(
         return ValidationResult(
             "Uncertain", 0, 0, None, f"validator missing: {validator_path}"
         )
-    active_backend = backend or os.environ.get(
-        "TRIAGE_VALIDATE_BACKEND",
-        os.environ.get("ACTIVE_BACKEND", os.environ.get("BACKEND", "claude")),
+    active_backend = (
+        backend
+        or os.environ.get("TRIAGE_VALIDATE_BACKEND")
+        or os.environ.get("ACTIVE_BACKEND")
+        or os.environ.get("BACKEND")
+        or "claude"
     )
-    active_model = model if model is not None else os.environ.get(
-        "TRIAGE_VALIDATE_MODEL", os.environ.get("MODEL", "")
+    active_model = model if model is not None else (
+        os.environ.get("TRIAGE_VALIDATE_MODEL") or os.environ.get("MODEL") or ""
     )
 
     first = _run_vote(

@@ -203,6 +203,17 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     check(static.is_file() and "DIGEST" in static.read_text(encoding="utf-8"), "prompt writes cached static rules atomically")
     cold = prompt.cold_start_prompt(context, 1)
     check("Agent 1" in cold and "ROLE: REPRODUCE" in cold, "cold prompt renders role and agent identity")
+    check(
+        "--role reproduce --strategy S7" in cold
+        and "reproduce--strategy" not in cold,
+        "cold prompt renders a parseable strategy-bearing state resume command",
+    )
+    static_text = static.read_text(encoding="utf-8")
+    check(
+        "bin/state resume --agent N" in static_text
+        and "bin/state resume --agent `" not in static_text,
+        "static prompt suffix keeps its compression resume command agent-neutral",
+    )
 
     generic_target = root / "generic-target"
     (generic_target / "build-asan").mkdir(parents=True)
@@ -391,6 +402,52 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
             not audit_runner.backend_configured("codex"),
             "a hung backend preflight is unavailable instead of aborting audit startup",
         )
+    model_runtime = SimpleNamespace(
+        root=ROOT, logs=root / "model-preflight-logs",
+        raw=root / "model-preflight-logs" / ".raw",
+        index=root / "model-preflight-logs" / "index.log",
+        backend="gemini", model="fixture-model",
+    )
+    model_runtime.raw.mkdir(parents=True)
+    with mock.patch.dict(
+        os.environ,
+        {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "1"},
+        clear=False,
+    ), mock.patch.object(audit_runner.llm_invoke, "run_agent_prompt", return_value=0), \
+         mock.patch.object(audit_runner.llm_invoke, "extract_text", return_value="MODEL_PREFLIGHT_OK"):
+        audit_runner.validate_model(model_runtime)
+    check(
+        "Model preflight passed" in model_runtime.index.read_text(encoding="utf-8"),
+        "model preflight exercises the requested model through the agent launch path",
+    )
+    model_runtime.backend = "oss"
+    with mock.patch.dict(
+        os.environ,
+        {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "1"},
+        clear=False,
+    ), mock.patch.object(audit_runner.llm_invoke, "run_agent_prompt", return_value=0), \
+         mock.patch.object(
+             audit_runner.llm_invoke, "extract_text",
+             side_effect=lambda _backend, _raw: (model_runtime.logs / ".preflight/oss-tool-sentinel.txt").read_text().strip(),
+         ), mock.patch.object(audit_runner.llm_invoke, "raw_has_tool", return_value=True):
+        audit_runner.validate_model(model_runtime)
+    check(
+        not (model_runtime.logs / ".preflight/oss-tool-sentinel.txt").exists(),
+        "OSS preflight requires a real read-tool result and removes its sentinel",
+    )
+    model_runtime.backend = "gemini"
+    with mock.patch.dict(
+        os.environ,
+        {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "1"},
+        clear=False,
+    ), mock.patch.object(audit_runner.llm_invoke, "run_agent_prompt", return_value=0), \
+         mock.patch.object(audit_runner.llm_invoke, "extract_text", return_value="wrong model response"):
+        try:
+            audit_runner.validate_model(model_runtime)
+            rejected_bad_model = False
+        except RuntimeError:
+            rejected_bad_model = True
+    check(rejected_bad_model, "model preflight rejects a nominal exit with the wrong response")
     config = target_config.Config(is_browser="1")
     with mock.patch.dict(os.environ, {"BROWSER_AGENTS": "2", "SHELL_AGENTS": "2"}, clear=False):
         equal((4, 2, 2), audit_runner._agent_counts(config, 10), "audit honors configured browser and shell role counts")
@@ -406,6 +463,35 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         agent_roles=("analysis", "reproduce", "reproduce"),
     )
     equal("analysis", explicit_context.role(1), "prompt applies explicit role ordering")
+    handoff_results = root / "handoff-results"
+    (handoff_results / "state").mkdir(parents=True)
+    (handoff_results / "state/hypotheses.jsonl").write_text(json.dumps({
+        "id": "H-HANDOFF", "agent": "1", "status": "NEEDS_TESTCASE",
+        "file": "src/parser.c:app_parse:91", "hypothesis": "nested state reaches stale entry",
+        "input_shape": "nested document", "guard_gap": "cleanup ordering",
+        "diagnostic": "lifetime", "strategy": "S5", "updated_at": "2026-07-10T00:00:00Z",
+    }) + "\n", encoding="utf-8")
+    handoff_context = prompt.PromptContext(
+        handoff_results, generic_target, "demo", references, 3,
+        agent_roles=("analysis", "reproduce", "reproduce"),
+    )
+    assigned_handoffs = {
+        agent: prompt.handoff_rows(handoff_context, agent) for agent in (2, 3)
+    }
+    assigned_agent = next(agent for agent, rows in assigned_handoffs.items() if rows)
+    check(
+        sum(bool(rows) for rows in assigned_handoffs.values()) == 1
+        and "H-HANDOFF" in prompt.handoff_directive(handoff_context, assigned_agent),
+        "analysis NEEDS_TESTCASE is routed to exactly one reproduce worker",
+    )
+    handoff_runtime = SimpleNamespace(
+        root=ROOT, results=handoff_results, target_root=generic_target,
+        target_slug="demo", repo_type="none",
+    )
+    check(
+        not audit_runner.should_skip_launch(handoff_runtime, handoff_context, assigned_agent),
+        "a pending analysis handoff keeps its reproduce worker launchable",
+    )
 
     strategy_results = root / "strategy-results"
     (strategy_results / "state").mkdir(parents=True)
@@ -441,15 +527,14 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     rotation_context = prompt.PromptContext(
         strategy_results, generic_target, "demo", references, 1,
     )
+    idle_progress = audit_runner.AgentProgress(0, 0, frozenset())
     with mock.patch.object(
         audit_runner.workqueue, "strategy_completion_status",
         return_value={"complete": True, "evidence": 2, "threshold": 2},
-    ), mock.patch.object(
-        audit_runner.structured_state, "agent_counts",
-        return_value={"active": 0, "result": 0},
     ):
         audit_runner.update_strategy_rotation(
-            rotation_runtime, rotation_context, {1: {"active": 0, "result": 0}}
+            rotation_runtime, rotation_context,
+            {1: idle_progress}, {1: idle_progress}, set(),
         )
     equal(
         "S7", (strategy_results / "state" / "strategy-1").read_text().strip(),
@@ -465,13 +550,12 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         + json.dumps({"agent": "2", "status": "DISCARDED", "file": "src/parser/b.c", "subsystem": "src/parser"}) + "\n",
         encoding="utf-8",
     )
-    with mock.patch.object(
-        audit_runner.structured_state, "agent_counts",
-        side_effect=lambda agent, _results: {"result": 1 if agent == "1" else 0},
-    ):
-        audit_runner.update_subsystem_dry_streaks(
-            subsystem_runtime, {1: {"result": 0}, 2: {"result": 0}}
-        )
+    audit_runner.update_subsystem_dry_streaks(
+        subsystem_runtime,
+        {1: idle_progress, 2: idle_progress},
+        {1: audit_runner.AgentProgress(0, 0, frozenset({"finding:FCL-1"})), 2: idle_progress},
+        {1},
+    )
     equal(
         0,
         audit_runner.workqueue.subsystem_dry_streak(
@@ -479,12 +563,12 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         ),
         "any productive agent resets a shared subsystem dry streak",
     )
-    with mock.patch.object(
-        audit_runner.structured_state, "agent_counts", return_value={"result": 0},
-    ):
-        audit_runner.update_subsystem_dry_streaks(
-            subsystem_runtime, {1: {"result": 0}, 2: {"result": 0}}
-        )
+    audit_runner.update_subsystem_dry_streaks(
+        subsystem_runtime,
+        {1: idle_progress, 2: idle_progress},
+        {1: idle_progress, 2: idle_progress},
+        set(),
+    )
     equal(
         1,
         audit_runner.workqueue.subsystem_dry_streak(
@@ -592,6 +676,8 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         state.iteration += 1
         return "dry", []
     with mock.patch.object(audit_runner, "instance_lock", return_value=contextlib.nullcontext()), \
+         mock.patch.object(audit_runner, "_activate_runtime"), \
+         mock.patch.object(audit_runner, "validate_model") as ensemble_model_preflight, \
          mock.patch.object(audit_runner, "preflight_build") as ensemble_preflight, \
          mock.patch.object(audit_runner, "initialize_backend", side_effect=_initialize_cycle), \
          mock.patch.object(audit_runner, "run_iteration", side_effect=_cycle_once), \
@@ -601,8 +687,9 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         )
     check(
         ensemble_rc == 0 and cycle_order == ["claude", "codex", "claude"]
+        and ensemble_model_preflight.call_count == 2
         and ensemble_preflight.call_count == 1,
-        "ensemble mode cycles backends and preflights the shared build once",
+        "ensemble mode preflights each model, cycles backends, and preflights the shared build once",
         repr(cycle_order),
     )
 
@@ -681,7 +768,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     launch_context.role.return_value = "reproduce"
     launch_context.scratch_dir.return_value = launch_scratch
     with mock.patch.object(audit_runner.prompt, "cold_start_prompt", return_value="prompt"), \
-         mock.patch.object(audit_runner.llm_invoke, "run_agent_prompt", return_value=0), \
+         mock.patch.object(audit_runner.llm_invoke, "run_agent_prompt", return_value=0) as launch_invoke, \
          mock.patch.object(audit_runner.llm_invoke, "extract_text", return_value="done"), \
          mock.patch.object(audit_runner.llm_usage, "extract_usage", return_value={}), \
          mock.patch.object(audit_runner.build_session_seed, "write_session_seed", return_value=True) as seed_refresh:
@@ -693,6 +780,56 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         and seed_args[1] == str(launch_results / ".session_seed_1.md"),
         "each completed agent launch refreshes the next prompt's session seed",
         repr(seed_refresh.call_args),
+    )
+    launch_env = launch_invoke.call_args.kwargs["extra_env"]
+    check(
+        launch_env["HITS_LOG_PATH"] == str(launch_results / "hits-1.log")
+        and launch_env["TRIED_INPUTS_LOG"] == str(launch_results / "tried-inputs-1.log"),
+        "agent and probe share the canonical per-agent evidence journals",
+        repr(launch_env),
+    )
+    corpus_testcase = launch_scratch / "coverage.html"
+    corpus_testcase.write_text(
+        "<!-- HYPOTHESIS-ID: H77 -->\n<!-- TARGET: src/parser.c -->\n"
+        "<!-- CATEGORY: bounds -->\n<html></html>\n",
+        encoding="utf-8",
+    )
+    (launch_scratch / "coverage.asan.txt").write_text(
+        "[run-sanitizer-multi] SUCCESS_RATE: 1/1\n",
+        encoding="utf-8",
+    )
+    (launch_results / "hits-1.log").write_text(
+        f"HIT: 2026-07-10T00:00:00Z testcase={corpus_testcase} "
+        "want=app_parse edges=2 new=1 frame=app_parse\n",
+        encoding="utf-8",
+    )
+    launch_runtime.num_agents = 1
+    with mock.patch.dict(os.environ, {"RESULTS_DIR": str(launch_results)}, clear=False):
+        promoted = audit_runner.promote_corpus(launch_runtime)
+    check(
+        promoted == 1 and any((launch_results / "corpus").glob("COVER-*/coverage.html")),
+        "post-iteration corpus promotion consumes probe's canonical HIT journal",
+    )
+    orphan = launch_scratch / "orphan.html"
+    orphan.write_text("<!-- TARGET: src/parser.c -->\n<!-- HYPOTHESIS-ID: H78 -->\n<html/>\n")
+    def _enforce_probe(command, _seconds, **_kwargs):
+        Path(command[-1]).with_suffix(".asan.txt").write_text(
+            "[run-sanitizer-multi] SUCCESS_RATE: 1/1\n", encoding="utf-8"
+        )
+        return SimpleNamespace(returncode=0)
+    with mock.patch.object(audit_runner, "run_timeout", side_effect=_enforce_probe):
+        enforced = audit_runner.enforce_orphan_testcases(launch_runtime)
+    check(
+        enforced == 1 and "CLEAN `orphan.html`" in
+        (launch_results / ".enforcement_results_1").read_text(encoding="utf-8"),
+        "post-iteration housekeeping probes runnable orphan testcases once",
+    )
+    enforcement_context = prompt.PromptContext(
+        launch_results, generic_target, "demo", references, 1,
+    )
+    check(
+        "ORPHAN TESTCASE RESULTS" in prompt.enforcement_results_directive(enforcement_context, 1),
+        "the next agent prompt receives orphan enforcement results",
     )
 
     audit_logs = root / "audit-logs"

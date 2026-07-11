@@ -84,6 +84,8 @@ def detect_format(path):
                     ev = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
+                if not isinstance(ev, dict):
+                    continue
                 ev_type = ev.get('type')
                 if ev_type in codex_markers:
                     return 'codex'
@@ -130,6 +132,8 @@ def _parse_claude_log(path):
             try:
                 ev = json.loads(line)
             except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(ev, dict):
                 continue
             t = ev.get('type')
             if t == 'assistant':
@@ -282,6 +286,8 @@ def _parse_codex_log(path):
                 ev = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
+            if not isinstance(ev, dict):
+                continue
             if ev.get('type') != 'item.completed':
                 continue
             item = ev.get('item', {}) or {}
@@ -401,6 +407,8 @@ def _parse_gemini_log(path):
             try:
                 ev = json.loads(line)
             except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(ev, dict):
                 continue
 
             ev_type = ev.get('type')

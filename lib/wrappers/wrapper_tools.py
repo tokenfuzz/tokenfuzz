@@ -14,7 +14,7 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 from command_tools import find_executable
-from file_tools import cap_output_bytes
+from file_tools import cap_output_file, capture_command
 
 
 def _real_tool(name: str, wrapper_dir: Path) -> str:
@@ -72,29 +72,24 @@ def capped_command(
     if _bypassed(tool) or _has_passthrough(args, set(passthrough)):
         _exec(real, command_args)
 
-    completed = subprocess.run(
-        [real, *command_args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
     cap_env = dict(os.environ)
     if "CAP_BYTES" in os.environ:
         cap_env["OUTCAP_MAX_BYTES"] = str(cap)
         cap_env["OUTCAP_HEAD_BYTES"] = str(cap * 3 // 5)
         cap_env["OUTCAP_TAIL_BYTES"] = str(cap * 2 // 5)
-    try:
-        stdout = cap_output_bytes(completed.stdout, f"{tool}-stdout", cap_env)
-        stderr = cap_output_bytes(completed.stderr, f"{tool}-stderr", cap_env)
-    except ValueError as exc:
-        print(exc, file=sys.stderr)
-        return 2
+    with capture_command([real, *command_args]) as completed:
+        try:
+            stdout = cap_output_file(completed.stdout, f"{tool}-stdout", cap_env)
+            stderr = cap_output_file(completed.stderr, f"{tool}-stderr", cap_env)
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 2
 
-    sys.stdout.buffer.write(stdout)
-    sys.stdout.buffer.flush()
-    sys.stderr.buffer.write(stderr)
-    sys.stderr.buffer.flush()
-    return completed.returncode
+        sys.stdout.buffer.write(stdout)
+        sys.stdout.buffer.flush()
+        sys.stderr.buffer.write(stderr)
+        sys.stderr.buffer.flush()
+        return completed.returncode
 
 
 SOURCE_SUFFIXES = {

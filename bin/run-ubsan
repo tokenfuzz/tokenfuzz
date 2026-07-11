@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import difflib
+import filecmp
 import os
 import shutil
 import sys
@@ -15,9 +15,9 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import sanitizer
 import target_config
-from sanitizer_helpers import _BROWSER_NOISE
+from sanitizer_helpers import _BROWSER_NOISE, copy_file, copy_filtered, file_contains
 from sanitizer_run import SanitizerRunner
-from timeout import run_timeout
+from timeout import capture_timeout, run_timeout
 
 PROFILE_PREFS = '''user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.policy.dataSubmissionEnabled", false);
@@ -67,13 +67,6 @@ def mode_options(mode: str) -> str:
     return sanitizer.compose_options("ubsan", sanitizer.options_for("ubsan", mode), CONFIG)
 
 
-def filtered_browser_output(data: bytes) -> bytes:
-    lines = data.decode(errors="replace").splitlines(keepends=True)
-    return "".join(
-        line for line in lines if not any(pattern.search(line) for pattern in _BROWSER_NOISE)
-    ).encode()
-
-
 def run_browser(options: str, timeout: int, args: list[str]) -> int:
     resolved = [
         Path(arg).resolve().as_uri() if not arg.startswith("-") and Path(arg).is_file() else arg
@@ -91,31 +84,29 @@ def run_browser(options: str, timeout: int, args: list[str]) -> int:
             "MOZ_DISABLE_CONTENT_SANDBOX": "1",
             "MOZ_HEADLESS": "1",
         }
-        completed = run_timeout(
+        with capture_timeout(
             [browser_binary(), "--profile", str(profile), "--no-remote", *resolved],
             timeout,
             env=environment,
-            capture_output=True,
-        )
-        output = completed.stdout + completed.stderr
-        sys.stdout.buffer.write(filtered_browser_output(output))
-        reports = [path for path in output_dir.glob("ubsan.log.*") if path.stat().st_size]
-        for report in reports:
-            print(f"=== UBSan report: {report.name} ===")
-            sys.stdout.buffer.write(report.read_bytes())
-        if reports:
-            print("[run-ubsan] UBSan issue detected", file=sys.stderr)
-            persist = ENV.get("UBSAN_CRASH_LOG_DIR")
-            if persist and Path(persist).is_dir():
-                for report in reports:
-                    shutil.copy2(report, persist)
-                (Path(persist) / "browser-output.txt").write_bytes(output)
-                print(f"[run-ubsan] Raw UBSan logs preserved in {persist}", file=sys.stderr)
-        elif b"TESTCASE_EXECUTED" in output:
-            print("[run-ubsan] EXECUTION VERIFIED: testcase ran (no UBSan issue)", file=sys.stderr)
-        else:
-            print("[run-ubsan] WARNING: no UBSan issue and no execution evidence - testcase may not have run", file=sys.stderr)
-        return completed.returncode
+        ) as (completed, output):
+            copy_filtered(output, sys.stdout.buffer, _BROWSER_NOISE)
+            reports = [path for path in output_dir.glob("ubsan.log.*") if path.stat().st_size]
+            for report in reports:
+                print(f"=== UBSan report: {report.name} ===")
+                copy_file(report, sys.stdout.buffer)
+            if reports:
+                print("[run-ubsan] UBSan issue detected", file=sys.stderr)
+                persist = ENV.get("UBSAN_CRASH_LOG_DIR")
+                if persist and Path(persist).is_dir():
+                    for report in reports:
+                        shutil.copy2(report, persist)
+                    shutil.copy2(output, Path(persist) / "browser-output.txt")
+                    print(f"[run-ubsan] Raw UBSan logs preserved in {persist}", file=sys.stderr)
+            elif file_contains(output, b"TESTCASE_EXECUTED"):
+                print("[run-ubsan] EXECUTION VERIFIED: testcase ran (no UBSan issue)", file=sys.stderr)
+            else:
+                print("[run-ubsan] WARNING: no UBSan issue and no execution evidence - testcase may not have run", file=sys.stderr)
+            return completed.returncode
 
 
 def run_js_diff(options: str, timeout: int, args: list[str]) -> int:
@@ -129,31 +120,22 @@ def run_js_diff(options: str, timeout: int, args: list[str]) -> int:
     js = ENV.get("UBSAN_JS", str(BUILD_DIR / "dist/bin/js"))
     environment = {**ENV, "UBSAN_OPTIONS": sanitizer.runtime_options("ubsan", options, ENV)}
     print(f"=== Running with {' '.join(eager)} (JIT eager) ===", file=sys.stderr)
-    eager_run = run_timeout([js, *eager, *args], timeout, env=environment, capture_output=True)
-    print(f"=== Running with {' '.join(off)} (JIT off) ===", file=sys.stderr)
-    off_run = run_timeout([js, *off, *args], timeout, env=environment, capture_output=True)
-    eager_out = eager_run.stdout + eager_run.stderr
-    off_out = off_run.stdout + off_run.stderr
-    print(f"=== {' '.join(eager)} output ===")
-    sys.stdout.buffer.write(eager_out)
-    print(f"\n=== {' '.join(off)} output ===")
-    sys.stdout.buffer.write(off_out)
-    print()
-    if eager_out == off_out:
-        print("[run-ubsan] DIFFERENTIAL: outputs MATCH (no divergence)", file=sys.stderr)
-    else:
-        print("[run-ubsan] DIFFERENTIAL: outputs DIFFER - potential JIT bug!", file=sys.stderr)
-        print("=== Diff ===", file=sys.stderr)
-        diff = difflib.unified_diff(
-            off_out.decode(errors="replace").splitlines(),
-            eager_out.decode(errors="replace").splitlines(),
-            lineterm="",
-        )
-        print("\n".join(diff), file=sys.stderr)
-    if b"runtime error:" in eager_out:
-        print(f"[run-ubsan] UBSan issue in {' '.join(eager)} mode", file=sys.stderr)
-    if b"runtime error:" in off_out:
-        print(f"[run-ubsan] UBSan issue in {' '.join(off)} mode", file=sys.stderr)
+    with capture_timeout([js, *eager, *args], timeout, env=environment) as (_, eager_out):
+        print(f"=== Running with {' '.join(off)} (JIT off) ===", file=sys.stderr)
+        with capture_timeout([js, *off, *args], timeout, env=environment) as (_, off_out):
+            print(f"=== {' '.join(eager)} output ===")
+            copy_file(eager_out, sys.stdout.buffer)
+            print(f"\n=== {' '.join(off)} output ===")
+            copy_file(off_out, sys.stdout.buffer)
+            print()
+            if filecmp.cmp(eager_out, off_out, shallow=False):
+                print("[run-ubsan] DIFFERENTIAL: outputs MATCH (no divergence)", file=sys.stderr)
+            else:
+                print("[run-ubsan] DIFFERENTIAL: outputs DIFFER - potential JIT bug!", file=sys.stderr)
+            if file_contains(eager_out, b"runtime error:"):
+                print(f"[run-ubsan] UBSan issue in {' '.join(eager)} mode", file=sys.stderr)
+            if file_contains(off_out, b"runtime error:"):
+                print(f"[run-ubsan] UBSan issue in {' '.join(off)} mode", file=sys.stderr)
     return 0
 
 

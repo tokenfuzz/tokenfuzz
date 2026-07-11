@@ -548,6 +548,10 @@ def find_shell_wrapper(scan_dirs: list[Path]) -> Optional[Path]:
             p = d / name
             if p.is_file():
                 return p
+        for name in ("testcase.sh", "reproducer.sh"):
+            p = d / name
+            if p.is_file() and crash_artifacts.looks_like_shell_wrapper(p):
+                return p
     return None
 
 

@@ -165,10 +165,11 @@ class Hits:
                 f"edges={self.edge_count} new={self.new_edges} frame={frame or '<none>'}\n"
             )
 
-    def run_target(self, coverage_dir: Path) -> tuple[bytes, int | None]:
+    def run_target(self, coverage_dir: Path) -> tuple[Path, int | None]:
         option_string = f"detect_leaks=0:coverage=1:halt_on_error=0:coverage_dir={coverage_dir}"
         environment = sanitizer.prepare_runtime_env("asan")
         environment["ASAN_OPTIONS"] = option_string
+        output = coverage_dir / "target-output.raw"
         if self.args.mode == "js":
             flags: list[str] = []
             script_args: list[str] = []
@@ -177,13 +178,13 @@ class Hits:
                     flags.append(arg)
                 else:
                     script_args.append(arg)
-            completed = run_timeout(
-                [str(self.js), *flags, str(self.testcase), *script_args],
-                self.args.timeout,
-                env=environment,
-                capture_output=True,
-            )
-            return completed.stdout + completed.stderr, None
+            with output.open("wb") as stream:
+                run_timeout(
+                    [str(self.js), *flags, str(self.testcase), *script_args],
+                    self.args.timeout, env=environment,
+                    stdout=stream, stderr=subprocess.STDOUT,
+                )
+            return output, None
 
         environment.update({"MOZ_DISABLE_CONTENT_SANDBOX": "1", "MOZ_HEADLESS": "1"})
         with tempfile.TemporaryDirectory(prefix="hits-profile-") as profile_name:
@@ -193,30 +194,39 @@ class Hits:
                 prefs += "\n" + os.environ["FIREFOX_EXTRA_PREFS"] + "\n"
             (profile / "user.js").write_text(prefs)
             (profile / "prefs.js").write_text(prefs)
-            process = subprocess.Popen(
-                [str(self.browser), "--profile", str(profile), "--no-remote", *self.args.extra, self.testcase.resolve().as_uri()],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=environment,
-                start_new_session=True,
-            )
-            parent_pid = process.pid
-            deadline = time.monotonic() + self.args.timeout
-            while process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.1)
-            if process.poll() is None:
+            with output.open("wb") as stream:
+                process = subprocess.Popen(
+                    [str(self.browser), "--profile", str(profile), "--no-remote", *self.args.extra, self.testcase.resolve().as_uri()],
+                    stdout=stream, stderr=subprocess.STDOUT, env=environment,
+                    start_new_session=True,
+                )
+                parent_pid = process.pid
+                deadline = time.monotonic() + self.args.timeout
+                while process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                # A browser parent can exit before content processes. Always
+                # close the unique process group before reading coverage.
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    os.killpg(parent_pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
-                try:
-                    process.wait(timeout=25)
-                except subprocess.TimeoutExpired:
+                group_deadline = time.monotonic() + 25
+                while time.monotonic() < group_deadline:
                     try:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        os.killpg(parent_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.1)
+                else:
+                    try:
+                        os.killpg(parent_pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-            output = process.communicate()[0] if process.stdout else b""
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
             time.sleep(0.5)
             return output, parent_pid
 
@@ -238,16 +248,25 @@ class Hits:
             stem = coverage.name.removesuffix(".sancov")
             base, _, pid_text = stem.rpartition(".")
             target = by_name.get(base, fallback)
-            printed = subprocess.run([str(self.sancov), "-print", str(coverage)], capture_output=True, check=False)
-            symbolized = subprocess.run(
-                [str(self.symbolizer), "-e", str(target), "--inlines", "--demangle"],
-                input=printed.stdout,
-                capture_output=True,
-                check=False,
-            ).stdout.decode(errors="replace").splitlines()
-            all_lines.extend(symbolized)
-            if self.args.mode == "js" or parent_pid is None or pid_text != str(parent_pid):
-                content_lines.extend(symbolized)
+            with tempfile.TemporaryDirectory(prefix="hits-symbolize-") as tmp:
+                addresses = Path(tmp) / "addresses"
+                symbolized = Path(tmp) / "symbolized"
+                with addresses.open("wb") as output:
+                    subprocess.run(
+                        [str(self.sancov), "-print", str(coverage)],
+                        stdout=output, stderr=subprocess.DEVNULL, check=False,
+                    )
+                with addresses.open("rb") as source, symbolized.open("wb") as output:
+                    subprocess.run(
+                        [str(self.symbolizer), "-e", str(target), "--inlines", "--demangle"],
+                        stdin=source, stdout=output, stderr=subprocess.DEVNULL, check=False,
+                    )
+                with symbolized.open(encoding="utf-8", errors="replace") as source:
+                    for raw in source:
+                        line = raw.rstrip("\n")
+                        all_lines.append(line)
+                        if self.args.mode == "js" or parent_pid is None or pid_text != str(parent_pid):
+                            content_lines.append(line)
         return all_lines, content_lines
 
     def write_hits(self, lines: list[str], content: list[str]) -> Path:
@@ -320,7 +339,7 @@ class Hits:
         with tempfile.TemporaryDirectory(prefix="hits-cov-") as coverage_name:
             coverage_dir = Path(coverage_name)
             output, parent_pid = self.run_target(coverage_dir)
-            if self.args.mode == "browser" and not output:
+            if self.args.mode == "browser" and output.stat().st_size == 0:
                 print("EXEC_FAIL - browser produced no stdout/stderr at all (launch failure)")
                 self.append_verdict("EXEC_FAIL:")
                 return 3

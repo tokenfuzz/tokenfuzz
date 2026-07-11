@@ -17,7 +17,9 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -51,6 +53,18 @@ def run_timeout(
         stderr=stderr,
         check=False,
     )
+
+
+@contextmanager
+def capture_timeout(command: Sequence[str], seconds: int, **kwargs):
+    """Run through the timeout wrapper with combined output stored on disk."""
+    with tempfile.TemporaryDirectory(prefix="timeout-capture-") as directory:
+        output = Path(directory) / "output"
+        with output.open("wb") as stream:
+            completed = run_timeout(
+                command, seconds, stdout=stream, stderr=subprocess.STDOUT, **kwargs
+            )
+        yield completed, output
 
 
 def _die(msg):

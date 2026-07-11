@@ -79,6 +79,22 @@ NONINPUT_TEXT_STEMS = {
 }
 _BIN_FILE_RE = re.compile(r"executable|Mach-O|ELF|shared object|dSYM", re.IGNORECASE)
 _ASAN_TESTCASE_RE = re.compile(r"\btestcase=([^ \t\r\n]+)")
+_SHELL_SHEBANG_RE = re.compile(r"^\s*#!.*\b(?:sh|bash|zsh|ksh)\b")
+_SHELL_WRAPPER_HINT_RE = re.compile(
+    r'(?m)(?:^\s*set\s+-|^\s*(?:ROOT|SRC|BUILD|SCRATCH|HARNESS_C|HARNESS_BIN|BIN)='
+    r'|^\s*(?:if|for|while)\s+|^\s*exec\s+|"\$(?:BIN|HARNESS_BIN|san_bin)"'
+    r'|\$(?:BIN|HARNESS_BIN|san_bin|repro_src)\b|/build-(?:a|ub|m|t)san/)'
+)
+
+
+def looks_like_shell_wrapper(path: Path) -> bool:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            text = stream.read(256 * 1024)
+    except OSError:
+        return False
+    first = text.splitlines()[0] if text.splitlines() else ""
+    return bool(_SHELL_SHEBANG_RE.search(first) or _SHELL_WRAPPER_HINT_RE.search(text))
 
 
 def _sort_key(path: Path) -> tuple[int, str]:
@@ -283,6 +299,8 @@ def is_testcase_candidate(path: Path, *, from_asan_header: bool = False,
         return False
 
     lower = name.lower()
+    if lower in {"testcase.sh", "reproducer.sh"} and looks_like_shell_wrapper(path):
+        return False
     prefixed = any(lower.startswith(p) for p in TESTCASE_PREFIXES)
     # A C/C++ source file that defines main() is almost certainly the
     # audit harness (e.g. `to_json_throwing_string_harness.cpp`), not the
@@ -343,11 +361,18 @@ def find_primary_sanitizer(scan_dirs: Iterable[Path]) -> Optional[Path]:
         if p.is_file() and p.stat().st_size > 0:
             return p
     matches: list[Path] = []
+    aliases = {
+        "asan.txt", "asan-output.txt", "asan_output.txt",
+        "msan.txt", "msan-output.txt", "msan_output.txt",
+        "tsan.txt", "tsan-output.txt", "tsan_output.txt",
+        "ubsan.txt", "ubsan-output.txt", "ubsan_output.txt",
+    }
     for d in dirs:
         for p in _visible_files(d):
             name = p.name
             if (
-                name.endswith(".asan.txt")
+                name.lower() in aliases
+                or name.endswith(".asan.txt")
                 or name.endswith(".msan.txt")
                 or name.endswith(".tsan.txt")
                 or name.endswith(".ubsan.txt")

@@ -18,6 +18,7 @@ from pathlib import Path
 import benchmark
 import crash_artifacts
 import llm_decide
+import stack_frames
 from prompt_render import render_template
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
@@ -85,6 +86,14 @@ _AUTO_REJECT = (
     (re.compile(r"^thread '[^']*'(?: \([^)]*\))? panicked at |\bRustMozCrash\b", re.MULTILINE), "runtime panic"),
 )
 _REPORT_NAMES = ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md")
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value >= 1 else default
 
 
 def _read(path: Path, limit: int = 1_000_000) -> str:
@@ -232,6 +241,216 @@ def _field(text: str, name: str) -> str:
     return label.group(1).strip() if label else ""
 
 
+_REACH_FIELD_LABELS = {
+    "surface": "Surface",
+    "primitive": "Primitive",
+    "class": "Class",
+    "caller_contract": "Caller contract",
+    "caller_controls": "Caller controls",
+    "trigger_source": "Trigger source",
+    "parameter_control": "Parameter control",
+    "trusted_caller_actions": "Trusted caller actions",
+    "boundary": "Boundary",
+    "advisory": "Advisory",
+}
+_REACH_FIELD_ENUMS = {
+    "caller_contract": {"obeyed", "violated"},
+    "caller_controls": {"bytes", "length", "number", "flags", "call-sequence", "timing", "none"},
+    "trigger_source": {"bytes", "both", "call-sequence", "timing", "race", "protocol-state", "env", "fs-state"},
+    "parameter_control": {"direct", "indirect", "application-supplied", "trusted", "harness-only"},
+    "trusted_caller_actions": {"normal public call", "private mutation", "callback ordering", "harness-only"},
+    "advisory": {"yes", "no"},
+}
+_SURFACE_KINDS = {"network", "library-api", "file-format", "cli", "dev-tool", "internal", "unknown"}
+
+
+def _valid_reach_field(key: str, value: object) -> str:
+    """Return a safe scorer field value, or empty when a decision is malformed."""
+    if key not in _REACH_FIELD_LABELS or not isinstance(value, str):
+        return ""
+    normalized = " ".join(value.split()).strip()
+    if not normalized or len(normalized) > 300 or "|" in normalized:
+        return ""
+    lowered = normalized.lower()
+    if key in _REACH_FIELD_ENUMS and lowered not in _REACH_FIELD_ENUMS[key]:
+        return ""
+    # bin/severity owns the canonical primitive table. Keep this boundary
+    # structural so adding a scorer primitive does not require a second list;
+    # unsupported keys are ignored by the scorer rather than gaining impact.
+    if key == "primitive" and not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", lowered):
+        return ""
+    if key == "surface":
+        kind = lowered.split(None, 1)[0].rstrip(":;,-")
+        if kind not in _SURFACE_KINDS:
+            return ""
+    return normalized
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _reach_field_present(text: str, label: str) -> bool:
+    """Treat generated placeholders as missing while preserving real author values."""
+    values = re.findall(
+        rf"^\|\s*{re.escape(label)}\s*\|\s*([^|\n]*)|^{re.escape(label)}\s*:\s*(.*)$",
+        text, re.IGNORECASE | re.MULTILINE,
+    )
+    placeholders = {"", "-", "—", "tbd", "unspecified", "unknown / not assessed"}
+    return any(
+        (table_value or bare_value).strip().lower() not in placeholders
+        for table_value, bare_value in values
+    )
+
+
+def fill_reach_fields(directory: Path) -> bool:
+    """Fill missing scorer fields from report evidence without overriding authors.
+
+    The report is the severity scorer's sole input. The decision sidecar only
+    records bounded retry state; accepted fallback values are materialized as
+    bare report fields so every downstream consumer sees the same facts.
+    """
+    if os.environ.get("LLM_FIELD_FILL_DISABLE", "0") == "1":
+        return False
+    report = _report(directory)
+    if report is None:
+        return False
+    try:
+        with report.open("rb") as stream:
+            text = stream.read(6000).decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    missing = {
+        key: label for key, label in _REACH_FIELD_LABELS.items()
+        if not _reach_field_present(text, label)
+    }
+    if not missing:
+        return False
+    sidecar = directory / ".llm_fields.json"
+    cache = _finding_cache(sidecar)
+    try:
+        attempts = int(cache.get("_fill_attempts", 0))
+        max_attempts = _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
+    except (TypeError, ValueError):
+        attempts, max_attempts = 0, 2
+    if attempts >= max_attempts:
+        return False
+    prompt = render_template("triage_reachability_fields.md.j2", {"narrative": text})
+    try:
+        timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
+    except ValueError:
+        timeout = 45
+    decision = llm_decide.llm_decide("reachability-fields", "", prompt, timeout)
+    cache["_fill_attempts"] = attempts + 1
+    if not isinstance(decision, dict):
+        _write_atomic_json(sidecar, cache)
+        return False
+    accepted = {
+        key: value
+        for key, raw in decision.items()
+        if key in missing and (value := _valid_reach_field(key, raw))
+    }
+    cache.update(accepted)
+    _write_atomic_json(sidecar, cache)
+    if not accepted:
+        return False
+    current = report.read_text(encoding="utf-8", errors="replace")
+    additions = [
+        f"{_REACH_FIELD_LABELS[key]}: {value}"
+        for key, value in accepted.items()
+        if not _reach_field_present(current, _REACH_FIELD_LABELS[key])
+    ]
+    if not additions:
+        return False
+    _atomic_write_text(report, current.rstrip() + "\n\n" + "\n".join(additions) + "\n")
+    return True
+
+
+def fill_reach_fields_tree(root: Path) -> int:
+    """Apply reach-field convergence to every pooled crash and finding."""
+    filled = 0
+    for kind, prefix in (("findings", "FIND-*"), ("crashes", "CRASH-*")):
+        for directory in sorted((Path(root) / kind).glob(prefix)):
+            if directory.is_dir() and fill_reach_fields(directory):
+                filled += 1
+    return filled
+
+
+def _cluster_source_path(location: str, target_root: Path) -> tuple[Path, int] | None:
+    match = re.search(r"^(.*?):(\d+)(?::\d+)?$", location or "")
+    if not match:
+        return None
+    candidate = Path(match.group(1))
+    candidate = candidate if candidate.is_absolute() else target_root / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(target_root.resolve())
+    except (OSError, ValueError):
+        return None
+    return (resolved, max(1, int(match.group(2)))) if resolved.is_file() else None
+
+
+def cluster_expansion_decision(
+    crash_dir: Path, target_root: Path, *, deadline: float | None = None,
+) -> list[dict] | None:
+    """Return up to three source-grounded sibling leads for one new crash.
+
+    ``None`` means retryable/unavailable; an empty list is a completed decision
+    that found no strong siblings and may be marked final by the caller.
+    """
+    sanitizer = _sanitizer_file(crash_dir)
+    if sanitizer is None:
+        return None
+    text = _read(sanitizer)
+    frames = stack_frames.iter_asan_frames(text)[:8]
+    if not frames:
+        return None
+    source_parts: list[str] = []
+    seen: set[Path] = set()
+    for frame in frames:
+        resolved = _cluster_source_path(frame.location, Path(target_root))
+        if resolved is None:
+            continue
+        path, line = resolved
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        start = max(0, line - 7)
+        end = min(len(lines), line + 6)
+        relative = path.relative_to(Path(target_root).resolve())
+        source_parts.append(f">>> {relative}:{line}\n" + "\n".join(lines[start:end]))
+        if len(source_parts) >= 3:
+            break
+    prompt = render_template(
+        "triage_cluster_expand.md.j2",
+        {
+            "id": crash_dir.name,
+            "frames": "\n".join(frame.raw for frame in frames),
+            "source_block": "\n\n".join(source_parts) or "(source unavailable)",
+        },
+    )
+    try:
+        configured = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
+    except ValueError:
+        configured = 45
+    # This decision sees only the bounded frame/source excerpts above. It does
+    # not need the old ten-minute floor; use the backend-appropriate decision
+    # timeout and let the live productive-wall deadline shorten it further.
+    timeout = _decision_timeout(configured, deadline)
+    if timeout <= 0:
+        return None
+    decision = llm_decide.llm_decide("cluster_expand", "rows", prompt, timeout)
+    if not isinstance(decision, dict) or not isinstance(decision.get("rows"), list):
+        return None
+    return [row for row in decision["rows"][:3] if isinstance(row, dict)]
+
+
 def evaluate_crash_verdict(report_text: str, controls: list[str]) -> tuple[str, str]:
     contract = _field(report_text, "Caller contract").lower()
     parameter = _field(report_text, "Parameter control").lower().replace("_", "-")
@@ -263,11 +482,33 @@ def evaluate_crash_verdict(report_text: str, controls: list[str]) -> tuple[str, 
 
 def _set_contract_concern(report: Path, reason: str) -> None:
     text = _read(report)
-    marker = "Contract concern:"
-    if marker.lower() in text.lower():
-        return
-    with report.open("a", encoding="utf-8") as stream:
-        stream.write(f"\n{marker} {reason}\n")
+    text = re.sub(
+        r"\n?## Contract concern\s*\n.*?(?=\n(?:## |Summary:)|\Z)", "", text,
+        flags=re.DOTALL,
+    ).rstrip()
+    block = (
+        "## Contract concern\n\n"
+        f"Triage kept this crash and flagged a contract concern: {reason}.\n\n"
+        "The diagnostic is real; downstream scoring recomputes the impact "
+        "from the report fields and target.toml.\n\n"
+    )
+    summary = re.search(r"(?m)^(?:Summary:|##\s+Summary\s*$)", text)
+    updated = text[:summary.start()] + block + text[summary.start():] if summary else text + "\n\n" + block
+    report.write_text(updated.rstrip() + "\n", encoding="utf-8")
+    (report.parent / ".contract-flagged").write_text(
+        f"# Contract-flagged by triage\n# Reason: {reason}\n", encoding="utf-8"
+    )
+
+
+def _clear_contract_concern(report: Path) -> None:
+    (report.parent / ".contract-flagged").unlink(missing_ok=True)
+    text = _read(report)
+    updated = re.sub(
+        r"\n?## Contract concern\s*\n.*?(?=\n(?:## |Summary:)|\Z)", "", text,
+        flags=re.DOTALL,
+    )
+    if updated != text:
+        report.write_text(updated.rstrip() + "\n", encoding="utf-8")
 
 
 def _run_tool(name: str, *args: str, env: dict | None = None) -> int:
@@ -692,6 +933,9 @@ def triage_one_crash(
         return _hold_incomplete(
             crash_dir, rejected_root, None, "bundle", ["REPORT.md"]
         )
+    if not _deadline_expired(deadline):
+        fill_reach_fields(crash_dir)
+        report = _report(crash_dir) or report
     verdict, detail = evaluate_crash_verdict(_read(report), attacker_controls)
     if verdict == "incomplete":
         return _hold_incomplete(
@@ -701,6 +945,8 @@ def triage_one_crash(
     _clear_promotion_sidecars(crash_dir)
     if verdict == "contract-flag":
         _set_contract_concern(report, detail)
+    else:
+        _clear_contract_concern(report)
     if _crash_trigger_gate(crash_dir, report, Path(target_root), deadline):
         _reject(
             crash_dir, rejected_root,
@@ -708,7 +954,7 @@ def triage_one_crash(
         )
         return "rejected"
     if _decision_timeout(1, deadline):
-        _run_tool("severity", str(crash_dir), env=environment)
+        _run_tool("severity", "--report", str(crash_dir), env=environment)
     return "promoted"
 
 
@@ -758,6 +1004,23 @@ def _quality_vote(report_text: str, timeout: int) -> dict | None:
     )
 
 
+def _finalize_accepted_finding(
+    finding_dir: Path, results_dir: Path, report: Path,
+    deadline: float | None,
+) -> str:
+    if not _deadline_expired(deadline):
+        fill_reach_fields(finding_dir)
+        report = _report(finding_dir) or report
+    if _finding_trigger_rejected(finding_dir, report, deadline):
+        _reject(
+            finding_dir, results_dir / "findings-rejected",
+            "trigger-provenance: triggering state not attacker-reachable",
+        )
+        return "rejected"
+    _run_tool("severity", "--report", str(finding_dir))
+    return "accepted"
+
+
 def validate_one_finding(
     finding_dir: Path,
     results_dir: Path,
@@ -781,14 +1044,9 @@ def validate_one_finding(
     if cache.get("decision_version") == "v13-python":
         if cache.get("accept") is True and int(cache.get("accept_count", 0)) >= accept_quorum:
             (finding_dir / ".pending-drop").unlink(missing_ok=True)
-            if _finding_trigger_rejected(finding_dir, report, deadline):
-                _reject(
-                    finding_dir, results_dir / "findings-rejected",
-                    "trigger-provenance: triggering state not attacker-reachable",
-                )
-                return "rejected"
-            _run_tool("severity", str(finding_dir))
-            return "accepted"
+            return _finalize_accepted_finding(
+                finding_dir, results_dir, report, deadline
+            )
         if cache.get("accept") is False and int(cache.get("reject_count", 0)) >= quorum:
             _reject(finding_dir, results_dir / "findings-rejected", str(cache.get("reason") or "quality gate reject"))
             return "rejected"
@@ -816,14 +1074,9 @@ def validate_one_finding(
                 }
                 _write_atomic_json(cache_path, payload)
                 (finding_dir / ".pending-drop").unlink(missing_ok=True)
-                if _finding_trigger_rejected(finding_dir, report, deadline):
-                    _reject(
-                        finding_dir, results_dir / "findings-rejected",
-                        "trigger-provenance: triggering state not attacker-reachable",
-                    )
-                    return "rejected"
-                _run_tool("severity", str(finding_dir))
-                return "accepted"
+                return _finalize_accepted_finding(
+                    finding_dir, results_dir, report, deadline
+                )
         else:
             rejects += 1
             rejected_reason = str(vote.get("reason") or rejected_reason)
@@ -867,9 +1120,9 @@ def validate_find_gate(
     findings = results / "findings"
     findings.mkdir(parents=True, exist_ok=True)
     directories = [path for path in sorted(findings.glob("FIND-*")) if path.is_dir()]
-    q = quorum or max(1, int(os.environ.get("FIND_GATE_QUORUM", "2")))
-    aq = accept_quorum or max(1, int(os.environ.get("FIND_GATE_ACCEPT_QUORUM", "2")))
-    timeout = max(1, int(os.environ.get("LLM_DECISION_TIMEOUT", "300")))
+    q = quorum or _positive_int_env("FIND_GATE_QUORUM", 2)
+    aq = accept_quorum or _positive_int_env("FIND_GATE_ACCEPT_QUORUM", 2)
+    timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 300)
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         statuses = pool.map(

@@ -3388,6 +3388,92 @@ def add_hypothesis(ctx: Context, args: argparse.Namespace) -> dict:
     return row
 
 
+def _cluster_owner_agent(crash_id: str, num_agents: int = 0) -> str:
+    """Return the filing agent for a crash, clamped to the live worker set."""
+    core = re.sub(r"^(?:CRASH|FIND)-", "", (crash_id or "").strip(), flags=re.IGNORECASE)
+    numbers = [part for part in core.split("-") if part.isdigit()]
+    agent = int(numbers[-1]) if len(numbers) >= 2 else 1
+    if not num_agents:
+        raw = os.environ.get("NUM_AGENTS", "")
+        num_agents = int(raw) if raw.isdigit() and int(raw) >= 1 else 0
+    if num_agents and not 1 <= agent <= num_agents:
+        agent = (agent - 1) % num_agents + 1
+    return str(agent)
+
+
+def add_cluster_hypotheses(
+    ctx: Context, crash_id: str, rows: list[dict], strategy: str = "",
+    *, num_agents: int = 0,
+) -> dict:
+    """Route crash-sibling leads into structured state under one JSONL lock."""
+    init_state(ctx)
+    agent = _cluster_owner_agent(crash_id, num_agents)
+    hyp_path = state_dir(ctx.results_dir) / "hypotheses.jsonl"
+
+    def surface_key(file_field: str, hypothesis: str) -> str:
+        return f"{file_field.strip().lower()}::{' '.join(hypothesis.split()).lower()}"
+
+    added = skipped = 0
+    now = now_iso()
+    with jsonl_lock(hyp_path):
+        existing = _read_jsonl_unlocked(hyp_path)
+        if not strategy:
+            origin = _crash_origin_from_hyps(existing, crash_id)
+            strategy = str(origin.get("strategy", "")).strip() if origin else ""
+        strategy = strategy or "S5"
+        existing_ids = {str(row.get("id", "")) for row in existing}
+        seen = {
+            surface_key(str(row.get("file", "")), str(row.get("hypothesis", "")))
+            for row in existing
+            if is_active_hypothesis_status(row.get("status", ""))
+        }
+        for item in rows[:3]:
+            file_path = str(item.get("file", "")).strip() if isinstance(item, dict) else ""
+            hypothesis = str(item.get("hypothesis", "")).strip() if isinstance(item, dict) else ""
+            category = str(item.get("category", "")).strip().lower() if isinstance(item, dict) else ""
+            if not file_path or not hypothesis:
+                skipped += 1
+                continue
+            category = category if category in HYPOTHESIS_DIAGNOSTIC_CATEGORIES else "state"
+            function = str(item.get("function", "")).strip()
+            line = str(item.get("line", "")).strip()
+            if (function or line not in ("", "0")) and file_path.count(":") < 2:
+                file_path = ":".join(
+                    part for part in (file_path, function, line if line != "0" else "") if part
+                )
+            key = surface_key(file_path, hypothesis)
+            if key in seen:
+                skipped += 1
+                continue
+            seed = f"{agent}:{file_path}:{hypothesis}:{now}:{added}"
+            hypothesis_id = "H-" + hashlib.sha1(seed.encode()).hexdigest()[:10]
+            counter = 0
+            while hypothesis_id in existing_ids:
+                counter += 1
+                hypothesis_id = "H-" + hashlib.sha1(f"{seed}:{counter}".encode()).hexdigest()[:10]
+            existing_ids.add(hypothesis_id)
+            seen.add(key)
+            _append_jsonl_unlocked(
+                hyp_path,
+                {
+                    "id": hypothesis_id,
+                    "agent": agent,
+                    "card_id": "",
+                    "hypothesis": hypothesis,
+                    "file": file_path,
+                    "input_shape": f"sibling of {crash_id}",
+                    "guard_gap": "unknown",
+                    "diagnostic": category,
+                    "strategy": strategy,
+                    "status": "PENDING",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            added += 1
+    return {"agent": agent, "added": added, "skipped": skipped}
+
+
 # Note fingerprints that indicate an environmental / build wall: the
 # next hypothesis on the same compilation unit will hit the same wall,
 # so blocking sibling cards saves wasted sessions. Kept tight on

@@ -98,7 +98,7 @@ _ASAN_PREFIX_PATTERNS = (
 )
 
 _ASAN_VERIFIED_RE = re.compile(
-    r"(ASAN_RUN_HEADER:|CRASH_RATE:|EXECUTION_RATE:|"
+    r"(ASAN_RUN_HEADER:|SANITIZER_RUN_HEADER:|CRASH_RATE:|EXECUTION_RATE:|SUCCESS_RATE: [1-9][0-9]*/|"
     r"\[run-asan\] CRASH DETECTED|"
     r"\[run-asan\] (?:browser|js|js-diff|xpcshell|generic)? ?EXECUTION VERIFIED|"
     r"ERROR: AddressSanitizer)"
@@ -213,14 +213,16 @@ def _file_has_verified_asan(path: str) -> bool:
     CRASH/VERIFIED markers, or an AddressSanitizer error line. A
     COVERAGE_GATE: MISSED marker disqualifies the run.
     """
+    verified = False
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
+            for line in f:
+                if _COVERAGE_MISSED_RE.search(line):
+                    return False
+                verified |= bool(_ASAN_VERIFIED_RE.search(line))
     except OSError:
         return False
-    if _COVERAGE_MISSED_RE.search(text):
-        return False
-    return bool(_ASAN_VERIFIED_RE.search(text))
+    return verified
 
 
 def count_verified_sanitizer_runs(directory: str) -> int:
@@ -467,18 +469,24 @@ def _cmd_promote_corpus(args) -> int:
                 skipped_no_asan += 1
                 continue
 
+            clean = crashing = False
             try:
                 with open(asan_out, "r", encoding="utf-8", errors="replace") as af:
-                    asan_text = af.read()
+                    for diagnostic_line in af:
+                        clean |= bool(_CLEAN_EVIDENCE_RE.search(diagnostic_line))
+                        crashing |= bool(re.search(
+                            r"ERROR: AddressSanitizer|CRASH_RATE: [1-9]",
+                            diagnostic_line,
+                        ))
             except OSError:
                 skipped_no_asan += 1
                 continue
 
-            if not _CLEAN_EVIDENCE_RE.search(asan_text):
+            if not clean:
                 skipped_no_asan += 1
                 continue
 
-            if re.search(r"ERROR: AddressSanitizer|CRASH_RATE: [1-9]", asan_text):
+            if crashing:
                 skipped_crashing += 1
                 continue
 

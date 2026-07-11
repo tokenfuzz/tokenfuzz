@@ -141,7 +141,10 @@ def sanitize_target_slug(raw: str, targets_root: str) -> str:
         normalized = re.sub(r"[^a-z0-9._-]+", "-", component.lower()).strip("-")
         if normalized:
             parts.append(normalized)
-    return "/".join(parts)
+    slug = "/".join(parts)
+    if not slug:
+        raise ValueError(f"target path has no usable slug: {raw}")
+    return slug
 
 
 def _cmd_sanitize_target_slug(args: argparse.Namespace) -> int:
@@ -1006,9 +1009,10 @@ def _cmd_finish_fields(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_codex_turn_delta(args: argparse.Namespace) -> int:
+def codex_turn_delta(log_file: str | os.PathLike[str], offset: int = 0) -> tuple[int, int]:
+    """Count newly completed Codex shell commands without rereading the log."""
     try:
-        offset = int(args.offset)
+        offset = int(offset)
     except (TypeError, ValueError):
         offset = 0
     if offset < 0:
@@ -1017,27 +1021,21 @@ def _cmd_codex_turn_delta(args: argparse.Namespace) -> int:
     count = 0
     next_offset = offset
     try:
-        with open(args.log_file, "rb") as f:
+        with open(log_file, "rb") as f:
             size = f.seek(0, os.SEEK_END)
             if offset > size:
                 offset = 0
             f.seek(offset)
             chunk = f.read()
     except OSError:
-        print("count=0")
-        print(f"offset={offset}")
-        return 0
+        return 0, offset
 
     if not chunk:
-        print("count=0")
-        print(f"offset={offset}")
-        return 0
+        return 0, offset
 
     last_newline = chunk.rfind(b"\n")
     if last_newline < 0:
-        print("count=0")
-        print(f"offset={offset}")
-        return 0
+        return 0, offset
 
     complete = chunk[: last_newline + 1]
     next_offset = offset + last_newline + 1
@@ -1054,8 +1052,13 @@ def _cmd_codex_turn_delta(args: argparse.Namespace) -> int:
         if isinstance(item, dict) and item.get("type") == "command_execution":
             count += 1
 
+    return count, next_offset
+
+
+def _cmd_codex_turn_delta(args: argparse.Namespace) -> int:
+    count, offset = codex_turn_delta(args.log_file, args.offset)
     print(f"count={count}")
-    print(f"offset={next_offset}")
+    print(f"offset={offset}")
     return 0
 
 

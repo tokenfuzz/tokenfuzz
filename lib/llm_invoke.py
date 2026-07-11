@@ -49,16 +49,21 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import fcntl
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
+from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -172,6 +177,7 @@ _GEMINI_ISOLATION_MARKER = ".tokenfuzz-memory-isolated"
 # Cache the staged isolated home for the lifetime of one process so repeated
 # memory_env("gemini") calls reuse the one staged dir.
 _gemini_iso_home: "str | None" = None
+_gemini_iso_lock = threading.Lock()
 _gemini_effort_settings: dict[tuple[str, str], str] = {}
 
 
@@ -195,6 +201,27 @@ def _same_path(a: str, b) -> bool:
         return os.path.realpath(a) == os.path.realpath(os.fspath(b))
     except (OSError, ValueError):
         return False
+
+
+def _is_clean_gemini_home(path: Path) -> bool:
+    try:
+        _verify_clean_gemini_home(path)
+    except OSError:
+        return False
+    return True
+
+
+@contextmanager
+def _gemini_home_file_lock(home: Path):
+    """Serialize first staging across audit and llm_decide processes."""
+    home.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = home.with_name(f".{home.name}.lock")
+    with lock_path.open("a+") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _stage_clean_gemini_home(iso_root: Path) -> None:
@@ -228,7 +255,7 @@ def _verify_clean_gemini_home(iso_root: Path) -> None:
         raise OSError(f"Gemini CLI .gemini directory is not clean: {iso_gemini}")
 
 
-def prepare_gemini_memory_isolation() -> "str | None":
+def _prepare_gemini_memory_isolation_locked() -> "str | None":
     """Relocate GEMINI_CLI_HOME to a clean, empty per-run home and return it.
 
     Denying the save_memory tool does NOT isolate Gemini CLI's cross-run
@@ -269,19 +296,24 @@ def prepare_gemini_memory_isolation() -> "str | None":
     logdir = os.environ.get("LOGDIR", "").strip()
     if logdir:
         desired = Path(logdir) / ".gemini-home"
-        # Reuse ONLY when the inherited/cached home is this run's home; a
-        # mismatch belongs to a different run/cell and must not be reused.
-        if existing and _same_path(existing, desired) and _is_tokenfuzz_gemini_home(existing):
+        with _gemini_home_file_lock(desired):
+            # Reuse ONLY when the inherited/cached home is this run's home; a
+            # mismatch belongs to a different run/cell and must not be reused.
+            if existing and _same_path(existing, desired) and _is_tokenfuzz_gemini_home(existing):
+                _gemini_iso_home = str(desired)
+                return _gemini_iso_home
+            if _gemini_iso_home is not None and _same_path(_gemini_iso_home, desired):
+                return _gemini_iso_home
+            # Another process from this run may have won initial staging.
+            if _is_clean_gemini_home(desired):
+                _gemini_iso_home = str(desired)
+                return _gemini_iso_home
+            try:
+                _stage_clean_gemini_home(desired)
+            except OSError:
+                return None
             _gemini_iso_home = str(desired)
             return _gemini_iso_home
-        if _gemini_iso_home is not None and _same_path(_gemini_iso_home, desired):
-            return _gemini_iso_home
-        try:
-            _stage_clean_gemini_home(desired)
-        except OSError:
-            return None
-        _gemini_iso_home = str(desired)
-        return _gemini_iso_home
     # No $LOGDIR (standalone caller): there is no per-run path to key on, so an
     # inherited marked home or the in-process cache is reused; otherwise a
     # throwaway removed at process exit.
@@ -297,6 +329,12 @@ def prepare_gemini_memory_isolation() -> "str | None":
         return None
     _gemini_iso_home = str(iso_root)
     return _gemini_iso_home
+
+
+def prepare_gemini_memory_isolation() -> "str | None":
+    """Stage or reuse the current run's Gemini CLI home atomically."""
+    with _gemini_iso_lock:
+        return _prepare_gemini_memory_isolation_locked()
 
 
 def memory_env(backend: str) -> dict:
@@ -322,9 +360,50 @@ def memory_env(backend: str) -> dict:
         return {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
     if backend == "gemini" and use_gemini_cli():
         home = prepare_gemini_memory_isolation()
-        if home:
-            return {"GEMINI_CLI_HOME": home}
+        if not home:
+            raise RuntimeError(
+                "Gemini CLI memory isolation could not stage a clean home; "
+                "refusing to inherit the operator's global GEMINI.md"
+            )
+        return {"GEMINI_CLI_HOME": home}
     return {}
+
+
+def _capture_agy_cli_log_diag(raw_log: str | os.PathLike[str]) -> None:
+    """Recover bounded provider diagnostics when Antigravity emits no stdout."""
+    raw = Path(raw_log)
+    try:
+        if raw.stat().st_size:
+            return
+    except OSError:
+        pass
+    pinned = os.environ.get("AGY_LOG_FILE", "").strip()
+    candidates = [Path(pinned)] if pinned else []
+    if not candidates:
+        log_dir = Path(os.environ.get(
+            "AUDIT_GEMINI_CLI_LOG_DIR",
+            str(Path(os.environ.get("GEMINI_DIR", str(Path.home() / ".gemini"))) / "antigravity-cli" / "log"),
+        ))
+        try:
+            candidates = sorted(log_dir.glob("cli-*.log"), key=lambda path: path.stat().st_mtime, reverse=True)
+        except OSError:
+            candidates = []
+    source = next((path for path in candidates if path.is_file()), None)
+    if source is None:
+        return
+    pattern = re.compile(r"RESOURCE_EXHAUSTED|quota|429|503|UNAVAILABLE|executor error|Resets in", re.I)
+    matches: deque[str] = deque(maxlen=15)
+    try:
+        with source.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                if pattern.search(line):
+                    matches.append(line.rstrip("\n"))
+        if matches:
+            with raw.open("a", encoding="utf-8") as destination:
+                destination.write(f"[agy CLI log tail: {source}]\n")
+                destination.write("\n".join(matches) + "\n")
+    except OSError:
+        return
 
 
 def prepare_gemini_effort_settings(model: str = "") -> "str | None":
@@ -665,6 +744,7 @@ def run_agent_prompt(
     cwd: str | os.PathLike[str] | None = None,
     extra_env: dict[str, str] | None = None,
     watchdog_marker_dir: str | os.PathLike[str] | None = None,
+    codex_turn_cap: int | None = None,
 ) -> int:
     """Launch a tool-using backend and write its combined raw transcript."""
     binary = backend_bin(backend)
@@ -704,6 +784,11 @@ def run_agent_prompt(
                 launch_command, input_text, raw_log, working_dir, environment,
                 watchdog_marker_dir,
             )
+        elif backend == "codex" and codex_turn_cap is not None and codex_turn_cap > 0:
+            returncode = _run_codex_with_turn_watchdog(
+                launch_command, input_text, raw_log, working_dir, environment,
+                codex_turn_cap,
+            )
         else:
             with Path(raw_log).open("w", encoding="utf-8") as sink:
                 completed = subprocess.run(
@@ -720,11 +805,85 @@ def run_agent_prompt(
     except OSError as exc:
         Path(raw_log).write_text(str(exc) + "\n", encoding="utf-8")
         return 127
+    if backend == "gemini" and not use_gemini_cli():
+        _capture_agy_cli_log_diag(raw_log)
     warning = refusal_warning(backend, str(raw_log), prompt)
     if warning:
         print(warning, file=sys.stderr)
         Path(f"{raw_log}.refusals.log").write_text(warning + "\n")
     return returncode
+
+
+def _run_codex_with_turn_watchdog(
+    launch_command, input_text, raw_log, cwd, environment, turn_cap: int,
+) -> int:
+    """End a Codex audit session after a bounded number of completed commands."""
+    import audit_helpers
+    import process_tree
+
+    raw = Path(raw_log)
+    capped = False
+    offset = total = 0
+    feeder = None
+    with raw.open("w", encoding="utf-8") as sink:
+        process = subprocess.Popen(
+            launch_command,
+            stdin=subprocess.PIPE if input_text is not None else None,
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=cwd,
+            env=environment,
+        )
+        try:
+            if input_text is not None:
+                def _feed() -> None:
+                    try:
+                        process.stdin.write(input_text)
+                    except (OSError, ValueError):
+                        pass
+                    finally:
+                        try:
+                            process.stdin.close()
+                        except OSError:
+                            pass
+
+                feeder = threading.Thread(target=_feed, daemon=True)
+                feeder.start()
+            while process.poll() is None:
+                # stdout is a regular file, so flushing Python's handle is
+                # enough to make every completed JSONL record observable.
+                sink.flush()
+                count, offset = audit_helpers.codex_turn_delta(raw, offset)
+                total += count
+                if total >= turn_cap:
+                    capped = True
+                    try:
+                        process_tree.kill_descendants(process.pid, signal.SIGTERM, 1.0)
+                    except (OSError, subprocess.SubprocessError):
+                        pass
+                    process.terminate()
+                    break
+                time.sleep(0.5)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            if feeder is not None:
+                feeder.join(timeout=1)
+    if capped:
+        with raw.open("a", encoding="utf-8") as stream:
+            stream.write(
+                f"[audit] TURN_SOFT_CAP reached after {total} completed shell commands; "
+                "session checkpointed for a fresh continuation.\n"
+            )
+        return 0
+    return process.returncode
 
 
 def _run_gemini_with_watchdog(

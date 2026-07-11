@@ -5,15 +5,17 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 from command_tools import find_executable
-from file_tools import clipped_prefix_bytes
+from file_tools import capture_command, clipped_prefix
 
 
 USAGE = """Usage: bin/show-patch <commit> [<path>...] [git show flags]
@@ -193,63 +195,74 @@ def main(argv: list[str] | None = None) -> int:
     if max_lines <= 0 and max_bytes <= 0:
         return git_run(git, repository, show_args).returncode
 
-    completed = git_run(git, repository, show_args, capture=True)
-    original = completed.stdout
-    total_lines = original.count(b"\n")
-    total_bytes = len(original)
-    view = original
-    line_clipped = max_lines > 0 and total_lines > max_lines
-    if line_clipped:
-        view = b"".join(original.splitlines(keepends=True)[:max_lines])
-    byte_clipped = max_bytes > 0 and len(view) > max_bytes
-    if byte_clipped:
-        view = clipped_prefix_bytes(view, max_bytes)
-
-    if cached is not None:
-        try:
-            cached.write_bytes(view)
-        except OSError:
-            pass
-    sys.stdout.buffer.write(view)
-    sys.stdout.flush()
-
-    if line_clipped or byte_clipped:
-        if line_clipped and byte_clipped:
-            print(
-                f"\n[show-patch: clipped at {max_lines} of {total_lines} lines AND "
-                f"{max_bytes} of {total_bytes} bytes. Tree of this commit:"
-            )
-        elif line_clipped:
-            print(
-                f"\n[show-patch: clipped at {max_lines} of {total_lines} lines. "
-                "Tree of this commit:"
-            )
+    command = [git, "-C", str(repository), *show_args]
+    with capture_command(command, capture_stderr=False) as completed, tempfile.TemporaryDirectory(
+        prefix="show-patch-"
+    ) as directory:
+        line_view = Path(directory) / "line-view"
+        total_lines = 0
+        with completed.stdout.open("rb") as source, line_view.open("wb") as target:
+            for line in source:
+                total_lines += 1
+                if max_lines <= 0 or total_lines <= max_lines:
+                    target.write(line)
+        total_bytes = completed.stdout.stat().st_size
+        line_clipped = max_lines > 0 and total_lines > max_lines
+        byte_clipped = max_bytes > 0 and line_view.stat().st_size > max_bytes
+        view = Path(directory) / "view"
+        if byte_clipped:
+            view.write_bytes(clipped_prefix(line_view, max_bytes))
         else:
-            print(
-                f"\n[show-patch: clipped at {max_bytes} of {total_bytes} bytes. "
-                "Tree of this commit:"
-            )
-        stat = git_run(
-            git,
-            repository,
-            ["show", "--stat", "--format=", *args],
-            capture=True,
-            quiet_stderr=True,
-        ).stdout
-        stat_lines = stat.splitlines(keepends=True)
+            os.replace(line_view, view)
+
+        if cached is not None:
+            temporary_cache = cached.with_name(f".{cached.name}.{os.getpid()}.tmp")
+            try:
+                with view.open("rb") as source, temporary_cache.open("wb") as target:
+                    shutil.copyfileobj(source, target, 1024 * 1024)
+                os.replace(temporary_cache, cached)
+            except OSError:
+                temporary_cache.unlink(missing_ok=True)
+        with view.open("rb") as source:
+            shutil.copyfileobj(source, sys.stdout.buffer, 1024 * 1024)
         sys.stdout.flush()
-        sys.stdout.buffer.write(b"".join(stat_lines[:stat_tail_lines]))
-        sys.stdout.flush()
-        if len(stat_lines) > stat_tail_lines:
+
+        if line_clipped or byte_clipped:
+            if line_clipped and byte_clipped:
+                print(
+                    f"\n[show-patch: clipped at {max_lines} of {total_lines} lines AND "
+                    f"{max_bytes} of {total_bytes} bytes. Tree of this commit:"
+                )
+            elif line_clipped:
+                print(
+                    f"\n[show-patch: clipped at {max_lines} of {total_lines} lines. "
+                    "Tree of this commit:"
+                )
+            else:
+                print(
+                    f"\n[show-patch: clipped at {max_bytes} of {total_bytes} bytes. "
+                    "Tree of this commit:"
+                )
+            stat_command = [git, "-C", str(repository), "show", "--stat", "--format=", *args]
+            with capture_command(stat_command) as stat:
+                shown = stat_total = 0
+                with stat.stdout.open("rb") as stream:
+                    for line in stream:
+                        stat_total += 1
+                        if stat_tail_lines <= 0 or shown < stat_tail_lines:
+                            sys.stdout.buffer.write(line)
+                            shown += 1
+            sys.stdout.flush()
+            if stat_tail_lines > 0 and stat_total > stat_tail_lines:
+                print(
+                    f"  ... ({stat_total - stat_tail_lines} more files; "
+                    "PATCH_STAT_TAIL_LINES=0 to widen)"
+                )
             print(
-                f"  ... ({len(stat_lines) - stat_tail_lines} more files; "
-                "PATCH_STAT_TAIL_LINES=0 to widen)"
+                f"Drill in: bin/show-patch {args[0]} -- <file>, or "
+                "PATCH_MAX_LINES=0 PATCH_MAX_BYTES=0 for the full diff.]"
             )
-        print(
-            f"Drill in: bin/show-patch {args[0]} -- <file>, or "
-            "PATCH_MAX_LINES=0 PATCH_MAX_BYTES=0 for the full diff.]"
-        )
-    return completed.returncode
+        return completed.returncode
 
 
 if __name__ == "__main__":

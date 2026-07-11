@@ -4,14 +4,13 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
-from file_tools import cap_output_bytes
+from file_tools import cap_output_file, capture_command
 from command_tools import find_executable
 
 
@@ -62,8 +61,6 @@ def main(argv: list[str] | None = None) -> int:
     prefix = ["--glob", "!**/.git/**", "--glob", "!**/.hg/**"]
     if not include_logs:
         prefix.extend(("--glob", "!**/output/**/logs/**"))
-    completed = subprocess.run([executable, *prefix, *passthrough], stdout=subprocess.PIPE)
-    output = completed.stdout
     cap_env = None
     if byte_value is not None:
         byte_cap = int(byte_value)
@@ -71,13 +68,16 @@ def main(argv: list[str] | None = None) -> int:
         cap_env["OUTCAP_MAX_BYTES"] = str(byte_cap)
         cap_env["OUTCAP_HEAD_BYTES"] = str(byte_cap * 3 // 5)
         cap_env["OUTCAP_TAIL_BYTES"] = str(byte_cap * 2 // 5)
-    try:
-        output = cap_output_bytes(output, "rg-safe", cap_env)
-    except ValueError as exc:
-        print(exc, file=sys.stderr)
-        return 2
-    sys.stdout.buffer.write(output)
-    return completed.returncode
+    with capture_command(
+        [executable, *prefix, *passthrough], capture_stderr=False
+    ) as completed:
+        try:
+            output = cap_output_file(completed.stdout, "rg-safe", cap_env)
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        sys.stdout.buffer.write(output)
+        return completed.returncode
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Sequence
@@ -27,6 +28,8 @@ import crash_bundle
 import languages
 import target_config
 import verdict as verdict_lib
+from file_tools import capture_command
+from sanitizer_helpers import file_contains
 from probe_helpers import _nonnegative_int
 
 VALID_MODES = {"auto", "browser", "js", "generic", "js-diff"}
@@ -141,7 +144,8 @@ def load_config(testcase: Path) -> target_config.Config:
 
 
 def parse_header(testcase: Path) -> dict[str, str]:
-    data = testcase.read_bytes()[:16384]
+    with testcase.open("rb") as stream:
+        data = stream.read(16384)
     text = "".join(chr(byte) for byte in data if byte in (9, 10) or 32 <= byte <= 126)
     text = "\n".join(text.splitlines()[:16])
     result: dict[str, str] = {}
@@ -161,24 +165,42 @@ def derive_want(target: str) -> str:
     return re.escape(filename)
 
 
+def feature_disabled_marker(path: Path) -> str:
+    overlap = ""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            while chunk := stream.read(64 * 1024):
+                text = overlap + chunk
+                if match := build_routes.FEATURE_DISABLED_RE.search(text):
+                    return match.group(0)
+                overlap = text[-4096:]
+    except OSError:
+        pass
+    return ""
+
+
 def prepare_exec_testcase(testcase: Path, config: target_config.Config, agent: str) -> Path:
     extension = testcase.suffix.lstrip(".")
     if extension not in SCRIPT_EXTENSIONS:
         return testcase
-    lines = testcase.read_text(errors="replace").splitlines(keepends=True)
-    if not any(BARE_METADATA.match(line) for line in lines[:16]):
+    with testcase.open(errors="replace") as stream:
+        header_lines = [stream.readline() for _ in range(16)]
+    if not any(BARE_METADATA.match(line) for line in header_lines):
         return testcase
-    digest = hashlib.sha1(testcase.read_bytes()).hexdigest()
+    digest_hash = hashlib.sha1()
+    with testcase.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest_hash.update(chunk)
+    digest = digest_hash.hexdigest()
     destination_dir = Path(config.results_dir) / f"scratch-{agent}" / ".probe-exec"
     destination_dir.mkdir(parents=True, exist_ok=True)
     destination = destination_dir / f"{testcase.stem}.{digest}.exec.{extension}"
-    output: list[str] = []
-    for index, line in enumerate(lines):
-        if index == 0 and line.startswith("#!"):
-            output.append(line)
-        elif not BARE_METADATA.match(line):
-            output.append(line)
-    destination.write_text("".join(output))
+    with testcase.open(errors="replace") as source, destination.open("w") as output:
+        for index, line in enumerate(source):
+            if index == 0 and line.startswith("#!"):
+                output.write(line)
+            elif not BARE_METADATA.match(line):
+                output.write(line)
     destination.chmod(testcase.stat().st_mode & 0o777)
     return destination
 
@@ -564,11 +586,13 @@ class Probe:
         confirmation = " confirm=1" if self.args.confirm else ""
         print(f"[probe] mode={self.mode} testcase={self.testcase} asan_output={self.output}{confirmation}")
         if self.mode == "js-diff":
-            completed = subprocess.run(self.command, capture_output=True, env=self.environment, check=False)
-            data = completed.stdout + completed.stderr
-            self.output.parent.mkdir(parents=True, exist_ok=True)
-            self.output.write_bytes(data)
-            sys.stdout.buffer.write(data)
+            with capture_command(
+                self.command, merge_stderr=True, env=self.environment
+            ) as completed:
+                self.output.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(completed.stdout, self.output)
+                with completed.stdout.open("rb") as source:
+                    shutil.copyfileobj(source, sys.stdout.buffer, 1024 * 1024)
         else:
             completed = subprocess.run(self.command, env=self.environment, check=False)
         result = completed.returncode
@@ -584,8 +608,7 @@ class Probe:
         if self.output.is_file() and self.output.stat().st_size:
             if verdict_lib.file_has_crash(self.output, tuple(self.config.runner_crash_patterns)):
                 return "CRASH"
-            text = self.output.read_text(errors="replace")
-            if "DIFFERENTIAL: outputs DIFFER" in text:
+            if file_contains(self.output, b"DIFFERENTIAL: outputs DIFFER"):
                 return "DIFF"
             if verdict_lib.file_is_clean(self.output):
                 return "CLEAN"
@@ -596,8 +619,8 @@ class Probe:
         binary = self.environment.get("ASAN_GENERIC_BIN", "")
         if os.environ.get("PROBE_AUTO_ROUTE", "1") == "0" or self.mode != "generic" or self.sanitizer != "asan" or current in {"CRASH", "DIFF"} or not binary or not self.output.is_file():
             return returncode, current
-        text = self.output.read_text(errors="replace")
-        if not build_routes.output_is_feature_disabled(text):
+        feature = feature_disabled_marker(self.output)
+        if not feature:
             return returncode, current
         keys = ([f"card:{self.card}"] if self.card else []) + ([f"file:{self.header['target'].split(':')[0]}"] if self.header["target"] else [])
         candidates: list[str] = []
@@ -605,18 +628,17 @@ class Probe:
         if cached:
             candidates.append(cached)
         candidates.extend(str(candidate.binary) for candidate in build_routes.enumerate_sibling_builds(Path(self.config.target_root), Path(binary)) if str(candidate.binary) != cached)
-        feature_match = build_routes.FEATURE_DISABLED_RE.search(text)
-        feature = feature_match.group(0) if feature_match else "feature-disabled"
         for candidate in candidates:
             if not os.access(candidate, os.X_OK):
                 continue
             environment = {**self.environment, "ASAN_GENERIC_BIN": candidate}
-            completed = subprocess.run(self.command, capture_output=True, env=environment, check=False)
-            data = completed.stdout + completed.stderr
-            if build_routes.output_is_feature_disabled(data.decode(errors="replace")):
-                continue
-            self.output.write_bytes(data)
-            routed = self._classify(completed.returncode)
+            with capture_command(
+                self.command, merge_stderr=True, env=environment
+            ) as completed:
+                if feature_disabled_marker(completed.stdout):
+                    continue
+                shutil.copy2(completed.stdout, self.output)
+                routed = self._classify(completed.returncode)
             print(f"[probe] ROUTED: feature='{feature}' canonical='{binary}' -> '{candidate}' verdict={routed}")
             for key in keys:
                 build_routes.record_route(Path(self.config.results_dir), key=key, binary=candidate, feature=feature, canonical_binary=binary)
@@ -630,13 +652,26 @@ class Probe:
         maximum = _nonnegative_int(os.environ.get("PROBE_ASAN_OUTPUT_MAX_BYTES", "8388608"), 8388608)
         head = _nonnegative_int(os.environ.get("PROBE_ASAN_OUTPUT_HEAD_BYTES", "262144"), 262144)
         tail = _nonnegative_int(os.environ.get("PROBE_ASAN_OUTPUT_TAIL_BYTES", "262144"), 262144)
-        data = self.output.read_bytes()
-        if maximum and len(data) > maximum:
+        size = self.output.stat().st_size
+        if maximum and size > maximum:
             marker = (
-                f"[probe] ASAN_OUTPUT_FILE truncated for storage after verdict classification: original_size_bytes={len(data)} max_bytes={maximum}\n"
+                f"[probe] ASAN_OUTPUT_FILE truncated for storage after verdict classification: original_size_bytes={size} max_bytes={maximum}\n"
                 f"[probe] showing first {head} byte(s) and last {tail} byte(s); rerun with PROBE_ASAN_OUTPUT_MAX_BYTES=0 to preserve full output.\n"
             ).encode()
-            self.output.write_bytes(marker + data[:head] + b"\n[probe] ... middle omitted from oversized ASan output ...\n" + data[-tail:])
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{self.output.name}.", dir=self.output.parent
+            )
+            try:
+                with os.fdopen(fd, "wb") as target, self.output.open("rb") as source:
+                    target.write(marker)
+                    target.write(source.read(head))
+                    target.write(b"\n[probe] ... middle omitted from oversized ASan output ...\n")
+                    source.seek(max(0, size - tail))
+                    shutil.copyfileobj(source, target, 1024 * 1024)
+                os.replace(temporary_name, self.output)
+            except BaseException:
+                Path(temporary_name).unlink(missing_ok=True)
+                raise
 
     def _state_command(self, *args: str) -> None:
         state = BIN_DIR / "state"
@@ -676,7 +711,7 @@ class Probe:
         if self.harness_source and self.build_kind == "interpret":
             print(f"[probe] WARNING: crash confirmed but auto-file skipped for interpreted HARNESS. File it under {self.config.results_dir}/crashes/.", file=sys.stderr)
             return
-        strategy_path = Path(self.config.results_dir) / f".agent_strategy_{self.agent}"
+        strategy_path = Path(self.config.results_dir) / "state" / f"strategy-{self.agent}"
         strategy = strategy_path.read_text().strip().upper() if strategy_path.is_file() else ""
         if not re.fullmatch(r"S[1-8]|REF", strategy):
             strategy = ""
@@ -692,6 +727,13 @@ class Probe:
             return
         if status == "FILED":
             print(f"[probe] CRASH FILED: {self.config.results_dir}/crashes/{crash_id} - reproducer + sanitizer.txt copied in; enrich report.md there")
+            if self.header["hypothesis"]:
+                self._state_command(
+                    "add-note", "--agent", self.agent,
+                    "--hypothesis-id", self.header["hypothesis"],
+                    "--card-id", self.card, "--kind", "decision",
+                    "--text", f"bin/probe filed {crash_id} at crashes/{crash_id}",
+                )
         else:
             print(f"[probe] CRASH already filed (identical reproducer): {self.config.results_dir}/crashes/{crash_id}")
 

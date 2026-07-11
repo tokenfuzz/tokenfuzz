@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Sequence
 
 import sanitizer
-from timeout import run_timeout
+from sanitizer_helpers import copy_file
+from timeout import capture_timeout, run_timeout
 
 
 def _expand(value: str, config, sanitizer_name: str) -> str:
@@ -77,20 +78,18 @@ class SanitizerRunner:
             command.append(args[0])
         command.extend(args[1:])
         offline = sanitizer.symbolize_available()
-        completed = run_timeout(
-            command,
-            timeout,
-            rss_mb=sanitizer.generic_rss_limit_mb(self.env),
-            env=self._runtime_env(options, "symbolize=0" if offline else ""),
-            capture_output=offline,
-        )
         if offline:
-            import tempfile
-            with tempfile.NamedTemporaryFile() as report:
-                report.write(completed.stdout + completed.stderr)
-                report.flush()
-                sanitizer.symbolize_file(report.name)
-                sys.stdout.buffer.write(Path(report.name).read_bytes())
+            with capture_timeout(
+                command, timeout, rss_mb=sanitizer.generic_rss_limit_mb(self.env),
+                env=self._runtime_env(options, "symbolize=0"),
+            ) as (completed, report):
+                sanitizer.symbolize_file(report)
+                copy_file(report, sys.stdout.buffer)
+        else:
+            completed = run_timeout(
+                command, timeout, rss_mb=sanitizer.generic_rss_limit_mb(self.env),
+                env=self._runtime_env(options),
+            )
         if completed.returncode == 124:
             print(f"[run-{self.name}] generic runner timed out after {timeout}s", file=sys.stderr)
         elif completed.returncode == 0:

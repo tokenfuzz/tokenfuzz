@@ -869,6 +869,10 @@ assert_file_contains "$dbench/pool/findings/FIND-0001/report.md" 'Accepted findi
   "T9r-m: --regenerate pooled the accepted finding"
 assert_file_not_contains "$dbench/pool/findings/FIND-0001/report.md" 'Pending finding' \
   "T9r-n: --regenerate did not pool the pending raw finding"
+assert_file_exists "$dbench/pool/harness/findings/FINDING-CLUSTERS.html" \
+  "T9r-n2: split harness findings have a condition-local cluster report"
+assert_file_exists "$dbench/pool/harness/crashes/CRASH-CLUSTERS.html" \
+  "T9r-n3: split harness crashes have a condition-local cluster report"
 
 # A regenerate-only artifact tree can outlive the target checkout. In that
 # case the model-direct find-gate points TARGET_ROOT at a missing tree, so its

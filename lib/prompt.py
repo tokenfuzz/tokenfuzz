@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,7 +70,7 @@ class PromptContext:
 
     def mode(self, agent: int) -> str:
         if not self.is_browser:
-            return "shell"
+            return "generic"
         return "browser" if agent <= self.browser_agents else "shell"
 
     def role(self, agent: int) -> str:
@@ -137,9 +138,12 @@ def write_static_prompt_file(context: PromptContext) -> Path:
     return destination
 
 
-def _state_strategy_arg(context: PromptContext, agent: int) -> list[str]:
+def _state_strategy_arg(context: PromptContext, agent: int) -> str:
     strategy = context.strategy(agent)
-    return ["--strategy", strategy] if strategy else []
+    # The prompt templates append this fragment directly after --role. Keep
+    # the separator here so an empty optional fragment and a populated one are
+    # both syntactically valid.
+    return f" --strategy {strategy}" if strategy else ""
 
 
 def work_card_directive(context: PromptContext, agent: int, *, force: bool = False) -> str:
@@ -342,6 +346,71 @@ def _role_guidance(context: PromptContext, agent: int) -> str:
     )
 
 
+def enforcement_results_directive(context: PromptContext, agent: int) -> str:
+    path = context.results_dir / f".enforcement_results_{agent}"
+    try:
+        body = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not body:
+        return ""
+    if any(line.startswith("- CRASH ") for line in body.splitlines()):
+        heading = "## ORPHAN TESTCASE RESULTS — CONFIRM CRASHES FIRST"
+        action = "The harness found a diagnostic while probing an unexecuted testcase. Inspect it and run `bin/probe --confirm` before starting new work."
+    else:
+        heading = "## ORPHAN TESTCASE RESULTS"
+        action = "The harness probed testcases left unexecuted in the prior session. Fix every NO_EXEC/TIMEOUT before writing another testcase."
+    return f"{heading}\n\n{action}\n\n{body}"
+
+
+def handoff_rows(context: PromptContext, agent: int) -> list[dict]:
+    """Assign analysis NEEDS_TESTCASE rows stably across reproduce workers."""
+    if context.role(agent) != "reproduce":
+        return []
+    reproduce_agents = [
+        number for number in range(1, context.num_agents + 1)
+        if context.role(number) == "reproduce"
+    ]
+    analysis_agents = {
+        str(number) for number in range(1, context.num_agents + 1)
+        if context.role(number) == "analysis"
+    }
+    if not reproduce_agents or not analysis_agents:
+        return []
+    assigned: list[dict] = []
+    for row in structured_state.rows(context.results_dir):
+        if row.get("status") != "NEEDS_TESTCASE" or str(row.get("agent", "")) not in analysis_agents:
+            continue
+        key = str(row.get("id") or row.get("hypothesis") or "")
+        slot = int(hashlib.sha1(key.encode()).hexdigest()[:8], 16) % len(reproduce_agents)
+        if reproduce_agents[slot] == agent:
+            assigned.append(row)
+    assigned.sort(key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
+    return assigned[:5]
+
+
+def handoff_directive(context: PromptContext, agent: int) -> str:
+    rows = handoff_rows(context, agent)
+    if not rows:
+        return ""
+    lines = [
+        "## HANDOFF FROM ANALYSIS",
+        "",
+        "Continue one of these source-validated hypotheses before claiming new work. Use its existing H ID in the testcase; do not create a duplicate hypothesis.",
+        "",
+        "| ID | File | Hypothesis | Input shape | Guard gap | Diagnostic | Strategy |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for row in rows:
+        values = [
+            row.get("id", ""), row.get("file", ""), row.get("hypothesis", ""),
+            row.get("input_shape", ""), row.get("guard_gap", ""),
+            row.get("diagnostic", ""), row.get("strategy", ""),
+        ]
+        lines.append("| " + " | ".join(str(value).replace("|", "\\|").replace("\n", " ")[:180] for value in values) + " |")
+    return "\n".join(lines)
+
+
 def cold_start_prompt(context: PromptContext, agent: int) -> str:
     mode = context.mode(agent)
     strategy = context.strategy(agent)
@@ -358,7 +427,7 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
             "agent_num": str(agent), "role": context.role(agent), "mode": mode,
             "safety_framing": safety_framing(context),
             "guide_section": guide_section(context, True),
-            "state_strategy_arg": " ".join(_state_strategy_arg(context, agent)),
+            "state_strategy_arg": _state_strategy_arg(context, agent),
             "suggested_sub_line": "", "audit_fixed_strategy_hint": fixed,
             "reference_dir": str(context.reference_dir), "strategy_a_block": strategy_block,
             "role_guidance": _role_guidance(context, agent),
@@ -382,7 +451,7 @@ def compact_fresh_prompt(context: PromptContext, agent: int) -> str:
             "safety_framing": safety_framing(context),
             "find_first_directive": find_first_directive(context),
             "guide_section": guide_section(context, False),
-            "state_strategy_arg": " ".join(_state_strategy_arg(context, agent)),
+            "state_strategy_arg": _state_strategy_arg(context, agent),
             "scratch_dir": str(context.scratch_dir(agent)),
             "audit_fixed_strategy_compact_clause": "",
             "strategy_assignment_line": strategy_brief(context.strategy(agent), context.reference_dir),
@@ -417,13 +486,13 @@ def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
             "role": context.role(agent), "mode": mode,
             "safety_framing": safety_framing(context),
             "guide_section": guide_section(context, False),
-            "state_strategy_arg": " ".join(_state_strategy_arg(context, agent)),
+            "state_strategy_arg": _state_strategy_arg(context, agent),
             "asan_loop_cmd": f"bin/probe {context.scratch_dir(agent)}/testcase",
             "mode_lock_or_targets_block": target_block,
-            "directive_block": "", "enforcement_block": "",
+            "directive_block": "", "enforcement_block": enforcement_results_directive(context, agent),
             "session_seed_section": seed, "session_continuation_section": seed,
             "audit_fixed_strategy_clause": "", "wrong_mode_subsystem_line": "",
-            "role_block": _role_guidance(context, agent), "handoff_directive": "",
+            "role_block": _role_guidance(context, agent), "handoff_directive": handoff_directive(context, agent),
             "work_card_directive": work_card_directive(context, agent),
             "strategy_assignment_line": strategy_brief(strategy, context.reference_dir),
             "strategy_roi_directive": "", "find_first_directive": find_first_directive(context),

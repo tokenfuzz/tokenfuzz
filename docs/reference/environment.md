@@ -31,7 +31,10 @@ NUM_AGENTS=4 bin/audit --target <target> --backend <backend>
 | Variable | Default | Use it for |
 | --- | --- | --- |
 | `AGENT_TIMEOUT` | `7200` seconds | Hard wall-clock ceiling for one agent launch. |
+| `TURN_SOFT_CAP` | `75` completed commands | Restart a Codex audit session with fresh context after this many shell commands. Set `0` to disable. |
 | `MAX_DRY_SESSIONS` | `10` | Stop a continuous run after this many dry iterations; the harness may raise a value that would prevent fair strategy rotation. |
+| `ASAN_AUTOENFORCE_MAX` | `3` | Maximum orphan testcases the post-iteration pass probes automatically. Set `0` to report them without running them. |
+| `ASAN_AUTOENFORCE_TIMEOUT` | `30` seconds | Per-testcase ceiling for the orphan enforcement probe. |
 
 The positional iteration count is the clearer way to bound an ordinary run:
 
@@ -57,6 +60,10 @@ are most useful in a shared shell or when a backend binary is outside `PATH`.
 | `GROK_BIN` | `grok` | Grok Build executable. |
 | `OPENCODE_BIN` | `opencode` | OpenCode executable for `--backend oss`. |
 | `USE_GEMINI_CLI` | `0` | Use Google Gemini CLI instead of the default Antigravity CLI. |
+| `AUDIT_MODEL_PREFLIGHT` | `1` | Launch the selected model once through the real agent path before starting. Set `0` only for an intentionally offline/mock run. |
+| `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds | Ceiling for each model preflight attempt. |
+| `AUDIT_MODEL_PREFLIGHT_ATTEMPTS` | `3` | Number of model preflight attempts. |
+| `LLM_DECISION_TIMEOUT` | `45` seconds hosted, `180` seconds OSS | Override the ceiling for focused triage and validation decisions. |
 
 The model precedence is `--model`, then the matching
 `*_MODEL_DEFAULT`, then `config/models.toml`. The `oss` backend has no model

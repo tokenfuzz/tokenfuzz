@@ -7,8 +7,34 @@ import argparse
 import base64
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
+
+
+def file_contains(path: Path, needle: bytes) -> bool:
+    """Search a potentially large diagnostic without loading it into memory."""
+    overlap = b""
+    with path.open("rb") as stream:
+        while chunk := stream.read(64 * 1024):
+            data = overlap + chunk
+            if needle in data:
+                return True
+            overlap = data[-max(0, len(needle) - 1):]
+    return False
+
+
+def copy_file(path: Path, destination) -> None:
+    with path.open("rb") as source:
+        shutil.copyfileobj(source, destination, 1024 * 1024)
+
+
+def copy_filtered(path: Path, destination, patterns) -> None:
+    with path.open("rb") as source:
+        for raw in source:
+            line = raw.decode(errors="replace")
+            if not any(pattern.search(line) for pattern in patterns):
+                destination.write(line.encode())
 
 
 _BROWSER_NOISE = tuple(re.compile(pattern) for pattern in (

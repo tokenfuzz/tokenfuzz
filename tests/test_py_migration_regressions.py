@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import runpy
 import shutil
@@ -68,7 +69,12 @@ _GOOD_REPORT = (
 )
 
 
-with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporary:
+# ignore_cleanup_errors: the lock-ownership case below exercises a build waiter
+# thread that can still be settling harness.lock/ when the tree is torn down;
+# a file vanishing mid-walk must not fail an otherwise-passing suite.
+with tempfile.TemporaryDirectory(
+    prefix="py-migration-regressions-", ignore_cleanup_errors=True
+) as temporary:
     root = Path(temporary)
     # Keep the LLM-driven gates out of these unit checks; each capability is
     # exercised through its structural path (env opt-out, byte accounting, etc.).
@@ -652,7 +658,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         still_waiting and acquired == [True] and (build_lock / "owner").is_file(),
         "harness build waiter acquires lock ownership before returning",
     )
-    shutil.rmtree(build_lock)
+    shutil.rmtree(build_lock, ignore_errors=True)
     budget_logs = root / "budget-logs"
     budget_logs.mkdir()
     runtime_stub = mock.Mock(logs=budget_logs, num_agents=2)
@@ -661,6 +667,24 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     check(
         all((budget_logs / f".sanitizer_runs_{agent}").read_text() == "0" for agent in (1, 2)),
         "sanitizer counters reset for every agent before an iteration",
+    )
+    for path in (
+        budget_logs / ".llm_decisions_harness",
+        budget_logs / ".llm_decisions_1",
+        budget_logs / ".llm_decisions_2",
+    ):
+        path.write_text("1000", encoding="utf-8")
+    audit_runner.reset_llm_decision_counters(runtime_stub)
+    check(
+        all(
+            path.read_text(encoding="utf-8") == "0"
+            for path in (
+                budget_logs / ".llm_decisions_harness",
+                budget_logs / ".llm_decisions_1",
+                budget_logs / ".llm_decisions_2",
+            )
+        ),
+        "LLM decision counters reset for the harness and every agent before an iteration",
     )
 
     # Idle secondary agents are skipped only when no active hypothesis, work
@@ -672,6 +696,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         target_slug="sampleproj", repo_type="none",
     )
     skip_context = mock.Mock()
+    skip_context.num_agents = 2
     skip_context.mode.return_value = "generic"
     skip_context.role.return_value = "reproduce"
     skip_context.strategy.return_value = "S1"
@@ -806,6 +831,122 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
             pf_skip_probe.call_count == 0,
             f"preflight skips {skip_reason} targets without probing freshness",
         )
+
+    # Pool finalization must persist LLM-derived reach facts into the report:
+    # bin/severity intentionally ignores auxiliary sidecars after the Python
+    # migration, so a sidecar-only port would silently leave scoring unchanged.
+    reach_dir = root / "reach-fields" / "crashes" / "CRASH-001"
+    reach_dir.mkdir(parents=True)
+    reach_report = reach_dir / "report.md"
+    reach_report.write_text(
+        "# Sequence-shaped lifetime issue\n\n"
+        "| Field | Value |\n| :---- | :---- |\n"
+        "| Caller controls | — |\n| Boundary | — |\n\n"
+        "Trigger source: bytes\n\n"
+        "A parsed object is removed by one public call and consumed by a later public call.\n",
+        encoding="utf-8",
+    )
+    reach_decision = {
+        "surface": "library-api — public object API",
+        "primitive": "uaf_read",
+        "class": "memory-safety",
+        "caller_contract": "obeyed",
+        "caller_controls": "call-sequence",
+        "trigger_source": "both",
+        "parameter_control": "application-supplied",
+        "trusted_caller_actions": "normal public call",
+        "boundary": "caller-created object graph",
+        "advisory": "no",
+    }
+    with mock.patch.object(triage.llm_decide, "llm_decide", return_value=reach_decision):
+        reach_changed = triage.fill_reach_fields(reach_dir)
+    reach_text = reach_report.read_text(encoding="utf-8")
+    check(reach_changed, "reach-field convergence updates an incomplete report")
+    check(
+        "Caller controls: call-sequence" in reach_text
+        and "Boundary: caller-created object graph" in reach_text,
+        "reach-field convergence materializes validated fallback fields in the report",
+    )
+    check(
+        reach_text.count("Trigger source:") == 1 and "Trigger source: bytes" in reach_text,
+        "reach-field convergence never overwrites an authored field",
+    )
+    with mock.patch.object(triage.llm_decide, "llm_decide") as no_refill:
+        check(not triage.fill_reach_fields(reach_dir), "complete reach fields are idempotent")
+    check(no_refill.call_count == 0, "complete reach fields spend no additional LLM decision")
+    severity_run = subprocess.run(
+        [str(ROOT / "bin" / "severity"), "--report", str(reach_dir), "--json"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+    )
+    severity_payload = json.loads(severity_run.stdout)["severity"]
+    check(severity_run.returncode == 0, "severity scores the converged report", severity_run.stderr)
+    check(
+        severity_payload["fields_used"]["caller_controls"] == "call-sequence",
+        "severity consumes persisted reach fields without a sidecar fallback",
+    )
+    live_root = root / "live-reach"
+    (live_root / "crashes-rejected").mkdir(parents=True)
+    live_crash = _crash_dir(
+        live_root, "CRASH-090", report="# Lifetime issue\n\nPublic calls leave a stale object.\n",
+        sanitizer=_ASAN, testcase=True,
+    )
+    with mock.patch.object(triage, "_bundle_needs_refresh", return_value=False), \
+         mock.patch.object(triage, "_bundle_missing_artifacts", return_value=[]), \
+         mock.patch.object(triage.llm_decide, "llm_decide", return_value=reach_decision), \
+         mock.patch.object(triage, "_run_tool") as live_tools:
+        live_status = triage.triage_one_crash(
+            live_crash, live_root, root, "sampleproj", ["bytes", "call-sequence"]
+        )
+    check(live_status == "promoted", "live crash triage fills reach fields before its verdict")
+    check(
+        "Caller contract: obeyed" in (live_crash / "REPORT.md").read_text(encoding="utf-8")
+        and any(call.args[:2] == ("severity", "--report") for call in live_tools.call_args_list),
+        "live crash finalization persists fields before severity scoring",
+    )
+
+    live_finding_root = root / "live-finding"
+    live_finding = live_finding_root / "findings/FIND-090"
+    live_finding.mkdir(parents=True)
+    (live_finding / "report.md").write_text(
+        "# State issue\n\nA public input reaches inconsistent authorization state.\n",
+        encoding="utf-8",
+    )
+    (live_finding / ".llm-find-quality.json").write_text(json.dumps({
+        "decision_version": "v13-python", "accept": True, "accept_count": 2,
+    }), encoding="utf-8")
+    with mock.patch.object(triage.llm_decide, "llm_decide", return_value=reach_decision), \
+         mock.patch.object(triage, "_finding_trigger_rejected", return_value=False), \
+         mock.patch.object(triage, "_run_tool") as finding_tools:
+        finding_status = triage.validate_one_finding(live_finding, live_finding_root)
+    check(finding_status == "accepted", "live finding finalization fills reach fields")
+    check(
+        "Caller controls: call-sequence" in (live_finding / "report.md").read_text(encoding="utf-8")
+        and finding_tools.call_args.args[:2] == ("severity", "--report"),
+        "live finding severity consumes the converged report",
+    )
+
+    # split_pool creates condition directories after combined clustering. Every
+    # condition must pass through the shared index maintainer so its cluster
+    # reports, member Cluster lines, enrichment, and HTML all agree locally.
+    condition_pool = root / "condition-pool"
+    for name in ("crashes", "findings", "model-direct", "harness"):
+        (condition_pool / name).mkdir(parents=True)
+    finalized: list[tuple[str, str, str]] = []
+
+    def _record_condition(path, _target, **_kwargs):
+        finalized.append((Path(path).name, os.environ.get("BACKEND", ""), os.environ.get("MODEL", "")))
+        return True
+
+    with mock.patch.object(triage, "maintain_indexes", side_effect=_record_condition):
+        benchmark_runner._finalize_condition_pools(
+            condition_pool, root / "target", "codex", "test-model", "sampleproj",
+            root / "decisions.log",
+        )
+    check(
+        finalized == [("harness", "codex", "test-model"), ("model-direct", "codex", "test-model")],
+        "condition finalization indexes every split condition and skips combined artifact roots",
+        repr(finalized),
+    )
 
     # The wall-clock timeout wrapper is the watched root process. The agy klog
     # is opened by its CLI descendant, so discovery must walk descendants.
