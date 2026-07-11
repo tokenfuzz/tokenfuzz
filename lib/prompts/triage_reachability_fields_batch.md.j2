@@ -1,0 +1,11 @@
+Apply the following classification contract independently to every report.
+Return one entry for every input id. Omit fields that are not clearly supported
+by that report.
+
+{{ instructions }}
+
+Output one JSON object and no prose:
+{"items":[{"id":"<input id>","surface":"...","primitive":"...","class":"...","caller_contract":"...","caller_controls":"...","trigger_source":"...","parameter_control":"...","trusted_caller_actions":"...","boundary":"...","advisory":"..."}]}
+
+Reports:
+{{ items_json }}

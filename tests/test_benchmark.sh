@@ -751,28 +751,24 @@ assert_not_match "Operation not permitted" "$dry_out" \
   "T9f: console tee path does not emit /dev/fd portability warnings"
 assert_match 'done in [0-9]+m[0-9][0-9]s \([0-9]+s\)' "$dry_out" \
   "T9f2: cell duration includes minutes and raw seconds"
-assert_match 'benchmark-result update \(after model-direct-r1\): .*benchmark-result\.html \(file://' "$dry_out" \
-  "T9f3: benchmark-result HTML link is logged after each cell"
-dry_updates=$(printf '%s\n' "$dry_out" | grep -c 'benchmark-result update (after ' || true)
-if [ "$dry_updates" -ge 4 ]; then
-  pass "T9f4: benchmark-result is refreshed after each dry-run cell"
+assert_match 'Cell model-direct-r1: metrics saved; aggregate rebuild deferred' "$dry_out" \
+  "T9f3: per-cell metrics are saved without rebuilding the aggregate"
+dry_updates=$(printf '%s\n' "$dry_out" \
+  | grep -c 'benchmark-result update (pre-ledger): .*benchmark-result\.html' || true)
+if [ "$dry_updates" -eq 1 ]; then
+  pass "T9f4: benchmark-result is built once after all dry-run cells"
 else
-  fail "T9f4: benchmark-result is refreshed after each dry-run cell" \
-    "saw $dry_updates update lines in: $dry_out"
+  fail "T9f4: benchmark-result is built once after all dry-run cells" \
+    "saw $dry_updates final update lines in: $dry_out"
 fi
-# Pins the update_result change guard: the pre-ledger pass follows no new cell,
-# so its inputs are unchanged and the full rebuild must be skipped. Without the
-# guard every one of the N+1 calls re-rendered the pool —
-# the benchmark's recurring slowness. If this drops below 2, someone removed the
-# guard or added unconditional work that re-dirties the inputs; the suite must
-# go red BEFORE the slowness ships, not after the next person notices 90s tests.
-dry_skips=$(printf '%s\n' "$dry_out" \
-  | grep -c 'benchmark-result update (.*): inputs unchanged, skipped rebuild' || true)
-if [ "$dry_skips" -ge 1 ]; then
-  pass "T9f5: redundant pre-ledger re-render is skipped"
+# The cell state and metrics remain resumable even though report generation is
+# deferred until every cell is complete.
+saved_cells=$(printf '%s\n' "$dry_out" | grep -c 'metrics saved; aggregate rebuild deferred' || true)
+if [ "$saved_cells" -eq 4 ]; then
+  pass "T9f5: every dry-run cell persists metrics before the final rebuild"
 else
-  fail "T9f5: redundant pre-ledger re-render must be skipped" \
-    "expected an 'inputs unchanged' skip, saw $dry_skips in: $dry_out"
+  fail "T9f5: every dry-run cell persists metrics before the final rebuild" \
+    "expected 4 saved cells, saw $saved_cells in: $dry_out"
 fi
 drun_json=$(find "$droot/codex" -mindepth 2 -maxdepth 2 -name run.json | head -1)
 assert_file_exists "$drun_json" "T9g: dry-run writes run metadata"

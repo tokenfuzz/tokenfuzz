@@ -309,6 +309,7 @@ def _reach_field_present(text: str, label: str) -> bool:
 
 def fill_reach_fields(
     directory: Path, usage_index: str | os.PathLike[str] | None = None,
+    *, decision_override: dict | None = None,
 ) -> bool:
     """Fill missing scorer fields from report evidence without overriding authors.
 
@@ -341,14 +342,16 @@ def fill_reach_fields(
         attempts, max_attempts = 0, 2
     if attempts >= max_attempts:
         return False
-    prompt = render_template("triage_reachability_fields.md.j2", {"narrative": text})
-    try:
-        timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
-    except ValueError:
-        timeout = 45
-    decision = llm_decide.llm_decide(
-        "reachability-fields", "", prompt, timeout, usage_index=usage_index,
-    )
+    decision = decision_override
+    if decision is None:
+        prompt = render_template("triage_reachability_fields.md.j2", {"narrative": text})
+        try:
+            timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
+        except ValueError:
+            timeout = 45
+        decision = llm_decide.llm_decide(
+            "reachability-fields", "", prompt, timeout, usage_index=usage_index,
+        )
     cache["_fill_attempts"] = attempts + 1
     if not isinstance(decision, dict):
         _write_atomic_json(sidecar, cache)
@@ -376,12 +379,55 @@ def fill_reach_fields(
 
 def fill_reach_fields_tree(root: Path) -> int:
     """Apply reach-field convergence to every pooled crash and finding."""
+    if os.environ.get("LLM_FIELD_FILL_DISABLE", "0") == "1":
+        return 0
     filled = 0
     usage_index = benchmark._find_index_jsonl(Path(root))
+    directories: list[Path] = []
     for kind, prefix in (("findings", "FIND-*"), ("crashes", "CRASH-*")):
         for directory in sorted((Path(root) / kind).glob(prefix)):
-            if directory.is_dir() and fill_reach_fields(directory, usage_index):
-                filled += 1
+            if directory.is_dir():
+                directories.append(directory)
+    items = []
+    for directory in directories:
+        report = _report(directory)
+        if report is None:
+            continue
+        try:
+            narrative = report.read_text(encoding="utf-8", errors="replace")[:6000]
+        except OSError:
+            continue
+        if any(
+            not _reach_field_present(narrative, label)
+            for label in _REACH_FIELD_LABELS.values()
+        ):
+            cache = _finding_cache(directory / ".llm_fields.json")
+            try:
+                attempts = int(cache.get("_fill_attempts", 0))
+                max_attempts = _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
+            except (TypeError, ValueError):
+                attempts, max_attempts = 0, 2
+            if attempts >= max_attempts:
+                continue
+            items.append({"id": directory.name, "report": narrative})
+    try:
+        timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
+    except ValueError:
+        timeout = 45
+    instructions = render_template(
+        "triage_reachability_fields.md.j2", {"narrative": ""},
+    ).split("\nReport:", 1)[0]
+    batched = _batch_decisions(
+        "reachability_fields_batch", "triage_reachability_fields_batch.md.j2",
+        instructions, items, timeout, usage_index,
+    ) if items else {}
+    for directory in directories:
+        decision = batched.get(directory.name)
+        if fill_reach_fields(
+            directory, usage_index,
+            decision_override=decision if isinstance(decision, dict) else None,
+        ):
+            filled += 1
     return filled
 
 
@@ -1144,6 +1190,90 @@ def _quality_vote(
     )
 
 
+_DECISION_BATCH_SIZE = 16
+
+
+def _batch_decisions(
+    decision: str, template: str, instructions: str,
+    items: list[dict], timeout: int,
+    usage_index: str | os.PathLike[str] | None,
+    deadline: float | None = None,
+) -> dict[str, dict]:
+    """Return only well-keyed batch results; callers retry omitted ids safely."""
+    decisions: dict[str, dict] = {}
+    for start in range(0, len(items), _DECISION_BATCH_SIZE):
+        call_timeout = _decision_timeout(timeout, deadline)
+        if call_timeout <= 0:
+            break
+        batch = items[start:start + _DECISION_BATCH_SIZE]
+        allowed = {str(item["id"]) for item in batch}
+        prompt = render_template(template, {
+            "instructions": instructions,
+            "items_json": json.dumps(batch, ensure_ascii=False),
+        })
+        result = llm_decide.llm_decide(
+            decision, "items", prompt, call_timeout, usage_index=usage_index,
+        )
+        if not isinstance(result, dict) or not isinstance(result.get("items"), list):
+            continue
+        for item in result["items"]:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "")
+            if item_id in allowed and item_id not in decisions:
+                decisions[item_id] = item
+    return decisions
+
+
+def _batch_quality_votes(
+    directories: list[Path], results_dir: Path, quorum: int, accept_quorum: int,
+    timeout: int, deadline: float | None,
+) -> dict[Path, list[dict]]:
+    usage_index = benchmark._find_index_jsonl(results_dir)
+    reports: dict[Path, str] = {}
+    for directory in directories:
+        if (directory / ".keep").is_file() or (directory / ".reviewed").is_file():
+            continue
+        cache = _finding_cache(directory / ".llm-find-quality.json")
+        try:
+            terminal_cache = cache.get("decision_version") == "v13-python" and (
+                (cache.get("accept") is True and int(cache.get("accept_count", 0)) >= accept_quorum)
+                or (cache.get("accept") is False and int(cache.get("reject_count", 0)) >= quorum)
+            )
+        except (TypeError, ValueError):
+            terminal_cache = False
+        if terminal_cache:
+            continue
+        report = _report(directory)
+        if report is not None:
+            reports[directory] = read_report_bounded(report)
+    votes: dict[Path, list[dict]] = {directory: [] for directory in reports}
+    active = set(reports)
+    instructions = render_template("triage_find_quality.md.j2", {"body": ""}).split(
+        "Output a single JSON object", 1,
+    )[0]
+    for _ in range(max(1, accept_quorum + quorum - 1)):
+        vote_timeout = _decision_timeout(timeout, deadline)
+        if vote_timeout <= 0 or not active:
+            break
+        ordered = sorted(active)
+        items = [{"id": directory.name, "report": reports[directory]} for directory in ordered]
+        by_id = _batch_decisions(
+            "find_quality_batch", "triage_find_quality_batch.md.j2",
+            instructions, items, vote_timeout, usage_index, deadline,
+        )
+        for directory in ordered:
+            vote = by_id.get(directory.name)
+            if not isinstance(vote, dict) or not isinstance(vote.get("accept"), bool):
+                continue
+            votes[directory].append(vote)
+            accepts = sum(item["accept"] is True for item in votes[directory])
+            rejects = sum(item["accept"] is False for item in votes[directory])
+            if accepts >= accept_quorum or rejects >= quorum:
+                active.discard(directory)
+    return votes
+
+
 def _finalize_accepted_finding(
     finding_dir: Path, results_dir: Path, report: Path,
     deadline: float | None,
@@ -1175,6 +1305,7 @@ def validate_one_finding(
     timeout: int = 300,
     deadline: float | None = None,
     target_root_is_product: bool = False,
+    initial_votes: list[dict] | None = None,
 ) -> str:
     if (finding_dir / ".keep").is_file() or (finding_dir / ".reviewed").is_file():
         return "accepted"
@@ -1201,11 +1332,17 @@ def validate_one_finding(
     report_text = read_report_bounded(report)
     accepts = rejects = 0
     accepted_class = accepted_severity = accepted_reason = rejected_reason = ""
-    for _ in range(max(1, accept_quorum + quorum - 1)):
+    vote_limit = max(1, accept_quorum + quorum - 1)
+    queued_votes = list(initial_votes or [])
+    for vote_number in range(vote_limit):
         vote_timeout = _decision_timeout(timeout, deadline)
         if vote_timeout <= 0:
             break
-        vote = _quality_vote(report_text, vote_timeout, usage_index)
+        vote = (
+            queued_votes[vote_number]
+            if vote_number < len(queued_votes)
+            else _quality_vote(report_text, vote_timeout, usage_index)
+        )
         if not isinstance(vote, dict) or not isinstance(vote.get("accept"), bool):
             break
         if vote["accept"]:
@@ -1274,12 +1411,16 @@ def validate_find_gate(
     aq = accept_quorum or _positive_int_env("FIND_GATE_ACCEPT_QUORUM", 2)
     timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 300)
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
+    initial_votes = _batch_quality_votes(
+        directories, results, q, aq, timeout, deadline,
+    ) if directories and not _deadline_expired(deadline) else {}
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         statuses = pool.map(
             lambda directory: validate_one_finding(
                 directory, results, quorum=q, accept_quorum=aq,
                 timeout=timeout, deadline=deadline,
                 target_root_is_product=target_root_is_product,
+                initial_votes=initial_votes.get(directory),
             ),
             directories,
         )

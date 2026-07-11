@@ -182,8 +182,10 @@ output/benchmark/
 the backend-native reasoning setting that was actually passed to the CLI even
 when the operator's global backend settings differ.
 
-The root `benchmark-result.html` is the cross-backend comparison. It is
-refreshed as cells complete and again at the end of each run.
+The root `benchmark-result.html` is the cross-backend comparison. Cell state
+and metrics are saved as each cell completes; the pooled comparison is rebuilt
+once after the final cell so sanitizer revalidation, bundling, clustering, and
+report rendering are not repeated for every partial result.
 
 Each backend also has an append-only ledger,
 `output/benchmark/<backend>/benchmark-results.html`, with one section

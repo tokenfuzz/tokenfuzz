@@ -1072,6 +1072,64 @@ with tempfile.TemporaryDirectory(
         severity_payload["fields_used"]["caller_controls"] == "call-sequence",
         "severity consumes persisted reach fields without a sidecar fallback",
     )
+    batch_reach_root = root / "batch-reach"
+    for name in ("FIND-001", "FIND-002"):
+        directory = batch_reach_root / "findings" / name
+        directory.mkdir(parents=True)
+        (directory / "report.md").write_text(
+            f"# {name}\n\nA public input reaches a stale object.\n", encoding="utf-8",
+        )
+    batch_reach_result = {"items": [
+        {"id": "FIND-001", **reach_decision},
+        {"id": "FIND-002", **reach_decision},
+    ]}
+    with mock.patch.object(
+        triage.llm_decide, "llm_decide", return_value=batch_reach_result,
+    ) as batch_reach_call:
+        batch_reach_count = triage.fill_reach_fields_tree(batch_reach_root)
+    check(
+        batch_reach_count == 2 and batch_reach_call.call_count == 1,
+        "reach-field convergence batches independent reports in one provider call",
+    )
+    check(
+        all(
+            "Caller controls: call-sequence" in
+            (batch_reach_root / "findings" / name / "report.md").read_text(encoding="utf-8")
+            for name in ("FIND-001", "FIND-002")
+        ),
+        "batched reach fields are applied only to their keyed reports",
+    )
+
+    batch_quality_root = root / "batch-quality"
+    batch_quality_dirs = []
+    for name in ("FIND-011", "FIND-012"):
+        directory = batch_quality_root / "findings" / name
+        directory.mkdir(parents=True)
+        (directory / "report.md").write_text(
+            f"# {name}\n\nA caller-controlled request bypasses authorization.\n",
+            encoding="utf-8",
+        )
+        batch_quality_dirs.append(directory)
+    quality_result = {"items": [
+        {"id": directory.name, "accept": True, "reason": "security boundary bypass",
+         "class": "auth:bypass", "severity": "high"}
+        for directory in batch_quality_dirs
+    ]}
+    with mock.patch.object(
+        triage.llm_decide, "llm_decide", return_value=quality_result,
+    ) as batch_quality_calls, mock.patch.object(
+        triage, "_finalize_accepted_finding", return_value="accepted",
+    ):
+        batch_quality_counts = triage.validate_find_gate(batch_quality_root)
+    check(
+        batch_quality_counts == {"accepted": 2, "rejected": 0, "pending": 0}
+        and batch_quality_calls.call_count == 2,
+        "finding quality preserves two independent vote rounds while batching startup",
+    )
+    check(
+        all((directory / ".llm-find-quality.json").is_file() for directory in batch_quality_dirs),
+        "batched finding votes persist the same terminal quorum state",
+    )
     live_root = root / "live-reach"
     (live_root / "crashes-rejected").mkdir(parents=True)
     live_crash = _crash_dir(

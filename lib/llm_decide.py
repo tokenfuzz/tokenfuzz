@@ -809,7 +809,8 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     valid but type-wrong object from reaching consumers.
     """
     known_decisions = {
-        "find_quality", "work_rerank", "s6-peer-suggest", "threat-model-suggest",
+        "find_quality", "find_quality_batch", "reachability_fields_batch",
+        "work_rerank", "s6-peer-suggest", "threat-model-suggest",
         "s6-peer-distill", "s6-peer-map",
     }
     if decision not in known_decisions:
@@ -826,6 +827,23 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
             and _is_string(parsed.get("reason"))
             and _is_string(parsed.get("class"))
             and _is_string(parsed.get("severity"))
+        )
+    if decision == "find_quality_batch":
+        items = parsed.get("items")
+        return isinstance(items, list) and all(
+            isinstance(item, dict)
+            and _is_string(item.get("id"))
+            and _is_bool(item.get("accept"))
+            and _is_string(item.get("reason"))
+            and _is_string(item.get("class"))
+            and _is_string(item.get("severity"))
+            for item in items
+        )
+    if decision == "reachability_fields_batch":
+        items = parsed.get("items")
+        return isinstance(items, list) and all(
+            isinstance(item, dict) and _is_string(item.get("id"))
+            for item in items
         )
     if decision == "work_rerank":
         cards = parsed.get("cards")

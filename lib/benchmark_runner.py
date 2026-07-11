@@ -1079,7 +1079,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         )
                     else:
                         log(f"Cell {name} {status} after {format_duration(wall)}; see {cell_dir}")
-                update_result(bench_dir, bench_root, args.target, args.backend, model, args.dry_run, f"after {name}")
+                log(f"Cell {name}: metrics saved; aggregate rebuild deferred")
         log(f"Cells complete: {done} done, {failed} failed")
     else:
         refreshed = 0
