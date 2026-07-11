@@ -29,6 +29,8 @@ The harness supplies the parts a long audit needs beyond a prompt:
 - **Comparable evaluation.** A built-in benchmark runs TokenFuzz and a direct
   vulnerability prompt under matched target, model, and wall-clock budgets,
   then compares validated, deduplicated evidence instead of prose volume.
+- **Supported backends.** Claude Code, Codex CLI, Gemini via Antigravity or Google
+  Gemini CLI, Grok Build, and local models via OpenCode; `--backend all` rotates hosted backends.
 
 Hosted and local model backends use the same audit contract. Bounded source
 reads, prompt reuse, execution budgets, and resumable state keep long runs

@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.1.0 - 2026-07-11
+
+- **Python-native orchestration replaces the legacy shell runtime.** Audit,
+  benchmark, recon, probe, sanitizer, setup, triage, timeout, wrapper, and
+  structured-state control paths now share direct Python implementations instead
+  of parallel shell stacks. The migration keeps resumable evidence and artifact
+  contracts intact while making deadlines, process cleanup, concurrent state,
+  backend isolation, and failure handling explicit and testable across platforms.
+
+- **Benchmark results now measure the complete, comparable workload.** Every cell
+  accounts for preflight, recon, audit workers, and validation decisions; records
+  resolved backend effort; marks missing productive-session usage unknown instead
+  of zero; and exposes incomplete-cell yield without admitting it to aggregates.
+  Both conditions receive the same crash and finding triage, configured target
+  roots are treated as the product boundary, and benchmark-only worker refill
+  suppression keeps configured concurrency from silently expanding provider cost.
+
+- **Finalization is bounded and substantially cheaper without weakening gates.**
+  Crash and finding validation has its own one-hour safety window, stops fan-out
+  after a confirmed account limit, and leaves unfinished evidence pending and
+  resumable. Direct, unchanged 5/5 sanitizer-confirmed byte-input crashes bypass
+  only redundant trigger votes, including model-direct bundles renamed after
+  probing; changed, ambiguous, and custom-harness evidence retains the two-vote
+  review. Finding-quality and reachability decisions are keyed and batched across
+  independent vote rounds, and pooled revalidation, bundling, clustering, and
+  rendering run once after all cell metrics are safely persisted.
+
+- **Grok Build joins the supported backend matrix.** Grok is available for full
+  audits, ensembles, recon, focused decisions, validation, containers, cleanup,
+  and benchmarks, with streaming output parsing and conservative token/cost
+  estimates where native telemetry is absent. Claude, Codex, Gemini/Antigravity,
+  and Grok now receive their CLI-native reasoning-effort controls consistently,
+  and archived run and ledger metadata records the resolved setting.
+
+- **Audit precision and recall safeguards are unified around target evidence.**
+  Recon is grounded in the configured threat model and concrete falsifiable
+  candidates; unknown evidence survives to source-backed tiebreaks; promotion
+  distinguishes sanitizer-confirmed crashes, non-memory diagnostics, findings-only
+  targets, and harness-owned faults. Productive work is deadline-aware and
+  retryable, quota evidence outranks nominal process success, and bounded report
+  and transcript reads fail visibly instead of silently dropping valid results.
+
+- **The operator surface is smaller and easier to diagnose.** The handbook now
+  leads with first-run, maintainer-handoff, backend, and controlled-benchmark
+  workflows; unused host dependencies and hidden compatibility paths are removed;
+  container and Python 3.10 coverage are restored; and focused migration,
+  portability, benchmark, triage, and startup regressions protect the rewritten
+  runtime rather than preserving obsolete implementations.
+
+- **Measured benchmark overhead fell without reducing observed yield.** In
+  like-for-like reruns, Codex `samples/sample-c` wall time fell 29% (52m→37m),
+  finalization 60%, reporting 74%, prompt traffic 28%, and output tokens 43%.
+  Claude `samples/sample-cpp` wall time fell 13%, finalization 13%, reporting 26%,
+  total token traffic 5%, and output tokens 15%; crash and finding yield held
+  steady or improved. Independent post-change Codex/Rust and Claude/Python runs
+  then completed all four cells in 36–37 minutes without provider limits or
+  refusals, surfacing 11 and 12 pooled root causes respectively.
+
 ## 1.0.3 - 2026-07-08
 
 - **Productive cards retire by scope-aware exhaustion.** Keep-alive re-offered
