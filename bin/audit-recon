@@ -22,6 +22,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import llm_invoke
+import llm_usage
 import recon_report
 import recon_slicer
 import target_config
@@ -61,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--concurrency", type=_positive, default=4)
     parser.add_argument("--out")
     parser.add_argument("--report")
+    parser.add_argument("--usage-index", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=_positive, default=1800)
     parser.add_argument("--validate", choices=("off", "confirmed", "all"), default="all")
     parser.add_argument("--scope", choices=("auto", "all", "since", "path"), default="auto")
@@ -227,6 +229,7 @@ def _run_slice(
     timeout_secs: int,
     logdir: Path,
     raw_dir: Path,
+    usage_index: Path | None,
 ) -> SliceResult:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     log_path = logdir / f"recon_{stamp}_{name}.log"
@@ -244,6 +247,10 @@ def _run_slice(
         rc = llm_invoke.run_agent_prompt(
             backend, prompt, timeout_secs, raw_path, model=model,
             max_turns=80, add_dirs=add_dirs, cwd=target_path,
+        )
+        llm_usage.append_usage_event(
+            usage_index, backend=backend, model=model,
+            kind="recon", prompt_text=prompt, raw_path=raw_path,
         )
         try:
             extracted = llm_invoke.extract_text(backend, str(raw_path))
@@ -306,6 +313,7 @@ def _validate(
     model: str,
     mode: str,
     timeout_secs: int,
+    usage_index: Path | None,
 ) -> tuple[int, int, int]:
     triage_dir = results_dir / ".recon-triage"
     triage_dir.mkdir(parents=True, exist_ok=True)
@@ -341,6 +349,10 @@ def _validate(
     rc = llm_invoke.run_agent_prompt(
         backend, prompt, budget, raw, model=model, max_turns=120,
         add_dirs=str(target_path), cwd=target_path,
+    )
+    llm_usage.append_usage_event(
+        usage_index, backend=backend, model=model,
+        kind="recon-triage", prompt_text=prompt, raw_path=raw,
     )
     if rc:
         log("WARN: batched triage agent exited non-zero; un-triaged reps fall back to deep verify")
@@ -531,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
             target_slug=args.target, attacker_controls=config.attacker_controls_csv(),
             target_path=target_path, backend=args.backend, model=args.model,
             timeout_secs=args.timeout, logdir=logdir, raw_dir=raw_dir,
+            usage_index=Path(args.usage_index) if args.usage_index else None,
         )
         results = _run_pass(slice_files, "", args.concurrency, **options)
         first_rows = [row for result in results for row in result.rows]
@@ -557,6 +570,7 @@ def main(argv: list[str] | None = None) -> int:
             promoted, rejected, uncertain = _validate(
                 out_path, results_dir, raw_dir, target_path, args.backend,
                 args.model, args.validate, args.timeout,
+                Path(args.usage_index) if args.usage_index else None,
             )
             log(
                 "Validator review complete: "

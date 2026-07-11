@@ -51,8 +51,8 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
     crash = crash_with_frame(results, target, "CRASH-010-2")
     captured: dict[str, object] = {}
 
-    def decide(_name, _keys, prompt, timeout):
-        captured.update(prompt=prompt, timeout=timeout)
+    def decide(_name, _keys, prompt, timeout, **kwargs):
+        captured.update(prompt=prompt, timeout=timeout, **kwargs)
         return {
             "rows": [{
                 "file": "src/parser.c", "function": "parse_next", "line": 24,
@@ -66,6 +66,10 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
     check(len(rows or []) == 1, "decision returns a concrete sibling row")
     check("int line_20" in str(captured.get("prompt")), "decision prompt includes bounded nearby source")
     check(captured.get("timeout") == 17, "cluster decision uses the configured bounded timeout without a ten-minute floor")
+    check(
+        captured.get("usage_index") == results / "logs" / "index.jsonl",
+        "cluster decisions charge the results-tree usage ledger",
+    )
 
     origin = {
         "id": "H-origin", "agent": "2", "card_id": "WORK-origin",

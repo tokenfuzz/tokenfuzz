@@ -66,6 +66,8 @@ import json
 import math
 import os
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 _INPUT_KEYS = ("input_tokens", "prompt_tokens", "input")
 # gemini-cli's result.stats names its cache-read counter `cached` (no
@@ -238,6 +240,18 @@ def _read(path: str) -> str:
         return ""
 
 
+def find_usage_index(results_dir: str | os.PathLike[str]) -> Path:
+    """Return the cost ledger shared by a results tree and its harvester."""
+    results = Path(results_dir)
+    inside = results / "logs" / "index.jsonl"
+    if inside.is_file() or inside.parent.is_dir():
+        return inside
+    sibling = results.parent / "logs" / "index.jsonl"
+    if sibling.is_file() or sibling.parent.is_dir():
+        return sibling
+    return inside
+
+
 def _zero_usage() -> dict:
     return {
         "tokens": {"input": 0, "cached_input": 0, "cache_creation": 0, "output": 0},
@@ -261,6 +275,8 @@ def extract_usage_from_text(
     raw: str,
     prompt_text: str = "",
     backend: str = "",
+    *,
+    estimate_missing: bool = False,
 ) -> dict:
     """Return a usage row from an already-read raw transcript."""
 
@@ -346,10 +362,15 @@ def extract_usage_from_text(
     # Estimated path: no usage telemetry (agy/Grok Build). Do not estimate Codex /
     # Claude failures from stderr; those backends have real JSON usage when
     # they actually run, so an absent usage object means "unknown".
-    if backend not in ("gemini", "grok"):
+    if backend not in ("gemini", "grok") and not estimate_missing:
         return {**_zero_usage(), "backend": backend}
 
     assistant_chars = _sum_assistant_content_chars(raw)
+    if estimate_missing and raw and not assistant_chars:
+        # One-shot decision backends return a plain JSON object. It is valid
+        # JSON but not a streaming event with role/content fields, so count the
+        # response itself instead of mistaking it for an empty transcript.
+        assistant_chars = len(raw)
     tokens = {
         "input": _estimate_tokens(prompt_text),
         "cached_input": 0,
@@ -357,6 +378,41 @@ def extract_usage_from_text(
         "output": math.ceil(assistant_chars / _CHARS_PER_TOKEN) if assistant_chars else 0,
     }
     return {"tokens": tokens, "probe": {}, "estimated": True, "backend": backend}
+
+
+def append_usage_event(
+    index_path: str | os.PathLike[str] | None,
+    *,
+    backend: str,
+    model: str,
+    kind: str,
+    prompt_text: str,
+    raw_text: str | None = None,
+    raw_path: str | os.PathLike[str] | None = None,
+) -> dict:
+    """Append one measured-or-estimated invocation to the shared cost ledger."""
+    if raw_text is None:
+        raw_text = _read(os.fspath(raw_path)) if raw_path is not None else ""
+    usage = extract_usage_from_text(
+        raw_text, prompt_text=prompt_text, backend=backend,
+        estimate_missing=True,
+    )
+    if not index_path:
+        return usage
+    event = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "role": kind,
+        "backend": backend,
+        "model": model,
+        **usage,
+    }
+    try:
+        from workqueue import append_jsonl
+
+        append_jsonl(Path(index_path), event)
+    except (ImportError, OSError, ValueError):
+        pass
+    return usage
 
 
 # ── Field-name aliases for extract-field so callers can ask for the

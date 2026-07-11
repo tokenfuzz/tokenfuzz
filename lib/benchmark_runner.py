@@ -117,7 +117,10 @@ def drain_find_gate(
         os.environ["LLM_DECIDE_LIMIT_FILE"] = str(limit_file)
         try:
             for attempt in range(max_pauses + 1):
-                if deadline is not None and time.monotonic() >= deadline:
+                # The first pass must still enumerate expired findings so the
+                # cell is marked incomplete; validate_find_gate's own deadline
+                # check makes that bookkeeping pass spend no provider quota.
+                if attempt and deadline is not None and time.monotonic() >= deadline:
                     break
                 limit_file.write_text("", encoding="utf-8")
                 counts = triage.validate_find_gate(results, deadline=deadline)
@@ -131,11 +134,13 @@ def drain_find_gate(
                 now = int(time.time())
                 wait = reset - now + 30 if reset and reset > now else pause_chunk
                 wait = max(1, min(wait, max_pause_total - paused))
+                if deadline is not None:
+                    wait = min(wait, max(0, int(deadline - time.monotonic())))
+                    if wait <= 0:
+                        break
                 log(f"Find-gate provider limit: pausing {wait}s before retry")
                 time.sleep(wait)
                 paused += wait
-                if deadline is not None:
-                    deadline += wait
         finally:
             if previous_limit is None:
                 os.environ.pop("LLM_DECIDE_LIMIT_FILE", None)
@@ -149,6 +154,7 @@ def drain_find_gate(
 
 def triage_cell_crashes(
     results: Path, target: Path, target_slug: str, *, workers: int = 4,
+    deadline: float | None = None,
 ) -> dict[str, int]:
     """Apply the audit crash gate to a finished benchmark cell."""
     config = target_config.Config(
@@ -166,6 +172,7 @@ def triage_cell_crashes(
         results, target, target_slug, config.attacker_controls,
         workers=max(1, workers),
         findings_only=config.sanitizers_explicitly_disabled,
+        deadline=deadline,
     )
 
 
@@ -205,10 +212,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--budget-wall", type=_nonnegative, default=10800,
         help=(
-            "productive wall seconds per cell for recon and agents; final "
-            "triage runs to completion afterward and provider-recovery pauses "
-            "are excluded (0 = unlimited)"
+            "productive wall seconds per cell for recon and agents; "
+            "provider-recovery pauses are excluded (0 = unlimited)"
         ),
+    )
+    result.add_argument(
+        "--finalize-wall", type=_nonnegative, default=3600,
+        help="separate wall-clock ceiling for final crash/finding validation (0 = unlimited)",
     )
     result.add_argument("--agents", type=_positive)
     result.add_argument("--conditions", default="model-direct,harness")
@@ -521,7 +531,10 @@ def run_harness(
     target = (SCRIPT_ROOT / "targets" / target_slug).resolve()
     marked = mark_target_artifacts(target)
     result_dir = facade / "output" / f"{target_slug}-{experiment}" / backend / "results"
-    command = [str(facade / "bin" / "audit"), "--target", target_slug, "--backend", backend]
+    command = [
+        str(facade / "bin" / "audit"), "--target", target_slug,
+        "--backend", backend, "--no-refill-workers",
+    ]
     if skip_recon:
         command.append("--skip-recon")
     if model:
@@ -873,6 +886,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             "runid": run_id, "target": args.target, "backend": args.backend,
             "model": model, "replicates": args.replicates,
             "budget_wall": args.budget_wall, "harness_agents": args.agents,
+            "finalize_wall": getattr(args, "finalize_wall", 3600),
             "model_direct_agents": 1, "conditions": conditions,
             "skip_recon": args.skip_recon,
             "target_sha": target_config.detect_rev(SCRIPT_ROOT / "targets" / args.target),
@@ -943,13 +957,22 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     paused = int((results.parent / "logs" / ".paused_secs").read_text().strip())
                 except (OSError, ValueError):
                     pass
+                finalize_wall = getattr(args, "finalize_wall", 3600)
+                finalize_deadline = (
+                    time.monotonic() + finalize_wall if finalize_wall else None
+                )
                 if not args.dry_run and results.is_dir() and (results / "crashes").is_dir():
                     log(f"Cell {name}: completing crash triage before metrics")
                     try:
-                        crash_counts = triage_cell_crashes(
-                            results, (SCRIPT_ROOT / "targets" / args.target).resolve(),
-                            args.target, workers=args.agents or 4,
-                        )
+                        target_root = (SCRIPT_ROOT / "targets" / args.target).resolve()
+                        with _decision_environment(
+                            args.backend, model, target_root, args.target,
+                        ):
+                            crash_counts = triage_cell_crashes(
+                                results, target_root, args.target,
+                                workers=args.agents or 4,
+                                deadline=finalize_deadline,
+                            )
                         log(
                             f"Cell {name} crash triage: promoted={crash_counts.get('promoted', 0)} "
                             f"rejected={crash_counts.get('rejected', 0)} "
@@ -971,6 +994,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         counts = drain_find_gate(
                             results, args.backend, model,
                             (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
+                            deadline=finalize_deadline,
                         )
                         paused += counts.get("paused_seconds", 0)
                         log(
@@ -981,6 +1005,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             status = "incomplete"
                     except Exception as exc:
                         log(f"WARN: find-gate drain failed for {name}: {exc}")
+                        status = "incomplete"
                 elif not args.dry_run and condition == "model-direct" and not args.validate_findings:
                     log(f"Cell {name} validation: DISABLED (--no-validate-findings)")
                 wall = int(time.monotonic() - start)
@@ -1016,13 +1041,22 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             except (OSError, ValueError):
                 continue
             if results.is_dir():
+                finalize_wall = getattr(args, "finalize_wall", 3600)
+                finalize_deadline = (
+                    time.monotonic() + finalize_wall if finalize_wall else None
+                )
                 if (results / "crashes").is_dir():
                     log(f"Regenerate: completing crash triage for {cell_dir.name} ({cell.get('condition', '?')})")
                     try:
-                        triage_cell_crashes(
-                            results, (SCRIPT_ROOT / "targets" / args.target).resolve(),
-                            args.target, workers=args.agents or 4,
-                        )
+                        target_root = (SCRIPT_ROOT / "targets" / args.target).resolve()
+                        with _decision_environment(
+                            args.backend, model, target_root, args.target,
+                        ):
+                            triage_cell_crashes(
+                                results, target_root, args.target,
+                                workers=args.agents or 4,
+                                deadline=finalize_deadline,
+                            )
                     except Exception as exc:
                         log(f"WARN: crash triage failed for {cell_dir.name}: {exc}")
                 if args.validate_findings and (results / "findings").is_dir():
@@ -1031,6 +1065,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         drain_find_gate(
                             results, args.backend, model,
                             (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
+                            deadline=finalize_deadline,
                         )
                     except Exception as exc:
                         log(f"WARN: find-gate drain failed for {cell_dir.name}: {exc}")

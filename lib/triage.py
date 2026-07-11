@@ -18,6 +18,7 @@ from pathlib import Path
 import benchmark
 import crash_artifacts
 import llm_decide
+import llm_usage
 import stack_frames
 from prompt_render import render_template
 
@@ -305,7 +306,9 @@ def _reach_field_present(text: str, label: str) -> bool:
     )
 
 
-def fill_reach_fields(directory: Path) -> bool:
+def fill_reach_fields(
+    directory: Path, usage_index: str | os.PathLike[str] | None = None,
+) -> bool:
     """Fill missing scorer fields from report evidence without overriding authors.
 
     The report is the severity scorer's sole input. The decision sidecar only
@@ -342,7 +345,9 @@ def fill_reach_fields(directory: Path) -> bool:
         timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
     except ValueError:
         timeout = 45
-    decision = llm_decide.llm_decide("reachability-fields", "", prompt, timeout)
+    decision = llm_decide.llm_decide(
+        "reachability-fields", "", prompt, timeout, usage_index=usage_index,
+    )
     cache["_fill_attempts"] = attempts + 1
     if not isinstance(decision, dict):
         _write_atomic_json(sidecar, cache)
@@ -371,9 +376,10 @@ def fill_reach_fields(directory: Path) -> bool:
 def fill_reach_fields_tree(root: Path) -> int:
     """Apply reach-field convergence to every pooled crash and finding."""
     filled = 0
+    usage_index = benchmark._find_index_jsonl(Path(root))
     for kind, prefix in (("findings", "FIND-*"), ("crashes", "CRASH-*")):
         for directory in sorted((Path(root) / kind).glob(prefix)):
-            if directory.is_dir() and fill_reach_fields(directory):
+            if directory.is_dir() and fill_reach_fields(directory, usage_index):
                 filled += 1
     return filled
 
@@ -445,7 +451,10 @@ def cluster_expansion_decision(
     timeout = _decision_timeout(configured, deadline)
     if timeout <= 0:
         return None
-    decision = llm_decide.llm_decide("cluster_expand", "rows", prompt, timeout)
+    decision = llm_decide.llm_decide(
+        "cluster_expand", "rows", prompt, timeout,
+        usage_index=llm_usage.find_usage_index(crash_dir.parents[1]),
+    )
     if not isinstance(decision, dict) or not isinstance(decision.get("rows"), list):
         return None
     return [row for row in decision["rows"][:3] if isinstance(row, dict)]
@@ -764,6 +773,7 @@ def _harness_rooted(crash_dir: Path) -> bool:
 
 def _finding_trigger_rejected(
     finding_dir: Path, report: Path, deadline: float | None = None,
+    usage_index: str | os.PathLike[str] | None = None,
 ) -> bool:
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     target_root = os.environ.get("TARGET_ROOT", "")
@@ -771,13 +781,14 @@ def _finding_trigger_rejected(
         return False
     return _trigger_vote(
         report, finding_dir / ".trigger-gate.json", backend,
-        os.environ.get("MODEL", ""), Path(target_root), deadline,
+        os.environ.get("MODEL", ""), Path(target_root), deadline, usage_index,
     ) == 1
 
 
 def _trigger_vote(
     report: Path, vote_file: Path, backend: str, model: str,
     target_root: Path, deadline: float | None = None,
+    usage_index: str | os.PathLike[str] | None = None,
 ) -> int:
     """Run the recall-safe trigger-provenance reviewer (`validate-finding --gate
     trigger`) over a report. Returns 1 = disproof-backed Reject, 0 = keep
@@ -795,6 +806,8 @@ def _trigger_vote(
             return 0
     if os.environ.get("LLM_DECIDE_DISABLE") == "1":
         return 2
+    if llm_decide.provider_limit_open():
+        return 2
     if not (report.is_file() and report.stat().st_size) or not target_root.is_dir() or not backend:
         return 2
     timeout = _decision_timeout(300, deadline)
@@ -808,6 +821,8 @@ def _trigger_vote(
     ]
     if model:
         command += ["--model", model]
+    if usage_index:
+        command += ["--usage-index", os.fspath(usage_index)]
     try:
         rc = subprocess.run(
             command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -815,6 +830,14 @@ def _trigger_vote(
         ).returncode
     except subprocess.TimeoutExpired:
         return 2
+    if rc not in (0, 1, 2):
+        raw = vote_file.with_suffix(".raw.log")
+        try:
+            llm_decide.record_provider_limit(
+                raw.read_text(encoding="utf-8", errors="replace")
+            )
+        except OSError:
+            pass
     if rc == 1:
         return 1
     if rc in (0, 2):
@@ -825,6 +848,7 @@ def _trigger_vote(
 def _crash_trigger_gate(
     crash_dir: Path, report: Path, target_root: Path,
     deadline: float | None = None,
+    usage_index: str | os.PathLike[str] | None = None,
 ) -> bool:
     """Recall-safe trigger-provenance gate for a kept crash. A `bytes`-labelled
     trigger passes evaluate_crash_verdict's set-difference even when those bytes
@@ -840,12 +864,12 @@ def _crash_trigger_gate(
     model = os.environ.get("MODEL", "")
     if _trigger_vote(
         report, crash_dir / ".trigger-gate.json", backend, model,
-        target_root, deadline,
+        target_root, deadline, usage_index,
     ) != 1:
         return False
     return _trigger_vote(
         report, crash_dir / ".trigger-gate-2.json", backend, model,
-        target_root, deadline,
+        target_root, deadline, usage_index,
     ) == 1
 
 
@@ -860,6 +884,7 @@ def triage_one_crash(
 ) -> str:
     if _deadline_expired(deadline):
         return "pending"
+    usage_index = benchmark._find_index_jsonl(results_dir)
     rejected_root = results_dir / "crashes-rejected"
     sanitizer = _sanitizer_file(crash_dir)
     sanitizer_text = _read(sanitizer) if sanitizer else ""
@@ -934,7 +959,7 @@ def triage_one_crash(
             crash_dir, rejected_root, None, "bundle", ["REPORT.md"]
         )
     if not _deadline_expired(deadline):
-        fill_reach_fields(crash_dir)
+        fill_reach_fields(crash_dir, usage_index)
         report = _report(crash_dir) or report
     verdict, detail = evaluate_crash_verdict(_read(report), attacker_controls)
     if verdict == "incomplete":
@@ -947,7 +972,9 @@ def triage_one_crash(
         _set_contract_concern(report, detail)
     else:
         _clear_contract_concern(report)
-    if _crash_trigger_gate(crash_dir, report, Path(target_root), deadline):
+    if _crash_trigger_gate(
+        crash_dir, report, Path(target_root), deadline, usage_index,
+    ):
         _reject(
             crash_dir, rejected_root,
             "trigger-provenance (2 independent rejects): triggering state not attacker-reachable from a public boundary",
@@ -997,21 +1024,28 @@ def _finding_cache(path: Path) -> dict:
         return {}
 
 
-def _quality_vote(report_text: str, timeout: int) -> dict | None:
+def _quality_vote(
+    report_text: str, timeout: int,
+    usage_index: str | os.PathLike[str] | None = None,
+) -> dict | None:
     prompt = render_template("triage_find_quality.md.j2", {"body": report_text})
     return llm_decide.llm_decide(
-        "find_quality", "accept,reason,class,severity", prompt, timeout
+        "find_quality", "accept,reason,class,severity", prompt, timeout,
+        usage_index=usage_index,
     )
 
 
 def _finalize_accepted_finding(
     finding_dir: Path, results_dir: Path, report: Path,
     deadline: float | None,
+    usage_index: str | os.PathLike[str] | None = None,
 ) -> str:
     if not _deadline_expired(deadline):
-        fill_reach_fields(finding_dir)
+        fill_reach_fields(finding_dir, usage_index)
         report = _report(finding_dir) or report
-    if _finding_trigger_rejected(finding_dir, report, deadline):
+    if _finding_trigger_rejected(
+        finding_dir, report, deadline, usage_index,
+    ):
         _reject(
             finding_dir, results_dir / "findings-rejected",
             "trigger-provenance: triggering state not attacker-reachable",
@@ -1034,6 +1068,7 @@ def validate_one_finding(
         return "accepted"
     if _deadline_expired(deadline):
         return "pending"
+    usage_index = benchmark._find_index_jsonl(results_dir)
     report = _report(finding_dir)
     if report is None:
         (finding_dir / ".needs-content").touch()
@@ -1045,7 +1080,7 @@ def validate_one_finding(
         if cache.get("accept") is True and int(cache.get("accept_count", 0)) >= accept_quorum:
             (finding_dir / ".pending-drop").unlink(missing_ok=True)
             return _finalize_accepted_finding(
-                finding_dir, results_dir, report, deadline
+                finding_dir, results_dir, report, deadline, usage_index
             )
         if cache.get("accept") is False and int(cache.get("reject_count", 0)) >= quorum:
             _reject(finding_dir, results_dir / "findings-rejected", str(cache.get("reason") or "quality gate reject"))
@@ -1057,7 +1092,7 @@ def validate_one_finding(
         vote_timeout = _decision_timeout(timeout, deadline)
         if vote_timeout <= 0:
             break
-        vote = _quality_vote(report_text, vote_timeout)
+        vote = _quality_vote(report_text, vote_timeout, usage_index)
         if not isinstance(vote, dict) or not isinstance(vote.get("accept"), bool):
             break
         if vote["accept"]:
@@ -1075,7 +1110,7 @@ def validate_one_finding(
                 _write_atomic_json(cache_path, payload)
                 (finding_dir / ".pending-drop").unlink(missing_ok=True)
                 return _finalize_accepted_finding(
-                    finding_dir, results_dir, report, deadline
+                    finding_dir, results_dir, report, deadline, usage_index
                 )
         else:
             rejects += 1

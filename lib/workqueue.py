@@ -1530,8 +1530,14 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160, timeout:
 
     if boosts is None:
         try:
+            from llm_usage import find_usage_index
+
             raw = subprocess.check_output(
-                [sys.executable, str(engine), "decide", "work_rerank", "cards", str(int(timeout))],
+                [
+                    sys.executable, str(engine), "decide", "work_rerank", "cards",
+                    str(int(timeout)), "--usage-index",
+                    str(find_usage_index(ctx.results_dir)),
+                ],
                 input=prompt,
                 text=True,
                 stderr=subprocess.DEVNULL,

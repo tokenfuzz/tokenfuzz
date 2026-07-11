@@ -106,6 +106,7 @@ from llm_invoke import (  # noqa: E402
     invocation_env as _invocation_env,
     opencode_config as _opencode_config,
 )
+import llm_usage  # noqa: E402
 
 
 _KNOWN_BACKENDS = ("claude", "codex", "oss", "gemini", "grok")
@@ -884,6 +885,8 @@ def llm_decide(
     required_keys: str,
     prompt: str,
     timeout: int = 15,
+    *,
+    usage_index: str | os.PathLike[str] | None = None,
 ) -> Optional[dict | list]:
     """Run one LLM decision. Returns the parsed JSON, or None on any failure.
 
@@ -906,6 +909,10 @@ def llm_decide(
         _llm_log(f"{decision} FAIL empty-prompt")
         return None
 
+    if not mock_val and provider_limit_open():
+        _llm_log(f"{decision} SKIP provider-limit-open")
+        return None
+
     # Circuit breaker: skip a real-backend request whose exact (decision,
     # prompt) has already failed the threshold times this session, before
     # consuming budget or paying another backend timeout. Mocks are
@@ -921,7 +928,9 @@ def llm_decide(
         _llm_log(f"{decision} SKIP budget-exhausted max={_budget_cap()}")
         return None
 
-    result, backend_error = _run_decision(decision, required_keys, prompt, timeout, mock_val)
+    result, backend_error = _run_decision(
+        decision, required_keys, prompt, timeout, mock_val, usage_index,
+    )
 
     # Update the breaker on real-backend outcomes only: a success clears the
     # keys, a failure arms the per-prompt key, and a fast backend error
@@ -934,7 +943,7 @@ def llm_decide(
     return result
 
 
-def _maybe_record_provider_limit(*chunks: str) -> None:
+def record_provider_limit(*chunks: str) -> None:
     """Record a provider usage-limit reset seen in a failed decide call.
 
     A decision LLM call has no session log for the shared rate-limit detector to
@@ -973,12 +982,24 @@ def _maybe_record_provider_limit(*chunks: str) -> None:
         return
 
 
+def provider_limit_open() -> bool:
+    """Stop a validation fan-out once any sibling confirms account exhaustion."""
+    target = os.environ.get("LLM_DECIDE_LIMIT_FILE")
+    if not target:
+        return False
+    try:
+        return Path(target).stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _run_decision(
     decision: str,
     required_keys: str,
     prompt: str,
     timeout: int,
     mock_val: str,
+    usage_index: str | os.PathLike[str] | None = None,
 ) -> "tuple[Optional[dict | list], bool]":
     """Dispatch one decision (mock or real backend) and validate its JSON.
 
@@ -1043,8 +1064,13 @@ def _run_decision(
                 f"elapsed={elapsed}s timeout={timeout}s"
             )
             # CLIs differ on whether provider caps land on stdout or stderr.
-            _maybe_record_provider_limit(exc.output, exc.stderr)
+            record_provider_limit(exc.output, exc.stderr)
             return None, True
+        llm_usage.append_usage_event(
+            usage_index, backend=backend,
+            model=os.environ.get("MODEL", "") or _default_model(backend),
+            kind=f"decision:{decision}", prompt_text=prompt, raw_text=raw,
+        )
 
     elapsed = int(time.time() - t_start)
 
@@ -1056,7 +1082,7 @@ def _run_decision(
         _llm_log(f"{decision} FAIL extract-json bytes={prompt_bytes} elapsed={elapsed}s")
         # Some backends surface a usage limit as a rate-limit event on stdout
         # while still exiting 0 (no CalledProcessError); catch that here too.
-        _maybe_record_provider_limit(raw)
+        record_provider_limit(raw)
         return None, False
     parsed = _try_load(json_text)
     if not _validate_required_keys(parsed, required_keys):
@@ -1074,7 +1100,10 @@ def _run_decision(
 
 def _cmd_decide(args) -> int:
     prompt = sys.stdin.read()
-    result = llm_decide(args.decision, args.required_keys or "", prompt, args.timeout)
+    result = llm_decide(
+        args.decision, args.required_keys or "", prompt, args.timeout,
+        usage_index=args.usage_index,
+    )
     if result is None:
         return 1
     # Emit canonical JSON: object roots in stable key order, no trailing
@@ -1095,6 +1124,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("decision")
     s.add_argument("required_keys", nargs="?", default="")
     s.add_argument("timeout", type=int, nargs="?", default=15)
+    s.add_argument("--usage-index")
     s.set_defaults(func=_cmd_decide)
 
     s = sub.add_parser("budget-check")

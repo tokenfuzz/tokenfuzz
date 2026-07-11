@@ -371,6 +371,8 @@ fi
 
 assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'command.append\("--skip-recon"\)' \
   "T16p: --skip-recon is forwarded to bin/audit instead of shadowing bin/audit-recon"
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" '"--no-refill-workers"' \
+  "T16q: benchmark harness cells disable automatic worker refills"
 
 # ── T17: cleanup_model_direct_scratch reclaims model-direct scratch/ only ──────
 # It must delete the throwaway scratch/ dir but never the harness's scratch-N/

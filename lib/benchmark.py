@@ -45,6 +45,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 from pathlib import Path
 
+import llm_usage
+
 try:  # ClusterFuzz-normalized stack frames — reused, never reinvented.
     import stack_frames as _sf
 except Exception:  # pragma: no cover - stack_frames should always import
@@ -1118,13 +1120,7 @@ def _find_index_jsonl(results_dir: Path) -> Path:
     this, every harness row scored as zero tokens). Returns the in-tree
     path when neither exists — harvest_tokens handles a missing file.
     """
-    inside = results_dir / "logs" / "index.jsonl"
-    if inside.is_file():
-        return inside
-    sibling = results_dir.parent / "logs" / "index.jsonl"
-    if sibling.is_file():
-        return sibling
-    return inside
+    return llm_usage.find_usage_index(results_dir)
 
 
 def count_recon_candidates(results_dir: Path) -> int:

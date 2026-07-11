@@ -78,7 +78,8 @@ With all defaults, the command means:
 | `--backend` | `codex` | Agent backend. Valid values are `claude`, `codex`, `gemini`, `grok`, and `oss`. |
 | `--model` | backend config default | Optional model override used by both conditions. |
 | `--replicates` | `3` | Runs per condition. |
-| `--budget-wall` | `10800` | Productive seconds per cell for recon and agents. Final triage runs to completion after that budget; provider-recovery pauses are excluded. `0` is unlimited. |
+| `--budget-wall` | `10800` | Productive seconds per cell for recon and agents. Provider-recovery pauses are excluded. `0` is unlimited. |
+| `--finalize-wall` | `3600` | Separate wall-clock ceiling for final crash and finding validation. `0` is unlimited. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
 | `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |
 | `--run-id` | UTC timestamp | Run directory under `output/benchmark/<backend>/`; reuse it to resume. |
@@ -124,10 +125,13 @@ startup cost inside the budget you gave it.
 
 After timed investigation stops, each cell synchronously drains the finding
 quality gate before metrics are harvested. This final triage is measurement,
-not additional finding time, so it may extend the cell's elapsed wall time
-beyond `--budget-wall`. A normally exhausted investigation budget still
-produces a completed cell; only unresolved triage or provider failure leaves
-the cell incomplete.
+not additional finding time, so it gets a separate `--finalize-wall` budget.
+Anything still pending at that deadline leaves the cell incomplete and can be
+resumed with `--regenerate`.
+
+Harness benchmark cells disable early-worker refills. This prevents the
+configured agent count from silently expanding provider demand; standalone
+`bin/audit` runs retain refills unless passed `--no-refill-workers`.
 
 ## Where results land
 
@@ -193,9 +197,12 @@ that produced the number.
 
 **Token usage** appears when the backend reports usage or the harness
 can estimate prompt size. The bold row per condition is the total to
-compare. Gemini through the Antigravity CLI may show estimated prompt
-tokens instead of measured usage; Gemini through `USE_GEMINI_CLI=1`
-can provide measured numbers.
+compare. Harness totals include model preflight, recon, audit agents, and
+harness-owned decisions such as triage, cluster expansion, work reranking, and
+peer mapping. One-shot calls without provider telemetry are estimated and
+marked as such. Gemini through the Antigravity CLI may show estimated prompt
+tokens instead of measured usage; Gemini through `USE_GEMINI_CLI=1` can
+provide measured numbers.
 
 **Bugs by severity** lists distinct crash clusters strongest first.
 The bug id links to the crash directory, and the reproducer link opens

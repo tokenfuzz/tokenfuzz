@@ -98,6 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-concurrent", action="store_true")
     parser.add_argument("--skip-recon", action="store_true")
     parser.add_argument("--enable-memory", action="store_true")
+    parser.add_argument(
+        "--refill-workers", action=argparse.BooleanOptionalAction, default=True,
+        help="reuse an early-finished worker slot once per iteration",
+    )
     return parser
 
 
@@ -195,6 +199,7 @@ class Runtime:
     agent_roles: tuple[str, ...]
     fixed_strategy: str
     decision_timeout: int
+    refill_workers: bool = True
 
     def prompt_context(self, guide: str) -> prompt.PromptContext:
         return prompt.PromptContext(
@@ -261,6 +266,7 @@ def prepare_runtime(
     root: Path, target_root: Path, target_slug: str, output_slug: str,
     backend: str, model_override: str, fixed_strategy: str,
     max_iterations: int, decision_timeout_override: str | None = None,
+    refill_workers: bool = True,
 ) -> Runtime:
     output_root = root / "output" / output_slug
     config = _load_config(root, target_root, output_root, target_slug)
@@ -291,6 +297,7 @@ def prepare_runtime(
         results, logs, raw, logs / "index.log", logs / "index.jsonl",
         total, browser, shell, roles, fixed_strategy,
         _decision_timeout_for_backend(backend, decision_timeout_override),
+        refill_workers,
     )
     _activate_runtime(runtime)
     return runtime
@@ -368,6 +375,11 @@ def validate_model(runtime: Runtime) -> None:
                 model=runtime.model, max_turns=6 if runtime.backend == "oss" else 1,
                 add_dirs=str(preflight_dir if runtime.backend == "oss" else runtime.root),
                 cwd=preflight_dir if runtime.backend == "oss" else runtime.root,
+            )
+            llm_usage.append_usage_event(
+                getattr(runtime, "index_jsonl", runtime.logs / "index.jsonl"),
+                backend=runtime.backend, model=runtime.model,
+                kind="model-preflight", prompt_text=prompt_text, raw_path=raw,
             )
             try:
                 response = llm_invoke.extract_text(runtime.backend, str(raw)).strip()
@@ -848,6 +860,7 @@ def maybe_seed_recon(runtime: Runtime, args, timeout_limit: int | None = None) -
         "--target-path", str(runtime.target_root), "--backend", runtime.backend,
         "--model", runtime.model, "--out", str(recon_output),
         "--report", str(runtime.results / "recon-findings.md"),
+        "--usage-index", str(getattr(runtime, "index_jsonl", runtime.logs / "index.jsonl")),
     ]
     environment = os.environ.copy() | {"SCRIPT_ROOT": str(runtime.root)}
     if timeout_limit is not None:
@@ -1056,7 +1069,7 @@ def run_agent(
         "returncode": rc, "provider_issue": issue, "prompt_chars": len(rendered),
         "raw_log": str(raw_path), "text_log": str(text_path), **usage,
     }
-    _append(runtime.index_jsonl, json.dumps(event, separators=(",", ":")))
+    workqueue.append_jsonl(runtime.index_jsonl, event)
     token_counts = usage.get("tokens") or {}
     total_tokens = sum(
         int(token_counts.get(key) or 0)
@@ -1632,7 +1645,7 @@ def run_agent_pool(
             # still active. This fills otherwise idle provider capacity without
             # turning an iteration into an unbounded worker queue.
             initial_still_active = any(initial for _agent, initial in futures.values())
-            if not initial_still_active:
+            if not getattr(runtime, "refill_workers", True) or not initial_still_active:
                 continue
             for result in completed_initial:
                 if result.provider_issue != "none" or should_skip_launch(
@@ -1940,6 +1953,7 @@ def main(argv: list[str] | None = None) -> int:
                 root, target_root, target_slug, output_slug, backend,
                 args.model, args.strategy, args.max_iterations,
                 decision_timeout_override,
+                args.refill_workers,
             )
             for backend in backends
         ]

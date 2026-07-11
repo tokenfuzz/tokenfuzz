@@ -420,6 +420,14 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "Model preflight passed" in model_runtime.index.read_text(encoding="utf-8"),
         "model preflight exercises the requested model through the agent launch path",
     )
+    preflight_usage = json.loads(
+        (model_runtime.logs / "index.jsonl").read_text(encoding="utf-8")
+    )
+    check(
+        preflight_usage["role"] == "model-preflight"
+        and preflight_usage["backend"] == "gemini",
+        "model preflight usage is charged to the session ledger",
+    )
     model_runtime.backend = "oss"
     with mock.patch.dict(
         os.environ,
@@ -788,6 +796,11 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "agent and probe share the canonical per-agent evidence journals",
         repr(launch_env),
     )
+    check(
+        (launch_logs / ".index.jsonl.lock").is_file()
+        and json.loads((launch_logs / "index.jsonl").read_text())["agent"] == 1,
+        "agent usage writes share the JSONL lock used by concurrent harness writers",
+    )
     corpus_testcase = launch_scratch / "coverage.html"
     corpus_testcase.write_text(
         "<!-- HYPOTHESIS-ID: H77 -->\n<!-- TARGET: src/parser.c -->\n"
@@ -919,6 +932,22 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "an early worker receives one refill while another initial slot is active",
         repr(pool_calls),
     )
+    pool_runtime.refill_workers = False
+    no_refill_calls = []
+    def _no_refill_agent(_runtime, _context, agent, _iteration, cold, _limit):
+        no_refill_calls.append((agent, cold))
+        return audit_runner.AgentResult(
+            agent, "reproduce", 0, Path(), Path(), {}, "none", None
+        )
+    with mock.patch.object(audit_runner, "run_agent_guarded", side_effect=_no_refill_agent), \
+         mock.patch.object(audit_runner, "should_skip_launch", return_value=False):
+        audit_runner.run_agent_pool(pool_state, [1, 2], True)
+    check(
+        sorted(no_refill_calls) == [(1, True), (2, True)],
+        "disabled worker refills never expand the configured pool",
+        repr(no_refill_calls),
+    )
+    pool_runtime.refill_workers = True
     refill_block = threading.Event()
     expired_calls = []
     def _expired_pool_agent(_runtime, _context, agent, _iteration, cold, _limit):
@@ -1045,16 +1074,75 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         gate_passes[0] == 2 and resumed["accepted"] == 2 and sleep_mock.call_count == 1,
         "benchmark finding drain resumes after a provider-limit marker",
     )
-    with mock.patch.object(triage, "validate_find_gate") as expired_gate, \
+    with mock.patch.object(
+        triage, "validate_find_gate",
+        return_value={"accepted": 0, "rejected": 0, "pending": 1},
+    ) as expired_gate, \
          mock.patch.object(benchmark_runner.time, "monotonic", return_value=100.0):
         expired_counts = benchmark_runner.drain_find_gate(
             gate_results, "codex", "fixture-model", generic_target, "demo",
             deadline=100.0,
         )
     check(
-        expired_counts == {"accepted": 0, "rejected": 0, "pending": 0}
-        and not expired_gate.called,
-        "benchmark validation drain launches no decisions after the cell deadline",
+        expired_counts == {"accepted": 0, "rejected": 0, "pending": 1}
+        and expired_gate.call_args.kwargs["deadline"] == 100.0,
+        "expired benchmark validation reports pending findings without extending the deadline",
+    )
+
+    limit_marker = root / "decision-provider-limit"
+    limit_marker.write_text("unknown\n", encoding="utf-8")
+    with mock.patch.dict(os.environ, {"LLM_DECIDE_LIMIT_FILE": str(limit_marker)}, clear=False), \
+         mock.patch.object(llm_decide, "_resolve_mock_value", return_value=""), \
+         mock.patch.object(llm_decide, "_run_decision") as limited_decision:
+        limited_result = llm_decide.llm_decide(
+            "find_quality", "accept,reason,class,severity", "review this", 1,
+        )
+    check(
+        limited_result is None and not limited_decision.called,
+        "a confirmed provider limit stops queued validation decisions",
+    )
+
+    decision_payload = '{"accept":true,"reason":"ok","class":"state","severity":"low"}'
+    for usage_backend in ("claude", "codex", "gemini", "grok"):
+        usage_index = root / f"usage-index-{usage_backend}.jsonl"
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": usage_backend, "MODEL": "fixture-model",
+        }, clear=False), mock.patch.object(
+            llm_decide, "_invoke_backend", return_value=decision_payload,
+        ):
+            usage_result, usage_error = llm_decide._run_decision(
+                "find_quality", "accept,reason,class,severity", "p" * 400, 1, "",
+                usage_index,
+            )
+        usage_row = json.loads(usage_index.read_text(encoding="utf-8"))
+        check(
+            usage_result == {"accept": True, "reason": "ok", "class": "state", "severity": "low"}
+            and usage_error is False
+            and usage_row["estimated"] is True
+            and usage_row["tokens"]["input"] == 100
+            and usage_row["tokens"]["output"] > 0
+            and usage_row["role"] == "decision:find_quality"
+            and usage_row["backend"] == usage_backend,
+            f"{usage_backend} one-shot decisions append labeled estimated usage",
+            repr(usage_row),
+        )
+
+    check(
+        benchmark_runner.parser().parse_args([]).finalize_wall == 3600,
+        "benchmark final validation defaults to a one-hour safety window",
+    )
+    layout_root = root / "usage-layouts"
+    harness_results = layout_root / "harness" / "results"
+    harness_results.mkdir(parents=True)
+    (harness_results.parent / "logs").mkdir()
+    direct_results = layout_root / "direct"
+    (direct_results / "logs").mkdir(parents=True)
+    check(
+        benchmark_runner.metrics._find_index_jsonl(harness_results)
+        == harness_results.parent / "logs" / "index.jsonl"
+        and benchmark_runner.metrics._find_index_jsonl(direct_results)
+        == direct_results / "logs" / "index.jsonl",
+        "usage ledger routing is stable before either layout creates index.jsonl",
     )
 
     config_root = root / "config-root"

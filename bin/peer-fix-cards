@@ -30,6 +30,7 @@ ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT"
 sys.path.insert(0, str(ROOT / "lib"))
 
 import peer_sources  # noqa: E402
+import llm_usage  # noqa: E402
 import target_config as tc  # noqa: E402
 import workqueue  # noqa: E402
 from llm_decide import llm_decide  # noqa: E402
@@ -115,6 +116,7 @@ def _verdict_cache_store(path: Path | None, payload: dict) -> None:
 def distill_bug_class(
     peer: str, fix_entry: dict, diff_excerpt: str, timeout: int = 20,
     cache_dir: Path | None = None,
+    usage_index: Path | None = None,
 ) -> str:
     """LLM-distill the bug class from a peer fix. Empty string on failure."""
     prompt = render_template("peer_fix_distill.md.j2", {
@@ -129,7 +131,10 @@ def distill_bug_class(
     cached = _verdict_cache_load(cache_path)
     if cached is not None and "bug_class" in cached:
         return str(cached["bug_class"])
-    result = llm_decide("s6-peer-distill", "class,summary,shape", prompt, timeout=timeout)
+    result = llm_decide(
+        "s6-peer-distill", "class,summary,shape", prompt, timeout=timeout,
+        usage_index=usage_index,
+    )
     if result is None:
         return ""
     cls = str(result.get("class", "")).strip()
@@ -148,6 +153,7 @@ def map_to_target_file(
     target_slug: str,
     timeout: int = 20,
     cache_dir: Path | None = None,
+    usage_index: Path | None = None,
 ) -> str:
     """LLM-map a distilled bug class to a target-side file analogue.
 
@@ -170,7 +176,10 @@ def map_to_target_file(
         # Defensive replay guard: the listing excerpt keys the cache, so
         # membership still holds, but re-checking costs nothing.
         return f if (not f or f in target_file_listing) else ""
-    result = llm_decide("s6-peer-map", "file,reason", prompt, timeout=timeout)
+    result = llm_decide(
+        "s6-peer-map", "file,reason", prompt, timeout=timeout,
+        usage_index=usage_index,
+    )
     if result is None:
         return ""
     f = str(result.get("file", "")).strip()
@@ -240,6 +249,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     ctx = workqueue.context_from_args(args)
+    usage_index = llm_usage.find_usage_index(ctx.results_dir)
     output = Path(args.output).expanduser().resolve() if args.output \
         else ctx.results_dir / "s6-peer-cards.jsonl"
 
@@ -321,14 +331,16 @@ def main(argv: list[str]) -> int:
                 diff_excerpt = peer_sources.fetch_fix_diff(clone, fix["fix_hash"])
 
             bug_class = distill_bug_class(peer, fix, diff_excerpt,
-                                          cache_dir=cache_dir)
+                                          cache_dir=cache_dir,
+                                          usage_index=usage_index)
             if not bug_class:
                 # LLM unavailable / failed — fall back to the raw summary.
                 bug_class = f"unknown class: {fix.get('summary', '')[:160]}"
 
             target_file = map_to_target_file(bug_class, target_files,
                                              ctx.target_slug,
-                                             cache_dir=cache_dir)
+                                             cache_dir=cache_dir,
+                                             usage_index=usage_index)
             if not target_file:
                 # No credible analogue — skip the card rather than emit
                 # noise. Operator can re-run if the listing changes.

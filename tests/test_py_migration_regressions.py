@@ -82,9 +82,9 @@ with tempfile.TemporaryDirectory(
     # exercised through its structural path (env opt-out, byte accounting, etc.).
     os.environ["CRASH_TRIGGER_GATE"] = "0"
 
-    # The productive wall limits finding work, not final measurement. A
-    # harness that consumes that entire budget must still drain the finding
-    # gate and finish as a countable benchmark cell.
+    # The productive wall and final measurement have independent budgets. A
+    # harness that consumes its investigation budget still receives a bounded
+    # finalization window and finishes as a countable benchmark cell.
     bench_root = root / "benchmark"
     backend_root = bench_root / "codex"
     bench_dir = backend_root / "wall-budget"
@@ -117,10 +117,13 @@ with tempfile.TemporaryDirectory(
 
     budget_args = SimpleNamespace(
         model="test-model", backend="codex", target="sampleproj", replicates=1,
-        budget_wall=1, agents=1, skip_recon=False, dry_run=False,
+        budget_wall=1, finalize_wall=7, agents=1, skip_recon=False, dry_run=False,
         regenerate=False, validate_findings=True,
     )
     empty_report = {"conditions": []}
+    budget_clock = iter([0])
+    def _budget_time():
+        return next(budget_clock, 5)
     with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", fake_script_root), \
          mock.patch.object(benchmark_runner.llm_invoke, "apply_memory_policy"), \
          mock.patch.object(benchmark_runner.target_config, "detect_rev", return_value="rev"), \
@@ -131,7 +134,7 @@ with tempfile.TemporaryDirectory(
          mock.patch.object(benchmark_runner, "update_result", return_value=empty_report), \
          mock.patch.object(benchmark_runner.metrics, "render_section", return_value=""), \
          mock.patch.object(benchmark_runner.metrics, "append_to_ledger"), \
-         mock.patch.object(benchmark_runner.time, "monotonic", side_effect=[0, 5]):
+         mock.patch.object(benchmark_runner.time, "monotonic", side_effect=_budget_time):
         budget_rc = benchmark_runner._run_locked(
             budget_args, bench_root, backend_root, bench_dir, cells_dir,
             backend_root / "benchmark-results.md", "wall-budget", ["harness"],
@@ -144,8 +147,8 @@ with tempfile.TemporaryDirectory(
     )
     check(budget_rc == 0, "budget-complete harness cell succeeds after final triage")
     check(
-        drained_deadlines == [None],
-        "final benchmark triage runs without the expired productive deadline",
+        drained_deadlines == [12],
+        "final benchmark triage receives its independent deadline",
         repr(drained_deadlines),
     )
     check(
@@ -243,7 +246,9 @@ with tempfile.TemporaryDirectory(
         (gate_crash / "input.bin").write_bytes(b"input")
         return 0
 
-    def _record_gate(_directory, report_path, _target_root, _deadline=None):
+    def _record_gate(
+        _directory, report_path, _target_root, _deadline=None, _usage_index=None,
+    ):
         reviewed_paths.append(report_path)
         return False
 

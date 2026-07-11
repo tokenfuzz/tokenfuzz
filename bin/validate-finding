@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import llm_invoke
+import llm_usage
 import prompt_render
 
 VOTES = {"Promote": 0, "Reject": 1, "Uncertain": 2}
@@ -31,6 +32,7 @@ def parse_args(argv=None):
     parser.add_argument("--gate", choices=("finding", "trigger"), default="finding")
     parser.add_argument("--output")
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--usage-index", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -107,6 +109,10 @@ def main(argv=None) -> int:
             args.backend, prompt, args.timeout, raw, model=args.model,
             max_turns=0, add_dirs=f"{ROOT},{target}", cwd=cwd,
         )
+    llm_usage.append_usage_event(
+        args.usage_index, backend=args.backend, model=args.model,
+        kind=f"decision:{args.gate}-validator", prompt_text=prompt, raw_path=raw,
+    )
     text = llm_invoke.extract_text(args.backend, str(raw)).replace("\r", "")
     vote = extract_vote(text)
     if vote is None:
