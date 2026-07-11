@@ -99,6 +99,12 @@ with tempfile.TemporaryDirectory(
         finding = results / "findings" / "FIND-001"
         finding.mkdir(parents=True)
         (finding / "report.md").write_text("# Finding\n", encoding="utf-8")
+        crash = results / "crashes" / "CRASH-001"
+        crash.mkdir(parents=True)
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: stack-overflow on address 0x1234\n",
+            encoding="utf-8",
+        )
         return 0, results
 
     def _budget_drain(results, *_args, **kwargs):
@@ -150,6 +156,12 @@ with tempfile.TemporaryDirectory(
     check(
         budget_metrics["confirmed_findings"] == 1,
         "metrics are harvested after final finding adjudication",
+        repr(budget_metrics),
+    )
+    check(
+        budget_metrics["confirmed_crashes"] == 0
+        and budget_metrics["crashes_rejected"] == 1,
+        "final cell triage quarantines model-direct autodiscard crashes before harvest",
         repr(budget_metrics),
     )
 

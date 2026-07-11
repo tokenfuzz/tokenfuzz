@@ -796,13 +796,16 @@ runjson_before=$(jq -rS . "$dbench/run.json")
 regen_harness_cell=$(find "$dbench/cells" -mindepth 1 -maxdepth 1 -type d -name 'harness-*' | sort | head -1)
 regen_harness_results=$(jq -r '.results_dir' "$regen_harness_cell/cell.json")
 mkdir -p "$regen_harness_results/findings/FIND-ACCEPTED" \
-         "$regen_harness_results/findings/FIND-PENDING"
+         "$regen_harness_results/findings/FIND-PENDING" \
+         "$regen_harness_results/crashes/CRASH-STACK"
 printf '# Accepted finding\n\nLocation: catalog.c:1\n' \
   > "$regen_harness_results/findings/FIND-ACCEPTED/report.md"
 printf '{"accept":true,"accept_count":2,"class":"memory-safety","severity":"Medium"}\n' \
   > "$regen_harness_results/findings/FIND-ACCEPTED/.llm-find-quality.json"
 printf '# Pending finding\n\nLocation: catalog.c:2\n' \
   > "$regen_harness_results/findings/FIND-PENDING/report.md"
+printf '==1==ERROR: AddressSanitizer: stack-overflow on address 0x1234\n' \
+  > "$regen_harness_results/crashes/CRASH-STACK/sanitizer.txt"
 # Simulate a stale pre-confirmed-findings metrics file. --regenerate must
 # reharvest before rebuilding the pool, otherwise both raw FIND dirs would be
 # pooled and the headline finding count would stay inflated.
@@ -833,6 +836,12 @@ assert_match 'no cells launched' "$regen_out" \
 # never a silent drop.
 assert_match 'Regenerate: draining find-gate for' "$regen_out" \
   "T9r-b2: --regenerate drains the find-gate before reharvest"
+assert_match 'Regenerate: completing crash triage for' "$regen_out" \
+  "T9r-b2-crash: --regenerate completes crash triage before reharvest"
+assert_dir_not_exists "$regen_harness_results/crashes/CRASH-STACK" \
+  "T9r-b2-stack: regenerate removes an auto-quarantined crash from accepted metrics"
+assert_dir_exists "$regen_harness_results/crashes-rejected/CRASH-STACK" \
+  "T9r-b2-stack-rejected: regenerate preserves the auto-quarantined crash as rejected"
 assert_match 'WARN: .* finding\(s\) still un-adjudicated after drain' "$regen_out" \
   "T9r-b3: --regenerate WARNs about findings the drain could not adjudicate"
 # --regenerate now runs the bundle pass too, but it is strictly additive: the

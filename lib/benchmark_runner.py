@@ -147,6 +147,28 @@ def drain_find_gate(
     return counts
 
 
+def triage_cell_crashes(
+    results: Path, target: Path, target_slug: str, *, workers: int = 4,
+) -> dict[str, int]:
+    """Apply the audit crash gate to a finished benchmark cell."""
+    config = target_config.Config(
+        slug=target_slug,
+        target_root=str(target),
+        attacker_controls=["bytes"],
+        sanitizers_enabled=["asan"],
+    )
+    config_path = SCRIPT_ROOT / "output" / target_slug / "target.toml"
+    if not config_path.is_file():
+        config_path = metrics._find_output_target_toml(results)
+    if config_path is not None:
+        target_config.load_toml_into(config, config_path)
+    return triage.triage_crash_dirs(
+        results, target, target_slug, config.attacker_controls,
+        workers=max(1, workers),
+        findings_only=config.sanitizers_explicitly_disabled,
+    )
+
+
 def target_key(raw: str) -> str:
     if raw and all(ch.isalnum() or ch in "._-" for ch in raw):
         return raw
@@ -921,6 +943,24 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     paused = int((results.parent / "logs" / ".paused_secs").read_text().strip())
                 except (OSError, ValueError):
                     pass
+                if not args.dry_run and results.is_dir() and (results / "crashes").is_dir():
+                    log(f"Cell {name}: completing crash triage before metrics")
+                    try:
+                        crash_counts = triage_cell_crashes(
+                            results, (SCRIPT_ROOT / "targets" / args.target).resolve(),
+                            args.target, workers=args.agents or 4,
+                        )
+                        log(
+                            f"Cell {name} crash triage: promoted={crash_counts.get('promoted', 0)} "
+                            f"rejected={crash_counts.get('rejected', 0)} "
+                            f"demoted={crash_counts.get('demoted', 0)} "
+                            f"pending={crash_counts.get('pending', 0)}"
+                        )
+                        if crash_counts.get("pending", 0):
+                            status = "incomplete"
+                    except Exception as exc:
+                        log(f"WARN: crash triage failed for {name}: {exc}")
+                        status = "incomplete"
                 if not args.dry_run and args.validate_findings and results.is_dir() and (results / "findings").is_dir():
                     # Final triage is measurement, not timed finding work. Run
                     # it synchronously after the audit consumes its productive
@@ -981,6 +1021,15 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             except (OSError, ValueError):
                 continue
             if results.is_dir():
+                if (results / "crashes").is_dir():
+                    log(f"Regenerate: completing crash triage for {cell_dir.name} ({cell.get('condition', '?')})")
+                    try:
+                        triage_cell_crashes(
+                            results, (SCRIPT_ROOT / "targets" / args.target).resolve(),
+                            args.target, workers=args.agents or 4,
+                        )
+                    except Exception as exc:
+                        log(f"WARN: crash triage failed for {cell_dir.name}: {exc}")
                 if args.validate_findings and (results / "findings").is_dir():
                     log(f"Regenerate: draining find-gate for {cell_dir.name} ({cell.get('condition', '?')})")
                     try:
