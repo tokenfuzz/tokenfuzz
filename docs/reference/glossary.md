@@ -21,9 +21,9 @@ them to exit.
 audit iterations against the same target and backend, normally
 rooted in the same `output/<target>/<backend>/` tree.
 
-**Cold start.** An iteration where no agent has structured state yet
-— typically the first iteration of a fresh target. Cold start
-also runs the recon survey before the deep agents launch.
+**Cold start.** An iteration where no agent has structured state yet—typically
+the first working iteration of a fresh target. Recon runs before deep agents on
+a multi-iteration cold start; a one-iteration smoke test skips it.
 
 **Recon.** A short breadth-first review pass over the in-scope
 source set. Runs at the start of an audit (or via
@@ -150,7 +150,7 @@ PHP) but valid for any project without an ASan build. Runtime
 diagnostics are filed under `findings/`, not `crashes/`.
 
 **`.session-env`.** Dynamic per-run paths and identifiers
-(`RESULTS_DIR`, `TARGET_ROOT`, `TARGET_REV`, `TARGET_SLUG`,
+(`RESULTS_DIR`, `TARGET_ROOT`, `TARGET_REV`, `TARGET_REPO_TYPE`, `TARGET_SLUG`,
 `LOGDIR`, `SESSION_STARTED`) written by `bin/audit` at startup
 into `output/<target>/<backend>/results/.session-env`. `bin/probe`
 discovers it by walking up from the testcase path, so no env vars need

@@ -184,7 +184,8 @@ recorded revision *is* affected, the most common causes are:
 
 The bundle is self-contained:
 
-- It does not phone home.
+- It contains no TokenFuzz telemetry. The script may use the network to clone
+  the recorded upstream source or install the project's build dependencies.
 - It does not contain audit-internal vocabulary.
 - It does not embed model transcripts.
 
@@ -193,13 +194,12 @@ H-prefixed scratch artifacts — live in `.audit/` inside the bundle
 for provenance. They are not needed to reproduce.
 
 If you would like to credit TokenFuzz in your advisory or commit
-message, the appropriate phrasing is something like:
+message, a neutral attribution is:
 
 > Discovered with TokenFuzz (LLM-based sanitizer-regression
 > harness).
 
-There is no embargo on disclosure other than the one you set as the
-maintainer.
+Follow the project's normal coordinated-disclosure and embargo process.
 
 ## Got a question or want to challenge the report?
 

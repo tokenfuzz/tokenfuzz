@@ -37,7 +37,7 @@
   <text x="40" y="62" class="step-num">1</text>
   <g filter="url(#al-shadow)"><rect x="70" y="28" width="850" height="60" class="step"/></g>
   <text x="90"  y="52"  class="title">Set up the target</text>
-  <text x="90"  y="74"  class="sub">Clone upstream source, build it under a sanitizer, point a small config file at the result.</text>
+  <text x="90"  y="74"  class="sub">Add the source checkout and review the generated runner, sanitizer, and threat-model config.</text>
 
   <path d="M480,88 L480,112" class="arrow" marker-end="url(#al-arrow)"/>
 
@@ -78,8 +78,8 @@
     <polygon points="480,466 580,526 480,586 380,526" class="gate"/>
   </g>
   <text x="480" y="518" class="gate-label">TRIAGE</text>
-  <text x="480" y="536" class="gate-sub">real security impact?</text>
-  <text x="480" y="552" class="gate-sub">reachable through a real input?</text>
+  <text x="480" y="536" class="gate-sub">security-relevant and concrete?</text>
+  <text x="480" y="552" class="gate-sub">evidence complete and reproducible?</text>
 
   <!-- Outcomes row -->
   <g filter="url(#al-shadow)"><rect x="40"  y="606" width="240" height="64" class="find"/></g>

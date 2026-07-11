@@ -45,17 +45,13 @@ upstream-derived [`lib/clusterfuzz_stacktrace.py`](https://github.com/tokenfuzz/
 3. **Normalize each function name** (`filter_function_name`): strip the
    argument list, anonymous-namespace markers, and `[abi:...]` tags, so
    `Store::set_blob(unsigned int)` and `Store::set_blob` are one symbol.
-4. **Take the top N** interesting frames (`MAX_CRASH_STATE_FRAMES: 3`) — the
-   *crash state*. Two crashes with the same crash state **and the same
+4. **Take the top three** interesting frames—the *crash state*. Two crashes
+   with the same crash state **and the same
    sanitizer primitive** (e.g. `heap-buffer-overflow READ`) are the same
    bug; identical stacks that report different primitives do not merge.
 5. **Bucket** crashes by that (primitive, crash state) pair. Near-identical
-   stacks that differ only in deep tail frames still group via a
-   longest-common-subsequence comparison of the top frames (implemented in
-   `bin/cluster-crashes`).
-   An additional per-line fuzzy-similarity fallback exists but is
-   opt-in via `CLUSTER_FUZZY_MATCH=1` — by default only exact and
-   LCS matches merge.
+   stacks that differ only in deep tail frames can still group through a
+   longest-common-subsequence comparison of the top frames.
 
 Crucially, the crash state **stops at allocation stacks** — the "freed
 by" / "previously allocated by" sections of a use-after-free report are
@@ -77,7 +73,7 @@ Crash 1 stack (raw):                         Crash 2 stack (raw):
 
 → SAME bucket. The argument-list difference is normalized away; only the
   three interesting frames count, and ignored runtime frames do not consume
-  the MAX_CRASH_STATE_FRAMES: 3 budget.
+  that frame budget.
 ```
 
 ```text

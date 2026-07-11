@@ -103,9 +103,9 @@ and `output/<target>/target.toml` reviewed. The shortest path is the
 [Add a target](../getting-started/add-a-target.md) flow.
 
 Treat a two-replicate, three-hour run as a layout and sanity check,
-not as a statistical claim. LLM runs are stochastic; every TokenFuzz
-cell spends 10-30 minutes on cold recon before deep investigation
-begins. For a result you would cite, use at least five replicates and
+not as a statistical claim. LLM runs are stochastic, and every TokenFuzz cell
+spends part of its budget on cold recon before deep investigation. For a result
+you would cite, use at least five replicates and
 more than one target.
 
 ## Recon and budget
@@ -245,9 +245,10 @@ adds the **Ground truth** block to the ledger:
   bugs. A fired trap, an unexpected crash, or a confirmed crash with no
   runtime artifact to attribute (unattributed prose) all count against it.
 
-A healthy run shows `tokenfuzz` at high recall *and* high precision: it
-confirms the planted bugs and the traps do not slip through as confirmed
-crashes. The direct baseline typically trails on both.
+A healthy canary run shows high recall *and* high precision: planted issues are
+confirmed and deliberate traps do not appear as accepted crashes. The direct
+baseline is measured by the same rule; the result, not an expected winner, is
+the point of the experiment.
 
 Score an existing results or pool tree directly:
 
@@ -362,8 +363,8 @@ guessed one.
 - Pick targets that can plausibly produce evidence inside the budget.
   If both rows stay at zero, you measured target hardness, not harness
   quality.
-- Use enough time for recon plus investigation. For small libraries,
-  the first harness cell commonly spends 10-30 minutes on recon.
+- Use enough time for recon plus investigation. A budget that ends during recon
+  does not measure the deep audit.
 - Use 5+ replicates before making claims. Three replicates show a
   direction; they do not settle stochastic behavior.
 - Compare more than one target. A harness change that helps one parser

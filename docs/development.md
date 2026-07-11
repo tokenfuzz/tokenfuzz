@@ -9,6 +9,30 @@ PRs land at
 issues and feature pitches at
 [github.com/tokenfuzz/tokenfuzz/issues](https://github.com/tokenfuzz/tokenfuzz/issues).
 
+## Start here
+
+From a fresh checkout, run the verification baseline before changing code:
+
+```bash
+bash tests/run-tests.sh
+bin/docs build
+```
+
+The main directories have distinct responsibilities:
+
+| Path | Responsibility |
+| --- | --- |
+| `bin/` | Executable operator and orchestration entry points. |
+| `lib/` | Shared Python implementation, prompt renderers, state, runners, triage, and reporting. |
+| `lib/prompts/` | Central Jinja prompt bodies. |
+| `.agents/` | Runtime strategy and reproducer references consumed by audit agents. |
+| `tests/` | Shell and Python behavior tests plus neutral fixtures. |
+| `docs/` | MkDocs handbook for operators, maintainers, security teams, and contributors. |
+
+Read the command or module you intend to change, its callers, and the matching
+tests before editing. `AGENTS.md` is part of the runtime audit contract, not a
+general contributor guide; changes there affect every spawned audit agent.
+
 ## Development agents
 
 Start your coding agent (`claude`, `codex`, `gemini`, `grok`) from the repository

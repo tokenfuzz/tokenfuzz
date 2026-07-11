@@ -55,8 +55,12 @@ Include:
 2. **Host details** — OS name and version, Python version, and
    `clang --version`.
 3. **The exact command you ran** — copy-paste, not paraphrased.
-4. **The smoke-test output** —
-   `bin/audit --target <target> --backend <backend> 1 2>&1 | head -80`.
+4. **The smoke-test output** — save it without cutting off the audit process:
+
+   ```bash
+   bin/audit --target <target> --backend <backend> 1 2>&1 | tee audit-smoke.log
+   sed -n '1,80p' audit-smoke.log
+   ```
 5. **Your `target.toml`** — redact upstream URLs if private.
 6. **What you expected** vs. **what you got**.
 7. **Relevant logs** — paste the useful part of `$LOGS/index.log`.

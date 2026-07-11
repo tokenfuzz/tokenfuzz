@@ -104,9 +104,8 @@ Common reasons:
 If the crash is still under `crashes/` with `.promotion_pending`, read that
 marker first. Triage is waiting for an enriched report, a valid sanitizer
 diagnostic, a testcase, or a complete exported bundle. Fix the named artifact
-and rerun triage. Do not delete the `.sig` or `.count` sidecars merely to extend
-the wait; raise `CRASH_PROMOTION_PENDING_MAX` when the normal ten passes are
-genuinely too short.
+and rerun triage. The adjacent signature and count files are internal progress
+state; do not delete or edit them.
 
 A trigger source outside `attacker_controls` is **not** a rejection
 reason — such crashes stay in `crashes/` with a contract concern and

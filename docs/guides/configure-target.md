@@ -252,8 +252,9 @@ See
 [Target config reference](../reference/target-toml.md#sanitizers)
 for the full field list and per-sanitizer binary overrides.
 
-`bin/audit` builds every C/C++ sanitizer in `enabled`, not just ASan, on
-its first run (or `bin/setup-target <target> --build` to do it up front):
+For ordinary non-browser C/C++ targets, `bin/audit` builds every sanitizer in
+`enabled`, not just ASan, on its first run (or use
+`bin/setup-target <target> --build` to do it up front):
 it converges a per-sanitizer recipe (`.audit/build-<san>.sh`), compiles
 `build-<san>/`, and fills the detected `<san>_bin` / `<san>_lib` paths.
 ASan is required; the others are best-effort and a failed one only warns.

@@ -1,8 +1,8 @@
 site_name: TokenFuzz
 site_description: >-
-  Open LLM-based vulnerability research platform for recon sweeps, eight
-  investigation strategies, severity-labelled triage, cost-aware fleet
-  coordination, and maintainer-ready sanitizer reproducers.
+  Open-source harness for evidence-driven LLM-assisted security auditing,
+  reproducible testcase execution, reviewable triage, maintainer handoff, and
+  controlled benchmark comparisons.
 site_url: https://tokenfuzz.github.io/tokenfuzz/
 
 repo_url: https://github.com/tokenfuzz/tokenfuzz
@@ -121,12 +121,12 @@ nav:
   - Guides:
       - guides/index.md
       - Configure a target: guides/configure-target.md
-      - Backends and ensembling: guides/backends.md
-      - Non-C/C++ targets: guides/multi-language.md
+      - Backends, models, and ensemble: guides/backends.md
+      - Language runners: guides/multi-language.md
       - Browser targets: guides/browser-targets.md
       - Recon discovery: guides/recon-discovery.md
-      - Triage results: guides/triage-results.md
-      - Reproduce a crash: guides/reproduce-a-crash.md
+      - Review and triage: guides/triage-results.md
+      - Maintainer crash reproduction: guides/reproduce-a-crash.md
   - Concepts:
       - concepts/index.md
       - Audit lifecycle: concepts/audit-lifecycle.md
@@ -134,7 +134,7 @@ nav:
       - Strategy model: concepts/strategy-model.md
       - Cost model: concepts/cost-model.md
       - Deduplication: concepts/deduplication.md
-      - Benchmarking: concepts/benchmark.md
+      - Benchmarking and evaluation: concepts/benchmark.md
   - Reference:
       - reference/index.md
       - Commands: reference/commands.md

@@ -64,8 +64,7 @@ Most real files hit more than one row. When that happens, the file
 gets:
 
 - a *primary* card with the highest-priority strategy;
-- *companion* cards for the other angles, capped by
-  `RANK_WORK_PER_FILE_COMPANIONS`.
+- a bounded number of *companion* cards for the other angles.
 
 So two agents can attack the same file from different directions
 without one starving the other. A parser function with

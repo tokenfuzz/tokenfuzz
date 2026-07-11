@@ -1,10 +1,10 @@
 # Add a Target
 
-Adding a target means giving the harness three things:
+Adding a target gives the harness three things:
 
 - source code under `targets/<target>/`;
-- sanitizer artifacts built from that source (C/C++ only);
-- a `output/<target>/target.toml` that describes how to run and triage
+- an executable test path: sanitizer artifacts or a language runner;
+- an `output/<target>/target.toml` that describes how to run and triage
   the target.
 
 Once those are in place, TokenFuzz can build a ranked work queue,
@@ -77,34 +77,30 @@ Notes:
   [Commands](../reference/commands.md). The normal setup flow does not
   need them.
 
-## 2. The build happens automatically
+## 2. Establish the build or runner
 
-You do not run a separate build step. `bin/audit` builds the target on
-its first run and rebuilds it whenever the source changes, so a checkout
-you just pulled is never audited against an older binary. The build is
-**fail-open**: if it cannot run or does not converge, the audit warns and
-continues rather than blocking.
+Build behavior depends on the target:
 
-What that build does depends on the detected `build_system`:
+- **Native C/C++ sanitizer targets.** On audit startup, TokenFuzz checks the
+  configured non-browser sanitizer trees. If one is missing or stale,
+  `bin/audit` calls `bin/setup-target --build` to converge and run a reusable
+  recipe under `targets/<target>/.audit/`. Failure is visible in the log but
+  fail-open: source analysis can continue while sanitizer-dependent work is
+  unavailable.
+- **Rust, Go, Swift, Python, Node, PHP, Ruby, and other registered language
+  builds.** Run `bin/setup-target <target> --build` when the runner depends on
+  compiled code or installed packages. Audit preflight does not automatically
+  run these ecosystem bootstrap commands.
+- **Browser targets.** Build through the browser project's supported tooling,
+  then point `target.toml` at the result. The generic native auto-builder does
+  not build browsers.
+- **Findings-only scripts.** No build is needed when the configured interpreter
+  can execute the testcase directly and the target has no dependencies to
+  install.
 
-- **C/C++ (`cmake` / `autotools` / `meson`)** — `bin/auto-build-script`
-  iterates on a vanilla ASan recipe until it produces a working build,
-  then writes the validated script to `targets/<target>/.audit/build.sh`.
-  `bin/export-repro` inlines that script verbatim into every
-  `reproduce.sh`, so maintainers get the same build the audit used. If
-  `[sanitizer].enabled` lists more than ASan, each extra sanitizer gets
-  its own `.audit/build-<san>.sh` and `build-<san>/` tree — ASan is
-  required, the others are best-effort and only warn on failure.
-- **Python / Node / PHP / Ruby / Rust / Go / Swift** — runs the
-  language's native install step (`setup.py build_ext --inplace`,
-  `npm install`, `composer install`, `bundle install`, `cargo build`,
-  `go build ./...`, `swift build`). Required when the runner will
-  `import` (or `require`, …) something the source tree builds or
-  downloads.
-- **Anything else (Java, Kotlin, Perl, R, Shell, …)** — no-op.
-
-UBSan, MSan, and TSan are optional add-ons enabled later through
-`target.toml`'s `[sanitizer]` block.
+For a native build, the generated `.audit/build.sh` (and
+`.audit/build-<san>.sh` for enabled secondary sanitizers) is also reused by
+`bin/export-repro` when it creates a maintainer bundle.
 
 ### Building up front (optional)
 
@@ -115,17 +111,16 @@ verify the target compiles before launching a long audit — run:
 bin/setup-target <target> --build
 ```
 
-This does the same build `bin/audit` would, now instead of at audit
-time. It skips silently when its inputs aren't present (no LLM backend,
-no manifest, no recognised build system, recipe already current). It is
-never required.
+For native targets, this performs the same refresh audit preflight would do.
+For registered non-native build systems, it runs the language bootstrap plan.
+It skips when there is no applicable manifest or build plan.
 
 ### Targets with no sanitizer build
 
 Pure-Python / pure-Ruby / pure-JS scripts with no native extensions or
-vendored dependencies, and non-C/C++ targets where you are happy to
-run testcases through the language's own interpreter without a
-sanitizer build. `bin/setup-target` writes a runner-only config
+vendored dependencies, and other targets that run testcases through a language
+runtime without sanitizer instrumentation, need no sanitizer build.
+`bin/setup-target` writes a runner-only config
 (`[sanitizer] enabled = []`) for those — diagnostics land under
 `findings/` instead of `crashes/`. See
 [Auditing non-C/C++ targets](../guides/multi-language.md) for the
@@ -141,8 +136,8 @@ container the suffix is empty.
 
 ### Writing the build recipe by hand
 
-`auto-build-script` is the supported path. If you need to override —
-no LLM backend available, exotic build system, in-tree patches — drop
+`auto-build-script` is the supported path for ordinary native projects. If you
+need to override it—an exotic build system or required local patches—drop
 a shell script with the contract `argv = <src> <build>` at
 `targets/<target>/.audit/build.sh` and `bin/export-repro` will inline
 it the same way.
@@ -173,15 +168,14 @@ For the review checklist, see
 field definitions, see
 [Target config reference](../reference/target-toml.md).
 
-### Where the agent guide lives
+### The shared agent contract
 
-When `bin/audit` launches an agent, it injects the long-form guide
-[`AGENTS.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/AGENTS.md) into the prompt. The same guide covers browser and generic
-targets — it describes the testcase format, strategy priority, and
-crash quality bar that the agent is expected to follow. If you want to
-tune agent behaviour for your target, that file is the right place to
-look first — it is read at audit start and embedded into every agent
-prompt.
+When `bin/audit` launches an agent, it injects the shared runtime guide
+[`AGENTS.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/AGENTS.md).
+It defines testcase headers, evidence requirements, strategy discipline, and
+the crash quality bar for every target. Target-specific choices belong in
+`target.toml` or the target source/build—not in the shared guide. Change
+`AGENTS.md` only when changing the audit contract for all targets.
 
 ## 4. Validate before long runs
 

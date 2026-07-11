@@ -33,8 +33,9 @@ repo root/
   output/<target>/<backend>/   per-backend results, state, and logs
 ```
 
-The harness does not write audit artifacts into the target source
-tree (unless a target-specific build command does so itself).
+Audit evidence never goes into the target source tree. Build commands may write
+build artifacts there, and the automatic builder stores reusable recipes under
+`targets/<target>/.audit/`.
 
 ## The audit run
 
@@ -63,9 +64,9 @@ fight over the same source.
 
 ## Breadth-first recon (cold start only)
 
-The first time `bin/audit` sees a given commit of the target source,
-it runs `bin/audit-recon` — a short parallel survey of the in-scope
-source set before the deep agents launch. Several agents sweep the
+On a multi-iteration run, the first time `bin/audit` sees a target revision it
+runs `bin/audit-recon`—a bounded parallel survey before deep agents launch.
+A one-iteration smoke test skips this stage. Several agents sweep the
 selected files for candidate bugs (calibrated for recall, not
 precision), and a second model independently votes each emission
 Promote / Reject / Uncertain.
@@ -187,7 +188,7 @@ output/<target>/<backend>/results/
   work-cards.jsonl             the ranked queue
   patch-cards.jsonl            prior-fix work cards (strategy S1)
   s6-peer-cards.jsonl          peer-project fix cards (strategy S6)
-  recon-hypotheses.jsonl       recon candidates (cold-start survey)
+  recon-hypotheses.jsonl       recon candidates (when recon has run)
   recon-findings.md            human-readable recon report
   .session-env                 probe discovery file for this result tree
 ```

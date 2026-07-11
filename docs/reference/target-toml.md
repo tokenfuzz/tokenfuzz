@@ -372,6 +372,7 @@ It contains dynamic values:
 - `TARGET_ROOT`;
 - `TARGET_SLUG`;
 - `TARGET_REV`;
+- `TARGET_REPO_TYPE`;
 - `LOGDIR`;
 - `SESSION_STARTED`.
 

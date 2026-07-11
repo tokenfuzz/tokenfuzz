@@ -103,12 +103,9 @@ This is the lever that bounds long unattended runs. Without it, one
 agent in a tight retry loop can burn an evening of wall-clock time
 and produce nothing.
 
-Codex sessions also have a command-count soft cap (`TURN_SOFT_CAP`,
-default 75): the watcher stops the session at that point so it
-resumes fresh on the next iteration. Without it, cached-input cost
-grows quadratically as hundreds of tool calls pile up in one
-conversation. Set `TURN_SOFT_CAP=0` to disable it for a controlled
-experiment.
+Long backend sessions also have an automatic command-count guard. The
+watcher ends an oversized session cleanly so the next iteration can resume
+from structured state instead of carrying hundreds of tool calls forward.
 
 ## Coverage gate before sanitizer (browser/JS only)
 
@@ -130,7 +127,7 @@ indexes, not from a coverage pre-check.
 Two agents probing the same source file with the same strategy is
 wasted work.
 
-- Card claims expire on a timer (default 30 minutes), so a wedged
+- Card claims expire on a timer, so a wedged
   agent does not poison the queue for an entire shift.
 - A diversity gate also blocks two agents from sharing a subsystem at
   the same time.

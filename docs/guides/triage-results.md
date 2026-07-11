@@ -100,7 +100,7 @@ A strong crash artifact has:
 - saved sanitizer output;
 - a confirmation run when applicable;
 - a report explaining the boundary and caller controls;
-- a trigger source that fits `target.toml`;
+- a clearly documented trigger source; `target.toml` fit affects severity;
 - a root cause in target code, not in harness-only misuse.
 
 The crash path is intentionally stricter than the finding path.
@@ -142,6 +142,7 @@ Boundary:
 Caller controls:
 Trusted caller actions:
 Parameter control: direct|mapped|harness-only|none
+Strategy: S1|S2|S3|S4|S5|S6|S7|S8|REF
 ```
 
 Notes:
@@ -161,6 +162,8 @@ Notes:
 - `Parameter control` is especially important for C harnesses. It
   tells triage whether a value is externally controlled or only
   invented by the harness.
+- `Strategy` records which investigation method produced the report so
+  cluster and benchmark summaries can attribute yield consistently.
 
 A typical exported `REPORT.md` looks like this. `bin/export-repro`
 emits the `## Fields` table first, then the bare-label lines triage
@@ -276,6 +279,9 @@ What every FIND needs:
   info disclosure, crypto, race, boundary violation, logic flaw, ….
 - A rationale a reviewer can act on (impact, caller control, what
   is wrong).
+- The standard bare-label fields used by triage, including `Boundary`,
+  `Caller controls`, `Trusted caller actions`, `Caller contract`, `Trigger
+  source`, and `Strategy`.
 
 A typical non-crashing FIND `report.md` looks like:
 
@@ -295,7 +301,12 @@ A typical non-crashing FIND `report.md` looks like:
 
 Class: authorization bypass
 Surface: library-api
+Boundary: Requests crossing the public service boundary.
 Caller controls: request bytes
+Trusted caller actions: Creates the handle before policy loading completes.
+Caller contract: obeyed
+Trigger source: call-sequence
+Strategy: S5
 
 ## Issue
 
@@ -416,7 +427,7 @@ crashes/
 findings/
   FINDING-CLUSTERS.md
   FINDING-CLUSTERS.html
-  FIND-001/report.md             ← Cluster: F1, Dedup key: [llm] auth/check-acl-zero-policy
+  FIND-001/report.md             ← Cluster: F1, Dedup key: [loc] src/policy.c:142
   FIND-001/report.html
   FIND-007/report.md             ← Cluster: F1, .dup-of -> FIND-001
 ```
@@ -426,12 +437,11 @@ How the cluster files and markers work:
 - `CRASH-CLUSTERS.html` and `FINDING-CLUSTERS.html` are the browser
   review pages — one row per cluster, with severity, member count, and
   the canonical member. The `.md` siblings are generated source files.
-- Each report has a `Cluster: <ID>` line. For FINDs, a second line
-  `Dedup key: [<source>] <token>` records the signature that grouped
-  it. `[loc]` is the deterministic location key, rendered as
-  `file:function`. `[llm]` is the LLM-chosen canonical token shared
-  across reports of the same root cause filed from different surface
-  sites. (`[title]` is the fallback key derived from the report title.)
+- Each report has a `Cluster: <ID>` line. For FINDs, `Dedup key: [loc]
+  <file>:<line>` records a deterministic source-site key. A siteless finding
+  receives a `[title]` display key but is not merged on title alone. Findings
+  can also merge when they contain the same normalized crash stack. See
+  [Deduplication](../concepts/deduplication.md) for the exact rules.
 - Non-canonical members carry a `.dup-of` file naming the canonical
   member. They are **not** deleted — a duplicate may still carry a
   useful variant or a clearer reproducer. Treat the canonical member

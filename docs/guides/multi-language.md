@@ -1,8 +1,7 @@
 # Auditing Non-C/C++ Targets
 
-The harness is language-agnostic. C/C++ targets stay the headline
-case because AddressSanitizer is the highest-signal tool we have, but
-the same pipeline works for many other ecosystems:
+TokenFuzz supports C/C++, Rust, Go, Python, Java, and other ecosystems behind
+one probe and triage contract. This page focuses on everything after C/C++:
 
 - Rust, Go, Swift;
 - Java, Kotlin;
@@ -115,9 +114,8 @@ A few ecosystem notes:
   `crashes/` like a C/C++ target rather than staying findings-only.
 - **Java** — single-file Java is supported (JEP 330): `java <file.java>`
   compiles and runs in one shot. This is the seeded default. When seeding,
-  `bin/setup-target`
-  prefers a working JDK from `AUDIT_JAVA_HOME` or `JAVA_HOME`, then a
-  working `java` on `PATH`.
+  `bin/setup-target` prefers a working JDK from `JAVA_HOME`, then a working
+  `java` on `PATH`.
 - **Kotlin** — the seeded default is for script-style `.kts` probes.
   Plain `.kt` sidecar harnesses compile through
   `kotlinc -include-runtime`. Gradle-driven Kotlin apps should keep

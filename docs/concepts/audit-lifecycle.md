@@ -39,7 +39,7 @@ refresh it explicitly with `bin/setup-target <slug>` (or use
 
 ## 2. Build the sanitizer artifact
 
-For C/C++ targets, the harness needs a sanitizer build. The default
+For native C/C++ targets, the harness needs a sanitizer build. The default
 location is `targets/<target>/build-asan/`, and `target.toml` points
 the harness at the binary inside it (`asan_bin`, `asan_lib`). The same
 layout is used for browsers and generic CLI/library targets.
@@ -62,8 +62,11 @@ findings-only mode — runtime panics and tracebacks land under
 `-race`, the runtime race detector still routes data-race reports
 into `crashes/`.
 
-After the build exists, refresh the generated config and review only
-unresolved or incorrect values.
+Audit preflight can create or refresh ordinary non-browser native sanitizer
+builds. Browser builds use their project tooling; registered language package
+builds run explicitly through `bin/setup-target <target> --build`. After the
+required build exists, refresh the generated config and review only unresolved
+or incorrect values.
 
 ## 3. Run the audit
 
@@ -82,9 +85,10 @@ and crash recovery.
 
 ## 4. Breadth-first recon (cold start only)
 
-The first time `bin/audit` sees a given commit of the target source,
-it pauses before the deep agents and runs a **breadth-first recon
-pass**: several agents sweep the in-scope source set for suspicious
+On a multi-iteration run, the first time `bin/audit` sees a given target
+revision it pauses before the deep agents and runs a **breadth-first recon
+pass**. (A one-iteration smoke test skips recon.) Several agents sweep the
+in-scope source set for suspicious
 spots (no sanitizer, no testcases), and a second model votes each
 emission Promote / Reject / Uncertain. The result is a prioritized
 list of *where bugs might be* — work cards the deep agents pick up
@@ -96,9 +100,8 @@ the agent's current strategy filter would normally skip it. Rejected
 candidates are demoted rather than deleted, so a later sanitizer
 verdict can still overturn the validator.
 
-Recon takes 10–30 minutes on a small library, up to an hour on a
-browser-sized tree, and is cached on the target source SHA so later
-audits against the same commit skip it. If recon fails, the audit
+Recon uses a bounded per-agent time budget and is cached on the target source
+SHA, so later audits against the same revision skip it. If recon fails, the audit
 continues on its regular ranked queue. See
 [Recon discovery](../guides/recon-discovery.md) for the full picture.
 

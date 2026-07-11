@@ -1,19 +1,17 @@
 # Recon discovery
 
-Recon is a quick, breadth-first review pass over your target source.
-It is the **first thing `bin/audit` does** when it sees a target for
-the first time, and you can also run it on its own with
-`bin/audit-recon`.
+Recon is a bounded, breadth-first review pass over target source. It runs before
+deep agents on a cold multi-iteration audit and can also run independently with
+`bin/audit-recon`. A one-iteration smoke test skips it.
 
 What recon is for, in one line:
 
 > Surface the suspicious-looking spots in the codebase as a starting
 > list, before the deep agents start writing testcases.
 
-For comparison: a full `bin/audit` run can take hours and writes
-sanitizer-verified crashes. A recon run takes 10–30 minutes and writes
-a list of candidate spots in the source — a map for the audit to
-follow.
+For comparison, a full audit can continue for hours and execute testcases.
+Recon is a bounded source-reading pass: it writes candidate locations for the
+deep audit to investigate.
 
 ## When recon runs
 
@@ -25,10 +23,9 @@ agents pick up.
 bin/audit --target curl --backend <backend>  # runs recon, then the audit
 ```
 
-On the very first run for a given commit of the target source, recon
-takes its 10–30 minutes. On any later run against the same commit it
-re-uses the cached result and starts the agents immediately. Edit the
-source (or update the target) and recon re-runs for the new commit.
+On the first multi-iteration run for a target revision, recon spends its
+configured per-agent time budget. Later runs against the same revision reuse
+the cached result. Update the source and recon runs again for the new revision.
 
 You can also call it on its own to look at the candidate list before
 starting an audit:
@@ -59,8 +56,8 @@ The standalone command writes the same two files the auto-run does:
    A flat source tree (no subdirectories) has no structure to exploit,
    so it falls back to LOC-balanced contiguous chunks.
 3. **Each agent reads code looking for vulnerabilities.** The prompt
-   is the same on every agent: a CTF-style instruction to *find all
-   vulnerabilities* and flag anything it notices — guard gaps,
+   is the same on every agent: a broad instruction to surface potential
+   security issues without pre-filtering — guard gaps,
    suspicious arithmetic, unchecked input, lifetime patterns,
    protocol-state quirks. The agent is asked for **recall, not
    precision**; it is told *not* to pre-filter.
@@ -148,15 +145,10 @@ Two safety nets:
 
 ## Calibration: recall first, then precision
 
-The first stage emits broadly — every guard gap the agent notices,
-including patterns that turn out to have an upstream guard or a
-downstream bound. That is expected. The validator's votes then order the queue so the
-strongest candidates are investigated first and weaker ones drain
-only after better work. On a recent curl run (1022 source
-files), recon emitted ~30 findings, the validator rejected most with
-concrete rationale, and a small number were promoted to the front of
-the queue — so the audit starts on the best candidates without anyone
-having to read all 30 by hand.
+The first stage emits broadly, including patterns that turn out to have an
+upstream guard or downstream bound. That is expected. Validator votes order the
+queue so stronger candidates are investigated first; weaker candidates remain
+available for later evidence rather than disappearing.
 
 ## Tuning, if you need it
 
@@ -184,8 +176,8 @@ keeps the survey and follow-up audit artifacts together.
 
 ## What recon will not do
 
-- It does **not** produce sanitizer-reproducible crashes. That is the
-  audit's job. Recon's outputs are written findings, not crashes.
+- It does **not** produce sanitizer-reproducible crashes. Its outputs are
+  unverified candidates and work cards, not accepted findings or crashes.
 - It does **not** file anything upstream. Every artifact stays in
   your local results directory until you review it.
 - It does **not** wander across the slice boundary by design. Each
