@@ -30,6 +30,8 @@ def parse_args(argv=None):
     parser.add_argument("--model", default="")
     parser.add_argument("--tiebreak", action="store_true")
     parser.add_argument("--gate", choices=("finding", "trigger"), default="finding")
+    parser.add_argument("--target-root-is-product", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--output")
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--usage-index", help=argparse.SUPPRESS)
@@ -63,10 +65,21 @@ def output_path(finding: Path, configured: str | None) -> Path:
 def render_validator_prompt(args, facts: dict) -> str:
     skeptic = prompt_render.render_template("validate_tiebreak.md.j2", {}) if args.tiebreak else ""
     template = "validate_trigger_provenance.md.j2" if args.gate == "trigger" else "validate_finding.md.j2"
+    product_boundary_block = ""
+    if args.target_root_is_product:
+        product_boundary_block = (
+            "The configured benchmark target root is the product boundary for this review.\n"
+            "Do not reject the whole target merely because its root-level documentation or\n"
+            "comments describe it as a sample, fixture, demo, or benchmark target. Clause\n"
+            "(d) still applies normally to a concrete test/fuzz/example/benchmark/demo\n"
+            "subdirectory, driver, generator, or other source file that does not ship in\n"
+            "the product built from this target root.\n"
+        )
     return prompt_render.render_template(template, {
         "target_path": str(Path(args.target_path).resolve()),
         "candidate_json": json.dumps(facts, sort_keys=True),
         "attacker_controls": os.environ.get("TARGET_ATTACKER_CONTROLS_CSV", "bytes"),
+        "product_boundary_block": product_boundary_block,
         "skeptic_block": skeptic,
         "timeout_secs": str(args.timeout),
     })

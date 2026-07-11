@@ -97,6 +97,8 @@ assert_not_match '\{\{\s*target_path\s*\}\}|\{\{\s*output_dir\s*\}\}' "$md_body"
 # instruction.
 assert_match 'Writing scope|under \./' "$md_body" \
   "T22l: prompt names a concrete writing scope for the agent"
+assert_match 'Do not delegate work to subagents' "$md_body" \
+  "T22l2: model-direct prompt forbids native worker fan-out"
 assert_match 'Primary objective' "$md_body" \
   "T22m: prompt foregrounds CRASH-vs-FIND priority via a Primary objective block"
 assert_match 'Mode switch after ~5 FINDs' "$md_body" \
@@ -249,7 +251,7 @@ assert_match 'findings: rejected=0 confirmed=0 pending=0 roots=0; crashes: rejec
 # that leaves the reject in findings/ rendering forever as a "Pending" severity
 # in the cluster. The harness reaches the same mover via bin/audit housekeeping;
 # this keeps model-direct on par so rejected finds move (and counts settle).
-assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'counts = triage.validate_find_gate\(results, deadline=deadline\)' \
+assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'counts = triage.validate_find_gate\(' \
   "T25h: model-direct findings gate runs validate_find_gate (quarantines find-quality rejects)"
 assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'ACTIVE_BACKEND.*backend' \
   "T25j: model-direct find gate gets benchmark model for trigger gate"

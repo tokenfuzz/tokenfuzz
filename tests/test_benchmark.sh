@@ -573,10 +573,18 @@ assert_file_contains "$SCRIPT_ROOT/lib/benchmark_runner.py" 'REJECTED-FINDINGS.m
 # ── T5: aggregate degrades gracefully on a partial run ───────────────────
 mk_cell harness-r3 harness 3 failed 0
 rm -f "$bd/cells/harness-r3/metrics.json"
+mk_cell harness-r4 harness 4 incomplete 0
+jtmp="$(mktemp)"
+jq '.confirmed_crashes=6 | .confirmed_findings=5' \
+  "$bd/cells/harness-r4/metrics.json" > "$jtmp" \
+  && mv "$jtmp" "$bd/cells/harness-r4/metrics.json"
 agg2=$(python3 "$PY" aggregate "$bd")
 hd2=$(echo "$agg2" | jq -c '.conditions[] | select(.condition=="harness")')
-assert_eq "3" "$(echo "$hd2" | jq -r '.replicates_total')" "T5a: failed cell counted in total"
+assert_eq "4" "$(echo "$hd2" | jq -r '.replicates_total')" "T5a: failed and incomplete cells counted in total"
 assert_eq "2" "$(echo "$hd2" | jq -r '.replicates_done')" "T5b: failed cell excluded from done"
+assert_eq "6/5" \
+  "$(echo "$hd2" | jq -r '.incomplete_observed[0] | "\(.crashes)/\(.findings)"')" \
+  "T5c: incomplete cell preserves observed counts outside aggregates"
 
 # ── T6: ledger append — header written once, sections accumulate ─────────
 ledger="$work/ledger.md"
@@ -584,6 +592,9 @@ python3 "$PY" ledger "$bd" --ledger "$ledger" >/dev/null
 assert_file_contains "$ledger" "# Benchmark results" "T6a: ledger header present"
 assert_file_contains "$ledger" "Benchmark run .run1." "T6b: run section present"
 assert_file_contains "$ledger" "AddressSanitizer-confirmed" "T6c: oracle caveat present"
+assert_file_contains "$ledger" \
+  'Incomplete — observed 6 crashes / 5 findings; excluded from aggregate' \
+  "T6c2: ledger surfaces incomplete-cell observed yield"
 hdr_count=$(grep -c '^# Benchmark results' "$ledger")
 python3 "$PY" ledger "$bd" --ledger "$ledger" >/dev/null
 hdr_count2=$(grep -c '^# Benchmark results' "$ledger")

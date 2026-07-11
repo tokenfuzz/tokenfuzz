@@ -69,10 +69,12 @@ def _signal_cleanup():
 def _decision_environment(
     backend: str, model: str, target: Path, target_slug: str,
     decision_log: Path | None = None,
+    attacker_controls: str = "bytes",
 ):
     values = {
         "ACTIVE_BACKEND": backend, "BACKEND": backend, "MODEL": model,
         "TARGET_ROOT": str(target), "TARGET_SLUG": target_slug,
+        "TARGET_ATTACKER_CONTROLS_CSV": attacker_controls or "bytes",
     }
     if decision_log is not None:
         values["LLM_DECIDE_LOG"] = str(decision_log)
@@ -112,7 +114,11 @@ def drain_find_gate(
         max_pauses, max_pause_total, pause_chunk = 12, 21600, 1800
     paused = 0
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
-    with _decision_environment(backend, model, target, target_slug):
+    config = benchmark_target_config(results, target, target_slug)
+    with _decision_environment(
+        backend, model, target, target_slug,
+        attacker_controls=config.attacker_controls_csv(),
+    ):
         previous_limit = os.environ.get("LLM_DECIDE_LIMIT_FILE")
         os.environ["LLM_DECIDE_LIMIT_FILE"] = str(limit_file)
         try:
@@ -123,7 +129,9 @@ def drain_find_gate(
                 if attempt and deadline is not None and time.monotonic() >= deadline:
                     break
                 limit_file.write_text("", encoding="utf-8")
-                counts = triage.validate_find_gate(results, deadline=deadline)
+                counts = triage.validate_find_gate(
+                    results, deadline=deadline, target_root_is_product=True,
+                )
                 reset = _find_gate_reset(limit_file)
                 if reset is None:
                     break
@@ -152,11 +160,10 @@ def drain_find_gate(
     return counts
 
 
-def triage_cell_crashes(
-    results: Path, target: Path, target_slug: str, *, workers: int = 4,
-    deadline: float | None = None,
-) -> dict[str, int]:
-    """Apply the audit crash gate to a finished benchmark cell."""
+def benchmark_target_config(
+    results: Path, target: Path, target_slug: str,
+) -> target_config.Config:
+    """Load the benchmark target through the same target.toml channel as audit."""
     config = target_config.Config(
         slug=target_slug,
         target_root=str(target),
@@ -168,11 +175,21 @@ def triage_cell_crashes(
         config_path = metrics._find_output_target_toml(results)
     if config_path is not None:
         target_config.load_toml_into(config, config_path)
+    return config
+
+
+def triage_cell_crashes(
+    results: Path, target: Path, target_slug: str, *, workers: int = 4,
+    deadline: float | None = None,
+) -> dict[str, int]:
+    """Apply the audit crash gate to a finished benchmark cell."""
+    config = benchmark_target_config(results, target, target_slug)
     return triage.triage_crash_dirs(
         results, target, target_slug, config.attacker_controls,
         workers=max(1, workers),
         findings_only=config.sanitizers_explicitly_disabled,
         deadline=deadline,
+        target_root_is_product=True,
     )
 
 
@@ -487,6 +504,7 @@ def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wal
             backend, prompt, wall, raw, model=model, max_turns=0,
             add_dirs=f"{cell_dir},{target}", cwd=cell_dir,
             watchdog_marker_dir=cell_dir,
+            allow_subagents=False,
         )
     finally:
         if previous_logdir is None:
@@ -672,7 +690,11 @@ def _finalize_condition_pools(
 ) -> None:
     """Build condition-local indexes after split_pool has copied its members."""
     reserved = {"crashes", "crashes-rejected", "findings", "findings-rejected"}
-    with _decision_environment(backend, model, target_root, target_slug, decision_log):
+    config = benchmark_target_config(pool, target_root, target_slug)
+    with _decision_environment(
+        backend, model, target_root, target_slug, decision_log,
+        config.attacker_controls_csv(),
+    ):
         for condition in sorted(pool.iterdir()):
             if not condition.is_dir() or condition.name in reserved:
                 continue
@@ -694,10 +716,13 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
         "LLM_DECIDE_LOG": str(bench_dir / "llm-decisions.log"),
     })
     target = SCRIPT_ROOT / "targets" / target_slug
+    config = benchmark_target_config(pool, target, target_slug)
+    environment["TARGET_ATTACKER_CONTROLS_CSV"] = config.attacker_controls_csv()
     bundled = 0
     if not dry_run:
         with _decision_environment(
-            backend, model, target, target_slug, bench_dir / "llm-decisions.log"
+            backend, model, target, target_slug, bench_dir / "llm-decisions.log",
+            config.attacker_controls_csv(),
         ):
             triage.fill_reach_fields_tree(pool)
         if (pool / "crashes").is_dir():
@@ -978,8 +1003,10 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     log(f"Cell {name}: completing crash triage before metrics")
                     try:
                         target_root = (SCRIPT_ROOT / "targets" / args.target).resolve()
+                        config = benchmark_target_config(results, target_root, args.target)
                         with _decision_environment(
                             args.backend, model, target_root, args.target,
+                            attacker_controls=config.attacker_controls_csv(),
                         ):
                             crash_counts = triage_cell_crashes(
                                 results, target_root, args.target,
@@ -1042,7 +1069,16 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     )
                 else:
                     failed += 1
-                    log(f"Cell {name} {status} after {format_duration(wall)}; see {cell_dir}")
+                    if status == "incomplete":
+                        log(
+                            f"Cell {name} incomplete — observed "
+                            f"{summary.get('confirmed_crashes', 0)} crashes / "
+                            f"{summary.get('confirmed_findings', 0)} findings; "
+                            f"excluded from aggregate after {format_duration(wall)}; "
+                            f"see {cell_dir}"
+                        )
+                    else:
+                        log(f"Cell {name} {status} after {format_duration(wall)}; see {cell_dir}")
                 update_result(bench_dir, bench_root, args.target, args.backend, model, args.dry_run, f"after {name}")
         log(f"Cells complete: {done} done, {failed} failed")
     else:
@@ -1062,8 +1098,10 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     log(f"Regenerate: completing crash triage for {cell_dir.name} ({cell.get('condition', '?')})")
                     try:
                         target_root = (SCRIPT_ROOT / "targets" / args.target).resolve()
+                        config = benchmark_target_config(results, target_root, args.target)
                         with _decision_environment(
                             args.backend, model, target_root, args.target,
+                            attacker_controls=config.attacker_controls_csv(),
                         ):
                             triage_cell_crashes(
                                 results, target_root, args.target,
@@ -1102,6 +1140,12 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             f"  {condition.get('condition')}: crash median={condition.get('crash_median', 0)} "
             f"finding total={condition.get('confirmed_finding_total', 0)}"
         )
+        for observed in condition.get("incomplete_observed", []):
+            print(
+                f"    {observed.get('cell')}: incomplete — observed "
+                f"{observed.get('crashes', 0)} crashes / "
+                f"{observed.get('findings', 0)} findings; excluded from aggregate"
+            )
     print()
     log(f"Ledger: {ledger}")
     log("Benchmark complete.")

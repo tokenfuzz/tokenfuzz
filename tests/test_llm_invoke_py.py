@@ -424,6 +424,12 @@ print("\nimportable API")
 sys.path.insert(0, str(ROOT / "lib"))
 import llm_invoke as inv  # noqa: E402
 
+claude_single = inv.agent_flags("claude", allow_subagents=False)
+ok("--disallowedTools" in claude_single, "single-agent Claude disables native delegation")
+ok("Agent,Task" in claude_single, "single-agent Claude denies current and legacy delegation tools")
+codex_single = inv.agent_flags("codex", allow_subagents=False)
+ok("features.multi_agent=false" in codex_single, "single-agent Codex disables native delegation")
+
 ok(inv.known_backend("claude") is True, "known_backend('claude') True")
 ok(inv.known_backend("openai") is False, "known_backend('openai') False")
 assert_eq("claude-opus-4-8", inv.default_model("claude"), "default_model claude")

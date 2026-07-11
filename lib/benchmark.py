@@ -1011,6 +1011,7 @@ def harvest_tokens(
         "estimated": False,
         "cost_usd": "",
         "cost_source": "",
+        "token_source": "unknown",
     }
     if not index_jsonl.is_file():
         return totals
@@ -1022,6 +1023,7 @@ def harvest_tokens(
     def _int(value: object) -> int:
         return int(value) if isinstance(value, (int, float)) else 0
 
+    token_sources: set[str] = set()
     for line in lines:
         line = line.strip()
         if not line:
@@ -1048,6 +1050,18 @@ def harvest_tokens(
             # belongs in the full-rate bucket alongside `input`.
             full_rate_input = raw_input + cache_creation
         output = _int(tok.get("output"))
+        prompt_estimate = (
+            _int(tok.get("prompt_estimate"))
+            or _int(tok.get("prompt_estimate_build"))
+        )
+        if row.get("estimated") is True:
+            token_sources.add("estimated")
+        elif any((raw_input, cache_read, cache_creation, output, prompt_estimate)):
+            token_sources.add("measured")
+        else:
+            # A missing terminal usage event is unknown, even when later
+            # validators in the same productive cell report measured usage.
+            token_sources.add("unknown")
         totals["input_tokens"] += full_rate_input
         totals["cached_input_tokens"] += cache_read
         totals["cache_creation_tokens"] += cache_creation
@@ -1107,6 +1121,18 @@ def harvest_tokens(
         totals["asan_invocations"] += _int(probe.get("asan_invocations"))
         if row.get("estimated") is True:
             totals["estimated"] = True
+    if token_sources:
+        # An `unknown` row is a productive session whose usage was never
+        # recorded, so the cell total OMITS real cost. That must dominate the
+        # rollup: otherwise it hides inside the estimated+measured `mixed` that
+        # every normal cell already reports, and an understated total reads as
+        # a clean measurement.
+        if "unknown" in token_sources:
+            totals["token_source"] = "unknown"
+        elif len(token_sources) == 1:
+            totals["token_source"] = next(iter(token_sources))
+        else:
+            totals["token_source"] = "mixed"
     return totals
 
 
@@ -2160,6 +2186,7 @@ def _tokens_for_cell(cell: dict) -> dict:
         "cost_source": str(tokens.get("cost_source") or ""),
         "iterations": int(tokens.get("iterations", 0) or 0),
         "estimated": estimated,
+        "token_source": str(tokens.get("token_source") or ""),
     }
 
 
@@ -2172,6 +2199,9 @@ def _row_token_source(row: dict) -> str:
     `unknown`   — the row carries no token signal of any kind, so it must
                   not be presented as a measurement of zero cost.
     """
+    explicit = str(row.get("token_source") or "")
+    if explicit in {"measured", "estimated", "unknown", "mixed"}:
+        return explicit
     if row.get("estimated"):
         return "estimated"
     if (row.get("input_tokens") or row.get("cached_input_tokens")
@@ -2181,10 +2211,15 @@ def _row_token_source(row: dict) -> str:
 
 
 def _token_source(rows: list[dict]) -> str:
-    """Source label for a collection of token rows — `mixed` when they differ."""
+    """Source label for a collection of token rows. `unknown` dominates: any
+    row without a usage signal understates the total, so the collection cannot
+    be read as measured. Otherwise the shared label, or `mixed` when they
+    differ."""
     if not rows:
         return "none"
     kinds = {_row_token_source(r) for r in rows}
+    if "unknown" in kinds:
+        return "unknown"
     if len(kinds) == 1:
         return next(iter(kinds))
     return "mixed"
@@ -2319,6 +2354,14 @@ def aggregate(bench_dir: Path) -> dict:
             for c in incomplete
             if c.get("run_quality") == "provider_limited"
         ]
+        incomplete_observed = [
+            {
+                "cell": c["cell"],
+                "crashes": int(c["metrics"].get("confirmed_crashes", 0) or 0),
+                "findings": int(c["metrics"].get("confirmed_findings", 0) or 0),
+            }
+            for c in incomplete
+        ]
         # done cells that recovered from a provider blip mid-run. They ARE
         # counted in the clean totals (the run finished usefully), but surfaced
         # so a reader knows those metrics include a disrupted session.
@@ -2378,6 +2421,7 @@ def aggregate(bench_dir: Path) -> dict:
                 "replicates_incomplete": len(incomplete),
                 "replicates_provider_limited": len(provider_limited),
                 "replicates_provider_recovered": len(provider_recovered),
+                "incomplete_observed": incomplete_observed,
                 "crashes": crashes,
                 "crash_median": _median([float(x) for x in crashes]),
                 "crash_total": crash_total,
@@ -3144,6 +3188,14 @@ def render_section(report: dict) -> str:
             )
         )
     lines.append("")
+    for c in sorted(conditions, key=lambda item: item["condition"]):
+        for observed in c.get("incomplete_observed", []):
+            lines.append(
+                "> **Incomplete — observed {crashes} crashes / {findings} findings; "
+                "excluded from aggregate.** `{cell}`".format(**observed)
+            )
+    if any(c.get("incomplete_observed") for c in conditions):
+        lines.append("")
     baseline_label = _condition_label("model-direct", backend)
     lines.append(
         "> **How to read this.** Each condition ran **Replicates** times "

@@ -884,9 +884,9 @@ assert_file_contains "$tled" 'Unique findings.*Unique crashes' \
 
 # ── T18p-s: zero-usage rows render as 'unknown', big counts compact ──────
 uagg=$(cat "$work/uagg.json" 2>/dev/null || true)
-assert_eq "mixed" \
+assert_eq "unknown" \
   "$(echo "$uagg" | jq -r '.conditions[]|select(.condition=="harness")|.token_source')" \
-  "T18p: a condition mixing measured + unknown rows reports 'mixed'"
+  "T18p: an unmeasured (unknown) cell makes the condition read 'unknown', not 'mixed'"
 assert_file_contains "$uled" 'unknown' \
   "T18q: a cell with no usage telemetry renders source 'unknown'"
 assert_file_contains "$uled" '2\.5M' \

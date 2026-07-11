@@ -129,6 +129,18 @@ not additional finding time, so it gets a separate `--finalize-wall` budget.
 Anything still pending at that deadline leaves the cell incomplete and can be
 resumed with `--regenerate`.
 
+Incomplete cells remain excluded from medians and aggregate yield. Their
+confirmed on-disk yield is still shown as an observed count in the console and
+run ledger, so an interrupted productive cell is not mistaken for a zero-yield
+cell.
+
+For validation, the configured benchmark target root is the product boundary.
+Root-level sample or fixture labeling therefore cannot make an entire benchmark
+target out of scope; ordinary non-shipping test, fuzz, example, benchmark, and
+demo code below that root remains subject to the same exclusion review. The
+validator also receives the target's configured `attacker_controls` from
+`target.toml`.
+
 Harness benchmark cells disable early-worker refills. This prevents the
 configured agent count from silently expanding provider demand; standalone
 `bin/audit` runs retain refills unless passed `--no-refill-workers`.

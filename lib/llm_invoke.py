@@ -595,6 +595,7 @@ def agent_flags(
     model: str = "",
     max_turns: int = 80,
     add_dirs: str = "",
+    allow_subagents: bool = True,
 ) -> list[str]:
     """Build the flag array for an interactive tool-using agent call.
 
@@ -623,6 +624,11 @@ def agent_flags(
             flags += ["--model", resolved_model]
         if effort:
             flags += ["--effort", effort]
+        if not allow_subagents:
+            # A model-direct benchmark is one provider session by contract.
+            # Deny both current and legacy delegation tool names so local
+            # Claude settings cannot silently expand that concurrency.
+            flags += ["--disallowedTools", "Agent,Task"]
         for d in (add_dirs or "").split(","):
             d = d.strip()
             if d:
@@ -641,6 +647,8 @@ def agent_flags(
             flags += ["--model", resolved_model]
         if effort:
             flags += ["-c", f'model_reasoning_effort="{effort}"']
+        if not allow_subagents:
+            flags += ["-c", "features.multi_agent=false"]
         dirs = [d.strip() for d in (add_dirs or "").split(",") if d.strip()]
         if dirs:
             flags += ["--cd", dirs[0]]
@@ -745,10 +753,14 @@ def run_agent_prompt(
     extra_env: dict[str, str] | None = None,
     watchdog_marker_dir: str | os.PathLike[str] | None = None,
     codex_turn_cap: int | None = None,
+    allow_subagents: bool = True,
 ) -> int:
     """Launch a tool-using backend and write its combined raw transcript."""
     binary = backend_bin(backend)
-    flags = agent_flags(backend, model, max_turns, add_dirs)
+    flags = agent_flags(
+        backend, model, max_turns, add_dirs,
+        allow_subagents=allow_subagents,
+    )
     first_dir = next((p.strip() for p in add_dirs.split(",") if p.strip()), "")
     working_dir = Path(cwd or first_dir or Path.cwd())
     environment = os.environ.copy()

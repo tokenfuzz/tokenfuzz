@@ -56,6 +56,37 @@ def equal(expected, actual, name: str) -> None:
 with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     root = Path(temporary)
 
+    # A productive session whose usage was never recorded (the zero-token
+    # `primary` row) understates the cell total, so the cell must read
+    # `unknown` — not hide behind the `mixed` that measured+estimated
+    # decisions produce on every normal cell.
+    missing_primary = root / "missing-primary-usage.jsonl"
+    missing_primary.write_text(
+        '{"backend":"codex","role":"primary","tokens":{"input":0,"output":0}}\n'
+        '{"backend":"codex","role":"decision","tokens":{"input":10,"output":2}}\n',
+        encoding="utf-8",
+    )
+    usage = __import__("benchmark").harvest_tokens(missing_primary)
+    equal(
+        "unknown", usage["token_source"],
+        "a missing productive session makes the cell token source unknown",
+    )
+    # A fully-recorded cell that merely mixes measured + estimated decisions
+    # must stay distinguishable from the missing-session case above, or the
+    # `unknown` flag is useless.
+    measured_estimated = root / "measured-estimated-usage.jsonl"
+    measured_estimated.write_text(
+        '{"backend":"codex","role":"decision","tokens":{"input":10,"output":2}}\n'
+        '{"backend":"codex","role":"decision","estimated":true,'
+        '"tokens":{"input":8,"output":1}}\n',
+        encoding="utf-8",
+    )
+    usage_me = __import__("benchmark").harvest_tokens(measured_estimated)
+    equal(
+        "mixed", usage_me["token_source"],
+        "measured+estimated stays 'mixed', distinct from a missing session",
+    )
+
     state = root / "results" / "state"
     state.mkdir(parents=True)
     hypotheses = state / "hypotheses.jsonl"
@@ -1044,17 +1075,22 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         decision_seen.update(
             backend=os.environ.get("ACTIVE_BACKEND"),
             model=os.environ.get("MODEL"), target=os.environ.get("TARGET_ROOT"),
+            controls=os.environ.get("TARGET_ATTACKER_CONTROLS_CSV"),
+            product=_kwargs.get("target_root_is_product"),
         )
         return {"accepted": 1, "rejected": 0, "pending": 0}
-    with mock.patch.object(triage, "validate_find_gate", side_effect=_gate_probe):
+    with mock.patch.object(
+        benchmark_runner, "benchmark_target_config", return_value=generic_config,
+    ), mock.patch.object(triage, "validate_find_gate", side_effect=_gate_probe):
         counts = benchmark_runner.drain_find_gate(
             gate_results, "codex", "fixture-model", generic_target, "demo",
         )
     check(
         counts["accepted"] == 1 and decision_seen == {
             "backend": "codex", "model": "fixture-model", "target": str(generic_target),
+            "controls": "bytes,call-sequence", "product": True,
         },
-        "benchmark in-process finding drain receives the resolved backend, model, and target",
+        "benchmark finding drain receives target scope and threat-model controls",
         repr(decision_seen),
     )
     gate_passes = [0]

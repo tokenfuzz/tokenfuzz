@@ -774,6 +774,7 @@ def _harness_rooted(crash_dir: Path) -> bool:
 def _finding_trigger_rejected(
     finding_dir: Path, report: Path, deadline: float | None = None,
     usage_index: str | os.PathLike[str] | None = None,
+    target_root_is_product: bool = False,
 ) -> bool:
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     target_root = os.environ.get("TARGET_ROOT", "")
@@ -782,6 +783,7 @@ def _finding_trigger_rejected(
     return _trigger_vote(
         report, finding_dir / ".trigger-gate.json", backend,
         os.environ.get("MODEL", ""), Path(target_root), deadline, usage_index,
+        target_root_is_product,
     ) == 1
 
 
@@ -789,6 +791,7 @@ def _trigger_vote(
     report: Path, vote_file: Path, backend: str, model: str,
     target_root: Path, deadline: float | None = None,
     usage_index: str | os.PathLike[str] | None = None,
+    target_root_is_product: bool = False,
 ) -> int:
     """Run the recall-safe trigger-provenance reviewer (`validate-finding --gate
     trigger`) over a report. Returns 1 = disproof-backed Reject, 0 = keep
@@ -823,6 +826,8 @@ def _trigger_vote(
         command += ["--model", model]
     if usage_index:
         command += ["--usage-index", os.fspath(usage_index)]
+    if target_root_is_product:
+        command.append("--target-root-is-product")
     try:
         rc = subprocess.run(
             command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -849,6 +854,7 @@ def _crash_trigger_gate(
     crash_dir: Path, report: Path, target_root: Path,
     deadline: float | None = None,
     usage_index: str | os.PathLike[str] | None = None,
+    target_root_is_product: bool = False,
 ) -> bool:
     """Recall-safe trigger-provenance gate for a kept crash. A `bytes`-labelled
     trigger passes evaluate_crash_verdict's set-difference even when those bytes
@@ -865,11 +871,13 @@ def _crash_trigger_gate(
     if _trigger_vote(
         report, crash_dir / ".trigger-gate.json", backend, model,
         target_root, deadline, usage_index,
+        target_root_is_product,
     ) != 1:
         return False
     return _trigger_vote(
         report, crash_dir / ".trigger-gate-2.json", backend, model,
         target_root, deadline, usage_index,
+        target_root_is_product,
     ) == 1
 
 
@@ -881,6 +889,7 @@ def triage_one_crash(
     attacker_controls: list[str],
     findings_only: bool = False,
     deadline: float | None = None,
+    target_root_is_product: bool = False,
 ) -> str:
     if _deadline_expired(deadline):
         return "pending"
@@ -974,6 +983,7 @@ def triage_one_crash(
         _clear_contract_concern(report)
     if _crash_trigger_gate(
         crash_dir, report, Path(target_root), deadline, usage_index,
+        target_root_is_product,
     ):
         _reject(
             crash_dir, rejected_root,
@@ -994,6 +1004,7 @@ def triage_crash_dirs(
     workers: int = 4,
     findings_only: bool = False,
     deadline: float | None = None,
+    target_root_is_product: bool = False,
 ) -> dict[str, int]:
     results = Path(results_dir)
     crashes = results / "crashes"
@@ -1008,6 +1019,7 @@ def triage_crash_dirs(
             lambda directory: triage_one_crash(
                 directory, results, Path(target_root), target_slug, controls,
                 findings_only, deadline,
+                target_root_is_product,
             ),
             directories,
         )
@@ -1039,12 +1051,14 @@ def _finalize_accepted_finding(
     finding_dir: Path, results_dir: Path, report: Path,
     deadline: float | None,
     usage_index: str | os.PathLike[str] | None = None,
+    target_root_is_product: bool = False,
 ) -> str:
     if not _deadline_expired(deadline):
         fill_reach_fields(finding_dir, usage_index)
         report = _report(finding_dir) or report
     if _finding_trigger_rejected(
         finding_dir, report, deadline, usage_index,
+        target_root_is_product,
     ):
         _reject(
             finding_dir, results_dir / "findings-rejected",
@@ -1063,6 +1077,7 @@ def validate_one_finding(
     accept_quorum: int = 2,
     timeout: int = 300,
     deadline: float | None = None,
+    target_root_is_product: bool = False,
 ) -> str:
     if (finding_dir / ".keep").is_file() or (finding_dir / ".reviewed").is_file():
         return "accepted"
@@ -1080,7 +1095,8 @@ def validate_one_finding(
         if cache.get("accept") is True and int(cache.get("accept_count", 0)) >= accept_quorum:
             (finding_dir / ".pending-drop").unlink(missing_ok=True)
             return _finalize_accepted_finding(
-                finding_dir, results_dir, report, deadline, usage_index
+                finding_dir, results_dir, report, deadline, usage_index,
+                target_root_is_product,
             )
         if cache.get("accept") is False and int(cache.get("reject_count", 0)) >= quorum:
             _reject(finding_dir, results_dir / "findings-rejected", str(cache.get("reason") or "quality gate reject"))
@@ -1110,7 +1126,8 @@ def validate_one_finding(
                 _write_atomic_json(cache_path, payload)
                 (finding_dir / ".pending-drop").unlink(missing_ok=True)
                 return _finalize_accepted_finding(
-                    finding_dir, results_dir, report, deadline, usage_index
+                    finding_dir, results_dir, report, deadline, usage_index,
+                    target_root_is_product,
                 )
         else:
             rejects += 1
@@ -1150,6 +1167,7 @@ def validate_find_gate(
     quorum: int | None = None,
     accept_quorum: int | None = None,
     deadline: float | None = None,
+    target_root_is_product: bool = False,
 ) -> dict[str, int]:
     results = Path(results_dir)
     findings = results / "findings"
@@ -1164,6 +1182,7 @@ def validate_find_gate(
             lambda directory: validate_one_finding(
                 directory, results, quorum=q, accept_quorum=aq,
                 timeout=timeout, deadline=deadline,
+                target_root_is_product=target_root_is_product,
             ),
             directories,
         )

@@ -248,6 +248,7 @@ with tempfile.TemporaryDirectory(
 
     def _record_gate(
         _directory, report_path, _target_root, _deadline=None, _usage_index=None,
+        _target_root_is_product=False,
     ):
         reviewed_paths.append(report_path)
         return False
@@ -487,6 +488,30 @@ with tempfile.TemporaryDirectory(
             triage._crash_trigger_gate(root, report_path, root) is True and votes.call_count == 2,
             "two trigger rejects satisfy the crash gate quorum",
         )
+    with mock.patch.dict(os.environ, {"LLM_DECIDE_DISABLE": "0"}, clear=False), \
+         mock.patch.object(subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+        triage._trigger_vote(
+            report_path, root / "product-vote.json", "codex", "fixture", root,
+            target_root_is_product=True,
+        )
+        check(
+            "--target-root-is-product" in run.call_args.args[0],
+            "benchmark product boundary is passed explicitly to trigger validation",
+        )
+    validator = runpy.run_path(str(ROOT / "bin" / "validate-finding"))
+    validator_args = validator["parse_args"]([
+        "--finding", str(report_path), "--target-path", str(root),
+        "--backend", "codex", "--gate", "trigger",
+        "--target-root-is-product",
+    ])
+    product_prompt = validator["render_validator_prompt"](
+        validator_args, {"report": _GOOD_REPORT}
+    )
+    check(
+        "configured benchmark target root is the product boundary" in product_prompt
+        and "Clause\n(d) still applies" in product_prompt,
+        "product-root scope preserves non-shipping review below the root",
+    )
     finding_root = root / "finding-trigger"
     finding = finding_root / "findings" / "FIND-001"
     finding.mkdir(parents=True)
