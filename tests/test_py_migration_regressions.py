@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,6 +81,77 @@ with tempfile.TemporaryDirectory(
     # Keep the LLM-driven gates out of these unit checks; each capability is
     # exercised through its structural path (env opt-out, byte accounting, etc.).
     os.environ["CRASH_TRIGGER_GATE"] = "0"
+
+    # The productive wall limits finding work, not final measurement. A
+    # harness that consumes that entire budget must still drain the finding
+    # gate and finish as a countable benchmark cell.
+    bench_root = root / "benchmark"
+    backend_root = bench_root / "codex"
+    bench_dir = backend_root / "wall-budget"
+    cells_dir = bench_dir / "cells"
+    cells_dir.mkdir(parents=True)
+    fake_script_root = root / "benchmark-script-root"
+    (fake_script_root / "targets" / "sampleproj").mkdir(parents=True)
+    drained_deadlines: list[object] = []
+
+    def _budget_harness(cell_dir, *_args):
+        results = cell_dir / "results"
+        finding = results / "findings" / "FIND-001"
+        finding.mkdir(parents=True)
+        (finding / "report.md").write_text("# Finding\n", encoding="utf-8")
+        return 0, results
+
+    def _budget_drain(results, *_args, **kwargs):
+        drained_deadlines.append(kwargs.get("deadline"))
+        finding = results / "findings" / "FIND-001"
+        (finding / ".llm-find-quality.json").write_text(
+            json.dumps({"accept": True}), encoding="utf-8"
+        )
+        return {"accepted": 1, "rejected": 0, "pending": 0}
+
+    budget_args = SimpleNamespace(
+        model="test-model", backend="codex", target="sampleproj", replicates=1,
+        budget_wall=1, agents=1, skip_recon=False, dry_run=False,
+        regenerate=False, validate_findings=True,
+    )
+    empty_report = {"conditions": []}
+    with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", fake_script_root), \
+         mock.patch.object(benchmark_runner.llm_invoke, "apply_memory_policy"), \
+         mock.patch.object(benchmark_runner.target_config, "detect_rev", return_value="rev"), \
+         mock.patch.object(benchmark_runner, "_git_rev", return_value="rev"), \
+         mock.patch.object(benchmark_runner, "preflight_build"), \
+         mock.patch.object(benchmark_runner, "run_harness", side_effect=_budget_harness), \
+         mock.patch.object(benchmark_runner, "drain_find_gate", side_effect=_budget_drain), \
+         mock.patch.object(benchmark_runner, "update_result", return_value=empty_report), \
+         mock.patch.object(benchmark_runner.metrics, "render_section", return_value=""), \
+         mock.patch.object(benchmark_runner.metrics, "append_to_ledger"), \
+         mock.patch.object(benchmark_runner.time, "monotonic", side_effect=[0, 5]):
+        budget_rc = benchmark_runner._run_locked(
+            budget_args, bench_root, backend_root, bench_dir, cells_dir,
+            backend_root / "benchmark-results.md", "wall-budget", ["harness"],
+        )
+    budget_cell = json.loads(
+        (cells_dir / "harness-r1" / "cell.json").read_text(encoding="utf-8")
+    )
+    budget_metrics = json.loads(
+        (cells_dir / "harness-r1" / "metrics.json").read_text(encoding="utf-8")
+    )
+    check(budget_rc == 0, "budget-complete harness cell succeeds after final triage")
+    check(
+        drained_deadlines == [None],
+        "final benchmark triage runs without the expired productive deadline",
+        repr(drained_deadlines),
+    )
+    check(
+        budget_cell["status"] == "done" and budget_cell["run_quality"] == "clean",
+        "budget-complete harness cell remains done and clean",
+        repr(budget_cell),
+    )
+    check(
+        budget_metrics["confirmed_findings"] == 1,
+        "metrics are harvested after final finding adjudication",
+        repr(budget_metrics),
+    )
 
     # ── #1 promotion-pending TTL: an incomplete crash is held, not rejected ──
     incomplete_root = root / "ttl"

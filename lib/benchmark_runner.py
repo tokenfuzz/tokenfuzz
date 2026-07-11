@@ -183,8 +183,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--budget-wall", type=_nonnegative, default=10800,
         help=(
-            "productive wall seconds per cell, shared by recon, agents, and "
-            "in-cell validation; provider-recovery pauses are excluded (0 = unlimited)"
+            "productive wall seconds per cell for recon and agents; final "
+            "triage runs to completion afterward and provider-recovery pauses "
+            "are excluded (0 = unlimited)"
         ),
     )
     result.add_argument("--agents", type=_positive)
@@ -899,7 +900,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 predicted = cell_dir if condition == "model-direct" else cell_dir / "repo-root" / "output" / f"{args.target}-{experiment}" / args.backend / "results"
                 write_cell(cell_json, condition, replicate, experiment, predicted, 0, "running", args.agents)
                 start = time.monotonic()
-                deadline = start + args.budget_wall if args.budget_wall else None
                 status = "done"
                 if args.dry_run:
                     results = dryrun_cell(cell_dir, condition, replicate)
@@ -921,29 +921,26 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     paused = int((results.parent / "logs" / ".paused_secs").read_text().strip())
                 except (OSError, ValueError):
                     pass
-                if deadline is not None:
-                    deadline += paused
                 if not args.dry_run and args.validate_findings and results.is_dir() and (results / "findings").is_dir():
-                    if deadline is not None and time.monotonic() >= deadline:
-                        log(f"Cell {name} validation deferred: cell budget exhausted")
-                        status = "incomplete"
-                    else:
-                        log(f"Cell {name}: draining find-gate before metrics")
-                        try:
-                            counts = drain_find_gate(
-                                results, args.backend, model,
-                                (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
-                                deadline=deadline,
-                            )
-                            paused += counts.get("paused_seconds", 0)
-                            log(
-                                f"Cell {name} validation: accepted={counts.get('accepted', 0)} "
-                                f"rejected={counts.get('rejected', 0)} pending={counts.get('pending', 0)}"
-                            )
-                            if counts.get("pending", 0):
-                                status = "incomplete"
-                        except Exception as exc:
-                            log(f"WARN: find-gate drain failed for {name}: {exc}")
+                    # Final triage is measurement, not timed finding work. Run
+                    # it synchronously after the audit consumes its productive
+                    # budget so a normal wall-budget stop remains a completed
+                    # benchmark cell with fully adjudicated metrics.
+                    log(f"Cell {name}: draining find-gate before metrics")
+                    try:
+                        counts = drain_find_gate(
+                            results, args.backend, model,
+                            (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
+                        )
+                        paused += counts.get("paused_seconds", 0)
+                        log(
+                            f"Cell {name} validation: accepted={counts.get('accepted', 0)} "
+                            f"rejected={counts.get('rejected', 0)} pending={counts.get('pending', 0)}"
+                        )
+                        if counts.get("pending", 0):
+                            status = "incomplete"
+                    except Exception as exc:
+                        log(f"WARN: find-gate drain failed for {name}: {exc}")
                 elif not args.dry_run and condition == "model-direct" and not args.validate_findings:
                     log(f"Cell {name} validation: DISABLED (--no-validate-findings)")
                 wall = int(time.monotonic() - start)

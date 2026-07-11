@@ -78,7 +78,7 @@ With all defaults, the command means:
 | `--backend` | `codex` | Agent backend. Valid values are `claude`, `codex`, `gemini`, `grok`, and `oss`. |
 | `--model` | backend config default | Optional model override used by both conditions. |
 | `--replicates` | `3` | Runs per condition. |
-| `--budget-wall` | `10800` | Productive seconds per cell, shared by recon, agents, and in-cell validation. Provider-recovery pauses are excluded; `0` is unlimited. |
+| `--budget-wall` | `10800` | Productive seconds per cell for recon and agents. Final triage runs to completion after that budget; provider-recovery pauses are excluded. `0` is unlimited. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
 | `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |
 | `--run-id` | UTC timestamp | Run directory under `output/benchmark/<backend>/`; reuse it to resume. |
@@ -121,6 +121,13 @@ Short budgets can therefore favor `model-direct`, since every harness
 cell spends part of its budget on recon before probing. This is not a
 bug in the benchmark. It is measuring whether TokenFuzz can repay its
 startup cost inside the budget you gave it.
+
+After timed investigation stops, each cell synchronously drains the finding
+quality gate before metrics are harvested. This final triage is measurement,
+not additional finding time, so it may extend the cell's elapsed wall time
+beyond `--budget-wall`. A normally exhausted investigation budget still
+produces a completed cell; only unresolved triage or provider failure leaves
+the cell incomplete.
 
 ## Where results land
 
