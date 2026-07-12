@@ -446,6 +446,11 @@ How the cluster files and markers work:
   member. They are **not** deleted — a duplicate may still carry a
   useful variant or a clearer reproducer. Treat the canonical member
   as the primary report.
+- A finding marked `Needs review` passed finding validation, but its class is
+  not specific enough for a trustworthy CVSS vector. Keep it in the review
+  set; it is unscored and does not count as Medium+. `Pending` instead means
+  validation has not reached a verdict. `Unknown` is reserved for incomplete
+  crash classification.
 
 Review a cluster top-down:
 

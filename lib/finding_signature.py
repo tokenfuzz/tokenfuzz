@@ -195,11 +195,11 @@ def extract_class(report_text: str) -> str:
 # ``Unknown`` with no score; a scored 0.0 is the CVSS band ``None``
 # (e.g. internal-surface code whose modified impacts are all N).
 _SEVERITY_LEVEL_RE = re.compile(
-    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low|None|Unknown)",
+    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low|None|Unknown|Needs review)",
     re.MULTILINE,
 )
 _SEVERITY_TABLE_RE = re.compile(
-    r"^\|\s*Severity\s*\|\s*(?P<level>Critical|High|Medium|Low|None|Unknown)\b"
+    r"^\|\s*Severity\s*\|\s*(?P<level>Critical|High|Medium|Low|None|Unknown|Needs review)\b"
     r"\s*(?:\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(?P<score>\d+(?:\.\d+)?)\s*\))?",
     re.MULTILINE | re.IGNORECASE,
 )
@@ -208,7 +208,7 @@ _SEVERITY_TABLE_RE = re.compile(
 _SEVERITY_SCORE_RE = re.compile(
     r"CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(\d+(?:\.\d+)?)(?![0-9./])")
 _SEVERITY_RANK = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1,
-                  "None": 0, "Unknown": 0}
+                  "None": 0, "Unknown": 0, "Needs review": 0}
 
 
 def extract_severity(report_text: str) -> tuple[str, int, float]:
@@ -219,7 +219,7 @@ def extract_severity(report_text: str) -> tuple[str, int, float]:
     row; then to ``('—', 0, 0.0)`` when no severity is recorded yet (e.g.
     before bin/severity has scored the report). Rank is the sort key —
     higher is more severe (Critical=4 > High=3 > Medium=2 > Low=1;
-    None=Unknown=0)."""
+    None=Unknown=Needs review=0)."""
     m = _SEVERITY_LEVEL_RE.search(report_text or "")
     if m:
         level = m.group("level").capitalize()

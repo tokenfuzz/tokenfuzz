@@ -1462,6 +1462,88 @@ read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "Unknown" "$level" "unenriched _TODO skeleton crash fails closed to Unknown"
 assert_eq "None" "$score" "no CVSS score for an unenriched skeleton crash"
 
+# Accepted finding classes are structured evidence, not prose. Severity owns
+# their single canonical mapping and ignores the gate's advisory severity.
+validated="$TEST_TMPDIR/findings/FIND-VALIDATED-CLASS"
+mkdir -p "$validated"
+cat > "$validated/report.md" <<'RPT'
+# Repeated work consumes unbounded resources
+
+## Fields
+
+| Field | Value |
+|:------|:------|
+| Class | dos |
+| Severity | Unknown |
+| Surface | library-api |
+
+The accepted report names concrete attacker-controlled repeated work.
+RPT
+cat > "$validated/.llm-find-quality.json" <<'JSON'
+{"decision_version":"v13-python","accept":true,"accept_count":2,"class":"dos:algorithmic","severity":"critical","reason":"measured superlinear work"}
+JSON
+validated_json=$(python3 "$REACH" --report "$validated" --json)
+assert_eq "dos_amplification" "$(jq -r '.severity.primitive_key' <<<"$validated_json")" \
+  "accepted dos:algorithmic class maps centrally to availability-only primitive"
+assert_neq "Critical" "$(jq -r '.severity.level' <<<"$validated_json")" \
+  "quality gate's advisory severity cannot become the CVSS result"
+
+# Classification is not an acceptance gate. Ambiguous or non-terminal caches
+# remain visible with an explicit terminal review state and no fabricated score.
+review="$TEST_TMPDIR/findings/FIND-NEEDS-REVIEW"
+mkdir -p "$review"
+cat > "$review/report.md" <<'RPT'
+# Ambiguous accepted boundary issue
+
+## Fields
+
+| Field | Value |
+|:------|:------|
+| Class | boundary |
+| Severity | Unknown |
+
+The report is substantive but its impact primitive is not specific enough.
+RPT
+cat > "$review/.llm-find-quality.json" <<'JSON'
+{"decision_version":"v13-python","accept":true,"accept_count":2,"class":"boundary:new-unmapped-kind","severity":"high","reason":"concrete boundary crossing"}
+JSON
+review_json=$(python3 "$REACH" --report "$review" --json)
+assert_eq "Needs review" "$(jq -r '.severity.level' <<<"$review_json")" \
+  "unmapped accepted class is explicit Needs review, not generic Unknown"
+assert_eq "null" "$(jq -r '.severity.score|tostring' <<<"$review_json")" \
+  "Needs review carries no invented CVSS score"
+assert_file_contains "$review/report.md" 'Severity.*Needs review' \
+  "report persists the explicit Needs review state"
+
+unaccepted="$TEST_TMPDIR/findings/FIND-NONTERMINAL-CLASS"
+cp -R "$validated" "$unaccepted"
+cat > "$unaccepted/.llm-find-quality.json" <<'JSON'
+{"decision_version":"v13-python","accept":true,"accept_count":1,"class":"dos:algorithmic","severity":"medium"}
+JSON
+nonterminal_json=$(python3 "$REACH" --report "$unaccepted" --json)
+assert_eq "Needs review" "$(jq -r '.severity.level' <<<"$nonterminal_json")" \
+  "one validator vote cannot mint a primitive or severity"
+
+# Sanitizer evidence and an authored Primitive retain precedence over the
+# validator class, preventing structured hints from overriding proof.
+authoritative="$TEST_TMPDIR/findings/FIND-AUTHORITATIVE"
+mkdir -p "$authoritative"
+cat > "$authoritative/report.md" <<'RPT'
+# Sanitizer-proved write
+
+Primitive: heap_write
+Surface: library-api
+
+==1==ERROR: AddressSanitizer: heap-buffer-overflow
+WRITE of size 8
+RPT
+cat > "$authoritative/.llm-find-quality.json" <<'JSON'
+{"decision_version":"v13-python","accept":true,"accept_count":2,"class":"dos:algorithmic","severity":"medium"}
+JSON
+authoritative_json=$(python3 "$REACH" --report "$authoritative" --json)
+assert_eq "heap_write" "$(jq -r '.severity.primitive_key' <<<"$authoritative_json")" \
+  "sanitizer/authored primitive outranks validator class"
+
 batch_finding="$TEST_TMPDIR/findings/FIND-BATCH"
 mkdir -p "$batch_finding"
 cat > "$batch_finding/report.md" <<'RPT'

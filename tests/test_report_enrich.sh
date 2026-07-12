@@ -516,4 +516,29 @@ else
   fail "enrich-report multi-file" "one or both reports were not enriched in the batch"
 fi
 
+# Empty bare-label fields must stay empty.  In particular, the field parser
+# must not let \s* consume the newline and steal the next label as its value.
+empty_fields="$TEST_TMPDIR/empty_fields"
+mkdir -p "$empty_fields"
+cat > "$empty_fields/report.md" <<'EOF'
+# Empty structured fields
+
+Boundary:
+Caller controls:
+Trusted caller actions:
+Caller contract:
+Trigger source:
+
+## Summary
+
+A concrete report whose optional structured fields have not been filled.
+EOF
+python3 "$ENRICH" --quiet "$empty_fields/report.md" >/dev/null 2>&1
+if grep -Eq 'Boundary:[[:space:]]+Caller controls|Caller controls:[[:space:]]+Trusted caller' \
+    "$empty_fields/report.md"; then
+  fail "empty bare-label fields remain empty" "a following label became the field value"
+else
+  pass "empty bare-label fields remain empty instead of swallowing the next line"
+fi
+
 summary

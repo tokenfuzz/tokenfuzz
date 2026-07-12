@@ -517,7 +517,7 @@ def _extract_bare_field(text: str, label: str) -> str:
             return val
     # Bare-label line: `Label: value`
     bare_re = re.compile(
-        rf"^{re.escape(label)}:\s*(?P<val>.+?)\s*$",
+        rf"^{re.escape(label)}:[ \t]*(?P<val>[^\r\n]+?)[ \t]*$",
         re.MULTILINE | re.IGNORECASE,
     )
     m = bare_re.search(text)

@@ -206,6 +206,8 @@ def _signature(find_dir: Path, target_root: str) -> dict:
         status = "NEEDS CONTENT"
     elif (find_dir / ".needs-attention").is_file():
         status = "NEEDS ATTENTION"
+    elif sig["severity_label"] == "Needs review":
+        status = "NEEDS REVIEW"
     if (find_dir / ".reviewed").is_file() or (find_dir / ".keep").is_file():
         status = "OK (override)"
     sig["status"] = status
@@ -565,7 +567,9 @@ def _format_clusters_md(clusters: list[dict], findings_root: Path,
         f"A `Pending` severity means the find-quality gate has not "
         f"rendered a final verdict yet (typically because the LLM was "
         f"disabled for this run, or the finding is pinned by "
-        f"`.keep`/`.reviewed` and bypassed the gate)."
+        f"`.keep`/`.reviewed` and bypassed the gate). A `Needs review` "
+        f"severity is a terminal, validated finding whose accepted class "
+        f"cannot be mapped to a trustworthy CVSS primitive without human input."
     )
     lines.append("")
     n_findings = sum(c["size"] for c in clusters)
@@ -782,7 +786,8 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
         f"**Members** links jump to each report. "
         f"A `Pending` severity means the find-quality gate has not "
         f"rendered a final verdict yet (LLM disabled, or pinned by "
-        f"`.keep`/`.reviewed`)."
+        f"`.keep`/`.reviewed`). `Needs review` means validation completed but "
+        f"the accepted class has no trustworthy CVSS primitive mapping."
     )
     md_lines.append("")
     md_lines.append(

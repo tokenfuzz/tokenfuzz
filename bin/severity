@@ -222,7 +222,7 @@ NON_SHIPPING_SURFACES = frozenset({"dev_tool", "internal"})
 # automatic and may need operator action (R:U).
 TRANSIENT_CRASH_PRIMITIVES = frozenset({"stack_exhaustion", "null_deref", "bus"})
 
-_SEVERITY_RANK = {"None": 0, "Unknown": 0, "Low": 1, "Medium": 2,
+_SEVERITY_RANK = {"None": 0, "Unknown": 0, "Needs review": 0, "Low": 1, "Medium": 2,
                   "High": 3, "Critical": 4}
 
 
@@ -1242,6 +1242,75 @@ _NARRATIVE_ONLY_PRIMITIVES = frozenset({
 })
 
 
+# The finding-quality gate emits a free-form but structured ``top:sub`` class.
+# Severity owns the one canonical translation from that schema to CVSS impact
+# primitives. Exact subclasses come first; only broad classes with one
+# conservative impact shape receive a fallback. Ambiguous labels stay
+# review-needed instead of being forced into a score.
+_VALIDATED_CLASS_PRIMITIVES = {
+    "boundary:context-confusion": "logic_regression",
+    "boundary:resource-substitution": "logic_regression",
+    "boundary:uri-filter-bypass": "path_traversal",
+    "deserialization:unsafe": "deserialization",
+    "dos:amplification": "dos_amplification",
+    "dos:crash": "dos_amplification",
+    "dos:decompression": "dos_amplification",
+    "dos:hash-collision": "dos_amplification",
+    "dos:memory-leak": "memory_leak",
+    "dos:regex-complexity": "regex_dos",
+    "dos:resource-amplification": "dos_amplification",
+    "dos:resource-exhaustion": "dos_amplification",
+    "dos:stack-exhaustion": "stack_exhaustion",
+    "info-disclosure:local-file": "info_leak",
+    "info-disclosure:xxe": "xxe",
+    "injection:mutation-xss": "xss",
+    "injection:terminal": "injection",
+    "injection:terminal-escape": "injection",
+    "logic:identifier-truncation": "logic_regression",
+    "logic:validation-bypass": "logic_regression",
+    "memory-safety:bounds": "heap_read_small",
+    "memory-safety:integer-overflow": "integer_overflow",
+    "memory-safety:lifetime": "uaf_read",
+    "memory-safety:null-deref": "null_deref",
+    "memory-safety:type-confusion": "type_confusion",
+    "memory-safety:uninit": "info_leak",
+    "memory-safety:use-after-free": "uaf_read",
+    "race:resource-selection": "protocol_state",
+}
+
+
+def _primitive_from_validated_class(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    label = value.strip().lower().replace("_", "-")
+    if not label:
+        return ""
+    exact = _VALIDATED_CLASS_PRIMITIVES.get(label)
+    if exact:
+        return exact
+    return {
+        "dos": "dos_amplification",
+        "info-disclosure": "info_leak",
+        "injection": "injection",
+        "logic": "logic_regression",
+        "crypto": "crypto_weakness",
+        "deserialization": "deserialization",
+    }.get(label.split(":", 1)[0], "")
+
+
+def _accepted_finding_primitive(report_dir: Path) -> tuple[str, str]:
+    path = Path(report_dir) / ".llm-find-quality.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        votes = int(payload.get("accept_count", 0))
+    except (OSError, ValueError, TypeError):
+        return "", ""
+    if payload.get("accept") is not True or votes < 2:
+        return "", ""
+    label = str(payload.get("class") or "").strip().lower()
+    return _primitive_from_validated_class(label), label
+
+
 # ── Surface classification (drives AV/UI and Environmental use) ──────────
 #
 # The surface tier feeds CVSS AV/UI and helps derive the Environmental
@@ -1696,6 +1765,14 @@ def compute_severity(report_text: str,
         if class_key in CVSS4_CLASS and (prim_key == "unknown" or prim_key in _NARRATIVE_ONLY_PRIMITIVES):
             prim_key = class_key
             prim_label = class_label
+    if report_dir is not None and (
+        prim_key == "unknown" or prim_key in _NARRATIVE_ONLY_PRIMITIVES
+    ):
+        validated_primitive, validated_class = _accepted_finding_primitive(report_dir)
+        if validated_primitive in CVSS4_CLASS:
+            prim_key = validated_primitive
+            prim_label = validated_primitive.replace("_", " ")
+            fields["validated_class"] = validated_class
 
     # A sidecar/narrative HIGH-IMPACT primitive (memory-corruption or
     # disclosure) that no sanitizer class confirmed AND that an on-disk
@@ -1741,8 +1818,15 @@ def compute_severity(report_text: str,
     if metrics is None:
         # Unclassified crash — no CVSS vector. Honest placeholder; downstream
         # rank is 0 (sorts below any scored finding).
+        is_finding = (
+            report_dir is not None and Path(report_dir).parent.name == "findings"
+        )
         return {
-            "level": "Unknown",
+            "level": (
+                "Needs review"
+                if is_finding and not _SKELETON_TODO_RE.search(report_text or "")
+                else "Unknown"
+            ),
             "score": None,
             "cvss": None,
             "primitive": prim_label,
@@ -1926,7 +2010,7 @@ def _format_severity_line(sev: dict) -> str:
       - **Severity**: <Level> (CVSS-BTE 4.0: <score> <rating>; <vector>; \
 primitive=<class>; surface=<tier>)
     Shape (unclassified):
-      - **Severity**: Unknown (unclassified — no CVSS vector)
+      - **Severity**: Needs review (unclassified — no CVSS vector)
 
     The leading ``<Level>`` word and the ``CVSS-* 4.0: <score>`` token are the
     contract downstream tools rely on (cluster-crashes, export-repro,
@@ -1934,7 +2018,8 @@ primitive=<class>; surface=<tier>)
     """
     cv = sev.get("cvss")
     if cv is None:
-        return ("- **Severity**: Unknown (unclassified — no CVSS vector; "
+        return (f"- **Severity**: {sev.get('level', 'Unknown')} "
+                "(unclassified — no CVSS vector; "
                 f"primitive={sev['primitive']})")
     parts = [
         f"{cv.get('nomenclature', 'CVSS-B')} 4.0: {cv['score']} {cv['rating']}",
@@ -1978,7 +2063,7 @@ def _format_severity_field(sev: dict) -> str:
     primitive is unclassified. The colon after the version keeps the score from
     reading as a second version number (``4.0 6.0``)."""
     if sev.get("score") is None:
-        return "Unknown"
+        return sev.get("level", "Unknown")
     name = (sev.get("cvss") or {}).get("nomenclature", "CVSS-B")
     return f"{sev['level']} ({name} 4.0: {sev['score']})"
 
@@ -2037,8 +2122,9 @@ def _format_severity_section(sev: dict) -> str:
     lines = [SEV_HEADING, ""]
     cv = sev.get("cvss")
     if cv is None:
+        subject = "finding" if sev.get("level") == "Needs review" else "crash"
         lines.append(
-            f"_Severity is the **CVSS v4.0 score**. This crash is "
+            f"_Severity is the **CVSS v4.0 score**. This {subject} is "
             f"**unclassified** (primitive={sev['primitive']}), so no CVSS "
             f"vector is derivable and no score is assigned. Classify the "
             f"primitive (set a `Primitive:` field) to score it._"
@@ -2325,7 +2411,8 @@ def render_human(severity: dict) -> str:
     out: list[str] = []
     cv = severity.get("cvss")
     if cv is None:
-        out.append(f"Severity: Unknown (unclassified — no CVSS vector; "
+        out.append(f"Severity: {severity.get('level', 'Unknown')} "
+                   f"(unclassified — no CVSS vector; "
                    f"primitive={severity['primitive']})")
     else:
         out.append(f"Severity: {severity['level']} "

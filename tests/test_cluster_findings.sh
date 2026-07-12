@@ -421,6 +421,25 @@ assert_file_exists "$RESULTS_DIR/findings/FIND-EVU/.dup-of" \
   && pass "RC#2: proven (E:P) member is canonical" \
   || fail "RC#2: proven (E:P) member is canonical" "proven member got .dup-of"
 
+# Accepted findings whose class cannot support a trustworthy CVSS vector are
+# terminal review work, not still-pending validation and not generic Unknown.
+mk_find FIND-NEEDS-REVIEW \
+"# Accepted finding needing impact classification
+## Location
+\`src/format.c:parse_record:88\`
+## Classification
+- **Class**: boundary:new-class
+- **Severity**: Needs review (unclassified — no CVSS vector; primitive=unclassified)" \
+  "boundary:new-class"
+python3 "$CLUSTER" "$RESULTS_DIR" >/dev/null 2>&1 \
+  || fail "cluster-findings (Needs review) re-runs cleanly" "nonzero exit"
+assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'Needs review' \
+  "cluster table preserves explicit Needs review severity"
+assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.md" 'NEEDS REVIEW' \
+  "cluster table distinguishes review work from pending validation"
+assert_file_contains "$RESULTS_DIR/findings/FINDING-CLUSTERS.html" 'sev-Needs-review' \
+  "HTML renders Needs review as an explicit severity state"
+
 # _derive_target_root scans the <agent>/{results,logs} marker from the RIGHT,
 # so a nested slug whose own first component is named "results" or "logs" is not
 # mistaken for the structural marker (which would corrupt the strip-prefix and

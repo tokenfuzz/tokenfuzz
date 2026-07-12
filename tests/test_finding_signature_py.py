@@ -455,6 +455,9 @@ assert_eq(("Medium", 2, 0.0), fs.extract_severity("| Severity | Medium |"),
 assert_eq(("Unknown", 0, 0.0),
           fs.extract_severity("- **Severity**: Unknown (unclassified — no CVSS vector)"),
           "unclassified crash → Unknown, no score")
+assert_eq(("Needs review", 0, 0.0),
+          fs.extract_severity("- **Severity**: Needs review (unclassified — no CVSS vector)"),
+          "accepted unscored finding → Needs review, no score")
 assert_eq(("—", 0, 0.0), fs.extract_severity("no severity recorded yet"),
           "unscored report → em-dash sentinel")
 both = ("| Severity | Low (CVSS-BTE 4.0: 3.1) |\n"

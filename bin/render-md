@@ -394,6 +394,7 @@ _HTML_HEAD = """<!DOCTYPE html>
   .sev-Medium   {{ background: var(--sev-medium-bg);   color: var(--sev-medium-fg); }}
   .sev-Low      {{ background: var(--sev-low-bg);      color: var(--sev-low-fg); }}
   .sev-Unknown  {{ background: var(--sev-unknown-bg);  color: var(--sev-unknown-fg); }}
+  .sev-Needs-review {{ background: var(--sev-unknown-bg); color: var(--sev-unknown-fg); }}
   /* `None` = scored 0.0 (CVSS band), e.g. internal-surface code whose
      modified impacts are all N. Same neutral palette as Unknown. */
   .sev-None     {{ background: var(--sev-unknown-bg);  color: var(--sev-unknown-fg); }}
@@ -537,6 +538,7 @@ _HTML_HEAD = """<!DOCTYPE html>
   .triage-card.sev-Medium   {{ border-left-color: var(--sev-medium-bg); }}
   .triage-card.sev-Low      {{ border-left-color: var(--sev-low-bg); }}
   .triage-card.sev-Unknown  {{ border-left-color: var(--sev-unknown-bg); }}
+  .triage-card.sev-Needs-review {{ border-left-color: var(--sev-unknown-bg); }}
   .triage-card.sev-None     {{ border-left-color: var(--sev-unknown-bg); }}
   .triage-row {{
     display: flex;
@@ -966,7 +968,7 @@ def _render_inline(text: str) -> str:
 # Cell decorators — applied AFTER the cell text is HTML-rendered so we
 # can wrap matching tokens in styled spans.
 _SEV_CELL_RE = re.compile(
-    r"^\s*(Critical|High|Medium|Low|None|Unknown|Pending|—)"
+    r"^\s*(Critical|High|Medium|Low|None|Unknown|Needs review|Pending|—)"
     r"(?:\s*\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(\d+(?:\.\d+)?)\s*\))?\s*$"
 )
 
@@ -1045,7 +1047,7 @@ def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "") -> str:
         score = m.group(2)
         if level == "—":
             return rendered_html
-        klass = f"sev-{level if level != 'Unknown' else 'Unknown'}"
+        klass = f"sev-{level.replace(' ', '-')}"
         if score:
             return (f'<span class="sev {klass}">{level}'
                     f'<span class="sev-score">{score}</span></span>')
@@ -1292,11 +1294,11 @@ _FIELDS_ROW_RE = re.compile(
     r"^\|\s*(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*\|\s*(?P<val>.+?)\s*\|\s*$"
 )
 _SEV_FIELD_RE = re.compile(
-    r"^(?P<level>Critical|High|Medium|Low|None|Unknown)"
+    r"^(?P<level>Critical|High|Medium|Low|None|Unknown|Needs review)"
     r"(?:\s*\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(?P<score>\d+(?:\.\d+)?)\s*\))?\s*$"
 )
 _SEV_BULLET_RE = re.compile(
-    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low|None|Unknown)"
+    r"^-?\s*\*\*Severity\*\*\s*:\s*(?P<level>Critical|High|Medium|Low|None|Unknown|Needs review)"
 )
 # The trailing lookahead keeps the "4.0" of a bare vector string
 # (``CVSS:4.0/AV:N/…``) from being misread as the score.
@@ -1523,7 +1525,7 @@ def _render_hero(h: dict) -> str:
     if not (h.get("severity_level") or h.get("primitive") or h.get("top_frame_func")):
         return ""
     parts: list[str] = []
-    sev_class = f"sev-{h.get('severity_level', 'Unknown')}"
+    sev_class = f"sev-{h.get('severity_level', 'Unknown').replace(' ', '-')}"
     parts.append(f'<div class="triage-card {sev_class}">')
 
     top_row: list[str] = []
@@ -1534,7 +1536,7 @@ def _render_hero(h: dict) -> str:
             if h.get("severity_score") else ""
         )
         top_row.append(
-            f'<span class="sev sev-{lvl}">{html.escape(lvl)}{score_html}</span>'
+            f'<span class="sev sev-{lvl.replace(" ", "-")}">{html.escape(lvl)}{score_html}</span>'
         )
     if h.get("primitive"):
         cat = _primitive_category(h["primitive"])

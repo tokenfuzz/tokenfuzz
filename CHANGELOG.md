@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 - 2026-07-11
+## 1.1.0 - 2026-07-12
 
 - **Python-native orchestration replaces the legacy shell runtime.** Audit,
   benchmark, recon, probe, sanitizer, setup, triage, timeout, wrapper, and
@@ -14,15 +14,26 @@
   resolved backend effort; marks incomplete worker or decision usage unknown instead
   of zero; uses backend-reported cost when available and otherwise prices Claude's
   reported cache-write TTL; counts confirmed finding roots only; and exposes
-  incomplete-cell yield without admitting it to aggregates.
+  incomplete-cell yield without admitting it to aggregates. Completed crash and
+  finding evidence remains countable when another artifact is pending; regeneration
+  repairs legacy cell status instead of discarding an otherwise successful replicate.
   Both conditions receive the same crash and finding triage, configured target
   roots are treated as the product boundary, and benchmark-only worker refill
   suppression keeps configured concurrency from silently expanding provider cost.
 
+- **Benchmark reports stay useful while long runs are active.** The aggregate HTML
+  is rebuilt after each completed cell and clearly labels provisional totals until
+  final cross-cell deduplication. Operators no longer wait for the entire matrix to
+  finish before inspecting results, while the final report retains the same gates
+  and unique-root accounting.
+
 - **Finalization is bounded and substantially cheaper without weakening gates.**
   Crash and finding validation has its own one-hour safety window, stops fan-out
   after a confirmed account limit, and leaves unfinished evidence pending and
-  resumable. Direct, unchanged 5/5 sanitizer-confirmed byte-input crashes bypass
+  resumable. A newly confirmed crash keeps its hypothesis active, receives a
+  bounded enrichment tail beyond the normal Codex turn cutoff, and resumes its
+  report before new work if still unfinished. Direct, unchanged 5/5
+  sanitizer-confirmed byte-input crashes bypass
   only redundant trigger votes, including model-direct bundles renamed after
   probing; changed, ambiguous, and custom-harness evidence retains the two-vote
   review. Finding-quality and reachability decisions are keyed and batched across
@@ -55,6 +66,13 @@
   targets, and harness-owned faults. Productive work is deadline-aware and
   retryable, quota evidence outranks nominal process success, and bounded report
   and transcript reads fail visibly instead of silently dropping valid results.
+
+- **Validated findings receive deterministic severity without invented scores.**
+  Two-vote finding classes now enter the existing central CVSS primitive engine,
+  while sanitizer evidence and explicit primitives retain precedence and advisory
+  model severity is ignored. Accepted classes that remain ambiguous stay visible as
+  `Needs review`, unscored and outside Medium+ totals, instead of appearing as a
+  misleading generic `Unknown` report.
 
 - **The operator surface is smaller and easier to diagnose.** The handbook now
   leads with first-run, maintainer-handoff, backend, and controlled-benchmark
