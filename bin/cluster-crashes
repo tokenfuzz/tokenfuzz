@@ -57,6 +57,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import stack_frames  # noqa: E402
+import symbol_names  # noqa: E402
 import clusterfuzz_stacktrace as cf_stack  # noqa: E402
 import finding_signature  # noqa: E402
 from cluster_common import (  # noqa: E402
@@ -529,7 +530,7 @@ def _extract_strategy(report_text: str) -> str:
 
 def _signature(crash_dir: Path) -> dict:
     asan = _find_sanitizer(crash_dir)
-    asan_text = _read_text(asan) if asan else ""
+    asan_text = symbol_names.demangle_text(_read_text(asan)) if asan else ""
     report = _find_report(crash_dir)
     report_text = _read_text(report) if report else ""
 

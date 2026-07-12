@@ -8,6 +8,7 @@ this module owns process lifecycle and isolated benchmark cells.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ import benchmark_model_direct_render
 import build_preflight
 import crash_bundle
 import llm_invoke
+import llm_usage
 import process_tree
 import target_config
 import triage
@@ -193,39 +195,90 @@ def triage_cell_crashes(
                 continue
             crash_bundle.restore_probe_context(sources, destination)
     config = benchmark_target_config(results, target, target_slug)
+    bypasses: set[Path] = set()
+    pre_demoted = 0
+    if require_replay:
+        candidates = sorted((results / "crashes").glob("CRASH-*"))
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(2, len(candidates) or 1)
+        ) as executor:
+            futures = {
+                crash_dir: executor.submit(
+                    _verify_model_direct_crash,
+                    crash_dir, target, target_slug, config.attacker_controls,
+                )
+                for crash_dir in candidates
+            }
+            replay_results: dict[Path, str] = {}
+            for crash_dir in candidates:
+                try:
+                    replay_results[crash_dir] = futures[crash_dir].result()
+                except (OSError, subprocess.SubprocessError, ValueError):
+                    replay_results[crash_dir] = "unverifiable"
+        for crash_dir in candidates:
+            status = replay_results[crash_dir]
+            if status == "bypass":
+                bypasses.add(crash_dir)
+                continue
+            if status == "reproduced":
+                continue
+            reason = (
+                "sanitizer evidence did not reproduce through the configured target invocation"
+                if status == "clean"
+                else "sanitizer evidence has no executable configured-target replay contract"
+            )
+            triage.demote_to_finding(crash_dir, results, reason)
+            pre_demoted += 1
     counts = triage.triage_crash_dirs(
         results, target, target_slug, config.attacker_controls,
         workers=max(1, workers),
         findings_only=config.sanitizers_explicitly_disabled,
         deadline=deadline,
         target_root_is_product=True,
+        confirmed_trigger_bypasses=bypasses,
     )
-    # A footer-less model-direct crash is only a comparable crash metric when
-    # the harness can resolve a replay contract. Custom sanitizer evidence is
-    # still valuable, but without its binary/invocation it cannot be reverified
-    # or exported as a working maintainer bundle; preserve it as a finding.
-    replay_candidates = (
-        sorted((results / "crashes").glob("CRASH-*")) if require_replay else []
-    )
-    for crash_dir in replay_candidates:
-        sanitizer = crash_dir / "sanitizer.txt"
-        try:
-            measured = bool(re.search(
-                r"^CRASH_RATE:\s*[0-9]+/[0-9]+", sanitizer.read_text(
-                    encoding="utf-8", errors="replace"
-                ), re.MULTILINE,
-            ))
-        except OSError:
-            continue
-        if measured or _resolve_reverify_fields(crash_dir, target, target_slug) is not None:
-            continue
-        triage.demote_to_finding(
-            crash_dir, results,
-            "sanitizer evidence has no machine-replayable binary and invocation",
-        )
-        counts["promoted"] = max(0, counts.get("promoted", 0) - 1)
-        counts["demoted"] = counts.get("demoted", 0) + 1
+    counts["demoted"] = counts.get("demoted", 0) + pre_demoted
     return counts
+
+
+def _verify_model_direct_crash(
+    crash_dir: Path, target: Path, target_slug: str,
+    attacker_controls: list[str],
+) -> str:
+    """Return bypass/reproduced/clean/unverifiable for one direct crash."""
+    controls = {str(value).strip().lower() for value in attacker_controls}
+    if triage._direct_probe_trigger_bypass(crash_dir, target, attacker_controls):
+        return "bypass"
+    resolved = _resolve_reverify_fields(crash_dir, target, target_slug)
+    if resolved is None:
+        return "unverifiable"
+    fields, replay_args = resolved
+    if not reverify_one_crash(crash_dir, target, target_slug):
+        return "unverifiable"
+    rate = _measured_crash_rate(crash_dir / "sanitizer.txt")
+    if rate is None or rate[0] == 0:
+        return "clean"
+    standard = False
+    try:
+        binary = Path(fields.get("BIN", "")).resolve(strict=True)
+        root = target.resolve(strict=True)
+        standard = (
+            fields.get("MODE") in {"generic", "cli"}
+            and not replay_args
+            and (binary == root or root in binary.parents)
+        )
+    except (OSError, TypeError):
+        pass
+    if (
+        standard and rate == (5, 5) and "bytes" in controls
+        and triage._fault_frame_is_in_target(
+            (crash_dir / "sanitizer.txt").read_text(
+                encoding="utf-8", errors="replace"
+            ), root,
+        )
+    ):
+        return "bypass"
+    return "reproduced"
 
 
 def target_key(raw: str) -> str:
@@ -559,7 +612,7 @@ def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wal
     except ValueError:
         usage_event = {}
     usage_event["resolved_effort"] = llm_invoke.default_effort(backend)
-    usage_event["usage_complete"] = rc == 0
+    usage_event["usage_complete"] = llm_usage.usage_is_complete(usage_event, rc)
     (cell_dir / "logs" / "index.jsonl").write_text(
         json.dumps(usage_event, separators=(",", ":")) + "\n", encoding="utf-8"
     )
@@ -708,14 +761,50 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
     clean_runs = int(success_match.group(1).split("/", 1)[0]) if success_match else 0
     if crashes == 0 and clean_runs == 0:
         return False
+    if crashes:
+        try:
+            original = (crash_dir / "sanitizer.txt").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            return False
+        if (
+            triage.autodiscard_reason(measured)
+            or not triage._has_memory_safety_signal(measured)
+            or not _same_sanitizer_fault(original, measured)
+        ):
+            return False
     note = f"reproduced in {rate} reverification runs" if crashes else "original one-shot trace did not reproduce in 5 reverification runs"
     with (crash_dir / "sanitizer.txt").open("a", encoding="utf-8") as output:
         output.write(f"\nCRASH_RATE: {rate}\n[run-sanitizer-multi] REVERIFY: {rate} - {note}\n")
     return True
 
 
+def _same_sanitizer_fault(original: str, measured: str) -> bool:
+    """Reject a replay that merely crashes in a different sanitizer class."""
+    pattern = re.compile(
+        r"(?:ERROR|SUMMARY):\s+(?:AddressSanitizer|HWAddressSanitizer):\s+"
+        r"([A-Za-z0-9_-]+)"
+    )
+    original_kinds = pattern.findall(original)
+    measured_kinds = pattern.findall(measured)
+    return not original_kinds or not measured_kinds or original_kinds[-1] == measured_kinds[-1]
+
+
+def _measured_crash_rate(path: Path) -> tuple[int, int] | None:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    rates = re.findall(r"^CRASH_RATE:\s*(\d+)\s*/\s*(\d+)\s*$", text, re.MULTILINE)
+    if not rates:
+        return None
+    crashes, runs = rates[-1]
+    return int(crashes), int(runs)
+
+
 def reverify_pool_crash_rates(pool: Path, target_root: Path, target_slug: str, reason: str) -> int:
-    reverified = 0
+    candidates: list[Path] = []
     for crash_dir in sorted((pool / "crashes").glob("CRASH-*")):
         sanitizer_file = crash_dir / "sanitizer.txt"
         if not sanitizer_file.is_file():
@@ -723,7 +812,23 @@ def reverify_pool_crash_rates(pool: Path, target_root: Path, target_slug: str, r
         text = sanitizer_file.read_text(encoding="utf-8", errors="replace")
         if re.search(r"^CRASH_RATE:\s*[0-9]+/[0-9]+", text, re.MULTILINE):
             continue
-        if reverify_one_crash(crash_dir, target_root, target_slug):
+        candidates.append(crash_dir)
+    results: dict[Path, bool] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, len(candidates) or 1)) as executor:
+        futures = {
+            crash_dir: executor.submit(
+                reverify_one_crash, crash_dir, target_root, target_slug,
+            )
+            for crash_dir in candidates
+        }
+        for crash_dir in candidates:
+            try:
+                results[crash_dir] = futures[crash_dir].result()
+            except (OSError, subprocess.SubprocessError):
+                results[crash_dir] = False
+    reverified = 0
+    for crash_dir in candidates:
+        if results.get(crash_dir):
             reverified += 1
         else:
             log(f"WARN: reverify could not measure {crash_dir.name} - leaving rate unset ({reason})")
@@ -777,6 +882,7 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
             reverify_pool_crash_rates(pool, target, target_slug, reason)
         with (bench_dir / "severity.log").open("w", encoding="utf-8") as output:
             _run_tool("severity", "--batch", str(pool), env=environment, stdout=output)
+        bundle_candidates: list[Path] = []
         for crash in sorted((pool / "crashes").glob("CRASH-*")):
             reports = list(crash.glob("[Rr][Ee][Pp][Oo][Rr][Tt].md"))
             canonical = any(
@@ -785,9 +891,24 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
                 for report in reports
             )
             if not canonical:
-                export_env = environment | {"RESULTS_DIR": str(pool), "TARGET_ROOT": str(target)}
-                if _run_tool("export-repro", crash.name, "--crash-dir", str(crash), "--slug", target_slug, env=export_env) == 0:
-                    bundled += 1
+                bundle_candidates.append(crash)
+        export_env = environment | {"RESULTS_DIR": str(pool), "TARGET_ROOT": str(target)}
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(2, len(bundle_candidates) or 1)
+        ) as executor:
+            futures = {
+                crash: executor.submit(
+                    _run_tool, "export-repro", crash.name,
+                    "--crash-dir", str(crash), "--slug", target_slug,
+                    env=export_env,
+                )
+                for crash in bundle_candidates
+            }
+            for crash in bundle_candidates:
+                try:
+                    bundled += futures[crash].result() == 0
+                except (OSError, subprocess.SubprocessError):
+                    log(f"WARN: reproducer bundle failed for {crash.name} ({reason})")
     if bundled:
         log(f"reproducer bundles created: {bundled} ({reason})")
     for kind, tool, output_name in (

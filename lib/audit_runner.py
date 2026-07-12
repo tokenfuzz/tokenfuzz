@@ -1065,11 +1065,12 @@ def run_agent(
             )
         except OSError:
             pass
+    usage_complete = llm_usage.usage_is_complete(usage, rc)
     event = {
         "timestamp": datetime.now(timezone.utc).isoformat(), "iteration": iteration,
         "agent": agent, "role": role, "backend": runtime.backend, "model": runtime.model,
         "resolved_effort": llm_invoke.default_effort(runtime.backend),
-        "usage_complete": rc == 0,
+        "usage_complete": usage_complete,
         "returncode": rc, "provider_issue": issue, "prompt_chars": len(rendered),
         "raw_log": str(raw_path), "text_log": str(text_path), **usage,
     }
@@ -1084,10 +1085,11 @@ def run_agent(
         if rc == 124 and issue == "none"
         else f"finished rc={rc}"
     )
+    token_display = str(total_tokens) if usage_complete else "unknown"
     index_log(
         runtime,
         f"Agent {agent} {launch} {outcome} provider={issue} "
-        f"tokens={total_tokens} log={text_path.name}",
+        f"tokens={token_display} log={text_path.name}",
     )
     return AgentResult(agent, role, rc, raw_path, text_path, usage, issue, reset_at)
 

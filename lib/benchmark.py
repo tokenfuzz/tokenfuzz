@@ -478,6 +478,18 @@ def dir_has_sanitizer_output(d: Path) -> bool:
     """True iff any regular file under *d* carries a sanitizer signature."""
     if not d.is_dir():
         return False
+    primary = d / "sanitizer.txt"
+    if primary.is_file():
+        try:
+            rates = re.findall(
+                r"^CRASH_RATE:\s*(\d+)\s*/\s*(\d+)\s*$",
+                primary.read_text(encoding="utf-8", errors="replace"),
+                re.MULTILINE,
+            )
+        except OSError:
+            rates = []
+        if rates and int(rates[-1][0]) == 0:
+            return False
     for path in d.rglob("*"):
         if path.is_file() and _file_has_sanitizer_output(path):
             return True

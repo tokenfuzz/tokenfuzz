@@ -100,6 +100,23 @@ _TERMINAL_TYPES = ("result", "turn.completed", "step_finish", "step-finish")
 _CHARS_PER_TOKEN = 4
 
 
+def usage_is_complete(usage: dict, returncode: int) -> bool:
+    """Return whether a finished invocation supplied usable usage data.
+
+    A zero exit is not enough: Codex and Claude can exit without their
+    terminal usage event. Estimated backends remain complete when extraction
+    produced an estimate; an all-zero native row is explicitly unknown.
+    """
+    if returncode != 0 or not isinstance(usage, dict):
+        return False
+    tokens = usage.get("tokens") or {}
+    has_tokens = any(
+        int(tokens.get(key) or 0)
+        for key in ("input", "cached_input", "cache_creation", "output")
+    )
+    return bool(has_tokens or usage.get("estimated") is True)
+
+
 def _first_int(d: dict, keys: tuple[str, ...]) -> int:
     for k in keys:
         v = d.get(k)
@@ -447,6 +464,7 @@ def append_usage_event(
         raw_text, prompt_text=prompt_text, backend=backend,
         estimate_missing=True,
     )
+    usage_complete = bool(usage_complete and usage_is_complete(usage, 0))
     if not index_path:
         return usage
     event = {

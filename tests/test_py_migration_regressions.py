@@ -1118,6 +1118,20 @@ with tempfile.TemporaryDirectory(
         ),
         "batched reach fields are applied only to their keyed reports",
     )
+    missing_batch_root = root / "missing-batch-reach"
+    missing_batch_dir = missing_batch_root / "findings" / "FIND-003"
+    missing_batch_dir.mkdir(parents=True)
+    (missing_batch_dir / "report.md").write_text(
+        "# FIND-003\n\nA public input reaches stale state.\n", encoding="utf-8",
+    )
+    with mock.patch.object(
+        triage.llm_decide, "llm_decide", return_value={"items": []},
+    ) as missing_batch_call:
+        check(
+            triage.fill_reach_fields_tree(missing_batch_root) == 0
+            and missing_batch_call.call_count == 1,
+            "a missing keyed reachability result stays pending without individual fan-out",
+        )
 
     batch_quality_root = root / "batch-quality"
     batch_quality_dirs = []
@@ -1138,6 +1152,8 @@ with tempfile.TemporaryDirectory(
         triage.llm_decide, "llm_decide", return_value=quality_result,
     ) as batch_quality_calls, mock.patch.object(
         triage, "_finalize_accepted_finding", return_value="accepted",
+    ), mock.patch.object(
+        triage, "_batch_reach_field_decisions", return_value=(set(), {}),
     ):
         batch_quality_counts = triage.validate_find_gate(batch_quality_root)
     check(

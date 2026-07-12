@@ -307,9 +307,12 @@ def _reach_field_present(text: str, label: str) -> bool:
     )
 
 
+_NO_REACH_DECISION = object()
+
+
 def fill_reach_fields(
     directory: Path, usage_index: str | os.PathLike[str] | None = None,
-    *, decision_override: dict | None = None,
+    *, decision_override: object = _NO_REACH_DECISION,
 ) -> bool:
     """Fill missing scorer fields from report evidence without overriding authors.
 
@@ -343,7 +346,7 @@ def fill_reach_fields(
     if attempts >= max_attempts:
         return False
     decision = decision_override
-    if decision is None:
+    if decision is _NO_REACH_DECISION:
         prompt = render_template("triage_reachability_fields.md.j2", {"narrative": text})
         try:
             timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
@@ -377,6 +380,57 @@ def fill_reach_fields(
     return True
 
 
+def _batch_reach_field_decisions(
+    directories: list[Path],
+    usage_index: str | os.PathLike[str] | None,
+    deadline: float | None = None,
+) -> tuple[set[Path], dict[Path, dict]]:
+    """Batch missing reachability fields without per-item fallback fan-out."""
+    items: list[dict] = []
+    attempted: set[Path] = set()
+    for directory in directories:
+        report = _report(directory)
+        if report is None:
+            continue
+        try:
+            narrative = report.read_text(encoding="utf-8", errors="replace")[:6000]
+        except OSError:
+            continue
+        if all(
+            _reach_field_present(narrative, label)
+            for label in _REACH_FIELD_LABELS.values()
+        ):
+            continue
+        cache = _finding_cache(directory / ".llm_fields.json")
+        try:
+            attempts = int(cache.get("_fill_attempts", 0))
+            max_attempts = _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
+        except (TypeError, ValueError):
+            attempts, max_attempts = 0, 2
+        if attempts >= max_attempts:
+            continue
+        attempted.add(directory)
+        items.append({"id": directory.name, "report": narrative})
+    if not items:
+        return attempted, {}
+    try:
+        timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
+    except ValueError:
+        timeout = 45
+    instructions = render_template(
+        "triage_reachability_fields.md.j2", {"narrative": ""},
+    ).split("\nReport:", 1)[0]
+    by_id = _batch_decisions(
+        "reachability_fields_batch", "triage_reachability_fields_batch.md.j2",
+        instructions, items, timeout, usage_index, deadline,
+    )
+    return attempted, {
+        directory: decision
+        for directory in attempted
+        if isinstance((decision := by_id.get(directory.name)), dict)
+    }
+
+
 def fill_reach_fields_tree(root: Path) -> int:
     """Apply reach-field convergence to every pooled crash and finding."""
     if os.environ.get("LLM_FIELD_FILL_DISABLE", "0") == "1":
@@ -388,44 +442,13 @@ def fill_reach_fields_tree(root: Path) -> int:
         for directory in sorted((Path(root) / kind).glob(prefix)):
             if directory.is_dir():
                 directories.append(directory)
-    items = []
+    attempted, batched = _batch_reach_field_decisions(directories, usage_index)
     for directory in directories:
-        report = _report(directory)
-        if report is None:
+        if directory not in attempted:
             continue
-        try:
-            narrative = report.read_text(encoding="utf-8", errors="replace")[:6000]
-        except OSError:
-            continue
-        if any(
-            not _reach_field_present(narrative, label)
-            for label in _REACH_FIELD_LABELS.values()
-        ):
-            cache = _finding_cache(directory / ".llm_fields.json")
-            try:
-                attempts = int(cache.get("_fill_attempts", 0))
-                max_attempts = _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
-            except (TypeError, ValueError):
-                attempts, max_attempts = 0, 2
-            if attempts >= max_attempts:
-                continue
-            items.append({"id": directory.name, "report": narrative})
-    try:
-        timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
-    except ValueError:
-        timeout = 45
-    instructions = render_template(
-        "triage_reachability_fields.md.j2", {"narrative": ""},
-    ).split("\nReport:", 1)[0]
-    batched = _batch_decisions(
-        "reachability_fields_batch", "triage_reachability_fields_batch.md.j2",
-        instructions, items, timeout, usage_index,
-    ) if items else {}
-    for directory in directories:
-        decision = batched.get(directory.name)
         if fill_reach_fields(
             directory, usage_index,
-            decision_override=decision if isinstance(decision, dict) else None,
+            decision_override=batched.get(directory),
         ):
             filled += 1
     return filled
@@ -1106,6 +1129,8 @@ def triage_one_crash(
     findings_only: bool = False,
     deadline: float | None = None,
     target_root_is_product: bool = False,
+    reach_fields_override: object = _NO_REACH_DECISION,
+    confirmed_trigger_bypass: bool = False,
 ) -> str:
     if _deadline_expired(deadline):
         return "pending"
@@ -1184,7 +1209,9 @@ def triage_one_crash(
             crash_dir, rejected_root, None, "bundle", ["REPORT.md"]
         )
     if not _deadline_expired(deadline):
-        fill_reach_fields(crash_dir, usage_index)
+        fill_reach_fields(
+            crash_dir, usage_index, decision_override=reach_fields_override,
+        )
         report = _report(crash_dir) or report
     verdict, detail = evaluate_crash_verdict(_read(report), attacker_controls)
     if verdict == "incomplete":
@@ -1197,7 +1224,7 @@ def triage_one_crash(
         _set_contract_concern(report, detail)
     else:
         _clear_contract_concern(report)
-    if _crash_trigger_gate(
+    if not confirmed_trigger_bypass and _crash_trigger_gate(
         crash_dir, report, Path(target_root), deadline, usage_index,
         target_root_is_product, attacker_controls,
     ):
@@ -1221,21 +1248,40 @@ def triage_crash_dirs(
     findings_only: bool = False,
     deadline: float | None = None,
     target_root_is_product: bool = False,
+    confirmed_trigger_bypasses: set[Path] | None = None,
 ) -> dict[str, int]:
     results = Path(results_dir)
     crashes = results / "crashes"
     crashes.mkdir(parents=True, exist_ok=True)
     controls = attacker_controls or ["bytes"]
+    bypasses = confirmed_trigger_bypasses or set()
     directories = [path for path in sorted(crashes.glob("CRASH-*")) if path.is_dir()]
     counts = {"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0}
     if not directories:
         return counts
+    reach_directories = []
+    for directory in directories:
+        sanitizer = _sanitizer_file(directory)
+        sanitizer_text = _read(sanitizer) if sanitizer else ""
+        if (
+            _report(directory) is not None
+            and _has_memory_safety_signal(sanitizer_text)
+            and not autodiscard_reason(sanitizer_text)
+        ):
+            reach_directories.append(directory)
+    usage_index = benchmark._find_index_jsonl(results)
+    reach_attempted, reach_decisions = _batch_reach_field_decisions(
+        reach_directories, usage_index, deadline,
+    )
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         statuses = pool.map(
             lambda directory: triage_one_crash(
                 directory, results, Path(target_root), target_slug, controls,
                 findings_only, deadline,
                 target_root_is_product,
+                reach_decisions.get(directory)
+                if directory in reach_attempted else _NO_REACH_DECISION,
+                directory in bypasses,
             ),
             directories,
         )
@@ -1352,9 +1398,12 @@ def _finalize_accepted_finding(
     deadline: float | None,
     usage_index: str | os.PathLike[str] | None = None,
     target_root_is_product: bool = False,
+    reach_fields_override: object = _NO_REACH_DECISION,
 ) -> str:
     if not _deadline_expired(deadline):
-        fill_reach_fields(finding_dir, usage_index)
+        fill_reach_fields(
+            finding_dir, usage_index, decision_override=reach_fields_override,
+        )
         report = _report(finding_dir) or report
     if _finding_trigger_rejected(
         finding_dir, report, deadline, usage_index,
@@ -1516,6 +1565,9 @@ def validate_find_gate(
         accepted_quality, results, deadline, benchmark._find_index_jsonl(results),
         target_root_is_product,
     )
+    reach_attempted, reach_decisions = _batch_reach_field_decisions(
+        accepted_quality, benchmark._find_index_jsonl(results), deadline,
+    )
     for directory, status in zip(directories, statuses):
         if status == "quality-accepted":
             report = _report(directory)
@@ -1530,6 +1582,8 @@ def validate_find_gate(
                         directory, results, report, deadline,
                         benchmark._find_index_jsonl(results),
                         target_root_is_product,
+                        reach_decisions.get(directory)
+                        if directory in reach_attempted else _NO_REACH_DECISION,
                     )
                     if report is not None and not _deadline_expired(deadline)
                     else "pending"

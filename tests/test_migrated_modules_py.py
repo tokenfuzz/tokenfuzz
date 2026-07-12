@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -25,6 +26,7 @@ import crash_bundle
 import edges
 import llm_decide
 import llm_invoke
+import llm_usage
 import prompt
 import sanitizer
 import sanitizer_run
@@ -95,6 +97,12 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     equal(
         "unknown", __import__("benchmark").harvest_tokens(incomplete_decision)["token_source"],
         "partial decision telemetry keeps the cell total explicitly unknown",
+    )
+    check(
+        not llm_usage.usage_is_complete(
+            {"estimated": False, "tokens": {"input": 0, "output": 0}}, 0,
+        ),
+        "a successful native session without terminal telemetry is incomplete",
     )
 
     state = root / "results" / "state"
@@ -485,7 +493,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     (unreplayable / "input.bin").write_bytes(b"input")
     with mock.patch.object(
         benchmark_runner.triage, "triage_crash_dirs",
-        return_value={"promoted": 1, "rejected": 0, "demoted": 0, "pending": 0},
+        return_value={"promoted": 0, "rejected": 0, "demoted": 0, "pending": 0},
     ), mock.patch.object(benchmark_runner, "_resolve_reverify_fields", return_value=None):
         replay_counts = benchmark_runner.triage_cell_crashes(
             unreplayable_results, direct_target, "direct-target", workers=1,
@@ -496,6 +504,67 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         and replay_counts["demoted"] == 1
         and (unreplayable_results / "findings" / "FIND-1" / "sanitizer.txt").is_file(),
         "unreplayable model-direct sanitizer evidence is preserved as a finding",
+    )
+    failed_replay_results = root / "failed-replay-results"
+    failed_replay = failed_replay_results / "crashes" / "CRASH-1"
+    shutil.copytree(unreplayable_results / "findings" / "FIND-1", failed_replay)
+    with mock.patch.object(
+        benchmark_runner.triage, "triage_crash_dirs",
+        return_value={"promoted": 0, "rejected": 0, "demoted": 0, "pending": 0},
+    ), mock.patch.object(
+        benchmark_runner, "_resolve_reverify_fields", return_value=({"MODE": "generic", "BIN": "fixture"}, []),
+    ), mock.patch.object(benchmark_runner, "reverify_one_crash", return_value=False):
+        failed_replay_counts = benchmark_runner.triage_cell_crashes(
+            failed_replay_results, direct_target, "direct-target", workers=1,
+            require_replay=True,
+        )
+    check(
+        failed_replay_counts["promoted"] == 0
+        and failed_replay_counts["demoted"] == 1
+        and (failed_replay_results / "findings" / "FIND-1").is_dir(),
+        "an executable model-direct crash that cannot be measured remains a finding",
+    )
+    standard_replay = root / "standard-replay" / "CRASH-1"
+    shutil.copytree(failed_replay_results / "findings" / "FIND-1", standard_replay)
+
+    def _record_standard_replay(crash_dir, _target, _slug):
+        with (crash_dir / "sanitizer.txt").open("a", encoding="utf-8") as stream:
+            stream.write("CRASH_RATE: 5/5\n")
+        return True
+
+    with mock.patch.object(
+        benchmark_runner.triage, "_direct_probe_trigger_bypass", return_value=False,
+    ), mock.patch.object(
+        benchmark_runner, "_resolve_reverify_fields",
+        return_value=({"MODE": "cli", "BIN": str(direct_binary)}, []),
+    ), mock.patch.object(
+        benchmark_runner, "reverify_one_crash", side_effect=_record_standard_replay,
+    ), mock.patch.object(
+        benchmark_runner.triage, "_fault_frame_is_in_target", return_value=True,
+    ):
+        equal(
+            "bypass",
+            benchmark_runner._verify_model_direct_crash(
+                standard_replay, direct_target, "direct-target", ["bytes"],
+            ),
+            "a configured-target 5/5 replay bypasses redundant trigger review",
+        )
+    zero_rate = root / "zero-rate-crashes" / "CRASH-1"
+    zero_rate.mkdir(parents=True)
+    (zero_rate / "sanitizer.txt").write_text(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\nCRASH_RATE: 0/5\n",
+        encoding="utf-8",
+    )
+    equal(
+        (0, []), __import__("benchmark").count_confirmed_crashes(zero_rate.parent),
+        "a measured zero-rate diagnostic cannot inflate benchmark crash counts",
+    )
+    check(
+        not benchmark_runner._same_sanitizer_fault(
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow child.c:9",
+            "SUMMARY: AddressSanitizer: ABRT child.c:8",
+        ),
+        "reverify cannot substitute an assertion abort for the reported memory fault",
     )
     mismatched = published_results / "crashes" / "CRASH-2"
     shutil.copytree(published_crash, mismatched)
@@ -1343,6 +1412,25 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
             f"{usage_backend} one-shot decisions append labeled estimated usage",
             repr(usage_row),
         )
+    timeout_index = root / "usage-index-timeout.jsonl"
+    timeout_error = subprocess.TimeoutExpired(
+        ["claude"], 45, output=b'{"type":"assistant"}', stderr=b"partial",
+    )
+    with mock.patch.dict(os.environ, {
+        "ACTIVE_BACKEND": "claude", "MODEL": "fixture-model",
+    }, clear=False), mock.patch.object(
+        llm_decide, "_invoke_backend", side_effect=timeout_error,
+    ):
+        timeout_result, timeout_backend_error = llm_decide._run_decision(
+            "find_quality", "accept,reason,class,severity", "review", 45, "",
+            timeout_index,
+        )
+    timeout_row = json.loads(timeout_index.read_text(encoding="utf-8"))
+    check(
+        timeout_result is None and timeout_backend_error is False
+        and timeout_row["usage_complete"] is False,
+        "timed-out decisions retain partial usage without crashing finalization",
+    )
 
     check(
         benchmark_runner.parser().parse_args([]).finalize_wall == 3600,

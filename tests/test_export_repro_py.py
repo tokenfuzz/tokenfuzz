@@ -617,6 +617,27 @@ assert_eq("ubsan-out-of-bounds",
 assert_eq("unclassified", er.infer_primitive_label(""),
           "infer_primitive_label: empty asan_top → unclassified")
 
+if shutil.which("c++filt"):
+    with tempfile.TemporaryDirectory(prefix="rust-symbols-") as rust_tmp:
+        rust_sanitizer = Path(rust_tmp) / "sanitizer.txt"
+        rust_sanitizer.write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "    #0 0x1 in _RNvNtCs2cypztuAOBY_11sample_rust9reportkit10sum_window reportkit.rs:37\n"
+            "    #1 0x2 in _RNvCs2cypztuAOBY_11sample_rust3run main.rs:63\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow reportkit.rs:37 in "
+            "_RNvNtCs2cypztuAOBY_11sample_rust9reportkit10sum_window\n",
+            encoding="utf-8",
+        )
+        rust_frames = er.extract_dedup_frames(rust_sanitizer)
+        assert_in("sample_rust::reportkit::sum_window reportkit.rs:37", rust_frames,
+                  "Rust-v0 dedup frames are maintainer-readable")
+        assert_not_in("_RNv", rust_frames, "Rust-v0 dedup frames contain no mangled symbols")
+        assert_in(
+            "in sample_rust::reportkit::sum_window",
+            er.build_report_title("CRASH-1", "heap-buffer-overflow", rust_frames, "bytes"),
+            "Rust-v0 report title uses the demangled top frame",
+        )
+
 ubsan_diag = TMP / "ubsan.txt"
 ubsan_diag.write_text("""\
 parser.c:77:5: runtime error: index 4 out of bounds for type 'int[4]'

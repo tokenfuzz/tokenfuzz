@@ -150,6 +150,12 @@ class is included in `attacker_controls`. Missing or stale evidence falls back
 to the normal two-vote trigger review. Severity, clustering, bundling, and all
 finding validation remain unchanged.
 
+Model-direct crash evidence is additionally replayed through the configured
+target invocation before it enters cell metrics. A stable 5/5 standard replay
+receives the same trigger-review bypass; a clean or unexecutable replay is
+preserved as a finding, and a measured 0/5 diagnostic is never counted as a
+confirmed crash.
+
 Source validators put their invariant instructions and target context before
 candidate-specific facts. Repeated calls can therefore reuse the provider's
 prompt-prefix cache without shortening the source-reading budget or changing

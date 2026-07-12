@@ -40,6 +40,7 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 import crash_artifacts  # noqa: E402  (runtime sys.path adjustment)
 import sanitizer as sanitizer_policy  # noqa: E402
 import stack_frames  # noqa: E402  (runtime sys.path adjustment)
+import symbol_names  # noqa: E402  (runtime sys.path adjustment)
 import target_config  # noqa: E402  (runtime sys.path adjustment)
 
 
@@ -567,18 +568,8 @@ def find_testcase(scan_dirs: list[Path], crash_dir: Path, audit_subdir: Path) ->
 
 
 def demangle(text: str) -> str:
-    """Pipe `text` through c++filt if available; else return unchanged."""
-    if shutil.which("c++filt") is None:
-        return text
-    try:
-        out = subprocess.run(
-            ["c++filt"], input=text, capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return text
-    if out.returncode != 0:
-        return text
-    return out.stdout
+    """Compatibility alias for the shared report/cluster demangler."""
+    return symbol_names.demangle_text(text)
 
 
 # ─── reproduce.sh templates ─────────────────────────────────────────
@@ -2165,7 +2156,7 @@ def extract_asan_summary(asan_file: Path) -> str:
 def extract_dedup_frames(asan_file: Path) -> str:
     if not asan_file.is_file():
         return ""
-    text = asan_file.read_text(encoding="utf-8", errors="replace")
+    text = demangle(asan_file.read_text(encoding="utf-8", errors="replace"))
     frames = stack_frames.interesting_frames(text, want=3)
     return " -> ".join(frame.display for frame in frames)
 

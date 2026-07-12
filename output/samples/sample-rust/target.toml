@@ -21,7 +21,7 @@ attacker_controls = ["bytes"]
 enabled = []
 
 [runner]
-bin            = "{TARGET_ROOT}/target/release/sample-rust"
+bin            = "target/release/sample-rust"
 args           = ["{TESTCASE}"]
 crash_patterns = [
   "thread '.*' panicked at",

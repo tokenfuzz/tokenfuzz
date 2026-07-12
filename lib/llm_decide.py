@@ -1075,7 +1075,7 @@ def _run_decision(
             # the per-prompt breaker still catches a repeated identical call.
             _llm_log(f"{decision} FAIL {exc} bytes={prompt_bytes}")
             return None, False
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             # Timeout = "needed more time", not "backend is failing". Addressed
             # by the decision-timeout floors, so it must NOT arm the per-type
             # breaker or it would sideline a gate that is merely slow.
@@ -1084,7 +1084,10 @@ def _run_decision(
                 f"{decision} FAIL {backend}-rc=124 bytes={prompt_bytes} "
                 f"elapsed={elapsed}s timeout={timeout}s"
             )
-            record_usage(exc.output or "", complete=False)
+            record_usage(
+                "\n".join(raw_string(part) for part in (exc.output, exc.stderr)),
+                complete=False,
+            )
             return None, False
         except subprocess.CalledProcessError as exc:
             # The backend RAN and exited non-zero — rate-limit / overload /

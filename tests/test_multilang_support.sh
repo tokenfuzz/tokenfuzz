@@ -175,6 +175,24 @@ EOF
 # writers of the same exec path would race.
 cp "$(pt_scratch ts)/tc.ts" "$(pt_scratch ts)/tc-dry.ts"
 
+# A runner binary containing a slash is target-relative. Keep the committed
+# Rust sample on that normal resolution path instead of putting argument-only
+# placeholders in [runner].bin.
+mkdir -p "$TARGET_ROOT/target/release"
+cat > "$TARGET_ROOT/target/release/sample-rust" <<'SH'
+#!/usr/bin/env bash
+echo "RUST_RUNNER_ARG=$1"
+echo "TESTCASE_EXECUTED"
+SH
+chmod +x "$TARGET_ROOT/target/release/sample-rust"
+mk_probe_tree rustrel < "$SCRIPT_ROOT/output/samples/sample-rust/target.toml"
+cat > "$(pt_scratch rustrel)/tc.txt" <<'EOF'
+TARGET: demo:main:1
+HYPOTHESIS-ID: H_rust_relative_runner
+CATEGORY: state
+payload
+EOF
+
 for san in ubsan msan tsan; do
   san_bin="$TARGET_ROOT/${san}-runner"
   cat > "$san_bin" <<'SH'
@@ -411,6 +429,7 @@ printf '%s\n' "$no_token_body" > "$(pt_scratch embtoken)/no-token.txt"
 launch_probe pydry --dry-run "$RESULTS_DIR/scratch-1/tc.py"
 launch_probe tsdry --dry-run "$(pt_scratch ts)/tc-dry.ts"
 launch_probe tsreal "$(pt_scratch ts)/tc.ts"
+launch_probe rustrel "$(pt_scratch rustrel)/tc.txt"
 for san in ubsan msan tsan; do
   launch_probe "sandry-${san}" --dry-run "$(pt_scratch "sandry-${san}")/${san}-tc.dat"
 done
@@ -449,6 +468,12 @@ wait
 # ── Section 5 assertions ───────────────────────────────────────────
 
 probe_dry_check "probe runner: python3 routing" pydry "mode=generic"
+
+rust_relative_out=$(probe_out rustrel)
+assert_match "TESTCASE_EXECUTED" "$rust_relative_out" \
+  "probe resolves committed Rust runner relative to target root"
+assert_match "RUST_RUNNER_ARG=$(real_path_of "$(pt_scratch rustrel)/tc.txt")" \
+  "$rust_relative_out" "probe passes testcase to target-relative Rust runner"
 
 ts_dry=$(probe_out tsdry)
 assert_match 'original_testcase=.*/tc-dry\.ts' "$ts_dry" \

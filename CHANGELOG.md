@@ -32,7 +32,14 @@
   inflating crash metrics, deterministic severity scoring runs once per pool, and
   pooled revalidation, bundling, clustering, and rendering run only after every
   cell metric is safely persisted. Deadline-truncated workers are labeled as such
-  instead of looking like backend failures.
+  instead of looking like backend failures. Decision timeouts retain partial
+  usage and leave work resumable instead of aborting finalization; successful
+  sessions without terminal telemetry remain unknown rather than zero.
+  Model-direct crashes are replayed through the configured target before they
+  enter metrics, stable standard replays skip redundant trigger review, measured
+  0/5 evidence remains a finding, and Rust report titles and dedup frames use
+  demangled symbols. Reachability decisions stay batched without omission
+  fan-out, while local reverify and bundle work uses bounded concurrency.
 
 - **Grok Build joins the supported backend matrix.** Grok is available for full
   audits, ensembles, recon, focused decisions, validation, containers, cleanup,
