@@ -17,7 +17,8 @@
   incomplete-cell yield without admitting it to aggregates. Completed crash and
   finding evidence remains countable when another artifact is pending; regeneration
   repairs legacy cell status without consuming pending-artifact lifetime or
-  discarding an otherwise successful replicate.
+  discarding an otherwise successful replicate. Rejected crash summaries no longer
+  double-count the same artifact as both a directory and a generated index row.
   Both conditions receive the same crash and finding triage, configured target
   roots are treated as the product boundary, and benchmark-only worker refill
   suppression keeps configured concurrency from silently expanding provider cost.

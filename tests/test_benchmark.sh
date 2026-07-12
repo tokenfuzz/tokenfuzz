@@ -140,6 +140,15 @@ printf '%s\n%s\n\n%s\n%s\n' \
 printf '%s\n  #0 foo bar\n' "$ASAN_LINE" > "$rd/crashes/CRASH-001/sanitizer.txt"
 printf 'just a report, no sanitizer output here\n' > "$rd/crashes/CRASH-002/report.md"
 printf 'rejected reason text\n' > "$rd/crashes-rejected/CRASH-009/REPORT.md"
+cat > "$rd/crashes-rejected/REJECTED-CRASHES.md" <<'EOF_REJECTED_SUMMARY'
+# Rejected crashes
+
+## Rejected crash directories
+
+| ID | Site | Reason | Report |
+| :-- | :--- | :----- | :----- |
+| `CRASH-009` | app_parse app.c:91 | rejected | [Link](CRASH-009/REPORT.md) |
+EOF_REJECTED_SUMMARY
 printf '{"tokens":{"input":1000,"cached_input":800,"output":50},"probe":{"asan_invocations":2}}\n' \
   > "$rd/logs/index.jsonl"
 printf '{"tokens":{"input":500,"cached_input":400,"output":30},"probe":{"asan_invocations":1}}\n' \
@@ -161,6 +170,17 @@ assert_eq "1" "$(echo "$hv" | jq -r '.confirmed_crashes')" \
 assert_eq "CRASH-001" "$(echo "$hv" | jq -r '.crash_dirs[0]')" \
   "T1b: confirmed crash dir is CRASH-001"
 assert_eq "1" "$(echo "$hv" | jq -r '.crashes_rejected')" "T1c: rejected crash counted"
+legacy_rejected="$work/legacy-row-rejected"
+mkdir -p "$legacy_rejected/crashes-rejected"
+cat > "$legacy_rejected/crashes-rejected/REJECTED-CRASHES.md" <<'EOF_LEGACY_REJECTIONS'
+| ID | Crash site | Rejected at |
+| :-- | :--------- | :---------- |
+| CR-a | app_parse.c:10 | t1 |
+| CR-b | app_parse.c:20 | t2 |
+EOF_LEGACY_REJECTIONS
+legacy_hv=$(python3 "$PY" harvest "$legacy_rejected")
+assert_eq "2" "$(echo "$legacy_hv" | jq -r '.crashes_rejected')" \
+  "T1c2: legacy row-only rejections remain countable"
 # DISCARDED hypotheses live in state/hypotheses.jsonl; count_discarded_hypotheses
 # returns 0 when the file is missing (no state seeded above).
 assert_eq "0" "$(echo "$hv" | jq -r '.discarded_hypotheses')" \
@@ -527,14 +547,26 @@ assert_eq "3" "$(echo "$id" | jq -r '.rejected_crash_total')" \
 # Rejected findings are pooled into a browsable list with validator booleans.
 rbd="$work/rejected-bench"
 rrd="$rbd/results"
-mkdir -p "$rbd/cells/model-direct-r1" "$rrd/findings-rejected/FIND-raw"
+mkdir -p "$rbd/cells/model-direct-r1" "$rrd/findings-rejected/FIND-raw" \
+  "$rrd/crashes-rejected/CRASH-old"
 cat > "$rbd/cells/model-direct-r1/cell.json" <<JSON
 {"condition":"model-direct","replicate":1,"status":"done","wall_seconds":1,
  "results_dir":"$rrd"}
 JSON
 cat > "$rbd/cells/model-direct-r1/metrics.json" <<'JSON'
-{"confirmed_crashes":0,"crash_dirs":[],"findings":0,"findings_rejected":1}
+{"confirmed_crashes":0,"crash_dirs":[],"crashes_rejected":1,
+ "findings":0,"findings_rejected":1}
 JSON
+printf '# Rejected crash\n' > "$rrd/crashes-rejected/CRASH-old/REPORT.md"
+cat > "$rrd/crashes-rejected/REJECTED-CRASHES.md" <<'EOF_GENERATED_CRASH_INDEX'
+# Rejected crashes
+
+## Rejected crash directories
+
+| ID | Site | Reason | Report |
+| :-- | :--- | :----- | :----- |
+| `CRASH-old` | app_parse app.c:91 | rejected | [Link](CRASH-old/REPORT.md) |
+EOF_GENERATED_CRASH_INDEX
 cat > "$rrd/findings-rejected/FIND-raw/report.md" <<'EOF_REJ'
 # Dirty source tree mutation
 
@@ -560,6 +592,9 @@ mkdir -p "$rrd/recon/RECON-deadbeefcafef00d"
 echo "# RECON-deadbeefcafef00d — synthetic recon vote" \
   > "$rrd/recon/RECON-deadbeefcafef00d/REPORT.md"
 python3 "$PY" pool "$rbd" >/dev/null
+assert_file_not_exists \
+  "$rbd/pool/crashes-rejected/CELL-REJECTIONS-model-direct-model-direct-r1.md" \
+  "T4f2: generated crash summary is not recopied as a row-only ledger"
 assert_file_exists "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \
   "T4g: rejected finding markdown index written for combined pool"
 assert_file_contains "$rbd/pool/findings-rejected/REJECTED-FINDINGS.md" \

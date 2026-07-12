@@ -627,18 +627,22 @@ def count_subdirs(parent: Path, prefix: str) -> int:
 
 
 def count_rejected_crash_rows(index_md: Path) -> int:
-    """Count rejected-crash rows in a rejected-crashes ledger.
+    """Count row-only rejection records in a rejected-crashes ledger.
 
-    The harness writes one row per crash dir it auto-rejected from the
-    main `crashes/` tree (runtime-diagnostic class, caller-misuse class,
-    etc.); they never get a CRASH-* subdir, so the row count is the
-    only signal of their existence.
+    Legacy ledgers can contain rejection rows with no corresponding directory.
+    A generated summary contains a row for every directory and must not be
+    counted again beside those directories.
     """
     if not index_md.is_file():
         return 0
     try:
         text = index_md.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        return 0
+    if any(
+        line.strip() == "## Rejected crash directories"
+        for line in text.splitlines()
+    ):
         return 0
     count = 0
     for line in text.splitlines():
@@ -663,17 +667,23 @@ def count_crashes_rejected(rejected_dir: Path) -> int:
     Two sources, both legitimate:
       * CRASH-* subdirs — full crash dirs the harness moved out of
         crashes/ after triage decided they were non-security.
-      * REJECTED-CRASHES.md rows — auto-rejected signatures (runtime-
-        diagnostic class, etc.) that never got a CRASH-* dir, only a
-        ledger row.
+      * row-only legacy ledgers — auto-rejected signatures that never got a
+        CRASH-* dir.
     Summing both is what makes the column total honest: a reader who
     sees 7 here can find 7 rejection records (subdir or row) below.
 
     """
-    ledger = rejected_dir / "REJECTED-CRASHES.md"
+    rosters = sorted(rejected_dir.glob("CELL-REJECTIONS-*.md"))
+    if rosters:
+        ledger_rows = sum(count_rejected_crash_rows(path) for path in rosters)
+    else:
+        ledger = rejected_dir / "REJECTED-CRASHES.md"
+        if not ledger.is_file():
+            ledger = rejected_dir / "INDEX.md"
+        ledger_rows = count_rejected_crash_rows(ledger)
     return (
         count_subdirs(rejected_dir, "CRASH-")
-        + count_rejected_crash_rows(ledger)
+        + ledger_rows
     )
 
 
@@ -2840,7 +2850,9 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
             # reviewer can see *why* a cell counted N rejections even when
             # zero rejection dirs exist.
             index_md = rejected_crashes_dir / "REJECTED-CRASHES.md"
-            if index_md.is_file():
+            if not index_md.is_file():
+                index_md = rejected_crashes_dir / "INDEX.md"
+            if count_rejected_crash_rows(index_md):
                 dst = (pool / "crashes-rejected"
                        / f"CELL-REJECTIONS-{cond}-{cell_dir.name}.md")
                 shutil.copy2(index_md, dst)
