@@ -182,6 +182,7 @@ def benchmark_target_config(
 def triage_cell_crashes(
     results: Path, target: Path, target_slug: str, *, workers: int = 4,
     deadline: float | None = None,
+    require_replay: bool = False,
 ) -> dict[str, int]:
     """Apply the audit crash gate to a finished benchmark cell."""
     nested_crashes = results / "session" / "results" / "crashes"
@@ -192,13 +193,39 @@ def triage_cell_crashes(
                 continue
             crash_bundle.restore_probe_context(sources, destination)
     config = benchmark_target_config(results, target, target_slug)
-    return triage.triage_crash_dirs(
+    counts = triage.triage_crash_dirs(
         results, target, target_slug, config.attacker_controls,
         workers=max(1, workers),
         findings_only=config.sanitizers_explicitly_disabled,
         deadline=deadline,
         target_root_is_product=True,
     )
+    # A footer-less model-direct crash is only a comparable crash metric when
+    # the harness can resolve a replay contract. Custom sanitizer evidence is
+    # still valuable, but without its binary/invocation it cannot be reverified
+    # or exported as a working maintainer bundle; preserve it as a finding.
+    replay_candidates = (
+        sorted((results / "crashes").glob("CRASH-*")) if require_replay else []
+    )
+    for crash_dir in replay_candidates:
+        sanitizer = crash_dir / "sanitizer.txt"
+        try:
+            measured = bool(re.search(
+                r"^CRASH_RATE:\s*[0-9]+/[0-9]+", sanitizer.read_text(
+                    encoding="utf-8", errors="replace"
+                ), re.MULTILINE,
+            ))
+        except OSError:
+            continue
+        if measured or _resolve_reverify_fields(crash_dir, target, target_slug) is not None:
+            continue
+        triage.demote_to_finding(
+            crash_dir, results,
+            "sanitizer evidence has no machine-replayable binary and invocation",
+        )
+        counts["promoted"] = max(0, counts.get("promoted", 0) - 1)
+        counts["demoted"] = counts.get("demoted", 0) + 1
+    return counts
 
 
 def target_key(raw: str) -> str:
@@ -532,6 +559,7 @@ def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wal
     except ValueError:
         usage_event = {}
     usage_event["resolved_effort"] = llm_invoke.default_effort(backend)
+    usage_event["usage_complete"] = rc == 0
     (cell_dir / "logs" / "index.jsonl").write_text(
         json.dumps(usage_event, separators=(",", ":")) + "\n", encoding="utf-8"
     )
@@ -610,14 +638,16 @@ def _run_tool(name: str, *args: str, env: dict | None = None, stdout=None) -> in
     return subprocess.run(command, env=env, stdout=stdout or subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode
 
 
-def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> bool:
+def _resolve_reverify_fields(
+    crash_dir: Path, target_root: Path, target_slug: str,
+) -> tuple[dict[str, str], list[str]] | None:
     resolved = subprocess.run(
         [sys.executable, str(SCRIPT_ROOT / "lib" / "benchmark.py"), "resolve-reverify",
          str(crash_dir), str(target_root), target_slug],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
     )
     if resolved.returncode:
-        return False
+        return None
     fields: dict[str, str] = {}
     replay_args: list[str] = []
     for line in resolved.stdout.splitlines():
@@ -630,10 +660,20 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
             fields[key] = value
     mode = fields.get("MODE", "none")
     binary = fields.get("BIN", "")
+    if mode == "none" or not binary:
+        return None
+    return fields, replay_args
+
+
+def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> bool:
+    resolved = _resolve_reverify_fields(crash_dir, target_root, target_slug)
+    if resolved is None:
+        return False
+    fields, replay_args = resolved
+    mode = fields.get("MODE", "none")
+    binary = fields.get("BIN", "")
     testcase = fields.get("TESTCASE", "")
     sanitizer_name = fields.get("SAN", "asan")
-    if mode == "none" or not binary:
-        return False
     temporary = crash_dir / "sanitizer.txt.reverify.tmp"
     temporary.unlink(missing_ok=True)
     environment = os.environ.copy()
@@ -736,11 +776,7 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
         if (pool / "crashes").is_dir():
             reverify_pool_crash_rates(pool, target, target_slug, reason)
         with (bench_dir / "severity.log").open("w", encoding="utf-8") as output:
-            for finding in sorted((pool / "findings").glob("FIND-*")):
-                if finding.is_dir():
-                    _run_tool("severity", "--report", str(finding), env=environment, stdout=output)
-            if (pool / "crashes").is_dir():
-                _run_tool("severity", "--batch", str(pool), env=environment, stdout=output)
+            _run_tool("severity", "--batch", str(pool), env=environment, stdout=output)
         for crash in sorted((pool / "crashes").glob("CRASH-*")):
             reports = list(crash.glob("[Rr][Ee][Pp][Oo][Rr][Tt].md"))
             canonical = any(
@@ -1020,6 +1056,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                                 results, target_root, args.target,
                                 workers=args.agents or 4,
                                 deadline=finalize_deadline,
+                                require_replay=condition == "model-direct",
                             )
                         log(
                             f"Cell {name} crash triage: promoted={crash_counts.get('promoted', 0)} "
@@ -1115,6 +1152,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                                 results, target_root, args.target,
                                 workers=args.agents or 4,
                                 deadline=finalize_deadline,
+                                require_replay=cell.get("condition") == "model-direct",
                             )
                     except Exception as exc:
                         log(f"WARN: crash triage failed for {cell_dir.name}: {exc}")

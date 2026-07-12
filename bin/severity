@@ -16,7 +16,7 @@ Environmental metrics. No network access.
 Usage:
   bin/severity --report path/to/CRASH-XXX/   # rewrite Severity + write
                                              # severity.json
-  bin/severity --batch path/to/results/      # score every crashes/CRASH-*/
+  bin/severity --batch path/to/results/      # score every accepted crash/finding
   bin/severity --report path/to/CRASH-XXX/ --harness-rooted-check
                                              # read-only: is the crash rooted
                                              # entirely in the audit harness?
@@ -2341,20 +2341,23 @@ def render_human(severity: dict) -> str:
 
 
 def _run_batch(results_dir: Path) -> int:
-    """Walk <results_dir>/crashes/CRASH-*/ and run --report on each.
+    """Score every crash and finding report in one interpreter process.
 
-    Per-crash failures don't stop the loop — they're logged and the run
+    Per-report failures don't stop the loop — they're logged and the run
     continues. A single summary table prints at the end.
     """
-    crashes_root = results_dir / "crashes"
-    if not crashes_root.is_dir():
-        print(f"severity: no crashes/ subdir under {results_dir}", file=sys.stderr)
-        return 2
-    dirs = sorted(p for p in crashes_root.iterdir()
-                  if p.is_dir() and p.name.startswith("CRASH-")
-                  and _find_report_md_in_dir(p) is not None)
+    dirs: list[Path] = []
+    for kind, prefix in (("findings", "FIND-"), ("crashes", "CRASH-")):
+        root = results_dir / kind
+        if root.is_dir():
+            dirs.extend(
+                p for p in root.iterdir()
+                if p.is_dir() and p.name.startswith(prefix)
+                and _find_report_md_in_dir(p) is not None
+            )
+    dirs.sort()
     if not dirs:
-        print(f"severity: no CRASH-*/report.md under {crashes_root}", file=sys.stderr)
+        print(f"severity: no accepted reports under {results_dir}", file=sys.stderr)
         return 0
     rows: list[tuple[str, str, str, str]] = []
     for cdir in dirs:
@@ -2375,7 +2378,7 @@ def _run_batch(results_dir: Path) -> int:
         except Exception as e:
             rows.append((cdir.name, f"err: {e!r}", "?", "?"))
     # Summary table.
-    print(f"\n=== Severity batch summary ({len(rows)} crash dirs) ===")
+    print(f"\n=== Severity batch summary ({len(rows)} report dirs) ===")
     print(f"{'ID':<24} {'Status':<10} {'Severity':<10}  Primitive")
     print(f"{'-'*24} {'-'*10} {'-'*10}  {'-'*30}")
     for cid, status, level, prim in rows:

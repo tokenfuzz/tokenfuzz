@@ -765,6 +765,31 @@ def parse_cluster_count(clusters_md: Path, fallback: int) -> int:
     return int(m.group(1)) if m else fallback
 
 
+def confirmed_finding_cluster_count(findings_dir: Path, names: list[str]) -> int:
+    """Count roots represented by confirmed findings only."""
+    clusters: set[str] = set()
+    for name in names:
+        directory = findings_dir / name
+        report = next(
+            (path for path in (directory / "report.md", directory / "REPORT.md")
+             if path.is_file()),
+            None,
+        )
+        cluster = ""
+        if report is not None:
+            try:
+                text = report.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            match = re.search(
+                r"^(?:Cluster\s*:\s*|\|\s*Cluster\s*\|\s*)([^|\n]+)",
+                text, re.IGNORECASE | re.MULTILINE,
+            )
+            cluster = match.group(1).strip() if match else ""
+        clusters.add(cluster if cluster and cluster not in {"—", "-"} else name)
+    return len(clusters)
+
+
 # Backends whose `input` token field already includes the cached prefix
 # (cached + fresh). Codex reports a running total; local OpenCode/oss
 # transcripts can follow the same cumulative shape when usage is present;
@@ -798,11 +823,13 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
     m = (model or "").strip().lower()
 
     if b == "claude":
-        # Claude API pricing, standard global routing, 5-minute prompt cache.
+        # Claude API pricing, standard global routing. Cache-write TTL is
+        # carried per event: five-minute writes cost 1.25x, one-hour 2x.
         if any(x in m for x in ("opus-4-8", "opus-4.8", "opus 4.8")):
             return {
                 "input": _money("5"),
                 "cache_write": _money("6.25"),
+                "cache_write_1h": _money("10"),
                 "cache_read": _money("0.50"),
                 "output": _money("25"),
                 "source": "claude-api-opus-4.8",
@@ -814,6 +841,7 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
             return {
                 "input": _money("5"),
                 "cache_write": _money("6.25"),
+                "cache_write_1h": _money("10"),
                 "cache_read": _money("0.50"),
                 "output": _money("25"),
                 "source": "claude-api-opus-4.5+",
@@ -822,6 +850,7 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
             return {
                 "input": _money("15"),
                 "cache_write": _money("18.75"),
+                "cache_write_1h": _money("30"),
                 "cache_read": _money("1.50"),
                 "output": _money("75"),
                 "source": "claude-api-opus-4.1/4",
@@ -830,6 +859,7 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
             return {
                 "input": _money("3"),
                 "cache_write": _money("3.75"),
+                "cache_write_1h": _money("6"),
                 "cache_read": _money("0.30"),
                 "output": _money("15"),
                 "source": "claude-api-sonnet-4.x",
@@ -838,6 +868,7 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
             return {
                 "input": _money("1"),
                 "cache_write": _money("1.25"),
+                "cache_write_1h": _money("2"),
                 "cache_read": _money("0.10"),
                 "output": _money("5"),
                 "source": "claude-api-haiku-4.5",
@@ -918,6 +949,7 @@ def _cost_decimal(
     cached_input_tokens: int,
     output_tokens: int,
     cache_creation_tokens: int = 0,
+    cache_creation_1h_tokens: int = 0,
     prompt_tokens_for_tier: int | None = None,
 ) -> tuple[Decimal | None, str]:
     rates = _pricing_rates(backend, model)
@@ -928,6 +960,9 @@ def _cost_decimal(
     cached = Decimal(max(0, int(cached_input_tokens)))
     out = Decimal(max(0, int(output_tokens)))
     cache_create = Decimal(max(0, int(cache_creation_tokens)))
+    cache_create_1h = min(
+        cache_create, Decimal(max(0, int(cache_creation_1h_tokens)))
+    )
 
     if rates.get("tiered"):
         prompt = int(prompt_tokens_for_tier or input_tokens or 0)
@@ -942,6 +977,7 @@ def _cost_decimal(
     cache_rate = rates.get("cache_read", Decimal("0"))
     output_rate = rates["output"]
     write_rate = rates.get("cache_write", input_rate)
+    write_1h_rate = rates.get("cache_write_1h", write_rate)
 
     # `input_tokens` is the normalized full-rate bucket. For Claude it
     # includes cache writes for comparability; pricing needs the split
@@ -949,7 +985,8 @@ def _cost_decimal(
     fresh_input = max(Decimal("0"), inp - cache_create)
     cost = (
         fresh_input * input_rate
-        + cache_create * write_rate
+        + (cache_create - cache_create_1h) * write_rate
+        + cache_create_1h * write_1h_rate
         + cached * cache_rate
         + out * output_rate
     ) / _MILLION
@@ -985,7 +1022,7 @@ def harvest_tokens(
 
       * input_tokens — tokens the model processed this turn at the
         full input rate (≥100%). On Claude this is `input + cache_creation`
-        (cache writes are billed at 125% of base input and represent
+        (cache writes are billed at 125% or 200% of base input and represent
         genuinely new content the model just read). On codex/oss/gemini/grok
         the SDK's `input` is cumulative — cache_read is subtracted so the
         remainder is the new content this turn. End result: one number
@@ -1001,6 +1038,7 @@ def harvest_tokens(
         "input_tokens": 0,
         "cached_input_tokens": 0,
         "cache_creation_tokens": 0,
+        "cache_creation_1h_tokens": 0,
         "output_tokens": 0,
         "asan_invocations": 0,
         # prompt_estimate is the only input-token signal from backends whose
@@ -1041,11 +1079,14 @@ def harvest_tokens(
         # the model-direct extractor; `cache_read` is a harness-only alias.
         cache_read = _int(tok.get("cached_input")) or _int(tok.get("cache_read"))
         cache_creation = _int(tok.get("cache_creation"))
+        cache_creation_1h = min(
+            cache_creation, _int(tok.get("cache_creation_1h"))
+        )
         if backend in _INPUT_INCLUDES_CACHED:
             full_rate_input = max(0, raw_input - cache_read)
         else:
             # Claude's `input` excludes both cache hits AND cache writes;
-            # cache_creation is billed at 125% of base input rate and is
+            # cache_creation is billed at 125%/200% of base input rate and is
             # genuinely fresh content the model just processed, so it
             # belongs in the full-rate bucket alongside `input`.
             full_rate_input = raw_input + cache_creation
@@ -1054,7 +1095,9 @@ def harvest_tokens(
             _int(tok.get("prompt_estimate"))
             or _int(tok.get("prompt_estimate_build"))
         )
-        if row.get("estimated") is True:
+        if row.get("usage_complete") is False:
+            token_sources.add("unknown")
+        elif row.get("estimated") is True:
             token_sources.add("estimated")
         elif any((raw_input, cache_read, cache_creation, output, prompt_estimate)):
             token_sources.add("measured")
@@ -1065,6 +1108,7 @@ def harvest_tokens(
         totals["input_tokens"] += full_rate_input
         totals["cached_input_tokens"] += cache_read
         totals["cache_creation_tokens"] += cache_creation
+        totals["cache_creation_1h_tokens"] += cache_creation_1h
         totals["output_tokens"] += output
         # Tiered long-context pricing (e.g. gpt-5.5 @272K) is a PER-REQUEST
         # boundary, but `raw_input` is the session's input summed across every
@@ -1083,15 +1127,22 @@ def harvest_tokens(
             or prompt_estimate_fallback
             or raw_input
         )
-        event_cost, source = _cost_decimal(
-            backend,
-            model,
-            input_tokens=full_rate_input,
-            cached_input_tokens=cache_read,
-            output_tokens=output,
-            cache_creation_tokens=cache_creation,
-            prompt_tokens_for_tier=tier_basis,
-        )
+        try:
+            event_cost = Decimal(str(row.get("cost_usd")))
+        except Exception:
+            event_cost = None
+        source = str(row.get("cost_source") or "")
+        if event_cost is None or event_cost < 0:
+            event_cost, source = _cost_decimal(
+                backend,
+                model,
+                input_tokens=full_rate_input,
+                cached_input_tokens=cache_read,
+                output_tokens=output,
+                cache_creation_tokens=cache_creation,
+                cache_creation_1h_tokens=cache_creation_1h,
+                prompt_tokens_for_tier=tier_basis,
+            )
         if event_cost is not None:
             totals["cost_usd"] = _decimal_text(
                 Decimal(totals["cost_usd"] or "0") + event_cost
@@ -1582,8 +1633,8 @@ def harvest(
     confirmed_finding_count, confirmed_finding_dirs = count_confirmed_findings(
         findings_dir
     )
-    finding_clusters = parse_cluster_count(
-        findings_dir / "FINDING-CLUSTERS.md", finding_count
+    finding_clusters = confirmed_finding_cluster_count(
+        findings_dir, confirmed_finding_dirs
     )
 
     metrics = {
@@ -3315,7 +3366,7 @@ def render_section(report: dict) -> str:
         lines.append(
             "> - **Input** — tokens processed at the full input rate "
             "(≥100% of base). Claude: fresh `input` + `cache_creation` "
-            "(cache writes at 125%). Codex/Gemini: SDK `input` minus "
+            "(cache writes at 125%, or 200% for Claude's one-hour TTL). Codex/Gemini: SDK `input` minus "
             "cache hits. One number meaning \"non-cache-hit input the "
             "model paid full freight on,\" comparable across backends."
         )

@@ -180,6 +180,18 @@ assert_eq "1200" "$(echo "$hv" | jq -r '.tokens.cached_input_tokens')" "T1k: cac
 assert_eq "2" "$(echo "$hv" | jq -r '.model_refusals')" \
   "T1l: model refusal warning sidecars counted"
 
+clustered="$work/confirmed-clusters/results"
+mkdir -p "$clustered/findings/FIND-A" "$clustered/findings/FIND-B" \
+         "$clustered/findings/FIND-PENDING"
+for id in FIND-A FIND-B; do
+  printf '{"accept":true}\n' > "$clustered/findings/$id/.llm-find-quality.json"
+  printf 'Cluster: FCL-shared\n' > "$clustered/findings/$id/report.md"
+done
+printf 'Cluster: FCL-pending\n' > "$clustered/findings/FIND-PENDING/report.md"
+clustered_v=$(python3 "$PY" harvest "$clustered")
+assert_eq "1" "$(echo "$clustered_v" | jq -r '.finding_clusters')" \
+  "T1l2: raw finding_clusters counts unique confirmed roots only"
+
 # ── T1cf: confirmed-findings floor across every gate state ───────────────
 # The mirror of T1's confirmed-crash floor: a FIND counts as confirmed only
 # when the find-quality gate accepted it or a human pinned it. Un-gated and
@@ -295,6 +307,20 @@ printf '%s\n' \
 chv=$(python3 "$PY" harvest "$crd" --backend claude --model claude-opus-4-8)
 assert_eq "0.083500" "$(echo "$chv" | jq -r '.tokens.cost_usd')" \
   "T1q: harvest prices fresh input + cache writes + cache reads + output"
+
+printf '%s\n' \
+  '{"backend":"claude","model":"claude-opus-4-8","tokens":{"input":1000,"cached_input":2000,"cache_creation":400,"cache_creation_1h":400,"output":3000}}' \
+  > "$crd/logs/index.jsonl"
+chv_1h=$(python3 "$PY" harvest "$crd" --backend claude --model claude-opus-4-8)
+assert_eq "0.085000" "$(echo "$chv_1h" | jq -r '.tokens.cost_usd')" \
+  "T1q0: Claude one-hour cache writes use the reported 2x input rate"
+
+printf '%s\n' \
+  '{"backend":"claude","model":"claude-opus-4-8","cost_usd":0.123456,"cost_source":"backend-reported","tokens":{"input":1000,"cached_input":2000,"cache_creation":400,"cache_creation_1h":400,"output":3000}}' \
+  > "$crd/logs/index.jsonl"
+chv_native=$(python3 "$PY" harvest "$crd" --backend claude --model claude-opus-4-8)
+assert_eq "0.123456" "$(echo "$chv_native" | jq -r '.tokens.cost_usd')" \
+  "T1q0b: backend-reported invocation cost overrides reconstructed pricing"
 
 grd="$work/grok-cost/results"
 mkdir -p "$grd/logs"

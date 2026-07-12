@@ -207,7 +207,7 @@ def _reject(directory: Path, rejected_root: Path, reason: str) -> Path:
     return destination
 
 
-def _demote_to_finding(directory: Path, results_dir: Path, reason: str) -> Path:
+def demote_to_finding(directory: Path, results_dir: Path, reason: str) -> Path:
     """Move a runtime-only CRASH artifact into the findings pipeline."""
     report = _report(directory)
     if report is not None:
@@ -925,6 +925,79 @@ def _finding_trigger_rejected(
     ) == 1
 
 
+_TRIGGER_BATCH_SIZE = 4
+
+
+def _batch_finding_trigger_votes(
+    directories: list[Path], results_dir: Path, deadline: float | None,
+    usage_index: str | os.PathLike[str] | None,
+    target_root_is_product: bool,
+) -> set[Path]:
+    """Populate independent keyed trigger votes with shared CLI startup."""
+    backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
+    target_root = Path(os.environ.get("TARGET_ROOT", ""))
+    if not backend or not target_root.is_dir():
+        return set()
+    if llm_decide.provider_limit_open():
+        return set(directories)
+    pending = []
+    for directory in directories:
+        vote_file = directory / ".trigger-gate.json"
+        if vote_file.is_file() and vote_file.stat().st_size:
+            try:
+                cached = json.loads(vote_file.read_text(encoding="utf-8")).get("vote")
+            except (OSError, ValueError):
+                cached = None
+            if cached in {"Promote", "Reject", "Uncertain"}:
+                continue
+            vote_file.unlink(missing_ok=True)
+        report = _report(directory)
+        if report is not None:
+            pending.append((directory, report, vote_file))
+    raw_dir = (
+        Path(usage_index).parent / ".raw"
+        if usage_index else results_dir / "logs" / ".raw"
+    )
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    attempted: set[Path] = set()
+    for start in range(0, len(pending), _TRIGGER_BATCH_SIZE):
+        timeout = _decision_timeout(300, deadline)
+        if timeout <= 0 or llm_decide.provider_limit_open():
+            break
+        batch = pending[start:start + _TRIGGER_BATCH_SIZE]
+        attempted.update(directory for directory, _report_path, _vote_file in batch)
+        manifest = raw_dir / f"trigger-batch-{os.getpid()}-{time.time_ns()}.json"
+        payload = {
+            "items": [
+                {"id": directory.name, "finding": str(report), "output": str(vote_file)}
+                for directory, report, vote_file in batch
+            ]
+        }
+        _write_atomic_json(manifest, payload)
+        command = [
+            str(SCRIPT_ROOT / "bin" / "validate-finding"),
+            "--batch-manifest", str(manifest), "--target-path", str(target_root),
+            "--backend", backend, "--gate", "trigger", "--timeout", str(timeout),
+        ]
+        model = os.environ.get("MODEL", "")
+        if model:
+            command += ["--model", model]
+        if usage_index:
+            command += ["--usage-index", os.fspath(usage_index)]
+        if target_root_is_product:
+            command.append("--target-root-is-product")
+        try:
+            subprocess.run(
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=timeout + 2, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            manifest.unlink(missing_ok=True)
+    return attempted
+
+
 def _trigger_vote(
     report: Path, vote_file: Path, backend: str, model: str,
     target_root: Path, deadline: float | None = None,
@@ -1077,7 +1150,7 @@ def triage_one_crash(
     if missing:
         return _hold_incomplete(crash_dir, rejected_root, report, "missing", missing)
     if runtime_only:
-        _demote_to_finding(
+        demote_to_finding(
             crash_dir,
             results_dir,
             "runtime diagnostic without a sanitizer-class memory-safety signal",
@@ -1089,7 +1162,7 @@ def triage_one_crash(
             if _ubsan_class(sanitizer_text) == "nonsecurity"
             else "sanitizer diagnostic without a recognized memory-safety class"
         )
-        _demote_to_finding(crash_dir, results_dir, reason)
+        demote_to_finding(crash_dir, results_dir, reason)
         return "demoted"
     environment = os.environ.copy()
     environment.update(
@@ -1306,6 +1379,7 @@ def validate_one_finding(
     deadline: float | None = None,
     target_root_is_product: bool = False,
     initial_votes: list[dict] | None = None,
+    defer_trigger: bool = False,
 ) -> str:
     if (finding_dir / ".keep").is_file() or (finding_dir / ".reviewed").is_file():
         return "accepted"
@@ -1322,6 +1396,8 @@ def validate_one_finding(
     if cache.get("decision_version") == "v13-python":
         if cache.get("accept") is True and int(cache.get("accept_count", 0)) >= accept_quorum:
             (finding_dir / ".pending-drop").unlink(missing_ok=True)
+            if defer_trigger:
+                return "quality-accepted"
             return _finalize_accepted_finding(
                 finding_dir, results_dir, report, deadline, usage_index,
                 target_root_is_product,
@@ -1338,11 +1414,16 @@ def validate_one_finding(
         vote_timeout = _decision_timeout(timeout, deadline)
         if vote_timeout <= 0:
             break
-        vote = (
-            queued_votes[vote_number]
-            if vote_number < len(queued_votes)
-            else _quality_vote(report_text, vote_timeout, usage_index)
-        )
+        if vote_number < len(queued_votes):
+            vote = queued_votes[vote_number]
+        elif initial_votes is not None:
+            # A batch was attempted for this pass. Missing keyed results stay
+            # pending for the next bounded pass; immediately fanning every
+            # omission back out into individual calls recreates the provider
+            # storm batching is meant to prevent.
+            break
+        else:
+            vote = _quality_vote(report_text, vote_timeout, usage_index)
         if not isinstance(vote, dict) or not isinstance(vote.get("accept"), bool):
             break
         if vote["accept"]:
@@ -1359,6 +1440,8 @@ def validate_one_finding(
                 }
                 _write_atomic_json(cache_path, payload)
                 (finding_dir / ".pending-drop").unlink(missing_ok=True)
+                if defer_trigger:
+                    return "quality-accepted"
                 return _finalize_accepted_finding(
                     finding_dir, results_dir, report, deadline, usage_index,
                     target_root_is_product,
@@ -1415,16 +1498,42 @@ def validate_find_gate(
         directories, results, q, aq, timeout, deadline,
     ) if directories and not _deadline_expired(deadline) else {}
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        statuses = pool.map(
+        statuses = list(pool.map(
             lambda directory: validate_one_finding(
                 directory, results, quorum=q, accept_quorum=aq,
                 timeout=timeout, deadline=deadline,
                 target_root_is_product=target_root_is_product,
                 initial_votes=initial_votes.get(directory),
+                defer_trigger=True,
             ),
             directories,
-        )
-    for status in statuses:
+        ))
+    accepted_quality = [
+        directory for directory, status in zip(directories, statuses)
+        if status == "quality-accepted"
+    ]
+    trigger_attempted = _batch_finding_trigger_votes(
+        accepted_quality, results, deadline, benchmark._find_index_jsonl(results),
+        target_root_is_product,
+    )
+    for directory, status in zip(directories, statuses):
+        if status == "quality-accepted":
+            report = _report(directory)
+            if (
+                directory in trigger_attempted
+                and not (directory / ".trigger-gate.json").is_file()
+            ):
+                status = "pending"
+            else:
+                status = (
+                    _finalize_accepted_finding(
+                        directory, results, report, deadline,
+                        benchmark._find_index_jsonl(results),
+                        target_root_is_product,
+                    )
+                    if report is not None and not _deadline_expired(deadline)
+                    else "pending"
+                )
         counts[status] += 1
     return counts
 

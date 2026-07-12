@@ -1,0 +1,22 @@
+# Findings under review (independent opaque facts)
+
+```json
+{{ candidates_json }}
+```
+
+# Vote
+
+Review every item independently using the source-reading method above. Do not
+let evidence for one item establish or disprove another. Missing or ambiguous
+evidence must produce `Uncertain`, never a guessed rejection.
+
+Output ONE JSON object on a single line, nothing else:
+
+```json
+{"items":[{"id":"<exact id>","vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<constructed path or empty>","disproof":"<Reject only: named source invariant and clause (a)-(f)>","surface_applies":"yes|no"}]}
+```
+
+Return exactly one keyed item for every supplied id. The definitions and
+recall-safe rejection standard above apply independently to each item.
+
+Budget: {{ timeout_secs }}s wall time. Be calibrated.

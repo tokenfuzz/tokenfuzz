@@ -1034,6 +1034,19 @@ def _run_decision(
     t_start = time.time()
 
     raw: str = ""
+
+    def raw_string(raw_text: object) -> str:
+        if isinstance(raw_text, bytes):
+            return raw_text.decode("utf-8", errors="replace")
+        return str(raw_text or "")
+
+    def record_usage(raw_text: object, *, complete: bool) -> None:
+        llm_usage.append_usage_event(
+            usage_index, backend=backend,
+            model=os.environ.get("MODEL", "") or _default_model(backend),
+            kind=f"decision:{decision}", prompt_text=prompt,
+            raw_text=raw_string(raw_text), usage_complete=complete,
+        )
     if mock_val:
         loaded = _load_mock(mock_val)
         if loaded is None:
@@ -1071,6 +1084,7 @@ def _run_decision(
                 f"{decision} FAIL {backend}-rc=124 bytes={prompt_bytes} "
                 f"elapsed={elapsed}s timeout={timeout}s"
             )
+            record_usage(exc.output or "", complete=False)
             return None, False
         except subprocess.CalledProcessError as exc:
             # The backend RAN and exited non-zero — rate-limit / overload /
@@ -1081,14 +1095,14 @@ def _run_decision(
                 f"{decision} FAIL {backend}-rc={exc.returncode} bytes={prompt_bytes} "
                 f"elapsed={elapsed}s timeout={timeout}s"
             )
+            record_usage(
+                "\n".join(raw_string(part) for part in (exc.output, exc.stderr)),
+                complete=False,
+            )
             # CLIs differ on whether provider caps land on stdout or stderr.
             record_provider_limit(exc.output, exc.stderr)
             return None, True
-        llm_usage.append_usage_event(
-            usage_index, backend=backend,
-            model=os.environ.get("MODEL", "") or _default_model(backend),
-            kind=f"decision:{decision}", prompt_text=prompt, raw_text=raw,
-        )
+        record_usage(raw, complete=True)
 
     elapsed = int(time.time() - t_start)
 

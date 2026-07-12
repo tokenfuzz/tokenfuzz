@@ -87,6 +87,15 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "mixed", usage_me["token_source"],
         "measured+estimated stays 'mixed', distinct from a missing session",
     )
+    incomplete_decision = root / "incomplete-decision-usage.jsonl"
+    incomplete_decision.write_text(
+        '{"backend":"claude","usage_complete":false,'
+        '"tokens":{"input":10,"output":2}}\n', encoding="utf-8",
+    )
+    equal(
+        "unknown", __import__("benchmark").harvest_tokens(incomplete_decision)["token_source"],
+        "partial decision telemetry keeps the cell total explicitly unknown",
+    )
 
     state = root / "results" / "state"
     state.mkdir(parents=True)
@@ -336,6 +345,29 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     (accepted / "report.md").write_text("# Concrete issue\n\nsrc/a.c:10 bounds issue\n", encoding="utf-8")
     (accepted / ".llm-find-quality.json").write_text(json.dumps({"decision_version": "v13-python", "accept": True, "accept_count": 2}), encoding="utf-8")
     equal("accepted", triage.validate_one_finding(accepted, rejected_results), "finding gate honors accepted cached quorum")
+    batched_pending = findings / "FIND-BATCH-PENDING"
+    batched_pending.mkdir()
+    (batched_pending / "report.md").write_text("# Concrete issue\n\nsrc/c.c:30 state issue\n", encoding="utf-8")
+    with mock.patch.object(triage, "_quality_vote", side_effect=AssertionError("individual fan-out")):
+        equal(
+            "pending",
+            triage.validate_one_finding(
+                batched_pending, rejected_results, initial_votes=[],
+            ),
+            "missing batch votes stay pending without individual quality fan-out",
+        )
+    with mock.patch.dict(
+        os.environ,
+        {"ACTIVE_BACKEND": "claude", "TARGET_ROOT": str(root)},
+        clear=False,
+    ), mock.patch.object(triage.llm_decide, "provider_limit_open", return_value=True):
+        equal(
+            {accepted},
+            triage._batch_finding_trigger_votes(
+                [accepted], rejected_results, None, None, False,
+            ),
+            "provider-limited trigger batches leave quality-accepted findings pending",
+        )
     pending = findings / "FIND-PENDING"
     pending.mkdir()
     equal("pending", triage.validate_one_finding(pending, rejected_results), "finding gate leaves missing reports pending")
@@ -442,6 +474,28 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         crash_bundle.verified_probe_context(published_crash) is not None
         and triage._direct_probe_trigger_bypass(published_crash, direct_target, ["bytes"]),
         "model-direct triage restores exact nested probe provenance after testcase rename",
+    )
+    unreplayable_results = root / "unreplayable-results"
+    unreplayable = unreplayable_results / "crashes" / "CRASH-1"
+    unreplayable.mkdir(parents=True)
+    (unreplayable / "sanitizer.txt").write_text(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\n", encoding="utf-8",
+    )
+    (unreplayable / "report.md").write_text("# Concrete crash\n", encoding="utf-8")
+    (unreplayable / "input.bin").write_bytes(b"input")
+    with mock.patch.object(
+        benchmark_runner.triage, "triage_crash_dirs",
+        return_value={"promoted": 1, "rejected": 0, "demoted": 0, "pending": 0},
+    ), mock.patch.object(benchmark_runner, "_resolve_reverify_fields", return_value=None):
+        replay_counts = benchmark_runner.triage_cell_crashes(
+            unreplayable_results, direct_target, "direct-target", workers=1,
+            require_replay=True,
+        )
+    check(
+        replay_counts["promoted"] == 0
+        and replay_counts["demoted"] == 1
+        and (unreplayable_results / "findings" / "FIND-1" / "sanitizer.txt").is_file(),
+        "unreplayable model-direct sanitizer evidence is preserved as a finding",
     )
     mismatched = published_results / "crashes" / "CRASH-2"
     shutil.copytree(published_crash, mismatched)

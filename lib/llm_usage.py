@@ -17,7 +17,8 @@ CLI shapes:
 
   llm_usage.py extract-usage <backend> <raw-log-path> [prompt-file]
       Print one JSON object on stdout: {tokens:{input, cached_input,
-      cache_creation, output}, probe:{}, estimated:bool, backend}.
+      cache_creation, cache_creation_1h, output}, probe:{}, estimated:bool,
+      backend}. `cache_creation_1h` is a priced subset of cache_creation.
   llm_usage.py extract-field <field> <backend> <raw-log-path>
                             [--prompt prompt-file]
       Print one integer (or empty string for unknown) on stdout.
@@ -56,7 +57,9 @@ Token-field aliasing (different backends, different spellings):
 cache_creation is the cache-WRITE counter — Claude reports it; codex
 does not, so it stays 0 there. It is captured so the benchmark does not
 silently drop a real billed input component (cache writes bill above
-cache reads). The last usage object seen in the stream wins (backends
+cache reads). Claude's explicit one-hour write bucket is retained separately
+so it is priced at 2x rather than the five-minute 1.25x rate. The last usage
+object seen in the stream wins (backends
 emit a running or final cumulative total).
 """
 
@@ -117,6 +120,15 @@ def _cache_int(d: dict, key: str) -> int:
     if isinstance(v, (int, float)):
         return int(v)
     return 0
+
+
+def _cache_creation_1h(usage: dict) -> int:
+    """Return Claude's explicitly reported one-hour cache-write tokens."""
+    detail = usage.get("cache_creation")
+    if not isinstance(detail, dict):
+        return 0
+    value = detail.get("ephemeral_1h_input_tokens")
+    return int(value) if isinstance(value, (int, float)) else 0
 
 
 def _find_usage(obj: object) -> dict | None:
@@ -256,7 +268,10 @@ def find_usage_index(results_dir: str | os.PathLike[str]) -> Path:
 
 def _zero_usage() -> dict:
     return {
-        "tokens": {"input": 0, "cached_input": 0, "cache_creation": 0, "output": 0},
+        "tokens": {
+            "input": 0, "cached_input": 0, "cache_creation": 0,
+            "cache_creation_1h": 0, "output": 0,
+        },
         "probe": {},
         "estimated": False,
     }
@@ -282,6 +297,14 @@ def extract_usage_from_text(
 ) -> dict:
     """Return a usage row from an already-read raw transcript."""
 
+    reported_cost = 0.0
+
+    def with_reported_cost(row: dict) -> dict:
+        if reported_cost > 0:
+            row["cost_usd"] = reported_cost
+            row["cost_source"] = "backend-reported"
+        return row
+
     # Primary path: SUM the usage of every terminal/summary event. Each
     # such event holds one invocation's cumulative total, and a cell may
     # contain several (re-invoked / resumed agent). Summing is the only
@@ -294,8 +317,12 @@ def extract_usage_from_text(
     # summing it would multiply-count the repeats. Other backends emit no
     # modelUsage and fall through to the sum below.
     model_usage_best: dict | None = None
+    model_usage_best_1h = 0
     model_usage_best_total = 0
-    summed = {"input": 0, "cached_input": 0, "cache_creation": 0, "output": 0}
+    summed = {
+        "input": 0, "cached_input": 0, "cache_creation": 0,
+        "cache_creation_1h": 0, "output": 0,
+    }
     saw_terminal = False
     for line in raw.splitlines():
         line = line.strip()
@@ -307,12 +334,21 @@ def extract_usage_from_text(
             continue
         if not isinstance(obj, dict) or obj.get("type") not in _TERMINAL_TYPES:
             continue
+        cost = obj.get("total_cost_usd")
+        if isinstance(cost, (int, float)):
+            reported_cost = max(reported_cost, float(cost))
         mu = _model_usage_tokens(obj)
         if mu is not None:
             total = sum(mu.values())
             if total > model_usage_best_total:
                 model_usage_best = mu
                 model_usage_best_total = total
+                usage = _find_usage(obj)
+                reported_1h = _cache_creation_1h(usage) if usage is not None else 0
+                # Claude's terminal result reports the cache TTL split while
+                # modelUsage carries the authoritative session total. Retain
+                # the explicit overlap without guessing the TTL of any excess.
+                model_usage_best_1h = min(mu["cache_creation"], reported_1h)
         usage = _find_usage(obj)
         if usage is None:
             continue
@@ -321,17 +357,23 @@ def extract_usage_from_text(
             "cached_input": _first_int(usage, _CACHED_KEYS) or _cache_int(usage, "read"),
             "cache_creation": _first_int(usage, _CACHE_CREATION_KEYS) or _cache_int(usage, "write"),
             "output": _first_int(usage, _OUTPUT_KEYS),
+            "cache_creation_1h": _cache_creation_1h(usage),
         }
         if any(candidate.values()):
             saw_terminal = True
             for k in summed:
                 summed[k] += candidate[k]
     if model_usage_best is not None:
-        return {"tokens": model_usage_best, "probe": {}, "estimated": False,
-                "backend": backend}
+        model_usage_best["cache_creation_1h"] = model_usage_best_1h
+        return with_reported_cost({
+            "tokens": model_usage_best, "probe": {}, "estimated": False,
+            "backend": backend,
+        })
     if saw_terminal:
-        return {"tokens": summed, "probe": {}, "estimated": False,
-                "backend": backend}
+        return with_reported_cost({
+            "tokens": summed, "probe": {}, "estimated": False,
+            "backend": backend,
+        })
 
     # Fallback path: no terminal event carried usage (agent killed before
     # emitting one, or a backend that only streams per-turn usage). The
@@ -354,18 +396,21 @@ def extract_usage_from_text(
                 "cached_input": _first_int(usage, _CACHED_KEYS) or _cache_int(usage, "read"),
                 "cache_creation": _first_int(usage, _CACHE_CREATION_KEYS) or _cache_int(usage, "write"),
                 "output": _first_int(usage, _OUTPUT_KEYS),
+                "cache_creation_1h": _cache_creation_1h(usage),
             }
             if any(candidate.values()):
                 measured = candidate
     if measured is not None:
-        return {"tokens": measured, "probe": {}, "estimated": False,
-                "backend": backend}
+        return with_reported_cost({
+            "tokens": measured, "probe": {}, "estimated": False,
+            "backend": backend,
+        })
 
     # Estimated path: no usage telemetry (agy/Grok Build). Do not estimate Codex /
     # Claude failures from stderr; those backends have real JSON usage when
     # they actually run, so an absent usage object means "unknown".
     if backend not in ("gemini", "grok") and not estimate_missing:
-        return {**_zero_usage(), "backend": backend}
+        return with_reported_cost({**_zero_usage(), "backend": backend})
 
     assistant_chars = _sum_assistant_content_chars(raw)
     if estimate_missing and raw and not assistant_chars:
@@ -379,7 +424,9 @@ def extract_usage_from_text(
         "cache_creation": 0,
         "output": math.ceil(assistant_chars / _CHARS_PER_TOKEN) if assistant_chars else 0,
     }
-    return {"tokens": tokens, "probe": {}, "estimated": True, "backend": backend}
+    return with_reported_cost({
+        "tokens": tokens, "probe": {}, "estimated": True, "backend": backend,
+    })
 
 
 def append_usage_event(
@@ -391,6 +438,7 @@ def append_usage_event(
     prompt_text: str,
     raw_text: str | None = None,
     raw_path: str | os.PathLike[str] | None = None,
+    usage_complete: bool = True,
 ) -> dict:
     """Append one measured-or-estimated invocation to the shared cost ledger."""
     if raw_text is None:
@@ -407,6 +455,7 @@ def append_usage_event(
         "backend": backend,
         "model": model,
         "resolved_effort": llm_invoke.default_effort(backend),
+        "usage_complete": usage_complete,
         **usage,
     }
     try:

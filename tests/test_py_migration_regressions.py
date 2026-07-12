@@ -522,6 +522,25 @@ with tempfile.TemporaryDirectory(
         product_prefix == second_prefix and len(product_prefix) > 4000,
         "trigger validators share a long invariant prefix before candidate-specific facts",
     )
+    batch_prompt = validator["render_trigger_batch_prompt"](
+        validator_args,
+        [{"id": "FIND-1", "facts": {"report": "A"}},
+         {"id": "FIND-2", "facts": {"report": "B"}}],
+    )
+    check(
+        batch_prompt.startswith(product_prefix)
+        and '"id": "FIND-1"' in batch_prompt
+        and "Review every item independently" in batch_prompt,
+        "trigger batching shares startup context while retaining keyed independent reviews",
+    )
+    parsed_batch = validator["extract_vote_batch"](
+        '{"items":[{"id":"FIND-1","vote":"Promote"},'
+        '{"id":"FIND-2","vote":"Reject","disproof":"src/a.c:guard"}]}'
+    )
+    check(
+        set(parsed_batch) == {"FIND-1", "FIND-2"},
+        "trigger batch parser preserves exact keyed verdicts",
+    )
     finding_args = validator["parse_args"]([
         "--finding", str(report_path), "--target-path", str(root),
         "--backend", "codex", "--gate", "finding",

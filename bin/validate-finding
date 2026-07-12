@@ -23,7 +23,8 @@ VOTES = {"Promote": 0, "Reject": 1, "Uncertain": 2}
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--finding", required=True)
+    parser.add_argument("--finding")
+    parser.add_argument("--batch-manifest", help=argparse.SUPPRESS)
     parser.add_argument("--target-path", required=True)
     parser.add_argument("--backend", required=True, choices=("claude", "codex", "gemini", "grok", "oss"))
     parser.add_argument("--model", default="")
@@ -100,6 +101,21 @@ def render_validator_prompt(args, facts: dict) -> str:
     })
 
 
+def render_trigger_batch_prompt(args, items: list[dict]) -> str:
+    base = render_validator_prompt(args, {})
+    prefix, marker, _rest = base.partition("# Finding under review (opaque facts)")
+    if not marker:
+        raise ValueError("trigger validator template missing finding marker")
+    suffix = prompt_render.render_template(
+        "validate_trigger_provenance_batch_suffix.md.j2",
+        {
+            "candidates_json": json.dumps(items, sort_keys=True),
+            "timeout_secs": str(args.timeout),
+        },
+    )
+    return prefix + suffix
+
+
 def extract_vote(text: str) -> dict | None:
     text = re.sub(r"^\s*```(?:json)?\s*$", "", text, flags=re.MULTILINE)
     decoder = json.JSONDecoder()
@@ -115,8 +131,94 @@ def extract_vote(text: str) -> dict | None:
     return None
 
 
+def extract_vote_batch(text: str) -> dict[str, dict]:
+    text = re.sub(r"^\s*```(?:json)?\s*$", "", text, flags=re.MULTILINE)
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(text):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        items = value.get("items") if isinstance(value, dict) else None
+        if not isinstance(items, list):
+            continue
+        out: dict[str, dict] = {}
+        for item in items:
+            if not isinstance(item, dict) or item.get("vote") not in VOTES:
+                continue
+            item_id = str(item.get("id") or "")
+            if item_id and item_id not in out:
+                out[item_id] = item
+        return out
+    return {}
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if not args.finding and not args.batch_manifest:
+        print("FATAL: --finding or --batch-manifest is required", file=sys.stderr)
+        return 4
+    if args.batch_manifest:
+        if args.gate != "trigger":
+            print("FATAL: batch manifests support only the trigger gate", file=sys.stderr)
+            return 4
+        try:
+            manifest = json.loads(Path(args.batch_manifest).read_text(encoding="utf-8"))
+            entries = manifest["items"]
+        except (OSError, ValueError, KeyError, TypeError):
+            print("FATAL: invalid batch manifest", file=sys.stderr)
+            return 4
+        if not isinstance(entries, list) or not entries:
+            return 4
+        target = Path(args.target_path)
+        items = []
+        outputs: dict[str, Path] = {}
+        findings: list[Path] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return 4
+            item_id = str(entry.get("id") or "")
+            finding = Path(str(entry.get("finding") or ""))
+            output = Path(str(entry.get("output") or ""))
+            if not item_id or item_id in outputs or not finding.is_file() or not output.parent.is_dir():
+                return 4
+            items.append({"id": item_id, "facts": candidate(finding)})
+            outputs[item_id] = output
+            findings.append(finding)
+        if not target.is_dir():
+            return 4
+        llm_invoke.apply_memory_policy()
+        prompt = render_trigger_batch_prompt(args, items)
+        raw = Path(args.batch_manifest).with_suffix(".raw.log")
+        status = llm_invoke.run_agent_prompt(
+            args.backend, prompt, args.timeout, raw, model=args.model,
+            max_turns=0, add_dirs=f"{ROOT},{target}",
+            cwd=validator_cwd(findings[0], target),
+        )
+        llm_usage.append_usage_event(
+            args.usage_index, backend=args.backend, model=args.model,
+            kind="decision:trigger-validator-batch", prompt_text=prompt, raw_path=raw,
+            usage_complete=status == 0,
+        )
+        if status not in (0, 1, 2):
+            try:
+                import llm_decide
+                llm_decide.record_provider_limit(
+                    raw.read_text(encoding="utf-8", errors="replace")
+                )
+            except (ImportError, OSError):
+                pass
+        parsed = extract_vote_batch(llm_invoke.extract_text(args.backend, str(raw)))
+        for item_id, output in outputs.items():
+            vote = parsed.get(item_id)
+            if vote is None:
+                continue
+            if vote["vote"] == "Reject" and not str(vote.get("disproof", "")).strip():
+                vote.update(vote="Uncertain", downgraded_from="Reject", downgrade_reason="empty disproof")
+            output.write_text(json.dumps(vote, indent=2, sort_keys=True) + "\n")
+        return 0 if parsed else 3
     finding = Path(args.finding)
     target = Path(args.target_path)
     if not finding.is_file() or not target.is_dir():
@@ -136,6 +238,7 @@ def main(argv=None) -> int:
     llm_usage.append_usage_event(
         args.usage_index, backend=args.backend, model=args.model,
         kind=f"decision:{args.gate}-validator", prompt_text=prompt, raw_path=raw,
+        usage_complete=status == 0,
     )
     text = llm_invoke.extract_text(args.backend, str(raw)).replace("\r", "")
     vote = extract_vote(text)

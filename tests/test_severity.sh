@@ -1462,5 +1462,20 @@ read level score key surface rating vector <<< "$(get_severity "$dir")"
 assert_eq "Unknown" "$level" "unenriched _TODO skeleton crash fails closed to Unknown"
 assert_eq "None" "$score" "no CVSS score for an unenriched skeleton crash"
 
+batch_finding="$TEST_TMPDIR/findings/FIND-BATCH"
+mkdir -p "$batch_finding"
+cat > "$batch_finding/report.md" <<'RPT'
+# Concrete path traversal
+
+Primitive: path_traversal
+Surface: cli
+Caller contract: obeyed
+Caller controls: bytes
+Trigger source: bytes
+RPT
+python3 "$REACH" --batch "$TEST_TMPDIR" >/dev/null
+assert_file_exists "$batch_finding/severity.json" \
+  "severity batch scores findings and crashes in one interpreter"
+
 teardown_test_env
 summary

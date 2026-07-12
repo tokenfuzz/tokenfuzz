@@ -212,6 +212,9 @@ bin/cluster-findings "$RESULTS"
 bin/show-exclusions "$RESULTS"
 ```
 
+`bin/severity --batch` scores accepted crashes and findings together in one
+offline process.
+
 See [Triage results](../guides/triage-results.md) before overriding or
 regenerating an artifact.
 

@@ -11,8 +11,10 @@
 
 - **Benchmark results now measure the complete, comparable workload.** Every cell
   accounts for preflight, recon, audit workers, and validation decisions; records
-  resolved backend effort; marks missing productive-session usage unknown instead
-  of zero; and exposes incomplete-cell yield without admitting it to aggregates.
+  resolved backend effort; marks incomplete worker or decision usage unknown instead
+  of zero; uses backend-reported cost when available and otherwise prices Claude's
+  reported cache-write TTL; counts confirmed finding roots only; and exposes
+  incomplete-cell yield without admitting it to aggregates.
   Both conditions receive the same crash and finding triage, configured target
   roots are treated as the product boundary, and benchmark-only worker refill
   suppression keeps configured concurrency from silently expanding provider cost.
@@ -24,8 +26,13 @@
   only redundant trigger votes, including model-direct bundles renamed after
   probing; changed, ambiguous, and custom-harness evidence retains the two-vote
   review. Finding-quality and reachability decisions are keyed and batched across
-  independent vote rounds, and pooled revalidation, bundling, clustering, and
-  rendering run once after all cell metrics are safely persisted.
+  independent vote rounds; missing batches stay pending instead of fanning out,
+  and trigger reviews share startup while retaining one source-backed verdict per
+  finding. Unreplayable custom-sanitizer crashes remain findings rather than
+  inflating crash metrics, deterministic severity scoring runs once per pool, and
+  pooled revalidation, bundling, clustering, and rendering run only after every
+  cell metric is safely persisted. Deadline-truncated workers are labeled as such
+  instead of looking like backend failures.
 
 - **Grok Build joins the supported backend matrix.** Grok is available for full
   audits, ensembles, recon, focused decisions, validation, containers, cleanup,

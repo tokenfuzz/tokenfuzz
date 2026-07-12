@@ -251,6 +251,7 @@ def _run_slice(
         llm_usage.append_usage_event(
             usage_index, backend=backend, model=model,
             kind="recon", prompt_text=prompt, raw_path=raw_path,
+            usage_complete=rc == 0,
         )
         try:
             extracted = llm_invoke.extract_text(backend, str(raw_path))
@@ -353,6 +354,7 @@ def _validate(
     llm_usage.append_usage_event(
         usage_index, backend=backend, model=model,
         kind="recon-triage", prompt_text=prompt, raw_path=raw,
+        usage_complete=rc == 0,
     )
     if rc:
         log("WARN: batched triage agent exited non-zero; un-triaged reps fall back to deep verify")

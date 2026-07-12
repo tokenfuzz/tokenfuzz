@@ -273,6 +273,20 @@ assert_eq "202" "$(xf cache_creation_input_tokens claude "$claude_model_usage_ra
 assert_eq "404" "$(xf output_tokens claude "$claude_model_usage_raw")" \
   "T11d: Claude modelUsage output = largest snapshot"
 
+claude_1h_raw="$work/claude-1h.raw"
+cat > "$claude_1h_raw" <<'EOF'
+{"type":"result","total_cost_usd":0.123456,"usage":{"input_tokens":10,"cache_creation_input_tokens":200,"cache_read_input_tokens":30,"output_tokens":40,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0}},"modelUsage":{"claude-opus":{"inputTokens":100,"cacheCreationInputTokens":200,"cacheReadInputTokens":300,"outputTokens":400}}}
+EOF
+one_hour=$(PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$claude_1h_raw" <<'PY'
+import json, sys
+import llm_usage
+row = llm_usage.extract_usage(sys.argv[1], backend="claude")
+print(f"{row['tokens']['cache_creation_1h']}|{row['cost_usd']}")
+PY
+)
+assert_eq "200|0.123456" "$one_hour" \
+  "T11d2: Claude cache creation retains its explicit one-hour TTL bucket"
+
 # A later, smaller modelUsage must not displace the largest snapshot
 # (proves max-wins, not last-wins).
 claude_mu_max_raw="$work/claude-mu-max.raw"

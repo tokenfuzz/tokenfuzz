@@ -490,8 +490,8 @@ bin/severity --batch "$RESULTS"
 What each command does:
 
 - `bin/export-repro` — builds the handoff bundle.
-- `bin/severity` — recomputes the CVSS severity for a crash or
-  finding from its report and `target.toml`, offline.
+- `bin/severity` — recomputes CVSS severity from reports and `target.toml`,
+  offline; `--batch` covers accepted crashes and findings together.
 - `bin/cluster-crashes` and `bin/cluster-findings` — group reports
   that share a root cause, write the cluster summaries, and stamp
   `Cluster:` and `Dedup key:` lines into each report. Both run

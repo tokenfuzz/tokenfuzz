@@ -380,6 +380,7 @@ def validate_model(runtime: Runtime) -> None:
                 getattr(runtime, "index_jsonl", runtime.logs / "index.jsonl"),
                 backend=runtime.backend, model=runtime.model,
                 kind="model-preflight", prompt_text=prompt_text, raw_path=raw,
+                usage_complete=last_rc == 0,
             )
             try:
                 response = llm_invoke.extract_text(runtime.backend, str(raw)).strip()
@@ -1068,6 +1069,7 @@ def run_agent(
         "timestamp": datetime.now(timezone.utc).isoformat(), "iteration": iteration,
         "agent": agent, "role": role, "backend": runtime.backend, "model": runtime.model,
         "resolved_effort": llm_invoke.default_effort(runtime.backend),
+        "usage_complete": rc == 0,
         "returncode": rc, "provider_issue": issue, "prompt_chars": len(rendered),
         "raw_log": str(raw_path), "text_log": str(text_path), **usage,
     }
@@ -1077,9 +1079,14 @@ def run_agent(
         int(token_counts.get(key) or 0)
         for key in ("input", "cached_input", "cache_creation", "output")
     )
+    outcome = (
+        "deadline-truncated rc=124"
+        if rc == 124 and issue == "none"
+        else f"finished rc={rc}"
+    )
     index_log(
         runtime,
-        f"Agent {agent} {launch} finished rc={rc} provider={issue} "
+        f"Agent {agent} {launch} {outcome} provider={issue} "
         f"tokens={total_tokens} log={text_path.name}",
     )
     return AgentResult(agent, role, rc, raw_path, text_path, usage, issue, reset_at)
