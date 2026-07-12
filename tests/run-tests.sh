@@ -85,9 +85,9 @@ while [ "$#" -gt 0 ]; do
     --install-container-deps)
       # Run installs in a subshell with set -e so a transient apt/dnf network
       # failure fails the step instead of silently leaving the container half-
-      # provisioned. Without this the entry script exec's bash -l and bin/audit
-      # later dies with "FATAL: missing required tool(s): jq" with no signal
-      # that the cause was an apt fetch timeout.
+      # provisioned. Without this the entry script exec's bash -l and the
+      # harness later fails on a missing tool with no signal that the cause was
+      # an earlier package fetch timeout.
       (
         set -e
         # nodejs is required: bin/audit:gemini_cli_check_bundled_ripgrep uses
@@ -265,7 +265,7 @@ load_prior_timings() {
 # self-corrects from real timings on the next run.
 bootstrap_weight() {
   case "$1" in
-    test_probe_harness_cpp|test_py_migration_regressions|test_llm_invoke_py) echo 15 ;;
+    test_benchmark_cli|test_probe_harness_cpp|test_py_migration_regressions|test_llm_invoke_py) echo 15 ;;
     test_multilang_support|test_benchmark_reverify) echo 10 ;;
     *) echo "" ;;
   esac
@@ -374,23 +374,32 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 count_test_output() {
-  local output="$1" ran skipped
+  local output="$1" ran skipped unittest_failed
+  ran=$(awk '/^Ran [0-9]+ tests? in / { count=$2 } END { print count+0 }' <<< "$output")
+  unittest_failed=$(awk '
+    /^(FAIL|ERROR): / {
+      key=$0
+      if (match($0, /\([^() ]+\.[^() ]+\)/)) {
+        key=substr($0, RSTART, RLENGTH)
+      }
+      seen[key]=1
+    }
+    END { for (key in seen) count++; print count+0 }
+  ' <<< "$output")
+  if [ "$ran" -gt 0 ] || [ "$unittest_failed" -gt 0 ]; then
+    skipped=$(awk '
+      match($0, /skipped=[0-9]+/) {
+        value=substr($0, RSTART+8, RLENGTH-8)
+      }
+      END { print value+0 }
+    ' <<< "$output")
+    COUNT_FAILED=$unittest_failed
+    COUNT_PASSED=$((ran - COUNT_FAILED - skipped))
+    [ "$COUNT_PASSED" -lt 0 ] && COUNT_PASSED=0
+    return
+  fi
   COUNT_PASSED=$(grep -c '✓' <<< "$output" || true)
   COUNT_FAILED=$(grep -c '✗' <<< "$output" || true)
-  if [ "$COUNT_PASSED" -eq 0 ] && [ "$COUNT_FAILED" -eq 0 ]; then
-    ran=$(awk '/^Ran [0-9]+ tests? in / { count=$2 } END { print count+0 }' <<< "$output")
-    if [ "$ran" -gt 0 ]; then
-      COUNT_FAILED=$(grep -Ec '^(FAIL|ERROR): ' <<< "$output" || true)
-      skipped=$(awk '
-        match($0, /skipped=[0-9]+/) {
-          value=substr($0, RSTART+8, RLENGTH-8)
-        }
-        END { print value+0 }
-      ' <<< "$output")
-      COUNT_PASSED=$((ran - COUNT_FAILED - skipped))
-      [ "$COUNT_PASSED" -lt 0 ] && COUNT_PASSED=0
-    fi
-  fi
 }
 
 run_suite() {

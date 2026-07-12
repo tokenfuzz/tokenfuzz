@@ -7,11 +7,17 @@ source "$TESTS_DIR/helpers.sh"
 setup_test_env
 
 RUNNER="$TESTS_DIR/run-tests.sh"
-tmp_script="$TESTS_DIR/test_runner_tmp_$$.sh"
-tmp_fail_script="$TESTS_DIR/test_runner_tmp_fail_$$.sh"
-tmp_python="$TESTS_DIR/test_runner_tmp_$$.py"
-tmp_hang_script="$TESTS_DIR/test_runner_tmp_hang_$$.sh"
-trap 'rm -f "$tmp_script" "$tmp_fail_script" "$tmp_python" "$tmp_hang_script"; teardown_test_env' EXIT
+tmp_script="$TESTS_DIR/.runner_tmp_$$.sh"
+tmp_fail_script="$TESTS_DIR/.runner_tmp_fail_$$.sh"
+tmp_python="$TESTS_DIR/.runner_tmp_$$.py"
+tmp_python_fail="$TESTS_DIR/.runner_tmp_fail_$$.py"
+tmp_hang_script="$TESTS_DIR/.runner_tmp_hang_$$.sh"
+cleanup() {
+  rm -f "$tmp_script" "$tmp_fail_script" "$tmp_python" \
+    "$tmp_python_fail" "$tmp_hang_script"
+  teardown_test_env
+}
+trap cleanup EXIT
 # Child runner invocations below would otherwise overwrite the REAL
 # scheduling artifact (output/test-timings.tsv) with fixture-suite rows,
 # permanently defeating the self-calibrating LPT weights.
@@ -25,7 +31,7 @@ EOF
 rc=0
 output=$(bash "$RUNNER" --jobs 1 "$(basename "$tmp_script")" 2>&1) || rc=$?
 assert_eq "1" "$rc" "runner: nonzero suite without assertion marks fails run"
-assert_match "Failed suites: test_runner_tmp_" "$output" "runner: nonzero suite is named"
+assert_match "Failed suites: \.runner_tmp_" "$output" "runner: nonzero suite is named"
 assert_match "Suite exit code: 7" "$output" "runner: nonzero suite exit code is printed"
 assert_match "RESULTS: .*0 passed.*, .*0 failed" "$output" "runner: assertion count stays separate from suite errors"
 assert_match "Total time:.*[0-9]+[hms0-9]* \\([0-9]+s\\)" "$output" \
@@ -58,6 +64,30 @@ PY
 output=$(bash "$RUNNER" --jobs 1 "$(basename "$tmp_python")" 2>&1)
 assert_match "RESULTS: .*2 passed.*, .*0 failed" "$output" \
   "runner: unittest assertions contribute to the summary"
+
+cat > "$tmp_python_fail" <<'PY'
+import unittest
+
+
+class SyntheticSubtests(unittest.TestCase):
+    def test_subtests(self):
+        print("  ✓ subprocess payload, not an assertion result")
+        for value in (1, 2):
+            with self.subTest(value=value):
+                self.assertEqual(value, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+PY
+
+rc=0
+output=$(bash "$RUNNER" --jobs 1 "$(basename "$tmp_python_fail")" 2>&1) || rc=$?
+assert_eq "1" "$rc" "runner: failed unittest subtests fail the run"
+assert_match "RESULTS: .*0 passed.*, .*1 failed" "$output" \
+  "runner: failed subtests count once by test method"
+assert_not_match "RESULTS: .*1 passed.*, .*0 failed" "$output" \
+  "runner: incidental checkmarks do not mask unittest failures"
 
 cat > "$tmp_hang_script" <<'EOF'
 #!/usr/bin/env bash
@@ -112,6 +142,7 @@ eval "$(awk '/^prioritize_parallel_tests\(\) \{/,/^}/' "$RUNNER")"
 # --- cold start (no timing artifact): bootstrap leads, rest is coarse ---
 PRIOR_TIMINGS=""
 heavy_w=$(test_weight test_probe_harness_cpp.py)
+benchmark_w=$(test_weight test_benchmark_cli.py)
 sanitizer_w=$(test_weight test_multilang_support.py)
 light_w=$(test_weight test_argparse_need_arg.py)
 if [ "$heavy_w" -gt "$light_w" ] && [ "$heavy_w" -ge 15 ]; then
@@ -119,6 +150,12 @@ if [ "$heavy_w" -gt "$light_w" ] && [ "$heavy_w" -ge 15 ]; then
 else
   fail "runner: cold-start bootstrap ranks a known-slow suite above a trivial one" \
     "probe_harness=$heavy_w argparse=$light_w"
+fi
+if [ "$benchmark_w" -gt "$light_w" ] && [ "$benchmark_w" -ge 15 ]; then
+  pass "runner: cold-start bootstrap schedules the benchmark lifecycle suite early"
+else
+  fail "runner: cold-start bootstrap schedules the benchmark lifecycle suite early" \
+    "benchmark_cli=$benchmark_w argparse=$light_w"
 fi
 if [ "$sanitizer_w" -gt "$light_w" ] && [ "$sanitizer_w" -ge 10 ]; then
   pass "runner: cold-start bootstrap ranks sanitizer coverage above trivial suites"
