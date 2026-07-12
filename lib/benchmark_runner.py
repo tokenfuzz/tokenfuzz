@@ -186,6 +186,7 @@ def triage_cell_crashes(
     results: Path, target: Path, target_slug: str, *, workers: int = 4,
     deadline: float | None = None,
     require_replay: bool = False,
+    age_pending: bool = True,
 ) -> dict[str, int]:
     """Apply the audit crash gate to a finished benchmark cell."""
     nested_crashes = results / "session" / "results" / "crashes"
@@ -237,6 +238,7 @@ def triage_cell_crashes(
         deadline=deadline,
         target_root_is_product=True,
         confirmed_trigger_bypasses=bypasses,
+        age_pending=age_pending,
     )
     counts["demoted"] = counts.get("demoted", 0) + pre_demoted
     return counts
@@ -1334,6 +1336,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                                 workers=args.agents or 4,
                                 deadline=finalize_deadline,
                                 require_replay=cell.get("condition") == "model-direct",
+                                age_pending=False,
                             )
                     except Exception as exc:
                         log(f"WARN: crash triage failed for {cell_dir.name}: {exc}")

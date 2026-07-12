@@ -203,8 +203,12 @@ with tempfile.TemporaryDirectory(
         "status": "incomplete", "run_quality": "provider_limited",
     }), encoding="utf-8")
     regenerate_args = SimpleNamespace(**{**vars(budget_args), "regenerate": True})
+    regenerate_age_pending = []
+    def _regenerate_crash_triage(*args, **kwargs):
+        regenerate_age_pending.append(kwargs.get("age_pending"))
+        return _budget_crash_triage(*args, **kwargs)
     with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", fake_script_root), \
-         mock.patch.object(benchmark_runner, "triage_cell_crashes", side_effect=_budget_crash_triage), \
+         mock.patch.object(benchmark_runner, "triage_cell_crashes", side_effect=_regenerate_crash_triage), \
          mock.patch.object(benchmark_runner, "drain_find_gate", side_effect=_budget_drain), \
          mock.patch.object(benchmark_runner, "update_result", return_value=empty_report), \
          mock.patch.object(benchmark_runner.metrics, "render_section", return_value=""), \
@@ -224,6 +228,11 @@ with tempfile.TemporaryDirectory(
         provider["status"] == "incomplete" and provider["run_quality"] == "provider_limited",
         "regenerate preserves genuine provider-limited status",
         repr(provider),
+    )
+    check(
+        regenerate_age_pending and all(value is False for value in regenerate_age_pending),
+        "regenerate triages without consuming pending-artifact lifetime",
+        repr(regenerate_age_pending),
     )
     recovered["status"] = "incomplete"
     recovered["run_quality"] = "incomplete"
@@ -300,6 +309,28 @@ with tempfile.TemporaryDirectory(
     check(
         triage.triage_one_crash(skeleton, skeleton_root, root, "sampleproj", ["bytes"]) == "pending",
         "unenriched _TODO skeleton is held pending, not promoted",
+    )
+
+    # Read-only regeneration may revisit a pending artifact many times. It
+    # refreshes the marker but must not consume live triage attempts or age
+    # sanitizer evidence into crashes-rejected.
+    replay_root = root / "replay-safe-pending"
+    (replay_root / "crashes-rejected").mkdir(parents=True)
+    replay_crash = _crash_dir(
+        replay_root, "CRASH-011",
+        report="## Root Cause\n_TODO (agent): fill in\n",
+        sanitizer=_ASAN, testcase=True,
+    )
+    for _ in range(12):
+        replay = triage.triage_crash_dirs(
+            replay_root, root, "sampleproj", ["bytes"], workers=1,
+            age_pending=False,
+        )
+        check(replay["pending"] == 1, "regeneration keeps incomplete crash pending")
+    check(replay_crash.is_dir(), "regeneration never ages pending crash into rejected")
+    check(
+        not (replay_crash / ".promotion_pending.count").exists(),
+        "regeneration does not consume a promotion-pending attempt",
     )
 
     # A complete crash clears the pending sidecars and is promotable.

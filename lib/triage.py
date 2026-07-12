@@ -745,7 +745,12 @@ def _hold_incomplete(
     report: Path | None,
     scope: str,
     missing: list[str],
+    *,
+    age_pending: bool = True,
 ) -> str:
+    if not age_pending:
+        _write_pending_marker(crash_dir, missing)
+        return "pending"
     maximum = _promotion_pending_max()
     count = _bump_promotion_pending(crash_dir, scope, missing)
     _write_pending_marker(crash_dir, missing)
@@ -1131,6 +1136,7 @@ def triage_one_crash(
     target_root_is_product: bool = False,
     reach_fields_override: object = _NO_REACH_DECISION,
     confirmed_trigger_bypass: bool = False,
+    age_pending: bool = True,
 ) -> str:
     if _deadline_expired(deadline):
         return "pending"
@@ -1173,7 +1179,10 @@ def triage_one_crash(
     if testcase is None and harness is None:
         missing.append("testcase or harness")
     if missing:
-        return _hold_incomplete(crash_dir, rejected_root, report, "missing", missing)
+        return _hold_incomplete(
+            crash_dir, rejected_root, report, "missing", missing,
+            age_pending=age_pending,
+        )
     if runtime_only:
         demote_to_finding(
             crash_dir,
@@ -1201,12 +1210,14 @@ def triage_one_crash(
     bundle_missing = _bundle_missing_artifacts(crash_dir)
     if bundle_missing:
         return _hold_incomplete(
-            crash_dir, rejected_root, report, "bundle", bundle_missing
+            crash_dir, rejected_root, report, "bundle", bundle_missing,
+            age_pending=age_pending,
         )
     report = _report(crash_dir)
     if report is None:
         return _hold_incomplete(
-            crash_dir, rejected_root, None, "bundle", ["REPORT.md"]
+            crash_dir, rejected_root, None, "bundle", ["REPORT.md"],
+            age_pending=age_pending,
         )
     if not _deadline_expired(deadline):
         fill_reach_fields(
@@ -1217,7 +1228,7 @@ def triage_one_crash(
     if verdict == "incomplete":
         return _hold_incomplete(
             crash_dir, rejected_root, report, "fields",
-            ["Caller contract or Trigger source"],
+            ["Caller contract or Trigger source"], age_pending=age_pending,
         )
     _clear_promotion_sidecars(crash_dir)
     if verdict == "contract-flag":
@@ -1249,6 +1260,7 @@ def triage_crash_dirs(
     deadline: float | None = None,
     target_root_is_product: bool = False,
     confirmed_trigger_bypasses: set[Path] | None = None,
+    age_pending: bool = True,
 ) -> dict[str, int]:
     results = Path(results_dir)
     crashes = results / "crashes"
@@ -1282,6 +1294,7 @@ def triage_crash_dirs(
                 reach_decisions.get(directory)
                 if directory in reach_attempted else _NO_REACH_DECISION,
                 directory in bypasses,
+                age_pending,
             ),
             directories,
         )

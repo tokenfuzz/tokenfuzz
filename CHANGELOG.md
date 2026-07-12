@@ -16,7 +16,8 @@
   reported cache-write TTL; counts confirmed finding roots only; and exposes
   incomplete-cell yield without admitting it to aggregates. Completed crash and
   finding evidence remains countable when another artifact is pending; regeneration
-  repairs legacy cell status instead of discarding an otherwise successful replicate.
+  repairs legacy cell status without consuming pending-artifact lifetime or
+  discarding an otherwise successful replicate.
   Both conditions receive the same crash and finding triage, configured target
   roots are treated as the product boundary, and benchmark-only worker refill
   suppression keeps configured concurrency from silently expanding provider cost.
