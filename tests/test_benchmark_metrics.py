@@ -185,6 +185,245 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(native["cost_usd"], "0.123456")
         self.assertEqual(native["cost_source"], "backend-reported")
 
+    def test_current_model_families_use_their_exact_price_tiers(self) -> None:
+        cases = (
+            ("codex", "gpt-5.6", "5", "0.50", "30"),
+            ("codex", "gpt-5.6-sol", "5", "0.50", "30"),
+            ("codex", "gpt-5.6-terra", "2.50", "0.25", "15"),
+            ("codex", "gpt-5.6-luna", "1", "0.10", "6"),
+            ("codex", "gpt-5.5-2026-04-23", "5", "0.50", "30"),
+            ("codex", "gpt-5.5-pro", "30", "0", "180"),
+            ("codex", "gpt-5.4", "2.50", "0.25", "15"),
+            ("codex", "gpt-5.4-mini", "0.75", "0.075", "4.50"),
+            ("codex", "gpt-5.4-nano", "0.20", "0.02", "1.25"),
+            ("codex", "gpt-5.4-pro", "30", "0", "180"),
+            ("codex", "gpt-5.2", "1.75", "0.175", "14"),
+            ("codex", "gpt-5.2-pro", "21", "0", "168"),
+            ("codex", "gpt-5.1", "1.25", "0.125", "10"),
+            ("codex", "gpt-5", "1.25", "0.125", "10"),
+            ("codex", "gpt-5-mini", "0.25", "0.025", "2"),
+            ("codex", "gpt-5-nano", "0.05", "0.005", "0.40"),
+            ("codex", "gpt-4.1", "2", "0.50", "8"),
+            ("codex", "gpt-4.1-mini", "0.40", "0.10", "1.60"),
+            ("codex", "gpt-4o", "2.50", "1.25", "10"),
+            ("codex", "gpt-4o-2024-05-13", "5", "0", "15"),
+            ("codex", "gpt-4o-mini", "0.15", "0.075", "0.60"),
+            ("codex", "o1", "15", "7.50", "60"),
+            ("codex", "o1-pro", "150", "0", "600"),
+            ("codex", "o3", "2", "0.50", "8"),
+            ("codex", "o3-pro", "20", "0", "80"),
+            ("codex", "o4-mini", "1.10", "0.275", "4.40"),
+            ("codex", "gpt-4-turbo-2024-04-09", "10", "0", "30"),
+            ("codex", "gpt-3.5-turbo", "0.50", "0", "1.50"),
+            ("claude", "claude-fable-5", "10", "1", "50"),
+            ("claude", "claude-mythos-5", "10", "1", "50"),
+            ("claude", "claude-opus-4-8", "5", "0.50", "25"),
+            ("claude", "claude-opus-4-5", "5", "0.50", "25"),
+            ("claude", "claude-opus-4-1", "15", "1.50", "75"),
+            ("claude", "claude-3-opus-20240229", "15", "1.50", "75"),
+            ("claude", "claude-sonnet-5", "2", "0.20", "10"),
+            ("claude", "claude-sonnet-4-6", "3", "0.30", "15"),
+            ("claude", "claude-sonnet-4-5", "3", "0.30", "15"),
+            ("claude", "claude-3-7-sonnet-20250219", "3", "0.30", "15"),
+            ("claude", "claude-3-5-sonnet-20241022", "3", "0.30", "15"),
+            ("claude", "claude-haiku-4-5-20251001", "1", "0.10", "5"),
+            ("claude", "claude-3-5-haiku-20241022", "0.80", "0.08", "4"),
+            ("claude", "claude-3-haiku-20240307", "0.25", "0.03", "1.25"),
+            ("gemini", "gemini-3.5-flash", "1.50", "0.15", "9"),
+            ("gemini", "gemini-3.1-pro-preview", "2", "0.20", "12"),
+            ("gemini", "gemini-3.1-flash-lite", "0.25", "0.025", "1.50"),
+            ("gemini", "gemini-3-flash-preview", "0.50", "0.05", "3"),
+            ("gemini", "gemini-2.5-pro", "1.25", "0.125", "10"),
+            ("gemini", "gemini-2.5-flash", "0.30", "0.03", "2.50"),
+            ("gemini", "gemini-2.5-flash-lite", "0.10", "0.01", "0.40"),
+            ("gemini", "gemini-2.0-flash", "0.10", "0.025", "0.40"),
+            ("gemini", "gemini-2.0-flash-lite", "0.075", "0", "0.30"),
+            ("grok", "grok-build-0.1", "1", "0.20", "2"),
+            ("grok", "grok-4.5", "2", "0.50", "6"),
+            ("grok", "grok-4.3", "1.25", "0.20", "2.50"),
+            ("grok", "grok-4.20-0309-reasoning", "1.25", "0.20", "2.50"),
+        )
+        for backend, model, input_rate, cache_rate, output_rate in cases:
+            with self.subTest(backend=backend, model=model):
+                rates = benchmark._pricing_rates(
+                    backend, model, priced_at="2026-07-12",
+                )
+                self.assertIsNotNone(rates)
+                if rates.get("tiered"):
+                    self.assertEqual(str(rates["input_low"]), input_rate)
+                    self.assertEqual(str(rates["cache_read_low"]), cache_rate)
+                    self.assertEqual(str(rates["output_low"]), output_rate)
+                else:
+                    self.assertEqual(str(rates["input"]), input_rate)
+                    self.assertEqual(str(rates.get("cache_read", 0)), cache_rate)
+                    self.assertEqual(str(rates["output"]), output_rate)
+
+        # The old "mini" suffix is not a GPT-5.6 model tier, and arbitrary
+        # future-looking names must not inherit Sol pricing by substring.
+        self.assertIsNone(benchmark._pricing_rates("codex", "gpt-5.6-mini"))
+        self.assertIsNone(benchmark._pricing_rates("codex", "gpt-5.60"))
+        self.assertIsNone(benchmark._pricing_rates("codex", "gpt-5-6"))
+        self.assertIsNone(benchmark._pricing_rates("claude", "claude-opus-5"))
+        self.assertIsNone(benchmark._pricing_rates("claude", "claude-haiku-5"))
+        sonnet_standard = benchmark._pricing_rates(
+            "claude", "claude-sonnet-5", priced_at="2026-09-01",
+        )
+        self.assertEqual(str(sonnet_standard["input"]), "3")
+        self.assertEqual(str(sonnet_standard["cache_write"]), "3.75")
+        self.assertEqual(str(sonnet_standard["cache_write_1h"]), "6")
+        self.assertEqual(str(sonnet_standard["cache_read"]), "0.30")
+        self.assertEqual(str(sonnet_standard["output"]), "15")
+
+        long_context = (
+            ("gpt-5.6-sol", "10", "1", "12.50", "45"),
+            ("gpt-5.6-terra", "5", "0.50", "6.25", "22.50"),
+            ("gpt-5.6-luna", "2", "0.20", "2.50", "9"),
+            ("gpt-5.5", "10", "1", None, "45"),
+            ("gpt-5.5-pro", "60", "0", None, "270"),
+        )
+        for model, input_high, cache_high, write_high, output_high in long_context:
+            with self.subTest(model=model, tier="long-context"):
+                rates = benchmark._pricing_rates("codex", model)
+                self.assertEqual(str(rates["input_high"]), input_high)
+                self.assertEqual(str(rates["cache_read_high"]), cache_high)
+                self.assertEqual(str(rates["output_high"]), output_high)
+                if write_high is None:
+                    self.assertNotIn("cache_write_high", rates)
+                else:
+                    self.assertEqual(str(rates["cache_write_high"]), write_high)
+
+        claude_cache = (
+            ("claude-fable-5", "12.50", "20"),
+            ("claude-opus-4-8", "6.25", "10"),
+            ("claude-sonnet-5", "2.50", "4"),
+            ("claude-sonnet-4-6", "3.75", "6"),
+            ("claude-haiku-4-5", "1.25", "2"),
+            ("claude-3-5-haiku", "1", "1.60"),
+            ("claude-3-haiku", "0.30", "0.50"),
+        )
+        for model, write_5m, write_1h in claude_cache:
+            with self.subTest(model=model, tier="cache-write"):
+                rates = benchmark._pricing_rates(
+                    "claude", model, priced_at="2026-07-12",
+                )
+                self.assertEqual(str(rates["cache_write"]), write_5m)
+                self.assertEqual(str(rates["cache_write_1h"]), write_1h)
+
+    def test_tiered_cache_writes_estimates_and_corrupt_rows_price_safely(self) -> None:
+        # GPT-5.6 cache writes cost 1.25x uncached input. The normalized input
+        # bucket contains writes, so pricing must split them back out.
+        cost, source = benchmark._cost_decimal(
+            "codex", "gpt-5.6-terra",
+            input_tokens=1_000_000,
+            cached_input_tokens=1_000_000,
+            cache_creation_tokens=400_000,
+            output_tokens=1_000_000,
+            prompt_tokens_for_tier=200_000,
+        )
+        self.assertEqual(benchmark._decimal_text(cost), "18.000000")
+        self.assertEqual(source, "openai-api-gpt-5.6-terra-standard")
+
+        claude_long, _ = benchmark._cost_decimal(
+            "claude", "claude-sonnet-4-5",
+            input_tokens=1_000_000,
+            cached_input_tokens=1_000_000,
+            cache_creation_tokens=400_000,
+            cache_creation_1h_tokens=200_000,
+            output_tokens=1_000_000,
+            prompt_tokens_for_tier=1_400_000,
+        )
+        self.assertEqual(benchmark._decimal_text(claude_long), "30.600000")
+
+        gemini_long, _ = benchmark._cost_decimal(
+            "gemini", "gemini-2.5-pro",
+            input_tokens=1_000_000, cached_input_tokens=1_000_000,
+            output_tokens=1_000_000, prompt_tokens_for_tier=200_001,
+        )
+        self.assertEqual(benchmark._decimal_text(gemini_long), "17.750000")
+
+        grok_standard, _ = benchmark._cost_decimal(
+            "grok", "grok-4.5",
+            input_tokens=1_000_000, cached_input_tokens=1_000_000,
+            output_tokens=1_000_000,
+        )
+        self.assertEqual(benchmark._decimal_text(grok_standard), "8.500000")
+
+        # Vendor thresholds are per request. Harness rows retain the rendered
+        # prompt size, so cumulative session input must not force the high tier.
+        index = self.root / "tier-boundary.jsonl"
+        index.write_text(json.dumps({
+            "backend": "gemini", "model": "gemini-2.5-pro",
+            "prompt_chars": 800_000,
+            "tokens": {"input": 1_000_000, "output": 1_000_000},
+        }) + "\n")
+        at_boundary = benchmark.harvest_tokens(index)
+        self.assertEqual(at_boundary["cost_usd"], "11.250000")
+        self.assertTrue(at_boundary["cost_estimated"])
+        index.write_text(json.dumps({
+            "backend": "gemini", "model": "gemini-2.5-pro",
+            "prompt_chars": 800_001,
+            "tokens": {"input": 1_000_000, "output": 1_000_000},
+        }) + "\n")
+        over_boundary = benchmark.harvest_tokens(index)
+        self.assertEqual(over_boundary["cost_usd"], "17.500000")
+        self.assertTrue(over_boundary["cost_estimated"])
+
+        index.write_text(json.dumps({
+            "backend": "gemini", "model": "gemini-2.5-pro",
+            "prompt_chars": 800_001, "cost_usd": 9.25,
+            "cost_source": "backend-reported",
+            "tokens": {"input": 1_000_000, "output": 1_000_000},
+        }) + "\n")
+        reported = benchmark.harvest_tokens(index)
+        self.assertEqual(reported["cost_usd"], "9.250000")
+        self.assertFalse(reported["cost_estimated"])
+
+        index = self.root / "estimated.jsonl"
+        index.write_text(json.dumps({
+            "backend": "grok", "model": "grok-build-0.1", "estimated": True,
+            "tokens": {"input": 0, "prompt_estimate": 1000, "output": 1000},
+        }) + "\n")
+        estimated = benchmark.harvest_tokens(index)
+        self.assertEqual(estimated["cost_usd"], "0.003000")
+        self.assertTrue(estimated["estimated"])
+
+        # JSONL is durable shared state: syntactically valid but malformed
+        # values must not crash a live report or create negative/NaN totals.
+        index.write_text(
+            "[]\n"
+            + json.dumps({"backend": "grok", "model": "grok-build-0.1", "tokens": []}) + "\n"
+            + json.dumps({
+                "backend": "grok", "model": "grok-build-0.1",
+                "cost_usd": "NaN", "tokens": {"input": -3, "output": 1e999},
+            }) + "\n"
+        )
+        corrupt = benchmark.harvest_tokens(index)
+        self.assertEqual(corrupt["input_tokens"], 0)
+        self.assertEqual(corrupt["output_tokens"], 0)
+        self.assertEqual(corrupt["cost_usd"], "0.000000")
+        self.assertEqual(benchmark._fmt_usd("NaN"), "—")
+        self.assertEqual(benchmark._fmt_usd("Infinity"), "—")
+        self.assertEqual(
+            benchmark._sum_cost_usd([
+                {"cost_usd": "NaN"}, {"cost_usd": "Infinity"},
+                {"cost_usd": "1.25"},
+            ]),
+            "1.250000",
+        )
+
+        cell = {
+            "condition": "harness", "status": "done",
+            "wall_seconds": "not-a-number",
+            "metrics": {"tokens": {
+                "input_tokens": -1, "output_tokens": float("inf"),
+                "iterations": "broken",
+            }},
+        }
+        token_row = benchmark._tokens_for_cell(cell)
+        self.assertEqual(token_row["input_tokens"], 0)
+        self.assertEqual(token_row["output_tokens"], 0)
+        self.assertEqual(token_row["wall_seconds"], 0)
+
     def test_configured_default_models_have_pricing(self) -> None:
         # Every backend default in config/models.toml must key a pricing row.
         # Backends without a backend-reported cost (codex/gemini/grok) render a
@@ -201,8 +440,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
     def test_usage_extraction_for_supported_backend_shapes(self) -> None:
         cases = (
             ("codex", [
-                {"type": "item.completed", "usage": {"input_tokens": 2000, "cached_input_tokens": 1800, "output_tokens": 90}},
-            ], (2000, 1800, 0, 90)),
+                {"type": "item.completed", "usage": {"input_tokens": 2000, "cached_input_tokens": 1800, "cache_write_tokens": 100, "output_tokens": 90}},
+            ], (2000, 1800, 100, 90)),
             ("oss", [
                 {"type": "step_finish", "part": {"type": "step-finish", "tokens": {"input": 1200, "output": 34, "cache": {"read": 900, "write": 25}}}},
             ], (1200, 900, 25, 34)),
@@ -213,6 +452,14 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("gemini", [
                 {"type": "result", "stats": {"input_tokens": 58000000, "output_tokens": 80, "cached": 55000000}},
             ], (58000000, 55000000, 0, 80)),
+            ("grok", [
+                {"type": "response.completed", "usage": {
+                    "input_tokens": 5000, "output_tokens": 60,
+                    "input_tokens_details": {
+                        "cached_tokens": 4000, "cache_write_tokens": 250,
+                    },
+                }},
+            ], (5000, 4000, 250, 60)),
         )
         for backend, rows, expected in cases:
             with self.subTest(backend=backend):

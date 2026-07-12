@@ -42,7 +42,7 @@ import sys
 import tempfile
 import urllib.parse
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import llm_usage
@@ -859,12 +859,45 @@ def _money(value: str) -> Decimal:
     return Decimal(value)
 
 
-def _pricing_rates(backend: str, model: str = "") -> dict | None:
+def _model_id_is(model: str, *model_ids: str) -> bool:
+    """Match a model ID or its dated snapshot, without prefix collisions."""
+    leaf = model.rsplit("/", 1)[-1].strip().lower()
+    normalized = re.sub(r"\s+", "-", leaf)
+    for model_id in model_ids:
+        wanted = re.sub(r"\s+", "-", model_id.strip().lower())
+        if normalized == wanted:
+            return True
+        if re.fullmatch(
+            rf"{re.escape(wanted)}-(?:\d{{8}}|\d{{4}}-\d{{2}}-\d{{2}})",
+            normalized,
+        ):
+            return True
+    return False
+
+
+def _pricing_day(value: object = None) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if value:
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc).date()
+
+
+def _pricing_rates(
+    backend: str, model: str = "", *, priced_at: object = None,
+) -> dict | None:
     """Public USD-equivalent token rates per 1M tokens.
 
     Codex product billing uses credits, but the underlying model has public
     API-equivalent token rates. Those rates are the reproducible denominator
-    for cross-backend benchmark dollars.
+    for cross-backend benchmark dollars. The benchmark CLIs make interactive
+    standard-tier requests, so batch, flex, priority, fast-mode, and regional
+    multipliers do not apply here.
     """
     b = (backend or "").strip().lower()
     m = (model or "").strip().lower()
@@ -872,7 +905,7 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
     if b == "claude":
         # Claude API pricing, standard global routing. Cache-write TTL is
         # carried per event: five-minute writes cost 1.25x, one-hour 2x.
-        if "fable" in m or "mythos" in m:
+        if _model_id_is(m, "claude-fable-5", "claude-mythos-5"):
             return {
                 "input": _money("10"),
                 "cache_write": _money("12.50"),
@@ -881,46 +914,76 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
                 "output": _money("50"),
                 "source": "claude-api-fable-5",
             }
-        if any(x in m for x in ("opus-4-8", "opus-4.8", "opus 4.8")):
+        # Introductory first-party API pricing is effective through
+        # 2026-08-31; the published rate becomes $3/$15 on 2026-09-01.
+        if _model_id_is(m, "claude-sonnet-5"):
+            introductory = _pricing_day(priced_at) <= date(2026, 8, 31)
+            return {
+                "input": _money("2" if introductory else "3"),
+                "cache_write": _money("2.50" if introductory else "3.75"),
+                "cache_write_1h": _money("4" if introductory else "6"),
+                "cache_read": _money("0.20" if introductory else "0.30"),
+                "output": _money("10" if introductory else "15"),
+                "source": (
+                    "claude-api-sonnet-5-introductory"
+                    if introductory else "claude-api-sonnet-5-standard"
+                ),
+            }
+        if _model_id_is(
+            m,
+            "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+            "claude-opus-4-5",
+        ):
             return {
                 "input": _money("5"),
                 "cache_write": _money("6.25"),
                 "cache_write_1h": _money("10"),
                 "cache_read": _money("0.50"),
                 "output": _money("25"),
-                "source": "claude-api-opus-4.8",
+                "source": "claude-api-opus-4.5-4.8",
             }
-        if any(x in m for x in (
-            "opus-4-7", "opus-4.7", "opus-4-6", "opus-4.6",
-            "opus-4-5", "opus-4.5",
-        )):
-            return {
-                "input": _money("5"),
-                "cache_write": _money("6.25"),
-                "cache_write_1h": _money("10"),
-                "cache_read": _money("0.50"),
-                "output": _money("25"),
-                "source": "claude-api-opus-4.5+",
-            }
-        if "opus" in m:
+        if _model_id_is(
+            m,
+            "claude-opus-4-1", "claude-opus-4", "claude-3-opus",
+        ):
             return {
                 "input": _money("15"),
                 "cache_write": _money("18.75"),
                 "cache_write_1h": _money("30"),
                 "cache_read": _money("1.50"),
                 "output": _money("75"),
-                "source": "claude-api-opus-4.1/4",
+                "source": "claude-api-opus-3/4/4.1",
             }
-        if "sonnet" in m:
+        if _model_id_is(m, "claude-sonnet-4-5", "claude-sonnet-4"):
+            return {
+                "tiered": True,
+                "threshold": 200_000,
+                "input_low": _money("3"),
+                "input_high": _money("6"),
+                "cache_write_low": _money("3.75"),
+                "cache_write_high": _money("7.50"),
+                "cache_write_1h_low": _money("6"),
+                "cache_write_1h_high": _money("12"),
+                "cache_read_low": _money("0.30"),
+                "cache_read_high": _money("0.60"),
+                "output_low": _money("15"),
+                "output_high": _money("22.50"),
+                "source": "claude-api-sonnet-4/4.5-standard",
+            }
+        if _model_id_is(
+            m,
+            "claude-sonnet-4-6", "claude-3-7-sonnet",
+            "claude-3-5-sonnet", "claude-3-sonnet",
+        ):
             return {
                 "input": _money("3"),
                 "cache_write": _money("3.75"),
                 "cache_write_1h": _money("6"),
                 "cache_read": _money("0.30"),
                 "output": _money("15"),
-                "source": "claude-api-sonnet-4.x",
+                "source": "claude-api-sonnet-3-4.6",
             }
-        if "haiku" in m:
+        if _model_id_is(m, "claude-haiku-4-5"):
             return {
                 "input": _money("1"),
                 "cache_write": _money("1.25"),
@@ -929,16 +992,83 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
                 "output": _money("5"),
                 "source": "claude-api-haiku-4.5",
             }
+        if _model_id_is(m, "claude-3-5-haiku"):
+            return {
+                "input": _money("0.80"),
+                "cache_write": _money("1"),
+                "cache_write_1h": _money("1.60"),
+                "cache_read": _money("0.08"),
+                "output": _money("4"),
+                "source": "claude-api-haiku-3.5",
+            }
+        if _model_id_is(m, "claude-3-haiku"):
+            return {
+                "input": _money("0.25"),
+                "cache_write": _money("0.30"),
+                "cache_write_1h": _money("0.50"),
+                "cache_read": _money("0.03"),
+                "output": _money("1.25"),
+                "source": "claude-api-haiku-3",
+            }
 
     if b in {"codex", "oss"}:
-        if "gpt-5.6-mini" in m:
+        # GPT-5.6 renamed the former flagship/mini/nano tiers to
+        # Sol/Terra/Luna. The unsuffixed alias routes to Sol.
+        if _model_id_is(m, "gpt-5.6-luna"):
             return {
-                "input": _money("0.75"),
-                "cache_read": _money("0.075"),
-                "output": _money("4.50"),
-                "source": "openai-api-gpt-5.6-mini",
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("1"),
+                "input_high": _money("2"),
+                "cache_write_low": _money("1.25"),
+                "cache_write_high": _money("2.50"),
+                "cache_read_low": _money("0.10"),
+                "cache_read_high": _money("0.20"),
+                "output_low": _money("6"),
+                "output_high": _money("9"),
+                "source": "openai-api-gpt-5.6-luna-standard",
             }
-        if "gpt-5.6" in m:
+        if _model_id_is(m, "gpt-5.6-terra"):
+            return {
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("2.50"),
+                "input_high": _money("5"),
+                "cache_write_low": _money("3.125"),
+                "cache_write_high": _money("6.25"),
+                "cache_read_low": _money("0.25"),
+                "cache_read_high": _money("0.50"),
+                "output_low": _money("15"),
+                "output_high": _money("22.50"),
+                "source": "openai-api-gpt-5.6-terra-standard",
+            }
+        if _model_id_is(m, "gpt-5.6", "gpt-5.6-sol"):
+            return {
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("5"),
+                "input_high": _money("10"),
+                "cache_write_low": _money("6.25"),
+                "cache_write_high": _money("12.50"),
+                "cache_read_low": _money("0.50"),
+                "cache_read_high": _money("1"),
+                "output_low": _money("30"),
+                "output_high": _money("45"),
+                "source": "openai-api-gpt-5.6-sol-standard",
+            }
+        if _model_id_is(m, "gpt-5.5-pro"):
+            return {
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("30"),
+                "input_high": _money("60"),
+                "cache_read_low": _money("0"),
+                "cache_read_high": _money("0"),
+                "output_low": _money("180"),
+                "output_high": _money("270"),
+                "source": "openai-api-gpt-5.5-pro-standard",
+            }
+        if _model_id_is(m, "gpt-5.5"):
             return {
                 "tiered": True,
                 "threshold": 272_000,
@@ -948,37 +1078,108 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
                 "cache_read_high": _money("1"),
                 "output_low": _money("30"),
                 "output_high": _money("45"),
-                "source": "openai-api-gpt-5.6-sol",
+                "source": "openai-api-gpt-5.5-standard",
             }
-        if "gpt-5.5" in m:
-            return {
-                "tiered": True,
-                "threshold": 272_000,
-                "input_low": _money("5"),
-                "input_high": _money("10"),
-                "cache_read_low": _money("0.50"),
-                "cache_read_high": _money("1"),
-                "output_low": _money("30"),
-                "output_high": _money("45"),
-                "source": "openai-api-gpt-5.5",
-            }
-        if "gpt-5.4-mini" in m:
+        if _model_id_is(m, "gpt-5.4-mini"):
             return {
                 "input": _money("0.75"),
                 "cache_read": _money("0.075"),
                 "output": _money("4.50"),
                 "source": "openai-api-gpt-5.4-mini",
             }
-        if "gpt-5.4" in m:
+        if _model_id_is(m, "gpt-5.4-nano"):
             return {
-                "input": _money("2.50"),
-                "cache_read": _money("0.25"),
-                "output": _money("15"),
-                "source": "openai-api-gpt-5.4",
+                "input": _money("0.20"),
+                "cache_read": _money("0.02"),
+                "output": _money("1.25"),
+                "source": "openai-api-gpt-5.4-nano",
             }
+        if _model_id_is(m, "gpt-5.4-pro"):
+            return {
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("30"),
+                "input_high": _money("60"),
+                "cache_read_low": _money("0"),
+                "cache_read_high": _money("0"),
+                "output_low": _money("180"),
+                "output_high": _money("270"),
+                "source": "openai-api-gpt-5.4-pro-standard",
+            }
+        if _model_id_is(m, "gpt-5.4"):
+            return {
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("2.50"),
+                "input_high": _money("5"),
+                "cache_read_low": _money("0.25"),
+                "cache_read_high": _money("0.50"),
+                "output_low": _money("15"),
+                "output_high": _money("22.50"),
+                "source": "openai-api-gpt-5.4-standard",
+            }
+        # Remaining standard-tier text models on OpenAI's public rate card.
+        # Specific snapshots with exceptional prices precede their aliases.
+        openai_flat = (
+            (("gpt-5.2-pro",), "21", None, "168"),
+            (("gpt-5.2",), "1.75", "0.175", "14"),
+            (("gpt-5.1",), "1.25", "0.125", "10"),
+            (("gpt-5-pro",), "15", None, "120"),
+            (("gpt-5-mini",), "0.25", "0.025", "2"),
+            (("gpt-5-nano",), "0.05", "0.005", "0.40"),
+            (("gpt-5",), "1.25", "0.125", "10"),
+            (("gpt-4.1-mini",), "0.40", "0.10", "1.60"),
+            (("gpt-4.1-nano",), "0.10", "0.025", "0.40"),
+            (("gpt-4.1",), "2", "0.50", "8"),
+            (("gpt-4o-2024-05-13",), "5", None, "15"),
+            (("gpt-4o-mini",), "0.15", "0.075", "0.60"),
+            (("gpt-4o",), "2.50", "1.25", "10"),
+            (("o1-pro",), "150", None, "600"),
+            (("o1-mini",), "1.10", "0.55", "4.40"),
+            (("o1",), "15", "7.50", "60"),
+            (("o3-pro",), "20", None, "80"),
+            (("o3-mini",), "1.10", "0.55", "4.40"),
+            (("o3",), "2", "0.50", "8"),
+            (("o4-mini",), "1.10", "0.275", "4.40"),
+            (("gpt-4-turbo", "gpt-4-turbo-2024-04-09"), "10", None, "30"),
+            (("gpt-4-0125-preview", "gpt-4-1106-preview",
+              "gpt-4-1106-vision-preview"), "10", None, "30"),
+            (("gpt-4-0613", "gpt-4-0314"), "30", None, "60"),
+            (("gpt-4-32k",), "60", None, "120"),
+            (("gpt-3.5-turbo", "gpt-3.5-turbo-0125"), "0.50", None, "1.50"),
+            (("gpt-3.5-turbo-1106",), "1", None, "2"),
+            (("gpt-3.5-turbo-0613", "gpt-3.5-0301",
+              "gpt-3.5-turbo-instruct"), "1.50", None, "2"),
+            (("gpt-3.5-turbo-16k-0613",), "3", None, "4"),
+            (("davinci-002",), "2", None, "2"),
+            (("babbage-002",), "0.40", None, "0.40"),
+        )
+        for model_ids, input_rate, cache_rate, output_rate in openai_flat:
+            if not _model_id_is(m, *model_ids):
+                continue
+            rates = {
+                "input": _money(input_rate),
+                "output": _money(output_rate),
+                "source": f"openai-api-{model_ids[0]}-standard",
+            }
+            if cache_rate is not None:
+                rates["cache_read"] = _money(cache_rate)
+            return rates
 
     if b == "gemini":
-        if "gemini-3.1-pro-preview" in m or "gemini-3-pro" in m:
+        if _model_id_is(m, "gemini-3.5-flash"):
+            return {
+                "input": _money("1.50"),
+                "cache_read": _money("0.15"),
+                "output": _money("9"),
+                "source": "gemini-api-3.5-flash-standard",
+            }
+        if _model_id_is(
+            m,
+            "gemini-3.1-pro-preview",
+            "gemini-3.1-pro-preview-customtools",
+            "gemini-3-pro-preview",
+        ):
             return {
                 "tiered": True,
                 "threshold": 200_000,
@@ -990,28 +1191,90 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
                 "output_high": _money("18"),
                 "source": "gemini-api-3.1-pro-preview-standard",
             }
-        if "gemini-3.1-flash-lite" in m:
+        if _model_id_is(m, "gemini-3.1-flash-lite"):
             return {
                 "input": _money("0.25"),
                 "cache_read": _money("0.025"),
                 "output": _money("1.50"),
                 "source": "gemini-api-3.1-flash-lite-standard",
             }
-        if "gemini-3-flash" in m:
+        if _model_id_is(m, "gemini-3-flash-preview"):
             return {
                 "input": _money("0.50"),
                 "cache_read": _money("0.05"),
                 "output": _money("3"),
                 "source": "gemini-api-3-flash-standard",
             }
+        if _model_id_is(m, "gemini-2.5-pro"):
+            return {
+                "tiered": True,
+                "threshold": 200_000,
+                "input_low": _money("1.25"),
+                "input_high": _money("2.50"),
+                "cache_read_low": _money("0.125"),
+                "cache_read_high": _money("0.25"),
+                "output_low": _money("10"),
+                "output_high": _money("15"),
+                "source": "gemini-api-2.5-pro-standard",
+            }
+        if _model_id_is(m, "gemini-2.5-flash"):
+            return {
+                "input": _money("0.30"),
+                "cache_read": _money("0.03"),
+                "output": _money("2.50"),
+                "source": "gemini-api-2.5-flash-standard",
+            }
+        if _model_id_is(
+            m, "gemini-2.5-flash-lite", "gemini-2.5-flash-lite-preview-09-2025",
+        ):
+            return {
+                "input": _money("0.10"),
+                "cache_read": _money("0.01"),
+                "output": _money("0.40"),
+                "source": "gemini-api-2.5-flash-lite-standard",
+            }
+        if _model_id_is(m, "gemini-2.0-flash"):
+            return {
+                "input": _money("0.10"),
+                "cache_read": _money("0.025"),
+                "output": _money("0.40"),
+                "source": "gemini-api-2.0-flash-standard-retired",
+            }
+        if _model_id_is(m, "gemini-2.0-flash-lite"):
+            return {
+                "input": _money("0.075"),
+                "cache_read": _money("0"),
+                "output": _money("0.30"),
+                "source": "gemini-api-2.0-flash-lite-standard-retired",
+            }
 
     if b == "grok":
-        if "grok-build" in m:
+        if _model_id_is(m, "grok-build-0.1"):
             return {
                 "input": _money("1"),
                 "cache_read": _money("0.20"),
                 "output": _money("2"),
                 "source": "xai-code-api-grok-build-0.1",
+            }
+        if _model_id_is(m, "grok-4.5"):
+            return {
+                "input": _money("2"),
+                "cache_read": _money("0.50"),
+                "output": _money("6"),
+                "source": "xai-chat-api-grok-4.5",
+            }
+        if _model_id_is(
+            m,
+            "grok-4.3",
+            "grok-4.20-multi-agent-0309",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-0309-non-reasoning",
+        ):
+            return {
+                "input": _money("1.25"),
+                "cache_read": _money("0.20"),
+                "output": _money("2.50"),
+                "source": "xai-chat-api-grok-4.3/4.20",
             }
     return None
 
@@ -1026,26 +1289,42 @@ def _cost_decimal(
     cache_creation_tokens: int = 0,
     cache_creation_1h_tokens: int = 0,
     prompt_tokens_for_tier: int | None = None,
+    priced_at: object = None,
 ) -> tuple[Decimal | None, str]:
-    rates = _pricing_rates(backend, model)
+    rates = _pricing_rates(backend, model, priced_at=priced_at)
     if not rates:
         return None, "unknown"
 
-    inp = Decimal(max(0, int(input_tokens)))
-    cached = Decimal(max(0, int(cached_input_tokens)))
-    out = Decimal(max(0, int(output_tokens)))
-    cache_create = Decimal(max(0, int(cache_creation_tokens)))
+    inp = Decimal(_as_nonnegative_int(input_tokens))
+    cached = Decimal(_as_nonnegative_int(cached_input_tokens))
+    out = Decimal(_as_nonnegative_int(output_tokens))
+    cache_create = Decimal(_as_nonnegative_int(cache_creation_tokens))
     cache_create_1h = min(
-        cache_create, Decimal(max(0, int(cache_creation_1h_tokens)))
+        cache_create, Decimal(_as_nonnegative_int(cache_creation_1h_tokens))
     )
 
     if rates.get("tiered"):
-        prompt = int(prompt_tokens_for_tier or input_tokens or 0)
+        prompt = _as_nonnegative_int(prompt_tokens_for_tier or input_tokens)
         high = prompt > int(rates["threshold"])
         input_rate = rates["input_high" if high else "input_low"]
         cache_rate = rates["cache_read_high" if high else "cache_read_low"]
         output_rate = rates["output_high" if high else "output_low"]
-        cost = (inp * input_rate + cached * cache_rate + out * output_rate) / _MILLION
+        write_rate = rates.get(
+            "cache_write_high" if high else "cache_write_low",
+            input_rate,
+        )
+        write_1h_rate = rates.get(
+            "cache_write_1h_high" if high else "cache_write_1h_low",
+            write_rate,
+        )
+        fresh_input = max(Decimal("0"), inp - cache_create)
+        cost = (
+            fresh_input * input_rate
+            + (cache_create - cache_create_1h) * write_rate
+            + cache_create_1h * write_1h_rate
+            + cached * cache_rate
+            + out * output_rate
+        ) / _MILLION
         return cost, str(rates["source"])
 
     input_rate = rates["input"]
@@ -1069,7 +1348,7 @@ def _cost_decimal(
 
 
 def _decimal_text(value: Decimal | None) -> str:
-    if value is None:
+    if value is None or not value.is_finite():
         return ""
     return format(value.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP), "f")
 
@@ -1077,10 +1356,12 @@ def _decimal_text(value: Decimal | None) -> str:
 def _fmt_usd(value: object, estimated: bool = False) -> str:
     try:
         dec = Decimal(str(value))
+        if not dec.is_finite():
+            return "—"
+        amount = dec.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
     except Exception:
         return "—"
     prefix = "~" if estimated else ""
-    amount = dec.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
     return f"{prefix}${amount:,.4f}"
 
 
@@ -1122,6 +1403,7 @@ def harvest_tokens(
         # is not silently scored as zero-cost.
         "prompt_estimate_tokens": 0,
         "estimated": False,
+        "cost_estimated": False,
         "cost_usd": "",
         "cost_source": "",
         "token_source": "unknown",
@@ -1134,9 +1416,10 @@ def harvest_tokens(
         return totals
 
     def _int(value: object) -> int:
-        return int(value) if isinstance(value, (int, float)) else 0
+        return _as_nonnegative_int(value)
 
     token_sources: set[str] = set()
+    cost_sources: set[str] = set()
     for line in lines:
         line = line.strip()
         if not line:
@@ -1145,10 +1428,14 @@ def harvest_tokens(
             row = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(row, dict):
+            continue
         totals["iterations"] += 1
         backend = str(row.get("backend") or default_backend or "").strip().lower()
         model = str(row.get("model") or default_model or "").strip()
         tok = row.get("tokens") or {}
+        if not isinstance(tok, dict):
+            tok = {}
         raw_input = _int(tok.get("input"))
         # cache_read is written as `cached_input` by both the harness and
         # the model-direct extractor; `cache_read` is a harness-only alias.
@@ -1189,64 +1476,73 @@ def harvest_tokens(
         # boundary, but `raw_input` is the session's input summed across every
         # request, so it crosses the threshold on conversation length alone and
         # pins ~all multi-turn sessions to the high tier. Tier on the per-request
-        # prompt size instead: prompt_estimate_build is the build-time prompt for
-        # one request; fall back to prompt_estimate, then the caller's
+        # prompt size instead: prompt_chars is the rendered request captured by
+        # audit_runner; fall back to legacy prompt estimates, then the caller's
         # prompt_estimate_fallback (model-direct has no harness stash, so harvest
         # derives this from the cell's persisted prompt.txt), then raw_input for
         # rows that predate every estimate. Underestimates within-session context
         # growth past the threshold, but errs far smaller than tiering on the
         # cumulative sum.
         tier_basis = (
-            _int(tok.get("prompt_estimate_build"))
+            (_int(row.get("prompt_chars")) + 3) // 4
+            or _int(tok.get("prompt_estimate_build"))
             or _int(tok.get("prompt_estimate"))
             or prompt_estimate_fallback
             or raw_input
         )
+        if prompt_estimate:
+            totals["prompt_estimate_tokens"] += prompt_estimate
+        estimated_pricing = bool(
+            raw_input == 0
+            and prompt_estimate
+            and backend in ("gemini", "grok")
+        )
+        pricing_input = prompt_estimate if estimated_pricing else full_rate_input
         try:
             event_cost = Decimal(str(row.get("cost_usd")))
         except Exception:
             event_cost = None
+        if event_cost is not None and not event_cost.is_finite():
+            event_cost = None
         source = str(row.get("cost_source") or "")
-        if event_cost is None or event_cost < 0:
+        used_rate_card = event_cost is None or event_cost < 0
+        if used_rate_card:
             event_cost, source = _cost_decimal(
                 backend,
                 model,
-                input_tokens=full_rate_input,
+                input_tokens=pricing_input,
                 cached_input_tokens=cache_read,
                 output_tokens=output,
                 cache_creation_tokens=cache_creation,
                 cache_creation_1h_tokens=cache_creation_1h,
                 prompt_tokens_for_tier=tier_basis,
+                priced_at=row.get("timestamp"),
             )
         if event_cost is not None:
             totals["cost_usd"] = _decimal_text(
                 Decimal(totals["cost_usd"] or "0") + event_cost
             )
-            totals["cost_source"] = source
-        for field in ("prompt_estimate", "prompt_estimate_build"):
-            val = tok.get(field)
-            if isinstance(val, (int, float)):
-                totals["prompt_estimate_tokens"] += int(val)
-                if raw_input == 0 and backend in ("gemini", "grok"):
-                    estimate_cost, source = _cost_decimal(
-                        backend,
-                        model,
-                        input_tokens=int(val),
-                        cached_input_tokens=0,
-                        output_tokens=output,
-                        prompt_tokens_for_tier=int(val),
-                    )
-                    if estimate_cost is not None:
-                        totals["cost_usd"] = _decimal_text(
-                            Decimal(totals["cost_usd"] or "0") + estimate_cost
-                        )
-                        totals["cost_source"] = source
-                        totals["estimated"] = True
-                break
+            if source:
+                cost_sources.add(source)
+        if used_rate_card and event_cost is not None:
+            rates = _pricing_rates(backend, model, priced_at=row.get("timestamp"))
+            # The threshold is per provider request, while CLI telemetry is an
+            # invocation aggregate. The selected tier is the best available
+            # reconstruction, not a backend-reported invoice amount.
+            if estimated_pricing or row.get("estimated") is True or (
+                rates is not None and rates.get("tiered")
+            ):
+                totals["cost_estimated"] = True
         probe = row.get("probe") or {}
+        if not isinstance(probe, dict):
+            probe = {}
         totals["asan_invocations"] += _int(probe.get("asan_invocations"))
-        if row.get("estimated") is True:
+        if row.get("estimated") is True or estimated_pricing:
             totals["estimated"] = True
+    if cost_sources:
+        totals["cost_source"] = (
+            next(iter(cost_sources)) if len(cost_sources) == 1 else "mixed"
+        )
     if token_sources:
         # An `unknown` row is a productive session whose usage was never
         # recorded, so the cell total OMITS real cost. That must dominate the
@@ -1772,7 +2068,8 @@ def _model_direct_prompt_estimate(results_dir: Path) -> int:
     prompt into memory.
     """
     try:
-        return (results_dir / "prompt.txt").stat().st_size // 4
+        size = (results_dir / "prompt.txt").stat().st_size
+        return (size + 3) // 4
     except OSError:
         return 0
 
@@ -2280,12 +2577,16 @@ def _effective_wall(cell: dict):
 def _tokens_for_cell(cell: dict) -> dict:
     """Return a normalized token row for one aggregated benchmark cell."""
     metrics = cell.get("metrics") or {}
+    if not isinstance(metrics, dict):
+        metrics = {}
     tokens = metrics.get("tokens") or {}
-    input_tokens = int(tokens.get("input_tokens", 0) or 0)
-    cached_input = int(tokens.get("cached_input_tokens", 0) or 0)
-    cache_creation = int(tokens.get("cache_creation_tokens", 0) or 0)
-    output_tokens = int(tokens.get("output_tokens", 0) or 0)
-    prompt_estimate = int(tokens.get("prompt_estimate_tokens", 0) or 0)
+    if not isinstance(tokens, dict):
+        tokens = {}
+    input_tokens = _as_nonnegative_int(tokens.get("input_tokens"))
+    cached_input = _as_nonnegative_int(tokens.get("cached_input_tokens"))
+    cache_creation = _as_nonnegative_int(tokens.get("cache_creation_tokens"))
+    output_tokens = _as_nonnegative_int(tokens.get("output_tokens"))
+    prompt_estimate = _as_nonnegative_int(tokens.get("prompt_estimate_tokens"))
     # `estimated` is explicit for model-direct rows. Harness-side gemini
     # rows often only have prompt_estimate_tokens because agy has no usage
     # surface; treat that as estimated too so reports do not imply measured
@@ -2305,8 +2606,8 @@ def _tokens_for_cell(cell: dict) -> dict:
         # `wall_seconds` here is productive wall (session-recovery pause excluded)
         # so token/throughput rows compare investigation time, not idle waiting.
         # `wall_elapsed_seconds` keeps the raw wall for reference.
-        "wall_seconds": int(_effective_wall(cell) or 0),
-        "wall_elapsed_seconds": int(cell.get("wall_seconds") or 0),
+        "wall_seconds": _as_nonnegative_int(_effective_wall(cell)),
+        "wall_elapsed_seconds": _as_nonnegative_int(cell.get("wall_seconds")),
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input,
         "cache_creation_tokens": cache_creation,
@@ -2314,7 +2615,8 @@ def _tokens_for_cell(cell: dict) -> dict:
         "prompt_estimate_tokens": prompt_estimate,
         "cost_usd": str(tokens.get("cost_usd") or ""),
         "cost_source": str(tokens.get("cost_source") or ""),
-        "iterations": int(tokens.get("iterations", 0) or 0),
+        "cost_estimated": bool(tokens.get("cost_estimated")) or estimated,
+        "iterations": _as_nonnegative_int(tokens.get("iterations")),
         "estimated": estimated,
         "token_source": str(tokens.get("token_source") or ""),
     }
@@ -2363,7 +2665,10 @@ def _sum_cost_usd(rows: list[dict]) -> str:
         if value in (None, ""):
             continue
         try:
-            total += Decimal(str(value))
+            amount = Decimal(str(value))
+            if not amount.is_finite():
+                continue
+            total += amount
             saw = True
         except Exception:
             continue
@@ -2398,6 +2703,8 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
             run_meta = json.loads(run_json.read_text(encoding="utf-8"))
         except ValueError:
             run_meta = {}
+        if not isinstance(run_meta, dict):
+            run_meta = {}
 
     by_condition: dict[str, list[dict]] = {}
     for cell_dir in _cell_dirs(bench_dir):
@@ -2410,10 +2717,14 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 cell = json.loads(cj.read_text(encoding="utf-8"))
             except ValueError:
                 cell = {}
+            if not isinstance(cell, dict):
+                cell = {}
         if mj.is_file():
             try:
                 metrics = json.loads(mj.read_text(encoding="utf-8"))
             except ValueError:
+                metrics = {}
+            if not isinstance(metrics, dict):
                 metrics = {}
         cond = cell.get("condition") or "unknown"
         merged = {
@@ -2437,7 +2748,8 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         p = bench_dir / name
         if p.is_file():
             try:
-                return json.loads(p.read_text(encoding="utf-8"))
+                value = json.loads(p.read_text(encoding="utf-8"))
+                return value if isinstance(value, dict) else {}
             except ValueError:
                 return {}
         return {}
@@ -2595,6 +2907,9 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 ),
                 "cost_usd_total": _sum_cost_usd(token_rows),
                 "cost_source": _cost_source(token_rows),
+                "cost_estimated": any(
+                    bool(row.get("cost_estimated")) for row in token_rows
+                ),
                 "token_source": _token_source(token_rows),
                 "cells": cells,
             }
@@ -3037,17 +3352,23 @@ def _fmt_output_cell(agg: dict) -> str:
 def _fmt_cost_cell(agg: dict) -> str:
     return _fmt_usd(
         agg.get("cost_usd_total"),
-        estimated=str(agg.get("token_source") or "") == "estimated",
+        estimated=bool(agg.get("cost_estimated"))
+        or str(agg.get("token_source") or "") == "estimated",
     )
 
 
 def _fmt_cost_compact_cell(agg: dict) -> str:
     try:
         dec = Decimal(str(agg.get("cost_usd_total")))
+        if not dec.is_finite():
+            return "—"
+        amount = dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     except Exception:
         return "—"
-    prefix = "~" if str(agg.get("token_source") or "") == "estimated" else ""
-    amount = dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    prefix = "~" if (
+        bool(agg.get("cost_estimated"))
+        or str(agg.get("token_source") or "") == "estimated"
+    ) else ""
     return f"{prefix}${amount:,}"
 
 
@@ -3414,7 +3735,9 @@ def render_section(report: dict) -> str:
                         prompt=_fmt_tokens(row.get("prompt_estimate_tokens")),
                         cost=_fmt_usd(
                             row.get("cost_usd"),
-                            estimated=bool(row.get("estimated")),
+                            estimated=bool(
+                                row.get("estimated") or row.get("cost_estimated")
+                            ),
                         ),
                     )
                 )
@@ -3462,6 +3785,10 @@ def render_section(report: dict) -> str:
         lines.append(
             "> - **Cost** — USD-equivalent token cost at public provider "
             "rates: fresh input + cache writes + cache reads + output. "
+            "A `~` marks character-count estimates or reconstructed "
+            "per-request long-context tiers. "
+            "This is token cost, not separately metered provider tools, "
+            "explicit cache storage, or non-standard service tiers. "
             "Codex rows use OpenAI API-equivalent dollars, including "
             "GPT-5.5 long-context pricing when a request exceeds 272k "
             "input tokens; the Codex product also reports credits."
@@ -4298,11 +4625,17 @@ def _atomic_write_json(path: Path, value: dict) -> None:
                 pass
 
 
-def _as_int(value: object) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
+def _as_nonnegative_int(value: object) -> int:
+    if isinstance(value, bool):
         return 0
+    try:
+        return max(0, int(value or 0))
+    except (OverflowError, TypeError, ValueError):
+        return 0
+
+
+def _as_int(value: object) -> int:
+    return _as_nonnegative_int(value)
 
 
 def _format_count(value: object) -> str:

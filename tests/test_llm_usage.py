@@ -189,6 +189,31 @@ class UsageExtractionTests(unittest.TestCase):
         self.assertEqual(row["tokens"]["cache_creation_1h"], 200)
         self.assertEqual(row["cost_usd"], 0.123456)
 
+    def test_malformed_native_counters_fail_open(self) -> None:
+        raw = self.fixture("malformed.raw", [{
+            "type": "result", "total_cost_usd": float("inf"),
+            "usage": {
+                "input_tokens": float("inf"), "prompt_tokens": 7,
+                "output_tokens": -5, "completion_tokens": 9,
+                "cache_read_input_tokens": True, "total_cached_tokens": 3,
+                "cache_creation_input_tokens": float("nan"),
+                "cache_write_input_tokens": 4,
+                "cache_creation": {"ephemeral_1h_input_tokens": -1},
+            },
+        }])
+        row = llm_usage.extract_usage(str(raw), backend="claude")
+        self.assertEqual(
+            row["tokens"],
+            {"input": 7, "cached_input": 3, "cache_creation": 4,
+             "cache_creation_1h": 0, "output": 9},
+        )
+        self.assertNotIn("cost_usd", row)
+        self.assertTrue(llm_usage.usage_is_complete(row, 0))
+        self.assertFalse(llm_usage.usage_is_complete({
+            "tokens": {"input": float("inf"), "output": -1},
+        }, 0))
+        self.assertFalse(llm_usage.usage_is_complete({"tokens": []}, 0))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

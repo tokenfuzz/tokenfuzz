@@ -78,8 +78,14 @@ _INPUT_KEYS = ("input_tokens", "prompt_tokens", "input")
 # gemini-cli's result.stats names its cache-read counter `cached` (no
 # `_input` / `_tokens` suffix); without this alias the 55M+ tokens it bills
 # as cache reads are silently dropped from the cached_input column.
-_CACHED_KEYS = ("cached_input_tokens", "cache_read_input_tokens", "cached_input", "cached")
-_CACHE_CREATION_KEYS = ("cache_creation_input_tokens", "cache_creation")
+_CACHED_KEYS = (
+    "cached_input_tokens", "cache_read_input_tokens", "total_cached_tokens",
+    "cached_input", "cached",
+)
+_CACHE_CREATION_KEYS = (
+    "cache_creation_input_tokens", "cache_write_input_tokens",
+    "cache_write_tokens", "cache_creation",
+)
 _OUTPUT_KEYS = ("output_tokens", "completion_tokens", "output")
 
 # Terminal/summary events carry the cumulative usage for ONE agent
@@ -110,18 +116,32 @@ def usage_is_complete(usage: dict, returncode: int) -> bool:
     if returncode != 0 or not isinstance(usage, dict):
         return False
     tokens = usage.get("tokens") or {}
+    if not isinstance(tokens, dict):
+        return False
     has_tokens = any(
-        int(tokens.get(key) or 0)
+        _nonnegative_int(tokens.get(key))
         for key in ("input", "cached_input", "cache_creation", "output")
     )
     return bool(has_tokens or usage.get("estimated") is True)
+
+
+def _nonnegative_int(value: object) -> int:
+    """Coerce one provider counter without trusting malformed telemetry."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (OverflowError, TypeError, ValueError):
+        return 0
 
 
 def _first_int(d: dict, keys: tuple[str, ...]) -> int:
     for k in keys:
         v = d.get(k)
         if isinstance(v, (int, float)):
-            return int(v)
+            parsed = _nonnegative_int(v)
+            if parsed:
+                return parsed
     return 0
 
 
@@ -135,8 +155,33 @@ def _cache_int(d: dict, key: str) -> int:
         return 0
     v = cache.get(key)
     if isinstance(v, (int, float)):
-        return int(v)
+        return _nonnegative_int(v)
     return 0
+
+
+def _input_detail_int(d: dict, *keys: str) -> int:
+    details = d.get("input_tokens_details")
+    if not isinstance(details, dict):
+        return 0
+    return _first_int(details, keys)
+
+
+def _cached_input_int(usage: dict) -> int:
+    return (
+        _first_int(usage, _CACHED_KEYS)
+        or _cache_int(usage, "read")
+        or _input_detail_int(usage, "cached_tokens", "cache_read_tokens")
+    )
+
+
+def _cache_write_int(usage: dict) -> int:
+    return (
+        _first_int(usage, _CACHE_CREATION_KEYS)
+        or _cache_int(usage, "write")
+        or _input_detail_int(
+            usage, "cache_write_tokens", "cache_creation_tokens",
+        )
+    )
 
 
 def _cache_creation_1h(usage: dict) -> int:
@@ -145,7 +190,7 @@ def _cache_creation_1h(usage: dict) -> int:
     if not isinstance(detail, dict):
         return 0
     value = detail.get("ephemeral_1h_input_tokens")
-    return int(value) if isinstance(value, (int, float)) else 0
+    return _nonnegative_int(value)
 
 
 def _find_usage(obj: object) -> dict | None:
@@ -197,7 +242,7 @@ def _model_usage_tokens(obj: object) -> dict | None:
         for dst, src in keymap.items():
             v = val.get(src)
             if isinstance(v, (int, float)):
-                out[dst] += int(v)
+                out[dst] += _nonnegative_int(v)
     return out if any(out.values()) else None
 
 
@@ -363,7 +408,9 @@ def extract_usage_from_text(
             continue
         cost = obj.get("total_cost_usd")
         if isinstance(cost, (int, float)):
-            reported_cost = max(reported_cost, float(cost))
+            candidate_cost = float(cost)
+            if math.isfinite(candidate_cost) and candidate_cost >= 0:
+                reported_cost = max(reported_cost, candidate_cost)
         mu = _model_usage_tokens(obj)
         if mu is not None:
             total = sum(mu.values())
@@ -381,8 +428,8 @@ def extract_usage_from_text(
             continue
         candidate = {
             "input": _first_int(usage, _INPUT_KEYS),
-            "cached_input": _first_int(usage, _CACHED_KEYS) or _cache_int(usage, "read"),
-            "cache_creation": _first_int(usage, _CACHE_CREATION_KEYS) or _cache_int(usage, "write"),
+            "cached_input": _cached_input_int(usage),
+            "cache_creation": _cache_write_int(usage),
             "output": _first_int(usage, _OUTPUT_KEYS),
             "cache_creation_1h": _cache_creation_1h(usage),
         }
@@ -420,8 +467,8 @@ def extract_usage_from_text(
         if usage is not None:
             candidate = {
                 "input": _first_int(usage, _INPUT_KEYS),
-                "cached_input": _first_int(usage, _CACHED_KEYS) or _cache_int(usage, "read"),
-                "cache_creation": _first_int(usage, _CACHE_CREATION_KEYS) or _cache_int(usage, "write"),
+                "cached_input": _cached_input_int(usage),
+                "cache_creation": _cache_write_int(usage),
                 "output": _first_int(usage, _OUTPUT_KEYS),
                 "cache_creation_1h": _cache_creation_1h(usage),
             }
@@ -552,9 +599,7 @@ def extract_field(
     # all-zero AND not estimated = nothing to report.
     measured_sum = 0
     for k in ("input", "output", "cached_input", "cache_creation"):
-        v = tokens.get(k)
-        if isinstance(v, (int, float)):
-            measured_sum += int(v)
+        measured_sum += _nonnegative_int(tokens.get(k))
     if not estimated and measured_sum == 0:
         return ""
 
@@ -563,7 +608,7 @@ def extract_field(
     for key in aliases:
         v = tokens.get(key)
         if isinstance(v, (int, float)):
-            total += int(v)
+            total += _nonnegative_int(v)
             any_present = True
     return str(total) if any_present else ""
 
