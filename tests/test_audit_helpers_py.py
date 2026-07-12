@@ -789,7 +789,7 @@ print("\niteration-provider-status")
 
 def _ips(raw_dir: str, timestamp: str) -> dict:
     proc = run(["iteration-provider-status", raw_dir, timestamp])
-    assert proc.returncode == 0, proc.stderr
+    ok(proc.returncode == 0, "iteration-provider-status command succeeds", proc.stderr)
     out = {}
     for line in proc.stdout.splitlines():
         k, _, v = line.partition("=")

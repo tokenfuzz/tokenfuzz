@@ -145,6 +145,10 @@ the strategy still applies, the sourcing is just more work.
 
 ### Preferred for advisory-covered peers: OSV (osv.dev)
 
+The command examples in this section use `curl` and `jq`. The GitHub severity
+fallback additionally uses the authenticated `gh` CLI. Install only the tools
+for the path you use; TokenFuzz itself does not require them.
+
 OSV aggregates OSS-Fuzz, GHSA, Debian DSA, Ubuntu USN, Alpine, etc., into one
 JSON schema. Each entry carries a fix commit hash you can `git show`. Highest
 structured signal when the peer is in the ecosystem.

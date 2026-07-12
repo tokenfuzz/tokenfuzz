@@ -1209,16 +1209,17 @@ assert_eq(True, tc.build_write_stamp(_bf_root, "asan"),
 assert_eq("fresh", tc.build_freshness(_bf_root, "asan"),
           "build_freshness: stamped build with no newer source reports fresh")
 
-# A source edit after the stamp → stale (the core staleness signal).
-time.sleep(1)
+# A source edit after the stamp → stale (the core staleness signal). Advance
+# mtime explicitly so the test is fast and independent of filesystem precision.
 (_bf_root / "main.c").write_text("int main(void){return 1;}\n")
+newer = time.time() + 1
+os.utime(_bf_root / "main.c", (newer, newer))
 assert_eq("stale", tc.build_freshness(_bf_root, "asan"),
           "build_freshness: a source file newer than the stamp reports stale")
 
 # A sibling sanitizer build compiled after the asan stamp must NOT read as a
 # source edit (only the canonical build-<san> trees are pruned from the walk).
 tc.build_write_stamp(_bf_root, "asan")
-time.sleep(1)
 (_bf_root / "build-ubsan").mkdir()
 (_bf_root / "build-ubsan" / "obj.o").write_bytes(b"\0")
 assert_eq("fresh", tc.build_freshness(_bf_root, "asan"),
@@ -1230,7 +1231,6 @@ assert_eq("fresh", tc.build_freshness(_bf_root, "asan"),
 # "build-*" dir would hide it and produce a false "fresh" — the one direction
 # this check must never take.
 tc.build_write_stamp(_bf_root, "asan")
-time.sleep(1)
 (_bf_root / "build-aux").mkdir()
 (_bf_root / "build-aux" / "config.guess").write_text("#!/bin/sh\n")
 assert_eq("stale", tc.build_freshness(_bf_root, "asan"),

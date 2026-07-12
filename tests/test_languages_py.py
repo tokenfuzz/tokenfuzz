@@ -666,7 +666,7 @@ active = sys.implementation.cache_tag  # e.g. "cpython-314"
 # Pick a wrong tag that's structurally valid but cannot equal the active
 # tag (active is "cpython-NN"; "cpython-9999" is safe across versions).
 wrong = "cpython-9999"
-assert active != wrong, "test sentinel collides with running interpreter"
+assert_true(active != wrong, "test sentinel differs from the running interpreter tag")
 
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)

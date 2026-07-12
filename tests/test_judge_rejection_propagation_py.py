@@ -114,10 +114,10 @@ with tempfile.TemporaryDirectory() as td:
         row = json.loads(line)
         if row.get("card_id") == "WORK-parse-id-asan":
             last_row = row
-    assert last_row is not None
-    ok("judge-rejected" in (last_row.get("note") or ""),
+    ok(last_row is not None, "matching card leaves a claims row")
+    ok("judge-rejected" in ((last_row or {}).get("note") or ""),
        "note carries judge-rejected marker")
-    ok("non-security" in (last_row.get("note") or ""),
+    ok("non-security" in ((last_row or {}).get("note") or ""),
        "note carries the operator-visible reason")
 
 # ── Multiple cards (sanitizer fan-out): all blocked ─────────────

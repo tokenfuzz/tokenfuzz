@@ -20,16 +20,16 @@ TokenFuzz itself needs:
 | LLVM (`clang`, `clang++`, `llvm-symbolizer`) | Building and diagnosing native sanitizer targets. |
 | `sancov` | Coverage-gated browser and JavaScript probes, when supported. |
 
-`bash` and `jq` are needed by the repository test suite. `gh` is optional and
-enables GitHub advisory lookup for cross-project strategy work. Your target may
-also need CMake, Meson, an archiver, a language runtime, or other upstream build
-dependencies.
+`bash` is needed by the repository test runner and its two shell-behavior suites.
+Your target may also need CMake, Meson, an archiver, a language runtime, or
+other upstream build dependencies. Optional strategy-specific tools are named
+where they are used; they are not TokenFuzz or test-suite prerequisites.
 
 ### macOS
 
 ```bash
 xcode-select --install
-brew install gh jq llvm ripgrep
+brew install llvm ripgrep
 ```
 
 Apple's command-line tools provide Git, `file`, `nm`, `otool`, and compiler
@@ -45,7 +45,7 @@ brew install python
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  bash binutils clang file gh git jq libclang-rt-dev llvm \
+  bash binutils clang file git libclang-rt-dev llvm \
   python3 python3-venv ripgrep
 ```
 
@@ -57,7 +57,7 @@ unavailable even when ASan works; use a complete LLVM installation from
 
 ```bash
 sudo dnf install -y \
-  bash binutils clang compiler-rt file gh git jq llvm \
+  bash binutils clang compiler-rt file git llvm \
   python3 python3-pip ripgrep
 ```
 

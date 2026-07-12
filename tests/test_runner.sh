@@ -9,7 +9,9 @@ setup_test_env
 RUNNER="$TESTS_DIR/run-tests.sh"
 tmp_script="$TESTS_DIR/test_runner_tmp_$$.sh"
 tmp_fail_script="$TESTS_DIR/test_runner_tmp_fail_$$.sh"
-trap 'rm -f "$tmp_script" "$tmp_fail_script"; teardown_test_env' EXIT
+tmp_python="$TESTS_DIR/test_runner_tmp_$$.py"
+tmp_hang_script="$TESTS_DIR/test_runner_tmp_hang_$$.sh"
+trap 'rm -f "$tmp_script" "$tmp_fail_script" "$tmp_python" "$tmp_hang_script"; teardown_test_env' EXIT
 # Child runner invocations below would otherwise overwrite the REAL
 # scheduling artifact (output/test-timings.tsv) with fixture-suite rows,
 # permanently defeating the self-calibrating LPT weights.
@@ -37,6 +39,39 @@ else
   fail "runner: zero failed count is green" "$output"
 fi
 
+cat > "$tmp_python" <<'PY'
+import unittest
+
+
+class SyntheticTests(unittest.TestCase):
+    def test_first(self):
+        self.assertEqual(2 + 2, 4)
+
+    def test_second(self):
+        self.assertIn("unit", "unittest")
+
+
+if __name__ == "__main__":
+    unittest.main()
+PY
+
+output=$(bash "$RUNNER" --jobs 1 "$(basename "$tmp_python")" 2>&1)
+assert_match "RESULTS: .*2 passed.*, .*0 failed" "$output" \
+  "runner: unittest assertions contribute to the summary"
+
+cat > "$tmp_hang_script" <<'EOF'
+#!/usr/bin/env bash
+sleep 30
+EOF
+
+rc=0
+output=$(bash "$RUNNER" --jobs 1 --suite-timeout 1 "$(basename "$tmp_hang_script")" 2>&1) || rc=$?
+assert_eq "1" "$rc" "runner: suite timeout fails the run"
+assert_match "Suite timed out after 1s" "$output" \
+  "runner: suite timeout reports the bounded failure"
+assert_match "Suite exit code: 124" "$output" \
+  "runner: suite timeout preserves the conventional exit code"
+
 cat > "$tmp_fail_script" <<'EOF'
 #!/usr/bin/env bash
 printf '  ✗ synthetic assertion failure\n'
@@ -62,7 +97,7 @@ if printf '%s\n' "$list" | awk 'NF && $1 != "wrapper" { bad=1 } END { exit bad ?
 else
   fail "runner: category list contains only requested category" "$list"
 fi
-assert_match "test_rg_wrapper.sh" "$list" "runner: wrapper category includes wrapper tests"
+assert_match "test_rg_wrapper.py" "$list" "runner: wrapper category includes migrated wrapper tests"
 assert_not_match "test_decision_" "$list" "runner: wrapper category excludes decision tests"
 
 # ── parallel scheduling: weights + longest-processing-time-first order ──
@@ -76,27 +111,20 @@ eval "$(awk '/^prioritize_parallel_tests\(\) \{/,/^}/' "$RUNNER")"
 
 # --- cold start (no timing artifact): bootstrap leads, rest is coarse ---
 PRIOR_TIMINGS=""
-heavy_w=$(test_weight test_workqueue.sh)
-sanitizer_w=$(test_weight test_sanitizer_multi.sh)
-core_w=$(test_weight test_severity.sh)
-light_w=$(test_weight test_argparse_need_arg.sh)
+heavy_w=$(test_weight test_probe_harness_cpp.py)
+sanitizer_w=$(test_weight test_multilang_support.py)
+light_w=$(test_weight test_argparse_need_arg.py)
 if [ "$heavy_w" -gt "$light_w" ] && [ "$heavy_w" -ge 15 ]; then
   pass "runner: cold-start bootstrap ranks a known-slow suite above a trivial one"
 else
   fail "runner: cold-start bootstrap ranks a known-slow suite above a trivial one" \
-    "workqueue=$heavy_w argparse=$light_w"
+    "probe_harness=$heavy_w argparse=$light_w"
 fi
 if [ "$sanitizer_w" -gt "$light_w" ] && [ "$sanitizer_w" -ge 10 ]; then
   pass "runner: cold-start bootstrap ranks sanitizer coverage above trivial suites"
 else
   fail "runner: cold-start bootstrap ranks sanitizer coverage above trivial suites" \
-    "sanitizer=$sanitizer_w argparse=$light_w"
-fi
-if [ "$core_w" -gt "$light_w" ] && [ "$core_w" -ge 15 ]; then
-  pass "runner: cold-start bootstrap ranks severity coverage above trivial suites"
-else
-  fail "runner: cold-start bootstrap ranks severity coverage above trivial suites" \
-    "severity=$core_w argparse=$light_w"
+    "multilang=$sanitizer_w argparse=$light_w"
 fi
 assert_eq "1" "$(test_weight test_audit_helpers_py.py)" \
   "runner: python suites weigh 1 by category fallback"
@@ -110,9 +138,9 @@ printf 'test_argparse_need_arg\tunit\t5\t0\t0\t999\t2\tx\n' >> "$tmp_timings"
 printf 'test_benchmark\tunit\t9\t0\t0\t3\t69\tx\n' >> "$tmp_timings"
 PRIOR_TIMINGS=""
 TEST_TIMINGS_FILE="$tmp_timings" load_prior_timings
-assert_eq "999" "$(test_weight test_argparse_need_arg.sh)" \
+assert_eq "999" "$(test_weight test_argparse_need_arg.py)" \
   "runner: recorded seconds become the weight (self-calibrating)"
-assert_eq "3" "$(test_weight test_benchmark.sh)" \
+assert_eq "3" "$(test_weight test_benchmark.py)" \
   "runner: a recorded fast time overrides the heavy bootstrap value"
 
 # prioritize_parallel_tests must emit suites in non-increasing weight
@@ -120,10 +148,10 @@ assert_eq "3" "$(test_weight test_benchmark.sh)" \
 # so a heavier suite appearing after a lighter one would start late.
 PRIOR_TIMINGS=""   # back to bootstrap weights for a predictable order
 TEST_FILES=(
-  "$TESTS_DIR/test_benchmark_scoring.sh"   # light
-  "$TESTS_DIR/test_benchmark.sh"           # heaviest (bootstrap)
-  "$TESTS_DIR/test_sanitizer_multi.sh"      # mid (bootstrap)
-  "$TESTS_DIR/test_workqueue.sh"           # heavy (bootstrap)
+  "$TESTS_DIR/test_benchmark_scoring.py"    # light
+  "$TESTS_DIR/test_probe_harness_cpp.py"    # heaviest (bootstrap)
+  "$TESTS_DIR/test_multilang_support.py"    # mid (bootstrap)
+  "$TESTS_DIR/test_workqueue.py"            # light after migration
 )
 prioritize_parallel_tests
 order_ok=1
@@ -139,7 +167,7 @@ else
   fail "runner: prioritize_parallel_tests orders suites longest-first (LPT)" \
     "got: ${TEST_FILES[*]##*/}"
 fi
-assert_eq "test_benchmark.sh" "${TEST_FILES[0]##*/}" \
+assert_eq "test_probe_harness_cpp.py" "${TEST_FILES[0]##*/}" \
   "runner: the heaviest suite is scheduled first"
 
 summary

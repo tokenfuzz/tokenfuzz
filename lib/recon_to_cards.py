@@ -99,7 +99,7 @@ SCORE_NEEDS_VERIFICATION = 200
 # very low score (below s1-patch's typical 80-140 band post-P3
 # decay) so the rotator only drains them after every higher-signal
 # card is exhausted — but they remain in the pool. Test
-# coverage in test_recon_changes.sh enforces this contract.
+# coverage in test_recon_changes.py enforces this contract.
 SCORE_VALIDATOR_REJECTED = 10
 
 

@@ -70,6 +70,13 @@ def assert_not_in(needle: str, haystack: str, name: str) -> None:
         failed(name, f"{needle!r} unexpectedly in haystack")
 
 
+def assert_true(condition: bool, name: str, detail: str = "") -> None:
+    if condition:
+        passed(name)
+    else:
+        failed(name, detail)
+
+
 # ─── Load bin/export-repro as a module ──────────────────────────────
 
 sys.path.insert(0, str(ROOT / "lib"))
@@ -314,29 +321,29 @@ full_body = (
     "## Classification\n\nCategory: lifetime\n\n"
     "## Root Cause\n\nDeep cause here.\n")
 head, rest = er.extract_summary_section(full_body)
-assert "<!-- enrich:tldr -->" in head and "## Summary" in head and "real summary prose" in head, \
-    "extract_summary_section: head carries leading enrich block + Summary section"
-assert "## Classification" not in head and "## Root Cause" not in head, \
-    "extract_summary_section: later sections stay out of the head"
-assert "## Classification" in rest and "## Root Cause" in rest and "## Summary" not in rest, \
-    "extract_summary_section: rest carries the post-Summary narrative only"
+assert_true("<!-- enrich:tldr -->" in head and "## Summary" in head and "real summary prose" in head,
+            "extract_summary_section: head carries leading enrich block + Summary section")
+assert_true("## Classification" not in head and "## Root Cause" not in head,
+            "extract_summary_section: later sections stay out of the head")
+assert_true("## Classification" in rest and "## Root Cause" in rest and "## Summary" not in rest,
+            "extract_summary_section: rest carries the post-Summary narrative only")
 assert_eq(("", rest), er.extract_summary_section(rest),
           "extract_summary_section: idempotent on the remainder")
 # `###` subsections stay attached to Summary.
 sub = "## Summary\n\nLead.\n\n### Detail\n\nMore.\n\n## Classification\n\nx\n"
 h2, r2 = er.extract_summary_section(sub)
-assert "### Detail" in h2 and "## Classification" in r2, \
-    "extract_summary_section: H3 subsection stays with Summary, H2 ends it"
+assert_true("### Detail" in h2 and "## Classification" in r2,
+            "extract_summary_section: H3 subsection stays with Summary, H2 ends it")
 # No Summary → no-op (Fields stays first).
 assert_eq(("", "## Root Cause\n\nx\n"), er.extract_summary_section("## Root Cause\n\nx\n"),
           "extract_summary_section: no ## Summary → no-op")
 # Another section before Summary → no-op (don't drag it along).
-assert er.extract_summary_section("## Classification\n\nc\n\n## Summary\n\ns\n")[0] == "", \
-    "extract_summary_section: Summary not leading → no-op"
+assert_true(er.extract_summary_section("## Classification\n\nc\n\n## Summary\n\ns\n")[0] == "",
+            "extract_summary_section: Summary not leading → no-op")
 # Summary-only body (model-direct) → rest is empty.
 h3, r3 = er.extract_summary_section("## Summary\n\nOnly summary.\n")
-assert "Only summary." in h3 and r3.strip() == "", \
-    "extract_summary_section: summary-only body leaves an empty remainder"
+assert_true("Only summary." in h3 and r3.strip() == "",
+            "extract_summary_section: summary-only body leaves an empty remainder")
 
 # 1. strip_audit_sections
 sample = """\
@@ -1283,8 +1290,9 @@ ASan confirms a heap-buffer-overflow in closureDequote when a caller passes
 a malformed bracket-quoted argument.
 """
 nh = er.render_agent_body(noheading_input)
-assert nh.lstrip().startswith("## Summary"), \
-    f"render_agent_body: headingless narrative gets a ## Summary heading (got {nh[:40]!r})"
+assert_true(nh.lstrip().startswith("## Summary"),
+            "render_agent_body: headingless narrative gets a ## Summary heading",
+            f"got {nh[:40]!r}")
 assert_in("ASan confirms a heap-buffer-overflow", nh,
           "render_agent_body: the narrative itself is preserved under the heading")
 assert_eq(nh, er.render_agent_body(nh),
@@ -1295,8 +1303,8 @@ assert_not_in("## Summary", headed,
               "render_agent_body: no spurious ## Summary when body already has a heading")
 # A Strategy: metadata line is skipped, not treated as the narrative.
 strat = er.render_agent_body("Strategy: S5\n\nThe overflow occurs because the loop never bounds-checks.\n")
-assert strat.count("## Summary") == 1 and "Strategy: S5" in strat, \
-    "render_agent_body: Strategy line kept, Summary heads the real narrative"
+assert_true(strat.count("## Summary") == 1 and "Strategy: S5" in strat,
+            "render_agent_body: Strategy line kept, Summary heads the real narrative")
 # A body with no narrative at all gets no heading (nothing to head).
 assert_not_in("## Summary", er.render_agent_body("## Fields\n\n| A | B |\n| :- | :- |\n| x | y |\n"),
               "render_agent_body: no ## Summary when there is no narrative")
@@ -1310,11 +1318,12 @@ enrich_lead = er.render_agent_body(
     "<!-- enrich:tldr -->\n**Reviewer TL;DR**\n\n- Trigger — caller bytes\n"
     "<!-- /enrich:tldr -->\n\n"
     "`decode()` copies past the end of a short serialized buffer.\n")
-assert enrich_lead.count("## Summary") == 1, \
-    f"render_agent_body: exactly one ## Summary for enrich-led body (got {enrich_lead!r})"
-assert enrich_lead.index("<!-- enrich:tldr -->") < enrich_lead.index("## Summary") \
-    < enrich_lead.index("`decode()`"), \
-    "render_agent_body: ## Summary sits after the enrich block, before the prose"
+assert_true(enrich_lead.count("## Summary") == 1,
+            "render_agent_body: exactly one ## Summary for enrich-led body",
+            f"got {enrich_lead!r}")
+assert_true(enrich_lead.index("<!-- enrich:tldr -->") < enrich_lead.index("## Summary")
+            < enrich_lead.index("`decode()`"),
+            "render_agent_body: ## Summary sits after the enrich block, before the prose")
 assert_eq(enrich_lead, er.render_agent_body(enrich_lead),
           "render_agent_body: enrich-led heading placement is idempotent")
 # Multiple stacked enrich blocks (cluster-siblings + tldr + severity-badge) are
@@ -1325,11 +1334,12 @@ multi_enrich = er.render_agent_body(
     "<!-- enrich:severity-badge -->\nSeverity: Low\n<!-- /enrich:severity-badge -->\n\n"
     "Strategy: S7\n\n"
     "The reference string is rendered as a NUL-terminated C string and overruns.\n")
-assert multi_enrich.count("## Summary") == 1, \
-    f"render_agent_body: one ## Summary across stacked enrich blocks (got {multi_enrich!r})"
-assert "Strategy: S7" in multi_enrich and \
-    multi_enrich.index("## Summary") < multi_enrich.index("The reference string"), \
-    "render_agent_body: heading heads the real prose after stacked enrich + Strategy metadata"
+assert_true(multi_enrich.count("## Summary") == 1,
+            "render_agent_body: one ## Summary across stacked enrich blocks",
+            f"got {multi_enrich!r}")
+assert_true("Strategy: S7" in multi_enrich and
+            multi_enrich.index("## Summary") < multi_enrich.index("The reference string"),
+            "render_agent_body: heading heads the real prose after stacked enrich + Strategy metadata")
 # An orphan metadata line (`Linked FIND:`, a recon cross-reference) above the
 # agent's OWN `## Summary` must not trigger a second inserted `## Summary` —
 # the body is already headed under Summary. Without the guard, the orphan line
@@ -1340,10 +1350,11 @@ orphan_before_summary = er.render_agent_body(
     "Linked FIND: `FIND-RECON-deadbeef-some-finding`\n\n"
     "## Summary\n\n"
     "`add_item_to_array` accepts an item already linked into another array.\n")
-assert orphan_before_summary.count("## Summary") == 1, \
-    f"render_agent_body: no duplicate ## Summary when body already has one (got {orphan_before_summary!r})"
-assert "Linked FIND:" in orphan_before_summary and "Strategy: S7" in orphan_before_summary, \
-    "render_agent_body: orphan metadata lines are preserved, not dropped"
+assert_true(orphan_before_summary.count("## Summary") == 1,
+            "render_agent_body: no duplicate ## Summary when body already has one",
+            f"got {orphan_before_summary!r}")
+assert_true("Linked FIND:" in orphan_before_summary and "Strategy: S7" in orphan_before_summary,
+            "render_agent_body: orphan metadata lines are preserved, not dropped")
 assert_eq(orphan_before_summary, er.render_agent_body(orphan_before_summary),
           "render_agent_body: existing-Summary guard is idempotent")
 

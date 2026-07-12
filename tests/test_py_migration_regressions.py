@@ -72,12 +72,7 @@ _GOOD_REPORT = (
 )
 
 
-# ignore_cleanup_errors: the lock-ownership case below exercises a build waiter
-# thread that can still be settling harness.lock/ when the tree is torn down;
-# a file vanishing mid-walk must not fail an otherwise-passing suite.
-with tempfile.TemporaryDirectory(
-    prefix="py-migration-regressions-", ignore_cleanup_errors=True
-) as temporary:
+with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporary:
     root = Path(temporary)
     # Keep the LLM-driven gates out of these unit checks; each capability is
     # exercised through its structural path (env opt-out, byte accounting, etc.).

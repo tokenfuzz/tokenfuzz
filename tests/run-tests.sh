@@ -20,12 +20,13 @@ usage() {
 Usage:
   tests/run-tests.sh [options] [test_file_pattern...]
   tests/run-tests.sh --category integration
-  tests/run-tests.sh --jobs 4 test_py_migration_regressions.py test_severity.sh
+  tests/run-tests.sh --jobs 4 test_py_migration_regressions.py test_severity.py
   tests/run-tests.sh --image ubuntu:24.04 [options] [test_file_pattern...]
 
 Options:
   -j, --jobs N          Run up to N test files at once (default: CPU count capped at TEST_JOBS_MAX or 8; TEST_JOBS/--jobs override).
   --category NAME       Run one category: decision, integration, python, static, unit, wrapper.
+  --suite-timeout N     Kill a test file and its process tree after N seconds (default: 900).
   --list                List matched tests with categories, then exit.
   --image IMAGE          Run the suite inside a Linux container image.
   --runtime NAME         Container runtime: docker (default).
@@ -36,7 +37,7 @@ Examples:
   bash tests/run-tests.sh
   bash tests/run-tests.sh --category wrapper
   bash tests/run-tests.sh --image ubuntu:24.04
-  bash tests/run-tests.sh --image fedora:latest --jobs 2 test_run_asan.sh
+  bash tests/run-tests.sh --image fedora:latest --jobs 2 test_run_asan.py
 EOF
 }
 
@@ -46,6 +47,7 @@ INSTALL_DEPS=1
 JOBS="${TEST_JOBS:-}"
 [ -n "$JOBS" ] && JOBS_EXPLICIT=1 || JOBS_EXPLICIT=0
 CATEGORY_FILTER=""
+SUITE_TIMEOUT=900
 LIST_ONLY=0
 PATTERNS=()
 
@@ -61,6 +63,11 @@ while [ "$#" -gt 0 ]; do
       CATEGORY_FILTER="$2"; shift 2 ;;
     --category=*)
       CATEGORY_FILTER="${1#--category=}"; shift ;;
+    --suite-timeout)
+      [ "$#" -ge 2 ] || { echo "tests/run-tests.sh: --suite-timeout requires a value" >&2; exit 2; }
+      SUITE_TIMEOUT="$2"; shift 2 ;;
+    --suite-timeout=*)
+      SUITE_TIMEOUT="${1#--suite-timeout=}"; shift ;;
     --list)
       LIST_ONLY=1; shift ;;
     --image)
@@ -84,36 +91,35 @@ while [ "$#" -gt 0 ]; do
       (
         set -e
         # nodejs is required: bin/audit:gemini_cli_check_bundled_ripgrep uses
-        # node for realpath/platform detection and audit-runner checks
-        # asserts its WARN path. CA certificates are needed for HTTPS git/gh
-        # traffic in minimal images. npm and curl are backend-install-path
-        # dependencies, not test-suite prerequisites.
+        # node for realpath/platform detection and audit-runner checks assert
+        # its WARN path. CA certificates support HTTPS fixture traffic in
+        # minimal images. Backend and strategy CLIs are not test prerequisites.
         if command -v apt-get >/dev/null 2>&1; then
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
           apt-get install -y --no-install-recommends \
-            bash binutils ca-certificates clang file gh git jq libclang-rt-dev llvm \
+            bash binutils ca-certificates clang file git libclang-rt-dev llvm \
             nodejs procps python3 python3-venv ripgrep
         elif command -v dnf >/dev/null 2>&1; then
           dnf install -y \
-            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk gh git \
-            grep jq llvm nodejs procps-ng python3 python3-pip ripgrep sed \
+            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git \
+            grep llvm nodejs procps-ng python3 python3-pip ripgrep sed \
             || dnf install -y \
-              bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk gh git \
-              grep jq llvm nodejs procps-ng python3 python3-pip sed
+              bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git \
+              grep llvm nodejs procps-ng python3 python3-pip sed
         elif command -v microdnf >/dev/null 2>&1; then
           microdnf install -y \
-            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk gh git \
-            grep jq llvm nodejs procps-ng python3 python3-pip sed
+            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git \
+            grep llvm nodejs procps-ng python3 python3-pip sed
         elif command -v yum >/dev/null 2>&1; then
           yum install -y \
-            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk gh git \
-            grep jq llvm nodejs procps-ng python3 python3-pip ripgrep sed \
+            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git \
+            grep llvm nodejs procps-ng python3 python3-pip ripgrep sed \
             || yum install -y \
-              bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk gh git \
-              grep jq llvm nodejs procps-ng python3 python3-pip sed
+              bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git \
+              grep llvm nodejs procps-ng python3 python3-pip sed
         else
-          echo "tests/run-tests.sh: no supported package manager found; install bash python3 file git gh jq clang llvm binutils nodejs ripgrep ca-certificates" >&2
+          echo "tests/run-tests.sh: no supported package manager found; install bash python3 file git clang llvm binutils nodejs ripgrep ca-certificates" >&2
           exit 2
         fi
       ) || {
@@ -126,7 +132,7 @@ while [ "$#" -gt 0 ]; do
       # error message points at the install step, not at bin/audit later.
       # sancov is not checked: the Debian/Ubuntu llvm package does not ship it.
       missing=()
-      for tool in bash python3 file git gh jq clang clang++ nm ar node rg llvm-symbolizer; do
+      for tool in bash python3 file git clang clang++ nm ar node rg llvm-symbolizer; do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
       done
       venv_probe="$(mktemp -d "${TMPDIR:-/tmp}/tokenfuzz-venv-check.XXXXXX" 2>/dev/null || true)"
@@ -157,6 +163,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+case "$SUITE_TIMEOUT" in
+  ''|*[!0-9]*|0) echo "tests/run-tests.sh: --suite-timeout must be a positive integer" >&2; exit 2 ;;
+esac
+
 if [ -n "$RUN_IMAGE" ]; then
   case "$CONTAINER_RUNTIME" in docker) ;; *) echo "tests/run-tests.sh: --runtime must be docker" >&2; exit 2 ;; esac
   command -v "$CONTAINER_RUNTIME" >/dev/null 2>&1 || {
@@ -171,6 +181,7 @@ if [ -n "$RUN_IMAGE" ]; then
   inner_args=()
   [ -n "$JOBS" ] && inner_args+=(--jobs "$JOBS")
   [ -n "$CATEGORY_FILTER" ] && inner_args+=(--category "$CATEGORY_FILTER")
+  inner_args+=(--suite-timeout "$SUITE_TIMEOUT")
   [ "$LIST_ONLY" -eq 1 ] && inner_args+=(--list)
   [ "$INSTALL_DEPS" -eq 0 ] && inner_args+=(--no-install-deps)
   if [ "${#PATTERNS[@]}" -gt 0 ]; then
@@ -210,11 +221,8 @@ detect_default_jobs() {
 }
 
 test_category() {
-  local name="$1"
-  case "$name" in
-    *.py) echo "python"; return ;;
-  esac
-  name="${name##*/}"
+  local raw="$1" name
+  name="${raw##*/}"
   name="${name%.sh}"
   name="${name%.py}"
   case "$name" in
@@ -223,7 +231,7 @@ test_category() {
     test_*_py|test_stack_frames|test_target_config_py) echo "python" ;;
     test_doc_neutrality|test_hits_cache_static|test_portability_lint|test_strategy_validation|test_vocab) echo "static" ;;
     test_grep_wrapper|test_rg_wrapper|test_sed_wrapper|test_rg_safe|test_zdotdir_shim) echo "wrapper" ;;
-    *) echo "unit" ;;
+    *) case "$raw" in *.py) echo "python" ;; *) echo "unit" ;; esac ;;
   esac
 }
 
@@ -257,9 +265,8 @@ load_prior_timings() {
 # self-corrects from real timings on the next run.
 bootstrap_weight() {
   case "$1" in
-    test_workqueue|test_benchmark) echo 25 ;;
-    test_severity|test_sanitizer_multi|test_probe_harness_cpp|test_setup_target|test_py_migration_regressions|test_llm_invoke_py) echo 15 ;;
-    test_multilang_support|test_benchmark_cells|test_benchmark_reverify|test_recon_changes) echo 10 ;;
+    test_probe_harness_cpp|test_py_migration_regressions|test_llm_invoke_py) echo 15 ;;
+    test_multilang_support|test_benchmark_reverify) echo 10 ;;
     *) echo "" ;;
   esac
 }
@@ -366,6 +373,36 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+count_test_output() {
+  local output="$1" ran skipped
+  COUNT_PASSED=$(grep -c '✓' <<< "$output" || true)
+  COUNT_FAILED=$(grep -c '✗' <<< "$output" || true)
+  if [ "$COUNT_PASSED" -eq 0 ] && [ "$COUNT_FAILED" -eq 0 ]; then
+    ran=$(awk '/^Ran [0-9]+ tests? in / { count=$2 } END { print count+0 }' <<< "$output")
+    if [ "$ran" -gt 0 ]; then
+      COUNT_FAILED=$(grep -Ec '^(FAIL|ERROR): ' <<< "$output" || true)
+      skipped=$(awk '
+        match($0, /skipped=[0-9]+/) {
+          value=substr($0, RSTART+8, RLENGTH-8)
+        }
+        END { print value+0 }
+      ' <<< "$output")
+      COUNT_PASSED=$((ran - COUNT_FAILED - skipped))
+      [ "$COUNT_PASSED" -lt 0 ] && COUNT_PASSED=0
+    fi
+  fi
+}
+
+run_suite() {
+  local tf="$1" interpreter
+  case "$tf" in
+    *.py) interpreter=python3 ;;
+    *) interpreter=bash ;;
+  esac
+  python3 "$SCRIPT_ROOT/lib/timeout.py" "$SUITE_TIMEOUT" TERM 0 \
+    "$interpreter" "$tf"
+}
+
 run_test_file() {
   local tf="$1"
   local name
@@ -377,22 +414,21 @@ run_test_file() {
   category=$(test_category "$tf")
   local output
   start=$SECONDS
-  case "$tf" in
-    *.py) output=$(python3 "$tf" 2>&1) ;;
-    *)    output=$(bash "$tf" 2>&1) ;;
-  esac
+  output=$(run_suite "$tf" 2>&1)
   local rc=$?
   elapsed=$((SECONDS - start))
   printf "${BOLD}=== %s [%s] (%ss) ===${NC}\n" "$name" "$category" "$elapsed"
   echo "$output"
   # Count passes/fails from output
   local p f
-  p=$(echo "$output" | grep -c '✓' || true)
-  f=$(echo "$output" | grep -c '✗' || true)
+  count_test_output "$output"
+  p=$COUNT_PASSED
+  f=$COUNT_FAILED
   TOTAL_PASSED=$((TOTAL_PASSED + p))
   TOTAL_FAILED=$((TOTAL_FAILED + f))
   if [ "$rc" -ne 0 ]; then
-    printf "${RED}  Suite exit code: %s%s\n" "$rc" "$NC"
+    printf "${RED}  Suite exit code: %s${NC}\n" "$rc"
+    [ "$rc" -eq 124 ] && printf "${RED}  Suite timed out after %ss${NC}\n" "$SUITE_TIMEOUT"
     ERRORS+=("$name")
   fi
   TIMINGS+=("$elapsed $name")
@@ -408,14 +444,12 @@ run_test_file_to_dir() {
   name="${name%.py}"
   category=$(test_category "$tf")
   start=$SECONDS
-  case "$tf" in
-    *.py) output=$(python3 "$tf" 2>&1) ;;
-    *)    output=$(bash "$tf" 2>&1) ;;
-  esac
+  output=$(run_suite "$tf" 2>&1)
   rc=$?
   elapsed=$((SECONDS - start))
-  p=$(echo "$output" | grep -c '✓' || true)
-  f=$(echo "$output" | grep -c '✗' || true)
+  count_test_output "$output"
+  p=$COUNT_PASSED
+  f=$COUNT_FAILED
   printf '%s' "$output" > "$out_dir/$index.out"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$category" "$p" "$f" "$rc" "$elapsed" "$tf" > "$out_dir/$index.meta"
 }
@@ -450,7 +484,8 @@ run_tests_parallel() {
     TOTAL_PASSED=$((TOTAL_PASSED + p))
     TOTAL_FAILED=$((TOTAL_FAILED + f))
     if [ "$rc" -ne 0 ]; then
-      printf "${RED}  Suite exit code: %s%s\n" "$rc" "$NC"
+      printf "${RED}  Suite exit code: %s${NC}\n" "$rc"
+      [ "$rc" -eq 124 ] && printf "${RED}  Suite timed out after %ss${NC}\n" "$SUITE_TIMEOUT"
       ERRORS+=("$name")
     fi
     TIMINGS+=("$elapsed $name")

@@ -217,7 +217,7 @@ is never a merge edge.
 ```
 
 These cases are pinned in [`tests/test_finding_dedup_py.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/test_finding_dedup_py.py) and
-[`tests/test_cluster_findings.sh`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/test_cluster_findings.sh).
+[`tests/test_cluster_findings.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/test_cluster_findings.py).
 
 ### Output
 

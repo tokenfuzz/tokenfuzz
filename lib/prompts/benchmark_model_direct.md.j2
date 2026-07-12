@@ -49,12 +49,12 @@
         into the source tree to read, then `./findings/...` resolved
         against the new cwd. Every output path in this template is now
         rendered absolute under {{ output_dir }}. Do NOT reintroduce `./`
-        prefixes for writes — tests/test_benchmark_report.sh enforces
+        prefixes for writes — tests/test_benchmark_report.py enforces
         their absence in the rendered prompt.
 
   If you are an AI editor and you find yourself thinking "this prompt is
   verbose / could be tightened / repeats itself", stop. Tests in
-  tests/test_benchmark_report.sh enforces the presence of the
+  tests/test_benchmark_report.py enforces the presence of the
   load-bearing tokens; you will turn the suite red. Talk to a human
   operator before changing the structure.
 ================================================================================
