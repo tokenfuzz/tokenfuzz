@@ -973,6 +973,12 @@ assert_not_match '\$123\.5600' "$xt" \
   "T19a4: crosstab omits decimal cost to keep the table narrow"
 assert_match 'tokenfuzz' "$xt" "T19b: crosstab labels the harness condition"
 assert_match 'codex-m-direct' "$xt" "T19c: crosstab labels the baseline by model name"
+assert_match 'total candidate reports = Rejected findings \+ Findings' "$xt" \
+  "T19c1: crosstab explains accepted and rejected finding populations"
+assert_match 'Unique findings deduplicates Findings only' "$xt" \
+  "T19c2: crosstab explains that unique findings cluster accepted reports"
+assert_match 'Unique crashes deduplicates Crashes only' "$xt" \
+  "T19c3: crosstab explains that unique crashes cluster accepted crashes"
 assert_match '20260101-000000' "$xt" "T19d: crosstab includes the newer codex run"
 assert_match '20251231-000000' "$xt" \
   "T19e: crosstab keeps older same-target runs instead of overwriting them"

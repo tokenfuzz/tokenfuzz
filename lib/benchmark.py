@@ -3899,6 +3899,11 @@ def crosstab(bench_root: Path) -> str:
         "accepted crash artifact."
     )
     lines.append(
+        "Rejected findings and Findings are disjoint outcomes: total candidate "
+        "reports = Rejected findings + Findings. Unique findings deduplicates "
+        "Findings only; it is not Findings minus Rejected findings."
+    )
+    lines.append(
         "- **Pending findings** — reports awaiting validation. They are excluded "
         "individually from Findings and Unique findings."
     )
@@ -3925,6 +3930,11 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "- **Crashes** — sanitizer-proved crash directories with diagnostic "
         "output and reproducer material on disk."
+    )
+    lines.append(
+        "Rejected crashes and Crashes are disjoint outcomes. Unique crashes "
+        "deduplicates Crashes only; rejected candidates are not subtracted "
+        "from it."
     )
     lines.append(
         "- **Pending crashes** — sanitizer-proved crashes already included in "
