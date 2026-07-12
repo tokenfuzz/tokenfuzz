@@ -240,11 +240,18 @@ roots = sorted(str(r.relative_to(symroot / "output"))
 assert_eq(["samples/sample-y"], roots,
           "iter_target_roots skips a symlinked dir cycle and still finds real targets")
 
-# Negative: outside any output/ tree returns None.
+# Negative: outside any output/ tree returns None. An unrelated sibling may
+# carry a valid-looking results session (as concurrent suites do under /tmp),
+# but its parent is not a target root and must never be searched as one.
+(TEST_TMPDIR / "unrelated" / "results").mkdir(parents=True)
+(TEST_TMPDIR / "unrelated" / "results" / ".session-env").write_text(
+    "RESULTS_DIR=unrelated\n", encoding="utf-8")
+assert_eq(None, tc.find_slug_session_dir(TEST_TMPDIR),
+          "find_slug_session_dir requires a target.toml root marker")
 empty = TEST_TMPDIR / "elsewhere"
 empty.mkdir()
 assert_eq(None, tc.find_session_dir(empty),
-          "find_session_dir returns None when no output/<slug> ancestor")
+          "find_session_dir ignores unrelated sibling sessions outside output/<slug>")
 
 # Regression: the upward walk probes sibling trees under shared ancestors it
 # does not own (e.g. snapd's mode-0700 /tmp/snap-private-tmp on CI runners). A

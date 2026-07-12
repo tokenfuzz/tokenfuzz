@@ -500,7 +500,10 @@ def find_slug_session_dir(slug_dir: str | os.PathLike) -> Optional[Path]:
     lexicographically-first is returned so the choice is deterministic.
     """
     d = Path(slug_dir)
-    if _is_dir(d):
+    # A results/.session-env alone does not make its parent a target backend.
+    # Shared ancestors such as /tmp routinely contain that shape from other
+    # concurrent runs; require the target-root marker before descending.
+    if _is_file(d / "target.toml"):
         try:
             backends = sorted(d.iterdir())
         except OSError:

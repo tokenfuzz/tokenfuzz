@@ -617,6 +617,22 @@ assert_eq("ubsan-out-of-bounds",
 assert_eq("unclassified", er.infer_primitive_label(""),
           "infer_primitive_label: empty asan_top → unclassified")
 
+with tempfile.TemporaryDirectory(prefix="demangler-") as demangler_tmp:
+    llvm_cxxfilt = Path(demangler_tmp) / "llvm-cxxfilt"
+    llvm_cxxfilt.write_text(
+        "#!/bin/sh\nprintf 'llvm-demangled\\n'\n", encoding="utf-8"
+    )
+    llvm_cxxfilt.chmod(0o755)
+    original_llvm_tool = er.symbol_names.sanitizer.llvm_tool
+    try:
+        er.symbol_names.sanitizer.llvm_tool = lambda _name: str(llvm_cxxfilt)
+        assert_eq(
+            "llvm-demangled\n", er.symbol_names.demangle_text("_Rsymbol\n"),
+            "demangle_text prefers the Rust-v0-capable LLVM demangler",
+        )
+    finally:
+        er.symbol_names.sanitizer.llvm_tool = original_llvm_tool
+
 if shutil.which("c++filt"):
     with tempfile.TemporaryDirectory(prefix="rust-symbols-") as rust_tmp:
         rust_sanitizer = Path(rust_tmp) / "sanitizer.txt"
