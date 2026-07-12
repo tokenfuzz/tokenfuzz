@@ -3222,7 +3222,7 @@ def render_section(report: dict) -> str:
     lines.append(
         "| Condition | Replicates | Wall (h) "
         "| Rejected findings | Findings | Pending findings | Unique findings "
-        "| Rejected crashes | Crashes | Pending crash reports | Unique crashes "
+        "| Rejected crashes | Crashes | Pending crashes | Unique crashes "
         "| Top crash severity |"
     )
     lines.append(
@@ -3315,9 +3315,9 @@ def render_section(report: dict) -> str:
         "M+)` where `M` is how many of the `N` clusters `bin/severity` "
         "scored Medium or higher — the security-yield subset, on one scale "
         "across both conditions. **Top crash severity** is the highest crash "
-        "severity in the row. **Pending crash reports** already have sanitizer "
-        "proof and remain in Crashes, but their unfinished report forces "
-        "Unknown severity until enrichment completes. "
+        "severity in the row. **Pending crashes** already have sanitizer proof "
+        "and remain in Crashes while report or bundle completion is pending; "
+        "an unfinished report remains Unknown severity. "
         f"`{baseline_label}` is a bare \"find the vulnerabilities\" prompt "
         "with no harness around it, so a large raw crash count there is "
         "mostly repeated noise. `tokenfuzz` is the audit harness — triage, "
@@ -3626,7 +3626,7 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "| Target | Backend | Condition | Run | Wall (h) | Replicates "
         "| Rejected findings | Findings | Pending findings | Unique findings "
-        "| Rejected crashes | Crashes | Pending crash reports | Unique crashes "
+        "| Rejected crashes | Crashes | Pending crashes | Unique crashes "
         "| Top crash severity "
         "| Input | Output | Cost |"
     )
@@ -3927,12 +3927,12 @@ def crosstab(bench_root: Path) -> str:
         "output and reproducer material on disk."
     )
     lines.append(
-        "- **Pending crash reports** — proved crashes already included in "
-        "Crashes whose maintainer report still needs enrichment. They remain "
-        "Unknown severity until complete."
+        "- **Pending crashes** — sanitizer-proved crashes already included in "
+        "Crashes while report or bundle completion is pending. An unfinished "
+        "report remains Unknown severity."
     )
     lines.append(
-        "- **Unique crashes** — accepted crashes after stack/signature "
+        "- **Unique crashes** — sanitizer-proved crashes after stack/signature "
         "clustering, shown as `N (M M+)`: `N` clustered crashes, `M` of them "
         "scored Medium or higher by severity — the headline security-yield "
         "subset. The count links to the crash cluster report."
