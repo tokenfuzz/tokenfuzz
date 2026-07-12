@@ -548,7 +548,20 @@ def find_repro_args(scan_dirs: Iterable[Path], *,
     """
     names = {os.path.basename(b) for b in bin_names if b}
     line = _read_repro_cmd_line(scan_dirs)
-    args = _split(line) if line else _report_command_args(scan_dirs, names)
+    if line:
+        args = _split(line)
+        # repro.cmd is args-only, but some agents write the common bare
+        # invocation as `BIN {TESTCASE}`.  Normalize only that exact,
+        # unambiguous two-token shape: flags, literal testcase paths, and
+        # arbitrary positional arguments remain verbatim.
+        if (
+            len(args) == 2
+            and args[1] == TESTCASE_TOKEN
+            and os.path.basename(args[0]) in names
+        ):
+            args = args[1:]
+    else:
+        args = _report_command_args(scan_dirs, names)
     if not args:
         return []
     args = _with_testcase_token(args, testcase_name)

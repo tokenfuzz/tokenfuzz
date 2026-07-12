@@ -245,6 +245,33 @@ pool9b="$TEST_TMPDIR/pool9b"
 _make_footerless_crash "$pool9b/crashes/CRASH-0001"
 _reverify_pool_crash_rates "$pool9b" "$tgt9" test &
 
+# ── T9c fixture: an agent violated the args-only contract by recording the
+# exact bare invocation `stub {TESTCASE}`. The narrowly normalized form must
+# replay as the normal configured-target invocation; an extra leading `stub`
+# deliberately makes this fixture fail execution rather than crash. ──
+pool9c="$TEST_TMPDIR/pool9c"; tgt9c="$TEST_TMPDIR/tgt9c"
+mkdir -p "$tgt9c/build-asan/src"
+cat > "$tgt9c/target.toml" <<'TOML'
+target = "reverify-leading-bin"
+asan_bin = "build-asan/src/stub"
+[sanitizer]
+enabled = ["asan"]
+TOML
+cat > "$tgt9c/build-asan/src/stub" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "stub" ]; then
+  echo "unexpected duplicated executable argument" >&2
+  exit 2
+fi
+echo "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010"
+echo "SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free"
+exit 1
+SH
+chmod +x "$tgt9c/build-asan/src/stub"
+_make_footerless_crash "$pool9c/crashes/CRASH-0001"
+printf 'stub {TESTCASE}\n' > "$pool9c/crashes/CRASH-0001/repro.cmd"
+_reverify_pool_crash_rates "$pool9c" "$tgt9c" test &
+
 # All reverify passes launched; block until every one has written its footer.
 wait
 rc5="$(cat "$TEST_TMPDIR/rc5.out" 2>/dev/null)"
@@ -326,6 +353,9 @@ assert_file_contains "$pool9/crashes/CRASH-0001/sanitizer.txt" '^CRASH_RATE: 5/5
 # crashing unconditionally.
 assert_file_contains "$pool9b/crashes/CRASH-0001/sanitizer.txt" '^CRASH_RATE: 0/5' \
   "T9b: without repro.cmd the bare invocation runs clean (0/5)"
+
+assert_file_contains "$pool9c/crashes/CRASH-0001/sanitizer.txt" '^CRASH_RATE: 5/5' \
+  "T9c: exact BIN {TESTCASE} repro.cmd normalizes to configured bare invocation"
 
 # The split-layout cases wrote their config under the real repo output/ tree.
 rm -rf "$cfgdir6" "$cfgdir7" "$cfgdir8"

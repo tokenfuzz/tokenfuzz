@@ -59,6 +59,81 @@ def equal(expected, actual, name: str) -> None:
 with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     root = Path(temporary)
 
+    harness_results = root / "harness-layout" / "grok" / "results"
+    sibling_index = harness_results.parent / "logs" / "index.jsonl"
+    sibling_index.parent.mkdir(parents=True)
+    sibling_index.write_text("{}\n", encoding="utf-8")
+    # An ancillary in-results log directory must not split final decisions
+    # away from the already-populated harness ledger.
+    (harness_results / "logs").mkdir(parents=True)
+    equal(
+        sibling_index, llm_usage.find_usage_index(harness_results),
+        "harness usage keeps the sibling ledger when results/logs also exists",
+    )
+    standalone_results = root / "standalone" / "results"
+    standalone_index = standalone_results / "logs" / "index.jsonl"
+    standalone_index.parent.mkdir(parents=True)
+    standalone_index.write_text("{}\n", encoding="utf-8")
+    equal(
+        standalone_index, llm_usage.find_usage_index(standalone_results),
+        "an existing standalone in-tree ledger remains readable",
+    )
+    (standalone_results.parent / "logs").mkdir()
+    equal(
+        standalone_index, llm_usage.find_usage_index(standalone_results),
+        "an empty sibling log directory cannot displace an existing in-tree ledger",
+    )
+    direct_results = root / "model-direct-r1"
+    equal(
+        direct_results / "logs" / "index.jsonl",
+        llm_usage.find_usage_index(direct_results),
+        "model-direct usage keeps its in-tree ledger",
+    )
+
+    incomplete_cell_dir = root / "incomplete-cell"
+    incomplete_cell_dir.mkdir()
+    benchmark_runner.write_cell(
+        incomplete_cell_dir / "cell.json", "harness", 1, "fixture",
+        incomplete_cell_dir / "results", 10, "incomplete", None,
+    )
+    incomplete_cell = json.loads(
+        (incomplete_cell_dir / "cell.json").read_text(encoding="utf-8")
+    )
+    equal(
+        "incomplete", incomplete_cell["run_quality"],
+        "artifact-incomplete cell is not mislabeled as provider-limited",
+    )
+    (incomplete_cell_dir / ".run-quality").write_text(
+        "provider_limited\n", encoding="utf-8"
+    )
+    benchmark_runner.write_cell(
+        incomplete_cell_dir / "cell.json", "harness", 1, "fixture",
+        incomplete_cell_dir / "results", 10, "incomplete", None,
+    )
+    limited_cell = json.loads(
+        (incomplete_cell_dir / "cell.json").read_text(encoding="utf-8")
+    )
+    equal(
+        "provider_limited", limited_cell["run_quality"],
+        "explicit provider-limit evidence retains its specific label",
+    )
+    cli_cell_dir = root / "cli-incomplete-cell"
+    cli_cell_dir.mkdir()
+    benchmark_module = __import__("benchmark")
+    benchmark_module._cmd_write_cell(SimpleNamespace(
+        path=str(cli_cell_dir / "cell.json"), condition="harness",
+        replicate="1", experiment="fixture", results_dir=str(cli_cell_dir / "results"),
+        wall_seconds="10", status="incomplete", requested_agents="",
+        paused_seconds="0",
+    ))
+    cli_cell = json.loads(
+        (cli_cell_dir / "cell.json").read_text(encoding="utf-8")
+    )
+    equal(
+        "incomplete", cli_cell["run_quality"],
+        "benchmark metadata CLI uses the same factual incomplete label",
+    )
+
     # A productive session whose usage was never recorded (the zero-token
     # `primary` row) understates the cell total, so the cell must read
     # `unknown` — not hide behind the `mixed` that measured+estimated

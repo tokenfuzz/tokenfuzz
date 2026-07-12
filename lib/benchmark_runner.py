@@ -426,12 +426,12 @@ def write_cell(
     quality = "clean"
     try:
         candidate = (path.parent / ".run-quality").read_text(encoding="utf-8").strip()
-        if candidate in {"clean", "provider_recovered", "provider_limited"}:
+        if candidate in {"clean", "incomplete", "provider_recovered", "provider_limited"}:
             quality = candidate
     except OSError:
         pass
     if status == "incomplete" and quality == "clean":
-        quality = "provider_limited"
+        quality = "incomplete"
     payload = {
         "condition": condition, "replicate": replicate, "experiment": experiment,
         "results_dir": str(results_dir), "wall_seconds": wall, "status": status,

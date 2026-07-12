@@ -275,11 +275,21 @@ def find_usage_index(results_dir: str | os.PathLike[str]) -> Path:
     """Return the cost ledger shared by a results tree and its harvester."""
     results = Path(results_dir)
     inside = results / "logs" / "index.jsonl"
-    if inside.is_file() or inside.parent.is_dir():
-        return inside
     sibling = results.parent / "logs" / "index.jsonl"
-    if sibling.is_file() or sibling.parent.is_dir():
+
+    # Harness results always use the standard <backend>/results layout and
+    # share the sibling <backend>/logs ledger with the agent pool.  Do not let
+    # an incidental results/logs directory redirect finalization into a second
+    # ledger.  Model-direct workspaces are the other documented layout and
+    # keep their ledger in-tree.
+    if sibling.is_file():
         return sibling
+    if inside.is_file():
+        return inside
+    if sibling.parent.is_dir():
+        return sibling
+    if inside.parent.is_dir():
+        return inside
     return inside
 
 

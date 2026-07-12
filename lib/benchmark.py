@@ -4214,12 +4214,12 @@ def _cmd_write_cell(args: argparse.Namespace) -> int:
     run_quality = "clean"
     try:
         value = (path.parent / ".run-quality").read_text(encoding="utf-8").strip()
-        if value in {"clean", "provider_recovered", "provider_limited"}:
+        if value in {"clean", "incomplete", "provider_recovered", "provider_limited"}:
             run_quality = value
     except OSError:
         pass
     if args.status == "incomplete" and run_quality == "clean":
-        run_quality = "provider_limited"
+        run_quality = "incomplete"
     paused = max(0, _as_int(args.paused_seconds))
     payload = {
         "condition": args.condition,

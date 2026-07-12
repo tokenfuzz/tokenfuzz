@@ -217,6 +217,24 @@ with tempfile.TemporaryDirectory() as td:
                                      testcase_name="input.txt"),
               "find_repro_args: token-only → []")
 
+    # Grok-style full bare invocation in the args-only file: strip the binary
+    # only for exact `BIN {TESTCASE}`. Other backends' flags and positional
+    # arguments must remain untouched.
+    (cd / "repro.cmd").write_text("app {TESTCASE}\n", encoding="utf-8")
+    assert_eq([], ca.find_repro_args([cd], bin_names=["app"],
+                                     testcase_name="input.txt"),
+              "find_repro_args: exact leading configured binary is normalized")
+    (cd / "repro.cmd").write_text("app --mode {TESTCASE}\n", encoding="utf-8")
+    assert_eq(["app", "--mode", ca.TESTCASE_TOKEN],
+              ca.find_repro_args([cd], bin_names=["app"],
+                                 testcase_name="input.txt"),
+              "find_repro_args: non-bare argv beginning with binary-like positional is preserved")
+    (cd / "repro.cmd").write_text("other {TESTCASE}\n", encoding="utf-8")
+    assert_eq(["other", ca.TESTCASE_TOKEN],
+              ca.find_repro_args([cd], bin_names=["app"],
+                                 testcase_name="input.txt"),
+              "find_repro_args: unmatched leading command is preserved")
+
 with tempfile.TemporaryDirectory() as td:
     cd = Path(td)
     (cd / "input.txt").write_bytes(b"x")
