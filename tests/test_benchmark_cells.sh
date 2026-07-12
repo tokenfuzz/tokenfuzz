@@ -218,6 +218,21 @@ assert_match "Cells complete: 1 done, 0 failed" "$codex_out" \
   "T16b: codex benchmark cell marked done"
 assert_match "refusals=0" "$codex_out" \
   "T16b-refusals: benchmark summary prints refusal count"
+# ── T16b5/6: the shared live dashboard is refreshed when a cell STARTS ──────
+# Regression: benchmark-result regenerated only on cell completion, so a
+# long-running cell (the trailing harness cell) stayed absent from the shared
+# dashboard for its whole duration. Assert the start-triggered regen fires,
+# and that it precedes the cell's own completion regen.
+assert_match "benchmark-result live update .start model-direct-r1." "$codex_out" \
+  "T16b5: live dashboard regenerated at cell start"
+start_ln=$(grep -nE "live update .start model-direct-r1." <<< "$codex_out" | head -1 | cut -d: -f1) || true
+done_ln=$(grep -nE "Cell model-direct-r1 done" <<< "$codex_out" | head -1 | cut -d: -f1) || true
+if [ -n "$start_ln" ] && [ -n "$done_ln" ] && [ "$start_ln" -lt "$done_ln" ]; then
+  pass "T16b6: start regen precedes the cell's completion regen"
+else
+  fail "T16b6: start regen precedes the cell's completion regen" \
+    "start_ln='$start_ln' done_ln='$done_ln' (start must fire before done)"
+fi
 # The target tree must stay byte-identical: no chmod, no copy, no rewrite.
 # Inspect the literal mode bits via stat rather than `[ -x file ]`. The
 # latter lies on Docker-for-Mac bind mounts (root + virtiofs returns

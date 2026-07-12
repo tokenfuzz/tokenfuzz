@@ -1202,6 +1202,10 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 log(f"Cell {name} starting: condition={condition} replicate={replicate} agents={1 if condition == 'model-direct' else args.agents or 'default'} model={model or '?'} experiment={experiment}")
                 predicted = cell_dir if condition == "model-direct" else cell_dir / "repo-root" / "output" / f"{args.target}-{experiment}" / args.backend / "results"
                 write_cell(cell_json, condition, replicate, experiment, predicted, 0, "running", args.agents)
+                # Regen fires again on completion; do it at start too so a
+                # just-started long cell (the trailing harness cell) shows in the
+                # shared dashboard for its whole run, not only after it finishes.
+                update_live_result(bench_root, f"start {name}")
                 start = time.monotonic()
                 status = "done"
                 if args.dry_run:
