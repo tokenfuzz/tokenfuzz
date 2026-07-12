@@ -1302,10 +1302,13 @@ def _accepted_finding_primitive(report_dir: Path) -> tuple[str, str]:
     path = Path(report_dir) / ".llm-find-quality.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        if not isinstance(payload, dict):
+            return "", ""
         votes = int(payload.get("accept_count", 0))
     except (OSError, ValueError, TypeError):
         return "", ""
-    if payload.get("accept") is not True or votes < 2:
+    if (payload.get("decision_version") != "v13-python"
+            or payload.get("accept") is not True or votes < 2):
         return "", ""
     label = str(payload.get("class") or "").strip().lower()
     return _primitive_from_validated_class(label), label

@@ -1488,6 +1488,27 @@ assert_eq "dos_amplification" "$(jq -r '.severity.primitive_key' <<<"$validated_
 assert_neq "Critical" "$(jq -r '.severity.level' <<<"$validated_json")" \
   "quality gate's advisory severity cannot become the CVSS result"
 
+high_impact="$TEST_TMPDIR/findings/FIND-VALIDATED-HIGH"
+mkdir -p "$high_impact"
+cat > "$high_impact/report.md" <<'RPT'
+# Accepted high-impact state flaw
+
+Class: state
+Surface: library-api
+
+The accepted report establishes an input-shaped unsafe object reconstruction.
+RPT
+cat > "$high_impact/.llm-find-quality.json" <<'JSON'
+{"decision_version":"v13-python","accept":true,"accept_count":2,"class":"deserialization:unsafe","severity":"critical"}
+JSON
+high_json=$(python3 "$REACH" --report "$high_impact" --json)
+assert_eq "deserialization" "$(jq -r '.severity.primitive_key' <<<"$high_json")" \
+  "accepted high-impact class maps to its existing central primitive"
+assert_eq "High" "$(jq -r '.severity.level' <<<"$high_json")" \
+  "unreproduced H/H/H finding is tempered by E:U and cannot become Critical"
+assert_file_contains "$high_impact/report.md" 'E:U' \
+  "validated high-impact finding records unreported exploit maturity"
+
 # Classification is not an acceptance gate. Ambiguous or non-terminal caches
 # remain visible with an explicit terminal review state and no fabricated score.
 review="$TEST_TMPDIR/findings/FIND-NEEDS-REVIEW"
@@ -1523,6 +1544,13 @@ JSON
 nonterminal_json=$(python3 "$REACH" --report "$unaccepted" --json)
 assert_eq "Needs review" "$(jq -r '.severity.level' <<<"$nonterminal_json")" \
   "one validator vote cannot mint a primitive or severity"
+
+malformed_cache="$TEST_TMPDIR/findings/FIND-NONDICT-CACHE"
+cp -R "$review" "$malformed_cache"
+printf '%s\n' '[]' > "$malformed_cache/.llm-find-quality.json"
+malformed_json=$(python3 "$REACH" --report "$malformed_cache" --json)
+assert_eq "Needs review" "$(jq -r '.severity.level' <<<"$malformed_json")" \
+  "valid non-object cache JSON fails open instead of crashing severity"
 
 # Sanitizer evidence and an authored Primitive retain precedence over the
 # validator class, preventing structured hints from overriding proof.

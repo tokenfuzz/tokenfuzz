@@ -1988,6 +1988,16 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
     block_pattern = re.compile(rf"^{re.escape(label)}:[ \t]*$", re.IGNORECASE)
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         lines = list(f)
+    # A skeleton commonly has several empty fields in a row.  Stop a block
+    # value at the next structured field instead of folding every following
+    # label and cluster stamp into the first empty field.
+    field_line = re.compile(
+        r"^(?:Surface|Primitive|Class|Severity|Boundary|Caller controls|"
+        r"Parameter control|Trusted caller actions|Caller contract|"
+        r"Trigger source|Strategy|CARD-ID|Cluster|Dedup frames|"
+        r"Reproduction rate):(?:[ \t].*)?$",
+        re.IGNORECASE,
+    )
     for idx, line in enumerate(lines):
         if pattern.match(line):
             line = line.rstrip("\n")
@@ -2004,6 +2014,8 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
                     if vals:
                         break
                     continue
+                if (field_line.match(stripped) or stripped.startswith(("#", "|", "<!--"))):
+                    break
                 vals.append(stripped)
             return " ".join(vals).rstrip()
     return read_field_from_fields_table(path, label)

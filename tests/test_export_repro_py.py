@@ -741,6 +741,26 @@ assert_eq("DNS query name bytes and public channel lifecycle sequence.",
 assert_eq("mapped through a documented resolver option.",
           er.read_bare_field(block_report, "Parameter control"),
           "read_bare_field: label block Parameter control")
+
+# Adjacent empty skeleton fields are empty. They must not consume the next
+# labels and generated cluster metadata as one long field value.
+empty_block_report = TMP / "empty-block-report.md"
+empty_block_report.write_text("""\
+Boundary:
+Caller controls:
+Trusted caller actions:
+Caller contract:
+Trigger source:
+Strategy: S5
+CARD-ID: WORK-neutral
+Cluster: CL-neutral
+""", encoding="utf-8")
+for field in ("Boundary", "Caller controls", "Trusted caller actions",
+              "Caller contract", "Trigger source"):
+    assert_eq("", er.read_bare_field(empty_block_report, field),
+              f"read_bare_field: adjacent empty {field} stays empty")
+assert_eq("S5", er.read_bare_field(empty_block_report, "Strategy"),
+          "read_bare_field: field after empty skeleton labels remains readable")
 v2, _ = er.infer_surface(harness, asan_path)
 assert_eq("library-api", v2,
           "infer_surface: harness #include of pcre2.h → library-api")
