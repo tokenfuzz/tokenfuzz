@@ -31,6 +31,7 @@ import target_config
 import triage
 import verdict
 import vocab_rules
+import workqueue
 
 passed = failed = 0
 
@@ -99,13 +100,18 @@ with tempfile.TemporaryDirectory(
         finding = results / "findings" / "FIND-001"
         finding.mkdir(parents=True)
         (finding / "report.md").write_text("# Finding\n", encoding="utf-8")
-        crash = results / "crashes" / "CRASH-001"
-        crash.mkdir(parents=True)
-        (crash / "sanitizer.txt").write_text(
-            "==1==ERROR: AddressSanitizer: stack-overflow on address 0x1234\n",
-            encoding="utf-8",
-        )
+        for index in range(1, 4):
+            crash = results / "crashes" / f"CRASH-00{index}-1"
+            crash.mkdir(parents=True)
+            (crash / "sanitizer.txt").write_text(_ASAN, encoding="utf-8")
+            (crash / "REPORT.md").write_text(
+                _GOOD_REPORT if index < 3 else "## Root Cause\n_TODO (agent): fill in\n",
+                encoding="utf-8",
+            )
         return 0, results
+
+    def _budget_crash_triage(*_args, **_kwargs):
+        return {"promoted": 2, "rejected": 0, "demoted": 0, "pending": 1}
 
     def _budget_drain(results, *_args, **kwargs):
         drained_deadlines.append(kwargs.get("deadline"))
@@ -130,6 +136,7 @@ with tempfile.TemporaryDirectory(
          mock.patch.object(benchmark_runner, "_git_rev", return_value="rev"), \
          mock.patch.object(benchmark_runner, "preflight_build"), \
          mock.patch.object(benchmark_runner, "run_harness", side_effect=_budget_harness), \
+         mock.patch.object(benchmark_runner, "triage_cell_crashes", side_effect=_budget_crash_triage), \
          mock.patch.object(benchmark_runner, "drain_find_gate", side_effect=_budget_drain), \
          mock.patch.object(benchmark_runner, "update_result", return_value=empty_report), \
          mock.patch.object(benchmark_runner.metrics, "render_section", return_value=""), \
@@ -162,11 +169,109 @@ with tempfile.TemporaryDirectory(
         repr(budget_metrics),
     )
     check(
-        budget_metrics["confirmed_crashes"] == 0
-        and budget_metrics["crashes_rejected"] == 1,
-        "final cell triage quarantines model-direct autodiscard crashes before harvest",
+        budget_metrics["confirmed_crashes"] == 3
+        and budget_metrics["crashes_pending"] == 1
+        and budget_metrics["crashes_rejected"] == 0,
+        "two promoted crashes and one report skeleton all retain sanitizer credit",
         repr(budget_metrics),
     )
+    budget_report = benchmark.aggregate(bench_dir, include_pool=False)
+    budget_condition = budget_report["conditions"][0]
+    check(
+        budget_condition["crash_total"] == 3
+        and budget_condition["pending_crash_total"] == 1
+        and budget_condition["confirmed_finding_total"] == 1,
+        "one pending crash is excluded individually without erasing promoted crashes or validated findings",
+        repr(budget_condition),
+    )
+
+    # Regeneration re-derives stale accounting status only after both
+    # finalizers return normally. Provider-limited cells remain excluded.
+    budget_cell["status"] = "incomplete"
+    budget_cell["run_quality"] = "incomplete"
+    (cells_dir / "harness-r1" / "cell.json").write_text(
+        json.dumps(budget_cell), encoding="utf-8"
+    )
+    provider_dir = cells_dir / "harness-r2"
+    provider_dir.mkdir()
+    provider_results = provider_dir / "results"
+    provider_results.mkdir()
+    (provider_dir / ".backend-unavailable").touch()
+    (provider_dir / "cell.json").write_text(json.dumps({
+        "condition": "harness", "replicate": 2, "experiment": "provider",
+        "results_dir": str(provider_results), "wall_seconds": 1,
+        "status": "incomplete", "run_quality": "provider_limited",
+    }), encoding="utf-8")
+    regenerate_args = SimpleNamespace(**{**vars(budget_args), "regenerate": True})
+    with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", fake_script_root), \
+         mock.patch.object(benchmark_runner, "triage_cell_crashes", side_effect=_budget_crash_triage), \
+         mock.patch.object(benchmark_runner, "drain_find_gate", side_effect=_budget_drain), \
+         mock.patch.object(benchmark_runner, "update_result", return_value=empty_report), \
+         mock.patch.object(benchmark_runner.metrics, "render_section", return_value=""), \
+         mock.patch.object(benchmark_runner.metrics, "append_to_ledger"):
+        benchmark_runner._run_locked(
+            regenerate_args, bench_root, backend_root, bench_dir, cells_dir,
+            backend_root / "benchmark-results.md", "wall-budget", ["harness"],
+        )
+    recovered = json.loads((cells_dir / "harness-r1" / "cell.json").read_text())
+    provider = json.loads((provider_dir / "cell.json").read_text())
+    check(
+        recovered["status"] == "done" and recovered["run_quality"] == "clean",
+        "regenerate recomputes stale artifact-pending incomplete status",
+        repr(recovered),
+    )
+    check(
+        provider["status"] == "incomplete" and provider["run_quality"] == "provider_limited",
+        "regenerate preserves genuine provider-limited status",
+        repr(provider),
+    )
+    recovered["status"] = "incomplete"
+    recovered["run_quality"] = "incomplete"
+    (cells_dir / "harness-r1" / "cell.json").write_text(
+        json.dumps(recovered), encoding="utf-8"
+    )
+    with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", fake_script_root), \
+         mock.patch.object(benchmark_runner, "triage_cell_crashes", side_effect=RuntimeError("triage failed")), \
+         mock.patch.object(benchmark_runner, "drain_find_gate", side_effect=_budget_drain), \
+         mock.patch.object(benchmark_runner, "update_result", return_value=empty_report), \
+         mock.patch.object(benchmark_runner.metrics, "render_section", return_value=""), \
+         mock.patch.object(benchmark_runner.metrics, "append_to_ledger"):
+        benchmark_runner._run_locked(
+            regenerate_args, bench_root, backend_root, bench_dir, cells_dir,
+            backend_root / "benchmark-results.md", "wall-budget", ["harness"],
+        )
+    finalizer_failed = json.loads(
+        (cells_dir / "harness-r1" / "cell.json").read_text()
+    )
+    check(
+        finalizer_failed["status"] == "incomplete",
+        "regenerate does not recover a cell when a finalizer actually fails",
+        repr(finalizer_failed),
+    )
+
+    # A pending crash is explicit resumable work and preempts card claiming.
+    resume_results = root / "resume-pending"
+    resume_crash = resume_results / "crashes" / "CRASH-003-1"
+    resume_crash.mkdir(parents=True)
+    (resume_crash / "report.md").write_text(
+        "## Root Cause\n_TODO (agent): complete\n", encoding="utf-8"
+    )
+    resume_ctx = workqueue.Context(ROOT, root, "sampleproj", resume_results, "none")
+    workqueue.init_state(resume_ctx)
+    (resume_results / "work-cards.jsonl").write_text(json.dumps({
+        "id": "WORK-next", "kind": "ranked-source", "status": "unclaimed",
+        "file": "src/next.c", "subsystem": "next", "strategy": "S2",
+    }) + "\n", encoding="utf-8")
+    resume_text = workqueue.state_resume(resume_ctx, "1", claim=True)
+    check(
+        "## Pending Crash Completion" in resume_text
+        and "CRASH-003-1" in resume_text
+        and "work-card assignment is deferred" in resume_text,
+        "unfinished crash report is the highest-priority resumable work",
+        resume_text,
+    )
+    claims = workqueue.read_jsonl(resume_results / "state" / "claims.jsonl")
+    check(not claims, "pending crash completion does not claim a new work card", repr(claims))
 
     # ── #1 promotion-pending TTL: an incomplete crash is held, not rejected ──
     incomplete_root = root / "ttl"

@@ -1948,6 +1948,50 @@ else
   pass "probe: findings-only runner diagnostic does not terminal-close card"
 fi
 
+# A sanitizer-confirmed crash is also kept active until its auto-filed report
+# is enriched; proof alone must not make the hypothesis/card terminal.
+printf '{"id": "H-asan-pending", "agent": "1", "card_id": "WORK-asan-pending", "hypothesis": "confirmed crash report stays active", "file": "alpha/core/ThingProcessor.cpp:ThingProcessorRead:3", "input_shape": "bytes", "guard_gap": "input-shaped size reaches bounds", "diagnostic": "bounds", "strategy": "S3", "status": "PENDING", "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z"}\n' \
+  >> "$runner_results/state/hypotheses.jsonl"
+printf '{"card_id": "WORK-asan-pending", "agent": "1", "status": "claimed", "updated_at": "2026-06-01T00:00:00Z"}\n' \
+  >> "$runner_results/state/claims.jsonl"
+cat > "$runner_results/scratch-1/asan-pending.dat" <<'EOF_TC'
+TARGET: alpha/core/ThingProcessor.cpp:ThingProcessorRead:3
+HYPOTHESIS-ID: H-asan-pending
+CARD-ID: WORK-asan-pending
+CATEGORY: bounds
+abc
+EOF_TC
+mock_asan="$TEST_TMPDIR/mock-asan"
+cat > "$mock_asan" <<'EOF_ASAN'
+#!/usr/bin/env bash
+echo '==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60200000' >&2
+echo 'SUMMARY: AddressSanitizer: heap-buffer-overflow child.c:91 in child_read' >&2
+exit 1
+EOF_ASAN
+chmod +x "$mock_asan"
+RESULTS_DIR="$runner_results" PROBE_SANITIZER=asan ASAN_GENERIC_BIN="$mock_asan" \
+  "$PROBE" --confirm "$runner_results/scratch-1/asan-pending.dat" >/dev/null 2>&1 || true
+asan_hyp_status=$(python3 - "$runner_results/state/hypotheses.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+print(next(row["status"] for row in reversed(rows) if row.get("id") == "H-asan-pending"))
+PY
+)
+assert_eq "PENDING" "$asan_hyp_status" \
+  "probe: confirmed sanitizer crash stays active until report enrichment"
+if grep -q '"card_id": "WORK-asan-pending".*"status": "crash"' "$runner_results/state/claims.jsonl"; then
+  fail "probe: pending sanitizer report does not terminal-close card" \
+    "WORK-asan-pending was marked crash"
+else
+  pass "probe: pending sanitizer report does not terminal-close card"
+fi
+assert_file_contains "$runner_results/crashes/CRASH-001-1/report.md" '_TODO \(agent\):' \
+  "probe: confirmation leaves explicit resumable report work"
+pending_close=$(RESULTS_DIR="$runner_results" TARGET_ROOT="$TARGET_ROOT" TARGET_SLUG="$TARGET_SLUG" \
+  "$STATE" update-card --card-id WORK-asan-pending --status crash 2>&1 || true)
+assert_match 'unfinished crash report' "$pending_close" \
+  "state: report-completeness gate infers card owner when --agent is omitted"
+
 cat > "$RESULTS_DIR/scratch-1/tc.dat" <<'EOF_TC'
 TARGET: alpha/core/ThingProcessor.cpp:ThingProcessorRead:3
 HYPOTHESIS-ID: H2

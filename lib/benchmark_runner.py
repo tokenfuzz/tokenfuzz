@@ -1247,8 +1247,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             f"demoted={crash_counts.get('demoted', 0)} "
                             f"pending={crash_counts.get('pending', 0)}"
                         )
-                        if crash_counts.get("pending", 0):
-                            status = "incomplete"
                     except Exception as exc:
                         log(f"WARN: crash triage failed for {name}: {exc}")
                         status = "incomplete"
@@ -1269,8 +1267,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             f"Cell {name} validation: accepted={counts.get('accepted', 0)} "
                             f"rejected={counts.get('rejected', 0)} pending={counts.get('pending', 0)}"
                         )
-                        if counts.get("pending", 0):
-                            status = "incomplete"
                     except Exception as exc:
                         log(f"WARN: find-gate drain failed for {name}: {exc}")
                         status = "incomplete"
@@ -1319,6 +1315,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             except (OSError, ValueError):
                 continue
             if results.is_dir():
+                finalizers_ok = True
                 finalize_wall = getattr(args, "finalize_wall", 3600)
                 finalize_deadline = (
                     time.monotonic() + finalize_wall if finalize_wall else None
@@ -1340,6 +1337,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             )
                     except Exception as exc:
                         log(f"WARN: crash triage failed for {cell_dir.name}: {exc}")
+                        finalizers_ok = False
                 if args.validate_findings and (results / "findings").is_dir():
                     log(f"Regenerate: draining find-gate for {cell_dir.name} ({cell.get('condition', '?')})")
                     try:
@@ -1350,10 +1348,26 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         )
                     except Exception as exc:
                         log(f"WARN: find-gate drain failed for {cell_dir.name}: {exc}")
+                        finalizers_ok = False
                 _write_json(cell_dir / "metrics.json", metrics.harvest(results, args.backend, model))
                 remaining = metrics.harvest(results, args.backend, model).get("findings_unadjudicated", 0)
                 if args.validate_findings and remaining:
                     log(f"WARN: {cell_dir.name} has {remaining} finding(s) still un-adjudicated after drain")
+                # `incomplete` is reserved for a provider-limited run or a
+                # finalizer that actually failed. Older runners also used it
+                # for an otherwise successful cell containing one unfinished
+                # artifact; recompute that stale status after fresh finalizers
+                # return normally without changing failed/provider cells.
+                if (
+                    finalizers_ok
+                    and cell.get("status") == "incomplete"
+                    and cell.get("run_quality") != "provider_limited"
+                    and not (cell_dir / ".backend-unavailable").is_file()
+                ):
+                    cell["status"] = "done"
+                    if cell.get("run_quality") == "incomplete":
+                        cell["run_quality"] = "clean"
+                    _write_json(cell_dir / "cell.json", cell)
                 refreshed += 1
         log(f"Regenerate: re-derived metrics from {refreshed} cell(s)")
 

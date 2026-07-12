@@ -3619,6 +3619,15 @@ def update_hypothesis(
                 f"{f' (agents: {agents})' if agents else ''}; rerun with --agent or use unique ids"
             )
         found = matches[0] if matches else None
+        if (
+            found
+            and str(status).upper().startswith("CRASH")
+            and _unfinished_crash_reports_for_agent(ctx, str(found.get("agent", "")))
+        ):
+            raise HypothesisStateError(
+                f"update-hyp refuses {status} for {hid}: this agent has an "
+                "unfinished crash report. Complete its `_TODO (agent):` fields first."
+            )
         for row in rows:
             if row is found:
                 row["status"] = status
@@ -3660,8 +3669,9 @@ def card_run_count(ctx: Context, card_id: str, verdict: str = "") -> int:
     When ``verdict`` is given (e.g. "CRASH"), count only rows with that
     verdict. The crash-close gate in update_card_status uses
     verdict="CRASH" as the harness-written evidence that a crash was
-    actually reproduced (bin/probe records the verdict before it
-    auto-closes the card); the discard gate uses the unfiltered count.
+    actually reproduced; the separate report-completeness gate prevents
+    closure while the filed bundle is still a skeleton. The discard gate
+    uses the unfiltered count.
     """
     if not card_id:
         return 0
@@ -4054,8 +4064,8 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
         shapes: a clean variant set must have actually been run, and one
         shallow hypothesis must not retire a file/strategy surface.
       * `crash` requires ≥1 runs.jsonl row with a CRASH verdict for the
-        card — bin/probe writes that verdict before it auto-closes the
-        card. An `update-card --status crash` with no such row is bounced
+        card and no unfinished crash report owned by the agent. An
+        `update-card --status crash` with no such row is bounced
         back to needs-verify instead of terminally consuming the card; the
         agent must run the testcase through bin/probe. Scope: this catches
         the observed failure mode (a card closed `crash` with no probe run
@@ -4092,13 +4102,30 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
                 f"distinct_hypotheses={hyps} (need {min_hyps}). "
                 "Run bin/probe variants and add a hypothesis first."
             )
-    elif status == "crash" and card_run_count(ctx, card_id, verdict="CRASH") < 1:
-        raise CardStatusUpdateError(
-            f"update-card refuses crash for {card_id}: no runs.jsonl "
-            "CRASH verdict references this card. Run the testcase "
-            "through bin/probe to verify the crash; it records the "
-            "verdict and files the artifact."
+    elif status == "crash":
+        if card_run_count(ctx, card_id, verdict="CRASH") < 1:
+            raise CardStatusUpdateError(
+                f"update-card refuses crash for {card_id}: no runs.jsonl "
+                "CRASH verdict references this card. Run the testcase "
+                "through bin/probe to verify the crash; it records the "
+                "verdict and files the artifact."
+            )
+        owners = {str(agent)} if agent else set()
+        owners.update(
+            str(row.get("agent", ""))
+            for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
+            if row.get("card_id") == card_id and row.get("agent") not in (None, "")
         )
+        blocked_owners = sorted(
+            owner for owner in owners
+            if _unfinished_crash_reports_for_agent(ctx, owner)
+        )
+        if blocked_owners:
+            raise CardStatusUpdateError(
+                f"update-card refuses crash for {card_id}: agent(s) "
+                f"{', '.join(blocked_owners)} have "
+                "an unfinished crash report. Complete its `_TODO (agent):` fields first."
+            )
     row = {
         "card_id": card_id,
         "agent": agent,
@@ -4550,6 +4577,40 @@ def show_crash(ctx: Context, crash_id: str) -> dict | None:
     return None
 
 
+def _agent_crash_dirs(ctx: Context, agent: str) -> list[Path]:
+    suffix = re.compile(rf"-{re.escape(str(agent))}$")
+    return [
+        artifact_dir
+        for artifact_dir in sorted((ctx.results_dir / "crashes").glob("CRASH-*"))
+        if artifact_dir.is_dir() and suffix.search(artifact_dir.name)
+    ]
+
+
+def _crash_report_unfinished(artifact_dir: Path) -> bool:
+    try:
+        return "_TODO (agent):" in _report_path(artifact_dir).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return True
+
+
+def _unfinished_crash_reports_for_agent(ctx: Context, agent: str) -> list[Path]:
+    return [
+        artifact_dir for artifact_dir in _agent_crash_dirs(ctx, agent)
+        if _crash_report_unfinished(artifact_dir)
+    ]
+
+
+def _pending_crashes_for_agent(ctx: Context, agent: str) -> list[Path]:
+    """Return this agent's unfinished crash bundles in filing order."""
+    return [
+        artifact_dir for artifact_dir in _agent_crash_dirs(ctx, agent)
+        if _crash_report_unfinished(artifact_dir)
+        or (artifact_dir / ".promotion_pending").is_file()
+    ]
+
+
 def _compact_finding(ctx: Context, row: dict[str, str]) -> dict:
     fid = row.get("id", "")
     artifact_dir = ctx.results_dir / "findings" / fid
@@ -4645,7 +4706,8 @@ def state_resume(
         if h.get("agent", "") == agent and is_active_hypothesis_status(h.get("status", ""))
     ]
     active.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "", reverse=True)
-    card = None if active else claim_next_card(ctx, agent, mode, role, claim=claim, strategy=strategy)
+    pending_crashes = _pending_crashes_for_agent(ctx, agent)
+    card = None if (pending_crashes or active) else claim_next_card(ctx, agent, mode, role, claim=claim, strategy=strategy)
 
     lines = [
         "# Structured Resume",
@@ -4655,8 +4717,21 @@ def state_resume(
         f"- Role: `{role or 'unspecified'}`",
         f"- Strategy filter: `{strategy.strip().upper()}`" if strategy.strip() else "",
         "",
-        "## Active Hypothesis",
+        "## Pending Crash Completion",
     ]
+    if pending_crashes:
+        for crash_dir in pending_crashes:
+            lines.append(f"- `{crash_dir.name}`: `{_report_path(crash_dir)}`")
+        lines.extend([
+            "",
+            "Next action: finish the oldest pending crash bundle before any hypothesis or work card. Read `.promotion_pending` when present and replace every `_TODO (agent):` report field; after the report is complete, close its hypothesis/card in structured state.",
+        ])
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "## Active Hypothesis",
+    ])
     if active:
         h = active[0]
         lines.extend(
@@ -4671,7 +4746,9 @@ def state_resume(
                 f"- Guard Gap: {h.get('guard_gap','')}",
                 f"- Diagnostic: `{h.get('diagnostic','')}`",
                 "",
-                "Next action: continue this hypothesis. Write or revise one testcase, run `bin/probe`, then update structured state.",
+                ("Next action after crash completion: continue this hypothesis."
+                 if pending_crashes else
+                 "Next action: continue this hypothesis. Write or revise one testcase, run `bin/probe`, then update structured state."),
             ]
         )
     else:
@@ -4714,13 +4791,16 @@ def state_resume(
                 ]
             )
         else:
-            lines.extend(
-                [
-                    "- none",
-                    "",
-                    "Next action: no eligible work card is available. Use `bin/state explain-queue` to record why no launchable work exists; do not run `bin/rank-work` interactively to expand or rerank the queue.",
-                ]
-            )
+            lines.append("- none")
+            lines.append("")
+            if pending_crashes:
+                lines.append(
+                    "Next action: work-card assignment is deferred until the pending crash report is complete."
+                )
+            else:
+                lines.append(
+                    "Next action: no eligible work card is available. Use `bin/state explain-queue` to record why no launchable work exists; do not run `bin/rank-work` interactively to expand or rerank the queue."
+                )
 
     if active:
         hyp_id = active[0].get("id", "")

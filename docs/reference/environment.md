@@ -31,7 +31,7 @@ NUM_AGENTS=4 bin/audit --target <target> --backend <backend>
 | Variable | Default | Use it for |
 | --- | --- | --- |
 | `AGENT_TIMEOUT` | `7200` seconds | Hard wall-clock ceiling for one agent launch. |
-| `TURN_SOFT_CAP` | `75` completed commands | Restart a Codex audit session with fresh context after this many shell commands. Set `0` to disable. |
+| `TURN_SOFT_CAP` | `75` completed commands | Restart a Codex audit session with fresh context after this many shell commands. A newly confirmed crash gets a bounded report-enrichment tail and resumes first if still unfinished. Set `0` to disable. |
 | `MAX_DRY_SESSIONS` | `10` | Stop a continuous run after this many dry iterations; the harness may raise a value that would prevent fair strategy rotation. |
 | `ASAN_AUTOENFORCE_MAX` | `3` | Maximum orphan testcases the post-iteration pass probes automatically. Set `0` to report them without running them. |
 | `ASAN_AUTOENFORCE_TIMEOUT` | `30` seconds | Per-testcase ceiling for the orphan enforcement probe. |

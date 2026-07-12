@@ -695,9 +695,11 @@ class Probe:
             "--sanitizer-runs", self.environment["SANITIZER_RUNS"],
         )
         if probe_verdict == "CRASH" and self.sanitizer != "runner":
-            self._state_command("update-hyp", "--id", hypothesis, "--status", "CRASH", "--note", "bin/probe observed sanitizer diagnostic")
-            if self.card:
-                self._state_command("update-card", "--card-id", self.card, "--status", "crash")
+            self._state_command(
+                "add-note", "--agent", self.agent, "--hypothesis-id", hypothesis,
+                "--card-id", self.card, "--kind", "decision",
+                "--text", "bin/probe observed a sanitizer diagnostic; keep hypothesis/card active until the filed crash report is complete",
+            )
         elif probe_verdict == "CRASH":
             self._state_command(
                 "add-note", "--agent", self.agent, "--hypothesis-id", hypothesis,

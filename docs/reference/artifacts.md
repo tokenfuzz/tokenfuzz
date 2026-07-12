@@ -136,6 +136,11 @@ complete. A directory that remains incomplete for the configured TTL is
 preserved under `crashes-rejected/` with the missing artifacts named in its
 rejection report.
 
+Pending promotion is resumable work. `bin/state resume --agent N` presents an
+unfinished bundle before active hypotheses or new work cards. Its sanitizer
+proof remains countable in benchmark crash totals, but severity stays Unknown
+until the report is complete.
+
 After export, the maintainer-facing bundle has:
 
 ```text

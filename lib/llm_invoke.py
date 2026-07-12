@@ -826,6 +826,33 @@ def run_agent_prompt(
     return returncode
 
 
+_CRASH_ENRICHMENT_GRACE_COMMANDS = 15
+_CRASH_ENRICHMENT_GRACE_SECONDS = 300
+
+
+def _agent_has_unfinished_crash(environment: dict) -> bool:
+    """Whether this audit agent owns a crash report that still needs prose."""
+    tried = environment.get("TRIED_INPUTS_LOG", "")
+    agent = str(environment.get("AGENT_NUM", ""))
+    if not tried or not agent:
+        return False
+    crashes = Path(tried).parent / "crashes"
+    for crash_dir in crashes.glob(f"CRASH-*-{agent}"):
+        if not crash_dir.is_dir():
+            continue
+        report = crash_dir / "report.md"
+        if not report.is_file() and (crash_dir / "REPORT.md").is_file():
+            report = crash_dir / "REPORT.md"
+        try:
+            if "_TODO (agent):" in report.read_text(
+                encoding="utf-8", errors="replace"
+            ):
+                return True
+        except OSError:
+            return True
+    return False
+
+
 def _run_codex_with_turn_watchdog(
     launch_command, input_text, raw_log, cwd, environment, turn_cap: int,
 ) -> int:
@@ -835,6 +862,8 @@ def _run_codex_with_turn_watchdog(
 
     raw = Path(raw_log)
     capped = False
+    enrichment_limit = None
+    enrichment_deadline = None
     offset = total = 0
     feeder = None
     with raw.open("w", encoding="utf-8") as sink:
@@ -869,13 +898,30 @@ def _run_codex_with_turn_watchdog(
                 count, offset = audit_helpers.codex_turn_delta(raw, offset)
                 total += count
                 if total >= turn_cap:
-                    capped = True
-                    try:
-                        process_tree.kill_descendants(process.pid, signal.SIGTERM, 1.0)
-                    except (OSError, subprocess.SubprocessError):
-                        pass
-                    process.terminate()
-                    break
+                    unfinished = _agent_has_unfinished_crash(environment)
+                    if enrichment_limit is None and unfinished:
+                        # Confirmation can land on the nominal last command.
+                        # Give the required report a small, bounded tail; the
+                        # structured resume path will preempt new work if this
+                        # tail still is not enough.
+                        enrichment_limit = total + _CRASH_ENRICHMENT_GRACE_COMMANDS
+                        enrichment_deadline = (
+                            time.monotonic() + _CRASH_ENRICHMENT_GRACE_SECONDS
+                        )
+                    if not unfinished or (
+                        enrichment_limit is not None
+                        and (
+                            total >= enrichment_limit
+                            or time.monotonic() >= enrichment_deadline
+                        )
+                    ):
+                        capped = True
+                        try:
+                            process_tree.kill_descendants(process.pid, signal.SIGTERM, 1.0)
+                        except (OSError, subprocess.SubprocessError):
+                            pass
+                        process.terminate()
+                        break
                 time.sleep(0.5)
             try:
                 process.wait(timeout=5)

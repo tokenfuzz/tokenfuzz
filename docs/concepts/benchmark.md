@@ -126,10 +126,13 @@ startup cost inside the budget you gave it.
 After timed investigation stops, each cell synchronously drains the finding
 quality gate before metrics are harvested. This final triage is measurement,
 not additional finding time, so it gets a separate `--finalize-wall` budget.
-Anything still pending at that deadline leaves the cell incomplete and can be
-resumed with `--regenerate`.
+Pending artifacts are excluded or qualified individually: an unadjudicated
+finding does not enter the finding total, while a sanitizer-proved crash with
+an unfinished report remains in the crash total at Unknown severity. A pending
+artifact does not erase the rest of its replicate. A provider-limited run or
+failed post-processing still leaves the cell incomplete.
 
-Incomplete cells remain excluded from medians and aggregate yield. Their
+Genuinely incomplete cells remain excluded from medians and aggregate yield. Their
 confirmed on-disk yield is still shown as an observed count in the console and
 run ledger, so an interrupted productive cell is not mistaken for a zero-yield
 cell.
@@ -197,8 +200,10 @@ running cell contributes no counts until its own triage and validation finish.
 The expensive pooled comparison is still rebuilt only once after the final
 cell. That pass performs sanitizer revalidation, bundling, clustering, and
 final report rendering; the live refresh only reads the atomic `cell.json` and
-`metrics.json` files. Incomplete-cell evidence is labeled as observed and stays
-excluded from medians and completed-cell totals.
+`metrics.json` files. The **Pending findings** and **Pending crash reports**
+columns distinguish incomplete artifacts from completed evidence. Genuinely
+incomplete-cell evidence is labeled as observed and stays excluded from medians
+and completed-cell totals.
 
 Each backend also has an append-only ledger,
 `output/benchmark/<backend>/benchmark-results.html`, with one section
@@ -403,6 +408,11 @@ bin/benchmark --regenerate
 the pool, re-runs severity scoring and crash/finding clustering,
 refreshes per-condition cluster reports, rewrites `report.json`, and
 updates `benchmark-result.{md,html}` plus the backend ledger row.
+
+It also recomputes stale cell status after post-processing succeeds. This
+recovers runs written by older versions that marked a whole cell incomplete
+because one artifact was pending; provider-limited and failed cells remain
+excluded.
 
 The exported reproducer bundle pass still runs, but stays additive: a
 crash with no canonical bundle yet (a model-direct freeform baseline,

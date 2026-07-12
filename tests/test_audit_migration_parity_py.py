@@ -225,6 +225,55 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         "Codex turn watchdog checkpoints and terminates a session at the soft cap",
     )
 
+    # A crash confirmed at the nominal cap gets a bounded enrichment tail.
+    grace_results = root / "grace-results"
+    grace_report = grace_results / "crashes" / "CRASH-001-1" / "report.md"
+    grace_report.parent.mkdir(parents=True)
+    grace_report.write_text("_TODO (agent): enrich\n", encoding="utf-8")
+    grace_tried = grace_results / "tried-inputs-1.log"
+    grace_codex = root / "grace_codex.py"
+    grace_codex.write_text(
+        "import json,sys,time\n"
+        "from pathlib import Path\n"
+        "report=Path(sys.argv[1])\n"
+        "for i in range(6):\n"
+        " print(json.dumps({'type':'item.completed','item':{'type':'command_execution','id':i}}), flush=True)\n"
+        " time.sleep(0.6)\n"
+        " if i == 3: report.write_text('## Root Cause\\ncomplete\\n')\n"
+        "time.sleep(10)\n",
+        encoding="utf-8",
+    )
+    grace_env = {**os.environ, "TRIED_INPUTS_LOG": str(grace_tried), "AGENT_NUM": "1"}
+    grace_raw = root / "grace-watchdog.raw"
+    grace_started = time.monotonic()
+    grace_rc = llm_invoke._run_codex_with_turn_watchdog(
+        [sys.executable, str(grace_codex), str(grace_report)], None,
+        grace_raw, root, grace_env, 2,
+    )
+    grace_text = grace_raw.read_text(encoding="utf-8")
+    check(
+        grace_rc == 0
+        and grace_text.count('"type": "item.completed"') >= 4
+        and time.monotonic() - grace_started < 7,
+        "Codex watchdog permits mandatory crash enrichment past the nominal cap",
+        grace_text,
+    )
+
+    # The enrichment exception remains bounded when the report never finishes.
+    grace_report.write_text("_TODO (agent): still pending\n", encoding="utf-8")
+    bounded_raw = root / "bounded-watchdog.raw"
+    with mock.patch.object(llm_invoke, "_CRASH_ENRICHMENT_GRACE_COMMANDS", 2), \
+         mock.patch.object(llm_invoke, "_CRASH_ENRICHMENT_GRACE_SECONDS", 2):
+        bounded_rc = llm_invoke._run_codex_with_turn_watchdog(
+            [sys.executable, str(fake_codex)], None, bounded_raw, root,
+            grace_env, 2,
+        )
+    check(
+        bounded_rc == 0
+        and "TURN_SOFT_CAP reached" in bounded_raw.read_text(encoding="utf-8"),
+        "Codex crash-enrichment tail remains bounded",
+    )
+
     singleton_runtime = object()
     singleton_target = root / "singleton-target"
     singleton_target.mkdir()

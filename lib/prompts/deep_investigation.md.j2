@@ -11,6 +11,7 @@
 ## FIRST ACTION — Structured Resume
 
 - Run `bin/state resume --agent {{ agent_num }} --mode {{ mode }} --role {{ role }}{{ state_strategy_arg }}`.
+- Pending crash completion? **Finish its report immediately.** It outranks active hypotheses and work cards.
 - Active PENDING/INVESTIGATING/NEEDS_TESTCASE hypothesis? **Continue immediately.** No new recon.
 - No active hypothesis? Use the assigned work card from the resume. If none is assigned, {{ audit_fixed_strategy_clause }}inspect `bin/state explain-queue --mode {{ mode }}` and stop after recording why no launchable work exists.
 {{ wrong_mode_subsystem_line }}

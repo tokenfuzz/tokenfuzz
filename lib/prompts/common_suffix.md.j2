@@ -35,8 +35,10 @@ Every turn re-reads the whole conversation, so fewer turns and less added text a
 
 Codex sessions have a soft turn budget of ~75 completed shell commands. Past
 this threshold, cached-input replay cost grows quadratically and the harness
-will end the session for a fresh `bin/state resume` continuation. **You will
-not get to finish a partial hypothesis if the cap fires mid-turn** — so:
+will end the session for a fresh `bin/state resume` continuation. A newly
+filed crash gets a small, bounded report-enrichment tail; if that is still
+insufficient, the next resume presents the unfinished crash ahead of all
+other work. Other partial hypotheses can still be cut off mid-turn, so:
 
 - Checkpoint frequently: every confirmed hypothesis, decision, or data-flow
   observation goes into `bin/state add-hyp / update-hyp / add-note` the
