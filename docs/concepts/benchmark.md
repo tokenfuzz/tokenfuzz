@@ -200,10 +200,10 @@ running cell contributes no counts until its own triage and validation finish.
 The expensive pooled comparison is still rebuilt only once after the final
 cell. That pass performs sanitizer revalidation, bundling, clustering, and
 final report rendering; the live refresh only reads the atomic `cell.json` and
-`metrics.json` files. The **Pending findings** and **Pending crashes**
-columns distinguish incomplete artifacts from completed evidence. Genuinely
-incomplete-cell evidence is labeled as observed and stays excluded from medians
-and completed-cell totals.
+`metrics.json` files. Genuinely incomplete-cell evidence is labeled as observed
+and stays excluded from medians and completed-cell totals. Artifact-level
+finalization state remains available in cell metrics and linked reports without
+widening the cross-run comparison table.
 
 Each backend also has an append-only ledger,
 `output/benchmark/<backend>/benchmark-results.html`, with one section

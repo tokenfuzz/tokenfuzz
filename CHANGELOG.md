@@ -27,7 +27,9 @@
   is rebuilt after each completed cell and clearly labels provisional totals until
   final cross-cell deduplication. Operators no longer wait for the entire matrix to
   finish before inspecting results, while the final report retains the same gates
-  and unique-root accounting.
+  and unique-root accounting. Comparison tables name confirmed evidence explicitly
+  and leave exceptional artifact-finalization state in the linked detail reports
+  instead of permanent pending columns.
 
 - **Finalization is bounded and substantially cheaper without weakening gates.**
   Crash and finding validation has its own one-hour safety window, stops fan-out

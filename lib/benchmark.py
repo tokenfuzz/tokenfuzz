@@ -3233,12 +3233,12 @@ def render_section(report: dict) -> str:
     # crash severity` is the single highest-severity crash display.
     lines.append(
         "| Condition | Replicates | Wall (h) "
-        "| Rejected findings | Findings | Pending findings | Unique findings "
-        "| Rejected crashes | Crashes | Pending crashes | Unique crashes "
+        "| Rejected findings | Confirmed findings | Unique findings "
+        "| Rejected crashes | Confirmed crashes | Unique crashes "
         "| Top crash severity |"
     )
     lines.append(
-        "| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | :--: |"
+        "| --- | --: | --: | --: | --: | --: | --: | --: | --: | :--: |"
     )
     for c in sorted(conditions,
                     key=lambda c: (-c.get("top_severity_rank", 0),
@@ -3254,8 +3254,8 @@ def render_section(report: dict) -> str:
             bench_dir, c["condition"], "crashes-rejected"
         )
         lines.append(
-            "| {cond} | {rep} | {wall} | {rfi} | {fi} | {pfi} | {uf} "
-            "| {rcr} | {cr} | {pcr} | {uc} | {sev} |".format(
+            "| {cond} | {rep} | {wall} | {rfi} | {fi} | {uf} "
+            "| {rcr} | {cr} | {uc} | {sev} |".format(
                 cond=_condition_cell(c["condition"], backend),
                 rep=(
                     "{d}/{t}".format(d=c.get("replicates_done", 0),
@@ -3278,7 +3278,6 @@ def render_section(report: dict) -> str:
                     "REJECTED-FINDINGS",
                 ),
                 fi=_md_link(_finding_count_label(c), cond_findings),
-                pfi=c.get("unadjudicated_finding_total", 0),
                 uf=_cluster_report_link(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
@@ -3290,7 +3289,6 @@ def render_section(report: dict) -> str:
                     "REJECTED-CRASHES",
                 ),
                 cr=_md_link(c.get("crash_total", 0), cond_crashes),
-                pcr=c.get("pending_crash_total", 0),
                 uc=_cluster_report_link(
                     _unique_with_medium_plus(
                         c.get("unique_crash_clusters", 0),
@@ -3315,11 +3313,10 @@ def render_section(report: dict) -> str:
         "hours a cell actually spent. The result columns are grouped by "
         "evidence type. **Rejected findings** are FIND reports that failed "
         "the independent validator gate and link to a table showing the "
-        "reachability / guards / primitive booleans. **Findings** counts only "
+        "reachability / guards / primitive booleans. **Confirmed findings** "
+        "counts only "
         "FIND reports accepted by the find-quality gate or pinned by a human. "
-        "**Pending findings** are unadjudicated and excluded individually from "
-        "both Findings and the unique-finding pool. Findings carry no on-disk crash; "
-        "**Crashes** counts only crash "
+        "Findings carry no on-disk crash; **Confirmed crashes** counts only crash "
         "directories with real sanitizer output on disk — an agent "
         "claiming a crash in prose never counts. **Unique findings** and "
         "**Unique crashes** are those counts after `bin/cluster-findings` / "
@@ -3327,9 +3324,7 @@ def render_section(report: dict) -> str:
         "M+)` where `M` is how many of the `N` clusters `bin/severity` "
         "scored Medium or higher — the security-yield subset, on one scale "
         "across both conditions. **Top crash severity** is the highest crash "
-        "severity in the row. **Pending crashes** already have sanitizer proof "
-        "and remain in Crashes while report or bundle completion is pending; "
-        "an unfinished report remains Unknown severity. "
+        "severity in the row. "
         f"`{baseline_label}` is a bare \"find the vulnerabilities\" prompt "
         "with no harness around it, so a large raw crash count there is "
         "mostly repeated noise. `tokenfuzz` is the audit harness — triage, "
@@ -3637,15 +3632,15 @@ def crosstab(bench_root: Path) -> str:
 
     lines.append(
         "| Target | Backend | Condition | Run | Wall (h) | Replicates "
-        "| Rejected findings | Findings | Pending findings | Unique findings "
-        "| Rejected crashes | Crashes | Pending crashes | Unique crashes "
+        "| Rejected findings | Confirmed findings | Unique findings "
+        "| Rejected crashes | Confirmed crashes | Unique crashes "
         "| Top crash severity "
         "| Input | Output | Cost |"
     )
     lines.append(
         "| --- | --- | --- | --- | --: | --: "
-        "| --: | --: | --: | --: "
-        "| --: | --: | --: | --: "
+        "| --: | --: | --: "
+        "| --: | --: | --: "
         "| :--: "
         "| --: | --: | --: |"
     )
@@ -3696,7 +3691,7 @@ def crosstab(bench_root: Path) -> str:
         if c is None:
             lines.append(
                 f"| {target_cell} | {backend_cell} | — | {run_cell} "
-                f"| — | — | — | — | — | — | — | — | — | — | — | — | — | · — | — | — | — |"
+                f"| — | — | — | — | — | — | — | — | · — | — | — | — |"
             )
             continue
         cond = c.get("condition", "?")
@@ -3717,8 +3712,8 @@ def crosstab(bench_root: Path) -> str:
         )
         lines.append(
             "| {tgt} | {bk} | {cond} | {rid} | {wall} | {reps} "
-            "| {rfi} | {fi} | {pfi} | {uf} "
-            "| {rcr} | {cr} | {pcr} | {uc} "
+            "| {rfi} | {fi} | {uf} "
+            "| {rcr} | {cr} | {uc} "
             "| {sev} | {inp} | {out} | {cost} |".format(
                 bk=backend_cell,
                 rid=run_cell,
@@ -3756,7 +3751,6 @@ def crosstab(bench_root: Path) -> str:
                     ) if provisional else _finding_count_label(c),
                     findings_dir,
                 ),
-                pfi=c.get("unadjudicated_finding_total", 0),
                 uf=("Pending" if provisional else _crosstab_count(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
@@ -3773,7 +3767,6 @@ def crosstab(bench_root: Path) -> str:
                     ) if provisional else c.get("crash_total", 0),
                     crashes_dir,
                 ),
-                pcr=c.get("pending_crash_total", 0),
                 uc=("Pending" if provisional else _crosstab_count(
                     _unique_with_medium_plus(
                         c.get("unique_crash_clusters", 0),
@@ -3907,17 +3900,13 @@ def crosstab(bench_root: Path) -> str:
         "gate or validator. The linked index records the reason."
     )
     lines.append(
-        "- **Findings** — reports that survived validation but do not have an "
-        "accepted crash artifact."
+        "- **Confirmed findings** — reports that survived validation but do "
+        "not have an accepted crash artifact."
     )
     lines.append(
-        "Rejected findings and Findings are disjoint outcomes: total candidate "
-        "reports = Rejected findings + Findings. Unique findings deduplicates "
-        "Findings only; it is not Findings minus Rejected findings."
-    )
-    lines.append(
-        "- **Pending findings** — reports awaiting validation. They are excluded "
-        "individually from Findings and Unique findings."
+        "Rejected findings and Confirmed findings are disjoint outcomes: total "
+        "candidate reports = Rejected findings + Confirmed findings. Unique "
+        "findings deduplicates Confirmed findings only."
     )
     lines.append(
         "- **Unique findings** — validated findings after signature clustering "
@@ -3940,18 +3929,12 @@ def crosstab(bench_root: Path) -> str:
         "did not demonstrate a sanitizer-class issue."
     )
     lines.append(
-        "- **Crashes** — sanitizer-proved crash directories with diagnostic "
-        "output and reproducer material on disk."
+        "- **Confirmed crashes** — sanitizer-proved crash directories with "
+        "diagnostic output and reproducer material on disk."
     )
     lines.append(
-        "Rejected crashes and Crashes are disjoint outcomes. Unique crashes "
-        "deduplicates Crashes only; rejected candidates are not subtracted "
-        "from it."
-    )
-    lines.append(
-        "- **Pending crashes** — sanitizer-proved crashes already included in "
-        "Crashes while report or bundle completion is pending. An unfinished "
-        "report remains Unknown severity."
+        "Rejected crashes and Confirmed crashes are disjoint outcomes. Unique "
+        "crashes deduplicates Confirmed crashes only."
     )
     lines.append(
         "- **Unique crashes** — sanitizer-proved crashes after stack/signature "
