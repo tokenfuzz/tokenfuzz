@@ -462,7 +462,12 @@ _HTML_HEAD = """<!DOCTYPE html>
   }}
   .benchmark-table thead th,
   .benchmark-table tbody td {{
-    padding: 7px 8px;
+    /* Tight horizontal padding keeps the 18-column crosstab's min-content
+       width inside the prose column so it doesn't overspill into a
+       `.table-wrap` scrollbar on normal-width monitors. Wider viewports
+       show every column; narrow ones still fall back to the wrap's own
+       scroll (which never hides a column). */
+    padding: 7px 6px;
     vertical-align: middle;
   }}
   .benchmark-table thead th,
