@@ -872,6 +872,15 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
     if b == "claude":
         # Claude API pricing, standard global routing. Cache-write TTL is
         # carried per event: five-minute writes cost 1.25x, one-hour 2x.
+        if "fable" in m or "mythos" in m:
+            return {
+                "input": _money("10"),
+                "cache_write": _money("12.50"),
+                "cache_write_1h": _money("20"),
+                "cache_read": _money("1"),
+                "output": _money("50"),
+                "source": "claude-api-fable-5",
+            }
         if any(x in m for x in ("opus-4-8", "opus-4.8", "opus 4.8")):
             return {
                 "input": _money("5"),
@@ -922,6 +931,25 @@ def _pricing_rates(backend: str, model: str = "") -> dict | None:
             }
 
     if b in {"codex", "oss"}:
+        if "gpt-5.6-mini" in m:
+            return {
+                "input": _money("0.75"),
+                "cache_read": _money("0.075"),
+                "output": _money("4.50"),
+                "source": "openai-api-gpt-5.6-mini",
+            }
+        if "gpt-5.6" in m:
+            return {
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("5"),
+                "input_high": _money("10"),
+                "cache_read_low": _money("0.50"),
+                "cache_read_high": _money("1"),
+                "output_low": _money("30"),
+                "output_high": _money("45"),
+                "source": "openai-api-gpt-5.6-sol",
+            }
         if "gpt-5.5" in m:
             return {
                 "tiered": True,

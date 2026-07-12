@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import benchmark
+import llm_invoke
 import llm_usage
 
 
@@ -168,6 +169,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("claude", "claude-opus-4-8", {"input": 1000, "cached_input": 2000, "cache_creation": 400, "output": 3000}, "0.083500"),
             ("grok", "grok-build-0.1", {"input": 3000, "cached_input": 2000, "output": 3000}, "0.007400"),
             ("codex", "gpt-5.5", {"input": 5000000, "cached_input": 4800000, "output": 1000, "prompt_estimate_build": 16000}, "3.430000"),
+            ("codex", "gpt-5.6-sol", {"input": 5000000, "cached_input": 4800000, "output": 1000, "prompt_estimate_build": 16000}, "3.430000"),
         )
         for backend, model, tokens, expected in cases:
             with self.subTest(backend=backend, model=model):
@@ -182,6 +184,19 @@ class BenchmarkMetricsTests(unittest.TestCase):
         native = benchmark.harvest_tokens(index)
         self.assertEqual(native["cost_usd"], "0.123456")
         self.assertEqual(native["cost_source"], "backend-reported")
+
+    def test_configured_default_models_have_pricing(self) -> None:
+        # Every backend default in config/models.toml must key a pricing row.
+        # Backends without a backend-reported cost (codex/gemini/grok) render a
+        # blank dollar column when the table lacks their model, so a model bump
+        # that skips the table degrades silently — this pins the two together.
+        for backend in ("claude", "codex", "gemini", "grok"):
+            model = llm_invoke.default_model(backend)
+            self.assertTrue(model, f"{backend} has no configured default model")
+            self.assertIsNotNone(
+                benchmark._pricing_rates(backend, model),
+                f"no pricing row for {backend} default model {model!r}",
+            )
 
     def test_usage_extraction_for_supported_backend_shapes(self) -> None:
         cases = (
