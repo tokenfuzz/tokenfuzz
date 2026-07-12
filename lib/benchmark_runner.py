@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import fcntl
 import hashlib
 import json
 import os
@@ -961,6 +962,73 @@ def _result_signature(bench_dir: Path) -> str:
     return digest.hexdigest()
 
 
+@contextmanager
+def _root_result_lock(bench_root: Path):
+    """Serialize the shared crosstab across concurrently running backends."""
+    bench_root.mkdir(parents=True, exist_ok=True)
+    with (bench_root / ".benchmark-result.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _render_root_result(bench_root: Path) -> Path:
+    """Atomically replace the cheap cross-run Markdown and HTML views."""
+    crosstab = bench_root / "benchmark-result.md"
+    html = crosstab.with_suffix(".html")
+    temporary_md = temporary_html = None
+    with _root_result_lock(bench_root):
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=bench_root,
+                prefix=".benchmark-result.", suffix=".md", delete=False,
+            ) as output:
+                temporary_md = Path(output.name)
+                output.write(metrics.crosstab(bench_root))
+            temporary_html = temporary_md.with_suffix(".html")
+            render = SCRIPT_ROOT / "bin" / "render-md"
+            if render.is_file():
+                rendered = subprocess.run(
+                    [str(render), str(temporary_md), "--html", str(temporary_html),
+                     "--title", "benchmark-result"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if rendered.returncode or not temporary_html.is_file():
+                    raise RuntimeError("render-md did not produce benchmark-result HTML")
+            temporary_md.chmod(0o644)
+            os.replace(temporary_md, crosstab)
+            temporary_md = None
+            if temporary_html.is_file():
+                temporary_html.chmod(0o644)
+                os.replace(temporary_html, html)
+                temporary_html = None
+        finally:
+            if temporary_md is not None:
+                temporary_md.unlink(missing_ok=True)
+            if temporary_html is not None:
+                temporary_html.unlink(missing_ok=True)
+    return html if html.is_file() else crosstab
+
+
+def update_live_result(bench_root: Path, reason: str) -> Path | None:
+    """Refresh the provisional crosstab without pooling or finalization."""
+    try:
+        artifact = _render_root_result(bench_root)
+    except Exception as exc:
+        # The benchmark evidence is authoritative; a dashboard failure must be
+        # visible without aborting the cell sequence that produces it.
+        log(f"WARN: benchmark-result live update failed ({reason}): {exc}")
+        return None
+    log(
+        f"benchmark-result live update ({reason}): "
+        f"{artifact} ({artifact.resolve().as_uri()})"
+    )
+    return artifact
+
+
 def update_result(bench_dir: Path, bench_root: Path, target: str, backend: str, model: str, dry_run: bool, reason: str) -> dict:
     signature = _result_signature(bench_dir)
     signature_key = str(bench_dir.resolve())
@@ -970,12 +1038,7 @@ def update_result(bench_dir: Path, bench_root: Path, target: str, backend: str, 
     rebuild_pool(bench_dir, target, backend, model, dry_run, reason)
     report = metrics.aggregate(bench_dir)
     _write_json(bench_dir / "report.json", report)
-    crosstab = bench_root / "benchmark-result.md"
-    crosstab.write_text(metrics.crosstab(bench_root), encoding="utf-8")
-    render = SCRIPT_ROOT / "bin" / "render-md"
-    if render.is_file():
-        subprocess.run([str(render), str(crosstab), "--html-sibling"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    artifact = crosstab.with_suffix(".html") if crosstab.with_suffix(".html").is_file() else crosstab
+    artifact = _render_root_result(bench_root)
     (bench_dir / ".result-signature").unlink(missing_ok=True)
     _RESULT_SIGNATURES[signature_key] = signature
     log(f"benchmark-result update ({reason}): {artifact} ({artifact.resolve().as_uri()})")
@@ -1007,8 +1070,7 @@ def _regenerate_all(args: argparse.Namespace, bench_root: Path) -> int:
     if not runs:
         print(f"FATAL: --regenerate: no runs found under {bench_root}", file=sys.stderr)
         return 1
-    crosstab = bench_root / "benchmark-result.md"
-    crosstab.write_text(metrics.crosstab(bench_root), encoding="utf-8")
+    crosstab = _render_root_result(bench_root).with_suffix(".md")
     log(f"Regenerate-all: rebuilt {crosstab} ({len(runs)} run(s), {failures} failed)")
     return 1 if failures else 0
 
@@ -1245,7 +1307,8 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         )
                     else:
                         log(f"Cell {name} {status} after {format_duration(wall)}; see {cell_dir}")
-                log(f"Cell {name}: metrics saved; aggregate rebuild deferred")
+                update_live_result(bench_root, f"after {name}")
+                log(f"Cell {name}: metrics saved; pooled finalization deferred")
         log(f"Cells complete: {done} done, {failed} failed")
     else:
         refreshed = 0

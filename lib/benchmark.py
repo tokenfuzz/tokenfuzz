@@ -2313,13 +2313,15 @@ def _cost_source(rows: list[dict]) -> str:
     return "mixed"
 
 
-def aggregate(bench_dir: Path) -> dict:
+def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
     """Fold every cell into a per-condition report.
 
     Each cell directory is expected to hold a cell.json (run metadata,
     written by bin/benchmark) and a metrics.json (written by `harvest`).
     Missing files degrade gracefully so a partial/resumed run still
-    aggregates what completed.
+    aggregates what completed. Live reporting passes ``include_pool=False``
+    so it reads only finalized cell metadata and cannot mutate or reuse stale
+    pooled state.
     """
     bench_dir = Path(bench_dir)
     run_meta = {}
@@ -2373,12 +2375,14 @@ def aggregate(bench_dir: Path) -> dict:
                 return {}
         return {}
 
-    members = _reconcile_demoted_pool_crashes(bench_dir)
+    members = _reconcile_demoted_pool_crashes(bench_dir) if include_pool else {}
     crash_attr = attribute_clusters(
-        _load("clusters-crashes.json"), members.get("crashes", {})
+        _load("clusters-crashes.json") if include_pool else {},
+        members.get("crashes", {}),
     )
     finding_attr = attribute_clusters(
-        _load("clusters-findings.json"), members.get("findings", {})
+        _load("clusters-findings.json") if include_pool else {},
+        members.get("findings", {}),
     )
     crash_by_cond = crash_attr["by_condition"]
     finding_by_cond = finding_attr["by_condition"]
@@ -2551,7 +2555,7 @@ def aggregate(bench_dir: Path) -> dict:
     # rather than a misleading 0% recall.
     pool_crashes = bench_dir / "pool" / "crashes"
     gt_path = ground_truth_path_for(run_meta.get("target", ""))
-    if gt_path.is_file():
+    if include_pool and gt_path.is_file():
         manifest = load_ground_truth(gt_path)
         errs = (["manifest is not a JSON object"] if manifest is None
                 else manifest_errors(manifest))
@@ -3459,8 +3463,8 @@ def _benchmark_roots(bench_root: Path) -> list[Path]:
 
     `bin/benchmark` places each backend's state in its own subdirectory
     (`output/benchmark/<backend>/`). A child counts as a backend root when
-    it holds at least one timestamped run directory with a `report.json` —
-    a structural test, so the layout is detected rather than name-matched.
+    it holds at least one timestamped run directory with `run.json` or a final
+    `report.json` — a structural test that also keeps in-progress runs visible.
     """
     if not bench_root.is_dir():
         return []
@@ -3468,14 +3472,14 @@ def _benchmark_roots(bench_root: Path) -> list[Path]:
     for child in sorted(bench_root.iterdir()):
         if not child.is_dir():
             continue
-        if any((d / "report.json").is_file()
+        if any((d / "run.json").is_file() or (d / "report.json").is_file()
                for d in child.iterdir() if d.is_dir()):
             roots.append(child)
     return roots
 
 
 def _reports_by_run_target(bench_root: Path) -> list[dict]:
-    """Every report.json under a backend benchmark root.
+    """Every final or provisional report under a backend benchmark root.
 
     The crosstab is append-style evidence, not a "latest only" dashboard:
     each row is keyed by backend, run, target, and condition. Keeping every
@@ -3485,12 +3489,18 @@ def _reports_by_run_target(bench_root: Path) -> list[dict]:
     reports: list[tuple[str, str, dict]] = []
     candidates = sorted(
         (d for d in bench_root.iterdir()
-         if d.is_dir() and (d / "report.json").is_file()),
+         if d.is_dir()
+         and ((d / "run.json").is_file() or (d / "report.json").is_file())),
         key=lambda d: d.name,
     )
     for run_dir in candidates:
+        report_path = run_dir / "report.json"
         try:
-            report = json.loads((run_dir / "report.json").read_text("utf-8"))
+            if report_path.is_file():
+                report = json.loads(report_path.read_text("utf-8"))
+            else:
+                report = aggregate(run_dir, include_pool=False)
+                report["provisional"] = True
         except (OSError, ValueError):
             continue
         run = report.get("run", {})
@@ -3521,6 +3531,20 @@ def _run_cell(runid: object) -> str:
     return f"`{runid}`"
 
 
+def _incomplete_observed(condition: dict, field: str) -> int:
+    return sum(
+        int(row.get(field, 0) or 0)
+        for row in condition.get("incomplete_observed", [])
+        if isinstance(row, dict)
+    )
+
+
+def _provisional_count(value: object, condition: dict, field: str) -> str:
+    observed = _incomplete_observed(condition, field)
+    suffix = f" (+{observed} incomplete)" if observed else ""
+    return f"{value}{suffix}"
+
+
 def crosstab(bench_root: Path) -> str:
     """Render benchmark results for each backend/run/target/condition key."""
     bench_root = Path(bench_root)
@@ -3536,6 +3560,7 @@ def crosstab(bench_root: Path) -> str:
                 "ledger": ledger if ledger.exists() else None,
                 "conditions": report.get("conditions", []),
                 "bench_dir": Path(bench_dir) if bench_dir else None,
+                "provisional": bool(report.get("provisional")),
             })
 
     lines: list[str] = []
@@ -3552,6 +3577,14 @@ def crosstab(bench_root: Path) -> str:
         f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}._"
     )
     lines.append("")
+    if any(row["provisional"] for row in rows):
+        lines.append(
+            "**Provisional:** one or more benchmark runs are still in progress. "
+            "Observed counts come only from cells that have saved metrics; "
+            "unique counts, severity, and the final verdict remain pending until "
+            "pooled finalization."
+        )
+        lines.append("")
     if not rows:
         lines.append("_No benchmark runs found yet._")
         lines.append("")
@@ -3613,6 +3646,7 @@ def crosstab(bench_root: Path) -> str:
         target = run.get("target", "?")
         target_cell = _target_cell(target, run.get("target_sha"), stacked=True)
         bench_dir = entry["row"]["bench_dir"]
+        provisional = entry["row"]["provisional"]
         run_cell = _run_cell(runid)
         if c is None:
             lines.append(
@@ -3671,30 +3705,99 @@ def crosstab(bench_root: Path) -> str:
                     rejected_findings_dir,
                     "REJECTED-FINDINGS",
                 ),
-                fi=_crosstab_count(_finding_count_label(c), findings_dir),
-                uf=_crosstab_count(
+                fi=_crosstab_count(
+                    _provisional_count(
+                        _finding_count_label(c), c, "findings"
+                    ) if provisional else _finding_count_label(c),
+                    findings_dir,
+                ),
+                uf=("Pending" if provisional else _crosstab_count(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
                         c.get("medium_plus_findings", 0)),
-                    findings_dir, "FINDING-CLUSTERS"),
+                    findings_dir, "FINDING-CLUSTERS")),
                 rcr=_crosstab_count(
                     c.get("rejected_crash_total", 0),
                     rejected_crashes_dir,
                     "REJECTED-CRASHES",
                 ),
-                cr=_crosstab_count(c.get("crash_total", 0), crashes_dir),
-                uc=_crosstab_count(
+                cr=_crosstab_count(
+                    _provisional_count(
+                        c.get("crash_total", 0), c, "crashes"
+                    ) if provisional else c.get("crash_total", 0),
+                    crashes_dir,
+                ),
+                uc=("Pending" if provisional else _crosstab_count(
                     _unique_with_medium_plus(
                         c.get("unique_crash_clusters", 0),
                         c.get("medium_plus_bugs", 0)),
-                    crashes_dir, "CRASH-CLUSTERS"),
-                sev=_severity_cell(c.get("top_severity_level", "—")),
+                    crashes_dir, "CRASH-CLUSTERS")),
+                sev=("Pending" if provisional else
+                     _severity_cell(c.get("top_severity_level", "—"))),
                 inp=_fmt_input_cell(c),
                 out=_fmt_output_cell(c),
                 cost=_fmt_cost_compact_cell(c),
             )
         )
     lines.append("")
+    provisional_rows = [row for row in rows if row["provisional"]]
+    if provisional_rows:
+        lines.append("## Live cell progress")
+        lines.append("")
+        lines.append(
+            "Counts below are read only from saved `metrics.json` files. A "
+            "running cell stays blank until its cell-level triage and validation "
+            "finish."
+        )
+        lines.append("")
+        lines.append(
+            "| Target | Backend | Run | Cell | Condition | Status | Findings "
+            "| Crashes | Wall (h) |"
+        )
+        lines.append(
+            "| --- | --- | --- | --- | --- | --- | --: | --: | --: |"
+        )
+        for row in provisional_rows:
+            run = row["run"]
+            bench_dir = row["bench_dir"]
+            for condition in row["conditions"]:
+                for cell in condition.get("cells", []):
+                    metrics = cell.get("metrics") or {}
+                    has_metrics = (
+                        bool(metrics) and metrics.get("exists") is not False
+                    )
+                    cell_name = str(cell.get("cell", "?"))
+                    cell_path = (
+                        bench_dir / "cells" / cell_name if bench_dir else None
+                    )
+                    lines.append(
+                        "| {target} | `{backend}` | {runid} | {cell} | {cond} "
+                        "| {status} | {findings} | {crashes} | {wall} |".format(
+                            target=run.get("target", "?"),
+                            backend=run.get("backend", "?"),
+                            runid=_run_cell(run.get("runid", "?")),
+                            cell=_md_link(f"`{cell_name}`", cell_path),
+                            cond=_condition_label(
+                                str(cell.get("condition", "?")),
+                                str(run.get("backend", "")),
+                                str(run.get("model", "")),
+                            ),
+                            status=cell.get("status", "unknown"),
+                            findings=(
+                                int(metrics.get("confirmed_findings", 0) or 0)
+                                if has_metrics else "—"
+                            ),
+                            crashes=(
+                                int(metrics.get("confirmed_crashes", 0) or 0)
+                                if has_metrics else "—"
+                            ),
+                            wall=(
+                                _fmt_hours(cell.get("wall_effective_seconds"))
+                                if cell.get("wall_effective_seconds") else "—"
+                            ),
+                        )
+                    )
+        lines.append("")
     lines.append(
         "Read each row as one completed experiment slice: one target, one "
         "backend, one condition, and one benchmark run. Reruns remain separate "

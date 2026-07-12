@@ -188,10 +188,17 @@ output/benchmark/
 the backend-native reasoning setting that was actually passed to the CLI even
 when the operator's global backend settings differ.
 
-The root `benchmark-result.html` is the cross-backend comparison. Cell state
-and metrics are saved as each cell completes; the pooled comparison is rebuilt
-once after the final cell so sanitizer revalidation, bundling, clustering, and
-report rendering are not repeated for every partial result.
+The root `benchmark-result.html` is the cross-backend comparison. It appears
+after the first cell saves metrics and refreshes after each later cell. While a
+run is active, a **Provisional** banner marks the page: it shows finalized-cell
+counts and cell status, while unique counts and severity remain pending. A
+running cell contributes no counts until its own triage and validation finish.
+
+The expensive pooled comparison is still rebuilt only once after the final
+cell. That pass performs sanitizer revalidation, bundling, clustering, and
+final report rendering; the live refresh only reads the atomic `cell.json` and
+`metrics.json` files. Incomplete-cell evidence is labeled as observed and stays
+excluded from medians and completed-cell totals.
 
 Each backend also has an append-only ledger,
 `output/benchmark/<backend>/benchmark-results.html`, with one section

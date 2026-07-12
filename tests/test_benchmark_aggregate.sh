@@ -701,6 +701,75 @@ assert_file_contains "$cfroot/benchmark-result.md" 'tokenfuzz.*\[1\]\([^)]*pool/
 assert_file_not_contains "$cfroot/benchmark-result.md" 'un-gated' \
   "T13o2: crosstab Findings column carries no un-gated suffix"
 
+# T13p-v: an in-progress run gets a read-only provisional HTML view without
+# constructing the expensive cross-cell pool. Only saved metrics are exposed;
+# final-only uniqueness and severity stay explicitly pending.
+lvroot="$work/live-root"
+lvbd="$lvroot/codex/live-run"
+mkdir -p "$lvbd/cells/model-direct-r1" \
+         "$lvbd/cells/harness-r1" "$lvbd/cells/harness-r2"
+cat > "$lvbd/run.json" <<'JSON'
+{"runid":"live-run","target":"sampleproj","backend":"codex","model":"fixture-model",
+ "replicates":2,"budget_wall":60,"conditions":["model-direct","harness"]}
+JSON
+cat > "$lvbd/cells/model-direct-r1/cell.json" <<JSON
+{"condition":"model-direct","replicate":1,"status":"done","wall_seconds":30,
+ "results_dir":"$lvbd/cells/model-direct-r1"}
+JSON
+cat > "$lvbd/cells/model-direct-r1/metrics.json" <<'JSON'
+{"confirmed_findings":2,"confirmed_crashes":1,"findings_rejected":0,
+ "crashes_rejected":0,"tokens":{}}
+JSON
+cat > "$lvbd/cells/harness-r1/cell.json" <<JSON
+{"condition":"harness","replicate":1,"status":"incomplete","wall_seconds":60,
+ "results_dir":"$lvbd/cells/harness-r1"}
+JSON
+cat > "$lvbd/cells/harness-r1/metrics.json" <<'JSON'
+{"confirmed_findings":3,"confirmed_crashes":2,"findings_rejected":1,
+ "crashes_rejected":1,"tokens":{}}
+JSON
+cat > "$lvbd/cells/harness-r2/cell.json" <<JSON
+{"condition":"harness","replicate":2,"status":"running","wall_seconds":0,
+ "results_dir":"$lvbd/cells/harness-r2"}
+JSON
+PYTHONPATH="$SCRIPT_ROOT/lib" python3 - "$lvroot" <<'PY'
+import sys
+from pathlib import Path
+import benchmark_runner
+benchmark_runner.update_live_result(Path(sys.argv[1]), "fixture")
+PY
+assert_file_exists "$lvroot/benchmark-result.html" \
+  "T13p: a running benchmark gets a live HTML report"
+assert_file_contains "$lvroot/benchmark-result.md" '\*\*Provisional:\*\*' \
+  "T13q: live report is unmistakably provisional"
+assert_file_contains "$lvroot/benchmark-result.md" 'fixture-model-direct.*Pending.*Pending.*Pending' \
+  "T13r: final-only deduplication fields stay pending"
+assert_file_contains "$lvroot/benchmark-result.md" '0 \(\+3 incomplete\).*0 \(\+2 incomplete\)' \
+  "T13s: incomplete-cell evidence is observed without entering completed totals"
+assert_file_contains "$lvroot/benchmark-result.md" 'harness-r2.*running.*—.*—' \
+  "T13t: running cells expose status but no unvalidated counts"
+assert_file_contains "$lvroot/benchmark-result.html" 'Live cell progress' \
+  "T13u: rendered HTML includes per-cell progress"
+if [ ! -e "$lvbd/pool" ] && [ ! -e "$lvbd/.pool.staging" ]; then
+  pass "T13v: live rendering does not build or mutate the evidence pool"
+else
+  fail "T13v: live rendering does not build or mutate the evidence pool"
+fi
+if PYTHONPATH="$SCRIPT_ROOT/lib" python3 - <<'PY'
+from pathlib import Path
+from unittest import mock
+import benchmark_runner
+with mock.patch.object(
+    benchmark_runner, "_render_root_result", side_effect=OSError("fixture")
+):
+    assert benchmark_runner.update_live_result(Path("/unused"), "fixture") is None
+PY
+then
+  pass "T13w: a live dashboard failure does not abort benchmark execution"
+else
+  fail "T13w: a live dashboard failure does not abort benchmark execution"
+fi
+
 # ── T14: aggregate attributes cluster-tool output to conditions ──────────
 wait "$pid_j3" || true
 aagg=$(cat "$work/aagg.json" 2>/dev/null || true)

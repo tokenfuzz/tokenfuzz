@@ -777,8 +777,8 @@ assert_not_match "Operation not permitted" "$dry_out" \
   "T9f: console tee path does not emit /dev/fd portability warnings"
 assert_match 'done in [0-9]+m[0-9][0-9]s \([0-9]+s\)' "$dry_out" \
   "T9f2: cell duration includes minutes and raw seconds"
-assert_match 'Cell model-direct-r1: metrics saved; aggregate rebuild deferred' "$dry_out" \
-  "T9f3: per-cell metrics are saved without rebuilding the aggregate"
+assert_match 'benchmark-result live update \(after model-direct-r1\): .*benchmark-result\.html' "$dry_out" \
+  "T9f3: each saved cell refreshes the lightweight HTML report"
 dry_updates=$(printf '%s\n' "$dry_out" \
   | grep -c 'benchmark-result update (pre-ledger): .*benchmark-result\.html' || true)
 if [ "$dry_updates" -eq 1 ]; then
@@ -787,13 +787,12 @@ else
   fail "T9f4: benchmark-result is built once after all dry-run cells" \
     "saw $dry_updates final update lines in: $dry_out"
 fi
-# The cell state and metrics remain resumable even though report generation is
-# deferred until every cell is complete.
-saved_cells=$(printf '%s\n' "$dry_out" | grep -c 'metrics saved; aggregate rebuild deferred' || true)
+# The live refresh must not restore pooled finalization after each cell.
+saved_cells=$(printf '%s\n' "$dry_out" | grep -c 'metrics saved; pooled finalization deferred' || true)
 if [ "$saved_cells" -eq 4 ]; then
-  pass "T9f5: every dry-run cell persists metrics before the final rebuild"
+  pass "T9f5: every dry-run cell persists metrics while pooled work stays deferred"
 else
-  fail "T9f5: every dry-run cell persists metrics before the final rebuild" \
+  fail "T9f5: every dry-run cell persists metrics while pooled work stays deferred" \
     "expected 4 saved cells, saw $saved_cells in: $dry_out"
 fi
 drun_json=$(find "$droot/codex" -mindepth 2 -maxdepth 2 -name run.json | head -1)
