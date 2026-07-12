@@ -10,51 +10,29 @@
   backend isolation, and failure handling explicit and testable across platforms.
 
 - **Benchmark results now measure the complete, comparable workload.** Every cell
-  accounts for preflight, recon, audit workers, and validation decisions; records
-  resolved backend effort; marks incomplete worker or decision usage unknown instead
-  of zero; uses backend-reported cost when available and otherwise prices Claude's
-  reported cache-write TTL; counts confirmed finding roots only; and exposes
-  incomplete-cell yield without admitting it to aggregates. Completed crash and
-  finding evidence remains countable when another artifact is pending; regeneration
-  repairs legacy cell status without consuming pending-artifact lifetime or
-  discarding an otherwise successful replicate. Rejected crash summaries no longer
-  double-count the same artifact as both a directory and a generated index row.
-  Both conditions receive the same crash and finding triage, configured target
-  roots are treated as the product boundary, and benchmark-only worker refill
-  suppression keeps configured concurrency from silently expanding provider cost.
+  includes preflight, recon, audit workers, and validation; records resolved backend
+  effort and cost; and treats missing usage as unknown instead of zero. Confirmed,
+  rejected, and unique result populations are now explicit and mathematically
+  consistent, while incomplete artifacts are excluded individually instead of
+  erasing an otherwise successful replicate. Both conditions receive the same
+  target-aware triage, and replay-safe regeneration repairs legacy runs without
+  consuming pending-artifact lifetime or launching new benchmark cells.
 
 - **Benchmark reports stay useful while long runs are active.** The aggregate HTML
   is rebuilt after each completed cell and clearly labels provisional totals until
   final cross-cell deduplication. Operators no longer wait for the entire matrix to
   finish before inspecting results, while the final report retains the same gates
-  and unique-root accounting. Comparison tables name confirmed evidence explicitly
-  and leave exceptional artifact-finalization state in the linked detail reports
-  instead of permanent pending columns.
+  and unique-root accounting.
 
 - **Finalization is bounded and substantially cheaper without weakening gates.**
-  Crash and finding validation has its own one-hour safety window, stops fan-out
-  after a confirmed account limit, and leaves unfinished evidence pending and
-  resumable. A newly confirmed crash keeps its hypothesis active, receives a
-  bounded enrichment tail beyond the normal Codex turn cutoff, and resumes its
-  report before new work if still unfinished. Direct, unchanged 5/5
-  sanitizer-confirmed byte-input crashes bypass
-  only redundant trigger votes, including model-direct bundles renamed after
-  probing; changed, ambiguous, and custom-harness evidence retains the two-vote
-  review. Finding-quality and reachability decisions are keyed and batched across
-  independent vote rounds; missing batches stay pending instead of fanning out,
-  and trigger reviews share startup while retaining one source-backed verdict per
-  finding. Unreplayable custom-sanitizer crashes remain findings rather than
-  inflating crash metrics, deterministic severity scoring runs once per pool, and
-  pooled revalidation, bundling, clustering, and rendering run only after every
-  cell metric is safely persisted. Deadline-truncated workers are labeled as such
-  instead of looking like backend failures. Decision timeouts retain partial
-  usage and leave work resumable instead of aborting finalization; successful
-  sessions without terminal telemetry remain unknown rather than zero.
-  Model-direct crashes are replayed through the configured target before they
-  enter metrics, stable standard replays skip redundant trigger review, measured
-  0/5 evidence remains a finding, and Rust report titles and dedup frames use
-  demangled symbols. Reachability decisions stay batched without omission
-  fan-out, while local reverify and bundle work uses bounded concurrency.
+  Crash and finding validation now has an independent one-hour safety window.
+  Newly confirmed crashes keep their work active, receive a watchdog-protected
+  enrichment tail, and resume incomplete reports before new investigation; a
+  provider limit or deadline leaves evidence visibly resumable rather than
+  discarding it. Keyed batching, bounded local concurrency, one final pool pass,
+  and selective reuse of stable sanitizer proof remove repeated model and report
+  work while preserving full review for changed, ambiguous, and custom-harness
+  evidence.
 
 - **Grok Build joins the supported backend matrix.** Grok is available for full
   audits, ensembles, recon, focused decisions, validation, containers, cleanup,
