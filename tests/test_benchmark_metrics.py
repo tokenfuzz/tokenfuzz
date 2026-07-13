@@ -113,6 +113,9 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["confirmed_findings"], 3)
         self.assertEqual(metrics["confirmed_finding_dirs"], ["FIND-ACCEPTED", "FIND-KEEP", "FIND-REVIEWED"])
         self.assertEqual(metrics["findings_unadjudicated"], 1)
+        # No work-cards.jsonl: nothing is a recon lead, so counting falls back
+        # to gate acceptance and confirmed is unchanged.
+        self.assertEqual(metrics["finding_leads"], 0)
         self.assertEqual(metrics["findings_rejected"], 1)
         self.assertEqual(metrics["recon_candidates"], 2)
         self.assertEqual(metrics["discarded_hypotheses"], 1)
@@ -130,6 +133,77 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "| CR-b | app_parse.c:20 | t2 |\n"
         )
         self.assertEqual(benchmark.harvest(legacy)["crashes_rejected"], 2)
+
+    def test_uninvestigated_recon_findings_count_as_leads(self) -> None:
+        # A gate-accepted recon FIND is confirmed only if an agent investigated
+        # it: ANY of its (fanned-out) work cards ever reached find/crash — read
+        # from the authoritative claims ledger, with the work-card status as a
+        # fallback — OR agent output in the dir, OR a human pin. Un-investigated
+        # recon guesses become leads. Production-shaped: recon fans one finding
+        # out to several cards, so a productive card among unclaimed siblings
+        # must still confirm.
+        results = self.root / "results"
+        findings = results / "findings"
+        cases = [
+            "FIND-0001-agent",              # agent-filed, no recon card -> confirmed
+            "FIND-RECON-fanout-productive",  # 3 cards, one 'find' -> confirmed
+            "FIND-RECON-fanout-lead",        # cards all unclaimed, bare -> lead
+            "FIND-RECON-claims-only",        # wc stale unclaimed, ledger 'find' -> confirmed
+            "FIND-RECON-artifact",           # unclaimed + non-empty agent file -> confirmed
+            "FIND-RECON-emptyfile",          # unclaimed + empty file -> lead (P4)
+            "FIND-RECON-pinned",             # unclaimed + .keep -> confirmed
+            "FIND-RECON-ungated",            # gate never verdicted -> unadjudicated
+        ]
+        for name in cases:
+            (findings / name).mkdir(parents=True)
+        for name in cases:
+            if name != "FIND-RECON-ungated":
+                self.write_json(findings / name / ".llm-find-quality.json", {"accept": True})
+        (findings / "FIND-RECON-artifact" / "validation_report.md").write_text("evidence\n")
+        (findings / "FIND-RECON-emptyfile" / "scratch.txt").write_text("")  # empty: no rescue
+        (findings / "FIND-RECON-pinned" / ".keep").touch()
+        # Fan-out: one find_id -> several cards. Card status is a fallback; the
+        # ledger is authoritative and can carry a productive status the stale
+        # work-card row misses (claims-only).
+        (results / "work-cards.jsonl").write_text(
+            "\n".join(json.dumps(c) for c in [
+                {"id": "fp1", "find_id": "FIND-RECON-fanout-productive", "status": "unclaimed"},
+                {"id": "fp2", "find_id": "FIND-RECON-fanout-productive", "status": "unclaimed"},
+                {"id": "fp3", "find_id": "FIND-RECON-fanout-productive", "status": "find"},
+                {"id": "fl1", "find_id": "FIND-RECON-fanout-lead", "status": "unclaimed"},
+                {"id": "fl2", "find_id": "FIND-RECON-fanout-lead", "status": "unclaimed"},
+                {"id": "co1", "find_id": "FIND-RECON-claims-only", "status": "unclaimed"},
+                {"id": "ar1", "find_id": "FIND-RECON-artifact", "status": "unclaimed"},
+                {"id": "ef1", "find_id": "FIND-RECON-emptyfile", "status": "unclaimed"},
+                {"id": "pn1", "find_id": "FIND-RECON-pinned", "status": "unclaimed"},
+                {"id": "un1", "find_id": "FIND-RECON-ungated", "status": "unclaimed"},
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        (results / "state").mkdir()
+        (results / "state" / "claims.jsonl").write_text(
+            "\n".join(json.dumps(c) for c in [
+                {"card_id": "co1", "status": "claimed"},
+                {"card_id": "co1", "status": "find"},   # ledger productive; wc row stale
+                {"card_id": "fl1", "status": "released"},
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        metrics = benchmark.harvest(results)
+        self.assertEqual(metrics["findings"], 8)
+        self.assertEqual(
+            metrics["confirmed_finding_dirs"],
+            ["FIND-0001-agent", "FIND-RECON-artifact", "FIND-RECON-claims-only",
+             "FIND-RECON-fanout-productive", "FIND-RECON-pinned"],
+        )
+        self.assertEqual(metrics["confirmed_findings"], 5)
+        self.assertEqual(
+            metrics["lead_finding_dirs"],
+            ["FIND-RECON-emptyfile", "FIND-RECON-fanout-lead"],
+        )
+        self.assertEqual(metrics["finding_leads"], 2)
+        # gate never verdicted ungated -> unadjudicated, not a lead
+        self.assertEqual(metrics["findings_unadjudicated"], 1)
 
     def test_sibling_logs_and_sanitizer_effort_floor(self) -> None:
         backend = self.root / "experiment" / "codex"
@@ -604,7 +678,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.write_json(run / "report.json", report)
         text = benchmark.crosstab(self.root / "crosstab")
         for expected in (
-            "total candidate reports = Rejected findings + Confirmed findings",
+            "Rejected findings, Confirmed findings, and leads are distinct populations",
             "Unique findings deduplicates Confirmed findings only",
             "Unique crashes deduplicates Confirmed crashes only",
             "Rejected findings | Confirmed findings | Unique findings",

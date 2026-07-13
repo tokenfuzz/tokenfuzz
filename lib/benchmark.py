@@ -189,6 +189,16 @@ def _finding_count_label(c: dict) -> object:
     return int(confirmed or 0)
 
 
+def _finding_leads_suffix(c: dict) -> str:
+    """Parenthetical marking un-investigated recon leads beside the confirmed
+    count, mirroring the '(+N incomplete)' provisional annotation. Leads are
+    recon-materialized FINDs the prose gate kept but no agent investigated; they
+    stay on disk and counted, just not folded into the confirmed headline.
+    """
+    leads = int(c.get("lead_finding_total", 0) or 0)
+    return f" (+{leads} leads)" if leads > 0 else ""
+
+
 def _local_path_replacements() -> list[tuple[str, str]]:
     """Prefixes to remove from pooled benchmark review artifacts.
 
@@ -548,6 +558,16 @@ def count_pending_crashes(crashes_dir: Path) -> int:
     return pending
 
 
+def _finding_is_pinned(finding_dir: Path) -> bool:
+    """True iff a human pinned the FIND (.keep/.reviewed).
+
+    A manual override that outranks both the find-quality gate and the
+    recon-lead check: a pinned FIND is confirmed even if recon-materialized and
+    never agent-investigated.
+    """
+    return (finding_dir / ".reviewed").is_file() or (finding_dir / ".keep").is_file()
+
+
 def _finding_is_confirmed(finding_dir: Path) -> bool:
     """True iff a FIND-* dir passed the find-quality gate, or is human-pinned.
 
@@ -563,7 +583,7 @@ def _finding_is_confirmed(finding_dir: Path) -> bool:
     Reuses the same accept/pin signal readers elsewhere key on
     (lib/workqueue.py `_compact_finding`, bin/cluster-findings).
     """
-    if (finding_dir / ".reviewed").is_file() or (finding_dir / ".keep").is_file():
+    if _finding_is_pinned(finding_dir):
         return True
     cache = finding_dir / ".llm-find-quality.json"
     if not cache.is_file():
@@ -571,7 +591,125 @@ def _finding_is_confirmed(finding_dir: Path) -> bool:
     return (_read_json(cache) or {}).get("accept") is True
 
 
-def count_confirmed_findings(findings_dir: Path) -> tuple[int, list[str]]:
+# Card statuses where an agent produced a validated result — a filed find or a
+# crash — from the work card. Mirrors workqueue.PRODUCTIVE_TERMINAL_CARD_STATUSES
+# (kept a small local copy so harvest carries no work-queue import). A
+# recon-materialized FIND whose card never reached one of these was named by
+# recon and liked by the prose gate but never investigated: a lead, not a
+# confirmed finding.
+_PRODUCTIVE_CARD_STATUSES = {"crash", "find"}
+
+
+def _iter_jsonl(path: Path):
+    """Yield dict rows from a JSONL file, tolerating a missing file and bad
+    lines (a partial write from a live run). Read-only metric use."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            yield row
+
+
+def _uninvestigated_recon_lead_ids(results_dir: Path, findings_dir: Path) -> set[str]:
+    """FIND-RECON-* findings no agent ever worked to a result.
+
+    recon materializes a FIND named ``FIND-RECON-*`` and fans it out to several
+    work cards (one per enabled sanitizer/strategy), each stamped with the
+    find_id. A finding is investigated when ANY of its cards ever reached a
+    productive terminal state (find/crash) — read from the authoritative claims
+    ledger (state/claims.jsonl), joined to the finding through work-cards.jsonl
+    (card id → find_id), with the work card's own status as a fallback. A recon
+    finding is a lead only when it has NO productive card. Fan-out matters: one
+    productive card among unclaimed siblings still confirms the finding — the
+    earlier any-card-nonproductive rule demoted such findings (false negatives).
+
+    Recon findings are identified by dir name, so a cell whose queue/ledger was
+    lost cannot silently re-confirm them: with no productive evidence they fall
+    to leads (still rescued by artifacts/pin), rather than re-inflating the
+    confirmed count. A cell with no recon findings (model-direct) yields no
+    leads and reads no state.
+    """
+    if not findings_dir.is_dir():
+        return set()
+    recon = {
+        child.name
+        for child in findings_dir.iterdir()
+        if child.is_dir() and child.name.startswith("FIND-RECON-")
+    }
+    if not recon:
+        return set()
+    productive: set[str] = set()
+    card_to_find: dict[str, str] = {}
+    for card in _iter_jsonl(results_dir / "work-cards.jsonl"):
+        find_id = card.get("find_id")
+        if not find_id:
+            continue
+        find_id = str(find_id)
+        card_id = card.get("id")
+        if card_id:
+            card_to_find[str(card_id)] = find_id
+        if str(card.get("status", "") or "") in _PRODUCTIVE_CARD_STATUSES:
+            productive.add(find_id)
+    for claim in _iter_jsonl(results_dir / "state" / "claims.jsonl"):
+        if str(claim.get("status", "")) in _PRODUCTIVE_CARD_STATUSES:
+            find_id = card_to_find.get(str(claim.get("card_id", "")))
+            if find_id:
+                productive.add(find_id)
+    return recon - productive
+
+
+# Non-dotfiles the recon + render pipeline writes into every FIND dir. Any
+# OTHER non-dotfile (a reproduction harness, sanitizer log, patch.diff,
+# validation report, differential) is agent investigation output. All harness
+# state is dotfiles (.llm-*, .trigger-*, .dup-of, .needs-content), so this small
+# named set is the whole machine-written non-dot surface; a future addition only
+# needs listing here, and omitting one errs toward confirmed (never a demotion).
+_MACHINE_FINDING_FILES = {"report.md", "report.html", "severity.json"}
+
+
+def _finding_investigated(finding_dir: Path) -> bool:
+    """True iff an agent (or a human pin) stands behind this FIND.
+
+    The harness records investigation two ways, and a recon lead is confirmed if
+    it shows EITHER — so demotion never hides real work:
+      - a human pin (.keep/.reviewed), or
+      - agent output left in the dir: any NON-EMPTY non-dot file beyond the
+        machine set (a reproduction harness, sanitizer log, patch, validation
+        report). Some backends validate a candidate without ever claiming its
+        work card, so this catches investigation the card status misses; the
+        non-empty check keeps a stray zero-byte file from forging confirmation.
+    The other path — a work card flipped to find/crash — is handled by the
+    caller (such FINDs never enter the lead set). Structured file-presence
+    signal, not text scraping.
+    """
+    if _finding_is_pinned(finding_dir):
+        return True
+    try:
+        for child in finding_dir.iterdir():
+            if child.name.startswith(".") or child.name in _MACHINE_FINDING_FILES:
+                continue
+            try:
+                if child.is_file() and child.stat().st_size > 0:
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        return False
+    return False
+
+
+def count_confirmed_findings(
+    findings_dir: Path, lead_ids: set[str] | None = None
+) -> tuple[int, list[str]]:
     """Count FIND-* subdirs the find-quality gate accepted (or a human pinned).
 
     Returns (count, sorted list of FIND dir names). The mirror of
@@ -583,16 +721,54 @@ def count_confirmed_findings(findings_dir: Path) -> tuple[int, list[str]]:
     cut-off run converges to its confirmed count, and any residual the drain
     cannot resolve surfaces as a run-health WARN rather than being silently
     dropped.
+
+    *lead_ids* are recon-materialized FINDs with no productive work card (see
+    _uninvestigated_recon_lead_ids). Those that are also un-investigated
+    (_finding_investigated: no pin, no agent artifacts) are gate-accepted on
+    recon's prose alone: excluded here and counted as leads instead
+    (count_finding_leads). Callers that cannot compute the set — the live audit
+    — pass nothing and get gate-acceptance counting unchanged.
     """
     if not findings_dir.is_dir():
         return 0, []
+    lead_ids = lead_ids or set()
     confirmed: list[str] = []
     for child in sorted(findings_dir.iterdir()):
         if not child.is_dir() or not child.name.startswith("FIND-"):
             continue
-        if _finding_is_confirmed(child):
-            confirmed.append(child.name)
+        if not _finding_is_confirmed(child):
+            continue
+        # A recon lead the gate liked on prose alone (its card never became
+        # productive, so it is in lead_ids) is confirmed only once an agent
+        # investigated it. Card-productive recon FINDs are never in lead_ids.
+        if child.name in lead_ids and not _finding_investigated(child):
+            continue
+        confirmed.append(child.name)
     return len(confirmed), confirmed
+
+
+def count_finding_leads(
+    findings_dir: Path, lead_ids: set[str]
+) -> tuple[int, list[str]]:
+    """Count gate-accepted FINDs that are un-investigated recon leads.
+
+    The complement of count_confirmed_findings over the same gate-accepted set:
+    a FIND the find-quality gate kept whose recon card never became productive
+    (in lead_ids) and that no agent investigated (_finding_investigated).
+    Surfaced so the recon backlog stays visible and counted without inflating
+    the confirmed headline. A recon FIND the gate never verdicted is not a lead
+    here — it is unadjudicated.
+    """
+    if not findings_dir.is_dir() or not lead_ids:
+        return 0, []
+    leads: list[str] = []
+    for child in sorted(findings_dir.iterdir()):
+        if not child.is_dir() or not child.name.startswith("FIND-"):
+            continue
+        if child.name in lead_ids and not _finding_investigated(child) \
+                and _finding_is_confirmed(child):
+            leads.append(child.name)
+    return len(leads), leads
 
 
 def _pool_finding_names(metrics: dict, findings_dir: Path) -> list[str]:
@@ -2001,8 +2177,12 @@ def harvest(
         crashes_dir / "CRASH-CLUSTERS.md", crash_count
     )
     finding_count = count_subdirs(findings_dir, "FIND-")
+    recon_lead_ids = _uninvestigated_recon_lead_ids(results_dir, findings_dir)
     confirmed_finding_count, confirmed_finding_dirs = count_confirmed_findings(
-        findings_dir
+        findings_dir, recon_lead_ids
+    )
+    lead_finding_count, lead_finding_dirs = count_finding_leads(
+        findings_dir, recon_lead_ids
     )
     finding_clusters = confirmed_finding_cluster_count(
         findings_dir, confirmed_finding_dirs
@@ -2023,12 +2203,22 @@ def harvest(
         "discarded_hypotheses": count_discarded_hypotheses(results_dir),
         "findings": finding_count,
         "confirmed_findings": confirmed_finding_count,
-        # FINDs still on disk with no gate verdict (findings minus accepted;
-        # rejected FINDs have already moved to findings-rejected/). Non-zero
-        # means the gate did not finish — usually a provider limit cut the drain
-        # short — so a reader never mistakes an un-drained 0-confirmed run for a
-        # clean "found nothing". Pure arithmetic on disk state; no LLM call.
-        "findings_unadjudicated": max(0, finding_count - confirmed_finding_count),
+        # Gate-accepted FINDs recon pre-filed but no agent investigated (work
+        # card never reached find/crash). Kept on disk and counted, but out of
+        # the confirmed headline and the pool: recon-named + prose-accepted is a
+        # lead, not a confirmation. Removing these is the benchmark's largest
+        # false-positive source; keeping them visible avoids a false negative.
+        "finding_leads": lead_finding_count,
+        "lead_finding_dirs": lead_finding_dirs,
+        # FINDs still on disk the gate never verdicted (findings minus accepted;
+        # accepted = confirmed + leads, rejected FINDs already moved to
+        # findings-rejected/). Non-zero means the gate did not finish — usually a
+        # provider limit cut the drain short — so a reader never mistakes an
+        # un-drained 0-confirmed run for a clean "found nothing". Pure arithmetic
+        # on disk state; no LLM call.
+        "findings_unadjudicated": max(
+            0, finding_count - confirmed_finding_count - lead_finding_count
+        ),
         "confirmed_finding_dirs": confirmed_finding_dirs,
         "finding_clusters": finding_clusters,
         "findings_rejected": count_subdirs(
@@ -2820,6 +3010,9 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         confirmed_findings = [
             c["metrics"].get("confirmed_findings", 0) for c in done
         ]
+        finding_leads = [
+            c["metrics"].get("finding_leads", 0) for c in done
+        ]
         rejected_findings = [
             c["metrics"].get("findings_rejected", 0) for c in done
         ]
@@ -2879,12 +3072,17 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "model_refusal_total": sum(model_refusals),
                 "finding_total": sum(findings),
                 "confirmed_finding_total": sum(confirmed_findings),
+                # Recon-named FINDs the prose gate kept but no agent investigated.
+                # Counted and surfaced as leads, out of the confirmed headline.
+                "lead_finding_total": sum(finding_leads),
                 # Findings the gate never adjudicated (drain cut short, e.g. a
                 # provider limit). Makes confirmed_finding_total=0 legible: 0
                 # confirmed with a non-zero remainder is "gate unfinished", not
-                # "nothing found". Mirrors the per-cell findings_unadjudicated.
+                # "nothing found". Mirrors the per-cell findings_unadjudicated;
+                # leads are gate-accepted, so they are excluded here too.
                 "unadjudicated_finding_total": sum(
-                    max(0, f - c) for f, c in zip(findings, confirmed_findings)
+                    max(0, f - c - l)
+                    for f, c, l in zip(findings, confirmed_findings, finding_leads)
                 ),
                 "unique_crash_clusters": cb.get("unique_clusters", 0),
                 "novel_crash_clusters": cb.get("novel_clusters", 0),
@@ -3626,7 +3824,8 @@ def render_section(report: dict) -> str:
                     cond_rejected_findings,
                     "REJECTED-FINDINGS",
                 ),
-                fi=_md_link(_finding_count_label(c), cond_findings),
+                fi=_md_link(_finding_count_label(c), cond_findings)
+                + _finding_leads_suffix(c),
                 uf=_cluster_report_link(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
@@ -4105,7 +4304,7 @@ def crosstab(bench_root: Path) -> str:
                         _finding_count_label(c), c, "findings"
                     ) if provisional else _finding_count_label(c),
                     findings_dir,
-                ),
+                ) + _finding_leads_suffix(c),
                 uf=("Pending" if provisional else _crosstab_count(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
@@ -4255,13 +4454,14 @@ def crosstab(bench_root: Path) -> str:
         "gate or validator. The linked index records the reason."
     )
     lines.append(
-        "- **Confirmed findings** — reports that survived validation but do "
-        "not have an accepted crash artifact."
+        "- **Confirmed findings** — reports that survived validation and were "
+        "investigated by an agent, without an accepted crash artifact. A recon "
+        "lead the gate accepted but no agent ever worked is shown beside the "
+        "count as `(+N leads)` and is not confirmed."
     )
     lines.append(
-        "Rejected findings and Confirmed findings are disjoint outcomes: total "
-        "candidate reports = Rejected findings + Confirmed findings. Unique "
-        "findings deduplicates Confirmed findings only."
+        "Rejected findings, Confirmed findings, and leads are distinct "
+        "populations. Unique findings deduplicates Confirmed findings only."
     )
     lines.append(
         "- **Unique findings** — validated findings after signature clustering "
@@ -4651,11 +4851,12 @@ def _format_count(value: object) -> str:
 def metric_gate_summary(metrics: dict) -> str:
     """Format accepted, pending, and rejected benchmark artifact counts."""
     return (
-        "findings: rejected={fr} confirmed={fc} pending={fp} roots={ft}; "
+        "findings: rejected={fr} confirmed={fc} leads={fl} pending={fp} roots={ft}; "
         "crashes: rejected={cr} confirmed={cc} unique={cu}"
     ).format(
         fr=_as_int(metrics.get("findings_rejected")),
         fc=_as_int(metrics.get("confirmed_findings")),
+        fl=_as_int(metrics.get("finding_leads")),
         fp=_as_int(metrics.get("findings_unadjudicated")),
         ft=_as_int(metrics.get("findings")),
         cr=_as_int(metrics.get("crashes_rejected")),
@@ -4759,7 +4960,15 @@ def _cmd_write_cell(args: argparse.Namespace) -> int:
 
 def _cmd_uncounted_findings(args: argparse.Namespace) -> int:
     metrics = _read_json_object(Path(args.path))
-    print(max(0, _as_int(metrics.get("findings")) - _as_int(metrics.get("confirmed_findings"))))
+    # Findings the gate never verdicted: roots minus the gate-accepted set
+    # (confirmed + un-investigated leads). Leads were accepted, so they are not
+    # "uncounted"; only un-adjudicated FINDs are.
+    uncounted = (
+        _as_int(metrics.get("findings"))
+        - _as_int(metrics.get("confirmed_findings"))
+        - _as_int(metrics.get("finding_leads"))
+    )
+    print(max(0, uncounted))
     return 0
 
 

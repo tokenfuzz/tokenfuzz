@@ -235,7 +235,7 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Replicates` | `done/total`, with a suffix for cells that hit provider trouble: `(Nr)` recovered after a mid-run blip, `(Np)` provider-limited. |
 | `Wall (h)` | Median wall-clock hours per completed cell. |
 | `Rejected findings` | FIND reports rejected by the validator. |
-| `Findings` | Validated non-crash security reports. |
+| `Findings` | Confirmed non-crash security reports an agent investigated. A recon lead the gate accepted but no agent ever worked is shown as `(+N leads)` beside the count and is not counted here. |
 | `Unique findings` | Clustered findings, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the finding cluster report. |
 | `Rejected crashes` | Crash directories rejected by triage. |
 | `Crashes` | Crash directories with real sanitizer output on disk. |
