@@ -74,7 +74,9 @@ A crash is legitimate when ALL of the following hold:
    Specifically, the following are LEGITIMATE attacker inputs, not contract
    violations:
    - negative, zero, or oversized integer fields in typed structs
-     (`int rm_so = -1024`, `size_t len = SIZE_MAX`)
+     (`int rm_so = -1024`, `size_t len = SIZE_MAX`) — when that field is
+     part of the untrusted input the library parses, NOT a size you chose
+     to describe a buffer you allocated (see the caller-buffer rule below)
    - NULL pointers passed to functions that document them as nullable
      (or are silent about nullability)
    - malformed length prefixes, magic numbers, or version fields in
@@ -124,10 +126,26 @@ acceptable. The fact that no documented example uses one is irrelevant.
 
 Do not file the following in `{{ results_dir }}/crashes/`: testcases where the harness
 itself directly writes into private struct fields, links against
-test-only TU symbols, or calls a free function on a clearly stale
-pointer that the public docs say must not be reused. Those are
-harness artifacts. Everything else — including ugly-looking inputs
-that nobody would write on purpose — file.
+test-only TU symbols, calls a free function on a clearly stale
+pointer that the public docs say must not be reused, or **misdescribes
+its OWN buffer** to the API — pointing the API at a read length or write
+capacity beyond the buffer the testcase actually allocated, or handing a
+non-NUL-terminated allocation to an API whose public contract requires a
+NUL-terminated C string. What the testcase tells the API about its own
+buffer — the readable / writable extent, and whether it is terminated —
+must match what it actually allocated. Deriving that size from untrusted
+input is fine; the misuse is claiming the buffer is larger, longer, or
+terminated when it is not. Those are harness artifacts.
+
+This is distinct from — and you MUST still file — a length that measures
+the untrusted DATA the library was handed, which it then reads PAST while
+honoring an accurate value (a length-delimited API that ignores its
+`len`), or a destination capacity the testcase passes truthfully that the
+library overruns anyway. The test is whose promise the mis-sizing breaks:
+the testcase lying about its own buffer (misuse) versus the library
+failing to honor a truthful length/capacity for the untrusted data it was
+given (real API-hardening bug). Everything else — including ugly-looking
+inputs that nobody would write on purpose — file.
 
 **Debug-only assert aborts are not crashes.** An abort from
 `assert(...)` (`__assert_rtn` / `__assert_fail` in the trace), any

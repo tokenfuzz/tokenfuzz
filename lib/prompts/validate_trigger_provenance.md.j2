@@ -30,10 +30,25 @@ state**, not the bug mechanics:
 >       sequence the library is driving — still owns or will read it; or
 >       destroying the object being processed from inside its own callback. No
 >       correct application does these and no attacker input forces them.
->       For anything that merely LOOKS like misuse — moving a node between two
->       trees / documents, a direct length / offset / index the caller chose, or
->       an input shape the library's internal callers do not produce — do NOT
->       assume it is forbidden. Reject only if you READ the public constructor /
+>       Also CLEAR (reject): the report needs the caller to MISDESCRIBE its OWN
+>       buffer — pointing the API at a read length or write capacity beyond the
+>       buffer the caller actually allocated, or handing a non-NUL-terminated
+>       allocation to an API whose PUBLIC contract requires a NUL-terminated C
+>       string. What the caller tells the API about its own buffer (readable /
+>       writable extent, termination) must match what it allocated; deriving that
+>       size from untrusted input is fine, but claiming it is larger, longer, or
+>       terminated when it is not is misuse. KEEP the mirror image: a length that
+>       measures the untrusted DATA the library was handed and reads PAST while
+>       honoring an ACCURATE value, or an in/out destination capacity passed
+>       TRUTHFULLY that the library overruns or ignores — those are library bugs.
+>       For an output-only size parameter, reject an undersized destination ONLY
+>       when the API's public documentation, type contract, or an enforced public
+>       guard states the required minimum — never on shipped-caller convention
+>       alone; if only convention shows the minimum, keep it (Uncertain).
+>       For anything else that merely LOOKS like misuse — moving a node between two
+>       trees / documents, a direct length / offset / index into the untrusted data
+>       the caller chose, or an input shape the library's internal callers do not
+>       produce — do NOT assume it is forbidden. Reject only if you READ the public constructor /
 >       guard and it PROVABLY rejects or cannot reach that state — e.g. the API's
 >       only in-tree callers always pass NUL-terminated data, so attacker bytes
 >       cannot form the non-NUL buffer the bug needs. Tree / list APIs

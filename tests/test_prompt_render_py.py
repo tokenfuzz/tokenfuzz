@@ -10,6 +10,7 @@ is NOT recursively substituted.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -156,6 +157,42 @@ proc = subprocess.run(
 Path(_tpath).unlink()
 assert_eq(0, proc.returncode, "undecodable byte rc=0 (no crash)")
 assert_eq(b"X lead\xc2tail Y", proc.stdout, "raw 0xC2 byte round-trips to output")
+
+
+# ── Caller-buffer taxonomy in the two crash-gating prompts ──────────
+# Behaviour changes under lib/prompts/ require matching assertions. These
+# render the real templates and pin the truthful-buffer taxonomy, so
+# deleting a REJECT or KEEP clause fails the suite. Blockquote prefixes and
+# line wrapping are collapsed so a clause matches regardless of where it wraps.
+print("\ncaller-buffer taxonomy (crash-gating prompts)")
+
+
+def render_named(name: str, vars_dict: dict[str, str]) -> tuple[int, str]:
+    cmd = [sys.executable, str(RENDER), name]
+    for k, v in vars_dict.items():
+        cmd.extend(["--var", f"{k}={v}"])
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.returncode, re.sub(r"[>\s]+", " ", proc.stdout)
+
+
+rc, sf = render_named("safety_framing.md.j2", {"results_dir": "/r"})
+ok(rc == 0, "safety_framing renders")
+ok("misdescribes its OWN buffer" in sf, "safety: buffer-overclaim reject clause")
+ok("must match what it actually allocated" in sf, "safety: truthfulness, not allocation provenance")
+ok("Deriving that size from untrusted input is fine" in sf, "safety: attacker-derived truthful size kept")
+ok("you MUST still file" in sf, "safety: KEEP mirror (accurate-len / truthful capacity)")
+ok("requires a NUL-terminated C string" in sf, "safety: documented C-string qualifier")
+ok("no untrusted byte sets" not in sf, "safety: absolute allocation-provenance wording removed")
+
+rc, vp = render_named("validate_trigger_provenance.md.j2", {"target_path": "/t"})
+ok(rc == 0, "validate_trigger_provenance renders")
+ok("MISDESCRIBE its OWN buffer" in vp, "validator: buffer-overclaim reject clause")
+ok("honoring an ACCURATE value" in vp, "validator: accurate-length KEEP")
+ok("destination capacity passed TRUTHFULLY that the library overruns" in vp,
+   "validator: truthful-capacity KEEP")
+ok("never on shipped-caller convention alone" in vp, "validator: output minimum must be documented, not convention")
+ok("PUBLIC contract requires a NUL-terminated C string" in vp, "validator: documented C-string qualification")
+ok("keep it (Uncertain)" in vp, "validator: ambiguous minimum preserved as Uncertain")
 
 
 print(f"\n  \033[1m{PASSED}/{PASSED + FAILED} passed\033[0m")
