@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# Bump whenever the trigger-provenance prompt changes classification semantics.
+# Old verdicts then fail open and receive a fresh source-reading review.
+TRIGGER_GATE_DECISION_VERSION = "trigger-v2-caller-buffer"
+
+
 @dataclass(frozen=True)
 class ValidationResult:
     verdict: str

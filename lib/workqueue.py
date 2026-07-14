@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Iterable
 
 import languages
+import report_identity
 from audit_scope import is_excluded_path_part
 # target_config (only detect_repo_type, below) and prompt_render.render_template
 # (only the work_rerank gate) are imported lazily inside their single call sites:
@@ -4621,7 +4622,12 @@ def _compact_finding(ctx: Context, row: dict[str, str]) -> dict:
     if cache_path.is_file():
         try:
             data = json.loads(cache_path.read_text(encoding="utf-8", errors="replace"))
-            if data.get("accept") is True:
+            cache_current = True
+            if data.get("report_sha1"):
+                cache_current = report_identity.quality_cache_matches_report(
+                    artifact_dir, data,
+                )
+            if data.get("accept") is True and cache_current:
                 llm_class = str(data.get("class") or "")
                 llm_severity = str(data.get("severity") or "")
         except Exception:

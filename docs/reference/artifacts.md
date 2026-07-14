@@ -110,7 +110,13 @@ surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. A gate pass with
 Reject votes below quorum leaves `.pending-drop`; reaching quorum moves
 the directory to `findings-rejected/` rather than deleting it. `touch
 .reviewed` (or `.keep`) inside a FIND directory pins it
-past either gate.
+past either gate. Successful partial quality votes are stored in
+`.llm-find-quality.json` and reused on the next pass. The cache records both
+the bounded, agent-authored substance reviewed by the gate and the semantic
+identity of the complete report; editing substantive content invalidates both
+partial progress and a terminal verdict, including for read-only benchmark and
+clustering consumers. Mechanical severity, patch, enrichment, and cluster
+annotations do not.
 
 A short run may leave `crashes/` and `findings/` empty — that is
 not a failed run by itself. Check the rejected indexes first to
@@ -230,7 +236,9 @@ needs:
 Vacuous candidates are not moved out of `findings/` below reject
 quorum. The harness drops a `.pending-drop` marker in the FIND directory.
 Edit the report to address the marker, or `touch .reviewed` / `.keep` to
-override. At quorum, the directory is moved to `findings-rejected/`.
+override. Editing the report also invalidates saved quality votes so the
+revised content receives a fresh quorum. At quorum, the directory is moved
+to `findings-rejected/`.
 
 The severity scorer can also write `severity.json` and update the
 severity text for a FIND. That is useful context, not a requirement

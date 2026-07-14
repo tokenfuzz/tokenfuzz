@@ -362,18 +362,29 @@ class HarnessBuilder:
 
     def _stale(self, lock: Path) -> bool:
         owner = lock / "owner"
-        if owner.is_file():
-            match = re.search(r"^pid=([0-9]+)", owner.read_text(errors="ignore"), re.M)
-            if match:
-                try:
-                    os.kill(int(match.group(1)), 0)
-                    return False
-                except ProcessLookupError:
-                    return True
-                except PermissionError:
-                    return False
+        try:
+            owner_text = owner.read_text(errors="ignore")
+        except OSError:
+            owner_text = ""
+        match = re.search(r"^pid=([0-9]+)", owner_text, re.M)
+        if match:
+            try:
+                os.kill(int(match.group(1)), 0)
+                return False
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
         grace = int(os.environ.get("PROBE_HARNESS_LOCK_STALE_MIN", "5")) * 60
-        return grace <= 0 or time.time() - lock.stat().st_mtime > grace
+        try:
+            mtime = lock.stat().st_mtime
+        except OSError:
+            # The lock (or its owner) vanished mid-check because a concurrent
+            # holder released it. It is not stale — the next mkdir simply
+            # acquires it. Falling through here would crash the waiter and let
+            # it delete a lock it never owned.
+            return False
+        return grace <= 0 or time.time() - mtime > grace
 
     def _show_failure(self, path: Path, *, cached: bool = False) -> None:
         data = path.read_bytes()

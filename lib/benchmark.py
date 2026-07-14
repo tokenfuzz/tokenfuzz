@@ -46,6 +46,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import llm_usage
+import report_identity
 
 try:  # ClusterFuzz-normalized stack frames — reused, never reinvented.
     import stack_frames as _sf
@@ -588,7 +589,14 @@ def _finding_is_confirmed(finding_dir: Path) -> bool:
     cache = finding_dir / ".llm-find-quality.json"
     if not cache.is_file():
         return False
-    return (_read_json(cache) or {}).get("accept") is True
+    payload = _read_json(cache) or {}
+    if payload.get("accept") is not True:
+        return False
+    # New caches bind the terminal verdict to the report's agent-authored
+    # substance. This check protects read-only harvest/progress callers that do
+    # not first run validate_find_gate. Legacy v13 caches have no report_sha1
+    # and retain their historical behavior until their next gate pass.
+    return report_identity.quality_cache_matches_report(finding_dir, payload)
 
 
 # Card statuses where an agent produced a validated result — a filed find or a
@@ -2299,7 +2307,10 @@ def _choose_find_quality(finding_dir: Path) -> dict:
     cache = finding_dir / ".llm-find-quality.json"
     if not cache.is_file():
         return {}
-    return _read_json(cache) or {}
+    payload = _read_json(cache) or {}
+    return payload if report_identity.quality_cache_matches_report(
+        finding_dir, payload,
+    ) else {}
 
 
 def _md_cell(value: object) -> str:

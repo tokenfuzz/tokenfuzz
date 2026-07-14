@@ -20,7 +20,9 @@ import crash_artifacts
 import crash_bundle
 import llm_decide
 import llm_usage
+import report_identity
 import stack_frames
+import triage_validate
 from prompt_render import render_template
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
@@ -87,7 +89,10 @@ _AUTO_REJECT = (
     (re.compile(r"(?:^|[][\s:>])Hit MOZ_CRASH\(|^Assertion failure:|###!!! ASSERTION:", re.MULTILINE), "intentional assertion crash"),
     (re.compile(r"^thread '[^']*'(?: \([^)]*\))? panicked at |\bRustMozCrash\b", re.MULTILINE), "runtime panic"),
 )
-_REPORT_NAMES = ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md")
+# Report-file precedence is shared with the content-identity module so the gate
+# and its read-only consumers always hash the same file. _report keeps its
+# stricter non-empty requirement.
+_REPORT_NAMES = report_identity.REPORT_NAMES
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -561,12 +566,14 @@ def evaluate_crash_verdict(report_text: str, controls: list[str]) -> tuple[str, 
 
 def _set_contract_concern(report: Path, reason: str) -> None:
     text = _read(report)
+    heading = report_identity.CONTRACT_CONCERN_HEADING
+    boundary = "|".join(re.escape(p) for p in report_identity.SECTION_BOUNDARY_PREFIXES)
     text = re.sub(
-        r"\n?## Contract concern\s*\n.*?(?=\n(?:## |Summary:)|\Z)", "", text,
+        rf"\n?{re.escape(heading)}\s*\n.*?(?=\n(?:{boundary})|\Z)", "", text,
         flags=re.DOTALL,
     ).rstrip()
     block = (
-        "## Contract concern\n\n"
+        f"{heading}\n\n"
         f"Triage kept this crash and flagged a contract concern: {reason}.\n\n"
         "The diagnostic is real; downstream scoring recomputes the impact "
         "from the report fields and target.toml.\n\n"
@@ -953,6 +960,23 @@ def _finding_trigger_rejected(
     ) == 1
 
 
+def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
+    """Return only a verdict produced for this prompt version and report."""
+    try:
+        payload = json.loads(vote_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("decision_version") != triage_validate.TRIGGER_GATE_DECISION_VERSION:
+        return None
+    content_sha1 = report_identity.content_sha1(report)
+    if not content_sha1 or payload.get("content_sha1") != content_sha1:
+        return None
+    vote = payload.get("vote")
+    return vote if vote in {"Promote", "Reject", "Uncertain"} else None
+
+
 _TRIGGER_BATCH_SIZE = 4
 
 
@@ -971,17 +995,14 @@ def _batch_finding_trigger_votes(
     pending = []
     for directory in directories:
         vote_file = directory / ".trigger-gate.json"
+        report = _report(directory)
+        if report is None:
+            continue
         if vote_file.is_file() and vote_file.stat().st_size:
-            try:
-                cached = json.loads(vote_file.read_text(encoding="utf-8")).get("vote")
-            except (OSError, ValueError):
-                cached = None
-            if cached in {"Promote", "Reject", "Uncertain"}:
+            if _cached_trigger_vote(report, vote_file) is not None:
                 continue
             vote_file.unlink(missing_ok=True)
-        report = _report(directory)
-        if report is not None:
-            pending.append((directory, report, vote_file))
+        pending.append((directory, report, vote_file))
     raw_dir = (
         Path(usage_index).parent / ".raw"
         if usage_index else results_dir / "logs" / ".raw"
@@ -1038,10 +1059,7 @@ def _trigger_vote(
     verdict short-circuits a re-run; a cached ParseFailure is not a verdict and
     falls through to retry."""
     if vote_file.is_file() and vote_file.stat().st_size:
-        try:
-            cached = json.loads(vote_file.read_text(encoding="utf-8")).get("vote")
-        except (OSError, ValueError):
-            cached = None
+        cached = _cached_trigger_vote(report, vote_file)
         if cached == "Reject":
             return 1
         if cached in ("Promote", "Uncertain"):
@@ -1235,6 +1253,12 @@ def triage_one_crash(
         _set_contract_concern(report, detail)
     else:
         _clear_contract_concern(report)
+    # Score before source-reading review so the trigger cache describes the
+    # final report shape. The validator strips generated scoring prose from its
+    # prompt, while retaining the structured reach fields the scorer surfaced.
+    if _decision_timeout(1, deadline):
+        _run_tool("severity", "--report", str(crash_dir), env=environment)
+        report = _report(crash_dir) or report
     if not confirmed_trigger_bypass and _crash_trigger_gate(
         crash_dir, report, Path(target_root), deadline, usage_index,
         target_root_is_product, attacker_controls,
@@ -1244,8 +1268,6 @@ def triage_one_crash(
             "trigger-provenance (2 independent rejects): triggering state not attacker-reachable from a public boundary",
         )
         return "rejected"
-    if _decision_timeout(1, deadline):
-        _run_tool("severity", "--report", str(crash_dir), env=environment)
     return "promoted"
 
 
@@ -1311,6 +1333,110 @@ def _finding_cache(path: Path) -> dict:
         return {}
 
 
+_FIND_QUALITY_VERSION = report_identity.FIND_QUALITY_DECISION_VERSION
+
+
+def _quality_content_sha1(report_text: str) -> str:
+    return report_identity.semantic_text_sha1(report_text)
+
+
+def _quality_cache_matches(
+    cache_path: Path, cache: dict, report: Path, report_text: str,
+) -> bool:
+    """Accept only a verdict/progress cache for the report it reviewed.
+
+    v13 caches written before semantic hashes were added may carry a raw hash
+    or no hash. Raw hashes must match exactly; hashless caches are tolerated
+    only while they are at least as new as the report. That preserves completed
+    audits without letting a later report edit replay a stale verdict.
+    """
+    if cache.get("decision_version") != _FIND_QUALITY_VERSION:
+        return False
+    cached_report_sha1 = cache.get("report_sha1")
+    if isinstance(cached_report_sha1, str) and cached_report_sha1:
+        # The full semantic identity is authoritative for new caches. The
+        # bounded hash remains useful provenance but can shift when generated
+        # annotations move a large report's head/tail cut points.
+        return cached_report_sha1 == report_identity.content_sha1(report)
+    cached_sha1 = cache.get("content_sha1")
+    if isinstance(cached_sha1, str) and cached_sha1:
+        # Pre-incremental v13 caches hashed the raw bounded report. Accept that
+        # exact legacy key once; every new write advances it to the semantic key.
+        return cached_sha1 in {
+            _quality_content_sha1(report_text),
+            hashlib.sha1(report_text.encode()).hexdigest(),
+        }
+    try:
+        return cache_path.stat().st_mtime_ns >= report.stat().st_mtime_ns
+    except OSError:
+        return False
+
+
+def _valid_quality_votes(value: object, limit: int) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    votes: list[dict] = []
+    for item in value[:limit]:
+        if not isinstance(item, dict) or not isinstance(item.get("accept"), bool):
+            continue
+        votes.append({
+            "accept": item["accept"],
+            "reason": str(item.get("reason") or ""),
+            "class": str(item.get("class") or ""),
+            "severity": str(item.get("severity") or ""),
+        })
+    return votes
+
+
+def _quality_payload(
+    report_text: str, votes: list[dict], quorum: int, accept_quorum: int,
+    report_sha1: str | None = None,
+) -> dict:
+    """Build one non-terminal or terminal cache from independent valid votes."""
+    vote_limit = max(1, accept_quorum + quorum - 1)
+    normalized = _valid_quality_votes(votes, vote_limit)
+    accepts = [vote for vote in normalized if vote["accept"] is True]
+    rejects = [vote for vote in normalized if vote["accept"] is False]
+    payload: dict = {
+        "decision_version": _FIND_QUALITY_VERSION,
+        "content_sha1": _quality_content_sha1(report_text),
+        "votes": normalized,
+        "accept_count": len(accepts),
+        "reject_count": len(rejects),
+    }
+    if report_sha1:
+        payload["report_sha1"] = report_sha1
+    if len(accepts) >= accept_quorum:
+        accepted = accepts[-1]
+        payload.update({
+            "accept": True,
+            "reason": accepted["reason"],
+            "class": accepted["class"],
+            "severity": accepted["severity"],
+        })
+    elif len(rejects) >= quorum:
+        payload.update({
+            "accept": False,
+            "reason": rejects[-1]["reason"] or "quality gate rejected finding",
+            "class": "",
+            "severity": "",
+        })
+    return payload
+
+
+def _quality_terminal(payload: dict, quorum: int, accept_quorum: int) -> bool:
+    try:
+        return (
+            payload.get("accept") is True
+            and int(payload.get("accept_count", 0)) >= accept_quorum
+        ) or (
+            payload.get("accept") is False
+            and int(payload.get("reject_count", 0)) >= quorum
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _quality_vote(
     report_text: str, timeout: int,
     usage_index: str | os.PathLike[str] | None = None,
@@ -1330,14 +1456,18 @@ def _batch_decisions(
     items: list[dict], timeout: int,
     usage_index: str | os.PathLike[str] | None,
     deadline: float | None = None,
+    workers: int = 1,
 ) -> dict[str, dict]:
     """Return only well-keyed batch results; callers retry omitted ids safely."""
-    decisions: dict[str, dict] = {}
-    for start in range(0, len(items), _DECISION_BATCH_SIZE):
+    batches = [
+        items[start:start + _DECISION_BATCH_SIZE]
+        for start in range(0, len(items), _DECISION_BATCH_SIZE)
+    ]
+
+    def decide(batch: list[dict]) -> dict[str, dict]:
         call_timeout = _decision_timeout(timeout, deadline)
         if call_timeout <= 0:
-            break
-        batch = items[start:start + _DECISION_BATCH_SIZE]
+            return {}
         allowed = {str(item["id"]) for item in batch}
         prompt = render_template(template, {
             "instructions": instructions,
@@ -1347,39 +1477,69 @@ def _batch_decisions(
             decision, "items", prompt, call_timeout, usage_index=usage_index,
         )
         if not isinstance(result, dict) or not isinstance(result.get("items"), list):
-            continue
+            return {}
+        found: dict[str, dict] = {}
         for item in result["items"]:
             if not isinstance(item, dict):
                 continue
             item_id = str(item.get("id") or "")
-            if item_id in allowed and item_id not in decisions:
-                decisions[item_id] = item
+            if item_id in allowed and item_id not in found:
+                found[item_id] = item
+        return found
+
+    decisions: dict[str, dict] = {}
+    if not batches:
+        return decisions
+    with ThreadPoolExecutor(max_workers=min(max(1, workers), len(batches))) as pool:
+        # map preserves chunk order, so duplicate ids still resolve
+        # deterministically even though independent provider calls overlap.
+        for found in pool.map(decide, batches):
+            for item_id, item in found.items():
+                decisions.setdefault(item_id, item)
     return decisions
 
 
 def _batch_quality_votes(
     directories: list[Path], results_dir: Path, quorum: int, accept_quorum: int,
-    timeout: int, deadline: float | None,
+    timeout: int, deadline: float | None, workers: int,
 ) -> dict[Path, list[dict]]:
     usage_index = benchmark._find_index_jsonl(results_dir)
     reports: dict[Path, str] = {}
+    report_hashes: dict[Path, str | None] = {}
+    votes: dict[Path, list[dict]] = {}
     for directory in directories:
         if (directory / ".keep").is_file() or (directory / ".reviewed").is_file():
             continue
-        cache = _finding_cache(directory / ".llm-find-quality.json")
-        try:
-            terminal_cache = cache.get("decision_version") == "v13-python" and (
-                (cache.get("accept") is True and int(cache.get("accept_count", 0)) >= accept_quorum)
-                or (cache.get("accept") is False and int(cache.get("reject_count", 0)) >= quorum)
-            )
-        except (TypeError, ValueError):
-            terminal_cache = False
-        if terminal_cache:
-            continue
         report = _report(directory)
-        if report is not None:
-            reports[directory] = read_report_bounded(report)
-    votes: dict[Path, list[dict]] = {directory: [] for directory in reports}
+        if report is None:
+            continue
+        report_text = read_report_bounded(report)
+        reports[directory] = report_text
+        report_hashes[directory] = report_identity.content_sha1(report)
+        cache_path = directory / ".llm-find-quality.json"
+        cache = _finding_cache(cache_path)
+        current = _quality_cache_matches(
+            cache_path, cache, report, report_text,
+        )
+        if current and _quality_terminal(cache, quorum, accept_quorum):
+            reports.pop(directory, None)
+            continue
+        existing = _valid_quality_votes(
+            cache.get("votes") if current else None,
+            max(1, accept_quorum + quorum - 1),
+        )
+        payload = _quality_payload(
+            report_text, existing, quorum, accept_quorum,
+            report_hashes[directory],
+        )
+        votes[directory] = list(payload["votes"])
+        # Invalidate a stale terminal verdict before any provider call. If the
+        # backend is unavailable, metrics must show pending rather than replay
+        # a verdict produced for different report content.
+        if not current or _quality_terminal(payload, quorum, accept_quorum):
+            _write_atomic_json(cache_path, payload)
+        if _quality_terminal(payload, quorum, accept_quorum):
+            reports.pop(directory, None)
     active = set(reports)
     instructions = render_template("triage_find_quality.md.j2", {"body": ""}).split(
         "Output a single JSON object", 1,
@@ -1392,16 +1552,20 @@ def _batch_quality_votes(
         items = [{"id": directory.name, "report": reports[directory]} for directory in ordered]
         by_id = _batch_decisions(
             "find_quality_batch", "triage_find_quality_batch.md.j2",
-            instructions, items, vote_timeout, usage_index, deadline,
+            instructions, items, vote_timeout, usage_index, deadline, workers,
         )
         for directory in ordered:
             vote = by_id.get(directory.name)
             if not isinstance(vote, dict) or not isinstance(vote.get("accept"), bool):
                 continue
             votes[directory].append(vote)
-            accepts = sum(item["accept"] is True for item in votes[directory])
-            rejects = sum(item["accept"] is False for item in votes[directory])
-            if accepts >= accept_quorum or rejects >= quorum:
+            payload = _quality_payload(
+                reports[directory], votes[directory], quorum, accept_quorum,
+                report_hashes[directory],
+            )
+            _write_atomic_json(directory / ".llm-find-quality.json", payload)
+            votes[directory] = list(payload["votes"])
+            if _quality_terminal(payload, quorum, accept_quorum):
                 active.discard(directory)
     return votes
 
@@ -1418,6 +1582,10 @@ def _finalize_accepted_finding(
             finding_dir, usage_index, decision_override=reach_fields_override,
         )
         report = _report(finding_dir) or report
+    # Stabilize generated fields before trigger review so its content-addressed
+    # verdict remains current on the next pass.
+    _run_tool("severity", "--report", str(finding_dir))
+    report = _report(finding_dir) or report
     if _finding_trigger_rejected(
         finding_dir, report, deadline, usage_index,
         target_root_is_product,
@@ -1427,7 +1595,20 @@ def _finalize_accepted_finding(
             "trigger-provenance: triggering state not attacker-reachable",
         )
         return "rejected"
-    _run_tool("severity", "--report", str(finding_dir))
+    # Reach-field and severity enrichment legitimately rewrite the report after
+    # quality quorum. Advance the content key to that finalized text so the
+    # next incremental pass skips it; a later author edit still changes the key
+    # and forces fresh review.
+    report = _report(finding_dir) or report
+    cache_path = finding_dir / ".llm-find-quality.json"
+    cache = _finding_cache(cache_path)
+    if (
+        cache.get("decision_version") == _FIND_QUALITY_VERSION
+        and cache.get("accept") is True
+    ):
+        cache["content_sha1"] = _quality_content_sha1(read_report_bounded(report))
+        cache["report_sha1"] = report_identity.content_sha1(report)
+        _write_atomic_json(cache_path, cache)
     return "accepted"
 
 
@@ -1453,10 +1634,13 @@ def validate_one_finding(
         (finding_dir / ".needs-content").touch()
         return "pending"
     (finding_dir / ".needs-content").unlink(missing_ok=True)
+    report_text = read_report_bounded(report)
+    report_sha1 = report_identity.content_sha1(report)
     cache_path = finding_dir / ".llm-find-quality.json"
     cache = _finding_cache(cache_path)
-    if cache.get("decision_version") == "v13-python":
-        if cache.get("accept") is True and int(cache.get("accept_count", 0)) >= accept_quorum:
+    current = _quality_cache_matches(cache_path, cache, report, report_text)
+    if current and _quality_terminal(cache, quorum, accept_quorum):
+        if cache.get("accept") is True:
             (finding_dir / ".pending-drop").unlink(missing_ok=True)
             if defer_trigger:
                 return "quality-accepted"
@@ -1464,69 +1648,72 @@ def validate_one_finding(
                 finding_dir, results_dir, report, deadline, usage_index,
                 target_root_is_product,
             )
-        if cache.get("accept") is False and int(cache.get("reject_count", 0)) >= quorum:
+        if cache.get("accept") is False:
             _reject(finding_dir, results_dir / "findings-rejected", str(cache.get("reason") or "quality gate reject"))
             return "rejected"
-    report_text = read_report_bounded(report)
-    accepts = rejects = 0
-    accepted_class = accepted_severity = accepted_reason = rejected_reason = ""
     vote_limit = max(1, accept_quorum + quorum - 1)
-    queued_votes = list(initial_votes or [])
-    for vote_number in range(vote_limit):
+    persisted_votes = _valid_quality_votes(
+        cache.get("votes") if current else None, vote_limit,
+    )
+    queued_votes = (
+        _valid_quality_votes(initial_votes, vote_limit)
+        if initial_votes is not None else persisted_votes
+    )
+    # A report edit invalidates both terminal verdicts and partial progress.
+    # Persist that pending state before a potentially unavailable provider call
+    # so downstream metrics cannot count the stale acceptance.
+    payload = _quality_payload(
+        report_text, queued_votes, quorum, accept_quorum, report_sha1,
+    )
+    _write_atomic_json(cache_path, payload)
+
+    while (
+        not _quality_terminal(payload, quorum, accept_quorum)
+        and len(queued_votes) < vote_limit
+    ):
         vote_timeout = _decision_timeout(timeout, deadline)
         if vote_timeout <= 0:
             break
-        if vote_number < len(queued_votes):
-            vote = queued_votes[vote_number]
-        elif initial_votes is not None:
+        if initial_votes is not None:
             # A batch was attempted for this pass. Missing keyed results stay
             # pending for the next bounded pass; immediately fanning every
             # omission back out into individual calls recreates the provider
             # storm batching is meant to prevent.
             break
-        else:
-            vote = _quality_vote(report_text, vote_timeout, usage_index)
+        vote = _quality_vote(report_text, vote_timeout, usage_index)
         if not isinstance(vote, dict) or not isinstance(vote.get("accept"), bool):
             break
-        if vote["accept"]:
-            accepts += 1
-            accepted_reason = str(vote.get("reason") or accepted_reason)
-            accepted_class = str(vote.get("class") or accepted_class)
-            accepted_severity = str(vote.get("severity") or accepted_severity)
-            if accepts >= accept_quorum:
-                payload = {
-                    "decision_version": "v13-python", "accept": True,
-                    "accept_count": accepts, "reason": accepted_reason,
-                    "class": accepted_class, "severity": accepted_severity,
-                    "content_sha1": hashlib.sha1(report_text.encode()).hexdigest(),
-                }
-                _write_atomic_json(cache_path, payload)
-                (finding_dir / ".pending-drop").unlink(missing_ok=True)
-                if defer_trigger:
-                    return "quality-accepted"
-                return _finalize_accepted_finding(
-                    finding_dir, results_dir, report, deadline, usage_index,
-                    target_root_is_product,
-                )
-        else:
-            rejects += 1
-            rejected_reason = str(vote.get("reason") or rejected_reason)
-            if rejects >= quorum:
-                payload = {
-                    "decision_version": "v13-python", "accept": False,
-                    "reject_count": rejects,
-                    "reason": rejected_reason or "quality gate rejected finding",
-                    "class": "", "severity": "",
-                    "content_sha1": hashlib.sha1(report_text.encode()).hexdigest(),
-                }
-                _write_atomic_json(cache_path, payload)
-                (finding_dir / ".pending-drop").unlink(missing_ok=True)
-                _reject(finding_dir, results_dir / "findings-rejected", payload["reason"])
-                return "rejected"
+        queued_votes.append(vote)
+        payload = _quality_payload(
+            report_text, queued_votes, quorum, accept_quorum, report_sha1,
+        )
+        queued_votes = list(payload["votes"])
+        _write_atomic_json(cache_path, payload)
+
+    if payload.get("accept") is True and _quality_terminal(payload, quorum, accept_quorum):
+        (finding_dir / ".pending-drop").unlink(missing_ok=True)
+        if defer_trigger:
+            return "quality-accepted"
+        return _finalize_accepted_finding(
+            finding_dir, results_dir, report, deadline, usage_index,
+            target_root_is_product,
+        )
+    if payload.get("accept") is False and _quality_terminal(payload, quorum, accept_quorum):
+        (finding_dir / ".pending-drop").unlink(missing_ok=True)
+        _reject(finding_dir, results_dir / "findings-rejected", payload["reason"])
+        return "rejected"
+    rejects = int(payload.get("reject_count", 0))
     if rejects:
+        rejected_reason = next(
+            (
+                vote["reason"] for vote in reversed(queued_votes)
+                if not vote["accept"] and vote["reason"]
+            ),
+            "finding quality review did not reach quorum",
+        )
         (finding_dir / ".pending-drop").write_text(
             f"Reject count: {rejects}/{quorum}\n"
-            f"Reason: {rejected_reason or 'finding quality review did not reach quorum'}\n",
+            f"Reason: {rejected_reason}\n",
             encoding="utf-8",
         )
     return "pending"
@@ -1534,7 +1721,7 @@ def validate_one_finding(
 
 def _write_atomic_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
 
@@ -1557,7 +1744,7 @@ def validate_find_gate(
     timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 300)
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
     initial_votes = _batch_quality_votes(
-        directories, results, q, aq, timeout, deadline,
+        directories, results, q, aq, timeout, deadline, workers,
     ) if directories and not _deadline_expired(deadline) else {}
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         statuses = list(pool.map(

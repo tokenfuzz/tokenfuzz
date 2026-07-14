@@ -35,6 +35,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import report_identity
+
 
 # ── Class normalization ───────────────────────────────────────────
 # Reports come from two vocabularies:
@@ -572,7 +574,9 @@ def read_llm_cache(find_dir: Path) -> dict:
         data = json.loads(p.read_text("utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return {}
-    if not data.get("accept"):
+    if not data.get("accept") or not report_identity.quality_cache_matches_report(
+        find_dir, data,
+    ):
         return {}
     return {
         "class": data.get("class", "") or "",

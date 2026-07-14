@@ -47,7 +47,9 @@ Environment controls:
   LLM_DECIDE_FAIL_THRESHOLD=<n>          consecutive identical-request failures
                                          before the breaker opens and skips
                                          re-issuing that decision (default 2,
-                                         0 = disabled).
+                                         0 = disabled). One full timeout opens
+                                         the exact-request key immediately;
+                                         cooldown still permits a later retry.
   LLM_DECIDE_TYPE_FAIL_THRESHOLD=<n>     consecutive fast backend errors for a
                                          decision type before that whole class
                                          is paused (default 8, 0 = disabled).
@@ -502,10 +504,10 @@ def _failcache_note(decision: str, prompt: str, success: bool,
     failure       → always bumps the per-prompt key (a repeated identical
                     failure is worth short-circuiting). Bumps the per-type key
                     ONLY when `backend_error` — a fast non-zero exit
-                    (rate-limit / overload). NOT a timeout (which means "needed
-                    more time", addressed by the decision-timeout floors, not by
-                    sidelining the class) and NOT a malformed-output parse
-                    failure (the backend answered fine; the model's output was
+                    (rate-limit / overload). NOT a timeout (the exact prompt is
+                    deferred separately without sidelining the class) and NOT
+                    a malformed-output parse failure (the backend answered
+                    fine; the model's output was
                     bad for THIS prompt only). Keying the type breaker on fast
                     backend errors is what stops it sidelining a gate that is
                     merely slow.
@@ -537,6 +539,28 @@ def _failcache_note(decision: str, prompt: str, success: bool,
             data[tkey] = [count + 1, time.time()]
             dirty = True
         return None, dirty
+
+    _failcache_update(mutate, default=None)
+
+
+def _failcache_trip_timed_out_prompt(decision: str, prompt: str) -> None:
+    """Open the exact-request breaker after one full backend timeout.
+
+    A timeout already consumed the entire configured decision window. Repeating
+    the identical prompt immediately is the expensive failure mode this cache
+    exists to stop. The normal cooldown still supplies a half-open retry, and
+    this never opens the broader decision-type breaker, so unrelated candidates
+    continue to receive validation.
+    """
+    threshold = _fail_threshold()
+    if threshold <= 0:
+        return
+    key = _failcache_key(decision, prompt)
+
+    def mutate(data):
+        count, _ = _entry(data.get(key))
+        data[key] = [max(count, threshold), time.time()]
+        return None, True
 
     _failcache_update(mutate, default=None)
 
@@ -1088,6 +1112,7 @@ def _run_decision(
                 "\n".join(raw_string(part) for part in (exc.output, exc.stderr)),
                 complete=False,
             )
+            _failcache_trip_timed_out_prompt(decision, prompt)
             return None, False
         except subprocess.CalledProcessError as exc:
             # The backend RAN and exited non-zero — rate-limit / overload /

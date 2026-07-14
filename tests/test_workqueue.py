@@ -19,6 +19,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import report_identity
 import workqueue
 
 
@@ -38,6 +39,23 @@ class WorkQueueTests(unittest.TestCase):
 
     def write_cards(self, cards: list[dict]) -> None:
         workqueue.write_cards(self.results / "work-cards.jsonl", cards)
+
+    def test_compact_finding_ignores_stale_content_addressed_gate_fields(self) -> None:
+        finding = self.results / "findings" / "FIND-001"
+        finding.mkdir(parents=True)
+        report = finding / "report.md"
+        report.write_text("# State issue\n\nConcrete boundary rationale.\n")
+        (finding / ".llm-find-quality.json").write_text(json.dumps({
+            "accept": True,
+            "class": "auth:bypass",
+            "severity": "high",
+            "report_sha1": report_identity.content_sha1(report),
+        }))
+        current = workqueue._compact_finding(self.ctx, {"id": finding.name})
+        self.assertEqual((current["class"], current["severity"]), ("auth:bypass", "high"))
+        report.write_text(report.read_text() + "\nRevised substantive analysis.\n")
+        stale = workqueue._compact_finding(self.ctx, {"id": finding.name})
+        self.assertEqual((stale["class"], stale["severity"]), ("", ""))
 
     def run_command(
         self, command: list[str], *, env: dict[str, str] | None = None,

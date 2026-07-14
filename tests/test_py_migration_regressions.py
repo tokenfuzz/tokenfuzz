@@ -962,6 +962,12 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "harness build waiter acquires lock ownership before returning",
     )
     shutil.rmtree(build_lock, ignore_errors=True)
+    # A holder releasing the lock mid-check must not crash the waiter's
+    # staleness probe; a vanished lock is "not stale" so the next mkdir wins.
+    check(
+        builder._stale(root / "harness.lock.released") is False,
+        "stale check tolerates a lock released during the check",
+    )
     budget_logs = root / "budget-logs"
     budget_logs.mkdir()
     runtime_stub = mock.Mock(logs=budget_logs, num_agents=2)
