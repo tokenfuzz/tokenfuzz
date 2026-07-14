@@ -1029,7 +1029,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
 
     cycle_order = []
-    ensemble_runtimes = [SimpleNamespace(backend="claude"), SimpleNamespace(backend="codex")]
+    ensemble_runtimes = [
+        SimpleNamespace(backend="claude", config=mock.Mock()),
+        SimpleNamespace(backend="codex", config=mock.Mock()),
+    ]
     def _initialize_cycle(runtime, _args, _guide, **_kwargs):
         return audit_runner.BackendState(runtime, mock.Mock(), started_at=1.0)
     def _cycle_once(state):
@@ -1038,6 +1041,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         return "dry", []
     with mock.patch.object(audit_runner, "instance_lock", return_value=contextlib.nullcontext()), \
          mock.patch.object(audit_runner, "_activate_runtime"), \
+         mock.patch.object(audit_runner.runner_preflight, "validate") as ensemble_runner_preflight, \
          mock.patch.object(audit_runner, "validate_model") as ensemble_model_preflight, \
          mock.patch.object(audit_runner, "preflight_build") as ensemble_preflight, \
          mock.patch.object(audit_runner, "initialize_backend", side_effect=_initialize_cycle), \
@@ -1048,9 +1052,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         )
     check(
         ensemble_rc == 0 and cycle_order == ["claude", "codex", "claude"]
+        and ensemble_runner_preflight.call_count == 1
         and ensemble_model_preflight.call_count == 2
         and ensemble_preflight.call_count == 1,
-        "ensemble mode preflights each model, cycles backends, and preflights the shared build once",
+        "ensemble mode preflights the runner/build once, each model, and cycles backends",
         repr(cycle_order),
     )
 

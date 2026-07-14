@@ -112,6 +112,31 @@ class BenchmarkCliTests(unittest.TestCase):
             self.assertFalse((run / ".pool.staging").exists())
             self.assertFalse((run / ".pool.old").exists())
 
+    def test_multi_target_isolates_a_fatal_target_from_the_grid(self) -> None:
+        # A per-target startup fatal (e.g. an unusable [runner].bin caught at
+        # preflight) must fail only its own target, leaving later targets in
+        # the grid to run — not abort the whole run with an uncaught traceback.
+        attempted = []
+
+        def fake_run_single(args, _bench_root):
+            attempted.append(args.target)
+            if args.target == "samples/sample-rust":
+                raise RuntimeError("configured [runner].bin failed startup check")
+            return 0
+
+        argv = [
+            "--target", "samples/sample-rust,samples/sample-python",
+            "--backend", "codex", "--bench-root", str(self.bench_root),
+        ]
+        output = io.StringIO()
+        with mock.patch.object(benchmark_runner, "run_single", side_effect=fake_run_single), \
+                redirect_stdout(output), redirect_stderr(output):
+            rc = benchmark_runner.main(argv)
+        self.assertEqual(attempted, ["samples/sample-rust", "samples/sample-python"])
+        self.assertEqual(rc, 1)
+        self.assertIn("FATAL: samples/sample-rust:", output.getvalue())
+        self.assertIn("Multi-target complete: 1/2 target(s) succeeded", output.getvalue())
+
     def test_reset_and_live_lock_contracts(self) -> None:
         ledger = self.root / "benchmark-results.md"
         ledger.write_text("# existing results\n", encoding="utf-8")

@@ -32,6 +32,7 @@ import crash_bundle
 import llm_invoke
 import llm_usage
 import process_tree
+import runner_preflight
 import target_config
 import triage
 from timeout import run_timeout
@@ -1095,6 +1096,7 @@ def preflight_build(args: argparse.Namespace, bench_dir: Path, model: str) -> No
     except (OSError, ValueError) as exc:
         log(f"WARN: sanitizer build preflight could not load target config: {exc}")
         return
+    runner_preflight.validate(config, log)
     build_preflight.refresh(
         SCRIPT_ROOT, target_root, args.target, config, bench_dir,
         args.backend, model, log,
@@ -1419,7 +1421,15 @@ def _main(argv: list[str] | None = None) -> int:
         for index, target in enumerate(targets, start=1):
             log(f"Multi-target {index}: {target} starting")
             run_id = f"{args.run_id}-{target_key(target)}" if args.run_id else ""
-            failures += run_single(replace_namespace(args, target=target, run_id=run_id), bench_root) != 0
+            # Isolate per-target fatals (e.g. an unusable runner at preflight) so
+            # one misconfigured target fails only its own cell instead of
+            # crashing the grid and losing every later target's results.
+            try:
+                failed = run_single(replace_namespace(args, target=target, run_id=run_id), bench_root) != 0
+            except RuntimeError as exc:
+                print(f"FATAL: {target}: {exc}", file=sys.stderr)
+                failed = True
+            failures += failed
         log(f"Multi-target complete: {len(targets) - failures}/{len(targets)} target(s) succeeded")
         return 1 if failures else 0
     if targets:

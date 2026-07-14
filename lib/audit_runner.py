@@ -30,6 +30,7 @@ import llm_usage
 import prompt
 import quality
 import recon_to_cards
+import runner_preflight
 import structured_state
 import process_tree
 import target_config
@@ -1821,6 +1822,7 @@ def _recover_transient(state: BackendState) -> bool:
 
 def run_backend(runtime: Runtime, args, guide: str) -> int:
     with instance_lock(runtime, args.allow_concurrent):
+        runner_preflight.validate(runtime.config, lambda message: index_log(runtime, message))
         validate_model(runtime)
         preflight_build(runtime)
         state = initialize_backend(runtime, args, guide, started_at=time.monotonic())
@@ -1854,6 +1856,9 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
     with ExitStack() as stack:
         for runtime in runtimes:
             stack.enter_context(instance_lock(runtime, args.allow_concurrent))
+        runner_preflight.validate(
+            runtimes[0].config, lambda message: index_log(runtimes[0], message)
+        )
         for runtime in runtimes:
             _activate_runtime(runtime)
             validate_model(runtime)
