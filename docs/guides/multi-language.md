@@ -104,10 +104,14 @@ A few ecosystem notes:
 
 - **Go** seeds findings-only `go run`. To use the runtime race
   detector, set `[sanitizer] enabled = ["race"]` and
-  `args = ["run", "-race", "{TESTCASE}"]`.
-- **Rust** can opt into a sanitizer build later — set
-  `[sanitizer] enabled = ["asan"]` once you have a nightly+sanitizer
-  build.
+  `args = ["run", "-race", "{TESTCASE}"]`, or point the `[runner]` at a
+  pre-built `go build -race` binary (the `samples/sample-go` benchmark
+  target does the latter, and its concurrent `merge` op trips the detector).
+- **Rust** can opt into an AddressSanitizer build: set
+  `[sanitizer] enabled = ["asan"]`, point `asan_bin` at the instrumented
+  binary, and commit a `.audit/build.sh` that produces it with a nightly
+  `-Zsanitizer=address -Zbuild-std` build. `bin/setup-target --build`
+  materializes it (see the `samples/sample-rust` benchmark target).
 - **Swift** is the exception to the "non-native → findings-only" rule
   in the decision tree: its seeded `[runner]` compiles the package with
   `-sanitize={SWIFT_SANITIZER}`, so a sanitizer diagnostic routes to

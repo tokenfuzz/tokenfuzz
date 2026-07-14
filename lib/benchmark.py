@@ -1891,6 +1891,10 @@ def manifest_errors(manifest: dict) -> list[str]:
             prim = str(e.get("primitive", "")).strip()
             if need_primitive and not prim:
                 errors.append(f"{where} ({eid or '?'}) needs a primitive")
+            # findings_only excludes a bug from the crash-recall denominator, so
+            # a stray string like "false" (truthy) must not silently drop it.
+            if "findings_only" in e and not isinstance(e["findings_only"], bool):
+                errors.append(f"{where} ({eid or '?'}) findings_only must be true or false")
             # A trap must declare what a benign occurrence looks like, so the
             # scorer can tell a fired trap from a real crash in the same frame.
             outcome = str(e.get("expected_outcome", "")).strip()
@@ -1937,6 +1941,12 @@ _PRIMITIVE_RE = re.compile(
     r"ThreadSanitizer):\s+([A-Za-z][A-Za-z0-9-]+)"
 )
 
+# Go's race detector prints "WARNING: DATA RACE" rather than a
+# "ThreadSanitizer: <primitive>" line, so it has no primitive for _PRIMITIVE_RE
+# to capture. Map it to the canonical "data-race" primitive a Go race target's
+# ground-truth names.
+_DATA_RACE_RE = re.compile(r"WARNING: DATA RACE")
+
 # A symbolized sanitizer stack frame: "    #3 0x... in <func> <loc>".
 _FRAME_FUNC_RE = re.compile(r"^\s*#\d+\s+\S+\s+in\s+(\S+)", re.MULTILINE)
 
@@ -1974,7 +1984,64 @@ def _find_sanitizer_file(crash_dir: Path) -> Path | None:
     return None
 
 
-def _crash_site_functions(text: str) -> set[str]:
+# A Rust ASan frame carries a v0-mangled symbol whose embedded crate hash is not
+# stable across builds (e.g. "_RNvNtCs<hash>_11sample_rust9reportkit10sum_window"),
+# while a Linux llvm-symbolizer instead prints the demangled path
+# ("sample_rust::reportkit::sum_window"). Both reduce to the same innermost
+# identifier, which is what a ground-truth signature_symbol names. This reduction
+# is applied ONLY to frames from a Rust target (_crash_site_functions), because a
+# demangled "a::b::c" and a bare Itanium "_ZN…" are equally C++ and must stay
+# whole for a C++ target — else an unrelated C++ crash could match a plain symbol.
+_RUST_LEGACY_HASH_RE = re.compile(r"^h[0-9a-f]{16}$")
+_LEN_PREFIX_RE = re.compile(r"\d+")
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _mangled_components(fn: str) -> list[str]:
+    """Length-prefixed identifiers of a `<len><ident>` mangled symbol, in order."""
+    comps, i, n = [], 0, len(fn)
+    while i < n:
+        m = _LEN_PREFIX_RE.match(fn, i)
+        if not m:
+            i += 1
+            continue
+        start, end = m.end(), m.end() + int(m.group())
+        if end <= n and _IDENT_RE.match(fn[start:end]):
+            comps.append(fn[start:end])
+            i = end
+        else:
+            i = m.end()
+    return comps
+
+
+def _rust_symbol_tail(fn: str) -> str:
+    """Innermost identifier of a Rust symbol, or "" when *fn* is not one.
+
+    Only ever applied to a frame from a Rust target (see _crash_site_functions),
+    because a demangled "a::b::c" is equally a C++ name and must not be reduced
+    for a C++ target. Handles the demangled path form ("a::b::c" -> "c") and the
+    two Rust manglings: v0 ("_R…", crate hash leading, last component is the
+    function) and legacy ("_ZN…" ending in a 17h<16hex> disambiguator). A bare
+    "_ZN…" with no Rust hash is an ordinary C++ symbol and yields "" so it is
+    never reduced even inside a Rust target's dependency frame."""
+    fn = fn.split("+", 1)[0].strip()
+    if "::" in fn:
+        parts = [p for p in fn.split("::") if p]
+        while parts and _RUST_LEGACY_HASH_RE.match(parts[-1]):
+            parts.pop()
+        return parts[-1] if parts else ""
+    if fn.startswith("_R"):
+        comps = _mangled_components(fn)
+        return comps[-1] if comps else ""
+    if fn.startswith("_ZN"):
+        comps = _mangled_components(fn)
+        if comps and _RUST_LEGACY_HASH_RE.match(comps[-1]):
+            comps.pop()
+            return comps[-1] if comps else ""
+    return ""
+
+
+def _crash_site_functions(text: str, rust: bool = False) -> set[str]:
     """Function name(s) at the crash SITE — the first interesting frame, the
     same frame bin/cluster-crashes keys its signature on.
 
@@ -1984,7 +2051,10 @@ def _crash_site_functions(text: str) -> set[str]:
     an allocator, or a freer. The shared ClusterFuzz parser skips sanitizer
     interceptor frames (e.g. __asan_memcpy) so the site is the true faulting
     function; the raw and normalized names are both returned so a manifest
-    symbol written either way matches.
+    symbol written either way matches. For a Rust target (*rust*) the demangled
+    innermost identifier is added too, so a v0-mangled or path-qualified frame
+    matches a plain signature_symbol; this is scoped to Rust so a C++ target's
+    "a::b::c" or "_ZN…" frame is never reduced to a colliding leaf name.
 
     Fallback (shared parser unimportable): the first frame line before any
     allocation/free marker that is not itself a sanitizer interceptor."""
@@ -1992,15 +2062,20 @@ def _crash_site_functions(text: str) -> set[str]:
         fr = _sf.first_interesting_frame(text)
         if fr is None:
             return set()
-        return {f for f in (fr.function, fr.state_function) if f}
-    head = _STACK_STATE_STOP_RE.split(text, maxsplit=1)[0]
-    for fn in _FRAME_FUNC_RE.findall(head):
-        if not _SAN_INTERCEPTOR_RE.match(fn):
-            return {fn}
-    return set()
+        base = {f for f in (fr.function, fr.state_function) if f}
+    else:
+        base = set()
+        head = _STACK_STATE_STOP_RE.split(text, maxsplit=1)[0]
+        for fn in _FRAME_FUNC_RE.findall(head):
+            if not _SAN_INTERCEPTOR_RE.match(fn):
+                base = {fn}
+                break
+    if not rust:
+        return base
+    return base | {tail for tail in map(_rust_symbol_tail, base) if tail}
 
 
-def _attribution_evidence(crash_dir: Path) -> tuple[str, set[str]] | None:
+def _attribution_evidence(crash_dir: Path, rust: bool = False) -> tuple[str, set[str]] | None:
     """Trusted runtime evidence for attribution, or None.
 
     `(primitive, crash-site function names)` parsed from a CANONICAL sanitizer
@@ -2023,7 +2098,11 @@ def _attribution_evidence(crash_dir: Path) -> tuple[str, set[str]] | None:
     except OSError:
         return None
     m = _PRIMITIVE_RE.search(text)
-    return (m.group(1) if m else ""), _crash_site_functions(text)
+    if m:
+        primitive = m.group(1)
+    else:
+        primitive = "data-race" if _DATA_RACE_RE.search(text) else ""
+    return primitive, _crash_site_functions(text, rust)
 
 
 # A trap's expected_outcome names what a *benign* occurrence looks like.
@@ -2096,11 +2175,18 @@ def score_ground_truth(
     if (crashes_dir / "crashes").is_dir():
         crashes_dir = crashes_dir / "crashes"
     members = members or {}
+    # The crash oracle grades only sanitizer-observable bugs. A hybrid target may
+    # also plant findings-only bugs (command injection, path traversal) that
+    # surface under findings/ and never as a crash; each carries findings_only=true
+    # so it is not stranded permanently "missed" in the crash-recall denominator.
     real = [
         b for b in manifest.get("planted_bugs", [])
-        if b.get("kind", "real") == "real"
+        if b.get("kind", "real") == "real" and not b.get("findings_only")
     ]
     traps = manifest.get("false_positive_traps", [])
+    # Rust symbol demangling is applied only to a Rust target's frames (a
+    # demangled C++ name is indistinguishable and must stay whole).
+    rust = str(manifest.get("language", "")).lower() == "rust"
 
     confirmed: list[tuple[str, tuple[str, set] | None]] = []
     if crashes_dir.is_dir():
@@ -2114,7 +2200,7 @@ def score_ground_truth(
             # as unattributed, never a true positive.
             if not dir_has_sanitizer_output(child):
                 continue
-            confirmed.append((child.name, _attribution_evidence(child)))
+            confirmed.append((child.name, _attribution_evidence(child, rust)))
 
     def score_subset(items: list) -> dict:
         detected: dict[str, list[str]] = {}

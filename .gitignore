@@ -36,6 +36,10 @@ targets/samples/sample-*/node_modules/
 targets/samples/sample-*/.build/
 targets/samples/sample-*/.audit/*
 !targets/samples/sample-*/.audit/build.sh
+# Compiled C-extension artifacts (sample-python's reportnative build)
+targets/samples/sample-*/build/
+targets/samples/sample-*/*.so
+targets/samples/sample-*/*.egg-info/
 
 # bin/benchmark ledger + run artifacts (operator data, not source)
 benchmark-results.md

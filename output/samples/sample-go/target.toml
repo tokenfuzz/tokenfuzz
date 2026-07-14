@@ -13,17 +13,19 @@ is_browser    = "0"
 # the job bytes are the only attacker-controlled surface.
 attacker_controls = ["bytes"]
 
-# Findings-only: the `go build` bootstrap produces the sample-go binary the
-# runner drives. Runtime panics and LLM-reported security issues both land under
-# findings/.
+# Race target: the `go build -race` bootstrap produces the instrumented sample-go
+# binary the runner drives, so the concurrent `merge` op's data race is a
+# verifiable crash. The security bugs execute through the same binary and land
+# under findings/.
 [sanitizer]
-enabled = []
+enabled = ["race"]
 
 [runner]
 bin            = "sample-go"
 args           = ["{TESTCASE}"]
 env            = ["GORACE=halt_on_error=1"]
 crash_patterns = [
+  "WARNING: DATA RACE",
   "panic: runtime error:",
   "panic:",
   "fatal error: stack overflow",

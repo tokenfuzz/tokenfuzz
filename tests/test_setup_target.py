@@ -300,6 +300,25 @@ class SetupTargetTests(unittest.TestCase):
         self.assertTrue(recipe.stat().st_mode & 0o111)
         self.assertNotIn("permission denied", process.stdout.lower())
 
+    def test_build_materializes_language_target_with_committed_recipe(self) -> None:
+        # A language target (non-native build system) opts into a sanitizer build
+        # by shipping a committed .audit/build.sh; setup-target --build must
+        # materialize it even though cargo/go/pip are not native build systems.
+        target = self.harness / "targets" / "langbuild"
+        target.mkdir(parents=True)
+        (target / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        self.build_recipe(target)
+        config = self.config("langbuild")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "langbuild"\nbuild_system = "cargo"\n'
+            'asan_bin = "build-asan/langbuild"\n[sanitizer]\nenabled = ["asan"]\n'
+        )
+        process = self.setup("langbuild", "--build", environment={"LLM_DECIDE_DISABLE": "1"})
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertTrue((target / "build-asan" / "langbuild").is_file())
+        self.assertIn("materializing asan build", process.stdout)
+
     def test_build_does_not_reseed_placeholder_configuration(self) -> None:
         (self.harness / "bin" / "auto-build-script").symlink_to(ROOT / "bin" / "auto-build-script")
         target = self.make_build_target("phtarget")

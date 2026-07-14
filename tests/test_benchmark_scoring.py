@@ -146,6 +146,97 @@ class BenchmarkScoringTests(unittest.TestCase):
         _, score = self.score(empty_san)
         self.assertEqual(score["overall"]["confirmed_crashes"], 0)
 
+    def test_rust_mangled_frame_attributes_to_plain_symbol(self) -> None:
+        # A Rust ASan frame carries a v0-mangled symbol with an unstable crate
+        # hash; the scorer must still credit the plain signature_symbol.
+        run = self.root / "rust"
+        crash = run / "crashes" / "R-0001"
+        crash.mkdir(parents=True)
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60\n"
+            "READ of size 1 at 0x60 thread T0\n"
+            "    #0 0x0 in __asan_memcpy\n"
+            "    #1 0x0 in _RNvNtCs9a5x3Hu2sLi_11sample_rust9reportkit10sum_window+0x1b0\n",
+            encoding="utf-8",
+        )
+        manifest = self.root / "rust-gt.json"
+        manifest.write_text(json.dumps({"language": "rust", "planted_bugs": [
+            {"id": "oob", "primitive": "heap-buffer-overflow", "signature_symbol": "sum_window"}
+        ]}), encoding="utf-8")
+        _, score = self.score(run, manifest=manifest)
+        self.assertEqual(score["overall"]["detected"], ["oob"])
+        self.assertEqual(score["overall"]["recall"], 1.0)
+
+    def test_cpp_frame_is_not_reduced_to_a_colliding_leaf_symbol(self) -> None:
+        # A C++ crash at ns::Class::parse (or its Itanium mangling) must NOT be
+        # credited to a ground-truth signature_symbol "parse" — Rust demangling
+        # is scoped to Rust targets so it cannot manufacture a false positive.
+        manifest = self.root / "cpp-gt.json"
+        manifest.write_text(json.dumps({"language": "cpp", "planted_bugs": [
+            {"id": "other", "primitive": "heap-buffer-overflow", "signature_symbol": "parse"}
+        ]}), encoding="utf-8")
+        for i, frame in enumerate(("ns::Class::parse", "_ZN2ns5Class5parseEv")):
+            run = self.root / f"cpp-{i}"
+            self.make_crash(run, f"C-{i}", frame, "heap-buffer-overflow")
+            _, score = self.score(run, manifest=manifest)
+            self.assertEqual(score["overall"]["detected"], [], frame)
+            self.assertEqual(score["overall"]["unexpected_crashes"], [f"C-{i}"], frame)
+
+    def test_rust_symbol_tail_reduces_rust_and_leaves_cpp_and_plain_frames(self) -> None:
+        cases = {
+            "_RNvNtCs9a5x3Hu2sLi_11sample_rust9reportkit10sum_window+0x1b0": "sum_window",
+            "_RNvNtCs9a5x3Hu2sLi_11sample_rust9reportkit10pack_table": "pack_table",
+            "sample_rust::reportkit::sum_window": "sum_window",
+            "_ZN11sample_rust9reportkit10sum_window17h0123456789abcdefE": "sum_window",  # legacy Rust
+            "rbundle::decode::h0123456789abcdef": "decode",
+            "_ZN2ns5Class5parseEv": "",  # plain C++ Itanium (no Rust hash) — untouched
+            "handle_array": "",          # plain C frame — left untouched
+            "main.mergeTallies.func1": "",  # Go frame — left untouched
+        }
+        for frame, expected in cases.items():
+            with self.subTest(frame=frame):
+                self.assertEqual(benchmark._rust_symbol_tail(frame), expected)
+
+    def test_go_data_race_attributes_via_race_primitive(self) -> None:
+        # Go's race detector prints "WARNING: DATA RACE" (no ThreadSanitizer
+        # primitive line); the scorer maps it to the data-race primitive and
+        # keys on the goroutine-closure frame.
+        run = self.root / "go"
+        crash = run / "crashes" / "G-0001"
+        crash.mkdir(parents=True)
+        (crash / "sanitizer.txt").write_text(
+            "==================\n"
+            "WARNING: DATA RACE\n"
+            "Write at 0x00c0 by goroutine 7:\n"
+            "  main.mergeTallies.func1()\n"
+            "      sample-go/reportkit.go:154 +0x90\n",
+            encoding="utf-8",
+        )
+        manifest = self.root / "go-gt.json"
+        manifest.write_text(json.dumps({"planted_bugs": [
+            {"id": "race", "primitive": "data-race", "signature_symbol": "main.mergeTallies.func1"}
+        ]}), encoding="utf-8")
+        _, score = self.score(run, manifest=manifest)
+        self.assertEqual(score["overall"]["detected"], ["race"])
+        self.assertEqual(score["overall"]["recall"], 1.0)
+
+    def test_findings_only_bug_excluded_from_crash_recall(self) -> None:
+        # A hybrid target plants a sanitizer bug plus a findings-only bug that
+        # never crashes; the latter must not sit permanently "missed" in the
+        # crash-recall denominator.
+        run = self.root / "hybrid"
+        self.make_crash(run, "H-0001", "pack_cells", "heap-buffer-overflow")
+        manifest = self.root / "hybrid-gt.json"
+        manifest.write_text(json.dumps({"planted_bugs": [
+            {"id": "native", "primitive": "heap-buffer-overflow", "signature_symbol": "pack_cells"},
+            {"id": "traversal", "findings_only": True, "primitive": "path-traversal",
+             "signature_symbol": "read_asset"},
+        ]}), encoding="utf-8")
+        _, score = self.score(run, manifest=manifest)
+        self.assertEqual(score["overall"]["detected"], ["native"])
+        self.assertEqual(score["overall"]["recall"], 1.0)
+        self.assertEqual(score["overall"]["missed"], [])
+
     def test_trap_requires_the_expected_non_memory_diagnostic(self) -> None:
         trap = self.root / "trap"
         self.make_crash(trap, "TF-0001", "pack_field", "heap-buffer-overflow")
@@ -161,6 +252,10 @@ class BenchmarkScoringTests(unittest.TestCase):
             {"planted_bugs": [
                 {"id": "a", "primitive": "heap-buffer-overflow", "signature_symbol": "render_cell"},
                 {"id": "b", "primitive": "heap-buffer-overflow", "signature_symbol": "render_cell"},
+            ]},
+            {"planted_bugs": [
+                {"id": "x", "primitive": "heap-buffer-overflow", "signature_symbol": "render_cell",
+                 "findings_only": "false"},
             ]},
         )
         for number, payload in enumerate(manifests):

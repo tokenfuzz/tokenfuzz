@@ -1,0 +1,22 @@
+{
+  "target": "samples/sample-python-native",
+  "language": "python",
+  "build": ".audit/build.sh",
+  "asan_bin": "build-asan/reportnative_harness",
+  "description": "Answer key for the synthetic sample-python-native target (reportnative CPython C extension). Kept under output/samples/sample-python-native/ - NOT inside targets/samples/sample-python-native/ - so the audited agents are not handed the answer while being measured. The deterministic scorer reads it after the run. .audit/build.sh compiles the extension's C core into build-asan/reportnative_harness (an AddressSanitizer driver), since an ASan-built .so cannot be imported under a stock interpreter. The single planted bug is a native integer-overflow heap out-of-bounds write in pack_cells, reachable from Python via reportkit_cli.py's `native` op and verifiable under ASan through the harness.",
+  "runner": "reportkit_cli.py",
+  "planted_bugs": [
+    {
+      "id": "native-integer-overflow-oob-write",
+      "kind": "real",
+      "primitive": "heap-buffer-overflow",
+      "access": "WRITE",
+      "signature_symbol": "pack_cells",
+      "input": "/tmp/py-native.job",
+      "cwe": "CWE-787",
+      "modeled_on": "integer-overflow-to-heap-overflow class (CWE-190 -> CWE-787) in a C extension: a 32-bit cell-count multiply truncates the allocation while the fill loop writes the full-width product",
+      "summary": "reportnative.pack_cells sizes its buffer from rows*width truncated to a 32-bit unsigned int, but the fill loop writes rows*width cells computed at full size_t width. When rows*width exceeds UINT_MAX the buffer is far too small and the loop writes past it (heap out-of-bounds write). AddressSanitizer reports heap-buffer-overflow at pack_cells (reportnative_core.c); /tmp/py-native.job packs a 65536 x 65537 grid."
+    }
+  ],
+  "false_positive_traps": []
+}

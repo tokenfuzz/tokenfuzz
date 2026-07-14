@@ -6,6 +6,13 @@ upstream_url  = "synthetic — TokenFuzz per-language benchmark (Rust)"
 build_system  = "cargo"
 pinned_rev    = "norev"
 
+# Instrumented CLI: .audit/build.sh produces a nightly
+# `-Zsanitizer=address -Zbuild-std` build. The two unsound-`unsafe` memory bugs
+# (pack_table, sum_window) fault under ASan; the security bugs (command
+# injection, path traversal) execute through the same binary and land under
+# findings/.
+asan_bin      = "build-asan/sample-rust"
+
 is_browser    = "0"
 
 [threat_model]
@@ -13,18 +20,5 @@ is_browser    = "0"
 # the job bytes are the only attacker-controlled surface.
 attacker_controls = ["bytes"]
 
-# Findings-only (a nightly + rust-src ASan build is a separate opt-in): the
-# `cargo build --release` bootstrap produces the sample-rust binary the runner
-# drives. Runtime panics and LLM-reported security issues both land under
-# findings/.
 [sanitizer]
-enabled = []
-
-[runner]
-bin            = "target/release/sample-rust"
-args           = ["{TESTCASE}"]
-crash_patterns = [
-  "thread '.*' panicked at",
-  "fatal runtime error:",
-  "==\\d+==ERROR: AddressSanitizer",
-]
+enabled = ["asan"]

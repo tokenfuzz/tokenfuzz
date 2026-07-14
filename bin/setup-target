@@ -262,7 +262,15 @@ class Setup:
             raise RuntimeError(f"bootstrap failed for {self.name} (see {audit_dir / 'bootstrap.log'})")
 
     def sanitizer_builds(self, config: target_config.Config) -> None:
-        if config.build_system not in NATIVE_SYSTEMS:
+        audit_dir = self.target_root / ".audit"
+        # Native C/C++ trees converge a .audit/build.sh through auto-build-script;
+        # a language target (cargo/go/pip) opts into a sanitizer build only by
+        # shipping a hand-authored .audit/build.sh (or build-<san>.sh) recipe.
+        # With neither a native build system nor such a recipe there is nothing
+        # to materialize.
+        recipes = ["build.sh", *(f"build-{s}.sh" for s in ("ubsan", "msan", "tsan"))]
+        has_recipe = any((audit_dir / name).is_file() for name in recipes)
+        if config.build_system not in NATIVE_SYSTEMS and not has_recipe:
             return
         if config.sanitizers_explicitly_disabled:
             sanitizers = []
@@ -270,7 +278,6 @@ class Setup:
             sanitizers = ["asan", *(
                 name for name in config.sanitizers_enabled if name != "asan"
             )]
-        audit_dir = self.target_root / ".audit"
         if self.args.build:
             candidates = self.backend_candidates()
             auto_builder = SCRIPT_ROOT / "bin/auto-build-script"

@@ -90,7 +90,13 @@ Build behavior depends on the target:
 - **Rust, Go, Swift, Python, Node, PHP, Ruby, and other registered language
   builds.** Run `bin/setup-target <target> --build` when the runner depends on
   compiled code or installed packages. Audit preflight does not automatically
-  run these ecosystem bootstrap commands.
+  run these ecosystem bootstrap commands. Such a target opts into a sanitizer
+  build by shipping a committed `targets/<target>/.audit/build.sh` that emits an
+  instrumented binary into `build-<san>/`; `--build` materializes it alongside
+  the ecosystem bootstrap (the `samples/sample-rust` and
+  `samples/sample-python-native` benchmark targets do this for an ASan build, and
+  `samples/sample-go` enables the race detector through its `go build -race`
+  bootstrap).
 - **Browser targets.** Build through the browser project's supported tooling,
   then point `target.toml` at the result. The generic native auto-builder does
   not build browsers.

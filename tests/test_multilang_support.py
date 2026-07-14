@@ -247,8 +247,10 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertRegex(result.stdout + result.stderr, r"TS_NODE_ARGV=--transpile-only --skip-project --compiler-options .*\.exec\.ts")
         self.assertTrue(ts_node.is_file())
 
-        rust_runner = self.executable(
-            self.target / "target" / "release" / "sample-rust",
+        # sample-rust is an ASan target: probe resolves the relative asan_bin
+        # against target_root and drives it under the sanitizer runner.
+        rust_asan_bin = self.executable(
+            self.target / "build-asan" / "sample-rust",
             "import sys\nprint('RUST_RUNNER_ARG=' + sys.argv[1])\nprint('TESTCASE_EXECUTED')\n",
         )
         sample_config = (ROOT / "output" / "samples" / "sample-rust" / "target.toml").read_text()
@@ -257,7 +259,7 @@ class MultiLanguageSupportTests(unittest.TestCase):
         result = self.run_probe(rust_case)
         self.assertIn("TESTCASE_EXECUTED", result.stdout + result.stderr)
         self.assertIn(f"RUST_RUNNER_ARG={rust_case.resolve()}", result.stdout + result.stderr)
-        self.assertTrue(rust_runner.is_file())
+        self.assertTrue(rust_asan_bin.is_file())
 
         harness = self.executable(
             scratch / "sidecar.py",

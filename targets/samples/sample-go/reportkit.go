@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 )
 
@@ -137,6 +138,27 @@ func runCommand(arg string) string {
 	return string(out)
 }
 
+// mergeTallies totals the entry counts of report shards concurrently, so a
+// large multi-shard report can be summed in parallel. Each worker adds into the
+// shared running total; the accumulator is not synchronised, so overlapping
+// shards race on it — a data race the race detector reports, and a total that is
+// silently short without it.
+func mergeTallies(shards [][]string) int {
+	total := 0
+	var wg sync.WaitGroup
+	for _, shard := range shards {
+		wg.Add(1)
+		go func(entries []string) {
+			defer wg.Done()
+			for range entries {
+				total++
+			}
+		}(shard)
+	}
+	wg.Wait()
+	return total
+}
+
 // ── Command-line front end ──────────────────────────────────────────────
 
 // firstRest splits a job body into its first line and the remaining text.
@@ -171,6 +193,14 @@ func dispatch(op, body string) (string, bool) {
 		return fmt.Sprintf("%v", parseConfig(body)), true
 	case "command":
 		return runCommand(strings.TrimSpace(body)), true
+	case "merge":
+		shards := [][]string{}
+		for _, line := range strings.Split(body, "\n") {
+			if strings.TrimSpace(line) != "" {
+				shards = append(shards, strings.Fields(line))
+			}
+		}
+		return "merged=" + strconv.Itoa(mergeTallies(shards)), true
 	default:
 		return "", false
 	}

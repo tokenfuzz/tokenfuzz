@@ -1,0 +1,33 @@
+# target.toml — sample-python-native synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+
+target        = "samples/sample-python-native"
+upstream_url  = "synthetic — TokenFuzz per-language benchmark (Python C extension)"
+build_system  = "python"
+pinned_rev    = "norev"
+
+# AddressSanitizer surface: .audit/build.sh compiles the reportnative C core into
+# a standalone harness that faults on the extension's native memory bug. Every
+# job is the same `native` op, so the default asan surface (the harness) and the
+# python3 runner (the importable .so, via PROBE_SANITIZER=runner) exercise the
+# same code — an ASan-built .so cannot be imported under a stock interpreter.
+asan_bin      = "build-asan/reportnative_harness"
+
+is_browser    = "0"
+
+[threat_model]
+# The CLI turns one attacker-supplied job file into a single reportnative call;
+# the job bytes are the only attacker-controlled surface.
+attacker_controls = ["bytes"]
+
+[sanitizer]
+enabled = ["asan"]
+
+[runner]
+bin            = "python3"
+args           = ["{TARGET_ROOT}/reportkit_cli.py", "{TESTCASE}"]
+env            = ["PYTHONDEVMODE=1", "PYTHONPATH={TARGET_ROOT}"]
+crash_patterns = [
+  "Traceback \\(most recent call last\\):",
+  "Fatal Python error:",
+]

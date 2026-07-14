@@ -1,14 +1,15 @@
 {
   "target": "samples/sample-rust",
   "language": "rust",
-  "findings_only": true,
-  "description": "Answer key for the synthetic sample-rust target (reportkit report toolkit). Kept under output/samples/sample-rust/ \u2014 NOT inside targets/samples/sample-rust/ \u2014 so the audited agents are not handed the answer while being measured. The `cargo build --release` bootstrap produces the sample-rust binary; every planted bug is reachable through it from a single job file. This is a findings-only target: every planted bug is an observable memory-safety or security boundary crossing \u2014 an integer-overflow heap out-of-bounds write, an unsound `unsafe` out-of-bounds read, command injection, and read/write path traversal \u2014 deliberately NOT a memory-safe unwrap panic (a clean abort with no leverage that a correctly calibrated auditor discards). Reproducer job files live in /tmp (not committed). The two false-positive traps look dangerous to a naive scanner but are safe.",
+  "build": ".audit/build.sh",
+  "asan_bin": "build-asan/sample-rust",
+  "description": "Answer key for the synthetic sample-rust target (reportkit report toolkit). Kept under output/samples/sample-rust/ \u2014 NOT inside targets/samples/sample-rust/ \u2014 so the audited agents are not handed the answer while being measured. The deterministic scorer reads it after the run. .audit/build.sh produces an AddressSanitizer build (nightly `-Zsanitizer=address -Zbuild-std`); every planted bug is reachable through build-asan/sample-rust from a single job file. This is a hybrid target: the two unsound-`unsafe` memory bugs (an integer-overflow heap out-of-bounds write and a get_unchecked out-of-bounds read) are verifiable ASan crashes, while the three security bugs (command injection, read/write path traversal) are findings that execute through the same binary without a sanitizer diagnostic. The planted bugs are deliberately NOT memory-safe unwrap panics (a clean abort with no leverage that a correctly calibrated auditor discards). Reproducer job files live in /tmp (not committed). The two false-positive traps look dangerous to a naive scanner but are safe.",
   "runner": "sample-rust",
   "planted_bugs": [
     {
       "id": "integer-overflow-oob-write",
       "kind": "real",
-      "primitive": "out-of-bounds-write",
+      "primitive": "heap-buffer-overflow",
       "access": "WRITE",
       "signature_symbol": "pack_table",
       "input": "/tmp/rust-table.job",
@@ -19,7 +20,7 @@
     {
       "id": "unsound-unsafe-oob-read",
       "kind": "real",
-      "primitive": "out-of-bounds-read",
+      "primitive": "heap-buffer-overflow",
       "access": "READ",
       "signature_symbol": "sum_window",
       "input": "/tmp/rust-window.job",
@@ -30,6 +31,7 @@
     {
       "id": "shell-command-injection",
       "kind": "real",
+      "findings_only": true,
       "primitive": "command-injection",
       "access": "EXEC",
       "signature_symbol": "run_export",
@@ -41,6 +43,7 @@
     {
       "id": "path-traversal-read",
       "kind": "real",
+      "findings_only": true,
       "primitive": "path-traversal",
       "access": "READ",
       "signature_symbol": "read_asset",
@@ -52,6 +55,7 @@
     {
       "id": "path-traversal-write",
       "kind": "real",
+      "findings_only": true,
       "primitive": "path-traversal",
       "access": "WRITE",
       "signature_symbol": "save_render",
