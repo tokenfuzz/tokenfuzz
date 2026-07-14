@@ -139,7 +139,7 @@ ok('model_reasoning_effort="high"' in f, "codex agent wires configured effort")
 proc = run(["agent-flags", "oss"], check=True)
 f = flags(proc)
 assert_eq(
-    ["run", "--dangerously-skip-permissions", "--format", "json"],
+    ["run", "--pure", "--dangerously-skip-permissions", "--format", "json"],
     f,
     "oss agent flags do not invent a model when none is supplied",
 )
@@ -429,6 +429,8 @@ ok("--disallowedTools" in claude_single, "single-agent Claude disables native de
 ok("Agent,Task" in claude_single, "single-agent Claude denies current and legacy delegation tools")
 codex_single = inv.agent_flags("codex", allow_subagents=False)
 ok("features.multi_agent=false" in codex_single, "single-agent Codex disables native delegation")
+ok("features.plugins=false" in codex_single,
+   "Codex agent disables plugin-contributed skills and workflows")
 
 ok(inv.known_backend("claude") is True, "known_backend('claude') True")
 ok(inv.known_backend("openai") is False, "known_backend('openai') False")
@@ -447,6 +449,14 @@ ok("--safe-mode" in decide_claude, "decide_flags('claude') disables user customi
 ok("--no-session-persistence" in decide_claude, "decide_flags('claude') disables persistence")
 ok("--max-turns" not in decide_claude, "decide_flags('claude') has no turn cap")
 ok("plan" in decide_claude, "decide_flags('claude') uses read-only plan mode")
+
+decide_codex = inv.decide_flags("codex")
+ok("features.plugins=false" in decide_codex,
+   "Codex decisions disable plugins")
+
+for builder in (inv.agent_flags, inv.decide_flags):
+    ok("--pure" in builder("oss"),
+       f"OpenCode {builder.__name__} runs without external plugins")
 
 agent_codex = inv.agent_flags("codex", add_dirs="/x,/y")
 ok("--json" in agent_codex and "--sandbox" in agent_codex,
@@ -568,6 +578,10 @@ ok(inv.memory_env("gemini")["GEMINI_CLI_HOME"] == iso_home,
 invoke_env = inv.invocation_env("gemini")
 settings_path = Path(invoke_env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"])
 settings = json.loads(settings_path.read_text())
+ok(settings["skills"]["enabled"] is False,
+   "Gemini CLI system settings disable skills")
+ok(settings["admin"]["extensions"]["enabled"] is False,
+   "Gemini CLI system settings disable extensions")
 override = settings["modelConfigs"]["customOverrides"][0]
 assert_eq("gemini-3.1-pro-preview", override["match"]["model"],
           "Gemini effort override targets the configured model")

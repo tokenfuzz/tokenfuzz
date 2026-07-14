@@ -129,6 +129,7 @@ class BenchmarkReportTests(unittest.TestCase):
             "args = sys.argv[1:]\n"
             "cd = args[args.index('--cd') + 1]\n"
             "adds = [args[i + 1] for i, value in enumerate(args[:-1]) if value == '--add-dir']\n"
+            "print('FAKE_ARGS=' + json.dumps(args), file=sys.stderr)\n"
             "print('FAKE_CD=' + cd, file=sys.stderr)\n"
             "print('FAKE_ADDS=' + '|'.join(adds), file=sys.stderr)\n"
             "print(json.dumps({'type': 'item.completed', 'usage': {"
@@ -174,6 +175,11 @@ class BenchmarkReportTests(unittest.TestCase):
         self.assertIn(str(target.resolve()), prompt)
         self.assertNotRegex(prompt, r"\{\{\s*(target_path|output_dir)\s*\}\}")
         raw = (cell / "backend.raw.log").read_text(encoding="utf-8")
+        args_line = next(
+            line for line in raw.splitlines() if line.startswith("FAKE_ARGS=")
+        )
+        invoked = json.loads(args_line.removeprefix("FAKE_ARGS="))
+        self.assertIn("features.plugins=false", invoked)
         self.assertIn(f"FAKE_CD={cell}", raw)
         self.assertIn(str(target.resolve()), raw.split("FAKE_ADDS=", 1)[1])
 

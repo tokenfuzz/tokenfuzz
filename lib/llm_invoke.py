@@ -407,7 +407,7 @@ def _capture_agy_cli_log_diag(raw_log: str | os.PathLike[str]) -> None:
 
 
 def prepare_gemini_effort_settings(model: str = "") -> "str | None":
-    """Write a Gemini CLI system-settings override for configured thinking."""
+    """Write Gemini CLI system settings for isolation and configured thinking."""
     if not use_gemini_cli():
         return None
     resolved_model = resolve_model_name("gemini", model).strip()
@@ -422,6 +422,13 @@ def prepare_gemini_effort_settings(model: str = "") -> "str | None":
     atexit.register(shutil.rmtree, root, ignore_errors=True)
     path = root / "settings.json"
     payload = {
+        # Gemini CLI has no safe-mode flag. System settings take precedence
+        # over user/workspace settings, so disable skills and extensions that
+        # can inject a duplicate workflow.
+        "skills": {"enabled": False},
+        "admin": {
+            "extensions": {"enabled": False},
+        },
         "modelConfigs": {
             "customOverrides": [{
                 "match": {"model": resolved_model},
@@ -463,6 +470,16 @@ _CODEX_MEMORY_OFF_FLAGS = [
     "-c", "features.memories=false",
     "-c", "memories.use_memories=false",
     "-c", "memories.generate_memories=false",
+]
+
+# Codex has no single Claude-style --safe-mode flag. Disabling the plugins
+# feature also removes plugin-contributed skills, hooks, and MCPs — preventing
+# a security plugin from wrapping TokenFuzz's own workflow. Use the `-c` form,
+# not `--disable plugins`: both mean features.plugins=false, but an unknown `-c`
+# key is ignored on any Codex version whereas `--disable` hard-errors on a build
+# that lacks the feature (same reasoning as _CODEX_MEMORY_OFF_FLAGS).
+_CODEX_PLUGIN_OFF_FLAGS = [
+    "-c", "features.plugins=false",
 ]
 
 
@@ -639,6 +656,7 @@ def agent_flags(
         flags = [
             "--json",
             "--ephemeral",
+            *_CODEX_PLUGIN_OFF_FLAGS,
             "--skip-git-repo-check",
             "--sandbox", "danger-full-access",
             "--dangerously-bypass-approvals-and-sandbox",
@@ -663,7 +681,7 @@ def agent_flags(
         # --dangerously-skip-permissions auto-approves tool use and filesystem
         # access is scoped by the launch cwd, so add_dirs is intentionally
         # unused here.
-        flags = ["run", "--dangerously-skip-permissions"]
+        flags = ["run", "--pure", "--dangerously-skip-permissions"]
         if resolved_model:
             flags += ["--model", opencode_model_ref(resolved_model)]
         flags += ["--format", "json"]
@@ -676,7 +694,10 @@ def agent_flags(
             # --skip-trust avoids a workspace-trust prompt in fresh
             # worktrees/containers. Gemini CLI accepts launch-time model
             # selection and --include-directories for extra workspaces.
-            flags = ["--approval-mode=yolo", "--skip-trust", "--output-format", "stream-json"]
+            flags = [
+                "--approval-mode=yolo", "--skip-trust",
+                "--output-format", "stream-json",
+            ]
             if resolved_model:
                 flags += ["--model", resolved_model]
             # Deny the save_memory tool at the admin policy tier as
@@ -1046,7 +1067,10 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         return flags
 
     if backend == "codex":
-        flags = ["--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only"]
+        flags = [
+            "--ephemeral", *_CODEX_PLUGIN_OFF_FLAGS,
+            "--skip-git-repo-check", "--sandbox", "read-only",
+        ]
         if resolved_model:
             flags += ["--model", resolved_model]
         if effort:
@@ -1056,7 +1080,7 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         return flags
 
     if backend == "oss":
-        flags = ["run"]
+        flags = ["run", "--pure"]
         if resolved_model:
             flags += ["--model", opencode_model_ref(resolved_model)]
         flags += ["--format", "json"]

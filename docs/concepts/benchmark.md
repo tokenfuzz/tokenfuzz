@@ -30,6 +30,15 @@ Each benchmark run is a small controlled experiment:
 | `model-direct` | `<model>-direct` when the model is known, otherwise `<backend>-direct` | One agent with a bare vulnerability-hunting prompt. This is the control. |
 | `harness` | `tokenfuzz` | `bin/audit` as shipped: recon, ranked work cards, strategy rotation, `bin/probe`, triage, validation, clustering, severity scoring, and reproducer bundling. |
 
+Backend customizations are disabled where the CLI provides an enforceable
+per-run control. Claude runs in safe mode; Codex disables plugins; OpenCode
+runs in pure mode; and Gemini CLI receives system
+settings that disable skills and extensions. This keeps an operator-installed
+security workflow from duplicating TokenFuzz's own
+orchestration or contaminating the model-direct control. Antigravity and Grok
+Build currently expose no equivalent one-shot isolation control, so disable
+their installed plugins and skills before using them for benchmark claims.
+
 The `--conditions` flag always uses the stable tokens
 `model-direct` and `harness`. The rendered labels are reader-facing
 names; they can include the selected model so old and new model runs
