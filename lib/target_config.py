@@ -178,6 +178,16 @@ ATTACKER_CONTROLS_VALID = (
 # diagnostic signal. Anything outside this set is logged on stderr and dropped.
 SANITIZERS_VALID = ("asan", "ubsan", "msan", "tsan", "race")
 
+# Non-native build systems whose default [runner] already drives a
+# sanitizer-instrumented run (e.g. `swift run -sanitize=...`), so they are
+# runnable sanitizer targets rather than findings-only ones. Inclusion
+# criterion: the language's canonical [runner] in lib/languages.py selects a
+# sanitizer through a {SANITIZER}/{SWIFT_SANITIZER} token. This is the single
+# source of truth for that classification, shared by the findings-only default
+# below and by benchmark_model_direct_render's crash-capability framing; a
+# sync test guards the two against drift.
+SANITIZER_RUNNER_BUILD_SYSTEMS = frozenset({"swift"})
+
 # .session-env keys trusted by the runtime.
 SESSION_ENV_ALLOW = (
     "RESULTS_DIR", "TARGET_ROOT", "TARGET_SLUG",
@@ -1718,15 +1728,11 @@ def seed_toml(
         "cmake", "meson", "autotools", "mach", "",
         "unknown",
     }
-    # Non-native ecosystems whose default [runner] already drives sanitizer
-    # builds (e.g. `swift run -sanitize={SWIFT_SANITIZER}`), so they are
-    # runnable sanitizer targets rather than findings-only ones.
-    _sanitizer_runner_build_systems = {"swift"}
     _findings_only_default = (
         not is_browser
         and not asan_bin
         and build_system not in _native_build_systems
-        and build_system not in _sanitizer_runner_build_systems
+        and build_system not in SANITIZER_RUNNER_BUILD_SYSTEMS
     )
 
     if _findings_only_default:

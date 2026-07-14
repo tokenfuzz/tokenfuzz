@@ -123,39 +123,46 @@ def _select_sanitizer(cfg) -> tuple:
     return None, None, None
 
 
-def _build_crash_objective(present: bool, build_dir: Path,
-                           output_dir: str, label: str,
-                           race_runner_present: bool = False) -> str:
+def _build_crash_objective(present: bool, build_dir: Path, label: str,
+                           race_runner_present: bool = False,
+                           sanitizer_runner_present: bool = False) -> str:
     if race_runner_present:
         return (
-            "A race-detector runner is configured through `[runner]` (race). "
-            "Your **primary**\n"
-            "deliverable is at least one CRASH on disk — a real\n"
-            "`WARNING: DATA RACE` trace from a real input or driver.\n"
-            "File every source-proven FINDING as you go — findings stay\n"
-            "first-class. But do not finish the session\n"
-            f"with an empty `{output_dir}/crashes/` if a candidate looks\n"
-            "reachable through the configured runner.\n"
+            "A race-detector runner is configured through `[runner]` (race).\n"
+            "File every source-proven FINDING as you go. When source review\n"
+            "identifies a plausible concurrency issue, prioritize running it\n"
+            "through the configured runner; file a CRASH only when a real\n"
+            "`WARNING: DATA RACE` trace reproduces. Do not divert unrelated\n"
+            "findings into crash work merely to fill the crashes directory.\n"
+        )
+    if sanitizer_runner_present:
+        return (
+            f"A {label} sanitizer runner is configured through `[runner]`.\n"
+            "File every source-proven FINDING as you go. When source review\n"
+            "identifies a plausible sanitizer-class memory-safety issue,\n"
+            "prioritize running it through the configured runner; file a\n"
+            "CRASH only when a real sanitizer trace reproduces. Do not divert\n"
+            "unrelated findings into crash work merely to fill the crashes\n"
+            "directory.\n"
         )
     if present:
         return (
-            f"A sanitizer build exists at `{build_dir}/` ({label}). Your "
-            "**primary**\n"
-            "deliverable is at least one CRASH on disk — a real sanitizer\n"
-            "trace from a real input or driver. File every source-proven\n"
-            "FINDING as you go — findings stay first-class. But do not\n"
-            "finish the session with an empty\n"
-            f"`{output_dir}/crashes/` if a candidate looks reachable from a\n"
-            "sanitizer-instrumented binary.\n"
+            f"A sanitizer build exists at `{build_dir}/` ({label}). File every\n"
+            "source-proven FINDING as you go. When source review identifies a\n"
+            "plausible sanitizer-class memory-safety issue, prioritize driving\n"
+            "it through the instrumented binary; file a CRASH only when a real\n"
+            "sanitizer trace reproduces. Do not divert unrelated findings into\n"
+            "crash work merely to fill the crashes directory.\n"
         )
     # Managed / interpreted targets and any project without a usable
     # sanitizer build. Keep the word "sanitizer-instrumented" so callers
     # and tests can rely on its presence to detect the no-build framing.
     return (
         "No native sanitizer-instrumented build is present for this\n"
-        "target. File FINDINGs as your primary deliverable; CRASHes are\n"
-        "only expected when a sanitizer-instrumented binary or library\n"
-        "exists.\n"
+        "target. File FINDINGs as your primary deliverable. Use the configured\n"
+        "runner, when available, to reproduce and deepen the strongest\n"
+        "candidates, and save that evidence with the FINDING. Do not create a\n"
+        "CRASH unless execution produces a real sanitizer-class diagnostic.\n"
     )
 
 
@@ -271,31 +278,36 @@ def _runner_bin_for_prompt(cfg) -> str:
     return cfg.resolve_path(raw)
 
 
-def _build_race_runner_invocation(cfg, output_dir: str) -> str:
-    if not cfg.runner_bin:
-        return ""
-    crash_dir = f"{output_dir}/crashes/CRASH-N"
-    testcase = f"{crash_dir}/testcase.go"
+def _runner_command_for_prompt(cfg, san: str, testcase: str,
+                               output_dir: str) -> str:
     runner = _runner_bin_for_prompt(cfg)
     args = [
-        _expand_runner_token(a, cfg, "race", testcase, output_dir)
+        _expand_runner_token(a, cfg, san, testcase, output_dir)
         for a in cfg.runner_args
         if a
     ]
     if not any("{TESTCASE}" in a for a in cfg.runner_args):
         args.append(testcase)
     env = [
-        _expand_runner_token(e, cfg, "race", "", output_dir)
+        _expand_runner_token(e, cfg, san, "", output_dir)
         for e in cfg.runner_env
         if e
     ]
     env_prefix = ""
     if env:
         env_prefix = "env " + " ".join(shlex.quote(e) for e in env) + " "
-    cmd = " ".join(
+    return " ".join(
         [env_prefix + shlex.quote(runner)] +
         [shlex.quote(a) for a in args]
     )
+
+
+def _build_race_runner_invocation(cfg, output_dir: str) -> str:
+    if not cfg.runner_bin:
+        return ""
+    crash_dir = f"{output_dir}/crashes/CRASH-N"
+    testcase = f"{crash_dir}/testcase.go"
+    cmd = _runner_command_for_prompt(cfg, "race", testcase, output_dir)
     return (
         "### Driving the race runner directly\n"
         "\nThe target is configured for the Go race detector through "
@@ -304,6 +316,25 @@ def _build_race_runner_invocation(cfg, output_dir: str) -> str:
         "output:\n\n"
         f"    {cmd} > {crash_dir}/stdout.txt 2> {crash_dir}/sanitizer.txt\n\n"
         "A reproducing Go race detector report belongs under "
+        f"`{output_dir}/crashes/`, not findings/.\n"
+    )
+
+
+def _build_sanitizer_runner_invocation(cfg, san: str, output_dir: str,
+                                       profile: dict) -> str:
+    """Render a runner command whose explicit tokens select a sanitizer."""
+    if not cfg.runner_bin:
+        return ""
+    crash_dir = f"{output_dir}/crashes/CRASH-N"
+    testcase = f"{crash_dir}/testcase"
+    cmd = _runner_command_for_prompt(cfg, san, testcase, output_dir)
+    return (
+        f"### Driving the {profile['label']} runner directly\n"
+        f"\nThe target selects {profile['long']} explicitly through "
+        "`[runner]`. Run a crafted testcase through that command and save a "
+        "real sanitizer diagnostic:\n\n"
+        f"    {cmd} > {crash_dir}/stdout.txt 2> {crash_dir}/sanitizer.txt\n\n"
+        "A reproducing sanitizer-class memory-safety diagnostic belongs under "
         f"`{output_dir}/crashes/`, not findings/.\n"
     )
 
@@ -341,10 +372,13 @@ def _resolve_toml_path(target: Path, script_root: str) -> Path | None:
 def render(target_path: str, output_dir: str, script_root: str) -> str:
     sys.path.insert(0, os.path.join(script_root, "lib"))
     try:
-        from target_config import Config, load_toml_into  # type: ignore
+        from target_config import (  # type: ignore
+            Config, load_toml_into, SANITIZER_RUNNER_BUILD_SYSTEMS,
+        )
     except Exception:
         Config = None  # type: ignore
         load_toml_into = None  # type: ignore
+        SANITIZER_RUNNER_BUILD_SYSTEMS = frozenset()  # type: ignore
     from audit_scope import non_audit_dirs_for_prompt  # type: ignore
     from prompt_render import render_template  # type: ignore
 
@@ -357,6 +391,7 @@ def render(target_path: str, output_dir: str, script_root: str) -> str:
     include_dirs: list[str] = []
     link_libs: list[str] = []
     race_runner_hint = ""
+    sanitizer_runner_hint = ""
     # build_dir is for display only; resolve_path applies AUDIT_BUILD_SUFFIX
     # so the message names the build tree that actually exists in-container.
     build_dir = target / "build-asan"
@@ -379,12 +414,23 @@ def render(target_path: str, output_dir: str, script_root: str) -> str:
             elif "race" in cfg.sanitizers_enabled:
                 race_runner_hint = _build_race_runner_invocation(
                     cfg, output_dir)
+            elif cfg.runner_bin and \
+                    cfg.build_system in SANITIZER_RUNNER_BUILD_SYSTEMS:
+                san = next(
+                    (name for name in cfg.sanitizers_enabled
+                     if name in _SAN_PROFILE),
+                    None,
+                )
+                if san is not None:
+                    sanitizer_runner_hint = _build_sanitizer_runner_invocation(
+                        cfg, san, output_dir, _SAN_PROFILE[san])
         except Exception:
             san = None
             bin_path = lib_path = None
             include_dirs = []
             link_libs = []
             race_runner_hint = ""
+            sanitizer_runner_hint = ""
 
     profile = _SAN_PROFILE.get(san or "", _SAN_PROFILE["asan"])
     options = _san_options(script_root, san) if san else ""
@@ -405,10 +451,12 @@ def render(target_path: str, output_dir: str, script_root: str) -> str:
         "target_path": target_path,
         "output_dir": output_dir,
         "crash_objective": _build_crash_objective(
-            present, build_dir, output_dir, profile["label"],
-            bool(race_runner_hint)),
-        "asan_invocation_hint": race_runner_hint or _build_invocation(
-            san, bin_path, output_dir, options, profile),
+            present, build_dir, profile["label"],
+            bool(race_runner_hint), bool(sanitizer_runner_hint)),
+        "asan_invocation_hint": (
+            race_runner_hint or sanitizer_runner_hint or _build_invocation(
+                san, bin_path, output_dir, options, profile)
+        ),
         "harness_build_recipe": _build_recipe(
             san, lib_path, include_dirs, link_libs, output_dir,
             options, profile),

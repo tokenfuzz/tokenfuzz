@@ -54,13 +54,14 @@ class BenchmarkReportTests(unittest.TestCase):
         for required in (
             "CRASH-<n>", "FIND-<n>", "sanitizer-instrumented", "Writing scope",
             "absolute paths only", "Do not delegate work to subagents", "Primary objective",
-            "Mode switch after ~5 FINDs",
+            "Use the configured\nrunner", "save that evidence with the FINDING",
         ):
             self.assertIn(required, body)
         for forbidden in (
             "unsupported claim", "falsification attempt", "symlink facade",
             "writable facade of", "deserialization", "info-leak",
             "protocol-state", "denial-of-service",
+            "Mode switch after ~5 FINDs", "roughly five plausible candidates",
         ):
             self.assertNotIn(forbidden, body)
         self.assertLess(body.index("For every FINDING:"), body.index("For every CRASH:"))
@@ -99,11 +100,93 @@ class BenchmarkReportTests(unittest.TestCase):
         library.touch()
         native_body = benchmark_model_direct_render.render(str(native), "/abs/out", str(ROOT))
         for required in (
-            "primary", "build-asan/src/sample-cli", "Driving the asan binary directly",
+            "build-asan/src/sample-cli", "Driving the asan binary directly",
             "Building a one-off harness driver", "build-asan/lib/libsample.a",
-            "fsanitize=address",
+            "fsanitize=address", "When source review identifies a\nplausible sanitizer-class",
+            "file a CRASH only when a real\nsanitizer trace reproduces",
         ):
             self.assertIn(required, native_body)
+        self.assertNotIn("merely to fill the crashes directory", body)
+        self.assertIn("merely to fill the crashes directory", native_body)
+
+        # A sanitizer-runner build system (swift) is advertised as
+        # crash-capable. Detection keys on build_system, the same structured
+        # signal target_config uses for the findings-only default — not on
+        # sniffing the runner args for a sanitizer token.
+        runner_native = self.root / "runner-native"
+        runner_native.mkdir()
+        runner_toml = (
+            'target = "sample"\n'
+            'build_system = "swift"\n'
+            '[sanitizer]\nenabled = ["asan"]\n'
+            '[runner]\nbin = "swift"\n'
+            'args = ["run", "-sanitize={SWIFT_SANITIZER}", "{TESTCASE}"]\n'
+        )
+        (runner_native / "target.toml").write_text(runner_toml, encoding="utf-8")
+        runner_body = benchmark_model_direct_render.render(
+            str(runner_native), "/abs/out", str(ROOT)
+        )
+        self.assertIn("asan sanitizer runner is configured", runner_body)
+        self.assertIn("Driving the asan runner directly", runner_body)
+        self.assertIn("-sanitize=address", runner_body)
+        self.assertNotIn("No native sanitizer-instrumented build", runner_body)
+
+        # Same runner+token, but a build_system the classification does not
+        # recognize falls through to findings-only framing — the token alone
+        # must not trigger crash-capability framing.
+        unknown_runner = self.root / "unknown-runner"
+        unknown_runner.mkdir()
+        (unknown_runner / "target.toml").write_text(
+            runner_toml.replace('build_system = "swift"', 'build_system = "make"'),
+            encoding="utf-8",
+        )
+        unknown_body = benchmark_model_direct_render.render(
+            str(unknown_runner), "/abs/out", str(ROOT)
+        )
+        self.assertIn("No native sanitizer-instrumented build", unknown_body)
+        self.assertNotIn("sanitizer runner is configured", unknown_body)
+
+        race = self.root / "race"
+        race.mkdir()
+        (race / "target.toml").write_text(
+            'target = "sample"\n'
+            '[sanitizer]\nenabled = ["race"]\n'
+            '[runner]\nbin = "go"\nargs = ["run", "-race", "{TESTCASE}"]\n',
+            encoding="utf-8",
+        )
+        race_body = benchmark_model_direct_render.render(
+            str(race), "/abs/out", str(ROOT)
+        )
+        self.assertIn("race-detector runner is configured", race_body)
+        self.assertIn("Driving the race runner directly", race_body)
+        self.assertIn("WARNING: DATA RACE", race_body)
+        self.assertNotIn("No native sanitizer-instrumented build", race_body)
+
+    def test_sanitizer_runner_build_systems_match_language_runners(self) -> None:
+        # SANITIZER_RUNNER_BUILD_SYSTEMS is the single source of truth for
+        # "this ecosystem's default runner drives a sanitizer." Guard it
+        # against drift from lib/languages.py: every listed build system must
+        # map to a language whose canonical runner selects a sanitizer via a
+        # {SANITIZER}/{SWIFT_SANITIZER} token. Otherwise the model-direct
+        # prompt would advertise crash capability the runner cannot deliver.
+        import languages
+
+        tokens = ("{SANITIZER}", "{SWIFT_SANITIZER}")
+        for build_system in target_config.SANITIZER_RUNNER_BUILD_SYSTEMS:
+            matches = [
+                lang for lang in languages.LANGUAGES
+                if build_system in lang.build_systems
+            ]
+            self.assertTrue(
+                matches,
+                f"{build_system!r} has no language in lib/languages.py",
+            )
+            for lang in matches:
+                blob = " ".join((*lang.runner_args, *lang.runner_env))
+                self.assertTrue(
+                    any(tok in blob for tok in tokens),
+                    f"{lang.name} runner drives no sanitizer token",
+                )
 
     def test_default_model_and_end_to_end_cell_metadata(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
