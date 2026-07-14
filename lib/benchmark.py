@@ -2399,6 +2399,24 @@ def _choose_find_quality(finding_dir: Path) -> dict:
     ) else {}
 
 
+def _rejection_artifact_reason(finding_dir: Path) -> str:
+    """Read the final disposition recorded when triage rejected a finding."""
+    rejection = finding_dir / "REJECTION.md"
+    if not rejection.is_file():
+        return ""
+    try:
+        lines = rejection.read_text(
+            encoding="utf-8", errors="replace",
+        ).splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        match = re.fullmatch(r"\s*(?:#\s*)?Reason:\s*(.+?)\s*", line, re.I)
+        if match:
+            return match.group(1)
+    return ""
+
+
 def _md_cell(value: object) -> str:
     text = str(value if value is not None else "").replace("\n", " ")
     return text.replace("|", "\\|").strip()
@@ -2551,6 +2569,9 @@ def _rejected_finding_rows(rejected_dir: Path) -> list[dict]:
         reason = (
             vote.get("rationale")
             or vote.get("reason")
+            # REJECTION.md records the final disposition and remains stable
+            # when pool-only link rewrites invalidate the copied quality cache.
+            or _rejection_artifact_reason(finding_dir)
             or quality.get("reason")
             or vote.get("caveats")
             or ""

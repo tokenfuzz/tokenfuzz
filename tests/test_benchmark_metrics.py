@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 import benchmark
 import llm_invoke
 import llm_usage
+import report_identity
 
 
 ASAN = "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602\n"
@@ -656,6 +657,73 @@ class BenchmarkMetricsTests(unittest.TestCase):
             self.assertEqual(len(list((condition_pool / "crashes").glob("CRASH-*"))), 1)
             self.assertEqual(len(list((condition_pool / "findings").glob("FIND-*"))), 1)
             self.assertTrue((condition_pool / "findings-rejected" / "REJECTED-FINDINGS.md").is_file())
+
+    def test_pool_rejected_finding_keeps_reason_after_report_link_rewrite(self) -> None:
+        bench = self.root / "rejection-reason-bench"
+        self.write_json(bench / "run.json", {
+            "runid": "rejection-reason", "target": "sample",
+            "backend": "codex", "conditions": ["harness"], "replicates": 1,
+        })
+        results = self.root / "rejection-reason-results"
+        rejected = results / "findings-rejected" / "FIND-REJECTED"
+        recon = results / "recon" / "RECON-deadbeef"
+        rejected.mkdir(parents=True)
+        recon.mkdir(parents=True)
+        report = rejected / "report.md"
+        report.write_text(
+            "# Rejected finding\n\nRecon ID: RECON-deadbeef\n",
+            encoding="utf-8",
+        )
+        (recon / "REPORT.md").write_text("# Recon evidence\n", encoding="utf-8")
+        reason = "caller control does not reach the reported operation"
+        self.write_json(rejected / ".llm-find-quality.json", {
+            "accept": False,
+            "reason": reason,
+            "report_sha1": report_identity.content_sha1(report),
+        })
+        (rejected / "REJECTION.md").write_text(
+            f"# Rejected artifact\n\nReason: {reason}\n\n"
+            "The original evidence is retained for audit.\n",
+            encoding="utf-8",
+        )
+        cell = self.make_cell(
+            bench, "harness-r1", "harness", 1, 0, rejected_findings=1,
+        )
+        data = json.loads((cell / "cell.json").read_text(encoding="utf-8"))
+        data["results_dir"] = str(results)
+        self.write_json(cell / "cell.json", data)
+        self.write_json(cell / "metrics.json", benchmark.harvest(results))
+
+        benchmark.build_pool(bench)
+
+        pooled = bench / "pool" / "findings-rejected" / "FIND-REJECTED-0001"
+        self.assertIn("[RECON-deadbeef]", (pooled / "report.md").read_text())
+        self.assertFalse(report_identity.quality_cache_matches_report(
+            pooled, json.loads((pooled / ".llm-find-quality.json").read_text()),
+        ))
+        index = (pooled.parent / "REJECTED-FINDINGS.md").read_text()
+        self.assertIn(reason, index)
+
+    def test_rejection_artifact_is_the_final_disposition(self) -> None:
+        rejected_root = self.root / "final-disposition"
+        finding = rejected_root / "FIND-TRIGGER-REJECTED"
+        finding.mkdir(parents=True)
+        report = finding / "report.md"
+        report.write_text("# Finding\n", encoding="utf-8")
+        self.write_json(finding / ".llm-find-quality.json", {
+            "accept": True,
+            "reason": "quality gate accepted the report",
+            "report_sha1": report_identity.content_sha1(report),
+        })
+        final_reason = "triggering state is not attacker-reachable"
+        (finding / "REJECTION.md").write_text(
+            f"# Rejected artifact\n\nReason: {final_reason}\n",
+            encoding="utf-8",
+        )
+
+        rows = benchmark._rejected_finding_rows(rejected_root)
+
+        self.assertEqual(rows[0]["reason"], final_reason)
 
     def test_crosstab_explains_finalized_populations_without_pending_columns(self) -> None:
         run = self.root / "crosstab" / "codex" / "20260101-000000"
