@@ -1,5 +1,76 @@
 # Changelog
 
+## 1.1.1 - 2026-07-13
+
+- **Recon leads stop inflating confirmed findings.** Recon pre-files a candidate
+  finding per hypothesis and the prose quality gate accepted the report, so
+  un-investigated recon guesses were counted as confirmed. Harvest now confirms a
+  recon finding only when an agent actually investigated it — a work card reached
+  find/crash in authoritative state, the directory holds non-empty agent
+  artifacts, or a human pinned it — and surfaces the rest as leads, keyed by
+  directory so lost state cannot silently re-confirm them. Pooled-run rejection
+  reasons also survive report-identity rewrites, keeping the rejection index
+  complete without weakening cache validation.
+
+- **Crash gating rejects a caller's misuse of its own buffer.** Discovery and
+  trigger prompts now reject a caller that misdescribes its own allocation —
+  reading or writing past its buffer, or handing non-terminated storage to a
+  documented C-string API — while still promoting genuine library over-reads,
+  truthful-capacity overruns, and attacker-derived-but-truthful sizes. Rejection
+  turns on truthfulness, not size provenance, closing a false-accept class
+  without loosening recall.
+
+- **Language sample targets gain real sanitizer surfaces.** Rust (nightly ASan
+  build-std), Go (`-race` with a genuine concurrent merge race), and a new
+  native-Python CPython C-extension ASan harness now build through a committed
+  `.audit/build.sh` that `setup-target` materializes for language targets. The
+  benchmark scorer scopes Rust frame demangling to Rust manifests so a C++ frame
+  is never reduced to a colliding leaf, maps data-race reports to the data-race
+  primitive, and excludes findings-only bugs from the crash-recall denominator.
+
+- **Model-direct benchmark cells reflect each target's real capability.** The
+  arbitrary five-finding mode switch is gone: findings-only controls deepen
+  candidates through their configured runner, while sanitizer and race targets
+  pursue crash artifacts only for source-backed candidates that reproduce a real
+  diagnostic, using one shared classification of sanitizer-capable runner build
+  systems instead of sniffing runner arguments. Comparison cells no longer
+  inherit operator-installed backend workflows that duplicate orchestration —
+  Codex plugins, OpenCode extras, and Gemini skills and extensions are disabled
+  per run so the baseline measures the model, not the operator's local setup.
+
+- **Unusable language runners fail fast instead of burning budget.** A configured
+  `[runner].bin` is validated before model preflight and before benchmark cells,
+  so launcher stubs and missing interpreters cannot silently waste an audit. A
+  findings-only target with no runner still audits in code-review mode, and a
+  per-target startup failure in a multi-target benchmark is isolated instead of
+  crashing the whole grid with an uncaught traceback.
+
+- **Finding validation is cached, resumable, and parallel.** Partial quality
+  votes persist and independent review batches run with bounded concurrency, so
+  an interrupted or slow provider never restarts completed work; peak fan-out is
+  unchanged and a skip, timeout, or malformed response can never invent an
+  acceptance. Verdicts bind to a shared semantic report identity checked by the
+  gate and every downstream consumer, mechanical annotations stay cache-neutral,
+  and substantive prose or reachability changes fail open to a fresh review. A
+  pre-existing harness build-lock race — the probe staleness check crashing when
+  a holder released the lock mid-check — is fixed alongside.
+
+- **Provider cost accounting is complete and correct.** Explicit vendor rate
+  tiers with dated snapshot matching replace overlapping model-name guesses across
+  OpenAI, Claude, Gemini, and xAI, with corrected long-context and cache-write
+  billing; estimated or corrupt usage rows fail open without double-counting
+  output. New gpt-5.6 and Fable 5 rows restore the Codex dollar column — its
+  default had moved to a model with no pricing row — and a test pins every default
+  model to a rate row so a future model bump fails loudly instead of blanking the
+  cost.
+
+- **Live dashboard and test-suite cleanup.** The shared benchmark dashboard now
+  regenerates when a cell starts, so a just-launched long-running cell is no
+  longer absent from it for its whole run. The legacy shell harnesses around
+  Python code are migrated to direct, portable Python tests — with restored
+  benchmark-lifecycle coverage and correct unittest result counting — while shell
+  coverage is retained for the runner and shell shim.
+
 ## 1.1.0 - 2026-07-12
 
 - **Python-native orchestration replaces the legacy shell runtime.** Audit,
