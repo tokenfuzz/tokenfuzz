@@ -10,6 +10,13 @@ from pathlib import Path
 FIND_QUALITY_DECISION_VERSION = "v13-python"
 REPORT_NAMES = ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md")
 
+_TABLE_FIELD_RE = re.compile(
+    r"^\|\s*(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*\|\s*(?P<val>.*?)\s*\|\s*$"
+)
+_BARE_FIELD_RE = re.compile(
+    r"^(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*:\s*(?P<val>.+?)\s*$"
+)
+
 # Single source of truth for the harness-owned report vocabulary. Writers
 # (triage's contract-concern setter, the report enricher) and this stripper
 # share these so a renamed heading or boundary cannot silently desync them and
@@ -90,6 +97,29 @@ def content_sha1(path: Path) -> str | None:
         return semantic_text_sha1(path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return None
+
+
+def extract_fields(report_text: str, names: set[str]) -> dict[str, str]:
+    """Return the first structured table/bare-label value for each name.
+
+    Reports are rendered in both forms over their lifetime. Keeping this parser
+    here prevents triage, severity, and read-only reporting from assigning
+    different meanings to the same artifact. Callers supply the accepted names
+    so narrative ``word: value`` prose cannot become structured state.
+    """
+    wanted = {str(name).strip().lower() for name in names if str(name).strip()}
+    out: dict[str, str] = {}
+    for raw in report_text.splitlines():
+        match = _TABLE_FIELD_RE.match(raw) or _BARE_FIELD_RE.match(raw)
+        if not match:
+            continue
+        key = match.group("key").strip().lower()
+        if key not in wanted or key in out:
+            continue
+        value = match.group("val").strip()
+        if value and value not in {"Value", "—", "-"}:
+            out[key] = value
+    return out
 
 
 def find_report(directory: Path) -> Path | None:

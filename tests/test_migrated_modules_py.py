@@ -473,12 +473,21 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     outcome, crash_id = crash_bundle.materialize(
         bundle_results, "2", bundle_case, bundle_san, "asan", "generic",
         args=("--decode",), target="src/decode.c:parse:10", hypothesis="H-1", strategy="S7",
+        target_slug="sampleproj", target_revision="audited-revision",
     )
     equal("FILED", outcome, "crash bundle materializes a first confirmed diagnostic")
     bundle_dir = bundle_results / "crashes" / crash_id
     check((bundle_dir / "report.md").is_file() and (bundle_dir / "repro.cmd").is_file(), "crash bundle includes report and replay arguments")
+    bundle_context = json.loads((bundle_dir / ".probe-context.json").read_text())
+    check(
+        bundle_context.get("version") == 2
+        and bundle_context.get("target_revision") == "audited-revision"
+        and bundle_context.get("issue_id", "").endswith(":hypothesis:H-1"),
+        "probe context binds issue identity to the audited target revision",
+    )
     duplicate, duplicate_id = crash_bundle.materialize(
-        bundle_results, "2", bundle_case, bundle_san, "asan", "generic", args=("--decode",)
+        bundle_results, "2", bundle_case, bundle_san, "asan", "generic", args=("--decode",),
+        target_slug="sampleproj", target_revision="audited-revision", hypothesis="H-1",
     )
     equal(("DUP", crash_id), (duplicate, duplicate_id), "crash bundle identity prevents duplicate filing")
 

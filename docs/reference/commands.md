@@ -210,10 +210,17 @@ bin/severity --batch "$RESULTS"
 bin/cluster-crashes "$RESULTS"
 bin/cluster-findings "$RESULTS"
 bin/show-exclusions "$RESULTS"
+bin/disposition "$RESULTS"
 ```
 
 `bin/severity --batch` scores accepted crashes and findings together in one
 offline process.
+
+`bin/disposition` emits a read-only four-state (`security`, `robustness`,
+`invalid`, `needs-review`) shadow report over a results tree. Pass a benchmark
+run directory to inspect each condition pool. It does not move artifacts or
+change benchmark totals; use `--include-rejected` only when auditing preserved
+rejection evidence as well.
 
 See [Triage results](../guides/triage-results.md) before overriding or
 regenerating an artifact.

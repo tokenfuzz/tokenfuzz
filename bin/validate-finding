@@ -75,6 +75,7 @@ def stamp_trigger_vote(args, vote: dict, content_sha1: str) -> dict:
     stamped.update({
         "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
         "content_sha1": content_sha1,
+        "attacker_controls": triage_validate.trigger_attacker_controls(),
     })
     return stamped
 

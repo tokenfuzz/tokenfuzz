@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Render read-only security/robustness dispositions for stored results."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import result_disposition  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "path",
+        help="results directory or benchmark run directory containing pool/",
+    )
+    parser.add_argument(
+        "--include-rejected",
+        action="store_true",
+        help="also classify preserved crashes-rejected/findings-rejected artifacts",
+    )
+    args = parser.parse_args(argv)
+    path = Path(args.path)
+    roots = result_disposition.discover_results_roots(path)
+    if not roots:
+        parser.error(f"no crash/finding results found under {path}")
+    runs = [
+        result_disposition.inspect_results(root, include_rejected=args.include_rejected)
+        for root in roots
+    ]
+    artifact_counts: Counter[str] = Counter()
+    issue_counts: Counter[str] = Counter()
+    for run in runs:
+        artifact_counts.update(run["artifact_summary"])
+        issue_counts.update(run["issue_summary"])
+    print(json.dumps({
+        "schema_version": result_disposition.SCHEMA_VERSION,
+        "mode": "shadow",
+        "artifact_summary": dict(sorted(artifact_counts.items())),
+        "issue_summary": dict(sorted(issue_counts.items())),
+        "runs": runs,
+    }, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

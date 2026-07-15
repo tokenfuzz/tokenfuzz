@@ -369,6 +369,26 @@ class SeverityTests(unittest.TestCase):
         self.assert_metrics(allowed, AV="N", MVC="")
         self.assertEqual(allowed["level"], "High")
 
+        allowed_sequence = self.score(self.make_report(
+            "attempting free on address which was not malloc()-ed",
+            report_id="CRASH-ALLOWED-SEQUENCE",
+            controls="ordered public API calls",
+            trigger="call-sequence",
+            target_controls=("bytes", "call-sequence"),
+        ))
+        self.assert_metrics(allowed_sequence, AV="N", MVC="")
+        self.assertEqual(allowed_sequence["level"], "High")
+
+        constrained_sequence = self.score(self.make_report(
+            "attempting free on address which was not malloc()-ed",
+            report_id="CRASH-ALLOWED-SEQUENCE-CONSTRAINED",
+            controls="ordered public API calls",
+            trigger="call-sequence",
+            target_controls=("bytes", "call-sequence"),
+            extra_fields=(("Parameter control", "harness-only"),),
+        ))
+        self.assert_metrics(constrained_sequence, AV="L", AT="P")
+
         for report_id, trigger in (("CRASH-OUTSIDE", "both"), ("CRASH-ALIAS", "sequence")):
             with self.subTest(trigger=trigger):
                 outside = self.score(self.make_report(

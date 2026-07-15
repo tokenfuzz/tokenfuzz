@@ -34,6 +34,7 @@ HERE = Path(__file__).absolute().parent
 sys.path.insert(0, str(HERE.parent / "lib"))
 
 import cvss4  # noqa: E402
+import report_identity  # noqa: E402
 import stack_frames  # noqa: E402
 import target_config as tc  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
@@ -507,6 +508,14 @@ def _contract_oob_components(fields: dict) -> set[str]:
     return set()
 
 
+def _active_attacker_controls(fields: dict) -> set[str]:
+    return {
+        _normalise_attacker_control_token(token)
+        for token in str(fields.get("_attacker_controls_csv", "")).split(",")
+        if token.strip()
+    }
+
+
 def _local_caller_only(fields: dict) -> tuple[bool, str]:
     """Whether the primitive is reachable only by a trusted local caller.
 
@@ -627,7 +636,16 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
     # Past this point only `call-sequence` and the trusted local
     # parameter/action signals localise; the remote-capable trigger tokens have
     # already been vetoed above.
-    if _CALL_SEQUENCE_RE.search(controls) or _CALL_SEQUENCE_RE.search(trigger):
+    call_sequence_signal = (
+        _CALL_SEQUENCE_RE.search(controls) or _CALL_SEQUENCE_RE.search(trigger)
+    )
+    if (
+        call_sequence_signal
+        and "call-sequence" not in _active_attacker_controls(fields)
+    ):
+        # A call ordering localises only when the target does not expose it to
+        # the attacker. Keep evaluating independent trusted-parameter/action
+        # evidence when it is exposed; those constraints can still be local.
         return True, "trigger is a local API/call-sequence, not attacker bytes → AV:L/AT:P"
     if parameter and re.search(r"\b(trusted|application-supplied|harness-only)\b", parameter):
         return True, "trigger needs trusted/application-supplied parameters → AV:L/AT:P"
@@ -1625,12 +1643,6 @@ def _repro_facts(report_text: str, fields: dict, cluster_size: int,
 # ── Report-field extraction ──────────────────────────────────────────────
 
 
-_TABLE_FIELD_RE = re.compile(
-    r"^\|\s*(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*\|\s*(?P<val>.*?)\s*\|\s*$"
-)
-_BARE_FIELD_RE = re.compile(
-    r"^(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*:\s*(?P<val>.+?)\s*$"
-)
 _FIELD_KEYS = {
     "surface", "trigger source", "caller contract", "caller controls",
     "trusted caller actions", "parameter control", "reproduction rate",
@@ -1650,23 +1662,7 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
     ``report_dir`` is used only to load the active target threat model. Report
     fields are the sole scoring input; auxiliary field sidecars are not read.
     """
-    out: dict[str, str] = {}
-    for raw in report_text.splitlines():
-        m = _TABLE_FIELD_RE.match(raw)
-        if m:
-            key = m.group("key").strip().lower()
-            if key in _FIELD_KEYS and key not in out:
-                val = m.group("val").strip()
-                if val and val not in ("Value", "—", "-"):
-                    out[key] = val
-            continue
-        m = _BARE_FIELD_RE.match(raw)
-        if m:
-            key = m.group("key").strip().lower()
-            if key in _FIELD_KEYS and key not in out:
-                val = m.group("val").strip()
-                if val and val not in ("—", "-"):
-                    out[key] = val
+    out = report_identity.extract_fields(report_text, _FIELD_KEYS)
 
     fields = {
         "surface":           out.get("surface", ""),
@@ -1703,17 +1699,10 @@ def _detect_cluster_size(report_text: str) -> int:
       | Cluster | CL-abc123 (4 reports: id1, id2, ...) |
     Falls back to 1 (singleton) when nothing parseable is found.
     """
-    for raw in report_text.splitlines():
-        m = _TABLE_FIELD_RE.match(raw)
-        if not m:
-            continue
-        if m.group("key").strip().lower() != "cluster":
-            continue
-        val = m.group("val")
-        n = _CLUSTER_SIZE_RE.search(val)
-        if n:
-            return max(1, int(n.group(1)))
-        return 1
+    value = report_identity.extract_fields(report_text, {"cluster"}).get("cluster", "")
+    n = _CLUSTER_SIZE_RE.search(value)
+    if n:
+        return max(1, int(n.group(1)))
     return 1
 
 

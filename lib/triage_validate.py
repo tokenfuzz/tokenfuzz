@@ -12,7 +12,29 @@ from pathlib import Path
 
 # Bump whenever the trigger-provenance prompt changes classification semantics.
 # Old verdicts then fail open and receive a fresh source-reading review.
-TRIGGER_GATE_DECISION_VERSION = "trigger-v2-caller-buffer"
+TRIGGER_GATE_DECISION_VERSION = "trigger-v3-scoped-controls"
+# A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
+# fail-open keep decision. Legacy Rejects are never reused because they were not
+# bound to the target threat model and could create a false negative.
+TRIGGER_GATE_ADVISORY_VERSIONS = {"trigger-v2-caller-buffer"}
+
+
+def trigger_attacker_controls(value: str | None = None) -> list[str]:
+    """Canonical controls bound into trigger-review cache identity."""
+    raw = value if value is not None else os.environ.get(
+        "TARGET_ATTACKER_CONTROLS_CSV", "bytes",
+    )
+    aliases = {
+        "data": "bytes", "data-driven": "bytes", "input": "bytes",
+        "call-order": "call-sequence", "call_order": "call-sequence",
+        "call-seq": "call-sequence", "call_sequence": "call-sequence",
+        "sequence": "call-sequence",
+    }
+    controls = {
+        aliases.get(token.strip().lower(), token.strip().lower())
+        for token in str(raw).split(",") if token.strip()
+    }
+    return sorted(controls or {"bytes"})
 
 
 @dataclass(frozen=True)

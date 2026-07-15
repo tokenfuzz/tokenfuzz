@@ -241,11 +241,7 @@ def demote_to_finding(directory: Path, results_dir: Path, reason: str) -> Path:
 
 
 def _field(text: str, name: str) -> str:
-    table = re.search(rf"^\|\s*{re.escape(name)}\s*\|\s*([^|\n]+)", text, re.IGNORECASE | re.MULTILINE)
-    if table:
-        return table.group(1).strip()
-    label = re.search(rf"^{re.escape(name)}\s*:\s*(.+)$", text, re.IGNORECASE | re.MULTILINE)
-    return label.group(1).strip() if label else ""
+    return report_identity.extract_fields(text, {name}).get(name.lower(), "")
 
 
 _REACH_FIELD_LABELS = {
@@ -949,12 +945,24 @@ def _finding_trigger_rejected(
     usage_index: str | os.PathLike[str] | None = None,
     target_root_is_product: bool = False,
 ) -> bool:
+    """Reject only after two independent source-backed negative reviews.
+
+    A first negative is a useful review signal, not enough authority to hide a
+    finding. Positive or unavailable second opinions fail open, matching the
+    sanitizer-crash gate while spending the extra call only on demotions.
+    """
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     target_root = os.environ.get("TARGET_ROOT", "")
     if not backend or not target_root:
         return False
-    return _trigger_vote(
+    if _trigger_vote(
         report, finding_dir / ".trigger-gate.json", backend,
+        os.environ.get("MODEL", ""), Path(target_root), deadline, usage_index,
+        target_root_is_product,
+    ) != 1:
+        return False
+    return _trigger_vote(
+        report, finding_dir / ".trigger-gate-2.json", backend,
         os.environ.get("MODEL", ""), Path(target_root), deadline, usage_index,
         target_root_is_product,
     ) == 1
@@ -968,13 +976,23 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("decision_version") != triage_validate.TRIGGER_GATE_DECISION_VERSION:
-        return None
     content_sha1 = report_identity.content_sha1(report)
     if not content_sha1 or payload.get("content_sha1") != content_sha1:
         return None
     vote = payload.get("vote")
-    return vote if vote in {"Promote", "Reject", "Uncertain"} else None
+    if vote not in {"Promote", "Reject", "Uncertain"}:
+        return None
+    version = payload.get("decision_version")
+    if version == triage_validate.TRIGGER_GATE_DECISION_VERSION:
+        if payload.get("attacker_controls") != triage_validate.trigger_attacker_controls():
+            return None
+        return vote
+    if (
+        version in triage_validate.TRIGGER_GATE_ADVISORY_VERSIONS
+        and vote in {"Promote", "Uncertain"}
+    ):
+        return vote
+    return None
 
 
 _TRIGGER_BATCH_SIZE = 4

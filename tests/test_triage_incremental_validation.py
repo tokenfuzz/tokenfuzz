@@ -302,9 +302,13 @@ Generated score text.
         cache.write_text(json.dumps({
             "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
             "content_sha1": report_identity.content_sha1(self.report),
+            "attacker_controls": ["bytes"],
             "vote": "Promote",
         }))
-        with mock.patch.dict(os.environ, {"LLM_DECIDE_DISABLE": "1"}, clear=False):
+        with mock.patch.dict(os.environ, {
+            "LLM_DECIDE_DISABLE": "1",
+            "TARGET_ATTACKER_CONTROLS_CSV": "bytes",
+        }, clear=False):
             self.assertEqual(
                 triage._trigger_vote(
                     self.report, cache, "codex", "fixture", self.root,
@@ -334,6 +338,64 @@ Generated score text.
                 2,
             )
 
+    def test_trigger_cache_is_bound_to_attacker_controls(self) -> None:
+        cache = self.finding / ".trigger-gate.json"
+        cache.write_text(json.dumps({
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "content_sha1": report_identity.content_sha1(self.report),
+            "attacker_controls": ["bytes"],
+            "vote": "Promote",
+        }))
+        with mock.patch.dict(os.environ, {
+            "LLM_DECIDE_DISABLE": "1",
+            "TARGET_ATTACKER_CONTROLS_CSV": "bytes,call-sequence",
+        }, clear=False):
+            self.assertEqual(
+                triage._trigger_vote(
+                    self.report, cache, "codex", "fixture", self.root,
+                ),
+                2,
+            )
+
+    def test_legacy_trigger_cache_reuses_only_fail_open_votes(self) -> None:
+        cache = self.finding / ".trigger-gate.json"
+        base = {
+            "decision_version": "trigger-v2-caller-buffer",
+            "content_sha1": report_identity.content_sha1(self.report),
+        }
+        with mock.patch.dict(os.environ, {"LLM_DECIDE_DISABLE": "1"}, clear=False):
+            cache.write_text(json.dumps({**base, "vote": "Promote"}))
+            self.assertEqual(
+                triage._trigger_vote(
+                    self.report, cache, "codex", "fixture", self.root,
+                ),
+                0,
+            )
+            cache.write_text(json.dumps({**base, "vote": "Reject"}))
+            self.assertEqual(
+                triage._trigger_vote(
+                    self.report, cache, "codex", "fixture", self.root,
+                ),
+                2,
+            )
+
+    def test_finding_trigger_rejection_requires_two_negative_votes(self) -> None:
+        environment = {"BACKEND": "codex", "TARGET_ROOT": str(self.root)}
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            triage, "_trigger_vote", side_effect=[1, 0],
+        ) as votes:
+            self.assertFalse(triage._finding_trigger_rejected(
+                self.finding, self.report,
+            ))
+            self.assertEqual(votes.call_count, 2)
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            triage, "_trigger_vote", side_effect=[1, 1],
+        ) as votes:
+            self.assertTrue(triage._finding_trigger_rejected(
+                self.finding, self.report,
+            ))
+            self.assertEqual(votes.call_count, 2)
+
     def test_trigger_validator_stamps_cache_identity(self) -> None:
         validator = runpy.run_path(str(ROOT / "bin" / "validate-finding"))
         args = validator["parse_args"]([
@@ -342,15 +404,19 @@ Generated score text.
             "--backend", "codex",
             "--gate", "trigger",
         ])
-        stamped = validator["stamp_trigger_vote"](
-            args, {"vote": "Promote"}, "report-sha1",
-        )
+        with mock.patch.dict(
+            os.environ, {"TARGET_ATTACKER_CONTROLS_CSV": "bytes"}, clear=False,
+        ):
+            stamped = validator["stamp_trigger_vote"](
+                args, {"vote": "Promote"}, "report-sha1",
+            )
         self.assertEqual(
             stamped,
             {
                 "vote": "Promote",
                 "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
                 "content_sha1": "report-sha1",
+                "attacker_controls": ["bytes"],
             },
         )
         self.report.write_text(

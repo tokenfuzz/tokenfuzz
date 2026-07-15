@@ -349,6 +349,10 @@ class BenchmarkReportTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 bench = self.root / name
+                self.write_json(bench / "run.json", {
+                    "target": "neutral-pool-target",
+                    "target_sha": "audited-revision",
+                })
                 for index, values in enumerate(controls, 1):
                     self.make_config_cell(
                         bench, f"sample-{index}",
@@ -358,6 +362,7 @@ class BenchmarkReportTests(unittest.TestCase):
                 benchmark.build_pool(bench)
                 text = (bench / "pool" / "target.toml").read_text(encoding="utf-8")
                 self.assertIn('attacker_controls = ["bytes", "call-sequence"]', text)
+                self.assertIn('pinned_rev = "audited-revision"', text)
 
         base = self.root / "live"
         pool = base / "pool"
@@ -366,8 +371,13 @@ class BenchmarkReportTests(unittest.TestCase):
         live = base / "live.toml"
         stale.write_text('[threat_model]\nattacker_controls = ["bytes", "call-sequence"]\n')
         live.write_text('[threat_model]\nattacker_controls = ["bytes"]\n')
-        benchmark._copy_pool_target_toml(pool, [stale], live_target_toml=live)
-        self.assertIn('attacker_controls = ["bytes"]', (pool / "target.toml").read_text())
+        benchmark._copy_pool_target_toml(
+            pool, [stale], live_target_toml=live,
+            target_revision="audited-revision",
+        )
+        live_text = (pool / "target.toml").read_text()
+        self.assertIn('attacker_controls = ["bytes"]', live_text)
+        self.assertIn('pinned_rev    = "audited-revision"', live_text)
         (pool / "target.toml").unlink()
         benchmark._copy_pool_target_toml(pool, [stale], live_target_toml=None)
         self.assertIn("call-sequence", (pool / "target.toml").read_text())

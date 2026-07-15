@@ -45,8 +45,10 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import crash_bundle
 import llm_usage
 import report_identity
+import result_disposition
 
 try:  # ClusterFuzz-normalized stack frames — reused, never reinvented.
     import stack_frames as _sf
@@ -3344,7 +3346,8 @@ def _live_target_toml(bench_dir: Path) -> Path | None:
 
 
 def _copy_pool_target_toml(pool: Path, candidates: list[Path],
-                           live_target_toml: Path | None = None) -> None:
+                           live_target_toml: Path | None = None,
+                           target_revision: str = "") -> None:
     """Provide target threat-model context for pooled severity rescoring.
 
     The severity scorer walks upward from a pooled crash dir to find
@@ -3356,8 +3359,28 @@ def _copy_pool_target_toml(pool: Path, candidates: list[Path],
     when all cells agree on attacker_controls; mixed threat models stay unscored
     by target config rather than applying the wrong one.
     """
+    def write_config(source: Path) -> None:
+        text = source.read_text(encoding="utf-8")
+        revision = _hash_text(target_revision)
+        if revision:
+            replacement = f"pinned_rev    = {json.dumps(revision)}"
+            if re.search(r"(?m)^\s*pinned_rev\s*=.*$", text):
+                text = re.sub(
+                    r"(?m)^\s*pinned_rev\s*=.*$", replacement, text, count=1,
+                )
+            else:
+                section = re.search(r"(?m)^\s*\[", text)
+                index = section.start() if section else len(text)
+                prefix = text[:index].rstrip()
+                suffix = text[index:].lstrip("\n")
+                text = (
+                    f"{prefix}\n{replacement}\n\n{suffix}"
+                    if prefix else f"{replacement}\n\n{suffix}"
+                )
+        (pool / "target.toml").write_text(text, encoding="utf-8")
+
     if live_target_toml is not None and live_target_toml.is_file():
-        shutil.copy2(live_target_toml, pool / "target.toml")
+        write_config(live_target_toml)
         return
     unique: dict[str, Path] = {}
     for path in candidates:
@@ -3372,14 +3395,45 @@ def _copy_pool_target_toml(pool: Path, candidates: list[Path],
         if len(controls) != 1:
             return
         rendered = ", ".join(json.dumps(v) for v in next(iter(controls)))
+        revision = _hash_text(target_revision)
+        identity = f"pinned_rev = {json.dumps(revision)}\n" if revision else ""
         (pool / "target.toml").write_text(
             "# benchmark pool target config: threat model preserved from cells\n"
+            f"{identity}"
             "[threat_model]\n"
             f"attacker_controls = [{rendered}]\n",
             encoding="utf-8",
         )
         return
-    shutil.copy2(next(iter(unique.values())), pool / "target.toml")
+    write_config(next(iter(unique.values())))
+
+
+def _write_pool_artifact_origin(
+    destination: Path,
+    source_results: Path,
+    source_artifact: Path,
+    kind: str,
+    condition: str,
+    cell: str,
+    target_identity: dict,
+) -> None:
+    """Preserve issue/revision/build provenance before pooling renames it."""
+    origin = result_disposition.artifact_origin(
+        source_results, source_artifact, kind,
+        target_override=target_identity,
+    )
+    if origin.get("issue_id_source") == "artifact-local":
+        origin["issue_id"] = crash_bundle.format_issue_id(
+            str(origin.get("target") or ""),
+            str(origin.get("target_revision") or ""),
+            "artifact",
+            f"{cell}/{source_artifact.name}",
+        )
+    origin.update({"condition": condition, "cell": cell})
+    (destination / result_disposition.ORIGIN_NAME).write_text(
+        json.dumps(origin, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
@@ -3425,6 +3479,11 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
     find_n = 0
     rejected_find_n = 0
     target_toml_candidates: list[Path] = []
+    run = _read_json(bench_dir / "run.json") or {}
+    pooled_target_identity = {
+        "target": str(run.get("target") or ""),
+        "target_revision": str(run.get("target_sha") or ""),
+    }
     for cell_dir in _cell_dirs(bench_dir):
         cj = cell_dir / "cell.json"
         mj = cell_dir / "metrics.json"
@@ -3464,6 +3523,10 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
             dst = pool / "crashes" / dst_name
             shutil.copytree(src, dst)
             _scrub_pooled_tree(dst)
+            _write_pool_artifact_origin(
+                dst, rd, src, "crashes", cond, cell_dir.name,
+                pooled_target_identity,
+            )
             members["crashes"][dst_name] = cond
             members["crash_cells"][dst_name] = cell_dir.name
         findings_dir = rd / "findings"
@@ -3478,6 +3541,10 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 shutil.copytree(src, dst)
                 _scrub_pooled_tree(dst)
                 _link_pool_recon_ids(dst, rd)
+                _write_pool_artifact_origin(
+                    dst, rd, src, "findings", cond, cell_dir.name,
+                    pooled_target_identity,
+                )
                 members["findings"][dst_name] = cond
         rejected_dir = rd / "findings-rejected"
         if rejected_dir.is_dir():
@@ -3490,6 +3557,10 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 shutil.copytree(src, dst)
                 _scrub_pooled_tree(dst)
                 _link_pool_recon_ids(dst, rd)
+                _write_pool_artifact_origin(
+                    dst, rd, src, "findings-rejected", cond, cell_dir.name,
+                    pooled_target_identity,
+                )
                 members["findings-rejected"][dst_name] = cond
         rejected_crashes_dir = rd / "crashes-rejected"
         if rejected_crashes_dir.is_dir():
@@ -3501,6 +3572,10 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 dst = pool / "crashes-rejected" / dst_name
                 shutil.copytree(src, dst)
                 _scrub_pooled_tree(dst)
+                _write_pool_artifact_origin(
+                    dst, rd, src, "crashes-rejected", cond, cell_dir.name,
+                    pooled_target_identity,
+                )
                 members["crashes-rejected"][dst_name] = cond
             # The per-cell named report is the human-readable rejection ledger
             # (rows for triage-rejected crash signatures that did NOT get a
@@ -3529,8 +3604,11 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                    / f"DISCARDED-{cond}-{cell_dir.name}.md")
             dst.write_text(discarded_md, encoding="utf-8")
 
-    _copy_pool_target_toml(pool, target_toml_candidates,
-                           live_target_toml=_live_target_toml(bench_dir))
+    _copy_pool_target_toml(
+        pool, target_toml_candidates,
+        live_target_toml=_live_target_toml(bench_dir),
+        target_revision=str(run.get("target_sha") or ""),
+    )
     write_rejected_findings_index(pool / "findings-rejected")
     write_rejected_crashes_index(pool / "crashes-rejected")
 
