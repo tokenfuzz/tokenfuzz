@@ -105,12 +105,6 @@ the `.*.jsonl.lock` files that serialise concurrent writers) is
 harness internals. The recon outputs are explained in
 [Recon discovery](../guides/recon-discovery.md).
 
-Probe-filed crashes also carry hidden `.probe-context.json` provenance. Version
-2 binds the testcase and sanitizer build identities to the target slug, actual
-revision, hypothesis/work-card identifiers, and a revision-scoped issue ID.
-Older contexts remain verifiable for replay but cannot supply the new issue or
-revision identity.
-
 FIND directories without a report get a `.needs-content` marker and
 surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. A gate pass with
 Reject votes below quorum leaves `.pending-drop`; reaching quorum moves
@@ -176,12 +170,6 @@ records that the gate passed. Crash directories may carry other dot-files
 the triage gates leave behind as well (`.llm-*.json` vote caches,
 `.severity_ok`, and similar markers). All of these are harness
 internals — safe to ignore when reviewing.
-
-Benchmark pools add `.artifact-origin.json` to every copied crash or finding.
-It preserves the source cell and condition, revision/build identity, and the
-explicit issue-provenance edge used for safe cross-tree deduplication. When no
-such edge exists, the fallback identity includes the cell and artifact name so
-unrelated evidence is kept separate.
 
 `REPORT.md` carries a `Cluster: <ID>` line. Non-canonical cluster
 members also have a `.dup-of` file naming the canonical CRASH. The

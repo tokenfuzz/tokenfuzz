@@ -611,7 +611,6 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.write_json(bench / "run.json", {
             "runid": "pool", "target": "sample", "backend": "codex",
             "conditions": ["model-direct", "harness"], "replicates": 1,
-            "target_sha": "audited-revision",
         })
         for condition in ("model-direct", "harness"):
             results = self.root / f"results-{condition}"
@@ -645,20 +644,6 @@ class BenchmarkMetricsTests(unittest.TestCase):
         pooled = benchmark.build_pool(bench)
         self.assertEqual(len(pooled["crashes"]), 2)
         self.assertEqual(len(pooled["findings"]), 2)
-        origins = [
-            json.loads(path.read_text())
-            for path in (bench / "pool").glob("*/*/.artifact-origin.json")
-        ]
-        self.assertEqual(len(origins), 8)
-        self.assertTrue(all(
-            origin["target_revision"] == "audited-revision"
-            for origin in origins
-        ))
-        fallback_ids = {
-            origin["issue_id"] for origin in origins
-            if origin["issue_id_source"] == "artifact-local"
-        }
-        self.assertEqual(len(fallback_ids), 8)
         self.assertFalse(any(
             (bench / "pool" / "crashes-rejected").glob("CELL-REJECTIONS-*.md")
         ))

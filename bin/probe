@@ -733,9 +733,7 @@ class Probe:
             status, crash_id = crash_bundle.materialize(
                 self.config.results_dir, self.agent, self.testcase, self.output,
                 self.sanitizer, self.mode, harness=self.harness_source, args=self.args.args,
-                target=self.header["target"], target_slug=self.config.slug,
-                target_revision=self.config.target_rev,
-                hypothesis=self.header["hypothesis"],
+                target=self.header["target"], hypothesis=self.header["hypothesis"],
                 card=self.card, strategy=strategy,
                 binary=self.environment.get(
                     f"{self.sanitizer.upper()}_GENERIC_BIN"

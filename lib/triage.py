@@ -241,7 +241,11 @@ def demote_to_finding(directory: Path, results_dir: Path, reason: str) -> Path:
 
 
 def _field(text: str, name: str) -> str:
-    return report_identity.extract_fields(text, {name}).get(name.lower(), "")
+    table = re.search(rf"^\|\s*{re.escape(name)}\s*\|\s*([^|\n]+)", text, re.IGNORECASE | re.MULTILINE)
+    if table:
+        return table.group(1).strip()
+    label = re.search(rf"^{re.escape(name)}\s*:\s*(.+)$", text, re.IGNORECASE | re.MULTILINE)
+    return label.group(1).strip() if label else ""
 
 
 _REACH_FIELD_LABELS = {
@@ -945,24 +949,12 @@ def _finding_trigger_rejected(
     usage_index: str | os.PathLike[str] | None = None,
     target_root_is_product: bool = False,
 ) -> bool:
-    """Reject only after two independent source-backed negative reviews.
-
-    A first negative is a useful review signal, not enough authority to hide a
-    finding. Positive or unavailable second opinions fail open, matching the
-    sanitizer-crash gate while spending the extra call only on demotions.
-    """
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     target_root = os.environ.get("TARGET_ROOT", "")
     if not backend or not target_root:
         return False
-    if _trigger_vote(
-        report, finding_dir / ".trigger-gate.json", backend,
-        os.environ.get("MODEL", ""), Path(target_root), deadline, usage_index,
-        target_root_is_product,
-    ) != 1:
-        return False
     return _trigger_vote(
-        report, finding_dir / ".trigger-gate-2.json", backend,
+        report, finding_dir / ".trigger-gate.json", backend,
         os.environ.get("MODEL", ""), Path(target_root), deadline, usage_index,
         target_root_is_product,
     ) == 1
@@ -984,9 +976,13 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
         return None
     version = payload.get("decision_version")
     if version == triage_validate.TRIGGER_GATE_DECISION_VERSION:
+        # A current verdict is only reusable under the threat model it was
+        # produced for; a controls change forces a fresh review.
         if payload.get("attacker_controls") != triage_validate.trigger_attacker_controls():
             return None
         return vote
+    # Legacy verdicts predate controls binding: reuse only their non-negative
+    # decisions (fail-open keep), never a Reject that could hide a real issue.
     if (
         version in triage_validate.TRIGGER_GATE_ADVISORY_VERSIONS
         and vote in {"Promote", "Uncertain"}

@@ -162,22 +162,6 @@ class is included in `attacker_controls`. Missing or stale evidence falls back
 to the normal two-vote trigger review. Severity, clustering, bundling, and all
 finding validation remain unchanged.
 
-Every pooled crash and finding receives a hidden `.artifact-origin.json`
-before its directory is renamed. The record keeps its source artifact, cell,
-condition, issue identity, actual target revision, configured revision,
-sanitizer build identity when available, and threat-model controls. The pooled
-`target.toml` also pins the revision from the benchmark's `run.json` while
-retaining the current threat model. A stale config revision is therefore
-reported as a mismatch instead of silently combining evidence from different
-source states. Cross-kind identity uses explicit recon, imported-issue,
-finding, hypothesis, or probe provenance; stack similarity alone never merges
-issues.
-
-Run `bin/disposition <benchmark-run-directory>` for a read-only technical ×
-scope shadow report. This is intentionally separate from regeneration and
-headline metrics: unresolved or conflicting evidence remains `needs-review`
-until the policy is validated across frozen pools.
-
 Model-direct crash evidence is additionally replayed through the configured
 target invocation before it enters cell metrics. A stable 5/5 standard replay
 receives the same trigger-review bypass; a clean or unexecutable replay is

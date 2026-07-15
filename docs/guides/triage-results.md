@@ -49,46 +49,16 @@ configured threat model decide the normal disposition. An independent
 source-reading trigger reviewer can reject a sanitizer crash only after two
 disproof-backed Reject votes. Missing or inconclusive reviewer output fails
 open and keeps the crash. Trigger votes are cached only for the agent-authored
-report substance, reviewer version, and configured attacker controls that
-produced them; substantive report edits or a changed threat model require a
-fresh negative review and fail open while it is unavailable. A legacy
-non-negative vote can still be reused because it cannot hide an issue.
-Generated severity, patch, enrichment, and cluster annotations do not spend
-another review.
+report substance and reviewer version that produced them; substantive report
+edits or classification-rule updates require a fresh review and fail open
+while it is unavailable. Generated severity, patch, enrichment, and cluster
+annotations do not spend another review.
 
 Findings face a parallel mechanism: the substance gate needs two
 accepts to confirm or two rejects before a FIND moves to
-`findings-rejected/`. An accepted finding then receives source-reading
-trigger-provenance review; as with crashes, two independent Reject votes are
-required before it moves out of the accepted tree. The second review runs only
-after the first Reject, so ordinary accepts spend no additional call.
-
-### Preview security disposition without changing results
-
-Use the read-only disposition report to separate technical validity from
-security scope before changing benchmark policy:
-
-```bash
-bin/disposition "$RESULTS"
-bin/disposition output/benchmark/<backend>/<run-id>
-```
-
-The JSON uses four dispositions: `security`, `robustness`, `invalid`, and
-`needs-review`. The rules are deliberately recall-safe:
-
-- a verified standard-input probe proves in-scope reachability;
-- a current source-review Promote proves in-scope reachability only when its
-  attacker-controls identity and the report's structured trigger controls
-  agree;
-- two current, controls-bound Reject votes prove out-of-scope reachability;
-- missing fields, old unbound votes, conflicts, and incomplete technical proof
-  remain `needs-review`.
-
-Report fields and the severity scorer's caller-only heuristic nominate cases;
-they never silently demote one. The command writes nothing, moves no artifact,
-and does not alter current severity or benchmark headline counts. Its
-`required_controls` array expands ambiguous labels such as `both`, and its
-revision fields expose evidence scored against the wrong checkout.
+`findings-rejected/`. An accepted finding then receives one
+source-reading trigger-provenance review; only a Reject carrying a concrete
+disproof can demote it.
 
 ## Common rejection reasons
 

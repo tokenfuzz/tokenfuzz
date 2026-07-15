@@ -34,7 +34,6 @@ HERE = Path(__file__).absolute().parent
 sys.path.insert(0, str(HERE.parent / "lib"))
 
 import cvss4  # noqa: E402
-import report_identity  # noqa: E402
 import stack_frames  # noqa: E402
 import target_config as tc  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
@@ -516,6 +515,12 @@ def _active_attacker_controls(fields: dict) -> set[str]:
     }
 
 
+# NOTE: reachability is a CVSS input here, not a separate verdict. Promoting this
+# signal into a four-state technical/scope "disposition" shadow was tried and
+# reverted: it bound scope to report-content hashes that pooling rewrites (so it
+# collapsed to needs-review on real data) and mis-ranked real crashes below
+# softer findings. Keep scope in the score; do not rebuild an adjudication layer
+# over mutable report text.
 def _local_caller_only(fields: dict) -> tuple[bool, str]:
     """Whether the primitive is reachable only by a trusted local caller.
 
@@ -644,8 +649,9 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
         and "call-sequence" not in _active_attacker_controls(fields)
     ):
         # A call ordering localises only when the target does not expose it to
-        # the attacker. Keep evaluating independent trusted-parameter/action
-        # evidence when it is exposed; those constraints can still be local.
+        # the attacker. When call-sequence is in attacker_controls, keep
+        # evaluating the independent trusted-parameter/action signals below;
+        # those constraints can still be local even for an in-model ordering.
         return True, "trigger is a local API/call-sequence, not attacker bytes → AV:L/AT:P"
     if parameter and re.search(r"\b(trusted|application-supplied|harness-only)\b", parameter):
         return True, "trigger needs trusted/application-supplied parameters → AV:L/AT:P"
@@ -1643,6 +1649,12 @@ def _repro_facts(report_text: str, fields: dict, cluster_size: int,
 # ── Report-field extraction ──────────────────────────────────────────────
 
 
+_TABLE_FIELD_RE = re.compile(
+    r"^\|\s*(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*\|\s*(?P<val>.*?)\s*\|\s*$"
+)
+_BARE_FIELD_RE = re.compile(
+    r"^(?P<key>[A-Za-z][A-Za-z0-9 _-]+?)\s*:\s*(?P<val>.+?)\s*$"
+)
 _FIELD_KEYS = {
     "surface", "trigger source", "caller contract", "caller controls",
     "trusted caller actions", "parameter control", "reproduction rate",
@@ -1662,7 +1674,23 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
     ``report_dir`` is used only to load the active target threat model. Report
     fields are the sole scoring input; auxiliary field sidecars are not read.
     """
-    out = report_identity.extract_fields(report_text, _FIELD_KEYS)
+    out: dict[str, str] = {}
+    for raw in report_text.splitlines():
+        m = _TABLE_FIELD_RE.match(raw)
+        if m:
+            key = m.group("key").strip().lower()
+            if key in _FIELD_KEYS and key not in out:
+                val = m.group("val").strip()
+                if val and val not in ("Value", "—", "-"):
+                    out[key] = val
+            continue
+        m = _BARE_FIELD_RE.match(raw)
+        if m:
+            key = m.group("key").strip().lower()
+            if key in _FIELD_KEYS and key not in out:
+                val = m.group("val").strip()
+                if val and val not in ("—", "-"):
+                    out[key] = val
 
     fields = {
         "surface":           out.get("surface", ""),
@@ -1694,15 +1722,21 @@ _CLUSTER_SIZE_RE = re.compile(r"\((\d+)\s+reports?\b", re.IGNORECASE)
 def _detect_cluster_size(report_text: str) -> int:
     """Pull cluster size from the report's Cluster row.
 
-    Two shapes the harness writes:
-      | Cluster | CL-abc123 (singleton)                |
-      | Cluster | CL-abc123 (4 reports: id1, id2, ...) |
+    Both shapes the cluster tools write (bin/cluster-crashes, bin/cluster-findings):
+      | Cluster | CL-abc123 (4 reports: id1, ...) |   table form (crash REPORTs)
+      Cluster: CL-abc123 (4 reports: id1, ...)        bare form (finding reports)
     Falls back to 1 (singleton) when nothing parseable is found.
     """
-    value = report_identity.extract_fields(report_text, {"cluster"}).get("cluster", "")
-    n = _CLUSTER_SIZE_RE.search(value)
-    if n:
-        return max(1, int(n.group(1)))
+    for raw in report_text.splitlines():
+        m = _TABLE_FIELD_RE.match(raw)
+        if m and m.group("key").strip().lower() == "cluster":
+            val = m.group("val")
+        elif raw.strip().lower().startswith("cluster:"):
+            val = raw.split(":", 1)[1]
+        else:
+            continue
+        n = _CLUSTER_SIZE_RE.search(val)
+        return max(1, int(n.group(1))) if n else 1
     return 1
 
 

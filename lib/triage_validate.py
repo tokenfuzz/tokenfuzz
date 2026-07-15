@@ -14,13 +14,18 @@ from pathlib import Path
 # Old verdicts then fail open and receive a fresh source-reading review.
 TRIGGER_GATE_DECISION_VERSION = "trigger-v3-scoped-controls"
 # A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
-# fail-open keep decision. Legacy Rejects are never reused because they were not
-# bound to the target threat model and could create a false negative.
+# fail-open keep decision. Legacy Rejects are never reused: they were not bound
+# to the target threat model and could otherwise create a false negative.
 TRIGGER_GATE_ADVISORY_VERSIONS = {"trigger-v2-caller-buffer"}
 
 
 def trigger_attacker_controls(value: str | None = None) -> list[str]:
-    """Canonical controls bound into trigger-review cache identity."""
+    """Canonical attacker_controls bound into trigger-review cache identity.
+
+    Bound into each cached vote so a verdict computed under one threat model is
+    not silently reused after attacker_controls changes (e.g. a target that
+    later exposes call-sequence).
+    """
     raw = value if value is not None else os.environ.get(
         "TARGET_ATTACKER_CONTROLS_CSV", "bytes",
     )

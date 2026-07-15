@@ -103,6 +103,18 @@ class SeverityTests(unittest.TestCase):
         for key, value in expected.items():
             self.assertEqual(metrics.get(key, ""), value, f"{key} in {result.get('cvss')}")
 
+    def test_cluster_size_parses_bare_and_table_forms(self) -> None:
+        # bin/cluster-findings writes bare-label Cluster: lines (finding reports);
+        # bin/cluster-crashes writes the |Cluster| table (crash REPORTs). Both must
+        # report the true size, else cluster/reproduction metrics are wrong.
+        self.assertEqual(
+            severity._detect_cluster_size("Cluster: FCL-abc (4 reports: a, b, c, d)\n"), 4)
+        self.assertEqual(
+            severity._detect_cluster_size("| Cluster | CL-abc (7 reports: ...) |\n"), 7)
+        self.assertEqual(
+            severity._detect_cluster_size("Cluster: FCL-abc (singleton)\n"), 1)
+        self.assertEqual(severity._detect_cluster_size("no cluster field here\n"), 1)
+
     def test_primitive_detection_matrix(self) -> None:
         cases = {
             "heap-use-after-free\nWRITE of size 8": "uaf_write",

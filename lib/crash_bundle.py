@@ -66,7 +66,7 @@ def verified_probe_context(crash_dir: Path) -> dict | None:
         context = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(context, dict) or context.get("version") not in {1, 2}:
+    if not isinstance(context, dict) or context.get("version") not in (1, 2):
         return None
     testcase_name = context.get("testcase")
     if not isinstance(testcase_name, str) or not testcase_name:
@@ -194,67 +194,6 @@ def _identity(testcase: Path, sanitizer: str, mode: str, harness: Path | None, a
     return ":".join((_sha1(testcase), sanitizer, mode, _sha1(harness) if harness else "", argument_hash))
 
 
-def format_issue_id(
-    target_slug: str,
-    target_revision: str,
-    source_kind: str,
-    source_id: str,
-) -> str:
-    if not source_id:
-        return ""
-    slug = target_slug or "unknown-target"
-    revision = target_revision or "unknown-revision"
-    return f"tokenfuzz-issue/v1:{slug}:{revision}:{source_kind}:{source_id}"
-
-
-def derive_issue_id(
-    results_dir: str | os.PathLike[str],
-    *,
-    target_slug: str = "",
-    target_revision: str = "",
-    hypothesis: str = "",
-    card: str = "",
-) -> str:
-    """Return a revision-scoped issue identity from existing run provenance.
-
-    Recon and imported-issue cards carry identities shared by their pre-filed
-    finding and later crash. Ordinary investigations fall back to the
-    hypothesis id. No stack or source-location similarity participates, so an
-    unknown relation remains split rather than hiding a distinct root cause.
-    """
-    card_row: dict = {}
-    if card:
-        try:
-            for line in (Path(results_dir) / "work-cards.jsonl").read_text(
-                encoding="utf-8", errors="replace",
-            ).splitlines():
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(row, dict) and str(row.get("id", "")) == card:
-                    card_row = row
-        except OSError:
-            pass
-
-    source_kind = ""
-    source_id = ""
-    recon = card_row.get("recon")
-    if isinstance(recon, dict) and recon.get("id"):
-        source_kind, source_id = "recon", str(recon["id"])
-    elif card_row.get("issue_id"):
-        source_kind, source_id = "upstream", str(card_row["issue_id"])
-    elif card_row.get("find_id"):
-        source_kind, source_id = "finding", str(card_row["find_id"])
-    elif hypothesis:
-        source_kind, source_id = "hypothesis", hypothesis
-    elif card:
-        source_kind, source_id = "card", card
-    return format_issue_id(
-        target_slug, target_revision, source_kind, source_id,
-    )
-
-
 def _write_probe_context(
     destination: Path,
     *,
@@ -265,16 +204,11 @@ def _write_probe_context(
     harness: Path | None,
     args: Sequence[str],
     binary: str | os.PathLike[str] | None,
-    target_slug: str = "",
-    target_revision: str = "",
-    hypothesis: str = "",
-    card: str = "",
-    issue_id: str = "",
 ) -> None:
     (destination / ".probe-context.json").write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 1,
                 "identity": identity,
                 "testcase": testcase.name,
                 "testcase_sha1": _sha1(testcase),
@@ -283,11 +217,6 @@ def _write_probe_context(
                 "harness": bool(harness),
                 "args": list(args),
                 "binary": _binary_identity(binary),
-                "target_slug": target_slug,
-                "target_revision": target_revision,
-                "hypothesis_id": hypothesis,
-                "card_id": card,
-                "issue_id": issue_id,
             },
             sort_keys=True,
         ) + "\n",
@@ -306,8 +235,6 @@ def materialize(
     harness: str | os.PathLike[str] | None = None,
     args: Sequence[str] = (),
     target: str = "",
-    target_slug: str = "",
-    target_revision: str = "",
     hypothesis: str = "",
     card: str = "",
     strategy: str = "",
@@ -321,13 +248,6 @@ def materialize(
     crashes = Path(results_dir) / "crashes"
     crashes.mkdir(parents=True, exist_ok=True)
     identity = _identity(testcase_path, sanitizer, mode, harness_path, args)
-    issue_id = derive_issue_id(
-        results_dir,
-        target_slug=target_slug,
-        target_revision=target_revision,
-        hypothesis=hypothesis,
-        card=card,
-    )
     index = crashes / f".probe-filed-{agent}.tsv"
     if index.is_file():
         try:
@@ -341,9 +261,7 @@ def materialize(
                 _write_probe_context(
                     crashes / crash_id, identity=identity, testcase=testcase_path,
                     sanitizer=sanitizer, mode=mode, harness=harness_path,
-                    args=args, binary=binary, target_slug=target_slug,
-                    target_revision=target_revision, hypothesis=hypothesis,
-                    card=card, issue_id=issue_id,
+                    args=args, binary=binary,
                 )
                 return "DUP", crash_id
     maximum = 0
@@ -358,9 +276,7 @@ def materialize(
                         _write_probe_context(
                             path, identity=identity, testcase=testcase_path,
                             sanitizer=sanitizer, mode=mode, harness=harness_path,
-                            args=args, binary=binary, target_slug=target_slug,
-                            target_revision=target_revision, hypothesis=hypothesis,
-                            card=card, issue_id=issue_id,
+                            args=args, binary=binary,
                         )
                         return "DUP", path.name
                 except OSError:
@@ -373,9 +289,7 @@ def materialize(
         _write_probe_context(
             destination, identity=identity, testcase=testcase_path,
             sanitizer=sanitizer, mode=mode, harness=harness_path, args=args,
-            binary=binary, target_slug=target_slug,
-            target_revision=target_revision, hypothesis=hypothesis,
-            card=card, issue_id=issue_id,
+            binary=binary,
         )
         shutil.copy2(testcase_path, destination / testcase_path.name)
         shutil.copy2(sanitizer_path, destination / "sanitizer.txt")
