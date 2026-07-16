@@ -633,10 +633,14 @@ with tempfile.TemporaryDirectory(prefix="demangler-") as demangler_tmp:
     original_llvm_tool = er.symbol_names.sanitizer.llvm_tool
     try:
         er.symbol_names.sanitizer.llvm_tool = lambda _name: str(llvm_cxxfilt)
-        assert_eq(
-            "llvm-demangled\n", er.symbol_names.demangle_text("_Rsymbol\n"),
-            "demangle_text prefers the Rust-v0-capable LLVM demangler",
-        )
+        for symbol in (
+            "_Rsymbol", "___Z3foov", "____Z3foov",
+            "__alloc_token_12____Z3foov", "_D4test3fooFZv",
+        ):
+            assert_eq(
+                "llvm-demangled\n", er.symbol_names.demangle_text(symbol + "\n"),
+                f"demangle_text sends supported prefix {symbol} to LLVM",
+            )
     finally:
         er.symbol_names.sanitizer.llvm_tool = original_llvm_tool
 

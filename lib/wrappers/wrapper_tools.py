@@ -14,7 +14,9 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 from command_tools import find_executable
-from file_tools import cap_output_file, capture_command
+
+# Compiler wrappers use only compiler_guard, so defer the heavier file_tools
+# import until capped_command is actually called.
 
 
 def _real_tool(name: str, wrapper_dir: Path) -> str:
@@ -53,6 +55,8 @@ def capped_command(
     wrapper_dir: Path | None = None,
 ) -> int:
     """Run a search tool with bounded stdout and stderr."""
+    from file_tools import cap_output_file, capture_command
+
     directory = (wrapper_dir or Path(__file__).resolve().parent).resolve()
     try:
         real = _real_tool(tool, directory)

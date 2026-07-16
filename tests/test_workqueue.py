@@ -69,6 +69,16 @@ class WorkQueueTests(unittest.TestCase):
             check=False,
         )
 
+    def test_read_sample_uses_256kb_boundary(self) -> None:
+        source = self.target / "large.c"
+        source.write_bytes(b"A" * 255_999 + b"B" + b"C")
+
+        sample = workqueue.read_sample(source)
+
+        self.assertEqual(len(sample), 256_000)
+        self.assertTrue(sample.endswith("B"))
+        self.assertNotIn("C", sample)
+
     @staticmethod
     def card(
         card_id: str,

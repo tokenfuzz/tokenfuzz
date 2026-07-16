@@ -990,11 +990,12 @@ def iter_source_files(root: Path, max_files: int = 0) -> Iterable[Path]:
                 return
 
 
-def read_sample(path: Path, max_bytes: int = 180_000) -> str:
+def read_sample(path: Path, max_bytes: int = 256_000) -> str:
     try:
-        data = path.read_bytes()[:max_bytes]
+        with path.open("rb") as source:
+            data = source.read(max_bytes)
         return data.decode("utf-8", errors="replace")
-    except Exception:
+    except OSError:
         return ""
 
 
