@@ -119,6 +119,14 @@ class SeverityTests(unittest.TestCase):
         cases = {
             "heap-use-after-free\nWRITE of size 8": "uaf_write",
             "heap-use-after-free\nREAD of size 4": "uaf_read",
+            "ERROR: AddressSanitizer: use-after-poison\nWRITE of size 8": "uaf_write",
+            "ERROR: AddressSanitizer: bad-free": "double_free",
+            "ERROR: AddressSanitizer: new-delete-type-mismatch": "undefined_behavior",
+            "ERROR: AddressSanitizer: free-size-mismatch": "undefined_behavior",
+            "ERROR: AddressSanitizer: calloc-overflow": "undefined_behavior",
+            "ERROR: AddressSanitizer: reallocarray-overflow": "undefined_behavior",
+            "ERROR: AddressSanitizer: pvalloc-overflow": "undefined_behavior",
+            "ERROR: AddressSanitizer: invalid-pointer-pair": "undefined_behavior",
             "SCARINESS: 20 (wild-addr-write)": "wild_write",
             "heap-buffer-overflow\nWRITE of size 8": "heap_write",
             "heap-buffer-overflow\nREAD of size 64": "heap_read_big",
@@ -133,11 +141,20 @@ class SeverityTests(unittest.TestCase):
             "attempting free on address which was not malloc()-ed": "double_free",
             "Bad-cast detected": "type_confusion",
             "x.cc:10:5: runtime error: member access within address which does not point to an object; invalid vptr": "type_confusion",
+            "x.c:1:2: runtime error: call to function through pointer to incorrect function type": "type_confusion",
+            "x.c:1:2: runtime error: member access within address which does not point to an object of type X": "type_confusion",
+            "x.c:1:2: runtime error: member access within address with insufficient space for an object of type X": "heap_read_small",
+            "x.c:1:2: runtime error: store to address with insufficient space for an object of type X": "heap_write",
+            "x.c:1:2: runtime error: variable length array bound evaluates to non-positive value 0": "undefined_behavior",
             "WARNING: MemorySanitizer: use-of-uninitialized-value": "info_leak",
             "open redirect in login return URL": "open_redirect",
             "server-side request forgery in URL fetch": "ssrf",
             "SQL injection in query builder": "sqli",
             "command injection in shell argument": "command_injection",
+            "remote code execution in expression evaluator": "code_execution",
+            "arbitrary file read through a decoded path": "arbitrary_file_read",
+            "arbitrary file write through a decoded path": "arbitrary_file_write",
+            "sandbox escape through the worker boundary": "sandbox_escape",
             "stored XSS in profile bio": "xss",
             "type confusion is possible in the state transition": "heap_read_small",
         }
@@ -150,6 +167,7 @@ class SeverityTests(unittest.TestCase):
             ("==7==ERROR: AddressSanitizer: strcpy-param-overlap\nstack of thread T0", "stack_write"),
             ("SUMMARY: AddressSanitizer: memcpy-param-overlap", "heap_write"),
             ("SUMMARY: AddressSanitizer: strcmp-param-overlap", "unknown"),
+            ("ERROR: HWAddressSanitizer: tag-mismatch", "unknown"),
             ("No AddressSanitizer: strcpy-param-overlap was observed", "unknown"),
             ("ERROR: AddressSanitizer: BUS on unknown address; WRITE of size 8; SCARINESS: 20 (wild-addr-write)", "bus"),
             ("SEGV on unknown address 0x20\nREAD of size 8", "null_deref"),
@@ -549,6 +567,86 @@ class SeverityTests(unittest.TestCase):
         self.assertEqual((self.score(review)["level"], self.score(review)["score"]), ("Needs review", None))
         (review / ".llm-find-quality.json").write_text("[]\n")
         self.assertEqual(self.score(review)["level"], "Needs review")
+
+    def test_validated_class_aliases_preserve_consequence(self) -> None:
+        aliases = {
+            "boundary:path-traversal": "path_traversal",
+            "boundary:path-traversal-read": "arbitrary_file_read",
+            "filesystem:path-traversal-write": "arbitrary_file_write",
+            "file-write:path-traversal": "arbitrary_file_write",
+            "boundary:sandbox-escape": "sandbox_escape",
+            "injection:command": "code_execution",
+        }
+        for label, expected in aliases.items():
+            with self.subTest(label=label):
+                self.assertEqual(
+                    severity._primitive_from_validated_class(label), expected,
+                )
+
+        # These labels do not establish one stable impact shape. Keeping the
+        # accepted finding unscored avoids manufacturing either high or low
+        # impact from a descriptive class alone.
+        for ambiguous in (
+            "auth:token-confusion", "config:permissive-default", "race:toctou",
+        ):
+            with self.subTest(ambiguous=ambiguous):
+                self.assertEqual(
+                    severity._primitive_from_validated_class(ambiguous), "",
+                )
+
+        file_write, _ = severity._cvss4_metrics(
+            "arbitrary_file_write", "library", {}, False,
+        )
+        self.assertEqual(
+            (file_write["VC"], file_write["VI"], file_write["VA"]),
+            ("N", "H", "L"),
+        )
+        sandbox, _ = severity._cvss4_metrics(
+            "sandbox_escape", "library", {}, False,
+        )
+        self.assertEqual(
+            (sandbox["VC"], sandbox["VI"], sandbox["VA"],
+             sandbox["SC"], sandbox["SI"], sandbox["SA"]),
+            ("H", "H", "H", "H", "H", "H"),
+        )
+
+    def test_new_classes_have_consequence_calibrated_cvss(self) -> None:
+        expected = {
+            "code_execution": (
+                "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                9.3, "Critical",
+            ),
+            "arbitrary_file_read": (
+                "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+                8.7, "High",
+            ),
+            "arbitrary_file_write": (
+                "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:L/SC:N/SI:N/SA:N",
+                8.8, "High",
+            ),
+            "sandbox_escape": (
+                "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H",
+                10.0, "Critical",
+            ),
+        }
+        for primitive, (vector, score, band) in expected.items():
+            with self.subTest(primitive=primitive):
+                metrics, _ = severity._cvss4_metrics(
+                    primitive, "library", {}, False,
+                )
+                self.assertIsNotNone(metrics)
+                self.assertEqual(severity.cvss4.vector(metrics), vector)
+                self.assertEqual(severity.cvss4.score(metrics), score)
+                self.assertEqual(severity.cvss4.rating(score), band)
+
+        # A sanitizer can prove that an operation was undefined without
+        # proving confidentiality, integrity, or availability impact in the
+        # unsanitized product. Preserve the class, but do not invent CVSS.
+        metrics, notes = severity._cvss4_metrics(
+            "undefined_behavior", "library", {}, False,
+        )
+        self.assertIsNone(metrics)
+        self.assertIn("unclassified", notes[0])
 
     def test_report_cli_is_idempotent_and_batch_writes_json(self) -> None:
         report = self.make_report(

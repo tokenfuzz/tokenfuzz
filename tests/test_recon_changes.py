@@ -65,6 +65,7 @@ class ReconChangesTests(unittest.TestCase):
             "CRLF injection in logger", "Open redirect via crafted Location header",
             "Patch typosquat in package install path", "Fix remote code execution in handler",
             "Prevent stack exhaustion from nested input", "Mitigate DoS amplification in resolver",
+            "Prevent sandbox escape from worker process",
         )
         for phrase in phrases:
             with self.subTest(phrase=phrase):
@@ -95,12 +96,18 @@ class ReconChangesTests(unittest.TestCase):
             "global_read": "global buffer over-read", "data_race": "data race",
             "info_leak": "uninitialized memory read", "null_deref": "null pointer dereference",
             "stack_exhaustion": "stack exhaustion via deep recursion",
-            "integer_overflow": "integer overflow", "regex_dos": "ReDoS catastrophic backtracking",
+            "integer_overflow": "integer overflow",
+            "regex_dos": "ReDoS catastrophic backtracking",
             "dos_amplification": "DoS amplification", "command_injection": "remote code execution",
+            "code_execution": "remote code execution",
             "deserialization": "insecure deserialization", "ssti": "server-side template injection",
             "sqli": "SQL injection", "authn_bypass": "authentication bypass",
             "authz_bypass": "authorization bypass", "idor": "insecure direct object reference",
-            "path_traversal": "path traversal", "xxe": "XML external entity",
+            "path_traversal": "path traversal",
+            "arbitrary_file_read": "arbitrary file read",
+            "arbitrary_file_write": "arbitrary file write",
+            "sandbox_escape": "sandbox escape",
+            "xxe": "XML external entity",
             "secrets_exposure": "hard-coded credential leak", "ssrf": "server-side request forgery",
             "prototype_pollution": "prototype pollution", "xss": "cross-site scripting",
             "open_redirect": "open redirect", "csrf": "cross-site request forgery",
@@ -112,6 +119,18 @@ class ReconChangesTests(unittest.TestCase):
         for key, phrase in coverage.items():
             with self.subTest(cvss_class=key):
                 self.assertGreater(workqueue.patch_audit_boost(phrase), 0)
+
+        reach_prompt = (
+            ROOT / "lib" / "prompts" / "triage_reachability_fields.md.j2"
+        ).read_text(encoding="utf-8")
+        for key in severity.CVSS4_CLASS:
+            with self.subTest(reachability_primitive=key):
+                self.assertIn(key, reach_prompt)
+
+        recon_prompt = (ROOT / "lib" / "prompts" / "audit_recon.md.j2").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn("dos|protocol|supply-chain|other", recon_prompt)
 
     def source_tree(self, name: str, directories: dict[str, int], root_files: int = 0) -> Path:
         target = self.root / name / "src" / "lib"

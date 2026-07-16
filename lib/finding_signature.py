@@ -63,6 +63,8 @@ _TOP_LEVEL_CLASSES = (
     "logic",
     "side-channel",
     "dos",
+    "protocol",
+    "supply-chain",
     "other",
 )
 
@@ -103,6 +105,13 @@ _NEUTRAL_TO_TOP = {
     "business-logic": "logic",
     "timing": "side-channel",
     "algorithmic": "dos",
+    "cache-poisoning": "protocol",
+    "request-smuggling": "protocol",
+    "protocol-downgrade": "protocol",
+    "dependency-confusion": "supply-chain",
+    "supply_chain": "supply-chain",
+    "typosquat": "supply-chain",
+    "typosquatting": "supply-chain",
 }
 
 
@@ -112,14 +121,13 @@ def normalize_class(raw: str) -> str:
     "memory-safety:bounds"      → "memory-safety"
     "state" (neutral vocab)     → "memory-safety"
     "auth:bypass"               → "auth"
-    "network:dns-response-…"    → "network"     (unknown top retained)
+    "network:dns-response-…"    → "network"     (legacy top retained)
     "input-validation:hostname" → "input-validation"
     "" or None                  → "other"
 
-    Unknown labels keep their top segment instead of collapsing to
-    "other" — the LLM's own taxonomy is more useful than forcing every
-    unfamiliar class into one bucket, and two reports about the same
-    root cause tend to use the same top label.
+    Unknown labels keep their top segment instead of collapsing to "other"
+    for compatibility with older votes and hand-authored reports. Current
+    prompts constrain new model votes to ``_TOP_LEVEL_CLASSES``.
     """
     if not raw:
         return "other"

@@ -50,11 +50,12 @@ _RUNTIME_DIAGNOSTIC = re.compile(
     re.MULTILINE,
 )
 _MEMORY_SAFETY = re.compile(
-    r"AddressSanitizer: (?:heap-buffer-overflow|(?:heap-)?use-after-free|container-overflow"
+    r"AddressSanitizer: (?:heap-buffer-overflow|(?:heap-)?use-after-free|use-after-poison|container-overflow"
     r"|dynamic-stack-buffer-overflow|stack-buffer-overflow|stack-use-after-return"
     r"|stack-use-after-scope|global-buffer-overflow|alloc-dealloc-mismatch"
     r"|intra-object-overflow|double-free|negative-size-param|bad-free|calloc-overflow"
-    r"|new-delete-type-mismatch|invalid-pointer-pair|[a-z]+-param-overlap)"
+    r"|reallocarray-overflow|pvalloc-overflow|new-delete-type-mismatch"
+    r"|free-size-mismatch|invalid-pointer-pair|[a-z]+-param-overlap)"
 )
 _OTHER_MEMORY_SAFETY = re.compile(
     r"WARNING: ThreadSanitizer: (?:data race|heap-use-after-free)"

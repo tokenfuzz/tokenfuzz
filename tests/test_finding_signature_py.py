@@ -61,6 +61,11 @@ assert_eq("config", fs.normalize_class("config:permissive-default"), "config")
 assert_eq("logic", fs.normalize_class("logic:business-rule"), "logic")
 assert_eq("side-channel", fs.normalize_class("side-channel:cache-timing"), "side-channel")
 assert_eq("dos", fs.normalize_class("dos:algorithmic"), "dos:algorithmic")
+assert_eq("protocol", fs.normalize_class("protocol:request-smuggling"), "protocol top-level")
+assert_eq("protocol", fs.normalize_class("cache-poisoning"), "protocol alias")
+assert_eq("supply-chain", fs.normalize_class("supply-chain:dependency-confusion"),
+          "supply-chain top-level")
+assert_eq("supply-chain", fs.normalize_class("typosquatting"), "supply-chain alias")
 # Any *overflow* label is a memory-safety mechanism — collapse the whole family
 # so a finding's mechanism and its consequence cluster together.
 assert_eq("memory-safety", fs.normalize_class("integer-overflow"), "integer-overflow → memory-safety")
@@ -69,9 +74,9 @@ assert_eq("memory-safety", fs.normalize_class("stack-overflow"), "stack-overflow
 assert_eq("memory-safety", fs.normalize_class("integer-overflow:arithmetic"),
           "integer-overflow:sub → memory-safety")
 assert_eq("network", fs.normalize_class("network:dns-response-validation"),
-          "unknown top retained (network)")
+          "legacy top retained (network)")
 assert_eq("input-validation", fs.normalize_class("input-validation:hostname"),
-          "unknown top retained (input-validation)")
+          "legacy top retained (input-validation)")
 assert_eq("other", fs.normalize_class(""), "empty → other")
 assert_eq("other", fs.normalize_class(None), "None → other")
 assert_eq("other", fs.normalize_class("null"), "literal 'null' → other")

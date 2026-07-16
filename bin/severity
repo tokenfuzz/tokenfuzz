@@ -147,6 +147,7 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     "dos_amplification": ("N", "N", "H", "N", "N", "N", None),
     "integer_overflow":  ("N", "N", "L", "N", "N", "N", None),  # precursor
     # ── Web / application classes ─────────────────────────────────────────
+    "code_execution":    ("H", "H", "H", "N", "N", "N", None),
     "command_injection": ("H", "H", "H", "N", "N", "N", None),
     "deserialization":   ("H", "H", "H", "N", "N", "N", None),
     "ssti":              ("H", "H", "H", "N", "N", "N", None),
@@ -155,6 +156,8 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     "authz_bypass":      ("H", "L", "N", "N", "N", "N", None),
     "idor":              ("L", "L", "N", "N", "N", "N", None),
     "path_traversal":    ("H", "N", "N", "N", "N", "N", None),
+    "arbitrary_file_read": ("H", "N", "N", "N", "N", "N", None),
+    "arbitrary_file_write": ("N", "H", "L", "N", "N", "N", None),
     "xxe":               ("H", "N", "L", "N", "N", "N", None),
     "secrets_exposure":  ("H", "N", "N", "N", "N", "N", None),
     "ssrf":              ("L", "L", "N", "L", "N", "N", None),   # reaches subsequent system
@@ -164,11 +167,15 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     "csrf":              ("N", "L", "N", "N", "N", "N", None),
     "crypto_weakness":   ("H", "N", "N", "N", "N", "N", "P"),    # exploitation conditional
     "injection":         ("L", "L", "N", "N", "N", "N", None),
+    # A sandbox/VM/interpreter escape fully compromises both the sandboxed
+    # vulnerable system and the escaped-to host (the subsequent system).
+    "sandbox_escape":    ("H", "H", "H", "H", "H", "H", None),
     # ── Recon / reasoning-confirmed ───────────────────────────────────────
     "protocol_state":    ("N", "H", "N", "N", "N", "N", None),
     "logic_regression":  ("L", "L", "N", "N", "N", "N", None),
-    # "unknown" is intentionally absent: an unclassified crash gets no CVSS
-    # vector (emitting one would be a number dressed as a standard).
+    # "unknown" and "undefined_behavior" are intentionally absent: neither
+    # supplies a security consequence from which CVSS impact can be derived.
+    # Emitting a number for either would be a number dressed as a standard.
 }
 
 # Primitive classes whose impact claims code-execution-capable corruption or
@@ -879,7 +886,7 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
 
     # Invalid frees (free of a non-malloc'd pointer, alloc/dealloc mismatch)
     # are the same allocator-state corruption family as double-free.
-    if re.search(r"\bdouble[- ]free\b|"
+    if re.search(r"\bdouble[- ]free\b|\bbad[- ]free\b|"
                  r"attempting free on address which was not malloc|"
                  r"\balloc[- ]dealloc[- ]mismatch\b|\binvalid[- ]free\b", t):
         return "double_free", "double-free / invalid free"
@@ -957,6 +964,15 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
     if re.search(r"\bnegative-size-param\b", t):
         return "heap_write", "negative-size param"
 
+    # These sanitizer diagnostics prove an abortable undefined operation, but
+    # not a memory read/write consequence. Keep them scoreable without
+    # promoting the diagnostic name itself to memory corruption.
+    if re.search(r"\b(?:calloc|reallocarray|pvalloc)[- ]overflow\b|"
+                 r"\binvalid[- ]pointer[- ]pair\b|"
+                 r"\bnew[- ]delete[- ]type[- ]mismatch\b|"
+                 r"\bfree[- ]size[- ]mismatch\b", t):
+        return "undefined_behavior", "sanitizer-confirmed undefined behavior"
+
     # LeakSanitizer memory leaks are a resource-DoS class. Must be matched
     # before the generic "leak(ed|s)" info-disclosure fallback below, which
     # is about *data* leaking, not allocations. The strong LSan tokens are
@@ -988,6 +1004,15 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
         return "info_leak", "uninitialized value (MSan)"
 
     if re.search(r"undefinedbehaviorsanitizer|:[0-9]+:[0-9]+: runtime error:", t):
+        if re.search(r"through pointer to incorrect function type|"
+                     r"does not point to an object of type", t):
+            return "type_confusion", "UBSan type confusion"
+        if re.search(r"with insufficient space for an object of type", t):
+            if rw == "write" or re.search(r"\bstore to address\b", t):
+                return "heap_write", "UBSan insufficient object space WRITE"
+            return "heap_read_small", "UBSan insufficient object space"
+        if re.search(r"variable length array bound evaluates to non-positive", t):
+            return "undefined_behavior", "UBSan non-positive VLA bound"
         if re.search(r"out of bounds|object-size|pointer[- ]overflow", t):
             return "heap_read_small", "UBSan bounds/object-size"
         if "misaligned" in t:
@@ -1098,8 +1123,10 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
 # alone — those generate noise on prose like "no auth bypass observed".
 _WEB_VULN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # RCE-shaped
-    (re.compile(r"\b(?:os|shell|command)[- ]?injection\b|\brce\b|\bremote code execution\b"),
+    (re.compile(r"\b(?:os|shell|command)[- ]?injection\b"),
      "command_injection", "command injection"),
+    (re.compile(r"\barbitrary code execution\b|\brce\b|\bremote code execution\b"),
+     "code_execution", "code execution"),
     (re.compile(r"\b(?:insecure )?deserialization\b|\bunsafe deserialization\b|"
                 r"\bpickle deserialization\b|\bunserialize\b"),
      "deserialization", "insecure deserialization"),
@@ -1117,6 +1144,8 @@ _WEB_VULN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
      "authz_bypass", "authorization bypass"),
     (re.compile(r"\b(?:insecure direct object reference|idor)\b"),
      "idor", "insecure direct object reference"),
+    (re.compile(r"\b(?:sandbox|container|vm) escape\b"),
+     "sandbox_escape", "sandbox escape"),
     # File / network exfil
     (re.compile(r"\b(?:server[- ]side request forgery|ssrf)\b"),
      "ssrf", "server-side request forgery"),
@@ -1124,7 +1153,11 @@ _WEB_VULN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # raw input bytes (testcase paths, corpus content) containing `../..`,
     # which would misclassify a memory-safety or DoS report as traversal.
     # The named phrases are the anchored signal.
-    (re.compile(r"\b(?:path|directory) traversal\b|\barbitrary file (?:read|write|disclosure)\b"),
+    (re.compile(r"\barbitrary file (?:write|overwrite|delete)\b"),
+     "arbitrary_file_write", "arbitrary file write"),
+    (re.compile(r"\barbitrary file (?:read|disclosure)\b"),
+     "arbitrary_file_read", "arbitrary file read"),
+    (re.compile(r"\b(?:path|directory) traversal\b"),
      "path_traversal", "path traversal"),
     (re.compile(r"\b(?:xml external entity|xxe)\b"),
      "xxe", "XML external entity"),
@@ -1258,8 +1291,9 @@ def detect_web_vuln(text_lower: str) -> tuple[str, str] | None:
 # here: it doubles as a sanitizer-ish "uninitialized read" detection, so it
 # stays authoritative.
 _NARRATIVE_ONLY_PRIMITIVES = frozenset({
-    "command_injection", "deserialization", "sqli", "ssti", "authn_bypass",
-    "authz_bypass", "idor", "ssrf", "path_traversal", "xxe",
+    "code_execution", "command_injection", "deserialization", "sqli", "ssti",
+    "authn_bypass", "authz_bypass", "idor", "sandbox_escape", "ssrf",
+    "path_traversal", "arbitrary_file_read", "arbitrary_file_write", "xxe",
     "secrets_exposure", "prototype_pollution", "xss", "open_redirect",
     "csrf", "regex_dos", "crypto_weakness", "injection",
     "protocol_state", "dos_amplification", "logic_regression",
@@ -1273,7 +1307,12 @@ _NARRATIVE_ONLY_PRIMITIVES = frozenset({
 # review-needed instead of being forced into a score.
 _VALIDATED_CLASS_PRIMITIVES = {
     "boundary:context-confusion": "logic_regression",
+    "boundary:arbitrary-file-write": "arbitrary_file_write",
+    "boundary:path-traversal": "path_traversal",
+    "boundary:path-traversal-read": "arbitrary_file_read",
+    "boundary:path-traversal-write": "arbitrary_file_write",
     "boundary:resource-substitution": "logic_regression",
+    "boundary:sandbox-escape": "sandbox_escape",
     "boundary:uri-filter-bypass": "path_traversal",
     "deserialization:unsafe": "deserialization",
     "dos:amplification": "dos_amplification",
@@ -1286,8 +1325,14 @@ _VALIDATED_CLASS_PRIMITIVES = {
     "dos:resource-exhaustion": "dos_amplification",
     "dos:stack-exhaustion": "stack_exhaustion",
     "info-disclosure:local-file": "info_leak",
+    "info-disclosure:arbitrary-file-read": "arbitrary_file_read",
+    "info-disclosure:path-traversal": "path_traversal",
+    "info-disclosure:path-traversal-read": "arbitrary_file_read",
     "info-disclosure:xxe": "xxe",
+    "injection:code-execution": "code_execution",
+    "injection:command": "code_execution",
     "injection:mutation-xss": "xss",
+    "injection:python-code": "code_execution",
     "injection:terminal": "injection",
     "injection:terminal-escape": "injection",
     "logic:identifier-truncation": "logic_regression",
@@ -1300,6 +1345,13 @@ _VALIDATED_CLASS_PRIMITIVES = {
     "memory-safety:uninit": "info_leak",
     "memory-safety:use-after-free": "uaf_read",
     "race:resource-selection": "protocol_state",
+    # Historical accepted labels from open-vocabulary quality votes. These are
+    # exact consequence-bearing aliases; broad filesystem/integrity fallbacks
+    # would be ambiguous and therefore remain intentionally absent.
+    "file-write:path-traversal": "arbitrary_file_write",
+    "filesystem:path-traversal-read": "arbitrary_file_read",
+    "filesystem:path-traversal-write": "arbitrary_file_write",
+    "integrity:path-traversal": "arbitrary_file_write",
 }
 
 

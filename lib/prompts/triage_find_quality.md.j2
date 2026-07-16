@@ -137,17 +137,21 @@ substantive content (not its hedging) makes it clear the issue is
 purely correctness / data-integrity / robustness with no security
 boundary crossing.
 
-If you accept, also CLASSIFY the issue. Pick the most specific freeform
-label you can in the form "<top-level>:<sub-label>" — e.g.
+If you accept, also CLASSIFY the issue. Use the form
+"<top-level>:<sub-label>". The top-level MUST be one of:
+memory-safety, auth, injection, info-disclosure, crypto, race, boundary,
+deserialization, config, logic, side-channel, dos, protocol, supply-chain,
+other. The sub-label is freeform and should name the concrete mechanism — e.g.
 "memory-safety:bounds", "memory-safety:lifetime", "auth:bypass",
 "auth:session-fixation", "injection:sql", "injection:command",
 "info-disclosure:pii", "crypto:weak-hash", "crypto:reused-iv",
 "race:toctou", "boundary:csp-bypass", "boundary:sandbox-escape",
 "deserialization:unsafe", "config:permissive-default",
-"logic:business-rule", "side-channel:timing", "dos:algorithmic", etc.
-You may invent a new label if none of the above fits — pick whatever
-best describes the actual issue. Do NOT force-fit into "memory-safety"
-or any other class just because it appears more often.
+"logic:business-rule", "side-channel:timing", "dos:algorithmic",
+"protocol:request-smuggling", or "supply-chain:dependency-confusion".
+Invent a new sub-label when needed. If no top-level fits, use
+"other:<specific-sub-label>"; do not invent a new top-level or force-fit the
+issue into a more dramatic class.
 
 Also pick a coarse severity hint: one of info, low, medium, high,
 critical. This is advisory only.

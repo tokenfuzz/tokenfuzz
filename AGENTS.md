@@ -151,7 +151,9 @@ targets, it means reachable through the documented input boundary
 memory-safety crash through a public boundary still goes under `crashes/` even
 when its `Trigger source` (e.g. `call-sequence`, `env`, `race`) falls outside the
 target's `attacker_controls`. Triage keeps it in `crashes/`, adds a contract
-concern, and downgrades the severity (×0.7) — it does not reject it. Do not
+concern, and records the precondition through CVSS `MAT:P`; a truly
+caller-only trigger also receives modified impacts that can floor it to Low.
+There is no flat score multiplier, and triage does not reject it. Do not
 pre-demote such a crash to `findings/` or discard it: file the reproducer and let
 triage score it. (Only harness-only misuse and the auto-quarantine classes below
 are kept out of `crashes/`.)

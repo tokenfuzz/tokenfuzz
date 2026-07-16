@@ -183,6 +183,9 @@ ok("Deriving that size from untrusted input is fine" in sf, "safety: attacker-de
 ok("you MUST still file" in sf, "safety: KEEP mirror (accurate-len / truthful capacity)")
 ok("requires a NUL-terminated C string" in sf, "safety: documented C-string qualifier")
 ok("no untrusted byte sets" not in sf, "safety: absolute allocation-provenance wording removed")
+ok("CVSS `MAT:P`" in sf, "safety: outside controls use the live CVSS mechanism")
+ok("demotes a crash from security to robustness" not in sf and "×0.7" not in sf,
+   "safety: reverted robustness/multiplier wording stays removed")
 
 rc, vp = render_named("validate_trigger_provenance.md.j2", {"target_path": "/t"})
 ok(rc == 0, "validate_trigger_provenance renders")
@@ -193,6 +196,27 @@ ok("destination capacity passed TRUTHFULLY that the library overruns" in vp,
 ok("never on shipped-caller convention alone" in vp, "validator: output minimum must be documented, not convention")
 ok("PUBLIC contract requires a NUL-terminated C string" in vp, "validator: documented C-string qualification")
 ok("keep it (Uncertain)" in vp, "validator: ambiguous minimum preserved as Uncertain")
+
+
+# ─── Closed class vocabulary and threat-model semantics ────────────
+print("\nclass vocabulary and threat-model semantics")
+rc, fq = render_named("triage_find_quality.md.j2", {"body": "sample finding"})
+ok(rc == 0, "finding-quality prompt renders")
+ok("protocol, supply-chain, other" in fq, "quality taxonomy includes protocol and supply-chain")
+ok("do not invent a new top-level" in fq, "quality taxonomy closes top-level label drift")
+
+rc, tm = render_named("suggest_threat_model.md.j2", {
+    "slug": "sampleproj", "upstream_url": "https://example.invalid",
+    "readme": "sample", "api_surface": "sample.h",
+})
+ok(rc == 0, "threat-model prompt renders")
+ok("`MAT:P` precondition" in tm, "threat-model prompt names the live CVSS mechanism")
+ok("demoted from security to robustness" not in tm,
+   "threat-model prompt does not describe the reverted disposition")
+
+agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+ok("×0.7" not in agents and "CVSS `MAT:P`" in agents,
+   "runtime agent contract matches scorer semantics")
 
 
 print(f"\n  \033[1m{PASSED}/{PASSED + FAILED} passed\033[0m")

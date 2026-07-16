@@ -180,11 +180,11 @@ Strategy: S<N>
 ordering you depend on — defaulting to `obeyed` inflates verdicts.
 
 `Trigger source` lists what an external caller must supply to reach the
-crash. The triage matrix demotes a crash from security to robustness when
-any component is outside the target's `attacker_controls` (declared in
-`output/<slug>/target.toml`). This is a **severity** verdict that triage
-applies automatically while the crash **stays in `{{ results_dir }}/crashes/`** —
-it is scored lower, not discarded. It is NOT a reason for you to route a
+crash. When any component is outside the target's `attacker_controls`
+(declared in `output/<slug>/target.toml`), triage keeps the crash and records
+the precondition through CVSS `MAT:P`; a truly caller-only trigger also gets
+modified impacts that can floor it to Low. The crash **stays in
+`{{ results_dir }}/crashes/`** and is not discarded. It is NOT a reason for you to route a
 reproducing crash to `{{ results_dir }}/findings/` or to mark it DISCARDED. If a
 testcase reproduces a sanitizer diagnostic through a public boundary and
 clears the three gate conditions above, file it under `{{ results_dir }}/crashes/`

@@ -469,6 +469,32 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "HWASan tag-mismatch remains a memory-safety crash class",
     )
     check(
+        triage._has_memory_safety_signal(
+            "==1==ERROR: AddressSanitizer: use-after-poison on address 0x1234\n"
+        ),
+        "ASan use-after-poison reaches the crash path that already scores it as UAF",
+    )
+    for diagnostic in (
+        "free-size-mismatch", "reallocarray-overflow", "pvalloc-overflow",
+    ):
+        check(
+            triage._has_memory_safety_signal(
+                f"==1==ERROR: AddressSanitizer: {diagnostic} on address 0x1234\n"
+            ),
+            f"ASan {diagnostic} has admission/scoring parity",
+        )
+    for non_security_diagnostic in (
+        "invalid-allocation-alignment", "odr-violation",
+        "bad-__sanitizer_annotate_contiguous_container",
+    ):
+        check(
+            not triage._has_memory_safety_signal(
+                "==1==ERROR: AddressSanitizer: "
+                f"{non_security_diagnostic}\n"
+            ),
+            f"ASan {non_security_diagnostic} is not promoted without consequence evidence",
+        )
+    check(
         not triage._has_memory_safety_signal(
             "WARNING: ThreadSanitizer: thread leak (pid=1)\n"
         ),

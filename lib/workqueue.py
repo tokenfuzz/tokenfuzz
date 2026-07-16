@@ -150,6 +150,7 @@ AUDIT_PATCH_BOOST_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"\b(?:authn|authentication) bypass\b",
     r"\b(?:authz|authorization|access[- ]?control) bypass\b",
     r"\bprivilege[- ]?escalation\b",
+    r"\b(?:sandbox|container|vm)[- ]?escape\b",
     r"\bidor\b|\binsecure direct object reference\b",
     r"\bsession (?:fixation|hijack(?:ing)?|reuse)\b",
     r"\b(?:jwt|token) (?:bypass|reuse|forgery|confusion)\b",

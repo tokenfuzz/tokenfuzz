@@ -32,11 +32,13 @@ Allowed primitive_keys:
                  type_confusion, heap_write, stack_write, global_write,
                  heap_read_big, heap_read_small, global_read, stack_read,
                  data_race, integer_overflow, null_deref, stack_exhaustion,
-                 bus, memory_leak, oom
-  Web/app:       command_injection, deserialization, sqli, ssti,
-                 authn_bypass, ssrf, path_traversal, authz_bypass, xxe,
+                 undefined_behavior, bus, memory_leak, oom
+  Web/app:       code_execution, command_injection, deserialization, sqli,
+                 ssti, authn_bypass, ssrf, path_traversal,
+                 arbitrary_file_read, arbitrary_file_write, authz_bypass, xxe,
                  secrets_exposure, idor, prototype_pollution, xss,
                  open_redirect, crypto_weakness, csrf, regex_dos, injection
+  Boundary:      sandbox_escape
   Reasoning-confirmed (no sanitizer signal): protocol_state,
                  dos_amplification, logic_regression, info_leak
   Other:         unknown

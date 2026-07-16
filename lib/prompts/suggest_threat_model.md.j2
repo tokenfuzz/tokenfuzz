@@ -1,9 +1,9 @@
 You are helping an audit harness set the threat model for a target project.
 The threat model — `attacker_controls` — declares what an attacker can
-actually supply to the code under audit. The harness uses it to decide
-whether a discovered crash is a security finding or an upstream-robustness
-issue: a crash whose trigger needs something OUTSIDE attacker_controls is
-demoted from security to robustness.
+actually supply to the code under audit. The harness uses it to model crash
+reachability in CVSS: a trigger component outside `attacker_controls` adds a
+`MAT:P` precondition, while a truly caller-only trigger also gets modified
+impacts that can floor it to Low. The crash remains recorded under `crashes/`.
 
 Target:
   slug         = {{ slug }}
