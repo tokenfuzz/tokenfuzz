@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""Build cached alternate ASan configurations without replacing build-asan."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+SCRIPT_ROOT = Path(os.environ.get("SCRIPT_ROOT") or Path(__file__).resolve().parent.parent)
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+import build_config
+import target_config
+from timeout import run_timeout
+
+
+_WIDEN_ATTEMPTS = 2
+_WIDEN_LLM_TIMEOUT_SECONDS = 600
+_WIDEN_TIMEOUT_GRACE_SECONDS = 60
+
+
+def log(message: str) -> None:
+    print(f"[build-configs] {message}", file=sys.stderr, flush=True)
+
+
+@contextlib.contextmanager
+def build_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def selected_suffix(value: str):
+    previous = os.environ.get("AUDIT_BUILD_SUFFIX")
+    os.environ["AUDIT_BUILD_SUFFIX"] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("AUDIT_BUILD_SUFFIX", None)
+        else:
+            os.environ["AUDIT_BUILD_SUFFIX"] = previous
+
+
+def recipe_command(
+    root: Path, config: build_config.BuildConfig, recipe: Path,
+) -> list[str]:
+    command = [
+        str(SCRIPT_ROOT / "bin" / "auto-build-script"),
+        "--src", str(root), "--sanitizer", "asan", "--out", str(recipe),
+    ]
+    if config.widen:
+        command += [
+            "--widen-from", str(root / ".audit" / "build.sh"),
+            "--max-iters", str(_WIDEN_ATTEMPTS),
+            "--llm-timeout-secs", str(_WIDEN_LLM_TIMEOUT_SECONDS),
+        ]
+    else:
+        for flag in config.flags:
+            command.append(f"--extra-flag={flag}")
+    return command
+
+
+def configuration_input_key(
+    root: Path, config: build_config.BuildConfig, base_suffix: str,
+) -> str:
+    """Bind convergence decisions to the primary recipe and source stamp."""
+    digest = hashlib.sha256()
+    digest.update((config.config_id + "\0").encode())
+    for path in (
+        root / ".audit" / "build.sh",
+        root / f"build-asan{base_suffix}" / ".audit-build-stamp",
+    ):
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
+    if not config.widen:
+        try:
+            digest.update(build_config.recipe_path(root, config).read_bytes())
+        except OSError:
+            digest.update(b"<missing-config-recipe>")
+    return digest.hexdigest()
+
+
+def input_stamp_path(recipe: Path) -> Path:
+    return recipe.with_suffix(recipe.suffix + ".input.sha256")
+
+
+def unavailable_path(
+    recipe: Path, base_suffix: str, *, backend: str = "",
+) -> Path:
+    # A generated widening recipe is backend-independent once it succeeds, but
+    # proposal failures are not. An operator who explicitly retries with a
+    # different backend should not inherit the first backend's timeout marker.
+    identity = base_suffix + (f"\0{backend}" if backend else "")
+    environment_id = hashlib.sha256(identity.encode()).hexdigest()[:10]
+    return recipe.with_suffix(recipe.suffix + f".{environment_id}.unavailable")
+
+
+def not_applicable_path(recipe: Path, base_suffix: str) -> Path:
+    environment_id = hashlib.sha256(base_suffix.encode()).hexdigest()[:10]
+    return recipe.with_suffix(recipe.suffix + f".{environment_id}.not-applicable")
+
+
+def write_marker(path: Path, value: str) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(value + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def marker_matches(path: Path, value: str) -> bool:
+    try:
+        return path.read_text(encoding="utf-8").strip() == value
+    except OSError:
+        return False
+
+
+def recipe_timeout_seconds(
+    config: build_config.BuildConfig, build_timeout_seconds: int,
+) -> int:
+    if not config.widen:
+        return build_timeout_seconds * 3
+    # Each proposal may consume its full model and candidate-build budgets.
+    # Leave a small margin for validation and process teardown so attempt two
+    # is not cut off by the enclosing process deadline.
+    return (
+        _WIDEN_ATTEMPTS
+        * (_WIDEN_LLM_TIMEOUT_SECONDS + build_timeout_seconds)
+        + _WIDEN_TIMEOUT_GRACE_SECONDS
+    )
+
+
+def is_fresh(root: Path, config: build_config.BuildConfig, base_suffix: str) -> bool:
+    recipe = build_config.recipe_path(root, config)
+    tree = build_config.build_dir(root, config, base_suffix=base_suffix)
+    if not recipe.is_file() or not build_config.is_ready(tree, recipe):
+        return False
+    if config.widen and not marker_matches(
+        input_stamp_path(recipe), configuration_input_key(root, config, base_suffix)
+    ):
+        return False
+    with selected_suffix(build_config.suffix(config, base_suffix)):
+        return target_config.build_freshness(root, "asan") == "fresh"
+
+
+def materialize(
+    root: Path, config: build_config.BuildConfig, *, base_suffix: str,
+    force: bool, timeout_seconds: int,
+) -> bool:
+    recipe = build_config.recipe_path(root, config)
+    tree = build_config.build_dir(root, config, base_suffix=base_suffix)
+    lock = root / ".audit" / "configs" / f".{config.config_id}.lock"
+    with build_lock(lock):
+        input_key = configuration_input_key(root, config, base_suffix)
+        backend = (
+            os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
+        ) if config.widen else ""
+        unavailable = unavailable_path(recipe, base_suffix, backend=backend)
+        not_applicable = not_applicable_path(recipe, base_suffix)
+        if force:
+            unavailable.unlink(missing_ok=True)
+            not_applicable.unlink(missing_ok=True)
+        elif marker_matches(not_applicable, input_key):
+            log(f"{config.name}: not applicable; regular ASan control is sufficient")
+            return True
+        elif marker_matches(unavailable, input_key):
+            log(
+                f"{config.name}: unavailable for this source/primary recipe; "
+                f"retry with --force"
+            )
+            return False
+        if not force and is_fresh(root, config, base_suffix):
+            log(f"{config.name}: fresh ({tree.name})")
+            return True
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        needs_recipe = (
+            force or not recipe.is_file()
+            or (config.widen and not marker_matches(input_stamp_path(recipe), input_key))
+        )
+        if needs_recipe:
+            log(f"{config.name}: converging {config.config_id}")
+            completed = run_timeout(
+                recipe_command(root, config, recipe),
+                recipe_timeout_seconds(config, timeout_seconds),
+                env=os.environ.copy(),
+            )
+            if completed.returncode == 4 and config.widen:
+                build_config.ready_path(tree).unlink(missing_ok=True)
+                write_marker(not_applicable, input_key)
+                unavailable.unlink(missing_ok=True)
+                log(f"{config.name}: not applicable; regular ASan control is sufficient")
+                return True
+            if completed.returncode or not recipe.is_file():
+                log(f"{config.name}: recipe did not converge (rc={completed.returncode}); primary remains available")
+                write_marker(unavailable, input_key)
+                return False
+            if config.widen:
+                write_marker(input_stamp_path(recipe), input_key)
+            else:
+                # The converged recipe is part of a declared configuration's
+                # retry identity; bind any later build failure to those exact
+                # bytes rather than the pre-convergence "missing" state.
+                input_key = configuration_input_key(root, config, base_suffix)
+        tree.mkdir(parents=True, exist_ok=True)
+        # A failed or interrupted rebuild must never leave a stale tree
+        # selectable merely because its previous readiness proof survived.
+        build_config.ready_path(tree).unlink(missing_ok=True)
+        output_path = recipe.with_suffix(".build.log")
+        log(f"{config.name}: building {tree.name}")
+        with output_path.open("ab") as output, selected_suffix(build_config.suffix(config, base_suffix)):
+            completed = run_timeout(
+                [str(recipe), str(root), str(tree)], timeout_seconds,
+                env=os.environ.copy(), stdout=output, stderr=subprocess.STDOUT,
+            )
+            if completed.returncode or not build_config.produced_artifacts(tree):
+                log(f"{config.name}: build failed (rc={completed.returncode}; log: {output_path})")
+                write_marker(unavailable, input_key)
+                return False
+            target_config.build_write_stamp(root, "asan")
+        build_config.write_recipe_stamp(tree, recipe)
+        build_config.mark_ready(tree, recipe)
+        unavailable.unlink(missing_ok=True)
+        not_applicable.unlink(missing_ok=True)
+        log(f"{config.name}: ready ({tree})")
+        return True
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", default="", help="target slug under targets/ and output/")
+    parser.add_argument("--target-path", default="")
+    parser.add_argument("--target-toml", default="")
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--config", action="append", default=[], help="configuration name or id (repeatable)")
+    selection.add_argument("--all", action="store_true")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--backend", default="",
+        help="model backend for automatic widening (or set BACKEND/ACTIVE_BACKEND)",
+    )
+    parser.add_argument("--timeout-seconds", type=int, default=900)
+    args = parser.parse_args(argv)
+    if args.timeout_seconds <= 0:
+        parser.error("--timeout-seconds must be positive")
+    if args.target:
+        args.target_path = args.target_path or str(SCRIPT_ROOT / "targets" / args.target)
+        args.target_toml = args.target_toml or str(SCRIPT_ROOT / "output" / args.target / "target.toml")
+    if not args.target_path or not args.target_toml:
+        parser.error("pass --target, or both --target-path and --target-toml")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.backend:
+        os.environ["ACTIVE_BACKEND"] = args.backend
+        os.environ["BACKEND"] = args.backend
+    root = Path(args.target_path).expanduser().resolve()
+    toml = Path(args.target_toml).expanduser().resolve()
+    config = target_config.Config(target_root=str(root))
+    target_config.load_toml_into(config, toml)
+    if config.build_system not in {"cmake", "autotools", "meson"} or not config.build_configs:
+        return 0
+    if target_config.build_freshness(root, "asan") != "fresh":
+        log("regular ASan control is missing or stale; prepare build-asan before alternates")
+        return 1
+    selected = config.build_configs if args.all else []
+    for selector in args.config:
+        found = build_config.find(config.build_configs, selector)
+        if found is None:
+            choices = ", ".join(item.name for item in config.build_configs)
+            raise ValueError(f"unknown build config {selector!r}; available: {choices}")
+        if found not in selected:
+            selected.append(found)
+    if any(item.widen for item in selected) and not (
+        os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND")
+    ):
+        raise ValueError(
+            "automatic widening requires --backend <name> or BACKEND/ACTIVE_BACKEND; "
+            "audit and setup preflight supply this automatically"
+        )
+    base_suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    succeeded = 0
+    for item in selected:
+        succeeded += materialize(
+            root, item, base_suffix=base_suffix, force=args.force,
+            timeout_seconds=args.timeout_seconds,
+        )
+    # Callers treat this as additive/fail-open, but a direct invocation must
+    # still report incomplete alternate coverage visibly.
+    return 0 if succeeded == len(selected) else 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError) as exc:
+        print(f"[build-configs] FATAL: {exc}", file=sys.stderr)
+        raise SystemExit(2)

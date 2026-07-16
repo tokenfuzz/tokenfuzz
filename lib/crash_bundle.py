@@ -10,8 +10,11 @@ import re
 import shlex
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Sequence
+
+import stack_frames
 
 
 def should_file(verdict: str, sanitizer: str, runs: int) -> bool:
@@ -26,7 +29,7 @@ def _sha1(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _binary_identity(binary: str | os.PathLike[str] | None) -> dict:
+def binary_identity(binary: str | os.PathLike[str] | None) -> dict:
     """Cheap build identity for a probe binary; empty when it cannot be proven."""
     if not binary:
         return {}
@@ -66,7 +69,7 @@ def verified_probe_context(crash_dir: Path) -> dict | None:
         context = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(context, dict) or context.get("version") not in (1, 2):
+    if not isinstance(context, dict) or context.get("version") not in (1, 2, 3):
         return None
     testcase_name = context.get("testcase")
     if not isinstance(testcase_name, str) or not testcase_name:
@@ -89,7 +92,7 @@ def verified_probe_context(crash_dir: Path) -> dict | None:
     recorded_binary = context.get("binary")
     if not isinstance(recorded_binary, dict) or not recorded_binary:
         return None
-    current_binary = _binary_identity(recorded_binary.get("path"))
+    current_binary = binary_identity(recorded_binary.get("path"))
     if current_binary != recorded_binary:
         return None
     identity = str(context.get("identity") or "")
@@ -112,6 +115,167 @@ def verified_probe_context(crash_dir: Path) -> dict | None:
     except OSError:
         return None
     return context
+
+
+_PRIMARY_DIFFERENTIAL_JSON = ".primary-build-differential.json"
+_PRIMARY_DIFFERENTIAL_SANITIZER = ".primary-build-sanitizer.txt"
+_PRIMARY_DIFFERENTIAL_STATUSES = {
+    "reproduced", "not-reproduced", "different-crash", "inconclusive",
+}
+
+
+def _artifact_path(crash_dir: Path, name: str) -> Path | None:
+    for root in (Path(crash_dir), Path(crash_dir) / ".audit"):
+        path = root / name
+        if path.is_file():
+            return path
+    return None
+
+
+def build_config_metadata(crash_dir: Path) -> dict | None:
+    """Return recorded alternate-build identity from either bundle layout."""
+    path = _artifact_path(Path(crash_dir), ".build-config.json")
+    if path is None:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("id"), str):
+        return None
+    return payload
+
+
+def verified_primary_differential(crash_dir: Path) -> dict | None:
+    """Return a probe-authored alternate-vs-primary result while evidence matches."""
+    crash_dir = Path(crash_dir)
+    context = verified_probe_context(crash_dir)
+    if context is None or not context.get("build_config_id"):
+        return None
+    result_path = _artifact_path(crash_dir, _PRIMARY_DIFFERENTIAL_JSON)
+    sanitizer_path = _artifact_path(crash_dir, _PRIMARY_DIFFERENTIAL_SANITIZER)
+    if result_path is None or sanitizer_path is None:
+        return None
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if not isinstance(result, dict) or result.get("version") != 1:
+            return None
+        if result.get("status") not in _PRIMARY_DIFFERENTIAL_STATUSES:
+            return None
+        if (
+            result.get("context_identity") != context.get("identity")
+            or result.get("testcase_sha1") != context.get("testcase_sha1")
+            or result.get("build_config_id") != context.get("build_config_id")
+            or result.get("primary_sanitizer_sha1") != _sha1(sanitizer_path)
+        ):
+            return None
+        recorded_binary = result.get("primary_binary")
+        if not isinstance(recorded_binary, dict) or not recorded_binary:
+            return None
+        if binary_identity(recorded_binary.get("path")) != recorded_binary:
+            return None
+    except (OSError, ValueError, TypeError):
+        return None
+    return result
+
+
+def _rate(text: str, label: str) -> tuple[int, int] | None:
+    matches = re.findall(
+        rf"^(?:\[run-sanitizer-multi\]\s+)?{re.escape(label)}:\s*(\d+)\s*/\s*(\d+)\s*$",
+        text,
+        re.MULTILINE,
+    )
+    if not matches:
+        return None
+    numerator, denominator = matches[-1]
+    return int(numerator), int(denominator)
+
+
+def _config_name(crash_dir: Path, config_id: str) -> str:
+    payload = build_config_metadata(crash_dir)
+    if payload is None or payload.get("id") != config_id:
+        return ""
+    return str(payload.get("name") or "")
+
+
+def record_primary_differential(
+    crash_dir: Path,
+    primary_sanitizer: Path,
+    primary_result: dict,
+) -> dict | None:
+    """Bind one forced-primary probe result to an alternate-config crash bundle."""
+    crash_dir = Path(crash_dir)
+    context = verified_probe_context(crash_dir)
+    sanitizer = Path(primary_sanitizer)
+    if context is None or not context.get("build_config_id") or not sanitizer.is_file():
+        return None
+    try:
+        primary_text = sanitizer.read_text(encoding="utf-8", errors="replace")
+        alternate_path = crash_dir / "sanitizer.txt"
+        if not alternate_path.is_file():
+            alternate_path = _artifact_path(crash_dir, "sanitizer.txt") or alternate_path
+        alternate_text = alternate_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    primary_binary = primary_result.get("binary")
+    if (
+        primary_result.get("version") != 1
+        or primary_result.get("testcase_sha1") != context.get("testcase_sha1")
+        or primary_result.get("build_config") != "primary"
+        or not isinstance(primary_binary, dict)
+        or not primary_binary
+        or binary_identity(primary_binary.get("path")) != primary_binary
+    ):
+        return None
+    primary_crash = _rate(primary_text, "CRASH_RATE")
+    primary_execution = _rate(primary_text, "EXECUTION_RATE")
+    alternate_signature = stack_frames.crash_signature(alternate_text)
+    primary_signature = stack_frames.crash_signature(primary_text)
+    if (
+        primary_crash == (5, 5)
+        and alternate_signature
+        and primary_signature == alternate_signature
+    ):
+        status = "reproduced"
+    elif primary_crash == (0, 5) and primary_execution == (5, 5):
+        status = "not-reproduced"
+    elif primary_crash == (5, 5) and primary_signature:
+        status = "different-crash"
+    else:
+        status = "inconclusive"
+    destination = crash_dir / _PRIMARY_DIFFERENTIAL_SANITIZER
+    result_path = crash_dir / _PRIMARY_DIFFERENTIAL_JSON
+    result = {
+        "version": 1,
+        "context_identity": context["identity"],
+        "testcase_sha1": context["testcase_sha1"],
+        "build_config_id": context["build_config_id"],
+        "build_config_name": _config_name(crash_dir, context["build_config_id"]),
+        "status": status,
+        "primary_verdict": str(primary_result.get("verdict") or ""),
+        "primary_binary": primary_binary,
+        "primary_crash_rate": list(primary_crash) if primary_crash else None,
+        "primary_execution_rate": list(primary_execution) if primary_execution else None,
+        "alternate_signature": alternate_signature,
+        "primary_signature": primary_signature,
+    }
+    fd, sanitizer_tmp_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=crash_dir)
+    os.close(fd)
+    sanitizer_tmp = Path(sanitizer_tmp_name)
+    json_tmp = result_path.with_name(f".{result_path.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(sanitizer, sanitizer_tmp)
+        result["primary_sanitizer_sha1"] = _sha1(sanitizer_tmp)
+        json_tmp.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(sanitizer_tmp, destination)
+        os.replace(json_tmp, result_path)
+    except OSError:
+        sanitizer_tmp.unlink(missing_ok=True)
+        json_tmp.unlink(missing_ok=True)
+        return None
+    # bin/severity surfaces the configuration and this status as a Fields-table
+    # row in report.md (and thus report.html); no report edit is needed here.
+    return verified_primary_differential(crash_dir)
 
 
 def restore_probe_context(sources: Sequence[Path], destination: Path) -> bool:
@@ -182,16 +346,53 @@ def restore_probe_context(sources: Sequence[Path], destination: Path) -> bool:
         context_tmp.unlink(missing_ok=True)
         return False
     if verified_probe_context(destination) is not None:
+        _restore_primary_differential(sources, destination)
         return True
     (destination / ".probe-identity").unlink(missing_ok=True)
     (destination / ".probe-context.json").unlink(missing_ok=True)
     return False
 
 
-def _identity(testcase: Path, sanitizer: str, mode: str, harness: Path | None, args: Sequence[str]) -> str:
+def _restore_primary_differential(sources: Sequence[Path], destination: Path) -> None:
+    """Best-effort restore of differential sidecars alongside restored context."""
+    candidates: dict[str, tuple[Path, Path]] = {}
+    for source in sources:
+        result = verified_primary_differential(source)
+        result_path = _artifact_path(source, _PRIMARY_DIFFERENTIAL_JSON)
+        sanitizer_path = _artifact_path(source, _PRIMARY_DIFFERENTIAL_SANITIZER)
+        if result is None or result_path is None or sanitizer_path is None:
+            continue
+        key = json.dumps(result, sort_keys=True)
+        candidates[key] = (result_path, sanitizer_path)
+    if len(candidates) != 1:
+        return
+    result_path, sanitizer_path = next(iter(candidates.values()))
+    try:
+        shutil.copy2(result_path, destination / _PRIMARY_DIFFERENTIAL_JSON)
+        shutil.copy2(sanitizer_path, destination / _PRIMARY_DIFFERENTIAL_SANITIZER)
+    except OSError:
+        (destination / _PRIMARY_DIFFERENTIAL_JSON).unlink(missing_ok=True)
+        (destination / _PRIMARY_DIFFERENTIAL_SANITIZER).unlink(missing_ok=True)
+        return
+    if verified_primary_differential(destination) is None:
+        (destination / _PRIMARY_DIFFERENTIAL_JSON).unlink(missing_ok=True)
+        (destination / _PRIMARY_DIFFERENTIAL_SANITIZER).unlink(missing_ok=True)
+
+
+def _identity(
+    testcase: Path, sanitizer: str, mode: str, harness: Path | None,
+    args: Sequence[str], build_config_id: str = "", build_recipe_digest: str = "",
+) -> str:
     argument_data = f"argc={len(args)}\n" + "".join(f"{len(arg)}:{arg}\n" for arg in args)
     argument_hash = hashlib.sha1(argument_data.encode()).hexdigest()
-    return ":".join((_sha1(testcase), sanitizer, mode, _sha1(harness) if harness else "", argument_hash))
+    identity = ":".join((
+        _sha1(testcase), sanitizer, mode, _sha1(harness) if harness else "",
+        argument_hash,
+    ))
+    return (
+        f"{identity}:cfg={build_config_id}@{build_recipe_digest}"
+        if build_config_id else identity
+    )
 
 
 def _write_probe_context(
@@ -204,11 +405,13 @@ def _write_probe_context(
     harness: Path | None,
     args: Sequence[str],
     binary: str | os.PathLike[str] | None,
+    build_config_id: str = "",
+    build_recipe_digest: str = "",
 ) -> None:
     (destination / ".probe-context.json").write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 3 if build_config_id else 1,
                 "identity": identity,
                 "testcase": testcase.name,
                 "testcase_sha1": _sha1(testcase),
@@ -216,7 +419,9 @@ def _write_probe_context(
                 "mode": mode,
                 "harness": bool(harness),
                 "args": list(args),
-                "binary": _binary_identity(binary),
+                "binary": binary_identity(binary),
+                "build_config_id": build_config_id,
+                "build_recipe_sha256": build_recipe_digest,
             },
             sort_keys=True,
         ) + "\n",
@@ -239,15 +444,28 @@ def materialize(
     card: str = "",
     strategy: str = "",
     binary: str | os.PathLike[str] | None = None,
+    build_config=None,
+    build_recipe: str | os.PathLike[str] | None = None,
 ) -> tuple[str, str]:
     testcase_path = Path(testcase)
     sanitizer_path = Path(sanitizer_output)
     harness_path = Path(harness) if harness else None
+    build_config_id = str(getattr(build_config, "config_id", "") or "")
+    build_recipe_path = Path(build_recipe) if build_recipe else None
     if not testcase_path.is_file() or not sanitizer_path.is_file() or (harness_path and not harness_path.is_file()):
         raise FileNotFoundError("bundle input missing")
+    if build_config_id and (build_recipe_path is None or not build_recipe_path.is_file()):
+        raise FileNotFoundError("alternate build recipe missing")
+    build_recipe_digest = (
+        hashlib.sha256(build_recipe_path.read_bytes()).hexdigest()
+        if build_config_id and build_recipe_path is not None else ""
+    )
     crashes = Path(results_dir) / "crashes"
     crashes.mkdir(parents=True, exist_ok=True)
-    identity = _identity(testcase_path, sanitizer, mode, harness_path, args)
+    identity = _identity(
+        testcase_path, sanitizer, mode, harness_path, args,
+        build_config_id, build_recipe_digest,
+    )
     index = crashes / f".probe-filed-{agent}.tsv"
     if index.is_file():
         try:
@@ -261,7 +479,8 @@ def materialize(
                 _write_probe_context(
                     crashes / crash_id, identity=identity, testcase=testcase_path,
                     sanitizer=sanitizer, mode=mode, harness=harness_path,
-                    args=args, binary=binary,
+                    args=args, binary=binary, build_config_id=build_config_id,
+                    build_recipe_digest=build_recipe_digest,
                 )
                 return "DUP", crash_id
     maximum = 0
@@ -276,7 +495,8 @@ def materialize(
                         _write_probe_context(
                             path, identity=identity, testcase=testcase_path,
                             sanitizer=sanitizer, mode=mode, harness=harness_path,
-                            args=args, binary=binary,
+                            args=args, binary=binary, build_config_id=build_config_id,
+                            build_recipe_digest=build_recipe_digest,
                         )
                         return "DUP", path.name
                 except OSError:
@@ -289,12 +509,33 @@ def materialize(
         _write_probe_context(
             destination, identity=identity, testcase=testcase_path,
             sanitizer=sanitizer, mode=mode, harness=harness_path, args=args,
-            binary=binary,
+            binary=binary, build_config_id=build_config_id,
+            build_recipe_digest=build_recipe_digest,
         )
         shutil.copy2(testcase_path, destination / testcase_path.name)
         shutil.copy2(sanitizer_path, destination / "sanitizer.txt")
         if harness_path:
             shutil.copy2(harness_path, destination / harness_path.name)
+        if build_config_id and build_recipe_path is not None:
+            recipe_copy = destination / ".build-config-recipe.sh"
+            shutil.copy2(build_recipe_path, recipe_copy)
+            (destination / ".build-config.json").write_text(
+                json.dumps(
+                    {
+                        "id": build_config_id,
+                        "name": str(getattr(build_config, "name", "")),
+                        "label": str(getattr(build_config, "label", "")),
+                        "features": [
+                            str(feature)
+                            for feature in getattr(build_config, "features", ())
+                            if str(feature).strip()
+                        ],
+                        "recipe_sha256": build_recipe_digest,
+                    },
+                    sort_keys=True,
+                ) + "\n",
+                encoding="utf-8",
+            )
         if args:
             quoted = " ".join(shlex.quote(arg) for arg in args)
             (destination / "repro.cmd").write_text(

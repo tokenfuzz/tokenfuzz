@@ -73,6 +73,14 @@ state**, not the bug mechanics:
 >   (f) corrupting private static metadata or internal descriptor tables that
 >       are only produced by trusted code and never parsed from attacker input.
 
+A machine-recorded `Build config` row naming an alternate configuration is not
+evidence for (d). In-tree optional features advertised by the project's build
+system may ship in supported downstream builds even when the primary control
+does not enable them. Treat primary non-reproduction as a configuration
+prerequisite for severity, not proof that the code is dead or non-shipping.
+Reject under (d) only when source or build documentation affirmatively shows
+that the surface is test-only, internal tooling, or otherwise not shipped.
+
 {{ product_boundary_block }}
 
 # Method

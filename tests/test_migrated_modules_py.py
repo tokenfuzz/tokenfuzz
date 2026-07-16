@@ -329,6 +329,11 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     cold = prompt.cold_start_prompt(context, 1)
     check("Agent 1" in cold and "ROLE: REPRODUCE" in cold, "cold prompt renders role and agent identity")
     check(
+        "BUILD CONFIGURATION" not in cold,
+        "browser prompts do not advertise native alternate-build controls",
+        cold,
+    )
+    check(
         "--role reproduce --strategy S7" in cold
         and "reproduce--strategy" not in cold,
         "cold prompt renders a parseable strategy-bearing state resume command",
@@ -672,6 +677,22 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         check(
             not triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["bytes"]),
             "non-standard argv cannot bypass trigger review",
+        )
+    with mock.patch.object(crash_bundle, "verified_probe_context", return_value={
+        **direct_context, "build_config_id": "wide-id",
+    }), mock.patch.object(crash_bundle, "verified_primary_differential", return_value=None):
+        check(
+            not triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["bytes"]),
+            "alternate-config crash cannot bypass trigger review without a primary differential",
+        )
+    with mock.patch.object(crash_bundle, "verified_probe_context", return_value={
+        **direct_context, "build_config_id": "wide-id",
+    }), mock.patch.object(crash_bundle, "verified_primary_differential", return_value={
+        "status": "reproduced",
+    }):
+        check(
+            triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["bytes"]),
+            "same-fault primary reproduction restores the direct byte-path bypass",
         )
     check(
         not triage._direct_probe_trigger_bypass(direct_crash, direct_target, ["call-sequence"]),
@@ -1365,8 +1386,9 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     check(
         benchmark_preflight.call_count == 1
         and benchmark_preflight.call_args[0][2] == "sample-c"
-        and benchmark_preflight.call_args[0][5:7] == ("codex", "fixture-model"),
-        "benchmark restores the shared sanitizer-build preflight before cells",
+        and benchmark_preflight.call_args[0][5:7] == ("codex", "fixture-model")
+        and benchmark_preflight.call_args.kwargs.get("include_alternates") is False,
+        "benchmark preflights the shared primary sanitizer build without alternate synthesis",
     )
     benchmark_preflight_args.dry_run = True
     with mock.patch.object(

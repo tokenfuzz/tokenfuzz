@@ -217,6 +217,176 @@ with tempfile.TemporaryDirectory() as tmpd:
            detail=f"stderr tail: {proc.stderr[-400:]!r}")
 
 
+# ─── alternate configuration helpers ───────────────────────────────
+
+_ordered = ["-DFIRST=1", "-DVALUE=two words", "-DTHIRD=$(literal)"]
+_script = abs_mod.initial_script("cmake", "asan", _ordered)
+ok(_script.index("-DFIRST=1") < _script.index("-DVALUE=two words") < _script.index("-DTHIRD=$(literal)"),
+   "named config flags retain declared order")
+ok("'-DVALUE=two words'" in _script and "'-DTHIRD=$(literal)'" in _script,
+   "named config flags are shell-quoted as single literal argv entries")
+
+_baseline = (
+    "#!/usr/bin/env bash\nset -eu\nsrc=\"$1\"; build=\"$2\"\n"
+    ": -fsanitize=address -O2 -g1 -DNDEBUG -fno-omit-frame-pointer\n"
+)
+ok(abs_mod.widened_preserves_baseline(_baseline, _baseline + ": -DWITH_X=ON\n")[0],
+   "widen guard accepts added features while retaining the primary contract")
+ok(not abs_mod.widened_preserves_baseline(
+       _baseline, _baseline.replace("-fsanitize=address", ""))[0],
+   "widen guard rejects a candidate that drops the sanitizer")
+ok(abs_mod.widened_adds_advertised_option(
+       _baseline, _baseline + ": -DWITH_PARSER=ON\n", "WITH_PARSER\nBUILD_TESTING", "cmake"),
+   "widen guard requires an advertised feature option")
+ok(not abs_mod.widened_adds_advertised_option(
+       _baseline, _baseline + "# comment only\n", "WITH_PARSER", "cmake"),
+   "widen guard rejects a recipe with no advertised option")
+ok(abs_mod.widened_disables_advertised_option(
+       _baseline, _baseline + ": -DWITH_ICONV=OFF\n", "WITH_ICONV\nWITH_READER", "cmake")
+   == "WITH_ICONV", "widen guard detects a newly disabled primary-default feature")
+ok(abs_mod.widened_disables_advertised_option(
+       _baseline + ": -DWITH_ICONV=OFF\n",
+       _baseline + ": -DWITH_ICONV=OFF -DWITH_READER=ON\n",
+       "WITH_ICONV\nWITH_READER", "cmake") == "",
+   "widen guard permits a disable already present in the primary recipe")
+
+with tempfile.TemporaryDirectory() as _empty_options_tmp:
+    _empty_options_root = Path(_empty_options_tmp)
+    (_empty_options_root / "CMakeLists.txt").write_text(
+        "project(no_options C)\n", encoding="utf-8"
+    )
+    _empty_options_scratch = _empty_options_root / "scratch"
+    _empty_options_scratch.mkdir()
+    ok(abs_mod.widen_features(
+           slug="no-options", build_system="cmake", sanitizer="asan",
+           baseline_script=_baseline, src=_empty_options_root,
+           scratch=_empty_options_scratch, readme_excerpt="",
+           build_timeout_secs=10, llm_timeout_secs=10,
+       ) == "", "widening distinguishes a target with no shipped feature options")
+
+with tempfile.TemporaryDirectory() as _nested_tmp:
+    _nested_root = Path(_nested_tmp)
+    (_nested_root / "CMakeLists.txt").write_text(
+        "add_subdirectory(build/cmake)\n", encoding="utf-8"
+    )
+    _nested_options = _nested_root / "build/cmake/CMakeModules/Options.cmake"
+    _nested_options.parent.mkdir(parents=True)
+    _nested_options.write_text(
+        'option(NESTED_SHIPPED_FEATURE "nested feature" OFF)\n', encoding="utf-8"
+    )
+    ok("NESTED_SHIPPED_FEATURE" in abs_mod.collect_feature_options(_nested_root, "cmake"),
+       "feature collection follows bounded nested CMake source layouts")
+
+ok(abs_mod.is_surface_option("LIB_WITH_LEGACY_DECODER"),
+   "feature filtering keeps shipped decoder surfaces")
+for _non_surface in (
+    "BUILD_SHARED_LIBS", "LIB_BUILD_TESTS", "PROGRAMS_LINK_SHARED",
+    "ENABLE_BENCHMARKS", "MULTITHREADED_COMPILATION",
+):
+    ok(not abs_mod.is_surface_option(_non_surface),
+       f"feature filtering drops non-surface option {_non_surface}")
+
+with tempfile.TemporaryDirectory() as _declared_options_tmp:
+    _declared_root = Path(_declared_options_tmp)
+    (_declared_root / "meson.options").write_text(
+        "option('legacy_decoder', type: 'feature', value: 'auto')\n"
+        "option('build-tests', type: 'boolean', value: false)\n"
+        "option('default_library', type: 'combo', choices: ['shared', 'static'])\n",
+        encoding="utf-8",
+    )
+    _meson_options = abs_mod.collect_feature_options(_declared_root, "meson")
+    ok("legacy_decoder" in _meson_options and "build-tests" in _meson_options,
+       "Meson feature collection preserves option semantics for model selection")
+    ok(abs_mod.widened_adds_advertised_option(
+           _baseline, _baseline + ": -Dlegacy_decoder=enabled\n",
+           _meson_options, "meson"),
+       "Meson widen guard accepts a filtered advertised feature")
+    ok(not abs_mod.widened_adds_advertised_option(
+           _baseline, _baseline + ": -Dbuild-tests=true\n",
+           _meson_options, "meson"),
+       "Meson widen guard does not count test controls as feature coverage")
+    ok(abs_mod.widened_enables_non_surface_option(
+           _baseline, _baseline + ": -Dbuild-tests=true\n", "meson")
+       == "build-tests",
+       "Meson widen guard rejects newly enabled test controls")
+
+    _configure = _declared_root / "configure"
+    _configure.write_text(
+        "#!/bin/sh\n"
+        "echo '  --enable-legacy-decoder  include compatibility decoder'\n"
+        "echo '  --enable-tests           build test programs'\n"
+        "echo '  --enable-shared          build shared library'\n"
+        "echo '  --without-zlib           omit compression support'\n",
+        encoding="utf-8",
+    )
+    _configure.chmod(0o755)
+    _autotools_options = abs_mod.collect_feature_options(_declared_root, "autotools")
+    ok("--enable-legacy-decoder" in _autotools_options
+       and "include compatibility decoder" in _autotools_options,
+       "Autotools feature collection preserves option descriptions")
+    ok(not abs_mod.widened_adds_advertised_option(
+           _baseline, _baseline + ": --enable-tests\n",
+           _autotools_options, "autotools"),
+       "Autotools widen guard does not count test controls as feature coverage")
+
+with tempfile.TemporaryDirectory() as _feedback_tmp:
+    _feedback_root = Path(_feedback_tmp)
+    (_feedback_root / "CMakeLists.txt").write_text(
+        'option(LEGACY_DECODER "compatibility decoder" OFF)\n', encoding="utf-8"
+    )
+    _feedback_scratch = _feedback_root / "scratch"
+    _feedback_scratch.mkdir()
+    _bad_widen = _baseline + ": -DLEGACY_DECODER=MAYBE\n"
+    _good_widen = _baseline + ": -DLEGACY_DECODER=ON\n"
+    _proposals = iter([_bad_widen, _good_widen])
+    _build_results = iter([(1, "configure rejected MAYBE\n"), (0, "built\n")])
+    _feedback_seen = []
+    _saved_ask = abs_mod.ask_llm_for_widened
+    _saved_run = abs_mod.run_script
+    _saved_artifacts = abs_mod.build_produced_artifacts
+    try:
+        def _fake_widened(**kwargs):
+            _feedback_seen.append(kwargs.get("build_log", ""))
+            return next(_proposals)
+        abs_mod.ask_llm_for_widened = _fake_widened
+        abs_mod.run_script = lambda *args, **kwargs: next(_build_results)
+        abs_mod.build_produced_artifacts = lambda _path: True
+        _feedback_result = abs_mod.widen_features(
+            slug="feedback", build_system="cmake", sanitizer="asan",
+            baseline_script=_baseline, src=_feedback_root,
+            scratch=_feedback_scratch, readme_excerpt="",
+            build_timeout_secs=10, llm_timeout_secs=10,
+        )
+    finally:
+        abs_mod.ask_llm_for_widened = _saved_ask
+        abs_mod.run_script = _saved_run
+        abs_mod.build_produced_artifacts = _saved_artifacts
+    ok(_feedback_result == _good_widen,
+       "widening revises and builds after deterministic validation feedback")
+    ok(len(_feedback_seen) == 2 and "configure rejected MAYBE" in _feedback_seen[1],
+       "widening sends the failed candidate build log to the model")
+
+_saved_decide = abs_mod.llm_decide
+_rendered_feedback = []
+try:
+    def _capture_decide(_decision, _keys, prompt, **_kwargs):
+        _rendered_feedback.append(prompt)
+        return {"script": _good_widen}
+    abs_mod.llm_decide = _capture_decide
+    abs_mod.ask_llm_for_widened(
+        slug="feedback", build_system="cmake", sanitizer="asan",
+        baseline_script=_baseline, feature_options="LEGACY_DECODER",
+        readme_excerpt="", timeout_secs=10,
+        current_script=_baseline, build_log="synthetic configure failure",
+    )
+finally:
+    abs_mod.llm_decide = _saved_decide
+ok(len(_rendered_feedback) == 1
+   and "synthetic configure failure" in _rendered_feedback[0]
+   and "{%" not in _rendered_feedback[0],
+   "widening feedback renders through the control-tag-free prompt path")
+
+
 # ─── summary ────────────────────────────────────────────────────────
 
 if _FAILED:

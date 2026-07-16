@@ -128,6 +128,10 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     in scope. **If you cannot tell whether the file ships — or it might be
     reached from a shipped path — ACCEPT.** A wrong reject hides a real
     bug; only reject when the non-shipping role is clear.
+    A `Build config` row naming a non-primary configuration is not itself
+    proof of a non-shipping role: advertised optional in-tree features can
+    ship in supported downstream builds. Require affirmative source or build
+    documentation before rejecting them as non-product code.
 
 Read the substance, not the hedging. Self-deprecating qualifiers in
 the writeup ("mostly robustness, but ...", "may not be exploitable",

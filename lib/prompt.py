@@ -11,6 +11,7 @@ from pathlib import Path
 import structured_state
 import target_config
 import workqueue
+import build_config
 from prompt_render import render_template
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
@@ -295,7 +296,61 @@ def sanitizer_build_directive(context: PromptContext) -> str:
     if config.runner_bin:
         facts.append(f"- `[runner].bin`: `{config.runner_bin}`")
     facts += ["", "Open target.toml only when changing this configuration."]
+    ready: list[str] = []
+    configured_builds = (
+        []
+        if os.environ.get("_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD") == "1"
+        else config.build_configs
+    )
+    for item in configured_builds:
+        recipe = build_config.recipe_path(context.target_root, item)
+        tree = build_config.build_dir(
+            context.target_root, item,
+            base_suffix=os.environ.get("AUDIT_BUILD_SUFFIX", ""),
+        )
+        if (
+            recipe.is_file()
+            and build_config.is_ready(tree, recipe)
+        ):
+            feature_text = f"; surfaces: {_compact(list(item.features))}" if item.features else ""
+            ready.append(f"- `{item.name}` ({item.config_id}){feature_text}")
+    if ready:
+        facts += [
+            "", "Built alternate ASan configurations:", *ready,
+            "Use the assigned configuration below; `PROBE_BUILD_CONFIG=<name>` is available for a deliberate comparison.",
+        ]
     return build_section + "\n\n" + "\n".join(facts)
+
+
+def build_config_assignment_directive(context: PromptContext, agent: int) -> str:
+    if context.is_browser or context.config is None:
+        return ""
+    path = context.results_dir / "state" / f"build-config-{agent}"
+    try:
+        selector = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        selector = ""
+    if not selector:
+        return (
+            "## BUILD CONFIGURATION - PRIMARY\n\n"
+            "This agent is the regular-configuration control. `bin/probe` uses the canonical build; "
+            "do not set `PROBE_BUILD_CONFIG` unless making one explicit differential comparison."
+        )
+    item = build_config.find(context.config.build_configs if context.config else [], selector)
+    if item is None:
+        return ""
+    features = f" Expected added surfaces: `{_compact(list(item.features))}`." if item.features else ""
+    return (
+        f"## BUILD CONFIGURATION - {item.name.upper()}\n\n"
+        f"This agent is assigned alternate ASan configuration `{item.name}` ({item.config_id}). "
+        "`bin/probe` selects it automatically from session state; keep using ordinary `bin/probe` commands."
+        f"{features} Compare a surprising result against `PROBE_BUILD_CONFIG=primary bin/probe ...`."
+    )
+
+
+def agent_build_directive(context: PromptContext, agent: int) -> str:
+    parts = [sanitizer_build_directive(context), build_config_assignment_directive(context, agent)]
+    return "\n\n".join(part for part in parts if part)
 
 
 def harness_build_failures_directive(context: PromptContext) -> str:
@@ -433,7 +488,7 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
             "role_guidance": _role_guidance(context, agent),
             "work_card_directive": work_card_directive(context, agent),
             "targets": _targets(context, mode),
-            "asan_build_directive": sanitizer_build_directive(context),
+            "asan_build_directive": agent_build_directive(context, agent),
             "harness_build_failures_directive": harness_build_failures_directive(context),
             "find_first_directive": find_first_directive(context),
             "mode_lock_line": f"**NO OVERLAP.** Mode lock: {mode}." if context.is_browser else "**NO OVERLAP.** Pick a different subsystem from every other agent.",
@@ -456,7 +511,7 @@ def compact_fresh_prompt(context: PromptContext, agent: int) -> str:
             "audit_fixed_strategy_compact_clause": "",
             "strategy_assignment_line": strategy_brief(context.strategy(agent), context.reference_dir),
             "work_card_directive": work_card_directive(context, agent),
-            "asan_build_directive": sanitizer_build_directive(context),
+            "asan_build_directive": agent_build_directive(context, agent),
             "harness_build_failures_directive": harness_build_failures_directive(context),
             "agent_state_instructions": _agent_state_instructions(context, agent),
             "session_continuation_section": _continuation(context, agent),
@@ -475,7 +530,7 @@ def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
     seed = _continuation(context, agent)
     target_block = _targets(context, mode)
     if not context.is_browser:
-        target_block += "\n\n" + sanitizer_build_directive(context)
+        target_block += "\n\n" + agent_build_directive(context, agent)
         failures = harness_build_failures_directive(context)
         if failures:
             target_block += "\n\n" + failures

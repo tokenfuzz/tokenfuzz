@@ -224,6 +224,11 @@ Every pooled crash that survives triage is bundled under the run's
 `pool/crashes/` tree with a `REPORT.md`, rendered `REPORT.html`, and
 `reproduce.sh`.
 
+Benchmark audit cells are pinned to the canonical primary build and disable
+automatic sibling routing. This keeps backend and condition comparisons on one
+identical compiled surface; widened-build exploration remains an ordinary-audit
+feature rather than a benchmark variable.
+
 To hand a finished run to someone else, `bin/export-benchmark` packages
 it into a self-contained, path-scrubbed archive (`--format zip|tar|dir`),
 taking the same `--backend` / `--target` / `--run-id` selectors as

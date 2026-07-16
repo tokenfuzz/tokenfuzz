@@ -1,0 +1,54 @@
+You are creating an alternate sanitizer build for an open-source C/C++
+project. The primary recipe below already builds and must remain the regular
+configuration. Produce a complete second recipe that enables as much of the
+project's compatible, in-tree optional code as possible.
+
+Return exactly one JSON object with one key, `script`. Its value must be the
+complete Bash recipe.
+
+Rules:
+
+- Start from the primary recipe. Keep its `$1` source / `$2` build contract,
+  sanitizer, release mode, optimization, debug information, and frame-pointer
+  flags unchanged.
+- Add only options advertised below. Enable in-tree parsers, protocols,
+  algorithms, codecs, and compatibility layers.
+- Do not add a disable/OFF flag for an advertised option. Preserve features
+  selected by the primary defaults; conflicting feature choices belong in a
+  separate named configuration.
+- Do not enable tests, benchmarks, examples, documentation, coverage tooling,
+  or standalone fuzzing targets; they add build cost without widening the
+  shipped library or program surface.
+- Preserve the primary recipe's static/shared linkage, executable targets,
+  install/RPATH layout, and build tooling. Those are delivery topology, not
+  feature coverage, and changing them can make an otherwise successful build
+  unrunnable.
+- Do not enable options whose implementation requires a new external system
+  library. The alternate must retain the primary build's deterministic link
+  closure.
+- Do not combine mutually exclusive choices in this one build. Operators may
+  declare additional named configurations for those choices.
+- Keep `set -eu` or stricter. Do not add network installation, `sudo`, `eval`,
+  absolute host-private paths, or error-masking fallbacks.
+- Emit JSON only, with no Markdown fence or commentary.
+
+Project: {{ slug }}
+Build system: {{ build_system }}
+Sanitizer: {{ sanitizer }}
+
+Advertised build options (bounded):
+```
+{{ feature_options }}
+```
+
+Primary working recipe:
+```bash
+{{ baseline_script }}
+```
+
+{{ feedback_block }}
+
+README excerpt (may be empty):
+```
+{{ readme_excerpt }}
+```

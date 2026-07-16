@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,7 @@ SCRIPT_DIR = Path(__file__).absolute().parent
 SCRIPT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
+import build_config  # noqa: E402
 from llm_decide import llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
 
@@ -141,7 +143,7 @@ cmake -S "$src" -B "$build" \\
     -DCMAKE_C_FLAGS="-O2 -g1 -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
     -DCMAKE_CXX_FLAGS="-O2 -g1 -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
     -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=__SAN__" \\
-    -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=__SAN__"
+    -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=__SAN__"__EXTRA_ARGS__
 cmake --build "$build" -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
 """
 
@@ -166,7 +168,7 @@ esac
     CFLAGS="-O2 -g1 -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
     CXXFLAGS="-O2 -g1 -DNDEBUG -fsanitize=__SAN__ -fno-omit-frame-pointer" \\
     LDFLAGS="-fsanitize=__SAN__" \\
-    "$src/configure" $strip_opt )
+    "$src/configure" $strip_opt__EXTRA_ARGS__ )
 ( cd "$build" && make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)" )
 """
 
@@ -179,7 +181,7 @@ meson setup --reconfigure "$build" "$src" \\
     --buildtype=release \\
     -Db_sanitize=__SAN_MESON__ -Db_ndebug=true \\
     -Dc_args="-g1 -fno-omit-frame-pointer" \\
-    -Dcpp_args="-g1 -fno-omit-frame-pointer"
+    -Dcpp_args="-g1 -fno-omit-frame-pointer"__EXTRA_ARGS__
 meson compile -C "$build"
 """
 
@@ -192,18 +194,23 @@ _SAN_TO_CC_FLAG = {
 }
 
 
-def initial_script(build_system: str, sanitizer: str) -> str:
+def _format_extra_args(flags) -> str:
+    return "" if not flags else " " + " ".join(shlex.quote(flag) for flag in flags)
+
+
+def initial_script(build_system: str, sanitizer: str, extra_flags=()) -> str:
     cc_flag = _SAN_TO_CC_FLAG.get(sanitizer, sanitizer)
+    extra = _format_extra_args(extra_flags)
     if build_system == "cmake":
-        return _INITIAL_CMAKE.replace("__SAN__", cc_flag)
+        template = _INITIAL_CMAKE
     if build_system == "autotools":
-        return _INITIAL_AUTOTOOLS.replace("__SAN__", cc_flag)
-    if build_system == "meson":
-        return _INITIAL_MESON.replace("__SAN__", cc_flag).replace(
-            "__SAN_MESON__", cc_flag
-        )
-    die(f"no initial recipe for build system: {build_system!r}")
-    return ""  # unreachable
+        template = _INITIAL_AUTOTOOLS
+    elif build_system == "meson":
+        template = _INITIAL_MESON.replace("__SAN_MESON__", cc_flag)
+    elif build_system != "cmake":
+        die(f"no initial recipe for build system: {build_system!r}")
+        return ""  # unreachable
+    return template.replace("__SAN__", cc_flag).replace("__EXTRA_ARGS__", extra)
 
 
 def run_script(script_path: Path, src: Path, build: Path,
@@ -216,23 +223,7 @@ def run_script(script_path: Path, src: Path, build: Path,
     return proc.returncode, (proc.stdout + proc.stderr)
 
 
-def build_produced_artifacts(build: Path) -> bool:
-    """Heuristic: a build is 'real' if it dropped at least one
-    static archive, shared library, or executable under build/. We do
-    NOT check for a specific filename — the point of this loop is to
-    discover what the project actually emits."""
-    for p in build.rglob("*"):
-        if not p.is_file():
-            continue
-        name = p.name
-        if name.endswith((".a", ".so", ".dylib")):
-            return True
-        # Heuristic for unsuffixed executables under bin/, src/, build root.
-        if (os.access(p, os.X_OK)
-                and not name.endswith((".cmake", ".sh", ".py", ".txt"))
-                and p.stat().st_size > 4_096):
-            return True
-    return False
+build_produced_artifacts = build_config.produced_artifacts
 
 
 # Matches bash's "command not found" diagnostics. Examples this catches:
@@ -324,6 +315,354 @@ def ask_llm_for_revision(*, slug: str, build_system: str, sanitizer: str,
     return script.strip() + "\n"
 
 
+# A widened recipe is an alternate build, never a replacement for the primary
+# recipe. The caller opts in with --widen-from after the primary has already
+# converged, so the extra cost is at most two model decisions and candidate builds.
+_FEATURE_OPTIONS_MAX_BYTES = 8_000
+_CMAKE_OPTION_RE = re.compile(
+    r"\b(?:[A-Za-z_][A-Za-z0-9_]*_option|option|cmake_dependent_option)"
+    r"\s*\(\s*\"?([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+_CMAKE_CACHE_BOOL_RE = re.compile(
+    r"\bset\s*\(\s*\"?([A-Za-z_][A-Za-z0-9_]*)\"?\s+[^)]*\bCACHE\s+BOOL\b",
+    re.IGNORECASE,
+)
+_MESON_OPTION_RE = re.compile(
+    r"\boption\s*\(\s*['\"]([^'\"]+)", re.IGNORECASE,
+)
+_AUTOTOOLS_OPTION_RE = re.compile(r"--[A-Za-z0-9][A-Za-z0-9_-]*")
+_NON_SURFACE_OPTION_RE = re.compile(
+    r"(?:^|_)(?:TESTS?|BENCH(?:MARKS?)?|EXAMPLES?|DOCS?|FUZZ(?:ERS?|ING)?|"
+    r"INSTALL|PACKAGE|CONTRIB|FRAMEWORK|SCCACHE|CCACHE|COVERAGE|REPRODUCIBLE)(?:_|$)"
+    r"|^(?:DEFAULT|BOTH)_LIBRAR(?:Y|IES)$"
+    r"|(?:^|_)(?:BUILD_)?(?:SHARED|STATIC|PROGRAMS?|TOOLS?)(?:_|$)"
+    r"|(?:^|_)PROGRAMS?_LINK(?:_|$)"
+    r"|(?:^|_)(?:MULTITHREADED_)?COMPILATION(?:_|$)",
+    re.IGNORECASE,
+)
+
+
+def is_surface_option(name: str) -> bool:
+    """Keep shipped code choices; drop build/test/link-topology controls."""
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+    return bool(normalized) and not _NON_SURFACE_OPTION_RE.search(normalized)
+
+
+def collect_feature_options(src: Path, build_system: str) -> str:
+    """Return bounded, build-system-advertised option context."""
+    try:
+        if build_system == "cmake":
+            names: list[str] = []
+            seen: set[str] = set()
+            candidates: list[Path] = []
+            # CMake projects commonly keep their real entry point under a
+            # source directory named build/cmake (zstd is one example), so
+            # pruning every "build" directory would miss advertised options.
+            # Walk only four source levels and exclude known generated trees.
+            for dirpath, dirnames, filenames in os.walk(src):
+                directory = Path(dirpath)
+                depth = len(directory.relative_to(src).parts)
+                dirnames[:] = sorted(
+                    name for name in dirnames
+                    if name not in {".git", ".hg", ".audit", "node_modules", "__pycache__"}
+                    and not re.match(r"^build-(?:asan|ubsan|msan|tsan)(?:[-+].*)?$", name)
+                )
+                if depth >= 4:
+                    dirnames[:] = []
+                for filename in sorted(filenames):
+                    if filename == "CMakeLists.txt" or filename.endswith(".cmake"):
+                        candidates.append(directory / filename)
+                        if len(candidates) >= 200:
+                            break
+                if len(candidates) >= 200:
+                    break
+            for path in candidates[:200]:
+                if not path.is_file():
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+                for regex in (_CMAKE_OPTION_RE, _CMAKE_CACHE_BOOL_RE):
+                    for match in regex.finditer(text):
+                        name = match.group(1)
+                        if name not in seen and is_surface_option(name):
+                            seen.add(name)
+                            names.append(name)
+            return "\n".join(names)[:_FEATURE_OPTIONS_MAX_BYTES]
+        if build_system == "meson":
+            for name in ("meson.options", "meson_options.txt"):
+                path = src / name
+                if path.is_file():
+                    # Preserve types, defaults, choices, and descriptions. The
+                    # model needs those semantics to distinguish shipped
+                    # features from dependencies and build-only controls.
+                    return path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )[:_FEATURE_OPTIONS_MAX_BYTES]
+            return ""
+        if build_system == "autotools":
+            configure = src / "configure"
+            if not (configure.is_file() and os.access(configure, os.X_OK)):
+                return ""
+            completed = subprocess.run(
+                [str(configure), "--help"], cwd=src, capture_output=True,
+                text=True, timeout=30, check=False,
+            )
+            # Autoconf-compatible frontends are not uniform: modern SQLite
+            # advertises shipped features as bare flags such as `--fts5` and
+            # `--rtree`, while FFmpeg uses `--enable-*`. Keep the bounded help
+            # text and let the model reason from descriptions instead of
+            # encoding a target-specific option grammar here.
+            return completed.stdout[:_FEATURE_OPTIONS_MAX_BYTES]
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return ""
+
+
+_RELEASE_MARKERS = (
+    "-DNDEBUG", "CMAKE_BUILD_TYPE=Release", "b_ndebug=true",
+    "--buildtype=release", "buildtype=release",
+)
+_BASELINE_MUST_KEEP = ("-g1", "-fno-omit-frame-pointer")
+_OPT_RE = re.compile(r"-O(?:[0-3sgz]|fast)\b")
+
+
+def widened_preserves_baseline(baseline: str, widened: str) -> tuple[bool, str]:
+    sanitizer = re.search(r"-fsanitize=[A-Za-z,]+", baseline)
+    if sanitizer and sanitizer.group(0) not in widened:
+        return False, f"dropped {sanitizer.group(0)}"
+    if any(value in baseline for value in _RELEASE_MARKERS) and not any(
+        value in widened for value in _RELEASE_MARKERS
+    ):
+        return False, "dropped release mode"
+    optimization = _OPT_RE.findall(baseline)
+    if optimization and optimization[-1] not in widened:
+        return False, f"dropped optimization level {optimization[-1]}"
+    for token in _BASELINE_MUST_KEEP:
+        if token in baseline and token not in widened:
+            return False, f"dropped {token}"
+    return True, ""
+
+
+def widened_adds_advertised_option(
+    baseline: str, widened: str, feature_options: str, build_system: str,
+) -> bool:
+    if baseline.strip() == widened.strip():
+        return False
+    if build_system == "cmake":
+        names = feature_options.splitlines()
+    elif build_system == "meson":
+        names = [
+            name for name in _MESON_OPTION_RE.findall(feature_options)
+            if is_surface_option(name)
+        ]
+    else:
+        names = [
+            name for name in _AUTOTOOLS_OPTION_RE.findall(feature_options)
+            if is_surface_option(name)
+        ]
+    baseline_lower = baseline.lower()
+    widened_lower = widened.lower()
+    return any(
+        name.strip() and name.lower() not in baseline_lower and name.lower() in widened_lower
+        for name in names
+    )
+
+
+def widened_enables_non_surface_option(
+    baseline: str, widened: str, build_system: str,
+) -> str:
+    """Name a newly enabled test/topology option, or return an empty string."""
+    if build_system in {"cmake", "meson"}:
+        for name, value in re.findall(
+            r"-D([A-Za-z0-9_-]+)\s*=\s*([^\s\\]+)", widened
+        ):
+            setting = f"-D{name}={value}"
+            if (
+                setting not in baseline
+                and not is_surface_option(name)
+                and value.lower() not in {"false", "disabled", "off", "no", "0"}
+            ):
+                return name
+        return ""
+    baseline_options = set(_AUTOTOOLS_OPTION_RE.findall(baseline))
+    for option in _AUTOTOOLS_OPTION_RE.findall(widened):
+        if (
+            option not in baseline_options
+            and option.startswith(("--enable-", "--with-"))
+            and not is_surface_option(option)
+        ):
+            return option
+    return ""
+
+
+def widened_disables_advertised_option(
+    baseline: str, widened: str, feature_options: str, build_system: str,
+) -> str:
+    """Name a newly disabled shipped option, or return an empty string."""
+    if build_system == "cmake":
+        for name in feature_options.splitlines():
+            if not name.strip():
+                continue
+            disabled = re.compile(
+                rf"-D{re.escape(name)}\s*=\s*(?:OFF|FALSE|NO|0)(?:\s|$)",
+                re.IGNORECASE,
+            )
+            if disabled.search(widened) and not disabled.search(baseline):
+                return name
+        return ""
+    if build_system == "meson":
+        names = _MESON_OPTION_RE.findall(feature_options)
+        for name in names:
+            disabled = re.compile(
+                rf"-D{re.escape(name)}\s*=\s*(?:false|disabled|off|no|0)(?:\s|$)",
+                re.IGNORECASE,
+            )
+            if disabled.search(widened) and not disabled.search(baseline):
+                return name
+        return ""
+    for option in re.findall(r"--(?:disable|without)-[A-Za-z0-9_-]+", widened):
+        if option not in baseline:
+            return option
+    return ""
+
+
+def ask_llm_for_widened(
+    *, slug: str, build_system: str, sanitizer: str, baseline_script: str,
+    feature_options: str, readme_excerpt: str, timeout_secs: int,
+    current_script: str = "", build_log: str = "",
+) -> str | None:
+    feedback_block = ""
+    if current_script:
+        feedback_block = (
+            "The previous widened candidate failed. Revise it rather than "
+            "returning the unchanged primary recipe.\n\n"
+            "Previous widened candidate:\n"
+            "```bash\n"
+            f"{current_script}\n"
+            "```\n\n"
+            "Failure or harness-validation feedback:\n"
+            "```\n"
+            f"{build_log[-_BUILD_LOG_TAIL_BYTES:]}\n"
+            "```"
+        )
+    prompt = render_template("auto_build_widen_features.md.j2", {
+        "slug": slug,
+        "build_system": build_system,
+        "sanitizer": sanitizer,
+        "baseline_script": baseline_script,
+        "feature_options": feature_options,
+        "readme_excerpt": readme_excerpt,
+        "feedback_block": feedback_block,
+    })
+    result = llm_decide("build-script-widen-features", "script", prompt, timeout=timeout_secs)
+    script = result.get("script") if isinstance(result, dict) else None
+    return script.strip() + "\n" if isinstance(script, str) else None
+
+
+def _widen_candidate_rejection(
+    baseline_script: str, script: str, options: str, build_system: str,
+) -> str:
+    non_surface = widened_enables_non_surface_option(
+        baseline_script, script, build_system
+    )
+    if non_surface:
+        return f"candidate enables non-shipping build surface ({non_surface})"
+    if not widened_adds_advertised_option(
+        baseline_script, script, options, build_system
+    ):
+        return "candidate adds no advertised build option"
+    disabled = widened_disables_advertised_option(
+        baseline_script, script, options, build_system
+    )
+    if disabled:
+        return f"candidate disables primary surface ({disabled})"
+    ok, reason = validate_proposed_script(script)
+    if ok:
+        ok, reason = widened_preserves_baseline(baseline_script, script)
+    return "" if ok else reason
+
+
+def widen_features(
+    *, slug: str, build_system: str, sanitizer: str, baseline_script: str,
+    src: Path, scratch: Path, readme_excerpt: str, build_timeout_secs: int,
+    llm_timeout_secs: int, max_iters: int = 2,
+) -> str | None:
+    options = collect_feature_options(src, build_system)
+    if not options.strip():
+        info("widen: no advertised build options found; keeping primary-only coverage")
+        return ""
+    script = ask_llm_for_widened(
+        slug=slug, build_system=build_system, sanitizer=sanitizer,
+        baseline_script=baseline_script, feature_options=options,
+        readme_excerpt=readme_excerpt, timeout_secs=llm_timeout_secs,
+    )
+    if script is None:
+        decision_log = os.environ.get("LLM_DECIDE_LOG") or (
+            f"{os.environ.get('LOGDIR') or '/tmp'}/llm-decisions.log"
+        )
+        info(
+            "widen: model did not return a usable recipe "
+            f"(timeout/backend/JSON failure; see {decision_log})"
+        )
+        return None
+    for iteration in range(1, max_iters + 1):
+        rejection = _widen_candidate_rejection(
+            baseline_script, script, options, build_system
+        )
+        if rejection:
+            log = f"[harness validation] {rejection}\n"
+            info(f"widen: iteration {iteration} rejected: {rejection}")
+        else:
+            candidate = scratch / "widen.candidate.sh"
+            candidate.write_text(script, encoding="utf-8")
+            candidate.chmod(0o755)
+            build = scratch / f"widen-build-{iteration}"
+            shutil.rmtree(build, ignore_errors=True)
+            build.mkdir(parents=True)
+            started = time.time()
+            try:
+                returncode, log = run_script(
+                    candidate, src, build, build_timeout_secs
+                )
+            except subprocess.TimeoutExpired:
+                returncode, log = 124, "[timeout]\n"
+            produced = returncode == 0 and build_produced_artifacts(build)
+            (scratch / f"widen-build-{iteration}.log").write_text(
+                log, encoding="utf-8", errors="replace"
+            )
+            info(
+                f"widen: iteration {iteration} rc={returncode} "
+                f"elapsed={time.time() - started:.1f}s produced_artifacts={produced}"
+            )
+            if produced:
+                return script
+        if iteration == max_iters:
+            break
+        revised = ask_llm_for_widened(
+            slug=slug, build_system=build_system, sanitizer=sanitizer,
+            baseline_script=baseline_script, feature_options=options,
+            current_script=script, build_log=log,
+            readme_excerpt=readme_excerpt, timeout_secs=llm_timeout_secs,
+        )
+        if revised is None or revised.strip() == script.strip():
+            break
+        script = revised
+    return None
+
+
+def write_recipe(out: Path, script: str, provenance: str) -> None:
+    body = script.split("\n", 1)[1] if script.startswith("#!") and "\n" in script else script
+    out.write_text(
+        "#!/usr/bin/env bash\n"
+        "# AUTO-GENERATED by bin/auto-build-script.\n"
+        f"# {provenance}\n"
+        "# Contract: argv = <src-dir> <build-dir>. Idempotent. Deterministic.\n"
+        + body,
+        encoding="utf-8",
+    )
+    out.chmod(0o755)
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--src", required=True, help="upstream source tree")
@@ -337,7 +676,21 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--build-timeout-secs", type=int, default=900)
     ap.add_argument("--llm-timeout-secs", type=int, default=60)
     ap.add_argument("--keep-scratch", action="store_true")
+    ap.add_argument(
+        "--extra-flag", action="append", default=[],
+        help="ordered configure/setup argument for a named build configuration (repeatable)",
+    )
+    ap.add_argument(
+        "--widen-from", default="", metavar="RECIPE",
+        help="create a feature-widened alternate from an existing working recipe",
+    )
     args = ap.parse_args(argv)
+
+    # Keep arguments as an ordered argv vector. Quoting happens only when they
+    # are embedded in the generated shell recipe.
+    build_config.validate_flags(args.extra_flag)
+    if args.widen_from and args.extra_flag:
+        die("--widen-from and --extra-flag are mutually exclusive")
 
     src = Path(args.src).expanduser().absolute()
     if not src.is_dir():
@@ -358,8 +711,40 @@ def main(argv: list[str]) -> int:
     info(f"scratch={scratch}")
 
     slug = src.name
-    script = initial_script(build_system, args.sanitizer)
     readme_excerpt = read_readme_excerpt(src)
+
+    if args.widen_from:
+        baseline_path = Path(args.widen_from).expanduser().absolute()
+        try:
+            baseline = baseline_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            die(f"cannot read --widen-from recipe: {exc}")
+        ok, reason = validate_proposed_script(baseline)
+        if not ok:
+            die(f"--widen-from recipe is invalid: {reason}")
+        widened = widen_features(
+            slug=slug, build_system=build_system, sanitizer=args.sanitizer,
+            baseline_script=baseline, src=src, scratch=scratch,
+            readme_excerpt=readme_excerpt,
+            build_timeout_secs=args.build_timeout_secs,
+            llm_timeout_secs=args.llm_timeout_secs,
+            max_iters=args.max_iters,
+        )
+        if widened == "":
+            die("feature widening is not applicable to this target", rc=4)
+        if widened is None:
+            die("feature widening did not produce a distinct working recipe", rc=3)
+        write_recipe(
+            out, widened,
+            f"build_system={build_system} sanitizer={args.sanitizer} widened_from={baseline_path.name}",
+        )
+        info(f"widen: wrote {out}")
+        print(str(out))
+        if not args.keep_scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
+        return 0
+
+    script = initial_script(build_system, args.sanitizer, args.extra_flag)
 
     # Write the candidate script next to scratch each iteration so the
     # build can be inspected on failure.
@@ -445,22 +830,17 @@ def main(argv: list[str]) -> int:
         sys.stderr.write("\n")
         die("did not converge", rc=3)
 
+    # The converged script must retain the shell-quoted spelling. Requiring the
+    # raw text alone could accept an LLM revision that unquoted shell syntax.
+    dropped = [flag for flag in args.extra_flag if shlex.quote(flag) not in script]
+    if dropped:
+        die(f"converged configuration dropped required flag(s): {dropped}", rc=3)
+
     # Persist the working script. Add a provenance header.
-    header = (
-        "#!/usr/bin/env bash\n"
-        "# AUTO-GENERATED by bin/auto-build-script.\n"
-        f"# build_system={build_system} sanitizer={args.sanitizer} converged_after={i} iters\n"
-        "# Contract: argv = <src-dir> <build-dir>. Idempotent. Deterministic.\n"
-        "# Re-run bin/auto-build-script to regenerate after an upstream\n"
-        "# build-system change.\n"
+    write_recipe(
+        out, script,
+        f"build_system={build_system} sanitizer={args.sanitizer} converged_after={i} iters",
     )
-    # Drop the candidate's own shebang line before splicing in our header
-    # so we don't end up with two shebangs.
-    body = script
-    if body.startswith("#!"):
-        body = body.split("\n", 1)[1] if "\n" in body else ""
-    out.write_text(header + body, encoding="utf-8")
-    os.chmod(out, 0o755)
     info(f"converged: wrote {out}")
     print(str(out))
     if not args.keep_scratch:

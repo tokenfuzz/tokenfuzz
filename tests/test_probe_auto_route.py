@@ -104,6 +104,14 @@ class ProbeAutoRouteTests(unittest.TestCase):
         self.assertNotIn("build-asan-empty", proc.stdout)
         self.assertNotIn("build-asan/bin/myrunner", proc.stdout)
 
+    def test_enumeration_skips_unready_managed_configuration(self) -> None:
+        unready = self.target / "build-asan+cfg-wide-deadbeef00" / "bin" / "myrunner"
+        unready.parent.mkdir(parents=True)
+        self.write_runner(unready, True)
+        proc = self.route_cli("enumerate", str(self.target), str(self.canonical))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn(str(unready), proc.stdout)
+
     def test_probe_routes_and_caches_the_working_sibling(self) -> None:
         proc = self.run_probe()
         output = proc.stdout + proc.stderr

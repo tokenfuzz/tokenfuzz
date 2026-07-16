@@ -319,6 +319,34 @@ class SetupTargetTests(unittest.TestCase):
         self.assertTrue((target / "build-asan" / "langbuild").is_file())
         self.assertIn("materializing asan build", process.stdout)
 
+    def test_build_supplies_backend_when_materializing_widened_config(self) -> None:
+        target = self.make_build_target("widebuild")
+        self.build_recipe(target)
+        config = self.config("widebuild")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "widebuild"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/widebuild"\nbuild_widening = true\n'
+        )
+        capture = self.temp / "build-config-backend"
+        helper = self.harness / "bin" / "build-configs"
+        helper.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            f"pathlib.Path({str(capture)!r}).write_text("
+            "os.environ.get('ACTIVE_BACKEND', '') + '\\n' + ' '.join(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        process = self.setup(
+            "widebuild", "--build",
+            environment={"LLM_DECIDE_DISABLE": "1", "ACTIVE_BACKEND": "codex"},
+        )
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        invocation = capture.read_text(encoding="utf-8")
+        self.assertTrue(invocation.startswith("codex\n"), invocation)
+        self.assertIn("--backend codex", invocation)
+
     def test_build_does_not_reseed_placeholder_configuration(self) -> None:
         (self.harness / "bin" / "auto-build-script").symlink_to(ROOT / "bin" / "auto-build-script")
         target = self.make_build_target("phtarget")

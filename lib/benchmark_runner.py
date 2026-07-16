@@ -664,7 +664,13 @@ def run_harness(
         command += ["--model", model]
     command += ["--experiment", experiment]
     environment = os.environ.copy()
-    environment["SCRIPT_ROOT"] = str(facade)
+    environment.update({
+        "SCRIPT_ROOT": str(facade),
+        # Benchmark cells must differ by the tested condition/backend, not by
+        # whichever backend happened to synthesize a widened build recipe.
+        "_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD": "1",
+        "PROBE_AUTO_ROUTE": "0",
+    })
     if agents is not None:
         environment["NUM_AGENTS"] = str(agents)
     if wall:
@@ -1099,7 +1105,7 @@ def preflight_build(args: argparse.Namespace, bench_dir: Path, model: str) -> No
     runner_preflight.validate(config, log)
     build_preflight.refresh(
         SCRIPT_ROOT, target_root, args.target, config, bench_dir,
-        args.backend, model, log,
+        args.backend, model, log, include_alternates=False,
     )
 
 

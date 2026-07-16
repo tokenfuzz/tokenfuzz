@@ -44,6 +44,29 @@ bin/suggest-peers "$TARGET" --apply --force
 See [Add a target](../getting-started/add-a-target.md) for the workflow and
 [Target config](target-toml.md) for field definitions.
 
+### Prepare alternate build configurations
+
+```bash
+bin/build-configs --target "$TARGET" --all --backend "$BACKEND"
+bin/build-configs --target "$TARGET" --config compact
+```
+
+Native target setup and audit preflight run the first command automatically.
+Use it directly to inspect or retry one configuration. Alternate builds are
+cached ASan siblings; failure leaves the canonical `build-asan` control usable.
+Automatic audit preflight spends at most ten minutes total on alternates, then
+warns and starts on the primary. Run `bin/setup-target --build` or
+`bin/build-configs` explicitly when a larger target needs longer preparation.
+The backend is needed only for model-guided `widen = true`; declared flag
+configurations do not need it. Audit and setup preflight provide their selected
+backend automatically. Widening makes at most two proposals on that backend:
+an initial candidate, then one revision informed by harness validation or the
+failed build log. Each model call has a 600-second ceiling. It never switches
+backends implicitly.
+An unavailable result is cached for the same source, primary recipe, and model
+backend. After fixing a transient toolchain problem, retry explicitly with
+`--force`.
+
 ## Run an audit
 
 ```bash
@@ -108,6 +131,17 @@ testcase, and records the verdict in `state/runs.jsonl`.
   without executing target code.
 - Use `--mode browser|js|generic|js-diff` only when automatic mode detection is
   wrong or the testcase deliberately requests differential execution.
+
+During an audit, TokenFuzz keeps at least one reproducer agent on the canonical
+build and rotates one minority slot across ready alternates. For a deliberate
+comparison, use `PROBE_BUILD_CONFIG=<name>`; use
+`PROBE_BUILD_CONFIG=primary` to force the regular build.
+
+After `--confirm` establishes an alternate-config crash, `bin/probe` performs a
+second five-run confirmation on the primary build. The crash report names the
+alternate and records whether the same sanitizer fault reproduced. A clean
+primary result is an environmental prerequisite for severity, not a reason to
+discard a bug in a supported optional feature.
 
 Every testcase begins with native-comment headers:
 

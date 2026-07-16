@@ -39,6 +39,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import build_config
+
 # Industry-wide feature-disabled phrases. Inclusion criterion: the
 # phrase names a *configure-time feature flag that wasn't set in this
 # build* and would succeed against a sibling build with the flag
@@ -147,6 +149,14 @@ def enumerate_sibling_builds(
             continue
         if canonical_build_name and name == canonical_build_name:
             continue
+        # Managed configuration trees remove this proof before rebuilding.
+        # Do not let generic sibling routing race a partial/failed tree merely
+        # because an old executable is still present.
+        if "+cfg-" in name:
+            config_id = name.rsplit("+cfg-", 1)[1]
+            recipe = target_root / ".audit" / "configs" / f"{config_id}.asan.sh"
+            if not build_config.is_ready(child, recipe):
+                continue
         # Only ASan-family builds — UBSan/MSan/TSan binaries answer a
         # different question and would mask the feature-flag mismatch
         # with an unrelated sanitizer mismatch instead.

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -223,6 +224,86 @@ class SeverityTests(unittest.TestCase):
                 result = self.score(self.make_report("heap-buffer-overflow\nWRITE of size 8", **kwargs))
                 self.assertEqual(result["surface_label"], surface)
                 self.assert_metrics(result, **metrics)
+
+    def test_primary_build_prerequisite_is_environmental_not_base_severity(self) -> None:
+        report = self.make_report(
+            "heap-buffer-overflow\nWRITE of size 8",
+            report_id="CRASH-CONFIG",
+        )
+        evidence = {
+            "status": "not-reproduced",
+            "build_config_name": "widened",
+            "build_config_id": "wide-id",
+        }
+        with mock.patch.object(
+            severity.crash_bundle, "verified_primary_differential", return_value=evidence
+        ):
+            result = self.score(report)
+        self.assert_metrics(result, MAT="P")
+        self.assertNotIn("MAT:P", result["cvss"]["base_vector"])
+        self.assertIn("primary-build differential: not-reproduced", result["repro_facts"][-1])
+        self.assertTrue(any("environmental prerequisite" in note for note in result["derivation"]))
+
+    def test_alternate_config_is_surfaced_as_a_fields_table_row(self) -> None:
+        report = self.make_report(
+            "heap-buffer-overflow\nWRITE of size 8", report_id="CRASH-CFGROW",
+        )
+        (report / ".build-config.json").write_text(
+            json.dumps({
+                "id": "widened-abc123",
+                "name": "widened",
+                "label": "widened in-tree features",
+                "features": ["JIT", "16/32-bit APIs"],
+                "recipe_sha256": "deadbeef",
+            }),
+            encoding="utf-8",
+        )
+        evidence = {
+            "status": "not-reproduced",
+            "build_config_name": "widened",
+            "build_config_id": "widened-abc123",
+        }
+        with mock.patch.object(
+            severity.crash_bundle, "verified_primary_differential", return_value=evidence
+        ):
+            result = self.score(report)
+            severity.update_report(report / "report.md", result)
+        text = (report / "report.md").read_text(encoding="utf-8")
+        row = next(line for line in text.splitlines() if line.startswith("| Build config |"))
+        for token in ("widened", "widened-abc123", "JIT", "16/32-bit APIs",
+                      "does not reproduce on the primary build"):
+            self.assertIn(token, row)
+
+        # export-repro migrates hidden audit provenance before triage invokes
+        # severity; the report row must survive that real bundle layout.
+        audit = report / ".audit"
+        audit.mkdir()
+        (report / ".build-config.json").replace(audit / ".build-config.json")
+        evidence["status"] = "reproduced"
+        with mock.patch.object(
+            severity.crash_bundle, "verified_primary_differential", return_value=evidence
+        ):
+            result = self.score(report)
+            severity.update_report(report / "report.md", result)
+        rows = [
+            line for line in (report / "report.md").read_text().splitlines()
+            if line.startswith("| Build config |")
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertIn("also reproduces on the primary build", rows[0])
+        self.assertNotIn("does not reproduce on the primary build", rows[0])
+
+    def test_primary_build_crash_has_no_build_config_row(self) -> None:
+        report = self.make_report(
+            "heap-buffer-overflow\nWRITE of size 8", report_id="CRASH-PRIMARY",
+        )
+        with mock.patch.object(
+            severity.crash_bundle, "verified_primary_differential", return_value=None
+        ):
+            result = self.score(report)
+            severity.update_report(report / "report.md", result)
+        self.assertEqual(result["build_config_field"], "")
+        self.assertNotIn("| Build config |", (report / "report.md").read_text())
 
     def test_local_call_sequence_is_floored_but_bytes_are_not(self) -> None:
         local = self.score(self.make_report(

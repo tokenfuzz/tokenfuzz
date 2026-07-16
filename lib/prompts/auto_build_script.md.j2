@@ -49,13 +49,14 @@ Hard rules:
     `# REQUIRES: <pkg-list>` header comment when the dep is mandatory.
   * The output static archive will be linked into a small harness
     with `-lm -lpthread` and platform frameworks ONLY. To keep that
-    link closure deterministic, AGGRESSIVELY disable optional
-    features that pull in system libraries (zlib, openssl, ssh,
+    link closure deterministic, disable optional features that pull
+    in external system libraries (zlib, openssl, ssh,
     nghttp2, libidn2, libpsl, libssh2, brotli, zstd, ldap, rtmp,
     etc.) unless the failing log specifically demands one of them.
-    The audit's harness exercises the project's core parser/state
-    paths — optional protocol/transport features are rarely the
-    bug surface and always the dep-closure surface.
+    Do not broadly disable the project's own in-tree parsers,
+    protocols, algorithms, codecs, or compatibility layers. When one
+    specific option breaks this build, disable only that option; the
+    widened sibling build covers compatible optional surfaces later.
   * Prefer a static archive output: add `-DBUILD_SHARED_LIBS=OFF`
     (or the project's equivalent — `-Dstatic=true`, `--enable-static
     --disable-shared`) so the maintainer's harness can statically

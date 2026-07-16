@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import hashlib
+import json
 import os
 import re
 import secrets
@@ -3252,8 +3254,27 @@ def main(argv: list[str]) -> int:
         # match the audit's build — same script, same flags, same library
         # naming. Without the file, use the generated build template.
         audit_build_script = ""
-        if cfg.target_root:
-            _abs = Path(cfg.target_root) / ".audit" / "build.sh"
+        recipe_display = ".audit/build.sh" if sanitizer == "asan" else f".audit/build-{sanitizer}.sh"
+        config_metadata = find_first_in_scan(scan_dirs, ".build-config.json")
+        config_recipe = find_first_in_scan(scan_dirs, ".build-config-recipe.sh")
+        if config_metadata is not None:
+            try:
+                metadata = json.loads(config_metadata.read_text(encoding="utf-8"))
+                expected_digest = str(metadata["recipe_sha256"])
+                actual_digest = hashlib.sha256(config_recipe.read_bytes()).hexdigest() if config_recipe else ""
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                die(f"invalid alternate build provenance for {args.crash_id}: {exc}")
+            if not config_recipe or actual_digest != expected_digest:
+                die(
+                    f"alternate build recipe for {args.crash_id} is missing or changed; "
+                    "refusing to export a reproducer for a different configuration"
+                )
+            audit_build_script = config_recipe.read_text(encoding="utf-8", errors="replace")
+            recipe_display = f"captured build config {metadata.get('name') or metadata.get('id')}"
+        elif cfg.target_root:
+            _abs = Path(cfg.target_root) / ".audit" / (
+                "build.sh" if sanitizer == "asan" else f"build-{sanitizer}.sh"
+            )
             # is_file() raises PermissionError when target_root sits under
             # a directory the current user can't stat (e.g. container-
             # authored session-env pointing into /root/... while CI runs
@@ -3277,7 +3298,7 @@ def main(argv: list[str]) -> int:
         # run, so a missing recipe here means that build never completed.
         if not audit_build_script and (build_system or "") in {"cmake", "autotools", "meson"}:
             sys.stderr.write(
-                f"[export-repro] WARN: {cfg.target_root or '<target_root unset>'}/.audit/build.sh "
+                f"[export-repro] WARN: {cfg.target_root or '<target_root unset>'}/{recipe_display} "
                 f"is missing for {build_system} target {cfg.slug!r}; reproduce.sh will use a "
                 f"generic {build_system} template that may not include the target-specific "
                 f"flags the audit build used. Run 'bin/setup-target {cfg.slug} --build' "
@@ -3416,7 +3437,7 @@ def main(argv: list[str]) -> int:
             and AUDIT_BUILD_MARKER not in repro_path.read_text(encoding="utf-8")
         ):
             die(
-                f"[export-repro] internal error: {cfg.target_root}/.audit/build.sh "
+                f"[export-repro] internal error: {recipe_display} "
                 f"was loaded but reproduce.sh for {args.crash_id} did not inline it "
                 f"(build_system={build_system!r}). A reproduce.sh template is not "
                 f"threading audit_build_script into emit_build(); fix the writer so "

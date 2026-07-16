@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 import build_routes  # noqa: E402
+import build_config  # noqa: E402
 
 _PASSED = 0
 _FAILED = 0
@@ -195,6 +196,31 @@ with make_tree() as td:
     assert_eq(
         "build-asan-cmake", names[0],
         "enumerate: mtime-desc order — newest sibling first",
+    )
+
+# Managed configuration siblings require readiness bound to the exact recipe,
+# not merely a leftover marker from an older or interrupted build.
+with make_tree() as td:
+    root = Path(td)
+    canonical = root / "build-asan" / "bin" / "pcre2test"
+    managed = root / "build-asan+cfg-wide-abc" / "bin"
+    managed.mkdir(parents=True)
+    binary = managed / "pcre2test"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    recipe = root / ".audit" / "configs" / "wide-abc.asan.sh"
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text("#!/bin/sh\n")
+    (managed.parent / ".audit-config-ready").write_text("stale\n")
+    assert_true(
+        all(c.build_dir != managed.parent for c in build_routes.enumerate_sibling_builds(root, canonical)),
+        "enumerate: stale managed readiness proof is rejected",
+    )
+    build_config.write_recipe_stamp(managed.parent, recipe)
+    build_config.mark_ready(managed.parent, recipe)
+    assert_true(
+        any(c.build_dir == managed.parent for c in build_routes.enumerate_sibling_builds(root, canonical)),
+        "enumerate: exact managed readiness proof is accepted",
     )
 
 # Absolute-path target_root must work, AND a non-existent target_root

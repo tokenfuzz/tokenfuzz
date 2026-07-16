@@ -127,3 +127,16 @@ PROBE_SANITIZER=msan bin/probe output/<target>/<backend>/results/scratch-1/testc
 
 The selected sanitizer must be enabled for the target. Persistent sanitizer
 policy belongs in `[sanitizer].enabled`, not in the environment.
+
+For an explicit ASan build comparison, select a ready named configuration from
+`target.toml`, or force the canonical control:
+
+```bash
+PROBE_BUILD_CONFIG=compact bin/probe output/<target>/<backend>/results/scratch-1/testcase
+PROBE_BUILD_CONFIG=primary bin/probe output/<target>/<backend>/results/scratch-1/testcase
+```
+
+Normal audits assign this automatically. `PROBE_BUILD_CONFIG` is a one-off
+probe override, not persistent configuration policy. Confirmed crashes from an
+alternate are automatically compared with the primary build; no extra override
+is needed.

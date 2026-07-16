@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 # extensions, harness dispatch, bootstrap commands). Imported as
 # `languages` for the rest of this module.
 import languages
+import build_config
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -337,6 +338,7 @@ def _parse_array_value(val: str) -> list[str]:
 def _parse_simple_toml(text: str) -> dict:
     parsed: dict = {}
     current = parsed
+    array_table_re = re.compile(r"^\s*\[\[([A-Za-z0-9_-]+)\]\]\s*$")
     section_re = re.compile(r"^\s*\[([A-Za-z0-9_-]+)\]\s*$")
     scalar_re = re.compile(r'^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$')
 
@@ -347,6 +349,17 @@ def _parse_simple_toml(text: str) -> dict:
         i += 1
         line = _strip_inline_comment(raw_line).strip()
         if not line:
+            continue
+        array_table = array_table_re.match(line)
+        if array_table:
+            name = array_table.group(1)
+            bucket = parsed.setdefault(name, [])
+            if not isinstance(bucket, list):
+                raise _FallbackTOMLDecodeError(
+                    f"{name} used as both a table and an array of tables"
+                )
+            current = {}
+            bucket.append(current)
             continue
         sec = section_re.match(line)
         if sec:
@@ -1390,6 +1403,9 @@ _NATIVE_BUILD_SYSTEMS = {"cmake", "autotools", "meson"}
 # can't masquerade as a source edit. (The sanitizer build trees themselves are
 # pruned separately, by exact name — see san_build_dirs in build_freshness.)
 _FRESHNESS_PRUNE_DIRS = {".git", ".hg", ".audit", "__pycache__", "node_modules"}
+_SANITIZER_BUILD_DIR_RE = re.compile(
+    r"^build-(?:asan|ubsan|msan|tsan)(?:[-+].*)?$"
+)
 
 
 def _build_dir_for(target_root: Path, san: str) -> Path:
@@ -1408,17 +1424,12 @@ def _source_state_signature(root: Path) -> str:
     this san's own tree) is excluded, while a source-support dir like build-aux/
     is still hashed. Errs toward "changed": any touch flips it (a harmless
     rebuild), but nothing real slips through as unchanged."""
-    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
-    san_build_dirs = {
-        f"build-{s}{sfx}"
-        for s in ("asan", "ubsan", "msan", "tsan")
-        for sfx in ("", suffix)
-    }
     entries: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
             d for d in dirnames
-            if d not in _FRESHNESS_PRUNE_DIRS and d not in san_build_dirs
+            if d not in _FRESHNESS_PRUNE_DIRS
+            and not _SANITIZER_BUILD_DIR_RE.fullmatch(d)
         ]
         for fn in filenames:
             fp = Path(dirpath) / fn
@@ -1536,8 +1547,9 @@ def seed_toml(
     """Seed a starter target.toml — best-effort introspection.
 
     When ``preserve_curated`` is set and out_path already parses, the curated
-    sections a fresh seed cannot re-derive — [threat_model].attacker_controls
-    and the whole [s6_peers] block — are carried over from the existing file
+    sections a fresh seed cannot re-derive — [threat_model].attacker_controls,
+    the whole [s6_peers] block, and build-configuration policy — are carried
+    over from the existing file
     instead of reset to the conservative default (attacker_controls) or dropped
     (s6_peers, which a plain seed never emits). bin/setup-target uses this for a
     placeholder refresh, so filling one unrelated FILL_ME never discards an
@@ -1552,6 +1564,8 @@ def seed_toml(
     # so the render below can substitute them in place of the seed defaults.
     preserved_controls: Optional[list[str]] = None
     preserved_s6: Optional[tuple[str, list[str]]] = None
+    preserved_build_widening: Optional[bool] = None
+    preserved_build_configs: list[dict] = []
     if preserve_curated and out.exists():
         try:
             _existing = parse_toml(out)
@@ -1575,6 +1589,13 @@ def seed_toml(
                         str(_dom) if isinstance(_dom, str) else "",
                         _peers,
                     )
+        if isinstance(_existing.get("build_widening"), bool):
+            preserved_build_widening = _existing["build_widening"]
+        if isinstance(_existing.get("build_config"), list):
+            preserved_build_configs = [
+                dict(row) for row in _existing["build_config"]
+                if isinstance(row, dict)
+            ]
     # Detected up front: declared_cli_names() needs the build system to know
     # which manifest to read when biasing the asan_bin guess below.
     build_system = _detect_build_system(root)
@@ -1643,6 +1664,15 @@ def seed_toml(
         f"upstream_url  = {toml_basic_string(upstream_v)}",
         f"build_system  = {toml_basic_string(build_system_v)}",
         f"pinned_rev    = {toml_basic_string(pinned_v)}",
+        *(
+            [
+                "",
+                "# Keep the production-like primary build and add one cached ASan",
+                "# sibling that enables compatible in-tree features.",
+                f"build_widening = {'true' if (preserved_build_widening if preserved_build_widening is not None else True) else 'false'}",
+            ]
+            if build_system in _NATIVE_BUILD_SYSTEMS else []
+        ),
         "",
         "# Direct CLI binary — what `bin/run-asan generic` runs by default:",
         asan_bin_line,
@@ -1887,6 +1917,22 @@ def seed_toml(
             "peers = [" + ", ".join(toml_basic_string(p) for p in peers) + "]"
         )
 
+    # Build configurations are operator-authored coverage choices. Preserve
+    # them across a placeholder refresh just like the threat model and peers.
+    for row in preserved_build_configs:
+        lines += ["", "[[build_config]]"]
+        for key in ("name", "label"):
+            if isinstance(row.get(key), str) and row[key]:
+                lines.append(f"{key} = {toml_basic_string(row[key])}")
+        if isinstance(row.get("widen"), bool):
+            lines.append(f"widen = {'true' if row['widen'] else 'false'}")
+        for key in ("flags", "features"):
+            values = row.get(key)
+            if isinstance(values, list) and all(isinstance(v, str) for v in values):
+                lines.append(
+                    f"{key} = [" + ", ".join(toml_basic_string(v) for v in values) + "]"
+                )
+
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1912,6 +1958,8 @@ class Config:
     msan_lib: str = ""
     tsan_lib: str = ""
     build_system: str = ""
+    build_widening: bool = False
+    build_configs: list[build_config.BuildConfig] = field(default_factory=list)
     cmake_target: str = ""
     pinned_rev: str = ""
     is_browser: str = "0"
@@ -2189,6 +2237,8 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     cfg.runner_args = []
     cfg.runner_env = []
     cfg.runner_crash_patterns = []
+    cfg.build_widening = False
+    cfg.build_configs = []
     for k, v in parsed.items():
         if k in ("target", "slug") and isinstance(v, str):
             cfg.slug = cfg.slug or v
@@ -2202,6 +2252,8 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
             cfg.cmake_target = v
         elif k == "build_system" and isinstance(v, str):
             cfg.build_system = v
+        elif k == "build_widening" and isinstance(v, bool):
+            cfg.build_widening = v
         elif k == "pinned_rev" and isinstance(v, str):
             cfg.pinned_rev = v
         elif k == "is_browser":
@@ -2242,6 +2294,26 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     # for every consumer of sanitizers_enabled.
     if not cfg.sanitizers_enabled and not cfg.sanitizers_explicitly_disabled:
         cfg.sanitizers_enabled.append("asan")
+
+    # Existing native targets predate the field, so absence adopts the new
+    # primary-preserving widened sibling. An explicit false remains an
+    # operator-visible opt-out. Non-native/browser targets never synthesize it.
+    if "build_widening" not in parsed:
+        cfg.build_widening = cfg.build_system in _NATIVE_BUILD_SYSTEMS and cfg.is_browser not in ("1", "true", "True")
+    if cfg.sanitizers_explicitly_disabled:
+        # Alternate configurations are ASan-only. Keeping them visible in a
+        # findings-only target would mislabel runner probes as alternate work.
+        cfg.build_widening = False
+        cfg.build_configs = []
+    else:
+        cfg.build_configs = build_config.from_parsed(
+            parsed.get("build_config"),
+            include_widened=(
+                cfg.build_widening
+                and cfg.build_system in _NATIVE_BUILD_SYSTEMS
+                and cfg.is_browser not in ("1", "true", "True")
+            ),
+        )
 
     # Normalize any path field that was stored as an audit-machine absolute
     # path (e.g. `auto-repair-target-toml` proposed

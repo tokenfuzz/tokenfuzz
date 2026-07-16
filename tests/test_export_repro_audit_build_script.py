@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import tempfile
 import unittest
@@ -118,6 +120,36 @@ class ExportReproducerAuditBuildTests(unittest.TestCase):
         self.assertNotIn("configure --disable-shared --enable-static", script)
         self.assertRegex(script, r'src="\$\(cd "\$src" && pwd\)"')
         self.assertIn("did not inline it", EXPORT.read_text(encoding="utf-8"))
+
+    def test_alternate_crash_inlines_captured_recipe_not_live_primary(self) -> None:
+        output, results, source = self.make_layout("config-test")
+        self.write_recipe(source, "PRIMARY_SENTINEL")
+        crash = self.write_crash(results, "CRASH-CFG-1")
+        recipe = crash / ".build-config-recipe.sh"
+        recipe.write_text(
+            "#!/usr/bin/env bash\nset -eu\nsrc=\"$1\"; build=\"$2\"\n"
+            "mkdir -p \"$build\"\necho CONFIG_SENTINEL > \"$build/.sentinel\"\n"
+        )
+        (crash / ".build-config.json").write_text(json.dumps({
+            "id": "wide-deadbeef00", "name": "wide",
+            "recipe_sha256": hashlib.sha256(recipe.read_bytes()).hexdigest(),
+        }))
+        proc = self.export(output, crash.name)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        script = (crash / "reproduce.sh").read_text(encoding="utf-8")
+        self.assertIn("CONFIG_SENTINEL", script)
+        self.assertNotIn("PRIMARY_SENTINEL", script)
+
+    def test_alternate_crash_rejects_changed_captured_recipe(self) -> None:
+        output, results, _source = self.make_layout("config-tamper")
+        crash = self.write_crash(results, "CRASH-CFG-2")
+        (crash / ".build-config-recipe.sh").write_text("#!/bin/sh\necho changed\n")
+        (crash / ".build-config.json").write_text(json.dumps({
+            "id": "wide-deadbeef00", "name": "wide", "recipe_sha256": "0" * 64,
+        }))
+        proc = self.export(output, crash.name)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("different configuration", proc.stdout + proc.stderr)
 
 
 if __name__ == "__main__":

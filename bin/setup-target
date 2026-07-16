@@ -318,6 +318,27 @@ class Setup:
         if target_config.refresh_detected_build_fields(self.target_root, self.toml):
             log(f"Refreshed <san>_bin/<san>_lib in {self.toml} from build trees on disk")
 
+        # Keep build-asan as the regular control, then materialize cached ASan
+        # alternates. Alternate failure is intentionally additive/fail-open.
+        build_configs_command = SCRIPT_ROOT / "bin" / "build-configs"
+        if self.args.build and config.build_configs and os.access(build_configs_command, os.X_OK):
+            candidates = self.backend_candidates()
+            command = [
+                str(build_configs_command),
+                "--target-path", str(self.target_root),
+                "--target-toml", str(self.toml), "--all",
+            ]
+            if candidates:
+                command += ["--backend", candidates[0]]
+            if self.args.force:
+                command.append("--force")
+            environment = os.environ.copy()
+            if candidates:
+                environment.update(ACTIVE_BACKEND=candidates[0], BACKEND=candidates[0])
+            completed = subprocess.run(command, env=environment, check=False)
+            if completed.returncode:
+                log("bootstrap: alternate build configurations could not be prepared; primary build is unaffected")
+
     def execute(self) -> int:
         self.prepare_source()
         self.seed_config()

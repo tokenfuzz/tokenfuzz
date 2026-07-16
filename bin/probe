@@ -24,6 +24,7 @@ LIB_DIR = ROOT / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
 import build_routes
+import build_config
 import crash_bundle
 import languages
 import target_config
@@ -31,6 +32,7 @@ import verdict as verdict_lib
 from file_tools import capture_command
 from sanitizer_helpers import file_contains
 from probe_helpers import _nonnegative_int
+from timeout import run_timeout
 
 VALID_MODES = {"auto", "browser", "js", "generic", "js-diff"}
 VALID_SANITIZERS = {"asan", "ubsan", "msan", "tsan", "race", "runner"}
@@ -412,11 +414,22 @@ class Probe:
         self.agent = self._agent_number()
         self.header = parse_header(self.testcase)
         self.mode = self._mode()
-        self.output = self.testcase.with_suffix(".asan.txt") if self.testcase.suffix else Path(str(self.testcase) + ".asan.txt")
+        default_output = self.testcase.with_suffix(".asan.txt") if self.testcase.suffix else Path(str(self.testcase) + ".asan.txt")
+        internal_output = (
+            os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL_OUTPUT", "")
+            if os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL") == "1" else ""
+        )
+        self.output = Path(internal_output) if internal_output else default_output
         self.exec_testcase = prepare_exec_testcase(self.testcase, self.config, self.agent)
         self.want = args.want or derive_want(self.header["target"])
         self.card = self.header["card"] or self._card_from_state()
         self.sanitizer = self._sanitizer()
+        self.base_build_suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+        self.selected_build_config = self._build_config()
+        if self.selected_build_config is not None:
+            os.environ["AUDIT_BUILD_SUFFIX"] = build_config.suffix(
+                self.selected_build_config, self.base_build_suffix
+            )
         self.harness_source: Path | None = None
         self.build_kind = ""
         self.environment = self._environment()
@@ -492,6 +505,39 @@ class Probe:
             raise ValueError(f"sanitizer '{selected}' does not support mode '{self.mode}'")
         return selected
 
+    def _build_config(self) -> build_config.BuildConfig | None:
+        explicit = os.environ.get("PROBE_BUILD_CONFIG", "").strip()
+        selector = explicit
+        if not selector:
+            assignment = Path(self.config.results_dir) / "state" / f"build-config-{self.agent}"
+            try:
+                selector = assignment.read_text(encoding="utf-8").strip()
+            except OSError:
+                selector = ""
+        if not selector or selector == "primary":
+            return None
+        if self.sanitizer != "asan":
+            if explicit:
+                raise ValueError("alternate build configurations are ASan-only; omit PROBE_BUILD_CONFIG for other sanitizers")
+            return None
+        selected = build_config.find(self.config.build_configs, selector)
+        if selected is None:
+            choices = ", ".join(item.name for item in self.config.build_configs)
+            raise ValueError(f"unknown build config {selector!r}; available: {choices or 'none'}")
+        recipe = build_config.recipe_path(self.config.target_root, selected)
+        tree = build_config.build_dir(
+            self.config.target_root, selected, base_suffix=self.base_build_suffix
+        )
+        if not (
+            recipe.is_file()
+            and build_config.is_ready(tree, recipe)
+        ):
+            raise ValueError(
+                f"build config {selected.name!r} is not ready; run "
+                f"bin/build-configs --target {self.config.slug} --config {selected.name}"
+            )
+        return selected
+
     def _environment(self) -> dict[str, str]:
         environment = dict(os.environ)
         environment.update({
@@ -503,6 +549,9 @@ class Probe:
             "ASAN_OUTPUT_FILE": str(self.output), "PROBE_SANITIZER_SELECTED": self.sanitizer,
             "SANITIZER_RUNS": "5" if self.args.confirm else environment.get("SANITIZER_RUNS", "1"),
         })
+        environment["PROBE_BUILD_CONFIG_SELECTED"] = (
+            self.selected_build_config.config_id if self.selected_build_config else "primary"
+        )
         if self.header["hypothesis"]:
             environment["HYPOTHESIS_ID"] = self.header["hypothesis"]
         if self.header["target"]:
@@ -585,6 +634,7 @@ class Probe:
     def dry_run(self) -> int:
         print(
             f"[probe] mode={self.mode} sanitizer={self.sanitizer} asan_output={self.output} "
+            f"build_config={self.selected_build_config.name if self.selected_build_config else 'primary'} "
             f"target={self.header['target']} hypothesis={self.header['hypothesis']} "
             f"want={self.want} card={self.card}"
         )
@@ -595,7 +645,10 @@ class Probe:
 
     def execute(self) -> int:
         confirmation = " confirm=1" if self.args.confirm else ""
-        print(f"[probe] mode={self.mode} testcase={self.testcase} asan_output={self.output}{confirmation}")
+        print(
+            f"[probe] mode={self.mode} testcase={self.testcase} asan_output={self.output}"
+            f" build_config={self.selected_build_config.name if self.selected_build_config else 'primary'}{confirmation}"
+        )
         if self.mode == "js-diff":
             with capture_command(
                 self.command, merge_stderr=True, env=self.environment
@@ -610,6 +663,7 @@ class Probe:
         probe_verdict = self._classify(result)
         result, probe_verdict = self._auto_route(result, probe_verdict)
         self._cap_output()
+        self._write_internal_differential_result(probe_verdict)
         print(f"[probe] verdict={probe_verdict}")
         self._record_state(probe_verdict)
         self._file_crash(probe_verdict)
@@ -654,6 +708,13 @@ class Probe:
             for key in keys:
                 build_routes.record_route(Path(self.config.results_dir), key=key, binary=candidate, feature=feature, canonical_binary=binary)
             self.environment["ASAN_GENERIC_BIN"] = candidate
+            routed_config = build_config.config_for_binary(
+                self.config.build_configs, self.config.target_root, candidate,
+                base_suffix=self.base_build_suffix,
+            )
+            if routed_config is not None:
+                self.selected_build_config = routed_config
+                self.environment["PROBE_BUILD_CONFIG_SELECTED"] = routed_config.config_id
             return completed.returncode, routed
         print(f"[probe] ROUTE_MISS: feature='{feature}' canonical='{binary}' - no sibling build exercised this feature")
         return returncode, current
@@ -695,6 +756,8 @@ class Probe:
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
     def _record_state(self, probe_verdict: str) -> None:
+        if os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL") == "1":
+            return
         hypothesis = self.header["hypothesis"]
         if not hypothesis:
             return
@@ -719,6 +782,8 @@ class Probe:
             )
 
     def _file_crash(self, probe_verdict: str) -> None:
+        if os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL") == "1":
+            return
         runs = int(self.environment["SANITIZER_RUNS"])
         if not crash_bundle.should_file(probe_verdict, self.sanitizer, runs):
             return
@@ -741,10 +806,18 @@ class Probe:
                     else "ASAN_GENERIC_BIN",
                     "",
                 ),
+                build_config=self.selected_build_config,
+                build_recipe=(
+                    build_config.recipe_path(self.config.target_root, self.selected_build_config)
+                    if self.selected_build_config else None
+                ),
             )
         except OSError as exc:
             print(f"[probe] WARNING: crash confirmed but bundle could not be created: {exc}", file=sys.stderr)
             return
+        crash_dir = Path(self.config.results_dir) / "crashes" / crash_id
+        if self.selected_build_config is not None:
+            self._run_primary_differential(crash_dir)
         if status == "FILED":
             print(f"[probe] CRASH FILED: {self.config.results_dir}/crashes/{crash_id} - reproducer + sanitizer.txt copied in; enrich report.md there")
             if self.header["hypothesis"]:
@@ -756,6 +829,96 @@ class Probe:
                 )
         else:
             print(f"[probe] CRASH already filed (identical reproducer): {self.config.results_dir}/crashes/{crash_id}")
+
+    def _write_internal_differential_result(self, probe_verdict: str) -> None:
+        destination = os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL_RESULT", "")
+        if os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL") != "1" or not destination:
+            return
+        binary_key = (
+            f"{self.sanitizer.upper()}_GENERIC_BIN"
+            if self.sanitizer in {"asan", "ubsan", "msan", "tsan"}
+            else "ASAN_GENERIC_BIN"
+        )
+        payload = {
+            "version": 1,
+            "testcase_sha1": hashlib.sha1(self.testcase.read_bytes()).hexdigest(),
+            "build_config": self.selected_build_config.config_id if self.selected_build_config else "primary",
+            "verdict": probe_verdict,
+            "binary": crash_bundle.binary_identity(self.environment.get(binary_key, "")),
+        }
+        path = Path(destination)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+            os.replace(temporary, path)
+        except OSError as exc:
+            temporary.unlink(missing_ok=True)
+            print(f"[probe] WARNING: primary-build comparison result could not be saved: {exc}", file=sys.stderr)
+
+    def _run_primary_differential(self, crash_dir: Path) -> None:
+        if crash_bundle.verified_primary_differential(crash_dir) is not None:
+            return
+        token = f"{os.getpid()}-{time.time_ns()}"
+        primary_output = crash_dir / f".primary-build-run-{token}.txt"
+        primary_result = crash_dir / f".primary-build-run-{token}.json"
+        environment = os.environ.copy()
+        environment.update({
+            "PROBE_BUILD_CONFIG": "primary",
+            "PROBE_AUTO_ROUTE": "0",
+            "_TOKENFUZZ_PRIMARY_DIFFERENTIAL": "1",
+            "_TOKENFUZZ_PRIMARY_DIFFERENTIAL_OUTPUT": str(primary_output),
+            "_TOKENFUZZ_PRIMARY_DIFFERENTIAL_RESULT": str(primary_result),
+        })
+        if self.base_build_suffix:
+            environment["AUDIT_BUILD_SUFFIX"] = self.base_build_suffix
+        else:
+            environment.pop("AUDIT_BUILD_SUFFIX", None)
+        command = [str(BIN_DIR / "probe")]
+        if self.args.mode != "auto":
+            command += ["--mode", self.args.mode]
+        command += ["--confirm", str(self.testcase)]
+        if self.args.args:
+            command += ["--", *self.args.args]
+        try:
+            # Backstop against a wedged child probe. It already bounds each of
+            # its 5 confirm runs by ASAN_TIMEOUT and any harness build by the
+            # build lock, so this only trips on a genuine hang; the generous
+            # margin avoids interrupting a legitimate slow rebuild. Fail-open:
+            # a timeout leaves no result file, so triage keeps ordinary review.
+            per_run = int(os.environ.get("ASAN_TIMEOUT", "15"))
+            lock_wait = int(os.environ.get("PROBE_HARNESS_BUILD_LOCK_TIMEOUT", "600"))
+            deadline = lock_wait + max(per_run, 1) * 5 * 4
+            run_timeout(
+                command,
+                deadline,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            raw_result = json.loads(primary_result.read_text(encoding="utf-8"))
+            evidence = crash_bundle.record_primary_differential(
+                crash_dir, primary_output, raw_result,
+            )
+            if evidence is None:
+                print(
+                    "[probe] WARNING: primary-build comparison was unavailable; "
+                    "triage will keep ordinary review enabled",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[probe] PRIMARY BUILD DIFFERENTIAL: {evidence['status']} "
+                    f"(alternate={self.selected_build_config.name})"
+                )
+        except (OSError, ValueError) as exc:
+            print(
+                f"[probe] WARNING: primary-build comparison was unavailable: {exc}; "
+                "triage will keep ordinary review enabled",
+                file=sys.stderr,
+            )
+        finally:
+            primary_output.unlink(missing_ok=True)
+            primary_result.unlink(missing_ok=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

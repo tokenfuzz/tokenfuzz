@@ -914,6 +914,16 @@ def _direct_probe_trigger_bypass(
         or context.get("args") != []
     ):
         return False
+    build_config_id = str(context.get("build_config_id") or "")
+    primary_differential = crash_bundle.verified_primary_differential(crash_dir)
+    if build_config_id and (
+        primary_differential is None
+        or primary_differential.get("status") != "reproduced"
+    ):
+        # An alternate-config invocation is not proof of the ordinary primary
+        # byte-input path. Keep the normal trigger reviewers unless the same
+        # sanitizer fault was machine-confirmed on the primary build.
+        return False
     binary = (context.get("binary") or {}).get("path")
     try:
         binary_path = Path(binary).resolve(strict=True)
@@ -936,10 +946,15 @@ def _direct_probe_trigger_bypass(
     _write_atomic_json(
         bypass,
         {
-            "decision_version": "direct-probe-v1",
+            "decision_version": "direct-probe-v2",
             "bypass": True,
-            "reason": "bin/probe --confirm 5/5 through standard target byte-input invocation",
+            "reason": (
+                "same sanitizer fault confirmed 5/5 on the primary target byte-input invocation"
+                if build_config_id
+                else "bin/probe --confirm 5/5 through standard target byte-input invocation"
+            ),
             "binary": str(binary_path),
+            "primary_differential": primary_differential.get("status") if build_config_id else "not-needed",
         },
     )
     return True

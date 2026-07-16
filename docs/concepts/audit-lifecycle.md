@@ -68,6 +68,18 @@ builds run explicitly through `bin/setup-target <target> --build`. After the
 required build exists, refresh the generated config and review only unresolved
 or incorrect values.
 
+For ordinary native targets, the regular `build-asan` remains the control and a
+cached widened ASan sibling explores compatible optional in-tree features. With
+multiple reproducer agents, the harness assigns alternates only to a minority
+slot; with one agent, it assigns about one closed-work iteration in four to an
+alternate. A confirmed alternate-build crash is automatically replayed five
+times on the primary build. Triage records whether the same fault reproduces
+there and keeps ordinary trigger review enabled when it does not. This spends extra build time
+once without allowing broader configuration coverage to erase bugs specific to
+the project's regular configuration. Automatic preflight limits that extra work
+to ten minutes total and falls open to the primary; explicit build preparation
+can run longer when a large target needs it.
+
 ## 3. Run the audit
 
 `bin/audit --target <slug> --backend <backend>` starts a session. It

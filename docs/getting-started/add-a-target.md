@@ -86,7 +86,10 @@ Build behavior depends on the target:
   `bin/audit` calls `bin/setup-target --build` to converge and run a reusable
   recipe under `targets/<target>/.audit/`. Failure is visible in the log but
   fail-open: source analysis can continue while sanitizer-dependent work is
-  unavailable.
+  unavailable. The canonical `build-asan` remains the regular-configuration
+  control. By default, setup also prepares one cached widened ASan sibling when
+  the project advertises compatible optional in-tree features. One minority
+  reproducer slot explores ready alternates while another stays on the control.
 - **Rust, Go, Swift, Python, Node, PHP, Ruby, and other registered language
   builds.** Run `bin/setup-target <target> --build` when the runner depends on
   compiled code or installed packages. Audit preflight does not automatically
@@ -118,6 +121,9 @@ bin/setup-target <target> --build
 ```
 
 For native targets, this performs the same refresh audit preflight would do.
+That includes configured ASan alternates, so initial setup can take one or more
+additional builds; later runs reuse them until the source or exact recipe
+changes. Set `build_widening = false` in `target.toml` if widening is unsuitable.
 For registered non-native build systems, it runs the language bootstrap plan.
 It skips when there is no applicable manifest or build plan.
 

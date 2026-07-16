@@ -45,6 +45,7 @@ The config is also part of triage:
 target       = "libxml2"
 upstream_url = "https://gitlab.gnome.org/GNOME/libxml2.git"
 build_system = "cmake"
+build_widening = true
 pinned_rev   = "HEAD"
 
 asan_bin     = "build-asan/xmllint"
@@ -65,6 +66,7 @@ attacker_controls = ["bytes"]
 | `target` | Target slug. It should match `targets/<target>` and `output/<target>`. |
 | `upstream_url` | Source repository URL used as metadata in exported bundles. |
 | `build_system` | Informational build-system label such as `cmake`, `meson`, `autotools`, or `mach`. |
+| `build_widening` | For ordinary native C/C++ targets, keep the canonical build and prepare one cached ASan sibling with compatible optional in-tree features enabled. Defaults to `true` when absent; set `false` to opt out. |
 | `pinned_rev` | Revision recorded when the config was created. The live revision is captured at audit startup. |
 | `asan_bin` | ASan executable used by generic or browser runs. Relative paths resolve under `targets/<target>/`. |
 | `asan_lib` | ASan library used when compiling C harness testcases. |
@@ -110,6 +112,37 @@ against.
 | Field | Meaning |
 | --- | --- |
 | `cmake_target` | CMake target name used when a generated bundle can rebuild a specific target. |
+
+## Build configurations
+
+The canonical `build-asan` tree is always the regular-configuration control.
+Build configurations add isolated, content-addressed ASan siblings; they never
+replace that control or multiply the UBSan, MSan, and TSan build set.
+
+`build_widening = true` asks TokenFuzz to derive one compatible widened sibling
+from the working primary recipe. It enables advertised, in-tree optional
+features while retaining the primary recipe's sanitizer and build contract.
+If the project exposes no suitable options, no sibling is built and the audit
+continues on the primary.
+
+Declare configurations only for meaningful mutually exclusive modes that
+automatic widening cannot combine:
+
+```toml
+build_widening = true
+
+[[build_config]]
+name = "compact"
+label = "compact table representation"
+flags = ["-DENABLE_COMPACT=ON", "-DTABLE_BITS=8"]
+features = ["compact tables"]
+```
+
+`name` must be a short lowercase identifier. `flags` are ordered configure
+arguments: order and duplicates are preserved in the configuration identity.
+`features` are human-readable surfaces shown to audit agents. A row uses either
+non-empty `flags` or `widen = true`, not both. Refreshing generated placeholders
+preserves operator-authored rows.
 
 `target.toml` is parsed as strict TOML. Invalid section headers
 or malformed arrays fail fast instead of silently falling back to

@@ -34,6 +34,7 @@ HERE = Path(__file__).absolute().parent
 sys.path.insert(0, str(HERE.parent / "lib"))
 
 import cvss4  # noqa: E402
+import crash_bundle  # noqa: E402
 import stack_frames  # noqa: E402
 import target_config as tc  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
@@ -1801,6 +1802,40 @@ def _detect_cluster_size(report_text: str) -> int:
 # replaced) never matches, nor does an instructional mention in prose.
 _SKELETON_TODO_RE = re.compile(r"^_TODO \(agent\):", re.MULTILINE)
 
+# Human-readable one-liner for the primary-build differential status, folded
+# into the Fields-table "Build config" row so a maintainer sees whether the
+# fault is reachable in the default build.
+_PRIMARY_DIFFERENTIAL_PHRASE = {
+    "reproduced": "also reproduces on the primary build",
+    "not-reproduced": "does not reproduce on the primary build",
+    "different-crash": "primary build faults differently",
+    "inconclusive": "primary-build comparison inconclusive",
+}
+
+
+def _build_config_field(report_dir: Path | None, build_evidence: dict | None) -> str:
+    """Render a `## Fields` cell describing the non-default build configuration.
+
+    Sourced from the crash bundle's `.build-config.json` (identity + advertised
+    features), so it is present for any alternate-config crash even when the
+    primary-build differential is missing or inconclusive. `export-repro` moves
+    audit provenance beneath `.audit/`, which the shared loader also covers."""
+    if report_dir is None:
+        return ""
+    meta = crash_bundle.build_config_metadata(Path(report_dir))
+    if meta is None or not meta.get("id"):
+        return ""
+    name = str(meta.get("name") or meta["id"])
+    parts = [f"alternate `{name}` (`{meta['id']}`)"]
+    features = [str(f).strip() for f in (meta.get("features") or []) if str(f).strip()]
+    if features:
+        parts.append("surfaces: " + ", ".join(features))
+    if isinstance(build_evidence, dict) and build_evidence.get("status"):
+        parts.append(_PRIMARY_DIFFERENTIAL_PHRASE.get(
+            build_evidence["status"], _PRIMARY_DIFFERENTIAL_PHRASE["inconclusive"]
+        ))
+    return " — ".join(parts)
+
 
 def compute_severity(report_text: str,
                      cluster_size: int = 1, report_dir: Path | None = None) -> dict:
@@ -1883,6 +1918,25 @@ def compute_severity(report_text: str,
     metrics, derivation = _cvss4_metrics(prim_key, surface_label, fields,
                                          concern, report_dir)
     repro_facts = _repro_facts(report_text, fields, cluster_size, report_dir)
+    build_evidence = (
+        crash_bundle.verified_primary_differential(report_dir)
+        if report_dir is not None else None
+    )
+    if build_evidence is not None:
+        config_name = (
+            build_evidence.get("build_config_name")
+            or build_evidence.get("build_config_id")
+            or "alternate"
+        )
+        status = build_evidence.get("status")
+        repro_facts.append(f"primary-build differential: {status} ({config_name})")
+        if metrics is not None and status == "not-reproduced":
+            metrics["MAT"] = "P"
+            derivation.append(
+                f"same fault did not reproduce on this checkout's primary build; "
+                f"alternate configuration {config_name!r} is an environmental prerequisite → MAT:P"
+            )
+    build_config_field = _build_config_field(report_dir, build_evidence)
     non_shipping = surface_label in NON_SHIPPING_SURFACES
 
     # Fail closed on an unenriched skeleton: its fields are TODO placeholders,
@@ -1915,6 +1969,8 @@ def compute_severity(report_text: str,
             "non_shipping": non_shipping,
             "repro_facts": repro_facts,
             "cluster_size": cluster_size,
+            "build_configuration": build_evidence,
+            "build_config_field": build_config_field,
             "fields_used": {k: v for k, v in fields.items() if not k.startswith("_")},
         }
 
@@ -1947,6 +2003,8 @@ def compute_severity(report_text: str,
         "non_shipping": non_shipping,
         "repro_facts": repro_facts,
         "cluster_size": cluster_size,
+        "build_configuration": build_evidence,
+        "build_config_field": build_config_field,
         "fields_used": {k: v for k, v in fields.items() if not k.startswith("_")},
     }
 
@@ -2345,6 +2403,7 @@ _SURFACED_REACH_FIELDS = (
 # `Field:` line.
 _KNOWN_FIELD_LABELS = frozenset({
     "class", "severity", "file", "function", "line", "target",
+    "build config",
     "primitive", "surface", "trigger source", "caller contract",
     "caller controls", "trusted caller actions", "parameter control",
     "boundary", "advisory",
@@ -2431,6 +2490,9 @@ def _synthesize_fields_table(text: str, severity: dict, used: dict) -> str:
     labels here would make those fields invisible to export. No-op if there is
     nothing beyond Severity to table (keeps the slim recon template unchanged)."""
     rows: list[tuple[str, str]] = [("Severity", _format_severity_field(severity))]
+    build_config = (severity.get("build_config_field") or "").strip()
+    if build_config:
+        rows.append(("Build config", _cell(build_config)))
     for key, label in _SURFACED_REACH_FIELDS:
         v = (used.get(key) or "").strip()
         if v:
@@ -2469,6 +2531,15 @@ def update_report(report_path: Path, severity: dict) -> None:
         for key, label in _SURFACED_REACH_FIELDS
         if (used.get(key) or "").strip() and not _field_present(text, label)
     ]
+    build_config = (severity.get("build_config_field") or "").strip()
+    if build_config:
+        # This row is machine-owned provenance. Refresh it when a differential
+        # changes instead of preserving a stale earlier status as authored text.
+        text, build_config_updated = _replace_structured_field(
+            text, "Build config", _cell(build_config),
+        )
+        if not build_config_updated:
+            to_add.insert(0, ("Build config", build_config))
     if to_add:
         text = _insert_fields_rows(text, to_add)
     # Always update an existing `- **Severity**: …` bullet (alternate crash

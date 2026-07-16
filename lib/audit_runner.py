@@ -23,6 +23,7 @@ from pathlib import Path
 
 import audit_helpers
 import build_preflight
+import build_config
 import build_session_seed
 import housekeeping
 import llm_invoke
@@ -1516,6 +1517,63 @@ def release_stale_card_claims(runtime: Runtime) -> int:
         return 0
 
 
+def assign_build_configs(runtime: Runtime, context: prompt.PromptContext, iteration: int) -> None:
+    """Keep a regular-build control while rotating one reproducer slot.
+
+    Assignments are session state consumed automatically by bin/probe. A slot
+    with active work stays on its current build so an investigation does not
+    change binaries mid-hypothesis.
+    """
+    state_dir = runtime.results / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    if os.environ.get("_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD") == "1":
+        for agent in range(1, runtime.num_agents + 1):
+            (state_dir / f"build-config-{agent}").unlink(missing_ok=True)
+        return
+    base_suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    ready = [
+        item for item in runtime.config.build_configs
+        if build_config.recipe_path(runtime.target_root, item).is_file()
+        and build_config.is_ready(
+            build_config.build_dir(runtime.target_root, item, base_suffix=base_suffix),
+            build_config.recipe_path(runtime.target_root, item),
+        )
+    ]
+    reproduce = [
+        agent for agent in range(1, runtime.num_agents + 1)
+        if context.role(agent) == "reproduce"
+    ]
+    alternate_agent = (
+        reproduce[-1]
+        if len(reproduce) >= 2
+        else reproduce[0] if reproduce and iteration % 4 == 0 else 0
+    )
+    for agent in range(1, runtime.num_agents + 1):
+        path = state_dir / f"build-config-{agent}"
+        counts = structured_state.agent_counts(str(agent), runtime.results)
+        current = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+        if counts and counts.get("active"):
+            # A single-agent audit cannot provide simultaneous control and
+            # alternate coverage. Preserve whichever binary the live
+            # hypothesis started on, then rotate only after closure.
+            if current and build_config.find(ready, current):
+                continue
+            path.unlink(missing_ok=True)
+            continue
+        if agent != alternate_agent or not ready:
+            path.unlink(missing_ok=True)
+            continue
+        index = (iteration - 1) if len(reproduce) >= 2 else (iteration // 4 - 1)
+        selected = ready[index % len(ready)]
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_text(selected.config_id + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+        index_log(
+            runtime,
+            f"Build configuration assignment: agent={agent} config={selected.name} id={selected.config_id}",
+        )
+
+
 @dataclass
 class BackendState:
     runtime: Runtime
@@ -1538,6 +1596,9 @@ def preflight_build(runtime: Runtime) -> None:
         runtime.root, runtime.target_root, runtime.target_slug, runtime.config,
         runtime.logs, runtime.backend, runtime.model,
         lambda message: index_log(runtime, message),
+        include_alternates=(
+            os.environ.get("_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD") != "1"
+        ),
     )
     if runtime.config.is_browser not in ("1", "true", "True"):
         return
@@ -1713,6 +1774,7 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
         initialize_agent_strategies(runtime)
     if _productive_wall_exhausted(state):
         return "budget", []
+    assign_build_configs(runtime, context, state.iteration)
     index_log(
         runtime,
         f"Iteration {state.iteration} starting: agents={runtime.num_agents} cold={str(cold).lower()} "
