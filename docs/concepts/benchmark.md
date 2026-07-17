@@ -247,18 +247,40 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | --- | --- |
 | `Condition` | `tokenfuzz` or the direct baseline label. |
 | `Replicates` | `done/total`, with a suffix for cells that hit provider trouble: `(Nr)` recovered after a mid-run blip, `(Np)` provider-limited. |
-| `Wall (h)` | Median wall-clock hours per completed cell. |
-| `Rejected findings` | FIND reports rejected by the validator. |
-| `Findings` | Confirmed non-crash security reports an agent investigated. A recon lead the gate accepted but no agent ever worked is shown as `(+N leads)` beside the count and is not counted here. |
-| `Unique findings` | Clustered findings, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the finding cluster report. |
-| `Rejected crashes` | Crash directories rejected by triage. |
-| `Crashes` | Crash directories with real sanitizer output on disk. |
-| `Unique crashes` | Clustered crashes, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the crash cluster report. |
+| `Wall (h)` | Median hours a cell spent finding things. The triage and validation that follow the audit are measurement, not finding work, so they are not counted. |
+| `Unique rejected findings` | FIND reports the validator rejected, after clustering merges duplicates where evidence permits. `≤ N` marks an upper bound. |
+| `Unique accepted findings` | Clustered non-crash security reports an agent investigated, shown `N (M M+)`: N unique, M scored Medium or higher. A recon lead the gate accepted but no agent ever worked is shown as `(+N leads)` beside the count and is not counted here. Links to the finding cluster report. |
+| `Unique rejected crashes` | Crash candidates triage rejected, after stack/signature clustering merges duplicates where evidence permits. `≤ N` marks an upper bound. |
+| `Unique accepted crashes` | Clustered crash directories with real sanitizer output on disk, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the crash cluster report. |
 | `Top crash severity` | Highest crash severity observed in the cell. |
+
+The same clusterers (`bin/cluster-findings` / `bin/cluster-crashes`) deduplicate
+both sides of the gate whenever the artifacts carry clustering evidence. A raw
+directory tally counts one root cause many times over, and a raw reject count
+set against a clustered accept count measures two different things.
+
+Two cases read as upper bounds rather than exact counts, both deliberately: a
+legacy ledger can hold rejection rows with no directory and so no evidence to
+cluster, and a clustering step that could not run reports the raw count. Both
+over-state rather than hide — a rejected result never silently disappears from
+the column.
 
 The count cells are links. They point into the condition-specific
 crash, finding, rejected-crash, rejected-finding, and cluster reports
 that produced the number.
+
+**Time to discovery**, below the table, plots those same numbers over time: one
+row per target, findings and crashes side by side. Each step is one deduplicated
+accepted result placed at the hour it was found, so the curve only climbs and
+ends exactly on the `Unique accepted` count; the strip underneath is what the
+gate cut, on the same clock but its own scale. Discovery times come from the
+`finding_created` stamps in `state/events.jsonl`. Runs recorded before that
+stream existed fall back to the artifacts' own clocks. When a discovery time is
+unavailable, the panel says the timing is approximate rather than implying an
+exactness it does not have. The `% kept` figure beside each series is simply how
+much of what a model proposed survived the gate; with an upper-bound rejected
+count, `≥ N% kept` is the corresponding lower bound. It is not precision,
+which needs the answer key described below.
 
 **Token usage** appears when the backend reports usage or the harness
 can estimate prompt size. The bold row per condition is the total to

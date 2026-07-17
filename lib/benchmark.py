@@ -171,25 +171,6 @@ def _md_link(label: object, path: Path | str | None) -> str:
     return f"[{label}]({_path_uri(p)})"
 
 
-def _finding_count_label(c: dict) -> object:
-    """Findings-cell label: the CONFIRMED finding count, full stop.
-
-    The headline total is the count of FINDs the find-quality gate accepted (or
-    a human pinned). Any un-adjudicated remainder from a cut-off triage is NOT
-    shown here: regenerate now drains the gate to completion before harvest
-    (`drain_cell_find_gate` in the regenerate branch), so a finished run carries
-    no un-gated backlog to surface, and a drain that cannot finish (no backend /
-    rate-limited) is reported as a run-health WARN rather than as a parenthetical
-    on a backend-comparison row. A metrics row missing the confirmed field is
-    incomplete and renders as unknown rather than treating raw FIND directories
-    as accepted findings.
-    """
-    confirmed = c.get("confirmed_finding_total")
-    if confirmed is None:
-        return "—"
-    return int(confirmed or 0)
-
-
 def _finding_leads_suffix(c: dict) -> str:
     """Parenthetical marking un-investigated recon leads beside the confirmed
     count, mirroring the '(+N incomplete)' provisional annotation. Leads are
@@ -395,6 +376,11 @@ def _artifact_report_link(label: object, artifact_dir: Path,
     if md_path.exists():
         return _md_link(label, md_path)
     return _md_link(label, artifact_dir)
+
+
+def _rejected_label(value: object, upper_bound: bool) -> object:
+    """Show when an unclusterable rejection count is only a safe maximum."""
+    return f"≤ {value}" if upper_bound else value
 
 
 def _unique_with_medium_plus(unique: int, medium_plus: int) -> str:
@@ -2856,6 +2842,58 @@ def _median(values: list[float]) -> float | int:
     return int(m) if float(m).is_integer() else float(m)
 
 
+_PRODUCTIVE_WALL = re.compile(r"Reached productive wall budget: (\d+)s productive")
+
+
+def _declared_productive_wall(cell_dir: Path):
+    """Seconds the audit itself reports spending on finding work, if it said.
+
+    A cell's recorded wall used to run past the audit and over the triage that
+    follows it, so a 3h budget reported as ~4h. The audit's own log is the
+    authoritative statement of what it spent, so prefer it — that also repairs
+    cells recorded before the clock was stopped at the right place.
+    """
+    log = Path(cell_dir) / "audit.log"
+    if not log.is_file():
+        return None
+    try:
+        with log.open(errors="replace") as stream:
+            for line in stream:
+                match = _PRODUCTIVE_WALL.search(line)
+                if match:
+                    return int(match.group(1))
+    except OSError:
+        return None
+    return None
+
+
+def _unique_rejected(
+    clusters: int, pooled_dirs: int, raw_total: int,
+) -> tuple[int, bool]:
+    """Return (rejection count, is_upper_bound) for one condition.
+
+    Two sources feed the raw total (see count_crashes_rejected): pooled
+    directories, which cluster, and row-only ledger records, which have none of
+    the evidence a clusterer keys on.
+
+    Row-only records are counted one per record — an upper bound. A legacy
+    ledger row carries an occurrence id, not a root-cause signature, so two
+    replicates rejecting the same root cause count twice. Deduplicating them
+    would mean mining signatures out of legacy Markdown, which buys accuracy
+    only for ledgers that modern runs no longer produce; carrying them is what
+    matters, because dropping them made real rejections disappear entirely.
+
+    Directories that produced no clusters means the clusterer did not run or
+    failed (the runner turns a failure into empty cluster JSON). That is not
+    "nothing was rejected": fall back to the raw upper bound so a tool failure
+    never renders as a clean bill.
+    """
+    if pooled_dirs and not clusters:
+        return raw_total, True
+    row_only = max(0, raw_total - pooled_dirs)
+    return clusters + row_only, bool(row_only)
+
+
 def _effective_wall(cell: dict):
     """Productive wall for a cell: elapsed minus any session-recovery pause.
 
@@ -3044,7 +3082,9 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
             "run_quality": cell.get("run_quality", "clean"),
             "wall_seconds": cell.get("wall_seconds"),
             "paused_seconds": cell.get("paused_seconds", 0) or 0,
-            "wall_effective_seconds": _effective_wall(cell),
+            "wall_effective_seconds": (
+                _declared_productive_wall(cell_dir) or _effective_wall(cell)
+            ),
             "metrics": metrics,
         }
         by_condition.setdefault(cond, []).append(merged)
@@ -3071,8 +3111,36 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         _load("clusters-findings.json") if include_pool else {},
         members.get("findings", {}),
     )
+    # The rejected side is clustered by the same tools (bin/benchmark points
+    # them at pool/<kind>-rejected), so "unique cut" is counted like "unique
+    # kept" instead of a raw dir tally.
+    rejected_crash_attr = attribute_clusters(
+        _load("clusters-crashes-rejected.json") if include_pool else {},
+        members.get("crashes-rejected", {}),
+    )
+    rejected_finding_attr = attribute_clusters(
+        _load("clusters-findings-rejected.json") if include_pool else {},
+        members.get("findings-rejected", {}),
+    )
     crash_by_cond = crash_attr["by_condition"]
     finding_by_cond = finding_attr["by_condition"]
+    rejected_crash_by_cond = rejected_crash_attr["by_condition"]
+    rejected_finding_by_cond = rejected_finding_attr["by_condition"]
+    # Rejected crashes come from two legitimate sources (count_crashes_rejected):
+    # CRASH-* dirs, and row-only ledger signatures that never got a dir. Only
+    # the dirs can be clustered, so count how many there are per condition —
+    # the remainder is row-only and must still reach the unique total, or real
+    # rejections vanish from the table.
+    pooled_rejected_crash_dirs: dict[str, int] = {}
+    for cond_name in members.get("crashes-rejected", {}).values():
+        pooled_rejected_crash_dirs[cond_name] = (
+            pooled_rejected_crash_dirs.get(cond_name, 0) + 1
+        )
+    pooled_rejected_finding_dirs: dict[str, int] = {}
+    for cond_name in members.get("findings-rejected", {}).values():
+        pooled_rejected_finding_dirs[cond_name] = (
+            pooled_rejected_finding_dirs.get(cond_name, 0) + 1
+        )
     # Crashes a post-pool gate demoted out of the accepted pool keep their
     # pooled-accepted name (CRASH-NNNN); cell-level rejects are CRASH-REJECTED-*.
     # Reconcile re-files demoted entries under crashes-rejected, so a plain
@@ -3157,6 +3225,8 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         token_usage.extend(token_rows)
         cb = crash_by_cond.get(cond, {})
         fb = finding_by_cond.get(cond, {})
+        rcb = rejected_crash_by_cond.get(cond, {})
+        rfb = rejected_finding_by_cond.get(cond, {})
         # Cell sums stay authoritative — they alone carry the rejection-ledger
         # auto-rejected signature rows that never get a crash dir. Only re-book
         # the post-pool demotions: subtract them from accepted, add to rejected.
@@ -3171,6 +3241,16 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 crashes[idx] -= removed
         crash_total = sum(crashes)
         rejected_crash_total = sum(rejected_crashes) + demoted
+        unique_rejected_crashes, rejected_crashes_upper_bound = _unique_rejected(
+            rcb.get("unique_clusters", 0),
+            pooled_rejected_crash_dirs.get(cond, 0),
+            rejected_crash_total,
+        )
+        unique_rejected_findings, rejected_findings_upper_bound = _unique_rejected(
+            rfb.get("unique_clusters", 0),
+            pooled_rejected_finding_dirs.get(cond, 0),
+            sum(rejected_findings),
+        )
         conditions.append(
             {
                 "condition": cond,
@@ -3209,6 +3289,10 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "medium_plus_bugs": cb.get("medium_plus", 0),
                 "unique_finding_clusters": fb.get("unique_clusters", 0),
                 "medium_plus_findings": fb.get("medium_plus", 0),
+                "unique_rejected_crash_clusters": unique_rejected_crashes,
+                "rejected_crash_clusters_upper_bound": rejected_crashes_upper_bound,
+                "unique_rejected_finding_clusters": unique_rejected_findings,
+                "rejected_finding_clusters_upper_bound": rejected_findings_upper_bound,
                 "wall_median": _median([float(x) for x in walls]),
                 "input_tokens_total": sum(r["input_tokens"] for r in token_rows),
                 "cached_input_tokens_total": sum(
@@ -3889,21 +3973,21 @@ def render_section(report: dict) -> str:
     crashes_dir = bench_dir / "pool" / "crashes"
     lines.append("### Scoreboard")
     lines.append("")
-    # Column order: identity, then how the run was set up (how many times
-    # it ran, how long each took), then results grouped by evidence type —
-    # findings (confirmed, then the deduplicated count) followed by crashes
-    # (same shape). `Unique findings` / `Unique crashes` show the clustered count
-    # annotated with its Medium+ subset — `N (M M+)` — so the security-yield
-    # subset is visible without dropping the Low/unscored remainder. `Top
-    # crash severity` is the single highest-severity crash display.
+    # Column order: identity, then how the run was set up (how many times it
+    # ran, how long each took), then results grouped by evidence type. Results
+    # are deduplicated whenever the artifacts carry clustering evidence.
+    # A rejected upper bound is marked in its cell rather than passed off as an
+    # exact unique count. The accepted columns carry their
+    # Medium+ subset — `N (M M+)` — so the security-yield subset is visible
+    # without dropping the Low/unscored remainder.
     lines.append(
         "| Condition | Replicates | Wall (h) "
-        "| Rejected findings | Confirmed findings | Unique findings "
-        "| Rejected crashes | Confirmed crashes | Unique crashes "
+        "| Unique rejected findings | Unique accepted findings "
+        "| Unique rejected crashes | Unique accepted crashes "
         "| Top crash severity |"
     )
     lines.append(
-        "| --- | --: | --: | --: | --: | --: | --: | --: | --: | :--: |"
+        "| --- | --: | --: | --: | --: | --: | --: | :--: |"
     )
     for c in sorted(conditions,
                     key=lambda c: (-c.get("top_severity_rank", 0),
@@ -3919,8 +4003,8 @@ def render_section(report: dict) -> str:
             bench_dir, c["condition"], "crashes-rejected"
         )
         lines.append(
-            "| {cond} | {rep} | {wall} | {rfi} | {fi} | {uf} "
-            "| {rcr} | {cr} | {uc} | {sev} |".format(
+            "| {cond} | {rep} | {wall} | {rfi} | {uf} "
+            "| {rcr} | {uc} | {sev} |".format(
                 cond=_condition_cell(c["condition"], backend),
                 rep=(
                     "{d}/{t}".format(d=c.get("replicates_done", 0),
@@ -3937,29 +4021,33 @@ def render_section(report: dict) -> str:
                     )
                 ),
                 wall=_fmt_hours(c.get("wall_median")),
-                rfi=_artifact_report_link(
-                    c.get("rejected_finding_total", 0),
-                    cond_rejected_findings,
-                    "REJECTED-FINDINGS",
-                ),
-                fi=_md_link(_finding_count_label(c), cond_findings)
-                + _finding_leads_suffix(c),
                 uf=_cluster_report_link(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
                         c.get("medium_plus_findings", 0)),
-                    cond_findings, "FINDING-CLUSTERS"),
-                rcr=_artifact_report_link(
-                    c.get("rejected_crash_total", 0),
-                    cond_rejected_crashes,
-                    "REJECTED-CRASHES",
+                    cond_findings, "FINDING-CLUSTERS")
+                + _finding_leads_suffix(c),
+                rfi=_artifact_report_link(
+                    _rejected_label(
+                        c.get("unique_rejected_finding_clusters", 0),
+                        c.get("rejected_finding_clusters_upper_bound", False),
+                    ),
+                    cond_rejected_findings,
+                    "REJECTED-FINDINGS",
                 ),
-                cr=_md_link(c.get("crash_total", 0), cond_crashes),
                 uc=_cluster_report_link(
                     _unique_with_medium_plus(
                         c.get("unique_crash_clusters", 0),
                         c.get("medium_plus_bugs", 0)),
                     cond_crashes, "CRASH-CLUSTERS"),
+                rcr=_artifact_report_link(
+                    _rejected_label(
+                        c.get("unique_rejected_crash_clusters", 0),
+                        c.get("rejected_crash_clusters_upper_bound", False),
+                    ),
+                    cond_rejected_crashes,
+                    "REJECTED-CRASHES",
+                ),
                 sev=_severity_cell(c.get("top_severity_level", "—")),
             )
         )
@@ -3977,16 +4065,20 @@ def render_section(report: dict) -> str:
         "> **How to read this.** Each condition ran **Replicates** times "
         "under the same per-cell time budget; **Wall (h)** is the median "
         "hours a cell actually spent. The result columns are grouped by "
-        "evidence type. **Rejected findings** are FIND reports that failed "
-        "the independent validator gate and link to a table showing the "
-        "reachability / guards / primitive booleans. **Confirmed findings** "
-        "counts only "
+        "evidence type. `bin/cluster-findings` / `bin/cluster-crashes` merge "
+        "duplicate signatures on both sides, so one root cause reported many "
+        "times counts once when clustering evidence is available. A `≤ N` "
+        "rejected cell is a conservative upper bound because legacy rows had "
+        "no artifact to cluster or clustering could not run. "
+        "**Unique rejected findings** "
+        "are FIND reports that failed the independent validator gate and link "
+        "to a table showing the reachability / guards / primitive booleans. "
+        "**Unique accepted findings** counts only "
         "FIND reports accepted by the find-quality gate or pinned by a human. "
-        "Findings carry no on-disk crash; **Confirmed crashes** counts only crash "
+        "Findings carry no on-disk crash; **Unique accepted crashes** counts only crash "
         "directories with real sanitizer output on disk — an agent "
-        "claiming a crash in prose never counts. **Unique findings** and "
-        "**Unique crashes** are those counts after `bin/cluster-findings` / "
-        "`bin/cluster-crashes` merge duplicate signatures, annotated `N (M "
+        "claiming a crash in prose never counts. The accepted columns are "
+        "annotated `N (M "
         "M+)` where `M` is how many of the `N` clusters `bin/severity` "
         "scored Medium or higher — the security-yield subset, on one scale "
         "across both conditions. **Top crash severity** is the highest crash "
@@ -4243,18 +4335,21 @@ def _run_cell(runid: object) -> str:
     return f"`{runid}`"
 
 
-def _incomplete_observed(condition: dict, field: str) -> int:
-    return sum(
-        int(row.get(field, 0) or 0)
-        for row in condition.get("incomplete_observed", [])
-        if isinstance(row, dict)
+def _rejected_cell(
+    value, directory, index_name: str, upper_bound: bool = False,
+) -> str:
+    """Rejected count or upper bound, or `—` when never computed.
+
+    crosstab reads each run's report.json as written. A report predating the
+    unique_rejected_* fields has no value to show, and rendering that as 0 says
+    "nothing was rejected" — a false clean bill for a run that may have rejected
+    plenty. Absent is unknown, not zero.
+    """
+    if value is None:
+        return "—"
+    return _crosstab_count(
+        _rejected_label(value, upper_bound), directory, index_name,
     )
-
-
-def _provisional_count(value: object, condition: dict, field: str) -> str:
-    observed = _incomplete_observed(condition, field)
-    suffix = f" (+{observed} incomplete)" if observed else ""
-    return f"{value}{suffix}"
 
 
 def crosstab(bench_root: Path) -> str:
@@ -4304,15 +4399,15 @@ def crosstab(bench_root: Path) -> str:
 
     lines.append(
         "| Target | Backend | Condition | Run | Wall (h) | Replicates "
-        "| Rejected findings | Confirmed findings | Unique findings "
-        "| Rejected crashes | Confirmed crashes | Unique crashes "
+        "| Unique rejected findings | Unique accepted findings "
+        "| Unique rejected crashes | Unique accepted crashes "
         "| Top crash severity "
         "| Input | Output | Cost |"
     )
     lines.append(
         "| --- | --- | --- | --- | --: | --: "
-        "| --: | --: | --: "
-        "| --: | --: | --: "
+        "| --: | --: "
+        "| --: | --: "
         "| :--: "
         "| --: | --: | --: |"
     )
@@ -4384,8 +4479,8 @@ def crosstab(bench_root: Path) -> str:
         )
         lines.append(
             "| {tgt} | {bk} | {cond} | {rid} | {wall} | {reps} "
-            "| {rfi} | {fi} | {uf} "
-            "| {rcr} | {cr} | {uc} "
+            "| {rfi} | {uf} "
+            "| {rcr} | {uc} "
             "| {sev} | {inp} | {out} | {cost} |".format(
                 bk=backend_cell,
                 rid=run_cell,
@@ -4412,33 +4507,23 @@ def crosstab(bench_root: Path) -> str:
                         else ""
                     )
                 ),
-                rfi=_crosstab_count(
-                    c.get("rejected_finding_total", 0),
-                    rejected_findings_dir,
-                    "REJECTED-FINDINGS",
-                ),
-                fi=_crosstab_count(
-                    _provisional_count(
-                        _finding_count_label(c), c, "findings"
-                    ) if provisional else _finding_count_label(c),
-                    findings_dir,
-                ) + _finding_leads_suffix(c),
+                # Clustering only runs at pooled finalization, so a provisional
+                # row has no honest count to show and says Pending on both sides.
+                rfi=("Pending" if provisional else _rejected_cell(
+                    c.get("unique_rejected_finding_clusters"),
+                    rejected_findings_dir, "REJECTED-FINDINGS",
+                    c.get("rejected_finding_clusters_upper_bound", False),
+                )),
                 uf=("Pending" if provisional else _crosstab_count(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
                         c.get("medium_plus_findings", 0)),
-                    findings_dir, "FINDING-CLUSTERS")),
-                rcr=_crosstab_count(
-                    c.get("rejected_crash_total", 0),
-                    rejected_crashes_dir,
-                    "REJECTED-CRASHES",
-                ),
-                cr=_crosstab_count(
-                    _provisional_count(
-                        c.get("crash_total", 0), c, "crashes"
-                    ) if provisional else c.get("crash_total", 0),
-                    crashes_dir,
-                ),
+                    findings_dir, "FINDING-CLUSTERS") + _finding_leads_suffix(c)),
+                rcr=("Pending" if provisional else _rejected_cell(
+                    c.get("unique_rejected_crash_clusters"),
+                    rejected_crashes_dir, "REJECTED-CRASHES",
+                    c.get("rejected_crash_clusters_upper_bound", False),
+                )),
                 uc=("Pending" if provisional else _crosstab_count(
                     _unique_with_medium_plus(
                         c.get("unique_crash_clusters", 0),
@@ -4568,24 +4653,28 @@ def crosstab(bench_root: Path) -> str:
     )
     lines.append("")
     lines.append(
-        "- **Rejected findings** — reports rejected by the independent quality "
-        "gate or validator. The linked index records the reason."
+        "Both finding columns use the same signature clustering when the "
+        "artifacts carry enough evidence. A rejected `≤ N` is a conservative "
+        "upper bound for unclusterable legacy rows or a clustering failure."
+    )
+    lines.append("")
+    lines.append(
+        "- **Unique rejected findings** — reports rejected by the independent "
+        "quality gate or validator, after clustering merges duplicate reports "
+        "where evidence permits. The linked index records the reason."
     )
     lines.append(
-        "- **Confirmed findings** — reports that survived validation and were "
-        "investigated by an agent, without an accepted crash artifact. A recon "
-        "lead the gate accepted but no agent ever worked is shown beside the "
-        "count as `(+N leads)` and is not confirmed."
-    )
-    lines.append(
-        "Rejected findings, Confirmed findings, and leads are distinct "
-        "populations. Unique findings deduplicates Confirmed findings only."
-    )
-    lines.append(
-        "- **Unique findings** — validated findings after signature clustering "
-        "merges duplicate reports, shown as `N (M M+)`: `N` clustered findings, "
-        "`M` of them scored Medium or higher by severity. The count links "
+        "- **Unique accepted findings** — reports that survived validation and "
+        "were investigated by an agent, without an accepted crash artifact, "
+        "after clustering merges duplicate reports. Shown as `N (M M+)`: `N` "
+        "clustered findings, `M` of them scored Medium or higher by severity. "
+        "A recon lead the gate accepted but no agent ever worked is shown "
+        "beside the count as `(+N leads)` and is not accepted. The count links "
         "to the finding cluster report."
+    )
+    lines.append(
+        "Rejected findings, accepted findings, and leads are distinct "
+        "populations."
     )
     lines.append("")
 
@@ -4597,23 +4686,22 @@ def crosstab(bench_root: Path) -> str:
     )
     lines.append("")
     lines.append(
-        "- **Rejected crashes** — crash candidates triage discarded, for "
-        "example because they were not reproducible, were already known, or "
-        "did not demonstrate a sanitizer-class issue."
+        "- **Unique rejected crashes** — crash candidates triage discarded — "
+        "for example not reproducible, already known, or not a "
+        "sanitizer-class issue — after stack/signature clustering merges "
+        "duplicates where evidence permits. A `≤ N` cell is an upper bound."
     )
     lines.append(
-        "- **Confirmed crashes** — sanitizer-proved crash directories with "
-        "diagnostic output and reproducer material on disk."
+        "- **Unique accepted crashes** — sanitizer-proved crash directories "
+        "with diagnostic output and reproducer material on disk, after "
+        "stack/signature clustering, shown as `N (M M+)`: `N` clustered "
+        "crashes, `M` of them scored Medium or higher by severity — the "
+        "headline security-yield subset. The count links to the crash cluster "
+        "report."
     )
     lines.append(
-        "Rejected crashes and Confirmed crashes are disjoint outcomes. Unique "
-        "crashes deduplicates Confirmed crashes only."
-    )
-    lines.append(
-        "- **Unique crashes** — sanitizer-proved crashes after stack/signature "
-        "clustering, shown as `N (M M+)`: `N` clustered crashes, `M` of them "
-        "scored Medium or higher by severity — the headline security-yield "
-        "subset. The count links to the crash cluster report."
+        "Rejected crashes and accepted crashes are disjoint outcomes, and both "
+        "columns are clustered the same way."
     )
     lines.append("")
 
@@ -4623,8 +4711,8 @@ def crosstab(bench_root: Path) -> str:
         "Severity comes from the shared severity scorer, which scores both "
         "findings and crashes on one scale so a security team can compare "
         "impact, not just raw report count. The `M+` annotation on the "
-        "**Unique findings** and **Unique crashes** columns is that score; the "
-        "**Top crash severity** column below is crash-only."
+        "**Unique accepted findings** and **Unique accepted crashes** columns "
+        "is that score; the **Top crash severity** column below is crash-only."
     )
     lines.append("")
     lines.append(

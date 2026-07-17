@@ -26,6 +26,7 @@ from pathlib import Path
 
 import audit_helpers
 import benchmark as metrics
+import benchmark_graph
 import benchmark_model_direct_render
 import build_preflight
 import crash_bundle
@@ -425,7 +426,7 @@ def _write_json(path: Path, payload: dict) -> None:
 def write_cell(
     path: Path, condition: str, replicate: int, experiment: str,
     results_dir: Path, wall: int, status: str, requested_agents: int | None,
-    paused: int = 0,
+    paused: int = 0, started_at: str = "",
 ) -> None:
     quality = "clean"
     try:
@@ -441,6 +442,11 @@ def write_cell(
         "results_dir": str(results_dir), "wall_seconds": wall, "status": status,
         "run_quality": quality, "paused_seconds": paused,
         "wall_effective_seconds": max(0, wall - paused),
+        # When the cell began. Reports that place a result on a timeline need an
+        # origin; without one they rebase onto their own first artifact and put
+        # hour zero wherever that landed. model-direct keeps no audit log, so
+        # this is the only origin it has.
+        "started_at": started_at,
     }
     if requested_agents is not None:
         payload["requested_agents"] = requested_agents
@@ -933,6 +939,26 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
                 output.truncate()
                 output.write('{"clusters":[]}\n')
         _run_tool(tool, str(pool), env=environment)
+    # Cluster the rejected side the same way, so "unique kept" and "unique cut"
+    # count comparably — a raw reject tally against a deduplicated accept tally
+    # measures two different things. The tool's root detection already accepts a
+    # bare directory of FIND-*/CRASH-* subdirs, so point it straight at the
+    # rejected root; --dry-run keeps cluster markers out of the rejection ledger
+    # (we want the counts, not a rewrite of the evidence).
+    for kind, tool, output_name in (
+        ("crashes-rejected", "cluster-crashes", "clusters-crashes-rejected.json"),
+        ("findings-rejected", "cluster-findings", "clusters-findings-rejected.json"),
+    ):
+        if not (pool / kind).is_dir():
+            continue
+        with (bench_dir / output_name).open("w", encoding="utf-8") as output:
+            if _run_tool(
+                tool, str(pool / kind), "--json", "--dry-run",
+                env=environment, stdout=output,
+            ):
+                output.seek(0)
+                output.truncate()
+                output.write('{"clusters":[]}\n')
     metrics.split_pool(bench_dir, stage_name)
     if not triage.maintain_indexes(pool, target):
         log("WARN: combined pool index maintenance failed")
@@ -1007,6 +1033,17 @@ def _render_root_result(bench_root: Path) -> Path:
                 )
                 if rendered.returncode or not temporary_html.is_file():
                     raise RuntimeError("render-md did not produce benchmark-result HTML")
+                # Graph goes straight after the table it visualises. A failure
+                # here must not cost us the table: the numbers are the report.
+                try:
+                    temporary_html.write_text(
+                        benchmark_graph.inject(
+                            temporary_html.read_text(encoding="utf-8"), bench_root,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception as exc:  # noqa: BLE001 - dashboard is best-effort
+                    log(f"WARN: time-to-discovery graph skipped: {exc}")
             temporary_md.chmod(0o644)
             os.replace(temporary_md, crosstab)
             temporary_md = None
@@ -1215,6 +1252,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 # shared dashboard for its whole run, not only after it finishes.
                 update_live_result(bench_root, f"start {name}")
                 start = time.monotonic()
+                started_at = datetime.now(timezone.utc).isoformat()
                 status = "done"
                 if args.dry_run:
                     results = dryrun_cell(cell_dir, condition, replicate, args.backend)
@@ -1226,6 +1264,12 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 else:
                     log(f"Cell {name} live log: {(cell_dir / 'audit.log').resolve()}")
                     rc, results = run_harness(cell_dir, args.target, args.backend, model, experiment, args.budget_wall, args.agents, args.skip_recon)
+                # Stop the clock where the finding work stops. Everything below
+                # — crash triage, the find-gate drain, metrics — is measurement
+                # of what was already found, so charging it to the cell's wall
+                # makes a 3h budget report as ~4h and makes conditions that
+                # produce more to adjudicate look slower at finding things.
+                wall = int(time.monotonic() - start)
                 if (cell_dir / ".backend-unavailable").exists():
                     status = "incomplete"
                     provider_unavailable = True
@@ -1276,23 +1320,25 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
                             deadline=finalize_deadline,
                         )
-                        paused += counts.get("paused_seconds", 0)
+                        # A pause inside the drain sits in the untimed
+                        # measurement phase, so it is not subtracted from the
+                        # cell's wall — only the audit's own pauses are.
                         log(
                             f"Cell {name} validation: accepted={counts.get('accepted', 0)} "
-                            f"rejected={counts.get('rejected', 0)} pending={counts.get('pending', 0)}"
+                            f"rejected={counts.get('rejected', 0)} pending={counts.get('pending', 0)} "
+                            f"paused={counts.get('paused_seconds', 0)}s"
                         )
                     except Exception as exc:
                         log(f"WARN: find-gate drain failed for {name}: {exc}")
                         status = "incomplete"
                 elif not args.dry_run and condition == "model-direct" and not args.validate_findings:
                     log(f"Cell {name} validation: DISABLED (--no-validate-findings)")
-                wall = int(time.monotonic() - start)
                 if results.is_dir():
                     _write_json(cell_dir / "metrics.json", metrics.harvest(results, args.backend, model))
                 else:
                     _write_json(cell_dir / "metrics.json", {"exists": False})
                     status = "failed"
-                write_cell(cell_json, condition, replicate, experiment, results, wall, status, args.agents, paused)
+                write_cell(cell_json, condition, replicate, experiment, results, wall, status, args.agents, paused, started_at)
                 if condition == "model-direct":
                     cleanup_model_direct_scratch(cell_dir)
                 summary = metrics.harvest(results, args.backend, model) if results.is_dir() else {}

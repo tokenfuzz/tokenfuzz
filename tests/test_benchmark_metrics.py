@@ -738,27 +738,37 @@ class BenchmarkMetricsTests(unittest.TestCase):
                 "replicates_total": 1, "wall_median": 60,
                 "rejected_finding_total": 2, "confirmed_finding_total": 3,
                 "unique_finding_clusters": 2, "medium_plus_findings": 1,
+                "unique_rejected_finding_clusters": 2,
+                "rejected_finding_clusters_upper_bound": True,
                 "rejected_crash_total": 4, "crash_total": 5,
                 "unique_crash_clusters": 3, "medium_plus_bugs": 2,
+                "unique_rejected_crash_clusters": 3,
                 "top_severity_level": "High", "tokens": {},
             }],
         }
         self.write_json(run / "report.json", report)
         text = benchmark.crosstab(self.root / "crosstab")
+        # Rejected columns precede accepted ones; upper bounds are explicit.
         for expected in (
-            "Rejected findings, Confirmed findings, and leads are distinct populations",
-            "Unique findings deduplicates Confirmed findings only",
-            "Unique crashes deduplicates Confirmed crashes only",
-            "Rejected findings | Confirmed findings | Unique findings",
-            "Rejected crashes | Confirmed crashes | Unique crashes",
+            "Rejected findings, accepted findings, and leads are distinct populations",
+            "Unique rejected findings | Unique accepted findings",
+            "Unique rejected crashes | Unique accepted crashes",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)
+        for gone in (
+            "| Confirmed findings |", "| Confirmed crashes |",
+            "| Rejected findings |", "| Rejected crashes |",
+        ):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, text)
         self.assertNotIn("Pending findings", text)
         self.assertNotIn("Pending crashes", text)
         ledger = benchmark.render_section(report)
         self.assertNotIn("Pending findings", ledger)
         self.assertNotIn("Pending crashes", ledger)
+        self.assertIn("≤ 2", text)
+        self.assertIn("≤ 2", ledger)
 
 
 if __name__ == "__main__":

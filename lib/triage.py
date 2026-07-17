@@ -18,11 +18,13 @@ from pathlib import Path
 import benchmark
 import crash_artifacts
 import crash_bundle
+import finding_signature
 import llm_decide
 import llm_usage
 import report_identity
 import stack_frames
 import triage_validate
+import workqueue
 from prompt_render import render_template
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
@@ -1756,6 +1758,69 @@ def _write_atomic_json(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
+def record_finding_discovery(results_dir: str | os.PathLike[str]) -> int:
+    """Stamp each finding's first-seen time into ``state/events.jsonl``.
+
+    The in-run accepted counter answers "what do we hold right now", not "when
+    was this found": it drops when a finding is demoted and finalization
+    re-adjudicates it in either direction, so it cannot carry a discovery
+    curve. Each finding instead gets one immutable first-seen row, keyed by the
+    cluster signature so the stamp still joins to the pooled result after
+    pooling rewrites the directory names.
+
+    Scans the rejected root too — a finding that the gate later cuts was still
+    discovered, and rejection moves the directory out of ``findings/``.
+
+    Returns the number of newly recorded findings.
+    """
+    results = Path(results_dir)
+    events = results / "state" / "events.jsonl"
+    seen = {
+        row.get("id") for row in workqueue.read_jsonl(events)
+        if row.get("type") == "finding_created"
+    }
+    rows = []
+    for root in (results / "findings", results / "findings-rejected"):
+        if not root.is_dir():
+            continue
+        for directory in sorted(root.glob("FIND-*")):
+            if not directory.is_dir() or directory.name in seen:
+                continue
+            report = _report(directory)
+            signature: list[str] = []
+            if report is not None:
+                signature = [
+                    str(part) for part in finding_signature.finding_signature(
+                        report.read_text(encoding="utf-8", errors="replace"),
+                    )["key"]
+                ]
+            rows.append({
+                "type": "finding_created",
+                "id": directory.name,
+                "signature": signature,
+                # first_seen is when housekeeping first observed it; mtime is the
+                # directory's own clock, which is closer to when the agent filed it.
+                "first_seen": datetime.now(timezone.utc).isoformat(),
+                "mtime": datetime.fromtimestamp(
+                    directory.stat().st_mtime, timezone.utc,
+                ).isoformat(),
+            })
+            seen.add(directory.name)
+    if not rows:
+        return 0
+    # One lock for the batch: a fsync per finding turns a 200-finding iteration
+    # into 200 locked writes, and re-reading between them is what lets two
+    # writers stamp the same finding twice.
+    with workqueue.jsonl_lock(events):
+        known = {
+            row.get("id") for row in workqueue.read_jsonl(events)
+            if row.get("type") == "finding_created"
+        }
+        fresh = [row for row in rows if row["id"] not in known]
+        workqueue._append_jsonl_many_unlocked(events, fresh)
+    return len(fresh)
+
+
 def validate_find_gate(
     results_dir: str | os.PathLike[str],
     *,
@@ -1768,6 +1833,19 @@ def validate_find_gate(
     results = Path(results_dir)
     findings = results / "findings"
     findings.mkdir(parents=True, exist_ok=True)
+    # Stamp discovery before the deadline-gated vote work below: when the wall
+    # budget is already spent the votes are skipped, but the finding was still
+    # found and must keep its place on the timeline. This is telemetry for a
+    # report — it must never be able to fail the validation it rides along with,
+    # so a broken state file is loud but not fatal.
+    try:
+        record_finding_discovery(results)
+    except Exception as exc:  # noqa: BLE001 - telemetry is never worth a gate
+        print(
+            f"WARN: finding discovery stamps unavailable ({exc}); "
+            "validation continues, timeline may be incomplete",
+            file=sys.stderr,
+        )
     directories = [path for path in sorted(findings.glob("FIND-*")) if path.is_dir()]
     q = quorum or _positive_int_env("FIND_GATE_QUORUM", 2)
     aq = accept_quorum or _positive_int_env("FIND_GATE_ACCEPT_QUORUM", 2)

@@ -2140,6 +2140,23 @@ def append_jsonl(path: Path, obj: dict) -> None:
         _append_jsonl_unlocked(path, obj)
 
 
+def _append_jsonl_many_unlocked(path: Path, rows: list[dict]) -> None:
+    """Append a batch with one open/flush/fsync.
+
+    Appending row by row costs a durability round-trip each time, which turns
+    one housekeeping pass over a few hundred findings into a few hundred fsyncs.
+    A caller that already holds the lock and the batch should pay for it once.
+    """
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        for obj in rows:
+            f.write(json.dumps(obj, sort_keys=True) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def read_jsonl(path: Path) -> list[dict]:
     return _read_jsonl_unlocked(path)
 
