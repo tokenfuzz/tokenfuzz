@@ -3488,10 +3488,30 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
     """
     import shutil
 
+    # The finding validator's scratch view (.validator-cwd) is a symlink farm
+    # into the target tree plus its build outputs. It is never evidence, and
+    # copytree follows those symlinks into half-written build trees and raises.
+    # Older runs embedded it inside model-direct finding dirs, so exclude it
+    # when pooling regardless of where it landed.
+    ignore_scratch = shutil.ignore_patterns(".validator-cwd")
+
     bench_dir = Path(bench_dir)
     pool = bench_dir / pool_name
+    stem = pool_name.strip(".")
+    # Sweep any skeleton a prior best-effort removal could not finish, so they
+    # don't accumulate across regenerates; this also clears our target name.
+    for leftover in bench_dir.glob(f".discard-{stem}-*"):
+        shutil.rmtree(leftover, ignore_errors=True)
     if pool.exists():
-        shutil.rmtree(pool)
+        # Rename the stale tree aside before removing it. A direct rmtree walks
+        # the tree and can fail with ENOTEMPTY when a concurrent writer
+        # (Spotlight/Finder repopulating .DS_Store, an indexer touching a nested
+        # build tree) creates a file in a directory rmtree just emptied. rename
+        # is atomic and content-agnostic, so the swap always succeeds; the aside
+        # removal is best-effort and never blocks the rebuild.
+        stale = bench_dir / f".discard-{stem}-{os.getpid()}"
+        pool.rename(stale)
+        shutil.rmtree(stale, ignore_errors=True)
     (pool / "crashes").mkdir(parents=True)
     (pool / "crashes-rejected").mkdir(parents=True)
     (pool / "findings").mkdir(parents=True)
@@ -3546,7 +3566,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
             crash_n += 1
             dst_name = f"CRASH-{crash_n:04d}"
             dst = pool / "crashes" / dst_name
-            shutil.copytree(src, dst)
+            shutil.copytree(src, dst, ignore=ignore_scratch)
             _scrub_pooled_tree(dst)
             members["crashes"][dst_name] = cond
             members["crash_cells"][dst_name] = cell_dir.name
@@ -3559,7 +3579,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 find_n += 1
                 dst_name = f"FIND-{find_n:04d}"
                 dst = pool / "findings" / dst_name
-                shutil.copytree(src, dst)
+                shutil.copytree(src, dst, ignore=ignore_scratch)
                 _scrub_pooled_tree(dst)
                 _link_pool_recon_ids(dst, rd)
                 members["findings"][dst_name] = cond
@@ -3571,7 +3591,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 rejected_find_n += 1
                 dst_name = f"FIND-REJECTED-{rejected_find_n:04d}"
                 dst = pool / "findings-rejected" / dst_name
-                shutil.copytree(src, dst)
+                shutil.copytree(src, dst, ignore=ignore_scratch)
                 _scrub_pooled_tree(dst)
                 _link_pool_recon_ids(dst, rd)
                 members["findings-rejected"][dst_name] = cond
@@ -3583,7 +3603,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 rejected_crash_n += 1
                 dst_name = f"CRASH-REJECTED-{rejected_crash_n:04d}"
                 dst = pool / "crashes-rejected" / dst_name
-                shutil.copytree(src, dst)
+                shutil.copytree(src, dst, ignore=ignore_scratch)
                 _scrub_pooled_tree(dst)
                 members["crashes-rejected"][dst_name] = cond
             # The per-cell named report is the human-readable rejection ledger

@@ -451,5 +451,49 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
             self.assertEqual(invoke.call_count, 3)
 
 
+class ValidatorScratchPlacementTests(unittest.TestCase):
+    """The validator's .validator-cwd must never land inside a pooled artifact.
+
+    f51b3a6 made the scratch view persistent in the results tree, anchored on a
+    `results`-named ancestor. Model-direct benchmark cells have no such ancestor
+    (the cell dir is the results dir), so the scratch was landing inside each
+    findings/FIND-N/ dir and breaking pool copy/remove.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="validator-cwd-place-")
+        self.root = Path(self.temporary.name)
+        self.target = self.root / "target"
+        self.target.mkdir()
+        (self.target / "src.c").write_text("int main(void){return 0;}\n")
+        self.validator_cwd = runpy.run_path(
+            str(ROOT / "bin" / "validate-finding")
+        )["validator_cwd"]
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _report(self, results: Path) -> Path:
+        report = results / "findings" / "FIND-1" / "report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("# finding\n")
+        return report
+
+    def test_model_direct_scratch_anchors_outside_finding_dir(self) -> None:
+        # Cell dir is the results dir; no `results`-named ancestor.
+        results = self.root / "cells" / "model-direct-r1"
+        report = self._report(results)
+        cwd = self.validator_cwd(report, self.target)
+        self.assertEqual(cwd, results / ".validator-cwd")
+        self.assertNotIn("FIND-1", cwd.parts)
+        self.assertTrue((cwd / "src.c").is_symlink())
+
+    def test_harness_scratch_still_anchors_at_results_root(self) -> None:
+        results = self.root / "output" / "x" / "codex" / "results"
+        report = self._report(results)
+        cwd = self.validator_cwd(report, self.target)
+        self.assertEqual(cwd, results / ".validator-cwd")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

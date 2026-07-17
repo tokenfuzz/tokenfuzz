@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -657,6 +660,78 @@ class BenchmarkMetricsTests(unittest.TestCase):
             self.assertEqual(len(list((condition_pool / "crashes").glob("CRASH-*"))), 1)
             self.assertEqual(len(list((condition_pool / "findings").glob("FIND-*"))), 1)
             self.assertTrue((condition_pool / "findings-rejected" / "REJECTED-FINDINGS.md").is_file())
+
+    def test_pool_rebuild_survives_concurrent_writer_during_stale_cleanup(self) -> None:
+        # A leftover staging tree from an interrupted run must be cleared even
+        # when a concurrent writer (Spotlight/Finder/an indexer) drops a file
+        # into a directory the removal just emptied — the race that makes a
+        # direct rmtree fail with ENOTEMPTY mid-walk.
+        bench = self.root / "race-bench"
+        self.write_json(bench / "run.json", {
+            "runid": "race", "target": "sample", "backend": "codex",
+            "conditions": ["harness"], "replicates": 1,
+        })
+        results = self.root / "race-results"
+        finding = results / "findings" / "FIND-001"
+        finding.mkdir(parents=True)
+        (finding / "report.md").write_text("# finding\n")
+        cell = self.make_cell(bench, "harness-r1", "harness", 1, 0, findings=1)
+        data = json.loads((cell / "cell.json").read_text())
+        data["results_dir"] = str(results)
+        self.write_json(cell / "cell.json", data)
+        self.write_json(cell / "metrics.json", benchmark.harvest(results))
+
+        benchmark.build_pool(bench)
+        self.assertTrue((bench / "pool").is_dir())
+
+        # A skeleton a prior best-effort removal could not finish must be swept,
+        # not accumulate across rebuilds.
+        skeleton = bench / ".discard-pool-999999"
+        (skeleton / "leftover").mkdir(parents=True)
+
+        real_rmtree = shutil.rmtree
+
+        def racing_rmtree(path, *rest, **kwargs):
+            # Reproduce the traceback: a raw removal of the stale pool raises
+            # ENOTEMPTY. Best-effort removals (ignore_errors) pass through.
+            if Path(path) == bench / "pool" and not kwargs.get("ignore_errors"):
+                raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+            return real_rmtree(path, *rest, **kwargs)
+
+        with mock.patch.object(shutil, "rmtree", racing_rmtree):
+            benchmark.build_pool(bench)
+        self.assertTrue((bench / "pool").is_dir())
+        self.assertFalse(any(bench.glob(".discard-*")))
+
+    def test_pool_excludes_validator_scratch_with_dangling_symlinks(self) -> None:
+        # Older model-direct cells embedded the validator's .validator-cwd (a
+        # symlink farm into the target tree) inside each finding dir. copytree
+        # follows those symlinks and raises shutil.Error on a dangling one, so
+        # pooling must skip the scratch entirely.
+        bench = self.root / "scratch-bench"
+        self.write_json(bench / "run.json", {
+            "runid": "scratch", "target": "sample", "backend": "codex",
+            "conditions": ["model-direct"], "replicates": 1,
+        })
+        results = self.root / "scratch-results"
+        finding = results / "findings" / "FIND-1"
+        finding.mkdir(parents=True)
+        (finding / "report.md").write_text("# finding\n")
+        (finding / ".keep").touch()
+        scratch = finding / ".validator-cwd"
+        scratch.mkdir()
+        (scratch / "src").symlink_to(self.root / "does-not-exist")
+        cell = self.make_cell(bench, "model-direct-r1", "model-direct", 1, 0, findings=1)
+        data = json.loads((cell / "cell.json").read_text())
+        data["results_dir"] = str(results)
+        self.write_json(cell / "cell.json", data)
+        self.write_json(cell / "metrics.json", benchmark.harvest(results))
+
+        benchmark.build_pool(bench)
+
+        pooled = bench / "pool" / "findings" / "FIND-0001"
+        self.assertTrue((pooled / "report.md").is_file())
+        self.assertFalse((pooled / ".validator-cwd").exists())
 
     def test_pool_rejected_finding_keeps_reason_after_report_link_rewrite(self) -> None:
         bench = self.root / "rejection-reason-bench"

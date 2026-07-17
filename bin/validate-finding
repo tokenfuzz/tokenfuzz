@@ -89,10 +89,33 @@ def output_path(finding: Path, configured: str | None) -> Path:
     return finding.parent / f"validator-vote-{index}.json"
 
 
+# Artifact containers under a results tree. The validator's scratch view must
+# anchor at the tree root (their parent), never inside an individual artifact
+# dir — benchmark pooling copies and removes those dirs, and the view is a
+# symlink farm into the target plus the validator's build outputs.
+_ARTIFACT_CONTAINERS = ("findings", "findings-rejected", "crashes", "crashes-rejected")
+
+
 def validator_cwd(finding: Path, target: Path) -> Path:
-    """Return one stable, isolated source view shared by this results tree."""
-    results = next((parent for parent in finding.parents if parent.name == "results"), None)
-    cwd = (results or finding.parent) / ".validator-cwd"
+    """Return one stable, isolated source view shared by this results tree.
+
+    Anchored at the results-tree root — the parent of the findings/crashes
+    container holding the artifact — so the view is shared across the tree and
+    never lands inside a single artifact dir. Model-direct cells have no
+    `results`-named ancestor (the cell dir is the results dir); keying off the
+    container name is what keeps their scratch out of the pool.
+    """
+    root = next(
+        (parent.parent for parent in finding.parents
+         if parent.name in _ARTIFACT_CONTAINERS),
+        None,
+    )
+    if root is None:
+        root = next(
+            (parent for parent in finding.parents if parent.name == "results"),
+            finding.parent,
+        )
+    cwd = root / ".validator-cwd"
     cwd.mkdir(parents=True, exist_ok=True)
     for entry in target.iterdir():
         link = cwd / entry.name
