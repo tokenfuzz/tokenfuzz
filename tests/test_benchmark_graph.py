@@ -9,6 +9,8 @@ A graph that disagrees with the table beside it is worse than no graph.
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -98,6 +100,27 @@ class CellOriginTests(unittest.TestCase):
 
     def test_no_origin_is_admitted_not_invented(self) -> None:
         self.assertIsNone(benchmark_graph._cell_start(self.cell))
+
+    def test_crash_filing_clock_overrides_copied_evidence_mtimes(self) -> None:
+        crash = self.cell / "CRASH-001"
+        crash.mkdir()
+        (crash / "testcase.bin").write_bytes(b"old source bytes")
+        filed = "2026-07-18T12:34:56+00:00"
+        (crash / ".crash-created-at").write_text(filed + "\n", encoding="utf-8")
+        self.assertEqual(
+            benchmark_graph._artifact_time(crash),
+            datetime.fromisoformat(filed).timestamp(),
+        )
+
+    def test_exported_crash_filing_clock_is_read_from_audit_provenance(self) -> None:
+        crash = self.cell / "CRASH-EXPORTED" / ".audit"
+        crash.mkdir(parents=True)
+        filed = "2026-07-18T12:34:56+00:00"
+        (crash / ".crash-created-at").write_text(filed + "\n", encoding="utf-8")
+        self.assertEqual(
+            benchmark_graph._artifact_time(crash.parent),
+            datetime.fromisoformat(filed).timestamp(),
+        )
 
 
 class CrashIdentityTests(unittest.TestCase):
@@ -223,6 +246,26 @@ class RejectedApproximationTests(unittest.TestCase):
         self.assertEqual(
             benchmark_graph.build(self.root)["series"][0]["model"], "gpt-5.6-sol")
 
+    def test_same_target_at_different_revisions_gets_separate_rows(self) -> None:
+        self._series()
+        metadata = json.loads((self.run / "run.json").read_text(encoding="utf-8"))
+        metadata["target_sha"] = "abcdef0111111111"
+        (self.run / "run.json").write_text(json.dumps(metadata), encoding="utf-8")
+        other = self.root / "claude" / "other-run"
+        shutil.copytree(self.run, other)
+        metadata = json.loads((other / "run.json").read_text(encoding="utf-8"))
+        metadata["target_sha"] = "abcdef0222222222"
+        (other / "run.json").write_text(json.dumps(metadata), encoding="utf-8")
+        data = benchmark_graph.build(self.root)
+        self.assertEqual(data["target_groups"], [
+            {"target": "sample", "target_sha": "abcdef0111111111"},
+            {"target": "sample", "target_sha": "abcdef0222222222"},
+        ])
+        self.assertEqual(
+            {row["target_sha"] for row in data["series"]},
+            {"abcdef0111111111", "abcdef0222222222"},
+        )
+
     def test_rejected_count_mismatch_marks_timing_approximate(self) -> None:
         # Historical reports have no upper-bound bit. The count/cluster mismatch
         # alone still proves the padded wall timestamps are approximate.
@@ -240,8 +283,7 @@ class RejectedApproximationTests(unittest.TestCase):
 class RenderTests(unittest.TestCase):
     def _data(self) -> dict:
         return {
-            "targets": {"sample": "abc1234"},
-            "target_order": ["sample"],
+            "target_groups": [{"target": "sample", "target_sha": "abc1234"}],
             "series": [{
                 "target": "sample", "target_sha": "abc1234", "backend": "codex",
                 "model": "gpt-5.6-sol",
@@ -279,6 +321,26 @@ class RenderTests(unittest.TestCase):
         self.assertIn("mouseenter", html)
         self.assertIn("Hover any point", html)
 
+    def test_metadata_is_inserted_with_text_content_only(self) -> None:
+        data = self._data()
+        data["series"][0]["model"] = '<img src=x onerror="alert(1)">'
+        data["target_groups"][0]["target"] = "<script>alert(2)</script>"
+        data["series"][0]["target"] = "<script>alert(2)</script>"
+        html = benchmark_graph.render(data)
+        self.assertNotIn("innerHTML", html)
+        self.assertIn("tip.replaceChildren", html)
+        self.assertIn("heading.textContent=title", html)
+        self.assertNotIn("<script>alert(2)</script>", html)
+
+    def test_all_supported_backends_have_distinct_colours(self) -> None:
+        html = benchmark_graph.render(self._data())
+        backends = ("codex", "claude", "gemini", "grok", "oss")
+        colours = dict(re.findall(
+            rf'({"|".join(backends)}):"(#[0-9a-fA-F]{{6}})"', html
+        ))
+        self.assertEqual(set(colours), set(backends))
+        self.assertEqual(len(set(colours.values())), len(backends))
+
     def test_fragment_is_self_contained(self) -> None:
         html = benchmark_graph.render(self._data())
         self.assertIn('id="ttd-data"', html)
@@ -290,7 +352,7 @@ class RenderTests(unittest.TestCase):
             with self.subTest(fetch=fetch):
                 self.assertNotIn(fetch, html)
         self.assertIn('"rejected_upper_bound":true', html)
-        self.assertIn("% kept", html)
+        self.assertNotIn("% kept", html)
         # the rejected magnitude lives in the chip and the crosstab; the old
         # per-row rejected mini-strip was redundant and is gone
         self.assertNotIn("REJECTED BY THE GATE", html)

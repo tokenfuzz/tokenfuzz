@@ -164,9 +164,10 @@ CRASH-001-1/
 ```
 
 Accepted crashes may carry other dot-files the triage gates leave
-behind (`.llm-*.json` vote caches, `.severity_ok`, and similar
-markers). All of these are harness internals — safe to ignore when
-reviewing.
+behind. `.crash-created-at` is the immutable filing clock used by benchmark
+discovery graphs (and moves under `.audit/` after export); `.llm-*.json` vote
+caches, `.severity_ok`, and similar markers are other examples. All of these
+are harness internals — safe to ignore when reviewing.
 
 `REPORT.md` carries a `Cluster: <ID>` line. Non-canonical cluster
 members also have a `.dup-of` file naming the canonical CRASH. The

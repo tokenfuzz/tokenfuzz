@@ -115,11 +115,26 @@ def _cell_start(cell_dir: Path) -> float | None:
 def _artifact_time(directory: Path) -> float | None:
     """Earliest clock inside an artifact directory.
 
+    New crash bundles carry a write-once filing timestamp because their
+    testcase and sanitizer evidence are copied with preserved source mtimes.
+    Prefer that clock when present. Historical artifacts fall back to the
+    earliest filesystem timestamp as before.
+
     A directory's own mtime moves whenever an entry is added or rewritten, so
     re-triage drags it to "now" and destroys the discovery signal. The earliest
     file inside it — written when the agent first filed the artifact — survives
     that, so prefer whichever is older.
     """
+    for created_at in (
+        directory / ".crash-created-at",
+        directory / ".audit" / ".crash-created-at",
+    ):
+        try:
+            return datetime.fromisoformat(
+                created_at.read_text(encoding="utf-8").strip().replace("Z", "+00:00")
+            ).timestamp()
+        except (OSError, ValueError):
+            pass
     stamps = []
     try:
         stamps.append(directory.stat().st_mtime)
@@ -299,7 +314,7 @@ def build(bench_root: Path) -> dict:
     """Collect one series per target/backend/condition/run."""
     bench_root = Path(bench_root)
     series: list[dict] = []
-    targets: dict[str, str] = {}
+    target_groups: set[tuple[str, str]] = set()
     for run_dir in sorted(bench_root.glob("*/*")):
         run_json = run_dir / "run.json"
         if not run_json.is_file():
@@ -317,8 +332,8 @@ def build(bench_root: Path) -> dict:
             report = json.loads(report_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        target = run.get("target", "?")
-        targets.setdefault(target, (run.get("target_sha") or "")[:7])
+        target = str(run.get("target") or "?")
+        target_sha = str(run.get("target_sha") or "")
         cells_by_cond: dict[str, list[Path]] = {}
         for cell in sorted((run_dir / "cells").glob("*")):
             if not (cell / "cell.json").is_file():
@@ -335,7 +350,7 @@ def build(bench_root: Path) -> dict:
             wall = (condition.get("wall_median") or 0) / 3600.0
             entry = {
                 "target": target,
-                "target_sha": targets[target],
+                "target_sha": target_sha,
                 "backend": run.get("backend", "?"),
                 "model": (run.get("model") or "").strip(),
                 "condition": cond,
@@ -388,19 +403,25 @@ def build(bench_root: Path) -> dict:
                     "rejected_times": [round(t, 4) for t in rejected],
                 }
             series.append(entry)
-    order = [t for t in sorted(targets) if any(s["target"] == t for s in series)]
-    return {"series": series, "targets": targets, "target_order": order}
+            target_groups.add((target, target_sha))
+    return {
+        "series": series,
+        "target_groups": [
+            {"target": target, "target_sha": target_sha}
+            for target, target_sha in sorted(target_groups)
+        ],
+    }
 
 
 # ── rendering ───────────────────────────────────────────────────────────────
-# Palette validated for both light and dark surfaces (colourblind-safe):
-# backend hue codex=blue, claude=magenta, gemini=violet — kept clear of the
-# warm red/orange/green the report already spends on severity.
+# Backend hues stay distinct on both light and dark surfaces and avoid the
+# severity palette where practical.
 _CSS = """
 .ttd{background:#f1f3f4;border-radius:20px;padding:1.3em 1.4em 1.5em;margin:1.6em 0 2em;
  box-shadow:0 1px 3px 1px rgba(32,33,36,.10),0 1px 2px rgba(32,33,36,.18);
  --ink1:#202124;--ink2:#5f6368;--muted:#80868b;--grid:#e8eaed;--axis:#b9bec4;
- --surf:#fff;--codex:#2a78d6;--claude:#d64f92;--gemini:#6f52c9;--noise:#9aa0a6;color:var(--ink1)}
+ --surf:#fff;--codex:#2a78d6;--claude:#d64f92;--gemini:#6f52c9;--grok:#00897b;
+ --oss:#c45d00;--noise:#9aa0a6;color:var(--ink1)}
 .ttd *{box-sizing:border-box}
 .ttd h2{font-size:1.35em;font-weight:700;margin:0 0 .15em;border:none;color:var(--ink1)}
 .ttd .kick{font-size:.72em;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--codex);margin:0 0 .3em}
@@ -440,17 +461,17 @@ _KEY = """
   <div class="kt"><b>◇ Final total</b><span>The settled count for that cell — identical to the Unique accepted column above.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><polygon points="8,1 8,11 19,6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
   <div class="kt"><b>▷ model-direct control</b><span>The bare model with no harness — one shot, so it lands as a single point at the hour it stopped.</span></div></div>
- <div class="ki"><svg viewBox="0 0 26 12"><circle cx="7" cy="6" r="5" fill="#2a78d6"/><circle cx="19" cy="6" r="5" fill="#d64f92"/></svg>
-  <div class="kt"><b>Label = model, colour = backend</b><span>Each row is named by the model that ran it (its model-direct control and tokenfuzz harness share that name); blue is codex, magenta is claude. Every target is audited on live, unfixed code — there is no planted bug to re-find.</span></div></div>
+ <div class="ki"><svg viewBox="0 0 26 12"><circle cx="3" cy="6" r="3" fill="#2a78d6"/><circle cx="8" cy="6" r="3" fill="#d64f92"/><circle cx="13" cy="6" r="3" fill="#6f52c9"/><circle cx="18" cy="6" r="3" fill="#00897b"/><circle cx="23" cy="6" r="3" fill="#c45d00"/></svg>
+  <div class="kt"><b>Label = model, colour = backend</b><span>Each row is named by the model that ran it (its model-direct control and tokenfuzz harness share that name): blue codex, magenta claude, violet gemini, teal grok, and orange OSS. Every target is audited on live, unfixed code — there is no planted bug to re-find.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><path d="M1 6 L25 6" stroke="currentColor" stroke-width="1.5"/><circle cx="13" cy="6" r="2.5" fill="currentColor"/></svg>
-  <div class="kt"><b>Reading the chip</b><span>The chip above each curve totals what the gate kept versus cut. &ldquo;% kept&rdquo; is how much of what the model proposed survived; a ≤ on the rejected count (so ≥ on % kept) marks a conservative upper bound. It is not precision: that needs an answer key, and a live target has none.</span></div></div>
+  <div class="kt"><b>Reading the chip</b><span>The chip above each curve shows separately deduplicated accepted and rejected counts. A root with mixed gate decisions can appear on both sides, so no retention percentage is inferred; a ≤ marks a conservative rejected upper bound.</span></div></div>
 </div>
 """
 
 _JS = r"""
 (function(){
 var D=JSON.parse(document.getElementById("ttd-data").textContent),NS="http://www.w3.org/2000/svg";
-var HUE={codex:"#2a78d6",claude:"#d64f92",gemini:"#6f52c9"};
+var HUE={codex:"#2a78d6",claude:"#d64f92",gemini:"#6f52c9",grok:"#00897b",oss:"#c45d00"};
 function el(t,a,k){var e=document.createElementNS(NS,t);for(var x in a)if(a[x]!=null)e.setAttribute(x,a[x]);
  (k||[]).forEach(function(c){e.appendChild(c)});return e}
 function tx(s){return document.createTextNode(String(s))}
@@ -461,8 +482,12 @@ function place(e){var pad=14,w=tip.offsetWidth,h=tip.offsetHeight,
  x=e.clientX+pad,y=e.clientY+pad;
  if(x+w>innerWidth-8)x=e.clientX-w-pad;if(y+h>innerHeight-8)y=e.clientY-h-pad;
  tip.style.left=Math.max(8,x)+"px";tip.style.top=Math.max(8,y)+"px"}
-function hover(node,html,grow){node.addEventListener("mouseenter",function(e){
-  tip.innerHTML=html;tip.style.display="block";place(e);if(grow)grow.setAttribute("r",5.5)});
+function hover(node,title,lines,grow){node.addEventListener("mouseenter",function(e){
+  tip.replaceChildren();var heading=document.createElement("b");heading.textContent=title;tip.appendChild(heading);
+  lines.forEach(function(line){tip.appendChild(document.createElement("br"));
+   var part=document.createElement(line.italic?"i":"span");part.textContent=line.text;
+   if(line.dim)part.className="dim";tip.appendChild(part)});
+  tip.style.display="block";place(e);if(grow)grow.setAttribute("r",5.5)});
  node.addEventListener("mousemove",place);
  node.addEventListener("mouseleave",function(){tip.style.display="none";if(grow)grow.setAttribute("r",3.5)})}
 function hrs(v){return (Math.round((+v||0)*100)/100)+"h"}
@@ -474,7 +499,7 @@ function nice(v,n,i){if(!(v>0))v=1;var s=v/(n||4),p=Math.pow(10,Math.floor(Math.
 // a discovery curve is cumulative: one step up per result, at the hour it was found
 function steps(times){var p=[[0,0]];times.forEach(function(t,i){p.push([t,i]);p.push([t,i+1])});return p}
 function path(pts,X,Y){return pts.map(function(p,i){return (i?"L":"M")+X(p[0]).toFixed(2)+","+Y(p[1]).toFixed(2)}).join(" ")}
-function panel(host,tg,kind,rows){
+function panel(host,kind,rows){
  var W=600,ml=46,mr=64,pw=W-ml-mr,chips=rows.filter(function(r){return r.condition==="harness"});
  var mt=18+chips.length*16,ph=206,xa=38,H=mt+ph+xa+8;
  var maxY=1,maxX=.5;
@@ -484,14 +509,11 @@ function panel(host,tg,kind,rows){
  var X=function(v){return ml+(v/xs.top)*pw},Y=function(v){return mt+ph-(v/ys.top)*ph};
  var s=el("svg",{class:"c",viewBox:"0 0 "+W+" "+H,role:"img"});
  var cy=11;
- chips.forEach(function(r){var m=r[kind],c=HUE[r.backend]||HUE.codex,u=!!m.rejected_upper_bound,
-  raw=(m.accepted+m.rejected)?100*m.accepted/(m.accepted+m.rejected):null,
-  k=raw==null?null:(u?Math.floor(raw):Math.round(raw));
+ chips.forEach(function(r){var m=r[kind],c=HUE[r.backend]||HUE.codex,u=!!m.rejected_upper_bound;
   s.appendChild(el("circle",{cx:ml+4,cy:cy-3.5,r:4,fill:c}));
   s.appendChild(el("text",{x:ml+14,y:cy,"font-size":11,"font-weight":700,fill:"#202124"},[tx(r.model||r.backend)]));
   s.appendChild(el("text",{x:ml+150,y:cy,"font-size":11,fill:"#5f6368"},[tx(m.accepted+" accepted")]));
   s.appendChild(el("text",{x:ml+242,y:cy,"font-size":11,fill:"#5f6368"},[tx((u?"≤ ":"")+m.rejected+" rejected")]));
-  if(k!=null)s.appendChild(el("text",{x:ml+336,y:cy,"font-size":11,"font-weight":700,fill:"#202124"},[tx((u?"≥ ":"")+k+"% kept")]));
   cy+=16});
  for(var v=0;v<=ys.top+1e-9;v+=ys.step){var yv=Math.round(v*1e6)/1e6;
   s.appendChild(el("line",{x1:ml,x2:ml+pw,y1:Y(yv),y2:Y(yv),stroke:yv?"#e8eaed":"#b9bec4","stroke-width":yv?1:1.5}));
@@ -507,9 +529,10 @@ function panel(host,tg,kind,rows){
    var tri=el("polygon",{points:[[x-6,y-6],[x-6,y+6],[x+6,y]].map(function(p){return p.join(",")}).join(" "),
     fill:"#fff",stroke:c,"stroke-width":2,"stroke-linejoin":"round"});
    s.appendChild(tri);
-   hover(tri,"<b>"+name+" · model-direct</b><br>"+m.accepted+" "+noun(kind,m.accepted)+" accepted<br>"+
-    "bare model, no harness — one shot, stopped at "+hrs(r.wall_h)+"<br>"+
-    "<span class='dim'>Control baseline: a plain “find the vulnerabilities” prompt with no triage or dedup, so a large raw count here is mostly noise.</span>");
+   hover(tri,name+" · model-direct",[
+    {text:m.accepted+" "+noun(kind,m.accepted)+" accepted"},
+    {text:"bare model, no harness — one shot, stopped at "+hrs(r.wall_h)},
+    {text:"Control baseline: a plain “find the vulnerabilities” prompt with no triage or dedup, so a large raw count here is mostly noise.",dim:true}]);
    s.appendChild(el("text",{x:x+10,y:y+4,"font-size":10.5,fill:"#5f6368"},[tx(m.accepted)]));return}
   var at=m.accepted_times||[],pts=steps(at);
   if(!pts.length)return;
@@ -526,14 +549,18 @@ function panel(host,tg,kind,rows){
    var dot=el("circle",{cx:px,cy:py,r:3.5,fill:"#fff",stroke:c,"stroke-width":1.5,"class":"dot"});
    var hit=el("circle",{cx:px,cy:py,r:9,fill:"transparent","class":"hit"});
    s.appendChild(dot);s.appendChild(hit);
-   hover(hit,"<b>"+name+" · tokenfuzz</b><br>"+noun(kind,1)+" #"+(i+1)+" of "+m.accepted+
-    " accepted<br>found "+hrs(t)+" into the run",dot)});
+   hover(hit,name+" · tokenfuzz",[
+    {text:noun(kind,1)+" #"+(i+1)+" of "+m.accepted+" accepted"},
+    {text:"found "+hrs(t)+" into the run"}],dot)});
   var ex=X(end[0]);
   var dia=el("polygon",{points:[[ex,Y(end[1])-5.5],[ex+5.5,Y(end[1])],[ex,Y(end[1])+5.5],[ex-5.5,Y(end[1])]]
     .map(function(p){return p.join(",")}).join(" "),fill:c,stroke:"#fff","stroke-width":2,"class":"hit"});
   s.appendChild(dia);
-  hover(dia,"<b>"+name+" · tokenfuzz</b><br>final total: "+m.accepted+" "+noun(kind,m.accepted)+
-   " accepted<br>over a "+hrs(r.wall_h)+" audit"+(m.approx_timing?"<br><i>discovery timing approximate</i>":""));
+  var finalLines=[
+   {text:"final total: "+m.accepted+" "+noun(kind,m.accepted)+" accepted"},
+   {text:"over a "+hrs(r.wall_h)+" audit"}];
+  if(m.approx_timing)finalLines.push({text:"discovery timing approximate",italic:true});
+  hover(dia,name+" · tokenfuzz",finalLines);
   s.appendChild(el("text",{x:ex+10,y:Y(end[1])+4,"font-size":11.5,"font-weight":700,fill:"#202124"},[tx(m.accepted)]))});
  if(chips.some(function(r){return r[kind].approx_timing})){
   s.appendChild(el("text",{x:ml+pw,y:mt+13,"text-anchor":"end","font-size":9.5,
@@ -541,18 +568,22 @@ function panel(host,tg,kind,rows){
    [tx("timing approximate — one or more discovery times unavailable")]))}
  host.appendChild(s)}
 var host=document.getElementById("ttd-rows");
-D.target_order.forEach(function(tg){
- var rows=D.series.filter(function(s){return s.target===tg});
+D.target_groups.forEach(function(tg){
+ var rows=D.series.filter(function(s){return s.target===tg.target&&s.target_sha===tg.target_sha});
  if(!rows.length)return;
  var vers={},reps=0;rows.forEach(function(r){vers[r.version]=1;if(r.condition==="harness")reps=Math.max(reps,r.replicates)});
  var sec=document.createElement("section");sec.className="row";
- sec.innerHTML='<div class="rh"><h3>'+tg+' <span class="sha">'+(D.targets[tg]||"")+'</span></h3>'+
-  '<span class="meta">harness '+Object.keys(vers).join(" · ")+(reps?" · "+reps+" replicate"+(reps>1?"s":"")+" pooled":"")+'</span></div>';
+ var rh=document.createElement("div");rh.className="rh";
+ var h3=document.createElement("h3");h3.appendChild(tx(tg.target+" "));
+ var sha=document.createElement("span");sha.className="sha";sha.textContent=tg.target_sha.slice(0,7);h3.appendChild(sha);rh.appendChild(h3);
+ var meta=document.createElement("span");meta.className="meta";
+ meta.textContent="harness "+Object.keys(vers).join(" · ")+(reps?" · "+reps+" replicate"+(reps>1?"s":"")+" pooled":"");
+ rh.appendChild(meta);sec.appendChild(rh);
  var g=document.createElement("div");g.className="grid";
  [["find","Security findings"],["crash","Security crashes"]].forEach(function(kk){
   var p=document.createElement("div");p.className="panel";
   var t=document.createElement("div");t.className="pt";t.textContent=kk[1];p.appendChild(t);
-  panel(p,tg,kk[0],rows);g.appendChild(p)});
+  panel(p,kk[0],rows);g.appendChild(p)});
  sec.appendChild(g);host.appendChild(sec)});
 })();
 """

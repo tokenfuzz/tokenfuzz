@@ -482,10 +482,17 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     equal("FILED", outcome, "crash bundle materializes a first confirmed diagnostic")
     bundle_dir = bundle_results / "crashes" / crash_id
     check((bundle_dir / "report.md").is_file() and (bundle_dir / "repro.cmd").is_file(), "crash bundle includes report and replay arguments")
+    created_at = (bundle_dir / ".crash-created-at").read_text(encoding="utf-8")
+    check(bool(created_at.strip()), "crash bundle records its immutable filing clock")
     duplicate, duplicate_id = crash_bundle.materialize(
         bundle_results, "2", bundle_case, bundle_san, "asan", "generic", args=("--decode",)
     )
     equal(("DUP", crash_id), (duplicate, duplicate_id), "crash bundle identity prevents duplicate filing")
+    equal(
+        created_at,
+        (bundle_dir / ".crash-created-at").read_text(encoding="utf-8"),
+        "duplicate confirmation does not rewrite the filing clock",
+    )
 
     original_path_open = Path.open
 

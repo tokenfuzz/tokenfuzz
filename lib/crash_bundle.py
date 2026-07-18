@@ -11,6 +11,7 @@ import shlex
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -505,6 +506,13 @@ def materialize(
     destination = crashes / crash_id
     destination.mkdir()
     try:
+        # copy2 below preserves source mtimes, so none of the copied evidence is
+        # an honest filing clock. Record one immutable bundle-creation timestamp
+        # before copying; duplicate probes reuse the existing bundle and never
+        # rewrite it.
+        (destination / ".crash-created-at").write_text(
+            datetime.now(timezone.utc).isoformat() + "\n", encoding="utf-8",
+        )
         (destination / ".probe-identity").write_text(identity + "\n", encoding="utf-8")
         _write_probe_context(
             destination, identity=identity, testcase=testcase_path,

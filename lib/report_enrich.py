@@ -31,6 +31,7 @@ by the caller from target.toml / session-env.
 
 from __future__ import annotations
 
+import glob
 import os
 import re
 from dataclasses import dataclass
@@ -157,10 +158,15 @@ class SourceFileIndex:
 
     def _scan(self, basenames: set[str]) -> dict[str, list[str]]:
         files_by_name: dict[str, list[str]] = {}
-        # Use the same traversal as the old source_root.rglob(basename)
-        # fallback. os.walk() orders nested equal-length duplicates
-        # differently, which can select a different source file.
-        for path in self.source_root.rglob("*"):
+        # A single basename can use the legacy targeted traversal, which avoids
+        # visiting every entry in very large trees. Batches still walk once for
+        # all requested names. Both retain rglob's tie order. glob.escape keeps
+        # a metachar in the name (e.g. a generated `foo[abi].c`) literal rather
+        # than a pattern, independent of what the extractor regex admits.
+        pattern = (
+            glob.escape(next(iter(basenames))) if len(basenames) == 1 else "*"
+        )
+        for path in self.source_root.rglob(pattern):
             if path.name in basenames and path.is_file():
                 relative = str(path.relative_to(self.source_root))
                 files_by_name.setdefault(path.name, []).append(relative)

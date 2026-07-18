@@ -4687,7 +4687,9 @@ def crosstab(bench_root: Path) -> str:
         "The count links to the finding cluster report."
     )
     lines.append(
-        "Rejected findings and accepted findings are distinct populations."
+        "Accepted and rejected findings are clustered separately. A root with "
+        "mixed gate decisions can therefore appear in both columns; the counts "
+        "must not be combined into a retention percentage."
     )
     lines.append("")
 

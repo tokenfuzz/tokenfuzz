@@ -270,17 +270,19 @@ crash, finding, rejected-crash, rejected-finding, and cluster reports
 that produced the number.
 
 **Time to discovery**, below the table, plots those same numbers over time: one
-row per target, findings and crashes side by side. Each step is one deduplicated
-accepted result placed at the hour it was found, so the curve only climbs and
-ends exactly on the `Unique accepted` count; the strip underneath is what the
-gate cut, on the same clock but its own scale. Discovery times come from the
-`finding_created` stamps in `state/events.jsonl`. Runs recorded before that
-stream existed fall back to the artifacts' own clocks. When a discovery time is
-unavailable, the panel says the timing is approximate rather than implying an
-exactness it does not have. The `% kept` figure beside each series is simply how
-much of what a model proposed survived the gate; with an upper-bound rejected
-count, `≥ N% kept` is the corresponding lower bound. It is not precision,
-which needs the answer key described below.
+row per target revision, findings and crashes side by side. Each step is one
+deduplicated accepted result placed at the hour it was found, so the curve only
+climbs and ends exactly on the `Unique accepted` count. The chip above each
+curve shows what the gate accepted and rejected. Discovery times come from the
+`finding_created` stamps in `state/events.jsonl` and the immutable filing clock
+on new crash bundles. Runs recorded before those clocks existed fall back to
+the artifacts' own timestamps. When a discovery time is unavailable, the panel
+says the timing is approximate rather than implying an exactness it does not
+have. Accepted and rejected artifacts are deduplicated separately. Because one
+root with mixed gate decisions can appear on both sides, the graph reports both
+counts without inferring a retention percentage. A `≤` rejected count remains
+a conservative upper bound. Neither count is precision, which needs the answer
+key described below.
 
 **Token usage** appears when the backend reports usage or the harness
 can estimate prompt size. The bold row per condition is the total to

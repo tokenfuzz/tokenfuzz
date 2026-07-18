@@ -312,10 +312,10 @@ Agent-inlined narrative that must be replaced by the sibling diff.
         first = context("first")
         second = context("second")
         real_rglob = Path.rglob
-        walks: list[Path] = []
+        walks: list[tuple[Path, str]] = []
 
         def counted_rglob(path: Path, pattern: str):
-            walks.append(Path(path))
+            walks.append((Path(path), pattern))
             return real_rglob(path, pattern)
 
         with mock.patch.object(Path, "rglob", counted_rglob):
@@ -335,10 +335,34 @@ Agent-inlined narrative that must be replaced by the sibling diff.
                 report_enrich._resolve_source_file(second, "tie.c"), legacy_tie
             )
 
-        self.assertEqual(walks, [self.source])
+        self.assertEqual(walks, [(self.source, "*")])
         self.assertEqual(
             set(source_index._files_by_name), {"parser.c", "helper.c", "tie.c"}
         )
+
+    def test_single_basename_lookup_uses_targeted_walk(self) -> None:
+        source_index = report_enrich.SourceFileIndex(self.source, {"parser.c"})
+        real_rglob = Path.rglob
+        patterns = []
+
+        def counted_rglob(path: Path, pattern: str):
+            patterns.append(pattern)
+            return real_rglob(path, pattern)
+
+        with mock.patch.object(Path, "rglob", counted_rglob):
+            self.assertEqual(
+                source_index.resolve("parser.c"), self.source / "lib" / "parser.c"
+            )
+        self.assertEqual(patterns, ["parser.c"])
+
+    def test_single_basename_with_glob_metachar_is_matched_literally(self) -> None:
+        # A generated source name can contain a glob metachar; the targeted
+        # single-basename walk must treat it as a literal, not a pattern.
+        generated = self.source / "gen" / "table[abi].c"
+        generated.parent.mkdir(parents=True)
+        generated.write_text("static const int t = 0;\n", encoding="utf-8")
+        source_index = report_enrich.SourceFileIndex(self.source, {"table[abi].c"})
+        self.assertEqual(source_index.resolve("table[abi].c"), generated)
 
     def test_nul_stdin_batch_and_per_report_failure_isolation(self) -> None:
         reports = []

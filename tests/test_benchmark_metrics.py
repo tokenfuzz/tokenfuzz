@@ -826,7 +826,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         text = benchmark.crosstab(self.root / "crosstab")
         # Rejected columns precede accepted ones; upper bounds are explicit.
         for expected in (
-            "Rejected findings and accepted findings are distinct populations",
+            "A root with mixed gate decisions can therefore appear in both columns",
             "Unique rejected findings | Unique accepted findings",
             "Unique rejected crashes | Unique accepted crashes",
         ):
