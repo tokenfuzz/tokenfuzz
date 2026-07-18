@@ -271,6 +271,14 @@ class RenderTests(unittest.TestCase):
         html = benchmark_graph.render(self._data())
         self.assertIn("[[r.wall_h,end[1]]]", html)
 
+    def test_points_are_interactive(self) -> None:
+        # every point carries a hover tooltip; the fragment ships the tooltip
+        # container, the hover wiring, and the reader-facing hint
+        html = benchmark_graph.render(self._data())
+        self.assertIn("ttd-tip", html)
+        self.assertIn("mouseenter", html)
+        self.assertIn("Hover any point", html)
+
     def test_fragment_is_self_contained(self) -> None:
         html = benchmark_graph.render(self._data())
         self.assertIn('id="ttd-data"', html)

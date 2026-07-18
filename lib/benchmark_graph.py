@@ -419,7 +419,16 @@ _CSS = """
 .ttd .panel{background:var(--surf);border-radius:14px;padding:.9em 1em .7em;
  box-shadow:0 1px 2px rgba(32,33,36,.16);min-width:0}
 .ttd .pt{font-size:.85em;font-weight:700;margin:0 0 .1em 2px;color:var(--ink1)}
+.ttd .hint{font-size:.8em;color:var(--ink2);margin:.9em 2px 0}
 .ttd svg.c{display:block;width:100%;height:auto;overflow:visible;font:inherit}
+.ttd svg.c .dot{cursor:pointer;transition:r .08s ease-out}
+.ttd svg.c .hit{cursor:pointer}
+.ttd-tip{position:fixed;z-index:60;display:none;pointer-events:none;max-width:270px;
+ background:#202124;color:#fff;font-size:.78em;line-height:1.5;padding:.5em .65em;
+ border-radius:9px;box-shadow:0 2px 8px rgba(32,33,36,.35)}
+.ttd-tip b{color:#fff}
+.ttd-tip .dim{color:#bdc1c6}
+.ttd-tip i{color:#bdc1c6}
 @media(max-width:860px){.ttd .grid{grid-template-columns:1fr}}
 """
 
@@ -445,6 +454,20 @@ var HUE={codex:"#2a78d6",claude:"#d64f92",gemini:"#6f52c9"};
 function el(t,a,k){var e=document.createElementNS(NS,t);for(var x in a)if(a[x]!=null)e.setAttribute(x,a[x]);
  (k||[]).forEach(function(c){e.appendChild(c)});return e}
 function tx(s){return document.createTextNode(String(s))}
+// one shared tooltip, positioned in viewport coords so it survives page scroll
+// and the SVG's responsive scaling
+var tip=document.createElement("div");tip.className="ttd-tip";document.body.appendChild(tip);
+function place(e){var pad=14,w=tip.offsetWidth,h=tip.offsetHeight,
+ x=e.clientX+pad,y=e.clientY+pad;
+ if(x+w>innerWidth-8)x=e.clientX-w-pad;if(y+h>innerHeight-8)y=e.clientY-h-pad;
+ tip.style.left=Math.max(8,x)+"px";tip.style.top=Math.max(8,y)+"px"}
+function hover(node,html,grow){node.addEventListener("mouseenter",function(e){
+  tip.innerHTML=html;tip.style.display="block";place(e);if(grow)grow.setAttribute("r",5.5)});
+ node.addEventListener("mousemove",place);
+ node.addEventListener("mouseleave",function(){tip.style.display="none";if(grow)grow.setAttribute("r",3.5)})}
+function hrs(v){return (Math.round((+v||0)*100)/100)+"h"}
+function noun(kind,n){var one=kind==="crash"?"crash":"finding";
+ return n===1?one:(kind==="crash"?"crashes":"findings")}
 function nice(v,n,i){if(!(v>0))v=1;var s=v/(n||4),p=Math.pow(10,Math.floor(Math.log10(s))),q=s/p;
  var st=(q<=1?1:q<=2?2:q<=2.5?2.5:q<=5?5:10)*p;if(i)st=Math.max(1,Math.round(st));
  return{step:st,top:Math.ceil(v/st-1e-9)*st}}
@@ -478,10 +501,15 @@ function panel(host,tg,kind,rows){
   s.appendChild(el("text",{x:X(q),y:mt+ph+16,"text-anchor":"middle","font-size":10.5,fill:"#80868b"},[tx((q%1?q.toFixed(1):q)+"h")]))}
  s.appendChild(el("text",{x:ml,y:mt+ph+30,"font-size":10,"font-weight":700,fill:"#80868b"},[tx("productive audit-hours →")]));
  rows.forEach(function(r){var m=r[kind],c=HUE[r.backend]||HUE.codex;
+  var name=r.model||r.backend;
   if(r.condition!=="harness"){ // single-shot control: one point where it stopped
    if(!m.accepted)return;var x=X(r.wall_h||.4),y=Y(m.accepted);
-   s.appendChild(el("polygon",{points:[[x-6,y-6],[x-6,y+6],[x+6,y]].map(function(p){return p.join(",")}).join(" "),
-    fill:"#fff",stroke:c,"stroke-width":2,"stroke-linejoin":"round"}));
+   var tri=el("polygon",{points:[[x-6,y-6],[x-6,y+6],[x+6,y]].map(function(p){return p.join(",")}).join(" "),
+    fill:"#fff",stroke:c,"stroke-width":2,"stroke-linejoin":"round"});
+   s.appendChild(tri);
+   hover(tri,"<b>"+name+" · model-direct</b><br>"+m.accepted+" "+noun(kind,m.accepted)+" accepted<br>"+
+    "bare model, no harness — one shot, stopped at "+hrs(r.wall_h)+"<br>"+
+    "<span class='dim'>Control baseline: a plain “find the vulnerabilities” prompt with no triage or dedup, so a large raw count here is mostly noise.</span>");
    s.appendChild(el("text",{x:x+10,y:y+4,"font-size":10.5,fill:"#5f6368"},[tx(m.accepted)]));return}
   var at=m.accepted_times||[],pts=steps(at);
   if(!pts.length)return;
@@ -492,9 +520,20 @@ function panel(host,tg,kind,rows){
   s.appendChild(el("polygon",{points:pts.map(function(p){return X(p[0]).toFixed(2)+","+Y(p[1]).toFixed(2)})
     .concat([X(end[0]).toFixed(2)+","+Y(0),X(0)+","+Y(0)]).join(" "),fill:c,"fill-opacity":".10"}));
   s.appendChild(el("path",{d:path(pts,X,Y),fill:"none",stroke:c,"stroke-width":2.5,"stroke-linejoin":"round","stroke-linecap":"round"}));
+  // a hoverable marker at each discovery — small dot for the eye, wider
+  // transparent disc so the point is easy to hit
+  at.forEach(function(t,i){var px=X(t).toFixed(2),py=Y(i+1).toFixed(2);
+   var dot=el("circle",{cx:px,cy:py,r:3.5,fill:"#fff",stroke:c,"stroke-width":1.5,"class":"dot"});
+   var hit=el("circle",{cx:px,cy:py,r:9,fill:"transparent","class":"hit"});
+   s.appendChild(dot);s.appendChild(hit);
+   hover(hit,"<b>"+name+" · tokenfuzz</b><br>"+noun(kind,1)+" #"+(i+1)+" of "+m.accepted+
+    " accepted<br>found "+hrs(t)+" into the run",dot)});
   var ex=X(end[0]);
-  s.appendChild(el("polygon",{points:[[ex,Y(end[1])-5.5],[ex+5.5,Y(end[1])],[ex,Y(end[1])+5.5],[ex-5.5,Y(end[1])]]
-    .map(function(p){return p.join(",")}).join(" "),fill:c,stroke:"#fff","stroke-width":2}));
+  var dia=el("polygon",{points:[[ex,Y(end[1])-5.5],[ex+5.5,Y(end[1])],[ex,Y(end[1])+5.5],[ex-5.5,Y(end[1])]]
+    .map(function(p){return p.join(",")}).join(" "),fill:c,stroke:"#fff","stroke-width":2,"class":"hit"});
+  s.appendChild(dia);
+  hover(dia,"<b>"+name+" · tokenfuzz</b><br>final total: "+m.accepted+" "+noun(kind,m.accepted)+
+   " accepted<br>over a "+hrs(r.wall_h)+" audit"+(m.approx_timing?"<br><i>discovery timing approximate</i>":""));
   s.appendChild(el("text",{x:ex+10,y:Y(end[1])+4,"font-size":11.5,"font-weight":700,fill:"#202124"},[tx(m.accepted)]))});
  if(chips.some(function(r){return r[kind].approx_timing})){
   s.appendChild(el("text",{x:ml+pw,y:mt+13,"text-anchor":"end","font-size":9.5,
@@ -529,7 +568,9 @@ def render(data: dict) -> str:
         '<section class="ttd">\n<p class="kick">Time to discovery</p>\n'
         "<h2>What each backend found, and what survived the gate</h2>\n"
         + _KEY
-        + '<div id="ttd-rows"></div>\n</section>\n'
+        + '<p class="hint">Hover any point — a discovery marker, a ◇ final total, '
+        'or a ▷ model-direct control — for what it is, its count, and its time.</p>\n'
+        '<div id="ttd-rows"></div>\n</section>\n'
         '<script type="application/json" id="ttd-data">' + payload + "</script>\n"
         "<script>" + _JS + "</script>\n"
     )
