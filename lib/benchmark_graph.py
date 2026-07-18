@@ -337,6 +337,7 @@ def build(bench_root: Path) -> dict:
                 "target": target,
                 "target_sha": targets[target],
                 "backend": run.get("backend", "?"),
+                "model": (run.get("model") or "").strip(),
                 "condition": cond,
                 "run_id": run_dir.name,
                 "version": (run.get("tokenfuzz_sha") or "")[:7],
@@ -433,7 +434,7 @@ _KEY = """
  <div class="ki"><svg viewBox="0 0 26 12"><rect x="1" y="6" width="24" height="5" fill="currentColor" fill-opacity=".3"/><path d="M1 8 L9 8 L9 6 L25 6" fill="none" stroke="currentColor" stroke-width="1.25"/></svg>
   <div class="kt"><b>The strip below — rejected</b><span>What the gate cut, clustered where evidence permits, on the same clock but its own compact scale. A ≤ total is a conservative upper bound.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><circle cx="7" cy="6" r="5" fill="#2a78d6"/><circle cx="19" cy="6" r="5" fill="#d64f92"/></svg>
-  <div class="kt"><b>Colour = backend</b><span>Blue is codex, magenta is claude. Every target is audited on live, unfixed code — there is no planted bug to re-find.</span></div></div>
+  <div class="kt"><b>Label = model, colour = backend</b><span>Each row is named by the model that ran it (its model-direct control and tokenfuzz harness share that name); blue is codex, magenta is claude. Every target is audited on live, unfixed code — there is no planted bug to re-find.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><path d="M1 6 L25 6" stroke="currentColor" stroke-width="1.5"/><circle cx="13" cy="6" r="2.5" fill="currentColor"/></svg>
   <div class="kt"><b>Reading a pair</b><span>Height is yield, the strip is wasted effort. &ldquo;% kept&rdquo; is how much of what the model proposed survived the gate; when rejects are an upper bound, &ldquo;≥% kept&rdquo; is a lower bound. It is not precision: that needs an answer key, and a live target has none.</span></div></div>
 </div>
@@ -466,10 +467,10 @@ function panel(host,tg,kind,rows){
   raw=(m.accepted+m.rejected)?100*m.accepted/(m.accepted+m.rejected):null,
   k=raw==null?null:(u?Math.floor(raw):Math.round(raw));
   s.appendChild(el("circle",{cx:ml+4,cy:cy-3.5,r:4,fill:c}));
-  s.appendChild(el("text",{x:ml+14,y:cy,"font-size":11,"font-weight":700,fill:"#202124"},[tx(r.backend)]));
-  s.appendChild(el("text",{x:ml+96,y:cy,"font-size":11,fill:"#5f6368"},[tx(m.accepted+" accepted")]));
-  s.appendChild(el("text",{x:ml+188,y:cy,"font-size":11,fill:"#5f6368"},[tx((u?"≤ ":"")+m.rejected+" rejected")]));
-  if(k!=null)s.appendChild(el("text",{x:ml+282,y:cy,"font-size":11,"font-weight":700,fill:"#202124"},[tx((u?"≥ ":"")+k+"% kept")]));
+  s.appendChild(el("text",{x:ml+14,y:cy,"font-size":11,"font-weight":700,fill:"#202124"},[tx(r.model||r.backend)]));
+  s.appendChild(el("text",{x:ml+150,y:cy,"font-size":11,fill:"#5f6368"},[tx(m.accepted+" accepted")]));
+  s.appendChild(el("text",{x:ml+242,y:cy,"font-size":11,fill:"#5f6368"},[tx((u?"≤ ":"")+m.rejected+" rejected")]));
+  if(k!=null)s.appendChild(el("text",{x:ml+336,y:cy,"font-size":11,"font-weight":700,fill:"#202124"},[tx((u?"≥ ":"")+k+"% kept")]));
   cy+=16});
  for(var v=0;v<=ys.top+1e-9;v+=ys.step){var yv=Math.round(v*1e6)/1e6;
   s.appendChild(el("line",{x1:ml,x2:ml+pw,y1:Y(yv),y2:Y(yv),stroke:yv?"#e8eaed":"#b9bec4","stroke-width":yv?1:1.5}));

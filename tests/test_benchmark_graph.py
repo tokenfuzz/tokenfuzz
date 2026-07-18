@@ -200,7 +200,7 @@ class RejectedApproximationTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         (self.run / "run.json").write_text(json.dumps({
             "target": "sample", "target_sha": "abc1234", "backend": "codex",
-            "tokenfuzz_sha": "deadbeef",
+            "model": "gpt-5.6-sol", "tokenfuzz_sha": "deadbeef",
         }), encoding="utf-8")
         (self.run / "pool-members.json").write_text("{}", encoding="utf-8")
         (cell / "cell.json").write_text(json.dumps({
@@ -215,6 +215,13 @@ class RejectedApproximationTests(unittest.TestCase):
             "rejected_finding_clusters_upper_bound": upper_bound,
         }]}), encoding="utf-8")
         return benchmark_graph.build(self.root)["series"][0]["find"]
+
+    def test_model_name_flows_into_the_series(self) -> None:
+        # the graph labels each row by the model that ran it, not the backend,
+        # so the recorded model must reach the series the renderer reads
+        self._series()
+        self.assertEqual(
+            benchmark_graph.build(self.root)["series"][0]["model"], "gpt-5.6-sol")
 
     def test_rejected_count_mismatch_marks_timing_approximate(self) -> None:
         # Historical reports have no upper-bound bit. The count/cluster mismatch
@@ -237,6 +244,7 @@ class RenderTests(unittest.TestCase):
             "target_order": ["sample"],
             "series": [{
                 "target": "sample", "target_sha": "abc1234", "backend": "codex",
+                "model": "gpt-5.6-sol",
                 "condition": "harness", "run_id": "20260101-000000",
                 "version": "deadbee", "replicates": 2, "wall_h": 3.0,
                 "find": {"accepted": 2, "rejected": 5, "medium_plus": 1,
@@ -249,6 +257,13 @@ class RenderTests(unittest.TestCase):
 
     def test_empty_data_renders_nothing(self) -> None:
         self.assertEqual(benchmark_graph.render({"series": []}), "")
+
+    def test_row_label_uses_the_model_name(self) -> None:
+        # the row is named by the model that ran it; the backend is only the
+        # fallback for runs recorded before the model was captured
+        html = benchmark_graph.render(self._data())
+        self.assertIn('"model":"gpt-5.6-sol"', html)
+        self.assertIn("r.model||r.backend", html)
 
     def test_fragment_is_self_contained(self) -> None:
         html = benchmark_graph.render(self._data())
