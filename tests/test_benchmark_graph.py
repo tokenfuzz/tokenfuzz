@@ -282,7 +282,10 @@ class RenderTests(unittest.TestCase):
             with self.subTest(fetch=fetch):
                 self.assertNotIn(fetch, html)
         self.assertIn('"rejected_upper_bound":true', html)
-        self.assertIn("≥% kept", html)
+        self.assertIn("% kept", html)
+        # the rejected magnitude lives in the chip and the crosstab; the old
+        # per-row rejected mini-strip was redundant and is gone
+        self.assertNotIn("REJECTED BY THE GATE", html)
 
     def test_inject_places_the_graph_after_the_table(self) -> None:
         page = (

@@ -431,12 +431,10 @@ _KEY = """
   <div class="kt"><b>◇ Final total</b><span>The settled count for that cell — identical to the Unique accepted column above.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><polygon points="8,1 8,11 19,6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
   <div class="kt"><b>▷ model-direct control</b><span>The bare model with no harness — one shot, so it lands as a single point at the hour it stopped.</span></div></div>
- <div class="ki"><svg viewBox="0 0 26 12"><rect x="1" y="6" width="24" height="5" fill="currentColor" fill-opacity=".3"/><path d="M1 8 L9 8 L9 6 L25 6" fill="none" stroke="currentColor" stroke-width="1.25"/></svg>
-  <div class="kt"><b>The strip below — rejected</b><span>What the gate cut, clustered where evidence permits, on the same clock but its own compact scale. A ≤ total is a conservative upper bound.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><circle cx="7" cy="6" r="5" fill="#2a78d6"/><circle cx="19" cy="6" r="5" fill="#d64f92"/></svg>
   <div class="kt"><b>Label = model, colour = backend</b><span>Each row is named by the model that ran it (its model-direct control and tokenfuzz harness share that name); blue is codex, magenta is claude. Every target is audited on live, unfixed code — there is no planted bug to re-find.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><path d="M1 6 L25 6" stroke="currentColor" stroke-width="1.5"/><circle cx="13" cy="6" r="2.5" fill="currentColor"/></svg>
-  <div class="kt"><b>Reading a pair</b><span>Height is yield, the strip is wasted effort. &ldquo;% kept&rdquo; is how much of what the model proposed survived the gate; when rejects are an upper bound, &ldquo;≥% kept&rdquo; is a lower bound. It is not precision: that needs an answer key, and a live target has none.</span></div></div>
+  <div class="kt"><b>Reading the chip</b><span>The chip above each curve totals what the gate kept versus cut. &ldquo;% kept&rdquo; is how much of what the model proposed survived; a ≤ on the rejected count (so ≥ on % kept) marks a conservative upper bound. It is not precision: that needs an answer key, and a live target has none.</span></div></div>
 </div>
 """
 
@@ -455,9 +453,9 @@ function steps(times){var p=[[0,0]];times.forEach(function(t,i){p.push([t,i]);p.
 function path(pts,X,Y){return pts.map(function(p,i){return (i?"L":"M")+X(p[0]).toFixed(2)+","+Y(p[1]).toFixed(2)}).join(" ")}
 function panel(host,tg,kind,rows){
  var W=600,ml=46,mr=64,pw=W-ml-mr,chips=rows.filter(function(r){return r.condition==="harness"});
- var mt=18+chips.length*16,ph=206,xa=38,sh=rows.length?16+rows.length*22:0,H=mt+ph+xa+sh+8;
- var maxY=1,maxX=.5,maxR=1;
- rows.forEach(function(r){var m=r[kind];maxY=Math.max(maxY,m.accepted);maxR=Math.max(maxR,m.rejected);
+ var mt=18+chips.length*16,ph=206,xa=38,H=mt+ph+xa+8;
+ var maxY=1,maxX=.5;
+ rows.forEach(function(r){var m=r[kind];maxY=Math.max(maxY,m.accepted);
   maxX=Math.max(maxX,r.wall_h||.5);(m.accepted_times||[]).forEach(function(t){maxX=Math.max(maxX,t)})});
  var ys=nice(maxY*1.12,4,true),xs=nice(maxX*1.04,4);
  var X=function(v){return ml+(v/xs.top)*pw},Y=function(v){return mt+ph-(v/ys.top)*ph};
@@ -502,18 +500,6 @@ function panel(host,tg,kind,rows){
   s.appendChild(el("text",{x:ml+pw,y:mt+13,"text-anchor":"end","font-size":9.5,
    "font-style":"italic",fill:"#9aa0a6"},
    [tx("timing approximate — one or more discovery times unavailable")]))}
- if(rows.length){var st=mt+ph+xa;
-  s.appendChild(el("text",{x:ml,y:st+8,"font-size":9.5,"font-weight":700,fill:"#9aa0a6"},
-   [tx("REJECTED BY THE GATE — clustered where possible, shared scale 0–"+maxR)]));
-  rows.forEach(function(r,i){var m=r[kind],c=HUE[r.backend]||HUE.codex;
-   var top=st+16+i*22,base=top+14,hg=12,Ys=function(v){return base-(v/maxR)*hg};
-   s.appendChild(el("line",{x1:ml,x2:ml+pw,y1:base,y2:base,stroke:"#e8eaed","stroke-width":1}));
-   var rt=(m.rejected_times||[]),rp=steps(rt);
-   if(rt.length&&(r.wall_h||0)>rp[rp.length-1][0])rp=rp.concat([[r.wall_h,rp[rp.length-1][1]]]);
-   if(rp.length){s.appendChild(el("polygon",{points:rp.map(function(p){return X(p[0]).toFixed(2)+","+Ys(p[1]).toFixed(2)})
-     .concat([X(rp[rp.length-1][0]).toFixed(2)+","+base,X(0)+","+base]).join(" "),fill:c,"fill-opacity":".28"}));
-    s.appendChild(el("path",{d:path(rp,X,Ys),fill:"none",stroke:c,"stroke-width":1.25,"stroke-opacity":".9"}))}
-   s.appendChild(el("text",{x:ml+pw+8,y:base+3,"font-size":10.5,"font-weight":700,fill:"#5f6368"},[tx((m.rejected_upper_bound?"≤ ":"")+m.rejected)]))})}
  host.appendChild(s)}
 var host=document.getElementById("ttd-rows");
 D.target_order.forEach(function(tg){

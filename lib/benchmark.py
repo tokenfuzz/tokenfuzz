@@ -4538,7 +4538,7 @@ def crosstab(bench_root: Path) -> str:
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
                         c.get("medium_plus_findings", 0)),
-                    findings_dir, "FINDING-CLUSTERS") + _finding_leads_suffix(c)),
+                    findings_dir, "FINDING-CLUSTERS")),
                 rcr=("Pending" if provisional else _rejected_cell(
                     c.get("unique_rejected_crash_clusters"),
                     rejected_crashes_dir, "REJECTED-CRASHES",
@@ -4688,13 +4688,10 @@ def crosstab(bench_root: Path) -> str:
         "were investigated by an agent, without an accepted crash artifact, "
         "after clustering merges duplicate reports. Shown as `N (M M+)`: `N` "
         "clustered findings, `M` of them scored Medium or higher by severity. "
-        "A recon lead the gate accepted but no agent ever worked is shown "
-        "beside the count as `(+N leads)` and is not accepted. The count links "
-        "to the finding cluster report."
+        "The count links to the finding cluster report."
     )
     lines.append(
-        "Rejected findings, accepted findings, and leads are distinct "
-        "populations."
+        "Rejected findings and accepted findings are distinct populations."
     )
     lines.append("")
 
