@@ -426,7 +426,7 @@ _CSS = """
 _KEY = """
 <div class="key">
  <div class="ki"><svg viewBox="0 0 26 12"><path d="M1 10 L8 10 L8 5 L17 5 L17 2 L25 2" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
-  <div class="kt"><b>The curve — accepted over time</b><span>Count on the y-axis, productive audit-hours on the x. Each step is one deduplicated result the gate kept, placed at the hour it was found, so the line only ever climbs and ends on the table's number.</span></div></div>
+  <div class="kt"><b>The curve — accepted over time</b><span>Count on the y-axis, productive audit-hours on the x. Each step is one deduplicated result the gate kept, placed at the hour it was found, so the line only ever climbs and ends on the table's number; where it runs flat to the right edge, the audit kept going but found nothing new.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><polygon points="13,1 19,6 13,11 7,6" fill="currentColor"/></svg>
   <div class="kt"><b>◇ Final total</b><span>The settled count for that cell — identical to the Unique accepted column above.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><polygon points="8,1 8,11 19,6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
@@ -485,9 +485,12 @@ function panel(host,tg,kind,rows){
    s.appendChild(el("polygon",{points:[[x-6,y-6],[x-6,y+6],[x+6,y]].map(function(p){return p.join(",")}).join(" "),
     fill:"#fff",stroke:c,"stroke-width":2,"stroke-linejoin":"round"}));
    s.appendChild(el("text",{x:x+10,y:y+4,"font-size":10.5,fill:"#5f6368"},[tx(m.accepted)]));return}
-  var pts=steps(m.accepted_times||[]);
+  var at=m.accepted_times||[],pts=steps(at);
   if(!pts.length)return;
   var end=pts[pts.length-1];
+  // the cell kept auditing after the last hit, so carry the count flat to its
+  // end — a curve that stops finding early must not read as a run that stopped
+  if(at.length&&(r.wall_h||0)>end[0]){pts=pts.concat([[r.wall_h,end[1]]]);end=pts[pts.length-1]}
   s.appendChild(el("polygon",{points:pts.map(function(p){return X(p[0]).toFixed(2)+","+Y(p[1]).toFixed(2)})
     .concat([X(end[0]).toFixed(2)+","+Y(0),X(0)+","+Y(0)]).join(" "),fill:c,"fill-opacity":".10"}));
   s.appendChild(el("path",{d:path(pts,X,Y),fill:"none",stroke:c,"stroke-width":2.5,"stroke-linejoin":"round","stroke-linecap":"round"}));
@@ -506,10 +509,10 @@ function panel(host,tg,kind,rows){
    var top=st+16+i*22,base=top+14,hg=12,Ys=function(v){return base-(v/maxR)*hg};
    s.appendChild(el("line",{x1:ml,x2:ml+pw,y1:base,y2:base,stroke:"#e8eaed","stroke-width":1}));
    var rt=(m.rejected_times||[]),rp=steps(rt);
+   if(rt.length&&(r.wall_h||0)>rp[rp.length-1][0])rp=rp.concat([[r.wall_h,rp[rp.length-1][1]]]);
    if(rp.length){s.appendChild(el("polygon",{points:rp.map(function(p){return X(p[0]).toFixed(2)+","+Ys(p[1]).toFixed(2)})
      .concat([X(rp[rp.length-1][0]).toFixed(2)+","+base,X(0)+","+base]).join(" "),fill:c,"fill-opacity":".28"}));
     s.appendChild(el("path",{d:path(rp,X,Ys),fill:"none",stroke:c,"stroke-width":1.25,"stroke-opacity":".9"}))}
-   s.appendChild(el("circle",{cx:ml-10,cy:base-hg/2,r:3,fill:c}));
    s.appendChild(el("text",{x:ml+pw+8,y:base+3,"font-size":10.5,"font-weight":700,fill:"#5f6368"},[tx((m.rejected_upper_bound?"≤ ":"")+m.rejected)]))})}
  host.appendChild(s)}
 var host=document.getElementById("ttd-rows");

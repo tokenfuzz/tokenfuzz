@@ -265,6 +265,12 @@ class RenderTests(unittest.TestCase):
         self.assertIn('"model":"gpt-5.6-sol"', html)
         self.assertIn("r.model||r.backend", html)
 
+    def test_curve_runs_flat_to_the_cell_wall(self) -> None:
+        # a cell that stops finding early kept auditing to its wall; the curve
+        # must carry the count flat to wall_h, not stop at the last discovery
+        html = benchmark_graph.render(self._data())
+        self.assertIn("[[r.wall_h,end[1]]]", html)
+
     def test_fragment_is_self_contained(self) -> None:
         html = benchmark_graph.render(self._data())
         self.assertIn('id="ttd-data"', html)
