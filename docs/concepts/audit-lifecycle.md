@@ -200,10 +200,13 @@ keeps the crash.
   class, and a rationale a reviewer can act on. A sanitizer
   reproducer is *not* required.
 
-Because no sanitizer vouches for a finding, an independent validator
-(`bin/validate-finding`, run with no shared context) votes each one
-Promote / Reject / Uncertain. Two Promote votes promote it; a single
-Reject is fatal; an Uncertain vote triggers a skeptical tiebreak.
+Because no sanitizer vouches for a finding, an independent LLM
+substance gate reads each report with no shared context and votes it
+accept or reject. Two accepts promote the finding; two rejects
+quarantine it to `findings-rejected/`. An accepted finding then gets
+one source-reading trigger-provenance review
+(`bin/validate-finding --gate trigger`) that can demote it only with a
+concrete disproof.
 
 What happens to each artifact:
 

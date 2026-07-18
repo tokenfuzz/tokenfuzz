@@ -63,7 +63,7 @@ are most useful in a shared shell or when a backend binary is outside `PATH`.
 | `AUDIT_MODEL_PREFLIGHT` | `1` | Launch the selected model once through the real agent path before starting. Set `0` only for an intentionally offline/mock run. |
 | `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds | Ceiling for each model preflight attempt. |
 | `AUDIT_MODEL_PREFLIGHT_ATTEMPTS` | `3` | Number of model preflight attempts. |
-| `LLM_DECISION_TIMEOUT` | `45` seconds hosted, `180` seconds OSS | Override the ceiling for focused triage and validation decisions. |
+| `LLM_DECISION_TIMEOUT` | `45` seconds | Override the per-decision ceiling for focused triage and validation LLM calls. |
 
 The model precedence is `--model`, then the matching
 `*_MODEL_DEFAULT`, then `config/models.toml`. The `oss` backend has no model

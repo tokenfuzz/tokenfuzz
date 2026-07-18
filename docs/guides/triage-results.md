@@ -43,22 +43,23 @@ state as-is.
 
 ## How the gates decide
 
-Crash classification is deterministic: sanitizer class, artifact
-completeness, harness-rooted stacks, caller-contract fields, and the
-configured threat model decide the normal disposition. An independent
-source-reading trigger reviewer can reject a sanitizer crash only after two
-disproof-backed Reject votes. Missing or inconclusive reviewer output fails
-open and keeps the crash. Trigger votes are cached only for the agent-authored
-report substance and reviewer version that produced them; substantive report
-edits or classification-rule updates require a fresh review and fail open
-while it is unavailable. Generated severity, patch, enrichment, and cluster
-annotations do not spend another review.
+**Crashes** are classified deterministically — sanitizer class,
+artifact completeness, harness-rooted stacks, caller-contract fields,
+and the configured threat model decide the normal disposition. On top
+of that, an independent source-reading *trigger reviewer* can reject a
+sanitizer-confirmed crash, but only after two disproof-backed Reject
+votes; missing or inconclusive reviewer output fails open and keeps the
+crash. Trigger votes are cached against the exact report substance and
+reviewer version that produced them, so a substantive report edit or a
+classification-rule change forces a fresh review (and fails open while
+that review is unavailable). Generated severity, patch, enrichment, and
+cluster annotations do not spend another review.
 
-Findings face a parallel mechanism: the substance gate needs two
-accepts to confirm or two rejects before a FIND moves to
+**Findings** use a parallel two-vote mechanism: the substance gate
+needs two accepts to confirm, or two rejects to move a FIND to
 `findings-rejected/`. An accepted finding then receives one
-source-reading trigger-provenance review; only a Reject carrying a concrete
-disproof can demote it.
+source-reading trigger-provenance review; only a Reject carrying a
+concrete disproof can demote it.
 
 ## Common rejection reasons
 

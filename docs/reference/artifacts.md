@@ -163,13 +163,10 @@ CRASH-001-1/
   .dup-of               # only on non-canonical cluster members
 ```
 
-Accepted crashes (and findings) also carry the reachability gate's
-output: `reachability.json` records the external-caller reachability
-evidence triage used to judge the crash, and a `.reachability_ok` marker
-records that the gate passed. Crash directories may carry other dot-files
-the triage gates leave behind as well (`.llm-*.json` vote caches,
-`.severity_ok`, and similar markers). All of these are harness
-internals — safe to ignore when reviewing.
+Accepted crashes may carry other dot-files the triage gates leave
+behind (`.llm-*.json` vote caches, `.severity_ok`, and similar
+markers). All of these are harness internals — safe to ignore when
+reviewing.
 
 `REPORT.md` carries a `Cluster: <ID>` line. Non-canonical cluster
 members also have a `.dup-of` file naming the canonical CRASH. The
@@ -252,12 +249,14 @@ output/<target>/<backend>/logs/
   index.log
   index.jsonl
   llm-decisions.log
-  session_<TS>_<role>-<n>-<mode>.log
-  session_<TS>_<role>-<n>-<mode>.log.summary.md
+  session_<TS>_<launch>-<n>.log
   .raw/
-    session_<TS>_<role>-<n>-<mode>.log.raw
-    session_<TS>_<role>-<n>-<mode>.prompt.md
+    session_<TS>_<launch>-<n>.log.raw
+    session_<TS>_<launch>-<n>.prompt.md
 ```
+
+In the per-session filenames, `<TS>` is the launch timestamp, `<launch>`
+is `cold-start` or `deep_investigation`, and `<n>` is the agent number.
 
 Logs are useful for:
 
@@ -273,7 +272,7 @@ For normal audit progress, prefer the generated HTML:
 - per-result `REPORT.html` / `report.html`.
 
 For debugging a run, start with `logs/README.md`, then `index.log`.
-Open the matching `*.summary.md` for the session named in the timeline.
+Open the matching `session_*.log` for the session named in the timeline.
 Use `index.jsonl` when you want the same session data in a scriptable
 form. Full backend transcripts and exact prompt dumps live under
 `logs/.raw/`; they are intentionally out of the way because they can be
