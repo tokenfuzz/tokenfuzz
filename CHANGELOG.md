@@ -1,5 +1,66 @@
 # Changelog
 
+## 1.2.0 - 2026-07-17
+
+- **Alternate build-configuration coverage for native targets.** Auditing only
+  the default build misses parser, protocol, compatibility, JIT, and
+  representation code hidden behind configure-time options. `build-asan` stays
+  the canonical control; ordinary native targets now also build one
+  content-addressed widened ASan sibling, adopted from bounded,
+  build-system-advertised options (`build_widening = true` by default, set
+  `false` to opt out), and operators can declare a few named `[[build_config]]`
+  rows for mutually exclusive modes. Setup and audit preflight cache siblings,
+  bind readiness to the exact recipe, cap automatic preparation at ten minutes,
+  and fail open to the primary. Only a minority reproducer slot explores
+  alternates, and every confirmed alternate crash is replayed five times on the
+  primary — a clean primary run becomes an Environmental MAT:P prerequisite
+  rather than erasing the bug. Crash bundles record the alternate identity;
+  benchmarks stay pinned to the primary so backend comparisons keep one compiled
+  surface. Findings-only, non-native, and browser targets remain primary-only.
+
+- **Severity taxonomy and sanitizer scoring gaps closed.** High-impact
+  application findings are now classified by their proven consequence with
+  pinned CVSS v4 vectors, while generic undefined behavior stays unscored until
+  impact is established; ASan/UBSan admission and scoring gaps are closed and new
+  finding classes are constrained to a stable taxonomy that preserves legacy
+  labels. Independent scoring safeguards land with it: severity no longer
+  localizes (`AV:L/AT:P`) a call-sequence trigger the target declares
+  attacker-controlled, the trigger-review cache is bound to the threat model so a
+  verdict is not reused after `attacker_controls` changes, and cluster size is
+  read from the finding report's bare `Cluster:` line so finding metrics are
+  correct.
+
+- **Benchmark comparison is honest across the gate, with a time-to-discovery
+  graph.** Rejected artifacts now cluster through the same deduplicators as
+  accepted ones, so the two sides of the gate are finally comparable; where
+  evidence is missing the report shows conservative bounds (`≤ N rejected`,
+  `≥ N% kept`) instead of letting rejections silently vanish. A new
+  time-to-discovery graph places each cluster at its earliest member, runs the
+  curve flat to the cell wall so a quiet final hour no longer reads as an early
+  stop, labels each row by the model that ran it, and explains every point on
+  hover. Cell wall time now stops at productive audit work rather than trailing
+  triage.
+
+- **Benchmark pooling no longer crashes on validator scratch.** A regression had
+  the finding validator anchor its working directory — a symlink farm into the
+  target tree and build outputs — inside model-direct cells' `findings/FIND-*/`,
+  which pooling then copied and removed, raising `shutil.Error` and `ENOTEMPTY`.
+  The validator cwd now anchors at the results-tree root for every layout,
+  pooling excludes `.validator-cwd`, and staging teardown renames aside before a
+  best-effort remove so a concurrent writer cannot abort it; already-broken runs
+  regenerate cleanly.
+
+- **Faster ranking and compiler wrappers.** `bin/rank-work` samples 256 KB of
+  each source file (up from 180 KB) and reads only that slice instead of loading
+  the whole file, and the compiler-guard wrapper defers its heavier `file_tools`
+  import so every compile skips work only the grep, sed, and rg wrappers use.
+
+- **Documentation corrections.** Fixed the documented session-log filenames
+  (`session_<TS>_<launch>-<n>.log`, with no `.log.summary.md`), removed
+  references to `reachability.json` / `.reachability_ok` artifacts the harness
+  never writes, corrected the `LLM_DECISION_TIMEOUT` default, and rewrote the
+  finding-gate description to the real two-accepts / two-rejects contract.
+
 ## 1.1.1 - 2026-07-13
 
 - **Recon leads stop inflating confirmed findings.** Recon pre-files a candidate
