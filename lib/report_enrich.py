@@ -147,6 +147,70 @@ _CLUSTER_RE = re.compile(
 )
 
 
+class SourceFileIndex:
+    """Lazy basename index for resolving partial source paths."""
+
+    def __init__(self, source_root: Path, basenames: Optional[set[str]] = None):
+        self.source_root = source_root
+        self._basenames = set(basenames or ())
+        self._files_by_name: Optional[dict[str, list[str]]] = None
+
+    def _scan(self, basenames: set[str]) -> dict[str, list[str]]:
+        files_by_name: dict[str, list[str]] = {}
+        # Use the same traversal as the old source_root.rglob(basename)
+        # fallback. os.walk() orders nested equal-length duplicates
+        # differently, which can select a different source file.
+        for path in self.source_root.rglob("*"):
+            if path.name in basenames and path.is_file():
+                relative = str(path.relative_to(self.source_root))
+                files_by_name.setdefault(path.name, []).append(relative)
+        for paths in files_by_name.values():
+            # Stable sorting retains rglob order for equal-length paths,
+            # matching the old per-reference resolver's tie behavior.
+            paths.sort(key=len)
+        return files_by_name
+
+    def add_basenames(self, basenames: set[str]) -> None:
+        new_names = basenames - self._basenames
+        if not new_names:
+            return
+        self._basenames.update(new_names)
+        if self._files_by_name is not None:
+            self._files_by_name.update(self._scan(new_names))
+
+    def resolve(self, path_ref: str) -> Optional[Path]:
+        candidate = self.source_root / path_ref
+        if candidate.is_file():
+            return candidate
+
+        base = os.path.basename(path_ref)
+        self.add_basenames({base})
+        if self._files_by_name is None:
+            # A batch supplies every referenced basename up front, so this
+            # retains only relevant full paths even on build-heavy trees.
+            self._files_by_name = self._scan(self._basenames)
+
+        matches = self._files_by_name.get(base, ())
+        if "/" in path_ref:
+            match = next(
+                (path for path in matches
+                 if str(self.source_root / path).endswith(path_ref)),
+                None,
+            )
+        else:
+            match = matches[0] if matches else None
+        return self.source_root / match if match else None
+
+
+def referenced_source_basenames(*texts: str) -> set[str]:
+    """Return source basenames that report enrichment may resolve."""
+    return {
+        os.path.basename(match.group("path"))
+        for text in texts
+        for match in _FILE_LINE_RE.finditer(text)
+    }
+
+
 @dataclass
 class EnrichContext:
     """All target-derived inputs the enrichment needs. Any field may
@@ -161,6 +225,8 @@ class EnrichContext:
     # Optional: full text of the sibling sanitizer.txt so we
     # can mine ASan-frame snippets without re-reading from disk later.
     sanitizer_text: str = ""
+    # Batch callers share one lazy index between reports for the same root.
+    source_index: Optional[SourceFileIndex] = None
 
 
 # ── helpers ────────────────────────────────────────────────────────
@@ -220,29 +286,15 @@ def _format_snippet(rel_path: str, start: int, lines: list[str], target_line: in
 
 def _resolve_source_file(ctx: EnrichContext, path_ref: str) -> Optional[Path]:
     """Resolve a `file.c` reference (possibly partial) against the target
-    source root. Returns the first match if multiple exist (depth-first,
-    shortest path wins)."""
+    source root. The shortest path wins; traversal order breaks ties."""
     if not ctx.source_root or not ctx.source_root.is_dir():
         return None
-    candidate = ctx.source_root / path_ref
-    if candidate.is_file():
-        return candidate
-    # Fall back to a tail-match search — agents often write
-    # `parser.c:1234` instead of `lib/xml/parser.c:1234`.
-    base = os.path.basename(path_ref)
-    if "/" in path_ref:
-        # multi-component: match by suffix on the path
-        matches = sorted(
-            (p for p in ctx.source_root.rglob(base) if p.is_file()
-             and str(p).endswith(path_ref)),
-            key=lambda p: len(str(p)),
-        )
-    else:
-        matches = sorted(
-            (p for p in ctx.source_root.rglob(base) if p.is_file()),
-            key=lambda p: len(str(p)),
-        )
-    return matches[0] if matches else None
+    if (
+        ctx.source_index is None
+        or ctx.source_index.source_root != ctx.source_root
+    ):
+        ctx.source_index = SourceFileIndex(ctx.source_root)
+    return ctx.source_index.resolve(path_ref)
 
 
 def _rel_to_root(ctx: EnrichContext, path: Path) -> str:
@@ -756,6 +808,16 @@ def _build_asan_snippets(ctx: EnrichContext, text: str) -> Optional[str]:
 def enrich_text(text: str, ctx: EnrichContext) -> str:
     """Apply every enrichment block. Pure function — no I/O on `text`.
     Caller decides whether to write it back to disk."""
+    if ctx.source_root and ctx.source_root.is_dir():
+        if (
+            ctx.source_index is None
+            or ctx.source_index.source_root != ctx.source_root
+        ):
+            ctx.source_index = SourceFileIndex(ctx.source_root)
+        ctx.source_index.add_basenames(
+            referenced_source_basenames(text, ctx.sanitizer_text)
+        )
+
     text = _strip_all_blocks(text)
     # Normalize trailing whitespace from previous run to keep diffs
     # minimal when nothing changed.

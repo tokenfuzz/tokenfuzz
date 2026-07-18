@@ -600,10 +600,14 @@ def _clear_contract_concern(report: Path) -> None:
         report.write_text(updated.rstrip() + "\n", encoding="utf-8")
 
 
-def _run_tool(name: str, *args: str, env: dict | None = None) -> int:
+def _run_tool(
+    name: str, *args: str, env: dict | None = None,
+    stdin_data: bytes | None = None,
+) -> int:
     return subprocess.run(
         [str(SCRIPT_ROOT / "bin" / name), *map(str, args)],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        env=env, input=stdin_data, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, check=False,
     ).returncode
 
 
@@ -1908,16 +1912,21 @@ def _render_reports(results: Path, workers: int) -> bool:
                 reports.append(report)
     if not reports:
         return True
+    enrich_succeeded = True
+    if os.environ.get("ENRICH_REPORT_AUTO", "1") == "1":
+        report_paths = b"\0".join(os.fsencode(report) for report in reports) + b"\0"
+        enrich_succeeded = _run_tool(
+            "enrich-report", "--quiet", "--paths-from-stdin",
+            stdin_data=report_paths,
+        ) == 0
+
     def render(report: Path) -> bool:
-        succeeded = True
-        if os.environ.get("ENRICH_REPORT_AUTO", "1") == "1":
-            succeeded = _run_tool("enrich-report", "--quiet", str(report)) == 0
-        return (
-            _run_tool("render-md", str(report), "--html-sibling", "--title", report.parent.name) == 0
-            and succeeded
-        )
+        return _run_tool(
+            "render-md", str(report), "--html-sibling", "--title", report.parent.name
+        ) == 0
+
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        return all(pool.map(render, reports))
+        return all(pool.map(render, reports)) and enrich_succeeded
 
 
 def maintain_indexes(

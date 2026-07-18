@@ -6,6 +6,7 @@ Usage:
   bin/enrich-report <path/to/report.md>
   bin/enrich-report <path/to/CRASH-XXX/>
   bin/enrich-report --slug <slug> <path/to/CRASH-XXX/>
+  bin/enrich-report --paths-from-stdin  # NUL-delimited paths on stdin
 
 The shim resolves the target source root + upstream URL + pinned rev
 from the surrounding session-env / target.toml when possible, then
@@ -19,6 +20,7 @@ so manual use is only needed when iterating on a single report.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -31,7 +33,12 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import target_config  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
-from report_enrich import EnrichContext, enrich_file  # noqa: E402
+from report_enrich import (  # noqa: E402
+    EnrichContext,
+    SourceFileIndex,
+    enrich_file,
+    referenced_source_basenames,
+)
 
 
 _REPORT_CANDIDATES = ("report.md", "REPORT.md", "description.md")
@@ -50,6 +57,20 @@ def _resolve_report_path(arg: Path) -> Path | None:
     return None
 
 
+def _read_sanitizer_text(report_path: Path) -> str:
+    """Read the adjacent sanitizer diagnostic, if present."""
+    for cand in (
+        report_path.parent / "sanitizer.txt",
+        report_path.parent / ".audit" / "sanitizer.txt",
+    ):
+        if cand.is_file():
+            try:
+                return cand.read_text("utf-8", errors="replace")
+            except OSError:
+                return ""
+    return ""
+
+
 def _resolve_context(report_path: Path, slug: str | None,
                      source_root: str | None,
                      upstream_url: str | None,
@@ -59,21 +80,6 @@ def _resolve_context(report_path: Path, slug: str | None,
     src_root: Path | None = Path(source_root).resolve() if source_root else None
     up_url = upstream_url or ""
     rev = pinned_rev or ""
-    sanitizer_text = ""
-
-    # Locate sanitizer.txt next to the report (or in .audit/) for
-    # ASan-frame mining when the report has no fenced excerpt.
-    for cand in (
-        report_path.parent / "sanitizer.txt",
-        report_path.parent / ".audit" / "sanitizer.txt",
-    ):
-        if cand.is_file():
-            try:
-                sanitizer_text = cand.read_text("utf-8", errors="replace")
-            except OSError:
-                pass
-            break
-
     # Resolve via target.toml walk — only when caller didn't pin
     # everything explicitly.
     needs_target = src_root is None or not up_url or not rev
@@ -114,7 +120,6 @@ def _resolve_context(report_path: Path, slug: str | None,
         source_root=src_root,
         upstream_url=up_url,
         pinned_rev=rev,
-        sanitizer_text=sanitizer_text,
     )
 
 
@@ -126,8 +131,12 @@ def main(argv: list[str] | None = None) -> int:
     # whole result pool per --regenerate, and one python start beats N (~40ms of
     # interpreter startup each). Each path resolves its own context from its
     # location; --slug/--source-root (when given) apply to all.
-    ap.add_argument("paths", type=Path, nargs="+", metavar="path",
+    ap.add_argument("paths", type=Path, nargs="*", metavar="path",
                     help="path(s) to report.md OR the report directory")
+    ap.add_argument(
+        "--paths-from-stdin", action="store_true",
+        help="read additional NUL-delimited report paths from stdin",
+    )
     ap.add_argument("--slug", default=None,
                     help="Target slug under output/ (when CWD is unrelated)")
     ap.add_argument("--source-root", default=None,
@@ -140,22 +149,69 @@ def main(argv: list[str] | None = None) -> int:
                     help="Suppress the 'changed/unchanged' line")
     args = ap.parse_args(argv)
 
+    paths = list(args.paths)
+    if args.paths_from_stdin:
+        paths.extend(
+            Path(os.fsdecode(raw_path))
+            for raw_path in sys.stdin.buffer.read().split(b"\0")
+            if raw_path
+        )
+    if not paths:
+        ap.error("at least one path or --paths-from-stdin entry is required")
+
     rc = 0
-    for path in args.paths:
+    work: list[tuple[Path, EnrichContext]] = []
+    basenames_by_root: dict[Path, set[str]] = {}
+    for path in paths:
         report = _resolve_report_path(path)
         if report is None:
             print(f"enrich-report: no report.md / REPORT.md / description.md "
                   f"under {path}", file=sys.stderr)
             rc = rc or 2
             continue
-        ctx = _resolve_context(
-            report_path=report,
-            slug=args.slug,
-            source_root=args.source_root,
-            upstream_url=args.upstream_url,
-            pinned_rev=args.pinned_rev,
-        )
-        changed = enrich_file(report, ctx)
+        try:
+            ctx = _resolve_context(
+                report_path=report,
+                slug=args.slug,
+                source_root=args.source_root,
+                upstream_url=args.upstream_url,
+                pinned_rev=args.pinned_rev,
+            )
+            if ctx.source_root is not None:
+                report_text = report.read_text("utf-8", errors="replace")
+                sanitizer_text = _read_sanitizer_text(report)
+                basenames_by_root.setdefault(ctx.source_root, set()).update(
+                    referenced_source_basenames(report_text, sanitizer_text)
+                )
+            work.append((report, ctx))
+        except Exception as exc:  # keep an independent report failure isolated
+            print(
+                f"enrich-report: {report}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            rc = rc or 1
+
+    source_indexes = {
+        root: SourceFileIndex(root, basenames)
+        for root, basenames in basenames_by_root.items()
+    }
+    for report, ctx in work:
+        if ctx.source_root is not None:
+            ctx.source_index = source_indexes[ctx.source_root]
+        try:
+            # Keep at most one full diagnostic live while still collecting
+            # every basename before the shared source-tree scan.
+            ctx.sanitizer_text = _read_sanitizer_text(report)
+            changed = enrich_file(report, ctx)
+        except Exception as exc:  # process the remaining reports, then fail loud
+            print(
+                f"enrich-report: {report}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            rc = rc or 1
+            continue
+        finally:
+            ctx.sanitizer_text = ""
         if not args.quiet:
             msg = "changed" if changed else "unchanged"
             print(f"enrich-report: {report} ({msg})")

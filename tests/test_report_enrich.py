@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
+import os
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -270,6 +275,154 @@ Agent-inlined narrative that must be replaced by the sibling diff.
             "Caller contract:", "Trigger source:",
         ):
             self.assertIn(label, lines)
+
+    def test_source_lookup_shares_one_tree_walk_across_reports(self) -> None:
+        nested = self.source / "vendor" / "module" / "helper.c"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("int helper(void) { return 1; }\n", encoding="utf-8")
+        duplicate = self.source / "vendor" / "parser.c"
+        duplicate.write_text("int vendor_parse(void) { return 2; }\n", encoding="utf-8")
+        # Nested equal-length paths are the case where os.walk and rglob
+        # traversal order differ. Create bb first so the test detects it.
+        ties = [
+            self.source / directory / "nested" / "tie.c"
+            for directory in ("bb", "aa")
+        ]
+        for tie in ties:
+            tie.parent.mkdir(parents=True)
+            tie.write_text("int tie(void) { return 3; }\n", encoding="utf-8")
+        legacy_tie = sorted(
+            (path for path in self.source.rglob("tie.c") if path.is_file()),
+            key=lambda path: len(str(path)),
+        )[0]
+
+        source_index = report_enrich.SourceFileIndex(
+            self.source, {"parser.c", "helper.c", "tie.c"}
+        )
+
+        def context(name: str) -> report_enrich.EnrichContext:
+            report = self.root / name / "report.md"
+            return report_enrich.EnrichContext(
+                report_path=report,
+                report_dir=report.parent,
+                source_root=self.source,
+                source_index=source_index,
+            )
+
+        first = context("first")
+        second = context("second")
+        real_rglob = Path.rglob
+        walks: list[Path] = []
+
+        def counted_rglob(path: Path, pattern: str):
+            walks.append(Path(path))
+            return real_rglob(path, pattern)
+
+        with mock.patch.object(Path, "rglob", counted_rglob):
+            self.assertEqual(
+                report_enrich._resolve_source_file(first, "parser.c"),
+                self.source / "lib" / "parser.c",
+            )
+            self.assertEqual(
+                report_enrich._resolve_source_file(second, "module/helper.c"),
+                nested,
+            )
+            self.assertEqual(
+                report_enrich._resolve_source_file(second, "lib/parser.c"),
+                self.source / "lib" / "parser.c",
+            )
+            self.assertEqual(
+                report_enrich._resolve_source_file(second, "tie.c"), legacy_tie
+            )
+
+        self.assertEqual(walks, [self.source])
+        self.assertEqual(
+            set(source_index._files_by_name), {"parser.c", "helper.c", "tie.c"}
+        )
+
+    def test_nul_stdin_batch_and_per_report_failure_isolation(self) -> None:
+        reports = []
+        for name in ("line\nbreak", "second"):
+            directory = self.root / name
+            directory.mkdir()
+            report = directory / "report.md"
+            report.write_text(
+                "# Batch\n\n## Data Flow Trace\n"
+                "- step: parse_header (parser.c:9) — reads input\n"
+            )
+            reports.append(report)
+        payload = b"\0".join(os.fsencode(report) for report in reports) + b"\0"
+        process = subprocess.run(
+            [sys.executable, str(ENRICH), "--quiet", "--paths-from-stdin",
+             "--source-root", str(self.source)],
+            input=payload, capture_output=True, check=False,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr.decode())
+        for report in reports:
+            self.assertIn("enrich:data-flow-snippets", report.read_text())
+
+        namespace = runpy.run_path(str(ENRICH), run_name="enrich_report_test")
+        cli_main = namespace["main"]
+        calls = []
+
+        def fail_first(report: Path, _ctx) -> bool:
+            calls.append(report)
+            if report == reports[0]:
+                raise RuntimeError("synthetic per-report failure")
+            return False
+
+        errors = io.StringIO()
+        with mock.patch.dict(cli_main.__globals__, {"enrich_file": fail_first}), \
+                contextlib.redirect_stderr(errors):
+            rc = cli_main(["--quiet", *map(str, reports)])
+        self.assertEqual(rc, 1)
+        self.assertEqual(calls, reports)
+        self.assertIn("RuntimeError: synthetic per-report failure", errors.getvalue())
+
+    def test_batch_releases_each_sanitizer_log_after_enrichment(self) -> None:
+        reports = []
+        for name in ("first", "second"):
+            directory = self.root / name
+            directory.mkdir()
+            report = directory / "report.md"
+            report.write_text("# Batch\n", encoding="utf-8")
+            reports.append(report)
+
+        namespace = runpy.run_path(str(ENRICH), run_name="enrich_report_memory_test")
+        cli_main = namespace["main"]
+        real_resolve_context = namespace["_resolve_context"]
+        contexts = []
+        reads = []
+
+        def track_context(*args, **kwargs):
+            ctx = real_resolve_context(*args, **kwargs)
+            contexts.append(ctx)
+            return ctx
+
+        def read_sanitizer(report: Path) -> str:
+            reads.append(report)
+            return f"diagnostic for {report.name}"
+
+        def inspect_enrich(report: Path, ctx) -> bool:
+            self.assertEqual(ctx.sanitizer_text, f"diagnostic for {report.name}")
+            self.assertEqual(sum(bool(item.sanitizer_text) for item in contexts), 1)
+            return False
+
+        replacements = {
+            "_resolve_context": track_context,
+            "_read_sanitizer_text": read_sanitizer,
+            "enrich_file": inspect_enrich,
+        }
+        with mock.patch.dict(cli_main.__globals__, replacements):
+            rc = cli_main([
+                "--quiet", "--source-root", str(self.source),
+                *map(str, reports),
+            ])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(reads, reports + reports)
+        self.assertTrue(contexts)
+        self.assertTrue(all(not ctx.sanitizer_text for ctx in contexts))
 
     def test_fence_aware_insertion_badges_links_and_anchor_truncation(self) -> None:
         no_h1 = (

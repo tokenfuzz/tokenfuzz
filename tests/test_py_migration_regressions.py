@@ -1392,6 +1392,44 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         repr(finalized),
     )
 
+    render_root = root / "batched-report-render"
+    render_reports = []
+    for parent, name in (("crashes", "CRASH-001"), ("findings", "FIND-001")):
+        directory = render_root / parent / name
+        directory.mkdir(parents=True)
+        report = directory / "report.md"
+        report.write_text(f"# {name}\n", encoding="utf-8")
+        render_reports.append(triage._report(directory))
+    render_calls: list[tuple[str, ...]] = []
+    enrich_inputs: list[bytes | None] = []
+
+    def _record_render_tool(*args, **_kwargs):
+        render_calls.append(tuple(args))
+        if args[0] == "enrich-report":
+            enrich_inputs.append(_kwargs.get("stdin_data"))
+        return 0
+
+    with mock.patch.object(triage, "_run_tool", side_effect=_record_render_tool):
+        render_ok = triage._render_reports(render_root, workers=2)
+    enrich_calls = [call for call in render_calls if call[0] == "enrich-report"]
+    html_calls = [call for call in render_calls if call[0] == "render-md"]
+    check(
+        render_ok
+        and len(enrich_calls) == 1
+        and enrich_calls[0] == ("enrich-report", "--quiet", "--paths-from-stdin")
+        and len(enrich_inputs) == 1
+        and enrich_inputs[0] is not None
+        and set(enrich_inputs[0].rstrip(b"\0").split(b"\0"))
+            == {os.fsencode(report) for report in render_reports},
+        "housekeeping enriches every report in one shared process",
+        repr(render_calls),
+    )
+    check(
+        len(html_calls) == 2,
+        "housekeeping still renders report HTML in parallel",
+        repr(render_calls),
+    )
+
     # The wall-clock timeout wrapper is the watched root process. The agy klog
     # is opened by its CLI descendant, so discovery must walk descendants.
     klog_dir = root / "antigravity-cli" / "log"
