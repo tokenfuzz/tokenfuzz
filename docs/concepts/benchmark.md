@@ -246,7 +246,7 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | Column | Meaning |
 | --- | --- |
 | `Condition` | `tokenfuzz` or the direct baseline label. |
-| `Replicates` | `done/total`, with a suffix for cells that hit provider trouble: `(Nr)` recovered after a mid-run blip, `(Np)` provider-limited. |
+| `Replicates` | `done/total`. Replicates that recovered from a mid-run provider pause got their full budget and fold in unmarked; a `(Np)` suffix flags N provider-limited replicates excluded from the totals (a same-run-id re-run retries them). |
 | `Wall (h)` | Median hours a cell spent finding things. The triage and validation that follow the audit are measurement, not finding work, so they are not counted. |
 | `Unique rejected findings` | FIND reports the validator rejected, after clustering merges duplicates where evidence permits. `≤ N` marks an upper bound. |
 | `Unique accepted findings` | Clustered non-crash security reports an agent investigated, shown `N (M M+)`: N unique, M scored Medium or higher. A recon lead the gate accepted but no agent ever worked is shown as `(+N leads)` beside the count and is not counted here. Links to the finding cluster report. |

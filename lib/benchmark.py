@@ -3185,8 +3185,9 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
             for c in incomplete
         ]
         # done cells that recovered from a provider blip mid-run. They ARE
-        # counted in the clean totals (the run finished usefully), but surfaced
-        # so a reader knows those metrics include a disrupted session.
+        # counted in the clean totals (the run finished usefully on its full
+        # budget), so the table shows no marker; the count is retained for
+        # fairness auditing and surfaced to operators elsewhere.
         provider_recovered = [
             c for c in done if c.get("run_quality") == "provider_recovered"
         ]
@@ -3809,6 +3810,32 @@ def _fmt_hours(seconds: object) -> str:
     return f"{s / 3600:.2f}h"
 
 
+def _replicates_cell(c: dict) -> str:
+    """`done/total`, plus a hover-annotated `(Np)` when provider limits kept
+    N replicates out of the clean totals.
+
+    Replicates that recovered from a mid-run provider pause got their full
+    time budget (the pause is excluded from wall) and fold into the totals
+    unchanged, so they carry no marker — their run_quality is retained in
+    state for fairness auditing and to drive same-run-id retries, not shown
+    here. A `(Np)` is wrapped in `<abbr>` so the HTML view explains it on
+    hover; the legend below carries the same wording for the plain markdown.
+    """
+    done = int(c.get("replicates_done", 0) or 0)
+    total = int(c.get("replicates_total", 0) or 0)
+    cell = f"{done}/{total}"
+    limited = int(c.get("replicates_provider_limited", 0) or 0)
+    if limited > 0:
+        cell += (
+            ' <abbr title="'
+            f"{limited} replicate(s) hit a provider limit that never cleared "
+            'and were excluded from the clean totals; a same-run-id re-run '
+            'retries them">'
+            f"({limited}p)</abbr>"
+        )
+    return cell
+
+
 def _reproducer_link(bench_dir: Path, members: list[str]) -> str:
     """Markdown link to a cluster's representative reproducer.
 
@@ -4026,20 +4053,7 @@ def render_section(report: dict) -> str:
             "| {cond} | {rep} | {wall} | {rfi} | {uf} "
             "| {rcr} | {uc} | {sev} |".format(
                 cond=_condition_cell(c["condition"], backend),
-                rep=(
-                    "{d}/{t}".format(d=c.get("replicates_done", 0),
-                                     t=c.get("replicates_total", 0))
-                    + (
-                        " ({r}r)".format(r=c.get("replicates_provider_recovered", 0))
-                        if int(c.get("replicates_provider_recovered", 0) or 0) > 0
-                        else ""
-                    )
-                    + (
-                        " ({p}p)".format(p=c.get("replicates_provider_limited", 0))
-                        if int(c.get("replicates_provider_limited", 0) or 0) > 0
-                        else ""
-                    )
-                ),
+                rep=_replicates_cell(c),
                 wall=_fmt_hours(c.get("wall_median")),
                 uf=_cluster_report_link(
                     _unique_with_medium_plus(
@@ -4507,26 +4521,7 @@ def crosstab(bench_root: Path) -> str:
                 tgt=target_cell,
                 cond=_condition_cell(cond, backend, model),
                 wall=_fmt_hours(c.get("wall_median")),
-                reps=(
-                    "{d}/{t}".format(
-                        d=int(c.get("replicates_done", 0) or 0),
-                        t=int(c.get("replicates_total", 0) or 0),
-                    )
-                    + (
-                        " ({r}r)".format(
-                            r=int(c.get("replicates_provider_recovered", 0) or 0)
-                        )
-                        if int(c.get("replicates_provider_recovered", 0) or 0) > 0
-                        else ""
-                    )
-                    + (
-                        " ({p}p)".format(
-                            p=int(c.get("replicates_provider_limited", 0) or 0)
-                        )
-                        if int(c.get("replicates_provider_limited", 0) or 0) > 0
-                        else ""
-                    )
-                ),
+                reps=_replicates_cell(c),
                 # Clustering only runs at pooled finalization, so a provisional
                 # row has no honest count to show and says Pending on both sides.
                 rfi=("Pending" if provisional else _rejected_cell(
@@ -4656,11 +4651,12 @@ def crosstab(bench_root: Path) -> str:
         "direct cells may end early when the model stops."
     )
     lines.append(
-        "- **Replicates** — `done/total`. A `(Nr)` suffix means N done replicates "
-        "recovered from a provider blip and ARE counted (their metrics include a "
-        "disrupted session); `(Np)` means N provider-limited replicates were "
-        "excluded from clean totals; `(Nq)` marks the alternate "
-        "quota-exhausted subset."
+        "- **Replicates** — `done/total`. A replicate that recovered from a "
+        "mid-run provider pause got its full time budget (the pause is "
+        "excluded from wall) and folds into the totals unchanged, so it "
+        "carries no marker. A `(Np)` suffix means N provider-limited "
+        "replicates never cleared and were excluded from the clean totals; a "
+        "same-run-id re-run retries them."
     )
     lines.append("")
 

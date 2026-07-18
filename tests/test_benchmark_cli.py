@@ -112,6 +112,48 @@ class BenchmarkCliTests(unittest.TestCase):
             self.assertFalse((run / ".pool.staging").exists())
             self.assertFalse((run / ".pool.old").exists())
 
+    def test_resume_retries_provider_limited_but_keeps_recovered(self) -> None:
+        target = "samples/sample-python"
+        base = (
+            "--target", target,
+            "--backend", "codex",
+            "--replicates", "2",
+            "--conditions", "harness",
+            "--agents", "2",
+            "--skip-recon",
+            "--dry-run",
+            "--run-id", "retry",
+            "--bench-root", str(self.bench_root),
+        )
+        first = self.run_cli(*base)
+        self.assertEqual(first.returncode, 0, first.stdout)
+
+        run = self.bench_root / "codex" / "retry"
+        recovered = run / "cells/harness-r1/cell.json"
+        limited = run / "cells/harness-r2/cell.json"
+
+        # r1: a done replicate that recovered from a mid-run pause — kept as-is.
+        data = json.loads(recovered.read_text(encoding="utf-8"))
+        self.assertEqual(data["status"], "done")
+        data["run_quality"] = "provider_recovered"
+        recovered.write_text(json.dumps(data), encoding="utf-8")
+        # r2: a provider-limited replicate excluded from the totals — retried.
+        data = json.loads(limited.read_text(encoding="utf-8"))
+        data["status"] = "incomplete"
+        data["run_quality"] = "provider_limited"
+        limited.write_text(json.dumps(data), encoding="utf-8")
+
+        resumed = self.run_cli(*base)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout)
+        self.assertIn("Cell harness-r1: already done, skipping", resumed.stdout)
+        self.assertIn("Cell harness-r2: prior run provider_limited; retrying", resumed.stdout)
+        self.assertIn("Cell harness-r2 starting", resumed.stdout)
+        self.assertNotIn("Cell harness-r2: already done, skipping", resumed.stdout)
+        # The retry produced a fresh, clean measurement for the excluded cell.
+        self.assertEqual(
+            json.loads(limited.read_text(encoding="utf-8"))["run_quality"], "clean"
+        )
+
     def test_multi_target_isolates_a_fatal_target_from_the_grid(self) -> None:
         # A per-target startup fatal (e.g. an unusable [runner].bin caught at
         # preflight) must fail only its own target, leaving later targets in

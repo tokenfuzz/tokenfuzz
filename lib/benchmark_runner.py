@@ -1228,12 +1228,22 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 cell_dir = cells_dir / name
                 cell_json = cell_dir / "cell.json"
                 try:
-                    if json.loads(cell_json.read_text(encoding="utf-8")).get("status") == "done":
-                        log(f"Cell {name}: already done, skipping")
-                        done += 1
-                        continue
+                    prior = json.loads(cell_json.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
-                    pass
+                    prior = {}
+                if prior.get("status") == "done":
+                    # Clean and recovered replicates alike finished on their
+                    # full budget; keep them. Retrying a recovered cell would
+                    # discard a valid measurement and likely re-hit the same
+                    # provider window, so a resume leaves it as-is.
+                    log(f"Cell {name}: already done, skipping")
+                    done += 1
+                    continue
+                if prior.get("status"):
+                    # A same-run-id resume re-runs any replicate that did not
+                    # finish clean — provider-limited (excluded from the totals)
+                    # or failed — trading it for a real measurement.
+                    log(f"Cell {name}: prior run {prior.get('run_quality') or prior['status']}; retrying")
                 if provider_unavailable:
                     cell_dir.mkdir(parents=True, exist_ok=True)
                     (cell_dir / ".backend-unavailable").touch()

@@ -902,6 +902,12 @@ _THEMATIC_BREAK_RE = re.compile(r"-{3,}|\*{3,}|_{3,}")
 # tag text in the rendered page (most visibly in the Severity rationale
 # axis table, whose "Why" column joins reasons with `<br>`).
 _LITERAL_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+# Literal `<abbr title="...">text</abbr>` in source markdown — a narrow
+# passthrough so a report can attach a hover tooltip to a short marker
+# (e.g. the benchmark `(Np)` replicate flag). Kept deliberately strict: a
+# quoted title and tag-free text only, so `html.escape` cannot smuggle
+# markup through it. Restored verbatim below like the `<br>` escape hatch.
+_LITERAL_ABBR_RE = re.compile(r'<abbr title="[^"<>]*">[^<>]*</abbr>', re.IGNORECASE)
 
 
 def _slug(text: str) -> str:
@@ -947,6 +953,12 @@ def _render_inline(text: str) -> str:
         parts.append(("br", "<br>"))
         return f"\x00B{len(parts) - 1}\x00"
     s = _LITERAL_BR_RE.sub(_stash_br, s)
+    # Preserve a literal `<abbr title="...">...</abbr>` (hover tooltip) past
+    # html.escape, restored verbatim below.
+    def _stash_abbr(m: re.Match) -> str:
+        parts.append(("abbr", m.group(0)))
+        return f"\x00A{len(parts) - 1}\x00"
+    s = _LITERAL_ABBR_RE.sub(_stash_abbr, s)
     s = html.escape(s)
     s = _BOLD_RE.sub(r"<strong>\1</strong>", s)
     s = _ITALIC_RE.sub(r"<em>\1</em>", s)
@@ -964,7 +976,7 @@ def _render_inline(text: str) -> str:
     # re-scan its own substitutions. Code is stashed before links, so each
     # pass strictly reduces the placeholder count — this terminates.
     while "\x00" in s:
-        s, n = re.subn(r"\x00([CLB])(\d+)\x00", _restore, s)
+        s, n = re.subn(r"\x00([CLBA])(\d+)\x00", _restore, s)
         if not n:
             break
     return s
