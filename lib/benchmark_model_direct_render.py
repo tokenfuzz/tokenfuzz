@@ -369,7 +369,34 @@ def _resolve_toml_path(target: Path, script_root: str) -> Path | None:
     return None
 
 
-def render(target_path: str, output_dir: str, script_root: str) -> str:
+def _budget_line(wall_seconds: int) -> str:
+    """State the session's wall-clock budget and the surface scale.
+
+    Without a stated budget both backends pace to a default ~10-60 min audit
+    session and stop far under a multi-hour budget. Naming the duration and the
+    surface scale recalibrates the single pass; it adds no probing enforcement.
+    """
+    if wall_seconds and wall_seconds > 0:
+        hours = wall_seconds / 3600.0
+        if hours >= 1:
+            n = round(hours)
+            amount = f"about {n} hour{'s' if n != 1 else ''}"
+        else:
+            m = max(1, round(wall_seconds / 60.0))
+            amount = f"about {m} minute{'s' if m != 1 else ''}"
+        lead = f"You have {amount} of wall-clock time for this single pass — a long session."
+    else:
+        lead = "You have a long, multi-hour wall-clock budget for this single pass."
+    return (
+        f"{lead} A codebase this size holds dozens of subsystems and hundreds "
+        "of audit-worthy call paths, so a thorough pass runs to many dozens of "
+        "tool calls across many subsystems. Do not wrap up after a handful of "
+        "findings — keep moving to fresh subsystems until you have made a broad "
+        "pass or are genuinely low on time."
+    )
+
+
+def render(target_path: str, output_dir: str, script_root: str, wall_seconds: int = 0) -> str:
     sys.path.insert(0, os.path.join(script_root, "lib"))
     try:
         from target_config import (  # type: ignore
@@ -464,6 +491,7 @@ def render(target_path: str, output_dir: str, script_root: str) -> str:
         # work-card pool uses the same set, so both audit modes scope
         # findings the same way. See the .j2 "Audit scope" section.
         "non_audit_dirs": non_audit_dirs_for_prompt(),
+        "budget_line": _budget_line(wall_seconds),
     }
     return render_template("benchmark_model_direct.md.j2", ctx)
 

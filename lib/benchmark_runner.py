@@ -589,7 +589,7 @@ def _record_provider_quality(cell_dir: Path, results: Path, rc: int = 1) -> str:
 def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wall: int) -> int:
     for name in ("crashes", "findings", "logs"):
         (cell_dir / name).mkdir(parents=True, exist_ok=True)
-    prompt = benchmark_model_direct_render.render(str(target), str(cell_dir), str(SCRIPT_ROOT))
+    prompt = benchmark_model_direct_render.render(str(target), str(cell_dir), str(SCRIPT_ROOT), wall)
     (cell_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     raw = cell_dir / "backend.raw.log"
     for marker in (".quota-exhausted", ".backend-unavailable", ".run-quality"):
