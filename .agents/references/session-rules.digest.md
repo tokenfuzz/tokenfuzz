@@ -129,6 +129,13 @@ explain-queue [--mode MODE] [--strategy S] [--top N] [--all]
 `resume` Runtime Feedback is next-mutation or harness-repair guidance from
 recent probe artifacts. It is not filing or discard evidence.
 
+Card discard uses the configured floor (default: three card-linked CLEAN rows
+across two actually-probed hypothesis shapes). MISSED, NO_EXEC, CRASH, and
+DIFF do not count. A surface unavailable in every configured sibling
+build/mode exits through ENV-BLOCKED (which soft-blocks its owning card), or a
+proven mode-incompatible, stale, or non-public card may be marked `blocked`
+with a precise note. MISSED alone is not proof of unreachability.
+
 ## Structured state discipline
 
 - NEUTRAL vocabulary, describe by LOCATION (`File:Function:Line`).

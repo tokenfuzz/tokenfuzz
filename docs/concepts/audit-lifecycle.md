@@ -126,16 +126,25 @@ Each agent works on **one hypothesis at a time**:
    shape, an expected diagnostic).
 3. Read a small region of the source.
 4. Find an existing seed input, or write a testcase from scratch.
-5. Run the testcase. If it doesn't reach the right code under the
-   sanitizer, revise the input and try again.
+5. Run the testcase. If it doesn't reach the right code through the
+   configured sanitizer or runner, revise the input and try again.
 6. If it does, confirm the result and move it through triage.
 
-The harness deliberately favours **a few deep hypotheses over many
-shallow notes** — agents are told to commit at least 15 tool calls
-and a few testcase variants per hypothesis before discarding. Work
-cards are leased so two agents don't step on each other; after a
-context compaction, the next iteration tells the agent which regions
-it has already read so it doesn't re-cover the same ground.
+Investigation depth follows evidence. A deterministic hypothesis can close
+after one clean probe only when the testcase directly exercised its exact
+trigger. Allocator-, scheduler-, race-, GC-, timing-, re-entrancy-, and
+state-dependent triggers need repetition or distinct inputs. Before a whole
+work card is discarded, the harness requires three card-linked clean probe
+runs across two distinct hypothesis shapes that were actually probed. This
+preserves breadth without charging every cold hypothesis for several variants.
+If no configured build or mode can execute the surface, the agent records an
+ENV-BLOCKED hypothesis instead; that soft-blocks the card for the current
+result set without pretending that MISSED probes were clean evidence. Proven
+mode-incompatible, stale, or non-public cards use the same soft `blocked` exit.
+
+Work cards are leased so two agents don't step on each other; after a context
+compaction, the next iteration tells the agent which regions it has already
+read so it doesn't re-cover the same ground.
 
 When an agent confirms a crash or finding in a subsystem, the queue
 relaxes the usual subsystem-diversity rule for that agent.

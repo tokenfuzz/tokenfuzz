@@ -26,7 +26,10 @@
 Use the inline strategy brief to orient, then open the full strategy file for the complete playbook before forming hypotheses.
 {{ strategy_roi_directive }}
 
-**Depth:** max 2-3 hypotheses per session. 15+ tool calls each. 3+ testcase variants each.
+**Depth follows evidence:** start with a trigger-aimed probe. Rotate after a
+genuinely cold deterministic result; go deep when the trigger is variable or a
+run shows progress toward the predicted failure. Coverage of more precise
+hypotheses finds more bugs than repeating nearby inputs with no new evidence.
 {{ find_first_directive }}
 
 ## MANDATORY WRITE-RUN-EVALUATE LOOP
@@ -35,25 +38,53 @@ Use the inline strategy brief to orient, then open the full strategy file for th
 "FILE FIND FIRST, REPRODUCE SECOND" above). Then run the reproducer loop —
 the FIND is preserved whether or not the reproducer lands.
 
-**NEVER write a second testcase before running ASan on the first.** The strict loop is:
+**NEVER write a second testcase before running `bin/probe` on the first.** The strict loop is:
 1. Write ONE testcase → 2. Run {{ asan_loop_cmd }} immediately → 3. Evaluate result →
-4. If CLEAN: write a variant (different input shape, not cosmetic) → repeat from 2.
-   If NO_EXEC: your testcase has a bug (exception, syntax error, early exit). Fix it before writing variants.
-   If CRASH: promote to the absolute `crashes/` path from AGENT IDENTITY immediately (a bare `crashes/` resolves against your current cwd, which may have drifted after a `cd`).
-5. Only after 3+ ASan-verified variants may you move to the next hypothesis.
+4. If MISSED, revise the input until it reaches the target path. If NO_EXEC,
+   fix the testcase. Neither result is evidence for discard.
+5. If CRASH, DIFF, or a runner diagnostic appears, stop rotating: confirm as
+   required and complete the crash or finding at the absolute results path
+   from AGENT IDENTITY (use the path printed by `bin/probe` when it files one).
+6. If CLEAN, decide from evidence:
+   - **Deterministic exact trigger exercised:** the testcase directly supplied
+     every boundary value or call step named by the hypothesis and the target
+     path executed. Record the evidence and rotate.
+   - **Variable or incompletely observed trigger:** allocator placement,
+     scheduling, races, GC, timing, re-entrancy, multi-step state, or a mere
+     coverage HIT needs repetition or a distinct input shape. A HIT proves the
+     location executed, not that its runtime predicate held.
+   - **Signal:** a newly cleared guard, closer coverage, suspicious output, or
+     crash-adjacent state earns deeper variants. Follow it while it converges.
 
 **For JS testcases:** Always end with `print('TESTCASE_EXECUTED');` as a sentinel.
 Wrap risky operations in try/catch that still exercises the target path on exception.
 
 **Structured state:** create hypotheses with `bin/state add-hyp --card-id <id>` when a work card exists (the harness claims the card on adopt — no claim happens at prompt time).
 
-**DISCARD evidence bar (this is the highest-impact correctness rule in this prompt — read carefully):** 3+ ASan-verified clean variants are a *necessary* condition for `bin/state update-hyp --id <id> --status DISCARDED`, not a *sufficient* one. Three variants that all crashed early at the same guard are one piece of evidence, not three. To DISCARD, the `--note <why>` MUST name:
-  (a) the distinct input shape each variant exercised (e.g. "v1: empty input, v2: nested 2-level, v3: malformed length prefix"),
-  (b) the guard, boundary, or path that actually held in each (e.g. "v1: len==0 fast-return at parse.c:412; v2: depth cap at parse.c:518; v3: rejected at length check parse.c:602"),
-  (c) at least one input shape you considered but did NOT try, with one sentence on why (e.g. "did not try: oversized length AFTER successful first-pass — needs allocator instrumentation I don't have here").
-A `--note` that says only "tried 3 variants, all clean" is REFUSED as DISCARD evidence — leave the hypothesis as `NEEDS_TESTCASE` and rotate. When `bin/probe` ran through a coverage-gated path (the automatic coverage gate prints a HIT/MISSED verdict for the suspected line), include that verdict in the note; otherwise the (a)/(b)/(c) breakdown is the bar.
+**Hypothesis DISCARD evidence bar:** `bin/state update-hyp --id <id> --status
+DISCARDED` normally needs a CLEAN probe that exercised the named trigger, not
+merely the enclosing function. One run is enough only for a deterministic
+trigger the testcase directly instantiates. Variable conditions require
+enough repetition or distinct shapes to exercise the variation. A concrete
+source/configuration proof that the named trigger has no documented input
+boundary can also close the hypothesis; cite the exact guard or contract in
+the `--note`. A MISSED, early guard rejection, or source-only guess is not that
+proof. Record the `bin/probe` verdict and one untried shape when a probe ran.
 
-**Do NOT auto-close the card after one hypothesis** — the same file likely supports other diagnostic angles (S2 invariant, S3 spec/fast-path, S5 lifetime/state). Best practice: try at least 2-3 distinct hypotheses spanning different strategies before `bin/state update-card --card-id <id> --status discarded`. The harness enforces an anti-fabrication floor: at least one hypothesis with ≥2 `bin/probe` runs on the card; without that the discard is refused.
+**Card DISCARD evidence bar:** before `bin/state update-card --card-id <id>
+--status discarded`, the harness requires at least
+{{ card_discard_min_runs }} card-linked CLEAN `bin/probe` runs across at least
+{{ card_discard_min_hypotheses }} distinct hypothesis shapes that were actually
+probed. This is a card floor, not a tax on every hypothesis. Use the runs on
+genuinely different angles (for example S2 invariant, S3 spec/fast-path, and
+S5 lifetime/state), and deepen any angle that shows signal.
+
+**Unreachable-card exit:** never manufacture CLEAN evidence for a surface the
+configured target cannot execute. After checking sibling builds/modes, mark
+the hypothesis `ENV-BLOCKED`; that soft-blocks its owning card for this result
+set. For a mode-incompatible or stale/non-public card proven unreachable from
+the target boundary, use `update-card --status blocked --note <proof>`. A
+MISSED verdict alone is not proof of unreachability.
 
 ## Auto-memory: record what was tried, never "skip future sweeps"
 
@@ -66,7 +97,7 @@ exercises a path you did not try.
 DO write (when saving a memory note about an audit pass):
 - The work-card / patch-card id you closed and on what target SHA.
 - The concrete hypotheses you ran (H-ids), one line each: input shape,
-  guard or path that held, ASan verdict.
+  guard or path that held, `bin/probe` verdict.
 - One or two input shapes you *did not* try, with a one-line reason.
 - A "Re-investigate if:" line listing conditions that would invalidate the
   prior CLEAN (new commit touches this file, new assert lands, hypothesis
@@ -86,7 +117,7 @@ When READING a prior auto-memory note about a card you've been assigned:
   it. Reference the prior note in your `--note` ("prior memory covered
   X,Y; this hypothesis covers Z, untried").
 - A DISCARD justified purely as "prior memory says saturated" is refused.
-  The discard `--note` must still satisfy the (a)/(b)/(c) evidence bar
-  above for the hypothesis you're closing now.
+  The discard `--note` must still satisfy the trigger-condition evidence
+  bar above for the hypothesis you're closing now.
 {{ agent_state_instructions }}
 {{ common_suffix }}

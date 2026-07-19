@@ -202,6 +202,14 @@ with an ID for one full compact record. Run `bin/state --help` and
 `bin/state <subcommand> --help` for filters and state-mutating commands used by
 agents.
 
+Card discard is evidence-gated. It needs the configured floor, by default
+three card-linked CLEAN runs across two distinct hypothesis shapes that were
+actually probed. MISSED, NO_EXEC, CRASH, and DIFF runs do not count. A surface
+unavailable in the configured builds or modes exits through an ENV-BLOCKED
+hypothesis, which soft-blocks its card. A proven mode-incompatible, stale, or
+non-public card can instead be marked `blocked` with a precise note; MISSED
+alone is not proof of unreachability.
+
 ## Run recon separately
 
 ```bash

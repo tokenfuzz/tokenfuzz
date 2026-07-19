@@ -397,7 +397,7 @@ def _role_guidance(context: PromptContext, agent: int) -> str:
         )
     return (
         f"**ROLE: REPRODUCE** - start from `bin/find-seed`, write under `{context.scratch_dir(agent)}`, "
-        "and run `bin/probe` in the same turn. Try at least three variants before discarding."
+        "and run `bin/probe` in the same turn."
     )
 
 
@@ -534,6 +534,7 @@ def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
         failures = harness_build_failures_directive(context)
         if failures:
             target_block += "\n\n" + failures
+    card_min_runs, card_min_hypotheses = workqueue.card_discard_requirements()
     return render_template(
         "deep_investigation.md.j2",
         {
@@ -551,6 +552,8 @@ def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
             "work_card_directive": work_card_directive(context, agent),
             "strategy_assignment_line": strategy_brief(strategy, context.reference_dir),
             "strategy_roi_directive": "", "find_first_directive": find_first_directive(context),
+            "card_discard_min_runs": str(card_min_runs),
+            "card_discard_min_hypotheses": str(card_min_hypotheses),
             "agent_state_instructions": _agent_state_instructions(context, agent),
             "common_suffix": common_suffix(context),
         },

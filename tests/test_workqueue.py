@@ -381,7 +381,45 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.add_run(index=2)
         self.add_run(index=3, hypothesis_id="H-2")
+        self.add_run(index=4, hypothesis_id="H-2")
         self.assertEqual(workqueue.update_card_status(self.ctx, "WORK-A", "discarded")["status"], "discarded")
+
+    def test_card_discard_ignores_nonclean_runs_and_unprobed_hypotheses(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/app.c")])
+        self.add_hypothesis()
+        self.add_hypothesis(
+            hyp_id="H-2", hypothesis="issue in app_close", input_shape="callback sequence",
+            guard_gap="state checked after callback", diagnostic="lifetime", strategy="S5",
+        )
+        self.add_run(verdict="NO_EXEC")
+        self.add_run(index=2)
+        self.add_run(index=3)
+
+        with self.assertRaisesRegex(workqueue.CardStatusUpdateError, "clean_runs=2.*probed_distinct_hypotheses=1"):
+            workqueue.update_card_status(self.ctx, "WORK-A", "discarded", agent="1")
+
+        self.add_run(index=4, hypothesis_id="H-2")
+        self.assertEqual(workqueue.card_discard_evidence(self.ctx, "WORK-A"), (3, 2))
+        self.assertEqual(
+            workqueue.update_card_status(self.ctx, "WORK-A", "discarded", agent="1")["status"],
+            "discarded",
+        )
+
+    def test_env_blocked_is_the_non_discard_exit_for_unreachable_card(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/app.c")])
+        self.add_hypothesis()
+        self.add_run(verdict="MISSED")
+
+        with self.assertRaisesRegex(workqueue.CardStatusUpdateError, "clean_runs=0"):
+            workqueue.update_card_status(self.ctx, "WORK-A", "discarded", agent="1")
+
+        workqueue.update_hypothesis(
+            self.ctx, "H-1", "ENV-BLOCKED",
+            "feature is unavailable in every configured sibling build", agent="1",
+        )
+        blocked = workqueue.latest_claims_by_card(self.ctx)["WORK-A"]
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["source"], "env-block-own-card")
 
     def test_rejected_finding_cards_and_per_agent_reject_skips_are_recorded(self) -> None:
         cards = [

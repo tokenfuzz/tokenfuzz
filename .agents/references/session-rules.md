@@ -216,6 +216,15 @@ bin/state explain-queue [--mode MODE] [--strategy S] [--top N] [--all]
 artifacts. Treat it as next-mutation or harness-repair guidance only, not
 filing/discard evidence.
 
+`update-card --status discarded` requires the configured evidence floor
+(default: three card-linked CLEAN runs across two distinct hypothesis shapes
+that were actually probed). MISSED, NO_EXEC, CRASH, and DIFF rows do not count.
+If the configured target cannot execute a surface, do not manufacture CLEAN
+evidence: after checking sibling builds/modes, mark its hypothesis ENV-BLOCKED
+(which soft-blocks the owning card) or mark a proven mode-incompatible,
+stale, or non-public card `blocked` with a precise note. MISSED alone is not
+proof of unreachability.
+
 Search & diff helpers:
 
 ```

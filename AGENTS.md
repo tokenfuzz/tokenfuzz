@@ -43,7 +43,7 @@ Each agent has a role set by the harness:
 
 1. **File concrete security findings; reproduce where feasible.** File a security issue under `findings/` the moment you can name it (file:function:line + issue class + impact) — a reproducer is NOT required. Promotion to `crashes/` DOES require a runnable testcase + sanitizer output on disk.
 2. **ONE finding at a time.** Confirm or discard before moving on.
-3. **RUN `bin/probe` FIRST; it coverage-gates when supported, then runs the sanitizer.**
+3. **RUN `bin/probe` FIRST; it coverage-gates when supported, then runs the configured sanitizer or runner.**
    ```
    bin/probe "${RESULTS_DIR}/scratch-N/testcase.html"              # 1 run, exploration
    bin/probe --confirm "${RESULTS_DIR}/scratch-N/testcase.html"    # 5 runs, after first crash
@@ -51,9 +51,9 @@ Each agent has a role set by the harness:
    `bin/probe` reads TARGET / HYPOTHESIS-ID / HARNESS from the testcase header
    and discovers TARGET_ROOT / RESULTS_DIR by walking up to
    `output/<slug>/<backend>/results/.session-env`. No env vars to set.
-   MISSED = revise input, don't discard, don't spend the sanitizer budget.
-4. **MANDATORY REPRODUCTION BUDGET.** Before DISCARDING: 10+ tool calls, 1+ HIT testcase under the sanitizer, 2+ variant inputs, documented input shapes tried.
-5. **2-3 DEEP investigations, not 10 shallow.** 15+ tool calls per hypothesis with testcase variants.
+   MISSED = revise input, don't discard, don't spend the execution budget.
+4. **DEPTH FOLLOWS EVIDENCE.** Start with a trigger-aimed `bin/probe` run. One CLEAN may resolve a deterministic hypothesis only when the testcase directly instantiates every named boundary value or call step. Allocator-, scheduler-, race-, GC-, timing-, re-entrancy-, or state-dependent triggers need repetition or distinct shapes; a coverage HIT alone proves only that the location executed. MISSED and NO_EXEC never justify discard; a concrete source/configuration proof that the named trigger has no documented input boundary may.
+5. **BREADTH WITH A CARD FLOOR.** Before discarding a card, record at least 3 card-linked CLEAN `bin/probe` runs across at least 2 distinct hypothesis shapes that were actually probed. This is a card floor, not a per-hypothesis variant tax. Deepen any angle that clears a guard, reaches closer coverage, changes suspicious output, or exposes crash-adjacent state. If the configured target cannot execute the card, do not manufacture CLEAN evidence: after checking sibling builds/modes, use `ENV-BLOCKED` (which soft-blocks the owning card) or `update-card --status blocked --note <proof>` for a proven mode-incompatible, stale, or non-public surface. MISSED alone is not proof.
 6. **Bugs cluster.** After confirming, search SAME FILE and neighbors before moving on.
 7. **Stay on one subsystem while exploring; expand to neighbors after a hit.** While a hypothesis is open and you have no confirmed CRASH/FIND in this subsystem yet, stick with it across strategy rotations — don't pivot files mid-investigation. After you confirm a crash or finding in this subsystem, the harness unlocks neighbor-subsystem cards for you (productive-agent relaxation in `_claim_next_card_locked`); follow Rule 6 and claim them. Pre-confirmation pivots are wasted context cost.
 8. **Iterate on non-diagnostic runs.** Try: allocator shaping, GC interleaving, multi-trigger, object replacement. See `.agents/references/reproducer-templates.md`.
@@ -122,7 +122,8 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
 2. Run `bin/probe` in the same turn:
    bin/probe "${RESULTS_DIR}/scratch-N/testcase.html"
 3. EVALUATE: crash? → re-run with `--confirm`; on a stable crash `bin/probe`
-   auto-files the bundle. Clean? → 2+ variants.
+   auto-files the bundle. CLEAN? Apply Rule 4: rotate only after a deterministic
+   named trigger ran clean; otherwise vary or repeat the input.
 4. IF CRASH: once you `bin/probe --confirm` and the diagnostic reproduces across
    runs, `bin/probe` materializes the bundle for you — it copies the reproducer +
    `sanitizer.txt` into the next `crashes/CRASH-NNN-<agent>/` slot, writes a

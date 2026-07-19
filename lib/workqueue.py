@@ -3690,8 +3690,8 @@ def card_run_count(ctx: Context, card_id: str, verdict: str = "") -> int:
     verdict. The crash-close gate in update_card_status uses
     verdict="CRASH" as the harness-written evidence that a crash was
     actually reproduced; the separate report-completeness gate prevents
-    closure while the filed bundle is still a skeleton. The discard gate
-    uses the unfiltered count.
+    closure while the filed bundle is still a skeleton. Card-discard evidence
+    is stricter and goes through ``card_discard_evidence``.
     """
     if not card_id:
         return 0
@@ -4071,6 +4071,42 @@ class CardStatusUpdateError(ValueError):
     """Raised when update_card_status refuses to commit a status change."""
 
 
+def card_discard_requirements() -> tuple[int, int]:
+    """Return the configured card-discard evidence floor.
+
+    Prompt rendering and enforcement share this helper so an operator override
+    cannot make the agent follow a different policy from ``update-card``.
+    """
+    return (
+        _int_env("WORK_CARD_MIN_RUNS_BEFORE_DISCARD", 3),
+        _int_env("WORK_CARD_MIN_HYPS_BEFORE_DISCARD", 2),
+    )
+
+
+def card_discard_evidence(ctx: Context, card_id: str) -> tuple[int, int]:
+    """Return CLEAN runs and actually-probed hypothesis shapes for a card."""
+    hypothesis_shapes = {
+        (str(row.get("agent", "")), str(row.get("id", ""))): _hypothesis_shape(row)
+        for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
+        if str(row.get("card_id", "")) == str(card_id) and row.get("id")
+    }
+    clean_runs = 0
+    probed_shapes: set[str] = set()
+    for run in read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl"):
+        if str(run.get("card_id", "")) != str(card_id):
+            continue
+        if str(run.get("verdict", "")).upper() != "CLEAN":
+            continue
+        shape = hypothesis_shapes.get(
+            (str(run.get("agent", "")), str(run.get("hypothesis_id", "")))
+        )
+        if not shape:
+            continue
+        clean_runs += 1
+        probed_shapes.add(shape)
+    return clean_runs, len(probed_shapes)
+
+
 def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "", note: str = "") -> dict:
     """Append a card-status row to claims.jsonl with evidence gates.
 
@@ -4079,10 +4115,10 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
     carry harness-written evidence:
 
       * `discarded` requires ≥WORK_CARD_MIN_RUNS_BEFORE_DISCARD (default 3)
-        runs.jsonl rows referencing the card AND
+        CLEAN runs.jsonl rows referencing the card and a real hypothesis AND
         ≥WORK_CARD_MIN_HYPS_BEFORE_DISCARD (default 2) distinct hypothesis
-        shapes: a clean variant set must have actually been run, and one
-        shallow hypothesis must not retire a file/strategy surface.
+        shapes among those runs: MISSED/NO_EXEC probes and unprobed rows cannot
+        retire a file/strategy surface.
       * `crash` requires ≥1 runs.jsonl row with a CRASH verdict for the
         card and no unfinished crash report owned by the agent. An
         `update-card --status crash` with no such row is bounced
@@ -4110,17 +4146,15 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
     """
     init_state(ctx)
     if status == "discarded":
-        min_runs = _int_env("WORK_CARD_MIN_RUNS_BEFORE_DISCARD", 3)
-        min_hyps = _int_env("WORK_CARD_MIN_HYPS_BEFORE_DISCARD", 2)
-        runs = card_run_count(ctx, card_id)
-        hyps = card_distinct_hypothesis_count(ctx, card_id)
+        min_runs, min_hyps = card_discard_requirements()
+        runs, hyps = card_discard_evidence(ctx, card_id)
         ok = runs >= min_runs and hyps >= min_hyps
         if not ok:
             raise CardStatusUpdateError(
                 f"update-card refuses discard for {card_id}: "
-                f"runs={runs} (need {min_runs}); "
-                f"distinct_hypotheses={hyps} (need {min_hyps}). "
-                "Run bin/probe variants and add a hypothesis first."
+                f"clean_runs={runs} (need {min_runs}); "
+                f"probed_distinct_hypotheses={hyps} (need {min_hyps}). "
+                "Run bin/probe and add distinct hypotheses first."
             )
     elif status == "crash":
         if card_run_count(ctx, card_id, verdict="CRASH") < 1:
