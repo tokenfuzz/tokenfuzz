@@ -4559,12 +4559,14 @@ def crosstab(bench_root: Path) -> str:
         lines.append(
             "Counts below are read only from saved `metrics.json` files. A "
             "running cell stays blank until its cell-level triage and validation "
-            "finish."
+            "finish. Both count columns are raw per-cell totals including "
+            "gate-rejected candidates and are not deduplicated; the scored unique "
+            "counts appear in the main table above."
         )
         lines.append("")
         lines.append(
-            "| Target | Backend | Run | Cell | Condition | Status | Findings "
-            "| Crashes | Wall (h) |"
+            "| Target | Backend | Run | Cell | Condition | Status | "
+            "Findings (raw) | Crashes (raw) | Wall (h) |"
         )
         lines.append(
             "| --- | --- | --- | --- | --- | --- | --: | --: | --: |"
@@ -4596,11 +4598,13 @@ def crosstab(bench_root: Path) -> str:
                             ),
                             status=cell.get("status", "unknown"),
                             findings=(
-                                int(metrics.get("confirmed_findings", 0) or 0)
+                                int(metrics.get("findings", 0) or 0)
+                                + int(metrics.get("findings_rejected", 0) or 0)
                                 if has_metrics else "—"
                             ),
                             crashes=(
                                 int(metrics.get("confirmed_crashes", 0) or 0)
+                                + int(metrics.get("crashes_rejected", 0) or 0)
                                 if has_metrics else "—"
                             ),
                             wall=(

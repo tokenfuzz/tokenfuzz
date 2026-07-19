@@ -850,6 +850,40 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertIn("≤ 2", text)
         self.assertIn("≤ 2", ledger)
 
+    def test_crosstab_live_progress_totals_include_rejected(self) -> None:
+        run = self.root / "live" / "claude" / "20260201-000000"
+        report = {
+            "run": {
+                "runid": "20260201-000000", "target": "sample",
+                "backend": "claude", "model": "claude-test",
+            },
+            "bench_dir": str(run),
+            "provisional": True,
+            "conditions": [{
+                "condition": "model-direct", "replicates_done": 1,
+                "replicates_total": 2, "wall_median": 60,
+                "cells": [{
+                    "cell": "model-direct-r1", "condition": "model-direct",
+                    "status": "done", "wall_effective_seconds": 3162,
+                    "metrics": {
+                        "exists": True,
+                        # 0 confirmed but 3 filed-and-rejected findings: the raw
+                        # total must surface them, not read as "found nothing".
+                        "confirmed_findings": 0, "findings": 0,
+                        "findings_rejected": 3,
+                        "confirmed_crashes": 0, "crashes_rejected": 0,
+                    },
+                }],
+            }],
+        }
+        self.write_json(run / "report.json", report)
+        text = benchmark.crosstab(self.root / "live")
+        self.assertIn("## Live cell progress", text)
+        self.assertIn("Findings (raw) | Crashes (raw)", text)
+        self.assertIn("not deduplicated", text)
+        # 3 rejected findings surface as the raw total despite 0 confirmed.
+        self.assertIn("| 3 | 0 |", text)
+
 
 if __name__ == "__main__":
     unittest.main()
