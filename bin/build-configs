@@ -153,7 +153,9 @@ def is_fresh(root: Path, config: build_config.BuildConfig, base_suffix: str) -> 
     ):
         return False
     with selected_suffix(build_config.suffix(config, base_suffix)):
-        return target_config.build_freshness(root, "asan") == "fresh"
+        return target_config.build_freshness(
+            root, "asan", recipe_path=recipe
+        ) == "fresh"
 
 
 def materialize(
@@ -229,7 +231,7 @@ def materialize(
                 log(f"{config.name}: build failed (rc={completed.returncode}; log: {output_path})")
                 write_marker(unavailable, input_key)
                 return False
-            target_config.build_write_stamp(root, "asan")
+            target_config.build_write_stamp(root, "asan", recipe_path=recipe)
         build_config.write_recipe_stamp(tree, recipe)
         build_config.mark_ready(tree, recipe)
         unavailable.unlink(missing_ok=True)

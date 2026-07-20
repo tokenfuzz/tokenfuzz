@@ -86,8 +86,10 @@ class BenchmarkReportTests(unittest.TestCase):
         library.parent.mkdir(parents=True)
         (native / "include").mkdir()
         (native / "lib").mkdir()
+        (native / "CMakeLists.txt").write_text("project(sample C)\n")
         (native / "target.toml").write_text(
             'target = "sample"\n'
+            'build_system = "cmake"\n'
             'asan_bin = "build-asan/src/sample-cli"\n'
             'asan_lib = "build-asan/lib/libsample.a"\n'
             'includes = ["include", "lib"]\n'
@@ -98,6 +100,12 @@ class BenchmarkReportTests(unittest.TestCase):
         binary.write_text(f"#!{sys.executable}\n", encoding="utf-8")
         binary.chmod(0o755)
         library.touch()
+        unstamped_body = benchmark_model_direct_render.render(
+            str(native), "/abs/out", str(ROOT)
+        )
+        self.assertIn("Driving the asan binary directly", unstamped_body)
+        self.assertNotIn("No native sanitizer-instrumented build", unstamped_body)
+        target_config.build_write_stamp(native, "asan")
         native_body = benchmark_model_direct_render.render(str(native), "/abs/out", str(ROOT))
         for required in (
             "build-asan/src/sample-cli", "Driving the asan binary directly",

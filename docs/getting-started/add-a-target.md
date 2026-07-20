@@ -87,7 +87,12 @@ Build behavior depends on the target:
   recipe under `targets/<target>/.audit/`. Failure is visible in the log but
   fail-open: source analysis can continue while sanitizer-dependent work is
   unavailable. The canonical `build-asan` remains the regular-configuration
-  control. By default, setup also prepares one cached widened ASan sibling when
+  control. A refresh always starts from an empty canonical build directory;
+  the previous tree is restored if the build fails. If an existing recipe
+  fails that clean build, setup gives the LLM at most three revised-recipe
+  attempts and installs a revision only after it builds successfully. Source
+  and recipe changes both invalidate the freshness stamp. By default, setup
+  also prepares one cached widened ASan sibling when
   the project advertises compatible optional in-tree features. One minority
   reproducer slot explores ready alternates while another stays on the control.
 - **Rust, Go, Swift, Python, Node, PHP, Ruby, and other registered language

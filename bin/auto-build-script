@@ -36,6 +36,11 @@ Usage:
   bin/auto-build-script --src targets/<slug> --sanitizer asan \\
                         --out targets/<slug>/.audit/build.sh   \\
                         [--max-iters 5] [--scratch /tmp/...]
+
+  bin/auto-build-script --src targets/<slug> --sanitizer asan \\
+                        --repair-from targets/<slug>/.audit/build.sh \\
+                        --failure-log targets/<slug>/.audit/build-materialize-asan.log \\
+                        --out /tmp/repaired-build.sh --max-iters 3
 """
 from __future__ import annotations
 
@@ -283,6 +288,17 @@ def read_readme_excerpt(src: Path) -> str:
                 continue
             return txt[:_README_EXCERPT_BYTES]
     return ""
+
+
+def read_build_log_tail(path: Path) -> str:
+    """Read only the bounded failure context sent to the model."""
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(max(0, size - _BUILD_LOG_TAIL_BYTES))
+        return stream.read(_BUILD_LOG_TAIL_BYTES).decode(
+            "utf-8", errors="replace"
+        )
 
 
 def ask_llm_for_revision(*, slug: str, build_system: str, sanitizer: str,
@@ -684,13 +700,26 @@ def main(argv: list[str]) -> int:
         "--widen-from", default="", metavar="RECIPE",
         help="create a feature-widened alternate from an existing working recipe",
     )
+    ap.add_argument(
+        "--repair-from", default="", metavar="RECIPE",
+        help="repair an existing recipe after a clean canonical build failure",
+    )
+    ap.add_argument(
+        "--failure-log", default="", metavar="LOG",
+        help="failed clean-build log used to seed --repair-from",
+    )
     args = ap.parse_args(argv)
 
     # Keep arguments as an ordered argv vector. Quoting happens only when they
     # are embedded in the generated shell recipe.
     build_config.validate_flags(args.extra_flag)
-    if args.widen_from and args.extra_flag:
-        die("--widen-from and --extra-flag are mutually exclusive")
+    if args.max_iters < 1:
+        die("--max-iters must be at least 1")
+    special_modes = bool(args.widen_from) + bool(args.repair_from)
+    if special_modes > 1 or (special_modes and args.extra_flag):
+        die("--widen-from, --repair-from, and --extra-flag are mutually exclusive")
+    if bool(args.failure_log) != bool(args.repair_from):
+        die("--failure-log is required with, and only valid for, --repair-from")
 
     src = Path(args.src).expanduser().absolute()
     if not src.is_dir():
@@ -744,7 +773,46 @@ def main(argv: list[str]) -> int:
             shutil.rmtree(scratch, ignore_errors=True)
         return 0
 
-    script = initial_script(build_system, args.sanitizer, args.extra_flag)
+    repair_path: Path | None = None
+    repair_seed_log = ""
+    if args.repair_from:
+        repair_path = Path(args.repair_from).expanduser().absolute()
+        failure_path = Path(args.failure_log).expanduser().absolute()
+        try:
+            script = repair_path.read_text(encoding="utf-8", errors="replace")
+            repair_seed_log = read_build_log_tail(failure_path)
+        except OSError as exc:
+            die(f"cannot read repair input: {exc}")
+        ok, reason = validate_proposed_script(script)
+        if not ok:
+            die(f"--repair-from recipe is invalid: {reason}")
+        missing = detect_missing_commands(repair_seed_log)
+        if missing:
+            die(
+                "clean-build failure is a missing toolchain, not a repairable "
+                f"recipe error: {' '.join(missing)}",
+                rc=3,
+            )
+        info(
+            "repair: asking LLM for revision from the failed clean-build log "
+            f"(tail {min(len(repair_seed_log), _BUILD_LOG_TAIL_BYTES)} bytes)"
+        )
+        revised = ask_llm_for_revision(
+            slug=slug, build_system=build_system, sanitizer=args.sanitizer,
+            current_script=script, build_log=repair_seed_log,
+            readme_excerpt=readme_excerpt,
+            timeout_secs=args.llm_timeout_secs,
+        )
+        if revised is None:
+            die("repair LLM returned no script", rc=3)
+        ok, reason = validate_proposed_script(revised)
+        if not ok:
+            die(f"repair LLM script rejected ({reason})", rc=3)
+        if revised.strip() == script.strip():
+            die("repair LLM returned the unchanged script", rc=3)
+        script = revised
+    else:
+        script = initial_script(build_system, args.sanitizer, args.extra_flag)
 
     # Write the candidate script next to scratch each iteration so the
     # build can be inspected on failure.
@@ -803,7 +871,12 @@ def main(argv: list[str]) -> int:
             )
             return 3
 
-        # Ask the LLM for a revised complete script.
+        if i == args.max_iters:
+            break
+
+        # Ask the LLM for a revised complete script. There is no revision
+        # request after the final build attempt because it could never be
+        # validated or persisted.
         info(f"iter {i}: asking LLM for revision (log tail {min(len(log),_BUILD_LOG_TAIL_BYTES)} bytes)")
         revised = ask_llm_for_revision(
             slug=slug, build_system=build_system, sanitizer=args.sanitizer,
@@ -839,7 +912,12 @@ def main(argv: list[str]) -> int:
     # Persist the working script. Add a provenance header.
     write_recipe(
         out, script,
-        f"build_system={build_system} sanitizer={args.sanitizer} converged_after={i} iters",
+        f"build_system={build_system} sanitizer={args.sanitizer} "
+        + (
+            f"repaired_from={repair_path.name} converged_after={i} retries"
+            if repair_path is not None
+            else f"converged_after={i} iters"
+        ),
     )
     info(f"converged: wrote {out}")
     print(str(out))

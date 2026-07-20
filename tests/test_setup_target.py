@@ -10,10 +10,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMAND = ROOT / "bin" / "setup-target"
+sys.path.insert(0, str(ROOT / "lib"))
+import build_materialize
+import target_config
 
 
 class SetupTargetTests(unittest.TestCase):
@@ -240,7 +244,9 @@ class SetupTargetTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import pathlib, sys\n"
             "build = pathlib.Path(sys.argv[2])\nbuild.mkdir(parents=True, exist_ok=True)\n"
-            f"binary = build / {target.name!r}\nbinary.touch()\nbinary.chmod(0o755)\n",
+            f"binary = build / {target.name!r}\n"
+            "binary.write_bytes(b'\\0' * 5000)\nbinary.chmod(0o755)\n"
+            f"(build / 'lib{target.name}.a').write_bytes(b'archive')\n",
             encoding="utf-8",
         )
         recipe.chmod(0o755 if executable else 0o644)
@@ -318,6 +324,154 @@ class SetupTargetTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         self.assertTrue((target / "build-asan" / "langbuild").is_file())
         self.assertIn("materializing asan build", process.stdout)
+
+        sentinel = target / "build-asan" / "keep-existing-tree"
+        sentinel.write_text("preserved\n")
+        repeated = self.setup(
+            "langbuild", "--build", environment={"LLM_DECIDE_DISABLE": "1"}
+        )
+        self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        self.assertNotIn("materializing asan build", repeated.stdout)
+        self.assertTrue(sentinel.is_file())
+
+    def test_stale_build_is_cleanly_rebuilt_and_restored_on_failure(self) -> None:
+        target = self.make_build_target("cleanbuild")
+        recipe = self.build_recipe(target)
+        config = self.config("cleanbuild")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "cleanbuild"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/cleanbuild"\n'
+        )
+        environment = {"LLM_DECIDE_DISABLE": "1"}
+        first = self.setup("cleanbuild", "--build", environment=environment)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+
+        build = target / "build-asan"
+        stale_only = build / "stale-cache-entry"
+        stale_only.write_text("must not survive a clean refresh\n")
+        (target / "main.c").write_text("int main(void) { return 1; }\n")
+        rebuilt = self.setup("cleanbuild", "--build", environment=environment)
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
+        self.assertFalse(stale_only.exists(), rebuilt.stdout + rebuilt.stderr)
+        self.assertTrue((build / "cleanbuild").is_file())
+
+        preserved = build / "preserve-on-failure"
+        preserved.write_text("old usable tree\n")
+        recipe.write_text(
+            f"#!{sys.executable}\nimport sys\nprint('intentional failure')\nsys.exit(9)\n",
+            encoding="utf-8",
+        )
+        recipe.chmod(0o755)
+        failed = self.setup("cleanbuild", "--build", environment=environment)
+        self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertIn("clean build failed", failed.stdout)
+        self.assertTrue(preserved.is_file())
+        self.assertTrue((build / "cleanbuild").is_file())
+        self.assertEqual(
+            list((target / ".audit" / "build-backups").glob("*")), []
+        )
+
+    def test_candidate_promotion_failure_restores_recipe_and_build(self) -> None:
+        target = self.make_build_target("promotionfail")
+        canonical = self.build_recipe(target)
+        old_recipe = canonical.read_text(encoding="utf-8")
+        build = target / "build-asan"
+        build.mkdir()
+        (build / "promotionfail").write_bytes(b"old binary")
+        marker = build / "old-tree-marker"
+        marker.write_text("preserved\n")
+        self.assertTrue(target_config.build_write_stamp(
+            target, "asan", recipe_path=canonical
+        ))
+
+        candidate = target / ".audit" / "build-candidates" / "build.sh.new"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_text(
+            old_recipe + "# validated candidate\n",
+            encoding="utf-8",
+        )
+        candidate.chmod(0o755)
+        real_replace = os.replace
+
+        def fail_promotion(source, destination):
+            if Path(source) == candidate and Path(destination) == canonical:
+                raise OSError("simulated promotion failure")
+            return real_replace(source, destination)
+
+        with mock.patch.object(
+            build_materialize.os, "replace", side_effect=fail_promotion
+        ):
+            result = build_materialize.materialize(
+                target, "asan", candidate, canonical,
+                lambda tree: (tree / "promotionfail").is_file(), force=True,
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("validated recipe could not be installed", result.reason)
+        self.assertEqual(canonical.read_text(encoding="utf-8"), old_recipe)
+        self.assertTrue(candidate.is_file())
+        self.assertTrue(marker.is_file())
+        self.assertEqual(
+            target_config.build_freshness(
+                target, "asan", recipe_path=canonical
+            ),
+            "fresh",
+        )
+
+    def test_existing_recipe_clean_failure_triggers_validated_repair(self) -> None:
+        target = self.make_build_target("repairbuild")
+        recipe = self.build_recipe(target)
+        config = self.config("repairbuild")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "repairbuild"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/repairbuild"\n'
+        )
+        first = self.setup(
+            "repairbuild", "--build", environment={"LLM_DECIDE_DISABLE": "1"}
+        )
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+
+        recipe.write_text(
+            f"#!{sys.executable}\nimport sys\nsys.exit(7)\n", encoding="utf-8"
+        )
+        recipe.chmod(0o755)
+        capture = self.temp / "repair-args"
+        auto_builder = self.harness / "bin" / "auto-build-script"
+        repaired_body = (
+            f"#!{sys.executable}\nimport pathlib, sys\n"
+            "build = pathlib.Path(sys.argv[2])\nbuild.mkdir(parents=True, exist_ok=True)\n"
+            "binary = build / 'repairbuild'\n"
+            "binary.write_bytes(b'\\0' * 5000)\nbinary.chmod(0o755)\n"
+            "# REPAIRED_RECIPE\n"
+        )
+        auto_builder.write_text(
+            f"#!{sys.executable}\nimport pathlib, sys\n"
+            f"pathlib.Path({str(capture)!r}).write_text(' '.join(sys.argv[1:]))\n"
+            "out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])\n"
+            f"out.write_text({repaired_body!r})\nout.chmod(0o755)\n",
+            encoding="utf-8",
+        )
+        auto_builder.chmod(0o755)
+        repaired = self.setup(
+            "repairbuild", "--build",
+            environment={"LLM_DECIDE_DISABLE": "0", "ACTIVE_BACKEND": "codex"},
+        )
+        self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+        self.assertIn(
+            "repaired asan recipe", repaired.stdout, repaired.stdout + repaired.stderr
+        )
+        self.assertIn("--repair-from", capture.read_text())
+        self.assertIn("--max-iters 3", capture.read_text())
+        self.assertIn("REPAIRED_RECIPE", recipe.read_text())
+        self.assertTrue((target / "build-asan" / "repairbuild").is_file())
+        self.assertEqual(
+            target_config.build_freshness(
+                target, "asan", recipe_path=recipe
+            ),
+            "fresh",
+        )
 
     def test_build_supplies_backend_when_materializing_widened_config(self) -> None:
         target = self.make_build_target("widebuild")

@@ -153,6 +153,67 @@ ok(all("{%" not in prompt and "%}" not in prompt for prompt in captured_prompts)
    "prompt: unsupported template control tags never reach the model")
 
 
+# ─── Existing-recipe repair budget ────────────────────────────────────
+
+with tempfile.TemporaryDirectory() as _repair_tmp:
+    _repair_root = Path(_repair_tmp)
+    _repair_src = _repair_root / "sampleproj"
+    _repair_src.mkdir()
+    (_repair_src / "CMakeLists.txt").write_text("project(sampleproj C)\n")
+    _repair_recipe = _repair_root / "build.sh"
+    _repair_recipe.write_text(
+        '#!/usr/bin/env bash\nset -eu\nsrc="$1"; build="$2"\n'
+        ': -fsanitize=address\nfalse\n'
+    )
+    _repair_failure = _repair_root / "failed.log"
+    _repair_failure.write_text("stale dependency: removed.c: No such file\n")
+    _repair_out = _repair_root / "repaired.sh"
+    _repair_scratch = _repair_root / "scratch"
+    _repair_calls: list[str] = []
+    _repair_attempts: list[str] = []
+    _original_ask = abs_mod.ask_llm_for_revision
+    _original_run = abs_mod.run_script
+
+    def _repair_ask(**kwargs):
+        _repair_calls.append(kwargs["build_log"])
+        number = len(_repair_calls)
+        return (
+            '#!/usr/bin/env bash\nset -eu\nsrc="$1"; build="$2"\n'
+            f': -fsanitize=address\n# revision {number}\nfalse\n'
+        )
+
+    def _repair_run(candidate, _src, _build, _timeout):
+        _repair_attempts.append(Path(candidate).read_text())
+        return 1, f"revision attempt {len(_repair_attempts)} failed\n"
+
+    abs_mod.ask_llm_for_revision = _repair_ask
+    abs_mod.run_script = _repair_run
+    try:
+        try:
+            abs_mod.main([
+                "--src", str(_repair_src), "--sanitizer", "asan",
+                "--out", str(_repair_out), "--scratch", str(_repair_scratch),
+                "--repair-from", str(_repair_recipe),
+                "--failure-log", str(_repair_failure), "--max-iters", "3",
+            ])
+            _repair_rc = 0
+        except SystemExit as exc:
+            _repair_rc = int(exc.code)
+    finally:
+        abs_mod.ask_llm_for_revision = _original_ask
+        abs_mod.run_script = _original_run
+
+    ok(_repair_rc == 3, "repair: exhausts the bounded budget without convergence")
+    ok(len(_repair_attempts) == 3,
+       "repair: --max-iters 3 performs exactly three revised build attempts")
+    ok(len(_repair_calls) == 3,
+       "repair: requests no unused revision after the third failed attempt")
+    ok(_repair_calls[0].startswith("stale dependency"),
+       "repair: the canonical clean-build failure seeds the first revision")
+    ok(not _repair_out.exists(),
+       "repair: does not overwrite the durable recipe when validation fails")
+
+
 # ─── End-to-end: iter 1 detects missing toolchain, exits 3 ──────────
 #
 # We can't run a real cmake build inside the test harness portably, so

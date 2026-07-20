@@ -291,6 +291,7 @@ class BuildConfigTests(unittest.TestCase):
             primary_recipe = root / ".audit" / "build.sh"
             primary_recipe.parent.mkdir(parents=True)
             primary_recipe.write_text("#!/bin/sh\n# primary one\n")
+            target_config.build_write_stamp(root, "asan")
             config_path = Path(directory) / "target.toml"
             config_path.write_text(
                 'target="sample"\nbuild_system="cmake"\nbuild_widening=false\n'
@@ -316,6 +317,7 @@ class BuildConfigTests(unittest.TestCase):
             self.assertEqual((first.returncode, second.returncode), (1, 1))
             self.assertIn("unavailable for this source/primary recipe", second.stderr)
             primary_recipe.write_text("#!/bin/sh\n# primary two\n")
+            target_config.build_write_stamp(root, "asan")
             changed = subprocess.run(command, capture_output=True, text=True, check=False)
             self.assertEqual(changed.returncode, 1)
             self.assertEqual((root / ".audit/attempts").read_text().splitlines(), ["attempt", "attempt"])
@@ -365,6 +367,7 @@ class BuildConfigTests(unittest.TestCase):
                 ": -fsanitize=address -O2 -g1 -DNDEBUG -fno-omit-frame-pointer\n"
             )
             primary_recipe.chmod(0o755)
+            target_config.build_write_stamp(root, "asan")
             config_path = Path(directory) / "target.toml"
             config_path.write_text(
                 'target="sample"\nbuild_system="cmake"\nbuild_widening=true\n',

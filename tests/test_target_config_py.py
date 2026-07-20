@@ -1213,6 +1213,47 @@ assert_eq(True, tc.build_write_stamp(_bf_root, "asan"),
 assert_eq("fresh", tc.build_freshness(_bf_root, "asan"),
           "build_freshness: stamped build with no newer source reports fresh")
 
+# The recipe is build input just like source. A recipe repair must invalidate
+# the artifact produced by the old recipe, even though .audit/ is intentionally
+# excluded from the broad source signature.
+(_bf_root / ".audit").mkdir()
+_bf_recipe = _bf_root / ".audit" / "build.sh"
+_bf_recipe.write_text("#!/bin/sh\n# first recipe\n")
+tc.build_write_stamp(_bf_root, "asan")
+assert_eq("fresh", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: stamp includes the current canonical recipe")
+_bf_recipe.write_text("#!/bin/sh\n# repaired recipe\n")
+assert_eq("stale", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: a changed canonical recipe reports stale")
+tc.build_write_stamp(_bf_root, "asan")
+_bf_recipe.unlink()
+assert_eq("stale", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: deleting the producing recipe reports stale")
+_bf_recipe.write_text("#!/bin/sh\n# repaired recipe\n")
+tc.build_write_stamp(_bf_root, "asan")
+
+# The prior stamp format had a source signature but no recipe digest. It must
+# remain usable across the migration; a later successful build will add line 3.
+_bf_stamp = _bf_root / "build-asan" / ".audit-build-stamp"
+_bf_stamp.write_text("\n".join(_bf_stamp.read_text().splitlines()[:2]) + "\n")
+assert_eq("fresh", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: legacy two-line stamp remains fresh")
+
+# Non-native targets ordinarily skip freshness, but an explicit hand-authored
+# sanitizer recipe opts one into the same source/recipe tracking.
+_bf_lang = TEST_TMPDIR / "freshness-language"
+(_bf_lang / ".audit").mkdir(parents=True)
+(_bf_lang / "build-asan").mkdir()
+(_bf_lang / "main.rs").write_text("fn main() {}\n")
+_bf_lang_recipe = _bf_lang / ".audit" / "build.sh"
+_bf_lang_recipe.write_text("#!/bin/sh\n")
+assert_eq(True, tc.build_write_stamp(
+    _bf_lang, "asan", recipe_path=_bf_lang_recipe
+), "build_write_stamp: explicit language recipe is stamped")
+assert_eq("fresh", tc.build_freshness(
+    _bf_lang, "asan", recipe_path=_bf_lang_recipe
+), "build_freshness: explicit language recipe opts into freshness")
+
 # A source edit after the stamp → stale (the core staleness signal). Advance
 # mtime explicitly so the test is fast and independent of filesystem precision.
 (_bf_root / "main.c").write_text("int main(void){return 1;}\n")

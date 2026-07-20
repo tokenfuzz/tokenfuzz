@@ -1135,6 +1135,20 @@ def _detect_cli_bin(san_dir: Path, root: Path, build_system: str,
     return ""
 
 
+def detect_sanitizer_build_artifacts(
+    target_root: "str | os.PathLike", sanitizer: str
+) -> tuple[str, str]:
+    """Return the selectable (binary, library) produced for a sanitizer."""
+    root = Path(target_root)
+    san_dir = _build_dir_for(root, sanitizer)
+    return (
+        _detect_cli_bin(
+            san_dir, root, _detect_build_system(root), sanitizer
+        ),
+        _detect_sanitizer_lib(san_dir, root),
+    )
+
+
 def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
     """Re-detect <san>_bin and <san>_lib for every sanitizer from the build
     trees now on disk and correct them in target.toml in place. Policy per
@@ -1154,7 +1168,6 @@ def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
     if target_root.name in _BROWSER_SLUGS:
         return False  # browsers use fixed bin candidates; no harness lib link
     suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
-    build_system = _detect_build_system(target_root)
     try:
         lines = Path(toml_path).read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -1204,10 +1217,11 @@ def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
             return
 
     for san in ("asan", "ubsan", "msan", "tsan"):
-        san_dir = target_root / f"build-{san}{suffix}"
-        _refresh(f"{san}_lib", san, _detect_sanitizer_lib(san_dir, target_root))
-        _refresh(f"{san}_bin", san,
-                 _detect_cli_bin(san_dir, target_root, build_system, san))
+        detected_bin, detected_lib = detect_sanitizer_build_artifacts(
+            target_root, san
+        )
+        _refresh(f"{san}_lib", san, detected_lib)
+        _refresh(f"{san}_bin", san, detected_bin)
     if changed:
         Path(toml_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return changed
@@ -1395,8 +1409,9 @@ def _detect_java_runner() -> tuple[str, list[str]]:
 # stale or missing native sanitizer tree on demand so a checkout that moved
 # since the last build is never audited against the wrong binary. These two
 # helpers are the cheap probe and the stamp those callers and `setup-target
-# --build` share. Native C/C++ only — language targets (cargo/go/pip) and
-# browsers build elsewhere and report "skip".
+# --build` share. Native C/C++ builds use their canonical recipe implicitly;
+# a language target can opt in with an explicit hand-authored recipe. Browsers
+# build elsewhere and report "skip".
 _NATIVE_BUILD_SYSTEMS = {"cmake", "autotools", "meson"}
 # VCS metadata and generated caches — never source whose change should force a
 # rebuild. Pruned from the mtime walk so a fresh .audit log or __pycache__ entry
@@ -1444,25 +1459,51 @@ def _source_state_signature(root: Path) -> str:
     ).hexdigest()
 
 
-def build_write_stamp(target_root: "str | os.PathLike", san: str) -> bool:
+def _primary_build_recipe(root: Path, san: str) -> Path:
+    name = "build.sh" if san == "asan" else f"build-{san}.sh"
+    return root / ".audit" / name
+
+
+def _build_recipe_digest(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def build_write_stamp(
+    target_root: "str | os.PathLike",
+    san: str,
+    *,
+    recipe_path: "str | os.PathLike | None" = None,
+) -> bool:
     """Mark build-<san> as current with the source tree as of now.
 
     Writes build-<san>/.audit-build-stamp with the detected rev (line 1, for
-    human diagnostics) and a source-state signature (line 2) that build_freshness
-    recomputes and compares. Returns False (no-op) when the build dir does not
-    exist."""
+    human diagnostics), a source-state signature (line 2), and the producing
+    recipe's digest (line 3). ``recipe_path`` is explicit for non-canonical
+    build configurations; canonical builds use .audit/build[-<san>].sh.
+    Returns False (no-op) when the build dir does not exist."""
     root = Path(target_root)
     build_dir = _build_dir_for(root, san)
     if not build_dir.is_dir():
         return False
     rev = detect_rev(root) or ""
     sig = _source_state_signature(root)
+    recipe = Path(recipe_path) if recipe_path is not None else \
+        _primary_build_recipe(root, san)
+    recipe_digest = _build_recipe_digest(recipe)
     (build_dir / ".audit-build-stamp").write_text(
-        f"{rev}\n{sig}\n", encoding="utf-8")
+        f"{rev}\n{sig}\n{recipe_digest}\n", encoding="utf-8")
     return True
 
 
-def build_freshness(target_root: "str | os.PathLike", san: str = "asan") -> str:
+def build_freshness(
+    target_root: "str | os.PathLike",
+    san: str = "asan",
+    *,
+    recipe_path: "str | os.PathLike | None" = None,
+) -> str:
     """Classify build-<san> against the current source tree.
 
     Returns one of:
@@ -1470,9 +1511,9 @@ def build_freshness(target_root: "str | os.PathLike", san: str = "asan") -> str:
                     build-<san> tree is expected, so freshness is N/A and
                     the caller must not try to (re)build one.
       * "missing" — native target with no build-<san> tree yet.
-      * "stale"   — the source-state signature differs from the recorded
-                    stamp (an upstream pull, branch switch, or local edit,
-                    add, delete, or rename since the build), or the stamp
+      * "stale"   — the source-state signature or canonical build recipe
+                    differs from the recorded stamp (an upstream pull, branch
+                    switch, local edit, or recipe repair), or the stamp
                     predates this mechanism.
       * "fresh"   — build-<san> exists and the source signature still matches.
 
@@ -1483,7 +1524,8 @@ def build_freshness(target_root: "str | os.PathLike", san: str = "asan") -> str:
     root = Path(target_root)
     if root.name in _BROWSER_SLUGS:
         return "skip"
-    if _detect_build_system(root) not in _NATIVE_BUILD_SYSTEMS:
+    if (_detect_build_system(root) not in _NATIVE_BUILD_SYSTEMS
+            and recipe_path is None):
         return "skip"
     build_dir = _build_dir_for(root, san)
     if not build_dir.is_dir():
@@ -1498,6 +1540,16 @@ def build_freshness(target_root: "str | os.PathLike", san: str = "asan") -> str:
     stored_sig = stamp_lines[1] if len(stamp_lines) >= 2 else ""
     if not stored_sig:
         return "stale"  # old-format (rev-only) stamp → rebuild to upgrade it
+    recipe = Path(recipe_path) if recipe_path is not None else \
+        _primary_build_recipe(root, san)
+    current_recipe_digest = _build_recipe_digest(recipe)
+    stored_recipe_digest = stamp_lines[2] if len(stamp_lines) >= 3 else ""
+    # Two-line stamps predate recipe identity. Accept them once when their
+    # source signature still matches; the next successful build upgrades the
+    # stamp. A recorded digest, including one whose recipe was later deleted,
+    # remains authoritative.
+    if stored_recipe_digest and stored_recipe_digest != current_recipe_digest:
+        return "stale"
     return "fresh" if _source_state_signature(root) == stored_sig else "stale"
 
 

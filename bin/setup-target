@@ -13,6 +13,7 @@ from pathlib import Path
 SCRIPT_ROOT = Path(os.environ.get("AUDIT_ROOT", Path(__file__).resolve().parent.parent)).resolve()
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
+import build_materialize
 import languages
 import target_config
 
@@ -261,6 +262,34 @@ class Setup:
         if status:
             raise RuntimeError(f"bootstrap failed for {self.name} (see {audit_dir / 'bootstrap.log'})")
 
+    def sanitizer_build_artifact_present(
+        self,
+        config: target_config.Config,
+        sanitizer_name: str,
+        build_dir: Path,
+    ) -> bool:
+        """Verify a recipe produced a selectable artifact in its clean tree."""
+        for kind, configured in (
+            ("bin", config.sanitizer_bin(sanitizer_name)),
+            ("lib", config.sanitizer_lib(sanitizer_name)),
+        ):
+            if not configured or "FILL_ME" in configured:
+                continue
+            try:
+                path = Path(config.resolve_path(configured))
+                path.resolve().relative_to(build_dir.resolve())
+            except (OSError, ValueError):
+                continue
+            if kind == "bin" and path.is_file() and os.access(path, os.X_OK):
+                return True
+            if kind == "lib" and path.is_file():
+                return True
+        detected_bin, detected_lib = \
+            target_config.detect_sanitizer_build_artifacts(
+                self.target_root, sanitizer_name
+            )
+        return bool(detected_bin or detected_lib)
+
     def sanitizer_builds(self, config: target_config.Config) -> None:
         audit_dir = self.target_root / ".audit"
         # Native C/C++ trees converge a .audit/build.sh through auto-build-script;
@@ -285,34 +314,111 @@ class Setup:
                 if sanitizer_name not in {"asan", "ubsan", "msan", "tsan"}:
                     continue
                 recipe = audit_dir / ("build.sh" if sanitizer_name == "asan" else f"build-{sanitizer_name}.sh")
+                candidate_dir = audit_dir / "build-candidates"
+                candidate = candidate_dir / f"{recipe.name}.{os.getpid()}"
+                candidate.unlink(missing_ok=True)
+                generated = False
                 if recipe.is_file() and not self.args.force:
                     log(f"bootstrap: keeping existing {recipe} (pass --force to regenerate)")
                 elif os.access(auto_builder, os.X_OK) and candidates:
+                    candidate_dir.mkdir(parents=True, exist_ok=True)
                     for backend in candidates:
                         environment = {**os.environ, "SCRIPT_ROOT": str(SCRIPT_ROOT), "ACTIVE_BACKEND": backend, "BACKEND": backend}
                         completed = subprocess.run([
-                            str(auto_builder), "--src", str(self.target_root), "--out", str(recipe), "--sanitizer", sanitizer_name,
+                            str(auto_builder), "--src", str(self.target_root), "--out", str(candidate), "--sanitizer", sanitizer_name,
                         ], env=environment)
                         if completed.returncode == 0:
-                            log(f"bootstrap: auto-build-script ({sanitizer_name}) succeeded on backend={backend} - wrote {recipe}")
+                            generated = True
+                            log(f"bootstrap: auto-build-script ({sanitizer_name}) succeeded on backend={backend} - validating candidate")
                             break
-                if not recipe.is_file():
+                active_recipe = candidate if generated else recipe
+                if not active_recipe.is_file():
                     continue
                 build_dir = self.target_root / f"build-{sanitizer_name}{os.environ.get('AUDIT_BUILD_SUFFIX', '')}"
-                freshness = target_config.build_freshness(self.target_root, sanitizer_name)
-                if freshness != "fresh":
+                freshness = target_config.build_freshness(
+                    self.target_root, sanitizer_name, recipe_path=recipe
+                )
+                if freshness != "fresh" or self.args.force:
                     log(f"bootstrap: materializing {sanitizer_name} build into {build_dir} (source is {freshness}; compiling so <san>_bin/<san>_lib can be detected; a few minutes)")
                     audit_dir.mkdir(parents=True, exist_ok=True)
                     # A committed or hand-authored recipe may lose its executable
                     # bit. Restore only owner-execute; do not broaden its access.
-                    recipe.chmod(recipe.stat().st_mode | 0o100)
-                    with (audit_dir / "build-materialize.log").open("ab") as output:
-                        completed = subprocess.run([str(recipe), str(self.target_root), str(build_dir)], stdout=output, stderr=subprocess.STDOUT)
-                    if completed.returncode == 0:
-                        target_config.build_write_stamp(self.target_root, sanitizer_name)
+                    active_recipe.chmod(active_recipe.stat().st_mode | 0o100)
+                    result = build_materialize.materialize(
+                        self.target_root,
+                        sanitizer_name,
+                        active_recipe,
+                        recipe,
+                        lambda tree: self.sanitizer_build_artifact_present(
+                            config, sanitizer_name, tree
+                        ),
+                        force=self.args.force,
+                    )
+                    if result.status == "built":
                         log(f"bootstrap: {sanitizer_name} build complete")
                     else:
-                        log(f"bootstrap: {sanitizer_name} build failed (see {audit_dir / 'build-materialize.log'})")
+                        if result.status == "fresh":
+                            candidate.unlink(missing_ok=True)
+                            continue
+                        log(
+                            f"bootstrap: {sanitizer_name} clean build failed "
+                            f"({result.reason}; see {result.log_path})"
+                        )
+                        # Existing recipes used to get only one materialization
+                        # attempt. A clean failure is the evidence needed for a
+                        # bounded repair loop; keep the old recipe/build until a
+                        # revised candidate passes both scratch and canonical
+                        # validation.
+                        if (
+                            not self.args.no_llm_config
+                            and os.environ.get("LLM_DECIDE_DISABLE", "0") != "1"
+                            and os.access(auto_builder, os.X_OK)
+                            and candidates
+                            and result.log_path is not None
+                        ):
+                            candidate_dir.mkdir(parents=True, exist_ok=True)
+                            repaired = candidate_dir / f"{recipe.name}.{os.getpid()}.repaired"
+                            repaired.unlink(missing_ok=True)
+                            environment = {
+                                **os.environ,
+                                "SCRIPT_ROOT": str(SCRIPT_ROOT),
+                                "ACTIVE_BACKEND": candidates[0],
+                                "BACKEND": candidates[0],
+                            }
+                            completed = subprocess.run([
+                                str(auto_builder), "--src", str(self.target_root),
+                                "--out", str(repaired), "--sanitizer", sanitizer_name,
+                                "--repair-from", str(active_recipe),
+                                "--failure-log", str(result.log_path),
+                                "--max-iters", "3",
+                            ], env=environment, check=False)
+                            if completed.returncode == 0 and repaired.is_file():
+                                repaired_result = build_materialize.materialize(
+                                    self.target_root,
+                                    sanitizer_name,
+                                    repaired,
+                                    recipe,
+                                    lambda tree: self.sanitizer_build_artifact_present(
+                                        config, sanitizer_name, tree
+                                    ),
+                                    force=self.args.force,
+                                )
+                                if repaired_result.status == "built":
+                                    log(
+                                        f"bootstrap: repaired {sanitizer_name} "
+                                        "recipe after clean-build failure"
+                                    )
+                                else:
+                                    repaired.unlink(missing_ok=True)
+                            else:
+                                repaired.unlink(missing_ok=True)
+                        candidate.unlink(missing_ok=True)
+                elif generated:
+                    # A concurrent materializer may have made the old recipe
+                    # fresh while this candidate was generated. Do not replace
+                    # that recipe without validating this candidate against the
+                    # canonical tree.
+                    candidate.unlink(missing_ok=True)
         elif sanitizers and not (audit_dir / "build.sh").is_file():
             log(f"hint: {self.name} is a {config.build_system} target with no {audit_dir / 'build.sh'} yet; bin/audit builds it automatically")
         if target_config.refresh_detected_build_fields(self.target_root, self.toml):
