@@ -27,7 +27,6 @@ bin/audit --target "$TARGET" --backend "$BACKEND" 1
 The trailing `1` has special smoke-test behavior:
 
 - one worker launches, regardless of the normal pool size;
-- cold-start recon is skipped;
 - the worker claims ranked work and investigates for one iteration;
 - result and log directories remain available for the next run.
 
@@ -118,9 +117,8 @@ Or run continuously:
 bin/audit --target "$TARGET" --backend "$BACKEND"
 ```
 
-Multi-iteration and continuous runs enable cold-start recon when the current
-target revision has no cached survey. They also use the configured worker pool
-and normal strategy rotation.
+Multi-iteration and continuous runs use the configured worker pool and normal
+strategy rotation.
 
 To inspect cleanup before starting over:
 
@@ -193,7 +191,5 @@ helper flags, run `bin/audit-container-shell --help`.
   maintainer review.
 - [Backends and ensembling](../guides/backends.md) covers hosted rotation and
   local models.
-- [Recon discovery](../guides/recon-discovery.md) explains the survey that runs
-  on longer cold starts.
 - [Audit lifecycle](../concepts/audit-lifecycle.md) connects setup, agents,
   probing, triage, and export.

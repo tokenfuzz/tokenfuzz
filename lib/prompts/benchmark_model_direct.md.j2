@@ -5,9 +5,9 @@
   This is the "model-direct" baseline prompt — the instruction the benchmark
   fires at a single agent with no harness scaffolding. Its opening purpose /
   authorization framing comes from the shared {{ goal_framing }} partial
-  (lib/prompts/audit_goal_framing.md.j2), the SAME opener bin/audit-recon
-  renders, so the baseline and the harness are framed identically and the
-  benchmark measures machinery, not framing. Several other structural pieces
+  (lib/prompts/audit_goal_framing.md.j2), so the baseline and the harness
+  are framed identically and the benchmark measures machinery, not
+  framing. Several other structural pieces
   are load-bearing and were tuned against observed
   failure modes — they look redundant only until you remove one and watch
   the metric collapse:

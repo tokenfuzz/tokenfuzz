@@ -4,7 +4,7 @@ Read this file ONCE at session start. Do NOT re-read it every iteration.
 
 ## PATH CONVENTION
 
-Every `findings/`, `crashes/`, `recon/`, `state/`, `scratch-*/`,
+Every `findings/`, `crashes/`, `state/`, `scratch-*/`,
 `crashes-rejected/`, and `findings-rejected/` reference in this file
 is a subdir of `${RESULTS_DIR}`, where `${RESULTS_DIR}` is the
 absolute results path the AGENT IDENTITY block names at the top of
@@ -290,9 +290,8 @@ PATCH_CONTEXT=N | PATCH_MAX_LINES=N | PATCH_MAX_BYTES=N   widen show-patch
 ## After Context Compression
 
 1. Run `bin/state resume --agent N` and read the recent structured notes
-2. Resume top PENDING hypothesis
-3. No new recon
-4. Do NOT re-read ranges listed in `PRIOR SESSION SEED`
+2. Resume the top PENDING hypothesis before claiming new work
+3. Do NOT re-read ranges listed in `PRIOR SESSION SEED`
 
 ## Rejected Crashes & Findings
 

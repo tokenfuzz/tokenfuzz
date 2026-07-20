@@ -465,15 +465,14 @@ def render(target_path: str, output_dir: str, script_root: str, wall_seconds: in
 
     ctx = {
         # Shared purpose/authorization opener — single source of truth in
-        # lib/prompts/audit_goal_framing.md.j2, also rendered by
-        # bin/audit-recon. Keeps the model-direct baseline and the recon
-        # prompt framed identically so the benchmark measures harness
-        # machinery, not a framing difference.
+        # lib/prompts/audit_goal_framing.md.j2. Keeps the model-direct
+        # baseline and the harness framed identically so the benchmark
+        # measures harness machinery, not a framing difference.
         "goal_framing": render_template("audit_goal_framing.md.j2", {}),
-        # Shared definitional floor (what is NOT a security issue), the same
-        # partial bin/audit-recon renders. Keeps the recon seed and this
-        # baseline on one quality bar so neither drifts into filing (or
-        # emitting) caller-misuse NULL-derefs the find-quality gate rejects.
+        # Shared definitional floor (what is NOT a security issue). Keeps
+        # this baseline on the same quality bar the find-quality gate
+        # enforces, so it does not drift into filing caller-misuse
+        # NULL-derefs the gate rejects.
         "bug_contract": render_template("audit_bug_contract.md.j2", {}),
         "target_path": target_path,
         "output_dir": output_dir,

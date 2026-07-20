@@ -1344,14 +1344,14 @@ assert_true(multi_enrich.count("## Summary") == 1,
 assert_true("Strategy: S7" in multi_enrich and
             multi_enrich.index("## Summary") < multi_enrich.index("The reference string"),
             "render_agent_body: heading heads the real prose after stacked enrich + Strategy metadata")
-# An orphan metadata line (`Linked FIND:`, a recon cross-reference) above the
+# An orphan metadata line (`Linked FIND:`, a cross-reference) above the
 # agent's OWN `## Summary` must not trigger a second inserted `## Summary` —
 # the body is already headed under Summary. Without the guard, the orphan line
 # reads as the first unheaded narrative and the bundle grows a duplicate
 # heading (`## Summary` … Strategy … `## Summary`).
 orphan_before_summary = er.render_agent_body(
     "Strategy: S7\n\n"
-    "Linked FIND: `FIND-RECON-deadbeef-some-finding`\n\n"
+    "Linked FIND: `FIND-0001-deadbeef-some-finding`\n\n"
     "## Summary\n\n"
     "`add_item_to_array` accepts an item already linked into another array.\n")
 assert_true(orphan_before_summary.count("## Summary") == 1,

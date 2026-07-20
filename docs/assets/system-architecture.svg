@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 740"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 610"
      font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
-     role="img" aria-label="TokenFuzz system architecture: source and config feed the audit, recon and ranking create work cards, agents run probes that produce findings, crashes, and rejected artifacts">
+     role="img" aria-label="TokenFuzz system architecture: source and config feed the audit, ranking creates work cards, agents run probes that produce findings, crashes, and rejected artifacts">
   <title>TokenFuzz system architecture</title>
   <defs>
     <marker id="sa-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -13,7 +13,6 @@
     <style><![CDATA[
       .input      { fill: #fef3c7; stroke: #b45309; stroke-width: 1.2; rx: 10; ry: 10; }
       .orch       { fill: #eef2ff; stroke: #4f46e5; stroke-width: 1.6; rx: 10; ry: 10; }
-      .recon      { fill: #f5f3ff; stroke: #7c3aed; stroke-width: 1.4; rx: 10; ry: 10; }
       .gate       { fill: #f8fafc; stroke: #64748b; stroke-width: 1.3; rx: 10; ry: 10; }
       .queue      { fill: #fff7ed; stroke: #ea580c; stroke-width: 1.3; rx: 10; ry: 10; }
       .state      { fill: #f1f5f9; stroke: #475569; stroke-width: 1.2; rx: 10; ry: 10; stroke-dasharray: 4 3; }
@@ -55,91 +54,80 @@
   <text x="220" y="178" class="title-w">bin/audit</text>
   <text x="220" y="200" class="sub">Reads config, detects revision, creates result tree, launches agents.</text>
 
-  <!-- Audit → recon -->
-  <path d="M360,212 L260,242" class="arrow" marker-end="url(#sa-arrow)"/>
-
-  <!-- Discovery row -->
-  <text x="40" y="236" class="lane-tag">Discovery</text>
-  <g filter="url(#sa-shadow)"><rect x="120" y="242" width="380" height="86" class="recon"/></g>
-  <text x="140" y="266" class="title">bin/audit-recon (cold start)</text>
-  <text x="140" y="288" class="sub">Parallel survey of in-scope source for suspicious spots.</text>
-  <text x="140" y="308" class="sub">Validator votes Promote / Reject / Uncertain.</text>
-  <text x="140" y="322" class="micro">Cached on the source SHA; later runs skip this box.</text>
-
-  <!-- Discovery → queue -->
-  <path d="M310,328 L420,352" class="arrow" marker-end="url(#sa-arrow)"/>
+  <!-- Audit → queue -->
+  <path d="M480,212 L480,222" class="arrow" marker-end="url(#sa-arrow)"/>
 
   <!-- Work queue -->
-  <text x="40" y="346" class="lane-tag">Work queue</text>
-  <g filter="url(#sa-shadow)"><rect x="200" y="352" width="400" height="58" class="queue"/></g>
-  <text x="220" y="376" class="title">work-cards.jsonl</text>
-  <text x="220" y="398" class="sub">Recon cards first; then patch, peer, source-feature cards.</text>
+  <text x="40" y="216" class="lane-tag">Work queue</text>
+  <g filter="url(#sa-shadow)"><rect x="200" y="222" width="400" height="58" class="queue"/></g>
+  <text x="220" y="246" class="title">work-cards.jsonl</text>
+  <text x="220" y="268" class="sub">Patch, peer, and source-feature cards in rank order.</text>
 
   <!-- State sidecar -->
-  <g filter="url(#sa-shadow)"><rect x="620" y="352" width="220" height="58" class="state"/></g>
-  <text x="640" y="376" class="title">state/*.jsonl</text>
-  <text x="640" y="398" class="sub">Claims, hypotheses, runs, notes.</text>
-  <path d="M600,381 L620,381" class="arrow-soft"/>
+  <g filter="url(#sa-shadow)"><rect x="620" y="222" width="220" height="58" class="state"/></g>
+  <text x="640" y="246" class="title">state/*.jsonl</text>
+  <text x="640" y="268" class="sub">Claims, hypotheses, runs, notes.</text>
+  <path d="M600,251 L620,251" class="arrow-soft"/>
 
   <!-- Queue → agents -->
-  <path d="M280,410 L200,448" class="arrow" marker-end="url(#sa-arrow)"/>
-  <path d="M400,410 L400,448" class="arrow" marker-end="url(#sa-arrow)"/>
-  <path d="M520,410 L600,448" class="arrow" marker-end="url(#sa-arrow)"/>
+  <path d="M280,280 L200,318" class="arrow" marker-end="url(#sa-arrow)"/>
+  <path d="M400,280 L400,318" class="arrow" marker-end="url(#sa-arrow)"/>
+  <path d="M520,280 L600,318" class="arrow" marker-end="url(#sa-arrow)"/>
 
   <!-- Agents row -->
-  <text x="40" y="440" class="lane-tag">Agents</text>
-  <g filter="url(#sa-shadow)"><rect x="120" y="448" width="200" height="74" class="agent"/></g>
-  <text x="138" y="472" class="title">Agent</text>
-  <text x="138" y="492" class="sub">Reads source, writes</text>
-  <text x="138" y="508" class="sub">one testcase, runs it.</text>
+  <text x="40" y="310" class="lane-tag">Agents</text>
+  <g filter="url(#sa-shadow)"><rect x="120" y="318" width="200" height="74" class="agent"/></g>
+  <text x="138" y="342" class="title">Agent</text>
+  <text x="138" y="362" class="sub">Reads source, writes</text>
+  <text x="138" y="378" class="sub">one testcase, runs it.</text>
 
-  <g filter="url(#sa-shadow)"><rect x="380" y="448" width="200" height="74" class="agent"/></g>
-  <text x="398" y="472" class="title">Agent</text>
-  <text x="398" y="492" class="sub">One hypothesis,</text>
-  <text x="398" y="508" class="sub">one subsystem at a time.</text>
+  <g filter="url(#sa-shadow)"><rect x="380" y="318" width="200" height="74" class="agent"/></g>
+  <text x="398" y="342" class="title">Agent</text>
+  <text x="398" y="362" class="sub">One hypothesis,</text>
+  <text x="398" y="378" class="sub">one subsystem at a time.</text>
 
-  <g filter="url(#sa-shadow)"><rect x="640" y="448" width="200" height="74" class="agent"/></g>
-  <text x="658" y="472" class="title">Agent</text>
-  <text x="658" y="492" class="sub">Different strategy</text>
-  <text x="658" y="508" class="sub">per agent, in parallel.</text>
+  <g filter="url(#sa-shadow)"><rect x="640" y="318" width="200" height="74" class="agent"/></g>
+  <text x="658" y="342" class="title">Agent</text>
+  <text x="658" y="362" class="sub">Different strategy</text>
+  <text x="658" y="378" class="sub">per agent, in parallel.</text>
 
   <!-- Agents → probe -->
-  <path d="M220,522 L460,548" class="arrow" marker-end="url(#sa-arrow)"/>
-  <path d="M480,522 L480,548" class="arrow" marker-end="url(#sa-arrow)"/>
-  <path d="M740,522 L500,548" class="arrow" marker-end="url(#sa-arrow)"/>
+  <path d="M220,392 L460,418" class="arrow" marker-end="url(#sa-arrow)"/>
+  <path d="M480,392 L480,418" class="arrow" marker-end="url(#sa-arrow)"/>
+  <path d="M740,392 L500,418" class="arrow" marker-end="url(#sa-arrow)"/>
 
   <!-- Probe -->
-  <text x="40" y="542" class="lane-tag">Execute</text>
-  <g filter="url(#sa-shadow)"><rect x="200" y="548" width="560" height="50" class="probe"/></g>
-  <text x="220" y="574" class="title">bin/probe</text>
-  <text x="310" y="574" class="sub">One execution gate. Coverage check, then sanitizer or differential runner.</text>
+  <text x="40" y="412" class="lane-tag">Execute</text>
+  <g filter="url(#sa-shadow)"><rect x="200" y="418" width="560" height="50" class="probe"/></g>
+  <text x="220" y="444" class="title">bin/probe</text>
+  <text x="310" y="444" class="sub">One execution gate. Coverage check, then sanitizer or differential runner.</text>
 
   <!-- Probe → triage -->
-  <path d="M480,598 L480,620" class="arrow" marker-end="url(#sa-arrow)"/>
-  <text x="40" y="616" class="lane-tag">Review</text>
-  <g filter="url(#sa-shadow)"><rect x="200" y="620" width="560" height="42" class="triage"/></g>
-  <text x="220" y="642" class="title">triage gates</text>
-  <text x="310" y="642" class="sub">Impact, attacker boundary, completeness, reproducibility.</text>
+  <path d="M480,468 L480,490" class="arrow" marker-end="url(#sa-arrow)"/>
+  <text x="40" y="486" class="lane-tag">Review</text>
+  <g filter="url(#sa-shadow)"><rect x="200" y="490" width="560" height="42" class="triage"/></g>
+  <text x="220" y="512" class="title">triage gates</text>
+  <text x="310" y="512" class="sub">Impact, attacker boundary, completeness, reproducibility.</text>
 
   <!-- Triage → outputs -->
-  <path d="M310,662 L220,686" class="arrow" marker-end="url(#sa-arrow)"/>
-  <path d="M480,662 L480,686" class="arrow" marker-end="url(#sa-arrow)"/>
-  <path d="M650,662 L740,686" class="arrow" marker-end="url(#sa-arrow)"/>
+  <path d="M310,532 L220,556" class="arrow" marker-end="url(#sa-arrow)"/>
+  <path d="M480,532 L480,556" class="arrow" marker-end="url(#sa-arrow)"/>
+  <path d="M650,532 L740,556" class="arrow" marker-end="url(#sa-arrow)"/>
 
   <!-- Outputs row -->
-  <text x="40" y="680" class="lane-tag">Output</text>
-  <g filter="url(#sa-shadow)"><rect x="40"  y="686" width="260" height="44" class="find"/></g>
-  <text x="58"  y="706" class="out-tag" fill="#166534">Primary</text>
-  <text x="138" y="706" class="title">findings/FIND-*</text>
-  <text x="58"  y="722" class="micro">Concrete security issues, reviewed before disclosure.</text>
+  <text x="40" y="550" class="lane-tag">Output</text>
+  <g filter="url(#sa-shadow)"><rect x="40"  y="556" width="260" height="44" class="find"/></g>
+  <text x="58"  y="576" class="out-tag" fill="#166534">Primary</text>
+  <text x="138" y="576" class="title">findings/FIND-*</text>
+  <text x="58"  y="592" class="micro">Concrete security issues, reviewed before disclosure.</text>
 
-  <g filter="url(#sa-shadow)"><rect x="340" y="686" width="280" height="44" class="crash"/></g>
-  <text x="358" y="706" class="out-tag" fill="#991b1b">Reproducible</text>
-  <text x="455" y="706" class="title">crashes/CRASH-*</text>
-  <text x="358" y="722" class="micro">Sanitizer-confirmed, exported as maintainer bundle.</text>
+  <g filter="url(#sa-shadow)"><rect x="340" y="556" width="280" height="44" class="crash"/></g>
+  <text x="358" y="576" class="out-tag" fill="#991b1b">Reproducible</text>
+  <text x="455" y="576" class="title">crashes/CRASH-*</text>
+  <text x="358" y="592" class="micro">Sanitizer-confirmed, exported as maintainer bundle.</text>
 
-  <g filter="url(#sa-shadow)"><rect x="660" y="686" width="260" height="44" class="reject"/></g>
-  <text x="678" y="706" class="out-tag" fill="#374151">Dropped</text>
-  <text x="748" y="706" class="title">rejected / review</text>
-  <text x="678" y="722" class="micro">Quarantined on disk with reason recorded.</text>
+  <g filter="url(#sa-shadow)"><rect x="660" y="556" width="260" height="44" class="reject"/></g>
+  <text x="678" y="576" class="out-tag" fill="#374151">Dropped</text>
+  <text x="748" y="576" class="title">rejected / review</text>
+  <text x="678" y="592" class="micro">Quarantined on disk with reason recorded.</text>
 </svg>

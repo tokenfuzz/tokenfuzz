@@ -66,7 +66,7 @@ class AuditStartupTests(unittest.TestCase):
                 [
                     str(ROOT / "bin" / "audit"), "--target", slug,
                     "--backend", "codex", "--model", "fixture-model",
-                    "--codex-bin", str(fake_codex), "--skip-recon", "1",
+                    "--codex-bin", str(fake_codex), "1",
                 ],
                 capture_output=True, text=True, env=env,
             )

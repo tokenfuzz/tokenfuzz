@@ -182,20 +182,6 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
         lines.append(f"- **Seed:** `{card['seed']}`")
     fixes = card.get("fix_hashes") or []
     lines.append(f"- **Fix commits:** {', '.join(fixes) if fixes else 'none listed'}")
-    recon = card.get("recon") or {}
-    if recon:
-        lines += [
-            "", "## RECON HYPOTHESIS DETAIL", "",
-            f"- **Recon ID:** {recon.get('id', 'unknown')}",
-            f"- **Line:** {recon.get('line', 'unknown')}",
-            f"- **Class:** {recon.get('class', 'unspecified')}",
-            f"- **Validator verdict:** {recon.get('validator_verdict', 'unspecified')}",
-        ]
-    if card.get("find_id"):
-        lines += [
-            "", "### PRE-FILED FIND (augment, do not re-file)", "",
-            f"Augment `{context.results_dir / 'findings' / card['find_id'] / 'report.md'}` with reproducer evidence; do not create a duplicate FIND.",
-        ]
     lines += [
         "",
         "Use this card first unless structured state already has a higher-priority active row.",

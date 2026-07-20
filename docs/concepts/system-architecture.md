@@ -1,13 +1,12 @@
 # System Architecture
 
-[![TokenFuzz system architecture: source and config feed the audit, recon and ranking create work cards, agents run testcases through probe, triage routes results](../assets/system-architecture.svg)](../assets/system-architecture.svg){target="_blank" title="Open full-size diagram in a new tab"}
+[![TokenFuzz system architecture: source and config feed the audit, ranking creates work cards, agents run testcases through probe, triage routes results](../assets/system-architecture.svg)](../assets/system-architecture.svg){target="_blank" title="Open full-size diagram in a new tab"}
 
 TokenFuzz has a small number of moving parts. This page walks through
 them in the order they show up in a session:
 
 - directory model;
 - the audit run;
-- breadth-first recon (cold start only);
 - the work queue and structured state;
 - agents;
 - the probe runner;
@@ -48,7 +47,6 @@ particular source pattern is a finding.
 
 The ranked queue is built from a few signals:
 
-- **recon candidates** from the cold-start review pass (described next);
 - which files handle untrusted input or do raw memory work;
 - which files were recently touched by security-relevant fixes;
 - which files are covered (or not covered) by existing tests;
@@ -62,30 +60,6 @@ decide what is *in scope*.
 Agents claim one entry from the queue at a time, so two agents do not
 fight over the same source.
 
-## Breadth-first recon (cold start only)
-
-On a multi-iteration run, the first time `bin/audit` sees a target revision it
-runs `bin/audit-recon`—a bounded parallel survey before deep agents launch.
-A one-iteration smoke test skips this stage. Several agents sweep the
-selected files for candidate bugs (calibrated for recall, not
-precision), and a second model independently votes each emission
-Promote / Reject / Uncertain.
-
-The votes shape the queue:
-
-- **Promoted** candidates get claim-time precedence over ordinary
-  cards. When a target enables more than one sanitizer, one promoted
-  candidate becomes one card per enabled sanitizer, and each card
-  carries a list of allowed strategies so an agent can claim it
-  whichever strategy it is currently running.
-- **Rejected** candidates are demoted, not deleted — testcase
-  evidence can still overturn the validator.
-
-Recon results are cached on the target source SHA, so later audits
-against the same commit skip the survey and start the deep agents
-immediately. Full detail is in
-[Recon discovery](../guides/recon-discovery.md).
-
 ## Work queue and structured state
 
 The work queue is the scheduler's contract with the agents. It and
@@ -93,7 +67,7 @@ the state files around it are append-only, so the run survives
 crashes and compactions:
 
 ```text
-work-cards.jsonl       ranked source, recon, patch, and peer-fix cards
+work-cards.jsonl       ranked source, patch, and peer-fix cards
 state/claims.jsonl     card leases and terminal status
 state/hypotheses.jsonl active and closed hypotheses
 state/runs.jsonl       probe verdicts
@@ -188,8 +162,6 @@ output/<target>/<backend>/results/
   work-cards.jsonl             the ranked queue
   patch-cards.jsonl            prior-fix work cards (strategy S1)
   s6-peer-cards.jsonl          peer-project fix cards (strategy S6)
-  recon-hypotheses.jsonl       recon candidates (when recon has run)
-  recon-findings.md            human-readable recon report
   .session-env                 probe discovery file for this result tree
 ```
 

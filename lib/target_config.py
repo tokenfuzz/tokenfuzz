@@ -697,7 +697,7 @@ def vcs_tracked_files(target_root: str | os.PathLike) -> "set[str] | None":
 
     Purpose: drop untracked scratch files (agent-authored PoCs and prior-run
     leftovers dropped into the target tree) from the audit source surface, so
-    they never become ranked work cards or recon slices. A file the project's
+    they never become ranked work cards. A file the project's
     own VCS does not track is not the product's source.
 
     "Tracked" means committed or staged/added-but-uncommitted; untracked and

@@ -1043,7 +1043,7 @@ def _patch_age_penalty(date_str: str) -> int:
     Targets where the bulk of the patch corpus is decades old (e.g.,
     pcre2 whose 2014 cards are the PCRE2-from-PCRE fork import) end
     up with most s1-patch cards in the 107..140 band — still in the
-    queue, but ranked below recon-validated Promote cards (1000).
+    queue, but ranked below fresher structural work.
     """
     if not date_str or not isinstance(date_str, str):
         return 0
@@ -2314,7 +2314,7 @@ def _is_broad_file_card(card: dict) -> bool:
 
     ``ranked-source`` cards rank a whole file for a strategy; their bugs live
     across functions never yet hypothesised, so re-discovery is not an
-    exhaustion proof for them. Concrete cards (recon-hypothesis, patch cards)
+    exhaustion proof for them. Concrete cards (patch cards)
     name a specific site, so their opened hypotheses *are* their search space.
     """
     return str(card.get("kind", "")) == "ranked-source"
@@ -2711,7 +2711,7 @@ def card_closed_for_run(
     productive conclusions whose retirement is **scope-aware**, because the
     right exhaustion signal depends on what the card covers:
 
-    * **Concrete cards** (recon-hypothesis, patch cards) name one specific
+    * **Concrete cards** (patch cards) name one specific
       site, so the hypotheses opened against them *are* their search space.
       They retire once re-concluded more times than they have distinct
       hypotheses (``conclusions - distinct >= _PRODUCTIVE_REDISCOVERY_MARGIN``)
@@ -2847,7 +2847,7 @@ def agent_current_subsystem(ctx: Context, agent: str) -> str:
 # Card `mode` describes the execution surface needed by the testcase. The
 # agent `mode` describes the worker interface. Sanitizer-backed cards are
 # still ordinary reproduce work for generic/shell workers; treating these as
-# exact-match-only strands high-value recon cards when bin/audit launches
+# exact-match-only strands high-value sanitizer cards when bin/audit launches
 # generic agents against an ASan target.
 SANITIZER_WORK_CARD_MODES = frozenset({
     "asan",
@@ -3056,26 +3056,6 @@ def explain_queue(
     return rows
 
 
-def is_promoted_recon_card(card: dict) -> bool:
-    """A recon-derived work card that the deep-validator marked as Promote.
-
-    The validator is the strongest pre-probe signal we have — a Promote
-    means an independent recon-and-validate pass named a concrete bug
-    AND a second reviewer pass re-verified it against the source. We
-    treat Promote like a recon hit: it should drain before any
-    structural/feature-ranked or prior-fix card.
-
-    Returns False for any card missing the recon block or with a
-    non-Promote verdict (case-insensitive). The check matches the
-    canonical shape produced by lib/recon_to_cards.finding_to_cards.
-    """
-    if card.get("kind") != "recon-hypothesis":
-        return False
-    recon = card.get("recon") or {}
-    verdict = str(recon.get("validator_verdict") or "").strip().lower()
-    return verdict == "promote"
-
-
 def claim_next_card(
     ctx: Context,
     agent: str,
@@ -3150,53 +3130,10 @@ def _claim_next_card_locked(
     # legitimate bug, so we don't drop the card from the global pool.
     rejected_card_ids = card_reject_skips_for_agent(ctx, agent)
 
-    # Promoted-recon precedence (P3): if any validator-Promoted recon card
-    # is unclaimed AND no agent currently has an active claim on a
-    # Promoted card, this claim must be steered there — even if the
-    # caller-supplied strategy filter would otherwise exclude it. The
-    # validator already separated the wheat (Promote) from the chaff
-    # (Reject/Uncertain) per-finding; the rotation logic in bin/audit
-    # doesn't see that signal and would otherwise leave Promote cards
-    # unclaimed for the whole budget while agents ping-pong S2↔S3.
-    #
-    # Gating "at least one agent" by counting *active* claims (not
-    # historical) means: once an agent picks the Promote card up, others
-    # fall through to normal strategy-filtered claiming. If the holder
-    # times out or discards, the next caller is re-steered.
-    promoted_unclaimed: list[dict] = []
-    promoted_active = False
-    for card in cards:
-        if not is_promoted_recon_card(card):
-            continue
-        if not is_auditable_work_card(card):
-            continue
-        cid = card.get("id", "")
-        latest_claim = latest.get(cid)
-        latest_status = latest_claim.get("status", "claimed") if latest_claim else ""
-        # Promoted precedence must NOT re-fire on an already-concluded
-        # card. A productive crash/find promoted card stays claimable via
-        # the normal queue below (and is rank-demoted by conclusion
-        # count), but re-granting it precedence — which bypasses the
-        # strategy filter — would let it preempt breadth every iteration
-        # until the subsystem goes dry. Hard-terminal check on purpose.
-        if latest_status in TERMINAL_CARD_STATUSES or cid in active_cards:
-            continue
-        if claim_blocks_card(latest_claim, ttl, now):
-            # Another agent (or this one) holds it actively.
-            promoted_active = True
-            continue
-        promoted_unclaimed.append(card)
-
     strategy_filter = strategy.strip().upper()
-    # When the precedence gate is armed (no agent on a Promoted card AND
-    # an unclaimed Promoted card exists), bypass the caller-supplied
-    # strategy filter for this claim. Mode/surface/subsystem checks
-    # below still apply — we don't want two agents on the same surface.
-    promoted_override = bool(promoted_unclaimed) and not promoted_active
 
-    def _build_candidates(override: bool) -> list[dict]:
+    def _build_candidates() -> list[dict]:
         out: list[dict] = []
-        eff_filter = "" if override else strategy_filter
         for card in cards:
             cid = card.get("id", "")
             if not is_auditable_work_card(card):
@@ -3204,10 +3141,8 @@ def _claim_next_card_locked(
             if cid and cid in rejected_card_ids:
                 # P5: previously rejected for this agent — do not re-offer.
                 continue
-            if override and not is_promoted_recon_card(card):
-                continue
-            if eff_filter:
-                if not card_strategy_matches(card, eff_filter):
+            if strategy_filter:
+                if not card_strategy_matches(card, strategy_filter):
                     continue
             latest_claim = latest.get(cid)
             # Resolve through the visible status (an expired "claimed" reads back
@@ -3236,9 +3171,7 @@ def _claim_next_card_locked(
     # sibling — multiple angles on the same surface are exactly where
     # parallel exploration finds the most bugs. For generic agents we
     # prefer disjoint subsystems even on small queues; the
-    # spread work even when only a few cards remain. Promoted-recon
-    # cards skip the diversity gate entirely — the validator signal
-    # outranks any owned-subsystem preference.
+    # spread work even when only a few cards remain.
     def _apply_diversity(candidates: list[dict]) -> list[dict]:
         preferred: list[dict] = []
         for card in candidates:
@@ -3251,7 +3184,7 @@ def _claim_next_card_locked(
             )
             subsystem = str(card.get("subsystem", "") or "")
             generic_mode = (mode in ("generic", "shell")) or ((card.get("mode") or "auto") in ("", "auto", "generic") and not mode)
-            if generic_mode and subsystem and not is_promoted_recon_card(card):
+            if generic_mode and subsystem:
                 # Productive-agent relaxation: an agent that already has a
                 # confirmed CRASH/FIND in this subsystem keeps picking from
                 # it (bug-cluster expansion). Without this, the
@@ -3269,15 +3202,7 @@ def _claim_next_card_locked(
             preferred = candidates
         return preferred
 
-    # First pass: under the override (if armed), look only at Promoted
-    # cards. If that yields nothing — every Promoted card is on a surface
-    # this agent already owns, or fails mode-match — fall through to the
-    # normal queue rather than starve the agent for the iteration.
-    preferred: list[dict] = []
-    if promoted_override:
-        preferred = _apply_diversity(_build_candidates(override=True))
-    if not preferred:
-        preferred = _apply_diversity(_build_candidates(override=False))
+    preferred = _apply_diversity(_build_candidates())
 
     # Diminishing-returns demotion: a card kept eligible *after* a verified
     # crash/find (card_closed_for_run) sinks below every fresher
@@ -3993,21 +3918,17 @@ def strategy_completion_status(ctx: Context, agent: str, strategy: str) -> dict:
 def strategy_yield(ctx: Context) -> dict:
     """Read-only attribution of probe outcomes to the strategy that drove them.
 
-    Answers "which strategy actually converts leads — and recon leads
-    specifically — into crashes?" purely by joining state already on disk:
-    runs.jsonl (verdict + hypothesis_id + card_id) against hypotheses.jsonl
-    (strategy) with a card fallback. No write path, no extra probe, so it
-    cannot slow a live audit; run it post-hoc or between iterations.
+    Answers "which strategy actually converts leads into crashes?" purely by
+    joining state already on disk: runs.jsonl (verdict + hypothesis_id +
+    card_id) against hypotheses.jsonl (strategy) with a card fallback. No
+    write path, no extra probe, so it cannot slow a live audit; run it
+    post-hoc or between iterations.
 
     Each run is attributed to a strategy via its hypothesis (the agent stamps
     its working strategy on every hypothesis), falling back to the work
-    card's strategy when the run has no hypothesis. A run is counted as
-    recon-origin when its card carries a `recon` block, or — when that card
-    has since been dropped by a recon refresh — when its card_id keeps the
-    stable "WORK-recon-" prefix; recon_crash / recon_diff isolate exactly the
-    recon fan-out's signal. `yield` is (CRASH+DIFF)/runs — the signal-
-    producing fraction. Strategies with no runs are omitted; unattributable
-    runs bucket under "(none)".
+    card's strategy when the run has no hypothesis. `yield` is
+    (CRASH+DIFF)/runs — the signal-producing fraction. Strategies with no
+    runs are omitted; unattributable runs bucket under "(none)".
     """
     hyp_strategy = {
         str(h.get("id", "")): str(h.get("strategy", "") or "")
@@ -4024,19 +3945,11 @@ def strategy_yield(ctx: Context) -> dict:
         if not strategy and card:
             strategy = str(card.get("strategy", "") or "")
         strategy = strategy or "(none)"
-        # Recon refresh rewrites work-cards.jsonl and drops superseded
-        # recon-hypothesis rows (recon_to_cards.py), so the card backing an
-        # older run may be gone. The run's card_id is on the append-only
-        # runs.jsonl and is never rewritten, and recon card ids are
-        # deterministically prefixed "WORK-recon-" (derive_card_id), so that
-        # prefix is the stable recon-origin signal when the row is missing.
-        is_recon = bool(card and card.get("recon")) or card_id.startswith("WORK-recon-")
         verdict = str(run.get("verdict", "") or "").upper()
         b = buckets.setdefault(
             strategy,
             {"strategy": strategy, "runs": 0, "crash": 0, "diff": 0,
-             "clean": 0, "no_exec": 0, "other": 0,
-             "recon_runs": 0, "recon_crash": 0, "recon_diff": 0},
+             "clean": 0, "no_exec": 0, "other": 0},
         )
         b["runs"] += 1
         # Only CLEAN is a clean execution. Unknown/auxiliary verdicts
@@ -4052,12 +3965,6 @@ def strategy_yield(ctx: Context) -> dict:
             b["no_exec"] += 1
         else:
             b["other"] += 1
-        if is_recon:
-            b["recon_runs"] += 1
-            if verdict == "CRASH":
-                b["recon_crash"] += 1
-            elif verdict == "DIFF":
-                b["recon_diff"] += 1
     rows = []
     for b in buckets.values():
         signal = b["crash"] + b["diff"]
@@ -4190,48 +4097,6 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
         row["note"] = note
     append_jsonl(state_dir(ctx.results_dir) / "claims.jsonl", row)
     return row
-
-
-def mark_cards_blocked_by_find_id(ctx: "Context", find_id: str, reason: str = "") -> list[str]:
-    """Mark every WORK-recon-* card pointing at find_id as soft-blocked.
-
-    Called when the judge panel quarantines a FIND-RECON-* directory to
-    findings-rejected/. Without this hook, the originating work-card keeps
-    its previous status (typically `unclaimed`/`released`) and the queue
-    ranker continues to surface it — wasting agent sessions on a
-    hypothesis the judges have already rejected. Observed in
-    sample-cplusplus on 2026-05-28: the parse_id REC card received 37
-    PLAN entries across both audits after its FIND-RECON dir was rejected
-    at 18:16:57.
-
-    The cards are written as `blocked` (a SOFT_TERMINAL_CARD_STATUS): the
-    queue ranker skips them, but a future audit pass can re-promote them
-    via `bin/state update-card --status unclaimed` if the rejection turns
-    out wrong. The original work-cards.jsonl row is left untouched — the
-    authoritative status comes from the most recent claims.jsonl entry.
-
-    Returns the list of card ids that were marked blocked.
-    """
-    if not find_id:
-        return []
-    init_state(ctx)
-    cards = read_jsonl(work_cards_path(ctx))
-    matching: list[str] = []
-    for card in cards:
-        if str(card.get("find_id", "")) == str(find_id):
-            cid = str(card.get("id", "")).strip()
-            if cid:
-                matching.append(cid)
-    note = f"judge-rejected: {reason}" if reason else "judge-rejected"
-    for cid in matching:
-        try:
-            update_card_status(ctx, cid, "blocked", agent="", note=note)
-        except CardStatusUpdateError as exc:
-            sys.stderr.write(
-                f"[workqueue] WARN: could not mark card {cid} blocked "
-                f"for find_id={find_id}: {exc}\n"
-            )
-    return matching
 
 
 def _int_env(name: str, default: int) -> int:

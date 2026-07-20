@@ -70,7 +70,6 @@ class BenchmarkCliTests(unittest.TestCase):
             "--replicates", "1",
             "--conditions", "model-direct,harness",
             "--agents", "2",
-            "--skip-recon",
             "--dry-run",
             "--run-id", "lifecycle",
             "--bench-root", str(self.bench_root),
@@ -90,7 +89,6 @@ class BenchmarkCliTests(unittest.TestCase):
             metadata = json.loads((run / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["target"], target)
             self.assertEqual(metadata["harness_agents"], 2)
-            self.assertTrue(metadata["skip_recon"])
             self.assertTrue((run / "cells/model-direct-r1/cell.json").is_file())
             self.assertTrue((run / "cells/harness-r1/cell.json").is_file())
             self.assertTrue((run / "pool").is_dir())
@@ -120,7 +118,6 @@ class BenchmarkCliTests(unittest.TestCase):
             "--replicates", "2",
             "--conditions", "harness",
             "--agents", "2",
-            "--skip-recon",
             "--dry-run",
             "--run-id", "retry",
             "--bench-root", str(self.bench_root),

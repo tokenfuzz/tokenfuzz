@@ -6,7 +6,7 @@ claude / codex / oss (OpenCode against local OpenAI-compatible servers) /
 gemini / grok. The `gemini` backend keeps
 one harness-visible name while supporting two CLI dialects underneath:
 Antigravity (`agy`, default) and Google Gemini CLI (`gemini` when
-USE_GEMINI_CLI=1). Audit, recon, validation, and decision callers import
+USE_GEMINI_CLI=1). Audit, validation, and decision callers import
 this module directly, so backend flags and invocation behavior cannot drift.
 
 CLI subcommands (`python3 lib/llm_invoke.py …`):
@@ -1242,7 +1242,7 @@ def extract_text(backend: str, raw_log_path: str) -> str:
         # assistant messages (.message.content[].text) and the trailing
         # result event (.result). The result event echoes the final
         # assistant turn *verbatim* — collecting both double-counts
-        # every line the agent emitted (e.g. recon hypotheses parsed
+        # every line the agent emitted (e.g. JSONL rows parsed
         # twice). Prefer the per-turn assistant text, which is complete
         # across multi-turn replies; fall back to .result only when no
         # assistant message text exists (non-streaming output formats
@@ -1336,7 +1336,7 @@ def extract_text(backend: str, raw_log_path: str) -> str:
                                     pieces.append(t)
             # Gemini CLI stream-json emits assistant text as deltas. The
             # fragments are not line-oriented; inserting separators corrupts
-            # structured replies such as recon JSONL (`{"id":...}` split
+            # structured replies such as batch JSONL (`{"id":...}` split
             # across several message events). Preserve the model's emitted
             # bytes exactly and rely on embedded "\n" deltas for line breaks.
             return "".join(pieces).rstrip("\n")

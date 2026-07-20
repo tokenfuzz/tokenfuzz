@@ -301,7 +301,7 @@ with tempfile.TemporaryDirectory() as td:
 
     # claude — in a real stream-json transcript the trailing result
     # event echoes the final assistant turn verbatim. Extraction must
-    # NOT emit it twice (would double-count every recon hypothesis).
+    # NOT emit it twice (would double-count every emitted row).
     (p / "claude.jsonl").write_text(
         '{"type":"system","subtype":"init"}\n'
         '{"type":"assistant","message":{"content":[{"type":"text","text":"hello from claude"}]}}\n'
@@ -714,7 +714,7 @@ with tempfile.TemporaryDirectory() as _td:
 
 
 # ── transient_tail: backend-agnostic provider-failure detection ─────────
-# Recon's retry uses this to recover slices killed mid-pass by a transient
+# Retry paths use this to recover work killed mid-pass by a transient
 # overload/429/5xx/rate-limit/timeout. It must read the RAW transcript and
 # understand BOTH a plain stderr error line AND a JSON error event, because
 # the stream-json text extractors (codex, gemini-CLI) drop the error. And it

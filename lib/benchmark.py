@@ -11,8 +11,8 @@ This module is the *deterministic* half of that tool — everything that
 does not involve launching an LLM. It is kept separate from bin/benchmark
 precisely so it can be unit-tested without a backend:
 
-  * harvest(results_dir)   — count confirmed crashes / findings / recon
-                             candidates in a standard results/ tree, by
+  * harvest(results_dir)   — count confirmed crashes / findings in a
+                             standard results/ tree, by
                              grepping for sanitizer signatures (the crash
                              oracle is AddressSanitizer, not an LLM vote).
   * aggregate(bench_dir)   — fold every cell's cell.json + metrics.json
@@ -171,15 +171,6 @@ def _md_link(label: object, path: Path | str | None) -> str:
     return f"[{label}]({_path_uri(p)})"
 
 
-def _finding_leads_suffix(c: dict) -> str:
-    """Parenthetical marking un-investigated recon leads beside the confirmed
-    count, mirroring the '(+N incomplete)' provisional annotation. Leads are
-    recon-materialized FINDs the prose gate kept but no agent investigated; they
-    stay on disk and counted, just not folded into the confirmed headline.
-    """
-    leads = int(c.get("lead_finding_total", 0) or 0)
-    return f" (+{leads} leads)" if leads > 0 else ""
-
 
 def _local_path_replacements() -> list[tuple[str, str]]:
     """Prefixes to remove from pooled benchmark review artifacts.
@@ -253,97 +244,6 @@ def _scrub_pooled_tree(root: Path) -> None:
             continue
         try:
             path.write_text(scrubbed, encoding="utf-8")
-        except OSError:
-            pass
-
-
-# Recon-hash mentions in pooled FIND reports the linker turns into
-# markdown links. Two narrow shapes (kept as a list so adding more
-# patterns later — recon REPORT cross-refs, audit-log cites — is a
-# one-line change). Each pattern's group 1 is the "RECON-<hash>" token
-# to be wrapped; the surrounding context outside the group is preserved
-# verbatim. Negative lookaheads/lookbehinds keep the linker idempotent
-# by skipping hashes already inside a `[…](…)` markdown link.
-_RECON_LINK_PATTERNS = (
-    # `- **Recon ID:** RECON-<hash>` (alternate bolded form).
-    re.compile(
-        r"(?<!\[)(?<!\]\()"
-        r"(?<=\*\*Recon ID:\*\*\s)"
-        r"(RECON-[0-9a-f]+)"
-        r"(?!\])",
-    ),
-    # Bare-label form `Recon ID: RECON-<hash>` — recon_to_cards now
-    # emits this shape so render-md's bare-label suppression hides
-    # the audit-only line from HTML while the markdown copy keeps
-    # the linkified anchor.
-    re.compile(
-        r"(?<!\[)(?<!\]\()"
-        r"(?<=(?<![\w*])Recon ID:\s)"
-        r"(RECON-[0-9a-f]+)"
-        r"(?!\])",
-    ),
-    # `Validator details: duplicate of RECON-<hash>` — the dedup parent
-    # that survives even when the primary Recon ID was pruned, so the
-    # linker still gives the reader a reachable recon vote.
-    re.compile(
-        r"(?<!\[)(?<!\]\()"
-        r"(?<=duplicate of\s)"
-        r"(RECON-[0-9a-f]+)"
-        r"(?!\])",
-    ),
-)
-
-
-def _link_pool_recon_ids(pool_finding_dir: Path,
-                         source_results_dir: Path) -> None:
-    """Hyperlink `RECON-<hash>` mentions in a pooled FIND's report.md.
-
-    A pooled FIND records the recon hypothesis that promoted it
-    (`- **Recon ID:** RECON-<hash>`) plus, when the recon was a
-    duplicate, the surviving parent (`Validator details: duplicate of
-    RECON-<hash>`). Both are bare text. The matching
-    `recon/RECON-<hash>/REPORT.html` carries the independent-validator
-    votes with `verified={reachability,guards,primitive}` — useful
-    audit context that was otherwise unreachable from the rendered
-    pool pages. Rewrite each hash to a relative markdown link when
-    its recon dir exists; leave it alone when it was pruned.
-
-    Runs *after* `_scrub_pooled_tree`, since the scrubber would strip
-    the workspace prefix from any path the linker introduced.
-    Idempotent: the patterns use lookbehind/lookahead to skip hashes
-    already inside `[…](…)`.
-    """
-    if not pool_finding_dir.is_dir() or not source_results_dir.is_dir():
-        return
-    recon_root = source_results_dir / "recon"
-    if not recon_root.is_dir():
-        return
-    for report in pool_finding_dir.rglob("report.md"):
-        try:
-            text = report.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-
-        def _link(m: re.Match) -> str:
-            token = m.group(1)  # "RECON-<hash>"
-            recon_dir = recon_root / token
-            # Prefer the rendered HTML sibling, fall back to .md; do
-            # nothing if neither exists (an orphaned id from a stale or
-            # purged recon tree).
-            for name in ("REPORT.html", "REPORT.md"):
-                candidate = recon_dir / name
-                if candidate.is_file():
-                    rel = os.path.relpath(candidate, report.parent)
-                    return f"[{token}]({rel})"
-            return token
-
-        new_text = text
-        for pat in _RECON_LINK_PATTERNS:
-            new_text = pat.sub(_link, new_text)
-        if new_text == text:
-            continue
-        try:
-            report.write_text(new_text, encoding="utf-8")
         except OSError:
             pass
 
@@ -548,9 +448,8 @@ def count_pending_crashes(crashes_dir: Path) -> int:
 def _finding_is_pinned(finding_dir: Path) -> bool:
     """True iff a human pinned the FIND (.keep/.reviewed).
 
-    A manual override that outranks both the find-quality gate and the
-    recon-lead check: a pinned FIND is confirmed even if recon-materialized and
-    never agent-investigated.
+    A manual override that outranks the find-quality gate: a pinned FIND is
+    confirmed even if never agent-investigated.
     """
     return (finding_dir / ".reviewed").is_file() or (finding_dir / ".keep").is_file()
 
@@ -565,7 +464,7 @@ def _finding_is_confirmed(finding_dir: Path) -> bool:
     kept, and moves quorum-rejected FINDs out to findings-rejected/. A
     `.keep`/`.reviewed` pin is a human override that bypasses the gate (same
     precedence the gate itself applies). An un-adjudicated FIND — no verdict
-    cache, e.g. recon output a wall-clock-cut-off run never triaged — is NOT
+    cache, e.g. output a wall-clock-cut-off run never triaged — is NOT
     confirmed; that is what keeps the count honest when triage did not finish.
     Reuses the same accept/pin signal readers elsewhere key on
     (lib/workqueue.py `_compact_finding`, bin/cluster-findings).
@@ -583,15 +482,6 @@ def _finding_is_confirmed(finding_dir: Path) -> bool:
     # not first run validate_find_gate. Legacy v13 caches have no report_sha1
     # and retain their historical behavior until their next gate pass.
     return report_identity.quality_cache_matches_report(finding_dir, payload)
-
-
-# Card statuses where an agent produced a validated result — a filed find or a
-# crash — from the work card. Mirrors workqueue.PRODUCTIVE_TERMINAL_CARD_STATUSES
-# (kept a small local copy so harvest carries no work-queue import). A
-# recon-materialized FIND whose card never reached one of these was named by
-# recon and liked by the prose gate but never investigated: a lead, not a
-# confirmed finding.
-_PRODUCTIVE_CARD_STATUSES = {"crash", "find"}
 
 
 def _iter_jsonl(path: Path):
@@ -613,156 +503,30 @@ def _iter_jsonl(path: Path):
             yield row
 
 
-def _uninvestigated_recon_lead_ids(results_dir: Path, findings_dir: Path) -> set[str]:
-    """FIND-RECON-* findings no agent ever worked to a result.
-
-    recon materializes a FIND named ``FIND-RECON-*`` and fans it out to several
-    work cards (one per enabled sanitizer/strategy), each stamped with the
-    find_id. A finding is investigated when ANY of its cards ever reached a
-    productive terminal state (find/crash) — read from the authoritative claims
-    ledger (state/claims.jsonl), joined to the finding through work-cards.jsonl
-    (card id → find_id), with the work card's own status as a fallback. A recon
-    finding is a lead only when it has NO productive card. Fan-out matters: one
-    productive card among unclaimed siblings still confirms the finding — the
-    earlier any-card-nonproductive rule demoted such findings (false negatives).
-
-    Recon findings are identified by dir name, so a cell whose queue/ledger was
-    lost cannot silently re-confirm them: with no productive evidence they fall
-    to leads (still rescued by artifacts/pin), rather than re-inflating the
-    confirmed count. A cell with no recon findings (model-direct) yields no
-    leads and reads no state.
-    """
-    if not findings_dir.is_dir():
-        return set()
-    recon = {
-        child.name
-        for child in findings_dir.iterdir()
-        if child.is_dir() and child.name.startswith("FIND-RECON-")
-    }
-    if not recon:
-        return set()
-    productive: set[str] = set()
-    card_to_find: dict[str, str] = {}
-    for card in _iter_jsonl(results_dir / "work-cards.jsonl"):
-        find_id = card.get("find_id")
-        if not find_id:
-            continue
-        find_id = str(find_id)
-        card_id = card.get("id")
-        if card_id:
-            card_to_find[str(card_id)] = find_id
-        if str(card.get("status", "") or "") in _PRODUCTIVE_CARD_STATUSES:
-            productive.add(find_id)
-    for claim in _iter_jsonl(results_dir / "state" / "claims.jsonl"):
-        if str(claim.get("status", "")) in _PRODUCTIVE_CARD_STATUSES:
-            find_id = card_to_find.get(str(claim.get("card_id", "")))
-            if find_id:
-                productive.add(find_id)
-    return recon - productive
-
-
-# Non-dotfiles the recon + render pipeline writes into every FIND dir. Any
-# OTHER non-dotfile (a reproduction harness, sanitizer log, patch.diff,
-# validation report, differential) is agent investigation output. All harness
-# state is dotfiles (.llm-*, .trigger-*, .dup-of, .needs-content), so this small
-# named set is the whole machine-written non-dot surface; a future addition only
-# needs listing here, and omitting one errs toward confirmed (never a demotion).
-_MACHINE_FINDING_FILES = {"report.md", "report.html", "severity.json"}
-
-
-def _finding_investigated(finding_dir: Path) -> bool:
-    """True iff an agent (or a human pin) stands behind this FIND.
-
-    The harness records investigation two ways, and a recon lead is confirmed if
-    it shows EITHER — so demotion never hides real work:
-      - a human pin (.keep/.reviewed), or
-      - agent output left in the dir: any NON-EMPTY non-dot file beyond the
-        machine set (a reproduction harness, sanitizer log, patch, validation
-        report). Some backends validate a candidate without ever claiming its
-        work card, so this catches investigation the card status misses; the
-        non-empty check keeps a stray zero-byte file from forging confirmation.
-    The other path — a work card flipped to find/crash — is handled by the
-    caller (such FINDs never enter the lead set). Structured file-presence
-    signal, not text scraping.
-    """
-    if _finding_is_pinned(finding_dir):
-        return True
-    try:
-        for child in finding_dir.iterdir():
-            if child.name.startswith(".") or child.name in _MACHINE_FINDING_FILES:
-                continue
-            try:
-                if child.is_file() and child.stat().st_size > 0:
-                    return True
-            except OSError:
-                continue
-    except OSError:
-        return False
-    return False
-
-
-def count_confirmed_findings(
-    findings_dir: Path, lead_ids: set[str] | None = None
-) -> tuple[int, list[str]]:
+def count_confirmed_findings(findings_dir: Path) -> tuple[int, list[str]]:
     """Count FIND-* subdirs the find-quality gate accepted (or a human pinned).
 
     Returns (count, sorted list of FIND dir names). The mirror of
     count_confirmed_crashes for findings: an un-adjudicated FIND (the gate
     never rendered a verdict) is NOT counted, so a run whose triage was cut
-    off cannot inflate its finding count with recon output the gate never
+    off cannot inflate its finding count with output the gate never
     looked at. The raw `count_subdirs(findings_dir, "FIND-")` total is kept
     in metrics (`findings`) for auditability; regenerate drains the gate so a
     cut-off run converges to its confirmed count, and any residual the drain
     cannot resolve surfaces as a run-health WARN rather than being silently
     dropped.
 
-    *lead_ids* are recon-materialized FINDs with no productive work card (see
-    _uninvestigated_recon_lead_ids). Those that are also un-investigated
-    (_finding_investigated: no pin, no agent artifacts) are gate-accepted on
-    recon's prose alone: excluded here and counted as leads instead
-    (count_finding_leads). Callers that cannot compute the set — the live audit
-    — pass nothing and get gate-acceptance counting unchanged.
     """
     if not findings_dir.is_dir():
         return 0, []
-    lead_ids = lead_ids or set()
     confirmed: list[str] = []
     for child in sorted(findings_dir.iterdir()):
         if not child.is_dir() or not child.name.startswith("FIND-"):
             continue
         if not _finding_is_confirmed(child):
             continue
-        # A recon lead the gate liked on prose alone (its card never became
-        # productive, so it is in lead_ids) is confirmed only once an agent
-        # investigated it. Card-productive recon FINDs are never in lead_ids.
-        if child.name in lead_ids and not _finding_investigated(child):
-            continue
         confirmed.append(child.name)
     return len(confirmed), confirmed
-
-
-def count_finding_leads(
-    findings_dir: Path, lead_ids: set[str]
-) -> tuple[int, list[str]]:
-    """Count gate-accepted FINDs that are un-investigated recon leads.
-
-    The complement of count_confirmed_findings over the same gate-accepted set:
-    a FIND the find-quality gate kept whose recon card never became productive
-    (in lead_ids) and that no agent investigated (_finding_investigated).
-    Surfaced so the recon backlog stays visible and counted without inflating
-    the confirmed headline. A recon FIND the gate never verdicted is not a lead
-    here — it is unadjudicated.
-    """
-    if not findings_dir.is_dir() or not lead_ids:
-        return 0, []
-    leads: list[str] = []
-    for child in sorted(findings_dir.iterdir()):
-        if not child.is_dir() or not child.name.startswith("FIND-"):
-            continue
-        if child.name in lead_ids and not _finding_investigated(child) \
-                and _finding_is_confirmed(child):
-            leads.append(child.name)
-    return len(leads), leads
 
 
 def _pool_finding_names(metrics: dict, findings_dir: Path) -> list[str]:
@@ -1741,31 +1505,6 @@ def _find_index_jsonl(results_dir: Path) -> Path:
     return llm_usage.find_usage_index(results_dir)
 
 
-def count_recon_candidates(results_dir: Path) -> int:
-    """Count recon hypotheses emitted for one results/ tree.
-
-    bin/audit-recon writes candidates to recon-hypotheses.jsonl (one JSON
-    row per hypothesis), not to a recon/RECON-* directory tree. Count the
-    JSONL rows whose id is a recon hypothesis so the metric reflects the
-    actual recon volume rather than a directory layout that never exists.
-    """
-    hyp = Path(results_dir) / "recon-hypotheses.jsonl"
-    if not hyp.is_file():
-        return 0
-    count = 0
-    for line in hyp.read_text(errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rid = json.loads(line).get("id", "")
-        except (json.JSONDecodeError, AttributeError):
-            continue
-        if rid.startswith("RECON-") or rid.startswith("REC-"):
-            count += 1
-    return count
-
-
 def count_model_refusals(results_dir: Path) -> int:
     """Count backend refusal warnings recorded for one benchmark cell.
 
@@ -2245,7 +1984,7 @@ def harvest(
     """Compute the deterministic metric set for one results/ tree.
 
     Works identically for a harness results dir and a model-direct-condition
-    workspace shaped the same way (crashes/, findings/, recon/, logs/) —
+    workspace shaped the same way (crashes/, findings/, logs/) —
     the comparison is fair because both are measured by this one yardstick.
     """
     results_dir = Path(results_dir)
@@ -2257,12 +1996,8 @@ def harvest(
         crashes_dir / "CRASH-CLUSTERS.md", crash_count
     )
     finding_count = count_subdirs(findings_dir, "FIND-")
-    recon_lead_ids = _uninvestigated_recon_lead_ids(results_dir, findings_dir)
     confirmed_finding_count, confirmed_finding_dirs = count_confirmed_findings(
-        findings_dir, recon_lead_ids
-    )
-    lead_finding_count, lead_finding_dirs = count_finding_leads(
-        findings_dir, recon_lead_ids
+        findings_dir
     )
     finding_clusters = confirmed_finding_cluster_count(
         findings_dir, confirmed_finding_dirs
@@ -2283,28 +2018,20 @@ def harvest(
         "discarded_hypotheses": count_discarded_hypotheses(results_dir),
         "findings": finding_count,
         "confirmed_findings": confirmed_finding_count,
-        # Gate-accepted FINDs recon pre-filed but no agent investigated (work
-        # card never reached find/crash). Kept on disk and counted, but out of
-        # the confirmed headline and the pool: recon-named + prose-accepted is a
-        # lead, not a confirmation. Removing these is the benchmark's largest
-        # false-positive source; keeping them visible avoids a false negative.
-        "finding_leads": lead_finding_count,
-        "lead_finding_dirs": lead_finding_dirs,
-        # FINDs still on disk the gate never verdicted (findings minus accepted;
-        # accepted = confirmed + leads, rejected FINDs already moved to
-        # findings-rejected/). Non-zero means the gate did not finish — usually a
-        # provider limit cut the drain short — so a reader never mistakes an
-        # un-drained 0-confirmed run for a clean "found nothing". Pure arithmetic
-        # on disk state; no LLM call.
+        # FINDs still on disk the gate never verdicted (findings minus
+        # confirmed; rejected FINDs already moved to findings-rejected/).
+        # Non-zero means the gate did not finish — usually a provider limit cut
+        # the drain short — so a reader never mistakes an un-drained
+        # 0-confirmed run for a clean "found nothing". Pure arithmetic on disk
+        # state; no LLM call.
         "findings_unadjudicated": max(
-            0, finding_count - confirmed_finding_count - lead_finding_count
+            0, finding_count - confirmed_finding_count
         ),
         "confirmed_finding_dirs": confirmed_finding_dirs,
         "finding_clusters": finding_clusters,
         "findings_rejected": count_subdirs(
             results_dir / "findings-rejected", "FIND-"
         ),
-        "recon_candidates": count_recon_candidates(results_dir),
         "model_refusals": count_model_refusals(results_dir),
         "exists": results_dir.is_dir(),
     }
@@ -2550,8 +2277,8 @@ def _rejected_finding_rows(rejected_dir: Path) -> list[dict]:
         vote = _choose_vote(finding_dir)
         quality = _choose_find_quality(finding_dir)
         # Reason prefers the validator's long-form rationale (when a
-        # recon-side vote exists), then falls back to the FIND-quality
-        # gate's reason (the path most pool entries take).
+        # vote exists), then falls back to the FIND-quality gate's
+        # reason (the path most pool entries take).
         reason = (
             vote.get("rationale")
             or vote.get("reason")
@@ -2690,7 +2417,7 @@ def write_rejected_findings_index(rejected_dir: Path) -> None:
         "",
         (
             "Findings rejected by triage. **Reason** is the validator's "
-            "rationale when a recon vote exists, otherwise the "
+            "rationale when a validator vote exists, otherwise the "
             "FIND-quality gate's rejection reason (`lib/triage.py`)."
         ),
         "",
@@ -3197,9 +2924,6 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         confirmed_findings = [
             c["metrics"].get("confirmed_findings", 0) for c in done
         ]
-        finding_leads = [
-            c["metrics"].get("finding_leads", 0) for c in done
-        ]
         rejected_findings = [
             c["metrics"].get("findings_rejected", 0) for c in done
         ]
@@ -3271,17 +2995,13 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "model_refusal_total": sum(model_refusals),
                 "finding_total": sum(findings),
                 "confirmed_finding_total": sum(confirmed_findings),
-                # Recon-named FINDs the prose gate kept but no agent investigated.
-                # Counted and surfaced as leads, out of the confirmed headline.
-                "lead_finding_total": sum(finding_leads),
                 # Findings the gate never adjudicated (drain cut short, e.g. a
                 # provider limit). Makes confirmed_finding_total=0 legible: 0
                 # confirmed with a non-zero remainder is "gate unfinished", not
-                # "nothing found". Mirrors the per-cell findings_unadjudicated;
-                # leads are gate-accepted, so they are excluded here too.
+                # "nothing found". Mirrors the per-cell findings_unadjudicated.
                 "unadjudicated_finding_total": sum(
-                    max(0, f - c - l)
-                    for f, c, l in zip(findings, confirmed_findings, finding_leads)
+                    max(0, f - c)
+                    for f, c in zip(findings, confirmed_findings)
                 ),
                 "unique_crash_clusters": cb.get("unique_clusters", 0),
                 "novel_crash_clusters": cb.get("novel_clusters", 0),
@@ -3582,7 +3302,6 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 dst = pool / "findings" / dst_name
                 shutil.copytree(src, dst, ignore=ignore_scratch)
                 _scrub_pooled_tree(dst)
-                _link_pool_recon_ids(dst, rd)
                 members["findings"][dst_name] = cond
         rejected_dir = rd / "findings-rejected"
         if rejected_dir.is_dir():
@@ -3594,7 +3313,6 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 dst = pool / "findings-rejected" / dst_name
                 shutil.copytree(src, dst, ignore=ignore_scratch)
                 _scrub_pooled_tree(dst)
-                _link_pool_recon_ids(dst, rd)
                 members["findings-rejected"][dst_name] = cond
         rejected_crashes_dir = rd / "crashes-rejected"
         if rejected_crashes_dir.is_dir():
@@ -4059,8 +3777,7 @@ def render_section(report: dict) -> str:
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
                         c.get("medium_plus_findings", 0)),
-                    cond_findings, "FINDING-CLUSTERS")
-                + _finding_leads_suffix(c),
+                    cond_findings, "FINDING-CLUSTERS"),
                 rfi=_artifact_report_link(
                     _rejected_label(
                         c.get("unique_rejected_finding_clusters", 0),
@@ -4634,7 +4351,7 @@ def crosstab(bench_root: Path) -> str:
         "details are listed."
     )
     lines.append(
-        "- **Condition** — `tokenfuzz` is the full harness: recon, ranked work "
+        "- **Condition** — `tokenfuzz` is the full harness: ranked work "
         "cards, multiple agents, sanitizer probing, triage, clustering, and "
         "reproducer export. The TokenFuzz repository hash is recorded in run "
         "metadata. `<model>-direct` is the control condition: the same model "
@@ -5076,12 +4793,11 @@ def _format_count(value: object) -> str:
 def metric_gate_summary(metrics: dict) -> str:
     """Format accepted, pending, and rejected benchmark artifact counts."""
     return (
-        "findings: rejected={fr} confirmed={fc} leads={fl} pending={fp} roots={ft}; "
+        "findings: rejected={fr} confirmed={fc} pending={fp} roots={ft}; "
         "crashes: rejected={cr} confirmed={cc} unique={cu}"
     ).format(
         fr=_as_int(metrics.get("findings_rejected")),
         fc=_as_int(metrics.get("confirmed_findings")),
-        fl=_as_int(metrics.get("finding_leads")),
         fp=_as_int(metrics.get("findings_unadjudicated")),
         ft=_as_int(metrics.get("findings")),
         cr=_as_int(metrics.get("crashes_rejected")),
@@ -5127,7 +4843,6 @@ def _cmd_write_run(args: argparse.Namespace) -> int:
         "harness_agents": _optional_int(args.harness_agents),
         "model_direct_agents": 1,
         "conditions": args.conditions.split(","),
-        "skip_recon": bool(args.skip_recon),
         "target_sha": args.target_sha,
         "tokenfuzz_sha": args.tokenfuzz_sha,
         "harness_sha": args.harness_sha,
@@ -5186,12 +4901,9 @@ def _cmd_write_cell(args: argparse.Namespace) -> int:
 def _cmd_uncounted_findings(args: argparse.Namespace) -> int:
     metrics = _read_json_object(Path(args.path))
     # Findings the gate never verdicted: roots minus the gate-accepted set
-    # (confirmed + un-investigated leads). Leads were accepted, so they are not
-    # "uncounted"; only un-adjudicated FINDs are.
     uncounted = (
         _as_int(metrics.get("findings"))
         - _as_int(metrics.get("confirmed_findings"))
-        - _as_int(metrics.get("finding_leads"))
     )
     print(max(0, uncounted))
     return 0
@@ -5390,7 +5102,6 @@ def main(argv: list[str]) -> int:
     p.add_argument("budget_wall", type=int)
     p.add_argument("harness_agents")
     p.add_argument("conditions")
-    p.add_argument("skip_recon", type=int)
     p.add_argument("target_sha")
     p.add_argument("tokenfuzz_sha")
     p.add_argument("harness_sha")

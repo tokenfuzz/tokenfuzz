@@ -116,7 +116,7 @@ class RipgrepSafeTests(unittest.TestCase):
             "targets/foo/src/code.c", "targets/foo/src/logs/parser.c",
             "targets/foo/src/.raw/corpus.txt", "targets/foo/output/pkg/logs/source.c",
             "output/foo/codex/logs/.raw/session_x.prompt.md",
-            "output/foo/codex/logs/recon_1.log", "output/foo/codex/logs/sess.log.raw",
+            "output/foo/codex/logs/sess.log.raw",
             "output/foo/codex/logs/.raw/session.raw", "output/foo/codex/logs/index.log",
             "output/foo/codex/logs/session_x.log",
             "output/foo/codex/logs/.gemini-home/chats/s.jsonl",
@@ -134,7 +134,7 @@ class RipgrepSafeTests(unittest.TestCase):
         self.assertIn("src/code.c", output)
         self.assertIn("src/logs/parser.c", output)
         for forbidden in (
-            "output/pkg/logs/source.c", "session_x.prompt.md", "recon_1.log",
+            "output/pkg/logs/source.c", "session_x.prompt.md",
             "sess.log.raw", "codex/logs/.raw/session.raw", "codex/logs/index.log",
             "session_x.log:", ".git/HEAD", ".hg/store",
         ):

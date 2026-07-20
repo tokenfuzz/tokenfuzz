@@ -38,8 +38,8 @@ S1 is the **fallback** default, not a directive to always start with
 patch mining. Prior fixes happen to carry concrete information — what
 changed, what assumption was wrong, what input shape reached the
 code, and what nearby code may still share that shape — but a
-validator-promoted recon card, a high-signal parser surface, or a
-peer-project fix can all outrank ordinary S1 work. The agent follows
+high-signal parser surface or a peer-project fix can outrank ordinary
+S1 work. The agent follows
 the assigned card.
 
 ## How a strategy gets assigned to a card
@@ -71,15 +71,8 @@ without one starving the other. A parser function with
 input-consumption verbs, casts, and asserts becomes an S7 card with
 S2 and S3 companions.
 
-Three other card sources sit on top of the ranked list:
+Two other card sources sit on top of the ranked list:
 
-- **Recon-hypothesis cards** — candidates from the cold-start
-  [recon survey](../guides/recon-discovery.md). Validator-promoted
-  candidates get *claim-time precedence*: if no agent is on a
-  promoted card, the next eligible claim is steered there even when
-  the agent's current strategy filter would otherwise skip it.
-  Validator-rejected candidates are demoted rather than deleted, so
-  sanitizer evidence can still overturn the validator.
 - **Patch cards** (always S1) — one per recent fix commit, with the
   touched files, severity, and any testcase revisions recorded in
   the issue tracker. Old fixes receive a mild age penalty; recently
@@ -92,8 +85,8 @@ Three other card sources sit on top of the ranked list:
 
 Each iteration:
 
-1. The harness builds the ranked card list (recon-hypothesis cards,
-   source-feature cards, patch cards, peer-fix cards).
+1. The harness builds the ranked card list (source-feature cards,
+   patch cards, peer-fix cards).
 2. Each agent pulls the next eligible one.
 
 A card is skipped if it is:

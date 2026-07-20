@@ -67,6 +67,16 @@ class RulesDigestTests(unittest.TestCase):
             missing = prompt.session_rules_digest(Path(temporary))
         self.assertIn("digest missing", missing)
 
+    def test_resume_rule_preserves_forward_progress(self) -> None:
+        digest = DIGEST.read_text(encoding="utf-8")
+        full = FULL.read_text(encoding="utf-8")
+        for text in (digest, full):
+            with self.subTest(source="digest" if text is digest else "full"):
+                self.assertIn("before claiming new work", text)
+                self.assertNotIn("No new exploration", text)
+                self.assertNotIn("No new recon", text)
+                self.assertNotIn("`recon/`", text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

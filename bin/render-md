@@ -1191,13 +1191,12 @@ _BARE_LABEL_KEYS = (
     "Parameter control", "Boundary", "Trusted caller actions", "Reproduction rate",
     "Cluster", "Primitive", "Strategy", "Dedup frames", "Advisory",
     "ClusterFuzz key frames",
-    # Finding-side regex-extraction keys: recon FIND-* reports carry
-    # bare `Cluster:` / `Dedup key:` / `Recon ID:` / `Validator details:`
-    # lines that downstream parsers (cluster-findings, finding_signature,
-    # lib/benchmark _RECON_LINK_PATTERNS) consume. Hide them from HTML
+    # Finding-side regex-extraction keys: FIND-* reports carry bare
+    # `Cluster:` / `Dedup key:` lines that downstream parsers
+    # (cluster-findings, finding_signature) consume. Hide them from HTML
     # output — the hero card already shows the cluster, and the audit-only
     # metadata would just clutter an upstream-facing view.
-    "Dedup key", "Recon ID", "Validator details",
+    "Dedup key",
 )
 _BARE_LABEL_RE = re.compile(
     r"^(?:" + "|".join(re.escape(k) for k in _BARE_LABEL_KEYS) + r"):\s+\S"
@@ -1243,19 +1242,14 @@ def _render_definition_list(lines: list[str]) -> str | None:
 # canonical sanitizer view.
 _COLLAPSIBLE_HEADINGS = {
     "severity rationale",
-    # Provenance on a recon-materialized FIND is harness-only book-keeping
-    # (Recon ID, Slice). Upstream maintainers don't need it; the audit
-    # operator does, so we collapse-not-hide.
-    "provenance",
 }
 
 # Bullet labels under `## Classification` that are harness-only triage
 # state — drop them from HTML so an upstream maintainer doesn't see
-# Recon-stage validator votes / internal confidence tags. Match the
+# internal confidence tags. Match the
 # `**Label**:` / `**Label:**` prefix, case-insensitive. Markdown source
 # keeps them for the audit operator and any harness tooling.
 _HARNESS_ONLY_CLASS_LABELS = (
-    "recon confidence",
     "validator verdict",
     "validator details",
 )
@@ -1349,7 +1343,7 @@ _PRIMITIVE_CATEGORY = {
     "alignment":            "type",
     "type-confusion":       "type",
     "null-deref":           "state",
-    # Finding-side bug-class vocabulary (recon stage). Maps `- **Class**:
+    # Finding-side bug-class vocabulary. Maps `- **Class**:
     # <class>` values from the Classification section to the hero card's
     # category colour scheme so findings inherit the same visual tier as
     # the equivalent crash primitive.
@@ -1448,7 +1442,7 @@ def _extract_hero(text: str) -> dict:
                 h["severity_score"] = score_m.group(1) if score_m else None
                 break
 
-    # Finding-shape fallbacks: when the Fields table is absent (recon
+    # Finding-shape fallbacks: when the Fields table is absent (prose
     # findings use Classification bullets + a bare `Cluster:` line +
     # a Location section), pull the same signals from those alternate
     # forms so the hero card lights up for findings too.
@@ -1482,7 +1476,7 @@ def _extract_hero(text: str) -> dict:
         if dedup_value:
             frames = _frames_from_dedup_value(dedup_value)
     # Finding fallback: Location section carries `path:func:line` as
-    # the primary site (no stack, since recon never ran the bug). Turn
+    # the primary site (no stack, since the bug was never executed). Turn
     # that into a synthetic single-frame so the hero card shows where
     # the defect lives instead of being frame-less.
     if not frames:
@@ -1889,10 +1883,9 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
 
             def _is_harness_only_bullet(body_text: str) -> bool:
                 """Skip Classification bullets that carry harness-only
-                triage state (`**Recon confidence**: …`, `**Validator
-                verdict**: …`, `**Validator details:** …`). These leak
-                from recon-materialized FIND reports and clutter the
-                upstream-facing HTML view. Markdown source keeps them
+                triage state (`**Validator verdict**: …`, `**Validator
+                details:** …`). These clutter the upstream-facing HTML
+                view. Markdown source keeps them
                 untouched for harness tooling."""
                 lab_m = _CLASS_BULLET_LABEL_RE.match(body_text)
                 if not lab_m:

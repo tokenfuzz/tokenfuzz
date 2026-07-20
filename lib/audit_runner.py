@@ -30,7 +30,6 @@ import llm_invoke
 import llm_usage
 import prompt
 import quality
-import recon_to_cards
 import runner_preflight
 import structured_state
 import process_tree
@@ -98,7 +97,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grok-bin")
     parser.add_argument("--new-target")
     parser.add_argument("--allow-concurrent", action="store_true")
-    parser.add_argument("--skip-recon", action="store_true")
     parser.add_argument("--enable-memory", action="store_true")
     parser.add_argument(
         "--refill-workers", action=argparse.BooleanOptionalAction, default=True,
@@ -558,9 +556,6 @@ def _queue_context(runtime: Runtime) -> workqueue.Context:
 
 def _work_card_signature(runtime: Runtime) -> str:
     inputs = [str(runtime.results.parents[1] / "target.toml")]
-    recon = runtime.results / "recon-hypotheses.jsonl"
-    if recon.exists():
-        inputs.append(str(recon))
     inputs.extend(str(path) for path in sorted((runtime.results / "coverage").glob("edges-agent-*.journal")))
     inputs.extend(str(path) for path in sorted((runtime.results / "corpus").glob("COVER-*/metadata.md")))
     return housekeeping.signature(
@@ -593,10 +588,7 @@ def _rank_window(runtime: Runtime) -> tuple[int, int]:
 
 def _write_rank_window(runtime: Runtime, limit: int) -> None:
     cards = workqueue.read_jsonl(runtime.results / "work-cards.jsonl")
-    core_count = sum(
-        card.get("kind") not in {"recon-hypothesis", "s6-peer-fix"}
-        for card in cards
-    )
+    core_count = sum(card.get("kind") != "s6-peer-fix" for card in cards)
     path = _rank_window_path(runtime)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(
@@ -652,14 +644,9 @@ def refresh_work_cards(
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
         if completed.returncode:
-            cards_path = runtime.results / "work-cards.jsonl"
-            recon_cards = [
-                card for card in workqueue.read_jsonl(cards_path)
-                if card.get("kind") == "recon-hypothesis"
-            ]
-            workqueue.write_cards(cards_path, recon_cards)
+            (runtime.results / "work-cards.jsonl").unlink(missing_ok=True)
             refresh_ok = False
-            index_log(runtime, f"WARN: rank-work refresh failed rc={completed.returncode}; retaining current recon cards only")
+            index_log(runtime, f"WARN: rank-work refresh failed rc={completed.returncode}; stale cards removed")
     else:
         refresh_ok = False
         index_log(runtime, "WARN: rank-work is missing; work-card refresh remains dirty")
@@ -831,67 +818,6 @@ def update_subsystem_dry_streaks(
     for subsystem, productive in outcomes.items():
         if not workqueue.record_subsystem_iteration(ctx, subsystem, productive):
             index_log(runtime, f"WARN: could not update dry streak for subsystem {subsystem}")
-
-
-def maybe_seed_recon(runtime: Runtime, args, timeout_limit: int | None = None) -> None:
-    recon_output = runtime.results / "recon-hypotheses.jsonl"
-    checkpoint = runtime.results / ".recon-checkpoint"
-    try:
-        cached_rev = checkpoint.read_text(encoding="utf-8").strip()
-    except OSError:
-        cached_rev = ""
-    cache_current = recon_output.exists() and (
-        not runtime.target_rev or cached_rev == runtime.target_rev
-    )
-    if args.skip_recon or args.max_iterations == 1 or cache_current:
-        return
-    # Never feed hypotheses from an older source revision into ranking if the
-    # refresh fails before producing a replacement. Keep the old checkpoint so
-    # the next attempt still computes the complete changed-source range.
-    recon_output.unlink(missing_ok=True)
-    cards_path = runtime.results / "work-cards.jsonl"
-    if cards_path.exists():
-        workqueue.write_cards(
-            cards_path,
-            [
-                card for card in workqueue.read_jsonl(cards_path)
-                if card.get("kind") != "recon-hypothesis"
-            ],
-        )
-    index_log(runtime, "Recon seed: starting bin/audit-recon")
-    command = [
-        str(runtime.root / "bin" / "audit-recon"), "--target", runtime.target_slug,
-        "--target-path", str(runtime.target_root), "--backend", runtime.backend,
-        "--model", runtime.model, "--out", str(recon_output),
-        "--report", str(runtime.results / "recon-findings.md"),
-        "--usage-index", str(getattr(runtime, "index_jsonl", runtime.logs / "index.jsonl")),
-    ]
-    environment = os.environ.copy() | {"SCRIPT_ROOT": str(runtime.root)}
-    if timeout_limit is not None:
-        completed = run_timeout(
-            command, max(1, timeout_limit), capture_output=True, env=environment,
-        )
-        output = completed.stdout.decode("utf-8", errors="replace")
-    else:
-        completed = subprocess.run(
-            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            check=False, env=environment,
-        )
-        output = completed.stdout
-    for line in output.splitlines():
-        _append(runtime.index, f"[recon-seed] {line}")
-    if completed.returncode or not recon_output.is_file() or not recon_output.stat().st_size:
-        index_log(runtime, f"Recon seed: no cards added (rc={completed.returncode})")
-        return
-    argv = [
-        "--target-slug", runtime.target_slug, "--target-path", str(runtime.target_root),
-        "--recon-jsonl", str(recon_output),
-        "--work-cards", str(runtime.results / "work-cards.jsonl"),
-        "--sanitizers", runtime.config.sanitizers_enabled_csv(),
-        "--results-dir", str(runtime.results),
-    ]
-    recon_to_cards.main(argv)
-    index_log(runtime, "Recon seed: converted hypotheses into work cards")
 
 
 def _session_budget(prompt_text: str, max_turns: int, scratch: Path) -> str:
@@ -1641,9 +1567,6 @@ def initialize_backend(
         runtime, context,
         started_at=time.monotonic() if started_at is None else started_at,
     )
-    remaining = _productive_wall_remaining(state)
-    if remaining is None or remaining > 0:
-        maybe_seed_recon(runtime, args, remaining)
     refresh_work_cards(runtime)
     initialize_agent_strategies(runtime)
     return state

@@ -235,7 +235,7 @@ class BenchmarkReportTests(unittest.TestCase):
         output = process.stdout + process.stderr
         self.assertIn("Cell model-direct-r1 validation: DISABLED", output)
         self.assertIn(
-            "findings: rejected=0 confirmed=0 leads=0 pending=0 roots=0; "
+            "findings: rejected=0 confirmed=0 pending=0 roots=0; "
             "crashes: rejected=0 confirmed=0 unique=0",
             output,
         )

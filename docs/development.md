@@ -178,7 +178,7 @@ can corrupt or lose lines.
 1. **Prefer per-agent paths**, keyed by `${agent_num}` or a unique session
    timestamp.
 2. **Keep forensic dumps under `logs/.raw/`** (`session_*.log.raw`,
-   `recon_*.raw`) so agent file scans do not pull them in.
+   `session_*.prompt.md`) so agent file scans do not pull them in.
 
 For genuinely shared mutable state, use `lib/workqueue.py` helpers
 (`jsonl_lock`, `append_jsonl`, `write_jsonl`); they serialize via

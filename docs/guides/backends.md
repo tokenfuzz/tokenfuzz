@@ -39,7 +39,7 @@ and backend-native reasoning effort. Model precedence is:
 The `[effort]` table is applied in the backend's native form—for example Codex
 model reasoning effort, Gemini thinking level, or the corresponding Claude and
 Grok flags. Edit the config when changing project defaults so normal audits,
-recon, validation, and direct model decisions stay aligned.
+validation and direct model decisions stay aligned.
 
 For the default `agy` Gemini path, `--model` accepts either the config slug or
 an exact label printed by `agy models`. Preflight rejects an unknown mapping

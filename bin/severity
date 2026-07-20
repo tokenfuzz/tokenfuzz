@@ -171,7 +171,7 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     # A sandbox/VM/interpreter escape fully compromises both the sandboxed
     # vulnerable system and the escaped-to host (the subsequent system).
     "sandbox_escape":    ("H", "H", "H", "H", "H", "H", None),
-    # ── Recon / reasoning-confirmed ───────────────────────────────────────
+    # ── Reasoning-confirmed ───────────────────────────────────────────────
     "protocol_state":    ("N", "H", "N", "N", "N", "N", None),
     "logic_regression":  ("L", "L", "N", "N", "N", "N", None),
     # "unknown" and "undefined_behavior" are intentionally absent: neither
@@ -1091,10 +1091,10 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
     if _unnegated_search(r"\b(type confusion|type mismatch|type validation|unchecked elements?)\b", t):
         return "heap_read_small", "type-state mismatch"
 
-    # ── Recon / reasoning-confirmed classes ───────────────────────
-    # Patterns for non-ASan findings the harness's audit-recon pass and
-    # the validator quorum have promoted. These keep promoted reasoning
-    # findings from collapsing to "unknown=8" at scoring time. Each
+    # ── Reasoning-confirmed classes ───────────────────────────────
+    # Patterns for non-ASan findings the validator quorum has promoted.
+    # These keep promoted reasoning findings from collapsing to
+    # "unknown=8" at scoring time. Each
     # pattern requires the named class as a distinct phrase, and
     # _unnegated_search drops mentions whose clause rules the class out
     # ("no cache poisoning", "not a downgrade").
@@ -1284,7 +1284,7 @@ def detect_web_vuln(text_lower: str) -> tuple[str, str] | None:
 
 
 # Primitive keys that are derived from prose REGEX (web/app classes +
-# recon/reasoning classes), not from a precise sanitizer signal. When a
+# reasoning classes), not from a precise sanitizer signal. When a
 # report also carries a structured Primitive field, that deliberate
 # classification outranks a prose-regex guess — but a sanitizer-class match
 # (heap-buffer-overflow, UAF, data race, …) is precise and always wins. This
@@ -1862,7 +1862,7 @@ def compute_severity(report_text: str,
 
     # Primitive: prefer a structured Primitive field that names a known class
     # when the narrative detector fell
-    # through to "unknown" or matched only a prose-regex web/recon class. A
+    # through to "unknown" or matched only a prose-regex web class. A
     # precise sanitizer-class match (ASan / UBSan / TSan) is never overridden.
     prim_key, prim_label = detect_primitive(report_text)
     # A precise ASan/UBSan/TSan class match is authoritative — never overridden
@@ -2174,7 +2174,7 @@ def _replace_severity_line(text: str, new_line: str, *, synthesize: bool = True)
     found. Callers pass `synthesize=False` when the Fields-table Severity
     cell is the authoritative source — synthesizing a duplicate bullet
     (or worse, a stub heading) would undo the slim-shape cleanup that
-    recon FIND reports rely on.
+    prose FIND reports rely on.
     """
     lines = text.splitlines()
     sev_re = re.compile(r"^-\s*\*\*Severity\*\*\s*:")
@@ -2215,7 +2215,7 @@ def _replace_structured_field(text: str, field: str, value: str) -> tuple[str, b
 
     The bool return lets `update_report` skip the verbose
     `- **Severity**: <level> (auto: …)` bullet when the Fields table already
-    carries the canonical row — recon-materialized FINDs use the Fields table
+    carries the canonical row — prose FINDs use the Fields table
     as the only writer for Severity and would otherwise have a stub
     `## Classification` section synthesized under them on every run.
     """
@@ -2488,7 +2488,7 @@ def _synthesize_fields_table(text: str, severity: dict, used: dict) -> str:
     (`bin/export-repro`, `bin/cluster-crashes`, `lib/triage.py`) keep working,
     and `bin/render-md` hides that duplicate block from HTML. Removing the bare
     labels here would make those fields invisible to export. No-op if there is
-    nothing beyond Severity to table (keeps the slim recon template unchanged)."""
+    nothing beyond Severity to table (keeps the slim FIND template unchanged)."""
     rows: list[tuple[str, str]] = [("Severity", _format_severity_field(severity))]
     build_config = (severity.get("build_config_field") or "").strip()
     if build_config:
@@ -2545,7 +2545,7 @@ def update_report(report_path: Path, severity: dict) -> None:
     # Always update an existing `- **Severity**: …` bullet (alternate crash
     # reports rely on the auto-formula being kept in sync), but never
     # synthesize one — that would inject a stub `## Classification`
-    # heading into the slim recon-finding template on every run.
+    # heading into the slim finding template on every run.
     text = _replace_severity_line(
         text, _format_severity_line(severity), synthesize=not fields_sev_updated,
     )

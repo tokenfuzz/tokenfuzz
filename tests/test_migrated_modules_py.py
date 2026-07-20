@@ -380,15 +380,14 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     (results / "work-cards.jsonl").write_text('{"id":"WORK-1"}\n', encoding="utf-8")
     card_payload = {
-        "id": "WORK-1", "kind": "recon-hypothesis", "subsystem": "parser",
+        "id": "WORK-1", "kind": "ranked-source", "subsystem": "parser",
         "file": "src/parser.c", "strategy": "S7", "score": 90,
-        "reason": "validated recon", "fix_hashes": ["abc123"], "find_id": "FIND-1",
-        "recon": {"id": "RECON-1", "line": 9, "class": "bounds", "validator_verdict": "Promote"},
+        "reason": "structural rank", "fix_hashes": ["abc123"],
     }
     with mock.patch.object(prompt.workqueue, "claim_next_card", return_value=card_payload), \
          mock.patch.object(structured_state, "agent_counts", return_value=None):
         directive = prompt.work_card_directive(context, 1)
-    check("PRE-FILED FIND" in directive and "RECON-1" in directive, "prompt renders recon and pre-filed finding card detail")
+    check("src/parser.c" in directive and "abc123" in directive, "prompt renders work-card detail")
 
     equal("null-deref", triage.autodiscard_reason("Hint: address points to the zero page"), "triage rejects null dereferences")
     equal("", triage.autodiscard_reason("ERROR: AddressSanitizer: heap-buffer-overflow"), "triage retains memory-safety diagnostics")
@@ -1005,8 +1004,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     (refresh_results / "patch-cards.jsonl").write_text("{}\n", encoding="utf-8")
     (refresh_results / "s6-peer-cards.jsonl").write_text("{}\n", encoding="utf-8")
     (refresh_results / "work-cards.jsonl").write_text(
-        json.dumps({"id": "OLD", "kind": "ranked-source"}) + "\n"
-        + json.dumps({"id": "RECON-current", "kind": "recon-hypothesis"}) + "\n",
+        json.dumps({"id": "OLD", "kind": "ranked-source"}) + "\n",
         encoding="utf-8",
     )
     with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True), \
@@ -1023,48 +1021,9 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         not failed_clean.called
         and not (refresh_results / "patch-cards.jsonl").exists()
         and not (refresh_results / "s6-peer-cards.jsonl").exists()
-        and [card.get("id") for card in remaining_cards] == ["RECON-current"],
+        and remaining_cards == [],
         "failed card generators cannot leave stale cards or mark the refresh clean",
     )
-    (refresh_results / "recon-hypotheses.jsonl").write_text("{}\n", encoding="utf-8")
-    (refresh_results / "work-cards.jsonl").write_text(
-        json.dumps({"id": "OLD-RECON", "kind": "recon-hypothesis"}) + "\n"
-        + json.dumps({"id": "CURRENT", "kind": "ranked-source"}) + "\n",
-        encoding="utf-8",
-    )
-    (refresh_results / ".recon-checkpoint").write_text("rev1\n", encoding="utf-8")
-    recon_args = SimpleNamespace(skip_recon=False, max_iterations=2)
-    with mock.patch.object(audit_runner.subprocess, "run") as cached_recon:
-        audit_runner.maybe_seed_recon(refresh_runtime, recon_args)
-    check(not cached_recon.called, "recon cache is reused only at its recorded target revision")
-    refresh_runtime.target_rev = "rev2"
-    with mock.patch.object(
-        audit_runner.subprocess, "run",
-        return_value=SimpleNamespace(returncode=1, stdout="backend failed\n"),
-    ) as stale_recon:
-        audit_runner.maybe_seed_recon(refresh_runtime, recon_args)
-    check(
-        stale_recon.called
-        and not (refresh_results / "recon-hypotheses.jsonl").exists()
-        and [
-            card.get("id") for card in audit_runner.workqueue.read_jsonl(
-                refresh_results / "work-cards.jsonl"
-            )
-        ] == ["CURRENT"],
-        "a new target revision invalidates stale recon cards even when refresh fails",
-    )
-    refresh_runtime.target_rev = "rev3"
-    with mock.patch.object(
-        audit_runner, "run_timeout",
-        return_value=SimpleNamespace(returncode=124, stdout=b"budget expired\n"),
-    ) as bounded_recon:
-        audit_runner.maybe_seed_recon(refresh_runtime, recon_args, timeout_limit=7)
-    check(
-        bounded_recon.call_count == 1 and bounded_recon.call_args.args[1] == 7,
-        "recon consumes the audit's remaining productive wall budget",
-        repr(bounded_recon.call_args),
-    )
-
     cycle_order = []
     ensemble_runtimes = [
         SimpleNamespace(backend="claude", config=mock.Mock()),
@@ -1125,7 +1084,6 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
          mock.patch.object(audit_runner, "_activate_runtime"), \
          mock.patch.object(audit_runner, "index_log"), \
          mock.patch.object(audit_runner.prompt, "write_static_prompt_file"), \
-         mock.patch.object(audit_runner, "maybe_seed_recon") as timed_recon, \
          mock.patch.object(audit_runner, "refresh_work_cards", return_value=False), \
          mock.patch.object(audit_runner, "initialize_agent_strategies"), \
          mock.patch.object(audit_runner.time, "monotonic", return_value=120.0):
@@ -1133,10 +1091,8 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
             init_runtime, SimpleNamespace(), "guide", started_at=100.0,
         )
     check(
-        initialized.started_at == 100.0
-        and timed_recon.call_args.args[2] == 30,
-        "audit productive clock includes recon initialization time",
-        repr(timed_recon.call_args),
+        initialized.started_at == 100.0,
+        "audit productive clock carries the caller's start time",
     )
     recovery_state = audit_runner.BackendState(
         budget_runtime, mock.Mock(), started_at=100.0,

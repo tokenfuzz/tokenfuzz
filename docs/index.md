@@ -9,7 +9,7 @@ runtimes.
 
 The harness supplies the parts a long audit needs beyond a prompt:
 
-- **Source-to-testcase investigation.** Cold-start recon and deterministic
+- **Source-to-testcase investigation.** Deterministic
   ranking create a shared work queue; eight review strategies guide deeper
   analysis without requiring a known bug or crashing seed.
 - **Evidence-gated results.** Testcases run through one probe contract.

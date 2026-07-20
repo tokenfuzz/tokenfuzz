@@ -22,31 +22,15 @@ audit iterations against the same target and backend, normally
 rooted in the same `output/<target>/<backend>/` tree.
 
 **Cold start.** An iteration where no agent has structured state yet—typically
-the first working iteration of a fresh target. Recon runs before deep agents on
-a multi-iteration cold start; a one-iteration smoke test skips it.
+the first working iteration of a fresh target.
 
-**Recon.** A short breadth-first review pass over the in-scope
-source set. Runs at the start of an audit (or via
-`bin/audit-recon` on its own), surveys the code for candidate
-bugs with one model, gates them with an independent second
-model, and seeds the work queue with prioritized candidates.
-Cached on the target source SHA. See
-[Recon discovery](../guides/recon-discovery.md).
-
-**Recon-hypothesis card.** A work card derived from a recon
-finding (`kind: "recon-hypothesis"` in `work-cards.jsonl`).
-High-confidence cards are tried before the regular queue;
-validator-rejected cards are kept at lower priority rather than
-deleted.
-
-**Validator.** The second-opinion model run on every recon
-emission. Reads the same source independently, votes Promote /
-Reject / Uncertain, and ranks what reaches the audit's work
-queue. The validator vote is a triage signal, not proof.
+**Validator.** The second-opinion model run on a filed finding.
+Reads the same source independently, votes Promote / Reject /
+Uncertain, and ranks what reaches the audit's work queue. The
+validator vote is a triage signal, not proof.
 
 **Resume.** An iteration where the agent reads structured state
-to continue prior hypotheses. Recon is skipped on resume — the
-cache from cold start is re-used.
+to continue prior hypotheses.
 
 **Compaction.** The backend's automatic shortening of the
 conversation when it nears the context limit. The harness emits
@@ -180,7 +164,7 @@ state files directly.
 ### Work-card pipeline
 
 **Work card.** A single unit of audit work — one source file ×
-strategy, one prior fix, one recon hypothesis, or one peer fix. Lives
+strategy, one prior fix, or one peer fix. Lives
 in `work-cards.jsonl` / `patch-cards.jsonl`.
 
 **Patch card.** A prior-fix work card (strategy S1), built by

@@ -219,7 +219,7 @@ def _model_usage_tokens(obj: object) -> dict | None:
 
     Claude's per-result `usage` reports only the final turn, so a
     multi-turn or resumed session undercounts the model's own spend
-    (measured up to ~24x on recon slices). `modelUsage` is the
+    (measured up to ~24x on wide fan-out sessions). `modelUsage` is the
     session-cumulative total keyed by model; its per-model tokens are
     summed here and priced at the cell's model downstream. Top-level
     only, so nested JSON in tool output cannot inflate usage.

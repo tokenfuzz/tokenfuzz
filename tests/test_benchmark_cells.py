@@ -236,7 +236,7 @@ print(json.dumps({"id": "REC-empty", "slice": "sample", "confidence": "AUDIT-CLE
                 mock.patch.object(benchmark_runner, "_record_provider_quality"):
             rc, _ = benchmark_runner.run_harness(
                 self.work / "launch-cell", self.slug, "codex", "",
-                "sample-experiment", 1, 2, True,
+                "sample-experiment", 1, 2,
             )
         self.assertEqual(rc, 0)
         command = run_timeout.call_args.args[0]
@@ -244,7 +244,6 @@ print(json.dumps({"id": "REC-empty", "slice": "sample", "confidence": "AUDIT-CLE
         launch_facade = self.work / "launch-cell" / "repo-root"
         self.assertEqual(Path(command[0]), launch_facade / "bin" / "audit")
         self.assertEqual(kwargs["cwd"], launch_facade)
-        self.assertIn("--skip-recon", command)
         self.assertIn("--no-refill-workers", command)
 
         scratch_cell = self.work / "scratch-cell"

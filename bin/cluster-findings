@@ -4,7 +4,7 @@
 Findings are filed without sanitizer output and span heterogeneous bug
 classes (memory-safety, auth, injection, info-disclosure, crypto, race,
 config, logic, ...). Every finding gets ONE identity computed from its
-report alone — identical for harness, recon, and model-direct findings:
+report alone — identical for harness and model-direct findings:
 
   (class, file, line) — the normalized issue class at the source site the
                 report pins. Class is normalized first (mechanism labels like
@@ -169,7 +169,7 @@ def _signature(find_dir: Path, target_root: str) -> dict:
     # Identity is a pure function of the report: class, file, line, and
     # crash-state are parsed from report.md (the find-quality cache only
     # supplies the accepted class as a hint). This single source is identical
-    # for harness, recon, and model-direct findings; nothing here depends on
+    # for harness and model-direct findings; nothing here depends on
     # which produced the report.
     sig = finding_signature.finding_signature(
         text,

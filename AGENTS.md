@@ -30,11 +30,9 @@ Each agent has a role set by the harness:
 
 - **reproduce** (default): Write testcases, run the sanitizer, produce crashes.
   Follow the strategy assigned by the harness on your work card — the queue
-  ranker has already weighed validator-confirmed recon hypotheses, prior-fix
-  sites, and structural ranking against each other. Do NOT hard-default to S1;
-  the queue may have placed a higher-signal card in front of you (a validated
-  recon Promote card commonly outranks every patch-card on disk). First
-  testcase by turn 20.
+  ranker has already weighed prior-fix sites, coverage gaps, and structural
+  ranking against each other. Do NOT hard-default to S1; the queue may have
+  placed a higher-signal card in front of you. First testcase by turn 20.
 - **analysis**: Deep code review, data-flow tracing, hypothesis generation.
   Spend 80% reading code, 20% writing minimal probes. Hand off NEEDS_TESTCASE
   hypotheses to reproduce agents.
@@ -81,8 +79,8 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 
 1. Run `bin/state resume --agent <n>` for your agent first — structured JSONL is the source of truth for the hypothesis queue and resume position. Resume highest PENDING/NEEDS_TESTCASE.
 2. Leftover testcase without sanitizer output? Run the sanitizer NOW or delete.
-3. **Cold start:** Use `bin/state add-hyp` to record 3-5 hypotheses from one recon subsystem.
-4. **After compression:** Start from structured state (`bin/state resume --agent <n>`); resume top PENDING. No new recon.
+3. **Cold start:** Use `bin/state add-hyp` to record 3-5 hypotheses from one subsystem.
+4. **After compression:** Start from structured state (`bin/state resume --agent <n>`); resume the top PENDING item before claiming new work, and do not re-read `PRIOR SESSION SEED` ranges.
 5. The harness embeds a condensed **session-rules digest** in your prompt (coverage-gate workflow, guards-db, search discipline, FIND quality bar). Rely on it. Read the full `.agents/references/session-rules.md` only if the digest is ambiguous for your situation — it is ~22 KB and re-sends on every later turn once read.
 
 ---
@@ -91,7 +89,7 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 
 | Priority | Strategy | When |
 |----------|----------|------|
-| **1st (fallback default)** | **S1: Prior-fix + regression variant** | Default ONLY when the queue has no higher-signal card assigned. The harness queue may rank a validator-confirmed recon Promote card above every S1 patch card — follow the assigned strategy when one is given. Mines own fixes AND refactors for unfixed analogues. |
+| **1st (fallback default)** | **S1: Prior-fix + regression variant** | Default ONLY when the queue has no higher-signal card assigned. The harness queue may rank another card above every S1 patch card — follow the assigned strategy when one is given. Mines own fixes AND refactors for unfixed analogues. |
 | **2nd** | **S2: Invariant negation** | Mechanical: break asserts, algorithm assumptions, multi-precondition gates. |
 | **3rd** | **S3: Spec-vs-impl + fast-paths** | LLM-native: spec compliance AND optimization fast-path skips. |
 | **4th** | **S4: Advanced differential** | Beyond auto-diff: GC zeal, wasm tiers, cross-build comparison. |

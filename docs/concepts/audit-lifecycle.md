@@ -1,6 +1,6 @@
 # Audit Lifecycle
 
-[![Audit lifecycle: set up the target, run the audit, recon surveys the code, agents investigate, probe runs the testcase, triage decides outcome](../assets/audit-lifecycle.svg)](../assets/audit-lifecycle.svg){target="_blank" title="Open full-size diagram in a new tab"}
+[![Audit lifecycle: set up the target, run the audit, agents investigate, probe runs the testcase, triage decides outcome](../assets/audit-lifecycle.svg)](../assets/audit-lifecycle.svg){target="_blank" title="Open full-size diagram in a new tab"}
 
 This page follows a run from "I have source I'm allowed to audit" to
 "a reviewer is looking at a finding". Every other page in the handbook
@@ -95,29 +95,7 @@ as append-only rows under `state/`. That structured state — not the
 agent's transcript — is the source of truth across resume, compaction,
 and crash recovery.
 
-## 4. Breadth-first recon (cold start only)
-
-On a multi-iteration run, the first time `bin/audit` sees a given target
-revision it pauses before the deep agents and runs a **breadth-first recon
-pass**. (A one-iteration smoke test skips recon.) Several agents sweep the
-in-scope source set for suspicious
-spots (no sanitizer, no testcases), and a second model votes each
-emission Promote / Reject / Uncertain. The result is a prioritized
-list of *where bugs might be* — work cards the deep agents pick up
-first, not a verified bug list.
-
-Promoted recon cards get the strongest priority: if no agent is
-already on one, the next eligible claim is steered there even when
-the agent's current strategy filter would normally skip it. Rejected
-candidates are demoted rather than deleted, so a later sanitizer
-verdict can still overturn the validator.
-
-Recon uses a bounded per-agent time budget and is cached on the target source
-SHA, so later audits against the same revision skip it. If recon fails, the audit
-continues on its regular ranked queue. See
-[Recon discovery](../guides/recon-discovery.md) for the full picture.
-
-## 5. Agents investigate
+## 4. Agents investigate
 
 Each agent works on **one hypothesis at a time**:
 
@@ -151,7 +129,7 @@ relaxes the usual subsystem-diversity rule for that agent.
 Neighbouring cards are cheaper and more valuable once the agent has
 working data-flow context for the area.
 
-## 6. Run the testcase
+## 5. Run the testcase
 
 Every testcase runs through one execution gate: `bin/probe`. It reads
 the testcase header, picks the right runner (browser, JS shell,
@@ -176,7 +154,7 @@ Probe output is a contract, not a log. Crash promotion requires a
 saved sanitizer or differential output file; report-only FINDs go
 through FIND validation instead.
 
-## 7. Triage
+## 6. Triage
 
 Triage decides whether an artifact is useful and in scope.
 
@@ -233,7 +211,7 @@ What happens to each artifact:
 Severity annotation is best-effort post-processing. A failed scoring
 run does not remove an otherwise complete crash or finding.
 
-## 8. Export to a maintainer bundle
+## 7. Export to a maintainer bundle
 
 Triage automatically runs `bin/export-repro` on every accepted crash.
 After bundling, each `crashes/CRASH-*` directory contains:
@@ -261,7 +239,7 @@ re-run `bin/export-repro <crash-id> --slug <target>` manually after
 editing files in the bundle, but the first export happens during
 triage without operator action.
 
-## 9. Where to look
+## 8. Where to look
 
 The paths worth knowing during a session:
 

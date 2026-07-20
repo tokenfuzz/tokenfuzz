@@ -21,11 +21,6 @@ class MissingArgumentTests(unittest.TestCase):
             "--testcase", "--want", "--mode", "--timeout", "--save",
             "--log", "--slug", "--agent",
         ),
-        "audit-recon": (
-            "--target", "--target-path", "--backend", "--concurrency",
-            "--out", "--report", "--timeout", "--validate", "--scope",
-            "--path", "--recon-lookback",
-        ),
         "validate-finding": (
             "--finding", "--target-path", "--backend", "--model", "--gate",
             "--output", "--timeout",

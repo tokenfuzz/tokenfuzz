@@ -76,7 +76,7 @@ bin/audit --target "$TARGET" --backend "$BACKEND"
 ```
 
 The optional final number is the iteration limit. `1` is a smoke test with one
-worker and no recon seeding. Omit the number, or pass `0`, for a continuous run.
+worker. Omit the number, or pass `0`, for a continuous run.
 
 Common flags:
 
@@ -84,7 +84,6 @@ Common flags:
 | --- | --- |
 | `--model <name>` | Override the backend's configured model. Required for `oss`. |
 | `--strategy S1` … `--strategy S8` | Pin one investigation strategy and suspend rotation. |
-| `--skip-recon` | Skip cold-start recon for this run. |
 | `--no-refill-workers` | Do not reuse slots whose agents finish before their peers. |
 | `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits. |
 | `--new-target <slug>` | Generate starter config and exit without starting an audit. |
@@ -209,21 +208,6 @@ unavailable in the configured builds or modes exits through an ENV-BLOCKED
 hypothesis, which soft-blocks its card. A proven mode-incompatible, stale, or
 non-public card can instead be marked `blocked` with a precise note; MISSED
 alone is not proof of unreachability.
-
-## Run recon separately
-
-```bash
-bin/audit-recon --target "$TARGET" --backend "$BACKEND"
-bin/audit-recon --target "$TARGET" --backend "$BACKEND" \
-  --scope path --path src/parser
-```
-
-`bin/audit` normally runs recon automatically once per target revision. Invoke
-`bin/audit-recon` directly to inspect a breadth-first survey without launching
-the deep audit, or to choose an explicit scope. Its main outputs are
-`recon-findings.md`, `recon-hypotheses.jsonl`, and candidate directories under
-`recon/`. They are leads, not verified findings. See
-[Recon discovery](../guides/recon-discovery.md).
 
 ## Review results
 

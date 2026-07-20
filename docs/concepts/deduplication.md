@@ -4,7 +4,7 @@ An audit run produces two kinds of duplicate-prone artifacts:
 
 - **Crashes** — sanitizer aborts captured by the probe runner, under
   `output/<target>/<backend>/results/crashes/CRASH-*/`.
-- **Findings** — security issues filed by agents and recon, under
+- **Findings** — security issues filed by agents, under
   `output/<target>/<backend>/results/findings/FIND-*/`.
 
 The same bug is usually discovered many times — reached through different
@@ -101,7 +101,7 @@ it is stable regardless of which member is most severe.
 ## Findings deduplication
 
 A finding is a *written report*, usually with **no stack trace** (especially
-recon / source-analysis findings), so the crash strategy doesn't apply.
+source-analysis findings), so the crash strategy doesn't apply.
 `bin/cluster-findings` (engine in [`lib/finding_dedup.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_dedup.py)) reduces every
 finding to a small set of **signals parsed from its report alone**, then
 clusters by **exact equality** — no LLM call, no fuzzy matching, no similarity
@@ -111,11 +111,10 @@ threshold.
 
 Identity is a pure function of the report, computed in **one place**
 (`bin/cluster-findings`). It does not depend on *how* the finding was produced,
-so a harness-agent finding, a recon-materialized finding, and a model-direct
-(bare-prompt baseline) finding are all keyed the same way and land in the same
-identity space. There is no per-source path and no pre-filing location dedup —
-a recon finding and an agent's re-discovery of the same bug collapse here, at
-cluster time, like any other duplicate.
+so a harness-agent finding and a model-direct (bare-prompt baseline) finding
+are both keyed the same way and land in the same identity space. There is no
+per-source path and no pre-filing location dedup — two agents' re-discovery of
+the same bug collapses here, at cluster time, like any other duplicate.
 
 ### The two merge signals
 

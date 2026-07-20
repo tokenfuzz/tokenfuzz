@@ -249,7 +249,7 @@ targets that want to plug in a custom driver script.
 | `env` | Extra `KEY=VAL` strings layered on the runtime environment (e.g. `["GORACE=halt_on_error=1"]`, `["PYTHONDEVMODE=1"]`). The same runner tokens as `args` are substituted at run time. |
 | `crash_patterns` | Additional regex strings the triager treats as crash signals beyond its built-in language-agnostic markers. Use sparingly. |
 
-Before model preflight, recon, or benchmark cells start, `bin/audit` and
+Before model preflight or benchmark cells start, `bin/audit` and
 `bin/benchmark` resolve any configured `bin` and verify that it is executable.
 Standard language runners are also invoked with their version command, so an
 installed launcher with a missing runtime (e.g. a `java` stub with no JDK)

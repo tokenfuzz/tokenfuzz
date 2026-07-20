@@ -17,10 +17,7 @@ that baseline.
 3. [Non-C/C++ targets](multi-language.md) or
    [Browser targets](browser-targets.md) — only if your target needs
    ecosystem-specific runner setup.
-4. [Recon discovery](recon-discovery.md) — understand the cold-start
-   survey that `bin/audit` runs automatically, or run it standalone
-   when you want to inspect candidate work first.
-5. [Triage results](triage-results.md) — review crashes, findings,
+4. [Triage results](triage-results.md) — review crashes, findings,
    rejected candidates, and duplicate clusters.
 
 ## Two rules that shape the guides
@@ -39,6 +36,5 @@ that baseline.
 | [Backends and ensembling](backends.md) | Run a single backend, cycle multiple hosted backends, or compare them. |
 | [Non-C/C++ targets](multi-language.md) | Configure language runners, findings-only targets, or non-ASan sanitizers such as Go `race`. |
 | [Browser targets](browser-targets.md) | Audit Firefox, Chromium, or a JS/Wasm runtime. |
-| [Recon discovery](recon-discovery.md) | Understand or refresh the breadth-first source survey that seeds the audit queue. |
 | [Triage results](triage-results.md) | Decide which crashes and findings to promote, reject, or refine. |
 | [Reproduce a crash](reproduce-a-crash.md) | Re-run an exported TokenFuzz crash bundle against a clean upstream checkout. |

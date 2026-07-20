@@ -87,7 +87,6 @@ The paths an operator inspects after a run:
 | `crashes-rejected/` | Rejected crash artifacts and `REJECTED-CRASHES.html` / `REJECTED-CRASHES.md`. |
 | `findings/` | All security findings — any class, with or without a reproducer. See note below. |
 | `findings-rejected/` | FIND directories rejected by the LLM substance gate at quorum. |
-| `recon/` | One `RECON-*` directory per breadth-first recon candidate — an **unverified** raw claim. Holds `finding.json`, `validator-vote-*.json`, and a human-readable `REPORT.md`/`REPORT.html`. A sibling of `findings/`, not part of it. |
 | `corpus/` | Clean HIT inputs that contributed new coverage, promoted after each iteration for reuse by the ranker. Inputs are deduplicated by content, so agents may safely reuse names such as `testcase.js`. |
 | `scratch-N/` | Active testcase work for agent `N`. |
 | `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`, and `SESSION_STARTED` values read by `bin/probe`. |
@@ -98,12 +97,10 @@ You rarely need to open these directly; the two worth knowing are:
 
 - `state/runs.jsonl` — one row per `bin/probe` invocation. `wc -l` on
   it is the fastest "did anything actually run?" check.
-Everything else (`work-cards.jsonl`, `patch-cards.jsonl`, the recon
-survey files, the other `state/*.jsonl` streams, per-agent
-`hits-N.log` / `tried-inputs-N.log`, `.static-prompt-rules.md`, and
-the `.*.jsonl.lock` files that serialise concurrent writers) is
-harness internals. The recon outputs are explained in
-[Recon discovery](../guides/recon-discovery.md).
+Everything else (`work-cards.jsonl`, `patch-cards.jsonl`, the other
+`state/*.jsonl` streams, per-agent `hits-N.log` / `tried-inputs-N.log`,
+`.static-prompt-rules.md`, and the `.*.jsonl.lock` files that serialise
+concurrent writers) is harness internals.
 
 FIND directories without a report get a `.needs-content` marker and
 surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. A gate pass with

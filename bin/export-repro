@@ -936,7 +936,7 @@ if [ ! -e "$san_lib" ]; then
   # build the subproject. Once that lands upstream, delete this block.
   #
   # The configured asan_lib often hints at a cmake subproject the agent
-  # built ad-hoc during recon, but the converged .audit/build.sh only
+  # built ad-hoc during discovery, but the converged .audit/build.sh only
   # covers the top-level cmake. When the path looks like `<subdir>/<lib>`,
   # see if upstream carries a matching `<src>/<subdir>` or
   # `<src>/contrib/<subdir>` cmake project and build it inline. Mirrors
@@ -1567,7 +1567,7 @@ _ENRICH_CLOSE_RE = re.compile(r"^<!--\s*/enrich:[A-Za-z0-9_-]+\s*-->\s*$")
 # An existing `## Summary` heading anywhere in the body. When present, the
 # narrative is already headed under Summary, so _ensure_leading_heading must
 # not prepend a second one — even if an orphan metadata line (`Linked FIND:`,
-# a recon cross-reference) sits above it and would otherwise look like the
+# a cross-reference) sits above it and would otherwise look like the
 # first unheaded narrative line.
 _SUMMARY_HEADING_RE = re.compile(r"^#{1,6}\s+Summary\s*$", re.IGNORECASE | re.MULTILINE)
 

@@ -33,28 +33,13 @@ def main(argv: list[str]) -> int:
     out = Path(args.output).expanduser().resolve() if args.output else ctx.results_dir / "work-cards.jsonl"
     cards = rank_target(ctx, args.limit, patch_cards)
     cards = llm_rerank_cards(ctx, cards, args.llm_top_n, args.llm_timeout)
-    # Preserve recon-hypothesis cards already in the output file.
-    # rank_target only rebuilds patch + ranked-source cards, so a plain
-    # overwrite here would silently drop the recon-seeded pool that
-    # lib/recon_to_cards.py merges in separately — stranding every recon
-    # lead before it can be probed. Mirror recon_to_cards.py's merge: it
-    # keeps non-recon cards, we keep recon cards. Dedup by id so a ranked
-    # card never collides with a preserved one.
-    ranked_ids = {c.get("id") for c in cards}
-    recon_cards = [
-        c for c in read_jsonl(out)
-        if c.get("kind") == "recon-hypothesis"
-        and c.get("id") not in ranked_ids
-    ]
-    cards = cards + recon_cards
     # Merge S6 peer-fix cards. bin/peer-fix-cards writes these to a
     # separate s6-peer-cards.jsonl, refreshed each iteration alongside
     # patch-cards.jsonl — but rank_target only ever rebuilds patch +
     # ranked-source cards, so without this merge the S6 cards are
     # written and then orphaned: they never land in work-cards.jsonl
     # and no agent can claim them. The s6 file is authoritative (it is
-    # regenerated, not preserved), so we read it fresh rather than
-    # preserving from `out` the way recon cards are. Dedup by id.
+    # regenerated, not preserved), so we read it fresh. Dedup by id.
     s6_path = Path(args.s6_cards).expanduser().resolve() if args.s6_cards \
         else ctx.results_dir / "s6-peer-cards.jsonl"
     merged_ids = {c.get("id") for c in cards}
@@ -78,11 +63,6 @@ def main(argv: list[str]) -> int:
 def _card_file(card: dict) -> str:
     for key in ("file", "path", "source"):
         value = str(card.get(key) or "").strip()
-        if value:
-            return value
-    recon = card.get("recon")
-    if isinstance(recon, dict):
-        value = str(recon.get("file") or recon.get("location") or "").strip()
         if value:
             return value
     return "-"

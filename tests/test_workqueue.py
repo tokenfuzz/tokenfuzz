@@ -349,22 +349,6 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(reasons["WORK-A"], "active-hypothesis")
         self.assertEqual(reasons["WORK-DUP"], "active-surface")
 
-    def test_promoted_recon_precedes_strategy_filter_then_falls_back(self) -> None:
-        promote = self.card(
-            "WORK-recon-promote", "src/recon.c", strategy="S3", score=1,
-            kind="recon-hypothesis", recon={"validator_verdict": "Promote"},
-        )
-        normal = self.card("WORK-S7", "src/normal.c", strategy="S7", score=100)
-        self.write_cards([normal, promote])
-        chosen = workqueue.claim_next_card(self.ctx, "1", mode="generic", strategy="S7", claim=False)
-        self.assertEqual(chosen["id"], "WORK-recon-promote")
-
-        workqueue.claim_next_card(self.ctx, "1", mode="generic", strategy="S7", claim=True)
-        fallback = workqueue.claim_next_card(self.ctx, "2", mode="generic", strategy="S7", claim=False)
-        self.assertEqual(fallback["id"], "WORK-S7")
-        self.assertTrue(workqueue.is_promoted_recon_card(promote))
-        self.assertFalse(workqueue.is_promoted_recon_card(normal))
-
     def test_card_status_gates_require_real_run_and_hypothesis_evidence(self) -> None:
         self.write_cards([self.card("WORK-A", "src/app.c")])
         with self.assertRaisesRegex(workqueue.CardStatusUpdateError, "refuses crash"):
@@ -421,19 +405,9 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(blocked["status"], "blocked")
         self.assertEqual(blocked["source"], "env-block-own-card")
 
-    def test_rejected_finding_cards_and_per_agent_reject_skips_are_recorded(self) -> None:
-        cards = [
-            self.card("WORK-RECON-A", "src/a.c", find_id="FIND-RECON-1"),
-            self.card("WORK-RECON-B", "src/b.c", find_id="FIND-RECON-1"),
-            self.card("WORK-OTHER", "src/c.c"),
-        ]
+    def test_per_agent_reject_skips_are_recorded(self) -> None:
+        cards = [self.card("WORK-OTHER", "src/c.c")]
         self.write_cards(cards)
-        blocked = workqueue.mark_cards_blocked_by_find_id(self.ctx, "FIND-RECON-1", "not security")
-        self.assertEqual(blocked, ["WORK-RECON-A", "WORK-RECON-B"])
-        latest = workqueue.latest_claims_by_card(self.ctx)
-        self.assertEqual(latest["WORK-RECON-A"]["status"], "blocked")
-        self.assertNotIn("WORK-OTHER", latest)
-
         workqueue.record_card_reject_skip(self.ctx, "WORK-OTHER", "1", "CRASH-REJECTED", "caller misuse")
         self.assertEqual(workqueue.card_reject_skips_for_agent(self.ctx, "1"), {"WORK-OTHER"})
         self.assertEqual(workqueue.card_reject_skips_for_agent(self.ctx, "2"), set())
@@ -478,22 +452,22 @@ class WorkQueueTests(unittest.TestCase):
 
     def test_recent_digests_strategy_yield_and_runtime_feedback(self) -> None:
         self.write_cards([
-            self.card("WORK-recon-A", "src/a.c", strategy="S8", recon={"id": "REC-a"}),
+            self.card("WORK-A2", "src/a.c", strategy="S8"),
             self.card("WORK-B", "src/b.c", strategy="S5"),
         ])
-        self.add_hypothesis(card_id="WORK-recon-A", strategy="S8")
+        self.add_hypothesis(card_id="WORK-A2", strategy="S8")
         output = self.results / "scratch-1" / "run.txt"
         output.parent.mkdir()
         output.write_text("coverage gate missed; closest reached frame: app_parse\n")
-        self.add_run(card_id="WORK-recon-A", verdict="MISSED", asan_output=str(output))
-        self.add_run(card_id="WORK-recon-A", verdict="CRASH", index=2)
+        self.add_run(card_id="WORK-A2", verdict="MISSED", asan_output=str(output))
+        self.add_run(card_id="WORK-A2", verdict="CRASH", index=2)
         self.add_run(card_id="WORK-B", verdict="EXEC_FAIL", index=3, hypothesis_id="")
         workqueue.add_note(self.ctx, argparse.Namespace(
-            agent="1", hypothesis_id="H-1", card_id="WORK-recon-A",
+            agent="1", hypothesis_id="H-1", card_id="WORK-A2",
             kind="guard", text="round-trip and idempotence property checked",
         ))
         workqueue.add_note(self.ctx, argparse.Namespace(
-            agent="1", hypothesis_id="H-1", card_id="WORK-recon-A",
+            agent="1", hypothesis_id="H-1", card_id="WORK-A2",
             kind="variants", text="inverse operation and fixed-point property checked",
         ))
 
@@ -501,12 +475,11 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(len(recent_hyps.strip().splitlines()), 2)
         recent_runs = workqueue.recent_runs(self.ctx, limit=2, agent="1")
         self.assertEqual(len(recent_runs.strip().splitlines()), 3)
-        feedback = workqueue.runtime_feedback(self.ctx, agent="1", card_id="WORK-recon-A")
+        feedback = workqueue.runtime_feedback(self.ctx, agent="1", card_id="WORK-A2")
         self.assertIn("productive-artifact", feedback)
         yields = {row["strategy"]: row for row in workqueue.strategy_yield(self.ctx)["strategies"]}
         self.assertEqual(yields["S8"]["runs"], 2)
         self.assertEqual(yields["S8"]["crash"], 1)
-        self.assertEqual(yields["S8"]["recon_runs"], 2)
         self.assertEqual(yields["S5"]["other"], 1)
         completion = workqueue.strategy_completion_status(self.ctx, "1", "S8")
         self.assertTrue(completion["complete"])
@@ -518,12 +491,6 @@ class WorkQueueTests(unittest.TestCase):
             "def parse_bytes(data):\n    assert data is not None\n    return bytes(data)\n",
             encoding="utf-8",
         )
-        recon = self.card(
-            "RECON-confirmed", "src/parser.py", kind="recon-hypothesis",
-            strategy="S7", allowed_strategies=["S5", "S7"],
-            recon={"validator_verdict": "Promote"},
-        )
-        self.write_cards([recon])
         workqueue.write_jsonl(self.results / "s6-peer-cards.jsonl", [
             self.card("S6-valid", "src/parser.py", kind="s6-peer-fix", strategy="S6"),
             self.card("S6-ignore", "src/parser.py", kind="not-s6", strategy="S6"),
@@ -542,15 +509,12 @@ class WorkQueueTests(unittest.TestCase):
         cards = workqueue.read_jsonl(self.results / "work-cards.jsonl")
         by_id = {row["id"]: row for row in cards}
         self.assertIn("src/parser.py", {row.get("file") for row in cards})
-        self.assertEqual(by_id["RECON-confirmed"]["allowed_strategies"], ["S5", "S7"])
-        self.assertEqual(by_id["RECON-confirmed"]["recon"]["validator_verdict"], "Promote")
         self.assertEqual(by_id["S6-valid"]["kind"], "s6-peer-fix")
         self.assertNotIn("S6-ignore", by_id)
 
         second = self.run_command(command + ["--quiet"])
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         ids = [row["id"] for row in workqueue.read_jsonl(self.results / "work-cards.jsonl")]
-        self.assertEqual(ids.count("RECON-confirmed"), 1)
         self.assertEqual(ids.count("S6-valid"), 1)
 
     def test_llm_rerank_is_cached_and_fails_open_on_invalid_output(self) -> None:

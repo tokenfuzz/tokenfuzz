@@ -34,7 +34,6 @@ sys.path.insert(0, str(ROOT / "lib"))
 import languages
 import workqueue
 import target_config
-import recon_slicer
 import crash_artifacts
 
 _PASSED = 0
@@ -242,94 +241,6 @@ assert_eq(workqueue.SOURCE_EXTS, languages.all_source_exts(),
 for ext in (".py", ".rb", ".go", ".java", ".kt", ".php", ".ts"):
     assert_in(ext, workqueue.SOURCE_EXTS,
               f"workqueue.SOURCE_EXTS contains {ext} (regression guard for pyyaml bug)")
-
-# recon_slicer.SOURCE_EXTS must mirror the same union, otherwise recon
-# produces zero slices on JS / TS / Kotlin / Swift / Ruby / PHP targets
-# (regression observed on the angular target: 3167 .ts files, slicer
-# reported "Found 0 source file(s)" and recon FATAL'd before any agent
-# could be launched).
-assert_eq(recon_slicer.SOURCE_EXTS, languages.all_source_exts(),
-          "recon_slicer.SOURCE_EXTS == languages.all_source_exts()")
-for ext in (".ts", ".tsx", ".js", ".kt", ".swift", ".rb", ".php"):
-    assert_in(ext, recon_slicer.SOURCE_EXTS,
-              f"recon_slicer.SOURCE_EXTS contains {ext} (regression guard for angular bug)")
-
-# Dependency-slice patterns are registry-owned (Language.def_patterns /
-# include_patterns) so recon_slicer's call/include edges cover every
-# supported language instead of a hardcoded C/JS/Python subset. Each
-# pattern must compile and expose the capture group recon_slicer reads.
-import re as _re  # noqa: E402
-
-_dep_def_langs = []
-for _lang in languages.LANGUAGES:
-    for _p in _lang.def_patterns:
-        _rx = _re.compile(_p)
-        assert_in("name", _rx.groupindex,
-                  f"{_lang.name} def_pattern captures a 'name' group")
-    for _p in _lang.include_patterns:
-        _rx = _re.compile(_p)
-        assert_in("path", _rx.groupindex,
-                  f"{_lang.name} include_pattern captures a 'path' group")
-    if _lang.def_patterns:
-        _dep_def_langs.append(_lang.name)
-
-# Every language that ships auditable source must contribute call edges;
-# without a def_pattern its files fall back to directory-only slicing, the
-# exact flat-tree gap this feature closes. Shell is exempt (no source_exts).
-for _lang in languages.LANGUAGES:
-    if _lang.source_exts:
-        assert_true(bool(_lang.def_patterns),
-                    f"{_lang.name} (has source_exts) declares a def_pattern")
-
-# recon_slicer must read the registry, not a private pattern table: a known
-# extension resolves to compiled def patterns, an unknown one to nothing.
-assert_true(bool(recon_slicer._dependency_patterns(".rs")[0]),
-            "recon_slicer._dependency_patterns('.rs') yields rust def patterns")
-assert_true(bool(recon_slicer._dependency_patterns(".c")[1]),
-            "recon_slicer._dependency_patterns('.c') yields C include patterns")
-assert_eq(recon_slicer._dependency_patterns(".nope"), ((), ()),
-          "recon_slicer._dependency_patterns(unknown ext) is empty")
-
-# Call-edge families: C/C++, JS/TS and Java/Kotlin each collapse to one
-# family so genuine intra-family cross-language calls still cluster; every
-# other language is its own family so a coincidental cross-runtime name
-# match cannot merge unrelated files.
-assert_eq(languages.call_family_for_ext(".c"), languages.call_family_for_ext(".cc"),
-          "C and C++ share a call-family")
-assert_eq(languages.call_family_for_ext(".h"), languages.call_family_for_ext(".hpp"),
-          "C and C++ headers share a call-family")
-assert_eq(languages.call_family_for_ext(".js"), languages.call_family_for_ext(".ts"),
-          "JavaScript and TypeScript share a call-family")
-assert_eq(languages.call_family_for_ext(".java"), languages.call_family_for_ext(".kt"),
-          "Java and Kotlin share a call-family")
-assert_true(languages.call_family_for_ext(".py") != languages.call_family_for_ext(".c"),
-            "Python and C are different call-families (cross-runtime guard)")
-assert_true(languages.call_family_for_ext(".rs") != languages.call_family_for_ext(".go"),
-            "Rust and Go are different call-families")
-# Unknown extension has no family, and every source language resolves to one.
-assert_eq(languages.call_family_for_ext(".nope"), None,
-          "unknown extension has no call-family")
-for _lang in languages.LANGUAGES:
-    for _ext in _lang.source_exts:
-        assert_true(bool(languages.call_family_for_ext(_ext)),
-                    f"{_ext} resolves to a non-empty call-family")
-
-# JS/TS carry both a classic `function foo()` detector and an arrow/const
-# detector (`const foo = (x) => ...`), the dominant modern idiom. The arrow
-# rule must match arrow bindings but not plain value bindings or literals.
-_js_defs = [_re.compile(p) for p in languages.for_source_ext(".js").def_patterns]
-assert_true(len(_js_defs) >= 2, "JavaScript declares classic + arrow def_patterns")
-_arrow = [rx for rx in _js_defs if rx.search("const f = (x) => x")]
-assert_true(bool(_arrow), "a JS def_pattern matches an arrow/const definition")
-_arx = _arrow[0]
-assert_eq(_arx.search("const decode = (x) => x + 1").group("name"), "decode",
-          "arrow def_pattern captures the const binding name")
-assert_true(_arx.search("export const g = async (a, b) => {}") is not None,
-            "arrow def_pattern matches exported async arrow")
-for _neg in ("const n = 5", "const arr = [1, 2, 3]", "const o = { a: 1 }",
-             "const re = /=>/", "let total = sum(a, b)"):
-    assert_true(_arx.search(_neg) is None,
-                f"arrow def_pattern does not match value binding: {_neg!r}")
 
 
 # ─── 7. crash_artifacts._HARNESS_SOURCE_SUFFIXES is C/C++ only ────

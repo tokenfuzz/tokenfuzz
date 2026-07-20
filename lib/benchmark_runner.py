@@ -322,7 +322,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--budget-wall", type=_nonnegative, default=10800,
         help=(
-            "productive wall seconds per cell for recon and agents; "
+            "productive wall seconds per cell for audit agents; "
             "provider-recovery pauses are excluded (0 = unlimited)"
         ),
     )
@@ -332,7 +332,6 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--agents", type=_positive)
     result.add_argument("--conditions", default="model-direct,harness")
-    result.add_argument("--skip-recon", action="store_true")
     result.add_argument("--ledger")
     result.add_argument("--bench-root", default="output/benchmark")
     result.add_argument("--run-id", default="")
@@ -654,7 +653,7 @@ def prepare_facade(cell_dir: Path, target_slug: str) -> Path:
 
 def run_harness(
     cell_dir: Path, target_slug: str, backend: str, model: str,
-    experiment: str, wall: int, agents: int | None, skip_recon: bool,
+    experiment: str, wall: int, agents: int | None,
 ) -> tuple[int, Path]:
     facade = prepare_facade(cell_dir, target_slug)
     target = (SCRIPT_ROOT / "targets" / target_slug).resolve()
@@ -664,8 +663,6 @@ def run_harness(
         str(facade / "bin" / "audit"), "--target", target_slug,
         "--backend", backend, "--no-refill-workers",
     ]
-    if skip_recon:
-        command.append("--skip-recon")
     if model:
         command += ["--model", model]
     command += ["--experiment", experiment]
@@ -1200,7 +1197,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             "budget_wall": args.budget_wall, "harness_agents": args.agents,
             "finalize_wall": getattr(args, "finalize_wall", 3600),
             "model_direct_agents": 1, "conditions": conditions,
-            "skip_recon": args.skip_recon,
             "target_sha": target_config.detect_rev(SCRIPT_ROOT / "targets" / args.target),
             "tokenfuzz_sha": _git_rev(SCRIPT_ROOT), "harness_sha": _git_rev(SCRIPT_ROOT, True),
             "dry_run": args.dry_run,
@@ -1211,8 +1207,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         log(f"Conditions: {','.join(conditions)}")
         if args.dry_run:
             log("Dry run: synthetic cells, no LLM calls")
-        if args.skip_recon:
-            log("Harness recon: skipped (--skip-recon)")
     else:
         log(f"Regenerating run {run_id}: target={args.target} backend={args.backend} (no cells launched)")
     log(f"Output: {bench_dir}")
@@ -1273,7 +1267,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     rc = run_model_direct(cell_dir, (SCRIPT_ROOT / "targets" / args.target).resolve(), args.backend, model, args.budget_wall)
                 else:
                     log(f"Cell {name} live log: {(cell_dir / 'audit.log').resolve()}")
-                    rc, results = run_harness(cell_dir, args.target, args.backend, model, experiment, args.budget_wall, args.agents, args.skip_recon)
+                    rc, results = run_harness(cell_dir, args.target, args.backend, model, experiment, args.budget_wall, args.agents)
                 # Stop the clock where the finding work stops. Everything below
                 # — crash triage, the find-gate drain, metrics — is measurement
                 # of what was already found, so charging it to the cell's wall

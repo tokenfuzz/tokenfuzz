@@ -28,7 +28,7 @@ Each benchmark run is a small controlled experiment:
 | Condition token | Rendered label | What runs |
 | --- | --- | --- |
 | `model-direct` | `<model>-direct` when the model is known, otherwise `<backend>-direct` | One agent with a bare vulnerability-hunting prompt. This is the control. |
-| `harness` | `tokenfuzz` | `bin/audit` as shipped: recon, ranked work cards, strategy rotation, `bin/probe`, triage, validation, clustering, severity scoring, and reproducer bundling. |
+| `harness` | `tokenfuzz` | `bin/audit` as shipped: ranked work cards, strategy rotation, `bin/probe`, triage, validation, clustering, severity scoring, and reproducer bundling. |
 
 Backend customizations are disabled where the CLI provides an enforceable
 per-run control. Claude runs in safe mode; Codex disables plugins; OpenCode
@@ -60,7 +60,7 @@ A useful benchmark is not "which row printed the largest number."
 The direct prompt often produces more raw crash directories because it
 has little structure around API misuse, duplicates, or self-inflicted
 testcases. TokenFuzz spends budget on work the direct prompt does not
-do: recon, queue construction, coverage-gated probes, validation,
+do: queue construction, coverage-gated probes, validation,
 deduplication, severity scoring, and maintainer-ready reproducers.
 
 That overhead is part of the comparison. The question is whether the
@@ -87,7 +87,7 @@ With all defaults, the command means:
 | `--backend` | `codex` | Agent backend. Valid values are `claude`, `codex`, `gemini`, `grok`, and `oss`. |
 | `--model` | backend config default | Optional model override used by both conditions. |
 | `--replicates` | `3` | Runs per condition. |
-| `--budget-wall` | `10800` | Productive seconds per cell for recon and agents. Provider-recovery pauses are excluded. `0` is unlimited. |
+| `--budget-wall` | `10800` | Productive seconds per cell for audit agents. Provider-recovery pauses are excluded. `0` is unlimited. |
 | `--finalize-wall` | `3600` | Separate wall-clock ceiling for final crash and finding validation. `0` is unlimited. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
 | `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |
@@ -113,24 +113,8 @@ and `output/<target>/target.toml` reviewed. The shortest path is the
 [Add a target](../getting-started/add-a-target.md) flow.
 
 Treat a two-replicate, three-hour run as a layout and sanity check,
-not as a statistical claim. LLM runs are stochastic, and every TokenFuzz cell
-spends part of its budget on cold recon before deep investigation. For a result
-you would cite, use at least five replicates and
-more than one target.
-
-## Recon and budget
-
-The `harness` condition is `bin/audit` as shipped, so a cold target
-starts with recon. Recon is not cached or shared: every harness cell
-runs its own cold recon, so each replicate is an independent product
-run and all replicates carry the recon cost equally. Recon is
-stochastic, so the seeded hypotheses differ across replicates — that
-variance is part of what the benchmark measures.
-
-Short budgets can therefore favor `model-direct`, since every harness
-cell spends part of its budget on recon before probing. This is not a
-bug in the benchmark. It is measuring whether TokenFuzz can repay its
-startup cost inside the budget you gave it.
+not as a statistical claim. LLM runs are stochastic. For a result you would
+cite, use at least five replicates and more than one target.
 
 After timed investigation stops, each cell synchronously drains the finding
 quality gate before metrics are harvested. This final triage is measurement,
@@ -249,7 +233,7 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Replicates` | `done/total`. Replicates that recovered from a mid-run provider pause got their full budget and fold in unmarked; a `(Np)` suffix flags N provider-limited replicates excluded from the totals (a same-run-id re-run retries them). |
 | `Wall (h)` | Median hours a cell spent finding things. The triage and validation that follow the audit are measurement, not finding work, so they are not counted. |
 | `Unique rejected findings` | FIND reports the validator rejected, after clustering merges duplicates where evidence permits. `≤ N` marks an upper bound. |
-| `Unique accepted findings` | Clustered non-crash security reports an agent investigated, shown `N (M M+)`: N unique, M scored Medium or higher. A recon lead the gate accepted but no agent ever worked is shown as `(+N leads)` beside the count and is not counted here. Links to the finding cluster report. |
+| `Unique accepted findings` | Clustered non-crash security reports an agent investigated, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the finding cluster report. |
 | `Unique rejected crashes` | Crash candidates triage rejected, after stack/signature clustering merges duplicates where evidence permits. `≤ N` marks an upper bound. |
 | `Unique accepted crashes` | Clustered crash directories with real sanitizer output on disk, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the crash cluster report. |
 | `Top crash severity` | Highest crash severity observed in the cell. |
@@ -286,7 +270,7 @@ key described below.
 
 **Token usage** appears when the backend reports usage or the harness
 can estimate prompt size. The bold row per condition is the total to
-compare. Harness totals include model preflight, recon, audit agents, and
+compare. Harness totals include model preflight, audit agents, and
 harness-owned decisions such as triage, cluster expansion, work reranking, and
 peer mapping. One-shot calls without provider telemetry are estimated and
 marked as such. Gemini through the Antigravity CLI may show estimated prompt
@@ -471,8 +455,6 @@ guessed one.
 - Pick targets that can plausibly produce evidence inside the budget.
   If both rows stay at zero, you measured target hardness, not harness
   quality.
-- Use enough time for recon plus investigation. A budget that ends during recon
-  does not measure the deep audit.
 - Use 5+ replicates before making claims. Three replicates show a
   direction; they do not settle stochastic behavior.
 - Compare more than one target. A harness change that helps one parser

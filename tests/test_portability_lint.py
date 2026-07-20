@@ -66,7 +66,7 @@ class PortabilityLintTests(unittest.TestCase):
 
     def test_operator_commands_use_python(self) -> None:
         for name in (
-            "audit", "audit-recon", "benchmark", "hits", "probe", "run-asan",
+            "audit", "benchmark", "hits", "probe", "run-asan",
             "run-msan", "run-tsan", "run-ubsan", "setup-target", "validate-finding",
         ):
             with self.subTest(name=name):

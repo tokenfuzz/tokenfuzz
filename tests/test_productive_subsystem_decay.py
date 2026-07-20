@@ -306,10 +306,10 @@ def _crash_claim(card_id: str) -> dict:
             "updated_at": "2026-01-01T00:00:00Z"}
 
 
-# Concrete cards (recon-hypothesis) name a specific site: their opened
+# Concrete cards (patch cards) name a specific site: their opened
 # hypotheses ARE their search space, so re-discovery is a valid exhaustion
 # signal for them.
-def _card(card_id: str, kind: str = "recon-hypothesis") -> dict:
+def _card(card_id: str, kind: str = "patch") -> dict:
     return {"id": card_id, "kind": kind, "file": "src/parser.c",
             "function": "foo", "subsystem": "src/parser.c", "mode": "auto",
             "strategy": "S7", "status": "unclaimed"}

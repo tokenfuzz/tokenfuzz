@@ -8,7 +8,7 @@ session-start step.
 
 ## PATH CONVENTION
 
-Every `findings/`, `crashes/`, `recon/`, `state/`, `scratch-*/`, and
+Every `findings/`, `crashes/`, `state/`, `scratch-*/`, and
 `crashes-rejected/` reference below is a subdir of `${RESULTS_DIR}`,
 where `${RESULTS_DIR}` is the absolute results path the AGENT IDENTITY
 block names at the top of your session prompt. **When you write,
@@ -147,8 +147,9 @@ with a precise note. MISSED alone is not proof of unreachability.
   `ASAN_GENERIC_BIN=…/build-asan-XYZ/bin/<binary>`. The harness also
   auto-routes; look for `[probe] ROUTED:`. Missing library / header is
   true ENV-BLOCKED — no alternate build helps.
-- After context compression: run `bin/state resume --agent N`, resume top
-  PENDING, do no new recon, and do not re-read `PRIOR SESSION SEED` ranges.
+- After context compression: run `bin/state resume --agent N`, resume the top
+  PENDING item before claiming new work, and do not re-read `PRIOR SESSION SEED`
+  ranges.
 
 ## CRASH promotion gate
 

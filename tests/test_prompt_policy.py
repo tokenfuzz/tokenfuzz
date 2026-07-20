@@ -123,6 +123,16 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         self.assertNotIn("2-3 DEEP investigations", guide)
         self.assertNotIn("Clean? → 2+ variants", guide)
 
+    def test_resume_policy_continues_without_repeating_work(self) -> None:
+        rendered = self.render()
+        guide = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+        for text in (rendered, guide):
+            with self.subTest(source="prompt" if text is rendered else "guide"):
+                self.assertIn("before claiming new work", text)
+                self.assertIn("PRIOR SESSION SEED", text)
+                self.assertNotIn("No new exploration", text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

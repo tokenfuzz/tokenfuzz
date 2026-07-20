@@ -29,7 +29,6 @@ running.
 | Output tokens | Long model prose, narration | Strategy quality bar: agents are graded on testcases written, not words. |
 | Sanitizer runs | Each run takes wall-clock + RAM; browsers cost more | Per-agent sanitizer-run budget; coverage gate before sanitizer run. |
 | Redundant work | Two agents re-exploring the same surface | Work-card leases, per-agent input memory, rejected indexes. |
-| Cold-start recon | Breadth-first survey of the in-scope source set | Cached on target source SHA so subsequent audits against the same commit skip recon entirely. |
 
 The two anchors are simple. **Avoid re-reading**: every byte the
 agent has already seen should not be sent again. **Avoid re-running**:

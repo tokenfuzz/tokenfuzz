@@ -118,7 +118,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
 
     budget_args = SimpleNamespace(
         model="test-model", backend="codex", target="sampleproj", replicates=1,
-        budget_wall=1, finalize_wall=7, agents=1, skip_recon=False, dry_run=False,
+        budget_wall=1, finalize_wall=7, agents=1, dry_run=False,
         regenerate=False, validate_findings=True,
     )
     empty_report = {"conditions": []}
