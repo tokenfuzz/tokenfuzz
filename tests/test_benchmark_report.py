@@ -94,7 +94,9 @@ class BenchmarkReportTests(unittest.TestCase):
             'asan_lib = "build-asan/lib/libsample.a"\n'
             'includes = ["include", "lib"]\n'
             'link_libs = ["-lm", "-lpthread"]\n'
-            '[sanitizer]\nenabled = ["asan"]\n',
+            '[sanitizer]\nenabled = ["asan"]\n'
+            '[runner]\n'
+            'args = ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"]\n',
             encoding="utf-8",
         )
         binary.write_text(f"#!{sys.executable}\n", encoding="utf-8")
@@ -112,6 +114,7 @@ class BenchmarkReportTests(unittest.TestCase):
             "Building a one-off harness driver", "build-asan/lib/libsample.a",
             "fsanitize=address", "When source review identifies a\nplausible sanitizer-class",
             "file a CRASH only when a real\nsanitizer trace reproduces",
+            "--input /abs/out/crashes/CRASH-N/input --sink " + os.devnull,
         ):
             self.assertIn(required, native_body)
         self.assertNotIn("merely to fill the crashes directory", body)

@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import benchmark_runner
+import crash_bundle
 
 
 DIAGNOSTIC = (
@@ -92,6 +93,14 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 "print('SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free')\n"
                 "raise SystemExit(1)\n"
             ),
+            "ordered-crash": (
+                "if len(sys.argv) == 5 and sys.argv[1] == '--input' "
+                "and sys.argv[3:] == ['--sink', '/dev/null']:\n"
+                "    print('==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010')\n"
+                "    print('SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free')\n"
+                "    raise SystemExit(1)\n"
+                "print('ran clean')\n"
+            ),
         }
         executable.write_text(
             f"#!{sys.executable}\nimport sys\n{bodies[behavior]}", encoding="utf-8"
@@ -119,6 +128,9 @@ class BenchmarkReverifyTests(unittest.TestCase):
         leading_target, leading_slug = self.make_target(
             "leading-target", "reject-leading-bin"
         )
+        ordered_target, ordered_slug = self.make_target(
+            "ordered-target", "ordered-crash"
+        )
 
         reproducing = self.make_crash("reproducing")
         clean = self.make_crash("clean")
@@ -134,6 +146,16 @@ class BenchmarkReverifyTests(unittest.TestCase):
         without_args = self.make_crash("without-args")
         normalized = self.make_crash("normalized")
         (normalized / "repro.cmd").write_text("stub {TESTCASE}\n", encoding="utf-8")
+        ordered_pool = self.root / "ordered"
+        ordered_case = self.root / "ordered-input.bin"
+        ordered_case.write_bytes(b"sample-bytes\n")
+        ordered_sanitizer = self.root / "ordered-sanitizer.txt"
+        ordered_sanitizer.write_text(DIAGNOSTIC, encoding="utf-8")
+        _, ordered_id = crash_bundle.materialize(
+            ordered_pool, "1", ordered_case, ordered_sanitizer, "asan", "generic",
+            args=("--input", "{TESTCASE}", "--sink", "/dev/null"),
+        )
+        ordered = ordered_pool / "crashes" / ordered_id
 
         unchanged = {
             path: (path / "sanitizer.txt").read_bytes()
@@ -149,6 +171,7 @@ class BenchmarkReverifyTests(unittest.TestCase):
             "with_args": (with_args.parent.parent, flag_target, flag_slug),
             "without_args": (without_args.parent.parent, flag_target, flag_slug),
             "normalized": (normalized.parent.parent, leading_target, leading_slug),
+            "ordered": (ordered_pool, ordered_target, ordered_slug),
         }
         with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}), \
                 concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as executor:
@@ -173,6 +196,7 @@ class BenchmarkReverifyTests(unittest.TestCase):
         self.assertIn("CRASH_RATE: 5/5", (with_args / "sanitizer.txt").read_text())
         self.assertIn("CRASH_RATE: 0/5", (without_args / "sanitizer.txt").read_text())
         self.assertIn("CRASH_RATE: 5/5", (normalized / "sanitizer.txt").read_text())
+        self.assertIn("CRASH_RATE: 5/5", (ordered / "sanitizer.txt").read_text())
 
     def test_split_config_suffix_and_unsafe_path_resolution(self) -> None:
         nonce = uuid.uuid4().hex

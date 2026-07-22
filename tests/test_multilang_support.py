@@ -226,6 +226,20 @@ class MultiLanguageSupportTests(unittest.TestCase):
             result = self.run_probe(testcase)
             self.assertIn(expected(testcase.resolve()), result.stdout + result.stderr)
 
+        scratch = self.tree(
+            "native-cli-args",
+            f'target = "multilang"\nbuild_system = "cmake"\n'
+            f'asan_bin = "{printer}"\n[sanitizer]\nenabled = ["asan"]\n'
+            '[runner]\nargs = ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"]\n',
+        )
+        testcase = self.make_testcase(scratch / "native-input.bin")
+        result = self.run_probe(testcase)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            f"ARGV=--input {testcase.resolve()} --sink {os.devnull}",
+            result.stdout + result.stderr,
+        )
+
     def test_typescript_relative_runner_and_interpreted_harness(self) -> None:
         ts_node = self.executable(
             self.target / "node_modules" / ".bin" / "ts-node",

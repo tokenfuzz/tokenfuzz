@@ -545,10 +545,13 @@ def materialize(
                 encoding="utf-8",
             )
         if args:
-            quoted = " ".join(shlex.quote(arg) for arg in args)
+            replay_args = list(args)
+            if "{TESTCASE}" not in replay_args:
+                replay_args.insert(0, "{TESTCASE}")
+            quoted = " ".join(shlex.quote(arg) for arg in replay_args)
             (destination / "repro.cmd").write_text(
                 "# Args after the target binary or harness. {TESTCASE} is replaced by export-repro.\n"
-                f"{{TESTCASE}} {quoted}\n"
+                f"{quoted}\n"
             )
         diagnostic_pattern = re.compile(
             r"(AddressSanitizer|UndefinedBehaviorSanitizer|MemorySanitizer|ThreadSanitizer|LeakSanitizer): [a-zA-Z0-9-]+"

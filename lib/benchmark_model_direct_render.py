@@ -167,7 +167,7 @@ def _build_crash_objective(present: bool, build_dir: Path, label: str,
 
 
 def _build_invocation(san, bin_path: Path | None, output_dir: str,
-                      options: str, profile: dict) -> str:
+                      options: str, profile: dict, cfg=None) -> str:
     # output_dir is the cell's results dir; rendered absolute so a model
     # that has `cd`'d into the source tree still writes back to the
     # right place. Relative `./crashes/...` in this hint silently
@@ -180,13 +180,25 @@ def _build_invocation(san, bin_path: Path | None, output_dir: str,
     env = profile["env"]
     crash_dir = f"{output_dir}/crashes/CRASH-N"
     opt_line = _env_assignment(env, options)
+    testcase = f"{crash_dir}/input"
+    command = f"{bin_path} <args>"
+    if cfg is not None and cfg.runner_args and not cfg.runner_bin:
+        args = [
+            _expand_runner_token(value, cfg, san, testcase, output_dir)
+            for value in cfg.runner_args
+        ]
+        if not any("{TESTCASE}" in value for value in cfg.runner_args):
+            args.append(testcase)
+        command = " ".join(
+            shlex.quote(str(value)) for value in (bin_path, *args)
+        )
     return (
         f"### Driving the {label} binary directly\n"
         f"\nA sanitizer-instrumented CLI is at:\n\n    {bin_path}\n\n"
         "Invoke it with crafted inputs and capture stderr to catch\n"
         f"{longn} output. Suggested wrapper:\n\n"
         f"    {opt_line} \\\n"
-        f"      {bin_path} <args>  2> {crash_dir}/sanitizer.txt\n\n"
+        f"      {command}  2> {crash_dir}/sanitizer.txt\n\n"
         "Try malformed inputs (URL escapes, oversized fields, protocol\n"
         "edge cases, integer extremes, embedded NULs) and inputs that\n"
         "exercise the surface area the source review flagged.\n\n"
@@ -253,6 +265,7 @@ def _expand_runner_token(value: str, cfg, san: str, testcase: str,
     out = value
     replacements = {
         "{TESTCASE}": testcase,
+        "{NULL_DEVICE}": os.devnull,
         "{TARGET_ROOT}": cfg.target_root,
         "{RESULTS_DIR}": output_dir,
         "{TARGET_SLUG}": cfg.slug,
@@ -419,6 +432,7 @@ def render(target_path: str, output_dir: str, script_root: str, wall_seconds: in
     link_libs: list[str] = []
     race_runner_hint = ""
     sanitizer_runner_hint = ""
+    cfg = None
     # build_dir is for display only; resolve_path applies AUDIT_BUILD_SUFFIX
     # so the message names the build tree that actually exists in-container.
     build_dir = target / "build-asan"
@@ -481,7 +495,7 @@ def render(target_path: str, output_dir: str, script_root: str, wall_seconds: in
             bool(race_runner_hint), bool(sanitizer_runner_hint)),
         "asan_invocation_hint": (
             race_runner_hint or sanitizer_runner_hint or _build_invocation(
-                san, bin_path, output_dir, options, profile)
+                san, bin_path, output_dir, options, profile, cfg)
         ),
         "harness_build_recipe": _build_recipe(
             san, lib_path, include_dirs, link_libs, output_dir,

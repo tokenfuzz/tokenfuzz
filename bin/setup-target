@@ -212,35 +212,79 @@ class Setup:
             result.append("oss")
         return result
 
+    def run_config_helper(self, helper: str, helper_args: list[str]) -> None:
+        executable = SCRIPT_ROOT / "bin" / helper
+        if not os.access(executable, os.X_OK):
+            return
+        candidates = self.backend_candidates()
+        for index, backend in enumerate(candidates):
+            environment = {
+                **os.environ, "SCRIPT_ROOT": str(SCRIPT_ROOT),
+                "ACTIVE_BACKEND": backend, "BACKEND": backend,
+                "LLM_BOOTSTRAP_QUIET": "1",
+            }
+            completed = subprocess.run(
+                [str(executable), *helper_args], env=environment
+            )
+            if completed.returncode == 0:
+                log(
+                    f"config bootstrap: {helper} succeeded on "
+                    f"backend={backend} - updated output/{self.name}/target.toml"
+                )
+                return
+            if completed.returncode == 4:
+                log(
+                    f"config bootstrap: {helper} kept the existing curated "
+                    f"section on backend={backend}"
+                )
+                return
+            next_backend = candidates[index + 1] if index + 1 < len(candidates) else ""
+            if next_backend:
+                log(
+                    f"config bootstrap: {helper} returned "
+                    f"rc={completed.returncode} on backend={backend} - "
+                    f"retrying with backend={next_backend}"
+                )
+            else:
+                log(
+                    f"config bootstrap: {helper} returned "
+                    f"rc={completed.returncode} on backend={backend} - "
+                    "no remaining backends"
+                )
+
     def llm_bootstrap(self) -> None:
         if not self.seeded_full:
             return
         if self.args.no_llm_config or os.environ.get("AUDIT_NEW_TARGET_BOOTSTRAP", "1") == "0" or os.environ.get("LLM_DECIDE_DISABLE", "0") == "1":
             return
-        candidates = self.backend_candidates()
         for helper in ("suggest-threat-model", "suggest-peers"):
-            executable = SCRIPT_ROOT / "bin" / helper
-            if not os.access(executable, os.X_OK):
-                continue
             helper_args = [self.name, "--apply"]
             if helper == "suggest-threat-model" or self.args.force:
                 helper_args.append("--force")
-            attempts: list[str] = []
-            for index, backend in enumerate(candidates):
-                environment = {**os.environ, "SCRIPT_ROOT": str(SCRIPT_ROOT), "ACTIVE_BACKEND": backend, "BACKEND": backend, "LLM_BOOTSTRAP_QUIET": "1"}
-                completed = subprocess.run([str(executable), *helper_args], env=environment)
-                if completed.returncode == 0:
-                    log(f"config bootstrap: {helper} succeeded on backend={backend} - updated output/{self.name}/target.toml")
-                    break
-                if completed.returncode == 4:
-                    log(f"config bootstrap: {helper} kept the existing curated section on backend={backend}")
-                    break
-                attempts.append(f"{backend}(rc={completed.returncode})")
-                next_backend = candidates[index + 1] if index + 1 < len(candidates) else ""
-                if next_backend:
-                    log(f"config bootstrap: {helper} returned rc={completed.returncode} on backend={backend} - retrying with backend={next_backend}")
-                else:
-                    log(f"config bootstrap: {helper} returned rc={completed.returncode} on backend={backend} - no remaining backends")
+            self.run_config_helper(helper, helper_args)
+
+    def runner_bootstrap(self) -> None:
+        """Derive native CLI argv after the sanitizer build is selectable."""
+        if (
+            self.args.no_llm_config
+            or os.environ.get("AUDIT_NEW_TARGET_BOOTSTRAP", "1") == "0"
+            or os.environ.get("LLM_DECIDE_DISABLE", "0") == "1"
+        ):
+            return
+        config = target_config.Config(target_root=str(self.target_root))
+        target_config.load_toml_into(config, self.toml)
+        if (
+            config.is_browser == "1" or config.build_system not in NATIVE_SYSTEMS
+            or config.runner_bin
+            or (config.runner_args and not self.args.force)
+        ):
+            return
+        if config.first_executable_sanitizer() is None:
+            return
+        helper_args = [self.name, "--apply"]
+        if self.args.force:
+            helper_args.append("--force")
+        self.run_config_helper("suggest-runner", helper_args)
 
     def language_build(self, config: target_config.Config) -> None:
         if not self.args.build:
@@ -459,6 +503,7 @@ class Setup:
         target_config.load_toml_into(config, self.toml)
         self.language_build(config)
         self.sanitizer_builds(config)
+        self.runner_bootstrap()
         print(f"\nNext steps:\n  1. Review output/{self.name}/target.toml.\n  2. Smoke-test with: bin/audit --target {self.name} --backend <claude|codex|gemini|grok|oss> 1")
         return 0
 

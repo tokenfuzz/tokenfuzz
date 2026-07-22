@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Derive a native sanitizer CLI's testcase argv from its own help."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT") \
+    else Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+from llm_decide import llm_decide  # noqa: E402
+from prompt_render import render_template  # noqa: E402
+from timeout import run_timeout  # noqa: E402
+import target_config as tc  # noqa: E402
+
+_MARKER = "# native CLI args set by bin/suggest-runner"
+_PLACEHOLDERS = {"TESTCASE", "NULL_DEVICE"}
+
+
+def read_help(binary: Path, max_bytes: int = 16384) -> str:
+    """Return the first useful bounded help response from a native CLI."""
+    for flag in ("--help", "-h"):
+        try:
+            completed = run_timeout(
+                [str(binary), flag], 10, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        except OSError:
+            continue
+        output = completed.stdout or b""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        if len(output.strip()) >= 80:
+            return output[:max_bytes]
+    return ""
+
+
+def normalize_args(raw: object) -> list[str]:
+    """Validate the bounded, shell-free argv template returned by the LLM."""
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 24:
+        return []
+    args: list[str] = []
+    for value in raw:
+        if (
+            not isinstance(value, str) or not value or len(value) > 256
+            or "\x00" in value or "\n" in value or "\r" in value
+        ):
+            return []
+        if set(re.findall(r"\{([A-Z_]+)\}", value)) - _PLACEHOLDERS:
+            return []
+        args.append(value)
+    if (
+        args.count("{TESTCASE}") != 1
+        or sum(value.count("{TESTCASE}") for value in args) != 1
+    ):
+        return []
+    return args
+
+
+def _assignment_end(lines: list[str], start: int, limit: int) -> int:
+    """Return the end of a possibly multi-line TOML array assignment."""
+    depth = 0
+    quoted = escaped = False
+    for index in range(start, limit):
+        for char in lines[index]:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quoted:
+                escaped = True
+            elif char == '"':
+                quoted = not quoted
+            elif not quoted and char == "[":
+                depth += 1
+            elif not quoted and char == "]":
+                depth -= 1
+        if depth <= 0:
+            return index + 1
+    return limit
+
+
+def set_runner_args(text: str, args: list[str], reasoning: str) -> str:
+    """Set only [runner].args, preserving every other target setting."""
+    lines = text.splitlines()
+    rendered = "args = [" + ", ".join(tc.toml_basic_string(v) for v in args) + "]"
+    comment = tc.toml_comment_lines(
+        "native CLI args set by bin/suggest-runner — " + reasoning.strip()
+    )
+    section = next(
+        (i for i, line in enumerate(lines) if line.strip() == "[runner]"), None
+    )
+    if section is None:
+        if lines and lines[-1]:
+            lines.append("")
+        lines.extend(("[runner]", comment, rendered))
+        return "\n".join(lines) + "\n"
+
+    end = next(
+        (i for i in range(section + 1, len(lines))
+         if lines[i].lstrip().startswith("[")
+         and not lines[i].lstrip().startswith("#")),
+        len(lines),
+    )
+    assignment = next(
+        (i for i in range(section + 1, end)
+         if re.match(r"^\s*args\s*=", lines[i])),
+        None,
+    )
+    if assignment is None:
+        lines[end:end] = [comment, rendered]
+    else:
+        start = assignment - 1 if (
+            assignment > section + 1 and lines[assignment - 1].startswith(_MARKER)
+        ) else assignment
+        finish = _assignment_end(lines, assignment, end)
+        lines[start:finish] = [comment, rendered]
+    return "\n".join(lines) + "\n"
+
+
+def validate_launch(
+    binary: Path, args: list[str], help_text: str, timeout: int,
+) -> tuple[bool, str]:
+    """Reject unsafe launches and commands whose behavior ignores the input."""
+    with tempfile.TemporaryDirectory(prefix="suggest-runner-") as directory:
+        testcase = Path(directory) / "input.bin"
+        missing = Path(directory) / "missing-input.bin"
+        original = b"tokenfuzz invocation probe\n"
+        testcase.write_bytes(original)
+
+        def expand(path: Path) -> list[str]:
+            return [
+                value.replace("{TESTCASE}", str(path)).replace(
+                    "{NULL_DEVICE}", os.devnull
+                )
+                for value in args
+            ]
+
+        try:
+            completed = run_timeout(
+                [str(binary), *expand(testcase)], 10, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, cwd=directory,
+            )
+        except OSError as exc:
+            return False, str(exc)
+        if completed.returncode == 124:
+            return False, "derived invocation timed out after 10 seconds"
+        try:
+            unchanged = testcase.read_bytes() == original
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            return False, "derived invocation modified or removed its testcase"
+        created = [path.name for path in Path(directory).iterdir() if path != testcase]
+        if created:
+            return False, f"derived invocation created output: {created[0]}"
+        try:
+            absent = run_timeout(
+                [str(binary), *expand(missing)], 10, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, cwd=directory,
+            )
+        except OSError as exc:
+            return False, str(exc)
+        if absent.returncode == 124:
+            return False, "derived invocation timed out after 10 seconds"
+        created = [path.name for path in Path(directory).iterdir() if path != testcase]
+        if missing.exists():
+            return False, "derived invocation treated the testcase path as output"
+        if created:
+            return False, f"derived invocation created output: {created[0]}"
+
+        def signature(result: subprocess.CompletedProcess, path: Path) -> tuple[int, str]:
+            output = result.stdout or b""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            normalized = output.replace(str(path), "{TESTCASE}")
+            return result.returncode, normalized.replace(path.name, "{TESTCASE}")
+
+        if signature(completed, testcase) == signature(absent, missing):
+            return False, "derived invocation did not depend on testcase contents or existence"
+        if completed.returncode:
+            output = completed.stdout or b""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            prompt = render_template("validate_runner.md.j2", {
+                "binary": str(binary),
+                "args": repr(args),
+                "returncode": str(completed.returncode),
+                "output": output[:8192] or "(no diagnostic output)",
+                "help": help_text,
+            })
+            decision = llm_decide(
+                "runner-validate", "valid,reasoning", prompt, timeout,
+            )
+            if not decision or decision.get("valid") is not True:
+                reason = (
+                    str((decision or {}).get("reasoning") or "").strip()
+                    or "nonzero launch did not prove the testcase was consumed as input"
+                )
+                return False, reason
+    return True, ""
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("slug")
+    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--timeout", type=int, default=120)
+    args = parser.parse_args(argv)
+
+    target = ROOT / "targets" / args.slug
+    target_toml = ROOT / "output" / args.slug / "target.toml"
+    if not target_toml.is_file():
+        print(f"[suggest-runner] target.toml not found: {target_toml}", file=sys.stderr)
+        return 1
+    cfg = tc.Config(target_root=str(target))
+    tc.load_toml_into(cfg, target_toml)
+    if cfg.runner_args and not args.force:
+        return 4
+    selected = cfg.first_executable_sanitizer()
+    if selected is None:
+        print("[suggest-runner] no executable sanitizer binary is configured", file=sys.stderr)
+        return 1
+    sanitizer, binary_name = selected
+    binary = Path(binary_name)
+    help_text = read_help(binary)
+    if not help_text:
+        print(f"[suggest-runner] could not read help from {binary}", file=sys.stderr)
+        return 1
+    prompt = render_template("suggest_runner.md.j2", {
+        "slug": args.slug,
+        "binary": cfg.sanitizer_bin(sanitizer),
+        "readme": tc.read_readme_excerpt(target) or "(no README found)",
+        "help": help_text,
+    })
+    result = llm_decide("runner-suggest", "args,reasoning", prompt, args.timeout)
+    if result is None:
+        return 2
+    runner_args = normalize_args(result.get("args"))
+    reasoning = str(result.get("reasoning", "")).strip()
+    if not runner_args:
+        print(f"[suggest-runner] invalid argv template: {result!r}", file=sys.stderr)
+        return 3
+    valid, reason = validate_launch(binary, runner_args, help_text, args.timeout)
+    if not valid:
+        print(f"[suggest-runner] refusing argv template: {reason}", file=sys.stderr)
+        return 3
+
+    current = target_toml.read_text(encoding="utf-8")
+    candidate = set_runner_args(current, runner_args, reasoning)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", suffix=".toml",
+        dir=target_toml.parent, delete=False,
+    ) as stream:
+        stream.write(candidate)
+        temporary = Path(stream.name)
+    try:
+        parsed = tc.Config(target_root=str(target))
+        tc.load_toml_into(parsed, temporary)
+    except Exception as exc:
+        temporary.unlink(missing_ok=True)
+        print(f"[suggest-runner] refusing invalid target.toml: {exc}", file=sys.stderr)
+        return 3
+    if args.apply:
+        os.replace(temporary, target_toml)
+        print(f"[suggest-runner] configured native CLI argv in {target_toml}", file=sys.stderr)
+    else:
+        temporary.unlink(missing_ok=True)
+        print("[runner]")
+        print("args = [" + ", ".join(tc.toml_basic_string(v) for v in runner_args) + "]")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

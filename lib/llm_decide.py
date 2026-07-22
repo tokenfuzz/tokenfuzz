@@ -855,7 +855,7 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     """
     known_decisions = {
         "find_quality", "find_quality_batch", "reachability_fields_batch",
-        "work_rerank", "s6-peer-suggest", "threat-model-suggest",
+        "work_rerank", "runner-suggest", "s6-peer-suggest", "threat-model-suggest",
         "s6-peer-distill", "s6-peer-map",
     }
     if decision not in known_decisions:
@@ -904,6 +904,11 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
             ):
                 return False
         return True
+    if decision == "runner-suggest":
+        return (
+            _is_string_list(parsed.get("args"))
+            and _is_string(parsed.get("reasoning", ""))
+        )
     if decision == "s6-peer-suggest":
         return (
             _is_string(parsed.get("domain"))

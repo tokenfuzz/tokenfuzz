@@ -1,0 +1,25 @@
+Decide whether this nonzero command launch reached parsing of the disposable
+testcase as an INPUT, rather than treating it as an output path or rejecting
+the command shape before input processing.
+
+Binary: {{ binary }}
+Argv template: {{ args }}
+Return code: {{ returncode }}
+
+Bounded diagnostic output:
+"""
+{{ output }}
+"""
+
+Bounded program help:
+"""
+{{ help }}
+"""
+
+Return one JSON object only:
+{"valid": true|false, "reasoning": "one short evidence-based sentence"}
+
+Set valid=true only when the diagnostic identifies the testcase as an input
+that was opened, decoded, parsed, or rejected for invalid input content.
+Set valid=false for usage text, unknown/missing options or operands, an output
+format/path error, a write/overwrite request, or ambiguous diagnostics.

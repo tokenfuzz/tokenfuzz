@@ -162,6 +162,40 @@ class SetupTargetTests(unittest.TestCase):
         self.assertIn("rapidjson", text)
         self.assertNotIn("oldjson", text)
 
+    def test_native_cli_invocation_bootstraps_after_binary_detection(self) -> None:
+        self.assertEqual(self.setup("demo", str(self.remote)).returncode, 0)
+        target = self.harness / "targets" / "demo"
+        binary = target / "build-ubsan" / "demo"
+        binary.parent.mkdir(parents=True)
+        binary.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+        binary.chmod(0o755)
+        self.config("demo").write_text(
+            'target = "demo"\nbuild_system = "cmake"\n'
+            '[sanitizer]\nenabled = ["ubsan"]\n'
+            'ubsan_bin = "build-ubsan/demo"\n',
+            encoding="utf-8",
+        )
+        helper = self.harness / "bin" / "suggest-runner"
+        helper.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib\n"
+            "root = pathlib.Path(os.environ['SCRIPT_ROOT'])\n"
+            "path = root / 'output' / 'demo' / 'target.toml'\n"
+            "path.write_text(path.read_text() + "
+            "'\\n[runner]\\nargs = [\"--input\", \"{TESTCASE}\"]\\n')\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        process = self.setup(
+            "demo", "--no-update",
+            environment={"ACTIVE_BACKEND": "codex", "LLM_DECIDE_DISABLE": "0"},
+        )
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertIn("suggest-runner succeeded", process.stdout)
+        config = target_config.Config(target_root=str(target))
+        target_config.load_toml_into(config, self.config("demo"))
+        self.assertEqual(config.runner_args, ["--input", "{TESTCASE}"])
+
     def test_plain_local_sources_nested_slugs_and_reserved_components(self) -> None:
         self.git("init", str(self.harness))
         plain = self.harness / "targets" / "plain-cpp"

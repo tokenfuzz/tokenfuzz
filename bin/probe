@@ -224,6 +224,7 @@ def expand_runner(value: str, testcase: Path, sanitizer_name: str, config: targe
         "{TESTCASE}": str(testcase), "{SANITIZER}": sanitizer_name,
         "{SWIFT_SANITIZER}": swift or "", "{TARGET_ROOT}": config.target_root,
         "{RESULTS_DIR}": config.results_dir, "{TARGET_SLUG}": config.slug,
+        "{NULL_DEVICE}": os.devnull,
     }
     for token, replacement in replacements.items():
         value = value.replace(token, replacement)
@@ -443,6 +444,7 @@ class Probe:
             )
         self.harness_source: Path | None = None
         self.build_kind = ""
+        self.repro_args = list(self.args.args)
         self.environment = self._environment()
         self.command = self._command()
 
@@ -610,11 +612,18 @@ class Probe:
             return [str(BIN_DIR / "run-sanitizer-multi"), self.sanitizer, self.mode, str(self.exec_testcase), *self.args.args]
 
         uses_runner = False
+        uses_sanitizer_args = False
         raw_bin = self.config.sanitizer_bin(self.sanitizer)
         if override:
             binary = override
         elif raw_bin:
             binary = self.config.resolve_path(raw_bin)
+            # A native sanitizer CLI may need an input flag or a sink argument
+            # instead of accepting the testcase positionally. Reuse the
+            # existing argv template without replacing the instrumented binary.
+            uses_sanitizer_args = bool(
+                self.config.runner_args and not self.config.runner_bin
+            )
         elif self.config.runner_bin:
             binary = resolve_executable(self.config.runner_bin, self.config)
             uses_runner = True
@@ -627,12 +636,23 @@ class Probe:
             self.environment["ASAN_GENERIC_DISABLE_OPTIONS"] = "1"
         generic_args: list[str] = []
         skip = False
-        if not harness and not preargs and uses_runner and self.config.runner_args:
+        if (
+            not harness and not preargs
+            and (uses_runner or uses_sanitizer_args)
+            and self.config.runner_args
+        ):
             generic_args = [expand_runner(value, self.exec_testcase, self.sanitizer, self.config) for value in self.config.runner_args]
             skip = any("{TESTCASE}" in value for value in self.config.runner_args)
             if not skip:
                 generic_args.append(str(self.exec_testcase))
                 skip = True
+            self.repro_args = [
+                expand_runner(value, Path("{TESTCASE}"), self.sanitizer, self.config)
+                for value in self.config.runner_args
+            ]
+            if "{TESTCASE}" not in self.repro_args:
+                self.repro_args.append("{TESTCASE}")
+            self.repro_args.extend(self.args.args)
         elif preargs:
             generic_args = [*preargs, str(self.exec_testcase)]
             skip = True
@@ -816,7 +836,7 @@ class Probe:
         try:
             status, crash_id = crash_bundle.materialize(
                 self.config.results_dir, self.agent, self.testcase, self.output,
-                self.sanitizer, self.mode, harness=self.harness_source, args=self.args.args,
+                self.sanitizer, self.mode, harness=self.harness_source, args=self.repro_args,
                 target=self.header["target"], hypothesis=self.header["hypothesis"],
                 card=self.card, strategy=strategy,
                 binary=self.environment.get(

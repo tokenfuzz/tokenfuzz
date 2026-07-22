@@ -1,0 +1,36 @@
+You are configuring how an audit harness passes one crafted input file to a
+sanitizer-instrumented command-line program. Derive the smallest read-only argv
+template from the program's own help. Do not guess options absent from the help.
+
+Target:
+  slug   = {{ slug }}
+  binary = {{ binary }}
+
+README excerpt:
+"""
+{{ readme }}
+"""
+
+Program help:
+"""
+{{ help }}
+"""
+
+Return a single JSON object (no prose, no fences):
+{
+  "args": ["...", "{TESTCASE}", "..."],
+  "reasoning": "<one short sentence citing the help syntax>"
+}
+
+Rules:
+- `args` is an argv array, never a shell command.
+- Include `{TESTCASE}` exactly once where the input file belongs.
+- Prefer a parse, inspect, decode, or validate operation that exercises the
+  input and exits. Do not modify the testcase.
+- If the program requires an output, send it to `{NULL_DEVICE}` and select any
+  documented no-output/null sink needed to keep the command valid.
+- Add only stable, non-interactive options needed for a deterministic audit
+  run. Do not add verbosity, networking, rebuild, overwrite, or debug options.
+- If `binary TESTCASE` already means "read this input", return
+  `["{TESTCASE}"]`.
+- At most 24 arguments; each argument must be at most 256 characters.

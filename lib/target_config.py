@@ -163,6 +163,29 @@ def toml_comment_lines(text: str) -> str:
     return "\n".join("# " + line for line in lines)
 
 
+_README_CANDIDATES = (
+    "README.md", "README.rst", "README.txt", "README", "Readme.md",
+    "README.markdown",
+)
+
+
+def read_readme_excerpt(
+    target_root: "str | os.PathLike", max_bytes: int = 2048,
+) -> str:
+    """Return a bounded README excerpt for target-configuration decisions."""
+    root = Path(target_root)
+    for name in _README_CANDIDATES:
+        path = root / name
+        if path.is_file():
+            try:
+                return path.read_text(
+                    encoding="utf-8", errors="replace"
+                )[:max_bytes]
+            except OSError:
+                continue
+    return ""
+
+
 # Canonical attacker_controls tokens. Anything outside this set is logged on
 # stderr and dropped (silent acceptance would weaken lib/triage.py's verdict
 # matrix). Order matches lib/target_config.py:TARGET_ATTACKER_CONTROLS_VALID.
@@ -1884,7 +1907,8 @@ def seed_toml(
     # ── [runner] block (language-agnostic invocation) ───────────────
     # Always emit a [runner] block (commented unless we have a default
     # for the detected build_system). bin/probe and bin/run-asan generic
-    # consult it when no sanitizer binary is configured. crash_patterns
+    # use `bin` when no sanitizer binary is configured; an args-only block
+    # describes how a native sanitizer CLI consumes its testcase. crash_patterns
     # is read by lib/triage.py to detect runtime crashes (panics,
     # tracebacks, race-detector reports) on top of its built-in markers.
     runner_default = language_runner_defaults(build_system)
@@ -1921,9 +1945,9 @@ def seed_toml(
         lines += [
             "",
             "# ── Runner (language / interpreter / driver invocation) ────────",
-            "# Uncomment and edit if this target is a script/interpreter audit.",
-            "# bin/probe routes here when [sanitizer].enabled = [] or no",
-            "# <san>_bin is set. '{TESTCASE}' expands to the testcase path.",
+            "# Uncomment and edit for a script runner, or set args alone when",
+            "# the sanitizer CLI needs input flags. '{TESTCASE}' expands to the",
+            "# testcase path; '{NULL_DEVICE}' expands to the platform null sink.",
             "# [runner]",
             '# bin            = "/usr/bin/env"',
             '# args           = ["python3", "{TESTCASE}"]',
@@ -2044,12 +2068,11 @@ class Config:
     s6_peers: list[str] = field(default_factory=list)
     s6_domain: str = ""
 
-    # [runner] table — language-agnostic program invocation. Used by
-    # bin/probe / bin/run-asan generic when no ASan binary is configured
-    # (or when sanitizers are explicitly disabled). The `bin` is an
-    # interpreter or driver (python3, node, go, ruby, cargo, ...). The
-    # `args` list takes literal arguments; the token "{TESTCASE}" is
-    # substituted with the testcase path. The `env` list is a flat list
+    # [runner] table — language-agnostic program invocation. `bin` selects an
+    # interpreter or driver when no sanitizer binary is configured. `args`
+    # also describes how a configured native sanitizer CLI consumes an input
+    # when `bin` is omitted. The tokens "{TESTCASE}" and "{NULL_DEVICE}" are
+    # substituted at runtime. The `env` list is a flat list
     # of "KEY=VAL" strings layered on the runtime environment.
     # `crash_patterns` is a list of regex strings that lib/triage.py
     # treats as additional crash signals (Go data races, Python panics,
@@ -2112,6 +2135,17 @@ class Config:
         if name == "tsan":
             return self.tsan_bin
         return ""
+
+    def first_executable_sanitizer(self) -> tuple[str, str] | None:
+        """Return the first enabled sanitizer and executable binary path."""
+        for name in self.sanitizers_enabled:
+            raw = self.sanitizer_bin(name)
+            if not raw:
+                continue
+            resolved = self.resolve_path(raw)
+            if Path(resolved).is_file() and os.access(resolved, os.X_OK):
+                return name, resolved
+        return None
 
     def sanitizer_lib(self, name: str) -> str:
         name = name.lower()
@@ -2237,7 +2271,7 @@ def _apply_runner_section(cfg: Config, raw: dict, source_path: str) -> None:
     """Populate cfg.runner_* from a [runner] subtable.
 
     Accepts:
-      bin            = "/usr/bin/python3"       # interpreter or driver
+      bin            = "/usr/bin/python3"       # optional interpreter/driver
       args           = ["-X", "dev", "{TESTCASE}"]  # literal args (use
                                                     # "{TESTCASE}" token
                                                     # for the testcase path)

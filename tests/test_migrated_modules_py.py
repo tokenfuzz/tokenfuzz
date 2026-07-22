@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -481,6 +482,25 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     equal("FILED", outcome, "crash bundle materializes a first confirmed diagnostic")
     bundle_dir = bundle_results / "crashes" / crash_id
     check((bundle_dir / "report.md").is_file() and (bundle_dir / "repro.cmd").is_file(), "crash bundle includes report and replay arguments")
+    equal(
+        ["{TESTCASE}", "--decode"],
+        shlex.split((bundle_dir / "repro.cmd").read_text().splitlines()[-1]),
+        "crash bundle keeps trailing probe arguments after the testcase",
+    )
+    template_case = root / "template-bundle.dat"
+    template_case.write_text("input\n", encoding="utf-8")
+    _, template_id = crash_bundle.materialize(
+        bundle_results, "2", template_case, bundle_san, "asan", "generic",
+        args=("--input", "{TESTCASE}", "--sink", "/dev/null"),
+    )
+    equal(
+        ["--input", "{TESTCASE}", "--sink", "/dev/null"],
+        shlex.split(
+            (bundle_results / "crashes" / template_id / "repro.cmd")
+            .read_text().splitlines()[-1]
+        ),
+        "crash bundle preserves a learned runner template's testcase position",
+    )
     created_at = (bundle_dir / ".crash-created-at").read_text(encoding="utf-8")
     check(bool(created_at.strip()), "crash bundle records its immutable filing clock")
     duplicate, duplicate_id = crash_bundle.materialize(

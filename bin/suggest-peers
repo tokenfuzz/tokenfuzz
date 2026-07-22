@@ -42,24 +42,6 @@ from prompt_render import render_template  # noqa: E402
 import target_config as tc  # noqa: E402
 
 S6_DOC = ROOT / ".agents" / "references" / "strategies" / "S6-cross-project.md"
-README_CANDIDATES = (
-    "README.md", "README.rst", "README.txt", "README", "Readme.md",
-    "README.markdown",
-)
-
-
-def read_readme_excerpt(target_root: Path, max_bytes: int = 2048) -> str:
-    """First max_bytes of the target's README, if present."""
-    for name in README_CANDIDATES:
-        p = target_root / name
-        if p.is_file():
-            try:
-                return p.read_text(encoding="utf-8", errors="replace")[:max_bytes]
-            except OSError:
-                continue
-    return ""
-
-
 def read_s6_taxonomy() -> str:
     """The taxonomy table from the S6 strategy doc, for LLM context."""
     if not S6_DOC.is_file():
@@ -161,7 +143,7 @@ def main(argv: list[str]) -> int:
     except Exception as e:
         print(f"[suggest-peers] warning: target.toml parse: {e}", file=sys.stderr)
 
-    readme_excerpt = read_readme_excerpt(targets_dir) if targets_dir.is_dir() else ""
+    readme_excerpt = tc.read_readme_excerpt(targets_dir) if targets_dir.is_dir() else ""
     taxonomy = read_s6_taxonomy()
     prompt = build_prompt(args.slug, upstream_url, readme_excerpt, taxonomy)
 

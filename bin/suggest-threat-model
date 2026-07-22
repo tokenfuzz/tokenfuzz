@@ -44,10 +44,6 @@ from llm_decide import llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
 import target_config as tc  # noqa: E402
 
-README_CANDIDATES = (
-    "README.md", "README.rst", "README.txt", "README", "Readme.md",
-    "README.markdown",
-)
 # Directories whose headers are build scaffolding / vendored deps, not the
 # target's own public API surface. Structural names, not project-specific.
 _API_SKIP_DIRS = {
@@ -59,18 +55,6 @@ _MARKER_BODY = "attacker_controls set by bin/suggest-threat-model"
 # Tests and in-place stale-comment detection match against the
 # fully-rendered comment line. Keep that string spelled exactly once.
 _MARKER = "# " + _MARKER_BODY
-
-
-def read_readme_excerpt(target_root: Path, max_bytes: int = 2048) -> str:
-    """First max_bytes of the target's README, if present."""
-    for name in README_CANDIDATES:
-        p = target_root / name
-        if p.is_file():
-            try:
-                return p.read_text(encoding="utf-8", errors="replace")[:max_bytes]
-            except OSError:
-                continue
-    return ""
 
 
 def collect_api_surface(target_root: Path, max_headers: int = 60) -> str:
@@ -231,7 +215,7 @@ def main(argv: list[str]) -> int:
     except Exception as e:
         print(f"[suggest-threat-model] warning: target.toml parse: {e}", file=sys.stderr)
 
-    readme = read_readme_excerpt(targets_dir)
+    readme = tc.read_readme_excerpt(targets_dir)
     api_surface = collect_api_surface(targets_dir)
     prompt = build_prompt(args.slug, cfg.upstream_url, readme, api_surface)
 
