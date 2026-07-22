@@ -1283,14 +1283,10 @@ def detect_web_vuln(text_lower: str) -> tuple[str, str] | None:
     return None
 
 
-# Primitive keys that are derived from prose REGEX (web/app classes +
-# reasoning classes), not from a precise sanitizer signal. When a
-# report also carries a structured Primitive field, that deliberate
-# classification outranks a prose-regex guess — but a sanitizer-class match
-# (heap-buffer-overflow, UAF, data race, …) is precise and always wins. This
-# is the precedence rule applied in compute_severity. info_leak is *excluded*
-# here: it doubles as a sanitizer-ish "uninitialized read" detection, so it
-# stays authoritative.
+# Primitive keys derived solely from prose regexes. They remain eligible for
+# replacement by the quality gate's validated class when no report field or
+# runtime diagnostic already supplied a stronger classification. info_leak is
+# excluded because it also represents a precise MSan diagnostic.
 _NARRATIVE_ONLY_PRIMITIVES = frozenset({
     "code_execution", "command_injection", "deserialization", "sqli", "ssti",
     "authn_bypass", "authz_bypass", "idor", "sandbox_escape", "ssrf",
@@ -1860,25 +1856,33 @@ def compute_severity(report_text: str,
     # dev/test paths in the narrative even when the Surface field is unset.
     fields["_report_text"] = report_text
 
-    # Primitive: prefer a structured Primitive field that names a known class
-    # when the narrative detector fell
-    # through to "unknown" or matched only a prose-regex web class. A
-    # precise sanitizer-class match (ASan / UBSan / TSan) is never overridden.
+    # Evidence precedence is strict: a runtime sanitizer diagnostic wins,
+    # otherwise a structured Primitive field wins over narrative keywords.
+    # This prevents a report about a confirmed read from being upgraded to a
+    # write primitive merely because its discussion mentions a sibling write.
     prim_key, prim_label = detect_primitive(report_text)
-    # A precise ASan/UBSan/TSan class match is authoritative — never overridden
-    # or demoted below.
-    sanitizer_authoritative = prim_key != "unknown" and prim_key not in _NARRATIVE_ONLY_PRIMITIVES
+    narrative_memory_classified = (
+        prim_key != "unknown" and prim_key not in _NARRATIVE_ONLY_PRIMITIVES
+    )
+    runtime_authoritative = (
+        prim_key != "unknown"
+        and stack_frames.has_sanitizer_diagnostic(report_text)
+        and prim_key not in _NARRATIVE_ONLY_PRIMITIVES
+    )
+    structured_authoritative = False
     primitive_field = (fields.get("primitive_field") or "").strip().lower()
     if primitive_field in CVSS4_CLASS and primitive_field != "unknown":
-        if prim_key == "unknown" or prim_key in _NARRATIVE_ONLY_PRIMITIVES:
+        if not runtime_authoritative:
             prim_key = primitive_field
             prim_label = primitive_field.replace("_", " ")
+            structured_authoritative = True
     elif fields.get("class_field"):
         class_key, class_label = detect_primitive(fields["class_field"])
-        if class_key in CVSS4_CLASS and (prim_key == "unknown" or prim_key in _NARRATIVE_ONLY_PRIMITIVES):
+        if class_key in CVSS4_CLASS and not runtime_authoritative:
             prim_key = class_key
             prim_label = class_label
-    if report_dir is not None and (
+            structured_authoritative = True
+    if report_dir is not None and not structured_authoritative and (
         prim_key == "unknown" or prim_key in _NARRATIVE_ONLY_PRIMITIVES
     ):
         validated_primitive, validated_class = _accepted_finding_primitive(report_dir)
@@ -1887,15 +1891,12 @@ def compute_severity(report_text: str,
             prim_label = validated_primitive.replace("_", " ")
             fields["validated_class"] = validated_class
 
-    # A sidecar/narrative HIGH-IMPACT primitive (memory-corruption or
-    # disclosure) that no sanitizer class confirmed AND that an on-disk
-    # sanitizer run actively CONTRADICTS (ran clean, no crash) must not score
-    # code-execution impact — that is an unverified model claim, which is a
-    # product non-goal. Demote to unclassified (no CVSS vector). ASan-derived
-    # classes are authoritative (bypassed), and a pure-static finding with no
-    # sanitizer run is untouched (it has no clean-run artifact), so a real
-    # code-review lead keeps its vector and is graded down through E:U instead.
-    if (not sanitizer_authoritative
+    # A sidecar-only HIGH-IMPACT primitive that no runtime or report analysis
+    # supports, and that an on-disk sanitizer run contradicts, must not score
+    # code-execution impact. A concrete source-level memory classification in
+    # the report is not disproved by one clean testcase, so it remains scored
+    # with unproven exploit maturity.
+    if (not runtime_authoritative and not narrative_memory_classified
             and prim_key in _HIGH_IMPACT_PRIMITIVES
             and (_sanitizer_ran_clean(report_dir) or _probe_ran_clean_text(report_text))):
         prim_label = f"{prim_label} (unconfirmed: sanitizer ran clean)"

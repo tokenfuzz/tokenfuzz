@@ -202,8 +202,17 @@ class SeverityTests(unittest.TestCase):
             extra_fields=(("Primitive", "sqli"),),
         )
         self.assertEqual(self.score(structured)["primitive_key"], "sqli")
+        structured_read = self.make_report(
+            "The analysis also discusses a sibling write overflow.",
+            report_id="FIND-READ",
+            extra_fields=(("Primitive", "heap_read_small"),),
+        )
+        self.assertEqual(
+            self.score(structured_read)["primitive_key"], "heap_read_small",
+        )
         sanitizer = self.make_report(
-            "heap-use-after-free\nWRITE of size 8\nopen redirect",
+            "ERROR: AddressSanitizer: heap-use-after-free\n"
+            "WRITE of size 8\nopen redirect",
             report_id="CRASH-AUTH",
             extra_fields=(("Primitive", "open_redirect"),),
         )
