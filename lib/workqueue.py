@@ -4124,6 +4124,7 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
         "testcase_sha1": (getattr(args, "testcase_sha1", "") or "").lower(),
         "asan_output": args.asan_output,
         "verdict": args.verdict,
+        "sanitizer": str(getattr(args, "sanitizer", "") or ""),
         "sanitizer_runs": sanitizer_runs,
         "created_at": now_iso(),
     }

@@ -235,6 +235,7 @@ def main(argv: list[str]) -> int:
     p_run.add_argument("--testcase-sha1", default="", help="sha1 of testcase contents at run time")
     p_run.add_argument("--asan-output", required=True)
     p_run.add_argument("--verdict", required=True)
+    p_run.add_argument("--sanitizer", default="", help="sanitizer selected by bin/probe")
     p_run.add_argument("--sanitizer-runs", default="", help="SANITIZER_RUNS count for this run (1 default, 5 for --confirm)")
     p_run.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 

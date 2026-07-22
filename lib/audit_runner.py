@@ -17,7 +17,7 @@ import threading
 import time
 import traceback
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +25,7 @@ import audit_helpers
 import build_preflight
 import build_config
 import build_session_seed
+import cluster_common
 import housekeeping
 import llm_invoke
 import llm_usage
@@ -200,6 +201,7 @@ class Runtime:
     fixed_strategy: str
     decision_timeout: int
     refill_workers: bool = True
+    cluster_expansion_attempted: set[Path] = field(default_factory=set, repr=False)
 
     def prompt_context(self, guide: str) -> prompt.PromptContext:
         return prompt.PromptContext(
@@ -1046,23 +1048,10 @@ def run_agent_guarded(
         )
 
 
-_CLUSTER_BARE_RE = re.compile(r"^Cluster:\s*([^\s|]+)", re.IGNORECASE)
-_CLUSTER_TABLE_RE = re.compile(r"^\|\s*Cluster\s*\|\s*([^|]+?)\s*\|", re.IGNORECASE)
-
-
 def _artifact_root_id(directory: Path) -> str:
-    for name in ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md"):
-        report = directory / name
-        try:
-            with report.open(encoding="utf-8", errors="replace") as stream:
-                for line in stream:
-                    match = _CLUSTER_BARE_RE.match(line) or _CLUSTER_TABLE_RE.match(line)
-                    if match:
-                        value = match.group(1).strip()
-                        if value and value not in {"—", "-", "?"}:
-                            return value
-        except OSError:
-            continue
+    cluster = cluster_common.artifact_cluster_id(directory)
+    if cluster:
+        return cluster
     # Before the first clustering pass, keep unlabelled artifacts distinct.
     # post_iteration stamps the deterministic root id before the next snapshot.
     return directory.name
@@ -1137,7 +1126,7 @@ def newly_introduced_roots(
 
 def benchmark_count_findings(path: Path):
     import benchmark
-    return benchmark.count_confirmed_findings(path)
+    return benchmark.count_admitted_findings(path)
 
 
 def benchmark_count_crashes(path: Path):
@@ -1210,15 +1199,29 @@ def expand_new_crash_clusters(
 ) -> dict[str, int]:
     """Expand each newly accepted crash once and queue its concrete siblings."""
     _migrate_cluster_backlog(runtime)
-    crashes = [
+    candidates = [
         crash for crash in sorted((runtime.results / "crashes").glob("CRASH-*"))
         if crash.is_dir()
         and not (crash / ".cluster_expanded").is_file()
         and not (crash / ".autodiscard").is_file()
     ]
-    counts = {"expanded": 0, "added": 0, "skipped": 0, "pending": 0}
+    attempted = getattr(runtime, "cluster_expansion_attempted", None)
+    if attempted is None:
+        attempted = set()
+        runtime.cluster_expansion_attempted = attempted
+    crashes = [crash for crash in candidates if crash not in attempted]
+    counts = {
+        "expanded": 0,
+        "added": 0,
+        "skipped": 0,
+        "pending": len(candidates) - len(crashes),
+    }
     if not crashes:
         return counts
+    # Expansion is optional lead generation. A transiently unavailable
+    # decision remains eligible after an audit resume, but retrying the same
+    # timed-out prompt after every live iteration can consume the audit wall.
+    attempted.update(crashes)
     decisions: dict[Path, list[dict] | None] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, runtime.num_agents)) as pool:
         futures = {
@@ -1507,6 +1510,7 @@ class BackendState:
     iteration: int = 0
     dry_streak: int = 0
     paused_seconds: int = 0
+    housekeeping_seconds: float = 0.0
     transient_streak: int = 0
     started_at: float = 0.0
     stopped: bool = False
@@ -1584,7 +1588,9 @@ def _productive_wall_exhausted(state: BackendState) -> bool:
         return False
     index_log(
         state.runtime,
-        f"Reached productive wall budget: {budget}s productive, {state.paused_seconds}s provider pause excluded",
+        f"Reached productive wall budget: {budget}s productive, "
+        f"{state.paused_seconds}s provider pause excluded and "
+        f"{state.housekeeping_seconds:.1f}s housekeeping included",
     )
     state.stopped = True
     return True
@@ -1609,6 +1615,18 @@ def _productive_wall_deadline(state: BackendState) -> float | None:
     if not budget:
         return None
     return state.started_at + budget + state.paused_seconds
+
+
+def _run_post_iteration(state: BackendState) -> None:
+    """Run housekeeping within the audit wall and record its cost."""
+    started = time.monotonic()
+    try:
+        post_iteration(state.runtime, deadline=_productive_wall_deadline(state))
+    finally:
+        state.housekeeping_seconds += max(0.0, time.monotonic() - started)
+        (state.runtime.logs / ".housekeeping_secs").write_text(
+            f"{state.housekeeping_seconds:.6f}\n", encoding="utf-8"
+        )
 
 
 def run_agent_pool(
@@ -1718,7 +1736,7 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     )
     # Agents can file valid artifacts before another worker hits a provider
     # limit. Always triage the iteration before deciding whether to pause.
-    post_iteration(runtime, deadline=_productive_wall_deadline(state))
+    _run_post_iteration(state)
     after = progress(runtime)
     after_agent_progress = {
         agent: agent_progress(runtime, agent, after)

@@ -766,6 +766,7 @@ class Probe:
             "--mode", self.mode, "--testcase", str(self.testcase),
             "--testcase-sha1", hashlib.sha1(self.testcase.read_bytes()).hexdigest(),
             "--asan-output", str(self.output), "--verdict", probe_verdict,
+            "--sanitizer", self.sanitizer,
             "--sanitizer-runs", self.environment["SANITIZER_RUNS"],
         )
         if probe_verdict == "CRASH" and self.sanitizer != "runner":

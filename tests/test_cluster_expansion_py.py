@@ -122,10 +122,14 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
             "hypothesis": "fresh crash exposes another neighbor", "category": "size",
         }]
 
-    with mock.patch.object(triage, "cluster_expansion_decision", side_effect=expansion):
+    with mock.patch.object(triage, "cluster_expansion_decision", side_effect=expansion) as decision:
         counts = audit_runner.expand_new_crash_clusters(runtime)
+        retried = audit_runner.expand_new_crash_clusters(runtime)
     check(counts == {"expanded": 2, "added": 1, "skipped": 0, "pending": 1},
           "driver distinguishes completed, empty, and retryable decisions")
+    check(retried == {"expanded": 0, "added": 0, "skipped": 0, "pending": 1},
+          "unavailable expansion remains pending without retrying in the same audit")
+    check(decision.call_count == 3, "each new crash gets at most one expansion attempt per audit")
     check((fresh / ".cluster_expanded").is_file(), "successful expansion is marked exactly once")
     check((empty / ".cluster_expanded").is_file(), "empty rows are a completed expansion")
     check(not (retry / ".cluster_expanded").exists(), "unavailable decisions remain retryable")

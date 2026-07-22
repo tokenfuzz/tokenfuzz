@@ -16,9 +16,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import audit_runner
+import benchmark
 import file_tools
 import llm_invoke
 import prompt
+import report_identity
 import target_config
 import triage
 import workqueue
@@ -101,6 +103,38 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     check(
         audit_runner.newly_introduced_roots(duplicate, novel) == {"finding:FCL-B"},
         "a newly accepted root cause counts as productivity",
+    )
+    secondary_report = findings / "FIND-004"
+    secondary_report.mkdir()
+    (secondary_report / ".keep").touch()
+    (secondary_report / "report.md").write_text(
+        "# Primary report without a cluster stamp\n", encoding="utf-8"
+    )
+    (secondary_report / "description.md").write_text(
+        "Cluster: FCL-B\n", encoding="utf-8"
+    )
+    secondary_duplicate = audit_runner.progress(runtime)
+    check(
+        not audit_runner.newly_introduced_roots(novel, secondary_duplicate),
+        "progress finds a cluster stamp in a secondary report file",
+    )
+    trigger_pending = findings / "FIND-005"
+    trigger_pending.mkdir()
+    trigger_report = trigger_pending / "report.md"
+    trigger_report.write_text("# State issue\n\nCluster: FCL-C\n", encoding="utf-8")
+    (trigger_pending / ".llm-find-quality.json").write_text(json.dumps({
+        "accept": True,
+        "report_sha1": report_identity.content_sha1(trigger_report),
+    }), encoding="utf-8")
+    pending_progress = audit_runner.progress(runtime)
+    check(
+        audit_runner.newly_introduced_roots(secondary_duplicate, pending_progress)
+        == {"finding:FCL-C"},
+        "a quality-accepted finding counts as audit progress while trigger review is pending",
+    )
+    check(
+        benchmark.count_confirmed_findings(findings)[0] == 4,
+        "strict benchmark credit still excludes the trigger-pending finding",
     )
     (state / "hypotheses.jsonl").write_text(
         json.dumps({"agent": "1", "status": "ENV-BLOCKED"}) + "\n",

@@ -89,6 +89,10 @@ class BenchmarkCliTests(unittest.TestCase):
             metadata = json.loads((run / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["target"], target)
             self.assertEqual(metadata["harness_agents"], 2)
+            self.assertEqual(
+                metadata["finding_confirmation"],
+                benchmark.FINDING_CONFIRMATION_VERSION,
+            )
             self.assertTrue((run / "cells/model-direct-r1/cell.json").is_file())
             self.assertTrue((run / "cells/harness-r1/cell.json").is_file())
             self.assertTrue((run / "pool").is_dir())

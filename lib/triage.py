@@ -611,12 +611,17 @@ def _run_tool(
     ).returncode
 
 
+_REPORT_GATE_DEFAULT_MAX_BYTES = 96 * 1024
+
+
 def _report_gate_cap() -> int:
     try:
-        cap = int(os.environ.get("REPORT_GATE_MAX_BYTES", "262144"))
+        cap = int(os.environ.get(
+            "REPORT_GATE_MAX_BYTES", _REPORT_GATE_DEFAULT_MAX_BYTES,
+        ))
     except ValueError:
-        return 262144
-    return cap if cap >= 1 else 262144
+        return _REPORT_GATE_DEFAULT_MAX_BYTES
+    return cap if cap >= 1 else _REPORT_GATE_DEFAULT_MAX_BYTES
 
 
 def read_report_bounded(path: Path) -> str:
@@ -1136,9 +1141,13 @@ def _trigger_vote(
             )
         except OSError:
             pass
-    if rc == 1:
+    # Exit 1 is also Python's default for an uncaught validator exception. Trust
+    # only the content-addressed artifact, never the process status, for a
+    # finding-removing Reject.
+    vote = _cached_trigger_vote(report, vote_file)
+    if vote == "Reject":
         return 1
-    if rc in (0, 2):
+    if vote in {"Promote", "Uncertain"}:
         return 0
     return 2
 
@@ -1606,13 +1615,12 @@ def _batch_quality_votes(
     return votes
 
 
-def _finalize_accepted_finding(
-    finding_dir: Path, results_dir: Path, report: Path,
-    deadline: float | None,
+def _prepare_accepted_finding(
+    finding_dir: Path, report: Path, deadline: float | None,
     usage_index: str | os.PathLike[str] | None = None,
-    target_root_is_product: bool = False,
     reach_fields_override: object = _NO_REACH_DECISION,
-) -> str:
+) -> Path:
+    """Stabilize report content before a content-addressed trigger vote."""
     if not _deadline_expired(deadline):
         fill_reach_fields(
             finding_dir, usage_index, decision_override=reach_fields_override,
@@ -1622,20 +1630,10 @@ def _finalize_accepted_finding(
     # verdict remains current on the next pass.
     _run_tool("severity", "--report", str(finding_dir))
     report = _report(finding_dir) or report
-    if _finding_trigger_rejected(
-        finding_dir, report, deadline, usage_index,
-        target_root_is_product,
-    ):
-        _reject(
-            finding_dir, results_dir / "findings-rejected",
-            "trigger-provenance: triggering state not attacker-reachable",
-        )
-        return "rejected"
-    # Reach-field and severity enrichment legitimately rewrite the report after
-    # quality quorum. Advance the content key to that finalized text so the
-    # next incremental pass skips it; a later author edit still changes the key
-    # and forces fresh review.
-    report = _report(finding_dir) or report
+    # Quality already reached quorum on the authored report. Advance that
+    # verdict across the harness-owned reach/severity annotations now, even if
+    # trigger review is temporarily unavailable, so a later trigger retry does
+    # not repeat the quality calls first.
     cache_path = finding_dir / ".llm-find-quality.json"
     cache = _finding_cache(cache_path)
     if (
@@ -1645,6 +1643,32 @@ def _finalize_accepted_finding(
         cache["content_sha1"] = _quality_content_sha1(read_report_bounded(report))
         cache["report_sha1"] = report_identity.content_sha1(report)
         _write_atomic_json(cache_path, cache)
+    return report
+
+
+def _finalize_accepted_finding(
+    finding_dir: Path, results_dir: Path, report: Path,
+    deadline: float | None,
+    usage_index: str | os.PathLike[str] | None = None,
+    target_root_is_product: bool = False,
+    reach_fields_override: object = _NO_REACH_DECISION,
+    *,
+    prepared: bool = False,
+) -> str:
+    if not prepared:
+        report = _prepare_accepted_finding(
+            finding_dir, report, deadline, usage_index,
+            reach_fields_override,
+        )
+    if _finding_trigger_rejected(
+        finding_dir, report, deadline, usage_index,
+        target_root_is_product,
+    ):
+        _reject(
+            finding_dir, results_dir / "findings-rejected",
+            "trigger-provenance: triggering state not attacker-reachable",
+        )
+        return "rejected"
     return "accepted"
 
 
@@ -1873,29 +1897,46 @@ def validate_find_gate(
         directory for directory, status in zip(directories, statuses)
         if status == "quality-accepted"
     ]
-    trigger_attempted = _batch_finding_trigger_votes(
-        accepted_quality, results, deadline, benchmark._find_index_jsonl(results),
-        target_root_is_product,
-    )
+    usage_index = benchmark._find_index_jsonl(results)
     reach_attempted, reach_decisions = _batch_reach_field_decisions(
-        accepted_quality, benchmark._find_index_jsonl(results), deadline,
+        accepted_quality, usage_index, deadline,
+    )
+    for directory in accepted_quality:
+        report = _report(directory)
+        if report is None:
+            continue
+        _prepare_accepted_finding(
+            directory, report, deadline, usage_index,
+            reach_decisions.get(directory)
+            if directory in reach_attempted else _NO_REACH_DECISION,
+        )
+    trigger_attempted = _batch_finding_trigger_votes(
+        accepted_quality, results, deadline, usage_index,
+        target_root_is_product,
     )
     for directory, status in zip(directories, statuses):
         if status == "quality-accepted":
             report = _report(directory)
             if (
                 directory in trigger_attempted
-                and not (directory / ".trigger-gate.json").is_file()
+                and (
+                    report is None
+                    or _cached_trigger_vote(
+                        report, directory / ".trigger-gate.json",
+                    ) is None
+                )
             ):
+                # A batch was already attempted. Missing, malformed, or stale
+                # keyed output stays pending for a later bounded pass instead
+                # of immediately spawning a serial per-finding validator.
                 status = "pending"
             else:
                 status = (
                     _finalize_accepted_finding(
                         directory, results, report, deadline,
-                        benchmark._find_index_jsonl(results),
+                        usage_index,
                         target_root_is_product,
-                        reach_decisions.get(directory)
-                        if directory in reach_attempted else _NO_REACH_DECISION,
+                        prepared=True,
                     )
                     if report is not None and not _deadline_expired(deadline)
                     else "pending"

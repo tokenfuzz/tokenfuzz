@@ -412,8 +412,6 @@ def prepare_gemini_effort_settings(model: str = "") -> "str | None":
         return None
     resolved_model = resolve_model_name("gemini", model).strip()
     effort = default_effort("gemini").strip().upper()
-    if not resolved_model or not effort:
-        return None
     key = (resolved_model, effort)
     existing = _gemini_effort_settings.get(key)
     if existing:
@@ -424,12 +422,17 @@ def prepare_gemini_effort_settings(model: str = "") -> "str | None":
     payload = {
         # Gemini CLI has no safe-mode flag. System settings take precedence
         # over user/workspace settings, so disable skills and extensions that
-        # can inject a duplicate workflow.
+        # can inject a duplicate workflow. An empty boundary-marker list makes
+        # the launch cwd the upper bound for GEMINI.md discovery instead of
+        # walking to an enclosing checkout.
         "skills": {"enabled": False},
         "admin": {
             "extensions": {"enabled": False},
         },
-        "modelConfigs": {
+        "context": {"memoryBoundaryMarkers": []},
+    }
+    if resolved_model and effort:
+        payload["modelConfigs"] = {
             "customOverrides": [{
                 "match": {"model": resolved_model},
                 "modelConfig": {
@@ -438,8 +441,7 @@ def prepare_gemini_effort_settings(model: str = "") -> "str | None":
                     },
                 },
             }],
-        },
-    }
+        }
     path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
     _gemini_effort_settings[key] = str(path)
     return str(path)
@@ -481,6 +483,38 @@ _CODEX_MEMORY_OFF_FLAGS = [
 _CODEX_PLUGIN_OFF_FLAGS = [
     "-c", "features.plugins=false",
 ]
+
+# Codex otherwise walks from --cd to the enclosing Git root and loads every
+# AGENTS.md on that path. Benchmark cells live below the TokenFuzz checkout, so
+# that silently gives a model-direct control the harness's audit contract.
+# An empty marker list makes the explicit launch directory the project root;
+# an AGENTS.md in that directory still loads, which is exactly what harness
+# facade launches require.
+_CODEX_PROJECT_ROOT_FLAGS = [
+    "-c", "project_root_markers=[]",
+]
+
+
+def ensure_project_root(path: str | os.PathLike[str]) -> None:
+    """Make path a self-contained CLI project root without invoking Git."""
+    root = Path(path)
+    if not root.is_dir():
+        raise RuntimeError(f"project root does not exist: {root}")
+    git_dir = root / ".git"
+    # Never alter an existing marker. In particular, validator cwds symlink the
+    # target's .git; completing that directory would mutate the checkout under
+    # audit. Both affected CLIs treat even an incomplete marker as a boundary.
+    if git_dir.exists() or git_dir.is_symlink():
+        return
+    for relative in ("objects/info", "objects/pack", "refs/heads"):
+        (git_dir / relative).mkdir(parents=True, exist_ok=True)
+    (git_dir / "HEAD").write_text(
+        "ref: refs/heads/tokenfuzz-launch\n", encoding="utf-8",
+    )
+    (git_dir / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+        encoding="utf-8",
+    )
 
 
 def default_model(backend: str) -> str:
@@ -657,6 +691,7 @@ def agent_flags(
             "--json",
             "--ephemeral",
             *_CODEX_PLUGIN_OFF_FLAGS,
+            *_CODEX_PROJECT_ROOT_FLAGS,
             "--skip-git-repo-check",
             "--sandbox", "danger-full-access",
             "--dangerously-bypass-approvals-and-sandbox",
@@ -784,6 +819,23 @@ def run_agent_prompt(
     )
     first_dir = next((p.strip() for p in add_dirs.split(",") if p.strip()), "")
     working_dir = Path(cwd or first_dir or Path.cwd())
+    # Grok and Antigravity have no launch flag that disables parent project
+    # discovery. Make the directory each CLI treats as its workspace a hard
+    # boundary even when TokenFuzz itself came from a source archive nested in
+    # an unrelated checkout. Existing Git/worktree markers are untouched.
+    try:
+        if backend == "grok":
+            ensure_project_root(first_dir or working_dir)
+        elif backend == "gemini" and not use_gemini_cli():
+            ensure_project_root(working_dir)
+    except (OSError, RuntimeError) as exc:
+        message = f"project boundary unavailable: {exc}"
+        print(f"ERROR: {message}", file=sys.stderr)
+        try:
+            Path(raw_log).write_text(message + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        return 127
     environment = os.environ.copy()
     environment.update(invocation_env(backend, model))
     if extra_env:
@@ -797,10 +849,13 @@ def run_agent_prompt(
         command, input_text = [binary, *flags, prompt], None
     elif backend == "gemini":
         command = [binary, *flags]
-        if not use_gemini_cli():
+        if use_gemini_cli():
+            command.extend(("-p", ""))
+            input_text = prompt
+        else:
             command.extend(("--print-timeout", f"{timeout_secs}s"))
-        command.extend(("-p", ""))
-        input_text = prompt
+            command.extend(("-p", prompt))
+            input_text = None
     elif backend == "grok":
         command, input_text = [binary, *flags, "-p", prompt], None
     else:
@@ -1068,7 +1123,7 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
 
     if backend == "codex":
         flags = [
-            "--ephemeral", *_CODEX_PLUGIN_OFF_FLAGS,
+            "--ephemeral", *_CODEX_PLUGIN_OFF_FLAGS, *_CODEX_PROJECT_ROOT_FLAGS,
             "--skip-git-repo-check", "--sandbox", "read-only",
         ]
         if resolved_model:

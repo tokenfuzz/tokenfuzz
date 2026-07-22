@@ -57,6 +57,8 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         with mock.patch.object(
             triage, "_finalize_accepted_finding", return_value="accepted",
         ), mock.patch.object(
+            triage, "_prepare_accepted_finding", return_value=self.report,
+        ), mock.patch.object(
             triage, "_batch_reach_field_decisions", return_value=(set(), {}),
         ):
             return triage.validate_find_gate(self.root, workers=2)
@@ -263,6 +265,12 @@ Generated score text.
             2,
             report_identity.content_sha1(self.report),
         )))
+        (self.finding / ".trigger-gate.json").write_text(json.dumps({
+            "content_sha1": report_identity.content_sha1(self.report),
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "attacker_controls": triage_validate.trigger_attacker_controls(),
+            "vote": "Promote",
+        }))
         self.assertEqual(benchmark.count_confirmed_findings(self.finding.parent)[0], 1)
         self.assertEqual(finding_signature.read_llm_cache(self.finding)["class"], "auth:bypass")
         self.report.write_text(
@@ -270,6 +278,7 @@ Generated score text.
             encoding="utf-8",
         )
         self.assertEqual(benchmark.count_confirmed_findings(self.finding.parent)[0], 0)
+        self.assertEqual(benchmark.harvest(self.root)["gate_states"][0]["trigger"], "stale")
         self.assertEqual(finding_signature.read_llm_cache(self.finding), {})
 
     def test_independent_batch_chunks_run_in_bounded_parallel(self) -> None:
@@ -365,6 +374,157 @@ Generated score text.
             cache.write_text(json.dumps({**legacy, "vote": "Reject"}))
             self.assertEqual(  # legacy Reject never reused -> fresh review
                 triage._trigger_vote(self.report, cache, "codex", "x", self.root), 2)
+
+    def test_find_gate_stabilizes_report_before_batched_trigger_vote(self) -> None:
+        report_text = triage.read_report_bounded(self.report)
+        (self.finding / ".llm-find-quality.json").write_text(json.dumps(
+            triage._quality_payload(
+                report_text,
+                [
+                    quality_vote(self.finding.name)["items"][0],
+                    quality_vote(self.finding.name)["items"][0],
+                ],
+                2,
+                2,
+                report_identity.content_sha1(self.report),
+            )
+        ))
+
+        def fill(*_args, **_kwargs):
+            self.report.write_text(
+                self.report.read_text() + "\nBoundary: public API\n",
+                encoding="utf-8",
+            )
+            return True
+
+        def batch(directories, *_args, **_kwargs):
+            self.assertEqual(directories, [self.finding])
+            self.assertIn("Boundary: public API", self.report.read_text())
+            (self.finding / ".trigger-gate.json").write_text(json.dumps({
+                "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+                "content_sha1": report_identity.content_sha1(self.report),
+                "attacker_controls": triage_validate.trigger_attacker_controls(),
+                "vote": "Promote",
+            }))
+            return {self.finding}
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage, "_batch_reach_field_decisions",
+            return_value=({self.finding}, {self.finding: {}}),
+        ), mock.patch.object(
+            triage, "fill_reach_fields", side_effect=fill,
+        ), mock.patch.object(
+            triage, "_run_tool", return_value=0,
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", side_effect=batch,
+        ), mock.patch.object(
+            triage.subprocess, "run",
+            side_effect=AssertionError("individual trigger fallback"),
+        ):
+            self.assertEqual(
+                triage.validate_find_gate(self.root, workers=1),
+                {"accepted": 1, "rejected": 0, "pending": 0},
+            )
+
+    def test_malformed_batched_trigger_vote_stays_pending(self) -> None:
+        report_text = triage.read_report_bounded(self.report)
+        (self.finding / ".llm-find-quality.json").write_text(json.dumps(
+            triage._quality_payload(
+                report_text,
+                [
+                    quality_vote(self.finding.name)["items"][0],
+                    quality_vote(self.finding.name)["items"][0],
+                ],
+                2,
+                2,
+                report_identity.content_sha1(self.report),
+            )
+        ))
+
+        def batch(*_args, **_kwargs):
+            (self.finding / ".trigger-gate.json").write_text(
+                json.dumps({"vote": "ParseFailure"})
+            )
+            return {self.finding}
+
+        def fill(*_args, **_kwargs):
+            if "Boundary: public API" not in self.report.read_text():
+                self.report.write_text(
+                    self.report.read_text() + "\nBoundary: public API\n",
+                    encoding="utf-8",
+                )
+            return True
+
+        with mock.patch.object(
+            triage, "_batch_reach_field_decisions",
+            return_value=({self.finding}, {self.finding: {}}),
+        ), mock.patch.object(
+            triage, "fill_reach_fields", side_effect=fill,
+        ), mock.patch.object(
+            triage, "_run_tool", return_value=0,
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", side_effect=batch,
+        ), mock.patch.object(
+            triage, "_batch_decisions",
+            side_effect=AssertionError("quality review repeated after stabilization"),
+        ), mock.patch.object(
+            triage.subprocess, "run",
+            side_effect=AssertionError("individual trigger fallback"),
+        ):
+            self.assertEqual(
+                triage.validate_find_gate(self.root, workers=1),
+                {"accepted": 0, "rejected": 0, "pending": 1},
+            )
+            self.assertEqual(
+                triage.validate_find_gate(self.root, workers=1),
+                {"accepted": 0, "rejected": 0, "pending": 1},
+            )
+        cache = triage._finding_cache(self.finding / ".llm-find-quality.json")
+        self.assertTrue(triage._quality_cache_matches(
+            self.finding / ".llm-find-quality.json",
+            cache,
+            self.report,
+            triage.read_report_bounded(self.report),
+        ))
+
+    def test_trigger_reject_requires_a_valid_vote_artifact(self) -> None:
+        cache = self.finding / ".trigger-gate.json"
+        with mock.patch.dict(
+            os.environ, {"LLM_DECIDE_DISABLE": "0"}, clear=False,
+        ), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(
+            triage.subprocess, "run", return_value=mock.Mock(returncode=1),
+        ):
+            self.assertEqual(
+                triage._trigger_vote(
+                    self.report, cache, "codex", "fixture", self.root,
+                ),
+                2,
+            )
+
+        def write_reject(*_args, **_kwargs):
+            cache.write_text(json.dumps({
+                "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+                "content_sha1": report_identity.content_sha1(self.report),
+                "attacker_controls": triage_validate.trigger_attacker_controls(),
+                "vote": "Reject",
+            }))
+            return mock.Mock(returncode=1)
+
+        with mock.patch.dict(
+            os.environ, {"LLM_DECIDE_DISABLE": "0"}, clear=False,
+        ), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(triage.subprocess, "run", side_effect=write_reject):
+            self.assertEqual(
+                triage._trigger_vote(
+                    self.report, cache, "codex", "fixture", self.root,
+                ),
+                1,
+            )
 
     def test_trigger_validator_stamps_cache_identity(self) -> None:
         validator = runpy.run_path(str(ROOT / "bin" / "validate-finding"))

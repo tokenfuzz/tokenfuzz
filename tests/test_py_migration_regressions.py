@@ -27,8 +27,10 @@ import benchmark_runner
 import gemini_watchdog
 import llm_invoke
 import process_tree
+import report_identity
 import target_config
 import triage
+import triage_validate
 import verdict
 import vocab_rules
 import workqueue
@@ -111,13 +113,22 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     def _budget_drain(results, *_args, **kwargs):
         drained_deadlines.append(kwargs.get("deadline"))
         finding = results / "findings" / "FIND-001"
+        report = finding / "report.md"
         (finding / ".llm-find-quality.json").write_text(
             json.dumps({"accept": True}), encoding="utf-8"
         )
+        if "harness-r2" in results.parts:
+            return {"accepted": 0, "rejected": 0, "pending": 1}
+        (finding / ".trigger-gate.json").write_text(json.dumps({
+            "vote": "Promote",
+            "content_sha1": report_identity.content_sha1(report),
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "attacker_controls": ["bytes"],
+        }), encoding="utf-8")
         return {"accepted": 1, "rejected": 0, "pending": 0}
 
     budget_args = SimpleNamespace(
-        model="test-model", backend="codex", target="sampleproj", replicates=1,
+        model="test-model", backend="codex", target="sampleproj", replicates=2,
         budget_wall=1, finalize_wall=7, agents=1, dry_run=False,
         regenerate=False, validate_findings=True,
     )
@@ -147,9 +158,15 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     budget_metrics = json.loads(
         (cells_dir / "harness-r1" / "metrics.json").read_text(encoding="utf-8")
     )
-    check(budget_rc == 0, "budget-complete harness cell succeeds after final triage")
+    pending_cell = json.loads(
+        (cells_dir / "harness-r2" / "cell.json").read_text(encoding="utf-8")
+    )
+    pending_metrics = json.loads(
+        (cells_dir / "harness-r2" / "metrics.json").read_text(encoding="utf-8")
+    )
+    check(budget_rc == 0, "trigger residue does not discard an otherwise completed benchmark cell")
     check(
-        drained_deadlines == [12],
+        drained_deadlines == [12, 12],
         "final benchmark triage receives its independent deadline",
         repr(drained_deadlines),
     )
@@ -164,6 +181,14 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         repr(budget_metrics),
     )
     check(
+        pending_cell["status"] == "done"
+        and pending_cell["run_quality"] == "clean"
+        and pending_metrics["confirmed_findings"] == 0
+        and pending_metrics["findings_unadjudicated"] == 1,
+        "quality-only findings remain visible without excluding the completed cell",
+        repr((pending_cell, pending_metrics)),
+    )
+    check(
         budget_metrics["confirmed_crashes"] == 3
         and budget_metrics["crashes_pending"] == 1
         and budget_metrics["crashes_rejected"] == 0,
@@ -173,10 +198,10 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     budget_report = benchmark.aggregate(bench_dir, include_pool=False)
     budget_condition = budget_report["conditions"][0]
     check(
-        budget_condition["crash_total"] == 3
-        and budget_condition["pending_crash_total"] == 1
+        budget_condition["crash_total"] == 6
+        and budget_condition["pending_crash_total"] == 2
         and budget_condition["confirmed_finding_total"] == 1,
-        "one pending crash is excluded individually without erasing promoted crashes or validated findings",
+        "pending findings and reports are qualified individually without erasing cell evidence",
         repr(budget_condition),
     )
 
@@ -187,13 +212,18 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     (cells_dir / "harness-r1" / "cell.json").write_text(
         json.dumps(budget_cell), encoding="utf-8"
     )
-    provider_dir = cells_dir / "harness-r2"
+    pending_cell["status"] = "incomplete"
+    pending_cell["run_quality"] = "incomplete"
+    (cells_dir / "harness-r2" / "cell.json").write_text(
+        json.dumps(pending_cell), encoding="utf-8"
+    )
+    provider_dir = cells_dir / "harness-r3"
     provider_dir.mkdir()
     provider_results = provider_dir / "results"
     provider_results.mkdir()
     (provider_dir / ".backend-unavailable").touch()
     (provider_dir / "cell.json").write_text(json.dumps({
-        "condition": "harness", "replicate": 2, "experiment": "provider",
+        "condition": "harness", "replicate": 3, "experiment": "provider",
         "results_dir": str(provider_results), "wall_seconds": 1,
         "status": "incomplete", "run_quality": "provider_limited",
     }), encoding="utf-8")
@@ -214,6 +244,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         )
     recovered = json.loads((cells_dir / "harness-r1" / "cell.json").read_text())
     provider = json.loads((provider_dir / "cell.json").read_text())
+    still_pending = json.loads((cells_dir / "harness-r2" / "cell.json").read_text())
     check(
         recovered["status"] == "done" and recovered["run_quality"] == "clean",
         "regenerate recomputes stale artifact-pending incomplete status",
@@ -223,6 +254,12 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         provider["status"] == "incomplete" and provider["run_quality"] == "provider_limited",
         "regenerate preserves genuine provider-limited status",
         repr(provider),
+    )
+    check(
+        still_pending["status"] == "done"
+        and still_pending["run_quality"] == "clean",
+        "regenerate recovers an artifact-pending cell after finalizers return normally",
+        repr(still_pending),
     )
     check(
         regenerate_age_pending and all(value is False for value in regenerate_age_pending),
@@ -743,6 +780,11 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     check((finding_root / "findings-rejected" / "FIND-001").is_dir(), "trigger-disproved finding is quarantined, not deleted")
 
     # ── #6 report-gate head+tail bound ──
+    os.environ.pop("REPORT_GATE_MAX_BYTES", None)
+    check(
+        triage._report_gate_cap() == 96 * 1024,
+        "default report gate cap stays below Linux's per-argument ceiling",
+    )
     os.environ["REPORT_GATE_MAX_BYTES"] = "1000"
     small = root / "small.md"
     small.write_bytes(b"S" * 400)
@@ -1315,6 +1357,9 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         triage.llm_decide, "llm_decide", return_value=quality_result,
     ) as batch_quality_calls, mock.patch.object(
         triage, "_finalize_accepted_finding", return_value="accepted",
+    ), mock.patch.object(
+        triage, "_prepare_accepted_finding",
+        side_effect=lambda _directory, report, *_args: report,
     ), mock.patch.object(
         triage, "_batch_reach_field_decisions", return_value=(set(), {}),
     ):

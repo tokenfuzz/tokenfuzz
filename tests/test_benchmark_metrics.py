@@ -20,6 +20,7 @@ import benchmark
 import llm_invoke
 import llm_usage
 import report_identity
+import triage_validate
 
 
 ASAN = "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602\n"
@@ -90,7 +91,15 @@ class BenchmarkMetricsTests(unittest.TestCase):
         findings = results / "findings"
         for name in ("FIND-ACCEPTED", "FIND-PENDING", "FIND-KEEP", "FIND-REVIEWED"):
             (findings / name).mkdir(parents=True)
+        accepted_report = findings / "FIND-ACCEPTED" / "report.md"
+        accepted_report.write_text("# Accepted state issue\n")
         self.write_json(findings / "FIND-ACCEPTED" / ".llm-find-quality.json", {"accept": True})
+        self.write_json(findings / "FIND-ACCEPTED" / ".trigger-gate.json", {
+            "vote": "Promote",
+            "content_sha1": report_identity.content_sha1(accepted_report),
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "attacker_controls": ["bytes"],
+        })
         (findings / "FIND-KEEP" / ".keep").touch()
         (findings / "FIND-REVIEWED" / ".reviewed").touch()
         (results / "findings-rejected" / "FIND-REJECTED").mkdir(parents=True)
@@ -131,6 +140,29 @@ class BenchmarkMetricsTests(unittest.TestCase):
         )
         self.assertEqual(benchmark.harvest(legacy)["crashes_rejected"], 2)
 
+    def test_legacy_finding_metrics_preserve_quality_only_run_semantics(self) -> None:
+        results = self.root / "legacy-findings"
+        finding = results / "findings" / "FIND-001"
+        finding.mkdir(parents=True)
+        report = finding / "report.md"
+        report.write_text("# State issue\n", encoding="utf-8")
+        self.write_json(finding / ".llm-find-quality.json", {
+            "accept": True,
+            "report_sha1": report_identity.content_sha1(report),
+        })
+
+        current = benchmark.harvest(results)
+        legacy = benchmark.harvest(
+            results, require_trigger_confirmation=False,
+        )
+
+        self.assertEqual(current["confirmed_findings"], 0)
+        self.assertEqual(current["findings_unadjudicated"], 1)
+        self.assertEqual(current["finding_confirmation"], "quality-trigger-v1")
+        self.assertEqual(legacy["confirmed_findings"], 1)
+        self.assertEqual(legacy["findings_unadjudicated"], 0)
+        self.assertEqual(legacy["finding_confirmation"], "legacy-quality")
+
     def test_sibling_logs_and_sanitizer_effort_floor(self) -> None:
         backend = self.root / "experiment" / "codex"
         results = backend / "results"
@@ -144,11 +176,38 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["tokens"]["input_tokens"], 200)
         self.assertEqual(metrics["tokens"]["asan_invocations"], 5)
 
+        state = results / "state"
+        state.mkdir()
+        (state / "runs.jsonl").write_text(
+            json.dumps({
+                "id": "RUN-1", "verdict": "CLEAN", "sanitizer": "asan",
+                "sanitizer_runs": 1,
+            }) + "\n" + json.dumps({
+                "id": "RUN-2", "verdict": "CRASH", "sanitizer": "asan",
+                "sanitizer_runs": 5,
+            }) + "\n" + json.dumps({
+                "id": "RUN-3", "verdict": "NO_EXEC", "sanitizer": "ubsan",
+                "sanitizer_runs": 2,
+            }) + "\nnot-json\n",
+            encoding="utf-8",
+        )
+        metrics = benchmark.harvest(results)
+        self.assertEqual(metrics["execution"]["probe_records"], 3)
+        self.assertEqual(metrics["execution"]["sanitizer_invocations"], 8)
+        self.assertEqual(metrics["execution"]["by_sanitizer"], {"asan": 6, "ubsan": 2})
+        self.assertEqual(metrics["execution"]["by_verdict"], {
+            "CLEAN": 1, "CRASH": 5, "NO_EXEC": 2,
+        })
+        self.assertEqual(metrics["execution"]["source"], "state/runs.jsonl")
+        self.assertEqual(metrics["tokens"]["asan_invocations"], 8)
+
         direct = self.root / "direct"
         crash = direct / "crashes" / "CRASH-1"
         crash.mkdir(parents=True)
         (crash / "sanitizer.txt").write_text(ASAN)
-        self.assertEqual(benchmark.harvest(direct)["tokens"]["asan_invocations"], 1)
+        direct_metrics = benchmark.harvest(direct)
+        self.assertEqual(direct_metrics["tokens"]["asan_invocations"], 1)
+        self.assertEqual(direct_metrics["execution"]["source"], "crash-floor")
 
     def test_token_normalization_sources_and_pricing(self) -> None:
         index = self.root / "index.jsonl"
@@ -184,6 +243,116 @@ class BenchmarkMetricsTests(unittest.TestCase):
         native = benchmark.harvest_tokens(index)
         self.assertEqual(native["cost_usd"], "0.123456")
         self.assertEqual(native["cost_source"], "backend-reported")
+
+    def test_artifact_links_are_advisory_and_preserve_raw_counts(self) -> None:
+        results = self.root / "linked-results"
+        findings = results / "findings"
+        crashes = results / "crashes"
+        for name in ("FIND-001", "FIND-002"):
+            directory = findings / name
+            directory.mkdir(parents=True)
+            (directory / ".keep").touch()
+            suffix = "\nRelated evidence: CRASH-001\n" if name == "FIND-001" else "\n"
+            (directory / "report.md").write_text(
+                f"# State issue\n\nCluster: FCL-same{suffix}", encoding="utf-8"
+            )
+        for name in ("CRASH-001", "CRASH-002"):
+            directory = crashes / name
+            directory.mkdir(parents=True)
+            (directory / "sanitizer.txt").write_text(ASAN, encoding="utf-8")
+            (directory / "REPORT.md").write_text(
+                "# Bounds issue\n\nCluster: CL-same\n", encoding="utf-8"
+            )
+
+        metrics = benchmark.harvest(results)
+
+        self.assertEqual(metrics["confirmed_findings"], 2)
+        self.assertEqual(metrics["confirmed_crashes"], 2)
+        self.assertEqual(metrics["artifact_links"]["duplicate_groups"], [
+            {
+                "kind": "crash", "cluster": "CL-same",
+                "members": ["CRASH-001", "CRASH-002"],
+            },
+            {
+                "kind": "finding", "cluster": "FCL-same",
+                "members": ["FIND-001", "FIND-002"],
+            },
+        ])
+        self.assertEqual(metrics["artifact_links"]["cross_kind"], [
+            {
+                "finding": "FIND-001", "crash": "CRASH-001",
+                "evidence": "explicit-reference",
+            },
+        ])
+
+    def test_metric_report_reads_are_bounded(self) -> None:
+        report = self.root / "oversized-report.md"
+        report.write_bytes(b"a" * (benchmark._MAX_SCAN_BYTES + 4096))
+
+        text = benchmark._read_metric_report(report)
+
+        self.assertEqual(len(text.encode()), benchmark._MAX_SCAN_BYTES)
+
+    def test_gate_states_expose_observed_conflicts_without_redisposition(self) -> None:
+        results = self.root / "gate-results"
+        finding = results / "findings" / "FIND-001"
+        pending = results / "findings" / "FIND-002"
+        rejected = results / "findings-rejected" / "FIND-003"
+        crash = results / "crashes" / "CRASH-001"
+        for directory in (finding, pending, rejected, crash):
+            directory.mkdir(parents=True)
+
+        finding_report = finding / "report.md"
+        finding_report.write_text(
+            "# State issue\n\nRelated evidence: CRASH-001\n", encoding="utf-8"
+        )
+        self.write_json(finding / ".llm-find-quality.json", {"accept": True})
+        self.write_json(finding / ".trigger-gate.json", {
+            "vote": "Reject",
+            "content_sha1": report_identity.content_sha1(finding_report),
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "attacker_controls": ["bytes"],
+        })
+        (pending / "report.md").write_text("# Pending state issue\n", encoding="utf-8")
+        self.write_json(pending / ".llm-find-quality.json", {
+            "accept": True, "report_sha1": "stale-report",
+        })
+
+        rejected_report = rejected / "report.md"
+        rejected_report.write_text("# Rejected state issue\n", encoding="utf-8")
+        self.write_json(rejected / ".llm-find-quality.json", {
+            "accept": False, "accept_count": 1, "reject_count": 1,
+        })
+
+        crash_report = crash / "REPORT.md"
+        crash_report.write_text("# Bounds issue\n", encoding="utf-8")
+        (crash / "sanitizer.txt").write_text(ASAN, encoding="utf-8")
+        self.write_json(crash / ".trigger-gate.json", {
+            "vote": "Promote",
+            "content_sha1": report_identity.content_sha1(crash_report),
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "attacker_controls": ["bytes"],
+        })
+
+        metrics = benchmark.harvest(results)
+        states = {row["id"]: row for row in metrics["gate_states"]}
+
+        self.assertEqual(metrics["confirmed_findings"], 0)
+        self.assertEqual(metrics["findings_rejected_pending"], 1)
+        self.assertEqual(metrics["findings_unadjudicated"], 1)
+        self.assertEqual(metrics["findings_rejected"], 1)
+        self.assertEqual(metrics["confirmed_crashes"], 1)
+        self.assertEqual(states["FIND-001"]["disposition"], "pending")
+        self.assertEqual(states["FIND-001"]["quality"], "accept")
+        self.assertEqual(states["FIND-001"]["trigger"], "reject")
+        self.assertTrue(states["FIND-001"]["reproduced"])
+        self.assertEqual(states["FIND-001"]["conflicts"], ["linked-trigger"])
+        self.assertEqual(states["CRASH-001"]["conflicts"], ["linked-trigger"])
+        self.assertEqual(states["FIND-002"]["disposition"], "pending")
+        self.assertEqual(states["FIND-002"]["quality"], "stale")
+        self.assertTrue(states["FIND-002"]["pending"])
+        self.assertEqual(states["FIND-003"]["disposition"], "rejected")
+        self.assertEqual(states["FIND-003"]["conflicts"], ["quality-votes"])
 
     def test_current_model_families_use_their_exact_price_tiers(self) -> None:
         cases = (

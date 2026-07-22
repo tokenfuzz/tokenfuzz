@@ -30,13 +30,15 @@ Each benchmark run is a small controlled experiment:
 | `model-direct` | `<model>-direct` when the model is known, otherwise `<backend>-direct` | One agent with a bare vulnerability-hunting prompt. This is the control. |
 | `harness` | `tokenfuzz` | `bin/audit` as shipped: ranked work cards, strategy rotation, `bin/probe`, triage, validation, clustering, severity scoring, and reproducer bundling. |
 
-Backend customizations are disabled where the CLI provides an enforceable
-per-run control. Claude runs in safe mode; Codex disables plugins; OpenCode
-runs in pure mode; and Gemini CLI receives system
-settings that disable skills and extensions. This keeps an operator-installed
-security workflow from duplicating TokenFuzz's own
-orchestration or contaminating the model-direct control. Antigravity and Grok
-Build currently expose no equivalent one-shot isolation control, so disable
+Each cell blocks instruction-file discovery above its launch directory using
+the backend's enforceable mechanism. Claude runs in safe mode; Codex and Gemini
+CLI disable parent traversal; and Antigravity and Grok Build receive a local
+project boundary. Backend customizations are also disabled where the CLI
+provides a per-run control: Codex disables plugins, OpenCode runs in pure mode,
+and Gemini CLI disables skills and extensions. This keeps an operator-installed
+security workflow from duplicating TokenFuzz's own orchestration or
+contaminating the model-direct control. Antigravity and Grok Build currently
+expose no equivalent one-shot plugin and skill isolation control, so disable
 their installed plugins and skills before using them for benchmark claims.
 
 The `--conditions` flag always uses the stable tokens
@@ -47,7 +49,8 @@ do not blur together.
 Every cell gets the same per-cell wall-clock budget. With the defaults,
 `bin/benchmark --target <target>` runs three `model-direct` cells and
 three `harness` cells, each with a 10,800 second budget. That is six
-cells, about 18 hours of wall-clock if run serially.
+cells, about 18 hours of audit time if run serially, plus bounded final
+validation.
 
 The benchmark keeps normal audit output separate. Cells run under
 isolated `bin/audit --experiment` trees, then the benchmark pools and
@@ -87,7 +90,7 @@ With all defaults, the command means:
 | `--backend` | `codex` | Agent backend. Valid values are `claude`, `codex`, `gemini`, `grok`, and `oss`. |
 | `--model` | backend config default | Optional model override used by both conditions. |
 | `--replicates` | `3` | Runs per condition. |
-| `--budget-wall` | `10800` | Productive seconds per cell for audit agents. Provider-recovery pauses are excluded. `0` is unlimited. |
+| `--budget-wall` | `10800` | Active audit seconds per cell, including housekeeping. Provider-recovery pauses are excluded. `0` is unlimited. |
 | `--finalize-wall` | `3600` | Separate wall-clock ceiling for final crash and finding validation. `0` is unlimited. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
 | `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |

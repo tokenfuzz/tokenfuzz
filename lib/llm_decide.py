@@ -105,13 +105,19 @@ from llm_invoke import (  # noqa: E402
     default_model as _default_model,
     extract_text as _extract_backend_text,
     gemini_default_bin as _gemini_default_bin,
+    ensure_project_root as _ensure_project_root,
     invocation_env as _invocation_env,
     opencode_config as _opencode_config,
+    use_gemini_cli as _use_gemini_cli,
 )
 import llm_usage  # noqa: E402
 
 
 _KNOWN_BACKENDS = ("claude", "codex", "oss", "gemini", "grok")
+
+
+class _LaunchPreparationError(RuntimeError):
+    """A local pre-exec failure that must not arm the backend breaker."""
 
 
 def _utc_iso() -> str:
@@ -596,6 +602,7 @@ def _invoke_backend(
 ) -> Optional[str]:
     """Run the backend CLI and return its stdout text, or None on failure."""
     model = os.environ.get("MODEL", "") or _default_model(backend)
+    gemini_cli = backend == "gemini" and _use_gemini_cli()
 
     # Empty overrides mean "use the default binary"; get(key, default) would
     # instead pass an empty executable name to subprocess.
@@ -614,13 +621,14 @@ def _invoke_backend(
         cmd = [bin_name, *flags]
     elif backend == "gemini":
         # Gemini backend keeps one name while switching CLI dialects via
-        # USE_GEMINI_CLI. Both dialects accept -p "" with the prompt on
-        # stdin for non-interactive calls.
+        # USE_GEMINI_CLI. Gemini CLI reads the prompt from stdin after an empty
+        # -p; Antigravity requires the prompt as the -p value.
         bin_name = os.environ.get("GEMINI_BIN") or _gemini_default_bin()
         flags = _backend_flags("gemini", model)
-        # Empty -p arg forces non-interactive mode while the prompt is
-        # read from stdin.
-        cmd = [bin_name, *flags, "-p", ""]
+        if gemini_cli:
+            cmd = [bin_name, *flags, "-p", ""]
+        else:
+            cmd = [bin_name, *flags, "-p", prompt]
     elif backend == "grok":
         bin_name = os.environ.get("GROK_BIN") or "grok"
         flags = _backend_flags("grok", model)
@@ -641,7 +649,19 @@ def _invoke_backend(
     child_env.update(_invocation_env(backend, model))
     temp_dir = None
     run_input = prompt
-    if backend == "grok":
+    launch_cwd = None
+    if backend == "grok" or (backend == "gemini" and not gemini_cli):
+        launch_cwd = Path(
+            os.environ.get("SCRIPT_ROOT") or Path(__file__).resolve().parent.parent
+        ).absolute()
+        try:
+            _ensure_project_root(launch_cwd)
+        except (OSError, RuntimeError) as exc:
+            raise _LaunchPreparationError(
+                f"project boundary unavailable: {exc}"
+            ) from exc
+        if backend == "grok":
+            cmd[1:1] = ["--cwd", str(launch_cwd)]
         run_input = None
     if backend == "oss":
         # Build the config first: _opencode_config can raise ValueError (no
@@ -662,6 +682,7 @@ def _invoke_backend(
                 text=True,
                 timeout=timeout_secs,
                 env=child_env,
+                cwd=launch_cwd,
             )
         except subprocess.TimeoutExpired:
             raise
@@ -1098,6 +1119,13 @@ def _run_decision(
             # backend storm. Don't arm the per-type breaker (backend_error=False):
             # the per-prompt breaker still catches a repeated identical call.
             _llm_log(f"{decision} FAIL {exc} bytes={prompt_bytes}")
+            return None, False
+        except _LaunchPreparationError as exc:
+            # Local pre-exec setup (the launch project boundary) failed — the
+            # harness environment, not the backend. Treat it like a missing
+            # binary: backend_error=False so one bad local root cannot sideline
+            # a whole decision class; the per-prompt breaker still applies.
+            _llm_log(f"{decision} FAIL local-launch {exc} bytes={prompt_bytes}")
             return None, False
         except subprocess.TimeoutExpired as exc:
             # Timeout = "needed more time", not "backend is failing". Addressed

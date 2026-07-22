@@ -8,6 +8,7 @@ each subcommand (and the importable API used by lib/llm_decide.py).
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -15,6 +16,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 HELPER = ROOT / "lib" / "llm_invoke.py"
@@ -135,6 +138,8 @@ ok("--json" in f, "codex has --json", f)
 ok("danger-full-access" in f, "codex has danger-full-access sandbox")
 ok("--dangerously-bypass-approvals-and-sandbox" in f, "codex bypasses approvals")
 ok('model_reasoning_effort="high"' in f, "codex agent wires configured effort")
+ok("project_root_markers=[]" in f,
+   "codex agent stops project instruction discovery at --cd")
 
 proc = run(["agent-flags", "oss"], check=True)
 f = flags(proc)
@@ -265,6 +270,8 @@ f = proc.stdout
 ok("read-only" in f, "decide codex read-only sandbox")
 ok("danger-full-access" not in f, "decide codex NOT danger-full-access")
 ok('model_reasoning_effort="high"' in f, "decide codex wires configured effort")
+ok("project_root_markers=[]" in f,
+   "decide codex stops project instruction discovery at cwd")
 
 proc = run(["decide-flags", "gemini"], check=True)
 f = flags(proc)
@@ -423,6 +430,134 @@ with tempfile.TemporaryDirectory() as td:
 print("\nimportable API")
 sys.path.insert(0, str(ROOT / "lib"))
 import llm_invoke as inv  # noqa: E402
+import llm_decide as decide_mod  # noqa: E402
+
+with tempfile.TemporaryDirectory() as td:
+    isolated = Path(td) / "launch-root"
+    isolated.mkdir()
+    with mock.patch.dict(os.environ, {"PATH": "/tokenfuzz/no-git-here"}):
+        inv.ensure_project_root(isolated)
+    ok((isolated / ".git" / "objects" / "info").is_dir(),
+       "project boundary creates standard metadata without Git")
+    ok((isolated / ".git" / "HEAD").is_file(),
+       "project boundary writes standard repository metadata")
+
+with tempfile.TemporaryDirectory() as td:
+    partial = Path(td) / "partial-root"
+    (partial / ".git").mkdir(parents=True)
+    inv.ensure_project_root(partial)
+    ok(not (partial / ".git" / "HEAD").exists(),
+       "project boundary leaves an existing marker untouched")
+
+# A validator cwd links every target entry, including the checkout's own .git.
+# Staging a boundary there must neither fail the launch — bin/validate-finding
+# exit 1 is the Reject vote — nor write through the link into the target.
+with tempfile.TemporaryDirectory() as td:
+    checkout = Path(td) / "target"
+    (checkout / ".git" / "refs").mkdir(parents=True)
+    linked = Path(td) / ".validator-cwd"
+    linked.mkdir()
+    (linked / ".git").symlink_to(checkout / ".git", target_is_directory=True)
+    inv.ensure_project_root(linked)
+    ok(not (checkout / ".git" / "objects").exists(),
+       "project boundary never writes through a symlinked marker")
+    ok(not (checkout / ".git" / "HEAD").exists(),
+       "project boundary leaves the audited checkout's repository intact")
+
+with tempfile.TemporaryDirectory() as td, \
+        mock.patch.dict(os.environ, {
+            "SCRIPT_ROOT": td,
+            "GEMINI_BIN": "/fake/agy",
+        }, clear=False), \
+        mock.patch.object(decide_mod, "_which", return_value="/fake/agy"), \
+        mock.patch.object(
+            decide_mod.subprocess, "run",
+            return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        ) as agy_run:
+    os.environ.pop("USE_GEMINI_CLI", None)
+    assert_eq("ok", decide_mod._invoke_backend("gemini", "DECISION_PROMPT", 5),
+              "Antigravity decision invocation succeeds")
+    agy_command = agy_run.call_args.args[0]
+    assert_eq("DECISION_PROMPT", agy_command[agy_command.index("-p") + 1],
+              "Antigravity decision passes a non-empty -p value")
+    ok(agy_run.call_args.kwargs["input"] is None,
+       "Antigravity decision does not duplicate the prompt on stdin")
+    assert_eq(Path(td), agy_run.call_args.kwargs["cwd"],
+              "Antigravity decision is rooted at SCRIPT_ROOT")
+
+with tempfile.TemporaryDirectory() as td:
+    for backend in ("grok", "gemini"):
+        launch_root = Path(td) / backend
+        launch_root.mkdir()
+        raw = launch_root / "raw.log"
+        with mock.patch.object(inv, "backend_bin", return_value=f"/fake/{backend}"), \
+                mock.patch.object(
+                    inv.subprocess, "run",
+                    return_value=SimpleNamespace(returncode=0),
+                ):
+            assert_eq(
+                0,
+                inv.run_agent_prompt(
+                    backend, "PROMPT", 0, raw,
+                    add_dirs=str(launch_root), cwd=launch_root,
+                ),
+                f"{backend} agent launch succeeds",
+            )
+        ok((launch_root / ".git" / "HEAD").is_file(),
+           f"{backend} agent launch stages its project boundary")
+
+# Raise site: an unusable launch boundary becomes a _LaunchPreparationError (not
+# the CalledProcessError a backend non-zero exit raises), and the backend never
+# runs — so the handler below can tell a local setup failure apart from a storm.
+with tempfile.TemporaryDirectory() as td, \
+        mock.patch.dict(os.environ, {"SCRIPT_ROOT": td}, clear=False), \
+        mock.patch.object(decide_mod, "_which", return_value="/fake/grok"), \
+        mock.patch.object(
+            decide_mod, "_ensure_project_root",
+            side_effect=OSError("read-only root"),
+        ), mock.patch.object(decide_mod.subprocess, "run") as prep_run:
+    prep_raised = False
+    try:
+        decide_mod._invoke_backend("grok", "PROMPT", 5)
+    except decide_mod._LaunchPreparationError:
+        prep_raised = True
+    ok(prep_raised, "an unusable launch boundary raises _LaunchPreparationError")
+    ok(not prep_run.called,
+       "the backend never runs after a launch-boundary failure")
+
+# Handler: that local failure returns no verdict without arming the backend breaker.
+with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "grok"}, clear=False), \
+        mock.patch.object(
+            decide_mod, "_invoke_backend",
+            side_effect=decide_mod._LaunchPreparationError("read-only root"),
+        ):
+    local_result, local_backend_error = decide_mod._run_decision(
+        "fixture", "vote", "PROMPT", 5, "",
+    )
+assert_eq(None, local_result, "local decision launch failure returns no verdict")
+ok(local_backend_error is False,
+   "local decision launch failure does not arm the backend breaker")
+
+boundary_error = io.StringIO()
+with tempfile.TemporaryDirectory() as td, \
+        mock.patch.object(
+            inv, "ensure_project_root", side_effect=OSError("read-only root"),
+        ), mock.patch.object(inv.subprocess, "run") as backend_run, \
+        mock.patch.object(inv.sys, "stderr", boundary_error):
+    raw = Path(td) / "raw.log"
+    assert_eq(
+        127,
+        inv.run_agent_prompt(
+            "grok", "PROMPT", 0, raw, add_dirs=td, cwd=td,
+        ),
+        "a missing project boundary fails the backend launch",
+    )
+    ok(not backend_run.called,
+       "a backend never runs after project-boundary failure")
+    ok("project boundary unavailable" in raw.read_text(),
+       "project-boundary failure is recorded in the raw log")
+    ok("project boundary unavailable" in boundary_error.getvalue(),
+       "project-boundary failure is visible on stderr")
 
 claude_single = inv.agent_flags("claude", allow_subagents=False)
 ok("--disallowedTools" in claude_single, "single-agent Claude disables native delegation")
@@ -582,6 +717,8 @@ ok(settings["skills"]["enabled"] is False,
    "Gemini CLI system settings disable skills")
 ok(settings["admin"]["extensions"]["enabled"] is False,
    "Gemini CLI system settings disable extensions")
+assert_eq([], settings["context"]["memoryBoundaryMarkers"],
+          "Gemini CLI stops GEMINI.md discovery at cwd")
 override = settings["modelConfigs"]["customOverrides"][0]
 assert_eq("gemini-3.1-pro-preview", override["match"]["model"],
           "Gemini effort override targets the configured model")

@@ -19,7 +19,13 @@ import sys
 from pathlib import Path
 from typing import Callable, Iterable
 
+import report_identity
+
 _HSPACE_RE = re.compile(r"[ \t]+")
+_CLUSTER_BARE_RE = re.compile(r"^Cluster:\s*([^\s|]+)", re.IGNORECASE)
+_CLUSTER_TABLE_RE = re.compile(
+    r"^\|\s*Cluster\s*\|\s*([^|]+?)\s*\|", re.IGNORECASE
+)
 
 
 def texts_differ_beyond_padding(old: str, new: str) -> bool:
@@ -35,17 +41,57 @@ def texts_differ_beyond_padding(old: str, new: str) -> bool:
     return _HSPACE_RE.sub(" ", old) != _HSPACE_RE.sub(" ", new)
 
 
-def exact_child_file(parent: Path, names: Iterable[str]) -> Path | None:
-    """Return an exact-case file child, even on case-insensitive filesystems."""
+def exact_child_files(parent: Path, names: Iterable[str]) -> tuple[Path, ...]:
+    """Return exact-case file children in the requested priority order."""
     try:
         children = {child.name: child for child in parent.iterdir()}
     except OSError:
-        return None
-    for name in names:
-        child = children.get(name)
-        if child is not None and child.is_file():
-            return child
-    return None
+        return ()
+    return tuple(
+        child
+        for name in names
+        if (child := children.get(name)) is not None and child.is_file()
+    )
+
+
+def exact_child_file(parent: Path, names: Iterable[str]) -> Path | None:
+    """Return the first exact-case file child in the requested order."""
+    return next(iter(exact_child_files(parent, names)), None)
+
+
+def artifact_report_paths(directory: Path) -> tuple[Path, ...]:
+    """Return recognized report files in their canonical priority order."""
+    return exact_child_files(directory, report_identity.REPORT_NAMES)
+
+
+def artifact_report_path(directory: Path) -> Path | None:
+    """Return the report file used for cluster identity, if present."""
+    return next(iter(artifact_report_paths(directory)), None)
+
+
+def cluster_label(report_text: str) -> str:
+    """Read the deterministic cluster stamp from report text."""
+    for line in report_text.splitlines():
+        match = _CLUSTER_BARE_RE.match(line) or _CLUSTER_TABLE_RE.match(line)
+        if match:
+            value = match.group(1).strip()
+            if value not in {"", "—", "-", "?"}:
+                return value
+    return ""
+
+
+def artifact_cluster_id(directory: Path) -> str:
+    """Read one artifact's deterministic cluster id without modifying it."""
+    for report in artifact_report_paths(directory):
+        try:
+            with report.open(encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    cluster = cluster_label(line)
+                    if cluster:
+                        return cluster
+        except OSError:
+            continue
+    return ""
 
 
 def render_md_sibling(md_path: Path, title: str | None = None) -> None:

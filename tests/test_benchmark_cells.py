@@ -117,7 +117,14 @@ print(json.dumps({"type": "item.completed", "usage": {
             """import json
 import os
 import sys
-sys.stdin.read()
+stdin_prompt = sys.stdin.read()
+prompt_index = sys.argv.index("-p")
+prompt_arg = sys.argv[prompt_index + 1]
+if "--approval-mode=yolo" in sys.argv:
+    if prompt_arg or not stdin_prompt:
+        raise SystemExit(64)
+elif not prompt_arg or stdin_prompt:
+    raise SystemExit(65)
 name = os.environ.get("FAKE_BACKEND_RELATIVE_WRITE")
 if name:
     open(name, "w", encoding="utf-8").write("contained\\n")
@@ -209,6 +216,9 @@ print(json.dumps({"id": "REC-empty", "slice": "sample", "confidence": "AUDIT-CLE
         self.assertFalse((ROOT / junk).exists())
         contained = list(gemini_root.glob(f"gemini/**/cells/model-direct-r1/{junk}"))
         self.assertEqual(len(contained), 1)
+        direct_cells = list(absolute_root.glob("codex/**/cells/model-direct-r1"))
+        self.assertEqual(len(direct_cells), 1)
+        self.assertFalse((direct_cells[0] / ".git").exists())
         self.assertIn("budget=unlimited", results["unlimited"].stdout)
 
     def test_agent_flags_harness_facade_and_cleanup(self) -> None:
@@ -218,7 +228,10 @@ print(json.dumps({"id": "REC-empty", "slice": "sample", "confidence": "AUDIT-CLE
         self.assertEqual(capped[capped.index("--max-turns") + 1], "80")
 
         cell = self.work / "harness-cell"
-        facade = benchmark_runner.prepare_facade(cell, self.slug)
+        # Facade preparation is backend-neutral. Backends needing an on-disk
+        # boundary stage it immediately before their process launch.
+        with mock.patch.dict(os.environ, {"PATH": "/tokenfuzz/no-git-here"}):
+            facade = benchmark_runner.prepare_facade(cell, self.slug)
         junk = "relative-junk.txt"
         old_cwd = Path.cwd()
         try:
@@ -228,6 +241,7 @@ print(json.dumps({"id": "REC-empty", "slice": "sample", "confidence": "AUDIT-CLE
             os.chdir(old_cwd)
         self.assertFalse((ROOT / junk).exists())
         self.assertTrue((facade / junk).is_file())
+        self.assertFalse((facade / ".git").exists())
 
         result = SimpleNamespace(returncode=0)
         with mock.patch.object(benchmark_runner, "run_timeout", return_value=result) as run_timeout, \

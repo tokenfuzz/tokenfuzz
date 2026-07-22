@@ -322,7 +322,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--budget-wall", type=_nonnegative, default=10800,
         help=(
-            "productive wall seconds per cell for audit agents; "
+            "active audit wall seconds per cell, including housekeeping; "
             "provider-recovery pauses are excluded (0 = unlimited)"
         ),
     )
@@ -425,7 +425,7 @@ def _write_json(path: Path, payload: dict) -> None:
 def write_cell(
     path: Path, condition: str, replicate: int, experiment: str,
     results_dir: Path, wall: int, status: str, requested_agents: int | None,
-    paused: int = 0, started_at: str = "",
+    paused: int = 0, started_at: str = "", housekeeping: int = 0,
 ) -> None:
     quality = "clean"
     try:
@@ -440,6 +440,7 @@ def write_cell(
         "condition": condition, "replicate": replicate, "experiment": experiment,
         "results_dir": str(results_dir), "wall_seconds": wall, "status": status,
         "run_quality": quality, "paused_seconds": paused,
+        "housekeeping_seconds": housekeeping,
         "wall_effective_seconds": max(0, wall - paused),
         # When the cell began. Reports that place a result on a timeline need an
         # origin; without one they rebase onto their own first artifact and put
@@ -1199,6 +1200,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             "model_direct_agents": 1, "conditions": conditions,
             "target_sha": target_config.detect_rev(SCRIPT_ROOT / "targets" / args.target),
             "tokenfuzz_sha": _git_rev(SCRIPT_ROOT), "harness_sha": _git_rev(SCRIPT_ROOT, True),
+            "finding_confirmation": metrics.FINDING_CONFIRMATION_VERSION,
             "dry_run": args.dry_run,
         }
         _write_json(bench_dir / "run.json", run_data)
@@ -1215,6 +1217,18 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
 
     done = failed = 0
     provider_unavailable = False
+    require_trigger_confirmation = True
+    if args.regenerate:
+        try:
+            run_metadata = json.loads(
+                (bench_dir / "run.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            run_metadata = {}
+        require_trigger_confirmation = (
+            run_metadata.get("finding_confirmation")
+            == metrics.FINDING_CONFIRMATION_VERSION
+        )
     if not args.regenerate:
         for condition in conditions:
             for replicate in range(1, args.replicates + 1):
@@ -1280,8 +1294,15 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 elif rc:
                     status = "failed"
                 paused = 0
+                housekeeping = 0
                 try:
                     paused = int((results.parent / "logs" / ".paused_secs").read_text().strip())
+                except (OSError, ValueError):
+                    pass
+                try:
+                    housekeeping = int(float(
+                        (results.parent / "logs" / ".housekeeping_secs").read_text().strip()
+                    ))
                 except (OSError, ValueError):
                     pass
                 finalize_wall = getattr(args, "finalize_wall", 3600)
@@ -1338,14 +1359,22 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 elif not args.dry_run and condition == "model-direct" and not args.validate_findings:
                     log(f"Cell {name} validation: DISABLED (--no-validate-findings)")
                 if results.is_dir():
-                    _write_json(cell_dir / "metrics.json", metrics.harvest(results, args.backend, model))
+                    summary = metrics.harvest(
+                        results, args.backend, model,
+                        require_trigger_confirmation=require_trigger_confirmation,
+                    )
+                    _write_json(cell_dir / "metrics.json", summary)
                 else:
-                    _write_json(cell_dir / "metrics.json", {"exists": False})
+                    summary = {"exists": False}
+                    _write_json(cell_dir / "metrics.json", summary)
                     status = "failed"
-                write_cell(cell_json, condition, replicate, experiment, results, wall, status, args.agents, paused, started_at)
+                write_cell(
+                    cell_json, condition, replicate, experiment, results, wall,
+                    status, args.agents, paused=paused, started_at=started_at,
+                    housekeeping=housekeeping,
+                )
                 if condition == "model-direct":
                     cleanup_model_direct_scratch(cell_dir)
-                summary = metrics.harvest(results, args.backend, model) if results.is_dir() else {}
                 log(f"Cell {name} {metrics.metric_gate_summary(summary)}")
                 if status == "done":
                     done += 1
@@ -1414,15 +1443,20 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     except Exception as exc:
                         log(f"WARN: find-gate drain failed for {cell_dir.name}: {exc}")
                         finalizers_ok = False
-                _write_json(cell_dir / "metrics.json", metrics.harvest(results, args.backend, model))
-                remaining = metrics.harvest(results, args.backend, model).get("findings_unadjudicated", 0)
+                summary = metrics.harvest(
+                    results, args.backend, model,
+                    require_trigger_confirmation=require_trigger_confirmation,
+                )
+                _write_json(cell_dir / "metrics.json", summary)
+                remaining = summary.get("findings_unadjudicated", 0)
                 if args.validate_findings and remaining:
                     log(f"WARN: {cell_dir.name} has {remaining} finding(s) still un-adjudicated after drain")
                 # `incomplete` is reserved for a provider-limited run or a
                 # finalizer that actually failed. Older runners also used it
                 # for an otherwise successful cell containing one unfinished
-                # artifact; recompute that stale status after fresh finalizers
-                # return normally without changing failed/provider cells.
+                # artifact; recover that stale status after fresh finalizers
+                # return normally. Residual artifacts remain visible in
+                # metrics without erasing confirmed evidence from the cell.
                 if (
                     finalizers_ok
                     and cell.get("status") == "incomplete"

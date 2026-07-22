@@ -129,6 +129,7 @@ class WorkQueueTests(unittest.TestCase):
             "testcase_sha1": "",
             "asan_output": str(self.results / f"scratch-1/testcase-{index}.asan.txt"),
             "verdict": verdict,
+            "sanitizer": "asan",
             "sanitizer_runs": 1,
         }
         values.update(overrides)

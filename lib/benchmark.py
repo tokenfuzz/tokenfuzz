@@ -45,8 +45,10 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import cluster_common
 import llm_usage
 import report_identity
+import triage_validate
 
 try:  # ClusterFuzz-normalized stack frames — reused, never reinvented.
     import stack_frames as _sf
@@ -64,6 +66,7 @@ except Exception:  # pragma: no cover - target_config should always import
     _tc = None
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+FINDING_CONFIRMATION_VERSION = "quality-trigger-v1"
 
 # ── sanitizer crash oracle ───────────────────────────────────────────────
 #
@@ -89,6 +92,9 @@ _MAX_SCAN_BYTES = 2 * 1024 * 1024
 
 _CLUSTER_COUNT_RE = re.compile(r"(\d+)\s+unique\s+cluster")
 _MODEL_REFUSAL_RE = re.compile(r"\bMODEL_REFUSAL\b")
+_ARTIFACT_REF_RE = re.compile(
+    r"\b(?:FIND|CRASH)-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*\b"
+)
 
 
 _RENDER_BASE_DIR: Path | None = None
@@ -420,29 +426,27 @@ def count_confirmed_crashes(crashes_dir: Path) -> tuple[int, list[str]]:
     return len(confirmed), confirmed
 
 
+def crash_is_pending(directory: Path) -> bool:
+    if (directory / ".promotion_pending").is_file():
+        return True
+    report = report_identity.find_report(directory)
+    try:
+        return report is not None and "_TODO (agent):" in report.read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return False
+
+
 def count_pending_crashes(crashes_dir: Path) -> int:
     """Count proved crash bundles whose maintainer report is unfinished."""
     if not crashes_dir.is_dir():
         return 0
-    pending = 0
-    for child in crashes_dir.iterdir():
-        if not child.is_dir() or child.name.startswith("."):
-            continue
-        if not dir_has_sanitizer_output(child):
-            continue
-        if (child / ".promotion_pending").is_file():
-            pending += 1
-            continue
-        for report_name in ("report.md", "REPORT.md"):
-            try:
-                if "_TODO (agent):" in (child / report_name).read_text(
-                    encoding="utf-8", errors="replace"
-                ):
-                    pending += 1
-                    break
-            except OSError:
-                continue
-    return pending
+    return sum(
+        dir_has_sanitizer_output(child) and crash_is_pending(child)
+        for child in crashes_dir.iterdir()
+        if child.is_dir() and not child.name.startswith(".")
+    )
 
 
 def _finding_is_pinned(finding_dir: Path) -> bool:
@@ -454,34 +458,92 @@ def _finding_is_pinned(finding_dir: Path) -> bool:
     return (finding_dir / ".reviewed").is_file() or (finding_dir / ".keep").is_file()
 
 
-def _finding_is_confirmed(finding_dir: Path) -> bool:
-    """True iff a FIND-* dir passed the find-quality gate, or is human-pinned.
-
-    Findings carry no sanitizer reproducer — that is the crashes/ contract,
-    not findings/ — so the finding analog of count_confirmed_crashes' "proof,
-    not assertion" is gate acceptance. The find-quality gate (lib/triage.py)
-    writes `.llm-find-quality.json` with `accept: true` only for a FIND it
-    kept, and moves quorum-rejected FINDs out to findings-rejected/. A
-    `.keep`/`.reviewed` pin is a human override that bypasses the gate (same
-    precedence the gate itself applies). An un-adjudicated FIND — no verdict
-    cache, e.g. output a wall-clock-cut-off run never triaged — is NOT
-    confirmed; that is what keeps the count honest when triage did not finish.
-    Reuses the same accept/pin signal readers elsewhere key on
-    (lib/workqueue.py `_compact_finding`, bin/cluster-findings).
-    """
-    if _finding_is_pinned(finding_dir):
-        return True
+def _finding_quality_accepted(finding_dir: Path) -> bool:
+    """True iff the current report passed quality review."""
     cache = finding_dir / ".llm-find-quality.json"
     if not cache.is_file():
         return False
     payload = _read_json(cache) or {}
     if payload.get("accept") is not True:
         return False
-    # New caches bind the terminal verdict to the report's agent-authored
-    # substance. This check protects read-only harvest/progress callers that do
-    # not first run validate_find_gate. Legacy v13 caches have no report_sha1
-    # and retain their historical behavior until their next gate pass.
     return report_identity.quality_cache_matches_report(finding_dir, payload)
+
+
+def _finding_is_admitted(finding_dir: Path) -> bool:
+    """True iff a FIND is substantive enough to count as audit progress."""
+    return _finding_is_pinned(finding_dir) or _finding_quality_accepted(finding_dir)
+
+
+def _finding_trigger_kept(finding_dir: Path) -> bool:
+    """True iff current trigger evidence keeps the finding in scope."""
+    if _read_json(finding_dir / ".trigger-gate-bypass.json").get("bypass") is True:
+        return True
+    report = report_identity.find_report(finding_dir)
+    report_sha1 = report_identity.content_sha1(report) if report else None
+    if not report_sha1:
+        return False
+    for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+        payload = _read_json(finding_dir / name)
+        if _current_trigger_vote(payload, report_sha1) in {"Promote", "Uncertain"}:
+            return True
+    return False
+
+
+def _current_trigger_vote(payload: dict, report_sha1: str | None) -> str | None:
+    if not report_sha1 or payload.get("content_sha1") != report_sha1:
+        return None
+    vote = payload.get("vote")
+    version = payload.get("decision_version")
+    if (
+        version == triage_validate.TRIGGER_GATE_DECISION_VERSION
+        # Harvest is intentionally environment-free: it validates that the
+        # current scoped schema recorded controls, while live triage is the
+        # authority that compares them with target.toml and refreshes a stale
+        # scope before benchmark metrics are written.
+        and isinstance(payload.get("attacker_controls"), list)
+        and vote in {"Promote", "Reject", "Uncertain"}
+    ):
+        return vote
+    if (
+        version in triage_validate.TRIGGER_GATE_ADVISORY_VERSIONS
+        and vote in {"Promote", "Uncertain"}
+    ):
+        return vote
+    return None
+
+
+def _finding_is_confirmed(
+    finding_dir: Path, *, require_trigger_confirmation: bool = True,
+) -> bool:
+    """True iff a FIND passed both gates, or is human-pinned.
+
+    Findings carry no sanitizer reproducer — that is the crashes/ contract,
+    not findings/ — so the finding analog of count_confirmed_crashes' "proof,
+    not assertion" is complete quality and trigger adjudication. A quality
+    quorum with missing or stale trigger evidence remains pending. A
+    `.keep`/`.reviewed` pin is the explicit human override for both gates.
+    """
+    if not _finding_is_admitted(finding_dir):
+        return False
+    return (
+        not require_trigger_confirmation
+        or _finding_is_pinned(finding_dir)
+        or _finding_trigger_kept(finding_dir)
+    )
+
+
+def _finding_has_terminal_reject(finding_dir: Path) -> bool:
+    """True iff a rejected FIND is awaiting its final directory move."""
+    if _finding_is_pinned(finding_dir):
+        return False
+    quality = _read_json(finding_dir / ".llm-find-quality.json")
+    if quality.get("accept") is False and report_identity.quality_cache_matches_report(
+        finding_dir, quality,
+    ):
+        return True
+    return _finding_quality_accepted(finding_dir) and _trigger_snapshot(
+        finding_dir
+    )[0] == "reject"
 
 
 def _iter_jsonl(path: Path):
@@ -503,8 +565,10 @@ def _iter_jsonl(path: Path):
             yield row
 
 
-def count_confirmed_findings(findings_dir: Path) -> tuple[int, list[str]]:
-    """Count FIND-* subdirs the find-quality gate accepted (or a human pinned).
+def count_confirmed_findings(
+    findings_dir: Path, *, require_trigger_confirmation: bool = True,
+) -> tuple[int, list[str]]:
+    """Count fully adjudicated FIND-* subdirs (or human-pinned overrides).
 
     Returns (count, sorted list of FIND dir names). The mirror of
     count_confirmed_crashes for findings: an un-adjudicated FIND (the gate
@@ -523,10 +587,31 @@ def count_confirmed_findings(findings_dir: Path) -> tuple[int, list[str]]:
     for child in sorted(findings_dir.iterdir()):
         if not child.is_dir() or not child.name.startswith("FIND-"):
             continue
-        if not _finding_is_confirmed(child):
+        if not _finding_is_confirmed(
+            child, require_trigger_confirmation=require_trigger_confirmation,
+        ):
             continue
         confirmed.append(child.name)
     return len(confirmed), confirmed
+
+
+def count_admitted_findings(findings_dir: Path) -> tuple[int, list[str]]:
+    """Count quality-accepted FINDs for live audit progress.
+
+    Trigger review is benchmark adjudication, not a search-loop admission
+    gate. A provider-delayed trigger vote must not turn a substantive new
+    finding into a dry iteration and rotate or stop the investigation.
+    """
+    if not findings_dir.is_dir():
+        return 0, []
+    admitted = [
+        child.name
+        for child in sorted(findings_dir.iterdir())
+        if child.is_dir()
+        and child.name.startswith("FIND-")
+        and _finding_is_admitted(child)
+    ]
+    return len(admitted), admitted
 
 
 def _pool_finding_names(metrics: dict, findings_dir: Path) -> list[str]:
@@ -1505,6 +1590,260 @@ def _find_index_jsonl(results_dir: Path) -> Path:
     return llm_usage.find_usage_index(results_dir)
 
 
+def harvest_execution(
+    results_dir: Path,
+    *,
+    usage_reported_invocations: int = 0,
+    crash_floor: int = 0,
+) -> dict:
+    """Read passive execution telemetry without influencing audit behavior.
+
+    ``bin/probe`` records one row per sanctioned probe in ``state/runs.jsonl``
+    and preserves the requested sanitizer repetition count.  Older and
+    model-direct cells may only have the usage-ledger counter or a confirmed
+    crash, so retain those as explicitly named fallback signals.  The signals
+    can describe the same work; take their maximum instead of double-counting.
+    """
+    path = results_dir / "state" / "runs.jsonl"
+    probe_records = 0
+    structured_invocations = 0
+    by_sanitizer: dict[str, int] = {}
+    by_verdict: dict[str, int] = {}
+    if path.is_file():
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            probe_records += 1
+            runs = _as_nonnegative_int(row.get("sanitizer_runs")) or 1
+            structured_invocations += runs
+            sanitizer = str(row.get("sanitizer") or "unknown").strip().lower()
+            verdict = str(row.get("verdict") or "UNKNOWN").strip().upper()
+            by_sanitizer[sanitizer] = by_sanitizer.get(sanitizer, 0) + runs
+            by_verdict[verdict] = by_verdict.get(verdict, 0) + runs
+
+    usage_reported_invocations = _as_nonnegative_int(usage_reported_invocations)
+    crash_floor = _as_nonnegative_int(crash_floor)
+    sanitizer_invocations = max(
+        structured_invocations, usage_reported_invocations, crash_floor
+    )
+    if probe_records:
+        source = "state/runs.jsonl"
+    elif usage_reported_invocations:
+        source = "logs/index.jsonl"
+    elif crash_floor:
+        source = "crash-floor"
+    else:
+        source = "none"
+    return {
+        "probe_records": probe_records,
+        "sanitizer_invocations": sanitizer_invocations,
+        "structured_sanitizer_invocations": structured_invocations,
+        "usage_reported_invocations": usage_reported_invocations,
+        "crash_floor": crash_floor,
+        "by_sanitizer": dict(sorted(by_sanitizer.items())),
+        "by_verdict": dict(sorted(by_verdict.items())),
+        "source": source,
+    }
+
+
+def _read_metric_report(path: Path | None) -> str:
+    """Read enough report text for passive metrics without unbounded I/O."""
+    if path is None:
+        return ""
+    try:
+        with path.open("rb") as stream:
+            return stream.read(_MAX_SCAN_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def harvest_artifact_links(
+    results_dir: Path,
+    finding_names: list[str],
+    crash_names: list[str],
+) -> dict:
+    """Describe existing duplicate and cross-kind evidence without acting on it."""
+    records: dict[str, tuple[str, str]] = {}
+    clusters: dict[tuple[str, str], list[str]] = {}
+    for kind, parent, names in (
+        ("finding", results_dir / "findings", finding_names),
+        ("crash", results_dir / "crashes", crash_names),
+    ):
+        for name in sorted(names):
+            report = cluster_common.artifact_report_path(parent / name)
+            text = _read_metric_report(report)
+            cluster = cluster_common.cluster_label(text)
+            records[name] = (kind, text)
+            if cluster:
+                clusters.setdefault((kind, cluster), []).append(name)
+
+    duplicate_groups = [
+        {"kind": kind, "cluster": cluster, "members": sorted(members)}
+        for (kind, cluster), members in sorted(clusters.items())
+        if len(members) > 1
+    ]
+    cross_kind: set[tuple[str, str]] = set()
+    for name, (kind, text) in records.items():
+        for reference in _ARTIFACT_REF_RE.findall(text):
+            other = records.get(reference)
+            if other is None or other[0] == kind:
+                continue
+            finding, crash = (
+                (name, reference) if kind == "finding" else (reference, name)
+            )
+            cross_kind.add((finding, crash))
+    return {
+        "duplicate_groups": duplicate_groups,
+        "cross_kind": [
+            {
+                "finding": finding,
+                "crash": crash,
+                "evidence": "explicit-reference",
+            }
+            for finding, crash in sorted(cross_kind)
+        ],
+    }
+
+
+def _trigger_snapshot(directory: Path) -> tuple[str, set[str]]:
+    signals: set[str] = set()
+    observed = False
+    report = report_identity.find_report(directory)
+    report_sha1 = report_identity.content_sha1(report) if report else None
+    for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+        payload = _read_json(directory / name)
+        if payload.get("vote") not in {"Promote", "Reject", "Uncertain"}:
+            continue
+        observed = True
+        vote = _current_trigger_vote(payload, report_sha1)
+        if vote is None:
+            continue
+        signals.add(vote)
+    bypass = _read_json(directory / ".trigger-gate-bypass.json").get("bypass") is True
+    if bypass:
+        signals.add("Promote")
+    if "Promote" in signals and "Reject" in signals:
+        state = "conflict"
+    elif "Reject" in signals:
+        state = "reject"
+    elif bypass:
+        state = "bypass"
+    elif "Promote" in signals:
+        state = "promote"
+    elif "Uncertain" in signals:
+        state = "uncertain"
+    elif observed:
+        state = "stale"
+    else:
+        state = "missing"
+    return state, signals
+
+
+def harvest_gate_states(
+    results_dir: Path,
+    confirmed_findings: list[str],
+    confirmed_crashes: list[str],
+) -> list[dict]:
+    """Snapshot existing gate evidence without recomputing any disposition."""
+    confirmed_finding_set = set(confirmed_findings)
+    confirmed_crash_set = set(confirmed_crashes)
+    rows: list[dict] = []
+    for kind, location, prefix, rejected in (
+        ("finding", "findings", "FIND-", False),
+        ("finding", "findings-rejected", "FIND-", True),
+        ("crash", "crashes", "CRASH-", False),
+        ("crash", "crashes-rejected", "CRASH-", True),
+    ):
+        parent = results_dir / location
+        if not parent.is_dir():
+            continue
+        for directory in sorted(parent.iterdir()):
+            if not directory.is_dir() or not directory.name.startswith(prefix):
+                continue
+            report = cluster_common.artifact_report_path(directory)
+            report_text = _read_metric_report(report)
+            trigger, trigger_signals = _trigger_snapshot(directory)
+            conflicts: list[str] = []
+            if "Promote" in trigger_signals and "Reject" in trigger_signals:
+                conflicts.append("trigger-votes")
+
+            if kind == "finding":
+                cache = _read_json(directory / ".llm-find-quality.json")
+                if _finding_is_pinned(directory):
+                    quality = "override"
+                elif cache and not report_identity.quality_cache_matches_report(
+                    directory, cache,
+                ):
+                    quality = "stale"
+                elif cache.get("accept") is True:
+                    quality = "accept"
+                elif cache.get("accept") is False:
+                    quality = "reject"
+                elif cache:
+                    quality = "pending"
+                else:
+                    quality = "missing"
+                accept_count = _as_nonnegative_int(cache.get("accept_count"))
+                reject_count = _as_nonnegative_int(cache.get("reject_count"))
+                if accept_count and reject_count:
+                    conflicts.append("quality-votes")
+                reproduced = False
+                pending = not rejected and directory.name not in confirmed_finding_set
+            else:
+                quality = "not-applicable"
+                reproduced = dir_has_sanitizer_output(directory)
+                pending = (
+                    not rejected
+                    and (
+                        directory.name not in confirmed_crash_set
+                        or crash_is_pending(directory)
+                    )
+                )
+            disposition = "rejected" if rejected else "pending" if pending else "accepted"
+            rows.append({
+                "id": directory.name,
+                "kind": kind,
+                "location": location,
+                "disposition": disposition,
+                "quality": quality,
+                "trigger": trigger,
+                "reproduced": reproduced,
+                "pending": pending,
+                "conflicts": conflicts,
+                "_report_text": report_text,
+                "_trigger_signals": trigger_signals,
+            })
+
+    by_id = {row["id"]: row for row in rows}
+    for row in rows:
+        for reference in _ARTIFACT_REF_RE.findall(row["_report_text"]):
+            other = by_id.get(reference)
+            if other is None or other["kind"] == row["kind"]:
+                continue
+            finding = row if row["kind"] == "finding" else other
+            crash = other if row["kind"] == "finding" else row
+            if crash["reproduced"]:
+                finding["reproduced"] = True
+            combined = row["_trigger_signals"] | other["_trigger_signals"]
+            if "Promote" in combined and "Reject" in combined:
+                for linked in (row, other):
+                    if "linked-trigger" not in linked["conflicts"]:
+                        linked["conflicts"].append("linked-trigger")
+    for row in rows:
+        row["conflicts"].sort()
+        del row["_report_text"]
+        del row["_trigger_signals"]
+    return rows
+
+
 def count_model_refusals(results_dir: Path) -> int:
     """Count backend refusal warnings recorded for one benchmark cell.
 
@@ -1980,6 +2319,8 @@ def harvest(
     results_dir: Path,
     default_backend: str = "",
     default_model: str = "",
+    *,
+    require_trigger_confirmation: bool = True,
 ) -> dict:
     """Compute the deterministic metric set for one results/ tree.
 
@@ -1997,7 +2338,17 @@ def harvest(
     )
     finding_count = count_subdirs(findings_dir, "FIND-")
     confirmed_finding_count, confirmed_finding_dirs = count_confirmed_findings(
-        findings_dir
+        findings_dir,
+        require_trigger_confirmation=require_trigger_confirmation,
+    )
+    rejected_pending = (
+        sum(
+            _finding_has_terminal_reject(child)
+            for child in findings_dir.iterdir()
+            if child.is_dir() and child.name.startswith("FIND-")
+        )
+        if require_trigger_confirmation and findings_dir.is_dir()
+        else 0
     )
     finding_clusters = confirmed_finding_cluster_count(
         findings_dir, confirmed_finding_dirs
@@ -2018,14 +2369,23 @@ def harvest(
         "discarded_hypotheses": count_discarded_hypotheses(results_dir),
         "findings": finding_count,
         "confirmed_findings": confirmed_finding_count,
-        # FINDs still on disk the gate never verdicted (findings minus
-        # confirmed; rejected FINDs already moved to findings-rejected/).
+        "finding_confirmation": (
+            FINDING_CONFIRMATION_VERSION
+            if require_trigger_confirmation else "legacy-quality"
+        ),
+        # A terminal reject can remain briefly in findings/ when the final
+        # move missed its deadline. It is adjudicated and uncounted, not
+        # pending review; keep it separate from genuinely missing votes.
+        "findings_rejected_pending": rejected_pending,
+        # FINDs still on disk for which the required gate never produced a
+        # terminal verdict. Rejected FINDs already moved to
+        # findings-rejected/, or are counted separately above.
         # Non-zero means the gate did not finish — usually a provider limit cut
         # the drain short — so a reader never mistakes an un-drained
         # 0-confirmed run for a clean "found nothing". Pure arithmetic on disk
         # state; no LLM call.
         "findings_unadjudicated": max(
-            0, finding_count - confirmed_finding_count
+            0, finding_count - confirmed_finding_count - rejected_pending
         ),
         "confirmed_finding_dirs": confirmed_finding_dirs,
         "finding_clusters": finding_clusters,
@@ -2041,11 +2401,22 @@ def harvest(
         default_model=default_model,
         prompt_estimate_fallback=_model_direct_prompt_estimate(results_dir),
     )
-    # Model-direct can leave sanitizer.txt under crashes/ without probe
-    # telemetry; each confirmed crash proves at least one sanitizer run.
-    metrics["tokens"]["asan_invocations"] = max(
-        int(metrics["tokens"].get("asan_invocations") or 0),
-        crash_count,
+    metrics["execution"] = harvest_execution(
+        results_dir,
+        usage_reported_invocations=metrics["tokens"].get("asan_invocations", 0),
+        crash_floor=crash_count,
+    )
+    # Compatibility for existing metric consumers.  New code should use the
+    # sanitizer-neutral execution object; the historical field name predates
+    # UBSan/MSan/TSan and is retained so old ledgers do not read as zero.
+    metrics["tokens"]["asan_invocations"] = metrics["execution"][
+        "sanitizer_invocations"
+    ]
+    metrics["artifact_links"] = harvest_artifact_links(
+        results_dir, confirmed_finding_dirs, crash_dirs
+    )
+    metrics["gate_states"] = harvest_gate_states(
+        results_dir, confirmed_finding_dirs, crash_dirs
     )
     return metrics
 
@@ -2622,11 +2993,12 @@ def _unique_rejected(
 
 
 def _effective_wall(cell: dict):
-    """Productive wall for a cell: elapsed minus any session-recovery pause.
+    """Active wall: elapsed minus confirmed provider-recovery pauses.
 
     Uses cell.json's `wall_effective_seconds` when present, else derives it
-    from `wall_seconds - paused_seconds`. Old cells (no pause fields) fall back
-    to raw `wall_seconds` when provider-active timing is unavailable.
+    from elapsed wall and provider pauses. Housekeeping remains separately
+    observable but is real harness work and therefore stays inside the budget.
+    Old cells without timing fields fall back to raw `wall_seconds`.
     """
     wall = cell.get("wall_seconds")
     if wall is None:
@@ -2925,7 +3297,22 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
             c["metrics"].get("confirmed_findings", 0) for c in done
         ]
         rejected_findings = [
-            c["metrics"].get("findings_rejected", 0) for c in done
+            _as_int(c["metrics"].get("findings_rejected"))
+            + _as_int(c["metrics"].get("findings_rejected_pending"))
+            for c in done
+        ]
+        unadjudicated_findings = [
+            _as_int(
+                c["metrics"].get(
+                    "findings_unadjudicated",
+                    max(
+                        0,
+                        _as_int(c["metrics"].get("findings"))
+                        - _as_int(c["metrics"].get("confirmed_findings")),
+                    ),
+                ),
+            )
+            for c in done
         ]
         rejected_crashes = [
             c["metrics"].get("crashes_rejected", 0) for c in done
@@ -2999,10 +3386,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 # provider limit). Makes confirmed_finding_total=0 legible: 0
                 # confirmed with a non-zero remainder is "gate unfinished", not
                 # "nothing found". Mirrors the per-cell findings_unadjudicated.
-                "unadjudicated_finding_total": sum(
-                    max(0, f - c)
-                    for f, c in zip(findings, confirmed_findings)
-                ),
+                "unadjudicated_finding_total": sum(unadjudicated_findings),
                 "unique_crash_clusters": cb.get("unique_clusters", 0),
                 "novel_crash_clusters": cb.get("novel_clusters", 0),
                 "top_severity_level": cb.get("top_severity_level", "—"),
@@ -4796,7 +5180,10 @@ def metric_gate_summary(metrics: dict) -> str:
         "findings: rejected={fr} confirmed={fc} pending={fp} roots={ft}; "
         "crashes: rejected={cr} confirmed={cc} unique={cu}"
     ).format(
-        fr=_as_int(metrics.get("findings_rejected")),
+        fr=(
+            _as_int(metrics.get("findings_rejected"))
+            + _as_int(metrics.get("findings_rejected_pending"))
+        ),
         fc=_as_int(metrics.get("confirmed_findings")),
         fp=_as_int(metrics.get("findings_unadjudicated")),
         ft=_as_int(metrics.get("findings")),
@@ -4874,6 +5261,7 @@ def _cmd_write_cell(args: argparse.Namespace) -> int:
     if args.status == "incomplete" and run_quality == "clean":
         run_quality = "incomplete"
     paused = max(0, _as_int(args.paused_seconds))
+    housekeeping = max(0, _as_int(getattr(args, "housekeeping_seconds", 0)))
     payload = {
         "condition": args.condition,
         "replicate": int(args.replicate),
@@ -4883,6 +5271,7 @@ def _cmd_write_cell(args: argparse.Namespace) -> int:
         "status": args.status,
         "run_quality": run_quality,
         "paused_seconds": paused,
+        "housekeeping_seconds": housekeeping,
         "wall_effective_seconds": max(0, int(args.wall_seconds) - paused),
     }
     requested = _optional_int(args.requested_agents)
@@ -4927,7 +5316,11 @@ def _cmd_cell_metrics_summary(args: argparse.Namespace) -> int:
         f"findings={_as_int(metrics.get('confirmed_findings', metrics.get('findings')))}/"
         f"{_as_int(metrics.get('finding_clusters'))} unique",
     ]
-    rejected = _as_int(metrics.get("crashes_rejected")) + _as_int(metrics.get("findings_rejected"))
+    rejected = (
+        _as_int(metrics.get("crashes_rejected"))
+        + _as_int(metrics.get("findings_rejected"))
+        + _as_int(metrics.get("findings_rejected_pending"))
+    )
     if rejected:
         parts.append(f"rejected={rejected}")
     unadjudicated = _as_int(metrics.get("findings_unadjudicated"))
@@ -5117,6 +5510,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("status")
     p.add_argument("requested_agents", nargs="?", default="")
     p.add_argument("paused_seconds", nargs="?", default="0")
+    p.add_argument("housekeeping_seconds", nargs="?", default="0")
 
     for name, help_text in (
         ("uncounted-findings", "count findings not accepted by the gate"),
