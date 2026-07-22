@@ -180,6 +180,12 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
     ]
     if card.get("seed"):
         lines.append(f"- **Seed:** `{card['seed']}`")
+    if card.get("buildability") == "not-built":
+        lines.append(
+            "- **Execution availability:** no matching object in the current "
+            "sanitizer builds; source review remains valid, but do not invent "
+            "CLEAN probe evidence if the public surface cannot execute"
+        )
     fixes = card.get("fix_hashes") or []
     lines.append(f"- **Fix commits:** {', '.join(fixes) if fixes else 'none listed'}")
     lines += [

@@ -951,11 +951,26 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     ):
         audit_runner.update_strategy_rotation(
             rotation_runtime, rotation_context,
-            {1: idle_progress}, {1: idle_progress}, set(),
+            {1: idle_progress}, set(),
         )
     equal(
         "S7", (strategy_results / "state" / "strategy-1").read_text().strip(),
         "dry strategy rotation selects the largest available queue",
+    )
+    (strategy_results / "state" / "strategy-1").write_text("S2\n", encoding="utf-8")
+    (strategy_results / ".agent_strategy_streak_1").write_text("2\n", encoding="utf-8")
+    with mock.patch.object(
+        audit_runner.workqueue, "strategy_completion_status",
+        return_value={"complete": True, "evidence": 2, "threshold": 2},
+    ):
+        audit_runner.update_strategy_rotation(
+            rotation_runtime, rotation_context,
+            {1: audit_runner.AgentProgress(0, 1, frozenset())},
+            set(),
+        )
+    equal(
+        "S7", (strategy_results / "state" / "strategy-1").read_text().strip(),
+        "environment-blocked work advances strategy rotation",
     )
 
     subsystem_runtime = SimpleNamespace(
@@ -968,10 +983,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         encoding="utf-8",
     )
     audit_runner.update_subsystem_dry_streaks(
-        subsystem_runtime,
-        {1: idle_progress, 2: idle_progress},
-        {1: audit_runner.AgentProgress(0, 0, frozenset({"finding:FCL-1"})), 2: idle_progress},
-        {1},
+        subsystem_runtime, {1},
     )
     equal(
         0,
@@ -981,10 +993,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "any productive agent resets a shared subsystem dry streak",
     )
     audit_runner.update_subsystem_dry_streaks(
-        subsystem_runtime,
-        {1: idle_progress, 2: idle_progress},
-        {1: idle_progress, 2: idle_progress},
-        set(),
+        subsystem_runtime, set(),
     )
     equal(
         1,
@@ -992,6 +1001,16 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
             audit_runner._queue_context(subsystem_runtime), "src/parser"
         ),
         "multiple dry agents advance a shared subsystem only once per iteration",
+    )
+    audit_runner.update_subsystem_dry_streaks(
+        subsystem_runtime, set(),
+    )
+    equal(
+        2,
+        audit_runner.workqueue.subsystem_dry_streak(
+            audit_runner._queue_context(subsystem_runtime), "src/parser"
+        ),
+        "environment-blocked work advances subsystem dry streak",
     )
 
     refresh_results = root / "refresh-results"

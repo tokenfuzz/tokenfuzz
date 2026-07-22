@@ -19,7 +19,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
@@ -540,6 +540,9 @@ class Context:
     target_slug: str
     results_dir: Path
     repo_type: str
+    _sanitizer_object_cache: tuple[set[str], int] | None = field(
+        default=None, init=False, repr=False,
+    )
 
 
 def now_iso() -> str:
@@ -988,6 +991,73 @@ def iter_source_files(root: Path, max_files: int = 0) -> Iterable[Path]:
             yield path
             if max_files > 0 and seen >= max_files:
                 return
+
+
+_NATIVE_COMPILATION_UNIT_EXTS = frozenset({
+    ".c", ".cc", ".cpp", ".cxx", ".m", ".mm",
+})
+
+
+def _sanitizer_object_keys(ctx: Context) -> tuple[set[str], int]:
+    """Return target-relative object identities from available sanitizer builds."""
+    if ctx._sanitizer_object_cache is not None:
+        return ctx._sanitizer_object_cache
+    keys: set[str] = set()
+    builds = 0
+    try:
+        roots = [
+            path for path in ctx.target_root.iterdir()
+            if path.is_dir()
+            and path.name.startswith(
+                ("build-asan", "build-ubsan", "build-msan", "build-tsan")
+            )
+        ]
+    except OSError:
+        roots = []
+    for root in roots:
+        found = False
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                suffix = Path(name).suffix.lower()
+                if suffix not in {".o", ".obj"}:
+                    continue
+                found = True
+                relative = (
+                    (Path(dirpath) / name).relative_to(root).as_posix().lower()
+                )
+                key = relative[: -len(suffix)]
+                keys.add(key)
+                keys.add(key.replace("/.libs/", "/"))
+        builds += int(found)
+    result = (keys, builds)
+    ctx._sanitizer_object_cache = result
+    return result
+
+
+def annotate_card_buildability(ctx: Context, cards: list[dict]) -> list[dict]:
+    """Attach advisory compilation evidence without removing source-review work."""
+    object_keys, build_count = _sanitizer_object_keys(ctx)
+    out: list[dict] = []
+    for original in cards:
+        card = dict(original)
+        relative = normalized_relpath(card.get("file", "")).lower()
+        suffix = Path(relative).suffix.lower()
+        if not object_keys or suffix not in _NATIVE_COMPILATION_UNIT_EXTS:
+            card["buildability"] = "unknown"
+        else:
+            stem = relative[: -len(suffix)]
+            matched = any(
+                key == stem or key == relative
+                or key.endswith("/" + stem) or key.endswith("/" + relative)
+                for key in object_keys
+            )
+            card["buildability"] = "built" if matched else "not-built"
+            if not matched:
+                card["buildability_reason"] = (
+                    f"no matching object in {build_count} sanitizer build(s)"
+                )
+        out.append(card)
+    return out
 
 
 def read_sample(path: Path, max_bytes: int = 256_000) -> str:
@@ -3180,6 +3250,27 @@ def _claim_next_card_locked(
                 return (0 if own_active_lease else 1, conclusion_counts.get(cid, 0))
 
             preferred.sort(key=_demotion_key)
+
+    # Reproducer sessions need executable shots first. An absent compilation
+    # object is advisory rather than terminal: analysis sessions retain the
+    # original ranking, and reproduce sessions reach optional units after the
+    # built/unknown queue is exhausted.
+    if role == "reproduce" and len(preferred) > 1:
+        order = {"built": 0, "unknown": 1, "not-built": 2}
+
+        def _buildability_key(card: dict) -> tuple[int, int]:
+            current = latest.get(card.get("id", ""))
+            own_active_lease = bool(
+                current
+                and str(current.get("agent", "")) == str(agent)
+                and claim_blocks_card(current, ttl, now)
+            )
+            return (
+                0 if own_active_lease else 1,
+                order.get(card.get("buildability", "unknown"), 1),
+            )
+
+        preferred.sort(key=_buildability_key)
 
     for card in preferred:
         cid = card.get("id", "")

@@ -755,7 +755,6 @@ class AgentProgress:
 
 def update_strategy_rotation(
     runtime: Runtime, context: prompt.PromptContext,
-    before_progress: dict[int, AgentProgress],
     after_progress: dict[int, AgentProgress],
     productive_agents: set[int],
 ) -> None:
@@ -765,12 +764,10 @@ def update_strategy_rotation(
     assigned = {context.strategy(agent) for agent in range(1, runtime.num_agents + 1)}
     ctx = _queue_context(runtime)
     for agent in range(1, runtime.num_agents + 1):
-        before = before_progress[agent]
         after = after_progress[agent]
         productive = agent in productive_agents
-        diagnostic = after.env_blocked > before.env_blocked
         streak = 0 if productive else _read_streak(runtime, agent)
-        if not productive and not diagnostic:
+        if not productive:
             streak += 1
         _write_streak(runtime, agent, streak)
         current = context.strategy(agent)
@@ -800,8 +797,6 @@ def update_strategy_rotation(
 
 def update_subsystem_dry_streaks(
     runtime: Runtime,
-    before_progress: dict[int, AgentProgress],
-    after_progress: dict[int, AgentProgress],
     productive_agents: set[int],
 ) -> None:
     """Record one dry/productive outcome for each subsystem touched this pass."""
@@ -811,11 +806,7 @@ def update_subsystem_dry_streaks(
         subsystem = workqueue.agent_current_subsystem(ctx, str(agent))
         if not subsystem:
             continue
-        before = before_progress[agent]
-        after = after_progress[agent]
         productive = agent in productive_agents
-        if after.env_blocked > before.env_blocked and not productive:
-            continue
         outcomes[subsystem] = outcomes.get(subsystem, False) or productive
     for subsystem, productive in outcomes.items():
         if not workqueue.record_subsystem_iteration(ctx, subsystem, productive):
@@ -1700,10 +1691,6 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     reset_sanitizer_run_counters(runtime)
     reset_llm_decision_counters(runtime)
     before = progress(runtime)
-    before_agent_progress = {
-        agent: agent_progress(runtime, agent, before)
-        for agent in range(1, runtime.num_agents + 1)
-    }
     cold = _cold(runtime)
     refreshed = refresh_work_cards(runtime)
     if refreshed:
@@ -1759,14 +1746,14 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
         return issue, results
     if productive:
         state.dry_streak = 0
-    elif not diagnostic:
+    else:
         state.dry_streak += 1
     state.transient_streak = 0
     update_subsystem_dry_streaks(
-        runtime, before_agent_progress, after_agent_progress, productive_agents
+        runtime, productive_agents
     )
     update_strategy_rotation(
-        runtime, context, before_agent_progress, after_agent_progress, productive_agents
+        runtime, context, after_agent_progress, productive_agents
     )
     outcome = "productive" if productive else "env-blocked" if diagnostic else "dry"
     index_log(

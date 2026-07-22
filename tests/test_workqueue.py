@@ -336,6 +336,30 @@ class WorkQueueTests(unittest.TestCase):
         reclaimed = workqueue.claim_next_card(self.ctx, "2", mode="generic", strategy="S7", claim=False)
         self.assertEqual(reclaimed["id"], "WORK-B")
 
+    def test_reproducers_prefer_built_units_without_hiding_source_review(self) -> None:
+        (self.target / "src").mkdir()
+        (self.target / "src/built.c").write_text("int built(void);\n")
+        (self.target / "src/optional.c").write_text("int optional(void);\n")
+        obj = self.target / "build-asan/src/built.o"
+        obj.parent.mkdir(parents=True)
+        obj.touch()
+        cards = workqueue.annotate_card_buildability(self.ctx, [
+            self.card("WORK-OPTIONAL", "src/optional.c", score=100),
+            self.card("WORK-BUILT", "src/built.c", score=10),
+        ])
+        self.assertEqual(
+            [card["buildability"] for card in cards], ["not-built", "built"],
+        )
+        self.write_cards(cards)
+        reproduced = workqueue.claim_next_card(
+            self.ctx, "1", mode="generic", role="reproduce", claim=False,
+        )
+        analyzed = workqueue.claim_next_card(
+            self.ctx, "2", mode="generic", role="analysis", claim=False,
+        )
+        self.assertEqual(reproduced["id"], "WORK-BUILT")
+        self.assertEqual(analyzed["id"], "WORK-OPTIONAL")
+
     def test_active_hypothesis_reserves_duplicate_surface(self) -> None:
         cards = [
             self.card("WORK-A", "src/app.c", score=20),

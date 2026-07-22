@@ -11,7 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
-from workqueue import add_common_args, apply_latest_claim_status, context_from_args, llm_rerank_cards, rank_target, read_jsonl, write_cards
+from workqueue import add_common_args, annotate_card_buildability, apply_latest_claim_status, context_from_args, llm_rerank_cards, rank_target, read_jsonl, write_cards
 
 
 def main(argv: list[str]) -> int:
@@ -49,6 +49,7 @@ def main(argv: list[str]) -> int:
         and c.get("id") not in merged_ids
     ]
     cards = cards + s6_cards
+    cards = annotate_card_buildability(ctx, cards)
     cards = apply_latest_claim_status(ctx, cards)
     write_cards(out, cards)
     if not args.quiet:
