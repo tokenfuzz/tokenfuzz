@@ -1624,7 +1624,10 @@ def harvest_execution(
             if not isinstance(row, dict):
                 continue
             probe_records += 1
-            runs = _as_nonnegative_int(row.get("sanitizer_runs")) or 1
+            runs = (
+                _as_nonnegative_int(row.get("sanitizer_runs"))
+                if "sanitizer_runs" in row else 1
+            )
             structured_invocations += runs
             sanitizer = str(row.get("sanitizer") or "unknown").strip().lower()
             verdict = str(row.get("verdict") or "UNKNOWN").strip().upper()

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import fcntl
 import hashlib
 import os
 import re
@@ -107,6 +108,8 @@ class MultiRun:
         self.sanitizer = sanitizer
         self.args = args
         self.runs = int(_env("SANITIZER_RUNS", "ASAN_RUNS", "5"))
+        if self.runs < 1:
+            raise ValueError("SANITIZER_RUNS must be a positive integer")
         self.child = SCRIPT_DIR / RUNNERS[sanitizer]
         self.header = "ASAN_RUN_HEADER" if sanitizer == "asan" else "SANITIZER_RUN_HEADER"
         self.output_display = os.environ.get("SAN_OUTPUT_FILE", os.environ.get("ASAN_OUTPUT_FILE", ""))
@@ -228,24 +231,63 @@ class MultiRun:
                 f"closest={shlex.quote(closest or '<none>')}\n"
             )
 
-    def account_budget(self) -> None:
-        counter_name = _env("SANITIZER_RUN_COUNTER_FILE", "ASAN_RUN_COUNTER_FILE")
-        if not counter_name:
+    def record_actual_runs(self, runs: int) -> None:
+        path = os.environ.get("SANITIZER_RUNS_ACTUAL_FILE", "")
+        if not path:
             return
-        counter = Path(counter_name)
-        counter.parent.mkdir(parents=True, exist_ok=True)
-        previous_text = counter.read_text(errors="ignore") if counter.is_file() else ""
-        digits = "".join(ch for ch in previous_text if ch.isdigit())
-        current = int(digits or 0) + 1
-        counter.write_text(str(current))
+        try:
+            destination = Path(path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("a+", encoding="utf-8") as stream:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                stream.write(f"{max(0, runs)}\n")
+                stream.flush()
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        except OSError as exc:
+            print(
+                f"[run-sanitizer-multi] WARN: could not record actual run count: {exc}",
+                file=sys.stderr,
+            )
+
+    def account_budget(self) -> bool:
+        requested = self.runs
+        counter_name = _env("SANITIZER_RUN_COUNTER_FILE", "ASAN_RUN_COUNTER_FILE")
         budget_text = _env("SANITIZER_RUN_BUDGET", "ASAN_RUN_BUDGET")
         budget = int(budget_text) if budget_text.isdigit() else 0
+        previous = 0
+        allowed = min(requested, budget) if budget else requested
+        if counter_name:
+            counter = Path(counter_name)
+            counter.parent.mkdir(parents=True, exist_ok=True)
+            with counter.open("a+", encoding="utf-8") as stream:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                stream.seek(0)
+                previous_text = stream.read()
+                digits = "".join(ch for ch in previous_text if ch.isdigit())
+                previous = int(digits or 0)
+                if budget:
+                    allowed = min(requested, max(0, budget - previous))
+                current = previous + allowed
+                stream.seek(0)
+                stream.truncate()
+                stream.write(str(current))
+                stream.flush()
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        else:
+            current = allowed
+        self.runs = allowed
         if budget:
             self.emit(f"[run-sanitizer-multi] BUDGET: {current}/{budget} sanitizer invocations used this iteration")
-            if current > budget:
-                self.emit("[run-sanitizer-multi] BUDGET: EXCEEDED - stop opening new hypotheses; wrap up the current one and exit")
+            if allowed < requested:
+                self.emit(
+                    f"[run-sanitizer-multi] BUDGET: CLAMPED requested={requested} "
+                    f"actual={allowed} remaining_before={max(0, budget - previous)}"
+                )
+            if allowed == 0:
+                self.emit("[run-sanitizer-multi] BUDGET: EXHAUSTED - no sanitizer run started")
         else:
             self.emit(f"[run-sanitizer-multi] BUDGET: {current} sanitizer invocation(s) this iteration")
+        return allowed > 0
 
     def classify(self, path: Path) -> Outcome:
         crashed = _file_matches(path, CRASH_RE)
@@ -338,6 +380,7 @@ class MultiRun:
         for index in range(1, self.runs + 1):
             self.emit(f"=== Run {index}/{self.runs} ===")
             with capture_command([str(self.child), *self.args], merge_stderr=True) as completed:
+                self.record_actual_runs(1)
                 data = completed.stdout
                 self.append_raw(data)
                 outcome = self.classify(data)
@@ -464,8 +507,11 @@ def main(argv: list[str]) -> int:
     run.seed_output()
     coverage_status = run.coverage_gate()
     if coverage_status is not None:
+        run.record_actual_runs(0)
         return coverage_status
-    run.account_budget()
+    if not run.account_budget():
+        run.record_actual_runs(0)
+        return 2
     run.run_repetitions()
     return run.finish()
 

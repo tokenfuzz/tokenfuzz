@@ -161,11 +161,26 @@ else:
         self.assertTrue(derived_case.with_suffix(".asan.txt").is_file())
 
         counter = self.root / "counter"
-        env = {"SANITIZER_RUN_COUNTER_FILE": str(counter), "SANITIZER_RUN_BUDGET": "3"}
-        for expected in range(1, 5):
-            process = self.run_multi(environment=env)
-            self.assertEqual(counter.read_text(), str(expected))
-        self.assertIn("EXCEEDED", self.output(process))
+        actual = self.root / "actual-runs"
+        env = {
+            "SANITIZER_RUN_COUNTER_FILE": str(counter),
+            "SANITIZER_RUN_BUDGET": "5",
+            "SANITIZER_RUNS_ACTUAL_FILE": str(actual),
+        }
+        process = self.run_multi(runs=2, environment=env)
+        self.assertEqual(counter.read_text(), "2")
+        self.assertIn("CRASH_RATE: 0/2", self.output(process))
+        process = self.run_multi(runs=4, environment=env)
+        self.assertEqual(counter.read_text(), "5")
+        self.assertIn("CLAMPED requested=4 actual=3", self.output(process))
+        self.assertIn("CRASH_RATE: 0/3", self.output(process))
+        process = self.run_multi(runs=2, environment=env)
+        self.assertEqual(process.returncode, 2)
+        self.assertEqual(counter.read_text(), "5")
+        self.assertIn("EXHAUSTED", self.output(process))
+        self.assertEqual(
+            sum(int(line) for line in actual.read_text().splitlines()), 5
+        )
 
         self.assertIn("mode argument required", self.output(self.run_multi(mode=None)))
         missing = self.root / "missing.html"

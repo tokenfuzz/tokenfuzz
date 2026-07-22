@@ -4152,8 +4152,11 @@ def _int_env(name: str, default: int) -> int:
 def add_run(ctx: Context, args: argparse.Namespace) -> dict:
     init_state(ctx)
     rid = "RUN-" + hashlib.sha1(f"{args.agent}:{args.testcase}:{now_iso()}".encode()).hexdigest()[:10]
+    raw_sanitizer_runs = getattr(args, "sanitizer_runs", "")
     try:
-        sanitizer_runs = int(getattr(args, "sanitizer_runs", "") or 0) or 1
+        sanitizer_runs = (
+            max(0, int(raw_sanitizer_runs)) if str(raw_sanitizer_runs) else 1
+        )
     except (TypeError, ValueError):
         sanitizer_runs = 1
     row = {

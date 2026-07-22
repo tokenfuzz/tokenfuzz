@@ -188,15 +188,18 @@ class BenchmarkMetricsTests(unittest.TestCase):
             }) + "\n" + json.dumps({
                 "id": "RUN-3", "verdict": "NO_EXEC", "sanitizer": "ubsan",
                 "sanitizer_runs": 2,
+            }) + "\n" + json.dumps({
+                "id": "RUN-4", "verdict": "MISSED", "sanitizer": "asan",
+                "sanitizer_runs": 0,
             }) + "\nnot-json\n",
             encoding="utf-8",
         )
         metrics = benchmark.harvest(results)
-        self.assertEqual(metrics["execution"]["probe_records"], 3)
+        self.assertEqual(metrics["execution"]["probe_records"], 4)
         self.assertEqual(metrics["execution"]["sanitizer_invocations"], 8)
         self.assertEqual(metrics["execution"]["by_sanitizer"], {"asan": 6, "ubsan": 2})
         self.assertEqual(metrics["execution"]["by_verdict"], {
-            "CLEAN": 1, "CRASH": 5, "NO_EXEC": 2,
+            "CLEAN": 1, "CRASH": 5, "NO_EXEC": 2, "MISSED": 0,
         })
         self.assertEqual(metrics["execution"]["source"], "state/runs.jsonl")
         self.assertEqual(metrics["tokens"]["asan_invocations"], 8)

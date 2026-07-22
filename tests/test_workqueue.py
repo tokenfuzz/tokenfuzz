@@ -149,6 +149,9 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(workqueue.mode_for_file("script.js"), "js")
         self.assertEqual(workqueue.mode_for_file("parser.c"), "auto")
 
+    def test_run_state_preserves_zero_sanitizer_executions(self) -> None:
+        self.assertEqual(self.add_run(sanitizer_runs=0)["sanitizer_runs"], 0)
+
     def test_patch_descriptions_and_deduplication_reject_noise(self) -> None:
         self.assertTrue(workqueue.is_version_only_file_set(["VERSION", "CHANGELOG.md"]))
         self.assertFalse(workqueue.is_version_only_file_set(["VERSION", "src/app.c"]))

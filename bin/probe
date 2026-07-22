@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 BIN_DIR = ROOT / "bin"
@@ -55,7 +55,7 @@ HEADER_RE = {
 }
 BARE_METADATA = re.compile(r"^\s*(TARGET|HYPOTHESIS-ID|CARD-ID|CATEGORY|MODE|HARNESS|PROPERTY):\s*")
 HELP = """Usage:
-  bin/probe [--confirm] [--dry-run] [--mode auto|browser|js|generic|js-diff] \\
+  bin/probe [--confirm | --sanitizer-runs N] [--dry-run] [--mode auto|browser|js|generic|js-diff] \\
             [--hypothesis-id HYPOTHESIS-ID] \\
             [--want REGEX] testcase [-- harness-args...]
 
@@ -73,14 +73,17 @@ For opaque byte inputs that cannot carry comments, pass --hypothesis-id;
 TARGET and CARD-ID are derived from that hypothesis in structured state.
 
 PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner overrides target.toml.
---confirm runs five times; --dry-run resolves and prints the command only.
+--confirm runs five times; --sanitizer-runs runs an explicit positive count;
+--dry-run resolves and prints the command only.
 """
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False, usage=argparse.SUPPRESS)
     parser.add_argument("--mode", default="auto")
-    parser.add_argument("--confirm", action="store_true")
+    runs = parser.add_mutually_exclusive_group()
+    runs.add_argument("--confirm", action="store_true")
+    runs.add_argument("--sanitizer-runs", type=int)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--want", default="")
     parser.add_argument("--hypothesis-id", default="")
@@ -100,11 +103,24 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         raise SystemExit(2)
     if args.mode not in VALID_MODES:
         raise ValueError(f"invalid mode: {args.mode}")
+    if args.sanitizer_runs is not None and args.sanitizer_runs < 1:
+        raise ValueError("--sanitizer-runs must be a positive integer")
     if args.want == "auto":
         args.want = ""
     if args.args and args.args[0] == "--":
         args.args.pop(0)
     return args
+
+
+def sanitizer_run_count(args: argparse.Namespace, environment: Mapping[str, str]) -> int:
+    if args.sanitizer_runs is not None:
+        return args.sanitizer_runs
+    if args.confirm:
+        return 5
+    try:
+        return max(1, int(environment.get("SANITIZER_RUNS", "1")))
+    except ValueError:
+        return 1
 
 
 def path_under(root: Path, path: Path) -> bool:
@@ -432,6 +448,9 @@ class Probe:
             if os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL") == "1" else ""
         )
         self.output = Path(internal_output) if internal_output else default_output
+        self.actual_runs_path = self.output.with_name(
+            f".{self.output.name}.runs-{os.getpid()}-{time.time_ns()}"
+        )
         self.exec_testcase = prepare_exec_testcase(self.testcase, self.config, self.agent)
         self.want = args.want or derive_want(self.header["target"])
         self.card = self.header["card"] or self._card_from_state()
@@ -567,8 +586,10 @@ class Probe:
             "TRIED_INPUTS_LOG": str(Path(self.config.results_dir) / f"tried-inputs-{self.agent}.log"),
             "HITS_LOG_PATH": str(Path(self.config.results_dir) / f"hits-{self.agent}.log"),
             "ASAN_OUTPUT_FILE": str(self.output), "PROBE_SANITIZER_SELECTED": self.sanitizer,
-            "SANITIZER_RUNS": "5" if self.args.confirm else environment.get("SANITIZER_RUNS", "1"),
+            "SANITIZER_RUNS": str(sanitizer_run_count(self.args, environment)),
+            "SANITIZER_RUNS_ACTUAL_FILE": str(self.actual_runs_path),
         })
+        self.actual_runs_path.unlink(missing_ok=True)
         environment["PROBE_BUILD_CONFIG_SELECTED"] = (
             self.selected_build_config.config_id if self.selected_build_config else "primary"
         )
@@ -687,6 +708,8 @@ class Probe:
             f"[probe] mode={self.mode} testcase={self.testcase} asan_output={self.output}"
             f" build_config={self.selected_build_config.name if self.selected_build_config else 'primary'}{confirmation}"
         )
+        if Path(self.command[0]).name == "run-sanitizer-multi":
+            self.actual_runs_path.write_text("0\n", encoding="utf-8")
         if self.mode == "js-diff":
             with capture_command(
                 self.command, merge_stderr=True, env=self.environment
@@ -700,12 +723,28 @@ class Probe:
         result = completed.returncode
         probe_verdict = self._classify(result)
         result, probe_verdict = self._auto_route(result, probe_verdict)
+        self.environment["SANITIZER_RUNS"] = str(self._actual_sanitizer_runs())
         self._cap_output()
         self._write_internal_differential_result(probe_verdict)
         print(f"[probe] verdict={probe_verdict}")
         self._record_state(probe_verdict)
         self._file_crash(probe_verdict)
         return result
+
+    def _actual_sanitizer_runs(self) -> int:
+        try:
+            records = self.actual_runs_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return int(self.environment["SANITIZER_RUNS"])
+        finally:
+            self.actual_runs_path.unlink(missing_ok=True)
+        values = []
+        for line in records:
+            try:
+                values.append(max(0, int(line.strip())))
+            except ValueError:
+                continue
+        return sum(values)
 
     def _classify(self, returncode: int) -> str:
         if self.output.is_file() and self.output.stat().st_size:
