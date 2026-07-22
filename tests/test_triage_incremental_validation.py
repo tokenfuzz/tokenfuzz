@@ -168,6 +168,55 @@ class IncrementalFindingValidationTests(unittest.TestCase):
             self.assertEqual(self._gate(), {"accepted": 1, "rejected": 0, "pending": 0})
         decide.assert_not_called()
 
+    def test_pre_canonicalization_verdicts_survive_the_table_hash_transition(self) -> None:
+        controls = ["bytes"]
+        self.report.write_text(
+            "# State issue\n\n"
+            "| Field | Value |\n"
+            "| --- | --- |\n"
+            "| Boundary | caller-controlled |\n",
+            encoding="utf-8",
+        )
+        report_text = self.report.read_text(encoding="utf-8")
+        legacy_sha1 = report_identity.legacy_semantic_text_sha1(report_text)
+        self.assertNotEqual(legacy_sha1, report_identity.content_sha1(self.report))
+
+        quality = {
+            "decision_version": report_identity.FIND_QUALITY_DECISION_VERSION,
+            "report_sha1": legacy_sha1,
+            "accept": True,
+        }
+        quality_path = self.finding / ".llm-find-quality.json"
+        quality_path.write_text(json.dumps(quality), encoding="utf-8")
+        self.assertTrue(report_identity.quality_cache_matches_report(self.finding, quality))
+        self.assertTrue(triage._quality_cache_matches(
+            quality_path, quality, self.report, report_text,
+        ))
+
+        trigger = {
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "content_sha1": legacy_sha1,
+            "attacker_controls": controls,
+            "vote": "Promote",
+        }
+        trigger_path = self.finding / ".trigger-gate.json"
+        trigger_path.write_text(json.dumps(trigger), encoding="utf-8")
+        with mock.patch.object(
+            triage_validate, "trigger_attacker_controls", return_value=controls,
+        ):
+            self.assertEqual(
+                triage._cached_trigger_vote(self.report, trigger_path), "Promote",
+            )
+        self.assertTrue(benchmark._finding_trigger_kept(self.finding))
+
+        self.report.write_text(
+            report_text.replace("caller-controlled", "trusted-only"),
+            encoding="utf-8",
+        )
+        self.assertFalse(report_identity.quality_cache_matches_report(self.finding, quality))
+        self.assertIsNone(triage._cached_trigger_vote(self.report, trigger_path))
+        self.assertFalse(benchmark._finding_trigger_kept(self.finding))
+
     def test_finalizer_advances_content_key_after_harness_enrichment(self) -> None:
         original = triage.read_report_bounded(self.report)
         cache = self.finding / ".llm-find-quality.json"
@@ -281,6 +330,24 @@ Generated score text.
         )
         self.assertNotEqual(before, report_identity.content_sha1(self.report))
 
+    def test_table_padding_does_not_invalidate_report_identity(self) -> None:
+        self.report.write_text(
+            "# State issue\n\n| Field | Value |\n| --- | --- |\n"
+            "| Boundary | caller-controlled request |\n",
+            encoding="utf-8",
+        )
+        before = report_identity.content_sha1(self.report)
+        subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "render-md"), str(self.report)],
+            check=True,
+        )
+        self.assertEqual(before, report_identity.content_sha1(self.report))
+        self.report.write_text(
+            self.report.read_text().replace("caller-controlled", "trusted"),
+            encoding="utf-8",
+        )
+        self.assertNotEqual(before, report_identity.content_sha1(self.report))
+
     def test_read_only_consumers_reject_a_stale_new_quality_cache(self) -> None:
         report_text = triage.read_report_bounded(self.report)
         cache = self.finding / ".llm-find-quality.json"
@@ -334,6 +401,61 @@ Generated score text.
                 {},
             )
         self.assertEqual(maximum, 2)
+
+    def test_reach_and_trigger_batches_use_bounded_parallelism(self) -> None:
+        directories = []
+        for index in range(9):
+            directory = self.root / "findings" / f"FIND-{index + 10:03d}"
+            directory.mkdir()
+            (directory / "report.md").write_text(
+                "# State issue\n\nA public request crosses a boundary.\n",
+                encoding="utf-8",
+            )
+            directories.append(directory)
+
+        lock = threading.Lock()
+        active = maximum = calls = 0
+
+        def decide(*_args, **_kwargs):
+            nonlocal active, maximum, calls
+            with lock:
+                active += 1
+                calls += 1
+                maximum = max(maximum, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return {"items": []}
+
+        with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=decide):
+            triage._batch_reach_field_decisions(
+                directories, None, workers=2,
+            )
+        self.assertEqual((calls, maximum), (3, 2))
+
+        active = maximum = calls = 0
+
+        def run(*_args, **_kwargs):
+            nonlocal active, maximum, calls
+            with lock:
+                active += 1
+                calls += 1
+                maximum = max(maximum, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(triage.subprocess, "run", side_effect=run):
+            attempted = triage._batch_finding_trigger_votes(
+                directories, self.root, None, None, False, workers=2,
+            )
+        self.assertEqual(attempted, set(directories))
+        self.assertEqual((calls, maximum), (3, 2))
 
     def test_trigger_cache_requires_current_prompt_and_report(self) -> None:
         cache = self.finding / ".trigger-gate.json"

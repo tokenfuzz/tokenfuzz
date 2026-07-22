@@ -401,6 +401,7 @@ def _batch_reach_field_decisions(
     directories: list[Path],
     usage_index: str | os.PathLike[str] | None,
     deadline: float | None = None,
+    workers: int = 4,
 ) -> tuple[set[Path], dict[Path, dict]]:
     """Batch missing reachability fields without per-item fallback fan-out."""
     items: list[dict] = []
@@ -439,7 +440,8 @@ def _batch_reach_field_decisions(
     ).split("\nReport:", 1)[0]
     by_id = _batch_decisions(
         "reachability_fields_batch", "triage_reachability_fields_batch.md.j2",
-        instructions, items, timeout, usage_index, deadline,
+        instructions, items, timeout, usage_index, deadline, workers,
+        batch_size=4,
     )
     return attempted, {
         directory: decision
@@ -1004,8 +1006,8 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
         return None
     if not isinstance(payload, dict):
         return None
-    content_sha1 = report_identity.content_sha1(report)
-    if not content_sha1 or payload.get("content_sha1") != content_sha1:
+    content_sha1s = report_identity.content_sha1_candidates(report)
+    if payload.get("content_sha1") not in content_sha1s:
         return None
     vote = payload.get("vote")
     if vote not in {"Promote", "Reject", "Uncertain"}:
@@ -1034,6 +1036,7 @@ def _batch_finding_trigger_votes(
     directories: list[Path], results_dir: Path, deadline: float | None,
     usage_index: str | os.PathLike[str] | None,
     target_root_is_product: bool,
+    workers: int = 4,
 ) -> set[Path]:
     """Populate independent keyed trigger votes with shared CLI startup."""
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
@@ -1058,14 +1061,20 @@ def _batch_finding_trigger_votes(
         if usage_index else results_dir / "logs" / ".raw"
     )
     raw_dir.mkdir(parents=True, exist_ok=True)
-    attempted: set[Path] = set()
-    for start in range(0, len(pending), _TRIGGER_BATCH_SIZE):
+    batches = [
+        pending[start:start + _TRIGGER_BATCH_SIZE]
+        for start in range(0, len(pending), _TRIGGER_BATCH_SIZE)
+    ]
+    attempted = {directory for directory, _report_path, _vote_file in pending}
+
+    def validate(index_and_batch: tuple[int, list[tuple[Path, Path, Path]]]) -> None:
+        index, batch = index_and_batch
         timeout = _decision_timeout(300, deadline)
         if timeout <= 0 or llm_decide.provider_limit_open():
-            break
-        batch = pending[start:start + _TRIGGER_BATCH_SIZE]
-        attempted.update(directory for directory, _report_path, _vote_file in batch)
-        manifest = raw_dir / f"trigger-batch-{os.getpid()}-{time.time_ns()}.json"
+            return
+        manifest = raw_dir / (
+            f"trigger-batch-{os.getpid()}-{time.time_ns()}-{index}.json"
+        )
         payload = {
             "items": [
                 {"id": directory.name, "finding": str(report), "output": str(vote_file)}
@@ -1094,6 +1103,11 @@ def _batch_finding_trigger_votes(
             pass
         finally:
             manifest.unlink(missing_ok=True)
+
+    if not batches:
+        return attempted
+    with ThreadPoolExecutor(max_workers=min(max(1, workers), len(batches))) as pool:
+        list(pool.map(validate, enumerate(batches)))
     return attempted
 
 
@@ -1359,7 +1373,7 @@ def triage_crash_dirs(
             reach_directories.append(directory)
     usage_index = benchmark._find_index_jsonl(results)
     reach_attempted, reach_decisions = _batch_reach_field_decisions(
-        reach_directories, usage_index, deadline,
+        reach_directories, usage_index, deadline, workers,
     )
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         statuses = pool.map(
@@ -1411,7 +1425,7 @@ def _quality_cache_matches(
         # The full semantic identity is authoritative for new caches. The
         # bounded hash remains useful provenance but can shift when generated
         # annotations move a large report's head/tail cut points.
-        return cached_report_sha1 == report_identity.content_sha1(report)
+        return cached_report_sha1 in report_identity.content_sha1_candidates(report)
     cached_sha1 = cache.get("content_sha1")
     if isinstance(cached_sha1, str) and cached_sha1:
         # Pre-incremental v13 caches hashed the raw bounded report. Accept that
@@ -1511,11 +1525,12 @@ def _batch_decisions(
     usage_index: str | os.PathLike[str] | None,
     deadline: float | None = None,
     workers: int = 1,
+    batch_size: int = _DECISION_BATCH_SIZE,
 ) -> dict[str, dict]:
     """Return only well-keyed batch results; callers retry omitted ids safely."""
     batches = [
-        items[start:start + _DECISION_BATCH_SIZE]
-        for start in range(0, len(items), _DECISION_BATCH_SIZE)
+        items[start:start + batch_size]
+        for start in range(0, len(items), batch_size)
     ]
 
     def decide(batch: list[dict]) -> dict[str, dict]:
@@ -1908,7 +1923,7 @@ def validate_find_gate(
     ]
     usage_index = benchmark._find_index_jsonl(results)
     reach_attempted, reach_decisions = _batch_reach_field_decisions(
-        accepted_quality, usage_index, deadline,
+        accepted_quality, usage_index, deadline, workers,
     )
     for directory in accepted_quality:
         report = _report(directory)
@@ -1921,7 +1936,7 @@ def validate_find_gate(
         )
     trigger_attempted = _batch_finding_trigger_votes(
         accepted_quality, results, deadline, usage_index,
-        target_root_is_product,
+        target_root_is_product, workers,
     )
     for directory, status in zip(directories, statuses):
         if status == "quality-accepted":

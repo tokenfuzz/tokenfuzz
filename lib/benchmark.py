@@ -479,18 +479,20 @@ def _finding_trigger_kept(finding_dir: Path) -> bool:
     if _read_json(finding_dir / ".trigger-gate-bypass.json").get("bypass") is True:
         return True
     report = report_identity.find_report(finding_dir)
-    report_sha1 = report_identity.content_sha1(report) if report else None
-    if not report_sha1:
+    report_sha1s = (
+        report_identity.content_sha1_candidates(report) if report else frozenset()
+    )
+    if not report_sha1s:
         return False
     for name in (".trigger-gate.json", ".trigger-gate-2.json"):
         payload = _read_json(finding_dir / name)
-        if _current_trigger_vote(payload, report_sha1) in {"Promote", "Uncertain"}:
+        if _current_trigger_vote(payload, report_sha1s) in {"Promote", "Uncertain"}:
             return True
     return False
 
 
-def _current_trigger_vote(payload: dict, report_sha1: str | None) -> str | None:
-    if not report_sha1 or payload.get("content_sha1") != report_sha1:
+def _current_trigger_vote(payload: dict, report_sha1s: frozenset[str]) -> str | None:
+    if payload.get("content_sha1") not in report_sha1s:
         return None
     vote = payload.get("vote")
     version = payload.get("decision_version")
@@ -1717,13 +1719,15 @@ def _trigger_snapshot(directory: Path) -> tuple[str, set[str]]:
     signals: set[str] = set()
     observed = False
     report = report_identity.find_report(directory)
-    report_sha1 = report_identity.content_sha1(report) if report else None
+    report_sha1s = (
+        report_identity.content_sha1_candidates(report) if report else frozenset()
+    )
     for name in (".trigger-gate.json", ".trigger-gate-2.json"):
         payload = _read_json(directory / name)
         if payload.get("vote") not in {"Promote", "Reject", "Uncertain"}:
             continue
         observed = True
-        vote = _current_trigger_vote(payload, report_sha1)
+        vote = _current_trigger_vote(payload, report_sha1s)
         if vote is None:
             continue
         signals.add(vote)
