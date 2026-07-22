@@ -406,12 +406,34 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(blocked["status"], "blocked")
         self.assertEqual(blocked["source"], "env-block-own-card")
 
-    def test_per_agent_reject_skips_are_recorded(self) -> None:
-        cards = [self.card("WORK-OTHER", "src/c.c")]
-        self.write_cards(cards)
-        workqueue.record_card_reject_skip(self.ctx, "WORK-OTHER", "1", "CRASH-REJECTED", "caller misuse")
-        self.assertEqual(workqueue.card_reject_skips_for_agent(self.ctx, "1"), {"WORK-OTHER"})
-        self.assertEqual(workqueue.card_reject_skips_for_agent(self.ctx, "2"), set())
+    def test_artifact_rejection_updates_only_its_originating_hypothesis(self) -> None:
+        self.write_cards([
+            self.card("WORK-A", "src/a.c"),
+            self.card("WORK-B", "src/b.c"),
+        ])
+        self.add_hypothesis(status="FIND-002", card_id="WORK-A")
+        self.add_hypothesis(
+            hyp_id="H-2", status="PENDING", card_id="WORK-A",
+            file="src/a.c:app_close:20",
+        )
+        self.add_hypothesis(
+            hyp_id="H-3", status="FIND-003", card_id="WORK-B",
+            file="src/b.c:app_read:30",
+        )
+        self.assertEqual(workqueue.agent_productive_subsystems(self.ctx, "1"), {"src"})
+
+        changed = workqueue.record_artifact_rejection(
+            self.results, "FIND-002-input-bounds.20260721T120000Z.1", "not security relevant",
+        )
+
+        self.assertEqual([row["id"] for row in changed], ["H-1"])
+        latest = {
+            row["id"]: row for row in workqueue.read_jsonl(self.results / "state/hypotheses.jsonl")
+        }
+        self.assertEqual(latest["H-1"]["status"], "DISCARDED")
+        self.assertIn("Triage rejected FIND-002", latest["H-1"]["note"])
+        self.assertEqual(latest["H-2"]["status"], "PENDING")
+        self.assertEqual(latest["H-3"]["status"], "FIND-003")
 
     def test_compact_card_and_artifact_apis_are_bounded_and_filterable(self) -> None:
         self.write_cards([

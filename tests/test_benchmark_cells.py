@@ -258,7 +258,7 @@ print(json.dumps({"id": "REC-empty", "slice": "sample", "confidence": "AUDIT-CLE
         launch_facade = self.work / "launch-cell" / "repo-root"
         self.assertEqual(Path(command[0]), launch_facade / "bin" / "audit")
         self.assertEqual(kwargs["cwd"], launch_facade)
-        self.assertIn("--no-refill-workers", command)
+        self.assertNotIn("--no-refill-workers", command)
 
         scratch_cell = self.work / "scratch-cell"
         for relative in (

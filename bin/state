@@ -31,13 +31,11 @@ from workqueue import (
     list_work_cards,
     list_crashes,
     list_findings,
-    lookup_crash_origin,
     recent_claims,
     recent_hypotheses,
     recent_notes,
     recent_runs,
     recent_tried,
-    record_card_reject_skip,
     release_stale_claims,
     show_recent,
     state_resume,
@@ -213,18 +211,6 @@ def main(argv: list[str]) -> int:
     p_card.add_argument("--agent", default="")
     p_card.add_argument("--note", default="")
     p_card.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
-
-    p_reject_skip = sub.add_parser(
-        "mark-card-reject-skip",
-        help="record do-not-revisit marker so a card is not re-offered to one agent",
-    )
-    p_reject_skip.add_argument("--card-id", default="", help="card id to skip (or pass --crash-id to derive)")
-    p_reject_skip.add_argument("--agent", default="", help="agent number (or pass --crash-id to derive)")
-    p_reject_skip.add_argument(
-        "--crash-id", default="",
-        help="crash id to derive card_id/agent from; the originating hypothesis row supplies both",
-    )
-    p_reject_skip.add_argument("--reason", default="", help="short note for the audit ledger")
 
     p_run = sub.add_parser("add-run")
     p_run.add_argument("--agent", required=True)
@@ -465,32 +451,6 @@ def main(argv: list[str]) -> int:
             print(f"[state] {exc}", file=sys.stderr)
             return 2
         _emit_mutator("update-card", row, args.json)
-        return 0
-    if args.cmd == "mark-card-reject-skip":
-        card_id = (args.card_id or "").strip()
-        agent = (args.agent or "").strip()
-        crash_id = (args.crash_id or "").strip()
-        if crash_id and (not card_id or not agent):
-            origin = lookup_crash_origin(ctx, crash_id)
-            if origin is None:
-                print(
-                    f"[state] mark-card-reject-skip: no hypothesis row matches crash_id={crash_id}",
-                    file=sys.stderr,
-                )
-                return 1
-            if not card_id:
-                card_id = str(origin.get("card_id", "")).strip()
-            if not agent:
-                agent = str(origin.get("agent", "")).strip()
-        if not card_id or not agent:
-            print(
-                "[state] mark-card-reject-skip: need --card-id and --agent "
-                "(or --crash-id resolving to a hypothesis that supplies both)",
-                file=sys.stderr,
-            )
-            return 2
-        row = record_card_reject_skip(ctx, card_id, agent, crash_id=crash_id, reason=args.reason or "")
-        print(json.dumps(row, sort_keys=True))
         return 0
     if args.cmd == "add-run":
         _emit_mutator("add-run", add_run(ctx, args), args.json)

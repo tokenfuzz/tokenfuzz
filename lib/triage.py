@@ -212,6 +212,15 @@ def _reject(directory: Path, rejected_root: Path, reason: str) -> Path:
     _annotate_rejection(directory, reason)
     destination = _unique_destination(rejected_root, directory.name)
     shutil.move(str(directory), destination)
+    try:
+        workqueue.record_artifact_rejection(
+            rejected_root.parent, directory.name, reason,
+        )
+    except OSError as exc:
+        print(
+            f"WARN: could not record structured rejection for {directory.name}: {exc}",
+            file=sys.stderr,
+        )
     return destination
 
 

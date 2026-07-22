@@ -56,6 +56,7 @@ HEADER_RE = {
 BARE_METADATA = re.compile(r"^\s*(TARGET|HYPOTHESIS-ID|CARD-ID|CATEGORY|MODE|HARNESS|PROPERTY):\s*")
 HELP = """Usage:
   bin/probe [--confirm] [--dry-run] [--mode auto|browser|js|generic|js-diff] \\
+            [--hypothesis-id HYPOTHESIS-ID] \\
             [--want REGEX] testcase [-- harness-args...]
 
 Required testcase headers:
@@ -68,6 +69,9 @@ Optional testcase headers:
   HARNESS: harness.c
   CARD-ID: <id>
 
+For opaque byte inputs that cannot carry comments, pass --hypothesis-id;
+TARGET and CARD-ID are derived from that hypothesis in structured state.
+
 PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner overrides target.toml.
 --confirm runs five times; --dry-run resolves and prints the command only.
 """
@@ -79,6 +83,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--want", default="")
+    parser.add_argument("--hypothesis-id", default="")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("testcase", nargs="?")
     parser.add_argument("args", nargs=argparse.REMAINDER)
@@ -413,6 +418,12 @@ class Probe:
         self._validate_location()
         self.agent = self._agent_number()
         self.header = parse_header(self.testcase)
+        if self.args.hypothesis_id:
+            self.header["hypothesis"] = self.args.hypothesis_id
+        hypothesis_row = self._hypothesis_from_state(self.header["hypothesis"])
+        if hypothesis_row:
+            self.header["target"] = self.header["target"] or str(hypothesis_row.get("file", ""))
+            self.header["card"] = self.header["card"] or str(hypothesis_row.get("card_id", ""))
         self.mode = self._mode()
         default_output = self.testcase.with_suffix(".asan.txt") if self.testcase.suffix else Path(str(self.testcase) + ".asan.txt")
         internal_output = (
@@ -476,19 +487,26 @@ class Probe:
         return mode
 
     def _card_from_state(self) -> str:
-        hypothesis = self.header["hypothesis"]
+        row = self._hypothesis_from_state(self.header["hypothesis"])
+        return str(row.get("card_id", "")) if row else ""
+
+    def _hypothesis_from_state(self, hypothesis: str) -> dict | None:
         state = Path(self.config.results_dir) / "state/hypotheses.jsonl"
         if not hypothesis or not state.is_file():
-            return ""
-        card = ""
+            return None
+        by_agent: dict[str, dict] = {}
         for line in state.read_text(errors="replace").splitlines():
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
             if row.get("id") == hypothesis:
-                card = str(row.get("card_id", ""))
-        return card
+                by_agent[str(row.get("agent", ""))] = row
+        if self.agent in by_agent:
+            return by_agent[self.agent]
+        # Analysis-to-reproduce handoffs retain the original agent on the
+        # hypothesis. A globally unique id is still unambiguous provenance.
+        return next(iter(by_agent.values())) if len(by_agent) == 1 else None
 
     def _sanitizer(self) -> str:
         selected = os.environ.get("PROBE_SANITIZER", "").lower()

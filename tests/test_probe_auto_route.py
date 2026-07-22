@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import json
 import stat
 import subprocess
 import sys
@@ -86,11 +87,11 @@ class ProbeAutoRouteTests(unittest.TestCase):
             [sys.executable, str(ROUTES), *args], capture_output=True, text=True
         )
 
-    def run_probe(self, **env) -> subprocess.CompletedProcess:
+    def run_probe(self, *args: str, **env) -> subprocess.CompletedProcess:
         command_env = self.env.copy()
         command_env.update(env)
         return subprocess.run(
-            [str(PROBE), str(self.testcase)], capture_output=True, text=True, env=command_env
+            [str(PROBE), *args, str(self.testcase)], capture_output=True, text=True, env=command_env
         )
 
     def test_sentinel_and_enumeration(self) -> None:
@@ -135,6 +136,30 @@ class ProbeAutoRouteTests(unittest.TestCase):
         output = proc.stdout + proc.stderr
         self.assertIn("ROUTE_MISS", output)
         self.assertIsNone(__import__("re").search(r"(?m)^\[probe\] ROUTED:", output))
+
+    def test_raw_input_uses_structured_hypothesis_without_changing_bytes(self) -> None:
+        original = b"\x00raw\xffinput\n"
+        self.testcase.write_bytes(original)
+        state = self.results / "state"
+        state.mkdir()
+        (state / "hypotheses.jsonl").write_text(json.dumps({
+            "id": "H-raw",
+            "agent": "2",
+            "card_id": "WORK-raw",
+            "file": "src/decoder.c:decode:42",
+            "status": "INVESTIGATING",
+        }) + "\n", encoding="utf-8")
+        self.write_runner(self.canonical, True)
+
+        proc = self.run_probe("--hypothesis-id", "H-raw", PROBE_AUTO_ROUTE="0")
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.testcase.read_bytes(), original)
+        runs = [json.loads(line) for line in (state / "runs.jsonl").read_text().splitlines()]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["hypothesis_id"], "H-raw")
+        self.assertEqual(runs[0]["card_id"], "WORK-raw")
+        self.assertEqual(runs[0]["verdict"], "CLEAN")
 
 
 if __name__ == "__main__":

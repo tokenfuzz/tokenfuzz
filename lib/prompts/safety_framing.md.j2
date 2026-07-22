@@ -54,9 +54,10 @@ Use concrete engineering language:
 <!-- /NOVOCAB -->
 
 Testcase file headers MUST be minimal: exactly `TARGET:`, `HYPOTHESIS-ID:`, and a
-one-line `CATEGORY:` drawn from the six neutral categories. Do NOT inline mechanism
-descriptions in the testcase — keep mechanism reasoning in structured state
-notes using the neutral vocabulary.
+one-line `CATEGORY:` drawn from the six neutral categories. Opaque byte inputs
+that cannot carry native comments stay byte-exact and use
+`bin/probe --hypothesis-id H-... <testcase>` instead. Do NOT inline mechanism
+descriptions in the testcase — keep mechanism reasoning in structured state notes.
 
 ## CRASH PROMOTION GATE — LEGITIMATE CRASHES ONLY
 

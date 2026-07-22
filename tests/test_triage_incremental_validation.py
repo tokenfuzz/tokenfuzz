@@ -118,6 +118,35 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         self.assertTrue(self.finding.is_dir())
         self.assertNotIn("accept", json.loads(cache.read_text()))
 
+    def test_rejection_replaces_the_originating_hypothesis_artifact_status(self) -> None:
+        state = self.root / "state"
+        state.mkdir()
+        (state / "hypotheses.jsonl").write_text(json.dumps({
+            "id": "H-1",
+            "agent": "1",
+            "card_id": "WORK-A",
+            "status": "FIND-001",
+            "file": "src/sample.c:app_parse:91",
+            "subsystem": "src",
+        }) + "\n", encoding="utf-8")
+        report_text = triage.read_report_bounded(self.report)
+        reject = quality_vote(self.finding.name, accept=False)["items"][0]
+        (self.finding / ".llm-find-quality.json").write_text(json.dumps(
+            triage._quality_payload(
+                report_text, [reject, reject], 2, 2,
+                report_identity.content_sha1(self.report),
+            )
+        ))
+
+        self.assertEqual(
+            triage.validate_one_finding(self.finding, self.root), "rejected",
+        )
+
+        latest = json.loads((state / "hypotheses.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(latest["status"], "DISCARDED")
+        self.assertIn("Triage rejected FIND-001", latest["note"])
+        self.assertTrue((self.root / "findings-rejected/FIND-001/REJECTION.md").is_file())
+
     def test_full_semantic_identity_is_authoritative_for_new_cache(self) -> None:
         report_text = triage.read_report_bounded(self.report)
         payload = triage._quality_payload(

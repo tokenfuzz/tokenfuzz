@@ -2366,70 +2366,46 @@ def active_hypothesis_subsystems(ctx: Context) -> set[str]:
     return subsystems
 
 
-def card_reject_skips_path(ctx: Context) -> Path:
-    """JSONL of (card_id, agent) pairs the rejection gate has marked as
-    do-not-revisit for this agent.
+def _artifact_status_id(value: str) -> str:
+    normalized = (value or "").strip().upper()
+    match = re.match(r"^(?:CRASH|FIND)-\d+(?:-\d+)?", normalized)
+    return match.group(0) if match else normalized
 
-    Each row: {card_id, agent, crash_id, reason, created_at}. The queue
-    consults this list per claim and skips any matching pair so the same
-    agent isn't re-offered a surface whose previous filing the gate
-    already rejected as caller-misuse / wrong-shape.
+
+def record_artifact_rejection(results_dir: Path, artifact_name: str, reason: str) -> list[dict]:
+    """Replace accepted-artifact statuses with their final rejected disposition.
+
+    Triage rejects one concrete artifact, not every hypothesis on its work card.
+    Keeping this update artifact-scoped prevents a rejected filing from retaining
+    productive-subsystem privileges without suppressing other card-linked angles.
     """
-    return state_dir(ctx.results_dir) / "card-reject-skips.jsonl"
+    path = state_dir(results_dir) / "hypotheses.jsonl"
+    if not path.is_file():
+        return []
+    artifact_id = _artifact_status_id(artifact_name)
+    if not artifact_id:
+        return []
 
+    def mutate(rows: list[dict]) -> list[dict]:
+        latest_indexes: dict[tuple[str, str], int] = {}
+        for index, row in enumerate(rows):
+            hypothesis_id = str(row.get("id", "")).strip()
+            if hypothesis_id:
+                latest_indexes[(str(row.get("agent", "")), hypothesis_id)] = index
+        changed: list[dict] = []
+        for index in latest_indexes.values():
+            row = rows[index]
+            previous = str(row.get("status", "")).strip()
+            if _artifact_status_id(previous) != artifact_id:
+                continue
+            row["status"] = "DISCARDED"
+            row["updated_at"] = now_iso()
+            row["note"] = f"Triage rejected {previous}: {reason}".strip()
+            changed.append(dict(row))
+        return changed
 
-def record_card_reject_skip(
-    ctx: Context,
-    card_id: str,
-    agent: str,
-    crash_id: str = "",
-    reason: str = "",
-) -> dict:
-    """Append a do-not-revisit marker for (card_id, agent).
-
-    Idempotent across crash_id: a second filing on the same card by the
-    same agent is recorded as an additional row (so the audit trail is
-    preserved) but the queue-side check only needs the (card_id, agent)
-    pair to be present at all. Returns the row that was written.
-    """
-    init_state(ctx)
-    cid = (card_id or "").strip()
-    ag = (agent or "").strip()
-    if not cid or not ag:
-        raise ValueError("record_card_reject_skip requires card_id and agent")
-    row = {
-        "card_id": cid,
-        "agent": ag,
-        "crash_id": (crash_id or "").strip(),
-        "reason": (reason or "").strip(),
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    path = card_reject_skips_path(ctx)
-    with jsonl_lock(path):
-        _append_jsonl_unlocked(path, row)
-    return row
-
-
-def card_reject_skips_for_agent(ctx: Context, agent: str) -> set[str]:
-    """Return the set of card_ids this agent must skip on future claims.
-
-    Reads the do-not-revisit ledger and filters to the requesting agent.
-    Empty for agents with no prior rejections. Used as a hard skip in
-    _claim_next_card_locked so a rejected surface stops being re-offered
-    to the agent that already filed against it.
-    """
-    if not agent:
-        return set()
-    ag = str(agent).strip()
-    path = card_reject_skips_path(ctx)
-    skipped: set[str] = set()
-    for row in read_jsonl(path):
-        if str(row.get("agent", "")).strip() != ag:
-            continue
-        cid = str(row.get("card_id", "")).strip()
-        if cid:
-            skipped.add(cid)
-    return skipped
+    _rows, changed = update_jsonl(path, mutate)
+    return changed
 
 
 def _crash_origin_from_hyps(hyps: list[dict], crash_id: str) -> dict | None:
@@ -2437,8 +2413,8 @@ def _crash_origin_from_hyps(hyps: list[dict], crash_id: str) -> dict | None:
 
     Hypothesis filings store the crash id in the row's `status` field as
     "CRASH-<id>" (see bin/state update-hyp / add-hyp). Newest-row-wins per id.
-    Split from `lookup_crash_origin` so callers holding hypotheses.jsonl in
-    memory can reuse the match without a second read.
+    Kept separate so callers holding hypotheses.jsonl in memory can reuse the
+    match without a second read.
     """
     cid_target = (crash_id or "").strip()
     if not cid_target:
@@ -2456,20 +2432,6 @@ def _crash_origin_from_hyps(hyps: list[dict], crash_id: str) -> dict | None:
         if status == cid_norm or status.startswith(cid_norm + " "):
             return row
     return None
-
-
-def lookup_crash_origin(ctx: Context, crash_id: str) -> dict | None:
-    """Find the hypothesis row that filed `crash_id`, if any.
-
-    Walks hypotheses.jsonl and returns the matching row so callers (the
-    rejection gate) can recover the originating card_id + agent without
-    scanning the crash dir bundle.
-    """
-    return _crash_origin_from_hyps(
-        read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"), crash_id
-    )
-
-
 def claim_row_expiry(row: dict, ttl: timedelta) -> datetime | None:
     expires_at = parse_iso_utc(row.get("expires_at", ""))
     if expires_at is not None:
@@ -3122,14 +3084,6 @@ def _claim_next_card_locked(
             if subsystem_dry_streak(ctx, s) < _PRODUCTIVE_DECAY_AFTER_ITERS
         }
 
-    # P5: cards whose previous filing by *this agent* was rejected at
-    # the triage gate (e.g. caller-misuse "crashes"). Skip them so the
-    # agent stops re-probing the same wrong-shape surface and rotates
-    # to a new card instead. Per-agent on purpose: a different agent
-    # might come at the same card from a different angle and find a
-    # legitimate bug, so we don't drop the card from the global pool.
-    rejected_card_ids = card_reject_skips_for_agent(ctx, agent)
-
     strategy_filter = strategy.strip().upper()
 
     def _build_candidates() -> list[dict]:
@@ -3137,9 +3091,6 @@ def _claim_next_card_locked(
         for card in cards:
             cid = card.get("id", "")
             if not is_auditable_work_card(card):
-                continue
-            if cid and cid in rejected_card_ids:
-                # P5: previously rejected for this agent — do not re-offer.
                 continue
             if strategy_filter:
                 if not card_strategy_matches(card, strategy_filter):

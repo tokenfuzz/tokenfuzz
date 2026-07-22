@@ -37,6 +37,8 @@ score. Use this exact comment format (adapt the comment delimiter per file type)
 Use native comments for testcase headers: `# TARGET: ...` in Python,
 `// TARGET: ...` in C/C++/JS shell testcases, and
 `<!-- TARGET: ... -->` in HTML.
+Opaque byte inputs have no native comment syntax: keep their bytes exact and run
+`bin/probe --hypothesis-id H-<id> <testcase>` instead of prepending a header.
 If the hypothesis ID does not yet exist in structured state, run
 `bin/state add-hyp` BEFORE writing the testcase. This is the coupling rule.
 

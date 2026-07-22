@@ -29,7 +29,8 @@ at phase boundaries exercises error-recovery code.
 1. Read the parser's main loop to identify phase transitions
 2. For each phase boundary: construct a valid-up-to-that-point input, then truncate
 3. Deliver via `bin/probe "${RESULTS_DIR}/scratch-N/tc.<ext>"` — TARGET / HYPOTHESIS-ID come
-   from the testcase header. For generic C/C++ targets, bin/probe selects
+   from the testcase header. Opaque bytes stay exact and use
+   `bin/probe --hypothesis-id H-... <testcase>`. For generic C/C++ targets, bin/probe selects
    the generic ASan path automatically.
 ```
 

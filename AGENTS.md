@@ -49,6 +49,7 @@ Each agent has a role set by the harness:
    `bin/probe` reads TARGET / HYPOTHESIS-ID / HARNESS from the testcase header
    and discovers TARGET_ROOT / RESULTS_DIR by walking up to
    `output/<slug>/<backend>/results/.session-env`. No env vars to set.
+   For opaque byte inputs, pass `--hypothesis-id H-...` and keep the input exact.
    MISSED = revise input, don't discard, don't spend the execution budget.
 4. **DEPTH FOLLOWS EVIDENCE.** Start with a trigger-aimed `bin/probe` run. One CLEAN may resolve a deterministic hypothesis only when the testcase directly instantiates every named boundary value or call step. Allocator-, scheduler-, race-, GC-, timing-, re-entrancy-, or state-dependent triggers need repetition or distinct shapes; a coverage HIT alone proves only that the location executed. MISSED and NO_EXEC never justify discard; a concrete source/configuration proof that the named trigger has no documented input boundary may.
 5. **BREADTH WITH A CARD FLOOR.** Before discarding a card, record at least 3 card-linked CLEAN `bin/probe` runs across at least 2 distinct hypothesis shapes that were actually probed. This is a card floor, not a per-hypothesis variant tax. Deepen any angle that clears a guard, reaches closer coverage, changes suspicious output, or exposes crash-adjacent state. If the configured target cannot execute the card, do not manufacture CLEAN evidence: after checking sibling builds/modes, use `ENV-BLOCKED` (which soft-blocks the owning card) or `update-card --status blocked --note <proof>` for a proven mode-incompatible, stale, or non-public surface. MISSED alone is not proof.
@@ -56,7 +57,7 @@ Each agent has a role set by the harness:
 7. **Stay on one subsystem while exploring; expand to neighbors after a hit.** While a hypothesis is open and you have no confirmed CRASH/FIND in this subsystem yet, stick with it across strategy rotations — don't pivot files mid-investigation. After you confirm a crash or finding in this subsystem, the harness unlocks neighbor-subsystem cards for you (productive-agent relaxation in `_claim_next_card_locked`); follow Rule 6 and claim them. Pre-confirmation pivots are wasted context cost.
 8. **Iterate on non-diagnostic runs.** Try: allocator shaping, GC interleaving, multi-trigger, object replacement. See `.agents/references/reproducer-templates.md`.
 9. **DIFFERENTIAL TESTING for JIT/Wasm.** Add `MODE: js-diff` to the testcase header and run `bin/probe testcase.js` — it runs `--ion-eager` vs `--no-ion`. A textual divergence IS the finding. No sanitizer crash needed.
-10. **NEUTRAL VOCABULARY IS MANDATORY.** Categories: **bounds / lifetime / type / size / uninit / state** only. Always use engineering-standard language: `testcase` / `reproducer`, `caller-controlled` / `input-shaped`, `hand-crafted` / `regression`, `crafted` / `non-conforming`, `reach bounds` / `reach lifetime`, `out-of-range read/write`, `overwrite` / `stomp`, `memory-safety`. Testcase header fields are exactly `TARGET:`, `HYPOTHESIS-ID:`, `CATEGORY:`; put them in the file's native comment syntax, e.g. `# TARGET:` for Python, `// TARGET:` for C/C++/JS, and `<!-- TARGET: ... -->` for HTML.
+10. **NEUTRAL VOCABULARY IS MANDATORY.** Categories: **bounds / lifetime / type / size / uninit / state** only. Always use engineering-standard language: `testcase` / `reproducer`, `caller-controlled` / `input-shaped`, `hand-crafted` / `regression`, `crafted` / `non-conforming`, `reach bounds` / `reach lifetime`, `out-of-range read/write`, `overwrite` / `stomp`, `memory-safety`. Testcase header fields are exactly `TARGET:`, `HYPOTHESIS-ID:`, `CATEGORY:`; put them in the file's native comment syntax, e.g. `# TARGET:` for Python, `// TARGET:` for C/C++/JS, and `<!-- TARGET: ... -->` for HTML. Opaque byte inputs use `bin/probe --hypothesis-id H-...` instead of prepending text.
 
 ## Paths
 
@@ -115,8 +116,9 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
 1. WRITE testcase to the absolute `${RESULTS_DIR}/scratch-N/` dir with header
    (TARGET / HYPOTHESIS-ID / CATEGORY, plus // HARNESS: harness.c /
    harness.cc / harness.cpp for C/C++ API bugs, or another supported sibling
-   harness type when the target uses a language runner). Do not create
-   repo-root `scratch-N/` dirs.
+   harness type when the target uses a language runner). For an opaque byte
+   input, keep the file exact and pass its existing hypothesis with
+   `bin/probe --hypothesis-id H-...`. Do not create repo-root `scratch-N/` dirs.
 2. Run `bin/probe` in the same turn:
    bin/probe "${RESULTS_DIR}/scratch-N/testcase.html"
 3. EVALUATE: crash? → re-run with `--confirm`; on a stable crash `bin/probe`

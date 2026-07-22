@@ -7,9 +7,10 @@
 2. If no card is assigned, pick a subsystem NOT claimed by other agents.{{ suggested_sub_line }}
    {{ audit_fixed_strategy_hint }}
 3. Workflow rules are embedded below under "SESSION RULES DIGEST" — drill into `{{ reference_dir }}/session-rules.md` only on ambiguity.
-4. Generate 3-5 structured hypotheses with `bin/state add-hyp`; add concise data-flow/guard/variant context with `bin/state add-note`. Investigate immediately.
+4. Record one concrete hypothesis with `bin/state add-hyp`, take the best `bin/find-seed` candidate, and run `bin/probe`. Then fill the same-subsystem queue to 3-5 hypotheses; add concise data-flow/guard/variant context with `bin/state add-note`.
 {{ strategy_a_block }}
 {{ role_guidance }}
+{{ first_probe_checkpoint }}
 {{ work_card_directive }}
 {{ targets }}
 {{ asan_build_directive }}

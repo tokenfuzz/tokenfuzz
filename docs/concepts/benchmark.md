@@ -160,9 +160,9 @@ candidate-specific facts. Repeated calls can therefore reuse the provider's
 prompt-prefix cache without shortening the source-reading budget or changing
 the vote contract.
 
-Harness benchmark cells disable early-worker refills. This prevents the
-configured agent count from silently expanding provider demand; standalone
-`bin/audit` runs retain refills unless passed `--no-refill-workers`.
+Harness benchmark cells use the audit runner's bounded early-worker refill:
+an idle slot can launch one replacement while a peer is still running, without
+exceeding the configured concurrent-agent count.
 
 ## Where results land
 

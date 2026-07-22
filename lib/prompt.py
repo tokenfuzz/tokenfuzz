@@ -387,6 +387,19 @@ def _role_guidance(context: PromptContext, agent: int) -> str:
     )
 
 
+def first_probe_checkpoint(context: PromptContext, agent: int) -> str:
+    if context.role(agent) != "reproduce":
+        return ""
+    return (
+        "**FIRST-PROBE CHECKPOINT:** Create or adopt one card-linked hypothesis, then "
+        "run a trigger-aimed `bin/probe` before turn 20. Put its required TARGET / "
+        "HYPOTHESIS-ID / CATEGORY headers in the testcase so the run reaches structured "
+        "state; for raw byte inputs, preserve the bytes and pass `--hypothesis-id H-...` "
+        "instead. NO_EXEC does not satisfy this checkpoint. Use the best existing seed plus "
+        "the smallest useful mutation instead of postponing execution for exhaustive review."
+    )
+
+
 def enforcement_results_directive(context: PromptContext, agent: int) -> str:
     path = context.results_dir / f".enforcement_results_{agent}"
     try:
@@ -472,6 +485,7 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
             "suggested_sub_line": "", "audit_fixed_strategy_hint": fixed,
             "reference_dir": str(context.reference_dir), "strategy_a_block": strategy_block,
             "role_guidance": _role_guidance(context, agent),
+            "first_probe_checkpoint": first_probe_checkpoint(context, agent),
             "work_card_directive": work_card_directive(context, agent),
             "targets": _targets(context, mode),
             "asan_build_directive": agent_build_directive(context, agent),
@@ -500,7 +514,7 @@ def compact_fresh_prompt(context: PromptContext, agent: int) -> str:
             "asan_build_directive": agent_build_directive(context, agent),
             "harness_build_failures_directive": harness_build_failures_directive(context),
             "agent_state_instructions": _agent_state_instructions(context, agent),
-            "session_continuation_section": _continuation(context, agent),
+            "first_probe_checkpoint": first_probe_checkpoint(context, agent),
         },
     )
 
@@ -532,9 +546,10 @@ def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
             "asan_loop_cmd": f"bin/probe {context.scratch_dir(agent)}/testcase",
             "mode_lock_or_targets_block": target_block,
             "directive_block": "", "enforcement_block": enforcement_results_directive(context, agent),
-            "session_seed_section": seed, "session_continuation_section": seed,
+            "session_continuation_section": seed,
             "audit_fixed_strategy_clause": "", "wrong_mode_subsystem_line": "",
             "role_block": _role_guidance(context, agent), "handoff_directive": handoff_directive(context, agent),
+            "first_probe_checkpoint": first_probe_checkpoint(context, agent),
             "work_card_directive": work_card_directive(context, agent),
             "strategy_assignment_line": strategy_brief(strategy, context.reference_dir),
             "strategy_roi_directive": "", "find_first_directive": find_first_directive(context),

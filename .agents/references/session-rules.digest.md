@@ -22,7 +22,8 @@ harness's harvester only looks under `${RESULTS_DIR}`.
 ## Reproduction wrapper
 
 - Default reproducer: `bin/probe <testcase>`. Reads TARGET / HYPOTHESIS-ID /
-  HARNESS from the testcase header. No env vars to set.
+  HARNESS from the testcase header. For opaque byte inputs, preserve the bytes
+  and pass `--hypothesis-id H-...`; target/card come from state. No env vars.
   - Write testcases and sibling harnesses under `${RESULTS_DIR}/scratch-N/`.
   - `bin/probe "${RESULTS_DIR}/scratch-N/tc.html"` → 1 run; `--confirm` → 5 runs.
   - Do not create repo-root `scratch-N/` dirs; a bare relative path writes to

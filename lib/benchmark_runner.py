@@ -662,7 +662,7 @@ def run_harness(
     result_dir = facade / "output" / f"{target_slug}-{experiment}" / backend / "results"
     command = [
         str(facade / "bin" / "audit"), "--target", target_slug,
-        "--backend", backend, "--no-refill-workers",
+        "--backend", backend,
     ]
     if model:
         command += ["--model", model]

@@ -52,17 +52,21 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def render(self, config: target_config.Config | None = None) -> str:
-        context = prompt.PromptContext(
+    def context(
+        self, config: target_config.Config | None = None, role: str = "reproduce",
+    ) -> prompt.PromptContext:
+        return prompt.PromptContext(
             results_dir=self.results,
             target_root=self.target,
             target_slug="sampleproj",
             reference_dir=self.references,
             num_agents=1,
-            agent_roles=("reproduce",),
+            agent_roles=(role,),
             config=config,
         )
-        return prompt.deep_investigation_prompt(context, 1)
+
+    def render(self, config: target_config.Config | None = None) -> str:
+        return prompt.deep_investigation_prompt(self.context(config), 1)
 
     def test_assembled_prompt_has_one_adaptive_policy_and_real_card_floor(self) -> None:
         rendered = self.render()
@@ -124,6 +128,9 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         self.assertNotIn("Clean? → 2+ variants", guide)
 
     def test_resume_policy_continues_without_repeating_work(self) -> None:
+        (self.results / ".session_seed_1.md").write_text(
+            "src/sample.c:80-120 already reviewed\n", encoding="utf-8",
+        )
         rendered = self.render()
         guide = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
@@ -132,6 +139,32 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
                 self.assertIn("before claiming new work", text)
                 self.assertIn("PRIOR SESSION SEED", text)
                 self.assertNotIn("No new exploration", text)
+
+        self.assertEqual(rendered.count("## PRIOR SESSION SEED"), 1)
+        compact = prompt.compact_fresh_prompt(self.context(), 1)
+        self.assertNotIn("PRIOR SESSION SEED", compact)
+
+    def test_reproduce_prompts_put_execution_before_turn_twenty(self) -> None:
+        context = self.context()
+        for rendered in (
+            prompt.cold_start_prompt(context, 1),
+            prompt.deep_investigation_prompt(context, 1),
+            prompt.compact_fresh_prompt(context, 1),
+        ):
+            with self.subTest(prompt=rendered.splitlines()[3:5]):
+                self.assertIn("FIRST-PROBE CHECKPOINT", rendered)
+                self.assertIn("before turn 20", rendered)
+                self.assertIn("NO_EXEC does not satisfy", rendered)
+                self.assertIn("--hypothesis-id H-...", rendered)
+
+        cold = prompt.cold_start_prompt(context, 1)
+        self.assertLess(cold.index("Record one concrete hypothesis"), cold.index("fill the same-subsystem queue"))
+        self.assertLess(cold.index("bin/find-seed"), cold.index("fill the same-subsystem queue"))
+
+        analysis = self.context(role="analysis")
+        self.assertNotIn(
+            "FIRST-PROBE CHECKPOINT", prompt.deep_investigation_prompt(analysis, 1),
+        )
 
 
 if __name__ == "__main__":
