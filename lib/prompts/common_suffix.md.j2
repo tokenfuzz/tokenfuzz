@@ -7,6 +7,7 @@
 - **Fuzz leads:** scan `{{ fuzz_leads_path }}` for recent non-noise libFuzzer crashes.
 - **After compression:** run `bin/state resume --agent N` with your agent number in place of `N`, then resume the top PENDING item before claiming new work. Do not re-read `PRIOR SESSION SEED` ranges.
 - **Session rules digest** is embedded below; drill into `{{ reference_dir }}/session-rules.md` only when the digest is ambiguous.
+- **Do not request the same file range twice** unless the file changed. Revisiting a file for a different, targeted range is valid; repeated overlapping windows are not.
 
 ## CONTEXT ECONOMICS
 
@@ -60,9 +61,9 @@ Self-pace:
   cold-start discovery, ~{{ tool_call_deep_soft_target }} for deep
   investigation. You can exceed it when chasing a reachable hypothesis; do
   not exceed it for general "let me re-read the same file again" exploration.
-- Never read the same file path twice in one session — the first read result
-  is still in your context. If you genuinely need to see different lines,
-  use `peek -B N -A N <symbol>` instead of re-reading the whole file.
+- Prefer one useful range over many narrow overlapping reads. If you need a
+  different part of a previously-read file, use a targeted `peek` range or
+  symbol lookup rather than re-reading the whole file.
 - A productive session emits at least one hypothesis (PENDING or
   NEEDS_TESTCASE row) every ~30 tool calls. If 30 calls go by with no row
   written, change strategy or rotate subsystem — don't keep peeking.

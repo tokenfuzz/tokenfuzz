@@ -166,6 +166,14 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
             "FIRST-PROBE CHECKPOINT", prompt.deep_investigation_prompt(analysis, 1),
         )
 
+    def test_prompt_allows_targeted_revisits_without_an_absolute_ban(self) -> None:
+        rendered = self.render()
+
+        # The absolute path-level ban caused false negatives on large sources.
+        self.assertNotIn("Never read the same file path twice", rendered)
+        self.assertIn("Revisiting a file for a different, targeted range is valid", rendered)
+        self.assertIn("Prefer one useful range over many narrow overlapping reads", rendered)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
