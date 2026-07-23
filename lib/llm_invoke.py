@@ -991,12 +991,19 @@ def _run_codex_with_turn_watchdog(
                             or time.monotonic() >= enrichment_deadline
                         )
                     ):
-                        capped = True
                         try:
                             process_tree.kill_descendants(process.pid, signal.SIGTERM, 1.0)
                         except (OSError, subprocess.SubprocessError):
                             pass
-                        process.terminate()
+                        # A process that already exited on its own is a natural
+                        # finish, not a checkpoint. Only mark the session capped
+                        # when this terminate actually applied to a live child.
+                        try:
+                            process.terminate()
+                        except OSError:
+                            pass
+                        else:
+                            capped = True
                         break
                 time.sleep(0.5)
             try:

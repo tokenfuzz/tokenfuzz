@@ -15,10 +15,12 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import audit_helpers
 import audit_runner
 import benchmark
 import file_tools
 import llm_invoke
+import process_tree
 import prompt
 import report_identity
 import target_config
@@ -257,6 +259,38 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         and time.monotonic() - started < 5
         and "TURN_SOFT_CAP reached" in watchdog_raw.read_text(encoding="utf-8"),
         "Codex turn watchdog checkpoints and terminates a session at the soft cap",
+    )
+
+    class ExitedAtCap:
+        pid = 123
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            # The child already exited on its own; terminate() races with that.
+            self.returncode = 0
+            raise ProcessLookupError
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+        def kill(self):
+            self.returncode = -9
+
+    natural_raw = root / "natural-at-cap.raw"
+    with mock.patch.object(llm_invoke.subprocess, "Popen", return_value=ExitedAtCap()), \
+         mock.patch.object(audit_helpers, "codex_turn_delta", return_value=(2, 0)), \
+         mock.patch.object(process_tree, "kill_descendants"):
+        natural_rc = llm_invoke._run_codex_with_turn_watchdog(
+            ["unused"], None, natural_raw, root, os.environ.copy(), 2,
+        )
+    check(
+        natural_rc == 0
+        and "TURN_SOFT_CAP reached" not in natural_raw.read_text(encoding="utf-8"),
+        "a process that exits at the cap is not mislabeled as checkpointed",
     )
 
     # A crash confirmed at the nominal cap gets a bounded enrichment tail.
