@@ -818,7 +818,10 @@ def _session_budget(prompt_text: str, max_turns: int, scratch: Path) -> str:
         prompt_text
         + "\n\n## SESSION BUDGET\n\n"
         + f"Stay within roughly {max_turns} turns. Save state and artifacts before stopping.\n"
-        + f"Write testcases only under `{scratch}` and run every testcase through `bin/probe`.\n"
+        + f"Keep every working file — testcases, seeds, fuzzing scripts, corpora, crash "
+        f"dumps — under `{scratch}`, and run every testcase through `bin/probe`. Never "
+        f"write to `/tmp` or other shared temp: those escape the results tree, survive "
+        f"into later cells, and let one run inherit another run's corpus.\n"
     )
 
 

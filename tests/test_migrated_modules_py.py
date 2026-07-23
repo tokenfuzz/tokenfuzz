@@ -1178,6 +1178,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     budget_prompt = audit_runner._session_budget('A "quoted" prompt', 20, root / "scratch-1")
     check('A "quoted" prompt' in budget_prompt and "roughly 20 turns" in budget_prompt, "audit session budget preserves quoted prompt text")
+    check(
+        "Never write to `/tmp`" in budget_prompt and "seeds" in budget_prompt,
+        "audit session budget keeps all working files under scratch, not shared /tmp",
+    )
 
     launch_results = root / "launch-results"
     launch_logs = root / "launch-logs"
