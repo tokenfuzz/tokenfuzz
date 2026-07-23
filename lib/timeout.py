@@ -124,6 +124,15 @@ def _descendants(root):
     return out
 
 
+def _group_members(pgid):
+    """Live pids in process group <pgid>, excluding this wrapper process."""
+    self_pid = os.getpid()
+    return [
+        member for member, group in _ps_rows("pid=,pgid=", 2)
+        if group == pgid and member != self_pid
+    ]
+
+
 def _tree_rss_kb(root):
     """Summed RSS (KB) of the child and every descendant. One ps call,
     parsed the same way as _descendants (pid/ppid) plus the rss column. ps
@@ -281,6 +290,32 @@ def main():
             os.killpg(pid, signal.SIGKILL)
         except (OSError, ProcessLookupError):
             pass
+    else:
+        # The direct child exited on its own, but any wrapped command — most
+        # often an audit agent — can leave backgrounded descendants (`nohup`
+        # fuzzers, `&` jobs) alive in this run's session group. Left running,
+        # they survive into later sessions, inherit stale corpora, and steal
+        # CPU from other cells. The child ran under setsid, so pgid == pid is a
+        # private group; signal 0 is a cheap "is anyone still there?" that skips
+        # the ps sweep on the common clean exit.
+        try:
+            os.killpg(pid, 0)
+            leaked = True
+        except (OSError, ProcessLookupError):
+            leaked = False
+        if leaked:
+            survivors = _group_members(pid)
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                pass
+            time.sleep(1)
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+            _log("reaped %d leaked descendant(s) in session group %d after a "
+                 "normal child exit" % (len(survivors), pid))
 
     if os.WIFSIGNALED(status):
         term_sig = os.WTERMSIG(status)

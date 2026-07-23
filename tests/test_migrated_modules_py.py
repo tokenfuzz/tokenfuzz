@@ -287,6 +287,35 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     completed = run_timeout([sys.executable, "-c", "import time; time.sleep(2)"], 1, capture_output=True)
     equal(124, completed.returncode, "timeout runner terminates expired commands")
 
+    # A successful agent that backgrounds a fuzzer must not leave it running:
+    # the wrapper reaps the whole session group on a normal (TERM-mode) exit.
+    import time as _time
+    leak_pidfile = root / "leaked-bg.pid"
+    leaked = run_timeout(
+        ["sh", "-c", f'sleep 30 & echo $! > "{leak_pidfile}"; exit 0'], 10,
+        capture_output=True,
+    )
+    check(leaked.returncode == 0, "wrapped command that backgrounds a child still exits 0")
+    for _ in range(40):
+        if leak_pidfile.is_file():
+            break
+        _time.sleep(0.05)
+    bg_pid = int(leak_pidfile.read_text().strip())
+    bg_dead = False
+    for _ in range(40):
+        try:
+            os.kill(bg_pid, 0)
+            _time.sleep(0.1)
+        except OSError:
+            bg_dead = True
+            break
+    if not bg_dead:  # never leave the test's own orphan running
+        try:
+            os.kill(bg_pid, 9)
+        except OSError:
+            pass
+    check(bg_dead, "normal-exit wrapper reaps a leaked background descendant")
+
     with mock.patch.dict(os.environ, {"LLM_DECIDE_MOCK_THREAT_MODEL_SUGGEST": '{"attacker_controls":["bytes"],"reasoning":"fixture"}'}, clear=False):
         equal(
             {"attacker_controls": ["bytes"], "reasoning": "fixture"},
