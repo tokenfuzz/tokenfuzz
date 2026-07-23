@@ -91,7 +91,7 @@ With all defaults, the command means:
 | `--model` | backend config default | Optional model override used by both conditions. |
 | `--replicates` | `3` | Runs per condition. |
 | `--budget-wall` | `10800` | Active audit seconds per cell, including housekeeping. Provider-recovery pauses are excluded. `0` is unlimited. |
-| `--finalize-wall` | `3600` | Separate wall-clock ceiling for final crash and finding validation. `0` is unlimited. |
+| `--finalize-wall` | `3600` | Wall-clock ceiling per final validation phase; crash triage and the finding drain each get their own budget. `0` is unlimited. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
 | `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |
 | `--run-id` | UTC timestamp | Run directory under `output/benchmark/<backend>/`; reuse it to resume. |
@@ -119,9 +119,10 @@ Treat a two-replicate, three-hour run as a layout and sanity check,
 not as a statistical claim. LLM runs are stochastic. For a result you would
 cite, use at least five replicates and more than one target.
 
-After timed investigation stops, each cell synchronously drains the finding
-quality gate before metrics are harvested. This final triage is measurement,
-not additional finding time, so it gets a separate `--finalize-wall` budget.
+After timed investigation stops, each cell synchronously triages crashes and
+then drains the finding quality gate before metrics are harvested. This final
+triage is measurement, not additional finding time, so each phase gets its own
+`--finalize-wall` budget — a crash-heavy cell cannot starve finding validation.
 Pending artifacts are excluded or qualified individually: an unadjudicated
 finding does not enter the finding total, while a sanitizer-proved crash with
 an unfinished report remains in the crash total at Unknown severity. A pending

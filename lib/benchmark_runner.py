@@ -104,6 +104,17 @@ def _find_gate_reset(path: Path) -> int | None:
     return max(values) if values else 0
 
 
+def _finalize_deadline(finalize_wall: int) -> float | None:
+    """Fresh ceiling for one finalization phase.
+
+    Crash triage and the finding drain each call this so a slow crash pass
+    cannot consume the finding gate's budget: a crash-heavy cell once spent
+    ~57 of a 60-minute shared deadline on crashes and left every quality-
+    accepted finding unadjudicated. Returns None when the phase is unbounded.
+    """
+    return time.monotonic() + finalize_wall if finalize_wall else None
+
+
 def drain_find_gate(
     results: Path, backend: str, model: str, target: Path, target_slug: str,
     *, deadline: float | None = None,
@@ -328,7 +339,8 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--finalize-wall", type=_nonnegative, default=3600,
-        help="separate wall-clock ceiling for final crash/finding validation (0 = unlimited)",
+        help="wall-clock ceiling per final validation phase; crash triage and the "
+             "finding drain each get their own budget (0 = unlimited)",
     )
     result.add_argument("--agents", type=_positive)
     result.add_argument("--conditions", default="model-direct,harness")
@@ -1306,9 +1318,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 except (OSError, ValueError):
                     pass
                 finalize_wall = getattr(args, "finalize_wall", 3600)
-                finalize_deadline = (
-                    time.monotonic() + finalize_wall if finalize_wall else None
-                )
                 if not args.dry_run and results.is_dir() and (results / "crashes").is_dir():
                     log(f"Cell {name}: completing crash triage before metrics")
                     try:
@@ -1321,7 +1330,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             crash_counts = triage_cell_crashes(
                                 results, target_root, args.target,
                                 workers=args.agents or 4,
-                                deadline=finalize_deadline,
+                                deadline=_finalize_deadline(finalize_wall),
                                 require_replay=condition == "model-direct",
                             )
                         log(
@@ -1343,7 +1352,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         counts = drain_find_gate(
                             results, args.backend, model,
                             (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
-                            deadline=finalize_deadline,
+                            deadline=_finalize_deadline(finalize_wall),
                         )
                         # A pause inside the drain sits in the untimed
                         # measurement phase, so it is not subtracted from the
@@ -1410,9 +1419,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             if results.is_dir():
                 finalizers_ok = True
                 finalize_wall = getattr(args, "finalize_wall", 3600)
-                finalize_deadline = (
-                    time.monotonic() + finalize_wall if finalize_wall else None
-                )
                 if (results / "crashes").is_dir():
                     log(f"Regenerate: completing crash triage for {cell_dir.name} ({cell.get('condition', '?')})")
                     try:
@@ -1425,7 +1431,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             triage_cell_crashes(
                                 results, target_root, args.target,
                                 workers=args.agents or 4,
-                                deadline=finalize_deadline,
+                                deadline=_finalize_deadline(finalize_wall),
                                 require_replay=cell.get("condition") == "model-direct",
                                 age_pending=False,
                             )
@@ -1438,7 +1444,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         drain_find_gate(
                             results, args.backend, model,
                             (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
-                            deadline=finalize_deadline,
+                            deadline=_finalize_deadline(finalize_wall),
                         )
                     except Exception as exc:
                         log(f"WARN: find-gate drain failed for {cell_dir.name}: {exc}")

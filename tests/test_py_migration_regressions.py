@@ -170,6 +170,21 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "final benchmark triage receives its independent deadline",
         repr(drained_deadlines),
     )
+    finalize_clock = iter([100.0, 250.0])
+    with mock.patch.object(
+        benchmark_runner.time, "monotonic", side_effect=lambda: next(finalize_clock)
+    ):
+        crash_phase = benchmark_runner._finalize_deadline(7)
+        find_phase = benchmark_runner._finalize_deadline(7)
+    check(
+        crash_phase == 107.0 and find_phase == 257.0 and find_phase > crash_phase,
+        "each finalization phase computes a fresh, independent deadline",
+        (crash_phase, find_phase),
+    )
+    check(
+        benchmark_runner._finalize_deadline(0) is None,
+        "an unbounded finalize budget yields no deadline",
+    )
     check(
         budget_cell["status"] == "done" and budget_cell["run_quality"] == "clean",
         "budget-complete harness cell remains done and clean",
