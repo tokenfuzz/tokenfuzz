@@ -181,28 +181,60 @@ def extract_vote(text: str) -> dict | None:
     return None
 
 
+def _keyed_votes(items: list) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for item in items:
+        if not isinstance(item, dict) or item.get("vote") not in VOTES:
+            continue
+        item_id = str(item.get("id") or "")
+        if item_id and item_id not in out:
+            out[item_id] = item
+    return out
+
+
+_ITEMS_ENVELOPE = re.compile(r'\{\s*"items"\s*:\s*\[')
+
+
+def _parse_items_array(text: str, bracket: int) -> list:
+    """Decode the elements of an items array whose opening `[` is at `bracket`.
+    Enforce comma separators between complete objects and stop at the closing
+    `]`, at the first element that will not fully decode, or at a broken
+    separator -- so a truncated or garbled trailing object is dropped, never
+    half-read, and a complete array is parsed identically to a truncated one."""
+    decoder = json.JSONDecoder()
+    items: list = []
+    index = bracket + 1
+    expect_value = True
+    while index < len(text):
+        while index < len(text) and text[index] in " \t\r\n":
+            index += 1
+        if index >= len(text) or text[index] == "]":
+            break
+        if expect_value:
+            try:
+                item, index = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                break
+            items.append(item)
+            expect_value = False
+        elif text[index] == ",":
+            index += 1
+            expect_value = True
+        else:
+            break
+    return items
+
+
 def extract_vote_batch(text: str) -> dict[str, dict]:
     text = re.sub(r"^\s*```(?:json)?\s*$", "", text, flags=re.MULTILINE)
-    decoder = json.JSONDecoder()
-    for index, character in enumerate(text):
-        if character != "{":
-            continue
-        try:
-            value, _ = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        items = value.get("items") if isinstance(value, dict) else None
-        if not isinstance(items, list):
-            continue
-        out: dict[str, dict] = {}
-        for item in items:
-            if not isinstance(item, dict) or item.get("vote") not in VOTES:
-                continue
-            item_id = str(item.get("id") or "")
-            if item_id and item_id not in out:
-                out[item_id] = item
-        return out
-    return {}
+    # Anchor on a real `{"items":[` envelope so prose that merely mentions an
+    # "items" list cannot manufacture a verdict. Only the final envelope is
+    # authoritative: falling back to an earlier one when the final answer is
+    # truncated could resurrect a hypothetical finding-removing Reject.
+    matches = list(_ITEMS_ENVELOPE.finditer(text))
+    if not matches:
+        return {}
+    return _keyed_votes(_parse_items_array(text, matches[-1].end() - 1))
 
 
 def main(argv=None) -> int:
@@ -255,7 +287,8 @@ def main(argv=None) -> int:
             kind="decision:trigger-validator-batch", prompt_text=prompt, raw_path=raw,
             usage_complete=status == 0,
         )
-        if status not in (0, 1, 2):
+        transient = status not in (0, 1, 2)
+        if transient:
             try:
                 import llm_decide
                 llm_decide.record_provider_limit(
@@ -272,6 +305,11 @@ def main(argv=None) -> int:
                 vote.update(vote="Uncertain", downgraded_from="Reject", downgrade_reason="empty disproof")
             vote = stamp_trigger_vote(args, vote, content_hashes[item_id])
             output.write_text(json.dumps(vote, indent=2, sort_keys=True) + "\n")
+        # 2 = transient backend failure (timeout / provider limit): the caller
+        # must not hot-retry it. 3 = a completed response that parsed nothing;
+        # 0 = votes written (the caller still retries any missing ids, once).
+        if transient:
+            return 2
         return 0 if parsed else 3
     finding = Path(args.finding)
     target = Path(args.target_path)

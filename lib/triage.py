@@ -1067,14 +1067,13 @@ def _batch_finding_trigger_votes(
     ]
     attempted = {directory for directory, _report_path, _vote_file in pending}
 
-    def validate(index_and_batch: tuple[int, list[tuple[Path, Path, Path]]]) -> None:
-        index, batch = index_and_batch
-        timeout = _decision_timeout(300, deadline)
-        if timeout <= 0 or llm_decide.provider_limit_open():
-            return
-        manifest = raw_dir / (
-            f"trigger-batch-{os.getpid()}-{time.time_ns()}-{index}.json"
-        )
+    model = os.environ.get("MODEL", "")
+
+    def run_batch(batch: list[tuple[Path, Path, Path]], tag: str, timeout: int) -> int:
+        """Validate one batch. Returns the validator's exit code, where 2 flags a
+        transient backend failure (timeout / provider limit) the caller must not
+        retry, and our own hard timeout maps to the same."""
+        manifest = raw_dir / f"trigger-batch-{os.getpid()}-{time.time_ns()}-{tag}.json"
         payload = {
             "items": [
                 {"id": directory.name, "finding": str(report), "output": str(vote_file)}
@@ -1087,7 +1086,6 @@ def _batch_finding_trigger_votes(
             "--batch-manifest", str(manifest), "--target-path", str(target_root),
             "--backend", backend, "--gate", "trigger", "--timeout", str(timeout),
         ]
-        model = os.environ.get("MODEL", "")
         if model:
             command += ["--model", model]
         if usage_index:
@@ -1095,19 +1093,54 @@ def _batch_finding_trigger_votes(
         if target_root_is_product:
             command.append("--target-root-is-product")
         try:
-            subprocess.run(
+            return subprocess.run(
                 command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=timeout + 2, check=False,
-            )
+            ).returncode
         except subprocess.TimeoutExpired:
-            pass
+            return 2
         finally:
             manifest.unlink(missing_ok=True)
+
+    def validate(
+        index_and_batch: tuple[int, list[tuple[Path, Path, Path]]],
+    ) -> tuple[int, list[tuple[Path, Path, Path]], int | None]:
+        index, batch = index_and_batch
+        timeout = _decision_timeout(300, deadline)
+        if timeout <= 0 or llm_decide.provider_limit_open():
+            return index, batch, None
+        return index, batch, run_batch(batch, str(index), timeout)
 
     if not batches:
         return attempted
     with ThreadPoolExecutor(max_workers=min(max(1, workers), len(batches))) as pool:
-        list(pool.map(validate, enumerate(batches)))
+        first_results = list(pool.map(validate, enumerate(batches)))
+
+    retries: list[tuple[str, list[tuple[Path, Path, Path]]]] = []
+    for index, batch, rc in first_results:
+        # Retry exactly once, and only ids a *completed* response left unvoted.
+        # Finish the whole first wave before starting retries so an incomplete
+        # early batch cannot consume the shared deadline ahead of untouched ids.
+        if rc not in (0, 3):
+            continue
+        missing = [
+            (directory, report, vote_file)
+            for directory, report, vote_file in batch
+            if _cached_trigger_vote(report, vote_file) is None
+        ]
+        if missing:
+            retries.append((f"{index}-retry", missing))
+
+    def retry(tag_and_batch: tuple[str, list[tuple[Path, Path, Path]]]) -> None:
+        tag, batch = tag_and_batch
+        timeout = _decision_timeout(300, deadline)
+        if timeout <= 0 or llm_decide.provider_limit_open():
+            return
+        run_batch(batch, tag, timeout)
+
+    if retries:
+        with ThreadPoolExecutor(max_workers=min(max(1, workers), len(retries))) as pool:
+            list(pool.map(retry, retries))
     return attempted
 
 

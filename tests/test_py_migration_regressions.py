@@ -750,6 +750,65 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         set(parsed_batch) == {"FIND-1", "FIND-2"},
         "trigger batch parser preserves exact keyed verdicts",
     )
+    # A dropped outer brace (a truncated reply whose "items" array is intact)
+    # must still recover every complete vote instead of losing the whole batch.
+    truncated_batch = validator["extract_vote_batch"](
+        '{"items":[{"id":"FIND-1","vote":"Promote"},'
+        '{"id":"FIND-2","vote":"Reject","disproof":"app_parse child.c:91"}]'
+    )
+    check(
+        {key: vote["vote"] for key, vote in truncated_batch.items()}
+        == {"FIND-1": "Promote", "FIND-2": "Reject"},
+        "trigger batch parser recovers votes from a truncated envelope",
+    )
+    # A truncated FINAL item is incomplete, so it is dropped, never half-accepted.
+    partial_final_batch = validator["extract_vote_batch"](
+        '{"items":[{"id":"FIND-1","vote":"Promote"},{"id":"FIND-2","vote":"Rej'
+    )
+    check(
+        set(partial_final_batch) == {"FIND-1"},
+        "trigger batch parser drops an incomplete trailing item",
+    )
+    # A finding-removing gate must never manufacture a verdict from prose that
+    # merely mentions an "items" list or a decoy array not in a `{"items":[`
+    # envelope.
+    check(
+        validator["extract_vote_batch"](
+            'I considered the "items" list '
+            '[{"id":"FIND-1","vote":"Reject","disproof":"app_parse child.c:91"}], '
+            "but cannot reach a verdict."
+        ) == {}
+        and validator["extract_vote_batch"](
+            'Here is a list [{"id":"FIND-1","vote":"Reject","disproof":"x"}].'
+        ) == {},
+        "trigger batch parser does not manufacture a verdict from prose",
+    )
+    # An earlier empty/decoy envelope must not shadow the real answer, which the
+    # model prints last; a broken separator keeps only the complete prefix.
+    check(
+        set(validator["extract_vote_batch"](
+            '{"items":[]} on reflection {"items":[{"id":"FIND-2","vote":"Promote"}]'
+        )) == {"FIND-2"}
+        and set(validator["extract_vote_batch"](
+            '{"items":[{"id":"FIND-1","vote":"Promote"} x '
+            '{"id":"FIND-2","vote":"Reject","disproof":"a"}]}'
+        )) == {"FIND-1"},
+        "trigger batch parser prefers the last envelope and stops at a broken separator",
+    )
+    # If the final envelope is empty or truncates before its first complete
+    # vote, never fall back to an earlier hypothetical finding-removing Reject.
+    earlier_reject = (
+        '{"items":[{"id":"FIND-1","vote":"Reject","disproof":"app_parse child.c:91"}]}'
+    )
+    check(
+        validator["extract_vote_batch"](
+            earlier_reject + '\n{"items":[{"id":"FIND-1","vote":"Pro'
+        ) == {}
+        and validator["extract_vote_batch"](
+            earlier_reject + '\n{"items":[]}'
+        ) == {},
+        "trigger batch parser treats an incomplete final envelope as authoritative",
+    )
     finding_args = validator["parse_args"]([
         "--finding", str(report_path), "--target-path", str(root),
         "--backend", "codex", "--gate", "finding",

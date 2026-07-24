@@ -38,6 +38,23 @@ def quality_vote(item_id: str, accept: bool = True) -> dict:
     }
 
 
+def _write_batch_votes(command: list[str], only: set[str] | None = None) -> None:
+    """Simulate the batched trigger validator: write a valid cached vote for each
+    manifest item (optionally only a subset), so the caller sees those ids as
+    voted and the rest as still-missing."""
+    manifest = Path(command[command.index("--batch-manifest") + 1])
+    for item in json.loads(manifest.read_text(encoding="utf-8"))["items"]:
+        if only is not None and item["id"] not in only:
+            continue
+        finding = Path(item["finding"])
+        Path(item["output"]).write_text(json.dumps({
+            "vote": "Promote",
+            "content_sha1": sorted(report_identity.content_sha1_candidates(finding))[0],
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "attacker_controls": triage_validate.trigger_attacker_controls(),
+        }), encoding="utf-8")
+
+
 class IncrementalFindingValidationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="triage-incremental-")
@@ -435,13 +452,14 @@ Generated score text.
 
         active = maximum = calls = 0
 
-        def run(*_args, **_kwargs):
+        def run(command, *_args, **_kwargs):
             nonlocal active, maximum, calls
             with lock:
                 active += 1
                 calls += 1
                 maximum = max(maximum, active)
             time.sleep(0.05)
+            _write_batch_votes(command)  # complete response: no ids left to retry
             with lock:
                 active -= 1
             return mock.Mock(returncode=0)
@@ -456,6 +474,102 @@ Generated score text.
             )
         self.assertEqual(attempted, set(directories))
         self.assertEqual((calls, maximum), (3, 2))
+
+    def test_incomplete_trigger_batch_retries_only_missing_ids_once(self) -> None:
+        directories = []
+        for index in range(2):
+            directory = self.root / "findings" / f"FIND-{index + 10:03d}"
+            directory.mkdir()
+            (directory / "report.md").write_text(
+                "# State issue\n\nA public request crosses a boundary.\n",
+                encoding="utf-8",
+            )
+            directories.append(directory)
+
+        runs = []
+
+        def run(command, *_args, **_kwargs):
+            manifest = Path(command[command.index("--batch-manifest") + 1])
+            ids = [item["id"] for item in json.loads(manifest.read_text())["items"]]
+            runs.append(ids)
+            # First pass votes only the first id; the retry must carry only the
+            # still-missing second id, then complete it.
+            _write_batch_votes(command, only={directories[0].name} if len(runs) == 1 else None)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(triage.subprocess, "run", side_effect=run):
+            triage._batch_finding_trigger_votes(
+                directories, self.root, None, None, False, workers=1,
+            )
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(runs[1], [directories[1].name])
+        for directory in directories:
+            self.assertIsNotNone(triage._cached_trigger_vote(
+                directory / "report.md", directory / ".trigger-gate.json",
+            ))
+
+    def test_trigger_retries_follow_every_initial_batch(self) -> None:
+        directories = []
+        for index in range(9):
+            directory = self.root / "findings" / f"FIND-{index + 10:03d}"
+            directory.mkdir()
+            (directory / "report.md").write_text(
+                "# State issue\n\nA public request crosses a boundary.\n",
+                encoding="utf-8",
+            )
+            directories.append(directory)
+
+        runs = []
+
+        def run(command, *_args, **_kwargs):
+            manifest = Path(command[command.index("--batch-manifest") + 1])
+            runs.append([
+                item["id"] for item in json.loads(manifest.read_text())["items"]
+            ])
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(triage.subprocess, "run", side_effect=run):
+            triage._batch_finding_trigger_votes(
+                directories, self.root, None, None, False, workers=1,
+            )
+        expected = [
+            [directory.name for directory in directories[start:start + 4]]
+            for start in range(0, len(directories), 4)
+        ]
+        self.assertEqual(runs[:3], expected)
+        self.assertEqual(runs[3:], expected)
+
+    def test_transient_trigger_batch_is_not_retried(self) -> None:
+        directory = self.root / "findings" / "FIND-010"
+        directory.mkdir()
+        (directory / "report.md").write_text(
+            "# State issue\n\nA public request crosses a boundary.\n",
+            encoding="utf-8",
+        )
+        calls = 0
+
+        def run(command, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return mock.Mock(returncode=2)  # transient backend failure: no votes
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(triage.subprocess, "run", side_effect=run):
+            triage._batch_finding_trigger_votes(
+                [directory], self.root, None, None, False, workers=1,
+            )
+        self.assertEqual(calls, 1)  # a timeout is never hot-retried
 
     def test_trigger_cache_requires_current_prompt_and_report(self) -> None:
         cache = self.finding / ".trigger-gate.json"
@@ -594,11 +708,11 @@ Generated score text.
             )
         ))
 
-        def batch(*_args, **_kwargs):
+        def batch(directories, *_args, **_kwargs):
             (self.finding / ".trigger-gate.json").write_text(
                 json.dumps({"vote": "ParseFailure"})
             )
-            return {self.finding}
+            return set(directories)
 
         def fill(*_args, **_kwargs):
             if "Boundary: public API" not in self.report.read_text():
