@@ -9,7 +9,7 @@
 [models]
 claude = "claude-opus-5"
 codex  = "gpt-5.6-sol"
-gemini = "gemini-3.1-pro-preview"
+gemini = "gemini-3.6-flash"
 grok   = "grok-4.5"
 oss    = ""
 
