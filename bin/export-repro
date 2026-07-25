@@ -4,6 +4,7 @@ maintainer-facing reproduction bundle.
 
 Usage:
   bin/export-repro <CRASH-id> [--out <dir>] [--slug <slug>]
+                   [--target-root <dir>] [--target-rev <rev>]
 
 Produces (replacing any previous content of <out>):
   <out>/REPORT.md           — bug summary, root cause, candidate fix
@@ -52,7 +53,10 @@ def die(msg: str) -> None:
 
 
 def usage() -> None:
-    sys.stderr.write("Usage: bin/export-repro <CRASH-id> [--out <dir>] [--slug <slug>]\n")
+    sys.stderr.write(
+        "Usage: bin/export-repro <CRASH-id> [--out <dir>] [--slug <slug>] "
+        "[--crash-dir <dir>] [--target-root <dir>] [--target-rev <rev>]\n"
+    )
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────
@@ -341,27 +345,7 @@ def sanitizer_default_options(sanitizer: str, mode: str = "") -> str:
     return sanitizer_policy.options_for(sanitizer.lower(), canonical)
 
 
-def _parse_header_line(line: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for token in line.strip().split():
-        if "=" not in token:
-            continue
-        k, v = token.split("=", 1)
-        fields[k] = v
-    return fields
-
-
-def sanitizer_run_header_fields(text: str) -> dict[str, str]:
-    for line in text.splitlines():
-        if line.startswith("SANITIZER_RUN_HEADER:"):
-            fields = _parse_header_line(line.split(":", 1)[1])
-            if "sanitizer" in fields:
-                return fields
-        if line.startswith("ASAN_RUN_HEADER:"):
-            fields = _parse_header_line(line.split(":", 1)[1])
-            fields.setdefault("sanitizer", "asan")
-            return fields
-    return {}
+sanitizer_run_header_fields = crash_artifacts.sanitizer_run_header_fields
 
 
 def decode_header_b64(value: str) -> str:
@@ -373,28 +357,7 @@ def decode_header_b64(value: str) -> str:
         return ""
 
 
-def infer_sanitizer_from_text(text: str) -> str:
-    fields = sanitizer_run_header_fields(text)
-    if fields:
-        san = fields.get("sanitizer", "").lower()
-        if san in SANITIZER_META:
-            return san
-    header = re.search(r"\bSANITIZER_RUN_HEADER:\s+[^\n]*\bsanitizer=([A-Za-z0-9_-]+)", text)
-    if header:
-        san = header.group(1).lower()
-        if san in SANITIZER_META:
-            return san
-    if "WARNING: DATA RACE" in text and "ThreadSanitizer" not in text:
-        return "race"
-    if "MemorySanitizer" in text:
-        return "msan"
-    if "ThreadSanitizer" in text:
-        return "tsan"
-    if "UndefinedBehaviorSanitizer" in text or re.search(r"\bruntime error:", text):
-        return "ubsan"
-    if "AddressSanitizer" in text or "ASAN_RUN_HEADER" in text:
-        return "asan"
-    return "asan"
+infer_sanitizer_from_text = crash_artifacts.infer_sanitizer_from_text
 
 
 def sanitizer_runtime_env_block(
@@ -581,6 +544,16 @@ def demangle(text: str) -> str:
 # Pinning must fail loudly. A bundle that silently builds a different commit
 # than the audit ran on reports "does not reproduce" for a real bug, which is
 # worse than refusing to build at all.
+# Emitted when the audit recorded no revision. REV is then a sentinel, not a
+# commit: checking it out fails on a pathspec that never existed, so the tree
+# is built as it stands and the bundle says so rather than pinning a fiction.
+PIN_REV_UNRECORDED = """\
+pin_rev() {
+  echo "reproduce.sh: the audit recorded no revision; building $2 as it stands" >&2
+  return 0
+}
+"""
+
 PIN_REV = """\
 pin_rev() {
   # Only a working checkout can be pinned. A tree that merely looks like one
@@ -691,14 +664,30 @@ fi
 # operator passes in is pinned either way. `.git` is tested with -e, not -d: in
 # a git worktree it is a FILE pointing at the real git dir, and -d skipped the
 # pin entirely there.
-if [ -e "$src/.git" ]; then
+if [ -e "$src/.git" ] && git -C "$src" rev-parse --git-dir >/dev/null 2>&1; then
   pin_rev git "$src"
   # Re-sync submodules after pinning: the recorded REV can point them at
   # different commits than the clone fetched, and an operator-supplied checkout
   # may not have them initialized at all. Submodule-dependent builds (e.g. a JIT
   # engine vendored under deps/) need their sources present. No-op when the repo
-  # has no submodules.
+  # has no submodules. The update's own exit status is not the test: a repo
+  # with none succeeds trivially, and a partial failure can still leave every
+  # submodule correct. What decides is the state afterwards — status marks a
+  # submodule uninitialized (-), at the wrong commit (+), or conflicted (U),
+  # and any of those means this is not the source the audit ran against.
   git -C "$src" submodule update --init --recursive 2>/dev/null || true
+  if ! submodule_state=$(git -C "$src" submodule status --recursive 2>&1); then
+    echo "reproduce.sh: cannot verify submodule revisions" >&2
+    printf '%s\n' "$submodule_state" >&2
+    exit 3
+  fi
+  stale=$(printf '%s\n' "$submodule_state" | grep -c '^[-+U]' || true)
+  if [ "$stale" != "0" ]; then
+    echo "reproduce.sh: $stale submodule(s) are not at the commit this tree records" >&2
+    echo "  this build would use different dependency sources; fetch them" >&2
+    echo "  with: git -C <checkout> submodule update --init --recursive" >&2
+    exit 3
+  fi
 elif [ -d "$src/.hg" ]; then
   pin_rev hg "$src"
 fi
@@ -1192,12 +1181,13 @@ def emit_preamble(build_system: str, upstream_url: str, pinned_rev: str,
     quoted_slug = shq(safe_slug(slug))
     quoted_san_bin_rel = shq(san_bin_rel)
     meta = sanitizer_meta(sanitizer)
+    pin_rev = PIN_REV if _rev_is_pinned(pinned_rev) else PIN_REV_UNRECORDED
     if build_system == "mach":
         return _sub_template(
             PREAMBLE_MACH,
             __UPSTREAM_URL__=quoted_url,
             __PINNED_REV__=quoted_rev,
-            __PIN_REV__=PIN_REV,
+            __PIN_REV__=pin_rev,
             __SLUG__=quoted_slug,
             __SAN_BIN_REL__=quoted_san_bin_rel,
             __SANITIZER_LABEL__=meta["label"],
@@ -1207,7 +1197,7 @@ def emit_preamble(build_system: str, upstream_url: str, pinned_rev: str,
         PREAMBLE_GENERIC,
         __UPSTREAM_URL__=quoted_url,
         __PINNED_REV__=quoted_rev,
-        __PIN_REV__=PIN_REV,
+        __PIN_REV__=pin_rev,
         # Recorded local source for a local-only target (empty for VCS targets,
         # which clone from upstream instead). shq("") -> '' so the LOCAL_SRC
         # branch is simply skipped at run time.
@@ -3116,7 +3106,10 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="bin/export-repro",
-        usage="bin/export-repro <CRASH-id> [--out <dir>] [--slug <slug>] [--crash-dir <dir>]",
+        usage=(
+            "bin/export-repro <CRASH-id> [--out <dir>] [--slug <slug>] "
+            "[--crash-dir <dir>] [--target-root <dir>] [--target-rev <rev>]"
+        ),
         add_help=False,
     )
     parser.add_argument("crash_id", nargs="?")
@@ -3125,6 +3118,14 @@ def main(argv: list[str]) -> int:
     # Override the default RESULTS_DIR/crashes/<id> path. Used by maintenance
     # passes that regenerate bundles outside the live crashes/ directory.
     parser.add_argument("--crash-dir")
+    # Maintenance callers rebuilding an old artifact know which checkout owns
+    # its build recipe. This must outrank an unrelated live slug session.
+    parser.add_argument("--target-root")
+    # The revision these crashes were found at, when the caller knows it and
+    # session discovery cannot. A benchmark pool is rebuilt long after its run,
+    # against a slug whose live session may belong to an entirely different
+    # one, so a caller-supplied revision outranks whatever is discovered.
+    parser.add_argument("--target-rev")
     parser.add_argument("-h", "--help", action="store_true")
     try:
         args = parser.parse_args(argv)
@@ -3174,7 +3175,15 @@ def main(argv: list[str]) -> int:
         except FileNotFoundError:
             die(f"no backend results/.session-env above {os.getcwd()}; use --slug")
 
-    cfg.target_rev = target_config.audited_rev(cfg)
+    if args.target_root:
+        target_root = Path(args.target_root).expanduser().absolute()
+        if not target_root.is_dir():
+            die(f"target root not found: {target_root}")
+        cfg.target_root = str(target_root)
+        # The session's revision described a different checkout; drop it so the
+        # fallback below reads this one's instead of pinning the other's.
+        cfg.target_rev = ""
+    cfg.target_rev = args.target_rev or target_config.audited_rev(cfg)
 
     if args.crash_dir:
         crash_dir = Path(args.crash_dir).resolve()
@@ -3244,7 +3253,7 @@ def main(argv: list[str]) -> int:
             shutil.copyfile(patch_src, stage / "patch.diff")
 
         upstream_url = cfg.upstream_url or "FILL_ME"
-        pinned_rev = cfg.target_rev or "HEAD"
+        pinned_rev = cfg.target_rev or target_config.NO_REV
         slug = cfg.slug or "target"
         cmake_target = cfg.cmake_target or ""
         build_system = cfg.build_system or "cmake"

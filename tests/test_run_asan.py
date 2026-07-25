@@ -125,6 +125,23 @@ class RunAsanTests(unittest.TestCase):
         self.assertNotIn("--ion-eager", invocations)
         self.assertNotIn("--no-ion", invocations)
 
+    def test_generic_harness_skip_does_not_append_a_testcase(self) -> None:
+        argv_log = self.root / "argv.txt"
+        harness = self.executable(
+            "harness",
+            "import os, pathlib, sys\n"
+            "pathlib.Path(os.environ['ARGV_LOG']).write_text('\\n'.join(sys.argv[1:]))\n",
+        )
+        proc = self.run_command(
+            "generic", "/dev/null",
+            ASAN_GENERIC_BIN=harness,
+            ASAN_GENERIC_SKIP_TESTCASE="1",
+            SANITIZER_GENERIC_SKIP_TESTCASE="1",
+            ARGV_LOG=argv_log,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(argv_log.read_text(encoding="utf-8"), "")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

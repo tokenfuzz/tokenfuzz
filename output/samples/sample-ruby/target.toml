@@ -4,7 +4,6 @@
 target        = "samples/sample-ruby"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (Ruby)"
 build_system  = "bundler"
-pinned_rev    = "norev"
 
 is_browser    = "0"
 

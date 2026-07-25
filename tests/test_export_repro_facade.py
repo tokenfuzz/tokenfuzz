@@ -72,6 +72,60 @@ class ExportReproducerFacadeTests(unittest.TestCase):
             self.assertIn("URL=" + url, script)
             self.assertNotIn("URL=FILL_ME", script)
             self.assertIn("sentinel-include-only-in-facade", script)
+            self.assertIn("REV=facadebeef", script)
+
+            # A benchmark pool is rebuilt long after its run, against a slug
+            # whose live session may belong to another run, so a caller that
+            # knows the audited revision outranks whatever discovery finds.
+            proc = subprocess.run(
+                [str(facade / "bin" / "export-repro"), "CRASH-FACADE-1",
+                 "--slug", slug, "--crash-dir", str(crash),
+                 "--target-rev", "0badc0de"],
+                cwd=str(facade), env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            script = (crash / "reproduce.sh").read_text(encoding="utf-8")
+            self.assertIn("REV=0badc0de", script)
+            self.assertNotIn("REV=facadebeef", script)
+
+            # The run's checkout must outrank a live session from the same
+            # slug, because that root supplies the captured build recipe.
+            exact_source = root / "exact source"
+            (exact_source / ".audit").mkdir(parents=True)
+            (exact_source / ".audit" / "build.sh").write_text(
+                "echo exact-root-recipe\n", encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [str(facade / "bin" / "export-repro"), "CRASH-FACADE-1",
+                 "--slug", slug, "--crash-dir", str(crash),
+                 "--target-root", str(exact_source),
+                 "--target-rev", "0badc0de"],
+                cwd=str(facade), env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            script = (crash / "reproduce.sh").read_text(encoding="utf-8")
+            self.assertIn("exact-root-recipe", script)
+
+            # A plain source tree has no honest commit to clone. Export keeps
+            # it explicitly unpinned instead of silently inventing HEAD.
+            proc = subprocess.run(
+                [str(facade / "bin" / "export-repro"), "CRASH-FACADE-1",
+                 "--slug", slug, "--crash-dir", str(crash),
+                 "--target-root", str(exact_source)],
+                cwd=str(facade), env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            script = (crash / "reproduce.sh").read_text(encoding="utf-8")
+            self.assertIn("REV=norev", script)
+            self.assertNotIn("REV=HEAD", script)
+
+            help_text = subprocess.run(
+                [str(facade / "bin" / "export-repro"), "--help"],
+                cwd=str(facade), env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(help_text.returncode, 0)
+            self.assertIn("--target-root", help_text.stderr)
+            self.assertIn("--target-rev", help_text.stderr)
 
 
 if __name__ == "__main__":

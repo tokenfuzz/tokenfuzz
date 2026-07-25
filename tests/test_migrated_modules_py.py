@@ -703,10 +703,11 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         (0, []), __import__("benchmark").count_confirmed_crashes(zero_rate.parent),
         "a measured zero-rate diagnostic cannot inflate benchmark crash counts",
     )
-    check(
-        not benchmark_runner._same_sanitizer_fault(
+    equal(
+        0,
+        benchmark_runner._runs_reproducing(
             "SUMMARY: AddressSanitizer: heap-buffer-overflow child.c:9",
-            "SUMMARY: AddressSanitizer: ABRT child.c:8",
+            "=== Run 1/1 ===\nSUMMARY: AddressSanitizer: ABRT child.c:8\n",
         ),
         "reverify cannot substitute an assertion abort for the reported memory fault",
     )

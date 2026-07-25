@@ -29,11 +29,13 @@ import benchmark as metrics
 import benchmark_graph
 import benchmark_model_direct_render
 import build_preflight
+import crash_artifacts
 import crash_bundle
 import llm_invoke
 import llm_usage
 import process_tree
 import runner_preflight
+import stack_frames
 import target_config
 import triage
 from timeout import run_timeout
@@ -445,6 +447,7 @@ def write_cell(
     path: Path, condition: str, replicate: int, experiment: str,
     results_dir: Path, wall: int, status: str, requested_agents: int | None,
     paused: int = 0, started_at: str = "", housekeeping: int = 0,
+    build_identity: dict | None = None,
 ) -> None:
     quality = "clean"
     try:
@@ -469,6 +472,14 @@ def write_cell(
     }
     if requested_agents is not None:
         payload["requested_agents"] = requested_agents
+    if build_identity is None:
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            build_identity = previous.get("build_identity")
+        except (OSError, ValueError):
+            build_identity = None
+    if build_identity:
+        payload["build_identity"] = build_identity
     try:
         config = json.loads((results_dir / "state" / "run-config.json").read_text(encoding="utf-8"))
         actual = config.get("num_agents")
@@ -479,6 +490,186 @@ def write_cell(
     except (OSError, ValueError):
         pass
     _write_json(path, payload)
+
+
+def _build_identity_config(target: Path, target_slug: str) -> target_config.Config | None:
+    """The config a replay resolves its target artifacts through; None if unreadable."""
+    config = target_config.Config(target_root=str(target))
+    config_path = SCRIPT_ROOT / "output" / target_slug / "target.toml"
+    if not config_path.is_file():
+        config_path = target / "target.toml"
+    if config_path.is_file():
+        try:
+            target_config.load_toml_into(config, config_path)
+        except (OSError, ValueError):
+            return None
+    return config
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _target_build_identity(target: Path, target_slug: str) -> dict:
+    """Content identity of the target artifacts a benchmark replay can execute."""
+    config = _build_identity_config(target, target_slug)
+    if config is None:
+        return {}
+
+    stamps: dict[str, str] = {}
+    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    for sanitizer in target_config.SANITIZERS_VALID:
+        path = target / f"build-{sanitizer}{suffix}" / ".audit-build-stamp"
+        try:
+            stamps[sanitizer] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+
+    artifacts: dict[str, dict[str, object]] = {}
+    configured = {
+        f"{sanitizer}-{kind}": value
+        for sanitizer in target_config.SANITIZERS_VALID
+        for kind, value in (
+            ("bin", config.sanitizer_bin(sanitizer)),
+            ("lib", config.sanitizer_lib(sanitizer)),
+        )
+        if value
+    }
+    for name, raw in configured.items():
+        try:
+            path = Path(config.resolve_path(raw))
+            if not path.is_file():
+                continue
+            artifacts[name] = {
+                "path": raw,
+                "size": path.stat().st_size,
+                "sha256": _file_sha256(path),
+            }
+        except (OSError, ValueError):
+            continue
+    if not stamps and not artifacts:
+        return {}
+    return {"version": 1, "stamps": stamps, "artifacts": artifacts}
+
+
+def _replay_binary_key(
+    sanitizer: str, config: target_config.Config | None, recorded: dict,
+) -> str:
+    """The binary a replay of this evidence runs.
+
+    That sanitizer's own when the cell recorded one or the config still
+    declares one, else the resolver's fallback to asan_bin. Reading the
+    recorded side first is what keeps a dropped `ubsan_bin` from quietly
+    rerouting UBSan evidence onto the ASan build and passing the check.
+    """
+    key = f"{sanitizer}-bin"
+    if key in recorded.get("artifacts", {}):
+        return key
+    return key if config is not None and config.sanitizer_bin(sanitizer) else "asan-bin"
+
+
+def _replay_build_keys(
+    crash_dirs: list[Path], config: target_config.Config | None, recorded: dict,
+) -> set[str]:
+    """Which target artifacts replaying this crash evidence would execute."""
+    keys: set[str] = set()
+    for crash_dir in crash_dirs:
+        sanitizer = crash_artifacts.crash_sanitizer(crash_dir)
+        if crash_artifacts.crash_harness_binary(crash_dir) is not None:
+            # A saved harness already contains a static archive. Only a shared
+            # library is consulted again when that executable is replayed.
+            key = f"{sanitizer}-lib"
+            artifact = recorded.get("artifacts", {}).get(key)
+            recorded_path = (
+                artifact.get("path", "") if isinstance(artifact, dict) else ""
+            )
+            current_path = (
+                config.sanitizer_lib(sanitizer) if config is not None else ""
+            )
+            if any(
+                raw and target_config._is_shared_lib(Path(raw).name)
+                for raw in (recorded_path, current_path)
+            ):
+                keys.add(key)
+            continue
+        keys.add(_replay_binary_key(sanitizer, config, recorded))
+    return keys
+
+
+def _identity_matches_keys(recorded: dict, current: dict, keys: set[str]) -> bool:
+    """Compare both sides symmetrically: an artifact or stamp that has since
+    gone missing, or since appeared, differs as much as a changed one."""
+    for key in keys:
+        sanitizer = key.split("-", 1)[0]
+        if recorded.get("artifacts", {}).get(key) != current.get("artifacts", {}).get(key):
+            return False
+        if recorded.get("stamps", {}).get(sanitizer) != current.get("stamps", {}).get(sanitizer):
+            return False
+    return True
+
+
+def _replay_build_check(
+    crash_dirs: list[Path], recorded: dict, current: dict,
+    config: target_config.Config | None, subject: str,
+) -> tuple[bool, str]:
+    """Whether the build these crashes were found under is still the live one.
+
+    Only an artifact one side or the other names is checked. What is absent from
+    both is part of no replay: a statically linked harness on a target that
+    configures no instrumented library, or a target driven entirely through
+    [runner], has no target build to verify — then or now — and stays
+    replayable rather than marking its cell incomplete.
+    """
+    keys = {
+        key for key in _replay_build_keys(crash_dirs, config, recorded)
+        if recorded.get("artifacts", {}).get(key)
+        or current.get("artifacts", {}).get(key)
+    }
+    if not keys:
+        return True, ""
+    if not recorded:
+        return False, f"{subject} recorded no executed build identity"
+    if not current:
+        return False, "the recorded target build is unavailable"
+    if not _identity_matches_keys(recorded, current, keys):
+        return False, f"the available target build differs from {subject}'s"
+    return True, ""
+
+
+def _cell_build_identity(cell: dict) -> dict:
+    recorded = cell.get("build_identity")
+    return recorded if isinstance(recorded, dict) else {}
+
+
+def _mark_build_finalization_incomplete(cell: dict, reason: str) -> None:
+    """Record that a cell's replay build could not be verified.
+
+    A cell that failed, or one a provider cut short, keeps that status: a later
+    regeneration promotes `incomplete` back to `done` once the build matches
+    again, which would launder those into the aggregate they are excluded from.
+    """
+    if cell.get("status") != "failed":
+        cell["status"] = "incomplete"
+    if cell.get("run_quality") == "clean":
+        cell["run_quality"] = "incomplete"
+    cell["build_finalization_error"] = reason
+
+
+def _replay_build_status(
+    cell: dict, results: Path, target: Path, target_slug: str,
+) -> tuple[bool, str]:
+    crash_dirs = sorted((results / "crashes").glob("CRASH-*"))
+    if not crash_dirs:
+        return True, ""
+    return _replay_build_check(
+        crash_dirs, _cell_build_identity(cell),
+        _target_build_identity(target, target_slug),
+        _build_identity_config(target, target_slug), "the cell",
+    )
 
 
 def dryrun_cell(cell_dir: Path, condition: str, replicate: int, backend: str) -> Path:
@@ -805,6 +996,12 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
     binary = fields.get("BIN", "")
     testcase = fields.get("TESTCASE", "")
     sanitizer_name = fields.get("SAN", "asan")
+    try:
+        original = (crash_dir / "sanitizer.txt").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        original = ""
     temporary = crash_dir / "sanitizer.txt.reverify.tmp"
     temporary.unlink(missing_ok=True)
     environment = os.environ.copy()
@@ -813,18 +1010,39 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
         "SANITIZER_RUNS": "5", "SAN_OUTPUT_FILE": str(temporary),
         f"{upper}_GENERIC_BIN": binary,
     })
+    # The options the crash was found under are part of how it was found —
+    # allocator shaping decides whether some faults surface at all — and the
+    # runner header recorded them. The runners append the environment after
+    # their own defaults, and a sanitizer runtime takes the last duplicate key.
+    for option_name in (
+        "ASAN_OPTIONS", "UBSAN_OPTIONS", "MSAN_OPTIONS", "TSAN_OPTIONS",
+    ):
+        environment.pop(option_name, None)
+    try:
+        recorded_options = crash_artifacts.recorded_sanitizer_options(original)
+    except ValueError as exc:
+        _write_reverify_log(crash_dir, f"recorded sanitizer options are unusable: {exc}\n")
+        return False
+    if recorded_options is not None:
+        environment[f"{upper}_OPTIONS"] = recorded_options
     arguments = [testcase, *replay_args] if replay_args else [testcase]
     if mode == "harness":
+        # The harness carries its own input, and keeps the sanitizer it was
+        # built with: under the ASan wrapper a UBSan harness never gets
+        # UBSAN_OPTIONS, so halt_on_error is unset and a real crash exits 0.
+        # Both skip flags, because bin/run-asan reads only its own.
         arguments = ["/dev/null"]
-        environment.update({"ASAN_GENERIC_BIN": binary, "ASAN_GENERIC_SKIP_TESTCASE": "1"})
-        sanitizer_name = "asan"
+        environment.update({
+            "ASAN_GENERIC_SKIP_TESTCASE": "1", "SANITIZER_GENERIC_SKIP_TESTCASE": "1",
+        })
         # An agent-compiled harness carries no rpath, so it dies in the loader
         # before main() and its crash looks unmeasurable. Supply the directory
         # bin/probe would have baked in. Harness mode only: a configured target
         # binary is launched the way the target itself is, and overriding the
         # loader path there could change which library a clean run resolves.
+        # Guard the empty string too — Path("") is the working directory.
         library_dir = fields.get("LIBDIR", "")
-        if Path(library_dir).is_dir():
+        if library_dir and Path(library_dir).is_dir():
             for variable in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
                 existing = environment.get(variable, "")
                 environment[variable] = (
@@ -842,50 +1060,122 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
         measured = ""
     finally:
         temporary.unlink(missing_ok=True)
-    rate_match = re.search(r"^CRASH_RATE:\s*([0-9]+/[0-9]+)", measured, re.MULTILINE)
-    rate = rate_match.group(1) if rate_match else ""
-    crashes = int(rate.split("/", 1)[0]) if rate else 0
+    rate_match = re.search(r"^CRASH_RATE:\s*([0-9]+)/([0-9]+)", measured, re.MULTILINE)
+    crashes = int(rate_match.group(1)) if rate_match else 0
+    runs = int(rate_match.group(2)) if rate_match else 0
     success_match = re.search(r"^\[run-sanitizer-multi\]\s+SUCCESS_RATE:\s*([0-9]+/[0-9]+)", measured, re.MULTILINE)
     clean_runs = int(success_match.group(1).split("/", 1)[0]) if success_match else 0
-    if not rate or (crashes == 0 and clean_runs == 0):
+    if not rate_match or (crashes == 0 and clean_runs == 0):
         # Nothing ran to completion: no summary at all, or a rate with neither
         # a crash nor a clean exit behind it (a loader or exec failure). Keep
         # the output so the demotion is diagnosable without re-running the cell.
         _write_reverify_log(crash_dir, measured)
         return False
     if crashes:
-        try:
-            original = (crash_dir / "sanitizer.txt").read_text(
-                encoding="utf-8", errors="replace"
-            )
-        except OSError:
-            _write_reverify_log(crash_dir, measured)
-            return False
+        crashes = _runs_reproducing(original, measured)
         if (
-            triage.autodiscard_reason(measured)
+            not crashes
+            or triage.autodiscard_reason(measured)
             or not triage._has_memory_safety_signal(measured)
-            or not _same_sanitizer_fault(original, measured)
         ):
             # The replay crashed, but not with the original's fault. Nothing
             # here confirms the crash, so it demotes like an unmeasured one —
             # and the operator needs the output to see which it was.
             _write_reverify_log(crash_dir, measured)
             return False
-    note = f"reproduced in {rate} reverification runs" if crashes else "original one-shot trace did not reproduce in 5 reverification runs"
+    rate = f"{crashes}/{runs}"
+    note = (
+        f"reproduced in {rate} reverification runs" if crashes
+        else f"original one-shot trace did not reproduce in {runs} reverification runs"
+    )
     with (crash_dir / "sanitizer.txt").open("a", encoding="utf-8") as output:
         output.write(f"\nCRASH_RATE: {rate}\n[run-sanitizer-multi] REVERIFY: {rate} - {note}\n")
     return True
 
 
-def _same_sanitizer_fault(original: str, measured: str) -> bool:
-    """Reject a replay that merely crashes in a different sanitizer class."""
-    pattern = re.compile(
-        r"(?:ERROR|SUMMARY):\s+(?:AddressSanitizer|HWAddressSanitizer):\s+"
-        r"([A-Za-z0-9_-]+)"
+_REPLAY_RUN_SPLIT_RE = re.compile(r"^=== Run [0-9]+/[0-9]+ ===$", re.MULTILINE)
+
+
+def _source_location(location: str) -> tuple[str, int | None]:
+    """Normalize a source location while retaining its faulting line."""
+    parts = location.rsplit(":", 2)
+    if len(parts) >= 2 and parts[-1].isdigit():
+        if len(parts) == 3 and parts[-2].isdigit():
+            return parts[0].replace("\\", "/"), int(parts[-2])
+        return ":".join(parts[:-1]).replace("\\", "/"), int(parts[-1])
+    return location.replace("\\", "/"), None
+
+
+def _fault_site(text: str) -> tuple[str, str, int | None] | None:
+    """The normalized function, path, and line of the reported fault."""
+    frame = stack_frames.first_interesting_frame(text)
+    if frame is None:
+        return None
+    path, line = _source_location(frame.location)
+    return frame.state_function, path, line
+
+
+def _same_source_path(left: str, right: str) -> bool:
+    """Compare paths after pooling may have removed one workspace prefix."""
+    left = left.rstrip("/")
+    right = right.rstrip("/")
+    return (
+        left == right
+        or bool(left and right and left.endswith(f"/{right.lstrip('/')}"))
+        or bool(left and right and right.endswith(f"/{left.lstrip('/')}"))
     )
-    original_kinds = pattern.findall(original)
-    measured_kinds = pattern.findall(measured)
-    return not original_kinds or not measured_kinds or original_kinds[-1] == measured_kinds[-1]
+
+
+def _same_fault(
+    key: tuple[str, str],
+    site: tuple[str, str, int | None] | None,
+    text: str,
+) -> bool:
+    """Whether `text` reports the fault `key` and `site` describe.
+
+    Sanitizer family and primitive, plus the faulting site when both sides name
+    one: two unrelated heap-buffer-overflows in one binary share a primitive,
+    and counting either as the other's reproduction confirms the wrong bug at
+    the wrong rate. Where a side has no parseable frame the primitive stands
+    alone rather than rejecting a real reproduction.
+    """
+    if crash_artifacts.sanitizer_fault_key(text) != key:
+        return False
+    measured_site = _fault_site(text)
+    if site is None or measured_site is None:
+        return True
+    function, path, line = site
+    measured_function, measured_path, measured_line = measured_site
+    if function != measured_function:
+        return False
+    if line is None or measured_line is None:
+        # A frame with no source line carries a module offset or a bare symbol,
+        # which names no bug. Whether a symbolizer was on PATH is a property of
+        # the host at replay time, not of the fault, so a replay that could not
+        # symbolize must read as the same crash rather than a different one.
+        return True
+    return line == measured_line and _same_source_path(path, measured_path)
+
+
+def _runs_reproducing(original: str, measured: str) -> int:
+    """How many replay runs carry the original's fault, not merely some crash.
+
+    run-sanitizer-multi concatenates every repetition into one transcript, so a
+    rate read off the whole of it counts a run that faulted somewhere else as a
+    reproduction, and rejects the whole replay when only the last run diverged.
+    Split the transcript back into its runs and count the matching ones.
+
+    Evidence whose own fault cannot be characterised counts nothing: there is
+    no claim "this reproduced" to make. Model-direct triage demotes that
+    unmeasured evidence to a finding; a pooled rate remains unset.
+    """
+    key = crash_artifacts.sanitizer_fault_key(original)
+    if key is None:
+        return 0
+    site = _fault_site(original)
+    transcript = measured.split("\n=== SUMMARY ===", 1)[0]
+    runs = _REPLAY_RUN_SPLIT_RE.split(transcript)[1:] or [measured]
+    return sum(1 for run in runs if _same_fault(key, site, run))
 
 
 def _measured_crash_rate(path: Path) -> tuple[int, int] | None:
@@ -900,9 +1190,14 @@ def _measured_crash_rate(path: Path) -> tuple[int, int] | None:
     return int(crashes), int(runs)
 
 
-def reverify_pool_crash_rates(pool: Path, target_root: Path, target_slug: str, reason: str) -> int:
+def reverify_pool_crash_rates(
+    pool: Path, target_root: Path, target_slug: str, reason: str,
+    skip: frozenset[str] | set[str] = frozenset(),
+) -> int:
     candidates: list[Path] = []
     for crash_dir in sorted((pool / "crashes").glob("CRASH-*")):
+        if crash_dir.name in skip:
+            continue
         sanitizer_file = crash_dir / "sanitizer.txt"
         if not sanitizer_file.is_file():
             continue
@@ -921,7 +1216,7 @@ def reverify_pool_crash_rates(pool: Path, target_root: Path, target_slug: str, r
         for crash_dir in candidates:
             try:
                 results[crash_dir] = futures[crash_dir].result()
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError, ValueError):
                 results[crash_dir] = False
     reverified = 0
     for crash_dir in candidates:
@@ -952,6 +1247,64 @@ def _finalize_condition_pools(
                 log(f"WARN: per-condition index maintenance failed ({condition.name})")
 
 
+def _run_target_sha(bench_dir: Path) -> str:
+    """The revision this run audited, as recorded at its start; "" if unknown."""
+    try:
+        run = json.loads((bench_dir / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str(run.get("target_sha") or "")
+
+
+def _pool_crash_owners(bench_dir: Path, pool: Path) -> dict[str, list[Path]]:
+    """Pooled crashes grouped by the cell they were copied from.
+
+    build_pool records that mapping, so each crash is checked against the build
+    its own cell ran, not against every cell in the run. An unmapped crash
+    groups under "" and is treated as belonging to no recorded build.
+    """
+    try:
+        members = json.loads((bench_dir / "pool-members.json").read_text(encoding="utf-8"))
+        owners = members.get("crash_cells") or {}
+    except (OSError, ValueError):
+        owners = {}
+    grouped: dict[str, list[Path]] = {}
+    for crash_dir in sorted((pool / "crashes").glob("CRASH-*")):
+        cell = owners.get(crash_dir.name, "") if isinstance(owners, dict) else ""
+        grouped.setdefault(str(cell), []).append(crash_dir)
+    return grouped
+
+
+def _pool_replay_blocked(
+    bench_dir: Path, pool: Path, target: Path, target_slug: str,
+) -> dict[str, str]:
+    """Pooled crashes whose executed build cannot be verified, and why.
+
+    Per crash, using its owning cell: one required artifact whose build has
+    moved on says nothing about another crash from the same or another cell.
+    """
+    config = _build_identity_config(target, target_slug)
+    current = _target_build_identity(target, target_slug)
+    blocked: dict[str, str] = {}
+    for cell_name, crash_dirs in sorted(_pool_crash_owners(bench_dir, pool).items()):
+        cell = {}
+        if cell_name:
+            try:
+                cell = json.loads(
+                    (bench_dir / "cells" / cell_name / "cell.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                cell = {}
+        for crash_dir in crash_dirs:
+            ok, reason = _replay_build_check(
+                [crash_dir], _cell_build_identity(cell), current, config,
+                cell_name or "the pool",
+            )
+            if not ok:
+                blocked[crash_dir.name] = reason
+    return blocked
+
+
 def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dry_run: bool, reason: str) -> None:
     stage_name = ".pool.staging"
     metrics.build_pool(bench_dir, stage_name)
@@ -976,7 +1329,16 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
         ):
             triage.fill_reach_fields_tree(pool)
         if (pool / "crashes").is_dir():
-            reverify_pool_crash_rates(pool, target, target_slug, reason)
+            blocked = _pool_replay_blocked(bench_dir, pool, target, target_slug)
+            for message in sorted(set(blocked.values())):
+                count = sum(1 for value in blocked.values() if value == message)
+                log(
+                    f"WARN: pooled crash-rate replay skipped for {count} crash(es) — "
+                    f"{message}; original evidence was left unchanged"
+                )
+            reverify_pool_crash_rates(
+                pool, target, target_slug, reason, skip=set(blocked),
+            )
         with (bench_dir / "severity.log").open("w", encoding="utf-8") as output:
             _run_tool("severity", "--batch", str(pool), env=environment, stdout=output)
         bundle_candidates: list[Path] = []
@@ -989,7 +1351,17 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
             )
             if not canonical:
                 bundle_candidates.append(crash)
+        # Bundling stays on when replay is skipped: a bundle reproduces from
+        # source at the recorded revision and carries the crash's own saved
+        # evidence, neither of which the current build's identity decides.
         export_env = environment | {"RESULTS_DIR": str(pool), "TARGET_ROOT": str(target)}
+        # The run recorded the revision it audited. A pool is rebuilt long
+        # after that, against a slug whose live session may belong to another
+        # run entirely, so pass it explicitly rather than let export-repro
+        # rediscover a revision this pool was never audited at. A run that
+        # recorded none says so: the checkout's current commit is not an
+        # answer to what this pool was audited at, only a plausible-looking one.
+        audited = _run_target_sha(bench_dir) or target_config.NO_REV
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(2, len(bundle_candidates) or 1)
         ) as executor:
@@ -997,6 +1369,7 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
                 crash: executor.submit(
                     _run_tool, "export-repro", crash.name,
                     "--crash-dir", str(crash), "--slug", target_slug,
+                    "--target-root", str(target), "--target-rev", audited,
                     env=export_env,
                 )
                 for crash in bundle_candidates
@@ -1347,7 +1720,17 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 experiment = f"bench-{run_id}-{condition}-r{replicate}"
                 log(f"Cell {name} starting: condition={condition} replicate={replicate} agents={1 if condition == 'model-direct' else args.agents or 'default'} model={model or '?'} experiment={experiment}")
                 predicted = cell_dir if condition == "model-direct" else cell_dir / "repo-root" / "output" / f"{args.target}-{experiment}" / args.backend / "results"
-                write_cell(cell_json, condition, replicate, experiment, predicted, 0, "running", args.agents)
+                cell_build_identity = (
+                    {} if args.dry_run else _target_build_identity(
+                        (SCRIPT_ROOT / "targets" / args.target).resolve(),
+                        args.target,
+                    )
+                )
+                write_cell(
+                    cell_json, condition, replicate, experiment, predicted, 0,
+                    "running", args.agents,
+                    build_identity=cell_build_identity,
+                )
                 # Regen fires again on completion; do it at start too so a
                 # just-started long cell (the trailing harness cell) shows in the
                 # shared dashboard for its whole run, not only after it finishes.
@@ -1389,7 +1772,32 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 except (OSError, ValueError):
                     pass
                 finalize_wall = getattr(args, "finalize_wall", 3600)
-                if not args.dry_run and results.is_dir() and (results / "crashes").is_dir():
+                replay_build_ok = True
+                if (
+                    not args.dry_run
+                    and condition == "model-direct"
+                    and results.is_dir()
+                    and (results / "crashes").is_dir()
+                ):
+                    replay_build_ok, reason = _replay_build_status(
+                        {"build_identity": cell_build_identity},
+                        results,
+                        (SCRIPT_ROOT / "targets" / args.target).resolve(),
+                        args.target,
+                    )
+                    if not replay_build_ok:
+                        log(
+                            f"WARN: Cell {name}: crash finalization skipped — "
+                            f"{reason}; original evidence was left unchanged"
+                        )
+                        if status != "failed":
+                            status = "incomplete"
+                if (
+                    not args.dry_run
+                    and replay_build_ok
+                    and results.is_dir()
+                    and (results / "crashes").is_dir()
+                ):
                     log(f"Cell {name}: completing crash triage before metrics")
                     try:
                         target_root = (SCRIPT_ROOT / "targets" / args.target).resolve()
@@ -1490,7 +1898,29 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             if results.is_dir():
                 finalizers_ok = True
                 finalize_wall = getattr(args, "finalize_wall", 3600)
-                if (results / "crashes").is_dir():
+                replay_build_ok = True
+                if (
+                    cell.get("condition") == "model-direct"
+                    and (results / "crashes").is_dir()
+                ):
+                    replay_build_ok, reason = _replay_build_status(
+                        cell,
+                        results,
+                        (SCRIPT_ROOT / "targets" / args.target).resolve(),
+                        args.target,
+                    )
+                    if not replay_build_ok:
+                        finalizers_ok = False
+                        _mark_build_finalization_incomplete(cell, reason)
+                        _write_json(cell_dir / "cell.json", cell)
+                        log(
+                            f"WARN: Regenerate: crash triage skipped for "
+                            f"{cell_dir.name} — {reason}; original evidence "
+                            "was left unchanged"
+                        )
+                    else:
+                        cell.pop("build_finalization_error", None)
+                if replay_build_ok and (results / "crashes").is_dir():
                     log(f"Regenerate: completing crash triage for {cell_dir.name} ({cell.get('condition', '?')})")
                     try:
                         target_root = (SCRIPT_ROOT / "targets" / args.target).resolve()

@@ -4,7 +4,6 @@
 target        = "samples/sample-php"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (PHP)"
 build_system  = "composer"
-pinned_rev    = "norev"
 
 is_browser    = "0"
 

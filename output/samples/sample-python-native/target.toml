@@ -4,7 +4,6 @@
 target        = "samples/sample-python-native"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (Python C extension)"
 build_system  = "python"
-pinned_rev    = "norev"
 
 # AddressSanitizer surface: .audit/build.sh compiles the reportnative C core into
 # a standalone harness that faults on the extension's native memory bug. Every

@@ -4,7 +4,6 @@
 target        = "samples/sample-perl"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (Perl)"
 build_system  = "perl"
-pinned_rev    = "norev"
 
 is_browser    = "0"
 

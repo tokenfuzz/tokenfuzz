@@ -7,7 +7,6 @@
 target        = "samples/sample-typescript"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (TypeScript)"
 build_system  = "npm"
-pinned_rev    = "norev"
 
 is_browser    = "0"
 

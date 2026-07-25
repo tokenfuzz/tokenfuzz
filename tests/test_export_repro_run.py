@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +16,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXPORT = ROOT / "bin" / "export-repro"
+loader = importlib.machinery.SourceFileLoader("export_repro_run", str(EXPORT))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+export_repro = importlib.util.module_from_spec(spec)
+loader.exec_module(export_repro)
 
 
 @unittest.skipUnless(
@@ -19,6 +27,120 @@ EXPORT = ROOT / "bin" / "export-repro"
     "clang, cmake, git, and bash are required for generated reproducer execution",
 )
 class ExportReproducerRunTests(unittest.TestCase):
+    def test_source_without_submodules_passes_revision_check(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="export-repro-no-submodule-") as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.name", "Test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "commit", "--allow-empty", "-qm", "fixture"],
+                check=True,
+            )
+            revision = subprocess.run(
+                ["git", "-C", str(source), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            reproduce = root / "reproduce.sh"
+            reproduce.write_text(
+                export_repro.emit_preamble(
+                    "cmake", "https://example.invalid/sample", revision,
+                    "sample", "build-asan/sample",
+                )
+                + "\nexit 0\n",
+                encoding="utf-8",
+            )
+            process = subprocess.run(
+                ["bash", str(reproduce), str(source)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+
+    def test_an_unrecorded_revision_builds_a_git_checkout_as_it_stands(self) -> None:
+        # "norev" is a sentinel for "the audit recorded no revision", not a
+        # commit. Checking it out fails on a pathspec that never existed, which
+        # would refuse to build every bundle from a run that recorded none.
+        with tempfile.TemporaryDirectory(prefix="export-repro-norev-") as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.name", "Test"], check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "commit", "--allow-empty", "-qm", "fixture"],
+                check=True,
+            )
+            reproduce = root / "reproduce.sh"
+            reproduce.write_text(
+                export_repro.emit_preamble(
+                    "cmake", "https://example.invalid/sample", "norev",
+                    "sample", "build-asan/sample",
+                )
+                + "\necho REACHED_BUILD\nexit 0\n",
+                encoding="utf-8",
+            )
+            process = subprocess.run(
+                ["bash", str(reproduce), str(source)], capture_output=True, text=True,
+            )
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            self.assertIn("REACHED_BUILD", process.stdout)
+            self.assertIn("recorded no revision", process.stderr)
+
+    def test_submodule_status_failure_is_not_treated_as_clean(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="export-repro-submodule-") as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            (source / ".git").mkdir(parents=True)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "if 'submodule' in args and 'status' in args:\n"
+                "    print('fatal: cannot read submodule configuration', file=sys.stderr)\n"
+                "    raise SystemExit(128)\n"
+                "if 'rev-parse' in args:\n"
+                "    print('.git')\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o755)
+            reproduce = root / "reproduce.sh"
+            reproduce.write_text(
+                export_repro.emit_preamble(
+                    "cmake", "https://example.invalid/sample", "deadbeef",
+                    "sample", "build-asan/sample",
+                )
+                + "\nexit 0\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
+            process = subprocess.run(
+                ["bash", str(reproduce), str(source)],
+                env=environment, capture_output=True, text=True,
+            )
+            self.assertEqual(process.returncode, 3)
+            self.assertIn(
+                "cannot verify submodule revisions",
+                process.stdout + process.stderr,
+            )
+
     def test_generated_reproducer_builds_replays_argv_and_surfaces_asan(self) -> None:
         with tempfile.TemporaryDirectory(prefix="export-repro-run-") as temporary:
             root = Path(temporary)

@@ -4,7 +4,6 @@
 target        = "samples/sample-python"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (Python)"
 build_system  = "python"
-pinned_rev    = "norev"
 
 is_browser    = "0"
 

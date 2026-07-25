@@ -238,6 +238,17 @@ bin/cluster-findings "$RESULTS"
 bin/show-exclusions "$RESULTS"
 ```
 
+`export-repro` normally gets the audited checkout and revision from the
+session. Maintenance code rebuilding an older pool passes both explicitly:
+
+```bash
+bin/export-repro CRASH-001-1 --slug "$TARGET" \
+  --target-root /path/to/audited-checkout --target-rev <commit>
+```
+
+Use the pair together for detached artifacts. It prevents an unrelated live
+session for the same slug from supplying either the revision or build recipe.
+
 `bin/severity --batch` scores accepted crashes and findings together in one
 offline process.
 

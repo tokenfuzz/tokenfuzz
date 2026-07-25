@@ -4,7 +4,6 @@
 target        = "samples/sample-rust"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (Rust)"
 build_system  = "cargo"
-pinned_rev    = "norev"
 
 # Instrumented CLI: .audit/build.sh produces a nightly
 # `-Zsanitizer=address -Zbuild-std` build. The two unsound-`unsafe` memory bugs

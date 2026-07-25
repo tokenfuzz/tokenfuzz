@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 import shlex
@@ -85,6 +87,161 @@ _SHELL_WRAPPER_HINT_RE = re.compile(
     r'|^\s*(?:if|for|while)\s+|^\s*exec\s+|"\$(?:BIN|HARNESS_BIN|san_bin)"'
     r'|\$(?:BIN|HARNESS_BIN|san_bin|repro_src)\b|/build-(?:a|ub|m|t)san/)'
 )
+
+SANITIZER_NAMES = frozenset({"asan", "ubsan", "msan", "tsan", "race"})
+MAX_RECORDED_SANITIZER_OPTIONS_BYTES = 64 * 1024
+# A sanitizer report's own opening line, optionally carrying the runtime's
+# process-id prefix.
+_HEADLINE = r"^(?:==\d+==)?\s*(?:ERROR|WARNING|SUMMARY): "
+# Raw-diagnostic fallback for output with no runner header. Each pattern is a
+# sanitizer's own report line, not a mention of its name: a target that prints
+# "runtime error:" or names MemorySanitizer in its own output must not reclassify
+# an ASan report. First match wins, so a diagnostic carrying two reports is
+# attributed to the more specific one — a Go race log that also panics with
+# "runtime error:" is a race, not UBSan.
+_RAW_DIAGNOSTIC_PATTERNS = (
+    ("msan", re.compile(_HEADLINE + r"MemorySanitizer:", re.MULTILINE)),
+    ("tsan", re.compile(_HEADLINE + r"ThreadSanitizer:", re.MULTILINE)),
+    ("asan", re.compile(
+        _HEADLINE + r"(?:HW)?AddressSanitizer:|AddressSanitizer:DEADLYSIGNAL"
+        r"|^ASAN_RUN_HEADER:", re.MULTILINE,
+    )),
+    ("race", re.compile(r"^WARNING: DATA RACE$", re.MULTILINE)),
+    # UBSan prefixes every diagnostic with the source location it fired at. A
+    # bare "runtime error:" is also how Go opens a panic, so the location is
+    # what separates the sanitizer's report from a target's own output.
+    ("ubsan", re.compile(
+        _HEADLINE + r"UndefinedBehaviorSanitizer:|UndefinedBehaviorSanitizer:DEADLYSIGNAL"
+        r"|^[^\s].*:\d+:\d+: runtime error:", re.MULTILINE,
+    )),
+)
+_ASAN_FAULT_RE = re.compile(
+    r"(?:ERROR|SUMMARY):\s+(?:AddressSanitizer|HWAddressSanitizer):\s+"
+    r"([A-Za-z0-9_-]+)"
+)
+_UBSAN_FAULT_PATTERNS = (
+    ("incorrect-function-type", re.compile(
+        r"through pointer to incorrect function type", re.IGNORECASE
+    )),
+    ("out-of-bounds", re.compile(r"out of bounds for type", re.IGNORECASE)),
+    ("insufficient-space", re.compile(
+        r"with insufficient space for an object of type", re.IGNORECASE
+    )),
+    ("nonpositive-vla", re.compile(
+        r"variable length array bound evaluates to non-positive value",
+        re.IGNORECASE,
+    )),
+    ("invalid-object-type", re.compile(
+        r"does not point to an object of type", re.IGNORECASE
+    )),
+)
+
+
+def sanitizer_run_header_fields(text: str) -> dict[str, str]:
+    """Parse the normalized runner header, including the legacy ASan form."""
+    for line in text.splitlines():
+        prefix = ""
+        sanitizer = ""
+        if line.startswith("SANITIZER_RUN_HEADER:"):
+            prefix = "SANITIZER_RUN_HEADER:"
+        elif line.startswith("ASAN_RUN_HEADER:"):
+            prefix = "ASAN_RUN_HEADER:"
+            sanitizer = "asan"
+        if not prefix:
+            continue
+        fields: dict[str, str] = {}
+        for token in line[len(prefix):].strip().split():
+            if "=" in token:
+                key, value = token.split("=", 1)
+                fields[key] = value
+        if sanitizer:
+            fields.setdefault("sanitizer", sanitizer)
+        if fields.get("sanitizer"):
+            return fields
+    return {}
+
+
+def infer_sanitizer_from_text(text: str, default: str = "asan") -> str:
+    """Return the sanitizer family from a runner header or raw diagnostic."""
+    fields = sanitizer_run_header_fields(text)
+    sanitizer = fields.get("sanitizer", "").lower()
+    if sanitizer in SANITIZER_NAMES:
+        return sanitizer
+    header = re.search(
+        r"\bSANITIZER_RUN_HEADER:\s+[^\n]*\bsanitizer=([A-Za-z0-9_-]+)",
+        text,
+    )
+    if header and header.group(1).lower() in SANITIZER_NAMES:
+        return header.group(1).lower()
+    for name, pattern in _RAW_DIAGNOSTIC_PATTERNS:
+        if pattern.search(text):
+            return name
+    return default
+
+
+def recorded_sanitizer_options(text: str) -> str | None:
+    """The runtime options the recorded diagnostic was produced under.
+
+    The runner header carries them because they are part of how a crash was
+    found: allocator shaping such as `quarantine_size_mb=1` decides whether
+    some faults are detectable at all. ``None`` means an older diagnostic did
+    not record the field; ``""`` is an explicitly recorded empty option set.
+    Malformed, oversized, or environment-invalid values raise ``ValueError``.
+    """
+    fields = sanitizer_run_header_fields(text)
+    if "env_options_b64" not in fields:
+        return None
+    encoded = fields["env_options_b64"]
+    if len(encoded) > MAX_RECORDED_SANITIZER_OPTIONS_BYTES * 2:
+        raise ValueError("recorded sanitizer options are oversized")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        decoded = raw.decode("utf-8")
+    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
+        raise ValueError("recorded sanitizer options are malformed") from exc
+    if len(raw) > MAX_RECORDED_SANITIZER_OPTIONS_BYTES:
+        raise ValueError("recorded sanitizer options are oversized")
+    if "\0" in decoded:
+        raise ValueError("recorded sanitizer options contain NUL")
+    return decoded
+
+
+def sanitizer_fault_key(text: str) -> tuple[str, str] | None:
+    """Identify a sanitizer fault without depending on unstable stack frames."""
+    sanitizer = infer_sanitizer_from_text(text, default="")
+    if sanitizer == "asan":
+        kinds = _ASAN_FAULT_RE.findall(text)
+        if not kinds:
+            return None
+        kind = kinds[-1].lower()
+        if kind == "attempting":
+            if re.search(r"AddressSanitizer:\s+attempting double-free", text):
+                kind = "double-free"
+            elif re.search(
+                r"AddressSanitizer:\s+attempting free on address", text
+            ):
+                kind = "bad-free"
+        return sanitizer, kind
+    if sanitizer == "ubsan":
+        for name, pattern in _UBSAN_FAULT_PATTERNS:
+            if pattern.search(text):
+                return sanitizer, name
+        return None
+    if sanitizer == "msan":
+        if re.search(r"MemorySanitizer:\s+use-of-uninitialized-value", text):
+            return sanitizer, "use-of-uninitialized-value"
+        return None
+    if sanitizer == "tsan":
+        match = re.search(
+            r"(?:WARNING|SUMMARY):\s+ThreadSanitizer:\s+"
+            r"(data race|heap-use-after-free)\b",
+            text,
+            re.IGNORECASE,
+        )
+        return (sanitizer, match.group(1).lower().replace(" ", "-")) if match else None
+    if sanitizer == "race" and re.search(r"^WARNING: DATA RACE$", text, re.MULTILINE):
+        return sanitizer, "data-race"
+    return None
 
 
 def looks_like_shell_wrapper(path: Path) -> bool:
@@ -379,6 +536,33 @@ def find_primary_sanitizer(scan_dirs: Iterable[Path]) -> Optional[Path]:
             ):
                 matches.append(p)
     return sorted(matches, key=lambda p: p.name.casefold())[0] if matches else None
+
+
+def crash_evidence_dirs(crash_dir: Path) -> list[Path]:
+    """Where one crash keeps its own artifacts, most specific first."""
+    audit = Path(crash_dir) / ".audit"
+    return ([audit] if audit.is_dir() else []) + [Path(crash_dir)]
+
+
+def crash_sanitizer(crash_dir: Path) -> str:
+    """The sanitizer family a crash's recorded diagnostic came from."""
+    diagnostic = find_primary_sanitizer(crash_evidence_dirs(crash_dir))
+    if diagnostic is None:
+        return "asan"
+    try:
+        return infer_sanitizer_from_text(
+            diagnostic.read_text(encoding="utf-8", errors="replace")
+        )
+    except OSError:
+        return "asan"
+
+
+def crash_harness_binary(crash_dir: Path) -> Optional[Path]:
+    """The self-contained harness a crash carries, if it carries one."""
+    for candidate in sorted(Path(crash_dir).glob("harness*")):
+        if is_executable_binary(candidate):
+            return candidate
+    return None
 
 
 def find_testcase(scan_dirs: Iterable[Path], *, sanitizer_files: Iterable[Path] = (),

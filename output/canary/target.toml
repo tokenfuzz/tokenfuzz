@@ -4,7 +4,6 @@
 target        = "canary"
 upstream_url  = "synthetic — TokenFuzz benchmark calibration fixture"
 build_system  = "cmake"
-pinned_rev    = "norev"
 
 # Direct CLI binary — what `bin/run-asan generic` runs by default.
 asan_bin      = "build-asan/canary"

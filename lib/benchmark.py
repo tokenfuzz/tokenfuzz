@@ -5443,11 +5443,7 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
         return 1
     crash_dir = Path(args.crash_dir)
     target_root = Path(args.target_root)
-    scan_dirs = []
-    audit_dir = crash_dir / ".audit"
-    if audit_dir.is_dir():
-        scan_dirs.append(audit_dir)
-    scan_dirs.append(crash_dir)
+    scan_dirs = _ca.crash_evidence_dirs(crash_dir)
 
     diagnostic = _ca.find_primary_sanitizer(scan_dirs)
     text = ""
@@ -5456,55 +5452,58 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
             text = diagnostic.read_text(encoding="utf-8", errors="replace")
         except OSError:
             pass
-    match = re.search(r"sanitizer=([a-z]+)", text)
-    sanitizer = match.group(1) if match else "asan"
-    if sanitizer not in {"asan", "ubsan", "msan", "tsan", "race", "runner"}:
-        sanitizer = "asan"
+    sanitizer = _ca.infer_sanitizer_from_text(text)
 
-    harness_binary = ""
-    for candidate in sorted(crash_dir.glob("harness*")):
-        if _ca.is_executable_binary(candidate):
-            harness_binary = str(candidate)
-            break
+    harness = _ca.crash_harness_binary(crash_dir)
     testcase = _ca.find_testcase(
         scan_dirs,
         sanitizer_files=[diagnostic] if diagnostic else [],
     )
     harness_source = _ca.find_harness_source(scan_dirs, exclude=testcase)
 
-    config = {}
+    # Read the config the way bin/probe and the runners do. A hand-rolled read
+    # of the same file accepts spellings they do not, and would then replay a
+    # binary nothing else in the harness would have chosen.
+    config = None
     config_path = target_root / "target.toml"
     if args.target_slug:
         split_config = SCRIPT_ROOT / "output" / args.target_slug / "target.toml"
         if split_config.is_file():
             config_path = split_config
     if _tc is not None and config_path.is_file():
+        config = _tc.Config(target_root=str(target_root))
         try:
-            config = _tc.parse_toml(config_path)
+            _tc.load_toml_into(config, config_path)
         except Exception:
-            config = {}
-    sanitizer_table = config.get("sanitizer", {}) or {}
-    binary_relative = (
-        config.get(f"{sanitizer}_bin")
-        or sanitizer_table.get(f"{sanitizer}_bin")
-        or config.get("asan_bin")
-        or ""
-    )
+            config = None
+    binary_relative = ""
+    library_relative = ""
+    if config is not None:
+        binary_relative = config.sanitizer_bin(sanitizer) or config.asan_bin
+        library_relative = config.sanitizer_lib(sanitizer)
 
     target_binary = _resolve_build_path(target_root, binary_relative)
 
-    if harness_binary:
-        # bin/probe bakes the instrumented library's own directory in as an
-        # rpath when it links a harness, so a probe-built binary self-locates.
-        # A harness the agent compiled by hand has no rpath and only loads with
-        # that directory supplied, so it belongs in the replay contract.
-        library = _resolve_build_path(
-            target_root,
-            config.get("asan_lib") or sanitizer_table.get("asan_lib") or "",
+    if harness is not None:
+        # Replay a harness under the sanitizer it was built with: under the
+        # ASan wrapper a UBSan harness never gets UBSAN_OPTIONS, so
+        # halt_on_error is unset and a real crash exits 0, reading as clean.
+        #
+        # A shared instrumented library remains a runtime dependency. A static
+        # archive was already consumed when the saved harness was linked.
+        library = _resolve_build_path(target_root, library_relative)
+        library_dir = (
+            str(Path(library).parent)
+            if (
+                library
+                and _tc is not None
+                and _tc._is_shared_lib(Path(library).name)
+                and Path(library).is_file()
+            )
+            else ""
         )
-        library_dir = str(Path(library).parent) if library else ""
         print(
-            f"SAN=asan\nMODE=harness\nBIN={harness_binary}\n"
+            f"SAN={sanitizer}\nMODE=harness\nBIN={harness}\n"
             f"LIBDIR={library_dir}\nTESTCASE="
         )
         return 0

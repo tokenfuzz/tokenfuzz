@@ -4,7 +4,6 @@
 target        = "samples/sample-java"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (Java)"
 build_system  = "maven"
-pinned_rev    = "norev"
 
 is_browser    = "0"
 

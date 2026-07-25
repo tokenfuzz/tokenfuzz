@@ -75,9 +75,12 @@ What it does:
    (every non-`mach` project), running with no argument clones the
    recorded upstream URL at the recorded revision into a directory
    next to the script. Running with a path uses that checkout
-   instead, pinned to the recorded revision — if that revision cannot
-   be checked out the script stops with exit 3 rather than build a
-   different commit. **For Firefox/`mach` bundles**, the checkout path is
+   instead, checked out at the recorded revision — if that revision
+   cannot be checked out the script stops with exit 3 rather than build
+   a different commit. Local modifications in a checkout you pass are
+   preserved, so you can test an applied candidate patch; the recorded
+   revision fixes the commit, not the working tree.
+   **For Firefox/`mach` bundles**, the checkout path is
    mandatory — pass it explicitly, or set `REPRO_AUTO_CLONE=1` to
    `hg clone` the recorded upstream repository next to the script
    (very slow).

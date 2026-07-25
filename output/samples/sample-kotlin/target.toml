@@ -7,7 +7,6 @@
 target        = "samples/sample-kotlin"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (Kotlin)"
 build_system  = "kotlin"
-pinned_rev    = "norev"
 
 is_browser    = "0"
 

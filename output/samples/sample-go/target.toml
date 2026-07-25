@@ -4,7 +4,6 @@
 target        = "samples/sample-go"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (Go)"
 build_system  = "go"
-pinned_rev    = "norev"
 
 is_browser    = "0"
 

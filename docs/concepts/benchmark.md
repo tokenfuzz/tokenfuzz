@@ -396,11 +396,33 @@ clusters, and re-renders the evidence already on disk, and recomputes cell
 status — so a cell an older run marked incomplete over one pending artifact can
 recover. Provider-limited and failed cells stay excluded.
 
-It is additive, never destructive: a crash that was never bundled gets one,
-while existing and hand-edited reports are left alone. Any crash without a
-measured reproduction rate is re-run through the same wrapper the harness uses,
-so the rate is comparable across conditions; one that cannot be re-run keeps an
-unset `?` rather than a guess.
+It does not substitute the current target build for the one a cell executed.
+Each new cell records the content identity of the binaries and instrumented
+libraries a replay would run. A regeneration that cannot match that identity
+leaves the original crash evidence unchanged, marks finalization incomplete,
+and reports why. Changes to a sanitizer build the evidence never used do not
+block it. Older cells without a recorded identity can still be re-rendered,
+but target-build-dependent crash replay is skipped.
+
+It stays additive otherwise: a crash that was never bundled gets one, and
+existing and hand-edited reports are left alone, whether or not replay ran. A
+bundle rebuilds from source at the revision the run recorded — a run that
+recorded none says `norev` rather than name the checkout's current commit —
+but its build recipe is read from the target tree as it stands today, so a
+recipe edited since the run is reflected in the bundle.
+
+Any crash without a measured reproduction rate is re-run through the same
+wrapper the harness uses, under exactly the runtime options its diagnostic
+recorded, and only while the build artifacts that crash needs are still
+available. Otherwise the pool keeps an unset `?` rather than a guess;
+model-direct triage preserves unmeasured evidence as a finding rather than a
+confirmed crash. Each pooled crash is checked against its owning cell and only
+its own replay artifacts, so one changed binary does not cost unrelated
+crashes their rates. A rate counts only runs that reproduced the original
+fault — same sanitizer, primitive, faulting function, and normalized source
+path and line where both diagnostics name them — so a replay that crashes
+elsewhere is not a reproduction. Evidence whose own fault cannot be
+characterised claims no rate.
 
 ## How to make the result worth reading
 

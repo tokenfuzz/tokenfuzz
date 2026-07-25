@@ -4,7 +4,6 @@
 target        = "samples/sample-javascript"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (JavaScript/Node)"
 build_system  = "npm"
-pinned_rev    = "norev"
 
 is_browser    = "0"
 

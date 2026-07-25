@@ -4,7 +4,6 @@
 target        = "samples/sample-r"
 upstream_url  = "synthetic — TokenFuzz per-language benchmark (R)"
 build_system  = "rlang"
-pinned_rev    = "norev"
 
 is_browser    = "0"
 

@@ -126,8 +126,18 @@ for _preamble, _label in ((pre, "generic"), (
     assert_not_in('update -r "$REV" 2>/dev/null || true', _preamble,
                   f"emit_preamble ({_label}): a failed hg pin is not swallowed")
 # `.git` is a FILE in a git worktree, so -d skipped the pin entirely there.
-assert_in('if [ -e "$src/.git" ]; then', pre,
+assert_in('if [ -e "$src/.git" ] && git -C "$src" rev-parse', pre,
           "emit_preamble: a git worktree is still pinned")
+# The submodule update's exit status is not the test: a repo with none
+# succeeds trivially, and a partial failure can still leave every submodule
+# correct. What decides is the state afterwards.
+assert_in("submodule status --recursive", pre,
+          "emit_preamble: submodule state is verified after the update")
+# The message names what `submodule status` actually compares against — the
+# superproject's recorded commits — not $REV, which can be a "no revision
+# recorded" sentinel.
+assert_in("are not at the commit this tree records", pre,
+          "emit_preamble: a submodule off the recorded commit is fatal")
 bin_resolve = er.emit_bin_resolve("build-asan/bin/x$(id)")
 assert_in('san_bin="$build"/\'bin/x$(id)\'', bin_resolve,
           "emit_bin_resolve: build path shell-quoted")
@@ -709,6 +719,17 @@ assert_eq("race",
 assert_eq("asan",
           er.infer_sanitizer_from_text("ASAN_RUN_HEADER: sanitizer=asan runs=5 mode=generic testcase=x started=y\n"),
           "infer_sanitizer_from_text: ASAN_RUN_HEADER accepted")
+# A target's own output names sanitizers and prints "runtime error:" without
+# being a report from one; only a report line reclassifies a diagnostic.
+assert_eq("asan",
+          er.infer_sanitizer_from_text(
+              "checking MemorySanitizer support\nlua: runtime error: bad argument\n"
+              "==7==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"),
+          "infer_sanitizer_from_text: an ASan report outranks incidental text")
+assert_eq("race",
+          er.infer_sanitizer_from_text(
+              "WARNING: DATA RACE\npanic: runtime error: index out of range\n"),
+          "infer_sanitizer_from_text: a Go race that panics stays a race")
 assert_eq("allocator_may_return_null=1",
           er.decode_header_b64("YWxsb2NhdG9yX21heV9yZXR1cm5fbnVsbD0x"),
           "decode_header_b64: recorded env options decode")
