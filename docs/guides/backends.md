@@ -218,6 +218,8 @@ output.
 - Keep cross-run learned memory off unless cumulative learning is intentional;
   it is off by default.
 - Diagnose startup in `logs/index.log`, then use the named trimmed session log.
+- Expect quota pauses on long runs rather than treating them as failures — see
+  [The run paused, or the backend went unavailable](../reference/troubleshooting.md#the-run-paused-or-the-backend-went-unavailable).
 - Evaluate results through findings, crashes, and rejected indexes—not the
   style or length of the backend transcript.
 

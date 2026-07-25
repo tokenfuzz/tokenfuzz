@@ -100,6 +100,13 @@ The other ecosystems differ only in the `[runner]` fields:
 The same shape applies to `rlang` and `perl`; `bin/setup-target`
 writes a starter `[runner]` block for each.
 
+!!! tip "There is a worked example for every language here"
+    Rather than starting from the table, copy a config that is known to run.
+    The repository ships a configured synthetic target for each of these
+    ecosystems under `targets/samples/sample-*`, with its hand-authored
+    `target.toml` committed at `output/samples/sample-*/target.toml`. See
+    [Sample targets](../getting-started/sample-targets.md).
+
 A few ecosystem notes:
 
 - **Go** seeds findings-only `go run`. To use the runtime race
@@ -161,10 +168,14 @@ letters — so any comment syntax works: `//`, `#`, `;`, `--`,
 header fields (`TARGET:`, `HYPOTHESIS-ID:`, `CATEGORY:`, `MODE:`).
 The file extension picks the build/interpret path.
 
-The supported set is the registry in [`lib/languages.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/languages.py); run
-`python3 lib/languages.py list` for the authoritative table (one row per
-language, with its harness extensions and build systems). The harness
-extensions split into two buckets:
+For the authoritative table — one row per language, with its harness
+extensions and build systems — run:
+
+```bash
+python3 lib/languages.py list
+```
+
+The harness extensions split into two buckets:
 
 ```text
 # Compiled (cached binary):    .c .cc .cpp .cxx .C .go .kt .rs .swift
@@ -188,9 +199,10 @@ crash_patterns = [
 ]
 ```
 
-These patterns layer on top of the built-in language-agnostic
-markers (`Traceback`, `panic:`, `Exception in thread`, …) that
-[`lib/triage.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/triage.py) already recognises.
+These layer on top of the built-in language-agnostic markers
+(`Traceback`, `panic:`, `Exception in thread`, …) that triage already
+recognises — you only need `crash_patterns` for a banner specific to
+your project.
 
 ## `reproduce.sh` templates
 

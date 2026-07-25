@@ -1,12 +1,7 @@
 # Glossary
 
-One-line definitions for the vocabulary used throughout the
-harness, the docs, and the agent prompts. Terms are grouped by
-topic; within a group, they are listed alphabetically. The
-operator-facing groups come first; the
-[Harness internals](#harness-internals) section at the end covers
-vocabulary you only need when extending the harness or reading raw
-state.
+One-line definitions for the vocabulary used across the handbook,
+the reports, and the agent prompts.
 
 ## Audit lifecycle
 
@@ -155,76 +150,25 @@ registration (OpenAI's Trusted Access for Cyber, Anthropic's
 Cyber Verification Program) that reduces false-positive policy
 interruptions during authorised defensive research.
 
-## Harness internals
+## Work queue and state
 
-Vocabulary for the queue, structured state, and cost machinery.
-You only need these when extending the harness or reading raw
-state files directly.
+**Work card.** One unit of audit work — a source file paired with a
+strategy, a prior fix, or a peer-project fix. Agents claim cards from
+the ranked queue in `work-cards.jsonl`.
 
-### Work-card pipeline
+**Claim.** The lease an agent holds on a card while it works the
+hypothesis. Expires after 30 minutes so a killed agent does not
+strand its card.
 
-**Work card.** A single unit of audit work — one source file ×
-strategy, one prior fix, or one peer fix. Lives
-in `work-cards.jsonl` / `patch-cards.jsonl`.
-
-**Patch card.** A prior-fix work card (strategy S1), built by
-`bin/patch-cards` from the target's VCS history.
-
-**Companion card.** A second work card for the same file with a
-different strategy, emitted when a file fires more than one
-code-feature signal.
-
-**Ranker (`bin/rank-work`).** The deterministic scorer that
-walks the source tree, applies `CODE_PATTERNS`, structural and
-coverage signals, and emits the ranked queue.
-
-**Claim.** The lease an agent takes on a card when it adopts the
-card into a hypothesis. Recorded in `claims.jsonl`. Expires
-after 30 minutes by default.
-
-**Work surface.** The dedupe key the work queue uses to prevent
-duplicate claims. Surface-card cards key on `file:function`
-(file-scoped cards use `file:S<n>` where `n` is the strategy
-number). A separate diversity gate prevents two agents from
-sharing a subsystem at the same time.
-
-**Subsystem.** The first one to five path components of a source
-file (`parser/xml`, `crypto/aes`, …). Used for blocklisting,
-ownership, and work distribution. Depth is auto-picked at startup.
-
-**Dry streak.** Consecutive iterations on the same strategy with
-no confirmed result. Tracked per agent in
-`.agent_strategy_streak_<n>`.
-
-### State
-
-**`state/*.jsonl`.** Structured append-only records:
-`hypotheses.jsonl`, `claims.jsonl`, `runs.jsonl`, `notes.jsonl`.
+**Subsystem.** The leading path components of a source file
+(`parser/xml`, `crypto/aes`, …). Two agents are kept out of the same
+subsystem at once, so a run spreads across the tree.
 
 **Hypothesis.** A narrow, falsifiable claim about a specific
-`file:function:line` with a named input shape, guard gap, and
-expected diagnostic. The unit of agent work.
+`file:function:line` — the input shape that reaches it, the guard it
+should violate, and the diagnostic expected. The unit of agent work,
+recorded with its outcome in `state/hypotheses.jsonl`.
 
-**Status.** A hypothesis lifecycle marker: `PENDING`,
-`INVESTIGATING`, `NEEDS_TESTCASE`, `NEEDS_DEEPER_PROBE`,
-`ENV-BLOCKED`, `DISCARDED`, `CRASH-XXX`, `FIND-XXX`.
-
-### Cost levers
-
-See [Cost model](../concepts/cost-model.md) for full context.
-
-**Prompt cache.** Cached cross-agent prompt fragments built
-once per iteration into `.static-prompt-rules.md`.
-
-**Capping commands.** `bin/rg-safe`, `bin/peek`,
-`bin/show-patch`, `bin/scratch-search` — enforce per-call
-byte / line ceilings so agents cannot dump raw source into
-context.
-
-**ASan budget.** Per-agent per-iteration sanitizer-run budget
-(25 for browser agents, 60 for shell agents). Coverage-gate runs
-do not count against it.
-
-**Tried-inputs / hits log.** `tried-inputs-N.log` and
-`hits-N.log` — per-agent memory of testcase shapes and reached
-coverage edges, so the next session does not repeat them.
+**`state/*.jsonl`.** Append-only records of claims, hypotheses, probe
+runs, and notes. This — not the model transcript — is what a resumed
+run reads.

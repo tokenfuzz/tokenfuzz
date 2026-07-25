@@ -116,6 +116,7 @@ nav:
   - Getting started:
       - getting-started/index.md
       - Prerequisites: getting-started/prerequisites.md
+      - Sample targets: getting-started/sample-targets.md
       - Add a target: getting-started/add-a-target.md
       - First audit: getting-started/first-audit.md
   - Guides:

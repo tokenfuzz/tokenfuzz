@@ -45,9 +45,9 @@ the assigned card.
 ## How a strategy gets assigned to a card
 
 Strategy is not free-form. It is baked into the work card the agent
-receives. When the harness ranks a source file (in [`lib/workqueue.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/workqueue.py)),
-it matches **families of code features** — not project-specific types
-or filenames — and picks the strategy that fits:
+receives. When the harness ranks a source file it matches **families of
+code features** — not project-specific types or filenames — and picks
+the strategy that fits:
 
 | What the file looks like | Primary strategy | Why |
 | --- | --- | --- |
@@ -94,7 +94,8 @@ A card is skipped if it is:
 - already done or already claimed by another agent's hypothesis;
 - on the same active surface another agent owns;
 - incompatible with the agent's mode;
-- build-blocked (current build didn't compile its translation unit);
+- environment-blocked — an agent already proved this compilation unit
+  cannot be built or imported in the current environment;
 - in a subsystem already owned by another generic-mode agent —
   *unless* the current agent has confirmed a crash or finding there.
 
@@ -123,12 +124,11 @@ not complete a strategy.* S1 is held longer than the other
 strategies before rotation, since patch review often takes several
 iterations to bear fruit.
 
-When the streak crosses its threshold, the harness chooses the
-eligible strategy with the largest unclaimed card pool, preferring a
-strategy no other agent currently holds. Ties follow the deterministic
-S1 → S2 → … → S8 order. A safety valve also forces rotation on an
-agent that never produces enough evidence to clear the formal
-completion gate, so one stuck method cannot stall the run forever.
+When it does rotate, the agent moves to the method with the most
+unclaimed work that no other agent is currently running, so the fleet
+spreads across strategies instead of converging on one. An agent that
+never manages to produce evidence is rotated anyway, so a stuck method
+cannot stall the run.
 
 The rule of thumb: **rotate the method, not the subsystem.** A
 subsystem should not be abandoned merely because notes were

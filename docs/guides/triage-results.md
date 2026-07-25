@@ -33,13 +33,11 @@ directory while the report waits for content or a second review:
   not reach reject quorum. Cleared on the next accept; once quorum is
   reached the FIND moves to `findings-rejected/` rather than being deleted.
 
-The `.needs-content` marker surfaces as a `NEEDS CONTENT` value in the
-`Status` column of `findings/FINDING-CLUSTERS.html`; `.pending-drop` is
-an internal triage marker and is not shown in that column. Either
-address the underlying issue
-(add the report, sharpen the rationale) and rerun triage, or `touch
-.reviewed` (or `.keep`) in the FIND directory to pin the current
-state as-is.
+Either address the underlying issue (add the report, sharpen the
+rationale) and rerun triage, or `touch .reviewed` (or `.keep`) in the FIND
+directory to pin the current state as-is.
+[The finding Status column](#the-finding-status-column) shows how each
+marker appears in `findings/FINDING-CLUSTERS.html`.
 
 ## How the gates decide
 
@@ -87,12 +85,21 @@ Before filing a similar crash, check:
 <RESULTS_DIR>/crashes-rejected/REJECTED-CRASHES.html
 ```
 
-For findings, scan `<RESULTS_DIR>/findings/FINDING-CLUSTERS.html` and
-look at the `Status` column (`OK`, `NEEDS CONTENT`, or `NEEDS
-ATTENTION`). `NEEDS CONTENT` means no `report.md` yet; `NEEDS ATTENTION`
-is set by a `.needs-attention` marker the harness drops on a report that
-needs a closer human look. A separate `.pending-drop` marker (not shown
-in this column) means a review pass ended below reject quorum.
+### The finding Status column
+
+For findings, scan `<RESULTS_DIR>/findings/FINDING-CLUSTERS.html` and read
+the `Status` column:
+
+| Status | Meaning |
+| --- | --- |
+| `OK` | The FIND has a report and cleared the gates. |
+| `NEEDS CONTENT` | No `report.md` / `description.md` yet (`.needs-content`). |
+| `NEEDS REVIEW` | Scored `Needs review`: the report's issue class is too vague for a trustworthy CVSS vector. |
+| `NEEDS ATTENTION` | You (or another reviewer) dropped a `.needs-attention` file in the FIND directory. The harness only reads that marker; it never writes one. |
+| `OK (override)` | A `.reviewed` or `.keep` file pins the FIND past the gates. |
+
+`.pending-drop` — a review pass that ended below reject quorum — is an
+internal marker and does not appear in this column.
 
 ## What a strong crash looks like
 
@@ -240,29 +247,23 @@ Notes on the fields:
   duplicate detection.
 - The auto-Severity bullet (`- **Severity**: …`) is rewritten by
   `bin/severity` on every triage pass; hand-edits there are lost.
-- Severity is the **CVSS v4.0 score** — one industry-standard
-  metric, computed by the vendored FIRST reference scorer. The bullet
-  and the Fields-table `Severity` row carry the level plus the score
-  (`Medium (CVSS-BT 4.0: 5.5)`); the generated `## Severity rationale` section
-  shows the full vector and how each metric was derived from the
-  report's classification and Fields. The label suffix reflects which
-  metric groups are populated: `CVSS-BT` for this in-scope crash (base +
-  threat), and `CVSS-BTE` once an Environmental metric is set — for
-  example the `MAT:P` a contract concern adds.
-- The CVSS vector is derived mechanically: **AV/UI** from the surface
-  tier; **VC/VI/VA/SC/SI/SA** from the primitive class; **E** from
-  reproducer/exploit evidence; **CR/IR/AR** are left Not Defined (they
-  model a deployer's asset importance, not anything the scorer can derive,
-  so a generic score keeps the CVSS-B worst case); **MAT** and Environmental
-  modified impacts from caller-control, contract concerns, and non-shipping
-  reachability. **PR:N** is the worst-case default because the harness has
-  no auth signal. Review
-  those assumptions against the real deployment before filing an
-  advisory — each derivation line is a reviewable claim.
-- **Non-shipping code** (test/maintenance/internal harness) is represented
-  with Environmental modified impact metrics rather than a custom cap.
-- Cluster size has no CVSS v4.0 metric. It is reported as a verification
-  fact and used for triage priority separately.
+- Severity is a **CVSS v4.0 score**, computed offline by the vendored FIRST
+  reference scorer — no house metric. The label says which metric groups were
+  populated: `CVSS-BT` (base + threat) normally, `CVSS-BTE` once an
+  Environmental metric applies, such as the `MAT:P` a contract concern adds.
+- The vector is derived mechanically from the report's own fields:
+  attack vector and user interaction from the surface, the impact metrics from
+  the primitive class, exploit maturity from the reproducer evidence, and the
+  Environmental metrics from caller control, contract concerns, and whether the
+  code ships. Two deliberate worst-case defaults: privileges required is `PR:N`,
+  because the harness has no authentication signal, and the requirement metrics
+  (`CR/IR/AR`) stay Not Defined, because only a deployer knows what the asset is
+  worth.
+- The generated `## Severity rationale` section shows the full vector and the
+  reasoning line by line. **Check those lines against your real deployment
+  before filing an advisory** — each one is a claim you can disagree with.
+- Cluster size is not part of the score. It is reported separately, as a
+  verification fact and a triage-priority signal.
 
 ## Finding requirements
 

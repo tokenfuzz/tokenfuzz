@@ -47,14 +47,19 @@ cd tokenfuzz
 
 bash tests/run-tests.sh
 
+# A shipped synthetic target — configured already, nothing to clone.
+bin/audit --target samples/sample-python --backend <claude|codex|gemini|grok|oss> 1
+
+# Or your own project.
 bin/setup-target <target> <repo-url>
-bin/audit --target <target> --backend <claude|codex|gemini|grok|oss> 1
+bin/audit --target <target> --backend <backend> 1
 ```
 
 The final `1` runs one bounded iteration. Its purpose is to prove that target
 setup, the backend, state, and result directories work together—not to find a
-vulnerability. When the smoke test is healthy, omit the count for a continuous
-run:
+vulnerability. [Sample targets](getting-started/sample-targets.md) lists the
+sixteen ready-made targets that come with the repository. When the smoke test
+is healthy, omit the count for a continuous run:
 
 ```bash
 bin/audit --target <target> --backend <backend>
@@ -124,6 +129,7 @@ See [Audit lifecycle](concepts/audit-lifecycle.md) for the detailed flow and
 | Goal | Start here |
 | --- | --- |
 | Install TokenFuzz and run one safe iteration | [Getting started](getting-started/index.md) |
+| Try it immediately on a shipped target | [Sample targets](getting-started/sample-targets.md) |
 | Add or configure a target | [Add a target](getting-started/add-a-target.md) |
 | Choose a hosted or local model backend | [Backends and ensembling](guides/backends.md) |
 | Review findings and crash bundles | [Triage results](guides/triage-results.md) |

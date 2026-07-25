@@ -115,42 +115,26 @@ Treat a two-replicate, three-hour run as a layout and sanity check,
 not as a statistical claim. LLM runs are stochastic. For a result you would
 cite, use at least five replicates and more than one target.
 
-After timed investigation stops, each cell synchronously triages crashes and
-then drains the finding quality gate before metrics are harvested. This final
-triage is measurement, not additional finding time, so each phase gets its own
-`--finalize-wall` budget — a crash-heavy cell cannot starve finding validation.
-Pending artifacts are excluded or qualified individually: an unadjudicated
-finding does not enter the finding total, while a sanitizer-proved crash with
-an unfinished report remains in the crash total at Unknown severity. A pending
-artifact does not erase the rest of its replicate. A provider-limited run or
-failed post-processing still leaves the cell incomplete.
+When a cell's timed investigation stops, it triages its crashes and finishes
+validating its findings before metrics are read. That closing pass is
+measurement, not extra finding time, and it is budgeted separately
+(`--finalize-wall`) so a crash-heavy cell cannot starve finding validation.
 
-Genuinely incomplete cells remain excluded from medians and aggregate yield. Their
-confirmed on-disk yield is still shown as an observed count in the console and
-run ledger, so an interrupted productive cell is not mistaken for a zero-yield
-cell.
+Anything still unadjudicated is handled conservatively rather than guessed at:
+an unvalidated finding does not enter the finding total, while a crash with
+sanitizer proof but an unfinished report still counts, at Unknown severity. A
+cell that was cut short — provider limit, interruption, failed post-processing
+— is marked incomplete and kept out of the medians, but the evidence it did
+produce is still reported as an observed count, so an interrupted productive
+cell is never mistaken for a barren one.
 
-For validation, the configured benchmark target root is the product boundary.
-Root-level sample or fixture labeling therefore cannot make an entire benchmark
-target out of scope; ordinary non-shipping test, fuzz, example, benchmark, and
-demo code below that root remains subject to the same exclusion review. The
-validator also receives the target's configured `attacker_controls` from
-`target.toml`.
-
-Crash trigger review is skipped only when probe-authored evidence proves all
-of the following: `bin/probe --confirm` reproduced the sanitizer crash 5/5,
-the testcase and sanitizer binary still match their recorded identities, the
-ordinary target binary was invoked without a custom harness or extra argv, the
-first source-bearing fault frame belongs to the target tree, and the input
-class is included in `attacker_controls`. Missing or stale evidence falls back
-to the normal two-vote trigger review. Severity, clustering, bundling, and all
-finding validation remain unchanged.
-
-Model-direct crash evidence is additionally replayed through the configured
-target invocation before it enters cell metrics. A stable 5/5 standard replay
-receives the same trigger-review bypass; a clean or unexecutable replay is
-preserved as a finding, and a measured 0/5 diagnostic is never counted as a
-confirmed crash.
+Both conditions are held to the same evidence bar. The baseline's crashes are
+replayed through the target's normal invocation before they count, so a
+diagnostic that does not reproduce is not counted as a crash. On either side, a
+crash that `bin/probe --confirm` reproduced 5/5 through the ordinary target
+binary, faulting in the target's own code on an attacker-controlled input,
+skips the trigger review it would otherwise get — the evidence already answers
+the question that review asks. Everything weaker takes the normal review.
 
 ## Where results land
 
@@ -174,17 +158,11 @@ output/benchmark/
 CLI, so an archived run stays reproducible even if your global backend settings
 later change.
 
-The root `benchmark-result.html` is the cross-backend comparison. It appears
-after the first cell saves metrics and refreshes after each later cell. While a
-run is active, a **Provisional** banner marks the page: it shows finalized-cell
-counts and cell status, while unique counts and severity remain pending. A
-running cell contributes no counts until its own triage and validation finish.
-
-The full pooled comparison — sanitizer revalidation, bundling, clustering, and
-final rendering — is rebuilt only once, after the last cell; the live refresh in
-between is a cheap read of already-finalized cells. Evidence from a genuinely
-incomplete cell is labeled as observed and stays out of the medians and
-completed-cell totals, so it can never inflate the comparison.
+The root `benchmark-result.html` is the cross-backend comparison. You can open
+it while the run is going: it refreshes as cells finish, under a
+**Provisional** banner, and a cell contributes nothing until its own triage and
+validation are done. The full pooled comparison — revalidation, bundling,
+clustering — is computed once at the end.
 
 Each backend also has an append-only ledger,
 `output/benchmark/<backend>/benchmark-results.html`, with one section
@@ -196,10 +174,9 @@ Every pooled crash that survives triage is bundled under the run's
 `pool/crashes/` tree with a `REPORT.md`, rendered `REPORT.html`, and
 `reproduce.sh`.
 
-Benchmark audit cells are pinned to the canonical primary build and disable
-automatic sibling routing. This keeps backend and condition comparisons on one
-identical compiled surface; widened-build exploration remains an ordinary-audit
-feature rather than a benchmark variable.
+Every cell is pinned to the same primary build. Alternate ASan builds are an
+ordinary-audit feature, deliberately kept out of the benchmark so backends and
+conditions are compared on one identical compiled surface.
 
 To hand a finished run to someone else, `bin/export-benchmark` packages
 it into a self-contained, path-scrubbed archive (`--format zip|tar|dir`),
@@ -226,16 +203,11 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Unique accepted crashes` | Clustered crash directories with real sanitizer output on disk, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the crash cluster report. |
 | `Top crash severity` | Highest crash severity observed in the cell. |
 
-The same clusterers (`bin/cluster-findings` / `bin/cluster-crashes`) deduplicate
-both sides of the gate whenever the artifacts carry clustering evidence. A raw
-directory tally counts one root cause many times over, and a raw reject count
-set against a clustered accept count measures two different things.
-
-Two cases read as upper bounds rather than exact counts, both deliberately: a
-legacy ledger can hold rejection rows with no directory and so no evidence to
-cluster, and a clustering step that could not run reports the raw count. Both
-over-state rather than hide — a rejected result never silently disappears from
-the column.
+Accepted and rejected results go through the same deduplication, because a raw
+directory tally counts one root cause many times over and would not be
+comparable with a clustered one. Where duplicates could not be resolved the
+count is shown as `≤ N` — it over-states rather than hides, so a rejected
+result never quietly vanishes from the column.
 
 The count cells are links. They point into the condition-specific
 crash, finding, rejected-crash, rejected-finding, and cluster reports
@@ -251,14 +223,12 @@ faking precision. Accepted and rejected results are deduplicated separately, and
 a `≤` rejected count is a conservative upper bound — neither figure is
 *precision*, which needs the answer key described below.
 
-**Token usage** appears when the backend reports usage or the harness
-can estimate prompt size. The bold row per condition is the total to
-compare. Harness totals include model preflight, audit agents, and
-harness-owned decisions such as triage, cluster expansion, work reranking, and
-peer mapping. One-shot calls without provider telemetry are estimated and
-marked as such. Gemini through the Antigravity CLI may show estimated prompt
-tokens instead of measured usage; Gemini through `USE_GEMINI_CLI=1` can
-provide measured numbers.
+**Token usage** compares what each condition actually cost. The bold row per
+condition is the total, and the harness side includes everything it spends
+beyond the agents themselves — preflight, triage, validation, and its other
+model calls — so the comparison is not flattered by hiding overhead. Estimated
+figures are marked; Gemini through the Antigravity CLI reports no usage, so its
+numbers are estimates.
 
 **Bugs by severity** lists distinct crash clusters strongest first.
 The bug id links to the crash directory, and the reproducer link opens
@@ -277,12 +247,10 @@ there is no oracle for that, so a run's precision and recall — and the
 triage gate thresholds tuned to them — go unmeasured.
 
 The **canary** target closes that gap. It is a small synthetic
-record-processing program at `targets/canary/` — the one target tree
-committed to the repo (the rest of `targets/` is a gitignored working
-area). It carries a handful of distinct planted memory-safety bugs and a
-couple of deliberate false-positive traps (inputs that look dangerous to a
-reviewer but are not a memory-safety fault), enough to exercise detection,
-triage, clustering, and severity scoring end to end.
+record-processing program at `targets/canary/`, carrying three planted
+memory-safety bugs and two deliberate false-positive traps (inputs that look
+dangerous to a reviewer but are not a memory-safety fault) — enough to
+exercise detection, triage, clustering, and severity scoring end to end.
 
 The answer key is deliberately **not** in the target tree. It lives at
 `output/canary/.ground-truth.json`, outside the directory handed to the
@@ -292,6 +260,13 @@ The deterministic scorer reads it after the run. Each planted bug pins its
 sanitizer primitive and the stack frame it crashes in; each trap declares
 the benign outcome it expects. The canary is 100% synthetic, so the answer
 key discloses no real project's bug.
+
+The canary is not alone: fifteen per-language `samples/sample-*` targets are
+committed the same way, each with its own answer key, so the same measurement
+works for Rust, Go, Python, Java, and the rest. Everything else under
+`targets/` and `output/` is a gitignored working area. See
+[Sample targets](../getting-started/sample-targets.md) for the full list and
+the per-language caveats.
 
 `targets/canary/run-benchmark.sh` builds the ASan binary and runs a short
 benchmark (the canary is tiny, so one replicate and a small budget suffice):
@@ -319,6 +294,13 @@ A healthy canary run shows high recall *and* high precision: planted issues are
 confirmed and deliberate traps do not appear as accepted crashes. The direct
 baseline is measured by the same rule; the result, not an expected winner, is
 the point of the experiment.
+
+The oracle grades **crashes**, because a sanitizer artifact is the only
+attribution it can trust. Two consequences: a findings-only target is reported
+as `not_scored: findings-only` rather than as 0% recall, and a planted bug on a
+sanitizer target that can never crash (path traversal, command injection)
+carries `findings_only: true` in the manifest so it stays out of the
+crash-recall denominator.
 
 Score an existing results or pool tree directly:
 
@@ -387,10 +369,10 @@ run cleanly, so half-written artifacts are never folded into the
 result. `--replicates` is the desired total, so you can raise it during
 resume to add more cells.
 
-A mid-run account/session usage limit (any backend) no longer ends a cell: the
-harness pauses it until the backend's reset — that wait is excluded from the
-cell's productive budget and from the reported `Wall (h)` — and marks it
-provider-limited only if the backend has still not recovered after 6h.
+A usage limit hit mid-cell does not end it. The cell pauses until the backend's
+quota resets, and that wait counts against neither its budget nor its reported
+`Wall (h)`. Only a backend that is still down six hours later marks the cell
+provider-limited.
 
 ## Regenerating results after code changes
 
@@ -409,25 +391,16 @@ bin/benchmark --target <target> --backend codex --regenerate \
 bin/benchmark --regenerate
 ```
 
-`--regenerate` launches no agents and makes no API calls. It rebuilds
-the pool, re-runs severity scoring and crash/finding clustering,
-refreshes per-condition cluster reports, rewrites `report.json`, and
-updates `benchmark-result.{md,html}` plus the backend ledger row.
+`--regenerate` launches no agents and makes no API calls. It re-scores, re-
+clusters, and re-renders the evidence already on disk, and recomputes cell
+status — so a cell an older run marked incomplete over one pending artifact can
+recover. Provider-limited and failed cells stay excluded.
 
-It also recomputes cell status, so a cell an older run marked incomplete over a
-single pending artifact can recover; provider-limited and failed cells stay
-excluded.
-
-The reproducer-bundle pass is additive: a crash that was never bundled (a
-model-direct baseline) gets a bundle, while already-bundled and hand-edited
-crashes are left untouched. `--regenerate` never re-bundles or overwrites an
-existing report.
-
-Reproduction rate is measured the same way for every pooled crash, so
-the rate is comparable across conditions: any crash lacking a measured
-rate is re-run through the same multi-run wrapper the harness path uses,
-and a crash that can't be re-run keeps an unset (`?`) rate rather than a
-guessed one.
+It is additive, never destructive: a crash that was never bundled gets one,
+while existing and hand-edited reports are left alone. Any crash without a
+measured reproduction rate is re-run through the same wrapper the harness uses,
+so the rate is comparable across conditions; one that cannot be re-run keeps an
+unset `?` rather than a guess.
 
 ## How to make the result worth reading
 

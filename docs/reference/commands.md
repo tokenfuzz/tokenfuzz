@@ -37,9 +37,16 @@ Useful flags:
 The suggestion steps can also be rerun independently:
 
 ```bash
-bin/suggest-threat-model "$TARGET" --apply --force
-bin/suggest-peers "$TARGET" --apply --force
+bin/suggest-threat-model "$TARGET" --apply --force   # re-derive attacker_controls
+bin/suggest-peers "$TARGET" --apply --force          # re-derive [s6_peers]
+bin/suggest-runner "$TARGET" --apply --force         # derive a CLI's testcase argv
 ```
+
+All three take a target slug, ask the model once, and print the suggestion;
+`--apply` writes it into `output/<target>/target.toml` and `--force` overwrites
+an existing section. `bin/suggest-runner` reads a native sanitizer CLI's own
+`--help` output to work out how it accepts an input file, and proposes the
+matching `[runner]` invocation.
 
 See [Add a target](../getting-started/add-a-target.md) for the workflow and
 [Target config](target-toml.md) for field definitions.
@@ -51,21 +58,15 @@ bin/build-configs --target "$TARGET" --all --backend "$BACKEND"
 bin/build-configs --target "$TARGET" --config compact
 ```
 
-Native target setup and audit preflight run the first command automatically.
-Use it directly to inspect or retry one configuration. Alternate builds are
-cached ASan siblings; failure leaves the canonical `build-asan` control usable.
-Automatic audit preflight spends at most ten minutes total on alternates, then
-warns and starts on the primary. Run `bin/setup-target --build` or
-`bin/build-configs` explicitly when a larger target needs longer preparation.
-The backend is needed only for model-guided `widen = true`; declared flag
-configurations do not need it. Audit and setup preflight provide their selected
-backend automatically. Widening makes at most two proposals on that backend:
-an initial candidate, then one revision informed by harness validation or the
-failed build log. Each model call has a 600-second ceiling. It never switches
-backends implicitly.
-An unavailable result is cached for the same source, primary recipe, and model
-backend. After fixing a transient toolchain problem, retry explicitly with
-`--force`.
+Setup and audit preflight run this for you. Use it directly to inspect or retry
+one configuration. Alternate builds are cached ASan siblings — a failure never
+costs you the canonical `build-asan` control.
+
+Preflight gives alternates ten minutes and then starts the audit on the primary
+build, so a large target may need `bin/build-configs` run by hand up front. The
+`--backend` is used only for a model-guided `widen = true` row; configurations
+that declare their own `flags` do not need a model at all. After fixing a
+transient toolchain problem, retry with `--force` to bypass the cached failure.
 
 ## Run an audit
 
@@ -88,13 +89,17 @@ Common flags:
 | `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits. |
 | `--new-target <slug>` | Generate starter config and exit without starting an audit. |
 
+One audit at a time owns a result tree: a second run on the same target and
+backend exits with `another bin/audit instance is writing to …`. A lock left by
+a killed run is reclaimed automatically — there is nothing to clean up.
+
 Omitting `--backend`, or using `--backend all`, cycles installed hosted
 backends in `claude → codex → gemini → grok` order. Each writes its own result
 tree. Use an explicit backend and model in reproducibility notes.
 
-Cross-run learned memory is deliberately different from project instructions
-and TokenFuzz state. `AGENTS.md`, the prompt, and `state/*.jsonl` still apply
-when learned memory is off. Benchmarks always keep learned memory off.
+Turning off learned memory does not make an agent forgetful: the audit contract
+and the run's own structured state still apply. It only stops conclusions from
+one target's run leaking into the next. Benchmarks always keep it off.
 
 ### Container shell
 
@@ -124,23 +129,21 @@ JS, generic, harness, or language runner, writes diagnostic output beside the
 testcase, and records the verdict in `state/runs.jsonl`.
 
 - Use the ordinary command for exploration.
-- Use `--confirm` only after the first diagnostic; it performs the multi-run
-  reproduction check and can file a stable crash bundle.
+- Use `--confirm` after a first diagnostic: it re-runs the testcase five times
+  and can file a stable crash bundle.
 - Use `--dry-run` to inspect mode, sanitizer, output path, and resolved command
   without executing target code.
 - Use `--mode browser|js|generic|js-diff` only when automatic mode detection is
   wrong or the testcase deliberately requests differential execution.
 
-During an audit, TokenFuzz keeps at least one reproducer agent on the canonical
-build and rotates one minority slot across ready alternates. For a deliberate
-comparison, use `PROBE_BUILD_CONFIG=<name>`; use
-`PROBE_BUILD_CONFIG=primary` to force the regular build.
+Run `bin/probe --help` for the rest.
 
-After `--confirm` establishes an alternate-config crash, `bin/probe` performs a
-second five-run confirmation on the primary build. The crash report names the
-alternate and records whether the same sanitizer fault reproduced. A clean
-primary result is an environmental prerequisite for severity, not a reason to
-discard a bug in a supported optional feature.
+When a target has alternate ASan builds, most of the audit stays on the regular
+build and a minority slot explores the alternates. A crash confirmed on an
+alternate is automatically re-confirmed against the regular build, and the
+report records both results — a bug in a supported optional feature is still a
+bug, it just carries the build it needs. Use `PROBE_BUILD_CONFIG=<name>` (or
+`primary`) for a deliberate one-off comparison.
 
 Every testcase begins with native-comment headers:
 
@@ -148,7 +151,7 @@ Every testcase begins with native-comment headers:
 TARGET: path/to/file.c:Function:123
 HYPOTHESIS-ID: H1
 CATEGORY: bounds
-MODE: generic          # optional
+MODE: generic          # optional: auto|browser|js|generic|js-diff
 HARNESS: harness.c     # optional sibling API harness
 ```
 
@@ -201,13 +204,10 @@ with an ID for one full compact record. Run `bin/state --help` and
 `bin/state <subcommand> --help` for filters and state-mutating commands used by
 agents.
 
-Card discard is evidence-gated. It needs the configured floor, by default
-three card-linked CLEAN runs across two distinct hypothesis shapes that were
-actually probed. MISSED, NO_EXEC, CRASH, and DIFF runs do not count. A surface
-unavailable in the configured builds or modes exits through an ENV-BLOCKED
-hypothesis, which soft-blocks its card. A proven mode-incompatible, stale, or
-non-public card can instead be marked `blocked` with a precise note; MISSED
-alone is not proof of unreachability.
+An agent cannot retire a piece of work on an opinion: closing a card as
+uninteresting requires probe runs on disk that actually executed the code and
+came back clean. That is why `list-cards` can show cards still open after an
+agent has looked at them.
 
 ## Review results
 
@@ -269,11 +269,9 @@ bin/export-benchmark --target "$TARGET" --backend "$BACKEND" --format zip
 See [Benchmarking](../concepts/benchmark.md) for experiment design, resumption,
 and regeneration.
 
-## Internal entry points
+## Everything else in `bin/`
 
-Commands such as `bin/rank-work`, `bin/patch-cards`, `bin/peer-fix-cards`,
-`bin/run-asan`, `bin/run-sanitizer-multi`, `bin/triage-fuzz-crashes`, and
-`bin/render-md` are orchestration components. Normal audits invoke them for
-you. Their CLI remains available for development and diagnosis, but it is not a
-stable operator workflow; read the command source and tests before calling one
-directly.
+The rest of `bin/` is orchestration the audit runs for you: ranking, card
+building, sanitizer runners, report enrichment, validation, and rendering. They
+are not an operator workflow and their interfaces are not stable. If you need
+one for development or diagnosis, read the command source and its tests first.

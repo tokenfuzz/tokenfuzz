@@ -26,6 +26,10 @@ Pick something with:
 
 Get one target clean and finishing healthy runs before adding more.
 
+If you only want to see the harness work end to end, skip the hunt: the
+repository ships sixteen configured synthetic targets. See
+[Sample targets](sample-targets.md).
+
 ## 1. Sync the source
 
 Create or update the checkout and seed the config:
@@ -47,13 +51,13 @@ bin/setup-target samples/sample-python /path/to/local/source
 `samples/sample-python` creates `targets/samples/sample-python/` and
 `output/samples/sample-python/target.toml`.
 
-Three useful variants:
+Four useful variants:
 
 ```bash
 bin/setup-target <target>                                   # re-inspect existing checkout
 bin/setup-target <target> <repo-url> --ref <branch-or-rev>  # clone + pin to a revision
 bin/setup-target <target> --ref <branch-or-rev>             # switch the existing checkout
-bin/setup-target <target> /path/to/local/source            # use a local source directory
+bin/setup-target <target> /path/to/local/source             # use a local source directory
 ```
 
 Notes:
@@ -81,20 +85,12 @@ Notes:
 
 Build behavior depends on the target:
 
-- **Native C/C++ sanitizer targets.** On audit startup, TokenFuzz checks the
-  configured non-browser sanitizer trees. If one is missing or stale,
-  `bin/audit` calls `bin/setup-target --build` to converge and run a reusable
-  recipe under `targets/<target>/.audit/`. Failure is visible in the log but
-  fail-open: source analysis can continue while sanitizer-dependent work is
-  unavailable. The canonical `build-asan` remains the regular-configuration
-  control. A refresh always starts from an empty canonical build directory;
-  the previous tree is restored if the build fails. If an existing recipe
-  fails that clean build, setup gives the LLM at most three revised-recipe
-  attempts and installs a revision only after it builds successfully. Source
-  and recipe changes both invalidate the freshness stamp. By default, setup
-  also prepares one cached widened ASan sibling when
-  the project advertises compatible optional in-tree features. One minority
-  reproducer slot explores ready alternates while another stays on the control.
+- **Native C/C++ sanitizer targets.** Built for you. On audit startup,
+  TokenFuzz checks the configured non-browser sanitizer trees; if one is
+  missing or stale, `bin/audit` calls `bin/setup-target --build`, which
+  converges and runs a reusable recipe under `targets/<target>/.audit/`. The
+  details are in [What the auto-build guarantees](#what-the-auto-build-guarantees)
+  below.
 - **Rust, Go, Swift, Python, Node, PHP, Ruby, and other registered language
   builds.** Run `bin/setup-target <target> --build` when the runner depends on
   compiled code or installed packages. Audit preflight does not automatically
@@ -115,6 +111,25 @@ Build behavior depends on the target:
 For a native build, the generated `.audit/build.sh` (and
 `.audit/build-<san>.sh` for enabled secondary sanitizers) is also reused by
 `bin/export-repro` when it creates a maintainer bundle.
+
+### What the auto-build guarantees
+
+For ordinary native C/C++ targets, the build that audit preflight runs is not
+best-effort improvisation. It holds to five rules:
+
+- **Failure is loud but not fatal.** A failed build is visible in the log, and
+  source analysis continues while sanitizer-dependent work is unavailable.
+- **A refresh is always a clean build.** It starts from an empty canonical
+  build directory, and restores the previous tree if the build fails.
+- **A broken recipe is repaired, not trusted.** If the existing recipe fails
+  that clean build, setup gives the model at most three revised-recipe
+  attempts, and installs a revision only after it builds successfully.
+- **Freshness is content-based.** Source changes and recipe changes both
+  invalidate the stamp.
+- **`build-asan` stays the control.** By default setup also prepares one cached
+  widened ASan sibling when the project advertises compatible optional in-tree
+  features. One minority reproducer slot explores ready alternates while
+  another stays on the control.
 
 ### Building up front (optional)
 
@@ -153,9 +168,9 @@ container the suffix is empty.
 
 ### Writing the build recipe by hand
 
-`auto-build-script` is the supported path for ordinary native projects. If you
-need to override it—an exotic build system or required local patches—drop
-a shell script with the contract `argv = <src> <build>` at
+`bin/auto-build-script` is the supported path for ordinary native projects. If
+you need to override it — an exotic build system or required local patches —
+drop a shell script with the contract `argv = <src> <build>` at
 `targets/<target>/.audit/build.sh` and `bin/export-repro` will inline
 it the same way.
 
@@ -177,8 +192,7 @@ Then open the file and edit only:
 - target-specific `link_libs`;
 - `attacker_controls`, when the default input boundary is too narrow
   or too broad. Valid tokens are `bytes`, `call-sequence`, `timing`,
-  `race`, `env`, `protocol-state`, and `fs-state` (see
-  [`lib/target_config.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/target_config.py)).
+  `race`, `env`, `protocol-state`, and `fs-state`.
 
 For the review checklist, see
 [Configure a target](../guides/configure-target.md). For complete

@@ -20,7 +20,7 @@ different evidence:
 |---|---|---|
 | Evidence | a sanitizer **stack trace** | a written **report** (often no stack) |
 | Strategy | ClusterFuzz **stack-state bucketing** | **exact-match clustering** on `(class, file, line)` or crash state |
-| Owner | `bin/cluster-crashes` | `bin/cluster-findings` + [`lib/finding_dedup.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_dedup.py) + [`lib/finding_signature.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_signature.py) |
+| Command | `bin/cluster-crashes` | `bin/cluster-findings` |
 
 They are independent: nothing in the findings path can change crash
 bucketing, and vice versa.
@@ -31,27 +31,23 @@ bucketing, and vice versa.
 
 A crash always comes with a sanitizer stack trace, so crashes dedup the
 way ClusterFuzz does: by the **crash state** — the top few *interesting*
-stack frames, normalized.
-
-Owned by `bin/cluster-crashes`, reusing [`lib/stack_frames.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/stack_frames.py) and the
-upstream-derived [`lib/clusterfuzz_stacktrace.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/clusterfuzz_stacktrace.py).
+stack frames, normalized. `bin/cluster-crashes` does the work, reusing
+ClusterFuzz's own stack-parsing rules.
 
 ### How it works
 
 1. **Parse** the ASan/UBSan/MSan stack into frames (`#0 in func file:line`).
 2. **Drop noise frames** — libc, the sanitizer runtime, allocator
-   shims — via ClusterFuzz's ignore-regex list. What remains are the
-   *interesting* frames: the target's own code.
-3. **Normalize each function name** (`filter_function_name`): strip the
-   argument list, anonymous-namespace markers, and `[abi:...]` tags, so
+   shims. What remains are the *interesting* frames: the target's own code.
+3. **Normalize each function name**: strip the argument list,
+   anonymous-namespace markers, and ABI tags, so
    `Store::set_blob(unsigned int)` and `Store::set_blob` are one symbol.
-4. **Take the top three** interesting frames—the *crash state*. Two crashes
-   with the same crash state **and the same
-   sanitizer primitive** (e.g. `heap-buffer-overflow READ`) are the same
-   bug; identical stacks that report different primitives do not merge.
-5. **Bucket** crashes by that (primitive, crash state) pair. Near-identical
-   stacks that differ only in deep tail frames can still group through a
-   longest-common-subsequence comparison of the top frames.
+4. **Take the top three** interesting frames — the *crash state*. Two crashes
+   with the same crash state **and the same sanitizer primitive** (e.g.
+   `heap-buffer-overflow READ`) are the same bug; identical stacks reporting
+   different primitives do not merge.
+5. **Bucket** crashes by that (primitive, crash state) pair. Stacks that
+   differ only in deep tail frames can still group together.
 
 Crucially, the crash state **stops at allocation stacks** — the "freed
 by" / "previously allocated by" sections of a use-after-free report are
@@ -100,44 +96,33 @@ it is stable regardless of which member is most severe.
 
 ## Findings deduplication
 
-A finding is a *written report*, usually with **no stack trace** (especially
-source-analysis findings), so the crash strategy doesn't apply.
-`bin/cluster-findings` (engine in [`lib/finding_dedup.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_dedup.py)) reduces every
-finding to a small set of **signals parsed from its report alone**, then
-clusters by **exact equality** — no LLM call, no fuzzy matching, no similarity
-threshold.
+A finding is a *written report*, usually with **no stack trace**, so the crash
+strategy doesn't apply. `bin/cluster-findings` reduces every finding to a small
+set of signals parsed from its report alone, then clusters by **exact
+equality** — no LLM call, no fuzzy matching, no similarity threshold.
 
-### One identity, every source
-
-Identity is a pure function of the report, computed in **one place**
-(`bin/cluster-findings`). It does not depend on *how* the finding was produced,
-so a harness-agent finding and a model-direct (bare-prompt baseline) finding
-are both keyed the same way and land in the same identity space. There is no
-per-source path and no pre-filing location dedup — two agents' re-discovery of
-the same bug collapses here, at cluster time, like any other duplicate.
+Identity comes from the report and nothing else, so a finding an agent filed
+and a finding the bare-prompt baseline filed are keyed the same way. Two agents
+rediscovering the same bug collapse here, at cluster time, like any other
+duplicate.
 
 ### The two merge signals
 
 Two findings merge if they share **either** of:
 
 - **`(class, file, line)`** — the same normalized issue class at the same
-  source line. Deterministic, no LLM.
-- **crash state** — the same ClusterFuzz-normalized top stack frames, on the
-  minority of findings that embed a sanitizer stack (reused from
-  [`lib/stack_frames.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/stack_frames.py)).
+  source line;
+- **crash state** — the same normalized top stack frames, for the minority of
+  findings that embed a sanitizer stack.
 
-A [**union-find**](https://en.wikipedia.org/wiki/Disjoint-set_data_structure)
-over those edges produces one cluster per root cause; the signals compose, so
-if A and B share a site and B and C share a crash state, all three land in one
-cluster. The canonical member is chosen by **evidence first, then severity,
-then id**: a finding backed by a proven exploit or reproducer outranks an
-unproven one *even if the unproven one scores higher* — so a proven Low can be
-canonical over an unproven Critical. Severity breaks ties among equally-proven
-members, and lowest lexicographic id breaks the rest.
+The signals compose: if A and B share a site and B and C share a crash state,
+all three land in one cluster. The canonical member is chosen by **evidence
+first, then severity, then id** — a finding backed by a proven reproducer
+outranks an unproven one *even if the unproven one scores higher*, so a proven
+Low can be canonical over an unproven Critical.
 
-That is the whole algorithm: union on exact equality of either signal. No
-similarity threshold, no *O(N²)* scan, no cap on distinct root causes — order
--independent and recomputable from stored evidence.
+That is the whole algorithm. No similarity threshold, no cap on distinct root
+causes, and the same input always produces the same clusters.
 
 ### Why the class is normalized first
 
@@ -146,13 +131,12 @@ an integer overflow that leads to an out-of-bounds write is filed by one
 reviewer as `integer-overflow` and by another as `memory-safety`. Left raw,
 that disagreement would split a true duplicate at one line into two clusters.
 
-So [`lib/finding_signature.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/lib/finding_signature.py) **normalizes the class before it
-becomes part of the key.** A small canonical vocabulary
-(`memory-safety`, `auth`, `injection`, `info-disclosure`, `crypto`, `race`,
-`dos`, `logic`, …) absorbs label drift, and one broad structural rule does the
-heavy lifting: **any `*overflow*` label folds into `memory-safety`** — the
-mechanism collapses into its consequence, so the two reviewers' labels agree
-and their findings merge.
+So the class is **normalized before it becomes part of the key.** A small
+canonical vocabulary (`memory-safety`, `auth`, `injection`, `info-disclosure`,
+`crypto`, `race`, `dos`, `logic`, …) absorbs label drift, and one broad rule
+does the heavy lifting: **any `*overflow*` label folds into `memory-safety`**.
+The mechanism collapses into its consequence, so the two reviewers' labels
+agree and their findings merge.
 
 ### Why location merges by line, never by function
 
@@ -214,9 +198,6 @@ is never a merge edge.
   FIND-z  class=config   (no file/line, no stack)
 → nothing to key on but the title → a singleton, never force-merged.
 ```
-
-These cases are pinned in [`tests/test_finding_dedup_py.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/test_finding_dedup_py.py) and
-[`tests/test_cluster_findings.py`](https://github.com/tokenfuzz/tokenfuzz/blob/main/tests/test_cluster_findings.py).
 
 ### Output
 

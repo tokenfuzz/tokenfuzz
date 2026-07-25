@@ -158,7 +158,7 @@ output/<target>/<backend>/results/
   findings/                    concrete security issues (with or without repro)
   findings-rejected/           findings the substance gate rejected (quorum)
   corpus/                      saved seeds with metadata
-  state/                       claims, hypotheses, notes, runs, build features
+  state/                       claims, hypotheses, notes, runs, events
   work-cards.jsonl             the ranked queue
   patch-cards.jsonl            prior-fix work cards (strategy S1)
   s6-peer-cards.jsonl          peer-project fix cards (strategy S6)

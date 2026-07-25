@@ -61,52 +61,41 @@ A typical "look at this function" turn stays under a few KiB of new
 context. Agents that bypass the wrappers get the same output ceiling
 applied automatically.
 
-The same principle applies to probe output. `bin/probe` caps
-oversized sanitizer logs before classification, keeping the head and
-tail where the actual sanitizer summary lives. Operators can override
-the cap for trusted local reruns; the default protects the
-conversation from pulling multi-megabyte logs into context.
+The same principle applies to probe output: `bin/probe` truncates an
+oversized sanitizer log before classification, keeping the head and
+tail where the summary lives, so a multi-megabyte log never lands in
+the conversation.
 
 ## Structured state over transcripts
 
-Tailing raw state files is expensive — each row is multi-KB JSON.
-The state views the agent and operator both use emit pipe-delimited
-slim rows.
-
-Representative ratio from a real run: 40 raw state rows returned 26
-KB; the equivalent slim view was about 3 KB.
+Agents and operators read the run through compact state views rather
+than raw JSON rows — roughly a tenth of the bytes for the same
+information. Nothing rereads a transcript to work out what happened.
 
 ## Session seeds across compaction
 
-After each completed agent launch, the harness extracts a small seed from
-the structured transcript. The seed records source searches, file ranges,
-and testcase paths already used. The next iteration combines it with
-`bin/state resume --agent <n>` and tells the agent not to repeat those reads.
-
-Net effect: an agent that has been compacted does not pay for
-re-reading the last iteration's source after a fresh launch or compaction.
+When a backend compacts the conversation, or a fresh agent launches,
+the harness hands it a short seed of the source ranges and testcases
+the last iteration already covered, and tells it not to re-read them.
+An interrupted agent does not pay twice for the same source.
 
 ## Per-agent sanitizer budget
 
-Each agent has a per-iteration budget of actual sanitizer launches.
-The defaults are **25 for browser-mode agents** and **60 for shell-mode
-agents**.
+Each agent gets a per-iteration budget of real sanitizer launches:
+**60 for shell agents** and **25 for browser agents**. Coverage-gate
+dry runs do not count. When the budget runs out the agent is told to
+wrap up its current hypothesis; in-flight work is not killed.
 
-- Coverage-gate dry-runs (browser/JS only) do not count.
-- When the budget is exhausted, the harness warns the agent and
-  directs it to wrap up the active hypothesis. The enforcement is
-  soft — in-flight work is not killed mid-turn.
+This bounds one agent's spend. Without it, an agent in a tight retry
+loop can burn an evening and produce nothing. To cap the *whole*
+continuous run instead, set `AUDIT_WALL_BUDGET_SECS` — the loop stops
+launching iterations once that budget is spent, which is how you leave
+an overnight audit running with a hard stop.
 
-This is the lever that bounds a single agent's spend. Without it, one
-agent in a tight retry loop can burn an evening of wall-clock time
-and produce nothing. To cap the *whole* continuous run instead of each
-agent, set `AUDIT_WALL_BUDGET_SECS`: the loop stops launching new
-iterations once that wall-clock budget is spent, which is the simplest
-way to leave an overnight audit running with a hard stop.
-
-Long backend sessions also have an automatic command-count guard. The
-watcher ends an oversized session cleanly so the next iteration can resume
-from structured state instead of carrying hundreds of tool calls forward.
+A long backend session is also checkpointed once it has run a few dozen
+commands, and continued with fresh context. Carrying hundreds of tool
+calls forward costs more every turn and buys nothing that structured
+state does not already hold.
 
 ## Coverage gate before sanitizer (browser/JS only)
 
@@ -128,19 +117,19 @@ indexes, not from a coverage pre-check.
 Two agents probing the same source file with the same strategy is
 wasted work.
 
-- Card claims expire on a timer, so a wedged
-  agent does not poison the queue for an entire shift.
+- Card claims expire after 30 minutes, so a wedged agent does not
+  poison the queue for an entire shift.
 - A diversity gate also blocks two agents from sharing a subsystem at
   the same time.
 - See
   [Strategy model](strategy-model.md#how-a-card-gets-to-an-agent)
   for the full exclusion rules.
 
-Build-feature gating prevents a different kind of duplicate spend.
-When the sanitizer build compiles a translation unit as a stub, the
-queue marks its cards `blocked` in this result set. Future agents
-don't rediscover the same "not in this build" wall until the
-operator rebuilds or starts a fresh run.
+A second kind of duplicate spend is the unbuildable surface. Once an
+agent proves that a file cannot be built or imported in this
+environment, its card and the neighbouring cards on the same
+compilation unit are marked blocked, so later agents do not rediscover
+the same wall. A fresh run with a fixed toolchain re-evaluates them.
 
 ## Rejected indexes prevent refiling
 
@@ -151,27 +140,20 @@ does not cost a triage round on Tuesday and Wednesday too.
 
 ## What to monitor
 
-The harness records each iteration's usage in the structured session
-index (`logs/index.jsonl`). Backends report usage differently — Claude
-and Codex emit real token counts, while the `gemini` backend (`agy`)
-surfaces no usage telemetry, so its token counts are **estimated** from
-the prompt bytes and transcript length (roughly 4 characters per token)
-and flagged `estimated: true` rather than measured. Treat those rows as
-approximate, not exact.
+Each iteration's usage is recorded in `logs/index.jsonl`, one row per
+agent launch with a `tokens` object. Two numbers tell you most of what
+you need:
 
-The numbers to watch in `logs/index.jsonl`:
+- **`tokens.cached_input`** should be roughly stable per iteration.
+  Rising without more output means an agent is pulling logs or source
+  dumps into context.
+- **`tokens.output` against testcases written.** Lots of output and few
+  testcases is the "model wrote an essay" smell.
 
-- **`tokens.cache_read` per iteration.** Should be stable. Rising
-  without growing output means the agent is dumping logs into
-  context.
-- **`tokens.output` vs. testcases written.** High output with no
-  testcases is a "model wrote a lot of prose" smell.
-- **Sanitizer runs vs. budget.** Chronic budget exhaustion suggests
-  the agent is stuck in a guard chain (see
-  [Strategy model](strategy-model.md#strategy-rotation)).
-- **Claims released vs. claims taken.** A high ratio means agents
-  adopt cards but do not finish hypotheses. The work-card surface
-  keeps expiring.
+Backends report differently: Claude and Codex emit real counts, while
+Gemini through the Antigravity CLI publishes no usage telemetry, so its
+rows are estimated from prompt and transcript size and flagged
+`estimated: true`. Treat those as approximate.
 
 For ensembling, compare these numbers across backends. A backend
 that produces the same evidence with half the cached input tokens

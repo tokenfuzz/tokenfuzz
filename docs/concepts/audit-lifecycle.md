@@ -68,13 +68,11 @@ builds run explicitly through `bin/setup-target <target> --build`. After the
 required build exists, refresh the generated config and review only unresolved
 or incorrect values.
 
-For ordinary native targets, the regular `build-asan` stays the control while a
-cached widened ASan sibling spends a minority of the audit's effort on
-compatible optional in-tree features. A crash found on the widened build is
-replayed on the primary and triaged there, so broader configuration coverage
-never erases a bug specific to the project's regular build. Preflight caps this
-extra build work at ten minutes and falls open to the primary; set
-`build_widening = false` in `target.toml` to turn it off.
+For ordinary native targets the regular `build-asan` stays the control, while a
+second build with the project's optional features turned on takes a minority of
+the audit's effort — a bug behind a non-default feature is still a bug. A crash
+found there is replayed against the regular build and triaged with both
+results. Set `build_widening = false` in `target.toml` to skip it.
 
 ## 3. Run the audit
 
@@ -165,11 +163,10 @@ concern noted. The scorer represents that local precondition with
 CVSS-BTE Environmental **MAT:P**, because the threat-model fit is a
 scoring question, not a filing question.
 
-Crash class, artifact completeness, harness ownership, and contract fields are
-checked deterministically. A final source-reading trigger-provenance gate is
-recall-safe: it needs two independent Reject votes with concrete disproof to
-remove a sanitizer-confirmed crash. An unavailable or inconclusive reviewer
-keeps the crash.
+Those checks are mechanical. On top of them, a reviewer reads the source and can
+still throw out a sanitizer-confirmed crash — but only on two independent
+rejections that each carry a concrete disproof. Silence or uncertainty keeps
+the crash.
 
 **For findings, the gates are about substance:**
 
@@ -178,13 +175,12 @@ keeps the crash.
   class, and a rationale a reviewer can act on. A sanitizer
   reproducer is *not* required.
 
-Because no sanitizer vouches for a finding, an independent LLM
-substance gate reads each report with no shared context and votes it
-accept or reject. Two accepts promote the finding; two rejects
-quarantine it to `findings-rejected/`. An accepted finding then gets
-one source-reading trigger-provenance review
-(`bin/validate-finding --gate trigger`) that can demote it only with a
-concrete disproof.
+Because no sanitizer vouches for a finding, each report is read
+independently — with none of the filing agent's context — and voted
+accept or reject. Two accepts promote it; two rejects move it to
+`findings-rejected/`. A promoted finding then gets one more
+source-reading review that can demote it, and only with a concrete
+disproof.
 
 What happens to each artifact:
 

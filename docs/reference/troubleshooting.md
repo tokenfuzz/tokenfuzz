@@ -155,6 +155,36 @@ wedges or is killed, the run self-heals: work-card claims expire on
 a timer, so the next iteration reclaims its card and resumes from
 structured state. You do not need to clean anything up by hand.
 
+## The run paused, or the backend went unavailable
+
+A hosted account or session usage limit does not end a run. `bin/audit` pauses
+and retries, and `logs/index.log` says so:
+
+```text
+Provider capacity limited; pausing 1800s before retry
+```
+
+What to expect:
+
+- The pause lasts until the provider's reported reset time, or 30 minutes if
+  the backend reports none. Waiting is capped at six hours.
+- Paused time does **not** count against `AUDIT_WALL_BUDGET_SECS`, so a quota
+  pause never eats an overnight budget.
+- Transient (non-quota) failures are retried separately with backoff.
+
+If the backend never comes back, the run exits with status `2` after logging
+`BACKEND_UNAVAILABLE`. In ensemble mode (`--backend all`) the exhausted backend
+is dropped from the rotation and the others keep working.
+
+Nothing needs cleaning up. Rerunning the same command resumes from the run's
+saved state.
+
+A continuous run can also stop on its own without any provider problem. If
+`index.log` ends with `STALL_STOP`, ten iterations in a row produced nothing
+and no hypothesis was left open — the run decided it was done rather than
+burning budget. Raise `MAX_DRY_SESSIONS` if you expect the target to be that
+slow, or take it as a signal to revisit the threat model and work queue.
+
 ## Backend CLI fails
 
 Check:

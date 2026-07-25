@@ -87,20 +87,14 @@ The paths an operator inspects after a run:
 | `crashes-rejected/` | Rejected crash artifacts and `REJECTED-CRASHES.html` / `REJECTED-CRASHES.md`. |
 | `findings/` | All security findings — any class, with or without a reproducer. See note below. |
 | `findings-rejected/` | FIND directories rejected by the LLM substance gate at quorum. |
-| `corpus/` | Clean HIT inputs that contributed new coverage, promoted after each iteration for reuse by the ranker. Inputs are deduplicated by content, so agents may safely reuse names such as `testcase.js`. |
+| `corpus/` | Inputs that reached new coverage, saved after each iteration for reuse as seeds. Deduplicated by content. |
 | `scratch-N/` | Active testcase work for agent `N`. |
 | `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`, and `SESSION_STARTED` values read by `bin/probe`. |
 
-The result tree also holds the queue files, structured state, and
-per-agent hit/tried-input logs the harness reads and writes itself.
-You rarely need to open these directly; the two worth knowing are:
-
-- `state/runs.jsonl` — one row per `bin/probe` invocation. `wc -l` on
-  it is the fastest "did anything actually run?" check.
-Everything else (`work-cards.jsonl`, `patch-cards.jsonl`, the other
-`state/*.jsonl` streams, per-agent `hits-N.log` / `tried-inputs-N.log`,
-`.static-prompt-rules.md`, and the `.*.jsonl.lock` files that serialise
-concurrent writers) is harness internals.
+The tree also holds the work queue and structured state the harness
+manages itself. One file is worth knowing: `state/runs.jsonl` has one
+row per `bin/probe` invocation, so `wc -l` on it answers "did anything
+actually run?". The rest is internal bookkeeping.
 
 FIND directories without a report get a `.needs-content` marker and
 surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. A gate pass with
@@ -127,9 +121,10 @@ CRASH-001-1/
 ```
 
 A crash that triage has accepted but not finished promoting carries a
-`.promotion_pending` marker, which clears once the export bundle below is
-complete. A directory that stays incomplete past the configured TTL is moved to
-`crashes-rejected/` with the missing artifacts named in its rejection report.
+`.promotion_pending` marker naming what is still missing. It clears once the
+export bundle below is complete. A directory still missing the same artifacts
+after ten triage passes is moved to `crashes-rejected/`, with those artifacts
+named in its rejection report.
 
 Pending promotion is resumable work. `bin/state resume --agent N` presents an
 unfinished bundle before active hypotheses or new work cards. Its sanitizer

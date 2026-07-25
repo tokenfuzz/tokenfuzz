@@ -11,9 +11,9 @@ runtimes.
 
 The harness supplies the parts a long audit needs beyond a prompt:
 
-- **Source-to-testcase investigation.** Deterministic
-  ranking create a shared work queue; eight review strategies guide deeper
-  analysis without requiring a known bug or crashing seed.
+- **Source-to-testcase investigation.** Deterministic ranking builds a shared
+  work queue; eight review strategies guide deeper analysis without requiring
+  a known bug or crashing seed.
 - **Evidence-gated results.** Testcases run through one probe contract.
   Sanitizer diagnostics are confirmed before promotion, while concrete
   non-crashing security issues remain first-class findings.
