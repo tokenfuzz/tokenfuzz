@@ -7,6 +7,7 @@ import concurrent.futures
 import inspect
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -46,16 +47,22 @@ class BenchmarkReverifyTests(unittest.TestCase):
         behavior: str = "crash",
         *,
         binary: str = "build-asan/src/stub",
+        library: str = "",
         config_in_output: bool = False,
         slug: str | None = None,
     ) -> tuple[Path, str]:
         target = self.root / name
         target.mkdir()
         slug = slug or name
+        if library:
+            instrumented = target / library
+            instrumented.parent.mkdir(parents=True, exist_ok=True)
+            instrumented.write_bytes(b"!<arch>\n")
         config = (
             f'target = "{slug}"\n'
             f'asan_bin = "{binary}"\n'
-            "[sanitizer]\n"
+            + (f'asan_lib = "{library}"\n' if library else "")
+            + "[sanitizer]\n"
             'enabled = ["asan"]\n'
         )
         if config_in_output:
@@ -114,6 +121,42 @@ class BenchmarkReverifyTests(unittest.TestCase):
         (crash / "sanitizer.txt").write_text(DIAGNOSTIC + footer, encoding="utf-8")
         (crash / "poc.bin").write_bytes(b"sample-bytes\n")
         return crash
+
+    def make_harness_crash(self, name: str) -> Path:
+        """A crash whose evidence is a harness binary the agent compiled.
+
+        Copied from a real executable because the replay contract identifies a
+        harness by asking `file` what it is, not by name.
+        """
+        crash = self.make_crash(name)
+        (crash / "poc.bin").unlink()
+        shutil.copy2(sys.executable, crash / "harness")
+        return crash
+
+    def replay_environment(self, crash: Path, target: Path, slug: str) -> dict[str, str]:
+        """Env handed to the replay, with run-sanitizer-multi stubbed out.
+
+        Only the sanitizer runner is stubbed: resolving the replay contract
+        stays real, so this measures what the contract actually produced.
+        """
+        captured: dict[str, str] = {}
+        real_run = benchmark_runner.subprocess.run
+
+        def fake_run(command, **kwargs):
+            if "run-sanitizer-multi" not in str(command[0]):
+                return real_run(command, **kwargs)
+            environment = kwargs.get("env") or {}
+            captured.update(environment)
+            Path(environment["SAN_OUTPUT_FILE"]).write_text(
+                f"CRASH_RATE: 5/5\n[run-sanitizer-multi] SUCCESS_RATE: 0/5\n{DIAGNOSTIC}",
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}), \
+                mock.patch.object(benchmark_runner.subprocess, "run", fake_run):
+            self.assertTrue(benchmark_runner.reverify_one_crash(crash, target, slug))
+        return captured
 
     @staticmethod
     def reverify(pool: Path, target: Path, slug: str) -> int:
@@ -239,6 +282,56 @@ class BenchmarkReverifyTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}):
             self.assertEqual(self.reverify(unsafe_crash.parent.parent, unsafe_target, unsafe_slug), 0)
         self.assertEqual((unsafe_crash / "sanitizer.txt").read_bytes(), before)
+
+    def test_a_hand_compiled_harness_replay_gets_the_library_directory(self) -> None:
+        # bin/probe bakes this directory in as an rpath; a harness the agent
+        # compiled by hand has none, so without it the replay dies in the
+        # loader and a reproducing crash is demoted.
+        target, slug = self.make_target(
+            "harness-target", "missing", library="build-asan/lib/libthing.a",
+        )
+        captured = self.replay_environment(
+            self.make_harness_crash("harness-pool"), target, slug,
+        )
+        expected = str(target / "build-asan" / "lib")
+        for variable in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+            self.assertIn(expected, captured.get(variable, "").split(os.pathsep))
+
+    def test_a_configured_target_replay_keeps_its_own_loader_path(self) -> None:
+        # The configured binary is launched the way the target itself is.
+        # Overriding its loader path could resolve a different library than a
+        # normal run would and turn a clean replay into a counted crash.
+        target, slug = self.make_target(
+            "cli-target", library="build-asan/lib/libthing.a",
+        )
+        captured = self.replay_environment(
+            self.make_crash("cli-pool"), target, slug,
+        )
+        for variable in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+            self.assertEqual(
+                captured.get(variable, ""), os.environ.get(variable, ""),
+            )
+
+    def test_an_unmeasurable_replay_keeps_its_output_for_diagnosis(self) -> None:
+        target, slug = self.make_target("silent-target", "missing")
+        crash = self.make_harness_crash("silent-pool")
+        real_run = benchmark_runner.subprocess.run
+
+        def fake_run(command, **kwargs):
+            if "run-sanitizer-multi" not in str(command[0]):
+                return real_run(command, **kwargs)
+            Path((kwargs.get("env") or {})["SAN_OUTPUT_FILE"]).write_text(
+                "dyld: Library not loaded: @rpath/libthing.dylib\n", encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}), \
+                mock.patch.object(benchmark_runner.subprocess, "run", fake_run):
+            self.assertFalse(benchmark_runner.reverify_one_crash(crash, target, slug))
+        self.assertIn(
+            "Library not loaded",
+            (crash / ".audit" / "reverify.log").read_text(encoding="utf-8"),
+        )
 
     def test_pool_rebuild_requires_a_measured_canonical_report(self) -> None:
         source = inspect.getsource(benchmark_runner.rebuild_pool)

@@ -195,6 +195,16 @@ def benchmark_target_config(
     return config
 
 
+# Why a direct-condition crash lost its promotion. "unmeasured" is distinct
+# from "no-contract" because the replay did launch: the missing measurement
+# points at the run, not at the crash's evidence.
+_REPLAY_DEMOTION_REASONS = {
+    "clean": "sanitizer evidence did not reproduce through the configured target invocation",
+    "unmeasured": "configured-target replay produced no measurement of the original fault (see .audit/reverify.log)",
+    "no-contract": "sanitizer evidence has no executable configured-target replay contract",
+}
+
+
 def triage_cell_crashes(
     results: Path, target: Path, target_slug: str, *, workers: int = 4,
     deadline: float | None = None,
@@ -229,7 +239,7 @@ def triage_cell_crashes(
                 try:
                     replay_results[crash_dir] = futures[crash_dir].result()
                 except (OSError, subprocess.SubprocessError, ValueError):
-                    replay_results[crash_dir] = "unverifiable"
+                    replay_results[crash_dir] = "no-contract"
         for crash_dir in candidates:
             status = replay_results[crash_dir]
             if status == "bypass":
@@ -237,12 +247,9 @@ def triage_cell_crashes(
                 continue
             if status == "reproduced":
                 continue
-            reason = (
-                "sanitizer evidence did not reproduce through the configured target invocation"
-                if status == "clean"
-                else "sanitizer evidence has no executable configured-target replay contract"
+            triage.demote_to_finding(
+                crash_dir, results, _REPLAY_DEMOTION_REASONS[status]
             )
-            triage.demote_to_finding(crash_dir, results, reason)
             pre_demoted += 1
     counts = triage.triage_crash_dirs(
         results, target, target_slug, config.attacker_controls,
@@ -261,16 +268,16 @@ def _verify_model_direct_crash(
     crash_dir: Path, target: Path, target_slug: str,
     attacker_controls: list[str],
 ) -> str:
-    """Return bypass/reproduced/clean/unverifiable for one direct crash."""
+    """Return bypass/reproduced/clean/unmeasured/no-contract for one crash."""
     controls = {str(value).strip().lower() for value in attacker_controls}
     if triage._direct_probe_trigger_bypass(crash_dir, target, attacker_controls):
         return "bypass"
     resolved = _resolve_reverify_fields(crash_dir, target, target_slug)
     if resolved is None:
-        return "unverifiable"
+        return "no-contract"
     fields, replay_args = resolved
     if not reverify_one_crash(crash_dir, target, target_slug):
-        return "unverifiable"
+        return "unmeasured"
     rate = _measured_crash_rate(crash_dir / "sanitizer.txt")
     if rate is None or rate[0] == 0:
         return "clean"
@@ -777,6 +784,18 @@ def _resolve_reverify_fields(
     return fields, replay_args
 
 
+def _write_reverify_log(crash_dir: Path, measured: str) -> None:
+    """Keep an unmeasurable replay's output for diagnosis; never fatal."""
+    try:
+        audit_dir = crash_dir / ".audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        (audit_dir / "reverify.log").write_text(
+            measured or "replay produced no output\n", encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> bool:
     resolved = _resolve_reverify_fields(crash_dir, target_root, target_slug)
     if resolved is None:
@@ -799,6 +818,18 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
         arguments = ["/dev/null"]
         environment.update({"ASAN_GENERIC_BIN": binary, "ASAN_GENERIC_SKIP_TESTCASE": "1"})
         sanitizer_name = "asan"
+        # An agent-compiled harness carries no rpath, so it dies in the loader
+        # before main() and its crash looks unmeasurable. Supply the directory
+        # bin/probe would have baked in. Harness mode only: a configured target
+        # binary is launched the way the target itself is, and overriding the
+        # loader path there could change which library a clean run resolves.
+        library_dir = fields.get("LIBDIR", "")
+        if Path(library_dir).is_dir():
+            for variable in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+                existing = environment.get(variable, "")
+                environment[variable] = (
+                    f"{library_dir}{os.pathsep}{existing}" if existing else library_dir
+                )
     elif replay_args:
         environment.update({"ASAN_GENERIC_SKIP_TESTCASE": "1", "SANITIZER_GENERIC_SKIP_TESTCASE": "1"})
     subprocess.run(
@@ -808,17 +839,19 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
     try:
         measured = temporary.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
+        measured = ""
     finally:
         temporary.unlink(missing_ok=True)
     rate_match = re.search(r"^CRASH_RATE:\s*([0-9]+/[0-9]+)", measured, re.MULTILINE)
-    if not rate_match:
-        return False
-    rate = rate_match.group(1)
-    crashes = int(rate.split("/", 1)[0])
+    rate = rate_match.group(1) if rate_match else ""
+    crashes = int(rate.split("/", 1)[0]) if rate else 0
     success_match = re.search(r"^\[run-sanitizer-multi\]\s+SUCCESS_RATE:\s*([0-9]+/[0-9]+)", measured, re.MULTILINE)
     clean_runs = int(success_match.group(1).split("/", 1)[0]) if success_match else 0
-    if crashes == 0 and clean_runs == 0:
+    if not rate or (crashes == 0 and clean_runs == 0):
+        # Nothing ran to completion: no summary at all, or a rate with neither
+        # a crash nor a clean exit behind it (a loader or exec failure). Keep
+        # the output so the demotion is diagnosable without re-running the cell.
+        _write_reverify_log(crash_dir, measured)
         return False
     if crashes:
         try:
@@ -826,12 +859,17 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
                 encoding="utf-8", errors="replace"
             )
         except OSError:
+            _write_reverify_log(crash_dir, measured)
             return False
         if (
             triage.autodiscard_reason(measured)
             or not triage._has_memory_safety_signal(measured)
             or not _same_sanitizer_fault(original, measured)
         ):
+            # The replay crashed, but not with the original's fault. Nothing
+            # here confirms the crash, so it demotes like an unmeasured one —
+            # and the operator needs the output to see which it was.
+            _write_reverify_log(crash_dir, measured)
             return False
     note = f"reproduced in {rate} reverification runs" if crashes else "original one-shot trace did not reproduce in 5 reverification runs"
     with (crash_dir / "sanitizer.txt").open("a", encoding="utf-8") as output:

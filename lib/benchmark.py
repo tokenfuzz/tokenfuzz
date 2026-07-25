@@ -5417,6 +5417,27 @@ def _cmd_report_refusals(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_build_path(target_root: Path, relative: str) -> str:
+    """Resolve a target.toml build path, honoring AUDIT_BUILD_SUFFIX.
+
+    Mirrors target_config.resolve_path for the raw-TOML read this command
+    does; "" for a path that escapes the target, which is not resolvable.
+    """
+    if not relative:
+        return ""
+    if os.path.isabs(relative):
+        return relative
+    if any(part == ".." for part in Path(relative).parts):
+        return ""
+    normalized = os.path.normpath(relative)
+    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    if suffix:
+        head, separator, rest = normalized.partition("/")
+        if head in {"build-asan", "build-ubsan", "build-msan", "build-tsan"}:
+            normalized = f"{head}{suffix}{separator}{rest}"
+    return str(target_root / normalized)
+
+
 def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
     if _ca is None:
         return 1
@@ -5470,21 +5491,22 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
         or ""
     )
 
-    target_binary = ""
-    if binary_relative:
-        if os.path.isabs(binary_relative):
-            target_binary = binary_relative
-        elif not any(part == ".." for part in Path(binary_relative).parts):
-            normalized = os.path.normpath(binary_relative)
-            suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
-            if suffix:
-                head, separator, rest = normalized.partition("/")
-                if head in {"build-asan", "build-ubsan", "build-msan", "build-tsan"}:
-                    normalized = f"{head}{suffix}{separator}{rest}"
-            target_binary = str(target_root / normalized)
+    target_binary = _resolve_build_path(target_root, binary_relative)
 
     if harness_binary:
-        print(f"SAN=asan\nMODE=harness\nBIN={harness_binary}\nTESTCASE=")
+        # bin/probe bakes the instrumented library's own directory in as an
+        # rpath when it links a harness, so a probe-built binary self-locates.
+        # A harness the agent compiled by hand has no rpath and only loads with
+        # that directory supplied, so it belongs in the replay contract.
+        library = _resolve_build_path(
+            target_root,
+            config.get("asan_lib") or sanitizer_table.get("asan_lib") or "",
+        )
+        library_dir = str(Path(library).parent) if library else ""
+        print(
+            f"SAN=asan\nMODE=harness\nBIN={harness_binary}\n"
+            f"LIBDIR={library_dir}\nTESTCASE="
+        )
         return 0
     if harness_source is not None:
         print("MODE=none\nREASON=source-harness-uncompiled")
