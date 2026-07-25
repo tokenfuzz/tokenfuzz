@@ -1051,6 +1051,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         target_rev="rev1", repo_type="none", results=refresh_results,
         logs=refresh_logs, backend="codex", model="fixture-model",
         config=generic_config, index=refresh_logs / "index.log",
+        decision_timeout=0,
     )
     with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True), \
          mock.patch.object(audit_runner.housekeeping, "mark_clean"), \

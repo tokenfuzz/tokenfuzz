@@ -27,8 +27,9 @@ from typing import Iterable
 import languages
 import report_identity
 from audit_scope import is_excluded_path_part
-# target_config (only detect_repo_type, below) and prompt_render.render_template
-# (only the work_rerank gate) are imported lazily inside their single call sites:
+# target_config (only detect_repo_type, below), llm_decide (only timeout
+# resolution), and prompt_render.render_template (only the work_rerank gate)
+# are imported lazily inside their single call sites:
 # workqueue backs bin/state, which agents invoke 30+ times per session, and each
 # of these modules adds ~3-4 ms of import (target_config pulls shutil; together
 # ~5 ms) that the common state ops (resume/add-hyp/update-hyp) never use —
@@ -1511,13 +1512,17 @@ def path_has_executable(name: str) -> bool:
     return False
 
 
-def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160, timeout: int = 20) -> list[dict]:
+def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
+                     timeout: int | None = None) -> list[dict]:
     """Second-stage optional ranking over deterministic candidates.
 
     The first stage stays authoritative on availability: if the one-shot LLM
     decision is disabled, unavailable, times out, or returns malformed JSON,
     this returns the original cards unchanged.
     """
+    if timeout is None:
+        from llm_decide import decision_timeout  # lazy: see import note at top
+        timeout = decision_timeout("work_rerank")
     if top_n <= 0 or not cards:
         return cards
     mock_present = "LLM_DECIDE_MOCK_WORK_RERANK" in os.environ or "LLM_DECIDE_MOCK" in os.environ

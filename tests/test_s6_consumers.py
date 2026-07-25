@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -146,6 +148,33 @@ class PeerFixCardTests(unittest.TestCase):
         text = log.read_text(encoding="utf-8")
         self.assertEqual(text.count("s6-peer-distill MOCK"), 2)
         self.assertEqual(text.count("s6-peer-map MOCK"), 2)
+
+    def test_peer_decisions_use_the_session_timeout_unless_explicit(self) -> None:
+        facade = runpy.run_path(str(ROOT / "bin" / "peer-fix-cards"))
+        observed: list[tuple[str, int]] = []
+
+        def decide(decision, _required, _prompt, timeout, **_kwargs):
+            observed.append((decision, timeout))
+            if decision == "s6-peer-distill":
+                return {"class": "bounds", "summary": "size mismatch", "shape": "guard"}
+            return {"file": "parser.c", "reason": "format analogue"}
+
+        facade["distill_bug_class"].__globals__["llm_decide"] = decide
+        with mock.patch.dict(
+            os.environ, {"LLM_DECISION_TIMEOUT": "37"}, clear=False,
+        ):
+            facade["distill_bug_class"]("peer", {"id": "FIX-1"}, "diff")
+            facade["map_to_target_file"](
+                "bounds: size mismatch", ["parser.c"], "myxml",
+            )
+            facade["map_to_target_file"](
+                "bounds: size mismatch", ["parser.c"], "myxml", timeout=9,
+            )
+        self.assertEqual(observed, [
+            ("s6-peer-distill", 37),
+            ("s6-peer-map", 37),
+            ("s6-peer-map", 9),
+        ])
 
 
 if __name__ == "__main__":

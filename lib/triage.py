@@ -365,10 +365,7 @@ def fill_reach_fields(
     decision = decision_override
     if decision is _NO_REACH_DECISION:
         prompt = render_template("triage_reachability_fields.md.j2", {"narrative": text})
-        try:
-            timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
-        except ValueError:
-            timeout = 45
+        timeout = llm_decide.decision_timeout()
         decision = llm_decide.llm_decide(
             "reachability-fields", "", prompt, timeout, usage_index=usage_index,
         )
@@ -431,10 +428,7 @@ def _batch_reach_field_decisions(
         items.append({"id": directory.name, "report": narrative})
     if not items:
         return attempted, {}
-    try:
-        timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
-    except ValueError:
-        timeout = 45
+    timeout = llm_decide.decision_timeout()
     instructions = render_template(
         "triage_reachability_fields.md.j2", {"narrative": ""},
     ).split("\nReport:", 1)[0]
@@ -530,13 +524,7 @@ def cluster_expansion_decision(
             "source_block": "\n\n".join(source_parts) or "(source unavailable)",
         },
     )
-    try:
-        configured = _positive_int_env("LLM_DECISION_TIMEOUT", 45)
-    except ValueError:
-        configured = 45
-    # This decision sees only the bounded frame/source excerpts above. It does
-    # not need the old ten-minute floor; use the backend-appropriate decision
-    # timeout and let the live productive-wall deadline shorten it further.
+    configured = llm_decide.decision_timeout("cluster_expand")
     timeout = _decision_timeout(configured, deadline)
     if timeout <= 0:
         return None

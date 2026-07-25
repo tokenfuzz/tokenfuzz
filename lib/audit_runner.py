@@ -27,6 +27,7 @@ import build_config
 import build_session_seed
 import cluster_common
 import housekeeping
+import llm_decide
 import llm_invoke
 import llm_usage
 import prompt
@@ -199,7 +200,7 @@ class Runtime:
     shell_agents: int
     agent_roles: tuple[str, ...]
     fixed_strategy: str
-    decision_timeout: int
+    decision_timeout: int  # operator's explicit ceiling; 0 when they set none
     refill_workers: bool = True
     cluster_expansion_attempted: set[Path] = field(default_factory=set, repr=False)
 
@@ -298,7 +299,7 @@ def prepare_runtime(
         target_rev, repo_type,
         results, logs, raw, logs / "index.log", logs / "index.jsonl",
         total, browser, shell, roles, fixed_strategy,
-        _decision_timeout_for_backend(backend, decision_timeout_override),
+        _operator_decision_timeout(decision_timeout_override),
         refill_workers,
     )
     _activate_runtime(runtime)
@@ -315,20 +316,33 @@ def _activate_runtime(runtime: Runtime) -> None:
         TARGET_ATTACKER_CONTROLS_CSV=runtime.config.attacker_controls_csv(),
         LLM_DECIDE_LOG=str(runtime.logs / "llm-decisions.log"),
         LLM_DECIDE_COUNTER_FILE=str(runtime.logs / ".llm_decisions_harness"),
-        LLM_DECISION_TIMEOUT=str(
-            getattr(runtime, "decision_timeout", _decision_timeout_for_backend(runtime.backend, None))
-        ),
     )
+    # Export only a real operator choice. Writing a resolved tier default back
+    # would read downstream as an explicit setting and suppress the longer
+    # per-decision defaults; clearing it when there is no choice keeps a value
+    # from an earlier runtime in this process from leaking into this one.
+    if runtime.decision_timeout:
+        os.environ["LLM_DECISION_TIMEOUT"] = str(runtime.decision_timeout)
+    else:
+        os.environ.pop("LLM_DECISION_TIMEOUT", None)
     os.environ.update(llm_invoke.memory_env(runtime.backend))
 
 
-def _decision_timeout_for_backend(backend: str, override: str | None) -> int:
-    raw = override if override not in (None, "") else ("180" if backend == "oss" else "45")
-    if not str(raw).isdigit() or int(raw) <= 0:
+def _operator_decision_timeout(override: str | None) -> int:
+    """Validate an explicit decision ceiling; 0 when the operator set none.
+
+    Zero is not a fallback default — it records "no operator choice", which
+    leaves lib/llm_decide.py free to apply its per-decision defaults. Resolving
+    a tier default here instead would be indistinguishable downstream from an
+    operator who asked for exactly the tier ceiling.
+    """
+    if override in (None, ""):
+        return 0
+    if not str(override).isdigit() or int(override) <= 0:
         raise ValueError(
-            f"LLM_DECISION_TIMEOUT must be a positive integer number of seconds (got {raw!r})"
+            f"LLM_DECISION_TIMEOUT must be a positive integer number of seconds (got {override!r})"
         )
-    return int(raw)
+    return int(override)
 
 
 def validate_model(runtime: Runtime) -> None:

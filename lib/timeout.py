@@ -35,6 +35,8 @@ def run_timeout(
     capture_output: bool = False,
     stdout=None,
     stderr=None,
+    input: str | bytes | None = None,
+    text: bool = False,
 ) -> subprocess.CompletedProcess:
     """Run a command through the portable process-tree timeout wrapper."""
     return subprocess.run(
@@ -51,6 +53,8 @@ def run_timeout(
         capture_output=capture_output,
         stdout=stdout,
         stderr=stderr,
+        input=input,
+        text=text,
         check=False,
     )
 

@@ -111,9 +111,22 @@ from llm_invoke import (  # noqa: E402
     use_gemini_cli as _use_gemini_cli,
 )
 import llm_usage  # noqa: E402
+from timeout import run_timeout  # noqa: E402
 
 
 _KNOWN_BACKENDS = ("claude", "codex", "oss", "gemini", "grok")
+
+DECISION_TIMEOUT_HOSTED = 45
+DECISION_TIMEOUT_OSS = 180
+# Hosted defaults for the decisions whose observed completion time exceeds the
+# tier ceiling; everything else uses the tier. Each is roughly double the
+# slowest observed completion. Re-derive from `<decision> OK ... elapsed=` lines
+# in the decisions log: a timed-out call reports the cutoff, not the time the
+# call needed, so rc=124 lines cannot size these.
+DECISION_TIMEOUT_HOSTED_DEFAULTS = {
+    "cluster_expand": 450,
+    "work_rerank": 150,
+}
 
 
 class _LaunchPreparationError(RuntimeError):
@@ -688,12 +701,12 @@ def _invoke_backend(
 
     try:
         try:
-            result = subprocess.run(
+            result = run_timeout(
                 cmd,
                 input=run_input,
                 capture_output=True,
                 text=True,
-                timeout=timeout_secs,
+                seconds=timeout_secs,
                 env=child_env,
                 cwd=launch_cwd,
             )
@@ -702,6 +715,10 @@ def _invoke_backend(
         except OSError:
             return None
 
+        if result.returncode == 124:
+            raise subprocess.TimeoutExpired(
+                cmd, timeout_secs, output=result.stdout, stderr=result.stderr,
+            )
         if result.returncode != 0:
             # Caller logs the backend-specific rc.
             raise subprocess.CalledProcessError(result.returncode, cmd, output=result.stdout, stderr=result.stderr)
@@ -961,6 +978,27 @@ def _load_mock(mock_val: str) -> Optional[str]:
     return mock_val
 
 
+def decision_timeout(decision: str = "") -> int:
+    """Return the configured decision ceiling, or the default for `decision`."""
+    backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
+    tier = (
+        DECISION_TIMEOUT_OSS if backend == "oss"
+        else DECISION_TIMEOUT_HOSTED
+    )
+    # Scaled by the tier ratio: the ratio itself is inherited, not separately
+    # measured per decision, but a slow local-inference host is never faster
+    # than a hosted one, so the hosted value is a floor it must clear. Still a
+    # default, not a floor over the operator: an explicit setting overrides it
+    # downward, and a stage deadline can shorten the call further.
+    measured = DECISION_TIMEOUT_HOSTED_DEFAULTS.get(decision, 0)
+    default = max(tier, measured * tier // DECISION_TIMEOUT_HOSTED)
+    try:
+        value = int(os.environ.get("LLM_DECISION_TIMEOUT", str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 1 else default
+
+
 def llm_decide(
     decision: str,
     required_keys: str,
@@ -1146,9 +1184,9 @@ def _run_decision(
             _llm_log(f"{decision} FAIL local-launch {exc} bytes={prompt_bytes}")
             return None, False
         except subprocess.TimeoutExpired as exc:
-            # Timeout = "needed more time", not "backend is failing". Addressed
-            # by the decision-timeout floors, so it must NOT arm the per-type
-            # breaker or it would sideline a gate that is merely slow.
+            # Timeout = "needed more time", not "backend is failing". The
+            # per-call ceiling and exact-prompt breaker already bound it, so it
+            # must NOT arm the per-type breaker and sideline unrelated prompts.
             elapsed = int(time.time() - t_start)
             _llm_log(
                 f"{decision} FAIL {backend}-rc=124 bytes={prompt_bytes} "

@@ -11,10 +11,12 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -471,7 +473,7 @@ with tempfile.TemporaryDirectory() as td, \
         }, clear=False), \
         mock.patch.object(decide_mod, "_which", return_value="/fake/agy"), \
         mock.patch.object(
-            decide_mod.subprocess, "run",
+            decide_mod, "run_timeout",
             return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
         ) as agy_run:
     os.environ.pop("USE_GEMINI_CLI", None)
@@ -484,6 +486,47 @@ with tempfile.TemporaryDirectory() as td, \
        "Antigravity decision does not duplicate the prompt on stdin")
     assert_eq(Path(td), agy_run.call_args.kwargs["cwd"],
               "Antigravity decision is rooted at SCRIPT_ROOT")
+
+# A decision timeout must reap the backend's whole process tree. Backend CLIs
+# may launch helpers; killing only the direct process leaves those helpers
+# consuming CPU after the decision has already failed open.
+with tempfile.TemporaryDirectory() as td:
+    directory = Path(td)
+    child_pid = directory / "child.pid"
+    backend = directory / "backend.py"
+    backend.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        "\"import os,time;open(os.environ['CHILD_PID'],'w').write(str(os.getpid()));time.sleep(10)\"], "
+        "env=os.environ.copy())\n"
+        "time.sleep(10)\n",
+        encoding="utf-8",
+    )
+    backend.chmod(0o755)
+    timed_out = False
+    leaked_pid = 0
+    try:
+        with mock.patch.dict(os.environ, {
+            "CODEX_BIN": str(backend), "CHILD_PID": str(child_pid),
+        }, clear=False):
+            decide_mod._invoke_backend("codex", "PROMPT", 1)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    if child_pid.is_file():
+        leaked_pid = int(child_pid.read_text())
+    deadline = time.monotonic() + 2
+    while leaked_pid and time.monotonic() < deadline:
+        try:
+            os.kill(leaked_pid, 0)
+        except ProcessLookupError:
+            leaked_pid = 0
+            break
+        time.sleep(0.05)
+    if leaked_pid:
+        os.kill(leaked_pid, signal.SIGKILL)
+    ok(timed_out, "decision process-tree wrapper preserves TimeoutExpired semantics")
+    ok(not leaked_pid, "decision timeout reaps backend descendants")
 
 with tempfile.TemporaryDirectory() as td:
     for backend in ("grok", "gemini"):
@@ -515,7 +558,7 @@ with tempfile.TemporaryDirectory() as td, \
         mock.patch.object(
             decide_mod, "_ensure_project_root",
             side_effect=OSError("read-only root"),
-        ), mock.patch.object(decide_mod.subprocess, "run") as prep_run:
+        ), mock.patch.object(decide_mod, "run_timeout") as prep_run:
     prep_raised = False
     try:
         decide_mod._invoke_backend("grok", "PROMPT", 5)

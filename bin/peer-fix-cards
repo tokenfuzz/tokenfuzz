@@ -33,7 +33,7 @@ import peer_sources  # noqa: E402
 import llm_usage  # noqa: E402
 import target_config as tc  # noqa: E402
 import workqueue  # noqa: E402
-from llm_decide import llm_decide  # noqa: E402
+from llm_decide import decision_timeout, llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
 
 
@@ -114,11 +114,12 @@ def _verdict_cache_store(path: Path | None, payload: dict) -> None:
 
 
 def distill_bug_class(
-    peer: str, fix_entry: dict, diff_excerpt: str, timeout: int = 20,
+    peer: str, fix_entry: dict, diff_excerpt: str, timeout: int | None = None,
     cache_dir: Path | None = None,
     usage_index: Path | None = None,
 ) -> str:
     """LLM-distill the bug class from a peer fix. Empty string on failure."""
+    timeout = decision_timeout() if timeout is None else timeout
     prompt = render_template("peer_fix_distill.md.j2", {
         "peer": peer,
         "fix_id": str(fix_entry.get("id", "")),
@@ -151,7 +152,7 @@ def map_to_target_file(
     bug_class_summary: str,
     target_file_listing: list[str],
     target_slug: str,
-    timeout: int = 20,
+    timeout: int | None = None,
     cache_dir: Path | None = None,
     usage_index: Path | None = None,
 ) -> str:
@@ -159,6 +160,7 @@ def map_to_target_file(
 
     Returns the relative path or empty string on failure / no good match.
     """
+    timeout = decision_timeout() if timeout is None else timeout
     if not target_file_listing or not bug_class_summary:
         return ""
     # Cap the listing in the prompt — file lists are noisy and the LLM

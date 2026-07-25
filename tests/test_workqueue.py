@@ -593,6 +593,43 @@ class WorkQueueTests(unittest.TestCase):
                 workqueue.llm_rerank_cards(self.ctx, cards, top_n=2, timeout=5), cards,
             )
 
+    def test_llm_rerank_uses_the_session_timeout_when_unspecified(self) -> None:
+        cards = [self.card("WORK-A", "src/a.c")]
+        captured: dict[str, object] = {}
+
+        def decide(command, **kwargs):
+            captured["command"] = command
+            captured["timeout"] = kwargs.get("timeout")
+            return '{"cards":[]}'
+
+        environment = {
+            "ACTIVE_BACKEND": "",
+            "LLM_DECIDE_MOCK_WORK_RERANK": '{"cards":[]}',
+            "LLM_DECISION_TIMEOUT": "37",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            workqueue.subprocess, "check_output", side_effect=decide,
+        ):
+            self.assertEqual(
+                workqueue.llm_rerank_cards(self.ctx, cards, top_n=1), cards,
+            )
+        command = captured["command"]
+        self.assertEqual(command[5], "37")
+        self.assertEqual(captured["timeout"], 42)
+
+        # Unset, reranking gets its own measured default: the tier ceiling is
+        # shorter than a single observed call, so every rerank would time out.
+        environment.pop("LLM_DECISION_TIMEOUT")
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            workqueue.subprocess, "check_output", side_effect=decide,
+        ):
+            os.environ.pop("LLM_DECISION_TIMEOUT", None)
+            # Fresh cards: an identical set would be served from the cache.
+            workqueue.llm_rerank_cards(
+                self.ctx, [self.card("WORK-B", "src/b.c")], top_n=1,
+            )
+        self.assertEqual(captured["command"][5], "150")
+
     def test_state_cli_recent_filters_explanations_and_bad_regexes(self) -> None:
         self.write_cards([self.card("WORK-A", "src/app.c")])
         self.add_hypothesis(hyp_id="H-PENDING", status="PENDING")

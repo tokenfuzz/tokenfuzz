@@ -84,7 +84,15 @@ used. Keep keys out of `target.toml`, reports, and committed shell files.
 | --- | --- | --- |
 | `AUDIT_LOCAL_BASE_URL` | `http://127.0.0.1:8000/v1` | OpenAI-compatible endpoint used by `--backend oss`. TokenFuzz appends `/v1` when omitted. |
 | `AUDIT_LOCAL_API_KEY` | `EMPTY` | Token for a local endpoint that requires authentication. |
-| `LLM_DECISION_TIMEOUT` | `180` seconds for `oss`, `45` hosted | Ceiling on each focused triage and validation call. |
+| `LLM_DECISION_TIMEOUT` | `180` seconds for `oss`, `45` hosted | Ceiling on each audit-time ranking, peer-mapping, triage, and validation decision. Setting it applies to *every* decision, including the two below. Stage deadlines may shorten it. |
+| `RANK_WORK_LLM_TIMEOUT` | unset | Override `LLM_DECISION_TIMEOUT` for work-card reranking only. The `bin/rank-work --llm-timeout` flag takes precedence over both. |
+
+Every decision launches a full agent CLI rather than a single chat completion,
+so its floor is a process launch plus a reasoning turn. A few decisions have
+been observed to complete well past the ceiling above and get a longer built-in
+default, scaled by the same hosted→`oss` ratio so a slow local-inference host
+gets proportionally more room. Setting `LLM_DECISION_TIMEOUT` replaces those
+defaults too.
 
 For Ollama:
 

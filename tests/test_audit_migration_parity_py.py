@@ -227,11 +227,15 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         "Claude stream-idle failure retries once through the real launch path",
     )
 
+    with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "oss"}, clear=True):
+        oss_tier = triage.llm_decide.decision_timeout()
+    with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "codex"}, clear=True):
+        hosted_tier = triage.llm_decide.decision_timeout()
     check(
-        audit_runner._decision_timeout_for_backend("oss", None) == 180
-        and audit_runner._decision_timeout_for_backend("codex", None) == 45
-        and audit_runner._decision_timeout_for_backend("oss", "240") == 240,
-        "decision timeout keeps hosted/OSS defaults and explicit override precedence",
+        oss_tier == 180 and hosted_tier == 45
+        and audit_runner._operator_decision_timeout(None) == 0
+        and audit_runner._operator_decision_timeout("240") == 240,
+        "tier defaults hold and the runtime records only an explicit ceiling",
     )
     check(
         triage._valid_reach_field("caller_controls", "bytes") == "bytes"

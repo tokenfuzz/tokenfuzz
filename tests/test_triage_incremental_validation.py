@@ -18,10 +18,12 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import audit_runner  # noqa: E402
 import benchmark  # noqa: E402
 import finding_signature  # noqa: E402
 import llm_decide  # noqa: E402
 import report_identity  # noqa: E402
+import target_config  # noqa: E402
 import triage  # noqa: E402
 import triage_validate  # noqa: E402
 
@@ -824,6 +826,117 @@ Generated score text.
 
 
 class DecisionTimeoutBackoffTests(unittest.TestCase):
+    def test_decision_timeout_honors_the_session_setting_and_backend_tier(self) -> None:
+        for backend, expected in (
+            ("codex", 45), ("claude", 45), ("oss", 180), ("", 45),
+        ):
+            with mock.patch.dict(
+                os.environ, {"ACTIVE_BACKEND": backend}, clear=True,
+            ):
+                self.assertEqual(llm_decide.decision_timeout(), expected)
+        for value, expected in (
+            ("17", 17), ("45", 45), ("180", 180), ("0", 45),
+            ("junk", 45), ("", 45),
+        ):
+            with mock.patch.dict(
+                os.environ,
+                {"LLM_DECISION_TIMEOUT": value, "ACTIVE_BACKEND": "codex"},
+                clear=True,
+            ):
+                self.assertEqual(llm_decide.decision_timeout(), expected)
+
+    def test_agent_reading_decisions_get_their_measured_default(self) -> None:
+        # Hosted, then the same values scaled by the oss tier ratio.
+        for backend, expand, rerank, other in (
+            ("claude", 450, 150, 45), ("oss", 1800, 600, 180),
+        ):
+            with mock.patch.dict(
+                os.environ, {"ACTIVE_BACKEND": backend}, clear=True,
+            ):
+                self.assertEqual(llm_decide.decision_timeout("cluster_expand"), expand)
+                self.assertEqual(llm_decide.decision_timeout("work_rerank"), rerank)
+                self.assertEqual(llm_decide.decision_timeout("find_quality_batch"), other)
+
+    def test_explicit_setting_overrides_the_measured_default_downward(self) -> None:
+        # A per-decision default is a default, never a floor over the operator.
+        with mock.patch.dict(
+            os.environ,
+            {"LLM_DECISION_TIMEOUT": "30", "ACTIVE_BACKEND": "claude"},
+            clear=True,
+        ):
+            self.assertEqual(llm_decide.decision_timeout("cluster_expand"), 30)
+            self.assertEqual(llm_decide.decision_timeout("work_rerank"), 30)
+
+    def _runtime(self, base: Path, decision_timeout: int) -> "audit_runner.Runtime":
+        return audit_runner.Runtime(
+            root=base, target_root=base, target_slug="sampleproj",
+            output_slug="sampleproj", backend="claude", model="",
+            config=target_config.Config(
+                target_root=str(base), is_browser="0",
+                sanitizers_explicitly_disabled=False,
+                sanitizers_enabled=["asan"],
+            ),
+            target_rev="HEAD", repo_type="none",
+            results=base, logs=base, raw=base,
+            index=base / "index.log", index_jsonl=base / "index.jsonl",
+            num_agents=1, browser_agents=0, shell_agents=1,
+            agent_roles=(), fixed_strategy="", decision_timeout=decision_timeout,
+        )
+
+    def test_operator_decision_timeout_records_only_an_explicit_choice(self) -> None:
+        for override in (None, ""):
+            self.assertEqual(audit_runner._operator_decision_timeout(override), 0)
+        self.assertEqual(audit_runner._operator_decision_timeout("240"), 240)
+        for bad in ("0", "-5", "junk"):
+            with self.assertRaises(ValueError):
+                audit_runner._operator_decision_timeout(bad)
+
+    def test_activate_runtime_exports_only_a_real_operator_choice(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="activate-runtime-") as tmp:
+            base = Path(tmp)
+            # No operator choice: nothing exported, so the per-decision default
+            # applies. Exporting a resolved tier default would suppress it.
+            with mock.patch.dict(os.environ, {}, clear=True):
+                audit_runner._activate_runtime(self._runtime(base, 0))
+                self.assertNotIn("LLM_DECISION_TIMEOUT", os.environ)
+                self.assertEqual(llm_decide.decision_timeout("cluster_expand"), 450)
+            # A choice the runtime carries reaches the decision, whether or not
+            # it was already in this environment.
+            with mock.patch.dict(os.environ, {}, clear=True):
+                audit_runner._activate_runtime(self._runtime(base, 30))
+                self.assertEqual(os.environ["LLM_DECISION_TIMEOUT"], "30")
+                self.assertEqual(llm_decide.decision_timeout("cluster_expand"), 30)
+            # A stale value from an earlier runtime does not leak into one that
+            # carries no choice.
+            with mock.patch.dict(
+                os.environ, {"LLM_DECISION_TIMEOUT": "30"}, clear=True,
+            ):
+                audit_runner._activate_runtime(self._runtime(base, 0))
+                self.assertNotIn("LLM_DECISION_TIMEOUT", os.environ)
+
+    def test_standalone_find_gate_keeps_its_batched_fallback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="find-gate-timeout-") as tmp:
+            results = Path(tmp)
+            finding = results / "findings" / "FIND-001"
+            finding.mkdir(parents=True)
+            (finding / "report.md").write_text("# concrete finding\n")
+            captured: list[int] = []
+
+            def batch(_directories, _results, _q, _aq, timeout, *_args):
+                captured.append(timeout)
+                return {}
+
+            with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+                triage, "_batch_quality_votes", side_effect=batch,
+            ), mock.patch.object(
+                triage, "validate_one_finding", return_value="pending",
+            ):
+                self.assertEqual(
+                    triage.validate_find_gate(results, workers=1),
+                    {"accepted": 0, "rejected": 0, "pending": 1},
+                )
+            self.assertEqual(captured, [300])
+
     def test_exact_timed_out_prompt_is_deferred_after_one_full_timeout(self) -> None:
         with tempfile.TemporaryDirectory(prefix="decision-timeout-") as tmp:
             environment = {

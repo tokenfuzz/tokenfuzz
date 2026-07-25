@@ -11,6 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from llm_decide import decision_timeout
 from workqueue import add_common_args, annotate_card_buildability, apply_latest_claim_status, context_from_args, llm_rerank_cards, rank_target, read_jsonl, write_cards
 
 
@@ -21,7 +22,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--patch-cards", help="Patch-card JSONL path; defaults to <RESULTS_DIR>/patch-cards.jsonl")
     parser.add_argument("--s6-cards", help="S6 peer-fix card JSONL path; defaults to <RESULTS_DIR>/s6-peer-cards.jsonl")
     parser.add_argument("--llm-top-n", type=int, default=int(os.environ.get("RANK_WORK_LLM_TOP_N", "160")))
-    parser.add_argument("--llm-timeout", type=int, default=int(os.environ.get("RANK_WORK_LLM_TIMEOUT", "20")))
+    parser.add_argument(
+        "--llm-timeout", type=int,
+        default=int(
+            os.environ.get("RANK_WORK_LLM_TIMEOUT", "")
+            or decision_timeout("work_rerank")
+        ),
+    )
     parser.add_argument("--output", help="Output JSONL path; defaults to <RESULTS_DIR>/work-cards.jsonl")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--jsonl", action="store_true", help="print full card JSONL to stdout")
