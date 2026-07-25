@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
-"""Behaviour tests for lib/process_tree.kill_under_path — the cell-leak reaper.
+"""Behaviour tests for lib/process_tree.kill_marked — the leaked-work reaper.
 
-A benchmark cell can leave a fuzzer running after its command returns: escaped
-via ``nohup``, a trailing ``&``, a new session, or reparenting to PID 1. The
-reaper finds and kills those by the cell directory in their argv. Exercises:
+A benchmark cell can leave a fuzzer running after its command returns. The cell
+command runs under a setsid'd timeout wrapper that reaps its own session group,
+but bin/audit gives each agent a nested wrapper in a *new* session, so a leak
+there survives the outer group kill. Ownership is therefore carried in the
+environment: the launcher exports a unique reap id into the child only, and
+every descendant inherits it — through `nohup`, `&`, setsid, and reparenting to
+PID 1 — which makes it positive proof of ownership.
 
-  * reap — a leaked process whose argv references the cell dir is TERM/KILLed
-  * no false positive — a sibling process outside the cell dir is untouched
-  * path boundary — cell ``-r1`` never matches sibling ``-r10``
-  * descendants — a match's helper child (argv without the cell dir) is reaped
-  * self-safety — a process whose OWN argv names the cell dir never kills itself
-  * ancestor guard — _protected_pids walks the parent chain and breaks on cycles
+Exercises:
+  * reap — a marked process is TERM/KILLed
+  * escaped leak — a marked grandchild in a NEW session, reparented to PID 1
+    (the shape that survives a session-group kill), is still reaped
+  * inheritance — a child that never names the marker itself is still reaped
+  * isolation — an unmarked process, and one carrying a different cell's
+    marker, are both untouched
+  * fail-safe — a caller whose OWN environment carries the marker reaps
+    nothing (it would be killing its own tree)
+  * empty marker is a no-op
 """
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -54,11 +61,17 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def _spawn_marker(marker: str) -> subprocess.Popen:
-    """A long-lived process carrying ``marker`` as an argv token (ignored by
-    the -c program). Puts an arbitrary path into argv without running it."""
+def _marked_env(marker: str) -> dict:
+    return dict(os.environ, **{pt.REAP_MARKER_VAR: marker})
+
+
+def _spawn_marked(marker: str, extra_env: dict | None = None) -> subprocess.Popen:
+    """A long-lived process carrying ``marker`` in its environment."""
+    env = _marked_env(marker)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(120)", marker]
+        [sys.executable, "-c", "import time; time.sleep(120)"], env=env
     )
 
 
@@ -73,8 +86,8 @@ def _wait_dead(pid: int, timeout: float = 5.0) -> bool:
 
 def _signalled(proc: subprocess.Popen, timeout: float = 5.0) -> bool:
     """A Popen child the reaper killed dies with a negative (signalled) rc.
-    Also collects the zombie so a still-listed <defunct> pid cannot confuse a
-    later ps snapshot (test-only concern: real leaks reparent away from us)."""
+    Also collects the zombie so a <defunct> entry cannot linger in a later
+    scan (test-only concern: real leaks reparent away from us)."""
     try:
         rc = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -101,128 +114,116 @@ def _cleanup(*items) -> None:
                 pass
 
 
+# ── reap + isolation ──────────────────────────────────────────────────
+print("reap / isolation")
+cell = pt.new_marker()
+sibling = pt.new_marker()
+
+ok(cell != sibling and len(cell) >= 16, "new_marker returns distinct opaque ids")
+
+victim = _spawn_marked(cell)
+other_cell = _spawn_marked(sibling)
+unmarked = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+try:
+    time.sleep(0.3)  # let the children settle into the process scan
+    reaped = pt.kill_marked(cell, grace=1.0)
+
+    ok(victim.pid in reaped, "marked process is reaped",
+       f"reaped={reaped} victim={victim.pid}")
+    ok(_signalled(victim), "reaped process is dead")
+    ok(other_cell.pid not in reaped and _alive(other_cell.pid),
+       "a concurrent sibling cell's marker is untouched",
+       f"reaped={reaped} sibling={other_cell.pid}")
+    ok(unmarked.pid not in reaped and _alive(unmarked.pid),
+       "an unmarked process is untouched",
+       f"reaped={reaped} unmarked={unmarked.pid}")
+    ok(pt.kill_marked(pt.new_marker(), grace=0.2) == [],
+       "an unused marker reaps nothing")
+    ok(pt.kill_marked("", grace=0.2) == [], "an empty marker is a no-op")
+finally:
+    _cleanup(victim, other_cell, unmarked)
+
+# ── the escaped-leak shape: new session + reparented to PID 1 ─────────
+print("\nescaped leak (new session, reparented)")
+escaped = pt.new_marker()
 with tempfile.TemporaryDirectory(prefix="process-tree-") as tmp:
-    base = Path(tmp)
-
-    # ── reap + no-false-positive + path boundary ──────────────────────
-    print("reap / isolation")
-    cell = base / "cell-r1"
-    cell.mkdir()
-    sibling = base / "cell-r10"       # shares the cell-r1 prefix sans separator
-    sibling.mkdir()
-    outside = base / "unrelated"
-    outside.mkdir()
-
-    victim = _spawn_marker(str(cell / "corpus" / "input"))
-    control = _spawn_marker(str(outside / "corpus" / "input"))
-    boundary = _spawn_marker(str(sibling / "corpus" / "input"))
+    pidfile = Path(tmp) / "grandchild.pid"
+    # Parent spawns a grandchild in its OWN session, writes its pid, and exits:
+    # the grandchild reparents to PID 1 and leaves the parent's session group —
+    # exactly what a session-group kill misses. It inherits the marker.
+    launcher = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import subprocess,sys;"
+            "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'],"
+            "start_new_session=True);"
+            "open(sys.argv[1],'w').write(str(p.pid))",
+            str(pidfile),
+        ],
+        env=_marked_env(escaped), check=False,
+    )
+    gpid = -1
     try:
-        time.sleep(0.3)  # let the children settle into the ps snapshot
-        reaped = pt.kill_under_path(cell, grace=1.0)
-
-        ok(victim.pid in reaped, "leaked cell process is reaped",
-           f"reaped={reaped} victim={victim.pid}")
-        ok(_signalled(victim), "reaped cell process is dead")
-        ok(control.pid not in reaped and _alive(control.pid),
-           "process outside the cell dir is untouched",
-           f"reaped={reaped} control={control.pid}")
-        ok(boundary.pid not in reaped and _alive(boundary.pid),
-           "cell-r1 reap does not match sibling cell-r10",
-           f"reaped={reaped} boundary={boundary.pid}")
-        ok(pt.kill_under_path(base / "cell-r99", grace=0.2) == [],
-           "no match returns empty without signalling anything")
-    finally:
-        _cleanup(victim, control, boundary)
-
-    # ── descendant expansion ──────────────────────────────────────────
-    print("\ndescendants")
-    dcell = base / "dcell"
-    dcell.mkdir()
-    pidfile = dcell / "child.pid"     # under the cell → parent argv matches
-    # Parent argv carries the cell path (pidfile); its child `sleep` does not.
-    parent = subprocess.Popen([
-        sys.executable, "-c",
-        "import subprocess,sys,time;"
-        "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)']);"
-        "open(sys.argv[1],'w').write(str(p.pid));time.sleep(120)",
-        str(pidfile),
-    ])
-    child_pid = -1
-    try:
+        ok(launcher.returncode == 0, "launcher exited, orphaning the grandchild")
         for _ in range(60):
             if pidfile.is_file() and pidfile.read_text().strip():
-                child_pid = int(pidfile.read_text().strip())
+                gpid = int(pidfile.read_text().strip())
                 break
             time.sleep(0.05)
-        ok(child_pid > 0, "descendant child spawned")
-        reaped = pt.kill_under_path(dcell, grace=1.0)
-        ok(parent.pid in reaped, "path-matched parent is reaped",
-           f"reaped={reaped} parent={parent.pid}")
-        ok(child_pid in reaped,
-           "child whose argv omits the cell dir is reaped as a descendant",
-           f"reaped={reaped} child={child_pid}")
-        ok(_signalled(parent) and _wait_dead(child_pid),
-           "parent and descendant are both dead")
+        ok(gpid > 0 and _alive(gpid), "escaped grandchild is running", f"pid={gpid}")
+        reaped = pt.kill_marked(escaped, grace=1.0)
+        ok(gpid in reaped,
+           "grandchild in a new session, reparented to PID 1, is reaped",
+           f"reaped={reaped} grandchild={gpid}")
+        ok(_wait_dead(gpid), "escaped grandchild is dead")
     finally:
-        _cleanup(parent, child_pid)
+        _cleanup(gpid)
 
-    # ── self-safety: a matcher never kills its own tree ───────────────
-    print("\nself-safety")
-    scell = base / "scell"
-    scell.mkdir()
-    helper = r"""
-import json, os, subprocess, sys, time
-sys.path.insert(0, os.path.join(sys.argv[2], "lib"))
-import process_tree as pt
-cell = sys.argv[1]
-gc = subprocess.Popen(
-    [sys.executable, "-c", "import time; time.sleep(120)",
-     os.path.join(cell, "gc-input")]
-)
-time.sleep(0.3)
-reaped = pt.kill_under_path(cell, grace=1.0)
-open(os.path.join(cell, "result.json"), "w").write(
-    json.dumps({"reaped": reaped, "self": os.getpid(), "gc": gc.pid})
-)
-"""
-    # The helper's own argv carries the cell path (sys.argv[1]); it must reap
-    # the grandchild but never itself.
-    helper_proc = subprocess.Popen(
-        [sys.executable, "-c", helper, str(scell), str(ROOT)]
+# ── inheritance: an unwitting child is still owned ───────────────────
+print("\ninheritance")
+inherit = pt.new_marker()
+parent = _spawn_marked(inherit)
+try:
+    # Child inherits the marker through the environment without naming it.
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        env=_marked_env(inherit),
     )
-    gc_pid = -1
     try:
-        rc = helper_proc.wait(timeout=15)
-        result = json.loads((scell / "result.json").read_text())
-        gc_pid = result["gc"]
-        ok(rc == 0, "self-referencing matcher exits normally (did not kill itself)",
-           f"rc={rc}")
-        ok(result["self"] not in result["reaped"],
-           "matcher excludes its own pid from the reap set",
-           repr(result))
-        ok(result["gc"] in result["reaped"] and _wait_dead(result["gc"]),
-           "matcher still reaps a genuine leaked grandchild", repr(result))
+        time.sleep(0.3)
+        reaped = pt.kill_marked(inherit, grace=1.0)
+        ok(parent.pid in reaped and child.pid in reaped,
+           "every process inheriting the marker is reaped",
+           f"reaped={reaped} parent={parent.pid} child={child.pid}")
+        ok(_signalled(parent) and _signalled(child), "both are dead")
     finally:
-        _cleanup(helper_proc, gc_pid)
+        _cleanup(child)
+finally:
+    _cleanup(parent)
 
-    # ── ancestor guard (unit) ─────────────────────────────────────────
-    print("\nancestor guard")
-    uid = 0
-    rows = [(10, 1, uid, "a"), (11, 10, uid, "b"), (12, 11, uid, "c")]
-    ok(pt._protected_pids(rows, 12) == {12, 11, 10, 1},
-       "protected set is the pid plus its ancestor chain")
-    cyc = [(20, 21, uid, "x"), (21, 20, uid, "y")]   # a ppid cycle
-    ok(pt._protected_pids(cyc, 20) == {20, 21},
-       "protected-chain walk terminates on a cycle")
-
-    # ── ps snapshot sanity on this platform ───────────────────────────
-    print("\nsnapshot")
-    snap = pt._process_rows()
-    me = os.getpid()
-    ok(any(pid == me for pid, _pp, _u, _c in snap),
-       "process snapshot includes this process")
-    ok(all(len(r) == 4 for r in snap) and snap,
-       "process snapshot rows are (pid, ppid, uid, command)")
+# ── fail-safe: never reap our own tree ───────────────────────────────
+print("\nfail-safe")
+selfmark = pt.new_marker()
+# A caller that wrongly exported the marker into its OWN environment must reap
+# nothing rather than kill the run. Run it out-of-process so the marker really
+# is in that interpreter's environ.
+helper = (
+    "import os,sys,subprocess,time;"
+    "sys.path.insert(0, sys.argv[2]);"
+    "import process_tree as pt;"
+    "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(20)'],env=os.environ.copy());"
+    "time.sleep(0.3);"
+    "r=pt.kill_marked(sys.argv[1], grace=0.5);"
+    "print('%s|%s' % (r, p.pid));"
+    "p.kill()"
+)
+completed = subprocess.run(
+    [sys.executable, "-c", helper, selfmark, str(ROOT / "lib")],
+    env=_marked_env(selfmark), capture_output=True, text=True, check=False,
+)
+ok(completed.returncode == 0 and completed.stdout.startswith("[]|"),
+   "a caller carrying the marker itself reaps nothing (fails safe)",
+   f"rc={completed.returncode} out={completed.stdout.strip()!r} err={completed.stderr.strip()!r}")
 
 
 print()

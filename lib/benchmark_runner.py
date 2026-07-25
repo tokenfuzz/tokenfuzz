@@ -598,15 +598,17 @@ def _record_provider_quality(cell_dir: Path, results: Path, rc: int = 1) -> str:
     return issue
 
 
-def _reap_cell_processes(cell_dir: Path) -> None:
-    """Kill any process a completed cell left behind, matched on the cell
-    directory in its command line so escaped fuzzers (nohup, `&`, new sessions,
-    reparented to PID 1) are reaped while a concurrent sibling cell, backend,
-    target, or run -- each a distinct cell path -- is untouched. Reliably covers
-    harness cells, whose binaries and inputs live under the cell tree; a model-
-    direct fuzzer running the shared target binary on inputs outside the cell is
-    not matched, since matching the shared binary would hit sibling cells."""
-    reaped = process_tree.kill_under_path(cell_dir)
+def _reap_cell_processes(marker: str) -> None:
+    """Kill fuzzers a completed cell left behind.
+
+    The cell command runs under a setsid'd timeout wrapper that reaps its own
+    session group, but bin/audit gives each agent a nested wrapper in a *new*
+    session, so a leak there survives the outer group kill. Every cell process
+    inherits this cell's reap marker, so reaping by marker catches those
+    regardless of session, parent, or command line, and can never touch a
+    concurrent sibling cell or an unrelated process.
+    """
+    reaped = process_tree.kill_marked(marker)
     if reaped:
         print(
             f"reaped {len(reaped)} leaked cell process(es): "
@@ -626,19 +628,23 @@ def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wal
     marked = mark_target_artifacts(target)
     previous_logdir = os.environ.get("LOGDIR")
     os.environ["LOGDIR"] = str(cell_dir / "logs")
+    # Marker goes into the child's environment only, never this process's, so
+    # the reap can never turn on the orchestrator itself.
+    reap_marker = process_tree.new_marker()
     try:
         rc = llm_invoke.run_agent_prompt(
             backend, prompt, wall, raw, model=model, max_turns=0,
             add_dirs=f"{cell_dir},{target}", cwd=cell_dir,
             watchdog_marker_dir=cell_dir,
             allow_subagents=False,
+            extra_env={process_tree.REAP_MARKER_VAR: reap_marker},
         )
     finally:
         if previous_logdir is None:
             os.environ.pop("LOGDIR", None)
         else:
             os.environ["LOGDIR"] = previous_logdir
-        _reap_cell_processes(cell_dir)
+        _reap_cell_processes(reap_marker)
     sweep_target_artifacts(target, cell_dir, marked)
     usage = subprocess.run(
         [
@@ -697,6 +703,7 @@ def run_harness(
     if model:
         command += ["--model", model]
     command += ["--experiment", experiment]
+    reap_marker = process_tree.new_marker()
     environment = os.environ.copy()
     environment.update({
         "SCRIPT_ROOT": str(facade),
@@ -704,20 +711,27 @@ def run_harness(
         # whichever backend happened to synthesize a widened build recipe.
         "_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD": "1",
         "PROBE_AUTO_ROUTE": "0",
+        # Inherited by every cell process; see _reap_cell_processes.
+        process_tree.REAP_MARKER_VAR: reap_marker,
     })
     if agents is not None:
         environment["NUM_AGENTS"] = str(agents)
     if wall:
         environment["AUDIT_WALL_BUDGET_SECS"] = str(wall)
     with (cell_dir / "audit.log").open("w", encoding="utf-8") as stream:
-        if wall:
-            rc = run_timeout(
-                command, wall + SESSION_PAUSE_BACKSTOP, cwd=facade,
-                env=environment, stdout=stream, stderr=subprocess.STDOUT,
-            ).returncode
-        else:
-            rc = subprocess.run(command, cwd=facade, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False).returncode
-    _reap_cell_processes(cell_dir)
+        try:
+            if wall:
+                rc = run_timeout(
+                    command, wall + SESSION_PAUSE_BACKSTOP, cwd=facade,
+                    env=environment, stdout=stream, stderr=subprocess.STDOUT,
+                ).returncode
+            else:
+                rc = subprocess.run(command, cwd=facade, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False).returncode
+        finally:
+            # Reap escaped cell processes even if the launch raised (OSError,
+            # timeout-helper failure) — the leak this guards against is exactly
+            # what an abnormal exit leaves behind.
+            _reap_cell_processes(reap_marker)
     result_dir.mkdir(parents=True, exist_ok=True)
     sweep_target_artifacts(target, result_dir, marked)
     logs = result_dir.parent / "logs"
