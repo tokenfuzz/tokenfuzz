@@ -112,7 +112,7 @@ def _resolve_context(report_path: Path, slug: str | None,
             if not up_url and cfg.upstream_url:
                 up_url = cfg.upstream_url
             if not rev:
-                rev = cfg.pinned_rev or cfg.target_rev or ""
+                rev = target_config.audited_rev(cfg)
 
     return EnrichContext(
         report_path=report_path,

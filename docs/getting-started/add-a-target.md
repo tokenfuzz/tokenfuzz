@@ -66,8 +66,8 @@ Notes:
   git/hg checkout is cloned as usual. A plain directory with no VCS
   metadata is symlinked into `targets/<target>/` (never copied, pulled, or
   fetched) and audited in place as a local-only "no VCS" target — its
-  `target.toml` records `upstream_url = "FILL_ME"` and `pinned_rev =
-  "norev"`, and the generated `reproduce.sh` asks for a checkout path
+  `target.toml` records `upstream_url = "FILL_ME"`, and the generated
+  `reproduce.sh` asks for a checkout path
   instead of trying to clone.
 - If a checkout already exists under `targets/<target>/`, the no-URL
   form normally seeds or refreshes the generated config without touching

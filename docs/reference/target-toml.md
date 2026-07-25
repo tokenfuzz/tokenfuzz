@@ -46,7 +46,6 @@ target       = "libxml2"
 upstream_url = "https://gitlab.gnome.org/GNOME/libxml2.git"
 build_system = "cmake"
 build_widening = true
-pinned_rev   = "HEAD"
 
 asan_bin     = "build-asan/xmllint"
 asan_lib     = "build-asan/libxml2.a"
@@ -67,7 +66,6 @@ attacker_controls = ["bytes"]
 | `upstream_url` | Source repository URL used as metadata in exported bundles. |
 | `build_system` | Informational build-system label such as `cmake`, `meson`, `autotools`, or `mach`. |
 | `build_widening` | For ordinary native C/C++ targets, keep the canonical build and prepare one cached ASan sibling with compatible optional in-tree features enabled. Defaults to `true` when absent; set `false` to opt out. |
-| `pinned_rev` | Revision recorded when the config was created. The live revision is captured at audit startup. |
 | `asan_bin` | ASan executable used by generic or browser runs. Relative paths resolve under `targets/<target>/`. |
 | `asan_lib` | ASan library used when compiling C harness testcases. |
 | `includes` | Include directories for C harness builds. Relative paths resolve under `targets/<target>/`. |
@@ -461,12 +459,13 @@ bin/suggest-peers <slug> --apply --force          # re-derive [s6_peers]
 seed and skip LLM enrichment — not recommended unless you have a
 specific reason to stay offline.
 
-## Generated versus live revision
+## The audited revision
 
-`pinned_rev` in `target.toml` is metadata captured at setup
-time. At audit startup, the live source revision is written to
-`.session-env` as `TARGET_REV`.
+`target.toml` records no revision. A revision written once at setup goes
+stale the moment the checkout advances, and a stale commit in an exported
+bundle or a report source link is a wrong answer that reads like a right one.
 
-Use the live revision in reports and exported bundles when the
-two differ. This lets you refresh a target without rewriting
-reviewed config on every source update.
+At audit startup the live source revision is written to `.session-env` as
+`TARGET_REV`, which is exact for that run. Reports and exported bundles use
+it, falling back to the checkout's own current revision when no session
+recorded one.

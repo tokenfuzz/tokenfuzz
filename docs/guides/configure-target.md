@@ -33,7 +33,6 @@ result time. They decide:
 target       = "libxml2"
 upstream_url = "https://gitlab.gnome.org/GNOME/libxml2.git"
 build_system = "cmake"
-pinned_rev   = "HEAD"
 
 asan_bin     = "build-asan/xmllint"
 asan_lib     = "build-asan/libxml2.a"
@@ -58,7 +57,6 @@ harness drive testcases through a language-specific `[runner]` block:
 target       = "my-py-tool"
 upstream_url = "https://example.org/my-py-tool.git"
 build_system = "python"
-pinned_rev   = "HEAD"
 
 is_browser   = "0"
 

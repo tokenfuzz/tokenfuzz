@@ -175,7 +175,7 @@ class Setup:
             reason = "missing"
         elif self.args.force:
             reason = "requested"
-        elif target_config.config_has_live_placeholder(self.toml):
+        elif target_config.config_has_live_placeholder(self.toml, self.target_root):
             reason = "placeholders"
         else:
             try:

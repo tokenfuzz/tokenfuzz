@@ -34,7 +34,7 @@ class PeerFixCardsFacadeTests(unittest.TestCase):
             f'slug = "{self.slug}"\n'
             'upstream_url = "https://example.com/facade-cell-url"\n'
             'build_system = "cmake"\n'
-            'pinned_rev = "facadebeef"\nincludes = []\nlink_libs = []\n'
+            'includes = []\nlink_libs = []\n'
             'is_browser = "0"\n\n[threat_model]\nattacker_controls = ["bytes"]\n',
             encoding="utf-8",
         )

@@ -33,7 +33,7 @@ class ExportReproducerAuditBuildTests(unittest.TestCase):
         output.mkdir(parents=True)
         (output / "target.toml").write_text(
             f'slug = "{slug}"\nupstream_url = "https://example.com/fake"\n'
-            f'build_system = "{build_system}"\npinned_rev = "deadbeef"\n'
+            f'build_system = "{build_system}"\n'
             f'asan_bin = "{asan_bin}"\nasan_lib = ""\nincludes = []\nlink_libs = []\n'
             'is_browser = "0"\n\n[threat_model]\nattacker_controls = ["bytes"]\n'
         )

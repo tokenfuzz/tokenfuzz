@@ -37,7 +37,7 @@ class TargetTomlAutoRepairTests(unittest.TestCase):
     def write_base(self) -> None:
         self.toml.write_text(
             'target = "sampleproj"\nupstream_url = "https://example.invalid/sampleproj"\n'
-            'build_system = "cmake"\npinned_rev = "deadbeef"\n\n'
+            'build_system = "cmake"\n\n'
             'includes = [".", "include"]\nlink_libs = ["/path/to/sample.c"]\n'
             'defines = ["-DNOCRYPT"]\n\n[sanitizer]\nenabled = ["asan"]\n',
             encoding="utf-8",

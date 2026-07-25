@@ -578,6 +578,27 @@ def demangle(text: str) -> str:
 # Templates use literal `__PLACEHOLDER__` tokens for substitutions. The
 # template body is otherwise emitted byte-for-byte.
 
+# Pinning must fail loudly. A bundle that silently builds a different commit
+# than the audit ran on reports "does not reproduce" for a real bug, which is
+# worse than refusing to build at all.
+PIN_REV = """\
+pin_rev() {
+  # Only a working checkout can be pinned. A tree that merely looks like one
+  # (empty .git, stripped metadata) is used as-is, exactly as a plain tree is,
+  # so this stops only where pinning was possible and did not happen.
+  case "$1" in
+    git) git -C "$2" rev-parse --git-dir >/dev/null 2>&1 || return 0
+         git -C "$2" checkout --quiet "$REV" && return 0 ;;
+    hg)  hg --cwd "$2" root >/dev/null 2>&1 || return 0
+         hg --cwd "$2" update -r "$REV" && return 0 ;;
+  esac
+  echo "reproduce.sh: cannot pin $2 to the audited revision $REV" >&2
+  echo "  another commit may not reproduce this crash; fetch that revision" >&2
+  echo "  into the checkout, or omit the path argument to clone it fresh." >&2
+  exit 3
+}
+"""
+
 PREAMBLE_MACH = """\
 #!/usr/bin/env bash
 # Reproduces a __SANITIZER_LABEL__ diagnostic against an upstream Firefox checkout.
@@ -587,13 +608,13 @@ PREAMBLE_MACH = """\
 set -eu
 URL=__UPSTREAM_URL__
 REV=__PINNED_REV__
-
+__PIN_REV__
 if [ $# -ge 1 ]; then
   src="$1"
 elif [ "${REPRO_AUTO_CLONE:-0}" = "1" ]; then
   src="$(dirname "$0")"/__SLUG__
   [ -d "$src/.hg" ] || hg clone "$URL" "$src"
-  hg --cwd "$src" update -r "$REV" 2>/dev/null || true
+  pin_rev hg "$src"
 else
   echo "Usage: $0 /path/to/firefox-src   (or set REPRO_AUTO_CLONE=1 for fresh clone)" >&2
   exit 2
@@ -618,6 +639,7 @@ PREAMBLE_GENERIC = """\
 set -eu
 URL=__UPSTREAM_URL__
 REV=__PINNED_REV__
+__PIN_REV__
 # Audit-tree-relative source path (e.g. targets/<slug>) for a local-only
 # target; empty for VCS targets. Kept relative — not a host-absolute path — so
 # the bundle stays portable and leaks no host layout. Resolve it against the
@@ -666,9 +688,11 @@ if [ ! -d "$src" ]; then
 fi
 # Pin to the recorded revision when this is a VCS checkout; a plain tree
 # (no .git / .hg) is used as-is. Both git and hg are handled so a checkout the
-# operator passes in is pinned either way.
-if [ -d "$src/.git" ]; then
-  git -C "$src" checkout --quiet "$REV" 2>/dev/null || true
+# operator passes in is pinned either way. `.git` is tested with -e, not -d: in
+# a git worktree it is a FILE pointing at the real git dir, and -d skipped the
+# pin entirely there.
+if [ -e "$src/.git" ]; then
+  pin_rev git "$src"
   # Re-sync submodules after pinning: the recorded REV can point them at
   # different commits than the clone fetched, and an operator-supplied checkout
   # may not have them initialized at all. Submodule-dependent builds (e.g. a JIT
@@ -676,7 +700,7 @@ if [ -d "$src/.git" ]; then
   # has no submodules.
   git -C "$src" submodule update --init --recursive 2>/dev/null || true
 elif [ -d "$src/.hg" ]; then
-  hg --cwd "$src" update -r "$REV" 2>/dev/null || true
+  pin_rev hg "$src"
 fi
 
 # Canonicalize to an absolute path now that the tree exists. Out-of-tree
@@ -1173,6 +1197,7 @@ def emit_preamble(build_system: str, upstream_url: str, pinned_rev: str,
             PREAMBLE_MACH,
             __UPSTREAM_URL__=quoted_url,
             __PINNED_REV__=quoted_rev,
+            __PIN_REV__=PIN_REV,
             __SLUG__=quoted_slug,
             __SAN_BIN_REL__=quoted_san_bin_rel,
             __SANITIZER_LABEL__=meta["label"],
@@ -1182,6 +1207,7 @@ def emit_preamble(build_system: str, upstream_url: str, pinned_rev: str,
         PREAMBLE_GENERIC,
         __UPSTREAM_URL__=quoted_url,
         __PINNED_REV__=quoted_rev,
+        __PIN_REV__=PIN_REV,
         # Recorded local source for a local-only target (empty for VCS targets,
         # which clone from upstream instead). shq("") -> '' so the LOCAL_SRC
         # branch is simply skipped at run time.
@@ -3148,6 +3174,8 @@ def main(argv: list[str]) -> int:
         except FileNotFoundError:
             die(f"no backend results/.session-env above {os.getcwd()}; use --slug")
 
+    cfg.target_rev = target_config.audited_rev(cfg)
+
     if args.crash_dir:
         crash_dir = Path(args.crash_dir).resolve()
     else:
@@ -3216,7 +3244,7 @@ def main(argv: list[str]) -> int:
             shutil.copyfile(patch_src, stage / "patch.diff")
 
         upstream_url = cfg.upstream_url or "FILL_ME"
-        pinned_rev = cfg.target_rev or cfg.pinned_rev or "HEAD"
+        pinned_rev = cfg.target_rev or "HEAD"
         slug = cfg.slug or "target"
         cmake_target = cfg.cmake_target or ""
         build_system = cfg.build_system or "cmake"

@@ -69,7 +69,23 @@ def is_placeholder_url(url: str) -> bool:
     return (url or "").strip().lower() in _PLACEHOLDER_URLS
 
 
-def config_has_live_placeholder(toml_path: "str | os.PathLike") -> bool:
+def audited_rev(cfg) -> str:
+    """The revision an audit ran against — "" for a target with no VCS.
+
+    Single source of truth for every consumer that names a commit: exported
+    reproducers, report source links, and promotion records. The session's
+    recorded rev is exact for that run; otherwise the checkout's own HEAD is
+    the only honest answer. target.toml deliberately records no revision — a
+    value written once at setup goes stale the moment the checkout advances,
+    and a stale commit in a bundle or a source link is a wrong answer that
+    reads like a right one.
+    """
+    return cfg.target_rev or detect_rev(cfg.target_root)
+
+
+def config_has_live_placeholder(
+    toml_path: "str | os.PathLike", target_root: "str | os.PathLike",
+) -> bool:
     """True when target.toml has an UNRESOLVED placeholder a re-seed can fix —
     an active (parsed, non-comment) field whose value still contains FILL_ME.
 
@@ -79,8 +95,10 @@ def config_has_live_placeholder(toml_path: "str | os.PathLike") -> bool:
 
       * commented example lines such as `# ubsan_lib = "build-<san>/FILL_ME.a"`,
         which the seed always emits and the TOML parser never sees; and
-      * `upstream_url = "FILL_ME"` on a local-only target (unpinned pinned_rev),
-        which is the intended steady state — re-seeding cannot resolve it.
+      * `upstream_url = "FILL_ME"` on a local-only target — one whose tree is
+        not a VCS checkout, so there is no upstream to resolve. That is asked
+        of the tree itself; a recorded sentinel would only restate it, and
+        would go stale if the tree later became a checkout.
 
     A grep for FILL_ME cannot make these distinctions (it matches comments and
     the local-only upstream), which is why this parses the TOML instead.
@@ -89,7 +107,7 @@ def config_has_live_placeholder(toml_path: "str | os.PathLike") -> bool:
         parsed = parse_toml(Path(toml_path))
     except Exception:
         return False  # unparsable config is handled by the caller's own check
-    upstream_unresolvable = is_unpinned_rev(str(parsed.get("pinned_rev", "") or ""))
+    upstream_unresolvable = detect_repo_type(target_root) == "none"
 
     def _walk(obj, key=None) -> bool:
         if isinstance(obj, str):
@@ -1701,13 +1719,11 @@ def seed_toml(
 
     if not upstream_url:
         upstream_url = _detect_upstream_url(root)
-    pinned_rev = detect_rev(root)
 
     out.parent.mkdir(parents=True, exist_ok=True)
 
     upstream_v = upstream_url or "FILL_ME"
     build_system_v = build_system or "unknown"
-    pinned_v = pinned_rev or "HEAD"
 
     # When introspection finds no ASan binary or archive, emit the field
     # commented out rather than as a "FILL_ME" placeholder string. A literal
@@ -1738,7 +1754,6 @@ def seed_toml(
         f"target        = {toml_basic_string(slug)}",
         f"upstream_url  = {toml_basic_string(upstream_v)}",
         f"build_system  = {toml_basic_string(build_system_v)}",
-        f"pinned_rev    = {toml_basic_string(pinned_v)}",
         *(
             [
                 "",
@@ -2037,7 +2052,6 @@ class Config:
     build_widening: bool = False
     build_configs: list[build_config.BuildConfig] = field(default_factory=list)
     cmake_target: str = ""
-    pinned_rev: str = ""
     is_browser: str = "0"
 
     includes: list[str] = field(default_factory=list)
@@ -2340,8 +2354,6 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
             cfg.build_system = v
         elif k == "build_widening" and isinstance(v, bool):
             cfg.build_widening = v
-        elif k == "pinned_rev" and isinstance(v, str):
-            cfg.pinned_rev = v
         elif k == "is_browser":
             cfg.is_browser = _toml_value_to_str(v)
         elif k == "includes" and isinstance(v, list):

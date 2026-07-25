@@ -114,6 +114,20 @@ assert_in("REV='rev $(id)'", pre,
           "emit_preamble: revision shell-quoted")
 assert_in('default_src="$(dirname "$0")"/bad-slug-id', pre,
           "emit_preamble: auto-clone slug sanitized")
+# A bundle that silently builds a different commit reports "does not
+# reproduce" for a real bug, so a possible pin that fails has to stop.
+for _preamble, _label in ((pre, "generic"), (
+    er.emit_preamble("mach", "https://x/y", "abc", "x", "bin/ignored"), "mach",
+)):
+    assert_in("pin_rev()", _preamble,
+              f"emit_preamble ({_label}): pins through the checked helper")
+    assert_not_in('checkout --quiet "$REV" 2>/dev/null || true', _preamble,
+                  f"emit_preamble ({_label}): a failed pin is not swallowed")
+    assert_not_in('update -r "$REV" 2>/dev/null || true', _preamble,
+                  f"emit_preamble ({_label}): a failed hg pin is not swallowed")
+# `.git` is a FILE in a git worktree, so -d skipped the pin entirely there.
+assert_in('if [ -e "$src/.git" ]; then', pre,
+          "emit_preamble: a git worktree is still pinned")
 bin_resolve = er.emit_bin_resolve("build-asan/bin/x$(id)")
 assert_in('san_bin="$build"/\'bin/x$(id)\'', bin_resolve,
           "emit_bin_resolve: build path shell-quoted")
@@ -1805,7 +1819,6 @@ target_root.mkdir(parents=True)
 slug = "exr-py-test"
 upstream_url = "https://example.com/repo"
 build_system = "cmake"
-pinned_rev = "abc123"
 asan_bin = "build-asan/demo"
 asan_lib = "build-asan/libdemo.a"
 includes = ["include"]

@@ -334,6 +334,15 @@ if shutil.which("git"):
 assert_eq("", tc.detect_rev(TEST_TMPDIR / "missing-rev-target"),
           "detect_rev: missing source tree stays empty")
 
+# audited_rev: the session's recorded rev is exact for that run and wins; with
+# none recorded the checkout's own HEAD is the only honest answer.
+_rev_cfg = tc.Config(target_root=str(plain_rev_root), target_rev="feedface")
+assert_eq("feedface", tc.audited_rev(_rev_cfg),
+          "audited_rev: the session's recorded rev wins")
+_rev_cfg.target_rev = ""
+assert_eq("norev", tc.audited_rev(_rev_cfg),
+          "audited_rev: falls back to the tree's own revision")
+
 
 # ─── 10. seed_toml emits a parseable file with [threat_model] ───────
 
@@ -344,8 +353,8 @@ tc.seed_toml(seed_root, out, "https://example.com/repo")
 text = out.read_text(encoding="utf-8")
 assert_in('target        = "seed-target"', text,
           "seeded toml has target field")
-assert_in('pinned_rev    = "norev"', text,
-          "seeded toml uses norev for plain source tree")
+assert_not_in("pinned_rev", text,
+              "seeded toml records no revision (it goes stale; see audited_rev)")
 assert_in("[threat_model]", text, "seeded toml has [threat_model] header")
 assert_in('attacker_controls = ["bytes"]', text,
           "seeded toml has bytes-only default for non-browser target")
@@ -1153,32 +1162,40 @@ def _write_toml(name: str, body: str) -> Path:
     p.write_text(body, encoding="utf-8")
     return p
 
-# Local-only steady state: upstream FILL_ME + unpinned rev → NOT a placeholder.
+# Whether a FILL_ME upstream is resolvable is asked of the tree, not of a
+# recorded sentinel: a plain tree has no upstream to detect, a checkout does.
+_plain_tree = TEST_TMPDIR / "placeholder-plain"
+_plain_tree.mkdir()
+_checkout = TEST_TMPDIR / "placeholder-checkout"
+_checkout.mkdir()
+subprocess.run(["git", "-C", str(_checkout), "init", "-q"], check=True)
+
+# Local-only steady state: upstream FILL_ME on a non-VCS tree → NOT a placeholder.
 _local_only = _write_toml("local_only.toml",
-    'target = "x"\nupstream_url = "FILL_ME"\npinned_rev = "norev"\n'
+    'target = "x"\nupstream_url = "FILL_ME"\n'
     '# ubsan_lib = "build-ubsan/FILL_ME.a"\nlink_libs = ["-lm"]\n')
-assert_eq(False, tc.config_has_live_placeholder(_local_only),
+assert_eq(False, tc.config_has_live_placeholder(_local_only, _plain_tree),
           "config_has_live_placeholder: local-only FILL_ME upstream is steady state")
 
 # Commented example FILL_ME only (fully-configured target) → NOT a placeholder.
 _commented = _write_toml("commented.toml",
-    'target = "x"\nupstream_url = "https://h/r"\npinned_rev = "abc123"\n'
+    'target = "x"\nupstream_url = "https://h/r"\n'
     'asan_bin = "build-asan/x"\n# msan_lib = "build-msan/FILL_ME.a"\n')
-assert_eq(False, tc.config_has_live_placeholder(_commented),
+assert_eq(False, tc.config_has_live_placeholder(_commented, _checkout),
           "config_has_live_placeholder: commented FILL_ME lines are not placeholders")
 
 # Active FILL_ME in a build field → IS a placeholder needing refresh.
 _active = _write_toml("active.toml",
-    'target = "x"\nupstream_url = "https://h/r"\npinned_rev = "abc123"\n'
+    'target = "x"\nupstream_url = "https://h/r"\n'
     'asan_lib = "build-asan/FILL_ME.a"\n')
-assert_eq(True, tc.config_has_live_placeholder(_active),
+assert_eq(True, tc.config_has_live_placeholder(_active, _checkout),
           "config_has_live_placeholder: an active FILL_ME build field needs refresh")
 
-# Real upstream but FILL_ME URL with a pinned rev → re-detect (not local-only).
+# FILL_ME URL on a real checkout → re-detect it (not local-only).
 _url_unfilled = _write_toml("url_unfilled.toml",
-    'target = "x"\nupstream_url = "FILL_ME"\npinned_rev = "abc123"\n')
-assert_eq(True, tc.config_has_live_placeholder(_url_unfilled),
-          "config_has_live_placeholder: FILL_ME upstream with a pinned rev still refreshes")
+    'target = "x"\nupstream_url = "FILL_ME"\n')
+assert_eq(True, tc.config_has_live_placeholder(_url_unfilled, _checkout),
+          "config_has_live_placeholder: FILL_ME upstream on a checkout still refreshes")
 
 
 # ─── build_freshness / build_write_stamp ────────────────────────────

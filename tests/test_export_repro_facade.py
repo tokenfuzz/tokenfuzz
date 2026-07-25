@@ -34,7 +34,7 @@ class ExportReproducerFacadeTests(unittest.TestCase):
             url = "https://example.com/facade-cell-url"
             (slug_dir / "target.toml").write_text(
                 f'slug = "{slug}"\nupstream_url = "{url}"\n'
-                'build_system = "cmake"\npinned_rev = "facadebeef"\n'
+                'build_system = "cmake"\n'
                 'asan_bin = "build-asan/unused"\nasan_lib = ""\n'
                 'includes = ["sentinel-include-only-in-facade"]\nlink_libs = []\n'
                 'is_browser = "0"\n\n[threat_model]\nattacker_controls = ["bytes"]\n'

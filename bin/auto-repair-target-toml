@@ -69,7 +69,7 @@ import llm_decide  # noqa: E402
 # Top-level scalar/array names the LLM is allowed to extend. These three
 # arrays are the only fields that legitimately need new entries to fix
 # a "missing TU / missing header / missing macro" link error. Everything
-# else (target, upstream_url, pinned_rev, build_system, asan_bin, …)
+# else (target, upstream_url, build_system, asan_bin, …)
 # defines what's under audit and must never be auto-edited.
 _EDITABLE_FIELDS = ("includes", "link_libs", "defines")
 

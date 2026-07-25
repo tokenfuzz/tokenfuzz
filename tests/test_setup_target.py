@@ -206,7 +206,7 @@ class SetupTargetTests(unittest.TestCase):
         (plain / "main.cpp").write_text("int main() { return 0; }\n")
         process = self.setup("plain-cpp", "--build", environment={"LLM_DECIDE_DISABLE": "1"})
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-        self.assertIn('pinned_rev    = "norev"', self.config("plain-cpp").read_text())
+        self.assertNotIn("pinned_rev", self.config("plain-cpp").read_text())
         self.assertIn("Using existing targets/plain-cpp as a plain source tree", process.stdout)
         process = self.setup(
             "plain-cpp", str(self.remote), "--ref", "main",
@@ -228,7 +228,7 @@ class SetupTargetTests(unittest.TestCase):
         self.assertTrue((link / "CMakeLists.txt").is_file())
         text = self.config("extlink").read_text()
         self.assertIn('upstream_url  = "FILL_ME"', text)
-        self.assertIn('pinned_rev    = "norev"', text)
+        self.assertNotIn("pinned_rev", text)
         self.assertNotIn(str(external), text)
         self.assertIn("non-VCS source", process.stdout)
 

@@ -33,7 +33,7 @@ class ExportReproducerRunTests(unittest.TestCase):
             crash.mkdir(parents=True)
             (output / "target.toml").write_text(
                 'slug = "exr-run-test"\nupstream_url = "https://example.com/fake"\n'
-                'build_system = "cmake"\npinned_rev = "deadbeef"\n'
+                'build_system = "cmake"\n'
                 'asan_bin = "build-asan/unused"\nasan_lib = ""\n'
                 'includes = []\nlink_libs = []\nis_browser = "0"\n\n'
                 '[threat_model]\nattacker_controls = ["bytes"]\n'
