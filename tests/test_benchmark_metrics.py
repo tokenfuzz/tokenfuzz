@@ -369,6 +369,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("codex", "gpt-5.4-mini", "0.75", "0.075", "4.50"),
             ("codex", "gpt-5.4-nano", "0.20", "0.02", "1.25"),
             ("codex", "gpt-5.4-pro", "30", "0", "180"),
+            ("codex", "gpt-5.3-codex", "1.75", "0.175", "14"),
             ("codex", "gpt-5.2", "1.75", "0.175", "14"),
             ("codex", "gpt-5.2-pro", "21", "0", "168"),
             ("codex", "gpt-5.1", "1.25", "0.125", "10"),
@@ -389,6 +390,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("codex", "gpt-3.5-turbo", "0.50", "0", "1.50"),
             ("claude", "claude-fable-5", "10", "1", "50"),
             ("claude", "claude-mythos-5", "10", "1", "50"),
+            ("claude", "claude-opus-5", "5", "0.50", "25"),
             ("claude", "claude-opus-4-8", "5", "0.50", "25"),
             ("claude", "claude-opus-4-5", "5", "0.50", "25"),
             ("claude", "claude-opus-4-1", "15", "1.50", "75"),
@@ -401,7 +403,9 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("claude", "claude-haiku-4-5-20251001", "1", "0.10", "5"),
             ("claude", "claude-3-5-haiku-20241022", "0.80", "0.08", "4"),
             ("claude", "claude-3-haiku-20240307", "0.25", "0.03", "1.25"),
+            ("gemini", "gemini-3.6-flash", "1.50", "0.15", "7.50"),
             ("gemini", "gemini-3.5-flash", "1.50", "0.15", "9"),
+            ("gemini", "gemini-3.5-flash-lite", "0.30", "0.03", "2.50"),
             ("gemini", "gemini-3.1-pro-preview", "2", "0.20", "12"),
             ("gemini", "gemini-3.1-flash-lite", "0.25", "0.025", "1.50"),
             ("gemini", "gemini-3-flash-preview", "0.50", "0.05", "3"),
@@ -411,7 +415,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("gemini", "gemini-2.0-flash", "0.10", "0.025", "0.40"),
             ("gemini", "gemini-2.0-flash-lite", "0.075", "0", "0.30"),
             ("grok", "grok-build-0.1", "1", "0.20", "2"),
-            ("grok", "grok-4.5", "2", "0.50", "6"),
+            ("grok", "grok-4.5", "2", "0.30", "6"),
             ("grok", "grok-4.3", "1.25", "0.20", "2.50"),
             ("grok", "grok-4.20-0309-reasoning", "1.25", "0.20", "2.50"),
         )
@@ -435,8 +439,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertIsNone(benchmark._pricing_rates("codex", "gpt-5.6-mini"))
         self.assertIsNone(benchmark._pricing_rates("codex", "gpt-5.60"))
         self.assertIsNone(benchmark._pricing_rates("codex", "gpt-5-6"))
-        self.assertIsNone(benchmark._pricing_rates("claude", "claude-opus-5"))
         self.assertIsNone(benchmark._pricing_rates("claude", "claude-haiku-5"))
+        self.assertIsNone(benchmark._pricing_rates("claude", "claude-opus-6"))
         sonnet_standard = benchmark._pricing_rates(
             "claude", "claude-sonnet-5", priced_at="2026-09-01",
         )
@@ -466,6 +470,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
 
         claude_cache = (
             ("claude-fable-5", "12.50", "20"),
+            ("claude-opus-5", "6.25", "10"),
             ("claude-opus-4-8", "6.25", "10"),
             ("claude-sonnet-5", "2.50", "4"),
             ("claude-sonnet-4-6", "3.75", "6"),
@@ -516,9 +521,16 @@ class BenchmarkMetricsTests(unittest.TestCase):
         grok_standard, _ = benchmark._cost_decimal(
             "grok", "grok-4.5",
             input_tokens=1_000_000, cached_input_tokens=1_000_000,
-            output_tokens=1_000_000,
+            output_tokens=1_000_000, prompt_tokens_for_tier=199_999,
         )
-        self.assertEqual(benchmark._decimal_text(grok_standard), "8.500000")
+        self.assertEqual(benchmark._decimal_text(grok_standard), "8.300000")
+
+        grok_long, _ = benchmark._cost_decimal(
+            "grok", "grok-4.5",
+            input_tokens=1_000_000, cached_input_tokens=1_000_000,
+            output_tokens=1_000_000, prompt_tokens_for_tier=200_001,
+        )
+        self.assertEqual(benchmark._decimal_text(grok_long), "16.600000")
 
         # Vendor thresholds are per request. Harness rows retain the rendered
         # prompt size, so cumulative session input must not force the high tier.

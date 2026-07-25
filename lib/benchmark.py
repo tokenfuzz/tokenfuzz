@@ -952,6 +952,7 @@ def _pricing_rates(
             }
         if _model_id_is(
             m,
+            "claude-opus-5",
             "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
             "claude-opus-4-5",
         ):
@@ -961,7 +962,7 @@ def _pricing_rates(
                 "cache_write_1h": _money("10"),
                 "cache_read": _money("0.50"),
                 "output": _money("25"),
-                "source": "claude-api-opus-4.5-4.8",
+                "source": "claude-api-opus-4.5-5",
             }
         if _model_id_is(
             m,
@@ -1142,6 +1143,7 @@ def _pricing_rates(
         # Remaining standard-tier text models on OpenAI's public rate card.
         # Specific snapshots with exceptional prices precede their aliases.
         openai_flat = (
+            (("gpt-5.3-codex",), "1.75", "0.175", "14"),
             (("gpt-5.2-pro",), "21", None, "168"),
             (("gpt-5.2",), "1.75", "0.175", "14"),
             (("gpt-5.1",), "1.25", "0.125", "10"),
@@ -1188,12 +1190,26 @@ def _pricing_rates(
             return rates
 
     if b == "gemini":
+        if _model_id_is(m, "gemini-3.6-flash"):
+            return {
+                "input": _money("1.50"),
+                "cache_read": _money("0.15"),
+                "output": _money("7.50"),
+                "source": "gemini-api-3.6-flash-standard",
+            }
         if _model_id_is(m, "gemini-3.5-flash"):
             return {
                 "input": _money("1.50"),
                 "cache_read": _money("0.15"),
                 "output": _money("9"),
                 "source": "gemini-api-3.5-flash-standard",
+            }
+        if _model_id_is(m, "gemini-3.5-flash-lite"):
+            return {
+                "input": _money("0.30"),
+                "cache_read": _money("0.03"),
+                "output": _money("2.50"),
+                "source": "gemini-api-3.5-flash-lite-standard",
             }
         if _model_id_is(
             m,
@@ -1270,18 +1286,31 @@ def _pricing_rates(
             }
 
     if b == "grok":
+        # xAI long-context pricing: a prompt past the threshold bills every
+        # token in the request at the higher rate. Cache writes have no
+        # separate rate and bill as base input.
         if _model_id_is(m, "grok-build-0.1"):
             return {
-                "input": _money("1"),
-                "cache_read": _money("0.20"),
-                "output": _money("2"),
+                "tiered": True,
+                "threshold": 200_000,
+                "input_low": _money("1"),
+                "input_high": _money("2"),
+                "cache_read_low": _money("0.20"),
+                "cache_read_high": _money("0.40"),
+                "output_low": _money("2"),
+                "output_high": _money("4"),
                 "source": "xai-code-api-grok-build-0.1",
             }
         if _model_id_is(m, "grok-4.5"):
             return {
-                "input": _money("2"),
-                "cache_read": _money("0.50"),
-                "output": _money("6"),
+                "tiered": True,
+                "threshold": 200_000,
+                "input_low": _money("2"),
+                "input_high": _money("4"),
+                "cache_read_low": _money("0.30"),
+                "cache_read_high": _money("0.60"),
+                "output_low": _money("6"),
+                "output_high": _money("12"),
                 "source": "xai-chat-api-grok-4.5",
             }
         if _model_id_is(
@@ -1292,9 +1321,14 @@ def _pricing_rates(
             "grok-4.20-0309-non-reasoning",
         ):
             return {
-                "input": _money("1.25"),
-                "cache_read": _money("0.20"),
-                "output": _money("2.50"),
+                "tiered": True,
+                "threshold": 200_000,
+                "input_low": _money("1.25"),
+                "input_high": _money("2.50"),
+                "cache_read_low": _money("0.20"),
+                "cache_read_high": _money("0.40"),
+                "output_low": _money("2.50"),
+                "output_high": _money("5"),
                 "source": "xai-chat-api-grok-4.3/4.20",
             }
     return None

@@ -7,7 +7,7 @@
 # lib/llm_invoke.py:agy_model_label.
 
 [models]
-claude = "claude-opus-4-8"
+claude = "claude-opus-5"
 codex  = "gpt-5.6-sol"
 gemini = "gemini-3.1-pro-preview"
 grok   = "grok-build-0.1"
