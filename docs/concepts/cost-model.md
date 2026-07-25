@@ -38,17 +38,16 @@ of those — the columns of the table above map onto these two rules.
 
 ## Cache-friendly prompt prefix
 
-The harness writes a fixed-suffix file (`.static-prompt-rules.md`)
-once per iteration, plus a safety-framing block computed once per
-audit process. Every agent's prompt begins with that identical
-prefix, so each backend's prompt cache absorbs the prefix on every
-turn and the harness pays the cache-hit price (a fraction of the
-normal input price) instead of the full prefill price.
+Every agent's prompt begins with an identical fixed prefix (the shared
+rules and safety framing). Because it never changes turn to turn, the
+backend's prompt cache absorbs it and the harness pays the cache-hit
+price — a fraction of the normal input price — instead of re-sending it
+in full each turn.
 
-The dynamic parts of the prompt (coverage-gap suggestions, cross-agent
-summaries, the agent's own state snippets) are computed per agent
-during prompt assembly — they are not shared across agents. The cost
-win is from the static prefix, not from sharing dynamic content.
+Only the parts that genuinely differ per agent — coverage-gap
+suggestions, cross-agent summaries, the agent's own state — come after
+that prefix. The cost win is the stable prefix, not any sharing of the
+dynamic tail.
 
 ## Capped source reading
 
@@ -98,9 +97,12 @@ agents**.
   directs it to wrap up the active hypothesis. The enforcement is
   soft — in-flight work is not killed mid-turn.
 
-This is the lever that bounds long unattended runs. Without it, one
+This is the lever that bounds a single agent's spend. Without it, one
 agent in a tight retry loop can burn an evening of wall-clock time
-and produce nothing.
+and produce nothing. To cap the *whole* continuous run instead of each
+agent, set `AUDIT_WALL_BUDGET_SECS`: the loop stops launching new
+iterations once that wall-clock budget is spent, which is the simplest
+way to leave an overnight audit running with a hard stop.
 
 Long backend sessions also have an automatic command-count guard. The
 watcher ends an oversized session cleanly so the next iteration can resume

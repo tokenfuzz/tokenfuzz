@@ -106,14 +106,9 @@ FIND directories without a report get a `.needs-content` marker and
 surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. A gate pass with
 Reject votes below quorum leaves `.pending-drop`; reaching quorum moves
 the directory to `findings-rejected/` rather than deleting it. `touch
-.reviewed` (or `.keep`) inside a FIND directory pins it
-past either gate. Successful partial quality votes are stored in
-`.llm-find-quality.json` and reused on the next pass. The cache records both
-the bounded, agent-authored substance reviewed by the gate and the semantic
-identity of the complete report; editing substantive content invalidates both
-partial progress and a terminal verdict, including for read-only benchmark and
-clustering consumers. Mechanical severity, patch, enrichment, and cluster
-annotations do not.
+.reviewed` (or `.keep`) inside a FIND directory pins it past either gate.
+Editing the report's substance re-opens its review; mechanical severity,
+patch, enrichment, and cluster annotations do not.
 
 A short run may leave `crashes/` and `findings/` empty — that is
 not a failed run by itself. Check the rejected indexes first to
@@ -132,12 +127,9 @@ CRASH-001-1/
 ```
 
 A crash that triage has accepted but not finished promoting carries a
-`.promotion_pending` marker. The adjacent `.promotion_pending.sig` and
-`.promotion_pending.count` files record whether the same artifact set has
-remained incomplete across triage passes. They clear when the bundle below is
-complete. A directory that remains incomplete for the configured TTL is
-preserved under `crashes-rejected/` with the missing artifacts named in its
-rejection report.
+`.promotion_pending` marker, which clears once the export bundle below is
+complete. A directory that stays incomplete past the configured TTL is moved to
+`crashes-rejected/` with the missing artifacts named in its rejection report.
 
 Pending promotion is resumable work. `bin/state resume --agent N` presents an
 unfinished bundle before active hypotheses or new work cards. Its sanitizer
@@ -160,11 +152,9 @@ CRASH-001-1/
   .dup-of               # only on non-canonical cluster members
 ```
 
-Accepted crashes may carry other dot-files the triage gates leave
-behind. `.crash-created-at` is the immutable filing clock used by benchmark
-discovery graphs (and moves under `.audit/` after export); `.llm-*.json` vote
-caches, `.severity_ok`, and similar markers are other examples. All of these
-are harness internals — safe to ignore when reviewing.
+Accepted crashes may carry other dot-files the triage gates leave behind
+(vote caches, timing and scoring markers, and the like). All of them are
+harness internals — safe to ignore when reviewing.
 
 `REPORT.md` carries a `Cluster: <ID>` line. Non-canonical cluster
 members also have a `.dup-of` file naming the canonical CRASH. The

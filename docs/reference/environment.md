@@ -31,6 +31,7 @@ NUM_AGENTS=4 bin/audit --target <target> --backend <backend>
 | Variable | Default | Use it for |
 | --- | --- | --- |
 | `AGENT_TIMEOUT` | `7200` seconds | Hard wall-clock ceiling for one agent launch. |
+| `AUDIT_WALL_BUDGET_SECS` | `0` (off) | Overall wall-clock ceiling for a continuous run. The loop stops launching new iterations once the budget is spent. Use it to bound an unattended overnight run without a fixed iteration count. |
 | `TURN_SOFT_CAP` | `75` completed commands | Restart a Codex audit session with fresh context after this many shell commands. A newly confirmed crash gets a bounded report-enrichment tail and resumes first if still unfinished. Set `0` to disable. |
 | `MAX_DRY_SESSIONS` | `10` | Stop a continuous run after this many dry iterations; the harness may raise a value that would prevent fair strategy rotation. |
 | `ASAN_AUTOENFORCE_MAX` | `3` | Maximum orphan testcases the post-iteration pass probes automatically. Set `0` to report them without running them. |
@@ -61,7 +62,7 @@ are most useful in a shared shell or when a backend binary is outside `PATH`.
 | `OPENCODE_BIN` | `opencode` | OpenCode executable for `--backend oss`. |
 | `USE_GEMINI_CLI` | `0` | Use Google Gemini CLI instead of the default Antigravity CLI. |
 | `AUDIT_MODEL_PREFLIGHT` | `1` | Launch the selected model once through the real agent path before starting. Set `0` only for an intentionally offline/mock run. |
-| `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds | Ceiling for each model preflight attempt. |
+| `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds (`300` for `gemini` under `USE_GEMINI_CLI=1`) | Ceiling for each model preflight attempt. |
 | `AUDIT_MODEL_PREFLIGHT_ATTEMPTS` | `3` | Number of model preflight attempts. |
 | `LLM_DECISION_TIMEOUT` | `45` seconds hosted, `180` seconds OSS | Override the per-decision ceiling for focused triage and validation LLM calls. |
 

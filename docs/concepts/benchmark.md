@@ -30,16 +30,12 @@ Each benchmark run is a small controlled experiment:
 | `model-direct` | `<model>-direct` when the model is known, otherwise `<backend>-direct` | One agent with a bare vulnerability-hunting prompt. This is the control. |
 | `harness` | `tokenfuzz` | `bin/audit` as shipped: ranked work cards, strategy rotation, `bin/probe`, triage, validation, clustering, severity scoring, and reproducer bundling. |
 
-Each cell blocks instruction-file discovery above its launch directory using
-the backend's enforceable mechanism. Claude runs in safe mode; Codex and Gemini
-CLI disable parent traversal; and Antigravity and Grok Build receive a local
-project boundary. Backend customizations are also disabled where the CLI
-provides a per-run control: Codex disables plugins, OpenCode runs in pure mode,
-and Gemini CLI disables skills and extensions. This keeps an operator-installed
-security workflow from duplicating TokenFuzz's own orchestration or
-contaminating the model-direct control. Antigravity and Grok Build currently
-expose no equivalent one-shot plugin and skill isolation control, so disable
-their installed plugins and skills before using them for benchmark claims.
+Each cell isolates the backend from any instruction files, plugins, or skills
+you have installed, using whatever per-run control that CLI provides. This keeps
+an operator-installed security workflow from duplicating TokenFuzz's own
+orchestration or contaminating the model-direct control. Antigravity and Grok
+Build have no such one-shot control yet, so disable their installed plugins and
+skills by hand before using them for benchmark claims.
 
 The `--conditions` flag always uses the stable tokens
 `model-direct` and `harness`. The rendered labels are reader-facing
@@ -156,15 +152,6 @@ receives the same trigger-review bypass; a clean or unexecutable replay is
 preserved as a finding, and a measured 0/5 diagnostic is never counted as a
 confirmed crash.
 
-Source validators put their invariant instructions and target context before
-candidate-specific facts. Repeated calls can therefore reuse the provider's
-prompt-prefix cache without shortening the source-reading budget or changing
-the vote contract.
-
-Harness benchmark cells use the audit runner's bounded early-worker refill:
-an idle slot can launch one replacement while a peer is still running, without
-exceeding the configured concurrent-agent count.
-
 ## Where results land
 
 All benchmark state lives under one root:
@@ -183,10 +170,9 @@ output/benchmark/
       pool/
 ```
 
-`run.json` records both the selected model and `resolved_effort`. Every
-`logs/index.jsonl` usage event repeats `resolved_effort`, so archived runs show
-the backend-native reasoning setting that was actually passed to the CLI even
-when the operator's global backend settings differ.
+`run.json` records the model and the reasoning effort actually passed to the
+CLI, so an archived run stays reproducible even if your global backend settings
+later change.
 
 The root `benchmark-result.html` is the cross-backend comparison. It appears
 after the first cell saves metrics and refreshes after each later cell. While a
@@ -194,13 +180,11 @@ run is active, a **Provisional** banner marks the page: it shows finalized-cell
 counts and cell status, while unique counts and severity remain pending. A
 running cell contributes no counts until its own triage and validation finish.
 
-The expensive pooled comparison is still rebuilt only once after the final
-cell. That pass performs sanitizer revalidation, bundling, clustering, and
-final report rendering; the live refresh only reads the atomic `cell.json` and
-`metrics.json` files. Genuinely incomplete-cell evidence is labeled as observed
-and stays excluded from medians and completed-cell totals. Artifact-level
-finalization state remains available in cell metrics and linked reports without
-widening the cross-run comparison table.
+The full pooled comparison — sanitizer revalidation, bundling, clustering, and
+final rendering — is rebuilt only once, after the last cell; the live refresh in
+between is a cheap read of already-finalized cells. Evidence from a genuinely
+incomplete cell is labeled as observed and stays out of the medians and
+completed-cell totals, so it can never inflate the comparison.
 
 Each backend also has an append-only ledger,
 `output/benchmark/<backend>/benchmark-results.html`, with one section
@@ -261,16 +245,11 @@ that produced the number.
 row per target revision, findings and crashes side by side. Each step is one
 deduplicated accepted result placed at the hour it was found, so the curve only
 climbs and ends exactly on the `Unique accepted` count. The chip above each
-curve shows what the gate accepted and rejected. Discovery times come from the
-`finding_created` stamps in `state/events.jsonl` and the immutable filing clock
-on new crash bundles. Runs recorded before those clocks existed fall back to
-the artifacts' own timestamps. When a discovery time is unavailable, the panel
-says the timing is approximate rather than implying an exactness it does not
-have. Accepted and rejected artifacts are deduplicated separately. Because one
-root with mixed gate decisions can appear on both sides, the graph reports both
-counts without inferring a retention percentage. A `≤` rejected count remains
-a conservative upper bound. Neither count is precision, which needs the answer
-key described below.
+curve shows what the gate accepted and rejected. When a result's discovery time
+can't be recovered, the panel flags the timing as approximate rather than
+faking precision. Accepted and rejected results are deduplicated separately, and
+a `≤` rejected count is a conservative upper bound — neither figure is
+*precision*, which needs the answer key described below.
 
 **Token usage** appears when the backend reports usage or the harness
 can estimate prompt size. The bold row per condition is the total to
@@ -435,18 +414,14 @@ the pool, re-runs severity scoring and crash/finding clustering,
 refreshes per-condition cluster reports, rewrites `report.json`, and
 updates `benchmark-result.{md,html}` plus the backend ledger row.
 
-It also recomputes stale cell status after post-processing succeeds. This
-recovers runs written by older versions that marked a whole cell incomplete
-because one artifact was pending; provider-limited and failed cells remain
+It also recomputes cell status, so a cell an older run marked incomplete over a
+single pending artifact can recover; provider-limited and failed cells stay
 excluded.
 
-The exported reproducer bundle pass still runs, but stays additive: a
-crash with no canonical bundle yet (a model-direct freeform baseline,
-never bundled at audit time) gets one, while already-bundled crashes —
-every harness crash, plus any hand-edited report — are left untouched,
-never re-bundled or re-rendered. Re-bundling an existing report would
-need live audit-session state and could overwrite hand edits, so the
-pass skips anything that already carries a canonical bundle.
+The reproducer-bundle pass is additive: a crash that was never bundled (a
+model-direct baseline) gets a bundle, while already-bundled and hand-edited
+crashes are left untouched. `--regenerate` never re-bundles or overwrites an
+existing report.
 
 Reproduction rate is measured the same way for every pooled crash, so
 the rate is comparable across conditions: any crash lacking a measured

@@ -49,11 +49,8 @@ and the configured threat model decide the normal disposition. On top
 of that, an independent source-reading *trigger reviewer* can reject a
 sanitizer-confirmed crash, but only after two disproof-backed Reject
 votes; missing or inconclusive reviewer output fails open and keeps the
-crash. Trigger votes are cached against the exact report substance and
-reviewer version that produced them, so a substantive report edit or a
-classification-rule change forces a fresh review (and fails open while
-that review is unavailable). Generated severity, patch, enrichment, and
-cluster annotations do not spend another review.
+crash. Editing a report's substance forces a fresh review; generated
+severity, patch, and cluster annotations do not.
 
 **Findings** use a parallel two-vote mechanism: the substance gate
 needs two accepts to confirm, or two rejects to move a FIND to
@@ -95,9 +92,7 @@ look at the `Status` column (`OK`, `NEEDS CONTENT`, or `NEEDS
 ATTENTION`). `NEEDS CONTENT` means no `report.md` yet; `NEEDS ATTENTION`
 is set by a `.needs-attention` marker the harness drops on a report that
 needs a closer human look. A separate `.pending-drop` marker (not shown
-in this column) means a review pass ended below reject quorum. Valid votes
-survive an interrupted pass in `.llm-find-quality.json`; a report edit
-invalidates that content-addressed progress before review resumes.
+in this column) means a review pass ended below reject quorum.
 
 ## What a strong crash looks like
 

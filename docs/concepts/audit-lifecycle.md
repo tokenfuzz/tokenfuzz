@@ -68,17 +68,13 @@ builds run explicitly through `bin/setup-target <target> --build`. After the
 required build exists, refresh the generated config and review only unresolved
 or incorrect values.
 
-For ordinary native targets, the regular `build-asan` remains the control and a
-cached widened ASan sibling explores compatible optional in-tree features. With
-multiple reproducer agents, the harness assigns alternates only to a minority
-slot; with one agent, it assigns about one closed-work iteration in four to an
-alternate. A confirmed alternate-build crash is automatically replayed five
-times on the primary build. Triage records whether the same fault reproduces
-there and keeps ordinary trigger review enabled when it does not. This spends extra build time
-once without allowing broader configuration coverage to erase bugs specific to
-the project's regular configuration. Automatic preflight limits that extra work
-to ten minutes total and falls open to the primary; explicit build preparation
-can run longer when a large target needs it.
+For ordinary native targets, the regular `build-asan` stays the control while a
+cached widened ASan sibling spends a minority of the audit's effort on
+compatible optional in-tree features. A crash found on the widened build is
+replayed on the primary and triaged there, so broader configuration coverage
+never erases a bug specific to the project's regular build. Preflight caps this
+extra build work at ten minutes and falls open to the primary; set
+`build_widening = false` in `target.toml` to turn it off.
 
 ## 3. Run the audit
 
@@ -108,17 +104,12 @@ Each agent works on **one hypothesis at a time**:
    configured sanitizer or runner, revise the input and try again.
 6. If it does, confirm the result and move it through triage.
 
-Investigation depth follows evidence. A deterministic hypothesis can close
-after one clean probe only when the testcase directly exercised its exact
-trigger. Allocator-, scheduler-, race-, GC-, timing-, re-entrancy-, and
-state-dependent triggers need repetition or distinct inputs. Before a whole
-work card is discarded, the harness requires three card-linked clean probe
-runs across two distinct hypothesis shapes that were actually probed. This
-preserves breadth without charging every cold hypothesis for several variants.
-If no configured build or mode can execute the surface, the agent records an
-ENV-BLOCKED hypothesis instead; that soft-blocks the card for the current
-result set without pretending that MISSED probes were clean evidence. Proven
-mode-incompatible, stale, or non-public cards use the same soft `blocked` exit.
+Investigation depth follows evidence. A deterministic bug can be dismissed
+after one clean probe that hit its exact trigger, but timing-, race-, GC-, and
+state-dependent triggers need repetition or different inputs before the harness
+will discard a work card — so a flaky bug is not written off on a single quiet
+run. A surface that no configured build or mode can even execute is marked
+blocked rather than counted as clean evidence.
 
 Work cards are leased so two agents don't step on each other; after a context
 compaction, the next iteration tells the agent which regions it has already
