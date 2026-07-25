@@ -518,6 +518,15 @@ class BenchmarkMetricsTests(unittest.TestCase):
         )
         self.assertEqual(benchmark._decimal_text(gemini_long), "17.750000")
 
+        # Google's low tier is "<= 200k" and xAI's is "< 200k", so the same
+        # 200k threshold bills low here and high for grok just below.
+        gemini_at_boundary, _ = benchmark._cost_decimal(
+            "gemini", "gemini-2.5-pro",
+            input_tokens=1_000_000, cached_input_tokens=1_000_000,
+            output_tokens=1_000_000, prompt_tokens_for_tier=200_000,
+        )
+        self.assertEqual(benchmark._decimal_text(gemini_at_boundary), "11.375000")
+
         grok_standard, _ = benchmark._cost_decimal(
             "grok", "grok-4.5",
             input_tokens=1_000_000, cached_input_tokens=1_000_000,
@@ -528,7 +537,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         grok_long, _ = benchmark._cost_decimal(
             "grok", "grok-4.5",
             input_tokens=1_000_000, cached_input_tokens=1_000_000,
-            output_tokens=1_000_000, prompt_tokens_for_tier=200_001,
+            output_tokens=1_000_000, prompt_tokens_for_tier=200_000,
         )
         self.assertEqual(benchmark._decimal_text(grok_long), "16.600000")
 

@@ -1286,13 +1286,16 @@ def _pricing_rates(
             }
 
     if b == "grok":
-        # xAI long-context pricing: a prompt past the threshold bills every
-        # token in the request at the higher rate. Cache writes have no
+        # xAI long-context pricing: a prompt at or past the threshold bills
+        # every token in the request at the higher rate. xAI's low tier is
+        # "< 200k", unlike Anthropic's and Google's "<= 200k", so the boundary
+        # itself is billed high here and low there. Cache writes have no
         # separate rate and bill as base input.
         if _model_id_is(m, "grok-build-0.1"):
             return {
                 "tiered": True,
                 "threshold": 200_000,
+                "threshold_inclusive": True,
                 "input_low": _money("1"),
                 "input_high": _money("2"),
                 "cache_read_low": _money("0.20"),
@@ -1305,6 +1308,7 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 200_000,
+                "threshold_inclusive": True,
                 "input_low": _money("2"),
                 "input_high": _money("4"),
                 "cache_read_low": _money("0.30"),
@@ -1323,6 +1327,7 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 200_000,
+                "threshold_inclusive": True,
                 "input_low": _money("1.25"),
                 "input_high": _money("2.50"),
                 "cache_read_low": _money("0.20"),
@@ -1360,7 +1365,12 @@ def _cost_decimal(
 
     if rates.get("tiered"):
         prompt = _as_nonnegative_int(prompt_tokens_for_tier or input_tokens)
-        high = prompt > int(rates["threshold"])
+        threshold = int(rates["threshold"])
+        high = (
+            prompt >= threshold
+            if rates.get("threshold_inclusive")
+            else prompt > threshold
+        )
         input_rate = rates["input_high" if high else "input_low"]
         cache_rate = rates["cache_read_high" if high else "cache_read_low"]
         output_rate = rates["output_high" if high else "output_low"]

@@ -92,13 +92,33 @@ def new_marker() -> str:
     return uuid.uuid4().hex
 
 
+def _ps_commands(include_environment: bool) -> dict[int, str]:
+    args = ["ps", "-axww", "-o", "pid=,command="]
+    if include_environment:
+        args[1] = "-axEww"
+    try:
+        output = subprocess.check_output(
+            args, text=True, errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    commands: dict[int, str] = {}
+    for line in output.splitlines():
+        pid_text, separator, command = line.strip().partition(" ")
+        if separator and pid_text.isdigit():
+            commands[int(pid_text)] = command.lstrip()
+    return commands
+
+
 def _pids_with_token(token: str) -> list[int]:
     """PIDs whose environment contains ``token``.
 
     Linux reads /proc/<pid>/environ directly; elsewhere ``ps -E`` prints each
-    environment after the command (``-ww`` keeps it untruncated). Both expose
-    only processes this uid may inspect, so the search is same-uid by
-    construction.
+    environment after the command (``-ww`` keeps it untruncated). A separate
+    argv-only snapshot identifies that boundary: without it, marker-looking
+    text in an unrelated process's arguments is indistinguishable from an
+    environment entry. Both expose only processes this uid may inspect, so the
+    search is same-uid by construction.
     """
     pids: list[int] = []
     if os.path.isdir("/proc"):
@@ -112,22 +132,27 @@ def _pids_with_token(token: str) -> list[int]:
                 continue
             try:
                 with open(f"/proc/{entry}/environ", "rb") as stream:
-                    if raw in stream.read():
+                    if raw in stream.read().split(b"\0"):
                         pids.append(int(entry))
             except (OSError, ValueError):
                 continue
         return pids
-    try:
-        out = subprocess.check_output(
-            ["ps", "-axEww", "-o", "pid=,command="],
-            text=True, errors="replace",
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    for line in out.splitlines():
-        pid_text, _, rest = line.strip().partition(" ")
-        if pid_text.isdigit() and token in rest:
-            pids.append(int(pid_text))
+
+    # Environment snapshot first: a pid it holds that the later argv snapshot
+    # has lost merely exited, whereas taking argv first drops any process born
+    # between the two calls — the still-spawning leak this exists to catch.
+    environment_commands = _ps_commands(include_environment=True)
+    plain_commands = _ps_commands(include_environment=False)
+    for pid, command_and_environment in environment_commands.items():
+        command = plain_commands.get(pid)
+        if command is None:
+            continue
+        prefix = f"{command} "
+        if not command_and_environment.startswith(prefix):
+            continue
+        environment = command_and_environment[len(prefix):]
+        if token in environment.split():
+            pids.append(pid)
     return pids
 
 

@@ -124,6 +124,14 @@ ok(cell != sibling and len(cell) >= 16, "new_marker returns distinct opaque ids"
 victim = _spawn_marked(cell)
 other_cell = _spawn_marked(sibling)
 unmarked = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+marker_text = f"{pt.REAP_MARKER_VAR}={cell}"
+argv_lookalike = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(120)", marker_text]
+)
+value_lookalike = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(120)"],
+    env=dict(os.environ, OTHER_REAP_VALUE=marker_text),
+)
 try:
     time.sleep(0.3)  # let the children settle into the process scan
     reaped = pt.kill_marked(cell, grace=1.0)
@@ -137,11 +145,17 @@ try:
     ok(unmarked.pid not in reaped and _alive(unmarked.pid),
        "an unmarked process is untouched",
        f"reaped={reaped} unmarked={unmarked.pid}")
+    ok(argv_lookalike.pid not in reaped and _alive(argv_lookalike.pid),
+       "marker-looking argv text is not mistaken for ownership",
+       f"reaped={reaped} argv_lookalike={argv_lookalike.pid}")
+    ok(value_lookalike.pid not in reaped and _alive(value_lookalike.pid),
+       "marker text inside another environment value is untouched",
+       f"reaped={reaped} value_lookalike={value_lookalike.pid}")
     ok(pt.kill_marked(pt.new_marker(), grace=0.2) == [],
        "an unused marker reaps nothing")
     ok(pt.kill_marked("", grace=0.2) == [], "an empty marker is a no-op")
 finally:
-    _cleanup(victim, other_cell, unmarked)
+    _cleanup(victim, other_cell, unmarked, argv_lookalike, value_lookalike)
 
 # ── the escaped-leak shape: new session + reparented to PID 1 ─────────
 print("\nescaped leak (new session, reparented)")
