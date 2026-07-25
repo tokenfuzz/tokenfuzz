@@ -31,6 +31,7 @@ are ignored.
 from __future__ import annotations
 
 import argparse
+import functools
 import re
 import sys
 from pathlib import Path
@@ -41,6 +42,31 @@ _PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 # token cost or confusing the model. Multiline-friendly.
 _COMMENT_RE = re.compile(r"\{#.*?#\}", re.DOTALL)
 _CONTROL_TAG_RE = re.compile(r"\{%.*?%\}", re.DOTALL)
+
+
+def _strip_and_validate(template_text: str) -> str:
+    """Remove `{# … #}` comments and reject unsupported control tags.
+
+    Depends only on the template body, so `render_template` caches the result
+    per (path, mtime) and re-runs only the context-dependent substitution.
+    """
+    template_text = _COMMENT_RE.sub("", template_text)
+    control_tag = _CONTROL_TAG_RE.search(template_text)
+    if control_tag:
+        tag = " ".join(control_tag.group(0).split())
+        raise ValueError(
+            f"unsupported template control tag {tag!r}; "
+            "compute optional blocks in the caller and pass them as variables"
+        )
+    return template_text
+
+
+def _substitute(template_text: str, context: dict[str, str]) -> str:
+    def replace(m: re.Match) -> str:
+        key = m.group(1)
+        value = context.get(key, "")
+        return value if isinstance(value, str) else str(value)
+    return _PLACEHOLDER_RE.sub(replace, template_text)
 
 
 def render(template_text: str, context: dict[str, str]) -> str:
@@ -54,29 +80,33 @@ def render(template_text: str, context: dict[str, str]) -> str:
     all match the same key). The replacement is non-recursive — a
     placeholder that itself appears in a substituted value is left alone.
     """
-    template_text = _COMMENT_RE.sub("", template_text)
-    control_tag = _CONTROL_TAG_RE.search(template_text)
-    if control_tag:
-        tag = " ".join(control_tag.group(0).split())
-        raise ValueError(
-            f"unsupported template control tag {tag!r}; "
-            "compute optional blocks in the caller and pass them as variables"
-        )
+    return _substitute(_strip_and_validate(template_text), context)
 
-    def replace(m: re.Match) -> str:
-        key = m.group(1)
-        value = context.get(key, "")
-        return value if isinstance(value, str) else str(value)
-    return _PLACEHOLDER_RE.sub(replace, template_text)
+
+@functools.lru_cache(maxsize=128)
+def _preprocessed_template(path_str: str, signature: tuple[int, int, int, int]) -> str:
+    return _strip_and_validate(Path(path_str).read_text(encoding="utf-8"))
 
 
 def render_template(template: str | Path, context: dict[str, str]) -> str:
-    """Render a template path or lib/prompts template name with context."""
+    """Render a template path or lib/prompts template name with context.
+
+    Prompt builds re-render the same run-constant templates many times per
+    iteration; the read + comment-strip is cached per (path, stat-signature) so
+    only the per-call placeholder substitution runs. The signature bundles
+    ino/size/mtime/ctime, so any edit — including an atomic replace or an
+    mtime-preserving restore — re-reads the template.
+    """
     template_path = Path(template)
     if not template_path.is_absolute():
         template_path = Path(__file__).resolve().parent / "prompts" / template_path
-    template_text = template_path.read_text(encoding="utf-8")
-    return render(template_text, context)
+    try:
+        st = template_path.stat()
+    except OSError:
+        # Preserve the original OSError surfaced by read_text for missing files.
+        return render(template_path.read_text(encoding="utf-8"), context)
+    signature = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    return _substitute(_preprocessed_template(str(template_path), signature), context)
 
 
 def _build_parser() -> argparse.ArgumentParser:

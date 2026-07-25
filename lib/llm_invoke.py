@@ -99,16 +99,41 @@ _MODEL_ENV_OVERRIDE = {
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.toml"
 
 
-def _config_table(name: str) -> dict:
-    """Return one table from config/models.toml."""
+_CONFIG_DOC_CACHE: tuple[tuple[int, int, int, int], dict] | None = None
+
+
+def _config_document() -> dict:
+    """Parse config/models.toml, cached by stat signature.
+
+    Resolved once per (unchanged) file: model/flag/effort lookups hit this
+    several times per decision and per agent launch, and the file is a fixed
+    repo artifact immutable for a run. The signature bundles ino/size/mtime/
+    ctime, so a test or operator edit — even an atomic replace or an mtime-
+    preserving restore — re-parses; callers otherwise see identical tables.
+    """
+    global _CONFIG_DOC_CACHE
+    try:
+        st = _CONFIG_PATH.stat()
+        signature = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    except OSError:
+        signature = (-1, -1, -1, -1)
+    if _CONFIG_DOC_CACHE is not None and _CONFIG_DOC_CACHE[0] == signature:
+        return _CONFIG_DOC_CACHE[1]
     try:
         toml = _load_tomllib()
+        with open(_CONFIG_PATH, "rb") as fh:
+            document = toml.load(fh)
     except ModuleNotFoundError:
         from target_config import parse_toml
 
-        return parse_toml(_CONFIG_PATH).get(name, {})
-    with open(_CONFIG_PATH, "rb") as fh:
-        return toml.load(fh).get(name, {})
+        document = parse_toml(_CONFIG_PATH)
+    _CONFIG_DOC_CACHE = (signature, document)
+    return document
+
+
+def _config_table(name: str) -> dict:
+    """Return one table from config/models.toml."""
+    return _config_document().get(name, {})
 
 
 def _config_models() -> dict:

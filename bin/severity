@@ -61,14 +61,30 @@ def _find_target_toml(start: Path) -> Path | None:
     return None
 
 
+# Batch scoring (severity-sweep, benchmark harvest) runs main() in-process for
+# every finding under one results tree, and each resolves the same target.toml.
+# Cache the parse keyed on (path, stat-signature) so a pool of N reports parses
+# it once while any edit — atomic replace or mtime-preserving restore — still
+# invalidates. Callers only read the dict (never mutate).
+_TARGET_TOML_CACHE: dict[Path, tuple[tuple[int, int, int, int], dict]] = {}
+
+
 def _parse_target_toml(path: Path) -> dict:
-    if not path.is_file():
+    try:
+        st = path.stat()
+    except OSError:
         return {}
+    signature = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    cached = _TARGET_TOML_CACHE.get(path)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
     try:
         parsed = tc.parse_toml(path)
     except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        parsed = {}
+    result = parsed if isinstance(parsed, dict) else {}
+    _TARGET_TOML_CACHE[path] = (signature, result)
+    return result
 
 
 # ─── Severity scoring ─────────────────────────────────────────────────────

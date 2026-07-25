@@ -579,16 +579,29 @@ def _backend_flags(backend: str, model: str) -> list[str]:
     return _decide_flags_for_backend(backend, model)
 
 
+_WHICH_CACHE: dict[tuple[str, str], str] = {}
+
+
 def _which(binary: str) -> Optional[str]:
     """Resolve a command name to an executable path, honoring PATH."""
     # Absolute path: just check executability.
     if os.path.sep in binary or binary.startswith("./"):
         return binary if os.access(binary, os.X_OK) else None
-    for d in os.environ.get("PATH", "").split(os.pathsep):
+    # Memoize positive hits keyed on (binary, PATH): every decision re-resolves
+    # the same backend CLI. Only successful resolutions are cached — an
+    # installed binary does not move, while a not-yet-found one is re-probed so
+    # a backend installed mid-run is still picked up.
+    path_env = os.environ.get("PATH", "")
+    cache_key = (binary, path_env)
+    cached = _WHICH_CACHE.get(cache_key)
+    if cached is not None and os.access(cached, os.X_OK):
+        return cached
+    for d in path_env.split(os.pathsep):
         if not d:
             continue
         candidate = os.path.join(d, binary)
         if os.access(candidate, os.X_OK):
+            _WHICH_CACHE[cache_key] = candidate
             return candidate
     return None
 

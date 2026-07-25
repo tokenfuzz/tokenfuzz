@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import re
 from pathlib import Path
@@ -76,7 +77,29 @@ def _canonicalize_tables(lines: list[str]) -> list[str]:
     return canonical
 
 
+# The find-gate re-derives a report's identity 4-6× in one process (quality
+# votes, trigger votes, dedup, accept). This transform is pure in
+# (report_text, canonicalize_tables), so a small locality cache returns
+# byte-identical output while collapsing those repeated full-report scans to
+# one. The gate validates findings in a 4-worker pool, so ~24 derivations are
+# in flight at once; 48 entries covers that with headroom without turning a
+# locality cache into a batch-wide retainer. Oversized reports skip the cache
+# entirely, bounding what a batch of large inputs can hold to a few MiB.
+_MAX_CACHED_REPORT_CHARS = 256 * 1024
+
+
 def _semantic_report_text(report_text: str, *, canonicalize_tables: bool) -> str:
+    if len(report_text) > _MAX_CACHED_REPORT_CHARS:
+        return _semantic_report_text_impl(report_text, canonicalize_tables)
+    return _semantic_report_text_cached(report_text, canonicalize_tables)
+
+
+@functools.lru_cache(maxsize=48)
+def _semantic_report_text_cached(report_text: str, canonicalize_tables: bool) -> str:
+    return _semantic_report_text_impl(report_text, canonicalize_tables)
+
+
+def _semantic_report_text_impl(report_text: str, canonicalize_tables: bool) -> str:
     """Remove only harness-owned annotations from report cache identity.
 
     Agent-authored prose and code fences remain byte-sensitive. Generated

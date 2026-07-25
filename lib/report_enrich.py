@@ -31,6 +31,7 @@ by the caller from target.toml / session-env.
 
 from __future__ import annotations
 
+import functools
 import glob
 import os
 import re
@@ -260,20 +261,51 @@ def _strip_all_blocks(text: str) -> str:
     return text
 
 
+# Source files a report cites are usually small, but generated sources (lexer
+# tables, amalgamations) are not size-bounded. Cap both the entry count and the
+# per-file size so a dense-trace batch cannot retain hundreds of MiB: at most 8
+# files under 4 MiB each are cached (~32 MiB ceiling); larger files are split
+# per call without caching.
+_SOURCE_LINES_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _split_source(path_str: str) -> tuple[str, ...]:
+    try:
+        return tuple(Path(path_str).read_text("utf-8", errors="replace").splitlines())
+    except OSError:
+        return ()
+
+
+@functools.lru_cache(maxsize=8)
+def _source_lines(path_str: str, signature: tuple[int, int, int, int]) -> tuple[str, ...]:
+    """Split a source file into lines, cached by (path, stat-signature).
+
+    One enrichment cites many lines of the same file across Data-Flow and ASan
+    sections; without this each ref re-read and re-split the whole file. The
+    signature (ino/size/mtime/ctime) re-reads an edited file even under an
+    atomic replace; an empty tuple covers unreadable/empty.
+    """
+    return _split_source(path_str)
+
+
 def _read_source_window(src: Path, line: int, context: int = 2) -> Optional[tuple[int, list[str]]]:
     """Return (start_line, lines) for a small window around `line`,
     or None if the file is unreadable."""
     try:
-        text = src.read_text("utf-8", errors="replace")
+        st = src.stat()
     except OSError:
         return None
-    lines = text.splitlines()
+    if st.st_size > _SOURCE_LINES_MAX_BYTES:
+        lines: tuple[str, ...] = _split_source(str(src))
+    else:
+        signature = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        lines = _source_lines(str(src), signature)
     if not lines or line < 1:
         return None
     line = min(line, len(lines))
     start = max(1, line - context)
     end = min(len(lines), line + context)
-    return start, lines[start - 1:end]
+    return start, list(lines[start - 1:end])
 
 
 def _format_snippet(rel_path: str, start: int, lines: list[str], target_line: int) -> str:

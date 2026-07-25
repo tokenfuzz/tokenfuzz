@@ -2390,52 +2390,6 @@ def _is_broad_file_card(card: dict) -> bool:
     return str(card.get("kind", "")) == "ranked-source"
 
 
-def active_hypothesis_card_ids(ctx: Context) -> set[str]:
-    active: set[str] = set()
-    for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"):
-        cid = row.get("card_id", "")
-        if cid and is_active_hypothesis_status(row.get("status", "")):
-            active.add(cid)
-    return active
-
-
-def active_hypothesis_surfaces(ctx: Context) -> set[str]:
-    """Return file/surface keys currently owned by active hypotheses."""
-    cards_by_id = {c.get("id", ""): c for c in read_jsonl(work_cards_path(ctx))}
-    surfaces: set[str] = set()
-    for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"):
-        if not is_active_hypothesis_status(row.get("status", "")):
-            continue
-        cid = row.get("card_id", "")
-        if cid and cid in cards_by_id:
-            surface = work_surface(cards_by_id[cid])
-        else:
-            surface = normalized_relpath(row.get("file", "").split(":", 1)[0]).lower()
-        if surface:
-            surfaces.add(surface)
-    return surfaces
-
-
-def active_hypothesis_subsystems(ctx: Context) -> set[str]:
-    cards_by_id = {c.get("id", ""): c for c in read_jsonl(work_cards_path(ctx))}
-    subsystems: set[str] = set()
-    for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"):
-        if not is_active_hypothesis_status(row.get("status", "")):
-            continue
-        subsystem = str(row.get("subsystem", "") or "")
-        cid = row.get("card_id", "")
-        card = cards_by_id.get(cid) if cid else None
-        if not subsystem and card:
-            subsystem = str(card.get("subsystem", "") or "")
-        if not subsystem:
-            file = row.get("file", "").split(":", 1)[0]
-            if file:
-                subsystem = subsystem_for(file)
-        if subsystem and subsystem != "unknown":
-            subsystems.add(subsystem)
-    return subsystems
-
-
 def _artifact_status_id(value: str) -> str:
     normalized = (value or "").strip().upper()
     match = re.match(r"^(?:CRASH|FIND)-\d+(?:-\d+)?", normalized)
@@ -2641,36 +2595,6 @@ def release_stale_claims(
     return released
 
 
-def claimed_card_surfaces(ctx: Context, ttl: timedelta, now: datetime) -> set[str]:
-    cards_by_id = {c.get("id", ""): c for c in read_jsonl(work_cards_path(ctx))}
-    surfaces: set[str] = set()
-    for cid, claim in latest_claims_by_card(ctx).items():
-        if not claim_blocks_card(claim, ttl, now):
-            continue
-        card = cards_by_id.get(cid)
-        if not card:
-            continue
-        surface = work_surface(card)
-        if surface:
-            surfaces.add(surface)
-    return surfaces
-
-
-def claimed_card_subsystems(ctx: Context, ttl: timedelta, now: datetime) -> set[str]:
-    cards_by_id = {c.get("id", ""): c for c in read_jsonl(work_cards_path(ctx))}
-    subsystems: set[str] = set()
-    for cid, claim in latest_claims_by_card(ctx).items():
-        if not claim_blocks_card(claim, ttl, now):
-            continue
-        card = cards_by_id.get(cid)
-        if not card:
-            continue
-        subsystem = str(card.get("subsystem", "") or "")
-        if subsystem and subsystem != "unknown":
-            subsystems.add(subsystem)
-    return subsystems
-
-
 def subsystem_dry_streak(ctx: Context, subsystem: str) -> int:
     """Read the global per-subsystem dry-iteration counter.
 
@@ -2803,8 +2727,17 @@ def card_closed_for_run(
     return concluded - distinct >= _PRODUCTIVE_REDISCOVERY_MARGIN
 
 
-def agent_productive_subsystems(ctx: Context, agent: str) -> set[str]:
+def agent_productive_subsystems(
+    ctx: Context,
+    agent: str,
+    *,
+    hypotheses: list[dict] | None = None,
+    cards_by_id: dict[str, dict] | None = None,
+) -> set[str]:
     """Subsystems where the given agent has a confirmed CRASH/FIND row.
+
+    Pass ``hypotheses``/``cards_by_id`` to reuse already-read snapshots instead
+    of re-reading the state files.
 
     Used to relax the subsystem-ownership skip in
     ``_claim_next_card_locked``: "bugs cluster" is a real signal (a
@@ -2824,9 +2757,11 @@ def agent_productive_subsystems(ctx: Context, agent: str) -> set[str]:
     if not agent:
         return set()
     agent_str = str(agent)
-    cards_by_id = {c.get("id", ""): c for c in read_jsonl(work_cards_path(ctx))}
+    if cards_by_id is None:
+        cards_by_id = {c.get("id", ""): c for c in read_jsonl(work_cards_path(ctx))}
+    hyps = read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl") if hypotheses is None else hypotheses
     subsystems: set[str] = set()
-    for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"):
+    for row in hyps:
         if str(row.get("agent", "")) != agent_str:
             continue
         status = str(row.get("status", "") or "")
@@ -3114,20 +3049,30 @@ def _claim_next_card_locked(
     strategy: str = "",
 ) -> dict | None:
     cards = read_jsonl(work_cards_path(ctx))
+    cards_by_id = {c.get("id", ""): c for c in cards}
+    # Read each shared state file once and derive every set/count from the
+    # in-memory snapshot. This path previously re-read work-cards, hypotheses,
+    # and claims ~15× per claim (via the per-set helper functions) while holding
+    # the claims lock. The single-read helpers below compute byte-identical sets
+    # — explain_queue already reads once this way — so this only cuts redundant
+    # parsing and shortens the critical section under parallel claim contention.
+    claim_rows = _read_jsonl_unlocked(claims_path)
     latest: dict[str, dict] = {}
-    for row in _read_jsonl_unlocked(claims_path):
+    for row in claim_rows:
         cid = row.get("card_id", "")
         if cid:
             latest[cid] = row
-    active_cards = active_hypothesis_card_ids(ctx)
+    hyps = read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
     now = datetime.now(timezone.utc)
     ttl = work_card_claim_ttl()
-    owned_surfaces = active_hypothesis_surfaces(ctx) | claimed_card_surfaces(ctx, ttl, now)
-    owned_subsystems = active_hypothesis_subsystems(ctx) | claimed_card_subsystems(ctx, ttl, now)
+    active_cards, active_surfaces, active_subsystems = _active_hypothesis_queue_sets(cards_by_id, hyps)
+    claimed_surfaces, claimed_subsystems = _claimed_card_queue_sets(cards_by_id, latest, ttl, now)
+    owned_surfaces = active_surfaces | claimed_surfaces
+    owned_subsystems = active_subsystems | claimed_subsystems
     # Per-claim memos for card_closed_for_run (and the demotion sort below)
     # so the candidate loops read claims/hypotheses/dry-streaks at most once.
-    conclusion_counts = card_conclusion_counts(ctx)
-    distinct_counts = card_distinct_hypothesis_counts(ctx)
+    conclusion_counts = card_conclusion_counts(ctx, claims=claim_rows)
+    distinct_counts = card_distinct_hypothesis_counts(ctx, hypotheses=hyps)
     dry_streaks: dict[str, int] = {}
     # Agents that have already produced a confirmed CRASH/FIND are
     # "productive" — they have working data-flow context for that
@@ -3138,7 +3083,7 @@ def _claim_next_card_locked(
     # because the per-iteration claim is already counted as "owning"
     # that subsystem. This implements the AGENTS.md "bugs cluster"
     # guidance the rest of the harness already encourages in prose.
-    productive_subsystems = agent_productive_subsystems(ctx, agent)
+    productive_subsystems = agent_productive_subsystems(ctx, agent, hypotheses=hyps, cards_by_id=cards_by_id)
     # Time-decay the productive-subsystem relaxation: after the global
     # dry-iter counter for a subsystem reaches PRODUCTIVE_DECAY_AFTER,
     # treat the area as mined out and drop it from the relaxation so
@@ -3673,9 +3618,10 @@ def card_run_count(ctx: Context, card_id: str, verdict: str = "") -> int:
     return n
 
 
-def card_conclusion_counts(ctx: Context) -> dict[str, int]:
+def card_conclusion_counts(ctx: Context, *, claims: list[dict] | None = None) -> dict[str, int]:
     """Per-card tally of productive terminal closures (crash/find) ever
-    recorded in claims.jsonl.
+    recorded in claims.jsonl. Pass ``claims`` to reuse an already-read
+    snapshot instead of re-reading the file.
 
     Used by the claim ranker to *demote* — never drop — a card that has
     already produced a bug. A verified crash/find keeps the surface
@@ -3686,8 +3632,9 @@ def card_conclusion_counts(ctx: Context) -> dict[str, int]:
     exhaust fresher surfaces first and revisit a cracked card only once the
     less-mined work is gone — diminishing returns without losing the card.
     """
+    rows = read_jsonl(state_dir(ctx.results_dir) / "claims.jsonl") if claims is None else claims
     counts: dict[str, int] = {}
-    for row in read_jsonl(state_dir(ctx.results_dir) / "claims.jsonl"):
+    for row in rows:
         if row.get("source", "") == "release-stale-claims" and row.get("preserved_terminal_status", ""):
             continue
         if str(row.get("status", "")) in _PRODUCTIVE_TERMINAL_CARD_STATUSES:
@@ -3726,13 +3673,17 @@ def card_distinct_hypothesis_count(ctx: Context, card_id: str) -> int:
     return len(seen)
 
 
-def card_distinct_hypothesis_counts(ctx: Context) -> dict[str, int]:
+def card_distinct_hypothesis_counts(
+    ctx: Context, *, hypotheses: list[dict] | None = None
+) -> dict[str, int]:
     """Per-card distinct-hypothesis-shape counts — the plural memo of
     ``card_distinct_hypothesis_count`` for candidate loops that would
-    otherwise re-read hypotheses.jsonl once per card.
+    otherwise re-read hypotheses.jsonl once per card. Pass ``hypotheses`` to
+    reuse an already-read snapshot instead of re-reading the file.
     """
+    rows = read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl") if hypotheses is None else hypotheses
     by_card: dict[str, set[str]] = {}
-    for h in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"):
+    for h in rows:
         cid = h.get("card_id", "")
         if not cid:
             continue

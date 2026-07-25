@@ -7,6 +7,8 @@ import argparse
 import json
 import os
 import re
+import stat as stat_module
+import threading
 from pathlib import Path
 
 from subsystem_paths import load_subsystems, subsystem_from_path
@@ -17,6 +19,16 @@ COUNTED_STATUS = re.compile(
     r"^(PENDING|INVESTIGATING|NEEDS_TESTCASE|DISCARDED|CRASH|CRASH-|FIND|FIND-|ENV-BLOCKED)$"
 )
 
+# One iteration funnels many queries (progress, cold-check, prompt builds)
+# through rows(); each re-parsed the whole growing hypotheses.jsonl. Cache the
+# parsed snapshot keyed on a full stat signature so an unchanged file is parsed
+# once: an append changes size, an atomic replace changes st_ino, and any other
+# write bumps st_mtime_ns/st_ctime_ns — so every edit invalidates transparently
+# (ctime cannot be forged back, so even an mtime-preserving restore is caught).
+# Callers get byte-identical rows; returned lists are read-only by contract.
+_ROWS_CACHE: dict[str, tuple[tuple[int, int, int, int], list[dict]]] = {}
+_ROWS_CACHE_LOCK = threading.Lock()
+
 
 def hypotheses_path(results_dir: str | os.PathLike | None = None) -> Path:
     root = Path(results_dir if results_dir is not None else os.environ.get("RESULTS_DIR", ""))
@@ -25,8 +37,18 @@ def hypotheses_path(results_dir: str | os.PathLike | None = None) -> Path:
 
 def rows(results_dir: str | os.PathLike | None = None) -> list[dict]:
     path = hypotheses_path(results_dir)
-    if not path.is_file() or path.stat().st_size == 0:
+    try:
+        info = path.stat()
+    except OSError:
         return []
+    if not stat_module.S_ISREG(info.st_mode) or info.st_size == 0:
+        return []
+    key = str(path)
+    signature = (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    with _ROWS_CACHE_LOCK:
+        cached = _ROWS_CACHE.get(key)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
     output = []
     with path.open(encoding="utf-8", errors="replace") as stream:
         for line in stream:
@@ -36,6 +58,8 @@ def rows(results_dir: str | os.PathLike | None = None) -> list[dict]:
                 continue
             if isinstance(value, dict):
                 output.append(value)
+    with _ROWS_CACHE_LOCK:
+        _ROWS_CACHE[key] = (signature, output)
     return output
 
 
