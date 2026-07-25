@@ -207,6 +207,7 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     stream_context = mock.Mock()
     stream_context.role.return_value = "reproduce"
     stream_context.scratch_dir.return_value = stream_results / "scratch-1"
+    stream_context.turn_soft_cap = 128
     def launch(_backend, _prompt, _timeout, raw_log, **_kwargs):
         launch_count[0] += 1
         if launch_count[0] == 1:
@@ -254,15 +255,62 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     )
     watchdog_raw = root / "watchdog.raw"
     started = time.monotonic()
-    watchdog_rc = llm_invoke._run_codex_with_turn_watchdog(
+    watchdog_rc = llm_invoke._run_agent_process(
         [sys.executable, str(fake_codex)], None, watchdog_raw, root,
-        os.environ.copy(), 2,
+        os.environ.copy(), turn_cap=2,
     )
     check(
         watchdog_rc == 0
         and time.monotonic() - started < 5
         and "TURN_SOFT_CAP reached" in watchdog_raw.read_text(encoding="utf-8"),
-        "Codex turn watchdog checkpoints and terminates a session at the soft cap",
+        "the turn watchdog checkpoints and terminates a session at the soft cap",
+    )
+
+    # A completed-result watchdog must not terminate the tool at dispatch.
+    # Before the backend-neutral cap, Claude had only a 1000-turn native
+    # ceiling, so observed sessions still ran to hundreds of requests.
+    fake_claude = root / "fake_claude.py"
+    fake_claude.write_text(
+        "import json,time\n"
+        "for i in range(4):\n"
+        " print(json.dumps({'type':'assistant','message':{'id':'m%d'%i,'content':["
+        "{'type':'text','text':'step'},{'type':'tool_use','name':'Bash'}]}}), flush=True)\n"
+        " time.sleep(0.4)\n"
+        " print(json.dumps({'type':'user','message':{'content':["
+        "{'type':'tool_result','tool_use_id':'u%d'%i,'content':'done'}]}}), flush=True)\n"
+        " time.sleep(0.1)\n"
+        "time.sleep(10)\n",
+        encoding="utf-8",
+    )
+    claude_raw = root / "claude-watchdog.raw"
+    claude_started = time.monotonic()
+    claude_rc = llm_invoke._run_agent_process(
+        [sys.executable, str(fake_claude)], None, claude_raw, root,
+        os.environ.copy(), turn_cap=2,
+    )
+    claude_text = claude_raw.read_text(encoding="utf-8")
+    check(
+        claude_rc == 0
+        and time.monotonic() - claude_started < 5
+        and "TURN_SOFT_CAP reached" in claude_text
+        and claude_text.count('"type": "user"') >= 2
+        and llm_invoke.session_turn_capped(claude_raw),
+        "the transcript cap waits for Claude tool results before checkpointing",
+        claude_text,
+    )
+    check(
+        not llm_invoke.session_turn_capped(root / "does-not-exist.raw"),
+        "a session that was never capped is not reported as checkpointed",
+    )
+    spoofed_cap = root / "spoofed-cap.raw"
+    spoofed_cap.write_text(
+        f"tool output: [audit] {llm_invoke.TURN_CAP_MARKER} after 2 calls\n"
+        '{"type":"turn.completed"}\n',
+        encoding="utf-8",
+    )
+    check(
+        not llm_invoke.session_turn_capped(spoofed_cap),
+        "tool output cannot spoof a cap marker before a natural terminal event",
     )
 
     class ExitedAtCap:
@@ -286,15 +334,86 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
 
     natural_raw = root / "natural-at-cap.raw"
     with mock.patch.object(llm_invoke.subprocess, "Popen", return_value=ExitedAtCap()), \
-         mock.patch.object(audit_helpers, "codex_turn_delta", return_value=(2, 0)), \
+         mock.patch.object(audit_helpers, "tool_call_delta", return_value=(2, 0)), \
          mock.patch.object(process_tree, "kill_descendants"):
-        natural_rc = llm_invoke._run_codex_with_turn_watchdog(
-            ["unused"], None, natural_raw, root, os.environ.copy(), 2,
+        natural_rc = llm_invoke._run_agent_process(
+            ["unused"], None, natural_raw, root, os.environ.copy(), turn_cap=2,
         )
     check(
         natural_rc == 0
         and "TURN_SOFT_CAP reached" not in natural_raw.read_text(encoding="utf-8"),
         "a process that exits at the cap is not mislabeled as checkpointed",
+    )
+
+    native_cap = root / "native-cap.py"
+    native_cap.write_text(
+        "import json,sys\n"
+        "print(json.dumps({'type':'result','subtype':'error_max_turns',"
+        "'is_error':True,'modelUsage':{'claude':{'inputTokens':2}}}))\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    native_raw = root / "native-cap.raw"
+    native_rc = llm_invoke._run_agent_process(
+        [sys.executable, str(native_cap)], None, native_raw, root,
+        os.environ.copy(), checkpoint_on_native_limit=True,
+    )
+    check(
+        native_rc == 0 and llm_invoke.session_turn_capped(native_raw),
+        "an explicitly armed Claude native ceiling is a checkpoint with usage, not a failure",
+    )
+
+    grok_cap = root / "grok-native-cap.py"
+    grok_cap.write_text(
+        "import json\n"
+        "print(json.dumps({'type':'max_turns_reached','turns':100}))\n",
+        encoding="utf-8",
+    )
+    grok_raw = root / "grok-native-cap.raw"
+    grok_rc = llm_invoke._run_agent_process(
+        [sys.executable, str(grok_cap)], None, grok_raw, root,
+        os.environ.copy(), checkpoint_on_native_limit=True,
+    )
+    check(
+        grok_rc == 0 and llm_invoke.session_turn_capped(grok_raw),
+        "an explicitly armed Grok native ceiling is normalized from its structured event",
+    )
+
+    gemini_cap = root / "gemini-native-cap.py"
+    gemini_cap.write_text(
+        "import json,sys\n"
+        "print(json.dumps({'type':'result','status':'error','error':{"
+        "'type':'FatalTurnLimitedError','message':'turn limit'},"
+        "'stats':{'input_tokens':2}}))\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    gemini_raw = root / "gemini-native-cap.raw"
+    gemini_rc = llm_invoke._run_agent_process(
+        [sys.executable, str(gemini_cap)], None, gemini_raw, root,
+        os.environ.copy(), checkpoint_on_native_limit=True,
+    )
+    check(
+        gemini_rc == 0 and llm_invoke.session_turn_capped(gemini_raw),
+        "an explicitly armed Gemini native ceiling retains terminal stats",
+    )
+
+    prose_limit = root / "native-cap-prose.py"
+    prose_limit.write_text(
+        "import json,sys\n"
+        "print(json.dumps({'type':'assistant','message':{'content':["
+        "{'type':'text','text':'error_max_turns'}]}}))\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    prose_raw = root / "native-cap-prose.raw"
+    prose_rc = llm_invoke._run_agent_process(
+        [sys.executable, str(prose_limit)], None, prose_raw, root,
+        os.environ.copy(), checkpoint_on_native_limit=True,
+    )
+    check(
+        prose_rc == 1 and not llm_invoke.session_turn_capped(prose_raw),
+        "model prose cannot spoof the structured native-cap checkpoint signal",
     )
 
     # A crash confirmed at the nominal cap gets a bounded enrichment tail.
@@ -318,16 +437,16 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     grace_env = {**os.environ, "TRIED_INPUTS_LOG": str(grace_tried), "AGENT_NUM": "1"}
     grace_raw = root / "grace-watchdog.raw"
     grace_started = time.monotonic()
-    grace_rc = llm_invoke._run_codex_with_turn_watchdog(
+    grace_rc = llm_invoke._run_agent_process(
         [sys.executable, str(grace_codex), str(grace_report)], None,
-        grace_raw, root, grace_env, 2,
+        grace_raw, root, grace_env, turn_cap=2,
     )
     grace_text = grace_raw.read_text(encoding="utf-8")
     check(
         grace_rc == 0
         and grace_text.count('"type": "item.completed"') >= 4
         and time.monotonic() - grace_started < 7,
-        "Codex watchdog permits mandatory crash enrichment past the nominal cap",
+        "the turn watchdog permits mandatory crash enrichment past the nominal cap",
         grace_text,
     )
 
@@ -336,14 +455,14 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     bounded_raw = root / "bounded-watchdog.raw"
     with mock.patch.object(llm_invoke, "_CRASH_ENRICHMENT_GRACE_COMMANDS", 2), \
          mock.patch.object(llm_invoke, "_CRASH_ENRICHMENT_GRACE_SECONDS", 2):
-        bounded_rc = llm_invoke._run_codex_with_turn_watchdog(
+        bounded_rc = llm_invoke._run_agent_process(
             [sys.executable, str(fake_codex)], None, bounded_raw, root,
-            grace_env, 2,
+            grace_env, turn_cap=2,
         )
     check(
         bounded_rc == 0
         and "TURN_SOFT_CAP reached" in bounded_raw.read_text(encoding="utf-8"),
-        "Codex crash-enrichment tail remains bounded",
+        "the crash-enrichment tail remains bounded",
     )
 
     singleton_runtime = object()

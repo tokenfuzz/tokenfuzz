@@ -150,10 +150,16 @@ you need:
 - **`tokens.output` against testcases written.** Lots of output and few
   testcases is the "model wrote an essay" smell.
 
-Backends report differently: Claude and Codex emit real counts, while
-Gemini through the Antigravity CLI publishes no usage telemetry, so its
-rows are estimated from prompt and transcript size and flagged
-`estimated: true`. Treat those as approximate.
+Backends report differently. A normally completed Claude, Codex, or Google
+Gemini CLI session emits terminal counts. Gemini's native turn-limit result
+also retains those counts. If Claude is stopped before its terminal event, the
+harness recovers exact cache buckets from its per-request events but marks the
+row `estimated: true` because fresh input and output remain lower bounds. A
+terminated Codex session with no usage stays unknown. Antigravity and Grok rows
+without native usage are estimated from prompt and transcript size.
+
+The row also records `turn_soft_cap` and `turn_capped`, so cost comparisons can
+separate natural completions from sessions rolled over to fresh context.
 
 For ensembling, compare these numbers across backends. A backend
 that produces the same evidence with half the cached input tokens

@@ -48,6 +48,13 @@ def strategy_brief(strategy: str, reference_dir: Path) -> str:
     )
 
 
+# Rollover target for one analysis session. Native-cap backends count agent
+# turns; structured streaming backends use completed tool calls as the nearest
+# safe proxy. Owned here so the runner and the contract the agent reads use the
+# same number. lib/audit_runner.py resolves $TURN_SOFT_CAP against it.
+DEFAULT_TURN_SOFT_CAP = 128
+
+
 @dataclass
 class PromptContext:
     results_dir: Path
@@ -64,7 +71,13 @@ class PromptContext:
     fixed_strategy: str = ""
     tool_call_soft_target: int = 80
     tool_call_deep_soft_target: int = 150
+    turn_soft_cap: int = DEFAULT_TURN_SOFT_CAP
     config: target_config.Config | None = None
+
+    def soft_target(self, deep: bool) -> int:
+        """Self-pacing hint, never above the cap that actually ends the session."""
+        target = self.tool_call_deep_soft_target if deep else self.tool_call_soft_target
+        return min(target, self.turn_soft_cap) if self.turn_soft_cap > 0 else target
 
     def scratch_dir(self, agent: int) -> Path:
         return self.results_dir / f"scratch-{agent}"
@@ -111,10 +124,18 @@ def find_first_directive(context: PromptContext) -> str:
     )
 
 
-def common_suffix(context: PromptContext) -> str:
-    cache = context.results_dir / ".static-prompt-rules.md"
-    if cache.is_file() and cache.stat().st_size:
-        return cache.read_text(encoding="utf-8")
+def turn_budget_section(context: PromptContext) -> str:
+    template = (
+        "turn_budget.md.j2"
+        if context.turn_soft_cap > 0
+        else "turn_budget_disabled.md.j2"
+    )
+    return render_template(
+        template, {"turn_soft_cap": str(context.turn_soft_cap)},
+    )
+
+
+def _render_common_suffix(context: PromptContext) -> str:
     return render_template(
         "common_suffix.md.j2",
         {
@@ -122,9 +143,36 @@ def common_suffix(context: PromptContext) -> str:
             "results_dir": str(context.results_dir),
             "fuzz_leads_path": str(context.results_dir / "fuzz-leads.md"),
             "reference_dir": str(context.reference_dir),
-            "tool_call_soft_target": str(context.tool_call_soft_target),
-            "tool_call_deep_soft_target": str(context.tool_call_deep_soft_target),
+            "tool_call_soft_target": str(context.soft_target(False)),
+            "tool_call_deep_soft_target": str(context.soft_target(True)),
+            "turn_budget_section": turn_budget_section(context),
             "session_rules_digest": session_rules_digest(context.reference_dir),
+        },
+    )
+
+
+def common_suffix(context: PromptContext) -> str:
+    cache = context.results_dir / ".static-prompt-rules.md"
+    if cache.is_file() and cache.stat().st_size:
+        return cache.read_text(encoding="utf-8")
+    return _render_common_suffix(context)
+
+
+def compact_suffix(context: PromptContext, agent: int) -> str:
+    """Small self-contained contract for a fresh session with no active work.
+
+    The full common suffix is about 22 KB once its session-rules digest is
+    embedded. Replaying that on every turn would erase much of the saving from
+    choosing the compact launch variant, so this keeps only the exact commands
+    and safety rules that prevent predictable discovery/help round-trips.
+    """
+    return render_template(
+        "compact_suffix.md.j2",
+        {
+            "scratch_dir": str(context.scratch_dir(agent)),
+            "tool_call_soft_target": str(context.soft_target(False)),
+            "tool_call_deep_soft_target": str(context.soft_target(True)),
+            "turn_budget_section": turn_budget_section(context),
         },
     )
 
@@ -132,7 +180,10 @@ def common_suffix(context: PromptContext) -> str:
 def write_static_prompt_file(context: PromptContext) -> Path:
     destination = context.results_dir / ".static-prompt-rules.md"
     temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
-    text = common_suffix(context)
+    # Refresh once at backend initialization. Reusing a results tree with a
+    # different TURN_SOFT_CAP must not preserve the previous run's budget or
+    # cap-bounded pacing targets in this otherwise-static cache.
+    text = _render_common_suffix(context)
     if text.strip():
         temporary.write_text(text, encoding="utf-8")
         os.replace(temporary, destination)
@@ -521,6 +572,7 @@ def compact_fresh_prompt(context: PromptContext, agent: int) -> str:
             "harness_build_failures_directive": harness_build_failures_directive(context),
             "agent_state_instructions": _agent_state_instructions(context, agent),
             "first_probe_checkpoint": first_probe_checkpoint(context, agent),
+            "compact_suffix": compact_suffix(context, agent),
         },
     )
 

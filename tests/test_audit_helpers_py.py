@@ -683,8 +683,8 @@ ok(
 )
 
 
-# ── codex-turn-delta ───────────────────────────────────────────────
-print("\ncodex-turn-delta")
+# ── tool-call-delta ────────────────────────────────────────────────
+print("\ntool-call-delta")
 with tempfile.NamedTemporaryFile("wb", suffix=".jsonl", delete=False) as f:
     delta_path = f.name
     f.write(b'{"type":"item.completed","item":{"type":"command_execution","command":"one"}}\n')
@@ -697,23 +697,76 @@ with tempfile.NamedTemporaryFile("wb", suffix=".jsonl", delete=False) as f:
     partial_offset = f.tell()
     f.write(b'{"type":"item.completed","item":{"type":"command_execution"')
 try:
-    proc = run(["codex-turn-delta", delta_path, "0"])
+    proc = run(["tool-call-delta", delta_path, "0"])
     lines = proc.stdout.splitlines()
-    assert_eq(0, proc.returncode, "codex-turn-delta exit code")
-    assert_eq("count=2", lines[0], "codex-turn-delta counts only completed command executions")
-    assert_eq(f"offset={partial_offset}", lines[1], "codex-turn-delta stops before partial line")
+    assert_eq(0, proc.returncode, "tool-call-delta exit code")
+    assert_eq("count=2", lines[0], "tool-call-delta counts only completed tool calls")
+    assert_eq(f"offset={partial_offset}", lines[1], "tool-call-delta stops before partial line")
 
     with open(delta_path, "ab") as f:
         f.write(b',"command":"two"}}\n')
-    proc = run(["codex-turn-delta", delta_path, str(partial_offset)])
+    proc = run(["tool-call-delta", delta_path, str(partial_offset)])
     assert_eq(["count=1", f"offset={os.path.getsize(delta_path)}"], proc.stdout.splitlines(),
-              "codex-turn-delta retries and counts completed partial line")
+              "tool-call-delta retries and counts completed partial line")
 
-    proc = run(["codex-turn-delta", delta_path, str(os.path.getsize(delta_path) + 100)])
+    proc = run(["tool-call-delta", delta_path, str(os.path.getsize(delta_path) + 100)])
     assert_eq("count=3", proc.stdout.splitlines()[0],
-              "codex-turn-delta resets if offset is past truncated file")
+              "tool-call-delta resets if offset is past truncated file")
 finally:
     os.unlink(delta_path)
+
+# Dispatch events are not safe rollover boundaries. Count only matching
+# completions/results for dialects that announce a tool before running it.
+with tempfile.NamedTemporaryFile("wb", suffix=".jsonl", delete=False) as f:
+    dialects_path = f.name
+    f.write(
+        b'{"type":"assistant","message":{"id":"m1","content":['
+        b'{"type":"text","text":"hi"},{"type":"tool_use","name":"Bash"},'
+        b'{"type":"tool_use","name":"Read"}]}}\n'
+    )
+    f.write(
+        b'{"type":"user","message":{"content":['
+        b'{"type":"tool_result","tool_use_id":"c1"},'
+        b'{"type":"tool_result","tool_use_id":"c2"}]}}\n'
+    )
+    f.write(b'{"type":"item.completed","item":{"type":"command_execution"}}\n')
+    f.write(b'{"type":"item.completed","item":{"type":"mcp_tool_call"}}\n')
+    f.write(b'{"type":"item.completed","item":{"type":"web_search"}}\n')
+    f.write(b'{"type":"item.completed","item":{"type":"dynamic_tool_call"}}\n')
+    f.write(b'{"type":"tool_use","tool_name":"run_shell_command"}\n')
+    f.write(b'{"type":"tool_result","tool_id":"g1","status":"success"}\n')
+    f.write(
+        b'{"type":"tool_use","part":{"type":"tool","tool":"read",'
+        b'"state":{"status":"completed","output":"ok"}}}\n'
+    )
+try:
+    proc = run(["tool-call-delta", dialects_path, "0"])
+    assert_eq(
+        "count=8", proc.stdout.splitlines()[0],
+        "tool-call-delta counts completed Claude, Codex action, Gemini and OpenCode tools",
+    )
+finally:
+    os.unlink(dialects_path)
+
+with tempfile.NamedTemporaryFile("wb", suffix=".jsonl", delete=False) as f:
+    dispatch_only_path = f.name
+    f.write(
+        b'{"type":"assistant","message":{"content":['
+        b'{"type":"tool_use","name":"Bash"}]}}\n'
+    )
+    f.write(b'{"type":"tool_use","tool_name":"run_shell_command"}\n')
+    f.write(
+        b'{"type":"tool_use","part":{"type":"tool","tool":"read",'
+        b'"state":{"status":"running"}}}\n'
+    )
+try:
+    proc = run(["tool-call-delta", dispatch_only_path, "0"])
+    assert_eq(
+        "count=0", proc.stdout.splitlines()[0],
+        "tool dispatch does not terminate work before the result exists",
+    )
+finally:
+    os.unlink(dispatch_only_path)
 
 
 # ── provider-reset-at ───────────────────────────────────────────────

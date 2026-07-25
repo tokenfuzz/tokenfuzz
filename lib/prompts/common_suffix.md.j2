@@ -32,24 +32,7 @@ Every turn re-reads the whole conversation, so fewer turns and less added text a
 - **Coverage-gate is automatic when supported** with `bin/probe "{{ results_dir }}/scratch-N/<testcase>"`. Write testcases and sibling harnesses to that absolute scratch path first; do not create repo-root `scratch-N/` dirs. Add `--confirm` to run 5x once a crash appears.
 - **Check prior runs before re-probing:** `bin/probe-history <testcase>` reads `state/runs.jsonl` and shows verdict history for that testcase (by path + content sha1). If a confirmed verdict (`runs=5`) is already recorded, you have the evidence — only re-probe when the binary, harness, or testcase has changed, or to refute a flaky single-run result. This tool NEVER runs anything; `bin/probe --confirm` is still the way to get a fresh verdict.
 
-## TURN BUDGET (codex sessions only)
-
-Codex sessions have a soft turn budget of ~75 completed shell commands. Past
-this threshold, cached-input replay cost grows quadratically and the harness
-will end the session for a fresh `bin/state resume` continuation. A newly
-filed crash gets a small, bounded report-enrichment tail; if that is still
-insufficient, the next resume presents the unfinished crash ahead of all
-other work. Other partial hypotheses can still be cut off mid-turn, so:
-
-- Checkpoint frequently: every confirmed hypothesis, decision, or data-flow
-  observation goes into `bin/state add-hyp / update-hyp / add-note` the
-  moment you have it. The next session continues from those records.
-- Around turn 60+ (you can ask the orchestrator with `bin/state recent-runs`
-  to estimate your turn count), prefer finishing the current hypothesis and
-  writing its outcome to state over starting a new investigation.
-- Cap is configurable via `TURN_SOFT_CAP` (default 75; 0 disables). Do not
-  attempt to override it from inside the session — the harness is the only
-  thing watching the count.
+{{ turn_budget_section }}
 
 ## TOOL-CALL BUDGET (soft hint, all backends)
 

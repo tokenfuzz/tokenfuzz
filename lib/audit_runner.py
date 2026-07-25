@@ -217,6 +217,7 @@ class Runtime:
             repo_type=self.repo_type,
             guide_text=guide,
             fixed_strategy=self.fixed_strategy,
+            turn_soft_cap=_turn_cap(),
             config=self.config,
         )
 
@@ -827,11 +828,10 @@ def update_subsystem_dry_streaks(
             index_log(runtime, f"WARN: could not update dry streak for subsystem {subsystem}")
 
 
-def _session_budget(prompt_text: str, max_turns: int, scratch: Path) -> str:
+def _session_files(prompt_text: str, scratch: Path) -> str:
     return (
         prompt_text
-        + "\n\n## SESSION BUDGET\n\n"
-        + f"Stay within roughly {max_turns} turns. Save state and artifacts before stopping.\n"
+        + "\n\n## SESSION FILES\n\n"
         + f"Keep every working file — testcases, seeds, fuzzing scripts, corpora, crash "
         f"dumps — under `{scratch}`, and run every testcase through `bin/probe`. Never "
         f"write to `/tmp` or other shared temp: those escape the results tree, survive "
@@ -884,10 +884,16 @@ def reset_llm_decision_counters(runtime: Runtime) -> None:
         path.write_text("0", encoding="utf-8")
 
 
-def _codex_turn_cap(backend: str) -> int | None:
-    if backend != "codex":
-        return None
-    raw = os.environ.get("TURN_SOFT_CAP", "75")
+def _turn_cap() -> int:
+    """Rollover target for one audit-agent session.
+
+    Native backends count model turns; transcript-polled backends count
+    completed tool calls. Cached-input replay grows with session length on
+    every provider, so one operator setting controls both safe boundaries.
+    Backends without either mechanism receive the target in their prompt.
+    0 disables it.
+    """
+    raw = os.environ.get("TURN_SOFT_CAP", str(prompt.DEFAULT_TURN_SOFT_CAP))
     if not raw.isdigit():
         raise ValueError(f"TURN_SOFT_CAP must be a non-negative integer (got {raw!r})")
     return int(raw)
@@ -922,8 +928,8 @@ def run_agent(
     text_path = runtime.logs / f"{stem}.log"
     prompt_path = runtime.raw / f"{stem}.prompt.md"
     base = prompt.cold_start_prompt(context, agent) if cold else prompt.deep_investigation_prompt(context, agent)
-    max_turns = max(1, int(os.environ.get("MAX_TURNS_ANALYSIS", "1000")))
-    rendered = _session_budget(base, max_turns, context.scratch_dir(agent))
+    turn_cap = context.turn_soft_cap
+    rendered = _session_files(base, context.scratch_dir(agent))
     # Neutralize classifier-hot vocabulary in the assembled prompt, then strip the
     # NOVOCAB sentinels, so a safety classifier does not refuse a benign audit
     # prompt (recall loss). Run once, on the final text, after every framing pass.
@@ -953,11 +959,11 @@ def run_agent(
     def invoke(limit: int) -> int:
         return llm_invoke.run_agent_prompt(
             runtime.backend, rendered, limit, raw_path, model=runtime.model,
-            max_turns=max_turns,
+            max_turns=turn_cap,
             add_dirs=f"{runtime.root},{runtime.target_root},{runtime.results}",
             cwd=runtime.root, extra_env=extra_env,
             watchdog_marker_dir=context.scratch_dir(agent),
-            codex_turn_cap=_codex_turn_cap(runtime.backend),
+            turn_cap=turn_cap,
         )
 
     rc = invoke(timeout)
@@ -1004,11 +1010,13 @@ def run_agent(
         except OSError:
             pass
     usage_complete = llm_usage.usage_is_complete(usage, rc)
+    turn_capped = llm_invoke.session_turn_capped(raw_path)
     event = {
         "timestamp": datetime.now(timezone.utc).isoformat(), "iteration": iteration,
         "agent": agent, "role": role, "backend": runtime.backend, "model": runtime.model,
         "resolved_effort": llm_invoke.default_effort(runtime.backend),
-        "usage_complete": usage_complete,
+        "usage_complete": usage_complete, "turn_capped": turn_capped,
+        "turn_soft_cap": turn_cap,
         "returncode": rc, "provider_issue": issue, "prompt_chars": len(rendered),
         "raw_log": str(raw_path), "text_log": str(text_path), **usage,
     }
@@ -1019,7 +1027,9 @@ def run_agent(
         for key in ("input", "cached_input", "cache_creation", "output")
     )
     outcome = (
-        "deadline-truncated rc=124"
+        "turn-capped; continuing from state"
+        if turn_capped
+        else "deadline-truncated rc=124"
         if rc == 124 and issue == "none"
         else f"finished rc={rc}"
     )

@@ -54,11 +54,11 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
       status booleans. Existing focused subcommands remain for tests and
       one-off callers.
 
-  codex-turn-delta <log_file> <offset>
-      Count completed Codex command_execution items in complete JSONL lines
-      appended at or after <offset>. Prints count=N and offset=N. The returned
-      offset stops after the last complete line so a partially-written event is
-      retried on the next poll.
+  tool-call-delta <log_file> <offset>
+      Count completed tool calls, in any backend's dialect, from the complete
+      JSONL lines appended at or after <offset>. Prints count=N and offset=N.
+      The returned offset stops after the last complete line so a
+      partially-written event is retried on the next poll.
 
   provider-reset-at <logfile> [--now-epoch N]
       Parse provider text for the next reset epoch.
@@ -475,6 +475,22 @@ def _claude_content_items(ev):
     return content if isinstance(content, list) else []
 
 
+# Codex `item.completed` values that represent an external action rather than
+# model prose or bookkeeping. Keep this explicit: an unknown future item type
+# should undercount (a longer session), never cause an unsafe early terminate.
+_COMPLETED_ITEM_TOOL_TYPES = frozenset({
+    "collab_agent_tool_call",
+    "command_execution",
+    "dynamic_tool_call",
+    "extension",
+    "file_change",
+    "image_view",
+    "mcp_tool_call",
+    "tool_use",
+    "web_search",
+})
+
+
 def _cmd_waste_telemetry(args: argparse.Namespace) -> int:
     path = args.log_file
     if not os.path.isfile(path):
@@ -639,47 +655,88 @@ def _iter_json_events(path):
         return
 
 
+def _event_tool_counts(event: dict) -> tuple[int, int]:
+    """Return (command_executions, all_tools) for one tool-use event.
+
+    This is the historical transcript tally used by finish-fields and waste
+    telemetry. It counts requested tools so their names remain available even
+    when a backend omits a matching result event.
+    """
+    if event.get("type") == "item.completed":
+        item = event.get("item") or {}
+        item_type = item.get("type")
+        if item_type == "command_execution":
+            return 1, 1
+        if item_type in _COMPLETED_ITEM_TOOL_TYPES:
+            return 0, 1
+        return 0, 0
+
+    if event.get("type") == "command_execution":
+        return 1, 1
+
+    if event.get("type") == "tool_use":
+        opencode_tool = _opencode_tool_event(event)
+        if opencode_tool is not None:
+            return int(opencode_tool["name"] in _SHELL_TOOL_NAMES), 1
+        name = event.get("tool_name") or event.get("name") or ""
+        return int(name in _SHELL_TOOL_NAMES), 1
+
+    if event.get("type") == "assistant" or "message" in event:
+        commands = tools = 0
+        for item in _claude_content_items(event):
+            if not isinstance(item, dict) or item.get("type") != "tool_use":
+                continue
+            commands += int((item.get("name") or "") == "Bash")
+            tools += 1
+        return commands, tools
+
+    return 0, 0
+
+
+def _event_completed_tool_count(event: dict) -> int:
+    """Return completed tool calls represented by one streaming event.
+
+    Dispatch events are deliberately excluded. Terminating on Claude or
+    Gemini's ``tool_use`` event can kill the command it just announced before
+    it writes a testcase, records state, or returns a probe diagnostic.
+    """
+    if event.get("type") == "item.completed":
+        item = event.get("item") or {}
+        if isinstance(item, dict) and item.get("type") in _COMPLETED_ITEM_TOOL_TYPES:
+            return 1
+        return 0
+
+    if event.get("type") == "command_execution":
+        return 1
+
+    if event.get("type") == "tool_result":
+        return 1
+
+    if event.get("type") == "tool_use":
+        opencode_tool = _opencode_tool_event(event)
+        if opencode_tool is None:
+            return 0
+        part = event.get("part") or {}
+        state = part.get("state") if isinstance(part, dict) else {}
+        status = state.get("status") if isinstance(state, dict) else ""
+        return int(status in ("completed", "error"))
+
+    if event.get("type") == "user" or "message" in event:
+        return sum(
+            1
+            for item in _claude_content_items(event)
+            if isinstance(item, dict) and item.get("type") == "tool_result"
+        )
+
+    return 0
+
+
 def _count_tools(path: str) -> dict[str, int]:
     counts = {"command_execution": 0, "all_tools": 0}
     for event in _iter_json_events(path):
-        if event.get("type") == "item.completed":
-            item = event.get("item") or {}
-            item_type = item.get("type")
-            if item_type == "command_execution":
-                counts["command_execution"] += 1
-                counts["all_tools"] += 1
-            elif item_type in ("tool_use", "file_change"):
-                counts["all_tools"] += 1
-            continue
-
-        if event.get("type") == "command_execution":
-            counts["command_execution"] += 1
-            counts["all_tools"] += 1
-            continue
-
-        if event.get("type") == "tool_use":
-            opencode_tool = _opencode_tool_event(event)
-            if opencode_tool is not None:
-                if opencode_tool["name"] in _SHELL_TOOL_NAMES:
-                    counts["command_execution"] += 1
-                counts["all_tools"] += 1
-                continue
-
-            name = event.get("tool_name") or event.get("name") or ""
-            if name in _SHELL_TOOL_NAMES:
-                counts["command_execution"] += 1
-            counts["all_tools"] += 1
-            continue
-
-        if event.get("type") == "assistant" or "message" in event:
-            for item in _claude_content_items(event):
-                if not isinstance(item, dict) or item.get("type") != "tool_use":
-                    continue
-                name = item.get("name") or ""
-                if name == "Bash":
-                    counts["command_execution"] += 1
-                counts["all_tools"] += 1
-
+        commands, tools = _event_tool_counts(event)
+        counts["command_execution"] += commands
+        counts["all_tools"] += tools
     return counts
 
 
@@ -1012,8 +1069,14 @@ def _cmd_finish_fields(args: argparse.Namespace) -> int:
     return 0
 
 
-def codex_turn_delta(log_file: str | os.PathLike[str], offset: int = 0) -> tuple[int, int]:
-    """Count newly completed Codex shell commands without rereading the log."""
+def tool_call_delta(log_file: str | os.PathLike[str], offset: int = 0) -> tuple[int, int]:
+    """Count newly completed tool calls without rereading the log.
+
+    Every structured CLI dialect is classified by
+    _event_completed_tool_count. Counts all completed tools rather than shell
+    commands alone, while never treating a pre-execution dispatch event as a
+    safe process-termination boundary.
+    """
     try:
         offset = int(offset)
     except (TypeError, ValueError):
@@ -1049,17 +1112,15 @@ def codex_turn_delta(log_file: str | os.PathLike[str], offset: int = 0) -> tuple
             ev = json.loads(raw.decode("utf-8", "replace"))
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             continue
-        if not isinstance(ev, dict) or ev.get("type") != "item.completed":
+        if not isinstance(ev, dict):
             continue
-        item = ev.get("item") or {}
-        if isinstance(item, dict) and item.get("type") == "command_execution":
-            count += 1
+        count += _event_completed_tool_count(ev)
 
     return count, next_offset
 
 
-def _cmd_codex_turn_delta(args: argparse.Namespace) -> int:
-    count, offset = codex_turn_delta(args.log_file, args.offset)
+def _cmd_tool_call_delta(args: argparse.Namespace) -> int:
+    count, offset = tool_call_delta(args.log_file, args.offset)
     print(f"count={count}")
     print(f"offset={offset}")
     return 0
@@ -1577,11 +1638,11 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--prompt", default="")
     s.set_defaults(func=_cmd_finish_fields)
 
-    s = sub.add_parser("codex-turn-delta",
-                       help="Count newly-appended Codex command_execution completions.")
+    s = sub.add_parser("tool-call-delta",
+                       help="Count newly-appended completed tool calls on any backend.")
     s.add_argument("log_file")
     s.add_argument("offset")
-    s.set_defaults(func=_cmd_codex_turn_delta)
+    s.set_defaults(func=_cmd_tool_call_delta)
 
     s = sub.add_parser("provider-reset-at", help="Parse provider text for next reset epoch.")
     s.add_argument("logfile")

@@ -356,6 +356,14 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     static = prompt.write_static_prompt_file(context)
     check(static.is_file() and "DIGEST" in static.read_text(encoding="utf-8"), "prompt writes cached static rules atomically")
+    context.turn_soft_cap = 17
+    prompt.write_static_prompt_file(context)
+    check(
+        "~17 agent/tool turns" in prompt.common_suffix(context),
+        "prompt refreshes a cached turn budget when a results tree is reused",
+    )
+    context.turn_soft_cap = prompt.DEFAULT_TURN_SOFT_CAP
+    prompt.write_static_prompt_file(context)
     cold = prompt.cold_start_prompt(context, 1)
     check("Agent 1" in cold and "ROLE: REPRODUCE" in cold, "cold prompt renders role and agent identity")
     check(
@@ -1178,11 +1186,14 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         and (budget_runtime.logs / ".run-quality").read_text().strip() == "provider_recovered",
         "provider capacity pause uses the reported reset and records excluded wall time",
     )
-    budget_prompt = audit_runner._session_budget('A "quoted" prompt', 20, root / "scratch-1")
-    check('A "quoted" prompt' in budget_prompt and "roughly 20 turns" in budget_prompt, "audit session budget preserves quoted prompt text")
+    budget_prompt = audit_runner._session_files('A "quoted" prompt', root / "scratch-1")
+    check(
+        'A "quoted" prompt' in budget_prompt and "SESSION FILES" in budget_prompt,
+        "audit session file rule preserves quoted prompt text",
+    )
     check(
         "Never write to `/tmp`" in budget_prompt and "seeds" in budget_prompt,
-        "audit session budget keeps all working files under scratch, not shared /tmp",
+        "audit session file rule keeps all working files under scratch, not shared /tmp",
     )
 
     launch_results = root / "launch-results"
@@ -1200,6 +1211,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     launch_context = mock.Mock()
     launch_context.role.return_value = "reproduce"
     launch_context.scratch_dir.return_value = launch_scratch
+    launch_context.turn_soft_cap = 128
     with mock.patch.object(audit_runner.prompt, "cold_start_prompt", return_value="prompt"), \
          mock.patch.object(audit_runner.llm_invoke, "run_agent_prompt", return_value=0) as launch_invoke, \
          mock.patch.object(audit_runner.llm_invoke, "extract_text", return_value="done"), \
@@ -1225,7 +1237,8 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     check(
         (launch_logs / ".index.jsonl.lock").is_file()
         and launch_usage_row["agent"] == 1
-        and launch_usage_row["resolved_effort"] == "high",
+        and launch_usage_row["resolved_effort"] == "high"
+        and launch_usage_row["turn_soft_cap"] == 128,
         "agent usage writes share the JSONL lock used by concurrent harness writers",
     )
     corpus_testcase = launch_scratch / "coverage.html"

@@ -189,6 +189,76 @@ class UsageExtractionTests(unittest.TestCase):
         self.assertEqual(row["tokens"]["cache_creation_1h"], 200)
         self.assertEqual(row["cost_usd"], 0.123456)
 
+    def test_capped_claude_session_sums_every_request(self) -> None:
+        # A session ended by the turn cap or the wall clock never emits its
+        # terminal event. Taking only the last per-request usage reported one
+        # request's tokens and made a long, expensive session look cheap.
+        def request(identifier: str, cache_read: int) -> dict:
+            return {
+                "type": "assistant",
+                "message": {
+                    "id": identifier,
+                    "content": [{"type": "tool_use", "name": "Bash"}],
+                    "usage": {
+                        "input_tokens": 2,
+                        "cache_read_input_tokens": cache_read,
+                        "cache_creation_input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_creation": {"ephemeral_1h_input_tokens": 100},
+                    },
+                },
+            }
+
+        repeated = request("msg_2", 41_000)
+        repeated["message"]["usage"]["cache_creation_input_tokens"] = 50
+        repeated["message"]["usage"]["output_tokens"] = 40
+        raw = self.fixture("capped.raw", [
+            request("msg_1", 17_000),
+            # The streamed event for one request repeats with growing
+            # counters. Merge buckets independently so a larger cache snapshot
+            # cannot discard an earlier non-cache counter.
+            request("msg_2", 40_000),
+            repeated,
+            request("msg_3", 90_000),
+        ])
+        row = llm_usage.extract_usage(str(raw), backend="claude")
+        self.assertEqual(row["tokens"]["cached_input"], 148_000)
+        self.assertEqual(row["tokens"]["cache_creation"], 300)
+        self.assertEqual(row["tokens"]["output"], 150)
+        self.assertTrue(row["estimated"])
+        self.assertTrue(llm_usage.usage_is_complete(row, 0))
+
+        # Claude reports a request's usage as the message begins, so its
+        # output_tokens is a stub. Billed generated content — thinking blocks
+        # especially — is the better floor, and taking it marks the row
+        # estimated rather than reporting a stub as measured.
+        thinking = request("msg_4", 1_000)
+        thinking["message"]["content"] = [
+            {"type": "thinking", "thinking": "y" * 8_000},
+        ]
+        tool = request("msg_4", 1_000)
+        tool["message"]["content"] = [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "z" * 2_000}},
+        ]
+        raw = self.fixture("thinking.raw", [thinking, tool])
+        row = llm_usage.extract_usage(str(raw), backend="claude")
+        self.assertEqual(row["tokens"]["cached_input"], 1_000)
+        self.assertGreater(row["tokens"]["output"], 2_000)
+        self.assertTrue(row["estimated"])
+
+    def test_terminal_model_usage_still_wins_over_per_request_sum(self) -> None:
+        raw = self.fixture("complete.raw", [
+            {"type": "assistant", "message": {
+                "id": "msg_1", "content": [],
+                "usage": {"cache_read_input_tokens": 10, "output_tokens": 1}}},
+            {"type": "result", "modelUsage": {"claude-opus": {
+                "inputTokens": 5, "cacheCreationInputTokens": 6,
+                "cacheReadInputTokens": 10, "outputTokens": 1}}},
+        ])
+        row = llm_usage.extract_usage(str(raw), backend="claude")
+        self.assertEqual(row["tokens"]["cached_input"], 10)
+        self.assertEqual(row["tokens"]["cache_creation"], 6)
+
     def test_malformed_native_counters_fail_open(self) -> None:
         raw = self.fixture("malformed.raw", [{
             "type": "result", "total_cost_usd": float("inf"),

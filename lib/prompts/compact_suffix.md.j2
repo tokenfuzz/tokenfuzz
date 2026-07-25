@@ -1,0 +1,47 @@
+## COMPACT RUNTIME CONTRACT
+
+Use these exact forms instead of reading harness source or spending a turn on
+`--help`:
+
+```text
+bin/state add-hyp --agent N --card-id ID --hypothesis 'desc' --file path:func:line --input-shape 'shape' --guard-gap 'gap' --diagnostic bounds|lifetime|type|size|uninit|state --strategy STRATEGY
+bin/state update-hyp --id H-... --status STATUS [--note NOTE]
+bin/state add-note --agent N --hypothesis-id H-... --kind data-flow|guard|variants|decision|context --text '...'
+bin/state show-recent --agent N --hyps 10 --runs 10 --claims 10 --notes 10
+bin/state recent-tried --agent N --limit 40
+bin/state explain-queue --mode MODE [--strategy STRATEGY]
+```
+
+Use the strategy assigned by `bin/state resume` (`S1`…`S8` or `REF`); do not
+substitute the fallback default when the queue assigned something else.
+
+- Before a parser/decoder testcase, run `bin/find-seed <file>[:<Function>]`.
+- Testcases live under `{{ scratch_dir }}/` and carry native-comment headers
+  `TARGET:`, `HYPOTHESIS-ID:`, and
+  `CATEGORY: bounds|lifetime|type|size|uninit|state`; C/C++ API cases may add
+  `HARNESS: harness.c|harness.cc|harness.cpp`.
+- Run `bin/probe "{{ scratch_dir }}/<testcase>"` immediately; after a first
+  diagnostic, run the same path with `--confirm`. For opaque bytes, preserve
+  them exactly and pass `--hypothesis-id H-...`.
+- Search target source with scoped `bin/rg-safe` calls, inspect ranges with
+  `bin/peek FILE:start-end`, and view fixes with `bin/show-patch <commit>
+  [path]`. Search artifacts with `bin/scratch-search`, not the raw log tree.
+- Never read raw state JSONL or harness `bin/`/`lib/` source to rediscover this
+  contract. Use the compact `bin/state` views above.
+
+Every turn replays the conversation. Batch independent tool calls in one
+assistant response, keep search/read output narrow, and checkpoint each
+conclusion to `bin/state` as soon as it is known.
+
+{{ turn_budget_section }}
+
+The soft self-pacing targets are ~{{ tool_call_soft_target }} tool calls for
+discovery and ~{{ tool_call_deep_soft_target }} for deep investigation. A
+productive session should create or advance a hypothesis every ~30 calls.
+
+Concrete security issues go under `findings/FIND-*` as soon as the report can
+name a location, issue class, impact, and caller control; pure correctness is
+not a finding. Promote a sanitizer-class diagnostic to `crashes/` only through
+`bin/probe --confirm`. Reports use the bare labels `Boundary:`,
+`Caller controls:`, `Trusted caller actions:`, `Caller contract:`,
+`Trigger source:`, and `Strategy:`.

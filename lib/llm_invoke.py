@@ -203,7 +203,7 @@ _GEMINI_ISOLATION_MARKER = ".tokenfuzz-memory-isolated"
 # memory_env("gemini") calls reuse the one staged dir.
 _gemini_iso_home: "str | None" = None
 _gemini_iso_lock = threading.Lock()
-_gemini_effort_settings: dict[tuple[str, str], str] = {}
+_gemini_settings: dict[tuple[str, str, int], str] = {}
 
 
 def _is_tokenfuzz_gemini_home(path: str) -> bool:
@@ -431,14 +431,17 @@ def _capture_agy_cli_log_diag(raw_log: str | os.PathLike[str]) -> None:
         return
 
 
-def prepare_gemini_effort_settings(model: str = "") -> "str | None":
-    """Write Gemini CLI system settings for isolation and configured thinking."""
+def prepare_gemini_settings(
+    model: str = "", max_session_turns: int = 0,
+) -> "str | None":
+    """Write Gemini CLI system settings for isolation, effort, and turn cap."""
     if not use_gemini_cli():
         return None
     resolved_model = resolve_model_name("gemini", model).strip()
     effort = default_effort("gemini").strip().upper()
-    key = (resolved_model, effort)
-    existing = _gemini_effort_settings.get(key)
+    cap = max(0, int(max_session_turns))
+    key = (resolved_model, effort, cap)
+    existing = _gemini_settings.get(key)
     if existing:
         return existing
     root = Path(tempfile.mkdtemp(prefix="tokenfuzz-gemini-settings-"))
@@ -456,6 +459,8 @@ def prepare_gemini_effort_settings(model: str = "") -> "str | None":
         },
         "context": {"memoryBoundaryMarkers": []},
     }
+    if cap:
+        payload["model"] = {"maxSessionTurns": cap}
     if resolved_model and effort:
         payload["modelConfigs"] = {
             "customOverrides": [{
@@ -468,15 +473,17 @@ def prepare_gemini_effort_settings(model: str = "") -> "str | None":
             }],
         }
     path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
-    _gemini_effort_settings[key] = str(path)
+    _gemini_settings[key] = str(path)
     return str(path)
 
 
-def invocation_env(backend: str, model: str = "") -> dict[str, str]:
+def invocation_env(
+    backend: str, model: str = "", max_session_turns: int = 0,
+) -> dict[str, str]:
     """Return environment controls needed for one backend invocation."""
     environment = memory_env(backend)
     if backend == "gemini" and use_gemini_cli():
-        settings = prepare_gemini_effort_settings(model)
+        settings = prepare_gemini_settings(model, max_session_turns)
         if settings:
             environment["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = settings
     return environment
@@ -701,9 +708,11 @@ def agent_flags(
             "--output-format", "stream-json",
             "--dangerously-skip-permissions",
         ]
-        # max_turns <= 0 means "no cap" — omit the flag so the CLI lets
-        # the agent run until the outer wall-clock budget hits. Used by
-        # the benchmark's model-direct cell, which is open-ended.
+        # Audit sessions pass TURN_SOFT_CAP here because Claude can end at its
+        # own structured turn boundary and retain terminal usage. Other callers
+        # use max_turns for their own contract (for example, preflight=1).
+        # max_turns <= 0 omits the flag; the model-direct benchmark uses that
+        # form so only its wall-clock budget ends the open-ended cell.
         if max_turns > 0:
             flags += ["--max-turns", str(max_turns)]
         if resolved_model:
@@ -843,13 +852,19 @@ def run_agent_prompt(
     cwd: str | os.PathLike[str] | None = None,
     extra_env: dict[str, str] | None = None,
     watchdog_marker_dir: str | os.PathLike[str] | None = None,
-    codex_turn_cap: int | None = None,
+    turn_cap: int | None = None,
     allow_subagents: bool = True,
 ) -> int:
     """Launch a tool-using backend and write its combined raw transcript."""
     binary = backend_bin(backend)
+    requested_cap = max(0, int(turn_cap)) if turn_cap is not None else None
+    native_session_cap = (
+        requested_cap
+        if requested_cap is not None and backend in ("claude", "grok")
+        else max_turns
+    )
     flags = agent_flags(
-        backend, model, max_turns, add_dirs,
+        backend, model, native_session_cap, add_dirs,
         allow_subagents=allow_subagents,
     )
     first_dir = next((p.strip() for p in add_dirs.split(",") if p.strip()), "")
@@ -872,7 +887,13 @@ def run_agent_prompt(
             pass
         return 127
     environment = os.environ.copy()
-    environment.update(invocation_env(backend, model))
+    environment.update(invocation_env(
+        backend,
+        model,
+        requested_cap
+        if requested_cap is not None and backend == "gemini" and use_gemini_cli()
+        else 0,
+    ))
     if extra_env:
         environment.update({str(key): str(value) for key, value in extra_env.items()})
     if backend == "claude":
@@ -902,29 +923,34 @@ def run_agent_prompt(
             str(timeout_secs), "TERM", "0", *command,
         ]
     try:
-        if backend == "gemini" and timeout_secs > 0:
-            returncode = _run_gemini_with_watchdog(
-                launch_command, input_text, raw_log, working_dir, environment,
-                watchdog_marker_dir,
-            )
-        elif backend == "codex" and codex_turn_cap is not None and codex_turn_cap > 0:
-            returncode = _run_codex_with_turn_watchdog(
-                launch_command, input_text, raw_log, working_dir, environment,
-                codex_turn_cap,
-            )
-        else:
-            with Path(raw_log).open("w", encoding="utf-8") as sink:
-                completed = subprocess.run(
-                    launch_command,
-                    input=input_text,
-                    stdout=sink,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    cwd=working_dir,
-                    env=environment,
-                    check=False,
+        # Claude, Grok, and current Google Gemini CLI versions have native turn
+        # limits. Gemini also keeps its completed-tool watchdog armed as a
+        # compatibility fallback for versions that ignore maxSessionTurns.
+        # Codex and OpenCode expose completed tool events, so the harness can
+        # stop them at the same rollover target. Antigravity (`agy`) has no
+        # native cap or stable documented completed-tool event contract. Its
+        # hidden stream-json step updates are not a safe termination boundary,
+        # so that dialect remains cooperative plus wall-clock bounded.
+        transcript_cap = requested_cap or 0
+        if backend in ("claude", "grok") or (
+            backend == "gemini" and not use_gemini_cli()
+        ):
+            transcript_cap = 0
+        returncode = _run_agent_process(
+            launch_command, input_text, raw_log, working_dir, environment,
+            turn_cap=transcript_cap,
+            checkpoint_on_native_limit=bool(
+                requested_cap
+                and (
+                    backend in ("claude", "grok")
+                    or (backend == "gemini" and use_gemini_cli())
                 )
-            returncode = completed.returncode
+            ),
+            health_watchdog=(
+                backend == "gemini" and timeout_secs > 0
+            ),
+            watchdog_marker_dir=watchdog_marker_dir,
+        )
     except OSError as exc:
         Path(raw_log).write_text(str(exc) + "\n", encoding="utf-8")
         return 127
@@ -939,6 +965,11 @@ def run_agent_prompt(
 
 _CRASH_ENRICHMENT_GRACE_COMMANDS = 15
 _CRASH_ENRICHMENT_GRACE_SECONDS = 300
+
+# Written to the transcript when the harness ends a session at the turn cap.
+# A capped session exits 0, so this is the only signal separating "checkpointed
+# for continuation" from "finished on its own".
+TURN_CAP_MARKER = "TURN_SOFT_CAP reached"
 
 
 def _agent_has_unfinished_crash(environment: dict) -> bool:
@@ -964,19 +995,66 @@ def _agent_has_unfinished_crash(environment: dict) -> bool:
     return False
 
 
-def _run_codex_with_turn_watchdog(
-    launch_command, input_text, raw_log, cwd, environment, turn_cap: int,
+def _feed_stdin(process, input_text: str):
+    """Write the prompt from a thread so a large prompt cannot deadlock.
+
+    stdout goes to a file, so the child never blocks there; without this a
+    prompt larger than the pipe buffer stalls against a child that streams
+    stdout before draining stdin.
+    """
+    def _feed() -> None:
+        try:
+            process.stdin.write(input_text)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
+    feeder = threading.Thread(target=_feed, daemon=True)
+    feeder.start()
+    return feeder
+
+
+def _run_agent_process(
+    launch_command, input_text, raw_log, cwd, environment, *,
+    turn_cap: int = 0,
+    checkpoint_on_native_limit: bool = False,
+    health_watchdog: bool = False,
+    watchdog_marker_dir: str | os.PathLike[str] | None = None,
 ) -> int:
-    """End a Codex audit session after a bounded number of completed commands."""
+    """Run one agent CLI, optionally under a turn cap and a health watchdog.
+
+    A transcript cap ends a session after a bounded number of completed tool
+    calls. Native-cap backends are normalized here too when explicitly armed
+    by the audit caller. A capped session exits 0 and is continued from
+    `bin/state resume`, not treated as a failure.
+
+    The health watchdog is Gemini's sustained-quota-stall detector; it needs
+    the transcript streamed live, which the polling loop already provides.
+    """
     import audit_helpers
     import process_tree
 
     raw = Path(raw_log)
+    if turn_cap <= 0 and not health_watchdog:
+        with raw.open("w", encoding="utf-8") as sink:
+            completed = subprocess.run(
+                launch_command, input=input_text, stdout=sink,
+                stderr=subprocess.STDOUT, text=True, cwd=cwd, env=environment,
+                check=False,
+            )
+        return _normalize_native_turn_limit(
+            raw, completed.returncode, checkpoint_on_native_limit,
+        )
+
     capped = False
     enrichment_limit = None
     enrichment_deadline = None
     offset = total = 0
-    feeder = None
+    feeder = watchdog = None
     with raw.open("w", encoding="utf-8") as sink:
         process = subprocess.Popen(
             launch_command,
@@ -988,30 +1066,35 @@ def _run_codex_with_turn_watchdog(
             env=environment,
         )
         try:
-            if input_text is not None:
-                def _feed() -> None:
-                    try:
-                        process.stdin.write(input_text)
-                    except (OSError, ValueError):
-                        pass
-                    finally:
-                        try:
-                            process.stdin.close()
-                        except OSError:
-                            pass
+            if health_watchdog:
+                import gemini_watchdog
 
-                feeder = threading.Thread(target=_feed, daemon=True)
-                feeder.start()
+                agent_num = environment.get("AGENT_NUM", "")
+                marker = (
+                    Path(watchdog_marker_dir)
+                    if watchdog_marker_dir is not None else raw.parent
+                )
+                watchdog = gemini_watchdog.Watchdog(
+                    raw, process.pid, marker,
+                    f"Agent{agent_num}" if agent_num else "gemini agent",
+                    use_cli=use_gemini_cli(),
+                )
+                watchdog.start()
+            if input_text is not None:
+                feeder = _feed_stdin(process, input_text)
             while process.poll() is None:
+                if turn_cap <= 0:
+                    time.sleep(0.5)
+                    continue
                 # stdout is a regular file, so flushing Python's handle is
                 # enough to make every completed JSONL record observable.
                 sink.flush()
-                count, offset = audit_helpers.codex_turn_delta(raw, offset)
+                count, offset = audit_helpers.tool_call_delta(raw, offset)
                 total += count
                 if total >= turn_cap:
                     unfinished = _agent_has_unfinished_crash(environment)
                     if enrichment_limit is None and unfinished:
-                        # Confirmation can land on the nominal last command.
+                        # Confirmation can land on the nominal last call.
                         # Give the required report a small, bounded tail; the
                         # structured resume path will preempt new work if this
                         # tail still is not enough.
@@ -1047,84 +1130,82 @@ def _run_codex_with_turn_watchdog(
                 process.kill()
                 process.wait()
         finally:
+            if watchdog is not None:
+                watchdog.stop()
+                watchdog.join(timeout=7)
             if process.poll() is None:
                 process.kill()
                 process.wait()
             if feeder is not None:
                 feeder.join(timeout=1)
     if capped:
-        with raw.open("a", encoding="utf-8") as stream:
-            stream.write(
-                f"[audit] TURN_SOFT_CAP reached after {total} completed shell commands; "
-                "session checkpointed for a fresh continuation.\n"
-            )
+        _mark_turn_capped(raw, f"after {total} completed tool calls")
         return 0
-    return process.returncode
+    return _normalize_native_turn_limit(
+        raw, process.returncode, checkpoint_on_native_limit,
+    )
 
 
-def _run_gemini_with_watchdog(
-    launch_command, input_text, raw_log, cwd, environment, marker_dir=None
-) -> int:
-    """Run a gemini agent with the health watchdog armed. The transcript is
-    streamed to raw_log live (not buffered) so the watchdog can poll it for
-    sustained 429 quota exhaustion; the agy klog arms cover the drip/idle
-    hangs. On a confirmed stall the watchdog terminates the process tree, which
-    lets proc.wait() return well before the wall-clock timeout."""
-    import gemini_watchdog
+def _native_turn_limit_reached(raw_log: Path) -> bool:
+    """Recognize exact structured native-cap events, never model/tool prose."""
+    from file_tools import reverse_lines
 
-    raw = Path(raw_log)
-    agent_num = environment.get("AGENT_NUM", "")
-    label = f"Agent{agent_num}" if agent_num else "gemini agent"
-    marker = Path(marker_dir) if marker_dir is not None else raw.parent
-    with raw.open("w", encoding="utf-8") as sink:
-        process = subprocess.Popen(
-            launch_command,
-            stdin=subprocess.PIPE if input_text is not None else None,
-            stdout=sink,
-            stderr=subprocess.STDOUT,
-            text=True,
-            cwd=cwd,
-            env=environment,
-        )
-        watchdog = None
-        feeder = None
+    for index, line in enumerate(reverse_lines(raw_log)):
+        if index >= 32:
+            break
         try:
-            watchdog = gemini_watchdog.Watchdog(
-                raw, process.pid, marker, label, use_cli=use_gemini_cli()
-            )
-            watchdog.start()
-            if input_text is not None:
-                # Feed stdin from a thread so a prompt larger than the pipe
-                # buffer cannot deadlock against a child that streams stdout
-                # first. stdout goes to a file, so the child never blocks there.
-                def _feed() -> None:
-                    try:
-                        process.stdin.write(input_text)
-                    except (OSError, ValueError):
-                        pass
-                    finally:
-                        try:
-                            process.stdin.close()
-                        except OSError:
-                            pass
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if (
+            event.get("type") == "result"
+            and event.get("subtype") == "error_max_turns"
+        ):
+            return True
+        if event.get("type") == "max_turns_reached":
+            return True
+        error = event.get("error")
+        if (
+            event.get("type") == "result"
+            and event.get("status") == "error"
+            and isinstance(error, dict)
+            and error.get("type") == "FatalTurnLimitedError"
+        ):
+            return True
+    return False
 
-                feeder = threading.Thread(target=_feed, daemon=True)
-                feeder.start()
-            process.wait()
-        finally:
-            if watchdog is not None:
-                watchdog.stop()
-                watchdog.join(timeout=7)
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-            if feeder is not None:
-                feeder.join(timeout=1)
-    return process.returncode
+
+def _normalize_native_turn_limit(
+    raw_log: Path, returncode: int, checkpoint_on_native_limit: bool,
+) -> int:
+    """Turn a deliberately armed native ceiling into a clean checkpoint."""
+    if checkpoint_on_native_limit and _native_turn_limit_reached(raw_log):
+        _mark_turn_capped(raw_log, "at the backend CLI's own turn ceiling")
+        return 0
+    return returncode
+
+
+def _mark_turn_capped(raw_log: Path, detail: str) -> None:
+    with open(raw_log, "a", encoding="utf-8") as stream:
+        stream.write(
+            f"[audit] {TURN_CAP_MARKER} {detail}; "
+            "session checkpointed for a fresh continuation.\n"
+        )
+
+
+def session_turn_capped(raw_log: str | os.PathLike[str]) -> bool:
+    """Whether this session ended at the turn cap rather than on its own."""
+    try:
+        from file_tools import reverse_lines
+
+        for line in reverse_lines(raw_log):
+            if line.strip():
+                return line.startswith(f"[audit] {TURN_CAP_MARKER} ")
+    except OSError:
+        return False
+    return False
 
 
 def decide_flags(backend: str, model: str = "") -> list[str]:

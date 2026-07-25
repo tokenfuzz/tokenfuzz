@@ -141,8 +141,56 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
                 self.assertNotIn("No new exploration", text)
 
         self.assertEqual(rendered.count("## PRIOR SESSION SEED"), 1)
+        # The compact variant starts from structured state only: no seed
+        # section and no seed body.
         compact = prompt.compact_fresh_prompt(self.context(), 1)
-        self.assertNotIn("PRIOR SESSION SEED", compact)
+        self.assertNotIn("## PRIOR SESSION SEED", compact)
+        self.assertNotIn("already reviewed", compact)
+
+    def test_every_launch_variant_carries_the_runtime_contract(self) -> None:
+        # A compact continuation is a NEW conversation with no memory of the
+        # workflow, and it is the most common variant. It needs exact CLI
+        # syntax and rollover guidance, but replaying the full 22 KB suffix
+        # would erase much of the reason this variant is compact.
+        context = self.context()
+        for name, rendered in (
+            ("cold", prompt.cold_start_prompt(context, 1)),
+            ("compact", prompt.compact_fresh_prompt(context, 1)),
+            ("deep", prompt.deep_investigation_prompt(context, 1)),
+        ):
+            with self.subTest(variant=name):
+                self.assertIn("bin/state resume --agent", rendered)
+                self.assertIn("TURN BUDGET", rendered)
+                self.assertIn("Batch independent tool calls", rendered)
+                self.assertIn("bin/probe", rendered)
+        compact = prompt.compact_fresh_prompt(context, 1)
+        self.assertIn("## COMPACT RUNTIME CONTRACT", compact)
+        self.assertIn("bin/state update-hyp --id", compact)
+        self.assertNotIn("## SESSION RULES DIGEST", compact)
+        self.assertLess(len(compact), len(prompt.cold_start_prompt(context, 1)))
+        compact_contract = prompt.compact_suffix(context, 1)
+        self.assertIn("--strategy STRATEGY", compact_contract)
+        self.assertNotIn("--strategy S1", compact_contract)
+
+    def test_turn_budget_is_backend_neutral_and_bounds_the_soft_target(self) -> None:
+        self.assertEqual(prompt.DEFAULT_TURN_SOFT_CAP, 128)
+        context = self.context()
+        context.turn_soft_cap = 40
+        suffix = prompt.common_suffix(context)
+
+        self.assertIn("TURN BUDGET (all backends)", suffix)
+        self.assertNotIn("codex sessions only", suffix)
+        self.assertIn("~40 agent/tool turns", suffix)
+        self.assertIn("Antigravity (`agy`)", suffix)
+        # A self-pacing hint above the cap that actually ends the session is a
+        # contradiction the agent reads as permission to run past it.
+        self.assertEqual(context.soft_target(deep=True), 40)
+        self.assertEqual(context.soft_target(deep=False), 40)
+        context.turn_soft_cap = 0
+        self.assertEqual(context.soft_target(deep=True), 150)
+        uncapped = prompt.turn_budget_section(context)
+        self.assertIn("rollover is disabled", uncapped)
+        self.assertNotIn("~0", uncapped)
 
     def test_reproduce_prompts_put_execution_before_turn_twenty(self) -> None:
         context = self.context()

@@ -48,10 +48,24 @@ so this section is mostly here to explain what you are reading.
 | Variable | Default | What it controls |
 | --- | --- | --- |
 | `MAX_DRY_SESSIONS` | `10` | A continuous run stops once this many iterations in a row produce nothing *and* no hypothesis is still open, logging `STALL_STOP`. Raise it for a hard target you expect to be slow; the harness ignores a value low enough to prevent fair strategy rotation. |
-| `TURN_SOFT_CAP` | `75` completed commands | A long Codex session is checkpointed and continued with fresh context instead of dragging hundreds of tool calls forward. The log says `TURN_SOFT_CAP reached …; session checkpointed for a fresh continuation`. Set `0` to disable. |
+| `TURN_SOFT_CAP` | `128` agent/tool turns | Rollover target for a long audit session. Claude, Grok, and current Google Gemini CLI versions use native turn limits; Gemini retains a completed-tool fallback for older versions. Codex and OpenCode use completed tool events as the safe termination boundary. Antigravity (`agy`) has neither a native turn flag nor a stable completed-tool event contract, so its prompt carries the same cooperative target but only `AGENT_TIMEOUT` can hard-stop it. Capped sessions continue from structured state; the log says `turn-capped; continuing from state`, and the transcript ends with `TURN_SOFT_CAP reached …`. Set `0` to disable. |
 
-Neither loses work: both stop at a point where the next iteration resumes from
-saved state.
+Already checkpointed hypotheses and artifacts are preserved. The next
+iteration resumes them from structured state; work not checkpointed before a
+backend's turn boundary may need to be repeated.
+
+The default is deliberately conservative: recorded Claude request curves
+modeled about 28% lower cache reads at 128 while interrupting fewer original
+sessions than a 100-turn cap. Use 100 as a more aggressive cost setting only
+after checking finding yield and incomplete-artifact rates on your workload:
+
+```bash
+TURN_SOFT_CAP=100 bin/audit --target <target> --backend <backend>
+```
+
+Native model turns and completed-tool events are not identical units, so treat
+the value as a cross-backend rollover target rather than an exact request
+quota.
 
 ## Model selection
 

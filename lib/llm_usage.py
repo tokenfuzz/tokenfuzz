@@ -35,19 +35,17 @@ On any internal failure these commands print empty and exit 0 — a
 missing cost number must never fail a benchmark cell or an audit
 session.
 
-Two extraction paths:
+Extraction paths:
 
-  measured  — codex and claude emit a usage object in their JSON event
-              stream; it is read directly. `estimated` is false.
-  estimated — the gemini backend (Antigravity CLI / agy 1.0.0) emits no
-              usage telemetry in --print output or its text logs, and Grok
-              Build's streaming JSON exposes no usage object. When no usage
-              object is found
-              and a prompt file is supplied, tokens are ESTIMATED from
-              character counts and the row is flagged `estimated: true`
-              so the ledger never presents an estimate as a measurement.
-              Codex/Claude logs without usage are treated as unknown
-              zeroes rather than estimating from error text.
+  measured   — terminal/summary usage is reduced according to the backend's
+               event contract. `estimated` is false.
+  recovered  — a terminal-less Claude stream is summed by stable message id.
+               Cache buckets are measured; incomplete fresh-input/output
+               buckets make the whole row `estimated: true`.
+  estimated  — when a backend reports no usage and a prompt file is supplied,
+               tokens are estimated from character counts and the row is
+               flagged `estimated: true`. Codex/Claude logs without usable
+               telemetry stay unknown rather than estimating from error text.
 
 Token-field aliasing (different backends, different spellings):
   input          ← input_tokens / prompt_tokens / input
@@ -58,9 +56,7 @@ cache_creation is the cache-WRITE counter — Claude reports it; codex
 does not, so it stays 0 there. It is captured so the benchmark does not
 silently drop a real billed input component (cache writes bill above
 cache reads). Claude's explicit one-hour write bucket is retained separately
-so it is priced at 2x rather than the five-minute 1.25x rate. The last usage
-object seen in the stream wins (backends
-emit a running or final cumulative total).
+so it is priced at 2x rather than the five-minute 1.25x rate.
 """
 
 from __future__ import annotations
@@ -360,6 +356,101 @@ def extract_usage(
     return extract_usage_from_text(raw, prompt_text=prompt_text, backend=backend)
 
 
+def _claude_per_request_usage(raw: str) -> tuple[dict, bool] | None:
+    """Sum Claude's per-assistant-message usage, or None if the stream has none.
+
+    Returns (tokens, estimated). Each API request reports its own usage under a
+    stable `message.id`; the streamed event for one message can repeat with
+    growing counters, so the largest snapshot per id is that request's total and
+    those totals sum. Verified against a completed 236-request session: the
+    cache-read and cache-creation buckets equal terminal `modelUsage` exactly.
+    Fresh input can omit CLI-internal requests, so a terminal-less row is
+    always marked estimated even when its generated-content floor is not the
+    larger output value.
+
+    Output does not: Claude reports a request's usage as the message begins, so
+    `output_tokens` there is a stub (~2% of the real count) and the true figure
+    only lands in the terminal event this path exists to replace. Generated
+    content — reply text, thinking blocks, and serialized tool calls, all of
+    which are billed output — gives a closer floor, so take whichever is
+    larger. The row remains estimated because neither the generated-content
+    floor nor the visible fresh-input counters are guaranteed complete.
+    """
+    def _generated_content_chars(content: object) -> int:
+        """Conservative generated-content size for one Claude stream event."""
+        if not isinstance(content, list):
+            return 0
+        total = 0
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text" and isinstance(block.get("text"), str):
+                total += len(block["text"])
+            elif block_type == "thinking" and isinstance(block.get("thinking"), str):
+                total += len(block["thinking"])
+            elif block_type == "tool_use":
+                name = block.get("name")
+                if isinstance(name, str):
+                    total += len(name)
+                tool_input = block.get("input")
+                if isinstance(tool_input, (dict, list)):
+                    total += len(json.dumps(tool_input, separators=(",", ":")))
+        return total
+
+    per_message: dict[str, dict] = {}
+    generated_chars = 0
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "assistant":
+            continue
+        message = obj.get("message")
+        if not isinstance(message, dict):
+            continue
+        usage = message.get("usage")
+        identifier = message.get("id")
+        if not isinstance(usage, dict) or not identifier:
+            continue
+        candidate = {
+            "input": _first_int(usage, _INPUT_KEYS),
+            "cached_input": _cached_input_int(usage),
+            "cache_creation": _cache_write_int(usage),
+            "output": _first_int(usage, _OUTPUT_KEYS),
+            "cache_creation_1h": _cache_creation_1h(usage),
+        }
+        if not any(candidate.values()):
+            continue
+        # Claude emits separate assistant events for the text/thinking/tool
+        # blocks of one message id, while repeating that request's same usage
+        # counters on each. Sum every generated block, but keep one usage row
+        # per id.
+        generated_chars += _generated_content_chars(message.get("content"))
+        previous = per_message.get(identifier)
+        if previous is None:
+            per_message[identifier] = candidate
+        else:
+            per_message[identifier] = {
+                key: max(previous[key], candidate[key])
+                for key in candidate
+            }
+    if not per_message:
+        return None
+    totals = {
+        key: sum(row[key] for row in per_message.values())
+        for key in ("input", "cached_input", "cache_creation", "output", "cache_creation_1h")
+    }
+    floor = math.ceil(generated_chars / _CHARS_PER_TOKEN) if generated_chars else 0
+    if floor > totals["output"]:
+        totals["output"] = floor
+    return totals, True
+
+
 def extract_usage_from_text(
     raw: str,
     prompt_text: str = "",
@@ -449,7 +540,21 @@ def extract_usage_from_text(
             "backend": backend,
         })
 
-    # Fallback path: no terminal event carried usage (agent killed before
+    # Fallback path A: Claude streams one per-request usage object per
+    # assistant message, so a session that never reached its terminal event
+    # (turn cap, wall-clock kill) can still recover its exact cache buckets and
+    # a conservative floor for the rest. Taking the last one instead reports a
+    # single request — a ~30x undercount on a long session, which would make a
+    # capped run look free.
+    per_request = _claude_per_request_usage(raw) if backend == "claude" else None
+    if per_request is not None:
+        tokens, output_estimated = per_request
+        return with_reported_cost({
+            "tokens": tokens, "probe": {}, "estimated": output_estimated,
+            "backend": backend,
+        })
+
+    # Fallback path B: no terminal event carried usage (agent killed before
     # emitting one, or a backend that only streams per-turn usage). The
     # LAST non-zero usage object wins — a floor, not a proven total. A
     # usage object that is all-zero is not real telemetry, so it does not

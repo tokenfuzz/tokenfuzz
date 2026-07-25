@@ -1,0 +1,17 @@
+## TURN BUDGET (all backends)
+
+This session's rollover target is ~{{ turn_soft_cap }} agent/tool turns. Claude,
+Grok, and current Google Gemini CLI versions use native turn limits; Gemini
+also keeps a completed-tool fallback for older versions. Codex and OpenCode
+stop after completed tool events. Antigravity (`agy`) exposes neither a native
+cap nor a stable completed-tool event contract, so it must follow the target
+cooperatively and remains wall-clock bounded.
+
+Checkpoint every conclusion to structured state as soon as it is known. In the
+last quarter of the budget, finish the current hypothesis and save its outcome
+rather than opening a new one. A newly filed crash gets a bounded enrichment
+tail where the CLI permits one; otherwise the next resume presents it ahead of
+all other work.
+
+`TURN_SOFT_CAP=0` disables rollover. Do not attempt to override the operator's
+setting from inside the session.

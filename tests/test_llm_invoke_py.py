@@ -466,6 +466,88 @@ with tempfile.TemporaryDirectory() as td:
     ok(not (checkout / ".git" / "HEAD").exists(),
        "project boundary leaves the audited checkout's repository intact")
 
+with tempfile.TemporaryDirectory() as td:
+    launch_root = Path(td)
+    raw = launch_root / "raw.jsonl"
+
+    def capture_rollover(backend, binary, cap, *, gemini_cli=False):
+        raw.touch()
+        with mock.patch.dict(
+            os.environ, {"USE_GEMINI_CLI": "1" if gemini_cli else "0"},
+        ), mock.patch.object(
+            inv, "backend_bin", return_value=binary,
+        ), mock.patch.object(
+            inv, "_run_agent_process", return_value=0,
+        ) as process:
+            inv.run_agent_prompt(
+                backend, "prompt", 0, raw, model="fixture-model", max_turns=999,
+                turn_cap=cap, cwd=launch_root,
+            )
+        return process.call_args.args[0], process.call_args.kwargs
+
+    command, kwargs = capture_rollover("claude", "claude", 17)
+    assert_eq(
+        "17", command[command.index("--max-turns") + 1],
+        "audit rollover uses Claude's native cap, not a looser hidden ceiling",
+    )
+    ok(
+        kwargs["turn_cap"] == 0 and kwargs["checkpoint_on_native_limit"],
+        "Claude native cap avoids kill-based transcript polling",
+        repr(kwargs),
+    )
+
+    command, kwargs = capture_rollover("grok", "grok", 17)
+    assert_eq(
+        "17", command[command.index("--max-turns") + 1],
+        "Grok audit rollover uses the same native cap",
+    )
+    ok(
+        kwargs["turn_cap"] == 0 and kwargs["checkpoint_on_native_limit"],
+        "Grok native cap avoids kill-based transcript polling",
+        repr(kwargs),
+    )
+
+    _command, kwargs = capture_rollover("codex", "codex", 17)
+    ok(
+        kwargs["turn_cap"] == 17 and not kwargs["checkpoint_on_native_limit"],
+        "Codex uses the completed-tool watchdog at the same rollover target",
+        repr(kwargs),
+    )
+
+    for backend, binary, gemini_cli in (
+        ("oss", "opencode", False),
+        ("gemini", "gemini", True),
+    ):
+        _command, kwargs = capture_rollover(
+            backend, binary, 17, gemini_cli=gemini_cli,
+        )
+        ok(
+            kwargs["turn_cap"] == 17
+            and kwargs["checkpoint_on_native_limit"] == (backend == "gemini"),
+            (
+                "Gemini CLI uses its native ceiling with a completed-tool fallback"
+                if backend == "gemini"
+                else "OpenCode uses the completed-tool watchdog"
+            ),
+            repr(kwargs),
+        )
+
+    _command, kwargs = capture_rollover("gemini", "agy", 17)
+    ok(
+        kwargs["turn_cap"] == 0 and not kwargs["checkpoint_on_native_limit"],
+        "Antigravity does not treat undocumented step updates as a safe turn counter",
+        repr(kwargs),
+    )
+
+    command, kwargs = capture_rollover("claude", "claude", 0)
+    ok(
+        "--max-turns" not in command
+        and kwargs["turn_cap"] == 0
+        and not kwargs["checkpoint_on_native_limit"],
+        "TURN_SOFT_CAP=0 disables both native and transcript limits",
+        repr((command, kwargs)),
+    )
+
 with tempfile.TemporaryDirectory() as td, \
         mock.patch.dict(os.environ, {
             "SCRIPT_ROOT": td,
@@ -768,6 +850,12 @@ assert_eq("gemini-3.6-flash", override["match"]["model"],
 assert_eq("HIGH", override["modelConfig"]["generateContentConfig"]
           ["thinkingConfig"]["thinkingLevel"],
           "Gemini CLI wires configured effort as thinkingLevel")
+cap_env = inv.invocation_env("gemini", max_session_turns=17)
+cap_settings = json.loads(
+    Path(cap_env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]).read_text()
+)
+assert_eq(17, cap_settings["model"]["maxSessionTurns"],
+          "Gemini CLI audit sessions receive a native turn ceiling")
 
 # Re-staging (a fresh run reusing the same $LOGDIR) wipes a stale throwaway
 # GEMINI.md so a killed run's memory can't be read back on resume.

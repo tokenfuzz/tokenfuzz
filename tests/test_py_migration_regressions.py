@@ -957,8 +957,9 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "for i in range(1,13)];time.sleep(120)",
     ]
     start = time.time()
-    watchdog_rc = llm_invoke._run_gemini_with_watchdog(
-        command, None, raw, root, os.environ.copy(), marker_dir
+    watchdog_rc = llm_invoke._run_agent_process(
+        command, None, raw, root, os.environ.copy(),
+        health_watchdog=True, watchdog_marker_dir=marker_dir,
     )
     elapsed = time.time() - start
     check(watchdog_rc != 0, "watchdog terminates the quota-stalled backend")
