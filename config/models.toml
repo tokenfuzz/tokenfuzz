@@ -10,7 +10,7 @@
 claude = "claude-opus-5"
 codex  = "gpt-5.6-sol"
 gemini = "gemini-3.1-pro-preview"
-grok   = "grok-build-0.1"
+grok   = "grok-4.5"
 oss    = ""
 
 # Backend-native reasoning controls. The gemini backend uses `agy` by default
