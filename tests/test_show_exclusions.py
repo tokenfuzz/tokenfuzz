@@ -24,11 +24,11 @@ class ShowExclusionsTests(unittest.TestCase):
                 "fuzz-crashes/FuzzerA/shutdown-noise",
             ):
                 (results / relative).mkdir(parents=True)
-            (results / "crashes-rejected/CRASH-002-null/.autodiscard").write_text(
-                "# Auto-rejected by triage\n# Reason: null-deref\n", encoding="utf-8"
+            (results / "crashes-rejected/CRASH-002-null/REJECTION.md").write_text(
+                "# Rejected artifact\n\nReason: null-deref\n", encoding="utf-8"
             )
-            (results / "crashes-rejected/CRASH-003-timeout/.autodiscard").write_text(
-                "  # Auto-rejected by triage\n  # Reason: timeout-only\n", encoding="utf-8"
+            (results / "crashes-rejected/CRASH-003-timeout/REJECTION.md").write_text(
+                "  # Rejected artifact\n\n  Reason: timeout-only\n", encoding="utf-8"
             )
             (results / "fuzz-crashes/FuzzerA/shutdown-noise/crash-da39").write_text(
                 "shutdown noise\n", encoding="utf-8"

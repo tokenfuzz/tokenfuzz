@@ -54,9 +54,6 @@ def reason_from_file(path: Path) -> str:
 
 
 def rejection_reason(directory: Path) -> str:
-    reason = reason_from_file(directory / ".autodiscard")
-    if reason:
-        return reason
     for relative in REJECTION_FILES:
         reason = reason_from_file(directory / relative)
         if reason:

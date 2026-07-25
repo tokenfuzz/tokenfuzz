@@ -2534,9 +2534,13 @@ def _choose_find_quality(finding_dir: Path) -> dict:
     ) else {}
 
 
-def _rejection_artifact_reason(finding_dir: Path) -> str:
-    """Read the final disposition recorded when triage rejected a finding."""
-    rejection = finding_dir / "REJECTION.md"
+def _rejection_artifact_reason(artifact_dir: Path) -> str:
+    """Read the final disposition triage recorded when it rejected an artifact.
+
+    REJECTION.md is written on the reject path before the directory moves, so
+    it is the one reason a pooled rejected crash or finding carries.
+    """
+    rejection = artifact_dir / "REJECTION.md"
     if not rejection.is_file():
         return ""
     try:
@@ -2630,22 +2634,6 @@ def _crash_sanitizer_text(crash_dir: Path) -> str:
 def _crash_site(crash_dir: Path) -> str:
     text = _crash_sanitizer_text(crash_dir)
     return _first_crash_frame(text) if text else ""
-
-
-def _crash_reason(crash_dir: Path) -> str:
-    """Triage's rejection rationale, recorded in the dir's .autodiscard."""
-    marker = crash_dir / ".autodiscard"
-    if not marker.is_file():
-        return ""
-    try:
-        for line in marker.read_text(
-                encoding="utf-8", errors="replace").splitlines():
-            s = line.strip()
-            if s.startswith("# Reason:"):
-                return s[len("# Reason:"):].strip()
-    except OSError:
-        pass
-    return ""
 
 
 def _finding_site(finding_dir: Path) -> str:
@@ -2778,7 +2766,9 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
             else:
                 link = f"[{p.name}/]({urllib.parse.quote(p.name)}/)"
             site = re.sub(r"\s+", " ", _crash_site(p) or "—").strip()
-            reason = re.sub(r"\s+", " ", _crash_reason(p) or "—").strip()
+            reason = re.sub(
+                r"\s+", " ", _rejection_artifact_reason(p) or "—",
+            ).strip()
             md.append(
                 f"| `{p.name}` | {_md_cell(site)} | {_md_cell(reason)} | {link} |"
             )

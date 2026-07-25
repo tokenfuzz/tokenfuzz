@@ -1211,7 +1211,6 @@ def expand_new_crash_clusters(
         crash for crash in sorted((runtime.results / "crashes").glob("CRASH-*"))
         if crash.is_dir()
         and not (crash / ".cluster_expanded").is_file()
-        and not (crash / ".autodiscard").is_file()
     ]
     attempted = getattr(runtime, "cluster_expansion_attempted", None)
     if attempted is None:

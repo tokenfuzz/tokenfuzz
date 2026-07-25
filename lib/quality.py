@@ -65,7 +65,7 @@ import languages
 _BLACK_EXACT_LOWER = {
     ".ds_store", ".gitignore", ".gitkeep", ".keep",
     ".harness-cache", ".enforced", ".config-hash", ".config_hash",
-    ".promotion_pending", ".autodiscard",
+    ".promotion_pending",
     ".severity_failed", ".severity_pending", ".severity_ok",
 }
 _BLACK_EXACT_PRESERVE_CASE = {

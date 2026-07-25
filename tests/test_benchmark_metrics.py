@@ -905,6 +905,25 @@ class BenchmarkMetricsTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["reason"], final_reason)
 
+    def test_rejected_crash_index_renders_the_rejection_reason(self) -> None:
+        # Triage writes REJECTION.md on the reject path before moving the
+        # directory, so it is the one reason a pooled rejected crash carries.
+        rejected = self.root / "crash-reason"
+        with_reason = rejected / "CRASH-REJECTED-0001"
+        with_reason.mkdir(parents=True)
+        reason = "trigger-provenance: state not attacker-reachable"
+        (with_reason / "REJECTION.md").write_text(
+            f"# Rejected artifact\n\nReason: {reason}\n", encoding="utf-8",
+        )
+        # No artifact: the row still renders, with an em-dash reason.
+        (rejected / "CRASH-REJECTED-0002").mkdir()
+
+        benchmark.write_rejected_crashes_index(rejected)
+
+        index = (rejected / "REJECTED-CRASHES.md").read_text(encoding="utf-8")
+        self.assertIn(f"| `CRASH-REJECTED-0001` | — | {reason} |", index)
+        self.assertIn("| `CRASH-REJECTED-0002` | — | — |", index)
+
     def test_crosstab_explains_finalized_populations_without_pending_columns(self) -> None:
         run = self.root / "crosstab" / "codex" / "20260101-000000"
         report = {
