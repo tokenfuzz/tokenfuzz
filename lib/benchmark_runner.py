@@ -598,6 +598,23 @@ def _record_provider_quality(cell_dir: Path, results: Path, rc: int = 1) -> str:
     return issue
 
 
+def _reap_cell_processes(cell_dir: Path) -> None:
+    """Kill any process a completed cell left behind, matched on the cell
+    directory in its command line so escaped fuzzers (nohup, `&`, new sessions,
+    reparented to PID 1) are reaped while a concurrent sibling cell, backend,
+    target, or run -- each a distinct cell path -- is untouched. Reliably covers
+    harness cells, whose binaries and inputs live under the cell tree; a model-
+    direct fuzzer running the shared target binary on inputs outside the cell is
+    not matched, since matching the shared binary would hit sibling cells."""
+    reaped = process_tree.kill_under_path(cell_dir)
+    if reaped:
+        print(
+            f"reaped {len(reaped)} leaked cell process(es): "
+            + " ".join(str(pid) for pid in reaped),
+            file=sys.stderr, flush=True,
+        )
+
+
 def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wall: int) -> int:
     for name in ("crashes", "findings", "logs"):
         (cell_dir / name).mkdir(parents=True, exist_ok=True)
@@ -621,6 +638,7 @@ def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wal
             os.environ.pop("LOGDIR", None)
         else:
             os.environ["LOGDIR"] = previous_logdir
+        _reap_cell_processes(cell_dir)
     sweep_target_artifacts(target, cell_dir, marked)
     usage = subprocess.run(
         [
@@ -699,6 +717,7 @@ def run_harness(
             ).returncode
         else:
             rc = subprocess.run(command, cwd=facade, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False).returncode
+    _reap_cell_processes(cell_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
     sweep_target_artifacts(target, result_dir, marked)
     logs = result_dir.parent / "logs"
