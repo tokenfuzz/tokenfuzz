@@ -700,12 +700,16 @@ class _SourceWatch:
     def _sample(self) -> None:
         if self.drift or not self.baseline:
             return
-        current = target_config.vcs_source_signature(self.target)
+        current = target_config.vcs_source_signature(
+            self.target, include_untracked=False,
+        )
         if not current or current == self.baseline:
             return
         self.drift = {
             "observed_at": datetime.now(timezone.utc).isoformat(),
-            "paths": target_config.source_changed_paths(self.target),
+            "paths": target_config.source_changed_paths(
+                self.target, include_untracked=False,
+            ),
         }
 
     def _loop(self) -> None:
@@ -2029,7 +2033,9 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         if settings:
             print(f"FATAL: {_resume_refusal(settings, run_id)}", file=sys.stderr)
             return 1
-        run_source = target_config.vcs_source_signature(target_root)
+        run_source = target_config.vcs_source_signature(
+            target_root, include_untracked=False,
+        )
         drifted = _pin_mismatch(previous, {}, run_source)
         if drifted:
             print(f"FATAL: {_resume_refusal(drifted, run_id)}", file=sys.stderr)

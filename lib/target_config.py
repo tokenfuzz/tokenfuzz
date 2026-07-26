@@ -1586,12 +1586,14 @@ def _mode_tag(path: Path) -> str:
         return "absent"
 
 
-def _content_digest(path: Path) -> str:
+def _content_digest(path: Path, *, include_untracked: bool = True) -> str:
     """Identity of one path's bytes: content, link target, or absence.
 
     A directory here is a submodule worktree, and its own signature is what
     answers the question — the parent's status only says "something changed",
-    which is the same string for every possible change inside it.
+    which is the same string for every possible change inside it. Benchmark
+    source identity follows tracked content recursively; build freshness keeps
+    the conservative whole-working-tree policy.
     """
     try:
         if path.is_symlink():
@@ -1599,7 +1601,9 @@ def _content_digest(path: Path) -> str:
                 os.readlink(path).encode("utf-8", "surrogatepass")
             ).hexdigest()
         if path.is_dir():
-            return "sub:" + _source_state_signature(path)
+            return "sub:" + _source_state_signature(
+                path, include_untracked=include_untracked,
+            )
         digest = hashlib.sha1()
         with path.open("rb") as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -1630,20 +1634,32 @@ def _vcs_status_records(command: list[str], environment: dict) -> "list[str] | N
     return None
 
 
-def _git_status_records(root: Path) -> "list[str] | None":
-    return _vcs_status_records(
-        [
-            "git", "-C", str(root), "status", "--porcelain=v2", "-z",
-            "--untracked-files=all",
-        ],
-        _GIT_READ_ONLY_ENV,
-    )
+def _git_status_records(
+    root: Path, *, include_untracked: bool = True,
+) -> "list[str] | None":
+    command = [
+        "git", "-C", str(root), "status", "--porcelain=v2", "-z",
+        "--untracked-files=all" if include_untracked else "--untracked-files=no",
+    ]
+    if not include_untracked:
+        # Extends the same rule into submodules, which `--untracked-files` does
+        # not reach. Named on the command line because that overrides
+        # `diff.ignoreSubmodules` and `submodule.<name>.ignore`: a checkout that
+        # configures submodule content away — common on large trees — would
+        # otherwise hide a tracked edit inside one and read as no drift.
+        command.append("--ignore-submodules=untracked")
+    return _vcs_status_records(command, _GIT_READ_ONLY_ENV)
 
 
-def _hg_status_records(root: Path) -> "list[str] | None":
-    # HGPLAIN pins the output format against user config and extensions.
+def _hg_status_records(
+    root: Path, *, include_untracked: bool = True,
+) -> "list[str] | None":
+    # HGPLAIN pins the output format against user config and extensions; -mard
+    # is Mercurial's --untracked-files=no, listing only tracked changes.
     return _vcs_status_records(
-        ["hg", "--cwd", str(root), "status", "-0"], {"HGPLAIN": "1"},
+        ["hg", "--cwd", str(root), "status", "-0"]
+        + ([] if include_untracked else ["-mard"]),
+        {"HGPLAIN": "1"},
     )
 
 
@@ -1681,20 +1697,28 @@ def _iter_status_paths(records: "list[str]") -> "list[tuple[str, str]] | None":
     return pairs
 
 
-def source_changed_paths(target_root: "str | os.PathLike", limit: int = 20) -> list[str]:
-    """Paths the VCS currently reports as changed, for drift diagnostics.
+def source_changed_paths(
+    target_root: "str | os.PathLike", limit: int = 20, *,
+    include_untracked: bool = True,
+) -> list[str]:
+    """Paths the VCS currently reports as changed, for diagnostics.
 
     Empty for a clean checkout, and empty rather than wrong when there is no
-    VCS to ask.
+    VCS to ask. ``include_untracked`` selects the same policy the signature was
+    taken under, so the paths named always explain the value that changed.
     """
     root = Path(target_root)
     kind = detect_repo_type(root)
     if kind == "git":
-        records = _git_status_records(root)
+        records = _git_status_records(
+            root, include_untracked=include_untracked,
+        )
         pairs = _iter_status_paths(records) if records is not None else None
         paths = [path for _, path in pairs] if pairs else []
     elif kind == "hg":
-        records = _hg_status_records(root)
+        records = _hg_status_records(
+            root, include_untracked=include_untracked,
+        )
         paths = _hg_status_paths(records) if records is not None else []
     else:
         return []
@@ -1706,7 +1730,9 @@ def source_signature(target_root: "str | os.PathLike") -> str:
     return _source_state_signature(Path(target_root))
 
 
-def _git_source_entries(root: Path) -> "list[str] | None":
+def _git_source_entries(
+    root: Path, *, include_untracked: bool = True,
+) -> "list[str] | None":
     """One entry per path git reports as changed, or None if git cannot answer.
 
     Ignored paths are absent from `git status` by construction, and that is the
@@ -1716,11 +1742,16 @@ def _git_source_entries(root: Path) -> "list[str] | None":
     its original value. Renames carry their origin, and a dirty submodule
     carries the record's own oids and submodule flags.
     """
-    # An empty repository has no HEAD. Its files are all untracked, so status
-    # still describes them completely; requiring a revision here would report
-    # "unknown" forever and let real edits pass as unchanged.
+    # An empty repository has no HEAD. Its files are all untracked, so the
+    # conservative policy still describes them completely; requiring a revision
+    # there would report "unknown" forever and let real edits pass as unchanged.
+    # Tracked-only cannot say anything without one — an empty repository tracks
+    # nothing, and a git that could not answer tracks nothing we can see. Both
+    # would otherwise fold to one constant, which reads as "never changed".
     rev = detect_rev(root)
-    records = _git_status_records(root)
+    if not rev and not include_untracked:
+        return None
+    records = _git_status_records(root, include_untracked=include_untracked)
     if records is None:
         return None
     pairs = _iter_status_paths(records)
@@ -1733,7 +1764,8 @@ def _git_source_entries(root: Path) -> "list[str] | None":
     return [
         f"rev\0{rev}",
         *(
-            f"{path}\0{_mode_tag(root / path)}\0{_content_digest(root / path)}"
+            f"{path}\0{_mode_tag(root / path)}\0"
+            f"{_content_digest(root / path, include_untracked=include_untracked)}"
             for _, path in pairs
         ),
     ]
@@ -1749,7 +1781,9 @@ def _hg_status_paths(records: list[str]) -> list[str]:
     return paths
 
 
-def _hg_source_entries(root: Path) -> "list[str] | None":
+def _hg_source_entries(
+    root: Path, *, include_untracked: bool = True,
+) -> "list[str] | None":
     """One entry per path Mercurial reports as changed, or None if it cannot say.
 
     Same contract as the git path: ignored files are absent from `hg status` by
@@ -1757,19 +1791,22 @@ def _hg_source_entries(root: Path) -> "list[str] | None":
     browser-sized checkouts use, and status there answers in about a second —
     hashing the tree itself would not.
     """
-    records = _hg_status_records(root)
+    records = _hg_status_records(root, include_untracked=include_untracked)
     if records is None:
         return None
     return [
         f"rev\0{detect_rev(root)}",
         *(
-            f"{path}\0{_mode_tag(root / path)}\0{_content_digest(root / path)}"
+            f"{path}\0{_mode_tag(root / path)}\0"
+            f"{_content_digest(root / path, include_untracked=include_untracked)}"
             for path in _hg_status_paths(records)
         ),
     ]
 
 
-def _vcs_source_entries(root: Path) -> "tuple[str, list[str] | None] | None":
+def _vcs_source_entries(
+    root: Path, *, include_untracked: bool = True,
+) -> "tuple[str, list[str] | None] | None":
     """(vcs kind, entries) for a tree under version control, else None.
 
     Entries are None when the VCS owns the tree but could not answer — a
@@ -1778,9 +1815,13 @@ def _vcs_source_entries(root: Path) -> "tuple[str, list[str] | None] | None":
     """
     kind = detect_repo_type(root)
     if kind == "git":
-        return "git", _git_source_entries(root)
+        return "git", _git_source_entries(
+            root, include_untracked=include_untracked,
+        )
     if kind == "hg":
-        return "hg", _hg_source_entries(root)
+        return "hg", _hg_source_entries(
+            root, include_untracked=include_untracked,
+        )
     return None
 
 
@@ -1806,15 +1847,18 @@ def _walk_source_entries(root: Path) -> list[str]:
     return entries
 
 
-def _source_state_signature(root: Path) -> str:
+def _source_state_signature(
+    root: Path, *, include_untracked: bool = True,
+) -> str:
     """Content identity of the source a build would compile.
 
-    Prefers what the VCS calls source — tracked state plus untracked-but-not-
-    ignored paths, content-hashed. That makes the signature immune to the two
-    false-staleness classes a path+mtime walk cannot tell apart: output a target
-    writes into its own tree during a test run, and an edit that is applied and
-    then reverted. Both used to force a rebuild, and on a shared checkout a
-    rebuild replaces the binary a concurrent run is auditing.
+    Prefers VCS state, content-hashed. Build freshness includes non-ignored
+    untracked paths; benchmark identity opts out because generated testcases are
+    not product source. Content identity makes both policies immune to the two
+    false-staleness classes a path+mtime walk cannot tell apart: ignored output
+    a target writes during a test run, and an edit that is applied and then
+    reverted. Both used to force a rebuild, and on a shared checkout a rebuild
+    replaces the binary a concurrent run is auditing.
 
     A tree with no VCS is hashed path by path instead. A checkout whose VCS
     cannot be read reports one constant "unknown" value rather than silently
@@ -1826,21 +1870,28 @@ def _source_state_signature(root: Path) -> str:
     The schema tag makes a change of backend or of this format stale every
     existing stamp on purpose.
     """
-    found = _vcs_source_entries(root)
+    found = _vcs_source_entries(root, include_untracked=include_untracked)
     if found is None:
         return _fold_signature("walk", _walk_source_entries(root))
     kind, entries = found
     return _VCS_UNAVAILABLE_SIGNATURE if entries is None else _fold_signature(kind, entries)
 
 
-def vcs_source_signature(target_root: "str | os.PathLike") -> str:
+def vcs_source_signature(
+    target_root: "str | os.PathLike", *, include_untracked: bool = True,
+) -> str:
     """Content identity from the VCS alone, or "" when there is no cheap answer.
 
     For repeated sampling while a run is in flight, where hashing a whole
     checkout — gigabytes, for a browser target — is not affordable, and where
-    "cannot tell" must never be reported as "changed".
+    "cannot tell" must never be reported as "changed". Benchmark comparability
+    passes ``include_untracked=False`` because it is about product source a cell
+    could have read, not testcases or output the cell generated. Added/staged
+    files still count as tracked.
     """
-    found = _vcs_source_entries(Path(target_root))
+    found = _vcs_source_entries(
+        Path(target_root), include_untracked=include_untracked,
+    )
     if found is None or found[1] is None:
         return ""
     return _fold_signature(found[0], found[1])

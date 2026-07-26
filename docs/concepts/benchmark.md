@@ -392,6 +392,10 @@ state and it refuses immediately: sharing the live build would measure a binary
 the current source did not produce, and rebuilding would corrupt that run. Use a
 separate checkout, or wait. Source pinning and drift detection read the VCS, so
 they cover git and Mercurial checkouts; a target under neither is not watched.
+They compare the revision and tracked working-tree content. Untracked
+testcases and generated output do not change the code a cell audited and do not
+invalidate it; build freshness separately retains its conservative treatment
+of possible untracked build inputs.
 
 A resumed `--run-id` is held to the same rule and never rebuilds: it verifies the
 build it pinned rather than converging one, and refuses if that build, the source

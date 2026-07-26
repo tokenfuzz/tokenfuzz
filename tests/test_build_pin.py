@@ -47,6 +47,16 @@ def _native_target(root: Path) -> None:
     (root / ".audit" / "build.sh").write_text("#!/bin/sh\n")
 
 
+def _git_commit_all(root: Path) -> None:
+    """Make the target a checkout with tracked source, as a real one is."""
+    for args in (("init", "-q"), ("add", "-A"), ("commit", "-qm", "init")):
+        subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+             "-c", "init.defaultBranch=main", "-C", str(root), *args],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+
 class VerifyOnlyCellTests(unittest.TestCase):
     """A benchmark cell must verify the pinned build and never replace it."""
 
@@ -298,6 +308,30 @@ class DriftWatchTests(unittest.TestCase):
         ):
             watch._sample()
         self.assertEqual({}, watch.drift)
+
+    def test_a_generated_artifact_is_not_drift(self) -> None:
+        """A cell's own testcases land in the checkout it is auditing.
+
+        A model-direct cell writes crafted inputs beside the target it drives.
+        None of that is code any cell read, so counting it as drift discarded
+        finished cells over their own by-products. A tracked edit in the same
+        tree still ends the cell.
+        """
+        tmp = Path(tempfile.mkdtemp(prefix="drift-"))
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)], check=False)
+        _native_target(tmp)
+        _git_commit_all(tmp)
+        watch = benchmark_runner._SourceWatch(
+            tmp, "t",
+            target_config.vcs_source_signature(tmp, include_untracked=False),
+        )
+        self.assertTrue(watch.baseline)
+        (tmp / "inj.mkv").write_bytes(b"\x1a\x45\xdf\xa3crafted")
+        watch._sample()
+        self.assertEqual({}, watch.drift)
+        (tmp / "main.c").write_text("int main(void){return 1;}\n")
+        watch._sample()
+        self.assertEqual(["main.c"], watch.drift["paths"])
 
     def test_a_target_with_no_cheap_signature_is_not_watched(self) -> None:
         """Hashing a whole checkout every minute is not affordable, so a target
