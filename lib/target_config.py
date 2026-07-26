@@ -17,6 +17,7 @@ Python API:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -554,6 +555,60 @@ def target_toml_for_session_dir(session_dir: str | os.PathLike) -> Path:
     return d.parent.parent / "target.toml"
 
 
+def find_target_toml(start: str | os.PathLike) -> Optional[Path]:
+    """Nearest ancestor target.toml, walking up from a report or results path.
+
+    Unlike `find_session_dir`, this never falls back to scanning `output/` for
+    some other target's session: a benchmark pool holds reports next to their
+    own `target.toml` but carries no `.session-env`, and a scan there returns
+    whichever unrelated target happens to sort first. Everything that reads a
+    report's target context must resolve it the same way, or one consumer
+    scores against libxml2's threat model while another quotes wolfSSL source.
+    """
+    cur = Path(start).absolute()
+    if cur.is_file():
+        cur = cur.parent
+    for p in [cur, *cur.parents]:
+        candidate = p / "target.toml"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def find_benchmark_target_rev(
+    start: str | os.PathLike, expected_slug: str,
+) -> str:
+    """Recorded target revision for an enclosing benchmark run, else "".
+
+    A benchmark pool has no `.session-env`, but its enclosing `run.json`
+    records the exact target revision. Require the target slug to match so an
+    unrelated ancestor's metadata can never be borrowed.
+    """
+    expected = (expected_slug or "").strip()
+    if not expected:
+        return ""
+    cur = Path(start).absolute()
+    if cur.is_file():
+        cur = cur.parent
+    for parent in [cur, *cur.parents]:
+        metadata = parent / "run.json"
+        try:
+            present = metadata.is_file()
+        except OSError:
+            return ""
+        if not present:
+            continue
+        try:
+            value = json.loads(metadata.read_text("utf-8", errors="replace"))
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(value, dict) or str(value.get("target", "")) != expected:
+            return ""
+        revision = str(value.get("target_sha", "") or "").strip()
+        return revision
+    return ""
+
+
 def find_slug_session_dir(slug_dir: str | os.PathLike) -> Optional[Path]:
     """Resolve the session dir for a known output/<slug> directory.
 
@@ -697,6 +752,11 @@ def detect_repo_type(target_root: str | os.PathLike) -> str:
 
 
 def detect_rev(target_root: str | os.PathLike) -> str:
+    # An empty root is "no target tree", not "the current directory". Path("")
+    # is ".", so without this the harness checkout's own HEAD comes back and
+    # gets published as the audited target revision.
+    if not str(target_root).strip():
+        return ""
     root = Path(target_root)
     repo_type = detect_repo_type(root)
     if repo_type == "git":

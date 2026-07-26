@@ -28,6 +28,51 @@ _CLUSTER_TABLE_RE = re.compile(
 )
 
 
+_PENDING_SIDECAR = ".promotion_pending"
+_PENDING_TODO_MARKER = "_TODO (agent):"
+
+
+def promotion_pending_reasons(directory: Path) -> list[str]:
+    """Why this bundle is still an unfinished auto-filed skeleton, else [].
+
+    Two independent sources, because either one alone misses real bundles:
+
+      * the `.promotion_pending` sidecar triage writes — searched beside the
+        report *and* under `.audit/`, where export and benchmark pooling move
+        sidecars. Reading only the top level marks a pooled skeleton "OK";
+      * the `_TODO (agent):` placeholders the skeleton ships with, which
+        survive even when no sidecar travelled with the bundle.
+
+    An unfinished report has no root cause and no data flow — it must never
+    be presented as a triaged result, whatever the index it lands in.
+    """
+    reasons: list[str] = []
+    marker_seen = False
+    for base in (directory, directory / ".audit"):
+        marker = base / _PENDING_SIDECAR
+        if not marker.is_file():
+            continue
+        marker_seen = True
+        try:
+            text = marker.read_text("utf-8", errors="replace")
+        except OSError:
+            text = ""
+        reasons.extend(line.strip() for line in text.splitlines() if line.strip())
+    if marker_seen and not reasons:
+        reasons.append(_PENDING_SIDECAR)
+    report = report_identity.find_report(directory)
+    if report is not None:
+        try:
+            if _PENDING_TODO_MARKER in report.read_text("utf-8", errors="replace"):
+                reasons.append(f"{report.name}(unfilled _TODO sections)")
+        except OSError:
+            pass
+    # De-duplicate while keeping order: sidecar and TODO scan often name the
+    # same report file.
+    seen: set[str] = set()
+    return [r for r in reasons if not (r in seen or seen.add(r))]
+
+
 def texts_differ_beyond_padding(old: str, new: str) -> bool:
     """True when *old* and *new* differ by more than horizontal whitespace.
 

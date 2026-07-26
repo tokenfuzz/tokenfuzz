@@ -197,7 +197,11 @@ falls outside the target's `attacker_controls` (target.toml) — a
 crash that clears conditions 1–3 under `crashes/` regardless of trigger
 source and let triage score severity; do not pre-demote a
 `call-sequence`/`env`/`race` crash to `findings/` on a bytes-only target.
-Caller contract violations always reject.
+Caller contract violations always reject. `violated` = the target's own
+docs state a rule the testcase breaks (ordering, ownership, lifetime,
+accepted argument/parent types) — quote it. A validity requirement still
+counts when phrased as "should" or "callers must make sure"; a recommendation
+that does not define accepted input does not. Silence is `unspecified`.
 
 ## FIND quality bar
 

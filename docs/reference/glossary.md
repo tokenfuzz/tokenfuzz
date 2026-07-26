@@ -98,7 +98,8 @@ failed triage, indexed with a reason so future sessions do not
 refile it.
 
 **Cluster file (`CRASH-CLUSTERS.html`, `FINDING-CLUSTERS.html`).** A
-browser-readable summary grouping reports that share a root cause.
+browser-readable summary grouping reports that share a deterministic evidence
+signature. It is a deduplication proxy, not proof of one root cause per cluster.
 Per-backend at the result tree; cross-backend at the target root. The
 `.md` siblings are the generated markdown source.
 

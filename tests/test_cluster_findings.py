@@ -117,6 +117,7 @@ class ClusterFindingsTests(unittest.TestCase):
         duplicate = next(report for report in a_reports if report != canonical)
         self.assertIn(canonical.parent.name, (duplicate.parent / ".dup-of").read_text())
         cluster_text = index.read_text(encoding="utf-8")
+        self.assertIn("not a guaranteed unique root cause", cluster_text)
         for pattern in (
             r"memory-safety, src/calc\.c, 88",
             r"\(auth, server/handlers/admin\.go, 42\)",

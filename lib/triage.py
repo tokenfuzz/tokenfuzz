@@ -273,7 +273,7 @@ _REACH_FIELD_LABELS = {
     "advisory": "Advisory",
 }
 _REACH_FIELD_ENUMS = {
-    "caller_contract": {"obeyed", "violated"},
+    "caller_contract": {"obeyed", "violated", "unspecified"},
     "caller_controls": {"bytes", "length", "number", "flags", "call-sequence", "timing", "none"},
     "trigger_source": {"bytes", "both", "call-sequence", "timing", "race", "protocol-state", "env", "fs-state"},
     "parameter_control": {"direct", "indirect", "application-supplied", "trusted", "harness-only"},
@@ -317,7 +317,9 @@ def _reach_field_present(text: str, label: str) -> bool:
         rf"^\|\s*{re.escape(label)}\s*\|\s*([^|\n]*)|^{re.escape(label)}\s*:\s*(.*)$",
         text, re.IGNORECASE | re.MULTILINE,
     )
-    placeholders = {"", "-", "—", "tbd", "unspecified", "unknown / not assessed"}
+    placeholders = {"", "-", "—", "tbd", "unknown / not assessed"}
+    if label.casefold() != "caller contract":
+        placeholders.add("unspecified")
     return any(
         (table_value or bare_value).strip().lower() not in placeholders
         for table_value, bare_value in values

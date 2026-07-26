@@ -184,6 +184,8 @@ ok("you MUST still file" in sf, "safety: KEEP mirror (accurate-len / truthful ca
 ok("requires a NUL-terminated C string" in sf, "safety: documented C-string qualifier")
 ok("no untrusted byte sets" not in sf, "safety: absolute allocation-provenance wording removed")
 ok("CVSS `MAT:P`" in sf, "safety: outside controls use the live CVSS mechanism")
+ok("must make sure" in sf and "A recommendation that does not define accepted input" in sf,
+   "safety: documented normative preconditions are caller contracts")
 ok("demotes a crash from security to robustness" not in sf and "×0.7" not in sf,
    "safety: reverted robustness/multiplier wording stays removed")
 
@@ -196,6 +198,8 @@ ok("destination capacity passed TRUTHFULLY that the library overruns" in vp,
 ok("never on shipped-caller convention alone" in vp, "validator: output minimum must be documented, not convention")
 ok("PUBLIC contract requires a NUL-terminated C string" in vp, "validator: documented C-string qualification")
 ok("keep it (Uncertain)" in vp, "validator: ambiguous minimum preserved as Uncertain")
+ok("must make sure" in vp and "does not make a documented-invalid node type supported" in vp,
+   "validator: documented node-type preconditions reject caller misuse")
 
 
 # ─── Closed class vocabulary and threat-model semantics ────────────

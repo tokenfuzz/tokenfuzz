@@ -337,8 +337,16 @@ not the strategy the work card was originally tagged with. Findings
 under `findings/FIND-*` carry the same field.
 
 `Caller contract` ∈ {obeyed, violated, unspecified}. Use `unspecified` when
-the public docs are silent about the call ordering you depend on — defaulting
-to `obeyed` inflates verdicts.
+the public docs are silent about what your testcase depends on — defaulting
+to `obeyed` inflates verdicts. Use `violated` when the target's own
+documentation states a rule the testcase breaks — call ordering, ownership,
+lifetime, or which object/handle/node types an API accepts as argument or
+parent — and quote that sentence in the report. A documented precondition
+counts however politely it is phrased ("must", "should", "callers must make
+sure"); "the docs only *advise* it" is not a reason to record `unspecified`.
+A recommendation that does not define accepted input or object validity
+remains advisory; the wording alone is not the test. Silence is `unspecified`;
+a stated precondition you broke is `violated`.
 
 `Entry` is optional but recommended: the public API function an external
 caller invokes to reach the bug, written call-shaped on its own line, e.g.

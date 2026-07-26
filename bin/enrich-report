@@ -71,6 +71,40 @@ def _read_sanitizer_text(report_path: Path) -> str:
     return ""
 
 
+def _config_for_report(report_path: Path):
+    """Target config for a report, anchored on its own nearest target.toml.
+
+    `target_config.load` walks up for a `.session-env` and, failing that,
+    scans `output/` and returns whichever target has a session. A benchmark
+    pool has no `.session-env` — it has a `target.toml` beside the reports —
+    so that scan hands back an unrelated target, and the enricher then
+    resolves `hash.c` in the wrong source tree and pastes a foreign project's
+    code under the stack frame. The report's own target.toml decides; the
+    session-env path stays for reports inside a live results tree.
+    """
+    toml = target_config.find_target_toml(report_path)
+    if toml is None:
+        return target_config.load(str(report_path))
+    cfg = target_config.Config()
+    target_config.load_toml_into(cfg, toml)
+    recorded_rev = target_config.find_benchmark_target_rev(toml, cfg.slug)
+    if recorded_rev:
+        cfg.target_rev = recorded_rev
+    if cfg.slug and not cfg.target_root:
+        slug_path = Path(cfg.slug)
+        if not slug_path.is_absolute() and ".." not in slug_path.parts:
+            for ancestor in toml.parents:
+                root = ancestor / "targets" / slug_path
+                if root.is_dir():
+                    cfg.target_root = str(root)
+                    break
+            if not cfg.target_root:
+                root = SCRIPT_ROOT / "targets" / slug_path
+                if root.is_dir():
+                    cfg.target_root = str(root)
+    return cfg
+
+
 def _resolve_context(report_path: Path, slug: str | None,
                      source_root: str | None,
                      upstream_url: str | None,
@@ -101,14 +135,27 @@ def _resolve_context(report_path: Path, slug: str | None,
                 if toml.is_file():
                     target_config.load_toml_into(cfg, toml)
             else:
-                cfg = target_config.load(str(report_path))
+                cfg = _config_for_report(report_path)
         except (FileNotFoundError, OSError):
             cfg = None
         if cfg is not None:
             if src_root is None and cfg.target_root:
                 p = Path(cfg.target_root)
                 if p.is_dir():
-                    src_root = p
+                    recorded = cfg.target_rev
+                    current = target_config.detect_rev(p)
+                    revisions_match = (
+                        target_config.is_unpinned_rev(recorded)
+                        or (
+                            not target_config.is_unpinned_rev(current)
+                            and (
+                                current.startswith(recorded)
+                                or recorded.startswith(current)
+                            )
+                        )
+                    )
+                    if revisions_match:
+                        src_root = p
             if not up_url and cfg.upstream_url:
                 up_url = cfg.upstream_url
             if not rev:

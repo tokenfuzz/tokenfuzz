@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib.machinery
+import importlib.util
 import io
 import os
 import re
@@ -499,6 +501,55 @@ Agent-inlined narrative that must be replaced by the sibling diff.
         truncated = report_enrich._truncate_anchor(long_anchor)
         self.assertTrue(truncated.endswith("…"))
         self.assertEqual(truncated.count("`") % 2, 0)
+
+    def test_pooled_report_resolves_its_own_target_not_a_scanned_one(self) -> None:
+        """A benchmark pool has a target.toml but no .session-env.
+
+        Falling back to scanning `output/` returns whichever target has a
+        session, and the enricher then resolves the frame's basename in that
+        project's tree — pasting a foreign codebase under the stack frame.
+        """
+        loader = importlib.machinery.SourceFileLoader(
+            "tokenfuzz_enrich_report", str(ENRICH)
+        )
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        enrich_report = importlib.util.module_from_spec(spec)
+        loader.exec_module(enrich_report)
+        checkout = self.root / "checkout"
+        for slug, body in (
+            ("mine", "int shared_name(void) { return 1; }\n"),
+            ("other", "int wrong_project(void) { return 2; }\n"),
+        ):
+            path = checkout / "targets" / slug / "hash.c"
+            path.parent.mkdir(parents=True)
+            path.write_text(body, encoding="utf-8")
+        pool = checkout / "output" / "bench" / "pool"
+        (pool / "crashes" / "CRASH-0001").mkdir(parents=True)
+        (pool / "target.toml").write_text('target = "mine"\n', encoding="utf-8")
+        (pool.parent / "run.json").write_text(
+            '{"target":"mine","target_sha":"feed1234"}\n', encoding="utf-8",
+        )
+        report = pool / "crashes" / "CRASH-0001" / "report.md"
+        report.write_text("# CRASH-0001\n\n- step: f (hash.c:1) — x\n", encoding="utf-8")
+
+        with mock.patch.object(enrich_report, "SCRIPT_ROOT", self.root / "unrelated"):
+            config = enrich_report._config_for_report(report)
+        self.assertEqual(config.slug, "mine")
+        self.assertEqual(config.target_rev, "feed1234")
+        self.assertEqual(Path(config.target_root), checkout / "targets" / "mine")
+
+        with mock.patch.object(enrich_report, "SCRIPT_ROOT", checkout), \
+             mock.patch.object(
+                 enrich_report.target_config, "detect_rev", return_value="other-rev"
+             ):
+            context = enrich_report._resolve_context(
+                report, None, None, None, None,
+            )
+        self.assertIsNone(
+            context.source_root,
+            "a moved checkout must not annotate a historical report",
+        )
+        self.assertEqual(context.pinned_rev, "feed1234")
 
 
 if __name__ == "__main__":

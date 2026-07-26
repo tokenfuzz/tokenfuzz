@@ -18,7 +18,7 @@ evidence for it):
   "surface":         "<network | library-api | file-format | cli | dev-tool | internal | unknown> — short description",
   "primitive":       "<one of the primitive_keys below>",
   "class":           "<short issue class, only if Primitive is unclear>",
-  "caller_contract": "<obeyed | violated>",
+  "caller_contract": "<obeyed | violated | unspecified>",
   "caller_controls": "<bytes | length | number | flags | call-sequence | timing | none>",
   "trigger_source":  "<bytes | both | call-sequence | timing | race | protocol-state | env | fs-state>",
   "parameter_control": "<direct | indirect | application-supplied | trusted | harness-only>",
@@ -45,6 +45,13 @@ Allowed primitive_keys:
 
 Rules:
 - Pick the single most specific primitive_key that fits the bug.
+- `caller_contract` is `violated` when the public documentation states the
+  precondition the testcase breaks. Normative wording such as "must make sure",
+  "should", ownership/lifetime requirements, or valid parent/child/argument
+  types can state a contract even when the implementation does not enforce it.
+  Distinguish a requirement that defines valid inputs from a recommendation
+  that merely suggests a safer follow-up action. Use `unspecified` when the
+  public docs are silent; do not turn silence into `obeyed`.
 - Prefer library-api when the surface is unclear but the bug lives in a library API.
 - For an open redirect: primitive=open_redirect; surface=library-api (or network for an HTTP service).
 - Use caller_controls for what the external caller shapes. Use parameter_control

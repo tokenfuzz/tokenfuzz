@@ -198,14 +198,16 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Replicates` | `done/total`. Replicates that recovered from a mid-run provider pause got their full budget and fold in unmarked; a `(Np)` suffix flags N provider-limited replicates excluded from the totals (a same-run-id re-run retries them). |
 | `Wall (h)` | Median hours a cell spent finding things. The triage and validation that follow the audit are measurement, not finding work, so they are not counted. |
 | `Unique rejected findings` | FIND reports the validator rejected, after clustering merges duplicates where evidence permits. `≤ N` marks an upper bound. |
-| `Unique accepted findings` | Clustered non-crash security reports an agent investigated, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the finding cluster report. |
+| `Unique accepted findings` | Distinct evidence-signature clusters of accepted non-crash security reports, shown `N (M M+)`: N clusters, M scored Medium or higher. This is not a guaranteed root-cause count. Links to the finding cluster report. |
 | `Unique rejected crashes` | Crash candidates triage rejected, after stack/signature clustering merges duplicates where evidence permits. `≤ N` marks an upper bound. |
-| `Unique accepted crashes` | Clustered crash directories with real sanitizer output on disk, shown `N (M M+)`: N unique, M scored Medium or higher. Links to the crash cluster report. |
+| `Unique accepted crashes` | Distinct sanitizer-signature clusters with real sanitizer output on disk, shown `N (M M+)`: N clusters, M scored Medium or higher. This is not a guaranteed unique-fix count. Links to the crash cluster report. |
 | `Top crash severity` | Highest crash severity observed in the cell. |
 
 Accepted and rejected results go through the same deduplication, because a raw
-directory tally counts one root cause many times over and would not be
-comparable with a clustered one. Where duplicates could not be resolved the
+directory tally counts matching evidence many times over and would not be
+comparable with a clustered one. Signature clustering is a deterministic
+deduplication proxy: one root cause can split across different sites, and
+different root causes can share a sink signature. Where duplicates could not be resolved the
 count is shown as `≤ N` — it over-states rather than hides, so a rejected
 result never quietly vanishes from the column.
 

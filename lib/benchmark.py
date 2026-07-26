@@ -427,15 +427,7 @@ def count_confirmed_crashes(crashes_dir: Path) -> tuple[int, list[str]]:
 
 
 def crash_is_pending(directory: Path) -> bool:
-    if (directory / ".promotion_pending").is_file():
-        return True
-    report = report_identity.find_report(directory)
-    try:
-        return report is not None and "_TODO (agent):" in report.read_text(
-            encoding="utf-8", errors="replace"
-        )
-    except OSError:
-        return False
+    return bool(cluster_common.promotion_pending_reasons(directory))
 
 
 def count_pending_crashes(crashes_dir: Path) -> int:
@@ -3016,8 +3008,8 @@ def _unique_rejected(
     the evidence a clusterer keys on.
 
     Row-only records are counted one per record — an upper bound. A legacy
-    ledger row carries an occurrence id, not a root-cause signature, so two
-    replicates rejecting the same root cause count twice. Deduplicating them
+    ledger row carries an occurrence id, not an evidence signature, so two
+    replicates rejecting the same issue can count twice. Deduplicating them
     would mean mining signatures out of legacy Markdown, which buys accuracy
     only for ledgers that modern runs no longer produce; carrying them is what
     matters, because dropping them made real rejections disappear entirely.
@@ -4242,8 +4234,9 @@ def render_section(report: dict) -> str:
         "under the same per-cell time budget; **Wall (h)** is the median "
         "hours a cell actually spent. The result columns are grouped by "
         "evidence type. `bin/cluster-findings` / `bin/cluster-crashes` merge "
-        "duplicate signatures on both sides, so one root cause reported many "
-        "times counts once when clustering evidence is available. A `≤ N` "
+        "matching evidence signatures on both sides. These deterministic "
+        "signature clusters reduce duplicate reports but are not guaranteed "
+        "root-cause or unique-fix counts. A `≤ N` "
         "rejected cell is a conservative upper bound because legacy rows had "
         "no artifact to cluster or clustering could not run. "
         "**Unique rejected findings** "

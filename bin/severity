@@ -43,24 +43,6 @@ from cluster_common import exact_child_file  # noqa: E402
 # ─── target.toml discovery ────────────────────────────────────────────────
 
 
-def _find_target_toml(start: Path) -> Path | None:
-    """Walk up from `start` looking for an output/<slug>/target.toml ancestor."""
-    cur = start.resolve()
-    if cur.is_file():
-        cur = cur.parent
-    for p in [cur, *cur.parents]:
-        # Case 1: we're already inside output/<slug>/...
-        for anc in [p, *p.parents]:
-            if anc.parent.name == "output" and (anc / "target.toml").is_file():
-                return anc / "target.toml"
-            if anc.name == "output":
-                # Stop climbing further once we hit the output root itself.
-                break
-        if (p / "target.toml").is_file():
-            return p / "target.toml"
-    return None
-
-
 # Batch scoring (severity-sweep, benchmark harvest) runs main() in-process for
 # every finding under one results tree, and each resolves the same target.toml.
 # Cache the parse keyed on (path, stat-signature) so a pool of N reports parses
@@ -359,13 +341,24 @@ def _threat_metric(report_text: str, fields: dict,
         proof-of-concept maturity
       * a reproducer/testcase artifact and no failed     → E:P
         reverification
-      * triaged but none of the above                    → E:U
+      * triaged, or a filed finding, but none of the     → E:U
+        above
       * untriaged input                                  → E:X
 
     A bare *prose* mention of "reproducer/PoC/testcase" is deliberately NOT
     sufficient — a sentence saying a PoC "could be built" is a claim, not
     evidence, and must not grant E:P (the dominant source of inflated
     Exploit-Maturity in prose-only findings).
+
+    A filed `findings/FIND-*` is E:U even when it carries no reach fields.
+    CVSS v4.0 scores an undefined E as `Attacked` — the worst case — which is
+    the right default for input the harness knows nothing about, but not for a
+    report it accepted, scored and published with no reproducer: no evidence
+    of exploitation is `Unreported`, not the undefined value the scorer treats
+    as the worst case (`Attacked`). Without this, a source-only lead scores
+    exactly as high as a bug with mature in-the-wild exploitation, and whether
+    the same unproven claim lands at worst case or at E:U turns on whether the
+    report happened to carry a Surface/Trigger row.
     """
     t = (report_text or "").lower()
     # Negation-aware: "no evidence this was exploited in the wild" is the
@@ -394,6 +387,8 @@ def _threat_metric(report_text: str, fields: dict,
         return "P", "reproducer/testcase artifact on disk → E:P"
     if _report_is_triaged(fields):
         return "U", "no reproducer artifact or positive reproduction → E:U"
+    if report_dir is not None and Path(report_dir).parent.name == "findings":
+        return "U", "filed finding with no reproducer evidence → E:U"
     return "X", "threat evidence not defined → E:X"
 
 
@@ -512,16 +507,46 @@ def _trigger_components_from_field(value: str) -> set[str]:
     return out
 
 
+_TAXONOMY_ONLY_RE = re.compile(
+    r"^(?:bytes|call-sequence|call-order|call-seq|sequence|data-driven|data|"
+    r"input|timing|race|env|protocol-state|fs-state|both)"
+    r"(?:\s*[,/+]\s*(?:bytes|call-sequence|call-order|call-seq|sequence|"
+    r"data-driven|data|input|timing|race|env|protocol-state|fs-state|both))*$"
+)
+
+
+def _declared_trigger_components(fields: dict) -> set[str]:
+    """Trigger components the report declares, from every structured field.
+
+    `Trigger source` is the canonical one. `Caller controls` is normally free
+    prose (and is read as prose everywhere else), but report templates also
+    accept the threat-model vocabulary there, and findings routinely use it —
+    `Caller controls: call-sequence` alongside `Trigger source: bytes` states
+    exactly what a crash states as `Trigger source: both`. Reading only one of
+    the two makes the same fact score differently on the two report kinds.
+
+    Folded in ONLY when the whole field is taxonomy tokens; one word of prose
+    and it is prose again. Adding a component can only widen the
+    out-of-attacker-control set, so this never raises a score.
+    """
+    components = _trigger_components_from_field(fields.get("trigger_source", ""))
+    controls = (fields.get("caller_controls", "") or "").strip().lower()
+    controls = controls.replace("_", "-").rstrip(".")
+    if controls and _TAXONOMY_ONLY_RE.match(controls):
+        components |= _trigger_components_from_field(controls)
+    return components
+
+
 def _contract_oob_components(fields: dict) -> set[str]:
     """Trigger components outside the target's current attacker_controls.
 
     This is deliberately derived from structured state only: the report's
-    Trigger source field and the active target.toml threat model. Report prose,
-    `## Contract concern`, and `.contract-flagged` are annotations and may be
-    stale after benchmark pooling or threat-model edits.
+    declared trigger components and the active target.toml threat model. Report
+    prose, `## Contract concern`, and `.contract-flagged` are annotations and
+    may be stale after benchmark pooling or threat-model edits.
     """
     controls_csv = fields.get("_attacker_controls_csv", "")
-    trigger_components = _trigger_components_from_field(fields.get("trigger_source", ""))
+    trigger_components = _declared_trigger_components(fields)
     if controls_csv and trigger_components:
         controls = {
             _normalise_attacker_control_token(t)
@@ -1772,7 +1797,8 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
     }
     attacker_controls: set[str] = set()
     if report_dir is not None:
-        attacker_controls = _attacker_controls_from_target_toml(_find_target_toml(report_dir))
+        toml_path = tc.find_target_toml(report_dir)
+        attacker_controls = _attacker_controls_from_target_toml(toml_path)
     # With no discoverable target.toml, default to the harness boundary
     # {bytes} so a
     # `Trigger source: both` still yields the call-sequence set-difference

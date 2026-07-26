@@ -369,6 +369,48 @@ The parser writes past `{object_name}`.
         )
         self.assertRegex(row, r"^\|\s*Low \(CVSS 3\.3\) ")
 
+    def test_pending_skeleton_is_flagged_from_either_location(self) -> None:
+        """An unfinished auto-filed bundle never renders as a clean row.
+
+        Export and benchmark pooling move sidecars under `.audit/`, so a
+        top-level-only lookup marked a pooled skeleton OK, and a report whose
+        Root Cause was still `_TODO (agent):` shipped as a triaged result.
+        """
+        crash = self.make_crash(
+            "CRASH-P1-1", "heap-use-after-free", "pending_fn",
+            "_TODO (agent): describe the defect.",
+        )
+        audit = crash / ".audit"
+        audit.mkdir()
+        (audit / ".promotion_pending").write_text(
+            "report.md(auto-filed skeleton not yet enriched)\n", encoding="utf-8",
+        )
+        self.assertEqual(self.run_cluster().returncode, 0)
+        row = next(
+            line for line in
+            (self.results / "crashes" / "CRASH-CLUSTERS.md").read_text().splitlines()
+            if "CRASH-P1-1" in line
+        )
+        self.assertIn("PENDING", row)
+        self.assertIn("auto-filed skeleton", row)
+        self.assertIn("unfilled _TODO sections", row)
+
+    def test_finished_report_is_not_flagged_pending(self) -> None:
+        self.make_crash(
+            "CRASH-P2-1", "heap-use-after-free", "done_fn",
+            "The length is not bounded before the copy.",
+        )
+        self.assertEqual(self.run_cluster().returncode, 0)
+        cluster_text = (
+            self.results / "crashes" / "CRASH-CLUSTERS.md"
+        ).read_text()
+        self.assertIn("not a guaranteed unique root cause or fix", cluster_text)
+        row = next(
+            line for line in cluster_text.splitlines()
+            if "CRASH-P2-1" in line
+        )
+        self.assertNotIn("PENDING", row)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

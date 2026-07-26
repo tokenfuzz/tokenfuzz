@@ -240,8 +240,13 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     )
     check(
         triage._valid_reach_field("caller_controls", "bytes") == "bytes"
-        and triage._valid_reach_field("caller_controls", "bytes, length") == "",
-        "caller-controls validation keeps the prompt's single-enum scorer contract",
+        and triage._valid_reach_field("caller_controls", "bytes, length") == ""
+        and triage._valid_reach_field("caller_contract", "unspecified") == "unspecified"
+        and triage._reach_field_present(
+            "Caller contract: unspecified", "Caller contract"
+        )
+        and not triage._reach_field_present("Surface: unspecified", "Surface"),
+        "reach validation keeps enums aligned and preserves unspecified contract",
     )
 
     fake_codex = root / "fake_codex.py"

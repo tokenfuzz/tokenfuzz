@@ -48,8 +48,17 @@ state**, not the bug mechanics:
 >       For anything else that merely LOOKS like misuse — moving a node between two
 >       trees / documents, a direct length / offset / index into the untrusted data
 >       the caller chose, or an input shape the library's internal callers do not
->       produce — do NOT assume it is forbidden. Reject only if you READ the public constructor /
->       guard and it PROVABLY rejects or cannot reach that state — e.g. the API's
+>       produce — do NOT assume it is forbidden. Read the public documentation as
+>       well as the constructor / guard. Normative wording such as "must make
+>       sure" or "should", ownership/lifetime requirements, and stated valid
+>       argument, parent, or child types are contract terms even when the
+>       implementation does not enforce them; do not dismiss a validity
+>       requirement as advisory merely because it is politely phrased. A
+>       recommendation that does not define accepted input remains advisory.
+>       Tree / list APIs may legitimately move supported nodes, but a C cast or
+>       missing runtime guard does not make a documented-invalid node type
+>       supported. Otherwise reject only if the public constructor / guard
+>       PROVABLY rejects or cannot reach that state — e.g. the API's
 >       only in-tree callers always pass NUL-terminated data, so attacker bytes
 >       cannot form the non-NUL buffer the bug needs. Tree / list APIs
 >       legitimately move nodes between trees, so a crash there is a REAL defect

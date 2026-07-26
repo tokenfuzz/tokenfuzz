@@ -181,6 +181,25 @@ assert_eq("/backend/results", loaded.results_dir,
 assert_eq("timing", loaded.attacker_controls_csv(),
           "load derives target.toml from backend results session dir")
 
+# Report consumers do not require a session env. A benchmark pool carries its
+# own target.toml below the original output/<slug> config, and the nearest
+# config must win without scanning another target's output tree.
+pool_root = slug_dir / "benchmark" / "pool" / "harness"
+pool_report = pool_root / "crashes" / "CRASH-001" / "REPORT.md"
+pool_report.parent.mkdir(parents=True)
+pool_toml = pool_root / "target.toml"
+pool_toml.write_text('target = "pooled-demo"\n', encoding="utf-8")
+pool_report.write_text("# report\n", encoding="utf-8")
+assert_eq(pool_toml.resolve(), tc.find_target_toml(pool_report).resolve(),
+          "find_target_toml returns the nearest ancestor config for a pool report")
+(slug_dir / "benchmark" / "run.json").write_text(
+    '{"target":"demo","target_sha":"feed1234"}\n', encoding="utf-8",
+)
+assert_eq("feed1234", tc.find_benchmark_target_rev(pool_report, "demo"),
+          "find_benchmark_target_rev reads the enclosing run revision")
+assert_eq("", tc.find_benchmark_target_rev(pool_report, "other"),
+          "find_benchmark_target_rev rejects metadata for another target")
+
 # find_slug_session_dir resolves a known slug dir to a backend session.
 slug_session = tc.find_slug_session_dir(slug_dir)
 assert_eq(backend_results.resolve(),
@@ -333,6 +352,8 @@ if shutil.which("git"):
               "detect_rev: parent git repo does not make nested target a checkout")
 assert_eq("", tc.detect_rev(TEST_TMPDIR / "missing-rev-target"),
           "detect_rev: missing source tree stays empty")
+assert_eq("", tc.detect_rev(""),
+          "detect_rev: an empty target root never resolves the harness checkout")
 
 # audited_rev: the session's recorded rev is exact for that run and wins; with
 # none recorded the checkout's own HEAD is the only honest answer.

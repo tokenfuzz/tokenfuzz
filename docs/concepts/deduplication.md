@@ -8,10 +8,12 @@ An audit run produces two kinds of duplicate-prone artifacts:
   `output/<target>/<backend>/results/findings/FIND-*/`.
 
 The same bug is usually discovered many times — reached through different
-inputs, callers, or by different agents. Deduplication collapses those
-re-discoveries into one **cluster** per root cause, so a reviewer sees each
-real bug once, with a *canonical* representative and the duplicates linked to
-it.
+inputs, callers, or by different agents. Deduplication collapses reports with
+the same evidence signature into a **cluster**, with a *canonical*
+representative and matching reports linked to it. A cluster is a review aid,
+not a proof of root-cause or fix equivalence: one defect can split when it
+reaches different sinks, and distinct defects can merge when they reach the
+same sink.
 
 The two artifact types use **different** strategies, because they carry
 different evidence:
@@ -44,8 +46,8 @@ ClusterFuzz's own stack-parsing rules.
    `Store::set_blob(unsigned int)` and `Store::set_blob` are one symbol.
 4. **Take the top three** interesting frames — the *crash state*. Two crashes
    with the same crash state **and the same sanitizer primitive** (e.g.
-   `heap-buffer-overflow READ`) are the same bug; identical stacks reporting
-   different primitives do not merge.
+   `heap-buffer-overflow READ`) share a crash-signature cluster; identical
+   stacks reporting different primitives do not merge.
 5. **Bucket** crashes by that (primitive, crash state) pair. Stacks that
    differ only in deep tail frames can still group together.
 
@@ -86,7 +88,7 @@ by max-member severity then size) and stamps a `Cluster:` line into each
 member `REPORT.md`. Each row names a **Canonical** member — the
 highest-severity crash in the cluster (the CVSS score breaks ties within a
 severity band, then lowest id) — and the
-**Members** column lists every crash sharing the root cause, ordered by
+**Members** column lists every crash sharing the signature, ordered by
 severity descending with the canonical in **bold**. This mirrors
 `bin/cluster-findings`, so both pages pick and present the canonical the same
 way. The `CL-<hash>` cluster id stays anchored on the bucket's crash state, so

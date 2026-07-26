@@ -766,6 +766,59 @@ class SeverityTests(unittest.TestCase):
             self.assertEqual(severity.main(["--batch", str(self.root)]), 0)
         self.assertTrue((finding / "severity.json").is_file())
 
+    # ── exploit maturity ───────────────────────────────────────────────
+
+    def test_filed_finding_without_evidence_is_unproven_not_worst_case(self) -> None:
+        """CVSS scores an undefined E as Attacked. A recon lead with no
+        reproducer must not tie a bug with mature in-the-wild exploitation."""
+        report = (self.root / "findings" / "FIND-RECON")
+        report.mkdir(parents=True)
+        (report / "report.md").write_text(
+            "# unbounded allocation from a header field\n\n"
+            "| Field | Value |\n|:--|:--|\n| Class | dos |\n"
+            "| Primitive | dos_amplification |\n"
+            "| File | `libavformat/demux.c` |\n\n"
+            "## Sanitizer evidence\n\nnot yet attempted\n",
+            encoding="utf-8",
+        )
+        result = self.score(report)
+        self.assert_metrics(result, E="U")
+
+        # A bare crash dir handed straight to bin/severity is still unknown
+        # input — the scorer must not invent a threat metric for it.
+        crash = self.root / "workspace" / "CRASH-RAW"
+        crash.mkdir(parents=True)
+        (crash / "report.md").write_text(
+            "# raw crash\n\nheap-buffer-overflow in demux\n", encoding="utf-8",
+        )
+        self.assertNotIn("E", self.score(crash).get("metrics", {}))
+
+    # ── declared trigger components ────────────────────────────────────
+
+    def test_taxonomy_caller_controls_localises_like_trigger_both(self) -> None:
+        """`Trigger source: bytes` + `Caller controls: call-sequence` states
+        what a crash states as `Trigger source: both`. Reading only one field
+        scored the same fact Medium on findings and Low on crashes."""
+        report = self.make_report(
+            "options are dropped on a reused context, leaving XXE enabled",
+            report_id="FIND-TOKENCTL", finding=True, trigger="bytes",
+            controls="call-sequence", target_controls=("bytes",),
+            extra_fields=(("Primitive", "xxe"),),
+        )
+        result = self.score(report)
+        self.assert_metrics(result, AV="L", AT="P")
+
+    def test_prose_caller_controls_stays_prose(self) -> None:
+        report = self.make_report(
+            "parser reads past the record while decoding attacker bytes",
+            report_id="FIND-PROSECTL", finding=True, trigger="bytes",
+            controls="the document bytes, and the call sequence the app uses",
+            target_controls=("bytes",),
+            extra_fields=(("Primitive", "xxe"),),
+        )
+        result = self.score(report)
+        self.assert_metrics(result, AV="N")
+
 
 if __name__ == "__main__":
     unittest.main()

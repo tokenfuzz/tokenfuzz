@@ -99,7 +99,7 @@ Start review with these generated pages:
 
 | Path | Purpose |
 | --- | --- |
-| `results/findings/FINDING-CLUSTERS.html` | Concrete security findings, grouped by root cause. |
+| `results/findings/FINDING-CLUSTERS.html` | Concrete security findings, grouped by exact evidence signature. |
 | `results/crashes/CRASH-CLUSTERS.html` | Confirmed sanitizer or race diagnostics and their reproduction bundles. |
 | `results/crashes-rejected/REJECTED-CRASHES.html` | Crash candidates rejected with an explanation. |
 

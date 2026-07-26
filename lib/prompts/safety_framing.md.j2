@@ -63,15 +63,16 @@ descriptions in the testcase — keep mechanism reasoning in structured state no
 
 Only put a reproducing sanitizer diagnostic under `{{ results_dir }}/crashes/CRASH-*` when it is a
 legitimate crash testcase. The gate is **NOT** "the caller used only the inputs
-the docs show in examples." Public APIs accept every value of their declared
-parameter type by definition; if the implementation breaks on one of those
-values, that is the bug, not a contract violation.
+the docs show in examples." Absent an explicit documented precondition, public
+APIs accept every value of their declared parameter type; if the implementation
+breaks on one of those values, that is the bug, not a contract violation.
 
 A crash is legitimate when ALL of the following hold:
 
 1. **Public API entrypoint.** The trusted caller invokes a documented public
-   function/CLI/IPC entry. Any value within the declared parameter type is
-   fair game — the API contract is the type signature, not example values.
+   function/CLI/IPC entry. Absent an explicit documented precondition, any
+   value within the declared parameter type is fair game — examples do not
+   narrow the API contract.
    Specifically, the following are LEGITIMATE attacker inputs, not contract
    violations:
    - negative, zero, or oversized integer fields in typed structs
@@ -123,7 +124,13 @@ mature C/C++ libraries — do not gate them out.**
 
 If you are unsure whether a value is in-domain: it is. A negative
 `regmatch_t.rm_so` is an `int`; the type signature says all `int`s are
-acceptable. The fact that no documented example uses one is irrelevant.
+acceptable unless the public documentation states otherwise. The fact that no
+documented example uses one is irrelevant. Conversely, normative wording such
+as "must make sure" or "should", ownership/lifetime requirements, and stated
+valid argument, parent, or child types are contract terms even if the
+implementation does not enforce them. Do not dismiss a validity requirement as
+advisory merely because it is politely phrased. A recommendation that does not
+define accepted input remains advisory.
 
 Do not file the following in `{{ results_dir }}/crashes/`: testcases where the harness
 itself directly writes into private struct fields, links against
@@ -177,8 +184,9 @@ Trigger source: <fill in>
 Strategy: S<N>
 
 `Caller contract` must be one of: `obeyed`, `violated`, `unspecified`. Use
-`unspecified` (NOT `obeyed`) when the public docs are silent about the call
-ordering you depend on — defaulting to `obeyed` inflates verdicts.
+`unspecified` (NOT `obeyed`) when the public docs are silent about the
+precondition you depend on — call ordering, ownership/lifetime, or valid
+argument and node types. Defaulting to `obeyed` inflates verdicts.
 
 `Trigger source` lists what an external caller must supply to reach the
 crash. When any component is outside the target's `attacker_controls`
