@@ -65,6 +65,27 @@ Common fixes:
 - Ensure runtime libraries are discoverable.
 - Install `llvm-symbolizer` so diagnostics are readable.
 
+## A build was not replaced, or a cell refuses to start
+
+These messages all come from one rule: a build in use by a live run is never
+replaced, because the evidence that run already recorded was measured against
+it.
+
+| Message | Meaning | What to do |
+| --- | --- | --- |
+| `build not replaced (another run is using ...)` | Another audit or benchmark holds this build. | Nothing. The existing build stays and work continues on it. |
+| `pinned benchmark build is not usable` | A benchmark cell found its pinned build missing, stale, or changed. Cells verify and never build. | Look for a build command run outside the harness during the run, then re-run the affected cell with `--run-id`. |
+| `target source changed during the cell` | The tracked source changed while the cell ran. Artifacts are kept; the cell leaves the headline comparison. | Check `cells/<cell>/source-drift.json` for the paths. Agents must not edit the target tree in place. |
+| `the available target build differs from the cell's` | Crash replay was skipped because the build moved on. Original evidence is untouched. | Re-run that cell; if it recurs with nothing else running, something outside the harness is rebuilding. |
+| `is at a different source state than a live run` | A benchmark refused to start: another live run pinned a different source state. | Use a separate checkout, or wait for that run. `--isolate-build` cannot fix this — both runs read one checkout. |
+| `refusing to launch cells against a build this run cannot verify or hold` | The build is missing, stale, or could not be leased. A benchmark will not measure a binary it cannot name. | Fix the build (`bin/setup-target <target> --build`) or wait for the run holding it, then start again. |
+| `the target build differs from the one this run pinned` | A `--run-id` resume found a different build than the cells already on disk were measured on. | Start a new run id, or restore the build that run pinned. Mixing generations would average two experiments. |
+| `<setting> was X for this run and is now Y` | A resume changed something that defines the experiment (model, effort, budget, agents, target revision). | Resume with the original settings, or start a new run id. `--replicates` and `--conditions` may still change. |
+
+A build is *stale* only when tracked source content, or the build recipe,
+actually changed. Ignored files a test run writes into the tree, and an edit that
+is reverted, both leave it fresh.
+
 ## C harness compilation fails
 
 Check `output/<target>/target.toml`:

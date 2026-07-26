@@ -145,8 +145,22 @@ better in scripts because they are visible in the command under review.
 | `AUDIT_DOCKER_RUNTIME` | `--docker-runtime` | OCI runtime passed to `docker run`; `--gvisor` selects `runsc`. |
 
 Inside the container helper, `AUDIT_BUILD_SUFFIX` is set for you so each image
-gets its own `build-asan-<image-id>/` tree. It is runtime state — do not set it
-by hand.
+gets its own `build-asan-<image-id>/` tree. `bin/benchmark --isolate-build` sets
+it the same way, to `+bench-<input-hash>`. It is runtime state — do not set it by
+hand.
+
+## Build leases and source pins
+
+Every process that executes a sanitizer build holds a shared lease on it, and
+every rebuild takes the matching exclusive one, so a build is never replaced
+while a run is using it. A run additionally pins the source state it is
+auditing, which is what catches two runs reading one checkout at different
+states — something a per-build lock cannot see.
+
+Both are advisory kernel locks under `targets/<slug>/.audit/`
+(`build-locks/<build-dir>.lock` and `source-pins/<pid>.pin`), released when the
+holder exits and needing no cleanup. There is nothing to configure, and they bind
+only harness commands — a build tool invoked by hand is outside them.
 
 ## One-off probe selection
 

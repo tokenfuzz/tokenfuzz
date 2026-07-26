@@ -49,6 +49,7 @@ ENV = sanitizer.prepare_runtime_env("ubsan")
 sanitizer.warn_if_disabled("ubsan", CONFIG)
 TARGET_ROOT = CONFIG.target_root if CONFIG else ENV.get("TARGET_ROOT", str(ROOT / "targets/firefox"))
 BUILD_DIR = sanitizer.build_dir("ubsan", TARGET_ROOT, ENV)
+sanitizer.hold_build("ubsan", TARGET_ROOT, ENV)
 
 
 def browser_binary() -> str:

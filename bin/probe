@@ -27,6 +27,7 @@ import build_routes
 import build_config
 import crash_bundle
 import languages
+import sanitizer as sanitizer_lib
 import target_config
 import verdict as verdict_lib
 from file_tools import capture_command
@@ -461,6 +462,10 @@ class Probe:
             os.environ["AUDIT_BUILD_SUFFIX"] = build_config.suffix(
                 self.selected_build_config, self.base_build_suffix
             )
+        # The tree is now fully resolved (sanitizer and, for an alternate
+        # configuration, its suffix). Hold it so a rebuild cannot replace the
+        # binary between resolving it here and finishing with it below.
+        sanitizer_lib.hold_build(self.sanitizer, self.config.target_root)
         self.harness_source: Path | None = None
         self.build_kind = ""
         self.repro_args = list(self.args.args)

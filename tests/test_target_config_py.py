@@ -1271,13 +1271,20 @@ assert_eq("fresh", tc.build_freshness(
     _bf_lang, "asan", recipe_path=_bf_lang_recipe
 ), "build_freshness: explicit language recipe opts into freshness")
 
-# A source edit after the stamp → stale (the core staleness signal). Advance
-# mtime explicitly so the test is fast and independent of filesystem precision.
+# A source edit after the stamp → stale (the core staleness signal).
 (_bf_root / "main.c").write_text("int main(void){return 1;}\n")
+assert_eq("stale", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: an edited source file reports stale")
+
+# Identity is content, not mtime: a file whose bytes did not change cannot
+# stale a build no matter how new it looks. Without this, any command that
+# rewrites a timestamp in the tree forces a rebuild, and on a shared checkout
+# a rebuild replaces the binary a concurrent run is auditing.
+tc.build_write_stamp(_bf_root, "asan")
 newer = time.time() + 1
 os.utime(_bf_root / "main.c", (newer, newer))
-assert_eq("stale", tc.build_freshness(_bf_root, "asan"),
-          "build_freshness: a source file newer than the stamp reports stale")
+assert_eq("fresh", tc.build_freshness(_bf_root, "asan"),
+          "build_freshness: touching a source file without editing it stays fresh")
 
 # A sibling sanitizer build compiled after the asan stamp must NOT read as a
 # source edit (only the canonical build-<san> trees are pruned from the walk).
@@ -1313,6 +1320,178 @@ assert_eq("stale", tc.build_freshness(_bf_root, "asan"),
 # build_write_stamp is a no-op (False) when the build dir is absent.
 assert_eq(False, tc.build_write_stamp(_bf_root, "msan"),
           "build_write_stamp: no-op when build-<san> does not exist")
+
+
+# ─── build_freshness on a VCS checkout ──────────────────────────────
+#
+# On a git checkout the VCS decides what counts as source. Anything it ignores
+# is build output, and a target that writes into its own tree while running its
+# own tests (a rewritten test log) must not stale the build that produced it —
+# that false signal is what made concurrent runs rebuild each other's binaries.
+_bf_git = TEST_TMPDIR / "freshness-git"
+_bf_git.mkdir()
+
+
+def _git(*args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+         "-c", "init.defaultBranch=main", "-C", str(_bf_git), *args],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+(_bf_git / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.16)\n")
+(_bf_git / "main.c").write_text("int main(void){return 0;}\n")
+(_bf_git / ".gitignore").write_text("/testsuite.log\n")
+_git("init", "-q")
+_git("add", "-A")
+_git("commit", "-qm", "init")
+(_bf_git / "build-asan").mkdir()
+tc.build_write_stamp(_bf_git, "asan")
+assert_eq("fresh", tc.build_freshness(_bf_git, "asan"),
+          "build_freshness(git): a stamped clean checkout reports fresh")
+
+# The incident: a test run rewrites an ignored log inside the source tree.
+(_bf_git / "testsuite.log").write_text("run 1: ok\n")
+assert_eq("fresh", tc.build_freshness(_bf_git, "asan"),
+          "build_freshness(git): rewriting an ignored file stays fresh")
+
+# .audit/ is untracked-but-not-ignored in a real target and is rewritten by
+# every build, so the prune has to survive the move to a VCS answer or a build
+# would stale itself.
+(_bf_git / ".audit").mkdir(exist_ok=True)
+(_bf_git / ".audit" / "build-materialize-asan.log").write_text("=== build ===\n")
+assert_eq("fresh", tc.build_freshness(_bf_git, "asan"),
+          "build_freshness(git): .audit/ churn stays fresh")
+
+# A real edit stales, and reverting it returns to fresh without a rebuild —
+# the edit/restore cycle an agent performs while preparing a patch.
+(_bf_git / "main.c").write_text("int main(void){return 1;}\n")
+assert_eq("stale", tc.build_freshness(_bf_git, "asan"),
+          "build_freshness(git): a tracked content edit reports stale")
+(_bf_git / "main.c").write_text("int main(void){return 0;}\n")
+assert_eq("fresh", tc.build_freshness(_bf_git, "asan"),
+          "build_freshness(git): reverting the edit returns to fresh")
+
+# Untracked-and-not-ignored source is source.
+(_bf_git / "extra.c").write_text("void extra(void){}\n")
+assert_eq("stale", tc.build_freshness(_bf_git, "asan"),
+          "build_freshness(git): a new untracked source file reports stale")
+(_bf_git / "extra.c").unlink()
+
+# Deletion and commit-level movement both register.
+(_bf_git / "main.c").unlink()
+assert_eq("stale", tc.build_freshness(_bf_git, "asan"),
+          "build_freshness(git): deleting a tracked file reports stale")
+_git("checkout", "--", "main.c")
+assert_eq("fresh", tc.build_freshness(_bf_git, "asan"),
+          "build_freshness(git): restoring the deleted file returns to fresh")
+(_bf_git / "main.c").write_text("int main(void){return 2;}\n")
+_git("add", "-A")
+_git("commit", "-qm", "second")
+assert_eq("stale", tc.build_freshness(_bf_git, "asan"),
+          "build_freshness(git): a new commit reports stale")
+
+# Identity is the working tree, not the index. Staging a change alters status
+# letters and index oids without altering the bytes a build compiles, and
+# rebuilding for that is pure waste — agents stage while preparing patches.
+tc.build_write_stamp(_bf_git, "asan")
+(_bf_git / "main.c").write_text("int main(void){return 3;}\n")
+_unstaged = tc._source_state_signature(_bf_git)
+_git("add", "main.c")
+assert_eq(_unstaged, tc._source_state_signature(_bf_git),
+          "source signature(git): staging the same bytes does not change identity")
+_git("reset", "-q", "HEAD", "main.c")
+_git("checkout", "--", "main.c")
+
+# A submodule's directory cannot hash to a constant: the parent's status says
+# only "something changed", which is the same string for every possible change
+# inside it, so distinct dirty contents would have read as unchanged.
+_bf_sub = _bf_git / "vendor"
+_bf_sub.mkdir()
+(_bf_sub / "x.c").write_text("int x(void){return 0;}\n")
+_sub_first = tc._content_digest(_bf_sub)
+(_bf_sub / "x.c").write_text("int x(void){return 1;}\n")
+assert_eq(True, _sub_first.startswith("sub:"),
+          "content digest: a submodule directory carries its own signature")
+assert_eq(True, _sub_first != tc._content_digest(_bf_sub),
+          "content digest: distinct dirty submodule contents differ")
+
+# A VCS that cannot answer must not switch identity scheme. Reporting the
+# whole-tree walk instead would change the value without the source changing,
+# which reads as drift and could discard a finished cell.
+_bf_saved_records = tc._git_status_records
+tc._git_status_records = lambda root: None
+_bf_unknown = tc._source_state_signature(_bf_git)
+_bf_unknown_again = tc._source_state_signature(_bf_git)
+_bf_cheap = tc.vcs_source_signature(_bf_git)
+_bf_stale_when_unknown = tc.build_freshness(_bf_git, "asan")
+tc._git_status_records = _bf_saved_records
+assert_eq(tc._VCS_UNAVAILABLE_SIGNATURE, _bf_unknown,
+          "source signature(git): an unreadable status reports one constant unknown")
+assert_eq(_bf_unknown, _bf_unknown_again,
+          "source signature(git): the unknown value is stable across calls")
+assert_eq("", _bf_cheap,
+          "vcs_source_signature: reports no answer rather than a wrong one")
+assert_eq("stale", _bf_stale_when_unknown,
+          "build_freshness(git): an unreadable status errs toward stale")
+
+# "Unknown" is an admission, not an identity. Stamping it would make the next
+# unknown answer match, so a tree edited while the VCS stayed down would read as
+# fresh — the one direction this classifier must never take.
+tc._git_status_records = lambda root: None
+tc.build_write_stamp(_bf_git, "asan")
+_bf_unknown_stamped = tc.build_freshness(_bf_git, "asan")
+(_bf_git / "main.c").write_text("int main(void){return 9;}\n")
+_bf_edit_while_unknown = tc.build_freshness(_bf_git, "asan")
+tc._git_status_records = _bf_saved_records
+assert_eq("stale", _bf_unknown_stamped,
+          "build_write_stamp: a stamp written while the VCS was down is not fresh")
+assert_eq("stale", _bf_edit_while_unknown,
+          "build_freshness: a real edit during VCS downtime never reads as fresh")
+tc.build_write_stamp(_bf_git, "asan")
+assert_eq("fresh", tc.build_freshness(_bf_git, "asan"),
+          "build_write_stamp: a stamp written with a real answer is fresh again")
+
+# Mercurial is what browser-sized checkouts use, so pinning and drift detection
+# have to work there too rather than silently doing nothing.
+if shutil.which("hg"):
+    _hg_root = TEST_TMPDIR / "freshness-hg"
+    _hg_root.mkdir()
+
+    def _hg(*args: str) -> None:
+        subprocess.run(
+            ["hg", "--cwd", str(_hg_root), *args], check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={**os.environ, "HGPLAIN": "1"},
+        )
+
+    (_hg_root / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.16)\n")
+    (_hg_root / "main.c").write_text("int main(void){return 0;}\n")
+    (_hg_root / ".hgignore").write_text("syntax: glob\ntestsuite.log\n")
+    _hg("init", ".")
+    _hg("add", ".")
+    _hg("commit", "-u", "test", "-m", "init")
+    assert_eq("hg", tc.detect_repo_type(_hg_root),
+              "detect_repo_type: an hg checkout is recognised")
+    _hg_base = tc.vcs_source_signature(_hg_root)
+    assert_eq(True, bool(_hg_base),
+              "vcs_source_signature(hg): a Mercurial checkout has a cheap signature")
+    (_hg_root / "testsuite.log").write_text("run 1: ok\n")
+    assert_eq(_hg_base, tc.vcs_source_signature(_hg_root),
+              "vcs_source_signature(hg): rewriting an ignored file changes nothing")
+    _hg_newer = time.time() + 1
+    os.utime(_hg_root / "main.c", (_hg_newer, _hg_newer))
+    assert_eq(_hg_base, tc.vcs_source_signature(_hg_root),
+              "vcs_source_signature(hg): touching a file changes nothing")
+    (_hg_root / "main.c").write_text("int main(void){return 1;}\n")
+    assert_eq(True, tc.vcs_source_signature(_hg_root) != _hg_base,
+              "vcs_source_signature(hg): a content edit changes the signature")
+    assert_eq(["main.c"], tc.source_changed_paths(_hg_root),
+              "source_changed_paths(hg): reports the edited path")
+    (_hg_root / "main.c").write_text("int main(void){return 0;}\n")
+    assert_eq(_hg_base, tc.vcs_source_signature(_hg_root),
+              "vcs_source_signature(hg): reverting returns to the original signature")
 
 
 # ─── seed_toml(preserve_curated=...) ────────────────────────────────

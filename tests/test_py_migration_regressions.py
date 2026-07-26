@@ -140,7 +140,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
          mock.patch.object(benchmark_runner.llm_invoke, "apply_memory_policy"), \
          mock.patch.object(benchmark_runner.target_config, "detect_rev", return_value="rev"), \
          mock.patch.object(benchmark_runner, "_git_rev", return_value="rev"), \
-         mock.patch.object(benchmark_runner, "preflight_build"), \
+         mock.patch.object(benchmark_runner, "preflight_build", return_value=[]), \
          mock.patch.object(benchmark_runner, "run_harness", side_effect=_budget_harness), \
          mock.patch.object(benchmark_runner, "triage_cell_crashes", side_effect=_budget_crash_triage), \
          mock.patch.object(benchmark_runner, "drain_find_gate", side_effect=_budget_drain), \

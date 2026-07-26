@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ import audit_helpers
 import benchmark as metrics
 import benchmark_graph
 import benchmark_model_direct_render
+import build_lease
 import build_preflight
 import crash_artifacts
 import crash_bundle
@@ -360,6 +362,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--hard", action="store_true")
     result.add_argument("--regenerate", action="store_true")
     result.add_argument("--dry-run", action="store_true")
+    result.add_argument(
+        "--isolate-build", action="store_true",
+        help="build into a private tree keyed by build inputs, instead of "
+             "sharing the target's canonical build with concurrent runs",
+    )
     validation = result.add_mutually_exclusive_group()
     validation.add_argument("--no-validate-findings", dest="validate_findings", action="store_false")
     validation.add_argument("--validate-findings", dest="validate_findings", action="store_true")
@@ -452,12 +459,23 @@ def write_cell(
     quality = "clean"
     try:
         candidate = (path.parent / ".run-quality").read_text(encoding="utf-8").strip()
-        if candidate in {"clean", "incomplete", "provider_recovered", "provider_limited"}:
+        if candidate in {
+            "clean", "incomplete", "provider_recovered", "provider_limited",
+            # A cell that read different source, or ran on a different binary,
+            # than its peers. Both keep their artifacts and leave the headline
+            # comparison, so the reason has to survive into the cell record.
+            "source_drift", "build_drift",
+        }:
             quality = candidate
     except OSError:
         pass
     if status == "incomplete" and quality == "clean":
         quality = "incomplete"
+    drift: dict = {}
+    try:
+        drift = json.loads((path.parent / "source-drift.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
     payload = {
         "condition": condition, "replicate": replicate, "experiment": experiment,
         "results_dir": str(results_dir), "wall_seconds": wall, "status": status,
@@ -472,6 +490,8 @@ def write_cell(
     }
     if requested_agents is not None:
         payload["requested_agents"] = requested_agents
+    if drift:
+        payload["source_drift"] = drift
     if build_identity is None:
         try:
             previous = json.loads(path.read_text(encoding="utf-8"))
@@ -638,6 +658,81 @@ def _replay_build_check(
     if not _identity_matches_keys(recorded, current, keys):
         return False, f"the available target build differs from {subject}'s"
     return True, ""
+
+
+def _build_matches_pin(pinned: dict, target: Path, target_slug: str) -> bool:
+    """Whether the live build is still the generation the run pinned.
+
+    Whole-identity comparison, unlike the per-crash check below: before a cell
+    starts there is no evidence yet to narrow the question to, so any difference
+    at all disqualifies it.
+    """
+    return not pinned or _target_build_identity(target, target_slug) == pinned
+
+
+class _SourceWatch:
+    """Watch a target's source content while one cell runs.
+
+    A cell whose agents edited the source read different code than its peers, so
+    it is not comparable to them. Boundary checks alone cannot see it: the
+    edit/build/test/revert cycle an agent performs leaves the tree byte-identical
+    by the time the cell ends, which is precisely why the content signature that
+    makes freshness trustworthy cannot double as drift detection. Sampling only
+    records — it never rebuilds, cancels, or otherwise acts — so it cannot
+    destabilise a run.
+
+    Deliberately VCS-only. A sample must be cheap enough to repeat for hours,
+    and hashing a whole checkout is not (a browser target is gigabytes); a
+    target the VCS cannot answer for is simply not watched. A failed query is
+    "no sample", never "changed" — reading it as changed would throw away a
+    finished cell over a transient git error.
+    """
+
+    def __init__(self, target: Path, target_slug: str, baseline: str, interval: int = 60):
+        self.target = target
+        self.target_slug = target_slug
+        self.baseline = baseline
+        self.interval = interval
+        self.drift: dict = {}
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _sample(self) -> None:
+        if self.drift or not self.baseline:
+            return
+        current = target_config.vcs_source_signature(self.target)
+        if not current or current == self.baseline:
+            return
+        self.drift = {
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "paths": target_config.source_changed_paths(self.target),
+        }
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self._sample()
+            except OSError:
+                return  # diagnostics are never worth failing a cell over
+            if self.drift:
+                return
+
+    def start(self) -> None:
+        if not self.baseline:
+            return
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> dict:
+        """Stop sampling and report the first drift seen, including at the end."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=30)
+        try:
+            self._sample()
+        except OSError:
+            pass
+        return self.drift
 
 
 def _cell_build_identity(cell: dict) -> dict:
@@ -1581,23 +1676,128 @@ def replace_namespace(namespace: argparse.Namespace, **changes) -> argparse.Name
     return argparse.Namespace(**values)
 
 
-def preflight_build(args: argparse.Namespace, bench_dir: Path, model: str) -> None:
-    if args.dry_run or args.regenerate:
-        return
-    target_root = SCRIPT_ROOT / "targets" / args.target
-    config = target_config.Config(target_root=str(target_root))
+def _recorded_run(bench_dir: Path) -> dict:
     try:
-        target_config.load_toml_into(
-            config, SCRIPT_ROOT / "output" / args.target / "target.toml"
-        )
-    except (OSError, ValueError) as exc:
-        log(f"WARN: sanitizer build preflight could not load target config: {exc}")
-        return
-    runner_preflight.validate(config, log)
-    build_preflight.refresh(
-        SCRIPT_ROOT, target_root, args.target, config, bench_dir,
-        args.backend, model, log, include_alternates=False,
+        return json.loads((bench_dir / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _resolve_build_suffix(args: argparse.Namespace, previous: dict) -> str:
+    """The build directory suffix this run uses, composed onto any base.
+
+    A resumed or regenerated run has to land on the tree it originally built —
+    recomputing the key would read whatever the checkout has become since — so a
+    recorded suffix always wins. A container's own suffix is composed with, not
+    replaced, or an isolated run inside one would escape its image's tree.
+    """
+    recorded = str(previous.get("build_suffix") or "")
+    if recorded:
+        return recorded
+    base = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    if getattr(args, "isolate_build", False) and not args.regenerate:
+        target = (SCRIPT_ROOT / "targets" / args.target).resolve()
+        return f"{base}+bench-{target_config.build_input_key(target)}"
+    return base
+
+
+@contextmanager
+def _build_suffix(value: str):
+    """Scope AUDIT_BUILD_SUFFIX to one run.
+
+    --regenerate walks many runs in one process; leaking one run's isolated
+    suffix into the next would resolve the next run's builds to a tree that was
+    never its own.
+    """
+    previous = os.environ.get("AUDIT_BUILD_SUFFIX")
+    if value:
+        os.environ["AUDIT_BUILD_SUFFIX"] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("AUDIT_BUILD_SUFFIX", None)
+        else:
+            os.environ["AUDIT_BUILD_SUFFIX"] = previous
+
+
+def _source_pin_conflict(target: Path, target_slug: str, signature: str) -> str:
+    """Why this run must not start against this checkout, if it must not.
+
+    A live run has pinned the source state it is auditing. If ours differs, the
+    two are not comparable and one of us would have to rebuild under the other.
+    A private build directory does not help — both runs read their source from
+    this one checkout — so only a separate checkout is actually correct. This is
+    deliberately checked against the checkout rather than the build directory,
+    so an isolated run is caught too.
+
+    Claiming and checking are the same operation: two runs that check before
+    either publishes would both see a clear field and both proceed.
+    """
+    peers = build_lease.claim_source_pin(target, signature)
+    if not peers:
+        return ""
+    return (
+        f"targets/{target_slug} is at a different source state than a live run "
+        f"({', '.join(peers)}). Sharing its build would measure a binary this "
+        f"source did not produce, and rebuilding would corrupt that run; "
+        f"--isolate-build cannot help because both runs read this same "
+        f"checkout. Use a separate checkout, or wait for the other run."
     )
+
+
+def _benchmark_config(target_root: Path, target_slug: str):
+    config = target_config.Config(target_root=str(target_root))
+    target_config.load_toml_into(
+        config, SCRIPT_ROOT / "output" / target_slug / "target.toml"
+    )
+    return config
+
+
+def preflight_build(
+    args: argparse.Namespace, bench_dir: Path, model: str, pinned: bool = False,
+) -> list[str]:
+    """Converge, hold and verify the build this run pins.
+
+    Returns the reasons the run must not start; empty when every required build
+    is present, matches its source, and is leased. A benchmark reports numbers
+    produced by a specific binary, so unlike an audit it refuses to start on a
+    build it could not verify or could not hold — every cell would otherwise be
+    measuring something nobody can name afterwards.
+
+    ``pinned`` marks a run that already has a recorded generation, which makes
+    this verify-only: see below.
+    """
+    if args.dry_run:
+        return []
+    target_root = SCRIPT_ROOT / "targets" / args.target
+    try:
+        config = _benchmark_config(target_root, args.target)
+    except (OSError, ValueError) as exc:
+        # A target with no generated config declares no sanitizer artifacts, so
+        # there is nothing to verify rather than something wrong. Say so and let
+        # the build checks below speak for themselves.
+        log(f"WARN: sanitizer build preflight could not load target config: {exc}")
+        config = target_config.Config(target_root=str(target_root))
+    if args.regenerate or pinned:
+        # Nothing is converged here. A regeneration replays existing evidence,
+        # and a resumed run already has cells measured on the build it pinned —
+        # converging either one could rebuild that generation out from under the
+        # evidence that depends on it, before any check could refuse the run.
+        unleased = build_preflight.hold_builds(
+            target_root, build_preflight.enabled_sanitizers(config), log
+        )
+    else:
+        runner_preflight.validate(config, log)
+        unleased = build_preflight.refresh(
+            SCRIPT_ROOT, target_root, args.target, config, bench_dir,
+            args.backend, model, log, include_alternates=False,
+        )
+    if pinned:
+        log("Resuming a pinned run: verifying the recorded build, not rebuilding")
+    blocking = [f"{name} could not be leased" for name in unleased]
+    blocking += build_preflight.build_problems(target_root, config)
+    return blocking
 
 
 def run_single(args: argparse.Namespace, bench_root: Path) -> int:
@@ -1638,12 +1838,154 @@ def run_single(args: argparse.Namespace, bench_root: Path) -> int:
     with BenchmarkLock(backend_root / lock_name):
         bench_dir.mkdir(parents=True, exist_ok=True)
         cells_dir.mkdir(parents=True, exist_ok=True)
+        previous = _recorded_run(bench_dir)
         console_path = bench_dir / "console.log"
-        with console_path.open("a", encoding="utf-8") as console, redirect_stdout(Tee(sys.stdout, console)), redirect_stderr(Tee(sys.stderr, console)):
-            return _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, run_id, conditions)
+        with console_path.open("a", encoding="utf-8") as console, redirect_stdout(Tee(sys.stdout, console)), redirect_stderr(Tee(sys.stderr, console)), _build_suffix(_resolve_build_suffix(args, previous)):
+            return _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, run_id, conditions, previous)
 
 
-def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, run_id, conditions) -> int:
+def _pin_mismatch(previous: dict, identity: dict, source: str) -> str:
+    """Why a resumed run cannot continue into this build, if it cannot.
+
+    A run pins one build generation and one source state. Resuming into a
+    different one keeps the finished cells and adds cells measured on something
+    else, and the totals would average the two — the cross-generation comparison
+    this whole mechanism exists to prevent. Recorded emptiness is not a mismatch:
+    a run from before this was recorded has nothing to contradict.
+    """
+    recorded_identity = previous.get("build_identity")
+    if isinstance(recorded_identity, dict) and recorded_identity and identity \
+            and recorded_identity != identity:
+        return "the target build differs from the one this run pinned"
+    recorded_source = str(previous.get("source_signature") or "")
+    if recorded_source and source and recorded_source != source:
+        return "the target source differs from the state this run pinned"
+    return ""
+
+
+_BENCH_TOKEN_RE = re.compile(r"\+bench-[0-9a-f]+")
+
+
+def _bench_token(name: str) -> str:
+    found = _BENCH_TOKEN_RE.search(name)
+    return found.group(0) if found else ""
+
+
+def _record_isolated_reference(target_root: Path, suffix: str, bench_dir: Path) -> None:
+    """Note, next to the target, that a run depends on an isolated build tree.
+
+    Collection would otherwise infer ownership by scanning one benchmark root,
+    and a run under a different --bench-root would look like nobody's — its
+    build would be collected while it still needed it for replay.
+    """
+    token = _bench_token(suffix)
+    if not token:
+        return
+    directory = target_root / ".audit" / "bench-refs" / token
+    directory.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(str(bench_dir).encode()).hexdigest()[:12]
+    (directory / f"{key}.ref").write_text(f"{bench_dir}\n", encoding="utf-8")
+
+
+def _referenced_tokens(target_root: Path, bench_root: Path, keep: str) -> "set[str] | None":
+    """Isolated build tokens some run still depends on, or None if unknowable.
+
+    Two sources, because neither alone is complete: run records under the
+    benchmark root in use, and markers beside the target that a run under any
+    root leaves behind. A marker whose run directory is gone is itself garbage
+    and is pruned.
+    """
+    referenced = {_bench_token(keep)} if keep else set()
+    for run_json in sorted(bench_root.glob("*/*/run.json")):
+        try:
+            data = json.loads(run_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # An unreadable run record is not permission to delete a build it
+            # may depend on. Collect nothing rather than guess.
+            return None
+        referenced.add(_bench_token(str(data.get("build_suffix") or "")))
+    refs = target_root / ".audit" / "bench-refs"
+    for marker in sorted(refs.glob("*/*.ref")):
+        try:
+            owner = Path(marker.read_text(encoding="utf-8").strip())
+        except OSError:
+            return None
+        if owner.is_dir():
+            referenced.add(marker.parent.name)
+        else:
+            marker.unlink(missing_ok=True)
+    referenced.discard("")
+    return referenced
+
+
+def _collect_isolated_builds(target_root: Path, bench_root: Path, keep: str) -> int:
+    """Remove isolated build trees no benchmark run refers to any more.
+
+    An isolated tree has to outlive its run, because --regenerate replays crashes
+    against the build they were found on, so a referenced tree stays however old
+    it is — including one referenced from a different --bench-root. What is
+    collected is a tree nothing on disk points at: an abandoned run directory, or
+    inputs whose run never recorded them. Alternate configurations built under an
+    isolated suffix share its token and are kept or collected with it.
+
+    Only the +bench- namespace is considered, so the canonical build, a
+    container-suffixed tree and build-<san>-repro are never candidates.
+    """
+    referenced = _referenced_tokens(target_root, bench_root, keep)
+    if referenced is None:
+        return 0
+    removed = 0
+    for tree in sorted(target_root.glob("build-*+bench-*")):
+        token = _bench_token(tree.name)
+        if not tree.is_dir() or not token or token in referenced:
+            continue
+        if build_lease.consumers_active(target_root, tree.name):
+            continue
+        with build_lease.exclusive(target_root, tree.name) as leased:
+            if not leased:
+                continue
+            shutil.rmtree(tree, ignore_errors=True)
+        removed += 1
+    return removed
+
+
+def _settings_mismatch(previous: dict, args: argparse.Namespace, model: str) -> str:
+    """Why a resumed run cannot continue under these settings, if it cannot.
+
+    Cells already on disk were produced under the settings recorded for the run.
+    Changing what defines the experiment and then adding cells would put two
+    different experiments in one median. Replicates, conditions and the
+    finalization budget are deliberately not on this list: raising replicates and
+    resuming a subset of conditions are how a run is legitimately continued, and
+    the finalize budget governs measurement rather than what the agents did.
+    """
+    if not previous:
+        return ""
+    fields = (
+        ("model", model),
+        ("resolved_effort", llm_invoke.default_effort(args.backend)),
+        ("budget_wall", args.budget_wall),
+        ("harness_agents", args.agents),
+        ("target_sha", target_config.detect_rev(SCRIPT_ROOT / "targets" / args.target)),
+    )
+    for name, current in fields:
+        recorded = previous.get(name)
+        if recorded is None or recorded == current:
+            continue
+        return f"{name} was {recorded!r} for this run and is now {current!r}"
+    return ""
+
+
+def _resume_refusal(reason: str, run_id: str) -> str:
+    return (
+        f"{reason}. Cells already recorded for run {run_id} were measured on the "
+        f"state it pinned, and mixing generations would average two different "
+        f"experiments into one result. Start a new run id, or restore the build "
+        f"and source this one pinned."
+    )
+
+
+def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, run_id, conditions, previous=None) -> int:
     model = args.model or llm_invoke.default_model(args.backend)
     llm_invoke.apply_memory_policy(False)
     if not args.regenerate:
@@ -1659,7 +2001,9 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             "finding_confirmation": metrics.FINDING_CONFIRMATION_VERSION,
             "dry_run": args.dry_run,
         }
-        _write_json(bench_dir / "run.json", run_data)
+        # Written once, below, after the pin checks: a refused resume must not
+        # overwrite the pin it was refused for, or the next attempt would find
+        # nothing to contradict and proceed.
         budget = "unlimited" if not args.budget_wall else f"{format_duration(args.budget_wall)} per cell"
         log(f"Benchmark run {run_id}: target={args.target} backend={args.backend} model={model or '?'} replicates={args.replicates} budget={budget}")
         log(f"Conditions: {','.join(conditions)}")
@@ -1669,7 +2013,67 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         log(f"Regenerating run {run_id}: target={args.target} backend={args.backend} (no cells launched)")
     log(f"Output: {bench_dir}")
 
-    preflight_build(args, bench_dir, model)
+    previous = previous or {}
+    target_root = (SCRIPT_ROOT / "targets" / args.target).resolve()
+    build_suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    run_identity: dict = {}
+    run_source = ""
+    # A run that already recorded a generation is being resumed, so from here on
+    # it verifies rather than converges.
+    pinned = bool(previous.get("build_identity"))
+    if not args.dry_run and not args.regenerate:
+        # Everything that can refuse the run happens before convergence. Once we
+        # rebuild, a peer run's evidence is already invalid and a resumed run has
+        # already lost the generation its finished cells were measured on.
+        settings = _settings_mismatch(previous, args, model)
+        if settings:
+            print(f"FATAL: {_resume_refusal(settings, run_id)}", file=sys.stderr)
+            return 1
+        run_source = target_config.vcs_source_signature(target_root)
+        drifted = _pin_mismatch(previous, {}, run_source)
+        if drifted:
+            print(f"FATAL: {_resume_refusal(drifted, run_id)}", file=sys.stderr)
+            return 1
+        conflict = _source_pin_conflict(target_root, args.target, run_source)
+        if conflict:
+            print(f"FATAL: {conflict}", file=sys.stderr)
+            return 1
+
+    blocking = preflight_build(args, bench_dir, model, pinned)
+    if blocking and not args.regenerate:
+        for reason in blocking:
+            print(f"FATAL: {reason}", file=sys.stderr)
+        print(
+            "FATAL: refusing to launch cells against a build this run cannot "
+            "verify or hold", file=sys.stderr,
+        )
+        return 1
+    for reason in blocking:
+        log(f"WARN: regenerating over an unverified build: {reason}")
+
+    # One build generation for the whole run. The preflight above converged it
+    # and holds its lease, so it is captured once, here, and every cell, replay
+    # and pooled check compares against the build the run actually used.
+    # Capturing per cell instead recorded a build that the cell's own startup
+    # could still replace — which is what made finalization refuse valid
+    # evidence even with nothing else running.
+    if not args.regenerate:
+        if not args.dry_run:
+            run_identity = _target_build_identity(target_root, args.target)
+            mismatch = _pin_mismatch(previous, run_identity, "")
+            if mismatch:
+                print(f"FATAL: {_resume_refusal(mismatch, run_id)}", file=sys.stderr)
+                return 1
+            # Carry the pin forward untouched: a resume must not re-pin, or the
+            # checks above could never fire on the attempt after this one.
+            run_identity = previous.get("build_identity") or run_identity
+            run_source = str(previous.get("source_signature") or "") or run_source
+            run_data["build_identity"] = run_identity
+            run_data["source_signature"] = run_source
+            if build_suffix:
+                run_data["build_suffix"] = build_suffix
+                _record_isolated_reference(target_root, build_suffix, bench_dir)
+        _write_json(bench_dir / "run.json", run_data)
 
     done = failed = 0
     provider_unavailable = False
@@ -1720,12 +2124,33 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 experiment = f"bench-{run_id}-{condition}-r{replicate}"
                 log(f"Cell {name} starting: condition={condition} replicate={replicate} agents={1 if condition == 'model-direct' else args.agents or 'default'} model={model or '?'} experiment={experiment}")
                 predicted = cell_dir if condition == "model-direct" else cell_dir / "repo-root" / "output" / f"{args.target}-{experiment}" / args.backend / "results"
-                cell_build_identity = (
-                    {} if args.dry_run else _target_build_identity(
-                        (SCRIPT_ROOT / "targets" / args.target).resolve(),
-                        args.target,
+                if not _build_matches_pin(
+                    run_identity,
+                    (SCRIPT_ROOT / "targets" / args.target).resolve(),
+                    args.target,
+                ):
+                    # Nothing inside the harness can reach here: the lease keeps
+                    # every cooperating rebuild out for the run's whole life. An
+                    # agent that ran a build tool by hand is outside that lease,
+                    # and a cell measured on a different binary than its peers
+                    # is not comparable, so refuse it rather than average it in.
+                    log(
+                        f"WARN: Cell {name}: not started — the target build "
+                        f"changed since the run pinned it; original evidence "
+                        f"was left unchanged"
                     )
-                )
+                    cell_dir.mkdir(parents=True, exist_ok=True)
+                    (cell_dir / ".run-quality").write_text(
+                        "build_drift\n", encoding="utf-8"
+                    )
+                    write_cell(
+                        cell_json, condition, replicate,
+                        f"bench-{run_id}-{condition}-r{replicate}", Path(), 0,
+                        "incomplete", args.agents, build_identity=run_identity,
+                    )
+                    failed += 1
+                    continue
+                cell_build_identity = run_identity
                 write_cell(
                     cell_json, condition, replicate, experiment, predicted, 0,
                     "running", args.agents,
@@ -1735,6 +2160,11 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 # just-started long cell (the trailing harness cell) shows in the
                 # shared dashboard for its whole run, not only after it finishes.
                 update_live_result(bench_root, f"start {name}")
+                source_watch = _SourceWatch(
+                    (SCRIPT_ROOT / "targets" / args.target).resolve(),
+                    args.target, run_source,
+                )
+                source_watch.start()
                 start = time.monotonic()
                 started_at = datetime.now(timezone.utc).isoformat()
                 status = "done"
@@ -1754,11 +2184,29 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 # makes a 3h budget report as ~4h and makes conditions that
                 # produce more to adjudicate look slower at finding things.
                 wall = int(time.monotonic() - start)
+                source_drift = source_watch.stop()
+                if source_drift:
+                    # Keep every artifact — the findings are still findings — but
+                    # take the cell out of the headline comparison: its agents
+                    # read code its peers did not. Never respond by rebuilding,
+                    # which would also invalidate the cells that came before.
+                    changed = ", ".join(source_drift.get("paths", [])[:5]) or "unknown"
+                    log(
+                        f"WARN: Cell {name}: target source changed during the "
+                        f"cell ({changed}); artifacts kept, cell excluded from "
+                        f"the comparison"
+                    )
+                    _write_json(cell_dir / "source-drift.json", source_drift)
+                    (cell_dir / ".run-quality").write_text(
+                        "source_drift\n", encoding="utf-8"
+                    )
                 if (cell_dir / ".backend-unavailable").exists():
                     status = "incomplete"
                     provider_unavailable = True
                 elif rc:
                     status = "failed"
+                elif source_drift:
+                    status = "incomplete"
                 paused = 0
                 housekeeping = 0
                 try:
@@ -1775,7 +2223,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 replay_build_ok = True
                 if (
                     not args.dry_run
-                    and condition == "model-direct"
                     and results.is_dir()
                     and (results / "crashes").is_dir()
                 ):
@@ -1967,7 +2414,13 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 if (
                     finalizers_ok
                     and cell.get("status") == "incomplete"
-                    and cell.get("run_quality") != "provider_limited"
+                    # A provider-limited cell never ran its budget; a drifted one
+                    # read or executed something its peers did not. Neither
+                    # becomes comparable later, so regeneration must not promote
+                    # them back into the totals.
+                    and cell.get("run_quality") not in (
+                        "provider_limited", "source_drift", "build_drift",
+                    )
                     and not (cell_dir / ".backend-unavailable").is_file()
                 ):
                     cell["status"] = "done"
@@ -1998,6 +2451,10 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             )
     print()
     log(f"Ledger: {ledger}")
+    if not args.dry_run:
+        collected = _collect_isolated_builds(target_root, bench_root, build_suffix)
+        if collected:
+            log(f"Collected {collected} isolated build tree(s) no run refers to")
     log("Benchmark complete.")
     return 1 if failed else 0
 

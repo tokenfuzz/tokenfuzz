@@ -382,6 +382,7 @@ def main(argv: list[str]) -> int:
         return 1
     mode, args = argv[0], argv[1:]
     sanitizer.warn_if_disabled("asan", CONFIG)
+    sanitizer.hold_build("asan", CONFIG.target_root if CONFIG else "")
     normal_timeout = int(BASE_ENV.get("ASAN_TIMEOUT", "15"))
     if mode == "browser": return run_browser(options("full"), normal_timeout, args)
     if mode == "browser-minimal": return run_browser(options("minimal"), normal_timeout, args)

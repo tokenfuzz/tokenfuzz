@@ -352,7 +352,63 @@ bin/benchmark --target <target> --agents 5
 
 # Start a fresh backend ledger. The previous one is archived.
 bin/benchmark --reset
+
+# Build into a private tree keyed by build inputs instead of sharing the
+# target's canonical build. For recipe or configuration comparisons.
+bin/benchmark --target <target> --isolate-build
 ```
+
+## Running several backends at once
+
+Backends can be benchmarked against one target concurrently. They share the
+target's checkout and its sanitizer build, which is what makes the comparison
+fair — every cell of every run executes the same bytes.
+
+A run pins one build generation:
+
+1. The run's preflight converges `build-asan` once, then holds a shared lease on
+   it for the whole run, including replay, pooled triage and metrics.
+2. A peer run whose build inputs match takes its own shared lease and uses the
+   same build. Nothing has to be duplicated.
+3. While any run holds the build, no `bin/setup-target`, `bin/build-configs` or
+   audit preflight will replace it. They say so and leave it in place.
+4. Cells verify the pinned build and never build. A cell that finds it missing,
+   stale, or different fails loudly rather than rebuilding, because rebuilding
+   would invalidate the cells that already ran.
+
+Two things end up excluded from the headline comparison instead of silently
+averaged in. Their artifacts are always kept:
+
+- `source_drift` — the target's tracked source changed while the cell ran, so
+  its agents read code the other cells did not.
+- `build_drift` — the build changed since the run pinned it, which only a build
+  command run outside the harness can cause.
+
+Each run also pins the *source state* it is auditing, at the checkout rather
+than at the build directory. Start a run while another has pinned a different
+state and it refuses immediately: sharing the live build would measure a binary
+the current source did not produce, and rebuilding would corrupt that run. Use a
+separate checkout, or wait. Source pinning and drift detection read the VCS, so
+they cover git and Mercurial checkouts; a target under neither is not watched.
+
+A resumed `--run-id` is held to the same rule and never rebuilds: it verifies the
+build it pinned rather than converging one, and refuses if that build, the source
+state, or an experiment-defining setting has moved — model, reasoning effort,
+`--budget-wall`, `--agents`, or the target revision. Raising `--replicates` and
+resuming a subset of `--conditions` remain the supported ways to continue a run,
+because neither changes what the finished cells measured.
+
+`--isolate-build` gives a run its own `build-asan+bench-<input-hash>/` tree,
+keyed by build inputs so runs that diverge identically still share one tree, and
+composed with a container's suffix when there is one. It is for comparing build
+recipes or configurations over the same source — it cannot isolate a different
+source revision, because both runs still read this one checkout, and the source
+pin above still applies.
+
+Isolated trees outlive their run, because `--regenerate` replays crashes against
+the build they were found on. A finished run collects only the isolated trees no
+run on disk still refers to; the canonical build, container-suffixed trees and
+`build-asan-repro` are never candidates.
 
 ## Resuming an interrupted run
 

@@ -41,6 +41,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-update", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--build", action="store_true")
+    parser.add_argument(
+        "--no-alternates", action="store_true",
+        help="build only the canonical sanitizer trees, skipping cached "
+             "alternate ASan configurations",
+    )
     parser.add_argument("--no-llm-config", action="store_true")
     return parser.parse_args(argv)
 
@@ -404,6 +409,13 @@ class Setup:
                         if result.status == "fresh":
                             candidate.unlink(missing_ok=True)
                             continue
+                        if result.status == "held":
+                            log(
+                                f"bootstrap: {sanitizer_name} build not replaced "
+                                f"({result.reason}); the existing tree stays in "
+                                f"place for the run that is using it"
+                            )
+                            continue
                         log(
                             f"bootstrap: {sanitizer_name} clean build failed "
                             f"({result.reason}; see {result.log_path})"
@@ -471,7 +483,10 @@ class Setup:
         # Keep build-asan as the regular control, then materialize cached ASan
         # alternates. Alternate failure is intentionally additive/fail-open.
         build_configs_command = SCRIPT_ROOT / "bin" / "build-configs"
-        if self.args.build and config.build_configs and os.access(build_configs_command, os.X_OK):
+        if (
+            self.args.build and not self.args.no_alternates
+            and config.build_configs and os.access(build_configs_command, os.X_OK)
+        ):
             candidates = self.backend_candidates()
             command = [
                 str(build_configs_command),

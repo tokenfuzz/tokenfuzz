@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import os
 import subprocess
+import shutil
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ SCRIPT_ROOT = Path(os.environ.get("SCRIPT_ROOT") or Path(__file__).resolve().par
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import build_config
+import build_lease
 import target_config
 from timeout import run_timeout
 
@@ -165,7 +167,17 @@ def materialize(
     recipe = build_config.recipe_path(root, config)
     tree = build_config.build_dir(root, config, base_suffix=base_suffix)
     lock = root / ".audit" / "configs" / f".{config.config_id}.lock"
-    with build_lock(lock):
+    # An alternate tree is replaced in place like the primary, so a run that is
+    # executing it must not have it rebuilt underneath. Refuse fast when one is,
+    # and again if the lease never arrives, rather than waiting out the timeout
+    # and then replacing it anyway.
+    if build_lease.consumers_active(root, tree.name):
+        log(f"{config.name}: {tree.name} is in use by another run; left in place")
+        return False
+    with build_lock(lock), build_lease.exclusive(root, tree.name) as leased:
+        if not leased:
+            log(f"{config.name}: build lease unavailable for {tree.name}; left in place")
+            return False
         input_key = configuration_input_key(root, config, base_suffix)
         backend = (
             os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
@@ -240,6 +252,36 @@ def materialize(
         return True
 
 
+def prune_orphan_trees(root: Path, configs: list, base_suffix: str) -> int:
+    """Remove alternate build trees whose configuration is no longer declared.
+
+    Live trees are bounded by the number of declared configurations; what
+    accumulates is a tree whose flags were edited, since its identity changed
+    with them. Only that exact namespace is considered — never the canonical
+    build, never another base suffix, never build-<san>-repro (bin/export-repro
+    owns that one), and never a tree a run is holding.
+    """
+    keep = {
+        build_config.build_dir(root, item, base_suffix=base_suffix).name
+        for item in configs
+    }
+    removed = 0
+    for tree in sorted(root.glob(f"build-asan{base_suffix}+cfg-*")):
+        if not tree.is_dir() or tree.name in keep:
+            continue
+        if build_lease.consumers_active(root, tree.name):
+            log(f"prune: {tree.name} is in use by another run; left in place")
+            continue
+        with build_lease.exclusive(root, tree.name) as leased:
+            if not leased:
+                log(f"prune: build lease unavailable for {tree.name}; left in place")
+                continue
+            shutil.rmtree(tree, ignore_errors=True)
+        log(f"prune: removed orphaned {tree.name}")
+        removed += 1
+    return removed
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default="", help="target slug under targets/ and output/")
@@ -301,6 +343,8 @@ def main(argv: list[str] | None = None) -> int:
             root, item, base_suffix=base_suffix, force=args.force,
             timeout_seconds=args.timeout_seconds,
         )
+    if args.all:
+        prune_orphan_trees(root, config.build_configs, base_suffix)
     # Callers treat this as additive/fail-open, but a direct invocation must
     # still report incomplete alternate coverage visibly.
     return 0 if succeeded == len(selected) else 1

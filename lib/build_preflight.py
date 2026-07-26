@@ -6,6 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import build_lease
 import target_config
 from timeout import run_timeout
 
@@ -44,6 +45,62 @@ def _refresh_alternates(
         )
 
 
+def enabled_sanitizers(config) -> list[str]:
+    """asan plus every enabled native sanitizer — the trees a run reads."""
+    enabled = config.sanitizers_enabled if isinstance(config.sanitizers_enabled, list) else []
+    return ["asan", *(name for name in enabled if name in _NATIVE_SANITIZERS)]
+
+
+def build_problems(target_root: Path, config) -> list[str]:
+    """Why the present sanitizer builds are not usable as they stand, if not.
+
+    The check a verify-only consumer makes. A build it may not replace must
+    still be the one it was promised: present, matching the source it is about
+    to read, and carrying the artifacts the target declares. Returns an empty
+    list when there is nothing to build or nothing wrong.
+    """
+    if (str(config.is_browser).lower() in {"1", "true"}
+            or config.sanitizers_explicitly_disabled):
+        return []
+    problems: list[str] = []
+    for name in enabled_sanitizers(config):
+        state = target_config.build_freshness(target_root, name)
+        if state == "skip":
+            continue
+        if state != "fresh":
+            problems.append(f"{target_config.build_dir_name(name)} is {state}")
+            continue
+        for kind, raw in (
+            ("bin", config.sanitizer_bin(name)), ("lib", config.sanitizer_lib(name)),
+        ):
+            if raw and not Path(config.resolve_path(raw)).is_file():
+                problems.append(f"{name}_{kind} is missing ({raw})")
+    return problems
+
+
+def hold_builds(target_root: Path, sanitizers: list[str], logger) -> list[str]:
+    """Keep the builds this run will read from being replaced underneath it.
+
+    Held for the life of the process, because that is the span the guarantee
+    covers: evidence a run records must stay replayable against the binary it
+    was measured on, across every session, replay and finalization step. A peer
+    run that wants the same inputs takes its own shared lease and shares the
+    build; one that wants different inputs is told rather than silently
+    rebuilding over this one.
+    """
+    unleased: list[str] = []
+    for name in sanitizers:
+        directory = target_config.build_dir_name(name)
+        # Only a tree that exists can be held, and a tree that does not exist
+        # has nothing to protect. Asking about existence rather than freshness
+        # also keeps this off the freshness path, which shells out to the VCS.
+        if not (target_root / directory).is_dir():
+            continue
+        if not build_lease.hold_shared(target_root, directory, logger=logger):
+            unleased.append(directory)
+    return unleased
+
+
 def refresh(
     root: Path,
     target_root: Path,
@@ -55,19 +112,43 @@ def refresh(
     logger,
     *,
     include_alternates: bool = True,
-) -> None:
-    """Rebuild enabled native sanitizer trees that are missing or stale.
+) -> list[str]:
+    """Rebuild enabled native sanitizer trees that are missing or stale, then
+    hold them for the rest of this run.
 
     Build failure is visible but never aborts the caller. Targets outside the
     harness's ``targets/`` tree are not passed to setup-target because its slug
     lookup would resolve a different path.
+
+    Returns the build directories it could not lease — empty when every existing
+    tree is held. An audit continues regardless (the warning is on the record);
+    a benchmark, whose whole result depends on the build not moving, refuses.
     """
     if str(config.is_browser).lower() in {"1", "true"} or config.sanitizers_explicitly_disabled:
-        return
-    enabled = config.sanitizers_enabled if isinstance(config.sanitizers_enabled, list) else []
-    sanitizers = [
-        "asan", *(name for name in enabled if name in _NATIVE_SANITIZERS)
-    ]
+        return []
+    sanitizers = enabled_sanitizers(config)
+    try:
+        _converge(
+            root, target_root, target_slug, config, log_dir, backend, model,
+            logger, sanitizers, include_alternates,
+        )
+    finally:
+        unleased = hold_builds(target_root, sanitizers, logger)
+    return unleased
+
+
+def _converge(
+    root: Path,
+    target_root: Path,
+    target_slug: str,
+    config,
+    log_dir: Path,
+    backend: str,
+    model: str,
+    logger,
+    sanitizers: list[str],
+    include_alternates: bool,
+) -> None:
     try:
         before = {
             name: target_config.build_freshness(target_root, name)
@@ -103,12 +184,18 @@ def refresh(
         f"Sanitizer build stale/missing ({','.join(pending)}); "
         "running bin/setup-target --build (fail-open)"
     )
+    command = [str(root / "bin" / "setup-target"), target_slug, "--build"]
+    if not include_alternates:
+        # setup-target materializes every declared alternate configuration of
+        # its own accord. Left on, a caller that asked for the primary build
+        # only — a benchmark — would get a full set of alternate trees too, and
+        # under an isolated suffix a whole second set of them.
+        command.append("--no-alternates")
     try:
         with build_log.open("ab") as output:
             subprocess.run(
-                [str(root / "bin" / "setup-target"), target_slug, "--build"],
-                env=environment, stdout=output, stderr=subprocess.STDOUT,
-                check=False,
+                command, env=environment, stdout=output,
+                stderr=subprocess.STDOUT, check=False,
             )
     except OSError as exc:
         logger(f"WARN: sanitizer build preflight could not run; continuing: {exc}")

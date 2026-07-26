@@ -1560,14 +1560,26 @@ def _max_dry_sessions() -> int:
 
 
 def preflight_build(runtime: Runtime) -> None:
-    build_preflight.refresh(
-        runtime.root, runtime.target_root, runtime.target_slug, runtime.config,
-        runtime.logs, runtime.backend, runtime.model,
-        lambda message: index_log(runtime, message),
-        include_alternates=(
-            os.environ.get("_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD") != "1"
-        ),
-    )
+    if os.environ.get("_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD") == "1":
+        # A benchmark converges one build for the whole run and holds its lease.
+        # A cell that rebuilt would replace the generation its own earlier cells'
+        # evidence was measured against, so a cell verifies and never builds. An
+        # unusable pinned build is a failed cell, not a repair job: a cell run
+        # against the wrong binary is not a measurement, and continuing would
+        # launder it into the comparison.
+        problems = build_preflight.build_problems(
+            runtime.target_root, runtime.config
+        )
+        if problems:
+            raise RuntimeError(
+                "pinned benchmark build is not usable: " + "; ".join(problems)
+            )
+    else:
+        build_preflight.refresh(
+            runtime.root, runtime.target_root, runtime.target_slug, runtime.config,
+            runtime.logs, runtime.backend, runtime.model,
+            lambda message: index_log(runtime, message),
+        )
     if runtime.config.is_browser not in ("1", "true", "True"):
         return
     canary_dir = runtime.results / ".preflight"

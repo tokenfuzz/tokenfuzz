@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import os
 import shutil
 import subprocess
@@ -13,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import build_lease
 import target_config
 
 
@@ -21,17 +20,6 @@ class MaterializeResult:
     status: str
     log_path: Path | None = None
     reason: str = ""
-
-
-@contextlib.contextmanager
-def _build_lock(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _remove_path(path: Path) -> None:
@@ -59,15 +47,36 @@ def materialize(
     tree aside while rebuilding and restore it on every failure. Candidate
     recipes are installed only after their output passes verification, then
     the build is stamped against the installed canonical bytes.
+
+    Because the tree is replaced in place, the window in which it is absent or
+    half-written belongs to this function alone: it takes the exclusive build
+    lease for the whole build, and reports "held" without touching anything
+    when a live run is executing that tree instead.
     """
     target_root = Path(target_root)
     suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
     build_dir = target_root / f"build-{sanitizer}{suffix}"
     audit_dir = target_root / ".audit"
-    lock = audit_dir / "build-locks" / f"{build_dir.name}.lock"
     log_path = audit_dir / f"build-materialize-{sanitizer}.log"
 
-    with _build_lock(lock):
+    # A peer builder is worth waiting for — its result may be the build we
+    # wanted. A live consumer is not: rebuilding underneath a run swaps the
+    # binary its recorded evidence was measured against, so the caller decides
+    # what to do instead (keep the existing tree, isolate, or refuse).
+    if not build_lease.writer_pending(target_root, build_dir.name) and \
+            build_lease.consumers_active(target_root, build_dir.name):
+        return MaterializeResult(
+            "held", None, f"another run is using {build_dir.name}"
+        )
+    with build_lease.exclusive(target_root, build_dir.name) as acquired:
+        if not acquired:
+            # A lease we could not take is a busy tree, not a broken recipe:
+            # report it as held so callers keep the existing build instead of
+            # entering recipe repair.
+            return MaterializeResult(
+                "held", None,
+                f"timed out waiting for the build lease on {build_dir.name}",
+            )
         if not force and target_config.build_freshness(
             target_root, sanitizer, recipe_path=canonical_recipe
         ) == "fresh":

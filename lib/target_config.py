@@ -1455,49 +1455,335 @@ def _detect_java_runner() -> tuple[str, list[str]]:
 # build elsewhere and report "skip".
 _NATIVE_BUILD_SYSTEMS = {"cmake", "autotools", "meson"}
 # VCS metadata and generated caches — never source whose change should force a
-# rebuild. Pruned from the mtime walk so a fresh .audit log or __pycache__ entry
-# can't masquerade as a source edit. (The sanitizer build trees themselves are
-# pruned separately, by exact name — see san_build_dirs in build_freshness.)
+# rebuild. Pruned from the signature so a fresh .audit log or __pycache__ entry
+# can't masquerade as a source edit. Still required on top of a VCS answer:
+# .audit/ is untracked-but-not-ignored in a typical target, and it is rewritten
+# by every build, so an unpruned VCS listing would stale each build it produced.
 _FRESHNESS_PRUNE_DIRS = {".git", ".hg", ".audit", "__pycache__", "node_modules"}
 _SANITIZER_BUILD_DIR_RE = re.compile(
     r"^build-(?:asan|ubsan|msan|tsan)(?:[-+].*)?$"
 )
+_FRESHNESS_VCS_TIMEOUT_SECONDS = 60
+# A plain `git status` refreshes and rewrites .git/index under index.lock.
+# Audit agents run git in the same checkout concurrently, so a probe that took
+# that lock would break their commands and theirs ours. Ask for a read-only
+# answer instead.
+_GIT_READ_ONLY_ENV = {"GIT_OPTIONAL_LOCKS": "0"}
+# Index of the path field in a `--porcelain=v2` record, by record type.
+_GIT_PATH_FIELD = {"1": 8, "2": 9, "u": 10}
+
+
+def build_dir_name(san: str = "asan", *, suffix: "str | None" = None) -> str:
+    """Directory name of a sanitizer build, honouring AUDIT_BUILD_SUFFIX.
+
+    Also the key the build lease is taken on, so a suffixed or alternate tree is
+    locked independently of the canonical one.
+    """
+    if suffix is None:
+        suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    return f"build-{san}{suffix}"
 
 
 def _build_dir_for(target_root: Path, san: str) -> Path:
-    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
-    return Path(target_root) / f"build-{san}{suffix}"
+    return Path(target_root) / build_dir_name(san)
+
+
+def _fold_signature(kind: str, entries: list[str]) -> str:
+    return hashlib.sha1(
+        "\n".join([f"schema=2-{kind}", *sorted(entries)]).encode("utf-8", "surrogatepass")
+    ).hexdigest()
+
+
+# One stable value meaning "the VCS could not be read". It is an admission of
+# ignorance, not an identity: build_write_stamp refuses to record it and
+# build_freshness refuses to match it, because a stamp written while the VCS was
+# down would otherwise keep matching afterwards and report a genuinely edited
+# tree as fresh — the one direction freshness must never take.
+_VCS_UNAVAILABLE_SIGNATURE = hashlib.sha1(b"schema=2-vcs-unavailable").hexdigest()
+
+
+def _freshness_pruned(name: str) -> bool:
+    return (
+        name in _FRESHNESS_PRUNE_DIRS
+        or bool(_SANITIZER_BUILD_DIR_RE.fullmatch(name))
+    )
+
+
+def _path_is_pruned(relative: str) -> bool:
+    """Whether a VCS-reported path sits under a pruned directory.
+
+    Only parent components are consulted: a *file* that happens to be named
+    build-asan is source, and dropping it would err toward "fresh".
+    """
+    return any(_freshness_pruned(part) for part in relative.split("/")[:-1])
+
+
+def _mode_tag(path: Path) -> str:
+    """The one file mode bit a build can depend on: is it executable."""
+    try:
+        return "x" if os.lstat(path).st_mode & 0o111 else "-"
+    except OSError:
+        return "absent"
+
+
+def _content_digest(path: Path) -> str:
+    """Identity of one path's bytes: content, link target, or absence.
+
+    A directory here is a submodule worktree, and its own signature is what
+    answers the question — the parent's status only says "something changed",
+    which is the same string for every possible change inside it.
+    """
+    try:
+        if path.is_symlink():
+            return "link:" + hashlib.sha1(
+                os.readlink(path).encode("utf-8", "surrogatepass")
+            ).hexdigest()
+        if path.is_dir():
+            return "sub:" + _source_state_signature(path)
+        digest = hashlib.sha1()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return "absent"
+
+
+def _vcs_status_records(command: list[str], environment: dict) -> "list[str] | None":
+    """NUL-delimited status records, or None if the VCS could not answer.
+
+    Retried once: a transient failure would otherwise change how identity is
+    computed, and a changed *scheme* looks exactly like changed source.
+    """
+    for _ in (1, 2):
+        try:
+            completed = subprocess.run(
+                command, capture_output=True,
+                timeout=_FRESHNESS_VCS_TIMEOUT_SECONDS,
+                env=os.environ | environment,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if completed.returncode == 0:
+            text = completed.stdout.decode("utf-8", "surrogateescape")
+            return [record for record in text.split("\0") if record]
+    return None
+
+
+def _git_status_records(root: Path) -> "list[str] | None":
+    return _vcs_status_records(
+        [
+            "git", "-C", str(root), "status", "--porcelain=v2", "-z",
+            "--untracked-files=all",
+        ],
+        _GIT_READ_ONLY_ENV,
+    )
+
+
+def _hg_status_records(root: Path) -> "list[str] | None":
+    # HGPLAIN pins the output format against user config and extensions.
+    return _vcs_status_records(
+        ["hg", "--cwd", str(root), "status", "-0"], {"HGPLAIN": "1"},
+    )
+
+
+def _iter_status_paths(records: "list[str]") -> "list[tuple[str, str]] | None":
+    """Parse `--porcelain=v2 -z` records into (metadata, path) pairs.
+
+    One parser for both the freshness signature and drift diagnostics. Returns
+    None on any layout it does not recognise, so callers fall back rather than
+    guess at a half-understood record.
+    """
+    pairs: list[tuple[str, str]] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        kind = record[:1]
+        if kind == "?":
+            metadata, _, path = record.partition(" ")
+        elif kind in _GIT_PATH_FIELD:
+            fields = record.split(" ", _GIT_PATH_FIELD[kind])
+            if len(fields) <= _GIT_PATH_FIELD[kind]:
+                return None
+            path = fields[-1]
+            metadata = " ".join(fields[:-1])
+            if kind == "2":
+                # `-z` puts a rename's origin in its own NUL-delimited field.
+                if index >= len(records):
+                    return None
+                metadata = f"{metadata} orig={records[index]}"
+                index += 1
+        else:
+            return None
+        if path and not _path_is_pruned(path):
+            pairs.append((metadata, path))
+    return pairs
+
+
+def source_changed_paths(target_root: "str | os.PathLike", limit: int = 20) -> list[str]:
+    """Paths the VCS currently reports as changed, for drift diagnostics.
+
+    Empty for a clean checkout, and empty rather than wrong when there is no
+    VCS to ask.
+    """
+    root = Path(target_root)
+    kind = detect_repo_type(root)
+    if kind == "git":
+        records = _git_status_records(root)
+        pairs = _iter_status_paths(records) if records is not None else None
+        paths = [path for _, path in pairs] if pairs else []
+    elif kind == "hg":
+        records = _hg_status_records(root)
+        paths = _hg_status_paths(records) if records is not None else []
+    else:
+        return []
+    return sorted(paths)[:limit]
+
+
+def source_signature(target_root: "str | os.PathLike") -> str:
+    """Content identity of a target's source tree (see _source_state_signature)."""
+    return _source_state_signature(Path(target_root))
+
+
+def _git_source_entries(root: Path) -> "list[str] | None":
+    """One entry per path git reports as changed, or None if git cannot answer.
+
+    Ignored paths are absent from `git status` by construction, and that is the
+    point: output a target writes into its own tree during a test run is not
+    source and must not stale a build. Everything git does report is
+    content-hashed, so an edit that is later reverted returns the signature to
+    its original value. Renames carry their origin, and a dirty submodule
+    carries the record's own oids and submodule flags.
+    """
+    # An empty repository has no HEAD. Its files are all untracked, so status
+    # still describes them completely; requiring a revision here would report
+    # "unknown" forever and let real edits pass as unchanged.
+    rev = detect_rev(root)
+    records = _git_status_records(root)
+    if records is None:
+        return None
+    pairs = _iter_status_paths(records)
+    if pairs is None:
+        return None  # unrecognised layout: fall back, never guess
+    # Only the final working-tree state: path, executable bit, content. Status
+    # letters and index oids are deliberately excluded — staging a change alters
+    # them without altering the bytes a build compiles, and rebuilding for that
+    # is pure waste.
+    return [
+        f"rev\0{rev}",
+        *(
+            f"{path}\0{_mode_tag(root / path)}\0{_content_digest(root / path)}"
+            for _, path in pairs
+        ),
+    ]
+
+
+def _hg_status_paths(records: list[str]) -> list[str]:
+    """Paths from `hg status -0` records, which are "<code> <path>"."""
+    paths = []
+    for record in records:
+        _, separator, path = record.partition(" ")
+        if separator and path and not _path_is_pruned(path):
+            paths.append(path)
+    return paths
+
+
+def _hg_source_entries(root: Path) -> "list[str] | None":
+    """One entry per path Mercurial reports as changed, or None if it cannot say.
+
+    Same contract as the git path: ignored files are absent from `hg status` by
+    construction, and what it does report is content-hashed. Mercurial is what
+    browser-sized checkouts use, and status there answers in about a second —
+    hashing the tree itself would not.
+    """
+    records = _hg_status_records(root)
+    if records is None:
+        return None
+    return [
+        f"rev\0{detect_rev(root)}",
+        *(
+            f"{path}\0{_mode_tag(root / path)}\0{_content_digest(root / path)}"
+            for path in _hg_status_paths(records)
+        ),
+    ]
+
+
+def _vcs_source_entries(root: Path) -> "tuple[str, list[str] | None] | None":
+    """(vcs kind, entries) for a tree under version control, else None.
+
+    Entries are None when the VCS owns the tree but could not answer — a
+    different situation from having no VCS at all, and the callers treat them
+    differently.
+    """
+    kind = detect_repo_type(root)
+    if kind == "git":
+        return "git", _git_source_entries(root)
+    if kind == "hg":
+        return "hg", _hg_source_entries(root)
+    return None
+
+
+def _walk_source_entries(root: Path) -> list[str]:
+    """Content identity of every non-pruned path, for a target with no VCS.
+
+    Without VCS metadata nothing distinguishes a generated file from a source
+    file, so everything counts and a target that writes into its own tree keeps
+    rebuilding. Making that target a git checkout is the fix.
+    """
+    entries: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if not _freshness_pruned(name)]
+        for name in list(dirnames):
+            # os.walk lists a symlinked directory here and never descends it,
+            # so its target would go unhashed. Account for the link itself.
+            if (Path(dirpath) / name).is_symlink():
+                dirnames.remove(name)
+                filenames.append(name)
+        for name in filenames:
+            path = Path(dirpath) / name
+            entries.append(f"{os.path.relpath(path, root)}\0{_content_digest(path)}")
+    return entries
 
 
 def _source_state_signature(root: Path) -> str:
-    """Hash the (relative path, mtime) of every source file under root.
+    """Content identity of the source a build would compile.
 
-    Compared across a build, a change in this signature flags ANY source-tree
-    edit — modification or addition (an mtime/path appears), AND deletion or
-    rename (a path disappears), which a bare max-mtime check misses because no
-    remaining file is newer. Prunes VCS/cache dirs and only the canonical
-    sanitizer build trees by exact name, so a sibling build compiled later (or
-    this san's own tree) is excluded, while a source-support dir like build-aux/
-    is still hashed. Errs toward "changed": any touch flips it (a harmless
-    rebuild), but nothing real slips through as unchanged."""
-    entries: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _FRESHNESS_PRUNE_DIRS
-            and not _SANITIZER_BUILD_DIR_RE.fullmatch(d)
-        ]
-        for fn in filenames:
-            fp = Path(dirpath) / fn
-            try:
-                mt = fp.stat().st_mtime
-            except OSError:
-                continue  # races/broken symlinks: not a staleness signal
-            entries.append(f"{os.path.relpath(fp, root)}\0{mt:.3f}")
-    entries.sort()
-    return hashlib.sha1(
-        "\n".join(entries).encode("utf-8", "surrogatepass")
-    ).hexdigest()
+    Prefers what the VCS calls source — tracked state plus untracked-but-not-
+    ignored paths, content-hashed. That makes the signature immune to the two
+    false-staleness classes a path+mtime walk cannot tell apart: output a target
+    writes into its own tree during a test run, and an edit that is applied and
+    then reverted. Both used to force a rebuild, and on a shared checkout a
+    rebuild replaces the binary a concurrent run is auditing.
+
+    A tree with no VCS is hashed path by path instead. A checkout whose VCS
+    cannot be read reports one constant "unknown" value rather than silently
+    switching to that walk: a changed *scheme* is indistinguishable from changed
+    source, which is enough to force a rebuild or fail a cell. Unknown is not an
+    identity — it is never stamped and never matches — so it reads as stale
+    until the VCS answers again.
+
+    The schema tag makes a change of backend or of this format stale every
+    existing stamp on purpose.
+    """
+    found = _vcs_source_entries(root)
+    if found is None:
+        return _fold_signature("walk", _walk_source_entries(root))
+    kind, entries = found
+    return _VCS_UNAVAILABLE_SIGNATURE if entries is None else _fold_signature(kind, entries)
+
+
+def vcs_source_signature(target_root: "str | os.PathLike") -> str:
+    """Content identity from the VCS alone, or "" when there is no cheap answer.
+
+    For repeated sampling while a run is in flight, where hashing a whole
+    checkout — gigabytes, for a browser target — is not affordable, and where
+    "cannot tell" must never be reported as "changed".
+    """
+    found = _vcs_source_entries(Path(target_root))
+    if found is None or found[1] is None:
+        return ""
+    return _fold_signature(found[0], found[1])
 
 
 def _primary_build_recipe(root: Path, san: str) -> Path:
@@ -1531,12 +1817,61 @@ def build_write_stamp(
         return False
     rev = detect_rev(root) or ""
     sig = _source_state_signature(root)
+    if sig == _VCS_UNAVAILABLE_SIGNATURE:
+        # Record no identity rather than a false one. A stamp saying "unknown"
+        # would keep matching the next unknown answer, and a tree edited while
+        # the VCS stayed down would read as fresh — auditing the wrong binary.
+        # An empty signature line reads as stale until a real one is written.
+        sig = ""
     recipe = Path(recipe_path) if recipe_path is not None else \
         _primary_build_recipe(root, san)
     recipe_digest = _build_recipe_digest(recipe)
     (build_dir / ".audit-build-stamp").write_text(
         f"{rev}\n{sig}\n{recipe_digest}\n", encoding="utf-8")
     return True
+
+
+def build_stamp_fields(
+    target_root: "str | os.PathLike", san: str = "asan",
+) -> "tuple[str, str, str] | None":
+    """(rev, source signature, recipe digest) recorded for build-<san>.
+
+    None when there is no stamp to read. Lets a caller ask *why* a build is
+    stale — moved source or a changed recipe — which are different problems with
+    different answers.
+    """
+    stamp = _build_dir_for(Path(target_root), san) / ".audit-build-stamp"
+    try:
+        lines = stamp.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    if not lines:
+        return None
+    return (
+        lines[0] if lines else "",
+        lines[1] if len(lines) >= 2 else "",
+        lines[2] if len(lines) >= 3 else "",
+    )
+
+
+def build_input_key(
+    target_root: "str | os.PathLike",
+    san: str = "asan",
+    *,
+    recipe_path: "str | os.PathLike | None" = None,
+) -> str:
+    """Short identity of everything a build is made from.
+
+    Names an isolated build directory, so two runs that diverge from the shared
+    tree in the same way share one tree instead of each minting its own. Keyed on
+    the inputs themselves — not on who asked — because a model or run id would
+    duplicate identical builds, which is where build explosion starts.
+    """
+    root = Path(target_root)
+    recipe = Path(recipe_path) if recipe_path is not None else \
+        _primary_build_recipe(root, san)
+    payload = f"{_source_state_signature(root)}\n{_build_recipe_digest(recipe)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
 
 
 def build_freshness(
@@ -1591,7 +1926,10 @@ def build_freshness(
     # remains authoritative.
     if stored_recipe_digest and stored_recipe_digest != current_recipe_digest:
         return "stale"
-    return "fresh" if _source_state_signature(root) == stored_sig else "stale"
+    current_sig = _source_state_signature(root)
+    if current_sig == _VCS_UNAVAILABLE_SIGNATURE:
+        return "stale"  # cannot tell is not the same as unchanged
+    return "fresh" if current_sig == stored_sig else "stale"
 
 
 def language_runner_defaults(build_system: str) -> dict:

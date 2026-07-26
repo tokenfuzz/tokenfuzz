@@ -174,6 +174,7 @@ def run_standard(name: str, argv: Sequence[str], config=None) -> int:
         return 1
     runner = SanitizerRunner(name, config)
     sanitizer.warn_if_disabled(name, config)
+    sanitizer.hold_build(name, config.target_root if config else "")
     mode = argv[0]
     timeouts = {
         "generic": int(os.environ.get(f"{name.upper()}_TIMEOUT", "15")),

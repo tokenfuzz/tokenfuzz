@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Mapping
 
+import build_lease
+
 LIB_DIR = Path(__file__).resolve().parent
 OPTIONS_FILE = LIB_DIR / "sanitizer_options.conf"
 SYMBOLIZER = LIB_DIR / "clusterfuzz_symbolizer.py"
@@ -29,6 +31,25 @@ def build_dir(name: str, target_root: str = "", env: Mapping[str, str] | None = 
     environment = os.environ if env is None else env
     root = target_root or environment.get("TARGET_ROOT", "")
     return Path(root) / f"build-{name}{environment.get('AUDIT_BUILD_SUFFIX', '')}"
+
+
+def hold_build(name: str, target_root: str = "", env: Mapping[str, str] | None = None) -> None:
+    """Keep the tree this runner is about to execute from being replaced.
+
+    A build is rewritten in place, so between resolving a binary and finishing
+    with it the tree can otherwise vanish — the runner then reports a load
+    failure, or worse a clean run, for a build that was merely mid-rebuild. The
+    lease is held until this process exits, which is exactly the span of one
+    execution. It binds cooperating rebuilders only: an agent invoking a build
+    tool by hand is outside it.
+    """
+    tree = build_dir(name, target_root, env)
+    if not tree.is_dir():
+        return
+    build_lease.hold_shared(
+        tree.parent, tree.name,
+        logger=lambda message: print(f"[sanitizer] {message}", file=sys.stderr),
+    )
 
 
 def prepare_runtime_env(selected: str, env: Mapping[str, str] | None = None) -> dict[str, str]:
