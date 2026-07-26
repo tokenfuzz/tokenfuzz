@@ -17,29 +17,152 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 from llm_decide import llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
-from timeout import run_timeout  # noqa: E402
+from timeout import capture_timeout  # noqa: E402
 import target_config as tc  # noqa: E402
 
 _MARKER = "# native CLI args set by bin/suggest-runner"
 _PLACEHOLDERS = {"TESTCASE", "NULL_DEVICE"}
+# A build tree holds more instrumented programs than the model needs to
+# choose between, and each one costs a help probe. The manifest-declared
+# CLIs lead the list, so the bound only truncates the long tail.
+_MAX_CANDIDATES = 8
+_HELP_IN_PROMPT = 2400
+_HELP_TIMEOUT_SECONDS = 3
+_MAX_SUGGESTIONS = 2
+
+
+def run_captured(
+    command: list[str], seconds: int, cwd: str | os.PathLike[str],
+    max_bytes: int,
+) -> tuple[subprocess.CompletedProcess, bytes]:
+    """Run with closed stdin and bounded in-memory output."""
+    with capture_timeout(
+        command, seconds, cwd=cwd, input=b"",
+    ) as (completed, output_path):
+        with output_path.open("rb") as output:
+            captured = output.read(max_bytes)
+    return completed, captured
 
 
 def read_help(binary: Path, max_bytes: int = 16384) -> str:
-    """Return the first useful bounded help response from a native CLI."""
+    """Return the first useful bounded help response from a native CLI.
+
+    Probed in a scratch directory on a closed stdin: a program that runs work
+    instead of printing usage must not write into the caller's tree or consume
+    the caller's input. One that does not answer within the deadline is left
+    without help — it cannot be described to the model, and it is not a CLI
+    whose help can be read."""
     for flag in ("--help", "-h"):
-        try:
-            completed = run_timeout(
-                [str(binary), flag], 10, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-        except OSError:
-            continue
-        output = completed.stdout or b""
-        if isinstance(output, bytes):
+        with tempfile.TemporaryDirectory(prefix="suggest-runner-help-") as directory:
+            try:
+                completed, output = run_captured(
+                    [str(binary), flag], _HELP_TIMEOUT_SECONDS, directory,
+                    max_bytes,
+                )
+            except OSError:
+                continue
+            if completed.returncode == 124:
+                return ""
             output = output.decode("utf-8", errors="replace")
-        if len(output.strip()) >= 80:
-            return output[:max_bytes]
+            if len(output.strip()) >= 80:
+                return output
     return ""
+
+
+def candidate_programs(
+    target: Path, sanitizer: str, configured: Path,
+) -> list[dict[str, str]]:
+    """Selectable instrumented CLIs with their help, configured binary first.
+
+    Programs that print no usable help are dropped: the model cannot derive
+    an argv template from a program that does not describe itself. Both that
+    and the candidate bound are reported, so a run never looks like it chose
+    from more than it saw."""
+    configured_real = os.path.realpath(configured)
+    paths: list[Path] = []
+    seen: set[str] = set()
+    if tc.sanitizer_binary_is_usable(target, sanitizer, configured):
+        paths.append(configured)
+        seen.add(configured_real)
+    else:
+        print(
+            f"[suggest-runner] configured binary is not an instrumented "
+            f"{sanitizer} executable, not offered: {configured}",
+            file=sys.stderr,
+        )
+    # Ask for one beyond the prompt bound so truncation is always visible,
+    # including when the configured program is already in the detected set.
+    for relative in tc.cli_candidates(target, sanitizer, _MAX_CANDIDATES + 1):
+        resolved = target / relative
+        if os.path.realpath(resolved) not in seen:
+            seen.add(os.path.realpath(resolved))
+            paths.append(resolved)
+    for dropped in paths[_MAX_CANDIDATES:]:
+        print(f"[suggest-runner] over the candidate bound, not offered: {dropped}",
+              file=sys.stderr)
+    programs: list[dict[str, str]] = []
+    for path in paths[:_MAX_CANDIDATES]:
+        help_text = read_help(path)
+        if not help_text:
+            print(f"[suggest-runner] no readable help, not offered: {path}",
+                  file=sys.stderr)
+            continue
+        programs.append({
+            "path": str(path).removeprefix(str(target) + "/"),
+            "help": help_text,
+            "configured": "1" if os.path.realpath(path) == configured_real else "",
+        })
+    for index, program in enumerate(programs, start=1):
+        program["id"] = f"c{index}"
+    return programs
+
+
+def render_candidates(programs: list[dict[str, str]]) -> str:
+    """Pre-render the candidate block; the template renderer has no loops."""
+    blocks = []
+    for program in programs:
+        configured = "  (currently configured)" if program["configured"] else ""
+        blocks.append(
+            f"[{program['id']}] {program['path']}{configured}\n"
+            f'help:\n"""\n{program["help"][:_HELP_IN_PROMPT]}\n"""'
+        )
+    return "\n\n".join(blocks)
+
+
+def matching_sanitizer_bins(
+    config: tc.Config, target: Path, selected: str, chosen: Path,
+) -> dict[str, str]:
+    """Validated same-program paths in every configured sanitizer build.
+
+    Runner arguments are shared. Refuse to write them when another enabled
+    native sanitizer would keep a different program: that would turn valid
+    probes into misleading clean or non-executing runs.
+    """
+    configured = [
+        sanitizer for sanitizer in config.sanitizers_enabled
+        if config.sanitizer_bin(sanitizer)
+    ]
+    selected_build = target / tc.build_dir_name(selected)
+    try:
+        tail = chosen.relative_to(selected_build)
+    except ValueError:
+        if len(configured) > 1:
+            raise ValueError(
+                f"selected program is outside {selected_build}; cannot map "
+                "shared runner arguments to the other sanitizer builds"
+            )
+        return {selected: str(chosen).removeprefix(str(target) + "/")}
+    updates: dict[str, str] = {}
+    for sanitizer in configured:
+        candidate = target / tc.build_dir_name(sanitizer) / tail
+        if tc.sanitizer_binary_is_usable(target, sanitizer, candidate):
+            updates[sanitizer] = str(candidate).removeprefix(str(target) + "/")
+        else:
+            raise ValueError(
+                f"matching instrumented {sanitizer} program is unavailable: "
+                f"{candidate}"
+            )
+    return updates
 
 
 def normalize_args(raw: object) -> list[str]:
@@ -142,9 +265,8 @@ def validate_launch(
             ]
 
         try:
-            completed = run_timeout(
-                [str(binary), *expand(testcase)], 10, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, cwd=directory,
+            completed, completed_output = run_captured(
+                [str(binary), *expand(testcase)], 10, directory, 65536,
             )
         except OSError as exc:
             return False, str(exc)
@@ -160,9 +282,8 @@ def validate_launch(
         if created:
             return False, f"derived invocation created output: {created[0]}"
         try:
-            absent = run_timeout(
-                [str(binary), *expand(missing)], 10, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, cwd=directory,
+            absent, absent_output = run_captured(
+                [str(binary), *expand(missing)], 10, directory, 65536,
             )
         except OSError as exc:
             return False, str(exc)
@@ -174,24 +295,27 @@ def validate_launch(
         if created:
             return False, f"derived invocation created output: {created[0]}"
 
-        def signature(result: subprocess.CompletedProcess, path: Path) -> tuple[int, str]:
-            output = result.stdout or b""
-            if isinstance(output, bytes):
-                output = output.decode("utf-8", errors="replace")
-            normalized = output.replace(str(path), "{TESTCASE}")
+        def signature(
+            result: subprocess.CompletedProcess, output: bytes, path: Path,
+        ) -> tuple[int, str]:
+            rendered = output.decode("utf-8", errors="replace")
+            normalized = rendered.replace(str(path), "{TESTCASE}")
             return result.returncode, normalized.replace(path.name, "{TESTCASE}")
 
-        if signature(completed, testcase) == signature(absent, missing):
+        if (
+            signature(completed, completed_output, testcase)
+            == signature(absent, absent_output, missing)
+        ):
             return False, "derived invocation did not depend on testcase contents or existence"
         if completed.returncode:
-            output = completed.stdout or b""
-            if isinstance(output, bytes):
-                output = output.decode("utf-8", errors="replace")
             prompt = render_template("validate_runner.md.j2", {
                 "binary": str(binary),
                 "args": repr(args),
                 "returncode": str(completed.returncode),
-                "output": output[:8192] or "(no diagnostic output)",
+                "output": (
+                    completed_output[:8192].decode("utf-8", errors="replace")
+                    or "(no diagnostic output)"
+                ),
                 "help": help_text,
             })
             decision = llm_decide(
@@ -229,40 +353,107 @@ def main(argv: list[str]) -> int:
         return 1
     sanitizer, binary_name = selected
     binary = Path(binary_name)
-    help_text = read_help(binary)
-    if not help_text:
+    programs = candidate_programs(target, sanitizer, binary)
+    if not programs:
         print(f"[suggest-runner] could not read help from {binary}", file=sys.stderr)
         return 1
-    prompt = render_template("suggest_runner.md.j2", {
-        "slug": args.slug,
-        "binary": cfg.sanitizer_bin(sanitizer),
-        "readme": tc.read_readme_excerpt(target) or "(no README found)",
-        "help": help_text,
-    })
-    result = llm_decide("runner-suggest", "args,reasoning", prompt, args.timeout)
-    if result is None:
-        return 2
-    runner_args = normalize_args(result.get("args"))
-    reasoning = str(result.get("reasoning", "")).strip()
-    if not runner_args:
-        print(f"[suggest-runner] invalid argv template: {result!r}", file=sys.stderr)
-        return 3
-    valid, reason = validate_launch(binary, runner_args, help_text, args.timeout)
-    if not valid:
-        print(f"[suggest-runner] refusing argv template: {reason}", file=sys.stderr)
-        return 3
+    feedback = ""
+    chosen: dict[str, str] | None = None
+    runner_args: list[str] = []
+    reasoning = ""
+    chosen_binary = binary
+    for attempt in range(1, _MAX_SUGGESTIONS + 1):
+        prompt = render_template("suggest_runner.md.j2", {
+            "slug": args.slug,
+            "readme": tc.read_readme_excerpt(target) or "(no README found)",
+            "candidates": render_candidates(programs),
+            "feedback_block": feedback,
+        })
+        result = llm_decide(
+            "runner-suggest", "binary,args,reasoning", prompt, args.timeout
+        )
+        if result is None:
+            return 2
+        chosen = next(
+            (p for p in programs if p["id"] == str(result.get("binary", ""))),
+            None,
+        )
+        runner_args = normalize_args(result.get("args"))
+        reasoning = str(result.get("reasoning", "")).strip()
+        if chosen is None:
+            reason = f"candidate id {result.get('binary', '')!r} was not offered"
+        elif not runner_args:
+            reason = "argv template was invalid"
+        else:
+            chosen_binary = target / chosen["path"]
+            valid, reason = validate_launch(
+                chosen_binary, runner_args, chosen["help"], args.timeout
+            )
+            if valid:
+                break
+        if attempt == _MAX_SUGGESTIONS:
+            print(f"[suggest-runner] refusing argv template: {reason}",
+                  file=sys.stderr)
+            return 3
+        print(
+            f"[suggest-runner] candidate rejected ({reason}); asking for revision",
+            file=sys.stderr,
+        )
+        feedback = (
+            "\nThe previous proposal was rejected by launch validation:\n"
+            f"proposal = {result!r}\n"
+            f"reason = {reason}\n"
+            "Choose again from the same candidate ids and revise the argv.\n"
+        )[:3000]
+    assert chosen is not None
 
     current = target_toml.read_text(encoding="utf-8")
     candidate = set_runner_args(current, runner_args, reasoning)
+    try:
+        bin_updates = matching_sanitizer_bins(
+            cfg, target, sanitizer, chosen_binary
+        )
+    except ValueError as exc:
+        print(f"[suggest-runner] refusing shared runner arguments: {exc}",
+              file=sys.stderr)
+        return 3
+    changed_bins: dict[str, str] = {}
+    for update_sanitizer, update_path in bin_updates.items():
+        configured_path = Path(
+            cfg.resolve_path(cfg.sanitizer_bin(update_sanitizer))
+        )
+        update_binary = target / update_path
+        if os.path.realpath(configured_path) == os.path.realpath(update_binary):
+            continue
+        candidate = tc.set_sanitizer_bin(
+            candidate, update_sanitizer, update_path
+        )
+        changed_bins[update_sanitizer] = update_path
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", suffix=".toml",
         dir=target_toml.parent, delete=False,
     ) as stream:
         stream.write(candidate)
         temporary = Path(stream.name)
+    temporary.chmod(target_toml.stat().st_mode & 0o777)
     try:
         parsed = tc.Config(target_root=str(target))
         tc.load_toml_into(parsed, temporary)
+        parsed_binary = Path(
+            parsed.resolve_path(parsed.sanitizer_bin(sanitizer))
+        )
+        if (
+            os.path.realpath(parsed_binary) != os.path.realpath(chosen_binary)
+            or parsed.runner_args != runner_args
+        ):
+            raise ValueError("validated binary/argv did not round-trip")
+        for update_sanitizer, update_path in bin_updates.items():
+            if os.path.realpath(
+                parsed.resolve_path(parsed.sanitizer_bin(update_sanitizer))
+            ) != os.path.realpath(target / update_path):
+                raise ValueError(
+                    f"validated {update_sanitizer}_bin did not round-trip"
+                )
     except Exception as exc:
         temporary.unlink(missing_ok=True)
         print(f"[suggest-runner] refusing invalid target.toml: {exc}", file=sys.stderr)
@@ -272,6 +463,16 @@ def main(argv: list[str]) -> int:
         print(f"[suggest-runner] configured native CLI argv in {target_toml}", file=sys.stderr)
     else:
         temporary.unlink(missing_ok=True)
+        if "asan" in changed_bins:
+            print(f"asan_bin = {tc.toml_basic_string(changed_bins['asan'])}")
+        non_asan = [
+            name for name in cfg.sanitizers_enabled
+            if name != "asan" and name in changed_bins
+        ]
+        if non_asan:
+            print("[sanitizer]")
+            for name in non_asan:
+                print(f"{name}_bin = {tc.toml_basic_string(changed_bins[name])}")
         print("[runner]")
         print("args = [" + ", ".join(tc.toml_basic_string(v) for v in runner_args) + "]")
     return 0

@@ -39,14 +39,23 @@ The suggestion steps can also be rerun independently:
 ```bash
 bin/suggest-threat-model "$TARGET" --apply --force   # re-derive attacker_controls
 bin/suggest-peers "$TARGET" --apply --force          # re-derive [s6_peers]
-bin/suggest-runner "$TARGET" --apply --force         # derive a CLI's testcase argv
+bin/suggest-runner "$TARGET" --apply --force         # pick a CLI and its testcase argv
 ```
 
-All three take a target slug, ask the model once, and print the suggestion;
-`--apply` writes it into `output/<target>/target.toml` and `--force` overwrites
-an existing section. `bin/suggest-runner` reads a native sanitizer CLI's own
-`--help` output to work out how it accepts an input file, and proposes the
-matching `[runner]` invocation.
+All three take a target slug and print the suggestion; `--apply` writes it into
+`output/<target>/target.toml` and `--force` overwrites an existing section.
+They ask the model once, except that `bin/suggest-runner` permits one revision
+after launch validation rejects a proposal. It reads the `--help` output of a
+bounded set of instrumented CLIs the build declares, picks the one that parses
+input files, and proposes the matching `[runner]` invocation. When that is not
+the binary detection guessed, it retargets `<san>_bin` too — a build tree holds
+a project's tools next to its test drivers, and only the launch it validates
+proves which is which. Matching instrumented programs in other enabled
+sanitizer builds are retargeted at the same time so the shared runner arguments
+keep their meaning; if a configured sibling build has no such program, the
+helper refuses the update instead of applying arguments to a different CLI.
+Nothing is written until the proposed invocation passes input-dependence
+validation with a disposable testcase.
 
 See [Add a target](../getting-started/add-a-target.md) for the workflow and
 [Target config](target-toml.md) for field definitions.

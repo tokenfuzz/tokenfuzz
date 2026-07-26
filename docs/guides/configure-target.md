@@ -286,7 +286,7 @@ fields are refined later.
 | Symptom | Likely fix |
 | --- | --- |
 | `bin/audit` cannot find target config | Seed it with `bin/audit --target <target> --backend <backend> 1` or `bin/setup-target <target>`. Confirm `--target` matches the directory name. |
-| Generic testcase runs the wrong binary | Fix `asan_bin`. Paths are relative to `targets/<target>/`. |
+| Generic testcase runs the wrong binary | Fix `asan_bin`, or rerun `bin/suggest-runner <target> --apply --force` to reselect from the build's own CLIs. Paths are relative to `targets/<target>/`; an executable in the matching ASan build survives later `bin/setup-target` runs. |
 | C harness compile fails on missing headers | Add source or build include directories to `includes`. |
 | C harness compile fails on missing macros | Add required compiler flags to `defines`. |
 | Link fails during harness compile | Add the ASan library to `asan_lib`; add required system libraries, target-relative archives, or target-relative source files to `link_libs`. |

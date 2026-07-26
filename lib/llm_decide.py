@@ -967,6 +967,7 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     if decision == "runner-suggest":
         return (
             _is_string_list(parsed.get("args"))
+            and _is_string(parsed.get("binary"))
             and _is_string(parsed.get("reasoning", ""))
         )
     if decision == "s6-peer-suggest":

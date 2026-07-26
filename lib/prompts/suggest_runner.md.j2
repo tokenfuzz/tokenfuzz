@@ -1,29 +1,33 @@
 You are configuring how an audit harness passes one crafted input file to a
-sanitizer-instrumented command-line program. Derive the smallest read-only argv
-template from the program's own help. Do not guess options absent from the help.
+sanitizer-instrumented command-line program. Pick the candidate program that
+parses attacker-supplied input files, then derive the smallest read-only argv
+template from that program's own help. Do not guess options absent from the help.
 
 Target:
   slug   = {{ slug }}
-  binary = {{ binary }}
 
 README excerpt:
 """
 {{ readme }}
 """
 
-Program help:
-"""
-{{ help }}
-"""
+Candidate programs:
+
+{{ candidates }}
+{{ feedback_block }}
 
 Return a single JSON object (no prose, no fences):
 {
+  "binary": "<candidate id>",
   "args": ["...", "{TESTCASE}", "..."],
   "reasoning": "<one short sentence citing the help syntax>"
 }
 
 Rules:
-- `args` is an argv array, never a shell command.
+- `binary` is one of the candidate ids above. Keep the currently configured
+  program unless its help shows it is a test-suite driver, benchmark, build
+  helper, or otherwise does not read an input file named on the command line.
+- `args` is an argv array for the chosen program, never a shell command.
 - Include `{TESTCASE}` exactly once where the input file belongs.
 - Prefer a parse, inspect, decode, or validate operation that exercises the
   input and exits. Do not modify the testcase.

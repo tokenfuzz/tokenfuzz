@@ -66,7 +66,7 @@ attacker_controls = ["bytes"]
 | `upstream_url` | Source repository URL used as metadata in exported bundles. |
 | `build_system` | Informational build-system label such as `cmake`, `meson`, `autotools`, or `mach`. |
 | `build_widening` | For ordinary native C/C++ targets, keep the canonical build and prepare one cached ASan sibling with compatible optional in-tree features enabled. Defaults to `true` when absent; set `false` to opt out. |
-| `asan_bin` | ASan executable used by generic or browser runs. Relative paths resolve under `targets/<target>/`. |
+| `asan_bin` | ASan executable used by generic or browser runs. Relative paths resolve under `targets/<target>/`. An executable in the matching ASan build (or an external executable whose ASan instrumentation can be verified) is kept as you set it; `bin/setup-target` re-detects this field only to fill it or to replace a missing or mismatched path. |
 | `asan_lib` | ASan library used when compiling C harness testcases. |
 | `includes` | Include directories for C harness builds. Relative paths resolve under `targets/<target>/`. |
 | `link_libs` | Extra linker inputs for C harness builds: system/library flags such as `-lm`, target-relative archives, or target-relative source files that must be compiled into the harness. |

@@ -885,10 +885,13 @@ tc.load_toml_into(cfg_scrub, scrub_toml)
 assert_eq("", cfg_scrub.asan_bin,
           "refresh_detected_build_fields: scrubbed asan_bin reads back as unset")
 
-# A plausible asan_bin (real, non-aux path) detection can't confirm is kept.
+# An executable that detection misses is kept when it remains in the matching
+# sanitizer build: this preserves operator choice even for a stripped binary
+# whose instrumentation `nm` cannot inspect.
 keep_root = TEST_TMPDIR / "refresh-keep-bin"
 (keep_root / "build-asan").mkdir(parents=True)
 (keep_root / "build-asan" / "mytool").write_bytes(b"\x7fELF")
+os.chmod(keep_root / "build-asan" / "mytool", 0o755)
 keep_toml = keep_root / "target.toml"
 keep_toml.write_text(
     'build_system  = "cmake"\n'
@@ -897,7 +900,152 @@ keep_toml.write_text(
 )
 tc.refresh_detected_build_fields(keep_root, keep_toml)
 assert_in('asan_bin      = "build-asan/mytool"', keep_toml.read_text(encoding="utf-8"),
-          "refresh_detected_build_fields: keeps a plausible operator-set asan_bin")
+          "refresh_detected_build_fields: keeps an operator-set asan_bin in its build")
+
+# A configured value detection *would* replace is still kept: it may have come
+# from an operator or from bin/suggest-runner validating a launch, and either
+# is stronger evidence than the first-match heuristic. Regression: refresh
+# adopted any detected value, so every rerun reverted a corrected binary.
+curated_root = TEST_TMPDIR / "refresh-curated"
+(curated_root / "build-asan").mkdir(parents=True)
+(curated_root / "build-asan" / "aaa.a").write_bytes(b"!<arch>\n")
+(curated_root / "build-asan" / "zzz.a").write_bytes(b"!<arch>\n")
+curated_toml = curated_root / "target.toml"
+curated_toml.write_text(
+    'build_system  = "cmake"\n'
+    'asan_lib      = "build-asan/zzz.a"\n',
+    encoding="utf-8",
+)
+assert_eq("build-asan/aaa.a",
+          tc.detect_sanitizer_build_artifacts(curated_root, "asan")[1],
+          "detect_sanitizer_build_artifacts: would pick the other archive")
+assert_eq(False, tc.refresh_detected_build_fields(curated_root, curated_toml),
+          "refresh_detected_build_fields: reports no change over a curated value")
+assert_in('asan_lib      = "build-asan/zzz.a"', curated_toml.read_text(encoding="utf-8"),
+          "refresh_detected_build_fields: keeps a curated value detection disagrees with")
+
+# The stale-path repair the adopt policy existed for still works: once the
+# configured path no longer resolves, detection wins.
+curated_toml.write_text(
+    'build_system  = "cmake"\n'
+    'asan_lib      = "build-asan/gone.a"\n',
+    encoding="utf-8",
+)
+assert_eq(True, tc.refresh_detected_build_fields(curated_root, curated_toml),
+          "refresh_detected_build_fields: still replaces a path that no longer exists")
+assert_in('asan_lib      = "build-asan/aaa.a"', curated_toml.read_text(encoding="utf-8"),
+          "refresh_detected_build_fields: adopts detection for a stale path")
+
+# An existing path is not enough for a binary: it must be an instrumented
+# executable in the build tree for the sanitizer its field names. Otherwise a
+# typo such as asan_bin=build-ubsan/tool silently defeats ASan and corrupts
+# every downstream run/reproduction metric.
+wrong_san_root = TEST_TMPDIR / "refresh-wrong-sanitizer"
+(wrong_san_root / "build-asan").mkdir(parents=True)
+(wrong_san_root / "build-ubsan").mkdir()
+_right_asan = wrong_san_root / "build-asan" / "right"
+_wrong_ubsan = wrong_san_root / "build-ubsan" / "wrong"
+for _p in (_right_asan, _wrong_ubsan):
+    _p.write_bytes(b"\x7fELF"); os.chmod(_p, 0o755)
+wrong_san_toml = wrong_san_root / "target.toml"
+wrong_san_toml.write_text(
+    'build_system = "cmake"\n'
+    'asan_bin = "build-ubsan/wrong"\n',
+    encoding="utf-8",
+)
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = (
+    lambda path, sanitizer="asan":
+        sanitizer == "asan" and Path(path) == _right_asan
+)
+try:
+    assert_eq(True, tc.refresh_detected_build_fields(
+        wrong_san_root, wrong_san_toml
+    ), "refresh_detected_build_fields: repairs a binary from the wrong sanitizer tree")
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
+assert_in('asan_bin      = "build-asan/right"',
+          wrong_san_toml.read_text(encoding="utf-8"),
+          "refresh_detected_build_fields: restores the instrumented ASan binary")
+
+# With no replacement available, an uninstrumented configured binary is
+# unset rather than silently surviving as the ASan runner.
+wrong_san_toml.write_text(
+    'build_system = "cmake"\n'
+    'asan_bin = "build-ubsan/wrong"\n',
+    encoding="utf-8",
+)
+_right_asan.unlink()
+assert_eq(True, tc.refresh_detected_build_fields(
+    wrong_san_root, wrong_san_toml
+), "refresh_detected_build_fields: scrubs an uninstrumented binary")
+assert_in('# asan_bin = "build-asan/FILL_ME"',
+          wrong_san_toml.read_text(encoding="utf-8"),
+          "refresh_detected_build_fields: does not preserve a wrong sanitizer")
+
+# The same sanitizer-ownership rule for libraries, without punishing an
+# archive the build never emits: a vendored or prebuilt instrumented library
+# is operator provenance and detection has nothing better to offer, while one
+# belonging to another sanitizer is the same mismatch rejected above.
+vendor_root = TEST_TMPDIR / "refresh-vendored-lib"
+(vendor_root / "build-asan").mkdir(parents=True)
+(vendor_root / "build-ubsan").mkdir()
+(vendor_root / "vendor").mkdir()
+(vendor_root / "vendor" / "libfoo-asan.a").write_bytes(b"!<arch>\n")
+(vendor_root / "build-ubsan" / "libwrong.a").write_bytes(b"!<arch>\n")
+vendor_toml = vendor_root / "target.toml"
+vendor_toml.write_text(
+    'build_system  = "cmake"\n'
+    'asan_lib      = "vendor/libfoo-asan.a"\n',
+    encoding="utf-8",
+)
+assert_eq(False, tc.refresh_detected_build_fields(vendor_root, vendor_toml),
+          "refresh_detected_build_fields: reports no change over a vendored asan_lib")
+assert_in('asan_lib      = "vendor/libfoo-asan.a"',
+          vendor_toml.read_text(encoding="utf-8"),
+          "refresh_detected_build_fields: keeps a library the build does not emit")
+vendor_toml.write_text(
+    'build_system  = "cmake"\n'
+    'asan_lib      = "build-ubsan/libwrong.a"\n',
+    encoding="utf-8",
+)
+assert_eq(True, tc.refresh_detected_build_fields(vendor_root, vendor_toml),
+          "refresh_detected_build_fields: scrubs a library from another sanitizer")
+assert_in('# asan_lib = "build-asan/FILL_ME.a"',
+          vendor_toml.read_text(encoding="utf-8"),
+          "refresh_detected_build_fields: unsets the mismatched library")
+
+
+# ─── 10e-bis. set_sanitizer_bin retargets one field ─────────────────
+#
+# bin/suggest-runner writes the program whose launch it validated. It must
+# move that one assignment and nothing else — the file it edits carries the
+# LLM-curated [threat_model]/[s6_peers] sections.
+setbin_text = (
+    'target        = "widget"\n'
+    'asan_bin      = "build-asan/runner"\n'
+    '# ubsan_bin = "build-ubsan/FILL_ME"\n'
+    '\n[threat_model]\nattacker_controls = ["bytes"]\n'
+)
+setbin_new = tc.set_sanitizer_bin(setbin_text, "asan", "build-asan/wtool")
+assert_in('asan_bin      = "build-asan/wtool"', setbin_new,
+          "set_sanitizer_bin: retargets the active assignment")
+assert_in('attacker_controls = ["bytes"]', setbin_new,
+          "set_sanitizer_bin: leaves curated sections intact")
+assert_eq(setbin_text, tc.set_sanitizer_bin(setbin_text, "ubsan", "build-ubsan/x"),
+          "set_sanitizer_bin: never uncomments an unset field")
+_setbin_cfg = tc.Config()
+tc.load_toml_into(_setbin_cfg, write("setbin.toml", setbin_new))
+assert_eq("build-asan/wtool", _setbin_cfg.asan_bin,
+          "set_sanitizer_bin: result round-trips through load_toml_into")
+setbin_ubsan = tc.set_sanitizer_bin(
+    '[sanitizer]\nenabled = ["ubsan"]\nubsan_bin = "build-ubsan/old"\n',
+    "ubsan", "build-ubsan/new",
+)
+_setbin_ubsan_cfg = tc.Config()
+tc.load_toml_into(_setbin_ubsan_cfg, write("setbin-ubsan.toml", setbin_ubsan))
+assert_eq("build-ubsan/new", _setbin_ubsan_cfg.ubsan_bin,
+          "set_sanitizer_bin: retargets a non-ASan field in [sanitizer]")
 
 
 # ─── 10f. _detect_cli_bin prunes aux dirs and filters before the cap ──
@@ -929,6 +1077,43 @@ finally:
 assert_eq("build-asan/mytool", _got,
           "_detect_cli_bin: skips CMakeFiles probes + tests/ helpers and finds "
           "the real tool past the probe cap")
+
+
+# ─── 10g. cli_candidates offers the whole selectable set ────────────
+#
+# _detect_cli_bin picks the head of this list; bin/suggest-runner offers all
+# of it to the model, because which installed program reads attacker-supplied
+# input is a semantic choice the build manifests do not record. A build tree
+# holds the project's tools next to its test drivers, so when the manifests
+# name the tools the free scan must not dilute them back in.
+cand_root = TEST_TMPDIR / "cli-candidates"
+(cand_root / "build-asan").mkdir(parents=True)
+for _name in ("aaa_test_driver", "wcat", "wtool"):
+    _p = cand_root / "build-asan" / _name
+    _p.write_bytes(b"\x7fELF"); os.chmod(_p, 0o755)
+(cand_root / "CMakeLists.txt").write_text(
+    "add_executable(wtool tool.c)\n"
+    "add_executable(wcat cat.c)\n"
+    "add_executable(aaa_test_driver t.c)\n"
+    "install(TARGETS wtool wcat RUNTIME DESTINATION bin)\n",
+    encoding="utf-8")
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = lambda p, s="asan": True
+try:
+    _cands = tc.cli_candidates(cand_root, "asan", 8)
+    _capped = tc.cli_candidates(cand_root, "asan", 1)
+    (cand_root / "CMakeLists.txt").write_text(
+        "add_executable(absent nowhere.c)\n", encoding="utf-8")
+    _scanned = tc.cli_candidates(cand_root, "asan", 8)
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
+assert_eq(["build-asan/wtool", "build-asan/wcat"], _cands,
+          "cli_candidates: returns the installed programs, not the test driver")
+assert_eq(["build-asan/wtool"], _capped,
+          "cli_candidates: honours the limit")
+assert_eq(["build-asan/aaa_test_driver", "build-asan/wcat", "build-asan/wtool"],
+          _scanned,
+          "cli_candidates: falls back to the free scan when no manifest name matches")
 
 
 # ─── 11. Fallback parser works without tomllib ─────────────────────
@@ -1003,6 +1188,26 @@ cm_root.mkdir()
 dcn_cm = tc.declared_cli_names(cm_root, "cmake")
 assert_eq(["cli"], dcn_cm,
           "declared_cli_names: cmake keeps installed executable, drops lib + test exe")
+
+# cmake: an ALIAS or IMPORTED declaration names a reference, not a binary the
+# build emits. Regression: the name was truncated at `::`, so the phantom
+# collided with the same-named library in install(TARGETS ...) — a non-empty
+# result that suppressed the fallback and hid every real program.
+cm_alias = DCN_DIR / "cmake-alias"
+cm_alias.mkdir()
+(cm_alias / "CMakeLists.txt").write_text(
+    "add_library(Widget widget.c)\n"
+    "install(TARGETS Widget EXPORT Widget ARCHIVE DESTINATION lib)\n"
+    "add_executable(wtool tool.c)\n"
+    "add_executable(wcat cat.c)\n"
+    "add_executable(prebuilt IMPORTED)\n"
+    "foreach(PROGRAM ${PROGRAMS})\n"
+    "    add_executable(Widget::${PROGRAM} ALIAS ${PROGRAM})\n"
+    "    install(TARGETS ${PROGRAM} EXPORT Widget RUNTIME DESTINATION bin)\n"
+    "endforeach()\n",
+    encoding="utf-8")
+assert_eq(["wcat", "wtool"], tc.declared_cli_names(cm_alias, "cmake"),
+          "declared_cli_names: cmake drops ALIAS/IMPORTED declarations")
 
 # cmake: no install(TARGETS) → fall back to declared executables.
 cm_noinst = DCN_DIR / "cmake-noinstall"

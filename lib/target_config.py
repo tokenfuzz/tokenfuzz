@@ -917,11 +917,20 @@ def _cmake_installed_executables(texts: Iterable[str]) -> list[str]:
     """
     text_list = list(texts)
     exec_names: set[str] = set()
+    # The trailing keyword and the `::` separator are captured so ALIAS and
+    # IMPORTED forms can be dropped: they name a reference, not a binary the
+    # build emits. A phantom name from `add_executable(Ns::x ALIAS x)` would
+    # otherwise collide with a same-named library in install(TARGETS ...),
+    # yielding a non-empty result that suppresses the fallback below.
     add_exec_re = re.compile(
-        r"add_executable\s*\(\s*([A-Za-z0-9_.-]+)", re.IGNORECASE)
+        r"add_executable\s*\(\s*([A-Za-z0-9_.:-]+)(?:\s+([A-Za-z_]+))?",
+        re.IGNORECASE)
     for text in text_list:
         for m in add_exec_re.finditer(text):
-            exec_names.add(m.group(1))
+            name = m.group(1)
+            if "::" in name or (m.group(2) or "").upper() in ("ALIAS", "IMPORTED"):
+                continue
+            exec_names.add(name)
     if not exec_names:
         return []
     install_re = re.compile(
@@ -1106,6 +1115,21 @@ def _binary_uses_sanitizer(path: Path, sanitizer: str = "asan") -> bool:
     return marker in out.stdout
 
 
+def sanitizer_binary_is_usable(
+    target_root: "str | os.PathLike", sanitizer: str, path: "str | os.PathLike",
+) -> bool:
+    """Whether `path` is an executable instrumented for this sanitizer."""
+    root = Path(target_root)
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    return (
+        candidate.is_file()
+        and os.access(candidate, os.X_OK)
+        and _binary_uses_sanitizer(candidate, sanitizer)
+    )
+
+
 def _find_under(asan_dir: Path, *, name: str | None = None,
                 maxdepth: int = 3) -> list[Path]:
     """Equivalent to: find <asan_dir> -maxdepth <n> -type f [-name <name>]."""
@@ -1204,22 +1228,37 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     return _pick_shared_lib(san_dir, root)
 
 
-def _detect_cli_bin(san_dir: Path, root: Path, build_system: str,
-                    sanitizer: str = "asan") -> str:
-    """Best instrumented CLI executable under `san_dir` (a build-<san>/
-    tree): a declared CLI name from the build manifests first, else the
-    first instrumented executable that is not a shared library, object file,
-    or build-system-internal artifact (CMakeFiles/ compiler probes, test
-    helpers). Empty when the build ships no CLI — a library-only or
+def _cli_candidates(san_dir: Path, root: Path, build_system: str,
+                    sanitizer: str, limit: int) -> list[str]:
+    """Up to `limit` instrumented CLI executables under `san_dir` (a
+    build-<san>/ tree), best first: the CLI names the build manifests
+    declare, else — only when those match nothing — the instrumented
+    executables that are not a shared library, object file, or
+    build-system-internal artifact (CMakeFiles/ compiler probes, test
+    helpers). Empty when the build ships no CLI: a library-only or
     header-only target. The aux-dir prune is what stops a CMake compiler
-    probe (CMakeDetermineCompilerABI_C.bin) being mistaken for the tool."""
+    probe (CMakeDetermineCompilerABI_C.bin) being mistaken for the tool.
+
+    The manifest pass is kept exclusive because the free scan cannot tell
+    a project's own tool from the test drivers and benchmarks beside it —
+    only the manifests carry that distinction."""
     if not san_dir.is_dir():
-        return ""
+        return []
+    found: list[str] = []
+
+    def take(path: Path) -> bool:
+        rel = str(path).removeprefix(str(root) + "/")
+        if rel not in found:
+            found.append(rel)
+        return len(found) >= limit
+
     for cand_name in declared_cli_names(root, build_system):
         for m in _find_under(san_dir, name=cand_name):
             if (os.access(m, os.X_OK) and not _is_aux_build_path(m, san_dir)
-                    and _binary_uses_sanitizer(m, sanitizer)):
-                return str(m).removeprefix(str(root) + "/")
+                    and _binary_uses_sanitizer(m, sanitizer) and take(m)):
+                return found
+    if found:
+        return found
     # Filter to plausible CLI executables BEFORE capping the nm probes:
     # CMakeFiles/ alone can hold dozens of files, so capping first would
     # exhaust the budget on pruned entries and never reach the real tool
@@ -1231,9 +1270,31 @@ def _detect_cli_bin(san_dir: Path, root: Path, build_system: str,
                     or "sanity" in f.name)
     candidates = [f for f in _find_under(san_dir) if _is_cli_candidate(f)]
     for f in candidates[:60]:
-        if _binary_uses_sanitizer(f, sanitizer):
-            return str(f).removeprefix(str(root) + "/")
-    return ""
+        if _binary_uses_sanitizer(f, sanitizer) and take(f):
+            break
+    return found
+
+
+def _detect_cli_bin(san_dir: Path, root: Path, build_system: str,
+                    sanitizer: str = "asan") -> str:
+    """The single best instrumented CLI executable, or empty."""
+    found = _cli_candidates(san_dir, root, build_system, sanitizer, 1)
+    return found[0] if found else ""
+
+
+def cli_candidates(target_root: "str | os.PathLike", sanitizer: str,
+                   limit: int) -> list[str]:
+    """Selectable instrumented CLIs for a sanitizer, best first.
+
+    `_detect_cli_bin` picks the head of this list for target.toml;
+    bin/suggest-runner offers the whole list to the model, because which
+    installed program reads attacker-supplied input is a semantic choice
+    the build manifests do not record."""
+    root = Path(target_root)
+    return _cli_candidates(
+        _build_dir_for(root, sanitizer), root, _detect_build_system(root),
+        sanitizer, limit,
+    )
 
 
 def detect_sanitizer_build_artifacts(
@@ -1250,14 +1311,97 @@ def detect_sanitizer_build_artifacts(
     )
 
 
+def _build_field_line(field: str, value: str) -> str:
+    """Render a <san>_bin/<san>_lib assignment in its section's style.
+
+    asan_* keep seed's wide alignment; the rest use the [sanitizer] block's
+    short form. Cosmetic — the TOML parser ignores spacing."""
+    if field in ("asan_bin", "asan_lib"):
+        return f"{field}{' ' * (14 - len(field))}= {toml_basic_string(value)}"
+    pad = " " * (len("ubsan_lib") - len(field))
+    return f"{field}{pad} = {toml_basic_string(value)}"
+
+
+def set_sanitizer_bin(text: str, sanitizer: str, value: str) -> str:
+    """Point an active <san>_bin at `value`, preserving every other setting.
+
+    Only rewrites a field that is already active: an unset binary means the
+    sanitizer is not selectable, and the caller reached this path through
+    one that was."""
+    field = f"{sanitizer}_bin"
+    field_re = re.compile(rf"^\s*{field}\b\s*=")
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if field_re.match(line) and not line.lstrip().startswith("#"):
+            lines[i] = _build_field_line(field, value)
+            return "\n".join(lines) + "\n"
+    return text
+
+
+def _in_other_sanitizer_build(
+    target_root: Path, sanitizer: str, candidate: Path,
+) -> bool:
+    """Whether `candidate` sits in a sanitizer build tree that is not this one."""
+    for other in ("asan", "ubsan", "msan", "tsan"):
+        if other == sanitizer:
+            continue
+        try:
+            candidate.resolve().relative_to(
+                _build_dir_for(target_root, other).resolve()
+            )
+            return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def _configured_build_field_is_usable(
+    target_root: Path, sanitizer: str, field: str, value: str,
+) -> bool:
+    """A curated build field must still belong to the sanitizer it names."""
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = target_root / candidate
+    if field.endswith("_bin"):
+        # A configured executable in the matching build is operator/build
+        # provenance even when `nm` cannot inspect a stripped binary. An
+        # absolute external executable has no such provenance, so require its
+        # runtime marker before preserving it.
+        try:
+            candidate.resolve().relative_to(
+                _build_dir_for(target_root, sanitizer).resolve()
+            )
+            in_matching_build = True
+        except (OSError, ValueError):
+            in_matching_build = False
+        return (
+            candidate.is_file()
+            and os.access(candidate, os.X_OK)
+            and (
+                in_matching_build
+                or sanitizer_binary_is_usable(
+                    target_root, sanitizer, candidate
+                )
+            )
+        )
+    # A library the build itself does not emit — a vendored or prebuilt
+    # instrumented archive — is operator provenance, and detection has nothing
+    # better to offer. Only a library belonging to a *different* sanitizer is
+    # a mismatch, the same failure the binary branch rejects above.
+    return candidate.is_file() and not _in_other_sanitizer_build(
+        target_root, sanitizer, candidate
+    )
+
+
 def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
     """Re-detect <san>_bin and <san>_lib for every sanitizer from the build
     trees now on disk and correct them in target.toml in place. Policy per
-    field: when the build yields a value, adopt it (filling an unset field
-    or replacing a stale one); when it does not, scrub a value that points
-    at a build-internal artifact (a CMake compiler probe, a test-framework
-    archive) or a now-missing path, and otherwise leave the field — and
-    every curated section — untouched. Returns True if anything changed.
+    field: a configured value that is still a usable artifact in the matching
+    sanitizer tree wins — it may have been chosen by an operator or by
+    bin/suggest-runner, and detection is a weaker signal than either. Otherwise
+    adopt what the build yields (filling an unset field or replacing a stale or
+    mismatched one), or scrub a value that points at a build-internal artifact
+    or a now-missing path. Returns True if anything changed.
 
     seed_toml must run before any build exists (it supplies build_system to
     the build step), so on a fresh target it cannot detect these fields and
@@ -1281,14 +1425,6 @@ def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
         m = re.search(r'=\s*"((?:[^"\\]|\\.)*)"', line)
         return m.group(1) if m else ""
 
-    def _active(field: str, value: str) -> str:
-        # asan_* keep seed's wide alignment; the rest use the [sanitizer]
-        # block's short form. Cosmetic — the TOML parser ignores spacing.
-        if field in ("asan_bin", "asan_lib"):
-            return f"{field}{' ' * (14 - len(field))}= {toml_basic_string(value)}"
-        pad = " " * (len("ubsan_lib") - len(field))
-        return f"{field}{pad} = {toml_basic_string(value)}"
-
     def _commented(field: str, san: str) -> str:
         # Retain FILL_ME so bin/setup-target's grep-for-FILL_ME re-seed
         # trigger keeps firing for the now-unset field.
@@ -1306,12 +1442,22 @@ def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
                 _path_has_aux_component(cur)
                 or not (target_root / cur).exists()
             )
+            if (
+                cur and not cur_bogus
+                and (
+                    cur == detected
+                    or _configured_build_field_is_usable(
+                        target_root, san, field, cur
+                    )
+                )
+            ):
+                return                                   # keep what is usable
             if detected:
-                new_line = _active(field, detected)      # fill or correct
-            elif cur_bogus:
-                new_line = _commented(field, san)        # scrub stale/bogus
+                new_line = _build_field_line(field, detected)  # fill or correct
+            elif cur:
+                new_line = _commented(field, san)        # scrub unusable
             else:
-                return                                   # leave good or unset
+                return                                   # leave unset
             if new_line != ln:
                 lines[i] = new_line
                 changed = True
