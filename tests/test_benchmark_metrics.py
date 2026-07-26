@@ -949,7 +949,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         text = benchmark.crosstab(self.root / "crosstab")
         # Rejected columns precede accepted ones; upper bounds are explicit.
         for expected in (
-            "A root with mixed gate decisions can therefore appear in both columns",
+            "can appear on both sides if it was accepted in one write-up",
             "Unique rejected findings | Unique accepted findings",
             "Unique rejected crashes | Unique accepted crashes",
         ):
@@ -998,9 +998,11 @@ class BenchmarkMetricsTests(unittest.TestCase):
         }
         self.write_json(run / "report.json", report)
         text = benchmark.crosstab(self.root / "live")
-        self.assertIn("## Live cell progress", text)
+        self.assertIn("## Runs in progress", text)
         self.assertIn("Findings (raw) | Crashes (raw)", text)
-        self.assertIn("not deduplicated", text)
+        # the reader has to be told these two columns are not the settled ones
+        self.assertIn("count one problem once per report", text)
+        self.assertIn("include candidates later rejected", text)
         # 3 rejected findings surface as the raw total despite 0 confirmed.
         self.assertIn("| 3 | 0 |", text)
 

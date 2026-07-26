@@ -456,15 +456,15 @@ _CSS = """
 _KEY = """
 <div class="key">
  <div class="ki"><svg viewBox="0 0 26 12"><path d="M1 10 L8 10 L8 5 L17 5 L17 2 L25 2" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
-  <div class="kt"><b>The curve — accepted over time</b><span>Count on the y-axis, productive audit-hours on the x. Each step is one deduplicated result the gate kept, placed at the hour it was found, so the line only ever climbs and ends on the table's number; where it runs flat to the right edge, the audit kept going but found nothing new.</span></div></div>
+  <div class="kt"><b>The curve — what was kept, over time</b><span>Count on the y-axis, hours of audit time on the x. Each step is one separate problem that held up when checked, placed at the hour it was first seen, so the line only ever climbs and ends on the table's number; where it runs flat to the right edge, the audit kept going but found nothing new.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><polygon points="13,1 19,6 13,11 7,6" fill="currentColor"/></svg>
-  <div class="kt"><b>◇ Final total</b><span>The settled count for that cell — identical to the Unique accepted column above.</span></div></div>
+  <div class="kt"><b>◇ Final total</b><span>Where that row ended up — the same number as the Unique accepted column above.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><polygon points="8,1 8,11 19,6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
-  <div class="kt"><b>▷ model-direct control</b><span>The bare model with no harness — one shot, so it lands as a single point at the hour it stopped.</span></div></div>
+  <div class="kt"><b>▷ the model on its own</b><span>The same model with no harness around it, asked plainly to find vulnerabilities — one attempt, so it lands as a single point at the hour it stopped. It is judged by the same rules as the curve: the same checks, and the same bug reported twice counted once. Only the prompt is different. Its crashes have one extra bar to clear — each has to crash again when the target is run normally.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><circle cx="3" cy="6" r="3" fill="#2a78d6"/><circle cx="8" cy="6" r="3" fill="#d64f92"/><circle cx="13" cy="6" r="3" fill="#6f52c9"/><circle cx="18" cy="6" r="3" fill="#00897b"/><circle cx="23" cy="6" r="3" fill="#c45d00"/></svg>
-  <div class="kt"><b>Label = model, colour = backend</b><span>Each row is named by the model that ran it (its model-direct control and tokenfuzz harness share that name): blue codex, magenta claude, violet gemini, teal grok, and orange OSS. Every target is audited on live, unfixed code — there is no planted bug to re-find.</span></div></div>
+  <div class="kt"><b>Label = model · run, colour = backend</b><span>One chart covers every run of the same target, so each row is labelled with the model that ran it and when that run started — otherwise two runs of one model would look alike. A model's own row and its harness row share the label. Colour is the CLI behind it: blue codex, magenta claude, violet gemini, teal grok, and orange OSS. Every target is audited on live, unfixed code — there is no planted bug to re-find.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><path d="M1 6 L25 6" stroke="currentColor" stroke-width="1.5"/><circle cx="13" cy="6" r="2.5" fill="currentColor"/></svg>
-  <div class="kt"><b>Reading the chip</b><span>The chip above each curve shows separately deduplicated accepted and rejected counts. A root with mixed gate decisions can appear on both sides, so no retention percentage is inferred; a ≤ marks a conservative rejected upper bound.</span></div></div>
+  <div class="kt"><b>Reading the chip</b><span>The line above each curve shows how much was kept and how much was rejected, each counted with its own duplicates merged. One problem can be kept in one write-up and rejected in another, so the two sides do not divide into a pass rate; a ≤ means the rejected figure is an upper bound.</span></div></div>
 </div>
 """
 
@@ -491,6 +491,10 @@ function hover(node,title,lines,grow){node.addEventListener("mouseenter",functio
  node.addEventListener("mousemove",place);
  node.addEventListener("mouseleave",function(){tip.style.display="none";if(grow)grow.setAttribute("r",3.5)})}
 function hrs(v){return (Math.round((+v||0)*100)/100)+"h"}
+// One chart holds every run of one target, so the model alone does not name a
+// row: two runs of the same model would carry the same label. The run id is
+// what separates them.
+function label(r){var n=r.model||r.backend;return r.run_id?n+" · "+r.run_id:n}
 function noun(kind,n){var one=kind==="crash"?"crash":"finding";
  return n===1?one:(kind==="crash"?"crashes":"findings")}
 function nice(v,n,i){if(!(v>0))v=1;var s=v/(n||4),p=Math.pow(10,Math.floor(Math.log10(s))),q=s/p;
@@ -511,9 +515,9 @@ function panel(host,kind,rows){
  var cy=11;
  chips.forEach(function(r){var m=r[kind],c=HUE[r.backend]||HUE.codex,u=!!m.rejected_upper_bound;
   s.appendChild(el("circle",{cx:ml+4,cy:cy-3.5,r:4,fill:c}));
-  s.appendChild(el("text",{x:ml+14,y:cy,"font-size":11,"font-weight":700,fill:"#202124"},[tx(r.model||r.backend)]));
-  s.appendChild(el("text",{x:ml+150,y:cy,"font-size":11,fill:"#5f6368"},[tx(m.accepted+" accepted")]));
-  s.appendChild(el("text",{x:ml+242,y:cy,"font-size":11,fill:"#5f6368"},[tx((u?"≤ ":"")+m.rejected+" rejected")]));
+  s.appendChild(el("text",{x:ml+14,y:cy,"font-size":11,"font-weight":700,fill:"#202124"},[tx(label(r))]));
+  s.appendChild(el("text",{x:ml+236,y:cy,"font-size":11,fill:"#5f6368"},[tx(m.accepted+" accepted")]));
+  s.appendChild(el("text",{x:ml+336,y:cy,"font-size":11,fill:"#5f6368"},[tx((u?"≤ ":"")+m.rejected+" rejected")]));
   cy+=16});
  for(var v=0;v<=ys.top+1e-9;v+=ys.step){var yv=Math.round(v*1e6)/1e6;
   s.appendChild(el("line",{x1:ml,x2:ml+pw,y1:Y(yv),y2:Y(yv),stroke:yv?"#e8eaed":"#b9bec4","stroke-width":yv?1:1.5}));
@@ -523,16 +527,17 @@ function panel(host,kind,rows){
   s.appendChild(el("text",{x:X(q),y:mt+ph+16,"text-anchor":"middle","font-size":10.5,fill:"#80868b"},[tx((q%1?q.toFixed(1):q)+"h")]))}
  s.appendChild(el("text",{x:ml,y:mt+ph+30,"font-size":10,"font-weight":700,fill:"#80868b"},[tx("productive audit-hours →")]));
  rows.forEach(function(r){var m=r[kind],c=HUE[r.backend]||HUE.codex;
-  var name=r.model||r.backend;
+  var name=label(r);
   if(r.condition!=="harness"){ // single-shot control: one point where it stopped
    if(!m.accepted)return;var x=X(r.wall_h||.4),y=Y(m.accepted);
    var tri=el("polygon",{points:[[x-6,y-6],[x-6,y+6],[x+6,y]].map(function(p){return p.join(",")}).join(" "),
     fill:"#fff",stroke:c,"stroke-width":2,"stroke-linejoin":"round"});
    s.appendChild(tri);
    hover(tri,name+" · model-direct",[
-    {text:m.accepted+" "+noun(kind,m.accepted)+" accepted"},
-    {text:"bare model, no harness — one shot, stopped at "+hrs(r.wall_h)},
-    {text:"Control baseline: a plain “find the vulnerabilities” prompt with no triage or dedup, so a large raw count here is mostly noise.",dim:true}]);
+    {text:m.accepted+" separate "+noun(kind,m.accepted)+" kept"},
+    {text:"the model on its own, no harness — one attempt, stopped at "+hrs(r.wall_h)},
+    {text:"This is the comparison point: the model was asked plainly to find vulnerabilities and given none of the harness's tooling. What it reported was then checked and counted the same way as the row above — the same bug reported twice counts once, and anything that did not hold up was dropped. So this number is directly comparable, not a raw tally.",dim:true},
+    {text:"Its crashes had to clear one extra bar: each had to crash again when the target was run normally. Anything that did not is counted as a finding here instead.",dim:true}]);
    s.appendChild(el("text",{x:x+10,y:y+4,"font-size":10.5,fill:"#5f6368"},[tx(m.accepted)]));return}
   var at=m.accepted_times||[],pts=steps(at);
   if(!pts.length)return;
@@ -550,15 +555,17 @@ function panel(host,kind,rows){
    var hit=el("circle",{cx:px,cy:py,r:9,fill:"transparent","class":"hit"});
    s.appendChild(dot);s.appendChild(hit);
    hover(hit,name+" · tokenfuzz",[
-    {text:noun(kind,1)+" #"+(i+1)+" of "+m.accepted+" accepted"},
-    {text:"found "+hrs(t)+" into the run"}],dot)});
+    {text:noun(kind,1)+" #"+(i+1)+" of "+m.accepted+" kept"},
+    {text:"first seen "+hrs(t)+" into the run"},
+    {text:"One separate problem, not one report. The same problem written up more than once counts once here, and the step is placed at the first time it was seen.",dim:true}],dot)});
   var ex=X(end[0]);
   var dia=el("polygon",{points:[[ex,Y(end[1])-5.5],[ex+5.5,Y(end[1])],[ex,Y(end[1])+5.5],[ex-5.5,Y(end[1])]]
     .map(function(p){return p.join(",")}).join(" "),fill:c,stroke:"#fff","stroke-width":2,"class":"hit"});
   s.appendChild(dia);
   var finalLines=[
-   {text:"final total: "+m.accepted+" "+noun(kind,m.accepted)+" accepted"},
-   {text:"over a "+hrs(r.wall_h)+" audit"}];
+   {text:"final total: "+m.accepted+" separate "+noun(kind,m.accepted)+" kept"},
+   {text:"over a "+hrs(r.wall_h)+" audit"},
+   {text:"Counted across this run's repeat attempts with duplicates merged — the same number as the Unique accepted column above.",dim:true}];
   if(m.approx_timing)finalLines.push({text:"discovery timing approximate",italic:true});
   hover(dia,name+" · tokenfuzz",finalLines);
   s.appendChild(el("text",{x:ex+10,y:Y(end[1])+4,"font-size":11.5,"font-weight":700,fill:"#202124"},[tx(m.accepted)]))});
@@ -577,7 +584,7 @@ D.target_groups.forEach(function(tg){
  var h3=document.createElement("h3");h3.appendChild(tx(tg.target+" "));
  var sha=document.createElement("span");sha.className="sha";sha.textContent=tg.target_sha.slice(0,7);h3.appendChild(sha);rh.appendChild(h3);
  var meta=document.createElement("span");meta.className="meta";
- meta.textContent="harness "+Object.keys(vers).join(" · ")+(reps?" · "+reps+" replicate"+(reps>1?"s":"")+" pooled":"");
+ meta.textContent="harness "+Object.keys(vers).join(" · ")+(reps?" · "+reps+" repeat run"+(reps>1?"s":"")+", duplicates merged":"");
  rh.appendChild(meta);sec.appendChild(rh);
  var g=document.createElement("div");g.className="grid";
  [["find","Security findings"],["crash","Security crashes"]].forEach(function(kk){
@@ -597,7 +604,7 @@ def render(data: dict) -> str:
     return (
         "<style>" + _CSS + "</style>\n"
         '<section class="ttd">\n<p class="kick">Time to discovery</p>\n'
-        "<h2>What each backend found, and what survived the gate</h2>\n"
+        "<h2>What each backend found, and what held up when checked</h2>\n"
         + _KEY
         + '<p class="hint">Hover any point — a discovery marker, a ◇ final total, '
         'or a ▷ model-direct control — for what it is, its count, and its time.</p>\n'
