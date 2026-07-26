@@ -261,7 +261,8 @@ proc = run(["decide-flags", "claude"], check=True)
 f = flags(proc)
 ok("--print" in f, "decide claude --print")
 ok("--max-turns" not in f, "decide claude has no turn cap (timeout-bounded, like codex/gemini)")
-ok("text" in f, "decide claude text output")
+assert_eq("json", f[f.index("--output-format") + 1],
+          "decide claude asks for the usage-bearing envelope")
 turns_idx = f.index("--permission-mode")
 assert_eq("plan", f[turns_idx + 1], "decide claude uses read-only plan mode")
 ok("--dangerously-skip-permissions" not in f, "decide claude omits skip-permissions (read-only, not full access)")
@@ -709,8 +710,14 @@ ok("--safe-mode" in decide_claude, "decide_flags('claude') disables user customi
 ok("--no-session-persistence" in decide_claude, "decide_flags('claude') disables persistence")
 ok("--max-turns" not in decide_claude, "decide_flags('claude') has no turn cap")
 ok("plan" in decide_claude, "decide_flags('claude') uses read-only plan mode")
+# The single-result envelope is what carries this call's measured usage; text
+# output leaves decision spend to be estimated from character counts.
+assert_eq("json", decide_claude[decide_claude.index("--output-format") + 1],
+          "decide_flags('claude') asks for the usage-bearing envelope")
 
 decide_codex = inv.decide_flags("codex")
+ok("--json" in decide_codex,
+   "Codex decisions ask for usage-bearing JSONL")
 ok("features.plugins=false" in decide_codex,
    "Codex decisions disable plugins")
 
@@ -765,6 +772,12 @@ ok(Path(pol).is_file(), "the admin policy file exists on disk", pol)
 ok("save_memory" in Path(pol).read_text(), "the policy file names the save_memory tool")
 ok("--admin-policy" in inv.decide_flags("gemini"),
    "Gemini CLI decide also denies save_memory by default")
+gemini_decide = inv.decide_flags("gemini")
+assert_eq(
+    "stream-json",
+    gemini_decide[gemini_decide.index("--output-format") + 1],
+    "Gemini CLI decisions ask for usage-bearing stream JSON",
+)
 os.environ.pop("USE_GEMINI_CLI", None)
 
 ok(not any("memor" in x.lower() for x in inv.agent_flags("claude")),

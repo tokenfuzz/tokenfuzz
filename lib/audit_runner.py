@@ -916,6 +916,32 @@ def _claude_stream_idle_retry_needed(raw_path: Path) -> bool:
         return False
 
 
+_TOKEN_DISPLAY_BUCKETS = (
+    ("in", "input"), ("cache", "cached_input"),
+    ("create", "cache_creation"), ("out", "output"),
+)
+
+
+def _token_display(usage: dict, complete: bool) -> str:
+    """Render a session's token use as its separate buckets.
+
+    Never one sum. Fresh input, cache writes, cache reads, and output are
+    different operations at different prices, and a single figure reads as
+    generated content when it is mostly replayed context — which is how a
+    context-replay cost was once diagnosed as a prompt-size problem. The same
+    shape bin/benchmark prints per cell.
+    """
+    counts = usage.get("tokens") or {}
+    buckets = {label: int(counts.get(key) or 0) for label, key in _TOKEN_DISPLAY_BUCKETS}
+    if not any(buckets.values()):
+        # Nothing measured and nothing estimated: say so rather than print
+        # four zeroes that read as a session which used no tokens.
+        return "unknown" if not complete else "0"
+    rendered = " ".join(f"{label}:{value}" for label, value in buckets.items())
+    estimated = usage.get("estimated") is True or not complete
+    return f"{rendered} (estimated)" if estimated else rendered
+
+
 def run_agent(
     runtime: Runtime, context: prompt.PromptContext, agent: int,
     iteration: int, cold: bool, timeout_limit: int | None = None,
@@ -1021,11 +1047,6 @@ def run_agent(
         "raw_log": str(raw_path), "text_log": str(text_path), **usage,
     }
     workqueue.append_jsonl(runtime.index_jsonl, event)
-    token_counts = usage.get("tokens") or {}
-    total_tokens = sum(
-        int(token_counts.get(key) or 0)
-        for key in ("input", "cached_input", "cache_creation", "output")
-    )
     outcome = (
         "turn-capped; continuing from state"
         if turn_capped
@@ -1033,7 +1054,7 @@ def run_agent(
         if rc == 124 and issue == "none"
         else f"finished rc={rc}"
     )
-    token_display = str(total_tokens) if usage_complete else "unknown"
+    token_display = _token_display(usage, usage_complete)
     index_log(
         runtime,
         f"Agent {agent} {launch} {outcome} provider={issue} "

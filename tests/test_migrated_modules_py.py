@@ -1573,6 +1573,192 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
             f"{usage_backend} one-shot decisions append labeled estimated usage",
             repr(usage_row),
         )
+
+    # The shape `claude --print --output-format json` actually returns. The
+    # envelope is valid JSON, so a parser that reads it as the decision finds
+    # none of the required keys and fails without arming the breaker — every
+    # decision falling open at once. Unwrapping it is what keeps the answer
+    # parseable, and keeping it whole is what makes the usage measured.
+    envelope_index = root / "usage-index-envelope.jsonl"
+    envelope = json.dumps({
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": decision_payload,
+        "usage": {
+            "input_tokens": 2, "cache_creation_input_tokens": 6647,
+            "cache_read_input_tokens": 15185, "output_tokens": 9,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 6647,
+                "ephemeral_5m_input_tokens": 0,
+            },
+        },
+        "modelUsage": {
+            "claude-opus-5[1m]": {
+                "inputTokens": 2, "outputTokens": 9,
+                "cacheReadInputTokens": 15185,
+                "cacheCreationInputTokens": 6647,
+                "costUSD": 0.0742975,
+            },
+        },
+        "total_cost_usd": 0.0742975,
+    })
+    with mock.patch.dict(os.environ, {
+        "ACTIVE_BACKEND": "claude", "MODEL": "fixture-model",
+    }, clear=False), mock.patch.object(
+        llm_decide, "_invoke_backend", return_value=envelope,
+    ):
+        envelope_result, envelope_error = llm_decide._run_decision(
+            "find_quality", "accept,reason,class,severity", "p" * 400, 1, "",
+            envelope_index,
+        )
+    envelope_row = json.loads(envelope_index.read_text(encoding="utf-8"))
+    check(
+        envelope_result == {"accept": True, "reason": "ok", "class": "state", "severity": "low"}
+        and envelope_error is False
+        and envelope_row["estimated"] is False
+        and envelope_row["usage_complete"] is True
+        and envelope_row["tokens"] == {
+            "input": 2, "cached_input": 15185, "cache_creation": 6647,
+            "cache_creation_1h": 6647, "output": 9,
+        },
+        "a decision envelope parses to the answer and meters its own usage",
+        repr(envelope_row),
+    )
+    result_shaped_answer = json.dumps({
+        "type": "result", "result": "model-selected value",
+        "accept": True, "reason": "ok", "class": "state", "severity": "low",
+    })
+    with mock.patch.dict(os.environ, {
+        "ACTIVE_BACKEND": "codex", "MODEL": "fixture-model",
+    }, clear=False), mock.patch.object(
+        llm_decide, "_invoke_backend", return_value=result_shaped_answer,
+    ):
+        result_shaped, result_shaped_error = llm_decide._run_decision(
+            "find_quality", "accept,reason,class,severity", "p" * 400, 1, "",
+        )
+    check(
+        result_shaped == {
+            "type": "result", "result": "model-selected value",
+            "accept": True, "reason": "ok", "class": "state", "severity": "low",
+        }
+        and result_shaped_error is False,
+        "another backend's result-shaped answer is not mistaken for a Claude envelope",
+        repr(result_shaped),
+    )
+    check(
+        llm_decide._decision_payload(
+            '{"accept":true}', "claude",
+        ) == '{"accept":true}'
+        and llm_decide._decision_payload("prose", "claude") == "prose"
+        and llm_decide._decision_payload(
+            '{"type":"result","result":"decision value"}', "codex",
+        ) == '{"type":"result","result":"decision value"}',
+        "a bare decision response is left as it is",
+    )
+
+    # opencode streams the answer as events and closes with the step_finish
+    # that carries its token counts, so the stream is what the usage recorder
+    # needs and the concatenated assistant text is what the parser needs.
+    stream_index = root / "usage-index-stream.jsonl"
+    stream = "\n".join(json.dumps(event) for event in (
+        {"type": "step_start", "part": {"type": "step-start"}},
+        {"type": "text", "part": {"type": "text", "text": decision_payload}},
+        {"type": "step_finish", "part": {
+            "type": "step-finish", "cost": 0,
+            "tokens": {
+                "total": 11941, "input": 11887, "output": 54,
+                "reasoning": 0, "cache": {"write": 0, "read": 0},
+            },
+        }},
+    ))
+    with mock.patch.dict(os.environ, {
+        "ACTIVE_BACKEND": "oss", "MODEL": "fixture-local-model",
+    }, clear=False), mock.patch.object(
+        llm_decide, "_invoke_backend", return_value=stream,
+    ):
+        stream_result, stream_error = llm_decide._run_decision(
+            "find_quality", "accept,reason,class,severity", "p" * 400, 1, "",
+            stream_index,
+        )
+    stream_row = json.loads(stream_index.read_text(encoding="utf-8"))
+    check(
+        stream_result == {"accept": True, "reason": "ok", "class": "state", "severity": "low"}
+        and stream_error is False
+        and stream_row["estimated"] is False
+        and stream_row["tokens"]["input"] == 11887
+        and stream_row["tokens"]["output"] == 54,
+        "an event stream parses to the answer and meters its own usage",
+        repr(stream_row),
+    )
+    check(
+        llm_decide._decision_payload("not a stream", "oss") == "not a stream",
+        "a transport that yields no assistant text is left as it is",
+    )
+
+    # Codex and native Gemini expose the same measured terminal counts used by
+    # full audit sessions. Decisions must retain those transports too; plain
+    # output silently turns both into character-count estimates.
+    for structured_backend, structured_stream, structured_tokens in (
+        (
+            "codex",
+            "\n".join(json.dumps(event) for event in (
+                {"type": "thread.started", "thread_id": "fixture"},
+                {"type": "item.completed", "item": {
+                    "type": "agent_message", "text": decision_payload,
+                }},
+                {"type": "turn.completed", "usage": {
+                    "input_tokens": 12003, "cached_input_tokens": 11000,
+                    "output_tokens": 38,
+                }},
+            )),
+            {"input": 12003, "cached_input": 11000, "output": 38},
+        ),
+        (
+            "gemini",
+            "\n".join(json.dumps(event) for event in (
+                {"type": "init", "session_id": "fixture"},
+                {"type": "message", "role": "assistant",
+                 "content": decision_payload},
+                {"type": "result", "status": "success", "stats": {
+                    "input_tokens": 8011, "cached": 7000,
+                    "output_tokens": 29,
+                }},
+            )),
+            {"input": 8011, "cached_input": 7000, "output": 29},
+        ),
+    ):
+        structured_index = (
+            root / f"usage-index-structured-{structured_backend}.jsonl"
+        )
+        env = {
+            "ACTIVE_BACKEND": structured_backend, "MODEL": "fixture-model",
+        }
+        if structured_backend == "gemini":
+            env["USE_GEMINI_CLI"] = "1"
+        with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+            llm_decide, "_invoke_backend", return_value=structured_stream,
+        ):
+            structured_result, structured_error = llm_decide._run_decision(
+                "find_quality", "accept,reason,class,severity", "p" * 400, 1,
+                "", structured_index,
+            )
+        structured_row = json.loads(
+            structured_index.read_text(encoding="utf-8")
+        )
+        check(
+            structured_result == {
+                "accept": True, "reason": "ok", "class": "state",
+                "severity": "low",
+            }
+            and structured_error is False
+            and structured_row["estimated"] is False
+            and structured_row["usage_complete"] is True
+            and all(
+                structured_row["tokens"][key] == value
+                for key, value in structured_tokens.items()
+            ),
+            f"{structured_backend} decision transport preserves answer and measured usage",
+            repr((structured_result, structured_row)),
+        )
     timeout_index = root / "usage-index-timeout.jsonl"
     timeout_error = subprocess.TimeoutExpired(
         ["claude"], 45, output=b'{"type":"assistant"}', stderr=b"partial",

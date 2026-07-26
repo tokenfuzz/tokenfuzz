@@ -85,6 +85,40 @@ class AuditClockTests(unittest.TestCase):
             90,
         )
 
+    def test_session_tokens_are_reported_as_separate_buckets(self) -> None:
+        # Summing them reads as generated content when the figure is almost
+        # entirely replayed context, which is how a cache-replay cost gets
+        # diagnosed as a prompt-size problem.
+        measured = audit_runner._token_display(
+            {"tokens": {
+                "input": 1_200, "cached_input": 81_500_000,
+                "cache_creation": 505_000, "output": 264_000,
+            }},
+            True,
+        )
+        self.assertEqual(
+            measured, "in:1200 cache:81500000 create:505000 out:264000",
+        )
+        self.assertNotIn(str(1_200 + 81_500_000 + 505_000 + 264_000), measured)
+        # A session that ended without terminal telemetry still has real cache
+        # numbers; hiding them loses the buckets that dominate the bill.
+        self.assertTrue(
+            audit_runner._token_display(
+                {"tokens": {"cached_input": 5}}, False,
+            ).endswith(
+                "(estimated)",
+            )
+        )
+        # Recovered Claude and character-count-only generic-backend rows are
+        # usable enough to keep the audit moving, so usage_complete can be true
+        # even though the numbers remain estimates.
+        self.assertTrue(
+            audit_runner._token_display(
+                {"tokens": {"cached_input": 5}, "estimated": True}, True,
+            ).endswith("(estimated)")
+        )
+        self.assertEqual(audit_runner._token_display({}, False), "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

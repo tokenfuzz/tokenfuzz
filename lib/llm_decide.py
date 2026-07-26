@@ -89,7 +89,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -101,9 +100,9 @@ from typing import Optional
 # because both files live in the harness lib/ directory).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llm_invoke import (  # noqa: E402
+    _cli_assistant_texts as _assistant_texts,
     decide_flags as _decide_flags_for_backend,
     default_model as _default_model,
-    extract_text as _extract_backend_text,
     gemini_default_bin as _gemini_default_bin,
     ensure_project_root as _ensure_project_root,
     invocation_env as _invocation_env,
@@ -673,7 +672,6 @@ def _invoke_backend(
     # codex carries its disable as `-c` flags already in the decide flags.
     child_env = os.environ.copy()
     child_env.update(_invocation_env(backend, model))
-    temp_dir = None
     run_input = prompt
     launch_cwd = None
     if backend == "grok" or (backend == "gemini" and not gemini_cli):
@@ -690,48 +688,38 @@ def _invoke_backend(
             cmd[1:1] = ["--cwd", str(launch_cwd)]
         run_input = None
     if backend == "oss":
-        # Build the config first: _opencode_config can raise ValueError (no
-        # model), and doing it before TemporaryDirectory() avoids leaking an
-        # uncleaned temp dir on that error path.
-        config_content = json.dumps(_opencode_config(model), separators=(",", ":"))
-        temp_dir = tempfile.TemporaryDirectory(prefix="tokenfuzz-opencode-decide-")
-        child_env["OPENCODE_CONFIG_CONTENT"] = config_content
+        child_env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            _opencode_config(model), separators=(",", ":"),
+        )
         cmd = [*cmd, prompt]
         run_input = None
 
     try:
-        try:
-            result = run_timeout(
-                cmd,
-                input=run_input,
-                capture_output=True,
-                text=True,
-                seconds=timeout_secs,
-                env=child_env,
-                cwd=launch_cwd,
-            )
-        except subprocess.TimeoutExpired:
-            raise
-        except OSError:
-            return None
+        result = run_timeout(
+            cmd,
+            input=run_input,
+            capture_output=True,
+            text=True,
+            seconds=timeout_secs,
+            env=child_env,
+            cwd=launch_cwd,
+        )
+    except subprocess.TimeoutExpired:
+        raise
+    except OSError:
+        return None
 
-        if result.returncode == 124:
-            raise subprocess.TimeoutExpired(
-                cmd, timeout_secs, output=result.stdout, stderr=result.stderr,
-            )
-        if result.returncode != 0:
-            # Caller logs the backend-specific rc.
-            raise subprocess.CalledProcessError(result.returncode, cmd, output=result.stdout, stderr=result.stderr)
-        if backend == "oss":
-            if temp_dir is None:
-                return result.stdout or ""
-            raw_path = Path(temp_dir.name) / "opencode.jsonl"
-            raw_path.write_text(result.stdout or "", encoding="utf-8")
-            return _extract_backend_text("oss", str(raw_path))
-        return result.stdout or ""
-    finally:
-        if temp_dir is not None:
-            temp_dir.cleanup()
+    if result.returncode == 124:
+        raise subprocess.TimeoutExpired(
+            cmd, timeout_secs, output=result.stdout, stderr=result.stderr,
+        )
+    if result.returncode != 0:
+        # Caller logs the backend-specific rc.
+        raise subprocess.CalledProcessError(result.returncode, cmd, output=result.stdout, stderr=result.stderr)
+    # Raw, for every backend: what a backend reports about its own token use
+    # travels in the transport around the answer, and the caller records that
+    # before _decision_payload separates the answer out.
+    return result.stdout or ""
 
 
 # ── JSON extraction & key validation ────────────────────────────────
@@ -804,6 +792,48 @@ def _balanced_spans(raw: str, open_ch: str, close_ch: str) -> list[str]:
             j += 1
         i = j + 1 if j < n else i + 1
     return spans
+
+
+def _decision_payload(raw: str, backend: str) -> str:
+    """The model's answer, separated from the transport it arrived in.
+
+    A backend that meters itself reports those counts in the transport, not in
+    the answer, so the caller records the whole of it and only the answer
+    reaches the parser. Claude wraps the answer in one result envelope. Codex,
+    OpenCode, and native Gemini stream assistant text followed by a terminal
+    event carrying usage.
+
+    Per backend, never by sniffing: Claude's envelope is itself valid JSON, so
+    left whole `_extract_json` would take it for the decision, match none of
+    the required keys, and fail on the branch that deliberately does not arm
+    the breaker — every decision falling open at once, quietly. Recognising
+    that shape anywhere would lose the verdict of a backend that legitimately
+    answers with `type` and `result` fields. A bare answer is returned as it
+    is, and so is a transport that yields nothing.
+    """
+    if backend == "claude":
+        envelope = _try_load(raw)
+        if (
+            isinstance(envelope, dict)
+            and envelope.get("type") == "result"
+            and isinstance(envelope.get("result"), str)
+        ):
+            return envelope["result"]
+        return raw
+    if backend in ("codex", "oss") or (
+        backend == "gemini" and _use_gemini_cli()
+    ):
+        pieces: list[str] = []
+        for line in raw.splitlines():
+            event = _try_load(line)
+            if isinstance(event, dict):
+                pieces.extend(_assistant_texts(backend, event))
+        # OpenCode and Gemini emit text fragments; inserting separators can
+        # corrupt a JSON answer split across events. Codex emits complete
+        # agent-message items, for which a newline preserves message bounds.
+        separator = "\n" if backend == "codex" else ""
+        return separator.join(pieces).rstrip("\n") or raw
+    return raw
 
 
 def _extract_json(raw: str) -> Optional[str]:
@@ -1135,6 +1165,7 @@ def _run_decision(
     t_start = time.time()
 
     raw: str = ""
+    backend = ""
 
     def raw_string(raw_text: object) -> str:
         if isinstance(raw_text, bytes):
@@ -1221,7 +1252,7 @@ def _run_decision(
     # Beyond this point the backend answered; any failure is a content problem
     # for THIS prompt (bad/empty/malformed JSON), not a failing decision class,
     # so backend_error stays False — the per-type breaker must not arm.
-    json_text = _extract_json(raw)
+    json_text = _extract_json(_decision_payload(raw, backend))
     if json_text is None:
         _llm_log(f"{decision} FAIL extract-json bytes={prompt_bytes} elapsed={elapsed}s")
         # Some backends surface a usage limit as a rate-limit event on stdout

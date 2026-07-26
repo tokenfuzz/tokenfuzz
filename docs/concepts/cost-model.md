@@ -158,6 +158,12 @@ row `estimated: true` because fresh input and output remain lower bounds. A
 terminated Codex session with no usage stays unknown. Antigravity and Grok rows
 without native usage are estimated from prompt and transcript size.
 
+One-shot harness decisions use the same ledger. Claude, Codex, native Gemini,
+and OpenCode keep their structured usage transport, then separate the
+assistant's answer before parsing the verdict. Antigravity and Grok decisions
+remain explicitly estimated because their current transports do not provide
+reliable native counts.
+
 The row also records `turn_soft_cap` and `turn_capped`, so cost comparisons can
 separate natural completions from sessions rolled over to fresh context.
 

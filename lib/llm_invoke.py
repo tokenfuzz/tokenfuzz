@@ -1211,7 +1211,7 @@ def session_turn_capped(raw_log: str | os.PathLike[str]) -> bool:
 def decide_flags(backend: str, model: str = "") -> list[str]:
     """Build the flag array for a decision call.
 
-    Read-only tools, text output, and no turn cap: every backend runs a
+    Read-only tools and no turn cap: every backend runs a
     decision bounded by the decision timeout, not a fixed number of turns, so a
     decision that reads source to judge (find_quality, reachability, cluster
     siblings, …) can — with the same read-only reach across backends: codex
@@ -1231,11 +1231,15 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         # plugins/skills/hooks/statusline context. Unlike full audit-agent
         # sessions, decide calls are never resumed, so session persistence is
         # disabled too.
+        # json, not text: the single-result envelope carries this call's own
+        # usage — fresh input, both cache buckets, the TTL split, and output —
+        # so decision spend is measured instead of estimated from character
+        # counts. lib/llm_decide.py unwraps the envelope before parsing.
         flags = [
             "--print",
             "--safe-mode",
             "--no-session-persistence",
-            "--output-format", "text",
+            "--output-format", "json",
             "--permission-mode", "plan",
         ]
         if resolved_model:
@@ -1246,7 +1250,8 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
 
     if backend == "codex":
         flags = [
-            "--ephemeral", *_CODEX_PLUGIN_OFF_FLAGS, *_CODEX_PROJECT_ROOT_FLAGS,
+            "--json", "--ephemeral",
+            *_CODEX_PLUGIN_OFF_FLAGS, *_CODEX_PROJECT_ROOT_FLAGS,
             "--skip-git-repo-check", "--sandbox", "read-only",
         ]
         if resolved_model:
@@ -1268,7 +1273,12 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         if use_gemini_cli():
             # Plan mode is Gemini CLI's read-only approval mode, matching
             # decide calls' single-shot/no-write contract.
-            flags = ["--approval-mode=plan", "--skip-trust"]
+            # stream-json retains the terminal stats block, so the decision
+            # ledger uses native counts instead of a character estimate.
+            flags = [
+                "--approval-mode=plan", "--skip-trust",
+                "--output-format", "stream-json",
+            ]
             if resolved_model:
                 flags += ["--model", resolved_model]
             # Deny save_memory even here, so the no-write contract holds
