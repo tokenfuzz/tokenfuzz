@@ -1,5 +1,89 @@
 # Changelog
 
+## 1.3.0 - 2026-07-26
+
+- **One build generation per run, and no more phantom rebuilds.** Output a target
+  wrote into its own tree during a test run — an ignored `runsuite.log` — counted
+  as a source edit, so a concurrent benchmark's preflight replaced the shared
+  `build-asan` mid-cell and finalization then refused to replay crash evidence
+  that was perfectly valid. Freshness is now content-based over VCS-reported
+  working-tree state, for git and Mercurial: ignored output, a restaged change
+  and an edit that is reverted all leave a build fresh, while dirty submodule
+  content no longer hashes to a constant, and a VCS that cannot answer reports
+  "unknown" — never stamped, never matched — so downtime cannot make an edited
+  tree read as fresh. Every process that executes a build holds a shared lease
+  on it and every rebuild takes the exclusive one, so a build is never replaced
+  under a live run — a rebuild that cannot get the lease says so and leaves the
+  tree alone. A benchmark pins one build generation, one source state and one
+  set of experiment settings for its whole run: it refuses to start on a build
+  it cannot verify or hold, refuses when a peer run claimed the checkout for
+  different source, and refuses to resume into a different generation or under a
+  changed model, effort, budget, agent count or target revision. A resumed run
+  verifies and never converges, so it cannot rebuild the generation its finished
+  cells depend on, and its cells verify but never build. Cells that read
+  different source
+  keep every artifact and leave the headline comparison instead of being averaged
+  into it. Concurrent backends on identical inputs share one build and add no
+  disk; `--isolate-build` is available for recipe and configuration comparisons,
+  keyed by build inputs so identical divergence shares one tree, and unreferenced
+  isolated trees are collected once no run needs them for replay.
+
+- **Crash replay happens under the build the crash was found on.** A pooled
+  replay used to run against whatever build was on disk at finalization time,
+  which silently re-measured old evidence with a new binary. Runs now record the
+  identity of the artifacts a replay would execute and skip — loudly, with the
+  original evidence untouched — rather than reporting a rate that belongs to a
+  different compile.
+
+- **The cold-start recon stage is gone.** It generated candidate leads before any
+  investigation had happened, and on a large target that unbounded generation
+  crowded out the audit it was meant to feed: hundreds of unverified guesses,
+  almost none of which survived triage. Audits now start from ranked work rather
+  than from a pile of speculation.
+
+- **Long sessions roll over instead of dying at the provider's ceiling.** A
+  session that exhausts a backend's context or turn limit now continues in a
+  fresh session with its state intact, across every hosted backend, so a
+  multi-hour investigation is no longer capped by one session's limits.
+
+- **Token use is measured, not estimated.** Usage is read from what the provider
+  actually reports instead of summed from local guesses, so cost and efficiency
+  columns describe the run that happened. Backend tier ceilings and decision
+  timeouts are honored from one place, and the Grok tier boundary is exact.
+
+- **Refreshed backend defaults and rate cards.** Claude defaults to Opus 5,
+  Gemini to `gemini-3.6-flash`, and Grok to `grok-4.5`, with vendor pricing
+  updated alongside so cost reporting matches current rates.
+
+- **Benchmark reporting states what it can prove.** Rejected-crash reasons come
+  from the rejection artifact rather than being inferred, live cell progress shows
+  raw finding and crash totals as they land, the result page's legend and labels
+  match what is plotted, an agent-compiled harness is replayed with its library on
+  the path, and a resumed run retries only the cells that actually need it.
+  Finding validation gets its own bounded budget so a crash-heavy cell can no
+  longer starve it.
+
+- **Runs no longer leak processes or scratch files.** Escaped cell and agent
+  descendants are reaped by inherited ownership on normal and abnormal exit, the
+  session watchdog exit race is closed, and agent working files stay out of
+  shared `/tmp`.
+
+- **Reproducers name the revision they were audited at.** Exports record the
+  audited revision instead of silently pinning whatever the checkout had become,
+  and a target's learned native sanitizer invocation is preserved across setup so
+  a working configuration is not re-derived and lost. Stale sanitizer recipes are
+  repaired without discarding the build that still works.
+
+- **Investigation quality.** Deep investigation rotates off cold subsystems and
+  deepens on evidence, the queue prioritizes executable sanitizer work, severity
+  honors structured primitive evidence, truncated trigger-vote batches are
+  recovered and retried once, prompts allow targeted source revisits, and
+  explicit sanitizer runs are accounted within budget.
+
+- Internal: hot re-reads, re-parses and report source lookups are cached across a
+  pass, and the handbook is corrected against the code with harness internals
+  removed.
+
 ## 1.2.0 - 2026-07-17
 
 - **Alternate build-configuration coverage for native targets.** Auditing only
