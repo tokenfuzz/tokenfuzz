@@ -33,7 +33,12 @@
   verifies and never converges, so it cannot rebuild the generation its finished
   cells depend on, and its cells verify but never build; cells that read
   different source keep every artifact and leave the headline comparison instead
-  of being averaged into it. Concurrent backends on identical inputs share one
+  of being averaged into it. Pinning and drift compare the revision and tracked
+  product source only, so the crafted inputs a model-direct cell writes into the
+  checkout it drives — including inside submodules — no longer read as source
+  drift and exclude a finished cell over its own by-products, while build
+  freshness stays conservative about the same paths because they could still be
+  build inputs. Concurrent backends on identical inputs share one
   build and add no disk; `--isolate-build` is available for recipe and
   configuration comparisons, keyed by build inputs so identical divergence shares
   one tree, and unreferenced isolated trees are collected once no run needs them
@@ -50,6 +55,25 @@
   sanitizer family, fault primitive, function, source path and line, so a
   duplicate basename no longer collides, and uncharacterised evidence claims no
   rate at all.
+
+- **The program under test is the one that reads attacker input.** Setup could
+  bootstrap a project's test-suite driver as the runner, or fail to bootstrap one
+  at all: a CMake `ALIAS` form was read as an executable, collided with a
+  same-named library, and suppressed the fallback holding the real programs, so
+  detection took the first binary in the build tree and every backend then
+  refused its argv. Detection alone cannot finish the job — a project installs
+  several CLIs and only one reads attacker-supplied input — so reference-only
+  target forms are dropped, every instrumented CLI is offered with its own help
+  text under opaque ids for the model to choose from, the launch check decides,
+  and one bounded revision round follows a rejection. The chosen program is
+  written into every enabled sanitizer's `<san>_bin` or setup refuses, because
+  `[runner].args` are shared and a sibling build keeping a different program
+  would turn probes into misleading clean runs; a configured field that still
+  works for the sanitizer it names now survives a refresh instead of reverting to
+  a detection guess. The same requirement holds at runtime: a target's native
+  sanitizer invocation is learned from its own CLI help, proven to consume the
+  input, and threaded through probe, bundles, reverification and export, so a
+  target that never parsed its testcase can no longer run clean.
 
 - **Long sessions roll over instead of dying at the provider's ceiling.** A
   session that exhausts a backend's context or turn limit now continues in a
@@ -125,11 +149,8 @@
 - **Reproducers name the revision they were audited at.** The stale `pinned_rev`
   field is gone: a report or bundle uses the session's recorded revision, else
   the checkout's own, and `reproduce.sh` stops with exit 3 rather than building a
-  different commit and reporting "does not reproduce" for a real bug. A target's
-  native sanitizer invocation is learned from its own CLI help, proven to consume
-  the input, and threaded through probe, bundles, reverification and export, so a
-  target that never parsed its testcase can no longer run clean. Stale sanitizer
-  recipes rebuild from a clean canonical path with bounded repair attempts and
+  different commit and reporting "does not reproduce" for a real bug. Stale
+  sanitizer recipes rebuild from a clean canonical path with bounded repair attempts and
   keep the previous usable tree on failure.
 
 - **Runs no longer leak processes or scratch files.** A backgrounded fuzzer that
@@ -141,7 +162,8 @@
 
 - Internal: hot re-reads, re-parses and report source lookups are cached across a
   pass with stat-signature invalidation and bounded memory, and the handbook is
-  corrected against the code with harness internals removed.
+  corrected against the code with harness internals removed and the development
+  guide tightened around explicit review and security discipline.
 
 ## 1.2.0 - 2026-07-17
 
