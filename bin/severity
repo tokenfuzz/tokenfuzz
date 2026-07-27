@@ -35,6 +35,7 @@ sys.path.insert(0, str(HERE.parent / "lib"))
 
 import cvss4  # noqa: E402
 import crash_bundle  # noqa: E402
+import crash_artifacts  # noqa: E402
 import stack_frames  # noqa: E402
 import target_config as tc  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
@@ -120,6 +121,8 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     "stack_write":       ("H", "H", "H", "N", "N", "N", None),
     "global_write":      ("H", "H", "H", "N", "N", "N", None),
     # TSan race is write-shaped but winning the window is a precondition → AT:P.
+    # This row is the race-DETECTOR reading; a race argued from source alone is
+    # scored as `race_condition` below (see compute_severity).
     "data_race":         ("H", "H", "H", "N", "N", "N", "P"),
     # ── Memory reads — disclosure (+ crash availability) ──────────────────
     "uaf_read":          ("H", "N", "L", "N", "N", "N", None),
@@ -172,6 +175,11 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     # ── Reasoning-confirmed ───────────────────────────────────────────────
     "protocol_state":    ("N", "H", "N", "N", "N", "N", None),
     "logic_regression":  ("L", "L", "N", "N", "N", "N", None),
+    # A race read out of source: unsynchronized shared state defeats a security
+    # decision (a guard skipped, a cached verdict reused). The consequence is
+    # integrity of that decision, not the memory corruption a detector-confirmed
+    # `data_race` shows; winning the window is still a precondition → AT:P.
+    "race_condition":    ("N", "H", "N", "N", "N", "N", "P"),
     # "unknown" and "undefined_behavior" are intentionally absent: neither
     # supplies a security consequence from which CVSS impact can be derived.
     # Emitting a number for either would be a number dressed as a standard.
@@ -257,12 +265,12 @@ def _parse_repro_rate(report_text: str, fields: dict) -> tuple[int, int] | None:
 def _has_repro_artifacts(report_dir: Path | None) -> bool:
     if report_dir is None:
         return False
-    if any((report_dir / n).is_file() for n in ("reproduce.sh", "input.txt", "input.bin")):
-        return True
-    for pattern in ("testcase*", "poc*", "reproducer*", "input.*"):
-        if any(report_dir.glob(pattern)):
-            return True
-    return False
+    # Use the same target-agnostic classifier that triage and export use. It
+    # recognises input_1.html and arbitrary binary/parser inputs while excluding
+    # reports, logs, replay metadata (repro.cmd), directories, and empty files.
+    # A replay command alone is not proof that a testcase exists.
+    evidence_dirs = crash_artifacts.crash_evidence_dirs(Path(report_dir))
+    return crash_artifacts.find_reproducer_artifact(evidence_dirs) is not None
 
 
 # Probe-native CLEAN evidence embedded in a report body: the harness's
@@ -1335,6 +1343,7 @@ _NARRATIVE_ONLY_PRIMITIVES = frozenset({
     "secrets_exposure", "prototype_pollution", "xss", "open_redirect",
     "csrf", "regex_dos", "crypto_weakness", "injection",
     "protocol_state", "dos_amplification", "logic_regression",
+    "race_condition",
 })
 
 
@@ -1726,7 +1735,7 @@ def _repro_facts(report_text: str, fields: dict, cluster_size: int,
     if report_dir is not None:
         have_san = ((report_dir / "sanitizer.txt").is_file()
                     or any(report_dir.glob("*.asan.txt")))
-        have_tc = any(report_dir.glob("testcase*")) or any(report_dir.glob("poc*"))
+        have_tc = _has_repro_artifacts(report_dir)
         if have_san and have_tc:
             facts.append("testcase + sanitizer log on disk")
         elif have_san:
@@ -1902,6 +1911,9 @@ def compute_severity(report_text: str,
     # otherwise a structured Primitive field wins over narrative keywords.
     # This prevents a report about a confirmed read from being upgraded to a
     # write primitive merely because its discussion mentions a sibling write.
+    # A sanitizer-confirmed class with no CVSS row (undefined_behavior) still
+    # counts as authoritative: it is unscoreable, not open to a self-declared
+    # field overriding what the sanitizer observed.
     prim_key, prim_label = detect_primitive(report_text)
     narrative_memory_classified = (
         prim_key != "unknown" and prim_key not in _NARRATIVE_ONLY_PRIMITIVES
@@ -1932,6 +1944,22 @@ def compute_severity(report_text: str,
             prim_key = validated_primitive
             prim_label = validated_primitive.replace("_", " ")
             fields["validated_class"] = validated_class
+
+    # "Race" names two different bug classes that share a word. A detector
+    # verdict means a memory data race — write-shaped, UB, corruption-capable,
+    # which is what the `data_race` row prices. Argued from source it almost
+    # always means a logic/TOCTOU race: shared state defeating a security
+    # decision, an integrity consequence, not corruption. This is class
+    # disambiguation, not a claim that source review is less trustworthy than a
+    # detector — the diagnostic is simply the only signal that separates the two
+    # senses. A report that establishes some other consequence names it and is
+    # scored through it; only the bare `data_race` label is redirected.
+    # Enforced here, not left to the classifier prompt: the report-only field
+    # fill cannot tell the senses apart, and picking the memory-safety one is
+    # what turns a logic race into a High.
+    if prim_key == "data_race" and not runtime_authoritative:
+        prim_key = "race_condition"
+        prim_label = "race condition (no race-detector diagnostic)"
 
     # A sidecar-only HIGH-IMPACT primitive that no runtime or report analysis
     # supports, and that an on-disk sanitizer run contradicts, must not score

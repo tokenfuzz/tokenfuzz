@@ -116,6 +116,139 @@ class SeverityTests(unittest.TestCase):
             severity._detect_cluster_size("Cluster: FCL-abc (singleton)\n"), 1)
         self.assertEqual(severity._detect_cluster_size("no cluster field here\n"), 1)
 
+    def test_claimed_race_without_detector_scores_as_logic_race(self) -> None:
+        # A report-only classifier cannot tell a TSan-detected memory race from
+        # a race argued out of source, and picking `data_race` buys the
+        # code-execution row (VC/VI/VA H/H/H) — how an unsynchronized-shared-
+        # state finding with no runtime evidence at all reaches High.
+        #
+        # The fixture is the population this path actually sees: a race the
+        # quality gate already accepted as security-relevant, defeating a named
+        # security decision. VI:H is the floor for "a security control stopped
+        # holding", not an impact invented from the word "race" — a report that
+        # establishes some other consequence names it, and is scored through it
+        # (see test_a_race_that_names_its_consequence_scores_through_it).
+        claimed = self.make_report(
+            "A concurrent resolution skips the shared lookup table, so the "
+            "configured redirect is not applied and the untrusted identifier "
+            "is used verbatim.",
+            report_id="FIND-RACE", finding=True, reproduction="",
+            extra_fields=(("Primitive", "data_race"),),
+        )
+        scored = self.score(claimed)
+        self.assertEqual(scored["primitive_key"], "race_condition")
+        self.assert_metrics(scored, VC="N", VI="H", VA="N", AT="P")
+        self.assertEqual(scored["level"], "Medium")
+
+        # A race detector actually reported it: the memory-corruption reading
+        # is evidenced, so the row and the band are unchanged. Dropping this row
+        # would leave every TSan/Go-race crash unscored — rank 0, below any Low
+        # prose finding — which no test that checks only ground-truth
+        # attribution can see.
+        detected = self.make_report(
+            "concurrent access", report_id="CRASH-RACE",
+            extra_fields=(("Primitive", "data_race"),),
+        )
+        (detected / "sanitizer.txt").write_text(
+            "WARNING: ThreadSanitizer: data race\n"
+            "    #0 worker sample.c:31\n",
+            encoding="utf-8",
+        )
+        confirmed = self.score(detected)
+        self.assertEqual(confirmed["primitive_key"], "data_race")
+        self.assert_metrics(confirmed, VC="H", VI="H", VA="H")
+        self.assertIsNotNone(confirmed["score"])
+
+        # Prose that merely names a consequence the report speculates about is
+        # not evidence for it: a catalog-race narrative mentioning SSRF must not
+        # be scored through the ssrf row on the strength of the phrase.
+        speculative = self.make_report(
+            "The shared-state collision could enable server-side request forgery.",
+            report_id="FIND-RACE-PROSE", finding=True, reproduction="",
+            extra_fields=(("Primitive", "data_race"),),
+        )
+        self.assertEqual(self.score(speculative)["primitive_key"], "race_condition")
+
+    def test_a_race_that_names_its_consequence_scores_through_it(self) -> None:
+        # The redirect catches only the case where no consequence was named.
+        # A race whose report classifies what actually goes wrong keeps that
+        # class and its impact — so `race_condition` can never become a ceiling
+        # that flattens availability, disclosure, or corruption races into
+        # integrity-only.
+        for primitive, expected in (
+            ("dos_amplification", ("N", "N", "H")),
+            ("info_leak", ("H", "N", "L")),
+            ("authz_bypass", ("H", "L", "N")),
+            ("heap_write", ("H", "H", "H")),
+        ):
+            with self.subTest(primitive=primitive):
+                report = self.make_report(
+                    "concurrent access to shared state under load",
+                    report_id=f"FIND-{primitive}", finding=True, reproduction="",
+                    extra_fields=(("Primitive", primitive),),
+                )
+                scored = self.score(report)
+                self.assertEqual(scored["primitive_key"], primitive)
+                self.assert_metrics(
+                    scored, VC=expected[0], VI=expected[1], VA=expected[2],
+                )
+
+    def test_unsupported_race_claim_is_demoted_by_a_clean_sanitizer_run(self) -> None:
+        # The claimed-impact valve covers `race_condition` too: a race the
+        # report asserts but an on-disk run contradicts loses its impact rather
+        # than keeping a Medium band on the strength of the label alone.
+        report = self.make_report(
+            "concurrent counter update", report_id="FIND-RACE-CLEAN",
+            finding=True, reproduction="",
+            extra_fields=(("Primitive", "data_race"),),
+        )
+        (report / "sanitizer.txt").write_text(
+            "[probe] verdict=CLEAN\nNO CRASHES in 5 runs\n", encoding="utf-8",
+        )
+        scored = self.score(report)
+        self.assertEqual((scored["level"], scored["score"]), ("Needs review", None))
+
+    def test_sanitizer_class_without_a_row_still_outranks_a_claimed_field(self) -> None:
+        # `undefined_behavior` is deliberately absent from CVSS4_CLASS. Gating
+        # runtime authority on membership in that table would let a report's own
+        # `Primitive:` field overrule what the sanitizer observed — an
+        # unscoreable UB crash reappearing as a self-declared High.
+        report = self.make_report(
+            "ERROR: AddressSanitizer: new-delete-type-mismatch on 0x602000000010\n"
+            "SUMMARY: AddressSanitizer: new-delete-type-mismatch",
+            report_id="CRASH-UB", extra_fields=(("Primitive", "heap_write"),),
+        )
+        scored = self.score(report)
+        self.assertEqual(scored["primitive_key"], "undefined_behavior")
+        self.assertEqual((scored["level"], scored["score"]), ("Unknown", None))
+
+    def test_saved_reproducer_is_recognised_by_prefix_not_extension(self) -> None:
+        # A standalone reproducer harness writes `input_1.html` / `repro.cmd`;
+        # an exact `input.*` match graded that bundle as carrying no reproducer
+        # and dropped it to E:U — unproven, next to a saved, replayable input.
+        bundle = self.make_report(
+            "heap-buffer-overflow\nWRITE of size 8", report_id="FIND-REPRO",
+            finding=True, reproduction="",
+        )
+        self.assert_metrics(self.score(bundle), E="U")
+        (bundle / "repro.cmd").write_text("./harness input_1.html\n", encoding="utf-8")
+        self.assert_metrics(self.score(bundle), E="U")
+        (bundle / "input_1.html").write_text("<a>", encoding="utf-8")
+        self.assert_metrics(self.score(bundle), E="P")
+
+        metadata = self.make_report(
+            "heap-buffer-overflow\nWRITE of size 8",
+            report_id="FIND-REPRO-METADATA", finding=True, reproduction="",
+        )
+        (metadata / "reproduction-notes.md").write_text(
+            "No runnable testcase saved.\n", encoding="utf-8")
+        (metadata / "input-analysis.md").write_text(
+            "Potential input shape.\n", encoding="utf-8")
+        (metadata / "report.html").write_text(
+            "<html>Generated report</html>\n", encoding="utf-8")
+        (metadata / "input-files").mkdir()
+        self.assert_metrics(self.score(metadata), E="U")
+
     def test_primitive_detection_matrix(self) -> None:
         cases = {
             "heap-use-after-free\nWRITE of size 8": "uaf_write",

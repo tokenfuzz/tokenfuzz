@@ -17,6 +17,7 @@ ARTIFACT_EXACT = {
     "REPORT.md",
     "REPORT.html",
     "report.md",
+    "report.html",
     "description.md",
     "README.md",
     "reproduce.sh",
@@ -64,6 +65,21 @@ TESTCASE_PREFIXES = (
     "repro_",
     "repro-",
     "reproducer",
+)
+
+# Explicit self-contained reproducer roles. These are accepted alongside normal
+# testcase discovery, but only for non-metadata files. In particular,
+# ``repro.cmd`` is replay argv rather than a reproducer, and words such as
+# ``reproduction-notes`` deliberately do not match these anchored prefixes.
+REPRODUCER_ROLE_PREFIXES = (
+    "poc.",
+    "poc_",
+    "poc-",
+    "repro.",
+    "repro_",
+    "repro-",
+    "reproducer",
+    "testcase",
 )
 
 TEXT_EXTS_REQUIRING_PREFIX = {".txt"}
@@ -275,6 +291,13 @@ def _visible_files(directory: Path) -> list[Path]:
         (p for p in entries if p.is_file() and not p.name.startswith(".")),
         key=_sort_key,
     )
+
+
+def _nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def is_executable_binary(path: Path) -> bool:
@@ -515,7 +538,7 @@ def find_primary_sanitizer(scan_dirs: Iterable[Path]) -> Optional[Path]:
     dirs = [Path(d) for d in scan_dirs]
     for d in dirs:
         p = d / "sanitizer.txt"
-        if p.is_file() and p.stat().st_size > 0:
+        if _nonempty_file(p):
             return p
     matches: list[Path] = []
     aliases = {
@@ -601,6 +624,58 @@ def find_testcase(scan_dirs: Iterable[Path], *, sanitizer_files: Iterable[Path] 
         for p in _visible_files(d):
             if is_testcase_candidate(p, min_bytes=min_bytes, relaxed=True):
                 return p
+    return None
+
+
+def find_reproducer_artifact(scan_dirs: Iterable[Path]) -> Optional[Path]:
+    """Return a saved input or explicitly named self-contained reproducer.
+
+    ``find_testcase`` owns normal input discovery. This adds the narrower shape
+    needed by evidence consumers: a source/script named for its PoC role can be
+    the entire reproducer and therefore legitimately contain ``main`` instead
+    of being an input consumed by a separate harness. Metadata suffixes and
+    replay-only ``repro.cmd`` remain excluded.
+    """
+    dirs = [Path(d) for d in scan_dirs if Path(d).is_dir()]
+    for directory in dirs:
+        for path in _visible_files(directory):
+            name = path.name
+            lower = name.lower()
+            # reproduce.sh is the one exact artifact whose contract is itself
+            # runnable; repro.cmd and generated reports are not.
+            if lower == "reproduce.sh":
+                if _nonempty_file(path):
+                    return path
+                continue
+            if (not any(lower.startswith(prefix)
+                        for prefix in REPRODUCER_ROLE_PREFIXES)
+                    or name in ARTIFACT_EXACT
+                    or any(lower.endswith(suffix)
+                           for suffix in ARTIFACT_SUFFIXES)):
+                continue
+            if _nonempty_file(path):
+                return path
+
+    testcase = find_testcase(dirs)
+    if testcase is None:
+        return None
+    lower = testcase.name.lower()
+    if any(lower.startswith(prefix) for prefix in TESTCASE_PREFIXES):
+        return testcase
+
+    # Non-canonical input names (min.xml, payload.bin) need a second artifact
+    # tying them to reproduction. This keeps an arbitrary source attachment in
+    # a finding directory from becoming exploit-maturity evidence merely
+    # because crash testcase discovery is intentionally relaxed.
+    if find_harness_source(dirs, exclude=testcase) is not None:
+        return testcase
+    if find_primary_sanitizer(dirs) is not None:
+        return testcase
+    for directory in dirs:
+        for name in ("repro.cmd", "reproduce.sh"):
+            path = directory / name
+            if _nonempty_file(path):
+                return testcase
     return None
 
 

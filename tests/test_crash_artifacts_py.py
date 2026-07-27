@@ -91,6 +91,46 @@ with tempfile.TemporaryDirectory() as td:
               "find_primary_sanitizer: suffix fallback scan tolerates missing dir")
 
 
+# Generated report projections are metadata, never reproducing inputs. The
+# lowercase report.html shape is used before maintainer export; REPORT.html is
+# used after export.
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    (cd / "report.html").write_text("<html>generated report</html>",
+                                    encoding="utf-8")
+    (cd / "REPORT.html").write_text("<html>exported report</html>",
+                                    encoding="utf-8")
+    assert_eq(None, ca.find_testcase([cd]),
+              "find_testcase: generated HTML reports are not testcases")
+
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    (cd / "repro.cmd").write_text("--mode parse {TESTCASE}\n",
+                                  encoding="utf-8")
+    (cd / "reproduction-notes.md").write_text("No PoC yet.\n",
+                                              encoding="utf-8")
+    assert_eq(None, ca.find_reproducer_artifact([cd]),
+              "find_reproducer_artifact: replay argv and notes are not a PoC")
+    poc = cd / "poc.c"
+    poc.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    assert_eq(poc, ca.find_reproducer_artifact([cd]),
+              "find_reproducer_artifact: self-contained source PoC is evidence")
+
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    attachment = cd / "affected.c"
+    attachment.write_text("void affected(void) {}\n", encoding="utf-8")
+    assert_eq(None, ca.find_reproducer_artifact([cd]),
+              "find_reproducer_artifact: arbitrary source attachment is not evidence")
+    attachment.unlink()
+    minimum = cd / "min.xml"
+    minimum.write_text("<r/>", encoding="utf-8")
+    (cd / "harness.c").write_text(
+        "int main(void) { return 0; }\n", encoding="utf-8")
+    assert_eq(minimum, ca.find_reproducer_artifact([cd]),
+              "find_reproducer_artifact: noncanonical input plus harness is evidence")
+
+
 # ─── find_harness_source: shared C/C++ harness detection ────────────
 
 with tempfile.TemporaryDirectory() as td:

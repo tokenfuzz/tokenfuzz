@@ -31,7 +31,8 @@ Allowed primitive_keys:
   Memory-safety: uaf_write, uaf_read, double_free, wild_write, wild_read,
                  type_confusion, heap_write, stack_write, global_write,
                  heap_read_big, heap_read_small, global_read, stack_read,
-                 data_race, integer_overflow, null_deref, stack_exhaustion,
+                 data_race (race-detector diagnostic only — otherwise use
+                 race_condition), integer_overflow, null_deref, stack_exhaustion,
                  undefined_behavior, bus, memory_leak, oom
   Web/app:       code_execution, command_injection, deserialization, sqli,
                  ssti, authn_bypass, ssrf, path_traversal,
@@ -40,7 +41,8 @@ Allowed primitive_keys:
                  open_redirect, crypto_weakness, csrf, regex_dos, injection
   Boundary:      sandbox_escape
   Reasoning-confirmed (no sanitizer signal): protocol_state,
-                 dos_amplification, logic_regression, info_leak
+                 dos_amplification, logic_regression, info_leak,
+                 race_condition
   Other:         unknown
 
 Rules:
@@ -103,6 +105,12 @@ Rules:
   regex backtracking from an attacker pattern/subject or deep nesting a parser
   accepts with no lower limit. Controlling the field VALUES is not controlling
   the exhausting quantity.
+- Use `data_race` ONLY when the report carries a race-detector diagnostic
+  (ThreadSanitizer / "WARNING: DATA RACE"). A race argued from source alone —
+  unsynchronized shared state, a TOCTOU window, a global cache read across
+  threads — is `race_condition`: the consequence is the security decision it
+  defeats, not memory corruption. Naming a consequence the report only
+  speculates about is worse than either; classify what the report establishes.
 - Output JSON only, no prose, no markdown fences.
 
 Report:
