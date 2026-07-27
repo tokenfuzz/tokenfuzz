@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import errno
+import io
 import json
 import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -847,6 +849,109 @@ class BenchmarkMetricsTests(unittest.TestCase):
         pooled = bench / "pool" / "findings" / "FIND-0001"
         self.assertTrue((pooled / "report.md").is_file())
         self.assertFalse((pooled / ".validator-cwd").exists())
+
+    def test_pool_survives_a_dangling_reproducer_symlink(self) -> None:
+        # A finding can outlive a scratch file that an agent linked as its
+        # reproducer. copytree resolves the dangling link, gets ENOENT and
+        # raises shutil.Error — aborting the pool build after every cell has
+        # already completed. Keep the finding, but do not treat the missing
+        # scratch file as durable evidence.
+        bench = self.root / "dangling-repro-bench"
+        self.write_json(bench / "run.json", {
+            "runid": "dangling", "target": "sample", "backend": "codex",
+            "conditions": ["harness"], "replicates": 1,
+        })
+        results = self.root / "dangling-results"
+        finding = results / "findings" / "FIND-1"
+        finding.mkdir(parents=True)
+        (finding / "report.md").write_text("# finding\n")
+        (finding / ".keep").touch()
+        (finding / "reproducer.xml").symlink_to("../../scratch-3/pruned.xml")
+        cell = self.make_cell(bench, "harness-r1", "harness", 1, 0, findings=1)
+        data = json.loads((cell / "cell.json").read_text())
+        data["results_dir"] = str(results)
+        self.write_json(cell / "cell.json", data)
+        self.write_json(cell / "metrics.json", benchmark.harvest(results))
+
+        warnings = io.StringIO()
+        with redirect_stderr(warnings):
+            benchmark.build_pool(bench)
+
+        pooled = bench / "pool" / "findings" / "FIND-0001"
+        self.assertTrue((pooled / "report.md").is_file())
+        self.assertFalse((pooled / "reproducer.xml").exists())
+        self.assertIn("symlink", warnings.getvalue())
+
+    def test_pool_materialises_a_live_evidence_symlink(self) -> None:
+        # copytree dereferences a live link, so the agent's link into scratch
+        # lands in the pool as a regular file holding the real bytes — the
+        # self-contained bundle every reproducer path (export-repro,
+        # find-crash-testcase, the E:P evidence grade) depends on. Dropping it
+        # would pool a finding stripped of its testcase, which is worse than
+        # the dangling case this rule exists to survive.
+        bench = self.root / "linked-repro-bench"
+        self.write_json(bench / "run.json", {
+            "runid": "linked", "target": "sample", "backend": "codex",
+            "conditions": ["harness"], "replicates": 1,
+        })
+        results = self.root / "linked-results"
+        finding = results / "findings" / "FIND-1"
+        scratch = results / "scratch-1"
+        finding.mkdir(parents=True)
+        scratch.mkdir()
+        (finding / "report.md").write_text("# finding\n")
+        (finding / ".keep").touch()
+        target = scratch / "testcase.xml"
+        target.write_text("<r/>", encoding="utf-8")
+        (finding / "reproducer.xml").symlink_to(target)
+        cell = self.make_cell(bench, "harness-r1", "harness", 1, 0, findings=1)
+        data = json.loads((cell / "cell.json").read_text())
+        data["results_dir"] = str(results)
+        self.write_json(cell / "cell.json", data)
+        self.write_json(cell / "metrics.json", benchmark.harvest(results))
+
+        warnings = io.StringIO()
+        with redirect_stderr(warnings):
+            benchmark.build_pool(bench)
+
+        pooled = bench / "pool" / "findings" / "FIND-0001"
+        self.assertTrue((pooled / "report.md").is_file())
+        # Pooled as a REGULAR file carrying the bytes — not a link, so the
+        # bundle no longer depends on scratch surviving.
+        repro = pooled / "reproducer.xml"
+        self.assertTrue(repro.is_file())
+        self.assertFalse(repro.is_symlink())
+        self.assertEqual(repro.read_text(encoding="utf-8"), "<r/>")
+        self.assertNotIn("reproducer.xml", warnings.getvalue())
+
+    def test_pool_does_not_follow_a_symlinked_artifact_directory(self) -> None:
+        bench = self.root / "linked-finding-bench"
+        self.write_json(bench / "run.json", {
+            "runid": "linked-dir", "target": "sample", "backend": "codex",
+            "conditions": ["harness"], "replicates": 1,
+        })
+        results = self.root / "linked-dir-results"
+        outside = self.root / "outside-finding"
+        outside.mkdir()
+        (outside / "report.md").write_text("# outside\n")
+        findings = results / "findings"
+        findings.mkdir(parents=True)
+        (findings / "FIND-1").symlink_to(outside, target_is_directory=True)
+        cell = self.make_cell(bench, "harness-r1", "harness", 1, 0, findings=1)
+        data = json.loads((cell / "cell.json").read_text())
+        data["results_dir"] = str(results)
+        self.write_json(cell / "cell.json", data)
+        self.write_json(cell / "metrics.json", {
+            "confirmed_finding_dirs": ["FIND-1"],
+        })
+
+        warnings = io.StringIO()
+        with redirect_stderr(warnings):
+            benchmark.build_pool(bench)
+
+        self.assertEqual(list((bench / "pool" / "findings").iterdir()), [])
+        self.assertEqual((outside / "report.md").read_text(encoding="utf-8"), "# outside\n")
+        self.assertIn("artifact directory is a symlink", warnings.getvalue())
 
     def test_pool_rejected_finding_keeps_reason_in_index(self) -> None:
         bench = self.root / "rejection-reason-bench"

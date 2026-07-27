@@ -424,8 +424,9 @@ complementary:
 - `findings/FIND-NNN-<slug>/` records the defect for upstream review
   regardless of reproduction outcome.
 - `crashes/CRASH-NNN-<agent>/` records a sanitizer reproducer that
-  strengthens the FIND (link the testcase into the FIND directory or open
-  a CRASH whose report references the FIND id).
+  strengthens the FIND (copy a regular testcase into the FIND directory,
+  save a compact generator for an impractically large input, or open a CRASH
+  whose report references the FIND id). Never put symlinks in FIND/CRASH bundles.
 
 If the reproducer never lands, the FIND still ships. If the reproducer
 does land, the FIND already exists and the CRASH becomes the evidence

@@ -1,79 +1,39 @@
 # Changelog
 
-## 1.3.0 - 2026-07-26
+## 1.3.0 - 2026-07-27
 
-- **The cold-start recon stage is gone.** It generated candidate leads before any
-  investigation had happened, and that unbounded pass scaled with target size
-  while the budget that had to validate it did not: on the largest trees it took
-  roughly 40% of a run's cost, produced 3 of 56 accepted crashes, and not one of
-  ~1,200 emitted candidates was ever validator-confirmed. Its cards also carried
-  a constant score that displaced structurally ranked work, and its delegated
-  turns escaped the parent turn cap, so startup could exhaust a provider session
-  before any sanitizer evidence existed. The stage is deleted rather than capped:
-  audits start from deterministic strategy cards, and source review becomes a
-  finding only through the normal agent, probe, and validation flow.
+- **The cold-start recon stage is gone.** It emitted candidate leads before any
+  investigation existed, unbounded and scaling with target size: ~40% of a run's
+  cost on large trees, 3 of 56 accepted crashes, and none of ~1,200 candidates
+  ever validator-confirmed. Deleted rather than capped — audits start from
+  deterministic strategy cards, and source review becomes a finding only through
+  the normal agent, probe and validation flow.
 
-- **One build generation per run, and no more phantom rebuilds.** Output a target
-  wrote into its own tree during a test run — an ignored `runsuite.log` — counted
-  as a source edit, so a concurrent benchmark's preflight replaced the shared
-  `build-asan` mid-cell and finalization then refused to replay crash evidence
-  that was perfectly valid. Freshness is now content-based over VCS-reported
-  working-tree state, for git and Mercurial: ignored output, a restaged change
-  and an edit that is reverted all leave a build fresh, while dirty submodule
-  content no longer hashes to a constant, and a VCS that cannot answer reports
-  "unknown" — never stamped, never matched — so downtime cannot make an edited
-  tree read as fresh. Every process that executes a build holds a shared lease on
-  it and every rebuild takes the exclusive one, so a build is never replaced
-  under a live run — a rebuild that cannot get the lease says so and leaves the
-  tree alone. A benchmark pins one build generation, one source state and one set
-  of experiment settings for its whole run: it refuses to start on a build it
-  cannot verify or hold, refuses when a peer run claimed the checkout for
-  different source, and refuses to resume into a different generation or under a
-  changed model, effort, budget, agent count or target revision. A resumed run
-  verifies and never converges, so it cannot rebuild the generation its finished
-  cells depend on, and its cells verify but never build; cells that read
-  different source keep every artifact and leave the headline comparison instead
-  of being averaged into it. Pinning and drift compare the revision and tracked
-  product source only, so the crafted inputs a model-direct cell writes into the
-  checkout it drives — including inside submodules — no longer read as source
-  drift and exclude a finished cell over its own by-products, while build
-  freshness stays conservative about the same paths because they could still be
-  build inputs. Concurrent backends on identical inputs share one
-  build and add no disk; `--isolate-build` is available for recipe and
-  configuration comparisons, keyed by build inputs so identical divergence shares
-  one tree, and unreferenced isolated trees are collected once no run needs them
-  for replay.
+- **One build generation per run, and no more phantom rebuilds.** A target's own
+  ignored test output counted as a source edit, so a concurrent benchmark
+  replaced the shared `build-asan` mid-cell and finalization then refused valid
+  crash evidence. Freshness is now content-based over VCS working-tree state, a
+  VCS that cannot answer reports "unknown" rather than fresh, and every build
+  carries a lease so it is never replaced under a live run. A benchmark pins one
+  build generation, source state and settings for its whole run and refuses to
+  start or resume outside them; drift compares tracked product source only, so a
+  model-direct cell's crafted inputs no longer read as drift.
 
-- **Crash replay happens under the build the crash was found on.** A pooled
-  replay used to run against whatever build and environment were live at
-  finalization time, which silently re-measured old evidence with a new binary,
-  and read a reproduction rate off a whole multi-run transcript. Cells now record
-  content identities for the binaries and runtime-loaded libraries a replay would
-  execute, and skip — loudly, per crash, with the original evidence untouched —
-  when a rebuilt artifact, a dropped sanitizer override, or a static-to-shared
-  contract change no longer matches. Rates count only diagnostics that agree on
-  sanitizer family, fault primitive, function, source path and line, so a
-  duplicate basename no longer collides, and uncharacterised evidence claims no
-  rate at all.
+- **Crash replay happens under the build the crash was found on.** Pooled replay
+  ran against whatever build was live at finalization, silently re-measuring old
+  evidence with a new binary. Cells now record content identities for the
+  binaries and libraries a replay would execute and skip — loudly, per crash,
+  evidence untouched — when they no longer match. Reproduction rates count only
+  diagnostics agreeing on sanitizer family, primitive, function, path and line.
 
 - **The program under test is the one that reads attacker input.** Setup could
-  bootstrap a project's test-suite driver as the runner, or fail to bootstrap one
-  at all: a CMake `ALIAS` form was read as an executable, collided with a
-  same-named library, and suppressed the fallback holding the real programs, so
-  detection took the first binary in the build tree and every backend then
-  refused its argv. Detection alone cannot finish the job — a project installs
-  several CLIs and only one reads attacker-supplied input — so reference-only
-  target forms are dropped, every instrumented CLI is offered with its own help
-  text under opaque ids for the model to choose from, the launch check decides,
-  and one bounded revision round follows a rejection. The chosen program is
-  written into every enabled sanitizer's `<san>_bin` or setup refuses, because
-  `[runner].args` are shared and a sibling build keeping a different program
-  would turn probes into misleading clean runs; a configured field that still
-  works for the sanitizer it names now survives a refresh instead of reverting to
-  a detection guess. The same requirement holds at runtime: a target's native
-  sanitizer invocation is learned from its own CLI help, proven to consume the
-  input, and threaded through probe, bundles, reverification and export, so a
-  target that never parsed its testcase can no longer run clean.
+  bootstrap a project's test-suite driver as the runner, or none at all, and
+  every backend then refused its argv. Detection alone cannot decide when a
+  project ships several CLIs, so each instrumented CLI is offered with its help
+  text for the model to choose and the launch check confirms it. The choice is
+  written into every enabled sanitizer's `<san>_bin` or setup refuses, and a
+  target's sanitizer invocation is proven to consume the input — so a target that
+  never parsed its testcase can no longer run clean.
 
 - **Long sessions roll over instead of dying at the provider's ceiling.** A
   session that exhausts a backend's context or turn limit now continues in a
@@ -85,32 +45,30 @@
   contract instead of replaying a ~22 KB prompt suffix.
 
 - **Reports say only what their evidence proves.** Pooled enrichment could
-  annotate a report with source borrowed from another target or session, an
-  unfinished exported skeleton rendered as OK, a filed source-only finding
-  inherited CVSS worst-case `E:X`, and evidence buckets were described as unique
-  root causes. Enrichment now resolves the nearest target and the recorded
-  audited revision and uses only a matching checkout, pending artifacts are
-  detected in one place, unproven filed findings score `E:U`, buckets are named
-  as deterministic evidence signatures, and finding and crash reachability score
-  the same precondition the same way. Severity no longer lowers a historical
-  finding from the absence of a build artifact, and it resolves conflicting
-  primitive signals in evidence order — sanitizer diagnostic, then the structured
-  `Primitive` field, then narrative wording — so prose about a neighbouring write
-  path can no longer inflate a confirmed read.
+  annotate a report with source borrowed from another target, render an
+  unfinished skeleton as OK, and let a source-only finding inherit CVSS
+  worst-case `E:X`. Enrichment now uses only a checkout matching the recorded
+  audited revision, unproven filed findings score `E:U`, and severity resolves
+  conflicting primitive signals in evidence order — sanitizer diagnostic, then
+  the structured `Primitive` field, then narrative wording — so prose about a
+  neighbouring write can no longer inflate a confirmed read.
+
+- **A race is scored on what proved it.** "Race" names two different bugs
+  sharing a word, and an asserted `data_race` bought the code-execution impact
+  only a detector's verdict earns — so a report-only classifier picking the
+  memory-safety name turned a logic race into a High, where every unconfirmed
+  race in the benchmark landed. A detector-confirmed race keeps that reading; one
+  argued from source scores as the integrity consequence it defeats. Saved
+  reproducers are recognised by the shared artifact classifier, so a bundle with
+  a numbered input and a replay command no longer grades as having none.
 
 - **Benchmark reporting states what it can prove.** Rejected-crash reasons come
-  from the rejection artifact rather than an inferred marker nothing had written
-  since triage moved to `REJECTION.md`, live cell progress shows raw finding and
-  crash totals as they land so a gate-rejected cell no longer reads as zero, the
-  result page's legend and labels match what is plotted, an agent-compiled
-  harness is replayed with its own library on the path instead of dying in the
-  loader, and a resumed run retries only the cells that actually need it. Crash
-  filing time is recorded write-once so discovery graphs do not inherit preserved
-  file mtimes, dashboard rows stay separated by full target revision, and the
-  invalid retention percentage over independently clustered accepted and rejected
-  sets is gone. Finding validation gets its own bounded budget so a crash-heavy
-  cell can no longer starve it — one 57-minute crash pass had left 115
-  quality-accepted findings scoring zero confirmed.
+  from the rejection artifact rather than a marker nothing wrote, live progress
+  shows raw totals so a gate-rejected cell no longer reads as zero, and a resumed
+  run retries only the cells that need it. Crash filing time is recorded
+  write-once so discovery graphs do not inherit preserved mtimes. Finding
+  validation gets its own bounded budget so a crash-heavy cell cannot starve it —
+  one 57-minute crash pass had left 115 quality-accepted findings scoring zero.
 
 - **Model-direct cells are told their budget.** The prompt said only that a
   wall-clock budget existed and never named it, so both backends paced to a
@@ -120,14 +78,11 @@
 
 - **Token use is measured, not estimated.** Provider input, cache writes, cache
   reads and output were summed into one `tokens=` figure despite different
-  semantics, prices and overlap; the ledger buckets are now reported separately,
-  and rows are marked estimated only when they really are. One-shot decisions
-  asked their backends for text and threw the reported usage away — each metered
-  backend is now asked for its usage-bearing transport, decoded only on its own
-  path so a model answer that looks like a transport envelope stays the verdict.
-  Backend tier ceilings and decision timeouts resolve from one place, ranking and
-  cluster expansion get defaults that fit a full agent launch instead of a
-  hardcoded 20 seconds, and the Grok tier boundary is exact.
+  semantics, prices and overlap; the ledger now reports each separately and marks
+  rows estimated only when they are. One-shot decisions threw away their
+  backend's reported usage — each metered backend is now asked for its
+  usage-bearing transport. Tier ceilings and decision timeouts resolve from one
+  place, with defaults that fit a full agent launch.
 
 - **Refreshed backend defaults and rate cards.** Claude defaults to Opus 5,
   Gemini to `gemini-3.6-flash`, and Grok to `grok-4.5`, with vendor pricing
@@ -135,16 +90,11 @@
   actually costs.
 
 - **Investigation quality.** Deep investigation rotates off a cold hypothesis
-  after one CLEAN probe but keeps repeating timing, allocator, GC and multi-step
-  state conditions that need it; the queue prefers work whose units exist in the
-  sanitizer build, so agents stop burning iterations re-proving absent code
-  unreachable; benchmark cells keep worker refill enabled instead of leaving
-  configured concurrency idle; truncated trigger-vote batches are recovered and
-  retried once rather than adjudicating a whole batch to zero; prompts allow a
-  new source range while still refusing an identical re-read; and explicit
-  sanitizer runs are reserved and charged against the per-iteration budget.
-  Finding validation no longer re-reviews settled findings because markdown table
-  padding shifted a report hash.
+  after one CLEAN probe but keeps repeating the timing, allocator, GC and
+  multi-step state conditions that need it; the queue prefers work whose units
+  exist in the sanitizer build; truncated trigger-vote batches are recovered
+  rather than adjudicated to zero; and finding validation no longer re-reviews
+  settled findings because table padding shifted a report hash.
 
 - **Reproducers name the revision they were audited at.** The stale `pinned_rev`
   field is gone: a report or bundle uses the session's recorded revision, else
@@ -159,6 +109,14 @@
   path or tty heuristic — on both normal and abnormal exit, the session watchdog
   no longer mislabels a natural finish as a forced checkpoint, and agent working
   files stay inside the results tree instead of shared `/tmp`.
+
+- **A finished run still reports its results.** An agent linked its reproducer
+  into a scratch directory that housekeeping later pruned; pooling resolved the
+  dangling path, hit `ENOENT` and aborted after every cell had completed — a
+  whole run producing nothing over one absent file. Pooling now skips a dangling
+  link and a symlinked artifact directory, naming each, while a live link is
+  still materialised into the bundle as the regular file every replay path
+  needs.
 
 - Internal: hot re-reads, re-parses and report source lookups are cached across a
   pass with stat-signature invalidation and bounded memory, and the handbook is

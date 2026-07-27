@@ -181,6 +181,7 @@ For ANY concrete security issue in the target, regardless of whether you can pro
 Required:
 
 - A report file at the FIND root — `report.md` or `description.md` (markdown). `report.html` is generated automatically by the harness; you do not need to write it. Other artifacts (testcase, sanitizer output, `affected-files.txt`) are welcome but optional.
+- Keep FIND/CRASH bundles self-contained: save evidence as regular files, never symlinks. For an impractically large input, save a compact generator instead.
 - The report must name a concrete location (file:function:line, endpoint, config key, etc.), state the security issue class, and give a rationale a reviewer can act on (impact, caller control, what is wrong).
 - Include the standard bare-label fields the crash gate expects, including `Strategy: S<N>` (S1..S8 or REF) so FINDING-CLUSTERS attributes the finding to the strategy that produced it.
 

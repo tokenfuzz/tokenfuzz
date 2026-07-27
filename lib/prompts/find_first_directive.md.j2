@@ -10,8 +10,9 @@ may have drifted into the source tree after a `cd` and would silently
 mis-route the finding. Filing a FIND is **not** contingent on a sanitizer crash,
 a runnable testcase, or web-reachability (see
 `.agents/references/session-rules.md` "FIND Quality Bar"). If a reproducer
-later lands, link the testcase into the FIND directory or open a CRASH that
-references the FIND id.
+later lands, copy a regular file into the FIND directory, save a compact
+generator for an impractically large input, or open a CRASH that references
+the FIND id. Never put symlinks in FIND/CRASH bundles.
 
 **Why this matters:** source-only strategies (S2 invariant-negation,
 S3 spec-vs-impl, S5 lifetime/state, S8 property-based) routinely identify

@@ -19,6 +19,7 @@ class InstructionFileTests(unittest.TestCase):
 
     def test_agents_contains_runtime_guidance_only(self) -> None:
         text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("save evidence as regular files, never symlinks", text)
         for forbidden in (
             "harness-dev-only", "Coding Discipline", "Testing Discipline",
             "Logging Discipline",

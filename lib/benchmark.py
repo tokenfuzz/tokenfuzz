@@ -3631,7 +3631,50 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
     # copytree follows those symlinks into half-written build trees and raises.
     # Older runs embedded it inside model-direct finding dirs, so exclude it
     # when pooling regardless of where it landed.
-    ignore_scratch = shutil.ignore_patterns(".validator-cwd")
+    _ignore_names = shutil.ignore_patterns(".validator-cwd")
+
+    def ignore_transient(directory, names):
+        """Drop scratch views and dangling links, naming what was lost.
+
+        Only DANGLING links are dropped. copytree dereferences a live one, so
+        an agent's link into scratch lands in the pool as a regular file with
+        the real bytes — exactly the self-contained bundle we want, and what
+        every downstream reproducer path needs. Skipping live links instead
+        would pool a finding stripped of its testcase. A link whose target
+        housekeeping already pruned has no bytes to copy: copytree resolves it,
+        hits ENOENT and aborts the whole pool build after every cell has
+        finished, so skip it — but say so, since a finding that arrives without
+        its reproducer must not look like one that never had it.
+        """
+        ignored = set(_ignore_names(directory, names))
+        for name in names:
+            path = os.path.join(directory, name)
+            if (name not in ignored and os.path.islink(path)
+                    and not os.path.exists(path)):
+                print(
+                    f"WARN: pooling {Path(directory).name}/{name}: symlink target "
+                    f"{os.readlink(path)!r} is gone; evidence not pooled",
+                    file=sys.stderr,
+                )
+                ignored.add(name)
+        return ignored
+
+    def is_artifact_dir(path: Path) -> bool:
+        """Only a real directory can own an artifact bundle.
+
+        Unlike a linked evidence file, a linked artifact ROOT is anomalous —
+        the harness creates these directories itself — and following one can
+        pull an unbounded tree (or a link cycle) into the pool. Skipping costs
+        at most one artifact, loudly.
+        """
+        if path.is_symlink():
+            print(
+                f"WARN: pooling {path.parent.name}/{path.name}: artifact directory "
+                f"is a symlink; not pooled",
+                file=sys.stderr,
+            )
+            return False
+        return path.is_dir()
 
     bench_dir = Path(bench_dir)
     pool = bench_dir / pool_name
@@ -3699,12 +3742,13 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
         # stays consistent with the harvested confirmed_crashes metric.
         for name in metrics.get("crash_dirs", []):
             src = rd / "crashes" / name
-            if not src.is_dir():
+            if not is_artifact_dir(src):
                 continue
             crash_n += 1
             dst_name = f"CRASH-{crash_n:04d}"
             dst = pool / "crashes" / dst_name
-            shutil.copytree(src, dst, ignore=ignore_scratch)
+            shutil.copytree(src, dst, ignore=ignore_transient,
+                            ignore_dangling_symlinks=True)
             _scrub_pooled_tree(dst)
             members["crashes"][dst_name] = cond
             members["crash_cells"][dst_name] = cell_dir.name
@@ -3712,34 +3756,37 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
         if findings_dir.is_dir():
             for name in _pool_finding_names(metrics, findings_dir):
                 src = findings_dir / name
-                if not src.is_dir():
+                if not is_artifact_dir(src):
                     continue
                 find_n += 1
                 dst_name = f"FIND-{find_n:04d}"
                 dst = pool / "findings" / dst_name
-                shutil.copytree(src, dst, ignore=ignore_scratch)
+                shutil.copytree(src, dst, ignore=ignore_transient,
+                            ignore_dangling_symlinks=True)
                 _scrub_pooled_tree(dst)
                 members["findings"][dst_name] = cond
         rejected_dir = rd / "findings-rejected"
         if rejected_dir.is_dir():
             for src in sorted(rejected_dir.iterdir()):
-                if not src.is_dir() or not src.name.startswith("FIND-"):
+                if not src.name.startswith("FIND-") or not is_artifact_dir(src):
                     continue
                 rejected_find_n += 1
                 dst_name = f"FIND-REJECTED-{rejected_find_n:04d}"
                 dst = pool / "findings-rejected" / dst_name
-                shutil.copytree(src, dst, ignore=ignore_scratch)
+                shutil.copytree(src, dst, ignore=ignore_transient,
+                            ignore_dangling_symlinks=True)
                 _scrub_pooled_tree(dst)
                 members["findings-rejected"][dst_name] = cond
         rejected_crashes_dir = rd / "crashes-rejected"
         if rejected_crashes_dir.is_dir():
             for src in sorted(rejected_crashes_dir.iterdir()):
-                if not src.is_dir() or not src.name.startswith("CRASH-"):
+                if not src.name.startswith("CRASH-") or not is_artifact_dir(src):
                     continue
                 rejected_crash_n += 1
                 dst_name = f"CRASH-REJECTED-{rejected_crash_n:04d}"
                 dst = pool / "crashes-rejected" / dst_name
-                shutil.copytree(src, dst, ignore=ignore_scratch)
+                shutil.copytree(src, dst, ignore=ignore_transient,
+                            ignore_dangling_symlinks=True)
                 _scrub_pooled_tree(dst)
                 members["crashes-rejected"][dst_name] = cond
             # The per-cell named report is the human-readable rejection ledger

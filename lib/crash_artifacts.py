@@ -288,6 +288,9 @@ def _visible_files(directory: Path) -> list[Path]:
     except OSError:
         return []
     return sorted(
+        # is_file() already follows the link: a dangling one is False, a live
+        # one is real readable evidence. Excluding symlinks outright would hide
+        # a testcase whose bytes are right there from every reproducer path.
         (p for p in entries if p.is_file() and not p.name.startswith(".")),
         key=_sort_key,
     )

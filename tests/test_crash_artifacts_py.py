@@ -117,6 +117,21 @@ with tempfile.TemporaryDirectory() as td:
               "find_reproducer_artifact: self-contained source PoC is evidence")
 
 with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    finding = root / "finding"
+    scratch = root / "scratch"
+    finding.mkdir()
+    scratch.mkdir()
+    target = scratch / "testcase.xml"
+    target.write_text("<r/>", encoding="utf-8")
+    (finding / "reproducer.xml").symlink_to(target)
+    assert_eq(finding / "reproducer.xml", ca.find_reproducer_artifact([finding]),
+              "find_reproducer_artifact: a readable linked input is evidence")
+    target.unlink()
+    assert_eq(None, ca.find_reproducer_artifact([finding]),
+              "find_reproducer_artifact: a dangling link has no bytes to reproduce")
+
+with tempfile.TemporaryDirectory() as td:
     cd = Path(td)
     attachment = cd / "affected.c"
     attachment.write_text("void affected(void) {}\n", encoding="utf-8")
