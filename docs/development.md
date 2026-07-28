@@ -195,6 +195,30 @@ or lose lines.
    (`jsonl_lock`, `append_jsonl`, `write_jsonl`), serialized via
    `fcntl.flock`.
 
+## Benchmark wall discipline
+
+The benchmark asks whether the harness beats the same model asked directly at
+the same budget, so what the wall contains decides whether that answer means
+anything. Three settled rules — do not re-derive them per change:
+
+1. **The wall contains all agent time and all in-run steering.** Housekeeping is
+   steering, not overhead: `post_iteration` promotes crashes, gates findings,
+   re-ranks work cards, and rotates strategy, and each of those changes what
+   agents do next. Slow steering is a bug to fix, never a reason to stop
+   counting it.
+2. **The only exclusion is provider-withheld capacity, capped.** A quota reset
+   is the vendor removing time from whichever condition straddles it, not work
+   either side chose to do. `PROVIDER_PAUSE_MAX_SECONDS` bounds it.
+3. **Post-cell adjudication is untimed, identical for both conditions, and
+   cannot add an artifact.** Terminal crash triage and the find-gate drain
+   score what is already on disk; that is measurement, and it runs under
+   `finalize_wall` rather than the audit wall.
+
+The trap rule 1 defends against: excluding a stall converts a performance bug
+into extra budget. A cell that spends 24% of its wall in housekeeping would
+silently get a 24% larger agent budget than its control, and the next report
+would show an improvement that came entirely from the accounting change.
+
 ## Documentation discipline
 
 Each `docs/` page has one job — overviews orient, guides walk through
@@ -247,6 +271,8 @@ These should continue to hold:
 - Rejected results are indexed with reasons.
 - Hosted and local model backends use the same audit contract.
 - Token-control features trim duplicated context, never investigation depth.
+- The benchmark wall covers every second the harness spends deciding what to
+  look at next; only provider-withheld capacity is subtracted.
 
 ## Non-goals
 
