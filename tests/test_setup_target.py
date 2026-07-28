@@ -221,15 +221,15 @@ class SetupTargetTests(unittest.TestCase):
 
     def test_plain_local_sources_nested_slugs_and_reserved_components(self) -> None:
         self.git("init", str(self.harness))
-        (self.harness / "bin" / "auto-build-script").symlink_to(
-            ROOT / "bin" / "auto-build-script"
-        )
         plain = self.harness / "targets" / "plain-cpp"
         plain.mkdir(parents=True)
         (plain / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.16)\nproject(plain CXX)\nadd_executable(plain main.cpp)\n"
         )
         (plain / "main.cpp").write_text("int main() { return 0; }\n")
+        # CMake is a target dependency, not a test-suite prerequisite. Exercise
+        # plain-tree materialization through the suite's hermetic recipe.
+        self.build_recipe(plain)
         process = self.setup("plain-cpp", "--build", environment={"LLM_DECIDE_DISABLE": "1"})
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         self.assertNotIn("pinned_rev", self.config("plain-cpp").read_text())
