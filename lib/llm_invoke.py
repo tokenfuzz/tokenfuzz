@@ -840,6 +840,47 @@ def agent_flags(
     raise ValueError(f"unknown backend: {backend}")
 
 
+def _apply_agent_shell_environment(
+    environment: dict[str, str], configured_wrappers: str = "",
+) -> None:
+    """Install process guards without leaking audit wrappers into controls.
+
+    Every tool-using launch gets the small process-safety directory. Only
+    callers that explicitly supply AGENT_WRAPPERS_PATH get the audit search
+    and compiler wrappers; in particular, model-direct and validator launches
+    must remain free of that TokenFuzz machinery.
+    """
+    lib_dir = Path(__file__).resolve().parent
+    guards = lib_dir / "agent_shell_guards"
+    default_wrappers = lib_dir / "wrappers"
+    inherited_wrappers = environment.pop("AGENT_WRAPPERS_PATH", "")
+    wrappers = Path(configured_wrappers) if configured_wrappers else None
+
+    guard_text = str(guards)
+    environment["AGENT_SHELL_GUARDS_PATH"] = guard_text
+    environment["ZDOTDIR"] = str(guards / "_zdotdir")
+    if wrappers is not None:
+        environment["AGENT_WRAPPERS_PATH"] = str(wrappers)
+
+    # Empty entries mean "current directory" — never carry one into an agent
+    # shell that cd's through the target tree. Strip inherited TokenFuzz paths
+    # as well: only an explicit caller opt-in may install the audit wrappers.
+    excluded = {
+        guard_text,
+        str(default_wrappers),
+        inherited_wrappers,
+        str(wrappers) if wrappers is not None else "",
+    }
+    entries = (environment.get("PATH") or os.defpath).split(os.pathsep)
+    prefixes = [guard_text]
+    if wrappers is not None:
+        prefixes.append(str(wrappers))
+    environment["PATH"] = os.pathsep.join([
+        *prefixes,
+        *(entry for entry in entries if entry and entry not in excluded),
+    ])
+
+
 def run_agent_prompt(
     backend: str,
     prompt: str,
@@ -896,6 +937,8 @@ def run_agent_prompt(
     ))
     if extra_env:
         environment.update({str(key): str(value) for key, value in extra_env.items()})
+    configured_wrappers = str((extra_env or {}).get("AGENT_WRAPPERS_PATH", ""))
+    _apply_agent_shell_environment(environment, configured_wrappers)
     if backend == "claude":
         command, input_text = [binary, *flags, "-p", prompt], None
     elif backend == "codex":

@@ -26,6 +26,9 @@ substitute the fallback default when the queue assigned something else.
 - Search target source with scoped `bin/rg-safe` calls, inspect ranges with
   `bin/peek FILE:start-end`, and view fixes with `bin/show-patch <commit>
   [path]`. Search artifacts with `bin/scratch-search`, not the raw log tree.
+- Never kill by process name/argv: no `pkill`/`killall` (including absolute
+  paths), and no `pgrep`/`ps`/pipeline/script feeding matched PIDs to `kill`.
+  A target name also appears in concurrent cells. Signal only a PID you saved.
 - Never read raw state JSONL or harness `bin/`/`lib/` source to rediscover this
   contract. Use the compact `bin/state` views above.
 

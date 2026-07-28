@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from guard_tools import refuse_process_name_kill
+
+raise SystemExit(refuse_process_name_kill("killall"))

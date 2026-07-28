@@ -230,7 +230,7 @@ test_category() {
     test_integration_*|test_mock_target) echo "integration" ;;
     test_*_py|test_stack_frames|test_target_config_py) echo "python" ;;
     test_doc_neutrality|test_hits_cache_static|test_portability_lint|test_strategy_validation|test_vocab) echo "static" ;;
-    test_grep_wrapper|test_rg_wrapper|test_sed_wrapper|test_rg_safe|test_zdotdir_shim) echo "wrapper" ;;
+    test_grep_wrapper|test_process_kill_guard|test_rg_wrapper|test_sed_wrapper|test_rg_safe|test_zdotdir_shim) echo "wrapper" ;;
     *) case "$raw" in *.py) echo "python" ;; *) echo "unit" ;; esac ;;
   esac
 }

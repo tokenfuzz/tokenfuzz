@@ -972,8 +972,9 @@ def run_agent(
         "TRIED_INPUTS_LOG": str(runtime.results / f"tried-inputs-{agent}.log"),
         "HITS_LOG_PATH": str(runtime.results / f"hits-{agent}.log"),
         "LLM_DECIDE_COUNTER_FILE": str(runtime.logs / f".llm_decisions_{agent}"),
+        # Facade-relative, so a benchmark cell gets this audit's wrappers after
+        # the launcher's universal process-safety guards.
         "AGENT_WRAPPERS_PATH": str(runtime.root / "lib" / "wrappers"),
-        "ZDOTDIR": str(runtime.root / "lib" / "wrappers" / "_zdotdir"),
         "SCRIPT_ROOT": str(runtime.root),
     }
     # A marker belongs to one launch only. Failing to clear it must stop the

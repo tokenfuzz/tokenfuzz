@@ -55,6 +55,8 @@ class BenchmarkReportTests(unittest.TestCase):
             "CRASH-<n>", "FIND-<n>", "sanitizer-instrumented", "Writing scope",
             "absolute paths only", "Do not delegate work to subagents", "Primary objective",
             "Use the configured\nrunner", "save that evidence with the FINDING",
+            "kill by process name/argv", "`pkill`", "`killall`",
+            "including by\nabsolute path", "matched PIDs",
         ):
             self.assertIn(required, body)
         for forbidden in (

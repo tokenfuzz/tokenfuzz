@@ -549,6 +549,83 @@ with tempfile.TemporaryDirectory() as td:
         repr((command, kwargs)),
     )
 
+    with mock.patch.object(
+        inv, "backend_bin", return_value="codex",
+    ), mock.patch.object(
+        inv, "_run_agent_process", return_value=0,
+    ) as guarded_process:
+        inv.run_agent_prompt(
+            "codex", "prompt", 0, raw, cwd=launch_root,
+            extra_env={"PATH": "/fixture/bin"},
+        )
+    guarded_env = guarded_process.call_args.args[4]
+    wrappers = str(ROOT / "lib" / "wrappers")
+    guards = str(ROOT / "lib" / "agent_shell_guards")
+    ok(
+        guarded_env["PATH"].split(os.pathsep)[0] == guards,
+        "every tool-using agent launch puts process guards first in PATH",
+        guarded_env["PATH"],
+    )
+    ok(
+        wrappers not in guarded_env["PATH"].split(os.pathsep)
+        and "AGENT_WRAPPERS_PATH" not in guarded_env,
+        "a direct launch does not inherit TokenFuzz audit wrappers",
+        repr(guarded_env),
+    )
+    assert_eq(
+        guards, guarded_env["AGENT_SHELL_GUARDS_PATH"],
+        "agent launch exports the process guard directory",
+    )
+    assert_eq(
+        str(ROOT / "lib" / "agent_shell_guards" / "_zdotdir"),
+        guarded_env["ZDOTDIR"],
+        "agent launch exports the guard-only login-shell bootstrap",
+    )
+
+    # A benchmark cell points AGENT_WRAPPERS_PATH at its facade so the agent
+    # sees its own repo root. The process guards remain first, followed by the
+    # explicitly opted-in audit wrappers.
+    with mock.patch.object(
+        inv, "backend_bin", return_value="codex",
+    ), mock.patch.object(
+        inv, "_run_agent_process", return_value=0,
+    ) as facade_process:
+        inv.run_agent_prompt(
+            "codex", "prompt", 0, raw, cwd=launch_root,
+            extra_env={"PATH": "/fixture/bin",
+                       "AGENT_WRAPPERS_PATH": "/facade/lib/wrappers"},
+        )
+    facade_env = facade_process.call_args.args[4]
+    assert_eq(
+        guards, facade_env["PATH"].split(os.pathsep)[0],
+        "process guards lead an audit agent PATH",
+    )
+    assert_eq(
+        "/facade/lib/wrappers", facade_env["PATH"].split(os.pathsep)[1],
+        "an explicitly configured audit wrapper directory follows guards",
+    )
+    assert_eq(
+        "/facade/lib/wrappers", facade_env["AGENT_WRAPPERS_PATH"],
+        "audit launch exports only its explicitly configured wrapper directory",
+    )
+    assert_eq(
+        str(ROOT / "lib" / "agent_shell_guards" / "_zdotdir"),
+        facade_env["ZDOTDIR"],
+        "audit launch uses the shared guard bootstrap",
+    )
+
+    inherited_env = {
+        "PATH": os.pathsep.join((wrappers, "/fixture/bin")),
+        "AGENT_WRAPPERS_PATH": wrappers,
+    }
+    inv._apply_agent_shell_environment(inherited_env)
+    ok(
+        wrappers not in inherited_env["PATH"].split(os.pathsep)
+        and "AGENT_WRAPPERS_PATH" not in inherited_env,
+        "ambient audit wrapper state cannot contaminate model-direct",
+        repr(inherited_env),
+    )
+
 with tempfile.TemporaryDirectory() as td, \
         mock.patch.dict(os.environ, {
             "SCRIPT_ROOT": td,

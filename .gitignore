@@ -79,8 +79,8 @@ __pycache__/
 *.log
 
 # zsh completion cache (zsh auto-writes this when ZDOTDIR points at
-# lib/wrappers/_zdotdir/ during agent sessions — see bin/audit)
-lib/wrappers/_zdotdir/.zcompdump*
+# the agent shell bootstrap during agent sessions — see lib/llm_invoke.py)
+lib/agent_shell_guards/_zdotdir/.zcompdump*
 
 # Documentation builds
 /site/

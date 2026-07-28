@@ -205,6 +205,7 @@ Use `bin/state`; do not maintain a parallel Markdown journal. Key rules:
 
 - **Search:** `rg -l` first, then read 2-3 files. Scope with `--glob` or narrow directory. No output directory scanning.
 - **Shell:** chain commands with `&&`, and pipe `hg log` through `| head -N`.
+- **Process cleanup:** never kill by process name/argv: no `pkill`/`killall` (including absolute paths), and no `pgrep`/`ps`/pipeline/script feeding matched PIDs to `kill`. A target name also appears in concurrent cells' command lines. Signal only an exact PID you saved, or let the timeout wrappers and ownership reaper clean up their own trees.
 - **Timeouts:** do not call GNU `timeout`/`gtimeout`; use `python3 lib/timeout.py <seconds> TERM <rss-mb> <command> ...` or the `lib.timeout.run_timeout` API.
 - **Portability:** use Python standard-library filesystem/process APIs and the helpers in `lib/sanitizer.py` for LLVM discovery. Do not add macOS-only or GNU-only command forms directly to `bin/*` or `lib/*`.
 - **VCS:** Use `git -C <target_root>` or `hg -R <target_root>` instead of changing directories. See `.agents/references/vcs-commands.md`.
