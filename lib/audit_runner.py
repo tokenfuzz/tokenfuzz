@@ -54,6 +54,11 @@ TRANSIENT_RETRY_MAX = 6
 _OWNED_INSTANCE_LOCKS: set[Path] = set()
 
 
+def _agent_timeout() -> int:
+    """Wall ceiling for one agent session, and for one pool epoch."""
+    return max(1, int(os.environ.get("AGENT_TIMEOUT", "7200")))
+
+
 def log(message: str) -> str:
     line = f"[{time.strftime('%H:%M:%S')}] {message}"
     print(line, flush=True)
@@ -104,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-memory", action="store_true")
     parser.add_argument(
         "--refill-workers", action=argparse.BooleanOptionalAction, default=True,
-        help="reuse an early-finished worker slot once per iteration",
+        help="relaunch a finished worker slot while an initial session is still running",
     )
     return parser
 
@@ -851,6 +856,9 @@ class AgentResult:
     usage: dict
     provider_issue: str
     reset_at: int | None
+    # Cut off mid-investigation at the rollover target, so its state carries
+    # in-flight work that the slot's next session is meant to continue.
+    turn_capped: bool = False
 
 
 def sanitizer_run_budget(
@@ -963,7 +971,7 @@ def run_agent(
     # prompt (recall loss). Run once, on the final text, after every framing pass.
     rendered = vocab_rules.strip_markers(vocab_rules.neutralize_string(rendered))
     prompt_path.write_text(rendered, encoding="utf-8")
-    timeout = max(1, int(os.environ.get("AGENT_TIMEOUT", "7200")))
+    timeout = _agent_timeout()
     if timeout_limit is not None:
         timeout = min(timeout, max(1, timeout_limit))
     sanitizer_budget = sanitizer_run_budget(context, agent)
@@ -1063,7 +1071,9 @@ def run_agent(
         f"Agent {agent} {launch} {outcome} provider={issue} "
         f"tokens={token_display} log={text_path.name}",
     )
-    return AgentResult(agent, role, rc, raw_path, text_path, usage, issue, reset_at)
+    return AgentResult(
+        agent, role, rc, raw_path, text_path, usage, issue, reset_at, turn_capped,
+    )
 
 
 def run_agent_guarded(
@@ -1457,9 +1467,18 @@ def _fuzz_leads_empty(results: Path) -> bool:
     return not any(line.strip() and not line.lstrip().startswith(("#", "_")) for line in lines)
 
 
-def should_skip_launch(runtime: Runtime, context: prompt.PromptContext, agent: int) -> bool:
-    """Skip an idle secondary slot only when every current work source is dry."""
-    if agent == 1:
+def should_skip_launch(
+    runtime: Runtime, context: prompt.PromptContext, agent: int,
+    *, primary_always_launches: bool = True,
+) -> bool:
+    """Skip an idle slot only when every current work source is dry.
+
+    Agent 1 launches unconditionally so an iteration always keeps one discovery
+    slot even on a dry queue. That is a guarantee about the *initial* cohort;
+    applying it to refills would relaunch agent 1 against a dry queue for the
+    rest of the epoch, so the pool asks without the exception.
+    """
+    if agent == 1 and primary_always_launches:
         return False
     counts = structured_state.agent_counts(str(agent), runtime.results)
     if counts and counts.get("active", 0):
@@ -1739,55 +1758,193 @@ def _run_post_iteration(state: BackendState) -> None:
         )
 
 
+def _refill_outcome(result: AgentResult) -> str:
+    """Classify a finished session by how its slot may be reused.
+
+    - `provider`: the caller's pause/recovery path owns this, not the pool.
+    - `continue`: turn-capped, so it stopped at the rollover target with work
+      still in flight — a continuation receipt that needs no other work source.
+    - `clean`: exited normally; reuse the slot only while work remains.
+    - `deadline`: rc=124 is the epoch or wall running out, so there is no time
+      to retry into.
+    - `failed`: an ambiguous process failure (a kill, a CLI crash). Recorded
+      audits show these are usually one-off — an rc=-9 and an rc=1 session were
+      each followed by a replacement that then ran a full productive session —
+      so the slot gets one retry per cohort, never a loop.
+    """
+    if result.provider_issue != "none":
+        return "provider"
+    if result.turn_capped:
+        return "continue"
+    if result.returncode == 0:
+        return "clean"
+    if result.returncode == 124:
+        return "deadline"
+    return "failed"
+
+
+# Provider states the outer loop recovers from, so the pool must stop feeding
+# them. The synthetic "internal" issue is a local harness fault, not provider
+# health, and halting every slot on one would discard the others' work.
+_PROVIDER_HALT_ISSUES = ("capacity_limited", "transient")
+
+
+def _session_did_work(result: AgentResult) -> bool:
+    """Whether a finished session acted at all, so its slot is worth reusing.
+
+    Work availability is sticky — a fuzz lead stays listed and a PENDING
+    hypothesis stays active for the whole pool — so it cannot bound how often a
+    slot relaunches. A transcript that parsed but holds no tool call is the one
+    positive signal that a session did nothing and that its replacement would
+    repeat the same no-op. Falls open when nothing parsed at all: an unreadable
+    or unrecognised transcript must not silently disable a backend's refills.
+    """
+    events = tools = 0
+    for event in audit_helpers._iter_json_events(str(result.raw)):
+        events += 1
+        tools += audit_helpers._event_tool_counts(event)[1]
+    return tools > 0 or events == 0
+
+
 def run_agent_pool(
     state: BackendState, agents: list[int], cold: bool
 ) -> list[AgentResult]:
-    """Run initial slots and at most one useful refill per early finisher."""
+    """Reuse a finished agent slot for as long as the initial cohort runs.
+
+    A slot used to get a single replacement and then idle at the iteration
+    barrier for however long the slowest peer still had to run, so a fast agent
+    lost most of its hours to waiting. Any finished slot is relaunched instead,
+    repeatedly, while an initial session is still outstanding and the slot has
+    work: it was turn-capped, or its own state still shows a live work source.
+    Every session is clamped to one epoch deadline fixed at cohort start, so a
+    refill launched just before the last initial ended cannot run a further full
+    AGENT_TIMEOUT and push post-iteration triage arbitrarily far out.
+
+    What this deliberately does NOT do is keep refilling until the epoch closes.
+    The `initial` sentinel is load-bearing twice over, and both reasons have to
+    be retired before it can go:
+
+    - It is the clock for iteration-counted control loops. Refilling to the
+      epoch stretches an iteration from about one session to AGENT_TIMEOUT,
+      which on a 5h run turns five iterations into roughly two — and strategy
+      rotation needs STRATEGY_DRY_THRESHOLD *iterations* of dryness, so it
+      would stop firing at all.
+    - It bounds stale-signal spin. should_skip_launch reports work from sticky
+      sources: a PENDING hypothesis that never resolves, or any line in
+      fuzz-leads.md. Capped at one generation those cost a few sessions;
+      uncapped they justify clean sessions for the whole epoch.
+
+    So a slot does still idle once the last initial session ends while a peer's
+    refill runs. Closing that window needs triage to stop being stop-the-world
+    and per-session progress receipts, not a looser sentinel. A one-slot cohort
+    likewise chains nothing — its only session is also the last initial one, and
+    continuation comes from the next iteration.
+    """
     runtime = state.runtime
     context = state.context
     results: list[AgentResult] = []
+    epoch_budget = _agent_timeout()
+    wall = _productive_wall_remaining(state)
+    if wall is not None:
+        epoch_budget = min(epoch_budget, wall)
+    epoch_deadline = time.monotonic() + epoch_budget
+
+    def epoch_remaining() -> int:
+        remaining = int(epoch_deadline - time.monotonic())
+        current_wall = _productive_wall_remaining(state)
+        return remaining if current_wall is None else min(remaining, current_wall)
+
+    # One retry per slot per cohort after an ambiguous process failure.
+    retried: set[int] = set()
+    # Provider trouble reported by any slot stops launches in all of them.
+    halted = ""
     with concurrent.futures.ThreadPoolExecutor(max_workers=runtime.num_agents) as pool:
-        futures = {
-            pool.submit(
+        futures: dict[concurrent.futures.Future, tuple[int, bool]] = {}
+
+        def launch(agent: int, initial: bool) -> None:
+            future = pool.submit(
                 run_agent_guarded, runtime, context, agent, state.iteration,
-                cold, _productive_wall_remaining(state),
-            ): (agent, True)
-            for agent in agents
-        }
+                cold and initial, epoch_remaining(),
+            )
+            futures[future] = (agent, initial)
+
+        for agent in agents:
+            launch(agent, True)
         while futures:
             done, _ = concurrent.futures.wait(
                 futures, return_when=concurrent.futures.FIRST_COMPLETED
             )
-            completed_initial: list[AgentResult] = []
+            finished = []
             for future in done:
-                _agent, initial = futures.pop(future)
+                futures.pop(future)
                 result = future.result()
                 results.append(result)
-                if initial:
-                    completed_initial.append(result)
-            # Reuse an early-finished slot once while another initial launch is
-            # still active. This fills otherwise idle provider capacity without
-            # turning an iteration into an unbounded worker queue.
-            initial_still_active = any(initial for _agent, initial in futures.values())
-            if not getattr(runtime, "refill_workers", True) or not initial_still_active:
+                finished.append(result)
+                if result.provider_issue in _PROVIDER_HALT_ISSUES and not halted:
+                    halted = result.provider_issue
+                    index_log(
+                        runtime,
+                        f"Worker-pool: agent={result.agent} reported {halted}; no further "
+                        "launches this iteration, finishing in-flight sessions first",
+                    )
+            if halted or not getattr(runtime, "refill_workers", True):
                 continue
-            for result in completed_initial:
-                if result.provider_issue != "none" or should_skip_launch(
-                    runtime, context, result.agent
-                ):
+            if not any(initial for _agent, initial in futures.values()):
+                continue
+            for result in finished:
+                outcome = _refill_outcome(result)
+                if outcome in ("provider", "deadline"):
+                    index_log(
+                        runtime,
+                        f"Worker-pool refill: agent={result.agent} slot left idle; "
+                        f"{outcome} outcome rc={result.returncode}",
+                    )
                     continue
-                remaining = _productive_wall_remaining(state)
-                if remaining is not None and remaining <= 0:
+                # A turn-capped session carries in-flight work, and a failed one
+                # produced no information about whether work remains — treating
+                # its crash as "found nothing" would strand the slot. Only a
+                # clean session has to justify its replacement.
+                if outcome == "clean":
+                    if should_skip_launch(
+                        runtime, context, result.agent, primary_always_launches=False,
+                    ):
+                        index_log(
+                            runtime,
+                            f"Worker-pool refill: agent={result.agent} slot left idle; "
+                            "no active hypothesis, handoff, claimable card, or fuzz lead",
+                        )
+                        continue
+                    if not _session_did_work(result):
+                        index_log(
+                            runtime,
+                            f"Worker-pool refill: agent={result.agent} slot left idle; "
+                            "its session made no tool call, so a replacement would repeat it",
+                        )
+                        continue
+                elif outcome == "failed" and result.agent in retried:
+                    index_log(
+                        runtime,
+                        f"Worker-pool refill: agent={result.agent} slot left idle; "
+                        f"already retried once after an unexpected exit rc={result.returncode}",
+                    )
                     continue
+                remaining = epoch_remaining()
+                if remaining <= 0:
+                    index_log(
+                        runtime,
+                        f"Worker-pool refill: agent={result.agent} slot left idle; "
+                        "pool epoch closed, deferring to post-iteration triage",
+                    )
+                    continue
+                if outcome == "failed":
+                    # Spend the allowance only on a launch that actually happens.
+                    retried.add(result.agent)
                 index_log(
                     runtime,
-                    f"Worker-pool refill: agent={result.agent} finished early; launching one replacement",
+                    f"Worker-pool refill: agent={result.agent} slot free; "
+                    f"launching another session with {remaining}s left in the epoch",
                 )
-                refill = pool.submit(
-                    run_agent_guarded, runtime, context, result.agent,
-                    state.iteration, False, remaining,
-                )
-                futures[refill] = (result.agent, False)
+                launch(result.agent, False)
     return results
 
 

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
@@ -1325,6 +1326,12 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
             not audit_runner.should_skip_launch(queue_runtime, generic_context, 1),
             "audit always preserves one discovery agent",
         )
+        check(
+            audit_runner.should_skip_launch(
+                queue_runtime, generic_context, 1, primary_always_launches=False,
+            ),
+            "the primary agent's free launch does not extend to slot refills",
+        )
         (results / "fuzz-leads.md").write_text("# Leads\nparser.c:91\n", encoding="utf-8")
         check(
             not audit_runner.should_skip_launch(queue_runtime, generic_context, 2),
@@ -1353,24 +1360,219 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     pool_state = audit_runner.BackendState(
         pool_runtime, pool_context, iteration=1, started_at=1.0,
     )
-    refill_started = threading.Event()
-    pool_calls = []
-    def _pool_agent(_runtime, _context, agent, _iteration, cold, _limit):
-        pool_calls.append((agent, cold))
-        if agent == 2:
-            refill_started.wait(10)
-        elif pool_calls.count((1, False)):
-            refill_started.set()
+    def _pool_result(agent, rc=0, issue="none", turn_capped=False, raw=Path()):
         return audit_runner.AgentResult(
-            agent, "reproduce", 0, Path(), Path(), {}, "none", None
+            agent, "reproduce", rc, raw, Path(), {}, issue, None, turn_capped,
         )
-    with mock.patch.object(audit_runner, "run_agent_guarded", side_effect=_pool_agent), \
-         mock.patch.object(audit_runner, "should_skip_launch", return_value=False):
-        pool_results = audit_runner.run_agent_pool(pool_state, [1, 2], True)
+
+    def _transcript(name, tool_calls):
+        """A minimal Claude-shaped transcript with `tool_calls` tool uses."""
+        path = root / f"pool-{name}.log.raw"
+        content = [{"type": "assistant", "message": {"content": (
+            [{"type": "tool_use", "name": "Bash", "input": {}}] * tool_calls
+            or [{"type": "text", "text": "nothing to do"}]
+        )}}]
+        path.write_text(
+            "\n".join(json.dumps(row) for row in content), encoding="utf-8",
+        )
+        return path
+
+    def _drive_pool(responder, *, skip_launch=False, want_slot1=3):
+        """Hold slot 2's initial session open until slot 1 stops being refilled.
+
+        Slot 2 keeps an initial session outstanding, which is the window in
+        which refills are issued; it returns once slot 1 has run `want_slot1`
+        sessions, or after a short backstop when no refill is coming.
+        """
+        calls = []
+        lock = threading.Lock()
+        def _slot1_sessions():
+            with lock:
+                return sum(1 for agent, _cold, _limit in calls if agent == 1)
+        def _agent(_runtime, _context, agent, _iteration, cold, limit):
+            with lock:
+                calls.append((agent, cold, limit))
+            if agent == 2:
+                backstop = time.monotonic() + 0.5
+                while _slot1_sessions() < want_slot1 and time.monotonic() < backstop:
+                    time.sleep(0.005)
+            return responder(agent, calls)
+        def _skip(_runtime, _context, agent, *, primary_always_launches=True):
+            if callable(skip_launch):
+                return skip_launch(agent, primary_always_launches)
+            return skip_launch
+        with mock.patch.object(audit_runner, "run_agent_guarded", side_effect=_agent), \
+             mock.patch.object(audit_runner, "should_skip_launch", side_effect=_skip):
+            results = audit_runner.run_agent_pool(pool_state, [1, 2], True)
+        return calls, results
+
+    # Duration is not a work-availability signal: an instant session with work
+    # available must still be replaced. The old minute-long floor vetoed these.
+    fast_calls, fast_results = _drive_pool(lambda agent, _calls: _pool_result(agent))
     check(
-        len(pool_results) == 3 and pool_calls.count((1, False)) == 1,
-        "an early worker receives one refill while another initial slot is active",
-        repr(pool_calls),
+        sum(1 for a, cold, _l in fast_calls if a == 1 and not cold) >= 2
+        and len(fast_results) == len(fast_calls),
+        "an instant session with work available is relaunched repeatedly",
+        repr(fast_calls),
+    )
+    check(
+        [c for c in fast_calls if c[1]].__len__() == 2,
+        "only the first session in each slot is a cold start",
+        repr(fast_calls),
+    )
+    check(
+        all(limit is not None and limit > 0 for _a, _c, limit in fast_calls),
+        "every session in the epoch is clamped to the remaining epoch deadline",
+        repr(fast_calls),
+    )
+    # No live work source: the slot stays idle instead of spinning.
+    idle_calls, _ = _drive_pool(
+        lambda agent, _calls: _pool_result(agent), skip_launch=True,
+    )
+    check(
+        sorted((a, c) for a, c, _l in idle_calls) == [(1, True), (2, True)],
+        "no slot is relaunched without a live work source",
+        repr(idle_calls),
+    )
+    # Agent 1's unconditional launch is an initial-cohort guarantee. If the pool
+    # asked with it, the primary slot would refill against a dry queue all epoch.
+    dry_primary_calls, _ = _drive_pool(
+        lambda agent, _calls: _pool_result(agent),
+        skip_launch=lambda agent, primary_always_launches: not (
+            agent == 1 and primary_always_launches
+        ),
+    )
+    check(
+        sorted((a, c) for a, c, _l in dry_primary_calls) == [(1, True), (2, True)],
+        "the pool asks about work without agent 1's initial-cohort free pass",
+        repr(dry_primary_calls),
+    )
+    # A turn-capped session was stopped mid-investigation, so its slot continues
+    # even when no separate work source is visible.
+    capped_calls, _ = _drive_pool(
+        lambda agent, _calls: _pool_result(agent, turn_capped=True),
+        skip_launch=True,
+    )
+    check(
+        sum(1 for a, cold, _l in capped_calls if a == 1 and not cold) >= 1,
+        "a turn-capped session continues in its slot without a separate work source",
+        repr(capped_calls),
+    )
+    # An ambiguous process failure is usually one-off -- recorded audits show a
+    # replacement after rc=-9 and rc=1 each running a full productive session --
+    # so the slot retries exactly once, and never loops.
+    for rc, label in ((-9, "killed"), (1, "crashed")):
+        retry_calls, _ = _drive_pool(
+            lambda agent, _calls, rc=rc: _pool_result(agent, rc=rc if agent == 1 else 0),
+        )
+        slot1 = [c for c in retry_calls if c[0] == 1]
+        check(
+            len(slot1) == 2 and slot1[0][1] is True and slot1[1][1] is False,
+            f"a {label} session (rc={rc}) retries its slot exactly once",
+            repr(retry_calls),
+        )
+    # A deadline truncation means the epoch or wall ran out: nothing to retry into.
+    deadline_calls, _ = _drive_pool(
+        lambda agent, _calls: _pool_result(agent, rc=124 if agent == 1 else 0),
+    )
+    check(
+        sorted((a, c) for a, c, _l in deadline_calls) == [(1, True), (2, True)],
+        "a deadline-truncated session (rc=124) does not get its slot relaunched",
+        repr(deadline_calls),
+    )
+    # A crashed session says nothing about whether work remains, so its one
+    # retry must not be vetoed by a dry queue -- and must not be spent by that
+    # veto either, or the slot is stranded for the rest of the cohort.
+    dry_retry_calls, _ = _drive_pool(
+        lambda agent, calls: _pool_result(
+            agent, rc=1 if agent == 1 else 0,
+        ),
+        skip_launch=True,
+    )
+    slot1 = [c for c in dry_retry_calls if c[0] == 1]
+    check(
+        len(slot1) == 2 and slot1[1][1] is False,
+        "a crashed session retries once even when every work source reads dry",
+        repr(dry_retry_calls),
+    )
+    # Provider trouble in one slot must stop launches in every *other* slot too,
+    # so a limited provider is not fed while the outer recovery path waits for
+    # the pool to drain. Needs a third slot: with only the failing slot and the
+    # one holding the cohort open, no refill is possible either way.
+    pool_runtime.num_agents = 3
+    latch_calls = []
+    latch_lock = threading.Lock()
+    limited = threading.Event()
+    def _latch_agent(_runtime, _context, agent, _iteration, cold, _limit):
+        with latch_lock:
+            latch_calls.append((agent, cold))
+        if agent == 1:
+            outcome = _pool_result(1, issue="capacity_limited")
+            limited.set()
+            return outcome
+        if agent == 2:
+            # Report after the limit is known, so a refill here would be a
+            # decision made with the provider already flagged.
+            limited.wait(1)
+            time.sleep(0.05)
+            return _pool_result(2, raw=_transcript("latch2", 3))
+        backstop = time.monotonic() + 0.5
+        while time.monotonic() < backstop:
+            with latch_lock:
+                if len(latch_calls) > 3:
+                    break
+            time.sleep(0.005)
+        return _pool_result(3, raw=_transcript("latch3", 3))
+    with mock.patch.object(audit_runner, "run_agent_guarded", side_effect=_latch_agent), \
+         mock.patch.object(audit_runner, "should_skip_launch", return_value=False):
+        audit_runner.run_agent_pool(pool_state, [1, 2, 3], True)
+    check(
+        sorted(latch_calls) == [(1, True), (2, True), (3, True)],
+        "a provider-limited slot halts launches across the whole pool",
+        repr(latch_calls),
+    )
+    pool_runtime.num_agents = 2
+    # Work availability is sticky (a fuzz lead stays listed all pool), so a
+    # clean session that did nothing must not be replaced by another no-op.
+    noop_calls, _ = _drive_pool(
+        lambda agent, _calls: _pool_result(agent, raw=_transcript(f"noop{agent}", 0)),
+    )
+    check(
+        sorted((a, c) for a, c, _l in noop_calls) == [(1, True), (2, True)],
+        "a clean session with no tool call does not get its slot replaced",
+        repr(noop_calls),
+    )
+    worked_calls, _ = _drive_pool(
+        lambda agent, _calls: _pool_result(agent, raw=_transcript(f"work{agent}", 3)),
+    )
+    check(
+        sum(1 for a, cold, _l in worked_calls if a == 1 and not cold) >= 1,
+        "a clean session that made tool calls does get its slot replaced",
+        repr(worked_calls),
+    )
+    # The epoch deadline, not the last initial session, bounds the tail.
+    with mock.patch.object(audit_runner, "_agent_timeout", return_value=1):
+        epoch_calls, _ = _drive_pool(lambda agent, _calls: _pool_result(agent))
+    check(
+        sorted((a, c) for a, c, _l in epoch_calls) == [(1, True), (2, True)],
+        "a closed pool epoch defers the slot to post-iteration triage",
+        repr(epoch_calls),
+    )
+    # Refills stop with the last initial session on purpose: that sentinel is
+    # the clock for iteration-counted strategy rotation and the bound on
+    # sticky-signal spin. A one-slot cohort therefore chains nothing, and
+    # continuation of a turn-capped session comes from the next iteration.
+    solo_calls = []
+    def _solo_agent(_runtime, _context, agent, _iteration, cold, _limit):
+        solo_calls.append((agent, cold))
+        return _pool_result(agent, turn_capped=True)
+    with mock.patch.object(audit_runner, "run_agent_guarded", side_effect=_solo_agent), \
+         mock.patch.object(audit_runner, "should_skip_launch", return_value=False):
+        audit_runner.run_agent_pool(pool_state, [1], True)
+    check(
+        solo_calls == [(1, True)],
+        "a one-slot cohort runs one session and defers continuation to triage",
+        repr(solo_calls),
     )
     pool_runtime.refill_workers = False
     no_refill_calls = []

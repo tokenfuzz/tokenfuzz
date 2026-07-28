@@ -1447,7 +1447,10 @@ def harvest_tokens(
         now live in input_tokens where they belong.
     """
     totals = {
-        "iterations": 0,
+        # One row per usage-bearing ledger entry: agent sessions plus the
+        # harness's own LLM-decision and probe rows. Not a count of iterations
+        # or of sessions -- a single iteration writes many rows.
+        "usage_records": 0,
         "input_tokens": 0,
         "cached_input_tokens": 0,
         "cache_creation_tokens": 0,
@@ -1487,7 +1490,7 @@ def harvest_tokens(
             continue
         if not isinstance(row, dict):
             continue
-        totals["iterations"] += 1
+        totals["usage_records"] += 1
         backend = str(row.get("backend") or default_backend or "").strip().lower()
         model = str(row.get("model") or default_model or "").strip()
         tok = row.get("tokens") or {}
@@ -3094,7 +3097,7 @@ def _tokens_for_cell(cell: dict) -> dict:
         "cost_usd": str(tokens.get("cost_usd") or ""),
         "cost_source": str(tokens.get("cost_source") or ""),
         "cost_estimated": bool(tokens.get("cost_estimated")) or estimated,
-        "iterations": _as_nonnegative_int(tokens.get("iterations")),
+        "usage_records": _as_nonnegative_int(tokens.get("usage_records")),
         "estimated": estimated,
         "token_source": str(tokens.get("token_source") or ""),
     }

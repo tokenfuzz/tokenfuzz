@@ -29,7 +29,7 @@ NUM_AGENTS=4 bin/audit --target <target> --backend <backend>
 | Variable | Default | Use it for |
 | --- | --- | --- |
 | `AUDIT_WALL_BUDGET_SECS` | `0` (off) | Wall-clock ceiling for a continuous run. The loop stops launching new iterations once it is spent — the simplest way to leave an overnight audit running with a hard stop. Provider quota pauses do not count against it. |
-| `AGENT_TIMEOUT` | `7200` seconds | Hard ceiling for one agent launch. |
+| `AGENT_TIMEOUT` | `7200` seconds | Hard ceiling for one agent launch, and for one iteration's pool of them. An early-finished slot is relaunched while a peer's first session is still running, so this also bounds how far those replacements can push post-iteration triage out: every session in the iteration is clamped to what remains of the ceiling measured from when the iteration's first sessions started. |
 | `SHELL_SANITIZER_RUN_BUDGET` | `60` | Sanitizer runs one shell/generic agent may spend per iteration. |
 | `BROWSER_SANITIZER_RUN_BUDGET` | `25` | The same budget for browser-mode agents. |
 

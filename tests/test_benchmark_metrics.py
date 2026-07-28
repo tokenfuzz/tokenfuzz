@@ -611,13 +611,14 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "wall_seconds": "not-a-number",
             "metrics": {"tokens": {
                 "input_tokens": -1, "output_tokens": float("inf"),
-                "iterations": "broken",
+                "usage_records": "broken",
             }},
         }
         token_row = benchmark._tokens_for_cell(cell)
         self.assertEqual(token_row["input_tokens"], 0)
         self.assertEqual(token_row["output_tokens"], 0)
         self.assertEqual(token_row["wall_seconds"], 0)
+        self.assertEqual(token_row["usage_records"], 0)
 
     def test_configured_default_models_have_pricing(self) -> None:
         # Every backend default in config/models.toml must key a pricing row.
