@@ -69,6 +69,13 @@ class BenchmarkReportTests(unittest.TestCase):
         self.assertLess(body.index("For every FINDING:"), body.index("For every CRASH:"))
         self.assertRegex(body, r"find as many|file generously|breadth and depth")
         self.assertNotRegex(body, r"\{\{\s*(target_path|output_dir)\s*\}\}")
+        # The baseline reports fields; it is never handed the harness's own
+        # strategy playbook. Reach fields are inferred downstream by
+        # triage.fill_reach_fields_tree, so the control arm scores on the same
+        # yardstick without inheriting tokenfuzz's methodology.
+        self.assertNotRegex(body, r"\bS[1-8]\b")
+        self.assertNotIn("| Strategy", body)
+        self.assertRegex(body, r"Use the same\s+`## Fields` table")
 
         literal = prompt_render.render_template(
             ROOT / "lib" / "prompts" / "benchmark_model_direct.md.j2",

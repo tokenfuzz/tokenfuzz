@@ -10,19 +10,36 @@ from pathlib import Path
 
 FIND_QUALITY_DECISION_VERSION = "v13-python"
 REPORT_NAMES = ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md")
+PLACEHOLDER_FIELD_VALUES = frozenset(
+    {"", "-", "—", "?", "tbd", "unknown / not assessed"}
+)
+
+
+def field_value_is_placeholder(field: str, value: str) -> bool:
+    """Whether a structured report value still needs a substantive value."""
+    normalized = value.strip().casefold()
+    return (
+        normalized in PLACEHOLDER_FIELD_VALUES
+        or (
+            normalized == "unspecified"
+            and field.strip().casefold() != "caller contract"
+        )
+    )
+
 
 # Single source of truth for the harness-owned report vocabulary. Writers
 # (triage's contract-concern setter, the report enricher) and this stripper
 # share these so a renamed heading or boundary cannot silently desync them and
 # start spending fresh reviews on mechanical edits.
 CONTRACT_CONCERN_HEADING = "## Contract concern"
+SEVERITY_RATIONALE_HEADING = "## Severity rationale"
 # A harness-inserted section runs until the next Markdown H2, a bare "Summary:"
 # field, or end-of-report — matching the contract-concern setter's own regex.
 SECTION_BOUNDARY_PREFIXES = ("## ", "Summary:")
 _GENERATED_SECTIONS = {
     CONTRACT_CONCERN_HEADING,
     "## Patch",
-    "## Severity rationale",
+    SEVERITY_RATIONALE_HEADING,
 }
 _CODE_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 _TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")

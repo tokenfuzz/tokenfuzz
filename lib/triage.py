@@ -317,13 +317,60 @@ def _reach_field_present(text: str, label: str) -> bool:
         rf"^\|\s*{re.escape(label)}\s*\|\s*([^|\n]*)|^{re.escape(label)}\s*:\s*(.*)$",
         text, re.IGNORECASE | re.MULTILINE,
     )
-    placeholders = {"", "-", "—", "tbd", "unknown / not assessed"}
-    if label.casefold() != "caller contract":
-        placeholders.add("unspecified")
     return any(
-        (table_value or bare_value).strip().lower() not in placeholders
+        not report_identity.field_value_is_placeholder(
+            label, table_value or bare_value,
+        )
         for table_value, bare_value in values
     )
+
+
+def _missing_reach_fields(text: str) -> dict[str, str]:
+    return {
+        key: label for key, label in _REACH_FIELD_LABELS.items()
+        if not _reach_field_present(text, label)
+    }
+
+
+def _accepted_reach_fields(
+    source: object, missing: dict[str, str],
+) -> dict[str, str]:
+    if not isinstance(source, dict):
+        return {}
+    return {
+        key: value
+        for key, raw in source.items()
+        if key in missing and (value := _valid_reach_field(key, raw))
+    }
+
+
+def _materialize_reach_fields(
+    report: Path, accepted: dict[str, str],
+) -> bool:
+    if not accepted:
+        return False
+    current = report.read_text(encoding="utf-8", errors="replace")
+    additions = [
+        f"{_REACH_FIELD_LABELS[key]}: {value}"
+        for key, value in accepted.items()
+        if not _reach_field_present(current, _REACH_FIELD_LABELS[key])
+    ]
+    if not additions:
+        return False
+    lines = current.rstrip().splitlines()
+    insertion = next(
+        (
+            index for index, line in enumerate(lines)
+            if line.strip() == report_identity.SEVERITY_RATIONALE_HEADING
+        ),
+        len(lines),
+    )
+    block = [*additions, ""]
+    if insertion and lines[insertion - 1].strip():
+        block.insert(0, "")
+    lines[insertion:insertion] = block
+    _atomic_write_text(report, "\n".join(lines).rstrip() + "\n")
+    return True
 
 
 _NO_REACH_DECISION = object()
@@ -345,25 +392,31 @@ def fill_reach_fields(
     if report is None:
         return False
     try:
-        with report.open("rb") as stream:
-            text = stream.read(6000).decode("utf-8", errors="replace")
+        full_text = report.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    missing = {
-        key: label for key, label in _REACH_FIELD_LABELS.items()
-        if not _reach_field_present(text, label)
-    }
+    text = full_text[:6000]
+    missing = _missing_reach_fields(full_text)
     if not missing:
         return False
     sidecar = directory / ".llm_fields.json"
     cache = _finding_cache(sidecar)
+    changed = _materialize_reach_fields(
+        report, _accepted_reach_fields(cache, missing),
+    )
+    if changed:
+        full_text = report.read_text(encoding="utf-8", errors="replace")
+        text = full_text[:6000]
+        missing = _missing_reach_fields(full_text)
+        if not missing:
+            return True
     try:
         attempts = int(cache.get("_fill_attempts", 0))
         max_attempts = _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
     except (TypeError, ValueError):
         attempts, max_attempts = 0, 2
     if attempts >= max_attempts:
-        return False
+        return changed
     decision = decision_override
     if decision is _NO_REACH_DECISION:
         prompt = render_template("triage_reachability_fields.md.j2", {"narrative": text})
@@ -374,26 +427,13 @@ def fill_reach_fields(
     cache["_fill_attempts"] = attempts + 1
     if not isinstance(decision, dict):
         _write_atomic_json(sidecar, cache)
-        return False
-    accepted = {
-        key: value
-        for key, raw in decision.items()
-        if key in missing and (value := _valid_reach_field(key, raw))
-    }
+        return changed
+    accepted = _accepted_reach_fields(decision, missing)
     cache.update(accepted)
     _write_atomic_json(sidecar, cache)
     if not accepted:
-        return False
-    current = report.read_text(encoding="utf-8", errors="replace")
-    additions = [
-        f"{_REACH_FIELD_LABELS[key]}: {value}"
-        for key, value in accepted.items()
-        if not _reach_field_present(current, _REACH_FIELD_LABELS[key])
-    ]
-    if not additions:
-        return False
-    _atomic_write_text(report, current.rstrip() + "\n\n" + "\n".join(additions) + "\n")
-    return True
+        return changed
+    return _materialize_reach_fields(report, accepted) or changed
 
 
 def _batch_reach_field_decisions(
@@ -401,24 +441,33 @@ def _batch_reach_field_decisions(
     usage_index: str | os.PathLike[str] | None,
     deadline: float | None = None,
     workers: int = 4,
-) -> tuple[set[Path], dict[Path, dict]]:
-    """Batch missing reachability fields without per-item fallback fan-out."""
+) -> tuple[set[Path], dict[Path, dict], set[Path]]:
+    """Apply cached fields, then batch unresolved fields without per-item fan-out."""
     items: list[dict] = []
     attempted: set[Path] = set()
+    prefilled: set[Path] = set()
     for directory in directories:
         report = _report(directory)
         if report is None:
             continue
         try:
-            narrative = report.read_text(encoding="utf-8", errors="replace")[:6000]
+            report_text = report.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if all(
-            _reach_field_present(narrative, label)
-            for label in _REACH_FIELD_LABELS.values()
-        ):
+        narrative = report_text[:6000]
+        missing = _missing_reach_fields(report_text)
+        if not missing:
             continue
         cache = _finding_cache(directory / ".llm_fields.json")
+        cached = _accepted_reach_fields(cache, missing)
+        if cached:
+            if _materialize_reach_fields(report, cached):
+                prefilled.add(directory)
+            report_text = report.read_text(encoding="utf-8", errors="replace")
+            narrative = report_text[:6000]
+            missing = _missing_reach_fields(report_text)
+            if not missing:
+                continue
         try:
             attempts = int(cache.get("_fill_attempts", 0))
             max_attempts = _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
@@ -429,7 +478,7 @@ def _batch_reach_field_decisions(
         attempted.add(directory)
         items.append({"id": directory.name, "report": narrative})
     if not items:
-        return attempted, {}
+        return attempted, {}, prefilled
     timeout = llm_decide.decision_timeout()
     instructions = render_template(
         "triage_reachability_fields.md.j2", {"narrative": ""},
@@ -439,25 +488,32 @@ def _batch_reach_field_decisions(
         instructions, items, timeout, usage_index, deadline, workers,
         batch_size=4,
     )
-    return attempted, {
-        directory: decision
-        for directory in attempted
-        if isinstance((decision := by_id.get(directory.name)), dict)
-    }
+    return (
+        attempted,
+        {
+            directory: decision
+            for directory in attempted
+            if isinstance((decision := by_id.get(directory.name)), dict)
+        },
+        prefilled,
+    )
 
 
 def fill_reach_fields_tree(root: Path) -> int:
     """Apply reach-field convergence to every pooled crash and finding."""
     if os.environ.get("LLM_FIELD_FILL_DISABLE", "0") == "1":
         return 0
-    filled = 0
+    changed: set[Path] = set()
     usage_index = benchmark._find_index_jsonl(Path(root))
     directories: list[Path] = []
     for kind, prefix in (("findings", "FIND-*"), ("crashes", "CRASH-*")):
         for directory in sorted((Path(root) / kind).glob(prefix)):
             if directory.is_dir():
                 directories.append(directory)
-    attempted, batched = _batch_reach_field_decisions(directories, usage_index)
+    attempted, batched, prefilled = _batch_reach_field_decisions(
+        directories, usage_index,
+    )
+    changed.update(prefilled)
     for directory in directories:
         if directory not in attempted:
             continue
@@ -465,8 +521,8 @@ def fill_reach_fields_tree(root: Path) -> int:
             directory, usage_index,
             decision_override=batched.get(directory),
         ):
-            filled += 1
-    return filled
+            changed.add(directory)
+    return len(changed)
 
 
 def _cluster_source_path(location: str, target_root: Path) -> tuple[Path, int] | None:
@@ -1395,7 +1451,7 @@ def triage_crash_dirs(
         ):
             reach_directories.append(directory)
     usage_index = benchmark._find_index_jsonl(results)
-    reach_attempted, reach_decisions = _batch_reach_field_decisions(
+    reach_attempted, reach_decisions, _ = _batch_reach_field_decisions(
         reach_directories, usage_index, deadline, workers,
     )
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -1945,7 +2001,7 @@ def validate_find_gate(
         if status == "quality-accepted"
     ]
     usage_index = benchmark._find_index_jsonl(results)
-    reach_attempted, reach_decisions = _batch_reach_field_decisions(
+    reach_attempted, reach_decisions, _ = _batch_reach_field_decisions(
         accepted_quality, usage_index, deadline, workers,
     )
     for directory in accepted_quality:

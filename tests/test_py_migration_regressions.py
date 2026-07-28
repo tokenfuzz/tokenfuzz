@@ -1361,6 +1361,75 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     with mock.patch.object(triage.llm_decide, "llm_decide") as no_refill:
         check(not triage.fill_reach_fields(reach_dir), "complete reach fields are idempotent")
     check(no_refill.call_count == 0, "complete reach fields spend no additional LLM decision")
+    cached_reach_dir = root / "cached-reach" / "crashes" / "CRASH-002"
+    cached_reach_dir.mkdir(parents=True)
+    cached_reach_report = cached_reach_dir / "report.md"
+    cached_reach_report.write_text(
+        "# Cached reach fields\n\n"
+        "| Field | Value |\n| :---- | :---- |\n"
+        "| Trusted caller actions | — |\n\n"
+        "Trusted caller actions: —\n\n"
+        "## Severity rationale\n\nGenerated scoring details.\n",
+        encoding="utf-8",
+    )
+    (cached_reach_dir / ".llm_fields.json").write_text(
+        json.dumps({
+            "_fill_attempts": 2,
+            "trusted_caller_actions": "normal public call",
+        }),
+        encoding="utf-8",
+    )
+    with mock.patch.object(triage.llm_decide, "llm_decide") as no_cached_retry:
+        cached_reach_changed = triage.fill_reach_fields(cached_reach_dir)
+    check(
+        cached_reach_changed
+        and "Trusted caller actions: normal public call"
+        in cached_reach_report.read_text(encoding="utf-8"),
+        "cached reach fields materialize after the retry budget is exhausted",
+    )
+    check(
+        no_cached_retry.call_count == 0,
+        "cached reach fields do not spend another LLM decision",
+    )
+    cached_long_root = root / "cached-long-reach"
+    cached_long_dir = cached_long_root / "crashes" / "CRASH-003"
+    cached_long_dir.mkdir(parents=True)
+    cached_long_report = cached_long_dir / "report.md"
+    cached_long_report.write_text(
+        "# Long cached reach fields\n\n"
+        "| Field | Value |\n| :---- | :---- |\n"
+        "| Surface | — |\n\n"
+        + ("Narrative evidence remains bounded for the prompt. " * 180)
+        + "\n\n## Severity rationale\n\nGenerated scoring details.\n",
+        encoding="utf-8",
+    )
+    (cached_long_dir / ".llm_fields.json").write_text(
+        json.dumps({"_fill_attempts": 1, **reach_decision}),
+        encoding="utf-8",
+    )
+    with mock.patch.object(triage.llm_decide, "llm_decide") as no_long_retry:
+        cached_long_count = triage.fill_reach_fields_tree(cached_long_root)
+    cached_long_text = cached_long_report.read_text(encoding="utf-8")
+    check(
+        cached_long_count == 1
+        and cached_long_text.find("Surface: library-api") > 6000,
+        "cached fields beyond the prompt bound still converge",
+    )
+    check(
+        no_long_retry.call_count == 0,
+        "full-report presence checks avoid retrying cached long reports",
+    )
+    cached_severity = subprocess.run(
+        [str(ROOT / "bin" / "severity"), "--report", str(cached_reach_dir)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+    )
+    check(
+        cached_severity.returncode == 0
+        and "Trusted caller actions: normal public call"
+        in cached_reach_report.read_text(encoding="utf-8"),
+        "severity regeneration preserves cached fields materialized into an old report",
+        cached_severity.stderr,
+    )
     severity_run = subprocess.run(
         [str(ROOT / "bin" / "severity"), "--report", str(reach_dir), "--json"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
@@ -1436,7 +1505,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         triage, "_prepare_accepted_finding",
         side_effect=lambda _directory, report, *_args: report,
     ), mock.patch.object(
-        triage, "_batch_reach_field_decisions", return_value=(set(), {}),
+        triage, "_batch_reach_field_decisions", return_value=(set(), {}, set()),
     ):
         batch_quality_counts = triage.validate_find_gate(batch_quality_root)
     check(

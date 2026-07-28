@@ -270,8 +270,9 @@ For every CRASH:
   5. If you wrote a driver, save it as
      `{{ output_dir }}/crashes/CRASH-<n>/harness.c` -- one driver per
      crash, so each can be rebuilt and reproduced on its own.
-  6. Write a short `{{ output_dir }}/crashes/CRASH-<n>/report.md` naming
-     the file, function, and bug class.
+  6. Write `{{ output_dir }}/crashes/CRASH-<n>/report.md`. Use the same
+     `## Fields` table required for findings, then name the file, function,
+     bug class, reach path, and attacker gain in concrete prose.
   7. End that report with the fix pointer — exactly one of: a `## Fix
      Direction` heading on its own line followed by a one-sentence body
      (where the fix goes + what changes), or a sibling `patch.diff` when the

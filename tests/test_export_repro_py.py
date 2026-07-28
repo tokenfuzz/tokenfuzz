@@ -2250,6 +2250,278 @@ if result_r.returncode == 0:
         assert_eq(1, report_r2.count("## Severity rationale"),
                   "severity replay: rationale not duplicated on second bundle")
 
+# ─── End-to-end: post-export field convergence survives re-bundling ──
+#
+# Benchmark cells may be bundled before triage infers their reachability
+# fields. The inferred bare labels are written to the canonical REPORT.md,
+# while the original agent report stays under .audit/. A pool regeneration
+# then runs severity and export-repro again. The visible table must absorb the
+# inferred values, render-md must not hide the only populated copy, and the
+# second export must not rebuild from the stale audit report and lose them.
+
+backfill_crash_dir = results_dir / "crashes" / "CRASH-BF-1"
+backfill_crash_dir.mkdir(parents=True)
+(backfill_crash_dir / "sanitizer.txt").write_text("""\
+=== Run 1/5 ===
+==44444==ERROR: AddressSanitizer: heap-use-after-free on address 0xc0de at pc 0xface
+READ of size 8 at 0xc0de thread T0
+    #0 0xdead in child_free /src/child.c:91
+    #1 0xfeed in table_free /src/table.c:236
+SUMMARY: AddressSanitizer: heap-use-after-free /src/child.c:91 in child_free
+CRASH_RATE: 5/5
+""", encoding="utf-8")
+(backfill_crash_dir / "report.md").write_text("""\
+# CRASH-BF-1
+
+## Summary
+
+A public input reaches a stale child object.
+
+## Fix Direction
+
+Detach the child before releasing it.
+""", encoding="utf-8")
+(backfill_crash_dir / "input.bin").write_bytes(b"\x04\x05\x06")
+
+backfill_first = subprocess.run(
+    [str(ROOT / "bin" / "export-repro"), "CRASH-BF-1"],
+    capture_output=True, text=True, env=env, cwd=output_root,
+)
+assert_eq(0, backfill_first.returncode,
+          f"post-export backfill: initial export succeeds "
+          f"(stderr={backfill_first.stderr[-200:]!r})")
+
+if backfill_first.returncode == 0:
+    backfill_report = backfill_crash_dir / "REPORT.md"
+    with backfill_report.open("a", encoding="utf-8") as stream:
+        stream.write("""\
+
+Caller contract: unspecified
+Caller controls: bytes
+Parameter control: application-supplied
+Trusted caller actions: —
+Trusted caller actions: normal public call
+Boundary: unspecified
+Boundary: caller-supplied document
+Strategy: S7
+""")
+
+    # Before severity has synchronized the table, render-md must expose the
+    # populated bare labels instead of hiding them behind `—` table cells.
+    backfill_render = subprocess.run(
+        [str(ROOT / "bin" / "render-md"), "--html-sibling", str(backfill_report)],
+        capture_output=True, text=True, env=env,
+    )
+    assert_eq(0, backfill_render.returncode,
+              f"post-export backfill: pre-severity render succeeds "
+              f"(stderr={backfill_render.stderr[-200:]!r})")
+    if backfill_render.returncode == 0:
+        backfill_html = (backfill_crash_dir / "REPORT.html").read_text(encoding="utf-8")
+        assert_in("caller-supplied document", backfill_html,
+                  "post-export backfill: renderer exposes Boundary fallback")
+        assert_in("application-supplied", backfill_html,
+                  "post-export backfill: renderer exposes Parameter control fallback")
+        assert_in("S7", backfill_html,
+                  "post-export backfill: renderer exposes Strategy fallback")
+
+    backfill_severity = subprocess.run(
+        [str(ROOT / "bin" / "severity"), "--report", str(backfill_crash_dir), "--json"],
+        capture_output=True, text=True, env=env,
+    )
+    assert_eq(0, backfill_severity.returncode,
+              f"post-export backfill: severity succeeds "
+              f"(stderr={backfill_severity.stderr[-200:]!r})")
+    if backfill_severity.returncode == 0:
+        synchronized = backfill_report.read_text(encoding="utf-8")
+        for label, value in (
+            ("Caller contract", "unspecified"),
+            ("Caller controls", "bytes"),
+            ("Parameter control", "application-supplied"),
+            ("Trusted caller actions", "normal public call"),
+            ("Boundary", "caller-supplied document"),
+        ):
+            assert_true(
+                re.search(
+                    rf"^\|\s*{re.escape(label)}\s*\|\s*{re.escape(value)}\s*\|",
+                    synchronized, re.MULTILINE,
+                ) is not None,
+                f"post-export backfill: severity fills placeholder {label}",
+            )
+
+    backfill_second = subprocess.run(
+        [str(ROOT / "bin" / "export-repro"), "CRASH-BF-1"],
+        capture_output=True, text=True, env=env, cwd=output_root,
+    )
+    assert_eq(0, backfill_second.returncode,
+              f"post-export backfill: second export succeeds "
+              f"(stderr={backfill_second.stderr[-200:]!r})")
+    if backfill_second.returncode == 0:
+        rebuilt = backfill_report.read_text(encoding="utf-8")
+        for value in (
+            "caller-supplied document", "application-supplied",
+            "normal public call", "Strategy: S7",
+        ):
+            assert_in(value, rebuilt,
+                      f"post-export backfill: second export preserves {value}")
+        assert_true(
+            re.search(r"^\|\s*Strategy\s*\|\s*S7\s*\|", rebuilt, re.MULTILINE)
+            is not None,
+            "post-export backfill: second export promotes Strategy into table",
+        )
+
+
+# ─── Re-export keeps the inferred surface out of its own inference ───
+#
+# A rebundled REPORT.md inlines the sanitizer diagnostic. Its harness frames
+# live under fuzz/ or tests/ by convention, which is exactly what the
+# dev-surface regex looks for — so folding the regenerated report back into
+# surface inference flips a shipping library crash to `maint-tool` on the
+# second export and downgrades its severity on every later regeneration.
+
+harness_frame_dir = results_dir / "crashes" / "CRASH-HF-1"
+harness_frame_dir.mkdir(parents=True)
+(harness_frame_dir / "sanitizer.txt").write_text("""\
+=== Run 1/5 ===
+==55555==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xbeef at pc 0xcafe
+READ of size 16 at 0xbeef thread T0
+    #0 0xdead in app_parse /src/proj/src/parse.c:120
+    #1 0xfeed in app_read /src/proj/src/api.c:44
+    #2 0xbead in LLVMFuzzerTestOneInput /src/proj/fuzz/read_fuzzer.c:18
+SUMMARY: AddressSanitizer: heap-buffer-overflow /src/proj/src/parse.c:120 in app_parse
+CRASH_RATE: 5/5
+""", encoding="utf-8")
+(harness_frame_dir / "report.md").write_text("""\
+# CRASH-HF-1
+
+## Summary
+
+A public library entry point overflows a heap buffer.
+
+Trigger source: bytes
+Boundary: public library API
+Caller controls: bytes
+Caller contract: obeyed
+""", encoding="utf-8")
+(harness_frame_dir / "input.bin").write_bytes(b"\x07\x08\x09")
+
+harness_frame_surfaces = []
+for attempt in (1, 2, 3):
+    harness_frame_run = subprocess.run(
+        [str(ROOT / "bin" / "export-repro"), "CRASH-HF-1"],
+        capture_output=True, text=True, env=env, cwd=output_root,
+    )
+    assert_eq(0, harness_frame_run.returncode,
+              f"harness-frame re-export: export {attempt} succeeds "
+              f"(stderr={harness_frame_run.stderr[-200:]!r})")
+    if harness_frame_run.returncode != 0:
+        break
+    harness_frame_surfaces.append(
+        re.search(
+            r"^Surface: (.*)$",
+            (harness_frame_dir / "REPORT.md").read_text(encoding="utf-8"),
+            re.MULTILINE,
+        ).group(1)
+    )
+    if attempt == 1:
+        canonical = (harness_frame_dir / "REPORT.md").read_text(encoding="utf-8")
+        canonical = re.sub(
+            r"^(\|\s*Surface\s*\|\s*)unknown(?:\s*—[^|]*)?(\s*\|)$",
+            r"\1library-api\2",
+            canonical,
+            flags=re.MULTILINE,
+        )
+        canonical = re.sub(
+            r"^Surface:\s*unknown\s*$",
+            "Surface: library-api",
+            canonical,
+            flags=re.MULTILINE,
+        )
+        (harness_frame_dir / "REPORT.md").write_text(canonical, encoding="utf-8")
+
+if len(harness_frame_surfaces) == 3:
+    assert_eq("library-api", harness_frame_surfaces[1],
+              "harness-frame re-export: canonical Surface survives re-bundling")
+    assert_eq(harness_frame_surfaces[1], harness_frame_surfaces[2],
+              "harness-frame re-export: preserved Surface stays stable")
+    assert_true(
+        "maint-tool" not in harness_frame_surfaces[2],
+        "harness-frame re-export: inlined sanitizer frames do not force maint-tool",
+        f"surfaces={harness_frame_surfaces!r}",
+    )
+
+
+# ─── The stored Surface is a fallback, never a pin ───────────────────
+#
+# Every export writes its own inference to the same `Surface:` line, so the
+# canonical value cannot outrank fresh evidence: preferring it would pin a
+# stale classification that regeneration can no longer repair, and would
+# retire the boundary correction that turns a harness-shaped `library-api`
+# into the shipped CLI the report names. It fills in only where structure and
+# boundary both come up empty (covered by the harness-frame block above).
+
+stored_surface_dir = results_dir / "crashes" / "CRASH-SS-1"
+stored_surface_dir.mkdir(parents=True)
+(stored_surface_dir / "sanitizer.txt").write_text(f"""\
+=== Run 1/5 ===
+==66666==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xbeef at pc 0xcafe
+READ of size 16 at 0xbeef thread T0
+    #0 0xdead in app_parse {target_root}/src/parse.c:120
+    #1 0xfeed in app_read {target_root}/src/api.c:44
+SUMMARY: AddressSanitizer: heap-buffer-overflow {target_root}/src/parse.c:120 in app_parse
+CRASH_RATE: 5/5
+""", encoding="utf-8")
+(stored_surface_dir / "report.md").write_text("""\
+# CRASH-SS-1
+
+## Summary
+
+A public library entry point overflows a heap buffer.
+
+Trigger source: bytes
+Caller controls: bytes
+Caller contract: obeyed
+""", encoding="utf-8")
+(stored_surface_dir / "input.bin").write_bytes(b"\x0a\x0b\x0c")
+
+
+def export_stored_surface(step: str) -> str:
+    run = subprocess.run(
+        [str(ROOT / "bin" / "export-repro"), "CRASH-SS-1"],
+        capture_output=True, text=True, env=env, cwd=output_root,
+    )
+    assert_eq(0, run.returncode,
+              f"stored surface: {step} export succeeds "
+              f"(stderr={run.stderr[-200:]!r})")
+    if run.returncode != 0:
+        return ""
+    return re.search(
+        r"^Surface: (.*)$",
+        (stored_surface_dir / "REPORT.md").read_text(encoding="utf-8"),
+        re.MULTILINE,
+    ).group(1)
+
+
+def rewrite_stored_surface(kind: str) -> None:
+    report = stored_surface_dir / "REPORT.md"
+    text = re.sub(r"^(\|\s*Surface\s*\|\s*)[^|]*(\|)$", rf"\1{kind} \2",
+                  report.read_text(encoding="utf-8"), flags=re.MULTILINE)
+    report.write_text(
+        re.sub(r"^Surface:.*$", f"Surface: {kind}", text, flags=re.MULTILINE),
+        encoding="utf-8",
+    )
+
+
+assert_eq("library-api", export_stored_surface("first"),
+          "stored surface: frames in the target's source infer library-api")
+rewrite_stored_surface("maint-tool")
+assert_true(
+    "maint-tool" not in export_stored_surface("stale"),
+    "stored surface: regeneration repairs a stale stored classification",
+)
+with (stored_surface_dir / "REPORT.md").open("a", encoding="utf-8") as stream:
+    stream.write("\nBoundary: the demo command-line tool\n")
+assert_eq("cli", export_stored_surface("boundary"),
+          "stored surface: a boundary naming a shipped CLI still corrects it")
 
 
 # ─── write_stub_reproduce: fail-open bundle (no runnable template) ───

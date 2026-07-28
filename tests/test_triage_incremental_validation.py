@@ -78,7 +78,7 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         ), mock.patch.object(
             triage, "_prepare_accepted_finding", return_value=self.report,
         ), mock.patch.object(
-            triage, "_batch_reach_field_decisions", return_value=(set(), {}),
+            triage, "_batch_reach_field_decisions", return_value=(set(), {}, set()),
         ):
             return triage.validate_find_gate(self.root, workers=2)
 
@@ -679,7 +679,7 @@ Generated score text.
             "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
         }, clear=False), mock.patch.object(
             triage, "_batch_reach_field_decisions",
-            return_value=({self.finding}, {self.finding: {}}),
+            return_value=({self.finding}, {self.finding: {}}, set()),
         ), mock.patch.object(
             triage, "fill_reach_fields", side_effect=fill,
         ), mock.patch.object(
@@ -726,7 +726,7 @@ Generated score text.
 
         with mock.patch.object(
             triage, "_batch_reach_field_decisions",
-            return_value=({self.finding}, {self.finding: {}}),
+            return_value=({self.finding}, {self.finding: {}}, set()),
         ), mock.patch.object(
             triage, "fill_reach_fields", side_effect=fill,
         ), mock.patch.object(

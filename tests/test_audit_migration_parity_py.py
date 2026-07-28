@@ -245,8 +245,9 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         and triage._reach_field_present(
             "Caller contract: unspecified", "Caller contract"
         )
-        and not triage._reach_field_present("Surface: unspecified", "Surface"),
-        "reach validation keeps enums aligned and preserves unspecified contract",
+        and not triage._reach_field_present("Surface: unspecified", "Surface")
+        and not triage._reach_field_present("| Surface | ? |", "Surface"),
+        "reach validation keeps enums aligned and all placeholders missing",
     )
 
     fake_codex = root / "fake_codex.py"

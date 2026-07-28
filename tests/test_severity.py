@@ -116,6 +116,18 @@ class SeverityTests(unittest.TestCase):
             severity._detect_cluster_size("Cluster: FCL-abc (singleton)\n"), 1)
         self.assertEqual(severity._detect_cluster_size("no cluster field here\n"), 1)
 
+    def test_field_specific_placeholder_does_not_shadow_inferred_value(self) -> None:
+        fields = severity.extract_report_fields(
+            "| Field | Value |\n"
+            "|:--|:--|\n"
+            "| Boundary | unspecified |\n"
+            "| Caller contract | unspecified |\n\n"
+            "Boundary: caller-supplied document\n"
+            "Caller contract: obeyed\n"
+        )
+        self.assertEqual(fields["boundary"], "caller-supplied document")
+        self.assertEqual(fields["caller_contract"], "unspecified")
+
     def test_claimed_race_without_detector_scores_as_logic_race(self) -> None:
         # A report-only classifier cannot tell a TSan-detected memory race from
         # a race argued out of source, and picking `data_race` buys the
@@ -940,6 +952,34 @@ class SeverityTests(unittest.TestCase):
         )
         result = self.score(report)
         self.assert_metrics(result, AV="L", AT="P")
+
+    def test_placeholder_cell_does_not_shadow_an_inferred_bare_label(self) -> None:
+        """Triage writes inferred reach fields as bare labels below a table
+        whose row is still a generated placeholder. The placeholder must not
+        win first-place extraction, or the inferred value never scores and
+        never reaches the table."""
+        report_dir = self.make_report(
+            "parser reads past the record while decoding attacker bytes",
+            report_id="CRASH-PLACEHOLDER", trigger="bytes",
+            extra_fields=(("Boundary", "?"), ("Parameter control", "—")),
+            extra="\nBoundary: caller-supplied document\n"
+                  "Parameter control: direct\n",
+        )
+        report = report_dir / "report.md"
+        fields = severity.extract_report_fields(
+            report.read_text(encoding="utf-8"), report_dir,
+        )
+        self.assertEqual(fields["boundary"], "caller-supplied document")
+        self.assertEqual(fields["parameter_control"], "direct")
+        severity.update_report(report, self.score(report_dir))
+        synchronized = report.read_text(encoding="utf-8")
+        self.assertRegex(
+            synchronized,
+            r"(?m)^\|\s*Boundary\s*\|\s*caller-supplied document\s*\|",
+        )
+        self.assertRegex(
+            synchronized, r"(?m)^\|\s*Parameter control\s*\|\s*direct\s*\|",
+        )
 
     def test_prose_caller_controls_stays_prose(self) -> None:
         report = self.make_report(

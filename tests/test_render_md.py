@@ -191,11 +191,58 @@ Real prose lives here.
         self.assertIn("Surface: library-api", source)
         self.assertIn("- **Severity**: Medium", source)
         for duplicate in (
-            "Trigger source: bytes", "Parameter control: direct",
             "CVSS-BTE 4.0: 6.5 Medium",
         ):
             self.assertNotIn(duplicate, bare_html)
+        self.assertIn("<dt>Trigger source</dt><dd>bytes</dd>", bare_html)
+        self.assertIn("<dt>Parameter control</dt><dd>direct</dd>", bare_html)
         self.assertIn("Real prose lives here", bare_html)
+
+        unrelated_table = self.markdown(
+            "unrelated-table",
+            """# Sample
+
+| Field | Value |
+|:------|:------|
+| Boundary | unspecified |
+
+| Fact | Value |
+|:-----|:------|
+| Boundary | internal component |
+
+Boundary: caller-supplied document
+""",
+        )
+        unrelated_html = self.html(unrelated_table)
+        self.assertIn("caller-supplied document", unrelated_html)
+
+        # Audit-only metadata is never the "sole copy" a reader needs: the
+        # hero card carries the cluster and the dedup key is harness state.
+        # Findings carry them as bare labels only, so exposing a bare label
+        # that no table row backs must not drag them into the HTML.
+        audit_only = self.markdown(
+            "audit-only",
+            """# Sample
+
+| Field | Value |
+|:------|:------|
+| Surface | library-api |
+
+Surface: library-api
+Cluster: FCL-ab12cd (3 reports: FIND-0001, FIND-0007, FIND-0011)
+Dedup key: app_parse:120:heap-buffer-overflow
+Reproduction rate: 5/5
+
+## Summary
+
+Real prose lives here.
+""",
+        )
+        audit_only_html = self.html(audit_only)
+        for hidden in ("<dt>Cluster</dt>", "<dt>Dedup key</dt>",
+                       "<dt>Reproduction rate</dt>"):
+            self.assertNotIn(hidden, audit_only_html)
+        self.assertIn("Real prose lives here", audit_only_html)
 
         mixed = self.markdown(
             "mixed",

@@ -41,6 +41,8 @@ SCRIPT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import crash_artifacts  # noqa: E402  (runtime sys.path adjustment)
+import cluster_common  # noqa: E402
+import report_identity  # noqa: E402
 import sanitizer as sanitizer_policy  # noqa: E402
 import stack_frames  # noqa: E402  (runtime sys.path adjustment)
 import symbol_names  # noqa: E402  (runtime sys.path adjustment)
@@ -2016,6 +2018,15 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
         r"Reproduction rate):(?:[ \t].*)?$",
         re.IGNORECASE,
     )
+
+    def usable(value: str) -> str:
+        value = value.strip()
+        return (
+            ""
+            if report_identity.field_value_is_placeholder(label, value)
+            else value
+        )
+
     for idx, line in enumerate(lines):
         if pattern.match(line):
             line = line.rstrip("\n")
@@ -2023,7 +2034,9 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
             m = re.match(r"^[A-Za-z0-9 /_-]+:\s*", line)
             if m:
                 line = line[m.end():]
-            return line.rstrip()
+            if value := usable(line):
+                return value
+            continue
         if block_pattern.match(line.rstrip("\n")):
             vals: list[str] = []
             for nxt in lines[idx + 1:]:
@@ -2035,11 +2048,25 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
                 if (field_line.match(stripped) or stripped.startswith(("#", "|", "<!--"))):
                     break
                 vals.append(stripped)
-            return " ".join(vals).rstrip()
-    return read_field_from_fields_table(path, label)
+            if value := usable(" ".join(vals)):
+                return value
+    return usable(read_field_from_fields_table(path, label))
 
 
 _STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-8]|REF)\b", re.IGNORECASE)
+_SURFACE_FIELD_RE = re.compile(
+    r"^(network|library-api|file-format|cli|dev-tool|maint-tool|internal|unknown)"
+    r"\b(?:\s*—\s*(.*))?$",
+    re.IGNORECASE,
+)
+
+
+def parse_surface_field(value: str) -> tuple[str, str]:
+    """Return a validated canonical surface kind and its optional rationale."""
+    match = _SURFACE_FIELD_RE.match((value or "").strip())
+    if match is None:
+        return "", ""
+    return match.group(1).lower(), (match.group(2) or "").strip()
 
 
 def normalize_strategy(value: str) -> str:
@@ -3217,6 +3244,14 @@ def main(argv: list[str]) -> int:
     report_md = find_first_in_scan(scan_dirs, "report.md")
     if report_md is None:
         report_md = find_first_in_scan(scan_dirs, "REPORT.md")
+    # Keep the audit-side original as the narrative source, but read fields
+    # from the canonical root report when a prior triage/severity pass enriched
+    # it. Re-bundling from .audit/report.md alone silently discards fields
+    # learned after the first export.
+    field_report_md = (
+        cluster_common.exact_child_file(crash_dir, ("REPORT.md",))
+        or report_md
+    )
 
     shell_wrapper = find_shell_wrapper(scan_dirs)
     testcase = find_testcase(scan_dirs, crash_dir, audit_subdir)
@@ -3497,22 +3532,54 @@ def main(argv: list[str]) -> int:
         trusted_actions_value = ""
         caller_contract_value = ""
         strategy_value = ""
+        canonical_surface_value = ""
+        canonical_surface_reason = ""
         report_text = ""
         if report_md is not None:
             report_text = report_md.read_text(encoding="utf-8", errors="replace")
-            trigger_value = read_bare_field(report_md, "Trigger source")
-            boundary_value = read_bare_field(report_md, "Boundary")
-            caller_controls_value = read_bare_field(report_md, "Caller controls")
-            parameter_control_value = read_bare_field(report_md, "Parameter control")
-            trusted_actions_value = read_bare_field(report_md, "Trusted caller actions")
-            caller_contract_value = read_bare_field(report_md, "Caller contract")
-            strategy_value = normalize_strategy(read_bare_field(report_md, "Strategy"))
+        # Surface inference reads the agent narrative only. A rebundled
+        # REPORT.md inlines the sanitizer diagnostic, whose harness frames
+        # (`fuzz/`, `tests/`) trip the dev-surface regex — feeding it back
+        # would flip Surface to maint-tool on every re-export. The fields the
+        # regenerated report does own reach the blob as named values below.
+        if field_report_md is not None:
+            canonical_surface_value, canonical_surface_reason = parse_surface_field(
+                read_bare_field(field_report_md, "Surface")
+            )
+            if canonical_surface_value and not canonical_surface_reason:
+                table_surface_value, table_surface_reason = parse_surface_field(
+                    read_field_from_fields_table(field_report_md, "Surface")
+                )
+                if table_surface_value == canonical_surface_value:
+                    canonical_surface_reason = table_surface_reason
+            trigger_value = read_bare_field(field_report_md, "Trigger source")
+            boundary_value = read_bare_field(field_report_md, "Boundary")
+            caller_controls_value = read_bare_field(field_report_md, "Caller controls")
+            parameter_control_value = read_bare_field(field_report_md, "Parameter control")
+            trusted_actions_value = read_bare_field(field_report_md, "Trusted caller actions")
+            caller_contract_value = read_bare_field(field_report_md, "Caller contract")
+            strategy_value = normalize_strategy(read_bare_field(field_report_md, "Strategy"))
         # Default to the harness input boundary when nothing named the trigger.
         trigger_value = trigger_value or "bytes"
         surface_value, surface_reason = adjust_surface_from_report(
             surface_value, surface_reason, report_text, boundary_value,
             trusted_actions_value, cfg
         )
+        # A surface a later triage pass inferred is this bundle's only evidence
+        # once structure and boundary yield nothing. It is a fallback, never an
+        # override: every export writes its own guess to the same `Surface:`
+        # line, so preferring it would pin a stale classification that
+        # regeneration can no longer repair and retire the boundary correction
+        # above — the one that turns a harness-shaped `library-api` into the
+        # shipped `cli` the report names.
+        if (
+            surface_value in ("", "unknown")
+            and canonical_surface_value
+            and canonical_surface_value != "unknown"
+        ):
+            surface_value, surface_reason = (
+                canonical_surface_value, canonical_surface_reason,
+            )
 
         severity_value = "—"
         for cand in (
@@ -3525,7 +3592,7 @@ def main(argv: list[str]) -> int:
                 severity_value = v
                 break
 
-        confidence_value = read_confidence(report_md, asan_file)
+        confidence_value = read_confidence(field_report_md, asan_file)
 
         # Advisory marker: patch.diff is best-effort. When absent + the
         # agent's narrative documents a Fix Direction, the bundle is

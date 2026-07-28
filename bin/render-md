@@ -47,6 +47,7 @@ from pathlib import Path
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
+import report_identity  # noqa: E402
 import stack_frames  # noqa: E402
 
 
@@ -1199,15 +1200,62 @@ _BARE_LABEL_KEYS = (
     "Dedup key",
 )
 _BARE_LABEL_RE = re.compile(
-    r"^(?:" + "|".join(re.escape(k) for k in _BARE_LABEL_KEYS) + r"):\s+\S"
+    r"^(?P<key>" + "|".join(re.escape(k) for k in _BARE_LABEL_KEYS) + r"):\s+\S"
 )
 _SEVERITY_LINE_RE = re.compile(r"^- \*\*Severity\*\*:\s+\S")
 
+# Report fields a later pass writes as a bare label *after* the bundle's
+# Fields table was built (lib/triage.py infers reach fields; enrichment adds
+# the strategy), and that bin/severity or the next re-export then promotes
+# into the table. Until that promotion lands the bare label is the report's
+# only copy, so it renders. The remaining keys above are cluster/dedup
+# metadata the hero card already carries — always hidden, table or not.
+_PROMOTABLE_LABEL_KEYS = frozenset({
+    "surface", "trigger source", "caller contract", "caller controls",
+    "parameter control", "boundary", "trusted caller actions",
+    "primitive", "advisory", "strategy",
+})
 
-def _is_bare_label_line(line: str) -> bool:
+
+def _populated_table_fields(lines: list[str]) -> set[str]:
+    """Return labels with real values in a visible Fields key/value table."""
+    populated: set[str] = set()
+    index = 0
+    while index + 1 < len(lines):
+        header = _split_row(lines[index])
+        if (
+            [cell.casefold() for cell in header[:2]] != ["field", "value"]
+            or not _TABLE_SEP_RE.match(lines[index + 1])
+        ):
+            index += 1
+            continue
+        index += 2
+        while index < len(lines) and _TABLE_ROW_RE.match(lines[index]):
+            cells = _split_row(lines[index])
+            if len(cells) >= 2:
+                key, value = cells[0].casefold(), cells[1].casefold()
+                if (
+                    key in _PROMOTABLE_LABEL_KEYS
+                    and not report_identity.field_value_is_placeholder(key, value)
+                ):
+                    populated.add(key)
+            index += 1
+    return populated
+
+
+def _is_bare_label_line(line: str, populated_table_fields: set[str] | None = None) -> bool:
     """A line that belongs to the regex-extraction duplicate block that
-    follows the Fields table in REPORT.md. Suppressed in HTML output."""
-    return bool(_BARE_LABEL_RE.match(line) or _SEVERITY_LINE_RE.match(line))
+    follows the Fields table in REPORT.md. Suppress it only when the visible
+    table has the value; otherwise the bare label is the report's sole data."""
+    if _SEVERITY_LINE_RE.match(line):
+        return True
+    match = _BARE_LABEL_RE.match(line)
+    if not match:
+        return False
+    key = match.group("key").casefold()
+    if populated_table_fields is None or key not in _PROMOTABLE_LABEL_KEYS:
+        return True
+    return key in populated_table_fields
 
 
 _REPORT_LABEL_HEADING_RE = re.compile(
@@ -1611,6 +1659,7 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
     blockquotes, inline code/bold/italic/links, fenced code blocks) to a
     self-contained HTML document, styled with the Material 3 stylesheet."""
     lines = text.splitlines()
+    populated_table_fields = _populated_table_fields(lines)
     body: list[str] = []
     i = 0
     paragraph: list[str] = []
@@ -1641,7 +1690,10 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
         # Reports sometimes place prose immediately before a bare label
         # without an intervening blank line. Filter those metadata
         # lines out before rendering so they do not get folded into prose.
-        paragraph[:] = [l for l in paragraph if not _is_bare_label_line(l)]
+        paragraph[:] = [
+            line for line in paragraph
+            if not _is_bare_label_line(line, populated_table_fields)
+        ]
         if not paragraph:
             paragraph.clear()
             return

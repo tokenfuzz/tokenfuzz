@@ -36,6 +36,7 @@ sys.path.insert(0, str(HERE.parent / "lib"))
 import cvss4  # noqa: E402
 import crash_bundle  # noqa: E402
 import crash_artifacts  # noqa: E402
+import report_identity  # noqa: E402
 import stack_frames  # noqa: E402
 import target_config as tc  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
@@ -1768,27 +1769,37 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
       * markdown table rows: ``| Surface | library-api — ... |``
       * bare-label lines:    ``Surface: library-api``
     First win is kept (the table is rendered first), so a stray bare line
-    later in the narrative cannot override the canonical table value.
+    later in the narrative cannot override the canonical table value. A
+    placeholder cell is not a value: it is the generated row a later pass
+    fills, so it neither scores nor shadows the bare label that carries the
+    inferred field.
 
     ``report_dir`` is used only to load the active target threat model. Report
     fields are the sole scoring input; auxiliary field sidecars are not read.
     """
+    def authored(field: str, value: str) -> str:
+        value = value.strip()
+        return (
+            ""
+            if report_identity.field_value_is_placeholder(field, value)
+            else value
+        )
+
     out: dict[str, str] = {}
     for raw in report_text.splitlines():
         m = _TABLE_FIELD_RE.match(raw)
         if m:
             key = m.group("key").strip().lower()
             if key in _FIELD_KEYS and key not in out:
-                val = m.group("val").strip()
-                if val and val not in ("Value", "—", "-"):
+                val = authored(key, m.group("val"))
+                if val and val != "Value":
                     out[key] = val
             continue
         m = _BARE_FIELD_RE.match(raw)
         if m:
             key = m.group("key").strip().lower()
             if key in _FIELD_KEYS and key not in out:
-                val = m.group("val").strip()
-                if val and val not in ("—", "-"):
+                if val := authored(key, m.group("val")):
                     out[key] = val
 
     fields = {
@@ -2083,7 +2094,7 @@ def compute_severity(report_text: str,
 # ─── Report mode: rewrite Severity ────────────────────────────────────────
 
 
-SEV_HEADING = "## Severity rationale"
+SEV_HEADING = report_identity.SEVERITY_RATIONALE_HEADING
 
 
 # libFuzzer's fixed entrypoint marks a harness frame by name; no shipped target
@@ -2469,9 +2480,9 @@ _SURFACED_REACH_FIELDS = (
     ("advisory",        "Advisory"),
 )
 
-# A field counts as already present (and is left untouched — agent-authored
-# values always win) if it appears as a `| Field | … |` table row OR a bare
-# `Field:` line.
+# Labels recognized when locating and extending the report's Fields table.
+# Substantive table cells are authored evidence and remain untouched;
+# generated placeholder cells may be filled from validated reachability data.
 _KNOWN_FIELD_LABELS = frozenset({
     "class", "severity", "file", "function", "line", "target",
     "build config",
@@ -2491,17 +2502,32 @@ _FIELDS_TABLE_IDENTITY = frozenset(
 )
 
 
-def _field_present(text: str, field: str) -> bool:
+def _sync_table_field(text: str, field: str, value: str) -> tuple[str, bool]:
+    """Fill a placeholder Fields-table row and report whether the row exists.
+
+    Reachability convergence writes validated bare labels after the bundle's
+    table already exists. A placeholder row is generated state, not authored
+    evidence: replace it from the scorer's resolved field. Preserve every
+    substantive table value, and let the caller insert a row when none exists.
+    """
+    lines = text.splitlines()
     wanted = field.lower()
-    bare_re = re.compile(rf"^{re.escape(field)}\s*:", re.IGNORECASE)
-    for line in text.splitlines():
-        if line.startswith("|"):
-            parts = line.split("|")
-            if len(parts) >= 4 and parts[1].strip().lower() == wanted:
-                return True
-        elif bare_re.match(line):
-            return True
-    return False
+    for index, line in enumerate(lines):
+        if not line.startswith("|"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 4 or parts[1].strip().lower() != wanted:
+            continue
+        if report_identity.field_value_is_placeholder(field, parts[2]):
+            old_cell = parts[2]
+            new_cell = f" {_cell(value)} "
+            if len(new_cell) < len(old_cell):
+                new_cell += " " * (len(old_cell) - len(new_cell))
+            parts[2] = new_cell
+            lines[index] = "|".join(parts)
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else ""), True
+        return text, True
+    return text, False
 
 
 def _find_fields_table_end(lines: list[str]) -> int:
@@ -2597,11 +2623,14 @@ def update_report(report_path: Path, severity: dict) -> None:
     )
     # Surface the reach fields the scorer used into the Fields table when the
     # report omits them (insert-if-absent; never overwrite an authored row).
-    to_add = [
-        (label, used[key].strip())
-        for key, label in _SURFACED_REACH_FIELDS
-        if (used.get(key) or "").strip() and not _field_present(text, label)
-    ]
+    to_add: list[tuple[str, str]] = []
+    for key, label in _SURFACED_REACH_FIELDS:
+        value = (used.get(key) or "").strip()
+        if not value:
+            continue
+        text, table_has_field = _sync_table_field(text, label, value)
+        if not table_has_field:
+            to_add.append((label, value))
     build_config = (severity.get("build_config_field") or "").strip()
     if build_config:
         # This row is machine-owned provenance. Refresh it when a differential
