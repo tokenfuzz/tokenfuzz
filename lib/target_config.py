@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -844,12 +845,10 @@ def vcs_tracked_files(target_root: str | os.PathLike) -> "set[str] | None":
 
 # ─── Seed a starter target.toml ─────────────────────────────────────
 
-_BROWSER_SLUGS = {"firefox", "chromium", "webkit", "servo"}
-_BROWSER_BIN_CANDIDATES = (
-    "dist/Nightly.app/Contents/MacOS/firefox",
-    "dist/bin/firefox",
-)
-
+# mach is a browser-specific driver. GN is shared by browsers, JavaScript
+# shells, and general native projects, so browser execution must be selected
+# explicitly for GN instead of inferred from its build marker alone.
+_INFERRED_BROWSER_BUILD_SYSTEMS = {"mach"}
 # CMake `install(TARGETS ...)` keywords that terminate the target-name list.
 # Anything after one of these is install configuration, not a target name.
 _CMAKE_INSTALL_KEYWORDS = frozenset({
@@ -990,50 +989,6 @@ def declared_cli_names(target_root: str | os.PathLike, build_system: str) -> lis
         seen.add(tok)
         names.append(tok)
     return names
-
-# ─── S4 differential pair taxonomy ──────────────────────────────────
-#
-# Per-engine CLI flag sets for differential JIT execution. Each engine has
-# its own toggle vocabulary; flag names are years-stable so per-target
-# metadata in target.toml is the right home. seed_toml writes these
-# defaults into [s4_diff_pairs] when --new-target seeds a browser-target
-# config; the operator can override.
-#
-# Keys:
-#   jit_off       — flags that disable the optimizing JIT (interpreter / baseline only)
-#   jit_eager     — flags that force the optimizing JIT to engage as early as possible
-#
-# Validation: `<shell> --help | grep <flag>` confirms availability. If the
-# engine renames a flag, the runner reports unknown-flag at startup —
-# loud failure, not silent miss.
-_S4_DIFF_PAIRS_TAXONOMY: dict[str, dict[str, list[str]]] = {
-    "firefox": {
-        "jit_off": ["--no-ion"],
-        "jit_eager": ["--ion-eager"],
-    },
-    "chromium": {
-        # V8 d8: disable both optimizing tiers; force-promote with --always-turbofan.
-        "jit_off": ["--no-turbofan", "--no-maglev"],
-        "jit_eager": ["--always-turbofan"],
-    },
-    "webkit": {
-        # JSC: --useJIT=false drops to LLInt interpreter. Eager side warms
-        # baseline immediately; full FTL still tier-ups on heat in practice.
-        "jit_off": ["--useJIT=false"],
-        "jit_eager": ["--thresholdForJITAfterWarmUp=0"],
-    },
-    "servo": {
-        # Servo embeds SpiderMonkey — same flags as firefox.
-        "jit_off": ["--no-ion"],
-        "jit_eager": ["--ion-eager"],
-    },
-}
-
-
-def s4_diff_pairs_for(slug: str) -> dict[str, list[str]]:
-    """Return the default [s4_diff_pairs] table for `slug`, or {} if unknown."""
-    return {k: list(v) for k, v in _S4_DIFF_PAIRS_TAXONOMY.get(slug, {}).items()}
-
 
 # ─── Threat-model seed lookup ───────────────────────────────────────────────
 #
@@ -1303,12 +1258,138 @@ def detect_sanitizer_build_artifacts(
     """Return the selectable (binary, library) produced for a sanitizer."""
     root = Path(target_root)
     san_dir = _build_dir_for(root, sanitizer)
-    return (
+    detected = (
         _detect_cli_bin(
             san_dir, root, _detect_build_system(root), sanitizer
         ),
         _detect_sanitizer_lib(san_dir, root),
     )
+    return tuple(
+        _canonical_build_artifact(value, sanitizer) if value else ""
+        for value in detected
+    )
+
+
+def detect_browser_sanitizer_bin(
+    target_root: "str | os.PathLike", sanitizer: str
+) -> str:
+    """Return the best instrumented browser executable in a native build.
+
+    App bundles declare their main executable in ``Info.plist``. Prefer the
+    shallowest foreground product. On non-bundle layouts, accept a target-named
+    product under ``dist`` or the sole executable directly in the build root.
+    Ambiguity returns no answer so setup requires an explicit ``asan_bin``
+    instead of silently choosing a helper. No product name is embedded here.
+
+    Detection is a setup-time answer that setup persists; run-time callers read
+    the configured field rather than repeating this scan per probe.
+    """
+    root = Path(target_root).absolute()
+    san_dir = _build_dir_for(root, sanitizer)
+    bundles: list[Path] = []
+    if san_dir.is_dir():
+        for dirpath, dirnames, _filenames in os.walk(san_dir):
+            relative = Path(dirpath).relative_to(san_dir)
+            if len(relative.parts) >= 4:
+                dirnames[:] = []
+                continue
+            app_names = [name for name in dirnames if name.endswith(".app")]
+            for app_name in app_names:
+                app = Path(dirpath) / app_name
+                info = app / "Contents" / "Info.plist"
+                try:
+                    with info.open("rb") as stream:
+                        metadata = plistlib.load(stream)
+                except (OSError, plistlib.InvalidFileException):
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
+                if _plist_truthy(metadata.get("LSBackgroundOnly")) or \
+                        _plist_truthy(metadata.get("LSUIElement")):
+                    continue
+                executable = metadata.get("CFBundleExecutable", "")
+                if not isinstance(executable, str) or not executable:
+                    continue
+                candidate = app / "Contents" / "MacOS" / executable
+                if sanitizer_binary_is_usable(
+                    root, sanitizer, candidate
+                ):
+                    bundles.append(candidate)
+            dirnames[:] = [
+                name for name in dirnames if not name.endswith(".app")
+            ]
+    if bundles:
+        bundles.sort(key=lambda path: (len(path.relative_to(san_dir).parts), str(path)))
+        shallowest_depth = len(bundles[0].relative_to(san_dir).parts)
+        shallowest = [
+            path for path in bundles
+            if len(path.relative_to(san_dir).parts) == shallowest_depth
+        ]
+        if len(shallowest) == 1:
+            return _canonical_build_artifact(
+                str(shallowest[0]).removeprefix(str(root) + "/"), sanitizer
+            )
+        return ""
+    dist = san_dir / "dist"
+    for candidate in _find_under(dist, name=root.name, maxdepth=8):
+        if sanitizer_binary_is_usable(root, sanitizer, candidate):
+            return _canonical_build_artifact(
+                str(candidate).removeprefix(str(root) + "/"), sanitizer
+            )
+    # Ambiguity is settled on the cheap file test before any instrumentation
+    # check: a build root with a dozen executables needs an explicit asan_bin
+    # whichever ones are instrumented, and `nm` over each of them is minutes
+    # of work on a large browser tree.
+    try:
+        entries = sorted(san_dir.iterdir())
+    except OSError:
+        entries = []
+    direct = [
+        candidate for candidate in entries
+        if candidate.is_file() and os.access(candidate, os.X_OK)
+    ]
+    if len(direct) == 1 and sanitizer_binary_is_usable(
+        root, sanitizer, direct[0]
+    ):
+        return _canonical_build_artifact(
+            str(direct[0]).removeprefix(str(root) + "/"), sanitizer
+        )
+    return ""
+
+
+def _plist_truthy(value: object) -> bool:
+    """Interpret the boolean forms commonly emitted in application plists."""
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, str) and value.strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
+def _browser_executable_is_helper(path: Path) -> bool:
+    """Whether an app-bundle executable is declared background-only.
+
+    Browser builds often copy process helpers next to the primary product.
+    They are valid sanitizer executables, but cannot launch a testcase as the
+    browser runner. Plist role metadata distinguishes them without knowing a
+    product or helper name.
+    """
+    for parent in path.parents:
+        if parent.suffix != ".app":
+            continue
+        info = parent / "Contents" / "Info.plist"
+        try:
+            with info.open("rb") as stream:
+                metadata = plistlib.load(stream)
+        except (OSError, plistlib.InvalidFileException):
+            return False
+        if not isinstance(metadata, dict):
+            return False
+        return (
+            _plist_truthy(metadata.get("LSBackgroundOnly"))
+            or _plist_truthy(metadata.get("LSUIElement"))
+        )
+    return False
 
 
 def _build_field_line(field: str, value: str) -> str:
@@ -1359,9 +1440,7 @@ def _configured_build_field_is_usable(
     target_root: Path, sanitizer: str, field: str, value: str,
 ) -> bool:
     """A curated build field must still belong to the sanitizer it names."""
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = target_root / candidate
+    candidate = _resolve_target_path(target_root, value)
     if field.endswith("_bin"):
         # A configured executable in the matching build is operator/build
         # provenance even when `nm` cannot inspect a stripped binary. An
@@ -1393,7 +1472,9 @@ def _configured_build_field_is_usable(
     )
 
 
-def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
+def refresh_detected_build_fields(
+    target_root: Path, toml_path: Path, *, is_browser: bool = False,
+) -> bool:
     """Re-detect <san>_bin and <san>_lib for every sanitizer from the build
     trees now on disk and correct them in target.toml in place. Policy per
     field: a configured value that is still a usable artifact in the matching
@@ -1410,9 +1491,6 @@ def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
     calls this after materializing the canonical build to repair that
     ordering — a surgical line edit, not a re-seed, so the LLM-curated
     [threat_model]/[s6_peers] survive."""
-    if target_root.name in _BROWSER_SLUGS:
-        return False  # browsers use fixed bin candidates; no harness lib link
-    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
     try:
         lines = Path(toml_path).read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -1429,7 +1507,7 @@ def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
         # Retain FILL_ME so bin/setup-target's grep-for-FILL_ME re-seed
         # trigger keeps firing for the now-unset field.
         stem = "FILL_ME.a" if field.endswith("_lib") else "FILL_ME"
-        return f'# {field} = "build-{san}{suffix}/{stem}"'
+        return f'# {field} = "build-{san}/{stem}"'
 
     def _refresh(field: str, san: str, detected: str) -> None:
         nonlocal changed
@@ -1438,9 +1516,13 @@ def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
             if not field_re.match(ln):
                 continue
             cur = _value_of(ln)
+            cur_path = _resolve_target_path(target_root, cur) if cur else target_root
             cur_bogus = bool(cur) and (
                 _path_has_aux_component(cur)
-                or not (target_root / cur).exists()
+                or _has_physical_build_prefix(cur, san)
+                or not cur_path.exists()
+                or (is_browser and field.endswith("_bin")
+                    and _browser_executable_is_helper(cur_path))
             )
             if (
                 cur and not cur_bogus
@@ -1464,10 +1546,14 @@ def refresh_detected_build_fields(target_root: Path, toml_path: Path) -> bool:
             return
 
     for san in ("asan", "ubsan", "msan", "tsan"):
-        detected_bin, detected_lib = detect_sanitizer_build_artifacts(
-            target_root, san
-        )
-        _refresh(f"{san}_lib", san, detected_lib)
+        if is_browser:
+            detected_bin = detect_browser_sanitizer_bin(target_root, san)
+            detected_lib = ""
+        else:
+            detected_bin, detected_lib = detect_sanitizer_build_artifacts(
+                target_root, san
+            )
+            _refresh(f"{san}_lib", san, detected_lib)
         _refresh(f"{san}_bin", san, detected_bin)
     if changed:
         Path(toml_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1486,7 +1572,10 @@ def _detect_include_dirs(target_root: Path, asan_dir_name: str) -> list[str]:
       - `src/` carrying public headers (some autotools projects)
     The `build-asan/include` entry is always emitted because CMake/Meson
     routinely generate config headers there; if the dir doesn't exist at
-    repro time the -I just does nothing.
+    repro time the -I just does nothing. `asan_dir_name` is only that
+    persisted literal, so it must be the canonical alias: a container
+    suffix belongs to the running image, and Config.resolve_path applies
+    the current one.
     """
     out: list[str] = []
 
@@ -1529,6 +1618,8 @@ def _detect_build_system(target_root: Path) -> str:
     # Native compiled systems (driver scripts first, then build files).
     if (target_root / "mach").is_file() and os.access(target_root / "mach", os.X_OK):
         return "mach"
+    if (target_root / ".gn").is_file():
+        return "gn"
     if (target_root / "CMakeLists.txt").is_file():
         return "cmake"
     if (target_root / "meson.build").is_file():
@@ -1657,9 +1748,12 @@ def _detect_java_runner() -> tuple[str, list[str]]:
 # since the last build is never audited against the wrong binary. These two
 # helpers are the cheap probe and the stamp those callers and `setup-target
 # --build` share. Native C/C++ builds use their canonical recipe implicitly;
-# a language target can opt in with an explicit hand-authored recipe. Browsers
-# build elsewhere and report "skip".
-_NATIVE_BUILD_SYSTEMS = {"cmake", "autotools", "meson"}
+# a language target can opt in with an explicit hand-authored recipe. Browser
+# drivers are included when their output obeys the same clean recipe contract;
+# unsupported drivers still report "skip".
+NATIVE_BUILD_SYSTEMS = frozenset({
+    "cmake", "autotools", "meson", "mach", "gn",
+})
 # VCS metadata and generated caches — never source whose change should force a
 # rebuild. Pruned from the signature so a fresh .audit log or __pycache__ entry
 # can't masquerade as a source edit. Still required on top of a VCS answer:
@@ -1692,6 +1786,42 @@ def build_dir_name(san: str = "asan", *, suffix: "str | None" = None) -> str:
 
 def _build_dir_for(target_root: Path, san: str) -> Path:
     return Path(target_root) / build_dir_name(san)
+
+
+def _canonical_build_artifact(path: str, san: str) -> str:
+    """Make a detected physical build path safe to persist in target.toml."""
+    physical = build_dir_name(san)
+    canonical = build_dir_name(san, suffix="")
+    if path == physical:
+        return canonical
+    if path.startswith(physical + "/"):
+        return canonical + path[len(physical):]
+    return path
+
+
+def _has_physical_build_prefix(path: str, san: str) -> bool:
+    """Whether a persisted path names a selected build instead of its alias."""
+    head = os.path.normpath(path).partition("/")[0]
+    canonical = build_dir_name(san, suffix="")
+    return head != canonical and (
+        head.startswith(canonical + "-") or head.startswith(canonical + "+")
+    )
+
+
+def _resolve_target_path(target_root: str | os.PathLike, value: str) -> Path:
+    """Resolve a persisted target-relative path to the active build tree."""
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    norm = os.path.normpath(value)
+    if norm == ".." or norm.startswith("../"):
+        raise ValueError(f"target-relative path escapes TARGET_ROOT: {value}")
+    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    if suffix:
+        head, sep, rest = norm.partition("/")
+        if head in ("build-asan", "build-ubsan", "build-msan", "build-tsan"):
+            norm = f"{head}{suffix}{sep}{rest}"
+    return Path(target_root) / norm
 
 
 def _fold_signature(kind: str, entries: list[str]) -> str:
@@ -2140,7 +2270,7 @@ def build_freshness(
     """Classify build-<san> against the current source tree.
 
     Returns one of:
-      * "skip"    — browser, or not a native C/C++ build system: no
+      * "skip"    — not a supported native C/C++ build system: no
                     build-<san> tree is expected, so freshness is N/A and
                     the caller must not try to (re)build one.
       * "missing" — native target with no build-<san> tree yet.
@@ -2155,9 +2285,7 @@ def build_freshness(
     "stale" (a needless rebuild), never toward "fresh", which would audit the
     wrong binary."""
     root = Path(target_root)
-    if root.name in _BROWSER_SLUGS:
-        return "skip"
-    if (_detect_build_system(root) not in _NATIVE_BUILD_SYSTEMS
+    if (_detect_build_system(root) not in NATIVE_BUILD_SYSTEMS
             and recipe_path is None):
         return "skip"
     build_dir = _build_dir_for(root, san)
@@ -2202,6 +2330,68 @@ def language_runner_defaults(build_system: str) -> dict:
     return defaults
 
 
+def browser_runner_defaults(build_system: str) -> dict:
+    """Return browser launch arguments for a native browser build driver.
+
+    Browser command lines are not standardized, but the build driver is a
+    stable structural signal. Target configuration can override these args
+    without teaching shared code a product slug.
+    """
+    if build_system == "mach":
+        return {
+            "args": ["--profile", "{PROFILE}", "--no-remote", "{TESTCASE}"],
+        }
+    if build_system == "gn":
+        return {
+            "args": [
+                "--user-data-dir={PROFILE}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--headless=new",
+                "--dump-dom",
+                "{TESTCASE}",
+            ],
+        }
+    return {}
+
+
+def update_browser_mode(toml_path: str | os.PathLike, enabled: bool) -> bool:
+    """Update only the explicit browser-mode scalar in an existing config."""
+    path = Path(toml_path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    replacement = f'is_browser    = "{1 if enabled else 0}"'
+    field = re.compile(r"^\s*is_browser\s*=")
+    for index, line in enumerate(lines):
+        if not field.match(line):
+            continue
+        if line == replacement:
+            return False
+        lines[index] = replacement
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    build_system = next(
+        (
+            index for index, line in enumerate(lines)
+            if re.match(r"^\s*build_system\s*=", line)
+        ),
+        None,
+    )
+    # A top-level scalar appended after a table header belongs to that table.
+    # Older hand-authored configs may omit build_system, so insert before the
+    # first table rather than silently writing threat_model.is_browser.
+    first_table = next(
+        (
+            index for index, line in enumerate(lines)
+            if re.match(r"^\s*\[", line)
+        ),
+        len(lines),
+    )
+    insert_at = build_system + 1 if build_system is not None else first_table
+    lines.insert(insert_at, replacement)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return True
+
+
 def _detect_upstream_url(target_root: Path) -> str:
     if (target_root / ".git").is_dir():
         try:
@@ -2231,6 +2421,7 @@ def seed_toml(
     out_path: str | os.PathLike,
     upstream_url: str = "",
     preserve_curated: bool = False,
+    browser_mode: bool | None = None,
 ) -> None:
     """Seed a starter target.toml — best-effort introspection.
 
@@ -2246,7 +2437,6 @@ def seed_toml(
     root = Path(target_root)
     out = Path(out_path)
     slug = root.name
-    is_browser = slug in _BROWSER_SLUGS
 
     # Read the curated sections to carry forward BEFORE the template is built,
     # so the render below can substitute them in place of the seed defaults.
@@ -2287,30 +2477,29 @@ def seed_toml(
     # Detected up front: declared_cli_names() needs the build system to know
     # which manifest to read when biasing the asan_bin guess below.
     build_system = _detect_build_system(root)
+    if browser_mode is None:
+        is_browser = build_system in _INFERRED_BROWSER_BUILD_SYSTEMS
+        if out.exists():
+            try:
+                existing_target = parse_toml(out)
+            except Exception:
+                existing_target = {}
+            existing_mode = existing_target.get("is_browser")
+            if isinstance(existing_mode, (str, int, bool)):
+                is_browser = str(existing_mode).lower() in {"1", "true"}
+    else:
+        is_browser = browser_mode
 
     asan_bin = ""
     asan_lib = ""
 
-    # AUDIT_BUILD_SUFFIX is set by bin/audit-container-shell so each
-    # container image gets its own build tree; empty outside.
-    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
-    def _build_dir_name(san: str) -> str:
-        return f"build-{san}{suffix}"
-
-    asan_dir = root / _build_dir_name("asan")
-
     if is_browser:
-        for cand in _BROWSER_BIN_CANDIDATES:
-            full = asan_dir / cand
-            if full.is_file() and os.access(full, os.X_OK):
-                asan_bin = f"{_build_dir_name('asan')}/{cand}"
-                break
-    elif asan_dir.is_dir():
+        asan_bin = detect_browser_sanitizer_bin(root, "asan")
+    else:
         # Candidate CLI names come from the target's own build manifests
         # (declared_cli_names), not a hardcoded per-project table. An
         # empty list just means we fall through to the free scan below.
-        asan_bin = _detect_cli_bin(asan_dir, root, build_system, "asan")
-        asan_lib = _detect_sanitizer_lib(asan_dir, root)
+        asan_bin, asan_lib = detect_sanitizer_build_artifacts(root, "asan")
 
     if not upstream_url:
         upstream_url = _detect_upstream_url(root)
@@ -2329,7 +2518,7 @@ def seed_toml(
     # see at a glance that the field is unset. Header-only C++ libraries
     # legitimately have no asan_lib; the commented line is the steady state
     # for those targets.
-    _asan_dir_name = _build_dir_name("asan")
+    _asan_dir_name = build_dir_name("asan", suffix="")
     asan_bin_line = (
         f"asan_bin      = {toml_basic_string(asan_bin)}" if asan_bin
         else f'# asan_bin    = "{_asan_dir_name}/FILL_ME"      '
@@ -2340,6 +2529,7 @@ def seed_toml(
         else f'# asan_lib    = "{_asan_dir_name}/FILL_ME.a"    '
              '# uncomment + fill if a // HARNESS testcase links a static archive'
     )
+    alternate_bin_name = "FILL_ME" if is_browser else slug
 
     lines = [
         "# target.toml — generated by bin/setup-target or bin/audit.",
@@ -2356,7 +2546,7 @@ def seed_toml(
                 "# sibling that enables compatible in-tree features.",
                 f"build_widening = {'true' if (preserved_build_widening if preserved_build_widening is not None else True) else 'false'}",
             ]
-            if build_system in _NATIVE_BUILD_SYSTEMS else []
+            if build_system in NATIVE_BUILD_SYSTEMS and not is_browser else []
         ),
         "",
         "# Direct CLI binary — what `bin/run-asan generic` runs by default:",
@@ -2365,7 +2555,8 @@ def seed_toml(
         "# C-API harness build inputs (testcases with // HARNESS: link against this):",
         asan_lib_line,
         'includes      = [' + ", ".join(
-            toml_basic_string(inc) for inc in _detect_include_dirs(root, _asan_dir_name)
+            toml_basic_string(inc)
+            for inc in _detect_include_dirs(root, _asan_dir_name)
         ) + "]",
         'link_libs     = ["-lm", "-lpthread"]',
         "",
@@ -2422,11 +2613,12 @@ def seed_toml(
     def _san_lib_toml_line(san: str) -> str:
         field = f"{san}_lib"
         pad = " " * (len("ubsan_lib") - len(field))
-        detected = "" if is_browser else _detect_sanitizer_lib(
-            root / _build_dir_name(san), root)
+        detected = "" if is_browser else detect_sanitizer_build_artifacts(
+            root, san
+        )[1]
         if detected:
             return f"{field}{pad} = {toml_basic_string(detected)}"
-        return f'# {field}{pad} = "{_build_dir_name(san)}/FILL_ME.a"'
+        return f'# {field}{pad} = "{build_dir_name(san, suffix="")}/FILL_ME.a"'
 
     ubsan_lib_line = _san_lib_toml_line("ubsan")
     msan_lib_line = _san_lib_toml_line("msan")
@@ -2439,14 +2631,10 @@ def seed_toml(
     # opts in by editing target.toml afterwards. Native build systems
     # (cmake/meson/autotools/mach) default to ["asan"] as they did
     # before.
-    _native_build_systems = {
-        "cmake", "meson", "autotools", "mach", "",
-        "unknown",
-    }
     _findings_only_default = (
         not is_browser
         and not asan_bin
-        and build_system not in _native_build_systems
+        and build_system not in NATIVE_BUILD_SYSTEMS | {"", "unknown"}
         and build_system not in SANITIZER_RUNNER_BUILD_SYSTEMS
     )
 
@@ -2463,13 +2651,13 @@ def seed_toml(
             "[sanitizer]",
             "enabled = []  # findings-only — uncomment a sanitizer to enable",
             '# enabled = ["asan"]',
-            f'# asan_suppressions  = "{_build_dir_name("asan")}/asan-suppressions.txt"',
-            f'# ubsan_suppressions = "{_build_dir_name("ubsan")}/ubsan-suppressions.txt"',
-            f'# msan_suppressions  = "{_build_dir_name("msan")}/msan-suppressions.txt"',
-            f'# tsan_suppressions  = "{_build_dir_name("tsan")}/tsan-suppressions.txt"',
-            f'# ubsan_bin = "{_build_dir_name("ubsan")}/{slug}"',
-            f'# msan_bin  = "{_build_dir_name("msan")}/{slug}"',
-            f'# tsan_bin  = "{_build_dir_name("tsan")}/{slug}"',
+            '# asan_suppressions  = "build-asan/asan-suppressions.txt"',
+            '# ubsan_suppressions = "build-ubsan/ubsan-suppressions.txt"',
+            '# msan_suppressions  = "build-msan/msan-suppressions.txt"',
+            '# tsan_suppressions  = "build-tsan/tsan-suppressions.txt"',
+            f'# ubsan_bin = "build-ubsan/{alternate_bin_name}"',
+            f'# msan_bin  = "build-msan/{alternate_bin_name}"',
+            f'# tsan_bin  = "build-tsan/{alternate_bin_name}"',
             ubsan_lib_line,
             msan_lib_line,
             tsan_lib_line,
@@ -2502,13 +2690,13 @@ def seed_toml(
             "# but do not abort.",
             "[sanitizer]",
             'enabled = ["asan"]',
-            f'# asan_suppressions  = "{_build_dir_name("asan")}/asan-suppressions.txt"',
-            f'# ubsan_suppressions = "{_build_dir_name("ubsan")}/ubsan-suppressions.txt"',
-            f'# msan_suppressions  = "{_build_dir_name("msan")}/msan-suppressions.txt"',
-            f'# tsan_suppressions  = "{_build_dir_name("tsan")}/tsan-suppressions.txt"',
-            f'# ubsan_bin = "{_build_dir_name("ubsan")}/' + (slug if not is_browser else "firefox") + '"',
-            f'# msan_bin  = "{_build_dir_name("msan")}/' + (slug if not is_browser else "firefox") + '"',
-            f'# tsan_bin  = "{_build_dir_name("tsan")}/' + (slug if not is_browser else "firefox") + '"',
+            '# asan_suppressions  = "build-asan/asan-suppressions.txt"',
+            '# ubsan_suppressions = "build-ubsan/ubsan-suppressions.txt"',
+            '# msan_suppressions  = "build-msan/msan-suppressions.txt"',
+            '# tsan_suppressions  = "build-tsan/tsan-suppressions.txt"',
+            f'# ubsan_bin = "build-ubsan/{alternate_bin_name}"',
+            f'# msan_bin  = "build-msan/{alternate_bin_name}"',
+            f'# tsan_bin  = "build-tsan/{alternate_bin_name}"',
             ubsan_lib_line,
             msan_lib_line,
             tsan_lib_line,
@@ -2521,7 +2709,10 @@ def seed_toml(
     # describes how a native sanitizer CLI consumes its testcase. crash_patterns
     # is read by lib/triage.py to detect runtime crashes (panics,
     # tracebacks, race-detector reports) on top of its built-in markers.
-    runner_default = language_runner_defaults(build_system)
+    runner_default = (
+        browser_runner_defaults(build_system)
+        if is_browser else language_runner_defaults(build_system)
+    )
 
     _toml_string = toml_basic_string  # local alias for the existing call sites
 
@@ -2529,17 +2720,21 @@ def seed_toml(
         lines += [
             "",
             "# ── Runner (language / interpreter / driver invocation) ────────",
-            f"# Auto-seeded for build_system = {build_system!r}. bin/probe routes",
-            "# probes here when [sanitizer].enabled = [] or no <san>_bin is set.",
-            "# The token '{TESTCASE}' is substituted with the testcase path at",
+            f"# Auto-seeded for build_system = {build_system!r}.",
+            "# The tokens '{TESTCASE}' and '{PROFILE}' are substituted at",
             "# run time. crash_patterns are regex strings layered on top of",
             "# lib/triage.py's built-in language-agnostic crash markers.",
             "[runner]",
-            f'bin            = {_toml_string(runner_default["bin"])}',
+        ]
+        if runner_default.get("bin"):
+            lines.append(
+                f'bin            = {_toml_string(runner_default["bin"])}'
+            )
+        lines.append(
             "args           = ["
             + ", ".join(_toml_string(a) for a in runner_default["args"])
-            + "]",
-        ]
+            + "]"
+        )
         if runner_default.get("env"):
             lines.append(
                 "env            = ["
@@ -2564,28 +2759,6 @@ def seed_toml(
             '# env            = []',
             '# crash_patterns = []',
         ]
-
-    # ── S4 differential pairs (per-engine CLI flag sets) ──────────
-    # Only seeded for targets with a JS shell whose flag vocabulary is
-    # known. Each shell has its own JIT-toggle flags; bin/run-asan js-diff
-    # reads these and falls back to Firefox flags only when missing.
-    # Validate by running `<shell> --help | grep <flag>`.
-    pairs = _S4_DIFF_PAIRS_TAXONOMY.get(slug, {})
-    if pairs:
-        lines += [
-            "",
-            "# ── S4 differential pairs (JIT toggle flags) ───────────────",
-            "# bin/run-asan js-diff runs the testcase under both flag sets and",
-            "# diffs outputs. Each engine has its own flag vocabulary. Seeded",
-            "# from the per-slug taxonomy in lib/target_config.py; edit if the",
-            "# engine renames flags. Verify with `<js_shell> --help | grep <flag>`.",
-            "[s4_diff_pairs]",
-        ]
-        for key in ("jit_off", "jit_eager"):
-            args = pairs.get(key, [])
-            if args:
-                rendered = ", ".join(f'"{a}"' for a in args)
-                lines.append(f"{key:<10} = [{rendered}]")
 
     # Carry a curated [s6_peers] forward. A plain seed never emits this section
     # (it is added by bin/suggest-peers / hand edits), so without this a
@@ -2771,17 +2944,7 @@ class Config:
     def resolve_path(self, p: str) -> str:
         if not p:
             return ""
-        if p.startswith("/"):
-            return p
-        norm = os.path.normpath(p)
-        if norm == ".." or norm.startswith("../"):
-            raise ValueError(f"target-relative path escapes TARGET_ROOT: {p}")
-        suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
-        if suffix:
-            head, sep, rest = norm.partition("/")
-            if head in ("build-asan", "build-ubsan", "build-msan", "build-tsan"):
-                norm = f"{head}{suffix}{sep}{rest}"
-        return f"{self.target_root}/{norm}"
+        return str(_resolve_target_path(self.target_root, p))
 
 
 def _apply_attacker_controls(cfg: Config, raw: list, source_path: str) -> None:
@@ -2992,7 +3155,7 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     # primary-preserving widened sibling. An explicit false remains an
     # operator-visible opt-out. Non-native/browser targets never synthesize it.
     if "build_widening" not in parsed:
-        cfg.build_widening = cfg.build_system in _NATIVE_BUILD_SYSTEMS and cfg.is_browser not in ("1", "true", "True")
+        cfg.build_widening = cfg.build_system in NATIVE_BUILD_SYSTEMS and cfg.is_browser not in ("1", "true", "True")
     if cfg.sanitizers_explicitly_disabled:
         # Alternate configurations are ASan-only. Keeping them visible in a
         # findings-only target would mislabel runner probes as alternate work.
@@ -3003,7 +3166,7 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
             parsed.get("build_config"),
             include_widened=(
                 cfg.build_widening
-                and cfg.build_system in _NATIVE_BUILD_SYSTEMS
+                and cfg.build_system in NATIVE_BUILD_SYSTEMS
                 and cfg.is_browser not in ("1", "true", "True")
             ),
         )

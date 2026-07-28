@@ -13,7 +13,13 @@ from sanitizer_helpers import copy_file
 from timeout import capture_timeout, run_timeout
 
 
-def _expand(value: str, config, sanitizer_name: str) -> str:
+def expand_runner_value(
+    value: str,
+    config,
+    sanitizer_name: str,
+    testcase: str = "",
+    profile: str | Path = "",
+) -> str:
     swift = {"asan": "address", "ubsan": "undefined", "tsan": "thread"}.get(sanitizer_name)
     if "{SWIFT_SANITIZER}" in value and swift is None:
         raise ValueError(
@@ -21,16 +27,68 @@ def _expand(value: str, config, sanitizer_name: str) -> str:
             "(supported: asan, ubsan, tsan)"
         )
     replacements = {
-        "{TESTCASE}": "",
+        "{TESTCASE}": testcase,
         "{SANITIZER}": sanitizer_name,
         "{SWIFT_SANITIZER}": swift or "",
         "{TARGET_ROOT}": config.target_root if config else os.environ.get("TARGET_ROOT", ""),
         "{RESULTS_DIR}": config.results_dir if config else os.environ.get("RESULTS_DIR", ""),
         "{TARGET_SLUG}": config.slug if config else os.environ.get("TARGET_SLUG", ""),
+        "{NULL_DEVICE}": os.devnull,
     }
+    if "{PROFILE}" in value:
+        if not profile:
+            raise ValueError("{PROFILE} is only valid for browser execution")
+        replacements["{PROFILE}"] = str(profile)
     for token, replacement in replacements.items():
         value = value.replace(token, replacement)
     return value
+
+
+def browser_command_args(
+    configured_args: Sequence[str],
+    testcase_args: Sequence[str],
+    config,
+    sanitizer_name: str,
+    profile: Path,
+) -> list[str]:
+    """Expand one target-configured browser command line."""
+    testcase = browser_testcase_value(testcase_args)
+    resolved = list(testcase_args)
+    if resolved:
+        resolved[0] = testcase
+    extra_args = resolved[1:]
+    result: list[str] = []
+    inserted_testcase = False
+    for value in configured_args:
+        if value == "{TESTCASE}":
+            if testcase:
+                result.append(testcase)
+            inserted_testcase = True
+            continue
+        if "{TESTCASE}" in value:
+            value = value.replace("{TESTCASE}", testcase)
+            inserted_testcase = True
+        result.append(
+            expand_runner_value(
+                value, config, sanitizer_name, profile=profile
+            )
+        )
+    if not inserted_testcase and testcase:
+        result.append(testcase)
+    result.extend(extra_args)
+    return result
+
+
+def browser_testcase_value(testcase_args: Sequence[str]) -> str:
+    """Return the browser-visible value of the primary testcase argument."""
+    if not testcase_args:
+        return ""
+    value = testcase_args[0]
+    return (
+        Path(value).resolve().as_uri()
+        if not value.startswith("-") and Path(value).is_file()
+        else value
+    )
 
 
 class SanitizerRunner:
@@ -48,14 +106,24 @@ class SanitizerRunner:
                 configured = self.config.resolve_path(configured)
         return configured
 
-    def _runtime_env(self, options: str, final_options: str = "") -> dict[str, str]:
+    def runtime_env(
+        self,
+        options: str,
+        final_options: str = "",
+        *,
+        profile: str | Path = "",
+        testcase: str = "",
+    ) -> dict[str, str]:
         result = dict(self.env)
         result[f"{self.upper}_OPTIONS"] = sanitizer.runtime_options(
             self.name, options, self.env, final_options
         )
         if self.config:
             for entry in self.config.runner_env:
-                expanded = _expand(entry, self.config, self.name)
+                expanded = expand_runner_value(
+                    entry, self.config, self.name,
+                    profile=profile, testcase=testcase,
+                )
                 key, value = expanded.split("=", 1)
                 result[key] = value
         return result
@@ -81,14 +149,14 @@ class SanitizerRunner:
         if offline:
             with capture_timeout(
                 command, timeout, rss_mb=sanitizer.generic_rss_limit_mb(self.env),
-                env=self._runtime_env(options, "symbolize=0"),
+                env=self.runtime_env(options, "symbolize=0"),
             ) as (completed, report):
                 sanitizer.symbolize_file(report)
                 copy_file(report, sys.stdout.buffer)
         else:
             completed = run_timeout(
                 command, timeout, rss_mb=sanitizer.generic_rss_limit_mb(self.env),
-                env=self._runtime_env(options),
+                env=self.runtime_env(options),
             )
         if completed.returncode == 124:
             print(f"[run-{self.name}] generic runner timed out after {timeout}s", file=sys.stderr)
@@ -102,7 +170,7 @@ class SanitizerRunner:
         binary = self.env.get(f"{self.upper}_JS") or str(
             sanitizer.build_dir(self.name, self.config.target_root if self.config else "", self.env) / "dist/bin/js"
         )
-        completed = run_timeout([binary, *args], timeout, env=self._runtime_env(options))
+        completed = run_timeout([binary, *args], timeout, env=self.runtime_env(options))
         if completed.returncode == 124:
             print(f"[run-{self.name}] JS shell timed out after {timeout}s", file=sys.stderr)
         elif completed.returncode == 0:
@@ -132,7 +200,7 @@ class SanitizerRunner:
         clean_args = [arg for arg in args if not arg.startswith("-fork=")]
         run_timeout(
             [binary, *clean_args], timeout, kill=True, cwd=crash_dir,
-            env={**self._runtime_env(options), "FUZZER": fuzzer},
+            env={**self.runtime_env(options), "FUZZER": fuzzer},
         )
         print(f"[run-{self.name}] Fuzz artifacts (if any): {crash_dir}", file=sys.stderr)
         return 0
@@ -146,7 +214,7 @@ class SanitizerRunner:
             print(f"[run-{self.name}] fuzz-repro target missing: {binary or '<unset>'}", file=sys.stderr)
             return 2
         resolved = [str(Path(arg).resolve()) if not arg.startswith("-") and Path(arg).is_file() else arg for arg in args]
-        return run_timeout([binary, *resolved], timeout, kill=True, env=self._runtime_env(options)).returncode
+        return run_timeout([binary, *resolved], timeout, kill=True, env=self.runtime_env(options)).returncode
 
     def fuzz_js(self, options: str, timeout: int, args: Sequence[str]) -> int:
         fuzzer = self._require_fuzzer()
@@ -154,14 +222,18 @@ class SanitizerRunner:
             return 1 if not self.env.get("FUZZER") else 2
         binary = sanitizer.build_dir(self.name, self.config.target_root if self.config else "", self.env) / "dist/bin/fuzz-tests"
         if not os.access(binary, os.X_OK):
-            print(f"Error: fuzz-tests binary not found at {binary}. Run ff-bsan {self.name} first.", file=sys.stderr)
+            print(
+                f"Error: fuzz-tests binary not found at {binary}. "
+                "Run bin/setup-target <target> --build first.",
+                file=sys.stderr,
+            )
             return 1
         crash_dir = Path(self.env.get("FUZZ_CRASH_DIR", str(sanitizer.default_fuzz_crash_dir(self.env))))
         crash_dir.mkdir(parents=True, exist_ok=True)
         clean_args = [arg for arg in args if not arg.startswith("-fork=")]
         run_timeout(
             [str(binary), *clean_args], timeout, cwd=crash_dir,
-            env={**self._runtime_env(options), "FUZZER": fuzzer},
+            env={**self.runtime_env(options), "FUZZER": fuzzer},
         )
         print(f"[run-{self.name}] Fuzz artifacts (if any): {crash_dir}", file=sys.stderr)
         return 0

@@ -56,7 +56,7 @@ Each agent has a role set by the harness:
 6. **Bugs cluster.** After confirming, search SAME FILE and neighbors before moving on.
 7. **Stay on one subsystem while exploring; expand to neighbors after a hit.** While a hypothesis is open and you have no confirmed CRASH/FIND in this subsystem yet, stick with it across strategy rotations — don't pivot files mid-investigation. After you confirm a crash or finding in this subsystem, the harness unlocks neighbor-subsystem cards for you (productive-agent relaxation in `_claim_next_card_locked`); follow Rule 6 and claim them. Pre-confirmation pivots are wasted context cost.
 8. **Iterate on non-diagnostic runs.** Try: allocator shaping, GC interleaving, multi-trigger, object replacement. See `.agents/references/reproducer-templates.md`.
-9. **DIFFERENTIAL TESTING for JIT/Wasm.** Add `MODE: js-diff` to the testcase header and run `bin/probe testcase.js` — it runs `--ion-eager` vs `--no-ion`. A textual divergence IS the finding. No sanitizer crash needed.
+9. **DIFFERENTIAL TESTING for JIT/Wasm.** Add `MODE: js-diff` to the testcase header and run `bin/probe testcase.js` — it runs the engine's JIT-eager and JIT-off flag sets from `target.toml` `[s4_diff_pairs]` and diffs the output. A textual divergence IS the finding. No sanitizer crash needed. If those flags are unset the run refuses rather than guess (guessed flags would error on both sides and read as "no divergence"); report it as ENV-BLOCKED instead of manufacturing a clean result.
 10. **NEUTRAL VOCABULARY IS MANDATORY.** Categories: **bounds / lifetime / type / size / uninit / state** only. Always use engineering-standard language: `testcase` / `reproducer`, `caller-controlled` / `input-shaped`, `hand-crafted` / `regression`, `crafted` / `non-conforming`, `reach bounds` / `reach lifetime`, `out-of-range read/write`, `overwrite` / `stomp`, `memory-safety`. Testcase header fields are exactly `TARGET:`, `HYPOTHESIS-ID:`, `CATEGORY:`; put them in the file's native comment syntax, e.g. `# TARGET:` for Python, `// TARGET:` for C/C++/JS, and `<!-- TARGET: ... -->` for HTML. Opaque byte inputs use `bin/probe --hypothesis-id H-...` instead of prepending text.
 
 ## Paths
@@ -66,10 +66,9 @@ gives you, never a hardcoded one. The default sanitizer build dir is
 `targets/<slug>/build-asan${AUDIT_BUILD_SUFFIX:-}/` for every target,
 browser or generic. `AUDIT_BUILD_SUFFIX` is set by `bin/audit-container-shell`
 to a short container image ID so different images get isolated build trees;
-outside a container it is empty and the dir is plain `build-asan`. Firefox
-browser binaries live at
-`build-asan${AUDIT_BUILD_SUFFIX:-}/dist/Nightly.app/Contents/MacOS/firefox`
-on macOS or `build-asan${AUDIT_BUILD_SUFFIX:-}/dist/bin/firefox` on Linux.
+outside a container it is empty and the dir is plain `build-asan`. A browser
+target's product executable is target metadata, not a fixed layout: read
+`<san>_bin` from `target.toml` rather than guessing a path inside the build.
 Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 `bin/run-tsan`, `bin/hits`) — they resolve the suffix through
 `lib/sanitizer.py::build_dir`.

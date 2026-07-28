@@ -1,8 +1,9 @@
 # Strategy S4: Advanced Differential Testing
 
-**Basic differential (--ion-eager vs --no-ion) is now automatic** — `run-sanitizer-multi`
-runs it on every js/xpcshell testcase. This strategy covers advanced differential
-techniques that require deliberate setup.
+**Basic JIT-tier differential is automatic** — `run-sanitizer-multi` runs it on
+every js/xpcshell testcase using the engine's `[s4_diff_pairs]` flags from
+`target.toml`, and reports SKIPPED when they are unset. This strategy covers
+advanced differential techniques that require deliberate setup.
 
 **Apply alongside any other strategy** — differential testing is a technique, not
 a standalone investigation.

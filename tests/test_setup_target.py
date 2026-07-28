@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,6 +19,22 @@ COMMAND = ROOT / "bin" / "setup-target"
 sys.path.insert(0, str(ROOT / "lib"))
 import build_materialize
 import target_config
+
+# Holds a shared build lease on a tree, the way a live audit does, until the
+# stop file appears.
+_HOLDER = """
+import sys, time
+from pathlib import Path
+sys.path.insert(0, {lib!r})
+import build_lease
+root, name, ready, stop = sys.argv[1:5]
+with build_lease.shared(root, name) as held:
+    assert held, "holder could not take the shared lease"
+    Path(ready).write_text("up\\n")
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline and not Path(stop).exists():
+        time.sleep(0.02)
+"""
 
 
 class SetupTargetTests(unittest.TestCase):
@@ -120,6 +137,12 @@ class SetupTargetTests(unittest.TestCase):
         self.commit(self.remote, "add skipped", "skipped.c")
         self.assertEqual(self.setup("demo").returncode, 0)
         self.assertFalse((self.harness / "targets" / "demo" / "skipped.c").exists())
+        # --pull updates the checkout without re-passing the repo URL, and is
+        # incompatible with the flag that suppresses updates.
+        pulled = self.setup("demo", "--pull")
+        self.assertEqual(pulled.returncode, 0, pulled.stdout + pulled.stderr)
+        self.assertTrue((self.harness / "targets" / "demo" / "skipped.c").is_file())
+        self.assertEqual(self.setup("demo", "--pull", "--no-update").returncode, 2)
         (self.remote / "demo.c").write_text("int main(void) { return 0; }\n")
         self.commit(self.remote, "add demo", "demo.c")
         process = self.setup("demo", str(self.remote))
@@ -198,6 +221,9 @@ class SetupTargetTests(unittest.TestCase):
 
     def test_plain_local_sources_nested_slugs_and_reserved_components(self) -> None:
         self.git("init", str(self.harness))
+        (self.harness / "bin" / "auto-build-script").symlink_to(
+            ROOT / "bin" / "auto-build-script"
+        )
         plain = self.harness / "targets" / "plain-cpp"
         plain.mkdir(parents=True)
         (plain / "CMakeLists.txt").write_text(
@@ -214,7 +240,7 @@ class SetupTargetTests(unittest.TestCase):
         )
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         self.assertFalse((plain / ".git").exists())
-        self.assertIn("repo URL/ref ignored", process.stdout)
+        self.assertIn("repo URL/ref/--pull ignored", process.stdout)
 
         external = self.temp / "external-plain"
         external.mkdir()
@@ -368,6 +394,244 @@ class SetupTargetTests(unittest.TestCase):
         self.assertNotIn("materializing asan build", repeated.stdout)
         self.assertTrue(sentinel.is_file())
 
+    def test_mach_browser_uses_deterministic_native_build_route(self) -> None:
+        (self.harness / "bin" / "auto-build-script").symlink_to(
+            ROOT / "bin" / "auto-build-script"
+        )
+        target = self.harness / "targets" / "machbrowser"
+        target.mkdir(parents=True)
+        mach = target / "mach"
+        mach.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, re\n"
+            "text = pathlib.Path(os.environ['MOZCONFIG']).read_text()\n"
+            "match = re.search(r'MOZ_OBJDIR=\"([^\"]+)\"', text)\n"
+            "if match is None:\n    raise SystemExit(2)\n"
+            "build = pathlib.Path(match.group(1))\n"
+            "binary = build / 'dist' / 'bin' / 'machbrowser'\n"
+            "binary.parent.mkdir(parents=True, exist_ok=True)\n"
+            "binary.write_bytes(b'\\0' * 5000)\n"
+            "binary.chmod(0o755)\n",
+            encoding="utf-8",
+        )
+        mach.chmod(0o755)
+        config = self.config("machbrowser")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "machbrowser"\nbuild_system = "mach"\nis_browser = "1"\n'
+            'asan_bin = "build-asan/dist/bin/machbrowser"\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+
+        process = self.setup(
+            "machbrowser", "--build",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        binary = target / "build-asan" / "dist" / "bin" / "machbrowser"
+        self.assertTrue(binary.is_file())
+        recipe = target / ".audit" / "build.sh"
+        self.assertIn("--enable-address-sanitizer", recipe.read_text())
+        self.assertIn("generated deterministic asan recipe", process.stdout)
+        self.assertEqual(
+            target_config.build_freshness(
+                target, "asan", recipe_path=recipe
+            ),
+            "fresh",
+        )
+
+    def test_gn_browser_is_detected_built_and_configured_without_slug_rules(self) -> None:
+        (self.harness / "bin" / "auto-build-script").symlink_to(
+            ROOT / "bin" / "auto-build-script"
+        )
+        target = self.harness / "targets" / "renamed-browser"
+        target.mkdir(parents=True)
+        (target / ".gn").write_text(
+            'buildconfig = "//build/config/BUILDCONFIG.gn"\n',
+            encoding="utf-8",
+        )
+        tools = self.temp / "gn-tools"
+        tools.mkdir()
+        gn = tools / "gn"
+        gn.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        gn.chmod(0o755)
+        autoninja = tools / "autoninja"
+        autoninja.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib, plistlib, subprocess, sys\n"
+            "build = pathlib.Path(sys.argv[sys.argv.index('-C') + 1])\n"
+            "source = build / 'browser.c'\n"
+            "source.write_text('int main(void) { return 0; }\\n')\n"
+            "binary = build / 'Sample.app' / 'Contents' / 'MacOS' / 'Sample'\n"
+            "binary.parent.mkdir(parents=True, exist_ok=True)\n"
+            "with (binary.parents[1] / 'Info.plist').open('wb') as stream:\n"
+            "    plistlib.dump({'CFBundleExecutable': 'Sample'}, stream)\n"
+            "subprocess.run(['cc', '-fsanitize=address', str(source), '-o', str(binary)], check=True)\n",
+            encoding="utf-8",
+        )
+        autoninja.chmod(0o755)
+
+        process = self.setup(
+            "renamed-browser", "--browser", "--build", "--no-llm-config",
+            environment={"PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"},
+        )
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        text = self.config("renamed-browser").read_text()
+        self.assertIn('build_system  = "gn"', text)
+        self.assertIn('is_browser    = "1"', text)
+        self.assertIn("--user-data-dir={PROFILE}", text)
+        self.assertIn(
+            'asan_bin      = "build-asan/Sample.app/Contents/MacOS/Sample"',
+            text,
+        )
+        recipe = target / ".audit" / "build.sh"
+        self.assertIn("is_asan=true", recipe.read_text())
+        self.assertNotIn("chrome", recipe.read_text())
+        self.assertEqual(
+            target_config.build_freshness(
+                target, "asan", recipe_path=recipe
+            ),
+            "fresh",
+        )
+
+    def test_explicit_browser_mode_updates_an_existing_config_in_place(self) -> None:
+        target = self.harness / "targets" / "existing-gn"
+        target.mkdir(parents=True)
+        (target / ".gn").write_text(
+            'buildconfig = "//build/config/BUILDCONFIG.gn"\n',
+            encoding="utf-8",
+        )
+        config = self.config("existing-gn")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "existing-gn"\nbuild_system = "gn"\n'
+            'is_browser = "0"\n# OPERATOR_EDIT_MARKER\n',
+            encoding="utf-8",
+        )
+
+        enabled = self.setup(
+            "existing-gn", "--browser", "--no-llm-config",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+        self.assertEqual(enabled.returncode, 0, enabled.stdout + enabled.stderr)
+        self.assertIn('is_browser    = "1"', config.read_text())
+        self.assertIn("OPERATOR_EDIT_MARKER", config.read_text())
+
+        disabled = self.setup(
+            "existing-gn", "--no-browser", "--no-llm-config",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+        self.assertEqual(disabled.returncode, 0, disabled.stdout + disabled.stderr)
+        self.assertIn('is_browser    = "0"', config.read_text())
+        self.assertIn("OPERATOR_EDIT_MARKER", config.read_text())
+
+        config.write_text(
+            'target = "existing-gn"\n'
+            '[threat_model]\nattacker_controls = ["bytes"]\n',
+            encoding="utf-8",
+        )
+        legacy = self.setup(
+            "existing-gn", "--browser", "--no-llm-config",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+        self.assertEqual(legacy.returncode, 0, legacy.stdout + legacy.stderr)
+        parsed = target_config.parse_toml(config)
+        self.assertEqual(parsed.get("is_browser"), "1")
+        self.assertNotIn("is_browser", parsed["threat_model"])
+
+        config.write_text(
+            'target = "existing-gn"\nbuild_system = "gn"\n'
+            'is_browser = "0"\nasan_bin = "build-asan/FILL_ME"\n'
+            '[sanitizer]\nenabled = []\n# OPERATOR_EDIT_MARKER\n',
+            encoding="utf-8",
+        )
+        placeholder_build = self.setup(
+            "existing-gn", "--browser", "--build", "--no-llm-config",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+        self.assertEqual(
+            placeholder_build.returncode, 0,
+            placeholder_build.stdout + placeholder_build.stderr,
+        )
+        self.assertIn('is_browser    = "1"', config.read_text())
+        self.assertIn("OPERATOR_EDIT_MARKER", config.read_text())
+
+    def test_partial_build_failure_persists_successful_artifacts(self) -> None:
+        target = self.make_build_target("partialbuild")
+        self.build_recipe(target, "asan")
+        failed = self.build_recipe(target, "ubsan")
+        failed.write_text(
+            f"#!{sys.executable}\nraise SystemExit(7)\n",
+            encoding="utf-8",
+        )
+        config = self.config("partialbuild")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "partialbuild"\nbuild_system = "cmake"\n'
+            '# asan_lib = "build-asan/FILL_ME.a"\n'
+            '[sanitizer]\nenabled = ["asan", "ubsan"]\n',
+            encoding="utf-8",
+        )
+
+        process = self.setup(
+            "partialbuild", "--build", "--no-llm-config",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn(
+            'asan_lib      = "build-asan/libpartialbuild.a"',
+            config.read_text(),
+        )
+        self.assertTrue((target / "build-asan" / "libpartialbuild.a").is_file())
+
+    def test_held_build_tree_is_not_reported_as_a_build_failure(self) -> None:
+        """A tree a live run is reading is deliberately left alone. Reporting
+        that as a --build failure would make the exit code depend on which
+        peer audits happen to be running."""
+        target = self.make_build_target("heldbuild")
+        self.build_recipe(target)
+        (target / "build-asan").mkdir()
+        witness = target / "build-asan" / "witness"
+        witness.write_text("original\n", encoding="utf-8")
+        config = self.config("heldbuild")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "heldbuild"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/heldbuild"\n',
+            encoding="utf-8",
+        )
+        ready = self.temp / "holder-ready"
+        stop = self.temp / "holder-stop"
+        holder = subprocess.Popen(
+            [sys.executable, "-c", _HOLDER.format(lib=str(ROOT / "lib")),
+             str(target), "build-asan", str(ready), str(stop)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not ready.exists():
+                if holder.poll() is not None:
+                    self.fail(holder.communicate()[1].decode())
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "holder never took the shared lease")
+            process = self.setup(
+                "heldbuild", "--build", environment={"LLM_DECIDE_DISABLE": "1"},
+            )
+        finally:
+            stop.write_text("stop\n", encoding="utf-8")
+            holder.wait(timeout=30)
+            for stream in (holder.stdout, holder.stderr):
+                if stream is not None:
+                    stream.close()
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertIn("asan build not replaced", process.stdout)
+        self.assertEqual("original\n", witness.read_text(encoding="utf-8"))
+
     def test_stale_build_is_cleanly_rebuilt_and_restored_on_failure(self) -> None:
         target = self.make_build_target("cleanbuild")
         recipe = self.build_recipe(target)
@@ -398,8 +662,9 @@ class SetupTargetTests(unittest.TestCase):
         )
         recipe.chmod(0o755)
         failed = self.setup("cleanbuild", "--build", environment=environment)
-        self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
         self.assertIn("clean build failed", failed.stdout)
+        self.assertIn("build failed", failed.stderr)
         self.assertTrue(preserved.is_file())
         self.assertTrue((build / "cleanbuild").is_file())
         self.assertEqual(
@@ -481,8 +746,11 @@ class SetupTargetTests(unittest.TestCase):
             "# REPAIRED_RECIPE\n"
         )
         auto_builder.write_text(
-            f"#!{sys.executable}\nimport pathlib, sys\n"
-            f"pathlib.Path({str(capture)!r}).write_text(' '.join(sys.argv[1:]))\n"
+            f"#!{sys.executable}\nimport os, pathlib, sys\n"
+            f"with pathlib.Path({str(capture)!r}).open('a') as stream:\n"
+            "    stream.write(os.environ['ACTIVE_BACKEND'] + '\\n')\n"
+            "if os.environ['ACTIVE_BACKEND'] == 'claude':\n"
+            "    raise SystemExit(9)\n"
             "out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])\n"
             f"out.write_text({repaired_body!r})\nout.chmod(0o755)\n",
             encoding="utf-8",
@@ -490,14 +758,13 @@ class SetupTargetTests(unittest.TestCase):
         auto_builder.chmod(0o755)
         repaired = self.setup(
             "repairbuild", "--build",
-            environment={"LLM_DECIDE_DISABLE": "0", "ACTIVE_BACKEND": "codex"},
+            environment={"LLM_DECIDE_DISABLE": "0"},
         )
         self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
         self.assertIn(
             "repaired asan recipe", repaired.stdout, repaired.stdout + repaired.stderr
         )
-        self.assertIn("--repair-from", capture.read_text())
-        self.assertIn("--max-iters 3", capture.read_text())
+        self.assertEqual(capture.read_text().splitlines()[:2], ["claude", "codex"])
         self.assertIn("REPAIRED_RECIPE", recipe.read_text())
         self.assertTrue((target / "build-asan" / "repairbuild").is_file())
         self.assertEqual(

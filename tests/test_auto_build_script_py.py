@@ -75,6 +75,111 @@ for _name in ("_INITIAL_CMAKE", "_INITIAL_AUTOTOOLS", "_INITIAL_MESON"):
     ok(" -g " not in _tmpl and ' -g"' not in _tmpl,
        f"{_name}: no bare -g (full DWARF) in build flags")
 
+# Mach is a regular deterministic build-system route, not a target-specific
+# skill. Its recipe must select the caller's clean output tree and retain both
+# the product browser and JS shell surfaces used by bin/probe.
+with tempfile.TemporaryDirectory() as _mach_tmp:
+    _mach_root = Path(_mach_tmp)
+    _mach = _mach_root / "mach"
+    _mach.write_text("#!/bin/sh\n", encoding="utf-8")
+    _mach.chmod(0o755)
+    ok(abs_mod.detect_build_system(_mach_root) == "mach",
+       "detect: executable mach driver selects the mach build system")
+_mach_script = abs_mod.initial_script("mach", "asan")
+ok("--enable-address-sanitizer" in _mach_script,
+   "mach: ASan uses the build system's sanitizer option")
+ok("MOZ_OBJDIR" in _mach_script and '"$src/mach" build' in _mach_script,
+   "mach: recipe binds output to argv-2 and invokes the source driver")
+ok("--enable-js-shell" in _mach_script and "--enable-fuzzing" in _mach_script,
+   "mach: recipe builds browser audit execution surfaces")
+ok("--enable-debug-symbols" in _mach_script,
+   "mach: recipe asks the driver for line-table debug symbols")
+ok("export CFLAGS" not in _mach_script and "export LDFLAGS" not in _mach_script,
+   "mach: sanitizer flags do not leak into unsanitized host build tools")
+with tempfile.TemporaryDirectory() as _mach_exec_tmp:
+    _mach_exec_root = Path(_mach_exec_tmp)
+    _mach_exec_src = _mach_exec_root / "src"
+    _mach_exec_build = _mach_exec_root / "build"
+    _mach_exec_src.mkdir()
+    _mach_exec = _mach_exec_src / "mach"
+    _mach_exec.write_text(
+        "#!/bin/sh\n"
+        "grep -F 'ac_add_options --enable-foo' \"$MOZCONFIG\" >/dev/null\n",
+        encoding="utf-8",
+    )
+    _mach_exec.chmod(0o755)
+    _mach_recipe = _mach_exec_root / "build.sh"
+    _mach_recipe.write_text(
+        abs_mod.initial_script("mach", "asan", ["--enable-foo"]),
+        encoding="utf-8",
+    )
+    _mach_run = subprocess.run(
+        ["bash", str(_mach_recipe), str(_mach_exec_src), str(_mach_exec_build)]
+    )
+    ok(_mach_run.returncode == 0,
+       "mach: extra configuration flags remain valid shell arguments")
+
+# GN is selected from its root marker and uses the driver graph's default
+# target. The shared recipe carries only GN/Chromium sanitizer conventions;
+# it does not branch on a checkout slug or product name.
+with tempfile.TemporaryDirectory() as _gn_tmp:
+    _gn_root = Path(_gn_tmp)
+    (_gn_root / ".gn").write_text("buildconfig = \"//build/config/BUILDCONFIG.gn\"\n")
+    ok(abs_mod.detect_build_system(_gn_root) == "gn",
+       "detect: .gn marker selects the GN build system")
+_gn_script = abs_mod.initial_script("gn", "asan")
+ok("is_asan=true" in _gn_script and "is_debug=false" in _gn_script,
+   "gn: recipe selects release ASan configuration")
+ok('autoninja -C "$build"' in _gn_script and " chrome" not in _gn_script,
+   "gn: recipe builds the graph default without a hardcoded product target")
+ok('--root="$src"' in _gn_script,
+   "gn: recipe binds source discovery to argv-1 instead of caller cwd")
+for _san, _arg in (
+    ("ubsan", "is_ubsan=true"),
+    ("msan", "is_msan=true"),
+    ("tsan", "is_tsan=true"),
+):
+    _script = abs_mod.initial_script("gn", _san)
+    ok(_arg in _script and "is_asan=true" not in _script,
+       f"gn: {_san} build selects its own sanitizer argument")
+ok(abs_mod.validate_proposed_script(_mach_script)[0],
+   "validation accepts build-driver sanitizer configuration")
+ok(abs_mod.validate_proposed_script(_gn_script)[0],
+   "validation accepts GN sanitizer configuration")
+
+with tempfile.TemporaryDirectory() as _gn_exec_tmp:
+    _gn_exec_root = Path(_gn_exec_tmp)
+    _gn_exec_src = _gn_exec_root / "src"
+    _gn_exec_build = _gn_exec_root / "build"
+    _gn_exec_tools = _gn_exec_root / "tools"
+    (_gn_exec_src / "buildtools" / "host").mkdir(parents=True)
+    _gn_exec_tools.mkdir()
+    _local_gn = _gn_exec_src / "buildtools" / "host" / "gn"
+    _local_gn.write_text(
+        "#!/bin/sh\nmkdir -p \"$2\"\ntouch \"$2/source-local-gn\"\n",
+        encoding="utf-8",
+    )
+    _local_gn.chmod(0o755)
+    _path_gn = _gn_exec_tools / "gn"
+    _path_gn.write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+    _path_gn.chmod(0o755)
+    _autoninja = _gn_exec_tools / "autoninja"
+    _autoninja.write_text(
+        "#!/bin/sh\nbuild=\"$2\"\ntest -f \"$build/source-local-gn\"\n",
+        encoding="utf-8",
+    )
+    _autoninja.chmod(0o755)
+    _gn_recipe = _gn_exec_root / "build.sh"
+    _gn_recipe.write_text(_gn_script, encoding="utf-8")
+    _gn_env = os.environ.copy()
+    _gn_env["PATH"] = f"{_gn_exec_tools}{os.pathsep}{_gn_env['PATH']}"
+    _gn_run = subprocess.run(
+        ["bash", str(_gn_recipe), str(_gn_exec_src), str(_gn_exec_build)],
+        env=_gn_env,
+    )
+    ok(_gn_run.returncode == 0,
+       "gn: source-local driver wins over a PATH wrapper")
+
 
 # ─── detect_missing_commands ────────────────────────────────────────
 

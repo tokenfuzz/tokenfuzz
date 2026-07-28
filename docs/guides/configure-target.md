@@ -192,9 +192,8 @@ is_browser = "1"
 Confirm:
 
 - `asan_bin` points to the browser executable.
-- macOS Firefox builds usually use
-  `build-asan/dist/Nightly.app/Contents/MacOS/firefox`.
-- Linux Firefox builds usually use `build-asan/dist/bin/firefox`.
+- `[runner].args` contains the browser profile argument with `{PROFILE}` and
+  its input position with `{TESTCASE}`.
 - Browser ASan runtime dependencies are present.
 - JS shell or browser wrappers work for the target.
 - Expected controls include `bytes`, `call-sequence`, and only the

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1292,20 +1293,33 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "preflight never redirects an external target build to the in-tree slug",
     )
     pf_runtime.target_root = pf_target
-    # Browser targets skip native build probing, then exercise the sanitizer
-    # wrapper canary before agents launch.
+    # A browser backed by a supported native build system uses the same
+    # freshness preflight, then exercises the sanitizer wrapper canary before
+    # agents launch.
     pf_runtime.config.is_browser = "1"
     def write_canary(*_args, **_kwargs):
-        (pf_results / ".preflight" / "canary-asan.txt").write_text(
-            "TESTCASE_EXECUTED\n", encoding="utf-8",
+        html = (pf_results / ".preflight" / "canary.html").read_text(
+            encoding="utf-8"
         )
+        marker_url = html.split('src="', 1)[1].split('"', 1)[0]
+        urllib.request.urlopen(marker_url, timeout=1).close()
         return mock.Mock(returncode=0)
-    with mock.patch.object(audit_runner.target_config, "build_freshness") as pf_browser_probe, \
+    with mock.patch.object(
+        audit_runner.target_config, "build_freshness", return_value="fresh"
+    ) as pf_browser_probe, \
          mock.patch.object(audit_runner.subprocess, "run", side_effect=write_canary) as pf_canary:
         audit_runner.preflight_build(pf_runtime)
     check(
-        pf_browser_probe.call_count == 0 and pf_canary.call_count == 1,
-        "browser preflight skips native freshness and runs the sanitizer canary",
+        pf_browser_probe.call_count == 1 and pf_canary.call_count == 1,
+        "browser preflight checks native freshness and runs the sanitizer canary",
+    )
+    check(
+        "browser-minimal" in pf_canary.call_args.args[0]
+        and (pf_results / ".preflight" / "canary.html").is_file()
+        and "TESTCASE_EXECUTED" not in (
+            pf_results / ".preflight" / "canary.html"
+        ).read_text(encoding="utf-8"),
+        "browser preflight falls back to a product HTML canary without a JS shell",
     )
 
     # Sanitizer-disabled generic targets have no native build recipe or canary.

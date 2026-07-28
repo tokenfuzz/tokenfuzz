@@ -4,9 +4,9 @@
 POC for the "ship one validated recipe per audit" model. Given an
 upstream source tree and a sanitizer label, this tool:
 
-  1. Detects the build system from on-disk manifests (CMakeLists.txt
-     → cmake; configure.ac → autotools; meson.build → meson) and
-     emits an initial vanilla recipe targeting that system.
+  1. Detects the build system from on-disk manifests (mach → mach; .gn → GN;
+     CMakeLists.txt → cmake; configure.ac → autotools; meson.build → meson)
+     and emits an initial vanilla recipe targeting that system.
   2. Runs the recipe against a scratch build dir.
   3. On non-zero exit (or missing expected artifact), feeds the tail
      of the build log + the current script to the LLM and asks for a
@@ -86,9 +86,20 @@ _FORBIDDEN_SUBSTRINGS = (
 )
 
 _REQUIRED_SUBSTRINGS = (
-    "-fsanitize=",
     "$1",
     "$2",
+)
+
+_SANITIZER_CONFIG_MARKERS = (
+    "-fsanitize=",
+    "--enable-address-sanitizer",
+    "--enable-undefined-sanitizer",
+    "--enable-memory-sanitizer",
+    "--enable-thread-sanitizer",
+    "is_asan=true",
+    "is_ubsan=true",
+    "is_msan=true",
+    "is_tsan=true",
 )
 
 
@@ -103,6 +114,10 @@ def info(msg: str) -> None:
 
 
 def detect_build_system(src: Path) -> str:
+    if (src / "mach").is_file() and os.access(src / "mach", os.X_OK):
+        return "mach"
+    if (src / ".gn").is_file():
+        return "gn"
     if (src / "CMakeLists.txt").is_file():
         return "cmake"
     if (src / "meson.build").is_file():
@@ -190,12 +205,83 @@ meson setup --reconfigure "$build" "$src" \\
 meson compile -C "$build"
 """
 
+# Let the driver own sanitizer flags. Exporting -fsanitize globally also
+# instruments Cargo build scripts and other host tools, whose link step does
+# not carry the target ASan runtime.
+_INITIAL_MACH = """\
+#!/usr/bin/env bash
+set -eu
+src="$1"; build="$2"
+mkdir -p "$build"
+mozconfig="$build/.mozconfig-tokenfuzz"
+{
+    printf 'mk_add_options MOZ_OBJDIR="%s"\\n' "$build"
+    printf '%s\\n' \\
+        'ac_add_options __MACH_SAN_OPTION__' \\
+        'ac_add_options --enable-fuzzing' \\
+        'ac_add_options --enable-js-shell' \\
+        'ac_add_options --enable-optimize="-O2"' \\
+        'ac_add_options --enable-debug-symbols="-gline-tables-only"' \\
+        'ac_add_options --disable-debug' \\
+        'ac_add_options --disable-install-strip' \\
+        'ac_add_options --disable-jemalloc' \\
+        'ac_add_options --disable-crashreporter' \\
+        'ac_add_options --disable-profiling' \\
+        'ac_add_options --without-wasm-sandboxed-libraries'__MACH_EXTRA_LINES__
+} > "$mozconfig"
+MOZCONFIG="$mozconfig" "$src/mach" build
+"""
+
+# GN has no portable product target name. Build the graph's declared default
+# instead of embedding a project-specific label in shared orchestration.
+_INITIAL_GN = """\
+#!/usr/bin/env bash
+set -eu
+src="$1"; build="$2"
+mkdir -p "$build"
+gn_bin=""
+for candidate in "$src"/buildtools/*/gn "$src"/buildtools/gn; do
+    if [ -x "$candidate" ]; then
+        gn_bin="$candidate"
+        break
+    fi
+done
+if [ -z "$gn_bin" ] && command -v gn >/dev/null 2>&1; then
+    gn_bin="$(command -v gn)"
+fi
+if [ -z "$gn_bin" ]; then
+    echo "gn: command not found" >&2
+    exit 127
+fi
+gn_args=__GN_ARGS__
+"$gn_bin" gen "$build" --root="$src" --args="$gn_args"
+if command -v autoninja >/dev/null 2>&1; then
+    autoninja -C "$build"
+else
+    ninja -C "$build"
+fi
+"""
+
 
 _SAN_TO_CC_FLAG = {
     "asan": "address",
     "ubsan": "undefined",
     "msan": "memory",
     "tsan": "thread",
+}
+
+_SAN_TO_MACH_OPTION = {
+    "asan": "--enable-address-sanitizer",
+    "ubsan": "--enable-undefined-sanitizer",
+    "msan": "--enable-memory-sanitizer",
+    "tsan": "--enable-thread-sanitizer",
+}
+
+_SAN_TO_GN_ARG = {
+    "asan": "is_asan=true",
+    "ubsan": "is_ubsan=true",
+    "msan": "is_msan=true",
+    "tsan": "is_tsan=true",
 }
 
 
@@ -206,9 +292,31 @@ def _format_extra_args(flags) -> str:
 def initial_script(build_system: str, sanitizer: str, extra_flags=()) -> str:
     cc_flag = _SAN_TO_CC_FLAG.get(sanitizer, sanitizer)
     extra = _format_extra_args(extra_flags)
+    if build_system == "mach":
+        option = _SAN_TO_MACH_OPTION.get(sanitizer)
+        if not option:
+            die(f"no mach sanitizer option for: {sanitizer!r}")
+        extra_lines = "".join(
+            f" \\\n        {shlex.quote(f'ac_add_options {flag}')}"
+            for flag in extra_flags
+        )
+        return (
+            _INITIAL_MACH
+            .replace("__MACH_SAN_OPTION__", option)
+            .replace("__MACH_EXTRA_LINES__", extra_lines)
+        )
+    if build_system == "gn":
+        sanitizer_arg = _SAN_TO_GN_ARG.get(sanitizer)
+        if not sanitizer_arg:
+            die(f"no GN sanitizer argument for: {sanitizer!r}")
+        gn_args = " ".join([
+            sanitizer_arg, "is_debug=false", "dcheck_always_on=false",
+            "symbol_level=1", *extra_flags,
+        ])
+        return _INITIAL_GN.replace("__GN_ARGS__", shlex.quote(gn_args))
     if build_system == "cmake":
         template = _INITIAL_CMAKE
-    if build_system == "autotools":
+    elif build_system == "autotools":
         template = _INITIAL_AUTOTOOLS
     elif build_system == "meson":
         template = _INITIAL_MESON.replace("__SAN_MESON__", cc_flag)
@@ -272,6 +380,8 @@ def validate_proposed_script(script: str) -> tuple[bool, str]:
     for needle in _REQUIRED_SUBSTRINGS:
         if needle not in script:
             return False, f"missing required token: {needle!r}"
+    if not any(marker in script for marker in _SANITIZER_CONFIG_MARKERS):
+        return False, "missing sanitizer configuration"
     for bad in _FORBIDDEN_SUBSTRINGS:
         if bad in script:
             return False, f"contains forbidden token: {bad!r}"
@@ -693,6 +803,11 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--llm-timeout-secs", type=int, default=60)
     ap.add_argument("--keep-scratch", action="store_true")
     ap.add_argument(
+        "--emit-initial", action="store_true",
+        help="write the deterministic initial recipe without a duplicate "
+             "scratch build; the caller must materialize and verify it",
+    )
+    ap.add_argument(
         "--extra-flag", action="append", default=[],
         help="ordered configure/setup argument for a named build configuration (repeatable)",
     )
@@ -718,6 +833,8 @@ def main(argv: list[str]) -> int:
     special_modes = bool(args.widen_from) + bool(args.repair_from)
     if special_modes > 1 or (special_modes and args.extra_flag):
         die("--widen-from, --repair-from, and --extra-flag are mutually exclusive")
+    if args.emit_initial and special_modes:
+        die("--emit-initial is incompatible with --widen-from and --repair-from")
     if bool(args.failure_log) != bool(args.repair_from):
         die("--failure-log is required with, and only valid for, --repair-from")
 
@@ -741,6 +858,18 @@ def main(argv: list[str]) -> int:
 
     slug = src.name
     readme_excerpt = read_readme_excerpt(src)
+
+    if args.emit_initial:
+        script = initial_script(build_system, args.sanitizer, args.extra_flag)
+        write_recipe(
+            out, script,
+            f"build_system={build_system} sanitizer={args.sanitizer} deterministic_initial",
+        )
+        info(f"wrote deterministic initial recipe: {out}")
+        print(str(out))
+        if not args.keep_scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
+        return 0
 
     if args.widen_from:
         baseline_path = Path(args.widen_from).expanduser().absolute()

@@ -500,6 +500,9 @@ For js/src/jit, js/src/wasm, js/src/irregexp:
 ```
 bin/probe testcase.js   # with MODE: js-diff in the testcase header
 ```
-Runs `--ion-eager` vs `--no-ion` and diffs output. A textual divergence = wrong JIT tier.
+Runs the engine's `[s4_diff_pairs]` `jit_eager` vs `jit_off` flags from
+`target.toml` and diffs output. A textual divergence = wrong JIT tier.
+Unset flags make the run refuse (exit 2) instead of guessing — record
+ENV-BLOCKED, do not read it as a clean differential.
 Convert to CRASH candidate by reducing until diff is minimal.
 **Value-corruption bugs don't need ASan crashes — a diff IS the finding.**

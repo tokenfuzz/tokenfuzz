@@ -420,20 +420,36 @@ class MultiRun:
         testcase = self.args[1] if len(self.args) > 1 else ""
         if self.sanitizer != "asan" or mode not in {"js", "xpcshell"} or not Path(testcase).is_file() or self.crashes or not self.executions:
             return
-        self.emit("\n=== AUTO-DIFFERENTIAL (--ion-eager vs --no-ion) ===")
+        self.emit("\n=== AUTO-DIFFERENTIAL ([s4_diff_pairs] JIT flags) ===")
         with capture_command(
             [str(SCRIPT_DIR / "run-asan"), "js-diff", testcase], merge_stderr=True
         ) as completed:
-            if _file_matches(completed.stdout, re.compile(r"outputs DIFFER")):
-                self.emit("[run-sanitizer-multi] AUTO-DIFF: DIVERGENCE DETECTED - potential JIT correctness issue")
+            if completed.returncode == 2:
+                # Missing flags and failed mode launches are both
+                # non-comparisons. Falling through to the "match" arm would
+                # record a differential that never ran as a clean one.
+                self.emit(
+                    "[run-sanitizer-multi] AUTO-DIFF: SKIPPED - js-diff could "
+                    "not execute both configured modes"
+                )
                 self.append_raw(completed.stdout)
                 self.write_digest(completed.stdout)
-                self.diff_divergences += 1
-            elif _file_matches(completed.stdout, re.compile(r"ERROR: AddressSanitizer")):
+            elif _file_matches(
+                completed.stdout,
+                re.compile(
+                    r"ERROR: AddressSanitizer|"
+                    r"AddressSanitizer:DEADLYSIGNAL"
+                ),
+            ):
                 self.emit("[run-sanitizer-multi] AUTO-DIFF: ASan crash in differential mode!")
                 self.append_raw(completed.stdout)
                 self.write_digest(completed.stdout)
                 self.crashes += 1
+            elif _file_matches(completed.stdout, re.compile(r"outputs DIFFER")):
+                self.emit("[run-sanitizer-multi] AUTO-DIFF: DIVERGENCE DETECTED - potential JIT correctness issue")
+                self.append_raw(completed.stdout)
+                self.write_digest(completed.stdout)
+                self.diff_divergences += 1
             else:
                 self.emit("[run-sanitizer-multi] AUTO-DIFF: outputs match (no JIT divergence)")
 

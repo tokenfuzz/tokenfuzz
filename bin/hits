@@ -93,7 +93,10 @@ def probe_sancov(label: str, binary: Path) -> None:
     if completed.returncode:
         raise RuntimeError(f"{Path(command[0]).name} failed on {label} ({binary}): {output or '<no output>'}")
     if needle not in output:
-        raise RuntimeError(f"{label} lacks sancov instrumentation (__sancov_guards section not present in {binary}) - rebuild with ff-bsan coverage")
+        raise RuntimeError(
+            f"{label} lacks sancov instrumentation (__sancov_guards section "
+            f"not present in {binary}) - rebuild the configured coverage tree"
+        )
     cache.write_text(key_text + "\n")
 
 
@@ -140,9 +143,15 @@ class Hits:
     def validate(self) -> None:
         if self.args.mode == "browser":
             if not os.access(self.browser, os.X_OK):
-                raise RuntimeError(f"coverage browser missing: {self.browser} - run ff-bsan coverage first")
+                raise RuntimeError(
+                    f"coverage browser missing: {self.browser} - prepare the "
+                    "configured build-asan-cov tree first"
+                )
             if not self.xul.is_file():
-                raise RuntimeError(f"coverage XUL missing: {self.xul} - run ff-bsan coverage first")
+                raise RuntimeError(
+                    f"coverage XUL missing: {self.xul} - prepare the configured "
+                    "build-asan-cov tree first"
+                )
             probe_sancov("XUL", self.xul)
         else:
             if not os.access(self.js, os.X_OK):

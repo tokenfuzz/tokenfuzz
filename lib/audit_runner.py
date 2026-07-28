@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import fcntl
+import http.server
 import json
 import os
 import re
@@ -33,6 +34,7 @@ import llm_usage
 import prompt
 import quality
 import runner_preflight
+import sanitizer
 import structured_state
 import process_tree
 import target_config
@@ -1585,28 +1587,85 @@ def preflight_build(runtime: Runtime) -> None:
         return
     canary_dir = runtime.results / ".preflight"
     canary_dir.mkdir(parents=True, exist_ok=True)
-    canary = canary_dir / "canary.js"
+    js_shell = Path(
+        os.environ.get(
+            "ASAN_JS",
+            str(sanitizer.build_dir(
+                "asan", runtime.target_root, os.environ
+            ) / "dist/bin/js"),
+        )
+    )
+    canary_mode = "js" if os.access(js_shell, os.X_OK) else "browser-minimal"
+    canary = canary_dir / (
+        "canary.js" if canary_mode == "js" else "canary.html"
+    )
     output = canary_dir / "canary-asan.txt"
-    canary.write_text("print('TESTCASE_EXECUTED');\n", encoding="utf-8")
+    browser_loaded = threading.Event()
+    server = None
+    server_thread = None
+    if canary_mode == "js":
+        canary.write_text("print('TESTCASE_EXECUTED');\n", encoding="utf-8")
+    else:
+        class CanaryHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                browser_loaded.set()
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, _format: str, *_args) -> None:
+                return
+
+        server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), CanaryHandler
+        )
+        server_thread = threading.Thread(
+            target=server.serve_forever, daemon=True
+        )
+        server_thread.start()
+        marker_url = (
+            f"http://127.0.0.1:{server.server_address[1]}/executed"
+        )
+        canary.write_text(
+            f'<!doctype html><body><img hidden src="{marker_url}"><script>'
+            "const m=String.fromCharCode("
+            "84,69,83,84,67,65,83,69,95,69,88,69,67,85,84,69,68"
+            ");console.log(m);document.body.textContent=m"
+            "</script>\n",
+            encoding="utf-8",
+        )
     environment = os.environ.copy() | {
         "SANITIZER_RUNS": "1", "SAN_OUTPUT_FILE": str(output),
         "SKIP_COVERAGE_GATE": "1",
     }
-    subprocess.run(
-        [str(runtime.root / "bin" / "run-sanitizer-multi"), "asan", "js", str(canary)],
-        cwd=runtime.root, env=environment, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, check=False,
-    )
+    try:
+        subprocess.run(
+            [
+                str(runtime.root / "bin" / "run-sanitizer-multi"),
+                "asan", canary_mode, str(canary),
+            ],
+            cwd=runtime.root, env=environment, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, check=False,
+        )
+        # Only the HTML canary can set the event; a JS-shell canary would
+        # otherwise pay the full timeout to learn nothing.
+        loaded = server is not None and browser_loaded.wait(1)
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if server_thread is not None:
+            server_thread.join(timeout=1)
     try:
         with output.open(encoding="utf-8", errors="replace") as stream:
             captured = any("TESTCASE_EXECUTED" in line for line in stream)
     except OSError:
         captured = False
-    if not captured:
+    if not (loaded or captured):
         raise RuntimeError(
-            f"sanitizer harness canary did not capture TESTCASE_EXECUTED; see {output}"
+            "sanitizer harness canary did not observe browser execution; "
+            f"see {output}"
         )
-    index_log(runtime, "PREFLIGHT OK: sanitizer harness canary captured TESTCASE_EXECUTED")
+    index_log(runtime, "PREFLIGHT OK: sanitizer harness canary observed target execution")
 
 
 def initialize_backend(

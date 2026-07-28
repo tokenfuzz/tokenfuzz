@@ -793,7 +793,7 @@ def _with_testcase_token(args: list[str], testcase_name: str) -> list[str]:
     out = [TESTCASE_TOKEN
            if (testcase_name and os.path.basename(a) == testcase_name)
            else a for a in args]
-    if TESTCASE_TOKEN not in out:
+    if not any(TESTCASE_TOKEN in arg for arg in out):
         out.append(TESTCASE_TOKEN)
     return out
 

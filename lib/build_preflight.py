@@ -59,8 +59,7 @@ def build_problems(target_root: Path, config) -> list[str]:
     to read, and carrying the artifacts the target declares. Returns an empty
     list when there is nothing to build or nothing wrong.
     """
-    if (str(config.is_browser).lower() in {"1", "true"}
-            or config.sanitizers_explicitly_disabled):
+    if config.sanitizers_explicitly_disabled:
         return []
     problems: list[str] = []
     for name in enabled_sanitizers(config):
@@ -124,7 +123,7 @@ def refresh(
     tree is held. An audit continues regardless (the warning is on the record);
     a benchmark, whose whole result depends on the build not moving, refuses.
     """
-    if str(config.is_browser).lower() in {"1", "true"} or config.sanitizers_explicitly_disabled:
+    if config.sanitizers_explicitly_disabled:
         return []
     sanitizers = enabled_sanitizers(config)
     try:

@@ -88,6 +88,11 @@ class VerifyOnlyCellTests(unittest.TestCase):
         problems = build_preflight.build_problems(self.target, self.config)
         self.assertTrue(any("missing" in item for item in problems), problems)
 
+    def test_browser_native_build_is_not_exempt_from_verification(self) -> None:
+        self.config.is_browser = "1"
+        problems = build_preflight.build_problems(self.target, self.config)
+        self.assertTrue(any("missing" in item for item in problems), problems)
+
     def test_stale_source_is_a_problem(self) -> None:
         self._build()
         (self.target / "main.c").write_text("int main(void){return 1;}\n")

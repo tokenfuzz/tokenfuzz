@@ -12,32 +12,49 @@ Use browser mode for:
 
 ## Enable browser mode
 
-`bin/setup-target` already sets `is_browser = "1"` automatically when the
-target slug is one of the four it recognises as a browser — `firefox`,
-`chromium`, `webkit`, or `servo` — and seeds the browser threat model and
-binary paths to match. Any other slug (a fork, a rename, a JS engine)
-needs the edit below. In `output/<target>/target.toml`:
+`bin/setup-target` sets `is_browser = "1"` from a browser-specific build driver
+such as `mach`, independent of the target slug. GN also builds shells and
+general native projects, so select browser mode explicitly for a GN browser:
 
-```toml
-is_browser = "1"
-asan_bin = "build-asan/dist/Nightly.app/Contents/MacOS/firefox"
-
-[threat_model]
-attacker_controls = ["bytes", "call-sequence", "timing"]
+```bash
+bin/setup-target my-gn-browser /path/to/source --browser --build
 ```
 
 Both browser and generic targets share the same `build-asan/` layout.
-Firefox writes its mach build there via `MOZ_OBJDIR`; CMake / autotools
+`mach` writes its object directory there; CMake / autotools
 targets install there with `-DCMAKE_INSTALL_PREFIX` or `--prefix`.
 Inside `bin/audit-container-shell`, `AUDIT_BUILD_SUFFIX` makes the
 actual build directory `build-asan-<image-id>/`; relative `build-asan/`
 paths in `target.toml` resolve through that suffix.
 
-For Firefox on Linux, use the ELF build path instead:
+Build a supported browser through the normal target setup path:
 
-```toml
-asan_bin = "build-asan/dist/bin/firefox"
+```bash
+bin/setup-target firefox --build
+bin/setup-target chromium --browser --build
 ```
+
+The generated recipe is stored under `targets/<target>/.audit/`, uses a clean
+release-mode sanitizer object directory, and is reused by audit preflight when
+the source moves. `mach` and GN are native adapters; neither adapter branches
+on a target or product name. GN builds its graph's default target. Browser
+projects with another build system can use `--browser` and provide the same
+`.audit/build.sh <source> <build-dir>` contract.
+
+On non-bundle platforms, set the top-level `asan_bin` field when a browser
+build emits multiple instrumented top-level executables. Setup accepts a sole
+executable or a target-named product under `dist`; it does not guess among
+ambiguous helpers by file size.
+
+Existing browser object directories created outside TokenFuzz have no
+`.audit-build-stamp`. The first setup or audit preflight therefore treats them
+as stale and performs one clean build before recording freshness; it does not
+assume an untracked binary matches the current source revision.
+
+The source tree must already be complete enough for its native driver. In
+particular, a GN checkout that uses an external dependency client must be
+synced before setup; TokenFuzz does not replace project-specific source
+bootstrap tooling.
 
 Coverage mode, when available, checks `XUL` on macOS or `libxul.so`
 on Linux.

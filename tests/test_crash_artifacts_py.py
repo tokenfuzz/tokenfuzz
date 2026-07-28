@@ -269,8 +269,19 @@ with tempfile.TemporaryDirectory() as td:
     # A bare `BIN input` (no real flags) reads as [] so behaviour is unchanged.
     (cd / "repro.cmd").write_text("{TESTCASE}\n", encoding="utf-8")
     assert_eq([], ca.find_repro_args([cd], bin_names=["app"],
-                                     testcase_name="input.txt"),
+              testcase_name="input.txt"),
               "find_repro_args: token-only → []")
+
+    (cd / "repro.cmd").write_text(
+        "--open={TESTCASE}\n", encoding="utf-8"
+    )
+    assert_eq(
+        ["--open={TESTCASE}"],
+        ca.find_repro_args(
+            [cd], bin_names=["app"], testcase_name="input.txt"
+        ),
+        "find_repro_args: embedded testcase token does not add a duplicate",
+    )
 
     # Grok-style full bare invocation in the args-only file: strip the binary
     # only for exact `BIN {TESTCASE}`. Other backends' flags and positional

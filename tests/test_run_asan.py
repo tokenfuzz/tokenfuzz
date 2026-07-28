@@ -55,6 +55,12 @@ class RunAsanTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("FUZZER must match", proc.stdout + proc.stderr)
 
+    def test_profile_placeholder_is_browser_only(self) -> None:
+        with self.assertRaisesRegex(ValueError, "only valid for browser"):
+            run_asan.sanitizer_run.expand_runner_value(
+                "--profile={PROFILE}", None, "asan"
+            )
+
     def test_live_dispatch_defaults_and_overrides(self) -> None:
         with mock.patch.object(run_asan, "options", return_value={}), \
              mock.patch.object(run_asan.sanitizer, "warn_if_disabled"), \
@@ -78,21 +84,56 @@ class RunAsanTests(unittest.TestCase):
             self.assertEqual(fuzz.call_args.args[1], 900)
 
     def test_js_diff_reports_match_and_divergence(self) -> None:
+        output = self.root / "output" / "engine"
+        results = output / "codex" / "results"
+        results.mkdir(parents=True)
+        (results / ".session-env").write_text(
+            f"RESULTS_DIR={results}\nTARGET_ROOT={self.root}\n"
+            f"TARGET_SLUG=engine\nLOGDIR={output / 'logs'}\n"
+        )
+        (output / "target.toml").write_text(
+            'target = "engine"\n[s4_diff_pairs]\n'
+            'jit_off = ["--no-opt"]\njit_eager = ["--eager"]\n'
+        )
         engine = self.executable(
             "mock-js",
             "import pathlib, sys\ntext = pathlib.Path(sys.argv[2]).read_text()\n"
-            "print(('ion' if sys.argv[1] == '--ion-eager' else 'noion') if 'DIFF' in text else 'same')\n",
+            "print(('eager' if sys.argv[1] == '--eager' else 'off') if 'DIFF' in text else 'same')\n",
         )
-        same = self.root / "same.js"
+        same = results / "same.js"
         same.write_text("print('same')\n")
-        proc = self.run_command("js-diff", same, ASAN_JS=engine)
+        proc = self.run_command("js-diff", same, cwd=results, ASAN_JS=engine)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("outputs MATCH", proc.stdout + proc.stderr)
-        different = self.root / "different.js"
+        different = results / "different.js"
         different.write_text("DIFF\n")
-        proc = self.run_command("js-diff", different, ASAN_JS=engine)
+        proc = self.run_command("js-diff", different, cwd=results, ASAN_JS=engine)
         self.assertEqual(proc.returncode, 1)
         self.assertIn("outputs DIFFER", proc.stdout + proc.stderr)
+
+        failing = self.executable(
+            "failing-js",
+            "import sys\nprint('unsupported ' + sys.argv[1])\n"
+            "raise SystemExit(64)\n",
+        )
+        proc = self.run_command(
+            "js-diff", same, cwd=results, ASAN_JS=failing
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("execution failed", proc.stdout + proc.stderr)
+        self.assertNotIn("outputs DIFFER", proc.stdout + proc.stderr)
+
+        crashing = self.executable(
+            "crashing-js",
+            "print('AddressSanitizer:DEADLYSIGNAL')\n"
+            "raise SystemExit(1)\n",
+        )
+        proc = self.run_command(
+            "js-diff", same, cwd=results, ASAN_JS=crashing
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("CRASH in", proc.stdout + proc.stderr)
+        self.assertNotIn("execution failed", proc.stdout + proc.stderr)
 
     def test_js_diff_uses_target_specific_flag_pairs(self) -> None:
         output = self.root / "output" / "chromium"
@@ -124,6 +165,77 @@ class RunAsanTests(unittest.TestCase):
         self.assertIn("--no-turbofan --no-maglev", invocations)
         self.assertNotIn("--ion-eager", invocations)
         self.assertNotIn("--no-ion", invocations)
+
+    def test_browser_uses_configured_profile_arguments_without_product_branch(self) -> None:
+        output = self.root / "output" / "renamed-browser"
+        results = output / "codex" / "results"
+        results.mkdir(parents=True)
+        (results / ".session-env").write_text(
+            f"RESULTS_DIR={results}\nTARGET_ROOT={self.root}\n"
+            f"TARGET_SLUG=renamed-browser\nLOGDIR={output / 'logs'}\n"
+        )
+        argv_log = self.root / "browser-argv.txt"
+        env_log = self.root / "browser-env.txt"
+        browser = self.executable(
+            "browser-product",
+            "import os, sys\n"
+            "open(os.environ['ARGV_LOG'], 'w').write('\\n'.join(sys.argv[1:]))\n"
+            "open(os.environ['ENV_LOG'], 'w').write("
+            "os.environ['RUNNER_PROFILE'] + '\\n' + os.environ['RUNNER_INPUT'])\n"
+            "print('TESTCASE_EXECUTED')\n",
+        )
+        (output / "target.toml").write_text(
+            'target = "renamed-browser"\nbuild_system = "gn"\nis_browser = "1"\n'
+            f'asan_bin = "{browser}"\n'
+            '[runner]\nargs = ["--user-data-dir={PROFILE}", "--headless=new", '
+            '"--dump-dom", "--root={TARGET_ROOT}", "--results={RESULTS_DIR}", '
+            '"--slug={TARGET_SLUG}", "--san={SANITIZER}", '
+            '"--swift={SWIFT_SANITIZER}", "{TESTCASE}"]\n'
+            'env = ["RUNNER_PROFILE={PROFILE}", "RUNNER_INPUT={TESTCASE}"]\n'
+        )
+        testcase = results / "canary.html"
+        testcase.write_text("<script>console.log('TESTCASE_EXECUTED')</script>\n")
+
+        proc = self.run_command(
+            "browser-minimal", testcase, cwd=results, ARGV_LOG=argv_log,
+            ENV_LOG=env_log,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        invocation = argv_log.read_text()
+        self.assertIn("--user-data-dir=", invocation)
+        self.assertIn("--headless=new", invocation)
+        self.assertIn("--dump-dom", invocation)
+        self.assertIn(f"--root={self.root}", invocation)
+        self.assertIn(f"--results={results}", invocation)
+        self.assertIn("--slug=renamed-browser", invocation)
+        self.assertIn("--san=asan", invocation)
+        self.assertIn("--swift=address", invocation)
+        self.assertIn(testcase.resolve().as_uri(), invocation)
+        self.assertNotIn("--profile", invocation)
+        runner_environment = env_log.read_text().splitlines()
+        self.assertIn("asan-profile-", runner_environment[0])
+        self.assertEqual(testcase.resolve().as_uri(), runner_environment[1])
+
+    def test_embedded_testcase_keeps_its_value_with_extra_arguments(self) -> None:
+        testcase = self.root / "canary.html"
+        testcase.write_text("<!doctype html>\n", encoding="utf-8")
+        config = mock.Mock(
+            target_root=str(self.root), results_dir=str(self.root), slug="browser"
+        )
+
+        arguments = run_asan.sanitizer_run.browser_command_args(
+            ["--input={TESTCASE}"],
+            [str(testcase), "--extra-flag"],
+            config,
+            "asan",
+            self.root / "profile",
+        )
+
+        self.assertEqual(
+            arguments,
+            [f"--input={testcase.resolve().as_uri()}", "--extra-flag"],
+        )
 
     def test_generic_harness_skip_does_not_append_a_testcase(self) -> None:
         argv_log = self.root / "argv.txt"

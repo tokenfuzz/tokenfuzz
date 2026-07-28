@@ -43,7 +43,7 @@ A few real examples:
 ```bash
 bin/setup-target libxml2 https://gitlab.gnome.org/GNOME/libxml2.git
 bin/setup-target zlib    https://github.com/madler/zlib.git
-bin/setup-target firefox https://hg.mozilla.org/mozilla-unified --repo-type hg
+bin/setup-target firefox https://github.com/mozilla-firefox/firefox.git
 bin/setup-target samples/sample-python /path/to/local/source
 ```
 
@@ -101,9 +101,13 @@ Build behavior depends on the target:
   `samples/sample-python-native` benchmark targets do this for an ASan build, and
   `samples/sample-go` enables the race detector through its `go build -race`
   bootstrap).
-- **Browser targets.** Build through the browser project's supported tooling,
-  then point `target.toml` at the result. The generic native auto-builder does
-  not build browsers.
+- **Browser targets.** Browser-specific `mach` drivers and explicitly selected
+  GN browser builds use the same setup contract as other native targets and
+  get deterministic release sanitizer recipes without a target-slug branch.
+  Pass `--browser` for GN because it also builds non-browser projects and
+  JavaScript shells. For another browser build system, pass
+  `--browser`, provide a reusable `targets/<target>/.audit/build.sh`, and point
+  `target.toml` at the product executable.
 - **Findings-only scripts.** No build is needed when the configured interpreter
   can execute the testcase directly and the target has no dependencies to
   install.

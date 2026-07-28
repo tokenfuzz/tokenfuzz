@@ -57,10 +57,7 @@ class PortabilityLintTests(unittest.TestCase):
         self.assertEqual(hits, [])
 
     def test_all_production_python_compiles(self) -> None:
-        for directory in (
-            ROOT / "bin", ROOT / "lib",
-            ROOT / ".agents" / "skills" / "ff-bsan" / "scripts",
-        ):
+        for directory in (ROOT / "bin", ROOT / "lib"):
             with self.subTest(directory=directory.relative_to(ROOT)):
                 self.assertTrue(compileall.compile_dir(str(directory), quiet=1))
 

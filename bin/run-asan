@@ -15,13 +15,19 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import sanitizer
+import sanitizer_run
 import target_config
 from sanitizer_helpers import (
     _BROWSER_NOISE, copy_file, copy_filtered, file_contains, firefox_fuzz_targets,
 )
 from timeout import capture_timeout, run_timeout
 
-PROFILE_PREFS = '''user_pref("browser.shell.checkDefaultBrowser", false);
+_ASAN_DIAGNOSTIC_MARKERS = (
+    b"ERROR: AddressSanitizer",
+    b"AddressSanitizer:DEADLYSIGNAL",
+)
+
+MACH_PROFILE_PREFS = '''user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.policy.dataSubmissionEnabled", false);
 user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
 user_pref("browser.aboutConfig.showWarning", false);
@@ -67,7 +73,7 @@ def load_config():
 
 CONFIG = load_config()
 BASE_ENV = dict(os.environ)
-TARGET_ROOT = CONFIG.target_root if CONFIG else BASE_ENV.get("TARGET_ROOT", str(ROOT / "targets/firefox"))
+TARGET_ROOT = CONFIG.target_root if CONFIG else BASE_ENV.get("TARGET_ROOT", str(Path.cwd()))
 BUILD_DIR = sanitizer.build_dir("asan", TARGET_ROOT, BASE_ENV)
 
 
@@ -76,56 +82,74 @@ def browser_binary() -> str:
         return BASE_ENV["ASAN_BROWSER"]
     if CONFIG and CONFIG.asan_bin:
         return CONFIG.resolve_path(CONFIG.asan_bin)
-    darwin = BUILD_DIR / "dist/Nightly.app/Contents/MacOS/firefox"
-    linux = BUILD_DIR / "dist/bin/firefox"
-    preferred = darwin if sys.platform == "darwin" else linux
-    fallback = linux if sys.platform == "darwin" else darwin
-    return str(preferred if os.access(preferred, os.X_OK) else fallback)
+    # bin/setup-target detects and persists the product executable. Re-running
+    # that scan here would repeat a whole-build-tree walk on every probe, and
+    # could only ever produce the answer setup already declined to write.
+    return ""
 
 
 def options(mode: str) -> str:
     return sanitizer.compose_options("asan", sanitizer.options_for("asan", mode), CONFIG)
 
 
-def runtime_env(option_string: str, selected: str = "asan") -> dict[str, str]:
+def runtime_env(
+    option_string: str,
+    selected: str = "asan",
+    *,
+    profile: str | Path = "",
+    testcase: str = "",
+) -> dict[str, str]:
     environment = sanitizer.prepare_runtime_env(selected, BASE_ENV)
     if selected == "asan":
-        environment["ASAN_OPTIONS"] = sanitizer.runtime_options("asan", option_string, BASE_ENV)
+        environment["ASAN_OPTIONS"] = sanitizer.runtime_options(
+            "asan", option_string, BASE_ENV
+        )
     if CONFIG:
-        swift = {"asan": "address"}.get(selected, "")
-        replacements = {
-            "{TESTCASE}": "",
-            "{SANITIZER}": selected,
-            "{SWIFT_SANITIZER}": swift,
-            "{TARGET_ROOT}": CONFIG.target_root,
-            "{RESULTS_DIR}": CONFIG.results_dir,
-            "{TARGET_SLUG}": CONFIG.slug,
-        }
         for entry in CONFIG.runner_env:
-            for token, value in replacements.items():
-                entry = entry.replace(token, value)
+            entry = sanitizer_run.expand_runner_value(
+                entry, CONFIG, selected,
+                profile=profile, testcase=testcase,
+            )
             key, value = entry.split("=", 1)
             environment[key] = value
     return environment
 
 
 def run_browser(option_string: str, timeout: int, args: list[str]) -> int:
-    resolved = [
-        Path(arg).resolve().as_uri() if not arg.startswith("-") and Path(arg).is_file() else arg
-        for arg in args
-    ]
     with tempfile.TemporaryDirectory(prefix="asan-profile-") as profile_name, tempfile.TemporaryDirectory(prefix="asan-output-") as output_name:
         profile = Path(profile_name)
         output_dir = Path(output_name)
-        prefs = PROFILE_PREFS
-        if BASE_ENV.get("FIREFOX_EXTRA_PREFS"):
-            prefs += "\n" + BASE_ENV["FIREFOX_EXTRA_PREFS"] + "\n"
-        (profile / "user.js").write_text(prefs)
-        (profile / "prefs.js").write_text(prefs)
-        environment = runtime_env(f"{option_string}:log_path={output_dir / 'asan.log'}")
-        environment.update({"MOZ_DISABLE_CONTENT_SANDBOX": "1", "MOZ_HEADLESS": "1"})
+        build_system = CONFIG.build_system if CONFIG else ""
+        if build_system == "mach":
+            prefs = MACH_PROFILE_PREFS
+            if BASE_ENV.get("FIREFOX_EXTRA_PREFS"):
+                prefs += "\n" + BASE_ENV["FIREFOX_EXTRA_PREFS"] + "\n"
+            (profile / "user.js").write_text(prefs)
+            (profile / "prefs.js").write_text(prefs)
+        launch_args = (
+            list(CONFIG.runner_args) if CONFIG and CONFIG.runner_args
+            else target_config.browser_runner_defaults(build_system).get("args", [])
+        )
+        command_args = sanitizer_run.browser_command_args(
+            launch_args, args, CONFIG, "asan", profile
+        )
+        binary = browser_binary()
+        if not binary or not os.access(binary, os.X_OK):
+            print(
+                f"[run-asan] browser runner missing or not executable: {binary or '<unset>'}"
+                "\n[run-asan] set asan_bin in target.toml (bin/setup-target <target> --build detects it)",
+                file=sys.stderr,
+            )
+            return 2
+        environment = runtime_env(
+            f"{option_string}:log_path={output_dir / 'asan.log'}",
+            profile=profile,
+            testcase=sanitizer_run.browser_testcase_value(args),
+        )
+        if build_system == "mach":
+            environment.update({"MOZ_DISABLE_CONTENT_SANDBOX": "1", "MOZ_HEADLESS": "1"})
         with capture_timeout(
-            [browser_binary(), "--profile", str(profile), "--no-remote", *resolved],
+            [binary, *command_args],
             timeout,
             env=environment,
         ) as (completed, output):
@@ -191,7 +215,7 @@ def run_xpcshell(option_string: str, timeout: int, args: list[str]) -> int:
         command = [browser, "--xpcshell", "-g", str(BUILD_DIR / "dist/bin"), "-a", str(appdir), "-m", testcase]
     if not os.access(command[0], os.X_OK):
         print(f"[run-asan] xpcshell runner missing: {command[0]}", file=sys.stderr)
-        print("[run-asan] Build with ff-bsan asan first (the build-asan build produces xpcshell).", file=sys.stderr)
+        print("[run-asan] Build with bin/setup-target <target> --build first (the ASan build produces xpcshell).", file=sys.stderr)
         return 2
     environment = runtime_env(option_string)
     environment["MOZ_DISABLE_CONTENT_SANDBOX"] = "1"
@@ -212,8 +236,13 @@ def run_js_diff(option_string: str, timeout: int, args: list[str]) -> int:
     testcase, flags, script_args = split_js_args(args)
     eager = CONFIG.s4_diff_pairs.get("jit_eager", []) if CONFIG else []
     off = CONFIG.s4_diff_pairs.get("jit_off", []) if CONFIG else []
-    eager = eager or ["--ion-eager"]
-    off = off or ["--no-ion"]
+    if not eager or not off:
+        print(
+            "[run-asan] js-diff requires target.toml [s4_diff_pairs] "
+            "jit_eager and jit_off arguments",
+            file=sys.stderr,
+        )
+        return 2
     js = BASE_ENV.get("ASAN_JS", str(BUILD_DIR / "dist/bin/js"))
     print(f"=== Running with {' '.join(eager)} (JIT eager) ===", file=sys.stderr)
     with capture_timeout(
@@ -230,19 +259,39 @@ def run_js_diff(option_string: str, timeout: int, args: list[str]) -> int:
             print(f"\n=== {' '.join(off)} output ===")
             copy_file(off_out, sys.stdout.buffer)
             print()
-            result = 0
+            eager_crash = any(
+                file_contains(eager_out, marker)
+                for marker in _ASAN_DIAGNOSTIC_MARKERS
+            )
+            off_crash = any(
+                file_contains(off_out, marker)
+                for marker in _ASAN_DIAGNOSTIC_MARKERS
+            )
+            if eager_crash:
+                print(f"[run-asan] CRASH in {' '.join(eager)} mode", file=sys.stderr)
+            if off_crash:
+                print(f"[run-asan] CRASH in {' '.join(off)} mode", file=sys.stderr)
+            if eager_crash or off_crash:
+                return 1
+            failed = [
+                f"{label}=rc{completed.returncode}"
+                for label, completed in (
+                    ("jit_eager", eager_run), ("jit_off", off_run),
+                )
+                if completed.returncode
+            ]
+            if failed:
+                print(
+                    "[run-asan] DIFFERENTIAL: execution failed "
+                    f"({', '.join(failed)}); no comparison was made",
+                    file=sys.stderr,
+                )
+                return 2
             if filecmp.cmp(eager_out, off_out, shallow=False):
                 print("[run-asan] DIFFERENTIAL: outputs MATCH (no divergence)", file=sys.stderr)
-            else:
-                result = 1
-                print("[run-asan] DIFFERENTIAL: outputs DIFFER - potential JIT bug!", file=sys.stderr)
-            if file_contains(eager_out, b"ERROR: AddressSanitizer"):
-                print(f"[run-asan] CRASH in {' '.join(eager)} mode", file=sys.stderr)
-                result = 1
-            if file_contains(off_out, b"ERROR: AddressSanitizer"):
-                print(f"[run-asan] CRASH in {' '.join(off)} mode", file=sys.stderr)
-                result = 1
-            return result
+                return 0
+            print("[run-asan] DIFFERENTIAL: outputs DIFFER - potential JIT bug!", file=sys.stderr)
+            return 1
 
 
 def resolve_command(name: str) -> str:
@@ -362,7 +411,7 @@ def run_fuzz_js(option_string: str, timeout: int, args: list[str]) -> int:
         return error
     binary = BUILD_DIR / "dist/bin/fuzz-tests"
     if not os.access(binary, os.X_OK):
-        print(f"Error: fuzz-tests binary not found at {binary}. Run ff-bsan asan first.", file=sys.stderr)
+        print(f"Error: fuzz-tests binary not found at {binary}. Run bin/setup-target <target> --build first.", file=sys.stderr)
         return 1
     clean_args = [
         str(Path(arg).resolve()) if not arg.startswith("-") and Path(arg).exists() else arg

@@ -14,12 +14,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import sanitizer
+import sanitizer_run
 import target_config
 from sanitizer_helpers import _BROWSER_NOISE, copy_file, copy_filtered, file_contains
 from sanitizer_run import SanitizerRunner
 from timeout import capture_timeout, run_timeout
 
-PROFILE_PREFS = '''user_pref("browser.shell.checkDefaultBrowser", false);
+MACH_PROFILE_PREFS = '''user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.policy.dataSubmissionEnabled", false);
 user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
 user_pref("browser.aboutConfig.showWarning", false);
@@ -47,7 +48,7 @@ def load_config():
 CONFIG = load_config()
 ENV = sanitizer.prepare_runtime_env("ubsan")
 sanitizer.warn_if_disabled("ubsan", CONFIG)
-TARGET_ROOT = CONFIG.target_root if CONFIG else ENV.get("TARGET_ROOT", str(ROOT / "targets/firefox"))
+TARGET_ROOT = CONFIG.target_root if CONFIG else ENV.get("TARGET_ROOT", str(Path.cwd()))
 BUILD_DIR = sanitizer.build_dir("ubsan", TARGET_ROOT, ENV)
 sanitizer.hold_build("ubsan", TARGET_ROOT, ENV)
 
@@ -57,11 +58,9 @@ def browser_binary() -> str:
         return ENV["UBSAN_BROWSER"]
     if CONFIG and CONFIG.ubsan_bin:
         return CONFIG.resolve_path(CONFIG.ubsan_bin)
-    darwin = BUILD_DIR / "dist/Nightly.app/Contents/MacOS/firefox"
-    linux = BUILD_DIR / "dist/bin/firefox"
-    preferred = darwin if sys.platform == "darwin" else linux
-    fallback = linux if sys.platform == "darwin" else darwin
-    return str(preferred if os.access(preferred, os.X_OK) else fallback)
+    # See bin/run-asan: the product executable is setup-time metadata, not a
+    # per-probe scan of the build tree.
+    return ""
 
 
 def mode_options(mode: str) -> str:
@@ -69,24 +68,39 @@ def mode_options(mode: str) -> str:
 
 
 def run_browser(options: str, timeout: int, args: list[str]) -> int:
-    resolved = [
-        Path(arg).resolve().as_uri() if not arg.startswith("-") and Path(arg).is_file() else arg
-        for arg in args
-    ]
     with tempfile.TemporaryDirectory(prefix="ubsan-profile-") as profile_name, tempfile.TemporaryDirectory(prefix="ubsan-output-") as output_name:
         profile = Path(profile_name)
         output_dir = Path(output_name)
-        (profile / "user.js").write_text(PROFILE_PREFS)
-        environment = {
-            **ENV,
-            "UBSAN_OPTIONS": sanitizer.runtime_options(
-                "ubsan", f"{options}:log_path={output_dir / 'ubsan.log'}", ENV
-            ),
-            "MOZ_DISABLE_CONTENT_SANDBOX": "1",
-            "MOZ_HEADLESS": "1",
-        }
+        build_system = CONFIG.build_system if CONFIG else ""
+        if build_system == "mach":
+            (profile / "user.js").write_text(MACH_PROFILE_PREFS)
+        launch_args = (
+            list(CONFIG.runner_args) if CONFIG and CONFIG.runner_args
+            else target_config.browser_runner_defaults(build_system).get("args", [])
+        )
+        command_args = sanitizer_run.browser_command_args(
+            launch_args, args, CONFIG, "ubsan", profile
+        )
+        binary = browser_binary()
+        if not binary or not os.access(binary, os.X_OK):
+            print(
+                f"[run-ubsan] browser runner missing or not executable: {binary or '<unset>'}"
+                "\n[run-ubsan] set ubsan_bin in target.toml (bin/setup-target <target> --build detects it)",
+                file=sys.stderr,
+            )
+            return 2
+        runner = SanitizerRunner("ubsan", CONFIG, ENV)
+        environment = runner.runtime_env(
+            f"{options}:log_path={output_dir / 'ubsan.log'}",
+            profile=profile,
+            testcase=sanitizer_run.browser_testcase_value(args),
+        )
+        if build_system == "mach":
+            environment.update({
+                "MOZ_DISABLE_CONTENT_SANDBOX": "1", "MOZ_HEADLESS": "1",
+            })
         with capture_timeout(
-            [browser_binary(), "--profile", str(profile), "--no-remote", *resolved],
+            [binary, *command_args],
             timeout,
             env=environment,
         ) as (completed, output):
@@ -116,28 +130,51 @@ def run_js_diff(options: str, timeout: int, args: list[str]) -> int:
         return 1
     eager = CONFIG.s4_diff_pairs.get("jit_eager", []) if CONFIG else []
     off = CONFIG.s4_diff_pairs.get("jit_off", []) if CONFIG else []
-    eager = eager or ["--ion-eager"]
-    off = off or ["--no-ion"]
+    if not eager or not off:
+        print(
+            "[run-ubsan] js-diff requires target.toml [s4_diff_pairs] "
+            "jit_eager and jit_off arguments",
+            file=sys.stderr,
+        )
+        return 2
     js = ENV.get("UBSAN_JS", str(BUILD_DIR / "dist/bin/js"))
     environment = {**ENV, "UBSAN_OPTIONS": sanitizer.runtime_options("ubsan", options, ENV)}
     print(f"=== Running with {' '.join(eager)} (JIT eager) ===", file=sys.stderr)
-    with capture_timeout([js, *eager, *args], timeout, env=environment) as (_, eager_out):
+    with capture_timeout([js, *eager, *args], timeout, env=environment) as (eager_run, eager_out):
         print(f"=== Running with {' '.join(off)} (JIT off) ===", file=sys.stderr)
-        with capture_timeout([js, *off, *args], timeout, env=environment) as (_, off_out):
+        with capture_timeout([js, *off, *args], timeout, env=environment) as (off_run, off_out):
             print(f"=== {' '.join(eager)} output ===")
             copy_file(eager_out, sys.stdout.buffer)
             print(f"\n=== {' '.join(off)} output ===")
             copy_file(off_out, sys.stdout.buffer)
             print()
+            eager_issue = file_contains(eager_out, b"runtime error:")
+            off_issue = file_contains(off_out, b"runtime error:")
+            if eager_issue:
+                print(f"[run-ubsan] UBSan issue in {' '.join(eager)} mode", file=sys.stderr)
+            if off_issue:
+                print(f"[run-ubsan] UBSan issue in {' '.join(off)} mode", file=sys.stderr)
+            if eager_issue or off_issue:
+                return 1
+            failed = [
+                f"{label}=rc{completed.returncode}"
+                for label, completed in (
+                    ("jit_eager", eager_run), ("jit_off", off_run),
+                )
+                if completed.returncode
+            ]
+            if failed:
+                print(
+                    "[run-ubsan] DIFFERENTIAL: execution failed "
+                    f"({', '.join(failed)}); no comparison was made",
+                    file=sys.stderr,
+                )
+                return 2
             if filecmp.cmp(eager_out, off_out, shallow=False):
                 print("[run-ubsan] DIFFERENTIAL: outputs MATCH (no divergence)", file=sys.stderr)
-            else:
-                print("[run-ubsan] DIFFERENTIAL: outputs DIFFER - potential JIT bug!", file=sys.stderr)
-            if file_contains(eager_out, b"runtime error:"):
-                print(f"[run-ubsan] UBSan issue in {' '.join(eager)} mode", file=sys.stderr)
-            if file_contains(off_out, b"runtime error:"):
-                print(f"[run-ubsan] UBSan issue in {' '.join(off)} mode", file=sys.stderr)
-    return 0
+                return 0
+            print("[run-ubsan] DIFFERENTIAL: outputs DIFFER - potential JIT bug!", file=sys.stderr)
+            return 1
 
 
 def browser_fuzz(options: str, timeout: int, args: list[str], repro: bool) -> int:

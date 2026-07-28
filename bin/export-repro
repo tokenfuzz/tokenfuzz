@@ -1069,19 +1069,16 @@ def emit_lib_discover(sanitizer: str = "asan") -> str:
 # `|| rc=$?` form in a list context disables -e for that one command.
 
 BROWSER_RUN = """\
-san_bin=""
-[ -n __SAN_BIN_REL__ ] && san_bin="$src"/__SAN_BIN_REL__
-[ -x "$san_bin" ] || san_bin="$src/__MACH_OBJDIR__/dist/Nightly.app/Contents/MacOS/firefox"
-[ -x "$san_bin" ] || san_bin="$src/__MACH_OBJDIR__/dist/bin/firefox"
-[ -x "$san_bin" ] || { echo "__SANITIZER_LABEL__ firefox not found at $san_bin" >&2; exit 2; }
+san_bin="$src"/__SAN_BIN_REL__
+[ -x "$san_bin" ] || { echo "__SANITIZER_LABEL__ browser not found at $san_bin" >&2; exit 2; }
 
-profile=$(mktemp -d "${TMPDIR:-/tmp}/firefox-repro-profile-XXXXXX")
+profile=$(mktemp -d "${TMPDIR:-/tmp}/browser-repro-profile-XXXXXX")
 trap 'rm -rf "$profile"' EXIT
-testcase_url="file://$(cd "$(dirname "$0")" && pwd)/__INPUT_NAME__"
+here=$(cd "$(dirname "$0")" && pwd)
+testcase_url="file://$here/__INPUT_NAME__"
 echo "=== running __SANITIZER_LABEL__ repro: $testcase_url ===" >&2
 rc=0
-__SANITIZER_ENV_BLOCK__  MOZ_HEADLESS=1 MOZ_DISABLE_CONTENT_SANDBOX=1 \\
-  "$san_bin" --headless --no-remote --profile "$profile" "$testcase_url" || rc=$?
+__SANITIZER_ENV_BLOCK____RUNNER_ENV_BLOCK__  "$san_bin" __BROWSER_ARGS__ || rc=$?
 echo "[repro] exit=$rc" >&2
 exit "$rc"
 """
@@ -2646,13 +2643,106 @@ def _is_bundle_filename(name: str) -> bool:
     return False
 
 
+def _browser_shell_value(value: str, *, sanitizer: str, slug: str) -> str:
+    """Render one configured browser value while preserving runtime tokens."""
+    known_tokens = {
+        "{SANITIZER}", "{TARGET_SLUG}", "{NULL_DEVICE}",
+        "{PROFILE}", "{TESTCASE}", "{TARGET_ROOT}", "{RESULTS_DIR}",
+        "{SWIFT_SANITIZER}",
+    }
+    unresolved = next(
+        (
+            token for token in re.findall(r"\{[A-Z][A-Z0-9_]*\}", value)
+            if token not in known_tokens
+        ),
+        "",
+    )
+    if unresolved:
+        die(f"browser reproducer cannot map runner token {unresolved!r}")
+    swift_sanitizer = {
+        "asan": "address", "ubsan": "undefined", "tsan": "thread",
+    }.get(sanitizer)
+    if "{SWIFT_SANITIZER}" in value and swift_sanitizer is None:
+        die(
+            f"browser reproducer sanitizer {sanitizer!r} has no "
+            "{SWIFT_SANITIZER} value"
+        )
+    literals = {
+        "{SANITIZER}": sanitizer,
+        "{SWIFT_SANITIZER}": swift_sanitizer or "",
+        "{TARGET_SLUG}": slug,
+        "{NULL_DEVICE}": "/dev/null",
+    }
+    for token, replacement in literals.items():
+        value = value.replace(token, replacement)
+    variables = {
+        "{PROFILE}": '"$profile"',
+        "{TESTCASE}": '"$testcase_url"',
+        "{TARGET_ROOT}": '"$src"',
+        "{RESULTS_DIR}": '"$here"',
+    }
+    token_re = re.compile("|".join(re.escape(token) for token in variables))
+    parts: list[str] = []
+    cursor = 0
+    for match in token_re.finditer(value):
+        if match.start() > cursor:
+            parts.append(shq(value[cursor:match.start()]))
+        parts.append(variables[match.group(0)])
+        cursor = match.end()
+    if cursor < len(value):
+        parts.append(shq(value[cursor:]))
+    rendered = "".join(parts) or "''"
+    return rendered
+
+
+def _browser_shell_args(
+    args: list[str], *, sanitizer: str, slug: str,
+) -> str:
+    replay = list(args)
+    if not any("{TESTCASE}" in value for value in replay):
+        replay.append("{TESTCASE}")
+    return " ".join(
+        _browser_shell_value(value, sanitizer=sanitizer, slug=slug)
+        for value in replay
+    )
+
+
+def _browser_shell_env(
+    entries: list[str], *, sanitizer: str, slug: str, build_system: str,
+) -> str:
+    replay = list(entries)
+    if build_system == "mach":
+        replay = [
+            "MOZ_HEADLESS=1", "MOZ_DISABLE_CONTENT_SANDBOX=1", *replay,
+        ]
+    lines: list[str] = []
+    for entry in replay:
+        key, separator, value = entry.partition("=")
+        if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            die(f"invalid browser runner environment entry: {entry!r}")
+        lines.append(
+            f"{key}="
+            f"{_browser_shell_value(value, sanitizer=sanitizer, slug=slug)} \\\n"
+        )
+    return "".join(lines)
+
+
 def write_browser_template(out: Path, *, build_system: str, upstream_url: str,
                            pinned_rev: str, slug: str, san_bin_rel: str,
                            input_name: str, sanitizer: str = "asan",
                            extra_options: str = "", mode: str = "browser",
                            recorded_env_options: str = "",
-                           audit_build_script: str = "") -> None:
+                           audit_build_script: str = "",
+                           runner_args: list[str] | None = None,
+                           runner_env: list[str] | None = None) -> None:
+    if not san_bin_rel:
+        die(f"browser target {slug!r} has no configured {sanitizer}_bin")
     meta = sanitizer_meta(sanitizer)
+    effective_args = (
+        list(runner_args)
+        if runner_args
+        else target_config.browser_runner_defaults(build_system).get("args", [])
+    )
     text = (
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
         + emit_build(build_system, sanitizer=sanitizer,
@@ -2665,6 +2755,13 @@ def write_browser_template(out: Path, *, build_system: str, upstream_url: str,
             __MACH_OBJDIR__=meta["mach_objdir"],
             __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
                 sanitizer, extra_options, mode, recorded_env_options
+            ),
+            __RUNNER_ENV_BLOCK__=_browser_shell_env(
+                list(runner_env or []),
+                sanitizer=sanitizer, slug=slug, build_system=build_system,
+            ),
+            __BROWSER_ARGS__=_browser_shell_args(
+                effective_args, sanitizer=sanitizer, slug=slug,
             ),
         )
     )
@@ -3395,6 +3492,14 @@ def main(argv: list[str]) -> int:
                     mode=run_mode or "browser",
                     recorded_env_options=recorded_env_options,
                     audit_build_script=audit_build_script,
+                    runner_args=(
+                        repro_args
+                        or list(cfg.runner_args)
+                        or target_config.browser_runner_defaults(
+                            build_system
+                        ).get("args", [])
+                    ),
+                    runner_env=list(cfg.runner_env),
                 )
             elif input_ext_lower in ("js", "mjs"):
                 write_js_shell_template(

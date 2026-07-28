@@ -546,7 +546,7 @@ def materialize(
             )
         if args:
             replay_args = list(args)
-            if "{TESTCASE}" not in replay_args:
+            if not any("{TESTCASE}" in arg for arg in replay_args):
                 replay_args.insert(0, "{TESTCASE}")
             quoted = " ".join(shlex.quote(arg) for arg in replay_args)
             (destination / "repro.cmd").write_text(

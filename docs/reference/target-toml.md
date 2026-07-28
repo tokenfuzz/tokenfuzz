@@ -22,7 +22,7 @@ layer.** The tooling infers:
 
 - source metadata;
 - build system;
-- browser mode for known browser slugs;
+- browser mode from browser-specific build drivers;
 - common ASan executables;
 - common static libraries;
 - default include paths;
@@ -64,7 +64,7 @@ attacker_controls = ["bytes"]
 | --- | --- |
 | `target` | Target slug. It should match `targets/<target>` and `output/<target>`. |
 | `upstream_url` | Source repository URL used as metadata in exported bundles. |
-| `build_system` | Informational build-system label such as `cmake`, `meson`, `autotools`, or `mach`. |
+| `build_system` | Informational build-system label such as `cmake`, `meson`, `autotools`, `mach`, or `gn`. |
 | `build_widening` | For ordinary native C/C++ targets, keep the canonical build and prepare one cached ASan sibling with compatible optional in-tree features enabled. Defaults to `true` when absent; set `false` to opt out. |
 | `asan_bin` | ASan executable used by generic or browser runs. Relative paths resolve under `targets/<target>/`. An executable in the matching ASan build (or an external executable whose ASan instrumentation can be verified) is kept as you set it; `bin/setup-target` re-detects this field only to fill it or to replace a missing or mismatched path. |
 | `asan_lib` | ASan library used when compiling C harness testcases. |
@@ -243,7 +243,7 @@ targets that want to plug in a custom driver script.
 | Key | Meaning |
 | --- | --- |
 | `bin` | Interpreter or driver program (`python3`, `node`, `cargo`, `ruby`, an absolute path to a wrapper script, …). A bare name is resolved on `PATH` first, then as a path relative to `targets/<target>/` — which is how a config points at a binary the target's own build produced. |
-| `args` | Literal argument list. `{TESTCASE}` is substituted with the testcase path; `{TARGET_ROOT}`, `{RESULTS_DIR}`, `{TARGET_SLUG}`, `{SANITIZER}`, and `{SWIFT_SANITIZER}` are also substituted at run time. |
+| `args` | Literal argument list. `{TESTCASE}` is substituted with the testcase path; browser runs also expand `{PROFILE}` to a fresh temporary profile. `{TARGET_ROOT}`, `{RESULTS_DIR}`, `{TARGET_SLUG}`, `{SANITIZER}`, and `{SWIFT_SANITIZER}` are also substituted at run time. |
 | `env` | Extra `KEY=VAL` strings layered on the runtime environment (e.g. `["GORACE=halt_on_error=1"]`, `["PYTHONDEVMODE=1"]`). The same runner tokens as `args` are substituted at run time. |
 | `crash_patterns` | Additional regex strings the triager treats as crash signals beyond its built-in language-agnostic markers. Use sparingly. |
 
@@ -381,22 +381,18 @@ Browser mode enables:
 - coverage-gated browser or shell runs when available;
 - JS differential mode.
 
-Firefox path conventions differ by platform. macOS builds
-normally use:
+The browser binary and launch arguments are target metadata. For example:
 
 ```toml
-asan_bin = "build-asan/dist/Nightly.app/Contents/MacOS/firefox"
+asan_bin = "build-asan/MyBrowser.app/Contents/MacOS/MyBrowser"
+
+[runner]
+args = ["--user-data-dir={PROFILE}", "--headless=new", "--dump-dom", "{TESTCASE}"]
 ```
 
-Linux builds normally use:
-
-```toml
-asan_bin = "build-asan/dist/bin/firefox"
-```
-
-Coverage-ASan browser gating follows the same platform split,
-checking XUL on macOS or `libxul.so` on Linux for
-`__sancov_guards`.
+`{PROFILE}` expands to a fresh temporary profile directory for each browser
+probe. `bin/setup-target` seeds launch arguments for structurally detected
+browser build drivers; other browsers set them explicitly.
 
 ## Session environment
 
@@ -422,18 +418,16 @@ from the testcase path and current directory. Scratch testcases under
 
 ## Strategy hints: `[s4_diff_pairs]` and `[s6_peers]`
 
-`bin/setup-target` and `bin/audit --new-target` seed two optional
-strategy-hint sections. Most operators leave them as generated — you
-can also hand-edit or delete them, and the audit still runs.
+Target configuration supports two optional strategy-hint sections.
 
 `[s4_diff_pairs]` lists pairs of execution modes the harness can diff
-for S4 (differential testing). Only browser/JS engine targets carry
-meaningful defaults:
+for S4 (differential testing). Each JS engine has its own flags, so they
+must be configured with that target rather than inferred from its slug:
 
 ```toml
 [s4_diff_pairs]
-jit_off   = ["--no-ion"]
-jit_eager = ["--ion-eager"]
+jit_off   = ["--engine-specific-off"]
+jit_eager = ["--engine-specific-eager"]
 ```
 
 `[s6_peers]` lists upstream peer projects to mine for S6
@@ -445,8 +439,8 @@ domain = "xml-parser"
 peers  = ["libexpat", "Xerces-C++", "rapidxml"]
 ```
 
-Empty or missing values are fine — both sections only suggest
-additional strategy material. `bin/audit --new-target` can also
+Empty or missing values are fine unless `js-diff` is selected. Both sections
+only suggest additional strategy material. `bin/audit --new-target` can also
 LLM-bootstrap a real `[threat_model]` and `[s6_peers]` instead of the
 conservative defaults; you can re-run that derivation at any time:
 

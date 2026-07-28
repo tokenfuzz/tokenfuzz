@@ -8,6 +8,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,6 +19,24 @@ LOADER.exec_module(probe)
 
 
 class ProbeArgumentTests(unittest.TestCase):
+    def test_opaque_browser_input_uses_browser_runner(self) -> None:
+        instance = object.__new__(probe.Probe)
+        instance.args = SimpleNamespace(mode="auto")
+        instance.header = {"mode": ""}
+        instance.testcase = Path("testcase.bin")
+        instance.config = SimpleNamespace(is_browser="1")
+
+        self.assertEqual(instance._mode(), "browser")
+
+    def test_opaque_non_browser_input_remains_generic(self) -> None:
+        instance = object.__new__(probe.Probe)
+        instance.args = SimpleNamespace(mode="auto")
+        instance.header = {"mode": ""}
+        instance.testcase = Path("testcase.bin")
+        instance.config = SimpleNamespace(is_browser="0")
+
+        self.assertEqual(instance._mode(), "generic")
+
     def test_explicit_sanitizer_runs_are_recorded_as_executed(self) -> None:
         args = probe.parse_args(["--sanitizer-runs", "17", "testcase.bin"])
         self.assertEqual(probe.sanitizer_run_count(args, {}), 17)

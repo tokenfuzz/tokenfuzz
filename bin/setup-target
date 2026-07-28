@@ -18,7 +18,6 @@ import languages
 import target_config
 
 RESERVED = {"output", "benchmark"}
-NATIVE_SYSTEMS = {"cmake", "autotools", "meson"}
 
 
 def log(message: str) -> None:
@@ -38,9 +37,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("source", nargs="?", default="")
     parser.add_argument("--repo-type", choices=("auto", "git", "hg"), default="auto")
     parser.add_argument("--ref", default="")
-    parser.add_argument("--no-update", action="store_true")
+    update = parser.add_mutually_exclusive_group()
+    update.add_argument("--no-update", action="store_true")
+    update.add_argument(
+        "--pull", action="store_true",
+        help="update an existing VCS checkout to the latest upstream source "
+             "without re-passing its repo URL",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--build", action="store_true")
+    parser.add_argument(
+        "--browser", action=argparse.BooleanOptionalAction, default=None,
+        help="select browser execution mode; browser-specific drivers are "
+             "inferred, while shared drivers such as GN require this flag",
+    )
     parser.add_argument(
         "--no-alternates", action="store_true",
         help="build only the canonical sanitizer trees, skipping cached "
@@ -95,12 +105,14 @@ class Setup:
             if self.args.repo_type != "auto" and self.args.repo_type != detected:
                 raise ValueError(f"targets/{self.name} is {detected}, not {self.args.repo_type}")
             if detected == "none":
-                if self.source or self.args.ref:
-                    log(f"Using existing targets/{self.name} as a plain source tree (no VCS metadata; repo URL/ref ignored)")
+                if self.source or self.args.ref or self.args.pull:
+                    log(f"Using existing targets/{self.name} as a plain source tree (no VCS metadata; repo URL/ref/--pull ignored)")
                 else:
                     log(f"Using existing targets/{self.name} as a plain source tree")
                 self.source = ""
-            elif self.args.no_update or (not self.source and not self.args.ref):
+            elif self.args.no_update or not (
+                self.source or self.args.ref or self.args.pull
+            ):
                 log(f"Using existing targets/{self.name} without updating")
             elif detected == "git":
                 self.sync_git()
@@ -176,6 +188,7 @@ class Setup:
 
     def seed_config(self) -> None:
         self.config_dir.mkdir(parents=True, exist_ok=True)
+        parsed: dict = {}
         if not self.toml.is_file():
             reason = "missing"
         elif self.args.force:
@@ -184,10 +197,22 @@ class Setup:
             reason = "placeholders"
         else:
             try:
-                target_config.parse_toml(self.toml)
+                parsed = target_config.parse_toml(self.toml)
                 reason = ""
             except Exception:
                 reason = "invalid"
+        if reason in ("", "placeholders") and self.args.browser is not None:
+            if not parsed:
+                parsed = target_config.parse_toml(self.toml)
+            current = str(parsed.get("is_browser", "0")).lower() in {
+                "1", "true",
+            }
+            if current != self.args.browser:
+                target_config.update_browser_mode(self.toml, self.args.browser)
+                log(
+                    f"Updated output/{self.name}/target.toml browser mode to "
+                    f"{1 if self.args.browser else 0}"
+                )
         if self.args.build and reason == "placeholders":
             log(f"Keeping output/{self.name}/target.toml as-is (--build does not re-seed; run 'bin/setup-target {self.name}' without --build to refresh placeholders)")
             reason = ""
@@ -196,7 +221,10 @@ class Setup:
             return
         if reason == "placeholders":
             log(f"Refreshing output/{self.name}/target.toml to fill placeholders (preserving curated [threat_model] / [s6_peers])")
-            target_config.seed_toml(self.target_root, self.toml, self.source, preserve_curated=True)
+            target_config.seed_toml(
+                self.target_root, self.toml, self.source,
+                preserve_curated=True, browser_mode=self.args.browser,
+            )
             return
         if reason == "missing":
             log(f"Seeding output/{self.name}/target.toml")
@@ -204,7 +232,10 @@ class Setup:
             log(f"Refreshing output/{self.name}/target.toml because it no longer parses as TOML")
         else:
             log(f"Regenerating output/{self.name}/target.toml (--force)")
-        target_config.seed_toml(self.target_root, self.toml, self.source)
+        target_config.seed_toml(
+            self.target_root, self.toml, self.source,
+            browser_mode=self.args.browser,
+        )
         self.seeded_full = True
 
     def backend_candidates(self) -> list[str]:
@@ -279,7 +310,8 @@ class Setup:
         config = target_config.Config(target_root=str(self.target_root))
         target_config.load_toml_into(config, self.toml)
         if (
-            config.is_browser == "1" or config.build_system not in NATIVE_SYSTEMS
+            str(config.is_browser).lower() in {"1", "true"}
+            or config.build_system not in target_config.NATIVE_BUILD_SYSTEMS
             or config.runner_bin
             or (config.runner_args and not self.args.force)
         ):
@@ -333,6 +365,12 @@ class Setup:
                 return True
             if kind == "lib" and path.is_file():
                 return True
+        if config.is_browser in ("1", "true", "True"):
+            return bool(
+                target_config.detect_browser_sanitizer_bin(
+                    self.target_root, sanitizer_name
+                )
+            )
         detected_bin, detected_lib = \
             target_config.detect_sanitizer_build_artifacts(
                 self.target_root, sanitizer_name
@@ -348,7 +386,10 @@ class Setup:
         # to materialize.
         recipes = ["build.sh", *(f"build-{s}.sh" for s in ("ubsan", "msan", "tsan"))]
         has_recipe = any((audit_dir / name).is_file() for name in recipes)
-        if config.build_system not in NATIVE_SYSTEMS and not has_recipe:
+        if (
+            config.build_system not in target_config.NATIVE_BUILD_SYSTEMS
+            and not has_recipe
+        ):
             return
         if config.sanitizers_explicitly_disabled:
             sanitizers = []
@@ -359,6 +400,7 @@ class Setup:
         if self.args.build:
             candidates = self.backend_candidates()
             auto_builder = SCRIPT_ROOT / "bin/auto-build-script"
+            build_errors: list[str] = []
             for sanitizer_name in sanitizers:
                 if sanitizer_name not in {"asan", "ubsan", "msan", "tsan"}:
                     continue
@@ -369,19 +411,35 @@ class Setup:
                 generated = False
                 if recipe.is_file() and not self.args.force:
                     log(f"bootstrap: keeping existing {recipe} (pass --force to regenerate)")
-                elif os.access(auto_builder, os.X_OK) and candidates:
+                elif os.access(auto_builder, os.X_OK):
                     candidate_dir.mkdir(parents=True, exist_ok=True)
-                    for backend in candidates:
-                        environment = {**os.environ, "SCRIPT_ROOT": str(SCRIPT_ROOT), "ACTIVE_BACKEND": backend, "BACKEND": backend}
-                        completed = subprocess.run([
-                            str(auto_builder), "--src", str(self.target_root), "--out", str(candidate), "--sanitizer", sanitizer_name,
-                        ], env=environment)
-                        if completed.returncode == 0:
-                            generated = True
-                            log(f"bootstrap: auto-build-script ({sanitizer_name}) succeeded on backend={backend} - validating candidate")
-                            break
+                    environment = {**os.environ, "SCRIPT_ROOT": str(SCRIPT_ROOT)}
+                    if candidates:
+                        environment.update(
+                            ACTIVE_BACKEND=candidates[0], BACKEND=candidates[0]
+                        )
+                    completed = subprocess.run([
+                        str(auto_builder), "--src", str(self.target_root),
+                        "--out", str(candidate), "--sanitizer", sanitizer_name,
+                        "--emit-initial",
+                    ], env=environment)
+                    if completed.returncode == 0:
+                        generated = True
+                        log(
+                            f"bootstrap: generated deterministic {sanitizer_name} "
+                            "recipe - validating it in the canonical clean build"
+                        )
+                    else:
+                        log(
+                            f"bootstrap: no deterministic {sanitizer_name} "
+                            f"recipe is available for build_system={config.build_system}"
+                        )
                 active_recipe = candidate if generated else recipe
                 if not active_recipe.is_file():
+                    build_errors.append(
+                        f"{sanitizer_name} build has no usable recipe for "
+                        f"build_system={config.build_system}"
+                    )
                     continue
                 build_dir = self.target_root / f"build-{sanitizer_name}{os.environ.get('AUDIT_BUILD_SUFFIX', '')}"
                 freshness = target_config.build_freshness(
@@ -410,11 +468,17 @@ class Setup:
                             candidate.unlink(missing_ok=True)
                             continue
                         if result.status == "held":
+                            # Not a build failure: declining to replace a tree a
+                            # live run is reading is the designed outcome, and
+                            # parallel audits hit it routinely. Reporting it as
+                            # an error would make the exit code depend on who
+                            # else is running.
                             log(
                                 f"bootstrap: {sanitizer_name} build not replaced "
                                 f"({result.reason}); the existing tree stays in "
                                 f"place for the run that is using it"
                             )
+                            candidate.unlink(missing_ok=True)
                             continue
                         log(
                             f"bootstrap: {sanitizer_name} clean build failed "
@@ -425,6 +489,7 @@ class Setup:
                         # bounded repair loop; keep the old recipe/build until a
                         # revised candidate passes both scratch and canonical
                         # validation.
+                        repaired_ok = False
                         if (
                             not self.args.no_llm_config
                             and os.environ.get("LLM_DECIDE_DISABLE", "0") != "1"
@@ -435,20 +500,24 @@ class Setup:
                             candidate_dir.mkdir(parents=True, exist_ok=True)
                             repaired = candidate_dir / f"{recipe.name}.{os.getpid()}.repaired"
                             repaired.unlink(missing_ok=True)
-                            environment = {
-                                **os.environ,
-                                "SCRIPT_ROOT": str(SCRIPT_ROOT),
-                                "ACTIVE_BACKEND": candidates[0],
-                                "BACKEND": candidates[0],
-                            }
-                            completed = subprocess.run([
-                                str(auto_builder), "--src", str(self.target_root),
-                                "--out", str(repaired), "--sanitizer", sanitizer_name,
-                                "--repair-from", str(active_recipe),
-                                "--failure-log", str(result.log_path),
-                                "--max-iters", "3",
-                            ], env=environment, check=False)
-                            if completed.returncode == 0 and repaired.is_file():
+                            for backend in candidates:
+                                repaired.unlink(missing_ok=True)
+                                environment = {
+                                    **os.environ,
+                                    "SCRIPT_ROOT": str(SCRIPT_ROOT),
+                                    "ACTIVE_BACKEND": backend,
+                                    "BACKEND": backend,
+                                }
+                                completed = subprocess.run([
+                                    str(auto_builder), "--src", str(self.target_root),
+                                    "--out", str(repaired),
+                                    "--sanitizer", sanitizer_name,
+                                    "--repair-from", str(active_recipe),
+                                    "--failure-log", str(result.log_path),
+                                    "--max-iters", "3",
+                                ], env=environment, check=False)
+                                if completed.returncode or not repaired.is_file():
+                                    continue
                                 repaired_result = build_materialize.materialize(
                                     self.target_root,
                                     sanitizer_name,
@@ -460,15 +529,19 @@ class Setup:
                                     force=self.args.force,
                                 )
                                 if repaired_result.status == "built":
+                                    repaired_ok = True
                                     log(
                                         f"bootstrap: repaired {sanitizer_name} "
-                                        "recipe after clean-build failure"
+                                        "recipe after clean-build failure on "
+                                        f"backend={backend}"
                                     )
-                                else:
-                                    repaired.unlink(missing_ok=True)
-                            else:
+                                    break
                                 repaired.unlink(missing_ok=True)
                         candidate.unlink(missing_ok=True)
+                        if not repaired_ok:
+                            build_errors.append(
+                                f"{sanitizer_name} build failed: {result.reason}"
+                            )
                 elif generated:
                     # A concurrent materializer may have made the old recipe
                     # fresh while this candidate was generated. Do not replace
@@ -477,8 +550,16 @@ class Setup:
                     candidate.unlink(missing_ok=True)
         elif sanitizers and not (audit_dir / "build.sh").is_file():
             log(f"hint: {self.name} is a {config.build_system} target with no {audit_dir / 'build.sh'} yet; bin/audit builds it automatically")
-        if target_config.refresh_detected_build_fields(self.target_root, self.toml):
+        if target_config.refresh_detected_build_fields(
+            self.target_root,
+            self.toml,
+            is_browser=config.is_browser in ("1", "true", "True"),
+        ):
             log(f"Refreshed <san>_bin/<san>_lib in {self.toml} from build trees on disk")
+        # Persist every sanitizer that completed before reporting a later
+        # failure, so retrying does not discard usable build output.
+        if self.args.build and build_errors:
+            raise RuntimeError("; ".join(build_errors))
 
         # Keep build-asan as the regular control, then materialize cached ASan
         # alternates. Alternate failure is intentionally additive/fail-open.

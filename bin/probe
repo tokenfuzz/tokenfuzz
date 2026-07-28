@@ -28,6 +28,7 @@ import build_config
 import crash_bundle
 import languages
 import sanitizer as sanitizer_lib
+import sanitizer_run
 import target_config
 import verdict as verdict_lib
 from file_tools import capture_command
@@ -231,21 +232,6 @@ def prepare_exec_testcase(testcase: Path, config: target_config.Config, agent: s
 
 def resolve_executable(value: str, config: target_config.Config) -> str:
     return shutil.which(value) or (value if os.access(value, os.X_OK) else config.resolve_path(value))
-
-
-def expand_runner(value: str, testcase: Path, sanitizer_name: str, config: target_config.Config) -> str:
-    swift = {"asan": "address", "ubsan": "undefined", "tsan": "thread"}.get(sanitizer_name)
-    if "{SWIFT_SANITIZER}" in value and swift is None:
-        raise ValueError(f"Swift runner does not support sanitizer '{sanitizer_name}'")
-    replacements = {
-        "{TESTCASE}": str(testcase), "{SANITIZER}": sanitizer_name,
-        "{SWIFT_SANITIZER}": swift or "", "{TARGET_ROOT}": config.target_root,
-        "{RESULTS_DIR}": config.results_dir, "{TARGET_SLUG}": config.slug,
-        "{NULL_DEVICE}": os.devnull,
-    }
-    for token, replacement in replacements.items():
-        value = value.replace(token, replacement)
-    return value
 
 
 def stat_key(path: str) -> str:
@@ -507,7 +493,11 @@ class Probe:
             elif self.testcase.suffix.lower() in {".js", ".mjs"}:
                 mode = "js" if self.config.is_browser != "0" else "generic"
             else:
-                mode = "generic"
+                mode = (
+                    "browser"
+                    if self.config.is_browser in {"1", "true", "True"}
+                    else "generic"
+                )
         if mode not in VALID_MODES - {"auto"}:
             raise ValueError(f"invalid mode: {mode}")
         return mode
@@ -635,6 +625,18 @@ class Probe:
             runner = BIN_DIR / ("run-asan" if self.sanitizer == "asan" else "run-ubsan")
             return [str(runner), "js-diff", str(self.exec_testcase), *self.args.args]
         if self.mode in {"browser", "js"}:
+            if self.mode == "browser":
+                configured = (
+                    list(self.config.runner_args)
+                    if self.config.runner_args
+                    else target_config.browser_runner_defaults(
+                        self.config.build_system
+                    ).get("args", [])
+                )
+                self.repro_args = list(configured)
+                if not any("{TESTCASE}" in value for value in self.repro_args):
+                    self.repro_args.append("{TESTCASE}")
+                self.repro_args.extend(self.args.args)
             return [str(BIN_DIR / "run-sanitizer-multi"), self.sanitizer, self.mode, str(self.exec_testcase), *self.args.args]
 
         uses_runner = False
@@ -648,7 +650,10 @@ class Probe:
             # instead of accepting the testcase positionally. Reuse the
             # existing argv template without replacing the instrumented binary.
             uses_sanitizer_args = bool(
-                self.config.runner_args and not self.config.runner_bin
+                self.config.runner_args
+                and not self.config.runner_bin
+                and str(getattr(self.config, "is_browser", "0")).lower()
+                not in {"1", "true"}
             )
         elif self.config.runner_bin:
             binary = resolve_executable(self.config.runner_bin, self.config)
@@ -667,13 +672,22 @@ class Probe:
             and (uses_runner or uses_sanitizer_args)
             and self.config.runner_args
         ):
-            generic_args = [expand_runner(value, self.exec_testcase, self.sanitizer, self.config) for value in self.config.runner_args]
+            generic_args = [
+                sanitizer_run.expand_runner_value(
+                    value, self.config, self.sanitizer,
+                    testcase=str(self.exec_testcase),
+                )
+                for value in self.config.runner_args
+            ]
             skip = any("{TESTCASE}" in value for value in self.config.runner_args)
             if not skip:
                 generic_args.append(str(self.exec_testcase))
                 skip = True
             self.repro_args = [
-                expand_runner(value, Path("{TESTCASE}"), self.sanitizer, self.config)
+                sanitizer_run.expand_runner_value(
+                    value, self.config, self.sanitizer,
+                    testcase="{TESTCASE}",
+                )
                 for value in self.config.runner_args
             ]
             if "{TESTCASE}" not in self.repro_args:

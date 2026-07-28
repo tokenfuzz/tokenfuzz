@@ -2648,6 +2648,49 @@ er.write_cli_with_input_template(
 assert_in('"$san_bin" "$testcase"', _cli_out.read_text(encoding="utf-8"),
           "write_cli_with_input_template: default is the bare invocation")
 
+# Browser bundles replay the configured product argv/environment rather than a
+# Firefox-specific command. Embedded testcase/profile tokens stay in position.
+_browser_out = TMP / "reproduce-browser.sh"
+er.write_browser_template(
+    _browser_out,
+    build_system="gn",
+    upstream_url="https://example.invalid/browser",
+    pinned_rev="1",
+    slug="browser-product",
+    san_bin_rel="build-asan/Product.app/Contents/MacOS/Product",
+    input_name="input.html",
+    runner_args=[
+        "--user-data-dir={PROFILE}",
+        "--open={TESTCASE}",
+        "--results={RESULTS_DIR}",
+        "--swift={SWIFT_SANITIZER}",
+        "--tag",
+        "value with spaces",
+    ],
+    runner_env=[
+        "PROFILE_COPY={PROFILE}",
+        "SOURCE_ROOT={TARGET_ROOT}",
+    ],
+)
+_browser_text = _browser_out.read_text(encoding="utf-8")
+assert_in(
+    '"$san_bin" --user-data-dir="$profile" '
+    '--open="$testcase_url" --results="$here" --swift=address '
+    '--tag \'value with spaces\'',
+    _browser_text,
+    "write_browser_template: configured argv is replayed with runtime tokens",
+)
+assert_in('PROFILE_COPY="$profile"', _browser_text,
+          "write_browser_template: configured profile environment is replayed")
+assert_in('SOURCE_ROOT="$src"', _browser_text,
+          "write_browser_template: target-root environment maps to cloned source")
+assert_in('--results="$here"', _browser_text,
+          "write_browser_template: results token maps to the bundle directory")
+assert_in("--swift=address", _browser_text,
+          "write_browser_template: Swift sanitizer token mirrors live expansion")
+assert_not_in("firefox", _browser_text.lower(),
+              "write_browser_template: generic browser replay has no product name")
+
 
 # ─── Cleanup ────────────────────────────────────────────────────────
 

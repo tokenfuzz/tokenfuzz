@@ -13,11 +13,13 @@ working unchanged.
 from __future__ import annotations
 
 import os
+import plistlib
 import sys
 import tempfile
 import shutil
 import subprocess
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
@@ -443,6 +445,8 @@ assert_eq([], tc.threat_model_for("libxml2"),
 # Browser target widens the threat model
 fx = TEST_TMPDIR / "firefox"
 fx.mkdir()
+(fx / "mach").write_text("#!/bin/sh\n")
+(fx / "mach").chmod(0o755)
 fx_out = TEST_TMPDIR / "seeded-browser.toml"
 tc.seed_toml(fx, fx_out, "")
 fx_text = fx_out.read_text(encoding="utf-8")
@@ -453,46 +457,23 @@ tc.load_toml_into(cfg, fx_out)
 assert_eq("bytes,call-sequence,timing", cfg.attacker_controls_csv(),
           "seeded browser toml round-trips through loader")
 
-# ─── 9b. seed_toml emits [s4_diff_pairs] for browser engines ────────
-# Per-engine JIT flags come from _S4_DIFF_PAIRS_TAXONOMY. Verify each
-# browser slug seeds a section and that the values round-trip through
-# load_toml_into into cfg.s4_diff_pairs.
-# Note: seed_toml derives slug from root.name, and only firefox/chromium/
-# webkit/servo are in _BROWSER_SLUGS — use those exact dir names.
-# (The existing "firefox" test dir above is already used; avoid colliding.)
-S4_BROWSER_TMPDIR = TEST_TMPDIR / "s4-roundtrip"
-S4_BROWSER_TMPDIR.mkdir()
-for browser_slug, expected_off, expected_eager in [
-    ("firefox", "--no-ion", "--ion-eager"),
-    ("chromium", "--no-turbofan", "--always-turbofan"),
-    ("webkit", "--useJIT=false", "--thresholdForJITAfterWarmUp=0"),
-    ("servo", "--no-ion", "--ion-eager"),
-]:
-    br = S4_BROWSER_TMPDIR / browser_slug
-    br.mkdir()
-    br_out = S4_BROWSER_TMPDIR / f"{browser_slug}.toml"
-    tc.seed_toml(br, br_out, "")
-    br_text = br_out.read_text(encoding="utf-8")
-    assert_in("[s4_diff_pairs]", br_text,
-              f"seed_toml: {browser_slug} has [s4_diff_pairs] section")
-    assert_in(expected_off, br_text,
-              f"seed_toml: {browser_slug} has expected jit_off flag")
-    assert_in(expected_eager, br_text,
-              f"seed_toml: {browser_slug} has expected jit_eager flag")
-    cfg = tc.Config()
-    tc.load_toml_into(cfg, br_out)
-    if expected_off in (cfg.s4_diff_pairs.get("jit_off") or []):
-        passed(f"load_toml_into: {browser_slug} jit_off round-trips")
-    else:
-        failed(f"load_toml_into: {browser_slug} jit_off round-trips",
-               f"got {cfg.s4_diff_pairs!r}")
-    if expected_eager in (cfg.s4_diff_pairs.get("jit_eager") or []):
-        passed(f"load_toml_into: {browser_slug} jit_eager round-trips")
-    else:
-        failed(f"load_toml_into: {browser_slug} jit_eager round-trips",
-               f"got {cfg.s4_diff_pairs!r}")
+# GN is a general build system, not itself evidence that the product accepts
+# browser testcases. Explicit browser mode remains available to setup-target.
+gn_root = TEST_TMPDIR / "gn-generic"
+gn_root.mkdir()
+(gn_root / ".gn").write_text('buildconfig = "//build/config/BUILDCONFIG.gn"\n')
+gn_out = TEST_TMPDIR / "seeded-gn.toml"
+tc.seed_toml(gn_root, gn_out, "")
+gn_cfg = tc.Config()
+tc.load_toml_into(gn_cfg, gn_out)
+assert_eq("0", gn_cfg.is_browser,
+          "GN seed remains generic without an explicit browser signal")
+tc.seed_toml(gn_root, gn_out, "", browser_mode=True)
+tc.load_toml_into(gn_cfg, gn_out)
+assert_eq("1", gn_cfg.is_browser,
+          "GN seed accepts explicit browser mode")
 
-# Non-browser target gets NO s4_diff_pairs section (no JS shell to diff).
+# ─── 9b. per-engine S4 flags are target metadata, not shared defaults ─
 generic_root = TEST_TMPDIR / "s4-generic"
 generic_root.mkdir()
 generic_out = TEST_TMPDIR / "s4-generic.toml"
@@ -503,18 +484,27 @@ if "[s4_diff_pairs]" not in generic_text:
 else:
     failed("seed_toml: non-browser target has no [s4_diff_pairs] section",
            "section unexpectedly present")
+assert_not_in("[s4_diff_pairs]", fx_text,
+              "browser seed has no hardcoded per-engine JIT flags")
 
-# s4_diff_pairs_for() returns {} for unknown slug, dict for known.
-if tc.s4_diff_pairs_for("firefox").get("jit_off") == ["--no-ion"]:
-    passed("s4_diff_pairs_for: firefox jit_off")
-else:
-    failed("s4_diff_pairs_for: firefox jit_off",
-           f"got {tc.s4_diff_pairs_for('firefox')!r}")
-if tc.s4_diff_pairs_for("unknown-target") == {}:
-    passed("s4_diff_pairs_for: unknown slug returns empty")
-else:
-    failed("s4_diff_pairs_for: unknown slug returns empty",
-           f"got {tc.s4_diff_pairs_for('unknown-target')!r}")
+# Every build-tree path a generic seed persists is the canonical alias, which
+# Config.resolve_path maps onto whichever suffixed tree the image is running.
+suffixed_seed_root = TEST_TMPDIR / "suffixed-seed"
+(suffixed_seed_root / "build-asan-img42" / "include").mkdir(parents=True)
+suffixed_seed_out = TEST_TMPDIR / "suffixed-seed.toml"
+with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": "-img42"}):
+    tc.seed_toml(suffixed_seed_root, suffixed_seed_out, "")
+    suffixed_seed_cfg = tc.Config(target_root=str(suffixed_seed_root))
+    tc.load_toml_into(suffixed_seed_cfg, suffixed_seed_out)
+    assert_eq(True, "build-asan/include" in suffixed_seed_cfg.includes,
+              "seed_toml persists the canonical include path under a suffix")
+    assert_eq(
+        str(suffixed_seed_root / "build-asan-img42" / "include"),
+        suffixed_seed_cfg.resolve_path("build-asan/include"),
+        "canonical include path resolves into the active suffixed tree",
+    )
+assert_not_in("build-asan-img42", suffixed_seed_out.read_text(encoding="utf-8"),
+              "seed_toml never writes a physical suffixed build path")
 
 
 # ─── 9c. S6 peers come only from target.toml ────────────────────────
@@ -901,6 +891,162 @@ keep_toml.write_text(
 tc.refresh_detected_build_fields(keep_root, keep_toml)
 assert_in('asan_bin      = "build-asan/mytool"', keep_toml.read_text(encoding="utf-8"),
           "refresh_detected_build_fields: keeps an operator-set asan_bin in its build")
+
+# Browser refresh must not preserve a background process helper as the main
+# runner merely because it is executable and instrumented. App role metadata
+# identifies the helper without a product-specific name.
+browser_refresh_root = Path("browser-refresh-relative")
+browser_refresh_abs = TEST_TMPDIR / browser_refresh_root
+for app_name, executable, metadata in (
+    ("Helper.app", "Helper", {
+        "CFBundleExecutable": "Helper", "LSBackgroundOnly": "1",
+    }),
+    ("Product.app", "Product", {"CFBundleExecutable": "Product"}),
+):
+    app = browser_refresh_abs / "build-asan" / app_name / "Contents"
+    binary = app / "MacOS" / executable
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"\x7fELF")
+    binary.chmod(0o755)
+    with (app / "Info.plist").open("wb") as stream:
+        plistlib.dump(metadata, stream)
+browser_refresh_toml = browser_refresh_abs / "target.toml"
+browser_refresh_toml.write_text(
+    'build_system = "gn"\n'
+    'asan_bin = "build-asan/Helper.app/Contents/MacOS/Helper"\n',
+    encoding="utf-8",
+)
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = lambda path, sanitizer="asan": True
+try:
+    detected_browser = tc.detect_browser_sanitizer_bin(
+        Path(os.path.relpath(browser_refresh_abs, Path.cwd())), "asan"
+    )
+    assert_eq("build-asan/Product.app/Contents/MacOS/Product",
+              detected_browser,
+              "browser artifact detection excludes background helper apps")
+    assert_eq(True, tc.refresh_detected_build_fields(
+        browser_refresh_abs, browser_refresh_toml, is_browser=True
+    ), "browser refresh replaces a configured background helper")
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
+assert_in('asan_bin      = "build-asan/Product.app/Contents/MacOS/Product"',
+          browser_refresh_toml.read_text(encoding="utf-8"),
+          "browser refresh adopts the foreground product executable")
+
+# Container suffixes select physical build trees at runtime but must never be
+# persisted: the next image resolves the canonical path to its own suffix.
+suffixed_browser_root = TEST_TMPDIR / "browser-suffixed"
+suffixed_app = (
+    suffixed_browser_root / "build-asan-img42"
+    / "Product.app" / "Contents"
+)
+suffixed_binary = suffixed_app / "MacOS" / "Product"
+suffixed_binary.parent.mkdir(parents=True)
+suffixed_binary.write_bytes(b"\x7fELF")
+suffixed_binary.chmod(0o755)
+with (suffixed_app / "Info.plist").open("wb") as stream:
+    plistlib.dump({"CFBundleExecutable": "Product"}, stream)
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = lambda path, sanitizer="asan": True
+try:
+    with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": "-img42"}):
+        assert_eq(
+            "build-asan/Product.app/Contents/MacOS/Product",
+            tc.detect_browser_sanitizer_bin(suffixed_browser_root, "asan"),
+            "browser detection canonicalizes container-suffixed build paths",
+        )
+        suffixed_cfg = tc.Config(
+            target_root=str(suffixed_browser_root),
+            asan_bin="build-asan/Product.app/Contents/MacOS/Product",
+        )
+        assert_eq(
+            str(suffixed_binary),
+            suffixed_cfg.resolve_path(suffixed_cfg.asan_bin),
+            "canonical browser path resolves into the active suffixed tree",
+        )
+    current_app = (
+        suffixed_browser_root / "build-asan-img43"
+        / "Product.app" / "Contents"
+    )
+    current_binary = current_app / "MacOS" / "Product"
+    current_binary.parent.mkdir(parents=True)
+    current_binary.write_bytes(b"\x7fELF")
+    current_binary.chmod(0o755)
+    with (current_app / "Info.plist").open("wb") as stream:
+        plistlib.dump({"CFBundleExecutable": "Product"}, stream)
+    stale_toml = suffixed_browser_root / "target.toml"
+    stale_toml.write_text(
+        'asan_bin = "build-asan-img42/Product.app/Contents/MacOS/Product"\n',
+        encoding="utf-8",
+    )
+    with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": "-img43"}):
+        assert_eq(
+            True,
+            tc.refresh_detected_build_fields(
+                suffixed_browser_root, stale_toml, is_browser=True
+            ),
+            "browser refresh replaces a persisted path from an older image",
+        )
+        assert_in(
+            'asan_bin      = "build-asan/Product.app/Contents/MacOS/Product"',
+            stale_toml.read_text(encoding="utf-8"),
+            "browser refresh persists the canonical build alias",
+        )
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
+
+# A non-bundle browser build with several plausible top-level executables must
+# not guess by size; target.toml is the explicit product-selection contract.
+ambiguous_browser_root = TEST_TMPDIR / "browser-ambiguous"
+(ambiguous_browser_root / "build-asan").mkdir(parents=True)
+for name, size in (("small", 4), ("large", 400)):
+    binary = ambiguous_browser_root / "build-asan" / name
+    binary.write_bytes(b"x" * size)
+    binary.chmod(0o755)
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = lambda path, sanitizer="asan": True
+try:
+    assert_eq("", tc.detect_browser_sanitizer_bin(
+        ambiguous_browser_root, "asan"
+    ), "browser artifact detection rejects ambiguous top-level executables")
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
+
+# Ambiguity is decided before instrumentation, so a build root full of
+# executables costs no `nm` invocations at all.
+_probed: list[str] = []
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = lambda path, sanitizer="asan": (
+    _probed.append(str(path)) or True
+)
+try:
+    tc.detect_browser_sanitizer_bin(ambiguous_browser_root, "asan")
+    assert_eq([], _probed,
+              "ambiguous build roots are rejected without inspecting binaries")
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
+
+# The same ambiguity rule applies to foreground app bundles. Helper-role
+# metadata can exclude background apps, but two equally shallow products need
+# an explicit operator choice.
+ambiguous_bundle_root = TEST_TMPDIR / "browser-ambiguous-bundles"
+for app_name in ("Alpha.app", "Beta.app"):
+    app = ambiguous_bundle_root / "build-asan" / app_name / "Contents"
+    binary = app / "MacOS" / app_name.removesuffix(".app")
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"\x7fELF")
+    binary.chmod(0o755)
+    with (app / "Info.plist").open("wb") as stream:
+        plistlib.dump({"CFBundleExecutable": binary.name}, stream)
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = lambda path, sanitizer="asan": True
+try:
+    assert_eq("", tc.detect_browser_sanitizer_bin(
+        ambiguous_bundle_root, "asan"
+    ), "browser artifact detection rejects equally shallow foreground bundles")
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
 
 # A configured value detection *would* replace is still kept: it may have come
 # from an operator or from bin/suggest-runner validating a launch, and either

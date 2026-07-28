@@ -29,7 +29,9 @@ Useful flags:
 
 | Flag | Meaning |
 | --- | --- |
-| `--build` | For native targets, build now instead of waiting for audit preflight. For supported language targets, explicitly run the ecosystem build step (audit preflight does not run it automatically). |
+| `--build` | For native targets, build now instead of waiting for audit preflight. The command fails if the requested build cannot be materialized. For supported language targets, explicitly run the ecosystem build step (audit preflight does not run it automatically). |
+| `--browser` / `--no-browser` | Select browser execution mode explicitly. A browser-specific driver such as `mach` is inferred when neither flag is present; shared build systems such as GN require an explicit choice. |
+| `--pull` | Update an existing VCS checkout to the latest upstream source without re-passing its repo URL. A dirty checkout is left untouched. |
 | `--no-update` | Do not pull or fetch an existing VCS checkout. |
 | `--force` | Regenerate generated config, including suggested threat-model and peer sections. Review local edits first. |
 | `--no-llm-config` | Skip best-effort model suggestions for the threat model and S6 peers. |
