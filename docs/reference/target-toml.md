@@ -410,11 +410,20 @@ It contains dynamic values:
 - `TARGET_REV`;
 - `TARGET_REPO_TYPE`;
 - `LOGDIR`;
-- `SESSION_STARTED`.
+- `SESSION_STARTED`;
+- `TARGET_CONFIG_SHA256`.
 
 `bin/probe` discovers the nearest `.session-env` by walking upward
 from the testcase path and current directory. Scratch testcases under
 `results/` therefore do not need manual environment setup.
+
+After preflight, `bin/audit` copies the target configuration to
+`output/<target>/<backend>/results/.target.toml` and records its digest
+as `TARGET_CONFIG_SHA256`. Every config consumer in that session — probes,
+sanitizer runners, severity, report enrichment — reads the snapshot, so an
+edit to the shared `output/<target>/target.toml` applies to the next run
+rather than retargeting probes already contributing to this one. Editing or
+removing the snapshot itself is a contract violation and fails loud.
 
 ## Strategy hints: `[s4_diff_pairs]` and `[s6_peers]`
 

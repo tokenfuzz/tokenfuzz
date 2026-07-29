@@ -34,7 +34,7 @@ import llm_usage
 import prompt
 import quality
 import runner_preflight
-import sanitizer
+import sanitizer_run
 import structured_state
 import process_tree
 import target_config
@@ -246,16 +246,24 @@ def _load_config(
 
 
 def _agent_counts(config: target_config.Config, max_iterations: int) -> tuple[int, int, int]:
+    page_browser = (
+        config.is_browser in ("1", "true", "True")
+        and target_config.browser_page_launch_configured(config)
+    )
     if max_iterations == 1:
-        browser = int(config.is_browser in ("1", "true", "True"))
+        browser = int(page_browser)
         return 1, browser, 1 - browser
     explicit = os.environ.get("NUM_AGENTS")
     if explicit:
         total = max(1, int(explicit))
         return total, 0, total
     if config.is_browser in ("1", "true", "True"):
-        browser = max(0, int(os.environ.get("BROWSER_AGENTS", "1")))
-        shell = max(0, int(os.environ.get("SHELL_AGENTS", "2")))
+        browser = (
+            max(0, int(os.environ.get("BROWSER_AGENTS", "1")))
+            if page_browser else 0
+        )
+        shell_default = "2" if page_browser else "3"
+        shell = max(0, int(os.environ.get("SHELL_AGENTS", shell_default)))
         return max(1, browser + shell), browser, shell
     total = max(1, int(os.environ.get("SHELL_AGENTS", "3")))
     return total, 0, total
@@ -578,12 +586,32 @@ def _queue_context(runtime: Runtime) -> workqueue.Context:
     )
 
 
-def _work_card_signature(runtime: Runtime) -> str:
-    inputs = [str(runtime.results.parents[1] / "target.toml")]
+def _work_card_signature(
+    runtime: Runtime, *, source_signature: str | None = None,
+) -> str:
+    # rank-work consumes source, coverage, and corpus state—not target.toml.
+    # Browser mode and attacker controls are explicit housekeeping fields; S6
+    # peer selection is the only remaining config input. Hash those parsed
+    # values by content so an asan_bin repair or cosmetic rewrite does not
+    # force a whole-repo source scan, which takes minutes on browser trees.
+    inputs: list[str] = []
     inputs.extend(str(path) for path in sorted((runtime.results / "coverage").glob("edges-agent-*.journal")))
     inputs.extend(str(path) for path in sorted((runtime.results / "corpus").glob("COVER-*/metadata.md")))
+    config = getattr(runtime, "config", None)
+    rank_config = json.dumps(
+        {
+            "s6_domain": getattr(config, "s6_domain", ""),
+            "s6_peers": getattr(config, "s6_peers", []),
+        },
+        sort_keys=True, separators=(",", ":"),
+    )
+    if source_signature is None:
+        source_signature = target_config.vcs_source_signature(
+            runtime.target_root, include_untracked=False,
+        )
     return housekeeping.signature(
-        "work-cards-refresh", inputs, runtime.target_rev
+        "work-cards-refresh", inputs,
+        f"{source_signature or runtime.target_rev}\nrank_config={rank_config}",
     )
 
 
@@ -627,8 +655,19 @@ def refresh_work_cards(
 ) -> bool:
     _activate_runtime(runtime)
     workqueue.init_state(_queue_context(runtime))
-    signature = _work_card_signature(runtime)
-    if not force and not housekeeping.should_run("work-cards-refresh", signature):
+    source_signature = target_config.vcs_source_signature(
+        runtime.target_root, include_untracked=False,
+    )
+    signature = _work_card_signature(
+        runtime, source_signature=source_signature,
+    )
+    # A VCS signature includes both the revision and tracked working-tree
+    # content. With that complete identity, age alone cannot make ranking
+    # stale; plain trees retain housekeeping's periodic safety refresh.
+    ttl = 0 if source_signature else None
+    if not force and not housekeeping.should_run(
+        "work-cards-refresh", signature, ttl=ttl,
+    ):
         return False
     rank_limit = limit if limit is not None else _rank_window(runtime)[0]
     if rank_limit <= 0:
@@ -676,7 +715,10 @@ def refresh_work_cards(
         index_log(runtime, "WARN: rank-work is missing; work-card refresh remains dirty")
     if refresh_ok:
         _write_rank_window(runtime, rank_limit)
-        housekeeping.mark_clean("work-cards-refresh", _work_card_signature(runtime))
+        # Mark the state that was ranked, not the state now: with ttl=0 no
+        # periodic re-rank absorbs an input that changed mid-rank. Reusing the
+        # decision signature also keeps the source scan to one per refresh.
+        housekeeping.mark_clean("work-cards-refresh", signature)
     return True
 
 
@@ -1581,8 +1623,145 @@ def _max_dry_sessions() -> int:
     return max(requested, STRATEGY_S1_DRY_THRESHOLD + 1)
 
 
+def runtime_config_path(runtime: Runtime) -> Path | None:
+    """Return this runtime's shared config path when it has a full layout."""
+    root = getattr(runtime, "root", None)
+    output_slug = getattr(runtime, "output_slug", "")
+    if root is None or not output_slug:
+        return None
+    return Path(root) / "output" / output_slug / "target.toml"
+
+
+def pin_runtime_config(runtime: Runtime) -> None:
+    """Reload and freeze the post-build execution contract for one backend."""
+    config_path = runtime_config_path(runtime)
+    if config_path is not None and config_path.is_file():
+        refreshed = target_config.Config(target_root=str(runtime.target_root))
+        target_config.load_toml_into(refreshed, config_path)
+        runtime.config = refreshed
+        target_config.pin_session_config(runtime.results, config_path)
+        _activate_runtime(runtime)
+
+
+def _canary_paths(runtime: Runtime, name: str) -> tuple[Path, Path]:
+    """Canary testcase and its sanitizer output, cleared of any older run."""
+    canary_dir = runtime.results / ".preflight"
+    canary_dir.mkdir(parents=True, exist_ok=True)
+    output = canary_dir / "canary-asan.txt"
+    output.unlink(missing_ok=True)
+    return canary_dir / name, output
+
+
+def _run_canary(
+    runtime: Runtime, mode: str, canary: Path, output: Path,
+    *, browser_override: str = "", runner_args: list[str] | None = None,
+) -> None:
+    environment = os.environ.copy() | {
+        "SANITIZER_RUNS": "1", "SAN_OUTPUT_FILE": str(output),
+        "SKIP_COVERAGE_GATE": "1",
+    }
+    if browser_override:
+        environment["ASAN_BROWSER"] = browser_override
+    if runner_args is not None:
+        environment["ASAN_GENERIC_SKIP_TESTCASE"] = "1"
+        environment["SANITIZER_GENERIC_SKIP_TESTCASE"] = "1"
+    command = [
+        str(runtime.root / "bin" / "run-sanitizer-multi"),
+        "asan", mode, str(canary),
+    ]
+    if runner_args is not None:
+        command.extend(runner_args)
+    subprocess.run(
+        command,
+        cwd=runtime.root, env=environment, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, check=False,
+    )
+
+
+def _canary_captured(output: Path) -> bool:
+    try:
+        with output.open(encoding="utf-8", errors="replace") as stream:
+            return any("TESTCASE_EXECUTED" in line for line in stream)
+    except OSError:
+        return False
+
+
+def _shell_canary_observed(runtime: Runtime) -> tuple[bool, Path]:
+    """Prove the shell route for a script engine with no page route."""
+    canary, output = _canary_paths(runtime, "canary.js")
+    canary.write_text("print('TESTCASE_EXECUTED');\n", encoding="utf-8")
+    configured: list[str] | None = None
+    if runtime.config.runner_args:
+        configured = [
+            sanitizer_run.expand_runner_value(
+                value, runtime.config, "asan", testcase=str(canary),
+            )
+            for value in runtime.config.runner_args
+        ]
+        if not any(
+            "{TESTCASE}" in value for value in runtime.config.runner_args
+        ):
+            configured.append(str(canary))
+    _run_canary(
+        runtime, "generic", canary, output, runner_args=configured,
+    )
+    return _canary_captured(output), output
+
+
+def _browser_canary_observed(
+    runtime: Runtime, *, browser_override: str = "",
+) -> tuple[bool, Path]:
+    """Run one product-route canary without trusting output from an older run."""
+    canary, output = _canary_paths(runtime, "canary.html")
+    browser_loaded = threading.Event()
+
+    class CanaryHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            browser_loaded.set()
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), CanaryHandler
+    )
+    server_thread = threading.Thread(
+        target=server.serve_forever, daemon=True
+    )
+    server_thread.start()
+    marker_url = (
+        f"http://127.0.0.1:{server.server_address[1]}/executed"
+    )
+    canary.write_text(
+        f'<!doctype html><body><img hidden src="{marker_url}"><script>'
+        "const m=String.fromCharCode("
+        "84,69,83,84,67,65,83,69,95,69,88,69,67,85,84,69,68"
+        ");console.log(m);document.body.textContent=m;"
+        "setTimeout(()=>window.close(),50)"
+        "</script>\n",
+        encoding="utf-8",
+    )
+    try:
+        _run_canary(
+            runtime, "browser-minimal", canary, output,
+            browser_override=browser_override,
+        )
+        loaded = browser_loaded.wait(1)
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1)
+    return loaded or _canary_captured(output), output
+
+
 def preflight_build(runtime: Runtime) -> None:
-    if os.environ.get("_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD") == "1":
+    config_path = runtime_config_path(runtime)
+    benchmark_pinned = (
+        os.environ.get("_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD") == "1"
+    )
+    if benchmark_pinned:
         # A benchmark converges one build for the whole run and holds its lease.
         # A cell that rebuilt would replace the generation its own earlier cells'
         # evidence was measured against, so a cell verifies and never builds. An
@@ -1603,86 +1782,55 @@ def preflight_build(runtime: Runtime) -> None:
             runtime.logs, runtime.backend, runtime.model,
             lambda message: index_log(runtime, message),
         )
+    pin_runtime_config(runtime)
     if runtime.config.is_browser not in ("1", "true", "True"):
         return
-    canary_dir = runtime.results / ".preflight"
-    canary_dir.mkdir(parents=True, exist_ok=True)
-    js_shell = Path(
-        os.environ.get(
-            "ASAN_JS",
-            str(sanitizer.build_dir(
-                "asan", runtime.target_root, os.environ
-            ) / "dist/bin/js"),
-        )
-    )
-    canary_mode = "js" if os.access(js_shell, os.X_OK) else "browser-minimal"
-    canary = canary_dir / (
-        "canary.js" if canary_mode == "js" else "canary.html"
-    )
-    output = canary_dir / "canary-asan.txt"
-    browser_loaded = threading.Event()
-    server = None
-    server_thread = None
-    if canary_mode == "js":
-        canary.write_text("print('TESTCASE_EXECUTED');\n", encoding="utf-8")
+    if not target_config.browser_page_launch_configured(runtime.config):
+        observed, output = _shell_canary_observed(runtime)
     else:
-        class CanaryHandler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                browser_loaded.set()
-                self.send_response(204)
-                self.end_headers()
-
-            def log_message(self, _format: str, *_args) -> None:
-                return
-
-        server = http.server.ThreadingHTTPServer(
-            ("127.0.0.1", 0), CanaryHandler
-        )
-        server_thread = threading.Thread(
-            target=server.serve_forever, daemon=True
-        )
-        server_thread.start()
-        marker_url = (
-            f"http://127.0.0.1:{server.server_address[1]}/executed"
-        )
-        canary.write_text(
-            f'<!doctype html><body><img hidden src="{marker_url}"><script>'
-            "const m=String.fromCharCode("
-            "84,69,83,84,67,65,83,69,95,69,88,69,67,85,84,69,68"
-            ");console.log(m);document.body.textContent=m"
-            "</script>\n",
-            encoding="utf-8",
-        )
-    environment = os.environ.copy() | {
-        "SANITIZER_RUNS": "1", "SAN_OUTPUT_FILE": str(output),
-        "SKIP_COVERAGE_GATE": "1",
-    }
-    try:
-        subprocess.run(
-            [
-                str(runtime.root / "bin" / "run-sanitizer-multi"),
-                "asan", canary_mode, str(canary),
-            ],
-            cwd=runtime.root, env=environment, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, check=False,
-        )
-        # Only the HTML canary can set the event; a JS-shell canary would
-        # otherwise pay the full timeout to learn nothing.
-        loaded = server is not None and browser_loaded.wait(1)
-    finally:
-        if server is not None:
-            server.shutdown()
-            server.server_close()
-        if server_thread is not None:
-            server_thread.join(timeout=1)
-    try:
-        with output.open(encoding="utf-8", errors="replace") as stream:
-            captured = any("TESTCASE_EXECUTED" in line for line in stream)
-    except OSError:
-        captured = False
-    if not (loaded or captured):
+        # A browser tree ships a script shell beside the product, so a shell
+        # canary proves nothing about the page route browser agents drive.
+        observed, output = _browser_canary_observed(runtime)
+        if not observed and not benchmark_pinned and \
+                config_path is not None and config_path.is_file():
+            detected = target_config.detect_browser_sanitizer_bin(
+                runtime.target_root, "asan"
+            )
+            configured = runtime.config.sanitizer_bin("asan")
+            if detected and detected != configured:
+                candidate = runtime.config.resolve_path(detected)
+                observed, output = _browser_canary_observed(
+                    runtime, browser_override=candidate,
+                )
+                if observed:
+                    original = config_path.read_text(encoding="utf-8")
+                    updated = target_config.set_sanitizer_bin(
+                        original, "asan", detected
+                    )
+                    if updated == original:
+                        # Only an override made the proved product run, and an
+                        # override does not reach the probes agents launch.
+                        raise RuntimeError(
+                            f"browser product {detected} passed preflight but "
+                            f"{config_path} declares no active asan_bin to "
+                            "point at it; set asan_bin and rerun"
+                        )
+                    temporary = config_path.with_name(
+                        f".{config_path.name}.{os.getpid()}.tmp"
+                    )
+                    try:
+                        temporary.write_text(updated, encoding="utf-8")
+                        os.replace(temporary, config_path)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                    pin_runtime_config(runtime)
+                    index_log(
+                        runtime,
+                        "Browser preflight repaired the configured sanitizer product",
+                    )
+    if not observed:
         raise RuntimeError(
-            "sanitizer harness canary did not observe browser execution; "
+            "sanitizer harness canary did not observe target execution; "
             f"see {output}"
         )
     index_log(runtime, "PREFLIGHT OK: sanitizer harness canary observed target execution")
@@ -1701,8 +1849,18 @@ def initialize_backend(
         runtime, context,
         started_at=time.monotonic() if started_at is None else started_at,
     )
-    refresh_work_cards(runtime)
-    initialize_agent_strategies(runtime)
+    housekeeping_started = time.monotonic()
+    try:
+        refresh_work_cards(runtime)
+        initialize_agent_strategies(runtime)
+    finally:
+        state.housekeeping_seconds += max(
+            0.0, time.monotonic() - housekeeping_started
+        )
+        runtime.logs.mkdir(parents=True, exist_ok=True)
+        (runtime.logs / ".housekeeping_secs").write_text(
+            f"{state.housekeeping_seconds:.6f}\n", encoding="utf-8"
+        )
     return state
 
 
@@ -2089,7 +2247,9 @@ def _recover_transient(state: BackendState) -> bool:
 
 def run_backend(runtime: Runtime, args, guide: str) -> int:
     with instance_lock(runtime, args.allow_concurrent):
-        runner_preflight.validate(runtime.config, lambda message: index_log(runtime, message))
+        runner_preflight.validate(
+            runtime.config, lambda message: index_log(runtime, message)
+        )
         validate_model(runtime)
         preflight_build(runtime)
         state = initialize_backend(runtime, args, guide, started_at=time.monotonic())
@@ -2124,12 +2284,15 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
         for runtime in runtimes:
             stack.enter_context(instance_lock(runtime, args.allow_concurrent))
         runner_preflight.validate(
-            runtimes[0].config, lambda message: index_log(runtimes[0], message)
+            runtimes[0].config,
+            lambda message: index_log(runtimes[0], message),
         )
         for runtime in runtimes:
             _activate_runtime(runtime)
             validate_model(runtime)
         preflight_build(runtimes[0])
+        for runtime in runtimes[1:]:
+            pin_runtime_config(runtime)
         started_at = time.monotonic()
         states = [
             initialize_backend(runtime, args, guide, started_at=started_at)

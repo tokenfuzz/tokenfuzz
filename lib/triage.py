@@ -207,14 +207,16 @@ def _annotate_rejection(directory: Path, reason: str) -> None:
     )
 
 
-def _reject(directory: Path, rejected_root: Path, reason: str) -> Path:
+def _reject(
+    directory: Path, rejected_root: Path, reason: str, *, category: str = "",
+) -> Path:
     rejected_root.mkdir(parents=True, exist_ok=True)
     _annotate_rejection(directory, reason)
     destination = _unique_destination(rejected_root, directory.name)
     shutil.move(str(directory), destination)
     try:
         workqueue.record_artifact_rejection(
-            rejected_root.parent, directory.name, reason,
+            rejected_root.parent, directory.name, reason, category=category,
         )
     except OSError as exc:
         print(
@@ -1413,6 +1415,7 @@ def triage_one_crash(
         _reject(
             crash_dir, rejected_root,
             "trigger-provenance (2 independent rejects): triggering state not attacker-reachable from a public boundary",
+            category=workqueue.UNREACHABLE_REJECTION_CATEGORY,
         )
         return "rejected"
     return "promoted"
@@ -1770,6 +1773,7 @@ def _finalize_accepted_finding(
         _reject(
             finding_dir, results_dir / "findings-rejected",
             "trigger-provenance: triggering state not attacker-reachable",
+            category=workqueue.UNREACHABLE_REJECTION_CATEGORY,
         )
         return "rejected"
     return "accepted"

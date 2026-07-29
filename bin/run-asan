@@ -116,6 +116,13 @@ def runtime_env(
 
 
 def run_browser(option_string: str, timeout: int, args: list[str]) -> int:
+    if CONFIG and not target_config.browser_page_launch_configured(CONFIG):
+        print(
+            "[run-asan] browser mode requires runner arguments containing "
+            "{PROFILE}; this target has only a script-engine route",
+            file=sys.stderr,
+        )
+        return 2
     with tempfile.TemporaryDirectory(prefix="asan-profile-") as profile_name, tempfile.TemporaryDirectory(prefix="asan-output-") as output_name:
         profile = Path(profile_name)
         output_dir = Path(output_name)

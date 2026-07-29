@@ -2389,6 +2389,13 @@ _PRODUCTIVE_TERMINAL_CARD_STATUSES = {"crash", "find"}
 # to concrete cards (see _is_broad_file_card / card_closed_for_run).
 _PRODUCTIVE_REDISCOVERY_MARGIN = 1
 
+# Rejection category for a concrete trigger state that adjudication found
+# unreachable from the target's public boundary. It is useful diminishing-
+# returns evidence for ranking, but it cannot prove that a broad file/strategy
+# card has no other reachable trigger. Set by lib/triage.py's reachability
+# gates only.
+UNREACHABLE_REJECTION_CATEGORY = "trigger-provenance"
+
 
 def _is_broad_file_card(card: dict) -> bool:
     """A whole-file/strategy card whose search space is the file, not the
@@ -2408,12 +2415,17 @@ def _artifact_status_id(value: str) -> str:
     return match.group(0) if match else normalized
 
 
-def record_artifact_rejection(results_dir: Path, artifact_name: str, reason: str) -> list[dict]:
+def record_artifact_rejection(
+    results_dir: Path, artifact_name: str, reason: str, *, category: str = "",
+) -> list[dict]:
     """Replace accepted-artifact statuses with their final rejected disposition.
 
     Triage rejects one concrete artifact, not every hypothesis on its work card.
     Keeping this update artifact-scoped prevents a rejected filing from retaining
     productive-subsystem privileges without suppressing other card-linked angles.
+
+    ``category`` records *why* in a form queue ranking can read structurally.
+    See ``UNREACHABLE_REJECTION_CATEGORY``.
     """
     path = state_dir(results_dir) / "hypotheses.jsonl"
     if not path.is_file():
@@ -2437,6 +2449,8 @@ def record_artifact_rejection(results_dir: Path, artifact_name: str, reason: str
             row["status"] = "DISCARDED"
             row["updated_at"] = now_iso()
             row["note"] = f"Triage rejected {previous}: {reason}".strip()
+            if category:
+                row["rejected_category"] = category
             changed.append(dict(row))
         return changed
 
@@ -2702,6 +2716,12 @@ def card_closed_for_run(
     stays separate: ``card_conclusion_counts`` demotes an already-cracked card
     below fresher siblings so a still-open surface is revisited least-mined-
     first.
+
+    Reachability rejection is deliberately not a closure signal. Adjudication
+    proves one filed trigger is outside the public boundary, not that every
+    function and trigger shape covered by a broad file/strategy card is
+    unreachable. The claim ranker uses those rejections only to demote repeated
+    dry work behind fresh cards.
 
     ``conclusion_counts``/``distinct_counts``/``dry_streaks`` are optional
     per-call memos so a candidate loop reads state at most once.
@@ -3085,6 +3105,7 @@ def _claim_next_card_locked(
     # so the candidate loops read claims/hypotheses/dry-streaks at most once.
     conclusion_counts = card_conclusion_counts(ctx, claims=claim_rows)
     distinct_counts = card_distinct_hypothesis_counts(ctx, hypotheses=hyps)
+    unreachable_counts = card_unreachable_rejection_counts(ctx, hypotheses=hyps)
     dry_streaks: dict[str, int] = {}
     # Agents that have already produced a confirmed CRASH/FIND are
     # "productive" — they have working data-flow context for that
@@ -3130,9 +3151,6 @@ def _claim_next_card_locked(
             latest_status = visible_card_status(latest_claim, ttl, now)
             blocks_card = claim_blocks_card(latest_claim, ttl, now)
             own_active_claim = bool(blocks_card and latest_claim and str(latest_claim.get("agent", "")) == str(agent))
-            # Blocked cards are retryable in a fresh result set, but not in
-            # the same run where the target configuration has already proven
-            # the surface unreachable.
             if card_closed_for_run(ctx, card, latest_status, conclusion_counts=conclusion_counts, distinct_counts=distinct_counts, dry_streaks=dry_streaks) or cid in active_cards or (blocks_card and not own_active_claim):
                 continue
             surface = work_surface(card)
@@ -3182,10 +3200,12 @@ def _claim_next_card_locked(
 
     preferred = _apply_diversity(_build_candidates())
 
-    # Diminishing-returns demotion: a card kept eligible *after* a verified
-    # crash/find (card_closed_for_run) sinks below every fresher
-    # (zero-conclusion) candidate so the agent spreads out instead of
-    # re-hitting the same card sequentially. Hot-file siblings naturally
+    # Diminishing-returns demotion: a card kept eligible after a verified
+    # crash/find or a reachability-rejected trigger sinks below every fresher
+    # candidate so the agent spreads out instead of re-hitting the same card
+    # sequentially. A rejection never removes the card: it proves only that
+    # concrete trigger, so the card resurfaces after less-mined work. Hot-file
+    # siblings naturally
     # sort ahead of unrelated cold work because they carry the file's
     # higher base rank (the stable sort preserves rank within a tier), so
     # this still mines the hot surface before rotating; a still-hot card
@@ -3195,7 +3215,7 @@ def _claim_next_card_locked(
     # stranding the lease until TTL. Skipped when nothing has been concluded
     # yet (the common early-run case).
     if len(preferred) > 1:
-        if conclusion_counts:
+        if conclusion_counts or unreachable_counts:
             def _demotion_key(c: dict) -> tuple[int, int]:
                 cid = c.get("id", "")
                 lc = latest.get(cid)
@@ -3204,7 +3224,11 @@ def _claim_next_card_locked(
                     and str(lc.get("agent", "")) == str(agent)
                     and claim_blocks_card(lc, ttl, now)
                 )
-                return (0 if own_active_lease else 1, conclusion_counts.get(cid, 0))
+                outcomes = (
+                    conclusion_counts.get(cid, 0)
+                    + unreachable_counts.get(cid, 0)
+                )
+                return (0 if own_active_lease else 1, outcomes)
 
             preferred.sort(key=_demotion_key)
 
@@ -3683,6 +3707,39 @@ def card_distinct_hypothesis_count(ctx: Context, card_id: str) -> int:
             if key:
                 seen.add(key)
     return len(seen)
+
+
+def card_unreachable_rejection_counts(
+    ctx: Context, *, hypotheses: list[dict] | None = None
+) -> dict[str, int]:
+    """Per-card tally of distinct triggers adjudicated as out of reach.
+
+    Counted per hypothesis id, not per filing, so re-filing one rejected
+    artifact cannot inflate the tally. A card with any hypothesis still
+    holding an accepted CRASH-*/FIND-* status reports zero: productive
+    conclusion counts already demote that card, so including both would count
+    the same investigation twice.
+    """
+    rows = read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl") if hypotheses is None else hypotheses
+    latest: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        hypothesis_id = str(row.get("id", "")).strip()
+        if hypothesis_id:
+            latest[(str(row.get("agent", "")), hypothesis_id)] = row
+    rejected: dict[str, set[str]] = {}
+    kept: set[str] = set()
+    for (_agent, hypothesis_id), row in latest.items():
+        cid = str(row.get("card_id", ""))
+        if not cid:
+            continue
+        status = str(row.get("status", "") or "")
+        if status.startswith("CRASH") or status.startswith("FIND"):
+            kept.add(cid)
+        elif row.get("rejected_category", "") == UNREACHABLE_REJECTION_CATEGORY:
+            rejected.setdefault(cid, set()).add(hypothesis_id)
+    return {
+        cid: len(ids) for cid, ids in rejected.items() if cid not in kept
+    }
 
 
 def card_distinct_hypothesis_counts(
@@ -5020,7 +5077,7 @@ def _runtime_feedback_decision(
     if verdicts.get("NO_EXEC", 0):
         return (
             "harness-setup",
-            "runs are not executing; fix testcase header, harness build, runner path, or target.toml before mutating inputs",
+            "runs are not executing; fix the testcase header or scratch harness, or record proven pinned runner/build metadata as ENV-BLOCKED before mutating inputs",
         )
     if signals.get("coverage-near-miss", 0):
         return (

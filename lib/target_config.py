@@ -237,7 +237,19 @@ SANITIZER_RUNNER_BUILD_SYSTEMS = frozenset({"swift"})
 SESSION_ENV_ALLOW = (
     "RESULTS_DIR", "TARGET_ROOT", "TARGET_SLUG",
     "TARGET_REV", "TARGET_REPO_TYPE", "SESSION_STARTED", "LOGDIR",
+    "TARGET_CONFIG_SHA256",
 )
+
+
+class PinnedConfigError(RuntimeError):
+    """A running audit's pinned target configuration is missing or altered.
+
+    Deliberately not a ValueError: bin/probe and the sanitizer wrappers read
+    that as "no session here" and fall back to the shared target.toml, which
+    would silently swap the runner and threat-model gate mid-session — the one
+    outcome the pin exists to prevent.
+    """
+
 
 def _normalize_attacker_control(v: str) -> str:
     v = v.lower()
@@ -554,6 +566,23 @@ def find_session_dir(start: str | os.PathLike) -> Optional[Path]:
 def target_toml_for_session_dir(session_dir: str | os.PathLike) -> Path:
     """Return target.toml for a backend results directory."""
     d = Path(session_dir)
+    try:
+        pinned = read_session_env(d).get("TARGET_CONFIG_SHA256", "")
+    except (FileNotFoundError, OSError):
+        pinned = ""
+    if pinned:
+        snapshot = d / ".target.toml"
+        if not snapshot.is_file():
+            raise PinnedConfigError(
+                "session target configuration snapshot is missing: "
+                f"{snapshot}"
+            )
+        if hashlib.sha256(snapshot.read_bytes()).hexdigest() != pinned:
+            raise PinnedConfigError(
+                "session target configuration changed after audit preflight: "
+                f"{snapshot}"
+            )
+        return snapshot
     return d.parent.parent / "target.toml"
 
 
@@ -570,6 +599,13 @@ def find_target_toml(start: str | os.PathLike) -> Optional[Path]:
     cur = Path(start).absolute()
     if cur.is_file():
         cur = cur.parent
+    # A live audit carries a digest-pinned backend-local snapshot. Consumers
+    # such as severity and report enrichment must use the same contract as
+    # bin/probe, even if a concurrent agent edits the shared target.toml.
+    for p in [cur, *cur.parents]:
+        if _is_file(p / ".session-env"):
+            candidate = target_toml_for_session_dir(p)
+            return candidate if candidate.is_file() else None
     for p in [cur, *cur.parents]:
         candidate = p / "target.toml"
         if candidate.is_file():
@@ -725,6 +761,63 @@ def write_session_env(
                 os.unlink(tmp_name)
             except FileNotFoundError:
                 pass
+
+
+def pin_session_config(
+    session_dir: str | os.PathLike, source: str | os.PathLike,
+) -> str:
+    """Freeze the target configuration used by one running audit.
+
+    Agents share ``output/<slug>/target.toml`` and run concurrently. A runtime
+    edit there must not retarget probes already contributing to one result
+    set. Copy the post-preflight configuration into the backend results
+    directory, then atomically publish its digest through ``.session-env``.
+    A new audit rewrites ``.session-env`` without the digest before preflight,
+    so a leftover snapshot can never leak into the next run.
+    """
+    directory = Path(session_dir)
+    env_path = directory / ".session-env"
+    payload = Path(source).read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    snapshot = directory / ".target.toml"
+    snapshot_tmp = ""
+    env_tmp = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb", dir=directory, prefix=".target.toml.", suffix=".tmp",
+            delete=False,
+        ) as stream:
+            snapshot_tmp = stream.name
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(snapshot_tmp, snapshot)
+        snapshot_tmp = ""
+
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+        lines = [
+            line for line in lines
+            if not line.startswith("TARGET_CONFIG_SHA256=")
+        ]
+        lines.append(f"TARGET_CONFIG_SHA256={digest}")
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=directory, prefix=".session-env.",
+            suffix=".tmp", delete=False,
+        ) as stream:
+            env_tmp = stream.name
+            stream.write("\n".join(lines) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(env_tmp, env_path)
+        env_tmp = ""
+    finally:
+        for temporary in (snapshot_tmp, env_tmp):
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+    return digest
 
 
 # ─── git/hg/plain source detection ──────────────────────────────────
@@ -2375,6 +2468,25 @@ def browser_runner_defaults(build_system: str) -> dict:
             ],
         }
     return {}
+
+
+def browser_page_launch_configured(config: object) -> bool:
+    """Whether ``config`` explicitly describes a page-browser route.
+
+    ``is_browser`` also covers script engines and browser-like runtimes.
+    A fresh profile is the structural distinction already required by the
+    browser runner contract; generic script-engine argument templates only
+    describe how their shell consumes ``{TESTCASE}``.
+    """
+    configured = getattr(config, "runner_args", None)
+    args = (
+        list(configured)
+        if configured
+        else browser_runner_defaults(
+            str(getattr(config, "build_system", "") or "")
+        ).get("args", [])
+    )
+    return any("{PROFILE}" in value for value in args)
 
 
 def update_browser_mode(toml_path: str | os.PathLike, enabled: bool) -> bool:

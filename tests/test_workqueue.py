@@ -487,6 +487,94 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(latest["H-2"]["status"], "PENDING")
         self.assertEqual(latest["H-3"]["status"], "FIND-003")
 
+    def _reject_unreachable(self, artifact: str) -> None:
+        workqueue.record_artifact_rejection(
+            self.results, artifact,
+            "trigger-provenance (2 independent rejects): triggering state "
+            "not attacker-reachable from a public boundary",
+            category=workqueue.UNREACHABLE_REJECTION_CATEGORY,
+        )
+
+    def test_reachability_rejections_demote_but_do_not_retire_a_card(self) -> None:
+        # Each adjudication proves only its concrete trigger is unreachable.
+        # The broad file card must remain available for other functions and
+        # trigger shapes, but it should yield to untouched work first.
+        self.write_cards([
+            self.card("WORK-A", "src/a.c", score=20),
+            self.card("WORK-B", "lib/b.c", score=10),
+        ])
+        for index in range(1, 4):
+            self.add_hypothesis(
+                hyp_id=f"H-{index}", status=f"CRASH-00{index}",
+                file=f"src/a.c:app_parse:{index}0",
+            )
+        card = self.card("WORK-A", "src/a.c")
+
+        self._reject_unreachable("CRASH-001")
+        self.assertFalse(workqueue.card_closed_for_run(self.ctx, card, "unclaimed"))
+        self._reject_unreachable("CRASH-002")
+        self.assertFalse(workqueue.card_closed_for_run(self.ctx, card, "unclaimed"))
+        self._reject_unreachable("CRASH-003")
+        self.assertEqual(
+            workqueue.card_unreachable_rejection_counts(self.ctx), {"WORK-A": 3},
+        )
+        self.assertFalse(workqueue.card_closed_for_run(self.ctx, card, "unclaimed"))
+        chosen = workqueue.claim_next_card(
+            self.ctx, "2", mode="generic", claim=False,
+        )
+        self.assertEqual(chosen["id"], "WORK-B")
+
+    def test_artifact_scoped_rejections_never_retire_a_card(self) -> None:
+        # Only a verdict about the surface generalises. A bad reproducer or a
+        # duplicate says nothing about the card's other angles.
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        for index in range(1, 5):
+            self.add_hypothesis(
+                hyp_id=f"H-{index}", status=f"CRASH-00{index}",
+                file=f"src/a.c:app_parse:{index}0",
+            )
+            workqueue.record_artifact_rejection(
+                self.results, f"CRASH-00{index}", "reproducer does not replay",
+            )
+        self.assertEqual(workqueue.card_unreachable_rejection_counts(self.ctx), {})
+        self.assertFalse(
+            workqueue.card_closed_for_run(
+                self.ctx, self.card("WORK-A", "src/a.c"), "unclaimed",
+            )
+        )
+
+    def test_a_kept_artifact_leaves_card_retirement_to_the_productive_paths(self) -> None:
+        # A surface that already yielded a keepable result is not "out of
+        # reach", however many of its other angles were rejected.
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        for index in range(1, 5):
+            self.add_hypothesis(
+                hyp_id=f"H-{index}", status=f"CRASH-00{index}",
+                file=f"src/a.c:app_parse:{index}0",
+            )
+        for index in range(1, 4):
+            self._reject_unreachable(f"CRASH-00{index}")
+        self.assertEqual(workqueue.card_unreachable_rejection_counts(self.ctx), {})
+        self.assertFalse(
+            workqueue.card_closed_for_run(
+                self.ctx, self.card("WORK-A", "src/a.c"), "unclaimed",
+            )
+        )
+
+    def test_refiling_one_rejected_artifact_cannot_retire_a_card(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        self.add_hypothesis(hyp_id="H-1", status="CRASH-001")
+        for suffix in ("", ".20260721T120000Z.1", ".20260721T130000Z.2"):
+            self._reject_unreachable(f"CRASH-001{suffix}")
+        self.assertEqual(
+            workqueue.card_unreachable_rejection_counts(self.ctx), {"WORK-A": 1},
+        )
+        self.assertFalse(
+            workqueue.card_closed_for_run(
+                self.ctx, self.card("WORK-A", "src/a.c"), "unclaimed",
+            )
+        )
+
     def test_compact_card_and_artifact_apis_are_bounded_and_filterable(self) -> None:
         self.write_cards([
             self.card("WORK-A", "src/a.c", strategy="S1", reason="raw memory operation " + "x" * 400),

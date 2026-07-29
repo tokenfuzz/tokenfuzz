@@ -24,9 +24,24 @@ class ProbeArgumentTests(unittest.TestCase):
         instance.args = SimpleNamespace(mode="auto")
         instance.header = {"mode": ""}
         instance.testcase = Path("testcase.bin")
-        instance.config = SimpleNamespace(is_browser="1")
+        instance.config = SimpleNamespace(
+            is_browser="1", build_system="mach", runner_args=[],
+        )
 
         self.assertEqual(instance._mode(), "browser")
+
+    def test_script_engine_js_uses_generic_runner_contract(self) -> None:
+        instance = object.__new__(probe.Probe)
+        instance.args = SimpleNamespace(mode="auto")
+        instance.header = {"mode": ""}
+        instance.testcase = Path("testcase.js")
+        instance.config = SimpleNamespace(
+            is_browser="1", build_system="", runner_args=[
+                "--input", "{TESTCASE}",
+            ],
+        )
+
+        self.assertEqual(instance._mode(), "generic")
 
     def test_opaque_non_browser_input_remains_generic(self) -> None:
         instance = object.__new__(probe.Probe)
@@ -36,6 +51,43 @@ class ProbeArgumentTests(unittest.TestCase):
         instance.config = SimpleNamespace(is_browser="0")
 
         self.assertEqual(instance._mode(), "generic")
+
+    def test_a_tampered_session_pin_never_falls_back_to_shared_config(self) -> None:
+        # probe's no-session fallback reads the shared output/<slug>/target.toml
+        # directly. Reaching it on a broken pin would swap the runner and the
+        # threat-model gate under a live session without saying so.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            results = root / "output" / "sampleproj" / "codex" / "results"
+            (results / "scratch-1").mkdir(parents=True)
+            shared = results.parents[1] / "target.toml"
+            shared.write_text(
+                'target = "sampleproj"\n[threat_model]\n'
+                'attacker_controls = ["timing"]\n', encoding="utf-8",
+            )
+            probe.target_config.write_session_env(
+                results, str(results), str(root / "target"), "sampleproj",
+                "abcd1234", str(results.parent / "logs"),
+            )
+            probe.target_config.pin_session_config(results, shared)
+            testcase = results / "scratch-1" / "testcase.js"
+            testcase.write_text("// TARGET: sampleproj\n", encoding="utf-8")
+            self.assertEqual(
+                ["timing"], probe.load_config(testcase).attacker_controls
+            )
+
+            shared.write_text(
+                'target = "sampleproj"\n[threat_model]\n'
+                'attacker_controls = ["bytes"]\n', encoding="utf-8",
+            )
+            (results / ".target.toml").write_text(
+                'target = "sampleproj"\n[threat_model]\n'
+                'attacker_controls = ["race"]\n', encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                probe.target_config.PinnedConfigError, "after audit preflight"
+            ):
+                probe.load_config(testcase)
 
     def test_explicit_sanitizer_runs_are_recorded_as_executed(self) -> None:
         args = probe.parse_args(["--sanitizer-runs", "17", "testcase.bin"])

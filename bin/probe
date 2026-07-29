@@ -488,16 +488,16 @@ class Probe:
         if mode == "auto" and self.header["mode"]:
             mode = self.header["mode"]
         if mode == "auto":
+            page_browser = (
+                self.config.is_browser in {"1", "true", "True"}
+                and target_config.browser_page_launch_configured(self.config)
+            )
             if self.testcase.suffix.lower() in {".html", ".htm", ".xhtml", ".svg"}:
                 mode = "browser"
             elif self.testcase.suffix.lower() in {".js", ".mjs"}:
-                mode = "js" if self.config.is_browser != "0" else "generic"
+                mode = "js" if page_browser else "generic"
             else:
-                mode = (
-                    "browser"
-                    if self.config.is_browser in {"1", "true", "True"}
-                    else "generic"
-                )
+                mode = "browser" if page_browser else "generic"
         if mode not in VALID_MODES - {"auto"}:
             raise ValueError(f"invalid mode: {mode}")
         return mode

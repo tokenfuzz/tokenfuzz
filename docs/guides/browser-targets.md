@@ -41,6 +41,12 @@ on a target or product name. GN builds its graph's default target. Browser
 projects with another build system can use `--browser` and provide the same
 `.audit/build.sh <source> <build-dir>` contract.
 
+The browser runner's `{PROFILE}` argument is also the page-route declaration.
+A browser-mode target without that token is treated as a script engine: it
+uses the generic `asan_bin` / `[runner].args` contract and receives shell
+agents only. This keeps `is_browser = "1"` useful for JIT- and GC-oriented
+runtimes without trying to feed them HTML or browser command-line flags.
+
 On non-bundle platforms, set the top-level `asan_bin` field when a browser
 build emits multiple instrumented top-level executables. Setup accepts a sole
 executable or a target-named product under `dist`; it does not guess among

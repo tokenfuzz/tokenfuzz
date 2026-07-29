@@ -935,7 +935,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         except RuntimeError:
             rejected_bad_model = True
     check(rejected_bad_model, "model preflight rejects a nominal exit with the wrong response")
-    config = target_config.Config(is_browser="1")
+    config = target_config.Config(is_browser="1", build_system="mach")
     with mock.patch.dict(os.environ, {"BROWSER_AGENTS": "2", "SHELL_AGENTS": "2"}, clear=False):
         equal((4, 2, 2), audit_runner._agent_counts(config, 10), "audit honors configured browser and shell role counts")
     equal((1, 1, 0), audit_runner._agent_counts(config, 1), "browser smoke mode keeps one browser worker")
@@ -1094,8 +1094,11 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         config=generic_config, index=refresh_logs / "index.log",
         decision_timeout=0,
     )
-    with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True), \
-         mock.patch.object(audit_runner.housekeeping, "mark_clean"), \
+    with mock.patch.object(
+         audit_runner.target_config, "vcs_source_signature",
+         return_value="tracked-source",
+    ), mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True) as should_refresh, \
+         mock.patch.object(audit_runner.housekeeping, "mark_clean") as marked_clean, \
          mock.patch.object(audit_runner.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as launched:
         refreshed = audit_runner.refresh_work_cards(refresh_runtime)
     launched_tools = [Path(call.args[0][0]).name for call in launched.call_args_list]
@@ -1103,6 +1106,14 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         refreshed and launched_tools == ["patch-cards", "peer-fix-cards", "rank-work"],
         "work-card refresh includes patch, peer-fix, and rank passes",
         repr(launched_tools),
+    )
+    check(
+        should_refresh.call_args.kwargs.get("ttl") == 0,
+        "versioned work-card refreshes do not rerun on age alone",
+    )
+    check(
+        marked_clean.call_args.args[1] == should_refresh.call_args.args[1],
+        "a refresh marks clean the state it ranked, not the state after it",
     )
     with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=False), \
          mock.patch.object(audit_runner.subprocess, "run") as skipped_refresh:

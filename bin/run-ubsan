@@ -68,6 +68,13 @@ def mode_options(mode: str) -> str:
 
 
 def run_browser(options: str, timeout: int, args: list[str]) -> int:
+    if CONFIG and not target_config.browser_page_launch_configured(CONFIG):
+        print(
+            "[run-ubsan] browser mode requires runner arguments containing "
+            "{PROFILE}; this target has only a script-engine route",
+            file=sys.stderr,
+        )
+        return 2
     with tempfile.TemporaryDirectory(prefix="ubsan-profile-") as profile_name, tempfile.TemporaryDirectory(prefix="ubsan-output-") as output_name:
         profile = Path(profile_name)
         output_dir = Path(output_name)

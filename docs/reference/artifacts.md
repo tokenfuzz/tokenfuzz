@@ -89,7 +89,8 @@ The paths an operator inspects after a run:
 | `findings-rejected/` | FIND directories rejected by the LLM substance gate at quorum. |
 | `corpus/` | Inputs that reached new coverage, saved after each iteration for reuse as seeds. Deduplicated by content. |
 | `scratch-N/` | Active testcase work for agent `N`. |
-| `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`, and `SESSION_STARTED` values read by `bin/probe`. |
+| `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`, `SESSION_STARTED`, and `TARGET_CONFIG_SHA256` values read by `bin/probe`. |
+| `.target.toml` | The post-preflight `target.toml` snapshot this session runs against, pinned by the `TARGET_CONFIG_SHA256` digest above. Every config consumer in the session reads it instead of the shared `output/<target>/target.toml`. Editing or removing it fails the run loud. |
 
 The tree also holds the work queue and structured state the harness
 manages itself. One file is worth knowing: `state/runs.jsonl` has one

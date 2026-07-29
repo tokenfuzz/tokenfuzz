@@ -67,6 +67,85 @@ class AuditClockTests(unittest.TestCase):
         self.assertEqual(state.housekeeping_seconds, 12.5)
         self.assertEqual(float((self.logs / ".housekeeping_secs").read_text()), 12.5)
 
+    def test_initial_queue_refresh_is_recorded_as_housekeeping(self) -> None:
+        results = self.root / "results"
+        results.mkdir()
+        runtime = SimpleNamespace(
+            backend="codex", model="fixture", target_slug="sampleproj",
+            target_root=self.root / "target", results=results, logs=self.logs,
+            prompt_context=lambda _guide: mock.Mock(),
+        )
+        with mock.patch.object(audit_runner, "_activate_runtime"), \
+                mock.patch.object(audit_runner, "index_log"), \
+                mock.patch.object(audit_runner.prompt, "write_static_prompt_file"), \
+                mock.patch.object(audit_runner, "refresh_work_cards"), \
+                mock.patch.object(audit_runner, "initialize_agent_strategies"), \
+                mock.patch.object(
+                    audit_runner.time, "monotonic", side_effect=[120.0, 132.5],
+                ):
+            state = audit_runner.initialize_backend(
+                runtime, SimpleNamespace(), "guide", started_at=100.0,
+            )
+
+        self.assertEqual(state.housekeeping_seconds, 12.5)
+        self.assertEqual(float((self.logs / ".housekeeping_secs").read_text()), 12.5)
+
+    def test_target_config_repair_does_not_dirty_source_work_cards(self) -> None:
+        results = self.root / "output" / "sampleproj" / "codex" / "results"
+        coverage = results / "coverage"
+        coverage.mkdir(parents=True)
+        config = results.parents[1] / "target.toml"
+        config.write_text('target = "sampleproj"\n', encoding="utf-8")
+        runtime = SimpleNamespace(
+            results=results, target_root=self.root / "target",
+            target_rev="rev-1",
+            config=SimpleNamespace(s6_domain="", s6_peers=[]),
+        )
+
+        with mock.patch.object(
+            audit_runner.target_config, "vcs_source_signature",
+            return_value="source-1",
+        ):
+            first = audit_runner._work_card_signature(runtime)
+        config.write_text(
+            'target = "sampleproj"\nis_browser = true\n', encoding="utf-8",
+        )
+        with mock.patch.object(
+            audit_runner.target_config, "vcs_source_signature",
+            return_value="source-1",
+        ):
+            second = audit_runner._work_card_signature(runtime)
+        self.assertEqual(first, second)
+
+        runtime.config.s6_peers = ["peer-project"]
+        with mock.patch.object(
+            audit_runner.target_config, "vcs_source_signature",
+            return_value="source-1",
+        ):
+            peer_changed = audit_runner._work_card_signature(runtime)
+        self.assertNotEqual(second, peer_changed)
+
+        (coverage / "edges-agent-1.journal").write_text(
+            "edge|source.c:1\n", encoding="utf-8",
+        )
+        with mock.patch.object(
+            audit_runner.target_config, "vcs_source_signature",
+            return_value="source-1",
+        ):
+            self.assertNotEqual(
+                peer_changed, audit_runner._work_card_signature(runtime)
+            )
+        with mock.patch.object(
+            audit_runner.target_config, "vcs_source_signature",
+            return_value="source-2",
+        ):
+            self.assertNotEqual(
+                audit_runner._work_card_signature(runtime),
+                audit_runner._work_card_signature(
+                    runtime, source_signature="source-1",
+                ),
+            )
+
     def test_cell_effective_wall_keeps_measured_housekeeping(self) -> None:
         path = self.root / "cell" / "cell.json"
         benchmark_runner.write_cell(

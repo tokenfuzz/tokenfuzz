@@ -1316,6 +1316,11 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     # freshness preflight, then exercises the sanitizer wrapper canary before
     # agents launch.
     pf_runtime.config.is_browser = "1"
+    pf_runtime.config.build_system = "mach"
+    pf_js = pf_target / "build-asan" / "dist" / "bin" / "js"
+    pf_js.parent.mkdir(parents=True)
+    pf_js.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    pf_js.chmod(0o755)
     def write_canary(*_args, **_kwargs):
         html = (pf_results / ".preflight" / "canary.html").read_text(
             encoding="utf-8"
@@ -1338,8 +1343,111 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         and "TESTCASE_EXECUTED" not in (
             pf_results / ".preflight" / "canary.html"
         ).read_text(encoding="utf-8"),
-        "browser preflight falls back to a product HTML canary without a JS shell",
+        "browser preflight tests the product route even when a JS shell exists",
     )
+
+    # A stale marker must not make a failed launch pass. Only after that
+    # functional failure may preflight replace an explicit usable executable
+    # with the unambiguous browser product and retry once.
+    pf_config_path = pf_harness / "output" / "sampleproj" / "target.toml"
+    pf_config_path.parent.mkdir(parents=True)
+    pf_runtime.config.asan_bin = "build-asan/wrong-browser"
+    pf_config_path.write_text(
+        'is_browser = true\n'
+        'asan_bin = "build-asan/wrong-browser"\n',
+        encoding="utf-8",
+    )
+    stale_output = pf_results / ".preflight" / "canary-asan.txt"
+    stale_output.write_text("TESTCASE_EXECUTED\n", encoding="utf-8")
+    pf_launches = [0]
+    def fail_then_load(*_args, **_kwargs):
+        pf_launches[0] += 1
+        if pf_launches[0] == 2:
+            return write_canary()
+        return mock.Mock(returncode=0)
+    with mock.patch.object(
+        audit_runner.target_config, "build_freshness", return_value="fresh"
+    ), mock.patch.object(
+        audit_runner, "pin_runtime_config"
+    ), mock.patch.object(
+        audit_runner.target_config, "detect_browser_sanitizer_bin",
+        return_value="build-asan/Product.app/Contents/MacOS/Product",
+    ) as pf_detect, mock.patch.object(
+        audit_runner.subprocess, "run", side_effect=fail_then_load,
+    ) as pf_repair_run:
+        audit_runner.preflight_build(pf_runtime)
+    check(
+        pf_launches[0] == 2
+        and pf_detect.call_count == 1
+        and pf_repair_run.call_args_list[1].kwargs["env"]["ASAN_BROWSER"].endswith(
+            "build-asan/Product.app/Contents/MacOS/Product"
+        )
+        and 'asan_bin      = "build-asan/Product.app/Contents/MacOS/Product"'
+            in pf_config_path.read_text(encoding="utf-8"),
+        "browser preflight proves the detected product before persisting its route",
+    )
+
+    # A failed candidate says nothing about why launch failed. Leave the
+    # operator's route intact rather than making an unproved repair durable.
+    failed_config = pf_config_path.read_text(encoding="utf-8").replace(
+        "build-asan/Product.app/Contents/MacOS/Product",
+        "build-asan/wrong-browser",
+    )
+    pf_config_path.write_text(failed_config, encoding="utf-8")
+    pf_runtime.config.asan_bin = "build-asan/wrong-browser"
+    failed_candidate_raised = False
+    try:
+        with mock.patch.object(
+            audit_runner.target_config, "build_freshness", return_value="fresh"
+        ), mock.patch.object(
+            audit_runner, "pin_runtime_config"
+        ), mock.patch.object(
+            audit_runner.target_config, "detect_browser_sanitizer_bin",
+            return_value="build-asan/Product.app/Contents/MacOS/Product",
+        ), mock.patch.object(
+            audit_runner, "_browser_canary_observed",
+            return_value=(False, stale_output),
+        ):
+            audit_runner.preflight_build(pf_runtime)
+    except RuntimeError:
+        failed_candidate_raised = True
+    check(
+        failed_candidate_raised
+        and pf_config_path.read_text(encoding="utf-8") == failed_config,
+        "browser preflight never persists a candidate that failed its canary",
+    )
+    pf_config_path.unlink()
+
+    # Browser mode also selects script engines. Those have no page route to
+    # launch, so demanding one would refuse to start a correctly configured
+    # target; they must be proved through the shell route instead.
+    pf_runtime.config.build_system = ""
+    pf_runtime.config.runner_args = ["--input", "{TESTCASE}"]
+    def run_shell_canary(*args, **kwargs):
+        Path(kwargs["env"]["SAN_OUTPUT_FILE"]).write_text(
+            "TESTCASE_EXECUTED\n", encoding="utf-8"
+        )
+        return mock.Mock(returncode=0)
+    with mock.patch.object(
+        audit_runner.target_config, "build_freshness", return_value="fresh"
+    ), mock.patch.object(
+        audit_runner.subprocess, "run", side_effect=run_shell_canary,
+    ) as pf_shell:
+        audit_runner.preflight_build(pf_runtime)
+    check(
+        "generic" in pf_shell.call_args.args[0]
+        and "browser-minimal" not in pf_shell.call_args.args[0]
+        and "--input" in pf_shell.call_args.args[0]
+        and str(pf_results / ".preflight" / "canary.js")
+            in pf_shell.call_args.args[0]
+        and (pf_results / ".preflight" / "canary.js").is_file(),
+        "generic script-engine arguments prove the shell route",
+    )
+    check(
+        audit_runner._agent_counts(pf_runtime.config, 1) == (1, 0, 1),
+        "a one-iteration script-engine audit assigns its agent to the shell route",
+    )
+    pf_runtime.config.runner_args = []
 
     # Sanitizer-disabled generic targets have no native build recipe or canary.
     pf_runtime.config.is_browser = "0"

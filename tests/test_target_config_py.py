@@ -329,6 +329,80 @@ assert_eq("/r", re_env["RESULTS_DIR"], "write_session_env: RESULTS_DIR round-tri
 assert_eq("myslug", re_env["TARGET_SLUG"], "write_session_env: TARGET_SLUG round-trips")
 assert_eq("abcd1234", re_env["TARGET_REV"], "write_session_env: TARGET_REV round-trips")
 
+# A running audit reads a backend-local, digest-pinned configuration. Shared
+# target.toml edits from another agent or operator apply only to the next run,
+# and editing the pinned copy fails loud instead of changing recorded metrics.
+pin_root = TEST_TMPDIR / "pin-session"
+pin_results = pin_root / "output" / "sampleproj" / "codex" / "results"
+pin_results.mkdir(parents=True)
+pin_target = pin_root / "target"
+pin_target.mkdir()
+pin_toml = pin_results.parent.parent / "target.toml"
+pin_toml.write_text(
+    'target = "sampleproj"\n[threat_model]\nattacker_controls = ["timing"]\n',
+    encoding="utf-8",
+)
+tc.write_session_env(
+    pin_results, str(pin_results), str(pin_target), "sampleproj",
+    "abcd1234", str(pin_results.parent / "logs"),
+)
+tc.pin_session_config(pin_results, pin_toml)
+pin_report = pin_results / "crashes" / "CRASH-001" / "report.md"
+pin_report.parent.mkdir(parents=True)
+pin_report.write_text("# report\n", encoding="utf-8")
+assert_eq(
+    (pin_results / ".target.toml").resolve(),
+    tc.find_target_toml(pin_report).resolve(),
+    "find_target_toml uses the live session's pinned config",
+)
+pin_toml.write_text(
+    'target = "sampleproj"\n[threat_model]\nattacker_controls = ["bytes"]\n',
+    encoding="utf-8",
+)
+assert_eq(
+    ["timing"], tc.load(pin_results).attacker_controls,
+    "load uses the pinned config after shared target.toml changes",
+)
+(pin_results / ".target.toml").write_text(
+    'target = "sampleproj"\n[threat_model]\nattacker_controls = ["race"]\n',
+    encoding="utf-8",
+)
+try:
+    tc.load(pin_results)
+except tc.PinnedConfigError as exc:
+    assert_in(
+        "changed after audit preflight", str(exc),
+        "load rejects a modified pinned target config",
+    )
+else:
+    failed("load rejects a modified pinned target config", "load succeeded")
+# The runners fall back to the shared config on ValueError. A pin violation
+# must not take that path, or tampering silently retargets the whole session.
+assert_eq(
+    False, isinstance(
+        tc.PinnedConfigError("x"), (ValueError, FileNotFoundError)
+    ),
+    "a pin violation is not the runners' no-session fallback signal",
+)
+(pin_results / ".target.toml").unlink()
+try:
+    tc.load(pin_results)
+except tc.PinnedConfigError as exc:
+    assert_in(
+        "snapshot is missing", str(exc),
+        "load rejects a missing pinned target config",
+    )
+else:
+    failed("load rejects a missing pinned target config", "load succeeded")
+tc.write_session_env(
+    pin_results, str(pin_results), str(pin_target), "sampleproj",
+    "abcd1234", str(pin_results.parent / "logs"),
+)
+assert_eq(
+    ["bytes"], tc.load(pin_results).attacker_controls,
+    "a new session ignores the previous run's pinned config",
+)
+
 
 # ─── 9. detect_rev returns revisions and the plain-tree sentinel ─────
 
@@ -933,6 +1007,26 @@ finally:
 assert_in('asan_bin      = "build-asan/Product.app/Contents/MacOS/Product"',
           browser_refresh_toml.read_text(encoding="utf-8"),
           "browser refresh adopts the foreground product executable")
+
+# Browser mode covers both page products and script engines. The fresh-profile
+# token already required by the browser runner contract distinguishes them
+# without guessing from a binary name or from generic runner arguments.
+page_config = tc.Config(build_system="mach")
+assert_eq(
+    True, tc.browser_page_launch_configured(page_config),
+    "native browser defaults describe a page route",
+)
+page_config.build_system = ""
+page_config.runner_args = ["--input", "{TESTCASE}"]
+assert_eq(
+    False, tc.browser_page_launch_configured(page_config),
+    "generic script-engine arguments do not describe a page route",
+)
+page_config.runner_args = ["--profile={PROFILE}", "{TESTCASE}"]
+assert_eq(
+    True, tc.browser_page_launch_configured(page_config),
+    "an explicit fresh-profile argument describes a page route",
+)
 
 # Container suffixes select physical build trees at runtime but must never be
 # persisted: the next image resolves the canonical path to its own suffix.

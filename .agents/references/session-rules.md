@@ -51,6 +51,13 @@ immediately.
 
 ## Coverage-Gated Reproduction (MANDATORY WORKFLOW)
 
+The audit pins a backend-local copy of `target.toml` after preflight. Never
+edit either the shared target config or the pinned results `.target.toml`
+during agent work: changing runners, sanitizer binaries, build flags, or the
+threat model mid-run invalidates concurrent evidence and metrics. Fix
+testcase/harness source locally; report proven runner or build metadata
+failures as ENV-BLOCKED for operator repair.
+
 Default reproduction wrapper is `bin/probe <testcase>`. It chooses the cheapest
 correct runner from the testcase's header: coverage-gated ASan for browser/js
 when possible, generic ASan for generic targets, and differential mode when the

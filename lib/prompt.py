@@ -407,14 +407,14 @@ def harness_build_failures_directive(context: PromptContext) -> str:
         return ""
     recent = sorted(logs, key=lambda path: path.stat().st_mtime_ns, reverse=True)[:3]
     paths = "\n".join(f"- `{path}`" for path in recent)
-    config_path = context.results_dir.parents[1] / "target.toml"
     return (
         "## PERSISTENT HARNESS BUILD FAILURES - FIX THE LOOP\n\n"
         f"{len(logs)} cached build failures exist. Read the latest bounded log tail before retrying:\n"
         f"{paths}\n\n"
-        "Fix the scratch harness when its source is wrong. If the parsed build flags are wrong, update "
-        f"`{config_path}` (`includes`, `defines`, or `link_libs`) and rerun `bin/probe`. "
-        "For a genuine toolchain conflict, mark the hypothesis ENV-BLOCKED with the exact diagnostic."
+        "Fix the scratch harness when its source is wrong. The session target "
+        "configuration is pinned; never edit target.toml during the audit. "
+        "For wrong parsed build flags or a genuine toolchain conflict, mark "
+        "the hypothesis ENV-BLOCKED with the exact diagnostic for operator repair."
     )
 
 

@@ -80,6 +80,8 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         self.assertIn("A HIT proves the location executed, not that its runtime predicate held", compact)
         self.assertIn("mark the hypothesis `ENV-BLOCKED`; that soft-blocks its owning card", compact)
         self.assertIn("A MISSED verdict alone is not proof of unreachability", compact)
+        self.assertIn("session target configuration is pinned", compact)
+        self.assertIn("never edit `target.toml`", compact)
         self.assertIn("Never put symlinks in FIND/CRASH bundles", compact)
         self.assertNotIn("Try at least three variants before discarding", rendered)
         self.assertNotIn("If CLEAN: write a variant", rendered)
