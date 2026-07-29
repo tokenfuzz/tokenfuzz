@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -118,6 +120,40 @@ check("git_shortstat: large-diff keyword commit rejected",
           " 30 files changed, 5000 insertions(+), 2000 deletions(-)\n",
           max_results=10,
       ) == [])
+
+# ─── Mercurial peer log ─────────────────────────────────────────────
+# Same policy as git: keyword-matching but oversized commits are noise.
+
+if shutil.which("hg"):
+    with tempfile.TemporaryDirectory() as d:
+        _peer = Path(d) / "peer"
+        _peer.mkdir()
+        _hg_env = os.environ | {"HGUSER": "Test User <test@example.invalid>"}
+
+        def _hg(*arguments: str) -> None:
+            subprocess.run(
+                ["hg", "--cwd", str(_peer), *arguments],
+                check=True, timeout=30, env=_hg_env, capture_output=True,
+            )
+
+        subprocess.run(["hg", "init", str(_peer)], check=True, timeout=30)
+        (_peer / "small.c").write_text("int a;\nint b;\n", encoding="utf-8")
+        _hg("add", "small.c")
+        _hg("commit", "-m", "fix overflow in parser")
+        (_peer / "huge.c").write_text("".join(f"int v{i};\n" for i in range(600)), encoding="utf-8")
+        _hg("add", "huge.c")
+        _hg("commit", "-m", "fix overflow across the tree")
+        (_peer / "small.c").write_text("int a;\nint c;\n", encoding="utf-8")
+        _hg("commit", "-m", "unrelated cleanup")
+
+        _hg_out = ps._vcs_log_hg(_peer, days=30, timeout=30, max_results=10)
+        check("hg log: keyword + small diff passes",
+              [entry["summary"] for entry in _hg_out] == ["fix overflow in parser"],
+              f"got: {_hg_out!r}")
+        check("hg log: dispatch reaches the hg backend",
+              [entry["summary"] for entry in
+               ps.vcs_log_search(_peer, days=30, timeout=30, max_results=10)]
+              == ["fix overflow in parser"])
 
 # ─── env-tunable diff-size knobs ────────────────────────────────────
 # The VCS fix-candidate size filter is an exploration knob, not fixed

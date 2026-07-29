@@ -1132,30 +1132,37 @@ def _patch_age_penalty(date_str: str) -> int:
         return 0
 
 
-def _recent_touched_files(target_root: Path, days: int = 180) -> set[str]:
+def _recent_touched_files(target_root: Path, days: int = 180, repo_type: str = "git") -> set[str]:
     """Files modified in the last `days` days, target-relative.
 
     Captures the real sibling-bug signal: "is the fix site still being
     actively edited?" A 2014 fix in code that was rewritten in 2024 is
     high-value (variant patterns may have been re-introduced); a 2014
     fix in dormant code is low-value (years of OSS-Fuzz on top of it).
-    Best-effort: returns empty set on git failure or on a non-git tree.
+    Best-effort: returns empty set on VCS failure or on a plain tree.
 
     Cached at call site via _recent_touched_files_for; callers should
-    use that wrapper, not this function, so the git invocation only
+    use that wrapper, not this function, so the VCS invocation only
     fires once per workqueue load.
     """
     if not target_root or not target_root.is_dir():
         return set()
-    git_dir = target_root / ".git"
-    if not git_dir.exists():
+    if repo_type == "hg":
+        since = (datetime.now(timezone.utc)
+                 - timedelta(days=int(days))).strftime("%Y-%m-%d")
+        # {join(files)} keeps one path per line; {files} would run them
+        # together on paths containing a space.
+        command = ["hg", "--cwd", str(target_root), "log",
+                   "-d", f">{since}", "--template", "{join(files, '\\n')}\\n"]
+    elif (target_root / ".git").exists():
+        command = ["git", "-C", str(target_root), "log",
+                   f"--since={int(days)}.days", "--name-only", "--pretty=format:"]
+    else:
         return set()
     try:
         import subprocess
         result = subprocess.run(
-            ["git", "-C", str(target_root), "log",
-             f"--since={int(days)}.days", "--name-only", "--pretty=format:"],
-            capture_output=True, text=True, timeout=10,
+            command, capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
             return set()
@@ -1171,7 +1178,7 @@ def _recent_touched_files_for(ctx: Context | None) -> set[str]:
     cached = getattr(ctx, "_recent_touched_cache", None)
     if cached is not None:
         return cached
-    out = _recent_touched_files(ctx.target_root)
+    out = _recent_touched_files(ctx.target_root, repo_type=ctx.repo_type)
     try:
         ctx._recent_touched_cache = out  # type: ignore[attr-defined]
     except Exception:

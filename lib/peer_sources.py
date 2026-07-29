@@ -300,11 +300,18 @@ def _parse_git_shortstat(out: str, max_results: int) -> list[dict]:
     return entries
 
 
+_HG_DIFFSTAT = re.compile(r"^(\d+): \+(\d+)/-(\d+)$")
+
+
 def _vcs_log_hg(peer_clone: Path, days: int, timeout: int, max_results: int) -> list[dict]:
+    # {diffstat} is Mercurial's --shortstat, so the same size bounds apply to
+    # both VCSes; sort(-rev) keeps newest-first, which the revset would
+    # otherwise reorder to ascending.
     cmd = [
         "hg", "-R", str(peer_clone), "log",
         "-d", f"-{days}",
-        "--template", "{node}\\t{desc|firstline}\\t{date|isodate}\\n",
+        "-r", "sort(not merge(), -rev)",
+        "--template", "{node}\\t{desc|firstline}\\t{date|isodate}\\t{diffstat}\\n",
         "-l", str(max_results * 4),  # over-fetch; filter below
     ]
     try:
@@ -315,11 +322,15 @@ def _vcs_log_hg(peer_clone: Path, days: int, timeout: int, max_results: int) -> 
         return []
     entries: list[dict] = []
     for line in out.splitlines():
-        parts = line.split("\t", 2)
-        if len(parts) < 3:
+        parts = line.split("\t", 3)
+        if len(parts) < 4:
             continue
-        full_hash, subject, when = parts
+        full_hash, subject, when, diffstat = parts
         if not _VCS_FIX_KEYWORDS.search(subject):
+            continue
+        sizes = _HG_DIFFSTAT.match(diffstat.strip())
+        if sizes and (int(sizes.group(1)) > _VCS_MAX_FILES_CHANGED
+                      or int(sizes.group(2)) + int(sizes.group(3)) > _VCS_MAX_LINES_CHANGED):
             continue
         entries.append({
             "source": "vcs",

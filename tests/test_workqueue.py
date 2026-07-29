@@ -262,6 +262,31 @@ class WorkQueueTests(unittest.TestCase):
         cards = workqueue.build_patch_cards(context, limit=1, inspect_commits=2, scan_window=2)
         self.assertIn("use-after-free", cards[0]["description"])
 
+    @unittest.skipUnless(shutil.which("hg"), "Mercurial is not installed")
+    def test_recently_touched_files_are_read_from_mercurial_too(self) -> None:
+        shutil.rmtree(self.target / ".git")
+        subprocess.run(["hg", "init", str(self.target)], check=True, timeout=10)
+        env = os.environ | {"HGUSER": "Test User <test@example.invalid>"}
+        path = self.target / "src" / "with space.c"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("int touched;\n", encoding="utf-8")
+        subprocess.run(
+            ["hg", "-R", str(self.target), "add", str(path)],
+            check=True, timeout=10, env=env,
+        )
+        subprocess.run(
+            ["hg", "-R", str(self.target), "commit", "-m", "Fix overflow"],
+            check=True, timeout=10, env=env,
+        )
+        self.assertEqual(
+            workqueue._recent_touched_files(self.target, repo_type="hg"),
+            {"src/with space.c"},
+        )
+        # Outside the window the same checkout reports nothing.
+        self.assertEqual(
+            workqueue._recent_touched_files(self.target, days=-1, repo_type="hg"), set(),
+        )
+
     def test_jsonl_updates_are_atomic_and_concurrent_appends_do_not_lose_rows(self) -> None:
         path = self.results / "state" / "concurrent.jsonl"
 
